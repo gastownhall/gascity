@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -151,7 +152,7 @@ func newNudgeDispatcherFixture(t *testing.T, sp runtime.Provider) (string, *nudg
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	d := newNudgeEventDispatcher(ctx, dir, testWriter(t), "test")
+	d := newNudgeEventDispatcher(ctx, dir, testWriter(t), "test", gate.ModeUnset)
 	d.quiescence = 150 * time.Millisecond
 	d.retryEpsilon = 30 * time.Millisecond
 	d.update(sp, &config.City{}, true)
@@ -437,29 +438,27 @@ func TestNudgeEventDispatcherEmptyQueueSkipsObservation(t *testing.T) {
 
 // TestNudgeEventDispatcherRunPassClosesEveryStoreItOpens pins the connection-leak
 // fix in runPass: every targeted-event, resync, wake and patrol pass opens a bead
-// store via openNudgeBeadStoreErr but never released it via closeBeadStoreHandle,
+// store via openNudgeBeadStoreWithModeErr but never released it via closeBeadStoreHandle,
 // so a long-lived dispatcher accumulated open store handles across passes (PR
 // #4967 ship-gate finding 5). Each pass here must close what it opened.
 func TestNudgeEventDispatcherRunPassClosesEveryStoreItOpens(t *testing.T) {
 	// Install the seam before fixture setup: newNudgeDispatcherFixture's dispatcher
 	// starts a worker goroutine immediately, so swapping the package-level
-	// openNudgeBeadStoreErr var after that point races against its reads. Instead,
-	// snapshot opens/closes right after the fixture returns and assert only on the
-	// delta accrued afterward — newNudgeDispatcherFixture opens its own long-lived
-	// session-manager store via openNudgeBeadStore (which calls openNudgeBeadStoreErr),
-	// and that store is legitimately never closed mid-test, so it must not count
-	// toward the runPass-specific open/close balance this test checks.
+	// openNudgeBeadStoreWithModeErr var after that point races against its reads.
+	// This mode-aware seam is used only by runPass; the fixture's long-lived
+	// session-manager store continues through openNudgeBeadStoreErr and does not
+	// enter these counters.
 	var opens, closes atomic.Int64
-	prev := openNudgeBeadStoreErr
-	openNudgeBeadStoreErr = func(path string) (beads.NudgesStore, error) {
+	prev := openNudgeBeadStoreWithModeErr
+	openNudgeBeadStoreWithModeErr = func(path string, _ gate.Mode) (beads.NudgesStore, error) {
 		opens.Add(1)
-		store, err := prev(path)
+		store, err := prev(path, gate.ModeUnset)
 		if err != nil {
 			return store, err
 		}
 		return beads.NudgesStore{Store: &runPassCloseCountingStore{Store: store.Store, closes: &closes}}, nil
 	}
-	t.Cleanup(func() { openNudgeBeadStoreErr = prev })
+	t.Cleanup(func() { openNudgeBeadStoreWithModeErr = prev })
 
 	fake := newNudgeEventedFake()
 	dir, d, info := newNudgeDispatcherFixture(t, fake)
@@ -484,16 +483,62 @@ func TestNudgeEventDispatcherRunPassClosesEveryStoreItOpens(t *testing.T) {
 		return len(d.pending) == 0 && !d.fullPassDue
 	}, "dispatcher settled")
 
-	// One store stays open for the whole test: newNudgeDispatcherFixture's own
-	// session-manager store, opened once via openNudgeBeadStore and never closed
-	// mid-test. So once the dispatcher has settled, exactly that one open should
-	// remain outstanding — every store runPass itself opened must have been closed.
+	// This seam observes only runPass's mode-aware opens; the fixture's
+	// long-lived session-manager store uses the ordinary open helper. Once the
+	// dispatcher settles, every observed open must therefore be closed.
 	gotOpens, gotCloses := opens.Load(), closes.Load()
 	if gotOpens == 0 {
 		t.Fatal("expected the nudge bead store to be opened at least once")
 	}
-	if outstanding := gotOpens - gotCloses; outstanding != 1 {
-		t.Fatalf("nudge bead store leak: opens=%d closes=%d outstanding=%d (want exactly 1: the fixture's own long-lived store)", gotOpens, gotCloses, outstanding)
+	if outstanding := gotOpens - gotCloses; outstanding != 0 {
+		t.Fatalf("nudge bead store leak: opens=%d closes=%d outstanding=%d (want 0)", gotOpens, gotCloses, outstanding)
+	}
+}
+
+func TestNudgeEventDispatcherRunPassUsesBootLatchedConditionalWritesMode(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"file\"\nconditional_writes = \"require\"\n"), 0o644); err != nil {
+		t.Fatalf("write boot config: %v", err)
+	}
+	bootCfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load boot config: %v", err)
+	}
+	bootMode := resolvedConditionalWritesMode(bootCfg)
+	if bootMode != gate.Require {
+		t.Fatalf("boot mode = %q, want require", bootMode)
+	}
+
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"file\"\nconditional_writes = \"off\"\n"), 0o644); err != nil {
+		t.Fatalf("flip on-disk config: %v", err)
+	}
+	reloadedCfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load flipped config: %v", err)
+	}
+	if got := resolvedConditionalWritesMode(reloadedCfg); got != gate.Off {
+		t.Fatalf("flipped on-disk mode = %q, want off", got)
+	}
+
+	var openedWith gate.Mode
+	previousOpen := openNudgeBeadStoreWithModeErr
+	openNudgeBeadStoreWithModeErr = func(_ string, mode gate.Mode) (beads.NudgesStore, error) {
+		openedWith = mode
+		return beads.NudgesStore{Store: beads.NewMemStore()}, nil
+	}
+	t.Cleanup(func() { openNudgeBeadStoreWithModeErr = previousOpen })
+
+	d := &nudgeEventDispatcher{
+		cityPath:              cityPath,
+		stderr:                io.Discard,
+		conditionalWritesMode: bootMode,
+		cfg:                   reloadedCfg,
+		sp:                    runtime.NewFake(),
+	}
+	d.runPass("", 0)
+	if openedWith != gate.Require {
+		t.Fatalf("runPass store mode = %q, want boot-latched require after disk flipped to off", openedWith)
 	}
 }
 
@@ -537,7 +582,7 @@ func TestNudgeEventDispatcherActivationAndProviderSwap(t *testing.T) {
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	d := newNudgeEventDispatcher(ctx, dir, testWriter(t), "test")
+	d := newNudgeEventDispatcher(ctx, dir, testWriter(t), "test", gate.ModeUnset)
 	defer func() {
 		cancel()
 		select {
@@ -647,10 +692,39 @@ func TestCityRuntimeReloadConfigTracedClosesNudgeWakeListenerOnLegacyReload(t *t
 		Stderr: testWriter(t),
 	})
 	cr.sessionDrains = newDrainTracker()
+	sessionStore := beads.NewMemStore()
+	sessionBead, err := sessionStore.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"agent_name":   "worker",
+			"provider":     "codex",
+			"session_name": "worker-session",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	cr.standaloneCityStore = sessionStore
+	if err := enqueueQueuedNudge(cityPath, newQueuedNudge("worker", "queued before legacy reload", time.Now())); err != nil {
+		t.Fatalf("enqueue queued nudge: %v", err)
+	}
+	var pollerCalls int
+	previousStartNudgePoller := startNudgePoller
+	startNudgePoller = func(gotCityPath, pollerKey, sessionName string) error {
+		pollerCalls++
+		if gotCityPath != cityPath || pollerKey != sessionBead.ID || sessionName != "worker-session" {
+			t.Errorf("startNudgePoller = (%q, %q, %q), want (%q, %q, %q)", gotCityPath, pollerKey, sessionName, cityPath, sessionBead.ID, "worker-session")
+		}
+		return nil
+	}
+	t.Cleanup(func() { startNudgePoller = previousStartNudgePoller })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cr.nudgeWakeCh = make(chan struct{}, 1)
-	cr.nudgeEvents = newNudgeEventDispatcher(ctx, cityPath, cr.stderr, cr.logPrefix)
+	cr.nudgeEvents = newNudgeEventDispatcher(ctx, cityPath, cr.stderr, cr.logPrefix, cr.conditionalWritesMode)
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -692,6 +766,9 @@ func TestCityRuntimeReloadConfigTracedClosesNudgeWakeListenerOnLegacyReload(t *t
 	}
 	if nudgeDispatcherIsHosting(cityPath) {
 		t.Fatal("wake socket still answers after the listener should have been closed on legacy reload")
+	}
+	if pollerCalls != 1 {
+		t.Fatalf("legacy poller starts = %d, want 1 for the nudge queued before listener teardown", pollerCalls)
 	}
 }
 

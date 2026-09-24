@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/herdr"
 	"github.com/gastownhall/gascity/internal/runtime/herdr/herdrtest"
@@ -81,7 +82,7 @@ func TestNudgeEventDispatcherLiveHerdr(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	d := newNudgeEventDispatcher(ctx, cityPath, testWriter(t), "live")
+	d := newNudgeEventDispatcher(ctx, cityPath, testWriter(t), "live", gate.ModeUnset)
 	d.update(p, &config.City{}, true)
 	defer func() {
 		cancel()

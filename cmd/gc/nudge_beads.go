@@ -7,6 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 const (
@@ -43,6 +44,18 @@ var openNudgeBeadStore = func(cityPath string) beads.NudgesStore {
 // helpers whose contract is already "a nil store means do nothing".
 var openNudgeBeadStoreErr = func(cityPath string) (beads.NudgesStore, error) {
 	store, err := openStoreAtForCity(cityPath, cityPath)
+	return finishNudgeBeadStoreOpen(cityPath, store, err)
+}
+
+// openNudgeBeadStoreWithModeErr opens the nudges store with a caller-supplied
+// conditional-writes mode. Long-lived runtimes use their boot-latched mode so
+// a config edit cannot change write discipline in only this per-pass handle.
+var openNudgeBeadStoreWithModeErr = func(cityPath string, mode gate.Mode) (beads.NudgesStore, error) {
+	result, err := openStoreResultAtForCityWithMode(cityPath, cityPath, mode, true, false)
+	return finishNudgeBeadStoreOpen(cityPath, result.Store, err)
+}
+
+func finishNudgeBeadStoreOpen(cityPath string, store beads.Store, err error) (beads.NudgesStore, error) {
 	if err != nil {
 		return beads.NudgesStore{}, fmt.Errorf("opening the city store at %q: %w", cityPath, err)
 	}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -60,10 +61,11 @@ const (
 // a dead supervisor, and mistaking one for the other would suppress the only
 // deliverer for a queued item.
 type nudgeEventDispatcher struct {
-	parent    context.Context
-	cityPath  string
-	stderr    io.Writer
-	logPrefix string
+	parent                context.Context
+	cityPath              string
+	stderr                io.Writer
+	logPrefix             string
+	conditionalWritesMode gate.Mode
 
 	// Timing knobs, shrunk by tests. quiescence mirrors the sidecar pollers'
 	// idle gate; retryEpsilon pads the aged-stamp retry.
@@ -108,17 +110,18 @@ type nudgeEventKick struct {
 
 // newNudgeEventDispatcher returns a dispatcher whose subscriptions and worker
 // live within parent. Wire a provider with update.
-func newNudgeEventDispatcher(parent context.Context, cityPath string, stderr io.Writer, logPrefix string) *nudgeEventDispatcher {
+func newNudgeEventDispatcher(parent context.Context, cityPath string, stderr io.Writer, logPrefix string, conditionalWritesMode gate.Mode) *nudgeEventDispatcher {
 	d := &nudgeEventDispatcher{
-		parent:       parent,
-		cityPath:     cityPath,
-		stderr:       stderr,
-		logPrefix:    logPrefix,
-		quiescence:   defaultNudgePollQuiescence,
-		retryEpsilon: nudgeEventRetryEpsilon,
-		pending:      make(map[string]nudgeEventKick),
-		kicked:       make(chan struct{}, 1),
-		workerDone:   make(chan struct{}),
+		parent:                parent,
+		cityPath:              cityPath,
+		stderr:                stderr,
+		logPrefix:             logPrefix,
+		conditionalWritesMode: conditionalWritesMode,
+		quiescence:            defaultNudgePollQuiescence,
+		retryEpsilon:          nudgeEventRetryEpsilon,
+		pending:               make(map[string]nudgeEventKick),
+		kicked:                make(chan struct{}, 1),
+		workerDone:            make(chan struct{}),
 	}
 	go d.worker(parent)
 	return d
@@ -335,7 +338,7 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 	if cfg == nil || sp == nil {
 		return
 	}
-	store, err := openNudgeBeadStoreErr(d.cityPath)
+	store, err := openNudgeBeadStoreWithModeErr(d.cityPath, d.conditionalWritesMode)
 	if err != nil {
 		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: opening nudge bead store: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
 		return

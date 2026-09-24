@@ -567,6 +567,23 @@ func TestSubmitFollowUpSkipsPollerWhenDispatcherActuallyHosting(t *testing.T) {
 		t.Fatalf("Listen on wake socket: %v", err)
 	}
 	defer lis.Close() //nolint:errcheck
+	wakeCh := make(chan struct{}, 1)
+	go func() {
+		for {
+			conn, acceptErr := lis.Accept()
+			if acceptErr != nil {
+				return
+			}
+			var payload [1]byte
+			if n, _ := conn.Read(payload[:]); n > 0 {
+				select {
+				case wakeCh <- struct{}{}:
+				default:
+				}
+			}
+			_ = conn.Close()
+		}
+	}()
 
 	var pollerCalls int
 	origPoller := startSessionSubmitPoller
@@ -592,6 +609,11 @@ func TestSubmitFollowUpSkipsPollerWhenDispatcherActuallyHosting(t *testing.T) {
 	}
 	if pollerCalls != 0 {
 		t.Fatalf("pollerCalls = %d, want 0 when a dispatcher is actually hosting on the wake socket", pollerCalls)
+	}
+	select {
+	case <-wakeCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatcher listener was not woken after the deferred submit was enqueued")
 	}
 }
 

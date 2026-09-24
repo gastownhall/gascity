@@ -144,6 +144,37 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	})
 }
 
+// startLegacyPollersForQueuedNudges hands queued work back to the per-session
+// poller path when a live runtime leaves supervisor/event dispatch mode. New
+// enqueues start their own poller, but items already queued while the wake
+// listener was hosting have no sidecar and would otherwise remain stranded.
+func startLegacyPollersForQueuedNudges(cityPath string, cfg *config.City, sessionBeads *sessionBeadSnapshot) error {
+	if cityPath == "" || cfg == nil || sessionBeads == nil {
+		return nil
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		return fmt.Errorf("loading nudge queue for legacy handoff: %w", err)
+	}
+	queuedAgents := make(map[string]bool, len(state.Pending)+len(state.InFlight))
+	for _, item := range state.Pending {
+		queuedAgents[item.Agent] = true
+	}
+	for _, item := range state.InFlight {
+		queuedAgents[item.Agent] = true
+	}
+	for _, info := range sessionBeads.OpenInfos() {
+		target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
+		for _, key := range target.queueKeys() {
+			if queuedAgents[key] {
+				maybeStartNudgePoller(target)
+				break
+			}
+		}
+	}
+	return nil
+}
+
 // deliverPendingQueuedNudges is one dispatcher pass over the queue: collect
 // the agents with due pending (or lease-expired in-flight) items, resolve
 // each matching open session bead to a nudgeTarget — restricted to

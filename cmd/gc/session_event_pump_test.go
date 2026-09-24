@@ -590,24 +590,12 @@ func TestSessionPhaseStretchActiveGatesPokeCancellation(t *testing.T) {
 		t.Error("stretch configured but no session-event stream must report inactive")
 	}
 
-	// The two checks above only pin sessionPhaseStretchActive() itself, not
-	// the guard in run()'s patrol-tick branch that consumes it
-	// (`if !cr.sessionPhaseStretchActive() { pokeDB.cancelPending() }`).
-	// Drive that exact conditional against a real tickDebouncer so a
-	// regression to the unconditional cancelPending() this fixed
-	// (f882bbdf34) fails here instead of only in a live run() goroutine.
-	patrolTick := func(cr *CityRuntime, pokeDB *tickDebouncer) {
-		if !cr.sessionPhaseStretchActive() {
-			pokeDB.cancelPending()
-		}
-	}
-
 	t.Run("stretch active keeps a pending poke armed", func(t *testing.T) {
 		pokeDB := newTickDebouncer()
 		pokeDB.arm(time.Hour) // never fires on its own within the test
 		t.Cleanup(pokeDB.cancelPending)
 
-		patrolTick(cr, pokeDB)
+		cr.cancelRedundantPoke(pokeDB)
 
 		pokeDB.mu.Lock()
 		stillArmed := pokeDB.timer != nil
@@ -622,7 +610,7 @@ func TestSessionPhaseStretchActiveGatesPokeCancellation(t *testing.T) {
 		pokeDB.arm(time.Hour)
 		t.Cleanup(pokeDB.cancelPending)
 
-		patrolTick(crNoStretch, pokeDB)
+		crNoStretch.cancelRedundantPoke(pokeDB)
 
 		pokeDB.mu.Lock()
 		stillArmed := pokeDB.timer != nil

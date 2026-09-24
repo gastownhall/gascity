@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -170,7 +171,8 @@ type CityRuntime struct {
 	// section. It is immutable for the life of the process: a reload that would
 	// change [storage] is refused by the StorageReloadRequiresRestart check in
 	// reloadConfigTraced rather than swapping a live handle.
-	storageRoutes *storageRoutes
+	storageRoutes         *storageRoutes
+	conditionalWritesMode gate.Mode
 
 	// Bead-driven reconciler state (Phase 2f).
 	sessionDrains      *drainTracker       // in-memory drain tracker; nil when bead reconciler disabled
@@ -417,6 +419,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 
 	cr := &CityRuntime{
 		storageRoutes:           routes,
+		conditionalWritesMode:   resolvedConditionalWritesMode(p.Cfg),
 		cityPath:                p.CityPath,
 		cityName:                p.CityName,
 		configName:              configName,
@@ -824,7 +827,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// seconds via the provider's verified delivery, and the sidecar poller
 	// class retires for such providers. Config reload re-points the
 	// dispatcher when it swaps the provider.
-	cr.nudgeEvents = newNudgeEventDispatcher(ctx, cr.cityPath, cr.stderr, cr.logPrefix)
+	cr.nudgeEvents = newNudgeEventDispatcher(ctx, cr.cityPath, cr.stderr, cr.logPrefix, cr.conditionalWritesMode)
 	cr.nudgeEvents.update(cr.sp, cr.cfg, true)
 
 	// Start the supervisor nudge dispatcher when configured. The wake-socket
@@ -894,9 +897,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			// canceling here would silently strand a session-exit signal
 			// until the stretched interval elapses. Only drop the poke
 			// when this patrol tick is guaranteed to cover session phases.
-			if !cr.sessionPhaseStretchActive() {
-				pokeDB.cancelPending()
-			}
+			cr.cancelRedundantPoke(pokeDB)
 			ctrlDB.cancelPending()
 			runTick("patrol")
 		case <-cr.pokeCh:
@@ -1168,6 +1169,15 @@ func (cr *CityRuntime) sessionPhaseStretchActive() bool {
 	stretch := cr.cfg.Daemon.SessionPatrolIntervalDuration()
 	return stretch > cr.cfg.Daemon.PatrolIntervalDuration() &&
 		cr.sessionEvents != nil && cr.sessionEvents.flowing()
+}
+
+// cancelRedundantPoke drops a pending poke only when the patrol tick about to
+// run includes the session phases that poke requests. Under a stretched
+// session patrol, the pending poke remains the only prompt reconciliation.
+func (cr *CityRuntime) cancelRedundantPoke(pokeDB *tickDebouncer) {
+	if !cr.sessionPhaseStretchActive() {
+		pokeDB.cancelPending()
+	}
 }
 
 // tick performs one reconciliation tick: pool death detection, config
@@ -3538,6 +3548,9 @@ func (cr *CityRuntime) ensureNudgeWakeListener(ctx context.Context) {
 				fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: closing wake listener: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			}
 			cr.nudgeWakeListener = nil
+			if err := startLegacyPollersForQueuedNudges(cr.cityPath, cr.cfg, cr.loadSessionBeadSnapshot()); err != nil {
+				fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: handing queued nudges to legacy pollers: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+			}
 		}
 		return
 	}
