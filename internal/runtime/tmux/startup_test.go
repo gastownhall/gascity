@@ -2770,6 +2770,62 @@ func TestEnsureFreshSession_PromptSuffixAppendedToCommand(t *testing.T) {
 	}
 }
 
+// A Codex positional startup prompt is itself the first user turn. Sending the
+// configured startup nudge through tmux immediately afterwards can interrupt
+// that turn while Codex is still starting MCP servers, dropping the behavioral
+// prime from the transcript. Keep the prime and first task in one argv turn.
+func TestEnsureFreshSession_CodexEmbedsNudgeInPrompt(t *testing.T) {
+	ops := &fakeStartOps{}
+	cfg := runtime.Config{
+		WorkDir:      "/proj",
+		Command:      "codex --model gpt-5.6-terra",
+		PromptSuffix: shellquote.Quote("ROLE PRIME"),
+		Nudge:        "CLAIM WORK",
+	}
+
+	if err := ensureFreshSession(ops, "gc-test-codex-prime", cfg); err != nil {
+		t.Fatalf("ensureFreshSession: %v", err)
+	}
+
+	args := shellquote.Split(ops.calls[0].command)
+	if got, want := args[len(args)-1], "ROLE PRIME\n\nCLAIM WORK"; got != want {
+		t.Fatalf("initial Codex prompt = %q, want %q", got, want)
+	}
+}
+
+func TestDoStartSession_CodexEmbeddedNudgeIsNotSentAgain(t *testing.T) {
+	ops := &fakeStartOps{hasSessionResult: true}
+	cfg := runtime.Config{
+		Command:      "codex --model gpt-5.6-terra",
+		PromptSuffix: shellquote.Quote("ROLE PRIME"),
+		Nudge:        "CLAIM WORK",
+	}
+
+	if err := doStartSession(context.Background(), ops, "gc-test-codex-prime", cfg, DefaultConfig().SetupTimeout); err != nil {
+		t.Fatalf("doStartSession: %v", err)
+	}
+	if containsMethod(ops.callMethods(), "sendKeys") {
+		t.Fatalf("startup nudge was sent separately after being embedded: %v", ops.callMethods())
+	}
+}
+
+func TestDoStartSession_NonCodexKeepsSeparateNudge(t *testing.T) {
+	ops := &fakeStartOps{hasSessionResult: true}
+	cfg := runtime.Config{
+		Command:      "claude --model sonnet",
+		PromptSuffix: shellquote.Quote("ROLE PRIME"),
+		Nudge:        "CLAIM WORK",
+	}
+
+	if err := doStartSession(context.Background(), ops, "gc-test-claude-prime", cfg, DefaultConfig().SetupTimeout); err != nil {
+		t.Fatalf("doStartSession: %v", err)
+	}
+	sends := callsByMethod(t, ops, "sendKeys", 1)
+	if got, want := sends[0].command, "CLAIM WORK"; got != want {
+		t.Fatalf("separate startup nudge = %q, want %q", got, want)
+	}
+}
+
 // TestEnsureFreshSession_PromptSuffixWithFlagPrefix verifies that when
 // PromptFlag is set, the flag is prepended to PromptSuffix in the
 // command. This is the correct behavior for providers that accept

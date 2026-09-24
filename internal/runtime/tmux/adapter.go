@@ -1545,7 +1545,8 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if cfg.Nudge != "" {
+	_, nudgeInInitialPrompt := codexInitialPrompt(cfg)
+	if cfg.Nudge != "" && !nudgeInInitialPrompt {
 		if err := sendStartupNudgeWithRetry(ctx,
 			func() error { return ops.sendKeys(name, cfg.Nudge) },
 			func(d time.Duration) { _ = sleepWithContext(ctx, d) },
@@ -1816,25 +1817,50 @@ func wrapInteractiveColorEnv(command string, unset bool) string {
 func buildLaunchCommand(name string, cfg runtime.Config) (fullCommand, promptFile string, err error) {
 	fullCommand = cfg.Command
 	unsetColorEnv := shouldUnsetInteractiveColorEnv(cfg.Command)
+	promptSuffix, _ := codexInitialPrompt(cfg)
 	switch {
-	case cfg.PromptSuffix == "":
-	case len(cfg.PromptSuffix) > maxInlinePromptLen:
+	case promptSuffix == "":
+	case len(promptSuffix) > maxInlinePromptLen:
 		// Large prompt — write to temp file and use $(cat ...) expansion inside
 		// the tmux session's shell to avoid the protocol limit and prevent the
 		// quoted prompt from leaking into the exec command line (which triggers
 		// ENAMETOOLONG / exit 126 when the total command overflows kernel
 		// argv/exec buffers).
-		promptFile, err = writePromptFile(cfg.WorkDir, name, cfg.PromptSuffix)
+		promptFile, err = writePromptFile(cfg.WorkDir, name, promptSuffix)
 		if err != nil {
 			return "", "", fmt.Errorf("writing prompt temp file for session %q: %w", name, err)
 		}
 		fullCommand = longPromptCommand(cfg.Command, cfg.PromptFlag, promptFile)
 	case cfg.PromptFlag != "":
-		fullCommand += " " + cfg.PromptFlag + " " + cfg.PromptSuffix
+		fullCommand += " " + cfg.PromptFlag + " " + promptSuffix
 	default:
-		fullCommand += " " + cfg.PromptSuffix
+		fullCommand += " " + promptSuffix
 	}
 	return wrapInteractiveColorEnv(fullCommand, unsetColorEnv), promptFile, nil
+}
+
+// codexInitialPrompt folds the startup nudge into Codex's positional startup
+// prompt. A positional prompt is Codex's first user turn; sending cfg.Nudge as
+// tmux keystrokes immediately after process launch can interrupt that turn while
+// MCP servers are still starting, leaving only the short nudge in the durable
+// transcript. One argv turn makes the behavioral prime and first task atomic.
+// Other providers retain the established separate-nudge behavior.
+func codexInitialPrompt(cfg runtime.Config) (string, bool) {
+	if cfg.PromptSuffix == "" || cfg.Nudge == "" {
+		return cfg.PromptSuffix, false
+	}
+	command := shellquote.Split(cfg.Command)
+	if len(command) == 0 || filepath.Base(command[0]) != "codex" {
+		return cfg.PromptSuffix, false
+	}
+	prime := shellquote.Split(cfg.PromptSuffix)
+	if len(prime) != 1 {
+		// PromptSuffix is expected to be one shell-quoted argv element. If a
+		// custom provider violates that contract, preserve the old delivery
+		// path instead of rewriting ambiguous shell input.
+		return cfg.PromptSuffix, false
+	}
+	return shellquote.Quote(prime[0] + "\n\n" + cfg.Nudge), true
 }
 
 func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
