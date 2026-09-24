@@ -32939,21 +32939,21 @@
             }
           },
           {
-            "description": "Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head.",
+            "description": "Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head. A value that is not a non-negative integer is rejected with 422.",
             "explode": false,
             "in": "query",
             "name": "after_seq",
             "schema": {
-              "description": "Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head.",
+              "description": "Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head. A value that is not a non-negative integer is rejected with 422.",
               "type": "string"
             }
           },
           {
-            "description": "SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head.",
+            "description": "SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head. Takes precedence over after_seq; a value that is not a non-negative integer starts at the current city event head.",
             "in": "header",
             "name": "Last-Event-ID",
             "schema": {
-              "description": "SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head.",
+              "description": "SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head. Takes precedence over after_seq; a value that is not a non-negative integer starts at the current city event head.",
               "type": "string"
             }
           }

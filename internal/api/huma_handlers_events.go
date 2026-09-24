@@ -336,13 +336,18 @@ func (s *Server) checkEventStream(_ context.Context, _ *EventStreamInput) error 
 func (s *Server) streamEvents(hctx huma.Context, input *EventStreamInput, send sse.Sender) {
 	ctx := hctx.Context()
 	ep := s.state.EventProvider()
-	afterSeq := input.resolveAfterSeq()
-	if strings.TrimSpace(input.LastEventID) == "" && strings.TrimSpace(input.AfterSeq) == "" {
-		// Head-start (no resume cursor): stream from now. Fail closed on a
-		// LatestSeq error rather than fall through to afterSeq=0, which Watch now
-		// treats as "replay the entire retained history" (across archives) — a
+	afterSeq, resumable := input.resolveAfterSeq()
+	if !resumable {
+		// Head-start (no usable resume cursor): stream from now. That covers an
+		// absent cursor and a Last-Event-ID the stream cannot place; a malformed
+		// after_seq was already rejected by Resolve. Fail closed on a LatestSeq
+		// error rather than fall through to afterSeq=0, which Watch now treats
+		// as "replay the entire retained history" (across archives) — a
 		// head-start client must not get a full-history flood. The client can
 		// reconnect.
+		if input.LastEventID != "" {
+			log.Printf("api: events-stream: unparseable Last-Event-ID %.64q; starting at head", input.LastEventID)
+		}
 		seq, err := ep.LatestSeq()
 		if err != nil {
 			log.Printf("api: events-stream: latest seq failed, refusing head-start replay: %v", err)
