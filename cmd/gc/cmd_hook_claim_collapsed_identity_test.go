@@ -53,22 +53,27 @@ mode = "on_demand"
 // alias/agent_name are the canonical "olivia".
 func newCollapsedPoolSessionBead(t *testing.T, cityDir string, alias, agentName, instanceToken string) string {
 	t.Helper()
+	return newOliviaSessionBead(t, cityDir, map[string]string{
+		"session_name":   "olivia-pool",
+		"template":       "olivia",
+		"alias":          alias,
+		"agent_name":     agentName,
+		"state":          string(session.StateActive),
+		"instance_token": instanceToken,
+	})
+}
+
+func newOliviaSessionBead(t *testing.T, cityDir string, metadata map[string]string) string {
+	t.Helper()
 	store, err := openCityStoreAt(cityDir)
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
 	bead, err := store.Create(beads.Bead{
-		Title:  "olivia",
-		Type:   session.BeadType,
-		Labels: []string{"gc:session", "agent:olivia"},
-		Metadata: map[string]string{
-			"session_name":   "olivia-pool",
-			"template":       "olivia",
-			"alias":          alias,
-			"agent_name":     agentName,
-			"state":          string(session.StateActive),
-			"instance_token": instanceToken,
-		},
+		Title:    "olivia",
+		Type:     session.BeadType,
+		Labels:   []string{"gc:session", "agent:olivia"},
+		Metadata: metadata,
 	})
 	if err != nil {
 		t.Fatalf("create session bead: %v", err)
@@ -102,7 +107,7 @@ func TestHookClaimCollapsedSingletonPoolServesNamedIdentity(t *testing.T) {
 		name, alias, agentName string
 	}{
 		{name: "alias collapsed", alias: "olivia", agentName: "olivia"},
-		{name: "agent_name collapsed, alias deferred", alias: "", agentName: "olivia"},
+		{name: "alias collapsed, agent_name stepped aside", alias: "olivia", agentName: "olivia-pool"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearGCEnv(t)
@@ -148,5 +153,118 @@ func TestHookClaimUncollapsedPoolSessionDoesNotAdoptNamedWork(t *testing.T) {
 	}
 	if result.Action != "drain" || result.Reason != "no_work" {
 		t.Fatalf("result = %+v, want a no_work drain: an uncollapsed pool session must not claim olivia's work", result)
+	}
+}
+
+// runCollapsedIdentityClaim runs one `gc hook --claim --json` and decodes it.
+func runCollapsedIdentityClaim(t *testing.T) hookClaimJSONResult {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	_ = cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("stdout is not a JSON claim result: %v\n%s; stderr=%s", err, stdout.String(), stderr.String())
+	}
+	return result
+}
+
+// TestHookClaimAgentNameAloneDoesNotCollapseIdentity: agent_name is NOT an
+// exclusive identity — every session of the template may carry it — so a pool
+// session whose alias is deferred (the on-demand named olivia holds or may
+// claim the alias) must not adopt olivia's in_progress work on agent_name
+// alone. Only the alias, written under the city alias lock, is exclusive.
+func TestHookClaimAgentNameAloneDoesNotCollapseIdentity(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := writeCollapsedIdentityCity(t)
+	sessionID := newCollapsedPoolSessionBead(t, cityDir, "", "olivia", "live-token")
+	setCollapsedPoolClaimEnv(t, cityDir, sessionID, "live-token")
+
+	if result := runCollapsedIdentityClaim(t); result.Action != "drain" || result.Reason != "no_work" {
+		t.Fatalf("result = %+v, want a no_work drain: agent_name=olivia without the olivia alias must not claim olivia's work", result)
+	}
+}
+
+// TestHookClaimManualSessionDoesNotCollapseIdentity: `gc session new olivia
+// --alias scratch` stamps agent_name=olivia on a manual session; a manual
+// session never serves the canonical identity, even if its bead carries it.
+func TestHookClaimManualSessionDoesNotCollapseIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, alias string
+	}{
+		{name: "own alias", alias: "scratch"},
+		{name: "canonical alias", alias: "olivia"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			t.Setenv("GC_BEADS", "file")
+			cityDir := writeCollapsedIdentityCity(t)
+			sessionID := newOliviaSessionBead(t, cityDir, map[string]string{
+				"session_name":   "s-scratch",
+				"template":       "olivia",
+				"alias":          tc.alias,
+				"agent_name":     "olivia",
+				"session_origin": "manual",
+				"manual_session": "true",
+				"state":          string(session.StateActive),
+				"instance_token": "live-token",
+			})
+			t.Setenv("GC_CITY", cityDir)
+			t.Setenv("GC_TEMPLATE", "olivia")
+			t.Setenv("GC_ALIAS", "scratch")
+			t.Setenv("GC_AGENT", "s-scratch")
+			t.Setenv("GC_SESSION_ID", sessionID)
+			t.Setenv("GC_SESSION_NAME", "s-scratch")
+			t.Setenv("GC_SESSION_ORIGIN", "manual")
+			t.Setenv("GC_INSTANCE_TOKEN", "live-token")
+
+			if result := runCollapsedIdentityClaim(t); result.Action == "work" {
+				t.Fatalf("result = %+v, want no claim: a manual session must not serve the canonical olivia identity", result)
+			}
+		})
+	}
+}
+
+// TestHookClaimNamedHolderAndDeferredPoolSessionOnlyAliasHolderClaims: the
+// woken on-demand named olivia holds the alias while the single-slot pool
+// session's alias is deferred (agent_name=olivia). Both used to pass the
+// identity check and could take the same in_progress bead; only the alias
+// holder may claim it.
+func TestHookClaimNamedHolderAndDeferredPoolSessionOnlyAliasHolderClaims(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := writeCollapsedIdentityCity(t)
+	namedID := newOliviaSessionBead(t, cityDir, map[string]string{
+		"session_name":                       "olivia",
+		"template":                           "olivia",
+		"alias":                              "olivia",
+		"agent_name":                         "olivia",
+		session.NamedSessionMetadataKey:      "true",
+		session.NamedSessionIdentityMetadata: "olivia",
+		session.NamedSessionModeMetadata:     "on_demand",
+		"session_origin":                     "named",
+		"state":                              string(session.StateActive),
+		"instance_token":                     "named-token",
+	})
+	poolID := newCollapsedPoolSessionBead(t, cityDir, "", "olivia", "pool-token")
+
+	// Pool session: must not take the named holder's bead.
+	setCollapsedPoolClaimEnv(t, cityDir, poolID, "pool-token")
+	if result := runCollapsedIdentityClaim(t); result.Action != "drain" || result.Reason != "no_work" {
+		t.Fatalf("pool session result = %+v, want a no_work drain: the alias-deferred pool session must not claim olivia's work", result)
+	}
+
+	// Named holder: owns the alias, claims the bead.
+	t.Setenv("GC_ALIAS", "olivia")
+	t.Setenv("GC_AGENT", "olivia")
+	t.Setenv("GC_SESSION_ID", namedID)
+	t.Setenv("GC_SESSION_NAME", "olivia")
+	t.Setenv("GC_SESSION_ORIGIN", "named")
+	t.Setenv("GC_INSTANCE_TOKEN", "named-token")
+	if result := runCollapsedIdentityClaim(t); result.Action != "work" || result.BeadID != "mc-olivia-1" {
+		t.Fatalf("named holder result = %+v, want action=work bead=mc-olivia-1", result)
 	}
 }

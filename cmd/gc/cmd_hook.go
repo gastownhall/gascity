@@ -646,21 +646,29 @@ func classifyHookClaimSessionInfo(cityPath string, cfg *config.City, sessionID, 
 // collapse, so the claim looked only for <name>-pool / session-id work and
 // drained no_work while the named identity's assignment waited — the olivia
 // seat in maintainer-city, 2026-09-22/23. The persisted alias/agent_name on the
-// fenced session bead is the authority for which identity this seat serves.
+// fenced session bead is the authority for which identity this seat serves —
+// specifically its exclusive alias, never the shared agent_name.
 //
 // The ga-80pen8 guard still holds: only a single-slot pool can collapse (there
 // is never a second live member to double-adopt the holder's work), a
 // configured named-session bead already carries its own alias, and a pool
 // session whose bead does NOT carry the canonical identity gets nothing.
 func hookClaimCollapsedIdentity(a *config.Agent, info *session.Info, runtimeAlias string) string {
-	if a == nil || info == nil || info.Closed || !a.UsesCanonicalSingletonPoolIdentity() || isNamedSessionInfo(*info) {
+	if a == nil || info == nil || info.Closed || !a.UsesCanonicalSingletonPoolIdentity() ||
+		isNamedSessionInfo(*info) || isManualSessionInfoForAgent(*info, a) {
 		return ""
 	}
 	canonical := strings.TrimSpace(a.QualifiedName())
 	if canonical == "" || strings.TrimSpace(runtimeAlias) == canonical {
 		return ""
 	}
-	if strings.TrimSpace(info.Alias) == canonical || strings.TrimSpace(info.AgentName) == canonical {
+	// Only the alias is exclusive: it is written under the city session alias
+	// lock after EnsureAliasAvailable, so at most one live session holds it.
+	// agent_name is NOT exclusive — an alias-deferred pool session, a woken
+	// named holder, and manual sessions (`gc session new olivia --alias x`) all
+	// carry agent_name=<canonical> — so accepting it let two sessions adopt the
+	// same in_progress assignment.
+	if strings.TrimSpace(info.Alias) == canonical {
 		return canonical
 	}
 	return ""
