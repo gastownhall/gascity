@@ -4946,6 +4946,22 @@ func createPoolSessionBeadWithGuardedAliasUsingLock(
 	if err != nil {
 		return session.Info{}, err
 	}
+	// A retired bead can leave its runtime occupying the canonical singleton
+	// name. Do not mint a fresh bead on every demand tick while it remains.
+	// Existing-bead reuse happens before this create path; this is not adoption
+	// or permission to stop an unknown owner. Start still fences later races.
+	//
+	// The probe is deliberately outside the withLocks section below, which is
+	// why Start and not this probe is the authoritative fence. A provider
+	// liveness call blocks on I/O — the ACP provider dials the session control
+	// socket and pings it, each with its own sub-second timeout, per candidate
+	// path — while withLocks takes a cross-process city lock file per
+	// identifier spelling. Probing under those locks would stall every other
+	// creator of the same identifiers behind it. Do not close the
+	// probe-to-create window by widening the lock over this call.
+	if cfgAgent != nil && cfgAgent.UsesCanonicalSingletonPoolIdentity() && bp.sp != nil && bp.sp.IsRunning(identifiers.sessionName) {
+		return session.Info{}, fmt.Errorf("%w: runtime %q still occupies singleton template %q", errPoolSessionNameUnavailable, identifiers.sessionName, template)
+	}
 	if bp.beadStore == nil {
 		return createPoolSessionBeadWithIdentifiers(bp.beadStore, template, bp.city, bp.sessionBeads, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, identifiers)
 	}

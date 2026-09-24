@@ -2,7 +2,9 @@ package bootstrap
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -80,7 +82,7 @@ func TestCoreMolPolecatReportWriteReportStepRecordsNoteAndAvoidsPRFlow(t *testin
 		"gc convoy status {{convoy_id}}",
 		"WORK_BEAD_ID",
 		"bd update",
-		"--notes",
+		"--append-notes",
 		"bd close",
 	} {
 		if !strings.Contains(description, want) {
@@ -98,4 +100,68 @@ func TestCoreMolPolecatReportWriteReportStepRecordsNoteAndAvoidsPRFlow(t *testin
 			t.Fatalf("write-report description must not contain %q:\n%s", forbidden, description)
 		}
 	}
+}
+
+var (
+	workBeadUpdatePattern = regexp.MustCompile(`bd update "?\$\{?WORK_BEAD_ID\}?"?(\s|$)`)
+	// replaceNotesFlagPattern matches the whole --notes flag, so
+	// --append-notes does not count.
+	replaceNotesFlagPattern = regexp.MustCompile(`(^|\s)--notes(\s|=|$)`)
+)
+
+// TestCoreFormulasNeverReplaceWorkBeadNotes guards against core formula steps
+// running `bd update "$WORK_BEAD_ID" ... --notes`. --notes replaces the notes
+// field and discards notes the work bead already carries (coordinator notes,
+// audit lines); work-bead writes must use --append-notes.
+func TestCoreFormulasNeverReplaceWorkBeadNotes(t *testing.T) {
+	dir := coreFormulaSearchPaths(t)[0]
+	paths, err := filepath.Glob(filepath.Join(dir, "*.toml"))
+	if err != nil {
+		t.Fatalf("glob core formulas: %v", err)
+	}
+	if len(paths) == 0 {
+		t.Fatalf("no core formulas found in %s", dir)
+	}
+	checked := 0
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, cmd := range joinShellContinuations(string(data)) {
+			if !workBeadUpdatePattern.MatchString(cmd) {
+				continue
+			}
+			checked++
+			if replaceNotesFlagPattern.MatchString(cmd) {
+				t.Errorf("%s: work-bead update must use --append-notes, not --notes (it replaces existing notes):\n%s",
+					filepath.Base(path), cmd)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal(`found no 'bd update "$WORK_BEAD_ID"' commands in core formulas; guard pattern is stale`)
+	}
+}
+
+// joinShellContinuations folds backslash-continued lines into one logical
+// command line so multi-line bd invocations are checked as a whole.
+func joinShellContinuations(text string) []string {
+	var out []string
+	var cur strings.Builder
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimRight(line, " \t\r")
+		if strings.HasSuffix(trimmed, "\\") {
+			cur.WriteString(strings.TrimSuffix(trimmed, "\\"))
+			cur.WriteString(" ")
+			continue
+		}
+		cur.WriteString(line)
+		out = append(out, cur.String())
+		cur.Reset()
+	}
+	if cur.Len() > 0 {
+		out = append(out, cur.String())
+	}
+	return out
 }

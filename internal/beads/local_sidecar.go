@@ -127,3 +127,30 @@ func (l *localSidecar) saveLocked() error {
 	}
 	return fsys.WriteFileAtomic(fsys.OSFS{}, l.path, raw, 0o644)
 }
+
+// localSidecarHandle exposes the sidecar OBJECT, not its contents.
+//
+// It exists for exactly one caller: the proxied-native split store, whose two
+// leaves are constructed with their own newLocalSidecar over the SAME file. That
+// is not a duplicate read but a permanent divergence — ensureLoadedLocked latches
+// loaded=true on first use and never re-reads — so a SetLocalString through one
+// leaf is invisible to a GetLocalString through the other for the life of the
+// process. The wrapper resolves it by pointing both leaves at one object, which
+// needs a way to ask a leaf for the one it holds.
+//
+// Both the method and the interface it satisfies (localSidecarCarrier) are
+// unexported, so only internal/beads types can take part.
+func (s *BdStore) localSidecarHandle() *localSidecar {
+	if s == nil {
+		return nil
+	}
+	return s.localStrings
+}
+
+// localSidecarHandle exposes this store's sidecar object. See BdStore's.
+func (s *NativeDoltStore) localSidecarHandle() *localSidecar {
+	if s == nil {
+		return nil
+	}
+	return s.localStrings
+}
