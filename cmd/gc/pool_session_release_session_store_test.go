@@ -85,6 +85,8 @@ func TestReleaseOrphanedPoolAssignmentsReadsLivenessFromSessionStore(t *testing.
 		[]beads.Store{workStore},
 		nil,
 		nil,
+		nil,
+		nil,
 	)
 
 	if len(released) != 0 {
@@ -121,6 +123,8 @@ func TestReleaseOrphanedPoolAssignmentsStillReleasesWhenSessionStoreSaysDead(t *
 		[]beads.Store{workStore},
 		nil,
 		nil,
+		nil,
+		nil,
 	)
 
 	if len(released) != 1 || released[0].ID != work.ID {
@@ -155,6 +159,8 @@ func TestReleaseOrphanedPoolAssignmentsFallsBackToWorkStoreForLiveness(t *testin
 		nil,
 		[]beads.Bead{work},
 		[]beads.Store{single},
+		nil,
+		nil,
 		nil,
 		nil,
 	)

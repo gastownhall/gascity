@@ -239,6 +239,9 @@ if [ "$1" = "--rig" ]; then
   shift 2
 fi
 case "$1" in
+  mail)
+    exit 0
+    ;;
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -354,6 +357,9 @@ if [ "$1" = "--rig" ]; then
   shift 2
 fi
 case "$1" in
+  mail)
+    exit 0
+    ;;
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -493,6 +499,9 @@ if [ "$1" = "--rig" ]; then
   shift 2
 fi
 case "$1" in
+  mail)
+    exit 0
+    ;;
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -630,6 +639,9 @@ if [ "$1" = "--rig" ]; then
   shift 2
 fi
 case "$1" in
+  mail)
+    exit 0
+    ;;
   config)
     if [ "$2" = "explain" ]; then
       exit 1
@@ -1296,6 +1308,149 @@ exit 1
 	}
 }
 
+// TestOrphanSweepTreatsPoolSessionNameSelfProbeAsUnverifiable verifies that a
+// pool-seat assignee whose only probe candidate is its own session name is
+// treated as unverifiable for BOTH tmux-safe session-name encodings.
+// agent.SanitizeQualifiedNameForSession encodes "/" as "--" (rig-scope:
+// "beads/deployer" -> "beads--deployer") and "." as "__" (pack-qualified
+// city-scope: "pack-author.pack-author" -> "pack-author__pack-author").
+// `gc bd show <session name>` cannot resolve either shape to a bead, so both
+// are failed probes, not dead seats.
+//
+// The self-probe fail-safe landed recognizing only "--" (#5841), which left
+// every "__" seat resetting whenever the liveness snapshot momentarily lacked
+// its row: measured as 7 resets over 2026-09-10..12, every one a "__" seat and
+// none a "--" seat, while 3 "__" seats were live (ga-dei7xx).
+func TestOrphanSweepTreatsPoolSessionNameSelfProbeAsUnverifiable(t *testing.T) {
+	tests := []struct {
+		name     string
+		workID   string
+		assignee string
+	}{
+		{
+			// Control: already protected by the "--" arm.
+			name:     "rig scope double dash",
+			workID:   "ga-rig-pool-self-probe",
+			assignee: "beads--deployer-pool",
+		},
+		{
+			name:     "city scope double underscore",
+			workID:   "ga-city-pool-self-probe",
+			assignee: "pack-author__pack-author-pool",
+		},
+		{
+			// Slot-numbered seat: the "-<slot>" sits between the sanitized
+			// agent and the "-pool" suffix (live example: bd__dog-1-pool).
+			name:     "city scope numbered slot",
+			workID:   "ga-city-slot-pool-self-probe",
+			assignee: "bd__dog-1-pool",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+			// The session list carries an unrelated keepalive row but not the
+			// pool seat: the transient window in which a cycling seat is
+			// absent from the snapshot, which drops the sweep through to the
+			// self-probe fail-safe. `bd show <assignee>` is left unhandled so
+			// it exits non-zero, exactly as the real binary does when handed a
+			// session name instead of a bead id. Both seats reconstruct from
+			// these configured agents, which is what marks them as seats
+			// rather than ephemeral sessions.
+			writeExecutable(t, filepath.Join(binDir, "gc"), fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: beads/deployer
+  source: pack
+Agent: pack-author.pack-author
+  source: pack
+Agent: bd.dog
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":%q,"status":"in_progress","assignee":%q}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = %q ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":%q,"status":"in_progress","assignee":%q}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`, tt.workID, tt.assignee, tt.workID, tt.workID, tt.assignee))
+
+			env := map[string]string{
+				"GC_CITY":      cityDir,
+				"GC_CITY_PATH": cityDir,
+				"GC_CALL_LOG":  gcLog,
+				"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+
+			script := coreScriptPath("orphan-sweep.sh")
+			cmd := exec.Command(script)
+			cmd.Env = mergeTestEnv(env)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+			}
+			if !strings.Contains(string(out), "orphan-sweep: reset 0 orphaned beads, skipped 1 unverifiable") {
+				t.Fatalf("session-name self-probe was not treated as unverifiable:\n%s", out)
+			}
+
+			logData, err := os.ReadFile(gcLog)
+			if err != nil {
+				t.Fatalf("ReadFile(gc log): %v", err)
+			}
+			log := string(logData)
+			if !strings.Contains(log, "bd show "+tt.assignee+" --json") {
+				t.Fatalf("session-name self-probe was never attempted:\n%s", log)
+			}
+			if strings.Contains(log, "bd release-if-current "+tt.workID+" ") {
+				t.Fatalf("live pool seat %q lost its claim on %s:\n%s", tt.assignee, tt.workID, log)
+			}
+		})
+	}
+}
+
 func TestOrphanSweepUsesDirectSessionBeadCandidatesWhenSessionListLags(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -1432,6 +1587,9 @@ else
   rig=""
 fi
 case "$1" in
+  mail)
+    exit 0
+    ;;
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -1556,6 +1714,9 @@ else
   rig=""
 fi
 case "$1" in
+  mail)
+    exit 0
+    ;;
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -1679,6 +1840,9 @@ else
   rig=""
 fi
 case "$1" in
+  mail)
+    exit 0
+    ;;
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -2011,7 +2175,7 @@ if [ "$*" = "bd update $ORPHAN_SWEEP_ORPHAN_ID --append-notes orphan-sweep: rese
   exit 0
 fi
 case "$*" in
-  "mail send mayor/ "*) exit 0 ;;
+  "mail send human "*) exit 0 ;;
 esac
 printf 'UNEXPECTED: %s\n' "$*" >> "$GC_CALL_LOG"
 printf 'UNEXPECTED: %s\n' "$*" >&2
@@ -2209,6 +2373,9 @@ else
   rig=""
 fi
 case "$1" in
+  mail)
+    exit 0
+    ;;
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -2524,6 +2691,9 @@ func TestOrphanSweepRecordsCauseNoteOnEveryReset(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 case "$1" in
+  mail)
+    exit 0
+    ;;
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -7317,6 +7487,144 @@ exit 0
 	}
 	if got := counts["ga-loop"]; got != 1 {
 		t.Fatalf("new loop count = %d, want 1\nledger: %s", got, ledgerData)
+	}
+}
+
+// TestSpawnStormDetectRollsBackLedgerWhenAlertUndeliverable pins the rollback
+// half of the edge trigger. With -eq, a count left sitting AT the threshold
+// never equals it again, so a sweep whose alert could not be delivered has to
+// put the count back where it was or the storm is never reported at all. The
+// failure must also reach the controller log, which takes a non-zero exit.
+func TestSpawnStormDetectRollsBackLedgerWhenAlertUndeliverable(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  list)
+    printf '[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]\n'
+    ;;
+  show)
+    printf '[{"id":"%s","status":"open","title":"Looping bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+	// Every mail send fails the way an unreachable backend does.
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+if [ "${1:-}" = "mail" ]; then
+  printf 'mail backend unavailable\n' >&2
+  exit 1
+fi
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CITY":               cityDir,
+		"GC_CITY_PATH":          cityDir,
+		"GC_PACK_STATE_DIR":     stateDir,
+		"GC_CALL_LOG":           gcLog,
+		"SPAWN_STORM_THRESHOLD": "1",
+		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	out, err := runScriptResult(t, coreScriptPath("spawn-storm-detect.sh"), env)
+	if err == nil {
+		t.Fatalf("spawn-storm-detect exited 0 with an undeliverable alert; want non-zero so the controller logs it\n%s", out)
+	}
+
+	ledgerData, readErr := os.ReadFile(filepath.Join(stateDir, "spawn-storm-counts.json"))
+	if readErr != nil {
+		t.Fatalf("ReadFile(ledger): %v", readErr)
+	}
+	var counts map[string]int
+	if err := json.Unmarshal(ledgerData, &counts); err != nil {
+		t.Fatalf("Unmarshal(ledger): %v\n%s", err, ledgerData)
+	}
+	got, ok := counts["ga-loop"]
+	if !ok {
+		t.Fatalf("ledger dropped ga-loop entirely; want the pre-sweep count 0 recorded\nledger: %s", ledgerData)
+	}
+	if got != 0 {
+		t.Fatalf("ledger count for ga-loop = %d, want 0 (rolled back); at %d the -eq trigger never fires again\nledger: %s", got, got, ledgerData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "SPAWN_STORM: bead ga-loop reset 1x") {
+		t.Fatalf("gc log missing the attempted spawn storm notification:\n%s", gcData)
+	}
+}
+
+// TestSpawnStormDetectAlertsOnceAtThresholdCrossing pins the edge trigger
+// itself. A bead already at the threshold whose count moves PAST it is an
+// ongoing storm the operator was told about on the crossing sweep, so it must
+// not mail again every five minutes for as long as the storm lasts. -ge would
+// alert here; -eq does not.
+func TestSpawnStormDetectAlertsOnceAtThresholdCrossing(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	ledger := filepath.Join(stateDir, "spawn-storm-counts.json")
+	// Seeded AT the threshold: the crossing sweep already happened and
+	// already alerted.
+	if err := os.WriteFile(ledger, []byte(`{"ga-loop":2}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  list)
+    printf '[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]\n'
+    ;;
+  show)
+    printf '[{"id":"%s","status":"open","title":"Looping bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CITY":               cityDir,
+		"GC_CITY_PATH":          cityDir,
+		"GC_PACK_STATE_DIR":     stateDir,
+		"GC_CALL_LOG":           gcLog,
+		"SPAWN_STORM_THRESHOLD": "2",
+		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+
+	ledgerData, err := os.ReadFile(ledger)
+	if err != nil {
+		t.Fatalf("ReadFile(ledger): %v", err)
+	}
+	var counts map[string]int
+	if err := json.Unmarshal(ledgerData, &counts); err != nil {
+		t.Fatalf("Unmarshal(ledger): %v\n%s", err, ledgerData)
+	}
+	// The sweep really ran and really counted, so the silence below is the
+	// trigger declining rather than the loop never reaching it.
+	if got := counts["ga-loop"]; got != 3 {
+		t.Fatalf("ledger count for ga-loop = %d, want 3\nledger: %s", got, ledgerData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(gcData), "SPAWN_STORM:") {
+		t.Fatalf("alerted again at count 3 past threshold 2; the trigger is edge-triggered, not level-triggered\ngc log:\n%s", gcData)
 	}
 }
 

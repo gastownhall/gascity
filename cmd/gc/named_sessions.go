@@ -152,6 +152,14 @@ func namedSessionModeInfo(i session.Info) string {
 	return session.NamedSessionModeInfo(i)
 }
 
+// recyclableDeadConfiguredNamePhantomInfo reports the configured identity a
+// process-dead session is squatting, when it is not that identity's canonical
+// owner and is therefore safe to close and recycle. Used by the reconciler's
+// Info-based close-orphan path.
+func recyclableDeadConfiguredNamePhantomInfo(i session.Info, cfg *config.City, cityName string) (string, bool) {
+	return session.RecyclableDeadConfiguredNamePhantomInfo(i, cfg, cityName)
+}
+
 func namedSessionContinuityEligible(b beads.Bead) bool {
 	return session.NamedSessionContinuityEligible(b)
 }
@@ -175,6 +183,18 @@ func findClosedNamedSessionBead(store beads.Store, identity string) (beads.Bead,
 func findClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessionName string) (beads.Bead, bool) {
 	bead, ok, _ := session.FindClosedNamedSessionBeadForSessionName(store, identity, sessionName)
 	return bead, ok
+}
+
+// buildClosedNamedSessionBeadIndex batches the per-identity
+// findClosedNamedSessionBead lookup into one store read, for callers that
+// need the sessionName=="" answer for every configured named session in one
+// pass (ga-0t7qjl) instead of once per identity. Discards the underlying
+// error the same way findClosedNamedSessionBead does: a failed read leaves
+// the index empty, so every identity's Find reports no match rather than
+// stopping the caller's whole loop.
+func buildClosedNamedSessionBeadIndex(store beads.Store) session.ClosedNamedSessionBeadIndex {
+	idx, _ := session.BuildClosedNamedSessionBeadIndex(store)
+	return idx
 }
 
 func findNamedSessionConflictInfo(sessionBeads *sessionBeadSnapshot, spec namedSessionSpec) (session.Info, bool) {

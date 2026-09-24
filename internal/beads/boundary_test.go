@@ -8,10 +8,18 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // repoRoot returns the repository root by navigating from this file's location.
 func repoRoot() string {
+	// Bazel runfiles builds compile with runfiles-relative paths, so
+	// runtime.Caller arithmetic lands inside the package instead of the repo
+	// root; an explicit root keeps the boundary walk meaningful there.
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	_, filename, _, _ := runtime.Caller(0)
 	return filepath.Join(filepath.Dir(filename), "..", "..")
 }
@@ -27,9 +35,12 @@ var bdExecAllowedDirs = []string{
 	// work ledger — a box-side capability probe, not a gc-side bd subprocess.
 	filepath.Join("internal", "runtime", "runtimecapability") + string(filepath.Separator),
 	filepath.Join("test", "integration") + string(filepath.Separator),
-	// dashboard BFF runs read-only `bd doctor` health probes against
-	// arbitrary per-rig .beads stores (supervisor-reported paths). This is
-	// the same direct-bd usage the retired cmd/gc/dashboard server had.
+	// dashboard BFF runs `bd ping` connectivity probes against arbitrary
+	// per-rig .beads stores (supervisor-reported paths): read-only of the
+	// store, but a full provider open that starts a stopped proxy (bd
+	// v1.3.0-rc.2 cmd/bd/main.go:1758-1791). Bounded because the sampler lives
+	// and dies with the supervisor. This is the same direct-bd usage the
+	// retired cmd/gc/dashboard server had.
 	filepath.Join("internal", "api", "dashboardbff") + string(filepath.Separator),
 }
 

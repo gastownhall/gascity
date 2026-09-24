@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -693,6 +694,8 @@ type AgentOverride struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// ContextAdvisory overrides context-pressure guidance for this agent.
+	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty"`
 	// Upstream overrides the model-serving endpoint selection (Phase C).
 	Upstream *string `toml:"upstream,omitempty"`
 	// Args overrides the provider's default arguments. Leave unset to keep
@@ -719,6 +722,9 @@ type AgentOverride struct {
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
+	// AutoReclaimStaleClaims overrides Agent.AutoReclaimStaleClaims (see that
+	// field for semantics).
+	AutoReclaimStaleClaims *bool `toml:"auto_reclaim_stale_claims,omitempty"`
 	// InstallAgentHooks overrides the agent's install_agent_hooks list.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
 	// Skills is a tombstone field retained for v0.15.1 backwards
@@ -1172,16 +1178,17 @@ func (r *Rig) EffectivePrefix() string {
 	return DeriveBeadsPrefix(r.Name)
 }
 
-// Coordination class names, mirroring coordclass.Class.String(). They are part of
-// the [beads.classes.<name>] config contract and must not change without a
-// migration.
+// Coordination class names. They are part of the [beads.classes.<name>] config
+// contract and must not change without a migration. They no longer MIRROR
+// coordclass.Class.String() — both spell the same beadmeta constants, so the
+// two vocabularies cannot drift apart.
 const (
-	BeadClassWork      = "work"
-	BeadClassGraph     = "graph"
-	BeadClassMessaging = "messaging"
-	BeadClassSessions  = "sessions"
-	BeadClassOrders    = "orders"
-	BeadClassNudges    = "nudges"
+	BeadClassWork      = beadmeta.ClassNameWork
+	BeadClassGraph     = beadmeta.ClassNameGraph
+	BeadClassMessaging = beadmeta.ClassNameMessaging
+	BeadClassSessions  = beadmeta.ClassNameSessions
+	BeadClassOrders    = beadmeta.ClassNameOrders
+	BeadClassNudges    = beadmeta.ClassNameNudges
 )
 
 // EffectiveDefaultBranch returns the rig's recorded default branch, or the
@@ -1804,8 +1811,11 @@ type MailConfig struct {
 	// Provider selects the mail backend: "fake", "fail",
 	// "exec:<script>", or "" (default: beadmail).
 	Provider string `toml:"provider,omitempty"`
-	// RetentionTTL is how long read messages are retained before purge. Empty
-	// or "0" disables read-message retention.
+	// RetentionTTL has two consumers: it is how long read messages are
+	// retained before purge, and how long a read mail bead stays open before
+	// the nudge-mail sweep closes it. Empty or "0" disables read-message
+	// purge. The sweep distinguishes the two: empty leaves it at its own
+	// 60-minute default, while "0" disables its mail-close phase.
 	RetentionTTL string `toml:"retention_ttl,omitempty"`
 }
 
@@ -2120,10 +2130,22 @@ type OrdersConfig struct {
 	// BurntSushi's omitempty does not drop a zero int, so a plain int would
 	// emit max_dispatches_per_tick = 0 into every marshaled city.toml.
 
-	// MaxDispatchesPerTick caps how many orders the supervisor dispatches
-	// per tick. Unset keeps the built-in default of 4; set to 1 to drain
-	// overdue cooldown orders one-per-tick at cold start instead of firing
-	// several concurrent goroutines at once.
+	// MaxDispatchesPerTick caps how many clock-driven orders (cooldown, cron
+	// and event triggers) the supervisor dispatches per tick, in a rotation
+	// that resumes where the previous tick stopped. Unset keeps the built-in
+	// default of 4; set to 1 to drain overdue cooldown orders one-per-tick at
+	// cold start instead of firing several concurrent goroutines at once.
+	// Condition-triggered orders are outside this budget: a passing check
+	// means work is pending right now, so they dispatch on the tick that
+	// observes it. The open-tracking and open-work gates still run for them
+	// (unless the order sets no_work_gate), but those gates are keyed per
+	// order and only hold back a redispatch of an order whose previous run
+	// is still moving, so they do not bound the tick as a whole: a tick
+	// launches at most this budget plus one dispatch per condition order
+	// whose check passed on that tick. That second term grows with how many
+	// condition orders a city defines, not with this setting, and at cold
+	// start, before any tracking bead exists, neither gate holds a
+	// simultaneously-due set back.
 	MaxDispatchesPerTick *int `toml:"max_dispatches_per_tick,omitempty"`
 	// Overrides apply per-order field overrides after scanning.
 	// Each override targets an order by name and optionally by rig.
@@ -2349,15 +2371,17 @@ type LocalDoctorCheck struct {
 // (broken-worktree pointers, missing files) remain hardcoded since they
 // cannot be operator-tuned in any meaningful sense.
 type DoctorConfig struct {
-	// WorktreeRigWarnSize is the per-rig warning threshold for the total
-	// disk footprint under .gc/worktrees/<rig>/. Reported by the
-	// worktree-disk-size check. Go-style human size string ("10GB", "500MB").
+	// WorktreeRigWarnSize is the per-rig warning threshold for a
+	// worktree population's total disk footprint. Reported by the
+	// worktree-disk-size check for .gc/worktrees/<rig>/, and by the
+	// rig:<rig>:worktrees check for the per-bead worktrees at
+	// <rig>/worktrees/. Go-style human size string ("10GB", "500MB").
 	// Empty or unparseable falls back to the default (10 GB).
 	WorktreeRigWarnSize string `toml:"worktree_rig_warn_size,omitempty" jsonschema:"default=10GB"`
 
-	// WorktreeRigErrorSize is the per-rig error threshold. When any rig
-	// exceeds this, the worktree-disk-size check reports an error rather
-	// than a warning. Empty or unparseable falls back to the default
+	// WorktreeRigErrorSize is the per-rig error threshold. When a rig
+	// worktree population exceeds this, the reporting check errors
+	// rather than warns. Empty or unparseable falls back to the default
 	// (50 GB).
 	WorktreeRigErrorSize string `toml:"worktree_rig_error_size,omitempty" jsonschema:"default=50GB"`
 
@@ -3057,6 +3081,8 @@ func (c *City) PackDirsForRig(rigName string) []string {
 // default_sling_formula, and append_fragments; the remaining fields are parsed
 // and composed but are not yet inherited onto agents automatically.
 type AgentDefaults struct {
+	// ContextAdvisory is the city-wide default context-pressure guidance.
+	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty"`
 	// Provider is the default provider name for agents that do not set their
 	// own provider. It also counts as a configured provider for implicit agent
 	// injection.
@@ -3225,6 +3251,8 @@ type Agent struct {
 	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
+	// ContextAdvisory overrides context-pressure guidance for this agent.
+	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty"`
 	// Upstream selects the model-serving endpoint (a key in [upstreams]) for
 	// this agent — WHO serves the model. "" (default) falls back to
 	// agent_defaults.upstream; if still empty, no upstream env is injected
@@ -3365,6 +3393,11 @@ type Agent struct {
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle string `toml:"sleep_after_idle,omitempty"`
+	// AutoReclaimStaleClaims opts this agent into gc hook --claim attempting
+	// a scoped stale-lease reclaim (via `bd reclaim --id`) when a
+	// route-matched candidate's only claim blocker is an existing assignee.
+	// Off by default; staleness is decided entirely by bd's own lease TTL.
+	AutoReclaimStaleClaims bool `toml:"auto_reclaim_stale_claims,omitempty"`
 	// InstallAgentHooks overrides workspace-level install_agent_hooks for this agent.
 	// When set, replaces (not adds to) the workspace default.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
@@ -3559,6 +3592,7 @@ func (a Agent) Clone() Agent {
 	out.MaxActiveSessions = copyIntPtr(a.MaxActiveSessions)
 	out.MinActiveSessions = copyIntPtr(a.MinActiveSessions)
 	out.AssignedWorkDeferLimit = copyIntPtr(a.AssignedWorkDeferLimit)
+	out.ContextAdvisory = cloneContextAdvisory(a.ContextAdvisory)
 	out.EmitsPermissionWarning = copyBoolPtr(a.EmitsPermissionWarning)
 	out.HooksInstalled = copyBoolPtr(a.HooksInstalled)
 	out.InjectAssignedSkills = copyBoolPtr(a.InjectAssignedSkills)
@@ -3950,6 +3984,7 @@ func hasDeprecatedAttachmentFields(cfg *City) bool {
 // mergeAgentDefaults merges src into dst using later-layer precedence for
 // scalars and additive append semantics for list fields.
 func mergeAgentDefaults(dst *AgentDefaults, src AgentDefaults, label string, prov *Provenance) {
+	mergeContextAdvisory(&dst.ContextAdvisory, src.ContextAdvisory)
 	if src.Provider != "" {
 		if prov != nil && dst.Provider != "" && dst.Provider != src.Provider {
 			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.provider redefined by %q", label))
@@ -4659,6 +4694,13 @@ func Parse(data []byte) (*City, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
+	// Parse intentionally preserves non-storage legacy authoring surfaces for
+	// the migration reader. The removed Dolt mode is topology authority, never
+	// migration input, so reject it at decode time without broadening that
+	// tolerance.
+	if err := validateDoltModeAuthoringSurface(md); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
 	if err := validateStorageAuthoringSurface(md); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
@@ -4666,6 +4708,9 @@ func Parse(data []byte) (*City, error) {
 	applyDaemonFormulaV2Default(&cfg, md)
 	normalizeLegacyOrderOverrideAliases(&cfg)
 	NormalizeSessionSleepFields(&cfg)
+	if err := validateContextAdvisories(&cfg); err != nil {
+		return nil, err
+	}
 	// Stamp source=sourceInline on agents declared via [[agent]] in
 	// the parsed TOML. These are city.toml inline agents (or test
 	// fixtures using Parse directly); pack agents go through a

@@ -31,6 +31,30 @@ const (
 	maxOpenConns    = 5
 	maxIdleConns    = 2
 	connMaxLifetime = time.Hour
+	// connMaxIdleTime must stay STRICTLY BELOW the server's idle reaper so
+	// the CLIENT closes an idle pooled connection before the server does.
+	// On this dolt version that reaper is read_timeout_millis
+	// (config.DefaultDoltReadTimeoutMillis, 120000) — NOT wait_timeout,
+	// which the server accepts, stores and reports but which reaps nothing
+	// on dolt 2.2.3 (measured for #5383; see
+	// config.DefaultDoltWaitTimeoutSeconds and the golden-file guard in
+	// cmd/gc/cmd_dolt_config_test.go). Without a client-side idle bound a
+	// pooled connection lives until connMaxLifetime (an hour), so the
+	// SERVER reaps it first and logs an error per reap:
+	//
+	//   Error reading packet from client N: read tcp ... i/o timeout
+	//   io.ReadFull(header size) failed
+	//
+	// 6565 such lines in one day were observed on a single managed city,
+	// arriving on a clean 30s cycle. That period matches neither the inert
+	// wait_timeout nor the 120s read_timeout default, so that city most
+	// likely carried a lower read_timeout_millis — unconfirmed, and not a
+	// bound to design against. 20s sits below every candidate (120s default,
+	// any 30s-class override, and connMaxLifetime), which is the property
+	// that matters. Closing client-side removes the events at the source
+	// rather than muting them; equality with a reaper bound would be a race,
+	// not a bound.
+	connMaxIdleTime = 20 * time.Second
 	connTimeout     = 5 * time.Second
 	readTimeout     = 30 * time.Second
 	writeTimeout    = 30 * time.Second
@@ -88,6 +112,31 @@ func Open(host, port, user, password, database string) (*sql.DB, error) {
 	db, err := sql.Open("mysql", formatDSN(host, port, user, password, database))
 	if err != nil {
 		return nil, fmt.Errorf("opening pooled dolt connection to %s:%s/%s: %w", host, port, database, err)
+	}
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxIdleConns)
+	db.SetConnMaxLifetime(connMaxLifetime)
+	db.SetConnMaxIdleTime(connMaxIdleTime)
+	registry.dbs[k] = db
+	return db, nil
+}
+
+// OpenSocket returns a shared *sql.DB for a Dolt Unix-socket endpoint.
+func OpenSocket(socket, user, password, database string) (*sql.DB, error) {
+	k := key("unix", socket, user, password, database)
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if db, ok := registry.dbs[k]; ok {
+		return db, nil
+	}
+	cfg := mysql.NewConfig()
+	cfg.User, cfg.Passwd, cfg.Net, cfg.Addr, cfg.DBName = user, password, "unix", socket, database
+	cfg.Timeout, cfg.ReadTimeout, cfg.WriteTimeout = connTimeout, readTimeout, writeTimeout
+	cfg.AllowNativePasswords = true
+	cfg.ParseTime = true
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		return nil, fmt.Errorf("opening pooled dolt socket connection %s/%s: %w", socket, database, err)
 	}
 	db.SetMaxOpenConns(maxOpenConns)
 	db.SetMaxIdleConns(maxIdleConns)

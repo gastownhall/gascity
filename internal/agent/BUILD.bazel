@@ -1,0 +1,49 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "agent",
+    srcs = [
+        "hints.go",
+        "session_name.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/agent",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/runtime"],
+)
+
+go_test(
+    name = "agent_test",
+    srcs = [
+        "hints_test.go",
+        "identity_separator_doc_test.go",
+        "session_name_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_meta",
+        "//:repo_source_tree",
+        "//docs:all_files",
+    ],
+    embed = [":agent"],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/runtime",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

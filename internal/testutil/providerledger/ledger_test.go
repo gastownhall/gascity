@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/testpolicy/waiverclock"
 )
 
@@ -621,8 +622,24 @@ func TestCatalogBindsACPWithDirAndDefersDefaultConstructor(t *testing.T) {
 	if got, want := renderSymbolRefs(withDirProof.AllowedCalls), "fmt.Sprintf, internal/runtime/acp.acpConformanceCommand, internal/runtime/acp.acpConformanceDir, sync/atomic.AddInt64"; got != want {
 		t.Errorf("ACP WithDir allowed calls = %q, want %q", got, want)
 	}
-	if defaultWaiver == nil || defaultWaiver.Owner != runtimeContractWaiverOwner {
+	if defaultWaiver == nil {
+		t.Fatal("acp.NewSeamBacked waiver is missing")
+	}
+	if defaultWaiver.Owner != runtimeContractWaiverOwner {
 		t.Errorf("ACP default waiver = %+v, want %s ownership", defaultWaiver, runtimeContractWaiverOwner)
+	}
+	// The default constructor now has its own direct proof attempt
+	// (TestACPDefaultDirConformance); the reason must point to that gap
+	// (currently: no clean Darwin-lane run yet, tracked by ga-csh74h) rather
+	// than resting on the WithDir proof, which does not exercise NewSeamBacked.
+	if strings.Contains(defaultWaiver.Reason, "WithDir proof does not exercise") {
+		t.Errorf("ACP default waiver reason still reads as the pre-ga-uz5t3a.10 generic reason: %q", defaultWaiver.Reason)
+	}
+	if !strings.Contains(defaultWaiver.Reason, "TestACPDefaultDirConformance") {
+		t.Errorf("ACP default waiver reason should name the implemented conformance test: %q", defaultWaiver.Reason)
+	}
+	if !strings.Contains(defaultWaiver.Reason, "ga-csh74h") {
+		t.Errorf("ACP default waiver reason should name the tracked Darwin-lane blocker: %q", defaultWaiver.Reason)
 	}
 }
 
@@ -1796,6 +1813,14 @@ func renderRegistrations(registrations []RuntimeRegistration) string {
 
 func repoRoot(t *testing.T) string {
 	t.Helper()
+	// GC_TEST_REPO_ROOT lets `bazel test` point whole-repo scan guards at a
+	// real checkout; runfiles trees cannot stand in for the repository.
+	if root := bazeltest.OverrideRoot(); root != "" {
+		if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+			t.Fatalf("GC_TEST_REPO_ROOT=%s has no go.mod: %v", root, err)
+		}
+		return root
+	}
 	dir, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)

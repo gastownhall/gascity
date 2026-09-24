@@ -380,22 +380,20 @@ func moleculeClassStore(recipe *formula.Recipe, workStore, graphStore beads.Stor
 
 // cookOnClassRouted compiles a formula and instantiates it in the store the
 // compiled recipe's class demands; molecule.Cook picks its store before compiling.
+//
+// The compile/validate/instantiate sequence itself belongs to
+// molecule.CookChoosingStore — this is that entry point with the class routing
+// as its chooser, so the only thing written out here is the routing decision.
+// A hand-copied Cook body would be a second implementation of the library's
+// contract, drifting silently the moment Cook grows an invariant.
 func cookOnClassRouted(ctx context.Context, workStore, graphStore beads.Store, formulaName string, searchPaths []string, opts molecule.Options) (*molecule.Result, error) {
 	if opts.ParentID == "" {
 		return nil, fmt.Errorf("cookOnClassRouted requires Options.ParentID")
 	}
-	compileVars := opts.Vars
-	if compileVars == nil {
-		compileVars = map[string]string{}
-	}
-	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, compileVars)
-	if err != nil {
-		return nil, fmt.Errorf("compiling formula %q: %w", formulaName, err)
-	}
-	if err := molecule.ValidateRecipeRuntimeVars(recipe, opts); err != nil {
-		return nil, err
-	}
-	return molecule.Instantiate(ctx, moleculeClassStore(recipe, workStore, graphStore), recipe, opts)
+	result, _, err := molecule.CookChoosingStore(ctx, formulaName, searchPaths, opts, func(recipe *formula.Recipe) beads.Store {
+		return moleculeClassStore(recipe, workStore, graphStore)
+	})
+	return result, err
 }
 
 // recipeCoordClass returns the coordination class of the beads that

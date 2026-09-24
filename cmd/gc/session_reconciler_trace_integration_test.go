@@ -478,19 +478,7 @@ func TestSessionReconcilerTraceGH1654WorkRequestedStartCandidates(t *testing.T) 
 			wantStartCandidates: 1,
 			setup: func(t *testing.T, cityDir string, store beads.Store, sp runtime.Provider) (*config.City, DesiredStateResult, *sessionBeadSnapshot) {
 				t.Helper()
-				cfg := &config.City{
-					Workspace: config.Workspace{Name: "trace-town"},
-					Session:   config.SessionConfig{Provider: "fake"},
-					Agents: []config.Agent{{
-						Name:              "dispatcher",
-						StartCommand:      "true",
-						MaxActiveSessions: intPtr(1),
-					}},
-					NamedSessions: []config.NamedSession{{
-						Template: "dispatcher",
-						Mode:     "on_demand",
-					}},
-				}
+				cfg := namedSessionPostKillTraceConfig()
 				if _, err := store.Create(beads.Bead{
 					Title:  "queued dispatcher work",
 					Type:   "task",
@@ -541,17 +529,7 @@ func TestSessionReconcilerTraceGH1654WorkRequestedStartCandidates(t *testing.T) 
 			wantStartCandidates: 1,
 			setup: func(t *testing.T, cityDir string, store beads.Store, sp runtime.Provider) (*config.City, DesiredStateResult, *sessionBeadSnapshot) {
 				t.Helper()
-				cfg := &config.City{
-					Workspace: config.Workspace{Name: "trace-town"},
-					Session:   config.SessionConfig{Provider: "fake"},
-					Agents: []config.Agent{{
-						Name:              "worker",
-						Dir:               "repo",
-						StartCommand:      "true",
-						MinActiveSessions: intPtr(0),
-						MaxActiveSessions: intPtr(5),
-					}},
-				}
+				cfg := poolRespawnAfterDrainTraceConfig()
 				createRoutedReadyWork(t, store, "repo/worker", 1)
 				dsResult := buildDesiredState("trace-town", cityDir, now, cfg, sp, store, io.Discard)
 				if got := dsResult.ScaleCheckCounts["repo/worker"]; got != 1 {
@@ -570,17 +548,7 @@ func TestSessionReconcilerTraceGH1654WorkRequestedStartCandidates(t *testing.T) 
 			wantStartCandidates: 3,
 			setup: func(t *testing.T, cityDir string, store beads.Store, sp runtime.Provider) (*config.City, DesiredStateResult, *sessionBeadSnapshot) {
 				t.Helper()
-				cfg := &config.City{
-					Workspace: config.Workspace{Name: "trace-town"},
-					Session:   config.SessionConfig{Provider: "fake"},
-					Agents: []config.Agent{{
-						Name:              "worker",
-						Dir:               "repo",
-						StartCommand:      "true",
-						MinActiveSessions: intPtr(3),
-						MaxActiveSessions: intPtr(100),
-					}},
-				}
+				cfg := poolGrowsPastMinActiveSessionsTraceConfig()
 				createRoutedReadyWork(t, store, "repo/worker", 6)
 				for slot := 1; slot <= 3; slot++ {
 					session := createCanonicalPoolSession(t, store, &cfg.Agents[0], now, slot)
@@ -691,6 +659,120 @@ func TestSessionReconcilerTraceGH1654WorkRequestedStartCandidates(t *testing.T) 
 			}
 			if startCandidates != tc.wantStartCandidates {
 				t.Fatalf("start_candidate decisions = %d, want %d", startCandidates, tc.wantStartCandidates)
+			}
+		})
+	}
+}
+
+// namedSessionPostKillTraceConfig returns the *config.City used by the
+// "named session post-kill" GH-1654 trace regression case above. Extracted
+// so TestNamedSessionPostKillTraceConfigToleratesShardParallelLoad can
+// assert on the exact same fixture without duplicating it.
+func namedSessionPostKillTraceConfig() *config.City {
+	return &config.City{
+		Workspace: config.Workspace{Name: "trace-town"},
+		Session:   config.SessionConfig{Provider: "fake"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "30s"},
+		Agents: []config.Agent{{
+			Name:              "dispatcher",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "dispatcher",
+			Mode:     "on_demand",
+		}},
+	}
+}
+
+// TestNamedSessionPostKillTraceConfigToleratesShardParallelLoad guards
+// against ga-hgjlhi: the "named session post-kill" case above calls
+// cr.waitForAsyncStarts(), which waits up to cr.cfg.Daemon.ShutdownTimeoutDuration().
+// An unconfigured Daemon.ShutdownTimeout falls back to a fixed production
+// default of 5s (internal/config DaemonConfig.ShutdownTimeoutDuration).
+// Under shard-parallel host load, 5s of real wall-clock time is not always
+// enough for the fake provider's async start goroutines to be scheduled and
+// finish, which fails the test with "async starts did not finish" even
+// though nothing is actually broken -- a false negative caused by the
+// fixture, not the reconciler. The fixture must set an explicit, generous
+// Daemon.ShutdownTimeout instead of inheriting the production default.
+func TestNamedSessionPostKillTraceConfigToleratesShardParallelLoad(t *testing.T) {
+	cfg := namedSessionPostKillTraceConfig()
+	const floor = 30 * time.Second
+	if got := cfg.Daemon.ShutdownTimeoutDuration(); got < floor {
+		t.Fatalf("namedSessionPostKillTraceConfig().Daemon.ShutdownTimeoutDuration() = %v, want >= %v "+
+			"(see ga-hgjlhi: the fixture must set an explicit, generous Daemon.ShutdownTimeout so "+
+			"cr.waitForAsyncStarts() doesn't false-negative under shard-parallel host load)", got, floor)
+	}
+}
+
+// poolRespawnAfterDrainTraceConfig returns the *config.City used by the
+// "pool respawn after drain" GH-1654 trace regression case above. Extracted
+// so TestPoolTraceConfigsToleratesShardParallelLoad can assert on the exact
+// same fixture without duplicating it.
+func poolRespawnAfterDrainTraceConfig() *config.City {
+	return &config.City{
+		Workspace: config.Workspace{Name: "trace-town"},
+		Session:   config.SessionConfig{Provider: "fake"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "30s"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "repo",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(5),
+		}},
+	}
+}
+
+// poolGrowsPastMinActiveSessionsTraceConfig returns the *config.City used by
+// the "pool grows past min active sessions" GH-1654 trace regression case
+// above. Extracted so TestPoolTraceConfigsToleratesShardParallelLoad can
+// assert on the exact same fixture without duplicating it.
+func poolGrowsPastMinActiveSessionsTraceConfig() *config.City {
+	return &config.City{
+		Workspace: config.Workspace{Name: "trace-town"},
+		Session:   config.SessionConfig{Provider: "fake"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "30s"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "repo",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(3),
+			MaxActiveSessions: intPtr(100),
+		}},
+	}
+}
+
+// TestPoolTraceConfigsToleratesShardParallelLoad guards against ga-hgjlhi:
+// the "pool respawn after drain" and "pool grows past min active sessions"
+// cases above share the same cr.waitForAsyncStarts() call as the
+// named-session case guarded by
+// TestNamedSessionPostKillTraceConfigToleratesShardParallelLoad, which waits
+// up to cr.cfg.Daemon.ShutdownTimeoutDuration(). An unconfigured
+// Daemon.ShutdownTimeout falls back to a fixed production default of 5s
+// (internal/config DaemonConfig.ShutdownTimeoutDuration), which is not
+// always enough for the fake provider's async start goroutines to be
+// scheduled and finish under shard-parallel host load -- a false negative
+// caused by the fixture, not the reconciler. Each fixture must set an
+// explicit, generous Daemon.ShutdownTimeout instead of inheriting the
+// production default.
+func TestPoolTraceConfigsToleratesShardParallelLoad(t *testing.T) {
+	const floor = 30 * time.Second
+	tests := []struct {
+		name   string
+		config func() *config.City
+	}{
+		{"poolRespawnAfterDrainTraceConfig", poolRespawnAfterDrainTraceConfig},
+		{"poolGrowsPastMinActiveSessionsTraceConfig", poolGrowsPastMinActiveSessionsTraceConfig},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.config()
+			if got := cfg.Daemon.ShutdownTimeoutDuration(); got < floor {
+				t.Fatalf("%s().Daemon.ShutdownTimeoutDuration() = %v, want >= %v "+
+					"(see ga-hgjlhi: the fixture must set an explicit, generous Daemon.ShutdownTimeout so "+
+					"cr.waitForAsyncStarts() doesn't false-negative under shard-parallel host load)", tc.name, got, floor)
 			}
 		})
 	}

@@ -4460,7 +4460,7 @@ func TestOnFormulaCopiesSourcePriorityToCreatedBeads(t *testing.T) {
 	}
 }
 
-func TestOnFormulaGraphWorkflowPreassignsNonLatchBeadsForFixedAgent(t *testing.T) {
+func TestOnFormulaGraphWorkflowRoutesUnclaimedNonLatchBeadsForFixedAgent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
@@ -4573,7 +4573,7 @@ title = "Do work"
 	if err != nil {
 		t.Fatalf("list workflow beads: %v", err)
 	}
-	assigned := 0
+	routed := 0
 	for _, bead := range all {
 		if bead.Metadata["gc.root_bead_id"] != rootID {
 			continue
@@ -4593,19 +4593,19 @@ title = "Do work"
 			if bead.Metadata[graphroute.GraphExecutionRouteMetaKey] != "mayor" {
 				t.Fatalf("workflow-finalize execution route = %q, want mayor", bead.Metadata[graphroute.GraphExecutionRouteMetaKey])
 			}
-			assigned++
+			routed++
 		default:
-			if bead.Assignee != "mayor" {
-				t.Fatalf("workflow bead %s assignee = %q, want mayor", bead.ID, bead.Assignee)
+			if bead.Assignee != "" {
+				t.Fatalf("workflow bead %s assignee = %q, want unclaimed routed work", bead.ID, bead.Assignee)
 			}
 			if bead.Metadata["gc.routed_to"] != "mayor" {
 				t.Fatalf("workflow bead %s gc.routed_to = %q, want mayor", bead.ID, bead.Metadata["gc.routed_to"])
 			}
-			assigned++
+			routed++
 		}
 	}
-	if assigned == 0 {
-		t.Fatalf("expected at least one assigned workflow bead; rows=%#v", all)
+	if routed == 0 {
+		t.Fatalf("expected at least one routed workflow bead; rows=%#v", all)
 	}
 	if !strings.Contains(stdout.String(), "Attached workflow") {
 		t.Fatalf("stdout = %q, want attached workflow message", stdout.String())
@@ -7761,6 +7761,12 @@ func TestCheckCrossRigDifferentRig(t *testing.T) {
 	if !strings.Contains(msg, "--force") {
 		t.Errorf("message = %q, want --force hint", msg)
 	}
+	if !strings.Contains(msg, "refusing cross-rig route") {
+		t.Errorf("message = %q, want explicit refusal wording", msg)
+	}
+	if !strings.Contains(msg, "nothing was routed") {
+		t.Errorf("message = %q, want explicit no-op statement", msg)
+	}
 }
 
 func TestCheckCrossRigCityAgent(t *testing.T) {
@@ -7793,6 +7799,9 @@ func TestDoSlingCrossRigBlocks(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "cross-rig") {
 		t.Errorf("stderr = %q, want cross-rig error", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "nothing was routed") {
+		t.Errorf("stderr = %q, want explicit refusal wording", stderr.String())
 	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0 (should not route)", len(runner.calls))
@@ -7873,6 +7882,9 @@ func TestDoSlingBatchCrossRigBlocks(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "cross-rig") {
 		t.Errorf("stderr = %q, want cross-rig error", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "nothing was routed") {
+		t.Errorf("stderr = %q, want explicit refusal wording", stderr.String())
 	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0 (should not route)", len(runner.calls))
@@ -8030,6 +8042,9 @@ func TestDoSlingOnFormulaCrossRigBlocked(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "cross-rig") {
 		t.Errorf("stderr = %q, want cross-rig error", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "nothing was routed") {
+		t.Errorf("stderr = %q, want explicit refusal wording", stderr.String())
 	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0", len(runner.calls))

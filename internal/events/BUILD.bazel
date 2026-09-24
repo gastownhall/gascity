@@ -1,0 +1,78 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "events",
+    srcs = [
+        "backend_payloads.go",
+        "control_payloads.go",
+        "events.go",
+        "execution_payloads.go",
+        "fake.go",
+        "inode_unix.go",
+        "inode_windows.go",
+        "multiplexer.go",
+        "order_payloads.go",
+        "payload.go",
+        "payloads.go",
+        "query.go",
+        "reader.go",
+        "reader_context.go",
+        "recorder.go",
+        "rollout_payloads.go",
+        "rotation.go",
+        "rotation_archive.go",
+        "rotation_payload.go",
+        "supervisor_payloads.go",
+        "watch_backfill.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/events",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "events_test",
+    srcs = [
+        "backend_payloads_test.go",
+        "conformance_test.go",
+        "control_payloads_test.go",
+        "events_test.go",
+        "latest_archived_match_test.go",
+        "multiplexer_test.go",
+        "order_payloads_test.go",
+        "payload_test.go",
+        "query_test.go",
+        "reader_afterseq_seek_test.go",
+        "reader_archive_filter_test.go",
+        "reader_beforeseq_test.go",
+        "reader_context_test.go",
+        "recorder_batch_test.go",
+        "recorder_shortwrite_unix_test.go",
+        "rotation_archive_test.go",
+        "rotation_auto_test.go",
+        "rotation_force_test.go",
+        "rotation_reader_test.go",
+        "rotation_superseded_test.go",
+        "rotation_test.go",
+        "rotation_watcher_test.go",
+        "testenv_import_test.go",
+        "type_naming_test.go",
+        "watch_backfill_test.go",
+    ],
+    embed = [":events"],
+    deps = [
+        "//internal/events/eventstest",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

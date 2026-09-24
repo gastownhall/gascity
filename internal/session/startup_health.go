@@ -201,3 +201,19 @@ func (s *Store) SaveStartupHealthEpisode(ep StartupHealthEpisode) error {
 	}
 	return nil
 }
+
+// ListStartupHealthEpisodes returns every persisted startup-health episode,
+// including ones behind a closed bead: a doctor check surfacing active
+// episodes must not silently miss one because some other path already closed
+// its bead.
+func (s *Store) ListStartupHealthEpisodes() ([]StartupHealthEpisode, error) {
+	matches, err := s.store.List(beads.ListQuery{Type: StartupHealthEpisodeType, IncludeClosed: true})
+	if err != nil {
+		return nil, fmt.Errorf("listing startup-health episodes: %w", err)
+	}
+	episodes := make([]StartupHealthEpisode, 0, len(matches))
+	for _, b := range matches {
+		episodes = append(episodes, StartupHealthEpisodeFromMetadata(b.Metadata))
+	}
+	return episodes, nil
+}
