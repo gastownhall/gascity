@@ -125,6 +125,15 @@ func cycleAliveSessionForFreshReassign(
 	if hasCapability && newSessionKey == "" {
 		batch["session_key"] = ""
 	}
+	// The kill above already succeeded (we returned early at :109 otherwise),
+	// so the runtime this bead's metadata describes is now definitely gone.
+	// Record that unconditionally in the same patch as the mint: a phantom
+	// key nothing ever launches on is worse than a session that looks asleep
+	// for one extra tick, and ComputeAwakeSet's reset-pending desire (gated
+	// on continuation_reset_pending + reset_committed_at, both already set by
+	// RestartRequestPatch above) wakes it again on the very next tick. See
+	// ga-2fpf9z.
+	batch["state"] = string(sessionpkg.StateAsleep)
 	batch[sessionpkg.CurrentBeadIDKey] = newBeadID
 	if err := sessionFrontDoor(store).ApplyPatch(info.ID, batch); err != nil {
 		if stderr != nil {
