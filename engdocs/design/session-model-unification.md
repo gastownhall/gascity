@@ -665,7 +665,7 @@ and lifecycle semantics off `GC_SESSION_ORIGIN`, not off `GC_AGENT`.
 | Origin | `configured_named_identity` | `alias` | `session_name` | `GC_ALIAS` | `GC_AGENT` |
 |---|---|---|---|---|---|
 | `named` | present; immutable fully qualified named identity | always equals `configured_named_identity` while config-managed | deterministic runtime handle derived from the named identity and workspace naming policy | same as `alias` | same as `alias` |
-| `ephemeral` | absent | optional, mutable if non-conflicting | opaque runtime handle | alias if present | alias if present; otherwise raw `session_name`, or bead ID when name metadata is absent |
+| `ephemeral` | absent | optional, mutable if non-conflicting | opaque runtime handle | alias if present | alias if present; otherwise the session bead ID |
 | `manual` | absent | optional, mutable if non-conflicting | opaque runtime handle | alias if present | alias if present; otherwise raw `session_name`, or bead ID when name metadata is absent |
 
 Configured named sessions do not carry a second mutable runtime alias
@@ -686,8 +686,10 @@ Phase 1 `GC_AGENT` contract is exact:
 
 - `named`: identical to `GC_ALIAS`, which is the configured named
   identity
-- `ephemeral` and `manual`: `GC_ALIAS` if present, otherwise raw persisted
-  `session_name`, falling back to the session bead ID when name metadata is absent
+- `ephemeral` (and any pool-managed session, i.e. `pool_managed` or
+  `pool_slot` set): `GC_ALIAS` if present, otherwise the session bead ID
+- `manual`: `GC_ALIAS` if present, otherwise raw persisted `session_name`,
+  falling back to the session bead ID when name metadata is absent
 
 No Phase 1 path may interpret `GC_AGENT` as backing config identity,
 factory target, or durable ownership token.
@@ -703,8 +705,12 @@ select the current ownership string in this order:
 1. current `alias`
 2. `configured_named_identity` for a recovered named session whose alias is
    temporarily absent
-3. raw persisted `session_name`
-4. session bead ID when no name metadata exists
+3. session bead ID for a pool-managed or `ephemeral` session (`pool_managed`,
+   `pool_slot`, or `session_origin=ephemeral`); a pool `session_name` is a
+   reusable slot handle shared by successive occupants, and hook claims
+   already record unaliased sessions under the bead ID
+4. raw persisted `session_name`
+5. session bead ID when no name metadata exists
 
 `BEADS_ACTOR`, API assignment normalization, hook claims, and scripted claims
 must all use that selector. `GC_AGENT` mirrors the selected value only for

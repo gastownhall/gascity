@@ -2996,8 +2996,8 @@ func TestSyncSessionBeads_ClearsManagedAliasWhenRemoved(t *testing.T) {
 	for _, key := range []string{"GC_AGENT", "BEADS_ACTOR"} {
 		if got, err := sp.GetMeta("s-gc-123", key); err != nil {
 			t.Fatalf("GetMeta(%s): %v", key, err)
-		} else if got != "s-gc-123" {
-			t.Fatalf("%s = %q, want session-name fallback", key, got)
+		} else if got != all[0].ID {
+			t.Fatalf("%s = %q, want session bead id %q for an unaliased ephemeral session", key, got, all[0].ID)
 		}
 	}
 }

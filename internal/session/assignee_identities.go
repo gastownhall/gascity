@@ -46,13 +46,17 @@ func AssigneeIdentities(i Info) []string {
 	return identities
 }
 
-// isPoolManagedIdentity reports whether i is a pool-managed worker session:
-// the reconciler's own pool_managed / pool_slot / session_origin=="ephemeral"
-// markers. It is the session.Info-only subset of cmd/gc's
-// isPoolManagedSessionInfo (which additionally resolves a cfg-driven template
-// fallback) — AssigneeIdentifier has no config to resolve that fallback
-// against, and every pool-managed bead the controller creates stamps one of
-// these three markers directly, so the subset is exact for this decision.
+// isPoolManagedIdentity reports whether i carries one of the reconciler's
+// pool_managed / pool_slot / session_origin=="ephemeral" markers. It is the
+// session.Info-only subset of cmd/gc's isPoolManagedSessionInfo (which
+// additionally resolves a cfg-driven template fallback); AssigneeIdentifier
+// has no config to resolve that fallback against. Every pool-managed bead the
+// controller creates stamps one of these markers directly, so all pool
+// workers are covered. The check is intentionally broader than "pool": a
+// non-pool session stamped session_origin=ephemeral also matches, which is
+// correct because gc hook --claim records any unaliased session's claims
+// under its session bead ID. Unaliased manual sessions still fall through to
+// session_name.
 func isPoolManagedIdentity(i Info) bool {
 	if strings.TrimSpace(i.SessionOrigin) == "ephemeral" {
 		return true
@@ -65,12 +69,13 @@ func isPoolManagedIdentity(i Info) bool {
 
 // AssigneeIdentifier returns the durable agent-facing ownership identity of a
 // session: its current public alias or configured named identity always win.
-// Otherwise, an unaliased pool-managed worker claims under its unique session
-// bead ID — pool session_name is a chair reused by every occupant of a slot,
-// so stamping it as the ownership identity lets a dead occupant's claim look
-// held by whoever the controller seats there next. Non-pool sessions keep the
-// runtime session name, falling back to the bead ID when no name metadata is
-// present.
+// Otherwise, an unaliased pool-managed or ephemeral session claims under its
+// unique session bead ID: pool session_name is a chair reused by every
+// occupant of a slot, so stamping it as the ownership identity lets a dead
+// occupant's claim look held by whoever the controller seats there next, and
+// it would disagree with the bead ID gc hook --claim records. Other sessions
+// keep the runtime session name, falling back to the bead ID when no name
+// metadata is present.
 // This is the same alias-first identity RuntimeEnvWithSessionContext exposes
 // through GC_ALIAS and BEADS_ACTOR; GC_AGENT mirrors it only for compatibility.
 // Keeping API assignment normalization on this rule prevents one session from
