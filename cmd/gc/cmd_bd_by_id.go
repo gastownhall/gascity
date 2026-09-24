@@ -437,7 +437,9 @@ var bdByIDUpdateValueFlags = map[string]bool{
 }
 
 // bdByIDUpdateUnrepresentable explains the rejection an operator is most likely
-// to hit, because the core pack writes it.
+// to hit, because the core pack's step-completion close writes it on
+// "$GC_BEAD_ID" (and its drain ack on "$DRAIN_BEAD_ID"). Core-pack writes to a
+// work bead use --append-notes instead, which is refused here the same way.
 //
 // beads.Bead has no notes field and beads.UpdateOpts has no notes write: notes
 // are outside gc's object model entirely, and `gc bd update --notes` works on an
