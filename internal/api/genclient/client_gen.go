@@ -34484,6 +34484,8 @@ type PatchV0CityByCityNameBeadByIdResponse struct {
 	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+	ApplicationproblemJSON504 *ErrorModel
 }
 
 // Status returns HTTPResponse.Status
@@ -34623,6 +34625,8 @@ type PostV0CityByCityNameBeadByIdUpdateResponse struct {
 	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+	ApplicationproblemJSON504 *ErrorModel
 }
 
 // Status returns HTTPResponse.Status
@@ -41477,6 +41481,20 @@ func ParsePatchV0CityByCityNameBeadByIdResponse(rsp *http.Response) (*PatchV0Cit
 		}
 		response.ApplicationproblemJSON500 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 504:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON504 = &dest
+
 	}
 
 	return response, nil
@@ -41809,6 +41827,20 @@ func ParsePostV0CityByCityNameBeadByIdUpdateResponse(rsp *http.Response) (*PostV
 			return nil, err
 		}
 		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 504:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON504 = &dest
 
 	}
 

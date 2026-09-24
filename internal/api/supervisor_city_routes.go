@@ -211,8 +211,8 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/bead/{id}/deps", (*Server).humaHandleBeadDeps, errorStatuses(http.StatusNotFound))
 	cityPost(sm, "/bead/{id}/close", (*Server).humaHandleBeadClose, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
 	cityPost(sm, "/bead/{id}/reopen", (*Server).humaHandleBeadReopen, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
-	cityPost(sm, "/bead/{id}/update", (*Server).humaHandleBeadUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
-	cityPatch(sm, "/bead/{id}", (*Server).humaHandleBeadUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
+	cityPost(sm, "/bead/{id}/update", (*Server).humaHandleBeadUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable, http.StatusGatewayTimeout), describes(beadUpdateDescription))
+	cityPatch(sm, "/bead/{id}", (*Server).humaHandleBeadUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable, http.StatusGatewayTimeout), describes(beadUpdateDescription))
 	cityPost(sm, "/bead/{id}/assign", (*Server).humaHandleBeadAssign, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
 	cityDelete(sm, "/bead/{id}", (*Server).humaHandleBeadDelete, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict),
 		describes("Closes the bead. This is a soft delete: the bead remains readable and retains its history, with status \"closed\". The API exposes no hard delete, so a caller that needs the record actually removed must not rely on this endpoint."))
