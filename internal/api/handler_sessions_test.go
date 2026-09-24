@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -8448,5 +8450,41 @@ func TestSessionMessageAndSubmitRejectAmbiguousTargetWith409(t *testing.T) {
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("%s status = %d, want %d (409 for ambiguous target); body=%s", path, rec.Code, http.StatusConflict, rec.Body.String())
 		}
+	}
+}
+
+// TestResolveSessionIDMaterializingNamedRefusesASuspendedAgent: the API
+// resolver is the path `gc session submit` and every supervisor-side wake take
+// first, so it must refuse to materialize a suspended agent's named session
+// exactly as the CLI resolver does — no bead, no runtime start, and an error
+// that maps to a truthful 409 rather than a 500 (gc-gtg3).
+func TestResolveSessionIDMaterializingNamedRefusesASuspendedAgent(t *testing.T) {
+	fs := newSessionFakeState(t)
+	base := "builtin:claude"
+	fs.cfg.Agents = []config.Agent{{
+		Name:              "worker",
+		Dir:               "myrig",
+		Provider:          "claude-max",
+		MaxActiveSessions: intPtr(1),
+		Suspended:         true,
+	}}
+	fs.cfg.Providers = map[string]config.ProviderSpec{
+		"claude-max": {Base: &base, PathCheck: "true"},
+	}
+	srv := New(fs)
+
+	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "myrig/worker")
+	if !errors.Is(err, errConfiguredNamedSessionSuspended) {
+		t.Fatalf("resolveSessionIDMaterializingNamed(myrig/worker) = (%q, %v), want errConfiguredNamedSessionSuspended", id, err)
+	}
+	all, listErr := fs.cityBeadStore.List(beads.ListQuery{Type: "gc:session", AllowScan: true})
+	if listErr != nil {
+		t.Fatalf("List: %v", listErr)
+	}
+	if len(all) != 0 || len(fs.sp.Calls) != 0 {
+		t.Fatalf("refused materialization left %d session beads and %d runtime calls, want none: %#v", len(all), len(fs.sp.Calls), fs.sp.Calls)
+	}
+	if herr, ok := humaResolveError(err).(huma.StatusError); !ok || herr.GetStatus() != http.StatusConflict {
+		t.Fatalf("humaResolveError(%v) = %v, want a 409", err, humaResolveError(err))
 	}
 }

@@ -1225,3 +1225,28 @@ func TestExecutionClaimStalledStaysOffTheExportAllowlist(t *testing.T) {
 		t.Fatal("execution.claim_stalled is on the redacted-export allowlist; that is an egress-surface change and needs its own review")
 	}
 }
+
+// TestSeatClaimBackstopLeavesASuspendedSeatAlone: a suspended agent is parked on
+// purpose. Its open routed work is real, but the lane must not govern the seat
+// at all — no grace clock, no marker, no nudge — or the operator's suspension
+// is undone every tick (gc-gtg3).
+func TestSeatClaimBackstopLeavesASuspendedSeatAlone(t *testing.T) {
+	f := newClaimBackstopFixture(t)
+	f.cfg.Agents[0].Suspended = true
+	f.idleFor(t, 10*time.Minute)
+
+	f.tick(t)
+	f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+
+	if got := f.nudgeCount(); got != 0 {
+		t.Fatalf("nudges on a suspended seat = %d, want 0; stdout=%s", got, f.stdout.String())
+	}
+	if got := f.sessionMeta(t, seatClaimNudgeWorkKey); got != "" {
+		t.Fatalf("persisted work marker on a suspended seat = %q, want none", got)
+	}
+	if got := f.sessionMeta(t, seatClaimNudgeCountKey); got != "" {
+		t.Fatalf("persisted attempt count on a suspended seat = %q, want none", got)
+	}
+}

@@ -225,6 +225,8 @@ func writeResolveError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, session.ErrAmbiguous), errors.Is(err, errConfiguredNamedSessionConflict):
 		writeError(w, http.StatusConflict, "ambiguous", err.Error())
+	case errors.Is(err, errConfiguredNamedSessionSuspended):
+		writeError(w, http.StatusConflict, "suspended", err.Error())
 	case errors.Is(err, session.ErrSessionNotFound):
 		writeError(w, http.StatusNotFound, "not_found", err.Error())
 	default:

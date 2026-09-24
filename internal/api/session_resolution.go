@@ -25,7 +25,10 @@ const (
 
 var (
 	errConfiguredNamedSessionConflict = errors.New("configured named session conflict")
-	errSessionTargetRejectedByConfig  = errors.New("session target rejected by config")
+	// errConfiguredNamedSessionSuspended reports a configured named session
+	// whose agent is suspended, so the session must not be materialized.
+	errConfiguredNamedSessionSuspended = errors.New("configured named session suspended")
+	errSessionTargetRejectedByConfig   = errors.New("session target rejected by config")
 )
 
 type apiSessionTargetNotFoundError struct {
@@ -228,6 +231,12 @@ func (s *Server) resolveConfiguredNamedSessionIDWithContext(ctx context.Context,
 	}
 	if lookup.HasCanonical {
 		return lookup.Canonical.ID, true, nil
+	}
+	// A live session still resolves above, but nothing is created on behalf of
+	// a suspended agent: the operator parked it, and a wake must not un-park
+	// it. Same gate as the CLI resolver (cmd/gc/session_resolve.go).
+	if opts.materialize && spec.Agent != nil && spec.Agent.Suspended {
+		return "", true, fmt.Errorf("%w: agent %q for %q is suspended; resume it before waking", errConfiguredNamedSessionSuspended, spec.Agent.QualifiedName(), identifier)
 	}
 	if lookup.HasConflict {
 		return "", true, fmt.Errorf("%w: %q conflicts with configured named session %q via live bead %s", errConfiguredNamedSessionConflict, identifier, spec.Identity, lookup.Conflict.ID)

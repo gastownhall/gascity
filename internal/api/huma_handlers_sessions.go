@@ -26,6 +26,8 @@ func humaResolveError(err error) error {
 	switch {
 	case errors.Is(err, session.ErrAmbiguous), errors.Is(err, errConfiguredNamedSessionConflict):
 		return apierr.SessionConflict.Msg("ambiguous: " + err.Error())
+	case errors.Is(err, errConfiguredNamedSessionSuspended):
+		return apierr.SessionConflict.Msg("suspended: " + err.Error())
 	case errors.Is(err, session.ErrSessionNotFound):
 		return apierr.SessionNotFound.Msg("not_found: " + err.Error())
 	default:

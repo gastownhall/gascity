@@ -1233,3 +1233,80 @@ func TestResolveSessionIDMaterializingNamed_NilStderrDoesNotPanic(t *testing.T) 
 		t.Fatalf("got %q, want canonical %q", id, canonical.ID)
 	}
 }
+
+// TestResolveSessionIDMaterializingNamed_RefusesASuspendedAgent: a suspended
+// agent's configured named session must not be materialized. A `gc mail send`
+// wake (notify-on by default) to a parked seat otherwise re-creates the very
+// session the operator suspended (gc-gtg3). The store must stay free of session
+// beads and the error must name the suspension so the mail path reports it
+// rather than "not found".
+func TestResolveSessionIDMaterializingNamed_RefusesASuspendedAgent(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+
+	store := beads.NewMemStore()
+	cfg := suspendedNamedSeatConfig()
+
+	id, err := resolveSessionIDMaterializingNamed(t.TempDir(), cfg, store, "named-seat")
+	if !errors.Is(err, errNamedSessionSuspended) {
+		t.Fatalf("resolveSessionIDMaterializingNamed(named-seat) = (%q, %v), want errNamedSessionSuspended", id, err)
+	}
+	if !strings.Contains(err.Error(), "named-seat") {
+		t.Fatalf("error %q does not name the suspended session", err)
+	}
+	all, listErr := store.List(beads.ListQuery{Type: sessionBeadType, AllowScan: true})
+	if listErr != nil {
+		t.Fatalf("store.List: %v", listErr)
+	}
+	if len(all) != 0 {
+		t.Fatalf("session beads after a refused materialization = %d, want 0: %+v", len(all), all)
+	}
+}
+
+// TestResolveSessionIDMaterializingNamed_StillResolvesASuspendedAgentsLiveBead
+// pins the boundary of the refusal: it covers bead creation and reopening
+// only. An existing canonical bead of a suspended agent still resolves, so a
+// running or stopped seat stays addressable; whether the caller may then
+// restart it is that caller's decision, not the resolver's.
+func TestResolveSessionIDMaterializingNamed_StillResolvesASuspendedAgentsLiveBead(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+
+	store := beads.NewMemStore()
+	cfg := suspendedNamedSeatConfig()
+	existing, err := store.Create(beads.Bead{
+		Title:  "named-seat",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"template":                   "named-seat",
+			"alias":                      "named-seat",
+			"session_name":               "test-city--named-seat",
+			"state":                      "stopped",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "named-seat",
+		},
+	})
+	if err != nil {
+		t.Fatalf("seeding the canonical bead: %v", err)
+	}
+
+	id, err := resolveSessionIDMaterializingNamed(t.TempDir(), cfg, store, "named-seat")
+	if err != nil || id != existing.ID {
+		t.Fatalf("resolveSessionIDMaterializingNamed(named-seat) = (%q, %v), want (%q, nil)", id, err, existing.ID)
+	}
+}
+
+// suspendedNamedSeatConfig is a city with one configured named seat whose
+// backing agent is suspended.
+func suspendedNamedSeatConfig() *config.City {
+	return &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "named-seat",
+			StartCommand: "true",
+			Suspended:    true,
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "named-seat",
+		}},
+	}
+}

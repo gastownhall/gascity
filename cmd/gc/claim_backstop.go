@@ -486,11 +486,18 @@ type seatClaimBackstop struct {
 // dependency gate (ensureDependencyOnlyTemplate, build_desired_state.go) rather
 // than to serve a work binding, so an open row that merely carries its slot
 // identity is not evidence it was handed anything to start.
+//
+// A seat whose agent is suspended is excluded for the same reason the
+// desired-state build and the reconciler's pending-create gate skip it: the
+// operator parked it on purpose, and a nudge every tick would undo that.
 func (p seatClaimBackstop) governs(s beads.Bead) bool {
 	if isManualSessionBead(s) {
 		return false
 	}
 	if strings.TrimSpace(s.Metadata["dependency_only"]) == "true" {
+		return false
+	}
+	if agent := findAgentByTemplate(p.cfg, normalizedSessionTemplate(s, p.cfg)); agent != nil && agent.Suspended {
 		return false
 	}
 	return strings.TrimSpace(s.Metadata["pool_managed"]) == "true" || isNamedSessionBead(s)
