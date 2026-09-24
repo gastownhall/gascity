@@ -14,8 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -157,6 +159,18 @@ func initCityWithManagedDoltRecovery(t *testing.T, env []string, configPath, cit
 	}
 }
 
+// isProviderOwnedProxiedDoltCity reports whether cityDir's beads store is in
+// provider-owned proxied mode (dolt_mode == "proxied-server" in
+// .beads/metadata.json). Any read or parse error resolves to false: this
+// helper must never fail the caller's wait loop.
+func isProviderOwnedProxiedDoltCity(cityDir string) bool {
+	mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, filepath.Join(cityDir, ".beads", "metadata.json"))
+	if err != nil || !ok {
+		return false
+	}
+	return mode == "proxied-server"
+}
+
 func waitForManagedDoltCityReady(env []string, cityDir string, timeout time.Duration) (string, error) {
 	deadline := time.Now().Add(timeout)
 	var (
@@ -178,6 +192,23 @@ func waitForManagedDoltCityReady(env []string, cityDir string, timeout time.Dura
 				"GC_CITY_RUNTIME_DIR="+filepath.Join(cityDir, ".gc", "runtime"),
 			)
 			probeEnv = appendManagedDoltEndpointEnv(probeEnv, port)
+			lastOut, lastErr = runCommand(cityDir, probeEnv, integrationBDCommandTimeout, bdBinary, "list", "--all", "--json", "--limit=0")
+			if lastErr == nil {
+				return lastOut, nil
+			}
+		} else if isProviderOwnedProxiedDoltCity(cityDir) {
+			probeEnv := filterEnvMany(env,
+				"GC_CITY",
+				"GC_CITY_PATH",
+				"GC_CITY_ROOT",
+				"GC_CITY_RUNTIME_DIR",
+				"GC_DOLT_PORT",
+			)
+			probeEnv = append(probeEnv,
+				"GC_CITY="+cityDir,
+				"GC_CITY_PATH="+cityDir,
+				"GC_CITY_RUNTIME_DIR="+filepath.Join(cityDir, ".gc", "runtime"),
+			)
 			lastOut, lastErr = runCommand(cityDir, probeEnv, integrationBDCommandTimeout, bdBinary, "list", "--all", "--json", "--limit=0")
 			if lastErr == nil {
 				return lastOut, nil
@@ -297,12 +328,21 @@ func TestWaitForManagedDoltCityReady_ProxiedModeSurfacesProbeError(t *testing.T)
 	bdBinary = fakeBD
 	t.Cleanup(func() { bdBinary = prevBDBinary })
 
-	_, err := waitForManagedDoltCityReady(nil, cityDir, 1200*time.Millisecond)
+	out, err := waitForManagedDoltCityReady(nil, cityDir, 1200*time.Millisecond)
 	if err == nil {
 		t.Fatal("waitForManagedDoltCityReady() error = nil, want the probe's own failure surfaced")
 	}
-	if !strings.Contains(err.Error(), "boom: no proxied endpoint configured") {
-		t.Errorf("waitForManagedDoltCityReady() error = %q, want it to surface the bd probe's own failure instead of the generic timeout message", err.Error())
+	// runCommand (unlike runCommandStdout) does not fold stderr into the
+	// returned error -- it returns the raw exec error ("exit status 1") and
+	// merges stdout+stderr into out via CombinedOutput. So "surfaces the
+	// probe's own failure" means: the generic loop-timeout message must not
+	// win (lastErr must be non-nil from the probe), and the probe's stderr
+	// text must be observable in out.
+	if strings.Contains(err.Error(), "timed out after") {
+		t.Errorf("waitForManagedDoltCityReady() error = %q, want the probe's own exec error, not the generic loop-timeout message", err.Error())
+	}
+	if !strings.Contains(out, "boom: no proxied endpoint configured") {
+		t.Errorf("waitForManagedDoltCityReady() out = %q, want it to contain the probe's own stderr output", out)
 	}
 }
 
