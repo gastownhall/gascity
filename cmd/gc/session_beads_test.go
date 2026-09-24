@@ -3759,7 +3759,7 @@ func TestSyncSessionBeads_FinalizesPoolSessionNameUnderAliasLock(t *testing.T) {
 	if len(all) != 1 {
 		t.Fatalf("session bead count = %d, want 1", len(all))
 	}
-	if got, want := all[0].Metadata["session_name"], poolIdentitySessionName(alias, template); got != want {
+	if got, want := all[0].Metadata["session_name"], PoolSessionName(template, all[0].ID); got != want {
 		t.Fatalf("session_name = %q, want %q", got, want)
 	}
 }

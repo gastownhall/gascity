@@ -278,6 +278,11 @@ type startResult struct {
 	// configured named session's pending-create should be preserved for a
 	// retry instead of destructively closed" (ga-pmafyc rounds 4 and 5).
 	diedDuringStartup bool
+	// provider is the runtime provider the start ran against. commitStartFailure
+	// uses it to tear down a bead-scoped pool runtime before rolling its row
+	// back (releaseBeadScopedPoolRuntime). Nil on test-built results, which
+	// keeps their rollback behavior unchanged.
+	provider runtime.Provider
 	// phases captures sub-phase wall-clock so the lifecycle log can pinpoint
 	// where a slow start spent its time. See gc-67o for context.
 	phases startPhaseTimings
@@ -1781,6 +1786,7 @@ func runPreparedStartCandidate(
 		rollbackPending:   rollbackPending,
 		rateLimitScreen:   rateLimitScreen,
 		diedDuringStartup: diedDuringStartup,
+		provider:          sp,
 		phases:            phases,
 	}
 }
@@ -2454,10 +2460,10 @@ func commitStartResultTraced(
 	// episode for this session name (ga-o04bfr.1.1). Skipped when there is
 	// nothing to clear so a healthy session's first-ever start does not mint
 	// a startup-health-episode bead it will never need.
-	if prior, loadErr := sessFront.LoadStartupHealthEpisode(name); loadErr != nil {
+	if prior, loadErr := sessFront.LoadStartupHealthEpisode(startupHealthEpisodeKey(info, name)); loadErr != nil {
 		fmt.Fprintf(stderr, "session reconciler: loading startup-health episode for %s: %v\n", name, loadErr) //nolint:errcheck
 	} else if prior.ConsecutiveCount != 0 || !prior.QuarantinedUntil.IsZero() {
-		cleared := sessionpkg.ClearStartupHealthEpisode(name)
+		cleared := sessionpkg.ClearStartupHealthEpisode(startupHealthEpisodeKey(info, name))
 		if saveErr := sessFront.SaveStartupHealthEpisode(cleared); saveErr != nil {
 			fmt.Fprintf(stderr, "session reconciler: clearing startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
 		}
@@ -2504,6 +2510,16 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	tp := result.prepared.candidate.tp
 	fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
 	if reason := runtime.ProviderTerminalErrorReason(result.err.Error()); reason != "" {
+		if result.rollbackPending && !releaseBeadScopedPoolRuntime(info, result.provider, stderr) {
+			// The runtime teardown could not be confirmed, so the row must stay
+			// OPEN in its pending-create state: marking the terminal error would
+			// park it asleep with its claim cleared, where neither reconciler
+			// rollback path retries the teardown and the box is unaddressable
+			// once the row later closes. The lease-expired pending-create
+			// rollback retries the teardown and closes it (ga-vcjr9).
+			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
+			return
+		}
 		// This runs on the async start goroutine, and this failure arm is terminal
 		// (logs + returns), so the write-returns-Info fold is discarded — never assign
 		// it back into infoByID (the tick's map, out of scope here). The persist still
@@ -2518,6 +2534,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 			})
 		}
 		if result.rollbackPending {
+			// The runtime was already torn down (or is not bead-scoped) above.
 			rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
@@ -2569,10 +2586,11 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 				"error": formatLifecycleError(result.err),
 			})
 		}
-		if prior, loadErr := sessFront.LoadStartupHealthEpisode(name); loadErr != nil {
+		episodeKey := startupHealthEpisodeKey(info, name)
+		if prior, loadErr := sessFront.LoadStartupHealthEpisode(episodeKey); loadErr != nil {
 			fmt.Fprintf(stderr, "session reconciler: loading startup-health episode for %s: %v\n", name, loadErr) //nolint:errcheck
 		} else {
-			prior.SessionName = name
+			prior.SessionName = episodeKey
 			kind := sessionpkg.FailureKindOther
 			if errors.Is(result.err, context.DeadlineExceeded) {
 				kind = sessionpkg.FailureKindTimeout
@@ -2595,7 +2613,9 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 			// here: it actually launched and exited, so the stale pending-create
 			// must clear for a fresh attempt next tick, matching base's fast
 			// recovery — see TestGastown_Reconciler_SessionRestartsAfterExit.
-			rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
+			if releaseBeadScopedPoolRuntime(info, result.provider, stderr) {
+				rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
+			}
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 		return
@@ -2903,6 +2923,56 @@ func rollbackPendingCreateClears(info sessionpkg.Info, sessFront *sessionpkg.Sto
 		batch[k] = v
 	}
 	return batch, true
+}
+
+// startupHealthEpisodeKey is the key a session's startup-health episode
+// (ga-o04bfr.1.1) accrues under. It is the runtime session name, except for a
+// pool row with a bead-ID-scoped name: every failed create of such a slot is a
+// new bead and so a new name, which would reset the episode on each attempt and
+// disarm the retry-storm quarantine. Those rows key on their stable pool
+// identity instead (the identity-derived name plus the "-pool" suffix, so it
+// cannot collide with a configured named session's own runtime name).
+func startupHealthEpisodeKey(info sessionpkg.Info, name string) string {
+	if !isPoolManagedSessionInfo(info) || !infoOwnsPoolSessionName(info) {
+		return name
+	}
+	agentName := strings.TrimSpace(info.AgentName)
+	if agentName == "" {
+		return name
+	}
+	return boundSessionNameLength(poolIdentitySessionName(agentName, info.Template) + poolRuntimeNameSuffix)
+}
+
+// releaseBeadScopedPoolRuntime tears down the runtime a pool row with a
+// bead-ID-scoped name (PoolSessionName(template, beadID)) may have left behind,
+// and reports whether the row may now be closed.
+//
+// This is the ga-vcjr9 leak guard for bead-scoped names. A failed pool create is
+// closed and the slot is re-minted as a NEW bead, so a NEW runtime name; any box
+// the failed attempt left behind (a provider whose own start-failure cleanup
+// did not run or did not succeed, or a start that gc judged failed after the
+// provider returned) would otherwise never be addressed again. Tearing it down
+// by name before the close, and holding the row OPEN when that teardown cannot
+// be confirmed, keeps every slot at <=1 live runtime: the open row keeps the
+// slot's identity lease (ensurePoolIdentityNotHeldByOpenRow) and occupies its
+// slot, so no successor can be minted, and the level-triggered pending-create
+// rollback retries the teardown next tick.
+//
+// Stopping by name is unconditionally safe here: the name embeds this row's
+// bead ID, so no other session can own it. Rows with any other name shape
+// (named sessions, tmux_alias pools, legacy identity-derived names) re-target
+// the same name on retry and are left to the existing provider-level cleanup.
+// A nil provider (test-built results) keeps the previous close-only behavior.
+func releaseBeadScopedPoolRuntime(info sessionpkg.Info, sp runtime.Provider, stderr io.Writer) bool {
+	if sp == nil || !isPoolManagedSessionInfo(info) || !infoOwnsPoolSessionName(info) {
+		return true
+	}
+	name := strings.TrimSpace(info.SessionNameMetadata)
+	if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
+		fmt.Fprintf(stderr, "session reconciler: holding pool session %s open: tearing down runtime %q before rollback: %v\n", info.ID, name, err) //nolint:errcheck
+		return false
+	}
+	return true
 }
 
 // rollbackPendingCreate returns the metadata batch it mirrored onto the raw bead
