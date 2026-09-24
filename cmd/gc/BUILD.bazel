@@ -660,6 +660,7 @@ go_test(
         "bead_policy_store_conditional_test.go",
         "bead_policy_store_conformance_test.go",
         "bead_policy_store_graph_ready_test.go",
+        "bead_policy_store_parent_projection_test.go",
         "bead_policy_store_test.go",
         "bead_worktree_liveness_discovery_test.go",
         "bead_worktree_liveness_fallback_test.go",

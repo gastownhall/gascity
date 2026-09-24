@@ -51,10 +51,12 @@ var (
 func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
 
 var (
-	_ beads.BatchDeleter      = (*beadPolicyStore)(nil)
-	_ beads.BatchDeleter      = (*beadPolicyGraphStore)(nil)
-	_ beads.DepMetadataReader = (*beadPolicyStore)(nil)
-	_ beads.DepMetadataReader = (*beadPolicyGraphStore)(nil)
+	_ beads.BatchDeleter           = (*beadPolicyStore)(nil)
+	_ beads.BatchDeleter           = (*beadPolicyGraphStore)(nil)
+	_ beads.DepMetadataReader      = (*beadPolicyStore)(nil)
+	_ beads.DepMetadataReader      = (*beadPolicyGraphStore)(nil)
+	_ beads.ParentProjectionWaiter = (*beadPolicyStore)(nil)
+	_ beads.ParentProjectionWaiter = (*beadPolicyGraphStore)(nil)
 )
 
 func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
@@ -174,6 +176,17 @@ func (s *beadPolicyStore) DeleteBatch(ids []string) error {
 		return beads.ErrBatchDeleteUnsupported
 	}
 	return deleter.DeleteBatch(ids)
+}
+
+// WaitForParentProjection preserves the wrapped store's optional projection
+// wait. An inner store without that capability keeps the existing no-wait
+// behavior. beadPolicyGraphStore inherits this method through its embedding.
+func (s *beadPolicyStore) WaitForParentProjection(ctx context.Context, id, oldParentID, newParentID string) error {
+	waiter, ok := s.Store.(beads.ParentProjectionWaiter)
+	if !ok {
+		return nil
+	}
+	return waiter.WaitForParentProjection(ctx, id, oldParentID, newParentID)
 }
 
 var (
