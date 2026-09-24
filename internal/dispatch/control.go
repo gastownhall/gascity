@@ -135,7 +135,11 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 		return ensurePendingAttemptConverges(store, bead, attempt, strategy, opts)
 	}
 
-	attemptNum, _ := strconv.Atoi(attempt.Metadata[beadmeta.AttemptMetadataKey])
+	// A retry attempt counts in gc.retry_attempt; a ralph iteration root never
+	// carries that key, so it falls back to gc.attempt, which there IS the
+	// iteration. RetryAttemptNumber encodes both, plus the legacy fallback for
+	// retry attempts minted before the key existed.
+	attemptNum := beadmeta.RetryAttemptNumber(attempt.Metadata)
 	eval, err := strategy.evaluate(store, bead, attempt, attemptNum, opts)
 	if err != nil {
 		return ControlResult{}, err
@@ -158,6 +162,7 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 		if strategy.onPass != nil {
 			strategy.onPass(closeMetadata, attempt)
 		}
+		restoreBodyMemberAttempt(closeMetadata, bead)
 		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed: %w", bead.ID, err)
 		}
@@ -222,6 +227,21 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 	default:
 		return ControlResult{}, fmt.Errorf("%s: unsupported attempt disposition", bead.ID)
 	}
+}
+
+// restoreBodyMemberAttempt repairs gc.attempt on a ralph body control minted by
+// a v1.5.0 pre-release, which stamped the control's own retry counter ("1")
+// there instead of the iteration. Pack gates read the passed control's verdict
+// joined on gc.attempt == iteration, so leaving it would stall that one
+// in-flight iteration. A control that carries no gc.iteration is not in a loop
+// (or predates gc.iteration, where gc.attempt already is the iteration) and is
+// left alone.
+func restoreBodyMemberAttempt(closeMetadata map[string]string, control beads.Bead) {
+	iteration := strings.TrimSpace(control.Metadata[beadmeta.IterationMetadataKey])
+	if iteration == "" || strings.TrimSpace(control.Metadata[beadmeta.AttemptMetadataKey]) == iteration {
+		return
+	}
+	closeMetadata[beadmeta.AttemptMetadataKey] = iteration
 }
 
 // ensurePendingAttemptConverges drives a not-yet-closed attempt toward
@@ -330,8 +350,8 @@ func syncControlEpochToAttempt(store beads.Store, control, attempt beads.Bead) e
 	if err != nil || current < 1 {
 		return nil
 	}
-	attemptNum, err := strconv.Atoi(strings.TrimSpace(attempt.Metadata[beadmeta.AttemptMetadataKey]))
-	if err != nil || attemptNum <= current {
+	attemptNum := beadmeta.RetryAttemptNumber(attempt.Metadata)
+	if attemptNum <= current {
 		return nil
 	}
 	writer, _, resolveErr := beads.ResolveConditionalWriter(store)
@@ -864,6 +884,11 @@ func applyRalphBodyChildControls(childMeta map[string]string, step, child *formu
 		return
 	}
 	childMeta[beadmeta.AttemptMetadataKey] = formula.RalphBodyChildAttempt(child, attemptNum)
+	if retryAttempt := formula.RalphBodyChildRetryAttempt(child); retryAttempt != "" {
+		childMeta[beadmeta.RetryAttemptMetadataKey] = retryAttempt
+	} else {
+		delete(childMeta, beadmeta.RetryAttemptMetadataKey)
+	}
 	// Same S38 rewrite namespaceRalphBodySteps applies at compile time, extended
 	// to the shape it missed. A frozen ralph body arrives already retry-expanded,
 	// so a nested control's attempt root carries gc.control_for as the BARE child
@@ -932,7 +957,6 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		rootMeta[k] = v
 	}
 	rootMeta[beadmeta.KindMetadataKey] = rootKind
-	rootMeta[beadmeta.AttemptMetadataKey] = strconv.Itoa(attemptNum)
 	rootMeta[beadmeta.StepIDMetadataKey] = stepID
 	rootMeta[beadmeta.StepRefMetadataKey] = attemptPrefix
 	// gc.control_for is the durable lineage pointer back to the control bead.
@@ -951,6 +975,16 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 	// exempted as a retry attempt. See gc-yydp6f.
 	rootMeta[beadmeta.LogicalBeadIDMetadataKey] = control.ID
 	setIterationMetadata(rootMeta, iteration)
+	// Counters are written after gc.iteration so StampRetryAttempt can see it.
+	// A ralph iteration root counts iterations in gc.attempt and has no retry
+	// counter; a retry attempt root counts in gc.retry_attempt and keeps the
+	// enclosing iteration (if any) in gc.attempt.
+	if step.Ralph != nil {
+		rootMeta[beadmeta.AttemptMetadataKey] = strconv.Itoa(attemptNum)
+		delete(rootMeta, beadmeta.RetryAttemptMetadataKey)
+	} else {
+		beadmeta.StampRetryAttempt(rootMeta, attemptNum)
+	}
 	if step.OnComplete != nil {
 		rootMeta[beadmeta.OutputJSONRequiredMetadataKey] = "true"
 	}
@@ -1772,7 +1806,7 @@ func latestAttemptFromCandidates(control beads.Bead, candidates []beads.Bead) be
 		if cf == "" {
 			continue
 		}
-		attemptNum, _ := strconv.Atoi(b.Metadata[beadmeta.AttemptMetadataKey])
+		attemptNum := beadmeta.RetryAttemptNumber(b.Metadata)
 		switch {
 		case precise[cf]:
 			if attemptNum > preciseAttempt {
@@ -1927,7 +1961,7 @@ func latestAttemptFromCandidatesLegacyRefSurgery(control beads.Bead, candidates 
 			continue
 		}
 
-		attemptNum, _ := strconv.Atoi(b.Metadata[beadmeta.AttemptMetadataKey])
+		attemptNum := beadmeta.RetryAttemptNumber(b.Metadata)
 		if attemptNum > latestAttempt {
 			latestAttempt = attemptNum
 			latest = b
