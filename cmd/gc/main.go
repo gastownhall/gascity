@@ -1615,8 +1615,14 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 // one-shot CLI invocation whose cfg it loaded itself moments ago. On top of
 // the shared path's reuse it also skips the bd provider's city-scope reload
 // (issue prefix, store options): that reload stays on the shared path because
-// long-lived callers (the order dispatcher from the controller tick and the
-// API webhook handler) pass a cfg that can be stale, or an empty stand-in.
+// the shared path is what every caller NOT converted to a one-shot entry point
+// still uses, and it must stay safe for the long-lived ones among them (the
+// order dispatcher from the controller tick and the API webhook handler), which
+// pass a cfg that can be stale, or an empty stand-in. The rest of that
+// population is one-shot and keeps paying the reload: gc bd's store-scope probe
+// and its two direct opens, plus the gc bd close work-record gate. Converting
+// those is deliberately out of scope here, so do not read the shared path's
+// remaining callers as long-lived-only.
 // Nothing enforces that cfg is fresh; the one-shot entry points
 // (openCityStoreAtWithConfig, oneShotRigStoreOpener) are the only callers.
 func openOneShotStoreAtForCityWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
@@ -1817,8 +1823,12 @@ func resolveStoreScopeRoot(cityPath, storePath string) string {
 // openBdStoreAtWithConfig opens the bd-backed store at storePath for a city.
 // A rig scope reuses a supplied cfg (a nil config is loaded here). The city
 // scope always reloads config from disk for the issue prefix and store
-// options: this is the shared open path, and long-lived callers (order
-// dispatch, API) can hand it a stale or empty cfg. One-shot callers go through
+// options: this is the shared open path, taken by every caller not converted
+// to a one-shot entry point, and its long-lived callers (order dispatch, API)
+// can hand it a stale or empty cfg. Unconverted one-shot callers are on it too
+// and still pay that reload — gc bd's store-scope probe and its two direct
+// opens, and the gc bd close work-record gate — and converting them is out of
+// scope here. CONVERTED one-shot callers go through
 // openOneShotBdStoreAtWithConfig instead.
 func openBdStoreAtWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
 	return openBdStoreAtScoped(storePath, cityPath, cfg, false)

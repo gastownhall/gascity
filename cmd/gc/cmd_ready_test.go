@@ -1223,30 +1223,36 @@ func assertEveryLegAskedForTheFederatedTier(t *testing.T, surface string, legs i
 	}
 }
 
-// readyCountedRigNames are the bound rigs of the load-count fixture. Three is
-// enough to tell "once per invocation" from "once per rig" apart.
+// readyCountedRigNames are the bound rigs of the load-count fixture by default.
+// Three is enough to tell "once per invocation" from "once per rig" apart. Pass
+// an explicit list to newReadyCityWithRigs to vary the count; this stays a
+// read-only default so no test has to rebind it.
 var readyCountedRigNames = []string{"alpha", "beta", "gamma"}
 
-// newReadyCityWithRigs writes a real on-disk file-provider city with every rig
-// in readyCountedRigNames bound and openable, left ambient (GC_CITY) the way
-// newReadyCityWithBrokenRig leaves its city. The last rig's path is written
-// relative to the city so config loading's rig-path normalisation is part of
-// what the load-count tests exercise. One agent template ("worker") lets the
-// session-close and drain-ack tests resolve a session bead.
-func newReadyCityWithRigs(t *testing.T) string {
+// newReadyCityWithRigs writes a real on-disk file-provider city with each rig in
+// rigNames bound and openable, defaulting to readyCountedRigNames when none are
+// given, left ambient (GC_CITY) the way newReadyCityWithBrokenRig leaves its
+// city. The last rig's path is written relative to the city so config loading's
+// rig-path normalisation is part of what the load-count tests exercise. One
+// agent template ("worker") lets the session-close and drain-ack tests resolve a
+// session bead.
+func newReadyCityWithRigs(t *testing.T, rigNames ...string) string {
 	t.Helper()
+	if len(rigNames) == 0 {
+		rigNames = readyCountedRigNames
+	}
 	cityDir := t.TempDir()
 	var cityToml strings.Builder
 	cityToml.WriteString("[workspace]\nname = \"readycounted\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n[[agent]]\nname = \"worker\"\nstart_command = \"true\"\nmax_active_sessions = 1\n")
-	rigDirs := make([]string, 0, len(readyCountedRigNames))
-	for i, name := range readyCountedRigNames {
+	rigDirs := make([]string, 0, len(rigNames))
+	for i, name := range rigNames {
 		dir := filepath.Join(cityDir, "rigs", name)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatalf("creating rig dir %s: %v", dir, err)
 		}
 		rigDirs = append(rigDirs, dir)
 		tomlPath := dir
-		if i == len(readyCountedRigNames)-1 {
+		if i == len(rigNames)-1 {
 			tomlPath = filepath.Join("rigs", name)
 		}
 		cityToml.WriteString("\n[[rigs]]\nname = " + strconv.Quote(name) + "\npath = " + strconv.Quote(tomlPath) + "\n")
@@ -1430,11 +1436,7 @@ func TestSessionCloseRigLegsReuseLoadedConfig(t *testing.T) {
 // command performed.
 func sessionCloseConfigLoads(t *testing.T, rigNames []string) int64 {
 	t.Helper()
-	prevNames := readyCountedRigNames
-	readyCountedRigNames = rigNames
-	defer func() { readyCountedRigNames = prevNames }()
-
-	cityDir := newReadyCityWithRigs(t)
+	cityDir := newReadyCityWithRigs(t, rigNames...)
 	t.Setenv("GC_DIR", t.TempDir())
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
