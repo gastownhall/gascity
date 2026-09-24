@@ -353,17 +353,22 @@ on_exhausted = "hard_fail"
 // left out, so it fits the every-PR rest-smoke budget.
 //
 // Iteration 1 records review.verdict=iterate, so the check fails and the loop
-// spawns iteration 2. There apply-fixes fails transiently once and must retry
-// before recording done. The check joins apply-fixes beads on
-// gc.attempt == the iteration, like the workflows pack gates do, so it only
-// approves if every body member still carries the iteration in gc.attempt.
-// apply-fixes allows 2 attempts, so its retry in iteration 2 only exists if
-// the retry counter (gc.retry_attempt) restarts at 1 in every iteration
-// instead of starting at the iteration number (ga-v7pu5).
+// spawns iteration 2, where apply-fixes records done. The check joins
+// apply-fixes beads on gc.attempt == the iteration, like the workflows pack
+// gates do. Every bead of iteration 2, retry attempts included, must carry the
+// iteration in gc.attempt: pack reviewer prompts name their artifact
+// directory from their own bead's gc.attempt, and {attempt} artifact paths
+// resolve it (ga-ud05j). The retry counter lives in gc.retry_attempt.
+//
+// In iteration 2 the review child also fails transiently once and must retry.
+// It allows 2 attempts, so that retry only exists if the retry counter
+// restarts at 1 in every iteration instead of starting at the iteration
+// number (ga-v7pu5), and if the retry attempt is linked to its control so its
+// failure retries instead of aborting the scope.
 func TestReviewLoopApprovesInIterationTwoWithBodyRetry(t *testing.T) {
 	cityDir := setupReviewFormulaCity(t, "success", map[string]string{
 		"GC_GRAPH_ITERATE_VERDICT_SUFFIXES": "review-loop.iteration.1.apply-fixes.attempt.1",
-		"GC_GRAPH_TRANSIENT_ONCE_SUFFIXES":  "review-loop.iteration.2.apply-fixes.attempt.1",
+		"GC_GRAPH_TRANSIENT_ONCE_SUFFIXES":  "review-loop.iteration.2.review.attempt.1",
 	})
 	writeLocalFormula(t, cityDir, "mol-review-loop-iteration-smoke", `description = """
 Minimal review loop that must approve in iteration 2 after a body retry.
@@ -396,7 +401,11 @@ timeout = "2m"
 [[steps.children]]
 id = "review"
 title = "Review"
-description = "Plain body member."
+description = "Review step with its own retry budget."
+
+[steps.children.retry]
+max_attempts = 2
+on_exhausted = "hard_fail"
 
 [[steps.children]]
 id = "apply-fixes"
@@ -425,12 +434,13 @@ on_exhausted = "hard_fail"
 
 	type counters struct{ attempt, retryAttempt, iteration string }
 	for suffix, want := range map[string]counters{
+		"review-loop.iteration.1.apply-fixes.attempt.1": {attempt: "1", retryAttempt: "1", iteration: "1"},
 		"review-loop.iteration.2":                       {attempt: "2", iteration: "2"},
 		"review-loop.iteration.2.review":                {attempt: "2", iteration: "2"},
+		"review-loop.iteration.2.review.attempt.1":      {attempt: "2", retryAttempt: "1", iteration: "2"},
+		"review-loop.iteration.2.review.attempt.2":      {attempt: "2", retryAttempt: "2", iteration: "2"},
 		"review-loop.iteration.2.apply-fixes":           {attempt: "2", iteration: "2"},
 		"review-loop.iteration.2.apply-fixes.attempt.1": {attempt: "2", retryAttempt: "1", iteration: "2"},
-		"review-loop.iteration.2.apply-fixes.attempt.2": {attempt: "2", retryAttempt: "2", iteration: "2"},
-		"review-loop.iteration.1.apply-fixes.attempt.1": {attempt: "1", retryAttempt: "1", iteration: "1"},
 	} {
 		bead := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, suffix)
 		got := counters{
@@ -444,9 +454,11 @@ on_exhausted = "hard_fail"
 		}
 	}
 
-	control := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, "review-loop.iteration.2.apply-fixes")
-	if got := metaValue(control, "gc.outcome"); got != "pass" {
-		t.Fatalf("iteration 2 apply-fixes outcome = %q, want pass", got)
+	for _, suffix := range []string{"review-loop.iteration.2.review", "review-loop.iteration.2.apply-fixes"} {
+		control := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, suffix)
+		if got := metaValue(control, "gc.outcome"); got != "pass" {
+			t.Fatalf("%s outcome = %q, want pass", suffix, got)
+		}
 	}
 }
 
