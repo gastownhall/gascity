@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,15 +14,27 @@ import (
 
 // fullyCapableBackingStore is a beads.Store test double that implements every
 // optional capability route_clear_store.go must forward: beads.GraphApplyStore
-// (via ApplyGraphPlan), beads.BatchDeleter, beads.Counter and beads.RowWitness.
-// None of the fast/hermetic test backends (FileStore, MemStore) implement
-// these -- only BdStore, NativeDoltStore and CachingStore do, and none of
+// (via ApplyGraphPlan), beads.BatchDeleter, beads.Counter, beads.RowWitness and
+// beads.ContextReadyReader (via ReadyContext). None of the fast/hermetic test
+// backends (FileStore, MemStore) implement ApplyGraphPlan, DeleteBatch, Count
+// or SawRows -- only BdStore, NativeDoltStore and CachingStore do, and none of
 // those are reachable from a cheap, hermetic unit test through the real
 // openStoreAtForCity factory (it has no seam to inject a fake backing store,
 // and the native/bd providers require a real preflight-gated store). A
 // capability-bearing double standing in for that real backend is therefore
 // the only way to prove the *forwarding* is correct in isolation from
 // whether a given production backend happens to implement the capability.
+//
+// ReadyContext is different: the embedded beads.NewMemStore() genuinely
+// implements it. But embedding is through the beads.Store INTERFACE field,
+// which only promotes methods the Store interface itself declares --
+// ContextReadyReader is an optional capability interface, not part of Store,
+// so MemStore's ReadyContext is invisible through this double exactly like
+// every other capability in ga-8q8z2w is invisible through
+// routeChangeClearingStore. Re-declaring it here, forwarding to the same
+// embedded MemStore, is this test double hitting the same bug it exists to
+// catch -- which is why the forward below is a type-assert-and-call rather
+// than relying on promotion.
 type fullyCapableBackingStore struct {
 	beads.Store
 
@@ -50,6 +64,14 @@ func (s *fullyCapableBackingStore) Count(_ context.Context, _ beads.ListQuery, _
 
 func (s *fullyCapableBackingStore) SawRows() bool {
 	return s.sawRows
+}
+
+func (s *fullyCapableBackingStore) ReadyContext(ctx context.Context, query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	reader, ok := s.Store.(beads.ContextReadyReader)
+	if !ok {
+		return nil, fmt.Errorf("reading ready beads from backing store: %w", beads.ErrReadyContextUnsupported)
+	}
+	return reader.ReadyContext(ctx, query...)
 }
 
 // TestRouteClearForwardsOptionalCapabilitiesThroughProductionComposition
@@ -171,8 +193,14 @@ func TestRouteClearForwardsOptionalCapabilitiesThroughProductionComposition(t *t
 // It is narrower than the table above only because FileStore (the fast,
 // hermetic test provider every other openStoreAtForCity test in this
 // package uses) is the one capability-forwarding target in ga-8q8z2w's list
-// that a raw FileStore genuinely implements; FileStore has no ApplyGraphPlan,
-// DeleteBatch, Count or SawRows to prove the rest against, real or forwarded.
+// that a raw FileStore genuinely implements the interface for; FileStore has
+// no ApplyGraphPlan, DeleteBatch, Count or SawRows to prove the rest against,
+// real or forwarded. FileStore's own ReadyContext deliberately vetoes every
+// call (see filestore.go) rather than succeeding -- refreshing the on-disk
+// JSON is context-blind, so a promoted MemStore.ReadyContext would falsely
+// promise cancellation -- so "resolves... end to end" here means the veto
+// itself surfaces through both wrapper layers as
+// beads.ErrReadyContextUnsupported, not that the call succeeds.
 func TestOpenStoreAtForCityForwardsReadyContextThroughRouteClear(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
@@ -194,7 +222,11 @@ func TestOpenStoreAtForCityForwardsReadyContextThroughRouteClear(t *testing.T) {
 	if !ok {
 		t.Fatal("store.(beads.ContextReadyReader) ok = false, want true: openStoreAtForCity's composed store does not resolve ContextReadyReader")
 	}
-	if _, err := reader.ReadyContext(context.Background()); err != nil {
-		t.Fatalf("ReadyContext: %v", err)
+	// FileStore always declines (see filestore.go); the fix under test is
+	// that its veto reaches the caller as beads.ErrReadyContextUnsupported
+	// through both wrapper layers rather than the type assertion above
+	// failing outright -- not that FileStore starts answering successfully.
+	if _, err := reader.ReadyContext(context.Background()); !errors.Is(err, beads.ErrReadyContextUnsupported) {
+		t.Fatalf("ReadyContext error = %v, want errors.Is(err, beads.ErrReadyContextUnsupported): FileStore deliberately vetoes ReadyContext", err)
 	}
 }

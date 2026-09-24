@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"fmt"
 	"log"
 
@@ -48,6 +49,11 @@ var (
 	_ DepMetadataReader                = (*routeChangeClearingStore)(nil)
 	_ ConditionalAssignmentReleaser    = (*routeChangeClearingStore)(nil)
 	_ ForeignIDCreator                 = (*routeChangeClearingStore)(nil)
+	_ GraphApplyHandleProvider         = (*routeChangeClearingStore)(nil)
+	_ BatchDeleter                     = (*routeChangeClearingStore)(nil)
+	_ Counter                          = (*routeChangeClearingStore)(nil)
+	_ RowWitness                       = (*routeChangeClearingStore)(nil)
+	_ ContextReadyReader               = (*routeChangeClearingStore)(nil)
 )
 
 // ConditionalWritesResolveTarget declares the immediate backing store as the
@@ -166,6 +172,101 @@ func (w *routeChangeClearingStore) IDPrefix() string {
 		return declaring.IDPrefix()
 	}
 	return ""
+}
+
+// GraphApplyHandle forwards the backing store's graph-apply capability
+// (GraphApplyHandleProvider), mirroring how CachingStore.GraphApplyHandle
+// delegates to GraphApplyFor(c.backing) -- but without CachingStore's
+// cache-refresh wrapping, which this decorator has no need for:
+// ApplyGraphPlan only ever creates brand-new beads, so it never intersects
+// the gc.routed_to writes this decorator intercepts. Forwarded for the same
+// reason as DepMetadata, ReleaseIfCurrent, and the rest above: the embedded
+// Store field does not promote an optional capability. Without this
+// forward, GraphApplyFor fails on every store this decorator wraps --
+// cmd/gc/main.go applies it OUTERMOST on openStoreResultAtForCityWithConfig,
+// the terminal factory for every CLI/standalone open, so graph apply (on by
+// default absent [daemon] formula_v2) breaks there (ga-8q8z2w).
+func (w *routeChangeClearingStore) GraphApplyHandle() (GraphApplyStore, bool) {
+	return GraphApplyFor(w.Store)
+}
+
+// DeleteBatch forwards the backing store's batched delete (BatchDeleter).
+// Forwarded for the same reason as DepMetadata and the rest above: the
+// embedded Store field does not promote an optional capability. Without
+// this forward, cmd/gc/cmd_convoy_dispatch.go's store.(beads.BatchDeleter)
+// assertion fails on every store this decorator wraps, pushing wisp-GC
+// closure teardown back onto the per-bead subprocess path -- the exact
+// regression bead_policy_store.go's own DeleteBatch comment exists to
+// prevent one layer in (ga-8q8z2w).
+func (w *routeChangeClearingStore) DeleteBatch(ids []string) error {
+	deleter, ok := w.Store.(BatchDeleter)
+	if !ok {
+		return ErrBatchDeleteUnsupported
+	}
+	return deleter.DeleteBatch(ids)
+}
+
+// Count forwards the backing store's count (Counter). Forwarded for the
+// same reason as DepMetadata and the rest above: the embedded Store field
+// does not promote an optional capability. Inner stores without a Counter
+// report ErrCountUnsupported, matching beadPolicyStore.Count
+// (cmd/gc/bead_policy_store.go) and signaling callers to fall back to List.
+func (w *routeChangeClearingStore) Count(ctx context.Context, query ListQuery, excludeTypes ...string) (int, error) {
+	counter, ok := w.Store.(Counter)
+	if !ok {
+		return 0, fmt.Errorf("counting beads: route-clearing-wrapped store: %w", ErrCountUnsupported)
+	}
+	return counter.Count(ctx, query, excludeTypes...)
+}
+
+// SawRows forwards the backing store's row-witness evidence (RowWitness).
+// Forwarded for the same reason as DepMetadata and the rest above: the
+// embedded Store field does not promote an optional capability, and here
+// the cost of omitting it is silent rather than loud, exactly as
+// beadPolicyStore.SawRows (cmd/gc/bead_policy_store.go) describes: an
+// absent optional capability reads to a caller as "this store cannot
+// witness itself", a supported state, so the store-health row count would
+// keep certifying a zero it has the evidence to refuse. Inner stores that
+// cannot witness themselves report no evidence, leaving the caller on its
+// prior behavior rather than refusing a count.
+func (w *routeChangeClearingStore) SawRows() bool {
+	witness, ok := w.Store.(RowWitness)
+	return ok && witness.SawRows()
+}
+
+// ReadyContext forwards the backing store's deadline-sensitive Ready
+// projection (ContextReadyReader). Forwarded for the same reason as
+// DepMetadata and the rest above: the embedded Store field does not
+// promote an optional capability. Inner stores without the read report
+// ErrReadyContextUnsupported, matching beadPolicyStore.ReadyContext
+// (cmd/gc/bead_policy_store.go).
+func (w *routeChangeClearingStore) ReadyContext(ctx context.Context, query ...ReadyQuery) ([]Bead, error) {
+	reader, ok := w.Store.(ContextReadyReader)
+	if !ok {
+		return nil, fmt.Errorf("reading ready beads through route-clearing store: %w", ErrReadyContextUnsupported)
+	}
+	return reader.ReadyContext(ctx, query...)
+}
+
+// Handles forwards the backing store's cache/live/writer handle triple
+// (HandlesFor's optional Handles() capability), overriding only Writer to
+// this decorator itself. Forwarded for the same reason as DepMetadata and
+// the rest above: the embedded Store field does not promote an optional
+// capability -- and without it, HandlesFor(w) cannot see past this
+// decorator at all, silently falling back to generic logical readers over
+// w rather than reaching a deeper store's own richer Handles()
+// (e.g. beadPolicyStore's read-tier-expanding readers, cmd/gc/bead_policy_
+// store.go), which is the "HandlesFor tier expansion" ga-8q8z2w reports
+// missing. The Writer override is not optional the way Cached/Live are:
+// this decorator adds no read behavior of its own, so the inner store's
+// Cached/Live readers are correct as-is, but a caller using an unoverridden
+// Handles().Writer to perform metadata writes would silently bypass this
+// decorator's entire route-change-clearing gate -- the one thing it exists
+// to add.
+func (w *routeChangeClearingStore) Handles() StoreHandles {
+	handles := HandlesFor(w.Store)
+	handles.Writer = w
+	return handles
 }
 
 // SetMetadata clears the rerouted bead's (and its molecule root's) executor-
