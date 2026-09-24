@@ -26,9 +26,44 @@ type nudgeReference = nudgequeue.Reference
 // strongly-typed beads.NudgesStore so the nudges class is statically visible to
 // every leaf nudge-bead helper; the wrapper carries the same underlying store
 // value (identity to the work store until the nudges class relocates).
+//
+// It discards the opened handle, so a caller of this form can never close the
+// work store the call opened. Once the nudges class relocates, that work store
+// is not the store returned, so it stays open (leaks) for the life of the
+// process; only on an unrelocated city is the returned store the opened handle.
+// A frame that closes what it opened must use openOwnedNudgeBeadStore and close
+// the returned handle, never the class store: closing the class store on a
+// relocated city is the bug openOwnedNudgeBeadStore exists to prevent.
 var openNudgeBeadStore = func(cityPath string) beads.NudgesStore {
-	store, _ := openNudgeBeadStoreErr(cityPath)
+	store, _ := openOwnedNudgeBeadStore(cityPath)
 	return store
+}
+
+// openOwnedNudgeBeadStore is the owning-frame form of openNudgeBeadStore: it
+// returns the nudges-class store to use AND the handle this call opened, which
+// is the only handle the caller may close.
+//
+// The two differ exactly when the NUDGES class is relocated onto a storage
+// binding. resolveNudgesStore then discards the work store this call opened and
+// returns the storage routes' process-shared engine, which the routes own and
+// closeCLIStorageRoutes releases when the invocation ends. A frame that closes
+// "the store it holds" therefore closes the routes' engine without detaching
+// their memo, and the memo goes on serving a closed engine: every later class
+// read in the process — nudge delivery itself, and the controller's own socket
+// handlers — then fails with ErrStoreClosed until the process exits.
+//
+// Closing by "the handle I opened" is also what keeps the ownership answer in
+// one place. The alternative, asking the routes a second time whether this class
+// is relocated, is the re-derivation the residency contract reserves to the
+// resolver, and is how this bug class reproduces
+// (scripts/residency-boundary-patterns.txt, rule b).
+//
+// It is a seam for the same reason openNudgeBeadStore is, and is the one the
+// counting fake replaces: openNudgeBeadStore delegates here, so a test that
+// substitutes this var moves both forms at once and the two can never disagree.
+var openOwnedNudgeBeadStore = func(cityPath string) (beads.NudgesStore, beads.Store) {
+	store, opened, _ := openNudgeBeadStoreOwned(cityPath)
+	return store, opened
 }
 
 // openNudgeBeadStoreErr is openNudgeBeadStore with the open failure kept instead
@@ -41,11 +76,25 @@ var openNudgeBeadStore = func(cityPath string) beads.NudgesStore {
 // use this form and print the reason; the seam above stays for the poll/drain
 // helpers whose contract is already "a nil store means do nothing".
 func openNudgeBeadStoreErr(cityPath string) (beads.NudgesStore, error) {
-	store, err := openStoreAtForCity(cityPath, cityPath)
+	store, _, err := openNudgeBeadStoreOwned(cityPath)
+	return store, err
+}
+
+// openNudgeWorkStore opens the work store every nudge opener starts from. It is
+// a seam so tests can count, per handle, that each owning frame closes the work
+// store it opened exactly once, including on a relocated city where that handle
+// is not the class store the frame uses. Tests that replace it must stay serial.
+var openNudgeWorkStore = openStoreAtForCity
+
+// openNudgeBeadStoreOwned is the one place the nudges-class store is opened, so
+// the class store and the handle the call opened are decided together. Every
+// form above is a projection of it.
+func openNudgeBeadStoreOwned(cityPath string) (beads.NudgesStore, beads.Store, error) {
+	store, err := openNudgeWorkStore(cityPath, cityPath)
 	if err != nil {
-		return beads.NudgesStore{}, fmt.Errorf("opening the city store at %q: %w", cityPath, err)
+		return beads.NudgesStore{}, nil, fmt.Errorf("opening the city store at %q: %w", cityPath, err)
 	}
-	return beads.NudgesStore{Store: resolveNudgesStore(cliStorageRoutes(cityPath), store, nil, cityPath, nil)}, nil
+	return beads.NudgesStore{Store: resolveNudgesStore(cliStorageRoutes(cityPath), store, nil, cityPath, nil)}, store, nil
 }
 
 // nudgeFrontDoor wraps a strongly-typed nudges store as the nudge object's
