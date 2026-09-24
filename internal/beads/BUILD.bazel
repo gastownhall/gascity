@@ -163,9 +163,9 @@ go_test(
     ) + [
         "//:go.mod",
         "//:repo_source_tree",
-        "@com_github_steveyegge_beads//internal/storage/schema:migrations",
-        "@com_github_steveyegge_beads//internal/storage/schema:schema.go",
-        "@com_github_steveyegge_beads//internal/types:types.go",
+        "@com_github_steveyegge_beads//internal/storage/issueops:pinned_cursor_sources",
+        "@com_github_steveyegge_beads//internal/storage/schema:pinned_cursor_sources",
+        "@com_github_steveyegge_beads//internal/types:pinned_cursor_sources",
     ],
     embed = [":beads"],
     deps = [

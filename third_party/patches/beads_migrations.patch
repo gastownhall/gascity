@@ -1,13 +1,37 @@
 diff -ruN a/internal/storage/schema/BUILD.bazel b/internal/storage/schema/BUILD.bazel
 --- a/internal/storage/schema/BUILD.bazel	2026-09-23 12:15:55.244530897 +0000
 +++ b/internal/storage/schema/BUILD.bazel	2026-09-23 12:15:55.257530882 +0000
-@@ -0,0 +1,9 @@
+@@ -0,0 +1,15 @@
 +
-+# Patched for gascity bazel farm: expose the schema migrations as a public
-+# filegroup so the pinned-cursor drift test can declare them as runfiles
-+# data (a pure-Bazel machine has no go module cache to read them from).
++# Patched for gascity bazel farm: expose the exact pinned sources read by the
++# cursor drift tests as public runfiles data. A pure-Bazel machine has no Go
++# module cache from which to resolve them.
 +filegroup(
 +    name = "migrations",
 +    srcs = glob(["migrations/**"]),
++    visibility = ["//visibility:public"],
++)
++
++filegroup(
++    name = "pinned_cursor_sources",
++    srcs = ["schema.go"] + glob(["migrations/**"]),
++    visibility = ["//visibility:public"],
++)
+diff -ruN a/internal/storage/issueops/BUILD.bazel b/internal/storage/issueops/BUILD.bazel
+--- a/internal/storage/issueops/BUILD.bazel	1970-01-01 00:00:00.000000000 +0000
++++ b/internal/storage/issueops/BUILD.bazel	2026-09-24 00:00:00.000000000 +0000
+@@ -0,0 +1,5 @@
++filegroup(
++    name = "pinned_cursor_sources",
++    srcs = ["search.go"],
++    visibility = ["//visibility:public"],
++)
+diff -ruN a/internal/types/BUILD.bazel b/internal/types/BUILD.bazel
+--- a/internal/types/BUILD.bazel	1970-01-01 00:00:00.000000000 +0000
++++ b/internal/types/BUILD.bazel	2026-09-24 00:00:00.000000000 +0000
+@@ -0,0 +1,5 @@
++filegroup(
++    name = "pinned_cursor_sources",
++    srcs = ["types.go"],
 +    visibility = ["//visibility:public"],
 +)
