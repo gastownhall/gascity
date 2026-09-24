@@ -360,6 +360,11 @@ type Info struct {
 	// reads it BOTH via strconv.Atoi (numeric threshold) AND as == "" / == "0"
 	// (clear/first-increment gates), so the mirror keeps the raw string.
 	ChurnCount string // churn_count (raw)
+	// IdleRespawnAttempts is the RAW idle_respawn_attempts metadata. The
+	// reconciler bounds idle-respawn retries for one assigned bead with it.
+	IdleRespawnAttempts string // idle_respawn_attempts (raw)
+	// IdleRespawnBeadID identifies the assigned bead the retry count belongs to.
+	IdleRespawnBeadID string // idle_respawn_bead_id (raw)
 	// WakeMode is the RAW wake_mode metadata. The wake and drain-finalize paths
 	// branch on an exact == "fresh" compare.
 	WakeMode string // wake_mode (raw)

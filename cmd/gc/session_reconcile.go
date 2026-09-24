@@ -33,10 +33,12 @@ type wakeEvaluation struct {
 	Reasons []WakeReason
 	// Reason mirrors AwakeDecision.Reason on the ComputeAwakeSet bridge path.
 	// It is only actionable when Reasons contains the matching effective wake.
-	Reason           string
-	Policy           resolvedSessionSleepPolicy
-	ConfigSuppressed bool
-	HasAssignedWork  bool
+	Reason              string
+	Policy              resolvedSessionSleepPolicy
+	ConfigSuppressed    bool
+	HasAssignedWork     bool
+	AssignedWorkBeadID  string
+	AssignedWorkClaimed bool
 }
 
 const (
