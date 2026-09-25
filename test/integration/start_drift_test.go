@@ -502,6 +502,8 @@ func setupDriftSystemdScenario(t *testing.T) *driftScenario {
 	buildGCBinaryWithCommit(t, binaryPath, driftHappyOldCommit)
 
 	unit := writeSystemdUserUnit(t, binaryPath, gcHome, runtimeDir)
+	// Registered before daemon-reload/start: a t.Fatalf in either skips any
+	// cleanup registered after it, and the unit file then outlives the run.
 	t.Cleanup(func() {
 		_ = systemctlUser("stop", unit)
 		_ = systemctlUser("disable", unit)
@@ -1171,10 +1173,19 @@ func sanitizeSupervisorServiceName(name string) string {
 	return strings.Trim(name, "-")
 }
 
-// systemdUserUnitDir returns the directory where user-level systemd
-// units live for the current user. Tests write the supervisor unit
-// here directly rather than going through `gc supervisor install` so
-// the test is self-contained.
+// systemdUserUnitDir returns the runtime unit directory of the user
+// systemd manager, $XDG_RUNTIME_DIR/systemd/user. Tests write the
+// supervisor unit here directly rather than going through `gc supervisor
+// install` so the test is self-contained.
+//
+// The directory must not be derived from HOME or XDG_DATA_HOME. The
+// manager builds its unit search path from its own login environment,
+// so a unit written under an overridden HOME (every fleet agent session,
+// and the private HOME of a release-gate run) is never found and
+// `systemctl --user start` fails with "Unit ... not found". The runtime
+// directory is on the search path whatever HOME the test runs under,
+// and it is volatile, so a unit leaked by a killed run is gone at logout.
+// requireUserSystemd guarantees XDG_RUNTIME_DIR is set.
 func systemdUserUnitDir() string {
 	return filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "systemd", "user")
 }
