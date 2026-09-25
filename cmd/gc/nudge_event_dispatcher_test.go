@@ -619,6 +619,22 @@ func TestNudgeEventDispatcherDoesNotRetryUnknownLegacyDelivery(t *testing.T) {
 		default:
 		}
 
+		// The provider call can outlive the ordinary claim lease. Another
+		// poller must not recover and redeliver the same item while the first
+		// uncancellable legacy call is still in flight.
+		<-time.After(defaultQueuedNudgeClaimTTL + time.Millisecond)
+		synctest.Wait()
+		reclaimed, err := claimDueQueuedNudgesMatching(dir, time.Now(), func(queuedNudge) bool { return true })
+		if err != nil {
+			t.Fatalf("claimDueQueuedNudgesMatching: %v", err)
+		}
+		if len(reclaimed) != 0 {
+			close(sp.release)
+			synctest.Wait()
+			<-done
+			t.Fatalf("legacy delivery claim expired while provider call was still in flight: reclaimed=%+v", reclaimed)
+		}
+
 		close(sp.release)
 		synctest.Wait()
 		<-done

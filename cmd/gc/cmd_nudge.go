@@ -1854,12 +1854,14 @@ func tryDeliverQueuedNudgesByPollerContext(ctx context.Context, target nudgeTarg
 		return false, errors.Join(bookkeepErr, err, relErr)
 	}
 	deliveryCtx := ctx
+	var stopClaimKeepalive func() error
 	if !runtime.SupportsNudgeContext(sp, target.sessionName) {
 		// The dispatcher deadline bounds observation and handle resolution, but
 		// a legacy provider cannot cancel an in-flight Nudge. Wait for its real
 		// result so a late busy/error response follows the normal retry path
 		// instead of becoming an outcome-unknown terminal acknowledgement.
 		deliveryCtx = context.WithoutCancel(ctx)
+		stopClaimKeepalive = keepQueuedNudgeClaimsAlive(target.cityPath, queuedNudgeIDs(items))
 	}
 	result, err := handle.Nudge(deliveryCtx, worker.NudgeRequest{
 		Text:     msg,
@@ -1867,6 +1869,9 @@ func tryDeliverQueuedNudgesByPollerContext(ctx context.Context, target nudgeTarg
 		Source:   "queue",
 		Wake:     worker.NudgeWakeLiveOnly,
 	})
+	if stopClaimKeepalive != nil {
+		bookkeepErr = errors.Join(bookkeepErr, stopClaimKeepalive())
+	}
 	if err != nil {
 		telemetry.RecordNudge(context.Background(), target.agentKey(), err)
 		if errors.Is(err, runtime.ErrSessionNotFound) {
@@ -2948,6 +2953,55 @@ func releaseQueuedNudgeClaims(cityPath string, ids []string) error {
 		sortQueuedNudges(state)
 		return nil
 	})
+}
+
+func keepQueuedNudgeClaimsAlive(cityPath string, ids []string) func() error {
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(defaultQueuedNudgeClaimTTL / 2)
+		defer ticker.Stop()
+		var firstErr error
+		for {
+			select {
+			case now := <-ticker.C:
+				if err := renewQueuedNudgeClaims(cityPath, ids, now); err != nil && firstErr == nil {
+					firstErr = err
+				}
+			case <-stop:
+				done <- firstErr
+				return
+			}
+		}
+	}()
+	return func() error {
+		close(stop)
+		return <-done
+	}
+}
+
+func renewQueuedNudgeClaims(cityPath string, ids []string, now time.Time) error {
+	want := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		want[id] = struct{}{}
+	}
+	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		for i := range state.InFlight {
+			if _, ok := want[state.InFlight[i].ID]; !ok {
+				continue
+			}
+			state.InFlight[i].LeaseUntil = now.Add(defaultQueuedNudgeClaimTTL).UTC()
+			delete(want, state.InFlight[i].ID)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("renewing queued nudge claims: %w", err)
+	}
+	if len(want) != 0 {
+		return fmt.Errorf("renewing queued nudge claims: %d claimed items missing from in-flight queue", len(want))
+	}
+	return nil
 }
 
 func recordQueuedNudgeFailure(cityPath string, ids []string, cause error, now time.Time) error {
