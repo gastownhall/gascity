@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os/exec"
@@ -445,6 +446,10 @@ func workerHandleForSessionTargetWithConfig(cityPath string, store beads.Store, 
 }
 
 func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, processNames []string) (worker.Handle, error) {
+	return workerHandleForSessionTargetWithRuntimeHintsContext(context.Background(), cityPath, store, sp, cfg, target, processNames)
+}
+
+func workerHandleForSessionTargetWithRuntimeHintsContext(ctx context.Context, cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, processNames []string) (worker.Handle, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return nil, session.ErrSessionNotFound
@@ -455,14 +460,16 @@ func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, sto
 	}
 	if store != nil {
 		if info, pr, err := session.ResolveSessionRecordByExactID(store, target); err == nil {
-			return factory.SessionByRecord(info, pr)
+			return factory.SessionByRecordContext(ctx, info, pr)
 		}
 		if id, err := session.ResolveSessionID(store, target); err == nil {
-			return factory.SessionByID(id)
+			return factory.SessionByHandleContext(ctx, id)
 		}
 		if sp != nil {
-			if sessionID, metaErr := sp.GetMeta(target, "GC_SESSION_ID"); metaErr == nil && strings.TrimSpace(sessionID) != "" {
-				return factory.SessionByID(strings.TrimSpace(sessionID))
+			if sessionID, metaErr := runtime.GetMetaContext(ctx, sp, target, "GC_SESSION_ID"); metaErr == nil && strings.TrimSpace(sessionID) != "" {
+				return factory.SessionByHandleContext(ctx, strings.TrimSpace(sessionID))
+			} else if errors.Is(metaErr, context.Canceled) || errors.Is(metaErr, context.DeadlineExceeded) {
+				return nil, metaErr
 			}
 		}
 	}
@@ -470,8 +477,10 @@ func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, sto
 		return nil, session.ErrSessionNotFound
 	}
 	providerName := target
-	if liveProvider, err := sp.GetMeta(target, "GC_PROVIDER"); err == nil && strings.TrimSpace(liveProvider) != "" {
+	if liveProvider, err := runtime.GetMetaContext(ctx, sp, target, "GC_PROVIDER"); err == nil && strings.TrimSpace(liveProvider) != "" {
 		providerName = strings.TrimSpace(liveProvider)
+	} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil, err
 	}
 	return factory.RuntimeHandle(target, providerName, "", processNames)
 }
@@ -529,7 +538,7 @@ func workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath string, store
 }
 
 func workerObserveSessionTargetWithRuntimeHintsContext(ctx context.Context, cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, processNames []string) (worker.LiveObservation, error) {
-	handle, err := workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, target, processNames)
+	handle, err := workerHandleForSessionTargetWithRuntimeHintsContext(ctx, cityPath, store, sp, cfg, target, processNames)
 	if err != nil {
 		return worker.LiveObservation{}, err
 	}

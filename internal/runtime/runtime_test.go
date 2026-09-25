@@ -33,6 +33,9 @@ func TestNudgeContextBoundsLegacyProvider(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("NudgeContext error = %v, want context deadline exceeded", err)
 	}
+	if !errors.Is(err, ErrNudgeOutcomeUnknown) {
+		t.Fatalf("NudgeContext error = %v, want ErrNudgeOutcomeUnknown for a legacy mutation still in flight", err)
+	}
 }
 
 func TestNudgeContextCancelsContextAwareProvider(t *testing.T) {

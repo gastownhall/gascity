@@ -1352,7 +1352,7 @@ func workerHandleForNudgeTargetContext(ctx context.Context, target nudgeTarget, 
 		if target.sessionID != "" || target.continuationEpoch != "" {
 			obs, err := workerObserveSessionTargetWithRuntimeHintsContext(ctx, target.cityPath, store, sp, target.cfg, target.sessionName, nil)
 			if err == nil {
-				matches, matchErr := nudgeTargetLiveGenerationMatches(target, obs, sp)
+				matches, matchErr := nudgeTargetLiveGenerationMatchesContext(ctx, target, obs, sp)
 				if matchErr != nil {
 					return nil, matchErr
 				}
@@ -1409,7 +1409,7 @@ func workerObserveNudgeTargetContext(ctx context.Context, target nudgeTarget, st
 		if err != nil {
 			return worker.LiveObservation{}, err
 		}
-		matches, err := nudgeTargetLiveGenerationMatches(target, obs, sp)
+		matches, err := nudgeTargetLiveGenerationMatchesContext(ctx, target, obs, sp)
 		if err != nil {
 			return worker.LiveObservation{}, err
 		}
@@ -1427,7 +1427,7 @@ func workerObserveNudgeTargetContext(ctx context.Context, target nudgeTarget, st
 	return workerObserveSessionTargetWithRuntimeHintsContext(ctx, target.cityPath, store, sp, target.cfg, target.sessionName, nil)
 }
 
-func nudgeTargetLiveGenerationMatches(target nudgeTarget, obs worker.LiveObservation, sp runtime.Provider) (bool, error) {
+func nudgeTargetLiveGenerationMatchesContext(ctx context.Context, target nudgeTarget, obs worker.LiveObservation, sp runtime.Provider) (bool, error) {
 	if !obs.Running || (target.sessionID == "" && target.continuationEpoch == "") {
 		return true, nil
 	}
@@ -1443,7 +1443,7 @@ func nudgeTargetLiveGenerationMatches(target nudgeTarget, obs worker.LiveObserva
 		return true, nil
 	}
 	if target.sessionID != "" {
-		liveID, err := sp.GetMeta(target.sessionName, "GC_SESSION_ID")
+		liveID, err := runtime.GetMetaContext(ctx, sp, target.sessionName, "GC_SESSION_ID")
 		if err != nil && !runtime.IsSessionGone(err) {
 			return false, err
 		}
@@ -1452,7 +1452,7 @@ func nudgeTargetLiveGenerationMatches(target nudgeTarget, obs worker.LiveObserva
 		}
 	}
 	if target.continuationEpoch != "" {
-		liveEpoch, err := sp.GetMeta(target.sessionName, "GC_CONTINUATION_EPOCH")
+		liveEpoch, err := runtime.GetMetaContext(ctx, sp, target.sessionName, "GC_CONTINUATION_EPOCH")
 		if err != nil && !runtime.IsSessionGone(err) {
 			return false, err
 		}
@@ -1778,7 +1778,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 }
 
 func tryDeliverQueuedNudgesByPollerContext(ctx context.Context, target nudgeTarget, store, sessStore beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
-	matches, err := nudgeTargetLiveGenerationMatches(target, obs, sp)
+	matches, err := nudgeTargetLiveGenerationMatchesContext(ctx, target, obs, sp)
 	if err != nil || !matches {
 		return false, err
 	}
@@ -1876,6 +1876,13 @@ func tryDeliverQueuedNudgesByPollerContext(ctx context.Context, target nudgeTarg
 			stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
 			ackErr := ackQueuedNudgesWithOutcome(target.cityPath, queuedNudgeIDs(items), "injected_unobserved", "", "provider-nudge-return")
 			return true, errors.Join(bookkeepErr, ackErr)
+		}
+		if errors.Is(err, runtime.ErrNudgeOutcomeUnknown) {
+			// A legacy provider cannot cancel its in-flight mutation. Retrying
+			// would race that original call and may inject the same text twice,
+			// so terminalize the queue item with an explicit unknown outcome.
+			ackErr := ackQueuedNudgesWithOutcome(target.cityPath, queuedNudgeIDs(items), "delivery_outcome_unknown", err.Error(), "legacy-provider-deadline")
+			return false, errors.Join(bookkeepErr, ackErr)
 		}
 		if recErr := recordQueuedNudgeFailureWithStore(target.cityPath, beads.NudgesStore{Store: deliveryStore}, queuedNudgeIDs(items), err, time.Now()); recErr != nil {
 			return false, errors.Join(bookkeepErr, recErr)

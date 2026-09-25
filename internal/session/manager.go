@@ -1982,8 +1982,12 @@ func (m *Manager) ObserveRuntimeForInfoContext(ctx context.Context, info Info, p
 	obs.Running = liveness.Running
 	obs.Alive = liveness.Alive
 	if obs.Running {
-		obs.Attached = m.sp.IsAttached(info.SessionName)
-		lastActive, err := m.sp.GetLastActivity(info.SessionName)
+		attached, err := runtime.IsAttachedContext(ctx, m.sp, info.SessionName)
+		if err != nil {
+			return RuntimeObservation{}, err
+		}
+		obs.Attached = attached
+		lastActive, err := runtime.GetLastActivityContext(ctx, m.sp, info.SessionName)
 		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
 			return RuntimeObservation{}, fmt.Errorf("observe last activity for %q: %w", info.SessionName, err)
 		}
@@ -2068,6 +2072,25 @@ func (m *Manager) EnrichInfo(info Info) Info {
 	}
 
 	return info
+}
+
+// EnrichInfoContext applies the live runtime overlay without allowing a
+// legacy provider call to extend the caller's wait past ctx.
+func (m *Manager) EnrichInfoContext(ctx context.Context, info Info) (Info, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Done() == nil {
+		return m.EnrichInfo(info), nil
+	}
+	result := make(chan Info, 1)
+	go func() { result <- m.EnrichInfo(info) }()
+	select {
+	case enriched := <-result:
+		return enriched, nil
+	case <-ctx.Done():
+		return Info{}, ctx.Err()
+	}
 }
 
 // EnrichInfos applies EnrichInfo to each element in place and returns the same

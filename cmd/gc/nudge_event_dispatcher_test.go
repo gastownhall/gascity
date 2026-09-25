@@ -561,6 +561,73 @@ type blockingObservationProvider struct {
 	err     error
 }
 
+type lateLegacyNudgeProvider struct {
+	*nudgeEventedFake
+	started     chan struct{}
+	release     chan struct{}
+	delivered   chan struct{}
+	startOnce   sync.Once
+	deliverOnce sync.Once
+	deliveries  atomic.Int32
+}
+
+func (p *lateLegacyNudgeProvider) Nudge(_ string, _ []runtime.ContentBlock) error {
+	p.startOnce.Do(func() {
+		close(p.started)
+		<-p.release
+	})
+	p.deliveries.Add(1)
+	p.deliverOnce.Do(func() { close(p.delivered) })
+	return nil
+}
+
+func TestNudgeEventDispatcherDoesNotRetryUnknownLegacyDelivery(t *testing.T) {
+	sp := &lateLegacyNudgeProvider{
+		nudgeEventedFake: newNudgeEventedFake(),
+		started:          make(chan struct{}),
+		release:          make(chan struct{}),
+		delivered:        make(chan struct{}),
+	}
+	t.Cleanup(func() {
+		select {
+		case <-sp.release:
+		default:
+			close(sp.release)
+		}
+	})
+	dir, d, info := newNudgeDispatcherFixture(t, sp)
+	d.deliveryTimeout = 20 * time.Millisecond
+	sp.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-time.Minute)}
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "deliver once", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	d.runPass(info.SessionName, nudgeEventRetryBudget)
+	select {
+	case <-sp.started:
+	default:
+		t.Fatal("legacy provider nudge did not start")
+	}
+
+	state := queueStateSnapshot(t, dir)
+	if len(state.Pending) != 0 || len(state.InFlight) != 0 {
+		t.Fatalf("unknown delivery remained retryable: state=%+v", state)
+	}
+	// A later dispatcher pass models the retry that used to duplicate the
+	// still-running legacy send. With the item terminalized as unknown, it is
+	// a no-op; releasing the original call produces the only delivery.
+	d.runPass(info.SessionName, nudgeEventRetryBudget)
+	close(sp.release)
+	select {
+	case <-sp.delivered:
+	case <-time.After(time.Second):
+		t.Fatal("original legacy delivery did not complete")
+	}
+	if got := sp.deliveries.Load(); got != 1 {
+		t.Fatalf("deliveries = %d, want exactly 1 across the retry pass", got)
+	}
+}
+
 func (p *blockingObservationProvider) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
 	<-p.unblock
 	return p.result, p.err
@@ -590,6 +657,88 @@ func TestWorkerHandleForNudgeTargetContextBoundsSecondObservation(t *testing.T) 
 	_, err := workerHandleForNudgeTargetContext(ctx, target, nil, sp)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("workerHandleForNudgeTargetContext error = %v, want context deadline exceeded", err)
+	}
+}
+
+type blockingObservationStageProvider struct {
+	*nudgeEventedFake
+	stage       string
+	blockedName string
+	started     chan struct{}
+	release     chan struct{}
+	startOnce   sync.Once
+}
+
+func (p *blockingObservationStageProvider) block(name, stage string) {
+	if name != p.blockedName || p.stage != stage {
+		return
+	}
+	p.startOnce.Do(func() { close(p.started) })
+	<-p.release
+}
+
+func (p *blockingObservationStageProvider) GetMeta(name, key string) (string, error) {
+	p.block(name, "metadata")
+	return p.Fake.GetMeta(name, key)
+}
+
+func (p *blockingObservationStageProvider) IsAttached(name string) bool {
+	p.block(name, "attachment")
+	return p.Fake.IsAttached(name)
+}
+
+func (p *blockingObservationStageProvider) GetLastActivity(name string) (time.Time, error) {
+	p.block(name, "last-activity")
+	return p.nudgeEventedFake.GetLastActivity(name)
+}
+
+func TestNudgeEventDispatcherObservationDeadlineDoesNotStallNextDelivery(t *testing.T) {
+	for _, stage := range []string{"metadata", "attachment", "last-activity"} {
+		t.Run(stage, func(t *testing.T) {
+			sp := &blockingObservationStageProvider{
+				nudgeEventedFake: newNudgeEventedFake(),
+				stage:            stage,
+				started:          make(chan struct{}),
+				release:          make(chan struct{}),
+			}
+			t.Cleanup(func() { close(sp.release) })
+			dir, d, blocked := newNudgeDispatcherFixture(t, sp)
+			d.deliveryTimeout = 20 * time.Millisecond
+			sp.blockedName = blocked.SessionName
+
+			store := openNudgeBeadStore(dir)
+			mgr := newSessionManagerWithConfig(dir, store, sp, nil)
+			ready, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "ready", Title: "Ready", Command: "codex", WorkDir: dir, Provider: "codex", Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("CreateSession(ready): %v", err)
+			}
+			if err := mgr.Start(context.Background(), ready.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+				t.Fatalf("Start(ready): %v", err)
+			}
+			sp.Activity = map[string]time.Time{
+				blocked.SessionName: time.Now().Add(-time.Minute),
+				ready.SessionName:   time.Now().Add(-time.Minute),
+			}
+			for _, agent := range []string{"worker", "ready"} {
+				if err := enqueueQueuedNudge(dir, newQueuedNudge(agent, "continue", time.Now().Add(-time.Minute))); err != nil {
+					t.Fatalf("enqueueQueuedNudge(%s): %v", agent, err)
+				}
+			}
+
+			startedAt := time.Now()
+			d.runPass("", 0)
+			select {
+			case <-sp.started:
+			default:
+				t.Fatalf("%s observation did not reach the blocking provider call", stage)
+			}
+			if elapsed := time.Since(startedAt); elapsed > time.Second {
+				t.Fatalf("dispatcher pass took %v; %s exceeded the per-delivery deadline", elapsed, stage)
+			}
+			if got := sp.CountCalls("Nudge", ready.SessionName); got != 1 {
+				t.Fatalf("next queued delivery calls = %d, want 1 after %s timed out", got, stage)
+			}
+		})
 	}
 }
 

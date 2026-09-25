@@ -66,6 +66,11 @@ var ErrExecUnsupported = errors.New("runtime does not implement the exec op")
 // separate signals for separate call paths.
 var ErrRuntimeUnavailable = errors.New("runtime unavailable: liveness observation failed")
 
+// ErrNudgeOutcomeUnknown reports that a legacy provider did not return before
+// the caller's deadline and cannot cancel its in-flight mutation. Callers must
+// not retry that nudge: the original send may still complete successfully.
+var ErrNudgeOutcomeUnknown = errors.New("nudge outcome unknown")
+
 // ErrRelaunchUnsupported reports that the underlying runtime cannot relaunch the
 // agent in a warm box (it is not a [RelaunchProvider], or is conjoined like
 // subprocess/acp/t3bridge). Composite/wrapping providers return it from their
@@ -241,6 +246,47 @@ type ContextRunningProvider interface {
 	IsRunningContext(ctx context.Context, name string) (bool, error)
 }
 
+type contextResult[T any] struct {
+	value T
+	err   error
+}
+
+func legacyCallContext[T any](ctx context.Context, call func() (T, error)) (T, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Done() == nil {
+		return call()
+	}
+	result := make(chan contextResult[T], 1)
+	go func() {
+		value, err := call()
+		result <- contextResult[T]{value: value, err: err}
+	}()
+	select {
+	case result := <-result:
+		return result.value, result.err
+	case <-ctx.Done():
+		var zero T
+		return zero, ctx.Err()
+	}
+}
+
+// GetMetaContext bounds a legacy provider metadata lookup.
+func GetMetaContext(ctx context.Context, sp Provider, name, key string) (string, error) {
+	return legacyCallContext(ctx, func() (string, error) { return sp.GetMeta(name, key) })
+}
+
+// IsAttachedContext bounds a legacy provider attachment lookup.
+func IsAttachedContext(ctx context.Context, sp Provider, name string) (bool, error) {
+	return legacyCallContext(ctx, func() (bool, error) { return sp.IsAttached(name), nil })
+}
+
+// GetLastActivityContext bounds a legacy provider activity lookup.
+func GetLastActivityContext(ctx context.Context, sp Provider, name string) (time.Time, error) {
+	return legacyCallContext(ctx, func() (time.Time, error) { return sp.GetLastActivity(name) })
+}
+
 // IsRunningContext bounds a provider running-state lookup. Context-aware
 // providers receive the caller's context directly; legacy providers are
 // isolated behind a buffered result so a stuck lookup cannot block its caller.
@@ -282,7 +328,7 @@ func NudgeContext(ctx context.Context, sp Provider, name string, content []Conte
 	case err := <-result:
 		return err
 	case <-ctx.Done():
-		return ctx.Err()
+		return fmt.Errorf("%w: %w", ErrNudgeOutcomeUnknown, ctx.Err())
 	}
 }
 
