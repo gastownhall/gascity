@@ -30,6 +30,14 @@ func spawnReparentedChild(t *testing.T, env []string) int {
 		t.Fatalf("parse child pid from %q: %v", out, err)
 	}
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	// ga-961qe1 / ga-cfr67u: this spawns a generic, un-setsid'd sleep 300
+	// that is indistinguishable BY NAME from any other test's target —
+	// including this file's own TestSetsidDoesNotPreventOrphanSelection,
+	// which reuses this helper as a deliberate concurrent decoy. Logging the
+	// pid here is what makes a given call's child distinguishable from any
+	// other sleep 300 in test output/logs; callers must not rely on argv or
+	// process name to tell two spawnReparentedChild children apart.
+	t.Logf("spawnReparentedChild: spawned pid=%d (generic sleep 300, un-setsid'd)", pid)
 	return pid
 }
 
@@ -116,26 +124,92 @@ func TestScrubbedForkedSupervisorIsNotSelected(t *testing.T) {
 //
 // The child below is setsid'd — a strictly stronger detachment than the
 // Setpgid the real fork path uses — and is still selected.
+//
+// ga-961qe1 / ga-cfr67u: this test used to *discover* its own child after the
+// fact via an unscoped, system-wide `pgrep -f 'sleep 300' | tail -1`, which
+// has no way to tell this test's own target apart from any other `sleep 300`
+// on a shared host. Two decoys prove that concretely rather than by
+// inspection: an ambient one from spawnReparentedChild (this file's other
+// helper, and exactly what ga-961qe1's root cause names as a real-world decoy
+// source) started first, and a second, "race" one started immediately after
+// the target. Linux allocates PIDs from a single monotonic counter, so a
+// later fork reliably gets a higher PID within this short a window — the
+// race decoy is guaranteed to be the highest-PID `sleep 300` match, and the
+// OLD lookup, which always takes tail -1, is guaranteed to pick it instead of
+// the real target. The race decoy and the pgrep lookup itself must run from
+// within the *same* `sh -c` invocation that starts the target, not a
+// separate exec.Command: pgrep -f matches full command lines, so a later,
+// separate launcher's own `pgrep -f 'sleep 300'` argument text would itself
+// contain the substring "sleep 300" and — being forked after everything else
+// — would win tail -1 by matching *itself*, masking the real bug this test
+// exists to show (this reproduction's own first draft hit exactly that).
+// Identification of the target itself is captured directly via the combined
+// script's own $! for the target (mirroring spawnReparentedChild's
+// already-proven pattern), taken before the race decoy is started so it
+// isn't overwritten, and is never used for the buggy lookup below — that
+// lookup exists only to demonstrate the bug.
 func TestSetsidDoesNotPreventOrphanSelection(t *testing.T) {
 	if _, err := exec.LookPath("setsid"); err != nil {
 		t.Skip("setsid not available")
 	}
 	sessionID := "ga-repro-s434i0-setsid-" + strconv.Itoa(os.Getpid())
 
-	launcher := exec.Command("sh", "-c", "setsid sleep 300 >/dev/null 2>&1 & sleep 0.2; pgrep -f 'sleep 300' | tail -1")
+	// Ambient decoy: some other, unrelated sleep 300 already on the host
+	// before this test's own target even starts.
+	ambientDecoyPID := spawnReparentedChild(t, os.Environ())
+
+	// The setsid'd target, a same-shell race decoy started immediately after
+	// it, and the OLD unscoped lookup — all from one `sh -c` invocation. See
+	// the function comment for why the race decoy and the lookup cannot be
+	// split into separate exec.Command calls without the lookup's own
+	// launcher shell self-matching and winning tail -1.
+	launcher := exec.Command("sh", "-c",
+		"setsid sleep 300 >/dev/null 2>&1 & echo $!; "+
+			"sleep 300 >/dev/null 2>&1 & echo $!; "+
+			"sleep 0.2; "+
+			"pgrep -f 'sleep 300' | tail -1")
 	launcher.Env = append(os.Environ(), "GC_SESSION_ID="+sessionID)
 	out, err := launcher.Output()
 	if err != nil {
 		t.Fatalf("spawn setsid child: %v", err)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil {
-		t.Fatalf("parse setsid child pid from %q: %v", out, err)
+	lines := strings.Fields(strings.TrimSpace(string(out)))
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 pids (target, race decoy, identified) from launcher, got %q", out)
 	}
-	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	realPID, err := strconv.Atoi(lines[0])
+	if err != nil {
+		t.Fatalf("parse real target pid from %q: %v", out, err)
+	}
+	raceDecoyPID, err := strconv.Atoi(lines[1])
+	if err != nil {
+		t.Fatalf("parse race decoy pid from %q: %v", out, err)
+	}
+	pid, err := strconv.Atoi(lines[2])
+	if err != nil {
+		t.Fatalf("parse identified pid from %q: %v", out, err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(realPID, syscall.SIGKILL) })
+	t.Cleanup(func() { _ = syscall.Kill(raceDecoyPID, syscall.SIGKILL) })
+	t.Logf("ambient decoy pid=%d, real target pid=%d, race decoy pid=%d, unscoped pgrep identified pid=%d",
+		ambientDecoyPID, realPID, raceDecoyPID, pid)
+
+	// OLD (buggy) identification picked tail -1 of an unscoped, system-wide
+	// pgrep — confirm it landed on the race decoy specifically, and not the
+	// real target, the ambient decoy, or some other stray match (e.g. the
+	// lookup's own launcher shell — the exact confounder this reproduction's
+	// own first draft hit; see the function comment).
+	if pid != raceDecoyPID {
+		t.Fatalf("reproduction setup did not race as intended: unscoped pgrep returned %d, "+
+			"want the same-shell race decoy %d (real target is %d, ambient decoy is %d)",
+			pid, raceDecoyPID, realPID, ambientDecoyPID)
+	}
 
 	// Prove the detachment is real: a fully setsid'd process leads its own
-	// session and process group.
+	// session and process group. This fires here — on the misidentified
+	// decoy, not the real target — reproducing ga-961qe1's exact false
+	// failure: the decoy is a normal child of its own launcher shell, not a
+	// session leader, even though setsid worked fine for the real target.
 	sid := procStatField(t, pid, 3)
 	if sid != pid {
 		t.Fatalf("child %d is not a session leader (sid=%d); setsid did not take effect", pid, sid)
