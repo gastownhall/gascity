@@ -36,13 +36,18 @@ const tailChunkSize = 64 * 1024
 
 // ExtractTailMeta reads the last portion of a session file to extract
 // model and context usage without full DAG resolution. Returns nil (no
-// error) if the file has no usable data.
+// error) if the file has no usable data. A gc ACP capture (IsACPCapturePath)
+// yields only activity, derived from its JSON-RPC prompt/response pairing.
 func ExtractTailMeta(path string) (*TailMeta, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck // best-effort close on read-only file
+
+	if IsACPCapturePath(path) {
+		return extractACPCaptureTailMeta(f)
+	}
 
 	data, startsMidLine, err := readTail(f)
 	if err != nil {

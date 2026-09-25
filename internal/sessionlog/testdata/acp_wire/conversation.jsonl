@@ -1,0 +1,37 @@
+{"gc_acp_capture":1,"ts":"2026-09-25T10:00:00.000000001Z","session_id":"gc-s1","session_name":"worker-1","continuation_epoch":"1","runtime_epoch":"1","pid":4242}
+{"ts":"2026-09-25T10:00:00.1Z","dir":"out","msg":{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}}
+{"ts":"2026-09-25T10:00:00.2Z","dir":"in","msg":{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}}
+{"ts":"2026-09-25T10:00:00.3Z","dir":"out","redacted":true,"msg":{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/work/repo","mcpServers":[]}}}
+{"ts":"2026-09-25T10:00:00.4Z","dir":"in","msg":{"jsonrpc":"2.0","id":1,"result":{"sessionId":"acp-sess-1"}}}
+{"ts":"2026-09-25T10:00:01Z","dir":"out","msg":{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"acp-sess-1","prompt":[{"type":"text","text":"Fix the build."},{"type":"resource_link","uri":"file:///work/repo/main.go","name":"main.go"},{"type":"resource","resource":{"uri":"file:///work/repo/notes.md","text":"notes body"}}]}}}
+{"ts":"2026-09-25T10:00:01.1Z","dir":"in","msg":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-sess-1","update":{"sessionUpdate":"agent_thought_chunk","messageId":"think-1","content":{"type":"text","text":"Let me "}}}}}
+{"ts":"2026-09-25T10:00:01.2Z","dir":"in","msg":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-sess-1","update":{"sessionUpdate":"agent_thought_chunk","messageId":"think-1","content":{"type":"text","text":"look."}}}}}
+{"ts":"2026-09-25T10:00:01.3Z","dir":"in","msg":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-sess-1","update":{"sessionUpdate":"agent_message_chunk","messageId":"msg-1","content":{"type":"text","text":"I will "}}}}}
+{"ts":"2026-09-25T10:00:01.4Z","dir":"in","msg":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-sess-1","update":{"sessionUpdate":"usage_update","used":1200,"size":200000}}}}
+{"ts":"2026-09-25T10:00:01.5Z","dir":"in","msg":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-sess-1","update":{"sessionUpdate":"agent_message_chunk","messageId":"msg-1","content":{"type":"text","text":"run "}}}}}
+{"ts":"2026-09-25T10:00:01.6Z","dir":"in","msg":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-sess-1","update":{"sessionUpdate":"agent_message_chunk","messageId":"msg-1","content":{"type":"text","text":"the tests."}}}}}
+{"ts":"2026-09-25T10:00:02Z","dir":"in","msg":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-sess-1","update":{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"Run go test","kind":"execute","status":"pending","rawInput":{"command":"go test ./..."}}}}}
+{"ts":"2026-09-25T10:00:02.1Z","dir":"in","msg":{"jsonrpc":"2.0","id":0,"method":"session/request_permission","params":{"sessionId":"acp-sess-1","toolCall":{"toolCallId":"call-1","title":"Run go test"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}}
+{"ts":"2026-09-25T10:00:03Z","dir":"out","msg":{"jsonrpc":"2.0","id":0,"result":{"outcome":{"outcome":"selected","optionId":"allow-once"}}}}
+{"ts":"2026-09-25T10:00:03.1Z","dir":"in","msg":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-sess-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"in_progress"}}}}
+{"ts":"2026-09-25T10:00:04Z","dir":"in","msg":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-sess-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed","rawOutput":{"stdout":"ok  ./...","exitCode":0}}}}}
+{"ts":"2026-09-25T10:00:04.1Z","dir":"in","msg":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Tests "}}}}}
+{"ts":"2026-09-25T10:00:04.2Z","dir":"in","msg":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"pass."}}}}}
+{"ts":"2026-09-25T10:00:04.3Z","dir":"in","msg":{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn","usage":{"inputTokens":1200,"outputTokens":80,"thoughtTokens":20,"cachedReadTokens":300,"totalTokens":1600}}}}
+{"ts":"2026-09-25T10:01:00Z","dir":"out","msg":{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"acp-sess-1","prompt":[{"type":"text","text":"Now refactor it."}]}}}
+{"ts":"2026-09-25T10:01:00.1Z","dir":"in","msg":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-sess-1","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"Now refactor it."}}}}}
+{"ts":"2026-09-25T10:01:00.2Z","dir":"in","msg":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Starting the "}}}}}
+{"ts":"2026-09-25T10:01:00.3Z","dir":"in","msg":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"refactor"}}}}}
+{"ts":"2026-09-25T10:01:01Z","dir":"out","msg":{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"acp-sess-1"}}}
+{"ts":"2026-09-25T10:01:01.1Z","dir":"in","msg":{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}}
+{"ts":"2026-09-25T10:02:00Z","dir":"out","msg":{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"acp-sess-1","prompt":[{"type":"text","text":"Try again."}]}}}
+{"ts":"2026-09-25T10:02:00.5Z","dir":"in","msg":{"jsonrpc":"2.0","id":4,"error":{"code":-32603,"message":"model overloaded"}}}
+{"gc_acp_capture":1,"ts":"2026-09-25T10:05:00Z","session_id":"gc-s1","session_name":"worker-1","continuation_epoch":"1","runtime_epoch":"2","pid":4343}
+{"ts":"2026-09-25T10:05:00.1Z","dir":"out","msg":{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1}}}
+{"ts":"2026-09-25T10:05:00.2Z","dir":"in","msg":{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1}}}
+{"ts":"2026-09-25T10:05:00.3Z","dir":"in","msg":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-sess-1","update":{"sessionUpdate":"user_message_chunk","messageId":"u-replay","content":{"type":"text","text":"Earlier question"}}}}}
+{"ts":"2026-09-25T10:05:01Z","dir":"out","msg":{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"acp-sess-1","prompt":[{"type":"text","text":"Are you back?"}]}}}
+{"ts":"2026-09-25T10:05:01.1Z","dir":"in","msg":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-sess-1","update":{"sessionUpdate":"agent_message_chunk","messageId":"msg-1","content":{"type":"text","text":"Yes, "}}}}}
+{"ts":"2026-09-25T10:05:01.2Z","dir":"in","msg":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-sess-1","update":{"sessionUpdate":"agent_message_chunk","messageId":"msg-1","content":{"type":"text","text":"I am back."}}}}}
+{"ts":"2026-09-25T10:05:01.3Z","dir":"in","msg":{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}}
+{"ts":"2026-09-25T10:05:02Z","dir":"in","msg":{"jsonrpc":"2.0","method":"session/upd
