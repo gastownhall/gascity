@@ -566,7 +566,7 @@ func TestBusyState_SetAndCleared(t *testing.T) {
 	}
 
 	// Simulate receiving a response that matches the active prompt.
-	sc.clearActivePrompt(42)
+	sc.abandonPrompt(42, errors.New("test abandon"))
 
 	if sc.isBusy() {
 		t.Error("should not be busy after clearing activePromptID")
@@ -586,7 +586,7 @@ func TestWaitIdleUnblocksPromptlyWhenBusyStateClears(t *testing.T) {
 	}()
 
 	time.Sleep(20 * time.Millisecond)
-	sc.clearActivePrompt(42)
+	sc.abandonPrompt(42, errors.New("test abandon"))
 
 	select {
 	case ok := <-done:

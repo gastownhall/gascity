@@ -28,7 +28,10 @@ type sessionConn struct {
 
 	mu             sync.Mutex
 	sessionID      string
-	activePromptID int64 // non-zero when a prompt response is pending
+	activePromptID int64       // non-zero when a prompt response is pending
+	currentTurn    *turnRecord // the running turn; nil when idle
+	lastTurn       *turnRecord // the most recently finished turn
+	drained        bool        // stdout reader exited; no turn can finish again
 	outputBuf      []string
 	outputBufMax   int
 	lastActivity   time.Time
@@ -122,8 +125,9 @@ func (sc *sessionConn) dispatch(msg JSONRPCMessage) {
 		if ok {
 			delete(sc.pending, *msg.ID)
 		}
-		// Clear busy state if this is the active prompt response.
+		// Settle the turn if this is the active prompt response.
 		if sc.activePromptID != 0 && *msg.ID == sc.activePromptID {
+			sc.endTurnLocked(promptOutcome(msg), time.Now())
 			sc.markIdleLocked()
 		}
 		sc.mu.Unlock()
@@ -270,10 +274,13 @@ func (sc *sessionConn) setActivePrompt(id int64) {
 	sc.mu.Unlock()
 }
 
-// drainPending clears busy state and closes all pending response channels.
-// Safe to call multiple times — closed channels are deleted from the map.
+// drainPending fails the running turn, clears busy state, and closes all
+// pending response channels. Safe to call multiple times — closed channels
+// are deleted from the map.
 func (sc *sessionConn) drainPending() {
 	sc.mu.Lock()
+	sc.drained = true
+	sc.endTurnLocked(turnOutcome{state: turnFailed, err: turnFailureAgentExited}, time.Now())
 	sc.markIdleLocked()
 	for id, ch := range sc.pending {
 		close(ch)
@@ -282,9 +289,12 @@ func (sc *sessionConn) drainPending() {
 	sc.mu.Unlock()
 }
 
-func (sc *sessionConn) clearActivePrompt(id int64) {
+// abandonPrompt fails the turn for prompt id, which was never delivered to
+// the agent, and clears busy state.
+func (sc *sessionConn) abandonPrompt(id int64, cause error) {
 	sc.mu.Lock()
-	if id == 0 || sc.activePromptID == id {
+	if sc.activePromptID == id {
+		sc.endTurnLocked(turnOutcome{state: turnFailed, err: fmt.Sprintf("sending prompt: %v", cause)}, time.Now())
 		sc.markIdleLocked()
 	}
 	sc.mu.Unlock()
@@ -312,6 +322,7 @@ func (sc *sessionConn) markBusyLocked(id int64) {
 		sc.idleCh = make(chan struct{})
 	}
 	sc.activePromptID = id
+	sc.startTurnLocked(id, time.Now())
 }
 
 func (sc *sessionConn) markIdleLocked() {

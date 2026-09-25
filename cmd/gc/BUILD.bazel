@@ -837,6 +837,7 @@ go_test(
         "cmd_mcp_test.go",
         "cmd_metrics_test.go",
         "cmd_migrate_test.go",
+        "cmd_nudge_acp_idle_test.go",
         "cmd_nudge_poll_due_work_gate_test.go",
         "cmd_nudge_runtime_test.go",
         "cmd_nudge_test.go",

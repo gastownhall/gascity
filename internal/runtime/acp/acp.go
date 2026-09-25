@@ -72,6 +72,8 @@ var (
 	_ runtime.Provider                    = (*Provider)(nil)
 	_ runtime.InteractionProvider         = (*Provider)(nil)
 	_ runtime.TransportCapabilityProvider = (*Provider)(nil)
+	_ runtime.IdleWaitProvider            = (*Provider)(nil)
+	_ runtime.IdleSnapshotProvider        = (*Provider)(nil)
 )
 
 // NewProvider returns an ACP [Provider] that stores socket files in
@@ -586,7 +588,7 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 
 	ch, err := sc.sendRequest(msg)
 	if err != nil {
-		sc.clearActivePrompt(id)
+		sc.abandonPrompt(id, err)
 		// Non-pipe failures (e.g., marshal errors) have nothing to do with
 		// the agent lifecycle, so surface them immediately rather than
 		// stalling the caller on sc.done.
@@ -613,8 +615,8 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 		}
 	}
 
-	// Drain the response channel in the background. If the agent
-	// returns a JSON-RPC error, log it rather than silently dropping.
+	// Drain the response channel in the background. The read loop records
+	// the turn outcome; a JSON-RPC error is also logged for operators.
 	go func() {
 		resp, ok := <-ch
 		if !ok {
