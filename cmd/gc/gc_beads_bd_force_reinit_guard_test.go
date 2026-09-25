@@ -538,6 +538,201 @@ esac
 	}
 }
 
+// TestStoreHoldsBdTablesConsidersParkedMigrationHistory pins the other half
+// of ga-m1qxc8: a parked store — no bd tables, no active migration cursor,
+// but real migration history left behind by a migrator that has since
+// exited — must not be misread as a genuinely fresh database. ga-3jssfa
+// already protects the actively-migrating case (cursor>0); the mayor's exit
+// contract for ga-m1qxc8 calls out a second case separately, where the
+// cursor itself reads 0 but schema_migrations still holds rows. Reading
+// that as fresh sends op_init down the same destructive `bd init --force`
+// path TestGcBeadsBdInitRefusesForcedReinitWhenDatabaseHoldsBdTables guards
+// against for the cursor>0 case.
+//
+// bd_runtime_schema_migration_count does not exist yet: this test names it
+// deliberately, before it is implemented, so bd_runtime_store_holds_bd_tables
+// gains a third signal to consult once table count and cursor both read
+// empty.
+func TestStoreHoldsBdTablesConsidersParkedMigrationHistory(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+
+	src := readGCBeadsBdScript(t)
+	validSQLName := extractShellFunction(t, src, "valid_sql_name")
+	tableCount := extractShellFunction(t, src, "bd_runtime_bd_table_count")
+	schemaCursor := extractShellFunction(t, src, "bd_runtime_schema_cursor")
+	migrationCount := extractShellFunction(t, src, "bd_runtime_schema_migration_count")
+	holdsTables := extractShellFunction(t, src, "bd_runtime_store_holds_bd_tables")
+
+	cases := []struct {
+		name           string
+		tableCountCSV  string
+		tableCountExit int
+		migExistsCSV   string
+		migExistsExit  int
+		cursorCSV      string
+		cursorExit     int
+		migCountCSV    string
+		migCountExit   int
+		want           int
+		why            string
+	}{
+		{
+			name:          "parked_store_with_migration_history_counts_as_present",
+			tableCountCSV: "cnt\n0\n", tableCountExit: 0,
+			migExistsCSV: "cnt\n1\n", migExistsExit: 0,
+			cursorCSV: "cur\n0\n", cursorExit: 0,
+			migCountCSV: "cnt\n3\n", migCountExit: 0,
+			want: bdTablesPresent,
+			why:  "a migrator that already ran and exited left real history behind; the cursor reading 0 must not be read as fresh when schema_migrations still holds rows (ga-m1qxc8's parked-DB case)",
+		},
+		{
+			name:          "empty_migration_table_still_authorizes_reinit",
+			tableCountCSV: "cnt\n0\n", tableCountExit: 0,
+			migExistsCSV: "cnt\n1\n", migExistsExit: 0,
+			cursorCSV: "cur\n0\n", cursorExit: 0,
+			migCountCSV: "cnt\n0\n", migCountExit: 0,
+			want: bdTablesAbsent,
+			why:  "a created-but-empty schema_migrations table is still the ordinary fresh-init path; only actual rows make a parked store present, matching the exit contract's \"ZERO rows\" wording",
+		},
+		{
+			name:          "populated_store_short_circuits_before_row_count_query",
+			tableCountCSV: "cnt\n3\n", tableCountExit: 0,
+			migExistsCSV: "cnt\n1\n", migExistsExit: 0,
+			cursorCSV: "cur\n0\n", cursorExit: 0,
+			migCountCSV: "", migCountExit: 1,
+			want: bdTablesPresent,
+			why:  "the four-table count alone already proves the store is populated; the row-count query must never even run, so a failing canned response here must not change the answer",
+		},
+		{
+			name:          "active_cursor_short_circuits_before_row_count_query",
+			tableCountCSV: "cnt\n0\n", tableCountExit: 0,
+			migExistsCSV: "cnt\n1\n", migExistsExit: 0,
+			cursorCSV: "cur\n5\n", cursorExit: 0,
+			migCountCSV: "", migCountExit: 1,
+			want: bdTablesPresent,
+			why:  "ga-3jssfa's active-migrator protection must still resolve the answer by itself; the new row-count signal is only consulted when count and cursor both read empty, so a failing canned response here must not change the answer",
+		},
+		{
+			name:          "migration_row_count_query_failure_is_undetermined_not_absent",
+			tableCountCSV: "cnt\n0\n", tableCountExit: 0,
+			migExistsCSV: "cnt\n1\n", migExistsExit: 0,
+			cursorCSV: "cur\n0\n", cursorExit: 0,
+			migCountCSV: "", migCountExit: 1,
+			want: bdTablesUnknown,
+			why:  "a row-count query that does not answer is evidence of nothing and must not be read as zero rows, which would silently re-authorize the destructive reinit",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			writeFakeParkedMigrationDolt(t, binDir,
+				tc.tableCountCSV, tc.tableCountExit,
+				tc.migExistsCSV, tc.migExistsExit,
+				tc.cursorCSV, tc.cursorExit,
+				tc.migCountCSV, tc.migCountExit)
+
+			script := "connect_host() { printf '127.0.0.1'; }\n" +
+				validSQLName + "\n" +
+				tableCount + "\n" +
+				schemaCursor + "\n" +
+				migrationCount + "\n" +
+				holdsTables + "\n" +
+				"bd_runtime_store_holds_bd_tables hq\n"
+
+			got := exitCodeOf(t, runGCBeadsBdSnippet(t, script, binDir))
+			if got != tc.want {
+				t.Fatalf("bd_runtime_store_holds_bd_tables = %d, want %d (table count=%q/%d, migrations exist=%q/%d, cursor=%q/%d, migration row count=%q/%d): %s",
+					got, tc.want,
+					tc.tableCountCSV, tc.tableCountExit,
+					tc.migExistsCSV, tc.migExistsExit,
+					tc.cursorCSV, tc.cursorExit,
+					tc.migCountCSV, tc.migCountExit,
+					tc.why)
+			}
+		})
+	}
+}
+
+// writeFakeParkedMigrationDolt installs a dolt stub that answers four
+// distinct queries differently by dispatching on the SQL text sent via -q:
+// the four-table count query, the schema_migrations existence probe (shared
+// verbatim by bd_runtime_schema_cursor and bd_runtime_schema_migration_count
+// — both ask it identically), the MAX(version) cursor value query, and the
+// COUNT(*) row-count value query. The cursor and row-count queries both
+// contain the literal "schema_migrations", so MAX(version) must be matched
+// before the row-count catch-all or every row-count case would silently
+// read the cursor's canned response instead of its own.
+func writeFakeParkedMigrationDolt(t *testing.T, dir string,
+	tableCountCSV string, tableCountExit int,
+	migExistsCSV string, migExistsExit int,
+	cursorCSV string, cursorExit int,
+	migCountCSV string, migCountExit int,
+) {
+	t.Helper()
+
+	tableCountFile := filepath.Join(dir, "table-count.csv")
+	migExistsFile := filepath.Join(dir, "migrations-exist.csv")
+	cursorFile := filepath.Join(dir, "cursor.csv")
+	migCountFile := filepath.Join(dir, "migration-count.csv")
+	if err := os.WriteFile(tableCountFile, []byte(tableCountCSV), 0o600); err != nil {
+		t.Fatalf("write fake dolt payload: %v", err)
+	}
+	if err := os.WriteFile(migExistsFile, []byte(migExistsCSV), 0o600); err != nil {
+		t.Fatalf("write fake dolt payload: %v", err)
+	}
+	if err := os.WriteFile(cursorFile, []byte(cursorCSV), 0o600); err != nil {
+		t.Fatalf("write fake dolt payload: %v", err)
+	}
+	if err := os.WriteFile(migCountFile, []byte(migCountCSV), 0o600); err != nil {
+		t.Fatalf("write fake dolt payload: %v", err)
+	}
+
+	body := fmt.Sprintf(`#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+case "$query" in
+  *"'issues'"*)
+    cat %q
+    exit %d
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    cat %q
+    exit %d
+    ;;
+  *"MAX(version)"*)
+    cat %q
+    exit %d
+    ;;
+  *"schema_migrations"*)
+    cat %q
+    exit %d
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, tableCountFile, tableCountExit,
+		migExistsFile, migExistsExit,
+		cursorFile, cursorExit,
+		migCountFile, migCountExit)
+	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake dolt: %v", err)
+	}
+}
+
 // TestForceReinitGuardWaitOutlastsCursorAdvancing pins the other half of the
 // same bug: even once bd_runtime_store_holds_bd_tables correctly answers
 // "present" for a mid-migration store, op_init only avoids the destructive
