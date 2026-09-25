@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,6 +36,13 @@ type protocolSession struct {
 // the given scenario flags plus --log-dir, and registers cleanup.
 func startProtocolFake(t *testing.T, args ...string) *protocolSession {
 	t.Helper()
+	return startProtocolFakeWithCancelTimeout(t, protocolWait, args...)
+}
+
+// startProtocolFakeWithCancelTimeout is startProtocolFake with the provider's
+// Interrupt settle bound (Config.CancelTimeout) set to cancelTimeout.
+func startProtocolFakeWithCancelTimeout(t *testing.T, cancelTimeout time.Duration, args ...string) *protocolSession {
+	t.Helper()
 	var fixture acpConformanceFixture
 	if err := prepareACPConformanceFixture(t, &fixture); err != nil {
 		t.Fatal(err)
@@ -44,6 +52,7 @@ func startProtocolFake(t *testing.T, args ...string) *protocolSession {
 		HandshakeTimeout:  protocolWait,
 		NudgeBusyTimeout:  protocolWait,
 		OutputBufferLines: 100,
+		CancelTimeout:     cancelTimeout,
 	})
 	name := fmt.Sprintf("gc-acp-proto-%d-%d", os.Getpid(), protocolCounter.Add(1))
 	command := "exec " + shellQuote(fixture.command) + " --log-dir " + shellQuote(logDir)
@@ -241,7 +250,10 @@ func TestACPProtocolExitDuringPromptDrains(t *testing.T) {
 }
 
 func TestACPProtocolSigintCancelAnswersInFlightPrompt(t *testing.T) {
-	s := startProtocolFake(t, "--sigint", "cancel", "--turn-delay", "1h")
+	// The fake ignores session/cancel, so Interrupt falls back to SIGINT once
+	// the settle bound passes.
+	s := startProtocolFakeWithCancelTimeout(t, 300*time.Millisecond,
+		"--on-cancel", "ignore", "--sigint", "cancel", "--turn-delay", "1h")
 	s.nudge(t, "long turn")
 	if !s.conn(t).isBusy() {
 		t.Fatal("prompt not in flight after Nudge")
@@ -271,7 +283,8 @@ func TestACPProtocolSigintCancelAnswersInFlightPrompt(t *testing.T) {
 const acpWireCancelled = "cancelled" //nolint:misspell // ACP wire value
 
 func TestACPProtocolSigintCancelStopReasonIsWireSpelling(t *testing.T) {
-	s := startProtocolFake(t, "--sigint", "cancel", "--turn-delay", "1h")
+	s := startProtocolFakeWithCancelTimeout(t, 300*time.Millisecond,
+		"--on-cancel", "ignore", "--sigint", "cancel", "--turn-delay", "1h")
 	sc := s.conn(t)
 	sc.mu.Lock()
 	sessID := sc.sessionID
@@ -542,5 +555,129 @@ func waitForPrompt(t *testing.T, s *protocolSession) {
 			t.Fatalf("fake never recorded a prompt; methods = %v", s.methods(t))
 		case <-tick.C:
 		}
+	}
+}
+
+// methodCount returns how many times the fake logged method.
+func (s *protocolSession) methodCount(t *testing.T, method string) int {
+	t.Helper()
+	n := 0
+	for _, m := range s.methods(t) {
+		if m == method {
+			n++
+		}
+	}
+	return n
+}
+
+func TestACPProtocolInterruptSettlesBySessionCancel(t *testing.T) {
+	s := startProtocolFake(t, "--on-cancel", "reply", "--cancel-latency", "200ms", "--turn-delay", "1h")
+	s.nudge(t, "long turn")
+	waitForPrompt(t, s)
+	start := time.Now()
+	if err := s.p.Interrupt(s.name); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+	elapsed := time.Since(start)
+	if elapsed < 200*time.Millisecond {
+		t.Fatalf("Interrupt returned after %v, want it to wait for the 200ms cancel latency", elapsed)
+	}
+	if elapsed >= protocolWait {
+		t.Fatalf("Interrupt took %v, want it settled within the %v bound", elapsed, protocolWait)
+	}
+	if s.conn(t).isBusy() {
+		t.Fatal("turn still busy after Interrupt returned")
+	}
+	if n := s.methodCount(t, methodSessionCancel); n != 1 {
+		t.Fatalf("methods.jsonl has %d session/cancel, want 1 (%v)", n, s.methods(t))
+	}
+	if signals := s.jsonlRecords(t, "signals.jsonl"); len(signals) != 0 {
+		t.Fatalf("signals.jsonl = %v, want no signal when session/cancel settles", signals)
+	}
+}
+
+func TestACPProtocolInterruptIdleSendsNothing(t *testing.T) {
+	s := startProtocolFake(t, "--sigint", "exit")
+	if err := s.p.Interrupt(s.name); err != nil {
+		t.Fatalf("Interrupt(idle): %v", err)
+	}
+	// The prompt round trip orders anything Interrupt wrote before it.
+	s.nudge(t, "still here")
+	s.waitIdle(t)
+	if !s.conn(t).alive() {
+		t.Fatal("fake exited: an idle Interrupt must not signal")
+	}
+	if n := s.methodCount(t, methodSessionCancel); n != 0 {
+		t.Fatalf("idle Interrupt sent %d session/cancel", n)
+	}
+	if signals := s.jsonlRecords(t, "signals.jsonl"); len(signals) != 0 {
+		t.Fatalf("signals.jsonl = %v, want none for an idle Interrupt", signals)
+	}
+}
+
+func TestACPProtocolInterruptNotSettledKeepsAgent(t *testing.T) {
+	prev := interruptSIGINTWait
+	interruptSIGINTWait = 100 * time.Millisecond
+	t.Cleanup(func() { interruptSIGINTWait = prev })
+	s := startProtocolFakeWithCancelTimeout(t, 100*time.Millisecond,
+		"--on-cancel", "ignore", "--sigint", "ignore", "--turn-delay", "1h")
+	s.nudge(t, "stubborn")
+	waitForPrompt(t, s)
+	err := s.p.Interrupt(s.name)
+	if !errors.Is(err, runtime.ErrInterruptNotSettled) {
+		t.Fatalf("Interrupt = %v, want runtime.ErrInterruptNotSettled", err)
+	}
+	if !s.conn(t).alive() {
+		t.Fatal("fake exited: Interrupt must never kill the agent")
+	}
+	deadline := time.NewTimer(protocolWait)
+	defer deadline.Stop()
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for len(s.jsonlRecords(t, "signals.jsonl")) < interruptSIGINTAttempts {
+		select {
+		case <-deadline.C:
+			t.Fatalf("signals.jsonl = %v, want %d SIGINT records", s.jsonlRecords(t, "signals.jsonl"), interruptSIGINTAttempts)
+		case <-tick.C:
+		}
+	}
+	for _, rec := range s.jsonlRecords(t, "signals.jsonl") {
+		if rec["signal"] != syscall.SIGINT.String() {
+			t.Fatalf("signals.jsonl record %v, want only SIGINT", rec)
+		}
+	}
+}
+
+// TestACPProtocolInterruptKeepsAgentThatExitsOnSIGINT is the spike
+// regression: an agent that exits on SIGINT keeps its conversation because
+// session/cancel settles the turn and no signal is sent.
+func TestACPProtocolInterruptKeepsAgentThatExitsOnSIGINT(t *testing.T) {
+	s := startProtocolFake(t, "--sigint", "exit", "--on-cancel", "reply", "--turn-delay", "1h")
+	sc := s.conn(t)
+	pid := sc.cmd.Process.Pid
+	s.nudge(t, "long turn")
+	waitForPrompt(t, s)
+	if err := s.p.Interrupt(s.name); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+	// --turn-delay would hold the next prompt too; answer it by cancel as
+	// well. What matters is that the same process receives it.
+	s.nudge(t, "next")
+	deadline := time.NewTimer(protocolWait)
+	defer deadline.Stop()
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for len(s.jsonlRecords(t, "prompts.jsonl")) < 2 {
+		select {
+		case <-deadline.C:
+			t.Fatalf("the agent never received the prompt after Interrupt; methods = %v", s.methods(t))
+		case <-tick.C:
+		}
+	}
+	if got := s.conn(t); got != sc || !sc.alive() || got.cmd.Process.Pid != pid {
+		t.Fatalf("agent pid %d replaced or exited after Interrupt", pid)
+	}
+	if signals := s.jsonlRecords(t, "signals.jsonl"); len(signals) != 0 {
+		t.Fatalf("signals.jsonl = %v, want none", signals)
 	}
 }
