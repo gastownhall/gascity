@@ -32,6 +32,12 @@ var ErrSessionInitializing = errors.New("session is initializing")
 // structured pending/respond interaction capability for the requested session.
 var ErrInteractionUnsupported = errors.New("session interaction is unsupported")
 
+// ErrInteractionResponseInvalid reports that a response to a pending
+// interaction cannot be applied: it names no outstanding request, or its
+// action is unknown or not offered by the interaction. The interaction stays
+// pending so the caller can answer again.
+var ErrInteractionResponseInvalid = errors.New("interaction response is invalid")
+
 // ErrSessionDiedDuringStartup reports that a provider created a session
 // process, but it exited before startup completed successfully.
 var ErrSessionDiedDuringStartup = errors.New("session died during startup")

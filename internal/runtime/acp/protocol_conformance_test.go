@@ -266,18 +266,137 @@ func TestACPProtocolSigintCancelAnswersInFlightPrompt(t *testing.T) {
 	}
 }
 
-func TestACPProtocolPermissionRequestAnsweredMethodNotFound(t *testing.T) {
-	// gc on this base serves no session/request_permission, so it answers
-	// -32601 and the fake rejects the tool, then completes the turn.
-	s := startProtocolFake(t, "--request-permission", "--permission-timeout", "1h")
+// waitPermission waits until the fake's permission request is pending.
+func (s *protocolSession) waitPermission(t *testing.T) *runtime.PendingInteraction {
+	t.Helper()
+	deadline := time.NewTimer(protocolWait)
+	defer deadline.Stop()
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		pending, err := s.p.Pending(s.name)
+		if err != nil {
+			t.Fatalf("Pending: %v", err)
+		}
+		if pending != nil {
+			return pending
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("permission request never became pending")
+		case <-tick.C:
+		}
+	}
+}
+
+// assertPermissionReply checks that the fake received exactly one client
+// reply, echoing wantID, with the given RequestPermissionOutcome.
+func assertPermissionReply(t *testing.T, s *protocolSession, wantID any, wantOutcome map[string]any) {
+	t.Helper()
+	// A cancelled reply is written asynchronously and can land after the
+	// turn settles, so wait for the fake to log it.
+	deadline := time.NewTimer(protocolWait)
+	defer deadline.Stop()
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	replies := s.jsonlRecords(t, "responses.jsonl")
+	for len(replies) == 0 {
+		select {
+		case <-deadline.C:
+			t.Fatal("fake never logged a client reply")
+		case <-tick.C:
+		}
+		replies = s.jsonlRecords(t, "responses.jsonl")
+	}
+	if len(replies) != 1 {
+		t.Fatalf("responses.jsonl = %v, want one client reply", replies)
+	}
+	reply := replies[0]
+	if reply["id"] != wantID {
+		t.Fatalf("reply id = %#v, want %#v", reply["id"], wantID)
+	}
+	result, _ := reply["result"].(map[string]any)
+	got, _ := json.Marshal(result["outcome"])
+	want, _ := json.Marshal(wantOutcome)
+	if string(got) != string(want) {
+		t.Fatalf("reply outcome = %s, want %s (reply %v)", got, want, reply)
+	}
+}
+
+func TestACPProtocolPermissionApproveRoundTrip(t *testing.T) {
+	s := startProtocolFake(t, "--request-permission")
 	s.nudge(t, "needs approval")
+	pending := s.waitPermission(t)
+	if pending.RequestID != "acp-1" || pending.Kind != "approval" || pending.Prompt != "Run: touch marker" {
+		t.Fatalf("Pending = %#v, want acp-1 approval for the tool call", pending)
+	}
+	if !s.conn(t).isBusy() {
+		t.Fatal("turn not busy while the permission is outstanding")
+	}
+	if err := s.p.Respond(s.name, runtime.InteractionResponse{RequestID: pending.RequestID, Action: "approve"}); err != nil {
+		t.Fatalf("Respond: %v", err)
+	}
 	s.waitIdle(t)
 
 	out := s.peek(t)
-	if !strings.Contains(out, "permission rejected: error -32601") || !strings.Contains(out, "echo: needs approval") {
-		t.Fatalf("Peek = %q, want rejected tool output then the echo", out)
+	if !strings.Contains(out, "permission granted: allow_once") || !strings.Contains(out, "echo: needs approval") {
+		t.Fatalf("Peek = %q, want granted tool output then the echo", out)
 	}
-	assertMethodNotFoundReplies(t, s, 1.0)
+	assertPermissionReply(t, s, 1.0, map[string]any{"outcome": "selected", "optionId": "allow_once"})
+}
+
+func TestACPProtocolPermissionDenyStringID(t *testing.T) {
+	s := startProtocolFake(t, "--request-permission", "--request-id-string")
+	s.nudge(t, "needs approval")
+	pending := s.waitPermission(t)
+	if pending.RequestID != `acp-"perm-1"` {
+		t.Fatalf("RequestID = %q, want acp-\"perm-1\"", pending.RequestID)
+	}
+	if err := s.p.Respond(s.name, runtime.InteractionResponse{RequestID: pending.RequestID, Action: "deny"}); err != nil {
+		t.Fatalf("Respond: %v", err)
+	}
+	s.waitIdle(t)
+
+	if out := s.peek(t); !strings.Contains(out, "permission rejected: reject_once") {
+		t.Fatalf("Peek = %q, want rejected tool output", out)
+	}
+	assertPermissionReply(t, s, "perm-1", map[string]any{"outcome": "selected", "optionId": "reject_once"})
+}
+
+func TestACPProtocolPermissionCancelledOnInterrupt(t *testing.T) {
+	s := startProtocolFake(t, "--request-permission", "--sigint", "cancel")
+	s.nudge(t, "needs approval")
+	s.waitPermission(t)
+	if err := s.p.Interrupt(s.name); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+	if pending, err := s.p.Pending(s.name); err != nil || pending != nil {
+		t.Fatalf("Pending after Interrupt = %#v, %v; want nil, nil", pending, err)
+	}
+	s.waitIdle(t)
+
+	if out := s.peek(t); strings.Contains(out, "echo:") || strings.Contains(out, "permission granted") {
+		t.Fatalf("Peek = %q, want the cancelled turn to produce no echo or grant", out)
+	}
+	assertPermissionReply(t, s, 1.0, map[string]any{"outcome": "cancelled"}) //nolint:misspell // ACP wire spelling
+}
+
+func TestACPProtocolPermissionDroppedWhenAgentCancelsRequest(t *testing.T) {
+	// The fake gives up on the request, sends $/cancel_request, and finishes
+	// the turn; gc forgets the request without replying.
+	s := startProtocolFake(t, "--request-permission", "--permission-timeout", "50ms")
+	s.nudge(t, "needs approval")
+	s.waitIdle(t)
+
+	if pending, err := s.p.Pending(s.name); err != nil || pending != nil {
+		t.Fatalf("Pending after the turn = %#v, %v; want nil, nil", pending, err)
+	}
+	if out := s.peek(t); !strings.Contains(out, "permission rejected: timeout") || !strings.Contains(out, "echo: needs approval") {
+		t.Fatalf("Peek = %q, want the timed-out tool output then the echo", out)
+	}
+	if replies := s.jsonlRecords(t, "responses.jsonl"); len(replies) != 0 {
+		t.Fatalf("responses.jsonl = %v, want no reply to a request the agent cancelled", replies)
+	}
 }
 
 func TestACPProtocolFSReadAnsweredMethodNotFound(t *testing.T) {

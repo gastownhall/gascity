@@ -1114,17 +1114,6 @@ func TestStop_PreservesMetadataWhenSocketRejectsStop(t *testing.T) {
 	}
 }
 
-func TestPendingAndRespondUnsupported(t *testing.T) {
-	p := newTestProvider(t)
-
-	if _, err := p.Pending("any"); !errors.Is(err, runtime.ErrInteractionUnsupported) {
-		t.Fatalf("Pending error = %v, want ErrInteractionUnsupported", err)
-	}
-	if err := p.Respond("any", runtime.InteractionResponse{Action: "approve"}); !errors.Is(err, runtime.ErrInteractionUnsupported) {
-		t.Fatalf("Respond error = %v, want ErrInteractionUnsupported", err)
-	}
-}
-
 func TestHandshakeTimeout_RespectsConfig(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "acp")
 	p := NewProviderWithDir(dir, Config{

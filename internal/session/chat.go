@@ -906,10 +906,14 @@ func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Be
 	return true, nil
 }
 
+// pendingInteractionLocked returns ErrPendingInteraction when the session is
+// blocked on an interaction. A provider that cannot see the runtime session
+// (ErrSessionNotFound) has nothing pending, as Pending and Respond treat it;
+// delivery then reports its own error if the session is really gone.
 func (m *Manager) pendingInteractionLocked(sessName string) error {
 	if ip, ok := m.sp.(runtime.InteractionProvider); ok {
 		pending, err := ip.Pending(sessName)
-		if err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		if err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) && !errors.Is(err, runtime.ErrSessionNotFound) {
 			return fmt.Errorf("getting pending interaction: %w", err)
 		}
 		if pending != nil {
@@ -1175,6 +1179,9 @@ func (m *Manager) Respond(id string, response runtime.InteractionResponse) error
 			if errors.Is(err, runtime.ErrSessionNotFound) {
 				log.Printf("session: respond runtime session gone for %q: %v", sessName, err)
 				return ErrNoPendingInteraction
+			}
+			if errors.Is(err, runtime.ErrInteractionResponseInvalid) {
+				return fmt.Errorf("%w: %w", ErrInteractionMismatch, err)
 			}
 			return fmt.Errorf("responding to pending interaction: %w", err)
 		}

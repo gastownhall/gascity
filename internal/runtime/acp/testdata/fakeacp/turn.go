@@ -281,8 +281,8 @@ func parsePermissionReply(msg message) (permissionDecision, string) {
 		return permissionRejected, "malformed reply"
 	}
 	switch {
-	case result.Outcome.Outcome == "canceled":
-		return permissionCancelled, "canceled"
+	case result.Outcome.Outcome == "cancelled": //nolint:misspell // ACP wire spelling
+		return permissionCancelled, "cancelled" //nolint:misspell // ACP wire spelling
 	case result.Outcome.Outcome == "selected" && strings.HasPrefix(result.Outcome.OptionID, "allow_"):
 		return permissionAllowed, result.Outcome.OptionID
 	default:

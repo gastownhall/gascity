@@ -39,6 +39,10 @@ type sessionConn struct {
 	activityPublisher       *activityPublisher
 	activityPublisherClosed bool
 
+	// permissions holds the agent's unanswered session/request_permission
+	// requests, oldest first.
+	permissions []pendingPermission
+
 	// unsupportedSeen records agent request methods already logged as
 	// unsupported, so each is reported once per connection.
 	unsupportedSeen map[string]struct{}
@@ -97,7 +101,7 @@ func (sc *sessionConn) readLoop(r io.Reader) {
 		// Agent->client requests are answered before the typed decode,
 		// which cannot represent string ids.
 		if req, ok := parseAgentRequest([]byte(line)); ok {
-			sc.answerUnsupported(req)
+			sc.handleAgentRequest(req)
 			continue
 		}
 
@@ -125,9 +129,20 @@ func (sc *sessionConn) dispatch(msg JSONRPCMessage) {
 		sc.handleUpdate(msg)
 		return
 	}
+	if msg.ID == nil && msg.Method == methodCancelRequest {
+		sc.dropCancelledPermission(msg.Params)
+		return
+	}
 
 	// Response (has ID, no method): route to waiter.
 	if msg.ID != nil && msg.Method == "" {
+		// The turn is over once its prompt is answered, so no permission the
+		// agent asked for during it can still be granted. Cancel them before
+		// the turn reads as idle. Only this loop adds permissions, so none
+		// can arrive in between.
+		if sc.isActivePrompt(*msg.ID) {
+			sc.cancelOutstandingPermissions()
+		}
 		sc.mu.Lock()
 		ch, ok := sc.pending[*msg.ID]
 		if ok {
@@ -285,9 +300,11 @@ func (sc *sessionConn) setActivePrompt(id int64) {
 	sc.mu.Unlock()
 }
 
-// drainPending clears busy state and closes all pending response channels.
-// Safe to call multiple times — closed channels are deleted from the map.
+// drainPending cancels outstanding permission requests, clears busy state
+// and closes all pending response channels. Safe to call multiple times —
+// closed channels are deleted from the map.
 func (sc *sessionConn) drainPending() {
+	sc.cancelOutstandingPermissions()
 	sc.mu.Lock()
 	sc.markIdleLocked()
 	for id, ch := range sc.pending {
@@ -303,6 +320,13 @@ func (sc *sessionConn) clearActivePrompt(id int64) {
 		sc.markIdleLocked()
 	}
 	sc.mu.Unlock()
+}
+
+// isActivePrompt reports whether id is the in-flight session/prompt.
+func (sc *sessionConn) isActivePrompt(id int64) bool {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	return sc.activePromptID != 0 && id == sc.activePromptID
 }
 
 // isBusy reports whether a prompt response is pending.

@@ -76,6 +76,7 @@ go_library(
 go_test(
     name = "session_test",
     srcs = [
+        "acp_permission_test.go",
         "address_directory_test.go",
         "assignee_identities_test.go",
         "canonical_identity_test.go",
@@ -168,6 +169,7 @@ go_test(
         "//internal/nudgequeue",
         "//internal/pidutil",
         "//internal/runtime",
+        "//internal/runtime/acp",
         "//internal/runtime/auto",
         "//internal/sessionlog",
         "//internal/storebinding/sqlite",

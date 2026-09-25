@@ -490,8 +490,9 @@ func (p *Provider) Stop(name string) error {
 	return err
 }
 
-// Interrupt sends SIGINT to the named session's process.
-// Best-effort: returns nil if the session doesn't exist.
+// Interrupt cancels the session's outstanding permission requests and sends
+// SIGINT to its process. Best-effort: returns nil if the session doesn't
+// exist.
 func (p *Provider) Interrupt(name string) error {
 	p.mu.Lock()
 	sc, ok := p.conns[name]
@@ -501,6 +502,7 @@ func (p *Provider) Interrupt(name string) error {
 		if sc.cmd == nil {
 			return nil
 		}
+		sc.cancelOutstandingPermissions()
 		return syscall.Kill(-sc.cmd.Process.Pid, syscall.SIGINT)
 	}
 
@@ -628,20 +630,6 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	}()
 
 	return nil
-}
-
-// Pending reports structured pending interactions. ACP only tracks whether an
-// outbound prompt is in flight; that busy state is not a user-facing blocking
-// interaction, so the provider intentionally reports this capability as
-// unsupported.
-func (p *Provider) Pending(_ string) (*runtime.PendingInteraction, error) {
-	return nil, runtime.ErrInteractionUnsupported
-}
-
-// Respond resolves a pending structured interaction. ACP does not currently
-// expose those interactions over the protocol, so responses are unsupported.
-func (p *Provider) Respond(_ string, _ runtime.InteractionResponse) error {
-	return runtime.ErrInteractionUnsupported
 }
 
 // SendKeys is a no-op for ACP sessions (no terminal).
