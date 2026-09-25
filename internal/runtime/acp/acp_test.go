@@ -1309,7 +1309,7 @@ func TestNudge_NonPipeErrorSurfacesImmediately(t *testing.T) {
 
 	// sc.done is intentionally left open: if the new branch mis-routes
 	// non-pipe errors through the select, the call will hang until
-	// nudgePostWriteDrainTimeout and the test will fail.
+	// the configured stop grace and the test will fail.
 	done := make(chan error, 1)
 	go func() {
 		done <- p.Nudge(name, []runtime.ContentBlock{{Type: "text", Text: "hi"}})

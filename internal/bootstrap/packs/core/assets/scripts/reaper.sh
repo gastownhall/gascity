@@ -1132,6 +1132,18 @@ while IFS= read -r DB; do
             JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) IS NULL
             OR JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) = ''
         )
+        AND NOT EXISTS (
+            SELECT 1 FROM \`$DB\`.labels lbl
+            WHERE lbl.issue_id = \`$DB\`.issues.id
+            AND lbl.label IN (
+                'gc:extmsg-group',
+                'gc:extmsg-participant',
+                'gc:extmsg-binding',
+                'gc:extmsg-membership',
+                'gc:extmsg-transcript-state',
+                'gc:extmsg-transcript'
+            )
+        )
         AND id NOT IN (
             SELECT DISTINCT d.issue_id FROM \`$DB\`.dependencies d
             INNER JOIN \`$DB\`.issues i ON d.depends_on_issue_id = i.id

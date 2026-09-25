@@ -82,6 +82,7 @@ formula_tests=(
   TestPersonalWorkFormulaCompileAndRun
   TestAdoptPRFormulaRetriesTransientReviewerStep
   TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries
+  TestReviewLoopApprovesInIterationTwoWithBodyRetry
   TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash
 )
 
@@ -93,6 +94,7 @@ review_formulas_basic_tests=(
 review_formulas_retry_tests=(
   TestAdoptPRFormulaRetriesTransientReviewerStep
   TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries
+  TestReviewLoopApprovesInIterationTwoWithBodyRetry
 )
 
 review_formulas_recovery_tests=(

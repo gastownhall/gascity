@@ -1320,10 +1320,11 @@ type BeadWorktreeReapedPayload struct {
 
 // BeadsDiagnostic defines model for BeadsDiagnostic.
 type BeadsDiagnostic struct {
-	BeadsStore          string  `json:"beads_store"`
-	NativeStoreEligible bool    `json:"native_store_eligible"`
-	PreflightGate       *string `json:"preflight_gate,omitempty"`
-	PreflightReason     *string `json:"preflight_reason,omitempty"`
+	BeadsStore          string             `json:"beads_store"`
+	NativeStoreEligible bool               `json:"native_store_eligible"`
+	PreflightGate       *string            `json:"preflight_gate,omitempty"`
+	PreflightReason     *string            `json:"preflight_reason,omitempty"`
+	Proxied             *ProxiedDiagnostic `json:"proxied,omitempty"`
 }
 
 // BindingStatus Lifecycle state of a session binding.
@@ -1660,6 +1661,12 @@ type ConvoyRemoveInputBody struct {
 	Items *[]string `json:"items,omitempty"`
 }
 
+// Cursors defines model for Cursors.
+type Cursors struct {
+	Ignored int64 `json:"ignored"`
+	Main    int64 `json:"main"`
+}
+
 // DeliveryContextRecord defines model for DeliveryContextRecord.
 type DeliveryContextRecord struct {
 	BindingGeneration int64             `json:"BindingGeneration"`
@@ -1798,14 +1805,6 @@ type EventStreamEnvelope struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
-}
-
-// ExecutionClaimStalledPayload defines model for ExecutionClaimStalledPayload.
-type ExecutionClaimStalledPayload struct {
-	Attempts   int64   `json:"attempts"`
-	BeadId     string  `json:"bead_id"`
-	RootBeadId *string `json:"root_bead_id,omitempty"`
-	SessionId  string  `json:"session_id"`
 }
 
 // ExecutionClaimWindowExpiredPayload defines model for ExecutionClaimWindowExpiredPayload.
@@ -3177,6 +3176,24 @@ type ProviderUpdateInputBody struct {
 
 	// ReadyDelayMs Milliseconds to wait before probing readiness.
 	ReadyDelayMs *int64 `json:"ready_delay_ms,omitempty"`
+}
+
+// ProxiedDiagnostic defines model for ProxiedDiagnostic.
+type ProxiedDiagnostic struct {
+	Cursors    Cursors              `json:"cursors"`
+	Demoted    *bool                `json:"demoted,omitempty"`
+	Detail     *string              `json:"detail,omitempty"`
+	Endpoint   ProxiedEndpointStamp `json:"endpoint"`
+	Evidence   *string              `json:"evidence,omitempty"`
+	IdlePolicy *string              `json:"idle_policy,omitempty"`
+	Verdict    *string              `json:"verdict,omitempty"`
+}
+
+// ProxiedEndpointStamp defines model for ProxiedEndpointStamp.
+type ProxiedEndpointStamp struct {
+	Generation *string `json:"generation,omitempty"`
+	Pid        *int64  `json:"pid,omitempty"`
+	Port       *int64  `json:"port,omitempty"`
 }
 
 // PublishReceipt defines model for PublishReceipt.
@@ -5788,22 +5805,6 @@ type TypedEventStreamEnvelopeEventsRotated struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
-// TypedEventStreamEnvelopeExecutionClaimStalled defines model for TypedEventStreamEnvelopeExecutionClaimStalled.
-type TypedEventStreamEnvelopeExecutionClaimStalled struct {
-	Actor            string                       `json:"actor"`
-	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
-	Message          *string                      `json:"message,omitempty"`
-	Payload          ExecutionClaimStalledPayload `json:"payload"`
-	RunId            *string                      `json:"run_id,omitempty"`
-	Seq              int64                        `json:"seq"`
-	SessionId        *string                      `json:"session_id,omitempty"`
-	StepId           *string                      `json:"step_id,omitempty"`
-	Subject          *string                      `json:"subject,omitempty"`
-	Ts               time.Time                    `json:"ts"`
-	Type             string                       `json:"type"`
-	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
-}
-
 // TypedEventStreamEnvelopeExecutionClaimWindowExpired defines model for TypedEventStreamEnvelopeExecutionClaimWindowExpired.
 type TypedEventStreamEnvelopeExecutionClaimWindowExpired struct {
 	Actor            string                             `json:"actor"`
@@ -7449,23 +7450,6 @@ type TypedTaggedEventStreamEnvelopeEventsRotated struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
-}
-
-// TypedTaggedEventStreamEnvelopeExecutionClaimStalled defines model for TypedTaggedEventStreamEnvelopeExecutionClaimStalled.
-type TypedTaggedEventStreamEnvelopeExecutionClaimStalled struct {
-	Actor            string                       `json:"actor"`
-	City             string                       `json:"city"`
-	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
-	Message          *string                      `json:"message,omitempty"`
-	Payload          ExecutionClaimStalledPayload `json:"payload"`
-	RunId            *string                      `json:"run_id,omitempty"`
-	Seq              int64                        `json:"seq"`
-	SessionId        *string                      `json:"session_id,omitempty"`
-	StepId           *string                      `json:"step_id,omitempty"`
-	Subject          *string                      `json:"subject,omitempty"`
-	Ts               time.Time                    `json:"ts"`
-	Type             string                       `json:"type"`
-	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired defines model for TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired.
@@ -9983,6 +9967,9 @@ type PostV0CityByCityNameSessionByIdKillParams struct {
 type SendSessionMessageParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // PostV0CityByCityNameSessionByIdPermissionModeParams defines parameters for PostV0CityByCityNameSessionByIdPermissionMode.
@@ -10001,6 +9988,9 @@ type PostV0CityByCityNameSessionByIdRenameParams struct {
 type RespondSessionParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // PostV0CityByCityNameSessionByIdStopParams defines parameters for PostV0CityByCityNameSessionByIdStop.
@@ -10031,6 +10021,9 @@ type StreamSessionParamsFormat string
 type SubmitSessionParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // PostV0CityByCityNameSessionByIdSuspendParams defines parameters for PostV0CityByCityNameSessionByIdSuspend.
@@ -10730,32 +10723,6 @@ func (t *EventPayload) FromControlStalledPayload(v ControlStalledPayload) error 
 
 // MergeControlStalledPayload performs a merge with any union data inside the EventPayload, using the provided ControlStalledPayload
 func (t *EventPayload) MergeControlStalledPayload(v ControlStalledPayload) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsExecutionClaimStalledPayload returns the union data inside the EventPayload as a ExecutionClaimStalledPayload
-func (t EventPayload) AsExecutionClaimStalledPayload() (ExecutionClaimStalledPayload, error) {
-	var body ExecutionClaimStalledPayload
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromExecutionClaimStalledPayload overwrites any union data inside the EventPayload as the provided ExecutionClaimStalledPayload
-func (t *EventPayload) FromExecutionClaimStalledPayload(v ExecutionClaimStalledPayload) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeExecutionClaimStalledPayload performs a merge with any union data inside the EventPayload, using the provided ExecutionClaimStalledPayload
-func (t *EventPayload) MergeExecutionClaimStalledPayload(v ExecutionClaimStalledPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -14207,34 +14174,6 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeEventsRotated(v 
 	return err
 }
 
-// AsTypedEventStreamEnvelopeExecutionClaimStalled returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExecutionClaimStalled
-func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExecutionClaimStalled() (TypedEventStreamEnvelopeExecutionClaimStalled, error) {
-	var body TypedEventStreamEnvelopeExecutionClaimStalled
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromTypedEventStreamEnvelopeExecutionClaimStalled overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExecutionClaimStalled
-func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExecutionClaimStalled(v TypedEventStreamEnvelopeExecutionClaimStalled) error {
-	v.Type = "execution.claim_stalled"
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeTypedEventStreamEnvelopeExecutionClaimStalled performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExecutionClaimStalled
-func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExecutionClaimStalled(v TypedEventStreamEnvelopeExecutionClaimStalled) error {
-	v.Type = "execution.claim_stalled"
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
 // AsTypedEventStreamEnvelopeExecutionClaimWindowExpired returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExecutionClaimWindowExpired
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExecutionClaimWindowExpired() (TypedEventStreamEnvelopeExecutionClaimWindowExpired, error) {
 	var body TypedEventStreamEnvelopeExecutionClaimWindowExpired
@@ -16429,8 +16368,6 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeEmergencySignaled()
 	case "events.rotated":
 		return t.AsTypedEventStreamEnvelopeEventsRotated()
-	case "execution.claim_stalled":
-		return t.AsTypedEventStreamEnvelopeExecutionClaimStalled()
 	case "execution.claim_window_expired":
 		return t.AsTypedEventStreamEnvelopeExecutionClaimWindowExpired()
 	case "execution.run_anchored":
@@ -17286,34 +17223,6 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeEvent
 // MergeTypedTaggedEventStreamEnvelopeEventsRotated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeEventsRotated
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeEventsRotated(v TypedTaggedEventStreamEnvelopeEventsRotated) error {
 	v.Type = "events.rotated"
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsTypedTaggedEventStreamEnvelopeExecutionClaimStalled returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExecutionClaimStalled
-func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExecutionClaimStalled() (TypedTaggedEventStreamEnvelopeExecutionClaimStalled, error) {
-	var body TypedTaggedEventStreamEnvelopeExecutionClaimStalled
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromTypedTaggedEventStreamEnvelopeExecutionClaimStalled overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExecutionClaimStalled
-func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExecutionClaimStalled(v TypedTaggedEventStreamEnvelopeExecutionClaimStalled) error {
-	v.Type = "execution.claim_stalled"
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeTypedTaggedEventStreamEnvelopeExecutionClaimStalled performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExecutionClaimStalled
-func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExecutionClaimStalled(v TypedTaggedEventStreamEnvelopeExecutionClaimStalled) error {
-	v.Type = "execution.claim_stalled"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -19518,8 +19427,6 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeEmergencySignaled()
 	case "events.rotated":
 		return t.AsTypedTaggedEventStreamEnvelopeEventsRotated()
-	case "execution.claim_stalled":
-		return t.AsTypedTaggedEventStreamEnvelopeExecutionClaimStalled()
 	case "execution.claim_window_expired":
 		return t.AsTypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired()
 	case "execution.run_anchored":
@@ -31530,6 +31437,17 @@ func NewSendSessionMessageRequestWithBody(server string, cityName string, id str
 
 		req.Header.Set("X-GC-Request", headerParam0)
 
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
+
 	}
 
 	return req, nil
@@ -31772,6 +31690,17 @@ func NewRespondSessionRequestWithBody(server string, cityName string, id string,
 
 		req.Header.Set("X-GC-Request", headerParam0)
 
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
+
 	}
 
 	return req, nil
@@ -32002,6 +31931,17 @@ func NewSubmitSessionRequestWithBody(server string, cityName string, id string, 
 		}
 
 		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
 
 	}
 

@@ -435,6 +435,62 @@ func TestClassRoutedClaimNeverEscalatesACommittedWorkClaim(t *testing.T) {
 	}
 }
 
+// TestClassRoutedRestampSplitsOnResidency pins the discriminator
+// restampHookAdoption keys its fail-open/fail-closed decision on. A re-stamp of
+// a bead the binding was PROVED to hold is declined as errRestampGraphResident
+// without touching the work seam — there is no transfer primitive there and no
+// close-path actor fence that would need one — while any other id is the work
+// store's and delegates unchanged. Getting this split wrong in either direction
+// is a #5716 loop: fail-open on a work-store bead hands over an unclosable
+// bead, and fail-closed on a resident one refuses adoption of a bead whose close
+// would have succeeded untouched.
+func TestClassRoutedRestampSplitsOnResidency(t *testing.T) {
+	class := newClaimRouteClassStore(t)
+	mintClaimRouteBead(t, class, "gcg-c00", nil)
+	route := newClaimRouteFor(t, class)
+
+	type restampCall struct{ beadID, from, to string }
+	var baseCalls []restampCall
+	ops := classRoutedHookClaimOps(hookClaimOps{
+		Claim: notFoundClaim(t, "gcg-c00"),
+		RestampAdopted: func(_ context.Context, _ string, _ []string, beadID, from, to string) (bool, error) {
+			baseCalls = append(baseCalls, restampCall{beadID, from, to})
+			return true, nil
+		},
+	}, route)
+
+	// Residency is a memo of a PROVED answer, so the claim that escalated is what
+	// records it — the same order a real adoption re-stamp runs in.
+	if _, ok, err := ops.Claim(context.Background(), "/work", nil, "gcg-c00", "worker-1"); err != nil || !ok {
+		t.Fatalf("routed claim of gcg-c00 = (ok=%v err=%v), want the escalation that memoizes residency", ok, err)
+	}
+
+	moved, err := ops.RestampAdopted(context.Background(), "/work", nil, "gcg-c00", "legacy-1", "worker-1")
+	if moved {
+		t.Fatal("re-stamp of a binding-resident bead reported moved=true; the graph store has no transfer primitive to move it with")
+	}
+	if !errors.Is(err, errRestampGraphResident) {
+		t.Fatalf("re-stamp of a binding-resident bead = %v, want errRestampGraphResident so the caller can tell it apart from the work store's identical unsupported error", err)
+	}
+	if !errors.Is(err, beads.ErrConditionalTransferUnsupported) {
+		t.Fatalf("re-stamp of a binding-resident bead = %v, want it to still satisfy beads.ErrConditionalTransferUnsupported", err)
+	}
+	if len(baseCalls) != 0 {
+		t.Fatalf("resident re-stamp reached the work seam %d time(s) (%+v); the work store does not hold this bead", len(baseCalls), baseCalls)
+	}
+
+	// Any id the binding was not proved to hold is the work store's, forwarded
+	// verbatim.
+	moved, err = ops.RestampAdopted(context.Background(), "/work", nil, "ga-c01", "legacy-2", "worker-1")
+	if err != nil || !moved {
+		t.Fatalf("re-stamp of a non-resident bead = (moved=%v err=%v), want the work seam's own answer", moved, err)
+	}
+	want := []restampCall{{"ga-c01", "legacy-2", "worker-1"}}
+	if len(baseCalls) != 1 || baseCalls[0] != want[0] {
+		t.Fatalf("work seam saw %+v, want exactly %+v", baseCalls, want)
+	}
+}
+
 // TestHookClaimClassRouteRefusesABindingThatCannotClaim pins the capability
 // check at the door, the shape storebinding.NewBeadsNudgeQueue already uses: a
 // leaf without the two-argument CAS claim cannot serve a claim-time route, and

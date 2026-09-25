@@ -30,6 +30,7 @@ go_test(
         "//internal/beads",
         "//internal/builtinpacks",
         "//internal/config",
+        "//internal/extmsg",
         "//internal/formula",
         "//internal/fsys",
         "//internal/molecule",

@@ -65,7 +65,11 @@ func setPoolTemplateRuntimeIdentityInfo(tp *TemplateParams, desiredAlias string,
 }
 
 // clearPoolTemplateRuntimeIdentity leaves a pool spawn with no public identity:
-// no alias, an explicitly BLANK GC_ALIAS, and GC_AGENT on the session name.
+// no alias, an explicitly BLANK GC_ALIAS, and a provisional GC_AGENT on the
+// session name. That GC_AGENT is not what the worker runs with: the session
+// runtime projection (session.RuntimeEnvWithSessionContext, merged last at
+// spawn) overrides GC_AGENT and BEADS_ACTOR with the session bead ID for an
+// unaliased pool session, matching the identity gc hook --claim records.
 //
 // Blanking GC_ALIAS rather than skipping the stamp is load-bearing.
 // resolveTemplate seeds GC_ALIAS with the agent's bare qualified name for every
@@ -85,6 +89,8 @@ func clearPoolTemplateRuntimeIdentity(tp *TemplateParams) {
 		tp.Env = make(map[string]string)
 	}
 	tp.Env["GC_ALIAS"] = ""
+	// Provisional only; see above. The runtime projection replaces it with
+	// the session bead ID before the worker starts.
 	if tp.SessionName != "" {
 		tp.Env["GC_AGENT"] = tp.SessionName
 	}

@@ -25,8 +25,12 @@ import (
 // dies. With the slot in GC_ALIAS, pool workers claimed under a name no
 // reconciler guard enumerates, so the drain guard saw no assigned work and
 // drained live claim-holders ~2min in. Restoring the original unaliased-pool
-// design (bc2ee15ac4) puts the claim back on the session name, which every
-// guard already enumerates — no guard change needed.
+// design (bc2ee15ac4) puts the claim back on an identity every guard already
+// enumerates — no guard change needed. AssigneeIdentifier then resolves that
+// unaliased identity to the session bead ID (see that function's doc); bead.ID
+// has always been the leading form in every enumeration
+// (sessionBeadAssigneeIdentities, currentSessionAssigneeIdentities,
+// ComputeAwakeSet).
 //
 // Slot bookkeeping does NOT ride the alias: agent_name, title, the agent:<name>
 // label, pool_slot, and the canonical-instance record all still carry it, and
@@ -169,23 +173,27 @@ func TestPoolSlotStaysUnaliasedAcrossReconcileTicks(t *testing.T) {
 		if env["GC_ALIAS"] != "" {
 			t.Fatalf("tick %d: spawn GC_ALIAS = %q, want empty", tick, env["GC_ALIAS"])
 		}
-		if want := got.Metadata["session_name"]; env["BEADS_ACTOR"] != want {
-			t.Fatalf("tick %d: spawn BEADS_ACTOR = %q, want the session name %q — this is the string the claim writes",
-				tick, env["BEADS_ACTOR"], want)
+		if env["BEADS_ACTOR"] != got.ID {
+			t.Fatalf("tick %d: spawn BEADS_ACTOR = %q, want the session bead id %q — this is the string the claim writes",
+				tick, env["BEADS_ACTOR"], got.ID)
 		}
 	}
 }
 
-// TestPoolSlotSessionRuntimeIdentityIsSessionName pins the end of the chain the
-// claim actually reads. The spawn env is mergeEnv(tp.Env, RuntimeEnvWithSessionContext),
-// so the RUNTIME projection wins — blanking tp.Env alone would be inert. With the
-// bead unaliased, runtimePublicAlias falls to empty and AssigneeIdentifier falls to
-// the persisted session name, which is what `gc hook --claim` then writes as the
-// assignee (hookSessionAgentForQuery: GC_ALIAS -> BEADS_ACTOR -> ...).
-func TestPoolSlotSessionRuntimeIdentityIsSessionName(t *testing.T) {
-	const sessionName = "claude-gcg-session-x"
+// TestPoolSlotSessionRuntimeIdentityIsSessionBeadID pins the end of the chain
+// the claim actually reads. The spawn env is mergeEnv(tp.Env, RuntimeEnvWithSessionContext),
+// so the RUNTIME projection wins — blanking tp.Env alone would be inert. With
+// the bead unaliased, runtimePublicAlias falls to empty and AssigneeIdentifier
+// falls to the unique session bead ID (see that function's doc). `gc hook --claim`
+// writes this same identity as the assignee (hookSessionAgentForQuery: GC_ALIAS ->
+// BEADS_ACTOR -> ...).
+func TestPoolSlotSessionRuntimeIdentityIsSessionBeadID(t *testing.T) {
+	const (
+		sessionID   = "gcg-session-x"
+		sessionName = "claude-gcg-session-x"
+	)
 	info := sessiontest.SeedBead(t, beads.Bead{
-		ID:     "gcg-session-x",
+		ID:     sessionID,
 		Type:   sessionBeadType,
 		Status: "open",
 		Labels: []string{sessionBeadLabel, "agent:rig/claude-1"},
@@ -198,18 +206,18 @@ func TestPoolSlotSessionRuntimeIdentityIsSessionName(t *testing.T) {
 		},
 	})
 
-	if got := sessionpkg.AssigneeIdentifier(info); got != sessionName {
-		t.Fatalf("AssigneeIdentifier = %q, want the session name %q — this is the string BEADS_ACTOR and the claim both use", got, sessionName)
+	if got := sessionpkg.AssigneeIdentifier(info); got != sessionID {
+		t.Fatalf("AssigneeIdentifier = %q, want the session bead id %q — this is the string BEADS_ACTOR and the claim both use", got, sessionID)
 	}
 	env := sessionpkg.RuntimeEnvWithSessionContext(info, 1, 1, "tok")
 	if env["GC_ALIAS"] != "" {
 		t.Fatalf("runtime GC_ALIAS = %q, want empty for an unaliased pool slot", env["GC_ALIAS"])
 	}
-	if env["BEADS_ACTOR"] != sessionName {
-		t.Fatalf("runtime BEADS_ACTOR = %q, want the session name %q", env["BEADS_ACTOR"], sessionName)
+	if env["BEADS_ACTOR"] != sessionID {
+		t.Fatalf("runtime BEADS_ACTOR = %q, want the session bead id %q", env["BEADS_ACTOR"], sessionID)
 	}
-	if env["GC_AGENT"] != sessionName {
-		t.Fatalf("runtime GC_AGENT = %q, want the session name %q", env["GC_AGENT"], sessionName)
+	if env["GC_AGENT"] != sessionID {
+		t.Fatalf("runtime GC_AGENT = %q, want the session bead id %q", env["GC_AGENT"], sessionID)
 	}
 }
 
@@ -273,8 +281,8 @@ func TestCanonicalSingletonPoolKeepsStableAlias(t *testing.T) {
 // TestReleaseOrphanedPoolAssignmentsReopensStaleSlotFormClaim is the deploy
 // self-heal pin. Beads still assigned slot-form when the fix lands map to no
 // live session (pool beads no longer answer to slot names), so orphan release
-// reopens them and a fresh worker re-claims under its session name. No manual
-// bead surgery.
+// reopens them and a fresh worker re-claims under its own session bead ID. No
+// manual bead surgery.
 func TestReleaseOrphanedPoolAssignmentsReopensStaleSlotFormClaim(t *testing.T) {
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{

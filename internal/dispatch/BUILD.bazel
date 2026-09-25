@@ -53,6 +53,7 @@ go_test(
         "ralph_retry_iteration_test.go",
         "ralph_test.go",
         "retry_artifact_iteration_test.go",
+        "retry_attempt_key_test.go",
         "retry_test.go",
         "runtime_test.go",
         "scope_skip_compat_test.go",
@@ -75,6 +76,7 @@ go_test(
         "//internal/session",
         "//internal/sourceworkflow",
         "//internal/testenv",
+        "@com_github_steveyegge_beads//:beads",
     ],
 )
 

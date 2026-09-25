@@ -479,6 +479,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			Env:                queryEnv,
 			DrainAck:           opts.DrainAck,
 			JSON:               opts.JSON,
+			RuntimeActor:       strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
 		}
 		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
@@ -580,7 +581,9 @@ func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, 
 // hiccup is not mislabeled as staleness AND a vanished session is not laundered
 // into an infrastructure hiccup that lets a stale runtime reach the claim path.
 func classifyHookClaimSession(cityPath string, cfg *config.City, sessionID, instanceToken string) (hookClaimSessionVerdict, string) {
-	store, err := openCityStoreAt(cityPath)
+	// cfg is the config this one-shot `gc hook` invocation loaded; reuse it
+	// rather than reloading the whole city config inside the open.
+	store, err := openCityStoreAtWithConfig(cityPath, cfg)
 	if err != nil {
 		return hookClaimSessionStoreUnavailable, fmt.Sprintf("opening session store: %v", err)
 	}
@@ -827,15 +830,21 @@ func hookSessionAgentForQuery() string {
 // the order is the whole of it.
 //
 // An unaliased pool spawn has no occupant name in the environment except its
-// session bead id. clearPoolTemplateRuntimeIdentity blanks GC_ALIAS and stamps
-// GC_AGENT with the slot-derived runtime session name, and that name is a CHAIR:
-// it is stable across every session that ever occupies the slot, by design
-// (poolRuntimeSessionName — a bead-ID-scoped runtime name leaked one sandbox per
-// failed start, ga-vcjr9). Recording a claim under it makes every "is the holder
-// still alive?" consumer answer about the chair, so a dead occupant's in_progress
+// session bead id. clearPoolTemplateRuntimeIdentity blanks GC_ALIAS, and the
+// runtime session name (GC_SESSION_NAME) is only a name for the runtime. Where
+// that name is identity-derived — tmux_alias pools, and unaliased rows minted by
+// pre-v1.5.0 builds (poolRuntimeSessionName) — it is a CHAIR: it is stable
+// across every session that ever occupies the slot. Unaliased pools are
+// bead-scoped again (PoolSessionName, <template>-<beadID>), but the bead id
+// stays the canonical claim identity. Recording a claim under a chair name
+// makes every "is the holder still alive?" consumer answer about the chair, so
+// a dead occupant's in_progress
 // bead reads as held by whoever sits there next and is never released, resumed,
 // or replaced. On maintainer-city one such label was the session_name of 24
-// distinct session beads, and the worst of them 66.
+// distinct session beads, and the worst of them 66. The runtime projection
+// (session.AssigneeIdentifier) exports the same session bead id as GC_AGENT and
+// BEADS_ACTOR for an unaliased pool session, so the worker's later bd mutations
+// are actored by exactly the string the claim is recorded under (#5716).
 //
 // So the session bead id goes ahead of every session/agent NAME form. Every
 // reader already leads with it — sessionBeadAssigneeIdentities,
