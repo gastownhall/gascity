@@ -50,6 +50,7 @@ func TestStoreHoldsBdTablesDistinguishesEmptyFromUndetermined(t *testing.T) {
 	validSQLName := extractShellFunction(t, src, "valid_sql_name")
 	tableCount := extractShellFunction(t, src, "bd_runtime_bd_table_count")
 	schemaCursor := extractShellFunction(t, src, "bd_runtime_schema_cursor")
+	migrationCount := extractShellFunction(t, src, "bd_runtime_schema_migration_count")
 	holdsTables := extractShellFunction(t, src, "bd_runtime_store_holds_bd_tables")
 
 	cases := []struct {
@@ -107,6 +108,7 @@ func TestStoreHoldsBdTablesDistinguishesEmptyFromUndetermined(t *testing.T) {
 				validSQLName + "\n" +
 				tableCount + "\n" +
 				schemaCursor + "\n" +
+				migrationCount + "\n" +
 				holdsTables + "\n" +
 				"bd_runtime_store_holds_bd_tables hq\n"
 
@@ -368,6 +370,7 @@ func TestStoreHoldsBdTablesConsidersMigrationCursor(t *testing.T) {
 	validSQLName := extractShellFunction(t, src, "valid_sql_name")
 	tableCount := extractShellFunction(t, src, "bd_runtime_bd_table_count")
 	schemaCursor := extractShellFunction(t, src, "bd_runtime_schema_cursor")
+	migrationCount := extractShellFunction(t, src, "bd_runtime_schema_migration_count")
 	holdsTables := extractShellFunction(t, src, "bd_runtime_store_holds_bd_tables")
 
 	cases := []struct {
@@ -461,6 +464,7 @@ func TestStoreHoldsBdTablesConsidersMigrationCursor(t *testing.T) {
 				validSQLName + "\n" +
 				tableCount + "\n" +
 				schemaCursor + "\n" +
+				migrationCount + "\n" +
 				holdsTables + "\n" +
 				"bd_runtime_store_holds_bd_tables hq\n"
 
