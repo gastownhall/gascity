@@ -60,11 +60,25 @@ const (
 
 // readyReaderCommand returns the reader a generated query asks for claimable
 // work with.
+//
+// This is always gcReadyCommand now, regardless of topology (ga-g4odhq).
+// `gc ready` is the only reader that applies the Go-side gc.work_outcome veto
+// (ga-beg8uc / ga-a7v0ex): a bead whose blocking dependency closed
+// work_outcome=blocked must stay excluded from every ready set, not only a
+// federated one. Bare `bd ready` has no notion of gc.work_outcome and cannot
+// see the veto at all, which is what let a vetoed dependent surface as ready
+// on any single-store city (ga-ez8vj8's incident: ga-poygzp.2 closed
+// work_outcome=blocked, and its dependent ga-8noaen was claimed ~20 minutes
+// later).
+//
+// The parameter stays for now — every call site already threads a `federated`
+// bool through to readyReaderStderrSink and readyReaderFailurePropagation,
+// which still legitimately branch on topology, and keeping the signature
+// stable avoids a mechanical rewrite of every caller for a decision that may
+// still need the topology bit if the veto is ever moved off this reader.
 func readyReaderCommand(federated bool) string {
-	if federated {
-		return gcReadyCommand
-	}
-	return bdReadyCommand
+	_ = federated
+	return gcReadyCommand
 }
 
 // readyReaderStderrSink returns the stderr redirect a probe tier wraps its ready

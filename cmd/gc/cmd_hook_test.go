@@ -1701,6 +1701,7 @@ esac
 	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	installFakeGCReadyDelegate(t, fakeBin)
 
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_CITY", cityDir)
@@ -1857,6 +1858,7 @@ esac
 	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	installFakeGCReadyDelegate(t, fakeBin)
 
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_CITY", cityDir)
@@ -1936,6 +1938,7 @@ esac
 	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	installFakeGCReadyDelegate(t, fakeBin)
 
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_CITY", cityDir)
@@ -1983,6 +1986,7 @@ esac
 	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	installFakeGCReadyDelegate(t, fakeBin)
 
 	for _, tc := range []struct {
 		name       string

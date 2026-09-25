@@ -96,6 +96,7 @@ max = 5
 		if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
 			t.Fatal(err)
 		}
+		installFakeGCReadyDelegate(t, fakeBin)
 
 		origPath := os.Getenv("PATH")
 		t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+origPath)

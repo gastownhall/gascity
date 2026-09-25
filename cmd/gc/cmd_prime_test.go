@@ -79,10 +79,10 @@ func TestBuildPrimeContextUsesBD105ReadyCompatibility(t *testing.T) {
 		Name: "worker",
 	}, nil, config.QueryTopology{Beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}}, nil)
 
-	if !strings.Contains(ctx.AssignedReadyQuery, `bd ready --include-ephemeral --assignee="$id"`) {
+	if !strings.Contains(ctx.AssignedReadyQuery, `gc ready --include-ephemeral --assignee="$id"`) {
 		t.Fatalf("AssignedReadyQuery = %q, want bd-1.0.5-compatible assigned ready query", ctx.AssignedReadyQuery)
 	}
-	if !strings.Contains(ctx.WorkQuery, "bd ready --include-ephemeral") {
+	if !strings.Contains(ctx.WorkQuery, "gc ready --include-ephemeral") {
 		t.Fatalf("WorkQuery = %q, want bd-1.0.5-compatible ready probes", ctx.WorkQuery)
 	}
 }

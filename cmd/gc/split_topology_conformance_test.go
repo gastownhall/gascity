@@ -2503,10 +2503,20 @@ func fixtureGraphLeg(e splitEnv) beads.Store {
 //  1. The seam answers. cityQueryTopology is the production resolver, and it
 //     rides on graphClassBinding — the same question resolveClassStore asks —
 //     so a city that relocates nothing federates nothing.
-//  2. The command changes, and only in the reader. The single-store row is the
-//     byte-identity claim (its exact bytes are pinned by
-//     internal/config's TestWorkQueryGolden); here it is the command WORD that
-//     matters, because a split city emitting `bd ready` is the blindness.
+//  2. The command's READER WORD no longer discriminates by topology: ga-g4odhq
+//     made every topology's ready read `gc ready`, because only `gc ready`
+//     applies the Go-side gc.work_outcome veto (ga-beg8uc), and a
+//     single-store city needs that veto exactly as much as a split one does
+//     (ga-ez8vj8's incident happened on a single-store city). What still
+//     changes, and only on a split city, is the WRAPPING around that read —
+//     the stderr-sink and failure-propagation clauses internal/config's
+//     TestFederatedSwapChangesOnlyTheReader pins byte-for-byte — because only
+//     a split city's read is allowed to fail loud instead of falling
+//     through. The single-store row remains the byte-identity claim (its
+//     exact bytes are pinned by internal/config's TestWorkQueryGolden); this
+//     row now checks that the reader word is present and `bd ready` is gone
+//     on BOTH topologies, and leaves the wrapping-clause byte-pinning to
+//     internal/config, whose tests own it.
 //  3. The reader the command names actually answers with the routed graph work,
 //     read through the production leg assembly rather than a restatement of it.
 //
@@ -2560,11 +2570,11 @@ func conformanceWorkQueryFederation(t *testing.T, e splitEnv) {
 
 	if !e.split {
 		for name, cmd := range map[string]string{"work_query": workQuery, "scale_check": poolDemand} {
-			if strings.Contains(cmd, "gc ready") {
-				t.Errorf("a single-store city's %s reads through the federated reader: %q — its command must be the one it already runs", name, cmd)
+			if !strings.Contains(cmd, "gc ready") {
+				t.Errorf("a single-store city's %s does not shell `gc ready`: %q — ga-g4odhq requires every topology's ready read to route through the Go-side gc.work_outcome veto, not only a federated one's", name, cmd)
 			}
-			if !strings.Contains(cmd, "bd ready") {
-				t.Errorf("a single-store city's %s no longer shells `bd ready`: %q", name, cmd)
+			if strings.Contains(cmd, "bd ready") {
+				t.Errorf("a single-store city's %s still shells `bd ready`, which has no gc.work_outcome veto (ga-beg8uc) and would let a vetoed dependent surface as ready again the way ga-ez8vj8's incident did: %q", name, cmd)
 			}
 		}
 		// Nothing is relocated, so no override can be blind to it.

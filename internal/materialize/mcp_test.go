@@ -268,7 +268,7 @@ func TestMCPTemplateDataUsesBD105WorkQuery(t *testing.T) {
 	agent := &config.Agent{Name: "worker"}
 
 	got := MCPTemplateData(cfg, "/tmp/city", agent, "worker", "/tmp/work", config.QueryTopology{})
-	if !strings.Contains(got["WorkQuery"], "bd ready --include-ephemeral") {
+	if !strings.Contains(got["WorkQuery"], "gc ready --include-ephemeral") {
 		t.Fatalf("WorkQuery = %q, want bd-1.0.5 ephemeral-ready probe", got["WorkQuery"])
 	}
 }

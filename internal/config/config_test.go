@@ -1859,13 +1859,13 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 	if strings.Contains(got, `--include-ephemeral`) {
 		t.Errorf("EffectiveWorkQuery() default must be bd 1.0.4-compatible without --include-ephemeral: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --limit=20`) {
+	if !strings.Contains(got, `gc ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --limit=20`) {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 pool-demand probe: %q", got)
 	}
 	if !strings.Contains(got, "-- mayor") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 target argument: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --metadata-field "gc.run_target=$target" --metadata-field "gc.kind=workflow" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`) {
+	if !strings.Contains(got, `gc ready --metadata-field "gc.run_target=$target" --metadata-field "gc.kind=workflow" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`) {
 		t.Errorf("EffectiveWorkQuery() missing run_target migration fallback: %q", got)
 	}
 	for _, want := range []string{`.metadata`, `.[:1]`} {
@@ -1914,10 +1914,10 @@ func TestEffectiveWorkQueryRoutedTierServesCanonicalPriorityOrder(t *testing.T) 
 func TestEffectiveWorkQueryBD105CompatibilityOptIn(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveWorkQueryFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}})
-	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --limit=20`) {
+	if !strings.Contains(got, `gc ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --limit=20`) {
 		t.Errorf("EffectiveWorkQueryForBeads(bd-1.0.5) missing include-ephemeral routed probe: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
+	if !strings.Contains(got, `gc ready --include-ephemeral --assignee="$id" --json --limit=1`) {
 		t.Errorf("EffectiveWorkQueryForBeads(bd-1.0.5) missing include-ephemeral assigned probe: %q", got)
 	}
 }
@@ -2008,7 +2008,7 @@ func TestEffectiveAssignedReadyQueryDefault(t *testing.T) {
 	if strings.Contains(got, `--include-ephemeral`) {
 		t.Fatalf("EffectiveAssignedReadyQuery() default must be bd 1.0.4-compatible without --include-ephemeral: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --assignee="$id" --json --limit=1`) {
+	if !strings.Contains(got, `gc ready --assignee="$id" --json --limit=1`) {
 		t.Fatalf("EffectiveAssignedReadyQuery() missing assigned-ready tier: %q", got)
 	}
 	if strings.Contains(got, "gc.routed_to") {
@@ -2032,7 +2032,7 @@ esac
 func TestEffectiveAssignedReadyQueryForBeadsBD105Compatibility(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	got := a.EffectiveAssignedReadyQueryFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}})
-	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
+	if !strings.Contains(got, `gc ready --include-ephemeral --assignee="$id" --json --limit=1`) {
 		t.Fatalf("EffectiveAssignedReadyQueryForBeads(bd-1.0.5) missing include-ephemeral assigned-ready tier: %q", got)
 	}
 }
@@ -2049,7 +2049,7 @@ func TestEffectiveAssignedInProgressQueryDefault(t *testing.T) {
 			t.Fatalf("EffectiveAssignedInProgressQuery() missing assigned recovery fragment %q: %q", want, got)
 		}
 	}
-	if strings.Contains(got, `bd ready`) {
+	if strings.Contains(got, `gc ready`) {
 		t.Fatalf("EffectiveAssignedInProgressQuery() should not include assigned-ready or routed pool demand: %q", got)
 	}
 
@@ -2097,7 +2097,7 @@ func TestEffectiveRoutedPoolQueryDefault(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	got := a.EffectiveRoutedPoolQuery()
 	if strings.Contains(got, `bd list --include-ephemeral --status in_progress`) ||
-		strings.Contains(got, `bd ready --include-ephemeral --assignee`) {
+		strings.Contains(got, `gc ready --include-ephemeral --assignee`) {
 		t.Fatalf("EffectiveRoutedPoolQuery() should be routed-pool-only: %q", got)
 	}
 	for _, want := range []string{
@@ -2129,7 +2129,7 @@ func TestEffectiveAssignedReadyQueryControlDispatcherClaimsLegacyAssignedWork(t 
 	for _, want := range []string{
 		`case "$id" in *control-dispatcher)`,
 		`for cand in "$id" "$legacy"`,
-		`bd ready --assignee="$cand"`,
+		`gc ready --assignee="$cand"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("EffectiveAssignedReadyQuery() = %q, want legacy alias fragment %q", got, want)
@@ -2262,7 +2262,7 @@ func TestEffectiveWorkQueryControlDispatcherClaimsLegacyAssignedWork(t *testing.
 	got := a.EffectiveWorkQuery()
 	for _, want := range []string{
 		`bd list --status in_progress --assignee="$cand"`,
-		`bd ready --assignee="$cand"`,
+		`gc ready --assignee="$cand"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("EffectiveWorkQuery() = %q, want storage-aware legacy assigned tier %q", got, want)
@@ -2323,7 +2323,7 @@ func TestEffectiveWorkQueryRoutedQueueUsesNativeCanonicalSortAcrossReadyTiers(t 
 	got := a.EffectiveWorkQuery()
 	for _, want := range []string{
 		`bd list --status in_progress --assignee="$id"`,
-		`bd ready --assignee="$id"`,
+		`gc ready --assignee="$id"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("EffectiveWorkQuery() = %q, want storage-aware assigned tier %q", got, want)
@@ -2364,7 +2364,7 @@ func TestGeneratedBdReadCommandsStayBd104StorageCompatible(t *testing.T) {
 			t.Fatalf("%s command uses bd 1.0.4-incompatible list flag: %s", name, command)
 		}
 	}
-	if strings.Contains(commands["work_query"], "bd ready --include-ephemeral") {
+	if strings.Contains(commands["work_query"], "gc ready --include-ephemeral") {
 		t.Fatalf("work query = %q, default must stay bd 1.0.4-compatible and omit --include-ephemeral", commands["work_query"])
 	}
 }
@@ -2465,10 +2465,10 @@ func TestEffectiveWorkQueryExcludesEpics(t *testing.T) {
 	// resume its own assigned ephemeral epic wisp (the patrol-loop pattern).
 	wantPresent := []string{
 		// routed/pool tier still excludes epics (gc-udx guard)
-		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json`,
+		`gc ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json`,
 		// assigned tiers carry NO epic exclusion
 		`bd list --status in_progress --assignee="$id" --json`,
-		`bd ready --assignee="$id" --json`,
+		`gc ready --assignee="$id" --json`,
 		`-- hello-world/worker`,
 	}
 	for _, want := range wantPresent {
@@ -2491,9 +2491,9 @@ func TestEffectiveWorkQueryExcludesEpicsControlDispatcher(t *testing.T) {
 	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
 	got := a.EffectiveWorkQuery()
 	wantPresent := []string{
-		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json`,
+		`gc ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json`,
 		`bd list --status in_progress --assignee="$cand" --json`,
-		`bd ready --assignee="$cand" --json`,
+		`gc ready --assignee="$cand" --json`,
 		`-- gascity/control-dispatcher gascity/workflow-control`,
 	}
 	for _, want := range wantPresent {
@@ -2758,15 +2758,15 @@ func TestDefaultPoolCheckUsesPoolName(t *testing.T) {
 	}
 }
 
-func TestDefaultPoolCheckUsesBdReady(t *testing.T) {
+func TestDefaultPoolCheckUsesGCReady(t *testing.T) {
 	a := Agent{
 		Name:              "dog",
 		Dir:               "hello-world",
 		MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3),
 	}
 	check := a.EffectiveScaleCheck()
-	if !strings.Contains(check, "bd ready") {
-		t.Errorf("EffectiveScaleCheck() = %q, want bd ready for blocker-aware counting", check)
+	if !strings.Contains(check, "gc ready") {
+		t.Errorf("EffectiveScaleCheck() = %q, want gc ready for blocker-aware counting", check)
 	}
 	if !strings.Contains(check, "--exclude-type=epic") {
 		t.Errorf("EffectiveScaleCheck() = %q, want --exclude-type=epic for executable demand only", check)
@@ -3210,8 +3210,8 @@ func TestEffectiveScaleCheckUsesReadyOnly(t *testing.T) {
 	}
 	check := a.EffectiveScaleCheck()
 
-	if !strings.Contains(check, "bd ready") {
-		t.Errorf("missing bd ready query for blocker-aware task counting")
+	if !strings.Contains(check, "gc ready") {
+		t.Errorf("missing gc ready query for blocker-aware task counting")
 	}
 	if !strings.Contains(check, "--exclude-type=epic") {
 		t.Errorf("EffectiveScaleCheck = %q, want --exclude-type=epic for executable demand only", check)
@@ -3227,7 +3227,7 @@ func TestEffectiveScaleCheckUsesReadyOnly(t *testing.T) {
 		t.Errorf("missing --limit 0 for complete ready count")
 	}
 	if strings.Contains(check, "2>/dev/null") || strings.Contains(check, "${ready:-0}") || strings.Contains(check, "|| echo 0") {
-		t.Errorf("default scale_check masks bd ready failures as zero: %q", check)
+		t.Errorf("default scale_check masks gc ready failures as zero: %q", check)
 	}
 	if strings.Contains(check, "${molecules:-0}") {
 		t.Errorf("unexpected ${molecules:-0} in arithmetic sum")
@@ -5808,6 +5808,18 @@ func runEffectiveWorkQueryForBeads(t *testing.T, a Agent, beads BeadsConfig, env
 // runShellWithFakeBd executes shellCmd with a fake `bd` script on PATH so
 // shared-predicate tests can exercise EffectiveWorkQuery and
 // EffectivePoolDemandQuery against the same simulated bd state.
+//
+// The same script is ALSO staged as `gc`, not just `bd`: every ready read a
+// generated query issues now goes through `gc ready` regardless of topology
+// (ga-g4odhq), and `gc ready` accepts exactly the flags these queries
+// generate — the swap is the command word and nothing else (see
+// readyReaderCommand's doc comment). The bdScript bodies these tests supply
+// key only on positional args ("$1", "$*", ...), never on argv[0], so
+// answering `gc ready ...` the same way `bd ready ...` would have answered is
+// the correct simulation, not a shortcut: it is what the real `gc ready`
+// does over a single-store city. Without a fake `gc` here, that call falls
+// through to whatever real `gc` binary PATH resolves, which then fails
+// trying to do real pack-cache initialization the test sandbox never set up.
 func runShellWithFakeBd(t *testing.T, shellCmd string, env map[string]string, bdScript string) string {
 	t.Helper()
 
@@ -5815,6 +5827,10 @@ func runShellWithFakeBd(t *testing.T, shellCmd string, env map[string]string, bd
 	bdPath := filepath.Join(tmp, "bd")
 	if err := os.WriteFile(bdPath, []byte(bdScript), 0o755); err != nil {
 		t.Fatalf("write fake bd: %v", err)
+	}
+	gcPath := filepath.Join(tmp, "gc")
+	if err := os.WriteFile(gcPath, []byte(bdScript), 0o755); err != nil {
+		t.Fatalf("write fake gc: %v", err)
 	}
 
 	commandEnv := []string{"PATH=" + tmp + ":" + os.Getenv("PATH")}

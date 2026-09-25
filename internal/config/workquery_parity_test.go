@@ -147,12 +147,20 @@ func oldEffectiveOnBoot(a *Agent, topo QueryTopology) string {
 // parityVariant binds an exported query kind's accessors to its frozen oracle.
 type parityVariant struct {
 	name string
-	// federates reports whether this kind's script contains a read the
-	// federation swap covers. Four are the `bd ready` call sites; the fifth is
-	// the crash-recovery tier's `bd list --status in_progress`, which the
-	// residency fix moved onto `gc ready --status in_progress` so a session can
-	// see its OWN claim when that claim lives in a relocated class binding. The
-	// rest are `bd query`/`bd update` and stay topology-blind
+	// federates reports whether this kind's script differs across topology —
+	// i.e. still has a byte the federation swap touches. Work, AssignedReady,
+	// and RoutedPool federate via the stderr-sink/failure-propagation clauses
+	// readyReaderStderrSink/readyReaderFailurePropagation append around their
+	// ready read; AssignedInProgress federates via the crash-recovery tier's
+	// `bd list --status in_progress` swapping to `gc ready --status
+	// in_progress` so a session can see its OWN claim when that claim lives in
+	// a relocated class binding. PoolDemand is topology-blind even though its
+	// script does contain a `gc ready` read: ga-g4odhq made readyReaderCommand
+	// return `gc ready` unconditionally so the Go-side gc.work_outcome veto
+	// (ga-beg8uc) applies on every topology, and poolDemandCountShell never
+	// wired in either helper to begin with (see its doc comment), so its
+	// rendered bytes are identical on both topologies for a fixed Beads
+	// config. The rest are `bd query`/`bd update` and stay topology-blind
 	// (TestQueryKindsWithoutAReadyReadAreTopologyBlind).
 	federates bool
 	plain     func(*Agent) string
@@ -174,7 +182,7 @@ func parityVariants() []parityVariant {
 		{"AssignedInProgress", true, (*Agent).EffectiveAssignedInProgressQuery, (*Agent).EffectiveAssignedInProgressQueryFor, oldEffectiveAssignedInProgressQuery, workQueryOverride},
 		{"AssignedReady", true, (*Agent).EffectiveAssignedReadyQuery, (*Agent).EffectiveAssignedReadyQueryFor, oldEffectiveAssignedReadyQuery, workQueryOverride},
 		{"RoutedPool", true, (*Agent).EffectiveRoutedPoolQuery, (*Agent).EffectiveRoutedPoolQueryFor, oldEffectiveRoutedPoolQuery, workQueryOverride},
-		{"PoolDemand", true, (*Agent).EffectivePoolDemandQuery, (*Agent).EffectivePoolDemandQueryFor, oldEffectivePoolDemandQuery, scaleCheckOverride},
+		{"PoolDemand", false, (*Agent).EffectivePoolDemandQuery, (*Agent).EffectivePoolDemandQueryFor, oldEffectivePoolDemandQuery, scaleCheckOverride},
 		{"OnDeath", false, (*Agent).EffectiveOnDeath, (*Agent).EffectiveOnDeathFor, oldEffectiveOnDeath, onDeathOverride},
 		{"OnBoot", false, (*Agent).EffectiveOnBoot, (*Agent).EffectiveOnBootFor, oldEffectiveOnBoot, onBootOverride},
 	}
@@ -276,12 +284,17 @@ func TestOnDeathOnBootFlagBlind(t *testing.T) {
 // rather than as prose, exactly which generated commands the federation swap
 // does NOT reach — and therefore what a split city still runs single-store.
 //
-// The swap covers the four `bd ready` call sites. It does not cover
-// AssignedInProgress (`bd list`, the crash-recovery tier), OnDeath (`bd list` +
-// `bd update`) or OnBoot (the same): there is no federated form of a status list
-// or a write, and building one is the claim-routing slice, ga-601v2. If a later
-// change federates one of them, this test fails and the gap is re-decided
-// deliberately instead of drifting shut.
+// The swap covers Work, AssignedReady, and RoutedPool via the stderr-sink and
+// failure-propagation clauses their `gc ready` reads carry, and
+// AssignedInProgress via the crash-recovery tier's `bd list --status
+// in_progress` swapping to `gc ready --status in_progress`. It does not cover
+// PoolDemand — topology-blind despite its script containing a `gc ready` read,
+// because poolDemandCountShell never wires in either clause (see its doc
+// comment) — nor OnDeath (`bd list` + `bd update`) nor OnBoot (the same):
+// there is no federated form of a status list or a write, and building one is
+// the claim-routing slice, ga-601v2. If a later change federates one of them,
+// this test fails and the gap is re-decided deliberately instead of drifting
+// shut.
 func TestQueryKindsWithoutAReadyReadAreTopologyBlind(t *testing.T) {
 	bd105 := BeadsConfig{BDCompatibility: BeadsBDCompatibility105}
 	single := QueryTopology{Beads: bd105}
@@ -313,11 +326,6 @@ func TestQueryKindsWithoutAReadyReadAreTopologyBlind(t *testing.T) {
 	}
 }
 
-// TestFederatedSwapChangesOnlyTheReader is the mutation guard on the swap
-// itself: every `bd ready` becomes `gc ready`, none is left behind, and nothing
-// ELSE about the script changes. A swap that also moved a flag, dropped a hold
-// label, or rewrote a `bd list` would pass the golden files (they would just be
-// regenerated) but fails here.
 func TestFederationBlindOverridesNamesTheBlindKeys(t *testing.T) {
 	single := QueryTopology{}
 	federated := QueryTopology{FederatedReady: true}
@@ -353,17 +361,23 @@ func singleQuoteEscaped(s string) string {
 }
 
 // singleStoreReadCount counts the reads in a single-store command that the
-// federation swap replaces: the `bd ready` call sites plus the crash-recovery
-// tier's `bd list --status in_progress`.
+// federation swap touches: the `gc ready` call sites already present in the
+// single-store form (ga-g4odhq unconditionally routes them through the
+// Go-side gc.work_outcome veto) plus the crash-recovery tier's `bd list
+// --status in_progress`, which only the federated form swaps to `gc ready
+// --status in_progress`.
 func singleStoreReadCount(command string) int {
-	return strings.Count(command, bdReadyCommand) +
+	return strings.Count(command, gcReadyCommand) +
 		strings.Count(command, bdListInProgressCommand)
 }
 
 // renormalizeFederatedCommand maps a federated command back onto the
 // single-store one by undoing ONLY the differences the swap is allowed to make:
-// the reader words, their failure clauses, and the crash-recovery tier's
-// presence-key prelude.
+// the stderr-sink/failure-propagation clauses around a federates:true kind's
+// ready read, and the crash-recovery tier's presence-key prelude. The reader
+// word itself needs no undoing: ga-g4odhq made every federates:true kind's
+// ready read say `gc ready` on both topologies, so the single-store side
+// already matches there without a rewrite.
 //
 // The last one is undone by generating both forms from the production function
 // itself rather than by pasting its text here. That keeps the guard honest as
@@ -393,7 +407,6 @@ func renormalizeFederatedCommand(federated string) string {
 			assignedInProgressCandidatesTierCommand(shellVar, QueryTopology{FederatedReady: true}),
 			assignedInProgressCandidatesTierCommand(shellVar, QueryTopology{}))
 	}
-	federated = strings.ReplaceAll(federated, gcReadyCommand, bdReadyCommand)
 	federated = strings.ReplaceAll(federated, `--json --limit=1) || exit $?`, `--json --limit=1 2>/dev/null)`)
 	// Suffix-matched so one pair covers both the routed tier (no explicit
 	// --sort; the reader's canonical priority order decides) and the
@@ -403,6 +416,16 @@ func renormalizeFederatedCommand(federated string) string {
 	return federated
 }
 
+// TestFederatedSwapChangesOnlyTheReader is the mutation guard on the swap
+// itself: singleStoreReadCount's reads — the `gc ready` call sites already
+// present in the single-store form, plus the crash-recovery tier's `bd list
+// --status in_progress` — all resolve to `gc ready` on the federated side,
+// and nothing ELSE about the script changes beyond what
+// renormalizeFederatedCommand already accounts for (the stderr-sink/failure-
+// propagation clauses and the crash-recovery presence-key prelude). A swap
+// that also moved a flag, dropped a hold label, or rewrote an unrelated `bd
+// list` would pass the golden files (they would just be regenerated) but
+// fails here.
 func TestFederatedSwapChangesOnlyTheReader(t *testing.T) {
 	for _, shape := range parityAgentShapes() {
 		for _, v := range parityVariants() {

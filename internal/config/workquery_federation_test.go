@@ -109,8 +109,10 @@ func TestFederatedPoolDemandPropagatesADeadLeg(t *testing.T) {
 }
 
 // fakeBDFails is a `bd` stand-in that fails every subcommand the way an
-// unreadable store makes the real one fail. A single-store city shells `bd`, not
-// `gc`, so this — not fakeGCReadyFails — is what actually exercises its tiers.
+// unreadable store makes the real one fail. The single-store work query still
+// shells `bd` for its crash-recovery tier (`bd list --status in_progress`)
+// even after ga-g4odhq moved every ready read onto `gc ready`, so this is what
+// exercises THAT tier's fall-through.
 //
 // It appends each invocation to $FAKE_BD_LOG because the single-store tiers
 // redirect bd's stderr to /dev/null: without the log there is no evidence the
@@ -122,36 +124,61 @@ printf 'bd: store unreadable\n' >&2
 exit 1
 `
 
+// fakeGCFails is a `gc` stand-in that fails every subcommand the way an
+// unreadable store makes the real `gc ready` fail. ga-g4odhq routes every
+// topology's ready read through `gc ready` — so the Go-side gc.work_outcome
+// veto (ga-beg8uc) always runs — which means a single-store city now shells
+// `gc` too, and this is what exercises ITS tiers' fall-through. It logs to
+// $FAKE_GC_LOG for the same reason fakeBDFails logs to $FAKE_BD_LOG.
+const fakeGCFails = `#!/bin/sh
+[ -n "$FAKE_GC_LOG" ] && printf '%s\n' "$*" >> "$FAKE_GC_LOG"
+printf 'gc: store unreadable\n' >&2
+exit 1
+`
+
 // TestSingleStoreWorkQueryKeepsItsFallThrough is the other half of the byte
-// identity claim, stated as behavior rather than as bytes: a non-relocated city
-// still swallows `bd ready`'s failure and falls through to the next tier. This
+// identity claim, stated as behavior rather than as bytes: a non-relocated
+// city still swallows a failing read and falls through to the next tier. This
 // is not an oversight being pinned — the tiers have somewhere to fall through
 // TO, and changing it would alter what every deployed city does on a flaky
 // store.
 //
-// The failing binary is `bd`, and it has to be: a single-store work query never
-// invokes `gc`, so installing the failure as `gc` would leave every tier reading
-// a healthy stub and the case would pass no matter what the tiers did.
+// Since ga-g4odhq, a single-store work query shells BOTH binaries: `bd` for
+// the crash-recovery tier (`bd list --status in_progress`, untouched by the
+// fix) and `gc` for every ready read (`gc ready`, so the Go-side
+// gc.work_outcome veto runs on every topology, not only a federated one). This
+// case fails both and proves neither failure propagates — unlike the
+// federated cases above, where readyReaderFailurePropagation makes a failing
+// `gc ready` fail the whole query on purpose. GC_SESSION_ID is set so the
+// crash-recovery and assigned-ready tiers' identity loop actually runs instead
+// of skipping to the routed-pool tier alone.
 func TestSingleStoreWorkQueryKeepsItsFallThrough(t *testing.T) {
 	a := &Agent{Name: "worker"}
 	command := a.EffectiveWorkQueryFor(singleStoreTopology())
-	if strings.Contains(command, "gc ready") {
-		t.Fatalf("the single-store work_query shells the federated reader, so a failing `bd` no longer exercises it: %q", command)
+	if !strings.Contains(command, "gc ready") {
+		t.Fatalf("the single-store work_query no longer shells `gc ready`; ga-g4odhq requires every topology's ready read to route through the Go-side gc.work_outcome veto: %q", command)
 	}
 	bdLog := filepath.Join(t.TempDir(), "bd-invocations")
+	gcLog := filepath.Join(t.TempDir(), "gc-invocations")
 	res := runGeneratedQueryWithBD(t, command, map[string]string{
 		"GC_SESSION_ORIGIN": "ephemeral",
+		"GC_SESSION_ID":     "worker-sess",
 		"FAKE_BD_LOG":       bdLog,
-	}, fakeGCReadyFails, fakeBDFails)
+		"FAKE_GC_LOG":       gcLog,
+	}, fakeGCFails, fakeBDFails)
 	if res.exit != 0 {
-		t.Fatalf("the single-store work_query exited %d over a failing bd; a non-relocated city must behave exactly as it does today (stderr=%q)", res.exit, res.stderr)
+		t.Fatalf("the single-store work_query exited %d over a failing bd and gc; a non-relocated city must behave exactly as it does today (stderr=%q)", res.exit, res.stderr)
 	}
 	if strings.TrimSpace(res.stdout) != "[]" {
 		t.Errorf("single-store work_query stdout = %q, want %q", res.stdout, "[]")
 	}
-	invocations, err := os.ReadFile(bdLog)
-	if err != nil || !strings.Contains(string(invocations), "ready") {
-		t.Fatalf("the failing `bd` was never asked for `ready` (log=%q, err=%v); a case whose failure injection is not invoked proves nothing about the fall-through", invocations, err)
+	bdInvocations, err := os.ReadFile(bdLog)
+	if err != nil || !strings.Contains(string(bdInvocations), "in_progress") {
+		t.Fatalf("the failing `bd` was never asked for the crash-recovery `list --status in_progress` (log=%q, err=%v); a case whose failure injection is not invoked proves nothing about the fall-through", bdInvocations, err)
+	}
+	gcInvocations, err := os.ReadFile(gcLog)
+	if err != nil || !strings.Contains(string(gcInvocations), "ready") {
+		t.Fatalf("the failing `gc` was never asked for `ready` (log=%q, err=%v); a case whose failure injection is not invoked proves nothing about the fall-through", gcInvocations, err)
 	}
 }
 

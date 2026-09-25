@@ -240,6 +240,31 @@ func disableManagedDoltRecoveryForTest(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 }
 
+// installFakeGCReadyDelegate writes a fake `gc` executable into fakeBin that
+// forwards `gc ready <flags>` to the `bd` executable already resolvable on
+// PATH (normally a fake bd fixture installed alongside it in the same
+// directory). readyReaderCommand (internal/config/workquery.go) always
+// generates "gc ready ..." now (ga-g4odhq), regardless of topology, so any
+// test that fakes bd on PATH to answer a work-query subprocess must also
+// answer `gc ready` the same way. gc ready's flag surface is a byte-identical
+// subset of bd ready's, so forwarding verbatim reproduces exactly what the
+// fake bd fixture already expects, whether "bd" or "gc" was invoked. Only the
+// "ready" subcommand is forwarded; anything else fails loudly instead of
+// silently returning empty, so a future generated command this fixture
+// doesn't anticipate shows up as a test failure, not a false negative.
+func installFakeGCReadyDelegate(t *testing.T, fakeBin string) {
+	t.Helper()
+	script := `#!/bin/sh
+case "$1" in
+  ready) shift; exec bd ready "$@" ;;
+  *) echo "fake gc: unsupported subcommand $1" >&2; exit 127 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "gc"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 var testProviderStubCommands = []string{
 	"claude",
 	"codex",
