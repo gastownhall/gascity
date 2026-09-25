@@ -31,6 +31,8 @@ const (
 	startupDialogVerifiedKey  = "startup_dialog_verified"
 )
 
+var deferredSubmitDispatcherIsHosting = nudgequeue.DispatcherIsHosting
+
 // SubmitIntent is the semantic delivery choice for a user message.
 type SubmitIntent string
 
@@ -585,7 +587,10 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 	}); err != nil {
 		return fmt.Errorf("queueing deferred submit: %w", err)
 	}
-	if m.supportsFollowUpLocked(b) {
+	// Suppress the fallback only when a supervisor dispatcher is actually
+	// answering. Provider capability alone does not prove the controller is
+	// running; direct CLI/library use must retain its sidecar deliverer.
+	if !deferredSubmitDispatcherIsHosting(m.cityPath) && m.supportsFollowUpLocked(b) {
 		_ = startSessionSubmitPoller(m.cityPath, deferredSubmitPollerKey(b), sessName)
 	}
 	return nil

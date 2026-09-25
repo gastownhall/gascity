@@ -15,7 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
-	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/spf13/cobra"
 )
@@ -329,7 +328,13 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 		return 0, nil
 	}
-	if hookMode && primeHookSessionStart(hookContext) && !primeHookHasLiveManagedSession(cityPath) {
+	// A SessionStart hook with no managed session identity has nothing to
+	// prime, so emit an empty hook payload. When an identity IS present (even if
+	// the session is not currently live, or its bead is missing/closed), fall
+	// through: the beacon must always be emitted, and a stale pane continuation
+	// epoch has to be able to redeliver the startup prompt (handled below via
+	// startupPromptDeliveredMarkerStale).
+	if hookMode && primeHookSessionStart(hookContext) && strings.TrimSpace(os.Getenv("GC_SESSION_ID")) == "" {
 		writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
 		return 0, nil
 	}
@@ -347,6 +352,10 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		return 0, nil
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
+
+	if suppressHookPrompt && startupPromptDeliveredMarkerStale(cityPath) {
+		suppressHookPrompt = false
+	}
 
 	if citySuspended(cfg) {
 		// Suspended is a legitimate quiet state, not a strict failure —
@@ -630,8 +639,9 @@ func primeHookSessionStart(ctx primeHookContext) bool {
 // GC_MANAGED_SESSION_HOOK. The codex and antigravity overlays do bake
 // GC_MANAGED_SESSION_HOOK=1 into their staged `gc prime --hook` command, so a
 // human-launched session there passes this gate — those two also set
-// GC_HOOK_EVENT_NAME=SessionStart and stay covered by the live-session gate
-// below.
+// GC_HOOK_EVENT_NAME=SessionStart and stay covered by the SessionStart gate in
+// doPrimeWithHookFormatOpts, which additionally requires GC_SESSION_ID. gc sets
+// that only on a session it created, so a human-launched provider never has it.
 var hookIdentityEnv = []string{
 	"GC_SESSION_ID",
 	"GC_SESSION_NAME",
@@ -643,11 +653,11 @@ var hookIdentityEnv = []string{
 
 // hookHasManagedIdentity reports whether this process carries any gc
 // identity. Shared by every hook-injection entry point (prime --hook,
-// mail check --inject, nudge drain --inject). It deliberately asks the weaker question than
-// primeHookHasLiveManagedSession: not "is there a live session bead" but "did
-// gc start this at all", so real hook flows that legitimately have no session
-// bead yet (manual aliases, template fallbacks, strict-mode validation) are not
-// mistaken for a human-launched provider.
+// mail check --inject, nudge drain --inject). It deliberately asks the weakest
+// question available: not "is there a live session bead" but "did gc start this
+// at all", so real hook flows that legitimately have no session bead yet
+// (manual aliases, template fallbacks, strict-mode validation) are not mistaken
+// for a human-launched provider.
 func hookHasManagedIdentity() bool {
 	for _, key := range hookIdentityEnv {
 		if strings.TrimSpace(os.Getenv(key)) != "" {
@@ -657,52 +667,45 @@ func hookHasManagedIdentity() bool {
 	return false
 }
 
-func primeHookHasLiveManagedSession(cityPath string) bool {
+// startupPromptDeliveredMarkerStale reports whether the pane-stamped
+// GC_STARTUP_PROMPT_DELIVERED marker predates the session's current
+// continuation epoch. The marker (and GC_CONTINUATION_EPOCH) is written once
+// into the pane/session environment at pane creation; an in-pane agent
+// restart after a continuation-epoch bump (drain handoff, config-drift reset,
+// crash-loop recovery) re-fires the SessionStart hook with the stale marker
+// still set, which would suppress the prime prompt for a fresh conversation
+// that never received it. A newer epoch on the session bead means the marker
+// belongs to a previous incarnation, so the prompt must be delivered.
+// Fail-safe: any missing value, parse failure, or store error preserves the
+// existing suppression.
+func startupPromptDeliveredMarkerStale(cityPath string) bool {
 	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
 	if sessionID == "" {
 		return false
 	}
-	sessionName := strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
-	if sessionName == "" {
+	paneEpoch, err := strconv.Atoi(strings.TrimSpace(os.Getenv("GC_CONTINUATION_EPOCH")))
+	if err != nil {
 		return false
 	}
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
 		return false
 	}
-	// Route the session-bead read through the session coordination-class store so
-	// a [beads.classes.sessions] relocation reaches this prime hook, mirroring
-	// primeHookSessionTemplate. The no-refresh config loader is deliberate on this
-	// hot hook path; a failed load yields nil cfg, which cliSessionStore treats as
-	// identity.
+	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close
+	// Route the marker read through the session coordination-class store so a
+	// [beads.classes.sessions] relocation reaches this check, matching the other
+	// prime-hook session reads (see primeHookSessionTemplate). No-refresh config
+	// loader on this hot hook path; nil cfg → cliSessionStore identity.
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	sessStore := cliSessionStore(store, cfg, cityPath)
-	// The front-door Get rejects a present-but-non-session bead
-	// (ErrSessionNotFound), folding in the removed IsSessionBeadOrRepairable guard.
-	info, err := sessionFrontDoor(sessStore).Get(sessionID)
+	markers, err := cliSessionFrontDoor(store, cfg, cityPath).PersistedMarkers(sessionID)
 	if err != nil {
 		return false
 	}
-	if info.Closed {
+	beadEpoch, err := strconv.Atoi(strings.TrimSpace(markers.ContinuationEpoch))
+	if err != nil {
 		return false
 	}
-	// Use the RAW session_name mirror (SessionNameMetadata), not SessionName which
-	// falls back to sessionNameFor(ID) and would loosen the exact-match semantics.
-	if strings.TrimSpace(info.SessionNameMetadata) != sessionName {
-		return false
-	}
-	if template := strings.TrimSpace(os.Getenv("GC_TEMPLATE")); template != "" &&
-		strings.TrimSpace(info.Template) != template {
-		return false
-	}
-	// MetadataState is the RAW state metadata; Info.State is blanked on closed
-	// beads, so the raw mirror preserves the original exact comparison.
-	switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
-	case sessionpkg.StateActive, sessionpkg.StateAwake, sessionpkg.StateCreating, sessionpkg.StateStartPending:
-		return true
-	default:
-		return false
-	}
+	return beadEpoch > paneEpoch
 }
 
 func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt string, hookMode bool, hookFormat string, suppressPrompt bool, hookContextSuffix string, afterDelivery func()) {
