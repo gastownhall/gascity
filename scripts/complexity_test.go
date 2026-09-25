@@ -12,6 +12,9 @@ import (
 
 func TestComplexityReportUpdateAndDiffUseStableJSONKeys(t *testing.T) {
 	repoRoot := repoRoot(t)
+	if err := bazeltest.EnsureGitRepo(t, repoRoot); err != nil {
+		t.Fatalf("git stand-in for guard tree: %v", err)
+	}
 	binDir := t.TempDir()
 	fake := filepath.Join(binDir, "gocyclo")
 	argsLog := filepath.Join(t.TempDir(), "args")

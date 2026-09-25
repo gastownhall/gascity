@@ -131,6 +131,7 @@ go_test(
         "//:repo_source_tree",
         "//internal/bootstrap/packs/core:pack_files",
     ],
+    shard_count = 3,
     deps = [
         "//internal/bazeltest",
         "//internal/config",

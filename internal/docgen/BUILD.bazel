@@ -34,6 +34,7 @@ go_test(
         "//:repo_source_tree",
     ],
     embed = [":docgen"],
+    shard_count = 2,
     deps = [
         "//internal/bazeltest",
         "//internal/testenv",
