@@ -25,6 +25,7 @@ go_library(
         "//internal/molecule",
         "//internal/pathutil",
         "//internal/runtime",
+        "//internal/session",
         "//internal/shellquote",
         "//internal/sourceworkflow",
         "//internal/telemetry",
