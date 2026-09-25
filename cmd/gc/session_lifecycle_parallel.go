@@ -2380,6 +2380,21 @@ func confirmPendingStart(currentState string) bool {
 	return sessionpkg.StateConfirmsPendingStart(sessionpkg.State(strings.TrimSpace(currentState)))
 }
 
+// startOpensAwakeInterval reports whether committing a confirmed start must
+// stamp a fresh awake_started_at epoch. A start out of a pending state always
+// does. So does a start committed onto a live bead that has no interval still
+// being accounted (no epoch, or one the compute lane has already recorded):
+// heal projects awake as soon as the runtime is observed, while the claimed
+// Start is still in flight, so a live state at commit does not prove an
+// interval is open. An open interval's epoch is never replaced.
+func startOpensAwakeInterval(info sessionpkg.Info) bool {
+	if confirmPendingStart(info.MetadataState) {
+		return true
+	}
+	epoch := strings.TrimSpace(info.AwakeStartedAt)
+	return epoch == "" || strings.TrimSpace(info.UsageComputeEmittedAt) == epoch
+}
+
 func commitStartResultTraced(
 	result startResult,
 	sessFront *sessionpkg.Store,
@@ -2437,9 +2452,9 @@ func commitStartResultTraced(
 		ConfirmState:            confirmPendingStart(info.MetadataState),
 		ClearSleepReason:        info.SleepReason != "",
 		ClearPendingCreateClaim: shouldRollbackPendingCreateInfo(info),
-		// A confirmed transition out of a dormant/creating state opens a new
-		// awake interval — stamp a fresh compute-usage epoch for it.
-		StartsAwakeInterval: confirmPendingStart(info.MetadataState),
+		// A confirmed start opens a new awake interval, including one whose
+		// bead heal already marked awake mid-start.
+		StartsAwakeInterval: startOpensAwakeInterval(info),
 		Now:                 clk.Now(),
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
@@ -2773,10 +2788,10 @@ func recoverRunningPendingCreate(
 		// at this point the claim is guaranteed to be set — hard-code the
 		// clear rather than re-evaluating the same predicate.
 		ClearPendingCreateClaim: true,
-		// Recovering an already-awake runtime must not reset the in-flight
-		// awake interval, so key the fresh epoch on a genuine dormant/creating
-		// start only — not the StateAwake re-confirmation above.
-		StartsAwakeInterval: confirmPendingStart(info.MetadataState),
+		// Recovering an already-awake runtime must not reset an in-flight
+		// awake interval, but a start whose commit never landed has none to
+		// keep, so stamp one unless an open interval is already on the bead.
+		StartsAwakeInterval: startOpensAwakeInterval(info),
 		Now:                 now,
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
