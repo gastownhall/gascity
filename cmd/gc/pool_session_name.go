@@ -78,6 +78,18 @@ func PoolSessionName(template, beadID string) string {
 	return agent.SanitizeQualifiedNameForSession(base) + "-" + beadID
 }
 
+// isPoolSessionNameForTemplate reports whether assignee is the runtime session
+// name a pool instance of template owns (PoolSessionName). A pool's own
+// ephemeral session names are the one assignee shape that proves the work was
+// claimed BY this pool, so an in-progress bead still holding one is in-flight
+// work whose owner has exited — eligible for respawn — rather than orphaned
+// work to leave alone. Session-bead ids, configured named identities, and
+// arbitrary unknown assignees do not match this shape.
+func isPoolSessionNameForTemplate(template, assignee string) bool {
+	prefix := PoolSessionName(template, "")
+	return len(prefix) > 1 && strings.HasPrefix(assignee, prefix)
+}
+
 // poolIdentitySessionName returns the tmux-safe encoding of a pool instance's
 // resolved identity — the qualified instance name the planner derives from
 // config and slot. It is a pure function of the identity, so every create

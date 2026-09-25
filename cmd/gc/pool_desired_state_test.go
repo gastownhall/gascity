@@ -467,6 +467,81 @@ func TestComputePoolDesiredStates_WakeKnownIdentityResolvesPersistedBoundAssigne
 	}
 }
 
+// TestComputePoolDesiredStates_RespawnsInFlightWorkWhosePoolSessionGone pins
+// the idle-pool-with-routed-work recovery: an IN-PROGRESS bead assigned to the
+// pool's own runtime session name (PoolSessionName) whose session is gone must
+// produce a wake-known-identity request. scale_check counts only unassigned
+// demand, so dropping the bead here leaves it invisible to every other demand
+// source and the pool sits at zero forever — the failure the
+// pool-idle-routed-work doctor check reports.
+func TestComputePoolDesiredStates_RespawnsInFlightWorkWhosePoolSessionGone(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("implementation-worker", "gascity-packs", intPtr(8), 0)},
+	}
+	template := "gascity-packs/implementation-worker"
+	// The assignee is the pool's own runtime session name, and no session bead
+	// resolves it — the pool instance that claimed the bead has exited.
+	work := []beads.Bead{
+		workBead("gp-inflight", template, PoolSessionName(template, "gp-1a2b"), "in_progress", 5),
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, nil, nil)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 1 || reqs[0].Tier != "wake-known-identity" || reqs[0].WorkBeadID != "gp-inflight" {
+		t.Fatalf("requests = %+v, want one wake-known-identity for gp-inflight", reqs)
+	}
+}
+
+// TestComputePoolDesiredStates_LeavesOpenPoolAssignedWorkAlone guards the other
+// side of the in-flight rule: an OPEN bead assigned to the same pool session
+// name is not in-flight work and must not respawn a pool instance.
+func TestComputePoolDesiredStates_LeavesOpenPoolAssignedWorkAlone(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("implementation-worker", "gascity-packs", intPtr(8), 0)},
+	}
+	template := "gascity-packs/implementation-worker"
+	work := []beads.Bead{
+		workBead("gp-open", template, PoolSessionName(template, "gp-1a2b"), "open", 5),
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, nil, nil)
+
+	for _, state := range result {
+		for _, req := range state.Requests {
+			if req.WorkBeadID == "gp-open" {
+				t.Fatalf("open pool-assigned work respawned: %+v", req)
+			}
+		}
+	}
+}
+
+// TestComputePoolDesiredStates_LeavesUnknownAssigneeInFlightWorkAlone keeps the
+// orphaned-work contract: an in-progress bead whose assignee is not this pool's
+// session-name shape must not respawn.
+func TestComputePoolDesiredStates_LeavesUnknownAssigneeInFlightWorkAlone(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("implementation-worker", "gascity-packs", intPtr(8), 0)},
+	}
+	template := "gascity-packs/implementation-worker"
+	work := []beads.Bead{
+		workBead("gp-unknown", template, "unknown-session-id", "in_progress", 5),
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, nil, nil)
+
+	for _, state := range result {
+		for _, req := range state.Requests {
+			if req.WorkBeadID == "gp-unknown" {
+				t.Fatalf("unknown-assignee in-flight work respawned: %+v", req)
+			}
+		}
+	}
+}
+
 func TestComputePoolDesiredStates_MaxCapsTotal(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(2), 0)},

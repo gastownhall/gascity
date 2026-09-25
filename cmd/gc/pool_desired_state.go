@@ -458,13 +458,31 @@ func computePoolDesiredStatesAt(
 				continue
 			}
 			if !agentTemplateIdentitiesEquivalent(cfg, assignee, template) || !isKnownPoolTemplate(assignee, cfg) {
-				// Assignee set but session closed/unknown and not a configured
-				// pool template — orphaned work, not our job to respawn. The
-				// identity-equivalence compare keeps work assigned under a
-				// legacy bound form of this template eligible for the
+				// An IN-PROGRESS bead whose assignee is this pool's own runtime
+				// session name (PoolSessionName, e.g. "worker-gp-1a2b") is
+				// in-flight work, not orphaned work: the pool instance that
+				// claimed it has exited without completing it (died, was
+				// replaced, or was reclaimed). scale_check counts only
+				// UNASSIGNED demand, so an in-flight bead dropped here is
+				// invisible to every other demand source and the pool sits at
+				// zero forever — the idle-pool-with-routed-work failure the
+				// pool-idle-routed-work doctor check reports. Respawn a pool
+				// instance through the wake-known-identity tier so it re-runs
+				// gc hook --claim and re-adopts the bead.
+				//
+				// The shape test is deliberately narrow: session-bead ids
+				// (closed or not), configured named identities, and arbitrary
+				// unknown assignees do NOT match PoolSessionName, so work that
+				// is genuinely orphaned stays orphaned (see
+				// TestComputePoolDesiredStates_ClosedSessionNotResumed and
+				// TestComputePoolDesiredStates_WakeKnownIdentityUnknownAssigneeProducesNoRequest).
+				// The identity-equivalence compare above keeps work assigned
+				// under a legacy bound form of this template eligible for the
 				// wake-known-identity tier; the emitted request carries the
 				// canonical template.
-				continue
+				if wb.Status != "in_progress" || !isPoolSessionNameForTemplate(template, assignee) {
+					continue
+				}
 			}
 			if _, ok := wakeRequestedTemplates[template]; ok {
 				continue
