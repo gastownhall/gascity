@@ -317,7 +317,26 @@ if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then
   fail_open_after_drain "gc dolt-cleanup apply missed ${MISSED_PURGE_BYTES} reclaimable bytes; leaving work bead open"
 fi
 
-bd close "$WORK_BEAD" --actor "${GC_ALIAS:-${GC_SESSION_NAME:-${GC_SESSION_ID:-}}}" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})"
+# A refused terminal close must leave evidence, never a clean drain: under
+# set -euo pipefail an unguarded failure aborts the script, the EXIT trap
+# still drain-acks, and the controller re-dispatches a fresh agent against
+# the still-open bead on every firing. Only an operator can finish this, so
+# it escalates like every other operator path in this script, carrying bd's
+# refusal text and the actor this run presented.
+CLOSE_FILE="$TMP_DIR/close.log"
+if ! bd close "$WORK_BEAD" --actor "${GC_ALIAS:-${GC_SESSION_NAME:-${GC_SESSION_ID:-}}}" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})" > "$CLOSE_FILE" 2>&1; then
+  cat "$CLOSE_FILE" >&2
+  CLOSE_REFUSAL="$(tr '\n' ' ' < "$CLOSE_FILE")"
+  CLOSE_REFUSAL_MESSAGE="terminal close refused by bd for ${WORK_BEAD} (actor presented: ${GC_ALIAS:-${GC_SESSION_NAME:-${GC_SESSION_ID:-none}}}): ${CLOSE_REFUSAL:-no error text}"
+  run_or_warn "send close-refused escalation" send_escalation \
+    "ESCALATION: stale-db terminal close refused for ${WORK_BEAD} [HIGH]" \
+    "${CLOSE_REFUSAL_MESSAGE}. The bead is still open behind a drained session, so the controller re-dispatches a fresh dog on every firing until it is closed by hand with the assignee identity: bd show ${WORK_BEAD}, then bd close ${WORK_BEAD} --actor <assignee>."
+  run_or_warn "emit close-refused escalation" gc event emit mol-dog-stale-db.escalate \
+    --message "${CLOSE_REFUSAL_MESSAGE}; leaving work bead open — close it by hand with the assignee identity"
+  maintenance_notice "MAINTENANCE_ESCALATE: stale-db terminal close REFUSED for ${WORK_BEAD}; an open bead behind a clean drain re-dispatches forever"
+  fail_open_after_drain "${CLOSE_REFUSAL_MESSAGE}; leaving work bead open"
+fi
+cat "$CLOSE_FILE"
 drain_ack_once # drain-ack before normal exit
 exit
 ```

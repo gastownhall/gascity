@@ -931,6 +931,9 @@ type staleDBFailureCase struct {
 	wantLog      string
 	forbidLog    string
 	forbidOutput string
+	// env is appended after the scrubbed harness environment, so a case can
+	// stand in for one runtime identity shape.
+	env []string
 }
 
 func TestStaleDBFormulaFailurePathsDrainAck(t *testing.T) {
@@ -1039,7 +1042,12 @@ func TestStaleDBFormulaSuccessPathFailuresDrainAck(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		fail        string
+		env         []string
 		wantFailure bool
+		// wantLog lines must all be recorded after the injected failure, and
+		// wantMail must appear on the escalation mail line itself.
+		wantLog  []string
+		wantMail string
 	}{
 		{
 			name: "scan event failure",
@@ -1050,15 +1058,31 @@ func TestStaleDBFormulaSuccessPathFailuresDrainAck(t *testing.T) {
 			fail: "bd update bead-1 --append-notes",
 		},
 		{
+			// The terminal close is the one call whose failure is not
+			// nonessential: the bead stays open behind a drained session and
+			// the controller re-dispatches against it on every firing. A
+			// refusal must reach the operator on every channel the script's
+			// other operator paths use — escalation mail carrying bd's own
+			// refusal text and the actor presented, the escalate event, and
+			// the maintenance nudge — before the fail-open exit, never as a
+			// bare non-zero status.
 			name:        "close failure",
 			fail:        "bd close bead-1",
+			env:         []string{"GC_ALIAS=dog-alpha", "GC_MAINTENANCE_DONE_TARGET=health"},
 			wantFailure: true,
+			wantLog: []string{
+				"gc mail send human -s ESCALATION: stale-db terminal close refused for bead-1 [HIGH] -m terminal close refused by bd for bead-1 (actor presented: dog-alpha): ",
+				"gc event emit mol-dog-stale-db.escalate --message terminal close refused by bd for bead-1 (actor presented: dog-alpha): ",
+				"gc session nudge health MAINTENANCE_ESCALATE: stale-db terminal close REFUSED for bead-1",
+			},
+			wantMail: "assignee mismatch",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			log, out, err := runStaleDBFormulaFailureCase(t, staleDBFailureCase{
 				scanJSON:     cleanScan,
 				failContains: tc.fail,
+				env:          tc.env,
 			})
 			if tc.wantFailure && err == nil {
 				t.Fatalf("rendered script exited successfully; want %q failure to preserve non-zero status\nlog:\n%s\noutput:\n%s", tc.fail, log, out)
@@ -1072,11 +1096,33 @@ func TestStaleDBFormulaSuccessPathFailuresDrainAck(t *testing.T) {
 			if !strings.Contains(log, tc.fail) {
 				t.Fatalf("command log missing injected failure %q\nlog:\n%s\noutput:\n%s", tc.fail, log, out)
 			}
+			for _, want := range tc.wantLog {
+				if !strings.Contains(log, want) {
+					t.Fatalf("%q path did not record %q\nlog:\n%s\noutput:\n%s", tc.fail, want, log, out)
+				}
+			}
+			if tc.wantMail != "" {
+				mail := staleDBLogLine(log, "gc mail send ")
+				if !strings.Contains(mail, tc.wantMail) {
+					t.Fatalf("%q path escalation mail does not carry bd's refusal %q\nmail: %q\nlog:\n%s\noutput:\n%s", tc.fail, tc.wantMail, mail, log, out)
+				}
+			}
 			if !tc.wantFailure && !strings.Contains(log, "bd close bead-1") {
 				t.Fatalf("%q path did not close work after nonessential failure\nlog:\n%s\noutput:\n%s", tc.fail, log, out)
 			}
 		})
 	}
+}
+
+// staleDBLogLine returns the first recorded command line starting with prefix,
+// or "" when the fake binaries never logged one.
+func staleDBLogLine(log, prefix string) string {
+	for _, line := range strings.Split(log, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return line
+		}
+	}
+	return ""
 }
 
 func runStaleDBFormulaFailureCase(t *testing.T, tc staleDBFailureCase) (string, []byte, error) {
@@ -1134,6 +1180,8 @@ set -euo pipefail
 maybe_fail() {
   local rendered="$1"
   if [ -n "${GC_TEST_FAIL_CONTAINS:-}" ] && [[ "$rendered" == *"$GC_TEST_FAIL_CONTAINS"* ]]; then
+    # Refuse the way bd's ownership guard does: with a reason on stderr.
+    echo "bd: ${rendered} refused: assignee mismatch" >&2
     exit 70
   fi
 }
@@ -1163,6 +1211,7 @@ esac
 		"GC_TEST_APPLY_EXIT="+tc.applyExit,
 		"GC_TEST_FAIL_CONTAINS="+tc.failContains,
 	)
+	cmd.Env = append(cmd.Env, tc.env...)
 	out, err := cmd.CombinedOutput()
 	logData, readErr := os.ReadFile(logPath)
 	if readErr != nil {
