@@ -1456,6 +1456,11 @@ go_test(
         "//examples/lifecycle:pack_files",
     ],
     embed = [":gc_lib"],
+    # TestMain owns host-process leak guards for Dolt and tmux. A Bazel
+    # process-wrapper sandbox denies the /proc enumeration those guards use,
+    # making the suite fail closed before it can prove cleanup. Run this one
+    # process-owning suite locally so the guards stay enforced.
+    tags = ["no-sandbox"],
     deps = [
         "//:gascity",
         "//examples/bd",
