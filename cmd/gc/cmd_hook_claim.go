@@ -476,17 +476,22 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		// seat. Certify against the canonical store before promising it.
 		verdict, canonicalAssignee := certifyHookAdoption(bead, *opts, *ops, dir, stderr)
 		if verdict != hookAdoptionRefused {
-			if restamped, adopt := restampHookAdoption(bead, canonicalAssignee, *opts, *ops, dir, stderr); adopt {
+			if restamped, adopt := restampHookAdoption(bead, canonicalAssignee, verdict, *opts, *ops, dir, stderr); adopt {
 				bead = restamped
 				result.Assignee = restamped.Assignee
 				// minted=false: adoption returns work this session already owned.
 				return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, false, stdout, stderr)}
 			}
 		}
-		// Refused: fall through to the claim tiers. The seat is healthy — its
-		// cache was not — and neither tier can match this row anyway (ready
-		// requires open, eligible requires an empty assignee), so this ends in
-		// the shared drain unless there is other work to do.
+		// Not adopted — the canonical store named another owner, or the bead is
+		// held under a legacy spelling that could not be moved to this worker's
+		// actor. Fall through to the claim tiers: neither tier can match this
+		// row anyway (ready requires open, eligible requires an empty
+		// assignee), so this ends in the shared drain unless there is other
+		// work to do. Draining is the point — an unclosable bead in hand is the
+		// #5716 loop, while a drain leaves the bead in place, adoptable by the
+		// next attempt once the store recovers, and the operator with the
+		// recovery command restampHookAdoption printed.
 	}
 
 	readyResult := claimFirstReadyHookAssignment(candidates, *opts, *ops, dir, stdout, stderr)
@@ -1058,10 +1063,28 @@ func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOp
 // session_name) the bead is adopted untouched, exactly as before.
 //
 // A lost CAS means the bead changed hands between the readback and the write,
-// so it is not adopted. A failed or unsupported CAS proves nothing about
-// ownership and keeps the pre-existing adopt-as-is behavior, the same
-// fail-open trade certifyHookAdoption makes for an unreadable readback.
-func restampHookAdoption(bead beads.Bead, canonicalAssignee string, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (beads.Bead, bool) {
+// so it is not adopted.
+//
+// A restamp that FAILED is decided by where the bead lives, not by the error
+// value, because the same beads.ErrConditionalTransferUnsupported reaches here
+// from two places with opposite correct answers:
+//
+//   - errRestampGraphResident, from the class route for a bead resident in the
+//     relocated graph store. Nothing downstream fences that bead's close on the
+//     stored assignee, so the legacy spelling costs the worker nothing and there
+//     is no recovery to prescribe: adopt as-is.
+//   - anything else, which is the work store, whose door bd fences byte for
+//     byte. A failure there — a transient bd error, or a bd too old for
+//     --if-assignee — is if anything STRONGER evidence that the stored spelling
+//     is still wrong, so handing the bead over would hand over the #5716 loop:
+//     refuse adoption and print the manual recovery.
+//
+// The one surviving fail-open on a work-store bead is hookAdoptionUnverified,
+// where the readback could not be made at all: `current` is then the work
+// query's (possibly stale) row rather than a canonical fact, so a failed CAS is
+// evidence of nothing, which is the same trade certifyHookAdoption makes for an
+// unreadable readback.
+func restampHookAdoption(bead beads.Bead, canonicalAssignee string, verdict hookAdoptionVerdict, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (beads.Bead, bool) {
 	target := strings.TrimSpace(opts.Assignee)
 	current := strings.TrimSpace(canonicalAssignee)
 	if current == "" {
@@ -1075,8 +1098,7 @@ func restampHookAdoption(bead beads.Bead, canonicalAssignee string, opts hookCla
 	defer cancel()
 	moved, err := ops.RestampAdopted(ctx, dir, opts.Env, bead.ID, current, target)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: adopting %s under legacy assignee %q; re-stamping it to %q failed: %v (bd will reject this worker's close/update until it is moved; recover with: bd update %s --if-assignee %q --if-status in_progress --assignee %q)\n", bead.ID, current, target, err, bead.ID, current, target) //nolint:errcheck
-		return bead, true
+		return bead, adoptAfterFailedRestamp(bead.ID, current, target, verdict, err, stderr)
 	}
 	if !moved {
 		fmt.Fprintf(stderr, "gc hook --claim: not adopting %s: it no longer carries assignee %q (re-stamp to %q lost)\n", bead.ID, current, target) //nolint:errcheck
@@ -1084,6 +1106,24 @@ func restampHookAdoption(bead beads.Bead, canonicalAssignee string, opts hookCla
 	}
 	bead.Assignee = target
 	return bead, true
+}
+
+// adoptAfterFailedRestamp reports whether a bead whose re-stamp failed may
+// still be adopted, and says why on stderr. See restampHookAdoption for the
+// rule: the answer is where the bead lives, plus the unverified-readback
+// exception.
+func adoptAfterFailedRestamp(beadID, current, target string, verdict hookAdoptionVerdict, err error, stderr io.Writer) bool {
+	switch {
+	case errors.Is(err, errRestampGraphResident):
+		fmt.Fprintf(stderr, "gc hook --claim: adopting %s under legacy assignee %q: it is graph-resident, which has no conditional-transfer primitive and no close-path actor fence, so the spelling does not need to move to %q\n", beadID, current, target) //nolint:errcheck
+		return true
+	case verdict == hookAdoptionUnverified:
+		fmt.Fprintf(stderr, "gc hook --claim: adopting %s under assignee %q without a canonical readback; re-stamping it to %q failed: %v (if the stored spelling really is %q, bd will reject this worker's close/update; recover with: bd update %s --if-assignee %q --if-status in_progress --assignee %q)\n", beadID, current, target, err, current, beadID, current, target) //nolint:errcheck
+		return true
+	default:
+		fmt.Fprintf(stderr, "gc hook --claim: not adopting %s: it is held under legacy assignee %q and re-stamping it to %q failed: %v (bd would reject this worker's close/update; recover with: bd update %s --if-assignee %q --if-status in_progress --assignee %q)\n", beadID, current, target, err, beadID, current, target) //nolint:errcheck
+		return false
+	}
 }
 
 func hookClaimExistingAssignment(candidates []beads.Bead, opts hookClaimOptions) (hookClaimJSONResult, beads.Bead, bool) {
