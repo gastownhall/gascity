@@ -3410,16 +3410,14 @@ func TestBuildDesiredState_NewPoolSessionBeadCreatedWithConcreteIdentity(t *test
 	if !containsString(got.Labels, "agent:rig/claude-1") {
 		t.Fatalf("labels = %#v, want concrete slot agent label", got.Labels)
 	}
-	// The runtime name is derived from the slot identity, never from the bead
-	// ID — that derivation is the ga-vcjr9 leak. A transient slot then steps
-	// aside onto "<identity>-pool" so the rebinding slot never becomes the
-	// runtime name (and therefore GC_AGENT), guarded by
-	// TestE2E_MultiAgent_PoolAndFixed (#5241).
-	if want := poolRuntimeSessionName(nil, "rig/claude-1", "rig/claude", true); got.Metadata["session_name"] != want {
-		t.Fatalf("session_name = %q, want the transient slot's identity-derived runtime name %q", got.Metadata["session_name"], want)
+	// An unaliased pool's runtime name is <template>-<beadID>, so the runtime
+	// resolves back to its bead; it is never the bare slot (and therefore never
+	// GC_AGENT = slot, #5241).
+	if want := PoolSessionName("rig/claude", got.ID); got.Metadata["session_name"] != want {
+		t.Fatalf("session_name = %q, want bead-scoped runtime name %q", got.Metadata["session_name"], want)
 	}
-	if beadOwnsPoolSessionName(got) {
-		t.Fatalf("session_name = %q is still bead-ID derived", got.Metadata["session_name"])
+	if !beadOwnsPoolSessionName(got) {
+		t.Fatalf("session_name = %q is not bead-ID scoped", got.Metadata["session_name"])
 	}
 }
 
@@ -8736,8 +8734,8 @@ func TestBuildDesiredState_UsesBeadNamedPoolSessionsForScaleCheckDemand(t *testi
 	if tp.TemplateName != "worker" {
 		t.Fatalf("TemplateName = %q, want worker", tp.TemplateName)
 	}
-	if got := poolRuntimeSessionName(nil, "worker-1", "worker", true); sessionName != got {
-		t.Fatalf("session name = %q, want the transient slot's identity-derived runtime name %q", sessionName, got)
+	if !strings.HasPrefix(sessionName, "worker-") || sessionName == poolRuntimeSessionName(nil, "worker-1", "worker", true) {
+		t.Fatalf("session name = %q, want a bead-scoped worker-<beadID> runtime name", sessionName)
 	}
 
 	sessionBeads, err := store.ListByLabel(sessionBeadLabel, 0)
@@ -11016,10 +11014,9 @@ func TestSelectOrCreatePoolSessionBeadPicksEarliestReusableSingletonCandidate(t 
 
 // TestSelectOrCreateDependencyPoolSessionBead_BlocksWhenConcreteAliasTaken:
 // a manual session holding "claude-1" as its alias owns that handle, so the
-// pool slot whose identity derives the same runtime name cannot have it. The
-// create fails closed and retries next tick against the same name rather than
-// minting a bead-ID-scoped sibling box (ga-vcjr9). The operator sees the
-// holder named in the error.
+// pool slot whose identity derives the same name cannot have it. The create
+// fails closed and retries next tick rather than minting a sibling box beside
+// the holder (ga-vcjr9). The operator sees the holder named in the error.
 func TestSelectOrCreateDependencyPoolSessionBead_BlocksWhenConcreteAliasTaken(t *testing.T) {
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{

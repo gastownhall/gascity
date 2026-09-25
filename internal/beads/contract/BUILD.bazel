@@ -44,6 +44,7 @@ go_test(
         "metadata_test.go",
         "migrate_journal_test.go",
         "mode_test.go",
+        "preflight_bdcontext_skip_test.go",
         "preflight_checker_test.go",
         "preflight_test.go",
         "testenv_import_test.go",

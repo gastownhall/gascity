@@ -213,3 +213,100 @@ func TestTmuxCommandLineQuotesEveryArgument(t *testing.T) {
 		t.Errorf("tmuxCommandLine =\n%s\nwant\n%s", got, want)
 	}
 }
+
+// TestNoSecretEnvValueReachesAnyTmuxArgv is the property guard across every
+// local-tmux path that carries env values: session creation AND the later
+// set-environment used by SetMeta. Any value whose key is not on the argv allow
+// list must be absent from every tmux argv, however it is spelled.
+func TestNoSecretEnvValueReachesAnyTmuxArgv(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	secrets := map[string]string{
+		"ANTHROPIC_AUTH_TOKEN":    "sk-ant-canary-1",
+		"OPENAI_API_KEY":          "sk-openai-canary-2",
+		"GC_INSTANCE_TOKEN":       "instance-canary-3",
+		"SOME_FUTURE_UNKNOWN_VAR": "future-canary-'quoted' $x #{y}\nline2",
+	}
+	fake := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = fake
+
+	env := map[string]string{"GC_RIG": "rig-a"}
+	for k, v := range secrets {
+		env[k] = v
+	}
+	if err := tm.NewSessionWithCommandAndEnv("gc-test-prop", "/work", "claude", env); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	for k, v := range secrets {
+		if err := tm.SetEnvironment("gc-test-prop", k, v); err != nil {
+			t.Fatalf("SetEnvironment(%s): %v", k, err)
+		}
+	}
+	if len(fake.calls) == 0 {
+		t.Fatal("no tmux calls recorded")
+	}
+	for _, call := range fake.calls {
+		joined := strings.Join(call, "\x00")
+		for k, v := range secrets {
+			if strings.Contains(joined, v) {
+				t.Fatalf("value of %s reached tmux argv", k)
+			}
+		}
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(os.TempDir(), stagedDirPrefix+"*")); len(leftovers) != 0 {
+		t.Errorf("staged directories survived: %v", leftovers)
+	}
+}
+
+// TestSetEnvironmentStagesSecretValue pins the mechanism: a secret value is
+// set by sourcing a command file (no start-server — set-environment must not
+// spawn a server for a session that cannot exist on it).
+func TestSetEnvironmentStagesSecretValue(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	fake := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = fake
+
+	if err := tm.SetEnvironment("gc-test-meta", "GC_INSTANCE_TOKEN", "tok-secret"); err != nil {
+		t.Fatalf("SetEnvironment: %v", err)
+	}
+	if len(fake.calls) != 1 {
+		t.Fatalf("tmux calls = %v, want exactly one source-file", fake.calls)
+	}
+	call := fake.calls[0]
+	if call[len(call)-2] != "source-file" || slices.Contains(call, "start-server") {
+		t.Errorf("secret SetEnvironment did not source a command file: %v", call)
+	}
+}
+
+// TestSetEnvironmentKeepsInertValueOnArgv keeps the common SetMeta path
+// (identity, epochs) file-free.
+func TestSetEnvironmentKeepsInertValueOnArgv(t *testing.T) {
+	fake := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = fake
+
+	if err := tm.SetEnvironment("gc-test-meta", "GC_SESSION_ID", "gc-123"); err != nil {
+		t.Fatalf("SetEnvironment: %v", err)
+	}
+	want := []string{"set-environment", "-t", "gc-test-meta", "GC_SESSION_ID", "gc-123"}
+	if got := fake.calls[0]; !slices.Equal(got[len(got)-len(want):], want) {
+		t.Errorf("inert SetEnvironment argv = %v, want suffix %v", got, want)
+	}
+}
+
+// TestSetEnvironmentFailsClosedWhenFileUnwritable proves SetEnvironment cannot
+// degrade to the argv leak when staging fails.
+func TestSetEnvironmentFailsClosedWhenFileUnwritable(t *testing.T) {
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "does-not-exist"))
+	fake := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = fake
+
+	if err := tm.SetEnvironment("gc-test-meta", "OPENAI_API_KEY", "sk-test"); err == nil {
+		t.Fatal("SetEnvironment must fail when the command file cannot be staged")
+	}
+	if len(fake.calls) != 0 {
+		t.Errorf("no tmux command may run once staging failed: %v", fake.calls)
+	}
+}

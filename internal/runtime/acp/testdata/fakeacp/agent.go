@@ -176,7 +176,7 @@ func (a *agent) cancelTurns(latency time.Duration) {
 		t.cancel()
 		go func(t *turn) {
 			waitFor(context.Background(), latency)
-			a.answer(t, "canceled", nil)
+			a.answer(t, wireCancelled, nil)
 		}(t)
 	}
 }

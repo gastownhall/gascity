@@ -246,8 +246,10 @@ func assertExactRuntimeNameSerializesPoolCreates(
 	if first.err != nil {
 		t.Fatalf("first create: %v", first.err)
 	}
-	if got := first.info.SessionNameMetadata; got != runtimeName {
-		t.Fatalf("first session_name = %q, want %q", got, runtimeName)
+	// runtimeName is the identity lease the creators serialize on; an
+	// unaliased pool persists the bead-scoped runtime name instead.
+	if got := first.info.SessionNameMetadata; got != runtimeName && got != PoolSessionName(first.info.Template, first.info.ID) {
+		t.Fatalf("first session_name = %q, want %q or its bead-scoped form", got, runtimeName)
 	}
 	if !errors.Is(second.err, errPoolSessionNameUnavailable) {
 		t.Fatalf("second create error = %v, want errPoolSessionNameUnavailable", second.err)
@@ -419,8 +421,8 @@ func TestCreatePoolSessionBeadWithGuardedAlias_ProvenAliasCollisionDefersAlias(t
 	if created.Alias != "" {
 		t.Fatalf("created alias = %q, want deferred/empty while rig/furiosa is held", created.Alias)
 	}
-	if created.SessionNameMetadata != expectedRuntimeName {
-		t.Fatalf("created session_name = %q, want exact free runtime name %q", created.SessionNameMetadata, expectedRuntimeName)
+	if want := PoolSessionName(cfg.Agents[0].QualifiedName(), created.ID); created.SessionNameMetadata != want {
+		t.Fatalf("created session_name = %q, want bead-scoped runtime name %q", created.SessionNameMetadata, want)
 	}
 
 	rows, err := loadSessionBeads(store)
@@ -472,8 +474,9 @@ func TestCreatePoolSessionBeadWithGuardedAlias_ForeignAliasCollisionDefersAlias(
 	if created.ID == "" || created.Alias != "" {
 		t.Fatalf("created session = %#v, want one alias-deferred primary row", created)
 	}
-	if created.SessionNameMetadata != expectedRuntimeName {
-		t.Fatalf("created session_name = %q, want %q", created.SessionNameMetadata, expectedRuntimeName)
+	_ = expectedRuntimeName // identity lease only; the persisted name is bead-scoped
+	if want := PoolSessionName(cfg.Agents[0].QualifiedName(), created.ID); created.SessionNameMetadata != want {
+		t.Fatalf("created session_name = %q, want %q", created.SessionNameMetadata, want)
 	}
 	if got := bp.sessionBeads.OpenInfos(); len(got) != 1 || got[0].ID != created.ID {
 		t.Fatalf("primary writeback = %#v, want exactly created row %s", got, created.ID)
@@ -704,8 +707,8 @@ func TestCreatePoolSessionBeadWithIdentifiers_UsesForeignAvailabilitySnapshotAnd
 	if err != nil {
 		t.Fatalf("create after foreign holder closes: %v", err)
 	}
-	if info.SessionNameMetadata != identifiers.sessionName {
-		t.Fatalf("replacement session_name = %q, want stable %q", info.SessionNameMetadata, identifiers.sessionName)
+	if want := PoolSessionName("worker", info.ID); info.SessionNameMetadata != want {
+		t.Fatalf("replacement session_name = %q, want bead-scoped %q", info.SessionNameMetadata, want)
 	}
 	if got := writebackSnapshot.OpenInfos(); len(got) != 1 || got[0].ID != info.ID {
 		t.Fatalf("primary writeback = %#v, want newly created session %s", got, info.ID)
