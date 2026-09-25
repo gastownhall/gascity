@@ -577,6 +577,14 @@ type lateLegacyNudgeProvider struct {
 	resultErr   error
 }
 
+type panickingLegacyNudgeProvider struct {
+	*nudgeEventedFake
+}
+
+func (p *panickingLegacyNudgeProvider) Nudge(string, []runtime.ContentBlock) error {
+	panic("provider panic")
+}
+
 func (p *lateLegacyNudgeProvider) Nudge(_ string, _ []runtime.ContentBlock) error {
 	p.startOnce.Do(func() {
 		close(p.started)
@@ -654,6 +662,150 @@ func TestNudgeEventDispatcherDoesNotRetryUnknownLegacyDelivery(t *testing.T) {
 		d.runPass(info.SessionName, nudgeEventRetryBudget)
 		if got := sp.deliveries.Load(); got != 1 {
 			t.Fatalf("deliveries = %d, want exactly 1 across the retry pass", got)
+		}
+	})
+}
+
+func TestNudgeEventDispatcherBatchAckSurvivesSiblingWithdrawal(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sp := &lateLegacyNudgeProvider{
+			nudgeEventedFake: newNudgeEventedFake(),
+			started:          make(chan struct{}),
+			release:          make(chan struct{}),
+			delivered:        make(chan struct{}),
+		}
+		defer func() {
+			select {
+			case <-sp.release:
+			default:
+				close(sp.release)
+			}
+		}()
+		dir, d, info := newNudgeDispatcherFixture(t, sp)
+		sp.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-time.Minute)}
+		keep := newQueuedNudge("worker", "keep", time.Now().Add(-time.Minute))
+		withdrawn := newQueuedNudge("worker", "withdrawn", time.Now().Add(-time.Minute))
+		for _, item := range []queuedNudge{keep, withdrawn} {
+			if err := enqueueQueuedNudge(dir, item); err != nil {
+				t.Fatalf("enqueueQueuedNudge: %v", err)
+			}
+		}
+
+		done := make(chan struct{})
+		go func() {
+			d.runPass(info.SessionName, 0)
+			close(done)
+		}()
+		<-sp.started
+		synctest.Wait()
+		if err := nudgequeue.WithdrawWaitNudges(nil, dir, []string{withdrawn.ID}); err != nil {
+			t.Fatalf("WithdrawWaitNudges: %v", err)
+		}
+		close(sp.release)
+		synctest.Wait()
+		<-done
+		if got := sp.deliveries.Load(); got != 1 {
+			t.Fatalf("deliveries after first pass = %d, want 1", got)
+		}
+		state := queueStateSnapshot(t, dir)
+		if len(state.Pending) != 0 || len(state.InFlight) != 0 || len(state.Dead) != 0 {
+			t.Fatalf("successful owned delivery remained queued after sibling withdrawal: state=%+v", state)
+		}
+
+		<-time.After(defaultQueuedNudgeClaimTTL + time.Second)
+		sp.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-time.Minute)}
+		d.runPass(info.SessionName, 0)
+		synctest.Wait()
+		if got := sp.deliveries.Load(); got != 1 {
+			t.Fatalf("delivered item %q was injected %d times after sibling withdrawal", keep.ID, got)
+		}
+	})
+}
+
+func TestNudgeEventDispatcherKeepaliveRenewsOwnedSiblingAfterWithdrawal(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sp := &lateLegacyNudgeProvider{
+			nudgeEventedFake: newNudgeEventedFake(),
+			started:          make(chan struct{}),
+			release:          make(chan struct{}),
+			delivered:        make(chan struct{}),
+		}
+		defer func() {
+			select {
+			case <-sp.release:
+			default:
+				close(sp.release)
+			}
+		}()
+		dir, d, info := newNudgeDispatcherFixture(t, sp)
+		sp.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-time.Minute)}
+		keep := newQueuedNudge("worker", "keep", time.Now().Add(-time.Minute))
+		withdrawn := newQueuedNudge("worker", "withdrawn", time.Now().Add(-time.Minute))
+		for _, item := range []queuedNudge{keep, withdrawn} {
+			if err := enqueueQueuedNudge(dir, item); err != nil {
+				t.Fatalf("enqueueQueuedNudge: %v", err)
+			}
+		}
+
+		done := make(chan struct{})
+		go func() {
+			d.runPass(info.SessionName, nudgeEventRetryBudget)
+			close(done)
+		}()
+		<-sp.started
+		synctest.Wait()
+		if err := nudgequeue.WithdrawWaitNudges(nil, dir, []string{withdrawn.ID}); err != nil {
+			t.Fatalf("WithdrawWaitNudges: %v", err)
+		}
+
+		<-time.After(defaultQueuedNudgeClaimTTL + time.Millisecond)
+		synctest.Wait()
+		reclaimed, err := claimDueQueuedNudgesMatching(dir, time.Now(), func(queuedNudge) bool { return true })
+		if err != nil {
+			t.Fatalf("claimDueQueuedNudgesMatching: %v", err)
+		}
+		if len(reclaimed) != 0 {
+			t.Fatalf("owned sibling %q expired after another batch claim was withdrawn: reclaimed=%+v", keep.ID, reclaimed)
+		}
+
+		close(sp.release)
+		synctest.Wait()
+		<-done
+	})
+}
+
+func TestNudgeEventDispatcherStopsClaimKeepaliveOnProviderPanic(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sp := &panickingLegacyNudgeProvider{nudgeEventedFake: newNudgeEventedFake()}
+		dir, _, info := newNudgeDispatcherFixture(t, sp)
+		sp.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-time.Minute)}
+		if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "panic", time.Now().Add(-time.Minute))); err != nil {
+			t.Fatalf("enqueueQueuedNudge: %v", err)
+		}
+		backing := openNudgeBeadStore(dir)
+		target := resolveNudgeTargetFromSessionInfo(dir, &config.City{}, *info)
+		lastActivity := time.Now().Add(-time.Minute)
+		obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &lastActivity}
+
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			_, _ = tryDeliverQueuedNudgesByPollerContext(context.Background(), target, backing.Store, backing.Store, sp, 0, obs)
+		}()
+		if recovered == nil {
+			t.Fatal("provider panic was not propagated")
+		}
+		state := queueStateSnapshot(t, dir)
+		if len(state.InFlight) != 1 {
+			t.Fatalf("state after provider panic = %+v, want one in-flight claim", state)
+		}
+		leaseUntil := state.InFlight[0].LeaseUntil
+
+		<-time.After(defaultQueuedNudgeClaimTTL/2 + time.Millisecond)
+		synctest.Wait()
+		state = queueStateSnapshot(t, dir)
+		if len(state.InFlight) != 1 || !state.InFlight[0].LeaseUntil.Equal(leaseUntil) {
+			t.Fatalf("claim keepalive survived provider panic: state=%+v original lease=%s", state, leaseUntil)
 		}
 	})
 }

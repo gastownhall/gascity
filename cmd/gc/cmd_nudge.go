@@ -1870,7 +1870,8 @@ func tryDeliverQueuedNudgesByPollerContext(ctx context.Context, target nudgeTarg
 		return false, errors.Join(bookkeepErr, err, relErr)
 	}
 	deliveryCtx := ctx
-	var stopClaimKeepalive func() error
+	var stopClaimKeepalive func()
+	var stopClaimKeepaliveErr error
 	if !runtime.SupportsNudgeContext(sp, target.sessionName) {
 		// The dispatcher deadline bounds observation and handle resolution, but
 		// a legacy provider cannot cancel an in-flight Nudge. Wait for its real
@@ -1880,7 +1881,14 @@ func tryDeliverQueuedNudgesByPollerContext(ctx context.Context, target nudgeTarg
 		if lifetime, ok := ctx.(interface{ deliveryLifetimeContext() context.Context }); ok {
 			deliveryCtx = lifetime.deliveryLifetimeContext()
 		}
-		stopClaimKeepalive = keepQueuedNudgeClaimsAlive(target.cityPath, queuedNudgeClaims(items))
+		stop := keepQueuedNudgeClaimsAlive(target.cityPath, queuedNudgeClaims(items))
+		var stopOnce sync.Once
+		stopClaimKeepalive = func() {
+			stopOnce.Do(func() {
+				stopClaimKeepaliveErr = stop()
+			})
+		}
+		defer stopClaimKeepalive()
 	}
 	result, err := handle.Nudge(deliveryCtx, worker.NudgeRequest{
 		Text:     msg,
@@ -1889,7 +1897,8 @@ func tryDeliverQueuedNudgesByPollerContext(ctx context.Context, target nudgeTarg
 		Wake:     worker.NudgeWakeLiveOnly,
 	})
 	if stopClaimKeepalive != nil {
-		bookkeepErr = errors.Join(bookkeepErr, stopClaimKeepalive())
+		stopClaimKeepalive()
+		bookkeepErr = errors.Join(bookkeepErr, stopClaimKeepaliveErr)
 	}
 	if err != nil {
 		telemetry.RecordNudge(context.Background(), target.agentKey(), err)
@@ -2940,10 +2949,13 @@ func ackQueuedNudgeClaimsWithOutcome(cityPath string, claims []queuedNudgeClaim,
 	maint := nudgeMaintenanceStore{cityPath: cityPath}
 	defer maint.close() //nolint:errcheck // best-effort
 	want := queuedNudgeClaimMap(claims)
-	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
-		if err := requireQueuedNudgeClaims(state, want); err != nil {
+	var claimErr error
+	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		owned, err := countQueuedNudgeClaims(state, want)
+		if owned == 0 {
 			return err
 		}
+		claimErr = err
 		now := time.Now()
 		inFlight := state.InFlight[:0]
 		for _, item := range state.InFlight {
@@ -2959,6 +2971,10 @@ func ackQueuedNudgeClaimsWithOutcome(cityPath string, claims []queuedNudgeClaim,
 		state.InFlight = inFlight
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	return claimErr
 }
 
 func releaseQueuedNudgeClaims(cityPath string, ids []string) error {
@@ -3007,10 +3023,13 @@ func releaseQueuedNudgeClaimsOwned(cityPath string, claims []queuedNudgeClaim) e
 		return nil
 	}
 	want := queuedNudgeClaimMap(claims)
-	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
-		if err := requireQueuedNudgeClaims(state, want); err != nil {
+	var claimErr error
+	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		owned, err := countQueuedNudgeClaims(state, want)
+		if owned == 0 {
 			return err
 		}
+		claimErr = err
 		var released []queuedNudge
 		inFlight := state.InFlight[:0]
 		for _, item := range state.InFlight {
@@ -3028,6 +3047,10 @@ func releaseQueuedNudgeClaimsOwned(cityPath string, claims []queuedNudgeClaim) e
 		sortQueuedNudges(state)
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	return claimErr
 }
 
 func keepQueuedNudgeClaimsAlive(cityPath string, claims []queuedNudgeClaim) func() error {
@@ -3057,10 +3080,13 @@ func keepQueuedNudgeClaimsAlive(cityPath string, claims []queuedNudgeClaim) func
 
 func renewQueuedNudgeClaims(cityPath string, claims []queuedNudgeClaim) error {
 	want := queuedNudgeClaimMap(claims)
+	var claimErr error
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
-		if err := requireQueuedNudgeClaims(state, want); err != nil {
+		owned, err := countQueuedNudgeClaims(state, want)
+		if owned == 0 {
 			return err
 		}
+		claimErr = err
 		leaseUntil := time.Now().Add(defaultQueuedNudgeClaimTTL).UTC()
 		for i := range state.InFlight {
 			claimedAt, owned := want[state.InFlight[i].ID]
@@ -3074,6 +3100,9 @@ func renewQueuedNudgeClaims(cityPath string, claims []queuedNudgeClaim) error {
 	if err != nil {
 		return fmt.Errorf("renewing queued nudge claims: %w", err)
 	}
+	if claimErr != nil {
+		return fmt.Errorf("renewing queued nudge claims: %w", claimErr)
+	}
 	return nil
 }
 
@@ -3085,18 +3114,18 @@ func queuedNudgeClaimMap(claims []queuedNudgeClaim) map[string]time.Time {
 	return want
 }
 
-func requireQueuedNudgeClaims(state *nudgeQueueState, want map[string]time.Time) error {
-	found := make(map[string]struct{}, len(want))
+func countQueuedNudgeClaims(state *nudgeQueueState, want map[string]time.Time) (int, error) {
+	found := 0
 	for _, item := range state.InFlight {
 		claimedAt, ok := want[item.ID]
 		if ok && item.ClaimedAt.Equal(claimedAt) {
-			found[item.ID] = struct{}{}
+			found++
 		}
 	}
-	if len(found) != len(want) {
-		return fmt.Errorf("%w: %d of %d claims remain owned", errQueuedNudgeClaimLost, len(found), len(want))
+	if found != len(want) {
+		return found, fmt.Errorf("%w: %d of %d claims remain owned", errQueuedNudgeClaimLost, found, len(want))
 	}
-	return nil
+	return found, nil
 }
 
 func recordQueuedNudgeFailure(cityPath string, ids []string, cause error, now time.Time) error {
@@ -3153,12 +3182,15 @@ func recordQueuedNudgeFailureDetailedMatching(cityPath string, store beads.Nudge
 		want[id] = true
 	}
 	var deadLettered []queuedNudge
+	var claimErr error
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		deadLettered = deadLettered[:0]
 		if owned != nil {
-			if err := requireQueuedNudgeClaims(state, owned); err != nil {
+			ownedCount, err := countQueuedNudgeClaims(state, owned)
+			if ownedCount == 0 {
 				return err
 			}
+			claimErr = err
 		}
 		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
 		if owned == nil {
@@ -3224,7 +3256,7 @@ func recordQueuedNudgeFailureDetailedMatching(cityPath string, store beads.Nudge
 			fmt.Fprintf(nudgeWarningWriter, "gc nudge: warning: marking dead-lettered nudge %q terminal: %v\n", item.ID, markErr) //nolint:errcheck
 		}
 	}
-	return deadLettered, nil
+	return deadLettered, claimErr
 }
 
 func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudge, bool) {
