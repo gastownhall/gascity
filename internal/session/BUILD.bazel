@@ -126,6 +126,7 @@ go_test(
         "startup_health_test.go",
         "state_machine_test.go",
         "store_resolve_test.go",
+        "store_start_fence_test.go",
         "store_test.go",
         "submit_family_test.go",
         "submit_test.go",

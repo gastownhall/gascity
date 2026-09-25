@@ -58,6 +58,7 @@ ACPSessionConfig holds settings for the ACP session provider.
 | `handshake_timeout` | string |  | `30s` | HandshakeTimeout is how long to wait for the ACP handshake to complete. Duration string (e.g., "30s", "1m"). Defaults to "30s". |
 | `nudge_busy_timeout` | string |  | `60s` | NudgeBusyTimeout is how long to wait for an agent to become idle before sending a new prompt. Duration string. Defaults to "60s". |
 | `output_buffer_lines` | integer |  | `1000` | OutputBufferLines is the number of output lines to keep in the circular buffer for Peek. Defaults to 1000. |
+| `stop_grace` | string |  | `5s` | StopGrace is how long stopping an ACP session waits after SIGTERM before escalating to SIGKILL. Raise it for agents that need longer to drain in-flight tool calls on shutdown. Duration string (e.g., "5s", "20s"). Defaults to "5s"; non-positive or unparseable values fall back to the default. gc stop bounds each session at 30s, so keep stop_grace comfortably below that. |
 
 ## APIConfig
 

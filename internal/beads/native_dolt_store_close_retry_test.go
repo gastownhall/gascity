@@ -183,7 +183,7 @@ func TestNativeDoltStoreCloseAllRecoversWhenTheCloseConflictsAfterMetadataLanded
 			}
 			return out, nil
 		},
-		updateIssue: func(context.Context, string, map[string]interface{}, string) error {
+		updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
 			atomic.AddInt32(&metadata, 1)
 			return nil
 		},

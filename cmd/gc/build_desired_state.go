@@ -94,21 +94,6 @@ type DesiredStateResult struct {
 	// ReadyUnassignedRoutedWorkStoreRefs is index-aligned with
 	// ReadyUnassignedRoutedWorkBeads and uses canonical city:/rig: refs.
 	ReadyUnassignedRoutedWorkStoreRefs []string
-	// OpenRoutedWorkBeads is the BROAD open/unassigned/routed snapshot, before
-	// ReadyUnassignedRoutedWorkBeads narrows it to the rows the default pool
-	// demand probes selected. The seat-claim backstop reads this one because it
-	// settles readiness itself, from each row's own dependency edges rather than
-	// from pool-demand selection: a named seat's routed work is not pool demand,
-	// so the narrowed view can be silent on exactly the rows that lane exists
-	// for. OpenRoutedWorkStores and OpenRoutedWorkStoreRefs are index-aligned
-	// with it, the same contract AssignedWorkStores/StoreRefs carry.
-	OpenRoutedWorkBeads     []beads.Bead
-	OpenRoutedWorkStores    []beads.Store
-	OpenRoutedWorkStoreRefs []string
-	// OpenRoutedWorkQueryPartial is true when the open-routed read above was
-	// incomplete. A missing row makes a seat's own work look absent, so
-	// consumers that act on ABSENCE must disable themselves for that tick.
-	OpenRoutedWorkQueryPartial bool
 	// NamedSessionDemand records which named-session identities have active
 	// direct assignee demand (Assignee == identity). The reconciler merges this
 	// into poolDesired so that on-demand named sessions remain config-eligible.
@@ -817,7 +802,6 @@ func buildDesiredStateWithSessionBeadsAt(
 	var unassignedRoutedBeads []beads.Bead
 	var unassignedRoutedStores []beads.Store
 	var unassignedRoutedStoreRefs []string
-	var unassignedRoutedPartial bool
 	var controlDispatcherScopeGaps []ControlDispatcherScopeGap
 	var readyUnassignedRoutedWorkBeads []beads.Bead
 	var readyUnassignedRoutedWorkStoreRefs []string
@@ -888,6 +872,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		// the route must be canonicalized before demand is counted or the cold
 		// pool never wakes for it.
 		subPhaseStart = time.Now()
+		var unassignedRoutedPartial bool
 		unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, unassignedRoutedPartial = collectOpenUnassignedRoutedWork(cityPath, cfg, store, rigStores, suspendedRigPaths, stderr)
 		// Same repair as above, over the open/unassigned collection: a bead
 		// released back to open by a drain is clobbered the same way an
@@ -1278,10 +1263,6 @@ func buildDesiredStateWithSessionBeadsAt(
 		AssignedWorkStoreRefs:              assignedWorkStoreRefs,
 		ReadyUnassignedRoutedWorkBeads:     readyUnassignedRoutedWorkBeads,
 		ReadyUnassignedRoutedWorkStoreRefs: readyUnassignedRoutedWorkStoreRefs,
-		OpenRoutedWorkBeads:                unassignedRoutedBeads,
-		OpenRoutedWorkStores:               unassignedRoutedStores,
-		OpenRoutedWorkStoreRefs:            unassignedRoutedStoreRefs,
-		OpenRoutedWorkQueryPartial:         unassignedRoutedPartial,
 		ReadyAssigned:                      readyAssigned,
 		ContinuationClaimCandidates:        continuationClaimCandidates,
 		ContinuationClaimQueryPartial:      continuationClaimQueryPartial,
@@ -4985,6 +4966,22 @@ func createPoolSessionBeadWithGuardedAliasUsingLock(
 	identifiers, err := derivePoolSessionIdentifiers(bp.city, template, identity, resolvedTmuxAlias)
 	if err != nil {
 		return session.Info{}, err
+	}
+	// A retired bead can leave its runtime occupying the canonical singleton
+	// name. Do not mint a fresh bead on every demand tick while it remains.
+	// Existing-bead reuse happens before this create path; this is not adoption
+	// or permission to stop an unknown owner. Start still fences later races.
+	//
+	// The probe is deliberately outside the withLocks section below, which is
+	// why Start and not this probe is the authoritative fence. A provider
+	// liveness call blocks on I/O — the ACP provider dials the session control
+	// socket and pings it, each with its own sub-second timeout, per candidate
+	// path — while withLocks takes a cross-process city lock file per
+	// identifier spelling. Probing under those locks would stall every other
+	// creator of the same identifiers behind it. Do not close the
+	// probe-to-create window by widening the lock over this call.
+	if cfgAgent != nil && cfgAgent.UsesCanonicalSingletonPoolIdentity() && bp.sp != nil && bp.sp.IsRunning(identifiers.sessionName) {
+		return session.Info{}, fmt.Errorf("%w: runtime %q still occupies singleton template %q", errPoolSessionNameUnavailable, identifiers.sessionName, template)
 	}
 	if bp.beadStore == nil {
 		return createPoolSessionBeadWithIdentifiers(bp.beadStore, template, bp.city, bp.sessionBeads, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, identifiers)
