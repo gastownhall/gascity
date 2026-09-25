@@ -781,6 +781,7 @@ func startupPromptDeliveredMarkerStale(cityPath string) bool {
 	if err != nil {
 		return false
 	}
+	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close
 	// Route the marker read through the session coordination-class store so a
 	// [beads.classes.sessions] relocation reaches this check, matching the other
 	// prime-hook session reads (see primeHookSessionTemplate). No-refresh config

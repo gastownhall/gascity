@@ -2541,9 +2541,10 @@ type DaemonConfig struct {
 	GraphWorkflows bool `toml:"graph_workflows,omitempty"`
 	// PatrolInterval is the health patrol interval. Duration string (e.g., "30s", "5m", "1h"). Defaults to "30s".
 	PatrolInterval string `toml:"patrol_interval,omitempty" jsonschema:"default=30s"`
-	// SessionPatrolInterval stretches the patrol-driven session-management
-	// phases (death detection, corpse sweeps, bead-driven session reconcile)
-	// to this interval while the session provider streams session events
+	// SessionPatrolInterval stretches the whole patrol-driven beadReconcileTick
+	// (death detection, corpse sweeps, bead-driven session reconcile, wait-nudge
+	// dispatch, and stalled-pool claim and continuation rescues) to this interval
+	// while the session provider streams session events
 	// (runtime.SessionEventProvider): events poke targeted reconciles in
 	// real time, so the patrol re-scan is demoted to a safety net. Ignored
 	// — session phases run on every patrol tick, today's behavior — when
