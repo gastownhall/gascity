@@ -12,7 +12,8 @@ import (
 	"time"
 )
 
-// drainWatcher pulls exactly n events (or fails) with a per-call deadline.
+// drainWatcher pulls exactly n events (or fails), bounding each Next with its
+// own hangBudget rather than a deadline shared with setup I/O.
 func drainWatcher(t *testing.T, w Watcher, n int) []Event {
 	t.Helper()
 	out := make([]Event, 0, n)
@@ -32,8 +33,8 @@ func drainWatcher(t *testing.T, w Watcher, n int) []Event {
 				t.Fatalf("Next %d/%d: %v", i+1, n, r.err)
 			}
 			out = append(out, r.e)
-		case <-time.After(5 * time.Second):
-			t.Fatalf("Next %d/%d timed out (archive-blind watcher?)", i+1, n)
+		case <-time.After(hangBudget):
+			t.Fatalf("Next %d/%d timed out after %s (archive-blind watcher?)", i+1, n, hangBudget)
 		}
 	}
 	return out
@@ -184,7 +185,9 @@ func TestWatchMidRotationTailNotLost(t *testing.T) {
 	defer rec.Close() //nolint:errcheck // test cleanup
 
 	recordN(rec, "seed", 2)
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	// Cancel-only: a rotation sits between this watcher's reads and fsyncs;
+	// drainWatcher bounds each read with its own hang budget (see hangBudget).
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w, err := rec.Watch(ctx, 0)
 	if err != nil {
@@ -371,7 +374,9 @@ func TestWatchRotationLargeLineNotLost(t *testing.T) {
 	defer rec.Close() //nolint:errcheck // test cleanup
 
 	recordN(rec, "seed", 1)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Cancel-only: a rotation sits between this watcher's reads and fsyncs;
+	// drainWatcher bounds each read with its own hang budget (see hangBudget).
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w, err := rec.Watch(ctx, 0)
 	if err != nil {
@@ -564,7 +569,9 @@ func TestWatchRepeatedRotationDuringCatchUpNotLost(t *testing.T) {
 	defer rec.Close() //nolint:errcheck // test cleanup
 
 	recordN(rec, "seed", 2) // seq 1..2
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	// Cancel-only: a rotation sits between this watcher's reads and fsyncs;
+	// drainWatcher bounds each read with its own hang budget (see hangBudget).
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w, err := rec.Watch(ctx, 0)
 	if err != nil {
@@ -733,7 +740,10 @@ func TestWatchConclusionWindowRotationNotLost(t *testing.T) {
 		t.Skip("inode unavailable on this platform")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Cancel-only: the second ForceRotate and WaitForRotations below fsync
+	// before stepRotation next consults this context (acquireBackfillSlot), so a
+	// deadline here would charge that disk I/O to the recovery step.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w, err := rec.Watch(ctx, 0)
 	if err != nil {

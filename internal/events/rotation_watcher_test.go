@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestWatcherSurvivesRotationWithoutGap exercises designer §8.1: the
@@ -27,7 +26,11 @@ func TestWatcherSurvivesRotationWithoutGap(t *testing.T) {
 	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "pre-1"})
 	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "pre-2"})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Cancel-only: ForceRotate and the compression behind res.Done fsync
+	// between the pre- and post-rotate reads, so a shared deadline would
+	// charge that disk I/O against the reads. drainWatcher bounds each read
+	// with its own hang budget instead (see hangBudget).
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w, err := rec.Watch(ctx, 0)
 	if err != nil {
@@ -37,14 +40,7 @@ func TestWatcherSurvivesRotationWithoutGap(t *testing.T) {
 
 	// Drain pre-rotate events first so the watcher's offset is at the
 	// end of the active file before rotation.
-	pre := []Event{}
-	for i := 0; i < 2; i++ {
-		e, err := w.Next()
-		if err != nil {
-			t.Fatalf("Next pre %d: %v", i, err)
-		}
-		pre = append(pre, e)
-	}
+	pre := drainWatcher(t, w, 2)
 	if pre[0].Subject != "pre-1" || pre[1].Subject != "pre-2" {
 		t.Errorf("pre-rotate subjects = [%q,%q], want [pre-1,pre-2]", pre[0].Subject, pre[1].Subject)
 	}
@@ -74,11 +70,9 @@ func TestWatcherSurvivesRotationWithoutGap(t *testing.T) {
 		{BeadClosed, "post-1"},
 		{BeadClosed, "post-2"},
 	}
+	post := drainWatcher(t, w, len(expected))
 	for i, exp := range expected {
-		e, err := w.Next()
-		if err != nil {
-			t.Fatalf("Next post %d: %v", i, err)
-		}
+		e := post[i]
 		if e.Type != exp.Type {
 			t.Errorf("event %d Type = %q, want %q", i, e.Type, exp.Type)
 		}
@@ -117,7 +111,8 @@ func TestWatcherDoesNotReEmitAfterRotation(t *testing.T) {
 		rec.Record(Event{Type: BeadCreated, Actor: "human"})
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Cancel-only: the rotation below fsyncs before the reads; see hangBudget.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Start watching after seq 3 — we should see only the anchor (seq 4)
@@ -136,10 +131,7 @@ func TestWatcherDoesNotReEmitAfterRotation(t *testing.T) {
 		<-res.Done
 	}
 
-	first, err := w.Next()
-	if err != nil {
-		t.Fatalf("Next: %v", err)
-	}
+	first := drainWatcher(t, w, 1)[0]
 	if first.Seq != 4 {
 		t.Errorf("first post-rotate event Seq = %d, want 4 (anchor)", first.Seq)
 	}
@@ -148,10 +140,7 @@ func TestWatcherDoesNotReEmitAfterRotation(t *testing.T) {
 	}
 
 	rec.Record(Event{Type: BeadClosed, Actor: "human"})
-	second, err := w.Next()
-	if err != nil {
-		t.Fatalf("Next #2: %v", err)
-	}
+	second := drainWatcher(t, w, 1)[0]
 	if second.Seq != 5 {
 		t.Errorf("second post-rotate event Seq = %d, want 5", second.Seq)
 	}
