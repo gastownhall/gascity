@@ -5948,7 +5948,7 @@ func TestStopTargetsBounded_AllUnresolvedFallsBackToSerial(t *testing.T) {
 }
 
 func TestCommitStartResult_LogsSuccessOutcome(t *testing.T) {
-	store := newTestStore()
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "b1", Type: sessionBeadType, Status: "open"}}, nil)
 	candidate := startCandidate{
 		info: sessionpkg.Info{
 			ID:                  "b1",
@@ -6045,6 +6045,101 @@ func TestCommitStartResult_TerminalProviderErrorMarksUnhealthy(t *testing.T) {
 	}
 	if got["last_woke_at"] != "" {
 		t.Fatalf("last_woke_at = %q, want cleared", got["last_woke_at"])
+	}
+}
+
+func seedTerminalPendingCreate(t *testing.T, store beads.Store) beads.Bead {
+	t.Helper()
+	b, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":             "worker",
+			"session_name":         "worker",
+			"state":                "creating",
+			"pending_create_claim": "true",
+			"generation":           "1",
+			"instance_token":       "tok-1",
+			"last_woke_at":         "2026-05-27T12:00:00Z",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func terminalPendingCreateResult(t *testing.T, store beads.Store, id string, now time.Time) startResult {
+	t.Helper()
+	info, err := sessionFrontDoor(store).Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return startResult{
+		prepared:        preparedStart{candidate: startCandidate{info: info, tp: TemplateParams{TemplateName: "worker", SessionName: "worker"}}},
+		err:             errors.New("model_not_found: gpt-5.3-codex-spark"),
+		outcome:         "provider_error",
+		started:         now,
+		finished:        now,
+		rollbackPending: true,
+	}
+}
+
+// A pending create whose first start hits a terminal provider error closes as
+// failed-create and keeps the terminal record (ga-z8yi2j: marking first cleared
+// the claim the fenced rollback requires, so the row stayed open and asleep).
+func TestCommitStartResult_TerminalProviderErrorRollsBackPendingCreate(t *testing.T) {
+	store := beads.NewMemStore()
+	b := seedTerminalPendingCreate(t, store)
+	now := time.Unix(3, 0).UTC()
+	result := terminalPendingCreateResult(t, store, b.ID, now)
+	var stderr bytes.Buffer
+	if commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: now}, events.NewFake(), 0, &stderr, &stderr) {
+		t.Fatal("commitStartResult returned true for a terminal provider error")
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed (stderr %q)", got.Status, stderr.String())
+	}
+	for key, want := range map[string]string{
+		"state":                                 "failed-create",
+		"pending_create_claim":                  "",
+		"sleep_reason":                          "provider-terminal-error",
+		sessionProviderTerminalErrorMetadataKey: "model_not_found",
+		sessionHealthStateMetadataKey:           "unhealthy",
+	} {
+		if got.Metadata[key] != want {
+			t.Errorf("%s = %q, want %q", key, got.Metadata[key], want)
+		}
+	}
+}
+
+// The terminal mark shares the rollback's fence: a result whose observed
+// incarnation was superseded must neither close nor mark the newer one.
+func TestCommitStartResult_TerminalProviderErrorLeavesSupersededPendingCreateUntouched(t *testing.T) {
+	store := beads.NewMemStore()
+	b := seedTerminalPendingCreate(t, store)
+	now := time.Unix(3, 0).UTC()
+	result := terminalPendingCreateResult(t, store, b.ID, now)
+	if err := store.SetMetadata(b.ID, "instance_token", "tok-2"); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: now}, events.NewFake(), 0, &stderr, &stderr)
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == "closed" {
+		t.Fatal("a superseded incarnation was closed by a stale terminal-error result")
+	}
+	if got.Metadata["pending_create_claim"] != "true" || got.Metadata["state"] != "creating" || got.Metadata[sessionProviderTerminalErrorMetadataKey] != "" {
+		t.Fatalf("superseded row claim/state/terminal = %q/%q/%q, want true/creating/empty",
+			got.Metadata["pending_create_claim"], got.Metadata["state"], got.Metadata[sessionProviderTerminalErrorMetadataKey])
 	}
 }
 
