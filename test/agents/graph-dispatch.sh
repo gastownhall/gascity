@@ -12,7 +12,7 @@ export BEADS_DIR="$GC_CITY/.beads"
 MODE="${GC_GRAPH_MODE:-success}"
 REPORT_FILE="$GC_CITY/graph-workflow-steps.log"
 TRACE_FILE="$GC_CITY/graph-workflow-trace.log"
-ASSIGNEE="${GC_SESSION_NAME:-${GC_AGENT:-}}"
+ASSIGNEE="${BEADS_ACTOR:-${GC_SESSION_NAME:-${GC_AGENT:-}}}"
 HARNESS_STATE_DIR="$GC_CITY/.gc/test-harness"
 HOOK_TIMEOUT="${GC_GRAPH_HOOK_TIMEOUT:-35}"
 
