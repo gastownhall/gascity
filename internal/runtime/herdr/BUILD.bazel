@@ -35,6 +35,7 @@ go_test(
         "conformance_test.go",
         "dial_bound_test.go",
         "effectiveworkdir_test.go",
+        "errorcode_test.go",
         "events_live_test.go",
         "events_test.go",
         "identity_meta_test.go",
