@@ -258,7 +258,7 @@ func TestRootAtomicWriterCrashReplayAtEveryProtocolOrdinal(t *testing.T) {
 				"--productmetrics-root-temp-crash", home.Home().Path(), test.point)
 			// Shard-free env: the re-exec'd crash helper selects work via
 			// -test.run; inheriting bazel's shard filter makes it exit PASS
-			// without running (sharding ga-*).
+			// without running (#6638).
 			command.Env = shardFreeEnv()
 			output, runErr := command.CombinedOutput()
 			if ctx.Err() != nil {

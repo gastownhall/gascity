@@ -3832,7 +3832,7 @@ func TestStorageAdvisoryLockIsReleasedWhenProcessDies(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "-test.run=^TestStorageLockHolderHelper$", "--", "--productmetrics-lock-holder", inspection.Home().Path())
 	// Re-exec'd helpers must not inherit bazel's shard filter: the go test
 	// runner would assign the helper to a different shard and exit "PASS"
-	// without running it (sharding ga-*).
+	// without running it (#6638).
 	cmd.Env = shardFreeEnv()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
