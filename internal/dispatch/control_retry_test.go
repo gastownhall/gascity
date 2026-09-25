@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	beadslib "github.com/steveyegge/beads"
 )
 
 // closeBlockedErr is the verbatim shape the fleet produced 296,270 times across
@@ -449,5 +450,36 @@ func TestClearControllerSpawnErrorMetadataClearsTheBudgetAnchor(t *testing.T) {
 		if got := metadata[key]; got != "" {
 			t.Fatalf("%s = %q after clearing, want empty", key, got)
 		}
+	}
+}
+
+// TestClassifyControllerErrorTreatsExhaustedMetadataMergeAsTransient pins the
+// contract between the native store's metadata merge and the controller: a
+// merge whose compare-and-swap lost to a concurrent writer on every attempt
+// (NativeDoltStore.SetMetadataBatch wraps *beads.CASRetriesExhaustedError
+// around beadslib.ErrVersionMismatch) is contention, so the control re-enters
+// instead of being failed with controller_error. The drain reservation retry
+// reads the same class.
+func TestClassifyControllerErrorTreatsExhaustedMetadataMergeAsTransient(t *testing.T) {
+	err := fmt.Errorf("%w: %w",
+		&beads.CASRetriesExhaustedError{ID: "gc-ctl", Key: "gc.attempt_log", Attempts: 3},
+		fmt.Errorf("%w: expected 7, got 8", beadslib.ErrVersionMismatch))
+	if !errors.Is(err, beadslib.ErrVersionMismatch) {
+		t.Fatalf("errors.Is(%v, ErrVersionMismatch) = false, want true", err)
+	}
+	if got := ClassifyControllerError(err); got != TierAvailability {
+		t.Fatalf("ClassifyControllerError(exhausted metadata merge) = %v, want %v", got, TierAvailability)
+	}
+	if !IsTransientControllerError(err) {
+		t.Fatal("IsTransientControllerError(exhausted metadata merge) = false, want true")
+	}
+	if !retryableDrainReservationError(err) {
+		t.Fatal("retryableDrainReservationError(exhausted metadata merge) = false, want true")
+	}
+	// Control: the bare mismatch, without the exhaustion type, is what the
+	// store returned before and is not transient — the wrapping is what
+	// carries the classification.
+	if got := ClassifyControllerError(fmt.Errorf("%w: expected 7, got 8", beadslib.ErrVersionMismatch)); got != TierNone {
+		t.Fatalf("ClassifyControllerError(bare version mismatch) = %v, want %v", got, TierNone)
 	}
 }
