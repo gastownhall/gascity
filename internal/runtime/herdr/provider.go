@@ -827,12 +827,26 @@ func agentAliveFromStatus(status string) bool {
 
 // Nudge injects and submits text into a running agent's input.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	ctx := context.Background()
+	return p.NudgeContext(context.Background(), name, content)
+}
+
+// NudgeContext injects and submits text, aborting provider IO when ctx ends.
+func (p *Provider) NudgeContext(ctx context.Context, name string, content []runtime.ContentBlock) error {
 	pid, err := p.paneID(ctx, name)
 	if err != nil || pid == "" {
 		return runtime.ErrSessionNotFound
 	}
 	return p.c.deliverNudge(ctx, pid, runtime.FlattenText(content))
+}
+
+// SessionEventStreamCovers reports that herdr's stream covers every session
+// routed directly to this provider.
+func (p *Provider) SessionEventStreamCovers(string) bool { return true }
+
+// SessionEventMatches maps herdr's constrained registry name to the exact Gas
+// City session identity persisted in the session bead.
+func (p *Provider) SessionEventMatches(name, eventName string) bool {
+	return name == eventName || herdrAgentName(name) == eventName
 }
 
 // Peek reads the current rendered screen ("visible") — the liveness/fingerprint

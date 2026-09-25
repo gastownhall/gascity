@@ -124,6 +124,7 @@ var (
 	nudgeObserveTarget                       = workerObserveNudgeTarget
 	nudgeWithdrawQueuedWaitNudges            = withdrawQueuedWaitNudges
 	nudgePollDeliverQueued                   = tryDeliverQueuedNudgesByPoller
+	nudgeEventDeliverQueued                  = tryDeliverQueuedNudgesByPollerContext
 	nudgeWarningWriter             io.Writer = os.Stderr
 )
 
@@ -1765,6 +1766,10 @@ func parseNudgeDeliveryMode(raw string) (nudgeDeliveryMode, error) {
 }
 
 func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
+	return tryDeliverQueuedNudgesByPollerContext(context.Background(), target, store, sessStore, sp, quiescence, obs)
+}
+
+func tryDeliverQueuedNudgesByPollerContext(ctx context.Context, target nudgeTarget, store, sessStore beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
 	matches, err := nudgeTargetLiveGenerationMatches(target, obs, sp)
 	if err != nil || !matches {
 		return false, err
@@ -1840,7 +1845,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
 		return false, errors.Join(bookkeepErr, err, relErr)
 	}
-	result, err := handle.Nudge(context.Background(), worker.NudgeRequest{
+	result, err := handle.Nudge(ctx, worker.NudgeRequest{
 		Text:     msg,
 		Delivery: worker.NudgeDeliveryDefault,
 		Source:   "queue",

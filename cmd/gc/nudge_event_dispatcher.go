@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -31,8 +32,9 @@ var openRawCityStoreForSessionResolution = openCityStoreAt
 // agent burns the whole budget on cheap rejects and the kick dies until its
 // next idle event.
 const (
-	nudgeEventRetryEpsilon = 250 * time.Millisecond
-	nudgeEventRetryBudget  = 3
+	nudgeEventRetryEpsilon    = 250 * time.Millisecond
+	nudgeEventRetryBudget     = 3
+	nudgeEventDeliveryTimeout = 30 * time.Second
 )
 
 // nudgeEventDispatcher delivers queued nudges on the provider's push session
@@ -71,8 +73,9 @@ type nudgeEventDispatcher struct {
 
 	// Timing knobs, shrunk by tests. quiescence mirrors the sidecar pollers'
 	// idle gate; retryEpsilon pads the aged-stamp retry.
-	quiescence   time.Duration
-	retryEpsilon time.Duration
+	quiescence      time.Duration
+	retryEpsilon    time.Duration
+	deliveryTimeout time.Duration
 
 	mu           sync.Mutex
 	cfg          *config.City
@@ -104,15 +107,16 @@ type nudgeEventKick struct {
 // live within parent. Wire a provider with update.
 func newNudgeEventDispatcher(parent context.Context, cityPath string, stderr io.Writer, logPrefix string) *nudgeEventDispatcher {
 	d := &nudgeEventDispatcher{
-		parent:       parent,
-		cityPath:     cityPath,
-		stderr:       stderr,
-		logPrefix:    logPrefix,
-		quiescence:   defaultNudgePollQuiescence,
-		retryEpsilon: nudgeEventRetryEpsilon,
-		pending:      make(map[string]nudgeEventKick),
-		kicked:       make(chan struct{}, 1),
-		workerDone:   make(chan struct{}),
+		parent:          parent,
+		cityPath:        cityPath,
+		stderr:          stderr,
+		logPrefix:       logPrefix,
+		quiescence:      defaultNudgePollQuiescence,
+		retryEpsilon:    nudgeEventRetryEpsilon,
+		deliveryTimeout: nudgeEventDeliveryTimeout,
+		pending:         make(map[string]nudgeEventKick),
+		kicked:          make(chan struct{}, 1),
+		workerDone:      make(chan struct{}),
 	}
 	go d.worker(parent)
 	return d
@@ -347,20 +351,19 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 	if cfg == nil || sp == nil {
 		return
 	}
-	store := openNudgeBeadStore(d.cityPath)
-	if store.Store == nil {
-		return
-	}
-	if nudgeBeadStoreOwned(d.cityPath) {
-		// Only close a handle this pass opened itself. When the nudges class is
-		// relocated to a split binding, store.Store is the shared, process-scoped
-		// route cliStorageRoutes owns; closing it here would tear it down for
-		// every other consumer of that binding after the first pass.
+	store, opened := openOwnedNudgeBeadStore(d.cityPath)
+	if opened != nil {
+		// Close only the one-shot work handle this pass opened. With a relocated
+		// nudges class, store.Store is the process-shared routed store while opened
+		// remains the discarded work handle owned by this frame.
 		defer func() {
-			if err := closeBeadStoreHandle(store.Store); err != nil {
+			if err := closeBeadStoreHandle(opened); err != nil {
 				fmt.Fprintf(d.stderr, "%s: nudge event dispatch: closing bead store: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
 			}
 		}()
+	}
+	if store.Store == nil {
+		return
 	}
 	// Session-class reads route through the session store, resolved from the
 	// city's raw work store rather than store.Store: store.Store has already
@@ -392,7 +395,7 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 	deliverInvoked := false
 	deliver := func(target nudgeTarget, obs worker.LiveObservation) (bool, error) {
 		deliverInvoked = true
-		ok, err := nudgePollDeliverQueued(target, store.Store, sessStore, sp, d.quiescence, obs)
+		ok, err := d.deliverQueued(target, store.Store, sessStore, sp, obs)
 		if ok || err != nil {
 			return ok, err
 		}
@@ -445,6 +448,12 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 		}
 		break
 	}
+}
+
+func (d *nudgeEventDispatcher) deliverQueued(target nudgeTarget, store, sessStore beads.Store, sp runtime.Provider, obs worker.LiveObservation) (bool, error) {
+	ctx, cancel := context.WithTimeout(d.parent, d.deliveryTimeout)
+	defer cancel()
+	return nudgeEventDeliverQueued(ctx, target, store, sessStore, sp, d.quiescence, obs)
 }
 
 // queuedNudgeRetryRemaining finds the earliest future-due item for target.

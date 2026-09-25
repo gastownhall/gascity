@@ -1867,6 +1867,37 @@ func TestCityRuntimeTickRunsNudgeDispatchFallbackDuringStretchSkip(t *testing.T)
 	}
 }
 
+type partialEventCoverageProvider struct{ *runtime.Fake }
+
+func (*partialEventCoverageProvider) SessionEventStreamCovers(name string) bool {
+	return name != "remote-session"
+}
+
+func (*partialEventCoverageProvider) SessionEventMatches(name, eventName string) bool {
+	return name == eventName
+}
+
+func TestSessionPhaseStretchRequiresCoverageForEveryOpenSession(t *testing.T) {
+	pump, cancel := streamingPump(t)
+	defer cancel()
+	store := beads.NewMemStore()
+	if _, err := sessionpkg.NewStore(beads.SessionStore{Store: store}).CreateSession(sessionpkg.CreateSpec{
+		Title: "worker", AgentName: "worker", Metadata: map[string]string{
+			"session_name": "remote-session", "state": string(sessionpkg.StateActive), "template": "worker",
+		},
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	cr := &CityRuntime{
+		cfg: &config.City{Daemon: config.DaemonConfig{PatrolInterval: "30s", SessionPatrolInterval: "10m"}},
+		sp:  &partialEventCoverageProvider{Fake: runtime.NewFake()}, sessionEvents: pump,
+		standaloneCityStore: store, stderr: io.Discard,
+	}
+	if cr.sessionPhaseStretchActive() {
+		t.Fatal("stretch active even though an open session is routed outside the forwarded event stream")
+	}
+}
+
 // TestCityRuntimeTickReadsDirtyExactlyOnce pins the fix for a TOCTOU window
 // found during ship-gate review of gc-2q8ohg: tick() used to decide
 // runSessionPhases from an early dirty.Load() peek, run reconcilePoolDeaths

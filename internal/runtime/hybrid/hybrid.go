@@ -108,6 +108,11 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	return p.route(name).Nudge(name, content)
 }
 
+// NudgeContext delegates cancellation to the routed backend when supported.
+func (p *Provider) NudgeContext(ctx context.Context, name string, content []runtime.ContentBlock) error {
+	return runtime.NudgeContext(ctx, p.route(name), name, content)
+}
+
 // WaitForIdle delegates to the routed backend when it supports explicit
 // idle-boundary waiting.
 func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
@@ -283,4 +288,24 @@ func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.S
 	default:
 		return nil, fmt.Errorf("neither local nor remote backend implements SubscribeSessionEvents")
 	}
+}
+
+// SessionEventStreamCovers reports whether the single forwarded stream belongs
+// to the backend that owns name.
+func (p *Provider) SessionEventStreamCovers(name string) bool {
+	_, localEvents := p.local.(runtime.SessionEventProvider)
+	if localEvents {
+		return !p.isRemote(name)
+	}
+	_, remoteEvents := p.remote.(runtime.SessionEventProvider)
+	return remoteEvents && p.isRemote(name)
+}
+
+// SessionEventMatches delegates provider-native name matching to the routed backend.
+func (p *Provider) SessionEventMatches(name, eventName string) bool {
+	routed := p.route(name)
+	if matcher, ok := routed.(runtime.SessionEventRouteProvider); ok {
+		return matcher.SessionEventMatches(name, eventName)
+	}
+	return name == eventName
 }

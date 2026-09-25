@@ -34,7 +34,11 @@ func DispatcherIsHosting(cityPath string) bool {
 	if strings.TrimSpace(cityPath) == "" {
 		return false
 	}
-	conn, err := net.DialTimeout("unix", WakeSocketPath(cityPath), wakeSocketDialTimeout)
+	path, err := PrepareWakeSocketPath(cityPath)
+	if err != nil {
+		return false
+	}
+	conn, err := net.DialTimeout("unix", path, wakeSocketDialTimeout)
 	if err != nil {
 		return false
 	}
@@ -237,9 +241,14 @@ func LockPath(cityPath string) string {
 // when the legacy pathname is too close to the platform sockaddr_un
 // limit. Mirrors the controllerSocketPath pattern in cmd/gc/controller.go.
 func WakeSocketPath(cityPath string) string {
+	path, _ := wakeSocketPath(cityPath)
+	return path
+}
+
+func wakeSocketPath(cityPath string) (string, bool) {
 	legacy := citylayout.RuntimePath(cityPath, "nudges", "wake.sock")
 	if len(legacy) <= wakeSocketPathLimit {
-		return legacy
+		return legacy, false
 	}
 	canonical, err := filepath.Abs(cityPath)
 	if err != nil {
@@ -247,5 +256,51 @@ func WakeSocketPath(cityPath string) string {
 	}
 	canonical = filepath.Clean(canonical)
 	sum := sha256.Sum256([]byte(canonical))
-	return filepath.Join("/tmp", "gascity-nudge", fmt.Sprintf("%x.sock", sum[:16]))
+	privateDir := filepath.Join(os.TempDir(), fmt.Sprintf("gascity-nudge-%d", os.Getuid()))
+	return filepath.Join(privateDir, fmt.Sprintf("%x.sock", sum[:16])), true
+}
+
+// PrepareWakeSocketPath creates and validates the socket directory and rejects
+// an existing long-path fallback socket owned by another local user.
+func PrepareWakeSocketPath(cityPath string) (string, error) {
+	path, fallback := wakeSocketPath(cityPath)
+	dir := filepath.Dir(path)
+	if !fallback {
+		return path, os.MkdirAll(dir, 0o755)
+	}
+	if err := ensurePrivateWakeSocketDir(dir); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return path, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("inspect wake socket: %w", err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if info.Mode()&os.ModeSocket == 0 || !ok || int(stat.Uid) != os.Getuid() {
+		return "", fmt.Errorf("wake socket %q is not an owner-controlled socket", path)
+	}
+	return path, nil
+}
+
+func ensurePrivateWakeSocketDir(dir string) error {
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("create private wake socket directory: %w", err)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("inspect private wake socket directory: %w", err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !ok || int(stat.Uid) != os.Getuid() {
+		return fmt.Errorf("private wake socket directory %q is not an owner-controlled directory", dir)
+	}
+	if info.Mode().Perm() != 0o700 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return fmt.Errorf("secure private wake socket directory: %w", err)
+		}
+	}
+	return nil
 }

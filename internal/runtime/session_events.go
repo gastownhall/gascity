@@ -90,3 +90,12 @@ type SessionEvent struct {
 type SessionEventProvider interface {
 	SubscribeSessionEvents(ctx context.Context) (<-chan SessionEvent, error)
 }
+
+// SessionEventRouteProvider describes optional routing details hidden behind a
+// composite or name-mapping provider. Consumers use it to avoid treating one
+// backend's event stream as coverage for sessions routed elsewhere, and to
+// match provider-native event names back to their Gas City session names.
+type SessionEventRouteProvider interface {
+	SessionEventStreamCovers(name string) bool
+	SessionEventMatches(name, eventName string) bool
+}

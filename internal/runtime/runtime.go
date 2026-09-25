@@ -229,6 +229,24 @@ type Provider interface {
 	Capabilities() ProviderCapabilities
 }
 
+// ContextNudgeProvider is implemented by providers that can cancel an
+// in-flight nudge at a caller-supplied deadline.
+type ContextNudgeProvider interface {
+	NudgeContext(ctx context.Context, name string, content []ContentBlock) error
+}
+
+// NudgeContext uses a provider's context-aware implementation when available.
+// Legacy providers retain their existing synchronous behavior.
+func NudgeContext(ctx context.Context, sp Provider, name string, content []ContentBlock) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if np, ok := sp.(ContextNudgeProvider); ok {
+		return np.NudgeContext(ctx, name, content)
+	}
+	return sp.Nudge(name, content)
+}
+
 // PendingInteraction describes a blocking interaction raised by a session.
 // This is an optional capability exposed by providers that support
 // structured approvals, questions, or other turn-blocking prompts.

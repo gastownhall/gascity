@@ -346,11 +346,10 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		return 0, nil
 	}
 	// A SessionStart hook with no managed session identity has nothing to
-	// prime, so emit an empty hook payload. When an identity IS present (even if
-	// the session is not currently live, or its bead is missing/closed), fall
-	// through: the beacon must always be emitted, and a stale pane continuation
-	// epoch has to be able to redeliver the startup prompt (handled below via
-	// startupPromptDeliveredMarkerStale). primeHookHasLiveManagedSession (#4010)
+	// prime, so emit an empty hook payload. Stale-epoch redelivery is considered
+	// only after primeHookHasLiveManagedSession validates the identity; otherwise
+	// hook side effects and handoff-mail consumption must remain unreachable.
+	// primeHookHasLiveManagedSession (#4010)
 	// requires GC_SESSION_ID and GC_SESSION_NAME to match an open session bead
 	// in active/awake/creating/start-pending state; a bare non-empty
 	// GC_SESSION_ID is not enough, since ambient/inherited env leaks a value
@@ -361,12 +360,8 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			return 0, nil
 		}
 		if !primeHookHasLiveManagedSession(cityPath) {
-			// An identity is present but does not resolve to a live session
-			// bead: never safe to inject the startup prompt from it, but the
-			// beacon and stale-epoch redelivery check below still need to
-			// run (see the comment above), so force suppression here instead
-			// of returning early.
-			suppressHookPrompt = true
+			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
+			return 0, nil
 		}
 	}
 	if !strictMode && primeHookSessionStart(hookContext) {

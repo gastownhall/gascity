@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -113,6 +114,20 @@ func (f *nudgeEventedFake) GetLastActivity(name string) (time.Time, error) {
 		return stamp, nil
 	}
 	return f.Fake.GetLastActivity(name)
+}
+
+type mappedNudgeEventedFake struct{ *nudgeEventedFake }
+
+func (f *mappedNudgeEventedFake) SessionEventStreamCovers(string) bool { return true }
+func (f *mappedNudgeEventedFake) SessionEventMatches(name, eventName string) bool {
+	return name == "Exact--GC-Session" && eventName == "mapped-herdr-name"
+}
+
+func TestNudgeSessionEventMatchesProviderRegistryName(t *testing.T) {
+	sp := &mappedNudgeEventedFake{nudgeEventedFake: newNudgeEventedFake()}
+	if !nudgeSessionEventMatches(sp, "Exact--GC-Session", "mapped-herdr-name") {
+		t.Fatal("provider-native event name did not resolve to the Gas City session")
+	}
 }
 
 // newNudgeDispatcherFixture builds a city dir with one running fake session
@@ -227,10 +242,10 @@ func TestNudgeEventDispatcherWakesFutureDueFailureWithoutAnotherEvent(t *testing
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
-	origDeliver := nudgePollDeliverQueued
+	origDeliver := nudgeEventDeliverQueued
 	calls := 0
 	requeueErr := make(chan error, 1)
-	nudgePollDeliverQueued = func(target nudgeTarget, store, sessStore beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
+	nudgeEventDeliverQueued = func(ctx context.Context, target nudgeTarget, store, sessStore beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
 		calls++
 		if calls == 1 {
 			if err := nudgequeue.WithState(dir, func(state *nudgequeue.State) error {
@@ -242,9 +257,9 @@ func TestNudgeEventDispatcherWakesFutureDueFailureWithoutAnotherEvent(t *testing
 			}
 			return false, nil
 		}
-		return origDeliver(target, store, sessStore, sp, quiescence, obs)
+		return origDeliver(ctx, target, store, sessStore, sp, quiescence, obs)
 	}
-	t.Cleanup(func() { nudgePollDeliverQueued = origDeliver })
+	t.Cleanup(func() { nudgeEventDeliverQueued = origDeliver })
 
 	// Only the initial kick is supplied. The requeued future-due item must
 	// arrange its own retry even though the target was already idle: without
@@ -367,12 +382,13 @@ func TestNudgeEventDispatcherRunPassClosesBeadStore(t *testing.T) {
 
 	backing := openNudgeBeadStore(dir)
 	var opens, closes atomic.Int32
-	orig := openNudgeBeadStore
-	openNudgeBeadStore = func(_ string) beads.NudgesStore {
+	orig := openOwnedNudgeBeadStore
+	openOwnedNudgeBeadStore = func(_ string) (beads.NudgesStore, beads.Store) {
 		opens.Add(1)
-		return beads.NudgesStore{Store: countingCloseNudgesStore{Store: backing.Store, closes: &closes}}
+		owned := countingCloseNudgesStore{Store: backing.Store, closes: &closes}
+		return beads.NudgesStore{Store: backing.Store}, owned
 	}
-	t.Cleanup(func() { openNudgeBeadStore = orig })
+	t.Cleanup(func() { openOwnedNudgeBeadStore = orig })
 
 	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
 	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "wait satisfied: proceed", time.Now().Add(-time.Minute))); err != nil {
@@ -510,6 +526,29 @@ func TestNudgeEventDispatcherRunPassClosesRawSessionStore(t *testing.T) {
 		t.Fatalf("expected runPass to open the raw session store, opened=%d", gotOpens)
 	} else if gotCloses := closes.Load(); gotCloses != gotOpens {
 		t.Fatalf("runPass leaked the raw session store handle: opened=%d closed=%d", gotOpens, gotCloses)
+	}
+}
+
+func TestNudgeEventDispatcherDeliveryHasDeadline(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	d := newNudgeEventDispatcher(ctx, t.TempDir(), io.Discard, "test")
+	d.deliveryTimeout = 20 * time.Millisecond
+
+	orig := nudgeEventDeliverQueued
+	nudgeEventDeliverQueued = func(ctx context.Context, _ nudgeTarget, _, _ beads.Store, _ runtime.Provider, _ time.Duration, _ worker.LiveObservation) (bool, error) {
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
+	t.Cleanup(func() { nudgeEventDeliverQueued = orig })
+
+	started := time.Now()
+	_, err := d.deliverQueued(nudgeTarget{}, nil, nil, runtime.NewFake(), worker.LiveObservation{})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deliverQueued error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("delivery returned after %v; deadline did not bound the provider call", elapsed)
 	}
 }
 

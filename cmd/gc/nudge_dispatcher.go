@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -34,7 +33,10 @@ func pingNudgeWakeSocket(cityPath string) {
 	if cityPath == "" {
 		return
 	}
-	path := nudgequeue.WakeSocketPath(cityPath)
+	path, err := nudgequeue.PrepareWakeSocketPath(cityPath)
+	if err != nil {
+		return
+	}
 	conn, err := net.DialTimeout("unix", path, pingNudgeWakeSocketDialTimeout)
 	if err != nil {
 		return
@@ -50,8 +52,8 @@ func pingNudgeWakeSocket(cityPath string) {
 // socket cannot be opened (e.g. permission, path-too-long); callers fall
 // back to patrol-interval dispatching.
 func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- struct{}, stderr io.Writer, logPrefix string) (net.Listener, error) {
-	path := nudgequeue.WakeSocketPath(cityPath)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	path, err := nudgequeue.PrepareWakeSocketPath(cityPath)
+	if err != nil {
 		return nil, fmt.Errorf("creating nudge wake dir: %w", err)
 	}
 	// A stale socket from a prior supervisor crash blocks Listen with
@@ -209,7 +211,7 @@ func deliverPendingQueuedNudges(cityPath string, cfg *config.City, sessStore bea
 			logNudgeDispatchSkip(debugOut, "no-target", info.AgentName, info.ID, "")
 			continue
 		}
-		if sessionFilter != "" && target.sessionName != sessionFilter {
+		if sessionFilter != "" && !nudgeSessionEventMatches(sp, target.sessionName, sessionFilter) {
 			continue
 		}
 		// ACP sessions also flow through this dispatcher. The inject-on-hook
@@ -277,6 +279,16 @@ func deliverPendingQueuedNudges(cityPath string, cfg *config.City, sessStore bea
 		firstErr = fmt.Errorf("recording nudge dispatch skip counters: %w", err)
 	}
 	return delivered, firstErr
+}
+
+func nudgeSessionEventMatches(sp runtime.Provider, sessionName, eventName string) bool {
+	if sessionName == eventName {
+		return true
+	}
+	if matcher, ok := sp.(runtime.SessionEventRouteProvider); ok {
+		return matcher.SessionEventMatches(sessionName, eventName)
+	}
+	return false
 }
 
 // logNudgeDispatchSkip emits a single GC_DEBUG-gated line documenting one

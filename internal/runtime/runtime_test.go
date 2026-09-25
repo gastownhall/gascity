@@ -1,6 +1,26 @@
 package runtime
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+)
+
+type contextNudgeFake struct{ *Fake }
+
+func (p *contextNudgeFake) NudgeContext(ctx context.Context, _ string, _ []ContentBlock) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestNudgeContextCancelsContextAwareProvider(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := NudgeContext(ctx, &contextNudgeFake{Fake: NewFake()}, "worker", TextContent("wake"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("NudgeContext error = %v, want context canceled", err)
+	}
+}
 
 func TestSyncWorkDirEnvSetsGCDir(t *testing.T) {
 	cfg := SyncWorkDirEnv(Config{WorkDir: "/tmp/work"})

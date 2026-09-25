@@ -1173,8 +1173,24 @@ func (cr *CityRuntime) sessionPhasesDue(trigger string, configPending bool, now 
 // never degrades below the patrol cadence.
 func (cr *CityRuntime) sessionPhaseStretchActive() bool {
 	stretch := cr.cfg.Daemon.SessionPatrolIntervalDuration()
-	return stretch > cr.cfg.Daemon.PatrolIntervalDuration() &&
-		cr.sessionEvents != nil && cr.sessionEvents.flowing()
+	if stretch <= cr.cfg.Daemon.PatrolIntervalDuration() ||
+		cr.sessionEvents == nil || !cr.sessionEvents.flowing() {
+		return false
+	}
+	router, routed := cr.sp.(runtime.SessionEventRouteProvider)
+	if !routed {
+		return true
+	}
+	snapshot := cr.loadSessionBeadSnapshot()
+	if snapshot == nil {
+		return false
+	}
+	for _, info := range snapshot.OpenInfos() {
+		if !router.SessionEventStreamCovers(info.SessionName) {
+			return false
+		}
+	}
+	return true
 }
 
 // tick performs one reconciliation tick: pool death detection, config
