@@ -910,44 +910,65 @@ func buildRalphRetryGraphNode(old beads.Bead, logicalID, oldScopeRef, newScopeRe
 // stampRalphRetryIteration advances the iteration/attempt counters on a bead
 // cloned to form the next Ralph outer iteration, reproducing the contract the
 // mint paths establish (internal/formula/ralph.go and
-// dispatch.buildAttemptRecipe). gc.iteration is the outer loop counter and
-// always advances to nextAttempt. gc.attempt advances too on a loop-level bead
-// (the scope/subject or the check — the beads that ARE the loop), but a nested
-// body member instead resets to its own local step counter (see
-// ralphRetryMemberAttempt) so a retry nested in the body is not born exhausted.
+// dispatch.buildAttemptRecipe). gc.iteration and gc.attempt both advance to
+// nextAttempt on every cloned bead: gc.attempt names the iteration on the loop
+// itself and on every body member, which is what pack gates join on. A retry
+// attempt nested in the body keeps its own counter in gc.retry_attempt instead
+// (see ralphRetryMemberRetryAttempt), so it is not born exhausted.
 //
-// Loop-level vs member is read from the bead: a body member lives inside the
-// scope and carries gc.scope_ref, while the scope subject, the simple-ralph
-// iteration bead, and the check do not. Callers pass the ORIGINAL bead so the
-// classification is not affected by rewrites already applied to the clone's meta.
+// Callers pass the ORIGINAL bead so the classification is not affected by
+// rewrites already applied to the clone's meta.
 func stampRalphRetryIteration(meta map[string]string, old beads.Bead, nextAttempt int) {
 	meta[beadmeta.IterationMetadataKey] = strconv.Itoa(nextAttempt)
+	meta[beadmeta.AttemptMetadataKey] = strconv.Itoa(nextAttempt)
 	if strings.TrimSpace(old.Metadata[beadmeta.ScopeRefMetadataKey]) == "" {
-		meta[beadmeta.AttemptMetadataKey] = strconv.Itoa(nextAttempt)
+		delete(meta, beadmeta.RetryAttemptMetadataKey)
 		return
 	}
-	meta[beadmeta.AttemptMetadataKey] = ralphRetryMemberAttempt(old, nextAttempt)
+	if retryAttempt := ralphRetryMemberRetryAttempt(old); retryAttempt != "" {
+		meta[beadmeta.RetryAttemptMetadataKey] = retryAttempt
+		return
+	}
+	delete(meta, beadmeta.RetryAttemptMetadataKey)
 }
 
-// ralphRetryMemberAttempt derives the gc.attempt a cloned Ralph body member
-// carries in the next outer iteration, matching the runtime mint
-// (dispatch.buildAttemptRecipe -> formula.RalphBodyChildAttempt): a retry or
-// nested-ralph control resets its own counter to 1; an already-materialized
-// attempt.N run keeps the attempt its ref names; every other (plain) member
-// inherits the outer iteration index. Classification is structural because at
-// iteration 1 every member's gc.attempt reads "1" and cannot be told apart by
-// value alone. (A nested ralph SCOPE member is not produced by any current
-// formula and is treated as a plain child here; if one is ever introduced it
-// would want the "1" reset like its control, tracked with the retry/ralph case.)
-func ralphRetryMemberAttempt(old beads.Bead, nextAttempt int) string {
-	switch strings.TrimSpace(old.Metadata[beadmeta.KindMetadataKey]) {
-	case beadmeta.KindRetry, beadmeta.KindRalph:
-		return "1"
+// ralphRetryMemberRetryAttempt derives the gc.retry_attempt a cloned Ralph body
+// member carries in the next outer iteration, matching the runtime mint
+// (dispatch.buildAttemptRecipe -> formula.RalphBodyChildRetryAttempt): an
+// already-materialized attempt.N run keeps the retry number its ref names; a
+// control or plain member has no retry counter of its own. Classification is
+// structural because a pre-key bead's gc.attempt cannot be told apart by value.
+func ralphRetryMemberRetryAttempt(old beads.Bead) string {
+	if !ralphRetryMemberIsFrozenAttempt(old) {
+		return ""
 	}
-	if own := strings.TrimSpace(old.Metadata[beadmeta.AttemptMetadataKey]); own != "" && ralphRetryMemberIsFrozenAttempt(old) {
+	if own := strings.TrimSpace(old.Metadata[beadmeta.RetryAttemptMetadataKey]); own != "" {
 		return own
 	}
-	return strconv.Itoa(nextAttempt)
+	for _, ref := range []string{old.Metadata[beadmeta.StepRefMetadataKey], old.Ref} {
+		if n := trailingAttemptSegment(ref); n != "" {
+			return n
+		}
+	}
+	// The ref names an attempt segment that is not its tail (a bead nested
+	// under an attempt, such as a scope-check), so it is not a retry attempt
+	// root. Its gc.attempt is not a retry counter either: a v1.4.2 bead there
+	// carries the inflated iteration+retry-1 value.
+	return ""
+}
+
+// trailingAttemptSegment returns n when ref ends in ".attempt.<n>", else "".
+func trailingAttemptSegment(ref string) string {
+	const marker = ".attempt."
+	idx := strings.LastIndex(ref, marker)
+	if idx < 0 {
+		return ""
+	}
+	n := ref[idx+len(marker):]
+	if _, err := strconv.Atoi(n); err != nil {
+		return ""
+	}
+	return n
 }
 
 // ralphRetryMemberIsFrozenAttempt reports whether a Ralph body member is an
@@ -1186,6 +1207,10 @@ func logicalStepRefForAttemptBead(bead beads.Bead) string {
 		normalized = strings.TrimSuffix(normalized, "-scope-check")
 	}
 	attempt := strings.TrimSpace(bead.Metadata[beadmeta.AttemptMetadataKey])
+	if kind == beadmeta.KindRetryRun || kind == beadmeta.KindRetryEval {
+		// A v1 retry bead's ref suffix names its retry counter, not an iteration.
+		attempt = beadmeta.RetryAttemptValue(bead.Metadata)
+	}
 	if trimmed, ok := trimAttemptStepRefForKind(normalized, kind, attempt); ok {
 		return trimmed
 	}
