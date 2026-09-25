@@ -334,10 +334,18 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 		return
 	}
 	store := openNudgeBeadStore(d.cityPath)
+	if nudgeBeadStoreOwned(d.cityPath) {
+		// A relocated nudge store is shared and process-scoped; only close the
+		// per-pass handle this call owns.
+		defer func() {
+			if err := closeBeadStoreHandle(store.Store); err != nil {
+				fmt.Fprintf(d.stderr, "%s: nudge event dispatch: closing bead store: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
+			}
+		}()
+	}
 	if store.Store == nil {
 		return
 	}
-	defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort close of the per-pass handle
 	// Session-class reads route through the session store (identity today);
 	// the nudge queue stays on its own store.
 	sessStore := cliSessionStore(store.Store, cfg, d.cityPath)

@@ -2,17 +2,33 @@ package main
 
 import (
 	"context"
+	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
+
+type runPassCloseCountingStore struct {
+	beads.Store
+	closes *atomic.Int64
+}
+
+func (s *runPassCloseCountingStore) CloseStore() error {
+	s.closes.Add(1)
+	if closer, ok := s.Store.(interface{ CloseStore() error }); ok {
+		return closer.CloseStore()
+	}
+	return nil
+}
 
 // testWriter adapts t.Logf into an io.Writer so dispatcher stderr lines land
 // in the test log instead of being discarded.
@@ -350,6 +366,46 @@ func TestNudgeEventDispatcherResyncRunsFullPass(t *testing.T) {
 
 	if !waitForDeliveredNudge(t, dir, fake) {
 		t.Fatalf("queued nudge not delivered on resync full pass; state=%+v", queueStateSnapshot(t, dir))
+	}
+}
+
+func TestNudgeEventDispatcherRunPassPreservesRelocatedStoreAcrossPasses(t *testing.T) {
+	cityPath := t.TempDir()
+	var closes atomic.Int64
+	shared := &runPassCloseCountingStore{Store: beads.NewMemStore(), closes: &closes}
+	entry := cliStorageRoutesEntryFor(cityPath)
+	entry.once.Do(func() {
+		entry.routes = &storageRoutes{
+			binding: "infra",
+			stores: map[coordclass.Class]beads.Store{
+				coordclass.ClassNudges: shared,
+			},
+		}
+	})
+	t.Cleanup(func() {
+		cliStorageRoutesMu.Lock()
+		delete(cliStorageRoutesByCity, cityPath)
+		cliStorageRoutesMu.Unlock()
+	})
+
+	d := &nudgeEventDispatcher{
+		parent:     context.Background(),
+		cityPath:   cityPath,
+		stderr:     io.Discard,
+		logPrefix:  "test",
+		quiescence: defaultNudgePollQuiescence,
+		cfg:        &config.City{},
+		sp:         runtime.NewFake(),
+		pending:    make(map[string]nudgeEventKick),
+		kicked:     make(chan struct{}, 1),
+		workerDone: make(chan struct{}),
+	}
+
+	d.runPass("", nudgeEventRetryBudget)
+	d.runPass("some-session", 0)
+
+	if got := closes.Load(); got != 0 {
+		t.Fatalf("runPass closed the shared relocated-class store %d time(s) across two passes, want 0", got)
 	}
 }
 
