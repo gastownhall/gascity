@@ -325,6 +325,7 @@ go_test(
         "handler_services_test.go",
         "handler_session_agents_test.go",
         "handler_session_chat_test.go",
+        "handler_session_reset_test.go",
         "handler_session_stream_promotion_test.go",
         "handler_session_submit_test.go",
         "handler_sessions_test.go",

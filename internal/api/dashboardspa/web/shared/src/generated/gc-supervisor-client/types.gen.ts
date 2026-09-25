@@ -17988,6 +17988,70 @@ export type PostV0CityByCityNameSessionByIdRenameResponses = {
 
 export type PostV0CityByCityNameSessionByIdRenameResponse = PostV0CityByCityNameSessionByIdRenameResponses[keyof PostV0CityByCityNameSessionByIdRenameResponses];
 
+export type PostV0CityByCityNameSessionByIdResetData = {
+    body?: never;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Session ID, alias, or runtime session_name.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/reset';
+};
+
+export type PostV0CityByCityNameSessionByIdResetErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type PostV0CityByCityNameSessionByIdResetError = PostV0CityByCityNameSessionByIdResetErrors[keyof PostV0CityByCityNameSessionByIdResetErrors];
+
+export type PostV0CityByCityNameSessionByIdResetResponses = {
+    /**
+     * OK
+     */
+    200: OkWithIdResponseBody;
+};
+
+export type PostV0CityByCityNameSessionByIdResetResponse = PostV0CityByCityNameSessionByIdResetResponses[keyof PostV0CityByCityNameSessionByIdResetResponses];
+
 export type RespondSessionData = {
     body: SessionRespondInputBody;
     headers: {
