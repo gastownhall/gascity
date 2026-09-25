@@ -1363,7 +1363,7 @@
         },
         "session_patrol_interval": {
           "type": "string",
-          "description": "SessionPatrolInterval stretches the patrol-driven session-management\nphases (death detection, corpse sweeps, bead-driven session reconcile)\nto this interval while the session provider streams session events\n(runtime.SessionEventProvider): events poke targeted reconciles in\nreal time, so the patrol re-scan is demoted to a safety net. Ignored\n— session phases run on every patrol tick, today's behavior — when\nempty (the default), when the provider has no event stream (tmux),\nwhile the stream is not established, or when the value is not longer\nthan patrol_interval. Event pokes, slings, and config reloads always\nrun the session phases regardless. Duration string (e.g., \"5m\", \"30m\")."
+          "description": "SessionPatrolInterval stretches the whole patrol-driven beadReconcileTick\n(death detection, corpse sweeps, bead-driven session reconcile, wait-nudge\ndispatch, and stalled-pool claim and continuation rescues) to this interval\nwhile the session provider streams session events\n(runtime.SessionEventProvider): events poke targeted reconciles in\nreal time, so the patrol re-scan is demoted to a safety net. Ignored\n— session phases run on every patrol tick, today's behavior — when\nempty (the default), when the provider has no event stream (tmux),\nwhile the stream is not established, or when the value is not longer\nthan patrol_interval. Event pokes, slings, and config reloads always\nrun the session phases regardless. Duration string (e.g., \"5m\", \"30m\")."
         },
         "max_restarts": {
           "type": "integer",

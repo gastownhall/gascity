@@ -252,18 +252,18 @@ func TestNudgeEventDispatcherRetriesFreshIdleStamp(t *testing.T) {
 
 func TestNudgeEventDispatcherWakesFutureDueFailureWithoutAnotherEvent(t *testing.T) {
 	fake := newNudgeEventedFake()
+	origDeliver := nudgePollDeliverQueued
+	t.Cleanup(func() { nudgePollDeliverQueued = origDeliver })
 	dir, d, info := newNudgeDispatcherFixture(t, fake)
 	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
 	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "retry me", time.Now().Add(-time.Minute))); err != nil {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
-	origDeliver := nudgePollDeliverQueued
-	calls := 0
+	var calls atomic.Int32
 	requeueErr := make(chan error, 1)
 	nudgePollDeliverQueued = func(target nudgeTarget, store, sessStore beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
-		calls++
-		if calls == 1 {
+		if calls.Add(1) == 1 {
 			if err := nudgequeue.WithState(dir, func(state *nudgequeue.State) error {
 				state.Pending[0].DeliverAfter = time.Now().Add(40 * time.Millisecond)
 				return nil
@@ -275,13 +275,12 @@ func TestNudgeEventDispatcherWakesFutureDueFailureWithoutAnotherEvent(t *testing
 		}
 		return origDeliver(target, store, sessStore, sp, quiescence, obs)
 	}
-	t.Cleanup(func() { nudgePollDeliverQueued = origDeliver })
 
 	// Only the initial kick is supplied. The requeued future-due item must
 	// arrange its own retry even though the target was already idle.
 	d.kickSessionAfter(info.SessionName, 0, nudgeEventRetryBudget)
 	if !waitForDeliveredNudge(t, dir, fake) {
-		t.Fatalf("requeued failure was not retried without another event; calls=%d state=%+v", calls, queueStateSnapshot(t, dir))
+		t.Fatalf("requeued failure was not retried without another event; calls=%d state=%+v", calls.Load(), queueStateSnapshot(t, dir))
 	}
 	select {
 	case err := <-requeueErr:
