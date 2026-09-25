@@ -21,6 +21,21 @@ func TestWakeSocketPathLongCityUsesPrivatePerUserDirectory(t *testing.T) {
 	}
 }
 
+func TestWakeSocketPathLongCityIsStableAcrossTempDirsAndFitsUnixLimit(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), strings.Repeat("long-city-path", 12))
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), strings.Repeat("long-temp-path", 12)))
+	first := WakeSocketPath(cityPath)
+	t.Setenv("TMPDIR", t.TempDir())
+	second := WakeSocketPath(cityPath)
+
+	if first != second {
+		t.Fatalf("fallback wake socket changed with TMPDIR: %q != %q", first, second)
+	}
+	if len(first) > wakeSocketPathLimit {
+		t.Fatalf("fallback wake socket length = %d, want <= %d: %q", len(first), wakeSocketPathLimit, first)
+	}
+}
+
 func TestEnsurePrivateWakeSocketDirRejectsSymlink(t *testing.T) {
 	realDir := filepath.Join(t.TempDir(), "real")
 	if err := os.Mkdir(realDir, 0o700); err != nil {

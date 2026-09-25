@@ -120,7 +120,7 @@ type mappedNudgeEventedFake struct{ *nudgeEventedFake }
 
 func (f *mappedNudgeEventedFake) SessionEventStreamCovers(string) bool { return true }
 func (f *mappedNudgeEventedFake) SessionEventMatches(name, eventName string) bool {
-	return name == "Exact--GC-Session" && eventName == "mapped-herdr-name"
+	return (name == "Exact--GC-Session" && eventName == "mapped-herdr-name") || eventName == "mapped-"+name
 }
 
 func TestNudgeSessionEventMatchesProviderRegistryName(t *testing.T) {
@@ -543,12 +543,48 @@ func TestNudgeEventDispatcherDeliveryHasDeadline(t *testing.T) {
 	t.Cleanup(func() { nudgeEventDeliverQueued = orig })
 
 	started := time.Now()
-	_, err := d.deliverQueued(nudgeTarget{}, nil, nil, runtime.NewFake(), worker.LiveObservation{})
+	deliveryCtx, deliveryCancel := d.targetContext()
+	defer deliveryCancel()
+	_, err := d.deliverQueued(deliveryCtx, nudgeTarget{}, nil, nil, runtime.NewFake(), worker.LiveObservation{})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("deliverQueued error = %v, want context deadline exceeded", err)
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("delivery returned after %v; deadline did not bound the provider call", elapsed)
+	}
+}
+
+type blockingObservationProvider struct{ *nudgeEventedFake }
+
+func (p *blockingObservationProvider) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
+	select {}
+}
+
+func TestWorkerObserveNudgeTargetContextBoundsProviderPreflight(t *testing.T) {
+	sp := &blockingObservationProvider{nudgeEventedFake: newNudgeEventedFake()}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	_, err := workerObserveNudgeTargetContext(ctx, nudgeTarget{sessionName: "worker"}, nil, sp)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("workerObserveNudgeTargetContext error = %v, want context deadline exceeded", err)
+	}
+}
+
+func TestNudgeEventDispatcherMappedEventRearmsFutureRetry(t *testing.T) {
+	sp := &mappedNudgeEventedFake{nudgeEventedFake: newNudgeEventedFake()}
+	dir, d, info := newNudgeDispatcherFixture(t, sp)
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "wait satisfied: proceed", time.Now().Add(time.Hour))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	eventName := "mapped-" + info.SessionName
+	d.runPass(eventName, 2)
+	d.mu.Lock()
+	_, rearmed := d.pending[eventName]
+	d.mu.Unlock()
+	if !rearmed {
+		t.Fatalf("future retry was not rearmed under mapped event name %q", eventName)
 	}
 }
 

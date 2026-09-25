@@ -577,8 +577,18 @@ func (p *Provider) Interrupt(name string) error {
 // exited agent whose pane idles at a shell prompt is NOT running, so
 // restarts still happen.
 func (p *Provider) IsRunning(name string) bool {
-	_, running, err := resolveBinding(p.lookupOps(context.Background(), name))
-	return err == nil && running
+	running, _ := p.IsRunningContext(context.Background(), name)
+	return running
+}
+
+// IsRunningContext reports whether the session is running while allowing the
+// caller to cancel the provider lookups used to resolve its binding.
+func (p *Provider) IsRunningContext(ctx context.Context, name string) (bool, error) {
+	_, running, err := resolveBinding(p.lookupOps(ctx, name))
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, ctxErr
+	}
+	return err == nil && running, nil
 }
 
 // IsAttached reports false: herdr 0.7.1 exposes no clean attach-state query.

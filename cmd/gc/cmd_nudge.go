@@ -1419,6 +1419,27 @@ func workerObserveNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.
 	return workerObserveSessionTargetWithConfig(target.cityPath, store, sp, target.cfg, target.sessionName)
 }
 
+func workerObserveNudgeTargetContext(ctx context.Context, target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.LiveObservation, error) {
+	if ctx == nil || ctx.Done() == nil {
+		return workerObserveNudgeTarget(target, store, sp)
+	}
+	type result struct {
+		observation worker.LiveObservation
+		err         error
+	}
+	results := make(chan result, 1)
+	go func() {
+		observation, err := workerObserveNudgeTarget(target, store, sp)
+		results <- result{observation: observation, err: err}
+	}()
+	select {
+	case result := <-results:
+		return result.observation, result.err
+	case <-ctx.Done():
+		return worker.LiveObservation{}, ctx.Err()
+	}
+}
+
 func nudgeTargetLiveGenerationMatches(target nudgeTarget, obs worker.LiveObservation, sp runtime.Provider) (bool, error) {
 	if !obs.Running || (target.sessionID == "" && target.continuationEpoch == "") {
 		return true, nil

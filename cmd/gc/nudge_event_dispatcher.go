@@ -393,9 +393,9 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 		return
 	}
 	deliverInvoked := false
-	deliver := func(target nudgeTarget, obs worker.LiveObservation) (bool, error) {
+	deliver := func(ctx context.Context, target nudgeTarget, obs worker.LiveObservation) (bool, error) {
 		deliverInvoked = true
-		ok, err := d.deliverQueued(target, store.Store, sessStore, sp, obs)
+		ok, err := d.deliverQueued(ctx, target, store.Store, sessStore, sp, obs)
 		if ok || err != nil {
 			return ok, err
 		}
@@ -420,7 +420,7 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 		}
 		return false, nil
 	}
-	if _, err := deliverPendingQueuedNudges(d.cityPath, cfg, sessStore, sp, sessionBeads, sessionFilter, d.stderr, deliver); err != nil {
+	if _, err := deliverPendingQueuedNudges(d.cityPath, cfg, sessStore, sp, sessionBeads, sessionFilter, d.stderr, d.targetContext, deliver); err != nil {
 		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
 	if sessionFilter == "" || deliverInvoked {
@@ -440,7 +440,7 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 	// actual DeliverAfter instead.
 	for _, info := range sessionBeads.OpenInfos() {
 		target := resolveNudgeTargetFromSessionInfo(d.cityPath, cfg, info)
-		if target.sessionName != sessionFilter {
+		if !nudgeSessionEventMatches(sp, target.sessionName, sessionFilter) {
 			continue
 		}
 		if remaining, requeued := queuedNudgeRetryRemaining(d.cityPath, target, time.Now()); requeued {
@@ -450,9 +450,11 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 	}
 }
 
-func (d *nudgeEventDispatcher) deliverQueued(target nudgeTarget, store, sessStore beads.Store, sp runtime.Provider, obs worker.LiveObservation) (bool, error) {
-	ctx, cancel := context.WithTimeout(d.parent, d.deliveryTimeout)
-	defer cancel()
+func (d *nudgeEventDispatcher) targetContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(d.parent, d.deliveryTimeout)
+}
+
+func (d *nudgeEventDispatcher) deliverQueued(ctx context.Context, target nudgeTarget, store, sessStore beads.Store, sp runtime.Provider, obs worker.LiveObservation) (bool, error) {
 	return nudgeEventDeliverQueued(ctx, target, store, sessStore, sp, d.quiescence, obs)
 }
 

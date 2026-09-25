@@ -235,6 +235,32 @@ type ContextNudgeProvider interface {
 	NudgeContext(ctx context.Context, name string, content []ContentBlock) error
 }
 
+// ContextRunningProvider is implemented by providers that can cancel an
+// in-flight running-state lookup at a caller-supplied deadline.
+type ContextRunningProvider interface {
+	IsRunningContext(ctx context.Context, name string) (bool, error)
+}
+
+// IsRunningContext bounds a provider running-state lookup. Context-aware
+// providers receive the caller's context directly; legacy providers are
+// isolated behind a buffered result so a stuck lookup cannot block its caller.
+func IsRunningContext(ctx context.Context, sp Provider, name string) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if rp, ok := sp.(ContextRunningProvider); ok {
+		return rp.IsRunningContext(ctx, name)
+	}
+	result := make(chan bool, 1)
+	go func() { result <- sp.IsRunning(name) }()
+	select {
+	case running := <-result:
+		return running, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+}
+
 // NudgeContext uses a provider's context-aware implementation when available.
 // Legacy providers retain their existing synchronous behavior.
 func NudgeContext(ctx context.Context, sp Provider, name string, content []ContentBlock) error {

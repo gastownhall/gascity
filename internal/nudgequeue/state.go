@@ -24,6 +24,8 @@ import (
 // the controllerSocketPathLimit pattern in cmd/gc/controller.go.
 const wakeSocketPathLimit = 100
 
+const wakeSocketFallbackRoot = "/tmp"
+
 const wakeSocketDialTimeout = 200 * time.Millisecond
 
 // DispatcherIsHosting reports whether a supervisor dispatcher is actually
@@ -256,7 +258,7 @@ func wakeSocketPath(cityPath string) (string, bool) {
 	}
 	canonical = filepath.Clean(canonical)
 	sum := sha256.Sum256([]byte(canonical))
-	privateDir := filepath.Join(os.TempDir(), fmt.Sprintf("gascity-nudge-%d", os.Getuid()))
+	privateDir := filepath.Join(wakeSocketFallbackRoot, fmt.Sprintf("gascity-nudge-%d", os.Getuid()))
 	return filepath.Join(privateDir, fmt.Sprintf("%x.sock", sum[:16])), true
 }
 

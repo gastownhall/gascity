@@ -113,6 +113,11 @@ func (p *Provider) NudgeContext(ctx context.Context, name string, content []runt
 	return runtime.NudgeContext(ctx, p.route(name), name, content)
 }
 
+// IsRunningContext delegates a cancellable running-state lookup to the routed backend.
+func (p *Provider) IsRunningContext(ctx context.Context, name string) (bool, error) {
+	return runtime.IsRunningContext(ctx, p.route(name), name)
+}
+
 // WaitForIdle delegates to the routed backend when it supports explicit
 // idle-boundary waiting.
 func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {

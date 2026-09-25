@@ -1366,6 +1366,31 @@ func (p *contextNudgeRuntimeProvider) NudgeContext(ctx context.Context, _ string
 	return ctx.Err()
 }
 
+type blockingRunningNudgeProvider struct{ *runtime.Fake }
+
+func (p *blockingRunningNudgeProvider) IsRunning(string) bool {
+	select {}
+}
+
+func TestRuntimeHandleNudgeBoundsLegacyRunningPreflight(t *testing.T) {
+	sp := &blockingRunningNudgeProvider{Fake: runtime.NewFake()}
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "stub",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err = handle.Nudge(ctx, NudgeRequest{Text: "wake"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Nudge error = %v, want context deadline exceeded", err)
+	}
+}
+
 func TestRuntimeHandleNudgeHonorsCallerContext(t *testing.T) {
 	sp := &contextNudgeRuntimeProvider{Fake: runtime.NewFake()}
 	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {

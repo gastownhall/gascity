@@ -127,7 +127,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	if cfg == nil || sessionBeads == nil || cityPath == "" || !nudgeDispatcherIsSupervisor(cfg) {
 		return 0, nil
 	}
-	return deliverPendingQueuedNudges(cityPath, cfg, sessStore, sp, sessionBeads, "", debugOut, func(target nudgeTarget, obs worker.LiveObservation) (bool, error) {
+	return deliverPendingQueuedNudges(cityPath, cfg, sessStore, sp, sessionBeads, "", debugOut, nil, func(_ context.Context, target nudgeTarget, obs worker.LiveObservation) (bool, error) {
 		return tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
 	})
 }
@@ -139,7 +139,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 // Returns how many targets delivered at least one item. debugOut is threaded
 // through to logNudgeDispatchSkip; nil suppresses the debug lines (skip
 // counts still accumulate regardless).
-func deliverPendingQueuedNudges(cityPath string, cfg *config.City, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, sessionFilter string, debugOut io.Writer, deliver func(nudgeTarget, worker.LiveObservation) (bool, error)) (int, error) {
+func deliverPendingQueuedNudges(cityPath string, cfg *config.City, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, sessionFilter string, debugOut io.Writer, targetContext func() (context.Context, context.CancelFunc), deliver func(context.Context, nudgeTarget, worker.LiveObservation) (bool, error)) (int, error) {
 	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return 0, nil
 	}
@@ -236,8 +236,14 @@ func deliverPendingQueuedNudges(cityPath string, cfg *config.City, sessStore bea
 			logNudgeDispatchSkip(debugOut, "not-matched", target.agentKey(), target.sessionName, "")
 			continue
 		}
-		obs, err := workerObserveNudgeTarget(target, sessStore, sp)
+		ctx := context.Background()
+		cancel := func() {}
+		if targetContext != nil {
+			ctx, cancel = targetContext()
+		}
+		obs, err := workerObserveNudgeTargetContext(ctx, target, sessStore, sp)
 		if err != nil {
+			cancel()
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -246,11 +252,13 @@ func deliverPendingQueuedNudges(cityPath string, cfg *config.City, sessStore bea
 			continue
 		}
 		if !obs.Running {
+			cancel()
 			skipCounts["not-running"]++
 			logNudgeDispatchSkip(debugOut, "not-running", target.agentKey(), target.sessionName, "")
 			continue
 		}
-		ok, err := deliver(target, obs)
+		ok, err := deliver(ctx, target, obs)
+		cancel()
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
