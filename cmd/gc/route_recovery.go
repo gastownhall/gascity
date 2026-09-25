@@ -27,6 +27,20 @@ import (
 // (ZFC): it copies a route the bead already declares and never invents a target.
 // Idempotent: a bead that already carries gc.routed_to yields "".
 func carriedPoolRoute(b beads.Bead) string {
+	// A graph-first mint withholds gc.routed_to behind the instantiation fence
+	// (molecule.fenceGraphWorkflowBead): the route sits in gc.deferred_routed_to
+	// and the type is deferred to a gate until every step is wired, and
+	// activation restores them. On such a bead an empty gc.routed_to is
+	// deliberate, not lost, and gc.run_target is the formula's bare pool name,
+	// not a route — restoring it stamps a bare, unclaimable route over the
+	// withheld qualified one, and the restore's read-merge-write can land over
+	// the activation and put the fence back. The same holds for any bead Ready
+	// would never surface: it is not pool work, whatever gc.run_target says.
+	if strings.TrimSpace(b.Metadata[beadmeta.InstantiatingMetadataKey]) != "" ||
+		strings.TrimSpace(b.Metadata[beadmeta.DeferredRoutedToMetadataKey]) != "" ||
+		beads.IsReadyExcludedBead(b) {
+		return ""
+	}
 	// Legacy pre-ga-eld2x workflow root: gc.run_target is the root's pool route
 	// only while gc.routed_to is empty — exactly legacyWorkflowRunTarget's rule.
 	if route := legacyWorkflowRunTarget(b); route != "" {
