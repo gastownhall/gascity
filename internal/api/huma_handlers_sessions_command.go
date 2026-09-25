@@ -898,6 +898,38 @@ func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionIDInput)
 	return out, nil
 }
 
+// --- Session Reset ---
+
+// humaHandleSessionReset is the Huma-typed handler for POST /v0/session/{id}/reset.
+// It records a fresh-restart request through the worker boundary (the same
+// path as `gc session reset`) and pokes the controller, which restarts the
+// session on the next continuation epoch.
+func (s *Server) humaHandleSessionReset(ctx context.Context, input *SessionIDInput) (*OKWithIDResponse, error) {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
+		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
+	}
+
+	id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
+	if err != nil {
+		return nil, humaResolveError(err)
+	}
+
+	handle, err := s.workerHandleForSession(store.Store, id)
+	if err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+	if err := handle.Reset(ctx); err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+	s.state.Poke()
+
+	out := &OKWithIDResponse{}
+	out.Body.Status = "ok"
+	out.Body.ID = id
+	return out, nil
+}
+
 // --- Session Respond ---
 
 // humaHandleSessionRespond is the Huma-typed handler for POST /v0/session/{id}/respond.

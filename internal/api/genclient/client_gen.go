@@ -10022,6 +10022,12 @@ type PostV0CityByCityNameSessionByIdRenameParams struct {
 	XGCRequest string `json:"X-GC-Request"`
 }
 
+// PostV0CityByCityNameSessionByIdResetParams defines parameters for PostV0CityByCityNameSessionByIdReset.
+type PostV0CityByCityNameSessionByIdResetParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // RespondSessionParams defines parameters for RespondSession.
 type RespondSessionParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
@@ -20290,6 +20296,9 @@ type ClientInterface interface {
 
 	PostV0CityByCityNameSessionByIdRename(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// PostV0CityByCityNameSessionByIdReset request
+	PostV0CityByCityNameSessionByIdReset(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdResetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// RespondSessionWithBody request with any body
 	RespondSessionWithBody(ctx context.Context, cityName string, id string, params *RespondSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -22536,6 +22545,18 @@ func (c *Client) PostV0CityByCityNameSessionByIdRenameWithBody(ctx context.Conte
 
 func (c *Client) PostV0CityByCityNameSessionByIdRename(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPostV0CityByCityNameSessionByIdRenameRequest(c.Server, cityName, id, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameSessionByIdReset(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdResetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdResetRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -31735,6 +31756,60 @@ func NewPostV0CityByCityNameSessionByIdRenameRequestWithBody(server string, city
 	return req, nil
 }
 
+// NewPostV0CityByCityNameSessionByIdResetRequest generates requests for PostV0CityByCityNameSessionByIdReset
+func NewPostV0CityByCityNameSessionByIdResetRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdResetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/session/%s/reset", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
 // NewRespondSessionRequest calls the generic RespondSession builder with application/json body
 func NewRespondSessionRequest(server string, cityName string, id string, params *RespondSessionParams, body RespondSessionJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -33839,6 +33914,9 @@ type ClientWithResponsesInterface interface {
 	PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error)
 
 	PostV0CityByCityNameSessionByIdRenameWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error)
+
+	// PostV0CityByCityNameSessionByIdResetWithResponse request
+	PostV0CityByCityNameSessionByIdResetWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdResetParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdResetResponse, error)
 
 	// RespondSessionWithBodyWithResponse request with any body
 	RespondSessionWithBodyWithResponse(ctx context.Context, cityName string, id string, params *RespondSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RespondSessionResponse, error)
@@ -37795,6 +37873,35 @@ func (r PostV0CityByCityNameSessionByIdRenameResponse) StatusCode() int {
 	return 0
 }
 
+type PostV0CityByCityNameSessionByIdResetResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *OKWithIDResponseBody
+	ApplicationproblemJSON401 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameSessionByIdResetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameSessionByIdResetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type RespondSessionResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -39945,6 +40052,15 @@ func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdRenameWithResponse(
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameSessionByIdRenameResponse(rsp)
+}
+
+// PostV0CityByCityNameSessionByIdResetWithResponse request returning *PostV0CityByCityNameSessionByIdResetResponse
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdResetWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdResetParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdResetResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdReset(ctx, cityName, id, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameSessionByIdResetResponse(rsp)
 }
 
 // RespondSessionWithBodyWithResponse request with arbitrary body returning *RespondSessionResponse
@@ -48990,6 +49106,81 @@ func ParsePostV0CityByCityNameSessionByIdRenameResponse(rsp *http.Response) (*Po
 			return nil, err
 		}
 		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0CityByCityNameSessionByIdResetResponse parses an HTTP response from a PostV0CityByCityNameSessionByIdResetWithResponse call
+func ParsePostV0CityByCityNameSessionByIdResetResponse(rsp *http.Response) (*PostV0CityByCityNameSessionByIdResetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameSessionByIdResetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OKWithIDResponseBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
 		var dest ErrorModel

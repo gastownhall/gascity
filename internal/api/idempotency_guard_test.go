@@ -83,6 +83,7 @@ var exemptFromIdempotency = map[string]bool{
 	"post-v0-city-by-city-name-session-by-id-kill":             true,
 	"post-v0-city-by-city-name-session-by-id-permission-mode":  true,
 	"post-v0-city-by-city-name-session-by-id-rename":           true,
+	"post-v0-city-by-city-name-session-by-id-reset":            true,
 	"post-v0-city-by-city-name-session-by-id-stop":             true,
 	"post-v0-city-by-city-name-session-by-id-suspend":          true,
 	"post-v0-city-by-city-name-session-by-id-wake":             true,

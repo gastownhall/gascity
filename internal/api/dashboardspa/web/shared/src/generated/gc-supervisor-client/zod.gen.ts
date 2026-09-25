@@ -9543,6 +9543,20 @@ export const zPostV0CityByCityNameSessionByIdRenamePath = z.object({
  */
 export const zPostV0CityByCityNameSessionByIdRenameResponse = zSessionResponse;
 
+export const zPostV0CityByCityNameSessionByIdResetHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zPostV0CityByCityNameSessionByIdResetPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zPostV0CityByCityNameSessionByIdResetResponse = zOkWithIdResponseBody;
+
 export const zRespondSessionBody = zSessionRespondInputBody;
 
 export const zRespondSessionHeaders = z.object({
