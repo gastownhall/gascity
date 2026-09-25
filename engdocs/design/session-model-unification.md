@@ -654,7 +654,7 @@ matches the unified model:
 - `GC_ALIAS` = current public alias, if any
 - `GC_TEMPLATE` = qualified backing agent-config identity
 - `GC_SESSION_ORIGIN` = `named`, `ephemeral`, or `manual`
-- `GC_AGENT` = temporary compatibility alias for the public handle only
+- `GC_AGENT` = temporary compatibility mirror of `BEADS_ACTOR`
 - `BEADS_ACTOR` = exact ownership string the running session presents to `bd`
 
 New prompt and hook logic should key config semantics off `GC_TEMPLATE`
@@ -679,8 +679,13 @@ Configured named-session alias vocabulary:
 - bead `alias` mirrors `configured_named_identity` for config-managed
   named sessions
 
-`GC_AGENT` remains compatibility-only. It must not be read by new logic
-for routing, ownership, demand, or namespace resolution.
+`GC_AGENT` remains compatibility-only: it mirrors the value
+`AssigneeIdentifier` selects, which is also what `BEADS_ACTOR` carries, so it
+does happen to hold the current ownership string. New logic must still not read
+it — key config semantics off `GC_TEMPLATE`, lifecycle semantics off
+`GC_SESSION_ORIGIN`, and ownership off `BEADS_ACTOR` or the typed session
+projection — because the mirror is transitional and may stop tracking the
+selector without notice.
 
 Phase 1 `GC_AGENT` contract is exact:
 
@@ -691,8 +696,10 @@ Phase 1 `GC_AGENT` contract is exact:
 - `manual`: `GC_ALIAS` if present, otherwise raw persisted `session_name`,
   falling back to the session bead ID when name metadata is absent
 
-No Phase 1 path may interpret `GC_AGENT` as backing config identity,
-factory target, or durable ownership token.
+No Phase 1 path may interpret `GC_AGENT` as backing config identity or
+factory target. Its value equals the ownership string only because it mirrors
+`BEADS_ACTOR`; the durable ownership field is the stored `assignee`, written
+from that selector, and that is what ownership logic must read.
 
 ### Transitional ownership projection
 
@@ -713,9 +720,20 @@ select the current ownership string in this order:
 5. session bead ID when no name metadata exists
 
 `BEADS_ACTOR`, API assignment normalization, hook claims, and scripted claims
-must all use that selector. `GC_AGENT` mirrors the selected value only for
-compatibility; new ownership logic reads `BEADS_ACTOR` or the typed session
-projection rather than treating `GC_AGENT` as a durable field.
+must all use that selector. One known divergence remains: `gc hook --claim` is
+origin-blind — it records a claim under the first non-empty of `GC_ALIAS` then
+`GC_SESSION_ID`, so it selects the session bead ID whenever `GC_SESSION_ID` is
+exported. For every pool-managed and `ephemeral` session that is the selector's
+own answer (step 3), but an unaliased **manual** session in template context
+claims under its bead ID while its actor stays `session_name` (step 4).
+Adoption re-stamping deliberately does not repair that case: moving the stored
+spelling would make it differ from the actor bd checks. Making
+`hookClaimAssigneeIdentity` origin-aware is the fix; until then this paragraph
+is the contract.
+
+`GC_AGENT` mirrors the selected value only for compatibility; new ownership
+logic reads `BEADS_ACTOR` or the typed session projection rather than treating
+`GC_AGENT` as a durable field.
 
 Runtime metadata updates do not rewrite the environment of an already-running
 agent process. Deploying a change to this projection therefore requires those

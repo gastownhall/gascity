@@ -56,11 +56,6 @@ type failingCloseStore struct {
 	*beads.MemStore
 }
 
-type stopHookProvider struct {
-	*runtime.Fake
-	beforeStop func(string)
-}
-
 type deadRuntimeArtifactProvider struct {
 	*runtime.Fake
 	visible   map[string]bool
@@ -199,13 +194,6 @@ func (s *failingReopenWriteStore) SetMetadataBatch(id string, kvs map[string]str
 // observed inside the Tx; the embedded MemStore.Tx would bind the raw store.
 func (s *failingReopenWriteStore) Tx(_ string, fn func(beads.Tx) error) error {
 	return fn(s)
-}
-
-func (p *stopHookProvider) Stop(name string) error {
-	if p.beforeStop != nil {
-		p.beforeStop(name)
-	}
-	return p.Fake.Stop(name)
 }
 
 type failingPoolSessionNameStore struct {
@@ -2352,70 +2340,27 @@ func TestRetireRemovedConfiguredNamedSessionBead_StopFailureKeepsRuntimeOwner(t 
 	}
 }
 
-func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_RechecksAssignedWorkAfterStop(t *testing.T) {
-	store := beads.NewMemStore()
-	sp := &stopHookProvider{Fake: runtime.NewFake()}
-	now := time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)
-	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
-		t.Fatalf("start worker: %v", err)
-	}
-	b, err := store.Create(beads.Bead{
-		Title:  "worker",
-		Type:   sessionBeadType,
-		Status: "open",
-		Labels: []string{sessionBeadLabel},
-		Metadata: map[string]string{
-			"session_name": "worker",
-			"template":     "worker",
-			"state":        "active",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create session bead: %v", err)
-	}
-	sp.beforeStop = func(name string) {
-		if name != "worker" {
-			t.Fatalf("Stop(%q), want worker", name)
-		}
-		if _, err := store.Create(beads.Bead{
-			Title:    "assigned during stop",
-			Type:     "task",
-			Status:   "open",
-			Assignee: b.ID,
-		}); err != nil {
-			t.Fatalf("create assigned work during stop: %v", err)
-		}
-	}
-
-	var stderr bytes.Buffer
-	closed := closeSessionBeadIfRuntimeStoppedAndUnassigned(
-		"",
-		store, nil, sp, nil, b, "suspended", "suspended session", now, &stderr,
-	)
-
-	if closed {
-		t.Fatal("closeSessionBeadIfRuntimeStoppedAndUnassigned closed bead after work appeared during stop")
-	}
-	got, err := store.Get(b.ID)
-	if err != nil {
-		t.Fatalf("Get(%s): %v", b.ID, err)
-	}
-	if got.Status != "open" {
-		t.Fatalf("status = %q, want open", got.Status)
-	}
-	if got.Metadata["close_reason"] != "" {
-		t.Fatalf("close_reason = %q, want empty", got.Metadata["close_reason"])
-	}
-}
-
-func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_StopLeavesRunningKeepsBeadOpen(t *testing.T) {
+// TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_RunningSessionDeclinesWithoutStopping
+// covers ga-4byiyc Q2: a session bead whose runtime is still running must be
+// declined (left open, untouched) rather than killed as a precondition for
+// closing the bead. Before the fix, closeSessionBeadIfRuntimeStoppedAndUnassigned
+// called stopRuntimeBeforeSessionBeadMutation unconditionally, which kills a
+// healthy running session purely to check whether the bead can close --
+// destroying live work for a bead that, post-kill, might not even close (the
+// TOCTOU race ga-zlakft reported). The fix checks sp.IsRunning up front and
+// returns false without ever invoking Stop/Kill. The three callers
+// ("reconfigured", "suspended", "orphaned") share this exact function body and
+// differ only in the closeReason label passed to closeBead on the eventual
+// close path -- the decline path this test exercises never reaches closeBead,
+// so this single representative case (labeled "orphaned") stands in for all
+// three call sites.
+func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_RunningSessionDeclinesWithoutStopping(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	now := time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)
 	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
 		t.Fatalf("start worker: %v", err)
 	}
-	sp.StopLeavesRunning["worker"] = true
 	b, err := store.Create(beads.Bead{
 		Title:  "worker",
 		Type:   sessionBeadType,
@@ -2438,13 +2383,16 @@ func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_StopLeavesRunningKeepsBea
 	)
 
 	if closed {
-		t.Fatal("closeSessionBeadIfRuntimeStoppedAndUnassigned closed bead while runtime was still running")
+		t.Fatal("closeSessionBeadIfRuntimeStoppedAndUnassigned closed bead while runtime was still running -- it must decline, not kill-then-close")
+	}
+	if gotCalls := sp.CountCalls("Stop", "worker"); gotCalls != 0 {
+		t.Fatalf("Stop call count for %q = %d, want 0 -- a running session must never be killed as a side effect of a close check", "worker", gotCalls)
 	}
 	if !sp.IsRunning("worker") {
 		t.Fatal("worker runtime unexpectedly stopped")
 	}
 	if !strings.Contains(stderr.String(), b.ID) {
-		t.Fatalf("stderr = %q, want bead ID %q", stderr.String(), b.ID)
+		t.Fatalf("stderr = %q, want it to mention declined bead %q", stderr.String(), b.ID)
 	}
 	got, err := store.Get(b.ID)
 	if err != nil {
@@ -2452,6 +2400,53 @@ func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_StopLeavesRunningKeepsBea
 	}
 	if got.Status != "open" {
 		t.Fatalf("status = %q, want open", got.Status)
+	}
+}
+
+// TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_AlreadyStoppedClosesAsBefore
+// is the companion case: when the runtime is already stopped (never started
+// here, so sp.IsRunning is false from the outset), closing an unassigned
+// session bead must behave exactly as before the fix -- the bead closes, and
+// since the runtime was never running there is nothing to stop (zero Stop
+// calls in either the old or new code path, because both short-circuit on
+// !IsRunning).
+func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_AlreadyStoppedClosesAsBefore(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake() // no Start call: "worker" is already stopped
+	now := time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)
+	b, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker",
+			"template":     "worker",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	closed := closeSessionBeadIfRuntimeStoppedAndUnassigned(
+		"",
+		store, nil, sp, nil, b, "suspended", "suspended session", now, &stderr,
+	)
+
+	if !closed {
+		t.Fatalf("closeSessionBeadIfRuntimeStoppedAndUnassigned did not close bead for an already-stopped, unassigned session; stderr=%q", stderr.String())
+	}
+	if gotCalls := sp.CountCalls("Stop", "worker"); gotCalls != 0 {
+		t.Fatalf("Stop call count for %q = %d, want 0 -- runtime was already stopped, nothing to stop", "worker", gotCalls)
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", b.ID, err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
 	}
 }
 
@@ -2657,6 +2652,13 @@ func TestSyncSessionBeads_RecreatesDriftedNamedSessionRuntimeName(t *testing.T) 
 	}
 	if err := sp.Start(context.Background(), oldName, runtime.Config{Command: "claude"}); err != nil {
 		t.Fatalf("starting drifted runtime: %v", err)
+	}
+	// Simulate a config-drift restart having already stopped the old runtime
+	// before this sync observes the identity drift: the close path only
+	// closes the drifted bead once its runtime is actually stopped
+	// (ga-6pf26b), it no longer stops a running one itself.
+	if err := sp.Stop(oldName); err != nil {
+		t.Fatalf("stopping drifted runtime: %v", err)
 	}
 
 	ds := map[string]TemplateParams{
@@ -5644,6 +5646,12 @@ func TestSyncSessionBeads_PoolInstanceOrphaned(t *testing.T) {
 
 	// Remove instances from runnable agents but keep template configured.
 	clk.Advance(5 * time.Second)
+	// Simulate the pool instances having already been reaped by an external
+	// orphan-drain: closeSessionBeadIfRuntimeStoppedAndUnassigned only closes
+	// a bead once its runtime is actually stopped (ga-6pf26b), it no longer
+	// stops a running one itself.
+	_ = sp.Stop("city-worker-1")
+	_ = sp.Stop("city-worker-2")
 	syncSessionBeads("", store, nil, sp, configuredNames, nil, clk, &stderr, false)
 
 	// Pool instances are ephemeral (not user-configured), so they become
@@ -5681,6 +5689,11 @@ func TestSyncSessionBeads_ResumedAfterSuspension(t *testing.T) {
 	// Suspend the agent: remove from runnable but keep in configuredNames.
 	clk.Advance(5 * time.Second)
 	configuredNames := map[string]bool{"worker": true}
+	// Simulate the suspend command having already stopped the runtime:
+	// closeSessionBeadIfRuntimeStoppedAndUnassigned declines to close a bead
+	// whose runtime is still running (ga-6pf26b) rather than stopping it
+	// itself.
+	_ = sp.Stop("worker")
 	syncSessionBeads("", store, nil, sp, configuredNames, nil, clk, &stderr, false)
 
 	// Verify the bead is closed.
@@ -5792,6 +5805,10 @@ func TestSyncSessionBeads_SuspendedAgentNotOrphaned(t *testing.T) {
 		"worker": true, // still configured, just suspended
 	}
 	clk.Advance(5 * time.Second)
+	// Simulate the suspend command having already stopped the runtime (see
+	// TestSyncSessionBeads_ResumedAfterSuspension): the close path only
+	// closes a bead once its runtime is actually stopped (ga-6pf26b).
+	_ = sp.Stop("worker")
 	syncSessionBeads("", store, dsOnlyMayor, sp, configuredNames, nil, clk, &stderr, false)
 
 	// Worker should be closed with reason "suspended", not "orphaned".
