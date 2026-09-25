@@ -38,6 +38,12 @@ var ErrInteractionUnsupported = errors.New("session interaction is unsupported")
 // pending so the caller can answer again.
 var ErrInteractionResponseInvalid = errors.New("interaction response is invalid")
 
+// ErrNudgeRefusedPendingInteraction reports that a nudge was refused because
+// the session is blocked on a pending interaction, such as a tool-call
+// approval a client has not answered yet. Delivery layers translate it into
+// their own refusal (session.ErrPendingInteraction).
+var ErrNudgeRefusedPendingInteraction = errors.New("nudge refused: session has a pending interaction")
+
 // ErrSessionDiedDuringStartup reports that a provider created a session
 // process, but it exited before startup completed successfully.
 var ErrSessionDiedDuringStartup = errors.New("session died during startup")

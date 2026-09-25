@@ -663,8 +663,12 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 		return nil
 	}
 
-	// Wait for agent to become idle.
-	if !sc.waitIdle(p.cfg.nudgeBusyTimeout()) {
+	// Wait for agent to become idle. A turn held open by a permission
+	// request refuses instead, so the answer is not stuck behind this wait.
+	if err := sc.waitNudgeable(p.cfg.nudgeBusyTimeout()); err != nil {
+		if errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction) {
+			return fmt.Errorf("%w: %s", err, name)
+		}
 		return fmt.Errorf("agent %q busy, timed out waiting for idle", name)
 	}
 

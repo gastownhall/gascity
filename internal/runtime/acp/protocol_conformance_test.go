@@ -370,8 +370,9 @@ func TestACPProtocolPermissionApproveRoundTrip(t *testing.T) {
 	s := startProtocolFake(t, "--request-permission")
 	s.nudge(t, "needs approval")
 	pending := s.waitPermission(t)
-	if pending.RequestID != "acp-1" || pending.Kind != "approval" || pending.Prompt != "Run: touch marker" {
-		t.Fatalf("Pending = %#v, want acp-1 approval for the tool call", pending)
+	assertRequestID(t, pending.RequestID, "1")
+	if pending.Kind != "approval" || pending.Prompt != "Run: touch marker" {
+		t.Fatalf("Pending = %#v, want an approval for the tool call", pending)
 	}
 	if !s.conn(t).isBusy() {
 		t.Fatal("turn not busy while the permission is outstanding")
@@ -392,9 +393,7 @@ func TestACPProtocolPermissionDenyStringID(t *testing.T) {
 	s := startProtocolFake(t, "--request-permission", "--request-id-string")
 	s.nudge(t, "needs approval")
 	pending := s.waitPermission(t)
-	if pending.RequestID != `acp-"perm-1"` {
-		t.Fatalf("RequestID = %q, want acp-\"perm-1\"", pending.RequestID)
-	}
+	assertRequestID(t, pending.RequestID, `"perm-1"`)
 	if err := s.p.Respond(s.name, runtime.InteractionResponse{RequestID: pending.RequestID, Action: "deny"}); err != nil {
 		t.Fatalf("Respond: %v", err)
 	}
@@ -424,9 +423,11 @@ func TestACPProtocolPermissionCancelledOnInterrupt(t *testing.T) {
 	assertPermissionReply(t, s, 1.0, map[string]any{"outcome": "cancelled"}) //nolint:misspell // ACP wire spelling
 }
 
-func TestACPProtocolPermissionDroppedWhenAgentCancelsRequest(t *testing.T) {
+func TestACPProtocolPermissionCancelledWhenAgentCancelsRequest(t *testing.T) {
 	// The fake gives up on the request, sends $/cancel_request, and finishes
-	// the turn; gc forgets the request without replying.
+	// the turn; gc still answers the original request, cancelled. (That the
+	// answer comes from the $/cancel_request handler rather than from the turn
+	// ending is pinned by TestPermissionCancelRequestAnsweredCancelled.)
 	s := startProtocolFake(t, "--request-permission", "--permission-timeout", "50ms")
 	s.nudge(t, "needs approval")
 	s.waitIdle(t)
@@ -437,9 +438,23 @@ func TestACPProtocolPermissionDroppedWhenAgentCancelsRequest(t *testing.T) {
 	if out := s.peek(t); !strings.Contains(out, "permission rejected: timeout") || !strings.Contains(out, "echo: needs approval") {
 		t.Fatalf("Peek = %q, want the timed-out tool output then the echo", out)
 	}
-	if replies := s.jsonlRecords(t, "responses.jsonl"); len(replies) != 0 {
-		t.Fatalf("responses.jsonl = %v, want no reply to a request the agent cancelled", replies)
+	assertPermissionReply(t, s, 1.0, map[string]any{"outcome": "cancelled"}) //nolint:misspell // ACP wire spelling
+}
+
+func TestACPProtocolPermissionCancelledWhenTurnEnds(t *testing.T) {
+	// The fake stops waiting without $/cancel_request and ends the turn with
+	// the request still outstanding; gc answers it cancelled at turn end.
+	s := startProtocolFake(t, "--request-permission", "--permission-timeout", "50ms", "--permission-abandon")
+	s.nudge(t, "needs approval")
+	s.waitIdle(t)
+
+	if pending, err := s.p.Pending(s.name); err != nil || pending != nil {
+		t.Fatalf("Pending after the turn = %#v, %v; want nil, nil", pending, err)
 	}
+	if out := s.peek(t); !strings.Contains(out, "echo: needs approval") {
+		t.Fatalf("Peek = %q, want the turn to complete", out)
+	}
+	assertPermissionReply(t, s, 1.0, map[string]any{"outcome": "cancelled"}) //nolint:misspell // ACP wire spelling
 }
 
 func TestACPProtocolFSReadAnsweredMethodNotFound(t *testing.T) {

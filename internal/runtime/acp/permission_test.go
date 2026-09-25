@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +23,8 @@ import (
 // method) is appended as one line to $GC_REPLY_FILE. The test drives the rest
 // of the turn by writing private notifications to the agent's stdin:
 // _test/finish answers the prompt, _test/cancel sends $/cancel_request for
-// params.requestId, _test/exit exits. $GC_PERM_OPTIONS (a JSON array) and
+// params.requestId, _test/ask sends one more permission request with id
+// params.id, _test/exit exits. $GC_PERM_OPTIONS (a JSON array) and
 // $GC_PERM_TITLE ("-" omits the title) override the request contents. SIGINT
 // is ignored so Interrupt leaves the agent running.
 func fakeACPPermissionCommand(rawIDs ...string) string {
@@ -72,6 +74,10 @@ for line in sys.stdin:
     elif method == "_test/cancel":
         send({"jsonrpc": "2.0", "method": "$/cancel_request",
               "params": {"requestId": msg["params"]["requestId"]}})
+    elif method == "_test/ask":
+        send({"jsonrpc": "2.0", "id": msg["params"]["id"], "method": "session/request_permission",
+              "params": {"sessionId": "s1", "options": options,
+                         "toolCall": {"toolCallId": "call_ask", "kind": "execute", "title": title}}})
     elif method == "_test/exit":
         sys.exit(0)
     elif method == "" and "id" in msg:
@@ -251,6 +257,20 @@ func assertOutcome(t *testing.T, reply map[string]json.RawMessage, wantID, wantO
 	}
 }
 
+// requestIDPattern is the RequestID shape: "acp-", a 12-hex-digit
+// per-connection nonce, "-", then the raw JSON id.
+var requestIDPattern = regexp.MustCompile(`^acp-[0-9a-f]{12}-(.+)$`)
+
+// assertRequestID checks that got names the raw JSON id rawID on some
+// connection.
+func assertRequestID(t *testing.T, got, rawID string) {
+	t.Helper()
+	m := requestIDPattern.FindStringSubmatch(got)
+	if m == nil || m[1] != rawID {
+		t.Fatalf("RequestID = %q, want acp-<nonce>-%s", got, rawID)
+	}
+}
+
 const outcomeCancelled = `{"outcome":{"outcome":"cancelled"}}` //nolint:misspell // ACP wire spelling
 
 func selected(optionID string) string {
@@ -289,8 +309,9 @@ func TestPermissionPendingShape(t *testing.T) {
 	f := startPermissionFake(t, nil, "7")
 	got := f.prompt(t)
 
+	assertRequestID(t, got.RequestID, "7")
 	want := &runtime.PendingInteraction{
-		RequestID: "acp-7",
+		RequestID: got.RequestID,
 		Kind:      "approval",
 		Prompt:    "Run: touch marker",
 		Options:   []string{"Allow once", "Always allow", "Reject", "Always reject"},
@@ -331,9 +352,7 @@ func TestPermissionPendingShape(t *testing.T) {
 func TestPermissionPendingStringIDAndTitleFallback(t *testing.T) {
 	f := startPermissionFake(t, map[string]string{"GC_PERM_TITLE": "-"}, `"perm-1"`)
 	got := f.prompt(t)
-	if got.RequestID != `acp-"perm-1"` {
-		t.Errorf("RequestID = %q, want %q", got.RequestID, `acp-"perm-1"`)
-	}
+	assertRequestID(t, got.RequestID, `"perm-1"`)
 	if got.Prompt != "Permission requested" {
 		t.Errorf("Prompt = %q, want fallback", got.Prompt)
 	}
@@ -401,7 +420,7 @@ func TestPermissionRespondInvalidKeepsPending(t *testing.T) {
 			t.Fatalf("Respond(%q) = %v, want ErrInteractionResponseInvalid", action, err)
 		}
 	}
-	err := f.p.Respond(f.name, runtime.InteractionResponse{RequestID: "acp-99", Action: "approve"})
+	err := f.p.Respond(f.name, runtime.InteractionResponse{RequestID: strings.TrimSuffix(pending.RequestID, "7") + "99", Action: "approve"})
 	if !errors.Is(err, runtime.ErrInteractionResponseInvalid) {
 		t.Fatalf("Respond(mismatched id) = %v, want ErrInteractionResponseInvalid", err)
 	}
@@ -425,15 +444,14 @@ func TestPermissionRespondInvalidKeepsPending(t *testing.T) {
 func TestPermissionFIFO(t *testing.T) {
 	f := startPermissionFake(t, nil, `"perm-a"`, "2")
 	first := f.prompt(t)
-	if first.RequestID != `acp-"perm-a"` {
-		t.Fatalf("first pending = %q, want the oldest request", first.RequestID)
-	}
+	assertRequestID(t, first.RequestID, `"perm-a"`)
 	if err := f.p.Respond(f.name, runtime.InteractionResponse{RequestID: first.RequestID, Action: "approve"}); err != nil {
 		t.Fatalf("Respond first: %v", err)
 	}
 	second := f.waitPending(t)
-	if second.RequestID != "acp-2" || second.Metadata["tool_call_id"] != "call_1" {
-		t.Fatalf("second pending = %#v, want acp-2 / call_1", second)
+	assertRequestID(t, second.RequestID, "2")
+	if second.Metadata["tool_call_id"] != "call_1" {
+		t.Fatalf("second pending = %#v, want call_1", second)
 	}
 	if err := f.p.Respond(f.name, runtime.InteractionResponse{RequestID: second.RequestID, Action: "deny"}); err != nil {
 		t.Fatalf("Respond second: %v", err)
@@ -471,21 +489,31 @@ func TestPermissionClearedOnProcessExit(t *testing.T) {
 	}
 }
 
-func TestPermissionDroppedOnCancelRequest(t *testing.T) {
+// TestPermissionCancelRequestAnsweredCancelled pins ACP cancellation: a
+// receiver that acts on $/cancel_request must still answer the original
+// request, so gc forgets it and replies with the canceled outcome.
+func TestPermissionCancelRequestAnsweredCancelled(t *testing.T) {
 	f := startPermissionFake(t, nil, "7", `"p8"`)
 	f.prompt(t)
 	f.tell(t, "_test/cancel", map[string]any{"requestId": 7})
-	waitUntil(t, "the second request to become oldest", func() bool {
-		next, err := f.p.Pending(f.name)
-		if err != nil {
-			t.Fatalf("Pending: %v", err)
-		}
-		return next != nil && next.RequestID == `acp-"p8"`
-	})
+	assertOutcome(t, f.waitReplies(t, 1)[0], "7", outcomeCancelled)
+	next, err := f.p.Pending(f.name)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if next == nil {
+		t.Fatal("canceling one request cleared the other")
+	}
+	assertRequestID(t, next.RequestID, `"p8"`)
+
 	f.tell(t, "_test/cancel", map[string]any{"requestId": "p8"})
+	replies := f.waitReplies(t, 2)
+	assertOutcome(t, replies[1], `"p8"`, outcomeCancelled)
 	f.waitNoPending(t)
 
-	// Neither dropped request is answered, even when the turn ends.
+	// Canceling an id gc does not hold is ignored, and ending the turn does
+	// not answer the already-canceled requests a second time.
+	f.tell(t, "_test/cancel", map[string]any{"requestId": 99})
 	f.tell(t, "_test/finish", nil)
 	if !f.conn(t).waitIdle(protocolUnitWait) {
 		t.Fatal("prompt never completed")
@@ -493,9 +521,109 @@ func TestPermissionDroppedOnCancelRequest(t *testing.T) {
 	sc := f.conn(t)
 	f.tell(t, "_test/exit", nil)
 	waitExited(t, sc)
-	if got := f.replies(t); len(got) != 0 {
-		t.Fatalf("agent received replies %v for canceled requests", got)
+	if got := f.replies(t); len(got) != 2 {
+		t.Fatalf("agent received replies %v, want exactly the two canceled replies", got)
 	}
+}
+
+// TestPermissionStaleRequestIDRejectedAfterRestart pins that RequestIDs are
+// unique per connection: agents number requests from 1 on every connection,
+// so an answer to the old incarnation's request must not apply to the new
+// incarnation's request with the same JSON-RPC id.
+func TestPermissionStaleRequestIDRejectedAfterRestart(t *testing.T) {
+	f := startPermissionFake(t, nil, "1")
+	stale := f.prompt(t)
+	if err := f.p.Stop(f.name); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := f.p.Start(context.Background(), f.name, runtime.Config{
+		Command: fakeACPPermissionCommand("1"),
+		WorkDir: t.TempDir(),
+		Env:     map[string]string{"GC_REPLY_FILE": f.replyFile, "GC_PERM_TITLE": "Run: rm -rf build"},
+	}); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	fresh := f.prompt(t)
+	assertRequestID(t, fresh.RequestID, "1")
+	if fresh.RequestID == stale.RequestID {
+		t.Fatalf("restarted agent reused RequestID %q", stale.RequestID)
+	}
+
+	err := f.p.Respond(f.name, runtime.InteractionResponse{RequestID: stale.RequestID, Action: "approve"})
+	if !errors.Is(err, runtime.ErrInteractionResponseInvalid) {
+		t.Fatalf("Respond(stale RequestID) = %v, want ErrInteractionResponseInvalid", err)
+	}
+	still, err := f.p.Pending(f.name)
+	if err != nil || still == nil || still.RequestID != fresh.RequestID {
+		t.Fatalf("Pending after stale answer = %#v, %v; want %q still pending", still, err, fresh.RequestID)
+	}
+	if got := f.replies(t); len(got) != 0 {
+		t.Fatalf("agent received replies %v for a stale answer", got)
+	}
+}
+
+// TestNudgeRefusedWhilePermissionPending pins that a nudge does not wait out
+// the busy timeout behind a turn held open by a permission request: it
+// refuses at once, so the session layer can report the pending interaction
+// and the answer is not queued behind the wait.
+func TestNudgeRefusedWhilePermissionPending(t *testing.T) {
+	f := startPermissionFake(t, nil, "7")
+	f.p.cfg.NudgeBusyTimeout = time.Hour
+	f.prompt(t)
+
+	start := time.Now()
+	err := f.p.Nudge(f.name, runtime.TextContent("more"))
+	if !errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction) {
+		t.Fatalf("Nudge while a permission is pending = %v, want ErrNudgeRefusedPendingInteraction", err)
+	}
+	if elapsed := time.Since(start); elapsed > protocolUnitWait {
+		t.Fatalf("Nudge took %s to refuse", elapsed)
+	}
+	if pending, err := f.p.Pending(f.name); err != nil || pending == nil {
+		t.Fatalf("Pending after refused Nudge = %#v, %v; want the permission still pending", pending, err)
+	}
+}
+
+// TestNudgeWaitingForIdleRefusedWhenPermissionArrives pins the wake-up: a
+// nudge already waiting for a busy turn refuses as soon as the agent asks
+// for permission, instead of holding the caller until the busy timeout.
+func TestNudgeWaitingForIdleRefusedWhenPermissionArrives(t *testing.T) {
+	f := startPermissionFake(t, nil) // the prompt asks nothing up front
+	f.p.cfg.NudgeBusyTimeout = time.Hour
+	if err := f.p.Nudge(f.name, runtime.TextContent("start")); err != nil {
+		t.Fatalf("first Nudge: %v", err)
+	}
+	sc := f.conn(t)
+	if !sc.isBusy() {
+		t.Fatal("turn not busy after the first prompt")
+	}
+
+	result := make(chan error, 1)
+	go func() { result <- f.p.Nudge(f.name, runtime.TextContent("queued")) }()
+	// The waiting Nudge holds nudgeMu for its whole wait.
+	waitUntil(t, "the second Nudge to start waiting", func() bool {
+		if sc.nudgeMu.TryLock() {
+			sc.nudgeMu.Unlock()
+			return false
+		}
+		return true
+	})
+	f.tell(t, "_test/ask", map[string]any{"id": 11})
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction) {
+			t.Fatalf("waiting Nudge = %v, want ErrNudgeRefusedPendingInteraction", err)
+		}
+	case <-time.After(protocolUnitWait):
+		t.Fatal("waiting Nudge did not refuse when the permission arrived")
+	}
+	pending := f.waitPending(t)
+	assertRequestID(t, pending.RequestID, "11")
+	if err := f.p.Respond(f.name, runtime.InteractionResponse{RequestID: pending.RequestID, Action: "approve"}); err != nil {
+		t.Fatalf("Respond: %v", err)
+	}
+	assertOutcome(t, f.waitReplies(t, 1)[0], "11", selected("yes"))
 }
 
 func TestInterruptCancelsOutstandingPermissions(t *testing.T) {

@@ -2,11 +2,14 @@ package acp
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -58,16 +61,33 @@ type requestPermissionParams struct {
 }
 
 // pendingPermission is one unanswered session/request_permission. id is the
-// request's compacted raw JSON id, echoed verbatim in the reply.
+// request's compacted raw JSON id, echoed verbatim in the reply; reqID is the
+// pending-interaction id clients answer with.
 type pendingPermission struct {
 	id     json.RawMessage
+	reqID  string
 	params requestPermissionParams
 }
 
-// requestID is the stable pending-interaction id. It keeps the raw JSON id
-// text, so the number 7 and the string "7" stay distinct.
+// permissionRequestID builds the pending-interaction id for a request:
+// "acp-<connection nonce>-<raw JSON id>". The raw id text keeps the number 7
+// and the string "7" distinct. The nonce is fixed per connection, so the id
+// is stable across Pending calls, but agents number their requests from 1 on
+// every connection, so without it a stale answer from before a restart would
+// name a different incarnation's request.
+func permissionRequestID(nonce string, id json.RawMessage) string {
+	return interactionRequestPrefix + nonce + "-" + string(id)
+}
+
+// newPermissionNonce returns a random per-connection RequestID component.
+func newPermissionNonce() string {
+	var b [6]byte
+	_, _ = rand.Read(b[:]) // crypto/rand.Read never fails (Go 1.24+).
+	return hex.EncodeToString(b[:])
+}
+
 func (pp pendingPermission) requestID() string {
-	return interactionRequestPrefix + string(pp.id)
+	return pp.reqID
 }
 
 // interaction projects the request onto the runtime vocabulary.
@@ -116,7 +136,7 @@ func (pp pendingPermission) outcome(action string) (permissionOutcome, error) {
 				return permissionOutcome{Outcome: permissionOutcomeSelected, OptionID: opt.OptionID}, nil
 			}
 		}
-		return permissionOutcome{}, fmt.Errorf("%w: action %q needs a %s option, which %s does not offer",
+		return permissionOutcome{}, fmt.Errorf("%w: action %q needs an option of kind %s, which %s does not offer",
 			runtime.ErrInteractionResponseInvalid, action, kind, pp.requestID())
 	}
 	for _, opt := range pp.params.Options {
@@ -179,8 +199,59 @@ func (sc *sessionConn) holdPermission(req agentRequest) {
 		return
 	}
 	sc.mu.Lock()
-	sc.permissions = append(sc.permissions, pendingPermission{id: id, params: params})
+	if sc.permissionNonce == "" {
+		sc.permissionNonce = newPermissionNonce()
+	}
+	sc.permissions = append(sc.permissions, pendingPermission{
+		id:     id,
+		reqID:  permissionRequestID(sc.permissionNonce, id),
+		params: params,
+	})
+	if sc.permissionHeld != nil {
+		close(sc.permissionHeld)
+		sc.permissionHeld = nil
+	}
 	sc.mu.Unlock()
+}
+
+// errNudgeBusy reports that a nudge's wait for the turn to end timed out.
+var errNudgeBusy = errors.New("agent busy, timed out waiting for idle")
+
+// waitNudgeable blocks until the turn is idle, like waitIdle, but refuses
+// with runtime.ErrNudgeRefusedPendingInteraction as soon as a permission
+// request is outstanding: that turn cannot end until a client answers, and
+// the answer must not queue behind this wait. It returns errNudgeBusy when
+// the timeout expires first.
+func (sc *sessionConn) waitNudgeable(timeout time.Duration) error {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		sc.mu.Lock()
+		sc.ensureIdleChannelLocked()
+		if len(sc.permissions) > 0 {
+			sc.mu.Unlock()
+			return runtime.ErrNudgeRefusedPendingInteraction
+		}
+		if sc.activePromptID == 0 {
+			sc.mu.Unlock()
+			return nil
+		}
+		idleCh := sc.idleCh
+		if sc.permissionHeld == nil {
+			sc.permissionHeld = make(chan struct{})
+		}
+		held := sc.permissionHeld
+		sc.mu.Unlock()
+
+		select {
+		case <-idleCh:
+			return nil
+		case <-held:
+			// Re-check: the permission may already have been answered.
+		case <-timer.C:
+			return errNudgeBusy
+		}
+	}
 }
 
 // oldestPermission returns the oldest unanswered permission request, or nil.
@@ -223,10 +294,10 @@ func (sc *sessionConn) resolvePermission(resp runtime.InteractionResponse) ([]by
 }
 
 // cancelOutstandingPermissions answers every unanswered permission request
-// with the canceled outcome and forgets them. ACP requires a client to do
-// this when the turn ends or is canceled; it also runs when the agent exits.
-// Replies are written asynchronously so callers on the read loop never wait
-// on the agent's stdin.
+// with the canceled outcome and forgets them. ACP requires this when the
+// client cancels the turn; gc also does it when the turn ends (no answer can
+// still apply to it) and when the agent exits. Replies are written
+// asynchronously so callers on the read loop never wait on the agent's stdin.
 func (sc *sessionConn) cancelOutstandingPermissions() {
 	sc.mu.Lock()
 	outstanding := sc.permissions
@@ -248,7 +319,7 @@ func (sc *sessionConn) cancelOutstandingPermissions() {
 		for _, data := range replies {
 			if err := sc.writeMessage(data); err != nil {
 				// An exited agent cannot read the reply; that is expected.
-				if !isPipeWriteError(err) && !errors.Is(err, os.ErrClosed) {
+				if !isPipeWriteError(err) {
 					fmt.Fprintf(os.Stderr, "acp: canceling permission request: %v\n", err)
 				}
 				return
@@ -257,9 +328,11 @@ func (sc *sessionConn) cancelOutstandingPermissions() {
 	}()
 }
 
-// dropCancelledPermission forgets the request named by a $/cancel_request
-// notification without replying: the agent has stopped waiting for it.
-func (sc *sessionConn) dropCancelledPermission(params json.RawMessage) {
+// cancelRequestedPermission handles a $/cancel_request notification naming an
+// outstanding permission request: gc forgets it and, as ACP cancellation
+// requires of an implementation that acts on the notification, still answers
+// the original request, with the canceled outcome.
+func (sc *sessionConn) cancelRequestedPermission(params json.RawMessage) {
 	var cancel struct {
 		RequestID json.RawMessage `json:"requestId"`
 	}
@@ -272,13 +345,24 @@ func (sc *sessionConn) dropCancelledPermission(params json.RawMessage) {
 		return
 	}
 	sc.mu.Lock()
-	defer sc.mu.Unlock()
+	var dropped *pendingPermission
 	for i, pp := range sc.permissions {
 		if bytes.Equal(pp.id, id) {
+			dropped = &pp
 			sc.permissions = append(sc.permissions[:i], sc.permissions[i+1:]...)
-			return
+			break
 		}
 	}
+	sc.mu.Unlock()
+	if dropped == nil {
+		return
+	}
+	data, err := encodePermissionReply(dropped.id, permissionOutcome{Outcome: permissionOutcomeCanceled})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "acp: %v\n", err)
+		return
+	}
+	sc.writeReplyAsync(methodRequestPermission, data)
 }
 
 // Pending reports the oldest unanswered ACP session/request_permission as an

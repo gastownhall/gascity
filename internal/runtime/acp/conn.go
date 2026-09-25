@@ -42,6 +42,12 @@ type sessionConn struct {
 	// permissions holds the agent's unanswered session/request_permission
 	// requests, oldest first.
 	permissions []pendingPermission
+	// permissionNonce makes permission RequestIDs unique to this
+	// connection; set when the first request is held.
+	permissionNonce string
+	// permissionHeld, when non-nil, is closed the next time a permission
+	// request is held, waking waitNudgeable.
+	permissionHeld chan struct{}
 
 	// unsupportedSeen records agent request methods already logged as
 	// unsupported, so each is reported once per connection.
@@ -130,7 +136,7 @@ func (sc *sessionConn) dispatch(msg JSONRPCMessage) {
 		return
 	}
 	if msg.ID == nil && msg.Method == methodCancelRequest {
-		sc.dropCancelledPermission(msg.Params)
+		sc.cancelRequestedPermission(msg.Params)
 		return
 	}
 

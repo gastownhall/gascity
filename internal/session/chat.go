@@ -828,6 +828,9 @@ func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, im
 		recordCtx = context.Background()
 	}
 	telemetry.RecordNudge(recordCtx, sessName, err)
+	if errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction) {
+		return fmt.Errorf("%w: %w", ErrPendingInteraction, err)
+	}
 	if err != nil {
 		return fmt.Errorf("sending message to session: %w", err)
 	}
@@ -906,14 +909,10 @@ func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Be
 	return true, nil
 }
 
-// pendingInteractionLocked returns ErrPendingInteraction when the session is
-// blocked on an interaction. A provider that cannot see the runtime session
-// (ErrSessionNotFound) has nothing pending, as Pending and Respond treat it;
-// delivery then reports its own error if the session is really gone.
 func (m *Manager) pendingInteractionLocked(sessName string) error {
 	if ip, ok := m.sp.(runtime.InteractionProvider); ok {
 		pending, err := ip.Pending(sessName)
-		if err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) && !errors.Is(err, runtime.ErrSessionNotFound) {
+		if err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
 			return fmt.Errorf("getting pending interaction: %w", err)
 		}
 		if pending != nil {
