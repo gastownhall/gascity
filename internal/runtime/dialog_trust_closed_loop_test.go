@@ -315,7 +315,8 @@ func TestAcceptWorkspaceTrustDialogLaterPassWithKeysInFlight(t *testing.T) {
 	if !errors.Is(err1, ErrWorkspaceTrustUnconfirmed) {
 		t.Fatalf("pass 1 error = %v, want ErrWorkspaceTrustUnconfirmed (keys still in flight)", err1)
 	}
-	time.Sleep(10 * time.Millisecond)
+	// Pass 2 starts 10ms after pass 1 gives up, with its keys still queued.
+	<-time.NewTimer(10 * time.Millisecond).C
 	err2 := acceptWorkspaceTrustDialog(context.Background(), newStartupDialogBudget(2*time.Second), pane.peek, pane.sendKeys)
 
 	assertNeverConfirmedNoExit(t, pane)
