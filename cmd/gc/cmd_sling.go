@@ -1716,10 +1716,8 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 		fmt.Fprintf(stderr, "warning: bead routed but nudge failed: %v\n", err) //nolint:errcheck // best-effort
 		return
 	}
-	if running {
-		maybeStartNudgePoller(target, sp)
-	} else {
-		maybeStartNudgePoller(target, sp)
+	maybeStartNudgePoller(target)
+	if !running {
 		if err := pokeController(cityPath); err != nil {
 			fmt.Fprintf(stderr, "Session %q is asleep; poke failed: %v\n", target.agent.QualifiedName(), err) //nolint:errcheck // best-effort
 		} else {

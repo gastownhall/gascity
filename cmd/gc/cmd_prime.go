@@ -260,22 +260,6 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	return code
 }
 
-// hookNudgePollerSessionProvider resolves the session provider used to gate
-// nudge-poller spawn on event-capable suppression. Fail open on resolution
-// errors — a hook must not start failing because the provider config is
-// momentarily broken. newSessionProviderFromContext already returns a nil
-// provider on error, which preserves the legacy sidecar spawn
-// (providerRetiresNudgePollers treats nil as not event-capable); only the
-// event-capable suppression is lost this pass.
-func hookNudgePollerSessionProvider(spctx sessionProviderContext, stderr io.Writer) runtime.Provider {
-	sp, err := newSessionProviderFromContext(spctx, nil)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc prime: session provider unavailable for nudge poller (fail open): %v\n", err) //nolint:errcheck
-		return nil
-	}
-	return sp
-}
-
 // doPrimeWithHookFormatOpts is the full entry point. consumeHandoff=false makes
 // the invocation non-destructive: durable auto-handoff mail is still rendered
 // into the output, but is not archived. Preview callers (--json) pass false so
@@ -447,13 +431,6 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			if sessionName == "" {
 				sessionName = cliSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
 			}
-			// Resolve the session provider so the spawn respects the
-			// event-capable suppression. Fail open on resolution errors — a hook
-			// must not start failing because the provider config is momentarily
-			// broken; the possibly-nil provider is confined to the else branch so
-			// today's spawn still runs when construction fails.
-			spctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
-			hookSP := hookNudgePollerSessionProvider(spctx, stderr)
 			maybeStartNudgePoller(withNudgeTargetFence(openNudgeBeadStore(cityPath).Store, nudgeTarget{
 				cityPath:          cityPath,
 				cityName:          cityName,
@@ -463,7 +440,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 				sessionID:         os.Getenv("GC_SESSION_ID"),
 				continuationEpoch: os.Getenv("GC_CONTINUATION_EPOCH"),
 				sessionName:       sessionName,
-			}), hookSP)
+			}))
 		}
 		var ctx PromptContext
 		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {

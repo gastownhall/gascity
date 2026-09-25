@@ -1470,7 +1470,7 @@ func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runti
 	// The observe is a session-class read; route through the session store
 	// (identity today). The enqueue above stays on its own nudge store.
 	if obs, err := workerObserveNudgeTarget(target, cliSessionStore(store, target.cfg, target.cityPath), sp); err == nil && obs.Running {
-		maybeStartNudgePoller(target, sp)
+		maybeStartNudgePoller(target)
 	}
 	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, undelivered, stdout, stderr)
 }
@@ -1606,7 +1606,7 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		return err
 	}
 	if obs.Running {
-		maybeStartNudgePoller(target, sp)
+		maybeStartNudgePoller(target)
 	}
 	return nil
 }
@@ -1928,7 +1928,7 @@ func pollerCanDeliverWithoutActivitySignal(target nudgeTarget, sp runtime.Provid
 	return sleeper.SleepCapability(target.sessionName) == runtime.SessionSleepCapabilityTimedOnly
 }
 
-func maybeStartNudgePoller(target nudgeTarget, _ runtime.Provider) {
+func maybeStartNudgePoller(target nudgeTarget) {
 	if target.sessionName == "" {
 		return
 	}
