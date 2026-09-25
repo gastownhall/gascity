@@ -1720,7 +1720,8 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 		maybeStartNudgePoller(target)
 	} else {
 		maybeStartNudgePoller(target)
-		if canRequestManagedNudgeWake(target, store) {
+		// Only wake on a confirmed not-running observation; an observe error leaves runtime state unknown (matches gc mail notify).
+		if err == nil && canRequestManagedNudgeWake(target, store) {
 			sessFront := cliSessionFrontDoor(store, target.cfg, target.cityPath)
 			if err := requestManagedNudgeWake(target, sessFront); err != nil {
 				// WakeConflictError (e.g. a closed target) is expected here and
