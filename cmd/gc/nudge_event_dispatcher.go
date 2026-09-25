@@ -233,8 +233,8 @@ func (d *nudgeEventDispatcher) forward(ctx context.Context, gen int64, events <-
 				return
 			}
 			switch ev.Kind {
-			case runtime.SessionEventAgentStatus:
-				if ev.Session == "" || ev.AgentStatus != "idle" {
+			case runtime.SessionEventAgentIdle:
+				if ev.Session == "" {
 					continue
 				}
 				d.kickSessionAfter(ev.Session, 0, nudgeEventRetryBudget)
@@ -333,12 +333,14 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 	if cfg == nil || sp == nil {
 		return
 	}
-	store := openNudgeBeadStore(d.cityPath)
-	if nudgeBeadStoreOwned(d.cityPath) {
-		// A relocated nudge store is shared and process-scoped; only close the
-		// per-pass handle this call owns.
+	store, opened, err := openNudgeBeadStoreOwned(d.cityPath)
+	if err != nil {
+		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: opening bead store: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	if opened != nil {
 		defer func() {
-			if err := closeBeadStoreHandle(store.Store); err != nil {
+			if err := closeBeadStoreHandle(opened); err != nil {
 				fmt.Fprintf(d.stderr, "%s: nudge event dispatch: closing bead store: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
 			}
 		}()
@@ -346,9 +348,15 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 	if store.Store == nil {
 		return
 	}
-	// Session-class reads route through the session store (identity today);
-	// the nudge queue stays on its own store.
-	sessStore := cliSessionStore(store.Store, cfg, d.cityPath)
+	if opened == nil {
+		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: opened work store is nil\n", d.logPrefix) //nolint:errcheck // best-effort stderr
+		return
+	}
+	// The nudge queue uses its class-routed store, while session reads resolve
+	// from the raw work-store handle this frame opened. Reusing store.Store as
+	// the fallback would send unrelocated session reads to a relocated nudges
+	// binding and make live sessions disappear from this pass.
+	sessStore := cliSessionStore(opened, cfg, d.cityPath)
 	sessionBeads, err := loadSessionBeadSnapshot(sessStore)
 	if err != nil {
 		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: loading session beads: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr

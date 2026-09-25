@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -223,7 +224,7 @@ func TestNudgeEventDispatcherDeliversOnIdleEvent(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
-	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentStatus, Session: info.SessionName, AgentStatus: "idle", Time: time.Now()})
+	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentIdle, Session: info.SessionName, Time: time.Now()})
 
 	if !waitForDeliveredNudge(t, dir, fake) {
 		t.Fatalf("queued nudge not delivered on idle event; state=%+v calls=%v", queueStateSnapshot(t, dir), fake.SnapshotCalls())
@@ -242,7 +243,7 @@ func TestNudgeEventDispatcherRetriesFreshIdleStamp(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
-	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentStatus, Session: info.SessionName, AgentStatus: "idle", Time: time.Now()})
+	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentIdle, Session: info.SessionName, Time: time.Now()})
 
 	if !waitForDeliveredNudge(t, dir, fake) {
 		t.Fatalf("queued nudge not delivered by the aged-stamp retry; state=%+v", queueStateSnapshot(t, dir))
@@ -301,7 +302,7 @@ func TestNudgeEventDispatcherBusyAgentStopsAfterOneRetry(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
-	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentStatus, Session: info.SessionName, AgentStatus: "idle", Time: time.Now()})
+	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentIdle, Session: info.SessionName, Time: time.Now()})
 
 	// Allow the attempt plus the whole retry budget to elapse, then confirm
 	// the kick DIED: no delivery, and no further observation activity in a
@@ -338,7 +339,7 @@ func TestNudgeEventDispatcherDeliversWhenStampLagsEvent(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
-	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentStatus, Session: info.SessionName, AgentStatus: "idle", Time: time.Now()})
+	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentIdle, Session: info.SessionName, Time: time.Now()})
 	go func() {
 		// The tracker's debounced poll stamps the transition a beat later.
 		time.Sleep(60 * time.Millisecond)
@@ -369,10 +370,47 @@ func TestNudgeEventDispatcherResyncRunsFullPass(t *testing.T) {
 	}
 }
 
+func TestNudgeEventDispatcherRunPassReadsSessionsFromWorkStoreWhenNudgesRelocate(t *testing.T) {
+	fake := runtime.NewFake()
+	dir, d, info := newNudgeDispatcherFixture(t, fake)
+
+	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "wait satisfied: proceed", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	entry := cliStorageRoutesEntryFor(filepath.Clean(dir))
+	entry.routes = &storageRoutes{
+		binding: "test-nudges-only",
+		stores: map[coordclass.Class]beads.Store{
+			coordclass.ClassNudges: beads.NewMemStore(),
+		},
+	}
+	t.Cleanup(func() { entry.routes = nil })
+
+	d.runPass(info.SessionName, 0)
+
+	var nudges int
+	for _, call := range fake.SnapshotCalls() {
+		if call.Method == "Nudge" {
+			nudges++
+		}
+	}
+	if nudges != 1 {
+		t.Fatalf("Nudge calls = %d, want 1; runPass must read the live session from the work store when nudges relocate; calls=%v state=%+v", nudges, fake.SnapshotCalls(), queueStateSnapshot(t, dir))
+	}
+}
+
 func TestNudgeEventDispatcherRunPassPreservesRelocatedStoreAcrossPasses(t *testing.T) {
 	cityPath := t.TempDir()
-	var closes atomic.Int64
-	shared := &runPassCloseCountingStore{Store: beads.NewMemStore(), closes: &closes}
+	var sharedCloses atomic.Int64
+	shared := &runPassCloseCountingStore{Store: beads.NewMemStore(), closes: &sharedCloses}
+	var openedCloses atomic.Int64
+	originalOpenWorkStore := openNudgeWorkStore
+	openNudgeWorkStore = func(string, string) (beads.Store, error) {
+		return &runPassCloseCountingStore{Store: beads.NewMemStore(), closes: &openedCloses}, nil
+	}
+	t.Cleanup(func() { openNudgeWorkStore = originalOpenWorkStore })
 	entry := cliStorageRoutesEntryFor(cityPath)
 	entry.once.Do(func() {
 		entry.routes = &storageRoutes{
@@ -404,8 +442,11 @@ func TestNudgeEventDispatcherRunPassPreservesRelocatedStoreAcrossPasses(t *testi
 	d.runPass("", nudgeEventRetryBudget)
 	d.runPass("some-session", 0)
 
-	if got := closes.Load(); got != 0 {
+	if got := sharedCloses.Load(); got != 0 {
 		t.Fatalf("runPass closed the shared relocated-class store %d time(s) across two passes, want 0", got)
+	}
+	if got := openedCloses.Load(); got != 2 {
+		t.Fatalf("runPass closed its one-shot work-store handles %d time(s) across two passes, want 2", got)
 	}
 }
 
@@ -435,7 +476,7 @@ func TestNudgeEventDispatcherEmptyQueueSkipsObservation(t *testing.T) {
 	// provider calls; an idle event against an EMPTY queue must add none —
 	// the pass short-circuits at the queue-state read.
 	baseline := countFakeCalls(fake, "IsRunning")
-	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentStatus, Session: info.SessionName, AgentStatus: "idle", Time: time.Now()})
+	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentIdle, Session: info.SessionName, Time: time.Now()})
 	time.Sleep(300 * time.Millisecond)
 
 	if n := countFakeCalls(fake, "IsRunning"); n != baseline {
@@ -452,7 +493,7 @@ func TestNudgeEventDispatcherIgnoresNonIdleStatuses(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
-	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentStatus, Session: info.SessionName, AgentStatus: "working", Time: time.Now()})
+	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentStateChanged, Session: info.SessionName, Time: time.Now()})
 	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: info.SessionName, Time: time.Now()})
 	time.Sleep(300 * time.Millisecond)
 
@@ -568,9 +609,9 @@ func TestNudgeEventDispatcherUpdateDoesNotHoldLockWhileSubscribing(t *testing.T)
 
 func TestNudgeEventDispatcherClosesPerPassStore(t *testing.T) {
 	spy := &closeStoreSpy{Store: beads.NewMemStore()}
-	origOpen := openNudgeBeadStore
-	openNudgeBeadStore = func(string) beads.NudgesStore { return beads.NudgesStore{Store: spy} }
-	t.Cleanup(func() { openNudgeBeadStore = origOpen })
+	originalOpenWorkStore := openNudgeWorkStore
+	openNudgeWorkStore = func(string, string) (beads.Store, error) { return spy, nil }
+	t.Cleanup(func() { openNudgeWorkStore = originalOpenWorkStore })
 
 	d := &nudgeEventDispatcher{cityPath: t.TempDir(), stderr: testWriter(t), logPrefix: "test", cfg: &config.City{}, sp: runtime.NewFake()}
 	d.runPass("", 0)
