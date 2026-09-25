@@ -1761,9 +1761,11 @@ func findScopeBody(all []beads.Bead, rootID, scopeRef string) (beads.Bead, bool)
 
 func setOutcomeAndClose(store beads.Store, beadID, outcome string) error {
 	if outcome == beadmeta.OutcomePass {
-		// Never merge pass over a control quarantine: the bead is already
-		// closed and its fail is the record (ga-3wlbcj).
-		if current, err := store.Get(beadID); err == nil && isControlQuarantined(current) {
+		// Never merge pass over a control-quarantined workflow ROOT: it is
+		// already closed and its fail is the record (ga-3wlbcj). Scoped to
+		// roots on purpose — retry/ralph logical beads keep their own
+		// terminal semantics.
+		if current, err := store.Get(beadID); err == nil && isQuarantinedWorkflowRoot(current) {
 			return nil
 		}
 	}
@@ -1847,6 +1849,12 @@ func isControlQuarantined(b beads.Bead) bool {
 			b.Metadata[beadmeta.ControlQuarantinedMetadataKey] == "true")
 }
 
+// isQuarantinedWorkflowRoot reports whether b is a workflow root the control
+// dispatcher closed as a hard failure.
+func isQuarantinedWorkflowRoot(b beads.Bead) bool {
+	return strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflow && isControlQuarantined(b)
+}
+
 // resolveFinalizeFailureDiagnostics returns the failure metadata to stamp on
 // the domain parent when a workflow finalizes FAILED. Two routes reach a
 // failed finalize and each names its own culprit:
@@ -1871,6 +1879,11 @@ func resolveFinalizeFailureDiagnostics(store beads.Store, finalizer beads.Bead) 
 	if rootID != "" {
 		if member, ok, err := terminalAbortScopeFailureMember(store, rootID, finalizer.ID); err == nil && ok {
 			return failureStampFor(member)
+		}
+		// A root the dispatcher quarantined is the culprit when no blocker
+		// failed: carry its reason and class to the parent, not a generic one.
+		if root, err := store.Get(rootID); err == nil && isControlQuarantined(root) {
+			return failureStampFor(root)
 		}
 	}
 	return failureStamp(workflowFailedReason, "", "")

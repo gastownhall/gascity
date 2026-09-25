@@ -3011,8 +3011,15 @@ func TestQuarantinedWorkflowRootStaysFailedAfterFinalizer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get finalizer: %v", err)
 	}
-	if _, err := dispatch.ProcessControl(store, finalizer, dispatch.ProcessOptions{}); err != nil {
+	result, err := dispatch.ProcessControl(store, finalizer, dispatch.ProcessOptions{})
+	if err != nil {
 		t.Fatalf("ProcessControl(finalizer): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-fail" {
+		t.Fatalf("finalizer result = %+v, want processed workflow-fail", result)
+	}
+	if got, err := store.Get(finalizer.ID); err != nil || got.Status != "closed" {
+		t.Fatalf("finalizer = %+v (err %v), want closed so it is never retried", got.Status, err)
 	}
 
 	gotRoot, err := store.Get(root.ID)
