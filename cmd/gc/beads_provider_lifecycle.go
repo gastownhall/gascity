@@ -610,43 +610,61 @@ func desiredScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.
 // It lives here rather than in gc-beads-bd.sh on purpose: ga-5mym bans
 // `bd config set` from that script because it runs inside the provider op
 // timeout, where bd's auto-migrate can cost tens of seconds on a populated
-// store. This runs once, after init, outside that budget, against a store bd
-// has just created and is therefore empty.
+// store. This runs after the provider's init op on every start, outside that
+// budget; on a store that is already registered it costs two bd reads and no
+// write.
 //
-// Only an unset value is written. A scope that already carries types is an
-// operator's extension or a retried init, and narrowing that list would delete
-// types whose beads exist; `gc doctor --fix` owns reconciling a partial one.
+// Existing registrations are merged, never narrowed: the value written is the
+// config row ∪ what `bd types --json` reports (the custom_types table bd's
+// validator reads) ∪ doctor.RequiredCustomTypes, and it is written only when a
+// required type is missing from the row or the table. A scope migrated from a
+// legacy city, or any scope an older gc registered, already carries a list
+// without the newer required types (startup-health-episode, #6495); skipping
+// it because the row was non-empty left those types unregistered. Reading the
+// table as well matters twice: bd validates against it whenever it is
+// non-empty, and `bd config set` replaces it wholesale, so a table-only extra
+// must be in the merged value or the write would delete it.
 //
-// Best-effort by design. The canonical config gc just wrote is what bd
-// validates bead types against, so a scope whose table sync did not happen
-// still works; `gc doctor` reports the drift and `--fix` reconciles it with
-// this same call. Failing the whole init over a cache that doctor owns would
-// destroy a city that is otherwise complete.
+// Best-effort by design. A read failure writes nothing — a list that cannot be
+// proven a superset must not replace the table — and every failure logs the
+// `gc doctor --fix` hint instead of failing init: doctor's custom-types check
+// reports the same drift and --fix performs the same merge. Failing the whole
+// init over it would destroy a city that is otherwise complete.
 func registerProviderOwnedScopeCustomTypes(cityPath, dir string) {
+	const hint = "; run `gc doctor --fix`"
 	env, err := providerOwnedScopeCustomTypesEnv(cityPath, dir)
 	if err != nil {
-		log.Printf("gc: custom bead types not registered for %s: %v", dir, err)
+		log.Printf("gc: custom bead types not registered for %s: %v%s", dir, err, hint)
 		return
 	}
 	run := beads.ExecCommandRunnerWithEnv(env)
 
 	out, err := run(dir, "bd", "config", "get", "--json", "types.custom")
 	if err != nil {
-		log.Printf("gc: custom bead types not registered for %s: read: %v", dir, err)
+		log.Printf("gc: custom bead types not registered for %s: read types.custom: %v%s", dir, err, hint)
 		return
 	}
-	var current struct {
-		Value string `json:"value"`
-	}
-	if err := json.Unmarshal(out, &current); err != nil {
-		log.Printf("gc: custom bead types not registered for %s: parse: %v", dir, err)
+	row, err := doctor.ParseCustomTypesConfigJSON(out)
+	if err != nil {
+		log.Printf("gc: custom bead types not registered for %s: %v%s", dir, err, hint)
 		return
 	}
-	if strings.TrimSpace(current.Value) != "" {
+	out, err = run(dir, "bd", "types", "--json")
+	if err != nil {
+		log.Printf("gc: custom bead types not registered for %s: read custom_types: %v%s", dir, err, hint)
 		return
 	}
-	if _, err := run(dir, "bd", "config", "set", "types.custom", strings.Join(doctor.RequiredCustomTypes, ",")); err != nil {
-		log.Printf("gc: custom bead types not registered for %s: %v; run `gc doctor --fix`", dir, err)
+	table, err := doctor.ParseRegisteredTypesJSON(out)
+	if err != nil {
+		log.Printf("gc: custom bead types not registered for %s: %v%s", dir, err, hint)
+		return
+	}
+	if !doctor.CustomTypesNeedRegistration(row, table) {
+		return
+	}
+	merged := doctor.MergeRequiredCustomTypes(row, table)
+	if _, err := run(dir, "bd", "config", "set", "types.custom", strings.Join(merged, ",")); err != nil {
+		log.Printf("gc: custom bead types not registered for %s: %v%s", dir, err, hint)
 	}
 }
 
