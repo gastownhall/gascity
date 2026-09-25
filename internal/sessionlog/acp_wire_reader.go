@@ -37,8 +37,9 @@ const (
 	acpMethodUpdate            = "session/update"
 	acpMethodRequestPermission = "session/request_permission"
 
-	acpDirOut = "out"
-	acpDirIn  = "in"
+	acpDirOut  = "out"
+	acpDirIn   = "in"
+	acpDirMeta = "meta"
 
 	acpStopReasonEndTurn   = "end_turn"
 	acpStopReasonCancelled = "cancelled" //nolint:misspell // ACP StopReason wire value
@@ -106,6 +107,9 @@ type acpCaptureLine struct {
 	SessionID string          `json:"session_id"`
 	Dir       string          `json:"dir"`
 	Msg       json.RawMessage `json:"msg"`
+	// Dropped is the count on a meta gap marker: records the writer could
+	// not capture under backpressure.
+	Dropped int `json:"dropped"`
 }
 
 func (l acpCaptureLine) isHeader() bool { return l.Version != 0 }
@@ -166,6 +170,21 @@ type acpToolState struct {
 	name     string
 	input    json.RawMessage
 	terminal bool
+	// content and rawOutput are the latest values the agent reported. ACP
+	// tool_call_update fields replace the earlier value (content replaces
+	// the whole collection), so the terminal update may omit them.
+	content   json.RawMessage
+	rawOutput json.RawMessage
+}
+
+// observe records the content collection and raw output an update carries.
+func (s *acpToolState) observe(update map[string]json.RawMessage) {
+	if content, ok := acpPresentField(update, "content"); ok {
+		s.content = content
+	}
+	if rawOutput, ok := acpPresentField(update, "rawOutput"); ok {
+		s.rawOutput = rawOutput
+	}
 }
 
 // acpPermission is an unanswered session/request_permission.
@@ -187,14 +206,18 @@ type acpCaptureReader struct {
 	headerSeen  bool
 
 	// Per agent process.
-	prompts     map[string]bool // out session/prompt ids awaiting a response
-	permissions map[string]acpPermission
-	tools       map[string]*acpToolState
-	toolOrder   []string
+	prompts map[string]bool // out session/prompt ids awaiting a response
+	// currentPrompt is the id of the newest prompt gc sent; only its
+	// response ends the current turn.
+	currentPrompt string
+	permissions   map[string]acpPermission
+	tools         map[string]*acpToolState
+	toolOrder     []string
 
 	run *acpChunkRun
-	// turnAssistant is the last assistant entry of the current turn; the
-	// prompt response stamps its stop reason and usage there.
+	// turnAssistant is the last agent message or thought entry of the
+	// current turn. The prompt response stamps its stop reason and usage
+	// there when it is still the newest entry.
 	turnAssistant *Entry
 	// messageIDSeen counts runs per kind+messageId so a reused ACP message id
 	// (the field is unstable) still yields distinct entry ids.
@@ -212,6 +235,7 @@ func (r *acpCaptureReader) resetProcess() {
 	r.permissions = make(map[string]acpPermission)
 	r.tools = make(map[string]*acpToolState)
 	r.toolOrder = nil
+	r.currentPrompt = ""
 	r.turnAssistant = nil
 }
 
@@ -244,6 +268,10 @@ func (r *acpCaptureReader) consume(lineIndex int, line []byte) error {
 		r.outgoing(lineIndex, msg, raw, ts)
 	case acpDirIn:
 		r.incoming(lineIndex, msg, raw, ts)
+	case acpDirMeta:
+		if rec.Dropped > 0 {
+			r.diagnostics.DroppedRecordCount += rec.Dropped
+		}
 	}
 	return nil
 }
@@ -287,6 +315,7 @@ func (r *acpCaptureReader) outgoing(lineIndex int, msg acpRPCMessage, raw json.R
 		r.closeRun()
 		r.turnAssistant = nil
 		r.prompts[msg.idKey()] = true
+		r.currentPrompt = msg.idKey()
 		params := kiroRawObject(msg.Params)
 		r.noteSessionID(kiroStringField(params, "sessionId"))
 		r.append(&Entry{
@@ -335,7 +364,11 @@ func (r *acpCaptureReader) incoming(lineIndex int, msg acpRPCMessage, raw json.R
 	case msg.isResponse():
 		if r.prompts[msg.idKey()] {
 			delete(r.prompts, msg.idKey())
-			r.turnEnd(lineIndex, msg, raw, ts)
+			if msg.idKey() == r.currentPrompt {
+				r.currentPrompt = ""
+				r.turnEnd(lineIndex, msg, raw, ts)
+			}
+			// A late response to an older prompt does not end the newer turn.
 			return
 		}
 		if result := kiroRawObject(msg.Result); len(result) > 0 {
@@ -398,6 +431,9 @@ func (r *acpCaptureReader) chunk(lineIndex int, kind string, update map[string]j
 	run.raws = append(run.raws, raw)
 	r.run = run
 	r.append(run.entry)
+	if kind != acpRunUser {
+		r.turnAssistant = run.entry
+	}
 }
 
 // closeRun finalizes the open chunk run's message and raw payload.
@@ -448,6 +484,7 @@ func (r *acpCaptureReader) toolCall(lineIndex int, update map[string]json.RawMes
 		Raw:       raw,
 	}
 	state := &acpToolState{entry: entry, name: name, input: input}
+	state.observe(update)
 	if _, known := r.tools[callID]; !known {
 		r.toolOrder = append(r.toolOrder, callID)
 	}
@@ -474,6 +511,7 @@ func (r *acpCaptureReader) toolCallUpdate(lineIndex int, update map[string]json.
 			state.name, state.input = name, input
 			state.entry.Message = acpToolUseMessage(callID, name, input)
 		}
+		state.observe(update)
 	}
 	r.toolResult(lineIndex, callID, state, update, raw, ts)
 }
@@ -491,14 +529,22 @@ func (r *acpCaptureReader) toolResult(lineIndex int, callID string, state *acpTo
 		state.terminal = true
 	}
 	r.closeRun()
-	content := kiroToolUpdateResultContent(update)
+	current := state
+	if current == nil {
+		// An update for a tool call this process never announced.
+		current = &acpToolState{}
+		current.observe(update)
+	}
+	content := acpToolResultContent(current.content, current.rawOutput, update)
 	if len(content) == 0 {
 		content = mustMarshal(map[string]string{"status": status})
 	}
-	name := ""
-	if state != nil {
-		name = state.name
+	isError := kiroToolUpdateIsError(update, content)
+	if !isError && acpNonEmptyJSON(current.rawOutput) {
+		// A shell's exit code rides rawOutput even when content is the result.
+		isError = kiroToolUpdateIsError(nil, kiroNeutralToolResult(current.rawOutput))
 	}
+	name := current.name
 	r.append(&Entry{
 		UUID:      acpLineEntryID(lineIndex, "tool-result"),
 		Type:      "tool_result",
@@ -509,7 +555,7 @@ func (r *acpCaptureReader) toolResult(lineIndex int, callID string, state *acpTo
 			ToolUseID: callID,
 			Name:      name,
 			Content:   content,
-			IsError:   kiroToolUpdateIsError(update, content),
+			IsError:   isError,
 		}}),
 		Raw: raw,
 	})
@@ -519,33 +565,58 @@ func (r *acpCaptureReader) permissionRequest(lineIndex int, msg acpRPCMessage, r
 	r.closeRun()
 	params := kiroRawObject(msg.Params)
 	toolCall := kiroRawObject(firstKiroRawField(params, "toolCall"))
+	// The interaction mirrors what the ACP runtime reports from Pending for
+	// the same request, so a client can match the transcript entry to the
+	// request it answers through /pending and /respond: the request id is
+	// derived from the JSON-RPC id, options are the option names in agent
+	// order, and the metadata lists each option's id and kind.
+	requestID := acpPermissionRequestID(msg.ID)
+	metadata := map[string]string{"source": "acp"}
+	if callID := kiroStringField(toolCall, "toolCallId"); callID != "" {
+		metadata["tool_call_id"] = callID
+	}
+	if kind := kiroStringField(toolCall, "kind"); kind != "" {
+		metadata["tool_kind"] = kind
+	}
 	var options []string
 	for _, rawOption := range kiroRawArray(firstKiroRawField(params, "options")) {
-		if id := kiroStringField(kiroRawObject(rawOption), "optionId"); id != "" {
-			options = append(options, id)
+		option := kiroRawObject(rawOption)
+		id := kiroStringField(option, "optionId")
+		name := firstNonEmpty(kiroStringField(option, "name"), id)
+		if name == "" {
+			continue
 		}
+		index := strconv.Itoa(len(options))
+		metadata["option_"+index+"_id"] = id
+		metadata["option_"+index+"_kind"] = kiroStringField(option, "kind")
+		metadata["option_"+index+"_name"] = name
+		options = append(options, name)
 	}
-	entryID := acpLineEntryID(lineIndex, "permission")
-	var metadata json.RawMessage
-	if callID := kiroStringField(toolCall, "toolCallId"); callID != "" {
-		metadata = mustMarshal(map[string]string{"tool_call_id": callID})
-	}
-	r.permissions[msg.idKey()] = acpPermission{requestID: entryID, line: lineIndex}
+	metadata["option_count"] = strconv.Itoa(len(options))
+	r.permissions[msg.idKey()] = acpPermission{requestID: requestID, line: lineIndex}
 	r.append(&Entry{
-		UUID:      entryID,
+		UUID:      acpLineEntryID(lineIndex, "permission"),
 		Type:      "assistant",
 		Timestamp: ts,
 		Message: kiroMessageWithBlocks("assistant", []ContentBlock{{
 			Type:      "interaction",
-			RequestID: entryID,
+			RequestID: requestID,
 			Kind:      "approval",
 			State:     "pending",
 			Prompt:    firstNonEmpty(kiroStringField(toolCall, "title"), "Permission requested"),
 			Options:   options,
-			Metadata:  metadata,
+			Metadata:  mustMarshal(metadata),
 		}}),
 		Raw: raw,
 	})
+}
+
+// acpPermissionRequestID is the interaction request id for an ACP
+// session/request_permission with JSON-RPC id rawID: "acp-" followed by the
+// id's JSON text. Agents number requests per process, so the id is unique
+// only within one agent process.
+func acpPermissionRequestID(rawID json.RawMessage) string {
+	return "acp-" + string(bytes.TrimSpace(rawID))
 }
 
 // turnEnd handles the response to a session/prompt: it stamps the stop reason
@@ -573,8 +644,21 @@ func (r *acpCaptureReader) turnEnd(lineIndex int, msg acpRPCMessage, raw json.Ra
 	}
 	result := kiroRawObject(msg.Result)
 	stopReason := kiroStringField(result, "stopReason")
-	if r.turnAssistant != nil {
-		r.turnAssistant.Message = acpStampTurnEnd(r.turnAssistant.Message, stopReason, acpUsage(firstKiroRawField(result, "usage")))
+	usage := acpUsage(firstKiroRawField(result, "usage"))
+	if r.turnAssistant != nil && r.turnAssistant == r.lastEntry() {
+		r.turnAssistant.Message = acpStampTurnEnd(r.turnAssistant.Message, stopReason, usage)
+	} else if stopReason != "" || usage != nil {
+		// The turn did not end on agent text (a tool result, a permission
+		// request, or no output at all). Stamping an earlier entry would
+		// rewrite history consumers already streamed, so the turn's end gets
+		// an entry of its own with no content.
+		r.append(&Entry{
+			UUID:      acpLineEntryID(lineIndex, "turn-result"),
+			Type:      "assistant",
+			Timestamp: ts,
+			Message:   acpStampTurnEnd(kiroMessageWithBlocks("assistant", []ContentBlock{}), stopReason, usage),
+			Raw:       raw,
+		})
 	}
 	if stopReason == "" || stopReason == acpStopReasonEndTurn {
 		return
@@ -602,10 +686,14 @@ func (r *acpCaptureReader) append(entry *Entry) {
 		entry.ParentUUID = r.messages[n-1].UUID
 	}
 	entry.SessionID = r.sessionID
-	if entry.Type == "assistant" {
-		r.turnAssistant = entry
-	}
 	r.messages = append(r.messages, entry)
+}
+
+func (r *acpCaptureReader) lastEntry() *Entry {
+	if len(r.messages) == 0 {
+		return nil
+	}
+	return r.messages[len(r.messages)-1]
 }
 
 // noteSessionID records the first ACP session id the agent reported.
@@ -616,6 +704,11 @@ func (r *acpCaptureReader) noteSessionID(id string) {
 }
 
 func (r *acpCaptureReader) finish(path string) *Session {
+	if r.run != nil && r.currentPrompt != "" {
+		// The agent is still streaming this message: later chunks will grow
+		// it in place under the same id.
+		r.run.entry.Partial = true
+	}
 	r.closeRun()
 	var orphans map[string]bool
 	for _, callID := range r.toolOrder {
@@ -636,6 +729,83 @@ func (r *acpCaptureReader) finish(path string) *Session {
 		OrphanedToolUseIDs: orphans,
 		Diagnostics:        r.diagnostics,
 	}
+}
+
+// acpToolResultContent is a finished tool call's result. The ACP content
+// collection is what the agent showed the model, so it wins: text becomes a
+// JSON string, a diff the neutral diff object (with any text as "output").
+// rawOutput is used only when there is no content and it is not empty; then
+// an error field, then a generic failure.
+func acpToolResultContent(content, rawOutput json.RawMessage, update map[string]json.RawMessage) json.RawMessage {
+	if result := acpFlattenToolContent(content); len(result) > 0 {
+		return result
+	}
+	if acpNonEmptyJSON(rawOutput) {
+		return kiroNeutralToolResult(rawOutput)
+	}
+	if errorRaw, ok := acpPresentField(update, "error"); ok {
+		return kiroNeutralErrorResult(errorRaw)
+	}
+	if strings.EqualFold(kiroStringField(update, "status"), "failed") {
+		return mustMarshal(map[string]string{"error": "tool call failed"})
+	}
+	return nil
+}
+
+// acpFlattenToolContent renders an ACP ToolCallContent collection. It
+// returns nil when the collection carries nothing to show.
+func acpFlattenToolContent(raw json.RawMessage) json.RawMessage {
+	var parts []string
+	hasDiff := false
+	for _, rawBlock := range kiroRawArray(raw) {
+		block := kiroRawObject(rawBlock)
+		switch kiroStringField(block, "type") {
+		case "content":
+			inner := firstKiroRawField(block, "content")
+			if text := acpFlattenPrompt(mustMarshal([]json.RawMessage{inner})); text != "" {
+				parts = append(parts, text)
+			}
+		case "diff":
+			hasDiff = true
+		case "terminal":
+			if id := kiroStringField(block, "terminalId"); id != "" {
+				parts = append(parts, "[terminal "+id+"]")
+			}
+		}
+	}
+	text := strings.Join(parts, "\n")
+	if hasDiff {
+		if diff := kiroNeutralDiffResult(raw); len(diff) > 0 {
+			if text == "" {
+				return diff
+			}
+			object := kiroRawObject(diff)
+			object["output"] = mustMarshal(text)
+			return mustMarshal(object)
+		}
+	}
+	if text == "" {
+		return nil
+	}
+	return mustMarshal(text)
+}
+
+// acpPresentField returns an update field that is present and not null.
+func acpPresentField(object map[string]json.RawMessage, name string) (json.RawMessage, bool) {
+	value, ok := object[name]
+	if !ok || len(bytes.TrimSpace(value)) == 0 || string(bytes.TrimSpace(value)) == "null" {
+		return nil, false
+	}
+	return value, true
+}
+
+// acpNonEmptyJSON reports whether raw holds a value other than null, {} or [].
+func acpNonEmptyJSON(raw json.RawMessage) bool {
+	switch string(bytes.Join(bytes.Fields(raw), nil)) {
+	case "", "null", "{}", "[]":
+		return false
+	}
+	return true
 }
 
 func acpToolUseMessage(callID, name string, input json.RawMessage) json.RawMessage {
@@ -787,6 +957,7 @@ func acpCaptureActivity(lines [][]byte) (*TailMeta, bool) {
 	meta := &TailMeta{}
 	answered := make(map[string]bool)
 	sawLine := false
+	sawDrop := false
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := bytes.TrimSpace(lines[i])
 		if len(line) == 0 {
@@ -808,10 +979,17 @@ func acpCaptureActivity(lines [][]byte) (*TailMeta, bool) {
 		switch {
 		case rec.Dir == acpDirIn && msg.isResponse():
 			answered[msg.idKey()] = true
+		case rec.Dir == acpDirMeta && rec.Dropped > 0:
+			sawDrop = true
 		case rec.Dir == acpDirOut && msg.Method == acpMethodPrompt && msg.idKey() != "":
-			if answered[msg.idKey()] {
+			switch {
+			case answered[msg.idKey()]:
 				meta.Activity = "idle"
-			} else {
+			case sawDrop:
+				// The writer dropped records after this prompt; its response
+				// may be among them, so the turn state is unknown.
+				meta.Activity = ""
+			default:
 				meta.Activity = "in-turn"
 			}
 			return meta, true

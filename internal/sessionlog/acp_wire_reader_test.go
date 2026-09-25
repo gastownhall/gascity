@@ -191,8 +191,26 @@ func TestReadACPCaptureTurnDetails(t *testing.T) {
 	}
 
 	perm := msgs[4].ContentBlocks()[0]
-	if perm.Kind != "approval" || perm.Prompt != "Run go test" || strings.Join(perm.Options, ",") != "allow-once,reject-once" {
+	// The interaction uses the ACP runtime's Pending vocabulary: the request
+	// id comes from the JSON-RPC id and the options are the option names,
+	// with each option's id and kind in the metadata.
+	if perm.Kind != "approval" || perm.Prompt != "Run go test" || perm.RequestID != "acp-0" ||
+		strings.Join(perm.Options, ",") != "Allow once,Reject" {
 		t.Errorf("permission block = %+v", perm)
+	}
+	var permMeta map[string]string
+	if err := json.Unmarshal(perm.Metadata, &permMeta); err != nil {
+		t.Fatalf("decoding permission metadata %s: %v", perm.Metadata, err)
+	}
+	wantMeta := map[string]string{
+		"source": "acp", "tool_call_id": "call-1", "option_count": "2",
+		"option_0_id": "allow-once", "option_0_kind": "allow_once", "option_0_name": "Allow once",
+		"option_1_id": "reject-once", "option_1_kind": "reject_once", "option_1_name": "Reject",
+	}
+	for k, v := range wantMeta {
+		if permMeta[k] != v {
+			t.Errorf("permission metadata[%s] = %q, want %q (metadata %v)", k, permMeta[k], v, permMeta)
+		}
 	}
 	outcome := msgs[5].ContentBlocks()[0]
 	if outcome.RequestID != perm.RequestID || perm.RequestID == "" {

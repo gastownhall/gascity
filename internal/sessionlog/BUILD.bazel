@@ -47,6 +47,7 @@ go_library(
 go_test(
     name = "sessionlog_test",
     srcs = [
+        "acp_wire_reader_results_test.go",
         "acp_wire_reader_test.go",
         "agents_test.go",
         "amp_reader_test.go",

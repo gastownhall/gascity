@@ -299,6 +299,14 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 	if err != nil {
 		return nil, err
 	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat transcript: %w", err)
+	}
+	// Stat before reading: an append that lands during the read then leaves
+	// the generation older than the content, which only forces a refresh.
+	// The other order could label older content with a newer generation,
+	// and a cached snapshot keyed by it would stay stale until the next write.
 	fullSession, err := sessionlog.ReadProviderFileRaw(req.Provider, path, 0)
 	if err != nil {
 		return nil, err
@@ -310,11 +318,6 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		if err != nil {
 			return nil, err
 		}
-	}
-
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, fmt.Errorf("stat transcript: %w", err)
 	}
 
 	entries := normalizeHistoryEntries(req.Provider, path, session.ID, session.Messages)
@@ -472,6 +475,9 @@ func normalizeEntry(provider, path, sessionID string, order int, entry *sessionl
 	}
 	if normalized.ID != entry.UUID {
 		normalized.Provenance.Derived = true
+	}
+	if entry.Partial {
+		normalized.Status = ResultStatusPartial
 	}
 	if !entry.Timestamp.IsZero() {
 		ts := entry.Timestamp.UTC()
@@ -987,11 +993,18 @@ func tailActivity(meta *sessionlog.TailMeta) TailActivity {
 
 func historyDiagnostics(session sessionlog.SessionDiagnostics) []HistoryDiagnostic {
 	malformedTail := session.MalformedTail
-	if session.MalformedLineCount == 0 && !malformedTail {
+	if session.MalformedLineCount == 0 && !malformedTail && session.DroppedRecordCount == 0 {
 		return nil
 	}
 
 	var diagnostics []HistoryDiagnostic
+	if session.DroppedRecordCount > 0 {
+		diagnostics = append(diagnostics, HistoryDiagnostic{
+			Code:    "dropped_records",
+			Message: "transcript writer dropped records; normalized history has gaps",
+			Count:   session.DroppedRecordCount,
+		})
+	}
 	if malformedTail {
 		diagnostics = append(diagnostics, HistoryDiagnostic{
 			Code:    "malformed_tail",

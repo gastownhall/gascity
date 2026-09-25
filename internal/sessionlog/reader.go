@@ -42,6 +42,9 @@ type Session struct {
 type SessionDiagnostics struct {
 	MalformedLineCount int
 	MalformedTail      bool
+	// DroppedRecordCount counts records the transcript writer reported it
+	// could not record (gc ACP captures under backpressure).
+	DroppedRecordCount int
 }
 
 // PaginationInfo describes the pagination state of a session response.
