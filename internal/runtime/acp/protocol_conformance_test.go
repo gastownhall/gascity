@@ -266,6 +266,49 @@ func TestACPProtocolSigintCancelAnswersInFlightPrompt(t *testing.T) {
 	}
 }
 
+// acpWireCancelled is the ACP stop reason for a cancelled turn (acp-go-sdk
+// StopReasonCancelled). The US misspell autofix must not rewrite it.
+const acpWireCancelled = "cancelled" //nolint:misspell // ACP wire value
+
+func TestACPProtocolSigintCancelStopReasonIsWireSpelling(t *testing.T) {
+	s := startProtocolFake(t, "--sigint", "cancel", "--turn-delay", "1h")
+	sc := s.conn(t)
+	sc.mu.Lock()
+	sessID := sc.sessionID
+	sc.mu.Unlock()
+	// Send the prompt directly so the test owns the response channel; Nudge
+	// discards the response on this base.
+	msg, id := newSessionPromptRequest(sessID, runtime.TextContent("long turn"))
+	sc.setActivePrompt(id)
+	ch, err := sc.sendRequest(msg)
+	if err != nil {
+		t.Fatalf("sendRequest: %v", err)
+	}
+	waitForMethod(t, s, "session/prompt")
+	if err := s.p.Interrupt(s.name); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+	var resp JSONRPCMessage
+	select {
+	case r, ok := <-ch:
+		if !ok {
+			t.Fatal("connection drained before the prompt response")
+		}
+		resp = r
+	case <-time.After(protocolWait):
+		t.Fatalf("no session/prompt response within %s", protocolWait)
+	}
+	var result struct {
+		StopReason string `json:"stopReason"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("decode result %s: %v", resp.Result, err)
+	}
+	if result.StopReason != acpWireCancelled {
+		t.Fatalf("stopReason = %q, want %q", result.StopReason, acpWireCancelled)
+	}
+}
+
 func TestACPProtocolPermissionTimeoutRejects(t *testing.T) {
 	// gc on this base does not answer session/request_permission, so the
 	// fake's timeout path fires: $/cancel_request, then a rejected tool.

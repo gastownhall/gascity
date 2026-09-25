@@ -104,7 +104,7 @@ func (a *agent) runTurn(t *turn, raw json.RawMessage) {
 		case permissionAborted:
 			return
 		case permissionCancelled:
-			a.answer(t, "canceled", nil)
+			a.answer(t, wireCancelled, nil)
 			return
 		}
 	}
@@ -193,7 +193,7 @@ type permissionDecision int
 const (
 	permissionAllowed permissionDecision = iota
 	permissionRejected
-	permissionCancelled // client answered outcome "canceled"
+	permissionCancelled // client answered the cancel outcome
 	permissionAborted   // the turn itself was canceled while waiting
 )
 
@@ -281,8 +281,8 @@ func parsePermissionReply(msg message) (permissionDecision, string) {
 		return permissionRejected, "malformed reply"
 	}
 	switch {
-	case result.Outcome.Outcome == "canceled":
-		return permissionCancelled, "canceled"
+	case result.Outcome.Outcome == wireCancelled:
+		return permissionCancelled, wireCancelled
 	case result.Outcome.Outcome == "selected" && strings.HasPrefix(result.Outcome.OptionID, "allow_"):
 		return permissionAllowed, result.Outcome.OptionID
 	default:
