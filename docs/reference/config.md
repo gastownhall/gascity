@@ -58,6 +58,7 @@ ACPSessionConfig holds settings for the ACP session provider.
 | `handshake_timeout` | string |  | `30s` | HandshakeTimeout is how long to wait for the ACP handshake to complete. Duration string (e.g., "30s", "1m"). Defaults to "30s". |
 | `nudge_busy_timeout` | string |  | `60s` | NudgeBusyTimeout is how long to wait for an agent to become idle before sending a new prompt. Duration string. Defaults to "60s". |
 | `output_buffer_lines` | integer |  | `1000` | OutputBufferLines is the number of output lines to keep in the circular buffer for Peek. Defaults to 1000. |
+| `stop_grace` | string |  | `5s` | StopGrace is how long stopping an ACP session waits after SIGTERM before escalating to SIGKILL. Raise it for agents that need longer to drain in-flight tool calls on shutdown. Duration string (e.g., "5s", "20s"). Defaults to "5s"; non-positive or unparseable values fall back to the default. gc stop bounds each session at 30s, so keep stop_grace comfortably below that. |
 
 ## APIConfig
 
@@ -625,7 +626,7 @@ OrdersConfig holds order settings for orders discovered from flat TOML files (on
 |-------|------|----------|---------|-------------|
 | `skip` | []string |  |  | Skip lists order names to exclude from scanning. |
 | `max_timeout` | string |  |  | MaxTimeout is an operator hard cap on the per-order dispatch timeout: no order's dispatched exec/formula runs longer than this. Go duration string (e.g., "60s"). Empty means uncapped (no override). This bounds the dispatch timeout only; a condition trigger's check_timeout is a separate probe deadline and is not capped here. |
-| `max_dispatches_per_tick` | integer |  |  | MaxDispatchesPerTick caps how many orders the supervisor dispatches per tick. Unset keeps the built-in default of 4; set to 1 to drain overdue cooldown orders one-per-tick at cold start instead of firing several concurrent goroutines at once. |
+| `max_dispatches_per_tick` | integer |  |  | MaxDispatchesPerTick caps how many clock-driven orders (cooldown, cron and event triggers) the supervisor dispatches per tick, in a rotation that resumes where the previous tick stopped. Unset keeps the built-in default of 4; set to 1 to drain overdue cooldown orders one-per-tick at cold start instead of firing several concurrent goroutines at once. Condition-triggered orders are outside this budget: a passing check means work is pending right now, so they dispatch on the tick that observes it. The open-tracking and open-work gates still run for them (unless the order sets no_work_gate), but those gates are keyed per order and only hold back a redispatch of an order whose previous run is still moving, so they do not bound the tick as a whole: a tick launches at most this budget plus one dispatch per condition order whose check passed on that tick. That second term grows with how many condition orders a city defines, not with this setting, and at cold start, before any tracking bead exists, neither gate holds a simultaneously-due set back. |
 | `overrides` | []OrderOverride |  |  | Overrides apply per-order field overrides after scanning. Each override targets an order by name and optionally by rig. |
 
 ## PackDefaults

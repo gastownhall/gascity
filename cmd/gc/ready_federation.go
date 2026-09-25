@@ -227,7 +227,7 @@ func readyLegLabel(ref storeref.StoreRef) string {
 // already happened by here, so reporting one and discarding the rest would throw
 // away diagnosis already paid for.
 func readyRigLegStores(cfg *config.City, cityPath string) (map[string]beads.Store, error) {
-	stores, failures := openStandaloneRigStores(cfg, cityPath)
+	stores, failures := openStandaloneRigStores(cfg, cityPath, oneShotRigStoreOpener(cfg))
 	if len(failures) == 0 {
 		return stores, nil
 	}

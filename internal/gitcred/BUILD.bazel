@@ -26,6 +26,7 @@ go_test(
     name = "gitcred_test",
     srcs = [
         "autherror_test.go",
+        "inject_keepalive_drift_test.go",
         "inject_test.go",
         "match_test.go",
         "protocol_test.go",
@@ -36,5 +37,20 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":gitcred"],
-    deps = ["//internal/testenv"],
+    deps = [
+        "//internal/git",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

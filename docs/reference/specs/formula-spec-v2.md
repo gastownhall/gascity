@@ -684,9 +684,11 @@ participates.
 ### 3.1. Check
 
 `[steps.check]` wraps a step in an inline run/check verification loop:
-after each iteration closes, the orchestrator runs the configured script;
-pass closes the step, fail with budget left spawns the next iteration,
-exhaustion closes the step as failed.
+after each iteration closes, the orchestrator runs the configured script.
+Exit 0 closes the step; an infrastructure outcome — exit 75, or the narrow
+stderr fallback described below — re-runs the script without spending an
+attempt; any other nonzero exit is a "not yet" verdict that spawns the next
+iteration while budget remains, and exhaustion closes the step as failed.
 
 | Key | Purpose |
 |---|---|
@@ -736,6 +738,46 @@ The step `timeout` applies as a general bound on the check script; a
 
 `check` must not be combined with `loop`, `on_complete`, `gate`, `expand`,
 `assignee`, or `retry`.
+
+**Infrastructure outcomes — exit 75.** A check script reports two different
+things with a nonzero exit: "the thing I verify is not true yet" (a verdict),
+and "I could not reach the infrastructure I need in order to tell" (a blind
+read). Only the first should cost an attempt. A blind read that is counted as
+a verdict spends the step's budget on a question the script never answered.
+
+Exit status **75** is the script's opt-in way to declare the second. It is
+`EX_TEMPFAIL` from `sysexits.h` — the same convention
+`scripts/push-gate-lock-lib.sh` already uses — and the orchestrator records
+that run as an infrastructure outcome rather than a verdict:
+
+| Exit status | Meaning | Consumes a `max_attempts` attempt |
+|---|---|---|
+| `0` | Pass — the step closes | n/a |
+| `75` | Infrastructure unreachable; the check produced no verdict | **No** — re-run attempt-free |
+| any other nonzero carrying a typed infrastructure string on stderr | Infrastructure unreachable, via the stderr fallback below | **No** — re-run attempt-free |
+| any other nonzero | Fail — the verdict is "not yet" | Yes |
+
+Attempt-free re-runs are themselves bounded by a separate infrastructure
+budget, so a script that exits 75 forever still terminates; it just does not
+burn the semantic budget on the way there. No Go code inspects what the check
+was verifying — exit 75 is the signal a script declares deliberately, and the
+one to write against. It is not the only route to an infrastructure outcome,
+though: the stderr fallback below can reclassify a nonzero exit from a script
+that never exits 75.
+
+As a fallback for check scripts that only propagate a `gc`/`bd` failure and
+its bare exit status, the orchestrator also recognizes a small fixed set of
+typed infrastructure error strings on **stderr**
+(`internal/convergence/gate_infra.go`). That table is deliberately narrow, is
+matched only against stderr, and is not a stable interface — a script that
+needs this behavior should exit 75.
+
+Scope (non-normative for other lanes): this reclassification is applied by
+the ralph check lane described in this section. The other condition
+consumers — trigger conditions, hybrid dispatch, and `gc converge` — still
+read a nonzero gate as a genuine verdict. Each lane opts in separately,
+because "re-run without cost" only means something where there is an attempt
+budget to protect.
 
 ### 3.2. Retry
 

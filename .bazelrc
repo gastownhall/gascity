@@ -7,3 +7,29 @@ common --color=no
 
 test --test_output=errors
 test --flaky_test_attempts=2
+
+
+# Bazel sandboxes root t.TempDir() deep under the output tree, blowing past the
+# 104-byte unix-socket sun_path limit for herdr/tmux/k8s socket tests. Root the
+# per-test tmpdir short, like `go test` does with TMPDIR=/tmp. /tmp/bt is
+# creatable by any user (CI runners, remote workers, dev machines alike).
+test --test_tmpdir=/tmp/bt
+test --sandbox_writable_path=/tmp/bt
+
+# GOROOT is resolved hermetically from runfiles (@go_sdk//:srcs) by
+# internal/bazeltest; no client export is required.
+test --test_env=GC_TEST_REPO_ROOT
+
+# Bazel test actions do not inherit HOME by default; the herdr env scrubber
+# allow-lists the real HOME value, and go-path tests depend on it.
+test --test_env=HOME
+
+# Repo-lint tests exec `go` and other dev binaries; bazel's default test PATH
+# is minimal, so forward the client's.
+test --test_env=PATH
+
+# Remote execution on the NativeLink farm (scheduler on cherry). Local
+# clients reach it on loopback; off-host agents should use the tailnet
+# endpoint grpc://cherry.tail3127c0.ts.net:50051 instead.
+build:remote-exec --remote_executor=grpc://127.0.0.1:50052
+build:remote-exec --remote_timeout=3600

@@ -2,11 +2,15 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "workdir",
-    srcs = ["workdir.go"],
+    srcs = [
+        "pool_isolation.go",
+        "workdir.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/workdir",
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/agent",
+        "//internal/config",
         "//internal/pathutil",
     ],
 )
@@ -14,9 +18,29 @@ go_library(
 go_test(
     name = "workdir_test",
     srcs = [
+        "pool_isolation_test.go",
         "testenv_import_test.go",
         "workdir_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
     embed = [":workdir"],
-    deps = ["//internal/testenv"],
+    deps = [
+        "//internal/config",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )
