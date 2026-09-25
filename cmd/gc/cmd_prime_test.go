@@ -1348,6 +1348,8 @@ func TestDoPrimeWithHook_CodexJSONFormatInfersAgentFromWorkDir(t *testing.T) {
 
 			cityDir := t.TempDir()
 			cleanupManagedDoltTestCity(t, cityDir)
+			// isTestBinary() refuses in test binaries (ga-klo4gz).
+			t.Setenv("GC_CITY", cityDir)
 			agentWorkDirParts := append([]string{cityDir, ".gc", "agents"}, strings.Split(tt.identity, "/")...)
 			agentWorkDir := filepath.Join(agentWorkDirParts...)
 			if err := os.MkdirAll(agentWorkDir, 0o755); err != nil {
