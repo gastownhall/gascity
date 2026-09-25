@@ -365,8 +365,8 @@ func (h *RuntimeHandle) PendingStatus(ctx context.Context) (*PendingInteraction,
 
 // LiveObservation reports runtime presence metadata for a legacy runtime-only
 // worker target.
-func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, error) {
-	liveness, err := runtime.ObserveLivenessWithError(h.provider, h.sessionName, h.processNames)
+func (h *RuntimeHandle) LiveObservation(ctx context.Context) (LiveObservation, error) {
+	liveness, err := runtime.ObserveLivenessWithErrorContext(ctx, h.provider, h.sessionName, h.processNames)
 	if err != nil {
 		return LiveObservation{}, err
 	}

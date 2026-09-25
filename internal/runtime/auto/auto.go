@@ -270,6 +270,22 @@ func (p *Provider) ObserveLivenessWithError(name string, processNames []string) 
 	return runtime.ObserveLivenessWithError(other, name, processNames)
 }
 
+// ObserveLivenessWithErrorContext delegates cancellable observation to the routed backend.
+func (p *Provider) ObserveLivenessWithErrorContext(ctx context.Context, name string, processNames []string) (runtime.Liveness, error) {
+	primary, err := runtime.ObserveLivenessWithErrorContext(ctx, p.route(name), name, processNames)
+	if err != nil || primary.Running {
+		return primary, err
+	}
+	p.mu.RLock()
+	isACP := p.routes[name]
+	p.mu.RUnlock()
+	other := p.acpSP
+	if isACP {
+		other = p.defaultSP
+	}
+	return runtime.ObserveLivenessWithErrorContext(ctx, other, name, processNames)
+}
+
 // Nudge delegates to the routed backend.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	return p.route(name).Nudge(name, content)

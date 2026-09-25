@@ -251,6 +251,9 @@ func IsRunningContext(ctx context.Context, sp Provider, name string) (bool, erro
 	if rp, ok := sp.(ContextRunningProvider); ok {
 		return rp.IsRunningContext(ctx, name)
 	}
+	if ctx.Done() == nil {
+		return sp.IsRunning(name), nil
+	}
 	result := make(chan bool, 1)
 	go func() { result <- sp.IsRunning(name) }()
 	select {
@@ -270,7 +273,17 @@ func NudgeContext(ctx context.Context, sp Provider, name string, content []Conte
 	if np, ok := sp.(ContextNudgeProvider); ok {
 		return np.NudgeContext(ctx, name, content)
 	}
-	return sp.Nudge(name, content)
+	if ctx.Done() == nil {
+		return sp.Nudge(name, content)
+	}
+	result := make(chan error, 1)
+	go func() { result <- sp.Nudge(name, content) }()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // PendingInteraction describes a blocking interaction raised by a session.

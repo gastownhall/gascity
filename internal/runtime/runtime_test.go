@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 type contextNudgeFake struct{ *Fake }
@@ -11,6 +12,27 @@ type contextNudgeFake struct{ *Fake }
 func (p *contextNudgeFake) NudgeContext(ctx context.Context, _ string, _ []ContentBlock) error {
 	<-ctx.Done()
 	return ctx.Err()
+}
+
+type blockingLegacyNudgeFake struct {
+	*Fake
+	unblock <-chan struct{}
+}
+
+func (p *blockingLegacyNudgeFake) Nudge(string, []ContentBlock) error {
+	<-p.unblock
+	return nil
+}
+
+func TestNudgeContextBoundsLegacyProvider(t *testing.T) {
+	unblock := make(chan struct{})
+	t.Cleanup(func() { close(unblock) })
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := NudgeContext(ctx, &blockingLegacyNudgeFake{Fake: NewFake(), unblock: unblock}, "worker", TextContent("wake"))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("NudgeContext error = %v, want context deadline exceeded", err)
+	}
 }
 
 func TestNudgeContextCancelsContextAwareProvider(t *testing.T) {

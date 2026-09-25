@@ -1966,11 +1966,16 @@ func (m *Manager) Get(id string) (Info, error) {
 // ObserveRuntimeForInfo reports live provider state for a session whose Info
 // has already been loaded by the caller, avoiding a redundant store fetch.
 func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) (RuntimeObservation, error) {
+	return m.ObserveRuntimeForInfoContext(context.Background(), info, processNames)
+}
+
+// ObserveRuntimeForInfoContext reports live provider state with caller cancellation.
+func (m *Manager) ObserveRuntimeForInfoContext(ctx context.Context, info Info, processNames []string) (RuntimeObservation, error) {
 	obs := RuntimeObservation{SessionName: info.SessionName}
 	if strings.TrimSpace(info.SessionName) == "" || m.sp == nil {
 		return obs, nil
 	}
-	liveness, err := runtime.ObserveLivenessWithError(m.sp, info.SessionName, processNames)
+	liveness, err := runtime.ObserveLivenessWithErrorContext(ctx, m.sp, info.SessionName, processNames)
 	if err != nil {
 		return RuntimeObservation{}, err
 	}

@@ -1344,9 +1344,13 @@ func managedNudgeWakeSkipReason(target nudgeTarget, sessFront *session.Store) st
 }
 
 func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.Handle, error) {
+	return workerHandleForNudgeTargetContext(context.Background(), target, store, sp)
+}
+
+func workerHandleForNudgeTargetContext(ctx context.Context, target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.Handle, error) {
 	if target.sessionName != "" {
 		if target.sessionID != "" || target.continuationEpoch != "" {
-			obs, err := workerObserveSessionTargetWithConfig(target.cityPath, store, sp, target.cfg, target.sessionName)
+			obs, err := workerObserveSessionTargetWithRuntimeHintsContext(ctx, target.cityPath, store, sp, target.cfg, target.sessionName, nil)
 			if err == nil {
 				matches, matchErr := nudgeTargetLiveGenerationMatches(target, obs, sp)
 				if matchErr != nil {
@@ -1396,8 +1400,12 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 }
 
 func workerObserveNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.LiveObservation, error) {
+	return workerObserveNudgeTargetContext(context.Background(), target, store, sp)
+}
+
+func workerObserveNudgeTargetContext(ctx context.Context, target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.LiveObservation, error) {
 	if target.sessionName != "" {
-		obs, err := workerObserveSessionTargetWithConfig(target.cityPath, store, sp, target.cfg, target.sessionName)
+		obs, err := workerObserveSessionTargetWithRuntimeHintsContext(ctx, target.cityPath, store, sp, target.cfg, target.sessionName, nil)
 		if err != nil {
 			return worker.LiveObservation{}, err
 		}
@@ -1414,30 +1422,9 @@ func workerObserveNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.
 		return obs, nil
 	}
 	if target.sessionID != "" {
-		return workerObserveSessionTargetWithConfig(target.cityPath, store, sp, target.cfg, target.sessionID)
+		return workerObserveSessionTargetWithRuntimeHintsContext(ctx, target.cityPath, store, sp, target.cfg, target.sessionID, nil)
 	}
-	return workerObserveSessionTargetWithConfig(target.cityPath, store, sp, target.cfg, target.sessionName)
-}
-
-func workerObserveNudgeTargetContext(ctx context.Context, target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.LiveObservation, error) {
-	if ctx == nil || ctx.Done() == nil {
-		return workerObserveNudgeTarget(target, store, sp)
-	}
-	type result struct {
-		observation worker.LiveObservation
-		err         error
-	}
-	results := make(chan result, 1)
-	go func() {
-		observation, err := workerObserveNudgeTarget(target, store, sp)
-		results <- result{observation: observation, err: err}
-	}()
-	select {
-	case result := <-results:
-		return result.observation, result.err
-	case <-ctx.Done():
-		return worker.LiveObservation{}, ctx.Err()
-	}
+	return workerObserveSessionTargetWithRuntimeHintsContext(ctx, target.cityPath, store, sp, target.cfg, target.sessionName, nil)
 }
 
 func nudgeTargetLiveGenerationMatches(target nudgeTarget, obs worker.LiveObservation, sp runtime.Provider) (bool, error) {
@@ -1795,7 +1782,7 @@ func tryDeliverQueuedNudgesByPollerContext(ctx context.Context, target nudgeTarg
 	if err != nil || !matches {
 		return false, err
 	}
-	if !pollerSessionIdleEnough(target, sp, quiescence, obs) {
+	if !pollerSessionIdleEnoughContext(ctx, target, sp, quiescence, obs) {
 		return false, nil
 	}
 	items, err := claimDueQueuedNudgesForTarget(target.cityPath, target, time.Now())
@@ -1861,7 +1848,7 @@ func tryDeliverQueuedNudgesByPollerContext(ctx context.Context, target nudgeTarg
 	} else {
 		msg = formatNudgeInjectOutput(items)
 	}
-	handle, err := workerHandleForNudgeTarget(target, handleSessStore, sp)
+	handle, err := workerHandleForNudgeTargetContext(ctx, target, handleSessStore, sp)
 	if err != nil {
 		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
 		return false, errors.Join(bookkeepErr, err, relErr)
@@ -1916,7 +1903,7 @@ func stampLastNudgeDeliveredAt(sessFront *session.Store, sessionID string, t tim
 	_ = sessFront.SetMarker(sessionID, session.MetadataLastNudgeDeliveredAt, t.UTC().Format(time.RFC3339))
 }
 
-func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {
+func pollerSessionIdleEnoughContext(ctx context.Context, target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {
 	if quiescence <= 0 {
 		return true
 	}
@@ -1935,9 +1922,9 @@ func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence
 	}
 	// The poller may take up to the quiescence window to exit while this
 	// runtime idle check is in progress.
-	ctx, cancel := context.WithTimeout(context.Background(), quiescence)
+	waitCtx, cancel := context.WithTimeout(ctx, quiescence)
 	defer cancel()
-	return waiter.WaitForIdle(ctx, target.sessionName, quiescence) == nil
+	return waiter.WaitForIdle(waitCtx, target.sessionName, quiescence) == nil
 }
 
 func pollerCanDeliverWithoutActivitySignal(target nudgeTarget, sp runtime.Provider) bool {

@@ -103,6 +103,11 @@ func (p *Provider) ObserveLivenessWithError(name string, processNames []string) 
 	return runtime.ObserveLivenessWithError(p.route(name), name, processNames)
 }
 
+// ObserveLivenessWithErrorContext delegates cancellable observation to the routed backend.
+func (p *Provider) ObserveLivenessWithErrorContext(ctx context.Context, name string, processNames []string) (runtime.Liveness, error) {
+	return runtime.ObserveLivenessWithErrorContext(ctx, p.route(name), name, processNames)
+}
+
 // Nudge delegates to the routed backend.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	return p.route(name).Nudge(name, content)

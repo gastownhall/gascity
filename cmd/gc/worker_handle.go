@@ -521,15 +521,19 @@ func workerInterruptSessionTargetWithConfig(cityPath string, store beads.Store, 
 }
 
 func workerObserveSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (worker.LiveObservation, error) {
-	return workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, target, nil)
+	return workerObserveSessionTargetWithRuntimeHintsContext(context.Background(), cityPath, store, sp, cfg, target, nil)
 }
 
 func workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, processNames []string) (worker.LiveObservation, error) {
+	return workerObserveSessionTargetWithRuntimeHintsContext(context.Background(), cityPath, store, sp, cfg, target, processNames)
+}
+
+func workerObserveSessionTargetWithRuntimeHintsContext(ctx context.Context, cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, processNames []string) (worker.LiveObservation, error) {
 	handle, err := workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, target, processNames)
 	if err != nil {
 		return worker.LiveObservation{}, err
 	}
-	return worker.ObserveHandle(context.Background(), handle)
+	return worker.ObserveHandle(ctx, handle)
 }
 
 func workerSessionTargetRunningWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (bool, error) {

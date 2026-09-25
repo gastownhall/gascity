@@ -785,10 +785,16 @@ func processTreeAlive(shellPID int, fg []proc, processNames []string, sessionID 
 // unchanged for the non-observer call sites (doctor) and the caffeinate-wrapper
 // case; processNames is unused here because herdr's status supersedes it.
 func (p *Provider) ObserveLiveness(name string, _ []string) runtime.Liveness {
+	obs, _ := p.ObserveLivenessWithErrorContext(context.Background(), name, nil)
+	return obs
+}
+
+// ObserveLivenessWithErrorContext reports liveness using caller-cancellable
+// registry and pane-binding lookups.
+func (p *Provider) ObserveLivenessWithErrorContext(ctx context.Context, name string, _ []string) (runtime.Liveness, error) {
 	if strings.TrimSpace(name) == "" {
-		return runtime.Liveness{}
+		return runtime.Liveness{}, nil
 	}
-	ctx := context.Background()
 	info, present, err := p.c.getAgent(ctx, herdrAgentName(name))
 	if err == nil && !present {
 		// Name absent — fall back to the bound pane before declaring the
@@ -800,10 +806,13 @@ func (p *Provider) ObserveLiveness(name string, _ []string) runtime.Liveness {
 		// clears the stale binding; a transport failure clears nothing and
 		// falls through to not-running (as a failed name query already does).
 		if _, running, perr := resolveBinding(p.lookupOps(ctx, name)); perr == nil && running {
-			return runtime.Liveness{Running: true, Alive: true}
+			return runtime.Liveness{Running: true, Alive: true}, nil
 		}
 	}
-	return livenessFromAgent(info, present, err)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return runtime.Liveness{}, ctxErr
+	}
+	return livenessFromAgent(info, present, err), nil
 }
 
 // livenessFromAgent folds a herdr `agent get` result into a Liveness verdict.

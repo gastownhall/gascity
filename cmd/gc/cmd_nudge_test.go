@@ -1222,13 +1222,13 @@ func TestPollerSessionIdleEnoughUsesSuppliedLastActivity(t *testing.T) {
 	last := time.Now().Add(-5 * time.Second)
 	obs := worker.LiveObservation{LastActivity: &last}
 
-	if !pollerSessionIdleEnough(target, nil, 3*time.Second, obs) {
+	if !pollerSessionIdleEnoughContext(context.Background(), target, nil, 3*time.Second, obs) {
 		t.Fatal("pollerSessionIdleEnough = false, want true when supplied last activity is old enough")
 	}
 
 	recent := time.Now().Add(-1 * time.Second)
 	obs.LastActivity = &recent
-	if pollerSessionIdleEnough(target, nil, 3*time.Second, obs) {
+	if pollerSessionIdleEnoughContext(context.Background(), target, nil, 3*time.Second, obs) {
 		t.Fatal("pollerSessionIdleEnough = true, want false when supplied last activity is too recent")
 	}
 }
@@ -1242,7 +1242,7 @@ func TestPollerSessionIdleEnoughFallsBackToIdleWaitWhenActivityUnavailable(t *te
 	target := nudgeTarget{sessionName: "sess-worker"}
 	obs := worker.LiveObservation{}
 
-	if !pollerSessionIdleEnough(target, fake, 3*time.Second, obs) {
+	if !pollerSessionIdleEnoughContext(context.Background(), target, fake, 3*time.Second, obs) {
 		t.Fatal("pollerSessionIdleEnough = false, want idle wait fallback to allow delivery")
 	}
 
@@ -1258,7 +1258,7 @@ func TestPollerSessionIdleEnoughFallsBackToIdleWaitWhenActivityUnavailable(t *te
 	}
 
 	fake.WaitForIdleErrors["sess-worker"] = errors.New("timed out waiting for idle")
-	if pollerSessionIdleEnough(target, fake, 3*time.Second, obs) {
+	if pollerSessionIdleEnoughContext(context.Background(), target, fake, 3*time.Second, obs) {
 		t.Fatal("pollerSessionIdleEnough = true, want idle wait error to suppress delivery")
 	}
 }
@@ -1272,7 +1272,7 @@ func TestPollerSessionIdleEnoughAllowsActivitylessTimedOnlySession(t *testing.T)
 	target := nudgeTarget{sessionName: "sess-worker"}
 	obs := worker.LiveObservation{}
 
-	if !pollerSessionIdleEnough(target, fake, 3*time.Second, obs) {
+	if !pollerSessionIdleEnoughContext(context.Background(), target, fake, 3*time.Second, obs) {
 		t.Fatal("pollerSessionIdleEnough = false, want activityless timed-only sessions to allow queued delivery")
 	}
 	if calls := fake.CountCalls("WaitForIdle", "sess-worker"); calls != 0 {

@@ -28,6 +28,41 @@ type LivenessObserverWithError interface {
 	ObserveLivenessWithError(name string, processNames []string) (Liveness, error)
 }
 
+// ContextLivenessObserverWithError observes liveness with caller cancellation.
+type ContextLivenessObserverWithError interface {
+	ObserveLivenessWithErrorContext(ctx context.Context, name string, processNames []string) (Liveness, error)
+}
+
+// ObserveLivenessWithErrorContext is the cancellable liveness entry point.
+// Legacy providers run behind a buffered result so they cannot block callers.
+func ObserveLivenessWithErrorContext(ctx context.Context, sp Provider, name string, processNames []string) (Liveness, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if observer, ok := sp.(ContextLivenessObserverWithError); ok {
+		obs, err := observer.ObserveLivenessWithErrorContext(ctx, name, processNames)
+		return normalizeLiveness(obs), err
+	}
+	if ctx.Done() == nil {
+		return ObserveLivenessWithError(sp, name, processNames)
+	}
+	type result struct {
+		liveness Liveness
+		err      error
+	}
+	results := make(chan result, 1)
+	go func() {
+		liveness, err := ObserveLivenessWithError(sp, name, processNames)
+		results <- result{liveness: liveness, err: err}
+	}()
+	select {
+	case result := <-results:
+		return result.liveness, result.err
+	case <-ctx.Done():
+		return Liveness{}, ctx.Err()
+	}
+}
+
 // ObserveLivenessWithError returns an error-bearing consolidated liveness view.
 // Providers that do not expose the optional error-bearing capability retain the
 // legacy observation behavior and return a nil error.

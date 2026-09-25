@@ -32,7 +32,7 @@ func ObserveHandle(ctx context.Context, h LiveObservationHandle) (LiveObservatio
 
 // LiveObservation reports runtime presence and attachment metadata for a
 // bead-backed session handle.
-func (h *SessionHandle) LiveObservation(_ context.Context) (LiveObservation, error) {
+func (h *SessionHandle) LiveObservation(ctx context.Context) (LiveObservation, error) {
 	id := h.currentSessionID()
 	if id == "" {
 		return LiveObservation{}, nil
@@ -41,7 +41,7 @@ func (h *SessionHandle) LiveObservation(_ context.Context) (LiveObservation, err
 	if err != nil {
 		return LiveObservation{}, err
 	}
-	runtimeObs, err := h.manager.ObserveRuntimeForInfo(info, h.runtimeHints().ProcessNames)
+	runtimeObs, err := h.manager.ObserveRuntimeForInfoContext(ctx, info, h.runtimeHints().ProcessNames)
 	if err != nil {
 		return LiveObservation{}, err
 	}

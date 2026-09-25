@@ -554,20 +554,42 @@ func TestNudgeEventDispatcherDeliveryHasDeadline(t *testing.T) {
 	}
 }
 
-type blockingObservationProvider struct{ *nudgeEventedFake }
+type blockingObservationProvider struct {
+	*nudgeEventedFake
+	unblock <-chan struct{}
+	result  runtime.Liveness
+	err     error
+}
 
 func (p *blockingObservationProvider) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
-	select {}
+	<-p.unblock
+	return p.result, p.err
 }
 
 func TestWorkerObserveNudgeTargetContextBoundsProviderPreflight(t *testing.T) {
-	sp := &blockingObservationProvider{nudgeEventedFake: newNudgeEventedFake()}
+	unblock := make(chan struct{})
+	t.Cleanup(func() { close(unblock) })
+	sp := &blockingObservationProvider{nudgeEventedFake: newNudgeEventedFake(), unblock: unblock}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 
 	_, err := workerObserveNudgeTargetContext(ctx, nudgeTarget{sessionName: "worker"}, nil, sp)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("workerObserveNudgeTargetContext error = %v, want context deadline exceeded", err)
+	}
+}
+
+func TestWorkerHandleForNudgeTargetContextBoundsSecondObservation(t *testing.T) {
+	unblock := make(chan struct{})
+	t.Cleanup(func() { close(unblock) })
+	sp := &blockingObservationProvider{nudgeEventedFake: newNudgeEventedFake(), unblock: unblock}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	target := nudgeTarget{sessionName: "worker", continuationEpoch: "epoch-1"}
+
+	_, err := workerHandleForNudgeTargetContext(ctx, target, nil, sp)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("workerHandleForNudgeTargetContext error = %v, want context deadline exceeded", err)
 	}
 }
 

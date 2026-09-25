@@ -1366,14 +1366,20 @@ func (p *contextNudgeRuntimeProvider) NudgeContext(ctx context.Context, _ string
 	return ctx.Err()
 }
 
-type blockingRunningNudgeProvider struct{ *runtime.Fake }
+type blockingRunningNudgeProvider struct {
+	*runtime.Fake
+	unblock <-chan struct{}
+}
 
 func (p *blockingRunningNudgeProvider) IsRunning(string) bool {
-	select {}
+	<-p.unblock
+	return false
 }
 
 func TestRuntimeHandleNudgeBoundsLegacyRunningPreflight(t *testing.T) {
-	sp := &blockingRunningNudgeProvider{Fake: runtime.NewFake()}
+	unblock := make(chan struct{})
+	t.Cleanup(func() { close(unblock) })
+	sp := &blockingRunningNudgeProvider{Fake: runtime.NewFake(), unblock: unblock}
 	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
 		Provider:     sp,
 		SessionName:  "legacy-worker",
