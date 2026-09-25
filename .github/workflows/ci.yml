@@ -191,6 +191,7 @@ jobs:
               - 'scripts/test-go-test-shard'
               - 'scripts/runtime-tmux-tests.manifest'
               - 'scripts/go-test-observable'
+              - 'internal/bootstrap/packs/core/assets/scripts/**'
               - 'examples/gastown/**'
             openclaw_bridge:
               - 'contrib/openclaw-bridge/**'
