@@ -122,11 +122,13 @@ func TestSetOutcomeAndCloseNeverPassesOverQuarantine(t *testing.T) {
 	t.Parallel()
 
 	store := beads.NewMemStore()
+	meta := controlQuarantinedRootMetadata()
+	meta["gc.kind"] = "workflow"
 	b := mustCreateWorkflowBead(t, store, beads.Bead{
 		Title:    "quarantined",
 		Type:     "task",
 		Status:   "closed",
-		Metadata: controlQuarantinedRootMetadata(),
+		Metadata: meta,
 	})
 	if err := setOutcomeAndClose(store, b.ID, "pass"); err != nil {
 		t.Fatalf("setOutcomeAndClose: %v", err)
@@ -137,5 +139,77 @@ func TestSetOutcomeAndCloseNeverPassesOverQuarantine(t *testing.T) {
 	}
 	if got := after.Metadata["gc.outcome"]; got != "fail" {
 		t.Fatalf("gc.outcome = %q, want fail kept over a pass write", got)
+	}
+}
+
+// The helper's guard is scoped to workflow ROOTS. A retry/ralph logical bead
+// that was quarantined and later passed keeps its own terminal semantics
+// (review of #162, S1): the pass is written, not silently dropped.
+func TestSetOutcomeAndCloseStillPassesAQuarantinedNonRoot(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	meta := controlQuarantinedRootMetadata()
+	meta["gc.kind"] = "retry"
+	b := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "logical retry bead",
+		Type:     "task",
+		Status:   "closed",
+		Metadata: meta,
+	})
+	if err := setOutcomeAndClose(store, b.ID, "pass"); err != nil {
+		t.Fatalf("setOutcomeAndClose: %v", err)
+	}
+	after, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got := after.Metadata["gc.outcome"]; got != "pass" {
+		t.Fatalf("non-root gc.outcome = %q, want pass (the guard is for workflow roots only)", got)
+	}
+}
+
+// The incident's second harm: the pass verdict closed the root's source chain
+// as passed. A quarantined root must leave its sources open and carry the
+// root's own diagnosis to its direct source (review of #162, S2/S4).
+func TestProcessWorkflowFinalizeQuarantinedRootLeavesSourcesOpenWithItsDiagnosis(t *testing.T) {
+	t.Parallel()
+
+	f := newSourceChainFinalizeFixture(t)
+	for k, v := range controlQuarantinedRootMetadata() {
+		if err := f.rigStore.SetMetadata(f.workflow.ID, k, v); err != nil {
+			t.Fatalf("SetMetadata(%s): %v", k, err)
+		}
+	}
+	if err := f.rigStore.Close(f.workflow.ID); err != nil {
+		t.Fatalf("close root: %v", err)
+	}
+
+	result, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{ResolveStoreRef: f.resolver})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-fail" {
+		t.Fatalf("result = %+v, want processed workflow-fail", result)
+	}
+	launch, err := f.rigStore.Get(f.rigLaunch.ID)
+	if err != nil {
+		t.Fatalf("get rig launch: %v", err)
+	}
+	if launch.Status == "closed" {
+		t.Fatalf("rig launch source was closed; a quarantined root must leave its sources open")
+	}
+	if got := launch.Metadata["gc.failure_reason"]; got != "control_dispatch_error" {
+		t.Fatalf("source gc.failure_reason = %q, want the root's control_dispatch_error", got)
+	}
+	if got := launch.Metadata["gc.failure_class"]; got != "hard" {
+		t.Fatalf("source gc.failure_class = %q, want hard", got)
+	}
+	city, err := f.cityStore.Get(f.citySource.ID)
+	if err != nil {
+		t.Fatalf("get city source: %v", err)
+	}
+	if city.Status == "closed" {
+		t.Fatalf("city source was closed; a quarantined root must leave the chain open")
 	}
 }
