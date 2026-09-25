@@ -3503,3 +3503,51 @@ func TestNativeDoltStoreReadyWorkOutcomeFilterToleratesOpenGates(t *testing.T) {
 		})
 	}
 }
+
+// TestNativeDoltStoreCustomTypesComeFromTheDatabaseNotYAML guards #6495 against
+// a tempting non-fix. The native store validates bead types against bd's
+// custom_types table (the config row only when that table is empty); the
+// library never loads .beads/config.yaml. So a type declared only in YAML is
+// still rejected; only registering it in the database makes the create pass.
+// The start-time shell heal (INSERT IGNORE into custom_types) is covered end to
+// end by TestEnsureBdRuntimeCustomTypesHealsUpgradedNativeStore in cmd/gc.
+func TestNativeDoltStoreCustomTypesComeFromTheDatabaseNotYAML(t *testing.T) {
+	ctx := context.Background()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	storage, err := beadslib.OpenBestAvailable(ctx, beadsDir)
+	if err != nil {
+		t.Skipf("upstream beads storage unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Fatalf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("SetConfig(issue_prefix): %v", err)
+	}
+	// The v1.4.2 registration: row and table both hold a list without the type.
+	if err := storage.SetConfig(ctx, "types.custom", "molecule,session,ops-extra"); err != nil {
+		t.Fatalf("SetConfig(types.custom): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("types.custom: molecule,session,ops-extra,startup-health-episode\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "native-test", "gc")
+
+	if _, err := store.Create(Bead{Title: "yaml only", Type: "startup-health-episode"}); err == nil || !strings.Contains(err.Error(), "invalid issue type") {
+		t.Fatalf("Create with a YAML-only type: err = %v, want invalid issue type", err)
+	}
+
+	// Registering the type in the database (row and table, as gc doctor --fix
+	// and the provider-owned start path do) is what the validator honors.
+	if err := storage.SetConfig(ctx, "types.custom", "molecule,session,ops-extra,startup-health-episode"); err != nil {
+		t.Fatalf("SetConfig(types.custom merged): %v", err)
+	}
+	for _, typ := range []string{"startup-health-episode", "ops-extra"} {
+		if _, err := store.Create(Bead{Title: "table registered", Type: typ}); err != nil {
+			t.Fatalf("Create(%s) after table registration: %v", typ, err)
+		}
+	}
+}
