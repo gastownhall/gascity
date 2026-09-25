@@ -78,6 +78,8 @@ type turnRecord struct {
 	StopReason string     // set when State is turnCompleted
 	Usage      *turnUsage // set when the agent reported usage
 	Error      string     // set when State is turnFailed
+
+	eventSeq uint64 // turn-event number; 0 when no events were published
 }
 
 // clone returns a copy that shares no memory with r.
@@ -163,6 +165,9 @@ func (sc *sessionConn) startTurnLocked(id int64, now time.Time) {
 		StartedAt: now,
 		State:     turnRunning,
 	}
+	if sc.turnEvents != nil {
+		sc.turnEvents.started(sc.currentTurn)
+	}
 }
 
 // endTurnLocked closes the running turn with outcome and makes it the last
@@ -179,6 +184,9 @@ func (sc *sessionConn) endTurnLocked(outcome turnOutcome, now time.Time) {
 	turn.Usage = outcome.usage
 	turn.Error = outcome.err
 	sc.lastTurn = turn
+	if sc.turnEvents != nil && turn.eventSeq != 0 {
+		sc.turnEvents.completed(turn, outcome, now)
+	}
 }
 
 // turns returns copies of the running turn (nil when idle) and the last

@@ -25,6 +25,7 @@ go_library(
         "setupcommand.go",
         "staging.go",
         "startup_hints.go",
+        "turn_events.go",
         "worker.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime",

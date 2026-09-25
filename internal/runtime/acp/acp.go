@@ -71,6 +71,7 @@ type Provider struct {
 	workDirs      map[string]string       // session name → workDir (for CopyTo)
 	cfg           Config
 	events        *sessionEventHub
+	turnEvents    turnEventHub
 	activityWrite func(path string, data []byte) error // test seam
 }
 
@@ -384,6 +385,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// Attach before publishing the connection so Stop, which finds it only
 	// through p.conns, always reports closed after the attached exit.
 	p.attachSessionEvents(name, sc)
+	p.attachTurnEvents(name, cfg.Env, sc)
 	p.conns[name] = sc
 	p.mu.Unlock()
 

@@ -13,6 +13,7 @@ go_test(
     srcs = [
         "hybrid_test.go",
         "testenv_import_test.go",
+        "turn_events_test.go",
     ],
     embed = [":hybrid"],
     deps = [

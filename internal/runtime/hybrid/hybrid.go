@@ -29,6 +29,7 @@ var (
 	_ runtime.LivenessObserver              = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 	_ runtime.SessionEventProvider          = (*Provider)(nil)
+	_ runtime.TurnEventProvider             = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -282,5 +283,22 @@ func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.S
 		return rSEP.SubscribeSessionEvents(ctx)
 	default:
 		return nil, fmt.Errorf("neither local nor remote backend implements SubscribeSessionEvents")
+	}
+}
+
+// SubscribeTurnEvents forwards the turn-event stream of whichever backend
+// implements runtime.TurnEventProvider, preferring the local backend the
+// same way SubscribeSessionEvents does. Today only ACP does (usually behind
+// an auto router on the local side).
+func (p *Provider) SubscribeTurnEvents(ctx context.Context) (<-chan runtime.TurnEvent, error) {
+	lTEP, lok := p.local.(runtime.TurnEventProvider)
+	rTEP, rok := p.remote.(runtime.TurnEventProvider)
+	switch {
+	case lok:
+		return lTEP.SubscribeTurnEvents(ctx)
+	case rok:
+		return rTEP.SubscribeTurnEvents(ctx)
+	default:
+		return nil, fmt.Errorf("neither local nor remote backend implements SubscribeTurnEvents")
 	}
 }

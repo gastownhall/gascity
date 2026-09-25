@@ -36,6 +36,7 @@ var (
 	_ runtime.LivenessObserver              = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 	_ runtime.SessionEventProvider          = (*Provider)(nil)
+	_ runtime.TurnEventProvider             = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -449,5 +450,22 @@ func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.S
 		return aSEP.SubscribeSessionEvents(ctx)
 	default:
 		return nil, fmt.Errorf("neither default nor ACP backend implements SubscribeSessionEvents")
+	}
+}
+
+// SubscribeTurnEvents forwards the turn-event stream of whichever backend
+// implements runtime.TurnEventProvider, preferring the default backend the
+// same way SubscribeSessionEvents does. Today only ACP does, so this is what
+// lets a city that routes some sessions to ACP record their turns.
+func (p *Provider) SubscribeTurnEvents(ctx context.Context) (<-chan runtime.TurnEvent, error) {
+	dTEP, dok := p.defaultSP.(runtime.TurnEventProvider)
+	aTEP, aok := p.acpSP.(runtime.TurnEventProvider)
+	switch {
+	case dok:
+		return dTEP.SubscribeTurnEvents(ctx)
+	case aok:
+		return aTEP.SubscribeTurnEvents(ctx)
+	default:
+		return nil, fmt.Errorf("neither default nor ACP backend implements SubscribeTurnEvents")
 	}
 }
