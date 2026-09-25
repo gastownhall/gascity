@@ -242,6 +242,24 @@ type ContextNudgeProvider interface {
 	NudgeContext(ctx context.Context, name string, content []ContentBlock) error
 }
 
+// RoutedContextNudgeProvider reports whether the backend selected for a named
+// session can cancel an in-flight nudge. Composite providers implement this so
+// callers do not mistake the routing wrapper's NudgeContext method for a
+// capability of the routed backend.
+type RoutedContextNudgeProvider interface {
+	SupportsNudgeContext(name string) bool
+}
+
+// SupportsNudgeContext reports whether the provider that will handle name can
+// cancel an in-flight nudge at a caller-supplied deadline.
+func SupportsNudgeContext(sp Provider, name string) bool {
+	if routed, ok := sp.(RoutedContextNudgeProvider); ok {
+		return routed.SupportsNudgeContext(name)
+	}
+	_, ok := sp.(ContextNudgeProvider)
+	return ok
+}
+
 // ContextRunningProvider is implemented by providers that can cancel an
 // in-flight running-state lookup at a caller-supplied deadline.
 type ContextRunningProvider interface {

@@ -1853,7 +1853,15 @@ func tryDeliverQueuedNudgesByPollerContext(ctx context.Context, target nudgeTarg
 		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
 		return false, errors.Join(bookkeepErr, err, relErr)
 	}
-	result, err := handle.Nudge(ctx, worker.NudgeRequest{
+	deliveryCtx := ctx
+	if !runtime.SupportsNudgeContext(sp, target.sessionName) {
+		// The dispatcher deadline bounds observation and handle resolution, but
+		// a legacy provider cannot cancel an in-flight Nudge. Wait for its real
+		// result so a late busy/error response follows the normal retry path
+		// instead of becoming an outcome-unknown terminal acknowledgement.
+		deliveryCtx = context.WithoutCancel(ctx)
+	}
+	result, err := handle.Nudge(deliveryCtx, worker.NudgeRequest{
 		Text:     msg,
 		Delivery: worker.NudgeDeliveryDefault,
 		Source:   "queue",

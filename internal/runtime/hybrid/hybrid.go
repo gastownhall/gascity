@@ -29,6 +29,7 @@ var (
 	_ runtime.LivenessObserver              = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 	_ runtime.SessionEventProvider          = (*Provider)(nil)
+	_ runtime.RoutedContextNudgeProvider    = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -116,6 +117,12 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 // NudgeContext delegates cancellation to the routed backend when supported.
 func (p *Provider) NudgeContext(ctx context.Context, name string, content []runtime.ContentBlock) error {
 	return runtime.NudgeContext(ctx, p.route(name), name, content)
+}
+
+// SupportsNudgeContext reports whether the backend routed for name supports
+// cancellation of an in-flight nudge.
+func (p *Provider) SupportsNudgeContext(name string) bool {
+	return runtime.SupportsNudgeContext(p.route(name), name)
 }
 
 // IsRunningContext delegates a cancellable running-state lookup to the routed backend.

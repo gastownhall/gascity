@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -18,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -568,6 +570,7 @@ type lateLegacyNudgeProvider struct {
 	startOnce   sync.Once
 	deliverOnce sync.Once
 	deliveries  atomic.Int32
+	resultErr   error
 }
 
 func (p *lateLegacyNudgeProvider) Nudge(_ string, _ []runtime.ContentBlock) error {
@@ -577,54 +580,175 @@ func (p *lateLegacyNudgeProvider) Nudge(_ string, _ []runtime.ContentBlock) erro
 	})
 	p.deliveries.Add(1)
 	p.deliverOnce.Do(func() { close(p.delivered) })
-	return nil
+	return p.resultErr
 }
 
 func TestNudgeEventDispatcherDoesNotRetryUnknownLegacyDelivery(t *testing.T) {
-	sp := &lateLegacyNudgeProvider{
-		nudgeEventedFake: newNudgeEventedFake(),
-		started:          make(chan struct{}),
-		release:          make(chan struct{}),
-		delivered:        make(chan struct{}),
-	}
-	t.Cleanup(func() {
+	synctest.Test(t, func(t *testing.T) {
+		sp := &lateLegacyNudgeProvider{
+			nudgeEventedFake: newNudgeEventedFake(),
+			started:          make(chan struct{}),
+			release:          make(chan struct{}),
+			delivered:        make(chan struct{}),
+		}
+		defer func() {
+			select {
+			case <-sp.release:
+			default:
+				close(sp.release)
+			}
+		}()
+		dir, d, info := newNudgeDispatcherFixture(t, sp)
+		d.deliveryTimeout = 20 * time.Millisecond
+		sp.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-time.Minute)}
+		if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "deliver once", time.Now().Add(-time.Minute))); err != nil {
+			t.Fatalf("enqueueQueuedNudge: %v", err)
+		}
+
+		done := make(chan struct{})
+		go func() {
+			d.runPass(info.SessionName, nudgeEventRetryBudget)
+			close(done)
+		}()
+		<-sp.started
+		<-time.After(d.deliveryTimeout + time.Millisecond)
+		synctest.Wait()
 		select {
-		case <-sp.release:
+		case <-done:
+			t.Fatal("dispatcher returned before the non-context provider reported success")
 		default:
-			close(sp.release)
+		}
+
+		close(sp.release)
+		synctest.Wait()
+		<-done
+		<-sp.delivered
+
+		state := queueStateSnapshot(t, dir)
+		if len(state.Pending) != 0 || len(state.InFlight) != 0 || len(state.Dead) != 0 {
+			t.Fatalf("successful legacy delivery remained queued: state=%+v", state)
+		}
+		// A later dispatcher pass must remain a no-op: waiting for the original
+		// provider result preserves the no-double-inject property without
+		// terminalizing an outcome that the provider has not reported yet.
+		d.runPass(info.SessionName, nudgeEventRetryBudget)
+		if got := sp.deliveries.Load(); got != 1 {
+			t.Fatalf("deliveries = %d, want exactly 1 across the retry pass", got)
 		}
 	})
-	dir, d, info := newNudgeDispatcherFixture(t, sp)
-	d.deliveryTimeout = 20 * time.Millisecond
-	sp.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-time.Minute)}
-	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "deliver once", time.Now().Add(-time.Minute))); err != nil {
-		t.Fatalf("enqueueQueuedNudge: %v", err)
-	}
+}
 
-	d.runPass(info.SessionName, nudgeEventRetryBudget)
-	select {
-	case <-sp.started:
-	default:
-		t.Fatal("legacy provider nudge did not start")
-	}
+func TestNudgeEventDispatcherRequeuesLegacyErrorAfterDeliveryDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sp := &lateLegacyNudgeProvider{
+			nudgeEventedFake: newNudgeEventedFake(),
+			started:          make(chan struct{}),
+			release:          make(chan struct{}),
+			delivered:        make(chan struct{}),
+			resultErr:        errors.New("agent busy, timed out waiting for idle"),
+		}
+		defer func() {
+			select {
+			case <-sp.release:
+			default:
+				close(sp.release)
+			}
+		}()
+		dir, d, info := newNudgeDispatcherFixture(t, sp)
+		d.deliveryTimeout = 20 * time.Millisecond
+		sp.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-time.Minute)}
+		if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "retry after busy", time.Now().Add(-time.Minute))); err != nil {
+			t.Fatalf("enqueueQueuedNudge: %v", err)
+		}
 
-	state := queueStateSnapshot(t, dir)
-	if len(state.Pending) != 0 || len(state.InFlight) != 0 {
-		t.Fatalf("unknown delivery remained retryable: state=%+v", state)
-	}
-	// A later dispatcher pass models the retry that used to duplicate the
-	// still-running legacy send. With the item terminalized as unknown, it is
-	// a no-op; releasing the original call produces the only delivery.
-	d.runPass(info.SessionName, nudgeEventRetryBudget)
-	close(sp.release)
-	select {
-	case <-sp.delivered:
-	case <-time.After(time.Second):
-		t.Fatal("original legacy delivery did not complete")
-	}
-	if got := sp.deliveries.Load(); got != 1 {
-		t.Fatalf("deliveries = %d, want exactly 1 across the retry pass", got)
-	}
+		done := make(chan struct{})
+		go func() {
+			d.runPass(info.SessionName, nudgeEventRetryBudget)
+			close(done)
+		}()
+		<-sp.started
+		<-time.After(d.deliveryTimeout + time.Millisecond)
+		synctest.Wait()
+
+		select {
+		case <-done:
+			t.Fatal("dispatcher returned before the non-context provider reported its delivery result")
+		default:
+		}
+		state := queueStateSnapshot(t, dir)
+		if len(state.InFlight) != 1 || len(state.Pending) != 0 || len(state.Dead) != 0 {
+			t.Fatalf("blocked legacy delivery state = %+v, want one in-flight item", state)
+		}
+
+		close(sp.release)
+		synctest.Wait()
+		<-done
+
+		state = queueStateSnapshot(t, dir)
+		if len(state.Pending) != 1 || len(state.InFlight) != 0 || len(state.Dead) != 0 {
+			t.Fatalf("failed legacy delivery state = %+v, want one requeued pending item", state)
+		}
+		if got := state.Pending[0].LastError; got != sp.resultErr.Error() {
+			t.Fatalf("requeued LastError = %q, want %q", got, sp.resultErr)
+		}
+	})
+}
+
+func TestNudgeEventDispatcherRequeuesAutoRoutedLegacyErrorAfterDeliveryDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		legacy := &lateLegacyNudgeProvider{
+			nudgeEventedFake: newNudgeEventedFake(),
+			started:          make(chan struct{}),
+			release:          make(chan struct{}),
+			delivered:        make(chan struct{}),
+			resultErr:        errors.New("agent busy, timed out waiting for idle"),
+		}
+		defer func() {
+			select {
+			case <-legacy.release:
+			default:
+				close(legacy.release)
+			}
+		}()
+		sp := sessionauto.New(legacy, runtime.NewFake())
+		dir, d, info := newNudgeDispatcherFixture(t, sp)
+		d.deliveryTimeout = 20 * time.Millisecond
+		legacy.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-time.Minute)}
+		if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "retry routed busy", time.Now().Add(-time.Minute))); err != nil {
+			t.Fatalf("enqueueQueuedNudge: %v", err)
+		}
+
+		done := make(chan struct{})
+		go func() {
+			d.runPass(info.SessionName, nudgeEventRetryBudget)
+			close(done)
+		}()
+		<-legacy.started
+		<-time.After(d.deliveryTimeout + time.Millisecond)
+		synctest.Wait()
+
+		select {
+		case <-done:
+			t.Fatal("dispatcher returned before the auto-routed legacy provider reported its delivery result")
+		default:
+		}
+		state := queueStateSnapshot(t, dir)
+		if len(state.InFlight) != 1 || len(state.Pending) != 0 || len(state.Dead) != 0 {
+			t.Fatalf("blocked auto-routed legacy delivery state = %+v, want one in-flight item", state)
+		}
+
+		close(legacy.release)
+		synctest.Wait()
+		<-done
+
+		state = queueStateSnapshot(t, dir)
+		if len(state.Pending) != 1 || len(state.InFlight) != 0 || len(state.Dead) != 0 {
+			t.Fatalf("failed auto-routed legacy delivery state = %+v, want one requeued pending item", state)
+		}
+		if got := state.Pending[0].LastError; got != legacy.resultErr.Error() {
+			t.Fatalf("requeued LastError = %q, want %q", got, legacy.resultErr)
+		}
+	})
 }
 
 func (p *blockingObservationProvider) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
