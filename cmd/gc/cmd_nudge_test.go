@@ -5241,6 +5241,36 @@ func TestCmdNudgeDropDeadLettersPendingNudge(t *testing.T) {
 	}
 }
 
+func TestQueuedNudgeClaimFenceRejectsStaleRenewalAndCompletion(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "deliver once", now.Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	first, err := claimDueQueuedNudgesMatching(dir, now, func(queuedNudge) bool { return true })
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first claim = %+v, %v; want one item", first, err)
+	}
+	second, err := claimDueQueuedNudgesMatching(dir, first[0].LeaseUntil.Add(time.Millisecond), func(queuedNudge) bool { return true })
+	if err != nil || len(second) != 1 {
+		t.Fatalf("reclaim = %+v, %v; want one item", second, err)
+	}
+	secondLease := second[0].LeaseUntil
+
+	if err := renewQueuedNudgeClaims(dir, queuedNudgeClaims(first)); !errors.Is(err, errQueuedNudgeClaimLost) {
+		t.Fatalf("stale renewal error = %v, want errQueuedNudgeClaimLost", err)
+	}
+	if err := ackQueuedNudgeClaimsWithOutcome(dir, queuedNudgeClaims(first), "injected", "", "test"); !errors.Is(err, errQueuedNudgeClaimLost) {
+		t.Fatalf("stale completion error = %v, want errQueuedNudgeClaimLost", err)
+	}
+
+	state := queueStateSnapshot(t, dir)
+	if len(state.InFlight) != 1 || state.InFlight[0].ID != second[0].ID || !state.InFlight[0].ClaimedAt.Equal(second[0].ClaimedAt) || !state.InFlight[0].LeaseUntil.Equal(secondLease) {
+		t.Fatalf("stale owner mutated current claim: state=%+v second=%+v", state, second[0])
+	}
+}
+
 func TestCmdNudgeDropDeadLettersInFlightNudge(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
@@ -5711,7 +5741,7 @@ func TestNudgePollHelpersCloseEveryStoreTheyOpen(t *testing.T) {
 		if err := releaseQueuedNudgeClaims(dir, []string{"n-leak"}); err != nil {
 			t.Fatalf("releaseQueuedNudgeClaims: %v", err)
 		}
-		if err := ackQueuedNudgesWithOutcome(dir, []string{"absent"}, "injected", "", "test"); err != nil {
+		if err := ackQueuedNudgesWithOutcome(dir, []string{"absent"}, "injected", "test"); err != nil {
 			t.Fatalf("ackQueuedNudgesWithOutcome: %v", err)
 		}
 	}
@@ -5752,7 +5782,7 @@ func TestNudgePollHelpersSkipDoltOpenOnEmptyQueue(t *testing.T) {
 		if err := releaseQueuedNudgeClaims(dir, []string{"absent"}); err != nil {
 			t.Fatalf("releaseQueuedNudgeClaims: %v", err)
 		}
-		if err := ackQueuedNudgesWithOutcome(dir, []string{"absent"}, "injected", "", "test"); err != nil {
+		if err := ackQueuedNudgesWithOutcome(dir, []string{"absent"}, "injected", "test"); err != nil {
 			t.Fatalf("ackQueuedNudgesWithOutcome: %v", err)
 		}
 	}
@@ -5812,7 +5842,7 @@ func TestNudgePollHelpersOpenOnceWhenQueueHasWork(t *testing.T) {
 		}
 	})
 	assertOneOpenOneClose(t, "ack", func(dir string) {
-		if err := ackQueuedNudgesWithOutcome(dir, []string{"n-work"}, "injected", "", "test-boundary"); err != nil {
+		if err := ackQueuedNudgesWithOutcome(dir, []string{"n-work"}, "injected", "test-boundary"); err != nil {
 			t.Fatalf("ackQueuedNudgesWithOutcome: %v", err)
 		}
 	})

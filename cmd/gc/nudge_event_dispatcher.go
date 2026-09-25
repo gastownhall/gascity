@@ -103,6 +103,15 @@ type nudgeEventKick struct {
 	retriesLeft int
 }
 
+type nudgeDeliveryContext struct {
+	context.Context
+	lifetime context.Context
+}
+
+func (c nudgeDeliveryContext) deliveryLifetimeContext() context.Context {
+	return c.lifetime
+}
+
 // newNudgeEventDispatcher returns a dispatcher whose subscriptions and worker
 // live within parent. Wire a provider with update.
 func newNudgeEventDispatcher(parent context.Context, cityPath string, stderr io.Writer, logPrefix string) *nudgeEventDispatcher {
@@ -451,7 +460,8 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 }
 
 func (d *nudgeEventDispatcher) targetContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(d.parent, d.deliveryTimeout)
+	attempt, cancel := context.WithTimeout(d.parent, d.deliveryTimeout)
+	return nudgeDeliveryContext{Context: attempt, lifetime: d.parent}, cancel
 }
 
 func (d *nudgeEventDispatcher) deliverQueued(ctx context.Context, target nudgeTarget, store, sessStore beads.Store, sp runtime.Provider, obs worker.LiveObservation) (bool, error) {

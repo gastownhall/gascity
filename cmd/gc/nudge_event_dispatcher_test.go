@@ -136,6 +136,10 @@ func TestNudgeSessionEventMatchesProviderRegistryName(t *testing.T) {
 // ("worker"), returning the pieces a dispatcher test needs. The returned
 // dispatcher uses shrunk timing knobs and is wired to sp.
 func newNudgeDispatcherFixture(t *testing.T, sp runtime.Provider) (string, *nudgeEventDispatcher, *session.Info) {
+	return newNudgeDispatcherFixtureWithContext(context.Background(), t, sp)
+}
+
+func newNudgeDispatcherFixtureWithContext(parent context.Context, t *testing.T, sp runtime.Provider) (string, *nudgeEventDispatcher, *session.Info) {
 	t.Helper()
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
@@ -149,7 +153,7 @@ func newNudgeDispatcherFixture(t *testing.T, sp runtime.Provider) (string, *nudg
 		t.Fatalf("Start: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	d := newNudgeEventDispatcher(ctx, dir, testWriter(t), "test")
 	d.quiescence = 150 * time.Millisecond
 	d.retryEpsilon = 30 * time.Millisecond
@@ -652,6 +656,46 @@ func TestNudgeEventDispatcherDoesNotRetryUnknownLegacyDelivery(t *testing.T) {
 			t.Fatalf("deliveries = %d, want exactly 1 across the retry pass", got)
 		}
 	})
+}
+
+func TestNudgeEventDispatcherLegacyDeliveryStopsOnShutdown(t *testing.T) {
+	sp := &lateLegacyNudgeProvider{
+		nudgeEventedFake: newNudgeEventedFake(),
+		started:          make(chan struct{}),
+		release:          make(chan struct{}),
+		delivered:        make(chan struct{}),
+	}
+	t.Cleanup(func() {
+		select {
+		case <-sp.release:
+		default:
+			close(sp.release)
+		}
+	})
+	parent, cancel := context.WithCancel(context.Background())
+	dir, d, info := newNudgeDispatcherFixtureWithContext(parent, t, sp)
+	sp.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-time.Minute)}
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "stop on shutdown", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		d.runPass(info.SessionName, nudgeEventRetryBudget)
+		close(done)
+	}()
+	<-sp.started
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("dispatcher did not stop after its parent context was canceled")
+	}
+
+	state := queueStateSnapshot(t, dir)
+	if len(state.Pending) != 0 || len(state.InFlight) != 0 || len(state.Dead) != 0 {
+		t.Fatalf("shutdown-unknown legacy delivery remained queued: state=%+v", state)
+	}
 }
 
 func TestNudgeEventDispatcherRequeuesLegacyErrorAfterDeliveryDeadline(t *testing.T) {
