@@ -29,14 +29,31 @@ const (
 	turnFailed turnState = "failed"
 )
 
-// turnFailureAgentExited is the failure message recorded when the agent's
-// connection closes while a prompt response is outstanding.
-const turnFailureAgentExited = "agent exited before the turn completed"
+// turnFailureConnClosed is the failure message recorded when the agent's
+// stdout reaches EOF while a prompt response is outstanding. EOF alone does
+// not say whether the process exited or only closed its output.
+const turnFailureConnClosed = "agent connection closed before the turn completed"
 
-// promptResult is the session/prompt response result.
+// turnFailureReadPrefix prefixes the failure message recorded when reading
+// the agent's stdout fails (for example an oversized frame) while a prompt
+// response is outstanding.
+const turnFailureReadPrefix = "reading agent output: "
+
+// drainFailure is the turn failure message for a connection drained because
+// of cause (nil means EOF).
+func drainFailure(cause error) string {
+	if cause == nil {
+		return turnFailureConnClosed
+	}
+	return turnFailureReadPrefix + cause.Error()
+}
+
+// promptResult is the session/prompt response result. Usage stays raw: it is
+// an unstable ACP field, so it is decoded separately and a malformed value
+// never fails the turn.
 type promptResult struct {
-	StopReason string     `json:"stopReason"`
-	Usage      *turnUsage `json:"usage,omitempty"`
+	StopReason string          `json:"stopReason"`
+	Usage      json.RawMessage `json:"usage,omitempty"`
 }
 
 // turnUsage is the unstable ACP token-usage object an agent may attach to a
@@ -82,9 +99,13 @@ type turnOutcome struct {
 	stopReason string
 	usage      *turnUsage
 	err        string
+	// usageErr is set when the agent sent a usage object gc could not
+	// decode. The usage is dropped; the turn outcome is unaffected.
+	usageErr error
 }
 
-// promptOutcome decodes a session/prompt response into a turn outcome.
+// promptOutcome decodes a session/prompt response into a turn outcome. The
+// stop reason is decoded strictly; the unstable usage object best-effort.
 func promptOutcome(msg JSONRPCMessage) turnOutcome {
 	if msg.Error != nil {
 		return turnOutcome{state: turnFailed, err: msg.Error.Message}
@@ -95,7 +116,22 @@ func promptOutcome(msg JSONRPCMessage) turnOutcome {
 			return turnOutcome{state: turnFailed, err: fmt.Sprintf("decoding session/prompt result: %v", err)}
 		}
 	}
-	return turnOutcome{state: turnCompleted, stopReason: result.StopReason, usage: result.Usage}
+	out := turnOutcome{state: turnCompleted, stopReason: result.StopReason}
+	out.usage, out.usageErr = decodeTurnUsage(result.Usage)
+	return out
+}
+
+// decodeTurnUsage decodes the unstable usage object. Absent or null usage is
+// (nil, nil); a value that does not decode is (nil, err).
+func decodeTurnUsage(raw json.RawMessage) (*turnUsage, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var usage turnUsage
+	if err := json.Unmarshal(raw, &usage); err != nil {
+		return nil, fmt.Errorf("decoding session/prompt usage: %w", err)
+	}
+	return &usage, nil
 }
 
 // newTurnID returns a random RFC 4122 version 4 UUID.
@@ -168,10 +204,17 @@ func (p *Provider) idleConn(name string) (*sessionConn, error) {
 	if sc.cancel != nil {
 		return nil, fmt.Errorf("%w: %q", errACPSessionStarting, name)
 	}
-	if !sc.usable() {
-		return nil, fmt.Errorf("%w: ACP session %q has exited", runtime.ErrSessionNotFound, name)
+	if !sc.alive() {
+		return nil, errACPConnClosed(name)
 	}
 	return sc, nil
+}
+
+// errACPConnClosed reports a session whose agent connection has closed: the
+// process exited or its stdout can no longer be read. Either way no turn can
+// finish again, so the session is gone, never idle.
+func errACPConnClosed(name string) error {
+	return fmt.Errorf("%w: ACP session %q connection closed", runtime.ErrSessionNotFound, name)
 }
 
 // usable reports whether the process is alive and its stdout is still being
@@ -185,13 +228,26 @@ func (sc *sessionConn) usable() bool {
 	return !sc.drained
 }
 
+// idleState reads the drained flag, busy state, and idle channel in one
+// critical section, so a drain cannot slip between the liveness check and
+// the busy read. A drained connection is errACPConnClosed.
+func (sc *sessionConn) idleState(name string) (busy bool, idleCh <-chan struct{}, err error) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if sc.drained {
+		return false, nil, errACPConnClosed(name)
+	}
+	sc.ensureIdleChannelLocked()
+	return sc.activePromptID != 0, sc.idleCh, nil
+}
+
 // WaitForIdle blocks until the named session has no session/prompt response
 // outstanding. It returns nil at once when the session is idle; otherwise it
 // waits until the running turn ends, the timeout expires (an error wrapping
-// [context.DeadlineExceeded]), ctx is done (ctx.Err()), or the agent exits
-// (an error wrapping [runtime.ErrSessionNotFound]). A session this provider
-// does not own in memory is reported as [runtime.ErrSessionNotFound].
-// A turn waiting on a permission reply is busy.
+// [context.DeadlineExceeded]), ctx is done (ctx.Err()), or the agent
+// connection closes (an error wrapping [runtime.ErrSessionNotFound]). A
+// session this provider does not own in memory is reported as
+// [runtime.ErrSessionNotFound]. A turn waiting on a permission reply is busy.
 func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -200,30 +256,33 @@ func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Du
 	if err != nil {
 		return err
 	}
-	sc.mu.Lock()
-	sc.ensureIdleChannelLocked()
-	busy := sc.activePromptID != 0
-	idleCh := sc.idleCh
-	sc.mu.Unlock()
+	busy, idleCh, err := sc.idleState(name)
+	if err != nil {
+		return err
+	}
 	if !busy {
 		return nil
 	}
+	return sc.awaitIdle(ctx, name, idleCh, timeout)
+}
+
+// awaitIdle waits on idleCh, captured while the session was busy, for the
+// running turn to end. idleCh also closes when the connection drains; a
+// drain is not an idle boundary, so the connection is re-checked on wake.
+func (sc *sessionConn) awaitIdle(ctx context.Context, name string, idleCh <-chan struct{}, timeout time.Duration) error {
 	if timeout <= 0 {
 		return fmt.Errorf("ACP session %q is busy: %w", name, context.DeadlineExceeded)
 	}
-
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case <-idleCh:
-		// drainPending also releases waiters when the agent exits; an exit
-		// is not an idle boundary.
 		if !sc.usable() {
-			return fmt.Errorf("%w: ACP session %q exited while busy", runtime.ErrSessionNotFound, name)
+			return errACPConnClosed(name)
 		}
 		return nil
 	case <-sc.done:
-		return fmt.Errorf("%w: ACP session %q exited while busy", runtime.ErrSessionNotFound, name)
+		return errACPConnClosed(name)
 	case <-timer.C:
 		return fmt.Errorf("ACP session %q still busy after %s: %w", name, timeout, context.DeadlineExceeded)
 	case <-ctx.Done():
@@ -233,11 +292,15 @@ func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Du
 
 // SnapshotIdle reports whether the named session has no session/prompt
 // response outstanding right now. A session this provider does not own, or
-// whose agent has exited, is an error, never idle.
+// whose agent connection has closed, is an error, never idle.
 func (p *Provider) SnapshotIdle(name string) (bool, error) {
 	sc, err := p.idleConn(name)
 	if err != nil {
 		return false, err
 	}
-	return !sc.isBusy(), nil
+	busy, _, err := sc.idleState(name)
+	if err != nil {
+		return false, err
+	}
+	return !busy, nil
 }

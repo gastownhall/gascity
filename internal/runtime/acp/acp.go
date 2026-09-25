@@ -29,6 +29,12 @@ import (
 // rather than surfacing a spurious error before SIGKILL lands.
 const nudgePostWriteDrainTimeout = 5 * time.Second
 
+// nudgeDrainedExitGrace caps how long Nudge waits for sc.done when the stdout
+// reader has already drained. An agent that exited is reaped within this
+// window (best-effort nil); a live agent whose output can no longer be read
+// is reported as an error instead of receiving a turn that can never finish.
+const nudgeDrainedExitGrace = 500 * time.Millisecond
+
 // Config holds ACP provider settings.
 type Config struct {
 	HandshakeTimeout  time.Duration // default 30s
@@ -277,7 +283,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// the stdout read end itself, so bytes still unread at that point are
 		// not guaranteed to be dispatched.
 		<-sc.readDone
-		sc.drainPending()
+		sc.drainPending(nil)
 		sc.closeActivityPublisher()
 		lis.Close()                 //nolint:errcheck
 		os.Remove(p.sockPath(name)) //nolint:errcheck
@@ -584,7 +590,16 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	// Set busy state BEFORE sendRequest so that dispatch can match the
 	// response ID and clear it. If we set it after, a fast agent could
 	// respond before setActivePrompt runs, leaving busy set permanently.
-	sc.setActivePrompt(id)
+	if !sc.setActivePrompt(id) {
+		// The stdout reader has drained, so no response could settle this
+		// turn. An exiting agent keeps the best-effort nil contract.
+		select {
+		case <-sc.done:
+			return nil
+		case <-time.After(nudgeDrainedExitGrace):
+			return fmt.Errorf("sending prompt to %q: %w", name, errACPConnClosed(name))
+		}
+	}
 
 	ch, err := sc.sendRequest(msg)
 	if err != nil {

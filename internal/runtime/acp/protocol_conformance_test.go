@@ -334,8 +334,8 @@ func TestACPProtocolTurnFailsWhenAgentExits(t *testing.T) {
 	if !errors.Is(err, runtime.ErrSessionNotFound) {
 		t.Fatalf("WaitForIdle = %v, want ErrSessionNotFound when the agent exits mid-turn", err)
 	}
-	if turn := s.lastTurn(t); turn.State != turnFailed || turn.Error != turnFailureAgentExited {
-		t.Fatalf("turn = %+v, want failed %q", turn, turnFailureAgentExited)
+	if turn := s.lastTurn(t); turn.State != turnFailed || turn.Error != turnFailureConnClosed {
+		t.Fatalf("turn = %+v, want failed %q", turn, turnFailureConnClosed)
 	}
 	if idle, err := s.p.SnapshotIdle(s.name); err == nil || idle {
 		t.Fatalf("SnapshotIdle = (%v, %v), want an error for an exited agent", idle, err)

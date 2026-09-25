@@ -121,8 +121,8 @@ func TestTurnRecordOutcomes(t *testing.T) {
 		},
 		{
 			name:   "agent exit mid-turn",
-			settle: func(sc *sessionConn, _ int64) { sc.drainPending() },
-			want:   turnRecord{State: turnFailed, Error: turnFailureAgentExited},
+			settle: func(sc *sessionConn, _ int64) { sc.drainPending(nil) },
+			want:   turnRecord{State: turnFailed, Error: turnFailureConnClosed},
 		},
 		{
 			name:   "prompt never sent",
@@ -159,6 +159,111 @@ func TestTurnRecordOutcomes(t *testing.T) {
 				t.Fatal("failed turn has no error message")
 			}
 		})
+	}
+}
+
+// TestPromptOutcomeToleratesUnstableUsage pins that a usage object gc cannot
+// decode never fails a turn: the stop reason is kept and only usage drops.
+// 12.0 is an integer under JSON Schema 2020-12, and some agents emit it.
+func TestPromptOutcomeToleratesUnstableUsage(t *testing.T) {
+	cases := []struct {
+		name         string
+		result       string
+		wantUsage    *turnUsage
+		wantUsageErr bool
+	}{
+		{name: "absent", result: `{"stopReason":"end_turn"}`},
+		{name: "null", result: `{"stopReason":"end_turn","usage":null}`},
+		{
+			name:      "integers",
+			result:    `{"stopReason":"end_turn","usage":{"inputTokens":12,"outputTokens":3,"totalTokens":15}}`,
+			wantUsage: &turnUsage{InputTokens: 12, OutputTokens: 3, TotalTokens: 15},
+		},
+		{name: "float counts", result: `{"stopReason":"end_turn","usage":{"inputTokens":12.0,"outputTokens":3,"totalTokens":15}}`, wantUsageErr: true},
+		{name: "string counts", result: `{"stopReason":"end_turn","usage":{"inputTokens":"12","outputTokens":"3","totalTokens":"15"}}`, wantUsageErr: true},
+		{name: "not an object", result: `{"stopReason":"end_turn","usage":[1,2]}`, wantUsageErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id := int64(7)
+			got := promptOutcome(JSONRPCMessage{JSONRPC: "2.0", ID: &id, Result: json.RawMessage(tc.result)})
+			if got.state != turnCompleted || got.stopReason != "end_turn" || got.err != "" {
+				t.Fatalf("outcome = %+v, want completed end_turn", got)
+			}
+			if (got.usageErr != nil) != tc.wantUsageErr {
+				t.Fatalf("usageErr = %v, want error %v", got.usageErr, tc.wantUsageErr)
+			}
+			switch {
+			case tc.wantUsage == nil && got.usage != nil:
+				t.Fatalf("usage = %+v, want nil", got.usage)
+			case tc.wantUsage != nil && (got.usage == nil || *got.usage != *tc.wantUsage):
+				t.Fatalf("usage = %+v, want %+v", got.usage, tc.wantUsage)
+			}
+		})
+	}
+
+	t.Run("recorded turn keeps the stop reason", func(t *testing.T) {
+		sc := newSessionConn(nil, nil, nil, 10, nil)
+		sc.setActivePrompt(4)
+		respondTo(sc, 4, `{"stopReason":"end_turn","usage":{"inputTokens":12.0}}`)
+		_, last := sc.turns()
+		if last == nil || last.State != turnCompleted || last.StopReason != "end_turn" || last.Usage != nil || last.Error != "" {
+			t.Fatalf("last turn = %+v, want completed end_turn without usage", last)
+		}
+	})
+
+	t.Run("malformed stop reason still fails", func(t *testing.T) {
+		id := int64(7)
+		got := promptOutcome(JSONRPCMessage{JSONRPC: "2.0", ID: &id, Result: json.RawMessage(`{"stopReason":7}`)})
+		if got.state != turnFailed || got.err == "" {
+			t.Fatalf("outcome = %+v, want failed", got)
+		}
+	})
+}
+
+// TestReadErrorIsNotAgentExit pins that a stdout read failure while the
+// agent is still alive is recorded as a read failure, not an exit.
+func TestReadErrorIsNotAgentExit(t *testing.T) {
+	sc := newSessionConn(nil, nil, nil, 10, nil)
+	sc.setActivePrompt(2)
+	// One frame over the 1 MiB scanner limit.
+	frame := `{"jsonrpc":"2.0","method":"session/update","params":{"pad":"` + strings.Repeat("x", 2<<20) + `"}}` + "\n"
+	sc.readLoop(strings.NewReader(frame))
+
+	_, last := sc.turns()
+	if last == nil || last.State != turnFailed {
+		t.Fatalf("last turn = %+v, want failed", last)
+	}
+	if !strings.HasPrefix(last.Error, turnFailureReadPrefix) || !strings.Contains(last.Error, "token too long") {
+		t.Fatalf("turn error = %q, want %q + the scanner error", last.Error, turnFailureReadPrefix)
+	}
+
+	t.Run("EOF is a closed connection", func(t *testing.T) {
+		sc := newSessionConn(nil, nil, nil, 10, nil)
+		sc.setActivePrompt(3)
+		sc.readLoop(strings.NewReader(""))
+		if _, last := sc.turns(); last == nil || last.Error != turnFailureConnClosed {
+			t.Fatalf("last turn = %+v, want %q", last, turnFailureConnClosed)
+		}
+	})
+}
+
+// TestNudgeRefusesDrainedConnection pins that a live agent whose stdout can
+// no longer be read does not get a turn that could never finish.
+func TestNudgeRefusesDrainedConnection(t *testing.T) {
+	p := newTestProvider(t)
+	name, sc := injectConn(t, p)
+	sc.drainPending(errors.New("bufio.Scanner: token too long"))
+
+	err := p.Nudge(name, runtime.TextContent("hello"))
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("Nudge = %v, want ErrSessionNotFound for a drained live connection", err)
+	}
+	if current, _ := sc.turns(); current != nil || sc.isBusy() {
+		t.Fatalf("Nudge opened turn %+v on a drained connection", current)
+	}
+	if sc.setActivePrompt(9) {
+		t.Fatal("setActivePrompt accepted a prompt on a drained connection")
 	}
 }
 
@@ -261,7 +366,7 @@ func TestWaitForIdle(t *testing.T) {
 	t.Run("dead session", func(t *testing.T) {
 		p := newTestProvider(t)
 		name, sc := injectConn(t, p)
-		sc.drainPending()
+		sc.drainPending(nil)
 		close(sc.done)
 		if err := p.WaitForIdle(context.Background(), name, time.Second); !errors.Is(err, runtime.ErrSessionNotFound) {
 			t.Fatalf("WaitForIdle = %v, want ErrSessionNotFound", err)
@@ -275,7 +380,7 @@ func TestWaitForIdle(t *testing.T) {
 		done := make(chan error, 1)
 		go func() { done <- p.WaitForIdle(context.Background(), name, time.Minute) }()
 		// Same order as the monitor goroutine: drain, then close done.
-		sc.drainPending()
+		sc.drainPending(nil)
 		close(sc.done)
 		if err := <-done; !errors.Is(err, runtime.ErrSessionNotFound) {
 			t.Fatalf("WaitForIdle = %v, want ErrSessionNotFound when the agent exits mid-turn", err)
@@ -285,7 +390,7 @@ func TestWaitForIdle(t *testing.T) {
 	t.Run("drained but not yet reaped", func(t *testing.T) {
 		p := newTestProvider(t)
 		name, sc := injectConn(t, p)
-		sc.drainPending()
+		sc.drainPending(nil)
 		if err := p.WaitForIdle(context.Background(), name, time.Second); !errors.Is(err, runtime.ErrSessionNotFound) {
 			t.Fatalf("WaitForIdle = %v, want ErrSessionNotFound for a drained connection", err)
 		}
@@ -299,6 +404,58 @@ func TestWaitForIdle(t *testing.T) {
 		p.mu.Unlock()
 		if err := p.WaitForIdle(context.Background(), name, time.Second); !errors.Is(err, errACPSessionStarting) {
 			t.Fatalf("WaitForIdle = %v, want errACPSessionStarting", err)
+		}
+	})
+}
+
+// TestAwaitIdleWakeBranches drives the parked branch of WaitForIdle
+// deterministically: the idle channel is captured while busy, the turn is
+// settled, and only then does the wait run.
+func TestAwaitIdleWakeBranches(t *testing.T) {
+	capture := func(t *testing.T, sc *sessionConn) <-chan struct{} {
+		t.Helper()
+		sc.setActivePrompt(5)
+		busy, idleCh, err := sc.idleState("s")
+		if err != nil || !busy {
+			t.Fatalf("idleState = (%v, %v), want busy", busy, err)
+		}
+		return idleCh
+	}
+
+	t.Run("turn ends", func(t *testing.T) {
+		sc := newSessionConn(nil, nil, nil, 10, nil)
+		idleCh := capture(t, sc)
+		respondTo(sc, 5, `{"stopReason":"end_turn"}`)
+		if err := sc.awaitIdle(context.Background(), "s", idleCh, time.Minute); err != nil {
+			t.Fatalf("awaitIdle = %v, want nil", err)
+		}
+	})
+
+	t.Run("drain while the process is still alive", func(t *testing.T) {
+		sc := newSessionConn(nil, nil, nil, 10, nil)
+		idleCh := capture(t, sc)
+		// done stays open: only the post-wake connection check can tell
+		// this wake from a finished turn.
+		sc.drainPending(nil)
+		if err := sc.awaitIdle(context.Background(), "s", idleCh, time.Minute); !errors.Is(err, runtime.ErrSessionNotFound) {
+			t.Fatalf("awaitIdle = %v, want ErrSessionNotFound", err)
+		}
+	})
+
+	t.Run("process exit", func(t *testing.T) {
+		sc := newSessionConn(nil, nil, nil, 10, nil)
+		idleCh := capture(t, sc)
+		close(sc.done)
+		if err := sc.awaitIdle(context.Background(), "s", idleCh, time.Minute); !errors.Is(err, runtime.ErrSessionNotFound) {
+			t.Fatalf("awaitIdle = %v, want ErrSessionNotFound", err)
+		}
+	})
+
+	t.Run("drained connection is never idle", func(t *testing.T) {
+		sc := newSessionConn(nil, nil, nil, 10, nil)
+		sc.drainPending(nil)
+		if busy, _, err := sc.idleState("s"); !errors.Is(err, runtime.ErrSessionNotFound) || busy {
+			t.Fatalf("idleState = (%v, %v), want ErrSessionNotFound", busy, err)
 		}
 	})
 }
@@ -321,7 +478,7 @@ func TestSnapshotIdle(t *testing.T) {
 	if idle, err := p.SnapshotIdle("gc-acp-missing"); !errors.Is(err, runtime.ErrSessionNotFound) || idle {
 		t.Fatalf("SnapshotIdle unknown = (%v, %v), want (false, ErrSessionNotFound)", idle, err)
 	}
-	sc.drainPending()
+	sc.drainPending(nil)
 	close(sc.done)
 	if idle, err := p.SnapshotIdle(name); !errors.Is(err, runtime.ErrSessionNotFound) || idle {
 		t.Fatalf("SnapshotIdle dead = (%v, %v), want (false, ErrSessionNotFound)", idle, err)

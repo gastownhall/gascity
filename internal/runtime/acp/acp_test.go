@@ -1173,7 +1173,7 @@ func TestReadLoopDeath_ClearsBusyState(t *testing.T) {
 	}
 
 	// Simulate readLoop exit (calls drainPending).
-	sc.drainPending()
+	sc.drainPending(nil)
 
 	if sc.isBusy() {
 		t.Error("should not be busy after drainPending")
@@ -1199,8 +1199,8 @@ func TestDrainPending_Idempotent(t *testing.T) {
 	sc.mu.Unlock()
 
 	// Call twice — should not panic on double-close.
-	sc.drainPending()
-	sc.drainPending() // second call should be a no-op
+	sc.drainPending(nil)
+	sc.drainPending(nil) // second call should be a no-op
 
 	if sc.isBusy() {
 		t.Error("should not be busy after double drain")
