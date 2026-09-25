@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -322,6 +323,87 @@ func TestACPProtocolPermissionTimeoutRejects(t *testing.T) {
 	}
 	if got := s.jsonlRecords(t, "responses.jsonl"); len(got) != 0 {
 		t.Fatalf("responses.jsonl = %v, want no client replies", got)
+	}
+}
+
+// lastTurn returns the session's last finished turn.
+func (s *protocolSession) lastTurn(t *testing.T) *turnRecord {
+	t.Helper()
+	current, last := s.conn(t).turns()
+	if current != nil {
+		t.Fatalf("turn %+v still running", current)
+	}
+	if last == nil {
+		t.Fatal("no finished turn recorded")
+	}
+	return last
+}
+
+func TestACPProtocolTurnCompletionPropagatesStopReason(t *testing.T) {
+	s := startProtocolFake(t, "--stop-reason", "max_tokens", "--usage", "12,34")
+	s.nudge(t, "count tokens")
+	if err := s.p.WaitForIdle(context.Background(), s.name, protocolWait); err != nil {
+		t.Fatalf("WaitForIdle: %v", err)
+	}
+
+	turn := s.lastTurn(t)
+	if turn.State != turnCompleted || turn.StopReason != "max_tokens" {
+		t.Fatalf("turn = %+v, want completed with stopReason max_tokens", turn)
+	}
+	want := turnUsage{InputTokens: 12, OutputTokens: 34, TotalTokens: 46}
+	if turn.Usage == nil || *turn.Usage != want {
+		t.Fatalf("usage = %+v, want %+v", turn.Usage, want)
+	}
+	if idle, err := s.p.SnapshotIdle(s.name); err != nil || !idle {
+		t.Fatalf("SnapshotIdle = (%v, %v), want (true, nil)", idle, err)
+	}
+}
+
+func TestACPProtocolTurnFailsOnPromptError(t *testing.T) {
+	s := startProtocolFake(t, "--prompt-error", "boom")
+	s.nudge(t, "fail please")
+	if err := s.p.WaitForIdle(context.Background(), s.name, protocolWait); err != nil {
+		t.Fatalf("WaitForIdle: %v", err)
+	}
+	if turn := s.lastTurn(t); turn.State != turnFailed || turn.Error != "boom" {
+		t.Fatalf("turn = %+v, want failed with the agent's error", turn)
+	}
+}
+
+func TestACPProtocolTurnFailsWhenAgentExits(t *testing.T) {
+	s := startProtocolFake(t, "--exit-during-prompt")
+	s.nudge(t, "die")
+	err := s.p.WaitForIdle(context.Background(), s.name, protocolWait)
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("WaitForIdle = %v, want ErrSessionNotFound when the agent exits mid-turn", err)
+	}
+	if turn := s.lastTurn(t); turn.State != turnFailed || turn.Error != turnFailureConnClosed {
+		t.Fatalf("turn = %+v, want failed %q", turn, turnFailureConnClosed)
+	}
+	if idle, err := s.p.SnapshotIdle(s.name); err == nil || idle {
+		t.Fatalf("SnapshotIdle = (%v, %v), want an error for an exited agent", idle, err)
+	}
+}
+
+func TestACPProtocolWaitForIdleBlocksUntilTurnEnds(t *testing.T) {
+	s := startProtocolFake(t, "--sigint", "cancel", "--turn-delay", "1h")
+	s.nudge(t, "long turn")
+	waitForMethod(t, s, "session/prompt")
+
+	if idle, err := s.p.SnapshotIdle(s.name); err != nil || idle {
+		t.Fatalf("SnapshotIdle = (%v, %v), want (false, nil) mid-turn", idle, err)
+	}
+	if err := s.p.WaitForIdle(context.Background(), s.name, 10*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("WaitForIdle mid-turn = %v, want context.DeadlineExceeded", err)
+	}
+	if err := s.p.Interrupt(s.name); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+	if err := s.p.WaitForIdle(context.Background(), s.name, protocolWait); err != nil {
+		t.Fatalf("WaitForIdle after cancel: %v", err)
+	}
+	if turn := s.lastTurn(t); turn.State != turnCompleted || turn.StopReason != acpStopReasonCancelled {
+		t.Fatalf("turn = %+v, want completed with stopReason %q", turn, acpStopReasonCancelled)
 	}
 }
 
