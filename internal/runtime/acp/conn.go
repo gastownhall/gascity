@@ -39,6 +39,10 @@ type sessionConn struct {
 	activityPublisher       *activityPublisher
 	activityPublisherClosed bool
 
+	// unsupportedSeen records agent request methods already logged as
+	// unsupported, so each is reported once per connection.
+	unsupportedSeen map[string]struct{}
+
 	// stdinMu serializes writes to the agent's stdin pipe. Separate from
 	// mu so that a slow/blocked stdin write cannot prevent dispatch (which
 	// needs mu) from routing responses, avoiding a circular pipe deadlock.
@@ -87,6 +91,13 @@ func (sc *sessionConn) readLoop(r io.Reader) {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
+			continue
+		}
+
+		// Agent->client requests are answered before the typed decode,
+		// which cannot represent string ids.
+		if req, ok := parseAgentRequest([]byte(line)); ok {
+			sc.answerUnsupported(req)
 			continue
 		}
 
@@ -238,10 +249,7 @@ func (sc *sessionConn) sendRequest(msg JSONRPCMessage) (chan JSONRPCMessage, err
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 
-	sc.stdinMu.Lock()
-	_, err = fmt.Fprintf(sc.stdin, "%s\n", data)
-	sc.stdinMu.Unlock()
-	if err != nil {
+	if err := sc.writeMessage(data); err != nil {
 		sc.mu.Lock()
 		delete(sc.pending, *msg.ID)
 		sc.mu.Unlock()
@@ -257,9 +265,16 @@ func (sc *sessionConn) sendNotification(msg JSONRPCMessage) error {
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
+	return sc.writeMessage(data)
+}
+
+// writeMessage writes one encoded JSON-RPC message, newline-terminated, to
+// the agent's stdin. Every stdin write goes through here; stdinMu keeps
+// concurrent writers from interleaving lines.
+func (sc *sessionConn) writeMessage(data []byte) error {
 	sc.stdinMu.Lock()
-	_, err = fmt.Fprintf(sc.stdin, "%s\n", data)
-	sc.stdinMu.Unlock()
+	defer sc.stdinMu.Unlock()
+	_, err := fmt.Fprintf(sc.stdin, "%s\n", data)
 	return err
 }
 

@@ -266,19 +266,84 @@ func TestACPProtocolSigintCancelAnswersInFlightPrompt(t *testing.T) {
 	}
 }
 
-func TestACPProtocolPermissionTimeoutRejects(t *testing.T) {
-	// gc on this base does not answer session/request_permission, so the
-	// fake's timeout path fires: $/cancel_request, then a rejected tool.
-	s := startProtocolFake(t, "--request-permission", "--permission-timeout", "50ms")
+func TestACPProtocolPermissionRequestAnsweredMethodNotFound(t *testing.T) {
+	// gc on this base serves no session/request_permission, so it answers
+	// -32601 and the fake rejects the tool, then completes the turn.
+	s := startProtocolFake(t, "--request-permission", "--permission-timeout", "1h")
 	s.nudge(t, "needs approval")
 	s.waitIdle(t)
 
 	out := s.peek(t)
-	if !strings.Contains(out, "permission rejected") || !strings.Contains(out, "echo: needs approval") {
+	if !strings.Contains(out, "permission rejected: error -32601") || !strings.Contains(out, "echo: needs approval") {
 		t.Fatalf("Peek = %q, want rejected tool output then the echo", out)
 	}
-	if got := s.jsonlRecords(t, "responses.jsonl"); len(got) != 0 {
-		t.Fatalf("responses.jsonl = %v, want no client replies", got)
+	assertMethodNotFoundReplies(t, s, 1.0)
+}
+
+func TestACPProtocolFSReadAnsweredMethodNotFound(t *testing.T) {
+	s := startProtocolFake(t, "--request-fs-read", "/etc/hostname")
+	s.nudge(t, "read it")
+	s.waitIdle(t)
+
+	if out := s.peek(t); !strings.Contains(out, "echo: read it") {
+		t.Fatalf("Peek = %q, want the turn to complete after the reply", out)
+	}
+	assertMethodNotFoundReplies(t, s, 1.0)
+}
+
+func TestACPProtocolStringIDRequestAnsweredMethodNotFound(t *testing.T) {
+	s := startProtocolFake(t, "--request-fs-read", "/etc/hostname", "--request-id-string")
+	s.nudge(t, "read it")
+	s.waitIdle(t)
+
+	if out := s.peek(t); !strings.Contains(out, "echo: read it") {
+		t.Fatalf("Peek = %q, want the turn to complete after the reply", out)
+	}
+	assertMethodNotFoundReplies(t, s, "fs-1")
+}
+
+func TestACPProtocolInitializeAdvertisesNoFSOrTerminal(t *testing.T) {
+	s := startProtocolFake(t)
+	raw, err := os.ReadFile(filepath.Join(s.logDir, "initialize.json"))
+	if err != nil {
+		t.Fatalf("initialize.json: %v", err)
+	}
+	var params struct {
+		ClientCapabilities json.RawMessage `json:"clientCapabilities"`
+	}
+	if err := json.Unmarshal(raw, &params); err != nil {
+		t.Fatalf("initialize.json decode: %v", err)
+	}
+	var caps any
+	if err := json.Unmarshal(params.ClientCapabilities, &caps); err != nil {
+		t.Fatalf("clientCapabilities decode %s: %v", params.ClientCapabilities, err)
+	}
+	got, _ := json.Marshal(caps)
+	const want = `{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false}`
+	if string(got) != want {
+		t.Fatalf("clientCapabilities = %s, want %s", got, want)
+	}
+}
+
+// assertMethodNotFoundReplies checks that the fake received exactly one
+// client reply, a -32601 error echoing wantID (a JSON number decodes as
+// float64, a string id stays a string).
+func assertMethodNotFoundReplies(t *testing.T, s *protocolSession, wantID any) {
+	t.Helper()
+	replies := s.jsonlRecords(t, "responses.jsonl")
+	if len(replies) != 1 {
+		t.Fatalf("responses.jsonl = %v, want one client reply", replies)
+	}
+	reply := replies[0]
+	if reply["id"] != wantID {
+		t.Fatalf("reply id = %#v, want %#v", reply["id"], wantID)
+	}
+	rpcErr, _ := reply["error"].(map[string]any)
+	if rpcErr == nil || rpcErr["code"] != float64(-32601) {
+		t.Fatalf("reply = %v, want error code -32601", reply)
+	}
+	if _, ok := reply["result"]; ok {
+		t.Fatalf("reply = %v, want no result", reply)
 	}
 }
 
