@@ -1221,6 +1221,9 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 	}
 	workDir := b.Metadata["work_dir"]
 	if workDir == "" {
+		if path := m.acpCaptureTranscriptPath(b); path != "" {
+			return path, TranscriptFound, nil
+		}
 		return "", TranscriptNoWorkDir, nil
 	}
 	provider := strings.TrimSpace(b.Metadata["provider_kind"])
@@ -1231,6 +1234,12 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 		searchPaths = sessionlog.DefaultSearchPaths()
 	}
 	if path := workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
+		return path, TranscriptFound, nil
+	}
+	// An ACP session's transcript is the capture gc wrote itself. A keyed
+	// native transcript (above) still wins; the workdir fallbacks below could
+	// return an unrelated provider's file.
+	if path := m.acpCaptureTranscriptPath(b); path != "" {
 		return path, TranscriptFound, nil
 	}
 	// zcode carries no session_key — no session-id flag, no hook plugin — so
