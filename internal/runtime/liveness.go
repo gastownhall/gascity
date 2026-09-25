@@ -43,24 +43,10 @@ func ObserveLivenessWithErrorContext(ctx context.Context, sp Provider, name stri
 		obs, err := observer.ObserveLivenessWithErrorContext(ctx, name, processNames)
 		return normalizeLiveness(obs), err
 	}
-	if ctx.Done() == nil {
+	value, _, err := CallLegacyProviderContext(ctx, sp, func() (Liveness, error) {
 		return ObserveLivenessWithError(sp, name, processNames)
-	}
-	type result struct {
-		liveness Liveness
-		err      error
-	}
-	results := make(chan result, 1)
-	go func() {
-		liveness, err := ObserveLivenessWithError(sp, name, processNames)
-		results <- result{liveness: liveness, err: err}
-	}()
-	select {
-	case result := <-results:
-		return result.liveness, result.err
-	case <-ctx.Done():
-		return Liveness{}, ctx.Err()
-	}
+	})
+	return value, err
 }
 
 // ObserveLivenessWithError returns an error-bearing consolidated liveness view.

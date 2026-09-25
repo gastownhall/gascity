@@ -2077,20 +2077,10 @@ func (m *Manager) EnrichInfo(info Info) Info {
 // EnrichInfoContext applies the live runtime overlay without allowing a
 // legacy provider call to extend the caller's wait past ctx.
 func (m *Manager) EnrichInfoContext(ctx context.Context, info Info) (Info, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if ctx.Done() == nil {
+	enriched, _, err := runtime.CallLegacyProviderContext(ctx, m.sp, func() (Info, error) {
 		return m.EnrichInfo(info), nil
-	}
-	result := make(chan Info, 1)
-	go func() { result <- m.EnrichInfo(info) }()
-	select {
-	case enriched := <-result:
-		return enriched, nil
-	case <-ctx.Done():
-		return Info{}, ctx.Err()
-	}
+	})
+	return enriched, err
 }
 
 // EnrichInfos applies EnrichInfo to each element in place and returns the same

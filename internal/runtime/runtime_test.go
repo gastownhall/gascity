@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -17,9 +19,15 @@ func (p *contextNudgeFake) NudgeContext(ctx context.Context, _ string, _ []Conte
 type blockingLegacyNudgeFake struct {
 	*Fake
 	unblock <-chan struct{}
+	started chan<- struct{}
+	calls   atomic.Int32
 }
 
 func (p *blockingLegacyNudgeFake) Nudge(string, []ContentBlock) error {
+	p.calls.Add(1)
+	if p.started != nil {
+		p.started <- struct{}{}
+	}
 	<-p.unblock
 	return nil
 }
@@ -36,6 +44,50 @@ func TestNudgeContextBoundsLegacyProvider(t *testing.T) {
 	if !errors.Is(err, ErrNudgeOutcomeUnknown) {
 		t.Fatalf("NudgeContext error = %v, want ErrNudgeOutcomeUnknown for a legacy mutation still in flight", err)
 	}
+}
+
+func TestNudgeContextBoundsBlockedLegacyProviderConcurrency(t *testing.T) {
+	unblock := make(chan struct{})
+	started := make(chan struct{}, maxConcurrentLegacyCallsPerProvider+1)
+	provider := &blockingLegacyNudgeFake{Fake: NewFake(), unblock: unblock, started: started}
+	var calls sync.WaitGroup
+	for range maxConcurrentLegacyCallsPerProvider {
+		calls.Add(1)
+		go func() {
+			defer calls.Done()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			_ = NudgeContext(ctx, provider, "worker", TextContent("wake"))
+		}()
+	}
+	for range maxConcurrentLegacyCallsPerProvider {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("legacy nudge did not occupy its concurrency slot")
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	err := NudgeContext(ctx, provider, "worker", TextContent("wake"))
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("NudgeContext over capacity error = %v, want context deadline exceeded", err)
+	}
+	if errors.Is(err, ErrNudgeOutcomeUnknown) {
+		t.Fatalf("NudgeContext over capacity error = %v, call never started so outcome is known", err)
+	}
+	select {
+	case <-started:
+		t.Fatal("legacy nudge exceeded the per-provider concurrency bound")
+	default:
+	}
+	if got := provider.calls.Load(); got != maxConcurrentLegacyCallsPerProvider {
+		t.Fatalf("legacy provider calls = %d, want %d", got, maxConcurrentLegacyCallsPerProvider)
+	}
+
+	close(unblock)
+	calls.Wait()
 }
 
 func TestNudgeContextCancelsContextAwareProvider(t *testing.T) {
