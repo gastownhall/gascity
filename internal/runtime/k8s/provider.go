@@ -907,7 +907,15 @@ func waitForTmux(ctx context.Context, ops k8sOps, name string, timeout time.Dura
 
 // initCityInPod copies the city directory and runs gc init inside the pod.
 func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity string) error {
-	// Copy city dir (excluding .gc/) into the pod.
+	// Streaming may leave a partial directory if the source or pod exec fails.
+	// Use a bounded cleanup context even when the caller has been canceled.
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_, _ = ops.execInPod(cleanupCtx, podName, "agent", []string{"rm", "-rf", "/tmp/city-src"}, nil)
+	}()
+
+	// Copy the city directory into the pod, including its current .gc state.
 	if err := copyDirToPod(ctx, ops, podName, "agent", ctrlCity, "/tmp/city-src"); err != nil {
 		return err
 	}
@@ -919,9 +927,6 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity string) er
 	if err != nil {
 		return err
 	}
-	// Clean up.
-	_, _ = ops.execInPod(ctx, podName, "agent",
-		[]string{"rm", "-rf", "/tmp/city-src"}, nil)
 	return nil
 }
 
