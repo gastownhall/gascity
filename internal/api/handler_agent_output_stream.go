@@ -346,6 +346,10 @@ func (s *Server) streamSessionLogHuma(
 		turns := make([]outputTurn, 0, len(sess.Messages))
 		uuids := make([]string, 0, len(sess.Messages))
 		for _, entry := range sess.Messages {
+			if entry.Partial {
+				// Still growing; send it once it settles (see settledHistorySnapshot).
+				continue
+			}
 			turn := entryToTurn(entry)
 			if turn.Text == "" {
 				continue
