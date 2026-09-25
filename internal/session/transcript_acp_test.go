@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
@@ -201,4 +202,102 @@ func TestTranscriptPathIgnoresCaptureForNonACPOrCitylessManager(t *testing.T) {
 			t.Fatalf("TranscriptPath = %q, want none without a city", path)
 		}
 	})
+}
+
+// controllerShapedACPBead creates a session bead the way the controller does:
+// no transport metadata, because the controller starts ACP agents without
+// persisting it.
+func controllerShapedACPBead(t *testing.T, store *beads.MemStore) beads.Bead {
+	t.Helper()
+	b, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   BeadType,
+		Labels: []string{LabelSession, "template:worker"},
+		Metadata: map[string]string{
+			"template":           "worker",
+			"state":              string(StateActive),
+			"provider":           "unreal-acp",
+			"provider_kind":      "unreal-acp",
+			"work_dir":           t.TempDir(),
+			"continuation_epoch": "1",
+			"generation":         "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadata(b.ID, "session_name", sessionNameFor(b.ID)); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+	b.Metadata["session_name"] = sessionNameFor(b.ID)
+	return b
+}
+
+func TestTranscriptPathACPCaptureForControllerBeadWithoutTransport(t *testing.T) {
+	t.Run("routed to the ACP runtime", func(t *testing.T) {
+		city := t.TempDir()
+		store := beads.NewMemStore()
+		autoSP := sessionauto.New(runtime.NewFake(), runtime.NewFake())
+		b := controllerShapedACPBead(t, store)
+		autoSP.RouteACP(b.Metadata["session_name"])
+		if err := autoSP.Start(context.Background(), b.Metadata["session_name"], runtime.Config{}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		mgr := NewManagerWithOptions(store, autoSP, WithCityPath(city))
+		capture := writeCityCapture(t, city, b.ID)
+
+		path, lookup, err := mgr.TranscriptPathClassified(b.ID, []string{t.TempDir()})
+		if err != nil {
+			t.Fatalf("TranscriptPathClassified: %v", err)
+		}
+		if path != capture || lookup != TranscriptFound {
+			t.Fatalf("TranscriptPathClassified = %q, %v; want the capture %q", path, lookup, capture)
+		}
+	})
+	t.Run("ACP by configuration, not running", func(t *testing.T) {
+		city := t.TempDir()
+		store := beads.NewMemStore()
+		b := controllerShapedACPBead(t, store)
+		mgr := NewManagerWithOptions(store, runtime.NewFake(), WithCityPath(city),
+			WithTransportResolver(func(template, _ string) string {
+				if template == "worker" {
+					return "acp"
+				}
+				return ""
+			}))
+		capture := writeCityCapture(t, city, b.ID)
+
+		path, err := mgr.TranscriptPath(b.ID, []string{t.TempDir()})
+		if err != nil {
+			t.Fatalf("TranscriptPath: %v", err)
+		}
+		if path != capture {
+			t.Fatalf("TranscriptPath = %q, want the capture %q", path, capture)
+		}
+	})
+	t.Run("not ACP by any signal", func(t *testing.T) {
+		city := t.TempDir()
+		store := beads.NewMemStore()
+		b := controllerShapedACPBead(t, store)
+		mgr := NewManagerWithOptions(store, runtime.NewFake(), WithCityPath(city))
+		writeCityCapture(t, city, b.ID)
+
+		path, err := mgr.TranscriptPath(b.ID, []string{t.TempDir()})
+		if err != nil {
+			t.Fatalf("TranscriptPath: %v", err)
+		}
+		if path != "" {
+			t.Fatalf("TranscriptPath = %q, want none for a session with no ACP signal", path)
+		}
+	})
+}
+
+func writeCityCapture(t *testing.T, city, id string) string {
+	t.Helper()
+	path, err := citylayout.ACPTranscriptPath(city, id, "1")
+	if err != nil {
+		t.Fatalf("ACPTranscriptPath: %v", err)
+	}
+	writeTestFile(t, path, `{"gc_acp_capture":1,"ts":"2026-09-25T10:00:00Z","session_id":"`+id+`"}`+"\n")
+	return path
 }

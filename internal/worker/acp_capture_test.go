@@ -105,9 +105,6 @@ func TestSessionHandleStateBusyFromACPCapture(t *testing.T) {
 	if state.Phase != PhaseBusy {
 		t.Fatalf("State().Phase with a prompt in flight = %s, want %s", state.Phase, PhaseBusy)
 	}
-	if handle.history != nil {
-		t.Fatal("State() primed the history cache, want the tail-only busy probe")
-	}
 
 	writeACPTestCapture(t, path, acpTestHeader, acpTestPrompt, acpTestChunkA, acpTestChunkB, acpTestResponse)
 	state, err = handle.State(context.Background())
@@ -124,6 +121,86 @@ func TestSessionHandleStateBusyFromACPCapture(t *testing.T) {
 	}
 	if history.TranscriptStreamID != filepath.Clean(path) {
 		t.Fatalf("History read %q, want the capture %q", history.TranscriptStreamID, path)
+	}
+}
+
+// newACPTestHandle starts an ACP session for provider "unreal-acp" through a
+// factory with a city, records sessionKey (when set) as its provider session
+// key, and returns the handle and its capture path.
+func newACPTestHandle(t *testing.T, sessionKey string) (*SessionHandle, string) {
+	t.Helper()
+	city := t.TempDir()
+	store := beads.NewMemStore()
+	factory, err := NewFactory(FactoryConfig{
+		Store:       store,
+		Provider:    runtime.NewFake(),
+		CityPath:    city,
+		SearchPaths: []string{t.TempDir()},
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+	handle, err := factory.Session(SessionSpec{
+		Template:  "probe",
+		Title:     "Probe",
+		Command:   "unreal-acp",
+		WorkDir:   t.TempDir(),
+		Provider:  "unreal-acp",
+		Transport: "acp",
+	})
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if sessionKey != "" {
+		if err := store.SetMetadata(handle.sessionID, "session_key", sessionKey); err != nil {
+			t.Fatalf("SetMetadata: %v", err)
+		}
+	}
+	path, err := citylayout.ACPTranscriptPath(city, handle.sessionID, "1")
+	if err != nil {
+		t.Fatalf("ACPTranscriptPath: %v", err)
+	}
+	return handle, path
+}
+
+// A keyed ACP session reads its activity with the fenced tail reader, which
+// sees the capture only because the factory adds the capture directory to
+// its search roots.
+func TestSessionHandleStateBusyFromACPCaptureWithSessionKey(t *testing.T) {
+	handle, path := newACPTestHandle(t, "provider-key-1")
+	info, err := handle.manager.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if strings.TrimSpace(info.SessionKey) == "" {
+		t.Fatal("session has no session key; the test needs the keyed branch")
+	}
+	writeACPTestCapture(t, path, acpTestHeader, acpTestPrompt, acpTestChunkA)
+	state, err := handle.State(context.Background())
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if state.Phase != PhaseBusy {
+		t.Fatalf("State().Phase with a prompt in flight = %s, want %s", state.Phase, PhaseBusy)
+	}
+}
+
+// A keyless ACP session decides activity from the capture tail instead of
+// parsing the whole capture. The capture here has no header, which the full
+// reader rejects but the tail scan does not need, so only the tail path can
+// report the prompt in flight.
+func TestSessionHandleStateKeylessACPUsesCaptureTail(t *testing.T) {
+	handle, path := newACPTestHandle(t, "")
+	writeACPTestCapture(t, path, acpTestPrompt, acpTestChunkA)
+	state, err := handle.State(context.Background())
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if state.Phase != PhaseBusy {
+		t.Fatalf("State().Phase = %s, want %s from the capture tail", state.Phase, PhaseBusy)
 	}
 }
 
@@ -177,5 +254,41 @@ func TestLoadHistoryFromACPCapture(t *testing.T) {
 		if err != nil || meta == nil || meta.Activity != "in-turn" {
 			t.Fatalf("%s: TailMetaForProvider = %+v, %v; want in-turn", provider, meta, err)
 		}
+	}
+}
+
+func TestLoadHistoryACPCapturePartialReplyAndDroppedRecords(t *testing.T) {
+	city := t.TempDir()
+	path, err := citylayout.ACPTranscriptPath(city, "gc-1", "1")
+	if err != nil {
+		t.Fatalf("ACPTranscriptPath: %v", err)
+	}
+	writeACPTestCapture(t, path, acpTestHeader, acpTestPrompt, acpTestChunkA,
+		`{"ts":"2026-09-25T10:00:03Z","dir":"meta","dropped":3}`)
+	adapter := SessionLogAdapter{SearchPaths: []string{citylayout.ACPTranscriptsDir(city)}}
+	snapshot, err := adapter.LoadHistory(LoadRequest{Provider: "unreal-acp", TranscriptPath: path, GCSessionID: "gc-1"})
+	if err != nil {
+		t.Fatalf("LoadHistory: %v", err)
+	}
+	if len(snapshot.Entries) != 2 {
+		t.Fatalf("entries = %+v, want the prompt and the streaming reply", snapshot.Entries)
+	}
+	if got := snapshot.Entries[0].Status; got != ResultStatusFinal {
+		t.Errorf("prompt status = %s, want %s", got, ResultStatusFinal)
+	}
+	if got := snapshot.Entries[1].Status; got != ResultStatusPartial {
+		t.Errorf("streaming reply status = %s, want %s", got, ResultStatusPartial)
+	}
+	found := false
+	for _, diagnostic := range snapshot.Diagnostics {
+		if diagnostic.Code == "dropped_records" && diagnostic.Count == 3 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("diagnostics = %+v, want dropped_records with count 3", snapshot.Diagnostics)
+	}
+	if snapshot.Continuity.Status != ContinuityStatusDegraded {
+		t.Errorf("continuity = %s, want %s for a transcript with gaps", snapshot.Continuity.Status, ContinuityStatusDegraded)
 	}
 }

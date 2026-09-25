@@ -17,7 +17,7 @@ import (
 // so it outranks workdir-based discovery, which could hand back another
 // provider's transcript from the same directory.
 func (m *Manager) acpCaptureTranscriptPath(b beads.Bead) string {
-	if transportFromMetadata(b) != "acp" || strings.TrimSpace(m.cityPath) == "" {
+	if strings.TrimSpace(m.cityPath) == "" || !m.beadUsesACP(b) {
 		return ""
 	}
 	path, err := citylayout.ACPTranscriptPath(m.cityPath, b.ID, transcriptContinuationEpoch(b.Metadata["continuation_epoch"]))
@@ -29,6 +29,19 @@ func (m *Manager) acpCaptureTranscriptPath(b beads.Bead) string {
 		return ""
 	}
 	return path
+}
+
+// beadUsesACP reports whether a session runs on the ACP transport. Beads the
+// controller creates carry no transport metadata, so it infers the transport
+// the way the rest of the Manager does (transportForBead: stored metadata,
+// MCP metadata, the runtime's route), then from the configured template or
+// provider.
+func (m *Manager) beadUsesACP(b beads.Bead) bool {
+	transport, _ := m.transportForBead(b, sessionName(b.ID, b))
+	if transport == "" {
+		transport = m.resolveConfiguredTransport(b.Metadata["template"], b.Metadata["provider"])
+	}
+	return transport == "acp"
 }
 
 // transcriptContinuationEpoch renders the epoch a runtime start publishes as
