@@ -22,6 +22,15 @@ import (
 // It returns the file holding the stored assignee.
 func legacyHeldBeadHookCity(t *testing.T, beadID, legacyAssignee string) (cityDir, ownerPath string) {
 	t.Helper()
+	return legacyHeldBeadHookCityWithRestamp(t, beadID, legacyAssignee, true)
+}
+
+// legacyHeldBeadHookCityWithRestamp is legacyHeldBeadHookCity with control over
+// the conditional reassign: when restampWorks is false, every update carrying
+// --if-assignee fails with a transient "database is locked" error and leaves the
+// stored assignee untouched, while show keeps reading back the legacy owner.
+func legacyHeldBeadHookCityWithRestamp(t *testing.T, beadID, legacyAssignee string, restampWorks bool) (cityDir, ownerPath string) {
+	t.Helper()
 	cityDir = t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -48,6 +57,10 @@ work_query = "printf '[{\"id\":\"%s\",\"status\":\"in_progress\",\"assignee\":\"
 	if err := os.WriteFile(statusPath, []byte("in_progress"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	restampFails := "0"
+	if !restampWorks {
+		restampFails = "1"
+	}
 	script := fmt.Sprintf(`#!/bin/sh
 owner=$(cat %[1]q)
 status=$(cat %[2]q)
@@ -73,6 +86,10 @@ update)
     prev="$arg"
   done
   if [ -n "$ifassignee" ]; then
+    if [ "%[4]s" = "1" ]; then
+      echo "Error updating %[3]s: database is locked" >&2
+      exit 1
+    fi
     if [ "$ifassignee" != "$owner" ]; then
       echo "Error updating %[3]s: assignee mismatch" >&2
       exit 13
@@ -83,7 +100,7 @@ update)
   exit 0 ;;
 esac
 printf '[]'
-`, ownerPath, statusPath, beadID)
+`, ownerPath, statusPath, beadID, restampFails)
 	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +156,53 @@ func TestCmdHookClaimRestampsLegacySpellingOnAdoption(t *testing.T) {
 	// And the worker's own close, actored by its runtime BEADS_ACTOR, now lands.
 	if err := hookClaimBdStoreContext(context.Background(), cityDir, nil, sessionID).Close(beadID); err != nil {
 		t.Fatalf("bd close as the respawned worker: %v", err)
+	}
+}
+
+// The refusal shape of the same upgrade: the legacy spelling is canonical (the
+// readback succeeds), but the work store fails the re-stamp. bd would still
+// fence this worker's close on the legacy spelling, so adopting the bead would
+// hand over the #5716 loop. It must not be adopted, the stored spelling must be
+// left alone, and stderr must name the manual recovery.
+func TestCmdHookClaimRefusesAdoptionWhenWorkStoreRestampFails(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	const (
+		beadID    = "ga-held1"
+		sessionID = "gcg-session-557fc1017792caa9a01355325b212416"
+	)
+	legacy := "claude-" + sessionID
+	_, ownerPath := legacyHeldBeadHookCityWithRestamp(t, beadID, legacy, false)
+
+	t.Setenv("GC_TEMPLATE", "builder")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", sessionID)
+	t.Setenv("BEADS_ACTOR", sessionID)
+	t.Setenv("GC_SESSION_NAME", legacy)
+	t.Setenv("GC_SESSION_ID", sessionID)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON (code %d): %v\nraw: %s\nstderr: %s", code, err, stdout.String(), stderr.String())
+	}
+	if result.Action == "work" && result.BeadID == beadID {
+		t.Fatalf("result = %+v (code %d), want %q NOT adopted after a failed work-store re-stamp; stderr: %s", result, code, beadID, stderr.String())
+	}
+	owner, err := os.ReadFile(ownerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(owner)); got != legacy {
+		t.Fatalf("stored assignee after refused adoption = %q, want the legacy spelling %q left in place", got, legacy)
+	}
+	if !strings.Contains(stderr.String(), "not adopting "+beadID) {
+		t.Fatalf("stderr does not report the refusal; stderr: %s", stderr.String())
+	}
+	recovery := fmt.Sprintf("bd update %s --if-assignee %q --if-status in_progress --assignee %q", beadID, legacy, sessionID)
+	if !strings.Contains(stderr.String(), recovery) {
+		t.Fatalf("stderr does not name the manual recovery %q; stderr: %s", recovery, stderr.String())
 	}
 }
 
