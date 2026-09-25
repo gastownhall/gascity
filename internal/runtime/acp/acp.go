@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -40,6 +41,9 @@ type Config struct {
 	// StopGrace is how long Stop waits after SIGTERM before escalating to
 	// SIGKILL. Default runtime.ManagedProcessStopGrace.
 	StopGrace time.Duration
+	// CancelTimeout is how long Interrupt waits for session/cancel to end
+	// the in-flight turn before falling back to SIGINT. Default 10s.
+	CancelTimeout time.Duration
 }
 
 func (c *Config) handshakeTimeout() time.Duration {
@@ -321,9 +325,17 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// Close the write end — child inherits it; we only read.
 	stderrW.Close() //nolint:errcheck
 
-	// Create control socket for cross-process discovery.
+	// Create control socket for cross-process discovery. Its interrupt
+	// command runs the owner's Interrupt logic once the connection exists.
 	processDone := make(chan struct{})
-	lis, err := p.startControlSocket(name, cmd, processDone)
+	var owned atomic.Pointer[sessionConn]
+	interrupt := func() error {
+		if sc := owned.Load(); sc != nil {
+			return sc.interrupt(name, p.cfg.cancelTimeout())
+		}
+		return nil
+	}
+	lis, err := p.startControlSocket(name, cmd, processDone, interrupt)
 	if err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		_ = cmd.Wait()
@@ -334,6 +346,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	sc := newSessionConn(cmd, stdinPipe, lis, p.cfg.outputBufferLines(), processDone)
 	sc.token = seedMeta["GC_INSTANCE_TOKEN"]
 	sc.capture = p.openCapture(name, cfg.Env, cmd.Process.Pid)
+	owned.Store(sc)
 
 	// Start readLoop before handshake so we can receive responses.
 	go sc.readLoop(stdoutPipe)
@@ -672,22 +685,26 @@ func (p *Provider) Stop(name string) error {
 	return err
 }
 
-// Interrupt sends SIGINT to the named session's process. When this provider
-// instance owns the connection, it first cancels the outstanding permission
-// requests. Another process interrupts through the control socket, which only
-// signals; held requests are then canceled when the turn ends or the agent
-// exits. Best-effort: returns nil if the session doesn't exist.
+// Interrupt cancels the session's in-flight prompt turn with ACP session/cancel
+// and waits for it to settle: outstanding permission requests are answered
+// canceled first, then session/cancel is sent, and the turn gets
+// Config.CancelTimeout to end. A turn still open after that gets SIGINT to its
+// process group, twice at most, a short wait each; if it is still open,
+// Interrupt returns an error wrapping runtime.ErrInterruptNotSettled and the
+// agent keeps running. Interrupt never kills the agent. With no turn in
+// flight it sends nothing and returns nil. An agent that exits during the
+// wait counts as settled.
+//
+// Best-effort for sessions this provider does not own: it returns nil if the
+// session doesn't exist, and a session owned by another process is
+// interrupted there, through the control socket, without waiting for the
+// result.
 func (p *Provider) Interrupt(name string) error {
 	p.mu.Lock()
 	sc, ok := p.conns[name]
 	p.mu.Unlock()
 	if ok {
-		// Guard against sentinel sessionConn (nil cmd during handshake).
-		if sc.cmd == nil {
-			return nil
-		}
-		sc.cancelOutstandingPermissions()
-		return syscall.Kill(-sc.cmd.Process.Pid, syscall.SIGINT)
+		return sc.interrupt(name, p.cfg.cancelTimeout())
 	}
 
 	// Fall back to socket (cross-process case).
@@ -1121,7 +1138,8 @@ func (p *Provider) socketNameForEntry(key string) string {
 }
 
 // startControlSocket creates a unix socket for cross-process commands.
-func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan struct{}) (net.Listener, error) {
+// interrupt runs the owner's Interrupt logic for the "interrupt" command.
+func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan struct{}, interrupt func() error) (net.Listener, error) {
 	sp := p.sockPath(name)
 	namePath := p.sockNamePath(name)
 	os.Remove(sp) //nolint:errcheck
@@ -1140,15 +1158,17 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan st
 			if err != nil {
 				return
 			}
-			go handleControlConn(conn, cmd, done, p.cfg.stopGrace())
+			go handleControlConn(conn, cmd, done, p.cfg.stopGrace(), interrupt)
 		}
 	}()
 	return lis, nil
 }
 
 // handleControlConn reads a command from the connection and acts on the process.
-// A "stop" escalates from SIGTERM to SIGKILL after stopGrace.
-func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}, stopGrace time.Duration) {
+// A "stop" escalates from SIGTERM to SIGKILL after stopGrace. An "interrupt"
+// runs interrupt, the owner's session/cancel-and-settle logic, and replies
+// once it returns.
+func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}, stopGrace time.Duration, interrupt func() error) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
 	scanner := bufio.NewScanner(conn)
@@ -1160,7 +1180,11 @@ func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}, stopG
 		_ = runtime.TerminateManagedProcess(cmd, done, stopGrace)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "interrupt":
-		_ = runtime.SignalProcessGroup(cmd, syscall.SIGINT)
+		if err := interrupt(); err != nil {
+			fmt.Fprintf(os.Stderr, "acp: interrupt via control socket: %v\n", err)
+			fmt.Fprintf(conn, "error: %v\n", err) //nolint:errcheck
+			return
+		}
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "ping":
 		conn.Write([]byte("ok\n")) //nolint:errcheck
