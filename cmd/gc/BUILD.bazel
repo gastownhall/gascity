@@ -1065,6 +1065,7 @@ go_test(
         "hook_claim_class_fanout_test.go",
         "hook_claim_drain_reason_schema_test.go",
         "hook_claim_failure_honesty_test.go",
+        "hook_claim_legacy_restamp_test.go",
         "hook_claim_occupant_identity_test.go",
         "hook_claim_self_resume_residency_test.go",
         "hook_claim_sigpipe_unwind_test.go",
