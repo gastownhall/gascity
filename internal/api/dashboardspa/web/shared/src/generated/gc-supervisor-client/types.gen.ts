@@ -11148,6 +11148,14 @@ export type PatchV0CityByCityNameBeadByIdErrors = {
      * Internal Server Error
      */
     500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+    /**
+     * Gateway Timeout
+     */
+    504: ErrorModel;
 };
 
 export type PatchV0CityByCityNameBeadByIdError = PatchV0CityByCityNameBeadByIdErrors[keyof PatchV0CityByCityNameBeadByIdErrors];
@@ -11440,6 +11448,14 @@ export type PostV0CityByCityNameBeadByIdUpdateErrors = {
      * Internal Server Error
      */
     500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+    /**
+     * Gateway Timeout
+     */
+    504: ErrorModel;
 };
 
 export type PostV0CityByCityNameBeadByIdUpdateError = PostV0CityByCityNameBeadByIdUpdateErrors[keyof PostV0CityByCityNameBeadByIdUpdateErrors];

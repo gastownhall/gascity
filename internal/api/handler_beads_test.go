@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -598,6 +600,31 @@ type projectionConflictStore struct {
 func (s *projectionConflictStore) WaitForParentProjection(_ context.Context, _, _, _ string) error {
 	s.waitCalls++
 	return beads.ErrParentProjectionSuperseded
+}
+
+type projectionWaitErrorStore struct {
+	beads.Store
+	err         error
+	hasDeadline bool
+}
+
+func (s *projectionWaitErrorStore) WaitForParentProjection(ctx context.Context, _, _, _ string) error {
+	_, s.hasDeadline = ctx.Deadline()
+	return s.err
+}
+
+// projectionWaitClientGoneStore models a client that disconnects mid-wait
+// after a backend read had already failed with its own timeout: the returned
+// error carries both context errors.
+type projectionWaitClientGoneStore struct {
+	beads.Store
+	disconnect func()
+}
+
+func (s *projectionWaitClientGoneStore) WaitForParentProjection(ctx context.Context, id, _, _ string) error {
+	s.disconnect()
+	<-ctx.Done()
+	return fmt.Errorf("updating bead %q: waiting for parent projection: %w (last check error: %w)", id, ctx.Err(), fmt.Errorf("bd list: %w", context.DeadlineExceeded))
 }
 
 // TestBeadListBoundedReadIsStableOrderedPrefixAcrossRigs pins the #3208
@@ -1428,6 +1455,70 @@ func TestBeadUpdateReturnsConflictWhenParentProjectionIsSuperseded(t *testing.T)
 	}
 	if store.waitCalls != 1 {
 		t.Fatalf("waitCalls = %d, want 1", store.waitCalls)
+	}
+}
+
+func TestBeadUpdateParentProjectionWaitHasDeadlineAndMapsErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		waitErr    error
+		wantStatus int
+	}{
+		{name: "deleted", waitErr: beads.ErrNotFound, wantStatus: http.StatusConflict},
+		{name: "timed out", waitErr: context.DeadlineExceeded, wantStatus: http.StatusGatewayTimeout},
+		// The shape the backend waiters return: the deadline plus the last
+		// failed check, both wrapped.
+		{name: "timed out after failed check", waitErr: fmt.Errorf("updating bead %q: waiting for parent projection: %w (last check error: %w)", "b", context.DeadlineExceeded, errors.New("bd list: invalid connection")), wantStatus: http.StatusGatewayTimeout},
+		{name: "canceled", waitErr: fmt.Errorf("updating bead %q: waiting for parent projection: %w", "b", context.Canceled), wantStatus: http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newFakeState(t)
+			store := &projectionWaitErrorStore{Store: beads.NewMemStore(), err: tc.waitErr}
+			state.stores["myrig"] = store
+			parent, err := store.Create(beads.Bead{Title: "Parent"})
+			if err != nil {
+				t.Fatalf("Create(parent): %v", err)
+			}
+			child, err := store.Create(beads.Bead{Title: "Child"})
+			if err != nil {
+				t.Fatalf("Create(child): %v", err)
+			}
+			h := newTestCityHandler(t, state)
+			req := newPostRequest(cityURL(state, "/bead/")+child.ID+"/update", bytes.NewBufferString(`{"parent":"`+parent.ID+`"}`))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d, body: %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if !store.hasDeadline {
+				t.Fatal("parent projection wait had no deadline")
+			}
+		})
+	}
+}
+
+// The status comes from why this request's wait stopped, not from an earlier
+// backend timeout that the waiter's error also carries.
+func TestBeadUpdateClientDisconnectDuringWaitIs503(t *testing.T) {
+	state := newFakeState(t)
+	reqCtx, disconnect := context.WithCancel(t.Context())
+	defer disconnect()
+	store := &projectionWaitClientGoneStore{Store: beads.NewMemStore(), disconnect: disconnect}
+	state.stores["myrig"] = store
+	parent, err := store.Create(beads.Bead{Title: "Parent"})
+	if err != nil {
+		t.Fatalf("Create(parent): %v", err)
+	}
+	child, err := store.Create(beads.Bead{Title: "Child"})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	h := newTestCityHandler(t, state)
+	req := newPostRequest(cityURL(state, "/bead/")+child.ID+"/update", bytes.NewBufferString(`{"parent":"`+parent.ID+`"}`)).WithContext(reqCtx)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 for a client that went away, body: %s", rec.Code, rec.Body.String())
 	}
 }
 

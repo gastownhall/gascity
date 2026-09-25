@@ -2049,42 +2049,17 @@ func (s *NativeDoltStore) Children(parentID string, opts ...QueryOpt) ([]Bead, e
 // WaitForParentProjection blocks until native dependency queries reflect a
 // successful reparent from oldParentID to newParentID for id.
 func (s *NativeDoltStore) WaitForParentProjection(ctx context.Context, id, oldParentID, newParentID string) error {
-	ticker := time.NewTicker(bdParentProjectionPollInterval)
-	defer ticker.Stop()
-
-	var lastErr error
-	for {
-		current, err := s.Get(id)
-		if err == nil {
-			switch current.ParentID {
-			case newParentID:
-				matches, matchErr := s.parentProjectionMatches(id, oldParentID, newParentID)
-				if matchErr == nil && matches {
-					return nil
-				}
-				lastErr = matchErr
-			case oldParentID:
-				lastErr = nil
-			default:
-				return fmt.Errorf("updating bead %q: %w", id, ErrParentProjectionSuperseded)
-			}
-		} else {
-			lastErr = err
-		}
-		select {
-		case <-ctx.Done():
-			if lastErr != nil {
-				return fmt.Errorf("updating bead %q: waiting for parent projection from %q to %q: %w (last check error: %w)", id, oldParentID, newParentID, ctx.Err(), lastErr)
-			}
-			return fmt.Errorf("updating bead %q: waiting for parent projection from %q to %q: %w", id, oldParentID, newParentID, ctx.Err())
-		case <-ticker.C:
-		}
-	}
+	return awaitParentProjection(ctx, parentProjectionReads{get: s.Get, matches: s.parentProjectionMatches}, id, oldParentID, newParentID)
 }
 
-func (s *NativeDoltStore) parentProjectionMatches(id, oldParentID, newParentID string) (bool, error) {
+func (s *NativeDoltStore) parentProjectionMatches(ctx context.Context, id, oldParentID, newParentID string, ephemeral bool) (bool, error) {
+	opts := []QueryOpt{IncludeClosed}
+	if ephemeral {
+		// An ephemeral child lives in the wisp tier, outside the default issues tier.
+		opts = append(opts, WithBothTiers)
+	}
 	if oldParentID != "" {
-		oldChildren, err := s.Children(oldParentID)
+		oldChildren, err := s.Children(oldParentID, opts...)
 		if err != nil {
 			return false, fmt.Errorf("listing old parent %q children: %w", oldParentID, err)
 		}
@@ -2092,8 +2067,11 @@ func (s *NativeDoltStore) parentProjectionMatches(id, oldParentID, newParentID s
 			return false, nil
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return false, fmt.Errorf("%w: %w", errParentProjectionCutShort, err)
+	}
 	if newParentID != "" {
-		newChildren, err := s.Children(newParentID)
+		newChildren, err := s.Children(newParentID, opts...)
 		if err != nil {
 			return false, fmt.Errorf("listing new parent %q children: %w", newParentID, err)
 		}

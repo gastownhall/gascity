@@ -3,11 +3,20 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+const beadParentProjectionWaitTimeout = 10 * time.Second
+
+// beadUpdateDescription documents the reparent read-after-write contract
+// shared by POST /bead/{id}/update and PATCH /bead/{id}.
+var beadUpdateDescription = fmt.Sprintf("Applies the update. When it changes the parent of a bead that is not being closed (moving it to a new parent or clearing its parent), the request waits up to %d seconds until the parent-child listings reflect the change, so an immediate read of the old and new parents' children shows it (subject to those listings' usual status filters). "+
+	"A 409 (the bead was reparented or deleted concurrently), 503 (the request was canceled while waiting), or 504 (the move was not confirmed in time) can arrive after the update was applied: read the bead's current state before retrying.",
+	int(beadParentProjectionWaitTimeout/time.Second))
 
 // humaHandleBeadList is the Huma-typed handler for GET /v0/beads.
 //
@@ -886,9 +895,27 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	}
 	if opts.ParentID != nil && current.ParentID != *opts.ParentID && waitStatus != "closed" {
 		if waiter, ok := store.(beads.ParentProjectionWaiter); ok {
-			if err := waiter.WaitForParentProjection(ctx, id, current.ParentID, *opts.ParentID); err != nil {
+			waitCtx, cancel := context.WithTimeout(ctx, beadParentProjectionWaitTimeout)
+			defer cancel()
+			if err := waiter.WaitForParentProjection(waitCtx, id, current.ParentID, *opts.ParentID); err != nil {
 				if errors.Is(err, beads.ErrParentProjectionSuperseded) {
 					return nil, apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " was reparented concurrently")
+				}
+				if errors.Is(err, beads.ErrNotFound) {
+					return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
+				}
+				// Classify by why this wait stopped: its own context says so
+				// directly, whereas err may also carry an earlier backend
+				// timeout from inside the wait.
+				stopped := waitCtx.Err()
+				if stopped == nil {
+					stopped = err
+				}
+				if errors.Is(stopped, context.DeadlineExceeded) {
+					return nil, apierr.GatewayTimeout.Msg("bead " + id + " was updated, but its parent projection was not confirmed before the timeout")
+				}
+				if errors.Is(stopped, context.Canceled) {
+					return nil, apierr.ServiceUnavailable.Msg("bead " + id + " was updated, but parent projection confirmation was canceled")
 				}
 				return nil, apierr.Internal.Msg(err.Error())
 			}
