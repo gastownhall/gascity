@@ -392,3 +392,59 @@ func TestRestampHookAdoption(t *testing.T) {
 		})
 	}
 }
+
+// A ready-tier claim of a bead held under a legacy spelling whose re-stamp CAS
+// is LOST (the bead changed hands between our claim and the re-stamp) is not
+// handed out: the claim moves on to the next candidate.
+func TestDoHookClaimReadyAssignmentLostRestampMovesToNextCandidate(t *testing.T) {
+	const sessionID = "gc-sess1"
+	legacy := "claude-" + sessionID
+	runner := func(string, string) (string, error) {
+		return `[
+			{"id":"hw-legacy","status":"open","assignee":"` + legacy + `","metadata":{"gc.routed_to":"worker"}},
+			{"id":"hw-fresh","status":"open","metadata":{"gc.routed_to":"worker"}}
+		]`, nil
+	}
+	var attempts, restamps []string
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			attempts = append(attempts, beadID)
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+		RestampAdopted: func(_ context.Context, _ string, _ []string, beadID, from, to string) (bool, error) {
+			restamps = append(restamps, beadID+":"+from+">"+to)
+			return false, nil // lost CAS
+		},
+		ListContinuation: func(context.Context, string, []string, string, string) ([]beads.Bead, error) {
+			return nil, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           sessionID,
+		SessionID:          sessionID,
+		RuntimeActor:       sessionID,
+		IdentityCandidates: []string{sessionID, legacy},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got, want := strings.Join(restamps, ","), "hw-legacy:"+legacy+">"+sessionID; got != want {
+		t.Fatalf("restamps = %q, want %q", got, want)
+	}
+	if got := strings.Join(attempts, ","); got != "hw-legacy,hw-fresh" {
+		t.Fatalf("claim attempts = %q, want hw-legacy then hw-fresh", got)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.BeadID != "hw-fresh" || result.Assignee != sessionID {
+		t.Fatalf("result = %+v, want the next candidate hw-fresh claimed as %q; stderr=%s", result, sessionID, stderr.String())
+	}
+}
