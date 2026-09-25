@@ -149,6 +149,10 @@ func (s *Server) streamSessionLog(
 		turns := make([]outputTurn, 0, len(sess.Messages))
 		uuids := make([]string, 0, len(sess.Messages))
 		for _, e := range sess.Messages {
+			if e.Partial {
+				// Still growing; send it once it settles (see settledHistorySnapshot).
+				continue
+			}
 			turn := entryToTurn(e)
 			if turn.Text == "" {
 				continue
