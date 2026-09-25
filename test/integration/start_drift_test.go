@@ -502,14 +502,14 @@ func setupDriftSystemdScenario(t *testing.T) *driftScenario {
 	buildGCBinaryWithCommit(t, binaryPath, driftHappyOldCommit)
 
 	unit := writeSystemdUserUnit(t, binaryPath, gcHome, runtimeDir)
-	mustSystemctlUser(t, "daemon-reload")
-	mustSystemctlUser(t, "start", unit)
 	t.Cleanup(func() {
 		_ = systemctlUser("stop", unit)
 		_ = systemctlUser("disable", unit)
 		_ = os.Remove(filepath.Join(systemdUserUnitDir(), unit))
 		_ = systemctlUser("daemon-reload")
 	})
+	mustSystemctlUser(t, "daemon-reload")
+	mustSystemctlUser(t, "start", unit)
 
 	pollHealthBuildID(t, port, driftHappyOldCommit, driftReadyTimeout)
 	cityDir := bootstrapDriftCity(t, binaryPath, env, gcHome)
@@ -1176,11 +1176,7 @@ func sanitizeSupervisorServiceName(name string) string {
 // here directly rather than going through `gc supervisor install` so
 // the test is self-contained.
 func systemdUserUnitDir() string {
-	if dir := os.Getenv("XDG_DATA_HOME"); dir != "" {
-		return filepath.Join(dir, "systemd", "user")
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "share", "systemd", "user")
+	return filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "systemd", "user")
 }
 
 // writeSystemdUserUnit writes a minimal [Service]/[Install] unit file
