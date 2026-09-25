@@ -3,9 +3,9 @@
 - Deploy bead: `ga-dd7luh`
 - Build bead: `ga-drb140`
 - Review bead: `ga-gknp2w`
-- Reviewed commit: `70e8b787908c09162ebcfdece2e3eef86ef783e9`
-- Base: `origin/main@5eec6bba548005c0e26e23a1b09dc1c34d45dc1f`
-- Evaluated: 2026-08-17 (America/Los_Angeles)
+- Reviewed commit: `ddacb33eb0650f96f03ba5bb4e44a3f2b1520b35` (maintainer fix on top of `70e8b787908c09162ebcfdece2e3eef86ef783e9`)
+- Base: `origin/main@e9f7e957a` (fix pass); original gate base `origin/main@5eec6bba548005c0e26e23a1b09dc1c34d45dc1f`
+- Evaluated: 2026-08-17 (America/Los_Angeles); fix pass re-verified 2026-09-25
 - Result: **PASS**
 
 `docs/PROJECT_MANIFEST.md` is not present at this commit. This checklist uses
@@ -41,9 +41,9 @@ deployer prompt.
 ## Test evidence
 
 ```text
-test_cmd: go test -count=1 -v ./cmd/gc -run '^(TestAppendRigHookStoresExcludesSuspendedRig|TestEvaluatePoolFanOutSumSumsAcrossProbes|TestEvaluatePoolFanOutSumClampsAggregateOnce|TestEvaluatePoolFanOutSumNewDemandLeavesAggregateUnclamped|TestEvaluatePoolFanOutSumBestEffortOnProbeError|TestEvaluatePoolFanOutSumRunsProbesConcurrently|TestEvaluatePoolFanOutSumSharesCallerSemaphoreNotNested|TestCityScopedFanOutProbesIncludesCityAndNonSuspendedRigsOnly)$'
-test_counts: 8 PASS, 0 FAIL, 0 SKIP
-diff_tests_executed: all eight named tests PASS
+test_cmd: go test -count=1 -v ./cmd/gc -run '^(TestAppendRigHookStoresExcludesSuspendedRig|TestEvaluatePoolFanOutSumSumsAcrossProbes|TestEvaluatePoolFanOutSumClampsAggregateOnce|TestEvaluatePoolFanOutSumNewDemandLeavesAggregateUnclamped|TestEvaluatePoolFanOutSumBestEffortOnProbeError|TestEvaluatePoolFanOutSumRunsProbesConcurrently|TestEvaluatePoolFanOutSumSharesCallerSemaphoreNotNested|TestCityScopedFanOutProbesIncludesCityAndNonSuspendedRigsOnly|TestCityScopedFanOutProbesPinsEachProbeToItsOwnStore|TestCityScopedFanOutProbesNilOwnEnvKeepsNilRigEnv|TestEvaluatePoolFanOutSumPrefixesEachProbeWithItsOwnDoltEndpoint)$'
+test_counts: 11 PASS, 0 FAIL, 0 SKIP (fix pass at ddacb33e)
+diff_tests_executed: all eleven named tests PASS
 waiver_ref: none
 
 test_cmd: make test-fast-parallel
@@ -51,7 +51,13 @@ test_counts: 9 harness jobs PASS, 1 harness job FAIL, 0 SKIP reported
 failure_attribution: TestHerdrConformance -> ga-19onv3 + origin/main workspace_not_found reproduction; TestProviderLiveClaudeKindPath -> ga-cqq3hs.1 + origin/main agent_pane_busy reproduction
 
 test_cmd: make test-cmd-gc-process-parallel
-test_counts: 7 jobs PASS, 0 FAIL, 0 SKIP
+test_counts: 7 jobs PASS, 0 FAIL, 0 SKIP (re-run at ddacb33e)
+
+test_cmd: go vet ./cmd/gc; make check-docs
+test_counts: PASS (re-run at ddacb33e)
+
+test_cmd: go test -count=1 ./internal/config -run '^TestSkipRevisionSnapshot_StillDetectsPackContentChange$'
+test_counts: PASS on ddacb33e and on origin/main@e9f7e957a; the CI red lane (packages-core-2-of-4) does not reproduce locally at either ref
 
 test_cmd: go test -count=1 -v ./test/docsync
 test_counts: 13 test/subtest PASS, 0 FAIL, 0 SKIP
