@@ -1117,6 +1117,40 @@ bd_runtime_schema_cursor() {
     echo "$cursor"
 }
 
+# bd_runtime_schema_migration_count prints how many rows schema_migrations
+# holds, or 0 if the table does not exist yet. bd_runtime_store_holds_bd_tables
+# consults this as a third signal, after bd table count and the migration
+# cursor both read empty: a parked store -- no bd tables, no in-flight
+# migration -- can still carry real migration history left behind by a
+# migrator that has since exited, and that history must not be misread as a
+# genuinely fresh database (ga-m1qxc8). Returns 1 (printing nothing) on any
+# query failure, so a caller can treat "could not tell" as unknown rather
+# than as zero.
+bd_runtime_schema_migration_count() {
+    local db="$1"
+    local host exists_output exists count_output count
+    [ -n "$db" ] || return 1
+    valid_sql_name "$db" || return 1
+    host=$(connect_host)
+    exists_output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.tables WHERE table_schema = '$db' AND table_name = 'schema_migrations'" 2>/dev/null) || return 1
+    exists=$(echo "$exists_output" | tail -1 | tr -d '[:space:]')
+    case "$exists" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    if [ "$exists" -eq 0 ]; then
+        echo 0
+        return 0
+    fi
+    count_output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SELECT COUNT(*) AS cnt FROM \`$db\`.schema_migrations" 2>/dev/null) || return 1
+    count=$(echo "$count_output" | tail -1 | tr -d '[:space:]')
+    case "$count" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    echo "$count"
+}
+
 # bd_runtime_store_holds_bd_tables answers whether the database carries bd's own
 # tables, which is what decides whether `bd init --force` would create schema or
 # migrate over live rows. It has three answers and the call site needs all three:
@@ -1125,25 +1159,29 @@ bd_runtime_schema_cursor() {
 #      existing working set, and beads refuses to migrate any table holding
 #      uncommitted changes (gastownhall/beads#4566), so the reinit aborts city
 #      init instead of repairing anything.
-#   1  no, the database is genuinely empty: zero bd tables AND no
-#      schema_migrations cursor in progress. This is the fresh store gc
-#      pre-seeds metadata.json for, and reinitializing it is exactly right.
-#      Zero bd tables with a nonzero cursor is NOT this case -- it means a
-#      concurrent initializer has created schema_migrations and started
-#      migrating but hasn't reached bd's own tables yet, and answers 0 here
-#      too (see below), never 1.
+#   1  no, the database is genuinely empty: zero bd tables, no schema_migrations
+#      cursor in progress, AND no migration history left behind in
+#      schema_migrations by a migrator that has since exited. This is the fresh
+#      store gc pre-seeds metadata.json for, and reinitializing it is exactly
+#      right. Zero bd tables with a nonzero cursor is NOT this case -- it means
+#      a concurrent initializer has created schema_migrations and started
+#      migrating but hasn't reached bd's own tables yet, and answers 0 here too
+#      (see below), never 1. Neither is zero bd tables with a settled (zero)
+#      cursor but rows still sitting in schema_migrations -- a parked store a
+#      migrator already finished with and exited (ga-m1qxc8) -- for the same
+#      reason: real prior state, not a fresh database.
 #   2  could not tell, because a query did not answer.
 #
 # Collapsing 2 into either of the others is the mistake this exists to prevent.
 # Folding it into 0 turns an unreadable count into a refusal to initialize a
 # fresh city; folding it into 1 re-creates the destructive guess this whole
-# guard was added to stop. The same reasoning extends to the cursor read: a
-# zero table count whose cursor read itself fails is unknown (2), not empty,
-# because there is no way to distinguish "fresh" from "mid-migration, and the
-# probe just missed it" without the cursor answering.
+# guard was added to stop. The same reasoning extends to the cursor and
+# migration-row-count reads: either one failing on a zero table count is
+# unknown (2), not empty, because there is no way to distinguish "fresh" from
+# "settled state the probe just misread" without both answering.
 bd_runtime_store_holds_bd_tables() {
     local db="$1"
-    local count cursor
+    local count cursor mig_count
     count=$(bd_runtime_bd_table_count "$db") || return 2
     case "$count" in
         ''|*[!0-9]*) return 2 ;;
@@ -1155,7 +1193,14 @@ bd_runtime_store_holds_bd_tables() {
     case "$cursor" in
         ''|*[!0-9]*) return 2 ;;
     esac
-    [ "$cursor" -gt 0 ]
+    if [ "$cursor" -gt 0 ]; then
+        return 0
+    fi
+    mig_count=$(bd_runtime_schema_migration_count "$db") || return 2
+    case "$mig_count" in
+        ''|*[!0-9]*) return 2 ;;
+    esac
+    [ "$mig_count" -gt 0 ]
 }
 
 # bd_runtime_reinit_refusal_subject disambiguates the two live states that
