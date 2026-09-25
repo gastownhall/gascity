@@ -639,6 +639,17 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		return base.Release(ctx, dir, env, beadID, assignee)
 	}
 
+	// An adoption re-stamp of a bead resident in the relocated graph store has
+	// no conditional-transfer primitive there, so it reports unsupported and
+	// the bead is adopted as-is (the pre-re-stamp behavior). Anything else
+	// is the work store's, like the release above.
+	ops.RestampAdopted = func(ctx context.Context, dir string, env []string, beadID, fromAssignee, toAssignee string) (bool, error) {
+		if route.knownResident(beadID) {
+			return false, beads.ErrConditionalTransferUnsupported
+		}
+		return base.RestampAdopted(ctx, dir, env, beadID, fromAssignee, toAssignee)
+	}
+
 	// The lifecycle-start emission reads the step's workflow root, so it belongs
 	// in the store the claim landed in. It routes on the MEMO alone and never
 	// probes: a step this invocation did not route is one the work store
