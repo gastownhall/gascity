@@ -1189,17 +1189,26 @@ func TestCityRuntimeEnsureNudgeWakeListenerTearsDownWhenGateCloses(t *testing.T)
 	}
 }
 
-// TestCityRuntimeReloadConfigTracedActivatesNudgeWakeListener drives
+// TestCityRuntimeReloadConfigTracedUpdatesNudgeWakeListenerHosting drives
 // reloadConfigTraced itself, not a hand-rolled stand-in for it. The unit
 // test above asserts the gate logic in ensureNudgeWakeListener is correct;
 // this one asserts reloadConfigTraced actually calls it. A prior version of
 // reloadConfigTraced dropped that call, and the unit test above kept passing
 // because it invokes cr.ensureNudgeWakeListener directly rather than going
 // through reloadConfigTraced -- exactly the gap this test closes.
-func TestCityRuntimeReloadConfigTracedActivatesNudgeWakeListener(t *testing.T) {
+func TestCityRuntimeReloadConfigTracedUpdatesNudgeWakeListenerHosting(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
-	writeCityRuntimeConfig(t, tomlPath, "fake")
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
+	writeConfig := func(mode string) {
+		t.Helper()
+		data := []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n[daemon]\nnudge_dispatcher = \"" + mode + "\"\n")
+		if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+	writeConfig("supervisor")
 
 	cfg, err := config.Load(osFS{}, tomlPath)
 	if err != nil {
@@ -1221,6 +1230,9 @@ func TestCityRuntimeReloadConfigTracedActivatesNudgeWakeListener(t *testing.T) {
 		Stderr: testWriter(t),
 	})
 	cr.sessionDrains = newDrainTracker()
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cr.nudgeWakeCh = make(chan struct{}, 1)
@@ -1234,30 +1246,27 @@ func TestCityRuntimeReloadConfigTracedActivatesNudgeWakeListener(t *testing.T) {
 		}
 	})
 	cr.nudgeEvents.update(cr.sp, cr.cfg, true)
-
-	// Startup: legacy dispatcher mode on a non-event provider satisfies
-	// neither half of the gate. No listener should start.
 	cr.ensureNudgeWakeListener(ctx)
-	if cr.nudgeWakeListener != nil {
-		t.Fatal("wake listener started for a non-event provider under legacy dispatcher mode, want none")
+	if !nudgequeue.DispatcherIsHosting(cityPath) {
+		t.Fatal("DispatcherIsHosting() = false with supervisor dispatcher, want true")
 	}
 
-	// Swap in an event-capable provider directly (the config's session
-	// provider name is unchanged, so reloadConfigTraced will not rebuild
-	// it from the registry -- it carries this cr.sp forward as nextSp).
-	// This is the reload reloadConfigTraced itself must wire up correctly;
-	// unlike the unit test above, nothing here calls
-	// cr.ensureNudgeWakeListener directly.
-	cr.sp = newNudgeEventedFake()
 	lastProviderName := "fake"
+	writeConfig("legacy")
 	reply := cr.reloadConfigTraced(ctx, &lastProviderName, cityPath, nil, reloadSourceManual)
-	if reply.Outcome == reloadOutcomeFailed {
-		t.Fatalf("reloadConfigTraced failed: %s", reply.Error)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("legacy reload outcome = %q, want %q; error=%q", reply.Outcome, reloadOutcomeApplied, reply.Error)
 	}
-	if !cr.nudgeEvents.active() {
-		t.Fatal("precondition: dispatcher must report active() after reloadConfigTraced observes the event-capable provider")
+	if nudgequeue.DispatcherIsHosting(cityPath) {
+		t.Fatal("DispatcherIsHosting() = true after legacy reload, want false")
 	}
-	if cr.nudgeWakeListener == nil {
-		t.Fatal("reloadConfigTraced did not start the wake listener after the provider became event-capable")
+
+	writeConfig("supervisor")
+	reply = cr.reloadConfigTraced(ctx, &lastProviderName, cityPath, nil, reloadSourceManual)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("supervisor reload outcome = %q, want %q; error=%q", reply.Outcome, reloadOutcomeApplied, reply.Error)
+	}
+	if !nudgequeue.DispatcherIsHosting(cityPath) {
+		t.Fatal("DispatcherIsHosting() = false after supervisor reload, want true")
 	}
 }
