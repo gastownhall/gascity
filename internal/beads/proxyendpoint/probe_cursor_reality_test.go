@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // TestProbeSessionReadsTheIgnoredLanesCursorReality is council A-F2's pin.
@@ -246,11 +248,17 @@ func TestOnlyTheSessionAndTheNamedHelperMarkARealityChecked(t *testing.T) {
 // production shortcut past the session. It scans every non-test Go file in the
 // module.
 func TestServedProbeForTestIsNeverCalledInProduction(t *testing.T) {
-	_, self, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
+	// Bazel compiles with runfiles-relative paths, so runtime.Caller
+	// arithmetic lands on "." rather than the module root; the runfiles tree
+	// (//:go.mod + //:repo_source_tree in this test's data) is the module there.
+	root := bazeltest.OverrideRoot()
+	if root == "" {
+		_, self, _, ok := runtime.Caller(0)
+		if !ok {
+			t.Fatal("runtime.Caller failed")
+		}
+		root = filepath.Clean(filepath.Join(filepath.Dir(self), "..", "..", ".."))
 	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(self), "..", "..", ".."))
 	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
 		t.Fatalf("module root %s has no go.mod: %v", root, err)
 	}

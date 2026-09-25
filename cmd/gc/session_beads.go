@@ -3363,7 +3363,7 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	cfg *config.City,
 	b beads.Bead,
 	closeReason string,
-	stopReason string,
+	_ string, // stopReason: unused -- a running session is declined here, never stopped
 	now time.Time,
 	stderr io.Writer,
 ) bool {
@@ -3378,7 +3378,9 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	if hasAssignedWork {
 		return false
 	}
-	if !stopRuntimeBeforeSessionBeadMutation(store, sp, cfg, b, stopReason, stderr) {
+	sessionName := strings.TrimSpace(b.Metadata["session_name"])
+	if sessionName != "" && sp != nil && sp.IsRunning(sessionName) {
+		fmt.Fprintf(stderr, "session work guard: declining to close %s: runtime %q is still running\n", b.ID, sessionName) //nolint:errcheck
 		return false
 	}
 	hasAssignedWork, err = sessionHasOpenAssignedWorkForConfig(cityPath, cfg, store, rigStores, b)
