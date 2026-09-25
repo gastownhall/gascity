@@ -30,8 +30,10 @@ import (
 const managedHookWrapperWaitDelay = 2 * time.Second
 
 // managedWrapperMarker identifies a `gc hook run` wrapper command body within a
-// shipped hook config string.
-const managedWrapperMarker = "gc hook run --timeout"
+// shipped hook config string. It omits the gc invocation token deliberately:
+// shipped commands invoke gc as either bare `gc` or `"${GC_BIN:-gc}"` (ga-5korc0),
+// and this invariant must hold regardless of which token a given pack uses.
+const managedWrapperMarker = "hook run --timeout"
 
 func TestManagedPromptHookTimeoutExceedsWrapper(t *testing.T) {
 	root := repoRoot()
