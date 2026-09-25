@@ -273,7 +273,7 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 	}
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault:
-		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
+		if err := runtime.NudgeContext(ctx, h.provider, h.sessionName, runtime.TextContent(req.Text)); err != nil {
 			return NudgeResult{}, err
 		}
 		result = NudgeResult{Delivered: true}

@@ -1359,6 +1359,35 @@ func TestRuntimeHandleUsesWorkerBoundaryForLegacyRuntimeSession(t *testing.T) {
 	}
 }
 
+type contextNudgeRuntimeProvider struct{ *runtime.Fake }
+
+func (p *contextNudgeRuntimeProvider) NudgeContext(ctx context.Context, _ string, _ []runtime.ContentBlock) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestRuntimeHandleNudgeHonorsCallerContext(t *testing.T) {
+	sp := &contextNudgeRuntimeProvider{Fake: runtime.NewFake()}
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "stub",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = handle.Nudge(ctx, NudgeRequest{Text: "wake"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Nudge error = %v, want context canceled", err)
+	}
+}
+
 func TestRuntimeHandleExpandedWorkerSurface(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
