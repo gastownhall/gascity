@@ -96,6 +96,18 @@ const reloadOrderDrainTimeout = 1 * time.Second
 
 var orderRescanInterval = time.Minute
 
+// shouldRunOrphanRelease reports whether beadReconcileTick's cadence gate
+// should let release_orphaned_pool_assignments run on this tick: true the
+// first time (last is the zero value) or once minInterval has elapsed since
+// last, false otherwise. Interim cadence-gate mitigation for ga-57er0d;
+// remove once ga-8uf72n's off-tick convergence lane supersedes it.
+func shouldRunOrphanRelease(now, last time.Time, minInterval time.Duration) bool {
+	if last.IsZero() {
+		return true
+	}
+	return now.Sub(last) >= minInterval
+}
+
 // CityRuntime holds all running state for a single city's reconciliation
 // loop. It encapsulates the per-city lifecycle that was previously spread
 // across runController and controllerLoop. A machine-wide supervisor can
@@ -131,6 +143,21 @@ type CityRuntime struct {
 	orderRescanEnabled      bool
 	orderRescanLast         time.Time
 	trace                   *sessionReconcilerTraceManager
+
+	// orphanReleaseLast records the wall-clock time beadReconcileTick last
+	// actually finished running release_orphaned_pool_assignments — stamped
+	// on completion, not on the tick's start. The measured production sweep
+	// takes ~328s, which already exceeds orphanReleaseMinInterval (5m), so a
+	// start-time stamp would make the gate provide no real throttling: the
+	// interval would already be spent by the time the sweep returns. Interim
+	// cadence-gate mitigation for ga-57er0d; remove this field once
+	// ga-8uf72n's off-tick convergence lane supersedes it.
+	orphanReleaseLast time.Time
+
+	// orphanReleaseNowFn stubs the clock behind the orphan-release cadence
+	// gate for deterministic tests (nil means time.Now). Test-only seam,
+	// removed together with the rest of this interim mitigation.
+	orphanReleaseNowFn func() time.Time
 
 	// routeRecovery is the route-repair lane: an event-fed delta pass in the
 	// tick and a cadenced authoritative scan behind it. Created on first use so
