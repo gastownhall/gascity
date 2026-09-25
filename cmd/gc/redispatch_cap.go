@@ -108,10 +108,20 @@ func enforceDrainAckAssignedWorkCycleCap(
 	if store == nil {
 		return
 	}
-	strandedBead, found, err := firstOpenAssignedWorkBeadForReachableStore(cityPath, cfg, store, rigStores, info)
+	if clk == nil {
+		clk = clock.Real{}
+	}
+	now := clk.Now().UTC()
+	// Count against the same bead recordDrainAckAssignedWorkEvent names:
+	// drainAckClaimableAnomalyBead (#6263) is the classifier that decides a
+	// drain-ack was a genuine strand, so the cap can only ever trip on cycles
+	// the drain_acked_with_assigned_work event also fired for.
+	strandedBead, found, err := drainAckClaimableAnomalyBead(cityPath, cfg, store, rigStores, info, now)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: redispatch-cap lookup for drain-acked %s: %v\n", info.ID, err) //nolint:errcheck
-		return
+		if !found {
+			return
+		}
 	}
 	if !found {
 		return
@@ -120,10 +130,6 @@ func enforceDrainAckAssignedWorkCycleCap(
 	if ownerStore == nil {
 		return
 	}
-	if clk == nil {
-		clk = clock.Real{}
-	}
-	now := clk.Now().UTC()
 	decision := nextDrainAckAssignedWorkCycle(strandedBead, now)
 	if !decision.tripped {
 		if err := ownerStore.Update(strandedBead.ID, beads.UpdateOpts{
