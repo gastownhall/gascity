@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
+
 	workerfake "github.com/gastownhall/gascity/internal/worker/fake"
 )
 
@@ -235,6 +237,25 @@ func runFakeInteraction(t *testing.T, profile ProfileID) fakeStartupRun {
 func fakeWorkerBinary(t *testing.T) string {
 	t.Helper()
 
+	// Under bazel the fake worker is a declared go_binary in runfiles; using
+	// it removes the `go build` subprocess (no toolchain needed on remote
+	// workers) and keeps the action hermetic.
+	for _, rf := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
+		if rf == "" {
+			continue
+		}
+		base := filepath.Join(rf, "_main", "internal", "worker", "fakecmd")
+		// go_binary runfiles layout: fakecmd_/fakecmd, or a plain fakecmd.
+		for _, bin := range []string{
+			filepath.Join(base, "fakecmd_", "fakecmd"),
+			filepath.Join(base, "fakecmd"),
+		} {
+			if fileExists(bin) {
+				return bin
+			}
+		}
+	}
+
 	fakeWorkerBinaryOnce.Do(func() {
 		root, err := workerRepoRoot()
 		if err != nil {
@@ -271,6 +292,9 @@ func fakeWorkerBinary(t *testing.T) string {
 }
 
 func workerRepoRoot() (string, error) {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root, nil
+	}
 	_, file, _, ok := goruntime.Caller(0)
 	if !ok {
 		return "", fmt.Errorf("resolve caller path")
@@ -326,4 +350,9 @@ func waitForWorkerFakeEvent(t *testing.T, path, kind string, timeout time.Durati
 	}
 	t.Fatalf("timed out waiting for %q event in %s", kind, path)
 	return workerfake.Event{}
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

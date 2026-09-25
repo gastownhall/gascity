@@ -46,6 +46,10 @@ type fakeState struct {
 	sessionsBeadStore beads.Store // relocated sessions store; nil falls back to cityBeadStore (default backend)
 	graphBeadStore    beads.Store // relocated graph store; nil falls back to cityBeadStore (default backend)
 	ordersBeadStore   beads.Store // relocated orders store; nil falls back to cityBeadStore (default backend)
+	// bindingRelics is the boot census a test wants replayed. Absent means
+	// uncensused, which means "assume relics" — see
+	// ClassBindingHasLegacyResidents.
+	bindingRelics     map[beads.Store]bool
 	cityBeadsDiag     *beads.BeadsDiagnostic
 	cityMailProv      mail.Provider // city-level mail provider (all mail is city-scoped)
 	eventProv         events.Provider
@@ -162,6 +166,17 @@ func (f *fakeState) OrdersBeadStore() beads.OrdersStore {
 		return beads.OrdersStore{Store: f.ordersBeadStore}
 	}
 	return beads.OrdersStore{Store: f.cityBeadStore}
+}
+
+// ClassBindingHasLegacyResidents replays whatever census a test recorded in
+// bindingRelics. A store with no entry — the default for every test that never
+// thought about relics — keeps its probe, matching an uncensused controller.
+func (f *fakeState) ClassBindingHasLegacyResidents(store beads.Store) bool {
+	verdict, censused := f.bindingRelics[store]
+	if !censused {
+		return true
+	}
+	return verdict
 }
 
 func (f *fakeState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {

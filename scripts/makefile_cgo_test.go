@@ -346,7 +346,14 @@ func filteredMakefileCGOTestEnv() []string {
 		}
 		filtered = append(filtered, entry)
 	}
-	return filtered
+	// The Makefile's CGO probes invoke `go env`; with an isolated HOME that
+	// would download a toolchain into t.TempDir(), whose read-only module
+	// cache files then defeat TempDir cleanup. Pin the local toolchain and
+	// keep any module-cache writes out of the temp home.
+	return append(filtered,
+		"GOTOOLCHAIN=local",
+		"GOMODCACHE="+filepath.Join(os.TempDir(), "gc-makefile-cgo-gomodcache"),
+	)
 }
 
 func assertContains(t *testing.T, haystack, needle string) {

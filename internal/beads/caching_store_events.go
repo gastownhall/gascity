@@ -18,6 +18,33 @@ import (
 // with the full bead JSON payload. This keeps the cache fresh without
 // waiting for reconciliation.
 func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
+	c.applyEvent(eventType, payload, false)
+}
+
+// ApplyEventSnapshot applies an event whose payload is a complete bead snapshot
+// with authoritative dependency coverage, rather than a bd hook patch.
+//
+// A CachingStore emits exactly such a snapshot after reconciliation absorbs a
+// row: notifyChange marshals the whole absorbed bead, dependencies included.
+// Bead.Dependencies and Bead.Needs are omitempty, so a bead with no
+// dependencies marshals with neither key, leaving that snapshot indistinguishable
+// on the wire from a bd on_update payload — which legitimately omits
+// dependencies after a removal and must be treated as coverage-unknown.
+//
+// Guessing wrong in that direction is not a lost optimization, it is a loop: the
+// coverage-unknown path drops the dep set, clears the is_blocked verdict
+// reconciliation just installed, clears depsComplete store-wide, and stamps a
+// mutation sequence that fences the row out of the next pass' absorb. The
+// cleared verdict is therefore never repaired, every later pass sees cached nil
+// against fresh &false, calls that a change, and emits again — thousands of
+// events per minute against a completely idle backing store (ga-yoix1).
+//
+// Callers that know the payload's provenance use this entry point to say so.
+func (c *CachingStore) ApplyEventSnapshot(eventType string, payload json.RawMessage) {
+	c.applyEvent(eventType, payload, true)
+}
+
+func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, depsAuthoritative bool) {
 	if len(payload) == 0 {
 		return
 	}
@@ -226,7 +253,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 				seqMode:    seqKeep,
 				clearDirty: true,
 			})
-			c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking)
+			c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking || depsAuthoritative)
 		}
 		c.updateStatsLocked()
 		mutated = true
@@ -235,6 +262,9 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		}
 	case "bead.updated":
 		existing, cached := c.beads[b.ID]
+		// Read before absorb: dependents' readiness turns on this row's status,
+		// so only a real transition may invalidate their projection.
+		statusChanged := !cached || existing.Status != b.Status
 		if !cached || beadChanged(existing, b, false) {
 			c.noteMutationLocked(b.ID)
 			c.absorbFreshLocked(b.ID, b, time.Now(), absorbOpts{
@@ -244,11 +274,14 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 			})
 			mutated = true
 		}
-		if depsMutated := c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking); depsMutated && !mutated {
+		if depsMutated := c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking || depsAuthoritative); depsMutated && !mutated {
 			c.noteMutationLocked(b.ID)
 			mutated = true
 		}
-		if hasCacheEventField(fields, "status") && c.clearDependentReadyProjectionsLocked(b.ID) {
+		// Gating on the field's PRESENCE re-entered the reconcile loop: the
+		// emitter always carries status, and clearing nils is_blocked (ga-fnmb5).
+		if statusChanged && hasCacheEventField(fields, "status") &&
+			c.clearDependentReadyProjectionsLocked(b.ID) {
 			mutated = true
 		}
 	case "bead.closed":
@@ -262,7 +295,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 			seqMode:    seqKeep,
 			clearDirty: true,
 		})
-		c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking)
+		c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking || depsAuthoritative)
 		mutated = true
 		if c.clearDependentReadyProjectionsLocked(b.ID) {
 			mutated = true
@@ -458,6 +491,7 @@ func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) B
 	}
 	if hasCacheEventField(fields, "status") {
 		merged.Status = patch.Status
+		merged.IndefinitelyDeferred = patch.IndefinitelyDeferred
 	}
 	if hasCacheEventField(fields, "issue_type") || hasCacheEventField(fields, "type") {
 		merged.Type = patch.Type
@@ -511,7 +545,9 @@ func cacheEventConflictsCurrent(current, patch Bead, fields map[string]json.RawM
 	if hasCacheEventField(fields, "title") && current.Title != patch.Title {
 		return true
 	}
-	if hasCacheEventField(fields, "status") && current.Status != patch.Status {
+	if hasCacheEventField(fields, "status") &&
+		(current.Status != patch.Status ||
+			current.IndefinitelyDeferred != patch.IndefinitelyDeferred) {
 		return true
 	}
 	if (hasCacheEventField(fields, "issue_type") || hasCacheEventField(fields, "type")) && current.Type != patch.Type {
@@ -690,7 +726,7 @@ func (c *CachingStore) notifyChange(eventType string, b Bead) {
 	if c.onChange == nil {
 		return
 	}
-	payload, err := json.Marshal(b)
+	payload, err := EncodeBeadEventPayload(b)
 	if err != nil {
 		c.recordProblem(fmt.Sprintf("marshal %s notification", eventType), err)
 		return
@@ -767,6 +803,7 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 		old.Ref != fresh.Ref ||
 		old.Description != fresh.Description ||
 		old.Ephemeral != fresh.Ephemeral ||
+		old.IndefinitelyDeferred != fresh.IndefinitelyDeferred ||
 		!timePtrEqual(old.DeferUntil, fresh.DeferUntil) ||
 		!boolPtrEqual(old.IsBlocked, fresh.IsBlocked) {
 		return true

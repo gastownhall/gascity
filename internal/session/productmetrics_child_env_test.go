@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/execenv"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestProductMetricsDirectChildEnvSessionSubmitPoller(t *testing.T) {
@@ -36,7 +35,7 @@ func TestProductMetricsDirectChildEnvSessionSubmitPoller(t *testing.T) {
 	if err := ensureSessionSubmitPoller(dir, "worker", "session-worker"); err != nil {
 		t.Fatalf("ensureSessionSubmitPoller: %v", err)
 	}
-	deadline := time.Now().Add(testutil.ExecRaceTimeout)
+	deadline := time.Now().Add(execHangBudget)
 	var data []byte
 	for {
 		var err error
@@ -48,7 +47,7 @@ func TestProductMetricsDirectChildEnvSessionSubmitPoller(t *testing.T) {
 			t.Fatalf("read child environment snapshot: %v", err)
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("child environment snapshot was not written within %s", testutil.ExecRaceTimeout)
+			t.Fatalf("child environment snapshot was not written within %s", execHangBudget)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

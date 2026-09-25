@@ -73,6 +73,7 @@ func TestCmdInit_ExplicitPathNonTerminalStillWorks(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	disableBootstrapForTests(t)
+	stubInitRemoteImports(t)
 
 	oldRegister := registerCityWithSupervisorTestHook
 	registerCityWithSupervisorTestHook = func(_ string, _ string, _ io.Writer, _ io.Writer) (bool, int) {
@@ -101,6 +102,7 @@ func TestCmdInit_NoArgsTerminalUnchanged(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	disableBootstrapForTests(t)
+	stubInitRemoteImports(t)
 
 	oldRegister := registerCityWithSupervisorTestHook
 	registerCityWithSupervisorTestHook = func(_ string, _ string, _ io.Writer, _ io.Writer) (bool, int) {

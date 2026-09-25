@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +17,20 @@ import (
 
 const poolManagedMetadataKey = "pool_managed"
 
+// errPoolSessionNameUnavailable reports that the pool identity (its lease name,
+// or for tmux_alias pools its runtime name) is currently held by something
+// else — a live holder, or an open unconfirmed create whose runtime teardown has
+// not been confirmed. The create fails closed and the slot is retried next
+// tick, so a slot never has more than one unconfirmed generation and therefore
+// never more than one live box (ga-vcjr9).
+var errPoolSessionNameUnavailable = errors.New("pool session name unavailable")
+
+// poolRuntimeNameSuffix separates a pool instance's runtime name from the
+// runtime name config reserves for a configured named session built on the same
+// agent. Both identities are the agent's; only one of them may own the bare
+// name, and config's claim wins.
+const poolRuntimeNameSuffix = "-pool"
+
 type explicitBeadIDStore interface {
 	IDPrefix() string
 }
@@ -25,6 +40,34 @@ type poolSessionCreateIdentity struct {
 	Alias     string
 	Slot      int
 	Metadata  map[string]string
+	// TransientSlot marks a pool slot that is a rebinding chair, not an
+	// occupant identity (an expanding pool with no namepool and no canonical
+	// singleton — usesTransientPoolSlotIdentity). The identity-derived name for
+	// such a slot steps aside from the bare slot string (#5241: the slot must
+	// never reach the identity channel via GC_AGENT). Unaliased pools now run
+	// under a bead-scoped runtime name, so the step-aside only shapes the
+	// identity lease name. It threads through the create path without a
+	// signature change so the many zero-value create-path callers are
+	// unaffected.
+	TransientSlot bool
+}
+
+// poolSessionIdentifiers is the pure identity derivation needed before a pool
+// create can enter its reservation fence. sessionName is the runtime handle
+// persisted on the bead for tmux_alias pools, and the identity lease name for
+// unaliased (beadScoped) pools. availabilityNames is the complete set of runtime
+// identifiers whose availability must be proved while that fence is held: the
+// runtime handle itself, plus the bare transient identity when it is not an
+// intentional configured-named-session coexistence exemption.
+type poolSessionIdentifiers struct {
+	sessionName       string
+	availabilityNames []string
+	// beadScoped marks the unaliased lane: the persisted runtime name is
+	// PoolSessionName(template, beadID), minted from the new bead's ID, and
+	// sessionName above is only the identity lease the create must prove free
+	// (and lock) — it is never handed to the runtime. See
+	// createPoolSessionBeadWithIdentifiers.
+	beadScoped bool
 }
 
 func isPoolManagedSessionBead(bead beads.Bead) bool {
@@ -210,10 +253,11 @@ func createPoolSessionBead(
 }
 
 // createPoolSessionBeadWithAlias creates a pool session bead and persists its
-// session_name. When resolvedTmuxAlias is non-empty, that name is used in
-// place of the universal PoolSessionName derivation when the live store and
-// config reservation checks allow it. If the alias is already reserved, the
-// bead ID is appended as a "-<beadID>" suffix and that fallback is checked too.
+// session_name. For tmux_alias pools the runtime name is the resolved alias
+// (a pure function of the identity); for unaliased pools it is
+// PoolSessionName(template, beadID), and the identity-derived name is only the
+// slot's lease. Either way a held identity fails the create outright — see
+// errPoolSessionNameUnavailable.
 func createPoolSessionBeadWithAlias(
 	store beads.Store,
 	template string,
@@ -226,22 +270,76 @@ func createPoolSessionBeadWithAlias(
 	if store == nil {
 		return sessionpkg.Info{}, fmt.Errorf("session store unavailable for pool template %q", template)
 	}
-	resolvedTmuxAlias, err := validateResolvedPoolTmuxAlias(template, resolvedTmuxAlias)
+	deriveIdentity := identity
+	deriveIdentity.AgentName = strings.TrimSpace(deriveIdentity.AgentName)
+	if deriveIdentity.AgentName == "" {
+		deriveIdentity.AgentName = template
+	}
+	identifiers, err := derivePoolSessionIdentifiers(cfg, template, deriveIdentity, resolvedTmuxAlias)
 	if err != nil {
 		return sessionpkg.Info{}, err
 	}
-	instanceToken := sessionpkg.NewInstanceToken()
-	agentName := strings.TrimSpace(identity.AgentName)
-	title := targetBasename(template)
+	return createPoolSessionBeadWithIdentifiers(store, template, cfg, sessionBeads, sessionBeads, now, identity, identifiers)
+}
+
+// createPoolSessionBeadWithIdentifiers proves every derived runtime identifier
+// available and creates the bead before returning. Guarded callers invoke this
+// while holding the complete city-scoped identifier lock set; direct callers
+// retain the same fail-closed availability contract without a city lock.
+// availabilitySnapshot may be a wider frozen cross-store union, while
+// writebackSnapshot remains the mutable primary snapshot that receives the new
+// row. Keeping those roles distinct prevents a foreign holder from disappearing
+// without losing same-build addInfo updates.
+func createPoolSessionBeadWithIdentifiers(
+	store beads.Store,
+	template string,
+	cfg *config.City,
+	availabilitySnapshot *sessionBeadSnapshot,
+	writebackSnapshot *sessionBeadSnapshot,
+	now time.Time,
+	identity poolSessionCreateIdentity,
+	identifiers poolSessionIdentifiers,
+) (sessionpkg.Info, error) {
+	if store == nil {
+		return sessionpkg.Info{}, fmt.Errorf("session store unavailable for pool template %q", template)
+	}
+	providedAgentName := strings.TrimSpace(identity.AgentName)
+	agentName := providedAgentName
 	if agentName == "" {
 		agentName = template
-	} else {
+	}
+	identity.AgentName = agentName
+	if identifiers.beadScoped {
+		// Snapshot leg first: a holder the tick already sees must fail the
+		// create closed even when the store scan below cannot answer.
+		if err := ensurePoolIdentityNotHeldByOpenRow(nil, cfg, availabilitySnapshot, template, agentName); err != nil {
+			return sessionpkg.Info{}, err
+		}
+	}
+	if err := ensurePoolSessionIdentifiersAvailable(store, cfg, availabilitySnapshot, template, identity, identifiers); err != nil {
+		return sessionpkg.Info{}, err
+	}
+	if identifiers.beadScoped {
+		if err := ensurePoolIdentityNotHeldByOpenRow(store, cfg, nil, template, agentName); err != nil {
+			return sessionpkg.Info{}, err
+		}
+	}
+	instanceToken := sessionpkg.NewInstanceToken()
+	title := targetBasename(template)
+	if providedAgentName != "" {
 		title = agentName
 	}
 	explicitID := poolSessionExplicitBeadID(store, instanceToken)
-	sessionName := pendingPoolSessionName(template, instanceToken)
-	if explicitID != "" {
-		sessionName = PoolSessionName(template, explicitID)
+	runtimeName := identifiers.sessionName
+	if identifiers.beadScoped {
+		// The runtime name carries the session bead ID so an operator (or a
+		// reaper) can go from a live runtime straight to its bead. When the
+		// store cannot pre-mint the ID, a placeholder is persisted and replaced
+		// right after create (the pre-#5372 two-step).
+		runtimeName = pendingPoolSessionName(template, instanceToken)
+		if explicitID != "" {
+			runtimeName = PoolSessionName(template, explicitID)
+		}
 	}
 	meta := map[string]string{
 		"template":                  template,
@@ -253,7 +351,7 @@ func createPoolSessionBeadWithAlias(
 		"generation":                "1",
 		"continuation_epoch":        "1",
 		"instance_token":            instanceToken,
-		"session_name":              sessionName,
+		"session_name":              runtimeName,
 		poolManagedMetadataKey:      boolMetadata(true),
 	}
 	if alias := strings.TrimSpace(identity.Alias); alias != "" {
@@ -279,8 +377,8 @@ func createPoolSessionBeadWithAlias(
 	if identity.Slot > 0 {
 		meta[sessionpkg.CanonicalPoolSlotMetadata] = strconv.Itoa(identity.Slot)
 	}
-	// CreateSessionInfo projects the just-created bead (no post-create store.Get),
-	// so the returned session_name derivation + fold below run over Info directly.
+	// CreateSessionInfo projects the just-created bead (no post-create store.Get).
+	// The session_name is already final in meta, so there is no second write.
 	info, err := sessionFrontDoor(store).CreateSessionInfo(sessionpkg.CreateSpec{
 		ID:        explicitID,
 		Title:     title,
@@ -294,59 +392,241 @@ func createPoolSessionBeadWithAlias(
 	// pool-create path now that the bead ID exists (no-op unless the shadow
 	// harness is enabled).
 	recordLegacyCompareWrites(info.ID, "poolSessionCreate", meta)
-	sessionName, err = derivePoolSessionName(store, cfg, template, info.ID, resolvedTmuxAlias, sessionBeads)
-	if err != nil {
-		_ = sessionFrontDoor(store).CloseWithoutReason(info.ID)
-		return sessionpkg.Info{}, err
-	}
-	if info.SessionNameMetadata != sessionName {
-		// Byte-identical single-key SetMetadata write (SetMarker), then fold the new
-		// session_name onto the returned Info instead of hand-mirroring a raw bead.
-		if err := sessionFrontDoor(store).SetMarker(info.ID, "session_name", sessionName); err != nil {
-			_ = sessionFrontDoor(store).CloseWithoutReason(info.ID)
-			return sessionpkg.Info{}, err
+	if identifiers.beadScoped {
+		if want := PoolSessionName(template, info.ID); info.SessionNameMetadata != want {
+			if err := sessionFrontDoor(store).SetMarker(info.ID, "session_name", want); err != nil {
+				// Nothing was started under the placeholder; closing as
+				// failed_create releases the identity lease for the next tick.
+				closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, io.Discard)
+				return sessionpkg.Info{}, err
+			}
+			info = info.ApplyPatch(sessionpkg.MetadataPatch{"session_name": want})
 		}
-		info = info.ApplyPatch(sessionpkg.MetadataPatch{"session_name": sessionName})
 	}
-	if sessionBeads != nil {
-		sessionBeads.addInfo(info)
+	if writebackSnapshot != nil {
+		writebackSnapshot.addInfo(info)
 	}
 	return info, nil
 }
 
-// derivePoolSessionName picks the session_name for a fresh pool bead. When
-// resolvedTmuxAlias is non-empty and unreserved in the live store, config, and
-// current open snapshot, it wins; otherwise the bead ID is appended as a
-// deterministic suffix.
-func derivePoolSessionName(store beads.Store, cfg *config.City, template, beadID, resolvedTmuxAlias string, snapshot *sessionBeadSnapshot) (string, error) {
+// ensurePoolIdentityNotHeldByOpenRow is the identity lease for the bead-scoped
+// lane. With bead-ID runtime names the name itself no longer collides across
+// generations, so what keeps a slot at ONE unconfirmed generation is that a
+// fresh row may not be minted while an OPEN pool row of the same template and
+// identity is still an unconfirmed create — pending-create, or failed-create
+// whose runtime teardown has not been confirmed (releaseBeadScopedPoolRuntime
+// holds such a row open). This is the guarantee #5372 got from the
+// identity-derived name collision (ga-vcjr9), keyed on the identity instead of
+// the runtime name. Identities compare in their tmux-safe encoding, the same
+// encoding the lock identifiers use, so two spellings of one slot collide.
+//
+// Settled rows (asleep, active) are deliberately not leases: the planner's slot
+// occupancy already governs them, and a legacy asleep holder with no box must
+// not stall its slot (TestPoolSessionCreate_LegacyBeadIDHolderDoesNotStallTheSlot).
+func ensurePoolIdentityNotHeldByOpenRow(store beads.Store, cfg *config.City, snapshot *sessionBeadSnapshot, template, agentName string) error {
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		return nil
+	}
+	want := poolIdentitySessionName(agentName, template)
+	holds := func(info sessionpkg.Info) bool {
+		if info.Closed || !isPoolManagedSessionInfo(info) {
+			return false
+		}
+		switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
+		case sessionpkg.StateStartPending, sessionpkg.StateCreating, sessionpkg.StateFailedCreate:
+		default:
+			return false
+		}
+		if strings.TrimSpace(info.AgentName) == "" || poolIdentitySessionName(info.AgentName, template) != want {
+			return false
+		}
+		stored := strings.TrimSpace(info.Template)
+		return stored == "" || storedTemplateMatchesPoolTemplate(stored, template, cfg)
+	}
+	if snapshot != nil {
+		for _, info := range snapshot.OpenInfos() {
+			if holds(info) {
+				return fmt.Errorf("%w: template %q identity %q held by open session %s", errPoolSessionNameUnavailable, template, agentName, info.ID)
+			}
+		}
+	}
+	if store == nil {
+		return nil
+	}
+	infos, err := sessionpkg.ExactMetadataSessionCandidatesInfo(store, false,
+		map[string]string{"agent_name": agentName},
+		map[string]string{"agent_name": want})
+	if err != nil {
+		return fmt.Errorf("checking pool identity %q for template %q: %w", agentName, template, err)
+	}
+	for _, info := range infos {
+		if holds(info) {
+			return fmt.Errorf("%w: template %q identity %q held by open session %s", errPoolSessionNameUnavailable, template, agentName, info.ID)
+		}
+	}
+	return nil
+}
+
+// derivePoolSessionIdentifiers picks every identifier relevant to a fresh pool
+// bead without consulting mutable store or snapshot state. The identifiers are a
+// pure function of the pool's configured identity: the resolved tmux_alias
+// (disambiguated by pool slot when the agent expands past the first one, since
+// one alias cannot name two boxes), else the qualified instance name the
+// planner derived from config and slot. For tmux_alias pools sessionName is the
+// runtime name. For unaliased pools (beadScoped) it is only the identity lease
+// and lock identifier; the runtime name is minted from the new bead's ID in
+// createPoolSessionBeadWithIdentifiers.
+func derivePoolSessionIdentifiers(cfg *config.City, template string, identity poolSessionCreateIdentity, resolvedTmuxAlias string) (poolSessionIdentifiers, error) {
 	resolvedTmuxAlias, err := validateResolvedPoolTmuxAlias(template, resolvedTmuxAlias)
+	if err != nil {
+		return poolSessionIdentifiers{}, err
+	}
+	sessionName := resolvedTmuxAlias
+	// identityName is the bare identity-derived name before any transient
+	// step-aside. A transient slot's runtime name steps aside from it (…-pool),
+	// so the runtime-name availability check below no longer covers the identity
+	// itself; the guard after it re-asserts the identity on this unaliased lane.
+	identityName := ""
+	switch {
+	case sessionName == "":
+		identityName = poolIdentitySessionName(identity.AgentName, template)
+		sessionName = poolRuntimeSessionName(cfg, identity.AgentName, template, identity.TransientSlot)
+	case identity.Slot > 1:
+		// Slot 1 keeps the bare alias; higher slots carry their slot number so
+		// a multi-instance pool sharing one configured alias still maps each
+		// slot onto its own stable box. Assemble the full logical name including
+		// the "-<slot>" suffix, then shorten the whole thing: a tmux_alias valid
+		// exactly at MaxExplicitSessionNameLen would otherwise overflow once the
+		// suffix is appended and fail ValidateExplicitName below, locking that
+		// slot out of creation forever. boundSessionNameLength is a no-op for the
+		// common short alias, so ordinary names keep their exact form.
+		sessionName = boundSessionNameLength(sessionName + "-" + strconv.Itoa(identity.Slot))
+	}
+	if _, err := sessionpkg.ValidateExplicitName(sessionName); err != nil {
+		return poolSessionIdentifiers{}, fmt.Errorf("derived pool session_name for template %q: %w", template, err)
+	}
+	identifiers := poolSessionIdentifiers{
+		sessionName:       sessionName,
+		availabilityNames: []string{sessionName},
+		beadScoped:        identityName != "",
+	}
+	// A transient slot's runtime name stepped aside from its bare identity, so
+	// availability must also be proved for the identity itself. Another live
+	// session already holding this concrete
+	// identity must fail the slot closed, not mint a sibling box next to it
+	// (ga-vcjr9 — the loser of a race for one identity is refused, guarded by
+	// TestSelectOrCreateDependencyPoolSessionBead_BlocksWhenConcreteAliasTaken).
+	// The config-reserved step-aside is deliberately exempt: there the pool is
+	// meant to coexist with its configured named-session peer, which owns the
+	// bare name by design.
+	if identity.TransientSlot && identityName != "" && identityName != sessionName &&
+		!configuredNamedSessionReservesRuntimeName(cfg, identityName) {
+		identifiers.availabilityNames = append(identifiers.availabilityNames, identityName)
+	}
+	return identifiers, nil
+}
+
+// derivePoolSessionName is the availability-checking compatibility wrapper
+// used by focused name tests for the storeless/configless path. Guarded
+// production creates derive with their real config, acquire every corresponding
+// lock, then call the same availability checker again inside that fence.
+func derivePoolSessionName(template string, identity poolSessionCreateIdentity, resolvedTmuxAlias string, snapshot *sessionBeadSnapshot) (string, error) {
+	identifiers, err := derivePoolSessionIdentifiers(nil, template, identity, resolvedTmuxAlias)
 	if err != nil {
 		return "", err
 	}
-	if resolvedTmuxAlias == "" {
-		return PoolSessionName(template, beadID), nil
+	if err := ensurePoolSessionIdentifiersAvailable(nil, nil, snapshot, template, identity, identifiers); err != nil {
+		return "", err
 	}
-	sessionName := resolvedTmuxAlias
-	if err := ensurePoolSessionNameAvailable(store, cfg, snapshot, sessionName, beadID); err != nil {
-		if !errors.Is(err, sessionpkg.ErrSessionNameExists) {
-			return "", fmt.Errorf("checking pool session_name for template %q: %w", template, err)
-		}
-		sessionName = resolvedTmuxAlias + "-" + beadID
-	}
-	if _, err := sessionpkg.ValidateExplicitName(sessionName); err != nil {
-		return "", fmt.Errorf("derived pool session_name for template %q: %w", template, err)
-	}
-	if err := ensurePoolSessionNameAvailable(store, cfg, snapshot, sessionName, beadID); err != nil {
-		return "", fmt.Errorf("derived pool session_name for template %q: %w", template, err)
-	}
-	return sessionName, nil
+	return identifiers.sessionName, nil
 }
 
-func ensurePoolSessionNameAvailable(store beads.Store, cfg *config.City, snapshot *sessionBeadSnapshot, name, selfID string) error {
-	if openSessionNameTaken(snapshot, name, selfID) {
+func ensurePoolSessionIdentifiersAvailable(
+	store beads.Store,
+	cfg *config.City,
+	snapshot *sessionBeadSnapshot,
+	template string,
+	identity poolSessionCreateIdentity,
+	identifiers poolSessionIdentifiers,
+) error {
+	for index, name := range identifiers.availabilityNames {
+		if err := ensurePoolSessionNameAvailable(store, cfg, snapshot, name, identity.AgentName); err != nil {
+			if errors.Is(err, sessionpkg.ErrSessionNameExists) {
+				if index == 0 {
+					return fmt.Errorf("%w: template %q identity %q wants %q: %w", errPoolSessionNameUnavailable, template, identity.AgentName, name, err)
+				}
+				return fmt.Errorf("%w: template %q identity %q already held as %q: %w", errPoolSessionNameUnavailable, template, identity.AgentName, name, err)
+			}
+			return fmt.Errorf("checking pool runtime identifier %q for template %q: %w", name, template, err)
+		}
+	}
+	return nil
+}
+
+// ensurePoolSessionNameAvailable answers whether a fresh pool bead may claim
+// name. selfOwner is the pool's own configured identity: without it the
+// reservation checks in internal/session cannot tell "this identity reclaiming
+// its own runtime name" from "a stranger squatting it", and they reject the
+// pool's own name forever (the config-reservation and identifier-collision
+// lanes both key off it).
+func ensurePoolSessionNameAvailable(store beads.Store, cfg *config.City, snapshot *sessionBeadSnapshot, name, selfOwner string) error {
+	if openSessionNameTaken(snapshot, name) {
 		return fmt.Errorf("%w: %q conflicts with live pool snapshot", sessionpkg.ErrSessionNameExists, name)
 	}
-	return sessionpkg.EnsureSessionNameAvailableWithConfig(store, cfg, name, selfID)
+	return sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, name, "", selfOwner)
+}
+
+// poolRuntimeSessionName is the identity-derived name for a pool instance with
+// no configured tmux_alias. Since v1.5.0 it is the slot's identity lease and
+// lock identifier, not the persisted runtime name (that is PoolSessionName,
+// bead-ID scoped); rows minted by pre-release builds may still carry it as
+// their session_name. It is poolIdentitySessionName, except that it steps
+// aside onto a distinct "<name>-pool" name — still identity-derived, still free
+// of the bead ID — in two cases:
+//
+//   - the pool instance shares an agent that is ALSO a configured named
+//     session's template, so poolIdentitySessionName would land on the name
+//     config reserves for the named session; or
+//   - transientSlot is true, meaning identityName is a transient pool slot
+//     ("pooled-1") rather than an occupant identity. clearPoolTemplateRuntimeIdentity
+//     puts GC_AGENT on the session name, so the name must not BE the slot or the
+//     slot leaks into the identity channel (#5241; the transient sibling of the
+//     ga-vcjr9 pod leak). Namepool and canonical-singleton pools are not
+//     transient, so they keep the bare identity-derived name.
+func poolRuntimeSessionName(cfg *config.City, identityName, template string, transientSlot bool) string {
+	name := poolIdentitySessionName(identityName, template)
+	if transientSlot || configuredNamedSessionReservesRuntimeName(cfg, name) {
+		// Fold the suffix into the length bound: poolIdentitySessionName already
+		// clamped name to MaxExplicitSessionNameLen, so appending the suffix to a
+		// boundary-length identity would overflow and fail ValidateExplicitName on
+		// the create path. boundSessionNameLength is a no-op for the common short
+		// name, so ordinary pools keep the exact "<name>-pool" step-aside form; a
+		// boundary-length identity shortens deterministically to a distinct, valid
+		// name that still steps aside from the reserved runtime name.
+		name = boundSessionNameLength(name + poolRuntimeNameSuffix)
+	}
+	return name
+}
+
+// configuredNamedSessionReservesRuntimeName reports whether name is the runtime
+// session name config reserves for some configured named session. It mirrors
+// the reservation loop in session.ensureConfiguredSessionNameAvailable so the
+// pool can step aside before that check rejects it.
+func configuredNamedSessionReservesRuntimeName(cfg *config.City, name string) bool {
+	if cfg == nil || strings.TrimSpace(name) == "" {
+		return false
+	}
+	for _, named := range cfg.NamedSessions {
+		reserved := strings.TrimSpace(named.QualifiedName())
+		if reserved == "" {
+			continue
+		}
+		if config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, reserved) == name {
+			return true
+		}
+	}
+	return false
 }
 
 func validateResolvedPoolTmuxAlias(template, resolvedTmuxAlias string) (string, error) {
@@ -362,15 +642,19 @@ func validateResolvedPoolTmuxAlias(template, resolvedTmuxAlias string) (string, 
 }
 
 // openSessionNameTaken reports whether any open session bead in the snapshot
-// (other than selfID) already advertises name as its session_name.
-func openSessionNameTaken(snapshot *sessionBeadSnapshot, name, selfID string) bool {
+// already advertises name as its session_name.
+//
+// An OPEN bead holds its name even when its state is failed_create: the
+// pending-create lease has not expired, the desired-state map is keyed by
+// session name, and handing the name out twice collapses the two beads onto one
+// entry. The rollback closes the bead, and a closed one is not in this snapshot,
+// so the retry the rollback exists to enable gets the name back on the next
+// tick.
+func openSessionNameTaken(snapshot *sessionBeadSnapshot, name string) bool {
 	if snapshot == nil || strings.TrimSpace(name) == "" {
 		return false
 	}
 	for _, b := range snapshot.OpenInfos() {
-		if b.ID == selfID {
-			continue
-		}
 		if strings.TrimSpace(b.SessionNameMetadata) == name {
 			return true
 		}

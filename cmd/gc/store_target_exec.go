@@ -54,7 +54,10 @@ func setExecProjectedBackendEnvEmpty(env map[string]string) {
 // set so it never blanks an ambient credential command for providers that skip
 // the copy.
 func execProjectedBackendCopyKeys() []string {
-	return append(execProjectedBackendEnvKeys(), "BEADS_DOLT_CREDENTIAL_COMMAND")
+	return append(execProjectedBackendEnvKeys(),
+		"BEADS_DOLT_CREDENTIAL_COMMAND",
+		registryCredentialProviderEnv,
+	)
 }
 
 func copyExecProjectedBackendEnv(dst, src map[string]string) {
@@ -78,7 +81,11 @@ func gcExecStoreEnv(cityPath string, target execStoreTarget, provider string) ma
 	env["BEADS_DOLT_AUTO_START"] = ""
 	env["GC_BIN"] = ""
 	if execProviderUsesCanonicalBdScopeFiles(provider) {
-		if gcBin := resolveProviderLifecycleGCBinary(); gcBin != "" {
+		// Best effort: this env opens a store for a read or a write, and a gc
+		// whose own on-disk path was removed by an upgrade must still serve the
+		// dashboard and its supervisor's reconciler. The provider-owned lifecycle
+		// env keeps the strict pin.
+		if gcBin := bestEffortProviderLifecycleGCBinary(); gcBin != "" {
 			env["GC_BIN"] = gcBin
 		}
 	}

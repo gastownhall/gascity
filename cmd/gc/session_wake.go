@@ -224,7 +224,7 @@ const executionStalledDrainReason = "execution-stalled"
 
 func drainReasonCancelable(reason string) bool {
 	return reason != "config-drift" && reason != "orphaned" && reason != "suspended" &&
-		reason != executionStalledDrainReason
+		reason != executionStalledDrainReason && reason != idleRespawnDrainReason
 }
 
 func pendingDrainReasonCancelable(reason string) bool {
@@ -232,11 +232,16 @@ func pendingDrainReasonCancelable(reason string) bool {
 }
 
 const (
-	reconcilerDrainAckSourceKey     = "GC_DRAIN_ACK_SOURCE"
-	reconcilerDrainAckSourceValue   = "reconciler"
-	drainAckSourceAgentValue        = "agent"
-	reconcilerDrainAckReasonKey     = "GC_DRAIN_REASON"
-	reconcilerDrainAckGenerationKey = "GC_DRAIN_GENERATION"
+	reconcilerDrainAckSourceKey   = "GC_DRAIN_ACK_SOURCE"
+	reconcilerDrainAckSourceValue = "reconciler"
+	drainAckSourceAgentValue      = "agent"
+	// drainAckRequesterInstanceTokenKey binds an agent acknowledgement to the
+	// incarnation that wrote it. Pane environment is per-CHAIR state and pool
+	// chairs are recycled under the same name, so without this an ack outlives
+	// its author and the next occupant inherits it.
+	drainAckRequesterInstanceTokenKey = "GC_DRAIN_ACK_REQUESTER_INSTANCE_TOKEN"
+	reconcilerDrainAckReasonKey       = "GC_DRAIN_REASON"
+	reconcilerDrainAckGenerationKey   = "GC_DRAIN_GENERATION"
 )
 
 func setReconcilerDrainAckMetadata(sp runtime.Provider, name string, ds *drainState) error {
@@ -266,7 +271,16 @@ func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) error {
 		return fmt.Errorf("session provider is nil")
 	}
 	var errs []error
-	for _, key := range []string{"GC_DRAIN_ACK", reconcilerDrainAckSourceKey, reconcilerDrainAckReasonKey, reconcilerDrainAckGenerationKey} {
+	for _, key := range []string{
+		"GC_DRAIN_ACK",
+		reconcilerDrainAckSourceKey,
+		// Cleared with the source it belongs to: a requester stamp that outlives
+		// its acknowledgement is residue waiting for a later source to make it
+		// look like evidence.
+		drainAckRequesterInstanceTokenKey,
+		reconcilerDrainAckReasonKey,
+		reconcilerDrainAckGenerationKey,
+	} {
 		if err := sp.RemoveMeta(name, key); err != nil {
 			log.Printf("session wake: clearing reconciler drain ack metadata %s for %s: %v", key, name, err)
 			errs = append(errs, fmt.Errorf("removing %s: %w", key, err))
@@ -564,7 +578,12 @@ func advanceSessionDrainsWithSessionsTraced(
 		// Check if process exited.
 		running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, info.ID)
 		if err != nil {
-			running = false
+			if trace != nil {
+				trace.RecordDecision(TraceSiteDrainComplete, TraceReasonCode(ds.reason), TraceOutcomeSkippedLivenessError, normalizedSessionTemplateInfo(info, cfg), name, traceRecordPayload{
+					"liveness_error": err.Error(),
+				})
+			}
+			continue
 		}
 		if !running {
 			// Process exited — drain complete.
@@ -578,6 +597,32 @@ func advanceSessionDrainsWithSessionsTraced(
 				})
 			}
 			continue
+		}
+
+		// Idle-respawn is a recovery action, not permission to interrupt a
+		// session that resumed work after the probe completed. Revalidate both
+		// the assigned-work premise and runtime activity immediately before the
+		// reconciler publishes its drain acknowledgement. Observation failures
+		// fail closed and leave the session running.
+		if ds.reason == idleRespawnDrainReason {
+			eval, exists := wakeEvals[info.ID]
+			lastActivity, activityErr := workerSessionTargetLastActivityWithConfig("", store, sp, cfg, name)
+			if !exists || !idleRespawnEligible(info, eval, clk.Now()) || activityErr != nil || lastActivity.After(ds.startedAt) {
+				dt.clearIdleProbe(id)
+				if ds.ackSet {
+					_ = clearReconcilerDrainAckMetadata(sp, name)
+				}
+				dt.remove(id)
+				telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "cancel")
+				if trace != nil {
+					fields := traceRecordPayload{"activity_resumed": lastActivity.After(ds.startedAt)}
+					if activityErr != nil {
+						fields["activity_error"] = activityErr.Error()
+					}
+					trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), name, fields)
+				}
+				continue
+			}
 		}
 
 		if eval, ok := wakeEvals[info.ID]; ok &&
@@ -683,7 +728,12 @@ func advanceSessionDrainsWithSessionsTraced(
 			// before marking metadata as asleep.
 			running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, info.ID)
 			if err != nil {
-				running = false
+				if trace != nil {
+					trace.RecordDecision(TraceSiteDrainTimeout, TraceReasonCode(ds.reason), TraceOutcomeSkippedLivenessError, normalizedSessionTemplateInfo(info, cfg), name, traceRecordPayload{
+						"liveness_error": err.Error(),
+					})
+				}
+				continue
 			}
 			if !running {
 				completeDrain(info, sessFront, ds, clk)

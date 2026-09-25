@@ -1,0 +1,113 @@
+# Bazel side-by-side build + test. Does not gate the Go CI (ci.yml); runs
+# the Bazel arm against the same commit so drift is caught early.
+#
+# Execution mode is env-driven:
+#   BAZEL_REMOTE_EXECUTOR  remote execution endpoint (grpc://...). Unset = local
+#                 execution only (no remote cache/exec), which keeps this
+#                 job green on fork PRs without farm access.
+#   RBE_TLS_CERT / RBE_TLS_KEY / RBE_TLS_CA
+#                 client certificate for mTLS endpoints (optional, base64).
+#   RBE_INSTANCE  RE instance name (optional, default empty).
+name: bazel-test
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  bazel:
+    name: bazel test (side-by-side)
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 90
+    env:
+      # Hoisted so the step-level `if:` below can see it (empty on forks,
+      # where secrets are unavailable — the job then runs locally).
+      BAZEL_REMOTE_EXECUTOR: ${{ secrets.BAZEL_REMOTE_EXECUTOR }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install bazel via bazelisk
+        run: |
+          curl -sSfL -o /tmp/bazelisk \
+            https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
+          sudo install -m 0755 /tmp/bazelisk /usr/local/bin/bazel
+          # Blacksmith (gastownhall pool): the image user's ~/.cache is root-owned and the
+          # bazel JVM stats user.home/.cache regardless of HOME/output_user_root. Make it
+          # writable; also keep bazelisk state under the runner temp.
+          sudo chmod 755 /home/ubuntu
+          sudo mkdir -p /home/ubuntu/.cache && sudo chown "$(id -u):$(id -g)" /home/ubuntu/.cache
+          mkdir -p "$RUNNER_TEMP/bazel-home" && echo "BAZELISK_HOME=$RUNNER_TEMP/bazel-home" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+
+      - name: Configure remote execution (if secrets present)
+        if: env.BAZEL_REMOTE_EXECUTOR != ''
+        env:
+          RBE_TLS_CERT: ${{ secrets.RBE_TLS_CERT }}
+          RBE_TLS_KEY: ${{ secrets.RBE_TLS_KEY }}
+          RBE_TLS_CA: ${{ secrets.RBE_TLS_CA }}
+          RBE_INSTANCE: ${{ secrets.RBE_INSTANCE }}
+        run: |
+          {
+            echo 'build:remote-exec --remote_executor='"$BAZEL_REMOTE_EXECUTOR"
+            [ -n "$RBE_INSTANCE" ] && echo 'build:remote-exec --remote_instance_name='"$RBE_INSTANCE"
+            if [ -n "$RBE_TLS_CERT" ]; then
+              printf '%s' "$RBE_TLS_CERT" | base64 -d > /tmp/rbe-cert.pem
+              printf '%s' "$RBE_TLS_KEY" | base64 -d > /tmp/rbe-key.pem
+              echo 'build:remote-exec --tls_client_certificate=/tmp/rbe-cert.pem'
+              echo 'build:remote-exec --tls_client_key=/tmp/rbe-key.pem'
+              if [ -n "$RBE_TLS_CA" ]; then
+                printf '%s' "$RBE_TLS_CA" | base64 -d > /tmp/rbe-ca.pem
+                echo 'build:remote-exec --tls_certificate_authority=/tmp/rbe-ca.pem'
+              fi
+            fi
+            echo 'build --remote_download_minimal'
+            echo 'test --test_env=PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin'
+            echo 'test --test_env=HOME=/tmp/gc-test-home'
+          } > .bazelrc.local
+
+      - name: BUILD files are in sync (gazelle + repo tree)
+        run: |
+          make bazel-sync
+          git diff --exit-code || {
+            echo "BUILD files out of sync; run 'make bazel-sync' and commit the result." >&2
+            git diff | head -80 >&2
+            exit 1
+          }
+
+      - name: Writable test HOME
+        run: |
+          mkdir -p /tmp/gc-test-home
+          echo "HOME=/tmp/gc-test-home" >> "$GITHUB_ENV"
+
+      - name: bazel build //...
+        run: bazel --output_user_root="$RUNNER_TEMP"/bazel-outputs build //... $( [ -f .bazelrc.local ] && echo --config=remote-exec )
+
+      - name: bazel test //...
+        run: |
+          if [ -f .bazelrc.local ]; then
+            bazel --output_user_root="$RUNNER_TEMP"/bazel-outputs test //... --config=remote-exec --test_output=errors --keep_going
+          else
+            bazel --output_user_root="$RUNNER_TEMP"/bazel-outputs test //... --test_output=errors --keep_going
+          fi
+
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bazel-testlogs
+          path: |
+            bazel-testlogs/**/test.log
+          retention-days: 7

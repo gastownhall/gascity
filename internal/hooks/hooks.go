@@ -33,8 +33,8 @@ var configFS embed.FS
 var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "opencode", "mimocode", "groq", "cerebras", "copilot", "cursor", "pi", "omp", "kimi"}
 
 const (
-	managedPiHookVersion       = 7
-	managedOpenCodeHookVersion = 5
+	managedPiHookVersion       = 9
+	managedOpenCodeHookVersion = 6
 	managedMimoCodeHookVersion = 2
 	managedOmpHookVersion      = 2
 )
@@ -203,7 +203,7 @@ func installOverlayManaged(fs fsys.FS, cityDir, workDir, provider string) error 
 				data = normalized
 			}
 		}
-		return writeEmbeddedManaged(fs, dst, data, overlayManagedNeedsUpgrade(provider, rel))
+		return writeEmbeddedManaged(fs, dst, data, overlayManagedNeedsUpgrade(provider, rel, data))
 	})
 }
 
@@ -226,7 +226,7 @@ func writeJSONOverlayManaged(fs fsys.FS, dst string, data []byte) error {
 	return writeManagedData(fs, dst, data)
 }
 
-func overlayManagedNeedsUpgrade(provider, rel string) func([]byte) bool {
+func overlayManagedNeedsUpgrade(provider, rel string, desired []byte) func([]byte) bool {
 	if provider == "pi" && rel == path.Join(".pi", "extensions", "gc-hooks.js") {
 		return piHookNeedsUpgrade
 	}
@@ -239,7 +239,58 @@ func overlayManagedNeedsUpgrade(provider, rel string) func([]byte) bool {
 	if provider == "omp" && rel == path.Join(".omp", "hooks", "gc-hook.ts") {
 		return ompHookNeedsUpgrade
 	}
+	if provider == "cursor" && rel == path.Join(".cursor", "hooks.json") {
+		return func(existing []byte) bool {
+			return cursorHookNeedsUpgrade(existing, desired)
+		}
+	}
 	return nil
+}
+
+func cursorHookNeedsUpgrade(existing, desired []byte) bool {
+	existingCanonical, err := overlay.CanonicalJSON(existing)
+	if err != nil {
+		return false
+	}
+	for _, legacy := range cursorHookLegacyVariants(desired) {
+		legacyCanonical, err := overlay.CanonicalJSON(legacy)
+		if err == nil && bytes.Equal(existingCanonical, legacyCanonical) {
+			return true
+		}
+	}
+	return false
+}
+
+// cursorHookLegacyVariants regenerates the most recently released managed
+// .cursor/hooks.json (#3457), derived from today's desired document so the
+// match stays independent of JSON formatting. Documents released before #3457
+// differ in the command body, not just the PATH prologue, so no transformation
+// of today's document reproduces them; they are intentionally left
+// un-upgraded rather than nonexistent, and adopting one is a deliberate
+// widening decision rather than a correction. Only released shapes belong
+// here: each variant widens the set of on-disk files installOverlayManaged
+// silently overwrites as managed, so a variant no workspace can be holding
+// costs safety and buys nothing.
+func cursorHookLegacyVariants(desired []byte) [][]byte {
+	const (
+		gcAware       = `\"${GC_BIN:-gc}\"`
+		gcBare        = `gc`
+		workspacePath = `export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\"; if [ -n \"${BD_BIN:-}\" ]; then export PATH=\"${BD_BIN%/*}:$PATH\"; fi; `
+		oldPath       = `export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\"`
+	)
+	variants := make([][]byte, 0, 1)
+	// Every managed hooks.json released to date uses a bare gc command and
+	// prepends provider tool paths with &&. The BD_BIN clause and the
+	// GC_BIN-aware commands are introduced by this change, so no released
+	// document carries them and no unreleased intermediate shape needs its
+	// own variant. Pre-#3457 released documents are out of scope here by
+	// choice, not because they do not exist.
+	legacy := bytes.ReplaceAll(desired, []byte(workspacePath), []byte(oldPath+` && `))
+	legacy = bytes.ReplaceAll(legacy, []byte(gcAware), []byte(gcBare))
+	if !bytes.Equal(legacy, desired) {
+		variants = append(variants, legacy)
+	}
+	return variants
 }
 
 func piHookNeedsUpgrade(existing []byte) bool {
@@ -254,6 +305,9 @@ func piHookNeedsUpgrade(existing []byte) bool {
 		!strings.Contains(content, "mirrorTempCounter") ||
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
+		!strings.Contains(content, "GC_MANAGED_SESSION_HOOK") ||
+		!strings.Contains(content, "GC_HOOK_EVENT_NAME") ||
+		!strings.Contains(content, "pendingPrimeContext") ||
 		!strings.Contains(content, `stdio: ["ignore", "pipe", "inherit"]`) {
 		return true
 	}
@@ -297,7 +351,9 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		!strings.Contains(content, "logRunFailure") ||
 		!strings.Contains(content, "logRunStderr(stderr);") ||
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
-		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") {
+		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
+		// The child's stdin must be closed or gc blocks on it (#5562).
+		!strings.Contains(content, "pending.child.stdin?.end();") {
 		return true
 	}
 	for _, marker := range []string{
@@ -647,10 +703,10 @@ func upgradeCodexHooks(existing, desired []byte, cityDir string) ([]byte, bool, 
 	hasManagedCommand := codexHookValueHasManagedCommand(root, "")
 	needsPreCompact := codexHookDocCanAddPreCompact(root)
 	changed := upgradeCodexHookValue(root, "", cityDir)
-	if desiredCodexPreCompactHook(desired) != nil && normalizeCodexManagedHookEntries(root, cityDir) {
+	if desiredCodexPreCompactHook(desired) != nil && normalizeCodexManagedHookEntries(root) {
 		changed = true
 	}
-	if addCodexPreCompactHook(root, desired) {
+	if addCodexPreCompactHook(root, desired, cityDir) {
 		changed = true
 	}
 	data, err := overlay.MarshalCanonicalJSON(root)
@@ -670,7 +726,7 @@ func normalizeCodexHookCommands(existing []byte, cityDir string) ([]byte, bool, 
 	}
 	hasManagedCommand := codexHookValueHasManagedCommand(root, "")
 	changed := upgradeCodexHookValue(root, "", cityDir)
-	if normalizeCodexManagedHookEntries(root, cityDir) {
+	if normalizeCodexManagedHookEntries(root) {
 		changed = true
 	}
 	data, err := overlay.MarshalCanonicalJSON(root)
@@ -706,7 +762,7 @@ func CodexHooksNeedManagedUpgrade(data []byte, cityDir string) bool {
 
 func applyCodexManagedHookUpgrade(root any, desired []byte, cityDir string) bool {
 	changed := upgradeCodexHookValue(root, "", cityDir)
-	if addCodexPreCompactHook(root, desired) {
+	if addCodexPreCompactHook(root, desired, cityDir) {
 		changed = true
 	}
 	return changed
@@ -788,7 +844,7 @@ func upgradeCodexHookValue(v any, event, cityDir string) bool {
 	}
 }
 
-func normalizeCodexManagedHookEntries(root any, cityDir string) bool {
+func normalizeCodexManagedHookEntries(root any) bool {
 	doc, ok := root.(map[string]any)
 	if !ok {
 		return false
@@ -807,7 +863,7 @@ func normalizeCodexManagedHookEntries(root any, cityDir string) bool {
 		seenManaged := map[string]bool{}
 		for _, entry := range entries {
 			if event == "SessionStart" {
-				if normalizeCodexManagedSessionStartEntry(entry, cityDir) {
+				if normalizeCodexManagedSessionStartEntry(entry) {
 					changed = true
 				}
 			}
@@ -831,9 +887,9 @@ func normalizeCodexManagedHookEntries(root any, cityDir string) bool {
 	return changed
 }
 
-func normalizeCodexManagedSessionStartEntry(entry any, cityDir string) bool {
+func normalizeCodexManagedSessionStartEntry(entry any) bool {
 	entryMap, ok := entry.(map[string]any)
-	if !ok || !codexHookEntryHasCommandBody(entryMap, sessionStartCurrentFormBody(cityDir)) {
+	if !ok || !codexHookValueHasManagedCommand(entryMap, "SessionStart") {
 		return false
 	}
 	if matcher, ok := entryMap["matcher"].(string); !ok || matcher != "startup" {
@@ -843,29 +899,8 @@ func normalizeCodexManagedSessionStartEntry(entry any, cityDir string) bool {
 	return false
 }
 
-func codexHookEntryHasCommandBody(entry map[string]any, body string) bool {
-	hooksValue, ok := entry["hooks"].([]any)
-	if !ok {
-		return false
-	}
-	for _, hookValue := range hooksValue {
-		hookMap, ok := hookValue.(map[string]any)
-		if !ok {
-			continue
-		}
-		command, ok := hookMap["command"].(string)
-		if !ok {
-			continue
-		}
-		if commandBodyAfterCanonicalPrefix(command) == body {
-			return true
-		}
-	}
-	return false
-}
-
 func codexHookCommandLooksManaged(event, command string) bool {
-	_, env, args, ok := parseManagedGCCommand(command)
+	_, _, env, args, ok := parseManagedGCCommand(command)
 	if !ok {
 		return false
 	}
@@ -885,7 +920,7 @@ func codexHookCommandLooksManaged(event, command string) bool {
 }
 
 func upgradeCodexHookCommand(event, command, cityDir string) (string, bool) {
-	prefix, env, args, ok := parseManagedGCCommand(command)
+	prefix, gcToken, env, args, ok := parseManagedGCCommand(command)
 	if !ok {
 		return "", false
 	}
@@ -894,13 +929,13 @@ func upgradeCodexHookCommand(event, command, cityDir string) (string, bool) {
 		if !codexSessionStartArgsMatch(env, args) && !codexLegacySessionStartRunArgsMatch(args) {
 			return "", false
 		}
-		desired := sessionStartCurrentFormBody(cityDir)
+		desired := sessionStartCurrentFormBody(cityDir, gcToken)
 		return prefix + desired, strings.TrimPrefix(command, prefix) != desired
 	case "PreCompact":
 		if !codexPreCompactArgsMatch(args) {
 			return "", false
 		}
-		desired := preCompactCurrentFormBody(cityDir)
+		desired := preCompactCurrentFormBody(cityDir, gcToken)
 		return prefix + desired, strings.TrimPrefix(command, prefix) != desired
 	case "UserPromptSubmit":
 		return upgradeManagedPromptHookCommand(command, "codex", cityDir)
@@ -909,23 +944,23 @@ func upgradeCodexHookCommand(event, command, cityDir string) (string, bool) {
 			return upgraded, true
 		}
 		if codexSessionStartArgsMatch(env, args) || codexLegacySessionStartRunArgsMatch(args) {
-			desired := sessionStartCurrentFormBody(cityDir)
+			desired := sessionStartCurrentFormBody(cityDir, gcToken)
 			return prefix + desired, strings.TrimPrefix(command, prefix) != desired
 		}
 		if codexPreCompactArgsMatch(args) {
-			desired := preCompactCurrentFormBody(cityDir)
+			desired := preCompactCurrentFormBody(cityDir, gcToken)
 			return prefix + desired, strings.TrimPrefix(command, prefix) != desired
 		}
 		return "", false
 	}
 }
 
-func managedPromptHookRunPrefix(cityDir string) string {
-	return `gc ` + codexCityFlag(cityDir) + `hook run --timeout 15s --timeout-exit-code 0 -- `
+func managedPromptHookRunPrefix(cityDir, gcToken string) string {
+	return gcToken + ` ` + codexCityFlag(cityDir) + `hook run --timeout 15s --timeout-exit-code 0 -- `
 }
 
 func upgradeManagedPromptHookCommand(command, hookFormat, cityDir string) (string, bool) {
-	prefix, _, args, ok := parseManagedGCCommand(command)
+	prefix, gcToken, _, args, ok := parseManagedGCCommand(command)
 	if !ok {
 		return "", false
 	}
@@ -933,7 +968,7 @@ func upgradeManagedPromptHookCommand(command, hookFormat, cityDir string) (strin
 	if !ok {
 		return "", false
 	}
-	desired := managedPromptHookRunPrefix(cityDir) + target
+	desired := managedPromptHookRunPrefix(cityDir, gcToken) + target
 	return prefix + desired, strings.TrimPrefix(command, prefix) != desired
 }
 
@@ -1063,16 +1098,20 @@ func isManagedGCCommandEnvKey(key string) bool {
 	}
 }
 
-func parseManagedGCCommand(command string) (string, map[string]string, []string, bool) {
+func parseManagedGCCommand(command string) (string, string, map[string]string, []string, bool) {
 	prefix := ""
 	body := command
-	if strings.HasPrefix(body, canonicalGCPathPrefix) {
+	switch {
+	case strings.HasPrefix(body, canonicalGCPathPrefix):
 		prefix = canonicalGCPathPrefix
 		body = strings.TrimPrefix(body, canonicalGCPathPrefix)
+	case strings.HasPrefix(body, canonicalGCPathPrefixAppend):
+		prefix = canonicalGCPathPrefixAppend
+		body = strings.TrimPrefix(body, canonicalGCPathPrefixAppend)
 	}
 	tokens := shellquote.Split(body)
 	if len(tokens) == 0 {
-		return "", nil, nil, false
+		return "", "", nil, nil, false
 	}
 	env := map[string]string{}
 	var envTokens []string
@@ -1093,11 +1132,17 @@ func parseManagedGCCommand(command string) (string, map[string]string, []string,
 		envTokens = append(envTokens, tokens[i])
 		i++
 	}
-	if i >= len(tokens) || tokens[i] != "gc" {
-		return "", nil, nil, false
+	var gcToken string
+	switch {
+	case i < len(tokens) && tokens[i] == "gc":
+		gcToken = "gc"
+	case i < len(tokens) && tokens[i] == managedGCBinToken:
+		gcToken = managedGCBinInvocation
+	default:
+		return "", "", nil, nil, false
 	}
 	if len(envTokens) > 0 && prefix == "" && !hasManagedEnv {
-		return "", nil, nil, false
+		return "", "", nil, nil, false
 	}
 	if len(extraEnvTokens) > 0 {
 		prefix += shellquote.Join(extraEnvTokens) + " "
@@ -1108,7 +1153,7 @@ func parseManagedGCCommand(command string) (string, map[string]string, []string,
 	} else if len(args) >= 1 && strings.HasPrefix(args[0], "--city=") {
 		args = args[1:]
 	}
-	return prefix, env, args, true
+	return prefix, gcToken, env, args, true
 }
 
 func codexSessionStartArgsMatch(env map[string]string, args []string) bool {
@@ -1184,7 +1229,7 @@ func codexManagedPromptTargetArgs(args []string, hookFormat string) (string, boo
 	}
 }
 
-func addCodexPreCompactHook(root any, desired []byte) bool {
+func addCodexPreCompactHook(root any, desired []byte, cityDir string) bool {
 	if !codexHookDocCanAddPreCompact(root) {
 		return false
 	}
@@ -1194,8 +1239,93 @@ func addCodexPreCompactHook(root any, desired []byte) bool {
 	if preCompact == nil {
 		return false
 	}
+	if prefix, gcToken, ok := findCodexManagedCommandShape(root); ok {
+		rewriteCodexCommands(preCompact, prefix+preCompactCurrentFormBody(cityDir, gcToken))
+	}
 	hooksMap["PreCompact"] = preCompact
 	return true
+}
+
+// findCodexManagedCommandShape scans an existing managed Codex hooks doc for
+// any recognized managed command and reports the shape (PATH-prefix and gc
+// invocation token) it uses, so a newly-added hook (PreCompact) can be
+// reconstructed in the same shape instead of always emitting the embedded
+// overlay's shape verbatim. The prefix is re-derived from the original
+// command text via direct HasPrefix checks against the two known constants,
+// not from parseManagedGCCommand's combined prefix return, so that any extra
+// env tokens a user added to an existing managed command never leak into the
+// freshly-added command.
+func findCodexManagedCommandShape(v any) (string, string, bool) {
+	var prefix, gcToken string
+	var found bool
+	var walk func(any, string)
+	walk = func(node any, event string) {
+		if found {
+			return
+		}
+		switch n := node.(type) {
+		case map[string]any:
+			for key, val := range n {
+				if found {
+					return
+				}
+				if key == "hooks" {
+					if hooksMap, ok := val.(map[string]any); ok {
+						for eventName, eventVal := range hooksMap {
+							walk(eventVal, eventName)
+						}
+						continue
+					}
+				}
+				if key == "command" {
+					if command, ok := val.(string); ok && codexHookCommandLooksManaged(event, command) {
+						switch {
+						case strings.HasPrefix(command, canonicalGCPathPrefixAppend):
+							prefix = canonicalGCPathPrefixAppend
+						case strings.HasPrefix(command, canonicalGCPathPrefix):
+							prefix = canonicalGCPathPrefix
+						default:
+							prefix = ""
+						}
+						if _, token, _, _, ok := parseManagedGCCommand(command); ok {
+							gcToken = token
+							found = true
+						}
+					}
+					continue
+				}
+				walk(val, event)
+			}
+		case []any:
+			for _, elem := range n {
+				walk(elem, event)
+			}
+		}
+	}
+	walk(v, "")
+	return prefix, gcToken, found
+}
+
+// rewriteCodexCommands overwrites every "command" leaf found in v in place
+// with command, walking arbitrary managed-hook JSON structure (a single hook
+// entry, an event's entry list, or a full hooks map).
+func rewriteCodexCommands(v any, command string) {
+	switch n := v.(type) {
+	case map[string]any:
+		for key, val := range n {
+			if key == "command" {
+				if _, ok := val.(string); ok {
+					n[key] = command
+				}
+				continue
+			}
+			rewriteCodexCommands(val, command)
+		}
+	case []any:
+		for _, elem := range n {
+			rewriteCodexCommands(elem, command)
+		}
+	}
 }
 
 func codexHookDocCanAddPreCompact(root any) bool {
@@ -1423,6 +1553,28 @@ func upgradeClaudeHookEntry(event string, entry map[string]any) bool {
 // or with this prefix; user-wrapped variants never have this exact prefix.
 const canonicalGCPathPrefix = `export PATH="$HOME/go/bin:$HOME/.local/bin:$PATH" && `
 
+// canonicalGCPathPrefixAppend is the current-form env-setup prefix: it
+// appends the gc install dirs to PATH instead of prepending them, so a
+// pre-existing "gc" already on the user's PATH is never shadowed by a
+// stale binary under $HOME/go/bin or $HOME/.local/bin (gc-af7ad8a0fe).
+// Recognized alongside canonicalGCPathPrefix by parseManagedGCCommand (the
+// Codex/prompt-hook upgrade path); the Claude legacy helpers
+// (commandBodyAfterCanonicalPrefix, isLegacyGCManagedCommand) still strip
+// only the prepend form.
+const canonicalGCPathPrefixAppend = `export PATH="$PATH:$HOME/go/bin:$HOME/.local/bin" && `
+
+// managedGCBinToken is the dequoted form of the current-form gc invocation
+// token as shellquote.Split tokenizes it (quotes stripped, no $ expansion).
+// managedGCBinInvocation is the same token in its quoted, source-text form,
+// used when reconstructing a command string. Both forms are recognized on
+// parse; which one round-trips on upgrade depends on which shape the
+// original command already used (shape-preserving upgrades never flip a
+// bare "gc" to "${GC_BIN:-gc}" or vice versa).
+const (
+	managedGCBinToken      = `${GC_BIN:-gc}`
+	managedGCBinInvocation = `"${GC_BIN:-gc}"`
+)
+
 // commandBodyAfterCanonicalPrefix returns the portion of command following
 // the canonical gc PATH-export prefix if present, else returns command
 // unchanged. Used to anchor legacy-form matching against the post-prefix
@@ -1471,8 +1623,8 @@ func isLegacyGCManagedCommand(event, command string) bool {
 // full env-var preamble. If gc ever extends the current-form command
 // with additional arguments, update this constant alongside the
 // emission site so legacy detection remains tight.
-func sessionStartCurrentFormBody(cityDir string) string {
-	return `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc ` + codexCityFlag(cityDir) + `prime --hook --hook-format codex`
+func sessionStartCurrentFormBody(cityDir, gcToken string) string {
+	return `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart ` + gcToken + ` ` + codexCityFlag(cityDir) + `prime --hook --hook-format codex`
 }
 
 const sessionStartPreviousManagedFormBody = `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`
@@ -1480,8 +1632,8 @@ const sessionStartPreviousManagedFormBody = `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_E
 // preCompactCurrentFormBody is the canonical current-form managed PreCompact
 // command body (post-canonical-PATH-prefix). If gc ever extends this command
 // with additional arguments, update this constant alongside the emission site.
-func preCompactCurrentFormBody(cityDir string) string {
-	return `gc ` + codexCityFlag(cityDir) + `handoff --auto --hook-format codex "context cycle"`
+func preCompactCurrentFormBody(cityDir, gcToken string) string {
+	return gcToken + ` ` + codexCityFlag(cityDir) + `handoff --auto --hook-format codex "context cycle"`
 }
 
 // equalsLegacyCommandBody reports whether the command body is exactly the
@@ -1536,7 +1688,7 @@ func upgradeClaudeHookCommand(event, command string) (string, bool) {
 			equalsLegacyCommandBody(body, `gc prime --hook --hook-format codex`) ||
 			equalsLegacyCommandBody(body, sessionStartPreviousManagedFormBody) {
 			prefix := strings.TrimSuffix(command, body)
-			return prefix + sessionStartCurrentFormBody(""), true
+			return prefix + sessionStartCurrentFormBody("", "gc"), true
 		}
 	case "UserPromptSubmit":
 		return upgradeManagedPromptHookCommand(command, "", "")

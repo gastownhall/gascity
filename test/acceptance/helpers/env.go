@@ -11,6 +11,18 @@ import (
 	"strings"
 )
 
+// acceptanceGitConfig mirrors scripts/test-gitconfig-path. beads.role is the
+// load-bearing key: gc doctor errors without it and gc-beads-bd's
+// ensure_beads_role otherwise tries to write it to the host.
+const acceptanceGitConfig = `[user]
+	name = gc-test
+	email = gc-test@test.local
+[beads]
+	role = maintainer
+[safe]
+	directory = *
+`
+
 // Env builds an isolated environment for acceptance tests.
 // It filters the host environment to a safe allowlist, then layers
 // test-specific overrides on top.
@@ -30,6 +42,12 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	for _, key := range []string{
 		"PATH", "TMPDIR", "LANG", "LC_ALL", "USER", "HOME",
 		"SHELL", "SSH_AUTH_SOCK", "TERM",
+		// The Makefile's TEST_ENV points these at scripts/test-gitconfig-path, a
+		// seeded writable global gitconfig carrying user.name, user.email and
+		// beads.role=maintainer. Dropping them sent the child's reads at the
+		// runner's real global config, which has no beads.role, so `gc doctor`
+		// failed its beads-role check on any host that had never opted in.
+		"GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM",
 		"CLAUDE_CONFIG_DIR", // Claude Code reads OAuth credentials from here
 		"ANTHROPIC_AUTH_TOKEN",
 		"ANTHROPIC_API_KEY",
@@ -83,6 +101,41 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 		}
 	}
 	e.vars["GC_HOME"] = gcHome
+
+	// Dolt reads its global config from $DOLT_ROOT_PATH/.dolt/config_global.json,
+	// falling back to $HOME. gc's init preflight (checkDoltAuthorIdentity) probes
+	// it with `dolt config --global --get` and has no fallback to any other
+	// config source, so a shape that drops GC_DOLT=skip refuses to init on a
+	// machine whose home never ran `dolt config --global`. Leaning on the host's
+	// ambient identity made that a coin flip: green on a developer box, red on a
+	// fresh CI runner. Seed under GC_HOME rather than the real home so a run
+	// never writes host Dolt state -- the same pattern tier_c, tutorial_goldens
+	// and test/integration already use.
+	doltRoot := filepath.Join(gcHome, ".dolt")
+	if err := os.MkdirAll(doltRoot, 0o755); err != nil {
+		panic(fmt.Sprintf("acceptance: creating dolt root under %s: %v", gcHome, err))
+	}
+	doltCfg := `{"user.name":"gc-test","user.email":"gc-test@test.local"}`
+	if err := os.WriteFile(filepath.Join(doltRoot, "config_global.json"), []byte(doltCfg), 0o644); err != nil {
+		panic(fmt.Sprintf("acceptance: seeding dolt identity under %s: %v", doltRoot, err))
+	}
+	e.vars["DOLT_ROOT_PATH"] = gcHome
+
+	// The Makefile points GIT_CONFIG_GLOBAL at scripts/test-gitconfig-path, but a
+	// caller that runs `go test -tags acceptance_a` directly supplies no seed at
+	// all, and the child then reads the host's real global config. That is how
+	// gc doctor's beads-role check failed on a CI runner that had never opted in
+	// — and it is also how gc-beads-bd's ensure_beads_role could write into a
+	// developer's own global config. Seed one under GC_HOME instead.
+	if e.vars["GIT_CONFIG_GLOBAL"] == "" {
+		gitConfig := filepath.Join(gcHome, "gitconfig")
+		if err := os.WriteFile(gitConfig, []byte(acceptanceGitConfig), 0o644); err != nil {
+			panic(fmt.Sprintf("acceptance: seeding global git config at %s: %v", gitConfig, err))
+		}
+		e.vars["GIT_CONFIG_GLOBAL"] = gitConfig
+		e.vars["GIT_CONFIG_NOSYSTEM"] = "1"
+	}
+
 	e.vars["XDG_RUNTIME_DIR"] = runtimeDir
 	tmuxTmpDir := filepath.Join(runtimeDir, "tmux")
 	if err := os.MkdirAll(tmuxTmpDir, 0o700); err != nil {
@@ -120,6 +173,17 @@ func installServiceManagerShims(gcHome string) (string, error) {
 		}
 	}
 	return shimDir, nil
+}
+
+// Clone returns an independent copy. Tier A shares one Env across the whole
+// package, and With mutates in place, so a test that needs its own PATH or
+// provider selection must take a copy rather than reach into the shared one.
+func (e *Env) Clone() *Env {
+	clone := &Env{vars: make(map[string]string, len(e.vars))}
+	for k, v := range e.vars {
+		clone.vars[k] = v
+	}
+	return clone
 }
 
 // With sets a variable, returning the Env for chaining.

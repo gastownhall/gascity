@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -693,6 +694,8 @@ type AgentOverride struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// ContextAdvisory overrides context-pressure guidance for this agent.
+	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty"`
 	// Upstream overrides the model-serving endpoint selection (Phase C).
 	Upstream *string `toml:"upstream,omitempty"`
 	// Args overrides the provider's default arguments. Leave unset to keep
@@ -719,6 +722,9 @@ type AgentOverride struct {
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
+	// AutoReclaimStaleClaims overrides Agent.AutoReclaimStaleClaims (see that
+	// field for semantics).
+	AutoReclaimStaleClaims *bool `toml:"auto_reclaim_stale_claims,omitempty"`
 	// InstallAgentHooks overrides the agent's install_agent_hooks list.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
 	// Skills is a tombstone field retained for v0.15.1 backwards
@@ -1121,6 +1127,16 @@ type PackRuntimeEntry struct {
 	// the only version today; the declaration exists so future protocol
 	// bumps fail at composition instead of at session start.
 	Protocol int `toml:"protocol,omitempty"`
+	// PromptDelivery opts this runtime into a non-default oversized-prompt
+	// delivery strategy (cmd/gc promptDeliverySupportFor). Unset (the zero
+	// value) keeps today's behavior: an oversized prompt hard-fails for any
+	// runtime this package cannot positively classify. The only other
+	// accepted value is "nudge-fallback", asserting the runtime has a
+	// working post-start Nudge path an oversized prompt can reroute
+	// through. This is a pack-composition-time assertion, not something gc
+	// verifies against the runtime executable — see
+	// docs/reference/specs/pack-spec.md sec 1.2.8.
+	PromptDelivery string `toml:"prompt_delivery,omitempty" jsonschema:"enum=nudge-fallback"`
 }
 
 // PackCommandEntry declares a CLI subcommand provided by a pack.
@@ -1162,16 +1178,17 @@ func (r *Rig) EffectivePrefix() string {
 	return DeriveBeadsPrefix(r.Name)
 }
 
-// Coordination class names, mirroring coordclass.Class.String(). They are part of
-// the [beads.classes.<name>] config contract and must not change without a
-// migration.
+// Coordination class names. They are part of the [beads.classes.<name>] config
+// contract and must not change without a migration. They no longer MIRROR
+// coordclass.Class.String() — both spell the same beadmeta constants, so the
+// two vocabularies cannot drift apart.
 const (
-	BeadClassWork      = "work"
-	BeadClassGraph     = "graph"
-	BeadClassMessaging = "messaging"
-	BeadClassSessions  = "sessions"
-	BeadClassOrders    = "orders"
-	BeadClassNudges    = "nudges"
+	BeadClassWork      = beadmeta.ClassNameWork
+	BeadClassGraph     = beadmeta.ClassNameGraph
+	BeadClassMessaging = beadmeta.ClassNameMessaging
+	BeadClassSessions  = beadmeta.ClassNameSessions
+	BeadClassOrders    = beadmeta.ClassNameOrders
+	BeadClassNudges    = beadmeta.ClassNameNudges
 )
 
 // EffectiveDefaultBranch returns the rig's recorded default branch, or the
@@ -1744,7 +1761,19 @@ type ACPSessionConfig struct {
 	// OutputBufferLines is the number of output lines to keep in the
 	// circular buffer for Peek. Defaults to 1000.
 	OutputBufferLines int `toml:"output_buffer_lines,omitempty" jsonschema:"default=1000"`
+	// StopGrace is how long stopping an ACP session waits after SIGTERM
+	// before escalating to SIGKILL. Raise it for agents that need longer to
+	// drain in-flight tool calls on shutdown. Duration string (e.g., "5s",
+	// "20s"). Defaults to "5s"; non-positive or unparseable values fall back
+	// to the default. gc stop bounds each session at 30s, so keep stop_grace
+	// comfortably below that.
+	StopGrace string `toml:"stop_grace,omitempty" jsonschema:"default=5s"`
 }
+
+// DefaultACPStopGrace is the ACP SIGTERM-to-SIGKILL grace used when
+// [session.acp] stop_grace is unset or invalid. It matches the grace every
+// managed-process runtime uses.
+const DefaultACPStopGrace = 5 * time.Second
 
 // HandshakeTimeoutDuration returns the handshake timeout as a time.Duration.
 // Defaults to 30s if empty or unparseable.
@@ -1756,6 +1785,15 @@ func (a *ACPSessionConfig) HandshakeTimeoutDuration() time.Duration {
 // Defaults to 60s if empty or unparseable.
 func (a *ACPSessionConfig) NudgeBusyTimeoutDuration() time.Duration {
 	return durationOr(a.NudgeBusyTimeout, 60*time.Second)
+}
+
+// StopGraceDuration returns the ACP stop grace as a time.Duration.
+// Defaults to DefaultACPStopGrace if empty, unparseable, or non-positive.
+func (a *ACPSessionConfig) StopGraceDuration() time.Duration {
+	if d := durationOr(a.StopGrace, DefaultACPStopGrace); d > 0 {
+		return d
+	}
+	return DefaultACPStopGrace
 }
 
 // OutputBufferLinesOrDefault returns the output buffer line count.
@@ -1794,8 +1832,11 @@ type MailConfig struct {
 	// Provider selects the mail backend: "fake", "fail",
 	// "exec:<script>", or "" (default: beadmail).
 	Provider string `toml:"provider,omitempty"`
-	// RetentionTTL is how long read messages are retained before purge. Empty
-	// or "0" disables read-message retention.
+	// RetentionTTL has two consumers: it is how long read messages are
+	// retained before purge, and how long a read mail bead stays open before
+	// the nudge-mail sweep closes it. Empty or "0" disables read-message
+	// purge. The sweep distinguishes the two: empty leaves it at its own
+	// 60-minute default, while "0" disables its mail-close phase.
 	RetentionTTL string `toml:"retention_ttl,omitempty"`
 }
 
@@ -1909,21 +1950,31 @@ const (
 	// DefaultDoltMaxConnections is the managed Dolt listener connection cap.
 	DefaultDoltMaxConnections = 256
 	// DefaultDoltReadTimeoutMillis is the managed Dolt listener read timeout.
-	// Managed multi-agent cities open a short-lived bd/dolt-sql client
-	// connection per operation and frequently SIGKILL it on a client-side
-	// deadline (e.g. agents wrap `gc hook` in `timeout 10`), so the server
-	// orphans the socket in Sleep until read_timeout fires. Lowering this from
-	// the former 30s reaps those dead per-call connections sooner, before they
-	// accumulate into a store-wide read collapse under load. read_timeout is the
-	// listener socket idle/produce timeout: it reaps idle (Sleep) connections
-	// and bounds the inter-row produce gap (go-mysql-server ErrRowTimeout
-	// re-arms per row), not total query wall-clock — so it does not cut a long
-	// but steadily-producing query. Do NOT drop it to/below the client kill
-	// budget (`timeout 10`) on the assumption it is purely idle-reaping. Cities
-	// with slower live operations raise it via city.toml [dolt]
-	// read_timeout_millis. See #3022 (5m->30s) and the scale_check storm RCA
-	// (30s->15s).
-	DefaultDoltReadTimeoutMillis = 15000
+	// read_timeout is go-mysql-server's ONLY idle-connection reaper:
+	// wait_timeout (DefaultDoltWaitTimeoutSeconds) is accepted, stored, and
+	// reported by the server, but reaps nothing on dolt 2.2.3 (measured for
+	// #5383). In code ErrRowTimeout re-arms per row, but plan shapes that
+	// produce no rows until they finish — recursive CTEs, aggregates, large
+	// UPDATEs — never re-arm it, so in practice read_timeout behaves as a
+	// wall-clock cap on the whole result-production phase, not merely an
+	// inter-row gap bound. It is fixed at handler construction: neither SET
+	// SESSION nor SET GLOBAL changes the effective value at runtime, only the
+	// server config file plus a restart.
+	//
+	// Raised from 15000 to 120000 after #5383 (the Reaper's own maintenance
+	// query was killed mid-production by the old 15s bound). #5053 introduced
+	// the wait_timeout config knob believing it would take over
+	// idle-connection reaping so read_timeout could be freed for long
+	// queries; #5383's measurements found that belief false, so this value
+	// instead stays at less than half of DefaultDoltWriteTimeoutMillis
+	// (300000, the prior emergency-workaround value) to preserve headroom
+	// for #3101's independent outer wall-clock deadline to catch a genuine
+	// connection pile-up (#3626) first. Cities with slower live operations
+	// can raise it further via city.toml [dolt] read_timeout_millis. See
+	// #3022 (5m->30s), the scale_check storm RCA (30s->15s), #5053
+	// (wait_timeout knob added), #5383 (Reaper false positive; wait_timeout
+	// measured inert), #3626 (read collapse incident).
+	DefaultDoltReadTimeoutMillis = 120000
 	// DefaultDoltWriteTimeoutMillis is the managed Dolt listener write timeout.
 	DefaultDoltWriteTimeoutMillis = 300000
 )
@@ -1951,19 +2002,20 @@ type DoltConfig struct {
 	MaxConnections int `toml:"max_connections,omitempty" jsonschema:"default=256"`
 	// ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.
 	// 0 means use the managed default.
-	ReadTimeoutMillis int `toml:"read_timeout_millis,omitempty" jsonschema:"default=15000"`
+	ReadTimeoutMillis int `toml:"read_timeout_millis,omitempty" jsonschema:"default=120000"`
 	// WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.
 	// 0 means use the managed default.
 	WriteTimeoutMillis int `toml:"write_timeout_millis,omitempty" jsonschema:"default=300000"`
 	// WaitTimeoutSeconds overrides the managed server's wait_timeout system
-	// variable, which is how long Dolt keeps an idle connection before reaping
-	// it. Cities that raise ReadTimeoutMillis above the reconcile tick gap
-	// generally need this raised with it, or the controller's long-lived
-	// dispatch-pool connections are still reaped between ticks. Before this
-	// field existed the only way to set it was GC_DOLT_WAIT_TIMEOUT in the
-	// supervisor's process environment, which no city.toml could express and
-	// no shell-invoked restart inherited — so a restart from an operator shell
-	// silently rewrote the value. 0 (omitted) means use the managed default.
+	// variable. Despite the name, wait_timeout does not currently reap idle
+	// connections -- measured inert on dolt 2.2.3 for #5383 (see
+	// DefaultDoltWaitTimeoutSeconds); read_timeout is the only reaper. The
+	// knob is kept and still emitted regardless: it is harmless, and becomes
+	// correct the moment dolt implements it. Before this field existed the
+	// only way to set it was GC_DOLT_WAIT_TIMEOUT in the supervisor's process
+	// environment, which no city.toml could express and no shell-invoked
+	// restart inherited — so a restart from an operator shell silently
+	// rewrote the value. 0 (omitted) means use the managed default.
 	WaitTimeoutSeconds int `toml:"wait_timeout_seconds,omitempty" jsonschema:"default=30"`
 	// DoltLockReleaseTimeout is how long managed-dolt lifecycle operations
 	// wait for dolt's on-disk exclusive store locks (the root-level
@@ -2037,8 +2089,14 @@ func (d DoltConfig) EffectiveWriteTimeoutMillis() int {
 	return DefaultDoltWriteTimeoutMillis
 }
 
-// DefaultDoltWaitTimeoutSeconds is the managed server's idle-connection reap
-// window when neither city.toml nor the environment configures one.
+// DefaultDoltWaitTimeoutSeconds is the managed default for the server's
+// wait_timeout system variable when neither city.toml nor the environment
+// configures one. Despite the name this is not an idle-connection reap
+// window: measured inert on dolt 2.2.3 for #5383 (accepted, stored, and
+// reported by the server, but nothing reads it in go-mysql-server's
+// server/ package -- see DefaultDoltReadTimeoutMillis, the actual reaper).
+// Kept and still emitted because it is harmless and becomes correct if a
+// future dolt version implements it.
 //
 // Deliberately not paired with an Effective* accessor like the other [dolt]
 // fields: wait_timeout resolves three ways, not two. An unset field must fall
@@ -2093,10 +2151,22 @@ type OrdersConfig struct {
 	// BurntSushi's omitempty does not drop a zero int, so a plain int would
 	// emit max_dispatches_per_tick = 0 into every marshaled city.toml.
 
-	// MaxDispatchesPerTick caps how many orders the supervisor dispatches
-	// per tick. Unset keeps the built-in default of 4; set to 1 to drain
-	// overdue cooldown orders one-per-tick at cold start instead of firing
-	// several concurrent goroutines at once.
+	// MaxDispatchesPerTick caps how many clock-driven orders (cooldown, cron
+	// and event triggers) the supervisor dispatches per tick, in a rotation
+	// that resumes where the previous tick stopped. Unset keeps the built-in
+	// default of 4; set to 1 to drain overdue cooldown orders one-per-tick at
+	// cold start instead of firing several concurrent goroutines at once.
+	// Condition-triggered orders are outside this budget: a passing check
+	// means work is pending right now, so they dispatch on the tick that
+	// observes it. The open-tracking and open-work gates still run for them
+	// (unless the order sets no_work_gate), but those gates are keyed per
+	// order and only hold back a redispatch of an order whose previous run
+	// is still moving, so they do not bound the tick as a whole: a tick
+	// launches at most this budget plus one dispatch per condition order
+	// whose check passed on that tick. That second term grows with how many
+	// condition orders a city defines, not with this setting, and at cold
+	// start, before any tracking bead exists, neither gate holds a
+	// simultaneously-due set back.
 	MaxDispatchesPerTick *int `toml:"max_dispatches_per_tick,omitempty"`
 	// Overrides apply per-order field overrides after scanning.
 	// Each override targets an order by name and optionally by rig.
@@ -2322,15 +2392,17 @@ type LocalDoctorCheck struct {
 // (broken-worktree pointers, missing files) remain hardcoded since they
 // cannot be operator-tuned in any meaningful sense.
 type DoctorConfig struct {
-	// WorktreeRigWarnSize is the per-rig warning threshold for the total
-	// disk footprint under .gc/worktrees/<rig>/. Reported by the
-	// worktree-disk-size check. Go-style human size string ("10GB", "500MB").
+	// WorktreeRigWarnSize is the per-rig warning threshold for a
+	// worktree population's total disk footprint. Reported by the
+	// worktree-disk-size check for .gc/worktrees/<rig>/, and by the
+	// rig:<rig>:worktrees check for the per-bead worktrees at
+	// <rig>/worktrees/. Go-style human size string ("10GB", "500MB").
 	// Empty or unparseable falls back to the default (10 GB).
 	WorktreeRigWarnSize string `toml:"worktree_rig_warn_size,omitempty" jsonschema:"default=10GB"`
 
-	// WorktreeRigErrorSize is the per-rig error threshold. When any rig
-	// exceeds this, the worktree-disk-size check reports an error rather
-	// than a warning. Empty or unparseable falls back to the default
+	// WorktreeRigErrorSize is the per-rig error threshold. When a rig
+	// worktree population exceeds this, the reporting check errors
+	// rather than warns. Empty or unparseable falls back to the default
 	// (50 GB).
 	WorktreeRigErrorSize string `toml:"worktree_rig_error_size,omitempty" jsonschema:"default=50GB"`
 
@@ -3030,6 +3102,8 @@ func (c *City) PackDirsForRig(rigName string) []string {
 // default_sling_formula, and append_fragments; the remaining fields are parsed
 // and composed but are not yet inherited onto agents automatically.
 type AgentDefaults struct {
+	// ContextAdvisory is the city-wide default context-pressure guidance.
+	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty"`
 	// Provider is the default provider name for agents that do not set their
 	// own provider. It also counts as a configured provider for implicit agent
 	// injection.
@@ -3155,8 +3229,8 @@ type Agent struct {
 	// universal derivation ("s-<beadID>" for ad-hoc sessions,
 	// "<basename>-<beadID>" for pool sessions). When set, it is expanded as a
 	// Go text/template using the same PathContext fields as work_dir /
-	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName),
-	// sanitized for tmux, and validated as an explicit session name. For pool
+	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,
+	// DefaultBranch), sanitized for tmux, and validated as an explicit session name. For pool
 	// sessions, a live-name collision appends the bead ID as a deterministic
 	// suffix. For manual `gc session new` sessions, tmux_alias becomes the
 	// explicit session_name and takes precedence over --alias, which remains the
@@ -3182,8 +3256,14 @@ type Agent struct {
 	// PromptTemplate is the path to this agent's prompt template file.
 	// Relative paths resolve against the city directory.
 	PromptTemplate string `toml:"prompt_template,omitempty"`
-	// Nudge is text typed into the agent's tmux session after startup.
-	// Used for CLI agents that don't accept command-line prompts.
+	// Nudge is text typed into the agent's session after startup.
+	// Used for CLI agents that don't accept command-line prompts. For a known
+	// pool session whose trigger remains unclaimed after the 90-second recovery
+	// grace period, an empty or whitespace-only Nudge does not opt out: it sends
+	// "Run gc hook --claim --drain-ack --json now; if it returns work, execute
+	// it immediately." This fallback applies only to the initial stalled-claim
+	// recovery; continuation-claim recovery remains configured-only. Unknown
+	// templates receive no fallback.
 	Nudge string `toml:"nudge,omitempty"`
 	// Session overrides the session transport for this agent.
 	// "" (default) uses the city-level session provider (typically tmux).
@@ -3192,6 +3272,8 @@ type Agent struct {
 	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
+	// ContextAdvisory overrides context-pressure guidance for this agent.
+	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty"`
 	// Upstream selects the model-serving endpoint (a key in [upstreams]) for
 	// this agent — WHO serves the model. "" (default) falls back to
 	// agent_defaults.upstream; if still empty, no upstream env is injected
@@ -3244,8 +3326,8 @@ type Agent struct {
 	// levels. Legacy no-store evaluation continues to treat the output as
 	// the desired session count. If it contains Go template placeholders, gc
 	// expands them using the same PathContext fields as work_dir and
-	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)
-	// before running the command.
+	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,
+	// DefaultBranch) before running the command.
 	ScaleCheck string `toml:"scale_check,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string
@@ -3254,13 +3336,14 @@ type Agent struct {
 	// OnBoot is a shell command template run once at controller startup for
 	// this agent. If it contains Go template placeholders, gc expands them
 	// using the same PathContext fields as work_dir and session_setup
-	// (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running
-	// the command.
+	// (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch)
+	// before running the command.
 	OnBoot string `toml:"on_boot,omitempty"`
 	// OnDeath is a shell command template run when a session dies unexpectedly.
 	// If it contains Go template placeholders, gc expands them using the same
 	// PathContext fields as work_dir and session_setup (Agent, AgentBase,
-	// Rig, RigRoot, CityRoot, CityName) before running the command.
+	// Rig, RigRoot, CityRoot, CityName, DefaultBranch) before running the
+	// command.
 	OnDeath string `toml:"on_death,omitempty"`
 	// Namepool is the path to a plain text file with one name per line.
 	// When set, sessions use names from the file as display aliases.
@@ -3271,8 +3354,8 @@ type Agent struct {
 	// WorkQuery is the shell command template to find available work for this
 	// agent. If it contains Go template placeholders, gc expands them using
 	// the same PathContext fields as work_dir and session_setup (Agent,
-	// AgentBase, Rig, RigRoot, CityRoot, CityName) before probe, hook, and
-	// prompt-context execution. Used by gc hook and available in prompt
+	// AgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before
+	// probe, hook, and prompt-context execution. Used by gc hook and available in prompt
 	// templates as {{.WorkQuery}}.
 	// If unset, Gas City uses a three-tier default query:
 	//   1. in_progress work assigned to this session/alias (crash recovery)
@@ -3284,8 +3367,8 @@ type Agent struct {
 	// SlingQuery is the command template to route a bead to this session config.
 	// If it contains Go template placeholders, gc expands them using the same
 	// PathContext fields as work_dir and session_setup (Agent, AgentBase,
-	// Rig, RigRoot, CityRoot, CityName) before replacing {} with the bead
-	// ID. Used by gc sling to make a bead visible to the target's work_query.
+	// Rig, RigRoot, CityRoot, CityName, DefaultBranch) before replacing {}
+	// with the bead ID. Used by gc sling to make a bead visible to the target's work_query.
 	// The placeholder {} is replaced with the bead ID at runtime.
 	// Default for all agents:
 	// "bd update {} --set-metadata gc.routed_to=<qualified-name>".
@@ -3331,6 +3414,11 @@ type Agent struct {
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle string `toml:"sleep_after_idle,omitempty"`
+	// AutoReclaimStaleClaims opts this agent into gc hook --claim attempting
+	// a scoped stale-lease reclaim (via `bd reclaim --id`) when a
+	// route-matched candidate's only claim blocker is an existing assignee.
+	// Off by default; staleness is decided entirely by bd's own lease TTL.
+	AutoReclaimStaleClaims bool `toml:"auto_reclaim_stale_claims,omitempty"`
 	// InstallAgentHooks overrides workspace-level install_agent_hooks for this agent.
 	// When set, replaces (not adds to) the workspace default.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
@@ -3353,7 +3441,10 @@ type Agent struct {
 	// SessionSetup is a list of shell commands run after session creation.
 	// Each command is a template string supporting placeholders:
 	// {{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}},
-	// {{.CityRoot}}, {{.CityName}}, {{.WorkDir}}.
+	// {{.CityRoot}}, {{.CityName}}, {{.WorkDir}}, {{.DefaultBranch}}.
+	// {{.DefaultBranch}} is the rig's configured default_branch (empty for
+	// city-scoped agents and rigs that record none); it is never probed from
+	// git, so scripts should keep their own origin/HEAD fallback.
 	// Commands run in gc's process (not inside the agent session) via sh -c.
 	// On failure, the last 4 KiB of the command's stdout/stderr is included
 	// in the error and may appear in controller and reconciler logs; avoid
@@ -3522,6 +3613,7 @@ func (a Agent) Clone() Agent {
 	out.MaxActiveSessions = copyIntPtr(a.MaxActiveSessions)
 	out.MinActiveSessions = copyIntPtr(a.MinActiveSessions)
 	out.AssignedWorkDeferLimit = copyIntPtr(a.AssignedWorkDeferLimit)
+	out.ContextAdvisory = cloneContextAdvisory(a.ContextAdvisory)
 	out.EmitsPermissionWarning = copyBoolPtr(a.EmitsPermissionWarning)
 	out.HooksInstalled = copyBoolPtr(a.HooksInstalled)
 	out.InjectAssignedSkills = copyBoolPtr(a.InjectAssignedSkills)
@@ -3681,7 +3773,7 @@ func InjectImplicitAgents(cfg *City) {
 	// prompt rendering falls back to the embedded baseline.
 	promptTemplate := ""
 	if coreDir := cfg.PackDirByName("core"); coreDir != "" {
-		promptTemplate = filepath.Join(coreDir, "assets", "prompts", "pool-worker.md")
+		promptTemplate = filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
 	}
 
 	slingFormula := cfg.AgentDefaults.DefaultSlingFormula
@@ -3913,6 +4005,7 @@ func hasDeprecatedAttachmentFields(cfg *City) bool {
 // mergeAgentDefaults merges src into dst using later-layer precedence for
 // scalars and additive append semantics for list fields.
 func mergeAgentDefaults(dst *AgentDefaults, src AgentDefaults, label string, prov *Provenance) {
+	mergeContextAdvisory(&dst.ContextAdvisory, src.ContextAdvisory)
 	if src.Provider != "" {
 		if prov != nil && dst.Provider != "" && dst.Provider != src.Provider {
 			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.provider redefined by %q", label))
@@ -4343,9 +4436,21 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 			return fmt.Errorf("rig %q: prefix %q collides with %s", r.Name, prefix, other)
 		}
 		seenPrefixes[prefix] = r.Name
+
+		if branch := r.EffectiveDefaultBranch(); branch != "" && !defaultBranchCharset.MatchString(branch) {
+			return fmt.Errorf("rig %q: default_branch %q contains characters outside [A-Za-z0-9._/@+=-]; the value is interpolated into prompts, formula variables, and pre_start shell commands, so shell-active characters are refused", r.Name, branch)
+		}
 	}
 	return nil
 }
+
+// defaultBranchCharset is the conservative branch-name alphabet ValidateRigs
+// accepts for default_branch. Git itself allows more (a single quote is a
+// legal ref character), but the value flows into template interpolation on
+// shell surfaces — {{base_branch}} in formula steps and
+// GC_DEFAULT_BRANCH='{{.DefaultBranch}}' in pre_start lines — where quotes and
+// metacharacters silently break or rewrite the command line.
+var defaultBranchCharset = regexp.MustCompile(`^[A-Za-z0-9._/@+=-]+$`)
 
 // ReservedPrefixWarnings returns advisory warnings for any effective HQ or rig
 // work-store prefix that shadows a reserved coordination-class id-prefix
@@ -4610,6 +4715,13 @@ func Parse(data []byte) (*City, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
+	// Parse intentionally preserves non-storage legacy authoring surfaces for
+	// the migration reader. The removed Dolt mode is topology authority, never
+	// migration input, so reject it at decode time without broadening that
+	// tolerance.
+	if err := validateDoltModeAuthoringSurface(md); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
 	if err := validateStorageAuthoringSurface(md); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
@@ -4617,6 +4729,9 @@ func Parse(data []byte) (*City, error) {
 	applyDaemonFormulaV2Default(&cfg, md)
 	normalizeLegacyOrderOverrideAliases(&cfg)
 	NormalizeSessionSleepFields(&cfg)
+	if err := validateContextAdvisories(&cfg); err != nil {
+		return nil, err
+	}
 	// Stamp source=sourceInline on agents declared via [[agent]] in
 	// the parsed TOML. These are city.toml inline agents (or test
 	// fixtures using Parse directly); pack agents go through a

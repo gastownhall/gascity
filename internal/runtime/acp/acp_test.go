@@ -117,6 +117,40 @@ func TestStart_HandshakeSuccess(t *testing.T) {
 	}
 }
 
+func TestStart_EmptyEnvOverrideIsAbsentFromAgent(t *testing.T) {
+	t.Setenv("BEADS_DB", "ambient-database")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example")
+	marker := filepath.Join(t.TempDir(), "env.txt")
+	command := `env | sort > "$GC_ENV_MARKER"; ` + fakeACPShellCommand()
+	p := newTestProvider(t)
+	name := testName()
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command: command,
+		WorkDir: t.TempDir(),
+		Env: map[string]string{
+			"BEADS_DB":               "",
+			"BEADS_DOLT_SERVER_HOST": "",
+			"BEADS_DIR":              "/selected/.beads",
+			"GC_ENV_MARKER":          marker,
+		},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop(name) })
+
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if strings.Contains(got, "BEADS_DB=") || strings.Contains(got, "BEADS_DOLT_SERVER_HOST=") {
+		t.Fatalf("withheld variables reached agent: %q", got)
+	}
+	if !strings.Contains(got, "BEADS_DIR=/selected/.beads\n") {
+		t.Fatalf("explicit environment did not reach agent: %q", got)
+	}
+}
+
 func TestStart_StagesKiroPackOverlayBeforeLaunch(t *testing.T) {
 	p := newTestProvider(t)
 	name := testName()
@@ -1275,7 +1309,7 @@ func TestNudge_NonPipeErrorSurfacesImmediately(t *testing.T) {
 
 	// sc.done is intentionally left open: if the new branch mis-routes
 	// non-pipe errors through the select, the call will hang until
-	// nudgePostWriteDrainTimeout and the test will fail.
+	// the configured stop grace and the test will fail.
 	done := make(chan error, 1)
 	go func() {
 		done <- p.Nudge(name, []runtime.ContentBlock{{Type: "text", Text: "hi"}})

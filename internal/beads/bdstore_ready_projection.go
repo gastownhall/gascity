@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -70,6 +71,17 @@ type readyProjectionScopeGuard struct {
 	// rather than sync.Once for the reason verdictClaimed is: the winner writes
 	// to a sink an operator owns, and no other caller should wait behind it.
 	announced atomic.Bool
+	// blockedDoor latches that some store over this scope proved `bd sql`
+	// refused at runtime while `bd blocked` answered, so every later store
+	// starts on the blocked door instead of re-deriving the SQL door from
+	// metadata and re-spending the failing 6-16s `bd sql`. It is orthogonal to
+	// degrade: degrade means "this scope cannot serve the projection at all"
+	// (both doors gone), while blockedDoor means "the SQL door is proven
+	// refused, use `bd blocked`" — a scope answering through the blocked door
+	// has NOT reached the degrade verdict. Set once, never cleared, for the same
+	// reason degrade is: the backend in front of the process does not regain
+	// `bd sql` mid-run, and re-probing costs the very subprocess this saves.
+	blockedDoor atomic.Bool
 }
 
 // readyProjectionGuards memoizes one guard per resolved scope path. It grows by
@@ -134,7 +146,7 @@ func (s *BdStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
 	if len(ids) == 0 {
 		return items, nil
 	}
-	enabled, err := s.bdReadyProjectionEnabled()
+	door, enabled, err := s.bdReadyProjectionEnabled()
 	if err != nil {
 		return items, err
 	}
@@ -142,7 +154,7 @@ func (s *BdStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
 		return items, nil
 	}
 
-	projection, err := s.fetchReadyProjection(ids)
+	projection, err := s.fetchReadyProjection(door, ids)
 	if err != nil {
 		return items, err
 	}
@@ -169,14 +181,36 @@ func skipBDReadyProjectionEnrichment(item Bead) bool {
 		beadHasLabel(item, "gc:nudge")
 }
 
-func (s *BdStore) bdReadyProjectionEnabled() (bool, error) {
+// readyProjectionDoor names the bd verb that fills the is_blocked column for
+// one scope.
+//
+// There are two, and which one a scope takes is decided by the backend gate
+// below rather than by preference. They are NOT interchangeable: `bd sql`
+// returns the column verbatim for every active row, while `bd blocked` returns
+// only the rows bd can name a blocker for (see fetchReadyProjectionViaBlocked).
+// So the SQL door stays primary wherever it works, and the blocked door is
+// reached only where the alternative is no column at all.
+type readyProjectionDoor int
+
+const (
+	// readyProjectionDoorSQL projects `select id,is_blocked from issues|wisps`.
+	// It is the column itself, and it is what every Dolt and DoltLite scope
+	// takes — unchanged by this file's second door.
+	readyProjectionDoorSQL readyProjectionDoor = iota
+	// readyProjectionDoorBlocked projects `bd blocked --json`, bd's own verb
+	// over its own blocked role. It answers on every backend, including the
+	// hosted-Postgres work stores where `bd sql` is not implemented.
+	readyProjectionDoorBlocked
+)
+
+func (s *BdStore) bdReadyProjectionEnabled() (readyProjectionDoor, bool, error) {
 	// The scope verdict outranks anything this store object knows: a store
 	// built after some other store over the same scope reached it must neither
 	// re-spend the discovery nor re-announce it. It still REPORTS the degrade,
 	// on every call, because that error is how each cache over the scope learns
 	// to decline its readiness reads.
 	if cause := s.latchedReadyProjectionDegrade(); cause != nil {
-		return false, fmt.Errorf("bd ready projection scope verdict: %w: %w", ErrReadyProjectionUnsupported, cause)
+		return readyProjectionDoorSQL, false, fmt.Errorf("bd ready projection scope verdict: %w: %w", ErrReadyProjectionUnsupported, cause)
 	}
 	s.readyProjectionMu.Lock()
 	defer s.readyProjectionMu.Unlock()
@@ -184,19 +218,30 @@ func (s *BdStore) bdReadyProjectionEnabled() (bool, error) {
 	// changing bd versions or re-pointing a scope at another backend to
 	// re-evaluate ready-projection support.
 	if s.readyProjectionChecked {
-		return s.readyProjectionEnabled, s.readyProjectionVersionErr
+		return s.readyProjectionDoorValue, s.readyProjectionEnabled, s.readyProjectionVersionErr
 	}
-	if reason := s.readyProjectionBackendRefusal(); reason != nil {
-		s.disableReadyProjectionLocked(reason)
-		return false, fmt.Errorf("bd ready projection backend gate: %w: %w", ErrReadyProjectionUnsupported, reason)
+	// A backend gc does not implement no longer costs the scope its column: it
+	// costs the scope `bd sql`. The gate's reason for withholding that call is
+	// that gc cannot assume an unknown backend's SCHEMA carries gc's
+	// issues/wisps projection — and that reason does not reach `bd blocked`,
+	// which is bd's own verb over bd's own role, answered by whatever storage
+	// bd opened. The second reason a fresh store starts on the blocked door is
+	// the scope-latched runtime refusal: a metadata-registered backend bd
+	// nevertheless opened embedded (isBdSQLUnsupportedInEmbeddedMode) had its
+	// `bd sql` proven refused by an earlier store, and switchToBlockedDoor
+	// recorded that on the shared guard so this rebuild does not re-spend it.
+	door := readyProjectionDoorSQL
+	if s.readyProjectionBackendRefusal() != nil || s.readyProjectionBlockedDoorLatched() {
+		door = readyProjectionDoorBlocked
 	}
+	s.readyProjectionDoorValue = door
 	out, err := s.runner(s.dir, "bd", "version")
 	if err != nil {
-		return false, fmt.Errorf("bd ready projection version gate: %w", err)
+		return door, false, fmt.Errorf("bd ready projection version gate: %w", err)
 	}
 	version, err := parseBDVersion(string(out))
 	if err != nil {
-		return false, fmt.Errorf("bd ready projection version gate: %w", err)
+		return door, false, fmt.Errorf("bd ready projection version gate: %w", err)
 	}
 	s.readyProjectionChecked = true
 	// A bd that predates the projection leaves every IsBlocked nil, which is the
@@ -220,10 +265,45 @@ func (s *BdStore) bdReadyProjectionEnabled() (bool, error) {
 		s.readyProjectionEnabled = false
 		s.readyProjectionVersionErr = fmt.Errorf("bd ready projection version gate: %w: bd %s predates %s, which introduced the is_blocked projection",
 			ErrReadyProjectionUnsupported, version, bdReadyProjectionMinVersion)
-		return false, s.readyProjectionVersionErr
+		return door, false, s.readyProjectionVersionErr
 	}
 	s.readyProjectionEnabled = true
-	return true, nil
+	return door, true, nil
+}
+
+// switchToBlockedDoor records that this scope's `bd sql` was refused at runtime
+// while `bd blocked` answers, so this store and every store built later over the
+// same scope go straight to the blocked door.
+//
+// The choice is latched in the scope guard, not just on this store object,
+// because cmd/gc builds a store per request and the control-ready scan rebuilds
+// one per scope every controlReadyCacheTTL: a store-local flag would let the
+// next store re-derive the SQL door from metadata and re-spend the failing
+// 6-16s `bd sql` a few times a minute, forever. It is a DISTINCT verdict from
+// the degrade the guard also carries — "SQL door proven refused, use `bd
+// blocked`", not "this scope is out of doors at all" — so it rides its own
+// field (readyProjectionScopeGuard.blockedDoor), which bdReadyProjectionEnabled
+// consults before the metadata-derived door.
+func (s *BdStore) switchToBlockedDoor() {
+	s.readyProjectionMu.Lock()
+	defer s.readyProjectionMu.Unlock()
+	s.readyProjectionDoorValue = readyProjectionDoorBlocked
+	if g := s.readyProjectionGuard(); g != nil {
+		g.blockedDoor.Store(true)
+	}
+}
+
+// readyProjectionBlockedDoorLatched reports whether some store over this scope
+// already proved `bd sql` refused at runtime and switched to the blocked door.
+// A fresh store consults it before deriving the door from metadata, so the
+// proven refusal survives the per-request / per-controlReadyCacheTTL store
+// rebuilds instead of re-spending the failing `bd sql` on each one.
+func (s *BdStore) readyProjectionBlockedDoorLatched() bool {
+	g := s.readyProjectionGuard()
+	if g == nil {
+		return false
+	}
+	return g.blockedDoor.Load()
 }
 
 // readyProjectionBackendRefusal reports why this scope's backend cannot answer
@@ -289,7 +369,7 @@ func (s *BdStore) latchReadyProjectionDegrade(cause error) {
 	}
 	_, _ = fmt.Fprintf(s.noticeWriter(),
 		"gc: ready-projection enrichment disabled for %s: %v\n"+
-			"gc: ready reads on this scope answer from a live `bd ready` instead of the cache; other cached reads keep serving and no further bd sql is spent.\n",
+			"gc: ready reads on this scope answer from a live `bd ready` instead of the cache; other cached reads keep serving and no further projection subprocess is spent.\n",
 		s.dir, cause)
 }
 
@@ -316,8 +396,7 @@ func (s *BdStore) latchReadyProjectionUnsupported(cause error) {
 	s.disableReadyProjectionLocked(cause)
 }
 
-func (s *BdStore) fetchReadyProjection(ids []string) (map[string]bool, error) {
-	result := make(map[string]bool, len(ids))
+func (s *BdStore) fetchReadyProjection(door readyProjectionDoor, ids []string) (map[string]bool, error) {
 	wanted := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
 		if id == "" {
@@ -346,8 +425,13 @@ func (s *BdStore) fetchReadyProjection(ids []string) (map[string]bool, error) {
 		wanted[id] = struct{}{}
 	}
 	if len(wanted) == 0 {
-		return result, nil
+		return map[string]bool{}, nil
 	}
+
+	if door == readyProjectionDoorBlocked {
+		return s.projectViaBlockedDoor(wanted, nil)
+	}
+	result := make(map[string]bool, len(wanted))
 
 	// bd exposes this as an active-row projection: the SQL filters out closed
 	// rows so cache prime/reconcile cost stays O(active work) instead of
@@ -363,12 +447,17 @@ func (s *BdStore) fetchReadyProjection(ids []string) (map[string]bool, error) {
 			// Belt-and-braces to the backend gate: a scope whose metadata does
 			// not name its backend, or names one gc implements while bd opened
 			// it some other way, only learns this from bd's own answer. It is a
-			// permanent property of the ledger, so it is latched rather than
-			// re-discovered — the unlatched version of this call cost
-			// maintainer-city a failing 6-16s subprocess on every prime and
-			// every reconcile, indefinitely.
-			s.latchReadyProjectionUnsupported(err)
-			return nil, fmt.Errorf("bd sql ready projection: %w: %w", ErrReadyProjectionUnsupported, err)
+			// permanent property of the ledger, so switchToBlockedDoor latches
+			// the choice in the scope guard — shared by every store rooted here
+			// — and every later rebuild consults it before the metadata-derived
+			// door. Without that scope latch the switch lived only on this store
+			// object, and cmd/gc rebuilds the store per request while the
+			// control-ready scan rebuilds one per scope every
+			// controlReadyCacheTTL: the next store re-picked the SQL door and
+			// re-spent this failing 6-16s subprocess on every prime and every
+			// reconcile, indefinitely.
+			s.switchToBlockedDoor()
+			return s.projectViaBlockedDoor(wanted, err)
 		}
 		return nil, fmt.Errorf("bd sql ready projection: %w", err)
 	}
@@ -390,4 +479,150 @@ func (s *BdStore) fetchReadyProjection(ids []string) (map[string]bool, error) {
 
 func readyProjectionSQL() string {
 	return "select id,is_blocked from issues where status <> 'closed' union all select id,is_blocked from wisps where status <> 'closed'"
+}
+
+// projectViaBlockedDoor runs the blocked door and classifies its failure the
+// way the SQL door's is classified, because the two failures mean different
+// things and owe different verdicts.
+//
+// bd refusing the VERB is a permanent property of the ledger in front of the
+// process, so it latches: the scope is out of doors and every later cache over
+// it is told so without spending a subprocess. Anything else — a timeout, a
+// connection reset, a busy server — is this cycle's failure, so it is returned
+// plain. That leaves the snapshot partial (CachingStore.applyReadyProjection),
+// which already declines cached readiness reads, and the next reconcile retries.
+// Latching a blip would cost a long-lived dispatcher its projection for the life
+// of the process.
+//
+// withheld, when non-nil, is bd's own refusal of `bd sql`. It rides along on
+// the latched cause so an operator who meets the notice can see both doors at
+// once instead of one. A caller that arrived here from the backend gate passes
+// nil and the gate's reason is read back below — on the failure path only, so
+// the healthy path costs no metadata read per cycle.
+func (s *BdStore) projectViaBlockedDoor(wanted map[string]struct{}, withheld error) (map[string]bool, error) {
+	projection, err := s.fetchReadyProjectionViaBlocked(wanted)
+	if err == nil {
+		return projection, nil
+	}
+	if !isBdBlockedUnsupported(err) {
+		return nil, err
+	}
+	if withheld == nil {
+		withheld = s.readyProjectionBackendRefusal()
+	}
+	cause := err
+	if withheld != nil {
+		cause = fmt.Errorf("%w; bd sql was withheld: %w", err, withheld)
+	}
+	s.latchReadyProjectionUnsupported(cause)
+	return nil, fmt.Errorf("bd ready projection: %w: %w", ErrReadyProjectionUnsupported, cause)
+}
+
+// isBdBlockedUnsupported reports whether bd refused the blocked verb itself, as
+// opposed to failing while answering it.
+//
+// It matches on bd's text for the same reason its `bd sql` sibling does: no
+// sentinel crosses the subprocess boundary, so the error arrives as bytes. The
+// classification is deliberately narrow and fails SAFE in both directions — a
+// refusal it fails to recognize costs a retry per cycle rather than a wrong
+// answer, and a blip it misreads as a refusal costs the projection, never the
+// readiness verdict, because the degrade sends readiness to a live `bd ready`.
+func isBdBlockedUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "blocked") {
+		return false
+	}
+	return strings.Contains(msg, "unknown command") ||
+		strings.Contains(msg, "not supported") ||
+		strings.Contains(msg, "not yet supported") ||
+		strings.Contains(msg, "unsupported")
+}
+
+// bdBlockedRow is the one field gc reads off `bd blocked --json`. bd renders a
+// full types.BlockedIssue there — the whole issue plus BlockedBy and
+// BlockedByCount — and gc wants none of it: membership in the response IS the
+// verdict.
+type bdBlockedRow struct {
+	ID string `json:"id"`
+}
+
+// fetchReadyProjectionViaBlocked fills the is_blocked column from `bd blocked
+// --json` for a scope whose backend does not implement `bd sql`.
+//
+// # Why this is the same column
+//
+// bd's blocked verb is not a direct-dependency answer. It seeds its row set
+// with `SELECT id FROM issues|wisps WHERE is_blocked = 1 AND status <> 'closed'
+// AND status <> 'pinned'` (issueops.GetBlockedIssuesInTx) — literally the
+// denormalized, transitively-propagated column that bd's own ready filters with
+// `is_blocked = 0` (sqlbuild.BuildReadyWorkWhere). Same column, same closure,
+// so a child of a blocked parent reads blocked here exactly as it does to
+// `bd ready`. That equality is the whole reason this door is allowed to exist:
+// a subtly different definition would offer the control dispatcher work whose
+// gate has not opened (#3218).
+//
+// # Absence means not blocked, explicitly
+//
+// bd returns only blocked rows, so every requested id missing from the response
+// is written false rather than left absent. Leaving it absent would leave
+// Bead.IsBlocked nil, and cachedBeadReady then falls back to the bead's OWN
+// direct blocks/waits-for/conditional-blocks deps — the weaker predicate this
+// projection exists to replace. The write is unconditional for that reason.
+//
+// # The one place it is not the column
+//
+// After seeding from is_blocked, bd narrows its OUTPUT to rows whose blocker it
+// can NAME: an active blocking dep whose target is a resident non-closed row,
+// or, failing that, any parent-child edge. A row carrying is_blocked = 1 with
+// neither is dropped from the response and therefore reads false here. bd's own
+// recompute (issueops.shouldBeBlockedDisjunction) can only produce such a row
+// from a stale flag — the state `bd recompute-blocked` and `bd sync` exist to
+// repair, and the state issueops.countStaleIsBlockedSQL counts — or from a
+// waits-for onto a spawner that closed while its gate stayed shut, which in a
+// gc-minted graph is also a molecule step and so carries the parent-child edge
+// that attributes it (formula.collectRecipeDeps mints waits-for only between
+// steps of one formula). Measured on maintainer-city's hosted-Postgres work
+// store: 117 active rows, `bd blocked` names 3, `bd ready` returns 112, and the
+// remaining 3 are accounted for by bd's own non-is_blocked ready predicates (2
+// in_progress rows, which bd's ready never returns because cmd/bd/ready.go
+// hardcodes Status "open", and 1 molecule, which sqlbuild.ReadyWorkExcludeTypes
+// drops) — zero unattributable rows.
+//
+// This is why the SQL door stays primary rather than being replaced: where
+// `bd sql` works it returns the column with no attribution filter at all.
+//
+// # Cost
+//
+// One subprocess per cache prime and per reconcile, independent of the number
+// of beads: bd answers the whole scope in one call the way `bd sql` did. Inside
+// bd the work scales with the BLOCKED set, not the ledger — 2·|blocked|
+// dependency lookups plus a batched row fetch. Measured against maintainer-city
+// live: 2.9s, against a `bd sql` that costs 6.5s there and then fails. What it
+// buys is every readiness read between reconciles, which today each spend a
+// live `bd ready` at ~2.5-4.4s.
+func (s *BdStore) fetchReadyProjectionViaBlocked(wanted map[string]struct{}) (map[string]bool, error) {
+	out, err := s.runner(s.dir, "bd", "blocked", "--json")
+	if err != nil {
+		return nil, fmt.Errorf("bd blocked ready projection: %w", err)
+	}
+	var rows []bdBlockedRow
+	if err := json.Unmarshal(extractJSON(out), &rows); err != nil {
+		return nil, fmt.Errorf("bd blocked ready projection: parsing JSON: %w", err)
+	}
+	blocked := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		if row.ID == "" {
+			continue
+		}
+		blocked[row.ID] = struct{}{}
+	}
+	result := make(map[string]bool, len(wanted))
+	for id := range wanted {
+		_, isBlocked := blocked[id]
+		result[id] = isBlocked
+	}
+	return result, nil
 }

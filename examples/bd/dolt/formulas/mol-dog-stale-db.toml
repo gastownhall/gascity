@@ -85,7 +85,8 @@ Run this as one shell script so every derived value remains in the same process:
 ```bash
 set -euo pipefail
 
-WORK_BEAD="${GC_BEAD_ID:?GC_BEAD_ID required (set by gc hook); aborting}"
+WORK_BEAD="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-$(gc hook current --id-only)}}"
+[ -n "$WORK_BEAD" ] || { echo "cannot resolve work bead id: GC_BEAD_ID/GC_TRIGGER_BEAD_ID unset and gc hook current returned nothing; aborting" >&2; exit 1; }
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dolt-cleanup.XXXXXX")
 DRAIN_ACKED=0
 
@@ -316,7 +317,7 @@ if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then
   fail_open_after_drain "gc dolt-cleanup apply missed ${MISSED_PURGE_BYTES} reclaimable bytes; leaving work bead open"
 fi
 
-bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})"
+bd close "$WORK_BEAD" --actor "${GC_ALIAS:-${GC_SESSION_NAME:-${GC_SESSION_ID:-}}}" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})"
 drain_ack_once # drain-ack before normal exit
 exit
 ```

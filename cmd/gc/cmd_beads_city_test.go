@@ -573,6 +573,106 @@ func TestDoBeadsCityUseExternalPreservesCompatOnlyExplicitRigs(t *testing.T) {
 	}
 }
 
+// TestDoBeadsCityUseExternalToleratesUninitializedInheritedRig is the ga-5k989
+// regression: a city endpoint change swept an inherited rig that carries no
+// .beads/metadata.json and hard-failed on it, so every controller start of a
+// city with such a rig exited 1 and crash-looped with no recovery path. An
+// inherited rig the city has never initialized is not a reason to refuse to
+// reconfigure the city, and the rigs that DO have canonical metadata must still
+// be canonicalized in the same run.
+func TestDoBeadsCityUseExternalToleratesUninitializedInheritedRig(t *testing.T) {
+	for name, uninitialized := range map[string]func(t *testing.T) string{
+		// The shape that killed fresh-03479: the rig root itself is gone
+		// (a /tmp path that did not survive the pod replacement) while the
+		// city's persisted config still registers it.
+		"rig root vanished": func(t *testing.T) string {
+			t.Helper()
+			return filepath.Join(t.TempDir(), "adopt")
+		},
+		// The rig root is there but was never `bd init`ed.
+		"rig root present but never initialized": func(t *testing.T) string {
+			t.Helper()
+			dir := filepath.Join(t.TempDir(), "adopt")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			return dir
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "bd")
+
+			cityDir := t.TempDir()
+			readyDir := filepath.Join(t.TempDir(), "frontend")
+			if err := os.MkdirAll(readyDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			uninitializedDir := uninitialized(t)
+
+			writeCityEndpointCityConfigWithCompat(t, cityDir, config.DoltConfig{Host: "old-city.example.com", Port: 3306}, []config.Rig{
+				{Name: "frontend", Path: readyDir, Prefix: "fe"},
+				{Name: "adopt", Path: uninitializedDir, Prefix: "ad"},
+			})
+			writeRigEndpointMetadata(t, cityDir, "hq")
+			writeRigEndpointMetadata(t, readyDir, "fe")
+			writeRigEndpointCanonicalConfig(t, cityDir, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginCityCanonical, EndpointStatus: contract.EndpointStatusVerified, DoltHost: "old-city.example.com", DoltPort: "3306"})
+			writeRigEndpointCanonicalConfig(t, readyDir, contract.ConfigState{IssuePrefix: "fe", EndpointOrigin: contract.EndpointOriginInheritedCity, EndpointStatus: contract.EndpointStatusVerified, DoltHost: "old-city.example.com", DoltPort: "3306"})
+
+			var stdout, stderr bytes.Buffer
+			code := doBeadsCityEndpoint(fsys.OSFS{}, cityDir, cityEndpointOptions{External: true, Host: "db.example.com", Port: "4406", User: "city-user", AdoptUnverified: true}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("doBeadsCityEndpoint() = %d, want 0; stderr = %s", code, stderr.String())
+			}
+
+			cityState := readRigEndpointConfigState(t, cityDir)
+			if cityState.EndpointOrigin != contract.EndpointOriginCityCanonical || cityState.DoltHost != "db.example.com" || cityState.DoltPort != "4406" {
+				t.Fatalf("city state = %+v", cityState)
+			}
+			readyState := readRigEndpointConfigState(t, readyDir)
+			if readyState.EndpointOrigin != contract.EndpointOriginInheritedCity || readyState.DoltHost != "db.example.com" || readyState.DoltPort != "4406" || readyState.DoltUser != "city-user" {
+				t.Fatalf("initialized rig was not canonicalized alongside the skipped one: %+v", readyState)
+			}
+			if got := readCityEndpointRigCompat(t, cityDir, "frontend"); got.DoltHost != "db.example.com" || got.DoltPort != "4406" {
+				t.Fatalf("frontend city.toml rig compat = %+v", got)
+			}
+			if _, err := os.Stat(filepath.Join(uninitializedDir, ".beads", "metadata.json")); !os.IsNotExist(err) {
+				t.Fatalf("an uninitialized rig must not gain a fabricated metadata.json, stat err = %v", err)
+			}
+		})
+	}
+}
+
+// TestDoBeadsCityUseExternalRejectsUnusableInheritedRigMetadata is the control
+// for the skip above. A metadata.json that exists but pins no dolt_database is
+// a misconfigured store, not an uninitialized one: it must still be fatal, or
+// the ga-5k989 fix would swallow a real topology error.
+func TestDoBeadsCityUseExternalRejectsUnusableInheritedRigMetadata(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	brokenDir := filepath.Join(t.TempDir(), "adopt")
+	if err := os.MkdirAll(filepath.Join(brokenDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(brokenDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeCityEndpointCityConfigWithCompat(t, cityDir, config.DoltConfig{Host: "old-city.example.com", Port: 3306}, []config.Rig{{Name: "adopt", Path: brokenDir, Prefix: "ad"}})
+	writeRigEndpointMetadata(t, cityDir, "hq")
+	writeRigEndpointCanonicalConfig(t, cityDir, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginCityCanonical, EndpointStatus: contract.EndpointStatusVerified, DoltHost: "old-city.example.com", DoltPort: "3306"})
+	writeRigEndpointCanonicalConfig(t, brokenDir, contract.ConfigState{IssuePrefix: "ad", EndpointOrigin: contract.EndpointOriginInheritedCity, EndpointStatus: contract.EndpointStatusVerified, DoltHost: "old-city.example.com", DoltPort: "3306"})
+
+	var stdout, stderr bytes.Buffer
+	code := doBeadsCityEndpoint(fsys.OSFS{}, cityDir, cityEndpointOptions{External: true, Host: "db.example.com", Port: "4406", AdoptUnverified: true}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doBeadsCityEndpoint() = %d, want 1; stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "missing pinned dolt_database") {
+		t.Fatalf("stderr = %q, want the unusable-metadata diagnosis", stderr.String())
+	}
+}
+
 func TestDoBeadsCityUseExternalAdoptUnverifiedSkipsValidation(t *testing.T) {
 	skipSlowCmdGCTest(t, "exercises managed bd provider transition behavior; run make test-cmd-gc-process for full coverage")
 	t.Setenv("GC_BEADS", "bd")

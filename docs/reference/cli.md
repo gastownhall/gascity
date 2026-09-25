@@ -88,6 +88,7 @@ gc [flags]
 | [gc version](#gc-version) | Print gc version |
 | [gc wait](#gc-wait) | Inspect and manage durable session waits |
 | [gc whoami](#gc-whoami) | Show the authenticated hosted Gas City account |
+| [gc worktree](#gc-worktree) | Ensure or verify agent workspace worktrees |
 
 ## gc agent
 
@@ -291,12 +292,17 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-All arguments after "gc bd" are forwarded to bd unchanged, except the
-gc-only "heartbeat &lt;issue-id&gt;" subcommand, which rewrites to
-"update &lt;issue-id&gt; --set-metadata gc.last_heartbeat_at=&lt;RFC3339 UTC now&gt;"
-so long-running workers can signal liveness to the dashboard, and
-"release-if-current &lt;issue-id&gt; &lt;assignee&gt;", which conditionally resets an
-in-progress assignment only when the bead still has that assignee.
+All arguments after "gc bd" are forwarded to bd unchanged, with one
+exception: a "list" that filters on the wisps (ephemeral) tier —
+"--type=molecule", "--type=wisp", "--mol-type", "--wisp-type" — also gets
+"--include-infra". bd skips that tier on any list without the flag, so those
+filters would otherwise return [] and exit 0 on a ledger full of live
+molecules. Every other list is forwarded as written. "heartbeat
+&lt;issue-id&gt;" forwards to bd's native heartbeat, which refreshes the claim's
+lease and fails loudly when the caller no longer owns it. gc adds one
+subcommand of its own: "release-if-current &lt;issue-id&gt; &lt;assignee&gt;", which
+conditionally resets an in-progress assignment only when the bead still has
+that assignee.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
@@ -314,7 +320,7 @@ gc bd --rig my-project create "New task"
 gc bd show my-project-abc          # auto-detects rig from bead prefix
 gc bd list --rig my-project -s open
 gc bd --city /path/to/city list    # pins the city (HQ) store, no rig auto-detect
-gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
+gc bd heartbeat my-project-abc     # refresh the claim lease you hold
 gc bd release-if-current my-project-abc worker-1
 ```
 
@@ -343,7 +349,15 @@ gc beads
 Manage the canonical city endpoint topology for bd-backed beads stores.
 
 Use use-managed to make the city GC-managed again. Use use-external to pin the
-city to an external Dolt endpoint and rewrite inherited rig mirrors.
+city to an external Dolt endpoint and rewrite inherited rig mirrors. Use
+migrate-proxied to move a legacy GC-managed city onto bd's proxied-server
+topology.
+
+use-managed and use-external manage gc-owned endpoint topology only. They refuse
+a city whose store the beads provider owns — one journaled in
+.gc/scope-ownership.json, one transferred by the ownership handoff, or one bd's
+metadata binds to the proxied-server path — because that endpoint lives in bd's
+own files and is bd's to change.
 
 ```
 gc beads city
@@ -351,8 +365,37 @@ gc beads city
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc beads city migrate-proxied](#gc-beads-city-migrate-proxied) | Migrate a legacy GC-managed city to bd's proxied-server topology |
 | [gc beads city use-external](#gc-beads-city-use-external) | Set the city endpoint to an external Dolt server |
 | [gc beads city use-managed](#gc-beads-city-use-managed) | Set the city endpoint to GC-managed |
+
+## gc beads city migrate-proxied
+
+Migrate a legacy GC-managed city, and the rigs that share its Dolt data
+directory, onto bd's proxied-server topology.
+
+The city's gc-managed `dolt sql-server` must already be stopped: run gc stop
+first. bd cannot see a server gc started (it looks only for its own pid file),
+so migrating against a live one commits the mode flip and leaves the scope
+unusable until the server dies.
+
+Each scope is migrated with bd's own `bd migrate from-server-to-proxied-server`,
+city first. The command is idempotent — an already-proxied scope reports
+"already migrated" — so a partially failed run can simply be rerun. It also
+retires gc's own runtime publication for the city it just handed over.
+
+On bd v1.3.0 this is the only supported migration for a legacy GC-managed city.
+Procedure, refusals and recovery: engdocs/runbooks/beads-migrate-proxied.md.
+
+```
+gc beads city migrate-proxied [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | report the plan without migrating anything |
+| `--json` | bool |  | emit the per-scope report as JSON |
+| `--rig` | stringArray |  | migrate only this rig (repeatable; default is every rig in city.toml) |
 
 ## gc beads city use-external
 
@@ -434,7 +477,7 @@ gc beads list --status open --format=json
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--all` | bool |  | include closed beads (default: open only) |
+| `--all` | bool |  | include closed beads (default: all nonclosed statuses) |
 | `--format` | string | `text` | output format: text or json |
 | `--label` | string |  | filter to beads carrying this label |
 | `--status` | string |  | filter to beads in this status |
@@ -821,7 +864,10 @@ gc context add <name> [flags]
 |------|------|---------|-------------|
 | `--ca-file` | string |  | PEM CA bundle to verify the server certificate |
 | `--city` | string |  | remote city name (default: &lt;name&gt;) |
+| `--credential-audience` | string |  | credential provider audience (provider mode) |
 | `--credential-command` | string |  | command that mints a transport bearer (edge/proxy fronted) |
+| `--credential-org` | string |  | optional credential provider organization (provider mode) |
+| `--credential-required-scopes` | string |  | JSON array of required credential scopes (provider mode) |
 | `--grant-command` | string |  | command that mints an X-GC-City-Write grant (direct hardened self-host) |
 | `--insecure-skip-verify` | bool |  | skip TLS verification (dev only) |
 | `--timeout` | string |  | REST request timeout, e.g. 120s (never applied to SSE streams) |
@@ -1369,6 +1415,16 @@ deprecations such as legacy [formulas].dir, and per-rig health. Use
 --fix for the canonical remediation path, including any safe mechanical
 legacy-to-current pack rewrites that are available on this branch.
 
+--check runs only the checks you name, so a caller after one verdict does
+not pay for the whole sweep. It is repeatable and also accepts a comma
+list, results keep their normal run order rather than the order you asked
+for, and the exit code reflects the selected checks alone. A name that no
+registered check matches fails the run: an empty result set would read as
+a clean bill of health to a caller filtering by name. Which names exist
+depends on the workspace, because doctor registers checks conditionally —
+run without --check to see them, or name a nonexistent check to have them
+listed.
+
 ```
 gc doctor [flags]
 ```
@@ -1380,10 +1436,14 @@ gc doctor
 gc doctor --fix
 gc doctor --verbose
 gc doctor --json
+gc doctor --check controller
+gc doctor --check controller --check events-log
+gc doctor --check controller,events-log --json
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--check` | stringArray |  | run only the named check(s); repeatable and comma-separated. A name matching no registered check fails the run rather than reporting an empty result |
 | `--check-timeout` | duration | `1m0s` | per-check time budget; a check or its --fix remediation exceeding it is abandoned and reported as timed out (0 disables) |
 | `--fix` | bool |  | attempt automatic repairs and safe mechanical migrations |
 | `--json` | bool |  | emit structured JSON instead of human-readable output |
@@ -1393,14 +1453,18 @@ gc doctor --json
 
 gc dolt-cleanup is the Go-side implementation of the operational Dolt
 cleanup tool. It resolves the Dolt server port via the AD-04 chain
-(--port &gt; city dolt.port &gt; &lt;rigRoot&gt;/.beads/dolt-server.port &gt; 3307),
-drops stale test/agent databases, calls DOLT_PURGE_DROPPED_DATABASES
-to reclaim disk, and reaps orphaned dolt sql-server processes left
-over from leaked test harnesses. Invalid explicit ports and unreadable
-or invalid city/rig port settings fail closed before cleanup stages run;
-only absent rig port files can reach the legacy default. The legacy
-default is a connection fallback only; it does not protect port 3307
-from orphan-process reaping.
+(--port &gt; city dolt.port &gt; live managed dolt [runtime handle, then
+process table] &gt; 3307); .beads/dolt-server.port is a bd compatibility
+status file and is never consulted for endpoint selection (it is read
+protect-only, to fence a recorded port, when live resolution is
+unavailable). It drops stale test/agent
+databases, calls DOLT_PURGE_DROPPED_DATABASES to reclaim disk, and
+reaps orphaned dolt sql-server processes left over from leaked test
+harnesses. Invalid explicit ports, invalid city port settings, and
+live-resolution errors (ambiguous listeners, discovery failures) fail
+closed before cleanup stages run; only a clean live-resolution miss can
+reach the legacy default. The legacy default is a connection fallback
+only; it does not protect port 3307 from orphan-process reaping.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
 Pass --max-orphan-dbs with --force to refuse all destructive cleanup
@@ -1413,7 +1477,8 @@ always protected, and any process whose state cannot be determined degrades to
 protected. A dolt sql-server is reaped only when its scope is provably gone —
 its working directory is an unlinked inode (the kernel "(deleted)" cwd marker),
 or its --config path is on the test-config-path allowlist (/tmp/Test*,
-os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*). A server
+os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*,
+/var/tmp/gotmp/Test*, $GOTMPDIR/Test*). A server
 whose --config has merely vanished while its working directory is still live is
 protected, not reaped, until an operator confirms; a lone missing-config
 observation is not proof of scope deletion. See the PROTECTED section of the
@@ -1881,23 +1946,24 @@ gc graph gc-42 --mermaid     # Mermaid.js diagram
 Convenience command for context handoff.
 
 Self-handoff (default): sends mail to self. If the current session is
-controller-restartable, requests a restart and blocks until the controller
-stops the session. For on-demand configured named sessions, sends mail and
-returns without requesting restart: handoff intentionally leaves the
-user-attended session running instead of restarting it out from under the
-user. The controller can restart such a session via
-gc runtime request-restart; handoff deliberately does not.
+controller-restartable, requests a restart, pokes the controller for an
+immediate reconcile tick, and returns without waiting for the controller to
+act. For on-demand configured named sessions, sends mail and returns without
+requesting restart: handoff intentionally leaves the user-attended session
+running instead of restarting it out from under the user. The controller can
+restart such a session via gc runtime request-restart; handoff deliberately
+does not.
 
 For controller-restartable sessions, equivalent to:
 
   gc mail send $GC_ALIAS &lt;subject&gt; [message]
   gc runtime request-restart
 
-Under normal operation the controller stops controller-restartable
-self-handoff sessions before this command returns. If the controller does not
-act within a bounded timeout, gc handoff exits 1 with a diagnostic instead of
-blocking indefinitely. If interrupted, the restart request remains set for the
-controller to process on its next reconcile tick.
+The command exits 0 once the restart request is durably persisted and the
+controller has been signaled, even if the controller has not yet acted. If
+the controller cannot be signaled, gc handoff exits 1 with a diagnostic — the
+restart request itself remains durably set, so the controller still picks it
+up on its next periodic reconcile tick regardless.
 
 Auto handoff (--auto): sends mail to self and returns without requesting a
 restart. This is for PreCompact hooks, where the provider is already managing
@@ -1924,6 +1990,7 @@ gc handoff [subject] [message] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--auto` | bool |  | Send handoff mail without requesting restart (for PreCompact hooks) |
+| `--force` | bool |  | destroy a target even when it has live background subagents |
 | `--hook-format` | string |  | format hook output for a provider |
 | `--json` | bool |  | emit JSON summary |
 | `--target` | string |  | Remote session alias or ID to handoff (kills only controller-restartable sessions) |
@@ -1956,11 +2023,41 @@ gc hook [agent] [flags]
 | `--claim` | bool |  | atomically claim one routed work item for the current session |
 | `--drain-ack` | bool |  | with --claim, acknowledge runtime drain when no work is available |
 | `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
-| `--json` | bool |  | with --claim, emit a JSON protocol result |
+| `--json` | bool |  | emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal) |
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc hook current](#gc-hook-current) | Print the work bead this session most recently claimed |
 | [gc hook run](#gc-hook-run) | Run a managed hook command with a hard timeout |
+
+## gc hook current
+
+Prints the work bead this session most recently claimed with gc hook --claim.
+
+The claim protocol stamps the claimed bead id onto the calling session's own
+bead, because the environment alone cannot reliably name it: $GC_BEAD_ID exists
+only in the controller's dispatch condition environment, never in a session
+shell, and $GC_TRIGGER_BEAD_ID — exported to demand-spawned pool seats as a
+pool-level spawn marker — is absent on other seats (e.g. a warm seat bound
+after start) and never decides what a session claims; the pool is pull. Named
+singleton sessions can carry a stale $GC_TRIGGER_BEAD_ID for their entire
+lifetime, pointing at a different bead than the one currently claimed, so it
+must never be consulted ahead of the claim. A formula step that must close
+the bead it is running reads the stamp back here:
+
+    BEAD_ID="$&#123;GC_BEAD_ID:-$(gc hook current --id-only)&#125;"
+
+The calling session is taken from $GC_SESSION_ID. Exits 1 when there is no
+session identity and when the session has claimed nothing, so a caller that
+cannot name its bead fails loudly instead of skipping its own work.
+
+```
+gc hook current [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--id-only` | bool |  | print only the bead id, with no surrounding context |
 
 ## gc hook run
 
@@ -2229,6 +2326,8 @@ gc init --template gascity --default-provider claude \
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--beads-target` | string |  | beads target selector: local or external (or GC_BEADS_TARGET); give with --beads-transport. Default local. external requires --dolt-host, --dolt-port and --dolt-database (or GC_DOLT_HOST/GC_DOLT_PORT/GC_DOLT_DATABASE); bd resolves the project_id itself, so --dolt-project-id is not needed with a selector |
+| `--beads-transport` | string |  | beads transport selector: direct or proxied (or GC_BEADS_TRANSPORT); give with --beads-target. Default proxied: bd owns the Dolt process, any bd read restarts it, and gc stop stops it. direct is the escape hatch and is also bd-owned (bd init --server), not the legacy gc-managed server. Every fresh provider-owned init requires bd &gt;= 1.3.0, selector or not; only the legacy --dolt-host alias given without a selector stays on the 1.0.4 floor |
 | `--bootstrap-profile` | string |  | bootstrap profile to apply for hosted/container defaults |
 | `--default-provider` | string |  | default readiness-aware provider to select from --providers |
 | `--dolt-database` | string |  | hosted beads project database, e.g. bd_prj_… (or GC_DOLT_DATABASE); required with --dolt-host |
@@ -2514,6 +2613,16 @@ Use --to as an alternative to the positional &lt;to&gt; argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
 Use --all to broadcast to all live sessions (excluding sender and "human").
 
+Use --dedup &lt;key&gt; for repeating notifications (patrol and cooldown orders
+that re-detect the same condition every run): the send is suppressed while
+a previous message with the same key is still live (un-archived) in the same
+mailbox, and an alias and the session behind it count as one mailbox.
+Suppression exits 0. Once the recipient archives the message the stream may
+alert again; senders that want a longer re-alert cadence keep their own
+last-sent state. Dedup needs a provider that can query its own message
+history. The built-in provider can; one that cannot sends normally and says
+so on stderr, because a duplicate notification beats a dropped one.
+
 ```
 gc mail send [<to>] [<body>] [flags]
 ```
@@ -2523,16 +2632,18 @@ gc mail send [<to>] [<body>] [flags]
 ```
 gc mail send mayor "Build is green"
 gc mail send mayor -s "Build is green"
-gc mail send myrig/witness -s "Need investigation" -m "Attach logs from the last failed run"
+gc mail send myrig/reviewer -s "Need investigation" -m "Attach logs from the last failed run"
 gc mail send --to mayor "Build is green"
 gc mail send human "Review needed for PR #42"
-gc mail send polecat "Priority task" --notify
+gc mail send worker "Priority task" --notify
 gc mail send --all "Status update: tests passing"
+gc mail send worker -s "disk warning" --dedup "disk-warn:hq"
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--all` | bool |  | broadcast to all live sessions (excludes sender and human) |
+| `--dedup` | string |  | suppress the send while a live message with this dedup key is in the same mailbox (provider permitting) |
 | `--from` | string |  | sender identity (default: $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human") |
 | `--json` | bool |  | emit JSONL result |
 | `-m`, `--message` | string |  | message body text |
@@ -2692,7 +2803,30 @@ gc nudge
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc nudge drop](#gc-nudge-drop) | Dead-letter one or more pending or in-flight nudges |
 | [gc nudge status](#gc-nudge-status) | Show queued and dead-letter nudges for a session |
+
+## gc nudge drop
+
+Dead-letter one or more pending or in-flight nudges by ID.
+
+Each dropped nudge is terminalized through the same dead-letter path a
+failed delivery attempt uses, so it lands in "gc nudge status" as dead
+rather than disappearing silently. Find IDs with "gc nudge status".
+
+Dropping an in-flight nudge dead-letters it even if it was already
+injected into the session but not yet acked.
+
+This only accepts explicit nudge IDs; it does not do bulk or age-based
+selection.
+
+```
+gc nudge drop <id>... [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | Output as JSON |
 
 ## gc nudge status
 
@@ -2843,7 +2977,7 @@ gc order sweep-nudge-mail [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--dry-run` | bool |  | log what would be closed; make no changes |
-| `--mail-ttl` | duration | `1h0m0s` | min age before a read mail bead is GC'd |
+| `--mail-ttl` | duration | `1h0m0s` | min age before a read mail bead is GC'd; 0 disables the mail-close phase (default: cfg.Mail.RetentionTTL when set, else 1h0m0s) |
 | `--nudge-ttl` | duration | `10m0s` | min age before a delivered nudge bead is GC'd |
 | `--quiet` | bool |  | suppress success output |
 
@@ -3005,6 +3139,12 @@ The command requires a clean Git checkout whose current HEAD matches its
 configured upstream branch, then submits the GitHub repository, commit, pack
 path, pack name, and version to the registry API.
 
+Registry pack names are scoped as &lt;github-owner&gt;/&lt;pack&gt;, where &lt;github-owner&gt;
+is the lowercased GitHub owner of the source repository. [pack].name must
+already carry that scoped name: the registry compares it byte-for-byte with the
+requested name, and reserves unscoped names for packs it already holds a claim
+for. --allow-unscoped-name submits such a legacy unscoped name anyway.
+
 --dev-auth (localhost only) replaces all other credentials. Otherwise,
 authentication precedence is --token, GC_REGISTRY_TOKEN, a complete session
 cookie and CSRF-token pair from flags or the environment, a stored native
@@ -3018,12 +3158,13 @@ gc pack registry publish <path-to-pack-root> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--allow-unscoped-name` | bool |  | submit an unscoped (bare) pack name; the registry accepts these only for names it already holds a claim for |
 | `--csrf-token` | string |  | registry CSRF token; defaults to GC_REGISTRY_CSRF_TOKEN |
 | `--description` | string |  | release description; defaults to [pack].description |
 | `--dev-auth` | bool |  | create a local dev-auth session before submitting; localhost only |
 | `--dev-auth-handle` | string | `local-cli` | dev-auth handle when --dev-auth is used |
 | `--dry-run` | bool |  | print the publish request without submitting |
-| `--name` | string |  | registry pack name; defaults to [pack].name |
+| `--name` | string |  | registry pack name; must equal [pack].name (the registry rejects a mismatch) |
 | `--ref` | string |  | release ref label; defaults to the upstream branch name |
 | `--registry-url` | string |  | registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then https://registry.gascity.com |
 | `--session-cookie` | string |  | registry_session cookie value or Cookie header; defaults to GC_REGISTRY_SESSION |
@@ -3494,9 +3635,11 @@ same name.
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
 Use --default-branch to set the rig's mainline branch explicitly. By default,
-gc rig add probes the repo's origin/HEAD (and falls back to the currently
-checked-out branch) and stores the result in city.toml so polecats and the
-refinery target the right branch without manual metadata patching.
+gc rig add probes the repo's remote HEADs — origin first, then any other
+configured remote — and falls back to the currently checked-out branch, then
+stores the result in city.toml so polecats and the refinery target the right
+branch without manual metadata patching. The banner reports which remote
+answered, or says the branch was inferred when no remote HEAD is set.
 Use --start-suspended to add the rig in a suspended state (dormant-by-default).
 The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
@@ -3527,7 +3670,8 @@ gc rig add /path/to/existing --adopt
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--adopt` | bool |  | adopt existing .beads/ directory (skip init) |
-| `--default-branch` | string |  | mainline branch (default: auto-detect from origin/HEAD or current branch) |
+| `--allow-ephemeral` | bool |  | register the rig even though its path is on a filesystem that does not survive a restart |
+| `--default-branch` | string |  | mainline branch (default: auto-detect from a remote HEAD — origin preferred — or the current branch) |
 | `--git-url` | string |  | git URL to clone into a new rig on a REMOTE city (server-side provisioning) |
 | `--include` | stringArray |  | pack source or pack name for rig agents (repeatable; writes canonical rig imports) |
 | `--json` | bool |  | Output in JSONL format |
@@ -3611,7 +3755,9 @@ Use --self to mark the rig as running its own local Dolt server on
 command requires --force because the rig's .beads/dolt-server.port mirror
 will no longer track the managed city Dolt.
 
-This command owns the rig's canonical .beads/config.yaml topology state.
+This command owns the rig's canonical .beads/config.yaml topology state. It
+refuses a rig whose store the beads provider owns: that rig's endpoint lives in
+bd's own files and is bd's to change.
 
 ```
 gc rig set-endpoint <rig> [flags]
@@ -3695,7 +3841,7 @@ gc runtime
 | [gc runtime drain-ack](#gc-runtime-drain-ack) | Acknowledge drain — signal the controller to stop this session |
 | [gc runtime drain-check](#gc-runtime-drain-check) | Check if a session is draining (exit 0 = draining) |
 | [gc runtime heartbeat](#gc-runtime-heartbeat) | Extend idle-timeout window during a long operation |
-| [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (waits to be killed) |
+| [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (returns immediately) |
 | [gc runtime undrain](#gc-runtime-undrain) | Cancel drain on a session |
 
 ## gc runtime check
@@ -3708,6 +3854,11 @@ the handshake declares, and probes optional operations. Optional
 operations that are absent (exit 2) are reported but never fail the
 run; everything else that misbehaves does. Exits non-zero if any check
 fails, so a runtime pack's CI can gate on it directly.
+
+One exception: when the argument resolves to a pack-declared runtime whose
+[runtimes.&lt;name&gt;] entry declares prompt_delivery = "nudge-fallback", the
+nudge probe is reported as "required: nudge" and an absent or broken nudge
+op fails the run — the declaration is smoke-tested, not trusted.
 
 The argument is an executable (path or PATH name) or a pack-declared
 runtime name: when it names a [runtimes.&lt;name&gt;] entry from the current
@@ -3832,20 +3983,20 @@ gc runtime heartbeat [flags]
 
 Signal the controller to stop and restart this session.
 
-Sets GC_RESTART_REQUESTED metadata on the session, then waits while the
-controller stops the session on its next reconcile tick and restarts it
-fresh. The wait keeps the agent idle so it does not consume more context
-in the interim.
+Sets GC_RESTART_REQUESTED metadata on the session, pokes the controller for
+an immediate reconcile tick, and returns without waiting. Control-plane
+authority over the actual stop/start stays with the controller's reconcile
+loop; this command only signals it so the request need not wait for the next
+periodic patrol tick.
 
-Under normal operation the controller SIGKILLs the process tree before
-this command returns. If the controller accepts the stop handoff, the
-runtime is already gone, or a SIGINT/SIGTERM is received, the command
-exits 0 cleanly. If the controller has not acted within a bounded
-timeout (max(5*PatrolInterval, 5min), capped at 30min) the command exits
-1 with a diagnostic pointing at controller health.
+The command exits 0 once the restart request is durably persisted and the
+controller has been signaled, even if the controller has not yet acted. If
+the controller cannot be signaled, the command exits 1 with a diagnostic —
+the restart request itself remains durably set, so the controller still
+picks it up on its next periodic reconcile tick regardless.
 
 This command is designed to be called from within a session context.
-It emits a session.draining event before waiting.
+It emits a session.draining event before signaling the controller.
 
 ```
 gc runtime request-restart
@@ -3981,11 +4132,15 @@ gc session close <session-id-or-alias> [flags]
 
 ## gc session kill
 
-Force-kill the runtime process for a session without changing its bead state.
+Force-kill the runtime process for a session without discarding its work.
 
-The session remains marked as active, so the reconciler will detect the dead
-process and restart it according to the session's lifecycle rules. This is
-useful for unsticking a session without losing its conversation history.
+The kill syncs the session's lifecycle state to asleep and pokes the controller,
+so the reconciler observes the dead process promptly and restarts the session
+according to its lifecycle rules. This keeps Gas City bead continuity: hooks,
+assignments, and work still point at the same session bead. If the provider has
+resume metadata, Gas City may attempt provider resume, but
+provider conversation continuity is not guaranteed; confirm it with the agent or
+provider after restart.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
@@ -3995,6 +4150,7 @@ gc session kill <session-id-or-alias> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--force` | bool |  | destroy a session even when it has live background subagents |
 | `--json` | bool |  | emit JSONL |
 
 ## gc session list
@@ -4517,6 +4673,7 @@ gc storage
 | Subcommand | Description |
 |------------|-------------|
 | [gc storage migrate](#gc-storage-migrate) | Migrate this city's infrastructure classes onto their configured binding |
+| [gc storage preflight](#gc-storage-preflight) | Report what the migration would refuse, without migrating (read-only) |
 | [gc storage recover-stranded](#gc-storage-recover-stranded) | Copy stranded infrastructure beads from the retained work store into the converged binding |
 | [gc storage status](#gc-storage-status) | Report this city's storage-class layout (read-only) |
 
@@ -4543,6 +4700,33 @@ gc storage migrate [flags]
 |------|------|---------|-------------|
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--from-work` | bool |  | migrate the infrastructure classes out of this city's work store |
+
+## gc storage preflight
+
+Run every check gc storage migrate --from-work runs and report what it
+finds — without copying anything, creating anything, taking the migration guard,
+or publishing any event.
+
+This is for deciding whether the window you are about to take will be spent
+migrating or spent reading a refusal. It runs against a LIVE city: a controller
+serving this city is reported by PID rather than refused, because stopping it is
+the next thing you were going to do anyway.
+
+It resolves its destination from [storage.classes], so it has nothing to check
+until that section names a binding. On a city with no infrastructure split it
+reports exactly that and exits non-zero — author the split first.
+
+It exits non-zero when the migration would refuse for a reason you have to go
+and fix first. That is a different question from gc storage status,
+which exits non-zero whenever the city is not yet serving from its binding — the
+ordinary state of every city with a cutover still ahead of it.
+
+One condition is never checked here, because no process can check it:
+--fleet-stopped attests that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own.
+
+```
+gc storage preflight
+```
 
 ## gc storage recover-stranded
 
@@ -4583,7 +4767,11 @@ open the binding's engine unless that database already exists, because opening
 it would create the very database the report is being asked about.
 
 It exits non-zero when the city is configured for a binding it has not
-converged on, so a deployment script can gate on it.
+converged on, so a deployment script can gate on it. That is the ordinary state
+of every city with a cutover still ahead of it, and it is NOT a fault report: a
+non-zero status here says the migration has not run, not that it would fail. To
+find out whether it would fail, run `gc storage preflight`, which rehearses
+every check the migration makes without migrating.
 
 ```
 gc storage status
@@ -4714,6 +4902,15 @@ until the supervisor socket is no longer answering, which is what
 most callers that need deterministic cleanup want (e.g., integration
 tests that then expect to remove temp directories without racing
 against lingering supervisor / controller subprocesses).
+
+Stopping the supervisor also stops the platform service that manages
+it, and stop exits non-zero when that fails; with --wait, gc further
+verifies on macOS that the launchd job is really gone before
+returning, sharing the same --wait-timeout deadline as the socket
+wait, and fails when it cannot confirm that. An operator stop also
+disables the launchd job, so it will not come back at the next login
+until 'gc supervisor install' — or 'gc start', which routes through
+install — re-enables it.
 
 When GC_SUPERVISOR_SYSTEMD_UNIT is set, stop is delegated to
 'systemctl [--user] stop &lt;unit&gt;' instead of the control-socket stop.
@@ -4995,3 +5192,109 @@ gc whoami [flags]
 |------|------|---------|-------------|
 | `--at` | string |  | service base URL; defaults to GC_SERVICE_URL, the stored default, then https://gascity.com |
 | `--token` | string |  | API token to check; defaults to GC_SERVICE_TOKEN or the stored login |
+
+## gc worktree
+
+Ensure or verify agent workspace worktrees.
+
+gc worktree is the single transactional owner for workspace provisioning.
+Postconditions: the path is a direct child of the configured per-rig root and
+the root of a worktree of the given repository, with the bead's uniquely named
+branch checked out on an attached HEAD (never detached). Durable provenance is
+stored in the worktree's private git directory and returned as JSON so callers
+can atomically publish the same evidence on the bead. A new branch is created
+from --base, resolved verbatim against the local repository. Failed creation
+rolls back everything it created; --dry-run plans without mutating anything.
+
+```
+gc worktree
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc worktree cleanup](#gc-worktree-cleanup) | Remove an owned worktree after all safety gates pass |
+| [gc worktree ensure](#gc-worktree-ensure) | Ensure the worktree exists and satisfies all postconditions |
+| [gc worktree verify](#gc-worktree-verify) | Verify the worktree satisfies all postconditions without mutating |
+
+## gc worktree cleanup
+
+Remove an owned worktree after all safety gates pass.
+
+Cleanup verifies the canonical repository, path, branch, and durable ownership
+provenance before acting. It refuses dirty worktrees, commits reachable from no
+branch, tag, or remote-tracking ref, and commits not merged into --base.
+--attempt-id binds the removal to one exact provisioning attempt, so a stale
+request cannot remove a workspace re-created at the same path. There is no
+force mode and no recursive-filesystem fallback. An already-absent,
+unregistered path is an idempotent success. With --json, safety refusals return
+a structured cleanup_pending result for formula automation.
+
+```
+gc worktree cleanup [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--attempt-id` | string |  | attempt id returned by the ensure that created this worktree (required) |
+| `--base` | string |  | exact base ref used for this worktree (required) |
+| `--base-sha` | string |  | recorded base SHA to verify when reusing a worktree |
+| `--bead` | string |  | work bead bound to this worktree (required) |
+| `--branch` | string |  | branch that must be checked out (required) |
+| `--creator` | string |  | mechanism creating the worktree (required) |
+| `--generation` | string |  | provisioning generation fence (required) |
+| `--json` | bool |  | emit the report as JSON |
+| `--lifecycle` | string | `active` | worktree lifecycle state |
+| `--owner` | string |  | single selected provisioning owner (required) |
+| `--path` | string |  | worktree path (required) |
+| `--repo` | string |  | repository directory the worktree belongs to (required) |
+| `--root` | string |  | configured per-rig worktree root; path must be its direct child (required) |
+| `--store-ref` | string |  | work bead store reference (required) |
+
+## gc worktree ensure
+
+Ensure the worktree exists and satisfies all postconditions
+
+```
+gc worktree ensure [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--base` | string |  | exact base ref used for this worktree (required) |
+| `--base-sha` | string |  | recorded base SHA to verify when reusing a worktree |
+| `--bead` | string |  | work bead bound to this worktree (required) |
+| `--branch` | string |  | branch that must be checked out (required) |
+| `--creator` | string |  | mechanism creating the worktree (required) |
+| `-n`, `--dry-run` | bool |  | plan without mutating anything |
+| `--generation` | string |  | provisioning generation fence (required) |
+| `--json` | bool |  | emit the report as JSON |
+| `--lifecycle` | string | `active` | worktree lifecycle state |
+| `--owner` | string |  | single selected provisioning owner (required) |
+| `--path` | string |  | worktree path (required) |
+| `--repo` | string |  | repository directory the worktree belongs to (required) |
+| `--root` | string |  | configured per-rig worktree root; path must be its direct child (required) |
+| `--store-ref` | string |  | work bead store reference (required) |
+
+## gc worktree verify
+
+Verify the worktree satisfies all postconditions without mutating
+
+```
+gc worktree verify [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--base` | string |  | exact base ref used for this worktree (required) |
+| `--base-sha` | string |  | recorded base SHA to verify when reusing a worktree |
+| `--bead` | string |  | work bead bound to this worktree (required) |
+| `--branch` | string |  | branch that must be checked out (required) |
+| `--creator` | string |  | mechanism creating the worktree (required) |
+| `--generation` | string |  | provisioning generation fence (required) |
+| `--json` | bool |  | emit the report as JSON |
+| `--lifecycle` | string | `active` | worktree lifecycle state |
+| `--owner` | string |  | single selected provisioning owner (required) |
+| `--path` | string |  | worktree path (required) |
+| `--repo` | string |  | repository directory the worktree belongs to (required) |
+| `--root` | string |  | configured per-rig worktree root; path must be its direct child (required) |
+| `--store-ref` | string |  | work bead store reference (required) |

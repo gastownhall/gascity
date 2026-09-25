@@ -205,7 +205,9 @@ func TestReconcileDetachedAtUsesRoutedSleepCapability(t *testing.T) {
 		t.Fatalf("policy capability = %q, want %q", policy.Capability, runtime.SessionSleepCapabilityFull)
 	}
 
-	reconcileDetachedAtInfo(sessiontest.SeedBead(t, session), store, policy, true, provider, &clock.Fake{Time: now})
+	if _, err := reconcileDetachedAtInfo(sessiontest.SeedBead(t, session), store, policy, true, provider, &clock.Fake{Time: now}); err != nil {
+		t.Fatalf("reconcileDetachedAtInfo: %v", err)
+	}
 
 	got, err := store.Get(session.ID)
 	if err != nil {
@@ -1224,7 +1226,7 @@ func TestSelectIdleProbeTargets_RotatesAcrossTicks(t *testing.T) {
 	dt := newDrainTracker()
 	infoByID := infoByIDForTargets(wakeTargets)
 
-	first := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByID)
+	first := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByID, time.Now())
 	if len(first) != 3 {
 		t.Fatalf("first selection = %d targets, want 3", len(first))
 	}
@@ -1232,7 +1234,7 @@ func TestSelectIdleProbeTargets_RotatesAcrossTicks(t *testing.T) {
 		t.Fatalf("first selection unexpectedly included fourth target: %v", first)
 	}
 
-	second := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByID)
+	second := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByID, time.Now())
 	if !second["four"] {
 		t.Fatalf("second selection should rotate in fourth target, got %v", second)
 	}
@@ -1253,7 +1255,7 @@ func TestSelectIdleProbeTargets_SkipsExplicitSleepIntent(t *testing.T) {
 		"wait-hold": {Policy: policy, ConfigSuppressed: true},
 	}
 
-	targets := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByIDForTargets(wakeTargets))
+	targets := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByIDForTargets(wakeTargets), time.Now())
 	if len(targets) != 0 {
 		t.Fatalf("selectIdleProbeTargets returned %v, want no probe targets", targets)
 	}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -260,7 +261,7 @@ func TestInstallClaudeUpgradesPreviousCanonicalSessionStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readEmbedded: %v", err)
 	}
-	stale := strings.Replace(string(current), sessionStartCurrentFormBody(""), sessionStartPreviousManagedFormBody, 1)
+	stale := strings.Replace(string(current), sessionStartCurrentFormBody("", "gc"), sessionStartPreviousManagedFormBody, 1)
 	if stale == string(current) {
 		t.Fatal("stale fixture did not diverge from current embedded config — check previous SessionStart pattern")
 	}
@@ -274,8 +275,8 @@ func TestInstallClaudeUpgradesPreviousCanonicalSessionStart(t *testing.T) {
 	hookData := fs.Files["/city/hooks/claude.json"]
 	runtimeData := fs.Files["/city/.gc/settings.json"]
 	sessionStartCommand := claudeHookCommand(t, hookData, "SessionStart")
-	if got := commandBodyAfterCanonicalPrefix(sessionStartCommand); got != sessionStartCurrentFormBody("") {
-		t.Fatalf("upgraded SessionStart body = %q, want %q", got, sessionStartCurrentFormBody(""))
+	if got := commandBodyAfterCanonicalPrefix(sessionStartCommand); got != sessionStartCurrentFormBody("", "gc") {
+		t.Fatalf("upgraded SessionStart body = %q, want %q", got, sessionStartCurrentFormBody("", "gc"))
 	}
 	if string(runtimeData) != string(hookData) {
 		t.Fatalf("runtime Claude settings should mirror upgraded hook settings:\n%s", string(runtimeData))
@@ -767,6 +768,64 @@ func TestUpgradeCodexHooksSkipsWhenDesiredPreCompactUnavailable(t *testing.T) {
 	}
 }
 
+func TestUpgradeCodexHooksPreservesLegacyShapeWhenAddingPreCompact(t *testing.T) {
+	desired, err := core.PackFS.ReadFile("overlay/per-provider/codex/.codex/hooks.json")
+	if err != nil {
+		t.Fatalf("read embedded codex overlay: %v", err)
+	}
+	for _, tc := range []struct {
+		name            string
+		sessionStart    string
+		wantPrefix      string
+		wantGCToken     string
+		forbidSubstring string
+	}{
+		{
+			name:            "legacy prepend and bare gc",
+			sessionStart:    canonicalGCPathPrefix + `gc prime --hook --hook-format codex`,
+			wantPrefix:      canonicalGCPathPrefix,
+			wantGCToken:     "gc",
+			forbidSubstring: "${GC_BIN",
+		},
+		{
+			name:            "current append and GC_BIN",
+			sessionStart:    canonicalGCPathPrefixAppend + managedGCBinInvocation + ` prime --hook --hook-format codex`,
+			wantPrefix:      canonicalGCPathPrefixAppend,
+			wantGCToken:     managedGCBinInvocation,
+			forbidSubstring: canonicalGCPathPrefix,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			existing, err := json.Marshal(map[string]any{
+				"hooks": map[string]any{
+					"SessionStart": []any{map[string]any{
+						"hooks": []any{map[string]any{"type": "command", "command": tc.sessionStart}},
+					}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal fixture: %v", err)
+			}
+			got, changed, err := upgradeCodexHooks(existing, desired, "/city")
+			if err != nil {
+				t.Fatalf("upgradeCodexHooks: %v", err)
+			}
+			if !changed {
+				t.Fatal("upgradeCodexHooks changed = false, want true")
+			}
+			if want := tc.wantPrefix + preCompactCurrentFormBody("/city", tc.wantGCToken); codexHookCommand(t, got, "PreCompact") != want {
+				t.Fatalf("PreCompact command = %q, want %q", codexHookCommand(t, got, "PreCompact"), want)
+			}
+			if want := tc.wantPrefix + sessionStartCurrentFormBody("/city", tc.wantGCToken); codexHookCommand(t, got, "SessionStart") != want {
+				t.Fatalf("SessionStart command = %q, want %q", codexHookCommand(t, got, "SessionStart"), want)
+			}
+			if strings.Contains(string(got), tc.forbidSubstring) {
+				t.Fatalf("upgraded hooks switched shape, found %q:\n%s", tc.forbidSubstring, got)
+			}
+		})
+	}
+}
+
 func TestAddCodexPreCompactHookRejectsInvalidRoots(t *testing.T) {
 	desired := []byte(`{"hooks":{"PreCompact":[{"hooks":[{"type":"command","command":"gc handoff --auto"}]}]}}`)
 	for name, root := range map[string]any{
@@ -791,7 +850,7 @@ func TestAddCodexPreCompactHookRejectsInvalidRoots(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if addCodexPreCompactHook(root, desired) {
+			if addCodexPreCompactHook(root, desired, "") {
 				t.Fatalf("addCodexPreCompactHook(%s) = true, want false", name)
 			}
 		})
@@ -1679,7 +1738,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	codexHooks := fs.Files["/work/.codex/hooks.json"]
 	codexHooksText := string(codexHooks)
 	sessionStartCommand := codexHookCommand(t, codexHooks, "SessionStart")
-	if !strings.Contains(sessionStartCommand, `gc --city '/city' prime --hook --hook-format codex`) {
+	if !strings.Contains(sessionStartCommand, `"${GC_BIN:-gc}" --city '/city' prime --hook --hook-format codex`) {
 		t.Fatalf("codex SessionStart hook command = %q, want city-bound gc prime --hook --hook-format codex", sessionStartCommand)
 	}
 	if !strings.Contains(sessionStartCommand, "GC_HOOK_EVENT_NAME=SessionStart") {
@@ -1691,12 +1750,12 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	if !strings.Contains(codexHooksText, `"PreCompact"`) {
 		t.Error("codex hooks should include PreCompact")
 	}
-	if !strings.Contains(codexHooksText, `gc --city '/city' handoff --auto --hook-format codex \"context cycle\"`) {
+	if !strings.Contains(codexHooksText, `\"${GC_BIN:-gc}\" --city '/city' handoff --auto --hook-format codex \"context cycle\"`) {
 		t.Error("codex PreCompact should use auto handoff with Codex hook output format")
 	}
 	for _, want := range []string{
-		`gc --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format codex`,
-		`gc --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format codex`,
+		`\"${GC_BIN:-gc}\" --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format codex`,
+		`\"${GC_BIN:-gc}\" --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format codex`,
 	} {
 		if !strings.Contains(codexHooksText, want) {
 			t.Errorf("codex prompt hooks missing bounded command %q:\n%s", want, codexHooksText)
@@ -1713,12 +1772,12 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	for path, wants := range map[string][]string{
 		"/work/.github/hooks/gascity.json": {
-			`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
-			`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
+			`\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
+			`\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
 		},
 		"/work/.cursor/hooks.json": {
-			`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
-			`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
+			`hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
+			`hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
 		},
 		"/work/.kiro/agents/gascity.json": {
 			`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
@@ -1732,6 +1791,22 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 			}
 		}
 	}
+	cursorHooks := string(fs.Files["/work/.cursor/hooks.json"])
+	if !strings.Contains(cursorHooks, `\"${GC_BIN:-gc}\" prime --hook`) {
+		t.Errorf("Cursor sessionStart hook must use GC_BIN before PATH fallback:\n%s", cursorHooks)
+	}
+	if !strings.Contains(cursorHooks, `export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\"`) {
+		t.Errorf("Cursor hooks must preserve the inherited workspace PATH ahead of user tool fallbacks:\n%s", cursorHooks)
+	}
+	if strings.Contains(cursorHooks, `export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\"`) {
+		t.Errorf("Cursor hooks must not select ambient user tools ahead of the inherited workspace PATH:\n%s", cursorHooks)
+	}
+	if !strings.Contains(cursorHooks, `if [ -n \"${BD_BIN:-}\" ]; then export PATH=\"${BD_BIN%/*}:$PATH\"; fi`) {
+		t.Errorf("Cursor hooks must put the configured bd binary directory ahead of provider PATH entries:\n%s", cursorHooks)
+	}
+	if strings.Contains(cursorHooks, ` && gc `) {
+		t.Errorf("Cursor hooks must use GC_BIN so provider PATH changes cannot select another gc:\n%s", cursorHooks)
+	}
 	// Copilot CLI documents preCompact (camelCase). The hook fires before
 	// context compaction starts so handoff can capture state; without it,
 	// long Copilot sessions silently lose context at compact boundaries.
@@ -1740,14 +1815,14 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	if !strings.Contains(copilotHooks, `"preCompact"`) {
 		t.Error("copilot hooks should include preCompact (closes #672 gap 3)")
 	}
-	if !strings.Contains(copilotHooks, `gc handoff --auto \"context cycle\"`) {
+	if !strings.Contains(copilotHooks, `\"${GC_BIN:-gc}\" handoff --auto \"context cycle\"`) {
 		t.Error("copilot preCompact should use auto handoff")
 	}
 	antigravityHooks := string(fs.Files["/work/.agents/hooks.json"])
 	for hookName, wantCommand := range map[string]string{
-		"gascity-prime":       `GC_PROVIDER_SESSION_ID_REQUIRED=antigravity GC_PROVIDER_SESSION_ID=\"${ANTIGRAVITY_CONVERSATION_ID:-}\" GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format antigravity`,
-		"gascity-nudge-drain": "gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format antigravity",
-		"gascity-mail-check":  "gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format antigravity",
+		"gascity-prime":       `GC_PROVIDER_SESSION_ID_REQUIRED=antigravity GC_PROVIDER_SESSION_ID=\"${ANTIGRAVITY_CONVERSATION_ID:-}\" GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart \"${GC_BIN:-gc}\" prime --hook --hook-format antigravity`,
+		"gascity-nudge-drain": `\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format antigravity`,
+		"gascity-mail-check":  `\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format antigravity`,
 	} {
 		if !strings.Contains(antigravityHooks, `"`+hookName+`"`) {
 			t.Errorf("Antigravity hooks missing hook %q:\n%s", hookName, antigravityHooks)
@@ -1761,7 +1836,8 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	opencodeHooks := string(fs.Files["/work/.opencode/plugins/gascity.js"])
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 5",
+		"const GC_OPENCODE_HOOK_VERSION = 6",
+		"pending.child.stdin?.end();",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		`"experimental.session.compacting"`,
@@ -1916,9 +1992,9 @@ func TestInstallAntigravityMergesExistingHooks(t *testing.T) {
 		`"custom-reminder"`,
 		`"command": "echo custom"`,
 		`"gascity-prime"`,
-		`gc prime --hook --hook-format antigravity`,
-		`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format antigravity`,
-		`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format antigravity`,
+		`\"${GC_BIN:-gc}\" prime --hook --hook-format antigravity`,
+		`\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format antigravity`,
+		`\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format antigravity`,
 	} {
 		if !strings.Contains(data, want) {
 			t.Errorf("merged Antigravity hooks missing %q:\n%s", want, data)
@@ -1958,9 +2034,13 @@ func TestInstallPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
 		`pi.on("before_agent_start"`,
-		"const GC_PI_HOOK_VERSION = 7",
+		"const GC_PI_HOOK_VERSION = 9",
 		"gc hook --inject",
-		`run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx))`,
+		`run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "SessionStart"))`,
+		`run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "PreCompact"))`,
+		"GC_MANAGED_SESSION_HOOK",
+		"GC_HOOK_EVENT_NAME",
+		"pendingPrimeContext",
 		"GC_PROVIDER_SESSION_ID",
 		"GC_PROVIDER_SESSION_ID_REQUIRED",
 		`stdio: ["ignore", "pipe", "inherit"]`,
@@ -2020,20 +2100,25 @@ func TestPiHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 // gc prime --hook
 // gc hook --inject
 // gc handoff --auto
-const GC_PI_HOOK_VERSION = 7;
-run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx));
+const GC_PI_HOOK_VERSION = 9;
+pendingPrimeContext = run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "SessionStart"));
 run(["hook", "--inject"], ctx.cwd);
 run(["handoff", "--auto", "context cycle"], ctx.cwd);
 let mirrorTempCounter = 0;
 GC_PROVIDER_SESSION_ID;
 GC_PROVIDER_SESSION_ID_REQUIRED;
+GC_MANAGED_SESSION_HOOK;
+GC_HOOK_EVENT_NAME;
 stdio: ["ignore", "pipe", "inherit"];
 function providerSessionEnv(ctx) {}
 `)
-	stale := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 7"), []byte("GC_PI_HOOK_VERSION = 6"), 1)
-	future := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 7"), []byte("GC_PI_HOOK_VERSION = 8"), 1)
+	stale := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 9"), []byte("GC_PI_HOOK_VERSION = 8"), 1)
+	future := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 9"), []byte("GC_PI_HOOK_VERSION = 10"), 1)
 	missingStderrForward := bytes.Replace(current, []byte(`stdio: ["ignore", "pipe", "inherit"];
 `), nil, 1)
+	missingManagedHookMarkers := bytes.Replace(current, []byte(`GC_MANAGED_SESSION_HOOK;
+`), nil, 1)
+	missingPendingPrimeContext := bytes.Replace(current, []byte("pendingPrimeContext = "), nil, 1)
 
 	if !piHookNeedsUpgrade(stale) {
 		t.Fatal("stale Pi hook version did not request upgrade")
@@ -2046,6 +2131,12 @@ function providerSessionEnv(ctx) {}
 	}
 	if !piHookNeedsUpgrade(missingStderrForward) {
 		t.Fatal("Pi hook without child stderr forwarding did not request upgrade")
+	}
+	if !piHookNeedsUpgrade(missingManagedHookMarkers) {
+		t.Fatal("Pi hook without managed-session hook markers did not request upgrade")
+	}
+	if !piHookNeedsUpgrade(missingPendingPrimeContext) {
+		t.Fatal("Pi hook that discards the SessionStart prime output did not request upgrade")
 	}
 }
 
@@ -2167,7 +2258,8 @@ export default async function gascityPlugin() {
 		t.Fatal("stale OpenCode managed plugin was preserved; expected managed upgrade")
 	}
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 5",
+		"const GC_OPENCODE_HOOK_VERSION = 6",
+		"pending.child.stdin?.end();",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		`"experimental.session.compacting"`,
@@ -2189,7 +2281,7 @@ export default async function gascityPlugin() {
 
 func TestOpenCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for OpenCode.
-const GC_OPENCODE_HOOK_VERSION = 5;
+const GC_OPENCODE_HOOK_VERSION = 6;
 const GC_BIN = process.env.GC_BIN || "gc";
 const PATH_PREFIX =
   "/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:";
@@ -2203,10 +2295,12 @@ runWithWarning(directory, "handoff", "--auto", "context cycle");
 output.context.push(handoff);
 GC_PROVIDER_SESSION_ID;
 GC_PROVIDER_SESSION_ID_REQUIRED;
+pending.child.stdin?.end();
 `)
-	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 5"), []byte("GC_OPENCODE_HOOK_VERSION = 4"), 1)
-	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 5"), []byte("GC_OPENCODE_HOOK_VERSION = 6"), 1)
+	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 6"), []byte("GC_OPENCODE_HOOK_VERSION = 5"), 1)
+	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 6"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
 	missingStderrLog := bytes.Replace(current, []byte("logRunStderr(stderr);\n"), nil, 1)
+	openStdin := bytes.Replace(current, []byte("pending.child.stdin?.end();\n"), nil, 1)
 
 	if !opencodeHookNeedsUpgrade(stale) {
 		t.Fatal("stale OpenCode hook version did not request upgrade")
@@ -2219,6 +2313,9 @@ GC_PROVIDER_SESSION_ID_REQUIRED;
 	}
 	if !opencodeHookNeedsUpgrade(missingStderrLog) {
 		t.Fatal("OpenCode hook without child stderr logging did not request upgrade")
+	}
+	if !opencodeHookNeedsUpgrade(openStdin) {
+		t.Fatal("OpenCode hook leaving child stdin open did not request upgrade")
 	}
 }
 
@@ -2326,6 +2423,91 @@ func TestWriteEmbeddedManagedDoesNotClobberExistingBackup(t *testing.T) {
 	}
 }
 
+// TestInstallCursorHookUpgradesHistoricalManagedFile pins the most recently
+// released managed .cursor/hooks.json shape (#3457): bare gc commands with
+// provider tool paths prepended by &&. Documents released before #3457 differ
+// in the command body, so no transformation of today's document reproduces
+// them; they are intentionally left un-upgraded, which makes this the only
+// shape Install adopts today.
+func TestInstallCursorHookUpgradesHistoricalManagedFile(t *testing.T) {
+	desired, err := core.PackFS.ReadFile("overlay/per-provider/cursor/.cursor/hooks.json")
+	if err != nil {
+		t.Fatalf("read embedded Cursor hooks: %v", err)
+	}
+	variants := cursorHookLegacyVariants(desired)
+	if len(variants) != 1 {
+		t.Fatalf("cursorHookLegacyVariants() = %d, want exactly the most recent released shape (#3457); adopting an older released shape is a deliberate widening, not a bug fix", len(variants))
+	}
+	legacy := variants[0]
+	if bytes.Contains(legacy, []byte("BD_BIN")) {
+		t.Fatalf("legacy variant carries a BD_BIN clause no released managed hook contains:\n%s", legacy)
+	}
+
+	fs := fsys.NewFake()
+	const dst = "/work/.cursor/hooks.json"
+	fs.Files[dst] = legacy
+	if err := Install(fs, "/city", "/work", []string{"cursor"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if got := string(fs.Files[dst]); !strings.Contains(got, `\"${GC_BIN:-gc}\" prime --hook`) {
+		t.Fatalf("historical Cursor hook was not upgraded:\n%s", got)
+	}
+	if got := fs.Files[dst+".bak"]; !bytes.Equal(got, legacy) {
+		t.Fatalf("historical Cursor hook backup = %q, want original managed content", got)
+	}
+}
+
+// TestInstallCursorHookPreservesUnreleasedIntermediateShapes guards the
+// narrowing above: documents that only ever existed mid-development are not
+// managed content, so Install must leave them alone rather than silently
+// overwrite whatever a user has on disk.
+func TestInstallCursorHookPreservesUnreleasedIntermediateShapes(t *testing.T) {
+	desired, err := core.PackFS.ReadFile("overlay/per-provider/cursor/.cursor/hooks.json")
+	if err != nil {
+		t.Fatalf("read embedded Cursor hooks: %v", err)
+	}
+	const (
+		workspaceFirst = `export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\"`
+		ambientFirst   = `export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\"`
+	)
+	unreleased := map[string][]byte{
+		"bare sessionStart with the pin clause": bytes.Replace(desired,
+			[]byte(`\"${GC_BIN:-gc}\" prime --hook`), []byte(`gc prime --hook`), 1),
+		"ambient-first PATH with the pin clause": bytes.ReplaceAll(desired,
+			[]byte(workspaceFirst), []byte(ambientFirst)),
+	}
+	for name, existing := range unreleased {
+		t.Run(name, func(t *testing.T) {
+			if bytes.Equal(existing, desired) {
+				t.Fatal("embedded Cursor hook no longer differs from this intermediate shape")
+			}
+			fs := fsys.NewFake()
+			const dst = "/work/.cursor/hooks.json"
+			fs.Files[dst] = existing
+			if err := Install(fs, "/city", "/work", []string{"cursor"}); err != nil {
+				t.Fatalf("Install: %v", err)
+			}
+			if got := fs.Files[dst]; !bytes.Equal(got, existing) {
+				t.Fatalf("unreleased Cursor hook shape was overwritten:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestInstallCursorHookPreservesUserAuthoredFile(t *testing.T) {
+	fs := fsys.NewFake()
+	const dst = "/work/.cursor/hooks.json"
+	custom := []byte(`{"version":1,"hooks":{"sessionStart":[{"command":"my-cursor-hook"}]}}`)
+	fs.Files[dst] = custom
+
+	if err := Install(fs, "/city", "/work", []string{"cursor"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if got := fs.Files[dst]; !bytes.Equal(got, custom) {
+		t.Fatalf("user-authored Cursor hook was overwritten:\n%s", got)
+	}
+}
+
 func TestInstallPiHookPreservesUserAuthoredFile(t *testing.T) {
 	fs := fsys.NewFake()
 	custom := []byte(`module.exports = function customPiExtension(pi) {
@@ -2378,7 +2560,7 @@ func TestInstallCodexWritesCanonicalJSON(t *testing.T) {
 	if bytes.Contains(data, []byte(`\u0026`)) {
 		t.Fatalf("codex hook escaped command operator:\n%s", data)
 	}
-	if !bytes.Contains(data, []byte(` && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/city' prime`)) {
+	if !bytes.Contains(data, []byte(` && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart \"${GC_BIN:-gc}\" --city '/city' prime`)) {
 		t.Fatalf("codex hook missing literal command operator:\n%s", data)
 	}
 	if !bytes.HasSuffix(data, []byte("\n")) {

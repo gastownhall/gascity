@@ -26,6 +26,12 @@ const (
 	graphNamespacedID = "gcg-abc" // minted by the binding: inside the reserved namespace
 	workShapedID      = "ga-xyz"  // the migrate-preserved id: outside every namespace
 	rigShapedID       = "ra-7"    // inside a rig's CONFIGURED prefix: the shadow row
+	// queueNamespacedID is a nudge-queue record: inside a namespace the nudges
+	// binding HOLDS but does not mint. Its rows must match graphNamespacedID's
+	// wherever a binding carries the namespace, because "who minted it" is not a
+	// question the resolver asks — and must match the work-shaped rows on T5,
+	// where no binding carries it.
+	queueNamespacedID = "gcnq-abc-q"
 )
 
 // corpusRouter is the routed work axis the ",routed" rows plan over: the shape
@@ -49,6 +55,7 @@ func corpusIntents() []struct {
 		{"ByID(" + graphNamespacedID + ")", ByID{ID: graphNamespacedID}},
 		{"ByID(" + workShapedID + ")", ByID{ID: workShapedID}},
 		{"ByID(" + rigShapedID + ")", ByID{ID: rigShapedID}},
+		{"ByID(" + queueNamespacedID + ")", ByID{ID: queueNamespacedID}},
 		{"ByID(" + workShapedID + ",routed)", ByID{ID: workShapedID, WorkAxis: corpusRouter()}},
 		{"ByID(" + graphNamespacedID + ",routed)", ByID{ID: graphNamespacedID, WorkAxis: corpusRouter()}},
 		{"RoutedWork", RoutedWork{}},
@@ -145,6 +152,29 @@ var residencyCorpus = map[string]string{
 	"Class(graph) x T3":                   "error: storage refused: run `gc storage migrate`",
 	"Class(sessions) x T3":                "error: storage refused: run `gc storage migrate`",
 
+	// ---- T3k: T3 whose binding a durable census PROVED holds ids outside its
+	// reserved namespaces. Every row is character-for-character T3's except the
+	// three residence probes, which become Fatal. The carve-out above rests on
+	// "this leg was only ever a probe for an id no relocated class could own",
+	// and that sentence is known to be false here: the migration preserved ids,
+	// so a work-shaped id CAN be resident in this binding, and the retained
+	// pre-migration copy is sitting in the work store ready to answer for it.
+	"ByID(gcg-abc) x T3k":                  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(ga-xyz) x T3k":                   `FirstOwner: class:gmnos[ResidenceProbe,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(ra-7) x T3k":                     `FirstOwner: class:gmnos[ResidenceProbe,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(ga-xyz,routed) x T3k":            `FirstOwner: class:gmnos[ResidenceProbe,Fatal] > ""[WorkFallback,Fatal] > rig:routed[Shadow,Fatal]`,
+	"ByID(gcg-abc,routed) x T3k":           `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
+	"RoutedWork x T3k":                     "error: storage refused: run `gc storage migrate`",
+	"AssignedWork(sweep) x T3k":            "error: storage refused: run `gc storage migrate`",
+	"AssignedWork(claim-escalation) x T3k": "error: storage refused: run `gc storage migrate`",
+	"Session x T3k":                        "error: storage refused: run `gc storage migrate`",
+	"Census(all) x T3k":                    "error: storage refused: run `gc storage migrate`",
+	"Census(work) x T3k":                   `Union(first-leg-wins): ""[Authority,Fatal]`,
+	"Census(graph) x T3k":                  "error: storage refused: run `gc storage migrate`",
+	"Class(work) x T3k":                    `SingleOwner: ""[Authority,Fatal]`,
+	"Class(graph) x T3k":                   "error: storage refused: run `gc storage migrate`",
+	"Class(sessions) x T3k":                "error: storage refused: run `gc storage migrate`",
+
 	// ---- T4: T2 with the bravo rig suspended. The constructor is TOLD which
 	// rigs to include; the resolver never re-invents an excluded leg.
 	"ByID(gcg-abc) x T4":                  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
@@ -206,7 +236,7 @@ var residencyCorpus = map[string]string{
 	"Class(graph) x T6":                   `SingleOwner: class:gmnos[Authority,Fatal]`,
 	"Class(sessions) x T6":                `SingleOwner: class:gmnos[Authority,Fatal]`,
 
-	// ---- T6r: mint-truthful but relics still open. The OTHER half of the
+	// ---- T6r: mint-truthful but holding relics. The OTHER half of the
 	// retirement pair — the probe stays, because a point-in-time "zero open
 	// relics" is the only thing that may retire it.
 	"ByID(gcg-abc) x T6r":                  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
@@ -224,6 +254,24 @@ var residencyCorpus = map[string]string{
 	"Class(work) x T6r":                    `SingleOwner: ""[Authority,Fatal]`,
 	"Class(graph) x T6r":                   `SingleOwner: class:gmnos[Authority,Fatal]`,
 	"Class(sessions) x T6r":                `SingleOwner: class:gmnos[Authority,Fatal]`,
+
+	// ---- The held-not-minted namespace, kept together because the claim is a
+	// comparison rather than a shape. Wherever a binding carries "gcnq" these
+	// rows are character-for-character the gcg-abc rows above: the resolver
+	// grants authority over a namespace the binding HOLDS, and never asks which
+	// sequence minted the id. On T5, where the two bindings carry only "gcg" and
+	// "gcs", they are the ga-xyz rows instead — an unheld namespace is not a
+	// half-claim, it is no claim, and the id gets the same probe order any
+	// unrecognized id gets.
+	"ByID(gcnq-abc-q) x T0":  `FirstOwner: ""[WorkFallback,Fatal]`,
+	"ByID(gcnq-abc-q) x T1":  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(gcnq-abc-q) x T2":  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(gcnq-abc-q) x T3":  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(gcnq-abc-q) x T3k": `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(gcnq-abc-q) x T4":  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(gcnq-abc-q) x T5":  `FirstOwner: class:g[ResidenceProbe,RefusalTolerated] > class:s[ResidenceProbe,RefusalTolerated] > ""[WorkFallback,Fatal]`,
+	"ByID(gcnq-abc-q) x T6":  `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
+	"ByID(gcnq-abc-q) x T6r": `FirstOwner: class:gmnos[Authority,Fatal] > ""[WorkFallback,Fatal]`,
 }
 
 // runtimeCorpusIntents is the intent axis of the RUNTIME-PLANE corpus: the
@@ -296,6 +344,15 @@ var residencyRuntimeCorpus = map[string]string{
 	"Session@runtime x T3":                        "error: storage refused: run `gc storage migrate`",
 	"Census(all)@runtime x T3":                    "error: storage refused: run `gc storage migrate`",
 	"ByID(ga-xyz)@runtime x T3":                   `FirstOwner: class:gmnos[ResidenceProbe,RefusalTolerated]`,
+
+	// T3k narrows identically — narrowing keeps a leg's role and policy, so the
+	// Fatal probe stays Fatal here too.
+	"RoutedWork@runtime x T3k":                     "error: storage refused: run `gc storage migrate`",
+	"AssignedWork(sweep)@runtime x T3k":            "error: storage refused: run `gc storage migrate`",
+	"AssignedWork(claim-escalation)@runtime x T3k": "error: storage refused: run `gc storage migrate`",
+	"Session@runtime x T3k":                        "error: storage refused: run `gc storage migrate`",
+	"Census(all)@runtime x T3k":                    "error: storage refused: run `gc storage migrate`",
+	"ByID(ga-xyz)@runtime x T3k":                   `FirstOwner: class:gmnos[ResidenceProbe,Fatal]`,
 
 	"RoutedWork@runtime x T4":                     `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,
 	"AssignedWork(sweep)@runtime x T4":            `Union(first-leg-wins): class:gmnos[FederationTail,Fatal]`,

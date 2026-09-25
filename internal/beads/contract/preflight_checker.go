@@ -57,16 +57,45 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 	if err != nil {
 		return PreflightResult{}, err
 	}
-	bdCtx, bdCtxErr := c.readBDContext(scope)
+	providerCheck := c.checkProvider()
+	metadataCheck := c.checkMetadataBackend(metadata)
 
-	checks := []PreflightCheckResult{
-		c.checkProvider(),
-		c.checkMetadataBackend(metadata),
-		c.checkBDContextAgreement(metadata, bdCtx, bdCtxErr),
-		c.checkDoltModeSafe(metadata, bdCtx, bdCtxErr),
-		c.checkIdentityMatch(scope, metadata),
-		c.checkVersionCompat(bdCtx, bdCtxErr),
-		c.checkContractShape(metadata),
+	// `bd context` is a subprocess per scope (~0.3-0.4 s, plus the git probes
+	// bd runs to resolve the repo). Its answer can only matter when the
+	// checks that precede it pass: once provider_contract or metadata_backend
+	// FAILs, the verdict is BLOCKED, and because those checks come FIRST in
+	// the order, they are also the gate and fallback reason whatever bd
+	// context would have said. So bd context is not consulted for a scope
+	// that is already blocked (e.g. a non-dolt backend, which is every scope
+	// of a postgres city). Nothing is cached: every Check re-reads metadata,
+	// so a long-lived controller sees an operator's config change on the next
+	// open exactly as before.
+	var (
+		checks   []PreflightCheckResult
+		bdCtxErr error
+	)
+	if blocker, blocked := firstFailedCheck(providerCheck, metadataCheck); blocked {
+		checks = []PreflightCheckResult{
+			providerCheck,
+			metadataCheck,
+			bdContextNotConsultedCheck(PreflightCheckBDContextAgreement, blocker),
+			bdContextNotConsultedCheck(PreflightCheckDoltModeSafe, blocker),
+			c.checkIdentityMatch(scope, metadata),
+			bdContextNotConsultedCheck(PreflightCheckVersionCompat, blocker),
+			c.checkContractShape(metadata),
+		}
+	} else {
+		var bdCtx PreflightBDContext
+		bdCtx, bdCtxErr = c.readBDContext(scope)
+		checks = []PreflightCheckResult{
+			providerCheck,
+			metadataCheck,
+			c.checkBDContextAgreement(metadata, bdCtx, bdCtxErr),
+			c.checkDoltModeSafe(metadata, bdCtx, bdCtxErr),
+			c.checkIdentityMatch(scope, metadata),
+			c.checkVersionCompat(bdCtx, bdCtxErr),
+			c.checkContractShape(metadata),
+		}
 	}
 	verdict := preflightVerdictForChecks(checks)
 	// A DEGRADED verdict caused solely by an unreachable bd context (e.g. a
@@ -94,6 +123,26 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 		result.FallbackReason = preflightFallbackReason(checks)
 	}
 	return NewPreflightResult(result), nil
+}
+
+// firstFailedCheck returns the first FAILed check among checks.
+func firstFailedCheck(checks ...PreflightCheckResult) (PreflightCheckResult, bool) {
+	for _, check := range checks {
+		if check.State == PreflightCheckFail {
+			return check, true
+		}
+	}
+	return PreflightCheckResult{}, false
+}
+
+// bdContextNotConsultedCheck reports a bd-context-derived check that was not
+// evaluated because blocker already FAILed ahead of it. It WARNs rather than
+// PASSes: nothing was verified, and a WARN can neither move the gate nor the
+// fallback reason off the earlier FAIL, nor add a repair step.
+func bdContextNotConsultedCheck(id PreflightCheckID, blocker PreflightCheckResult) PreflightCheckResult {
+	return NewPreflightCheckResult(id, PreflightCheckWarn,
+		fmt.Sprintf("bd context not consulted; native store is already blocked by %s", blocker.ID),
+		PreflightDetails{MetadataBackend: blocker.Details.MetadataBackend, Provider: blocker.Details.Provider})
 }
 
 func (c PreflightChecker) readMetadata(scope string) (preflightMetadata, error) {
@@ -200,6 +249,8 @@ func (c PreflightChecker) checkDoltModeSafe(metadata preflightMetadata, ctx Pref
 	switch ctx.DoltMode {
 	case "server":
 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckPass, "bd context reports dolt server mode", details)
+	case "proxied-server":
+		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckPass, "bd context reports proxied Dolt server mode", details)
 	case "embedded":
 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckFail, "dolt_mode=embedded; native store requires Dolt server mode (bd context must report dolt_mode=server) — falling back to per-call bd. See troubleshooting.", details)
 	default:
@@ -273,9 +324,74 @@ func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) 
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd/beads schema compatible; linked library version unconfirmed ("+reason+")", details)
 	}
 	if strings.TrimPrefix(ctx.BDVersion, "v") != libraryVersion {
+		if newerSemverCompatibleBD(ctx.BDVersion, libraryVersion) {
+			return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd version is a newer semver-compatible release of the linked beads library version", details)
+		}
+		if samePrereleaseSeries(ctx.BDVersion, libraryVersion) {
+			return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd and the linked beads library are prereleases of the same release", details)
+		}
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "bd version differs from linked beads library version", details)
 	}
 	return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd and linked beads library versions match", details)
+}
+
+// newerSemverCompatibleBD reports whether bdVersion is a semver-compatible
+// upgrade of libraryVersion: the same major version, and not older. Per
+// semver, only a major bump breaks compatibility, so a newer bd release
+// within the linked library's major version — the common case when an
+// unversioned Homebrew dependency drifts ahead of gc's pinned go.mod release
+// (gastownhall/gascity#5164) — is safe to treat as compatible rather than a
+// hard version mismatch. Returns false (falling back to the exact-match
+// behavior already applied above) whenever either version does not parse as
+// valid semver, so this only ever widens what passes, never what fails.
+func newerSemverCompatibleBD(bdVersion, libraryVersion string) bool {
+	bdCanonical := "v" + strings.TrimPrefix(strings.TrimSpace(bdVersion), "v")
+	libCanonical := "v" + strings.TrimPrefix(strings.TrimSpace(libraryVersion), "v")
+	if !semver.IsValid(bdCanonical) || !semver.IsValid(libCanonical) {
+		return false
+	}
+	if semver.Major(bdCanonical) != semver.Major(libCanonical) {
+		return false
+	}
+	return semver.Compare(bdCanonical, libCanonical) >= 0
+}
+
+// samePrereleaseSeries reports whether both versions are prereleases of the same
+// MAJOR.MINOR.PATCH release — v1.3.0-rc.1 and v1.3.0-rc.2, in either order.
+//
+// newerSemverCompatibleBD deliberately refuses an OLDER bd, because an older bd
+// may not understand a newer library's schema. For the pairing this widening
+// was written for, that risk was checked rather than assumed: v1.3.0-rc.1 and
+// v1.3.0-rc.2 embed a byte-identical internal/storage/schema, both computing
+// LatestVersion() == 66, so neither can carry schema skew against the other.
+// That is a verified property of THAT pair, not a law of RC series: nothing
+// stops an rc.N from being cut precisely to land a schema change, and this
+// predicate compares version strings only, never schema versions. A future
+// same-series pin move must re-prove the schema premise for its own pair.
+//
+// gascity's own pins do not currently produce that pairing (BD_VERSION and
+// BD_CURRENT_VERSION are both v1.3.0-rc.2), so this widening is not load-bearing
+// for the current bump. It is kept so that an operator running a bd from
+// elsewhere in a series whose schema identity has been checked is not refused
+// a native store for a skew that pair does not carry.
+//
+// Kept deliberately narrow: BOTH sides must be prereleases and the release they
+// are candidates for must be identical, so every cross-release skew, and an RC
+// paired with its own final release, still fails. semver.Compare's prerelease
+// ordering is intentionally not consulted: ordering rc.1 before rc.2 says
+// nothing about which of them embeds which schema, so it is no substitute
+// for the by-hand check recorded above.
+func samePrereleaseSeries(bdVersion, libraryVersion string) bool {
+	bd := "v" + strings.TrimPrefix(strings.TrimSpace(bdVersion), "v")
+	lib := "v" + strings.TrimPrefix(strings.TrimSpace(libraryVersion), "v")
+	if !semver.IsValid(bd) || !semver.IsValid(lib) {
+		return false
+	}
+	bdPre, libPre := semver.Prerelease(bd), semver.Prerelease(lib)
+	if bdPre == "" || libPre == "" {
+		return false
+	}
+	return strings.TrimSuffix(semver.Canonical(bd), bdPre) == strings.TrimSuffix(semver.Canonical(lib), libPre)
 }
 
 func (c PreflightChecker) checkContractShape(metadata preflightMetadata) PreflightCheckResult {

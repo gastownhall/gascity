@@ -62,6 +62,7 @@ import (
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storebinding"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // storageSupportedTopologyStatement is the one sentence describing what this
@@ -94,6 +95,83 @@ type storageRoutes struct {
 	// its CachingStore stays the only emitter on that side — see
 	// class_store_emit.go for why the two must not both emit.
 	emitCityPath string
+	// relics records, per binding store, whether the boot-time census found a
+	// bead — open or closed — outside the namespaces that binding declares.
+	//
+	// ABSENT MEANS UNKNOWN, and unknown means "assume relics" — see
+	// hasLegacyResidents. A process that never censused, or a binding whose
+	// mint bit is off so the answer would not matter, must not read as clean.
+	//
+	// Keying a map on beads.Store is safe here for the same confined reason
+	// residencyBindingsFromRoutes gives: every key comes from this struct's own
+	// stores map, which holds what storage boot opened.
+	relics map[beads.Store]bool
+}
+
+// hasLegacyResidents reports the boot census's verdict for a binding store.
+//
+// The default is the pessimistic one on every path that could skip the census:
+// a nil receiver, an uncensused process, and a store the census never reached
+// all answer true. Retirement is the claim that needs evidence.
+func (r *storageRoutes) hasLegacyResidents(store beads.Store) bool {
+	if r == nil {
+		return true
+	}
+	verdict, censused := r.relics[store]
+	if !censused {
+		return true
+	}
+	return verdict
+}
+
+// censusBindingRelics takes the once-per-process live read that turns
+// ClassBinding.HasLegacyResidents from a pessimistic default into an
+// observation.
+//
+// It runs only for a binding whose mint bit already verified, which is both a
+// cost bound and a statement of what the answer is for: probe retirement needs
+// BOTH halves, so a binding that does not mint truthfully pays nothing to learn
+// an answer that cannot change its plans.
+//
+// Since ga-qdt5y.18 this verdict is load-bearing on `gc bd`'s by-id path, which
+// is the busiest one-shot route in the CLI: the door no longer keeps a probe of
+// its own, so a binding certified clean here is a binding that path will not
+// read. A false clean is a lost bead, which is why every unknown answers true.
+//
+// # The cost, and why it is paid rather than written down
+//
+// The verdict covers the binding's WHOLE history and not its working set, so
+// it is never free: a store that answers it itself (beads.NamespaceCensus)
+// costs 0.4ms at 1k rows and 3.2ms at 10k, and one that has to be listed
+// instead costs 97ms at 10k (internal/storeref/relic_census_bench_test.go).
+// "Once per process" is what bounds it — the one-shot funnel takes it inside a
+// sync.Once per city (cliStorageRoutes) and the controller takes it once at boot
+// — and the verdict lives in the routes value those callers already hold.
+//
+// It is deliberately NOT remembered on disk. A note saying "this binding holds
+// relics" is a status file: it survives an operator rebuilding or re-pointing
+// the binding, nothing clears it, and a later `gc` then keeps or retires a probe
+// on a verdict no store agrees with. Querying live state is the house rule
+// (AGENTS.md), so the answer stays a read and the saving comes from making the
+// read cheaper. TestBootCensusIsLiveAndLeavesNothingOnDisk pins both halves.
+func censusBindingRelics(routes *storageRoutes) {
+	if routes == nil {
+		return
+	}
+	// Built with the pessimistic default still in force — the census reads the
+	// bindings' stores and prefixes, never their relic bits — so this is not
+	// circular. A refusal here is carried by the bindings themselves; the
+	// census's own error handling is what makes a refused binding keep its
+	// probe.
+	bindings, _ := residencyBindingsFromRoutes(routes)
+	relics := make(map[beads.Store]bool, len(bindings))
+	for _, binding := range bindings {
+		if !binding.MintsReserved {
+			continue
+		}
+		relics[binding.Leg.Store] = storeref.HasLegacyResidents(binding) // residency:allow — indexes a census result by the binding it was taken from; resolves nothing
+	}
+	routes.relics = relics
 }
 
 // storeFor returns the store serving a class and whether these routes relocate
@@ -197,6 +275,7 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 			recordStorageBindingOutcome(rec, blocked, advice)
 			return nil, errors.New(advice)
 		}
+		recordStorageBindingOutcome(rec, infraMigrationReport{Outcome: infraMigrationNotConfigured}, "")
 		return nil, nil
 	}
 
@@ -232,6 +311,11 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 			recordStorageBindingOutcome(rec, blocked, advice)
 			return nil, errors.New(advice)
 		}
+		// Same verdict as the absent section above, and deliberately the same
+		// event: an operator who reverted by re-pointing every class and one who
+		// deleted the section have arrived at the same place, and a subscriber
+		// should not have to know which edit they made to read it.
+		recordStorageBindingOutcome(rec, infraMigrationReport{Outcome: infraMigrationNotConfigured}, "")
 		return nil, nil
 	}
 
@@ -291,6 +375,11 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	if err := recordServedBinding(plan, cityPath, storage, target); err != nil {
 		return nil, errors.Join(fmt.Errorf("%s: %w", logPrefix, err), routes.close())
 	}
+	// One read, here, because this is the single funnel both planes pass
+	// through — the controller's boot and the one-shot CLI's memoized routes.
+	// Taking it anywhere downstream would put a store read inside a per-tick
+	// topology constructor.
+	censusBindingRelics(routes)
 	return routes, nil
 }
 
@@ -517,13 +606,13 @@ func checkBornSplitDiscipline(cityPath string, logPrefix string, stderr io.Write
 	source, err := openInfraMigrationSource(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: born-split check: opening the work store: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return infraMigrationReport{Outcome: infraMigrationUncheckable}
+		return infraMigrationReport{Outcome: infraMigrationUncheckable, Fault: fmt.Errorf("born-split check: opening the work store: %w", err)}
 	}
 	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
 	infra, err := readInfraSnapshot(source)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: born-split check: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return infraMigrationReport{Outcome: infraMigrationUncheckable}
+		return infraMigrationReport{Outcome: infraMigrationUncheckable, Fault: fmt.Errorf("born-split check: %w", err)}
 	}
 	if len(infra) == 0 {
 		return infraMigrationReport{Outcome: infraMigrationConverged}
@@ -556,10 +645,17 @@ func plannedBindingOpener(plan *storebinding.StoragePlan, name string) storebind
 }
 
 // storageBindingEventTypes maps a migration outcome to the event that reports
-// it. Outcomes with no entry are not events: not-configured describes a city
-// that was never asked, and stranded is carried inside the refusal that names
-// the ids.
+// it. Every outcome has one, and TestEveryMigrationOutcomeReachesARegisteredEventType
+// keeps it that way: an unmapped outcome publishes nothing and does so silently,
+// so a subscriber gating a deploy would read a verdict that was reached as no
+// verdict at all.
+//
+// Several refusals share the unconverged type on purpose — a stranded city, a
+// blocked born split and a blocked genesis are all "config and data disagree",
+// and the sentence in the payload's invariant is what distinguishes them. The
+// distinct types are the ones a subscriber would branch on rather than read.
 var storageBindingEventTypes = map[infraMigrationOutcome]string{
+	infraMigrationNotConfigured:    events.StorageBindingNotConfigured,
 	infraMigrationConverged:        events.StorageBindingConverged,
 	infraMigrationGenesis:          events.StorageBindingGenesis,
 	infraMigrationUnconverged:      events.StorageBindingUnconverged,
@@ -583,10 +679,11 @@ func recordStorageBindingOutcome(rec events.Recorder, report infraMigrationRepor
 		return
 	}
 	raw, err := json.Marshal(storebinding.StorageBindingOutcomePayload{
-		Binding:   report.Target.Binding,
-		Database:  report.Target.Database,
-		Outcome:   report.Outcome.String(),
-		Invariant: invariant,
+		Binding:     report.Target.Binding,
+		Database:    report.Target.Database,
+		Outcome:     report.Outcome.String(),
+		Invariant:   invariant,
+		ProvenBeads: report.ProvenBeads,
 	})
 	if err != nil {
 		return

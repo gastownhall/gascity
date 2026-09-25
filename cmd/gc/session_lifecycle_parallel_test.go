@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,10 +19,12 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
@@ -741,6 +745,237 @@ func TestReconcileSessionBeads_FailedDependencyBlocksDependentButNotSibling(t *t
 	}
 }
 
+func TestPrepareStartCandidateRepairsConcretePoolTemplateWorkDir(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "repos", "aot-mobile")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		template      = "aot-mobile/gastown.polecat"
+		concreteAlias = "aot-mobile/gastown.capable"
+		sessionName   = "capable-session"
+	)
+	templateWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "aot-mobile", "polecats", "gastown.polecat")
+	concreteWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "aot-mobile", "polecats", "gastown.capable")
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  concreteAlias,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + concreteAlias},
+		Metadata: map[string]string{
+			"template":                        template,
+			"agent_name":                      concreteAlias,
+			"alias":                           concreteAlias,
+			"session_name":                    sessionName,
+			"session_origin":                  "ephemeral",
+			"pool_slot":                       "1",
+			poolManagedMetadataKey:            boolMetadata(true),
+			"state":                           string(sessionpkg.StateStartPending),
+			beadmeta.WorkDirMetadataKey:       templateWorkDir,
+			beadmeta.LegacyWorkDirMetadataKey: templateWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "aot"},
+		Rigs:      []config.Rig{{Name: "aot-mobile", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:          "gastown.polecat",
+			Dir:           "aot-mobile",
+			Provider:      "test-agent",
+			StartCommand:  "true",
+			WorkDir:       ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}",
+			NamepoolNames: []string{"gastown.capable", "gastown.furiosa"},
+		}},
+	}
+
+	prepared, err := prepareStartCandidateForCity(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: template,
+			InstanceName: concreteAlias,
+			SessionName:  sessionName,
+			WorkDir:      concreteWorkDir,
+		},
+	}, cityPath, "aot", cfg, nil, store, &clock.Fake{Time: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)}, io.Discard, nil)
+	if err != nil {
+		t.Fatalf("prepareStartCandidateForCity: %v", err)
+	}
+	if prepared.cfg.WorkDir != concreteWorkDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want concrete alias work_dir %q", prepared.cfg.WorkDir, concreteWorkDir)
+	}
+	persisted, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := persisted.Metadata[beadmeta.WorkDirMetadataKey]; got != concreteWorkDir {
+		t.Fatalf("gc.work_dir = %q, want %q", got, concreteWorkDir)
+	}
+	if got := persisted.Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != concreteWorkDir {
+		t.Fatalf("work_dir = %q, want %q", got, concreteWorkDir)
+	}
+}
+
+// TestPrepareStartCandidateRepairsConcretePoolTemplateWorkDir_SymlinkedCityPath
+// is the symlink twin of the repair test above: the stale template work_dir is
+// stamped on the bead through a symlinked spelling of the city path, so a
+// lexical filepath.Clean comparison would miss it and the repair would
+// silently no-op. Worktree roots reached through a symlink are exactly where
+// this fix has to hold.
+func TestPrepareStartCandidateRepairsConcretePoolTemplateWorkDir_SymlinkedCityPath(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("symlinked city paths are not exercised on Windows")
+	}
+	root := t.TempDir()
+	cityPath := filepath.Join(root, "city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkedCityPath := filepath.Join(root, "city-link")
+	if err := os.Symlink(cityPath, linkedCityPath); err != nil {
+		t.Skipf("symlink unsupported here: %v", err)
+	}
+	rigPath := filepath.Join(cityPath, "repos", "aot-mobile")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		template      = "aot-mobile/gastown.polecat"
+		concreteAlias = "aot-mobile/gastown.capable"
+		sessionName   = "capable-session"
+	)
+	linkedTemplateWorkDir := filepath.Join(linkedCityPath, ".gc", "worktrees", "aot-mobile", "polecats", "gastown.polecat")
+	concreteWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "aot-mobile", "polecats", "gastown.capable")
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  concreteAlias,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + concreteAlias},
+		Metadata: map[string]string{
+			"template":                        template,
+			"agent_name":                      concreteAlias,
+			"alias":                           concreteAlias,
+			"session_name":                    sessionName,
+			"session_origin":                  "ephemeral",
+			"pool_slot":                       "1",
+			poolManagedMetadataKey:            boolMetadata(true),
+			"state":                           string(sessionpkg.StateStartPending),
+			beadmeta.WorkDirMetadataKey:       linkedTemplateWorkDir,
+			beadmeta.LegacyWorkDirMetadataKey: linkedTemplateWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "aot"},
+		Rigs:      []config.Rig{{Name: "aot-mobile", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:          "gastown.polecat",
+			Dir:           "aot-mobile",
+			Provider:      "test-agent",
+			StartCommand:  "true",
+			WorkDir:       ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}",
+			NamepoolNames: []string{"gastown.capable", "gastown.furiosa"},
+		}},
+	}
+
+	prepared, err := prepareStartCandidateForCity(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: template,
+			InstanceName: concreteAlias,
+			SessionName:  sessionName,
+			WorkDir:      concreteWorkDir,
+		},
+	}, cityPath, "aot", cfg, nil, store, &clock.Fake{Time: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)}, io.Discard, nil)
+	if err != nil {
+		t.Fatalf("prepareStartCandidateForCity: %v", err)
+	}
+	if prepared.cfg.WorkDir != concreteWorkDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want concrete alias work_dir %q", prepared.cfg.WorkDir, concreteWorkDir)
+	}
+	persisted, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := persisted.Metadata[beadmeta.WorkDirMetadataKey]; got != concreteWorkDir {
+		t.Fatalf("gc.work_dir = %q, want %q", got, concreteWorkDir)
+	}
+	if got := persisted.Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != concreteWorkDir {
+		t.Fatalf("work_dir = %q, want %q", got, concreteWorkDir)
+	}
+}
+
+func TestBuildPreparedStartRejectsConcretePoolTemplateWorkDir(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "repos", "aot-mobile")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		template      = "aot-mobile/gastown.polecat"
+		concreteAlias = "aot-mobile/gastown.capable"
+		sessionName   = "capable-session"
+	)
+	templateWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "aot-mobile", "polecats", "gastown.polecat")
+	concreteWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "aot-mobile", "polecats", "gastown.capable")
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  concreteAlias,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + concreteAlias},
+		Metadata: map[string]string{
+			"template":                        template,
+			"agent_name":                      concreteAlias,
+			"alias":                           concreteAlias,
+			"session_name":                    sessionName,
+			"session_origin":                  "ephemeral",
+			"pool_slot":                       "1",
+			poolManagedMetadataKey:            boolMetadata(true),
+			"state":                           string(sessionpkg.StateStartPending),
+			beadmeta.WorkDirMetadataKey:       concreteWorkDir,
+			beadmeta.LegacyWorkDirMetadataKey: concreteWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "aot"},
+		Rigs:      []config.Rig{{Name: "aot-mobile", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:          "gastown.polecat",
+			Dir:           "aot-mobile",
+			Provider:      "test-agent",
+			StartCommand:  "true",
+			WorkDir:       ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}",
+			NamepoolNames: []string{"gastown.capable", "gastown.furiosa"},
+		}},
+	}
+
+	_, _, err = buildPreparedStartWithWorkDirResolver(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: template,
+			InstanceName: concreteAlias,
+			SessionName:  sessionName,
+			WorkDir:      concreteWorkDir,
+		},
+	}, cityPath, cfg, store, func(startCandidate, *config.City) string {
+		return templateWorkDir
+	})
+	if err == nil {
+		t.Fatal("buildPreparedStartWithWorkDirResolver error = nil, want template work_dir rejection")
+	}
+	if !strings.Contains(err.Error(), "resolved template work_dir") {
+		t.Fatalf("error = %v, want template work_dir rejection", err)
+	}
+}
+
 func TestPrepareStartCandidate_UsesSessionIDForTaskWorkDir(t *testing.T) {
 	store := beads.NewMemStore()
 	session, err := store.Create(beads.Bead{
@@ -792,6 +1027,299 @@ func TestPrepareStartCandidate_UsesSessionIDForTaskWorkDir(t *testing.T) {
 	}
 	if prepared.cfg.WorkDir != workDir {
 		t.Fatalf("prepared.cfg.WorkDir = %q, want %q", prepared.cfg.WorkDir, workDir)
+	}
+}
+
+// TestPrepareStartCandidate_StampOnlyWorkDirDoesNotOverrideSessionID is the
+// integration-level regression for the gc.work_dir feedback loop: gc.work_dir
+// is an observability stamp reconciliation mirrors from observed cwd, not
+// launch authority. A task bead assigned to the session ID that carries ONLY
+// gc.work_dir (no legacy work_dir) must not redirect the session away from
+// its own configured work dir.
+func TestPrepareStartCandidate_StampOnlyWorkDirDoesNotOverrideSessionID(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionWorkDir := t.TempDir()
+	stampedWorkDir := t.TempDir()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:frontend/worker-1"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "custom-worker-1",
+			"pool_slot":    "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.Create(beads.Bead{
+		Title: "task",
+		Metadata: map[string]string{
+			beadmeta.WorkDirMetadataKey: stampedWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := "in_progress"
+	assignee := session.ID
+	if err := store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := prepareStartCandidate(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: "frontend/worker",
+			SessionName:  "custom-worker-1",
+			WorkDir:      sessionWorkDir,
+		},
+		order: 0,
+	}, &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+		},
+	}, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+	if prepared.cfg.WorkDir != sessionWorkDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want session work dir %q (must not follow gc.work_dir-only stamp %q)", prepared.cfg.WorkDir, sessionWorkDir, stampedWorkDir)
+	}
+}
+
+// TestPrepareStartCandidate_StampOnlyWorkDirDoesNotOverrideRoleName is the
+// same regression as TestPrepareStartCandidate_StampOnlyWorkDirDoesNotOverrideSessionID,
+// but the stamped task bead is assigned to the bare logical template (role)
+// name instead of the session ID. Fleet bd identity is role-level, so this
+// covers the scope-widener path in taskWorkDirAssignees: an in_progress bead
+// assigned to any session of the role must not be able to redirect this
+// session's cwd via an observability-only stamp either.
+func TestPrepareStartCandidate_StampOnlyWorkDirDoesNotOverrideRoleName(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionWorkDir := t.TempDir()
+	stampedWorkDir := t.TempDir()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:frontend/worker-1"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "custom-worker-1",
+			"pool_slot":    "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.Create(beads.Bead{
+		Title: "task",
+		Metadata: map[string]string{
+			beadmeta.WorkDirMetadataKey: stampedWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := "in_progress"
+	assignee := "frontend/worker"
+	if err := store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := prepareStartCandidate(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: "frontend/worker",
+			SessionName:  "custom-worker-1",
+			WorkDir:      sessionWorkDir,
+		},
+		order: 0,
+	}, &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+		},
+	}, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+	if prepared.cfg.WorkDir != sessionWorkDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want session work dir %q (must not follow gc.work_dir-only stamp %q via role-name assignment)", prepared.cfg.WorkDir, sessionWorkDir, stampedWorkDir)
+	}
+}
+
+// TestPrepareStartCandidate_NoAssignedTaskKeepsSessionWorkDir is the no-task
+// control for the two StampOnlyWorkDir tests above: with no assigned
+// in_progress bead at all, the session's own configured work dir must win.
+// This proves the session's dir was genuinely set and would have been lost
+// to a real redirect, not just left untouched by an inert test setup.
+func TestPrepareStartCandidate_NoAssignedTaskKeepsSessionWorkDir(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionWorkDir := t.TempDir()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:frontend/worker-1"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "custom-worker-1",
+			"pool_slot":    "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := prepareStartCandidate(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: "frontend/worker",
+			SessionName:  "custom-worker-1",
+			WorkDir:      sessionWorkDir,
+		},
+		order: 0,
+	}, &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+		},
+	}, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+	if prepared.cfg.WorkDir != sessionWorkDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want session work dir %q", prepared.cfg.WorkDir, sessionWorkDir)
+	}
+}
+
+// TestPrepareStartCandidate_NonexistentStampedWorkDirKeepsSessionWorkDir is
+// the nonexistent-stamp control: a gc.work_dir stamp naming a directory that
+// does not exist on disk must not redirect the session either. The resolver
+// stats the path, so only existing directories are even eligible to
+// redirect — this proves that guard still holds after the fix.
+func TestPrepareStartCandidate_NonexistentStampedWorkDirKeepsSessionWorkDir(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionWorkDir := t.TempDir()
+	missingWorkDir := filepath.Join(t.TempDir(), "does-not-exist")
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:frontend/worker-1"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "custom-worker-1",
+			"pool_slot":    "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.Create(beads.Bead{
+		Title: "task",
+		Metadata: map[string]string{
+			beadmeta.WorkDirMetadataKey: missingWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := "in_progress"
+	assignee := session.ID
+	if err := store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := prepareStartCandidate(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: "frontend/worker",
+			SessionName:  "custom-worker-1",
+			WorkDir:      sessionWorkDir,
+		},
+		order: 0,
+	}, &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+		},
+	}, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+	if prepared.cfg.WorkDir != sessionWorkDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want session work dir %q (nonexistent stamp %q must not resolve)", prepared.cfg.WorkDir, sessionWorkDir, missingWorkDir)
+	}
+}
+
+func TestPrepareStartCandidate_UsesTriggerBeadWorkDirBeforeClaim(t *testing.T) {
+	store := beads.NewMemStore()
+	sourceWorkDir := t.TempDir()
+	launcherWorkDir := t.TempDir()
+	source, err := store.Create(beads.Bead{
+		Title: "implementation source anchor",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.LegacyWorkDirMetadataKey: sourceWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := store.Create(beads.Bead{
+		Title: "drain item workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.DrainMemberIDMetadataKey: source.ID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trigger, err := store.Create(beads.Bead{
+		Title:  "unclaimed implementation step",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:frontend/worker-1"},
+		Metadata: map[string]string{
+			"template":                              "worker",
+			"session_name":                          "custom-worker-1",
+			"pool_slot":                             "1",
+			beadmeta.TriggerBeadIDMetadataKey:       trigger.ID,
+			beadmeta.TriggerBeadStoreRefMetadataKey: "rig:frontend",
+			beadmeta.WorkDirMetadataKey:             launcherWorkDir,
+			beadmeta.LegacyWorkDirMetadataKey:       launcherWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := prepareStartCandidate(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: "frontend/worker",
+			SessionName:  "custom-worker-1",
+			WorkDir:      launcherWorkDir,
+		},
+	}, &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+		},
+	}, store, &clock.Fake{Time: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+	if prepared.cfg.WorkDir != sourceWorkDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want trigger source work dir %q", prepared.cfg.WorkDir, sourceWorkDir)
 	}
 }
 
@@ -5420,7 +5948,7 @@ func TestStopTargetsBounded_AllUnresolvedFallsBackToSerial(t *testing.T) {
 }
 
 func TestCommitStartResult_LogsSuccessOutcome(t *testing.T) {
-	store := newTestStore()
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "b1", Type: sessionBeadType, Status: "open"}}, nil)
 	candidate := startCandidate{
 		info: sessionpkg.Info{
 			ID:                  "b1",
@@ -5517,6 +6045,101 @@ func TestCommitStartResult_TerminalProviderErrorMarksUnhealthy(t *testing.T) {
 	}
 	if got["last_woke_at"] != "" {
 		t.Fatalf("last_woke_at = %q, want cleared", got["last_woke_at"])
+	}
+}
+
+func seedTerminalPendingCreate(t *testing.T, store beads.Store) beads.Bead {
+	t.Helper()
+	b, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":             "worker",
+			"session_name":         "worker",
+			"state":                "creating",
+			"pending_create_claim": "true",
+			"generation":           "1",
+			"instance_token":       "tok-1",
+			"last_woke_at":         "2026-05-27T12:00:00Z",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func terminalPendingCreateResult(t *testing.T, store beads.Store, id string, now time.Time) startResult {
+	t.Helper()
+	info, err := sessionFrontDoor(store).Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return startResult{
+		prepared:        preparedStart{candidate: startCandidate{info: info, tp: TemplateParams{TemplateName: "worker", SessionName: "worker"}}},
+		err:             errors.New("model_not_found: gpt-5.3-codex-spark"),
+		outcome:         "provider_error",
+		started:         now,
+		finished:        now,
+		rollbackPending: true,
+	}
+}
+
+// A pending create whose first start hits a terminal provider error closes as
+// failed-create and keeps the terminal record (ga-z8yi2j: marking first cleared
+// the claim the fenced rollback requires, so the row stayed open and asleep).
+func TestCommitStartResult_TerminalProviderErrorRollsBackPendingCreate(t *testing.T) {
+	store := beads.NewMemStore()
+	b := seedTerminalPendingCreate(t, store)
+	now := time.Unix(3, 0).UTC()
+	result := terminalPendingCreateResult(t, store, b.ID, now)
+	var stderr bytes.Buffer
+	if commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: now}, events.NewFake(), 0, &stderr, &stderr) {
+		t.Fatal("commitStartResult returned true for a terminal provider error")
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed (stderr %q)", got.Status, stderr.String())
+	}
+	for key, want := range map[string]string{
+		"state":                                 "failed-create",
+		"pending_create_claim":                  "",
+		"sleep_reason":                          "provider-terminal-error",
+		sessionProviderTerminalErrorMetadataKey: "model_not_found",
+		sessionHealthStateMetadataKey:           "unhealthy",
+	} {
+		if got.Metadata[key] != want {
+			t.Errorf("%s = %q, want %q", key, got.Metadata[key], want)
+		}
+	}
+}
+
+// The terminal mark shares the rollback's fence: a result whose observed
+// incarnation was superseded must neither close nor mark the newer one.
+func TestCommitStartResult_TerminalProviderErrorLeavesSupersededPendingCreateUntouched(t *testing.T) {
+	store := beads.NewMemStore()
+	b := seedTerminalPendingCreate(t, store)
+	now := time.Unix(3, 0).UTC()
+	result := terminalPendingCreateResult(t, store, b.ID, now)
+	if err := store.SetMetadata(b.ID, "instance_token", "tok-2"); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: now}, events.NewFake(), 0, &stderr, &stderr)
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == "closed" {
+		t.Fatal("a superseded incarnation was closed by a stale terminal-error result")
+	}
+	if got.Metadata["pending_create_claim"] != "true" || got.Metadata["state"] != "creating" || got.Metadata[sessionProviderTerminalErrorMetadataKey] != "" {
+		t.Fatalf("superseded row claim/state/terminal = %q/%q/%q, want true/creating/empty",
+			got.Metadata["pending_create_claim"], got.Metadata["state"], got.Metadata[sessionProviderTerminalErrorMetadataKey])
 	}
 }
 
@@ -7060,6 +7683,7 @@ func TestPrepareStartCandidate_PreservesRuntimeConfigAndProviderEnv(t *testing.T
 		stored.Metadata["instance_token"],
 	))
 	expected.Env = mergeEnv(expected.Env, map[string]string{"GC_PROVIDER": "gemini"})
+	expected.Env = git.ApplySSHKeepaliveEnv(expected.Env)
 	expected = runtime.SyncWorkDirEnv(expected)
 
 	if !reflect.DeepEqual(prepared.cfg, expected) {
@@ -7171,8 +7795,8 @@ func TestPrepareStartCandidate_EmptyPoolBeadAliasScrubsStampedTemplateIdentity(t
 	} else if got != "" {
 		t.Fatalf("GC_ALIAS = %q, want empty because the pool alias is deferred", got)
 	}
-	if got := prepared.cfg.Env["GC_AGENT"]; got != "ants-pool-gc123" {
-		t.Fatalf("GC_AGENT = %q, want non-conflicting session name %q", got, "ants-pool-gc123")
+	if got := prepared.cfg.Env["GC_AGENT"]; got != bead.ID {
+		t.Fatalf("GC_AGENT = %q, want the unaliased pool session bead id %q", got, bead.ID)
 	}
 	if got := prepared.cfg.Env["TEMPLATE_KEY"]; got != "keep" {
 		t.Fatalf("TEMPLATE_KEY = %q, want %q (unrelated template env must survive merge)", got, "keep")
@@ -7624,5 +8248,69 @@ func TestStaleResumeKeyProbe(t *testing.T) {
 	}
 	if _, probeable := staleResumeKeyProbe("claude", workDir, ""); probeable {
 		t.Fatal("empty key probeable = true, want false")
+	}
+}
+
+// TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv is the
+// launch-layer assertion for gascity#4373. resolvePreservedConfiguredNamedSessionTemplate
+// clearing the stamp is not enough on its own: buildPreparedStartWithWorkDirResolver
+// re-derives GC_TRIGGER_BEAD_ID from candidate.info via sessionTriggerBeadEnv,
+// so unless refreshConfiguredNamedStartCandidate folds the resolver's Info back
+// onto the candidate, the seat starting on the clearing tick still launches
+// aimed at the parked bead. Asserting on the resolved TemplateParams cannot
+// catch that; only prepared.cfg.Env can.
+func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	// The production shape of a parked target: real stores fold bd's raw
+	// `blocked` into "open" and report the park via the IsBlocked projection.
+	blocked := true
+	work, err := store.Create(beads.Bead{Title: "parked work", Status: "open", IsBlocked: &blocked})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "worker")
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":                        "worker",
+			"session_name":                    sessionName,
+			namedSessionMetadataKey:           "true",
+			namedSessionIdentityMetadata:      "worker",
+			namedSessionModeMetadata:          "on_demand",
+			beadmeta.TriggerBeadIDMetadataKey: work.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	prepared, err := prepareStartCandidateForCity(startCandidate{
+		info:  sessiontest.SeedBead(t, session),
+		tp:    TemplateParams{TemplateName: "worker", SessionName: sessionName},
+		order: 0,
+	}, ".", cfg.Workspace.Name, cfg, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, io.Discard, nil)
+	if err != nil {
+		t.Fatalf("prepareStartCandidateForCity: %v", err)
+	}
+	if got := prepared.cfg.Env["GC_TRIGGER_BEAD_ID"]; got != "" {
+		t.Errorf("launched GC_TRIGGER_BEAD_ID = %q, want cleared for a parked target", got)
+	}
+	if got := prepared.cfg.Env["GC_TRIGGER_WORK_BEAD_ID"]; got != "" {
+		t.Errorf("launched GC_TRIGGER_WORK_BEAD_ID = %q, want cleared for a parked target", got)
+	}
+	after, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session bead after prepare: %v", err)
+	}
+	if v := after.Metadata[beadmeta.TriggerBeadIDMetadataKey]; v != "" {
+		t.Errorf("durable trigger stamp = %q, want cleared", v)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -293,8 +294,8 @@ func TestOrphanReleaseSparesALiveHoldersBindingResidentClaim(t *testing.T) {
 
 	infos := sessionInfosFromBeads([]beads.Bead{sess})
 	released := releaseOrphanedPoolAssignments(
-		work, cfg, cityPath, infos,
-		[]beads.Bead{claim}, []beads.Store{work}, []string{""}, nil,
+		work, beads.SessionStore{Store: work}, cfg, cityPath, infos,
+		[]beads.Bead{claim}, []beads.Store{work}, []string{""}, nil, nil, nil,
 	)
 	if len(released) != 0 {
 		t.Fatalf("released %v — a LIVE holder's claim was taken back on a leg the release path now reads; that is claim loss, not a strand", released)
@@ -518,6 +519,9 @@ func TestResidencyRegistrationHappensUnderTheControllerLock(t *testing.T) {
 
 func repoRootForResidency(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	dir, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("cwd: %v", err)

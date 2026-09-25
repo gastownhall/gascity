@@ -79,11 +79,24 @@ type stopCommandOutcome struct {
 func cmdStopJSON(args []string, stdout, stderr io.Writer, wallClockTimeout time.Duration, force bool, jsonOut bool) int {
 	var outcome stopCommandOutcome
 	if wallClockTimeout > 0 {
-		outcome = runStopWithWallClockCap(wallClockTimeout, stderr, func() stopCommandOutcome {
-			return cmdStopJSONSequence(args, stdout, stderr, force, jsonOut, true)
+		unregisterTx := newSupervisorUnregisterTransaction()
+		outcome = runStopWithWallClockCap(wallClockTimeout, stderr, unregisterTx, func() stopCommandOutcome {
+			return cmdStopJSONSequence(args, stdout, stderr, force, jsonOut, true, unregisterTx)
 		})
 	} else {
-		outcome = cmdStopJSONSequence(args, stdout, stderr, force, jsonOut, false)
+		// The uncapped path holds the same pending-unregister transaction as
+		// the capped one: a stop that fails after removing the registration —
+		// a managed provider that refuses to shut down, an invalid config the
+		// body cannot recover — must hand the entry back rather than leave a
+		// live city unregistered. This mirrors the capped arm's accept/rollback
+		// exactly; the deferred success message is part of the same contract.
+		unregisterTx := newSupervisorUnregisterTransaction()
+		outcome = cmdStopJSONSequence(args, stdout, stderr, force, jsonOut, false, unregisterTx)
+		if outcome.code == 0 {
+			unregisterTx.commit()
+		} else {
+			writeSupervisorUnregisterRollback(stderr, "gc stop", "stop failed after unregistering city", unregisterTx.rollback())
+		}
 	}
 	if outcome.code != 0 {
 		return outcome.code
@@ -95,7 +108,7 @@ func cmdStopJSON(args []string, stdout, stderr io.Writer, wallClockTimeout time.
 	return 0
 }
 
-func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, jsonOut bool, wallClockCapApplied bool) stopCommandOutcome {
+func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, jsonOut bool, wallClockCapApplied bool, unregisterTx *supervisorUnregisterTransaction) stopCommandOutcome {
 	cityPath, err := resolveStopCityPath(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -108,7 +121,7 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 	}
 
 	unregisteredFromSupervisor := false
-	if handled, code := unregisterCityFromSupervisorWithForce(cityPath, stopStdout, stderr, "gc stop", force); handled {
+	if handled, code := unregisterCityFromSupervisorWithForce(cityPath, stopStdout, stderr, "gc stop", force, unregisterTx); handled {
 		if code != 0 {
 			return stopCommandOutcome{code: code, cityPath: cityPath}
 		}
@@ -141,10 +154,10 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 	if wallClockCapApplied {
 		return stopLoadedCity()
 	}
-	return runStopWithWallClockCap(defaultStopWallClockTimeout(cfg), stderr, stopLoadedCity)
+	return runStopWithWallClockCap(defaultStopWallClockTimeout(cfg), stderr, nil, stopLoadedCity)
 }
 
-func runStopWithWallClockCap(wallClockCap time.Duration, stderr io.Writer, stop func() stopCommandOutcome) stopCommandOutcome {
+func runStopWithWallClockCap(wallClockCap time.Duration, stderr io.Writer, unregisterTx *supervisorUnregisterTransaction, stop func() stopCommandOutcome) stopCommandOutcome {
 	doneCh := make(chan stopCommandOutcome, 1)
 	bodyDone := make(chan struct{})
 	go func() {
@@ -159,9 +172,21 @@ func runStopWithWallClockCap(wallClockCap time.Duration, stderr io.Writer, stop 
 
 	select {
 	case out := <-doneCh:
+		if unregisterTx != nil {
+			if out.code == 0 {
+				unregisterTx.commit()
+			} else {
+				writeSupervisorUnregisterRollback(stderr, "gc stop", "stop failed after unregistering city", unregisterTx.rollback())
+			}
+		}
 		return out
 	case <-timer.C:
+		var rollback supervisorUnregisterRollback
+		if unregisterTx != nil {
+			rollback = unregisterTx.rollback()
+		}
 		fmt.Fprintf(stderr, "gc stop: timed out after %s; some sessions may not have stopped — retry with --force if stop is wedged, or raise --timeout for large stop sets\n", wallClockCap) //nolint:errcheck // best-effort stderr
+		writeSupervisorUnregisterRollback(stderr, "gc stop", "wall-clock timeout", rollback)
 		return stopCommandOutcome{code: 1}
 	}
 }
@@ -317,7 +342,9 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 			fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		// Controller handled the shutdown — still stop bead store below.
+		// Controller handled the shutdown — still stop the bead store, and
+		// only after waiting for the controller to be gone: a live reader
+		// restarts a provider-owned proxy the moment it is retired.
 		if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 			fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
@@ -383,7 +410,21 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 
 	teardownServerForStop(sp, stderr, "gc stop")
 
-	// Stop bead store's backing service after agents.
+	// Stop the bead store's backing service LAST, and only here. The order
+	// this function runs in is load-bearing for a provider-owned proxied city:
+	//
+	//   controller (agents drain with it) -> sessions -> orphan sessions ->
+	//   runtime server teardown -> bd dolt stop per provider-owned scope
+	//
+	// bd restarts a proxied scope's proxy and Dolt child on ANY read (beads
+	// cmd/bd/main.go:1758 — BEADS_DOLT_AUTO_START does not reach that path),
+	// so a single surviving reader after this point resurrects the processes
+	// this call just retired. Retiring first and stopping readers afterwards
+	// would leave the city up with a live proxy every time.
+	//
+	// The call is re-runnable: `bd dolt stop` is idempotent on rc.2 (exit 0,
+	// stopped/verified true, with or without a live proxy), so a second
+	// `gc stop` finds nothing to do and still exits 0.
 	if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal warning.
@@ -443,11 +484,24 @@ func stopCityManagedBeadsProviderAfterSuccessfulStop(cityPath string, stderr io.
 	return true
 }
 
+// stopCityManagedBeadsProvider retires the city's bead-store backend on the
+// stop paths that do not run the full stop body (supervisor-unregistered, and
+// a city whose config will not load).
+//
+// A provider-owned scope is not gated on a managed Dolt port. bd owns the
+// process for those scopes and publishes no GC-managed port, so the port probe
+// — which is the right question for the legacy managed-Dolt lifecycle — would
+// answer "nothing to stop" for every proxied city and leave its proxy and Dolt
+// child resident.
 func stopCityManagedBeadsProvider(cityPath string) (bool, error) {
 	if rawBeadsProvider(cityPath) != "bd" {
 		return false, nil
 	}
-	if currentResolvableManagedDoltPort(cityPath) == "" {
+	providerOwned, err := cityHasProviderOwnedScope(cityPath)
+	if err != nil {
+		return false, err
+	}
+	if !providerOwned && currentResolvableManagedDoltPort(cityPath) == "" {
 		return false, nil
 	}
 	return true, shutdownBeadsProviderForStop(cityPath)

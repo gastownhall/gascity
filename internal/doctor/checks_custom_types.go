@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // RequiredCustomTypes lists the bead types that Gas City requires
@@ -27,10 +28,19 @@ import (
 // so Ready() and `bd ready` can exclude formula scaffolding from actionable
 // work queues. Without it registered, formula dispatch fails with
 // "invalid issue type: step" (#1039).
+//
+// "startup-health-episode" is included for the same reason
+// (internal/session.StartupHealthEpisodeType): the session reconciler writes
+// one per session name, and the startup-health-episodes check lists them. A
+// city on the bd CLI front door — which is every city that keeps its Dolt
+// topology in bd's hands — has bd validate the type on both paths, so an
+// unregistered one turns both the write and the scan into "invalid issue
+// type". A native-store city never noticed because its SQL path does not
+// validate.
 var RequiredCustomTypes = []string{
 	"molecule", "convoy", "message", "event", "gate",
 	"merge-request", "agent", "role", "rig", "session", "spec",
-	"convergence", "step",
+	"convergence", "step", "startup-health-episode",
 }
 
 // CustomTypesCheck verifies that all required Gas City custom bead
@@ -50,11 +60,29 @@ type CustomTypesCheck struct {
 	// `bd create --type <t>` with "invalid issue type: <t>" because the
 	// table row was never (re)created.
 	tableMissing []string
+	// BdBin is the bd executable to run, as the caller's own pin resolver
+	// answered it. Empty falls back to PATH.
+	BdBin string
 }
 
 // NewCustomTypesCheck creates a check for a specific store directory.
-func NewCustomTypesCheck(dir, label string) *CustomTypesCheck {
-	return &CustomTypesCheck{Dir: dir, Label: label}
+//
+// bdBin is the bd executable this store is pinned to, resolved by the caller
+// the same way every other gc bd call resolves it (city.toml
+// `[workspace.env] BD_BIN`, then PATH). Running whatever `bd` PATH happens to
+// hold is the wrong binary twice over: for a proxied scope it is not the one
+// that owns the proxy, and `gc doctor --fix` writes types.custom through it.
+// Empty means the caller has no pin and PATH is the answer.
+func NewCustomTypesCheck(dir, label, bdBin string) *CustomTypesCheck {
+	return &CustomTypesCheck{Dir: dir, Label: label, BdBin: bdBin}
+}
+
+// bdExecutable names the binary this check's bd calls run.
+func (c *CustomTypesCheck) bdExecutable() string {
+	if pinned := strings.TrimSpace(c.BdBin); pinned != "" {
+		return pinned
+	}
+	return "bd"
 }
 
 // Name returns the check identifier.
@@ -68,7 +96,7 @@ func (c *CustomTypesCheck) Name() string {
 // independently: a store can pass the CSV check yet still reject
 // `bd create --type <t>` if the table row is missing (see
 // TestCustomTypesCheck_TableDrift).
-func (c *CustomTypesCheck) Run(_ *CheckContext) *CheckResult {
+func (c *CustomTypesCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 
 	// Check if .beads directory exists — if not, skip (no store here).
@@ -80,7 +108,7 @@ func (c *CustomTypesCheck) Run(_ *CheckContext) *CheckResult {
 	}
 
 	// Get current custom types from the CSV config.
-	current, err := getCustomTypes(c.Dir)
+	current, err := getCustomTypes(ctx, c.bdExecutable(), c.Dir)
 	if err != nil {
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("could not read types.custom: %v", err)
@@ -94,7 +122,7 @@ func (c *CustomTypesCheck) Run(_ *CheckContext) *CheckResult {
 
 	// Get registered types from the normalized custom_types table — the
 	// source of truth bd's create validation checks.
-	registered, err := getRegisteredTypes(c.Dir)
+	registered, err := getRegisteredTypes(ctx, c.bdExecutable(), c.Dir)
 	if err != nil {
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("could not read custom_types table: %v", err)
@@ -152,34 +180,168 @@ func (c *CustomTypesCheck) CanFix() bool { return true }
 // would silently delete those, causing failures the next time code tries
 // to create beads of the deleted types.
 //
+// The merge source is the types.custom config row AND the normalized
+// custom_types table: `bd config set types.custom` replaces the whole table
+// (DELETE, then insert the new list), so an extra that survives only in the
+// table — the shape an upgraded legacy-managed store has once gc's start path
+// rewrote the row — would be dropped by a row-only merge. If either cannot be
+// read, Fix fails rather than writing a list it cannot prove is a superset.
+//
 // Fix also runs when only c.tableMissing is non-empty (CSV already
-// complete): re-issuing `bd config set types.custom` with the same CSV
-// value is what reconciles a drifted custom_types table, since bd's set
-// path is what keeps the table in sync with the CSV.
-func (c *CustomTypesCheck) Fix(_ *CheckContext) error {
+// complete): re-issuing `bd config set types.custom` with the merged value
+// is what reconciles a drifted custom_types table, since bd's set path is
+// what keeps the table in sync with the CSV.
+func (c *CustomTypesCheck) Fix(ctx *CheckContext) error {
 	if len(c.missing) == 0 && len(c.tableMissing) == 0 {
 		return nil
 	}
-	// Read the current list so we can preserve user-added types.
-	// If we cannot read it, return the error rather than overwriting —
-	// silently dropping user types is worse than failing loud.
-	current, err := getCustomTypes(c.Dir)
+	current, err := getCustomTypes(ctx, c.bdExecutable(), c.Dir)
 	if err != nil {
 		return fmt.Errorf("reading current custom types: %w", err)
 	}
-	merged := contract.MergeCustomTypes(current, RequiredCustomTypes)
-	return setCustomTypes(c.Dir, strings.Join(merged, ","))
+	registered, err := getRegisteredTypes(ctx, c.bdExecutable(), c.Dir)
+	if err != nil {
+		return fmt.Errorf("reading registered custom types: %w", err)
+	}
+	merged := MergeRequiredCustomTypes(current, registered)
+	return setCustomTypes(ctx, c.bdExecutable(), c.Dir, strings.Join(merged, ","))
+}
+
+// MergeRequiredCustomTypes returns the types.custom value that registers every
+// RequiredCustomTypes entry without narrowing what the store already accepts:
+// the config row's list, then any types only the custom_types table carries,
+// then the missing required ones. Order is stable so a re-run is a no-op.
+func MergeRequiredCustomTypes(row, table []string) []string {
+	return contract.MergeCustomTypes(contract.MergeCustomTypes(row, table), RequiredCustomTypes)
+}
+
+// CustomTypesNeedRegistration reports whether a required type is absent from
+// the config row or from the custom_types table. bd validates against the
+// table whenever it is non-empty, so a complete row alone is not enough.
+func CustomTypesNeedRegistration(row, table []string) bool {
+	return len(typesNotIn(RequiredCustomTypes, row)) != 0 || len(typesNotIn(RequiredCustomTypes, table)) != 0
+}
+
+func customTypesStoreEnv(ctx *CheckContext, dir string) ([]string, error) {
+	cityPath := dir
+	if ctx != nil && strings.TrimSpace(ctx.CityPath) != "" {
+		cityPath = ctx.CityPath
+	}
+	environ := beads.ProcessEnvSnapshotExcludingNativeDoltOpen()
+
+	overrides := map[string]string{
+		"BEADS_BACKEND":               "",
+		"BEADS_BACKUP_ENABLED":        "false",
+		"BEADS_DB":                    "",
+		"BEADS_DB_PATH":               "",
+		"BEADS_DIR":                   filepath.Join(dir, ".beads"),
+		"BEADS_DOLT_AUTO_START":       "0",
+		"BEADS_DOLT_DATABASE":         "",
+		"BEADS_DOLT_DATA_DIR":         "",
+		"BEADS_DOLT_PORT":             "",
+		"BEADS_DOLT_SERVER_DATABASE":  "",
+		"BEADS_DOLT_SERVER_HOST":      "",
+		"BEADS_DOLT_SERVER_MODE":      "",
+		"BEADS_DOLT_SERVER_PORT":      "",
+		"BEADS_DOLT_SERVER_SOCKET":    "",
+		"BEADS_DOLT_SERVER_TLS":       "",
+		"BEADS_DOLT_SERVER_USER":      "",
+		"BEADS_DOLT_SHARED_SERVER":    "",
+		"BEADS_DOLT_SYNC_CLI_REMOTES": "false",
+		"BEADS_ROUTING_MODE":          "off",
+		"BEADS_SHARED_SERVER_DIR":     "",
+		"BD_BACKUP_ENABLED":           "false",
+		"BD_DOLT_SYNC_CLI_REMOTES":    "false",
+		"BD_ROUTING_MODE":             "off",
+		"DOLT_ROOT_PATH":              "",
+		"GC_BEADS":                    "",
+		"GC_BEADS_BACKEND":            "",
+		"GC_BEADS_PREFIX":             "",
+		"GC_BEADS_SCOPE_ROOT":         dir,
+		"GC_DOLT_DATABASE":            "",
+		"GC_DOLT_HOST":                "",
+		"GC_DOLT_PORT":                "",
+		"GC_DOLT_USER":                "",
+	}
+	// Authentication remains inherited intentionally: canonical store config
+	// identifies the endpoint, while remote credentials and credential helpers
+	// are supplied through the process environment.
+
+	carryAmbientTLS := false
+	meta, ok, err := contract.LoadMetadataState(fsys.OSFS{}, filepath.Join(dir, ".beads", "metadata.json"))
+	if err != nil {
+		return nil, fmt.Errorf("resolving bd store metadata: %w", err)
+	}
+	switch {
+	case ok && strings.EqualFold(strings.TrimSpace(meta.Backend), "doltlite"):
+		// A doltlite scope has no server to target, so the endpoint selectors
+		// stay cleared. The backend hint is re-projected from the recorded
+		// metadata rather than inherited, which is what keeps the ambient
+		// environment from choosing the backend.
+		overrides["GC_BEADS_BACKEND"] = "doltlite"
+		overrides["BEADS_BACKEND"] = "doltlite"
+	case ok && strings.EqualFold(strings.TrimSpace(meta.DoltMode), "server"):
+		// Managed-city GC_DOLT_HOST remains part of the resolver contract: it is
+		// the supported container-to-host override, not a bd-side store selector.
+		// All ambient bd selectors are replaced below with this resolved target.
+		target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, dir)
+		if err != nil {
+			return nil, fmt.Errorf("resolving bd store target: %w", err)
+		}
+		overrides["GC_DOLT_HOST"] = target.Host
+		overrides["GC_DOLT_PORT"] = target.Port
+		overrides["GC_DOLT_USER"] = target.User
+		overrides["BEADS_DOLT_SERVER_HOST"] = target.Host
+		overrides["BEADS_DOLT_SERVER_PORT"] = target.Port
+		overrides["BEADS_DOLT_SERVER_USER"] = target.User
+		carryAmbientTLS = target.External && !contract.DoltHostIsLocal(target.Host)
+	}
+
+	out := make([]string, 0, len(environ)+len(overrides))
+	for _, entry := range environ {
+		key, value, _ := strings.Cut(entry, "=")
+		if carryAmbientTLS && key == "BEADS_DOLT_SERVER_TLS" {
+			overrides[key] = value
+		}
+		if _, replaced := overrides[key]; !replaced {
+			out = append(out, entry)
+		}
+	}
+	for key, value := range overrides {
+		out = append(out, key+"="+value)
+	}
+	return out, nil
+}
+
+// customTypesBDCommand builds a bd invocation for this store: the scrubbed
+// store environment main added, run through the bd binary the caller pinned
+// (bdBin, empty meaning PATH) rather than whatever `bd` PATH happens to hold.
+func customTypesBDCommand(ctx *CheckContext, bdBin, dir string, args ...string) (*exec.Cmd, error) {
+	env, err := customTypesStoreEnv(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	bin := strings.TrimSpace(bdBin)
+	if bin == "" {
+		bin = "bd"
+	}
+	cmd := exec.Command(bin, args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	return cmd, nil
 }
 
 // getCustomTypes reads the current types.custom config from a bd store.
 // Uses --json so an unset key returns an empty string value rather than
 // the human-readable "types.custom (not set)" sentinel (which would
 // otherwise be persisted as a fake custom type when Fix() merges).
-func getCustomTypes(dir string) ([]string, error) {
+func getCustomTypes(ctx *CheckContext, bdBin, dir string) ([]string, error) {
 	start := time.Now()
 	args := []string{"config", "get", "--json", "types.custom"}
-	cmd := exec.Command("bd", args...)
-	cmd.Dir = dir
+	cmd, err := customTypesBDCommand(ctx, bdBin, dir, args...)
+	if err != nil {
+		return nil, err
+	}
 	out, err := cmd.Output()
 	exitCode := 0
 	if err != nil {
@@ -200,27 +362,54 @@ func getCustomTypes(dir string) ([]string, error) {
 // parseCustomTypesJSON decodes the output of `bd config get --json types.custom`
 // into a list of types. Empty values yield nil (not []string{""}).
 func parseCustomTypesJSON(out []byte) ([]string, error) {
+	return ParseCustomTypesConfigJSON(out)
+}
+
+// ParseCustomTypesConfigJSON decodes `bd config get --json types.custom`.
+// The value takes either form bd writes: the legacy CSV (a,b) or the JSON
+// array `bd config set` / pour store (["a","b"]). Entries are trimmed and
+// empties dropped; an empty value yields nil.
+func ParseCustomTypesConfigJSON(out []byte) ([]string, error) {
 	var parsed struct {
 		Value string `json:"value"`
 	}
 	if err := json.Unmarshal(out, &parsed); err != nil {
 		return nil, fmt.Errorf("parsing bd config get output: %w", err)
 	}
-	raw := strings.TrimSpace(parsed.Value)
+	return parseCustomTypesValue(parsed.Value), nil
+}
+
+func parseCustomTypesValue(value string) []string {
+	raw := strings.TrimSpace(value)
 	if raw == "" {
-		return nil, nil
+		return nil
 	}
-	return strings.Split(raw, ","), nil
+	parts := strings.Split(raw, ",")
+	if strings.HasPrefix(raw, "[") {
+		var arr []string
+		if err := json.Unmarshal([]byte(raw), &arr); err == nil {
+			parts = arr
+		}
+	}
+	var out []string
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // getRegisteredTypes reads the bd store's normalized custom_types table —
 // the source of truth bd's create validation checks — as opposed to
 // getCustomTypes, which reads the types.custom CSV config value.
-func getRegisteredTypes(dir string) ([]string, error) {
+func getRegisteredTypes(ctx *CheckContext, bdBin, dir string) ([]string, error) {
 	start := time.Now()
 	args := []string{"types", "--json"}
-	cmd := exec.Command("bd", args...)
-	cmd.Dir = dir
+	cmd, err := customTypesBDCommand(ctx, bdBin, dir, args...)
+	if err != nil {
+		return nil, err
+	}
 	out, err := cmd.Output()
 	exitCode := 0
 	if err != nil {
@@ -242,6 +431,13 @@ func getRegisteredTypes(dir string) ([]string, error) {
 // returns its custom_types field — the table-backed list, distinct from
 // parseCustomTypesJSON's CSV-config value.
 func parseRegisteredTypesJSON(out []byte) ([]string, error) {
+	return ParseRegisteredTypesJSON(out)
+}
+
+// ParseRegisteredTypesJSON decodes `bd types --json` and returns its
+// custom_types field: the list bd's validator resolves (the custom_types
+// table, or the config row when that table is empty).
+func ParseRegisteredTypesJSON(out []byte) ([]string, error) {
 	var parsed struct {
 		CustomTypes []string `json:"custom_types"`
 	}
@@ -252,12 +448,14 @@ func parseRegisteredTypesJSON(out []byte) ([]string, error) {
 }
 
 // setCustomTypes writes the types.custom config to a bd store.
-func setCustomTypes(dir, types string) error {
+func setCustomTypes(ctx *CheckContext, bdBin, dir, types string) error {
 	start := time.Now()
 	args := []string{"config", "set", "types.custom", types}
-	cmd := exec.Command("bd", args...)
-	cmd.Dir = dir
-	err := cmd.Run()
+	cmd, err := customTypesBDCommand(ctx, bdBin, dir, args...)
+	if err != nil {
+		return err
+	}
+	err = cmd.Run()
 	exitCode := 0
 	if err != nil {
 		var exitErr *exec.ExitError

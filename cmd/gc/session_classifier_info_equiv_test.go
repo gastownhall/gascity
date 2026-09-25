@@ -215,6 +215,76 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				"pool_slot":    "2",
 			},
 		},
+		// asleep+sleep_reason=max-session-age is freeable (isPoolSessionSlotFreeable*):
+		// covers the Info-form production path (isPoolSessionSlotFreeableInfo), which
+		// previously had no equivalence-oracle coverage for this reason.
+		"asleep-max-session-age-freeable": {
+			ID:     "ga-maxage",
+			Type:   session.BeadType,
+			Title:  "maxage",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "worker",
+				"state":        "asleep",
+				"sleep_reason": string(session.SleepReasonMaxSessionAge),
+				"pool_slot":    "2",
+			},
+		},
+		// The remaining freeable sleep reasons. Each arm of the
+		// isPoolSessionSlotFreeable allowlist needs its own fixture: the oracle
+		// compares the bead form against the Info form per fixture, so a reason
+		// with no fixture lets the two classifiers drift apart on that reason
+		// alone. failed-create appears here in its asleep+sleep_reason spelling,
+		// which is distinct from the "failed-create" fixture below (state=
+		// failed-create) and reaches a different arm.
+		"asleep-city-stop-freeable": {
+			ID:     "ga-citystop",
+			Type:   session.BeadType,
+			Title:  "citystop",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "worker",
+				"state":        "asleep",
+				"sleep_reason": string(session.SleepReasonCityStop),
+				"pool_slot":    "2",
+			},
+		},
+		"asleep-failed-create-freeable": {
+			ID:     "ga-failedasleep",
+			Type:   session.BeadType,
+			Title:  "failedasleep",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "worker",
+				"state":        "asleep",
+				"sleep_reason": string(session.SleepReasonFailedCreate),
+				"pool_slot":    "2",
+			},
+		},
+		"asleep-runtime-missing-freeable": {
+			ID:     "ga-runtimemissing",
+			Type:   session.BeadType,
+			Title:  "runtimemissing",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "worker",
+				"state":        "asleep",
+				"sleep_reason": string(session.SleepReasonRuntimeMissing),
+				"pool_slot":    "2",
+			},
+		},
+		"asleep-provider-terminal-error-freeable": {
+			ID:     "ga-providerterm",
+			Type:   session.BeadType,
+			Title:  "providerterm",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "worker",
+				"state":        "asleep",
+				"sleep_reason": string(session.SleepReasonProviderTerminalError),
+				"pool_slot":    "2",
+			},
+		},
 		"asleep-wait-hold-not-freeable": {
 			ID:     "ga-wait",
 			Type:   session.BeadType,

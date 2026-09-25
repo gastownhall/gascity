@@ -46,18 +46,55 @@ func AssigneeIdentities(i Info) []string {
 	return identities
 }
 
+// isPoolManagedIdentity reports whether i carries one of the reconciler's
+// pool_managed / pool_slot / session_origin=="ephemeral" markers. It is the
+// session.Info-only subset of cmd/gc's isPoolManagedSessionInfo (which
+// additionally resolves a cfg-driven template fallback); AssigneeIdentifier
+// has no config to resolve that fallback against. Every pool-managed bead the
+// controller creates stamps one of these markers directly, so all pool
+// workers are covered. The check is intentionally broader than "pool": a
+// non-pool session stamped session_origin=ephemeral also matches, which is
+// correct because gc hook --claim records any unaliased session's claims
+// under its session bead ID. Unaliased manual sessions still fall through to
+// session_name.
+func isPoolManagedIdentity(i Info) bool {
+	if strings.TrimSpace(i.SessionOrigin) == "ephemeral" {
+		return true
+	}
+	if i.PoolManaged {
+		return true
+	}
+	return strings.TrimSpace(i.PoolSlot) != ""
+}
+
 // AssigneeIdentifier returns the durable agent-facing ownership identity of a
-// session: its current public alias, configured named identity, or runtime
-// session name, falling back to the bead ID when no name metadata is present.
+// session: its current public alias or configured named identity always win.
+// Otherwise, an unaliased pool-managed or ephemeral session claims under its
+// session bead ID. The bead ID is the stable per-session identity that the
+// claim (gc hook --claim records it), the bd actor (BEADS_ACTOR) and the stored
+// assignee all share, independent of how the runtime is named: a runtime
+// session_name is a provider-facing name whose shape has changed across
+// releases (slot-derived chair names on rc builds, <template>-<beadID> again
+// since #6549) and may be identity-derived for tmux_alias pools. Other
+// sessions keep the runtime session name, falling back to the bead ID when no
+// name metadata is present.
 // This is the same alias-first identity RuntimeEnvWithSessionContext exposes
 // through GC_ALIAS and BEADS_ACTOR; GC_AGENT mirrors it only for compatibility.
 // Keeping API assignment normalization on this rule prevents one session from
 // owning work under a different exact string than it presents to bd.
 func AssigneeIdentifier(i Info) string {
-	for _, v := range []string{i.Alias, i.ConfiguredNamedIdentity, i.SessionNameMetadata} {
+	for _, v := range []string{i.Alias, i.ConfiguredNamedIdentity} {
 		if v = strings.TrimSpace(v); v != "" {
 			return v
 		}
 	}
-	return i.ID
+	if isPoolManagedIdentity(i) {
+		if id := strings.TrimSpace(i.ID); id != "" {
+			return id
+		}
+	}
+	if sn := strings.TrimSpace(i.SessionNameMetadata); sn != "" {
+		return sn
+	}
+	return strings.TrimSpace(i.ID)
 }
