@@ -1228,6 +1228,8 @@ go_test(
         "rig_scope_resolution_test.go",
         "root_argv_test.go",
         "route_log_test.go",
+        "route_recovery_cas_test.go",
+        "route_recovery_fenced_test.go",
         "route_recovery_lane_test.go",
         "route_recovery_test.go",
         "routed_rows_manifest_test.go",
