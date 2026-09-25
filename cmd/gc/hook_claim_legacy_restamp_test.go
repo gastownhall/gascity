@@ -150,23 +150,37 @@ func TestRestampHookAdoption(t *testing.T) {
 	)
 	bead := beads.Bead{ID: "ga-1", Status: "in_progress", Assignee: legacy}
 	for _, tc := range []struct {
-		name         string
-		actor        string
-		canonical    string
-		moved        bool
-		err          error
-		wantCalls    int
-		wantAdopt    bool
-		wantAssignee string
+		name            string
+		actor           string
+		canonical       string
+		verdict         hookAdoptionVerdict
+		moved           bool
+		err             error
+		wantCalls       int
+		wantAdopt       bool
+		wantAssignee    string
+		wantRecovery    bool
+		wantStderrHas   string
+		wantStderrLacks string
 	}{
 		{name: "legacy spelling is re-stamped", actor: sessionID, canonical: legacy, moved: true, wantCalls: 1, wantAdopt: true, wantAssignee: sessionID},
 		{name: "lost CAS is not adopted", actor: sessionID, canonical: legacy, moved: false, wantCalls: 1, wantAdopt: false},
-		{name: "failed CAS adopts as-is", actor: sessionID, canonical: legacy, err: errors.New("boom"), wantCalls: 1, wantAdopt: true, wantAssignee: legacy},
-		{name: "unsupported CAS adopts as-is", actor: sessionID, canonical: legacy, err: beads.ErrConditionalTransferUnsupported, wantCalls: 1, wantAdopt: true, wantAssignee: legacy},
+		// A work-store bead whose re-stamp failed is NOT adopted: bd fences its
+		// close on the spelling that could not be moved, so adopting it hands
+		// the worker the #5716 loop instead of a recoverable refusal.
+		{name: "failed CAS on a work-store bead is not adopted", actor: sessionID, canonical: legacy, err: errors.New("boom"), wantCalls: 1, wantAdopt: false, wantRecovery: true},
+		{name: "unsupported CAS on a work-store bead is not adopted", actor: sessionID, canonical: legacy, err: beads.ErrConditionalTransferUnsupported, wantCalls: 1, wantAdopt: false, wantRecovery: true},
+		// The same unsupported error from the class route means the opposite:
+		// nothing fences a graph-resident close, so the bead is adopted and no
+		// recovery command is prescribed (none exists for a gcg- id).
+		{name: "graph-resident route adopts as-is", actor: sessionID, canonical: legacy, err: errRestampGraphResident, wantCalls: 1, wantAdopt: true, wantAssignee: legacy, wantStderrHas: "graph-resident", wantStderrLacks: "--if-assignee"},
 		{name: "already the claim identity", actor: sessionID, canonical: sessionID, wantCalls: 0, wantAdopt: true, wantAssignee: legacy},
 		{name: "actor differs from claim identity (manual session)", actor: legacy, canonical: legacy, wantCalls: 0, wantAdopt: true, wantAssignee: legacy},
 		{name: "no actor in env", actor: "", canonical: legacy, wantCalls: 0, wantAdopt: true, wantAssignee: legacy},
-		{name: "unverified readback uses the query row", actor: sessionID, canonical: "", moved: true, wantCalls: 1, wantAdopt: true, wantAssignee: sessionID},
+		{name: "unverified readback uses the query row", actor: sessionID, canonical: "", verdict: hookAdoptionUnverified, moved: true, wantCalls: 1, wantAdopt: true, wantAssignee: sessionID},
+		// An unreadable readback makes `current` the work query's own row, so a
+		// failed re-stamp proves nothing and stays fail-open, loudly.
+		{name: "failed CAS on an unverified readback adopts as-is", actor: sessionID, canonical: "", verdict: hookAdoptionUnverified, err: errors.New("boom"), wantCalls: 1, wantAdopt: true, wantAssignee: legacy, wantRecovery: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
@@ -179,7 +193,7 @@ func TestRestampHookAdoption(t *testing.T) {
 			}}
 			opts := hookClaimOptions{Assignee: sessionID, RuntimeActor: tc.actor}
 			var stderr bytes.Buffer
-			got, adopt := restampHookAdoption(bead, tc.canonical, opts, ops, "/city", &stderr)
+			got, adopt := restampHookAdoption(bead, tc.canonical, tc.verdict, opts, ops, "/city", &stderr)
 			if calls != tc.wantCalls {
 				t.Fatalf("RestampAdopted calls = %d, want %d", calls, tc.wantCalls)
 			}
@@ -189,11 +203,17 @@ func TestRestampHookAdoption(t *testing.T) {
 			if adopt && got.Assignee != tc.wantAssignee {
 				t.Fatalf("assignee = %q, want %q", got.Assignee, tc.wantAssignee)
 			}
-			if tc.err != nil {
+			if tc.wantRecovery {
 				want := fmt.Sprintf("bd update %s --if-assignee %q --if-status in_progress --assignee %q", bead.ID, legacy, sessionID)
 				if !strings.Contains(stderr.String(), want) {
 					t.Fatalf("warning does not name the manual recovery %q; stderr: %s", want, stderr.String())
 				}
+			}
+			if tc.wantStderrHas != "" && !strings.Contains(stderr.String(), tc.wantStderrHas) {
+				t.Fatalf("stderr does not mention %q; stderr: %s", tc.wantStderrHas, stderr.String())
+			}
+			if tc.wantStderrLacks != "" && strings.Contains(stderr.String(), tc.wantStderrLacks) {
+				t.Fatalf("stderr prescribes %q for a bead that needs no recovery; stderr: %s", tc.wantStderrLacks, stderr.String())
 			}
 		})
 	}
