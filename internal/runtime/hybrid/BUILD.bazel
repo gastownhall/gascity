@@ -11,12 +11,14 @@ go_library(
 go_test(
     name = "hybrid_test",
     srcs = [
+        "conformance_test.go",
         "hybrid_test.go",
         "testenv_import_test.go",
     ],
     embed = [":hybrid"],
     deps = [
         "//internal/runtime",
+        "//internal/runtime/runtimetest",
         "//internal/testenv",
     ],
 )
