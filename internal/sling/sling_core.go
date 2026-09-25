@@ -499,7 +499,7 @@ func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 // bead: routed to the target, but still claimed by a third party with no
 // molecule to drive it (gm-2kyaqy). Identity matches the routing write
 // (agentutil.RoutedToIdentity), so a pool target compares against its pool
-// name and a claim by one of its own sessions ("<pool>-<id>") is not
+// name and a claim by one of its own sessions (assigneeIsOwnPoolSession) is not
 // undeliverable -- the same carve-out CheckBeadState already makes. Returns
 // false when the bead is unassigned, unreadable, or already held by the
 // target, since none of those strand the hand-off.
@@ -509,7 +509,7 @@ func undeliverableHandoffWarning(querier BeadQuerier, deps SlingDeps, beadID str
 		return "", false
 	}
 	target := agentutil.RoutedToIdentity(&a)
-	claimedByOwnPoolSession := agentutil.IsMultiSessionAgent(&a) && strings.HasPrefix(holder.Assignee, target+"-")
+	claimedByOwnPoolSession := agentutil.IsMultiSessionAgent(&a) && assigneeIsOwnPoolSession(holder.Assignee, target, querier, deps.Store)
 	if holder.Assignee == target || claimedByOwnPoolSession {
 		return "", false
 	}
