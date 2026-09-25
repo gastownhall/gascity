@@ -180,23 +180,46 @@ func (c *CustomTypesCheck) CanFix() bool { return true }
 // would silently delete those, causing failures the next time code tries
 // to create beads of the deleted types.
 //
+// The merge source is the types.custom config row AND the normalized
+// custom_types table: `bd config set types.custom` replaces the whole table
+// (DELETE, then insert the new list), so an extra that survives only in the
+// table — the shape an upgraded legacy-managed store has once gc's start path
+// rewrote the row — would be dropped by a row-only merge. If either cannot be
+// read, Fix fails rather than writing a list it cannot prove is a superset.
+//
 // Fix also runs when only c.tableMissing is non-empty (CSV already
-// complete): re-issuing `bd config set types.custom` with the same CSV
-// value is what reconciles a drifted custom_types table, since bd's set
-// path is what keeps the table in sync with the CSV.
+// complete): re-issuing `bd config set types.custom` with the merged value
+// is what reconciles a drifted custom_types table, since bd's set path is
+// what keeps the table in sync with the CSV.
 func (c *CustomTypesCheck) Fix(ctx *CheckContext) error {
 	if len(c.missing) == 0 && len(c.tableMissing) == 0 {
 		return nil
 	}
-	// Read the current list so we can preserve user-added types.
-	// If we cannot read it, return the error rather than overwriting —
-	// silently dropping user types is worse than failing loud.
 	current, err := getCustomTypes(ctx, c.bdExecutable(), c.Dir)
 	if err != nil {
 		return fmt.Errorf("reading current custom types: %w", err)
 	}
-	merged := contract.MergeCustomTypes(current, RequiredCustomTypes)
+	registered, err := getRegisteredTypes(ctx, c.bdExecutable(), c.Dir)
+	if err != nil {
+		return fmt.Errorf("reading registered custom types: %w", err)
+	}
+	merged := MergeRequiredCustomTypes(current, registered)
 	return setCustomTypes(ctx, c.bdExecutable(), c.Dir, strings.Join(merged, ","))
+}
+
+// MergeRequiredCustomTypes returns the types.custom value that registers every
+// RequiredCustomTypes entry without narrowing what the store already accepts:
+// the config row's list, then any types only the custom_types table carries,
+// then the missing required ones. Order is stable so a re-run is a no-op.
+func MergeRequiredCustomTypes(row, table []string) []string {
+	return contract.MergeCustomTypes(contract.MergeCustomTypes(row, table), RequiredCustomTypes)
+}
+
+// CustomTypesNeedRegistration reports whether a required type is absent from
+// the config row or from the custom_types table. bd validates against the
+// table whenever it is non-empty, so a complete row alone is not enough.
+func CustomTypesNeedRegistration(row, table []string) bool {
+	return len(typesNotIn(RequiredCustomTypes, row)) != 0 || len(typesNotIn(RequiredCustomTypes, table)) != 0
 }
 
 func customTypesStoreEnv(ctx *CheckContext, dir string) ([]string, error) {
@@ -339,17 +362,42 @@ func getCustomTypes(ctx *CheckContext, bdBin, dir string) ([]string, error) {
 // parseCustomTypesJSON decodes the output of `bd config get --json types.custom`
 // into a list of types. Empty values yield nil (not []string{""}).
 func parseCustomTypesJSON(out []byte) ([]string, error) {
+	return ParseCustomTypesConfigJSON(out)
+}
+
+// ParseCustomTypesConfigJSON decodes `bd config get --json types.custom`.
+// The value takes either form bd writes: the legacy CSV (a,b) or the JSON
+// array `bd config set` / pour store (["a","b"]). Entries are trimmed and
+// empties dropped; an empty value yields nil.
+func ParseCustomTypesConfigJSON(out []byte) ([]string, error) {
 	var parsed struct {
 		Value string `json:"value"`
 	}
 	if err := json.Unmarshal(out, &parsed); err != nil {
 		return nil, fmt.Errorf("parsing bd config get output: %w", err)
 	}
-	raw := strings.TrimSpace(parsed.Value)
+	return parseCustomTypesValue(parsed.Value), nil
+}
+
+func parseCustomTypesValue(value string) []string {
+	raw := strings.TrimSpace(value)
 	if raw == "" {
-		return nil, nil
+		return nil
 	}
-	return strings.Split(raw, ","), nil
+	parts := strings.Split(raw, ",")
+	if strings.HasPrefix(raw, "[") {
+		var arr []string
+		if err := json.Unmarshal([]byte(raw), &arr); err == nil {
+			parts = arr
+		}
+	}
+	var out []string
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // getRegisteredTypes reads the bd store's normalized custom_types table —
@@ -383,6 +431,13 @@ func getRegisteredTypes(ctx *CheckContext, bdBin, dir string) ([]string, error) 
 // returns its custom_types field — the table-backed list, distinct from
 // parseCustomTypesJSON's CSV-config value.
 func parseRegisteredTypesJSON(out []byte) ([]string, error) {
+	return ParseRegisteredTypesJSON(out)
+}
+
+// ParseRegisteredTypesJSON decodes `bd types --json` and returns its
+// custom_types field: the list bd's validator resolves (the custom_types
+// table, or the config row when that table is empty).
+func ParseRegisteredTypesJSON(out []byte) ([]string, error) {
 	var parsed struct {
 		CustomTypes []string `json:"custom_types"`
 	}

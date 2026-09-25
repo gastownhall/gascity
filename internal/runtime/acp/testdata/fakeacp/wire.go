@@ -15,6 +15,11 @@ const (
 	codeInternalError  = -32603
 )
 
+// wireCancelled is the ACP wire spelling of the cancel stop reason and of
+// the cancel permission outcome. The US-locale misspell autofix would
+// rewrite it into a value no ACP client recognizes.
+const wireCancelled = "cancelled" //nolint:misspell // ACP wire value
+
 // message is one JSON-RPC 2.0 frame. IDs stay raw so numeric and string ids
 // round-trip unchanged.
 type message struct {

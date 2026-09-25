@@ -13,6 +13,10 @@ go_library(
         "identity_darwin.go",
         "identity_linux.go",
         "identity_stub.go",
+        "infrastructure_argv.go",
+        "infrastructure_argv_darwin.go",
+        "infrastructure_argv_linux.go",
+        "infrastructure_argv_stub.go",
         "kill_stub.go",
         "kill_unix.go",
         "proctable.go",
@@ -50,6 +54,7 @@ go_test(
         "descendants_test.go",
         "guard_test.go",
         "identity_darwin_test.go",
+        "infrastructure_argv_test.go",
         "kill_unix_test.go",
         "scan_darwin_command_test.go",
         "scan_darwin_test.go",
@@ -59,6 +64,7 @@ go_test(
     ],
     embed = [":proctable"],
     deps = [
+        "//internal/beads/proxyendpoint",
         "//internal/testenv",
     ] + select({
         "@rules_go//go/platform:darwin": [

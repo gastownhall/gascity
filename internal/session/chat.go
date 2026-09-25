@@ -928,7 +928,9 @@ func (m *Manager) dismissKnownDialogsLocked(ctx context.Context, sessName string
 	if !ok {
 		return false
 	}
-	_ = dp.DismissKnownDialogs(ctx, sessName, timeout)
+	if err := dp.DismissKnownDialogs(ctx, sessName, timeout); errors.Is(err, runtime.ErrWorkspaceTrustUnconfirmed) {
+		log.Printf("session: %q: %v", sessName, err)
+	}
 	return true
 }
 
