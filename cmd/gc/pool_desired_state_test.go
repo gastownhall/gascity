@@ -2886,7 +2886,7 @@ func TestComputePoolDesiredStates_ZeroDemandRecordsSkipDecision(t *testing.T) {
 			trace := newPoolDesiredStateTestTrace("claude")
 			sessions := sessionInfosFromBeads(tt.sessions)
 
-			result := computePoolDesiredStates(cfg, nil, sessions, tt.scaleCheckCounts, nil, trace)
+			result := computePoolDesiredStates(cfg, nil, sessions, tt.scaleCheckCounts, nil, nil, trace)
 
 			if untraced := ComputePoolDesiredStates(cfg, nil, sessions, tt.scaleCheckCounts); !reflect.DeepEqual(result, untraced) {
 				t.Fatalf("traced result = %#v, want identical to untraced %#v", result, untraced)
