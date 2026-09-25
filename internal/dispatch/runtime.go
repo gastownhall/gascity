@@ -1760,6 +1760,13 @@ func findScopeBody(all []beads.Bead, rootID, scopeRef string) (beads.Bead, bool)
 }
 
 func setOutcomeAndClose(store beads.Store, beadID, outcome string) error {
+	if outcome == beadmeta.OutcomePass {
+		// Never merge pass over a control quarantine: the bead is already
+		// closed and its fail is the record (ga-3wlbcj).
+		if current, err := store.Get(beadID); err == nil && isControlQuarantined(current) {
+			return nil
+		}
+	}
 	return updateMetadataAndClose(store, beadID, map[string]string{beadmeta.OutcomeMetadataKey: outcome})
 }
 
@@ -1813,7 +1820,31 @@ func resolveFinalizeOutcome(store beads.Store, finalizer beads.Bead) (string, er
 			outcome = beadmeta.OutcomeFail
 		}
 	}
+	if outcome == beadmeta.OutcomePass && rootID != "" {
+		// A root the control dispatcher already quarantined is a failed
+		// workflow whatever its blockers say. Without this the finalizer
+		// merged pass onto a closed root that still carried every
+		// quarantine key, and watchers keyed on gc.outcome read "fine"
+		// (ga-3wlbcj: 61 roots quarantined for `unsupported control bead
+		// kind "workflow"` on 2026-09-25). A missing root falls through to
+		// the caller's missing-root path.
+		root, err := store.Get(rootID)
+		if err != nil && !errors.Is(err, beads.ErrNotFound) {
+			return "", err
+		}
+		if err == nil && isControlQuarantined(root) {
+			outcome = beadmeta.OutcomeFail
+		}
+	}
 	return outcome, nil
+}
+
+// isControlQuarantined reports whether the control dispatcher closed b as a
+// hard failure it could not process.
+func isControlQuarantined(b beads.Bead) bool {
+	return b.Status == "closed" &&
+		(b.Metadata[beadmeta.FinalDispositionMetadataKey] == beadmeta.DispositionControlQuarantine ||
+			b.Metadata[beadmeta.ControlQuarantinedMetadataKey] == "true")
 }
 
 // resolveFinalizeFailureDiagnostics returns the failure metadata to stamp on
