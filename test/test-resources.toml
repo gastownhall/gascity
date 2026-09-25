@@ -23,8 +23,8 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 488
-baseline_files = 177
+baseline_calls = 503
+baseline_files = 179
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-cp3hwi"
@@ -64,8 +64,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 318
-baseline_files = 121
+baseline_calls = 333
+baseline_files = 123
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-cp3hwi"
@@ -142,8 +142,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 98
-baseline_files = 38
+baseline_calls = 100
+baseline_files = 39
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-cp3hwi"
@@ -434,8 +434,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 318
-baseline_files = 121
+baseline_calls = 333
+baseline_files = 123
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-cp3hwi"
@@ -512,8 +512,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 96
-baseline_files = 37
+baseline_calls = 98
+baseline_files = 38
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-cp3hwi"

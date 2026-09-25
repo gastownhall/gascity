@@ -1222,13 +1222,13 @@ func TestPollerSessionIdleEnoughUsesSuppliedLastActivity(t *testing.T) {
 	last := time.Now().Add(-5 * time.Second)
 	obs := worker.LiveObservation{LastActivity: &last}
 
-	if !pollerSessionIdleEnough(target, nil, 3*time.Second, obs) {
+	if !pollerSessionIdleEnoughContext(context.Background(), target, nil, 3*time.Second, obs) {
 		t.Fatal("pollerSessionIdleEnough = false, want true when supplied last activity is old enough")
 	}
 
 	recent := time.Now().Add(-1 * time.Second)
 	obs.LastActivity = &recent
-	if pollerSessionIdleEnough(target, nil, 3*time.Second, obs) {
+	if pollerSessionIdleEnoughContext(context.Background(), target, nil, 3*time.Second, obs) {
 		t.Fatal("pollerSessionIdleEnough = true, want false when supplied last activity is too recent")
 	}
 }
@@ -1242,7 +1242,7 @@ func TestPollerSessionIdleEnoughFallsBackToIdleWaitWhenActivityUnavailable(t *te
 	target := nudgeTarget{sessionName: "sess-worker"}
 	obs := worker.LiveObservation{}
 
-	if !pollerSessionIdleEnough(target, fake, 3*time.Second, obs) {
+	if !pollerSessionIdleEnoughContext(context.Background(), target, fake, 3*time.Second, obs) {
 		t.Fatal("pollerSessionIdleEnough = false, want idle wait fallback to allow delivery")
 	}
 
@@ -1258,7 +1258,7 @@ func TestPollerSessionIdleEnoughFallsBackToIdleWaitWhenActivityUnavailable(t *te
 	}
 
 	fake.WaitForIdleErrors["sess-worker"] = errors.New("timed out waiting for idle")
-	if pollerSessionIdleEnough(target, fake, 3*time.Second, obs) {
+	if pollerSessionIdleEnoughContext(context.Background(), target, fake, 3*time.Second, obs) {
 		t.Fatal("pollerSessionIdleEnough = true, want idle wait error to suppress delivery")
 	}
 }
@@ -1272,7 +1272,7 @@ func TestPollerSessionIdleEnoughAllowsActivitylessTimedOnlySession(t *testing.T)
 	target := nudgeTarget{sessionName: "sess-worker"}
 	obs := worker.LiveObservation{}
 
-	if !pollerSessionIdleEnough(target, fake, 3*time.Second, obs) {
+	if !pollerSessionIdleEnoughContext(context.Background(), target, fake, 3*time.Second, obs) {
 		t.Fatal("pollerSessionIdleEnough = false, want activityless timed-only sessions to allow queued delivery")
 	}
 	if calls := fake.CountCalls("WaitForIdle", "sess-worker"); calls != 0 {
@@ -5241,6 +5241,96 @@ func TestCmdNudgeDropDeadLettersPendingNudge(t *testing.T) {
 	}
 }
 
+func TestQueuedNudgeClaimFenceRejectsStaleRenewalAndCompletion(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "deliver once", now.Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	first, err := claimDueQueuedNudgesMatching(dir, now, func(queuedNudge) bool { return true })
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first claim = %+v, %v; want one item", first, err)
+	}
+	second, err := claimDueQueuedNudgesMatching(dir, first[0].LeaseUntil.Add(time.Millisecond), func(queuedNudge) bool { return true })
+	if err != nil || len(second) != 1 {
+		t.Fatalf("reclaim = %+v, %v; want one item", second, err)
+	}
+	secondLease := second[0].LeaseUntil
+
+	if err := renewQueuedNudgeClaims(dir, queuedNudgeClaims(first)); !errors.Is(err, errQueuedNudgeClaimLost) {
+		t.Fatalf("stale renewal error = %v, want errQueuedNudgeClaimLost", err)
+	}
+	if err := ackQueuedNudgeClaimsWithOutcome(dir, queuedNudgeClaims(first), "injected", "", "test"); !errors.Is(err, errQueuedNudgeClaimLost) {
+		t.Fatalf("stale completion error = %v, want errQueuedNudgeClaimLost", err)
+	}
+	if err := releaseQueuedNudgeClaimsOwned(dir, queuedNudgeClaims(first)); !errors.Is(err, errQueuedNudgeClaimLost) {
+		t.Fatalf("stale release error = %v, want errQueuedNudgeClaimLost", err)
+	}
+	if _, err := recordQueuedNudgeFailureDetailedOwned(dir, beads.NudgesStore{}, queuedNudgeClaims(first), errors.New("stale failure"), now); !errors.Is(err, errQueuedNudgeClaimLost) {
+		t.Fatalf("stale failure error = %v, want errQueuedNudgeClaimLost", err)
+	}
+
+	state := queueStateSnapshot(t, dir)
+	if len(state.InFlight) != 1 || state.InFlight[0].ID != second[0].ID || !state.InFlight[0].ClaimedAt.Equal(second[0].ClaimedAt) || !state.InFlight[0].LeaseUntil.Equal(secondLease) {
+		t.Fatalf("stale owner mutated current claim: state=%+v second=%+v", state, second[0])
+	}
+}
+
+func TestQueuedNudgeClaimFenceReleasesOwnedSubset(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	for _, message := range []string{"owned", "withdrawn"} {
+		if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", message, now.Add(-time.Minute))); err != nil {
+			t.Fatalf("enqueueQueuedNudge: %v", err)
+		}
+	}
+	claimed, err := claimDueQueuedNudgesMatching(dir, now, func(queuedNudge) bool { return true })
+	if err != nil || len(claimed) != 2 {
+		t.Fatalf("claim = %+v, %v; want two items", claimed, err)
+	}
+	if err := nudgequeue.WithdrawWaitNudges(nil, dir, []string{claimed[1].ID}); err != nil {
+		t.Fatalf("WithdrawWaitNudges: %v", err)
+	}
+
+	if err := releaseQueuedNudgeClaimsOwned(dir, queuedNudgeClaims(claimed)); !errors.Is(err, errQueuedNudgeClaimLost) {
+		t.Fatalf("release error = %v, want errQueuedNudgeClaimLost", err)
+	}
+	state := queueStateSnapshot(t, dir)
+	if len(state.Pending) != 1 || state.Pending[0].ID != claimed[0].ID || len(state.InFlight) != 0 {
+		t.Fatalf("release did not preserve owned-subset mutation: state=%+v", state)
+	}
+}
+
+func TestQueuedNudgeClaimFenceRecordsFailureForOwnedSubset(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	for _, message := range []string{"owned", "withdrawn"} {
+		if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", message, now.Add(-time.Minute))); err != nil {
+			t.Fatalf("enqueueQueuedNudge: %v", err)
+		}
+	}
+	claimed, err := claimDueQueuedNudgesMatching(dir, now, func(queuedNudge) bool { return true })
+	if err != nil || len(claimed) != 2 {
+		t.Fatalf("claim = %+v, %v; want two items", claimed, err)
+	}
+	if err := nudgequeue.WithdrawWaitNudges(nil, dir, []string{claimed[1].ID}); err != nil {
+		t.Fatalf("WithdrawWaitNudges: %v", err)
+	}
+
+	cause := errors.New("delivery failed")
+	_, err = recordQueuedNudgeFailureDetailedOwned(dir, beads.NudgesStore{}, queuedNudgeClaims(claimed), cause, now)
+	if !errors.Is(err, errQueuedNudgeClaimLost) {
+		t.Fatalf("record failure error = %v, want errQueuedNudgeClaimLost", err)
+	}
+	state := queueStateSnapshot(t, dir)
+	if len(state.Pending) != 1 || state.Pending[0].ID != claimed[0].ID || state.Pending[0].Attempts != 1 || state.Pending[0].LastError != cause.Error() || len(state.InFlight) != 0 {
+		t.Fatalf("failure did not preserve owned-subset mutation: state=%+v", state)
+	}
+}
+
 func TestCmdNudgeDropDeadLettersInFlightNudge(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
@@ -5711,7 +5801,7 @@ func TestNudgePollHelpersCloseEveryStoreTheyOpen(t *testing.T) {
 		if err := releaseQueuedNudgeClaims(dir, []string{"n-leak"}); err != nil {
 			t.Fatalf("releaseQueuedNudgeClaims: %v", err)
 		}
-		if err := ackQueuedNudgesWithOutcome(dir, []string{"absent"}, "injected", "", "test"); err != nil {
+		if err := ackQueuedNudgesWithOutcome(dir, []string{"absent"}, "injected", "test"); err != nil {
 			t.Fatalf("ackQueuedNudgesWithOutcome: %v", err)
 		}
 	}
@@ -5752,7 +5842,7 @@ func TestNudgePollHelpersSkipDoltOpenOnEmptyQueue(t *testing.T) {
 		if err := releaseQueuedNudgeClaims(dir, []string{"absent"}); err != nil {
 			t.Fatalf("releaseQueuedNudgeClaims: %v", err)
 		}
-		if err := ackQueuedNudgesWithOutcome(dir, []string{"absent"}, "injected", "", "test"); err != nil {
+		if err := ackQueuedNudgesWithOutcome(dir, []string{"absent"}, "injected", "test"); err != nil {
 			t.Fatalf("ackQueuedNudgesWithOutcome: %v", err)
 		}
 	}
@@ -5812,7 +5902,7 @@ func TestNudgePollHelpersOpenOnceWhenQueueHasWork(t *testing.T) {
 		}
 	})
 	assertOneOpenOneClose(t, "ack", func(dir string) {
-		if err := ackQueuedNudgesWithOutcome(dir, []string{"n-work"}, "injected", "", "test-boundary"); err != nil {
+		if err := ackQueuedNudgesWithOutcome(dir, []string{"n-work"}, "injected", "test-boundary"); err != nil {
 			t.Fatalf("ackQueuedNudgesWithOutcome: %v", err)
 		}
 	})

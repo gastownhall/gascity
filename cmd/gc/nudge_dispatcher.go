@@ -7,13 +7,13 @@ import (
 	"io"
 	"net"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // pingNudgeWakeSocketDialTimeout bounds how long a producer waits to dial
@@ -33,7 +33,10 @@ func pingNudgeWakeSocket(cityPath string) {
 	if cityPath == "" {
 		return
 	}
-	path := nudgequeue.WakeSocketPath(cityPath)
+	path, err := nudgequeue.PrepareWakeSocketPath(cityPath)
+	if err != nil {
+		return
+	}
 	conn, err := net.DialTimeout("unix", path, pingNudgeWakeSocketDialTimeout)
 	if err != nil {
 		return
@@ -49,8 +52,8 @@ func pingNudgeWakeSocket(cityPath string) {
 // socket cannot be opened (e.g. permission, path-too-long); callers fall
 // back to patrol-interval dispatching.
 func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- struct{}, stderr io.Writer, logPrefix string) (net.Listener, error) {
-	path := nudgequeue.WakeSocketPath(cityPath)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	path, err := nudgequeue.PrepareWakeSocketPath(cityPath)
+	if err != nil {
 		return nil, fmt.Errorf("creating nudge wake dir: %w", err)
 	}
 	// A stale socket from a prior supervisor crash blocks Listen with
@@ -117,11 +120,27 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- 
 // logNudgeDispatchSkip); pass nil to suppress (skip counts still accumulate
 // into the persisted queue state's DispatchSkips regardless of debugOut, so
 // `gc nudge status` stays informative even with GC_DEBUG unset).
+//
+// (Event-capable providers never reach this: nudgeDispatchTick routes their
+// passes through the nudge event dispatcher's worker instead.)
 func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, debugOut io.Writer) (int, error) {
-	if cfg == nil || sessionBeads == nil || cityPath == "" {
+	if cfg == nil || sessionBeads == nil || cityPath == "" || !nudgeDispatcherIsSupervisor(cfg) {
 		return 0, nil
 	}
-	if !nudgeDispatcherIsSupervisor(cfg) {
+	return deliverPendingQueuedNudges(cityPath, cfg, sessStore, sp, sessionBeads, "", debugOut, nil, func(_ context.Context, target nudgeTarget, obs worker.LiveObservation) (bool, error) {
+		return tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+	})
+}
+
+// deliverPendingQueuedNudges is one dispatcher pass over the queue: collect
+// the agents with due pending (or lease-expired in-flight) items, resolve
+// each matching open session bead to a nudgeTarget — restricted to
+// sessionFilter when set — observe it, and hand running matches to deliver.
+// Returns how many targets delivered at least one item. debugOut is threaded
+// through to logNudgeDispatchSkip; nil suppresses the debug lines (skip
+// counts still accumulate regardless).
+func deliverPendingQueuedNudges(cityPath string, cfg *config.City, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, sessionFilter string, debugOut io.Writer, targetContext func() (context.Context, context.CancelFunc), deliver func(context.Context, nudgeTarget, worker.LiveObservation) (bool, error)) (int, error) {
+	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return 0, nil
 	}
 	now := time.Now()
@@ -192,6 +211,9 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 			logNudgeDispatchSkip(debugOut, "no-target", info.AgentName, info.ID, "")
 			continue
 		}
+		if sessionFilter != "" && !nudgeSessionEventMatches(sp, target.sessionName, sessionFilter) {
+			continue
+		}
 		// ACP sessions also flow through this dispatcher. The inject-on-hook
 		// drain path still catches deliveries when the agent receives external
 		// prompts, but a warm-idle ACP session never fires its hook on its
@@ -214,8 +236,14 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 			logNudgeDispatchSkip(debugOut, "not-matched", target.agentKey(), target.sessionName, "")
 			continue
 		}
-		obs, err := workerObserveNudgeTarget(target, sessStore, sp)
+		ctx := context.Background()
+		cancel := func() {}
+		if targetContext != nil {
+			ctx, cancel = targetContext()
+		}
+		obs, err := workerObserveNudgeTargetContext(ctx, target, sessStore, sp)
 		if err != nil {
+			cancel()
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -224,11 +252,13 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 			continue
 		}
 		if !obs.Running {
+			cancel()
 			skipCounts["not-running"]++
 			logNudgeDispatchSkip(debugOut, "not-running", target.agentKey(), target.sessionName, "")
 			continue
 		}
-		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+		ok, err := deliver(ctx, target, obs)
+		cancel()
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -257,6 +287,16 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 		firstErr = fmt.Errorf("recording nudge dispatch skip counters: %w", err)
 	}
 	return delivered, firstErr
+}
+
+func nudgeSessionEventMatches(sp runtime.Provider, sessionName, eventName string) bool {
+	if sessionName == eventName {
+		return true
+	}
+	if matcher, ok := sp.(runtime.SessionEventRouteProvider); ok {
+		return matcher.SessionEventMatches(sessionName, eventName)
+	}
+	return false
 }
 
 // logNudgeDispatchSkip emits a single GC_DEBUG-gated line documenting one

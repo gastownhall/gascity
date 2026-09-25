@@ -36,6 +36,7 @@ var (
 	_ runtime.LivenessObserver              = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 	_ runtime.SessionEventProvider          = (*Provider)(nil)
+	_ runtime.RoutedContextNudgeProvider    = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -270,9 +271,41 @@ func (p *Provider) ObserveLivenessWithError(name string, processNames []string) 
 	return runtime.ObserveLivenessWithError(other, name, processNames)
 }
 
+// ObserveLivenessWithErrorContext delegates cancellable observation to the routed backend.
+func (p *Provider) ObserveLivenessWithErrorContext(ctx context.Context, name string, processNames []string) (runtime.Liveness, error) {
+	primary, err := runtime.ObserveLivenessWithErrorContext(ctx, p.route(name), name, processNames)
+	if err != nil || primary.Running {
+		return primary, err
+	}
+	p.mu.RLock()
+	isACP := p.routes[name]
+	p.mu.RUnlock()
+	other := p.acpSP
+	if isACP {
+		other = p.defaultSP
+	}
+	return runtime.ObserveLivenessWithErrorContext(ctx, other, name, processNames)
+}
+
 // Nudge delegates to the routed backend.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	return p.route(name).Nudge(name, content)
+}
+
+// NudgeContext delegates cancellation to the routed backend when supported.
+func (p *Provider) NudgeContext(ctx context.Context, name string, content []runtime.ContentBlock) error {
+	return runtime.NudgeContext(ctx, p.route(name), name, content)
+}
+
+// SupportsNudgeContext reports whether the backend routed for name supports
+// cancellation of an in-flight nudge.
+func (p *Provider) SupportsNudgeContext(name string) bool {
+	return runtime.SupportsNudgeContext(p.route(name), name)
+}
+
+// IsRunningContext delegates a cancellable running-state lookup to the routed backend.
+func (p *Provider) IsRunningContext(ctx context.Context, name string) (bool, error) {
+	return runtime.IsRunningContext(ctx, p.route(name), name)
 }
 
 // WaitForIdle delegates to the routed backend when it supports explicit
@@ -450,4 +483,27 @@ func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.S
 	default:
 		return nil, fmt.Errorf("neither default nor ACP backend implements SubscribeSessionEvents")
 	}
+}
+
+// SessionEventStreamCovers reports whether the single forwarded stream belongs
+// to the backend that owns name.
+func (p *Provider) SessionEventStreamCovers(name string) bool {
+	_, defaultEvents := p.defaultSP.(runtime.SessionEventProvider)
+	p.mu.RLock()
+	isACP := p.routes[name]
+	p.mu.RUnlock()
+	if defaultEvents {
+		return !isACP
+	}
+	_, acpEvents := p.acpSP.(runtime.SessionEventProvider)
+	return acpEvents && isACP
+}
+
+// SessionEventMatches delegates provider-native name matching to the routed backend.
+func (p *Provider) SessionEventMatches(name, eventName string) bool {
+	routed := p.route(name)
+	if matcher, ok := routed.(runtime.SessionEventRouteProvider); ok {
+		return matcher.SessionEventMatches(name, eventName)
+	}
+	return name == eventName
 }

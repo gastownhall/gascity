@@ -14,8 +14,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -65,6 +67,11 @@ var ErrExecUnsupported = errors.New("runtime does not implement the exec op")
 // not even emit PartialListError for a total failure. The two are intentionally
 // separate signals for separate call paths.
 var ErrRuntimeUnavailable = errors.New("runtime unavailable: liveness observation failed")
+
+// ErrNudgeOutcomeUnknown reports that a legacy provider did not return before
+// the caller's deadline and cannot cancel its in-flight mutation. Callers must
+// not retry that nudge: the original send may still complete successfully.
+var ErrNudgeOutcomeUnknown = errors.New("nudge outcome unknown")
 
 // ErrRelaunchUnsupported reports that the underlying runtime cannot relaunch the
 // agent in a warm box (it is not a [RelaunchProvider], or is conjoined like
@@ -227,6 +234,182 @@ type Provider interface {
 	// Capabilities reports what this provider can reliably detect.
 	// Used by the reconciler to skip inapplicable wake reasons.
 	Capabilities() ProviderCapabilities
+}
+
+// ContextNudgeProvider is implemented by providers that can cancel an
+// in-flight nudge at a caller-supplied deadline.
+type ContextNudgeProvider interface {
+	NudgeContext(ctx context.Context, name string, content []ContentBlock) error
+}
+
+// RoutedContextNudgeProvider reports whether the backend selected for a named
+// session can cancel an in-flight nudge. Composite providers implement this so
+// callers do not mistake the routing wrapper's NudgeContext method for a
+// capability of the routed backend.
+type RoutedContextNudgeProvider interface {
+	SupportsNudgeContext(name string) bool
+}
+
+// SupportsNudgeContext reports whether the provider that will handle name can
+// cancel an in-flight nudge at a caller-supplied deadline.
+func SupportsNudgeContext(sp Provider, name string) bool {
+	if routed, ok := sp.(RoutedContextNudgeProvider); ok {
+		return routed.SupportsNudgeContext(name)
+	}
+	_, ok := sp.(ContextNudgeProvider)
+	return ok
+}
+
+// ContextRunningProvider is implemented by providers that can cancel an
+// in-flight running-state lookup at a caller-supplied deadline.
+type ContextRunningProvider interface {
+	IsRunningContext(ctx context.Context, name string) (bool, error)
+}
+
+type contextResult[T any] struct {
+	value T
+	err   error
+}
+
+const maxConcurrentLegacyCallsPerProvider = 8
+
+type legacyCallGate struct {
+	slots chan struct{}
+	refs  int
+}
+
+var legacyCallGates = struct {
+	sync.Mutex
+	byProvider    map[Provider]*legacyCallGate
+	nonComparable *legacyCallGate
+}{byProvider: make(map[Provider]*legacyCallGate)}
+
+func retainLegacyCallGate(sp Provider) (*legacyCallGate, func()) {
+	legacyCallGates.Lock()
+	comparable := sp == nil || reflect.TypeOf(sp).Comparable()
+	var gate *legacyCallGate
+	if comparable {
+		gate = legacyCallGates.byProvider[sp]
+	} else {
+		gate = legacyCallGates.nonComparable
+	}
+	if gate == nil {
+		gate = &legacyCallGate{slots: make(chan struct{}, maxConcurrentLegacyCallsPerProvider)}
+		if comparable {
+			legacyCallGates.byProvider[sp] = gate
+		} else {
+			legacyCallGates.nonComparable = gate
+		}
+	}
+	gate.refs++
+	legacyCallGates.Unlock()
+
+	return gate, func() {
+		legacyCallGates.Lock()
+		defer legacyCallGates.Unlock()
+		gate.refs--
+		if gate.refs != 0 {
+			return
+		}
+		if comparable {
+			delete(legacyCallGates.byProvider, sp)
+		} else {
+			legacyCallGates.nonComparable = nil
+		}
+	}
+}
+
+// CallLegacyProviderContext bounds both the caller wait and the number of
+// uncancellable legacy calls that may remain in flight for one provider. The
+// returned boolean reports that the context expired after call started;
+// mutation callers use it to distinguish an unknown outcome from cancellation
+// while waiting for a slot.
+func CallLegacyProviderContext[T any](ctx context.Context, sp Provider, call func() (T, error)) (T, bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Done() == nil {
+		value, err := call()
+		return value, false, err
+	}
+	if err := ctx.Err(); err != nil {
+		var zero T
+		return zero, false, err
+	}
+	gate, releaseGate := retainLegacyCallGate(sp)
+	select {
+	case gate.slots <- struct{}{}:
+	case <-ctx.Done():
+		releaseGate()
+		var zero T
+		return zero, false, ctx.Err()
+	}
+	result := make(chan contextResult[T], 1)
+	go func() {
+		defer func() {
+			<-gate.slots
+			releaseGate()
+		}()
+		value, err := call()
+		result <- contextResult[T]{value: value, err: err}
+	}()
+	select {
+	case result := <-result:
+		return result.value, false, result.err
+	case <-ctx.Done():
+		var zero T
+		return zero, true, ctx.Err()
+	}
+}
+
+// GetMetaContext bounds a legacy provider metadata lookup.
+func GetMetaContext(ctx context.Context, sp Provider, name, key string) (string, error) {
+	value, _, err := CallLegacyProviderContext(ctx, sp, func() (string, error) { return sp.GetMeta(name, key) })
+	return value, err
+}
+
+// IsAttachedContext bounds a legacy provider attachment lookup.
+func IsAttachedContext(ctx context.Context, sp Provider, name string) (bool, error) {
+	value, _, err := CallLegacyProviderContext(ctx, sp, func() (bool, error) { return sp.IsAttached(name), nil })
+	return value, err
+}
+
+// GetLastActivityContext bounds a legacy provider activity lookup.
+func GetLastActivityContext(ctx context.Context, sp Provider, name string) (time.Time, error) {
+	value, _, err := CallLegacyProviderContext(ctx, sp, func() (time.Time, error) { return sp.GetLastActivity(name) })
+	return value, err
+}
+
+// IsRunningContext bounds a provider running-state lookup. Context-aware
+// providers receive the caller's context directly; legacy providers are
+// isolated behind a buffered result so a stuck lookup cannot block its caller.
+func IsRunningContext(ctx context.Context, sp Provider, name string) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if rp, ok := sp.(ContextRunningProvider); ok {
+		return rp.IsRunningContext(ctx, name)
+	}
+	value, _, err := CallLegacyProviderContext(ctx, sp, func() (bool, error) { return sp.IsRunning(name), nil })
+	return value, err
+}
+
+// NudgeContext uses a provider's context-aware implementation when available.
+// Legacy providers retain their existing synchronous behavior.
+func NudgeContext(ctx context.Context, sp Provider, name string, content []ContentBlock) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if np, ok := sp.(ContextNudgeProvider); ok {
+		return np.NudgeContext(ctx, name, content)
+	}
+	_, outcomeUnknown, err := CallLegacyProviderContext(ctx, sp, func() (struct{}, error) {
+		return struct{}{}, sp.Nudge(name, content)
+	})
+	if outcomeUnknown {
+		return fmt.Errorf("%w: %w", ErrNudgeOutcomeUnknown, ctx.Err())
+	}
+	return err
 }
 
 // PendingInteraction describes a blocking interaction raised by a session.

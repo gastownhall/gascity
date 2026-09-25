@@ -1785,6 +1785,283 @@ func TestCityRuntimeTickReturnsBeforeDemandWhenCanceled(t *testing.T) {
 	}
 }
 
+// TestCityRuntimeTickRunsNudgeDispatchFallbackDuringStretchSkip reproduces
+// the patrol-tick nudge-dispatch fallback being starved by session-phase
+// stretching: the fallback's own doc comment (nudgeDispatchTick) promises
+// delivery "at the end of each patrol tick" as a belt-and-suspenders backstop
+// for a missed wake signal, but it used to run only from inside
+// beadReconcileTick, itself only reached when runSessionPhases is true. On a
+// patrol tick inside the stretch window (session-event stream flowing,
+// [daemon].session_patrol_interval longer than patrol_interval),
+// runSessionPhases is false and the fallback never ran at all until the
+// stretch window elapsed -- far slower than patrol_interval. tick() must
+// call it unconditionally instead.
+func TestCityRuntimeTickRunsNudgeDispatchFallbackDuringStretchSkip(t *testing.T) {
+	pump, cancelPump := streamingPump(t)
+	defer cancelPump()
+
+	nudgeCtx, cancelNudge := context.WithCancel(context.Background())
+	defer cancelNudge()
+	dispatcher := newNudgeEventDispatcher(nudgeCtx, t.TempDir(), io.Discard, "test")
+	dispatcher.mu.Lock()
+	dispatcher.eventCapable = true
+	dispatcher.cfg = &config.City{}
+	dispatcher.sp = runtime.NewFake()
+	dispatcher.mu.Unlock()
+
+	store := beads.NewMemStore()
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: t.TempDir(),
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Daemon: config.DaemonConfig{
+				PatrolInterval:        "30s",
+				SessionPatrolInterval: "10m",
+			},
+		},
+		sp:                  runtime.NewFake(),
+		sessionEvents:       pump,
+		nudgeEvents:         dispatcher,
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		t.Fatal("session-management phases must not run inside the stretch window")
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	now := time.Now()
+	cr.sessionPhasesLast = now // just ran: the next patrol tick falls inside the stretch window
+
+	if cr.sessionPhasesDue("patrol", false, now.Add(time.Minute)) {
+		t.Fatal("precondition failed: patrol tick should fall inside the stretch window")
+	}
+
+	// The full pass triggered by kickAll() runs asynchronously on the
+	// dispatcher's own worker goroutine and clears fullPassDue the instant
+	// it wakes, so that flag cannot be polled reliably. Observe the pass
+	// itself instead, through the same package-level seam the raw
+	// session-store regression tests use.
+	var runPasses atomic.Int32
+	origOpenRaw := openRawCityStoreForSessionResolution
+	openRawCityStoreForSessionResolution = func(path string) (beads.Store, error) {
+		runPasses.Add(1)
+		return origOpenRaw(path)
+	}
+	t.Cleanup(func() { openRawCityStoreForSessionResolution = origOpenRaw })
+
+	ctx := context.Background()
+	var dirty atomic.Bool
+	var lastProviderName string
+	var prevPoolRunning map[string]bool
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for runPasses.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("tick() did not run the nudge-dispatch patrol fallback during a stretch-skip patrol tick")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+type partialEventCoverageProvider struct{ *runtime.Fake }
+
+func (*partialEventCoverageProvider) SessionEventStreamCovers(name string) bool {
+	return name != "remote-session"
+}
+
+func (*partialEventCoverageProvider) SessionEventMatches(name, eventName string) bool {
+	return name == eventName
+}
+
+func TestSessionPhaseStretchRequiresCoverageForEveryOpenSession(t *testing.T) {
+	pump, cancel := streamingPump(t)
+	defer cancel()
+	store := beads.NewMemStore()
+	if _, err := sessionpkg.NewStore(beads.SessionStore{Store: store}).CreateSession(sessionpkg.CreateSpec{
+		Title: "worker", AgentName: "worker", Metadata: map[string]string{
+			"session_name": "remote-session", "state": string(sessionpkg.StateActive), "template": "worker",
+		},
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	cr := &CityRuntime{
+		cfg: &config.City{Daemon: config.DaemonConfig{PatrolInterval: "30s", SessionPatrolInterval: "10m"}},
+		sp:  &partialEventCoverageProvider{Fake: runtime.NewFake()}, sessionEvents: pump,
+		standaloneCityStore: store, stderr: io.Discard,
+	}
+	if cr.sessionPhaseStretchActive() {
+		t.Fatal("stretch active even though an open session is routed outside the forwarded event stream")
+	}
+}
+
+// TestCityRuntimeTickReadsDirtyExactlyOnce pins the fix for a TOCTOU window
+// found during ship-gate review of gc-2q8ohg: tick() used to decide
+// runSessionPhases from an early dirty.Load() peek, run reconcilePoolDeaths
+// gated on that decision, and only THEN read dirty.Swap(false) for the
+// reload gate — correcting runSessionPhases afterward if a change had
+// landed in between, but too late to un-skip a death scan that had already
+// run (or been skipped) on the stale peek. A config change from the
+// separate watcher goroutine (controller.go) landing inside that window
+// could be treated as configChanged for the reload while the death scan for
+// that same tick believed no change was pending; a live race between the
+// watcher and tick() has no reliable way to force that interleaving from a
+// test, so this pins the structural invariant instead, the way this package
+// already pins call sites (TestGCNonTestFilesStayOnWorkerBoundary,
+// TestCityRuntimeWiresSessionEventPumpCallSites): tick's body must call
+// dirty.Load()/dirty.Swap() exactly once. Two reads (one Load, one Swap, or
+// two Swaps) reopen the window even if both happen to agree in this test's
+// single-threaded call — the defect is that a second read exists at all,
+// not any particular observed value from it.
+func TestCityRuntimeTickReadsDirtyExactlyOnce(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "city_runtime.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse city_runtime.go: %v", err)
+	}
+
+	var tickFn *ast.FuncDecl
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name == nil || fn.Name.Name != "tick" || fn.Recv == nil {
+			return true
+		}
+		tickFn = fn
+		return false
+	})
+	if tickFn == nil {
+		t.Fatal("could not find func (cr *CityRuntime) tick in city_runtime.go")
+	}
+
+	reads := 0
+	ast.Inspect(tickFn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel == nil {
+			return true
+		}
+		if sel.Sel.Name != "Load" && sel.Sel.Name != "Swap" {
+			return true
+		}
+		recv, ok := sel.X.(*ast.Ident)
+		if !ok || recv.Name != "dirty" {
+			return true
+		}
+		reads++
+		return true
+	})
+	if reads != 1 {
+		t.Fatalf("tick() calls dirty.Load()/dirty.Swap() %d time(s), want exactly 1: a second read reopens the TOCTOU window between the session-phase gate and the reload gate", reads)
+	}
+}
+
+// TestCityRuntimeTickDirtyRestoreDefersBeforePoolDeathScan pins a second
+// ordering invariant found during ship-gate review of gc-2q8ohg: tick()
+// clears dirty via Swap(false) and then calls reconcilePoolDeaths before any
+// defer exists to restore dirty on an incomplete tick. If the defer that
+// calls dirty.Store(true) is registered only after reconcilePoolDeaths
+// returns, a panic inside reconcilePoolDeaths permanently drops the pending
+// config change: dirty was already cleared by the earlier Swap, and the
+// restoring defer was never reached, so it never runs during the panic's
+// unwind. This pins that the dirty.Store(true) restoration defer is
+// registered (its statement appears, textually, earlier in tick's body)
+// before the call to reconcilePoolDeaths, the way this package already pins
+// other structural orderings (TestCityRuntimeTickReadsDirtyExactlyOnce).
+func TestCityRuntimeTickDirtyRestoreDefersBeforePoolDeathScan(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "city_runtime.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse city_runtime.go: %v", err)
+	}
+
+	var tickFn *ast.FuncDecl
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name == nil || fn.Name.Name != "tick" || fn.Recv == nil {
+			return true
+		}
+		tickFn = fn
+		return false
+	})
+	if tickFn == nil {
+		t.Fatal("could not find func (cr *CityRuntime) tick in city_runtime.go")
+	}
+
+	isDirtyStoreCall := func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return false
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel == nil || sel.Sel.Name != "Store" {
+			return false
+		}
+		recv, ok := sel.X.(*ast.Ident)
+		return ok && recv.Name == "dirty"
+	}
+
+	var restoreDeferPos token.Pos
+	ast.Inspect(tickFn.Body, func(n ast.Node) bool {
+		if restoreDeferPos != token.NoPos {
+			return false
+		}
+		deferStmt, ok := n.(*ast.DeferStmt)
+		if !ok {
+			return true
+		}
+		lit, ok := deferStmt.Call.Fun.(*ast.FuncLit)
+		if !ok {
+			return true
+		}
+		found := false
+		ast.Inspect(lit.Body, func(inner ast.Node) bool {
+			if isDirtyStoreCall(inner) {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			restoreDeferPos = deferStmt.Pos()
+			return false
+		}
+		return true
+	})
+	if restoreDeferPos == token.NoPos {
+		t.Fatal("no defer statement calling dirty.Store(...) found in tick()")
+	}
+
+	var poolDeathScanPos token.Pos
+	ast.Inspect(tickFn.Body, func(n ast.Node) bool {
+		if poolDeathScanPos != token.NoPos {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel == nil || sel.Sel.Name != "reconcilePoolDeaths" {
+			return true
+		}
+		poolDeathScanPos = call.Pos()
+		return false
+	})
+	if poolDeathScanPos == token.NoPos {
+		t.Fatal("no call to reconcilePoolDeaths found in tick()")
+	}
+
+	if restoreDeferPos >= poolDeathScanPos {
+		t.Fatalf("the dirty.Store(...) restoration defer is registered at or after the reconcilePoolDeaths call: a panic inside reconcilePoolDeaths would permanently drop a pending config change instead of being restored on unwind")
+	}
+}
+
 func TestCityRuntimeTickReturnsBeforeDemandWhenCanceledDuringOrderDispatch(t *testing.T) {
 	store := beads.NewMemStore()
 	ctx, cancel := context.WithCancel(context.Background())

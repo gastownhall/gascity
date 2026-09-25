@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -209,8 +210,11 @@ type CityRuntime struct {
 	reloadReqCh         chan reloadRequest           // receives structured reload requests from controller.sock
 	pokeCh              chan struct{}                // non-blocking signal to trigger immediate reconciler tick
 	sessionEvents       *sessionEventPump            // provider event stream → pokeCh bridge; wired by run()
+	sessionPhasesLast   time.Time                    // last tick that ran the session phases (reconciler goroutine only)
 	controlDispatcherCh chan struct{}                // non-blocking signal for control-dispatcher-only reconcile
 	nudgeWakeCh         chan struct{}                // signal to dispatch queued nudges; fed by wake socket listener
+	nudgeWakeListener   net.Listener                 // wake socket listener, once started; nil until ensureNudgeWakeListener claims ownership
+	nudgeEvents         *nudgeEventDispatcher        // provider idle events → queued-nudge delivery; wired by run()
 	reloadMu            sync.Mutex                   // guards activeReload
 	activeReload        *reloadRequest
 	onStarted           func()
@@ -815,17 +819,33 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// Bridge the provider's push session-event stream (if it has one) into
+	// queued-nudge delivery: an idle event delivers waiting nudges within
+	// seconds via the provider's verified delivery, and the sidecar poller
+	// class retires for such providers. Config reload re-points the
+	// dispatcher when it swaps the provider.
+	cr.nudgeEvents = newNudgeEventDispatcher(ctx, cr.cityPath, cr.stderr, cr.logPrefix)
+	cr.nudgeEvents.update(cr.sp, cr.cfg, true)
+
 	// Start the supervisor nudge dispatcher when configured. The wake-socket
 	// listener feeds nudgeWakeCh on every producer enqueue, giving sub-second
 	// dispatch latency. Patrol-tick fallback inside cr.tick() guarantees
 	// eventual delivery if the wake is missed (socket race, listener
-	// restart). Legacy mode skips the listener entirely; per-session
-	// pollers continue to own delivery.
-	if nudgeDispatcherIsSupervisor(cr.cfg) && cr.cityPath != "" {
-		if _, err := startNudgeWakeListener(ctx, cr.cityPath, cr.nudgeWakeCh, cr.stderr, cr.logPrefix); err != nil {
-			fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v (falling back to patrol-only delivery)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
-		}
-	}
+	// restart). Event-capable providers get the listener in BOTH dispatcher
+	// modes — their sidecar spawn is suppressed, so the event dispatcher
+	// (kicked by this listener and by idle events) owns queued delivery.
+	// Legacy mode on polled providers skips the listener entirely;
+	// per-session pollers continue to own delivery.
+	//
+	// ensureNudgeWakeListener re-evaluates this gate on every config reload
+	// too (see reloadConfigTraced), because a reload can flip either half of
+	// it: daemon.nudge_dispatcher can switch to "supervisor", or the
+	// provider can swap to/from one that implements SessionEventProvider.
+	// Without a re-check here, a city that started legacy-mode-on-tmux and
+	// later reloaded onto an event-capable provider would have queued
+	// nudges routed to a dispatcher that owns delivery but is never woken
+	// except by the patrol-tick fallback.
+	cr.ensureNudgeWakeListener(ctx)
 
 	// Bridge the provider's push session-event stream (if it has one) into
 	// pokeCh: a session death pokes the reconciler within seconds instead of
@@ -876,8 +896,17 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			// Patrol scans every reconciler state authoritatively, so any
-			// pending event-driven fires are redundant — drop them.
-			pokeDB.cancelPending()
+			// pending event-driven fires are redundant — drop them. But
+			// that's only true when this patrol tick will actually run the
+			// session-management phases: sessionPhasesDue can skip them on a
+			// stretched patrol (see sessionPhasesDue), and a poke dropped
+			// here on such a tick would never be handled at all — the tick
+			// that "made it redundant" didn't do the work it preempted.
+			// Control-dispatcher fires are unaffected by stretching, so they
+			// still cancel unconditionally.
+			if cr.sessionPhasesDue("patrol", dirty.Load(), time.Now()) {
+				pokeDB.cancelPending()
+			}
 			ctrlDB.cancelPending()
 			runTick("patrol")
 		case <-cr.pokeCh:
@@ -1112,6 +1141,58 @@ func (cr *CityRuntime) reconcilePoolDeaths(prevPoolRunning *map[string]bool) {
 	}
 }
 
+// sessionPhasesDue reports whether this tick must run the session-management
+// phases (pool death detection, corpse sweeps, demand/desired state, bead
+// reconcile). Always true except on patrol ticks in stretched mode: with
+// [daemon].session_patrol_interval longer than patrol_interval and the
+// provider's session-event stream live, patrol-driven session scans run at
+// the stretched cadence — event pokes carry the real-time work and the
+// patrol scan is the safety net. A pending config change always runs the
+// phases (a reload must reconcile fully).
+//
+// Pure: it does not stamp sessionPhasesLast. A tick that finds this due can
+// still abort before the phases actually run (e.g. the filesystem-pressure
+// gate, or a canceled context mid-phase); stamping here regardless of
+// whether the phases completed would make a later patrol believe the
+// safety-net scan already ran for the stretched interval when it never did,
+// and skip corpse cleanup/reconciliation it still owes. The caller stamps
+// sessionPhasesLast only after the phases run to completion.
+func (cr *CityRuntime) sessionPhasesDue(trigger string, configPending bool, now time.Time) bool {
+	return trigger != "patrol" || configPending || !cr.sessionPhaseStretchActive() ||
+		!now.Before(cr.sessionPhasesLast.Add(cr.cfg.Daemon.SessionPatrolIntervalDuration()))
+}
+
+// sessionPhaseStretchActive reports whether the stretched session-phase
+// patrol is in effect: configured longer than the patrol interval AND the
+// session-event stream has actually delivered an event (flowing, not merely
+// streaming). A provider can return a subscribed channel while it is still
+// connecting or unreachable behind it (herdr retries forever with capped
+// backoff); gating on streaming() alone would silently treat an unreachable
+// provider as equivalent to a healthy one and stretch patrol regardless.
+// Without confirmed event flow the stretch is ignored so session liveness
+// never degrades below the patrol cadence.
+func (cr *CityRuntime) sessionPhaseStretchActive() bool {
+	stretch := cr.cfg.Daemon.SessionPatrolIntervalDuration()
+	if stretch <= cr.cfg.Daemon.PatrolIntervalDuration() ||
+		cr.sessionEvents == nil || !cr.sessionEvents.flowing() {
+		return false
+	}
+	router, routed := cr.sp.(runtime.SessionEventRouteProvider)
+	if !routed {
+		return true
+	}
+	snapshot := cr.loadSessionBeadSnapshot()
+	if snapshot == nil {
+		return false
+	}
+	for _, info := range snapshot.OpenInfos() {
+		if !router.SessionEventStreamCovers(info.SessionName) {
+			return false
+		}
+	}
+	return true
+}
+
 // tick performs one reconciliation tick: pool death detection, config
 // reload (if dirty), agent reconciliation, wisp GC, and order
 // dispatch.
@@ -1144,16 +1225,47 @@ func (cr *CityRuntime) tick(
 			trace.end(completion, traceRecordPayload{"phase": "tick", "trigger": traceTrigger})
 		}
 	}()
-	// Detect pool instance deaths since last tick. Ordered ahead of the config
-	// reload so it compares against the config the deaths happened under.
-	cr.reconcilePoolDeaths(prevPoolRunning)
+	// configChanged is read once, here, via the only Swap(false) in this
+	// tick. dirty is written from a separate watcher goroutine
+	// (controller.go), so a second, later Load()/Swap() could observe a
+	// different value than this one: reconcilePoolDeaths and the reload
+	// gate below must act on the SAME observation of "did a config change
+	// land for this tick", or a change landing between two reads of dirty
+	// can be treated as configChanged for the reload while runSessionPhases
+	// was computed as false, silently skipping the death scan for the tick
+	// that believes it just reconciled everything.
+	configChanged := dirty.Swap(false)
+	tickCompleted := false
+	// Register the dirty-restoration guard before reconcilePoolDeaths runs
+	// below: a panic inside that call would otherwise leave configChanged's
+	// Swap(false) permanently applied, since the later defer that also
+	// restores dirty is not registered until after reconcilePoolDeaths
+	// returns and only recovers panics that occur once control reaches it.
+	if configChanged {
+		defer func() {
+			if !tickCompleted {
+				dirty.Store(true)
+			}
+		}()
+	}
+	// Stretched session-phase patrol: when the provider streams session
+	// events, patrol-driven session scans may run at a longer cadence
+	// ([daemon].session_patrol_interval) — event pokes carry the real-time
+	// work and the patrol scan is the safety net. Non-patrol triggers and
+	// pending config changes always run the session phases.
+	runSessionPhases := cr.sessionPhasesDue(trigger, configChanged, time.Now())
+	// Detect pool instance deaths since last tick (session phase). Ordered
+	// ahead of the config reload so it compares against the config the
+	// deaths happened under.
+	if runSessionPhases {
+		cr.reconcilePoolDeaths(prevPoolRunning)
+	}
 
 	var manualReload *reloadRequest
 	var manualReply reloadControlReply
 	manualReloadCompleted := false
 	manualReloadReplied := false
 	dirtyCleared := false
-	tickCompleted := false
 	completeManualReload := func() {
 		if manualReload == nil || manualReloadReplied {
 			return
@@ -1179,7 +1291,6 @@ func (cr *CityRuntime) tick(
 		cr.sendReloadReply(manualReload.doneCh, reply)
 		cr.clearActiveReloadIf(manualReload)
 	}()
-	configChanged := dirty.Swap(false)
 	if configChanged {
 		dirtyCleared = true
 		source := reloadSourceWatch
@@ -1273,155 +1384,36 @@ func (cr *CityRuntime) tick(
 	}
 
 	// Session-management phases: snapshot, corpse sweeps, drain finalization,
-	// demand/desired state, bead-driven reconcile.
-	phaseStart = time.Now()
-	sessionBeads := cr.loadSessionBeadSnapshot()
-	recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.initial", phaseStart, traceSessionSnapshotFields(sessionBeads))
-	if trace != nil && sessionBeads != nil {
-		trace.RecordSessionBaseline("", "", traceRecordPayload{
-			"open_count": len(sessionBeads.OpenInfos()),
-		})
-		_ = trace.flushCurrentBatch(TraceDurabilityDurable)
-	}
-
-	// Session bead sync BEFORE reconciliation (one-tick state lag; see run()).
-	// Post-reconcile sync was intentionally removed: the daemon's next tick
-	// corrects bead state, and the pre-reconcile sync is sufficient for
-	// the reconciler to read/write hashes during reconciliation.
-	// Reap open session beads whose tmux session is dead before loading demand
-	// so stale names cannot block desired-state computation (#742).
-	phaseStart = time.Now()
-	cleanupDeadRuntimeSessionCorpses(cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr)
-	recordPhase(TraceSiteControllerTickPhase, "cleanup_dead_runtime_session_corpses", phaseStart, nil)
-	// Reap live runtimes still bound to a closed bead (e.g. a named-session
-	// identity re-minted as a pool slot) so the name's current owner can rebind
-	// it and attach lands on the right runtime.
-	phaseStart = time.Now()
-	reapRuntimesBoundToClosedBeads(cr.sessionsBeadStore().Store, sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
-	recordPhase(TraceSiteControllerTickPhase, "reap_runtimes_bound_to_closed_beads", phaseStart, nil)
-	phaseStart = time.Now()
-	swept := sweepProcessTableOrphans(cr.sp, sessionBeads, cr.sessionsBeadStore().Store, cr.cityPath, cr.stderr)
-	if swept > 0 {
-		fmt.Fprintf(cr.stderr, "session reconciler: swept %d process-table orphan runtime(s)\n", swept) //nolint:errcheck
-	}
-	recordPhase(TraceSiteControllerTickPhase, "sweep_process_table_orphans", phaseStart, map[string]any{"reaped": swept})
-	phaseStart = time.Now()
-	reaped := reapStaleSessionBeads(cr.sessionsBeadStore().Store, cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr)
-	recordPhase(TraceSiteControllerTickPhase, "reap_stale_session_beads", phaseStart, map[string]any{"reaped": reaped})
-	if reaped > 0 {
-		phaseStart = time.Now()
-		sessionBeads = cr.loadSessionBeadSnapshot()
-		recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_reap", phaseStart, traceSessionSnapshotFields(sessionBeads))
-	}
-	reapEnabled := cr.cfg.Daemon.AutoReapClosedBeadWorktreesEnabled()
-	reapDryRun := cr.cfg.Daemon.AutoReapClosedBeadWorktreesDryRunEnabled()
-	if reapEnabled || reapDryRun {
-		phaseStart = time.Now()
-		// Cross-check the liveness gate against the current open-session set in
-		// addition to the authoritative /proc cwd scan. Real removal supersedes
-		// dry-run when both flags are set.
-		liveSessionDirs := liveSessionWorktreeDirs(sessionBeads)
-		report := reapClosedBeadWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), liveSessionDirs, !reapEnabled, cr.rec, cr.reapSkips, cr.stderr)
-		recordPhase(TraceSiteControllerTickPhase, "reap_closed_bead_worktrees", phaseStart, map[string]any{
-			"reaped":    len(report.Reaped),
-			"protected": len(report.Protected),
-			"dry_run":   !reapEnabled,
-		})
-		// Agent-home worktree cleanup performs real removals, so it runs only
-		// when real reaping is enabled — never under dry-run.
-		if reapEnabled {
-			phaseStart = time.Now()
-			agentHomesReset := cleanupClosedBeadAgentHomeWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), cr.stderr)
-			recordPhase(TraceSiteControllerTickPhase, "cleanup_agent_home_worktrees", phaseStart, map[string]any{"reset": agentHomesReset})
+	// demand/desired state, bead-driven reconcile. Skipped on patrol ticks
+	// inside the stretched session-patrol window (see sessionPhasesDue) —
+	// event pokes re-run them on demand. sessionPhasesLast is stamped only
+	// once the phases actually run to completion (not on the abort path
+	// within), so a tick that finds them due but aborts mid-phase (context
+	// canceled) does not fool the next patrol into skipping a scan that
+	// never happened.
+	if runSessionPhases {
+		if !cr.runSessionManagementPhases(ctx, trace, recordPhase, trigger, configChanged, manualReload, manualReloadCompleted, &manualReply) {
+			return
 		}
+		cr.sessionPhasesLast = time.Now()
+	} else {
+		recordPhase(TraceSiteControllerTickPhase, "session_phases.stretch_skip", time.Now(), map[string]any{
+			"session_patrol_interval": cr.cfg.Daemon.SessionPatrolInterval,
+		})
 	}
-	if ctx.Err() != nil {
-		return
-	}
+	// Patrol-tick fallback for the supervisor nudge dispatcher: ensures
+	// queued items get delivered even if the wake socket missed the enqueue
+	// (process race during supervisor restart, listener crash). Called
+	// unconditionally, outside the runSessionPhases gate above: that gate
+	// stretches to session_patrol_interval when the provider streams
+	// session events, which would otherwise starve this belt-and-suspenders
+	// fallback to the same slow cadence instead of the fast patrol_interval
+	// nudgeDispatchTick's own doc comment promises. beadReconcileTick no
+	// longer calls it, to avoid a redundant double-dispatch on ticks where
+	// session phases do run.
 	phaseStart = time.Now()
-	finalizedDrainAckStops := 0
-	if sessionBeads != nil {
-		finalizedDrainAckStops = finalizeDrainAckStopPendingSessions(
-			cr.cityPath,
-			cr.cfg,
-			cr.sp,
-			cr.sessionsBeadStore(),
-			cr.rigBeadStores(),
-			sessionBeads.OpenInfos(),
-			cr.dops,
-			cr.sessionDrains,
-			&cr.asyncStops,
-			clock.Real{},
-			cr.rec,
-			cr.stderr,
-		)
-	}
-	recordPhase(TraceSiteControllerTickPhase, "finalize_drain_ack_stop_pending", phaseStart, map[string]any{
-		"finalized": finalizedDrainAckStops,
-	})
-	if finalizedDrainAckStops > 0 {
-		phaseStart = time.Now()
-		sessionBeads = cr.loadSessionBeadSnapshot()
-		recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_drain_ack_stop_pending", phaseStart, traceSessionSnapshotFields(sessionBeads))
-	}
-	if ctx.Err() != nil {
-		return
-	}
-	phaseStart = time.Now()
-	demand := cr.loadDemandSnapshot(sessionBeads, trace, trigger, configChanged)
-	recordPhase(TraceSiteDemandSnapshot, "load_demand_snapshot", phaseStart, map[string]any{
-		"config_changed": configChanged,
-		"trigger":        trigger,
-	})
-	result := demand.result
-	phaseStart = time.Now()
-	sessionBeads = cr.loadSessionBeadSnapshot()
-	recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_demand", phaseStart, traceSessionSnapshotFields(sessionBeads))
-	phaseStart = time.Now()
-	result = cr.refreshDesiredState(result, sessionBeads)
-	recordPhase(TraceSiteDesiredStateBuild, "refresh_desired_state.before_sync", phaseStart, traceDesiredStateFields(result))
-	phaseStart = time.Now()
-	_ = cr.syncBeadsAndUpdateIndex(result.State, sessionBeads, recordPhase)
-	recordPhase(TraceSiteSessionSync, "sync_beads_and_update_index", phaseStart, traceDesiredStateFields(result))
-	// Reload snapshot after sync so the reconciler sees metadata written
-	// by syncBeadsAndUpdateIndex (e.g., configured_named_session/mode
-	// stamped on adopted beads). The CachingStore has the updated data
-	// from SetMetadataBatch write-through.
-	phaseStart = time.Now()
-	sessionBeads = cr.loadSessionBeadSnapshot()
-	recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_sync", phaseStart, traceSessionSnapshotFields(sessionBeads))
-	// Re-point external-message bindings at respawned sessions (and clear
-	// bindings whose session is gone) now that replacement beads are visible.
-	phaseStart = time.Now()
-	reapStaleExtmsgBindings(ctx, cr.sessionsBeadStore(), time.Now(), cr.stderr)
-	recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_bindings", phaseStart, nil)
-	// Re-point group participants at respawned sessions and carry their
-	// group-owned transcript membership; the participant side has no read-time
-	// membership overlay, so this backstop is what converges binding-less
-	// participants the binding reaper never sees.
-	phaseStart = time.Now()
-	reapStaleExtmsgParticipants(ctx, cr.sessionsBeadStore(), cr.stderr)
-	recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_participants", phaseStart, nil)
-	phaseStart = time.Now()
-	result = cr.refreshDesiredState(result, sessionBeads)
-	recordPhase(TraceSiteDesiredStateBuild, "refresh_desired_state.after_sync", phaseStart, traceDesiredStateFields(result))
-
-	if manualReload != nil && manualReload.soft && manualReloadCompleted &&
-		(manualReply.Outcome == reloadOutcomeApplied || manualReply.Outcome == reloadOutcomeNoChange) {
-		phaseStart = time.Now()
-		cr.applySoftReloadAcceptance(&manualReply, result.State, sessionBeads)
-		recordPhase(TraceSiteConfigReload, "apply_soft_reload_acceptance", phaseStart, nil)
-		phaseStart = time.Now()
-		sessionBeads = cr.loadSessionBeadSnapshot()
-		recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_soft_reload", phaseStart, traceSessionSnapshotFields(sessionBeads))
-	}
-
-	// Bead-driven reconciliation (requires bead store / drain tracker).
-	if cr.sessionDrains != nil {
-		phaseStart = time.Now()
-		cr.beadReconcileTick(ctx, result, sessionBeads, trace, false)
-		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile_tick", phaseStart, traceDesiredStateFields(result))
-	}
+	cr.nudgeDispatchTick(ctx)
+	recordPhase(TraceSiteControllerTickPhase, "nudge_dispatch_patrol_fallback", phaseStart, nil)
 	// Graph stores intentionally do not emit bead.closed, so a step closed
 	// between the durable write and the best-effort journal append would be a
 	// permanent lifecycle gap. The tick repairs only the roots the journal named
@@ -1493,6 +1485,224 @@ func (cr *CityRuntime) tick(
 	completeManualReload()
 	completion = TraceCompletionCompleted
 	tickCompleted = true
+}
+
+// runSessionManagementPhases runs the session-management phases: snapshot,
+// corpse sweeps, drain finalization, demand/desired state, bead-driven
+// reconcile. Extracted from tick() as a pure refactor (no behavior change).
+//
+// It reports completed=false on a canceled context, exactly mirroring the
+// two `if ctx.Err() != nil { return }` early-outs the block had inline in
+// tick() before extraction. The caller must treat completed=false as "abort
+// the tick immediately", the same as the original inline `return` did — it
+// must NOT stamp sessionPhasesLast and must NOT run any subsequent tick
+// phases.
+func (cr *CityRuntime) runSessionManagementPhases(
+	ctx context.Context,
+	trace *sessionReconcilerTraceCycle,
+	recordPhase func(site TraceSiteCode, name string, start time.Time, fields map[string]any),
+	trigger string,
+	configChanged bool,
+	manualReload *reloadRequest,
+	manualReloadCompleted bool,
+	manualReply *reloadControlReply,
+) (completed bool) {
+	phaseStart := time.Now()
+	sessionBeads := cr.loadSessionBeadSnapshot()
+	recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.initial", phaseStart, traceSessionSnapshotFields(sessionBeads))
+	if trace != nil && sessionBeads != nil {
+		trace.RecordSessionBaseline("", "", traceRecordPayload{
+			"open_count": len(sessionBeads.OpenInfos()),
+		})
+		_ = trace.flushCurrentBatch(TraceDurabilityDurable)
+	}
+
+	// Session bead sync BEFORE reconciliation (one-tick state lag; see run()).
+	// Post-reconcile sync was intentionally removed: the daemon's next tick
+	// corrects bead state, and the pre-reconcile sync is sufficient for
+	// the reconciler to read/write hashes during reconciliation.
+	// Reap open session beads whose tmux session is dead before loading demand
+	// so stale names cannot block desired-state computation (#742).
+	phaseStart = time.Now()
+	cleanupDeadRuntimeSessionCorpses(cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr)
+	recordPhase(TraceSiteControllerTickPhase, "cleanup_dead_runtime_session_corpses", phaseStart, nil)
+	// Reap live runtimes still bound to a closed bead (e.g. a named-session
+	// identity re-minted as a pool slot) so the name's current owner can rebind
+	// it and attach lands on the right runtime.
+	phaseStart = time.Now()
+	reapRuntimesBoundToClosedBeads(cr.sessionsBeadStore().Store, sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
+	recordPhase(TraceSiteControllerTickPhase, "reap_runtimes_bound_to_closed_beads", phaseStart, nil)
+	phaseStart = time.Now()
+	swept := sweepProcessTableOrphans(cr.sp, sessionBeads, cr.sessionsBeadStore().Store, cr.cityPath, cr.stderr)
+	if swept > 0 {
+		fmt.Fprintf(cr.stderr, "session reconciler: swept %d process-table orphan runtime(s)\n", swept) //nolint:errcheck
+	}
+	recordPhase(TraceSiteControllerTickPhase, "sweep_process_table_orphans", phaseStart, map[string]any{"reaped": swept})
+	phaseStart = time.Now()
+	reaped := reapStaleSessionBeads(cr.sessionsBeadStore().Store, cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr)
+	recordPhase(TraceSiteControllerTickPhase, "reap_stale_session_beads", phaseStart, map[string]any{"reaped": reaped})
+	if reaped > 0 {
+		phaseStart = time.Now()
+		sessionBeads = cr.loadSessionBeadSnapshot()
+		recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_reap", phaseStart, traceSessionSnapshotFields(sessionBeads))
+	}
+	reapEnabled := cr.cfg.Daemon.AutoReapClosedBeadWorktreesEnabled()
+	reapDryRun := cr.cfg.Daemon.AutoReapClosedBeadWorktreesDryRunEnabled()
+	if reapEnabled || reapDryRun {
+		phaseStart = time.Now()
+		// Cross-check the liveness gate against the current open-session set in
+		// addition to the authoritative /proc cwd scan. Real removal supersedes
+		// dry-run when both flags are set.
+		liveSessionDirs := liveSessionWorktreeDirs(sessionBeads)
+		report := reapClosedBeadWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), liveSessionDirs, !reapEnabled, cr.rec, cr.reapSkips, cr.stderr)
+		recordPhase(TraceSiteControllerTickPhase, "reap_closed_bead_worktrees", phaseStart, map[string]any{
+			"reaped":    len(report.Reaped),
+			"protected": len(report.Protected),
+			"dry_run":   !reapEnabled,
+		})
+		// Agent-home worktree cleanup performs real removals, so it runs only
+		// when real reaping is enabled — never under dry-run.
+		if reapEnabled {
+			phaseStart = time.Now()
+			agentHomesReset := cleanupClosedBeadAgentHomeWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), cr.stderr)
+			recordPhase(TraceSiteControllerTickPhase, "cleanup_agent_home_worktrees", phaseStart, map[string]any{"reset": agentHomesReset})
+		}
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	phaseStart = time.Now()
+	finalizedDrainAckStops := 0
+	if sessionBeads != nil {
+		finalizedDrainAckStops = finalizeDrainAckStopPendingSessions(
+			cr.cityPath,
+			cr.cfg,
+			cr.sp,
+			cr.sessionsBeadStore(),
+			cr.rigBeadStores(),
+			sessionBeads.OpenInfos(),
+			cr.dops,
+			cr.sessionDrains,
+			&cr.asyncStops,
+			clock.Real{},
+			cr.rec,
+			cr.stderr,
+		)
+	}
+	recordPhase(TraceSiteControllerTickPhase, "finalize_drain_ack_stop_pending", phaseStart, map[string]any{
+		"finalized": finalizedDrainAckStops,
+	})
+	if finalizedDrainAckStops > 0 {
+		phaseStart = time.Now()
+		sessionBeads = cr.loadSessionBeadSnapshot()
+		recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_drain_ack_stop_pending", phaseStart, traceSessionSnapshotFields(sessionBeads))
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	phaseStart = time.Now()
+	demand := cr.loadDemandSnapshot(sessionBeads, trace, trigger, configChanged)
+	recordPhase(TraceSiteDemandSnapshot, "load_demand_snapshot", phaseStart, map[string]any{
+		"config_changed": configChanged,
+		"trigger":        trigger,
+	})
+	result := demand.result
+	phaseStart = time.Now()
+	sessionBeads = cr.loadSessionBeadSnapshot()
+	recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_demand", phaseStart, traceSessionSnapshotFields(sessionBeads))
+	phaseStart = time.Now()
+	result = cr.refreshDesiredState(result, sessionBeads)
+	recordPhase(TraceSiteDesiredStateBuild, "refresh_desired_state.before_sync", phaseStart, traceDesiredStateFields(result))
+	phaseStart = time.Now()
+	_ = cr.syncBeadsAndUpdateIndex(result.State, sessionBeads, recordPhase)
+	recordPhase(TraceSiteSessionSync, "sync_beads_and_update_index", phaseStart, traceDesiredStateFields(result))
+	// Reload snapshot after sync so the reconciler sees metadata written
+	// by syncBeadsAndUpdateIndex (e.g., configured_named_session/mode
+	// stamped on adopted beads). The CachingStore has the updated data
+	// from SetMetadataBatch write-through.
+	phaseStart = time.Now()
+	sessionBeads = cr.loadSessionBeadSnapshot()
+	recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_sync", phaseStart, traceSessionSnapshotFields(sessionBeads))
+	// Re-point external-message bindings at respawned sessions (and clear
+	// bindings whose session is gone) now that replacement beads are visible.
+	phaseStart = time.Now()
+	reapStaleExtmsgBindings(ctx, cr.sessionsBeadStore(), time.Now(), cr.stderr)
+	recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_bindings", phaseStart, nil)
+	// Re-point group participants at respawned sessions and carry their
+	// group-owned transcript membership; the participant side has no read-time
+	// membership overlay, so this backstop is what converges binding-less
+	// participants the binding reaper never sees.
+	phaseStart = time.Now()
+	reapStaleExtmsgParticipants(ctx, cr.sessionsBeadStore(), cr.stderr)
+	recordPhase(TraceSiteControllerTickPhase, "reap_stale_extmsg_participants", phaseStart, nil)
+	phaseStart = time.Now()
+	result = cr.refreshDesiredState(result, sessionBeads)
+	recordPhase(TraceSiteDesiredStateBuild, "refresh_desired_state.after_sync", phaseStart, traceDesiredStateFields(result))
+
+	if manualReload != nil && manualReload.soft && manualReloadCompleted &&
+		(manualReply.Outcome == reloadOutcomeApplied || manualReply.Outcome == reloadOutcomeNoChange) {
+		phaseStart = time.Now()
+		cr.applySoftReloadAcceptance(manualReply, result.State, sessionBeads)
+		recordPhase(TraceSiteConfigReload, "apply_soft_reload_acceptance", phaseStart, nil)
+		phaseStart = time.Now()
+		sessionBeads = cr.loadSessionBeadSnapshot()
+		recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_soft_reload", phaseStart, traceSessionSnapshotFields(sessionBeads))
+	}
+
+	// Bead-driven reconciliation (requires bead store / drain tracker).
+	if cr.sessionDrains != nil {
+		phaseStart = time.Now()
+		cr.beadReconcileTick(ctx, result, sessionBeads, trace, false)
+		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile_tick", phaseStart, traceDesiredStateFields(result))
+	}
+	return true
+}
+
+// ensureNudgeWakeListener starts the supervisor nudge wake-socket listener
+// if it is not already running and the current provider/config now satisfy
+// its activation gate, and tears it down if a later reload no longer
+// satisfies the gate. It is idempotent (safe to call on every reload) and
+// callers serialize it: startup (run()) and reload (reloadConfigTraced)
+// both execute on the reconciler goroutine, so no lock is needed around the
+// cr.nudgeWakeListener nil-check.
+//
+// The listener's presence is also read cross-process:
+// nudgequeue.DispatcherIsHosting dials the socket to decide whether a
+// deferred submit's fallback sidecar poller is redundant (see
+// internal/session/submit.go's enqueueDeferredSubmitLocked). Leaving a stale
+// listener answering after a reload drops back to legacy dispatch on a
+// non-event provider — the gate this function itself uses to decide whether
+// anything still drains the queue — would make that check a false positive:
+// the socket answers, the fallback poller is suppressed, and neither
+// nudgeDispatchTick's event-dispatcher path nor its supervisor path picks up
+// the work (both require the gate this function checks), so the queued item
+// has no deliverer at all. A dial that finds nothing listening is a safe,
+// documented false negative (harmless duplicate contender); a listener that
+// outlives its gate is not. So the gate is re-checked on every call, in both
+// directions.
+func (cr *CityRuntime) ensureNudgeWakeListener(ctx context.Context) {
+	if cr.cityPath == "" {
+		return
+	}
+	gateOpen := cr.nudgeEvents != nil && (nudgeDispatcherIsSupervisor(cr.cfg) || cr.nudgeEvents.active())
+	if cr.nudgeWakeListener != nil {
+		if !gateOpen {
+			if err := cr.nudgeWakeListener.Close(); err != nil {
+				fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: closing wake listener: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+			}
+			cr.nudgeWakeListener = nil
+		}
+		return
+	}
+	if !gateOpen {
+		return
+	}
+	lis, err := startNudgeWakeListener(ctx, cr.cityPath, cr.nudgeWakeCh, cr.stderr, cr.logPrefix)
+	if err != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v (falling back to patrol-only delivery)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	cr.nudgeWakeListener = lis
 }
 
 func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
@@ -2271,6 +2481,14 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if providerChanged && cr.sessionEvents != nil {
 		cr.sessionEvents.restart(nextSp)
 	}
+	if cr.nudgeEvents != nil {
+		cr.nudgeEvents.update(nextSp, nextCfg, providerChanged)
+		// Re-check wake-listener ownership after the dispatcher has observed
+		// the new provider/config: a reload can newly satisfy the gate
+		// (supervisor mode enabled, or the provider swapped to one that
+		// implements SessionEventProvider) with no listener yet running.
+		cr.ensureNudgeWakeListener(ctx)
+	}
 
 	if cr.cs != nil {
 		cr.cs.updateFromRuntime(nextCfg, nextSp, result.Revision)
@@ -2772,17 +2990,16 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	}
 	phaseStart = time.Now()
 	if err == nil {
-		if nudgeErr := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, sessionpkg.NewStore(sessStore), cr.nudgesBeadStore(), time.Now(), dispatchSessionBeads); nudgeErr != nil {
+		if nudgeErr := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, sessionpkg.NewStore(sessStore), cr.nudgesBeadStore(), cr.sp, time.Now(), dispatchSessionBeads); nudgeErr != nil {
 			fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, nudgeErr) //nolint:errcheck
 		}
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.dispatch_wait_nudges", phaseStart, traceSessionSnapshotFields(dispatchSessionBeads))
-	// Patrol-tick fallback for the supervisor nudge dispatcher: ensures
-	// queued items get delivered even if the wake socket missed the
-	// enqueue (process race during supervisor restart, listener crash).
-	phaseStart = time.Now()
-	cr.nudgeDispatchTick(ctx)
-	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_dispatch_tick", phaseStart, nil)
+	// The patrol-tick fallback for the supervisor nudge dispatcher used to run
+	// here, but that nested it inside the stretchable session-phase gate
+	// (sessionPhasesDue), starving it to session_patrol_interval instead of
+	// patrol_interval. tick() now calls cr.nudgeDispatchTick(ctx) directly,
+	// unconditionally, once per patrol tick.
 
 	// Idle recovery: re-nudge pool slots that are running but never claimed
 	// either their assigned/ready-routed trigger bead or the one ready graph-v2
@@ -2798,7 +3015,9 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// trigger bead still being open (the instant a pool slot claims, the bead
 	// flips to in_progress and stops matching), persists its bounded
 	// observe→nudge→backoff state on the session bead, and never spams a tick.
-	// See nudgeStalledPoolClaims for the full invariant.
+	// See nudgeStalledPoolClaims for the full invariant. (The warm-bind edge
+	// nudge in startPreparedStartCandidate remains the fast path for on-demand
+	// binds; this backstop is the slow rescue behind it.)
 	phaseStart = time.Now()
 	// The idle-claim nudge lane reads idle-claim marker keys that session.Info
 	// does not project, so it needs raw beads. Now that the snapshot no longer
@@ -3403,6 +3622,17 @@ func parseRFC3339Metadata(v string) (time.Time, bool) {
 // at the end of each patrol tick so a missed wake doesn't strand a queue
 // item past the patrol interval.
 func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
+	// Event-capable providers route every pass through the nudge event
+	// dispatcher's worker: a delivery blocks for seconds (idle wait,
+	// paste+submit confirm), which must not stall the reconciler loop, and
+	// the single worker serializes supervisor-side deliveries. This runs in
+	// BOTH nudge_dispatcher modes — with the sidecar spawn suppressed for
+	// event-capable providers, it is the delivery engine for legacy-mode
+	// cities too.
+	if cr.nudgeEvents != nil && cr.nudgeEvents.active() {
+		cr.nudgeEvents.kickAll()
+		return
+	}
 	if !nudgeDispatcherIsSupervisor(cr.cfg) {
 		return
 	}
@@ -4182,6 +4412,20 @@ func (cr *CityRuntime) shutdown() {
 				fmt.Fprintf(cr.stderr, "%s: closing the storage binding: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			}
 		}()
+		// The nudge-event worker shares run()'s ctx and only checks
+		// cancellation between passes, not mid-runPass; it reads the same
+		// city store cr.storageRoutes.close() (deferred above, so it runs
+		// after this func returns) tears down. Wait for it to actually stop
+		// before that close can race an in-flight delivery attempt. Bounded:
+		// a wedged worker (e.g. a hung provider dial) must not stall
+		// shutdown indefinitely.
+		if cr.nudgeEvents != nil {
+			select {
+			case <-cr.nudgeEvents.workerDone:
+			case <-time.After(5 * time.Second):
+				fmt.Fprintf(cr.stderr, "%s: nudge event dispatcher worker did not stop within 5s; closing storage anyway\n", cr.logPrefix) //nolint:errcheck // best-effort stderr
+			}
+		}
 		asyncStartsDrained := cr.waitForAsyncStarts()
 		cr.waitForAsyncStops()
 		preserveSessions := cr.preserveSessionsShutdown.Load()

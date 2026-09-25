@@ -577,8 +577,18 @@ func (p *Provider) Interrupt(name string) error {
 // exited agent whose pane idles at a shell prompt is NOT running, so
 // restarts still happen.
 func (p *Provider) IsRunning(name string) bool {
-	_, running, err := resolveBinding(p.lookupOps(context.Background(), name))
-	return err == nil && running
+	running, _ := p.IsRunningContext(context.Background(), name)
+	return running
+}
+
+// IsRunningContext reports whether the session is running while allowing the
+// caller to cancel the provider lookups used to resolve its binding.
+func (p *Provider) IsRunningContext(ctx context.Context, name string) (bool, error) {
+	_, running, err := resolveBinding(p.lookupOps(ctx, name))
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, ctxErr
+	}
+	return err == nil && running, nil
 }
 
 // IsAttached reports false: herdr 0.7.1 exposes no clean attach-state query.
@@ -775,10 +785,16 @@ func processTreeAlive(shellPID int, fg []proc, processNames []string, sessionID 
 // unchanged for the non-observer call sites (doctor) and the caffeinate-wrapper
 // case; processNames is unused here because herdr's status supersedes it.
 func (p *Provider) ObserveLiveness(name string, _ []string) runtime.Liveness {
+	obs, _ := p.ObserveLivenessWithErrorContext(context.Background(), name, nil)
+	return obs
+}
+
+// ObserveLivenessWithErrorContext reports liveness using caller-cancellable
+// registry and pane-binding lookups.
+func (p *Provider) ObserveLivenessWithErrorContext(ctx context.Context, name string, _ []string) (runtime.Liveness, error) {
 	if strings.TrimSpace(name) == "" {
-		return runtime.Liveness{}
+		return runtime.Liveness{}, nil
 	}
-	ctx := context.Background()
 	info, present, err := p.c.getAgent(ctx, herdrAgentName(name))
 	if err == nil && !present {
 		// Name absent — fall back to the bound pane before declaring the
@@ -790,10 +806,13 @@ func (p *Provider) ObserveLiveness(name string, _ []string) runtime.Liveness {
 		// clears the stale binding; a transport failure clears nothing and
 		// falls through to not-running (as a failed name query already does).
 		if _, running, perr := resolveBinding(p.lookupOps(ctx, name)); perr == nil && running {
-			return runtime.Liveness{Running: true, Alive: true}
+			return runtime.Liveness{Running: true, Alive: true}, nil
 		}
 	}
-	return livenessFromAgent(info, present, err)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return runtime.Liveness{}, ctxErr
+	}
+	return livenessFromAgent(info, present, err), nil
 }
 
 // livenessFromAgent folds a herdr `agent get` result into a Liveness verdict.
@@ -827,12 +846,26 @@ func agentAliveFromStatus(status string) bool {
 
 // Nudge injects and submits text into a running agent's input.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	ctx := context.Background()
+	return p.NudgeContext(context.Background(), name, content)
+}
+
+// NudgeContext injects and submits text, aborting provider IO when ctx ends.
+func (p *Provider) NudgeContext(ctx context.Context, name string, content []runtime.ContentBlock) error {
 	pid, err := p.paneID(ctx, name)
 	if err != nil || pid == "" {
 		return runtime.ErrSessionNotFound
 	}
 	return p.c.deliverNudge(ctx, pid, runtime.FlattenText(content))
+}
+
+// SessionEventStreamCovers reports that herdr's stream covers every session
+// routed directly to this provider.
+func (p *Provider) SessionEventStreamCovers(string) bool { return true }
+
+// SessionEventMatches maps herdr's constrained registry name to the exact Gas
+// City session identity persisted in the session bead.
+func (p *Provider) SessionEventMatches(name, eventName string) bool {
+	return name == eventName || herdrAgentName(name) == eventName
 }
 
 // Peek reads the current rendered screen ("visible") — the liveness/fingerprint

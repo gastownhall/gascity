@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -478,6 +479,86 @@ func TestSubmitFollowUpQueuesDeferredMessageAndStartsCodexPoller(t *testing.T) {
 	}
 }
 
+// sessionEventedFake makes runtime.Fake event-capable so tests can assert the
+// deferred-submit path suppresses its sidecar poller for such providers.
+type sessionEventedFake struct{ *runtime.Fake }
+
+func (f sessionEventedFake) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
+	ch := make(chan runtime.SessionEvent)
+	go func() {
+		<-ctx.Done()
+		close(ch)
+	}()
+	return ch, nil
+}
+
+func TestSubmitFollowUpStartsPollerForEventCapableProviderWithoutDispatcher(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := sessionEventedFake{Fake: runtime.NewFake()}
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	var pollerCalls int
+	origPoller := startSessionSubmitPoller
+	startSessionSubmitPoller = func(_, _, _ string) error {
+		pollerCalls++
+		return nil
+	}
+	defer func() { startSessionSubmitPoller = origPoller }()
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "follow up later", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp)
+	if err != nil {
+		t.Fatalf("Submit(follow_up): %v", err)
+	}
+	if !outcome.Queued {
+		t.Fatal("Submit(follow_up) should report queued")
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 1 {
+		t.Fatalf("pending queued submits = %d, want 1 (the item must still queue; only the sidecar is suppressed)", len(state.Pending))
+	}
+	if pollerCalls != 1 {
+		t.Fatalf("pollerCalls = %d, want 1: provider capability does not prove a supervisor dispatcher is hosting", pollerCalls)
+	}
+}
+
+func TestSubmitFollowUpSkipsPollerWhenDispatcherIsHosting(t *testing.T) {
+	store := beads.NewMemStore()
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, sessionEventedFake{Fake: runtime.NewFake()}, WithCityPath(cityPath))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	origHosting := deferredSubmitDispatcherIsHosting
+	deferredSubmitDispatcherIsHosting = func(path string) bool { return path == cityPath }
+	t.Cleanup(func() { deferredSubmitDispatcherIsHosting = origHosting })
+	origPoller := startSessionSubmitPoller
+	pollerCalls := 0
+	startSessionSubmitPoller = func(_, _, _ string) error { pollerCalls++; return nil }
+	t.Cleanup(func() { startSessionSubmitPoller = origPoller })
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "follow up later", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp)
+	if err != nil {
+		t.Fatalf("Submit(follow_up): %v", err)
+	}
+	if !outcome.Queued {
+		t.Fatal("Submit(follow_up) should report queued")
+	}
+	if pollerCalls != 0 {
+		t.Fatalf("pollerCalls = %d, want 0 with a live dispatcher", pollerCalls)
+	}
+}
+
 func TestEnsureSessionSubmitPollerRejectsGoTestExecutable(t *testing.T) {
 	cityPath := t.TempDir()
 	exe := filepath.Join(t.TempDir(), "session.test")
@@ -504,6 +585,9 @@ func TestEnsureSessionSubmitPollerRejectsGoTestExecutable(t *testing.T) {
 }
 
 func TestExistingSessionSubmitPollerPIDRejectsUnrelatedLivePID(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("poller ownership check uses /proc on linux")
+	}
 	cityPath := t.TempDir()
 	pidPath := sessionSubmitPollerPIDPath(cityPath, "s-test", "session-id")
 	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
@@ -523,6 +607,9 @@ func TestExistingSessionSubmitPollerPIDRejectsUnrelatedLivePID(t *testing.T) {
 }
 
 func TestExistingSessionSubmitPollerPIDAcceptsMatchingCitySession(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("poller ownership check uses /proc on linux")
+	}
 	cityPath := filepath.Join(t.TempDir(), "city with spaces")
 	sessionName := "s-test"
 	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName, "session-id")
@@ -544,6 +631,9 @@ func TestExistingSessionSubmitPollerPIDAcceptsMatchingCitySession(t *testing.T) 
 }
 
 func TestExistingSessionSubmitPollerPIDRejectsDifferentCitySameSession(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("poller ownership check uses /proc on linux")
+	}
 	cityPath := t.TempDir()
 	otherCityPath := t.TempDir()
 	sessionName := "s-test"
@@ -566,6 +656,9 @@ func TestExistingSessionSubmitPollerPIDRejectsDifferentCitySameSession(t *testin
 }
 
 func TestExistingSessionSubmitPollerPIDRejectsDifferentTargetSameCitySession(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("poller ownership check uses /proc on linux")
+	}
 	cityPath := t.TempDir()
 	sessionName := "s-test"
 	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName, "session-id")

@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -159,6 +160,21 @@ func (f *Factory) SessionByHandle(id string) (Handle, error) {
 	return f.sessionFromRecord(info, pr)
 }
 
+// SessionByHandleContext rebuilds a session-backed worker handle while
+// bounding the live runtime overlay with ctx.
+func (f *Factory) SessionByHandleContext(ctx context.Context, id string) (Handle, error) {
+	front := f.manager.PersistedStore()
+	info, pr, err := front.GetPersistedResponse(id)
+	if err != nil {
+		return nil, bridgeSessionRecordError(id, err)
+	}
+	if info.Type == "" {
+		front.RepairTypeBestEffort(id)
+		info.Type = sessionpkg.BeadType
+	}
+	return f.SessionByRecordContext(ctx, info, pr)
+}
+
 // SessionByRecord builds a session-backed worker handle from an already-resolved
 // session record (Info + PersistedResponse), avoiding a redundant store.Get for
 // callers that just resolved it (e.g. via session.ResolveSessionRecordByExactID).
@@ -174,6 +190,16 @@ func (f *Factory) SessionByHandle(id string) (Handle, error) {
 // typed envelope for exactly this.
 func (f *Factory) SessionByRecord(info sessionpkg.Info, pr sessionpkg.PersistedResponse) (Handle, error) {
 	return f.sessionFromRecord(f.manager.EnrichInfo(info), pr)
+}
+
+// SessionByRecordContext builds a session-backed worker handle while bounding
+// the live runtime overlay with ctx.
+func (f *Factory) SessionByRecordContext(ctx context.Context, info sessionpkg.Info, pr sessionpkg.PersistedResponse) (Handle, error) {
+	enriched, err := f.manager.EnrichInfoContext(ctx, info)
+	if err != nil {
+		return nil, err
+	}
+	return f.sessionFromRecord(enriched, pr)
 }
 
 func (f *Factory) sessionFromRecord(info sessionpkg.Info, pr sessionpkg.PersistedResponse) (Handle, error) {

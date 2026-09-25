@@ -14,6 +14,25 @@ import (
 
 var _ runtime.Provider = (*Provider)(nil)
 
+type autoEventProvider struct{ *runtime.Fake }
+
+func (p *autoEventProvider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
+	ch := make(chan runtime.SessionEvent)
+	go func() { <-ctx.Done(); close(ch) }()
+	return ch, nil
+}
+
+func TestSessionEventStreamCoversOnlyForwardedBackend(t *testing.T) {
+	p := New(&autoEventProvider{Fake: runtime.NewFake()}, runtime.NewFake())
+	p.RouteACP("remote")
+	if !p.SessionEventStreamCovers("local") {
+		t.Fatal("default-routed session is not covered by the forwarded default stream")
+	}
+	if p.SessionEventStreamCovers("remote") {
+		t.Fatal("ACP-routed session reported covered by the default-only stream")
+	}
+}
+
 // Relaunch must reach the routed backend (default vs ACP), or the reconciler's
 // RelaunchProvider type-assert would be masked by the auto router and fall back
 // to Stop+Start.

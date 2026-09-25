@@ -1966,19 +1966,28 @@ func (m *Manager) Get(id string) (Info, error) {
 // ObserveRuntimeForInfo reports live provider state for a session whose Info
 // has already been loaded by the caller, avoiding a redundant store fetch.
 func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) (RuntimeObservation, error) {
+	return m.ObserveRuntimeForInfoContext(context.Background(), info, processNames)
+}
+
+// ObserveRuntimeForInfoContext reports live provider state with caller cancellation.
+func (m *Manager) ObserveRuntimeForInfoContext(ctx context.Context, info Info, processNames []string) (RuntimeObservation, error) {
 	obs := RuntimeObservation{SessionName: info.SessionName}
 	if strings.TrimSpace(info.SessionName) == "" || m.sp == nil {
 		return obs, nil
 	}
-	liveness, err := runtime.ObserveLivenessWithError(m.sp, info.SessionName, processNames)
+	liveness, err := runtime.ObserveLivenessWithErrorContext(ctx, m.sp, info.SessionName, processNames)
 	if err != nil {
 		return RuntimeObservation{}, err
 	}
 	obs.Running = liveness.Running
 	obs.Alive = liveness.Alive
 	if obs.Running {
-		obs.Attached = m.sp.IsAttached(info.SessionName)
-		lastActive, err := m.sp.GetLastActivity(info.SessionName)
+		attached, err := runtime.IsAttachedContext(ctx, m.sp, info.SessionName)
+		if err != nil {
+			return RuntimeObservation{}, err
+		}
+		obs.Attached = attached
+		lastActive, err := runtime.GetLastActivityContext(ctx, m.sp, info.SessionName)
 		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
 			return RuntimeObservation{}, fmt.Errorf("observe last activity for %q: %w", info.SessionName, err)
 		}
@@ -2063,6 +2072,15 @@ func (m *Manager) EnrichInfo(info Info) Info {
 	}
 
 	return info
+}
+
+// EnrichInfoContext applies the live runtime overlay without allowing a
+// legacy provider call to extend the caller's wait past ctx.
+func (m *Manager) EnrichInfoContext(ctx context.Context, info Info) (Info, error) {
+	enriched, _, err := runtime.CallLegacyProviderContext(ctx, m.sp, func() (Info, error) {
+		return m.EnrichInfo(info), nil
+	})
+	return enriched, err
 }
 
 // EnrichInfos applies EnrichInfo to each element in place and returns the same

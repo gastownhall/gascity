@@ -64,3 +64,11 @@ func TestHerdrAgentNameLongNamesStayDistinctAndStable(t *testing.T) {
 		t.Error("mapping is not deterministic")
 	}
 }
+
+func TestProviderSessionEventMatchesMappedRegistryName(t *testing.T) {
+	p := &Provider{}
+	name := "GunnInternships--gastown__refinery"
+	if !p.SessionEventMatches(name, herdrAgentName(name)) {
+		t.Fatal("mapped herdr registry name did not match its Gas City session")
+	}
+}

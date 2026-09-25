@@ -262,7 +262,12 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 		err = fmt.Errorf("nudge text is required")
 		return NudgeResult{}, err
 	}
-	if !h.provider.IsRunning(h.sessionName) {
+	running, runningErr := runtime.IsRunningContext(ctx, h.provider, h.sessionName)
+	if runningErr != nil {
+		err = runningErr
+		return NudgeResult{}, err
+	}
+	if !running {
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
 			result = NudgeResult{Delivered: false}
 			return result, nil
@@ -273,7 +278,7 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 	}
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault:
-		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
+		if err := runtime.NudgeContext(ctx, h.provider, h.sessionName, runtime.TextContent(req.Text)); err != nil {
 			return NudgeResult{}, err
 		}
 		result = NudgeResult{Delivered: true}
@@ -360,8 +365,8 @@ func (h *RuntimeHandle) PendingStatus(ctx context.Context) (*PendingInteraction,
 
 // LiveObservation reports runtime presence metadata for a legacy runtime-only
 // worker target.
-func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, error) {
-	liveness, err := runtime.ObserveLivenessWithError(h.provider, h.sessionName, h.processNames)
+func (h *RuntimeHandle) LiveObservation(ctx context.Context) (LiveObservation, error) {
+	liveness, err := runtime.ObserveLivenessWithErrorContext(ctx, h.provider, h.sessionName, h.processNames)
 	if err != nil {
 		return LiveObservation{}, err
 	}
@@ -370,17 +375,28 @@ func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, err
 		Alive:       liveness.Alive,
 		SessionName: h.sessionName,
 	}
-	if suspended, err := h.provider.GetMeta(h.sessionName, "suspended"); err == nil && strings.TrimSpace(suspended) == "true" {
+	if suspended, err := runtime.GetMetaContext(ctx, h.provider, h.sessionName, "suspended"); errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return LiveObservation{}, err
+	} else if strings.TrimSpace(suspended) == "true" {
 		obs.Suspended = true
 	}
-	if sessionID, err := h.provider.GetMeta(h.sessionName, "GC_SESSION_ID"); err == nil {
-		obs.RuntimeSessionID = strings.TrimSpace(sessionID)
+	sessionID, err := runtime.GetMetaContext(ctx, h.provider, h.sessionName, "GC_SESSION_ID")
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return LiveObservation{}, err
 	}
+	obs.RuntimeSessionID = strings.TrimSpace(sessionID)
 	if obs.Running {
-		obs.Attached = h.provider.IsAttached(h.sessionName)
-		last, err := h.provider.GetLastActivity(h.sessionName)
+		attached, err := runtime.IsAttachedContext(ctx, h.provider, h.sessionName)
+		if err != nil {
+			return LiveObservation{}, err
+		}
+		obs.Attached = attached
+		last, err := runtime.GetLastActivityContext(ctx, h.provider, h.sessionName)
 		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
 			return LiveObservation{}, fmt.Errorf("observe last activity for %q: %w", h.sessionName, err)
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return LiveObservation{}, err
 		}
 		if err == nil && !last.IsZero() {
 			lastCopy := last

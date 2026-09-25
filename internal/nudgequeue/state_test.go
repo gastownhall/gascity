@@ -1,7 +1,9 @@
 package nudgequeue
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -10,6 +12,43 @@ import (
 
 	"github.com/gastownhall/gascity/internal/clock"
 )
+
+func TestWakeSocketPathLongCityUsesPrivatePerUserDirectory(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), strings.Repeat("long-city-path", 12))
+	want := fmt.Sprintf("gascity-nudge-%d", os.Getuid())
+	if got := filepath.Base(filepath.Dir(WakeSocketPath(cityPath))); got != want {
+		t.Fatalf("fallback wake socket directory = %q, want %q", got, want)
+	}
+}
+
+func TestWakeSocketPathLongCityIsStableAcrossTempDirsAndFitsUnixLimit(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), strings.Repeat("long-city-path", 12))
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), strings.Repeat("long-temp-path", 12)))
+	first := WakeSocketPath(cityPath)
+	t.Setenv("TMPDIR", t.TempDir())
+	second := WakeSocketPath(cityPath)
+
+	if first != second {
+		t.Fatalf("fallback wake socket changed with TMPDIR: %q != %q", first, second)
+	}
+	if len(first) > wakeSocketPathLimit {
+		t.Fatalf("fallback wake socket length = %d, want <= %d: %q", len(first), wakeSocketPathLimit, first)
+	}
+}
+
+func TestEnsurePrivateWakeSocketDirRejectsSymlink(t *testing.T) {
+	realDir := filepath.Join(t.TempDir(), "real")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePrivateWakeSocketDir(link); err == nil {
+		t.Fatal("ensurePrivateWakeSocketDir accepted a symlink")
+	}
+}
 
 // TestWithState_TimesOutInsteadOfBlockingForever guards ga-2kzci3 FR1/FR2:
 // WithState itself -- not just the withStateBounded helper it wraps -- must

@@ -29,6 +29,7 @@ var (
 	_ runtime.LivenessObserver              = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 	_ runtime.SessionEventProvider          = (*Provider)(nil)
+	_ runtime.RoutedContextNudgeProvider    = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -103,9 +104,30 @@ func (p *Provider) ObserveLivenessWithError(name string, processNames []string) 
 	return runtime.ObserveLivenessWithError(p.route(name), name, processNames)
 }
 
+// ObserveLivenessWithErrorContext delegates cancellable observation to the routed backend.
+func (p *Provider) ObserveLivenessWithErrorContext(ctx context.Context, name string, processNames []string) (runtime.Liveness, error) {
+	return runtime.ObserveLivenessWithErrorContext(ctx, p.route(name), name, processNames)
+}
+
 // Nudge delegates to the routed backend.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	return p.route(name).Nudge(name, content)
+}
+
+// NudgeContext delegates cancellation to the routed backend when supported.
+func (p *Provider) NudgeContext(ctx context.Context, name string, content []runtime.ContentBlock) error {
+	return runtime.NudgeContext(ctx, p.route(name), name, content)
+}
+
+// SupportsNudgeContext reports whether the backend routed for name supports
+// cancellation of an in-flight nudge.
+func (p *Provider) SupportsNudgeContext(name string) bool {
+	return runtime.SupportsNudgeContext(p.route(name), name)
+}
+
+// IsRunningContext delegates a cancellable running-state lookup to the routed backend.
+func (p *Provider) IsRunningContext(ctx context.Context, name string) (bool, error) {
+	return runtime.IsRunningContext(ctx, p.route(name), name)
 }
 
 // WaitForIdle delegates to the routed backend when it supports explicit
@@ -283,4 +305,24 @@ func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.S
 	default:
 		return nil, fmt.Errorf("neither local nor remote backend implements SubscribeSessionEvents")
 	}
+}
+
+// SessionEventStreamCovers reports whether the single forwarded stream belongs
+// to the backend that owns name.
+func (p *Provider) SessionEventStreamCovers(name string) bool {
+	_, localEvents := p.local.(runtime.SessionEventProvider)
+	if localEvents {
+		return !p.isRemote(name)
+	}
+	_, remoteEvents := p.remote.(runtime.SessionEventProvider)
+	return remoteEvents && p.isRemote(name)
+}
+
+// SessionEventMatches delegates provider-native name matching to the routed backend.
+func (p *Provider) SessionEventMatches(name, eventName string) bool {
+	routed := p.route(name)
+	if matcher, ok := routed.(runtime.SessionEventRouteProvider); ok {
+		return matcher.SessionEventMatches(name, eventName)
+	}
+	return name == eventName
 }
