@@ -51,10 +51,9 @@ type sessionEventHub struct {
 // closer; closing happens under hub.mu after removal, so no send can race it.
 type sessionEventSub struct {
 	ch chan runtime.SessionEvent
-	// lost is set when an event was dropped and no resync has been queued
-	// since. Guarded by hub.mu.
-	lost bool
-	// wake asks the subscriber goroutine to deliver a resync.
+	// wake asks the subscriber goroutine to deliver a resync. Its one slot
+	// coalesces drops: a drop either finds a wake still pending, whose
+	// resync is sent after it, or queues a new one.
 	wake chan struct{}
 }
 
@@ -86,12 +85,8 @@ func (h *sessionEventHub) serve(ctx context.Context, sub *sessionEventSub) {
 			return
 		case <-sub.wake:
 		}
-		// Clear the loss before queuing its resync: an event dropped from
-		// here on sets lost again and wakes this loop, so every drop is
-		// followed by a resync that is queued after it.
-		h.mu.Lock()
-		sub.lost = false
-		h.mu.Unlock()
+		// An event dropped from here on queues another wake, so every drop
+		// is followed by a resync that is sent after it.
 		select {
 		case sub.ch <- resyncEvent():
 		case <-ctx.Done():
@@ -109,8 +104,10 @@ func (h *sessionEventHub) unsubscribe(sub *sessionEventSub) {
 }
 
 // publish offers ev to every subscriber without blocking. A subscriber with
-// a full channel, or with an undelivered loss, drops ev; the loss is
-// reported by a later resync.
+// a full channel drops ev, and the loss is reported by a later resync. A
+// subscriber with room always receives ev, even while a resync for an
+// earlier loss is still queued: that resync still follows the drop it
+// covers, so delivering ev cannot hide a gap.
 func (h *sessionEventHub) publish(ev runtime.SessionEvent) {
 	if h == nil {
 		return
@@ -118,13 +115,9 @@ func (h *sessionEventHub) publish(ev runtime.SessionEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for sub := range h.subs {
-		if sub.lost {
-			continue
-		}
 		select {
 		case sub.ch <- ev:
 		default:
-			sub.lost = true
 			select {
 			case sub.wake <- struct{}{}:
 			default:

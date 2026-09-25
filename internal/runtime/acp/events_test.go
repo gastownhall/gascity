@@ -3,8 +3,11 @@ package acp
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -217,38 +220,68 @@ func TestSessionEventsCancelClosesStream(t *testing.T) {
 }
 
 func TestSessionEventsSlowSubscriberGetsResyncAfterDrops(t *testing.T) {
-	p := newTestProvider(t)
-	ch := subscribe(t, p)
+	synctest.Test(t, func(t *testing.T) {
+		h := newSessionEventHub()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		ch := h.subscribe(ctx)
 
-	// The subscriber reads nothing while far more events than the buffer
-	// holds are published.
-	const published = 3 * sessionEventBuffer
-	for i := range published {
-		p.events.publish(runtime.SessionEvent{
-			Kind:    runtime.SessionEventAgentStateChanged,
-			Session: fmt.Sprintf("s-%d", i),
-			Time:    time.Now(),
-		})
-	}
+		// The subscriber reads nothing while far more events than the
+		// buffer holds are published.
+		const published = 3 * sessionEventBuffer
+		for i := range published {
+			h.publish(runtime.SessionEvent{
+				Kind:    runtime.SessionEventAgentStateChanged,
+				Session: fmt.Sprintf("s-%d", i),
+				Time:    time.Now(),
+			})
+		}
 
-	expectResync(t, ch)
-	// The buffer held the opening resync plus the first events in order;
-	// the rest were dropped and coalesced into a resync that arrives as soon
-	// as the reader makes room.
-	for i := range sessionEventBuffer - 1 {
-		expectEvent(t, ch, runtime.SessionEventAgentStateChanged, fmt.Sprintf("s-%d", i))
-	}
-	expectResync(t, ch)
+		expectResync(t, ch)
+		// The buffer held the opening resync plus the first events in
+		// order; the rest were dropped and coalesced into a resync that
+		// arrives as soon as the reader makes room.
+		for i := range sessionEventBuffer - 1 {
+			expectEvent(t, ch, runtime.SessionEventAgentStateChanged, fmt.Sprintf("s-%d", i))
+		}
+		expectResync(t, ch)
 
-	// The stream keeps flowing after the loss. A drop that raced the queued
-	// resync may earn one more resync; redundant resyncs are allowed.
-	p.events.publish(runtime.SessionEvent{Kind: runtime.SessionEventAgentIdle, Session: "after", Time: time.Now()})
-	ev := nextEvent(t, ch)
-	for ev.Kind == runtime.SessionEventResync {
-		ev = nextEvent(t, ch)
+		// Let the resync goroutine settle: a drop that raced the first
+		// resync may have queued one more, which is allowed.
+		synctest.Wait()
+		h.publish(runtime.SessionEvent{Kind: runtime.SessionEventAgentIdle, Session: "after", Time: time.Now()})
+		ev := nextEvent(t, ch)
+		for ev.Kind == runtime.SessionEventResync {
+			ev = nextEvent(t, ch)
+		}
+		if ev.Kind != runtime.SessionEventAgentIdle || ev.Session != "after" {
+			t.Fatalf("event after the loss = %s(%q), want agent_idle(\"after\")", ev.Kind, ev.Session)
+		}
+	})
+}
+
+// TestSessionEventHubDeliversWhileResyncPending pins that a subscriber with
+// room receives an event even while the resync for an earlier drop has not
+// been sent yet: the hub drops only under backpressure.
+func TestSessionEventHubDeliversWhileResyncPending(t *testing.T) {
+	h := newSessionEventHub()
+	// No serve goroutine: the pending wake stands for a loss whose resync
+	// has not been queued yet.
+	sub := &sessionEventSub{
+		ch:   make(chan runtime.SessionEvent, sessionEventBuffer),
+		wake: make(chan struct{}, 1),
 	}
-	if ev.Kind != runtime.SessionEventAgentIdle || ev.Session != "after" {
-		t.Fatalf("event after the loss = %s(%q), want agent_idle(\"after\")", ev.Kind, ev.Session)
+	sub.wake <- struct{}{}
+	h.subs[sub] = struct{}{}
+
+	h.publish(runtime.SessionEvent{Kind: runtime.SessionEventAgentIdle, Session: "roomy", Time: time.Now()})
+	select {
+	case ev := <-sub.ch:
+		if ev.Kind != runtime.SessionEventAgentIdle || ev.Session != "roomy" {
+			t.Fatalf("event = %s(%q), want agent_idle(\"roomy\")", ev.Kind, ev.Session)
+		}
+	default:
+		t.Fatal("event dropped although the subscriber had room")
 	}
 }
 
@@ -295,4 +328,109 @@ func TestSessionEventsSurviveProductionWrapping(t *testing.T) {
 		t.Fatalf("auto SubscribeSessionEvents: %v", err)
 	}
 	expectResync(t, routed)
+}
+
+// expectNoEvent fails if an event is already waiting on ch.
+func expectNoEvent(t *testing.T, ch <-chan runtime.SessionEvent) {
+	t.Helper()
+	select {
+	case ev, ok := <-ch:
+		t.Fatalf("unexpected event %s(%q) (open=%v), want none", ev.Kind, ev.Session, ok)
+	default:
+	}
+}
+
+// attachTestSource makes sc publish its events on h as session name.
+func attachTestSource(sc *sessionConn, h *sessionEventHub, name string) {
+	sc.mu.Lock()
+	sc.events = &sessionEventSource{hub: h, session: name, ref: "acp:test"}
+	sc.mu.Unlock()
+}
+
+// TestSessionEventsStopAfterAgentDeathReportsClosedOnce pins Stop's dead
+// path, the normal production path after an agent dies on its own: the
+// reconciler's Stop reports closed exactly once after the exit.
+func TestSessionEventsStopAfterAgentDeathReportsClosedOnce(t *testing.T) {
+	p := newTestProvider(t)
+	name := startFake(t, p, fakeACPExitOnPromptCommand(t))
+	ch := subscribe(t, p)
+	expectResync(t, ch)
+
+	if err := p.Nudge(name, runtime.TextContent("die")); err != nil {
+		t.Fatalf("Nudge: %v", err)
+	}
+	expectEvent(t, ch, runtime.SessionEventAgentStateChanged, name)
+	expectEvent(t, ch, runtime.SessionEventExited, name)
+
+	if err := p.Stop(name); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	expectEvent(t, ch, runtime.SessionEventClosed, name)
+	if err := p.Stop(name); err != nil {
+		t.Fatalf("second Stop: %v", err)
+	}
+	p.events.publish(runtime.SessionEvent{Kind: runtime.SessionEventAgentIdle, Session: "marker", Time: time.Now()})
+	expectEvent(t, ch, runtime.SessionEventAgentIdle, "marker")
+}
+
+// TestSessionEventsClosedWaitsForExited pins that closed never precedes
+// exited: emitClosed publishes nothing until the exit has been reported.
+func TestSessionEventsClosedWaitsForExited(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newSessionEventHub()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		ch := h.subscribe(ctx)
+		expectResync(t, ch)
+
+		sc := newSessionConn(nil, nil, nil, 10, nil)
+		attachTestSource(sc, h, "s")
+		closedDone := make(chan struct{})
+		go func() {
+			sc.emitClosed()
+			close(closedDone)
+		}()
+		synctest.Wait()
+		expectNoEvent(t, ch)
+
+		sc.markExited()
+		<-closedDone
+		expectEvent(t, ch, runtime.SessionEventExited, "s")
+		expectEvent(t, ch, runtime.SessionEventClosed, "s")
+	})
+}
+
+// TestSessionEventsAttachAfterExitReportsExited pins that an agent that
+// exited before Start attached its events still reports exited.
+func TestSessionEventsAttachAfterExitReportsExited(t *testing.T) {
+	p := newTestProvider(t)
+	ch := subscribe(t, p)
+	expectResync(t, ch)
+
+	sc := newSessionConn(&exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}, nil, nil, 10, nil)
+	sc.markExited()
+	expectNoEvent(t, ch)
+
+	p.attachSessionEvents("early", sc)
+	ev := expectEvent(t, ch, runtime.SessionEventExited, "early")
+	if want := fmt.Sprintf("acp:%d", os.Getpid()); ev.Ref != want {
+		t.Fatalf("exited Ref = %q, want %q", ev.Ref, want)
+	}
+}
+
+// TestSessionEventsAbandonedPromptReportsIdle pins that a prompt that never
+// reached the agent still closes its turn with agent_idle: the connection
+// is alive and can take the next turn.
+func TestSessionEventsAbandonedPromptReportsIdle(t *testing.T) {
+	p := newTestProvider(t)
+	ch := subscribe(t, p)
+	expectResync(t, ch)
+
+	name, sc := injectConn(t, p)
+	attachTestSource(sc, p.events, name)
+	if err := p.Nudge(name, runtime.TextContent("hello")); err == nil {
+		t.Fatal("Nudge succeeded over an erroring stdin, want an error")
+	}
+	expectEvent(t, ch, runtime.SessionEventAgentStateChanged, name)
+	expectEvent(t, ch, runtime.SessionEventAgentIdle, name)
 }
