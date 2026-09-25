@@ -108,6 +108,12 @@ func shouldRunOrphanRelease(now, last time.Time, minInterval time.Duration) bool
 	return now.Sub(last) >= minInterval
 }
 
+// orphanReleaseMinInterval is the minimum wall-clock gap beadReconcileTick
+// enforces between release_orphaned_pool_assignments sweeps via
+// shouldRunOrphanRelease. Interim cadence-gate mitigation for ga-57er0d;
+// remove once ga-8uf72n's off-tick convergence lane supersedes it.
+var orphanReleaseMinInterval = 5 * time.Minute
+
 // CityRuntime holds all running state for a single city's reconciliation
 // loop. It encapsulates the per-city lifecycle that was previously spread
 // across runController and controllerLoop. A machine-wide supervisor can
@@ -2527,6 +2533,16 @@ func (cr *CityRuntime) newWarmClaimTriggerResolver(servingRigs map[string]beads.
 	}
 }
 
+// orphanReleaseNow returns the clock reading the orphan-release cadence gate
+// consults: cr.orphanReleaseNowFn if set (deterministic tests), time.Now()
+// otherwise.
+func (cr *CityRuntime) orphanReleaseNow() time.Time {
+	if cr.orphanReleaseNowFn != nil {
+		return cr.orphanReleaseNowFn()
+	}
+	return time.Now()
+}
+
 // beadReconcileTick runs one bead-driven reconciliation pass. bootReconcile is
 // true only for the synchronous pass on the startup path: that pass must flip
 // readiness quickly, so it skips the undesired-pool-session sweep (a heavy
@@ -2583,9 +2599,21 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// arm of this very tick is about to act on (the release-first ordering plus
 	// snapshot staleness otherwise produces the wake/release/retire treadmill).
 	preWakeCandidates, preWakeCandidateRefs := filterAssignedWorkBeadsForSessionWake(cr.cfg, cr.cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
-	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, sessStore, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), recordPhase)
+	var released []releasedPoolAssignment
+	orphanReleaseRan := shouldRunOrphanRelease(cr.orphanReleaseNow(), cr.orphanReleaseLast, orphanReleaseMinInterval)
+	if orphanReleaseRan {
+		released = releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, sessStore, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), recordPhase)
+		// Stamp completion time, not the pre-call time captured above for the
+		// gate check: the sweep itself takes ~328s in production, which already
+		// exceeds orphanReleaseMinInterval (5m). Reusing the pre-call timestamp
+		// here would give the gate no real throttling — elapsed time from a
+		// stale start-time stamp alone already clears the interval on the very
+		// next tick (deploy-gate criterion-2 FAIL on ga-p69yam).
+		cr.orphanReleaseLast = cr.orphanReleaseNow()
+	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments", phaseStart, map[string]any{
 		"released_count": len(released),
+		"cadence_ran":    orphanReleaseRan,
 	})
 	if len(released) > 0 {
 		for _, r := range released {
