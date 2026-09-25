@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // These tests pin the Idempotency-Key wire contract on the session action
@@ -153,31 +155,146 @@ func TestSessionSubmitWithoutKeyDeliversEachRequest(t *testing.T) {
 	}
 }
 
-func TestSessionSubmitSameKeyDifferentSessionsIndependent(t *testing.T) {
+// TestSessionActionSameKeyDifferentSessionsIndependent pins per-target
+// scoping on every session action: one Idempotency-Key used against two
+// sessions must deliver to both, never replay the first session's response.
+func TestSessionActionSameKeyDifferentSessionsIndependent(t *testing.T) {
+	cases := []struct {
+		action string
+		body   string
+		// deliveredOnce reports whether sessionID got exactly one delivery.
+		deliveredOnce func(t *testing.T, fs *fakeState, info session.Info, rec *httptest.ResponseRecorder) bool
+	}{
+		{
+			action: "submit",
+			body:   `{"message":"hello","intent":"follow_up"}`,
+			deliveredOnce: func(t *testing.T, fs *fakeState, info session.Info, rec *httptest.ResponseRecorder) bool {
+				id := decodeAsyncAccepted(t, rec.Body).RequestID
+				if success, failure := waitForSessionSubmitResult(t, fs.eventProv, id); success == nil {
+					t.Fatalf("session submit %s failed: %s: %s", id, failure.ErrorCode, failure.ErrorMessage)
+				}
+				return queuedSubmitCount(t, fs.cityPath, info.ID) == 1
+			},
+		},
+		{
+			action: "messages",
+			body:   `{"message":"hello"}`,
+			deliveredOnce: func(t *testing.T, fs *fakeState, info session.Info, rec *httptest.ResponseRecorder) bool {
+				id := decodeAsyncAccepted(t, rec.Body).RequestID
+				if success, failure := waitForSessionMessageResult(t, fs.eventProv, id); success == nil {
+					t.Fatalf("session message %s failed: %s: %s", id, failure.ErrorCode, failure.ErrorMessage)
+				}
+				return countSessionNudges(fs.sp, info.SessionName, "hello") == 1
+			},
+		},
+		{
+			action: "respond",
+			body:   `{"request_id":"req-1","action":"approve"}`,
+			deliveredOnce: func(t *testing.T, fs *fakeState, info session.Info, rec *httptest.ResponseRecorder) bool {
+				var got struct {
+					ID string `json:"id"`
+				}
+				if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+					t.Fatalf("decode respond body: %v", err)
+				}
+				if got.ID != info.ID {
+					t.Fatalf("respond body id = %q, want %q (replayed another session's response)", got.ID, info.ID)
+				}
+				return countSessionResponds(fs.sp, info.SessionName) == 1
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.action, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			h := newTestCityHandler(t, fs)
+			sessions := []session.Info{
+				createTestSession(t, fs.cityBeadStore, fs.sp, "Session A"),
+				createTestSession(t, fs.cityBeadStore, fs.sp, "Session B"),
+			}
+			if tc.action == "respond" {
+				for _, info := range sessions {
+					fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+						RequestID: "req-1",
+						Kind:      "approval",
+						Prompt:    "approve?",
+					})
+				}
+			}
+			for _, info := range sessions {
+				rec := postSessionAction(t, h, cityURL(fs, "/session/")+info.ID+"/"+tc.action, "shared-key", tc.body)
+				if rec.Code != http.StatusAccepted {
+					t.Fatalf("%s to %s: status = %d, want 202; body = %s", tc.action, info.ID, rec.Code, rec.Body.String())
+				}
+				if !tc.deliveredOnce(t, fs, info, rec) {
+					t.Fatalf("%s to %s: want exactly one delivery; calls = %#v", tc.action, info.ID, fs.sp.SnapshotCalls())
+				}
+			}
+		})
+	}
+}
+
+// TestSessionSubmitIdempotencyIntentIsPartOfBody pins that intent is hashed:
+// reusing a key with a different intent is a different request, not a replay.
+func TestSessionSubmitIdempotencyIntentIsPartOfBody(t *testing.T) {
 	fs := newSessionFakeState(t)
 	h := newTestCityHandler(t, fs)
-	a := createTestSession(t, fs.cityBeadStore, fs.sp, "Submit A")
-	b := createTestSession(t, fs.cityBeadStore, fs.sp, "Submit B")
-	body := `{"message":"hello","intent":"follow_up"}`
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Submit Intent")
+	url := cityURL(fs, "/session/") + info.ID + "/submit"
 
-	var requestIDs []string
-	for _, id := range []string{a.ID, b.ID} {
-		rec := postSessionAction(t, h, cityURL(fs, "/session/")+id+"/submit", "shared-key", body)
-		if rec.Code != http.StatusAccepted {
-			t.Fatalf("submit to %s: status = %d, want 202; body = %s", id, rec.Code, rec.Body.String())
-		}
-		requestIDs = append(requestIDs, decodeAsyncAccepted(t, rec.Body).RequestID)
+	first := postSessionAction(t, h, url, "submit-1", `{"message":"same text","intent":"follow_up"}`)
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first submit: status = %d, want 202; body = %s", first.Code, first.Body.String())
 	}
-	if requestIDs[0] == requestIDs[1] {
-		t.Fatalf("same key on two sessions replayed request_id %q, want independent scopes", requestIDs[0])
+	accepted := decodeAsyncAccepted(t, first.Body)
+
+	mismatch := postSessionAction(t, h, url, "submit-1", `{"message":"same text","intent":"interrupt_now"}`)
+	if mismatch.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("intent-only change: status = %d, want 422; body = %s", mismatch.Code, mismatch.Body.String())
 	}
-	for _, id := range requestIDs {
-		if success, failure := waitForSessionSubmitResult(t, fs.eventProv, id); success == nil {
-			t.Fatalf("session submit %s failed: %s: %s", id, failure.ErrorCode, failure.ErrorMessage)
-		}
+	if success, failure := waitForSessionSubmitResult(t, fs.eventProv, accepted.RequestID); success == nil {
+		t.Fatalf("session submit failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
-	if queuedSubmitCount(t, fs.cityPath, a.ID) != 1 || queuedSubmitCount(t, fs.cityPath, b.ID) != 1 {
-		t.Fatalf("want one queued submit per session")
+}
+
+// TestSessionSubmitAndMessagesKeepSeparateScopes pins that /submit and
+// /messages on the same session do not share a key scope: with no intent the
+// two bodies are identical, so a shared scope would replay submit's 202.
+func TestSessionSubmitAndMessagesKeepSeparateScopes(t *testing.T) {
+	fs := newSessionFakeState(t)
+	h := newTestCityHandler(t, fs)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Submit Then Message")
+	base := cityURL(fs, "/session/") + info.ID
+	body := `{"message":"scoped text"}`
+
+	submit := postSessionAction(t, h, base+"/submit", "shared-key", body)
+	if submit.Code != http.StatusAccepted {
+		t.Fatalf("submit: status = %d, want 202; body = %s", submit.Code, submit.Body.String())
+	}
+	submitID := decodeAsyncAccepted(t, submit.Body).RequestID
+
+	message := postSessionAction(t, h, base+"/messages", "shared-key", body)
+	if message.Code != http.StatusAccepted {
+		t.Fatalf("messages: status = %d, want 202; body = %s", message.Code, message.Body.String())
+	}
+	messageID := decodeAsyncAccepted(t, message.Body).RequestID
+	if submitID == messageID {
+		t.Fatalf("messages replayed submit's request_id %q, want separate scopes", submitID)
+	}
+	if success, failure := waitForSessionSubmitResult(t, fs.eventProv, submitID); success == nil {
+		t.Fatalf("session submit failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	if success, failure := waitForSessionMessageResult(t, fs.eventProv, messageID); success == nil {
+		t.Fatalf("session message failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+}
+
+func TestSessionActionIdempotencyPathEscapesTarget(t *testing.T) {
+	if got, want := sessionActionIdempotencyPath("a/b", "submit"), "/v0/session/a%2Fb/submit"; got != want {
+		t.Fatalf("sessionActionIdempotencyPath = %q, want %q", got, want)
+	}
+	if got, want := sessionActionIdempotencyPath("gc-1", "respond"), "/v0/session/gc-1/respond"; got != want {
+		t.Fatalf("sessionActionIdempotencyPath = %q, want %q", got, want)
 	}
 }
 
@@ -318,5 +435,56 @@ func TestSessionRespondFailureReleasesKey(t *testing.T) {
 	retry := postSessionAction(t, h, url, "respond-1", body)
 	if retry.Code != http.StatusAccepted {
 		t.Fatalf("retry after failure: status = %d, want 202; body = %s", retry.Code, retry.Body.String())
+	}
+}
+
+// blockingRespondProvider holds Respond open until release is closed so a
+// concurrent same-key request observes the in-flight claim.
+type blockingRespondProvider struct {
+	*runtime.Fake
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingRespondProvider) Respond(name string, response runtime.InteractionResponse) error {
+	close(p.entered)
+	<-p.release
+	return p.Fake.Respond(name, response)
+}
+
+func TestSessionRespondInFlightReturnsConflict(t *testing.T) {
+	fs := newSessionFakeState(t)
+	blocking := &blockingRespondProvider{Fake: fs.sp, entered: make(chan struct{}), release: make(chan struct{})}
+	fs.sessionProvider = blocking
+	h := newTestCityHandler(t, fs)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Respond In Flight")
+	fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "req-1",
+		Kind:      "approval",
+		Prompt:    "approve?",
+	})
+	url := cityURL(fs, "/session/") + info.ID + "/respond"
+	body := `{"request_id":"req-1","action":"approve"}`
+
+	firstDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { firstDone <- postSessionAction(t, h, url, "respond-1", body) }()
+	<-blocking.entered
+
+	inFlight := postSessionAction(t, h, url, "respond-1", body)
+	if inFlight.Code != http.StatusConflict || !strings.Contains(inFlight.Body.String(), "idempotency-in-flight") {
+		t.Fatalf("in-flight repeat: status = %d body = %s, want 409 idempotency-in-flight", inFlight.Code, inFlight.Body.String())
+	}
+
+	close(blocking.release)
+	first := <-firstDone
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first respond: status = %d, want 202; body = %s", first.Code, first.Body.String())
+	}
+	replay := postSessionAction(t, h, url, "respond-1", body)
+	if replay.Code != http.StatusAccepted || replay.Body.String() != first.Body.String() {
+		t.Fatalf("replay after completion: status = %d body = %s, want 202 %s", replay.Code, replay.Body.String(), first.Body.String())
+	}
+	if got := countSessionResponds(fs.sp, info.SessionName); got != 1 {
+		t.Fatalf("Respond calls = %d, want 1", got)
 	}
 }
