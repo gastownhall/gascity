@@ -1544,14 +1544,23 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 // s.DepList/s.List (each of which reacquire s.withReadRetry's lock): this
 // method runs INSIDE Ready's withReadRetry closure, so nesting another
 // withReadRetry call would risk a sync.RWMutex RLock reentrancy hazard.
-// GetDependenciesWithMetadata is a base beadslib.Storage method (no
-// capability probe needed, unlike DependencyBatchLister) and returns each
-// blocker's full Issue row — status and metadata together — alongside the
-// edge type in one call per candidate, so no second batched issue fetch is
-// needed the way BdStore's mirror image requires.
+//
+// The read is batched when the storage can batch it: one source-keyed edge
+// read for every candidate (GetDependencyRecordsForIssues) and one issue read
+// for the distinct ready-blocking targets (GetIssuesByIDs), the same two-step
+// shape as BdStore's mirror. Per candidate, GetDependenciesWithMetadata is
+// exactly those two reads for one id, so the batched pair sees the same rows
+// — and a frontier of N candidates costs two storage API calls instead of N
+// (each one a round trip on a served store), which over a network link
+// exhausted the whole read-retry budget every controller tick (#6491). A
+// storage without the batched edge read takes the per-candidate path
+// unchanged.
 func (s *NativeDoltStore) filterReadyByWorkOutcome(ctx context.Context, storage beadslib.Storage, candidates []Bead) ([]Bead, error) {
 	if len(candidates) == 0 {
 		return candidates, nil
+	}
+	if batch, ok := storage.(nativeDependencyRecordsBatchReader); ok {
+		return filterReadyByWorkOutcomeBatched(ctx, batch, storage, candidates)
 	}
 	result := make([]Bead, 0, len(candidates))
 	for _, c := range candidates {
@@ -1580,6 +1589,99 @@ func (s *NativeDoltStore) filterReadyByWorkOutcome(ctx context.Context, storage 
 				blocked = true
 				break
 			}
+		}
+		if !blocked {
+			result = append(result, c)
+		}
+	}
+	return result, nil
+}
+
+// nativeDependencyRecordsBatchReader is the source-keyed batched edge read
+// every Dolt-backed beadslib storage offers (storage.DependencyQueryStore,
+// promoted through the DoltStorage decorator contract) but the base
+// beadslib.Storage does not name, so it is reached by capability probe.
+type nativeDependencyRecordsBatchReader interface {
+	GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*beadslib.Dependency, error)
+}
+
+// filterReadyByWorkOutcomeBatched is filterReadyByWorkOutcome's veto over two
+// batched reads. The RULE is the per-candidate path's: only a ready-blocking
+// edge whose target is closed with gc.work_outcome=blocked removes a
+// candidate, and a target the issue read does not return (the per-candidate
+// read skips it too) is no evidence of blocking. The error contract differs
+// in two ways: only ready-blocking targets are hydrated, so a non-blocking
+// target's row is never read and can never fail; and a storage-level failure
+// of either batched read (the edge read's wisp/permanent partition included)
+// fails the whole filter rather than one candidate's read.
+//
+// The result does not depend on edge order. The batched edge read is sorted
+// by the store and the per-candidate read is not, so a veto that stopped at
+// the first closed-and-blocked target — and parsed a malformed target's
+// metadata only when it sorted before that one — would let the two paths
+// disagree. Every fetched ready-blocking target's metadata is therefore
+// parsed exactly once up front, and a malformed one is reported against the
+// first candidate (in candidate order) that references it, choosing the
+// lowest target id when that candidate references more than one.
+func filterReadyByWorkOutcomeBatched(ctx context.Context, batch nativeDependencyRecordsBatchReader, storage beadslib.Storage, candidates []Bead) ([]Bead, error) {
+	ids := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		ids = append(ids, c.ID)
+	}
+	edges, err := batch.GetDependencyRecordsForIssues(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("checking blocking dependency outcomes: reading dependency edges: %w", err)
+	}
+	var blockerIDs []string
+	seen := make(map[string]bool)
+	for _, id := range ids {
+		for _, dep := range edges[id] {
+			if dep == nil || !IsReadyBlockingDependencyType(string(dep.Type)) || seen[dep.DependsOnID] {
+				continue
+			}
+			seen[dep.DependsOnID] = true
+			blockerIDs = append(blockerIDs, dep.DependsOnID)
+		}
+	}
+	if len(blockerIDs) == 0 {
+		return candidates, nil
+	}
+	blockers, err := storage.GetIssuesByIDs(ctx, blockerIDs)
+	if err != nil {
+		return nil, fmt.Errorf("checking blocking dependency outcomes: fetching blockers: %w", err)
+	}
+	// One parse per fetched target: vetoes records the closed-and-blocked
+	// verdict, malformed records the parse failure for the report below.
+	vetoes := make(map[string]bool, len(blockers))
+	malformed := make(map[string]error)
+	for _, b := range blockers {
+		if b == nil {
+			continue
+		}
+		metadata, err := metadataMapFromNative(b.Metadata)
+		if err != nil {
+			malformed[b.ID] = err
+			continue
+		}
+		vetoes[b.ID] = string(b.Status) == "closed" && metadata[beadmeta.WorkOutcomeMetadataKey] == beadmeta.WorkOutcomeBlocked
+	}
+	result := make([]Bead, 0, len(candidates))
+	for _, c := range candidates {
+		blocked := false
+		badBlocker := ""
+		for _, dep := range edges[c.ID] {
+			if dep == nil || !IsReadyBlockingDependencyType(string(dep.Type)) {
+				continue
+			}
+			if _, bad := malformed[dep.DependsOnID]; bad && (badBlocker == "" || dep.DependsOnID < badBlocker) {
+				badBlocker = dep.DependsOnID
+			}
+			if vetoes[dep.DependsOnID] {
+				blocked = true
+			}
+		}
+		if badBlocker != "" {
+			return nil, fmt.Errorf("checking blocking dependency outcomes for %s: parsing blocker %s metadata: %w", c.ID, badBlocker, malformed[badBlocker])
 		}
 		if !blocked {
 			result = append(result, c)

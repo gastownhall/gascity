@@ -119,6 +119,7 @@ go_test(
         "native_dolt_store_metadata_lost_update_internal_test.go",
         "native_dolt_store_metadata_preserve_test.go",
         "native_dolt_store_parent_namespace_test.go",
+        "native_dolt_store_ready_outcome_test.go",
         "native_dolt_store_ready_projection_internal_test.go",
         "native_dolt_store_ready_statuses_test.go",
         "native_dolt_store_reconnect_test.go",
