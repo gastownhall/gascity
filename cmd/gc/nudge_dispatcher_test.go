@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -557,7 +558,67 @@ func TestMaybeStartNudgePollerSkipsACPSessionInLegacyMode(t *testing.T) {
 	}
 }
 
-func TestMaybeStartNudgePollerSkipsInSupervisorMode(t *testing.T) {
+// TestMaybeStartNudgePollerSkipsInSupervisorModeWhenControllerConfirmsHosting
+// covers the healthy case: a controller is actually up and its identity
+// probe confirms it is hosting the nudge dispatcher, so the per-session
+// poller correctly stays out of the way.
+func TestMaybeStartNudgePollerSkipsInSupervisorModeWhenControllerConfirmsHosting(t *testing.T) {
+	prev := startNudgePoller
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	called := false
+	startNudgePoller = func(_, _, _ string) error {
+		called = true
+		return nil
+	}
+
+	cityPath := t.TempDir()
+	nudgeDispatcherActive := &atomic.Bool{}
+	nudgeDispatcherActive.Store(true)
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, nil, nil, nil, nil, nil, nudgeDispatcherActive)
+	if err != nil {
+		t.Fatalf("startControllerSocket: %v", err)
+	}
+	t.Cleanup(func() { lis.Close() }) //nolint:errcheck
+
+	maybeStartNudgePoller(nudgeTarget{
+		cityPath:    cityPath,
+		sessionName: "worker-session",
+		cfg:         supervisorCfg(),
+	})
+	if called {
+		t.Fatal("startNudgePoller invoked although the controller confirmed it is hosting the supervisor dispatcher")
+	}
+}
+
+// TestMaybeStartNudgePollerFallsOpenWhenSupervisorConfiguredButNoControllerRunning
+// is the #6361 regression: daemon.nudge_dispatcher="supervisor" only states
+// intent. With no controller reachable to confirm it is actually hosting
+// the dispatcher, the per-session poller must still start, or a queued
+// nudge is stranded until a controller comes back.
+func TestMaybeStartNudgePollerFallsOpenWhenSupervisorConfiguredButNoControllerRunning(t *testing.T) {
+	prev := startNudgePoller
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	called := false
+	startNudgePoller = func(_, _, _ string) error {
+		called = true
+		return nil
+	}
+
+	maybeStartNudgePoller(nudgeTarget{
+		cityPath:    t.TempDir(), // no controller socket present
+		sessionName: "worker-session",
+		cfg:         supervisorCfg(),
+	})
+	if !called {
+		t.Fatal("startNudgePoller not invoked although no controller confirmed hosting the supervisor dispatcher; queued nudges would be stranded")
+	}
+}
+
+func TestMaybeStartNudgePollerStartsInLegacyMode(t *testing.T) {
 	prev := startNudgePoller
 	t.Cleanup(func() { startNudgePoller = prev })
 
@@ -570,19 +631,43 @@ func TestMaybeStartNudgePollerSkipsInSupervisorMode(t *testing.T) {
 	maybeStartNudgePoller(nudgeTarget{
 		cityPath:    t.TempDir(),
 		sessionName: "worker-session",
-		cfg:         supervisorCfg(),
-	})
-	if called {
-		t.Fatal("startNudgePoller invoked in supervisor mode; supervisor dispatcher would race with the per-session poller")
-	}
-
-	maybeStartNudgePoller(nudgeTarget{
-		cityPath:    t.TempDir(),
-		sessionName: "worker-session",
 		cfg:         &config.City{},
 	})
 	if !called {
 		t.Fatal("startNudgePoller not invoked in legacy mode")
+	}
+}
+
+// TestNudgeDispatcherOwnsDelivery covers the helper's three decision paths
+// directly: legacy config never probes, supervisor config with no reachable
+// controller fails open, and supervisor config with a controller that
+// confirms hosting suppresses the poller.
+func TestNudgeDispatcherOwnsDelivery(t *testing.T) {
+	if nudgeDispatcherOwnsDelivery(t.TempDir(), &config.City{}) {
+		t.Error("legacy-mode cfg must never own delivery, regardless of controller state")
+	}
+	if nudgeDispatcherOwnsDelivery(t.TempDir(), supervisorCfg()) {
+		t.Error("supervisor-mode cfg with no reachable controller must fail open (not own delivery)")
+	}
+
+	cityPath := t.TempDir()
+	nudgeDispatcherActive := &atomic.Bool{}
+	nudgeDispatcherActive.Store(true)
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, nil, nil, nil, nil, nil, nudgeDispatcherActive)
+	if err != nil {
+		t.Fatalf("startControllerSocket: %v", err)
+	}
+	t.Cleanup(func() { lis.Close() }) //nolint:errcheck
+
+	if !nudgeDispatcherOwnsDelivery(cityPath, supervisorCfg()) {
+		t.Error("supervisor-mode cfg with a controller confirming hosting must own delivery")
+	}
+
+	nudgeDispatcherActive.Store(false)
+	if nudgeDispatcherOwnsDelivery(cityPath, supervisorCfg()) {
+		t.Error("supervisor-mode cfg must not own delivery once the controller reports it is not hosting the dispatcher")
 	}
 }
 

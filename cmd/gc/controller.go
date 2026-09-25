@@ -93,6 +93,13 @@ func (m controllerHostingMode) known() bool {
 type controllerIdentityReply struct {
 	PID         int                   `json:"pid"`
 	HostingMode controllerHostingMode `json:"hosting_mode"`
+	// NudgeDispatcherActive reports whether this controller is currently
+	// hosting the supervisor-mode nudge dispatcher, read live off its own
+	// running config rather than off whatever config a caller loaded from
+	// disk. daemon.nudge_dispatcher="supervisor" only states the intent; a
+	// crashed/not-yet-started controller, or one mid config-reload, can
+	// disagree with it (gascity#6361).
+	NudgeDispatcherActive bool `json:"nudge_dispatcher_active"`
 }
 
 type sessionCircuitResetRequest struct {
@@ -149,6 +156,7 @@ func startControllerSocket(
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
+	nudgeDispatcherActive *atomic.Bool,
 ) (net.Listener, error) {
 	if !hostingMode.known() {
 		return nil, fmt.Errorf("starting controller socket: invalid hosting mode %q", hostingMode)
@@ -169,7 +177,7 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+			go handleControllerConn(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, nudgeDispatcherActive)
 		}
 	}()
 	return lis, nil
@@ -191,6 +199,7 @@ func handleControllerConn(
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
+	nudgeDispatcherActive *atomic.Bool,
 ) {
 	defer conn.Close()                                 //nolint:errcheck // best-effort cleanup
 	conn.SetDeadline(time.Now().Add(95 * time.Second)) //nolint:errcheck // symmetric read+write deadline; 5s margin over 30s enqueue + 60s reply
@@ -212,7 +221,11 @@ func handleControllerConn(
 		case line == "ping":
 			fmt.Fprintf(conn, "%d\n", os.Getpid()) //nolint:errcheck // best-effort
 		case line == controllerIdentityCommand:
-			writeJSONLine(conn, controllerIdentityReply{PID: os.Getpid(), HostingMode: hostingMode})
+			writeJSONLine(conn, controllerIdentityReply{
+				PID:                   os.Getpid(),
+				HostingMode:           hostingMode,
+				NudgeDispatcherActive: nudgeDispatcherActive != nil && nudgeDispatcherActive.Load(),
+			})
 		case line == "poke":
 			// Non-blocking send: triggers immediate reconciler tick for
 			// event-driven wake after sling assigns work.
@@ -1317,10 +1330,12 @@ func runController(
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
+	nudgeDispatcherActive := &atomic.Bool{}
+	nudgeDispatcherActive.Store(nudgeDispatcherIsSupervisor(cfg))
 
 	sockPath := controllerSocketPath(cityPath)
 	forceShutdown := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, nudgeDispatcherActive)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1358,6 +1373,7 @@ func runController(
 		WatchTargets:            initialWatchTargets,
 		ConfigRev:               configRev,
 		ConfigDirty:             configDirty,
+		NudgeDispatcherActive:   nudgeDispatcherActive,
 		Cfg:                     cfg,
 		SP:                      sp,
 		Publication:             supervisor.PublicationConfig{},
