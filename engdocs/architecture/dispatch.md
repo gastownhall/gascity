@@ -252,6 +252,14 @@ demand from a rig it can never actually claim work from, or the reverse,
 staying asleep while claimable work sits in a rig its `scale_check` no
 longer counts.
 
+Each probe's store is selected by its env, not its working directory: bd
+honors `BEADS_DIR` over cwd discovery, so every managed rig probe carries
+its own rig runtime env (`BEADS_DIR=<rig>/.beads` and that rig's Dolt
+host/port prefix). A city-scoped custom `scale_check` therefore runs once
+per store and the results are summed, so the check must count a single
+store. A check that already sweeps rigs itself will over-count, and a rig
+that shares the city's store is counted twice.
+
 ## Invariants
 
 1. **Sling query placeholder is always `{}`.** The `buildSlingCommand`

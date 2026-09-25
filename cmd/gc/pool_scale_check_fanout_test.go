@@ -2,11 +2,14 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -269,7 +272,7 @@ func TestCityScopedFanOutProbesIncludesCityAndNonSuspendedRigsOnly(t *testing.T)
 	ownEnv := map[string]string{"OWN": "1"}
 	suspended := map[string]bool{rigBPath: true}
 
-	probes := cityScopedFanOutProbes(cityPath, cfg, agentCfg, cityPath, ownEnv, suspended)
+	probes, _ := cityScopedFanOutProbes(cityPath, cfg, agentCfg, cityPath, ownEnv, suspended)
 
 	if len(probes) != 2 {
 		t.Fatalf("len(probes) = %d, want 2 (city + riga only; rigb is suspended): %+v", len(probes), probes)
@@ -288,5 +291,95 @@ func TestCityScopedFanOutProbesIncludesCityAndNonSuspendedRigsOnly(t *testing.T)
 	}
 	if !foundRigA {
 		t.Fatalf("probes missing non-suspended rig riga: %+v", probes)
+	}
+}
+
+// TestCityScopedFanOutProbesPinsEachProbeToItsOwnStore guards the store
+// selection itself: bd honors BEADS_DIR over cwd discovery, so reusing the
+// city env for a rig probe would re-read the city store once per rig. Each
+// managed rig probe must carry its own BEADS_DIR.
+func TestCityScopedFanOutProbesPinsEachProbeToItsOwnStore(t *testing.T) {
+	cityPath, rigDir, cfg := newControllerProbeFixture(t)
+	writeCanonicalScopeConfig(t, rigDir, contract.ConfigState{
+		IssuePrefix:    "de",
+		EndpointOrigin: contract.EndpointOriginInheritedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	cityAgent := &config.Agent{Name: "triage"}
+	ownEnv, err := controllerQueryRuntimeEnv(cityPath, cfg, cityAgent)
+	if err != nil {
+		t.Fatalf("controllerQueryRuntimeEnv() error = %v", err)
+	}
+
+	probes, errs := cityScopedFanOutProbes(cityPath, cfg, cityAgent, cityPath, ownEnv, nil)
+	if len(errs) != 0 {
+		t.Fatalf("errs = %v, want none", errs)
+	}
+	if len(probes) != 2 {
+		t.Fatalf("len(probes) = %d, want 2 (city + demo): %+v", len(probes), probes)
+	}
+	cityBeads := probes[0].env["BEADS_DIR"]
+	rigBeads := probes[1].env["BEADS_DIR"]
+	if cityBeads != filepath.Join(cityPath, ".beads") {
+		t.Fatalf("city probe BEADS_DIR = %q, want %q", cityBeads, filepath.Join(cityPath, ".beads"))
+	}
+	if rigBeads != filepath.Join(rigDir, ".beads") {
+		t.Fatalf("rig probe BEADS_DIR = %q, want %q", rigBeads, filepath.Join(rigDir, ".beads"))
+	}
+	if cityBeads == rigBeads {
+		t.Fatalf("city and rig probes share BEADS_DIR %q; the rig probe would re-read the city store", cityBeads)
+	}
+}
+
+// TestCityScopedFanOutProbesNilOwnEnvKeepsNilRigEnv pins the named-session
+// path: with no own env, rig probes fall back to bd's cwd discovery.
+func TestCityScopedFanOutProbesNilOwnEnvKeepsNilRigEnv(t *testing.T) {
+	cityPath, _, cfg := newControllerProbeFixture(t)
+
+	probes, errs := cityScopedFanOutProbes(cityPath, cfg, &config.Agent{Name: "triage"}, cityPath, nil, nil)
+	if len(errs) != 0 {
+		t.Fatalf("errs = %v, want none", errs)
+	}
+	for _, p := range probes {
+		if p.env != nil {
+			t.Fatalf("probe %s env = %v, want nil when ownEnv is nil", p.ref, p.env)
+		}
+	}
+}
+
+// TestEvaluatePoolFanOutSumPrefixesEachProbeWithItsOwnDoltEndpoint guards
+// against a pool-level prefix: a rig on a different Dolt server must be
+// probed against its own host/port, not the city's.
+func TestEvaluatePoolFanOutSumPrefixesEachProbeWithItsOwnDoltEndpoint(t *testing.T) {
+	probes := []poolStoreProbe{
+		{ref: "city", dir: "city", env: map[string]string{"GC_DOLT_PORT": "3311"}},
+		{ref: "riga", dir: "riga", env: map[string]string{"GC_DOLT_PORT": "4422"}},
+	}
+	var mu sync.Mutex
+	seen := map[string]string{}
+	runner := func(check, dir string, _ map[string]string) (string, error) {
+		mu.Lock()
+		seen[dir] = check
+		mu.Unlock()
+		return "1", nil
+	}
+	sem := make(chan struct{}, len(probes))
+	sp := scaleParams{Min: 0, Max: 100, Check: "count-work"}
+
+	got, errs := evaluatePoolFanOutSum("agent", sp, probes, runner, sem, true)
+	if len(errs) != 0 {
+		t.Fatalf("errs = %v, want none", errs)
+	}
+	if got != 2 {
+		t.Fatalf("sum = %d, want 2", got)
+	}
+	for dir, port := range map[string]string{"city": "3311", "riga": "4422"} {
+		want := "GC_DOLT_PORT='" + port + "' count-work"
+		if check := seen[dir]; check != want {
+			t.Fatalf("probe %s check = %q, want %q (its own Dolt port prefix)", dir, check, want)
+		}
+	}
+	if strings.Contains(seen["riga"], "3311") {
+		t.Fatalf("riga probe check = %q carries the city's Dolt port", seen["riga"])
 	}
 }

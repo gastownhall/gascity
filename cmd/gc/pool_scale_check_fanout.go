@@ -23,27 +23,43 @@ type poolStoreProbe struct {
 // cityScopedFanOutProbes builds the probe list for a city-scoped agent's
 // custom scale_check fan-out: the agent's own (city) probe plus one probe
 // per non-suspended rig, mirroring activeStores' suspended-rig filter in
-// buildDesiredStateWithSessionBeads. ownEnv is reused unchanged for every
-// probe: controllerQueryRuntimeEnv resolves to the city's bd runtime env for
-// any city-scoped agent regardless of which store's directory a probe
-// happens to run in, so there is no per-rig env to compute here — the probe
-// command's working directory (dir) is what selects the store.
-func cityScopedFanOutProbes(cityPath string, cfg *config.City, _ *config.Agent, ownDir string, ownEnv map[string]string, suspendedRigPaths map[string]bool) []poolStoreProbe {
+// buildDesiredStateWithSessionBeads. The probe env, not the working
+// directory, selects the store: bd honors BEADS_DIR over cwd discovery, so
+// each managed rig probe gets its own rig runtime env (BEADS_DIR=<rig>/.beads
+// plus that rig's Dolt coordinates). When ownEnv is nil (named-session path
+// or an unmanaged city scope) every probe keeps a nil env and bd discovers
+// the store from dir, matching the single-store behavior on that path; an
+// unmanaged rig likewise gets a nil env. A rig whose env cannot be built is
+// skipped and its error returned for the caller to log. The rig env is built
+// without managed-dolt recovery because this runs every tick (ga-cdmx6x).
+func cityScopedFanOutProbes(cityPath string, cfg *config.City, _ *config.Agent, ownDir string, ownEnv map[string]string, suspendedRigPaths map[string]bool) ([]poolStoreProbe, []error) {
 	probes := []poolStoreProbe{{ref: "city", dir: ownDir, env: ownEnv}}
 	if cfg == nil {
-		return probes
+		return probes, nil
 	}
+	var errs []error
 	for _, rig := range cfg.Rigs {
 		if suspendedRigPaths[filepath.Clean(rig.Path)] {
 			continue
 		}
-		probes = append(probes, poolStoreProbe{ref: rig.Name, dir: resolveAgentDirPath(cityPath, rig.Path), env: ownEnv})
+		rigRoot := resolveAgentDirPath(cityPath, rig.Path)
+		var rigEnv map[string]string
+		if ownEnv != nil && scopeUsesManagedBdStoreContract(cityPath, rigRoot) {
+			env, err := bdRuntimeEnvForRigWithErrorNoRecovery(cityPath, cfg, rigRoot)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("rig %s: %w", rig.Name, err))
+				continue
+			}
+			rigEnv = env
+		}
+		probes = append(probes, poolStoreProbe{ref: rig.Name, dir: rigRoot, env: rigEnv})
 	}
-	return probes
+	return probes, errs
 }
 
 // evaluatePoolFanOutSum runs sp.Check via runner against every probe
-// concurrently, sharing the caller's own sem (never a nested semaphore), and
+// concurrently, prefixing the check with each probe's own Dolt connection
+// coordinates (sp.Check must arrive unprefixed), sharing the caller's own sem (never a nested semaphore), and
 // sums the parsed per-probe counts -- clamping the aggregate once when
 // newDemand is false, mirroring evaluatePool/evaluatePoolNewDemand's
 // single-store clamp semantics applied to the summed total instead of one
@@ -62,14 +78,15 @@ func evaluatePoolFanOutSum(agentName string, sp scaleParams, probes []poolStoreP
 			defer func() { <-sem }()
 
 			start := time.Now()
-			out, err := runner(sp.Check, probe.dir, probe.env)
+			check := prefixShellEnv(controllerQueryPrefixEnv(probe.env), sp.Check)
+			out, err := runner(check, probe.dir, probe.env)
 			durationMs := float64(time.Since(start).Milliseconds())
 			if err != nil {
 				telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, 0, err)
 				errs[i] = fmt.Errorf("%s: %w", probe.ref, err)
 				return
 			}
-			n, err := parseScaleCheckCount(agentName, sp.Check, out)
+			n, err := parseScaleCheckCount(agentName, check, out)
 			if err != nil {
 				telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, 0, err)
 				errs[i] = fmt.Errorf("%s: %w", probe.ref, err)
