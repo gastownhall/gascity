@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -4641,6 +4642,65 @@ func TestCityRuntimeReloadProviderSwapPreservesDrainTracker(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeReloadUpdatesNudgeWakeListenerHosting(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeNudgeDispatcherConfig(t, tomlPath, "supervisor")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+	cr.sessionDrains = newDrainTracker()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cr.nudgeEvents = newNudgeEventDispatcher(ctx, cityPath, io.Discard, "gc test")
+	cr.nudgeEvents.update(sp, cfg, true)
+	cr.reconcileNudgeWakeListener(ctx)
+	if !nudgequeue.DispatcherIsHosting(cityPath) {
+		t.Fatal("DispatcherIsHosting() = false with supervisor dispatcher, want true")
+	}
+
+	lastProviderName := "fake"
+	writeCityRuntimeNudgeDispatcherConfig(t, tomlPath, "legacy")
+	reply := cr.reloadConfigTraced(ctx, &lastProviderName, cityPath, nil, reloadSourceManual)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("legacy reload outcome = %q, want %q; error=%q", reply.Outcome, reloadOutcomeApplied, reply.Error)
+	}
+	if nudgequeue.DispatcherIsHosting(cityPath) {
+		t.Fatal("DispatcherIsHosting() = true after legacy reload, want false")
+	}
+
+	writeCityRuntimeNudgeDispatcherConfig(t, tomlPath, "supervisor")
+	reply = cr.reloadConfigTraced(ctx, &lastProviderName, cityPath, nil, reloadSourceManual)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("supervisor reload outcome = %q, want %q; error=%q", reply.Outcome, reloadOutcomeApplied, reply.Error)
+	}
+	if !nudgequeue.DispatcherIsHosting(cityPath) {
+		t.Fatal("DispatcherIsHosting() = false after supervisor reload, want true")
+	}
+}
+
 func TestCityRuntimeReloadProviderSwapFailsOnPartialSessionListing(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -6845,6 +6905,16 @@ func writeCityRuntimeConfig(t *testing.T, tomlPath, provider string) {
 	t.Helper()
 	clearInheritedBeadsEnv(t)
 	writeCityRuntimeConfigNamed(t, tomlPath, "test-city", provider)
+}
+
+func writeCityRuntimeNudgeDispatcherConfig(t *testing.T, tomlPath, mode string) {
+	t.Helper()
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, filepath.Dir(tomlPath))
+	data := []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n[daemon]\nnudge_dispatcher = \"" + mode + "\"\n")
+	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
 }
 
 func writeCityRuntimeSoftReloadConfig(t *testing.T, tomlPath, shutdownTimeout string) {

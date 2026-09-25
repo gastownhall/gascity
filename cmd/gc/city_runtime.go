@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -213,6 +214,7 @@ type CityRuntime struct {
 	controlDispatcherCh chan struct{}                // non-blocking signal for control-dispatcher-only reconcile
 	nudgeWakeCh         chan struct{}                // signal to dispatch queued nudges; fed by wake socket listener
 	nudgeEvents         *nudgeEventDispatcher        // provider idle events → queued-nudge delivery; wired by run()
+	nudgeWakeListener   net.Listener                 // non-nil while this runtime owns queued-nudge delivery
 	reloadMu            sync.Mutex                   // guards activeReload
 	activeReload        *reloadRequest
 	onStarted           func()
@@ -499,6 +501,34 @@ func (cr *CityRuntime) setControllerState(cs *controllerState) {
 // crashTracker returns the crash tracker for API server wiring.
 func (cr *CityRuntime) crashTrack() crashTracker {
 	return cr.ct
+}
+
+// reconcileNudgeWakeListener keeps the wake socket aligned with the runtime's
+// queued-nudge delivery ownership. A live socket suppresses fallback pollers,
+// so it must close as soon as neither the supervisor dispatcher nor an
+// event-backed dispatcher can consume its wakeups.
+func (cr *CityRuntime) reconcileNudgeWakeListener(ctx context.Context) {
+	if cr.nudgeEvents == nil {
+		return
+	}
+	shouldHost := cr.cityPath != "" && (nudgeDispatcherIsSupervisor(cr.cfg) || cr.nudgeEvents.active())
+	if !shouldHost {
+		if cr.nudgeWakeListener != nil {
+			_ = cr.nudgeWakeListener.Close()
+			cr.nudgeWakeListener = nil
+		}
+		return
+	}
+	if cr.nudgeWakeListener != nil {
+		return
+	}
+
+	listener, err := startNudgeWakeListener(ctx, cr.cityPath, cr.nudgeWakeCh, cr.stderr, cr.logPrefix)
+	if err != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v (falling back to patrol-only delivery)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	cr.nudgeWakeListener = listener
 }
 
 // run executes the reconciliation loop until ctx is canceled. This is
@@ -834,11 +864,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// (kicked by this listener and by idle events) owns queued delivery.
 	// Legacy mode on polled providers skips the listener entirely;
 	// per-session pollers continue to own delivery.
-	if (nudgeDispatcherIsSupervisor(cr.cfg) || cr.nudgeEvents.active()) && cr.cityPath != "" {
-		if _, err := startNudgeWakeListener(ctx, cr.cityPath, cr.nudgeWakeCh, cr.stderr, cr.logPrefix); err != nil {
-			fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v (falling back to patrol-only delivery)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
-		}
-	}
+	cr.reconcileNudgeWakeListener(ctx)
 
 	// Bridge the provider's push session-event stream (if it has one) into
 	// pokeCh: a session death pokes the reconciler within seconds instead of
@@ -2346,6 +2372,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if cr.nudgeEvents != nil {
 		cr.nudgeEvents.update(nextSp, nextCfg, providerChanged)
 	}
+	cr.reconcileNudgeWakeListener(ctx)
 
 	if cr.cs != nil {
 		cr.cs.updateFromRuntime(nextCfg, nextSp, result.Revision)
