@@ -4,7 +4,7 @@ package hybrid
 
 import (
 	"context"
-	"fmt"
+	"os"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -264,23 +264,16 @@ func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
 	return runtime.SessionSleepCapabilityDisabled
 }
 
-// SubscribeSessionEvents forwards the session-event stream of whichever
-// backend implements runtime.SessionEventProvider. Today only herdr does, so
-// without this method, wrapping an event-capable local backend (e.g. herdr)
-// behind hybrid for remote routing would fail the
-// runtime.SessionEventProvider type assertion in cmd/gc's
-// sessionEventPump.restart and silently drop the whole event-driven
-// reconcile poke, falling back to patrol polling with no underlying
-// capability loss to explain it.
+// SubscribeSessionEvents forwards the session-event streams of the backends
+// that implement runtime.SessionEventProvider (herdr and acp today). Without
+// this method, wrapping an event-capable backend behind hybrid for remote routing
+// would fail the runtime.SessionEventProvider type assertion in cmd/gc's
+// sessionEventPump.restart and silently drop the event-driven reconcile
+// poke. When both backends publish events, both streams are merged, so
+// neither backend's session deaths are lost; see
+// runtime.SubscribeSessionEventSources for the failure handling.
 func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
-	lSEP, lok := p.local.(runtime.SessionEventProvider)
-	rSEP, rok := p.remote.(runtime.SessionEventProvider)
-	switch {
-	case lok:
-		return lSEP.SubscribeSessionEvents(ctx)
-	case rok:
-		return rSEP.SubscribeSessionEvents(ctx)
-	default:
-		return nil, fmt.Errorf("neither local nor remote backend implements SubscribeSessionEvents")
-	}
+	return runtime.SubscribeSessionEventSources(ctx, os.Stderr,
+		runtime.SessionEventSource{Name: "local", Provider: p.local},
+		runtime.SessionEventSource{Name: "remote", Provider: p.remote})
 }

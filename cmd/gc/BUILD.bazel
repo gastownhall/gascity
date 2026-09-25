@@ -1255,6 +1255,7 @@ go_test(
         "session_diagnostics_wiring_test.go",
         "session_drain_ack_min_floor_test.go",
         "session_drainack_info_equiv_test.go",
+        "session_event_pump_acp_test.go",
         "session_event_pump_live_test.go",
         "session_event_pump_test.go",
         "session_identity_test.go",

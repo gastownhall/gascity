@@ -70,6 +70,7 @@ type Provider struct {
 	conns         map[string]*sessionConn // in-process tracking
 	workDirs      map[string]string       // session name → workDir (for CopyTo)
 	cfg           Config
+	events        *sessionEventHub
 	activityWrite func(path string, data []byte) error // test seam
 }
 
@@ -110,6 +111,7 @@ func NewProviderWithDir(dir string, cfg Config) *Provider {
 		conns:    make(map[string]*sessionConn),
 		workDirs: make(map[string]string),
 		cfg:      cfg,
+		events:   newSessionEventHub(),
 	}
 }
 
@@ -289,6 +291,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		os.Remove(p.sockPath(name)) //nolint:errcheck
 		_ = os.Remove(p.sockNamePath(name))
 		close(processDone)
+		sc.markExited()
 	}()
 
 	// Perform ACP handshake with a deadline. hsCtx (created above with
@@ -378,6 +381,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		p.mu.Unlock()
 		return fmt.Errorf("session %q was stopped during startup", name)
 	}
+	// Attach before publishing the connection so Stop, which finds it only
+	// through p.conns, always reports closed after the attached exit.
+	p.attachSessionEvents(name, sc)
 	p.conns[name] = sc
 	p.mu.Unlock()
 
@@ -470,6 +476,9 @@ func (p *Provider) Stop(name string) error {
 	if ok {
 		if !sc.alive() {
 			p.cleanupMeta(name)
+			if sc.cmd != nil {
+				sc.emitClosed()
+			}
 			return nil
 		}
 		// Guard against sentinel sessionConn (nil cmd/stdin during handshake).
@@ -484,6 +493,7 @@ func (p *Provider) Stop(name string) error {
 		err := terminateProcess(sc)
 		if err == nil || runtime.IsSessionGone(err) {
 			p.cleanupMeta(name)
+			sc.emitClosed()
 			return nil
 		}
 		return err
