@@ -1,6 +1,7 @@
 # Release gate: wake drained sessions on sling nudge
 
 **Verdict:** **PASS**
+> Values in the table below are superseded by the "Head refresh" section at the end of this file.
 
 - **Deploy bead:** ga-406x21
 - **Build bead:** ga-qj4ids
