@@ -72,7 +72,12 @@ const (
 	// Merged with main's reviewed delta: cmd-gc-productmetrics-testhook
 	// timeout-minutes 5 -> 12 (#6396: canceled at the 5-minute budget with no
 	// failing test).
-	expectedCIExecutionHash     = "71bfa3a539e5dd0cb7973c5f265ef6582a1ed943ccbd36fb39f39fda744c1cd2"
+	//
+	// Bumped again (#6385): the integration path filter also matches
+	// internal/bootstrap/packs/core/assets/scripts/** so a reaper.sh-only
+	// change runs the real-Dolt reaper tests. Reviewed delta: one filter path,
+	// no new job, trigger or permission.
+	expectedCIExecutionHash     = "7bf12250c2b6d756458cc48e70fd716b01e517fa4d629f237b542aa8f67cb139"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

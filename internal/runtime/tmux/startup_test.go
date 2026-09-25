@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -3525,5 +3526,29 @@ func TestStartOpsSendKeysKeepsWarmBoxOnRelaunch(t *testing.T) {
 	}
 	if got := fe.killCount(); got != 0 {
 		t.Fatalf("relaunch issued %d kill(s); the warm box must survive a failed startup prompt", got)
+	}
+}
+
+func TestDoStartSession_WarnsWhenTrustDialogLeftUnconfirmed(t *testing.T) {
+	var warnings bytes.Buffer
+	old := startupDialogWarningOut
+	startupDialogWarningOut = &warnings
+	t.Cleanup(func() { startupDialogWarningOut = old })
+
+	ops := &fakeStartOps{
+		hasSessionResult:        true,
+		acceptStartupDialogsErr: fmt.Errorf("workspace trust dialog: %w", runtime.ErrWorkspaceTrustUnconfirmed),
+	}
+	cfg := runtime.Config{Command: "claude", ReadyPromptPrefix: "> ", ProcessNames: []string{"claude"}}
+
+	if err := doStartSession(context.Background(), ops, "gc-city-mayor", cfg, DefaultConfig().SetupTimeout); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Both passes fail; only the final (post-readiness) pass reports it.
+	if got := strings.Count(warnings.String(), "never reached the trust option"); got != 1 {
+		t.Fatalf("warnings = %q, want exactly one unconfirmed-trust warning", warnings.String())
+	}
+	if !strings.Contains(warnings.String(), `"gc-city-mayor"`) {
+		t.Fatalf("warning %q does not name the session", warnings.String())
 	}
 }

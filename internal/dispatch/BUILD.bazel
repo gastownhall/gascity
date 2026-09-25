@@ -75,6 +75,7 @@ go_test(
         "//internal/session",
         "//internal/sourceworkflow",
         "//internal/testenv",
+        "@com_github_steveyegge_beads//:beads",
     ],
 )
 
