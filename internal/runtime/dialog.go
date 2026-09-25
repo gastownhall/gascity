@@ -60,18 +60,42 @@ type startupDialogBudget struct {
 }
 
 func newStartupDialogBudget(timeout time.Duration) *startupDialogBudget {
-	return &startupDialogBudget{timeout: timeout, deadline: time.Now().Add(timeout)}
+	return &startupDialogBudget{timeout: timeout, deadline: dialogClock.Now().Add(timeout)}
 }
 
 // live reports whether the sequence may keep polling.
 func (b *startupDialogBudget) live() bool {
-	return time.Now().Before(b.deadline)
+	return dialogClock.Now().Before(b.deadline)
 }
 
 // observe records that a phase recognized the pane and grants the next phase a
 // fresh timeout to wait for its own dialog to render.
 func (b *startupDialogBudget) observe() {
-	b.deadline = time.Now().Add(b.timeout)
+	b.deadline = dialogClock.Now().Add(b.timeout)
+}
+
+// startupDialogClock is the time source of the polling startup-dialog
+// helpers: the waits between peeks (sleep) and the budget deadline.
+type startupDialogClock interface {
+	Now() time.Time
+	// Sleep waits for d or until ctx is canceled.
+	Sleep(ctx context.Context, d time.Duration)
+}
+
+// dialogClock is the wall clock in production. Tests swap in a stepped
+// virtual clock so that a fake pane's key and frame timing is ordered against
+// the handler's peeks deterministically instead of racing real timers.
+var dialogClock startupDialogClock = wallDialogClock{}
+
+type wallDialogClock struct{}
+
+func (wallDialogClock) Now() time.Time { return time.Now() }
+
+func (wallDialogClock) Sleep(ctx context.Context, d time.Duration) {
+	select {
+	case <-ctx.Done():
+	case <-time.After(d):
+	}
 }
 
 // StartupDialogOption configures optional policy for the startup-dialog helpers.
@@ -1889,8 +1913,5 @@ func sleep(ctx context.Context, d time.Duration) {
 	if d <= 0 {
 		return
 	}
-	select {
-	case <-ctx.Done():
-	case <-time.After(d):
-	}
+	dialogClock.Sleep(ctx, d)
 }
