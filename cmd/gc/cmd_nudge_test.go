@@ -3798,6 +3798,63 @@ func TestDeliverSlingNudgeRequestsManagedWakeForDrainedSession(t *testing.T) {
 	}
 }
 
+// TestDeliverSlingNudgeSkipsManagedWakeWhenReconcilerUnmanaged pins the
+// gate-false side of ga-qj4ids: without a managed reconciler the sling path
+// keeps today's queue-and-poke behavior and records no wake request.
+func TestDeliverSlingNudgeSkipsManagedWakeWhenReconcilerUnmanaged(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if err := store.SetMetadataBatch(info.ID, session.AcknowledgeDrainPatch(time.Now(), false)); err != nil {
+		t.Fatalf("SetMetadataBatch(drained): %v", err)
+	}
+
+	prevManaged := nudgeCityUsesManagedReconciler
+	nudgeCityUsesManagedReconciler = func(string) bool { return false }
+	t.Cleanup(func() { nudgeCityUsesManagedReconciler = prevManaged })
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		cfg:         &config.City{Agents: []config.Agent{{Name: "worker", Provider: "claude"}}},
+		sessionID:   info.ID,
+		sessionName: info.SessionName,
+		identity:    "worker",
+		agent:       config.Agent{Name: "worker", Provider: "claude"},
+	}
+
+	var stdout, stderr bytes.Buffer
+	deliverSlingNudge(target, fake, store, dir, &stdout, &stderr)
+
+	updated, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := updated.Metadata["wake_request"]; got != "" {
+		t.Fatalf("wake_request = %q, want empty when the reconciler is unmanaged", got)
+	}
+	if got := updated.Metadata["state"]; got != string(session.StateDrained) {
+		t.Fatalf("state = %q, want %q — an unmanaged city must not wake the drained session", got, session.StateDrained)
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, target.agent.QualifiedName(), time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 1/0/0", len(pending), len(inFlight), len(dead))
+	}
+}
+
 func assertSessionLastNudgeDeliveredAtStamped(t *testing.T, store beads.Store, sessionID string) {
 	t.Helper()
 	refetched, err := store.Get(sessionID)
