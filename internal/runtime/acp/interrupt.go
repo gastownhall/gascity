@@ -251,7 +251,7 @@ func (sc *sessionConn) signalTurn(idleCh <-chan struct{}, sent *atomic.Bool) boo
 		sc.onTurnSignal()
 	}
 	// A failure means the group is already gone; the wait observes that.
-	if err := runtime.SignalProcessGroup(sc.cmd, syscall.SIGINT); err == nil && sent != nil {
+	if err := runtime.SignalProcessGroup(sc.cmd, sc.pgid, syscall.SIGINT); err == nil && sent != nil {
 		sent.Store(true)
 	}
 	return true

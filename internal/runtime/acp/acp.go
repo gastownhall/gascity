@@ -339,19 +339,23 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// Close the write end — child inherits it; we only read.
 	stderrW.Close() //nolint:errcheck
 
+	// Setpgid succeeded at spawn; its leader PID remains the group ID.
+	pgid := cmd.Process.Pid
+
 	// Create control socket for cross-process discovery. Its interrupt and
 	// turn commands run the owner's logic once the connection exists.
 	processDone := make(chan struct{})
 	var owned atomic.Pointer[sessionConn]
-	lis, err := p.startControlSocket(name, cmd, processDone, p.ownedControlCommands(name, &owned))
+	lis, err := p.startControlSocket(name, cmd, pgid, processDone, p.ownedControlCommands(name, &owned))
 	if err != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = runtime.SignalProcessGroup(cmd, pgid, syscall.SIGKILL)
 		_ = cmd.Wait()
 		clearSentinel()
 		return fmt.Errorf("creating control socket for %q: %w", name, err)
 	}
 
 	sc := newSessionConn(cmd, stdinPipe, lis, p.cfg.outputBufferLines(), processDone)
+	sc.pgid = pgid
 	sc.token = seedMeta["GC_INSTANCE_TOKEN"]
 	if f, ok := runtime.InputFenceFromEnv(cfg.Env); ok {
 		sc.fence = f.Digest()
@@ -420,7 +424,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// Handshake failed — kill the process. The monitor goroutine
 		// handles listener/socket cleanup when the process exits.
 		_ = stdinPipe.Close()
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = runtime.SignalProcessGroup(cmd, pgid, syscall.SIGKILL)
 		<-sc.done
 		clearSentinel()
 		// The monitor closed done after cmd.Wait returned, so ProcessState is
@@ -435,7 +439,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// and clean up — the caller of Stop expects the session to be gone.
 	if err := hsCtx.Err(); err != nil {
 		_ = stdinPipe.Close()
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = runtime.SignalProcessGroup(cmd, pgid, syscall.SIGKILL)
 		<-sc.done
 		clearSentinel()
 		return fmt.Errorf("session %q was stopped during startup", name)
@@ -447,7 +451,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	seed := time.Now()
 	if err := p.publishActivity(name, seed); err != nil {
 		_ = stdinPipe.Close()
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = runtime.SignalProcessGroup(cmd, pgid, syscall.SIGKILL)
 		<-sc.done
 		clearSentinel()
 		return fmt.Errorf("publishing initial activity for %q: %w", name, err)
@@ -462,7 +466,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	)
 	if err := sc.installActivityPublisher(publisher, seed); err != nil {
 		_ = stdinPipe.Close()
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = runtime.SignalProcessGroup(cmd, pgid, syscall.SIGKILL)
 		<-sc.done
 		clearSentinel()
 		return fmt.Errorf("starting activity publication for %q: %w", name, err)
@@ -474,7 +478,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if p.conns[name] != sentinel || hsCtx.Err() != nil {
 		p.mu.Unlock()
 		_ = stdinPipe.Close()
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = runtime.SignalProcessGroup(cmd, pgid, syscall.SIGKILL)
 		<-sc.done
 		clearSentinel()
 		return fmt.Errorf("session %q was stopped during startup", name)
@@ -1206,7 +1210,7 @@ func (p *Provider) ownedInterrupt(name string, owned *atomic.Pointer[sessionConn
 
 // startControlSocket creates a unix socket for cross-process commands.
 // owner runs the owner's logic for the interrupt and turn commands.
-func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan struct{}, owner controlCommands) (net.Listener, error) {
+func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, pgid int, done <-chan struct{}, owner controlCommands) (net.Listener, error) {
 	sp := p.sockPath(name)
 	namePath := p.sockNamePath(name)
 	os.Remove(sp) //nolint:errcheck
@@ -1225,7 +1229,7 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan st
 			if err != nil {
 				return
 			}
-			go handleControlConn(conn, cmd, done, p.cfg.stopGrace(), owner)
+			go handleControlConn(conn, cmd, pgid, done, p.cfg.stopGrace(), owner)
 		}
 	}()
 	return lis, nil
@@ -1237,7 +1241,7 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan st
 // session/cancel-and-settle logic, in the background. "turn" and
 // "interrupt-turn <id>" answer from the owner's turn record (see
 // turn_identity.go). An unknown command closes the connection unanswered.
-func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}, stopGrace time.Duration, owner controlCommands) {
+func handleControlConn(conn net.Conn, cmd *exec.Cmd, pgid int, done <-chan struct{}, stopGrace time.Duration, owner controlCommands) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
 	scanner := bufio.NewScanner(conn)
@@ -1253,7 +1257,7 @@ func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}, stopG
 	case controlTurn:
 		fmt.Fprintf(conn, "%s\n", owner.turn()) //nolint:errcheck
 	case "stop":
-		_ = runtime.TerminateManagedProcess(cmd, done, stopGrace)
+		_ = runtime.TerminateManagedProcess(cmd, pgid, done, stopGrace)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "interrupt":
 		// The settle can take the whole cancel_timeout plus the SIGINT
@@ -1418,5 +1422,5 @@ func isPipeWriteError(err error) bool {
 // terminateProcess sends SIGTERM then, after grace, SIGKILL to a tracked
 // process group.
 func terminateProcess(sc *sessionConn, grace time.Duration) error {
-	return runtime.TerminateManagedProcess(sc.cmd, sc.done, grace)
+	return runtime.TerminateManagedProcess(sc.cmd, sc.pgid, sc.done, grace)
 }
