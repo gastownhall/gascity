@@ -125,91 +125,65 @@ func TestScrubbedForkedSupervisorIsNotSelected(t *testing.T) {
 // The child below is setsid'd — a strictly stronger detachment than the
 // Setpgid the real fork path uses — and is still selected.
 //
-// ga-961qe1 / ga-cfr67u: this test used to *discover* its own child after the
-// fact via an unscoped, system-wide `pgrep -f 'sleep 300' | tail -1`, which
-// has no way to tell this test's own target apart from any other `sleep 300`
-// on a shared host. Two decoys prove that concretely rather than by
-// inspection: an ambient one from spawnReparentedChild (this file's other
-// helper, and exactly what ga-961qe1's root cause names as a real-world decoy
-// source) started first, and a second, "race" one started immediately after
-// the target. Linux allocates PIDs from a single monotonic counter, so a
-// later fork reliably gets a higher PID within this short a window — the
-// race decoy is guaranteed to be the highest-PID `sleep 300` match, and the
-// OLD lookup, which always takes tail -1, is guaranteed to pick it instead of
-// the real target. The race decoy and the pgrep lookup itself must run from
-// within the *same* `sh -c` invocation that starts the target, not a
-// separate exec.Command: pgrep -f matches full command lines, so a later,
-// separate launcher's own `pgrep -f 'sleep 300'` argument text would itself
-// contain the substring "sleep 300" and — being forked after everything else
-// — would win tail -1 by matching *itself*, masking the real bug this test
-// exists to show (this reproduction's own first draft hit exactly that).
-// Identification of the target itself is captured directly via the combined
-// script's own $! for the target (mirroring spawnReparentedChild's
-// already-proven pattern), taken before the race decoy is started so it
-// isn't overwritten, and is never used for the buggy lookup below — that
-// lookup exists only to demonstrate the bug.
+// ga-961qe1 / ga-cfr67u: the target is identified by capturing the spawning
+// shell's own $! directly, never by scanning for it after the fact — the
+// same pattern spawnReparentedChild uses. Two concurrent, unrelated `sleep
+// 300` decoys are deliberately present throughout — an ambient one from
+// spawnReparentedChild (this file's other helper, and exactly what
+// ga-961qe1's root cause names as a real-world decoy source), and a second
+// started immediately after the target in its own launcher — proving the
+// identification is correct regardless of what else matches that process
+// name on the host (ga-961qe1's old, unscoped `pgrep -f 'sleep 300' | tail
+// -1` lookup could not tell them apart; that form is preserved in this
+// bead's RED commit).
 func TestSetsidDoesNotPreventOrphanSelection(t *testing.T) {
 	if _, err := exec.LookPath("setsid"); err != nil {
 		t.Skip("setsid not available")
 	}
 	sessionID := "ga-repro-s434i0-setsid-" + strconv.Itoa(os.Getpid())
 
-	// Ambient decoy: some other, unrelated sleep 300 already on the host
-	// before this test's own target even starts.
+	// Concurrent decoys this test's identification must ignore: an ambient
+	// one already on the host, and a second started immediately after the
+	// target below, from the same launcher.
 	ambientDecoyPID := spawnReparentedChild(t, os.Environ())
 
-	// The setsid'd target, a same-shell race decoy started immediately after
-	// it, and the OLD unscoped lookup — all from one `sh -c` invocation. See
-	// the function comment for why the race decoy and the lookup cannot be
-	// split into separate exec.Command calls without the lookup's own
-	// launcher shell self-matching and winning tail -1.
+	// The trailing `sleep 0.2` is load-bearing, not leftover from the old
+	// pgrep-based lookup: `setsid CMD &` backgrounds a fork of the shell
+	// that has not yet called setsid(2)/exec'd into CMD at the moment `$!`
+	// is available, so reading /proc/<pid>/stat immediately can observe the
+	// child still in the parent's original session. Confirmed empirically —
+	// removing this sleep reproduces a ~80% local failure rate with sid
+	// stuck at an ancestor session instead of the target's own pid.
 	launcher := exec.Command("sh", "-c",
 		"setsid sleep 300 >/dev/null 2>&1 & echo $!; "+
 			"sleep 300 >/dev/null 2>&1 & echo $!; "+
-			"sleep 0.2; "+
-			"pgrep -f 'sleep 300' | tail -1")
+			"sleep 0.2")
 	launcher.Env = append(os.Environ(), "GC_SESSION_ID="+sessionID)
 	out, err := launcher.Output()
 	if err != nil {
 		t.Fatalf("spawn setsid child: %v", err)
 	}
 	lines := strings.Fields(strings.TrimSpace(string(out)))
-	if len(lines) != 3 {
-		t.Fatalf("expected 3 pids (target, race decoy, identified) from launcher, got %q", out)
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 pids (target, second decoy) from launcher, got %q", out)
 	}
-	realPID, err := strconv.Atoi(lines[0])
+	pid, err := strconv.Atoi(lines[0])
 	if err != nil {
-		t.Fatalf("parse real target pid from %q: %v", out, err)
+		t.Fatalf("parse target pid from %q: %v", out, err)
 	}
-	raceDecoyPID, err := strconv.Atoi(lines[1])
+	secondDecoyPID, err := strconv.Atoi(lines[1])
 	if err != nil {
-		t.Fatalf("parse race decoy pid from %q: %v", out, err)
+		t.Fatalf("parse second decoy pid from %q: %v", out, err)
 	}
-	pid, err := strconv.Atoi(lines[2])
-	if err != nil {
-		t.Fatalf("parse identified pid from %q: %v", out, err)
-	}
-	t.Cleanup(func() { _ = syscall.Kill(realPID, syscall.SIGKILL) })
-	t.Cleanup(func() { _ = syscall.Kill(raceDecoyPID, syscall.SIGKILL) })
-	t.Logf("ambient decoy pid=%d, real target pid=%d, race decoy pid=%d, unscoped pgrep identified pid=%d",
-		ambientDecoyPID, realPID, raceDecoyPID, pid)
-
-	// OLD (buggy) identification picked tail -1 of an unscoped, system-wide
-	// pgrep — confirm it landed on the race decoy specifically, and not the
-	// real target, the ambient decoy, or some other stray match (e.g. the
-	// lookup's own launcher shell — the exact confounder this reproduction's
-	// own first draft hit; see the function comment).
-	if pid != raceDecoyPID {
-		t.Fatalf("reproduction setup did not race as intended: unscoped pgrep returned %d, "+
-			"want the same-shell race decoy %d (real target is %d, ambient decoy is %d)",
-			pid, raceDecoyPID, realPID, ambientDecoyPID)
-	}
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	t.Cleanup(func() { _ = syscall.Kill(secondDecoyPID, syscall.SIGKILL) })
+	t.Logf("ambient decoy pid=%d, second decoy pid=%d, target pid=%d (captured via $!, never scanned for)",
+		ambientDecoyPID, secondDecoyPID, pid)
 
 	// Prove the detachment is real: a fully setsid'd process leads its own
-	// session and process group. This fires here — on the misidentified
-	// decoy, not the real target — reproducing ga-961qe1's exact false
-	// failure: the decoy is a normal child of its own launcher shell, not a
-	// session leader, even though setsid worked fine for the real target.
+	// session and process group. Keeps the assertion's teeth (acceptance
+	// criterion 2): a genuinely broken setsid still fails here, on the
+	// correctly-identified target.
 	sid := procStatField(t, pid, 3)
 	if sid != pid {
 		t.Fatalf("child %d is not a session leader (sid=%d); setsid did not take effect", pid, sid)
