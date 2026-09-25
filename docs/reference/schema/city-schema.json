@@ -22,7 +22,7 @@
         },
         "stop_grace": {
           "type": "string",
-          "description": "StopGrace is how long stopping an ACP session waits after SIGTERM\nbefore escalating to SIGKILL. Raise it for agents that need longer to\ndrain in-flight tool calls on shutdown. Duration string (e.g., \"5s\",\n\"30s\"). Defaults to \"5s\"; non-positive or unparseable values fall back\nto the default.",
+          "description": "StopGrace is how long stopping an ACP session waits after SIGTERM\nbefore escalating to SIGKILL. Raise it for agents that need longer to\ndrain in-flight tool calls on shutdown. Duration string (e.g., \"5s\",\n\"20s\"). Defaults to \"5s\"; non-positive or unparseable values fall back\nto the default. gc stop bounds each session at 30s, so keep stop_grace\ncomfortably below that.",
           "default": "5s"
         }
       },

@@ -1764,8 +1764,9 @@ type ACPSessionConfig struct {
 	// StopGrace is how long stopping an ACP session waits after SIGTERM
 	// before escalating to SIGKILL. Raise it for agents that need longer to
 	// drain in-flight tool calls on shutdown. Duration string (e.g., "5s",
-	// "30s"). Defaults to "5s"; non-positive or unparseable values fall back
-	// to the default.
+	// "20s"). Defaults to "5s"; non-positive or unparseable values fall back
+	// to the default. gc stop bounds each session at 30s, so keep stop_grace
+	// comfortably below that.
 	StopGrace string `toml:"stop_grace,omitempty" jsonschema:"default=5s"`
 }
 
