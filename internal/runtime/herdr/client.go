@@ -66,6 +66,17 @@ func herdrErrorCode(err error) string {
 	return ""
 }
 
+// herdrCodeAnyShape returns the herdr-reported error code from err
+// regardless of which shape runWithSecrets wrapped it in: the typed
+// envelope herdrErrorCode already recovers (a zero-exit CLI invocation), or
+// the *herdrStderr shape a non-zero exit wraps instead. herdrErrorCode alone
+// cannot see through the second shape, which is what left the pane-busy
+// retry guard at provider.go unable to recognize agent_pane_busy
+// (ga-iwanrj): herdr reports that rejection via a non-zero exit.
+func herdrCodeAnyShape(_ error) string {
+	return ""
+}
+
 // disqualifyingCode returns a herdr error code that rules the paste fallback out,
 // or "" if none does. It is the only use this change makes of a failure's text, and
 // the direction is the whole point: see targetHasNoNamedAgent for why text cannot
