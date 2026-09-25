@@ -70,6 +70,19 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 	// of a postgres city). Nothing is cached: every Check re-reads metadata,
 	// so a long-lived controller sees an operator's config change on the next
 	// open exactly as before.
+	//
+	// Scope limit on that win: only the bd context subprocess is removed.
+	// identity_match still runs on the blocked branch, and whether its
+	// production reader dials is decided by the scope's .beads/config.yaml,
+	// not by the metadata backend that blocked the scope
+	// (cmd/gc.canonicalScopeDoltTarget -> ResolveScopeConfigState). A scope
+	// carrying no endpoint keys is legacy-minimal and bails before dialing,
+	// so for it the removed subprocess is the whole cost change; one that
+	// still carries gc.endpoint_origin plus dolt.host/dolt.port -- the
+	// residue a dolt-to-postgres migration leaves behind -- resolves
+	// authoritative and can still spend up to 5 s pinging an endpoint that is
+	// gone. That probe is pre-existing and unchanged here, but it bounds the
+	// figures above to the clean-config case.
 	var (
 		checks   []PreflightCheckResult
 		bdCtxErr error
