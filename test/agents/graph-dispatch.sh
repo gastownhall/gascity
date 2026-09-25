@@ -246,7 +246,7 @@ should_use_hook_fallback() {
     [ -n "${GC_TEMPLATE:-}" ] && [ "${GC_TEMPLATE:-}" != "${GC_AGENT:-}" ]
 }
 
-trace "startup pid=$$ assignee=${ASSIGNEE:-}"
+trace "startup pid=$$ assignee=${ASSIGNEE:-} actor=${BEADS_ACTOR}"
 trace_store
 cleanup() {
     local rc=$?
@@ -312,7 +312,12 @@ fetch_in_progress_queue() {
     if [ -z "$ASSIGNEE" ]; then
         return 1
     fi
-    timeout 10 bd list --assignee "$ASSIGNEE" --status=in_progress --json 2>/dev/null
+    # Resume under the identity the claim recorded. `bd update --claim` stamps
+    # BEADS_ACTOR, which for an unaliased pool session is the session bead ID
+    # (#6324), not the runtime GC_SESSION_NAME (<template>-<beadID>). Listing
+    # by the session name never finds this session's own claim, so a pool
+    # worker restarted mid-step skips its in_progress bead forever.
+    timeout 10 bd list --assignee "$BEADS_ACTOR" --status=in_progress --json 2>/dev/null
 }
 
 select_candidate_from_queue() {
