@@ -12,6 +12,7 @@ go_test(
     name = "hybrid_test",
     srcs = [
         "hybrid_test.go",
+        "session_events_test.go",
         "testenv_import_test.go",
     ],
     embed = [":hybrid"],
