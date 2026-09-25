@@ -15,6 +15,7 @@ go_test(
         "conformance_test.go",
         "liveness_forwarding_test.go",
         "testenv_import_test.go",
+        "turn_events_test.go",
     ],
     embed = [":auto"],
     deps = [

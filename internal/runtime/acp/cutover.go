@@ -11,8 +11,9 @@ import (
 // de-conflated seams (via [runtime.NewProviderFromSeams]), passing the optional
 // interfaces production callers type-assert — InteractionProvider (pending /
 // respond), TransportCapabilityProvider (SupportsTransport), SleepCapability,
-// IdleWaitProvider (WaitForIdle), IdleSnapshotProvider (SnapshotIdle), and
-// SessionEventProvider (SubscribeSessionEvents) —
+// IdleWaitProvider (WaitForIdle), IdleSnapshotProvider (SnapshotIdle),
+// SessionEventProvider (SubscribeSessionEvents), and TurnEventProvider
+// (SubscribeTurnEvents) —
 // through to the underlying *Provider. The early cut-over for the acp provider.
 type seamBackedProvider struct {
 	runtime.Provider
@@ -27,6 +28,7 @@ var (
 	_ runtime.IdleWaitProvider            = (*seamBackedProvider)(nil)
 	_ runtime.IdleSnapshotProvider        = (*seamBackedProvider)(nil)
 	_ runtime.SessionEventProvider        = (*seamBackedProvider)(nil)
+	_ runtime.TurnEventProvider           = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs an acp provider served through the seams.
@@ -76,4 +78,10 @@ func (s *seamBackedProvider) SnapshotIdle(name string) (bool, error) {
 // passthrough).
 func (s *seamBackedProvider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
 	return s.raw.SubscribeSessionEvents(ctx)
+}
+
+// SubscribeTurnEvents implements [runtime.TurnEventProvider] (non-seam
+// passthrough).
+func (s *seamBackedProvider) SubscribeTurnEvents(ctx context.Context) (<-chan runtime.TurnEvent, error) {
+	return s.raw.SubscribeTurnEvents(ctx)
 }

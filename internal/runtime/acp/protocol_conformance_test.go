@@ -36,6 +36,13 @@ type protocolSession struct {
 // the given scenario flags plus --log-dir, and registers cleanup.
 func startProtocolFake(t *testing.T, args ...string) *protocolSession {
 	t.Helper()
+	return startProtocolFakeEnv(t, nil, args...)
+}
+
+// startProtocolFakeEnv is startProtocolFake with env added to the session's
+// runtime.Config.
+func startProtocolFakeEnv(t *testing.T, env map[string]string, args ...string) *protocolSession {
+	t.Helper()
 	var fixture acpConformanceFixture
 	if err := prepareACPConformanceFixture(t, &fixture); err != nil {
 		t.Fatal(err)
@@ -54,6 +61,7 @@ func startProtocolFake(t *testing.T, args ...string) *protocolSession {
 	if err := p.Start(context.Background(), name, runtime.Config{
 		Command: command,
 		WorkDir: t.TempDir(),
+		Env:     env,
 	}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

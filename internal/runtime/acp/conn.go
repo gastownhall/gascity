@@ -48,6 +48,9 @@ type sessionConn struct {
 	// events publishes this connection's session events; nil until Start
 	// commits the connection to the Provider that owns it.
 	events *sessionEventSource
+	// turnEvents publishes this connection's turns; nil until Start commits
+	// the connection to the Provider that owns it.
+	turnEvents *turnEventSource
 	// exited is set once the agent process has exited.
 	exited bool
 	// exitReported closes after the exit has been published (or found no
