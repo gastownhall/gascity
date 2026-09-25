@@ -211,6 +211,8 @@ func TestEvaluatePoolDefaultScaleCheckIgnoresRoutedActiveUnassignedWork(t *testi
 // runs before any real bd subprocess call, so a not-yet-isolating helper can
 // never itself reach a real shared server.
 func TestCmdGCRealBDTestsUseTestOwnedDoltContext(t *testing.T) {
+	skipSlowCmdGCTest(t, "uses real bd to prove test-owned HOME isolation; run make test-cmd-gc-process for full coverage")
+
 	bdPath, err := findPreferredBinary("bd", "/home/ubuntu/.local/bin/bd")
 	if err != nil {
 		t.Skip("bd not installed")
