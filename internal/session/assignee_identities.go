@@ -1,6 +1,10 @@
 package session
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/beads"
+)
 
 // This file is the confined session-class assignee-identity vocabulary: the
 // forms under which a work bead may be assigned to a session. It is shared by
@@ -97,4 +101,19 @@ func AssigneeIdentifier(i Info) string {
 		return sn
 	}
 	return strings.TrimSpace(i.ID)
+}
+
+// IsOpenSessionOfTemplate reports whether b is a live (not closed) session bead,
+// or a repairable one, created from template. Callers that meet a work bead's
+// assignee and need to know whether it is one of a pool's own sessions use it
+// after resolving the assignee as a bead ID: since #6324 an unaliased pool or
+// ephemeral session claims under its session bead ID (AssigneeIdentifier), so
+// the "<template>-" session_name prefix no longer identifies the claimant.
+func IsOpenSessionOfTemplate(b beads.Bead, template string) bool {
+	template = strings.TrimSpace(template)
+	if template == "" || !IsSessionBeadOrRepairable(b) {
+		return false
+	}
+	info := infoFromPersistedBead(b)
+	return !info.Closed && strings.TrimSpace(info.Template) == template
 }
