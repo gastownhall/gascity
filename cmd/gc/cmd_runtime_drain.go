@@ -822,16 +822,20 @@ func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.W
 		}
 		return
 	}
-	store, err := openCityStoreAt(cityPath)
+	// One load serves every open below: drain-ack is a one-shot command, so
+	// the config it just read is current. The saving applies only when this
+	// load succeeds: a failed load leaves cfg nil, the city open then loads
+	// again on its own, and the rig legs are skipped as before.
+	cfg, _ := loadCityConfig(cityPath, io.Discard)
+	store, err := openCityStoreAtWithConfig(cityPath, cfg)
 	if err != nil || store == nil {
 		return
 	}
-	cfg, _ := loadCityConfig(cityPath, io.Discard)
 	rigStores := func() map[string]beads.Store {
 		if cfg == nil {
 			return nil
 		}
-		return buildStandaloneRigStores(cfg, cityPath, io.Discard)
+		return buildStandaloneRigStoresWithConfig(cfg, cityPath, io.Discard)
 	}
 	releaseUnexecutedClaimsForSessionStore(cityPath, cfg, store, rigStores, sessionName, drainAckReleaseBudget, stderr)
 }

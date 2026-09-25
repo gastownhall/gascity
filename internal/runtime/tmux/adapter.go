@@ -1470,6 +1470,10 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 	return finishLaunch(ctx, ops, name, cfg, setupTimeout)
 }
 
+// startupDialogWarningOut receives startup-dialog warnings (a var so tests can
+// capture it).
+var startupDialogWarningOut io.Writer = os.Stderr
+
 // launchOrchestration runs the post-agent-launch startup steps against a session
 // whose agent pane has just been created (doStartSession) or respawned (the
 // un-weld relaunch path): wait for the agent command, accept startup dialogs
@@ -1490,7 +1494,9 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	// Always attempted when process names are set, since any Claude-like
 	// agent may show a trust dialog regardless of EmitsPermissionWarning.
 	if runtime.ShouldAcceptStartupDialogs(cfg) {
-		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
+		// Best-effort: a trust dialog left unconfirmed here is retried by
+		// the post-readiness pass below, which reports it if it persists.
+		_ = ops.acceptStartupDialogs(ctx, name)
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -1517,7 +1523,12 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	// ready screen. Re-run dialog acceptance after readiness so late dialogs do
 	// not strand the session in an unusable startup state.
 	if runtime.ShouldAcceptStartupDialogs(cfg) {
-		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
+		// Best-effort, but a trust dialog this last pass still could not
+		// confirm is left on screen with the cursor off the trust row, where
+		// any later Enter would answer it. Say so instead of dropping it.
+		if err := ops.acceptStartupDialogs(ctx, name); errors.Is(err, runtime.ErrWorkspaceTrustUnconfirmed) {
+			_, _ = fmt.Fprintf(startupDialogWarningOut, "warning: session %q: %v\n", name, err)
+		}
 		if err := ctx.Err(); err != nil {
 			return ignoreDeadlineIfSessionAlive(ops, name, err)
 		}

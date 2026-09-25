@@ -1026,7 +1026,7 @@ func TestNativeDoltStoreSetMetadataBatchRejectsInvalidExistingMetadata(t *testin
 				Metadata:  json.RawMessage(`{"existing":`),
 			}, nil
 		},
-		updateIssue: func(context.Context, string, map[string]interface{}, string) error {
+		updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
 			updateCalled = true
 			return nil
 		},
@@ -1039,13 +1039,14 @@ func TestNativeDoltStoreSetMetadataBatchRejectsInvalidExistingMetadata(t *testin
 		t.Fatalf("SetMetadataBatch error = %v, want bead metadata context", err)
 	}
 	if updateCalled {
-		t.Fatal("UpdateIssue was called after invalid metadata")
+		t.Fatal("UpdateIssueChecked was called after invalid metadata")
 	}
 }
 
 func TestNativeDoltStoreSetMetadataBatchRetriesSerializationConflictFromFreshState(t *testing.T) {
 	getCalls := 0
 	updateCalls := 0
+	var expectedVersions []int64
 	var writtenMetadata json.RawMessage
 	storage := &nativeDoltStorageSpy{
 		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
@@ -1055,16 +1056,21 @@ func TestNativeDoltStoreSetMetadataBatchRetriesSerializationConflictFromFreshSta
 				metadata = json.RawMessage(`{"concurrent":"preserved"}`)
 			}
 			return &beadslib.Issue{
-				ID:        "gc-conflict",
-				Title:     "metadata conflict",
-				Status:    beadslib.StatusOpen,
-				IssueType: beadslib.TypeTask,
-				Priority:  2,
-				Metadata:  metadata,
+				ID:         "gc-conflict",
+				Title:      "metadata conflict",
+				Status:     beadslib.StatusOpen,
+				IssueType:  beadslib.TypeTask,
+				Priority:   2,
+				Metadata:   metadata,
+				RowVersion: int64(getCalls),
 			}, nil
 		},
-		updateIssue: func(_ context.Context, _ string, updates map[string]interface{}, _ string) error {
+		updateIssueChecked: func(_ context.Context, _ string, updates map[string]interface{}, _ string, opts beadslib.UpdateIssueOptions) error {
 			updateCalls++
+			if opts.ExpectedVersion == nil {
+				t.Fatal("metadata write carried no expected version")
+			}
+			expectedVersions = append(expectedVersions, *opts.ExpectedVersion)
 			if updateCalls == 1 {
 				return errors.New("dolt commit: Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction, try restarting transaction")
 			}
@@ -1085,7 +1091,10 @@ func TestNativeDoltStoreSetMetadataBatchRetriesSerializationConflictFromFreshSta
 		t.Fatalf("GetIssue calls = %d, want 2 so retry re-reads current metadata", getCalls)
 	}
 	if updateCalls != 2 {
-		t.Fatalf("UpdateIssue calls = %d, want 2", updateCalls)
+		t.Fatalf("UpdateIssueChecked calls = %d, want 2", updateCalls)
+	}
+	if !slices.Equal(expectedVersions, []int64{1, 2}) {
+		t.Fatalf("expected versions = %v, want [1 2]: each attempt must swap against the version its own read returned", expectedVersions)
 	}
 	var got map[string]string
 	if err := json.Unmarshal(writtenMetadata, &got); err != nil {
@@ -1106,7 +1115,7 @@ func TestNativeDoltStoreSetMetadataBatchDoesNotRetryPermanentWriteError(t *testi
 			getCalls++
 			return &beadslib.Issue{ID: "gc-permanent", Metadata: json.RawMessage(`{"existing":"kept"}`)}, nil
 		},
-		updateIssue: func(context.Context, string, map[string]interface{}, string) error {
+		updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
 			updateCalls++
 			return wantErr
 		},
@@ -1118,7 +1127,7 @@ func TestNativeDoltStoreSetMetadataBatchDoesNotRetryPermanentWriteError(t *testi
 		t.Fatalf("SetMetadataBatch error = %v, want %v", err, wantErr)
 	}
 	if getCalls != 1 || updateCalls != 1 {
-		t.Fatalf("calls = GetIssue:%d UpdateIssue:%d, want 1 each", getCalls, updateCalls)
+		t.Fatalf("calls = GetIssue:%d UpdateIssueChecked:%d, want 1 each", getCalls, updateCalls)
 	}
 }
 
@@ -1131,7 +1140,7 @@ func TestNativeDoltStoreSetMetadataBatchStopsAfterThreeSerializationConflicts(t 
 			getCalls++
 			return &beadslib.Issue{ID: "gc-persistent-conflict"}, nil
 		},
-		updateIssue: func(context.Context, string, map[string]interface{}, string) error {
+		updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
 			updateCalls++
 			return wantErr
 		},
@@ -1143,7 +1152,7 @@ func TestNativeDoltStoreSetMetadataBatchStopsAfterThreeSerializationConflicts(t 
 		t.Fatalf("SetMetadataBatch error = %v, want %v", err, wantErr)
 	}
 	if getCalls != 3 || updateCalls != 3 {
-		t.Fatalf("calls = GetIssue:%d UpdateIssue:%d, want 3 each", getCalls, updateCalls)
+		t.Fatalf("calls = GetIssue:%d UpdateIssueChecked:%d, want 3 each", getCalls, updateCalls)
 	}
 }
 
@@ -3501,5 +3510,53 @@ func TestNativeDoltStoreReadyWorkOutcomeFilterToleratesOpenGates(t *testing.T) {
 				t.Fatalf("Ready = %+v, want empty: a blocker closed with gc.work_outcome=blocked must veto its dependent", got)
 			}
 		})
+	}
+}
+
+// TestNativeDoltStoreCustomTypesComeFromTheDatabaseNotYAML guards #6495 against
+// a tempting non-fix. The native store validates bead types against bd's
+// custom_types table (the config row only when that table is empty); the
+// library never loads .beads/config.yaml. So a type declared only in YAML is
+// still rejected; only registering it in the database makes the create pass.
+// The start-time shell heal (INSERT IGNORE into custom_types) is covered end to
+// end by TestEnsureBdRuntimeCustomTypesHealsUpgradedNativeStore in cmd/gc.
+func TestNativeDoltStoreCustomTypesComeFromTheDatabaseNotYAML(t *testing.T) {
+	ctx := context.Background()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	storage, err := beadslib.OpenBestAvailable(ctx, beadsDir)
+	if err != nil {
+		t.Skipf("upstream beads storage unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Fatalf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("SetConfig(issue_prefix): %v", err)
+	}
+	// The v1.4.2 registration: row and table both hold a list without the type.
+	if err := storage.SetConfig(ctx, "types.custom", "molecule,session,ops-extra"); err != nil {
+		t.Fatalf("SetConfig(types.custom): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("types.custom: molecule,session,ops-extra,startup-health-episode\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "native-test", "gc")
+
+	if _, err := store.Create(Bead{Title: "yaml only", Type: "startup-health-episode"}); err == nil || !strings.Contains(err.Error(), "invalid issue type") {
+		t.Fatalf("Create with a YAML-only type: err = %v, want invalid issue type", err)
+	}
+
+	// Registering the type in the database (row and table, as gc doctor --fix
+	// and the provider-owned start path do) is what the validator honors.
+	if err := storage.SetConfig(ctx, "types.custom", "molecule,session,ops-extra,startup-health-episode"); err != nil {
+		t.Fatalf("SetConfig(types.custom merged): %v", err)
+	}
+	for _, typ := range []string{"startup-health-episode", "ops-extra"} {
+		if _, err := store.Create(Bead{Title: "table registered", Type: typ}); err != nil {
+			t.Fatalf("Create(%s) after table registration: %v", typ, err)
+		}
 	}
 }
