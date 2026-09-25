@@ -139,6 +139,17 @@ import (
 // bead, which is why the caller degrades to unrouted claiming instead of failing.
 var errClaimRouteBindingCannotClaim = errors.New("the relocated coordination-class binding cannot claim")
 
+// errRestampGraphResident reports that an adoption re-stamp was declined because
+// the bead is resident in the relocated graph store, which has no
+// conditional-transfer primitive — and needs none, since no production close
+// path fences a graph-resident bead on its stored assignee.
+//
+// It wraps beads.ErrConditionalTransferUnsupported so a caller that only asks
+// "was a transfer possible?" still sees the same class of answer, while a caller
+// that must decide whether the un-moved spelling is HARMFUL can tell this
+// resident case apart from the work store's identical error.
+var errRestampGraphResident = fmt.Errorf("graph-resident bead: %w", beads.ErrConditionalTransferUnsupported)
+
 // hookClaimClassRoute is the opened coordination-class front door a claim-time
 // write falls back to, plus the per-invocation record of which bead ids the
 // binding was PROVED to hold.
@@ -643,9 +654,16 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 	// no conditional-transfer primitive there, so it reports unsupported and
 	// the bead is adopted as-is (the pre-re-stamp behavior). Anything else
 	// is the work store's, like the release above.
+	//
+	// The unsupported answer is tagged with errRestampGraphResident, because the
+	// caller's decision turns on WHERE the bead lives rather than on the error:
+	// the identical beads.ErrConditionalTransferUnsupported from the work store
+	// (a bd below the --if-assignee floor) means the opposite — a bead whose
+	// close bd will fence on the spelling that could not be moved — and must
+	// refuse adoption. See restampHookAdoption.
 	ops.RestampAdopted = func(ctx context.Context, dir string, env []string, beadID, fromAssignee, toAssignee string) (bool, error) {
 		if route.knownResident(beadID) {
-			return false, beads.ErrConditionalTransferUnsupported
+			return false, errRestampGraphResident
 		}
 		return base.RestampAdopted(ctx, dir, env, beadID, fromAssignee, toAssignee)
 	}

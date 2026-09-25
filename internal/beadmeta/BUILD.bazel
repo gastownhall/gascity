@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "beadmeta",
     srcs = [
+        "attempt.go",
         "control_close.go",
         "hold_labels.go",
         "keys.go",
@@ -20,6 +21,7 @@ go_library(
 go_test(
     name = "beadmeta_test",
     srcs = [
+        "attempt_test.go",
         "control_close_test.go",
         "guard_test.go",
         "hold_labels_test.go",
