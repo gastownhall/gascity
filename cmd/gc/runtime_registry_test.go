@@ -320,3 +320,14 @@ func TestRuntimeRegistryACPConfigCarriesStopGrace(t *testing.T) {
 		t.Errorf("default acp config = %+v, want 30s handshake, 60s nudge busy, 1000 buffer lines", def)
 	}
 }
+
+func TestRuntimeRegistryACPConfigCarriesCancelTimeout(t *testing.T) {
+	got := acpProviderConfig(config.ACPSessionConfig{CancelTimeout: "2s"})
+	if got.CancelTimeout != 2*time.Second {
+		t.Errorf("acp CancelTimeout = %v, want 2s from [session.acp] cancel_timeout", got.CancelTimeout)
+	}
+	def := acpProviderConfig(config.ACPSessionConfig{})
+	if def.CancelTimeout != config.DefaultACPCancelTimeout {
+		t.Errorf("default acp CancelTimeout = %v, want config.DefaultACPCancelTimeout (%v)", def.CancelTimeout, config.DefaultACPCancelTimeout)
+	}
+}

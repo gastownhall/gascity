@@ -44,6 +44,11 @@ var ErrInteractionResponseInvalid = errors.New("interaction response is invalid"
 // their own refusal (session.ErrPendingInteraction).
 var ErrNudgeRefusedPendingInteraction = errors.New("nudge refused: session has a pending interaction")
 
+// ErrInterruptNotSettled reports that Interrupt asked the session to stop its
+// current turn but the turn had not ended when the provider's settle bound
+// ran out. The session is left running; ending it is an explicit Stop.
+var ErrInterruptNotSettled = errors.New("interrupt did not settle the session's turn")
+
 // ErrSessionDiedDuringStartup reports that a provider created a session
 // process, but it exited before startup completed successfully.
 var ErrSessionDiedDuringStartup = errors.New("session died during startup")
@@ -159,7 +164,10 @@ type Provider interface {
 
 	// Interrupt sends a soft interrupt signal (e.g., Ctrl-C / SIGINT) to
 	// the named session. Best-effort: returns nil if the session doesn't
-	// exist. Used for graceful shutdown before Stop.
+	// exist. Used for graceful shutdown before Stop. A provider with a
+	// protocol-level cancel may instead wait a bounded time for the
+	// interrupted turn to end and return [ErrInterruptNotSettled] if it
+	// does not.
 	Interrupt(name string) error
 
 	// IsRunning reports whether the named provider runtime exists. It does not

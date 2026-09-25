@@ -1768,7 +1768,18 @@ type ACPSessionConfig struct {
 	// to the default. gc stop bounds each session at 30s, so keep stop_grace
 	// comfortably below that.
 	StopGrace string `toml:"stop_grace,omitempty" jsonschema:"default=5s"`
+	// CancelTimeout is how long interrupting an ACP session waits for the
+	// agent to end its turn after session/cancel before falling back to
+	// SIGINT. The interrupt never kills the agent. Duration string (e.g.,
+	// "10s", "30s"). Defaults to "10s"; non-positive or unparseable values
+	// fall back to the default.
+	CancelTimeout string `toml:"cancel_timeout,omitempty" jsonschema:"default=10s"`
 }
+
+// DefaultACPCancelTimeout is how long an ACP interrupt waits for
+// session/cancel to settle the turn when [session.acp] cancel_timeout is
+// unset or invalid.
+const DefaultACPCancelTimeout = 10 * time.Second
 
 // DefaultACPStopGrace is the ACP SIGTERM-to-SIGKILL grace used when
 // [session.acp] stop_grace is unset or invalid. It matches the grace every
@@ -1794,6 +1805,16 @@ func (a *ACPSessionConfig) StopGraceDuration() time.Duration {
 		return d
 	}
 	return DefaultACPStopGrace
+}
+
+// CancelTimeoutDuration returns the ACP session/cancel settle bound as a
+// time.Duration. Defaults to DefaultACPCancelTimeout if empty, unparseable,
+// or non-positive.
+func (a *ACPSessionConfig) CancelTimeoutDuration() time.Duration {
+	if d := durationOr(a.CancelTimeout, DefaultACPCancelTimeout); d > 0 {
+		return d
+	}
+	return DefaultACPCancelTimeout
 }
 
 // OutputBufferLinesOrDefault returns the output buffer line count.

@@ -24,7 +24,8 @@ import (
 // of the turn by writing private notifications to the agent's stdin:
 // _test/finish answers the prompt, _test/cancel sends $/cancel_request for
 // params.requestId, _test/ask sends one more permission request with id
-// params.id, _test/exit exits. $GC_PERM_OPTIONS (a JSON array) and
+// params.id, _test/exit exits. A session/cancel from gc answers the prompt
+// canceled. $GC_PERM_OPTIONS (a JSON array) and
 // $GC_PERM_TITLE ("-" omits the title) override the request contents. SIGINT
 // is ignored so Interrupt leaves the agent running.
 func fakeACPPermissionCommand(rawIDs ...string) string {
@@ -71,6 +72,8 @@ for line in sys.stdin:
                   "params": {"sessionId": "s1", "toolCall": tool, "options": options}})
     elif method == "_test/finish":
         send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "end_turn"}})
+    elif method == "session/cancel":
+        send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "cancel" + "led"}})
     elif method == "_test/cancel":
         send({"jsonrpc": "2.0", "method": "$/cancel_request",
               "params": {"requestId": msg["params"]["requestId"]}})
