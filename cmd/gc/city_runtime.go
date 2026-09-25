@@ -1485,6 +1485,14 @@ func (cr *CityRuntime) tick(
 		recordPhase(TraceSiteControllerTickPhase, "session_phases.stretch_skip", time.Now(), map[string]any{
 			"session_patrol_interval": cr.cfg.Daemon.SessionPatrolInterval,
 		})
+		// Queued-nudge delivery keeps the ordinary patrol cadence even when
+		// session reconciliation is stretched. The event stream that permits
+		// stretching session scans is independent of the nudge stream, so a
+		// missed wake or failed nudge subscription must not defer this safety
+		// net until session_patrol_interval.
+		phaseStart = time.Now()
+		cr.nudgeDispatchTick(ctx)
+		recordPhase(TraceSiteControllerTickPhase, "nudge_dispatch_tick.stretch_fallback", phaseStart, nil)
 	}
 	// Graph stores intentionally do not emit bead.closed, so a step closed
 	// between the durable write and the best-effort journal append would be a

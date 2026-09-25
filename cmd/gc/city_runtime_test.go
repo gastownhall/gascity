@@ -1118,6 +1118,59 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T)
 	}
 }
 
+func TestCityRuntimeTickDispatchesQueuedNudgesWhenSessionPhasesAreStretched(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "bd")
+	stubManagedDoltStoreOpeners(t)
+
+	cityPath := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityPath)
+	pump, cancel := streamingPump(t)
+	defer cancel()
+
+	cfg := &config.City{
+		Daemon: config.DaemonConfig{
+			PatrolInterval:        "30s",
+			SessionPatrolInterval: "10m",
+		},
+	}
+	sp := runtime.NewFake()
+	cr := &CityRuntime{
+		cityPath:          cityPath,
+		cityName:          "test-city",
+		cfg:               cfg,
+		sp:                sp,
+		buildFn:           func(*config.City, runtime.Provider, beads.Store) DesiredStateResult { return DesiredStateResult{} },
+		dops:              newDrainOps(sp),
+		rec:               events.Discard,
+		sessionDrains:     newDrainTracker(),
+		sessionEvents:     pump,
+		sessionPhasesLast: time.Now(),
+		logPrefix:         "gc test",
+		stdout:            io.Discard,
+		stderr:            io.Discard,
+	}
+	dispatcher := &nudgeEventDispatcher{
+		eventCapable: true,
+		kicked:       make(chan struct{}, 1),
+	}
+	cr.nudgeEvents = dispatcher
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+
+	dirty := &atomic.Bool{}
+	lastProviderName := ""
+	prevPoolRunning := map[string]bool{}
+	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "patrol")
+
+	dispatcher.mu.Lock()
+	defer dispatcher.mu.Unlock()
+	if !dispatcher.fullPassDue {
+		t.Fatal("stretched patrol tick did not schedule the queued-nudge fallback pass")
+	}
+}
+
 func TestCityRuntimeTickPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "bd")
