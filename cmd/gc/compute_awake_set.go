@@ -58,6 +58,7 @@ type AwakeNamedSession struct {
 type AwakeSessionBead struct {
 	ID                        string
 	SessionName               string
+	Alias                     string // public alias pool seats claim work under (GC_ALIAS); empty for legacy beads
 	Template                  string
 	State                     string // "creating", "active", "asleep", "drained", "closed"
 	SleepReason               string
@@ -780,6 +781,12 @@ func sessionAssigneeMatches(named []AwakeNamedSession, bead AwakeSessionBead, as
 		return false
 	}
 	if assignee == bead.ID || assignee == bead.SessionName {
+		return true
+	}
+	// Pool seats claim work under their alias (session.AssigneeIdentifier is
+	// alias-first), so a claim held by "tributary/gastown.nux" must keep the
+	// seat whose session_name is "tributary--gastown__nux" awake and counted.
+	if bead.Alias != "" && assignee == bead.Alias {
 		return true
 	}
 	if bead.NamedIdentity != "" {

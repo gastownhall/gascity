@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -916,11 +918,44 @@ func sessionAssignmentIdentifiersForConfig(sessionBead beads.Bead, cfg *config.C
 }
 
 func sessionAssignmentIdentifierRaw(sessionBead beads.Bead) []string {
-	return []string{
-		strings.TrimSpace(sessionBead.ID),
-		strings.TrimSpace(sessionBead.Metadata["session_name"]),
-		strings.TrimSpace(sessionBead.Metadata[namedSessionIdentityMetadata]),
+	// ai-city local patch (2026-09-14): pool seats claim work under their
+	// alias (GC_ALIAS, e.g. "tributary/gastown.nux"), not the tmux
+	// session_name ("tributary--gastown__nux"). The orphan-release path already
+	// recognizes the full identity set (sessionBeadAssigneeIdentities: id,
+	// session_name, named identity, alias, alias_history); the keep-awake,
+	// scale-slot and drain-ack close gates must use the same set, otherwise a
+	// working pool seat reads as work-free and the reconciler retires it
+	// mid-claim (ki-43ip: 175-285 retirements/day on tributary).
+	return withoutTransientSlotAliases(sessionBeadAssigneeIdentities(sessionBead),
+		sessionBead.ID, sessionBead.Metadata["session_name"], sessionBead.Metadata[namedSessionIdentityMetadata])
+}
+
+// transientSlotAliasPattern matches slot-form pool aliases ("<pool>-<n>",
+// e.g. "gascity/gc.run-operator-1"). Slot numbers rebind across incarnations,
+// so slot-form ownership must never keep a session alive
+// (TestAssignmentGuardsIgnoreTransientPoolSlotAliases). Namepool aliases
+// ("tributary/gastown.nux") are the identity GC_ALIAS claims under and are
+// honored.
+var transientSlotAliasPattern = regexp.MustCompile(`-[0-9]+$`)
+
+func withoutTransientSlotAliases(ids []string, keep ...string) []string {
+	kept := make(map[string]struct{}, len(keep))
+	for _, k := range keep {
+		if k = strings.TrimSpace(k); k != "" {
+			kept[k] = struct{}{}
+		}
 	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, ok := kept[id]; !ok && transientSlotAliasPattern.MatchString(path.Base(id)) {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
 }
 
 // sessionAssignmentIdentifiersForConfigInfo is the session.Info form of
@@ -963,11 +998,10 @@ func sessionAssignmentIdentifiersForConfigInfo(info session.Info, cfg *config.Ci
 }
 
 func sessionAssignmentIdentifierRawInfo(info session.Info) []string {
-	return []string{
-		strings.TrimSpace(info.ID),
-		strings.TrimSpace(info.SessionNameMetadata),
-		strings.TrimSpace(info.ConfiguredNamedIdentity),
-	}
+	// Info twin of sessionAssignmentIdentifierRaw (see the alias note there);
+	// session.AssigneeIdentities is the confined codec both forms share.
+	return withoutTransientSlotAliases(session.AssigneeIdentities(info),
+		info.ID, info.SessionNameMetadata, info.ConfiguredNamedIdentity)
 }
 
 // sessionAssignmentIdentifiersInfo is the session.Info form of
