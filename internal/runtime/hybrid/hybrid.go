@@ -264,6 +264,12 @@ func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
 	return runtime.SessionSleepCapabilityDisabled
 }
 
+// SupportsSessionEvents reports whether either wrapped backend supplies a
+// session-event stream.
+func (p *Provider) SupportsSessionEvents() bool {
+	return runtime.SupportsSessionEvents(p.local) || runtime.SupportsSessionEvents(p.remote)
+}
+
 // SubscribeSessionEvents forwards the session-event stream of whichever
 // backend implements runtime.SessionEventProvider. Today only herdr does, so
 // without this method, wrapping an event-capable local backend (e.g. herdr)
@@ -276,9 +282,9 @@ func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.S
 	lSEP, lok := p.local.(runtime.SessionEventProvider)
 	rSEP, rok := p.remote.(runtime.SessionEventProvider)
 	switch {
-	case lok:
+	case lok && runtime.SupportsSessionEvents(p.local):
 		return lSEP.SubscribeSessionEvents(ctx)
-	case rok:
+	case rok && runtime.SupportsSessionEvents(p.remote):
 		return rSEP.SubscribeSessionEvents(ctx)
 	default:
 		return nil, fmt.Errorf("neither local nor remote backend implements SubscribeSessionEvents")

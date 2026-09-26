@@ -12,7 +12,31 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-var _ runtime.Provider = (*Provider)(nil)
+var (
+	_ runtime.Provider                       = (*Provider)(nil)
+	_ runtime.SessionEventCapabilityProvider = (*Provider)(nil)
+)
+
+type sessionEventFake struct{ *runtime.Fake }
+
+func (p *sessionEventFake) SubscribeSessionEvents(context.Context) (<-chan runtime.SessionEvent, error) {
+	return make(chan runtime.SessionEvent), nil
+}
+
+func TestSupportsSessionEventsReportsWrappedCapability(t *testing.T) {
+	plain := runtime.NewFake()
+	evented := &sessionEventFake{Fake: runtime.NewFake()}
+
+	if New(plain, runtime.NewFake()).SupportsSessionEvents() {
+		t.Fatal("SupportsSessionEvents() = true with two plain backends")
+	}
+	if !New(evented, plain).SupportsSessionEvents() {
+		t.Fatal("SupportsSessionEvents() = false with an event-capable default backend")
+	}
+	if !New(plain, evented).SupportsSessionEvents() {
+		t.Fatal("SupportsSessionEvents() = false with an event-capable ACP backend")
+	}
+}
 
 // Relaunch must reach the routed backend (default vs ACP), or the reconciler's
 // RelaunchProvider type-assert would be masked by the auto router and fall back

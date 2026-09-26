@@ -7,20 +7,14 @@ import (
 	"io"
 	"net"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/worker"
 )
-
-// pingNudgeWakeSocketDialTimeout bounds how long a producer waits to dial
-// the supervisor wake socket. Producers must not block on a stale or
-// missing socket — legacy-mode cities and pre-start producers expect the
-// dial to fail fast.
-const pingNudgeWakeSocketDialTimeout = 200 * time.Millisecond
 
 // pingNudgeWakeSocket sends a best-effort wake signal to the supervisor's
 // nudge dispatcher. Callers invoke this after enqueueing a queued nudge so
@@ -30,17 +24,21 @@ const pingNudgeWakeSocketDialTimeout = 200 * time.Millisecond
 // and the per-session poller in legacy mode each guarantee eventual
 // delivery without the wake.
 func pingNudgeWakeSocket(cityPath string) {
-	if cityPath == "" {
-		return
-	}
-	path := nudgequeue.WakeSocketPath(cityPath)
-	conn, err := net.DialTimeout("unix", path, pingNudgeWakeSocketDialTimeout)
-	if err != nil {
-		return
-	}
-	defer conn.Close() //nolint:errcheck // best-effort signaling
-	_ = conn.SetWriteDeadline(time.Now().Add(pingNudgeWakeSocketDialTimeout))
-	_, _ = conn.Write([]byte{1})
+	nudgequeue.PingWakeSocket(cityPath)
+}
+
+// nudgeDispatcherIsHosting reports whether a supervisor-hosted nudge
+// dispatcher is actually listening on the wake socket for cityPath, not
+// merely configured for supervisor mode or running against an
+// event-capable provider (nudgeDispatcherIsSupervisor and a bare
+// runtime.SessionEventProvider type assertion each answer that weaker,
+// configuration/capability-only question). Delegates to
+// nudgequeue.DispatcherIsHosting —
+// see its doc comment for the false-negative-over-false-positive tradeoff
+// this makes: callers must only use it to suppress a fallback poller, never
+// to prove a dispatcher is absent.
+func nudgeDispatcherIsHosting(cityPath string) bool {
+	return nudgequeue.DispatcherIsHosting(cityPath)
 }
 
 // startNudgeWakeListener opens the supervisor wake socket and spawns an
@@ -50,7 +48,7 @@ func pingNudgeWakeSocket(cityPath string) {
 // back to patrol-interval dispatching.
 func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- struct{}, stderr io.Writer, logPrefix string) (net.Listener, error) {
 	path := nudgequeue.WakeSocketPath(cityPath)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := nudgequeue.EnsureWakeSocketDir(cityPath); err != nil {
 		return nil, fmt.Errorf("creating nudge wake dir: %w", err)
 	}
 	// A stale socket from a prior supervisor crash blocks Listen with
@@ -117,11 +115,61 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- 
 // logNudgeDispatchSkip); pass nil to suppress (skip counts still accumulate
 // into the persisted queue state's DispatchSkips regardless of debugOut, so
 // `gc nudge status` stays informative even with GC_DEBUG unset).
+//
+// (Event-capable providers never reach this: nudgeDispatchTick routes their
+// passes through the nudge event dispatcher's worker instead.)
 func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, debugOut io.Writer) (int, error) {
-	if cfg == nil || sessionBeads == nil || cityPath == "" {
+	if cfg == nil || sessionBeads == nil || cityPath == "" || !nudgeDispatcherIsSupervisor(cfg) {
 		return 0, nil
 	}
-	if !nudgeDispatcherIsSupervisor(cfg) {
+	return deliverPendingQueuedNudges(cityPath, cfg, sessStore, sp, sessionBeads, "", debugOut, func(target nudgeTarget, obs worker.LiveObservation) (bool, error) {
+		return tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+	})
+}
+
+// startLegacyPollersForQueuedNudges hands queued work back to the per-session
+// poller path when a live runtime leaves supervisor/event dispatch mode. New
+// enqueues start their own poller, but items already queued while the wake
+// listener was hosting have no sidecar and would otherwise remain stranded.
+func startLegacyPollersForQueuedNudges(cityPath string, cfg *config.City, sessionBeads *sessionBeadSnapshot) error {
+	if cityPath == "" || cfg == nil || sessionBeads == nil {
+		return nil
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		return fmt.Errorf("loading nudge queue for legacy handoff: %w", err)
+	}
+	queuedAgents := make(map[string]bool, len(state.Pending)+len(state.InFlight))
+	for _, item := range state.Pending {
+		queuedAgents[item.Agent] = true
+	}
+	for _, item := range state.InFlight {
+		queuedAgents[item.Agent] = true
+	}
+	var firstErr error
+	for _, info := range sessionBeads.OpenInfos() {
+		target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
+		for _, key := range target.queueKeys() {
+			if queuedAgents[key] {
+				if err := startNudgePollerForTarget(target); err != nil && firstErr == nil {
+					firstErr = fmt.Errorf("starting legacy nudge poller for %q: %w", target.sessionName, err)
+				}
+				break
+			}
+		}
+	}
+	return firstErr
+}
+
+// deliverPendingQueuedNudges is one dispatcher pass over the queue: collect
+// the agents with due pending (or lease-expired in-flight) items, resolve
+// each matching open session bead to a nudgeTarget — restricted to
+// sessionFilter when set — observe it, and hand running matches to deliver.
+// Returns how many targets delivered at least one item. debugOut is threaded
+// through to logNudgeDispatchSkip; nil suppresses the debug lines (skip
+// counts still accumulate regardless).
+func deliverPendingQueuedNudges(cityPath string, cfg *config.City, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, sessionFilter string, debugOut io.Writer, deliver func(nudgeTarget, worker.LiveObservation) (bool, error)) (int, error) {
+	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return 0, nil
 	}
 	now := time.Now()
@@ -192,6 +240,9 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 			logNudgeDispatchSkip(debugOut, "no-target", info.AgentName, info.ID, "")
 			continue
 		}
+		if sessionFilter != "" && target.sessionName != sessionFilter {
+			continue
+		}
 		// ACP sessions also flow through this dispatcher. The inject-on-hook
 		// drain path still catches deliveries when the agent receives external
 		// prompts, but a warm-idle ACP session never fires its hook on its
@@ -228,7 +279,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 			logNudgeDispatchSkip(debugOut, "not-running", target.agentKey(), target.sessionName, "")
 			continue
 		}
-		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+		ok, err := deliver(target, obs)
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}

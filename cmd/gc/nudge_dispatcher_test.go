@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -532,6 +534,43 @@ func TestDispatchAllQueuedNudgesNilCfg(t *testing.T) {
 	}
 }
 
+func TestStartLegacyPollersForQueuedNudgesReturnsPollerStartError(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityPath := t.TempDir()
+	if err := enqueueQueuedNudge(cityPath, newQueuedNudge("worker", "msg", time.Now())); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"agent_name":   "worker",
+			"provider":     "codex",
+			"session_name": "worker-session",
+			"state":        "active",
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	snapshot, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeadSnapshot: %v", err)
+	}
+
+	wantErr := errors.New("start poller")
+	previousStartNudgePoller := startNudgePoller
+	startNudgePoller = func(_, _, _ string) error { return wantErr }
+	t.Cleanup(func() { startNudgePoller = previousStartNudgePoller })
+
+	err = startLegacyPollersForQueuedNudges(cityPath, &config.City{}, snapshot)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("startLegacyPollersForQueuedNudges error = %v, want %v", err, wantErr)
+	}
+}
+
 // TestMaybeStartNudgePollerSkipsACPSessionInLegacyMode verifies the
 // legacy per-session poller still skips ACP sessions. A sidecar `gc
 // nudge poll` process can observe the ACP control socket, but it does
@@ -557,7 +596,117 @@ func TestMaybeStartNudgePollerSkipsACPSessionInLegacyMode(t *testing.T) {
 	}
 }
 
-func TestMaybeStartNudgePollerSkipsInSupervisorMode(t *testing.T) {
+func TestNudgeDispatcherIsHosting(t *testing.T) {
+	if nudgeDispatcherIsHosting("") {
+		t.Error("empty cityPath must report not hosting")
+	}
+
+	dir := t.TempDir()
+	if nudgeDispatcherIsHosting(dir) {
+		t.Error("no listener on the wake socket must report not hosting")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wakeCh := make(chan struct{}, 1)
+	lis, err := startNudgeWakeListener(ctx, dir, wakeCh, nil, "test")
+	if err != nil {
+		t.Fatalf("startNudgeWakeListener: %v", err)
+	}
+	defer lis.Close() //nolint:errcheck
+
+	if !nudgeDispatcherIsHosting(dir) {
+		t.Error("live listener on the wake socket must report hosting")
+	}
+}
+
+func TestNudgeDispatcherIsHostingLongCityPath(t *testing.T) {
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), strings.Repeat("environment-specific-temp", 4)))
+	cityPath := filepath.Join(t.TempDir(), strings.Repeat("long-city-path", 12))
+	if path := nudgequeue.WakeSocketPath(cityPath); len(path) > 100 {
+		t.Fatalf("fallback wake socket path length = %d, want <= 100: %q", len(path), path)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wakeCh := make(chan struct{}, 1)
+	lis, err := startNudgeWakeListener(ctx, cityPath, wakeCh, nil, "test")
+	if err != nil {
+		t.Fatalf("startNudgeWakeListener for long city path: %v", err)
+	}
+	defer lis.Close() //nolint:errcheck
+
+	if !nudgequeue.DispatcherIsHosting(cityPath) {
+		t.Fatal("DispatcherIsHosting = false for live long-path listener")
+	}
+}
+
+func TestMaybeStartNudgePollerSkipsWhenDispatcherActuallyHosting(t *testing.T) {
+	prev := startNudgePoller
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	called := false
+	startNudgePoller = func(_, _, _ string) error {
+		called = true
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir := t.TempDir()
+	wakeCh := make(chan struct{}, 1)
+	lis, err := startNudgeWakeListener(ctx, dir, wakeCh, nil, "test")
+	if err != nil {
+		t.Fatalf("startNudgeWakeListener: %v", err)
+	}
+	defer lis.Close() //nolint:errcheck
+
+	maybeStartNudgePoller(nudgeTarget{
+		cityPath:    dir,
+		sessionName: "worker-session",
+		cfg:         supervisorCfg(),
+	})
+	if called {
+		t.Fatal("startNudgePoller invoked while a dispatcher is actually listening on the wake socket; the live dispatcher would race with the per-session poller")
+	}
+}
+
+// TestMaybeStartNudgePollerStartsWhenConfiguredButNotHosting is the
+// regression test for gc-3qty46 / gc-olw3uw: nudgeDispatcherIsSupervisor
+// (config-only) or providerRetiresNudgePollers (capability-only) each only
+// answer "is the city SET UP for a dispatcher", not "is one actually
+// delivering". A city configured for supervisor mode (or given an
+// event-capable provider) with no process listening on the wake socket left
+// every queued nudge with no deliverer and no error. maybeStartNudgePoller
+// must gate on the live wake socket (nudgeDispatcherIsHosting) instead.
+func TestMaybeStartNudgePollerStartsWhenConfiguredButNotHosting(t *testing.T) {
+	prev := startNudgePoller
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	called := false
+	startNudgePoller = func(_, _, _ string) error {
+		called = true
+		return nil
+	}
+
+	// supervisorCfg but no listener started on the wake socket: configured
+	// for a dispatcher that is not actually hosting.
+	maybeStartNudgePoller(nudgeTarget{
+		cityPath:    t.TempDir(),
+		sessionName: "worker-session",
+		cfg:         supervisorCfg(),
+	})
+	if !called {
+		t.Fatal("startNudgePoller not invoked despite no dispatcher listening on the wake socket; configuration alone must not suppress the fallback poller")
+	}
+}
+
+// TestMaybeStartNudgePollerStartsForEventCapableProviderWithoutHosting covers
+// the capable-but-not-hosting case: an event-capable provider (satisfies
+// runtime.SessionEventProvider, so providerRetiresNudgePollers reports true)
+// with no dispatcher actually listening. Capability alone previously
+// suppressed the poller; the live wake-socket check must not.
+func TestMaybeStartNudgePollerStartsForEventCapableProviderWithoutHosting(t *testing.T) {
 	prev := startNudgePoller
 	t.Cleanup(func() { startNudgePoller = prev })
 
@@ -570,10 +719,21 @@ func TestMaybeStartNudgePollerSkipsInSupervisorMode(t *testing.T) {
 	maybeStartNudgePoller(nudgeTarget{
 		cityPath:    t.TempDir(),
 		sessionName: "worker-session",
-		cfg:         supervisorCfg(),
+		cfg:         &config.City{},
 	})
-	if called {
-		t.Fatal("startNudgePoller invoked in supervisor mode; supervisor dispatcher would race with the per-session poller")
+	if !called {
+		t.Fatal("startNudgePoller not invoked for an event-capable provider with no live dispatcher; capability alone must not suppress the fallback poller")
+	}
+}
+
+func TestMaybeStartNudgePollerStartsInLegacyMode(t *testing.T) {
+	prev := startNudgePoller
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	called := false
+	startNudgePoller = func(_, _, _ string) error {
+		called = true
+		return nil
 	}
 
 	maybeStartNudgePoller(nudgeTarget{
@@ -607,5 +767,57 @@ func TestEnqueuePingsWakeSocket(t *testing.T) {
 	case <-wakeCh:
 	case <-time.After(2 * time.Second):
 		t.Fatal("wakeCh not signaled after enqueue")
+	}
+}
+
+// TestEnsureNudgeWakeListenerReconcilesOnConfigReload is the regression test
+// for finding 4 of PR #4967 gate report gc-75w2t8: the wake-socket listener
+// used to be decided once at startup
+// (nudgeDispatcherIsSupervisor(cr.cfg) || cr.nudgeEvents.active()), so a
+// later config reload that flips either condition true never started one.
+// ensureNudgeWakeListener must be re-run on every reload and open the
+// socket the first time either condition holds.
+func TestEnsureNudgeWakeListenerReconcilesOnConfigReload(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir := t.TempDir()
+
+	cr := &CityRuntime{
+		cityPath:    dir,
+		cfg:         &config.City{}, // legacy mode, no event-capable provider
+		stderr:      discardWriter{},
+		logPrefix:   "test",
+		nudgeWakeCh: make(chan struct{}, 1),
+	}
+
+	cr.ensureNudgeWakeListener(ctx)
+	if cr.nudgeWakeListener != nil {
+		t.Fatal("listener started in legacy mode with no event-capable provider")
+	}
+	if _, err := net.DialTimeout("unix", nudgequeue.WakeSocketPath(dir), 50*time.Millisecond); err == nil {
+		t.Fatal("wake socket accepted a dial before any listener was started")
+	}
+
+	// Simulate a cfg-only reload that turns on supervisor mode without a
+	// provider swap (providerChanged=false in reloadConfigTraced's call).
+	cr.cfg = supervisorCfg()
+	cr.ensureNudgeWakeListener(ctx)
+	if cr.nudgeWakeListener == nil {
+		t.Fatal("listener not started after reload flipped supervisor mode on")
+	}
+	defer cr.nudgeWakeListener.Close() //nolint:errcheck
+
+	conn, err := net.DialTimeout("unix", nudgequeue.WakeSocketPath(dir), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial wake socket after reload: %v", err)
+	}
+	conn.Close() //nolint:errcheck
+
+	// A second reload must not attempt to start a duplicate listener (which
+	// would fail with "address already in use" and log a spurious warning).
+	startedListener := cr.nudgeWakeListener
+	cr.ensureNudgeWakeListener(ctx)
+	if cr.nudgeWakeListener != startedListener {
+		t.Fatal("ensureNudgeWakeListener replaced an already-running listener")
 	}
 }

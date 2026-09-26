@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,6 +18,72 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+// wakeSocketDialTimeout bounds how long DispatcherIsHosting waits for the
+// supervisor wake socket to accept a connection. Kept short: this is a
+// liveness probe on a decision's critical path (whether to spawn a sidecar
+// poller), not a delivery attempt.
+const wakeSocketDialTimeout = 200 * time.Millisecond
+
+// DispatcherIsHosting reports whether a supervisor-hosted nudge dispatcher is
+// actually listening on the wake socket for cityPath, not merely configured
+// or capable of one. A successful dial is the only signal treated as
+// hosting: the supervisor may be down, mid-restart, or running a provider
+// that leaves the socket unopened, and all of those must be treated as "no
+// deliverer" rather than guessed at. A failed dial does NOT prove a
+// dispatcher is absent (the supervisor could be hosting via patrol-interval
+// fallback with a socket bind that failed), so callers must only use this to
+// decide whether to skip a sidecar poller — a false negative here starts a
+// harmless duplicate poller, but a false positive would suppress the only
+// deliverer and silently strand queued items. This function is written to
+// never produce that false positive.
+func DispatcherIsHosting(cityPath string) bool {
+	if strings.TrimSpace(cityPath) == "" {
+		return false
+	}
+	path, fallback := wakeSocketPath(cityPath)
+	if err := EnsureWakeSocketDir(cityPath); err != nil {
+		return false
+	}
+	if fallback && !ownedWakeSocket(path) {
+		return false
+	}
+	conn, err := net.DialTimeout("unix", path, wakeSocketDialTimeout)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// PingWakeSocket sends a best-effort wake signal to a supervisor-hosted
+// nudge dispatcher. Callers invoke this AFTER an item lands in the queue: the
+// dispatcher's accept loop fires its wake on the connection alone, before any
+// payload is read, so a dial issued before the enqueue (e.g. a preceding
+// DispatcherIsHosting probe) can spend that wake on a pass that finds nothing
+// to deliver yet. Failures (no listener, dial or write timeout) are
+// intentionally silent: the patrol-tick fallback in supervisor mode and the
+// per-session poller in legacy mode each guarantee eventual delivery without
+// this ping.
+func PingWakeSocket(cityPath string) {
+	if strings.TrimSpace(cityPath) == "" {
+		return
+	}
+	path, fallback := wakeSocketPath(cityPath)
+	if err := EnsureWakeSocketDir(cityPath); err != nil {
+		return
+	}
+	if fallback && !ownedWakeSocket(path) {
+		return
+	}
+	conn, err := net.DialTimeout("unix", path, wakeSocketDialTimeout)
+	if err != nil {
+		return
+	}
+	defer conn.Close() //nolint:errcheck // best-effort signaling
+	_ = conn.SetWriteDeadline(time.Now().Add(wakeSocketDialTimeout))
+	_, _ = conn.Write([]byte{1})
+}
 
 // wakeSocketPathLimit caps the canonical socket path length below the
 // platform sockaddr_un limit (108 bytes on Linux, 104 on macOS). Matches
@@ -217,9 +285,14 @@ func LockPath(cityPath string) string {
 // when the legacy pathname is too close to the platform sockaddr_un
 // limit. Mirrors the controllerSocketPath pattern in cmd/gc/controller.go.
 func WakeSocketPath(cityPath string) string {
+	path, _ := wakeSocketPath(cityPath)
+	return path
+}
+
+func wakeSocketPath(cityPath string) (string, bool) {
 	legacy := citylayout.RuntimePath(cityPath, "nudges", "wake.sock")
 	if len(legacy) <= wakeSocketPathLimit {
-		return legacy
+		return legacy, false
 	}
 	canonical, err := filepath.Abs(cityPath)
 	if err != nil {
@@ -227,5 +300,50 @@ func WakeSocketPath(cityPath string) string {
 	}
 	canonical = filepath.Clean(canonical)
 	sum := sha256.Sum256([]byte(canonical))
-	return filepath.Join("/tmp", "gascity-nudge", fmt.Sprintf("%x.sock", sum[:16]))
+	privateDir := filepath.Join("/tmp", fmt.Sprintf("gascity-nudge-%d", os.Getuid()))
+	return filepath.Join(privateDir, fmt.Sprintf("%x.sock", sum[:16])), true
+}
+
+// EnsureWakeSocketDir creates and validates the directory containing the wake
+// socket. Long-path fallbacks live in an owner-only directory because a shared
+// temp directory would let another local user impersonate the dispatcher.
+func EnsureWakeSocketDir(cityPath string) error {
+	path, fallback := wakeSocketPath(cityPath)
+	dir := filepath.Dir(path)
+	if !fallback {
+		return os.MkdirAll(dir, 0o755)
+	}
+	return ensurePrivateWakeSocketDir(dir)
+}
+
+func ensurePrivateWakeSocketDir(dir string) error {
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("create private wake socket directory: %w", err)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("inspect private wake socket directory: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("private wake socket path %q is not a directory", dir)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(stat.Uid) != os.Getuid() {
+		return fmt.Errorf("private wake socket directory %q is not owned by uid %d", dir, os.Getuid())
+	}
+	if info.Mode().Perm() != 0o700 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return fmt.Errorf("secure private wake socket directory: %w", err)
+		}
+	}
+	return nil
+}
+
+func ownedWakeSocket(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSocket == 0 {
+		return false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int(stat.Uid) == os.Getuid()
 }

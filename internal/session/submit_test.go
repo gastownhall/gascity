@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -478,6 +480,177 @@ func TestSubmitFollowUpQueuesDeferredMessageAndStartsCodexPoller(t *testing.T) {
 	}
 }
 
+// sessionEventedFake makes runtime.Fake event-capable so tests can assert the
+// deferred-submit path suppresses its sidecar poller for such providers.
+type sessionEventedFake struct{ *runtime.Fake }
+
+func (f sessionEventedFake) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
+	ch := make(chan runtime.SessionEvent)
+	go func() {
+		<-ctx.Done()
+		close(ch)
+	}()
+	return ch, nil
+}
+
+// TestSubmitFollowUpStartsPollerForEventCapableProviderWithoutHosting is the
+// regression test for gc-3qty46 / gc-olw3uw at this deferred-submit call
+// site: provider event-capability alone does not prove a supervisor-hosted
+// dispatcher is actually running (the controller can be down while an
+// event-capable provider is configured), so enqueueDeferredSubmitLocked
+// probes the live wake socket (nudgequeue.DispatcherIsHosting) instead of
+// providerRetiresNudgePollers-style capability. With no listener on that
+// socket, the sidecar poller must still start — capability alone must never
+// suppress the only deliverer for a queued item.
+func TestSubmitFollowUpStartsPollerForEventCapableProviderWithoutHosting(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := sessionEventedFake{Fake: runtime.NewFake()}
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	var pollerCalls int
+	origPoller := startSessionSubmitPoller
+	startSessionSubmitPoller = func(_, _, _ string) error {
+		pollerCalls++
+		return nil
+	}
+	defer func() { startSessionSubmitPoller = origPoller }()
+
+	// No listener is started on nudgequeue.WakeSocketPath(cityPath): the
+	// provider is event-capable, but no dispatcher is actually hosting.
+	outcome, err := mgr.Submit(context.Background(), info.ID, "follow up later", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp)
+	if err != nil {
+		t.Fatalf("Submit(follow_up): %v", err)
+	}
+	if !outcome.Queued {
+		t.Fatal("Submit(follow_up) should report queued")
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 1 {
+		t.Fatalf("pending queued submits = %d, want 1", len(state.Pending))
+	}
+	if pollerCalls != 1 {
+		t.Fatalf("pollerCalls = %d, want 1 despite an event-capable provider; capability alone must not suppress the fallback poller when no dispatcher is actually hosting", pollerCalls)
+	}
+}
+
+// TestSubmitFollowUpStartsFallbackPollerWhenDispatcherActuallyHosting guards
+// the enqueue/listener-close race: a successful socket probe is only a
+// momentary snapshot, so it cannot safely suppress the durable fallback after
+// the queued item is written. Queue flocking makes the duplicate poller safe.
+func TestSubmitFollowUpStartsFallbackPollerWhenDispatcherActuallyHosting(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := sessionEventedFake{Fake: runtime.NewFake()}
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	sockPath := nudgequeue.WakeSocketPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll wake socket dir: %v", err)
+	}
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("Listen on wake socket: %v", err)
+	}
+	defer lis.Close() //nolint:errcheck
+	wakeCh := make(chan struct{}, 1)
+	go func() {
+		for {
+			conn, acceptErr := lis.Accept()
+			if acceptErr != nil {
+				return
+			}
+			var payload [1]byte
+			if n, _ := conn.Read(payload[:]); n > 0 {
+				select {
+				case wakeCh <- struct{}{}:
+				default:
+				}
+			}
+			_ = conn.Close()
+		}
+	}()
+
+	var pollerCalls int
+	origPoller := startSessionSubmitPoller
+	startSessionSubmitPoller = func(_, _, _ string) error {
+		pollerCalls++
+		return nil
+	}
+	defer func() { startSessionSubmitPoller = origPoller }()
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "follow up later", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp)
+	if err != nil {
+		t.Fatalf("Submit(follow_up): %v", err)
+	}
+	if !outcome.Queued {
+		t.Fatal("Submit(follow_up) should report queued")
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 1 {
+		t.Fatalf("pending queued submits = %d, want 1 (the item must still queue; only the sidecar is suppressed)", len(state.Pending))
+	}
+	if pollerCalls != 1 {
+		t.Fatalf("pollerCalls = %d, want 1 so a dispatcher shutdown cannot strand the queued submit", pollerCalls)
+	}
+	select {
+	case <-wakeCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatcher listener was not woken after the deferred submit was enqueued")
+	}
+}
+
+// TestEnqueueDeferredSubmitLockedAlwaysStartsFallbackPoller ensures deferred
+// submits retain a durable deliverer without performing a socket liveness
+// probe while holding the session mutation lock.
+func TestEnqueueDeferredSubmitLockedAlwaysStartsFallbackPoller(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+
+	var pollerCalls int
+	origPoller := startSessionSubmitPoller
+	startSessionSubmitPoller = func(_, _, _ string) error {
+		pollerCalls++
+		return nil
+	}
+	defer func() { startSessionSubmitPoller = origPoller }()
+
+	if err := mgr.enqueueDeferredSubmitLocked(b, info.SessionName, "follow up later"); err != nil {
+		t.Fatalf("enqueueDeferredSubmitLocked: %v", err)
+	}
+
+	if pollerCalls != 1 {
+		t.Fatalf("pollerCalls = %d, want 1", pollerCalls)
+	}
+}
+
 func TestEnsureSessionSubmitPollerRejectsGoTestExecutable(t *testing.T) {
 	cityPath := t.TempDir()
 	exe := filepath.Join(t.TempDir(), "session.test")
@@ -504,6 +677,9 @@ func TestEnsureSessionSubmitPollerRejectsGoTestExecutable(t *testing.T) {
 }
 
 func TestExistingSessionSubmitPollerPIDRejectsUnrelatedLivePID(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("poller ownership check uses /proc on linux")
+	}
 	cityPath := t.TempDir()
 	pidPath := sessionSubmitPollerPIDPath(cityPath, "s-test", "session-id")
 	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
@@ -523,6 +699,9 @@ func TestExistingSessionSubmitPollerPIDRejectsUnrelatedLivePID(t *testing.T) {
 }
 
 func TestExistingSessionSubmitPollerPIDAcceptsMatchingCitySession(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("poller ownership check uses /proc on linux")
+	}
 	cityPath := filepath.Join(t.TempDir(), "city with spaces")
 	sessionName := "s-test"
 	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName, "session-id")
@@ -544,6 +723,9 @@ func TestExistingSessionSubmitPollerPIDAcceptsMatchingCitySession(t *testing.T) 
 }
 
 func TestExistingSessionSubmitPollerPIDRejectsDifferentCitySameSession(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("poller ownership check uses /proc on linux")
+	}
 	cityPath := t.TempDir()
 	otherCityPath := t.TempDir()
 	sessionName := "s-test"
@@ -566,6 +748,9 @@ func TestExistingSessionSubmitPollerPIDRejectsDifferentCitySameSession(t *testin
 }
 
 func TestExistingSessionSubmitPollerPIDRejectsDifferentTargetSameCitySession(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("poller ownership check uses /proc on linux")
+	}
 	cityPath := t.TempDir()
 	sessionName := "s-test"
 	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName, "session-id")

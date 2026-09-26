@@ -1929,8 +1929,27 @@ func pollerCanDeliverWithoutActivitySignal(target nudgeTarget, sp runtime.Provid
 }
 
 func maybeStartNudgePoller(target nudgeTarget) {
+	_ = startNudgePollerForTarget(target)
+}
+
+// startNudgePollerForTarget applies the poller eligibility checks and returns
+// any spawn failure to callers that have an error-reporting boundary.
+func startNudgePollerForTarget(target nudgeTarget) error {
 	if target.sessionName == "" {
-		return
+		return nil
+	}
+	// Event-capable providers retire the sidecar class in favor of the
+	// supervisor-hosted nudge event dispatcher, and even a non-event
+	// provider in supervisor mode has its delivery owned by that same
+	// supervisor process. Capability/config alone proves neither case is
+	// actually happening — a configured-but-dead or subscribe-failed
+	// supervisor leaves the queue with no deliverer — so this checks the
+	// live wake socket rather than a bare provider-capability check or
+	// nudgeDispatcherIsSupervisor(target.cfg) alone. A failed dial only
+	// ever fails toward starting a duplicate poller (harmless under the
+	// queue's flock), never toward suppressing the only deliverer.
+	if nudgeDispatcherIsHosting(target.cityPath) {
+		return nil
 	}
 	// Reap stale poller PID files before deciding whether to spawn. Owning
 	// processes only remove their PID file via the release closure, so any
@@ -1940,12 +1959,6 @@ func maybeStartNudgePoller(target nudgeTarget) {
 	// races concurrent acquirers — see reapStaleNudgePoller). Best-effort:
 	// never block a spawn.
 	_ = reapStaleNudgePollers(target.cityPath)
-	// Supervisor-hosted dispatcher owns delivery in supervisor mode; the
-	// per-session poller would race with it and reintroduce the bd-shellout
-	// load it was designed to eliminate.
-	if nudgeDispatcherIsSupervisor(target.cfg) {
-		return
-	}
 	// ACP session/prompt delivery requires the process that owns the
 	// in-memory ACP connection. A sidecar `gc nudge poll` process can
 	// observe the control socket but cannot safely deliver prompts. In
@@ -1953,11 +1966,9 @@ func maybeStartNudgePoller(target nudgeTarget) {
 	// configure daemon.nudge_dispatcher = "supervisor" for dispatcher-owned
 	// queued delivery.
 	if target.sessionTransport() == "acp" {
-		return
+		return nil
 	}
-	if err := startNudgePoller(target.cityPath, target.pollerKey(), target.sessionName); err != nil {
-		return
-	}
+	return startNudgePoller(target.cityPath, target.pollerKey(), target.sessionName)
 }
 
 func withNudgeTargetFence(store beads.Store, target nudgeTarget) nudgeTarget {

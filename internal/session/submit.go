@@ -585,9 +585,17 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 	}); err != nil {
 		return fmt.Errorf("queueing deferred submit: %w", err)
 	}
+	// A live dispatcher is only a momentary liveness observation: it can stop
+	// after a probe and before this queue write. Keep the flock-protected
+	// sidecar as the durable fallback even when the supervisor is currently
+	// hosting. Duplicate claim attempts are serialized by the queue lock.
 	if m.supportsFollowUpLocked(b) {
 		_ = startSessionSubmitPoller(m.cityPath, deferredSubmitPollerKey(b), sessName)
 	}
+	// Ping after enqueue so a currently live dispatcher can still provide the
+	// low-latency path; the poller above guarantees eventual delivery if the
+	// listener disappears before accepting this wake.
+	nudgequeue.PingWakeSocket(m.cityPath)
 	return nil
 }
 

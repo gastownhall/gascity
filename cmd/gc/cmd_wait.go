@@ -1251,7 +1251,7 @@ func lookupSessionBeadByIDInfo(sessFront *sessionpkg.Store, id string) (sessionp
 	return info, true, nil
 }
 
-func dispatchReadyWaitNudges(cityPath string, store beads.Store, _ runtime.Provider, now time.Time) error {
+func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Provider, now time.Time) error {
 	// Single-store wrapper: fan the one work store into the session and nudges
 	// class params so existing test call sites stay untouched. Both arms route
 	// through their coordination-class store (cliSessionFrontDoor, cliNudgesStore)
@@ -1261,10 +1261,14 @@ func dispatchReadyWaitNudges(cityPath string, store beads.Store, _ runtime.Provi
 	if strings.TrimSpace(cityPath) != "" {
 		cfg, _ = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	}
-	return dispatchReadyWaitNudgesWithSnapshot(cityPath, cfg, cliSessionFrontDoor(store, cfg, cityPath), cliNudgesStore(store, cfg, cityPath), now, nil)
+	return dispatchReadyWaitNudgesWithSnapshot(cityPath, cfg, cliSessionFrontDoor(store, cfg, cityPath), cliNudgesStore(store, cfg, cityPath), sp, now, nil)
 }
 
-func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sessFront *sessionpkg.Store, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) error {
+// cfg and sp are accepted for call-site compatibility (callers already
+// resolve both) but no longer gate the poller decision directly: see
+// nudgeDispatcherIsHosting's use below for why config/capability alone
+// cannot prove a dispatcher is actually live.
+func dispatchReadyWaitNudgesWithSnapshot(cityPath string, _ *config.City, sessFront *sessionpkg.Store, nudges beads.NudgesStore, _ runtime.Provider, now time.Time, sessionBeads *sessionBeadSnapshot) error {
 	if sessionBeads == nil {
 		var err error
 		sessionBeads, err = loadSessionBeadSnapshot(sessFront.Store().Store)
@@ -1327,7 +1331,16 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		// BuiltinAncestor at session-bead creation, so wrapped aliases
 		// already surface as their built-in family here. The provider
 		// fallback covers sessions created before provider_kind was stamped.
-		if waitNudgeProviderNeedsPoller(sessionInfo) && !nudgeDispatcherIsSupervisor(cfg) {
+		//
+		// nudgeDispatcherIsHosting checks the live wake socket rather than
+		// nudgeDispatcherIsSupervisor(cfg) or a bare provider-capability
+		// check alone: configuration and provider capability each only prove a
+		// dispatcher COULD own delivery, not that one currently IS — a
+		// configured-but-dead or subscribe-failed supervisor left this
+		// queued nudge with no deliverer under the weaker checks. See
+		// nudgeDispatcherIsHosting's doc comment for the duplicate-delivery
+		// tradeoff this accepts to avoid that silent loss.
+		if waitNudgeProviderNeedsPoller(sessionInfo) && !nudgeDispatcherIsHosting(cityPath) {
 			if err := startNudgePoller(cityPath, waitNudgePollerKey(sessionInfo), sessionInfo.SessionNameMetadata); err != nil {
 				return fmt.Errorf("starting wait nudge poller: %w", err)
 			}

@@ -6,6 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 const (
@@ -91,6 +92,15 @@ var openNudgeWorkStore = openStoreAtForCity
 // form above is a projection of it.
 func openNudgeBeadStoreOwned(cityPath string) (beads.NudgesStore, beads.Store, error) {
 	store, err := openNudgeWorkStore(cityPath, cityPath)
+	return resolveNudgeBeadStoreOwned(cityPath, store, err)
+}
+
+var openNudgeBeadStoreWithModeOwned = func(cityPath string, mode gate.Mode) (beads.NudgesStore, beads.Store, error) {
+	result, err := openStoreResultAtForCityWithMode(cityPath, cityPath, mode, true, false)
+	return resolveNudgeBeadStoreOwned(cityPath, result.Store, err)
+}
+
+func resolveNudgeBeadStoreOwned(cityPath string, store beads.Store, err error) (beads.NudgesStore, beads.Store, error) {
 	if err != nil {
 		return beads.NudgesStore{}, nil, fmt.Errorf("opening the city store at %q: %w", cityPath, err)
 	}
