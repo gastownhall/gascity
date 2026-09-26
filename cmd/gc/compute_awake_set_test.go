@@ -462,6 +462,58 @@ func TestNamedOnDemand_WorkQueryWakesIdleAsleepSession(t *testing.T) {
 	assertReason(t, result, "hello-world--refinery", "work-query")
 }
 
+// TestNamedOnDemand_RoutedDemandWakesDrainedSession is the ga-j4lqwa.1 fix:
+// a Drained on-demand named session with live routed-but-unassigned demand
+// must wake. Before the fix, the on_demand branch's desired[sn]=reason write
+// was gated on !bead.Drained for every reason including "routed-demand",
+// silently discarding the demand and stranding the work until some unrelated
+// wake path happened to touch the session.
+func TestNamedOnDemand_RoutedDemandWakesDrainedSession(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:                   []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions:            []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
+		SessionBeads:             []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "drained", Drained: true, NamedIdentity: "hello-world/refinery"}},
+		NamedSessionRoutedDemand: map[string]bool{"hello-world/refinery": true},
+		Now:                      now,
+	})
+	assertAwake(t, result, "hello-world--refinery")
+	assertReason(t, result, "hello-world--refinery", "routed-demand")
+}
+
+// TestNamedOnDemand_NamedDemandWakesDrainedSession is the named-demand
+// sibling of the same fix: operator/assignee-direct demand (NamedSessionDemand)
+// gets the same override strength as routed-demand, since both are real,
+// unambiguous demand for this exact identity.
+func TestNamedOnDemand_NamedDemandWakesDrainedSession(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:             []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions:      []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
+		SessionBeads:       []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "drained", Drained: true, NamedIdentity: "hello-world/refinery"}},
+		NamedSessionDemand: map[string]bool{"hello-world/refinery": true},
+		Now:                now,
+	})
+	assertAwake(t, result, "hello-world--refinery")
+	assertReason(t, result, "hello-world--refinery", "named-demand")
+}
+
+// TestNamedOnDemand_WorkQueryDoesNotWakeDrainedSession is the negative/
+// regression guard for the same fix: "work-query" is deliberately NOT
+// exempted from the Drained gate (ga-j4lqwa.1 acceptance criteria) because it
+// lacks NamedSessionRoutedDemand's UsesCanonicalSingletonPoolIdentity()
+// scoping, and widening it risks a herd-wake on multi-instance pools. This
+// pins the intentional scope boundary so a future change can't silently widen
+// the exemption to work-query.
+func TestNamedOnDemand_WorkQueryDoesNotWakeDrainedSession(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:            []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions:     []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
+		SessionBeads:      []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "drained", Drained: true, NamedIdentity: "hello-world/refinery"}},
+		NamedSessionWorkQ: map[string]bool{"hello-world/refinery": true},
+		Now:               now,
+	})
+	assertAsleep(t, result, "hello-world--refinery")
+}
+
 func TestNamedOnDemand_PendingCreateWakesWithoutDemand(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
