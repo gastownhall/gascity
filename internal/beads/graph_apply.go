@@ -2,11 +2,26 @@ package beads
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	beadslib "github.com/steveyegge/beads"
 )
+
+// ErrGraphApplyBudgetExhausted marks a graph apply that returned with its own
+// derived context expired while the caller's context was still live: the
+// operation budget sized for this plan was spent.
+//
+// It states what was observed, not what a retry would do. A second attempt
+// might still succeed — the store may be faster the next minute. What the
+// marker carries is a policy: no automatic replay once an operation's own
+// budget is spent, because the budget is a function of the plan
+// (nativeGraphApplyDeadline), so an immediate identical attempt is asking the
+// same question with the same answer time and doubles the store load to find
+// out. Callers that want another attempt should decide so deliberately, under
+// a budget of their own.
+var ErrGraphApplyBudgetExhausted = errors.New("graph apply budget exhausted")
 
 // GraphApplyStore is an optional store capability for atomically creating a
 // precomputed graph of beads, dependency edges, and post-create assignments.
