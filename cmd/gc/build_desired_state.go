@@ -895,6 +895,24 @@ func buildDesiredStateWithSessionBeadsAt(
 		recordDemandSubPhase(trace, "demand_snapshot.evaluate_pending_pools", subPhaseStart, map[string]any{
 			"pools": len(pendingPools),
 		})
+		// Templates that both DECLARED their custom scale_check authoritative
+		// and produced a clean answer on THIS tick. Snapshotted before the
+		// default probe merges below, because that merge writes into the same
+		// map and would otherwise make a probe-supplied count indistinguishable
+		// from a custom one.
+		//
+		// A template qualifies only if its check ran to completion: a partial
+		// (non-zero exit, timeout, unbuildable env) is explicitly NOT a clean
+		// zero, and must keep falling through to the cold-wake probe.
+		authoritativeScaleCheck := make(map[string]bool, len(scaleCheckCounts))
+		for template := range scaleCheckCounts {
+			if poolScaleCheckPartialTemplates[template] {
+				continue
+			}
+			if agent := findAgentByTemplate(cfg, template); agent != nil && agent.ScaleCheckAuthoritative {
+				authoritativeScaleCheck[template] = true
+			}
+		}
 		if len(defaultScaleTargets) > 0 {
 			subPhaseStart = time.Now()
 			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(cfg, defaultScaleTargets, demandReadyCache)
@@ -919,6 +937,42 @@ func buildDesiredStateWithSessionBeadsAt(
 				// A cold-pool wake probe only wakes the pool from zero; clamp its
 				// contribution to 1 so it never overrides a custom scale_check's
 				// authoritative count for the same template.
+				//
+				// Clamping alone did not deliver that promise. The merge below
+				// is a max(), so clamping to 1 stops the probe overriding a
+				// custom count of 2+ but NOT a custom count of 0 — max(0,1) is
+				// 1. A custom check could therefore never answer "no demand"
+				// while its pool was cold, which is the only time this probe
+				// runs. The pool drained to zero, the next tick's probe woke it
+				// again, and the woken worker found the work its own check had
+				// already judged unactionable and drained. Measured on
+				// lookout/hand 2026-08-31: 42 wakes, 43 ephemeral starts and 43
+				// orphan drains in 40 minutes, ~one Claude cold start every 30s,
+				// for the whole time a review was outstanding. The same tick did
+				// it to the mason pool. The probe counts Ready() work matched on
+				// gc.routed_to, so it cannot see the pool-specific state the
+				// custom check exists to read (for hands: whether the review a
+				// parked epic is waiting on has come back).
+				//
+				// The probe is NOT wrong to raise a zero in general: a
+				// rig-scoped check cannot see work routed to it that lives in
+				// the city store, and without the probe such a pool would never
+				// wake at all (TestBuildDesiredState_ScaleFromZero_CrossRig
+				// covers exactly that). The two cases are told apart by whether
+				// the check reads the store the work is in, which only the city
+				// declaring the pool can know — so this is opt-in per agent via
+				// scale_check_authoritative, and every pool that does not set it
+				// keeps the previous behaviour untouched.
+				//
+				// A check that failed is still not a zero: it stays partial,
+				// falls through to the probe, and wakes the pool exactly as
+				// before. That asymmetry is deliberate. Suppressing a wake on a
+				// count we do not trust is how
+				// fix/pool-desired-skip-named-session-templates stranded routed
+				// work with no claimant.
+				if coldWakeTemplates[template] && authoritativeScaleCheck[template] {
+					continue
+				}
 				if coldWakeTemplates[template] && count > 1 {
 					count = 1
 				}
