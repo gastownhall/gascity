@@ -7,14 +7,15 @@ Evaluated 2026-09-26. This is an interim mitigation: remove the cadence gate whe
 - Reviewed source: `6a255b31f0eb1ab55f4cfb3e4a6c4e6c2da1290d`. Fresh reviewer PASS is recorded on ga-p69yam after the Bazel source-registration repair; cadence logic is unchanged from the reviewed completion-time fix.
 - Tested base: `origin/main` at `4b991976f7dbc2050e11b7f3ac25b81363e9c535`; a final fetch confirmed the same base.
 - Tested merged fixture: `bbb344ba803b712cf460926d18d469bf500499b1`, tree `a40a9d89939b4948e58c8286efa3a30ad7a4b9a0`.
-- Branch: `deploy/ga-p69yam-gate`, cut at the reviewed source; the release record is the only additional file.
+- Branch: `deploy/ga-p69yam-gate`, cut at the reviewed source. After the reviewed source, the branch adds this release record, a merge of `origin/main`, and the partial-snapshot follow-up.
+- Head `09cbd4b` adds the partial-snapshot follow-up after the reviewed source `6a255b31f0`: a due tick whose snapshot is partial no longer stamps `orphanReleaseLast`, plus the `TestBeadReconcileTick_OrphanReleaseCadenceGate_PartialSnapshotDoesNotStamp` regression.
 - Mode: remote; normal push target: fork. No shared builder branch is a push target; no stack or prohibited paths were found.
 - Evidence directory: `/var/tmp/gc-ga-p69yam.ggvhui3v`. SHA and ancestry checks use resolved Git objects, not branch tips. Associated-PR preflight returned no PR both before testing and before publication.
 
 | Criterion | Result | Evidence |
 |---|---|---|
 | 1. Review PASS present | PASS | Fresh style, security, and spec-compliance PASS at the exact reviewed source is recorded on ga-p69yam. No review carryover or waiver is used. |
-| 2. Acceptance criteria met | PASS | First sweep runs immediately; subsequent sweeps require five minutes since completion. Exact-boundary and due-sweep cases pass. A deterministic 328-second sweep stamps completion and gates a tick one second later. The unchanged same-tick session/wake-protection regression passes. The new test file is registered in sorted Bazel srcs and all internal imports have declared dependencies, by static inspection. |
+| 2. Acceptance criteria met | PASS | First sweep runs immediately; subsequent sweeps require five minutes since completion. Exact-boundary and due-sweep cases pass. A deterministic 328-second sweep stamps completion and gates a tick one second later. A partial-snapshot tick does not stamp; the next complete tick is still due and releases. The unchanged same-tick session/wake-protection regression passes. The new test file is registered in sorted Bazel srcs and all internal imports have declared dependencies, by static inspection. |
 | 3. Tests pass | PASS | Full documented sweep completed exit 0: all 40 jobs passed. All four changed test roots passed in both process and integration profiles, with no owned FAIL/SKIP/missing results. Every selected required CI lane completed; detailed evidence below. |
 | 3b. Policy/lint lane | PASS | Build, whole-tree vet, affected lint, formatting, CI policy, native dependency and DoltLite boundaries, docs, module replacement, event-export and core boundaries passed. Generated, release-config and dashboard checks also passed. |
 | 3c. CI-config diff | PASS | No CI job, matrix, timeout, or required-check list changes. BUILD.bazel adds only the missing test source; its source/dependency inspection passed. Bazel/Gazelle were not executed; the Bazel lane is documented as non-gating. |
@@ -34,7 +35,7 @@ Exit 0, 40/40 jobs passed. Ran through load-gate-run.sh (threshold 15, max wait 
 - Top-level Go executions: 53,390 PASS, 0 FAIL, 232 SKIP.
 - All Go result events including subtests: 95,576 PASS, 0 FAIL, 327 SKIP.
 - Counts include repeated execution across profiles; they are not distinct-test or assertion counts.
-- `diff_tests_executed: 4 named roots, 8 PASS executions, 0 FAIL, 0 SKIP, 0 missing`.
+- `diff_tests_executed: 4 named roots, 8 PASS executions, 0 FAIL, 0 SKIP, 0 missing` from the full-suite sweep at `6a255b31f0`. The fifth root, TestBeadReconcileTick_OrphanReleaseCadenceGate_PartialSnapshotDoesNotStamp, was run separately at `09cbd4b` (process profile only; see the changed-test-root table). The full-suite counts above were measured at `6a255b31f0`, not at `09cbd4b`.
 - `waiver_ref: none`; `failure_attribution: none`.
 - `skip_justification`: unchanged platform-specific cases, helper entrypoints, opt-in external services/persistence, and explicitly unavailable legacy fixtures do not exercise the cadence change. All 183 skipped roots were mapped to unchanged test files; none is in the changed test source. The Podman environment was configured before the run. Complete names, source locations and skip context: skip-audit-final.json.
 - TestGCLiveContract_BeadsAndEvents and TestHumaBinary_SessionMessageAsync both PASS; this run did not hit the ga-lejnse migration refusal.
@@ -45,6 +46,7 @@ Exit 0, 40/40 jobs passed. Ran through load-gate-run.sh (threshold 15, max wait 
 | TestBeadReconcileTick_OrphanReleaseCadenceGate_SkipsWithinMinInterval | PASS | cmd-gc-process-1-of-6.log, integration-packages-cmd-gc-3-of-6.log |
 | TestBeadReconcileTick_OrphanReleaseCadenceGate_RunsOnDueTick | PASS | cmd-gc-process-2-of-6.log, integration-packages-cmd-gc-4-of-6.log |
 | TestBeadReconcileTick_OrphanReleaseCadenceGate_StampsCompletionNotStart | PASS | cmd-gc-process-3-of-6.log, integration-packages-cmd-gc-5-of-6.log |
+| TestBeadReconcileTick_OrphanReleaseCadenceGate_PartialSnapshotDoesNotStamp | PASS (process profile only, at `09cbd4b`) | Separate targeted run at `09cbd4b`: `go test ./cmd/gc -run 'TestShouldRunOrphanRelease\|TestBeadReconcileTick_OrphanReleaseCadenceGate\|TestBeadReconcileTick_OrphanReleaseCallSite_RetainsLiveAndWakeProtectedWork' -count=1 -v` — all six roots PASS, `ok github.com/gastownhall/gascity/cmd/gc 1.514s`. Not part of the full-suite sweep. |
 
 The additional acceptance regression TestBeadReconcileTick_OrphanReleaseCallSite_RetainsLiveAndWakeProtectedWork also PASSes in both profiles. acceptance-regression-audit.json records each criterion's code and observed results.
 
