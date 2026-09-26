@@ -1110,6 +1110,7 @@ esac
 
 	stdout, stderr, err := runGCBeadsBdCommand(t, sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
 		"GC_CITY_PATH="+cityPath,
+		"GC_DOLT_INIT_LOCK_DIR="+t.TempDir(),
 		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
 	)...), script, "init", cityPath, "gc", "hq")
 	out := stdout + stderr
@@ -1270,6 +1271,7 @@ esac
 
 	stdout, stderr, err := runGCBeadsBdCommand(t, sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
 		"GC_CITY_PATH="+cityPath,
+		"GC_DOLT_INIT_LOCK_DIR="+t.TempDir(),
 		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
 	)...), script, "init", cityPath, "gc", "hq")
 	out := stdout + stderr
@@ -1486,12 +1488,16 @@ esac
 	scriptB := gcBeadsBdScriptPath(cityB)
 
 	pathEnv := "PATH=" + strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator))
+	// One lock directory shared by both processes, so they contend on the
+	// same per-database lock file without touching the host-wide default.
+	lockDir := filepath.Join(sharedDir, "locks")
 
 	newCmd := func(script, cityPath, initMarker string) *exec.Cmd {
 		cmd := exec.Command(script, "init", cityPath, "gc", "hq")
 		cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
 			"GC_CITY_PATH="+cityPath,
 			pathEnv,
+			"GC_DOLT_INIT_LOCK_DIR="+lockDir,
 			"INIT_MARKER="+initMarker,
 		)...)
 		return cmd

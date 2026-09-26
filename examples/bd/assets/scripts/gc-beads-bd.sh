@@ -32,16 +32,16 @@
 #       <data_dir>/<db>/.dolt/noms/LOCK) to be released before start/stop
 #       fail closed, in milliseconds (default: 60000). gc projects
 #       [dolt].dolt_lock_release_timeout from city.toml into this variable.
-#   GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS — wall-clock budget, in milliseconds
-#       (default: 120000), for how long wait_for_bd_runtime_schema will go
+#   GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS — wall-clock cap, in milliseconds
+#       (default: 120000), on how long wait_for_bd_runtime_schema will go
 #       between observed advances of a mid-migration database's
-#       schema_migrations cursor before giving up. The wait itself is
-#       progress-based, not a fixed attempt count or a total-wait ceiling:
-#       every observed advance pushes this budget forward again, so a live
-#       migration that keeps advancing -- however long it ultimately takes
-#       -- is waited out in full. Only a gap with no observed advance, once
-#       it reaches this cap (or the shorter STALL_BUDGET consecutive-attempt
-#       count), ends the wait early.
+#       schema_migrations cursor. The wait is progress-based: every observed
+#       advance resets both the stall counter and this cap, so a live
+#       migration that keeps advancing is waited out in full. A stalled
+#       wait is ended by the stall counter, not this cap: 8 consecutive
+#       cursor reads with no change (about 4.5s at the current backoff)
+#       give up. The cap only bounds a wait whose cursor reads keep
+#       failing outright.
 #   GC_DOLT_INIT_LOCK_DIR — directory holding op_init's cross-process,
 #       per-database advisory locks that serialize a forced reinit's
 #       revalidate-then-force sequence (default: $TMPDIR or /tmp). Not
@@ -3034,12 +3034,12 @@ run_bd_init_pinned() {
     local force_init="${5:-false}"
     if [ "$force_init" = "true" ]; then
         run_bd_pinned "$dir" init --force --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
-            --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for $dir"
+            --server-host "$host" --server-port "$DOLT_PORT" "$dir" 8>&- || die "bd init failed for $dir"
         return 0
     fi
 
     run_bd_pinned "$dir" init --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
-        --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for $dir"
+        --server-host "$host" --server-port "$DOLT_PORT" "$dir" 8>&- || die "bd init failed for $dir"
 }
 
 # run_bd_init_proxied initializes a local workspace through beads RC's
@@ -3524,6 +3524,9 @@ op_init() {
             die "flock is required to safely force-reinitialize database '$dolt_database' (data-safety): without it, two concurrent initializers cannot be serialized and could both force a destructive reinit (gastownhall/beads#4566). Install: brew install flock (macOS) or apt install util-linux (Linux)"
         fi
         local init_lock_file="$INIT_LOCK_DIR/$dolt_database.lock"
+        case "$INIT_LOCK_TIMEOUT_MS" in
+            ''|*[!0-9]*) INIT_LOCK_TIMEOUT_MS=60000 ;;
+        esac
         local init_lock_timeout_s=$((INIT_LOCK_TIMEOUT_MS / 1000))
         mkdir -p "$INIT_LOCK_DIR"
         exec 8>"$init_lock_file"
