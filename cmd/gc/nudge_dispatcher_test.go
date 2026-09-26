@@ -535,6 +535,7 @@ func TestDispatchAllQueuedNudgesNilCfg(t *testing.T) {
 }
 
 func TestStartLegacyPollersForQueuedNudgesReturnsPollerStartError(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
 	cityPath := t.TempDir()
 	if err := enqueueQueuedNudge(cityPath, newQueuedNudge("worker", "msg", time.Now())); err != nil {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
