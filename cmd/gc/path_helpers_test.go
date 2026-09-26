@@ -363,7 +363,19 @@ func (g *doltLeakGuardedTestingM) reapDoltProcessesUnderRoot(label string) bool 
 }
 
 func (g *doltLeakGuardedTestingM) sweepStaleCmdGCTestDoltProcesses(label string) bool {
-	procs, err := discoverDoltProcesses()
+	return g.sweepStaleCmdGCTestDoltProcessesWith(label, discoverDoltProcesses, reapDoltLeakProcesses)
+}
+
+// sweepStaleCmdGCTestDoltProcessesWith is sweepStaleCmdGCTestDoltProcesses with
+// the process enumerator and reaper injected, mirroring runWith above. The sweep
+// KILLS processes, so its classification has to be assertable without spawning
+// or signalling anything real.
+func (g *doltLeakGuardedTestingM) sweepStaleCmdGCTestDoltProcessesWith(
+	label string,
+	enumerate func() ([]DoltProcInfo, error),
+	reap func([]DoltProcInfo),
+) bool {
+	procs, err := enumerate()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: %s stale scan failed: %v\n", label, err) //nolint:errcheck
 		return true
@@ -372,7 +384,8 @@ func (g *doltLeakGuardedTestingM) sweepStaleCmdGCTestDoltProcesses(label string)
 	tempParent := filepath.Dir(filepath.Clean(g.tempRoot))
 	var leaked []DoltProcInfo
 	for _, proc := range procs {
-		if !isStaleCmdGCTestConfigPath(extractConfigPath(proc.Argv), activeRoots, tempParent) {
+		configPath := extractConfigPath(proc.Argv)
+		if !isStaleCmdGCTestConfigPath(configPath, activeRoots, tempParent) && !g.isStaleSourceRootConfigPath(configPath) {
 			continue
 		}
 		leaked = append(leaked, proc)
@@ -385,8 +398,39 @@ func (g *doltLeakGuardedTestingM) sweepStaleCmdGCTestDoltProcesses(label string)
 	})
 	fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: %s sweep reaping %d stale cmd/gc test dolt sql-server process(es)\n", label, len(leaked)) //nolint:errcheck
 	writeDoltLeakReport(os.Stderr, leaked)
-	reapDoltLeakProcesses(leaked)
+	reap(leaked)
 	return true
+}
+
+// isStaleSourceRootConfigPath reports whether configPath belongs to a dolt
+// sql-server rooted in this checkout's package directory, which at startup can
+// only be a leftover from an earlier test binary.
+//
+// The owner-PID rules above cannot classify these. They derive staleness from a
+// PID encoded in a temp-root directory name, and a server that resolved its city
+// root to "." has no such directory — its config sits at cmd/gc/.gc inside the
+// checkout. So it fails every staleness test and survives.
+//
+// Nor can the in-run guard catch it: a server inherited from a previous
+// invocation is already in the INITIAL snapshot, so diffDoltProcessSnapshots
+// rightly excludes it as not leaked by this run. Widening the snapshot roots
+// (#5057) fixed detection for servers this run spawns, but left the inherited
+// ones with no path that reaps them. They accumulate across invocations,
+// holding ports, memory and the data-dir lock that blocks the next run in the
+// same checkout.
+//
+// Reaping is safe here for the same reason detection is: no real city lives
+// inside the checkout, so a dolt sql-server rooted here is a test leak by
+// construction. Scoping to THIS source root is what keeps it safe — peer
+// worktrees running their own cmd/gc tests concurrently root under their own
+// directories and are never matched. An unresolved (empty) source root is
+// ignored rather than treated as a match-everything prefix, which would turn
+// this sweep into a box-wide reaper of other checkouts' servers.
+func (g *doltLeakGuardedTestingM) isStaleSourceRootConfigPath(configPath string) bool {
+	if g.sourceRoot == "" || configPath == "" {
+		return false
+	}
+	return pathutil.PathWithin(g.sourceRoot, configPath)
 }
 
 // sweepOrphanDoltStoreDirs runs the symptom-based fallback sweep
