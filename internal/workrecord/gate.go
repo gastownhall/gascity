@@ -69,14 +69,19 @@ func ValidOutcome(v string) bool {
 // Gated reports whether the work-record close contract applies to bead. It
 // applies to worker-claimable work units — plain task beads — and deliberately
 // NOT to control/structural beads (anything carrying gc.kind: workflow roots,
-// scope/run/check/drain steps, etc.) or non-task beads (convoy, message). Those
-// use the disjoint control-plane gc.outcome vocabulary and are closed by the
-// dispatch engine, not by a worker reporting a work outcome.
+// scope/run/check/drain steps, etc.), workflow steps identified by gc.step_id or
+// gc.step_ref, or non-task beads (convoy, message). Those use the disjoint
+// control-plane gc.outcome vocabulary and are closed by the dispatch engine,
+// not by a worker reporting a work outcome.
 func Gated(bead beads.Bead) bool {
 	if t := strings.TrimSpace(bead.Type); t != "" && t != "task" {
 		return false
 	}
 	if strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) != "" {
+		return false
+	}
+	if strings.TrimSpace(bead.Metadata[beadmeta.StepIDMetadataKey]) != "" ||
+		strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey]) != "" {
 		return false
 	}
 	return true
