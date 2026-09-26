@@ -483,3 +483,100 @@ func assertTraceShowSchemaRecordProperty(t *testing.T, name string) {
 		t.Fatalf("trace show result schema missing record property %q", name)
 	}
 }
+
+// TestTraceStatusSurfacesHeadWriteTime pins that `gc trace status` reports when
+// the trace head was last written, not just its sequence number.
+//
+// The reconciler flushes a batch per cycle and is silent between cycles, so on
+// a live city the head sits unchanged for minutes at a time as a matter of
+// course (measured on gc-management 2026-09-21: 111 quiet gaps in one day,
+// median 691s, max 984s). Printing a bare "Head seq" makes a normal quiet
+// interval and a genuinely wedged writer render identically, which is how
+// ga-d7yoo2 came to be filed against a writer that was working correctly.
+func TestTraceStatusSurfacesHeadWriteTime(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityTOML(t, cityDir, "trace-town", "mayor")
+	t.Setenv("GC_CITY", cityDir)
+
+	// A head last written 12 minutes ago: an ordinary inter-cycle gap.
+	written := time.Now().UTC().Add(-12 * time.Minute).Truncate(time.Second)
+	rootDir := traceCityRuntimeDir(cityDir)
+	if err := os.MkdirAll(rootDir, sessionReconcilerTraceOwnerDirPerm); err != nil {
+		t.Fatalf("creating trace root: %v", err)
+	}
+	head := sessionReconcilerTraceHead{
+		SchemaVersion: sessionReconcilerTraceSchemaVersion,
+		Seq:           40222373,
+		CurrentPath:   "segments/2026/09/21/segment-000002.jsonl",
+		CurrentBytes:  3178487,
+		UpdatedAt:     written,
+	}
+	data, err := json.Marshal(head)
+	if err != nil {
+		t.Fatalf("marshaling head: %v", err)
+	}
+	headPath := filepath.Join(rootDir, sessionReconcilerTraceHeadFile)
+	if err := os.WriteFile(headPath, data, sessionReconcilerTraceOwnerFilePerm); err != nil {
+		t.Fatalf("writing head: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdTraceStatusWithJSON(true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdTraceStatusWithJSON(json) = %d; stderr=%s", code, stderr.String())
+	}
+	var statusJSON traceStatusResultJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &statusJSON); err != nil {
+		t.Fatalf("unmarshalling trace status JSON: %v; output=%s", err, stdout.String())
+	}
+	if statusJSON.HeadSeq != head.Seq {
+		t.Fatalf("head_seq = %d, want %d", statusJSON.HeadSeq, head.Seq)
+	}
+	if statusJSON.HeadUpdatedAt == nil || !statusJSON.HeadUpdatedAt.Equal(written) {
+		t.Fatalf("head_updated_at = %v, want %v; without it a frozen head seq is indistinguishable from a live one",
+			statusJSON.HeadUpdatedAt, written)
+	}
+	validateJSONResultSchema(t, []string{"trace", "status"}, stdout.Bytes())
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdTraceStatusWithJSON(false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdTraceStatusWithJSON(text) = %d; stderr=%s", code, stderr.String())
+	}
+	got := stdout.String()
+	if !strings.Contains(got, written.Format(time.RFC3339)) {
+		t.Fatalf("status output = %q, want the head write time %s", got, written.Format(time.RFC3339))
+	}
+	if !strings.Contains(got, "ago") {
+		t.Fatalf("status output = %q, want the age of the head write", got)
+	}
+}
+
+// TestTraceStatusOmitsHeadWriteTimeWithoutHead pins that a city whose
+// controller has never flushed a batch reports no head write time rather than
+// a zero timestamp that would read as 1970.
+func TestTraceStatusOmitsHeadWriteTimeWithoutHead(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityTOML(t, cityDir, "trace-town", "mayor")
+	t.Setenv("GC_CITY", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdTraceStatusWithJSON(true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdTraceStatusWithJSON(json) = %d; stderr=%s", code, stderr.String())
+	}
+	var statusJSON traceStatusResultJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &statusJSON); err != nil {
+		t.Fatalf("unmarshalling trace status JSON: %v; output=%s", err, stdout.String())
+	}
+	if statusJSON.HeadUpdatedAt != nil {
+		t.Fatalf("head_updated_at = %v, want it omitted for a city with no head file", statusJSON.HeadUpdatedAt)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdTraceStatusWithJSON(false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdTraceStatusWithJSON(text) = %d; stderr=%s", code, stderr.String())
+	}
+	if got := stdout.String(); strings.Contains(got, "Head updated:") {
+		t.Fatalf("status output = %q, want no head write line for a city with no head file", got)
+	}
+}
