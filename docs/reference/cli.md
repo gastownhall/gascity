@@ -4377,6 +4377,10 @@ gc session submit mayor "stop and do this instead" --intent interrupt_now
 Suspend an active session by stopping its runtime process.
 The session bead persists and can be resumed later.
 
+The hold is durable: a suspended session that still owns assigned work stays
+asleep rather than being restarted to serve it, and its pool slot and claim are
+left alone. It comes back on `gc session wake`, or when the hold expires.
+
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
 ```
@@ -4404,7 +4408,12 @@ gc session unpin <session-id-or-alias> [flags]
 
 ## gc session wait
 
-Register a dependency wait for a session
+Register a durable wait so a session is woken when the beads it depends on close.
+
+With --sleep the session takes a wait hold and drains to sleep. The hold is
+durable: a wait-held session that still owns assigned work stays asleep rather
+than being restarted to serve it, and its pool slot and claim are left alone. It
+comes back when the wait resolves, or on `gc session wake`.
 
 ```
 gc session wait [session-id-or-alias] [flags]

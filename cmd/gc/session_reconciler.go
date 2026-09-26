@@ -861,7 +861,19 @@ func finalizeDrainAckStoppedSession(
 	}
 	batch := sessionpkg.AcknowledgeDrainPatch(clk.Now().UTC(), info.WakeMode == "fresh")
 	if hasAssignedWork {
-		batch = sessionpkg.CompleteDrainPatch(clk.Now().UTC(), string(sessionpkg.SleepReasonIdle), info.WakeMode == "fresh")
+		// A drain-acked seat sleeps as "idle" unless it carries a standing hold,
+		// in which case the hold IS the reason it slept. The distinction is not
+		// cosmetic: the pool-slot gate (isPoolSessionSlotFreeableInfo) reads only
+		// state + sleep_reason, so labeling a parked seat "idle" makes its slot
+		// freeable and lets the stranded repair unclaim its work and close its
+		// bead — destroying the park instead of honoring it
+		// (gastownhall/gascity#5561). The drain-timeout sibling already passes the
+		// drain's own reason, which for a held drain is this same intent.
+		drainReason := sessionpkg.SleepReasonIdle
+		if standing := sessionpkg.StandingSleepIntent(info.SleepIntent); standing != "" {
+			drainReason = standing
+		}
+		batch = sessionpkg.CompleteDrainPatch(clk.Now().UTC(), string(drainReason), info.SleepIntent, info.WakeMode == "fresh")
 	}
 	// A drain-ack that completes a restart-request cycle (gc session reset →
 	// agent drain-ack) must also consume restart_requested. The drain-ack

@@ -465,7 +465,7 @@ func agentTemplateIdentitiesEquivalent(cfg *config.City, a, b string) bool {
 func healExpiredTimersInfo(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock) sessionpkg.Info {
 	if h := info.HeldUntil; h != "" {
 		if t, _ := time.Parse(time.RFC3339, h); !t.IsZero() && clk.Now().After(t) {
-			batch := sessionpkg.ClearExpiredHoldPatch(info.SleepReason)
+			batch := sessionpkg.ClearExpiredHoldPatch(info.SleepReason, info.SleepIntent)
 			if err := sessFront.ApplyPatch(info.ID, batch); err == nil {
 				info = info.ApplyPatch(batch)
 			}
