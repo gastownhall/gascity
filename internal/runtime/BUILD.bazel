@@ -54,6 +54,7 @@ go_test(
         "liveness_test.go",
         "privatedir_test.go",
         "probe_test.go",
+        "process_control_unix_test.go",
         "provider_core_test.go",
         "redact_test.go",
         "runtime_test.go",

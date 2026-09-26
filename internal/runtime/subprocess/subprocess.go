@@ -60,6 +60,7 @@ const (
 // sessionConn tracks a running child process and its control socket.
 type sessionConn struct {
 	cmd      *exec.Cmd
+	pgid     int           // process group recorded at Setpgid spawn; 0 if none
 	done     chan struct{} // closed when process exits
 	listener net.Listener  // unix socket listener
 }
@@ -202,13 +203,17 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		return fmt.Errorf("starting session %q: %w", name, err)
 	}
 	_ = nullFile.Close()
+	// Setpgid succeeded with Start, so the leader pid is the group id. Record
+	// it now: Getpgid returns ESRCH once this process is reaped, while the
+	// recorded id still names the group for any descendant that outlives it.
+	pgid := cmd.Process.Pid
 
 	// Create control socket for cross-process discovery.
 	done := make(chan struct{})
-	lis, err := p.startControlSocket(name, cmd, done, socketDir, euid)
+	lis, err := p.startControlSocket(name, cmd, pgid, done, socketDir, euid)
 	if err != nil {
 		// Socket creation failed — kill the process and bail.
-		_ = cmd.Process.Kill()
+		_ = runtime.SignalProcessGroup(cmd, pgid, syscall.SIGKILL)
 		_ = cmd.Wait()
 		clearWorkDir()
 		return fmt.Errorf("creating control socket for %q: %w", name, err)
@@ -216,7 +221,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	if err := p.persistStartMetadata(name, cfg.Env); err != nil {
 		lis.Close() //nolint:errcheck
 		_ = p.removeSocketArtifactsAt(name, socketDir, euid)
-		_ = cmd.Process.Kill()
+		_ = runtime.SignalProcessGroup(cmd, pgid, syscall.SIGKILL)
 		_ = cmd.Wait()
 		clearWorkDir()
 		return fmt.Errorf("storing metadata for %q: %w", name, err)
@@ -232,7 +237,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		close(done)
 	}()
 
-	p.procs[name] = &sessionConn{cmd: cmd, done: done, listener: lis}
+	p.procs[name] = &sessionConn{cmd: cmd, pgid: pgid, done: done, listener: lis}
 	return nil
 }
 
@@ -278,7 +283,7 @@ func (p *Provider) Interrupt(name string) error {
 	sc, ok := p.procs[name]
 	p.mu.Unlock()
 	if ok {
-		return runtime.SignalProcessGroup(sc.cmd, syscall.SIGINT)
+		return runtime.SignalProcessGroup(sc.cmd, sc.pgid, syscall.SIGINT)
 	}
 
 	// Fall back to socket (cross-process case). A missing socket is the same
@@ -692,7 +697,7 @@ func (p *Provider) socketNameForEntry(dir, key string) string {
 //   - "interrupt" — SIGINT to the whole session process group; replies "ok"
 //   - "ping" — replies "ok"
 //   - "pid" — replies with the PID (diagnostics)
-func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan struct{}, dir string, euid int) (net.Listener, error) {
+func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, pgid int, done <-chan struct{}, dir string, euid int) (net.Listener, error) {
 	if err := p.ensureSocketDir(dir, euid); err != nil {
 		return nil, err
 	}
@@ -716,14 +721,14 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan st
 			if err != nil {
 				return // listener closed
 			}
-			go handleSessionConn(conn, cmd, done)
+			go handleSessionConn(conn, cmd, pgid, done)
 		}
 	}()
 	return lis, nil
 }
 
 // handleSessionConn reads a command from the connection and acts on the process.
-func handleSessionConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}) {
+func handleSessionConn(conn net.Conn, cmd *exec.Cmd, pgid int, done <-chan struct{}) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
 	scanner := bufio.NewScanner(conn)
@@ -732,10 +737,10 @@ func handleSessionConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}) {
 	}
 	switch scanner.Text() {
 	case "stop":
-		_ = runtime.TerminateManagedProcess(cmd, done, runtime.ManagedProcessStopGrace)
+		_ = runtime.TerminateManagedProcess(cmd, pgid, done, runtime.ManagedProcessStopGrace)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "interrupt":
-		_ = runtime.SignalProcessGroup(cmd, syscall.SIGINT)
+		_ = runtime.SignalProcessGroup(cmd, pgid, syscall.SIGINT)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "ping":
 		conn.Write([]byte("ok\n")) //nolint:errcheck
@@ -848,7 +853,7 @@ func isUnavailableSocketError(err error) bool {
 
 // terminateSessionConn sends SIGTERM then SIGKILL to an in-memory tracked process.
 func terminateSessionConn(sc *sessionConn) error {
-	return runtime.TerminateManagedProcess(sc.cmd, sc.done, runtime.ManagedProcessStopGrace)
+	return runtime.TerminateManagedProcess(sc.cmd, sc.pgid, sc.done, runtime.ManagedProcessStopGrace)
 }
 
 // Capabilities reports subprocess provider capabilities. The subprocess
