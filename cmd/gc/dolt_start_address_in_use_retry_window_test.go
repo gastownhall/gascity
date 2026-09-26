@@ -627,6 +627,46 @@ func TestStartManagedDoltProcessWithOptions_HappyPathReturnsReadyOnFirstAttempt(
 	}
 }
 
+func TestStartManagedDoltProcessPersistsPreLaunchBoundary(t *testing.T) {
+	const port = 17790
+	launchBoundary := time.Date(2026, 9, 1, 3, 0, 0, 0, time.UTC)
+	originalNow := managedDoltNowFn
+	managedDoltNowFn = func() time.Time { return launchBoundary }
+	t.Cleanup(func() { managedDoltNowFn = originalNow })
+
+	var observedBoundary bool
+	cityPath := installStartManagedDoltLoopStubs(t, startManagedDoltLoopStubs{
+		startFn: func(cityPath, _, _ string, _ *os.File) (managedDoltStartedProcess, error) {
+			observedBoundary = true
+			return managedDoltStartedProcess{CityPath: cityPath, PID: 4242}, nil
+		},
+		waitReadyFn: func(_, _, _, _ string, _ int, _ time.Duration, _ bool) (managedDoltWaitReadyReport, error) {
+			return managedDoltWaitReadyReport{Ready: true, PIDAlive: true}, nil
+		},
+		logSuffixFn:     func(_ string, _ int64) (string, error) { return "", nil },
+		portAvailableFn: func(_ string, _ int) bool { return true },
+		retryWindow:     0,
+	})
+
+	if _, err := startManagedDoltProcessWithOptions(cityPath, "0.0.0.0", strconv.Itoa(port), "root", "warning", -1, time.Second, false); err != nil {
+		t.Fatalf("start managed Dolt: %v", err)
+	}
+	if !observedBoundary {
+		t.Fatal("managed Dolt launch stub was not called")
+	}
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolve runtime layout: %v", err)
+	}
+	state, err := readDoltRuntimeStateFile(layout.StateFile)
+	if err != nil {
+		t.Fatalf("read provider state: %v", err)
+	}
+	if state.StartedAt != launchBoundary.Format(time.RFC3339) {
+		t.Fatalf("provider started_at = %q, want pre-launch boundary %q", state.StartedAt, launchBoundary.Format(time.RFC3339))
+	}
+}
+
 // TestStartManagedDoltProcessWithOptions_RetryWindowZeroBumpsImmediately
 // pins the legacy fall-back-immediately behavior: retryWindow=0 means the
 // wait helper at line 246 is gated out (`retryWindow > 0` is false), so
