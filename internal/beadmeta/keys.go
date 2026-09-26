@@ -305,10 +305,11 @@ const (
 	// WorkflowExpandedMetadataKey marks a graph.v2 workflow root that was
 	// compiled with real child steps beyond the root itself. Its absence
 	// distinguishes a genuinely root-only (#2763-shape) molecule, whose root
-	// IS the unit of work and must remain claimable via the
-	// RunTargetMetadataKey fallback, from a fully-expanded root whose real
-	// children have all closed and is only waiting on workflow-finalize —
-	// see hookClaimMatchesRoute/hookClaimRoute (#5900).
+	// IS the unit of work and must remain claimable, from an expanded root
+	// that is a controller-owned latch: its children are the work and
+	// workflow-finalize closes it. An expanded root is never admitted as
+	// fresh worker work, via RunTargetMetadataKey (#5900) or via
+	// RoutedToMetadataKey (#6461); see IsExpandedWorkflow.
 	WorkflowExpandedMetadataKey = "gc.workflow_expanded"
 )
 

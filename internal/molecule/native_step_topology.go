@@ -28,6 +28,12 @@ func recipeWithNativeStepDependencies(recipe *formula.Recipe) *formula.Recipe {
 
 	clone := *recipe
 	clone.Steps = recipeStepsWithNativeStepDependencies(recipe.Steps, recipe.Deps)
+	if recipe.RootOnly && len(recipe.Steps) > 0 {
+		// RootOnly recipes retain compiled children for provenance, but those
+		// children are not materialized. Stamp the root against the physical
+		// one-node graph so discarded control steps cannot make it look blocked.
+		clone.Steps[0] = recipeStepsWithNativeStepDependencies(recipe.Steps[:1], nil)[0]
+	}
 	return &clone
 }
 

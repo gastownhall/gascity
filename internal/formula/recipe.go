@@ -122,8 +122,10 @@ func (r *Recipe) RootStep() *RecipeStep {
 	return &r.Steps[0]
 }
 
-// RecipeHasReadySurface reports whether instantiating recipe creates a root
-// bead that Ready queries can see and route directly.
+// RecipeHasReadySurface reports whether instantiating recipe creates
+// Ready-visible routed work: a root-only recipe's root is that work, and a
+// graph.v2 recipe's routed step beads are (its expanded root is a latch that
+// pool demand and claims refuse). A poured v1 molecule container is neither.
 func RecipeHasReadySurface(recipe *Recipe) bool {
 	if recipe == nil {
 		return false

@@ -2268,7 +2268,7 @@ func openControlDispatcherDemand(cfg *config.City, workBeads []beads.Bead) map[s
 		return demand
 	}
 	for _, wb := range workBeads {
-		if wb.Status != "open" || strings.TrimSpace(wb.Assignee) != "" {
+		if wb.Status != "open" || !demandRowServable(wb) {
 			continue
 		}
 		for _, candidate := range controllerDemandRouteCandidates(wb) {

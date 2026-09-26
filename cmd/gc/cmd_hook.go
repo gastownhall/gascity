@@ -1124,7 +1124,9 @@ func workQueryHasReadyWork(output string) bool {
 // filterUnreadyHookCandidates strips beads from work_query output that fail
 // bd ready semantics: future defer_until, any open blocking dep in the row's
 // blocked_by array, the row's own is_blocked / status=="blocked" marker, or a
-// canonical dispatch hold label. The work_query is expected to gate these, but
+// canonical dispatch hold label. Unassigned expanded workflow roots are also
+// excluded from fresh work; assigned roots remain continuation anchors.
+// The work_query is expected to gate these, but
 // defensive filtering here prevents a single broken query from cascading into
 // agent action on a bead it cannot progress.
 // Pure function over JSON; takes time.Time so tests stay deterministic.
@@ -1160,6 +1162,10 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 			continue
 		}
 		if isHeldHookCandidate(obj) {
+			continue
+		}
+		if candidate, ok := decodeHookCandidateBead(obj); ok &&
+			strings.TrimSpace(candidate.Assignee) == "" && beadmeta.IsExpandedWorkflow(candidate.Metadata) {
 			continue
 		}
 		filtered = append(filtered, obj)

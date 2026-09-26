@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/git"
@@ -691,6 +692,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 	for _, candidate := range candidates {
 		if strings.TrimSpace(candidate.ID) == "" ||
 			hookClaimCandidateIsMessage(candidate) ||
+			(!hookCandidateHasClaimableKind(candidate) && !hookCandidateIsOwnedWorkflowAnchor(candidate, opts)) ||
 			!strings.EqualFold(strings.TrimSpace(candidate.Status), "open") ||
 			!hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) ||
 			hookCandidateBudgetDeferred(candidate, now) {
@@ -795,6 +797,15 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, true, stdout, stderr)}
 	}
 	return hookClaimResult{claimsErrored: claimsErrored}
+}
+
+// hookCandidateIsOwnedWorkflowAnchor admits an expanded graph root only on the
+// assigned-ready path. The assignment is the continuation contract: it lets
+// this session promote its preassigned anchor without making the same root
+// available as fresh routed work to an unrelated session.
+func hookCandidateIsOwnedWorkflowAnchor(candidate beads.Bead, opts hookClaimOptions) bool {
+	return strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflow &&
+		hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates)
 }
 
 // hookClaimBeadIsElsewhere reports whether a failed claim proves the bead is not
@@ -958,11 +969,12 @@ func mergeHookClaimCandidateMetadata(candidate, claimed beads.Bead) beads.Bead {
 }
 
 // hookCandidateClaimable reports whether a work-query candidate is eligible for a
-// fresh claim: it has an id, is currently unassigned, matches one of this
-// session's route targets, and is not still within a build-budget deferral
-// window (see hookCandidateBudgetDeferred).
+// fresh claim: its kind is claimable, it has an id, is currently unassigned,
+// matches one of this session's route targets, and is not within a build-budget
+// deferral window (see hookCandidateBudgetDeferred).
 func hookCandidateClaimable(candidate beads.Bead, routeTargets []string, now time.Time) bool {
-	return strings.TrimSpace(candidate.ID) != "" &&
+	return hookCandidateHasClaimableKind(candidate) &&
+		strings.TrimSpace(candidate.ID) != "" &&
 		strings.TrimSpace(candidate.Assignee) == "" &&
 		hookClaimMatchesRoute(candidate, routeTargets) &&
 		!hookCandidateBudgetDeferred(candidate, now)
@@ -992,13 +1004,22 @@ func hookCandidateBudgetDeferred(candidate beads.Bead, now time.Time) bool {
 // claim-eligibility failure is a non-empty (possibly stale) assignee -- the exact
 // shape ga-7rj87d FR1 scopes a stale-lease reclaim attempt to. A candidate still
 // inside its gc.budget_deferred_until window is never reclaim-eligible: the
-// budget gate must hold across both the fresh-claim and reclaim paths, or a
-// stale assignee lets a deferred candidate bypass the daily build budget.
+// budget and kind gates must hold across both the fresh-claim and reclaim paths,
+// or a stale assignee lets a candidate bypass either gate.
 func hookCandidateReclaimEligible(candidate beads.Bead, routeTargets []string, now time.Time) bool {
-	return strings.TrimSpace(candidate.ID) != "" &&
+	return hookCandidateHasClaimableKind(candidate) &&
+		strings.TrimSpace(candidate.ID) != "" &&
 		strings.TrimSpace(candidate.Assignee) != "" &&
 		hookClaimMatchesRoute(candidate, routeTargets) &&
 		!hookCandidateBudgetDeferred(candidate, now)
+}
+
+// hookCandidateHasClaimableKind rejects workflow-topology infrastructure that
+// may carry a worker route but is owned by the graph. Control beads remain
+// executable through the control-dispatcher lane, which uses this same hook
+// claim path.
+func hookCandidateHasClaimableKind(candidate beads.Bead) bool {
+	return config.PoolDemandServeRulesForQuery().AllowsMetadata(candidate.Metadata)
 }
 
 // reportHookClaimRejected publishes a bead.claim_rejected event (ADR-0009) when a
@@ -1154,7 +1175,7 @@ func adoptAfterFailedRestamp(beadID, current, target string, verdict hookAdoptio
 
 func hookClaimExistingAssignment(candidates []beads.Bead, opts hookClaimOptions) (hookClaimJSONResult, beads.Bead, bool) {
 	for _, candidate := range candidates {
-		if hookClaimCandidateIsMessage(candidate) {
+		if hookClaimCandidateIsMessage(candidate) || hookCandidateIsSpecOrScope(candidate) {
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(candidate.Status), "in_progress") &&
@@ -1173,6 +1194,11 @@ func hookClaimExistingAssignment(candidates []beads.Bead, opts hookClaimOptions)
 		}
 	}
 	return hookClaimJSONResult{}, beads.Bead{}, false
+}
+
+func hookCandidateIsSpecOrScope(candidate beads.Bead) bool {
+	kind := strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])
+	return kind == beadmeta.KindSpec || kind == beadmeta.KindScope
 }
 
 // hookClaimCandidateIsMessage reports whether candidate is a mail message
@@ -3105,18 +3131,18 @@ func hookRouteIdentitiesEqual(a, b string) bool {
 // unit of work, with no compiled children - is claimable via its
 // gc.run_target authoring hint. It must not also resurrect a fully-expanded
 // root: once compile.go gives a graph.v2 root real child steps, it stamps
-// gc.workflow_expanded=true, and that root's only remaining path to
-// dependency-readiness is every real child closing while workflow-finalize
-// has not yet run and closed it (#5900) - a state the fallback must not
-// treat as claimable (WorkflowTopologyKinds document workflow roots as never
-// claimable). A candidate without the stamp predates this fix or was never
-// expanded, so it keeps the original permissive behavior.
+// gc.workflow_expanded=true. Its finalizer dependency is informational, so
+// it can be ready throughout execution. Neither route may admit it as fresh
+// work. Canonical native-step metadata distinguishes a genuinely root-only
+// root (exactly "[]") from a graph latch. Legacy routed graph.v2 roots without
+// either topology fact fail closed; run_target-only legacy roots retain their
+// compatibility path.
 func workflowRunTargetFallbackEligible(candidate beads.Bead) bool {
 	kind := strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])
 	if kind != beadmeta.KindWorkflow {
 		return false
 	}
-	return strings.TrimSpace(candidate.Metadata[beadmeta.WorkflowExpandedMetadataKey]) != "true"
+	return config.PoolDemandServeRulesForQuery().AllowsMetadata(candidate.Metadata)
 }
 
 func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
@@ -3152,7 +3178,10 @@ func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 // would wrongly hide legitimately unrouted display candidates (ga-1xaqgo.2).
 func hookCandidateVisible(candidate beads.Bead, identities, routeTargets []string) bool {
 	if assignee := strings.TrimSpace(candidate.Assignee); assignee != "" {
-		return hookClaimHasIdentity(assignee, identities)
+		return !hookCandidateIsSpecOrScope(candidate) && hookClaimHasIdentity(assignee, identities)
+	}
+	if !hookCandidateHasClaimableKind(candidate) {
+		return false
 	}
 	if hookClaimRoute(candidate) == "" {
 		return true

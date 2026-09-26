@@ -69,6 +69,9 @@ func demandServableForTemplates(cfg *config.City, b beads.Bead, templates map[st
 // template it is asking for.
 func demandRowServable(b beads.Bead) bool {
 	rules := config.PoolDemandServeRulesForQuery()
+	if !rules.AllowsMetadata(b.Metadata) {
+		return false
+	}
 	if rules.RequireUnassigned && strings.TrimSpace(b.Assignee) != "" {
 		return false
 	}

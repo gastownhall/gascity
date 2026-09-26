@@ -109,9 +109,12 @@ var StructuralGraphKinds = []string{
 }
 
 // WorkflowTopologyKinds lists kinds that anchor workflow topology (root
-// workflow, scope latch, formula spec). Routing never lands on these; agents
-// must never claim them. graphroute.IsWorkflowTopologyKind derives from this
-// set.
+// workflow, scope latch, formula spec). graphroute.IsWorkflowTopologyKind
+// derives from this set; the step router skips these kinds. KindWorkflow is
+// the exception that still carries gc.routed_to: a root-only root is the
+// unit of work (#2763), while an expanded root keeps the route for
+// attribution and its owner's continuation but is refused as fresh work
+// (IsExpandedWorkflow; #5900, #6461).
 var WorkflowTopologyKinds = []string{
 	KindWorkflow,
 	KindScope,

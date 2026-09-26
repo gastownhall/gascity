@@ -13454,6 +13454,43 @@ func TestOpenControlDispatcherDemandHonorsBareLegacyRoute(t *testing.T) {
 	}
 }
 
+// TestOpenControlDispatcherDemandExcludesExpandedWorkflowRoots keeps the
+// deterministic dispatcher demand reader aligned with the worker's claim
+// boundary. An expanded root is a controller latch whose children are the
+// executable work, so spawning a dispatcher for the root would create demand
+// for a row that the dispatcher can never claim.
+func TestOpenControlDispatcherDemandExcludesExpandedWorkflowRoots(t *testing.T) {
+	maxActive := 1
+	const route = "core.control-dispatcher"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+	root := beads.Bead{
+		ID:     "expanded-root",
+		Status: "open",
+		Type:   "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
+			beadmeta.FormulaContractMetadataKey:  beadmeta.FormulaContractGraphV2,
+			beadmeta.RoutedToMetadataKey:         route,
+			beadmeta.WorkflowExpandedMetadataKey: "true",
+		},
+	}
+
+	if hookCandidateClaimable(root, []string{route}, time.Now()) {
+		t.Fatal("expanded workflow root unexpectedly passed the hook claim boundary")
+	}
+	if demand := openControlDispatcherDemand(cfg, []beads.Bead{root}); demand[route] {
+		t.Fatalf("openControlDispatcherDemand = %v, want no demand for an unclaimable expanded workflow root", demand)
+	}
+}
+
 // TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates verifies that
 // when the demand store returns a partial result for a pool agent:
 //   - poolScaleCheckPartialTemplates is set for the affected template

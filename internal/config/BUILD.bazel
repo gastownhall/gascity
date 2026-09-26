@@ -184,6 +184,7 @@ go_test(
         "workquery_named_routed_gate_test.go",
         "workquery_parity_test.go",
         "workquery_recovery_test.go",
+        "workquery_root_admission_test.go",
         "workquery_single_session_routed_test.go",
     ],
     data = glob(
