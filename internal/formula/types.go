@@ -239,6 +239,12 @@ type Step struct {
 	// If both Description and DescriptionFile are set, DescriptionFile wins.
 	DescriptionFile string `json:"description_file,omitempty" toml:"description_file,omitempty"`
 
+	// descriptionFileReference retains the source of an oversized prompt after
+	// DescriptionFile is consumed. Resolve uses it to regenerate the compact
+	// reference after inherited variables have been composed. It is internal
+	// compiler state and must never be serialized into recipes or bead metadata.
+	descriptionFileReference *descriptionFileReference
+
 	// Notes are additional notes for the issue (supports substitution).
 	Notes string `json:"notes,omitempty"`
 

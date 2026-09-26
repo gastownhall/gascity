@@ -1,6 +1,7 @@
 package formula
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -513,6 +514,87 @@ description_file = "operator.md"
 	}
 	if strings.Contains(step.Description, "large prompt body\nlarge prompt body\n") {
 		t.Fatalf("Description unexpectedly inlined oversized prompt:\n%s", step.Description)
+	}
+}
+
+func TestCompileInheritedVarsInOversizedDescriptionFileReference(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "requirements.md")
+	largePrompt := strings.Repeat("requirements prompt body\n", descriptionFileInlineMaxBytes/24+128)
+	if len([]byte(largePrompt)) <= descriptionFileInlineMaxBytes {
+		t.Fatalf("test prompt length = %d, want > %d", len([]byte(largePrompt)), descriptionFileInlineMaxBytes)
+	}
+	if err := os.WriteFile(promptPath, []byte(largePrompt), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "base.toml"), []byte(`
+formula = "base"
+version = 2
+contract = "graph.v2"
+type = "workflow"
+
+[vars.requirements_path]
+description = "Requirements artifact path"
+required = true
+
+[[steps]]
+id = "requirements"
+title = "Requirements"
+description = "base prompt"
+`), 0o644); err != nil {
+		t.Fatalf("write base formula: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "child.toml"), []byte(`
+formula = "child"
+version = 2
+contract = "graph.v2"
+type = "workflow"
+extends = ["base"]
+
+[vars.interaction_mode]
+description = "Interaction mode"
+required = true
+
+[[steps]]
+id = "requirements"
+title = "Requirements"
+description_file = "requirements.md"
+`), 0o644); err != nil {
+		t.Fatalf("write child formula: %v", err)
+	}
+
+	vars := map[string]string{
+		"interaction_mode":  "autonomous",
+		"requirements_path": "artifacts/delivery/requirements.md",
+	}
+	recipe, err := Compile(context.Background(), "child", []string{dir}, vars)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	step := recipe.StepByID("child.requirements")
+	if step == nil {
+		t.Fatal("compiled recipe missing child.requirements")
+	}
+	rendered := Substitute(step.Description, vars)
+	for _, want := range []string{
+		"External Prompt Required",
+		promptPath,
+		`interaction_mode="autonomous"`,
+		`requirements_path="artifacts/delivery/requirements.md"`,
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("Description missing %q:\n%s", want, rendered)
+		}
+	}
+	for _, name := range []string{"interaction_mode", "requirements_path"} {
+		if got := strings.Count(rendered, name+"="); got != 1 {
+			t.Fatalf("Description contains %s assignment %d times, want once:\n%s", name, got, rendered)
+		}
+	}
+	if strings.Index(rendered, "interaction_mode=") > strings.Index(rendered, "requirements_path=") {
+		t.Fatalf("Formula variables are not sorted:\n%s", rendered)
 	}
 }
 
