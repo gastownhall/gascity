@@ -16,6 +16,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/builtinpacks",
+        "//internal/config",
         "//internal/fsys",
         "//internal/git",
         "//internal/gitcred",
@@ -91,9 +92,22 @@ go_test(
     embed = [":packman"],
     deps = [
         "//internal/builtinpacks",
+        "//internal/config",
         "//internal/fsys",
         "//internal/gitcred",
         "//internal/processgroup/processgrouptest",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

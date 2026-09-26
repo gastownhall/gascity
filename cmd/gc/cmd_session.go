@@ -1883,7 +1883,7 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	// nothing and a city that relocates nothing still reads one store.
 	var rigStores map[string]beads.Store
 	if cityErr == nil && cfg != nil {
-		rigStores = buildStandaloneRigStores(cfg, cityPath, stderr)
+		rigStores = buildStandaloneRigStoresWithConfig(cfg, cityPath, stderr)
 	}
 	unclaimWorkAssignedToRetiredSessionBead(cityPath, cfg, store, rigStores, closedSessionBead, "", stderr)
 

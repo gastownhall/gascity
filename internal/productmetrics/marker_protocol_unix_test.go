@@ -256,6 +256,10 @@ func TestRootAtomicWriterCrashReplayAtEveryProtocolOrdinal(t *testing.T) {
 			defer cancel()
 			command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRootAtomicWriterCrashHelper$", "--",
 				"--productmetrics-root-temp-crash", home.Home().Path(), test.point)
+			// Shard-free env: the re-exec'd crash helper selects work via
+			// -test.run; inheriting bazel's shard filter makes it exit PASS
+			// without running (#6638).
+			command.Env = shardFreeEnv()
 			output, runErr := command.CombinedOutput()
 			if ctx.Err() != nil {
 				t.Fatalf("crash helper %s timed out: %v\n%s", test.point, ctx.Err(), output)

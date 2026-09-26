@@ -19,6 +19,8 @@ go_library(
         "entry_id.go",
         "gemini_reader.go",
         "grok_reader.go",
+        "kimi_code_discovery.go",
+        "kimi_code_reader.go",
         "kimi_reader.go",
         "kiro_reader.go",
         "mimocode_reader.go",
@@ -57,6 +59,7 @@ go_test(
         "entry_id_occurrence_test.go",
         "entry_id_test.go",
         "grok_reader_test.go",
+        "kimi_code_test.go",
         "kimi_reader_test.go",
         "kiro_reader_test.go",
         "mimocode_plugin_mirror_test.go",
@@ -76,4 +79,16 @@ go_test(
         "//internal/modelwindow",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

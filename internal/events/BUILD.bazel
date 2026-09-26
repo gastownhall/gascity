@@ -42,9 +42,11 @@ go_test(
         "payload_test.go",
         "query_test.go",
         "reader_afterseq_seek_test.go",
+        "reader_archive_filter_test.go",
         "reader_beforeseq_test.go",
         "reader_context_test.go",
         "recorder_batch_test.go",
+        "recorder_shortwrite_unix_test.go",
         "rotation_archive_test.go",
         "rotation_auto_test.go",
         "rotation_force_test.go",
@@ -53,6 +55,7 @@ go_test(
         "rotation_test.go",
         "rotation_watcher_test.go",
         "testenv_import_test.go",
+        "type_naming_test.go",
         "watch_backfill_test.go",
     ],
     embed = [":events"],
@@ -60,4 +63,16 @@ go_test(
         "//internal/events/eventstest",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "git",
-    srcs = glob(["*.go"]),
+    srcs = glob(
+        ["*.go"],
+        exclude = ["*_test.go"],
+    ),
     importpath = "github.com/gastownhall/gascity/internal/git",
     visibility = ["//:__subpackages__"],
     deps = ["//internal/gitcred"],
@@ -16,6 +19,7 @@ go_test(
         "clone_test.go",
         "git_test.go",
         "revision_test.go",
+        "sshkeepalive_test.go",
         "testenv_import_test.go",
         "unreachable_commits_test.go",
         "worktree_ops_test.go",
@@ -25,4 +29,16 @@ go_test(
         "//internal/testenv",
         "//internal/testutil",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

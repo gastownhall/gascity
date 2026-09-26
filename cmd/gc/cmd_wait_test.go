@@ -480,6 +480,7 @@ func TestWriteWaitDetail_RendersWaitInfo(t *testing.T) {
 }
 
 func TestWaitJSONSchemasDoNotExposeRawMetadata(t *testing.T) {
+	chdirToRealPackageDir(t)
 	for _, path := range []string{
 		filepath.Join("..", "..", "schemas", "wait", "list", "result.schema.json"),
 		filepath.Join("..", "..", "schemas", "wait", "inspect", "result.schema.json"),

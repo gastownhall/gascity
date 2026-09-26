@@ -24,8 +24,8 @@ func TestE2E_Pool_InstanceNaming(t *testing.T) {
 	// The slot names are real and still stamped on the session bead (agent_name),
 	// which is how the members are discovered here. What they are NOT is public
 	// identity: an expanding-pool slot rebinds to a fresh session whenever a
-	// holder dies, so each member owns work under its own session name and its
-	// GC_AGENT is that name, not "worker-N".
+	// holder dies, so each member owns work under its own session bead ID and
+	// its GC_AGENT is that ID, not "worker-N".
 	reports := waitForPoolMemberReports(t, cityDir, "worker", []string{"worker-1", "worker-2"}, e2eDefaultTimeout())
 	for _, slot := range []string{"worker-1", "worker-2"} {
 		if agent := reports[slot].get("GC_AGENT"); agent == slot {
@@ -139,7 +139,7 @@ func TestE2E_Pool_EnvPerInstance(t *testing.T) {
 	r1, r2 := reports["envpool-1"], reports["envpool-2"]
 
 	// Each instance still gets a UNIQUE GC_AGENT — it is now the member's own
-	// session name rather than its slot, which is the whole point: the identity
+	// session bead ID rather than its slot, which is the whole point: the identity
 	// a pool member claims under has to be one that dies with it.
 	a1, a2 := r1.get("GC_AGENT"), r2.get("GC_AGENT")
 	if a1 == "" || a2 == "" {

@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "splittest",
     srcs = [
+        "pinned_id_fence.go",
         "semantics.go",
         "split_stores.go",
         "strict_store.go",
@@ -11,6 +12,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/beads",
+        "//internal/config",
         "//internal/storeref",
     ],
 )
@@ -18,15 +20,38 @@ go_library(
 go_test(
     name = "splittest_test",
     srcs = [
+        "fence_conformance_test.go",
         "import_boundary_test.go",
         "split_stores_test.go",
         "strict_store_test.go",
         "testenv_import_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_source_tree",
+    ],
     embed = [":splittest"],
     deps = [
+        "//internal/bazeltest",
         "//internal/beads",
+        "//internal/beads/beadstest",
+        "//internal/config",
         "//internal/storeref",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

@@ -445,6 +445,11 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 		s.SetEnv(env)
 		return s, nil
 	}
+	// One bd opener for both the fallback store and the proxied split store's
+	// write leaf: a demotion must not change which store does the writing.
+	openBd := func() (beads.Store, error) {
+		return bdStoreForRig(scopeRoot, cs.cityPath, cfg, prefix), nil
+	}
 	result, err := controllerStateOpenRigStoreAtForCity(context.Background(), beads.StoreOpenOptions{
 		ScopeRoot:                   scopeRoot,
 		CityPath:                    cs.cityPath,
@@ -452,6 +457,10 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 		PreflightChecker:            newBeadsPreflightChecker(cs.cityPath, provider),
 		ConditionalWrites:           cs.rolloutFlags.BeadsConditionalWrites(),
 		OnConditionalWritesDegraded: conditionalWritesDegradedRecorder(cs.eventProv, cs.rolloutFlags, "rig/"+rigName),
+		// The controller holds a rig store for the process lifetime, which is
+		// what decides both the project-pool shape and whether a finite-idle
+		// proxy may host it at all.
+		LongLived: true,
 		OpenFileStore: func() (beads.Store, error) {
 			store, err := openCompatibleFileStore(scopeRoot, cs.cityPath)
 			if err != nil {
@@ -459,10 +468,9 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 			}
 			return store, nil
 		},
-		OpenBdStore: func() (beads.Store, error) {
-			return bdStoreForRig(scopeRoot, cs.cityPath, cfg, prefix), nil
-		},
-		OpenExecStore: openExecStore,
+		OpenBdStore:      openBd,
+		OpenProxiedStore: proxiedNativeStoreOpenerForScope(cs.cityPath, scopeRoot, cfg, openBd),
+		OpenExecStore:    openExecStore,
 		OpenNativeStore: func() (beads.Store, error) {
 			env, err := nativeDoltOpenEnvForScope(cs.cityPath, cfg, scopeRoot)
 			if err != nil {

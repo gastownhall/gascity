@@ -950,6 +950,7 @@ func TestProviderDrainOpsClearDrainAttemptsAllMetadataRemovals(t *testing.T) {
 	want := []string{
 		"GC_DRAIN_ACK",
 		reconcilerDrainAckSourceKey,
+		drainAckRequesterInstanceTokenKey,
 		reconcilerDrainAckReasonKey,
 		reconcilerDrainAckGenerationKey,
 		"GC_DRAIN",
@@ -976,7 +977,14 @@ func TestProviderDrainOpsSetDrainAckAttemptsAckAfterCleanupErrors(t *testing.T) 
 	if !slices.Equal(sp.removeKeys, wantRemove) {
 		t.Fatalf("removed keys = %v, want %v", sp.removeKeys, wantRemove)
 	}
+	// The stamp lands BEFORE the source, so the source is never admissible ahead
+	// of its own binding: drainReminderAckPin admits an acknowledgement on the
+	// source alone and reads the stamp in a separate round-trip, so written the
+	// other way round it would pair this ack's fresh source with the previous
+	// occupant's stamp and mint "proven stale" about an ack microseconds old.
+	// GC_DRAIN_ACK still lands last, which is what the effect boundary gates on.
 	wantSet := []string{
+		drainAckRequesterInstanceTokenKey,
 		reconcilerDrainAckSourceKey,
 		"GC_DRAIN_ACK",
 	}

@@ -14,6 +14,7 @@ go_library(
         "//internal/agentutil",
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/config",
         "//internal/convoy",
         "//internal/events",
         "//internal/executionevent",
@@ -24,6 +25,7 @@ go_library(
         "//internal/molecule",
         "//internal/pathutil",
         "//internal/runtime",
+        "//internal/session",
         "//internal/shellquote",
         "//internal/sourceworkflow",
         "//internal/telemetry",
@@ -37,6 +39,7 @@ go_test(
         "cycle_test.go",
         "sling_attached_hint_test.go",
         "sling_attachment_test.go",
+        "sling_convoy_reuse_test.go",
         "sling_core_test.go",
         "sling_env_test.go",
         "sling_graph_root_store_test.go",
@@ -46,6 +49,8 @@ go_test(
         "sling_rootonly_hint_test.go",
         "sling_sweep_test.go",
         "sling_test.go",
+        "source_workflow_graph_leg_test.go",
+        "source_workflow_supersede_test.go",
         "testenv_import_test.go",
         "zz_boolptr_test.go",
     ],
@@ -58,6 +63,7 @@ go_test(
         "//internal/beads/exec",
         "//internal/beads/splittest",
         "//internal/citylayout",
+        "//internal/config",
         "//internal/convoy",
         "//internal/events",
         "//internal/formula",
@@ -69,4 +75,16 @@ go_test(
         "//internal/sourceworkflow",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

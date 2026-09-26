@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrading Notes
+
+- **Keep Beads (`bd`) at v1.3.0.** v1.5.0 pins and is tested against bd
+  v1.3.0 (`deps.env` `BD_VERSION` and the go.mod library). Do not move a city
+  to a newer `bd` until a gc release pins it.
+- **`gc storage migrate` is experimental.** The command is new in v1.5.0 and
+  still has open correctness issues on split cities (#5987, #6015, #5974,
+  #6129, #6242, #6348). Run `gc storage preflight` first, back up every store
+  involved, and do not migrate a production city you cannot restore.
+- **Run `gc doctor` after upgrading a city whose beads store gc does not
+  own.** gc now registers its required bead types (including the new
+  `startup-health-episode`) on start for gc-managed and provider-owned stores.
+  It never writes to external Dolt servers, complete storage bindings, hosted
+  gateways or legacy proxied opt-in scopes: on those, run `gc doctor` and, if
+  `custom-types` fails, `gc doctor --fix` (#6495).
+- **Unaliased pool and ephemeral sessions now act as their session bead id.**
+  `GC_AGENT` and `BEADS_ACTOR` (and the event actor and telemetry `gc.agent`)
+  are the session bead id instead of the session name; restart running
+  sessions to pick it up. `gc hook --claim` re-stamps a bead still held under
+  the old spelling when it adopts it; if that fails it prints the exact
+  `bd update <id> --if-assignee <old> --if-status in_progress --assignee <new>`
+  command to recover (#5716).
+- **Pool rows from a pre-release build keep their old names, and a failed
+  pool start can now stall its slot.** Open pool rows created by an RC or main
+  build named bare `claude` or `claude-N-pool` keep those names until they
+  close, and each can leave at most one orphan runtime, once; new workers use
+  `<template>-<beadID>`. When a pool worker fails to start, gc stops its
+  runtime before the slot retries; if that stop fails, the slot stalls with a
+  `holding pool session <id> open` log line instead of starting another box
+  (#6549).
+- **The Dolt compactor never flattens a database that has a Dolt remote.**
+  Such databases (including bd `refs/dolt/data` and backup-only `file://`
+  remotes) get a bare `CALL DOLT_GC()` and their history grows, and a leftover
+  `compact-pending-push` marker is held for review instead of pushed. To
+  flatten one on purpose, announce a window to every clone, then run
+  `GC_DOLT_COMPACT_ALLOW_FEDERATED=1 gc dolt compact --only-db <db>`. On first
+  sight the compactor tags each database `gc-compact-base`: at its root if the
+  compactor already flattened it or it is marked `.compact-full-history`,
+  otherwise at HEAD, keeping its pre-upgrade history. Only commits after the
+  tag are squashed. If you roll a database back to before its tag, compaction
+  of it fails with instructions until you delete the tag
+  (`CALL DOLT_TAG('-d', 'gc-compact-base')`) (#5958).
+- **`secrets.env` keys must be shell identifiers.** Any other key (optionally
+  after `export `) is rejected as `line N: invalid key`, and an unclosed quote
+  skips through its closing line as one block reported by key and line range;
+  the rest of the file still applies. Check the supervisor's stderr after
+  `gc start` for skipped lines (#5982, #6022).
+- **Child processes now see `BD_BIN=` (empty) when no `bd` pin is
+  configured,** instead of an inherited ambient value. A relative or
+  non-executable ambient `BD_BIN` is ignored with a warning; a `BD_BIN` pinned
+  in `workspace.env` still fails closed (#6550).
+- **Formula steps and the agent-script `notes:` key now append to work-bead
+  notes** (`bd update --append-notes`) instead of replacing them. A retried
+  step can append the same text twice (#6412).
+- **A retry step's own counter moved to `gc.retry_attempt`.** Inside a ralph
+  or review loop, `gc.attempt` names the loop iteration on every bead of the
+  iteration body again (the v1.4.2 contract), and `gc.retry_attempt` counts a
+  step's retries from 1 in each iteration. Packs that read `gc.attempt` as a
+  retry counter should read `gc.retry_attempt`, falling back to `gc.attempt`;
+  beads created before the upgrade have no `gc.retry_attempt` (#6548).
+- **Main and nightly builds only: the seat-claim and named-seat execution
+  backstops are removed.** Named always-on seats again have no controller
+  claim or execution backstop, so an agent must claim its work at startup or
+  be nudged. The pool-slot backstop stays, without #6287's changes: a slot with
+  no `nudge` is drained after the 90s grace instead of nudged first, a slot is
+  nudged or drained even while a human is attached, and activity no longer
+  re-arms it. The `execution.claim_stalled` event type is gone; leftover
+  `seat_claim_*` and `execution_claim_nudge_*` session metadata is inert
+  (#6524).
+
 ### Added
 
 - **`gc storage preflight` reports everything the infra-class cutover would
@@ -100,6 +170,124 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   minter, which is the premise this change retires (ga-8w5c7).
 
 ### Fixed
+
+- **The Dolt compactor no longer rewrites adopted or shared history.** The
+  default-on `mol-dog-compactor` (`gc dolt compact`) flattened any managed
+  database over 2000 commits back to its root commit and, if the database had
+  a remote, force-pushed the result. History adopted with `gc rig add
+  --adopt`, `bd bootstrap` or a `dolt clone` of a team remote was squashed
+  beyond recovery, and every other clone of that remote was rewritten with it.
+  See the Upgrading Notes above and "History protection" in
+  `docs/troubleshooting/dolt-bloat-recovery.md` (#5958, #6554).
+
+- **Native Dolt store metadata writes no longer silently undo concurrent
+  updates.** `SetMetadata` and `SetMetadataBatch` read, merged and wrote back
+  the whole metadata map outside a transaction, so a concurrent update to other
+  keys was lost; separately, route recovery could stamp an unclaimable bare
+  route over a fenced graph step. Metadata writes now compare-and-swap on the
+  row version and re-merge on conflict. Under sustained contention on one bead
+  (3 refused swaps in about 75 ms) they return an error wrapping
+  `beads.ErrVersionMismatch` instead of reporting success after overwriting the
+  other writer. Route recovery skips fenced beads and sets `gc.routed_to` with a
+  key-level compare-and-set. Known residual: two reconciler writes that ignore
+  their error after stopping a runtime can now more often leave a hot session
+  bead marked awake or draining with no runtime until a later tick repairs it
+  (ga-l03ij). The `bd`-subprocess store path is unchanged (#6222, #6221,
+  #6233).
+
+- **Claude sessions in untrusted directories start again instead of
+  answering the trust dialog "No, exit".** Current Claude Code builds put the
+  cursor on "No, exit", and v1.4.2 confirmed it with a bare Enter, killing
+  every managed Claude session that started in an untrusted directory. gc now
+  sends movement keys, re-reads the screen, and presses Enter only after two
+  consecutive frames show the cursor on "Yes, I trust this folder". If it
+  cannot get there it leaves the dialog up and warns on stderr rather than
+  guessing (#6531, #5796, #6121, #6547).
+
+- **Unaliased pool workers no longer loop on claim and close.** A pre-release
+  regression claimed work under one identity and closed it under another, so
+  `bd` rejected every close with "assignee mismatch" and the worker retried
+  forever. Claim, close and the runtime actor now agree on the session bead id
+  (#5716, #6324).
+
+- **Unaliased pool workers are named `<template>-<beadID>` again.**
+  Pre-release builds named the first worker with the bare template name (for
+  example `claude`), so a runtime name no longer led to its session bead. The
+  fix for the Kubernetes pod leak that caused this change is kept: a failed
+  create now stops its runtime before the bead closes (#6549).
+
+- **`Ready` on a remote native Dolt store is fast again.** A pre-release
+  regression read each candidate's dependencies in its own transaction, so
+  controller ticks on remote stores took minutes. The blocker check is now one
+  batched read (#6491, #6497).
+
+- **Retries inside ralph/review loops get the right attempt numbers and a
+  full retry budget in every iteration.** Pre-release builds carried a retry's
+  own number in `gc.attempt` from iteration 2 on, so reviewer prompts and
+  `attempt-{attempt}` artifact paths pointed at the wrong or stale
+  `attempt-N` directory. v1.4.2 started a retry reached in a later iteration
+  at the iteration number, so it could be out of budget before its first
+  retry. `gc.iteration` and `{iteration}` are unchanged, and the new
+  `{retry_attempt}` placeholder names a step's own retry. In-flight molecules
+  keep working across the upgrade (#6548).
+
+- **Upgraded cities register `startup-health-episode` again, so crash-loop
+  protection works.** An upgraded store kept its old type list in bd's
+  `custom_types` table, so creating the new bead type failed with `invalid
+  issue type: startup-health-episode` and startup-health protection was
+  silently off. gc now merges its required types into both the config row and
+  the table on start without removing custom types, and `gc doctor --fix`
+  preserves types that exist only in the table (#6495, #6557).
+
+- **A nudge no longer closes the shared store on a city that relocates the
+  `nudges` class.** The first nudge maintenance pass closed the storage
+  routes' shared engine, and every later class read in the controller failed
+  with `sqlite store: bead store closed` until restart; a 7.6-hour outage was
+  seen (#5979, #5980).
+
+- **Managed Dolt is no longer killed about 15 seconds after the session that
+  restarted it closes.** `gc dolt restart` from an agent shell stamped the
+  Dolt watchdog with that session's id, so the orphan sweep killed it when the
+  session ended. Managed Dolt and the detached supervisor no longer inherit
+  session identity, and the sweep skips city infrastructure (#6316, #6546).
+
+- **A single bad line in `secrets.env` no longer drops every credential.** A
+  multi-line JSON or PEM paste made the parser reject the whole file, and a
+  quoted multi-line script value leaked its inner lines as stray variables.
+  Parsing now skips only the bad line or quoted block and names it by line
+  number (#5982, #6022, #6043).
+
+- **Formula steps no longer erase notes on the work bead.** Closing,
+  committing and reporting steps in the core formulas replaced the work bead's
+  notes, losing coordinator, human and orphan-sweep notes; they now append
+  (#6412).
+
+- **The stale-issue reaper no longer closes active Slack room groups.**
+  Durable external-messaging records looked stale to the reaper and were
+  closed, freezing inbound transcripts for live Slack rooms; they are now
+  excluded (#6380, #6385).
+
+- **A stale or relative ambient `BD_BIN` no longer takes every `gc bd`
+  offline.** A pre-release regression made an ambient `BD_BIN` that was
+  relative or not executable a hard error for every `gc bd` and bd-backed
+  command; it is now ignored with a warning (#6550).
+
+- **A condition-triggered order whose check passes now dispatches on the tick
+  that observes it, instead of queueing behind the per-tick dispatch budget.**
+  `orders.max_dispatches_per_tick` (default 4) capped every trigger type and
+  advanced a rotation cursor only when it spent a slot, so on a city with ~40
+  orders and a tick period longer than every sweep's interval the cooldown
+  sweeps were due at every tick and spent the whole budget before the rotation
+  reached anything else — each order got a turn roughly every ten ticks. A
+  condition order is a wake demand rather than a request for a turn: its check
+  reports that work is pending right now, and it is true only for as long as
+  that work waits. On maintainer-city the merge-queue order went 11 h without a
+  dispatch while merge beads sat ready, with no gate error, no suppression
+  event and nothing in the journal to show for it. Due condition orders now
+  fire outside the budget (still single-flighted by the open-tracking and
+  open-work gates, and still bounded by their own check), the budget and its
+  rotation are unchanged for cooldown, cron and event orders, and a tick that
+  spends its budget logs one line naming the orders it did not reach.
 
 - **A closed binding row now supersedes its retained frozen twin in the
   one-live-workflow-per-source-bead guard, so a converged city stops refusing a
