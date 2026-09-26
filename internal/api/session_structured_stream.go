@@ -235,8 +235,20 @@ func hashStructuredProjection(projection SessionStreamStructuredMessageEvent, in
 	return sha256Hex(data)
 }
 
+// hashStructuredMessages fingerprints the already-delivered prefix a resume
+// token vouches for. Model and usage are excluded: providers such as Codex
+// record them in separate accounting records that land after later entries
+// (a token_count follows the tool output it paid for) and that scroll out of
+// the bounded tail scan, so they are attached to, or dropped from, entries a
+// client already holds. That accounting refresh is not a history rewrite.
 func hashStructuredMessages(messages []SessionStructuredMessage) string {
-	data, err := json.Marshal(nonNilStructuredMessages(messages))
+	stable := make([]SessionStructuredMessage, len(messages))
+	for i, message := range messages {
+		message.Model = ""
+		message.Usage = nil
+		stable[i] = message
+	}
+	data, err := json.Marshal(stable)
 	if err != nil {
 		return sha256Hex(nil)
 	}
