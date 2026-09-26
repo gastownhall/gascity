@@ -1825,6 +1825,78 @@ func TestResolveProviderOpenCodeStartupDialogPolicyInheritedByWrapper(t *testing
 	}
 }
 
+// TestResolvedProviderHookSuppliesRolePerTurn pins the per-turn role-hook
+// capability as a family fact: builtin opencode/mimocode carry it, a wrapped
+// custom provider inherits it through BuiltinAncestor, providers whose hooks
+// deliver context once at SessionStart (pi) or have no hook (zcode) do not,
+// and a fully custom provider with no builtin ancestor never claims it.
+func TestResolvedProviderHookSuppliesRolePerTurn(t *testing.T) {
+	var nilProvider *ResolvedProvider
+	if nilProvider.HookSuppliesRolePerTurn() {
+		t.Fatal("nil ResolvedProvider must report false")
+	}
+
+	for _, tc := range []struct {
+		provider string
+		want     bool
+	}{
+		{provider: "opencode", want: true},
+		{provider: "mimocode", want: true},
+		{provider: "pi", want: false},
+		{provider: "claude", want: false},
+		{provider: "codex", want: false},
+		{provider: "zcode", want: false},
+	} {
+		agent := &Agent{Name: "worker", Provider: tc.provider}
+		providers := map[string]ProviderSpec{tc.provider: BuiltinProviderAlias(tc.provider)}
+		rp, err := ResolveProvider(agent, nil, providers, func(string) (string, error) { return "/usr/bin/x", nil })
+		if err != nil {
+			t.Fatalf("ResolveProvider(%s): %v", tc.provider, err)
+		}
+		if got := rp.HookSuppliesRolePerTurn(); got != tc.want {
+			t.Errorf("%s HookSuppliesRolePerTurn() = %v, want %v", tc.provider, got, tc.want)
+		}
+	}
+
+	base := "builtin:opencode"
+	wrapped := map[string]ProviderSpec{"wrapped-opencode": {Base: &base}}
+	rp, err := ResolveProvider(&Agent{Name: "worker", Provider: "wrapped-opencode"}, nil, wrapped, lookPathOnly("opencode"))
+	if err != nil {
+		t.Fatalf("ResolveProvider(wrapped-opencode): %v", err)
+	}
+	if !rp.HookSuppliesRolePerTurn() {
+		t.Errorf("wrapped base=builtin:opencode HookSuppliesRolePerTurn() = false, want true (inherited via BuiltinAncestor %q)", rp.BuiltinAncestor)
+	}
+
+	standalone := ""
+	custom := map[string]ProviderSpec{"custom": {Base: &standalone, Command: "custom-agent", SupportsHooks: boolPtr(true)}}
+	rp, err = ResolveProvider(&Agent{Name: "worker", Provider: "custom"}, nil, custom, lookPathOnly("custom-agent"))
+	if err != nil {
+		t.Fatalf("ResolveProvider(custom): %v", err)
+	}
+	if rp.HookSuppliesRolePerTurn() {
+		t.Error("fully custom provider with no builtin ancestor must not claim a per-turn role hook")
+	}
+
+	// An explicit standalone provider (base = "") that happens to carry a
+	// builtin NAME is not the builtin: BuiltinFamily is empty even though
+	// resolveProviderKind still reports the name. The capability is a fact
+	// about the builtin overlay, so it must follow BuiltinAncestor alone.
+	for _, name := range []string{"opencode", "mimocode"} {
+		shadow := map[string]ProviderSpec{name: {Base: &standalone, Command: name + "-custom", SupportsHooks: boolPtr(true)}}
+		rp, err := ResolveProvider(&Agent{Name: "worker", Provider: name}, nil, shadow, lookPathOnly(name+"-custom"))
+		if err != nil {
+			t.Fatalf("ResolveProvider(standalone %s): %v", name, err)
+		}
+		if rp.BuiltinAncestor != "" {
+			t.Fatalf("standalone %s BuiltinAncestor = %q, want empty", name, rp.BuiltinAncestor)
+		}
+		if rp.HookSuppliesRolePerTurn() {
+			t.Errorf("standalone provider named %q (base = \"\") must not claim a per-turn role hook (Kind=%q Name=%q)", name, rp.Kind, rp.Name)
+		}
+	}
+}
+
 // --- Tri-state capability bool tests ---
 //
 // These verify the three-way *bool semantics for SupportsHooks,
@@ -1988,6 +2060,48 @@ func TestAgentHasHooks_ClaudeAlways(t *testing.T) {
 	}
 }
 
+// TestAgentHasHooks_ManagedOverlayHooksByDefault pins the default for
+// builtins whose bundled overlay hook gc stages for the launch family
+// unconditionally and which primes the session on its own (opencode and
+// mimocode): the agent is hook-enabled without install_agent_hooks or
+// hooks_installed. hooks_installed = false stays the explicit opt-out, an
+// explicit standalone provider (base = "") that carries the builtin name has
+// no builtin family and is not covered, and a wrapped provider inherits the
+// default through its ancestor.
+func TestAgentHasHooks_ManagedOverlayHooksByDefault(t *testing.T) {
+	ws := &Workspace{Name: "test"}
+	for _, name := range []string{"opencode", "mimocode"} {
+		if !AgentHasHooks(&Agent{Name: "worker"}, ws, name, nil) {
+			t.Errorf("%s with no install_agent_hooks should have hooks by default (overlay staged unconditionally)", name)
+		}
+		if !AgentHasHooks(&Agent{Name: "worker"}, ws, name, map[string]ProviderSpec{name: BuiltinProviderAlias(name)}) {
+			t.Errorf("%s via builtin alias should have hooks by default", name)
+		}
+		no := false
+		if AgentHasHooks(&Agent{Name: "worker", HooksInstalled: &no}, ws, name, nil) {
+			t.Errorf("%s with hooks_installed = false must opt out", name)
+		}
+		standalone := ""
+		shadow := map[string]ProviderSpec{name: {Base: &standalone, Command: name + "-custom"}}
+		if AgentHasHooks(&Agent{Name: "worker"}, ws, name, shadow) {
+			t.Errorf("standalone [providers.%s] base = \"\" has no builtin family and must not be hook-enabled by default", name)
+		}
+	}
+	base := "builtin:opencode"
+	wrapped := map[string]ProviderSpec{"wrapped-opencode": {Base: &base}}
+	if !AgentHasHooks(&Agent{Name: "worker"}, ws, "wrapped-opencode", wrapped) {
+		t.Error("wrapped base=builtin:opencode should inherit the managed-overlay default")
+	}
+	// Providers whose staged hook primes once at SessionStart and defers to
+	// the launch-time prompt keep the pre-existing default: not hook-enabled
+	// unless install_agent_hooks or hooks_installed says so.
+	for _, name := range []string{"pi", "codex", "antigravity", "gemini", "kimi", "kiro", "cursor", "copilot", "omp"} {
+		if AgentHasHooks(&Agent{Name: "worker"}, ws, name, nil) {
+			t.Errorf("%s must not be hook-enabled by default", name)
+		}
+	}
+}
+
 func TestAgentHasHooks_InstallHooksMatch(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	ws := &Workspace{InstallAgentHooks: []string{"gemini", "opencode"}}
@@ -2038,8 +2152,10 @@ func TestAgentHasHooks_AgentLevelInstallHooks(t *testing.T) {
 	if !AgentHasHooks(agent, ws, "copilot", nil) {
 		t.Error("agent install_agent_hooks should be checked")
 	}
-	if AgentHasHooks(agent, ws, "opencode", nil) {
-		t.Error("opencode not in agent install_agent_hooks")
+	// codex has no managed-overlay default (unlike opencode, which is
+	// hook-enabled regardless of the list), so it is the right negative.
+	if AgentHasHooks(agent, ws, "codex", nil) {
+		t.Error("codex not in agent install_agent_hooks")
 	}
 }
 

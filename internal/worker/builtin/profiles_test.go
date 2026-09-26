@@ -138,6 +138,72 @@ func TestBuiltinProviderZCodeSpec(t *testing.T) {
 	}
 }
 
+// TestBuiltinHookSuppliesRolePerTurn pins exactly which builtin hooks
+// re-supply the rendered role prompt to every model generation: opencode's
+// plugin (and the mimocode fork of it) run `gc prime --hook` from a
+// system-prompt transform without the managed SessionStart markers. Every
+// other hook delivers context once at SessionStart (pi, codex, antigravity,
+// claude via settings) or is not installed at all (zcode), so those sessions
+// still depend on the resume nudge for their role. groq and cerebras are
+// hook-staged as opencode but declare no resume flag, so their restarts are
+// fresh processes and must keep the launch-path prompt.
+func TestBuiltinHookSuppliesRolePerTurn(t *testing.T) {
+	want := map[string]bool{
+		"opencode": true,
+		"mimocode": true,
+	}
+	for _, name := range BuiltinProviderOrder() {
+		spec := BuiltinProviders()[name]
+		if got := spec.HookSuppliesRolePerTurn; got != want[name] {
+			t.Errorf("%s HookSuppliesRolePerTurn = %v, want %v", name, got, want[name])
+		}
+		if got := HookSuppliesRolePerTurn(name); got != want[name] {
+			t.Errorf("HookSuppliesRolePerTurn(%q) = %v, want %v", name, got, want[name])
+		}
+		if spec.HookSuppliesRolePerTurn && !spec.SupportsHooks {
+			t.Errorf("%s claims a per-turn role hook but SupportsHooks = false", name)
+		}
+		if spec.HookSuppliesRolePerTurn && spec.ResumeFlag == "" {
+			t.Errorf("%s claims a per-turn role hook but cannot resume a conversation (no ResumeFlag); its restarts are fresh and need the launch prompt", name)
+		}
+	}
+	if HookSuppliesRolePerTurn("") || HookSuppliesRolePerTurn("not-a-provider") {
+		t.Error("HookSuppliesRolePerTurn must be false for unknown names")
+	}
+}
+
+// TestBuiltinManagedOverlayHooks pins which builtins are hook-enabled by
+// default: gc stages every bundled per-provider overlay for the launch family
+// unconditionally, but only the opencode and mimocode overlays carry a hook
+// that primes the session on its own (the per-turn system-prompt transform).
+// The other overlays defer to launch-time delivery (managed SessionStart
+// markers) or need an extra launch flag (kimi), so their agents stay
+// hook-enabled only through install_agent_hooks / hooks_installed.
+func TestBuiltinManagedOverlayHooks(t *testing.T) {
+	want := map[string]bool{
+		"opencode": true,
+		"mimocode": true,
+	}
+	for _, name := range BuiltinProviderOrder() {
+		spec := BuiltinProviders()[name]
+		if got := spec.ManagedOverlayHooks; got != want[name] {
+			t.Errorf("%s ManagedOverlayHooks = %v, want %v", name, got, want[name])
+		}
+		if got := ManagedOverlayHooks(name); got != want[name] {
+			t.Errorf("ManagedOverlayHooks(%q) = %v, want %v", name, got, want[name])
+		}
+		if spec.ManagedOverlayHooks && !spec.SupportsHooks {
+			t.Errorf("%s claims managed overlay hooks but SupportsHooks = false", name)
+		}
+		if spec.HookSuppliesRolePerTurn && !spec.ManagedOverlayHooks {
+			t.Errorf("%s supplies the role per turn but is not hook-enabled by default; the resume dedup would be inert", name)
+		}
+	}
+	if ManagedOverlayHooks("") || ManagedOverlayHooks("not-a-provider") {
+		t.Error("ManagedOverlayHooks must be false for unknown names")
+	}
+}
+
 func TestBuiltinProvidersReturnClonedData(t *testing.T) {
 	a := BuiltinProviders()
 	b := BuiltinProviders()

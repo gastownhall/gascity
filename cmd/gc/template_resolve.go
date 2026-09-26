@@ -57,6 +57,12 @@ type TemplateParams struct {
 	Command string
 	// Prompt is the fully rendered prompt (with beacon).
 	Prompt string
+	// Beacon is the bare identity line the rendered Prompt starts with
+	// (`[city] alias • ts`, no prime instruction). Carried separately so the
+	// resume path can submit a restart turn that identifies the wake without
+	// replaying the template when the provider hook already supplies it
+	// (resumeStartupNudge).
+	Beacon string
 	// Env is the merged environment (passthrough + provider + agent + passthrough vars).
 	Env map[string]string
 	// OperatorEnv carries only the operator-authored environment layers —
@@ -419,7 +425,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// below): when the rendered prompt is inlined under the beacon, the agent
 	// already holds the exact bytes `gc prime` would hand back, so the
 	// instruction costs a turn and duplicates the context it just received.
-	includePrimeInstruction := !hasHooks && prompt == ""
+	// Hook status is transport-aware: an ACP session never loads the CLI
+	// plugin overlay (promptDelivery just forwards the beacon), so even a
+	// hook-enabled provider (opencode/mimocode are hook-enabled by default)
+	// needs the instruction there or a promptless ACP agent lands unprimed.
+	isACP := sessionTransport == config.SessionTransportACP
+	includePrimeInstruction := prompt == "" && (!hasHooks || isACP)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, includePrimeInstruction, p.beaconTime)
 	switch {
 	case suppressStartupPrompt:
@@ -430,51 +441,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		prompt = beacon
 	}
 
-	// Step 9b: Append the assigned-skills appendix when the agent
-	// has a vendor sink, hasn't opted out, AND the runtime actually
-	// delivers the skills to the session workdir. The appendix claims
-	// "these skills are materialized in your provider's skill
-	// directory and load automatically" — that claim has to match
-	// reality, so we gate on the same availability conditions as
-	// materialization itself:
-	//
-	//   - Stage-1-eligible runtime + workdir == scope root: stage 1
-	//     wrote the sink into the scope root the agent sees.
-	//   - Stage-2-eligible runtime (regardless of workdir): the
-	//     session PreStart invokes `gc internal materialize-skills`
-	//     into the session workdir before the agent starts.
-	//
-	// Agents for which neither path delivers (ACP, k8s, hybrid,
-	// subprocess with WorkDir ≠ scope root — because subprocess
-	// doesn't execute PreStart) get no appendix; we'd be lying to
-	// them. Discovered via the pass-1 Codex review.
-	if !suppressStartupPrompt && effectiveInjectAssignedSkills(cfgAgent) {
-		wsProvider := ""
-		if p.workspace != nil {
-			wsProvider = p.workspace.Provider
-		}
-		provider := effectiveAgentProviderFamily(cfgAgent, wsProvider, p.providers)
-		if _, ok := materialize.VendorSink(provider); ok {
-			scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
-			canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
-			stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
-			stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent)
-			if stage1Delivers || stage2Delivers {
-				var agentCat materialize.AgentCatalog
-				if cfgAgent.SkillsDir != "" {
-					// Best-effort: a transient I/O failure loading the
-					// agent catalog shouldn't break the prompt render.
-					// The error is already surfaced via
-					// effectiveSkillsForAgent's stderr path earlier in
-					// the call graph.
-					if c, err := materialize.LoadAgentCatalog(cfgAgent.SkillsDir); err == nil {
-						agentCat = c
-					}
-				}
-				if frag := buildAssignedSkillsPromptFragment(cfgAgent, p.sharedSkillCatalogForAgent(cfgAgent), agentCat); frag != "" {
-					prompt = prompt + "\n\n" + frag
-				}
-			}
+	// Step 9b: Append the assigned-skills appendix when the runtime actually
+	// delivers the skills to the session workdir (see
+	// assignedSkillsPromptAppendix for the gate). The hook copy of the role
+	// (`gc prime --hook`) appends the same fragment under that same
+	// skills-materialization gate.
+	if !suppressStartupPrompt {
+		if frag := assignedSkillsPromptAppendix(p, cfgAgent, workDir); frag != "" {
+			prompt = prompt + "\n\n" + frag
 		}
 	}
 
@@ -738,6 +712,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	params := TemplateParams{
 		Command:          command,
 		Prompt:           prompt,
+		Beacon:           runtime.FormatBeaconAt(p.cityName, qualifiedName, false, p.beaconTime),
 		Env:              env,
 		OperatorEnv:      operatorEnv,
 		Upstream:         cfgAgent.Upstream,
@@ -752,7 +727,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		RigName:          rigName,
 		RigRoot:          rigRoot,
 		WakeMode:         cfgAgent.WakeMode,
-		IsACP:            sessionTransport == config.SessionTransportACP,
+		IsACP:            isACP,
 		HookEnabled:      hasHooks,
 		MCPServers:       mcpServers,
 	}

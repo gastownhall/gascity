@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -187,6 +188,8 @@ func initialMessageResumeResult(tc phase2ProviderCase, prepared *preparedStart) 
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
 			"prepared start = nil").WithEvidence(evidence)
 	}
+	hookSuppliesRole := resumeRolePromptSuppliedByHook(prepared.candidate.tp)
+	evidence["hook_supplies_role_per_turn"] = strconv.FormatBool(hookSuppliesRole)
 	switch {
 	case strings.TrimSpace(prepared.cfg.PromptSuffix) != "":
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
@@ -194,7 +197,10 @@ func initialMessageResumeResult(tc phase2ProviderCase, prepared *preparedStart) 
 	case strings.TrimSpace(prepared.cfg.PromptFlag) != "":
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
 			fmt.Sprintf("PromptFlag = %q, want no flag startup prompt replay on resume", prepared.cfg.PromptFlag)).WithEvidence(evidence)
-	case got != "Base worker prompt":
+	case hookSuppliesRole && hookPrimedRestartTurnMismatch(prepared) != "":
+		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
+			hookPrimedRestartTurnMismatch(prepared)).WithEvidence(evidence)
+	case !hookSuppliesRole && got != "Base worker prompt":
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
 			fmt.Sprintf("restart prompt payload = %q, want base worker prompt on resume", got)).WithEvidence(evidence)
 	case strings.Contains(prepared.cfg.Nudge, "Do the first task."):
@@ -264,11 +270,14 @@ func resumeRestartPromptResult(tc phase2ProviderCase, prepared *preparedStart, r
 		return workertest.Fail(tc.profileID, requirement,
 			fmt.Sprintf("PromptSuffix encoding invalid: %v", err)).WithEvidence(evidence)
 	}
+	hookSuppliesRole := false
 	if prepared != nil {
+		hookSuppliesRole = resumeRolePromptSuppliedByHook(prepared.candidate.tp)
 		evidence["cfg_prompt_suffix"] = prepared.cfg.PromptSuffix
 		evidence["cfg_prompt_flag"] = prepared.cfg.PromptFlag
 		evidence["cfg_nudge"] = prepared.cfg.Nudge
 		evidence["startup_prompt_delivered"] = prepared.cfg.Env[startupPromptDeliveredEnv]
+		evidence["hook_supplies_role_per_turn"] = strconv.FormatBool(hookSuppliesRole)
 	}
 	switch {
 	case prepared == nil:
@@ -279,7 +288,10 @@ func resumeRestartPromptResult(tc phase2ProviderCase, prepared *preparedStart, r
 	case strings.TrimSpace(prepared.cfg.PromptFlag) != "":
 		return workertest.Fail(tc.profileID, requirement,
 			fmt.Sprintf("PromptFlag = %q, want no flag startup prompt replay on resume", prepared.cfg.PromptFlag)).WithEvidence(evidence)
-	case got != "Base worker prompt":
+	case hookSuppliesRole && hookPrimedRestartTurnMismatch(prepared) != "":
+		return workertest.Fail(tc.profileID, requirement,
+			hookPrimedRestartTurnMismatch(prepared)).WithEvidence(evidence)
+	case !hookSuppliesRole && got != "Base worker prompt":
 		return workertest.Fail(tc.profileID, requirement,
 			fmt.Sprintf("restart prompt payload = %q, want base worker prompt", got)).WithEvidence(evidence)
 	case strings.Contains(prepared.cfg.Nudge, "Do the first task."):
@@ -288,10 +300,104 @@ func resumeRestartPromptResult(tc phase2ProviderCase, prepared *preparedStart, r
 	case prepared.cfg.Env[startupPromptDeliveredEnv] != "1":
 		return workertest.Fail(tc.profileID, requirement,
 			fmt.Sprintf("%s = %q, want 1 when restart prompt is delivered", startupPromptDeliveredEnv, prepared.cfg.Env[startupPromptDeliveredEnv])).WithEvidence(evidence)
+	case hookSuppliesRole:
+		return workertest.Pass(tc.profileID, requirement,
+			fmt.Sprintf("%s on a hook-primed provider resumes with the configured nudge only, or idle when none is configured (role supplied by the hook), without replaying initial_message", label)).WithEvidence(evidence)
 	default:
 		return workertest.Pass(tc.profileID, requirement,
 			fmt.Sprintf("%s receives a restart prompt on resume without replaying initial_message", label)).WithEvidence(evidence)
 	}
+}
+
+// phase2HookSuppliesRolePerTurnFamilies is the independent, family-keyed
+// expectation for WC-INPUT-006: which canonical profiles stage a hook that
+// supplies the rendered role prompt to every generation. Kept as test data
+// (not derived from the predicate under test) so the conformance check pins
+// the catalog decision rather than echoing it.
+var phase2HookSuppliesRolePerTurnFamilies = map[string]bool{
+	"opencode": true,
+	"mimocode": true,
+}
+
+// hookPrimedResumeRoleResult checks WC-INPUT-006 against a resume prepared
+// WITH provider hooks installed for the profile's family: hook-primed
+// families must deliver only the configured nudge (no rendered role prompt),
+// while every other family keeps the rendered prompt in its restart turn.
+func hookPrimedResumeRoleResult(tc phase2ProviderCase, prepared *preparedStart) workertest.Result {
+	got, evidence, err := phase2PromptPayload(tc, prepared)
+	if err != nil {
+		return workertest.Fail(tc.profileID, workertest.RequirementInputHookPrimedResumeRoleOmitted,
+			fmt.Sprintf("PromptSuffix encoding invalid: %v", err)).WithEvidence(evidence)
+	}
+	if prepared == nil {
+		return workertest.Fail(tc.profileID, workertest.RequirementInputHookPrimedResumeRoleOmitted,
+			"prepared start = nil").WithEvidence(evidence)
+	}
+	wantHookSuppliesRole := phase2HookSuppliesRolePerTurnFamilies[tc.family]
+	gotHookSuppliesRole := resumeRolePromptSuppliedByHook(prepared.candidate.tp)
+	evidence["cfg_nudge"] = prepared.cfg.Nudge
+	evidence["want_hook_supplies_role_per_turn"] = strconv.FormatBool(wantHookSuppliesRole)
+	evidence["hook_supplies_role_per_turn"] = strconv.FormatBool(gotHookSuppliesRole)
+	switch {
+	case !prepared.candidate.tp.HookEnabled:
+		return workertest.Fail(tc.profileID, workertest.RequirementInputHookPrimedResumeRoleOmitted,
+			"HookEnabled = false, want provider hooks installed for this scenario").WithEvidence(evidence)
+	case gotHookSuppliesRole != wantHookSuppliesRole:
+		return workertest.Fail(tc.profileID, workertest.RequirementInputHookPrimedResumeRoleOmitted,
+			fmt.Sprintf("resumeRolePromptSuppliedByHook = %v, want %v for family %s", gotHookSuppliesRole, wantHookSuppliesRole, tc.family)).WithEvidence(evidence)
+	case strings.TrimSpace(prepared.cfg.PromptSuffix) != "" || strings.TrimSpace(prepared.cfg.PromptFlag) != "":
+		return workertest.Fail(tc.profileID, workertest.RequirementInputHookPrimedResumeRoleOmitted,
+			fmt.Sprintf("launch prompt = (%q, %q), want none on resume", prepared.cfg.PromptSuffix, prepared.cfg.PromptFlag)).WithEvidence(evidence)
+	case prepared.cfg.Env[startupPromptDeliveredEnv] != "1":
+		return workertest.Fail(tc.profileID, workertest.RequirementInputHookPrimedResumeRoleOmitted,
+			fmt.Sprintf("%s = %q, want 1 so the hook keys on the delivered marker", startupPromptDeliveredEnv, prepared.cfg.Env[startupPromptDeliveredEnv])).WithEvidence(evidence)
+	case wantHookSuppliesRole && hookPrimedRestartTurnMismatch(prepared) != "":
+		return workertest.Fail(tc.profileID, workertest.RequirementInputHookPrimedResumeRoleOmitted,
+			hookPrimedRestartTurnMismatch(prepared)).WithEvidence(evidence)
+	case !wantHookSuppliesRole && got != "Base worker prompt":
+		return workertest.Fail(tc.profileID, workertest.RequirementInputHookPrimedResumeRoleOmitted,
+			fmt.Sprintf("restart prompt payload = %q, want base worker prompt replayed for a SessionStart-primed provider", got)).WithEvidence(evidence)
+	case !wantHookSuppliesRole && !startupNudgeMatches(tc, prepared.cfg.Nudge):
+		return workertest.Fail(tc.profileID, workertest.RequirementInputHookPrimedResumeRoleOmitted,
+			fmt.Sprintf("cfg.Nudge = %q, want configured nudge preserved after restart prompt", prepared.cfg.Nudge)).WithEvidence(evidence)
+	case strings.Contains(prepared.cfg.Nudge, "Do the first task."):
+		return workertest.Fail(tc.profileID, workertest.RequirementInputHookPrimedResumeRoleOmitted,
+			fmt.Sprintf("cfg.Nudge = %q, want no replayed initial_message on resume", prepared.cfg.Nudge)).WithEvidence(evidence)
+	case wantHookSuppliesRole:
+		return workertest.Pass(tc.profileID, workertest.RequirementInputHookPrimedResumeRoleOmitted,
+			"hook-primed provider resumes with the configured nudge as its restart turn, or idle when none is configured; the role prompt is never replayed as a user turn").WithEvidence(evidence)
+	default:
+		return workertest.Pass(tc.profileID, workertest.RequirementInputHookPrimedResumeRoleOmitted,
+			"SessionStart-primed provider still receives the rendered prompt in its restart turn").WithEvidence(evidence)
+	}
+}
+
+// phase2Beacon is the beacon line the phase-2 fixtures render
+// (resolvePhase2TemplateWithHooks pins cityName and beaconTime), computed
+// independently of TemplateParams.Beacon so the check pins the shape.
+func phase2Beacon(prepared *preparedStart) string {
+	return runtime.FormatBeaconAt("phase2-city", prepared.candidate.tp.Alias, false, time.Unix(0, 0))
+}
+
+// hookPrimedRestartTurnMismatch returns "" when a hook-primed profile's
+// resume nudge is the expected restart turn: exactly "" when no nudge is
+// configured (the role is in the system prompt via the plugin, so the
+// session resumes idle and the next message, queued nudge, or claim backstop
+// starts a turn), otherwise beacon + separator + configured nudge, and never
+// the rendered template. Non-empty return is the failure detail.
+func hookPrimedRestartTurnMismatch(prepared *preparedStart) string {
+	nudge := prepared.cfg.Nudge
+	if strings.Contains(nudge, "Base worker prompt") {
+		return fmt.Sprintf("cfg.Nudge = %q, want no replayed role prompt when the provider hook supplies it to every generation", nudge)
+	}
+	want := ""
+	if configured := prepared.candidate.tp.Hints.Nudge; configured != "" {
+		want = phase2Beacon(prepared) + startupPromptNudgeSeparator + configured
+	}
+	if nudge != want {
+		return fmt.Sprintf("cfg.Nudge = %q, want restart turn %q", nudge, want)
+	}
+	return ""
 }
 
 func defaultArgsExceptOption(provider *config.ResolvedProvider, optionKey string) []string {

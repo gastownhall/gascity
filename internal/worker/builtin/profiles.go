@@ -52,11 +52,46 @@ type BuiltinProviderSpec struct {
 	PathCheck              string
 	SupportsACP            bool
 	SupportsHooks          bool
-	InstructionsFile       string
-	ResumeFlag             string
-	ResumeStyle            string
-	ResumeCommand          string
-	SessionIDFlag          string
+	// HookSuppliesRolePerTurn records that the hook gc stages for this
+	// provider supplies the rendered role prompt to every model generation
+	// (a system-prompt transform running `gc prime --hook` without the
+	// managed SessionStart markers), rather than delivering it once at
+	// session start. When true, a resumed conversation does not need the
+	// role replayed as a user turn: the hook already carries it. The hook
+	// decorates generations but never starts one, so a restart turn is still
+	// required to wake the session.
+	//
+	// Only providers that actually resume a conversation qualify (ResumeFlag
+	// set): groq and cerebras launch the opencode binary and are hook-staged
+	// as opencode, but with no resume flag every restart is a fresh process,
+	// so dropping the role on their "resume" branch would strand a fresh
+	// session unprimed.
+	HookSuppliesRolePerTurn bool
+	// ManagedOverlayHooks records that this builtin's bundled overlay ships a
+	// lifecycle hook that gc stages for the launch family unconditionally
+	// (runtime.EffectiveOverlayProviderNames always includes the launch
+	// provider; install_agent_hooks only appends extra slots) AND that the
+	// hook primes the session on its own, so an agent on this provider is
+	// hook-enabled by default (config.AgentHasHooks) without
+	// install_agent_hooks or hooks_installed. hooks_installed = false remains
+	// the explicit opt-out.
+	//
+	// Every bundled per-provider overlay is staged the same way, but only
+	// opencode and mimocode qualify today: their per-turn system-prompt
+	// transform supplies the role regardless of launch-time delivery. The
+	// others defer to the launch prompt through the managed SessionStart
+	// markers (pi, codex, antigravity, kimi), re-emit it at SessionStart
+	// (gemini, copilot, cursor, kiro, omp), or need an extra launch flag to
+	// load the overlay at all (kimi's --config-file); flipping their default
+	// would also drop the beacon's `gc prime` instruction for promptless
+	// agents, which for the marker-setting hooks is the only way that agent
+	// reaches its default prompt.
+	ManagedOverlayHooks bool
+	InstructionsFile    string
+	ResumeFlag          string
+	ResumeStyle         string
+	ResumeCommand       string
+	SessionIDFlag       string
 	// ForkFlag is the CLI flag that forks a resumed conversation into a new
 	// branch. Combined with ResumeFlag + SessionIDFlag it yields the fork-launch
 	// form (resume a parent brain, fork off it, bind gc's own session id). Empty
@@ -638,10 +673,17 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		Env:                  map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
 		SupportsACP:          true,
 		SupportsHooks:        true,
-		InstructionsFile:     "AGENTS.md",
-		ResumeFlag:           "--session",
-		ResumeStyle:          "flag",
-		ACPArgs:              []string{"acp"},
+		// The staged .opencode/plugins/gascity.js prepends `gc prime --hook`
+		// to the system prompt on every generation (chat.message and
+		// experimental.chat.system.transform), so the role never has to be
+		// replayed as a user turn on resume. The overlay is staged for every
+		// opencode launch, so the agent is hook-enabled by default.
+		HookSuppliesRolePerTurn: true,
+		ManagedOverlayHooks:     true,
+		InstructionsFile:        "AGENTS.md",
+		ResumeFlag:              "--session",
+		ResumeStyle:             "flag",
+		ACPArgs:                 []string{"acp"},
 		OptionsSchema: []BuiltinProviderOption{
 			modelOption(
 				modelChoice("opencode/deepseek-v4-flash-free", "DeepSeek V4 Flash Free"),
@@ -660,19 +702,23 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// explicit opt-in until `mimo acp` has equivalent non-interactive
 		// conformance coverage. No mimocode.json is staged — staging one
 		// would clobber user config.
-		DisplayName:      "MiMo Code",
-		Command:          "mimo",
-		Args:             []string{"--never-ask"},
-		PromptMode:       "flag",
-		PromptFlag:       "--prompt",
-		ReadyDelayMs:     8000,
-		ProcessNames:     []string{"mimo", ".mimocode", "node", "bun"},
-		SupportsACP:      true,
-		SupportsHooks:    true,
-		InstructionsFile: "AGENTS.md",
-		ResumeFlag:       "--session",
-		ResumeStyle:      "flag",
-		ACPArgs:          []string{"acp"},
+		DisplayName:   "MiMo Code",
+		Command:       "mimo",
+		Args:          []string{"--never-ask"},
+		PromptMode:    "flag",
+		PromptFlag:    "--prompt",
+		ReadyDelayMs:  8000,
+		ProcessNames:  []string{"mimo", ".mimocode", "node", "bun"},
+		SupportsACP:   true,
+		SupportsHooks: true,
+		// Same plugin shape as opencode: .mimocode/plugin/gascity.js runs
+		// `gc prime --hook` from the system-prompt transform on every turn.
+		HookSuppliesRolePerTurn: true,
+		ManagedOverlayHooks:     true,
+		InstructionsFile:        "AGENTS.md",
+		ResumeFlag:              "--session",
+		ResumeStyle:             "flag",
+		ACPArgs:                 []string{"acp"},
 		OptionsSchema: []BuiltinProviderOption{
 			modelOption(
 				modelChoice("mimo/mimo-auto", "MiMo Auto (free)"),
@@ -907,6 +953,23 @@ func BuiltinProviders() map[string]BuiltinProviderSpec {
 		out[name] = cloneBuiltinProviderSpec(spec)
 	}
 	return out
+}
+
+// HookSuppliesRolePerTurn reports whether the builtin provider named name
+// stages a hook that re-supplies the rendered role prompt on every model
+// generation. Unknown names report false. This reads the catalog directly so
+// hot paths (session start preparation) do not clone every spec per call.
+func HookSuppliesRolePerTurn(name string) bool {
+	spec, ok := builtinProviderSpecs[name]
+	return ok && spec.HookSuppliesRolePerTurn
+}
+
+// ManagedOverlayHooks reports whether the builtin provider named name is
+// hook-enabled by default: its bundled overlay hook is staged for every launch
+// of the family and primes the session on its own. Unknown names report false.
+func ManagedOverlayHooks(name string) bool {
+	spec, ok := builtinProviderSpecs[name]
+	return ok && spec.ManagedOverlayHooks
 }
 
 // CanonicalProfileIdentity returns the explicit compatibility identity for one

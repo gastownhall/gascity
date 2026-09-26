@@ -40,14 +40,20 @@
     {
       "code": "WC-INPUT-004",
       "group": "input_delivery",
-      "description": "A resumed session with in-progress assigned work receives a restart turn instead of landing idle when no explicit nudge is configured.",
+      "description": "A resumed session with in-progress assigned work receives a restart turn instead of landing idle when no explicit nudge is configured; hook-primed providers (opencode, mimocode) resume idle instead, their role supplied by the hook.",
       "scenario_id": "input-in-progress-resume-restart"
     },
     {
       "code": "WC-INPUT-005",
       "group": "input_delivery",
-      "description": "A resumed session with pre-claim work demand receives a restart turn instead of landing idle when no explicit nudge is configured.",
+      "description": "A resumed session with pre-claim work demand receives a restart turn instead of landing idle when no explicit nudge is configured; hook-primed providers (opencode, mimocode) resume idle instead, their role supplied by the hook.",
       "scenario_id": "input-pre-claim-resume-restart"
+    },
+    {
+      "code": "WC-INPUT-006",
+      "group": "input_delivery",
+      "description": "A resumed session whose installed provider hook supplies the rendered role prompt to every generation delivers the beacon plus the configured nudge as its restart turn and no restart turn when none is configured; every other profile keeps the rendered prompt in the restart turn.",
+      "scenario_id": "input-hook-primed-resume-role-omitted"
     },
     {
       "code": "WC-TX-003",

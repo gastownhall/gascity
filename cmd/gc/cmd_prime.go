@@ -412,10 +412,17 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		runHookSideEffects()
 	}
 
+	// fallbackAgent is the resolved agent the default run-once prompt below
+	// is emitted for when neither its template nor a builtin worker prompt
+	// produced output; the hook copy of that prompt carries the same
+	// assigned-skills appendix the launch path attaches to it.
+	var fallbackAgent *config.Agent
 	for _, a := range resolvedAgents {
 		if isAgentEffectivelySuspended(cfg, &a) {
 			return 0, nil
 		}
+		a := a
+		fallbackAgent = &a
 		resolved, rErr := config.ResolveProvider(&a, &cfg.Workspace, cfg.Providers, exec.LookPath)
 		if rErr == nil && hookMode {
 			sessionName := os.Getenv("GC_SESSION_NAME")
@@ -451,6 +458,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
 				packDirs, fragments, nil)
 			if prompt != "" {
+				prompt = appendPrimeHookSkillsAppendix(prompt, cityPath, cityName, cfg, &a, hookMode && !suppressHookPrompt)
 				var budget *promptBudgetJSON
 				if strictMode {
 					var budgetErr error
@@ -491,6 +499,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 				content := renderPrompt(fsys.OSFS{}, cityPath, cityName, promptFile, ctx, cfg.Workspace.SessionTemplate, stderr,
 					cfg.PackDirsForRig(ctx.RigName), nil, nil)
 				if content != "" {
+					content = appendPrimeHookSkillsAppendix(content, cityPath, cityName, cfg, &a, hookMode && !suppressHookPrompt)
 					injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr, consumeHandoff)
 					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, content, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 					return 0, nil
@@ -502,9 +511,16 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	// Fallback: default run-once prompt. Under strict, this is only reached
 	// when the agent has no prompt_template and doesn't match a builtin
 	// worker prompt — a supported config shape, so the default prompt is
-	// the correct output even under --strict.
+	// the correct output even under --strict. A resolved agent still gets
+	// the skills appendix here: the launch path appends it to this same
+	// default prompt, and on resume the hook copy is the only one the
+	// session sees.
+	fallbackPrompt := defaultPrimePrompt
+	if fallbackAgent != nil {
+		fallbackPrompt = appendPrimeHookSkillsAppendix(fallbackPrompt, cityPath, cityName, cfg, fallbackAgent, hookMode && !suppressHookPrompt)
+	}
 	injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr, consumeHandoff)
-	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
+	writePrimePromptWithFormat(stdout, cityName, agentName, fallbackPrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 	return 0, nil
 }
 
@@ -597,6 +613,45 @@ func primeHookAgentCandidatesFromPath(path string) []string {
 		}
 	}
 	return nil
+}
+
+// appendPrimeHookSkillsAppendix appends the assigned-skills appendix to the
+// hook copy of the rendered role, under exactly the skills-materialization
+// gate resolveTemplate uses (assignedSkillsPromptAppendix): a provider with a
+// vendor sink, no agent opt-out, and a session runtime that materializes the
+// skills into the session workdir. Providers whose hook supplies the role to
+// every generation make this copy the only one a resumed session sees, so it
+// has to carry the appendix the launch copy carries.
+//
+// The workdir is the live session directory (GC_DIR, falling back to the
+// process cwd the hook runs in), which is the directory stage-2
+// materialization actually populated. Explicit `gc prime` (no --hook) stays
+// the exact template body so it remains usable for diffs.
+//
+// Catalog loading is best-effort here: a shared-catalog load failure yields
+// no appendix rather than a broken hook payload, and the controller already
+// reports that same failure on every desired-state build. Callers pass
+// hookCopyCarriesRole=false when the hook copy is suppressed (managed
+// SessionStart after launch delivery) so no catalog walk runs for output
+// that is dropped anyway.
+func appendPrimeHookSkillsAppendix(prompt, cityPath, cityName string, cfg *config.City, a *config.Agent, hookCopyCarriesRole bool) string {
+	if !hookCopyCarriesRole || cfg == nil || a == nil {
+		return prompt
+	}
+	workDir := strings.TrimSpace(os.Getenv("GC_DIR"))
+	if workDir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return prompt
+		}
+		workDir = cwd
+	}
+	params := newAgentBuildParams(cityName, cityPath, cfg, nil, time.Now(), nil, io.Discard)
+	frag := assignedSkillsPromptAppendix(params, a, workDir)
+	if frag == "" {
+		return prompt
+	}
+	return prompt + "\n\n" + frag
 }
 
 func prependHookBeacon(cityName, agentName, prompt string) string {

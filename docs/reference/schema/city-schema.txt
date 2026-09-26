@@ -287,7 +287,7 @@
         },
         "hooks_installed": {
           "type": "boolean",
-          "description": "HooksInstalled overrides automatic hook detection. Set to true when hooks\nare manually installed (e.g., merged into the project's own hook config)\nand auto-installation via install_agent_hooks is not desired. When true,\nthe agent is treated as hook-enabled for startup behavior: no prime\ninstruction in beacon and no delayed nudge. Interacts with\ninstall_agent_hooks — set this instead when hooks are pre-installed."
+          "description": "HooksInstalled overrides automatic hook detection. Set to true when hooks\nare manually installed (e.g., merged into the project's own hook config)\nand auto-installation via install_agent_hooks is not desired. When true,\nthe agent is treated as hook-enabled for startup behavior: no prime\ninstruction in the beacon, and on providers whose hook supplies the role\nprompt to every generation, a resume delivers only the beacon and\nconfigured nudge. Interacts with install_agent_hooks — set this instead\nwhen hooks are pre-installed. Agents on builtin opencode or mimocode\n(or a provider wrapped over them) are hook-enabled by default because\ngc stages their overlay plugin for every launch; set this to false for\nsuch a provider whose overridden command does not load the staged\nplugin directory, otherwise a session without the plugin would resume\nunprimed."
         },
         "session_setup": {
           "items": {
