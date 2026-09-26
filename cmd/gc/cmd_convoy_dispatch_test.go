@@ -2960,6 +2960,83 @@ func TestQuarantineControlFailureBeadSettlesRootWhenFinalizerQuarantined(t *test
 	}
 }
 
+// ga-3wlbcj: a workflow ROOT served to the control dispatcher is quarantined
+// as a hard failure. Its finalizer still runs later with passing blockers and
+// must not turn the quarantined root back into a pass.
+func TestQuarantinedWorkflowRootStaysFailedAfterFinalizer(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:  "workflow root",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	step, err := store.Create(beads.Bead{
+		Title:    "step",
+		Metadata: map[string]string{"gc.outcome": "pass"},
+	})
+	if err != nil {
+		t.Fatalf("create step: %v", err)
+	}
+	if err := store.Close(step.ID); err != nil {
+		t.Fatalf("close step: %v", err)
+	}
+	finalizer, err := store.Create(beads.Bead{
+		Title:  "finalizer",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create finalizer: %v", err)
+	}
+	if err := store.DepAdd(finalizer.ID, step.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(finalizer->step): %v", err)
+	}
+	if err := store.DepAdd(root.ID, finalizer.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(root->finalizer): %v", err)
+	}
+
+	if _, err := quarantineControlFailureBead(store, root, errors.New(`unsupported control bead kind "workflow"`)); err != nil {
+		t.Fatalf("quarantineControlFailureBead(root): %v", err)
+	}
+	finalizer, err = store.Get(finalizer.ID)
+	if err != nil {
+		t.Fatalf("get finalizer: %v", err)
+	}
+	result, err := dispatch.ProcessControl(store, finalizer, dispatch.ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(finalizer): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-fail" {
+		t.Fatalf("finalizer result = %+v, want processed workflow-fail", result)
+	}
+	if got, err := store.Get(finalizer.ID); err != nil || got.Status != "closed" {
+		t.Fatalf("finalizer = %+v (err %v), want closed so it is never retried", got.Status, err)
+	}
+
+	gotRoot, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("get root: %v", err)
+	}
+	if gotRoot.Status != "closed" {
+		t.Fatalf("root status = %q, want closed", gotRoot.Status)
+	}
+	if got := gotRoot.Metadata["gc.outcome"]; got != "fail" {
+		t.Fatalf("quarantined root gc.outcome = %q after its finalizer ran, want fail", got)
+	}
+	if got := gotRoot.Metadata["gc.final_disposition"]; got != "control_quarantined" {
+		t.Fatalf("root gc.final_disposition = %q, want control_quarantined", got)
+	}
+}
+
 func TestQuarantineControlFailureBeadDoesNotTouchRootForNonFinalizerControl(t *testing.T) {
 	store := beads.NewMemStore()
 	root, err := store.Create(beads.Bead{
