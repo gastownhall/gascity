@@ -1241,9 +1241,16 @@ done <<EOF
 $DATABASES
 EOF
 
-# Step 6: prune closed session beads from the city's primary bead store.
+# Step 6: prune closed session beads from the city's Dolt work store.
 # GC_REAPER_SESSION_BEAD_PATTERN defaults to 'gm-*' (legacy Gas Manager prefix).
 # Set to empty string to activate the type-safe SQL path (targets issue_type=session only).
+#
+# This step is the combined Dolt work/infra topology: sessions are rows in
+# that database's issues table. On a split city, agent sessions (gcg-session-*,
+# gcs-*) live in the sqlite infra ledger (.gc/store/graph/beads.sqlite), which
+# this Dolt loop cannot see. Those rows are purged by the daemon wisp GC
+# (purgeClosedInfraSessions), on the same GC_REAPER_SESSION_PURGE_AGE clock.
+# Do not point this script at an unrelated Dolt server to reach them.
 if [ -d "$CITY_BEADS_DIR" ]; then
     SESSION_PRUNE_ATTEMPTED=1
     if [ -n "$SESSION_BEAD_PATTERN" ]; then

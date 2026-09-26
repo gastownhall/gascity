@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -89,6 +90,89 @@ func TestWispGC_PurgesExpiredMolecules(t *testing.T) {
 		t.Fatalf("purged = %d, want 3", purged)
 	}
 	assertDeletedIDs(t, store.deletedIDs, "mol-1", "wisp-1", "mol-3")
+}
+
+func TestPurgeClosedInfraSessionsLeavesLiveWork(t *testing.T) {
+	now := time.Now()
+	old := now.Add(-40 * 24 * time.Hour)
+	young := now.Add(-2 * time.Hour)
+	oldSession := makeGCBead("gcg-session-old", old, "closed", "session")
+	oldSession.UpdatedAt = old
+	youngSession := makeGCBead("gcs-young", young, "closed", "session")
+	youngSession.UpdatedAt = young
+	openSession := makeGCBead("gcg-session-live", old, "open", "session")
+	openSession.UpdatedAt = old
+	closedStep := makeGCBead("gcg-step", old, "closed", "task")
+	closedStep.UpdatedAt = old
+	child := makeGCBead("gcg-child", old, "closed", "task")
+	child.UpdatedAt = old
+	child.ParentID = "gcg-session-parent"
+	parent := makeGCBead("gcg-session-parent", old, "closed", "session")
+	parent.UpdatedAt = old
+
+	store := newGCStore([]beads.Bead{oldSession, youngSession, openSession, closedStep, parent, child})
+	purged, err := purgeClosedInfraSessions(store, now, 720*time.Hour, 500)
+	if err != nil {
+		t.Fatalf("purgeClosedInfraSessions: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "gcg-session-old")
+}
+
+func TestPurgeClosedInfraSessionsDeletesSQLiteRow(t *testing.T) {
+	opened, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcg"))
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	store, ok := opened.(*beads.SQLiteStore)
+	if !ok {
+		t.Fatalf("store type %T", opened)
+	}
+	t.Cleanup(func() { _ = store.CloseStore() })
+
+	now := time.Now()
+	old := now.Add(-40 * 24 * time.Hour)
+	young := now.Add(-2 * time.Hour)
+	create := func(b beads.Bead) {
+		t.Helper()
+		if _, err := store.Create(b); err != nil {
+			t.Fatalf("Create %s: %v", b.ID, err)
+		}
+	}
+	create(beads.Bead{
+		ID: "gcg-session-old", Title: "old session", Type: "session", Status: "closed",
+		CreatedAt: old, UpdatedAt: old, Metadata: map[string]string{"command": "echo hi"},
+	})
+	create(beads.Bead{
+		ID: "gcg-session-young", Title: "young session", Type: "session", Status: "closed",
+		CreatedAt: young, UpdatedAt: young,
+	})
+	create(beads.Bead{
+		ID: "gcg-session-live", Title: "live session", Type: "session", Status: "open",
+		CreatedAt: old, UpdatedAt: old,
+	})
+	create(beads.Bead{
+		ID: "gcg-1", Title: "closed step", Type: "task", Status: "closed",
+		CreatedAt: old, UpdatedAt: old,
+	})
+
+	purged, err := purgeClosedInfraSessions(store, now, 720*time.Hour, 500)
+	if err != nil {
+		t.Fatalf("purgeClosedInfraSessions: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1", purged)
+	}
+	if _, err := store.Get("gcg-session-old"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("old session Get = %v, want ErrNotFound", err)
+	}
+	for _, id := range []string{"gcg-session-young", "gcg-session-live", "gcg-1"} {
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("Get %s: %v", id, err)
+		}
+	}
 }
 
 func TestWispGC_NothingExpired(t *testing.T) {

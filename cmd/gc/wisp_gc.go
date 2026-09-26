@@ -77,6 +77,31 @@ var wispGCReapOrphanProbeCap = 500
 // unbounded pass. Package var so tests can shrink it.
 var wispGCClosurePurgeBatchCap = 500
 
+// infraSessionPurgeAgeDefault matches the reaper order's SESSION_PURGE_AGE
+// (GC_REAPER_SESSION_PURGE_AGE, default 720h). Session rows are coordination
+// history, not wisps, so they do not use the 24h wisp TTL.
+const infraSessionPurgeAgeDefault = 720 * time.Hour
+
+// infraSessionPurgeAge is the idle age a closed session bead must reach
+// before purgeClosedInfraSessions deletes it. Tests replace it.
+var infraSessionPurgeAge = defaultInfraSessionPurgeAge
+
+func defaultInfraSessionPurgeAge() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("GC_REAPER_SESSION_PURGE_AGE"))
+	if raw == "" {
+		return infraSessionPurgeAgeDefault
+	}
+	age, err := time.ParseDuration(raw)
+	if err != nil || age <= 0 {
+		return infraSessionPurgeAgeDefault
+	}
+	return age
+}
+
+// wispGCSessionPurgeBatchCap bounds how many closed infra session beads one
+// sweep deletes. The backlog drains across ticks instead of one unbounded pass.
+var wispGCSessionPurgeBatchCap = 500
+
 // reapOrphansEnforced reports whether orphaned-closed-wisp reaping should
 // actually delete rows (true) or run dry (false). It is a package var so tests
 // can flip it without touching the process environment. By default it reads
@@ -210,6 +235,15 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 		purged += orphanReaped
 		deleteErr = errors.Join(deleteErr, orphanErr)
 	}
+
+	// Closed agent-session rows (gcg-session-*, gcs-*) live in this same infra
+	// ledger, not in the Dolt work database the reaper order queries. The
+	// root-blind SQLite retention sweeper stays off, so this is the sweep that
+	// deletes them. Its clock is the reaper's session purge age (30 days), not
+	// the 24h wisp TTL, and it never deletes a non-session bead.
+	sessionPurged, sessionErr := purgeClosedInfraSessions(store, now, infraSessionPurgeAge(), wispGCSessionPurgeBatchCap)
+	purged += sessionPurged
+	deleteErr = errors.Join(deleteErr, sessionErr)
 
 	if m.mailRetentionTTL > 0 && mailStore.Store != nil {
 		// The read-message retention arm is messaging-class: its candidate query
@@ -523,6 +557,79 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 	}
 
 	return reaped, errors.Join(collectErr, deleteErr)
+}
+
+// purgeClosedInfraSessions deletes closed session beads that have been idle
+// longer than age. Sessions for this city are rows in the sqlite infra ledger
+// (the same store as the graph), minted as gcg-session-* or the older gcs-*
+// prefix. The Dolt reaper only sees issue_type=session in a Dolt `issues`
+// table, which is the combined work/infra topology, so this arm is what keeps
+// the sqlite ledger from retaining every closed session forever.
+//
+// It deletes only type=session rows that are closed and old. A closed workflow
+// step, an open session, and a session that still owns a parent-child child
+// stay. Delete is the store's own delete, so labels, metadata, and deps go
+// with the bead.
+func purgeClosedInfraSessions(store beads.Store, now time.Time, age time.Duration, batchCap int) (int, error) {
+	if store == nil || age <= 0 {
+		return 0, nil
+	}
+	candidates, err := store.List(beads.ListQuery{
+		Status:   "closed",
+		Type:     "session",
+		TierMode: beads.TierBoth,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("listing closed infra sessions: %w", err)
+	}
+	cutoff := now.Add(-age)
+	purged := 0
+	attempted := 0
+	var deleteErr error
+	for _, candidate := range candidates {
+		if batchCap > 0 && attempted >= batchCap {
+			break
+		}
+		if candidate.Type != "session" || candidate.Status != "closed" {
+			continue
+		}
+		activity := candidate.UpdatedAt
+		if activity.IsZero() {
+			activity = candidate.CreatedAt
+		}
+		if activity.IsZero() || !activity.Before(cutoff) {
+			continue
+		}
+		children, childErr := store.Children(candidate.ID, beads.IncludeClosed, beads.WithBothTiers)
+		if childErr != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("listing children for session %q: %w", candidate.ID, childErr))
+			continue
+		}
+		if len(children) > 0 {
+			continue
+		}
+		linked, linkErr := hasParentChildDepEdge(store, candidate.ID)
+		if linkErr != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("listing parent-child deps for session %q: %w", candidate.ID, linkErr))
+			continue
+		}
+		if linked {
+			continue
+		}
+		attempted++
+		if err := store.Delete(candidate.ID); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("purging closed infra session %q: %w", candidate.ID, err))
+			continue
+		}
+		purged++
+	}
+	if purged > 0 {
+		log.Printf("wisp gc: purged %d closed infra session bead(s) older than %s", purged, age)
+	}
+	return purged, deleteErr
 }
 
 // hasParentChildDepEdge reports whether id sits on either end of a parent-child
