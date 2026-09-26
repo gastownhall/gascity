@@ -1195,6 +1195,49 @@ func TestCmdCityStatus_SupervisorManagedNoAPIPortUsesSupervisorAPI(t *testing.T)
 	}
 }
 
+// TestCmdCityStatus_APIRouteDoesNotOpenLocalStore keeps the supervisor route
+// ahead of every bead/Dolt read. During a store-contention burst, opening the
+// local store can block even while the supervisor's cached status endpoint is
+// healthy; doing that work before choosing the API route made gc status emit
+// no output until the external command timeout killed it.
+func TestCmdCityStatus_APIRouteDoesNotOpenLocalStore(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1")
+	cityPath := writeCityStatusTestCity(t)
+	if err := os.Mkdir(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("create store marker: %v", err)
+	}
+
+	srv := httptest.NewServer(okCityStatusHandler(t))
+	defer srv.Close()
+
+	origAlive, origSup := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
+	origOpen := openCityStoreAtForStatus
+	t.Cleanup(func() {
+		apiRouteControllerAliveHook = origAlive
+		apiRouteSupervisorClientHook = origSup
+		openCityStoreAtForStatus = origOpen
+	})
+	apiRouteControllerAliveHook = func(string) int { return 4242 }
+	apiRouteSupervisorClientHook = func(cp string) *api.Client {
+		if cp != cityPath {
+			return nil
+		}
+		return api.NewCityScopedClient(srv.URL, "test-city")
+	}
+	openCityStoreAtForStatus = func(string) (beads.StoreOpenResult, error) {
+		t.Fatal("gc status opened the local bead store before using the healthy supervisor API")
+		return beads.StoreOpenResult{}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdCityStatus([]string{cityPath}, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdCityStatus exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "route=api") {
+		t.Fatalf("stderr missing route=api: %s", stderr.String())
+	}
+}
+
 // TestRouteCityStatus_APIJSONIncludesCacheAge verifies the API-path JSON
 // output carries the _cache_age_s envelope field while the fallback path
 // omits it. Enforces D5 from the gc-read-path design doc.
