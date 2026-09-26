@@ -7,8 +7,10 @@
 # converts satisfied cross-rig blocks deps to related, preserving the
 # audit trail while removing blocking semantics.
 #
-# Uses a fixed lookback window (15 minutes) to find recently closed
-# issues. Idempotent — converting an already-related dep is a no-op.
+# Uses the bead.closed event stream with a fixed lookback window (15
+# minutes), then scans each store's indexed depends_on_external column
+# once. Cost is O(stores), not O(recently-closed beads). Idempotent —
+# converting an already-related dep is a no-op.
 #
 # Becomes unnecessary when beads supports cross-rig computeBlockedIDs.
 #
@@ -20,49 +22,97 @@ __SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/_bd_trace.sh" "cross-rig-deps"
 
+if ! command -v jq >/dev/null 2>&1; then
+    echo "cross-rig-deps: jq is required but not found in PATH" >&2
+    exit 1
+fi
+
 CITY="${GC_CITY:-.}"
 LOOKBACK="${CROSS_RIG_LOOKBACK:-15m}"
 
-# Step 1: Find recently closed issues.
-# Use a fixed lookback window rather than tracking patrol time.
-SINCE=$(date -u -d "-${LOOKBACK%m} minutes" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
-        date -u -v-"${LOOKBACK%m}"M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || exit 0
+# Step 1: Read close transitions once. A quiet run exits before spawning bd.
+EVENTS=$(gc events --type bead.closed --since "$LOOKBACK" 2>/dev/null) || exit 0
+[ -n "$EVENTS" ] || exit 0
 
-CLOSED=$(gc bd list --status=closed --closed-after="$SINCE" --json 2>/dev/null) || exit 0
-if [ -z "$CLOSED" ] || [ "$CLOSED" = "[]" ]; then
-    exit 0
-fi
+CLOSED_IDS=$(printf '%s\n' "$EVENTS" \
+    | jq -r '.payload.bead.id // .payload.id // empty' 2>/dev/null \
+    | sort -u) || exit 0
+[ -n "$CLOSED_IDS" ] || exit 0
+CLOSED_JSON=$(printf '%s\n' "$CLOSED_IDS" | jq -Rsc 'split("\n") | map(select(length > 0))')
 
-# Step 2: For each closed issue, check for cross-rig dependents.
-# Capture jq output into variables (instead of piping into the loops) so
-# producer failures still trip pipefail+set -e fail-loud, and the loop
-# bodies run in the parent shell — RESOLVED is incremented in scope and
-# survives to the summary echo below. CLOSED is pre-validated as a
-# non-empty array on lines 26-29, so CLOSED_IDS is non-empty here.
+# Build the store list once. gc bd is routing sugar, not a federation
+# layer, so every store must be queried explicitly. The query volume is
+# therefore fixed at one read per store regardless of close throughput.
+RIGS_JSON=$(gc rig list --json 2>/dev/null) || exit 0
+SCOPES=$(printf '%s' "$RIGS_JSON" \
+    | jq -r '(.rigs // [])[]
+             | [(if .hq == true then "city" else "rig" end), .name]
+             | @tsv' 2>/dev/null) || exit 0
+[ -n "$SCOPES" ] || exit 0
+
+run_bd_for_scope() {
+    scope_kind="$1"
+    scope_name="$2"
+    shift 2
+    if [ "$scope_kind" = "city" ]; then
+        gc bd --city "$CITY" "$@"
+    else
+        gc bd --rig "$scope_name" "$@"
+    fi
+}
+
+# Cross-prefix targets are stored verbatim in depends_on_external. bd dep
+# list returns hydrated issue records and cannot surface a target that is
+# absent from the local store, so query the owning column directly.
+EXTERNAL_BLOCKS_SQL="SELECT issue_id, depends_on_external
+FROM dependencies
+WHERE type = 'blocks' AND depends_on_external IS NOT NULL
+UNION ALL
+SELECT issue_id, depends_on_external
+FROM wisp_dependencies
+WHERE type = 'blocks' AND depends_on_external IS NOT NULL"
+
+BATCH_FILE=$(mktemp "${TMPDIR:-/tmp}/cross-rig-deps.XXXXXX")
+ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/cross-rig-deps.err.XXXXXX")
+trap 'rm -f "$BATCH_FILE" "$ERR_FILE"' EXIT
+
 RESOLVED=0
-CLOSED_IDS=$(echo "$CLOSED" | jq -r '.[].id' 2>/dev/null)
-while IFS= read -r closed_id; do
-    # Find beads that have a blocks dep on this closed issue.
-    DEPS=$(gc bd dep list "$closed_id" --direction=up --type=blocks --json 2>/dev/null) || continue
-    if [ -z "$DEPS" ] || [ "$DEPS" = "[]" ]; then
+while IFS="$(printf '\t')" read -r scope_kind scope_name; do
+    [ -n "$scope_kind" ] || continue
+    if ! ROWS=$(run_bd_for_scope "$scope_kind" "$scope_name" \
+            sql --json "$EXTERNAL_BLOCKS_SQL" 2>"$ERR_FILE"); then
+        echo "cross-rig-deps: skipping $scope_name — bd sql failed: $(tail -n 1 "$ERR_FILE")" >&2
+        continue
+    fi
+    if [ -z "$ROWS" ] || [ "$ROWS" = "[]" ]; then
         continue
     fi
 
-    # Filter for external (cross-rig) deps. The select() filter may yield
-    # zero matches, in which case we skip rather than feed an empty
-    # here-string into `read` (which would produce one bogus iteration
-    # with dep_id="").
-    EXTERNAL_DEPS=$(echo "$DEPS" | jq -r '.[] | select(.id | startswith("external:")) | .id' 2>/dev/null)
-    if [ -z "$EXTERNAL_DEPS" ]; then
-        continue
+    MATCHES=$(printf '%s' "$ROWS" \
+        | jq -r --argjson closed "$CLOSED_JSON" '
+            .[]
+            | select(.issue_id != null and .depends_on_external != null)
+            | select(.depends_on_external as $target | $closed | index($target))
+            | [.issue_id, .depends_on_external]
+            | @tsv' 2>/dev/null) || MATCHES=""
+    [ -n "$MATCHES" ] || continue
+
+    : > "$BATCH_FILE"
+    while IFS="$(printf '\t')" read -r dep_id closed_id; do
+        [ -n "$dep_id" ] && [ -n "$closed_id" ] || continue
+        printf 'dep remove %s %s\n' "$dep_id" "$closed_id" >> "$BATCH_FILE"
+        printf 'dep add %s %s related\n' "$dep_id" "$closed_id" >> "$BATCH_FILE"
+    done <<< "$MATCHES"
+
+    STORE_RESOLVED=$(grep -c '^dep remove ' "$BATCH_FILE" 2>/dev/null) || STORE_RESOLVED=0
+    [ "$STORE_RESOLVED" -gt 0 ] || continue
+    if ! run_bd_for_scope "$scope_kind" "$scope_name" batch \
+            -f "$BATCH_FILE" -m "cross-rig-deps sweep"; then
+        echo "cross-rig-deps: bd batch failed in $scope_name — no dependencies were converted" >&2
+        exit 1
     fi
-    while IFS= read -r dep_id; do
-        # Convert blocks → related: remove blocking semantics, keep audit trail.
-        gc bd dep remove "$dep_id" "external:$closed_id" 2>/dev/null || true
-        gc bd dep add "$dep_id" "external:$closed_id" --type=related 2>/dev/null || true
-        RESOLVED=$((RESOLVED + 1))
-    done <<< "$EXTERNAL_DEPS"
-done <<< "$CLOSED_IDS"
+    RESOLVED=$((RESOLVED + STORE_RESOLVED))
+done <<< "$SCOPES"
 
 if [ "$RESOLVED" -gt 0 ]; then
     echo "cross-rig-deps: resolved $RESOLVED cross-rig dependencies"
