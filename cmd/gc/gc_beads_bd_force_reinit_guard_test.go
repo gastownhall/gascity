@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -48,6 +49,8 @@ func TestStoreHoldsBdTablesDistinguishesEmptyFromUndetermined(t *testing.T) {
 	src := readGCBeadsBdScript(t)
 	validSQLName := extractShellFunction(t, src, "valid_sql_name")
 	tableCount := extractShellFunction(t, src, "bd_runtime_bd_table_count")
+	schemaCursor := extractShellFunction(t, src, "bd_runtime_schema_cursor")
+	migrationCount := extractShellFunction(t, src, "bd_runtime_schema_migration_count")
 	holdsTables := extractShellFunction(t, src, "bd_runtime_store_holds_bd_tables")
 
 	cases := []struct {
@@ -104,6 +107,8 @@ func TestStoreHoldsBdTablesDistinguishesEmptyFromUndetermined(t *testing.T) {
 			script := "connect_host() { printf '127.0.0.1'; }\n" +
 				validSQLName + "\n" +
 				tableCount + "\n" +
+				schemaCursor + "\n" +
+				migrationCount + "\n" +
 				holdsTables + "\n" +
 				"bd_runtime_store_holds_bd_tables hq\n"
 
@@ -334,5 +339,1208 @@ esac
 	if _, statErr := os.Stat(initMarker); statErr == nil {
 		argv, _ := os.ReadFile(initMarker)
 		t.Fatalf("bd init ran despite the refusal, so the guard reported without preventing:\nargv:\n%s\noutput:\n%s", argv, got)
+	}
+}
+
+// TestStoreHoldsBdTablesConsidersMigrationCursor extends the guard above to
+// the bug that let a mid-migration database slip through as "empty": the
+// four bd tables genuinely are absent while a concurrent `bd init` is still
+// running its own migrations, but schema_migrations already carries a
+// non-zero cursor. bd_runtime_store_holds_bd_tables must read that cursor
+// and answer "present" (0) rather than "absent" (1), because op_init treats
+// 1 as license to force a reinit immediately, without even trying
+// wait_for_bd_runtime_schema first — exactly the fast path that raced the
+// concurrent initializer in the failing job (a random vNN database force-
+// reinits and beads then refuses to migrate the dirty tables).
+//
+// writeFakeCountDolt cannot express this: it returns one canned response no
+// matter which query is sent, so a case needing the table count and the
+// migration cursor to disagree needs a fake that dispatches on the SQL
+// text. writeFakeSchemaCursorDolt below is that sibling; it does not
+// replace writeFakeCountDolt, and the existing cases above stay independent
+// of query order exactly as before.
+func TestStoreHoldsBdTablesConsidersMigrationCursor(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+
+	src := readGCBeadsBdScript(t)
+	validSQLName := extractShellFunction(t, src, "valid_sql_name")
+	tableCount := extractShellFunction(t, src, "bd_runtime_bd_table_count")
+	schemaCursor := extractShellFunction(t, src, "bd_runtime_schema_cursor")
+	migrationCount := extractShellFunction(t, src, "bd_runtime_schema_migration_count")
+	holdsTables := extractShellFunction(t, src, "bd_runtime_store_holds_bd_tables")
+
+	cases := []struct {
+		name           string
+		tableCountCSV  string
+		tableCountExit int
+		migExistsCSV   string
+		migExistsExit  int
+		cursorCSV      string
+		cursorExit     int
+		want           int
+		why            string
+	}{
+		{
+			name:           "genuinely_fresh_store_still_authorizes_reinit",
+			tableCountCSV:  "cnt\n0\n",
+			tableCountExit: 0,
+			migExistsCSV:   "cnt\n0\n",
+			migExistsExit:  0,
+			cursorCSV:      "cur\n0\n",
+			cursorExit:     0,
+			want:           bdTablesAbsent,
+			why:            "no bd tables and no migration history at all is the ordinary fresh-init path and must not gain latency or a different answer from the new cursor check",
+		},
+		{
+			name:           "mid_migration_store_counts_as_present",
+			tableCountCSV:  "cnt\n0\n",
+			tableCountExit: 0,
+			migExistsCSV:   "cnt\n1\n",
+			migExistsExit:  0,
+			cursorCSV:      "cur\n6\n",
+			cursorExit:     0,
+			want:           bdTablesPresent,
+			why:            "a concurrent initializer's migration has advanced the cursor before creating the four bd tables; reading this as empty is the exact bug (ga-e2z1zb) that force-reinits a mid-migration database",
+		},
+		{
+			name:           "populated_store_is_present_regardless_of_cursor",
+			tableCountCSV:  "cnt\n3\n",
+			tableCountExit: 0,
+			migExistsCSV:   "cnt\n1\n",
+			migExistsExit:  0,
+			cursorCSV:      "cur\n0\n",
+			cursorExit:     0,
+			want:           bdTablesPresent,
+			why:            "the four-table count alone already proves the store is populated; the cursor is irrelevant here and must not flip this to absent",
+		},
+		{
+			name:           "table_count_query_failure_is_undetermined",
+			tableCountCSV:  "",
+			tableCountExit: 1,
+			migExistsCSV:   "cnt\n0\n",
+			migExistsExit:  0,
+			cursorCSV:      "cur\n0\n",
+			cursorExit:     0,
+			want:           bdTablesUnknown,
+			why:            "the pre-existing undetermined path must survive the cursor-aware rewrite unchanged",
+		},
+		{
+			name:           "cursor_value_query_failure_is_undetermined_not_absent",
+			tableCountCSV:  "cnt\n0\n",
+			tableCountExit: 0,
+			migExistsCSV:   "cnt\n1\n",
+			migExistsExit:  0,
+			cursorCSV:      "",
+			cursorExit:     1,
+			want:           bdTablesUnknown,
+			why:            "a cursor query that does not answer is evidence of nothing and must not be read as cursor=0, which would silently re-authorize the destructive reinit",
+		},
+		{
+			name:           "migration_table_existence_query_failure_is_undetermined_not_absent",
+			tableCountCSV:  "cnt\n0\n",
+			tableCountExit: 0,
+			migExistsCSV:   "",
+			migExistsExit:  1,
+			cursorCSV:      "cur\n0\n",
+			cursorExit:     0,
+			want:           bdTablesUnknown,
+			why:            "the existence probe is as much a part of reading the cursor as the value query, and its failure must not be silently treated as cursor=0 either",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			writeFakeSchemaCursorDolt(t, binDir,
+				tc.tableCountCSV, tc.tableCountExit,
+				tc.migExistsCSV, tc.migExistsExit,
+				tc.cursorCSV, tc.cursorExit)
+
+			script := "connect_host() { printf '127.0.0.1'; }\n" +
+				validSQLName + "\n" +
+				tableCount + "\n" +
+				schemaCursor + "\n" +
+				migrationCount + "\n" +
+				holdsTables + "\n" +
+				"bd_runtime_store_holds_bd_tables hq\n"
+
+			got := exitCodeOf(t, runGCBeadsBdSnippet(t, script, binDir))
+			if got != tc.want {
+				t.Fatalf("bd_runtime_store_holds_bd_tables = %d, want %d (table count=%q/%d, migrations exist=%q/%d, cursor=%q/%d): %s",
+					got, tc.want,
+					tc.tableCountCSV, tc.tableCountExit,
+					tc.migExistsCSV, tc.migExistsExit,
+					tc.cursorCSV, tc.cursorExit,
+					tc.why)
+			}
+		})
+	}
+}
+
+// writeFakeSchemaCursorDolt installs a dolt stub that answers three distinct
+// queries differently by dispatching on the SQL text sent via -q: the
+// four-table count query (same shape writeFakeCountDolt answers), the
+// schema_migrations existence probe, and the schema_migrations cursor value
+// query. writeFakeCountDolt answers every query identically and so cannot
+// drive a case where the count and the cursor need to disagree; this is the
+// sibling the cursor-awareness tests need instead.
+func writeFakeSchemaCursorDolt(t *testing.T, dir string,
+	tableCountCSV string, tableCountExit int,
+	migExistsCSV string, migExistsExit int,
+	cursorCSV string, cursorExit int,
+) {
+	t.Helper()
+
+	tableCountFile := filepath.Join(dir, "table-count.csv")
+	migExistsFile := filepath.Join(dir, "migrations-exist.csv")
+	cursorFile := filepath.Join(dir, "cursor.csv")
+	if err := os.WriteFile(tableCountFile, []byte(tableCountCSV), 0o600); err != nil {
+		t.Fatalf("write fake dolt payload: %v", err)
+	}
+	if err := os.WriteFile(migExistsFile, []byte(migExistsCSV), 0o600); err != nil {
+		t.Fatalf("write fake dolt payload: %v", err)
+	}
+	if err := os.WriteFile(cursorFile, []byte(cursorCSV), 0o600); err != nil {
+		t.Fatalf("write fake dolt payload: %v", err)
+	}
+
+	body := fmt.Sprintf(`#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+case "$query" in
+  *"'issues'"*)
+    cat %q
+    exit %d
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    cat %q
+    exit %d
+    ;;
+  *"schema_migrations"*)
+    cat %q
+    exit %d
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, tableCountFile, tableCountExit, migExistsFile, migExistsExit, cursorFile, cursorExit)
+	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake dolt: %v", err)
+	}
+}
+
+// TestStoreHoldsBdTablesConsidersParkedMigrationHistory pins the other half
+// of ga-m1qxc8: a parked store — no bd tables, no active migration cursor,
+// but real migration history left behind by a migrator that has since
+// exited — must not be misread as a genuinely fresh database. ga-3jssfa
+// already protects the actively-migrating case (cursor>0); the mayor's exit
+// contract for ga-m1qxc8 calls out a second case separately, where the
+// cursor itself reads 0 but schema_migrations still holds rows. Reading
+// that as fresh sends op_init down the same destructive `bd init --force`
+// path TestGcBeadsBdInitRefusesForcedReinitWhenDatabaseHoldsBdTables guards
+// against for the cursor>0 case.
+//
+// bd_runtime_schema_migration_count does not exist yet: this test names it
+// deliberately, before it is implemented, so bd_runtime_store_holds_bd_tables
+// gains a third signal to consult once table count and cursor both read
+// empty.
+func TestStoreHoldsBdTablesConsidersParkedMigrationHistory(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+
+	src := readGCBeadsBdScript(t)
+	validSQLName := extractShellFunction(t, src, "valid_sql_name")
+	tableCount := extractShellFunction(t, src, "bd_runtime_bd_table_count")
+	schemaCursor := extractShellFunction(t, src, "bd_runtime_schema_cursor")
+	migrationCount := extractShellFunction(t, src, "bd_runtime_schema_migration_count")
+	holdsTables := extractShellFunction(t, src, "bd_runtime_store_holds_bd_tables")
+
+	cases := []struct {
+		name           string
+		tableCountCSV  string
+		tableCountExit int
+		migExistsCSV   string
+		migExistsExit  int
+		cursorCSV      string
+		cursorExit     int
+		migCountCSV    string
+		migCountExit   int
+		want           int
+		why            string
+	}{
+		{
+			name:          "parked_store_with_migration_history_counts_as_present",
+			tableCountCSV: "cnt\n0\n", tableCountExit: 0,
+			migExistsCSV: "cnt\n1\n", migExistsExit: 0,
+			cursorCSV: "cur\n0\n", cursorExit: 0,
+			migCountCSV: "cnt\n3\n", migCountExit: 0,
+			want: bdTablesPresent,
+			why:  "a migrator that already ran and exited left real history behind; the cursor reading 0 must not be read as fresh when schema_migrations still holds rows (ga-m1qxc8's parked-DB case)",
+		},
+		{
+			name:          "empty_migration_table_still_authorizes_reinit",
+			tableCountCSV: "cnt\n0\n", tableCountExit: 0,
+			migExistsCSV: "cnt\n1\n", migExistsExit: 0,
+			cursorCSV: "cur\n0\n", cursorExit: 0,
+			migCountCSV: "cnt\n0\n", migCountExit: 0,
+			want: bdTablesAbsent,
+			why:  "a created-but-empty schema_migrations table is still the ordinary fresh-init path; only actual rows make a parked store present, matching the exit contract's \"ZERO rows\" wording",
+		},
+		{
+			name:          "populated_store_short_circuits_before_row_count_query",
+			tableCountCSV: "cnt\n3\n", tableCountExit: 0,
+			migExistsCSV: "cnt\n1\n", migExistsExit: 0,
+			cursorCSV: "cur\n0\n", cursorExit: 0,
+			migCountCSV: "", migCountExit: 1,
+			want: bdTablesPresent,
+			why:  "the four-table count alone already proves the store is populated; the row-count query must never even run, so a failing canned response here must not change the answer",
+		},
+		{
+			name:          "active_cursor_short_circuits_before_row_count_query",
+			tableCountCSV: "cnt\n0\n", tableCountExit: 0,
+			migExistsCSV: "cnt\n1\n", migExistsExit: 0,
+			cursorCSV: "cur\n5\n", cursorExit: 0,
+			migCountCSV: "", migCountExit: 1,
+			want: bdTablesPresent,
+			why:  "ga-3jssfa's active-migrator protection must still resolve the answer by itself; the new row-count signal is only consulted when count and cursor both read empty, so a failing canned response here must not change the answer",
+		},
+		{
+			name:          "migration_row_count_query_failure_is_undetermined_not_absent",
+			tableCountCSV: "cnt\n0\n", tableCountExit: 0,
+			migExistsCSV: "cnt\n1\n", migExistsExit: 0,
+			cursorCSV: "cur\n0\n", cursorExit: 0,
+			migCountCSV: "", migCountExit: 1,
+			want: bdTablesUnknown,
+			why:  "a row-count query that does not answer is evidence of nothing and must not be read as zero rows, which would silently re-authorize the destructive reinit",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			writeFakeParkedMigrationDolt(t, binDir,
+				tc.tableCountCSV, tc.tableCountExit,
+				tc.migExistsCSV, tc.migExistsExit,
+				tc.cursorCSV, tc.cursorExit,
+				tc.migCountCSV, tc.migCountExit)
+
+			script := "connect_host() { printf '127.0.0.1'; }\n" +
+				validSQLName + "\n" +
+				tableCount + "\n" +
+				schemaCursor + "\n" +
+				migrationCount + "\n" +
+				holdsTables + "\n" +
+				"bd_runtime_store_holds_bd_tables hq\n"
+
+			got := exitCodeOf(t, runGCBeadsBdSnippet(t, script, binDir))
+			if got != tc.want {
+				t.Fatalf("bd_runtime_store_holds_bd_tables = %d, want %d (table count=%q/%d, migrations exist=%q/%d, cursor=%q/%d, migration row count=%q/%d): %s",
+					got, tc.want,
+					tc.tableCountCSV, tc.tableCountExit,
+					tc.migExistsCSV, tc.migExistsExit,
+					tc.cursorCSV, tc.cursorExit,
+					tc.migCountCSV, tc.migCountExit,
+					tc.why)
+			}
+		})
+	}
+}
+
+// writeFakeParkedMigrationDolt installs a dolt stub that answers four
+// distinct queries differently by dispatching on the SQL text sent via -q:
+// the four-table count query, the schema_migrations existence probe (shared
+// verbatim by bd_runtime_schema_cursor and bd_runtime_schema_migration_count
+// — both ask it identically), the MAX(version) cursor value query, and the
+// COUNT(*) row-count value query. The cursor and row-count queries both
+// contain the literal "schema_migrations", so MAX(version) must be matched
+// before the row-count catch-all or every row-count case would silently
+// read the cursor's canned response instead of its own.
+func writeFakeParkedMigrationDolt(t *testing.T, dir string,
+	tableCountCSV string, tableCountExit int,
+	migExistsCSV string, migExistsExit int,
+	cursorCSV string, cursorExit int,
+	migCountCSV string, migCountExit int,
+) {
+	t.Helper()
+
+	tableCountFile := filepath.Join(dir, "table-count.csv")
+	migExistsFile := filepath.Join(dir, "migrations-exist.csv")
+	cursorFile := filepath.Join(dir, "cursor.csv")
+	migCountFile := filepath.Join(dir, "migration-count.csv")
+	if err := os.WriteFile(tableCountFile, []byte(tableCountCSV), 0o600); err != nil {
+		t.Fatalf("write fake dolt payload: %v", err)
+	}
+	if err := os.WriteFile(migExistsFile, []byte(migExistsCSV), 0o600); err != nil {
+		t.Fatalf("write fake dolt payload: %v", err)
+	}
+	if err := os.WriteFile(cursorFile, []byte(cursorCSV), 0o600); err != nil {
+		t.Fatalf("write fake dolt payload: %v", err)
+	}
+	if err := os.WriteFile(migCountFile, []byte(migCountCSV), 0o600); err != nil {
+		t.Fatalf("write fake dolt payload: %v", err)
+	}
+
+	body := fmt.Sprintf(`#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+case "$query" in
+  *"'issues'"*)
+    cat %q
+    exit %d
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    cat %q
+    exit %d
+    ;;
+  *"MAX(version)"*)
+    cat %q
+    exit %d
+    ;;
+  *"schema_migrations"*)
+    cat %q
+    exit %d
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, tableCountFile, tableCountExit,
+		migExistsFile, migExistsExit,
+		cursorFile, cursorExit,
+		migCountFile, migCountExit)
+	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake dolt: %v", err)
+	}
+}
+
+// TestForceReinitGuardWaitOutlastsCursorAdvancing pins the other half of the
+// same bug: even once bd_runtime_store_holds_bd_tables correctly answers
+// "present" for a mid-migration store, op_init only avoids the destructive
+// reinit if wait_for_bd_runtime_schema actually waits for that migration to
+// finish. The pre-fix loop gives up after a fixed 8 attempts with no regard
+// for whether the concurrent initializer is still making progress; a
+// migration slower than 8 short backoff steps still loses the race. This
+// drives a fake schema_migrations cursor that advances on every call and
+// never repeats, with schema_ready only turning true once the cursor has
+// moved well past that old fixed budget — proving the wait outlives it.
+func TestForceReinitGuardWaitOutlastsCursorAdvancing(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+
+	src := readGCBeadsBdScript(t)
+	validSQLName := extractShellFunction(t, src, "valid_sql_name")
+	serverSQL := extractShellFunction(t, src, "server_sql")
+	schemaReady := extractShellFunction(t, src, "bd_runtime_schema_ready")
+	tableCount := extractShellFunction(t, src, "bd_runtime_bd_table_count")
+	schemaCursor := extractShellFunction(t, src, "bd_runtime_schema_cursor")
+	sleepMs := extractShellFunction(t, src, "sleep_ms")
+	waitForSchema := extractShellFunction(t, src, "wait_for_bd_runtime_schema")
+
+	binDir := t.TempDir()
+	counterFile := filepath.Join(binDir, "cursor-counter")
+
+	const readyAtCursor = 12 // past the old fixed 8-attempt budget
+	fakeDolt := fmt.Sprintf(`#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+counter_file=%q
+case "$query" in
+  *"FROM config"*)
+    n=$(cat "$counter_file" 2>/dev/null || echo 0)
+    [ "$n" -ge %d ]
+    exit $?
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    printf 'cnt\n1\n'
+    exit 0
+    ;;
+  *"schema_migrations"*)
+    n=$(cat "$counter_file" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "$counter_file"
+    printf 'cur\n%%d\n' "$n"
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, counterFile, readyAtCursor)
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(fakeDolt), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "sleep"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	script := "connect_host() { printf '127.0.0.1'; }\n" +
+		validSQLName + "\n" +
+		serverSQL + "\n" +
+		schemaReady + "\n" +
+		tableCount + "\n" +
+		schemaCursor + "\n" +
+		sleepMs + "\n" +
+		waitForSchema + "\n" +
+		"wait_for_bd_runtime_schema hq\n"
+
+	if err := runGCBeadsBdSnippet(t, script, binDir); err != nil {
+		counterContents, _ := os.ReadFile(counterFile)
+		t.Fatalf("wait_for_bd_runtime_schema gave up while the migration cursor was still advancing (last cursor seen: %s): %v", counterContents, err)
+	}
+}
+
+// TestForceReinitGuardWaitGivesUpOnStalledCursor is the other side of the
+// same behavior: when the cursor stops moving — a genuinely stuck or
+// crashed concurrent initializer, not just a slow one — the wait must still
+// give up rather than hang, and must return failure so op_init's caller can
+// die instead of silently proceeding.
+func TestForceReinitGuardWaitGivesUpOnStalledCursor(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+
+	src := readGCBeadsBdScript(t)
+	validSQLName := extractShellFunction(t, src, "valid_sql_name")
+	serverSQL := extractShellFunction(t, src, "server_sql")
+	schemaReady := extractShellFunction(t, src, "bd_runtime_schema_ready")
+	tableCount := extractShellFunction(t, src, "bd_runtime_bd_table_count")
+	schemaCursor := extractShellFunction(t, src, "bd_runtime_schema_cursor")
+	sleepMs := extractShellFunction(t, src, "sleep_ms")
+	waitForSchema := extractShellFunction(t, src, "wait_for_bd_runtime_schema")
+
+	binDir := t.TempDir()
+	callCountFile := filepath.Join(binDir, "cursor-call-count")
+
+	fakeDolt := fmt.Sprintf(`#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+call_count_file=%q
+case "$query" in
+  *"FROM config"*)
+    exit 1
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    printf 'cnt\n1\n'
+    exit 0
+    ;;
+  *"schema_migrations"*)
+    n=$(cat "$call_count_file" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "$call_count_file"
+    printf 'cur\n6\n'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, callCountFile)
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(fakeDolt), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "sleep"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	script := "connect_host() { printf '127.0.0.1'; }\n" +
+		validSQLName + "\n" +
+		serverSQL + "\n" +
+		schemaReady + "\n" +
+		tableCount + "\n" +
+		schemaCursor + "\n" +
+		sleepMs + "\n" +
+		waitForSchema + "\n" +
+		"wait_for_bd_runtime_schema hq\n"
+
+	err := runGCBeadsBdSnippet(t, script, binDir)
+	if err == nil {
+		t.Fatalf("wait_for_bd_runtime_schema succeeded against a cursor that never moved from 6; a stalled migration must not read as ready")
+	}
+
+	raw, readErr := os.ReadFile(callCountFile)
+	if readErr != nil {
+		t.Fatalf("cursor was never queried at all (%v); wait_for_bd_runtime_schema must retry a stalled cursor before giving up, not fail on the first check", readErr)
+	}
+	calls, convErr := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if convErr != nil {
+		t.Fatalf("unreadable call count %q: %v", raw, convErr)
+	}
+	if calls < 2 {
+		t.Fatalf("cursor was read only %d time(s); wait_for_bd_runtime_schema must retry a stalled cursor at least once before giving up", calls)
+	}
+	if calls > 100 {
+		t.Fatalf("cursor was read %d times; wait_for_bd_runtime_schema must give up on a stalled cursor within a bounded number of attempts, not spin indefinitely", calls)
+	}
+}
+
+// TestForceReinitGuardWaitOutlastsSettleTimeoutWhileCursorAdvances asserts
+// the acceptance criterion directly: op_init "must stop random vNN -> v66
+// forced reinitializations when another initializer advances
+// schema_migrations" (release-gates/ga-3jssfa-op-init-force-reinit-race-gate.md
+// criterion 2), with no exception for how long that takes. The full suite
+// reproduced exactly this: TestGraphWorkflowFailureRunsCleanup's gc init
+// forced a reinit that bd then refused for 13 pending migrations (v53 ->
+// v66) — a live migration that was still moving, just not fast enough to
+// finish inside a fixed wall-clock window under load.
+//
+// wait_for_bd_runtime_schema computes its GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS
+// deadline once, up front, and checks "now >= deadline" every iteration
+// regardless of whether the cursor just advanced. A cursor that advances on
+// every single poll (stalls always reset to 0, never approaching
+// stall_budget=8) must still be waited out; the settle-timeout cap is
+// documented (gc-beads-bd.sh's GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS comment) as
+// bounding a stalled wait, not a live one. This test sets that cap to 0 so
+// the deadline is exhausted before the loop's first iteration completes,
+// then drives a cursor that advances on every attempt: the wait must still
+// reach readiness, not give up on the first check.
+func TestForceReinitGuardWaitOutlastsSettleTimeoutWhileCursorAdvances(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+
+	src := readGCBeadsBdScript(t)
+	validSQLName := extractShellFunction(t, src, "valid_sql_name")
+	serverSQL := extractShellFunction(t, src, "server_sql")
+	schemaReady := extractShellFunction(t, src, "bd_runtime_schema_ready")
+	tableCount := extractShellFunction(t, src, "bd_runtime_bd_table_count")
+	schemaCursor := extractShellFunction(t, src, "bd_runtime_schema_cursor")
+	sleepMs := extractShellFunction(t, src, "sleep_ms")
+	waitForSchema := extractShellFunction(t, src, "wait_for_bd_runtime_schema")
+
+	binDir := t.TempDir()
+	counterFile := filepath.Join(binDir, "cursor-counter")
+
+	const readyAtCursor = 3 // any value > 1 exposes the bug: the buggy wait gives up after its first iteration
+	fakeDolt := fmt.Sprintf(`#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+counter_file=%q
+case "$query" in
+  *"FROM config"*)
+    n=$(cat "$counter_file" 2>/dev/null || echo 0)
+    [ "$n" -ge %d ]
+    exit $?
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    printf 'cnt\n1\n'
+    exit 0
+    ;;
+  *"schema_migrations"*)
+    n=$(cat "$counter_file" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "$counter_file"
+    printf 'cur\n%%d\n' "$n"
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, counterFile, readyAtCursor)
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(fakeDolt), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "sleep"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	script := "connect_host() { printf '127.0.0.1'; }\n" +
+		"GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS=0\n" +
+		validSQLName + "\n" +
+		serverSQL + "\n" +
+		schemaReady + "\n" +
+		tableCount + "\n" +
+		schemaCursor + "\n" +
+		sleepMs + "\n" +
+		waitForSchema + "\n" +
+		"wait_for_bd_runtime_schema hq\n"
+
+	if err := runGCBeadsBdSnippet(t, script, binDir); err != nil {
+		counterContents, _ := os.ReadFile(counterFile)
+		t.Fatalf("wait_for_bd_runtime_schema gave up under an exhausted GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS even though the migration cursor was still advancing on every attempt (last cursor seen: %s); a live, advancing cursor must not be cut off by the wall-clock cap alone: %v", counterContents, err)
+	}
+}
+
+// TestGcBeadsBdInitRefusesForcedReinitWhenMigrationCursorIsAdvancing drives
+// op_init through the exact scenario in the failing job: a target database
+// with zero of the four bd tables (so the pre-fix guard read it as
+// genuinely empty) but a schema_migrations cursor already at a non-zero
+// value, left behind by a concurrent initializer's own bd init that has not
+// finished. op_init's fast path for "absent" skips wait_for_bd_runtime_schema
+// entirely and forces a reinit immediately —
+// TestGcBeadsBdInitRefusesForcedReinitWhenDatabaseHoldsBdTables above only
+// covers the count>0 branch of the guard, never this one, which is why the
+// bug shipped.
+//
+// The die message is asserted to differ from the count>0 case's message: a
+// store with a stalled migration does not "hold bd tables" in the sense
+// that message describes, and conflating the two would mislead whoever
+// reads the failure while triaging it.
+func TestGcBeadsBdInitRefusesForcedReinitWhenMigrationCursorIsAdvancing(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	materializeBuiltinPacksForTest(t, cityPath)
+	script := gcBeadsBdScriptPath(cityPath)
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// bd init exits 0 rather than failing, so a regression surfaces as this
+	// test's own assertion rather than as an unrelated downstream error.
+	initMarker := filepath.Join(t.TempDir(), "bd-init-ran")
+	fakeBd := fmt.Sprintf(`#!/bin/sh
+set -eu
+if [ "${1:-}" = "init" ]; then
+  printf '%%s\n' "$@" > %q
+fi
+exit 0
+`, initMarker)
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(fakeBd), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Zero of the four bd tables, but schema_migrations already exists with
+	// a stalled non-zero cursor: a concurrent initializer's migration that
+	// has made progress but not finished, or has crashed partway. The
+	// schema readiness probe never succeeds either, matching a store that
+	// is not yet queryable.
+	fakeDolt := `#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+case "$query" in
+  *"'issues'"*)
+    printf 'cnt\n0\n'
+    exit 0
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    printf 'cnt\n1\n'
+    exit 0
+    ;;
+  *"schema_migrations"*)
+    printf 'cur\n6\n'
+    exit 0
+    ;;
+  *"FROM config"*)
+    echo "table not found: config" >&2
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(fakeDolt), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// sleep_ms shells out to sleep, so stubbing it spends the retry budget
+	// at no wall-clock cost.
+	if err := os.WriteFile(filepath.Join(binDir, "sleep"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := runGCBeadsBdCommand(t, sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
+		"GC_CITY_PATH="+cityPath,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)...), script, "init", cityPath, "gc", "hq")
+	out := stdout + stderr
+	if err == nil {
+		t.Fatalf("init should refuse to force-reinitialize a database with an advancing migration cursor, but it succeeded:\n%s", out)
+	}
+
+	for _, want := range []string{
+		"refusing to force-reinitialize",
+		"'hq'",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("refusal is not self-describing, missing %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, "concurrent") && !strings.Contains(out, "migration") {
+		t.Fatalf("refusal does not name a concurrent/in-progress migration, so it is indistinguishable from the unrelated count>0 refusal while triaging:\n%s", out)
+	}
+	if strings.Contains(out, "holds bd tables but its bd schema stayed unreadable across retries") {
+		t.Fatalf("refusal reused the count>0 message for a store with zero bd tables, which misdescribes what is actually there:\n%s", out)
+	}
+	if strings.Contains(out, "missing bd schema; re-initializing") {
+		t.Fatalf("init fell through to the destructive reinit instead of refusing:\n%s", out)
+	}
+	if _, statErr := os.Stat(initMarker); statErr == nil {
+		argv, _ := os.ReadFile(initMarker)
+		t.Fatalf("bd init ran despite the refusal, so the guard reported without preventing:\nargv:\n%s\noutput:\n%s", argv, out)
+	}
+}
+
+// TestGcBeadsBdInitRefusesForcedReinitWhenCursorAdvancesBetweenClassificationAndForce
+// pins the actual TOCTOU gap the deployer's integration gate caught after
+// TestGcBeadsBdInitRefusesForcedReinitWhenMigrationCursorIsAdvancing shipped:
+// that sibling test's fake dolt answers "schema_migrations exists with a
+// stalled cursor" from op_init's very first classification read onward, so
+// it never exercises the case where the store is genuinely empty AT
+// classification time and only stops being empty afterward. Real wall-clock
+// work happens between bd_runtime_store_holds_bd_tables's classification
+// call and the destructive run_bd_init_pinned call that actually executes
+// the force -- a second ensure_database_registered call and, when the
+// database was freshly created, seed_fresh_managed_bd_version_witness both
+// run in that gap -- during which a concurrent initializer can create
+// schema_migrations and start advancing its cursor. This fake dolt counts
+// calls to the schema_migrations existence probe and answers "does not
+// exist" (genuinely fresh) on the first call but "exists, cursor stalled at
+// 6" on every call after, simulating exactly that concurrent write landing
+// inside the gap. op_init must revalidate immediately before forcing, not
+// rely solely on the one classification read from earlier in the function.
+func TestGcBeadsBdInitRefusesForcedReinitWhenCursorAdvancesBetweenClassificationAndForce(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	materializeBuiltinPacksForTest(t, cityPath)
+	script := gcBeadsBdScriptPath(cityPath)
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// bd init exits 0 rather than failing, so a regression surfaces as this
+	// test's own assertion rather than as an unrelated downstream error.
+	initMarker := filepath.Join(t.TempDir(), "bd-init-ran")
+	fakeBd := fmt.Sprintf(`#!/bin/sh
+set -eu
+if [ "${1:-}" = "init" ]; then
+  printf '%%s\n' "$@" > %q
+fi
+exit 0
+`, initMarker)
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(fakeBd), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The schema_migrations existence probe answers "does not exist" (the
+	// store reads as genuinely empty) on its first call -- the
+	// classification read at op_init's original call site -- and "exists,
+	// with a stalled non-zero cursor" on every call after, simulating a
+	// concurrent initializer that created and started advancing
+	// schema_migrations during the gap between classification and the force
+	// decision. Table count stays zero throughout: this models a migration
+	// in progress that has not yet reached bd's own four tables, matching
+	// the sibling advancing-cursor scenario. The config-table probe (which
+	// backs bd_runtime_schema_ready) fails until bd init actually runs, then
+	// succeeds -- so an unguarded op_init that forces the reinit anyway sees
+	// its own force "work" (schema now reads ready) and exits 0 instead of
+	// dying on an unrelated post-init verification failure. That keeps the
+	// regression's signal on the one thing this test exists to catch: did
+	// op_init revalidate immediately before forcing, or did it act on a
+	// stale classification. A fix that revalidates before run_bd_init_pinned
+	// never reaches bd init at all, so init_marker never exists and this
+	// probe's gate never matters on the fixed path.
+	existsCounterFile := filepath.Join(binDir, "schema-migrations-exists-calls")
+	fakeDolt := fmt.Sprintf(`#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+counter_file=%q
+init_marker=%q
+case "$query" in
+  *"'issues'"*)
+    printf 'cnt\n0\n'
+    exit 0
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    n=$(cat "$counter_file" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "$counter_file"
+    if [ "$n" -le 1 ]; then
+      printf 'cnt\n0\n'
+    else
+      printf 'cnt\n1\n'
+    fi
+    exit 0
+    ;;
+  *"schema_migrations"*)
+    printf 'cur\n6\n'
+    exit 0
+    ;;
+  *"FROM config"*)
+    if [ -f "$init_marker" ]; then
+      printf 'cnt\n1\n'
+      exit 0
+    fi
+    echo "table not found: config" >&2
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, existsCounterFile, initMarker)
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(fakeDolt), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// sleep_ms shells out to sleep, so stubbing it spends any retry budget
+	// at no wall-clock cost.
+	if err := os.WriteFile(filepath.Join(binDir, "sleep"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := runGCBeadsBdCommand(t, sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
+		"GC_CITY_PATH="+cityPath,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)...), script, "init", cityPath, "gc", "hq")
+	out := stdout + stderr
+	if err == nil {
+		t.Fatalf("init should refuse to force-reinitialize once revalidation finds the store no longer empty, but it succeeded:\n%s", out)
+	}
+
+	calls := 0
+	if raw, readErr := os.ReadFile(existsCounterFile); readErr == nil {
+		calls, _ = strconv.Atoi(strings.TrimSpace(string(raw)))
+	}
+	if calls < 2 {
+		t.Fatalf("schema_migrations existence probe was called only %d time(s); op_init classified the store as empty and forced reinit without ever revalidating immediately before the force decision, so this test did not exercise the classification-to-force race window:\n%s", calls, out)
+	}
+
+	for _, want := range []string{
+		"refusing to force-reinitialize",
+		"'hq'",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("refusal is not self-describing, missing %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, "concurrent") && !strings.Contains(out, "migration") {
+		t.Fatalf("refusal does not name a concurrent/in-progress migration, so it is indistinguishable from the unrelated count>0 refusal while triaging:\n%s", out)
+	}
+	if strings.Contains(out, "holds bd tables but its bd schema stayed unreadable across retries") {
+		t.Fatalf("refusal reused the count>0 message for a store with zero bd tables, which misdescribes what is actually there:\n%s", out)
+	}
+	if _, statErr := os.Stat(initMarker); statErr == nil {
+		argv, _ := os.ReadFile(initMarker)
+		t.Fatalf("bd init ran despite the store no longer being empty by the time of the force decision, so a classification-time-only freshness check did not close the race:\nargv:\n%s\noutput:\n%s", argv, out)
+	}
+}
+
+// TestGcBeadsBdScriptDocumentsSchemaSettleTimeoutOverride pins the exit
+// contract's requirement that wait_for_bd_runtime_schema's wall-clock hard
+// cap has an env override, and that the override is documented in the
+// script's own header block the way every other GC_DOLT_*_TIMEOUT_MS
+// variable already is (GC_DOLT_LOCK_RELEASE_TIMEOUT_MS,
+// GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS). Deliberately does not drive
+// the cap with real wall-clock timing — that would make the suite slow and
+// flaky for no behavioral benefit over the stall/advance tests above; this
+// only checks the override exists and is wired in.
+func TestGcBeadsBdScriptDocumentsSchemaSettleTimeoutOverride(t *testing.T) {
+	src := readGCBeadsBdScript(t)
+
+	headerEnd := strings.Index(src, "\nset -e")
+	if headerEnd == -1 {
+		t.Fatalf("could not locate end of script header comment block")
+	}
+	header := src[:headerEnd]
+	if !strings.Contains(header, "GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS") {
+		t.Fatalf("script header does not document GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS, unlike every other GC_DOLT_*_TIMEOUT_MS override:\n%s", header)
+	}
+
+	waitForSchema := extractShellFunction(t, src, "wait_for_bd_runtime_schema")
+	if !strings.Contains(waitForSchema, "GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS") {
+		t.Fatalf("wait_for_bd_runtime_schema does not read GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS, so the documented override in the header has no effect:\n%s", waitForSchema)
+	}
+	if !strings.Contains(waitForSchema, "120000") {
+		t.Fatalf("wait_for_bd_runtime_schema does not default the hard cap to >=120s (120000ms), the minimum the exit contract requires:\n%s", waitForSchema)
+	}
+}
+
+// TestGcBeadsBdInitConcurrentInvocationsDoNotBothForceReinit drives two real
+// op_init invocations against the same target Dolt database concurrently, as
+// separate OS processes, rather than the single-process call-counter
+// sequencing every other test in this file uses (including
+// TestGcBeadsBdInitRefusesForcedReinitWhenCursorAdvancesBetweenClassificationAndForce
+// above, which closes the gap between op_init's OWN revalidation and its OWN
+// force call within one process). That single-process fix does nothing for
+// this shape of race: nothing today serializes two SEPARATE op_init
+// processes against each other. Each classifies the same, still genuinely
+// empty database as absent, each revalidates against that same still-empty
+// database immediately before forcing, and each proceeds to force — because
+// neither process's revalidation can observe the other process's in-flight
+// force until that force has actually completed and mutated visible state.
+// Two concurrent `bd init --force` calls against one live database is the
+// corruption this whole guard exists to prevent (gastownhall/beads#4566).
+//
+// The two processes' fake dolt binaries share one on-disk "has anything
+// forced yet" marker, so a force by either process becomes visible, as
+// "present", to whichever process next queries after that force lands — the
+// same signal a real Dolt server would give a second initializer once the
+// first's `bd init` has actually created the schema. Pre-fix, both processes
+// still race past that signal: revalidation only re-checks currently visible
+// state, so if neither process's revalidation query happens to land after
+// the other's force, both see "still empty" and both force anyway. Post-fix,
+// a lock around the revalidate-through-force critical section should
+// serialize the two processes so the second one's revalidation cannot run
+// until the first one's force has already landed and mutated the shared
+// marker — at which point the second correctly reads "present" and refuses,
+// and exactly one of the two ever forces.
+//
+// The 150ms sleep in the fake dolt's schema_migrations-existence handler
+// (hit twice per process: once during classification, once during
+// revalidation) is deliberate. Without it, two freshly started OS processes
+// racing through a handful of stubbed, near-instant queries would overlap
+// only by luck, making the test flaky in either direction — including
+// "passing" pre-fix for the wrong reason, if process B never gets far enough
+// to query anything until after process A has already finished and forced.
+// The sleep widens every dolt round trip enough that both processes are
+// reliably still in-flight, concurrently, through their own classification
+// and revalidation, regardless of OS scheduling jitter — turning a
+// probabilistic race into a deterministic one.
+func TestGcBeadsBdInitConcurrentInvocationsDoNotBothForceReinit(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+
+	sharedDir := t.TempDir()
+	forcedMarker := filepath.Join(sharedDir, "forced")
+	markerA := filepath.Join(sharedDir, "bd-init-ran-a")
+	markerB := filepath.Join(sharedDir, "bd-init-ran-b")
+
+	binDir := filepath.Join(sharedDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Every bd init call records its own process's argv (via $INIT_MARKER,
+	// set differently per process below) and marks the shared database as
+	// forced, so a query landing after this point reads "present" no matter
+	// which of the two processes' dolt stub invocations answers it.
+	fakeBd := fmt.Sprintf(`#!/bin/sh
+set -eu
+if [ "${1:-}" = "init" ]; then
+  printf '%%s\n' "$@" > "$INIT_MARKER"
+  : > %q
+fi
+exit 0
+`, forcedMarker)
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(fakeBd), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Dispatches on the query text following -q, exactly like the other
+	// fakes in this file. Answers reflect "empty" until forcedMarker exists,
+	// then "present" (four tables, a migrations row, a readable config
+	// table) from then on — regardless of which process's stub is asked.
+	fakeDolt := fmt.Sprintf(`#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+case "$query" in
+  *"'issues'"*)
+    if [ -e %q ]; then
+      printf 'cnt\n4\n'
+    else
+      printf 'cnt\n0\n'
+    fi
+    exit 0
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    sleep 0.15
+    if [ -e %q ]; then
+      printf 'cnt\n1\n'
+    else
+      printf 'cnt\n0\n'
+    fi
+    exit 0
+    ;;
+  *"schema_migrations"*)
+    printf 'cur\n6\n'
+    exit 0
+    ;;
+  *"FROM config"*)
+    if [ -e %q ]; then
+      exit 0
+    fi
+    echo "table not found: config" >&2
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, forcedMarker, forcedMarker, forcedMarker)
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(fakeDolt), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	newCity := func() string {
+		t.Helper()
+		cityPath := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+			[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		materializeBuiltinPacksForTest(t, cityPath)
+		return cityPath
+	}
+	// Separate cities (as two worktrees of the same checkout would have),
+	// but the same target dolt_database ("hq") — the shape that actually
+	// bit the failing job: independent initializers, one shared backing
+	// store.
+	cityA := newCity()
+	cityB := newCity()
+	scriptA := gcBeadsBdScriptPath(cityA)
+	scriptB := gcBeadsBdScriptPath(cityB)
+
+	pathEnv := "PATH=" + strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator))
+
+	newCmd := func(script, cityPath, initMarker string) *exec.Cmd {
+		cmd := exec.Command(script, "init", cityPath, "gc", "hq")
+		cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
+			"GC_CITY_PATH="+cityPath,
+			pathEnv,
+			"INIT_MARKER="+initMarker,
+		)...)
+		return cmd
+	}
+
+	cmdA := newCmd(scriptA, cityA, markerA)
+	cmdB := newCmd(scriptB, cityB, markerB)
+	var outA, errA, outB, errB bytes.Buffer
+	cmdA.Stdout, cmdA.Stderr = &outA, &errA
+	cmdB.Stdout, cmdB.Stderr = &outB, &errB
+
+	// Started back-to-back, not sequenced: the sleep inside the dolt stub
+	// (not any coordination here) is what guarantees the overlap this test
+	// depends on.
+	if err := cmdA.Start(); err != nil {
+		t.Fatalf("start process A: %v", err)
+	}
+	if err := cmdB.Start(); err != nil {
+		t.Fatalf("start process B: %v", err)
+	}
+	waitErrA := cmdA.Wait()
+	waitErrB := cmdB.Wait()
+
+	forcedCount := 0
+	var forcedBy []string
+	if _, statErr := os.Stat(markerA); statErr == nil {
+		forcedCount++
+		forcedBy = append(forcedBy, "A")
+	}
+	if _, statErr := os.Stat(markerB); statErr == nil {
+		forcedCount++
+		forcedBy = append(forcedBy, "B")
+	}
+
+	if forcedCount > 1 {
+		t.Fatalf("both concurrent op_init processes force-reinitialized the same database (forced by: %v); "+
+			"only one process's revalidation should ever be allowed to observe \"still empty\" immediately before forcing — "+
+			"the other must see the first process's force and refuse\n"+
+			"process A (err=%v):\nstdout:\n%s\nstderr:\n%s\n"+
+			"process B (err=%v):\nstdout:\n%s\nstderr:\n%s",
+			forcedBy,
+			waitErrA, outA.String(), errA.String(),
+			waitErrB, outB.String(), errB.String())
+	}
+	if forcedCount == 0 {
+		t.Fatalf("neither concurrent op_init process force-reinitialized the database; the test's fakes did not exercise the force path at all\n"+
+			"process A (err=%v):\nstdout:\n%s\nstderr:\n%s\n"+
+			"process B (err=%v):\nstdout:\n%s\nstderr:\n%s",
+			waitErrA, outA.String(), errA.String(),
+			waitErrB, outB.String(), errB.String())
 	}
 }

@@ -32,6 +32,26 @@
 #       <data_dir>/<db>/.dolt/noms/LOCK) to be released before start/stop
 #       fail closed, in milliseconds (default: 60000). gc projects
 #       [dolt].dolt_lock_release_timeout from city.toml into this variable.
+#   GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS — wall-clock budget, in milliseconds
+#       (default: 120000), for how long wait_for_bd_runtime_schema will go
+#       between observed advances of a mid-migration database's
+#       schema_migrations cursor before giving up. The wait itself is
+#       progress-based, not a fixed attempt count or a total-wait ceiling:
+#       every observed advance pushes this budget forward again, so a live
+#       migration that keeps advancing -- however long it ultimately takes
+#       -- is waited out in full. Only a gap with no observed advance, once
+#       it reaches this cap (or the shorter STALL_BUDGET consecutive-attempt
+#       count), ends the wait early.
+#   GC_DOLT_INIT_LOCK_DIR — directory holding op_init's cross-process,
+#       per-database advisory locks that serialize a forced reinit's
+#       revalidate-then-force sequence (default: $TMPDIR or /tmp). Not
+#       under GC_CITY_PATH on purpose: two cities/worktrees that share one
+#       managed Dolt server can target the same dolt_database from
+#       different city paths, so the lock must resolve to the same file
+#       for both regardless of which city each process was invoked from.
+#   GC_DOLT_INIT_LOCK_TIMEOUT_MS — wait budget for that lock before op_init
+#       gives up on a concurrent initializer and fails closed instead of
+#       forcing unprotected, in milliseconds (default: 60000).
 
 set -e
 
@@ -45,6 +65,11 @@ DOLT_LOGLEVEL="${GC_DOLT_LOGLEVEL:-warning}"
 LSOF_TIMEOUT_SECONDS="${GC_LSOF_TIMEOUT_SECONDS:-2}"
 CONCURRENT_START_READY_TIMEOUT_MS="${GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS:-}"
 LOCK_RELEASE_TIMEOUT_MS="${GC_DOLT_LOCK_RELEASE_TIMEOUT_MS:-60000}"
+# Deliberately NOT derived from GC_CITY_PATH — see op_init's use of this for
+# why (two cities/worktrees sharing one managed Dolt server must resolve to
+# the same lock file despite having different city paths).
+INIT_LOCK_DIR="${GC_DOLT_INIT_LOCK_DIR:-${TMPDIR:-/tmp}/gc-beads-bd-init-locks}"
+INIT_LOCK_TIMEOUT_MS="${GC_DOLT_INIT_LOCK_TIMEOUT_MS:-60000}"
 BEADS_BACKEND="${GC_BEADS_BACKEND:-${BEADS_BACKEND:-dolt}}"
 
 # Probed once in the parent shell — dolt_data_lock_holder runs in $(...)
@@ -964,29 +989,73 @@ server_reachable() {
     server_sql "SELECT 1" >/dev/null 2>&1
 }
 
+# wait_for_bd_runtime_schema waits for bd's schema to become queryable in
+# database $1, tracking real migration progress instead of a fixed attempt
+# count or total-wait ceiling: each attempt re-reads the schema_migrations
+# cursor via bd_runtime_schema_cursor, and both the stall counter and the
+# GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS deadline reset whenever the cursor has
+# moved since the previous attempt. A slow-but-live concurrent migration
+# keeps resetting both and is waited out in full, however long it
+# ultimately takes; only a gap with no observed advance -- once it reaches
+# STALL_BUDGET consecutive attempts or the settle-timeout cap, whichever
+# comes first -- ends the wait early. The prior fixed 8-attempt/~4.5s
+# budget measured short against a real 66-migration run (7.19s unloaded,
+# worse under a saturated CI host) -- exactly the window that let a racing
+# initializer's database read as "missing schema" in ga-e2z1zb. A cursor
+# read that fails outright (bd_runtime_schema_cursor returns
+# non-numeric/empty) is treated as a stalled attempt rather than progress
+# -- there is no evidence of advancement to reset the counters on.
 wait_for_bd_runtime_schema() {
     local db="$1"
-    local attempt backoff_ms
+    local backoff_ms stalls last_cursor cursor cap_ms now deadline
+    local stall_budget=8
     [ -n "$db" ] || return 1
     valid_sql_name "$db" || return 1
 
+    cap_ms="${GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS:-120000}"
+    case "$cap_ms" in
+        ''|*[!0-9]*) cap_ms=120000 ;;
+    esac
+    now=$(date +%s 2>/dev/null) || now=0
+    deadline=$((now + cap_ms / 1000))
+
     backoff_ms=100
-    for attempt in 1 2 3 4 5 6 7 8; do
+    stalls=0
+    last_cursor=""
+    while :; do
         if bd_runtime_schema_ready "$db"; then
             return 0
         fi
-        if [ "$attempt" -lt 8 ]; then
-            sleep_ms "$backoff_ms" 2>/dev/null || sleep 1
-            if [ "$backoff_ms" -lt 1000 ]; then
-                backoff_ms=$((backoff_ms * 2))
-                if [ "$backoff_ms" -gt 1000 ]; then
-                    backoff_ms=1000
-                fi
+
+        cursor=$(bd_runtime_schema_cursor "$db") || cursor=""
+        case "$cursor" in
+            ''|*[!0-9]*) cursor="" ;;
+        esac
+        if [ -n "$cursor" ] && [ "$cursor" != "$last_cursor" ]; then
+            stalls=0
+            last_cursor="$cursor"
+            now=$(date +%s 2>/dev/null) || now=0
+            deadline=$((now + cap_ms / 1000))
+        else
+            stalls=$((stalls + 1))
+            if [ "$stalls" -ge "$stall_budget" ]; then
+                return 1
+            fi
+
+            now=$(date +%s 2>/dev/null) || now=0
+            if [ "$now" -ge "$deadline" ]; then
+                return 1
+            fi
+        fi
+
+        sleep_ms "$backoff_ms" 2>/dev/null || sleep 1
+        if [ "$backoff_ms" -lt 1000 ]; then
+            backoff_ms=$((backoff_ms * 2))
+            if [ "$backoff_ms" -gt 1000 ]; then
+                backoff_ms=1000
             fi
         fi
     done
-
-    return 1
 }
 
 # bd_runtime_bd_table_count prints how many of bd's own tables exist in the
@@ -1013,6 +1082,75 @@ bd_runtime_bd_table_count() {
     echo "$output" | tail -1 | tr -d '[:space:]'
 }
 
+# bd_runtime_schema_cursor prints the highest schema_migrations.version value
+# recorded in the database, or 0 if the schema_migrations table does not exist
+# yet. This is what tells a zero bd_runtime_bd_table_count apart from a
+# genuinely fresh (never-initialized) store: a concurrent initializer creates
+# schema_migrations and starts advancing its cursor before any of bd's own
+# tables (issues, comments, events, dependencies) exist, so a snapshot taken
+# in that window reads 0 tables yet is not empty. Returns 1 (printing
+# nothing) if either query fails or answers with something unparseable, so a
+# caller can tell "no migration in flight" from "could not tell" and treat
+# the latter as unknown rather than as zero.
+bd_runtime_schema_cursor() {
+    local db="$1"
+    local host exists_output exists cursor_output cursor
+    [ -n "$db" ] || return 1
+    valid_sql_name "$db" || return 1
+    host=$(connect_host)
+    exists_output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.tables WHERE table_schema = '$db' AND table_name = 'schema_migrations'" 2>/dev/null) || return 1
+    exists=$(echo "$exists_output" | tail -1 | tr -d '[:space:]')
+    case "$exists" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    if [ "$exists" -eq 0 ]; then
+        echo 0
+        return 0
+    fi
+    cursor_output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SELECT COALESCE(MAX(version), 0) AS cur FROM \`$db\`.schema_migrations" 2>/dev/null) || return 1
+    cursor=$(echo "$cursor_output" | tail -1 | tr -d '[:space:]')
+    case "$cursor" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    echo "$cursor"
+}
+
+# bd_runtime_schema_migration_count prints how many rows schema_migrations
+# holds, or 0 if the table does not exist yet. bd_runtime_store_holds_bd_tables
+# consults this as a third signal, after bd table count and the migration
+# cursor both read empty: a parked store -- no bd tables, no in-flight
+# migration -- can still carry real migration history left behind by a
+# migrator that has since exited, and that history must not be misread as a
+# genuinely fresh database (ga-m1qxc8). Returns 1 (printing nothing) on any
+# query failure, so a caller can treat "could not tell" as unknown rather
+# than as zero.
+bd_runtime_schema_migration_count() {
+    local db="$1"
+    local host exists_output exists count_output count
+    [ -n "$db" ] || return 1
+    valid_sql_name "$db" || return 1
+    host=$(connect_host)
+    exists_output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.tables WHERE table_schema = '$db' AND table_name = 'schema_migrations'" 2>/dev/null) || return 1
+    exists=$(echo "$exists_output" | tail -1 | tr -d '[:space:]')
+    case "$exists" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    if [ "$exists" -eq 0 ]; then
+        echo 0
+        return 0
+    fi
+    count_output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SELECT COUNT(*) AS cnt FROM \`$db\`.schema_migrations" 2>/dev/null) || return 1
+    count=$(echo "$count_output" | tail -1 | tr -d '[:space:]')
+    case "$count" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    echo "$count"
+}
+
 # bd_runtime_store_holds_bd_tables answers whether the database carries bd's own
 # tables, which is what decides whether `bd init --force` would create schema or
 # migrate over live rows. It has three answers and the call site needs all three:
@@ -1021,21 +1159,71 @@ bd_runtime_bd_table_count() {
 #      existing working set, and beads refuses to migrate any table holding
 #      uncommitted changes (gastownhall/beads#4566), so the reinit aborts city
 #      init instead of repairing anything.
-#   1  no, the database is empty. This is the genuinely-fresh store gc pre-seeds
-#      metadata.json for, and reinitializing it is exactly right.
-#   2  could not tell, because the query did not answer.
+#   1  no, the database is genuinely empty: zero bd tables, no schema_migrations
+#      cursor in progress, AND no migration history left behind in
+#      schema_migrations by a migrator that has since exited. This is the fresh
+#      store gc pre-seeds metadata.json for, and reinitializing it is exactly
+#      right. Zero bd tables with a nonzero cursor is NOT this case -- it means
+#      a concurrent initializer has created schema_migrations and started
+#      migrating but hasn't reached bd's own tables yet, and answers 0 here too
+#      (see below), never 1. Neither is zero bd tables with a settled (zero)
+#      cursor but rows still sitting in schema_migrations -- a parked store a
+#      migrator already finished with and exited (ga-m1qxc8) -- for the same
+#      reason: real prior state, not a fresh database.
+#   2  could not tell, because a query did not answer.
 #
 # Collapsing 2 into either of the others is the mistake this exists to prevent.
 # Folding it into 0 turns an unreadable count into a refusal to initialize a
 # fresh city; folding it into 1 re-creates the destructive guess this whole
-# guard was added to stop.
+# guard was added to stop. The same reasoning extends to the cursor and
+# migration-row-count reads: either one failing on a zero table count is
+# unknown (2), not empty, because there is no way to distinguish "fresh" from
+# "settled state the probe just misread" without both answering.
 bd_runtime_store_holds_bd_tables() {
-    local count
-    count=$(bd_runtime_bd_table_count "$1") || return 2
+    local db="$1"
+    local count cursor mig_count
+    count=$(bd_runtime_bd_table_count "$db") || return 2
     case "$count" in
         ''|*[!0-9]*) return 2 ;;
     esac
-    [ "$count" -gt 0 ]
+    if [ "$count" -gt 0 ]; then
+        return 0
+    fi
+    cursor=$(bd_runtime_schema_cursor "$db") || return 2
+    case "$cursor" in
+        ''|*[!0-9]*) return 2 ;;
+    esac
+    if [ "$cursor" -gt 0 ]; then
+        return 0
+    fi
+    mig_count=$(bd_runtime_schema_migration_count "$db") || return 2
+    case "$mig_count" in
+        ''|*[!0-9]*) return 2 ;;
+    esac
+    [ "$mig_count" -gt 0 ]
+}
+
+# bd_runtime_reinit_refusal_subject disambiguates the two live states that
+# bd_runtime_store_holds_bd_tables collapses into its single "not empty"
+# return code (0): bd's own tables are present, or the table count is still
+# zero but schema_migrations shows a cursor in flight (a concurrent
+# initializer that hasn't reached bd's tables yet). Echoes "tables" or
+# "migration" so a caller can choose the refusal message that actually
+# matches what is there. Re-queries the table count at the moment of the
+# call -- whatever produced the caller's classification is stale by however
+# long has passed since.
+bd_runtime_reinit_refusal_subject() {
+    local db="$1"
+    local table_count=""
+    table_count=$(bd_runtime_bd_table_count "$db" 2>/dev/null) || table_count=""
+    case "$table_count" in
+        ''|*[!0-9]*) table_count="" ;;
+    esac
+    if [ -n "$table_count" ] && [ "$table_count" -gt 0 ]; then
+        echo "tables"
+    else
+        echo "migration"
+    fi
 }
 
 # --- Robustness Helpers ---
@@ -3242,7 +3430,18 @@ op_init() {
                     if wait_for_bd_runtime_schema "$dolt_database"; then
                         schema_ready=true
                     elif [ "$holds_bd_tables" -eq 0 ]; then
-                        die "database '$dolt_database' holds bd tables but its bd schema stayed unreadable across retries; refusing to force-reinitialize (data-safety). a forced reinit re-runs migrations over the existing working set, which beads rejects when a table it migrates carries uncommitted changes (gastownhall/beads#4566). inspect the store with 'bd dolt status' before retrying."
+                        # holds_bd_tables=0 covers two distinct give-up states that
+                        # share one code: bd's own tables are present, or the table
+                        # count is still zero but schema_migrations shows a cursor in
+                        # flight (a concurrent initializer that hasn't reached bd's
+                        # tables yet). Ask which one now, at give-up time -- the
+                        # earlier read that produced holds_bd_tables is stale by
+                        # however long the wait just ran.
+                        if [ "$(bd_runtime_reinit_refusal_subject "$dolt_database")" = "tables" ]; then
+                            die "database '$dolt_database' holds bd tables but its bd schema stayed unreadable across retries; refusing to force-reinitialize (data-safety). a forced reinit re-runs migrations over the existing working set, which beads rejects when a table it migrates carries uncommitted changes (gastownhall/beads#4566). inspect the store with 'bd dolt status' before retrying."
+                        else
+                            die "database '$dolt_database' has a schema_migrations cursor in progress but it never settled; refusing to force-reinitialize (data-safety). this means a concurrent initializer is still migrating '$dolt_database', or a previous migration crashed mid-way. a forced reinit cannot succeed here -- beads refuses to auto-apply pending migrations to a database with existing history -- and would only corrupt the store further. wait for the concurrent init to finish, or inspect the stalled migration with 'bd dolt status' before retrying."
+                        fi
                     else
                         # Undetermined: the table count never answered, so there is
                         # no evidence either way. Keep the pre-existing behaviour
@@ -3300,6 +3499,51 @@ op_init() {
         seed_fresh_managed_bd_version_witness "$dir"
     fi
 
+    # The classification above (whichever branch set bd_init_force) can go
+    # stale before the force actually runs: ensure_database_registered and
+    # seed_fresh_managed_bd_version_witness both do real work in the gap
+    # between that decision and here, during which a concurrent initializer
+    # can create schema_migrations and start advancing its cursor. Revalidate
+    # immediately before forcing rather than acting on a read that is now
+    # however-old -- this is the same probe the classification above used,
+    # just re-run at the moment it actually matters.
+    if [ -n "$bd_init_force" ]; then
+        # Revalidating alone is not enough when the concurrent initializer
+        # is a SEPARATE OS process (e.g. a second city/worktree pointed at
+        # this same dolt_database): two processes can each revalidate
+        # "still empty" and each proceed to force, because neither
+        # process's revalidation can observe the other's in-flight force
+        # until that force has actually landed and mutated visible state
+        # (gastownhall/beads#4566). Take a cross-process advisory lock,
+        # keyed by dolt_database (the one thing guaranteed identical
+        # between such processes — GC_CITY_PATH is not) and rooted outside
+        # any single city's directory tree, so a second process's
+        # revalidation cannot even begin until the first's force (or
+        # refusal) has completed and made its outcome visible.
+        if [ "$FLOCK_AVAILABLE" != true ]; then
+            die "flock is required to safely force-reinitialize database '$dolt_database' (data-safety): without it, two concurrent initializers cannot be serialized and could both force a destructive reinit (gastownhall/beads#4566). Install: brew install flock (macOS) or apt install util-linux (Linux)"
+        fi
+        local init_lock_file="$INIT_LOCK_DIR/$dolt_database.lock"
+        local init_lock_timeout_s=$((INIT_LOCK_TIMEOUT_MS / 1000))
+        mkdir -p "$INIT_LOCK_DIR"
+        exec 8>"$init_lock_file"
+        if ! flock -w "$init_lock_timeout_s" 8; then
+            die "could not acquire init lock for database '$dolt_database' ($init_lock_file) within ${init_lock_timeout_s}s; a concurrent initializer may be stuck. inspect the store with 'bd dolt status' before retrying, or raise GC_DOLT_INIT_LOCK_TIMEOUT_MS."
+        fi
+
+        local reinit_still_empty=0
+        bd_runtime_store_holds_bd_tables "$dolt_database" || reinit_still_empty=$?
+        if [ "$reinit_still_empty" -eq 0 ]; then
+            if [ "$(bd_runtime_reinit_refusal_subject "$dolt_database")" = "tables" ]; then
+                die "database '$dolt_database' now holds bd tables that were not there moments ago; refusing to force-reinitialize (data-safety). a concurrent initializer completed between the freshness check and this forced reinit; forcing now would re-run migrations over its working set, which beads rejects when a table it migrates carries uncommitted changes (gastownhall/beads#4566). inspect the store with 'bd dolt status' before retrying."
+            else
+                die "database '$dolt_database' now has a schema_migrations cursor in progress that was not there moments ago; refusing to force-reinitialize (data-safety). a concurrent initializer started migrating '$dolt_database' between the freshness check and this forced reinit, and beads refuses to auto-apply pending migrations to a database with existing history. wait for the concurrent init to finish, or inspect the migration with 'bd dolt status' before retrying."
+            fi
+        elif [ "$reinit_still_empty" -eq 2 ]; then
+            echo "warning: could not confirm '$dolt_database' is still empty immediately before forcing; proceeding on the earlier classification" >&2
+        fi
+    fi
+
     # Run bd init in server mode through the pinned wrapper so the fallback
     # path uses the same authenticated Dolt target as the rest of init.
     # Metadata-only scopes already look initialized to bd, so schema-repair
@@ -3309,6 +3553,17 @@ op_init() {
     # database to initialize. Without `--database`, bd can seed beads_<prefix>
     # and leave the pinned database schema-less.
     run_bd_init_pinned "$dir" "$prefix" "$dolt_database" "$host" "${bd_init_force:+true}"
+
+    # Release the init lock (acquired above only when bd_init_force was
+    # set) promptly rather than holding it through the post-init
+    # verification below: once run_bd_init_pinned has returned, the
+    # database's schema is now genuinely present, so whichever process is
+    # next in line for this lock will see that in its own revalidation and
+    # correctly refuse to force again — it does not also need to wait out
+    # this process's own settle/verification below.
+    if [ -n "$bd_init_force" ]; then
+        exec 8>&-
+    fi
 
     # Re-register post-init: if bd init didn't catalog-register the DB
     # (server-mode quirk), do it now. After a successful bd init this is a
