@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -8,11 +9,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -71,6 +74,7 @@ type cityStatusSnapshot struct {
 	Agents            []cityStatusAgentRow
 	Rigs              []StatusRigJSON
 	NamedSessions     []cityStatusNamedSession
+	Orders            []cityStatusOrder
 	Partial           bool
 	PartialErrors     []string
 	Summary           StatusSummaryJSON
@@ -88,6 +92,31 @@ type cityStatusNamedSession struct {
 	Identity string
 	Status   string
 	Mode     string
+}
+
+// cityStatusOrder is one unhealthy order signal surfaced in gc status
+// without requiring gc doctor. Two distinct sources populate it: a firing- or
+// outcome-unhealthy order copies Name/Status/Severity/Message/Details
+// straight from that doctor check's own CheckResult
+// (Consecutive/FirstSuppressed left zero), while a gate-suppressed order sets
+// Name/Consecutive/FirstSuppressed from its events.OrderSuppressedPayload and
+// synthesizes Message, since no doctor check reads that event type.
+type cityStatusOrder struct {
+	Name     string
+	Status   doctor.CheckStatus
+	Severity doctor.CheckSeverity
+	Message  string
+	// Details is the check's own per-order breakdown, carried through
+	// verbatim. Both order checks summarize into a Message that names no
+	// order ("scheduled orders are stale"), so without this the row tells an
+	// operator nothing actionable and they have to run gc doctor anyway. It
+	// is the same list gc doctor --verbose prints, so it includes a line per
+	// monitored order rather than only the offending ones; the renderer caps
+	// it at cityStatusOrderDetailLimit. Empty for suppression rows, whose
+	// Name is already the order name.
+	Details         []string
+	Consecutive     int
+	FirstSuppressed string
 }
 
 type rigStatusCounts struct {
@@ -323,7 +352,120 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 		})
 	}
 
+	snapshot.Orders = collectCityStatusOrders(cfg, cityPath, stderr)
+
 	return snapshot
+}
+
+const (
+	// orderSuppressionEventTailLimit bounds how far back collectCityStatusOrders
+	// scans events.jsonl for events.OrderSuppressed. Mirrors internal/doctor's
+	// own orderFiringEventTailLimit (unexported, so not reusable directly): far
+	// enough back to catch an active suppression streak without scanning the
+	// whole log on a long-lived city.
+	orderSuppressionEventTailLimit = 2000
+
+	// orderSuppressionEventScanBytes bounds the backward walk itself, and it
+	// is the bound that actually binds here. A tail read stops early only
+	// once it has collected orderSuppressionEventTailLimit MATCHING events,
+	// so on the normal city — which has never emitted an order.suppressed at
+	// all — the match count never rises and the walk runs to byte 0,
+	// unmarshalling every line of a log that reaches hundreds of megabytes.
+	// A byte budget makes "no suppression in the recent window" cost a fixed
+	// read, which is the correct answer for a signal that re-emits at least
+	// once per orderOpenWorkSuppressionRepeat while it is live.
+	orderSuppressionEventScanBytes = 8 << 20
+
+	// orderSuppressionRecencyWindow drops suppression events too old to
+	// describe a live streak. clearOpenWorkSuppression deletes the in-memory
+	// streak silently — there is no recovery event — so the last
+	// order.suppressed line stays in the log forever and would otherwise
+	// produce its row forever. A live streak re-alerts every
+	// orderOpenWorkSuppressionRepeat, so a multiple of that interval cannot
+	// hide one: anything older is a streak that has already ended (or a
+	// controller that is no longer running the order at all).
+	orderSuppressionRecencyWindow = 3 * orderOpenWorkSuppressionRepeat
+
+	// cityStatusOrderDetailLimit caps the per-order detail lines printed
+	// under one Orders row. Both checks emit one detail per monitored order,
+	// so a large city would otherwise turn a two-line block into a wall.
+	cityStatusOrderDetailLimit = 20
+)
+
+// collectCityStatusOrders gathers the unhealthy-order signals gc status
+// surfaces without requiring gc doctor: the firing- and outcome-health
+// checks doctor already runs, copied straight from their own CheckResult so
+// the two commands can never disagree, plus the current open-work gate
+// suppression state (events.OrderSuppressed), which neither doctor check
+// reads.
+//
+// The firing-current check is wired with the same
+// doctor.WithOrderFiringCurrentLastRunFunc(doctorOrderFiringCurrentLastRunFunc(...))
+// option cmd_doctor.go's buildDoctorChecks uses (mirrored, not shared,
+// because the two live in different construction paths). Without it, an
+// order whose last firing falls outside the check's bounded events.jsonl
+// tail read has no fallback and gc status silently disagrees with gc
+// doctor, which does have the authoritative order-run-history lookup.
+func collectCityStatusOrders(cfg *config.City, cityPath string, stderr io.Writer) []cityStatusOrder {
+	var result []cityStatusOrder
+
+	checkCtx := &doctor.CheckContext{CityPath: cityPath}
+	for _, r := range []*doctor.CheckResult{
+		doctor.NewOrderFiringCurrentCheck(cfg, cityPath, doctor.WithOrderFiringCurrentLastRunFunc(doctorOrderFiringCurrentLastRunFunc(cityPath, cfg, stderr))).Run(checkCtx),
+		doctor.NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(checkCtx),
+	} {
+		if r.Status == doctor.StatusOK {
+			continue
+		}
+		result = append(result, cityStatusOrder{
+			Name:     r.Name,
+			Status:   r.Status,
+			Severity: r.Severity,
+			Message:  r.Message,
+			Details:  r.Details,
+		})
+	}
+
+	// Tail-read events.jsonl for recent OrderSuppressed events and keep only
+	// the most recent one per order name: the gate re-emits this event on
+	// every suppressed dispatch tick, so a live-stuck order can appear many
+	// times in the tail window and only its latest Consecutive/FirstSuppressed
+	// values reflect the current suppression state.
+	//
+	// The read is bounded twice, and neither bound can hide a live streak —
+	// see orderSuppressionEventScanBytes (the walk stops after a fixed number
+	// of bytes, because the match limit alone never stops it on a city with
+	// no suppression at all) and orderSuppressionRecencyWindow (recovery
+	// emits no event, so an old line would otherwise alert forever).
+	eventsPath := filepath.Join(cityPath, ".gc", "events.jsonl")
+	suppressionFilter := events.Filter{
+		Type:         events.OrderSuppressed,
+		Since:        time.Now().Add(-orderSuppressionRecencyWindow),
+		MaxScanBytes: orderSuppressionEventScanBytes,
+	}
+	suppressed, _ := events.ReadFilteredTail(eventsPath, suppressionFilter, orderSuppressionEventTailLimit) //nolint:errcheck // best-effort: a missing/unreadable events.jsonl just yields no suppression rows, matching the firing/outcome checks' own tolerance for an absent log
+	var suppressedRows []cityStatusOrder
+	suppressedIndex := make(map[string]int)
+	for _, e := range suppressed {
+		var payload events.OrderSuppressedPayload
+		if err := json.Unmarshal(e.Payload, &payload); err != nil {
+			continue
+		}
+		row := cityStatusOrder{
+			Name:            payload.OrderName,
+			Consecutive:     payload.Consecutive,
+			FirstSuppressed: payload.FirstSuppressed,
+			Message:         e.Message,
+		}
+		if idx, ok := suppressedIndex[payload.OrderName]; ok {
+			suppressedRows[idx] = row
+		} else {
+			suppressedIndex[payload.OrderName] = len(suppressedRows)
+			suppressedRows = append(suppressedRows, row)
+		}
+	}
+
+	return append(result, suppressedRows...)
 }
 
 func namedSessionStatusForCity(
@@ -614,6 +756,21 @@ func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.
 		fmt.Fprintln(stdout, "Named sessions:")
 		for _, named := range snapshot.NamedSessions {
 			fmt.Fprintf(stdout, "  %-24s%s (%s)\n", named.Identity, named.Status, named.Mode) //nolint:errcheck // best-effort stdout
+		}
+	}
+
+	if len(snapshot.Orders) > 0 {
+		fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
+		fmt.Fprintln(stdout, "Orders:")
+		for _, order := range snapshot.Orders {
+			fmt.Fprintf(stdout, "  %-24s%s\n", order.Name, order.Message) //nolint:errcheck // best-effort stdout
+			for i, detail := range order.Details {
+				if i == cityStatusOrderDetailLimit {
+					fmt.Fprintf(stdout, "    ... and %d more (gc doctor --verbose)\n", len(order.Details)-cityStatusOrderDetailLimit) //nolint:errcheck // best-effort stdout
+					break
+				}
+				fmt.Fprintf(stdout, "    %s\n", detail) //nolint:errcheck // best-effort stdout
+			}
 		}
 	}
 
