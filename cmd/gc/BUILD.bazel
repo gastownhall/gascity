@@ -1104,6 +1104,7 @@ go_test(
         "lifecycle_coordination_test.go",
         "lifecycle_live_query_test.go",
         "load_city_config_snapshot_test.go",
+        "mail_inject_newest_window_test.go",
         "main_scope_symlink_test.go",
         "main_test.go",
         "maintenance_startup_test.go",
