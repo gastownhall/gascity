@@ -26,6 +26,26 @@ not describe a target as an existing gate.
 | Large/E2E ownership and cadence | Target; the executable manifest is owned by `ga-80po0c.6` |
 | First-attempt flake and quarantine policy | Target; required Playwright retry and legacy unledgered skips remain noncompliant debt under `ga-80po0c` |
 
+## Bazel: the fast feedback loop for agents
+
+Everything below describes the `go test` policy that CI enforces. For
+day-to-day iteration, agents should prefer the **Bazel side-by-side
+suite**: same tests, remote-cached, shared across worktrees and CI:
+
+```bash
+bazel test //...          # full suite; ~0.6s on a warm cache
+bazel test //internal/X   # one package while iterating
+```
+
+The first run costs the same as `go test`; every later run is a cache
+hit because the remote CAS is shared fleet-wide. A test that passed on
+CI does not re-execute locally. After changing imports or adding
+packages, run `make bazel-sync` and commit the regenerated BUILD files
+(the CI sync gate checks this).
+
+See `engdocs/bazel-quickstart.md` for local setup and
+`engdocs/bazel-ci-budget.md` for the CI optimization loop.
+
 ## The outcome: protected PR feedback in under five minutes
 
 The developer-visible service-level objective is p95 **under five minutes**

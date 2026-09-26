@@ -110,6 +110,7 @@ go_test(
         "//internal/beads/beadstest",
         "//internal/convergence",
         "//internal/events",
+        "//internal/execenv",
         "//internal/fsys",
         "//internal/processgroup/processgrouptest",
         "//internal/testenv",
