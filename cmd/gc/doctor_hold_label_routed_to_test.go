@@ -218,3 +218,99 @@ type holdLabelListErrorStore struct {
 func (s holdLabelListErrorStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	return nil, errors.New("listing failed")
 }
+
+// TestHoldLabelRoutedToBindingQualifiedRouteSatisfiesBothChecks is the
+// regression for the two checks disagreeing: on a PackV2 city the hold label carries the short
+// agent name (hold:mayor) while gc.routed_to carries the binding-qualified one
+// (gastown.mayor). Before the fix the two doctor checks disagreed about the
+// same bead — hold-label-routed-to demanded "mayor", v2-routed-to-namespace
+// demanded "gastown.mayor" — so a blanket `gc doctor --fix` rewrote every held
+// bead back and forth on every run, and in the window between the two fixes
+// the beads were invisible to the routed_to queries that hook and sling use.
+// Both checks must report OK on the same bead.
+func TestHoldLabelRoutedToBindingQualifiedRouteSatisfiesBothChecks(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Agents: []config.Agent{{Name: "mayor", BindingName: "gastown"}}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{
+		ID: "H-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:mayor"},
+		Metadata: map[string]string{"gc.routed_to": "gastown.mayor"},
+	}}, nil)
+	factory := func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	}
+
+	holdRes := newHoldLabelRoutedToCheck(cfg, cityDir, factory).Run(&doctor.CheckContext{})
+	if holdRes.Status != doctor.StatusOK {
+		t.Errorf("hold-label-routed-to = %v, want OK on a binding-qualified route: %#v", holdRes.Status, holdRes)
+	}
+	nsRes := newV2RoutedToNamespaceCheck(cfg, cityDir, factory).Run(&doctor.CheckContext{})
+	if nsRes.Status != doctor.StatusOK {
+		t.Errorf("v2-routed-to-namespace = %v, want OK on a binding-qualified route: %#v", nsRes.Status, nsRes)
+	}
+}
+
+// TestHoldLabelRoutedToFixWritesBindingQualifiedForm covers the other half:
+// when a held bead genuinely has drifted, --fix must persist the
+// form the city routes on (gastown.mayor), not the bare label value. Writing
+// "mayor" would leave v2-routed-to-namespace red and hand the bead straight
+// back to the flapping loop, so a second pass of both checks must be clean.
+func TestHoldLabelRoutedToFixWritesBindingQualifiedForm(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "mayor", BindingName: "gastown"},
+		// Ambiguous: two bound agents share the short name "qa-lead", so no
+		// single rewrite target exists and Fix falls back to the label value.
+		{Name: "qa-lead", BindingName: "gastown"},
+		{Name: "qa-lead", BindingName: "othertown"},
+	}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "H-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:mayor"}},
+		{ID: "H-2", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:qa-lead"}},
+	}, nil)
+	factory := func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	}
+
+	check := newHoldLabelRoutedToCheck(cfg, cityDir, factory)
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+
+	h1, err := store.Get("H-1")
+	if err != nil {
+		t.Fatalf("get H-1: %v", err)
+	}
+	if got := h1.Metadata["gc.routed_to"]; got != "gastown.mayor" {
+		t.Errorf("H-1 gc.routed_to = %q, want gastown.mayor (binding-qualified form)", got)
+	}
+	h2, err := store.Get("H-2")
+	if err != nil {
+		t.Fatalf("get H-2: %v", err)
+	}
+	if got := h2.Metadata["gc.routed_to"]; got != "qa-lead" {
+		t.Errorf("H-2 gc.routed_to = %q, want qa-lead (ambiguous binding, left for manual resolution)", got)
+	}
+
+	// No flapping: after one Fix the unambiguous bead satisfies both checks,
+	// so neither has anything left to rewrite on it. H-2 stays flagged by
+	// v2-routed-to-namespace — an ambiguous short form is exactly what that
+	// check reports for manual resolution, and silencing it is not this
+	// fix's job.
+	if res := check.Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Errorf("post-fix hold-label-routed-to = %v, want OK: %#v", res.Status, res)
+	}
+	nsRes := newV2RoutedToNamespaceCheck(cfg, cityDir, factory).Run(&doctor.CheckContext{})
+	nsDetails := strings.Join(nsRes.Details, "\n")
+	if strings.Contains(nsDetails, "H-1") {
+		t.Errorf("post-fix v2-routed-to-namespace still flags H-1 — the two checks disagree:\n%s", nsDetails)
+	}
+	if !strings.Contains(nsDetails, "H-2") {
+		t.Errorf("post-fix v2-routed-to-namespace should still flag ambiguous H-2:\n%s", nsDetails)
+	}
+}
