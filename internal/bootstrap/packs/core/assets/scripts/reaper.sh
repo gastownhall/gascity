@@ -1470,13 +1470,22 @@ EOF
                 TOTAL=0
                 while true; do
                     RAW=$(dolt_sql -r csv -q "USE \`${CITY_DB}\`; SELECT id FROM issues WHERE issue_type='session' AND status='closed' AND closed_at < DATE_SUB(NOW(), INTERVAL ${SESSION_AGE_H} HOUR) LIMIT 500;") 2>/dev/null || break
-                    BATCH_IDS=$(printf '%s\n' "$RAW" | tail -n +2 | grep -v '^$')
+                    # `|| true` matters: with set -e, an empty result set makes
+                    # grep -v exit 1 and kills the whole reaper. The SELECT
+                    # returns just its CSV header once the backlog is drained,
+                    # which is the steady state a working prune produces, so the
+                    # loop would abort on the pass after its final batch --
+                    # before TOTAL_SESSIONS_PRUNED, the terminal session-state
+                    # prune, the summary or the anomaly report. The grep -c on
+                    # the next line is already guarded the same way.
+                    BATCH_IDS=$(printf '%s\n' "$RAW" | tail -n +2 | grep -v '^$' || true)
                     BATCH_COUNT=$(printf '%s\n' "$BATCH_IDS" | grep -c . || true)
                     [ "$BATCH_COUNT" -gt 0 ] || break
                     SQL_IDS=$(printf '%s\n' "$BATCH_IDS" | sed "s/.*/'&'/" | tr '\n' ',' | sed 's/,$//')
                     dolt_sql -r csv -q "USE \`${CITY_DB}\`;
 DELETE FROM labels WHERE issue_id IN (${SQL_IDS});
-DELETE FROM dependencies WHERE issue_id IN (${SQL_IDS}) OR depends_on_issue_id IN (${SQL_IDS});
+DELETE FROM dependencies WHERE issue_id IN (${SQL_IDS});
+DELETE FROM dependencies WHERE depends_on_issue_id IN (${SQL_IDS});
 DELETE FROM issues WHERE id IN (${SQL_IDS});
 CALL DOLT_COMMIT('-A', '-m', 'reaper: session_beads_pruned=${BATCH_COUNT} type=session age>${SESSION_AGE_H}h', '--author', 'reaper <reaper@gascity.local>');" >/dev/null \
                         || { record_anomaly "session" "SQL cascade failed at offset $TOTAL"; break; }
