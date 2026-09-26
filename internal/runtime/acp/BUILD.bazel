@@ -5,9 +5,11 @@ go_library(
     srcs = [
         "acp.go",
         "activity_publisher.go",
+        "agent_requests.go",
         "conn.go",
         "cutover.go",
         "lifecycle_lock.go",
+        "permission.go",
         "protocol.go",
         "seams.go",
     ],
@@ -24,7 +26,9 @@ go_test(
     srcs = [
         "acp_test.go",
         "activity_test.go",
+        "agent_requests_test.go",
         "meta_privacy_test.go",
+        "permission_test.go",
         "pipe_error_test.go",
         "protocol_test.go",
         "seams_test.go",

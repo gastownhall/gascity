@@ -828,6 +828,9 @@ func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, im
 		recordCtx = context.Background()
 	}
 	telemetry.RecordNudge(recordCtx, sessName, err)
+	if errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction) {
+		return fmt.Errorf("%w: %w", ErrPendingInteraction, err)
+	}
 	if err != nil {
 		return fmt.Errorf("sending message to session: %w", err)
 	}
@@ -1177,6 +1180,9 @@ func (m *Manager) Respond(id string, response runtime.InteractionResponse) error
 			if errors.Is(err, runtime.ErrSessionNotFound) {
 				log.Printf("session: respond runtime session gone for %q: %v", sessName, err)
 				return ErrNoPendingInteraction
+			}
+			if errors.Is(err, runtime.ErrInteractionResponseInvalid) {
+				return fmt.Errorf("%w: %w", ErrInteractionMismatch, err)
 			}
 			return fmt.Errorf("responding to pending interaction: %w", err)
 		}

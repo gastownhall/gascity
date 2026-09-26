@@ -247,6 +247,7 @@ go_library(
 go_test(
     name = "api_test",
     srcs = [
+        "acp_permission_stream_test.go",
         "agent_resolution_test.go",
         "apierr_guard_test.go",
         "apierr_roundtrip_test.go",
@@ -490,6 +491,7 @@ go_test(
         "//internal/rollout",
         "//internal/runproj",
         "//internal/runtime",
+        "//internal/runtime/acp",
         "//internal/runtime/auto",
         "//internal/session",
         "//internal/sessionlog",
