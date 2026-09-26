@@ -34,6 +34,8 @@ SPIKE_THRESHOLD="${GC_JSONL_SPIKE_THRESHOLD:-20}"  # percentage (0-100)
 # data while suppressing stand-up flares. Set to 0 to disable.
 MIN_PREV_FOR_SPIKE_CHECK="${GC_JSONL_MIN_PREV_FOR_SPIKE:-100}"
 MAX_PUSH_FAILURES="${GC_JSONL_MAX_PUSH_FAILURES:-3}"
+MAX_REPACK_FAILURES="${GC_JSONL_MAX_REPACK_FAILURES:-3}"
+REPACK_LOOSE_CEILING="${GC_JSONL_REPACK_LOOSE_CEILING:-512}"
 PUSH_RETRY_DELAY_MIN="${GC_JSONL_PUSH_RETRY_DELAY_MIN:-1}"
 PUSH_RETRY_DELAY_SPAN="${GC_JSONL_PUSH_RETRY_DELAY_SPAN:-4}"
 SCRUB="${GC_JSONL_SCRUB:-true}"
@@ -697,6 +699,124 @@ commit_archive_snapshot() {
         echo "jsonl-export: $context commit failed" >&2
         return 1
     fi
+    # Every snapshot commit leaves one new loose blob per exported store (a
+    # full issues.jsonl, tens of MiB each) and nothing in this script ever
+    # repacked the archive; git only runs its own gc --auto from commands this
+    # script never calls (merge, rebase, receive-pack). Measured 2026-09-23 on
+    # the Cherub town: 5,333 loose objects, 7.48 GiB, against a 160 MiB pack
+    # last written 20 days earlier — the archive was the city's largest disk
+    # consumer while its packed content was a few hundred MiB. Repack on the
+    # commit path, bounded: gc.auto=256 fires roughly every ~128 commits, so
+    # each repack handles a few hundred MiB, not the whole history; autoDetach
+    # off so the repack finishes inside this order's own run instead of a
+    # detached child that outlives it. Never fatal: the snapshot is already
+    # committed, and a failed repack costs disk, not data. Never silent either:
+    # a repack that keeps failing is exactly the unbounded growth this call
+    # exists to stop, so failures are counted in state and escalated.
+    # Exit status alone is not proof: gc --auto returns 0 without packing when
+    # a previous auto-gc left .git/gc.log (it then skips for gc.logExpiry), or
+    # when the pack directory is unusable. So the post-condition is checked
+    # too: after gc, loose objects must be at or below REPACK_LOOSE_CEILING
+    # (default twice the gc.auto trigger, so a correctly skipped gc below the
+    # trigger never counts as a failure).
+    # Every read below is guarded: under set -euo pipefail an unguarded
+    # failing substitution would end the whole export here, before the
+    # failure is recorded and before the snapshot is marked for push.
+    local repack_err
+    local repack_rc=0
+    local count_out
+    local loose
+    local git_dir
+    local gc_log
+    repack_err=$(git -c gc.auto=256 -c gc.autoDetach=false gc --auto --quiet 2>&1 >/dev/null) || repack_rc=$?
+    count_out=$(git count-objects -v 2>&1) || count_out="count-objects failed: $count_out"
+    loose=$(printf '%s\n' "$count_out" | awk '/^count:/ {print $2}')
+    case "$loose" in ''|*[!0-9]*) loose="" ;; esac
+    if [ "$repack_rc" -eq 0 ] && [ -n "$loose" ] && [ "$loose" -le "$REPACK_LOOSE_CEILING" ]; then
+        record_archive_repack_success
+        return 0
+    fi
+    if [ -z "$loose" ]; then
+        repack_err="$repack_err
+$count_out"
+    fi
+    git_dir=$(git rev-parse --git-dir 2>/dev/null) || git_dir=".git"
+    gc_log="$git_dir/gc.log"
+    if [ -f "$gc_log" ]; then
+        repack_err="$repack_err
+.git/gc.log: $(head -c 400 "$gc_log")"
+    fi
+    record_archive_repack_failure "exit=$repack_rc loose_objects=${loose:-unknown} (ceiling $REPACK_LOOSE_CEILING)
+$repack_err"
+    return 0
+}
+
+# Clear the repack failure streak. Writes state only when there is a streak
+# to clear, so the common path (gc --auto finds nothing to do) costs no write.
+record_archive_repack_success() {
+    local state_json
+    state_json=$(read_state_json)
+    if [ "$(printf '%s\n' "$state_json" | jq -r '(.consecutive_repack_failures // 0) > 0 or has("last_repack_stderr") or has("repack_failure_escalated")')" != "true" ]; then
+        return 0
+    fi
+    write_state_json "$(printf '%s\n' "$state_json" | jq -c 'del(.consecutive_repack_failures) | del(.last_repack_stderr) | del(.repack_failure_escalated)')"
+}
+
+# Count a failed repack and escalate once per failure streak when the count
+# reaches MAX_REPACK_FAILURES. gc --auto is a no-op below the loose-object
+# threshold, so a failure only happens when a repack was actually due, and
+# every later commit retries it: a streak means the archive is growing.
+record_archive_repack_failure() {
+    local stderr_context="$1"
+    local consecutive
+    local already_escalated
+    local stderr_display
+    local body
+
+    echo "jsonl-export: archive repack failed (non-fatal; loose objects keep accumulating until it succeeds)" >&2
+    consecutive=$(read_state_json | jq -r '.consecutive_repack_failures // 0' || echo "0")
+    consecutive=$((consecutive + 1))
+    write_state_json "$(
+        read_state_json \
+            | jq -c \
+                --argjson count "$consecutive" \
+                --arg stderr "$(truncate_push_stderr_for_state "$stderr_context")" \
+                '.consecutive_repack_failures = $count
+                 | if $stderr == "" then del(.last_repack_stderr) else .last_repack_stderr = $stderr end'
+    )"
+
+    already_escalated=$(read_state_json | jq -r '.repack_failure_escalated // false' || echo "false")
+    if [ "$consecutive" -lt "$MAX_REPACK_FAILURES" ] || [ "$already_escalated" = "true" ]; then
+        return 0
+    fi
+    stderr_display=$(truncate_stderr_context "$stderr_context")
+    if [ -z "$stderr_display" ]; then
+        stderr_display="(no stderr captured)"
+    fi
+    body=$(cat <<ESCALATION
+Order: jsonl-export
+Archive: $ARCHIVE_REPO
+Consecutive repack failures: $consecutive (threshold: $MAX_REPACK_FAILURES)
+
+Last git gc stderr:
+$stderr_display
+
+Every snapshot commit adds full-size loose blobs; until a repack succeeds the
+archive grows by tens of MiB per commit.
+
+Remediation:
+- Check free disk and the loose-object count: git -C $ARCHIVE_REPO count-objects -vH
+- Run the repack by hand to see the full error: git -C $ARCHIVE_REPO gc
+- Temporarily suppress: export GC_JSONL_MAX_REPACK_FAILURES=99
+ESCALATION
+)
+    if "$ESCALATE_SCRIPT" \
+        --subject "ESCALATION: JSONL archive repack failing [HIGH]" \
+        --message "$body" \
+        2>/dev/null; then
+        write_state_json "$(read_state_json | jq -c '.repack_failure_escalated = true')"
+    fi
+    return 0
 }
 
 discard_failed_db_outputs() {
