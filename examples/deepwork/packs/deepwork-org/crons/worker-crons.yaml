@@ -1,0 +1,42 @@
+# Worker Crons — auto-installed on mesh join
+# These run inside worker containers/nodes.
+# Variables: $GT_ROOT resolves to the GT workspace root.
+#
+# On install, cron-audit.sh reads this file and writes the crontab.
+# On daily audit, cron-audit.sh ensures crontab matches this definition.
+
+role: "worker"
+requires:
+  - cron  # apt-get install -y cron
+  - bash
+
+crons:
+  worker-mesh-sync:
+    schedule: "*/2 * * * *"
+    script: "mesh-sync.sh"
+    log: "/tmp/mesh-sync.log"
+    purpose: "Mesh heartbeat + DoltHub sync"
+
+  worker-inbox-check:
+    schedule: "*/5 * * * *"
+    script: "mesh-inbox.sh"
+    log: "/tmp/mesh-inbox.log"
+    purpose: "Check inbox for work assignments from coordinator"
+
+  worker-watchdog:
+    schedule: "*/5 * * * *"
+    script: "mesh-work-watchdog.sh"
+    log: "/tmp/mesh-watchdog.log"
+    purpose: "Check for stale claims, idle sessions, restart if needed"
+
+  worker-autosync-digest:
+    schedule: "0 */2 * * *"
+    script: "mesh-auto-sync.sh digest"
+    log: "/tmp/mesh-autosync.log"
+    purpose: "Broadcast activity digest to coordinator"
+
+  worker-cron-audit:
+    schedule: "0 6 * * *"
+    script: "cron-audit.sh --enforce"
+    log: "/tmp/cron-audit.log"
+    purpose: "Daily audit: ensure crontab matches registry"

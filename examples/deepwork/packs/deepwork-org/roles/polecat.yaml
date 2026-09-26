@@ -1,0 +1,23 @@
+# Polecat — Disposable worker
+name: polecat
+scope: rig
+description: "Disposable coding worker. Spawned per-bead via gt sling. Works in isolated worktree. Exits when done — no idle state."
+work_dir: "{{.TownRoot}}/{{.Rig}}/polecats/{{.Name}}"
+
+responsibilities:
+  - implement_code       # Read bead, write code, commit
+  - run_tests            # Self-review before submitting
+  - push_branch          # Push to Gitea for refinery
+  - close_bead           # Mark work complete
+
+restrictions:
+  - never_merge_own_work  # Refinery handles merge
+  - never_push_to_main
+  - never_create_new_beads  # Stay scoped to assigned work
+  - exit_when_done        # No idle state — done means gone
+
+lifecycle:
+  spawn: "gt sling <bead> <rig>"
+  formula: "mol-polecat-commit or mol-polecat-work"
+  exit: "gc runtime drain-ack"
+  crash_recovery: "witness detects, rescues worktree, re-slings"
