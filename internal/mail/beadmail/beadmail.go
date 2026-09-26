@@ -446,7 +446,7 @@ func (p *Provider) ArchiveCandidates(filter ArchiveFilter) ([]mail.Message, erro
 	}
 	matches := make([]mail.Message, 0, len(candidates))
 	for _, b := range candidates {
-		if b.Status != "open" {
+		if !beads.IsOpenStatus(b.Status) {
 			continue
 		}
 		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
@@ -642,7 +642,7 @@ func (p *Provider) CheckAutoHandoffs(recipients []string) ([]mail.Message, error
 	}
 	var messages []mail.Message
 	for _, b := range candidates {
-		if b.Status != "open" ||
+		if !beads.IsOpenStatus(b.Status) ||
 			(len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee)) ||
 			hasLabel(b.Labels, "read") ||
 			!hasLabel(b.Labels, mail.AutoHandoffLabel) ||
@@ -752,7 +752,7 @@ func beadmailError(operation string, err error) error {
 // preserves that pre-sweep addressability while still hiding genuinely
 // user-removed beads.
 func isRemovedMessageBead(b beads.Bead) bool {
-	if b.Type != messageBeadType || b.Status == "open" {
+	if b.Type != messageBeadType || beads.IsOpenStatus(b.Status) {
 		return false
 	}
 	// Retention-swept mail is system-aged, not user-removed; it stays
@@ -819,7 +819,7 @@ func (p *Provider) Thread(id string) ([]mail.Message, error) {
 	}
 	msgs := make([]mail.Message, 0, len(bs))
 	for _, b := range bs {
-		if b.Status != "open" {
+		if !beads.IsOpenStatus(b.Status) {
 			// Thread listings show only open messages, matching the list views
 			// and the pre-removal List-without-IncludeClosed behavior: a closed
 			// message bead — whether a legacy close-on-archive remnant or a
@@ -857,7 +857,7 @@ func (p *Provider) CountRecipients(recipients []string) (int, int, error) {
 	}
 	var total, unread int
 	for _, b := range candidates {
-		if b.Status != "open" {
+		if !beads.IsOpenStatus(b.Status) {
 			continue
 		}
 		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
@@ -887,7 +887,7 @@ func (p *Provider) filterMessagesForRecipients(recipients []string, includeRead 
 	}
 	var msgs []mail.Message
 	for _, b := range candidates {
-		if b.Status != "open" {
+		if !beads.IsOpenStatus(b.Status) {
 			continue
 		}
 		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
@@ -969,7 +969,7 @@ func SweepReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int,
 		if limit > 0 && closed >= limit {
 			break
 		}
-		if b.Status != "open" {
+		if !beads.IsOpenStatus(b.Status) {
 			continue
 		}
 		if err := store.SetMetadata(b.ID, "close_reason", closeReason); err != nil {
@@ -999,7 +999,7 @@ func CountReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int)
 		if limit > 0 && count >= limit {
 			break
 		}
-		if b.Status != "open" {
+		if !beads.IsOpenStatus(b.Status) {
 			continue
 		}
 		count++

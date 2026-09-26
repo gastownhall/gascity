@@ -236,8 +236,8 @@ func TestPoolIdleRoutedWorkCheckFixIsNoop(t *testing.T) {
 }
 
 // poolIdleRoutedWorkBlockedStore models the production routed-work read for a
-// bead that is blocked in the BACKING store. mapBdStatus collapses bd's blocked
-// status into Gas City's "open", so a non-Live read returns it (routedCollapsed)
+// bead that is blocked in the BACKING store. bd's blocked status is a member of
+// Gas City's open SET, so a non-Live read returns it (routedCollapsed)
 // while a Live read reaches bd's raw --status=open filter and excludes it
 // (routedLive). Only the routed-work query carries a metadata filter; the
 // session enumeration is label-only and delegates to the embedded store, as do

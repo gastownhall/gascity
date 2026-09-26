@@ -65,6 +65,48 @@ func TestConvoyCreateAndGet(t *testing.T) {
 	}
 }
 
+// TestConvoyGetCrossRigTracksResolveLiveStatus pins sc-uhhvkd: a tracked
+// member living in a different rig's store than the convoy's own must
+// resolve to that store's authoritative current status, not the unresolved
+// "unknown" placeholder convoycore reports for a class the caller never
+// named.
+func TestConvoyGetCrossRigTracksResolveLiveStatus(t *testing.T) {
+	state := newFakeMutatorState(t)
+	otherRig := beads.NewMemStore()
+	otherRig.IDPrefix = "other"
+	state.stores["otherrig"] = otherRig
+	h := newTestCityHandler(t, state)
+
+	store := state.stores["myrig"]
+	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	item, err := otherRig.Create(beads.Bead{Title: "other rig task"})
+	if err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+	if err := store.DepAdd(convoy.ID, item.ID, "tracks"); err != nil {
+		t.Fatal(err)
+	}
+	if err := otherRig.Close(item.ID); err != nil {
+		t.Fatalf("close item: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/convoy/")+convoy.ID, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	var getResp convoyGetResponse
+	if err := json.NewDecoder(rec.Body).Decode(&getResp); err != nil {
+		t.Fatalf("decode get: %v", err)
+	}
+	if len(getResp.Children) != 1 || getResp.Children[0].ID != item.ID || getResp.Children[0].Status != "closed" {
+		t.Fatalf("children = %+v, want the cross-rig tracked item %s rendered with its live closed status", getResp.Children, item.ID)
+	}
+	if getResp.Progress == nil || getResp.Progress.Closed != 1 || getResp.Progress.Total != 1 {
+		t.Fatalf("progress = %+v, want 1/1 closed", getResp.Progress)
+	}
+}
+
 func TestConvoyCreateInvalidItem(t *testing.T) {
 	state := newFakeMutatorState(t)
 	h := newTestCityHandler(t, state)
@@ -271,6 +313,55 @@ func TestConvoyCheckTracksItems(t *testing.T) {
 	}
 	if resp.Complete {
 		t.Error("complete = true, want false")
+	}
+}
+
+// TestConvoyCheckCrossRigTrackedChildMustCloseToComplete pins sc-uhhvkd:
+// check must resolve a tracked member from another rig's authoritative
+// current store, and refuse Complete until that unique authoritative child
+// is terminal too.
+func TestConvoyCheckCrossRigTrackedChildMustCloseToComplete(t *testing.T) {
+	state := newFakeMutatorState(t)
+	otherRig := beads.NewMemStore()
+	otherRig.IDPrefix = "other"
+	state.stores["otherrig"] = otherRig
+	h := newTestCityHandler(t, state)
+
+	store := state.stores["myrig"]
+	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	item, err := otherRig.Create(beads.Bead{Title: "other rig task"})
+	if err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+	if err := store.DepAdd(convoy.ID, item.ID, "tracks"); err != nil {
+		t.Fatal(err)
+	}
+
+	check := func() convoyCheckResponse {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/convoy/")+convoy.ID+"/check", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("check: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+		}
+		var resp convoyCheckResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode check: %v", err)
+		}
+		return resp
+	}
+
+	resp := check()
+	if resp.Total != 1 || resp.Closed != 0 || resp.Complete {
+		t.Fatalf("resp = %+v, want total=1 closed=0 complete=false while the cross-rig child is open", resp)
+	}
+
+	if err := otherRig.Close(item.ID); err != nil {
+		t.Fatalf("close item: %v", err)
+	}
+
+	resp = check()
+	if resp.Total != 1 || resp.Closed != 1 || !resp.Complete {
+		t.Fatalf("resp = %+v, want total=1 closed=1 complete=true once the cross-rig child closed", resp)
 	}
 }
 

@@ -80,9 +80,9 @@ func TestBindNamedSessionTriggerBead_ClearsStampWhenTargetBlocked(t *testing.T) 
 
 // TestBindNamedSessionTriggerBead_ClearsStampWhenTargetDependencyBlocked is
 // the production-shaped gascity#4373 repro. Through BdStore/DoltLite/
-// NativeDolt, mapBdStatus folds bd's raw `blocked` into "open", so the parked
-// target this reconciler actually sees is `open` + IsBlocked=true — bd's
-// denormalized ready-work projection. The stamp must clear on that shape, not
+// NativeDolt, a dependency-blocked bead keeps bd's raw status `open`, so the
+// parked target this reconciler actually sees is `open` + IsBlocked=true —
+// bd's denormalized ready-work projection. The stamp must clear on that shape, not
 // only on the literal status a MemStore fixture can hand back.
 func TestBindNamedSessionTriggerBead_ClearsStampWhenTargetDependencyBlocked(t *testing.T) {
 	mem := beads.NewMemStore()
