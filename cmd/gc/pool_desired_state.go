@@ -238,7 +238,7 @@ func ComputePoolDesiredStatesAt(
 	scaleCheckCounts map[string]int,
 	decisionTime time.Time,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, decisionTime, nil)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil, decisionTime, nil)
 }
 
 func ComputePoolDesiredStatesTraced(
@@ -261,7 +261,7 @@ func ComputePoolDesiredStatesTracedAt(
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, decisionTime, trace)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil, decisionTime, trace)
 }
 
 func ComputePoolDesiredStatesWithDemandTraced(
@@ -277,16 +277,21 @@ func ComputePoolDesiredStatesWithDemandTraced(
 
 // ComputePoolDesiredStatesWithDemandTracedAt computes traced pool demand at a
 // caller-supplied decision time while preserving per-work demand provenance.
+// readyAssigned, when non-nil, is index-aligned to assignedWorkBeads and
+// reports whether each bead's upstream readiness has been confirmed; nil
+// preserves the historical fail-open behavior for callers with no readiness
+// data available.
 func ComputePoolDesiredStatesWithDemandTracedAt(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
+	readyAssigned []bool,
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, trace)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, readyAssigned, decisionTime, trace)
 }
 
 func computePoolDesiredStates(
@@ -297,7 +302,7 @@ func computePoolDesiredStates(
 	scaleCheckDemand map[string]scaleCheckDemand,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, time.Time{}, trace)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, nil, time.Time{}, trace)
 }
 
 func computePoolDesiredStatesAt(
@@ -306,6 +311,7 @@ func computePoolDesiredStatesAt(
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
+	readyAssigned []bool,
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
@@ -362,10 +368,22 @@ func computePoolDesiredStatesAt(
 
 		// Resume tier: actionable assigned work beads whose assignee resolves
 		// to a non-closed session bead. These sessions must stay alive.
-		for _, wb := range assignedWorkBeads {
+		for wi, wb := range assignedWorkBeads {
 			routedTo := routedToOrLegacyWorkflowTarget(wb)
 			if wb.Status != "in_progress" && wb.Status != "open" {
 				continue
+			}
+			if wb.Status == "open" && readyAssigned != nil {
+				// Mirrors workBeadHasAwakeDemand's "open" case on the awake bridge
+				// (compute_awake_set.go): an open assigned-work bead only resumes
+				// once the store confirms it's unblocked. in_progress is exempt —
+				// IsBlocked is a different, upstream concept and not this slice's
+				// job. A nil slice (no readiness data for this caller) preserves
+				// the historical unconditional-resume behavior; a too-short slice
+				// defaults the missing index to not-ready.
+				if wi >= len(readyAssigned) || !readyAssigned[wi] {
+					continue
+				}
 			}
 			assignee := strings.TrimSpace(wb.Assignee)
 			if assignee == "" {
