@@ -305,7 +305,6 @@ LINT_BASE ?= origin/main
 LINT_CHANGED_REF ?= HEAD
 LINT_CHANGED_SCOPE ?= worktree
 LINT_FLAGS ?=
-## LINT_GOMEMLIMIT: soft heap cap for golangci-lint (default 6GiB; LINT_GOMEMLIMIT=off removes it, 0 is a zero-byte limit)
 LINT_GOMEMLIMIT ?= 6GiB
 LINT_ENV = GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GOMEMLIMIT=$(LINT_GOMEMLIMIT)
 QUALITY_GATE_GOFLAGS = $$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly
