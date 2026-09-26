@@ -75,11 +75,12 @@ func TestPrimingKeysClearedWhereverStartedConfigHashClears(t *testing.T) {
 	})
 
 	t.Run("C-2 ConversationResetPatch clears when hash clears", func(t *testing.T) {
-		cleared := ConversationResetPatch(true)
+		now := time.Now()
+		cleared := ConversationResetPatch(true, now)
 		assertClearsStartedHashAndPriming(t, cleared)
 
 		// Churn arm keeps the hash — and therefore the markers.
-		kept := ConversationResetPatch(false)
+		kept := ConversationResetPatch(false, now)
 		if _, ok := kept["started_config_hash"]; ok {
 			t.Fatal("churn arm must not clear started_config_hash")
 		}
