@@ -451,6 +451,11 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
 				packDirs, fragments, nil)
 			if prompt != "" {
+				// Append before the strict budget is computed so the
+				// diagnostic measures exactly what reaches stdout.
+				// appendFilesystemSearchGuidance is idempotent, so the
+				// call in writePrimePromptWithFormat is a no-op here.
+				prompt = appendFilesystemSearchGuidance(prompt)
 				var budget *promptBudgetJSON
 				if strictMode {
 					var budgetErr error
@@ -706,6 +711,7 @@ func primeHookHasLiveManagedSession(cityPath string) bool {
 }
 
 func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt string, hookMode bool, hookFormat string, suppressPrompt bool, hookContextSuffix string, afterDelivery func()) {
+	prompt = appendFilesystemSearchGuidance(prompt)
 	if hookMode && suppressPrompt {
 		// Managed sessions receive the rendered startup prompt through the
 		// launch payload or nudge path. SessionStart hooks add context only.
