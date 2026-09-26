@@ -36,11 +36,15 @@ func TestLintUsesReadonlyModuleDownloads(t *testing.T) {
 	if !strings.Contains(string(makefile), readonlyGOFlags) {
 		t.Fatalf("Makefile must derive QUALITY_GATE_GOFLAGS from effective GOFLAGS")
 	}
+	const lintEnv = `LINT_ENV = GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GOMEMLIMIT=$(LINT_GOMEMLIMIT)`
+	if !strings.Contains(string(makefile), lintEnv) {
+		t.Fatalf("Makefile must bind readonly GOFLAGS and GOMEMLIMIT through LINT_ENV")
+	}
 	for target, wantGOFLAGS := range map[string]string{
-		"lint-full":     `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
-		"lint-new":      `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
+		"lint-full":     `$(LINT_ENV)`,
+		"lint-new":      `$(LINT_ENV)`,
 		"lint-changed":  `export GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
-		"lint-affected": `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
+		"lint-affected": `$(LINT_ENV)`,
 	} {
 		t.Run(target, func(t *testing.T) {
 			body := makeTargetBody(t, string(makefile), target)
@@ -70,8 +74,8 @@ func TestQualityGateTargetsUseReadonlyModuleDownloads(t *testing.T) {
 	}
 
 	for target, wantGOFLAGS := range map[string]string{
-		"fmt-check":                `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
-		"fmt-check-changed":        `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
+		"fmt-check":                `$(LINT_ENV)`,
+		"fmt-check-changed":        `$(LINT_ENV)`,
 		"vet":                      `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
 		"test":                     `$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
 		"test-fsys-darwin-compile": `$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
@@ -79,6 +83,32 @@ func TestQualityGateTargetsUseReadonlyModuleDownloads(t *testing.T) {
 		t.Run(target, func(t *testing.T) {
 			if body := makeTargetBody(t, string(makefile), target); !strings.Contains(body, wantGOFLAGS) {
 				t.Fatalf("%s must scope QUALITY_GATE_GOFLAGS to its subprocess tree", target)
+			}
+		})
+	}
+}
+
+func TestLintTargetsApplyMemoryLimit(t *testing.T) {
+	makefile, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	if !strings.Contains(string(makefile), "LINT_GOMEMLIMIT ?= 6GiB") {
+		t.Fatalf("Makefile must default LINT_GOMEMLIMIT to 6GiB")
+	}
+
+	for target, wantLimit := range map[string]string{
+		"lint-full":         `$(LINT_ENV)`,
+		"lint-new":          `$(LINT_ENV)`,
+		"lint-changed":      `export GOMEMLIMIT="$(LINT_GOMEMLIMIT)"`,
+		"lint-affected":     `$(LINT_ENV)`,
+		"fmt-check":         `$(LINT_ENV)`,
+		"fmt-check-changed": `$(LINT_ENV)`,
+		"fmt":               `GOMEMLIMIT=$(LINT_GOMEMLIMIT)`,
+	} {
+		t.Run(target, func(t *testing.T) {
+			if body := makeTargetBody(t, string(makefile), target); !strings.Contains(body, wantLimit) {
+				t.Fatalf("%s must apply LINT_GOMEMLIMIT to its subprocess tree", target)
 			}
 		})
 	}
