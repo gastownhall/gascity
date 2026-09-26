@@ -688,6 +688,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 	for _, candidate := range candidates {
 		if strings.TrimSpace(candidate.ID) == "" ||
 			hookClaimCandidateIsMessage(candidate) ||
+			!hookClaimCandidateEligible(candidate, opts.RouteTargets) ||
 			!strings.EqualFold(strings.TrimSpace(candidate.Status), "open") ||
 			!hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) ||
 			hookCandidateBudgetDeferred(candidate, now) {
@@ -954,6 +955,21 @@ func mergeHookClaimCandidateMetadata(candidate, claimed beads.Bead) beads.Bead {
 	return claimed
 }
 
+// hookClaimCandidateEligible rejects graph latches from normal worker claim
+// results. The unrouted workflow-root run-target shape is the legacy control
+// dispatcher route and remains eligible.
+func hookClaimCandidateEligible(candidate beads.Bead, routeTargets []string) bool {
+	switch strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey]) {
+	case beadmeta.KindScope:
+		return false
+	case beadmeta.KindWorkflow:
+		return strings.TrimSpace(candidate.Metadata[beadmeta.RoutedToMetadataKey]) == "" &&
+			hookClaimMatchesRoute(candidate, routeTargets)
+	default:
+		return true
+	}
+}
+
 // hookCandidateClaimable reports whether a work-query candidate is eligible for a
 // fresh claim: it has an id, is currently unassigned, matches one of this
 // session's route targets, and is not still within a build-budget deferral
@@ -961,6 +977,7 @@ func mergeHookClaimCandidateMetadata(candidate, claimed beads.Bead) beads.Bead {
 func hookCandidateClaimable(candidate beads.Bead, routeTargets []string, now time.Time) bool {
 	return strings.TrimSpace(candidate.ID) != "" &&
 		strings.TrimSpace(candidate.Assignee) == "" &&
+		hookClaimCandidateEligible(candidate, routeTargets) &&
 		hookClaimMatchesRoute(candidate, routeTargets) &&
 		!hookCandidateBudgetDeferred(candidate, now)
 }
@@ -1151,7 +1168,8 @@ func adoptAfterFailedRestamp(beadID, current, target string, verdict hookAdoptio
 
 func hookClaimExistingAssignment(candidates []beads.Bead, opts hookClaimOptions) (hookClaimJSONResult, beads.Bead, bool) {
 	for _, candidate := range candidates {
-		if hookClaimCandidateIsMessage(candidate) {
+		if hookClaimCandidateIsMessage(candidate) ||
+			!hookClaimCandidateEligible(candidate, opts.RouteTargets) {
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(candidate.Status), "in_progress") &&
