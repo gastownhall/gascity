@@ -503,6 +503,105 @@ func TestGraphWorkflowInMemorySuccessPath(t *testing.T) {
 	}
 }
 
+// TestGraphWorkflowRootClosesWithoutTeardown pins the post-settlement teardown
+// contract from gastownhall/gascity#5271 (bead ga-99u0u) at the dispatch layer:
+// a workflow root closes on its own sinks, and the teardown tail is not one of
+// them.
+//
+// The contract has two halves, and this test fails if either is reverted.
+// graphSinkStepIDs omits gc.scope_role=teardown from workflow-finalize's sinks
+// (re-adding them deadlocks settlement: the teardown's pass condition can wait
+// on the root outcome only finalize produces), and processWorkflowFinalize's
+// terminal sweep exempts the teardown tail so it stays open and executable
+// rather than being skip-closed -- which would leak the worktree.
+//
+// The consequence is what this test makes explicit, because it is easy to
+// assume otherwise: "workflow root closed" is NOT a barrier for cleanup having
+// run. test/integration/graph_dispatch_test.go assumed it was and went flaky
+// under load (ga-pva49c, sightings ga-lwnqu9 and ga-qhr85l); it now waits on
+// the teardown's own close via waitForWorkflowTeardown.
+func TestGraphWorkflowRootClosesWithoutTeardown(t *testing.T) {
+	store, convoyID, workflowID := startMemScopedWorkflow(t)
+	cityPath := t.TempDir()
+
+	// Model the condition the failing integration runs were under: the async
+	// worker has not reached .cleanup-worktree when the control dispatcher
+	// reaches workflow-finalize. Every other worker step runs normally.
+	withheld := false
+	for step := 0; step < 200; step++ {
+		if mustGetMemBead(t, store, workflowID).Status == "closed" {
+			break
+		}
+		progressed := false
+		for _, bead := range memGraphReady(t, store) {
+			if !graphroute.IsControlDispatcherKind(bead.Metadata["gc.kind"]) {
+				continue
+			}
+			result, err := dispatch.ProcessControl(store, bead, dispatch.ProcessOptions{CityPath: cityPath})
+			if err != nil {
+				t.Fatalf("ProcessControl(%s): %v", bead.ID, err)
+			}
+			progressed = progressed || result.Processed
+		}
+		ready := memGraphReady(t, store)
+		for {
+			bead, ok, err := selectExecutableGraphWorkerBead(ready, "worker")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !ok {
+				break
+			}
+			if strings.Contains(beadRef(bead), "cleanup-worktree") {
+				withheld = true
+				break
+			}
+			executeMemGraphWorkerBead(t, store, bead, convoyID, cityPath, "success")
+			progressed = true
+			ready = memGraphReady(t, store)
+		}
+		if !progressed {
+			break
+		}
+	}
+
+	if !withheld {
+		t.Fatal("teardown was never offered to the worker; the test no longer models a slow worker")
+	}
+
+	root := mustGetMemBead(t, store, workflowID)
+	if root.Status != "closed" {
+		t.Fatalf("root status = %q, want closed: the root must settle on its own sinks, "+
+			"not wait on the teardown tail (#5271 -- gating finalize on teardown deadlocks settlement)", root.Status)
+	}
+	if got := root.Metadata["gc.outcome"]; got != "pass" {
+		t.Fatalf("root outcome = %q, want pass", got)
+	}
+
+	teardownOpen := false
+	all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, bead := range all {
+		if strings.HasSuffix(beadRef(bead), ".cleanup-worktree") && bead.Status == "open" {
+			teardownOpen = true
+		}
+	}
+	if !teardownOpen {
+		t.Fatal("teardown tail is not open after the root closed; the terminal sweep must exempt it " +
+			"so cleanup stays executable, otherwise settlement skip-closes it and leaks the worktree")
+	}
+
+	// The reason the integration test could not use the root as its barrier:
+	// at this instant the convoy still carries the work_dir cleanup clears.
+	convoy := mustGetMemBead(t, store, convoyID)
+	if got := convoy.Metadata["work_dir"]; got == "" {
+		t.Fatal("convoy work_dir is already clear with the teardown withheld; " +
+			"this test no longer demonstrates why a closed root is not a cleanup barrier")
+	}
+}
+
 func TestGraphWorkflowInMemoryFailureRunsCleanup(t *testing.T) {
 	store, convoyID, workflowID := startMemScopedWorkflow(t)
 	cityPath := t.TempDir()
