@@ -219,14 +219,18 @@ func TestSlingNudgeEnqueueBudgetPreservesQueuedItems(t *testing.T) {
 			t.Fatalf("surviving dead nudge %q (i=%d) bucket = %q, want %q; buckets=%v", id, i, bucket, seededBuckets[id], buckets)
 		}
 	}
+	// Supersession runs before the budgeted housekeeping, so the matching
+	// pending and in-flight items are dead-lettered as superseded — preserved
+	// in the dead bucket, never dropped — even though the dead backlog alone
+	// would exhaust the budget.
 	for i := 0; i < 2; i++ {
 		id := fmt.Sprintf("nudge-pending-preserve-%d", i)
-		if bucket := buckets[id]; bucket != "pending" {
-			t.Fatalf("%s bucket = %q, want pending because supersede budget was already exhausted", id, bucket)
+		if bucket := buckets[id]; bucket != "dead" {
+			t.Fatalf("%s bucket = %q, want dead (superseded before housekeeping spent the budget)", id, bucket)
 		}
 		id = fmt.Sprintf("nudge-in-flight-preserve-%d", i)
-		if bucket := buckets[id]; bucket != "in-flight" {
-			t.Fatalf("%s bucket = %q, want in-flight because supersede budget was already exhausted", id, bucket)
+		if bucket := buckets[id]; bucket != "dead" {
+			t.Fatalf("%s bucket = %q, want dead (superseded before housekeeping spent the budget)", id, bucket)
 		}
 	}
 	if bucket := buckets[item.ID]; bucket != "pending" {
