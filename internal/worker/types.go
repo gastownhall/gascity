@@ -391,20 +391,22 @@ type HistorySnapshot struct {
 
 // HistoryEntry is a normalized transcript entry.
 type HistoryEntry struct {
-	ID          string              `json:"id"`
-	Kind        string              `json:"kind"`
-	Actor       Actor               `json:"actor"`
-	Order       int                 `json:"order"`
-	Timestamp   *time.Time          `json:"timestamp,omitempty"`
-	Status      ResultStatus        `json:"status"`
-	Text        string              `json:"text,omitempty"`
-	Model       string              `json:"model,omitempty"`
-	StopReason  string              `json:"stop_reason,omitempty"`
-	Usage       *HistoryUsage       `json:"usage,omitempty"`
-	UserPrompt  *HistoryUserPrompt  `json:"user_prompt,omitempty"`
-	SystemEvent *HistorySystemEvent `json:"system_event,omitempty"`
-	Blocks      []HistoryBlock      `json:"blocks,omitempty"`
-	Provenance  Provenance          `json:"provenance"`
+	ID              string              `json:"id"`
+	ClientMessageID string              `json:"client_message_id,omitempty"`
+	TurnID          string              `json:"turn_id,omitempty"`
+	Kind            string              `json:"kind"`
+	Actor           Actor               `json:"actor"`
+	Order           int                 `json:"order"`
+	Timestamp       *time.Time          `json:"timestamp,omitempty"`
+	Status          ResultStatus        `json:"status"`
+	Text            string              `json:"text,omitempty"`
+	Model           string              `json:"model,omitempty"`
+	StopReason      string              `json:"stop_reason,omitempty"`
+	Usage           *HistoryUsage       `json:"usage,omitempty"`
+	UserPrompt      *HistoryUserPrompt  `json:"user_prompt,omitempty"`
+	SystemEvent     *HistorySystemEvent `json:"system_event,omitempty"`
+	Blocks          []HistoryBlock      `json:"blocks,omitempty"`
+	Provenance      Provenance          `json:"provenance"`
 }
 
 // HistoryBlock carries normalized content/tool payload.

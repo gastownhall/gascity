@@ -346,7 +346,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 			return
 		}
 		if msg := strings.TrimSpace(body.Message); msg != "" {
-			if _, sendErr := s.submitMessageToSession(context.Background(), store.Store, info.ID, msg, session.SubmitIntentDefault); sendErr != nil {
+			if _, sendErr := s.submitMessageToSession(context.Background(), store.Store, info.ID, msg, session.SubmitIntentDefault, ""); sendErr != nil {
 				if rollbackErr := s.rollbackCreatedSession(store, info.ID); rollbackErr != nil {
 					s.emitSessionCreateFailed(reqID, "message_delivery_failed",
 						fmt.Sprintf("initial message delivery failed: %v (rollback failed: %v)", sendErr, rollbackErr))
@@ -731,6 +731,13 @@ func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitIn
 	if reqIDErr != nil {
 		return asyncAcceptedBody{}, apierr.Internal.Msg(reqIDErr.Error())
 	}
+	
+	// Generate turn_id for correlation
+	turnID, turnIDErr := newTurnID()
+	if turnIDErr != nil {
+		return asyncAcceptedBody{}, apierr.Internal.Msg(turnIDErr.Error())
+	}
+	
 	eventCursor, cursorErr := s.currentCityEventCursor()
 	if cursorErr != nil {
 		return asyncAcceptedBody{}, apierr.Internal.Msg(cursorErr.Error())
@@ -744,15 +751,21 @@ func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitIn
 			s.emitSessionSubmitFailed(reqID, "resolve_failed", err.Error())
 			return
 		}
-		outcome, submitErr := s.submitMessageToSession(context.Background(), store.Store, id, message, intent)
+		
+		// Emit turn.started event
+		s.emitTurnStarted(turnID, id, input.Body.ClientMessageID, reqID)
+		
+		outcome, submitErr := s.submitMessageToSession(context.Background(), store.Store, id, message, intent, input.Body.ClientMessageID)
 		if submitErr != nil {
 			s.emitSessionSubmitFailed(reqID, "submit_failed", submitErr.Error())
+			s.emitTurnFailed(turnID, id, "submit_failed", submitErr.Error())
 		} else {
 			s.emitSessionSubmitSucceeded(reqID, id, outcome.Queued, string(intent))
+			// Note: turn.completed will be emitted by the worker when all provider responses are done
 		}
 	}()
 
-	return asyncAcceptedBody{Status: "accepted", RequestID: reqID, EventCursor: eventCursor}, nil
+	return asyncAcceptedBody{Status: "accepted", RequestID: reqID, EventCursor: eventCursor, TurnID: turnID, ClientMessageID: input.Body.ClientMessageID}, nil
 }
 
 // --- Session Messages ---
@@ -794,6 +807,13 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 	if reqIDErr != nil {
 		return asyncAcceptedBody{}, apierr.Internal.Msg(reqIDErr.Error())
 	}
+	
+	// Generate turn_id for correlation
+	turnID, turnIDErr := newTurnID()
+	if turnIDErr != nil {
+		return asyncAcceptedBody{}, apierr.Internal.Msg(turnIDErr.Error())
+	}
+	
 	eventCursor, cursorErr := s.currentCityEventCursor()
 	if cursorErr != nil {
 		return asyncAcceptedBody{}, apierr.Internal.Msg(cursorErr.Error())
@@ -835,6 +855,9 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 				sendResult(messageResult{errorCode: "resolve_failed", err: err})
 				return
 			}
+				// Emit turn.started event
+				s.emitTurnStarted(turnID, id, "", reqID)
+
 			if err := s.sendUserMessageToSession(ctx, store.Store, id, message); err != nil {
 				code := "message_failed"
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
@@ -853,6 +876,7 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 			terminalEmitted.Store(true)
 			if result.err != nil {
 				s.emitSessionMessageFailed(reqID, result.errorCode, result.err.Error())
+				s.emitTurnFailed(turnID, result.sessionID, result.errorCode, result.err.Error())
 				return
 			}
 			s.emitSessionMessageSucceeded(reqID, result.sessionID)
@@ -871,10 +895,11 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 			}
 			terminalEmitted.Store(true)
 			s.emitSessionMessageFailed(reqID, "timeout", fmt.Sprintf("session.message timed out after %s", sessionMessageAsyncTimeout))
+				s.emitTurnFailed(turnID, sessionTarget, "timeout", fmt.Sprintf("session.message timed out after %s", sessionMessageAsyncTimeout))
 		}
 	}()
 
-	return asyncAcceptedBody{Status: "accepted", RequestID: reqID, EventCursor: eventCursor}, nil
+	return asyncAcceptedBody{Status: "accepted", RequestID: reqID, EventCursor: eventCursor, TurnID: turnID}, nil
 }
 
 // --- Session Stop ---
