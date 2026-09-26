@@ -1232,11 +1232,20 @@ func (c *sqliteFenceChild) kill(t *testing.T) {
 	_ = c.wait(t)
 }
 
-// killSQLiteFenceChildInOrder issues killFn and closeStdin against a fence
-// child process.
+// killSQLiteFenceChildInOrder issues killFn before closeStdin. A fence child
+// blocks reading stdin inside a deliberately-uncommitted transaction so a
+// forced kill leaves a crash artifact (e.g. a hot rollback journal) on disk
+// for the test to inspect. Closing stdin first would deliver an ordinary EOF
+// to that blocked read, which can let the child resume and run its own
+// deferred cleanup before the kill signal arrives -- wiping the very
+// artifact the kill was supposed to preserve. Killing first forecloses that:
+// once a fatal signal is pending for a task blocked in an interruptible
+// sleep, the kernel handles it at the return-to-userspace checkpoint
+// regardless of what else woke the task, so the child can never reach that
+// cleanup code (ga-5skods).
 func killSQLiteFenceChildInOrder(killFn, closeStdin func() error) {
-	_ = closeStdin()
 	_ = killFn()
+	_ = closeStdin()
 }
 
 func (c *sqliteFenceChild) wait(t *testing.T) error {
