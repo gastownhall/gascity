@@ -5,8 +5,9 @@ import "github.com/gastownhall/gascity/internal/runtime"
 // seamBackedProvider serves the legacy [runtime.Provider] through the
 // de-conflated seams (via [runtime.NewProviderFromSeams]), passing the optional
 // interfaces production callers type-assert — InteractionProvider (pending /
-// respond), TransportCapabilityProvider (SupportsTransport), and SleepCapability
-// — through to the underlying *Provider. The early cut-over for the acp provider.
+// respond), TransportCapabilityProvider (SupportsTransport), SleepCapability,
+// and ProcessTableScanner (orphan reaping) — through to the underlying
+// *Provider. The early cut-over for the acp provider.
 type seamBackedProvider struct {
 	runtime.Provider
 	raw *Provider
@@ -17,6 +18,7 @@ var (
 	_ runtime.InteractionProvider         = (*seamBackedProvider)(nil)
 	_ runtime.TransportCapabilityProvider = (*seamBackedProvider)(nil)
 	_ runtime.SleepCapabilityProvider     = (*seamBackedProvider)(nil)
+	_ runtime.ProcessTableScanner         = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs an acp provider served through the seams.
@@ -50,4 +52,16 @@ func (s *seamBackedProvider) SupportsTransport(transport string) bool {
 // SleepCapability passes through to the underlying provider (non-seam).
 func (s *seamBackedProvider) SleepCapability(name string) runtime.SessionSleepCapability {
 	return s.raw.SleepCapability(name)
+}
+
+// FindRuntimesBySessionID implements [runtime.ProcessTableScanner] (non-seam
+// passthrough).
+func (s *seamBackedProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
+	return s.raw.FindRuntimesBySessionID(id)
+}
+
+// TerminateRuntime implements [runtime.ProcessTableScanner] (non-seam
+// passthrough).
+func (s *seamBackedProvider) TerminateRuntime(r runtime.LiveRuntime) error {
+	return s.raw.TerminateRuntime(r)
 }

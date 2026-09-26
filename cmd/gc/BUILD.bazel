@@ -1024,6 +1024,7 @@ go_test(
         "dolt_start_managed_test.go",
         "dolt_stop_managed_test.go",
         "dolt_wisp_query_index_test.go",
+        "drain_ack_escalation_auto_test.go",
         "drain_ack_escalation_test.go",
         "drain_ack_release_test.go",
         "drain_reminder_ack_binding_test.go",

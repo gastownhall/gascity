@@ -8,6 +8,9 @@ go_library(
         "descendants_linux.go",
         "descendants_stub.go",
         "doc.go",
+        "environ_darwin.go",
+        "environ_linux.go",
+        "environ_stub.go",
         "guard.go",
         "identity.go",
         "identity_darwin.go",
@@ -52,6 +55,7 @@ go_test(
     name = "proctable_test",
     srcs = [
         "descendants_test.go",
+        "environ_linux_test.go",
         "guard_test.go",
         "identity_darwin_test.go",
         "infrastructure_argv_test.go",

@@ -545,7 +545,7 @@ func terminateDrainAckRuntimeByProcessTable(
 	now time.Time,
 	stderr io.Writer,
 ) string {
-	scanner, ok := sp.(runtime.ProcessTableScanner)
+	scanner, ok := runtime.AsProcessTableScanner(sp)
 	if !ok {
 		fmt.Fprintf(stderr, "%s: %s survived its stop and the provider cannot scan the process table; slot stays occupied\n", //nolint:errcheck
 			drainAckEscalationLabel, name)
