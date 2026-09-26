@@ -2181,13 +2181,33 @@ func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Wr
 }
 
 // asyncStartPreparedCommandStaleInfo is the async-start command-drift gate: it
-// reads the current session's resolved command off Info.Command (the raw "command"
-// mirror, TrimSpace-equivalent). The prepared side is the resolved template command
-// (tp.Command). It is the sole form (the raw sibling was deleted in WI-6 R4).
+// compares the commit-time persisted command (current.Command) against the
+// enqueue-time persisted command (prepared.candidate.info.Command, the
+// in-lock re-read from prepareStartCandidateForCity). A start is stale only
+// when that value changed DURING startup, and changed to something other
+// than the prepared template command (tp.Command) or a prefix-extension of
+// it (the worker boundary's augmented form, shouldPreserveStoredRuntimeCommand).
+// A difference that already existed at enqueue is not startup drift; nothing
+// on the commit path repairs it, so treating it as stale would discard every
+// wave forever (ga-k88yuh, ga-2ygo4s). It is the sole form (the raw sibling
+// was deleted in WI-6 R4).
 func asyncStartPreparedCommandStaleInfo(prepared preparedStart, current sessionpkg.Info) bool {
 	preparedCommand := strings.TrimSpace(prepared.candidate.tp.Command)
 	currentCommand := strings.TrimSpace(current.Command)
-	return preparedCommand != "" && currentCommand != "" && preparedCommand != currentCommand
+	if preparedCommand == "" || currentCommand == "" {
+		return false
+	}
+	// Only a change DURING startup can make this start stale. A persisted
+	// command unchanged since enqueue was already there when the start was
+	// prepared; nothing on the commit path rewrites it, so discarding for it
+	// would discard every wave forever (ga-k88yuh).
+	if currentCommand == strings.TrimSpace(prepared.candidate.info.Command) {
+		return false
+	}
+	// A change to the prepared command, or to a prefix-extension of it (the
+	// worker boundary's augmented form), is not a change of desired command
+	// (ga-2ygo4s).
+	return currentCommand != preparedCommand && !shouldPreserveStoredRuntimeCommand(currentCommand, preparedCommand)
 }
 
 // clearPendingStartInFlightLease clears last_woke_at for the session handle so a
