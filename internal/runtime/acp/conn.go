@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // defaultOutputBufferLines is the default circular buffer size for Peek output.
@@ -42,6 +44,15 @@ type sessionConn struct {
 	// before session metadata is removed.
 	activityPublisher       *activityPublisher
 	activityPublisherClosed bool
+
+	// events publishes this connection's session events; nil until Start
+	// commits the connection to the Provider that owns it.
+	events *sessionEventSource
+	// exited is set once the agent process has exited.
+	exited bool
+	// exitReported closes after the exit has been published (or found no
+	// attached source), so closed can follow exited.
+	exitReported chan struct{}
 
 	// stdinMu serializes writes to the agent's stdin pipe. Separate from
 	// mu so that a slow/blocked stdin write cannot prevent dispatch (which
@@ -74,6 +85,7 @@ func newSessionConn(cmd *exec.Cmd, stdin io.WriteCloser, lis net.Listener, bufSi
 		outputBufMax: bufSize,
 		pending:      make(map[int64]chan JSONRPCMessage),
 		idleCh:       make(chan struct{}),
+		exitReported: make(chan struct{}),
 	}
 	close(sc.idleCh)
 	return sc
@@ -341,10 +353,16 @@ func (sc *sessionConn) markBusyLocked(id int64) {
 	}
 	sc.activePromptID = id
 	sc.startTurnLocked(id, time.Now())
+	sc.emitLocked(runtime.SessionEventAgentStateChanged)
 }
 
 func (sc *sessionConn) markIdleLocked() {
 	sc.ensureIdleChannelLocked()
+	// A drained connection can never take another turn, so its failed turn
+	// is not reported as an idle agent.
+	if sc.activePromptID != 0 && !sc.drained {
+		sc.emitLocked(runtime.SessionEventAgentIdle)
+	}
 	sc.activePromptID = 0
 	select {
 	case <-sc.idleCh:

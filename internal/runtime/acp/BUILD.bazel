@@ -7,6 +7,7 @@ go_library(
         "activity_publisher.go",
         "conn.go",
         "cutover.go",
+        "events.go",
         "protocol.go",
         "seams.go",
         "turns.go",
@@ -24,6 +25,7 @@ go_test(
     srcs = [
         "acp_test.go",
         "activity_test.go",
+        "events_test.go",
         "meta_privacy_test.go",
         "protocol_test.go",
         "seams_test.go",
