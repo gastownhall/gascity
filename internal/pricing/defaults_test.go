@@ -28,6 +28,7 @@ func TestDefaultPricingsCoverKnownClaudeModels(t *testing.T) {
 		"claude-sonnet-4-6",
 		"claude-opus-4-7",
 		"claude-opus-4-8",
+		"claude-opus-5-5",
 		"claude-haiku-4-5-20251001",
 	}
 	r := New(DefaultPricings())
@@ -73,6 +74,13 @@ func TestDefaultPricingsCurrentClaudeRates(t *testing.T) {
 			completion:    25.00,
 			cacheRead:     0.50,
 			cacheCreation: 6.25,
+		},
+		{
+			model:         "claude-opus-5-5",
+			prompt:        4.00,
+			completion:    20.00,
+			cacheRead:     0.20,
+			cacheCreation: 5.00,
 		},
 		{
 			model:         "claude-haiku-4-5-20251001",
