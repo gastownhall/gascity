@@ -97,11 +97,11 @@ jobs:
 
       - name: bazel test //...
         run: |
-          ARGS=(--output_user_root="$RUNNER_TEMP"/bazel-outputs --profile=/tmp/bazel-profile.json)
+          ARGS=(--output_user_root="$RUNNER_TEMP"/bazel-outputs)
           if [ -f .bazelrc.local ]; then
-            bazel "${ARGS[@]}" test //... --config=remote-exec --test_output=errors --keep_going
+            bazel "${ARGS[@]}" test //... --profile=/tmp/bazel-profile.json --config=remote-exec --test_output=errors --keep_going
           else
-            bazel "${ARGS[@]}" test //... --test_output=errors --keep_going
+            bazel "${ARGS[@]}" test //... --profile=/tmp/bazel-profile.json --test_output=errors --keep_going
           fi
 
       - name: Critical-path report (the optimization loop metric)

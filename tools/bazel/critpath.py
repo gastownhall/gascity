@@ -4,6 +4,7 @@
 Usage: bazel test //... --profile=/tmp/p.json ...; then tools/bazel/critpath.py /tmp/p.json
 
 Decision rule:
+  critical_path = sum of the critical-path component durations (the chain)
   gap = elapsed - critical_path
   gap < 15%  -> scheduling is fine; attack the longest critical-path action
                 (shard it if it's a test; parallelize inputs if it's an upload)
@@ -11,12 +12,17 @@ Decision rule:
 """
 import json, sys, re
 
-prof = json.load(open(sys.argv[1]))
+try:
+    with open(sys.argv[1]) as f:
+        prof = json.load(f)
+except (OSError, ValueError):
+    print(f"critpath: no profile at {sys.argv[1]} (bazel test did not run?)")
+    sys.exit(0)
 ev = prof.get("traceEvents", [])
 elapsed = max((e.get("dur", 0) for e in ev if e.get("name") == "buildTargets"), default=0) / 1e6
-cps = sorted((e for e in ev if e.get("cat") == "critical path component" and e.get("dur", 0) > 1e6),
-             key=lambda e: e["dur"], reverse=True)
-cp = max((e["dur"] for e in cps), default=0) / 1e6
+comps = [e for e in ev if e.get("cat") == "critical path component"]
+cps = sorted((e for e in comps if e.get("dur", 0) > 1e6), key=lambda e: e["dur"], reverse=True)
+cp = sum(e.get("dur", 0) for e in comps) / 1e6
 gap = elapsed - cp
 pct = (gap / elapsed * 100) if elapsed else 0
 
@@ -24,6 +30,9 @@ print(f"elapsed        {elapsed:7.1f}s")
 print(f"critical path  {cp:7.1f}s   ({', '.join(e['name'].split('action ')[-1][:40] for e in cps[:3])})")
 print(f"gap            {gap:7.1f}s   ({pct:.0f}% of elapsed)")
 print()
+if elapsed == 0 or not cps:
+    print("NEXT: no critical-path data in profile")
+    sys.exit(0)
 if pct < 15:
     top = cps[0]
     name = top["name"]
