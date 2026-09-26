@@ -4273,7 +4273,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// the stamp below just hasn't caught up yet). Fail toward the
 					// pre-existing cycle behavior on any lookup or parse error.
 					if prev := strings.TrimSpace(info.CurrentlyProcessingBeadID); prev != "" {
-						prevOpen, prevClosedAt, err := prevAssignedBeadStatus(store, prev)
+						prevOpen, prevClosedAt, err := prevAssignedBeadStatus(residencyTopologyForCity(cityPath, cfg, store, rigStores), prev)
 						if err == nil && prevOpen {
 							continue
 						}

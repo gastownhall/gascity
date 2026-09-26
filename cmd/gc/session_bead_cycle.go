@@ -11,6 +11,7 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // recordCurrentBeadIDOnWake persists the work bead a session is being woken
@@ -45,21 +46,32 @@ func recordCurrentBeadIDOnWake(info sessionpkg.Info, sessFront *sessionpkg.Store
 	return sessionpkg.MetadataPatch{sessionpkg.CurrentBeadIDKey: beadID}
 }
 
-// prevAssignedBeadStatus looks up a single bead by id and reports whether it
-// is still open (non-terminal, via convoycore.IsTerminalStatus) and, when
-// terminal, the closed_at timestamp from its metadata. One store round trip
-// answers both questions, so the fresh-cycle guard in session_reconciler.go
-// does not need a second lookup to get closed_at after checking status.
-// closedAt is the zero Time when the bead is open or closed_at is absent or
-// unparseable.
-func prevAssignedBeadStatus(store beads.Store, id string) (open bool, closedAt time.Time, err error) {
-	b, err := store.Get(id)
+// prevAssignedBeadStatus looks up a single bead by id over the caller's
+// residency topology — rather than a single fixed store — and reports
+// whether it is still open (non-terminal, via convoycore.IsTerminalStatus)
+// and, when terminal, the time it closed. Resolving over the topology
+// (byIDBeadForTopology) rather than one store is what lets this answer for a
+// rig-scoped id: every ga-* work bead lives in a rig store, and a lookup
+// against the city/session store alone always misses it. One store round
+// trip answers both questions, so the fresh-cycle guard in
+// session_reconciler.go does not need a second lookup to get the close time
+// after checking status.
+//
+// closedAt prefers the metadata "closed_at" timestamp when present and
+// RFC3339Nano-parseable, but falls back to the bead's UpdatedAt: no real `bd
+// close` ever writes a closed_at metadata key (bd keeps closed_at as a
+// top-level column that neither bdIssue nor beads.Bead decodes), so without
+// this fallback closedAt is always zero for a bead closed the way every real
+// close closes it. closedAt is the zero Time only when the bead is open.
+func prevAssignedBeadStatus(topo storeref.Topology, id string) (open bool, closedAt time.Time, err error) {
+	b, err := byIDBeadForTopology(topo, id)
 	if err != nil {
 		return false, time.Time{}, err
 	}
 	if !convoycore.IsTerminalStatus(b.Status) {
 		return true, time.Time{}, nil
 	}
+	closedAt = b.UpdatedAt
 	if ca := b.Metadata["closed_at"]; ca != "" {
 		if t, perr := time.Parse(time.RFC3339Nano, ca); perr == nil {
 			closedAt = t
