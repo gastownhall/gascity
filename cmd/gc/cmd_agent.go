@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
 
@@ -561,7 +562,12 @@ func doAgentList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io
 		fmt.Fprintf(stderr, "gc agent list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	items := agentListItems(cfg, cityQueryTopology(cityPath, cfg))
+	st, err := loadSuspensionState(fs, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc agent list: loading suspension state: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	items := agentListItems(cfg, cityQueryTopology(cityPath, cfg), cityPath, st)
 	if jsonOutput {
 		if err := writeCLIJSONLine(stdout, AgentListJSON{
 			SchemaVersion: "1",
@@ -586,7 +592,7 @@ func doAgentList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io
 	return 0
 }
 
-func agentListItems(cfg *config.City, topo config.QueryTopology) []AgentListItem {
+func agentListItems(cfg *config.City, topo config.QueryTopology, cityPath string, st suspensionstate.State) []AgentListItem {
 	if cfg == nil {
 		return nil
 	}
@@ -601,7 +607,7 @@ func agentListItems(cfg *config.City, topo config.QueryTopology) []AgentListItem
 			WorkDir:              a.WorkDir,
 			Provider:             a.Provider,
 			Session:              a.Session,
-			Suspended:            a.Suspended,
+			Suspended:            isAgentEffectivelySuspendedWith(cfg, cityPath, &a, st),
 			WorkQuery:            a.EffectiveWorkQueryFor(topo),
 			SlingQuery:           a.EffectiveSlingQuery(),
 			ConfiguredWorkQuery:  a.WorkQuery,

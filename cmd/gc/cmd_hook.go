@@ -234,6 +234,7 @@ type hookCommandOptions struct {
 	Claim      bool
 	DrainAck   bool
 	JSON       bool
+	DrainAckFn hookDrainAckFunc
 }
 
 // cmdHook is the CLI entry point for gc hook. Resolves the agent from
@@ -327,9 +328,16 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		}
 	}
 
-	st, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
+	st, err := loadSuspensionState(fsys.OSFS{}, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook: loading suspension state: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	if citySuspendedWithState(cfg, st) {
 		fmt.Fprintln(stderr, "gc hook: city is suspended") //nolint:errcheck // best-effort stderr
+		if opts.Claim {
+			return writeHookClaimSuspensionDrain(hookClaimReasonCitySuspended, opts, stdout, stderr)
+		}
 		return 1
 	}
 
@@ -366,8 +374,17 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		return 1
 	}
 
-	if isAgentEffectivelySuspendedWith(cfg, cityPath, &a, st) {
-		fmt.Fprintf(stderr, "gc hook: agent %q is suspended\n", agentName) //nolint:errcheck // best-effort stderr
+	if scope, name, suspended := agentSuspensionCauseWith(cfg, cityPath, &a, st); suspended {
+		reason := hookClaimReasonAgentSuspended
+		if scope == "rig" {
+			fmt.Fprintf(stderr, "gc hook: rig %q is suspended\n", name) //nolint:errcheck
+			reason = hookClaimReasonRigSuspended
+		} else {
+			fmt.Fprintf(stderr, "gc hook: agent %q is suspended\n", agentName) //nolint:errcheck
+		}
+		if opts.Claim {
+			return writeHookClaimSuspensionDrain(reason, opts, stdout, stderr)
+		}
 		return 1
 	}
 
