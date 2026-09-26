@@ -1470,7 +1470,7 @@ EOF
                 TOTAL=0
                 while true; do
                     RAW=$(dolt_sql -r csv -q "USE \`${CITY_DB}\`; SELECT id FROM issues WHERE issue_type='session' AND status='closed' AND closed_at < DATE_SUB(NOW(), INTERVAL ${SESSION_AGE_H} HOUR) LIMIT 500;") 2>/dev/null || break
-                    BATCH_IDS=$(printf '%s\n' "$RAW" | tail -n +2 | grep -v '^$')
+                    BATCH_IDS=$(printf '%s\n' "$RAW" | tail -n +2 | grep -v '^$' || true)
                     BATCH_COUNT=$(printf '%s\n' "$BATCH_IDS" | grep -c . || true)
                     [ "$BATCH_COUNT" -gt 0 ] || break
                     SQL_IDS=$(printf '%s\n' "$BATCH_IDS" | sed "s/.*/'&'/" | tr '\n' ',' | sed 's/,$//')
