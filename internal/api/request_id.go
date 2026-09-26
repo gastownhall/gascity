@@ -154,6 +154,45 @@ func (s *Server) emitSessionSubmitFailed(requestID, errorCode, errorMessage stri
 	s.emitRequestFailed(requestID, RequestOperationSessionSubmit, errorCode, errorMessage)
 }
 
+// emitTurnStarted records a turn.started event when a conversation turn begins.
+func (s *Server) emitTurnStarted(turnID, sessionID, clientMessageID, requestID string) {
+	s.emitAsyncResult(events.TurnStarted, sessionID, TurnStartedPayload{
+		TurnID:          turnID,
+		SessionID:       sessionID,
+		ClientMessageID: clientMessageID,
+		RequestID:       requestID,
+	})
+}
+
+// emitTurnCompleted records a turn.completed event when all provider responses are finalized.
+func (s *Server) emitTurnCompleted(turnID, sessionID string, entryCount int, durationMs int64) {
+	s.emitAsyncResult(events.TurnCompleted, sessionID, TurnCompletedPayload{
+		TurnID:     turnID,
+		SessionID:  sessionID,
+		EntryCount: entryCount,
+		DurationMs: durationMs,
+	})
+}
+
+// emitTurnFailed records a turn.failed event when a turn encounters an error.
+func (s *Server) emitTurnFailed(turnID, sessionID, errorCode, errorMessage string) {
+	s.emitAsyncResult(events.TurnFailed, sessionID, TurnFailedPayload{
+		TurnID:       turnID,
+		SessionID:    sessionID,
+		ErrorCode:    errorCode,
+		ErrorMessage: errorMessage,
+	})
+}
+
+// emitTurnCanceled records a turn.canceled event when a turn is intentionally stopped.
+func (s *Server) emitTurnCanceled(turnID, sessionID, reason string) {
+	s.emitAsyncResult(events.TurnCanceled, sessionID, TurnCanceledPayload{
+		TurnID:    turnID,
+		SessionID: sessionID,
+		Reason:    reason,
+	})
+}
+
 // emitRigCreateSucceeded records a request.result.rig.create event — the
 // terminal success of an async server-side rig add.
 func (s *Server) emitRigCreateSucceeded(requestID, rig, prefix, defaultBranch string) {

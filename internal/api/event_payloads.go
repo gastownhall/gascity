@@ -201,6 +201,49 @@ type RequestFailedPayload struct {
 // IsEventPayload marks RequestFailedPayload as an events.Payload variant.
 func (RequestFailedPayload) IsEventPayload() {}
 
+// TurnStartedPayload is emitted on turn.started when a user message begins processing.
+type TurnStartedPayload struct {
+	TurnID          string `json:"turn_id" doc:"Unique identifier for this conversation turn."`
+	SessionID       string `json:"session_id" doc:"Session ID where the turn is executing."`
+	ClientMessageID string `json:"client_message_id,omitempty" doc:"Client-generated message ID if provided in the submit request."`
+	RequestID       string `json:"request_id" doc:"API request ID that initiated this turn."`
+}
+
+// IsEventPayload marks TurnStartedPayload as an events.Payload variant.
+func (TurnStartedPayload) IsEventPayload() {}
+
+// TurnCompletedPayload is emitted on turn.completed when all provider responses are finalized.
+type TurnCompletedPayload struct {
+	TurnID    string `json:"turn_id" doc:"Unique identifier for this conversation turn."`
+	SessionID string `json:"session_id" doc:"Session ID where the turn completed."`
+	EntryCount int   `json:"entry_count" doc:"Number of transcript entries produced in this turn."`
+	DurationMs int64 `json:"duration_ms,omitempty" doc:"Time from turn start to completion in milliseconds."`
+}
+
+// IsEventPayload marks TurnCompletedPayload as an events.Payload variant.
+func (TurnCompletedPayload) IsEventPayload() {}
+
+// TurnFailedPayload is emitted on turn.failed when a turn encounters an unrecoverable error.
+type TurnFailedPayload struct {
+	TurnID       string `json:"turn_id" doc:"Unique identifier for this conversation turn."`
+	SessionID    string `json:"session_id" doc:"Session ID where the turn failed."`
+	ErrorCode    string `json:"error_code" doc:"Machine-readable error code."`
+	ErrorMessage string `json:"error_message" doc:"Human-readable error description."`
+}
+
+// IsEventPayload marks TurnFailedPayload as an events.Payload variant.
+func (TurnFailedPayload) IsEventPayload() {}
+
+// TurnCanceledPayload is emitted on turn.canceled when a turn is intentionally stopped by user action.
+type TurnCanceledPayload struct {
+	TurnID    string `json:"turn_id" doc:"Unique identifier for this conversation turn."`
+	SessionID string `json:"session_id" doc:"Session ID where the turn was canceled."`
+	Reason    string `json:"reason,omitempty" doc:"Optional reason for cancellation (e.g. user_interrupt, session_reset)."`
+}
+
+// IsEventPayload marks TurnCanceledPayload as an events.Payload variant.
+func (TurnCanceledPayload) IsEventPayload() {}
+
 // SupervisorStartedPayload classifies how the previous supervisor
 // instance exited, recorded once per supervisor startup. The cause is
 // derived from the clean-shutdown handoff token the previous instance's

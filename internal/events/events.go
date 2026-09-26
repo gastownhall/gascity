@@ -313,6 +313,14 @@ const (
 	RequestResultRigCreate      = "request.result.rig.create"
 	RequestFailed               = "request.failed"
 
+	// Turn lifecycle events track the lifecycle of a conversation turn.
+	// A turn starts when a user message is submitted and ends when all
+	// provider responses are complete.
+	TurnStarted   = "turn.started"
+	TurnCompleted = "turn.completed"
+	TurnFailed    = "turn.failed"
+	TurnCanceled  = "turn.canceled"
+
 	// RigProvisionProgress reports one provisioning step of a server-side
 	// rig add (clone, beads-init, packs, config, routes). Non-terminal;
 	// the terminal outcome is RequestResultRigCreate or RequestFailed.

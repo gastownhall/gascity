@@ -751,11 +751,17 @@ func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitIn
 			s.emitSessionSubmitFailed(reqID, "resolve_failed", err.Error())
 			return
 		}
+		
+		// Emit turn.started event
+		s.emitTurnStarted(turnID, id, input.Body.ClientMessageID, reqID)
+		
 		outcome, submitErr := s.submitMessageToSession(context.Background(), store.Store, id, message, intent, input.Body.ClientMessageID)
 		if submitErr != nil {
 			s.emitSessionSubmitFailed(reqID, "submit_failed", submitErr.Error())
+			s.emitTurnFailed(turnID, id, "submit_failed", submitErr.Error())
 		} else {
 			s.emitSessionSubmitSucceeded(reqID, id, outcome.Queued, string(intent))
+			// Note: turn.completed will be emitted by the worker when all provider responses are done
 		}
 	}()
 
@@ -849,6 +855,9 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 				sendResult(messageResult{errorCode: "resolve_failed", err: err})
 				return
 			}
+				// Emit turn.started event
+				s.emitTurnStarted(turnID, id, "", reqID)
+
 			if err := s.sendUserMessageToSession(ctx, store.Store, id, message); err != nil {
 				code := "message_failed"
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
@@ -867,6 +876,7 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 			terminalEmitted.Store(true)
 			if result.err != nil {
 				s.emitSessionMessageFailed(reqID, result.errorCode, result.err.Error())
+				s.emitTurnFailed(turnID, result.sessionID, result.errorCode, result.err.Error())
 				return
 			}
 			s.emitSessionMessageSucceeded(reqID, result.sessionID)
@@ -885,6 +895,7 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 			}
 			terminalEmitted.Store(true)
 			s.emitSessionMessageFailed(reqID, "timeout", fmt.Sprintf("session.message timed out after %s", sessionMessageAsyncTimeout))
+				s.emitTurnFailed(turnID, sessionTarget, "timeout", fmt.Sprintf("session.message timed out after %s", sessionMessageAsyncTimeout))
 		}
 	}()
 
