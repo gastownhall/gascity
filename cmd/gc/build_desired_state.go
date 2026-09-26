@@ -128,6 +128,14 @@ type DesiredStateResult struct {
 	// per-bead readiness slice for buildAwakeInputFromReconciler's
 	// AwakeWorkBead.Ready flag.
 	ReadyAssigned map[storeScopedBeadKey]bool
+	// PoolWakeReadiness is the serve side's verdict on the AssignedWorkBeads
+	// whose claimant session is gone: would the ready query a woken seat runs
+	// actually be served that row? Computed once per demand phase from the same
+	// Ready() snapshot the scale-check probes read, and handed to every
+	// filterAssignedWorkBeadsForPoolDemand call so the recomputing consumers
+	// below answer readiness exactly as this phase did. Nil means no verdict was
+	// resolved, which keeps every row.
+	PoolWakeReadiness *poolWakeReadiness
 	// ContinuationClaimCandidates is the fail-closed projection of
 	// ReadyAssigned used by the post-reconcile continuation-claim backstop.
 	// It is empty on any assigned-work partial read.
@@ -794,6 +802,7 @@ func buildDesiredStateWithSessionBeadsAt(
 	var readyUnassignedRoutedWorkBeads []beads.Bead
 	var readyUnassignedRoutedWorkStoreRefs []string
 	var readyAssigned map[storeScopedBeadKey]bool
+	var poolWakeReady *poolWakeReadiness
 	var storePartial bool
 	var scaleCheckCounts map[string]int
 	var scaleCheckDemandByTemplate map[string]scaleCheckDemand
@@ -977,7 +986,14 @@ func buildDesiredStateWithSessionBeadsAt(
 		if len(scaleCheckPartialTemplates) > 0 {
 			fmt.Fprintf(stderr, "scaleCheck: PARTIAL — scale_check failed for %s, retaining affected sessions\n", strings.Join(sortedBoolMapKeys(scaleCheckPartialTemplates), ",")) //nolint:errcheck
 		}
-		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
+		// The wake tier's rows are read for readiness here, in the same phase and
+		// off the same per-store snapshot the scale-check probes above used, so
+		// the assigned arm and the unassigned arm cannot disagree about what
+		// "ready" means. demandReadyCache (not assignedReadyCache) is the correct
+		// oracle: this runs AFTER canonicalizeLegacyBoundAssignedWork's rewrites,
+		// on the same side of that write as every other demand-phase read.
+		poolWakeReady = newPoolWakeReadiness(demandReadyCache, assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, stderr)
+		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs, poolWakeReady)
 		bp.assignedWorkBeads = poolWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
@@ -1224,6 +1240,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		ReadyUnassignedRoutedWorkBeads:     readyUnassignedRoutedWorkBeads,
 		ReadyUnassignedRoutedWorkStoreRefs: readyUnassignedRoutedWorkStoreRefs,
 		ReadyAssigned:                      readyAssigned,
+		PoolWakeReadiness:                  poolWakeReady,
 		ContinuationClaimCandidates:        continuationClaimCandidates,
 		ContinuationClaimQueryPartial:      continuationClaimQueryPartial,
 		NamedSessionDemand:                 namedWorkReady,
