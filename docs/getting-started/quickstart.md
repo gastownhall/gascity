@@ -60,10 +60,8 @@ outside your session. See [Formulas](/tutorials/05-formulas) and
 ## 4. Watch an Agent Work
 
 ```bash
-gc bd show <bead-id>
+gc bd show <bead-id> --watch
 ```
-
-Re-run it until the bead's status flips from `OPEN` to `CLOSED`.
 
 For a fuller walkthrough of cities and rigs, continue to
 [Tutorial 01](/tutorials/01-cities-and-rigs). To see Gas City do the thing it
