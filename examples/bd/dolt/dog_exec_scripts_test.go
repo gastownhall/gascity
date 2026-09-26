@@ -4378,6 +4378,148 @@ func TestCompactScriptNonRaceClassQuarantineReasonsNeverAutoClear(t *testing.T) 
 	}
 }
 
+func TestCompactScriptDryRunQuarantineHardBlockIsReadOnly(t *testing.T) {
+	cases := []struct {
+		name     string
+		args     []string
+		extraEnv []string
+	}{
+		{name: "flatten"},
+		{name: "bare_gc", extraEnv: []string{"GC_DOLT_COMPACT_BARE_GC=1"}},
+		{name: "gc_only", args: []string{"--gc-only"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+			if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+				t.Fatalf("mkdir quarantine dir: %v", err)
+			}
+			markerData := []byte("db=beads\nreason=manual repair pending\ncreated_at=2026-05-01T00:00:00Z\n")
+			if err := os.WriteFile(marker, markerData, 0o600); err != nil {
+				t.Fatalf("write quarantine marker: %v", err)
+			}
+
+			args := append(append([]string{}, tc.args...), "--dry-run")
+			out, err := fixture.runWithArgs(t, "below_threshold", args, tc.extraEnv...)
+			if err == nil {
+				t.Fatalf("dry-run must report that the existing quarantine blocks compaction:\n%s", out)
+			}
+			if !strings.Contains(out, "dry-run") || !strings.Contains(out, "integrity quarantine marker exists") {
+				t.Fatalf("dry-run output missing read-only quarantine diagnosis:\n%s", out)
+			}
+			gotMarkerData, readErr := os.ReadFile(marker)
+			if readErr != nil {
+				t.Fatalf("read quarantine marker: %v", readErr)
+			}
+			if string(gotMarkerData) != string(markerData) {
+				t.Fatalf("dry-run mutated quarantine evidence\nwant:\n%s\ngot:\n%s", markerData, gotMarkerData)
+			}
+			if _, statErr := os.Stat(compactBeadsQuarantineNotifyStatePath(fixture.cityPath)); !os.IsNotExist(statErr) {
+				t.Fatalf("dry-run must not create quarantine notify state; stat=%v", statErr)
+			}
+			log := readCompactGCLog(t, fixture)
+			if strings.Contains(log, "gc event emit dolt.compact.quarantine") || strings.Contains(log, "gc mail send ") {
+				t.Fatalf("dry-run must not emit quarantine events or mail:\n%s", log)
+			}
+		})
+	}
+}
+
+func TestCompactScriptDryRunQuarantineAutoClearPreviewIsReadOnly(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "same_count_db_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("setup cycle should have quarantined, but compact succeeded:\n%s", firstOut)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	markerData, readErr := os.ReadFile(marker)
+	if readErr != nil {
+		t.Fatalf("read setup quarantine marker: %v", readErr)
+	}
+	if err := os.RemoveAll(filepath.Dir(compactBeadsQuarantineNotifyStatePath(fixture.cityPath))); err != nil {
+		t.Fatalf("clear setup notify state: %v", err)
+	}
+	if err := os.WriteFile(fixture.gcLog, nil, 0o644); err != nil {
+		t.Fatalf("clear setup gc log: %v", err)
+	}
+	if err := os.WriteFile(fixture.doltLog, nil, 0o644); err != nil {
+		t.Fatalf("clear setup dolt log: %v", err)
+	}
+
+	out, err := fixture.runWithArgs(t, "quarantine_autoclear_confined", []string{"--dry-run"}, "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("dry-run should preview a provable auto-clear and continue: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "dry-run") || !strings.Contains(out, "would auto-clear") {
+		t.Fatalf("dry-run output missing auto-clear preview:\n%s", out)
+	}
+	gotMarkerData, readErr := os.ReadFile(marker)
+	if readErr != nil {
+		t.Fatalf("dry-run removed the quarantine marker: %v", readErr)
+	}
+	if string(gotMarkerData) != string(markerData) {
+		t.Fatalf("dry-run mutated quarantine evidence\nwant:\n%s\ngot:\n%s", markerData, gotMarkerData)
+	}
+	if _, statErr := os.Stat(compactBeadsQuarantineNotifyStatePath(fixture.cityPath)); !os.IsNotExist(statErr) {
+		t.Fatalf("dry-run must not create quarantine notify state; stat=%v", statErr)
+	}
+	gcLog := readCompactGCLog(t, fixture)
+	if strings.Contains(gcLog, "gc event emit dolt.compact.quarantine") || strings.Contains(gcLog, "gc mail send ") {
+		t.Fatalf("dry-run must not emit auto-clear events or mail:\n%s", gcLog)
+	}
+	doltLog, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	for _, forbidden := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_GC"} {
+		if strings.Contains(string(doltLog), forbidden) {
+			t.Fatalf("dry-run auto-clear preview must not issue %s:\n%s", forbidden, doltLog)
+		}
+	}
+}
+
+func TestCompactScriptDryRunQuarantineFailedAutoClearIsReadOnly(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "same_count_db_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("setup cycle should have quarantined, but compact succeeded:\n%s", firstOut)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	markerData, readErr := os.ReadFile(marker)
+	if readErr != nil {
+		t.Fatalf("read setup quarantine marker: %v", readErr)
+	}
+	if err := os.RemoveAll(filepath.Dir(compactBeadsQuarantineNotifyStatePath(fixture.cityPath))); err != nil {
+		t.Fatalf("clear setup notify state: %v", err)
+	}
+	if err := os.WriteFile(fixture.gcLog, nil, 0o644); err != nil {
+		t.Fatalf("clear setup gc log: %v", err)
+	}
+
+	out, err := fixture.runWithArgs(t, "quarantine_autoclear_outside_known_tables", []string{"--dry-run"}, "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("dry-run must report a failed auto-clear proof as blocked:\n%s", out)
+	}
+	if !strings.Contains(out, "dry-run") || !strings.Contains(out, "cannot auto-clear") {
+		t.Fatalf("dry-run output missing failed auto-clear diagnosis:\n%s", out)
+	}
+	gotMarkerData, readErr := os.ReadFile(marker)
+	if readErr != nil {
+		t.Fatalf("read quarantine marker: %v", readErr)
+	}
+	if string(gotMarkerData) != string(markerData) {
+		t.Fatalf("dry-run mutated quarantine evidence\nwant:\n%s\ngot:\n%s", markerData, gotMarkerData)
+	}
+	if _, statErr := os.Stat(compactBeadsQuarantineNotifyStatePath(fixture.cityPath)); !os.IsNotExist(statErr) {
+		t.Fatalf("dry-run must not create quarantine notify state; stat=%v", statErr)
+	}
+	log := readCompactGCLog(t, fixture)
+	if strings.Contains(log, "gc event emit dolt.compact.quarantine") || strings.Contains(log, "gc mail send ") {
+		t.Fatalf("dry-run must not emit failed-auto-clear events or mail:\n%s", log)
+	}
+}
+
 func TestCompactScriptExistingQuarantineNotificationDoesNotMutateEvidenceMarker(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")

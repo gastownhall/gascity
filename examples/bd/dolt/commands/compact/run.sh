@@ -1895,6 +1895,19 @@ report_existing_quarantine() {
   record_marker_notify_state "$quarantine_dir" "$db" "${quarantine_reason:-<unknown>}" "$quarantine_alert_emitted" "$quarantine_notify_error"
 }
 
+# report_existing_quarantine_dry_run DB
+#   Read-only counterpart to report_existing_quarantine. A dry-run must expose
+#   the same blocking evidence without emitting events/mail or touching notify
+#   state; the operator can then run the real command to perform those effects.
+report_existing_quarantine_dry_run() {
+  db="$1"
+  quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
+  quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
+  quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
+  print_existing_quarantine_marker "$db" "$quarantine_marker" "$quarantine_reason" "$quarantine_created_at"
+  printf 'compact: db=%s quarantine marker preserved — dry-run (would keep quarantine and block compaction)\n' "$db" >&2
+}
+
 ensure_compact_marker_writable() {
   dir="$1"
   db="$2"
@@ -2756,21 +2769,34 @@ flatten_database() {
            diff_stat_preserved_tables "$db" "$autoclear_preflight_head" "$autoclear_current_head" > "$autoclear_preserved_tables_tmp" && \
            db_root_drift_within_verified_tables "$db" "$autoclear_preflight_head" "$autoclear_current_head" "$autoclear_preserved_tables_tmp"; then
           rm -f "$autoclear_preserved_tables_tmp"
-          printf 'compact: db=%s integrity quarantine marker auto-cleared — drift confined to content-preserved table(s) [%s] via DOLT_DIFF_STAT(%s..%s), reason=%s created_at=%s\n' \
-            "$db" "${db_root_drift_proven_tables:-}" "${autoclear_preflight_head:-<empty>}" "$autoclear_current_head" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
-          emit_compact_quarantine_event "$db" "compact-quarantine-autoclear" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}"
-          mail_compact_quarantine_alert "$db" "compact-quarantine-autoclear" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
-          rm -f "$quarantine_marker"
+          if [ -n "$dry_run" ]; then
+            printf 'compact: db=%s integrity quarantine marker preserved — dry-run (would auto-clear; drift confined to content-preserved table(s) [%s] via DOLT_DIFF_STAT(%s..%s), reason=%s created_at=%s)\n' \
+              "$db" "${db_root_drift_proven_tables:-}" "${autoclear_preflight_head:-<empty>}" "$autoclear_current_head" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
+          else
+            printf 'compact: db=%s integrity quarantine marker auto-cleared — drift confined to content-preserved table(s) [%s] via DOLT_DIFF_STAT(%s..%s), reason=%s created_at=%s\n' \
+              "$db" "${db_root_drift_proven_tables:-}" "${autoclear_preflight_head:-<empty>}" "$autoclear_current_head" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
+            emit_compact_quarantine_event "$db" "compact-quarantine-autoclear" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}"
+            mail_compact_quarantine_alert "$db" "compact-quarantine-autoclear" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
+            rm -f "$quarantine_marker"
+          fi
         else
           rm -f "$autoclear_preserved_tables_tmp"
           printf 'compact: db=%s cannot auto-clear integrity quarantine marker — preservation proof did not confirm drift is confined to content-preserved, verified tables (reason=%s)\n' \
             "$db" "${quarantine_reason:-<unknown>}" >&2
-          report_existing_quarantine "$db"
+          if [ -n "$dry_run" ]; then
+            report_existing_quarantine_dry_run "$db"
+          else
+            report_existing_quarantine "$db"
+          fi
           return 1
         fi
         ;;
       *)
-        report_existing_quarantine "$db"
+        if [ -n "$dry_run" ]; then
+          report_existing_quarantine_dry_run "$db"
+        else
+          report_existing_quarantine "$db"
+        fi
         return 1
         ;;
     esac
@@ -3601,7 +3627,11 @@ bare_gc_database() {
   fi
 
   if has_compact_marker "$quarantine_dir" "$db"; then
-    report_existing_quarantine "$db"
+    if [ -n "$dry_run" ]; then
+      report_existing_quarantine_dry_run "$db"
+    else
+      report_existing_quarantine "$db"
+    fi
     return 1
   fi
 
@@ -3641,7 +3671,11 @@ gc_only_database() {
   if has_compact_marker "$quarantine_dir" "$db"; then
     # Same operator-visible state as a scheduled refusal, so it reports the
     # same way: stdout alone leaves the quarantine off the bus entirely.
-    report_existing_quarantine "$db"
+    if [ -n "$dry_run" ]; then
+      report_existing_quarantine_dry_run "$db"
+    else
+      report_existing_quarantine "$db"
+    fi
     return 1
   fi
 
