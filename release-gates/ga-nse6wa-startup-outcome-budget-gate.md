@@ -53,3 +53,5 @@ diff_tests_executed:
 Additional acceptance command: isolated-test-run.sh -- go test -run ^TestPhase2StartupOutcomeBounds$ -count=5 -v ./internal/worker/workertest; scope focused, 5/5 top-level PASS, exit 0, observed concurrently with the full suite. Its results are excluded from the full-suite counts above.
 
 Evidence: /var/tmp/ga-nse6wa-full-r1.log, /var/tmp/ga-nse6wa-full-shards-r1/, /var/tmp/ga-nse6wa-policy-r1.log, /var/tmp/ga-nse6wa-static-r1.log, /var/tmp/ga-nse6wa-repeat-r1.log.
+
+Publication freshness check: origin/main advanced to 7950253e11fa96f815981a16825f2e9522cad199. Merge-tree with the unchanged reviewed source exited 0, tree b472db7e23599f55bdf56a823d26369b8ae447f2; ancestry scope still PASS. The full-suite counts above remain from the explicitly named tested base, not this later main tip.
