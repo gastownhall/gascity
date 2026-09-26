@@ -373,15 +373,21 @@ func structuredHistoryFromSnapshot(snapshot *worker.HistorySnapshot) *SessionStr
 // absolute server-side transcript file path, which must never reach the
 // structured wire: it discloses the OS username, the on-disk directory layout,
 // the project working directory, and the provider session UUID. Hashing the
-// path together with the provider and logical conversation IDs yields an
-// identifier that is stable for a given stream and changes when the transcript
-// rotates to a new path — all a client needs for stream identity — while
-// revealing none of the underlying filesystem detail.
+// path together with the provider session ID yields an identifier that is
+// stable for a given stream and changes when the transcript rotates to a new
+// path — all a client needs for stream identity — while revealing none of the
+// underlying filesystem detail.
+//
+// The logical conversation ID is deliberately excluded. It falls back to the
+// GC session ID until a provider hook persists the session key, and that write
+// can become visible after the transcript is already being served (a Codex
+// SessionStart hook records it out of band). The physical stream is unchanged
+// by that metadata update, so its identity must be too.
 func opaqueTranscriptStreamID(snapshot *worker.HistorySnapshot) string {
 	if snapshot == nil {
 		return ""
 	}
-	identity := snapshot.TranscriptStreamID + "\x00" + snapshot.ProviderSessionID + "\x00" + snapshot.LogicalConversationID
+	identity := snapshot.TranscriptStreamID + "\x00" + snapshot.ProviderSessionID
 	return sha256Hex([]byte(identity))
 }
 

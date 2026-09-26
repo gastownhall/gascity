@@ -200,11 +200,15 @@ func structuredResumeToken(projection SessionStreamStructuredMessageEvent, inclu
 	}
 }
 
+// structuredStreamIdentityHash identifies the physical transcript stream a
+// resume token was issued against. Like opaqueTranscriptStreamID it excludes the
+// logical conversation ID, which can change when a late session-key write
+// becomes visible; that metadata change must not invalidate cursors.
 func structuredStreamIdentityHash(history *SessionStructuredHistory) string {
 	if history == nil {
 		return sha256Hex(nil)
 	}
-	identity := history.TranscriptStreamID + "\x00" + history.ProviderSessionID + "\x00" + history.LogicalConversationID
+	identity := history.TranscriptStreamID + "\x00" + history.ProviderSessionID
 	return sha256Hex([]byte(identity))
 }
 
