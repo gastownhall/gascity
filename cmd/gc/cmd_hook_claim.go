@@ -1210,10 +1210,18 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	}
 	stampHookSessionCurrentClaim(bead, opts, ops, stderr)
 	publishHookClaimRunMap(bead, opts, ops, stderr)
+	// Continuation pre-assignment is BEST-EFFORT, like the sibling
+	// stampHookClaimIdentity and publishHookClaimRunMap calls above: it only
+	// optimizes which session is offered the next step. It must never veto the
+	// claim itself. A store hiccup, Dolt latency past the mutation budget, or a
+	// sibling that refuses an assignment would otherwise turn a successful claim
+	// (the held existing_assignment step, or a fresh claim) into a non-zero exit
+	// with no JSON on stdout — the exact hard-fail that stranded graph.v2 recon
+	// workflows (sys-pxryan.20). We keep whatever did land and log the rest; the
+	// preassignment is retried on the next tick (NDI).
 	assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: preassigning continuation group for %s: %v\n", bead.ID, err) //nolint:errcheck
-		return 1
+		fmt.Fprintf(stderr, "gc hook --claim: preassigning continuation group for %s: %v (non-fatal; returning held step, continuation retried next tick)\n", bead.ID, err) //nolint:errcheck
 	}
 	result.ContinuationAssigned = assigned
 	if writeErr := writeHookClaimResultLine(result, opts.JSON, stdout); writeErr != nil {
