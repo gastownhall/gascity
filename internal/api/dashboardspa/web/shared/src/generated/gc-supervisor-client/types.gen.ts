@@ -12512,7 +12512,7 @@ export type StreamEventsData = {
     body?: never;
     headers?: {
         /**
-         * SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head.
+         * SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head. Takes precedence over after_seq; a value that is not a non-negative integer starts at the current city event head.
          */
         'Last-Event-ID'?: string;
     };
@@ -12524,7 +12524,7 @@ export type StreamEventsData = {
     };
     query?: {
         /**
-         * Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head.
+         * Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head. A value that is not a non-negative integer is rejected with 422.
          */
         after_seq?: string;
     };

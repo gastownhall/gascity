@@ -297,7 +297,9 @@ requests.
   `payload.request_id`.
 - Resume:
   - `Last-Event-ID` or `after_seq`; omit both to start from the
-    current city event head.
+    current city event head. `Last-Event-ID` takes precedence; one that is
+    not a non-negative integer also starts from the head rather than
+    replaying history. A malformed `after_seq` is rejected with `422`.
 - `gc events` in city scope outputs one `TypedEventStreamEnvelope` JSON
   object per line.
 - `gc events --watch` and `gc events --follow` in city scope output one

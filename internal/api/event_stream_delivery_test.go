@@ -133,6 +133,68 @@ func TestCityEventStreamDeliversEveryEventWhenBeadStoresAreWedged(t *testing.T) 
 	}
 }
 
+// TestCityEventStreamUnparseableCursorStartsAtHead proves the handler wires a
+// Last-Event-ID it cannot place to the head-start path. The cursor matrix is
+// owned by TestEventStreamInputResolveAfterSeq; this is the one stream-level
+// proof that such a cursor never reaches Watch(0).
+//
+// Regression: an unparseable Last-Event-ID resolved to 0 and bypassed the
+// head-start guard, so a client that sent "abc" was streamed the city's entire
+// retained history from seq 1.
+//
+// The handler reads LatestSeq before it flushes headers, so recording in
+// afterAttach deterministically lands after the head-start position.
+func TestCityEventStreamUnparseableCursorStartsAtHead(t *testing.T) {
+	const backlog = 3
+
+	state := newFakeState(t)
+	state.cityName = "resume-city"
+	recorder := newTestEventRecorder(t, state)
+	record := func() { recorder.Record(events.Event{Type: events.MailSent, Actor: "human", Subject: "mayor"}) }
+	for range backlog {
+		record()
+	}
+
+	header := http.Header{"Last-Event-ID": []string{"abc"}}
+	body := driveCityEventStreamRequest(t, state, nil, "", header, record, func(b string) bool {
+		return len(parseStreamEventSeqs(b)) > 0
+	})
+	seqs := parseStreamEventSeqs(body)
+	if len(seqs) == 0 {
+		t.Fatalf("stream delivered no event frame; body: %s", body)
+	}
+	if want := uint64(backlog + 1); seqs[0] != want {
+		t.Fatalf("first delivered seq = %d, want %d (the event recorded after attach); an unparseable Last-Event-ID must head-start, not replay from 1", seqs[0], want)
+	}
+}
+
+// TestCityEventStreamRejectsMalformedAfterSeq proves EventStreamInput.Resolve
+// is wired on the SSE operation: a malformed after_seq is a 422 Problem
+// Details before the stream commits. Validation cases are owned by
+// TestEventStreamInputResolveRejectsMalformedAfterSeq.
+func TestCityEventStreamRejectsMalformedAfterSeq(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "resume-city"
+	newTestEventRecorder(t, state)
+
+	handler := NewSupervisorMux(&singleStateResolver{state: state}, nil, false, "test", "", time.Now()).
+		WithAnyHostAllowed().Handler()
+	// A regression streams instead of rejecting; the deadline turns that into a
+	// status failure rather than a hung test.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/v0/city/"+state.cityName+"/events/stream?after_seq=nope", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "after_seq must be a non-negative integer") {
+		t.Fatalf("body = %q, want after_seq validation message", rec.Body.String())
+	}
+}
+
 // TestCityEventStreamProjectsWorkflowEventsWhenKeepingUp is the counterweight
 // to the delivery test above: skipping the workflow projection under backlog
 // must not turn into skipping it always. A stream that is keeping up still
@@ -300,6 +362,19 @@ func (r *streamRecorder) code() int {
 // waiting first would hang a failing test instead of failing it.
 func driveCityEventStream(t *testing.T, state *fakeState, gate *storeGate, enough func(string) bool) string {
 	t.Helper()
+	return driveCityEventStreamRequest(t, state, gate, "?after_seq=0", nil, nil, enough)
+}
+
+// driveCityEventStreamRequest is driveCityEventStream with the reconnect
+// cursor under the caller's control: query is appended to the stream path and
+// header is copied onto the request. afterAttach, when non-nil, runs once the
+// handler has flushed its headers — it attaches its watcher before that flush,
+// so the start position is fixed and events recorded in afterAttach are
+// "after" it.
+func driveCityEventStreamRequest(t *testing.T, state *fakeState, gate *storeGate, query string, header http.Header,
+	afterAttach func(), enough func(string) bool,
+) string {
+	t.Helper()
 
 	mux := NewSupervisorMux(&singleStateResolver{state: state}, nil, false, "test", "", time.Now()).
 		WithAnyHostAllowed()
@@ -309,7 +384,12 @@ func driveCityEventStream(t *testing.T, state *fakeState, gate *storeGate, enoug
 	defer cancel()
 
 	req := httptest.NewRequest(http.MethodGet,
-		"/v0/city/"+state.cityName+"/events/stream?after_seq=0", nil).WithContext(ctx)
+		"/v0/city/"+state.cityName+"/events/stream"+query, nil).WithContext(ctx)
+	for k, vs := range header {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
 	rec := newStreamRecorder()
 
 	done := make(chan struct{})
@@ -327,6 +407,14 @@ func driveCityEventStream(t *testing.T, state *fakeState, gate *storeGate, enoug
 		return rec.body()
 	}
 
+	if afterAttach != nil {
+		select {
+		case <-rec.flushed:
+		case <-ctx.Done():
+			return unwind()
+		}
+		afterAttach()
+	}
 	for !enough(rec.body()) {
 		select {
 		case <-rec.flushed:
