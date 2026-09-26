@@ -116,7 +116,15 @@ that assignee.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
-auto-export behavior, invoke bd directly.`,
+auto-export behavior, invoke bd directly.
+
+gc bd refuses a write that would set an assignee naming no configured
+agent or named session, because work assigned to a target that does not
+resolve is never picked up and nothing reports it. Set
+GC_ALLOW_UNRESOLVED_ASSIGNEE=1 to write it anyway; a false value (0,
+false, no, off) leaves the check on. The check is skipped when no agents
+resolve from the config at all, since that cannot distinguish an
+unroutable assignee from a config that failed to load.`,
 		Example: `  gc bd --rig my-project list
   gc bd --rig my-project create "New task"
   gc bd show my-project-abc          # auto-detects rig from bead prefix
@@ -331,15 +339,10 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 	verb, args := bdflags.SplitGlobalFlags(bdArgs)
 	// bd registers `new` as an alias for `create` (bd create --help: "Aliases:
 	// create, new"), so the alias has to reach the same admission check AND the
-	// same flag manifest. Normalizing here covers both, because those are the
-	// only two things verb is read for. The gate alone would not: bdflags keys
-	// its manifests under the canonical verb only and performs no alias
-	// normalization, so ValueFlags("new") is nil, and an empty manifest steps
-	// over no value — the failure mode globalValueFlags' doc comment calls
-	// load-bearing.
-	if verb == "new" {
-		verb = "create"
-	}
+	// same flag manifest. bdNormalizeSubcommandAlias is the one shared place
+	// every verb reader normalizes through — see its doc comment for why a
+	// second copy of this map must not exist.
+	verb = bdNormalizeSubcommandAlias(verb)
 	if verb != "create" && verb != "update" {
 		return "", false
 	}
@@ -524,6 +527,25 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// from a store the operator did not name. Auto-detected scope (GC_RIG, -C,
 	// cwd) is resolved inside resolveBdScopeTarget and deliberately does not
 	// travel — see refuseRigScopedClassOwnedTarget.
+	//
+	// The assignee gate runs here, before this by-ID door, and nowhere else:
+	// maybeRouteBdByID writes the assignee in process (cmd_bd_by_id.go,
+	// serveBdByIDResolved), so a refusal placed only after it would run after
+	// the write it exists to prevent. This position also covers every later
+	// door by construction. It precedes the exact-ID guard below, whose
+	// store.Get can fall back to shelling out to the real bd binary
+	// (native-store-unavailable fallback) — a refusal must precede that side
+	// effect, not merely precede the forwarded mutation — and it precedes the
+	// forwarded bd subprocess further down. The gate is a pure check over cfg
+	// and bdArgs with no store access, and neither is reassigned between here
+	// and those doors, so a second call site could only repeat this verdict
+	// (and repeat its empty-roster warning).
+	if !assigneeGateBypassed() {
+		if err := checkBdAssigneeArgs(cfg, bdArgs, stderr); err != nil {
+			fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 	if code, handled := maybeRouteBdByID(cityPath, rigName, bdArgs, stdout, stderr); handled {
 		return code
 	}
@@ -631,6 +653,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	}
 
 	reapStaleBdExportJSONL(target.ScopeRoot)
+
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 
 	// Resolve the same binary every other bd path in the tree resolves for

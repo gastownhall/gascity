@@ -308,6 +308,14 @@ gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
 auto-export behavior, invoke bd directly.
 
+gc bd refuses a write that would set an assignee naming no configured
+agent or named session, because work assigned to a target that does not
+resolve is never picked up and nothing reports it. Set
+GC_ALLOW_UNRESOLVED_ASSIGNEE=1 to write it anyway; a false value (0,
+false, no, off) leaves the check on. The check is skipped when no agents
+resolve from the config at all, since that cannot distinguish an
+unroutable assignee from a config that failed to load.
+
 ```
 gc bd [bd-args...]
 ```
