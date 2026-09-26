@@ -364,7 +364,7 @@ func computePoolDesiredStatesAt(
 		// to a non-closed session bead. These sessions must stay alive.
 		for _, wb := range assignedWorkBeads {
 			routedTo := routedToOrLegacyWorkflowTarget(wb)
-			if wb.Status != "in_progress" && wb.Status != "open" {
+			if wb.Status != "in_progress" && !beads.IsOpenStatus(wb.Status) {
 				continue
 			}
 			assignee := strings.TrimSpace(wb.Assignee)

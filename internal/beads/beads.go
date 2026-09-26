@@ -76,7 +76,7 @@ var ErrBDSilentFallback = errors.New("bd silent fallback to on-disk auto-import"
 type Bead struct {
 	ID        string    `json:"id"`
 	Title     string    `json:"title"`
-	Status    string    `json:"status"`     // "open", "in_progress", "closed"
+	Status    string    `json:"status"`     // "open", "in_progress", "blocked", "closed"; "blocked" is in the open set — see IsOpenStatus
 	Type      string    `json:"issue_type"` // "task" default; matches bd wire format
 	Priority  *int      `json:"priority,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
@@ -620,6 +620,19 @@ func IsReadyExcludedType(t string) bool {
 	return readyExcludeTypes[t]
 }
 
+// IsOpenStatus reports whether a read-model status belongs to the open set:
+// not closed, and not claimed by a running worker. bd's blocked is a member,
+// because mapBdStatus stopped collapsing it into "open" (sc-bpn7w) and every
+// demand, claim, dispatch, and mail guard that means "still open" must keep
+// treating a blocked bead exactly as it did before that widening.
+//
+// Ready is deliberately NOT this set: IsReadyCandidateForTier compares the
+// status exactly, mirroring nativeDoltOpenReadyStatuses, because bd's own
+// ready semantics exclude blocked (ga-3mv5d3).
+func IsOpenStatus(status string) bool {
+	return status == "open" || status == "blocked"
+}
+
 // IsReadyCandidate reports whether a bead passes the store-independent default
 // Ready filters: open status, main tier, actionable type, and no future
 // defer_until. Dependency and assignee checks are store-specific and happen
@@ -643,7 +656,7 @@ func IsReadyCandidateForTier(b Bead, now time.Time, tier TierMode) bool {
 			return false
 		}
 	}
-	return b.Status == "open" &&
+	return b.Status == "open" && // exact: see IsOpenStatus on why Ready excludes blocked
 		!IsReadyExcludedBead(b) &&
 		!IsDeferred(b, now)
 }

@@ -1569,9 +1569,10 @@ func collectAssignedWorkBeadsWithStores(
 			}
 			// Open assigned molecule roots that count as wake demand. Whether an
 			// open assigned root is demand must be decided from the bead's RAW
-			// status, not the collapsed Bead.Status: mapBdStatus folds bd's
-			// blocked/deferred/review/testing into "open", so a blocked assigned
-			// root reads as "open" through the cache and would wrongly re-enter
+			// status, not the read-model Bead.Status: mapBdStatus folds bd's
+			// deferred/review/testing into "open" and keeps blocked in the open
+			// SET, so a blocked assigned root still passes a cached open read and
+			// would wrongly re-enter
 			// demand (EB-42o8/gc-nz5i; extends gc-4zb/#4395). A Live read reaches
 			// the backing store's raw --status=open filter, which excludes it —
 			// see listOpenForControllerDemandLive.
@@ -1727,7 +1728,7 @@ func readyCapturedAssigneeSet(work []beads.Bead, storeRefs []string, readyAssign
 		if assignee == "" {
 			continue
 		}
-		if bead.Status != "open" && bead.Status != "in_progress" {
+		if !beads.IsOpenStatus(bead.Status) && bead.Status != "in_progress" {
 			continue
 		}
 		// Fail safe (probe rather than skip) when the index-aligned store ref
@@ -2268,7 +2269,7 @@ func openControlDispatcherDemand(cfg *config.City, workBeads []beads.Bead) map[s
 		return demand
 	}
 	for _, wb := range workBeads {
-		if wb.Status != "open" || strings.TrimSpace(wb.Assignee) != "" {
+		if !beads.IsOpenStatus(wb.Status) || strings.TrimSpace(wb.Assignee) != "" {
 			continue
 		}
 		for _, candidate := range controllerDemandRouteCandidates(wb) {
@@ -2410,9 +2411,9 @@ func listBothTiersForControllerDemand(store beads.Store, query beads.ListQuery) 
 // listOpenForControllerDemandLive reads open work for the controller-demand and
 // spawn-capacity paths on the LIVE tier so the backing store's raw-status filter
 // runs. listBothTiersForControllerDemand serves a Status:"open" query from the
-// cache (handles.Cached forces Live=false), which filters against the collapsed
-// Bead.Status: mapBdStatus folds bd's blocked/deferred/review/testing into Gas
-// City's "open", so a blocked bead is indistinguishable from ready work and
+// cache (handles.Cached forces Live=false), which filters against the read-model
+// Bead.Status: mapBdStatus folds bd's deferred/review/testing into "open" and
+// keeps blocked in the open SET, so a blocked bead still reads as open work and
 // would count as controller demand, re-entering dispatch (EB-42o8/gc-nz5i). Only
 // a Live read reaches the backing store's server-side --status=open filter
 // (BdStore passes it to bd; DoltliteReadStore matches WHERE status=?), which
@@ -2785,7 +2786,7 @@ func markReadyAssigned(readyIDs map[string]bool, b beads.Bead) {
 }
 
 func isOpenAssignedMoleculeWork(b beads.Bead) bool {
-	if b.Status != "open" || strings.TrimSpace(b.Assignee) == "" {
+	if !beads.IsOpenStatus(b.Status) || strings.TrimSpace(b.Assignee) == "" {
 		return false
 	}
 	if !beads.IsMoleculeType(b.Type) {
@@ -3657,8 +3658,9 @@ func bindNamedSessionTriggerBead(store beads.Store, info session.Info, cityName 
 		return info, nil
 	}
 	if !stale {
-		// mapBdStatus folds bd's raw `blocked` into "open" (gc-4zb/#4395), so a
-		// literal status check never fires through BdStore/DoltLite/NativeDolt.
+		// A dependency-blocked bead keeps bd's raw status "open" (gc-4zb/#4395):
+		// bd derives dependency blocking separately, so a literal status check
+		// never fires through BdStore/DoltLite/NativeDolt.
 		// IsBlocked is bd's denormalized ready-work projection and is the signal
 		// the wake side already uses for #4726. A nil projection (native DoltLite
 		// snapshots, pre-1.0.5 bd) fails open: the stamp survives one more tick
@@ -5016,7 +5018,7 @@ func isFailedCreateSessionInfo(i session.Info) bool {
 func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) bool {
 	for _, wb := range workBeads {
 		assignee := strings.TrimSpace(wb.Assignee)
-		if assignee == "" || (wb.Status != "open" && wb.Status != "in_progress") {
+		if assignee == "" || (!beads.IsOpenStatus(wb.Status) && wb.Status != "in_progress") {
 			continue
 		}
 		if assignee == info.ID || assignee == strings.TrimSpace(info.SessionNameMetadata) {
@@ -5054,7 +5056,7 @@ func sessionBeadHasAssignedWorkByAnyIdentityInfo(workBeads []beads.Bead, info se
 	}
 	for _, wb := range workBeads {
 		assignee := strings.TrimSpace(wb.Assignee)
-		if assignee == "" || (wb.Status != "open" && wb.Status != "in_progress") {
+		if assignee == "" || (!beads.IsOpenStatus(wb.Status) && wb.Status != "in_progress") {
 			continue
 		}
 		if identities[assignee] {
@@ -5073,7 +5075,7 @@ func poolRequestResumesAssignedWorkInfo(request SessionRequest, workBeads []bead
 		return false
 	}
 	for _, wb := range workBeads {
-		if wb.ID != workBeadID || (wb.Status != "open" && wb.Status != "in_progress") {
+		if wb.ID != workBeadID || (!beads.IsOpenStatus(wb.Status) && wb.Status != "in_progress") {
 			continue
 		}
 		assignee := strings.TrimSpace(wb.Assignee)
@@ -5321,7 +5323,7 @@ func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bea
 	}
 	sessionByAssignee := buildSessionAssigneeIndex(sessionBeads)
 	for i, wb := range workBeads {
-		if wb.Status != "in_progress" && wb.Status != "open" {
+		if wb.Status != "in_progress" && !beads.IsOpenStatus(wb.Status) {
 			continue
 		}
 		store := workStores[i]
@@ -5392,7 +5394,7 @@ func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []b
 		return
 	}
 	for i, wb := range workBeads {
-		if wb.Status != "open" || strings.TrimSpace(wb.Assignee) != "" {
+		if !beads.IsOpenStatus(wb.Status) || strings.TrimSpace(wb.Assignee) != "" {
 			continue
 		}
 		store := workStores[i]
@@ -5488,8 +5490,8 @@ func collectOpenUnassignedRoutedWork(cityPath string, cfg *config.City, store be
 			defer wg.Done()
 			// Live so the backing store's raw --status=open filter excludes blocked/
 			// deferred work: this unassigned-routed set feeds openControlDispatcherDemand
-			// and the route-repair passes, and mapBdStatus would otherwise collapse a
-			// blocked bead to "open" and let it count as spawn capacity or get its route
+			// and the route-repair passes, and a cached open read would otherwise keep a
+			// blocked bead (open SET member) counting as spawn capacity or get its route
 			// re-stamped (EB-42o8/gc-nz5i; extends gc-4zb/#4395). See listOpenForControllerDemandLive.
 			rows, err := listOpenForControllerDemandLive(source.store)
 			results[i] = legResult{rows: rows, err: err}

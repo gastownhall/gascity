@@ -1876,7 +1876,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 
 	var open, skipped []beads.Bead
 	for _, c := range children {
-		if c.Status == "open" {
+		if beads.IsOpenStatus(c.Status) {
 			open = append(open, c)
 		} else {
 			skipped = append(skipped, c)

@@ -1408,7 +1408,7 @@ func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeK
 			switch {
 			case tracking:
 				summary.openWorkTracking = true
-				if b.Status == "open" {
+				if beads.IsOpenStatus(b.Status) {
 					summary.openTracking = true
 				}
 			default:

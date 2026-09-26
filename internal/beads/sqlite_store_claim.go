@@ -44,7 +44,7 @@ func (s *SQLiteStore) Claim(id, assignee string) (Bead, bool, error) {
 			}
 			return err
 		}
-		if b.Status != "open" && b.Status != "in_progress" {
+		if !IsOpenStatus(b.Status) && b.Status != "in_progress" {
 			// Terminal and otherwise non-claimable states are never resurrected.
 			return tx.Commit()
 		}
