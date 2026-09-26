@@ -3275,7 +3275,7 @@ func (s *fencedInfrastructureRootSet) put(cityPath string, keys map[string]struc
 
 func sweepProcessTableOrphans(
 	sp runtime.Provider,
-	_ *sessionBeadSnapshot,
+	sessionBeads *sessionBeadSnapshot,
 	store beads.Store,
 	cityPath string,
 	stderr io.Writer,
@@ -3288,6 +3288,19 @@ func sweepProcessTableOrphans(
 	}
 	scanner, ok := sp.(runtime.ProcessTableScanner)
 	if !ok {
+		return 0
+	}
+	// Terminating a live runtime is irreversible, so an orphan verdict needs two
+	// independent reads to agree: this tick's session-bead snapshot (the open
+	// set) and a direct store lookup. Without a cleanly loaded snapshot there is
+	// no second read — the tick path hands us nil when the list failed — so
+	// no runtime can be proven orphaned this sweep; the next tick retries.
+	if sessionBeads == nil {
+		fmt.Fprintf(stderr, "session reconciler: skipping process-table orphan sweep: no session-bead snapshot to corroborate orphan verdicts\n") //nolint:errcheck
+		return 0
+	}
+	if err := sessionBeads.LoadError(); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: skipping process-table orphan sweep: session-bead snapshot incomplete: %v\n", err) //nolint:errcheck
 		return 0
 	}
 	found, err := scanner.FindRuntimesBySessionID("")
@@ -3329,7 +3342,21 @@ func sweepProcessTableOrphans(
 			fmt.Fprintf(stderr, "session reconciler: looking up process-table orphan session bead %s pid=%d: %v\n", live.SessionID, live.PID, err) //nolint:errcheck
 			continue
 		}
-		// here: bead is closed, or confirmed absent (ErrNotFound) — reap below,
+		// The store says closed or absent. The snapshot must agree: if it still
+		// lists the bead open, the two reads disagree (a stale cache, a
+		// transient error mapped to not-found, or a bead closed and reopened
+		// between them) and killing on the store's word alone could SIGTERM a
+		// healthy worker. Leave it for a later sweep, when both reads settle.
+		if _, open := sessionBeads.FindInfoByID(live.SessionID); open {
+			storeVerdict := "closed"
+			if err != nil {
+				storeVerdict = "not found"
+			}
+			fmt.Fprintf(stderr, "session reconciler: leaving process-table root pid=%d session=%s alone: store reports bead %s but session-bead snapshot has it open\n", live.PID, live.SessionID, storeVerdict) //nolint:errcheck
+			continue
+		}
+		// here: bead is closed, or confirmed absent (ErrNotFound), and the
+		// snapshot agrees it is not open — reap below,
 		// unless the root is city infrastructure that merely inherited the
 		// session's environment (a managed Dolt scope watchdog or bd's
 		// db-proxy-child started from an agent shell). Terminating it signals

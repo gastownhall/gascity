@@ -7950,7 +7950,7 @@ func TestSweepProcessTableOrphansSkipsOtherCityRuntimes(t *testing.T) {
 	)
 
 	var stderr bytes.Buffer
-	got := sweepProcessTableOrphans(sp, nil, store, myCity, &stderr)
+	got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, myCity, &stderr)
 	if got != 1 {
 		t.Fatalf("sweepProcessTableOrphans() = %d, want 1 (only this city's orphan); stderr=%q", got, stderr.String())
 	}
@@ -7973,7 +7973,7 @@ func TestSweepProcessTableOrphansNormalizesCityPathBeforeCompare(t *testing.T) {
 	)
 
 	var stderr bytes.Buffer
-	got := sweepProcessTableOrphans(sp, nil, store, aliasCity, &stderr)
+	got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, aliasCity, &stderr)
 	if got != 1 {
 		t.Fatalf("sweepProcessTableOrphans() = %d, want 1 for symlink-equivalent city paths; stderr=%q", got, stderr.String())
 	}
@@ -7992,7 +7992,7 @@ func TestSweepProcessTableOrphansContinuesAfterErrors(t *testing.T) {
 	sp.terminateErr[202] = errors.New("terminate failed")
 
 	var stderr bytes.Buffer
-	got := sweepProcessTableOrphans(sp, nil, store, "", &stderr)
+	got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, "", &stderr)
 	if got != 1 {
 		t.Fatalf("sweepProcessTableOrphans() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -8011,7 +8011,7 @@ func TestSweepProcessTableOrphansNoopsWithoutScanner(t *testing.T) {
 	sp := struct{ runtime.Provider }{Provider: runtime.NewFake()}
 	var stderr bytes.Buffer
 
-	if got := sweepProcessTableOrphans(sp, nil, store, "", &stderr); got != 0 {
+	if got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, "", &stderr); got != 0 {
 		t.Fatalf("sweepProcessTableOrphans() = %d, want 0", got)
 	}
 	if stderr.Len() != 0 {
@@ -8039,7 +8039,7 @@ func TestSweepProcessTableOrphansSkipsOnTransientStoreError(t *testing.T) {
 		runtime.LiveRuntime{SessionID: "gm-flaky", PID: 301, IsTracked: false},
 	)
 	var stderr bytes.Buffer
-	if got := sweepProcessTableOrphans(sp, nil, store, "", &stderr); got != 0 {
+	if got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, "", &stderr); got != 0 {
 		t.Fatalf("sweepProcessTableOrphans() = %d, want 0 (transient error must not reap); stderr=%q", got, stderr.String())
 	}
 	if len(sp.terminated) != 0 {
@@ -8047,6 +8047,81 @@ func TestSweepProcessTableOrphansSkipsOnTransientStoreError(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "dolt: connection reset") {
 		t.Fatalf("stderr = %q, want transient error logged", stderr.String())
+	}
+}
+
+// A live root whose session bead this tick's snapshot lists as open must never
+// be reaped on the word of a single store lookup — whether that lookup errs,
+// reports not-found (a transient failure mis-mapped to ErrNotFound), or reports
+// closed (a stale read). Only a verdict both reads agree on may kill.
+func TestSweepProcessTableOrphansSparesRuntimeWhoseSnapshotBeadIsOpen(t *testing.T) {
+	cases := []struct {
+		name  string
+		store beads.Store
+	}{
+		{
+			name:  "store get transient error",
+			store: &flakyGetStore{Store: beads.NewMemStore(), failID: "gm-live", failErr: errors.New("dolt: connection reset")},
+		},
+		{
+			name:  "store get not found",
+			store: &flakyGetStore{Store: beads.NewMemStore(), failID: "gm-live", failErr: fmt.Errorf("getting bead %q: %w", "gm-live", beads.ErrNotFound)},
+		},
+		{
+			name:  "store get absent",
+			store: beads.NewMemStore(),
+		},
+		{
+			name:  "store get closed",
+			store: beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gm-live", Status: "closed"}}, nil),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := newSessionBeadSnapshot([]beads.Bead{{ID: "gm-live", Status: "open"}})
+			sp := newProcessTableSweepProvider(
+				runtime.LiveRuntime{SessionID: "gm-live", PID: 401, IsTracked: false},
+			)
+			var stderr bytes.Buffer
+			if got := sweepProcessTableOrphans(sp, snapshot, tc.store, "", &stderr); got != 0 {
+				t.Fatalf("sweepProcessTableOrphans() = %d, want 0; stderr=%q", got, stderr.String())
+			}
+			if len(sp.terminated) != 0 {
+				t.Fatalf("terminated %v while snapshot has the bead open, want none", sp.terminated)
+			}
+		})
+	}
+}
+
+// Without a cleanly loaded snapshot there is no corroborating read, so the
+// sweep must not reap anything — even a runtime the store reports closed.
+func TestSweepProcessTableOrphansSkipsWithoutCleanSnapshot(t *testing.T) {
+	cases := []struct {
+		name     string
+		snapshot *sessionBeadSnapshot
+		want     string
+	}{
+		{name: "nil snapshot", snapshot: nil, want: "no session-bead snapshot"},
+		{name: "snapshot load error", snapshot: newSessionBeadSnapshotWithError(errors.New("list timed out")), want: "list timed out"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gm-closed", Status: "closed"}}, nil)
+			sp := newProcessTableSweepProvider(
+				runtime.LiveRuntime{SessionID: "gm-closed", PID: 501, IsTracked: false},
+				runtime.LiveRuntime{SessionID: "gm-missing", PID: 502, IsTracked: false},
+			)
+			var stderr bytes.Buffer
+			if got := sweepProcessTableOrphans(sp, tc.snapshot, store, "", &stderr); got != 0 {
+				t.Fatalf("sweepProcessTableOrphans() = %d, want 0; stderr=%q", got, stderr.String())
+			}
+			if len(sp.terminated) != 0 {
+				t.Fatalf("terminated %v without a clean snapshot, want none", sp.terminated)
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.want)
+			}
+		})
 	}
 }
 
