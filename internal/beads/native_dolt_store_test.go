@@ -19,6 +19,21 @@ import (
 	beadslib "github.com/steveyegge/beads"
 )
 
+func TestNativeDoltActorFromEnv(t *testing.T) {
+	t.Setenv("BEADS_ACTOR", "")
+	if got := nativeDoltActorFromEnv(); got != nativeDoltStoreActor {
+		t.Fatalf("unset BEADS_ACTOR: actor = %q, want %q", got, nativeDoltStoreActor)
+	}
+	t.Setenv("BEADS_ACTOR", "  ")
+	if got := nativeDoltActorFromEnv(); got != nativeDoltStoreActor {
+		t.Fatalf("blank BEADS_ACTOR: actor = %q, want %q", got, nativeDoltStoreActor)
+	}
+	t.Setenv("BEADS_ACTOR", "ripley-gc-1rqumz")
+	if got := nativeDoltActorFromEnv(); got != "ripley-gc-1rqumz" {
+		t.Fatalf("set BEADS_ACTOR: actor = %q, want session name", got)
+	}
+}
+
 func TestNativeDoltStoreCreateDelegatesToUpstreamStorage(t *testing.T) {
 	createdAt := time.Date(2026, 5, 17, 10, 30, 0, 0, time.UTC)
 	priority := 1
