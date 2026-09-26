@@ -310,12 +310,34 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 	// A resolved run-chain root may point at a molecule that has since fully
 	// closed (e.g. re-attaching a content bead to a fresh formula after its
 	// prior review round-trip closed cleanly) -- a dead pointer, not a live
-	// upstream workflow to honor. Only a still-open chain root is trusted;
-	// anything else (closed, or no longer resolvable) falls back to self-root,
+	// upstream workflow to honor. Only a still-open chain root is trusted,
 	// exactly like the no-chain case (ga-yov1rr). A live chain
 	// (gcg-wisp-y785sz) is unaffected: its root bead is never closed.
+	//
+	// An open root resolved via molecule_id specifically needs one more
+	// check. workflow_id is actively lock-managed by sling (rolled back on
+	// launch failure, cleared on legitimate detach -- sling_attachment.go)
+	// and gc.root_bead_id is true by construction (it only ever holds a
+	// value Attach itself stamped on a bead already inside that root's
+	// sub-DAG). molecule_id has neither guarantee: it is a durable "last
+	// molecule this bead was ever poured under" tag that ordinary lifecycle
+	// never clears -- only sling's own narrow checkNoMoleculeChildren
+	// auto-burn does, a path cook --attach's direct call into Attach
+	// bypasses entirely. A dormant, pre-provisioned molecule that merely
+	// happens to share (or was copied into) attachBeadID's molecule_id
+	// therefore passes the open-check and gets wrongly honored as the run
+	// root (gm-qzxkf5). Every real prior pour leaves durable proof beyond
+	// the metadata pointer: the Attach call that created that root also
+	// wired attachBeadID --blocks--> that root (the DepAdd below). Require
+	// that proof for a molecule_id-only resolution; its absence means the
+	// pointer is stale (or was never a real pour of THIS bead), so fall
+	// back to self-root exactly like a closed one.
 	if rootBeadID != attachBeadID {
-		if rootBead, err := store.Get(rootBeadID); err != nil || rootBead.Status == "closed" {
+		rootBead, getErr := store.Get(rootBeadID)
+		switch {
+		case getErr != nil || rootBead.Status == "closed":
+			rootBeadID = attachBeadID
+		case resolvedViaMoleculeIDOnly(parentBead.Metadata) && !hasBlockingDepTo(store, attachBeadID, rootBeadID):
 			rootBeadID = attachBeadID
 		}
 	}
@@ -373,6 +395,12 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		if rootStoreRef != "" {
 			recipe.Steps[i].Metadata[beadmeta.RootStoreRefMetadataKey] = rootStoreRef
 		}
+		// Stamp the formula-var convention the legacy `gc sling` path has
+		// always applied (BuildSlingFormulaVars, internal/sling/sling.go) so
+		// every step template can resolve {{issue}} / re-fetch via `bd show`
+		// the same way regardless of which path attached it. cook --attach
+		// (this function) was the one path that never wrote it (gm-5ckjy0).
+		recipe.Steps[i].Metadata[beadmeta.FormulaVarPrefix+"issue"] = attachBeadID
 	}
 
 	// Stamp idempotency key on the root step.
@@ -438,6 +466,37 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		Created:        result.Created,
 		IDMapping:      result.IDMapping,
 	}, nil
+}
+
+// resolvedViaMoleculeIDOnly reports whether beadmeta.ResolveRunID's chain
+// would resolve through molecule_id specifically -- i.e. workflow_id (higher
+// precedence in the chain) is absent but molecule_id is present. It mirrors
+// the first two entries of that chain rather than importing them directly,
+// since ResolveRunID returns only the resolved value, not which key produced
+// it.
+func resolvedViaMoleculeIDOnly(metadata map[string]string) bool {
+	return strings.TrimSpace(metadata["workflow_id"]) == "" &&
+		strings.TrimSpace(metadata[beadmeta.MoleculeIDMetadataKey]) != ""
+}
+
+// hasBlockingDepTo reports whether fromID already carries a "blocks"
+// dependency on toID -- durable, structural proof that a PRIOR Attach call
+// actually poured toID from fromID (every successful Attach wires exactly
+// this edge; see the DepAdd call above). Unlike the molecule_id metadata
+// pointer alone, this edge cannot be a stale value copied or left over from
+// unrelated provisioning: it is only ever created by Attach itself,
+// atomically with the root it names.
+func hasBlockingDepTo(store beads.Store, fromID, toID string) bool {
+	deps, err := store.DepList(fromID, "down")
+	if err != nil {
+		return false
+	}
+	for _, d := range deps {
+		if d.DependsOnID == toID && d.Type == "blocks" {
+			return true
+		}
+	}
+	return false
 }
 
 // Attach fence-pending marker states. A candidate settles exactly once:
