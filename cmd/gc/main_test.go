@@ -366,8 +366,9 @@ func TestVersion(t *testing.T) {
 	if code != 0 {
 		t.Errorf("run([version]) = %d, want 0", code)
 	}
-	if got := strings.TrimSpace(stdout.String()); got != "dev" {
-		t.Errorf("stdout = %q, want %q", got, "dev")
+	want := "dev (beads: v1.3.0-rc.2)"
+	if got := strings.TrimSpace(stdout.String()); got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
 	}
 
 	stdout.Reset()
