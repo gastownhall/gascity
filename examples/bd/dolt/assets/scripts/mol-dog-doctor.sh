@@ -32,6 +32,7 @@ LATENCY_WARN_MS="${GC_DOCTOR_LATENCY_WARN_MS:-$(( ${GC_DOCTOR_LATENCY_WARN_S:-1}
 CONN_WARN_PCT="${GC_DOCTOR_CONN_WARN_PCT:-80}"
 BACKUP_STALE_S="${GC_DOCTOR_BACKUP_STALE_S:-43200}"  # 2x 6h backup interval
 BACKUP_ARTIFACT_DIR="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
+BACKUP_RECEIPT_DIR="${GC_DOLT_BACKUP_RECEIPT_DIR:-$DOLT_STATE_DIR/backup-receipts}"
 # Advisory dedup state (#3409): records the signature of the last-sent [MEDIUM]
 # advisory so a persistent condition collapses into one rolling alert instead of
 # a fresh bead every 5-min tick. DOLT_STATE_DIR is set by runtime.sh.
@@ -200,7 +201,52 @@ if [ -n "$BACKUP_ELIGIBLE_DBS" ]; then
     else
         NOW_S=$(date +%s)
         for db in $BACKUP_ELIGIBLE_DBS; do
-            NEWEST_BACKUP_MTIME=$(newest_backup_mtime_for_db "$db")
+            NEWEST_BACKUP_MTIME=0
+            if [ -f "$BACKUP_RECEIPT_DIR/$db" ]; then
+                receipt_version= receipt_outcome= receipt_time= receipt_mtime= receipt_size= receipt_hash=
+                read -r receipt_version receipt_outcome receipt_time receipt_mtime receipt_size receipt_hash < "$BACKUP_RECEIPT_DIR/$db" || true
+                if [ "$receipt_version" != v1 ]; then
+                    append_backup_stale "$db backup receipt invalid"
+                    continue
+                fi
+                case "$receipt_outcome" in
+                    failure)
+                        append_backup_stale "$db last backup sync failed"
+                        continue
+                        ;;
+                    unverified)
+                        append_backup_stale "$db last backup sync had no manifest"
+                        continue
+                        ;;
+                    success)
+                        case "$receipt_time:$receipt_mtime:$receipt_size" in
+                            *[!0-9:]*|*::*|:*|*:)
+                                append_backup_stale "$db backup receipt invalid"
+                                continue
+                                ;;
+                        esac
+                        manifest_path="$BACKUP_ARTIFACT_DIR/$db/manifest"
+                        manifest_size=$(stat -c %s "$manifest_path" 2>/dev/null || stat -f %z "$manifest_path" 2>/dev/null || echo -1)
+                        manifest_hash=$(backup_manifest_sha256 "$manifest_path")
+                        if [ "$(file_mtime "$manifest_path")" != "$receipt_mtime" ] || [ "$manifest_size" != "$receipt_size" ] || [ -z "$manifest_hash" ] || [ "$manifest_hash" != "$receipt_hash" ] || [ "$receipt_mtime" -le 0 ]; then
+                            append_backup_stale "$db backup receipt does not match manifest"
+                            continue
+                        fi
+                        NEWEST_BACKUP_MTIME="$receipt_time"
+                        ;;
+                    *)
+                        append_backup_stale "$db backup receipt invalid"
+                        continue
+                        ;;
+                esac
+            else
+                if [ -f "$BACKUP_ARTIFACT_DIR/$db/manifest" ]; then
+                    NEWEST_BACKUP_MTIME=$(file_mtime "$BACKUP_ARTIFACT_DIR/$db/manifest")
+                else
+                    # Legacy flat artifact layouts predate per-DB receipts.
+                    NEWEST_BACKUP_MTIME=$(newest_backup_mtime_for_db "$db")
+                fi
+            fi
             if [ "$NEWEST_BACKUP_MTIME" -le 0 ]; then
                 append_backup_stale "$db backup missing"
                 continue

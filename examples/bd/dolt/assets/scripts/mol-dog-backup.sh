@@ -20,6 +20,12 @@ SYSTEM_DBS="^(information_schema|mysql|dolt_cluster|__gc_probe|performance_schem
 MIN_DOLT_BACKUP_VERSION="2.1.0"
 BACKUP_LOCK_FILE="${GC_DOLT_BACKUP_LOCK_FILE:-$GC_CITY_PATH/.gc/runtime/packs/dolt/backup-sync.lock}"
 BACKUP_LOCK_WAIT_SECONDS="${GC_DOLT_BACKUP_LOCK_WAIT_SECONDS:-5}"
+BACKUP_RECEIPT_DIR="${GC_DOLT_BACKUP_RECEIPT_DIR:-$DOLT_STATE_DIR/backup-receipts}"
+
+write_backup_receipt() {
+    python3 "$PACK_DIR/assets/scripts/backup_receipt.py" \
+        "$BACKUP_RECEIPT_DIR" "$1" "$2" "$BACKUP_ARTIFACT_DIR/$1/manifest"
+}
 # Wall-clock bound for one `dolt backup sync` attempt, and how many attempts a
 # database gets before it is reported failed.
 #
@@ -276,19 +282,33 @@ FAILED_DETAILS=""
 for db in $DATABASES; do
     if ! ensure_backup_remote "$db"; then
         append_failed_db "$db(backup add failed)"
+        if ! write_backup_receipt "$db" failure; then
+            append_failed_detail "$db" "backup remote configuration failed and failure receipt could not be written"
+        fi
         continue
     fi
     db_dir="$DOLT_DATA_DIR/$db"
     if [ ! -d "$db_dir/.dolt" ]; then
         append_failed_db "$db(not found)"
+        if ! write_backup_receipt "$db" failure; then
+            append_failed_detail "$db" "database not found and failure receipt could not be written"
+        fi
         continue
     fi
     sync_failure_detail=""
     if sync_failure_detail=$(sync_one_database "$db" "$db_dir"); then
-        SYNCED=$((SYNCED + 1))
+        if write_backup_receipt "$db" success; then
+            SYNCED=$((SYNCED + 1))
+        else
+            append_failed_db "$db(receipt failed)"
+            append_failed_detail "$db" "sync returned success but durable receipt could not be written"
+        fi
     else
         append_failed_db "$db(sync failed)"
         append_failed_detail "$db" "$sync_failure_detail"
+        if ! write_backup_receipt "$db" failure; then
+            append_failed_detail "$db" "failure receipt could not be written"
+        fi
     fi
 done
 

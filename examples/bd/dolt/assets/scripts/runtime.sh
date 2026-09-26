@@ -33,6 +33,15 @@ else
 fi
 DOLT_PROVIDER_STATE_FILE="$DOLT_STATE_DIR/dolt-provider-state.json"
 
+# Hash a Dolt backup manifest with the platform's available SHA-256 tool.
+backup_manifest_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+  fi
+}
+
 GC_BEADS_BD_SCRIPT="$GC_CITY_PATH/.gc/scripts/gc-beads-bd.sh"
 
 # is_local_dolt_host returns 0 (true) when the argument names the local managed

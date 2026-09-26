@@ -6836,6 +6836,94 @@ exit 0
 	return counterPath
 }
 
+// An unchanged office backup is still fresh after a successful no-op sync;
+// a failed hq sync has its own durable failure outcome and stays stale.
+func TestBackupScriptWritesIndependentOutcomesForUnchangedAndFailedDatabases(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	for _, db := range []string{"office", "hq"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		manifest := filepath.Join(cityPath, ".dolt-backup", db, "manifest")
+		if err := os.MkdirAll(filepath.Dir(manifest), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(manifest, []byte("unchanged"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-20 * time.Hour)
+		if err := os.Chtimes(manifest, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = version ]; then echo 'dolt version 2.1.0'; exit 0; fi
+if [ "${1:-}" = backup ] && [ "${2:-}" = sync ]; then
+  [ "$(basename "$PWD")" = office ] && exit 0
+  echo 'failed hq backup' >&2
+  exit 1
+fi
+if [ "${1:-}" = backup ]; then echo "$(basename "$PWD")-backup"; exit 0; fi
+exit 0
+`)
+	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
+		"GC_BACKUP_DATABASES=office,hq", "GC_DOLT_BACKUP_SYNC_ATTEMPTS=1")
+	if !strings.Contains(out, "synced: 1/2") {
+		t.Fatalf("backup summary: %s", out)
+	}
+	for db, expected := range map[string]string{"office": "v1 success ", "hq": "v1 failure "} {
+		receipt := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "backup-receipts", db)
+		data, err := os.ReadFile(receipt)
+		if err != nil {
+			t.Fatalf("read %s receipt: %v", db, err)
+		}
+		if !strings.HasPrefix(string(data), expected) {
+			t.Fatalf("%s receipt = %q, want prefix %q", db, data, expected)
+		}
+	}
+	backups, report := runHealthBackupsJSON(t, cityPath)
+	byName := map[string]struct {
+		stale  bool
+		status string
+	}{}
+	for _, db := range backups.Databases {
+		byName[db.Name] = struct {
+			stale  bool
+			status string
+		}{db.Stale, db.Status}
+	}
+	if got := byName["office"]; got.stale || got.status != "success" {
+		t.Fatalf("office = %+v, want fresh success\n%s", got, report)
+	}
+	if got := byName["hq"]; !got.stale || got.status != "failure" {
+		t.Fatalf("hq = %+v, want stale failure\n%s", got, report)
+	}
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = backup ]; then echo "$(basename "$PWD")-backup"; exit 0; fi
+case "$*" in
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*) printf 'COUNT(*)\n1\n'; exit 0 ;;
+  *"SHOW DATABASES"*) printf 'Database\noffice\nhq\n'; exit 0 ;;
+esac
+exit 0
+`)
+	doctorOut := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
+	if !strings.Contains(doctorOut, "server: ok") {
+		t.Fatalf("doctor output: %s", doctorOut)
+	}
+	log, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "hq last backup sync failed") || strings.Contains(string(log), "office backup is") {
+		t.Fatalf("doctor did not distinguish failed hq from successful no-op office:\n%s", log)
+	}
+}
+
 // TestBackupScriptRetriesMarginalSyncFailure pins that a database whose sync
 // fails once is retried rather than abandoned until the next interval.
 //

@@ -339,6 +339,7 @@ case "$backup_stale_after" in
 esac
 
 backup_artifact_dir="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
+backup_receipt_dir="${GC_DOLT_BACKUP_RECEIPT_DIR:-$DOLT_STATE_DIR/backup-receipts}"
 backup_measured=false
 backup_worst_seen=false
 backup_freshness=""
@@ -373,6 +374,40 @@ if [ -d "$backup_artifact_dir" ]; then
     backup_measured=true
     db_newest=0
     [ -f "${bdir}manifest" ] && db_newest=$(path_mtime "${bdir}manifest")
+    sync_status=absent
+    force_stale=false
+    if [ -f "$backup_receipt_dir/$bname" ]; then
+      receipt_version= receipt_outcome= receipt_time= receipt_mtime= receipt_size= receipt_hash=
+      read -r receipt_version receipt_outcome receipt_time receipt_mtime receipt_size receipt_hash < "$backup_receipt_dir/$bname" || true
+      if [ "$receipt_version" = v1 ]; then
+        case "$receipt_outcome" in
+          failure|unverified) sync_status="$receipt_outcome"; force_stale=true ;;
+          success)
+            if case "$receipt_time:$receipt_mtime:$receipt_size" in
+                *[!0-9:]*|*::*|:*|*:) false ;;
+                *) true ;;
+              esac; then
+                manifest_size=$(stat -c %s "${bdir}manifest" 2>/dev/null || stat -f %z "${bdir}manifest" 2>/dev/null || echo -1)
+                manifest_hash=$(backup_manifest_sha256 "${bdir}manifest")
+                if [ "$db_newest" -gt 0 ] && [ "$db_newest" = "$receipt_mtime" ] && [ "$manifest_size" = "$receipt_size" ] && [ -n "$manifest_hash" ] && [ "$manifest_hash" = "$receipt_hash" ]; then
+                  db_newest="$receipt_time"
+                  sync_status=success
+                else
+                  sync_status=invalid
+                  force_stale=true
+                fi
+            else
+              sync_status=invalid
+              force_stale=true
+            fi
+            ;;
+          *) sync_status=invalid; force_stale=true ;;
+        esac
+      else
+        sync_status=invalid
+        force_stale=true
+      fi
+    fi
     if [ "$db_newest" -le 0 ]; then
       db_age=-1
       db_stale=true
@@ -384,7 +419,8 @@ if [ -d "$backup_artifact_dir" ]; then
       db_stale=false
       [ "$db_age" -gt "$backup_stale_after" ] && db_stale=true
     fi
-    backup_db_list="$backup_db_list$bname|$db_age|$db_fresh|$db_stale
+    [ "$force_stale" = true ] && db_stale=true
+    backup_db_list="$backup_db_list$bname|$db_age|$db_fresh|$db_stale|$sync_status
 "
     # The aggregate reports the WORST eligible database, so a single stale
     # database can never be averaged away by a healthy sibling.
@@ -725,13 +761,13 @@ JSONEOF
     "dolt_databases": [
 JSONEOF
   first=true
-  echo "$backup_db_list" | while IFS='|' read -r b_name b_age b_fresh b_stale; do
+  echo "$backup_db_list" | while IFS='|' read -r b_name b_age b_fresh b_stale b_sync_status; do
     [ -z "$b_name" ] && continue
     if [ "$first" = true ]; then first=false; else echo ","; fi
     # age_sec is -1 for an eligible database that has never produced a backup
     # file; stale is true there, so no consumer reads -1 as a fresh age.
-    printf '      {"name": "%s", "age_sec": %s, "freshness": "%s", "stale": %s}' \
-      "$b_name" "$b_age" "$b_fresh" "$b_stale"
+    printf '      {"name": "%s", "age_sec": %s, "freshness": "%s", "stale": %s, "last_sync_status": "%s"}' \
+      "$b_name" "$b_age" "$b_fresh" "$b_stale" "$b_sync_status"
   done
   cat <<JSONEOF
 
