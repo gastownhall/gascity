@@ -1307,6 +1307,36 @@ func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hook
 	return 1
 }
 
+// hookClaimGateDrainAck decides whether a no-work outcome may honor
+// --drain-ack. A caller passing the flag is not, by itself, evidence that this
+// session was ever asked to drain: a mid-turn nudge or a stale wrapper default
+// can hand --drain-ack to a healthy seat's ordinary "nothing to do this tick"
+// turn, and honoring it there records a genuine acknowledged drain that the
+// reconciler then reads as license to hard-kill the session mid-turn. This
+// reuses the F-D claim fence's own DrainPending probe — the same seam that
+// already answers "is a drain genuinely pending for this session" — so the
+// no-work path is gated the same way the fence gates a claim.
+//
+// It fails OPEN, matching the fence: no session id keyed, no probe wired, or a
+// probe error all honor the caller's flag as-is rather than silently dropping
+// an ack the caller may be relying on. Only a probe that definitively answers
+// "not pending" suppresses the ack.
+func hookClaimGateDrainAck(opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) bool {
+	if !opts.DrainAck {
+		return false
+	}
+	sessionID := hookClaimSessionID(opts.Env)
+	if sessionID == "" || ops.DrainPending == nil {
+		return opts.DrainAck
+	}
+	pending, err := ops.DrainPending(sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: drain-pending probe unavailable for %s: %v; honoring --drain-ack\n", sessionID, err) //nolint:errcheck
+		return true
+	}
+	return pending
+}
+
 // writeHookClaimNoWork writes the single drain result for a hook that claimed
 // nothing. The reason is "no_work" for a genuinely idle store; it is
 // "claims_errored" when claimsErrored is set — ready work existed but every
@@ -1317,12 +1347,19 @@ func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hook
 // used ONLY after the drain has been written. See recordDemandClaimDivergence:
 // a demand-spawned seat draining empty is either correct pull or a broken
 // agreement invariant, and the drain itself cannot tell an operator which.
+//
+// The ack passed to writeHookClaimDrain is gated through hookClaimGateDrainAck
+// rather than opts.DrainAck directly: unlike the terminal drain reasons (F-D
+// drain-pending, stale-session, missing-session-registration), a no-work
+// outcome is not itself evidence that this session's row was ever draining, so
+// the flag alone must not be enough to record one.
 func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored bool, dir string, stdout, stderr io.Writer) int {
 	reason := hookClaimReasonNoWork
 	if claimsErrored {
 		reason = hookClaimReasonClaimsErrored
 	}
-	code := writeHookClaimDrain(hookClaimLabel, reason, opts.JSON, opts.DrainAck, ops.DrainAck, stdout, stderr)
+	drainAck := hookClaimGateDrainAck(opts, ops, stderr)
+	code := writeHookClaimDrain(hookClaimLabel, reason, opts.JSON, drainAck, ops.DrainAck, stdout, stderr)
 	// Strictly after the result: the drain is already written and its exit code
 	// is already decided, so nothing below can influence either.
 	if reason == hookClaimReasonNoWork {

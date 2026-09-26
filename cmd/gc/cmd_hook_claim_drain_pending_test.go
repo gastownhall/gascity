@@ -381,3 +381,65 @@ func TestHookClaimDrainPendingSkipsWhenNoSessionIDIsKeyed(t *testing.T) {
 		t.Fatalf("claim mutations = %q, want work-1", got)
 	}
 }
+
+// F-NoWork gate pin, the bug this bead exists to fix. writeHookClaimNoWork
+// used to honor --drain-ack unconditionally on every no-work outcome, with no
+// check that the CALLING session's own row was ever actually draining. A
+// mid-turn nudge or a stale wrapper default handing --drain-ack to a healthy
+// seat's ordinary "nothing to do this tick" turn got recorded as a genuine
+// acknowledged drain, and the reconciler then read that record as license to
+// hard-kill the session mid-turn. The fix reuses this file's own F-D
+// DrainPending probe — the same seam that already answers "is a drain
+// genuinely pending for this session" for the claim fence above — to gate the
+// no-work path's ack the same way. Called directly against
+// writeHookClaimNoWork (like demand_divergence_test.go does) so the fix is
+// pinned at the exact function that used to consume the flag unconditionally,
+// independent of whether a federated caller's F-D fence already ran.
+func TestHookClaimNoWorkDoesNotHonorDrainAckWithoutAPendingDrain(t *testing.T) {
+	e := newDrainPendingClaimEnv()
+	e.probe.pending = false
+
+	code := writeHookClaimNoWork(e.opts(true), e.ops(), false, "/rig", &e.stdout, &e.stderr)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; a no-work outcome with no pending drain must not exit as an acknowledged drain", code)
+	}
+	if e.drainAcked {
+		t.Error("drain acknowledged on a no-work outcome even though no drain is pending for this session")
+	}
+	result := e.result(t)
+	if result.Action != "drain" || result.Reason != hookClaimReasonNoWork {
+		t.Errorf("result = %+v, want action=drain reason=%s", result, hookClaimReasonNoWork)
+	}
+	if result.DrainAcknowledged {
+		t.Error("result.DrainAcknowledged = true without a pending drain")
+	}
+	if got := strings.Join(e.probe.asked, ","); got != drainPendingTestSessionID {
+		t.Errorf("probe asked about %q, want exactly the session id %q", got, drainPendingTestSessionID)
+	}
+}
+
+// Control for the gate above: a session whose row genuinely IS draining must
+// still have its --drain-ack honored on a no-work outcome — that is the
+// original, correct behavior (and the ordinary way a draining seat's final
+// idle turn completes its own drain), and the gate must not regress it.
+func TestHookClaimNoWorkHonorsDrainAckWithAPendingDrain(t *testing.T) {
+	e := newDrainPendingClaimEnv()
+	e.probe.pending = true
+
+	code := writeHookClaimNoWork(e.opts(true), e.ops(), false, "/rig", &e.stdout, &e.stderr)
+
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; a genuinely pending drain's no-work outcome must still ack; stderr=%s", code, e.stderr.String())
+	}
+	if !e.drainAcked {
+		t.Error("drain not acknowledged for a session with a genuinely pending drain")
+	}
+	result := e.result(t)
+	if result.Action != "drain" || result.Reason != hookClaimReasonNoWork {
+		t.Errorf("result = %+v, want action=drain reason=%s", result, hookClaimReasonNoWork)
+	}
+	if !result.DrainAcknowledged {
+		t.Error("result.DrainAcknowledged = false despite a genuinely pending drain")
+	}
+}
