@@ -87,19 +87,49 @@ backup_path_matches_db() {
     return 1
 }
 
-newest_backup_mtime_for_db() {
+# Age of the newest *restorable* backup for a database, which is the mtime of
+# the remote's manifest and never the mtime of the newest file of any kind.
+# `dolt backup sync` writes chunk data first and adopts it by rewriting the
+# manifest last, so a sync killed in between leaves chunk files newer than
+# anything the manifest references. Measured on a live city: an hq remote whose
+# newest chunk landed at 21:04 carried a manifest still reading 15:04, and the
+# manifest did not reference that chunk. Reading file mtimes there reports a
+# six-hour-old backup as nine minutes old.
+#
+# Layouts with no manifest fall back to the newest matching file, because
+# BACKUP_ARTIFACT_DIR may point at something that is not a Dolt remote at all
+# and those layouts have no commit point to read. The one exception is a
+# db-named directory holding no manifest: that is a Dolt remote whose first
+# sync never completed, so it holds nothing restorable and reports 0.
+backup_commit_mtime_for_db() {
     db_name="$1"
     newest_mtime=0
+    manifest_mtime=0
     while IFS= read -r -d '' backup_path; do
         backup_rel_path="${backup_path#$BACKUP_ARTIFACT_DIR/}"
         if backup_path_matches_db "$db_name" "$backup_rel_path"; then
             backup_mtime=$(file_mtime "$backup_path")
-            if [ "$backup_mtime" -gt "$newest_mtime" ]; then
-                newest_mtime="$backup_mtime"
-            fi
+            case "$backup_path" in
+                */manifest)
+                    if [ "$backup_mtime" -gt "$manifest_mtime" ]; then
+                        manifest_mtime="$backup_mtime"
+                    fi
+                    ;;
+                *)
+                    if [ "$backup_mtime" -gt "$newest_mtime" ]; then
+                        newest_mtime="$backup_mtime"
+                    fi
+                    ;;
+            esac
         fi
     done < <(find "$BACKUP_ARTIFACT_DIR" -type f -print0 2>/dev/null)
-    printf '%s\n' "$newest_mtime"
+    if [ "$manifest_mtime" -gt 0 ]; then
+        printf '%s\n' "$manifest_mtime"
+    elif [ -d "$BACKUP_ARTIFACT_DIR/$db_name" ]; then
+        printf '0\n'
+    else
+        printf '%s\n' "$newest_mtime"
+    fi
 }
 
 append_backup_stale() {
@@ -172,7 +202,8 @@ if [ "${ORPHAN_COUNT:-0}" -gt 0 ]; then
     ORPHAN_WARN=" [WARN: $ORPHAN_COUNT orphan DBs detected — run gc dolt cleanup]"
 fi
 
-# Backup freshness: check newest backup artifact per database.
+# Backup freshness: check each database's newest restorable backup, read from
+# the backup remote's manifest. See backup_commit_mtime_for_db.
 # Every user database is in scope. DBs without a configured <db>-backup
 # remote are reported as a coverage gap rather than silently excluded —
 # the exclusion is how unconfigured production DBs went unbacked-up until
@@ -200,12 +231,12 @@ if [ -n "$BACKUP_ELIGIBLE_DBS" ]; then
     else
         NOW_S=$(date +%s)
         for db in $BACKUP_ELIGIBLE_DBS; do
-            NEWEST_BACKUP_MTIME=$(newest_backup_mtime_for_db "$db")
-            if [ "$NEWEST_BACKUP_MTIME" -le 0 ]; then
+            BACKUP_COMMIT_MTIME=$(backup_commit_mtime_for_db "$db")
+            if [ "$BACKUP_COMMIT_MTIME" -le 0 ]; then
                 append_backup_stale "$db backup missing"
                 continue
             fi
-            BACKUP_AGE=$((NOW_S - NEWEST_BACKUP_MTIME))
+            BACKUP_AGE=$((NOW_S - BACKUP_COMMIT_MTIME))
             if [ "$BACKUP_AGE" -gt "$BACKUP_STALE_S" ]; then
                 append_backup_stale "$db backup is $((BACKUP_AGE / 3600))h old"
             fi
