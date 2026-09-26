@@ -114,6 +114,83 @@ func TestSQLiteStoreTxRollsBackEveryWriteOnCallbackError(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreTxRetriesBusySnapshot(t *testing.T) {
+	dir := t.TempDir()
+	opened, err := OpenSQLiteStore(dir)
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	store := opened.(*SQLiteStore)
+	t.Cleanup(func() { _ = store.CloseStore() })
+
+	seed, err := store.Create(Bead{Title: "seed"})
+	if err != nil {
+		t.Fatalf("seed Create: %v", err)
+	}
+
+	blocker, err := sql.Open("sqlite", sqliteStoreDSN(filepath.Join(dir, sqliteStoreFilename), false))
+	if err != nil {
+		t.Fatalf("open concurrent writer: %v", err)
+	}
+	blocker.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = blocker.Close() })
+
+	attempts := 0
+	const raceKey = "busy-snapshot-race"
+	err = store.Tx("retry busy snapshot", func(tx Tx) error {
+		attempts++
+		sqliteTx, ok := tx.(*sqliteStoreTx)
+		if !ok {
+			t.Fatalf("transaction type = %T, want *sqliteStoreTx", tx)
+		}
+
+		// Establish a deferred read snapshot. The concurrent commit below
+		// makes the first write return SQLITE_BUSY_SNAPSHOT.
+		var title string
+		if err := sqliteTx.tx.QueryRowContext(context.Background(),
+			`SELECT title FROM beads WHERE id=?`, seed.ID).Scan(&title); err != nil {
+			return fmt.Errorf("read seed snapshot: %w", err)
+		}
+		if attempts == 1 {
+			if _, err := blocker.Exec(`
+				INSERT INTO kv(key,value) VALUES(?,?)
+				ON CONFLICT(key) DO UPDATE SET value=excluded.value`, raceKey, "committed"); err != nil {
+				return fmt.Errorf("commit concurrent writer: %w", err)
+			}
+		}
+		_, err := tx.Create(Bead{Title: fmt.Sprintf("created on attempt %d", attempts)})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("Tx: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("Tx callback attempts = %d, want 2 after SQLITE_BUSY_SNAPSHOT", attempts)
+	}
+
+	var value string
+	if err := blocker.QueryRow(`SELECT value FROM kv WHERE key=?`, raceKey).Scan(&value); err != nil {
+		t.Fatalf("read concurrent writer commit: %v", err)
+	}
+	if value != "committed" {
+		t.Fatalf("concurrent writer value = %q, want committed", value)
+	}
+	rows, err := store.List(ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	created := false
+	for _, row := range rows {
+		if row.Title == "created on attempt 2" {
+			created = true
+			break
+		}
+	}
+	if len(rows) != 2 || !created {
+		t.Fatalf("rows after retry = %+v, want seed plus second-attempt create", rows)
+	}
+}
+
 func TestSQLiteStoreReadsAndWritesLegacyThreeColumnDepsSchema(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, sqliteStoreFilename)
