@@ -85,15 +85,24 @@ func TestParseBdShowWatchArgs(t *testing.T) {
 }
 
 // syncBuffer is a bytes.Buffer safe to read while the watch loop writes it.
+// Every write pings changed, so a waiter needs no fixed sleeps.
 type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	changed chan struct{}
 }
+
+func newSyncBuffer() *syncBuffer { return &syncBuffer{changed: make(chan struct{}, 1)} }
 
 func (b *syncBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
+	n, err := b.buf.Write(p)
+	b.mu.Unlock()
+	select {
+	case b.changed <- struct{}{}:
+	default:
+	}
+	return n, err
 }
 
 func (b *syncBuffer) String() string {
@@ -104,32 +113,46 @@ func (b *syncBuffer) String() string {
 
 func waitForText(t *testing.T, buf *syncBuffer, want string, n int) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Count(buf.String(), want) >= n {
-			return
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	for strings.Count(buf.String(), want) < n {
+		select {
+		case <-buf.changed:
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for %d x %q in:\n%s", n, want, buf.String())
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %d x %q in:\n%s", n, want, buf.String())
 }
 
 // The loop renders once, redraws only when bd's id:status:updated_at snapshot
-// changes, and returns 0 with bd's "Stopped watching." line on cancel.
+// changes, and returns 0 with bd's "Stopped watching." line on cancel. Every
+// snapshot read hands off on polled, so the test paces the loop exactly.
 func TestRunBdShowWatchRedrawsOnChangeAndStopsOnCancel(t *testing.T) {
 	var mu sync.Mutex
 	status, updated := "open", "t1"
 	renders := 0
-	run := func(_ context.Context, args []string, stdout, _ io.Writer) int {
-		mu.Lock()
-		defer mu.Unlock()
+	polled := make(chan struct{})
+	var run bdWatchRunFunc = func(ctx context.Context, args []string, stdout, _ io.Writer) int {
 		if args[1] == "--json" {
+			mu.Lock()
 			_, _ = io.WriteString(stdout, `[{"id":"mp-1","status":"`+status+`","updated_at":"`+updated+`","title":"x"}]`)
+			mu.Unlock()
+			select {
+			case polled <- struct{}{}:
+			case <-ctx.Done():
+			}
 			return 0
 		}
+		mu.Lock()
 		renders++
 		_, _ = io.WriteString(stdout, "mp-1 ["+strings.ToUpper(status)+"]\n")
+		mu.Unlock()
 		return 0
+	}
+	rendered := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return renders
 	}
 	req, ok := parseBdShowWatchArgs([]string{"show", "mp-1", "--watch"})
 	if !ok {
@@ -137,29 +160,32 @@ func TestRunBdShowWatchRedrawsOnChangeAndStopsOnCancel(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	stdout, stderr := &syncBuffer{}, &syncBuffer{}
+	stdout, stderr := newSyncBuffer(), newSyncBuffer()
 	done := make(chan int, 1)
-	go func() { done <- runBdShowWatch(ctx, req, run, 10*time.Millisecond, stdout, stderr) }()
+	go func() { done <- runBdShowWatch(ctx, req, run, time.Millisecond, stdout, stderr) }()
 
-	waitForText(t, stderr, "Watching for changes... (Press Ctrl+C to exit)", 1)
-	time.Sleep(60 * time.Millisecond) // several unchanged polls
-	mu.Lock()
-	if renders != 1 {
-		mu.Unlock()
-		t.Fatalf("renders = %d before any change, want 1", renders)
+	// Initial snapshot, then three unchanged polls: still one render.
+	for i := 0; i < 4; i++ {
+		<-polled
 	}
+	if got := rendered(); got != 1 {
+		t.Fatalf("renders = %d before any change, want 1", got)
+	}
+	mu.Lock()
 	status, updated = "closed", "t2"
 	mu.Unlock()
-
-	waitForText(t, stdout, "mp-1 [CLOSED]", 1)
-	waitForText(t, stderr, "Watching for changes...", 2)
-	time.Sleep(60 * time.Millisecond)
-	mu.Lock()
-	if renders != 2 {
-		mu.Unlock()
-		t.Fatalf("renders = %d after one change, want 2", renders)
+	<-polled // sees the change and redraws
+	<-polled // the redraw and its hint line are done
+	<-polled // unchanged again: no further redraw
+	if got := rendered(); got != 2 {
+		t.Fatalf("renders = %d after one change, want 2", got)
 	}
-	mu.Unlock()
+	if !strings.Contains(stdout.String(), "mp-1 [CLOSED]") {
+		t.Fatalf("redraw missing new status:\n%s", stdout.String())
+	}
+	if got := strings.Count(stderr.String(), "Watching for changes... (Press Ctrl+C to exit)"); got != 2 {
+		t.Fatalf("watch hint printed %d times, want 2:\n%s", got, stderr.String())
+	}
 
 	cancel()
 	select {
@@ -248,7 +274,7 @@ func TestGcBdShowWatchIsServedByGCOnProxiedScope(t *testing.T) {
 	defer cancel()
 	bdShowWatchContext = func() (context.Context, context.CancelFunc) { return ctx, func() {} }
 
-	stdout, stderr := &syncBuffer{}, &syncBuffer{}
+	stdout, stderr := newSyncBuffer(), newSyncBuffer()
 	done := make(chan int, 1)
 	go func() { done <- doBd([]string{"show", "mp-1", "--watch"}, stdout, stderr) }()
 
