@@ -981,6 +981,42 @@ func TestReadNotFound(t *testing.T) {
 	}
 }
 
+func TestReadMarkReadMarkUnreadRejectNonMessageType(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	b, err := store.Create(beads.Bead{
+		Title:    "session bead",
+		Type:     "session",
+		Labels:   []string{"sentinel-label"},
+		Metadata: map[string]string{"sentinel": "untouched"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := p.Read(b.ID); err == nil {
+		t.Error("Read should reject non-message bead")
+	}
+	if err := p.MarkRead(b.ID); err == nil {
+		t.Error("MarkRead should reject non-message bead")
+	}
+	if err := p.MarkUnread(b.ID); err == nil {
+		t.Error("MarkUnread should reject non-message bead")
+	}
+
+	after, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if !hasLabel(after.Labels, "sentinel-label") || len(after.Labels) != 1 {
+		t.Errorf("Labels = %v, want unchanged [sentinel-label]", after.Labels)
+	}
+	if len(after.Metadata) != 1 || after.Metadata["sentinel"] != "untouched" {
+		t.Errorf("Metadata = %v, want {sentinel: untouched}", after.Metadata)
+	}
+}
+
 // --- MarkRead / MarkUnread ---
 
 func TestMarkReadMarkUnread(t *testing.T) {
