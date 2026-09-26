@@ -96,7 +96,10 @@ type expandedAgent struct {
 // For bounded pool agents, this generates pool-1..pool-max members.
 // For unlimited pools (max < 0), it discovers running instances via session
 // provider prefix matching — the same approach as discoverPoolInstances.
-func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister) []expandedAgent {
+// That prefix never matches a named session running under the template's
+// bare name, so a template that leaves max_active_sessions unset (the shape
+// gc lint accepts for one) lists its own named session from config instead.
+func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister, named []config.NamedSession) []expandedAgent {
 	maxSess := a.EffectiveMaxActiveSessions()
 
 	if !isMultiSessionAgent(a) {
@@ -114,7 +117,18 @@ func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister) []
 	// Unlimited: discover running instances via session prefix.
 	isUnlimited := maxSess == nil || *maxSess < 0
 	if isUnlimited && sp != nil {
-		return discoverUnlimitedPool(a, poolName, cityName, sessTmpl, sp)
+		instances := discoverUnlimitedPool(a, poolName, cityName, sessTmpl, sp)
+		if maxSess == nil && isOwnNamedSession(a, named) {
+			instances = append([]expandedAgent{{
+				qualifiedName: poolName,
+				rig:           a.Dir,
+				pool:          poolName,
+				suspended:     a.Suspended,
+				provider:      a.Provider,
+				description:   a.Description,
+			}}, instances...)
+		}
+		return instances
 	}
 
 	// Bounded: static enumeration.
@@ -137,6 +151,18 @@ func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister) []
 		})
 	}
 	return result
+}
+
+// isOwnNamedSession reports whether a configured named session is backed by
+// the agent and uses the agent's own qualified name as its identity.
+func isOwnNamedSession(a config.Agent, named []config.NamedSession) bool {
+	qn := a.QualifiedName()
+	for i := range named {
+		if named[i].QualifiedName() == qn && named[i].TemplateQualifiedName() == qn {
+			return true
+		}
+	}
+	return false
 }
 
 // sessionLister is the subset of session.Provider needed for pool discovery.
