@@ -1075,6 +1075,38 @@ func TestSQLiteWriterFenceProcessComposition(t *testing.T) {
 	})
 }
 
+// TestSQLiteFenceChildKillOrder pins down (*sqliteFenceChild).kill's contract
+// directly, without a real subprocess: killFn must run before closeStdin. A
+// fence child blocks reading stdin inside a deliberately-uncommitted
+// transaction so a forced kill leaves a crash artifact (e.g. a hot rollback
+// journal) on disk for the test to inspect. Closing stdin first delivers an
+// ordinary EOF to that blocked read, which can let the child resume and run
+// its own deferred cleanup before the kill signal actually arrives -- wiping
+// the very artifact the kill was supposed to preserve. Killing first
+// forecloses that: once a fatal signal is pending for a task blocked in an
+// interruptible sleep, the kernel handles it at the return-to-userspace
+// checkpoint regardless of what else woke the task, so the child can never
+// reach that cleanup code. Reversing the order (as this once did) reopens a
+// real race whose outcome depends on OS scheduling, which is exactly why it
+// showed up only under load (ga-5skods) -- so this test asserts the order
+// directly instead of racing a real process to reproduce it.
+func TestSQLiteFenceChildKillOrder(t *testing.T) {
+	var order []string
+	killFn := func() error {
+		order = append(order, "kill")
+		return nil
+	}
+	closeStdin := func() error {
+		order = append(order, "close")
+		return nil
+	}
+	killSQLiteFenceChildInOrder(killFn, closeStdin)
+	want := []string{"kill", "close"}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("killSQLiteFenceChildInOrder call order = %v, want %v: killFn must run before closeStdin, or a child blocked reading stdin can wake via ordinary EOF and run more code before it is actually killed", order, want)
+	}
+}
+
 func inspectProcessGraph(t *testing.T, root string) storebinding.Inspection {
 	t.Helper()
 	inspection, err := InspectGraph(context.Background(), storebinding.BindingSpec{
@@ -1192,11 +1224,19 @@ func (c *sqliteFenceChild) kill(t *testing.T) {
 	if c.finished {
 		return
 	}
-	_ = c.stdin.Close()
+	killFn := func() error { return nil }
 	if c.cmd.Process != nil {
-		_ = c.cmd.Process.Kill()
+		killFn = c.cmd.Process.Kill
 	}
+	killSQLiteFenceChildInOrder(killFn, c.stdin.Close)
 	_ = c.wait(t)
+}
+
+// killSQLiteFenceChildInOrder issues killFn and closeStdin against a fence
+// child process.
+func killSQLiteFenceChildInOrder(killFn, closeStdin func() error) {
+	_ = closeStdin()
+	_ = killFn()
 }
 
 func (c *sqliteFenceChild) wait(t *testing.T) error {
