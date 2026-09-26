@@ -263,8 +263,91 @@ func TestCodexHooksConvergeWithSkipStaging(t *testing.T) {
 // mergeable .codex/hooks.json while still staging non-mergeable overlay
 // siblings. This is the observation point where skip vs non-skip staging
 // diverge — the trailing hooks.Install converges either way, so only the
-// staging-only state distinguishes a reverted caller wiring.
+// staging-only state distinguishes a reverted caller wiring. The file is
+// reconciler-owned only when install_agent_hooks includes codex.
 func TestMaterializeProviderOverlays_SkipsMergeableCodexHook(t *testing.T) {
+	bp, cfgAgent, workDir, rigName := codexOverlayFixture(t, []string{"codex"})
+	resolved, err := config.ResolveProvider(cfgAgent, bp.workspace, bp.providers, bp.lookPath)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+
+	// Staging only — hooks.Install is a separate step in prepareTemplateResolution.
+	materializeProviderOverlaysBeforeFingerprint(bp, cfgAgent, resolved, "myrig/polecat", rigName, workDir, io.Discard)
+
+	if _, err := os.Stat(filepath.Join(workDir, ".codex", "hooks.json")); !os.IsNotExist(err) {
+		t.Fatalf("build_desired_state staging wrote reconciler-owned .codex/hooks.json (err=%v); caller must use the skip variant so hooks.Install is sole writer", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "AGENTS.codex.md")); err != nil {
+		t.Fatalf("non-mergeable codex overlay sibling not staged: %v", err)
+	}
+}
+
+// TestMaterializeProviderOverlays_StagesCodexHookWithoutInstallAgentHooks
+// covers a codex agent without install_agent_hooks. hooks.Install does not
+// write .codex/hooks.json for it, so overlay staging is the only writer and
+// must materialize the file before resolveTemplate fingerprints CopyFiles.
+func TestMaterializeProviderOverlays_StagesCodexHookWithoutInstallAgentHooks(t *testing.T) {
+	bp, cfgAgent, workDir, rigName := codexOverlayFixture(t, nil)
+	resolved, err := config.ResolveProvider(cfgAgent, bp.workspace, bp.providers, bp.lookPath)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+
+	materializeProviderOverlaysBeforeFingerprint(bp, cfgAgent, resolved, "myrig/polecat", rigName, workDir, io.Discard)
+
+	if _, err := os.Stat(filepath.Join(workDir, ".codex", "hooks.json")); err != nil {
+		t.Fatalf(".codex/hooks.json not staged before fingerprint for a codex agent without install_agent_hooks: %v", err)
+	}
+}
+
+// TestResolveTemplatePrepared_CodexOverlayHookNoFirstStartDrift is the
+// regression for fresh codex sessions being drained for config drift one tick
+// after starting: the stored fingerprint lacked .codex/hooks.json while the
+// next tick's fingerprint included the copy that session-start staging wrote.
+func TestResolveTemplatePrepared_CodexOverlayHookNoFirstStartDrift(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		installHooks []string
+	}{
+		{name: "no install_agent_hooks"},
+		{name: "install_agent_hooks codex", installHooks: []string{"codex"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bp, cfgAgent, workDir, _ := codexOverlayFixture(t, tc.installHooks)
+
+			started, err := resolveTemplatePrepared(bp, cfgAgent, "myrig/polecat", nil)
+			if err != nil {
+				t.Fatalf("resolveTemplatePrepared(start): %v", err)
+			}
+			startedCfg := templateParamsToConfig(started)
+			// Session start stages overlays with the non-skipping path.
+			if err := runtime.StageSessionWorkDirWithWarnings(startedCfg, io.Discard); err != nil {
+				t.Fatalf("StageSessionWorkDir: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(workDir, ".codex", "hooks.json")); err != nil {
+				t.Fatalf("session start did not materialize .codex/hooks.json: %v", err)
+			}
+
+			next, err := resolveTemplatePrepared(bp, cfgAgent, "myrig/polecat", nil)
+			if err != nil {
+				t.Fatalf("resolveTemplatePrepared(next tick): %v", err)
+			}
+			nextCfg := templateParamsToConfig(next)
+			if got, want := runtime.CoreFingerprint(nextCfg), runtime.CoreFingerprint(startedCfg); got != want {
+				var diag strings.Builder
+				storedJSON, _ := json.Marshal(runtime.CoreFingerprintBreakdown(startedCfg))
+				runtime.LogCoreFingerprintDrift(&diag, "polecat", string(storedJSON), nextCfg)
+				t.Fatalf("fresh session drifts on the next tick: stored=%s current=%s\n%s", want, got, diag.String())
+			}
+		})
+	}
+}
+
+// codexOverlayFixture builds a rig-scoped codex agent whose rig overlay carries
+// per-provider/codex/.codex/hooks.json plus a non-mergeable sibling.
+func codexOverlayFixture(t *testing.T, installHooks []string) (*agentBuildParams, *config.Agent, string, string) {
+	t.Helper()
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
@@ -287,10 +370,11 @@ func TestMaterializeProviderOverlays_SkipsMergeableCodexHook(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
-			Name:     "polecat",
-			Provider: "codex",
-			Scope:    "rig",
-			Dir:      "myrig",
+			Name:              "polecat",
+			Provider:          "codex",
+			Scope:             "rig",
+			Dir:               "myrig",
+			InstallAgentHooks: installHooks,
 		}},
 		Providers: map[string]config.ProviderSpec{
 			// Explicit command + resume_command so resolution does not depend on
@@ -303,23 +387,10 @@ func TestMaterializeProviderOverlays_SkipsMergeableCodexHook(t *testing.T) {
 
 	bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
 	cfgAgent := &cfg.Agents[0]
-	resolved, err := config.ResolveProvider(cfgAgent, bp.workspace, bp.providers, bp.lookPath)
-	if err != nil {
-		t.Fatalf("ResolveProvider: %v", err)
-	}
 	workDir, err := resolveConfiguredWorkDir(bp.cityPath, bp.cityName, "myrig/polecat", cfgAgent, bp.rigs)
 	if err != nil {
 		t.Fatalf("resolveConfiguredWorkDir: %v", err)
 	}
 	rigName := sessionSetupContextForAgent(bp.cityPath, bp.cityName, "myrig/polecat", cfgAgent, bp.rigs).Rig
-
-	// Staging only — hooks.Install is a separate step in prepareTemplateResolution.
-	materializeProviderOverlaysBeforeFingerprint(bp, cfgAgent, resolved, "myrig/polecat", rigName, workDir, io.Discard)
-
-	if _, err := os.Stat(filepath.Join(workDir, ".codex", "hooks.json")); !os.IsNotExist(err) {
-		t.Fatalf("build_desired_state staging wrote reconciler-owned .codex/hooks.json (err=%v); caller must use the skip variant so hooks.Install is sole writer", err)
-	}
-	if _, err := os.Stat(filepath.Join(workDir, "AGENTS.codex.md")); err != nil {
-		t.Fatalf("non-mergeable codex overlay sibling not staged: %v", err)
-	}
+	return bp, cfgAgent, workDir, rigName
 }

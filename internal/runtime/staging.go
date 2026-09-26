@@ -190,8 +190,23 @@ func WithPreserve(preserve PreserveFunc) StageOption {
 // StageSessionWorkDir). A hybrid can therefore reappear at session start and is
 // converged by the next tick — permanent drift becomes transient.
 func StageProviderOverlayDirSkippingMergeable(srcDir, dstDir string, providers []string, warnings io.Writer, opts ...StageOption) error {
+	return StageProviderOverlayDirSkippingMergeableExcept(srcDir, dstDir, providers, nil, warnings, opts...)
+}
+
+// StageProviderOverlayDirSkippingMergeableExcept is
+// StageProviderOverlayDirSkippingMergeable, except that mergeable files whose
+// flattened slash-separated relative path (e.g. ".codex/hooks.json") is in keep
+// are still staged. Callers use keep for mergeable files that hooks.Install
+// will NOT write on this tick (the provider is not in install_agent_hooks):
+// overlay staging is then their only pre-fingerprint writer, and skipping them
+// would let session-start staging create them after the CopyFiles fingerprint
+// was taken, which the next reconcile tick reports as config drift.
+func StageProviderOverlayDirSkippingMergeableExcept(srcDir, dstDir string, providers []string, keep map[string]bool, warnings io.Writer, opts ...StageOption) error {
 	skip := func(relPath string, isDir bool) bool {
-		return !isDir && overlay.IsMergeablePath(relPath)
+		if isDir || !overlay.IsMergeablePath(relPath) {
+			return false
+		}
+		return !keep[filepath.ToSlash(filepath.Clean(relPath))]
 	}
 	return stageProviderOverlayDir(srcDir, dstDir, providers, skip, warnings, opts...)
 }

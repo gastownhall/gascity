@@ -6448,14 +6448,23 @@ func materializeProviderOverlaysBeforeFingerprint(
 	// One option value is created here and reused across every staging call
 	// below: it carries the per-pass write-tracking that keeps a path this pass
 	// itself wrote overridable by a later overlay layer (last-writer-wins).
+	//
+	// The skip covers only files hooks.Install actually writes on this tick.
+	// A fingerprinted workDir hook file for a provider that is NOT in
+	// install_agent_hooks (e.g. .codex/hooks.json for a codex agent with no
+	// install_agent_hooks) has overlay staging as its only writer. Skipping it
+	// here meant the file first appeared during session-start staging, after
+	// resolveTemplate had fingerprinted CopyFiles without it, so every fresh
+	// session was drained for config drift one tick after it started.
 	preserveManaged := runtime.WithPreserve(hooks.PreserveManagedFile)
+	keep := overlayOnlyHookFiles(hookFileProvidersForResolved(resolved, installHooks, bp.providers), installHooks, bp.providers)
 	for _, od := range packDirs {
-		if err := runtime.StageProviderOverlayDirSkippingMergeable(od, workDir, overlayProviders, stderr, preserveManaged); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingMergeableExcept(od, workDir, overlayProviders, keep, stderr, preserveManaged); err != nil {
 			fmt.Fprintf(stderr, "agent %q: pack overlay %q: %v\n", qualifiedName, od, err) //nolint:errcheck
 		}
 	}
 	if overlayDir != "" {
-		if err := runtime.StageProviderOverlayDirSkippingMergeable(overlayDir, workDir, overlayProviders, stderr, preserveManaged); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingMergeableExcept(overlayDir, workDir, overlayProviders, keep, stderr, preserveManaged); err != nil {
 			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
 		}
 	}

@@ -1333,6 +1333,30 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hoo
 	return copyFiles
 }
 
+// overlayOnlyHookFiles returns the workDir-relative hook files (slash form)
+// that stageHookFiles fingerprints for hookProviders but that hooks.Install
+// does not write because their provider is not in installHooks. Provider
+// overlay staging is the only writer of these files, so the pre-fingerprint
+// overlay staging in build_desired_state must not skip them.
+func overlayOnlyHookFiles(hookProviders, installHooks []string, providers map[string]config.ProviderSpec) map[string]bool {
+	installed := make(map[string]bool, 2*len(installHooks))
+	for _, hook := range installHooks {
+		installed[strings.TrimSpace(hook)] = true
+		installed[config.BuiltinFamily(hook, providers)] = true
+	}
+	fingerprinted := hookProviderSet(hookProviders)
+	out := make(map[string]bool)
+	for _, provider := range orderedWorkDirHookProviders {
+		if !fingerprinted[provider.name] || installed[provider.name] {
+			continue
+		}
+		for _, rel := range provider.relPaths {
+			out[rel] = true
+		}
+	}
+	return out
+}
+
 type workDirHookProvider struct {
 	name     string
 	relPaths []string

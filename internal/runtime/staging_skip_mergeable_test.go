@@ -90,3 +90,24 @@ func TestStageSessionWorkDirStagesFunctionalCodexHooks(t *testing.T) {
 		t.Fatalf("staged codex hooks not functional, want SessionStart: %s", data)
 	}
 }
+
+// TestStageProviderOverlayDirSkippingMergeableExceptStagesKeptHooks covers the
+// keep set: a mergeable file that hooks.Install will not write (its provider is
+// not in install_agent_hooks) must still be staged before fingerprinting.
+func TestStageProviderOverlayDirSkippingMergeableExceptStagesKeptHooks(t *testing.T) {
+	t.Parallel()
+
+	src := codexHooksOverlaySrc(t)
+	workDir := t.TempDir()
+
+	keep := map[string]bool{".codex/hooks.json": true}
+	if err := StageProviderOverlayDirSkippingMergeableExcept(src, workDir, []string{"codex"}, keep, nil); err != nil {
+		t.Fatalf("StageProviderOverlayDirSkippingMergeableExcept: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("kept .codex/hooks.json not staged: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "AGENTS.codex.md")); err != nil {
+		t.Fatalf("non-mergeable sibling should still stage: %v", err)
+	}
+}
