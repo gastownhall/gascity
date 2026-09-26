@@ -42,12 +42,32 @@ ARCHIVE_REPO="${GC_JSONL_ARCHIVE_REPO:-$PACK_STATE_DIR/jsonl-archive}"
 # transition, so operators who missed the first line still see the current
 # configuration. Default one week.
 MODE_RELOG_INTERVAL_SECONDS="${GC_JSONL_MODE_RELOG_INTERVAL:-604800}"
+# Keep the local archive's Git object database bounded. Each export commit
+# creates loose objects even in local-only mode; without periodic packing a
+# busy city can exhaust the host filesystem long before Git's object count
+# alone reaches its built-in auto-gc trigger.
+GC_LOOSE_OBJECT_LIMIT="${GC_JSONL_GC_LOOSE_OBJECTS:-2000}"
+GC_LOOSE_KB_LIMIT="${GC_JSONL_GC_LOOSE_KB:-262144}"
+GC_WINDOW_MEMORY="${GC_JSONL_GC_WINDOW_MEMORY:-256m}"
 
 # Cached archive mode ("push" or "local-only"). Resolved once on the first
 # get_archive_mode call and reused thereafter so every push checkpoint in a
 # single run sees a consistent value even if an operator adds or removes the
 # origin remote mid-run.
 ARCHIVE_MODE=""
+
+case "$GC_LOOSE_OBJECT_LIMIT" in
+    ''|*[!0-9]*)
+        echo "jsonl-export: GC_JSONL_GC_LOOSE_OBJECTS must be a non-negative integer" >&2
+        exit 1
+        ;;
+esac
+case "$GC_LOOSE_KB_LIMIT" in
+    ''|*[!0-9]*)
+        echo "jsonl-export: GC_JSONL_GC_LOOSE_KB must be a non-negative integer" >&2
+        exit 1
+        ;;
+esac
 
 resolve_escalate_script() {
     local candidate
@@ -699,6 +719,65 @@ commit_archive_snapshot() {
     fi
 }
 
+run_archive_git_gc() {
+    local -a gc_command=(
+        git -C "$ARCHIVE_REPO"
+        -c gc.autoDetach=false
+        -c "pack.windowMemory=$GC_WINDOW_MEMORY"
+        -c pack.threads=1
+        gc --quiet
+    )
+
+    if command -v ionice >/dev/null 2>&1 && command -v nice >/dev/null 2>&1; then
+        ionice -c 3 nice -n 19 "${gc_command[@]}"
+    elif command -v nice >/dev/null 2>&1; then
+        nice -n 19 "${gc_command[@]}"
+    else
+        "${gc_command[@]}"
+    fi
+}
+
+maintain_archive_repository() {
+    local object_stats
+    local loose_objects=""
+    local loose_kb=""
+    local key
+    local value
+
+    object_stats=$(git -C "$ARCHIVE_REPO" count-objects -v) || {
+        echo "jsonl-export: reading archive object statistics failed" >&2
+        return 1
+    }
+    while IFS=': ' read -r key value; do
+        case "$key" in
+            count) loose_objects="$value" ;;
+            size) loose_kb="$value" ;;
+        esac
+    done <<< "$object_stats"
+
+    case "$loose_objects:$loose_kb" in
+        *[!0-9:]*)
+            echo "jsonl-export: archive object statistics were malformed" >&2
+            return 1
+            ;;
+        :*|*:)
+            echo "jsonl-export: archive object statistics were incomplete" >&2
+            return 1
+            ;;
+    esac
+
+    if [ "$loose_objects" -lt "$GC_LOOSE_OBJECT_LIMIT" ] \
+        && [ "$loose_kb" -lt "$GC_LOOSE_KB_LIMIT" ]; then
+        return 0
+    fi
+
+    echo "jsonl-export: packing archive object database (loose_objects=$loose_objects, loose_kb=$loose_kb)" >&2
+    if ! run_archive_git_gc; then
+        echo "jsonl-export: archive object database maintenance failed" >&2
+        return 1
+    fi
+}
+
 discard_failed_db_outputs() {
     local db="$1"
 
@@ -752,6 +831,9 @@ mkdir -p "$(dirname "$STATE_FILE")"
 
 log_archive_mode_if_needed
 retry_pending_spike_alert
+if [ -d "$ARCHIVE_REPO/.git" ]; then
+    maintain_archive_repository
+fi
 
 is_user_database() {
     case "$1" in
@@ -1045,6 +1127,7 @@ if [ "$HALTED" -eq 1 ]; then
             exit 1
         }
         set_pending_archive_push
+        maintain_archive_repository
     fi
     set_pending_spike_alert "$HALT_DB" "$HALT_PREV_COUNT" "$HALT_CURRENT_COUNT" "$HALT_DELTA" "$SPIKE_THRESHOLD"
     if send_spike_alert "$HALT_DB" "$HALT_PREV_COUNT" "$HALT_CURRENT_COUNT" "$HALT_DELTA" "$SPIKE_THRESHOLD"; then
@@ -1096,6 +1179,7 @@ commit_archive_snapshot \
     exit 1
 }
 set_pending_archive_push
+maintain_archive_repository
 
 if should_attempt_push; then
     PUSH_STATUS="ok"

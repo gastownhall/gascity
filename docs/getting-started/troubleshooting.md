@@ -546,6 +546,30 @@ On each run `jsonl-export` logs the active mode to stderr on transitions
 (e.g. after you add or remove `origin`) and re-logs it at least weekly so
 that an operator reading the log file can always find the current mode.
 
+### Archive object maintenance
+
+Every snapshot commit creates loose Git objects, including in local-only
+mode. The exporter checks the archive before each export and after each new
+commit. It runs a foreground, low-priority `git gc` when either of these
+defaults is reached:
+
+- `GC_JSONL_GC_LOOSE_OBJECTS=2000`
+- `GC_JSONL_GC_LOOSE_KB=262144` (256 MiB)
+
+Packing is deliberately single-threaded and uses
+`GC_JSONL_GC_WINDOW_MEMORY=256m` to avoid competing with the Dolt server and
+worker sessions for memory. These values can be lowered for small hosts. An
+invalid count/size value or failed maintenance run fails the order visibly;
+the exporter does not continue creating loose objects after maintenance has
+failed.
+
+To inspect an archive manually without changing it:
+
+```bash
+git -C "$ARCHIVE" count-objects -vH
+git -C "$ARCHIVE" fsck --connectivity-only
+```
+
 ### Enabling off-box backup
 
 Pick a repository that only this host will push to (the archive contains

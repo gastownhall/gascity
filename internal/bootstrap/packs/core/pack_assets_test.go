@@ -150,6 +150,32 @@ func TestCoreMaintenanceExecAssets(t *testing.T) {
 	}
 }
 
+func TestJSONLExportMaintainsArchiveObjectDatabase(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "assets/scripts/jsonl-export.sh")
+	if err != nil {
+		t.Fatalf("ReadFile(jsonl-export.sh): %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		`GC_JSONL_GC_LOOSE_OBJECTS`,
+		`GC_JSONL_GC_LOOSE_KB`,
+		`GC_JSONL_GC_WINDOW_MEMORY`,
+		`maintain_archive_repository()`,
+		`count-objects -v`,
+		`pack.windowMemory=`,
+		`pack.threads=1`,
+		`gc.autoDetach=false`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("jsonl-export.sh is missing archive-maintenance contract %q", want)
+		}
+	}
+	if got := strings.Count(body, "maintain_archive_repository\n"); got < 2 {
+		t.Fatalf("jsonl-export.sh invokes archive maintenance %d times, want at least twice (before export and after commit)", got)
+	}
+}
+
 func TestCoreControlDispatcherAgent(t *testing.T) {
 	type agentFile struct {
 		Description       string   `toml:"description"`
