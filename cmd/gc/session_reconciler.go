@@ -820,6 +820,15 @@ func finalizeDrainAckStoppedSession(
 				dt.remove(info.ID)
 			}
 			recordStopped(true)
+			// ra-co9epr: this session drain-acked with NO assigned work at
+			// all — the "spawned blind, found nothing, self-drained"
+			// signature. Count it against the spawn-churn breaker so a
+			// misroute that keeps spawning unclaimable blind demand gets
+			// rate-limited instead of burning a real session every ~24s
+			// forever. See recordPoolSpawnChurnForClosedSession's doc
+			// comment for why TriggerBeadID is the churn/legitimate-idle
+			// distinguisher.
+			recordPoolSpawnChurnForClosedSession(template, info, clk, rec)
 			// write-returns-Info (Step 6d): the caller's snapshot fold is ApplyPatch(the
 			// ClosePatch) + MarkClosed (closed:true). The raw session.Status="closed"
 			// mirror is deleted — the caller's MarkClosed fold is the sole same-tick
@@ -896,6 +905,13 @@ func finalizeDrainAckStoppedSession(
 	recordStopped(true)
 	if hasAssignedWork {
 		recordDrainAckAssignedWorkEvent(cityPath, cfg, store, rigStores, info, template, template, name, clk.Now().UTC(), rec, stderr)
+		// ra-3y4okc: this is the exact loop signature (session drain-acked
+		// while still assigned to open/in-progress work) that livelocks a
+		// misrouted bead the pool may not execute or close. Count the cycle
+		// against the stranded work bead and, past the cap, auto-hold it —
+		// see enforceDrainAckAssignedWorkCycleCap's doc comment for why this
+		// acts on the work bead rather than the session bead finalized here.
+		enforceDrainAckAssignedWorkCycleCap(cityPath, cfg, store, rigStores, info, clk, rec, stderr)
 	}
 	// Non-close drain-ack: the snapshot fold is the ApplyPatchInfo result above.
 	return drainAckFinalizeResult{folded: &foldedInfo}
