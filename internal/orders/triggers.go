@@ -23,7 +23,8 @@ type TriggerResult struct {
 	// Due is true if the trigger condition is satisfied and the order should run.
 	Due bool
 	// Reason explains why the trigger is or isn't due.
-	Reason   string
+	Reason string
+	// TimedOut is true only when a condition check was killed by its check_timeout deadline.
 	TimedOut bool
 	// LastRun is the last execution time (zero if never run).
 	LastRun time.Time
@@ -62,10 +63,9 @@ var (
 
 // ConditionCheckTimedOutMarker is the substring embedded in a condition
 // trigger's TriggerResult.Reason when the check command is killed by its
-// check_timeout deadline. The dispatcher matches on it to emit the
-// operator-facing starvation diagnostic, so both the producer here and the
-// consumer in the dispatcher reference this one constant instead of coupling
-// on a separately-typed literal across packages.
+// check_timeout deadline. It is only the human-readable text in Reason;
+// callers that need to detect a timeout must branch on TriggerResult.TimedOut,
+// since stderr excerpts appended to Reason can contain the same words.
 const ConditionCheckTimedOutMarker = "timed out"
 
 const (
