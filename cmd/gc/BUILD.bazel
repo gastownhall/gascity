@@ -722,6 +722,7 @@ go_test(
         "city_layout_test.go",
         "city_registry_test.go",
         "city_runtime_bead_worktree_reap_test.go",
+        "city_runtime_orphan_release_cadence_test.go",
         "city_runtime_release_callsite_test.go",
         "city_runtime_server_lifecycle_test.go",
         "city_runtime_test.go",
