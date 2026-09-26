@@ -92,6 +92,7 @@ go_test(
     ],
     embed = [":worker"],
     deps = [
+        "//internal/beadmeta",
         "//internal/beads",
         "//internal/events",
         "//internal/pricing",

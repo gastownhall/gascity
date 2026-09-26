@@ -9508,6 +9508,10 @@ export type UsageSessionRecent = {
      */
     cost_usd_estimate: number;
     /**
+     * Formula name from session bead metadata, when attributed.
+     */
+    formula_name?: string;
+    /**
      * Prompt tokens in the window.
      */
     input_tokens: number;

@@ -12,6 +12,7 @@ import (
 )
 
 func newCostsCmd(stdout, stderr io.Writer) *cobra.Command {
+	var byFormula bool
 	cmd := &cobra.Command{
 		Use:   "costs",
 		Short: "Show per-run usage and estimated cost for this city",
@@ -29,17 +30,19 @@ the cost total.`,
 		Example: "  gc costs",
 		Args:    cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doCosts(stdout, stderr) != 0 {
+			if doCosts(stdout, stderr, byFormula) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&byFormula, "by-formula", false, "group all runs of the same formula into one aggregated row")
 	return cmd
 }
 
 type runCost struct {
 	RunID               string  `json:"run_id"`
+	FormulaName         string  `json:"formula_name,omitempty"`
 	Invocations         int     `json:"invocations"`
 	ComputeFacts        int     `json:"compute_facts"`
 	InputTokens         int     `json:"input_tokens"`
@@ -61,6 +64,9 @@ func aggregateRunCosts(facts []usage.Fact) []runCost {
 			rc = &runCost{RunID: f.RunID}
 			byRun[f.RunID] = rc
 			order = append(order, f.RunID)
+		}
+		if rc.FormulaName == "" && f.FormulaName != "" {
+			rc.FormulaName = f.FormulaName
 		}
 		switch f.Kind {
 		case usage.KindModel:
@@ -87,7 +93,41 @@ func aggregateRunCosts(facts []usage.Fact) []runCost {
 	return rows
 }
 
-func doCosts(stdout, stderr io.Writer) int {
+// aggregateByFormula groups run costs by formula name into one aggregated row
+// per formula. Runs with no formula name are grouped under "-".
+func aggregateByFormula(rows []runCost) []runCost {
+	byFormula := map[string]*runCost{}
+	var order []string
+	for _, r := range rows {
+		key := r.FormulaName
+		if key == "" {
+			key = "-"
+		}
+		fc := byFormula[key]
+		if fc == nil {
+			fc = &runCost{FormulaName: key}
+			byFormula[key] = fc
+			order = append(order, key)
+		}
+		fc.Invocations += r.Invocations
+		fc.ComputeFacts += r.ComputeFacts
+		fc.InputTokens += r.InputTokens
+		fc.OutputTokens += r.OutputTokens
+		fc.CacheReadTokens += r.CacheReadTokens
+		fc.CacheCreationTokens += r.CacheCreationTokens
+		fc.WallSeconds += r.WallSeconds
+		fc.CostUSDEstimate += r.CostUSDEstimate
+		fc.Unpriced += r.Unpriced
+	}
+	sort.Strings(order)
+	result := make([]runCost, 0, len(order))
+	for _, key := range order {
+		result = append(result, *byFormula[key])
+	}
+	return result
+}
+
+func doCosts(stdout, stderr io.Writer, byFormula bool) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc costs: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -105,17 +145,33 @@ func doCosts(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc costs: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
 	rows := aggregateRunCosts(facts)
+	if byFormula {
+		rows = aggregateByFormula(rows)
+	}
 
 	if len(rows) == 0 {
 		fmt.Fprintf(stdout, "No usage facts recorded yet (%s).\n", usagePath) //nolint:errcheck
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "RUN\tINVOCATIONS\tIN\tOUT\tCACHE_R\tCACHE_C\tWALL_S\tEST_USD\tUNPRICED") //nolint:errcheck
+	if byFormula {
+		fmt.Fprintln(tw, "FORMULA\tINVOCATIONS\tIN\tOUT\tCACHE_R\tCACHE_C\tWALL_S\tEST_USD\tUNPRICED") //nolint:errcheck
+	} else {
+		fmt.Fprintln(tw, "RUN\tFORMULA\tINVOCATIONS\tIN\tOUT\tCACHE_R\tCACHE_C\tWALL_S\tEST_USD\tUNPRICED") //nolint:errcheck
+	}
 	var tot runCost
 	for _, r := range rows {
-		fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.4f\t%d\n", //nolint:errcheck
-			truncRunID(r.RunID), r.Invocations, r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheCreationTokens, r.WallSeconds, r.CostUSDEstimate, r.Unpriced)
+		formula := r.FormulaName
+		if formula == "" {
+			formula = "-"
+		}
+		if byFormula {
+			fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.4f\t%d\n", //nolint:errcheck
+				formula, r.Invocations, r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheCreationTokens, r.WallSeconds, r.CostUSDEstimate, r.Unpriced)
+		} else {
+			fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.4f\t%d\n", //nolint:errcheck
+				truncRunID(r.RunID), formula, r.Invocations, r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheCreationTokens, r.WallSeconds, r.CostUSDEstimate, r.Unpriced)
+		}
 		tot.Invocations += r.Invocations
 		tot.InputTokens += r.InputTokens
 		tot.OutputTokens += r.OutputTokens
@@ -125,8 +181,13 @@ func doCosts(stdout, stderr io.Writer) int {
 		tot.CostUSDEstimate += r.CostUSDEstimate
 		tot.Unpriced += r.Unpriced
 	}
-	fmt.Fprintf(tw, "TOTAL\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.4f\t%d\n", //nolint:errcheck
-		tot.Invocations, tot.InputTokens, tot.OutputTokens, tot.CacheReadTokens, tot.CacheCreationTokens, tot.WallSeconds, tot.CostUSDEstimate, tot.Unpriced)
+	if byFormula {
+		fmt.Fprintf(tw, "TOTAL\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.4f\t%d\n", //nolint:errcheck
+			tot.Invocations, tot.InputTokens, tot.OutputTokens, tot.CacheReadTokens, tot.CacheCreationTokens, tot.WallSeconds, tot.CostUSDEstimate, tot.Unpriced)
+	} else {
+		fmt.Fprintf(tw, "TOTAL\t\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.4f\t%d\n", //nolint:errcheck
+			tot.Invocations, tot.InputTokens, tot.OutputTokens, tot.CacheReadTokens, tot.CacheCreationTokens, tot.WallSeconds, tot.CostUSDEstimate, tot.Unpriced)
+	}
 	tw.Flush() //nolint:errcheck
 	if tot.Unpriced > 0 {
 		fmt.Fprintf(stdout, "\nNote: %d invocation(s) had no pricing and are excluded from EST_USD.\n", tot.Unpriced) //nolint:errcheck

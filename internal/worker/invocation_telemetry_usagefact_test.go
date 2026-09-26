@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -151,6 +152,73 @@ func TestMessageEmitsModelUsageFactToSink(t *testing.T) {
 	}
 }
 
+// TestMessageEmitsModelUsageFactWithFormulaName verifies the prompt-op seam
+// end-to-end: when the session bead carries gc.formula_name metadata the emitted
+// usage.Fact must carry the same FormulaName. This covers the metadata-read in
+// recordInvocationTelemetry that was wired in gc-caf.
+func TestMessageEmitsModelUsageFactWithFormulaName(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	h, err := NewSessionHandle(SessionHandleConfig{
+		Manager:     manager,
+		SearchPaths: []string{searchBase},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+		Session: SessionSpec{
+			Profile:  ProfileClaudeTmuxCLI,
+			Template: "probe",
+			Title:    "Probe",
+			Command:  "claude",
+			WorkDir:  workDir,
+			Provider: "claude",
+			Metadata: map[string]string{"agent_name": "myrig/polecat-1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSessionHandle: %v", err)
+	}
+	if err := h.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	const formulaName = "code-review"
+	if err := store.SetMetadata(h.sessionID, beadmeta.FormulaNameMetadataKey, formulaName); err != nil {
+		t.Fatalf("SetMetadata gc.formula_name: %v", err)
+	}
+
+	info, err := manager.Get(h.sessionID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", h.sessionID, err)
+	}
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", slugDir, err)
+	}
+	transcriptPath := filepath.Join(slugDir, info.SessionKey+".jsonl")
+	writeWorkerTestJSONL(t, transcriptPath, []map[string]any{
+		usageEntry("u1", "claude-opus-4-7", 100, 50, 0, 0),
+	})
+
+	if _, err := h.Message(context.Background(), MessageRequest{Text: "hello"}); err != nil {
+		t.Fatalf("Message: %v", err)
+	}
+
+	facts, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("want 1 model fact, got %d: %+v", len(facts), facts)
+	}
+	if facts[0].FormulaName != formulaName {
+		t.Errorf("FormulaName = %q, want %q (from gc.formula_name bead metadata)", facts[0].FormulaName, formulaName)
+	}
+}
+
 // TestMessageEmitsUnpricedModelFactForUnknownModel proves the tri-state honesty
 // of the real fact path: an unknown model yields a fact flagged Unpriced with a
 // zero cost — "not measured", never a free $0 invocation.
@@ -212,9 +280,9 @@ func TestModelUsageFact(t *testing.T) {
 	}
 	// modelUsageFact resolves RunID from the run chain; StepID is intentionally
 	// left unset — model usage is attributed at run level, not per formula step.
-	bead := beads.Bead{ID: "b1", Metadata: map[string]string{"molecule_id": "mol-7"}}
+	bead := beads.Bead{ID: "b1", Metadata: map[string]string{"molecule_id": "mol-7", "gc.formula_name": "my-formula"}}
 
-	priced := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "myrig/polecat-1", "claude", 0.02, true, now)
+	priced := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "myrig/polecat-1", "claude", 0.02, true, now, bead.Metadata["gc.formula_name"])
 	if priced.Kind != usage.KindModel {
 		t.Fatalf("kind = %q", priced.Kind)
 	}
@@ -235,6 +303,9 @@ func TestModelUsageFact(t *testing.T) {
 	if priced.Worker != "myrig/polecat-1" || priced.Model != "claude-opus-4-7" || priced.Provider != "claude" {
 		t.Fatalf("identity wrong: %+v", priced)
 	}
+	if priced.FormulaName != "my-formula" {
+		t.Fatalf("FormulaName = %q, want my-formula (propagated from gc.formula_name metadata)", priced.FormulaName)
+	}
 	if priced.InputTokens != 100 || priced.OutputTokens != 50 || priced.CacheReadTokens != 10 || priced.CacheCreationTokens != 5 {
 		t.Fatalf("tokens wrong: %+v", priced)
 	}
@@ -254,7 +325,7 @@ func TestModelUsageFact(t *testing.T) {
 	}
 
 	// Unpriced collapses cost to zero regardless of the cost argument.
-	unp := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, false, now)
+	unp := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, false, now, "")
 	if !unp.Unpriced || unp.CostUSDEstimate != 0 {
 		t.Fatalf("unpriced fact must zero the cost and set the flag: %+v", unp)
 	}
@@ -276,7 +347,7 @@ func TestModelUsageFactPrefersEntryTimestampOverNow(t *testing.T) {
 	}
 	bead := beads.Bead{ID: "b1", Metadata: map[string]string{"molecule_id": "mol-7"}}
 
-	f := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now)
+	f := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now, "")
 	if f.At != entryTime.UnixMilli() {
 		t.Fatalf("At = %d, want the entry's own timestamp %d, not now (%d)", f.At, entryTime.UnixMilli(), now.UnixMilli())
 	}
@@ -285,7 +356,7 @@ func TestModelUsageFactPrefersEntryTimestampOverNow(t *testing.T) {
 	// extraction doesn't populate it) must fall back to now unchanged.
 	uNoTimestamp := u
 	uNoTimestamp.Timestamp = time.Time{}
-	fallback := modelUsageFact(uNoTimestamp, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now)
+	fallback := modelUsageFact(uNoTimestamp, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now, "")
 	if fallback.At != now.UnixMilli() {
 		t.Fatalf("At = %d, want now (%d) when Timestamp is zero", fallback.At, now.UnixMilli())
 	}
@@ -472,6 +543,88 @@ func TestFactorySweepSessionModelUsageClaude(t *testing.T) {
 	}
 	if len(facts2) != 2 {
 		t.Fatalf("second sweep changed fact count to %d, want 2", len(facts2))
+	}
+}
+
+// TestSweepSessionModelUsageCarriesFormulaName verifies the sweep-seam end-to-end:
+// when the session bead carries gc.formula_name metadata, every emitted usage.Fact
+// must carry the same FormulaName. This covers the metadata-read in
+// sweepResolvedTranscript that was wired in gc-caf.
+func TestSweepSessionModelUsageCarriesFormulaName(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	factory, err := NewFactory(FactoryConfig{
+		Store:       store,
+		Provider:    sp,
+		SearchPaths: []string{searchBase},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	h, err := factory.Session(SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+		Metadata: map[string]string{"agent_name": "myrig/polecat-1"},
+	})
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if err := h.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	id := h.sessionID
+
+	const formulaName = "my-sweep-formula"
+	if err := store.SetMetadata(id, beadmeta.FormulaNameMetadataKey, formulaName); err != nil {
+		t.Fatalf("SetMetadata gc.formula_name: %v", err)
+	}
+
+	info, err := h.manager.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", id, err)
+	}
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", slugDir, err)
+	}
+	writeWorkerTestJSONL(t, filepath.Join(slugDir, info.SessionKey+".jsonl"), []map[string]any{
+		usageEntryWithMessageID("u1", "msg-1", 100, 50, 0, 0),
+	})
+
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), id, b.Metadata, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage: %v", err)
+	}
+	if !settled {
+		t.Fatal("sweep must report settled")
+	}
+	if emitted != 1 {
+		t.Fatalf("emitted = %d, want 1", emitted)
+	}
+
+	facts, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("want 1 model fact, got %d: %+v", len(facts), facts)
+	}
+	if facts[0].FormulaName != formulaName {
+		t.Errorf("FormulaName = %q, want %q (from gc.formula_name bead metadata)", facts[0].FormulaName, formulaName)
 	}
 }
 

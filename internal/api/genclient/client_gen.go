@@ -8780,6 +8780,9 @@ type UsageSessionRecent struct {
 	// CostUsdEstimate List-price estimate for the window.
 	CostUsdEstimate float64 `json:"cost_usd_estimate"`
 
+	// FormulaName Formula name from session bead metadata, when attributed.
+	FormulaName *string `json:"formula_name,omitempty"`
+
 	// InputTokens Prompt tokens in the window.
 	InputTokens int64 `json:"input_tokens"`
 

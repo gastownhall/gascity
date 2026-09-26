@@ -181,6 +181,7 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 	if agentName == "" {
 		agentName = strings.TrimSpace(info.SessionName)
 	}
+	formulaName := strings.TrimSpace(pr.Metadata[beadmeta.FormulaNameMetadataKey])
 	// Model usage facts flow to the configured usage sink (gc costs / external
 	// aggregators), independent of the metrics above and of operation-event
 	// recording: a sink-only handle (CLI factory path) still emits. Resolved once
@@ -189,9 +190,10 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 	now := time.Now().UTC()
 	for _, u := range pending {
 		labels := telemetry.InvocationLabels{
-			AgentName: agentName,
-			Model:     u.Model,
-			Provider:  providerFamily,
+			AgentName:   agentName,
+			Model:       u.Model,
+			Provider:    providerFamily,
+			FormulaName: formulaName,
 		}
 		telemetry.RecordInvocationTokens(ctx, labels,
 			int64(u.InputTokens), int64(u.OutputTokens),
@@ -206,7 +208,7 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 			telemetry.RecordInvocationCostEstimate(ctx, labels, cost)
 		}
 		if emitFacts {
-			h.recordModelUsageFact(modelUsageFact(u, pr.Metadata, id, id, info.SessionName, providerFamily, cost, priced, now))
+			h.recordModelUsageFact(modelUsageFact(u, pr.Metadata, id, id, info.SessionName, providerFamily, cost, priced, now, formulaName))
 		}
 	}
 	// Best-effort: a failed cursor write means the next prompt op may
@@ -234,7 +236,7 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 // read as "not measured", never as a free invocation. At prefers the
 // transcript entry's own Timestamp when the extractor populated one, falling
 // back to now for providers whose tail extraction leaves it zero.
-func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sessionID, worker, providerFamily string, cost float64, priced bool, now time.Time) usage.Fact {
+func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sessionID, worker, providerFamily string, cost float64, priced bool, now time.Time, formulaName string) usage.Fact {
 	// beadID and sessionID are the session bead id and the run-id fallback — the
 	// same fields the retired ResolveRunID(bead.Metadata, bead.ID, sessionID) read
 	// from the raw bead. At the sole production call site they are equal (the
@@ -259,6 +261,7 @@ func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sess
 		SessionID: strings.TrimSpace(sessionID),
 		// StepID intentionally unset — run-level attribution (see body note).
 		Worker:              strings.TrimSpace(worker),
+		FormulaName:         strings.TrimSpace(formulaName),
 		Kind:                usage.KindModel,
 		Model:               strings.TrimSpace(u.Model),
 		Provider:            strings.TrimSpace(providerFamily),
@@ -679,6 +682,7 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 	}
 	workerName := strings.TrimSpace(meta["session_name"])
 	agentName := sweepAgentName(meta)
+	formulaName := strings.TrimSpace(meta[beadmeta.FormulaNameMetadataKey])
 	lastRecorded := ""
 	for _, u := range pending {
 		cost, priced := registry.Estimate(family, u.Model, pricing.Usage{
@@ -693,9 +697,10 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 		// agree. Metrics fire before the sink write: they must be recorded even if the
 		// sink Record below fails.
 		labels := telemetry.InvocationLabels{
-			AgentName: agentName,
-			Model:     u.Model,
-			Provider:  family,
+			AgentName:   agentName,
+			Model:       u.Model,
+			Provider:    family,
+			FormulaName: formulaName,
 		}
 		telemetry.RecordInvocationTokens(ctx, labels,
 			int64(u.InputTokens), int64(u.OutputTokens),
@@ -703,7 +708,7 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 		if priced {
 			telemetry.RecordInvocationCostEstimate(ctx, labels, cost)
 		}
-		fact := modelUsageFact(u, meta, id, id, workerName, family, cost, priced, now)
+		fact := modelUsageFact(u, meta, id, id, workerName, family, cost, priced, now, formulaName)
 		if recErr := sink.Record(ctx, fact); recErr != nil {
 			// Stop at the first failure and advance the cursor only through the last
 			// success, so the next sweep resumes here instead of skipping the gap.

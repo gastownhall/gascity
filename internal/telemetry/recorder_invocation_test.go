@@ -18,18 +18,53 @@ func resetInvocationInstruments(t *testing.T) {
 
 func TestInvocationLabels_OTelAttributes(t *testing.T) {
 	labels := InvocationLabels{
+		AgentName:   "rig/polecat-1",
+		Model:       "claude-opus-4-7",
+		Provider:    "claude",
+		FormulaName: "my-formula",
+	}
+	attrs := labels.toOTel()
+	if len(attrs) != 4 {
+		t.Fatalf("toOTel() = %d attrs, want 4", len(attrs))
+	}
+	want := map[attribute.Key]string{
+		"agent_name":   "rig/polecat-1",
+		"model":        "claude-opus-4-7",
+		"provider":     "claude",
+		"formula_name": "my-formula",
+	}
+	for _, a := range attrs {
+		expected, ok := want[a.Key]
+		if !ok {
+			t.Errorf("unexpected attr key: %s", a.Key)
+			continue
+		}
+		if got := a.Value.AsString(); got != expected {
+			t.Errorf("attr %s: got %q want %q", a.Key, got, expected)
+		}
+	}
+}
+
+// TestInvocationLabels_OTelAttributesEmptyFormulaName verifies that a
+// non-formula session (FormulaName="") still emits 4 OTEL attributes, with
+// formula_name present as an empty string. Cardinality is bounded: the empty
+// string is one fixed key, not N per formula.
+func TestInvocationLabels_OTelAttributesEmptyFormulaName(t *testing.T) {
+	labels := InvocationLabels{
 		AgentName: "rig/polecat-1",
 		Model:     "claude-opus-4-7",
 		Provider:  "claude",
+		// FormulaName intentionally empty (non-formula session)
 	}
 	attrs := labels.toOTel()
-	if len(attrs) != 3 {
-		t.Fatalf("toOTel() = %d attrs, want 3", len(attrs))
+	if len(attrs) != 4 {
+		t.Fatalf("toOTel() = %d attrs, want 4 (formula_name always emitted)", len(attrs))
 	}
 	want := map[attribute.Key]string{
-		"agent_name": "rig/polecat-1",
-		"model":      "claude-opus-4-7",
-		"provider":   "claude",
+		"agent_name":   "rig/polecat-1",
+		"model":        "claude-opus-4-7",
+		"provider":     "claude",
+		"formula_name": "",
 	}
 	for _, a := range attrs {
 		expected, ok := want[a.Key]
@@ -138,7 +173,7 @@ func TestInvocationInstrumentsActuallyRegisterValues(t *testing.T) {
 }
 
 // TestInvocationInstrumentsCarryExpectedAttributes confirms the
-// {agent_name, model, provider} tag set is the only set on every
+// {agent_name, model, provider, formula_name} tag set is the only set on every
 // instrument — no leaked bead_id or prompt_sha would explode cardinality.
 func TestInvocationInstrumentsCarryExpectedAttributes(t *testing.T) {
 	resetInvocationInstruments(t)
@@ -153,7 +188,7 @@ func TestInvocationInstrumentsCarryExpectedAttributes(t *testing.T) {
 
 	ctx := context.Background()
 	labels := InvocationLabels{
-		AgentName: "agentA", Model: "modelB", Provider: "providerC",
+		AgentName: "agentA", Model: "modelB", Provider: "providerC", FormulaName: "formulaD",
 	}
 	RecordInvocationTokens(ctx, labels, 100, 50, 2000, 800)
 
@@ -183,7 +218,10 @@ func TestInvocationInstrumentsCarryExpectedAttributes(t *testing.T) {
 				if got := keys["provider"]; got != "providerC" {
 					t.Errorf("%s: provider = %q", m.Name, got)
 				}
-				if len(keys) != 3 {
+				if got := keys["formula_name"]; got != "formulaD" {
+					t.Errorf("%s: formula_name = %q", m.Name, got)
+				}
+				if len(keys) != 4 {
 					t.Errorf("%s: unexpected attributes: %+v", m.Name, keys)
 				}
 				checked++

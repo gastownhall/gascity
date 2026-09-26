@@ -47,6 +47,8 @@ type Fact struct {
 	Worker    string `json:"worker,omitempty"`     // session name
 	City      string `json:"city,omitempty"`
 
+	FormulaName string `json:"formula_name,omitempty"` // gc.formula_name from session bead metadata
+
 	Kind Kind `json:"kind"`
 
 	// Model facts (Kind == KindModel).

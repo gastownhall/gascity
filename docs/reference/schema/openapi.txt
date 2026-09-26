@@ -25479,6 +25479,10 @@
             "format": "double",
             "type": "number"
           },
+          "formula_name": {
+            "description": "Formula name from session bead metadata, when attributed.",
+            "type": "string"
+          },
           "input_tokens": {
             "description": "Prompt tokens in the window.",
             "format": "int64",

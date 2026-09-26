@@ -139,6 +139,51 @@ func TestBuildUsageBodySkipsInvalidFactsAndKeepsSessionIDsDistinct(t *testing.T)
 	}
 }
 
+func TestBuildUsageBodyFormulaNamePropagatesToRecentBySession(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	facts := []usage.Fact{
+		{Kind: usage.KindModel, Worker: "rig/worker-a", SessionID: "s-formula", FormulaName: "review", InputTokens: 10, At: now.UnixMilli(), IdempotencyKey: "f1"},
+		{Kind: usage.KindModel, Worker: "rig/worker-b", SessionID: "s-no-formula", InputTokens: 5, At: now.UnixMilli(), IdempotencyKey: "f2"},
+	}
+	body := buildUsageBody(facts, usage.RecentReadReport{}, now)
+	if len(body.RecentBySession) != 2 {
+		t.Fatalf("recent_by_session = %+v, want 2 entries", body.RecentBySession)
+	}
+	byID := make(map[string]UsageSessionRecent)
+	for _, s := range body.RecentBySession {
+		byID[s.SessionID] = s
+	}
+	if got := byID["s-formula"].FormulaName; got != "review" {
+		t.Errorf("FormulaName = %q, want %q", got, "review")
+	}
+	if got := byID["s-no-formula"].FormulaName; got != "" {
+		t.Errorf("FormulaName = %q, want empty for session without formula", got)
+	}
+}
+
+// TestBuildUsageBodyFormulaNamePreservedByFirstFact verifies that when a session
+// has multiple facts the formula_name captured from the first fact is not
+// overwritten by subsequent facts that have an empty FormulaName. The
+// sessionAccum is initialized on the first fact, so only that fact's FormulaName
+// is captured.
+func TestBuildUsageBodyFormulaNamePreservedByFirstFact(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	facts := []usage.Fact{
+		{Kind: usage.KindModel, Worker: "rig/worker-a", SessionID: "s1", FormulaName: "review", InputTokens: 10, At: now.UnixMilli(), IdempotencyKey: "f1"},
+		{Kind: usage.KindModel, Worker: "rig/worker-a", SessionID: "s1", FormulaName: "", InputTokens: 20, At: now.UnixMilli(), IdempotencyKey: "f2"},
+	}
+	body := buildUsageBody(facts, usage.RecentReadReport{}, now)
+	if len(body.RecentBySession) != 1 {
+		t.Fatalf("recent_by_session = %+v, want 1 entry (same session)", body.RecentBySession)
+	}
+	if got := body.RecentBySession[0].FormulaName; got != "review" {
+		t.Errorf("FormulaName = %q, want %q (first fact wins; subsequent empty must not overwrite)", got, "review")
+	}
+	if body.RecentBySession[0].InputTokens != 30 {
+		t.Errorf("InputTokens = %d, want 30 (both facts aggregated)", body.RecentBySession[0].InputTokens)
+	}
+}
+
 func TestHandleUsageIsRegisteredAndReturnsSanitizedAggregate(t *testing.T) {
 	state := newFakeState(t)
 	state.usageSink = usage.NewLocalSink(filepath.Join(state.cityPath, ".gc", "usage.jsonl"))

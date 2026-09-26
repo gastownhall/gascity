@@ -70,14 +70,16 @@ func initInvocationInstruments() {
 	})
 }
 
-// InvocationLabels carries the {agent_name, model, provider} attribute
-// set used by every 1b instrument. Bead-level dimensions (bead_id,
+// InvocationLabels carries the {agent_name, model, provider, formula_name}
+// attribute set used by every 1b instrument. Bead-level dimensions (bead_id,
 // prompt_sha) are deliberately excluded to keep cardinality bounded; they
-// belong on the per-invocation event log instead.
+// belong on the per-invocation event log instead. FormulaName is empty for
+// non-formula sessions; cardinality is bounded by pack config.
 type InvocationLabels struct {
-	AgentName string
-	Model     string
-	Provider  string
+	AgentName   string
+	Model       string
+	Provider    string
+	FormulaName string
 }
 
 func (l InvocationLabels) toOTel() []attribute.KeyValue {
@@ -85,6 +87,7 @@ func (l InvocationLabels) toOTel() []attribute.KeyValue {
 		attribute.String("agent_name", l.AgentName),
 		attribute.String("model", l.Model),
 		attribute.String("provider", l.Provider),
+		attribute.String("formula_name", l.FormulaName),
 	}
 }
 
