@@ -6534,6 +6534,70 @@ func TestReconcilerSilentRebaselineOnVersionMismatch(t *testing.T) {
 	}
 }
 
+// TestReconcilerSilentRebaselineOnFingerprintVersionBump is a regression test
+// for ga-d9y4nr, modeled on the ga-zfm/v4 precedent's own test shape directly
+// above (TestReconcilerSilentRebaselineOnVersionMismatch). This bead bumps
+// FingerprintVersion v6->v7, so a started_config_hash stamped with the now-
+// retired "v6:" prefix — what every session running before the fix has
+// stored — must be treated as legacy/mismatched and silently rebaselined,
+// the same as any other version-prefix mismatch. On unpatched code
+// (FingerprintVersion still "v6") the stored "v6:" hash matches the current
+// version, so IsLegacyOrMismatchedVersion does not flag it: the reconciler
+// compares it as same-version drift instead (TestReconcilerStillDrainsOnSameVersionRealDrift's
+// case) and drains the session. RED until the version bump lands.
+func TestReconcilerSilentRebaselineOnFingerprintVersionBump(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	rec := events.NewFake()
+	env.rec = rec
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	// A hash stamped by a binary at the retired "v6" FingerprintVersion.
+	staleCore := "v6:" + strings.Repeat("a", 64)
+	staleLive := "v6:" + strings.Repeat("b", 64)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": staleCore,
+		"started_live_hash":   staleLive,
+		"live_hash":           staleLive,
+		"core_hash_breakdown": `{"version":"v6","fields":{"Command":"old"}}`,
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("expected no drain when rebaselining a v6-prefixed hash after the FingerprintVersion bump, got %+v; stderr=%s", ds, env.stderr.String())
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionDraining {
+			t.Errorf("unexpected SessionDraining event recorded for v6->v7 silent rebaseline: %+v", e)
+		}
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	expectedCore := runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"})
+	expectedLive := runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"})
+	if got.Metadata["started_config_hash"] != expectedCore {
+		t.Errorf("started_config_hash = %q, want rebaseline to %q", got.Metadata["started_config_hash"], expectedCore)
+	}
+	if got.Metadata["started_live_hash"] != expectedLive {
+		t.Errorf("started_live_hash = %q, want rebaseline to %q", got.Metadata["started_live_hash"], expectedLive)
+	}
+	if got.Metadata["live_hash"] != expectedLive {
+		t.Errorf("live_hash = %q, want rebaseline to %q", got.Metadata["live_hash"], expectedLive)
+	}
+	if got.Metadata["core_hash_breakdown"] == `{"version":"v6","fields":{"Command":"old"}}` {
+		t.Errorf("core_hash_breakdown was not rebaselined, still: %q", got.Metadata["core_hash_breakdown"])
+	}
+	if got.Metadata["core_hash_breakdown"] == "" {
+		t.Errorf("core_hash_breakdown was cleared but should be rebaselined to current breakdown")
+	}
+}
+
 // TestReconcilerStillDrainsOnSameVersionRealDrift enforces ga-s760.1 FR-4:
 // the silent rebaseline path must NOT swallow real drift. When stored and
 // current hashes share the current version prefix but differ in the hex
