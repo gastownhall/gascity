@@ -93,7 +93,13 @@ func sessionOwnsLiveClaim(
 	if claimID == "" {
 		return false, "", nil
 	}
-	held, err := assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
+	// The first leg that holds the claimed bead answers for it — bead ids are
+	// unique, so the bead's own state (held, closed, released, re-owned) is
+	// final and the walk stops there either way. Only NotFound moves on to the
+	// next leg. Without this a finished worker whose stamp names a closed bead
+	// would read every remaining leg on every tick.
+	held := false
+	_, err = assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
 		work, err := liveBeadRead(s, claimID)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
@@ -101,7 +107,8 @@ func sessionOwnsLiveClaim(
 			}
 			return false, err
 		}
-		return claimedWorkStillHeldBy(work, info.ID), nil
+		held = claimedWorkStillHeldBy(work, info.ID)
+		return true, nil
 	})
 	if err != nil {
 		return true, claimID, fmt.Errorf("reading claimed bead %s: %w", claimID, err)
