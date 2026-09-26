@@ -55,6 +55,21 @@ args = ["notes-mcp"]
 	if strings.Contains(stderr.String(), `"helper"`) {
 		t.Fatalf("unchanged skip re-warned on the next tick:\n%s", stderr.String())
 	}
+
+	// The latch is keyed per (city, agent, harness, servers), not once per
+	// process: a newly added unsupported agent still warns while the already
+	// reported one stays quiet.
+	cfg.Agents = append(cfg.Agents, config.Agent{Name: "helper2", Scope: "city", Provider: "copilot"})
+	stderr.Reset()
+	if err := runStage1MCPProjection(cityPath, cfg, stubLookPath, &stderr); err != nil {
+		t.Fatalf("third runStage1MCPProjection: %v", err)
+	}
+	if !strings.Contains(stderr.String(), `"helper2"`) {
+		t.Fatalf("new skipped agent did not warn:\n%s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), `"helper"`) {
+		t.Fatalf("unchanged skip re-warned alongside the new one:\n%s", stderr.String())
+	}
 }
 
 func TestUnsupportedMCPHarnessErrorExplainsTheFix(t *testing.T) {

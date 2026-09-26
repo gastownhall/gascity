@@ -1111,6 +1111,7 @@ go_test(
         "max_session_age_tracker_test.go",
         "mcp_integration_test.go",
         "mcp_supervisor_test.go",
+        "mcp_unsupported_harness_test.go",
         "metrics_census_test.go",
         "metrics_classifier_test.go",
         "metrics_lifecycle_test.go",
