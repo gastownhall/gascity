@@ -639,14 +639,15 @@ func (s *Server) resolveSessionIDMaterializingNamedWithContext(ctx context.Conte
 	return s.resolveSessionTargetIDWithContext(ctx, store, identifier, apiSessionResolveOptions{materialize: true})
 }
 
-func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, id, message string, intent session.SubmitIntent) (session.SubmitOutcome, error) {
+func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, id, message string, intent session.SubmitIntent, clientMessageID string) (session.SubmitOutcome, error) {
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return session.SubmitOutcome{}, err
 	}
 	result, err := handle.Message(ctx, worker.MessageRequest{
-		Text:     message,
-		Delivery: workerDeliveryIntent(intent),
+		Text:            message,
+		Delivery:        workerDeliveryIntent(intent),
+		ClientMessageID: clientMessageID,
 	})
 	if err != nil {
 		return session.SubmitOutcome{}, err
@@ -669,7 +670,7 @@ func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads
 // sendUserMessageToSession keeps POST /messages as a compatibility alias for
 // the semantic default submit path.
 func (s *Server) sendUserMessageToSession(ctx context.Context, store beads.Store, id, message string) error {
-	_, err := s.submitMessageToSession(ctx, store, id, message, session.SubmitIntentDefault)
+	_, err := s.submitMessageToSession(ctx, store, id, message, session.SubmitIntentDefault, "")
 	return err
 }
 

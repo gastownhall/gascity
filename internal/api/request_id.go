@@ -19,6 +19,16 @@ func newRequestID() (string, error) {
 	return "req-" + hex.EncodeToString(b), nil
 }
 
+// newTurnID generates a unique identifier for a conversation turn.
+// Format: "turn-" + hex(16 random bytes) = "turn-" + 32 hex chars
+func newTurnID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generating turn ID: %w", err)
+	}
+	return "turn-" + hex.EncodeToString(b), nil
+}
+
 func (s *Server) currentCityEventCursor() (string, error) {
 	ep := s.state.EventProvider()
 	if ep == nil {
