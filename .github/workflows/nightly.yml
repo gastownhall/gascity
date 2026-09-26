@@ -77,7 +77,7 @@ jobs:
       - name: Tier C Ollama inference tests
         run: >
           go test -tags acceptance_c -timeout 45m -v ./test/acceptance/tier_c/...
-          -run 'Test(BdCmdSeparatesStdoutAndStderrOnError|BdCmdReturnsPureStdoutOnSuccessfulJSONCommand|Swarm_SlingWorkCoderCommits|Gastown_PolecatLifecycle|Gastown_MayorDispatchPipeline|TierCEnvAuthDoesNotMirrorAuthTokenIntoAPIKey)$'
+          -run 'Test(BdCmdSeparatesStdoutAndStderrOnError|BdCmdReturnsPureStdoutOnSuccessfulJSONCommand|Swarm_SlingWorkCoderCommits|Gastown_PolecatLifecycle|Gastown_MayorDispatchPipeline|TierCEnvAuthDoesNotMirrorAuthTokenIntoAPIKey|FreshInit_SlingSpawnsDefaultPoolWorker|FreshInit_ClaudeUnrestricted)$'
 
   integration-sqlite-coordstore:
     name: Integration / SQLite coordination store
