@@ -86,8 +86,11 @@ const (
 	// PR jobs' resolve-pin / build-bd-from-BD_CURRENT_REF / verify steps
 	// verbatim, and one `go test -tags acceptance_a -timeout 45m -run
 	// 'TestBeadsProxiedDefault$'` step. No new trigger, no new permission, no
-	// provider selector.
-	expectedNightlyExecutionHash = "04ca67750b129d1e4b52702116e79f0c0547e67d1a1f050932511cf3fed10db2"
+	// provider selector. Then (v1.5.0 Tier C first-run drain) the tier-c job's
+	// -run selector gained TestFreshInit_SlingSpawnsDefaultPoolWorker and
+	// TestFreshInit_ClaudeUnrestricted, mirroring RC Gate's acceptance C shards;
+	// same job, env, secrets and runner.
+	expectedNightlyExecutionHash = "54aa1f894d2c3167efb3bb5b439b3d76f00dc1c5d5abd92a3247ae4d1bc604bb"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 

@@ -18,12 +18,23 @@ import (
 // loaded CI host while the whole test stays within a few seconds per backend.
 const metadataStressRounds = 60
 
-// metadataStressMaxErrorRate bounds the fraction of SetMetadataBatch calls
-// that may give up with ErrVersionMismatch after the retry budget. A refused
-// write is surfaced, never silently lost, so a nonzero rate is correct; the
-// bound catches a retry loop that stopped re-reading (every call would fail)
-// without making the test sensitive to host load.
-const metadataStressMaxErrorRate = 0.25
+// metadataStressMaxErrorRate is a sanity ceiling on the fraction of
+// SetMetadataBatch calls that may give up with ErrVersionMismatch after the
+// retry budget. A refused write is surfaced, never silently lost, so a nonzero
+// rate is correct, and how often the three-attempt budget runs out depends on
+// how the host schedules the two writers: the embedded engine on the macOS
+// runner gave up on 33% of calls with the retry working as designed, so the
+// earlier 25% bound failed on host load alone.
+//
+// The rate is not the proof that a retry re-reads the committed row. A
+// mutation that re-used the first read on every retry gave up on only 2-27%
+// of calls here on Linux, overlapping the correct implementation's range; the
+// scripted interleavings (TestNativeDoltStoreSetMetadataBatchKeepsAConcurrent*)
+// are what fail deterministically on that regression. This test's correctness
+// assertions are the lost-update checks, which stay strict: zero successful
+// writes may be missing from the final row. The ceiling only catches a gross
+// liveness failure, such as a merge that no longer retries at all.
+const metadataStressMaxErrorRate = 0.5
 
 // TestNativeDoltStoreMetadataMergeSurvivesAConcurrentUpdateLoop is the
 // unscripted form of the compare-and-swap proof: one goroutine loops Update on
@@ -135,7 +146,7 @@ func runMetadataMergeStress(t *testing.T, store *NativeDoltStore, ephemeral bool
 	t.Logf("update: %d landed, %d refused; batch: %d landed, %d refused (%.0f%%)",
 		len(writers[0].landed), len(writers[0].errs), len(batch.landed), len(batch.errs), rate*100)
 	if rate > metadataStressMaxErrorRate {
-		t.Fatalf("SetMetadataBatch gave up on %d of %d calls (%.0f%%), want at most %.0f%%: the merge retry is not re-reading onto the committed row",
+		t.Fatalf("SetMetadataBatch gave up on %d of %d calls (%.0f%%), want at most %.0f%%: the metadata merge retry is failing far more often than contention explains",
 			len(batch.errs), metadataStressRounds, rate*100, metadataStressMaxErrorRate*100)
 	}
 	if len(writers[0].landed) == 0 || len(batch.landed) == 0 {
