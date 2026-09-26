@@ -45,6 +45,9 @@ const (
 	hookClaimReasonNonTurnContext             = "non_turn_context"
 	hookClaimReasonDrainPending               = "drain_pending"
 	hookClaimReasonMissingSessionRegistration = "missing_session_registration"
+	hookClaimReasonCitySuspended              = "city_suspended"
+	hookClaimReasonAgentSuspended             = "agent_suspended"
+	hookClaimReasonRigSuspended               = "rig_suspended"
 )
 
 // Reasons carried on a bead.claim_released event: which unwind gave the claim
@@ -1395,6 +1398,14 @@ func writeHookClaimDrainPending(label, sessionID string, opts hookClaimOptions, 
 // retrying the refusal forever.
 func writeHookClaimStaleSessionDrain(opts hookCommandOptions, stdout, stderr io.Writer) int {
 	return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, hookRuntimeDrainAck, stdout, stderr)
+}
+
+func writeHookClaimSuspensionDrain(reason string, opts hookCommandOptions, stdout, stderr io.Writer) int {
+	drainAckFn := opts.DrainAckFn
+	if drainAckFn == nil {
+		drainAckFn = hookRuntimeDrainAck
+	}
+	return writeHookClaimDrain(hookClaimLabel, reason, opts.JSON, opts.DrainAck, drainAckFn, stdout, stderr)
 }
 
 // writeHookClaimMissingSessionRegistrationDrain emits the terminal result for a

@@ -21,10 +21,12 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -2180,6 +2182,25 @@ func startPreparedStartCandidate(
 			if stopErr != nil && !runtime.IsSessionGone(stopErr) {
 				return false, fmt.Errorf("recycling session %q with dead agent process: %w", name, stopErr)
 			}
+		}
+	}
+	if rigName := strings.TrimSpace(item.candidate.tp.RigName); rigName != "" {
+		st, err := loadSuspensionState(fsys.OSFS{}, cityPath)
+		if err != nil {
+			return false, fmt.Errorf("loading suspension state before starting session %q: %w", name, err)
+		}
+		suspendedOnStart := false
+		if cfg != nil {
+			for i := range cfg.Rigs {
+				rig := &cfg.Rigs[i]
+				if rig.Name == rigName {
+					suspendedOnStart = rig.EffectiveSuspendedOnStart()
+					break
+				}
+			}
+		}
+		if suspensionstate.EffectiveRigSuspended(st, rigName, suspendedOnStart) {
+			return false, fmt.Errorf("rig %q is suspended", rigName)
 		}
 	}
 	if store == nil || strings.TrimSpace(item.candidate.info.ID) == "" {
