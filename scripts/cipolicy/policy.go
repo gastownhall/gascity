@@ -56,9 +56,14 @@ const (
 	// internal/bootstrap/packs/core/assets/scripts/** so a reaper.sh-only
 	// change runs the real-Dolt reaper tests. Reviewed delta: one filter path,
 	// no new job, trigger or permission.
-	expectedCIExecutionHash      = "e1ce0c687c18f42a0d5b0f8d32383154a2823db6c912dc1bce2d6c5c58f1fd37"
-	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
-	expectedNightlyExecutionHash = "9cc6663eacb2279f8d98b6e0acc72de7b8907b0f58ef85c2f8dc684791c2a823" // reviewed delta: Beads v1.3.0-rc.2 -> v1.3.0
+	expectedCIExecutionHash     = "e1ce0c687c18f42a0d5b0f8d32383154a2823db6c912dc1bce2d6c5c58f1fd37"
+	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
+	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (v1.5.0 Tier C
+	// first-run drain) the tier-c job's -run selector gained
+	// TestFreshInit_SlingSpawnsDefaultPoolWorker and
+	// TestFreshInit_ClaudeUnrestricted, mirroring RC Gate's acceptance C shards;
+	// same job, env, secrets and runner.
+	expectedNightlyExecutionHash = "c3f4bdbbf813f93d037ea1bbabe03c8974856abd74a9e48209dc06500fb6e032"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 
