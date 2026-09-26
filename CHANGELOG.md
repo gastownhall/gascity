@@ -171,6 +171,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The OpenCode plugin keeps the stable prime at the head of the system
+  prompt.** `experimental.chat.system.transform` prepended the cached
+  `gc prime --hook` output, the drained nudges and unread mail to `system[0]`
+  as one block. `gc nudge drain --inject` emits a `Current time: ...` line on
+  every call, even with an empty queue, so the bytes right after the prime
+  changed every turn and the provider's prompt-cache prefix ended at the
+  prime; everything after it, including OpenCode's own system text, was
+  re-prefilled at every turn start. The plugin now prepends only the prime to
+  `system[0]` and appends the per-turn text as a trailing system entry, after
+  every stable entry. It also stops injecting from `chat.message`: OpenCode
+  persists that hook's `output.message.system` on the user message and joins
+  it into the tail of `system[0]` on every generation of the turn, which put
+  the prime and the clock line back into the header. The MiMo Code plugin had
+  the same shape and gets the same fix. OpenCode hook version 7, MiMo Code
+  hook version 3; `gc` upgrades installed plugins below those or without the
+  new transform. (#5732)
+
 - **The Dolt compactor no longer rewrites adopted or shared history.** The
   default-on `mol-dog-compactor` (`gc dolt compact`) flattened any managed
   database over 2000 commits back to its root commit and, if the database had
