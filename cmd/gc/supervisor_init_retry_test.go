@@ -205,3 +205,140 @@ func TestReconcileCitiesRetriesAfterConfigEdit(t *testing.T) {
 		t.Fatalf("after editing city.toml the reconcile pass never attempted the city (stderr: %q); editing city.toml resets the backoff, but the leaked initStatus entry skips the city before the backoff is ever consulted, so only a supervisor restart recovers it", stderr.String())
 	}
 }
+
+// newUnloadableConfigCity registers a city whose directory exists but whose
+// city.toml never parses, the shape that #5313 reports: "directory is
+// missing" is too narrow a predicate, since a directory that keeps an
+// invalid (or absent) city.toml sails past that check indefinitely.
+func newUnloadableConfigCity(t *testing.T) (*supervisor.Registry, string) {
+	t.Helper()
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath := filepath.Join(t.TempDir(), "unloadable-city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "unloadable-city"); err != nil {
+		t.Fatal(err)
+	}
+	return reg, cityPath
+}
+
+func cityStillRegistered(t *testing.T, reg *supervisor.Registry, path string) bool {
+	t.Helper()
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Path == path {
+			return true
+		}
+	}
+	return false
+}
+
+// TestReconcileCitiesAutoUnregistersRepeatedConfigLoadFailure covers
+// candidate fix A for #5313: a city whose city.toml fails to load must be
+// unregistered after staleCityConfigLoadFailThreshold consecutive failed
+// attempts, the same way a city whose directory has vanished already is
+// (staleCityDirAbsentThreshold). Without this, the init-failure backoff
+// caps at 5 minutes and the retry runs forever.
+func TestReconcileCitiesAutoUnregistersRepeatedConfigLoadFailure(t *testing.T) {
+	reg, cityPath := newUnloadableConfigCity(t)
+	cr := newCityRegistry()
+	key := canonicalTestPath(cityPath)
+
+	var stdout, stderr bytes.Buffer
+	for i := 0; i < staleCityConfigLoadFailThreshold; i++ {
+		reconcileCities(context.Background(), reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
+		// Each cycle's failure sets a backoff (10s, 20s, ...); without
+		// elapsing it, only the first cycle would ever re-attempt the
+		// config load and the streak would never accumulate.
+		elapseInitBackoff(cr, key)
+	}
+
+	if cityStillRegistered(t, reg, key) {
+		t.Fatalf("city %q should have been auto-unregistered after %d cycles of a config that never loads, but is still registered", key, staleCityConfigLoadFailThreshold)
+	}
+	if !strings.Contains(stderr.String(), "auto-unregistering") {
+		t.Fatalf("stderr should mention auto-unregistering, got: %s", stderr.String())
+	}
+}
+
+// TestReconcileCitiesDoesNotUnregisterConfigLoadFailureBeforeThreshold pins
+// the threshold boundary: a city short of staleCityConfigLoadFailThreshold
+// consecutive config-load failures must still be retried, not dropped.
+func TestReconcileCitiesDoesNotUnregisterConfigLoadFailureBeforeThreshold(t *testing.T) {
+	reg, cityPath := newUnloadableConfigCity(t)
+	cr := newCityRegistry()
+	key := canonicalTestPath(cityPath)
+
+	var stdout, stderr bytes.Buffer
+	for i := 0; i < staleCityConfigLoadFailThreshold-1; i++ {
+		reconcileCities(context.Background(), reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
+		elapseInitBackoff(cr, key)
+	}
+
+	if !cityStillRegistered(t, reg, key) {
+		t.Fatalf("city %q should still be registered after %d cycles (threshold is %d)", key, staleCityConfigLoadFailThreshold-1, staleCityConfigLoadFailThreshold)
+	}
+}
+
+// TestReconcileCitiesResetsConfigFailCounterWhenConfigLoadSucceeds proves
+// the auto-unregister above only fires on a genuine consecutive streak: once
+// city.toml parses again, the config-load-failure count must reset even if
+// the city goes on to fail init for an unrelated reason (here, the same
+// storage-shape failure exercised by newWedgedInitCity). Otherwise a city
+// that fails to load once, gets fixed, and later fails init some other way
+// could accumulate toward the threshold across unrelated failure kinds.
+func TestReconcileCitiesResetsConfigFailCounterWhenConfigLoadSucceeds(t *testing.T) {
+	reg, cityPath := newUnloadableConfigCity(t)
+	cr := newCityRegistry()
+	key := canonicalTestPath(cityPath)
+
+	var stdout, stderr bytes.Buffer
+	for i := 0; i < staleCityConfigLoadFailThreshold-1; i++ {
+		reconcileCities(context.Background(), reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
+		elapseInitBackoff(cr, key)
+	}
+
+	// Fix the config: it now loads, but still fails later in newCityRuntime
+	// (unservableStorageCityTOML), a different failure kind entirely.
+	cleanupManagedDoltTestCity(t, cityPath)
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(unservableStorageCityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := writeSpyScript(t, filepath.Join(t.TempDir(), "ops.log"))
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+
+	stderr.Reset()
+	reconcileCities(context.Background(), reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
+
+	var configFail int
+	cr.ReadCallback(func(
+		_ map[string]*managedCity,
+		_ map[string]cityInitProgress,
+		initFailures map[string]*initFailRecord,
+		_ map[string]*panicRecord,
+	) {
+		if rec := initFailures[key]; rec != nil {
+			configFail = rec.configFail
+		}
+	})
+	if configFail != 0 {
+		t.Fatalf("configFail = %d after city.toml loaded successfully, want 0 (stderr: %s)", configFail, stderr.String())
+	}
+	if !cityStillRegistered(t, reg, key) {
+		t.Fatal("city should still be registered: it never reached the config-load-failure threshold")
+	}
+}
