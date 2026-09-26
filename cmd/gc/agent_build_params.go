@@ -127,6 +127,15 @@ type agentBuildParams struct {
 	// etc.). Used by the skill materialization integration to decide
 	// stage-2 eligibility.
 	sessionProvider string
+
+	// providerUnresolved collects the provider-not-in-PATH failures that
+	// dropped templates from this build, so buildDesiredState can report
+	// the hole instead of just returning a smaller desired set. A pointer,
+	// not a slice: resolveTemplateForSessionBeadInfo (and any other seam
+	// that scopes params via `local := *bp`) must accumulate into the same
+	// place as the parent (ob-woag). Nil in focused unit fixtures that
+	// build params by hand; every recording site is nil-receiver-safe.
+	providerUnresolved *providerUnresolvedSet
 }
 
 // hasCompleteSessionSnapshot reports whether a store-backed build has a
@@ -145,6 +154,18 @@ func (p *agentBuildParams) hasCompleteSessionSnapshot() bool {
 		return p.sessionSnapshotComplete
 	}
 	return p.sessionBeads != nil && p.sessionBeads.LoadError() == nil
+}
+
+// recordProviderUnresolved forwards one template-resolution error to this
+// build's provider-not-in-PATH accumulator, and reports whether the error was
+// one. Nil-safe on both the params and the accumulator so the legacy fixtures
+// that hand-build params (and the storeless paths that pass a nil bp) stay
+// working.
+func (p *agentBuildParams) recordProviderUnresolved(template string, err error) bool {
+	if p == nil {
+		return false
+	}
+	return p.providerUnresolved.record(template, err)
 }
 
 // newAgentBuildParams constructs agentBuildParams from the common startup values.
@@ -171,6 +192,8 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 		beadNames:       make(map[string]string),
 		stderr:          stderr,
 		sessionProvider: cfg.Session.Provider,
+
+		providerUnresolved: newProviderUnresolvedSet(),
 	}
 	if store != nil {
 		params.poolSessionCreateBudget = poolplan.NewCreateBudget(cfg.Daemon.MaxWakesPerTickOrDefault())
