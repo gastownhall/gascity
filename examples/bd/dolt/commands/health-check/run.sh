@@ -39,16 +39,35 @@ json_field() {
     | tr -d ' "'
 }
 
+# server_string_field KEY — a string field of the server object. json_field's
+# no-jq fallback strips spaces and quotes, which suits scalars but mangles free
+# text; here the no-jq path keeps the value's JSON escapes (diagnostics only).
+server_string_field() {
+  if command -v jq >/dev/null 2>&1; then
+    json_field ".server.$1"
+    return
+  fi
+  printf '%s\n' "$report" \
+    | sed -n "/\"server\"[[:space:]]*:/,/}/p" \
+    | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\\(.*\\)\".*/\\1/p" \
+    | head -1
+}
+
 reachable=$(json_field ".server.reachable")
 running=$(json_field ".server.running")
 pid=$(json_field ".server.pid")
 port=$(json_field ".server.port")
 latency=$(json_field ".server.latency_ms")
+attempts=$(json_field ".server.probe_attempts")
+probe_error=$(server_string_field probe_error)
 
 case "$reachable" in
   true) exit 0 ;;
   false)
-    echo "Dolt server unreachable: running=${running:-unknown} pid=${pid:-0} port=${port:-unknown} latency_ms=${latency:-0}" >&2
+    msg="Dolt server unreachable: running=${running:-unknown} pid=${pid:-0} port=${port:-unknown} latency_ms=${latency:-0}"
+    if [ -n "$attempts" ]; then msg="$msg attempts=$attempts"; fi
+    if [ -n "$probe_error" ]; then msg="$msg error=$probe_error"; fi
+    echo "$msg" >&2
     exit 1
     ;;
   *)
