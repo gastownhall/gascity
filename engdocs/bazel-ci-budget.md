@@ -40,7 +40,8 @@ gap >= 15% of elapsed  -> capacity problem; attack the farm:
 | local, warm | - | 248s | 218s | 30s (12%) | sharding-bound |
 | remote, cold-farm | T3 | 723s | 711s | 12s | 634s input upload after worker recycle |
 | remote, warm | T1 | 92s | 84s | 8s | one gc shard at 82s |
-| CI main (no runner cache) | T2 | ~500s build + 60-900s test | - | - | 205MB input re-hash dominates |
+| CI, --jobs=2 (default) | T2 | 841s | 87s | 754s (90%) | 2vcpu runner capped REMOTE actions at 2 in flight; one flag (--jobs=64) fixed it |
+| CI, --jobs=64 | T2 | 167s | 156s | 11s (6%) | budget passes; gc shard is the path |
 
 ## Path to 60s (T1)
 

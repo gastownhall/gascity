@@ -120,7 +120,7 @@ jobs:
 
       - name: Critical-path report + budget (the optimization loop metric)
         if: always()
-        run: python3 tools/bazel/critpath.py /tmp/bazel-profile.json --tier T2 --budget 360 || true
+        run: python3 tools/bazel/critpath.py /tmp/bazel-profile.json --tier T2 --budget 180 || true
 
       - name: Upload test logs
         if: failure()
