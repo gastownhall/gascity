@@ -437,3 +437,127 @@ func TestSessionOwnsLiveClaim(t *testing.T) {
 		}
 	})
 }
+
+// ownershipCountingStore counts Get calls, to pin how many store reads one
+// live-claim check costs.
+type ownershipCountingStore struct {
+	beads.Store
+	mu   sync.Mutex
+	gets int
+}
+
+func (s *ownershipCountingStore) Get(id string) (beads.Bead, error) {
+	s.mu.Lock()
+	s.gets++
+	s.mu.Unlock()
+	return s.Store.Get(id)
+}
+
+func (s *ownershipCountingStore) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gets
+}
+
+// TestSessionOwnsLiveClaim_StopsAtFoundBead: the first residency leg that
+// holds the claimed bead answers for it. A finished worker whose stamp still
+// names a closed (or released, or re-owned) bead must not fan the read out to
+// every other leg on every tick — that was 1+2R bd subprocesses per check on a
+// city with R rigs. Only a NotFound moves on to the next leg.
+func TestSessionOwnsLiveClaim_StopsAtFoundBead(t *testing.T) {
+	city := &ownershipCountingStore{Store: beads.NewMemStore()}
+	rigA := &ownershipCountingStore{Store: beads.NewMemStore()}
+	rigB := &ownershipCountingStore{Store: beads.NewMemStore()}
+	rigStores := map[string]beads.Store{"alpha": rigA, "beta": rigB}
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: ownershipPoolTemplate, Scope: "city", MaxActiveSessions: intPtr(4)}},
+		Rigs:   []config.Rig{{Name: "alpha", Path: t.TempDir()}, {Name: "beta", Path: t.TempDir()}},
+	}
+
+	session, err := city.Create(beads.Bead{
+		Title:  ownershipWorkerName,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         ownershipWorkerName,
+			"template":             ownershipPoolTemplate,
+			"state":                "active",
+			poolManagedMetadataKey: "true",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := sessionFrontDoor(city).Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		mutate   func(t *testing.T, work beads.Bead)
+		wantHeld bool
+	}{
+		{name: "closed", mutate: func(t *testing.T, work beads.Bead) {
+			if err := city.Close(work.ID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "released", mutate: func(t *testing.T, work beads.Bead) {
+			open, none := "open", ""
+			if err := city.Update(work.ID, beads.UpdateOpts{Status: &open, Assignee: &none}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "owned by another session", mutate: func(t *testing.T, work beads.Bead) {
+			if err := city.SetMetadata(work.ID, beadmeta.SessionIDMetadataKey, "gc-other"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "held", wantHeld: true, mutate: func(*testing.T, beads.Bead) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inProgress, assignee := "in_progress", ownershipPoolTemplate
+			work, err := city.Create(beads.Bead{Title: "do-work", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := city.Update(work.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &assignee}); err != nil {
+				t.Fatal(err)
+			}
+			if err := city.SetMetadata(work.ID, beadmeta.SessionIDMetadataKey, session.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := city.SetMetadata(session.ID, beadmeta.CurrentClaimBeadIDMetadataKey, work.ID); err != nil {
+				t.Fatal(err)
+			}
+			tc.mutate(t, work)
+
+			cityBefore, aBefore, bBefore := city.count(), rigA.count(), rigB.count()
+			held, claimID, err := sessionOwnsLiveClaim("", cfg, city, rigStores, info)
+			if err != nil || claimID != work.ID || held != tc.wantHeld {
+				t.Fatalf("sessionOwnsLiveClaim = (%v, %q, %v), want (%v, %q, nil)", held, claimID, err, tc.wantHeld, work.ID)
+			}
+			if got := city.count() - cityBefore; got != 2 {
+				t.Errorf("city store Gets = %d, want 2 (session bead + claimed bead)", got)
+			}
+			if got := rigA.count() - aBefore + rigB.count() - bBefore; got != 0 {
+				t.Errorf("rig store Gets = %d, want 0: the claimed bead was already found in the city leg", got)
+			}
+		})
+	}
+
+	t.Run("not found in city leg moves on to the rigs", func(t *testing.T) {
+		if err := city.SetMetadata(session.ID, beadmeta.CurrentClaimBeadIDMetadataKey, "gc-elsewhere"); err != nil {
+			t.Fatal(err)
+		}
+		aBefore, bBefore := rigA.count(), rigB.count()
+		held, _, err := sessionOwnsLiveClaim("", cfg, city, rigStores, info)
+		if held || err != nil {
+			t.Fatalf("sessionOwnsLiveClaim = (%v, %v), want not held", held, err)
+		}
+		if rigA.count() == aBefore || rigB.count() == bBefore {
+			t.Fatalf("rig legs not searched for a claim missing from the city leg (alpha +%d, beta +%d)", rigA.count()-aBefore, rigB.count()-bBefore)
+		}
+	})
+}
