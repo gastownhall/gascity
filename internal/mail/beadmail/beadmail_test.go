@@ -855,6 +855,136 @@ func TestInboxExcludesRead(t *testing.T) {
 	}
 }
 
+// typeLeakyMessageStore embeds MemStore but drops the Type filter on
+// message-candidate queries, simulating a store implementation that doesn't
+// enforce Type="message" server-side. It lets a non-message bead (e.g. a
+// session bead) leak into the candidate list so filterMessagesForRecipients'
+// own defensive Type check is what excludes it, not the query.
+type typeLeakyMessageStore struct {
+	*beads.MemStore
+}
+
+func (s typeLeakyMessageStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Type != messageBeadType {
+		return s.MemStore.List(query)
+	}
+	leaky := query
+	leaky.Type = ""
+	return s.MemStore.List(leaky)
+}
+
+func TestInboxExcludesNonMessageBeadsFromLeakyCandidates(t *testing.T) {
+	store := typeLeakyMessageStore{MemStore: beads.NewMemStore()}
+	p := New(store)
+
+	if _, err := p.Send("human", "mayor", "", "real message"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:     session.BeadType,
+		Status:   "open",
+		Assignee: "mayor",
+		Title:    "session bead",
+	}); err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+
+	msgs, err := p.Inbox("mayor")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Body != "real message" {
+		t.Fatalf("Inbox = %#v, want only the message bead (session bead must be excluded)", msgs)
+	}
+}
+
+func TestInboxExcludesMetadataMarkedReadMessage(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	m, err := p.Send("human", "mayor", "", "read via metadata only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Set mail.read=true without the "read" label, matching a caller that
+	// wrote metadata directly (e.g. a migrated store) rather than through
+	// MarkRead/Read.
+	if err := store.Update(m.ID, beads.UpdateOpts{
+		Metadata: map[string]string{mail.ReadMetadataKey: "true"},
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	msgs, err := p.Inbox("mayor")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("Inbox = %d messages, want 0 (metadata mail.read=true must exclude, matching beadToMessage.Read)", len(msgs))
+	}
+
+	_, unread, err := p.CountRecipients([]string{"mayor"})
+	if err != nil {
+		t.Fatalf("CountRecipients: %v", err)
+	}
+	if unread != 0 {
+		t.Errorf("CountRecipients unread = %d, want 0 (metadata mail.read=true must count as read)", unread)
+	}
+}
+
+func TestCheckAutoHandoffsExcludesMetadataMarkedReadHandoff(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	auto, err := p.SendHandoff(mail.HandoffIntent{
+		From:        "worker",
+		To:          "worker",
+		Subject:     "context cycle",
+		Body:        "continue durable work",
+		ThreadID:    "thread-metadata-read",
+		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff: %v", err)
+	}
+	// Mark it read via metadata only, without the "read" label, matching a
+	// caller that wrote metadata directly rather than through MarkRead/Read.
+	if err := store.Update(auto.ID, beads.UpdateOpts{
+		Metadata: map[string]string{mail.ReadMetadataKey: "true"},
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	messages, err := p.CheckAutoHandoffs([]string{"worker"})
+	if err != nil {
+		t.Fatalf("CheckAutoHandoffs: %v", err)
+	}
+	if len(messages) != 0 {
+		t.Errorf("CheckAutoHandoffs = %d messages, want 0 (metadata mail.read=true must not reinject)", len(messages))
+	}
+}
+
+func TestInboxIncludesGenuineUnreadMessage(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("human", "mayor", "", "genuinely unread")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := p.Inbox("mayor")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].ID != sent.ID {
+		t.Fatalf("Inbox = %#v, want the unread message %s to remain included", msgs, sent.ID)
+	}
+	if msgs[0].Read {
+		t.Errorf("Read = true, want false for a genuinely unread message")
+	}
+}
+
 // --- Get ---
 
 func TestGet(t *testing.T) {
