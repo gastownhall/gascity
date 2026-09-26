@@ -1885,7 +1885,10 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	if cityErr == nil && cfg != nil {
 		rigStores = buildStandaloneRigStoresWithConfig(cfg, cityPath, stderr)
 	}
-	unclaimWorkAssignedToRetiredSessionBead(cityPath, cfg, store, rigStores, closedSessionBead, "", stderr)
+	// The session bead lives in the sessions-class store (sessStore), which on a
+	// split city is not the work store the sweep leads with; the claim
+	// back-channel must be cleared where the session bead actually is.
+	unclaimWorkAssignedToRetiredSessionBeadVia(cityPath, cfg, store, sessStore, rigStores, closedSessionBead, "", stderr)
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{

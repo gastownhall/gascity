@@ -82,6 +82,11 @@ var hookClaimMutationTimeout = 10 * time.Second
 // lands before the backstop's first nudge, and a pathological slow read only earns
 // the idle-claim backstop's next idempotent (NDI) re-nudge, never a double claim.
 // GC_HOOK_CLAIM_WINDOW (resolveHookClaimWindow) still overrides this default.
+//
+// The window fences when a claim may START. A claim that starts inside it gets
+// its own reserved hookClaimMutationTimeout budget (claimMutationContext) rather
+// than whatever sliver of the window the read left, so a found bead is always
+// claimable; the straddle unwind fires only past window + that reserve.
 var hookClaimWindowDefault = hookWorkQueryTimeout + hookClaimMutationTimeout
 
 // hookClaimNonTurnEnvMarkers are the environment markers that prove a
@@ -624,25 +629,33 @@ func (ops *hookClaimOps) claimWindowOrDefault() time.Duration {
 	return resolveHookClaimWindow()
 }
 
-// claimMutationContext bounds a claim-write child by whichever is sooner: the
-// flat mutation timeout, or what remains of the claim window.
+// claimLandingWindowSpent reports whether a claim CAS that just returned landed
+// too late to hand to the invoking turn: past the claim window PLUS the reserved
+// claim budget. The window fences when a claim may START (claimWindowSpent); a
+// claim started inside it owns a separate, full mutation budget
+// (claimMutationContext), so only a CAS that overran that reserved budget is a
+// straddle.
+func (ops *hookClaimOps) claimLandingWindowSpent() bool {
+	return ops.invocationAge() > ops.claimWindowOrDefault()+hookClaimMutationTimeout
+}
+
+// claimMutationContext bounds a claim-write child by the reserved mutation
+// budget, hookClaimMutationTimeout, measured from when the claim tier starts.
 //
-// Bounding by the window is half of F-B. The CAS runs in a bd child with its own
-// 120s ceiling (bdCommandTimeout), so without this a claim started at the last
-// second of the window keeps writing long past the fence — and a claim that
-// lands late is exactly the parked claim the fence exists to prevent.
+// The claim budget is deliberately SEPARATE from the read budget. It used to be
+// min(mutation timeout, what remains of the claim window), which let a slow
+// federated work query spend the claim's time: a read that returned a found
+// bead a few milliseconds before the window closed passed the start fence and
+// then ran the CAS on an already-expired context, so bd failed it with
+// `claiming bead "<id>": timed out after 0s (caller deadline)` and the seat
+// drained claims_errored with its routed work unclaimed (maintainer-city,
+// 2026-09-22/23). A claim that passes the start fence now always gets the full
+// budget, and F-B still holds: the CAS runs in a bd child with its own 120s
+// ceiling, so this bound is what keeps a claim from writing long past the fence,
+// and the straddle unwind (claimLandingWindowSpent) releases one that lands
+// after window + reserve.
 func (ops *hookClaimOps) claimMutationContext() (context.Context, context.CancelFunc) {
-	budget := hookClaimMutationTimeout
-	if remaining := ops.claimWindowOrDefault() - ops.invocationAge(); remaining < budget {
-		budget = remaining
-	}
-	if budget <= 0 {
-		// Already spent. The tier's own fence refuses before using this, but an
-		// already-expired context keeps the contract honest for any path that
-		// does not.
-		budget = time.Nanosecond
-	}
-	return context.WithTimeout(context.Background(), budget)
+	return context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 }
 
 // refuseExpiredHookClaimWindow reports the spent-window refusal and returns the
@@ -1193,13 +1206,13 @@ func hookClaimCandidateIsMessage(candidate beads.Bead) bool {
 // turn legitimately made. A held claim that goes undelivered is re-served to the
 // next turn by the existing-assignment tier instead.
 func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, minted bool, stdout, stderr io.Writer) int {
-	// F-B straddle. The CAS was STARTED inside the window and LANDED outside it:
-	// the claim-write child carries its own ceiling, so a claim can commit after
-	// the invoking turn is already gone. That is the same parked claim by another
+	// F-B straddle. The CAS was STARTED inside the window and LANDED outside the
+	// window plus its reserved claim budget: the claim-write child carries its own
+	// ceiling, so a claim can commit after the invoking turn is already gone. That is the same parked claim by another
 	// route, so it takes the same unwind as an undelivered one.
-	if minted && ops.claimWindowSpent() {
-		cause := fmt.Sprintf("claim of %s landed after the %s claim window closed (invocation age %s); releasing it rather than parking it",
-			bead.ID, ops.claimWindowOrDefault(), ops.invocationAge().Round(time.Millisecond))
+	if minted && ops.claimLandingWindowSpent() {
+		cause := fmt.Sprintf("claim of %s landed after the %s claim window and its %s claim reserve closed (invocation age %s); releasing it rather than parking it",
+			bead.ID, ops.claimWindowOrDefault(), hookClaimMutationTimeout, ops.invocationAge().Round(time.Millisecond))
 		return unwindUndeliveredHookClaim(hookClaimReleaseReasonStraddled, cause, bead, opts, ops, dir, stderr)
 	}
 	result.RootBeadID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])

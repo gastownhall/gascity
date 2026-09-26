@@ -191,6 +191,7 @@ var infoKeyCodec = []infoKeySpec{
 	{"unknown_state_escalated_at", func(i *Info, v string) { i.UnknownStateEscalatedAt = v }},
 	{"session_name_explicit", func(i *Info, v string) { i.SessionNameExplicit = v }},
 	{"wake_request", func(i *Info, v string) { i.WakeRequest = v }},
+	{"wake_requested_at", func(i *Info, v string) { i.WakeRequestedAt = v }},
 	{"restart_requested", func(i *Info, v string) { i.RestartRequested = v }},
 	{"session_id_flag", func(i *Info, v string) { i.SessionIDFlag = v }},
 	{"template_overrides", func(i *Info, v string) { i.TemplateOverrides = v }},

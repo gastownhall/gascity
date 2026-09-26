@@ -1374,6 +1374,46 @@ func pendingResumePreservingNamedRestartInfo(i sessionpkg.Info, clk clock.Clock,
 	return true
 }
 
+// wakeDemandOverridesSleepSuppression reports whether a wake the awake set
+// wants survives the session's config sleep suppression (the idle latch:
+// asleep with sleep_reason=idle under an unchanged sleep-policy fingerprint).
+//
+// explicitWake is the session's durable, still-pending wake_request=explicit
+// (`gc session wake`, the wake API, a peer's wake; see explicitWakePendingInfo):
+// an operator or agent asked for THIS session, so the idle latch must not
+// silently swallow the request. It is read off the session rather than
+// decision.Reason because the awake set may re-label an explicitly woken named
+// holder (e.g. to "named-demand").
+// explicitWakePendingInfo reports whether the session carries a durable
+// wake_request=explicit that has NOT yet been served, and so may override the
+// idle latch. PreWakePatch clears the request only when it prepares a start, so
+// a `gc session wake` recorded while the session was ALREADY running is never
+// consumed; honoring it unconditionally would exempt that session from idle
+// sleep forever. The request counts as served when:
+//   - the session is up now (state active/awake): the wake it asked for is in
+//     effect; or
+//   - the session has slept since the request (wake_requested_at before
+//     slept_at): the awake interval that followed the request served it, so it
+//     must not bounce the session back out of its latest sleep.
+//
+// A request whose timestamps are missing or unparseable is honored (fail
+// toward the operator's wake; the next start clears it).
+func explicitWakePendingInfo(info sessionpkg.Info) bool {
+	if strings.TrimSpace(info.WakeRequest) != string(sessionpkg.WakeCauseExplicit) {
+		return false
+	}
+	switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
+	case sessionpkg.StateActive, sessionpkg.StateAwake:
+		return false
+	}
+	requestedAt, reqErr := time.Parse(time.RFC3339, strings.TrimSpace(info.WakeRequestedAt))
+	sleptAt, sleptErr := time.Parse(time.RFC3339, strings.TrimSpace(info.SleptAt))
+	if reqErr == nil && sleptErr == nil && requestedAt.Before(sleptAt) {
+		return false
+	}
+	return true
+}
+
 func wakeDemandOverridesSleepSuppression(
 	decision AwakeDecision,
 	eval wakeEvaluation,
@@ -1381,20 +1421,27 @@ func wakeDemandOverridesSleepSuppression(
 	poolDesired map[string]int,
 	template string,
 	hasExplicitSleepIntent bool,
+	explicitWake bool,
 ) bool {
 	if hasExplicitSleepIntent {
 		return false
 	}
-	if eval.HasAssignedWork {
+	if eval.HasAssignedWork || explicitWake {
 		return true
 	}
-	// Routed demand wakes the canonical alias holder. Alias suppression
-	// deliberately drops the standby's poolDesired to zero, so the pool count
-	// alone cannot carry the signal here — without this the holder stays
-	// asleep under a configured non-interactive sleep policy and the routed
-	// work never gets picked up.
-	hasDemand := poolDesired[template] > 0 || decision.Reason == "routed-demand"
-	if hasDemand && policy.Class == config.SessionSleepNonInteractive {
+	// Routed demand wakes the canonical alias holder, for EVERY sleep class.
+	// Alias suppression (canonicalSingletonAliasHeldTemplates) deliberately
+	// drops the standby's poolDesired to zero while the holder exists, so the
+	// holder is the only session that can serve the routed work. The
+	// "interactive sessions honor their idle window against pool demand"
+	// rationale below assumes a pool sibling can take the work; for the alias
+	// holder none can, so leaving it idle-latched wedges the template: the
+	// asleep record satisfies the singleton's capacity and never starts
+	// (maintainer-city olivia, 2026-09-22).
+	if decision.Reason == "routed-demand" {
+		return true
+	}
+	if poolDesired[template] > 0 && policy.Class == config.SessionSleepNonInteractive {
 		return true
 	}
 	return decision.Reason == "min-active" && containsWakeReason(eval.Reasons, WakeConfig)
@@ -3977,12 +4024,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// from before gc stop must not cancel the post-start guarantee.
 			// Interactive sessions honor their idle window against
 			// pool-scale demand — an idle chat session should still sleep
-			// to release resources.
+			// to release resources. Two wakes override for every class: a
+			// durable explicit wake request, and routed demand on the
+			// canonical alias holder (the only session that can serve it).
 			// Explicit sleep_intent always wins — if the session has
 			// signaled it wants to sleep, honor that regardless of demand.
 			template := normalizedSessionTemplateInfo(info, cfg)
 			hasExplicitSleepIntent := info.SleepIntent != ""
-			demandOverrides := wakeDemandOverridesSleepSuppression(decision, eval, policy, poolDesired, template, hasExplicitSleepIntent)
+			explicitWake := explicitWakePendingInfo(info)
+			demandOverrides := wakeDemandOverridesSleepSuppression(decision, eval, policy, poolDesired, template, hasExplicitSleepIntent, explicitWake)
 			if !demandOverrides {
 				eval.ConfigSuppressed = true
 				eval.Reasons = nil // Clear reasons so Phase 2 does not cancel the drain.
