@@ -1218,6 +1218,17 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 				stopWalk = true
 				return nil
 			}
+			if strings.TrimSpace(loaded.Metadata[beadmeta.WorkOutcomeMetadataKey]) == beadmeta.WorkOutcomeBlocked {
+				stopWalk = true
+				if mutate && loaded.Status != "blocked" && loaded.Status != "closed" {
+					status := "blocked"
+					if err := nextStore.Update(nextID, beads.UpdateOpts{Status: &status}); err != nil {
+						return fmt.Errorf("blocking source bead %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
+					}
+				}
+				opts.tracef("close-source-chain root=%s stop reason=blocked_work_outcome source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
+				return nil
+			}
 			if !mutate {
 				return nil
 			}
