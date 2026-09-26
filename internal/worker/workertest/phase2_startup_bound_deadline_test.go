@@ -31,8 +31,6 @@ import (
 // TestPhase2StartupOutcomeBoundStaysAHangDetector guards
 // fakeStartupPostControlOverhead against exactly the regression that caused
 // ga-e4bhca: shrinking it back down to a value sized for an idle box.
-// Today this fails: fakeStartupPostControlOverhead is a fixed 2s literal,
-// under both floors.
 func TestPhase2StartupOutcomeBoundStaysAHangDetector(t *testing.T) {
 	t.Parallel()
 
@@ -86,8 +84,7 @@ func startupRunFixture(t *testing.T, profile ProfileID, outcome string, postCont
 // pass under host load: a post-control transition that took far longer than
 // the old 2s overhead, but completed correctly and stayed within the hang
 // budget, must be a Pass — WC-BRINGUP-001 proves the outcome is delivered,
-// not how fast. Today this fails: fakeStartupPostControlOverhead is still
-// 2s, so a 30-second-but-correct transition is a false Fail.
+// not how fast.
 func TestPhase2StartupOutcomeResultToleratesASlowButCorrectTransition(t *testing.T) {
 	t.Parallel()
 
@@ -109,9 +106,9 @@ func TestPhase2StartupOutcomeResultToleratesASlowButCorrectTransition(t *testing
 // ga-e4bhca's required negative case: widening the bound to tolerate load
 // must not also widen it into tolerating a genuinely stuck fake worker. A
 // post-control transition that never caught up within the hang budget still
-// reports Fail regardless of how generous the bound is. This already holds
-// today (a fortiori under the old, tighter bound) and is expected to keep
-// holding after the fix.
+// reports Fail regardless of how generous the bound is. The case uses
+// synthetic event timestamps to model the late transition, so it runs
+// without waiting out the budget.
 func TestPhase2StartupOutcomeResultStillFailsWhenGenuinelyBroken(t *testing.T) {
 	t.Parallel()
 
