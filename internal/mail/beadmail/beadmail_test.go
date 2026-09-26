@@ -1044,6 +1044,50 @@ func TestArchive(t *testing.T) {
 	}
 }
 
+type archiveGetMissingStore struct {
+	*beads.MemStore
+}
+
+func (s archiveGetMissingStore) Get(string) (beads.Bead, error) {
+	return beads.Bead{}, beads.ErrNotFound
+}
+
+func TestArchiveRepairsOpenMessageMissingFromDirectLookup(t *testing.T) {
+	store := beads.NewMemStore()
+	sender := New(store)
+	sent, err := sender.Send("human", "worker", "", "dismiss me")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p := New(archiveGetMissingStore{MemStore: store})
+	if err := p.Archive(sent.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+
+	b, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("bead status = %q, want closed", b.Status)
+	}
+	open, err := store.List(beads.ListQuery{Status: "open", Assignee: "worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 0 {
+		t.Errorf("open assigned beads = %v, want none", open)
+	}
+	inbox, err := p.Inbox("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inbox) != 0 {
+		t.Errorf("unread inbox = %v, want none", inbox)
+	}
+}
+
 // TestLegacyClosedMessageBeadTreatedAsRemoved covers the upgrade path for a
 // store written by an earlier release that archived a message by closing its
 // bead instead of deleting it. The eager-delete archive contract says an
