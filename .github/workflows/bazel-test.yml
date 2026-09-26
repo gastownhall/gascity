@@ -53,10 +53,11 @@ jobs:
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
-            ${{ runner.temp }}/bazel-outputs/*/cache
-            ${{ runner.temp }}/bazel-outputs/*/cache/repos
+            ${{ runner.temp }}/bazel-outputs
           key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock') }}
-          restore-keys: bazel-${{ runner.os }}-
+          restore-keys: |
+            bazel-${{ runner.os }}-
+          save-always: true
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
@@ -105,10 +106,7 @@ jobs:
           mkdir -p /tmp/gc-test-home
           echo "HOME=/tmp/gc-test-home" >> "$GITHUB_ENV"
 
-      - name: bazel build //...
-        run: bazel --output_user_root="$RUNNER_TEMP"/bazel-outputs build //... $( [ -f .bazelrc.local ] && echo --config=remote-exec )
-
-      - name: bazel test //...
+      - name: bazel test //... (build subsumed)
         run: |
           ARGS=(--output_user_root="$RUNNER_TEMP"/bazel-outputs)
           PROFILE=(--profile=/tmp/bazel-profile.json)
