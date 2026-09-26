@@ -122,12 +122,6 @@ func TestCityStatusReportsObservationErrors(t *testing.T) {
 }
 
 func TestCityStatusObservationTimesOut(t *testing.T) {
-	oldTimeout := statusObservationTimeout
-	statusObservationTimeout = 20 * time.Millisecond
-	t.Cleanup(func() {
-		statusObservationTimeout = oldTimeout
-	})
-
 	release := make(chan struct{})
 	defer close(release)
 	oldObserve := observeSessionTargetForStatus
@@ -144,7 +138,7 @@ func TestCityStatusObservationTimesOut(t *testing.T) {
 		"/city",
 		nil,
 		runtime.NewFake(),
-		&config.City{},
+		&config.City{Session: config.SessionConfig{StatusObservationTimeout: "20ms"}},
 		statusObservationTarget{runtimeSessionName: "slow-session"},
 		&stderr,
 	)
@@ -156,6 +150,46 @@ func TestCityStatusObservationTimesOut(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "observing \"slow-session\" timed out") {
 		t.Fatalf("stderr = %q, want timeout warning", stderr.String())
+	}
+}
+
+// A city that sets a non-positive status_observation_timeout is opting out of
+// the outer bound: the observation must run to completion and return the real
+// answer instead of the empty timeout fallback.
+func TestCityStatusObservationTimeoutDisabled(t *testing.T) {
+	// The observation is bounded by a budget this city disabled, so it must have
+	// run: the send below is the receipt. Waiting on a wall-clock duration would
+	// prove the same thing at a cost the ledger will not absorb --
+	// test/test-resources.toml pins the untagged fixed-sleep totals as a ceiling
+	// that cannot grow -- so the fake reports completion through a channel.
+	observed := make(chan struct{}, 1)
+	oldObserve := observeSessionTargetForStatus
+	observeSessionTargetForStatus = func(string, beads.Store, runtime.Provider, *config.City, string) (worker.LiveObservation, error) {
+		observed <- struct{}{}
+		return worker.LiveObservation{Running: true}, nil
+	}
+	t.Cleanup(func() { observeSessionTargetForStatus = oldObserve })
+
+	var stderr bytes.Buffer
+	obs := observeSessionTargetWithWarning(
+		"gc status",
+		"/city",
+		nil,
+		runtime.NewFake(),
+		&config.City{Session: config.SessionConfig{StatusObservationTimeout: "0s"}},
+		statusObservationTarget{runtimeSessionName: "slow-session"},
+		&stderr,
+	)
+	select {
+	case <-observed:
+	default:
+		t.Fatal("observation did not run with the outer bound disabled")
+	}
+	if !obs.Running {
+		t.Fatal("observation should report running with the outer bound disabled")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want no timeout warning with the outer bound disabled", stderr.String())
 	}
 }
 
@@ -1395,20 +1429,15 @@ func (p blockingStatusRunningProvider) IsRunning(string) bool {
 }
 
 func TestCityStatusPartialRuntimeProbeDoesNotRenderAuthoritativeStopped(t *testing.T) {
-	origTimeout := statusProviderCallTimeout
 	origWarn := statusProviderTimeoutWarning
-	t.Cleanup(func() {
-		statusProviderCallTimeout = origTimeout
-		statusProviderTimeoutWarning = origWarn
-	})
-	statusProviderCallTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { statusProviderTimeoutWarning = origWarn })
 	statusProviderTimeoutWarning = func() {}
 
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	base := blockingStatusRunningProvider{Provider: runtime.NewFake(), entered: entered, release: release, running: true}
-	sp := newBoundedStatusProvider(base)
+	sp := newBoundedStatusProvider(base, 10*time.Millisecond)
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "city"},
 		Agents:    []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(1)}},
