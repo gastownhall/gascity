@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
@@ -1289,9 +1290,24 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hoo
 		for _, rel := range provider.relPaths {
 			abs := filepath.Join(workDir, rel)
 			if _, err := os.Stat(abs); err == nil {
+				// The gc-managed mergeable hook/settings files (the six paths
+				// in overlay.IsMergeablePath) get path-only fingerprinting
+				// (Probed: false) for the same reason .gc/settings.json does
+				// below: session-start staging re-merges the bundled overlay
+				// into these files after the pre-start fingerprint is taken,
+				// so content-hashing them makes every deploy that touches a
+				// bundled overlay drain sessions it just woke (ga-d9y4nr,
+				// ga-sf1dpe). Presence still enters the fingerprint via the
+				// path-only CopyFiles entry; only the content contribution is
+				// dropped.
+				probed := !overlay.IsMergeablePath(rel)
+				var contentHash string
+				if probed {
+					contentHash = runtime.HashHookSettingsContent(abs, rel)
+				}
 				copyFiles = append(copyFiles, runtime.CopyEntry{
 					Src: abs, RelDst: path.Join(relWorkDir, rel),
-					Probed: true, ContentHash: runtime.HashHookSettingsContent(abs, rel),
+					Probed: probed, ContentHash: contentHash,
 				})
 			}
 		}

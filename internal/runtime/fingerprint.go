@@ -52,7 +52,18 @@ type BreakdownCopyEntry struct {
 // its own dedicated Launch-tier identity field (Config.OperatorEnv), separate
 // from Env and FingerprintExtra (Option A', ga-3a42sp). The bump rebaselines
 // existing v5 hashes silently rather than draining the fleet. (ga-i91hrn)
-const FingerprintVersion = "v6"
+//
+// v7: the six gc-managed mergeable provider hook/settings files
+// (overlay.IsMergeablePath: .agents/hooks.json, .claude/settings.json,
+// .gemini/settings.json, .codex/hooks.json, .cursor/hooks.json,
+// .github/hooks/gascity.json) are no longer content-probed in workdir
+// CopyFiles; like .gc/settings.json since v4, their fingerprint contribution
+// is path-based only. Session-start staging re-merges the bundled overlay
+// into these files after the pre-start fingerprint is taken, so content-
+// hashing them made every deploy that touched a bundled overlay drain
+// sessions it had just woken. The bump rebaselines existing v6 hashes
+// silently rather than draining the fleet. (ga-d9y4nr, ga-sf1dpe)
+const FingerprintVersion = "v7"
 
 // ConfigFingerprint returns a deterministic hash of the Config fields that
 // define an agent's behavioral identity. Changes to these fields indicate

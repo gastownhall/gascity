@@ -859,32 +859,94 @@ func normalizeCodexManagedHookEntries(root any) bool {
 		if !ok {
 			continue
 		}
-		normalized := entries[:0]
-		seenManaged := map[string]bool{}
-		for _, entry := range entries {
-			if event == "SessionStart" {
+		if event == "SessionStart" {
+			for _, entry := range entries {
 				if normalizeCodexManagedSessionStartEntry(entry) {
 					changed = true
 				}
 			}
-			if codexHookValueHasManagedCommand(entry, event) {
-				keyData, err := overlay.MarshalCanonicalJSON(entry)
-				if err == nil {
-					key := string(keyData)
-					if seenManaged[key] {
-						changed = true
-						continue
-					}
-					seenManaged[key] = true
-				}
-			}
-			normalized = append(normalized, entry)
+		}
+		normalized, collapsed := collapseManagedCodexEntries(entries, event)
+		if collapsed {
+			changed = true
 		}
 		if len(normalized) != len(entries) {
 			hooksMap[event] = normalized
 		}
 	}
 	return changed
+}
+
+// collapseManagedCodexEntries collapses every entry in entries that
+// codexHookValueHasManagedCommand recognizes as the managed hook for event
+// into a single surviving entry, dropping the rest. Entries that are not
+// recognized as managed are left untouched, in place, regardless of how many
+// managed entries are found.
+//
+// Before #6579, upgradeCodexHookValue always rewrote a managed command into
+// one fixed shape, so two managed entries for the same event were always
+// byte-identical by the time this ran and a plain equality dedup (keyed on
+// each entry's canonical JSON) was enough. #6579 made the upgrade preserve
+// each entry's own PATH-prefix/gc-token shape instead of normalizing it, so
+// an old-shape and a new-shape entry — each independently recognized as "the
+// managed hook for this event" — no longer converge to the same bytes and
+// never collapsed: the stale entry #6579 was meant to retire kept running
+// forever alongside the new one (ga-d9y4nr, ga-sf1dpe). Keying the dedup on
+// "is this recognized as managed" instead of "is this byte-identical to
+// another entry" fixes that gap directly, and — because recognition
+// (codexHookValueHasManagedCommand) never looks at the "matcher" field —
+// also reconciles a raw matcher:"" entry freshly merged from the bundled
+// overlay against an already-normalized matcher:"startup" entry for the same
+// command, which a byte-identity dedup keyed on the full entry (matcher
+// included) could not do either.
+//
+// When more than one managed candidate is present, the surviving entry is
+// whichever already uses the current shape (codexManagedEntryUsesCurrentShape),
+// so a stale legacy entry never wins over a current one; with no current-shape
+// candidate among them, the first one found survives, same as a lone managed
+// entry has nothing to reconcile against today. Returns the possibly
+// shortened slice and whether anything was dropped.
+func collapseManagedCodexEntries(entries []any, event string) ([]any, bool) {
+	winner := -1
+	dropped := false
+	for i, entry := range entries {
+		if !codexHookValueHasManagedCommand(entry, event) {
+			continue
+		}
+		if winner == -1 {
+			winner = i
+			continue
+		}
+		dropped = true
+		if !codexManagedEntryUsesCurrentShape(entries[winner]) && codexManagedEntryUsesCurrentShape(entry) {
+			winner = i
+		}
+	}
+	if !dropped {
+		return entries, false
+	}
+	out := make([]any, 0, len(entries))
+	for i, entry := range entries {
+		if i != winner && codexHookValueHasManagedCommand(entry, event) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out, true
+}
+
+// codexManagedEntryUsesCurrentShape reports whether entry carries a managed
+// command already using the current PATH-append prefix and ${GC_BIN:-gc}
+// token (canonicalGCPathPrefixAppend / managedGCBinInvocation), as opposed to
+// a legacy shape. Used by collapseManagedCodexEntries to prefer a
+// current-shape entry over a legacy-shape duplicate for the same event.
+// findCodexManagedCommandShape's own event-less walk still recognizes a
+// managed command inside a single entry (codexHookCommandLooksManaged's
+// default case matches any of the three known managed patterns), so this
+// reuses it rather than re-walking the entry itself.
+func codexManagedEntryUsesCurrentShape(entry any) bool {
+	prefix, gcToken, ok := findCodexManagedCommandShape(entry)
+	return ok && prefix == canonicalGCPathPrefixAppend && gcToken == managedGCBinInvocation
 }
 
 func normalizeCodexManagedSessionStartEntry(entry any) bool {

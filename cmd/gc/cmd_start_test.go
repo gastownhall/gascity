@@ -1191,11 +1191,17 @@ func TestStageHookFilesIncludesAntigravityHooks(t *testing.T) {
 			if entry.Src != hookPath {
 				t.Fatalf("stageHookFiles() staged %q, want %q", entry.Src, hookPath)
 			}
-			if !entry.Probed {
-				t.Fatal("stageHookFiles() .agents/hooks.json not marked Probed")
+			// .agents/hooks.json is one of the six gc-managed mergeable
+			// paths (overlay.IsMergeablePath); since FingerprintVersion
+			// v7 it is path-only fingerprinted (Probed: false), like the
+			// other five, because session-start staging re-merges the
+			// bundled overlay into it after the pre-start fingerprint is
+			// taken (ga-d9y4nr).
+			if entry.Probed {
+				t.Fatal("stageHookFiles() .agents/hooks.json unexpectedly marked Probed (should be path-only)")
 			}
-			if entry.ContentHash == "" {
-				t.Fatal("stageHookFiles() .agents/hooks.json has empty ContentHash")
+			if entry.ContentHash != "" {
+				t.Fatalf("stageHookFiles() .agents/hooks.json has non-empty ContentHash %q, want empty (path-only)", entry.ContentHash)
 			}
 			return
 		}
