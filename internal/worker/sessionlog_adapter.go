@@ -380,7 +380,7 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		},
 		Continuity: continuity,
 		TailState: TailState{
-			Activity:              snapshotTailActivity(req.Provider, tailMeta, entries),
+			Activity:              snapshotTailActivity(req.Provider, tailMeta, fullSession.Activity, entries),
 			LastEntryID:           lastEntryID,
 			OpenToolUseIDs:        openToolUseIDs,
 			PendingInteractionIDs: pendingIDs,
@@ -931,9 +931,16 @@ func normalizeBlockKind(kind string) BlockKind {
 // turn starts, and every turn is closed out — with its reply, or with the
 // failure/interrupt outcome — so a trailing user message means a turn is in
 // flight and a trailing assistant message means idle.
-func snapshotTailActivity(provider string, meta *sessionlog.TailMeta, entries []HistoryEntry) TailActivity {
+//
+// A reader that derived activity from explicit lifecycle records in the full
+// file (Codex task_started/task_complete) is authoritative over the tail-chunk
+// heuristic, which never classifies those records.
+func snapshotTailActivity(provider string, meta *sessionlog.TailMeta, readerActivity string, entries []HistoryEntry) TailActivity {
 	if sessionlog.DerivesActivityFromHistory(provider) {
 		return wholeFileJSONActivity(entries)
+	}
+	if readerActivity != "" {
+		return tailActivity(&sessionlog.TailMeta{Activity: readerActivity})
 	}
 	return tailActivity(meta)
 }

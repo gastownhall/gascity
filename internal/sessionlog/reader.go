@@ -35,6 +35,11 @@ type Session struct {
 
 	// Diagnostics surfaces parser health for the underlying session file.
 	Diagnostics SessionDiagnostics
+
+	// Activity is the turn state derived from explicit lifecycle records in
+	// the full file: "idle", "in-turn", or "" when the reader does not track
+	// turn lifecycle or the file records none.
+	Activity string
 }
 
 // SessionDiagnostics reports non-fatal issues detected while loading a

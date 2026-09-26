@@ -79,6 +79,7 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 	toolContexts := make(map[string]codexToolCallContext)
 	responseItemIDs := newStableSyntheticEntryIDSequence("codex")
 	eventMsgIDs := newStableSyntheticEntryIDSequence("codex-event")
+	var activity codexTurnActivity
 
 	for _, e := range entries {
 		ts, _ := time.Parse(time.RFC3339Nano, e.raw.Timestamp)
@@ -97,6 +98,7 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 			if json.Unmarshal(e.raw.Payload, &em) != nil {
 				continue
 			}
+			activity.observe(em)
 			eventID := eventMsgIDs.ForRecord([]byte(e.line))
 			switch em.Type {
 			case "user_message":
@@ -177,7 +179,31 @@ func ReadCodexFile(path string, _ int) (*Session, error) {
 		ID:          codexSessionID(path),
 		Messages:    messages,
 		Diagnostics: diagnostics,
+		Activity:    activity.state,
 	}, nil
+}
+
+// codexTurnActivity follows the rollout's explicit turn lifecycle. Codex
+// records task_started when a turn begins and task_complete or turn_aborted
+// when it ends. An assistant message is not a turn boundary: it can precede
+// further tool calls in the same turn, and a failed turn ends without one.
+type codexTurnActivity struct {
+	openTurnID string
+	state      string
+}
+
+func (a *codexTurnActivity) observe(em codexEventMsg) {
+	switch em.Type {
+	case "task_started":
+		a.openTurnID, a.state = em.TurnID, "in-turn"
+	case "task_complete", "turn_aborted":
+		// A terminal record naming a turn other than the open one belongs to
+		// an earlier turn and cannot end the current one.
+		if em.TurnID != "" && a.openTurnID != "" && em.TurnID != a.openTurnID {
+			return
+		}
+		a.openTurnID, a.state = "", "idle"
+	}
 }
 
 func convertResponseItem(payload json.RawMessage, rawLine string, ts time.Time, patchApplyResults map[string]json.RawMessage, toolContexts map[string]codexToolCallContext, syntheticID stableSyntheticEntryIDSource) *Entry {
@@ -1573,10 +1599,11 @@ type codexEntry struct {
 }
 
 type codexEventMsg struct {
-	Type           string                      `json:"type"`             // user_message, agent_message, agent_reasoning, token_count
-	Message        string                      `json:"message"`          // for user_message, agent_message, error
-	Text           string                      `json:"text"`             // for agent_reasoning
-	CodexErrorInfo string                      `json:"codex_error_info"` // for usage_limit_exceeded and related errors
+	Type           string                      `json:"type"`              // user_message, agent_message, agent_reasoning, token_count, task_started, task_complete
+	TurnID         string                      `json:"turn_id,omitempty"` // for task_started, task_complete, turn_aborted
+	Message        string                      `json:"message"`           // for user_message, agent_message, error
+	Text           string                      `json:"text"`              // for agent_reasoning
+	CodexErrorInfo string                      `json:"codex_error_info"`  // for usage_limit_exceeded and related errors
 	CallID         string                      `json:"call_id,omitempty"`
 	Stdout         string                      `json:"stdout,omitempty"`
 	Stderr         string                      `json:"stderr,omitempty"`

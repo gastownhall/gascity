@@ -735,3 +735,48 @@ func codexReaderStringSlice(t *testing.T, raw json.RawMessage) []string {
 	}
 	return values
 }
+
+// Codex activity follows the rollout's explicit turn lifecycle: an assistant
+// answer alone does not end a turn, and a turn that failed before answering
+// still ends at its task_complete.
+func TestReadCodexFileActivityFollowsTurnLifecycle(t *testing.T) {
+	started := func(turn string) string {
+		return `{"type":"event_msg","payload":{"type":"task_started","turn_id":"` + turn + `"}}`
+	}
+	complete := func(turn string) string {
+		return `{"type":"event_msg","payload":{"type":"task_complete","turn_id":"` + turn + `","last_agent_message":"Ready."}}`
+	}
+	user := `{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Say you are ready."}]}}`
+	answer := `{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Ready."}]}}`
+	failed := `{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1","last_agent_message":null,"error":{"message":"unexpected status 401 Unauthorized"}}}`
+	aborted := `{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-1","reason":"interrupted"}}`
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		want  string
+	}{
+		{name: "no lifecycle records", lines: []string{user, answer}, want: ""},
+		{name: "turn started", lines: []string{started("turn-1"), user}, want: "in-turn"},
+		{name: "answer before completion", lines: []string{started("turn-1"), user, answer}, want: "in-turn"},
+		{name: "completed turn", lines: []string{started("turn-1"), user, answer, complete("turn-1")}, want: "idle"},
+		{name: "failed turn without answer", lines: []string{started("turn-1"), user, failed}, want: "idle"},
+		{name: "aborted turn", lines: []string{started("turn-1"), user, aborted}, want: "idle"},
+		{name: "next turn started", lines: []string{started("turn-1"), complete("turn-1"), started("turn-2")}, want: "in-turn"},
+		{name: "earlier turn completion cannot end current turn", lines: []string{started("turn-1"), started("turn-2"), complete("turn-1")}, want: "in-turn"},
+		{name: "completion without turn identity", lines: []string{started("turn-1"), `{"type":"event_msg","payload":{"type":"task_complete"}}`}, want: "idle"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rollout.jsonl")
+			if err := os.WriteFile(path, []byte(strings.Join(tc.lines, "\n")+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			sess, err := ReadCodexFile(path, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sess.Activity != tc.want {
+				t.Fatalf("Activity = %q, want %q", sess.Activity, tc.want)
+			}
+		})
+	}
+}

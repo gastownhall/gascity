@@ -1655,12 +1655,12 @@ func TestActivityDerivationIsScopedToZCode(t *testing.T) {
 		if sessionlog.DerivesActivityFromHistory(provider) {
 			t.Fatalf("%s must not derive activity from history", provider)
 		}
-		if got := snapshotTailActivity(provider, nil, entries); got != TailActivityUnknown {
+		if got := snapshotTailActivity(provider, nil, "", entries); got != TailActivityUnknown {
 			t.Fatalf("%s activity = %q, want the pre-branch %q", provider, got, TailActivityUnknown)
 		}
 	}
 	for _, provider := range []string{"zcode", "zcode/tmux-cli"} {
-		if got := snapshotTailActivity(provider, nil, entries); got != TailActivityInTurn {
+		if got := snapshotTailActivity(provider, nil, "", entries); got != TailActivityInTurn {
 			t.Fatalf("%s activity = %q, want in-turn", provider, got)
 		}
 	}
@@ -1680,7 +1680,7 @@ func TestClosedFailedTurnReadsIdle(t *testing.T) {
 		{Actor: ActorUser},
 		{Actor: ActorAssistant}, // "zcode-repl error rc=1"
 	}
-	if got := snapshotTailActivity("zcode/tmux-cli", nil, entries); got != TailActivityIdle {
+	if got := snapshotTailActivity("zcode/tmux-cli", nil, "", entries); got != TailActivityIdle {
 		t.Fatalf("activity after a closed failed turn = %q, want idle", got)
 	}
 }
@@ -1725,4 +1725,52 @@ func samePath(a, b string) bool {
 	resolvedA, errA := filepath.EvalSymlinks(a)
 	resolvedB, errB := filepath.EvalSymlinks(b)
 	return errA == nil && errB == nil && resolvedA == resolvedB
+}
+
+// A Codex rollout's turn lifecycle must reach the history tail state. Before
+// this, the Claude-shaped tail heuristic reported every Codex session as
+// unknown, so a client could never observe a completed startup turn as idle.
+func TestLoadHistoryCodexTailActivityFollowsTurnLifecycle(t *testing.T) {
+	const turn = "01a0dc57-954b-72e1-b538-ab60e9fb981b"
+	head := []string{
+		`{"timestamp":"2026-09-26T06:12:02.515Z","ordinal":0,"type":"session_meta","payload":{"session_id":"01a0dc57-951a-7223-a222-739219691d4b","id":"01a0dc57-951a-7223-a222-739219691d4b","cwd":"/work","originator":"codex-tui","cli_version":"0.153.4","source":"cli","model_provider":"openai"}}`,
+		`{"timestamp":"2026-09-26T06:12:02.516Z","ordinal":1,"type":"event_msg","payload":{"type":"task_started","turn_id":"` + turn + `","started_at":1790403122,"model_context_window":258400,"collaboration_mode_kind":"default"}}`,
+		`{"timestamp":"2026-09-26T06:12:02.729Z","ordinal":2,"type":"response_item","payload":{"type":"message","id":"msg_dev","role":"developer","content":[{"type":"input_text","text":"instructions"}]}}`,
+		`{"timestamp":"2026-09-26T06:12:02.730Z","ordinal":3,"type":"world_state","payload":{"full":true,"state":{}}}`,
+		`{"timestamp":"2026-09-26T06:12:02.730Z","ordinal":4,"type":"turn_context","payload":{"turn_id":"` + turn + `","root_turn_id":"` + turn + `","cwd":"/work","model":"gpt-5.5"}}`,
+		`{"timestamp":"2026-09-26T06:12:03.136Z","ordinal":5,"type":"response_item","payload":{"type":"message","id":"msg_user","role":"user","content":[{"type":"input_text","text":"Say you are ready."}]}}`,
+		`{"timestamp":"2026-09-26T06:12:03.137Z","ordinal":6,"type":"event_msg","payload":{"type":"item_completed","turn_id":"` + turn + `","item":{"type":"UserMessage","id":"u1","content":[]}}}`,
+	}
+	answer := []string{
+		`{"timestamp":"2026-09-26T06:12:06.200Z","ordinal":7,"type":"event_msg","payload":{"type":"item_completed","turn_id":"` + turn + `","item":{"type":"AgentMessage","id":"msg_a1","content":[{"type":"Text","text":"Ready."}]}}}`,
+		`{"timestamp":"2026-09-26T06:12:06.201Z","ordinal":8,"type":"response_item","payload":{"type":"message","id":"msg_a1","role":"assistant","content":[{"type":"output_text","text":"Ready."}]}}`,
+		`{"timestamp":"2026-09-26T06:12:06.301Z","ordinal":9,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":12000,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":12020},"last_token_usage":{"input_tokens":12000,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":12020},"model_context_window":258400}}}`,
+	}
+	completed := `{"timestamp":"2026-09-26T06:12:06.400Z","ordinal":10,"type":"event_msg","payload":{"type":"task_complete","turn_id":"` + turn + `","last_agent_message":"Ready.","started_at":1790403122,"completed_at":1790403126,"duration_ms":3884}}`
+	failed := `{"timestamp":"2026-09-26T06:12:17.494Z","ordinal":7,"type":"event_msg","payload":{"type":"task_complete","turn_id":"` + turn + `","last_agent_message":null,"error":{"message":"unexpected status 401 Unauthorized"}}}`
+
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		want  TailActivity
+	}{
+		{name: "startup turn answering", lines: append(append([]string{}, head...), answer...), want: TailActivityInTurn},
+		{name: "startup turn complete", lines: append(append(append([]string{}, head...), answer...), completed), want: TailActivityIdle},
+		{name: "startup turn failed", lines: append(append([]string{}, head...), failed), want: TailActivityIdle},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rollout-2026-09-26T06-12-02-01a0dc57-951a-7223-a222-739219691d4b.jsonl")
+			writeLines(t, path, tc.lines...)
+			snapshot, err := (SessionLogAdapter{}).LoadHistory(LoadRequest{Provider: "codex", TranscriptPath: path, GCSessionID: "gc-1"})
+			if err != nil {
+				t.Fatalf("LoadHistory: %v", err)
+			}
+			if got := snapshot.TailState.Activity; got != tc.want {
+				t.Fatalf("TailState.Activity = %q, want %q", got, tc.want)
+			}
+			if snapshot.TailState.Degraded {
+				t.Fatalf("TailState degraded: %q", snapshot.TailState.DegradedReason)
+			}
+		})
+	}
 }
