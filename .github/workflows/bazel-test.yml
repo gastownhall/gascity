@@ -48,6 +48,16 @@ jobs:
           sudo mkdir -p /home/ubuntu/.cache && sudo chown "$(id -u):$(id -g)" /home/ubuntu/.cache
           mkdir -p "$RUNNER_TEMP/bazel-home" && echo "BAZELISK_HOME=$RUNNER_TEMP/bazel-home" >> "$GITHUB_ENV"
 
+      # Runner-side bazel caches: without these every run re-hashes the
+      # 205MB repo_source_tree + SDK before a single action can start.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ runner.temp }}/bazel-outputs/*/cache
+            ${{ runner.temp }}/bazel-outputs/*/cache/repos
+          key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock') }}
+          restore-keys: bazel-${{ runner.os }}-
+
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
@@ -104,9 +114,9 @@ jobs:
             bazel "${ARGS[@]}" test //... --test_output=errors --keep_going
           fi
 
-      - name: Critical-path report (the optimization loop metric)
+      - name: Critical-path report + budget (the optimization loop metric)
         if: always()
-        run: python3 tools/bazel/critpath.py /tmp/bazel-profile.json || true
+        run: python3 tools/bazel/critpath.py /tmp/bazel-profile.json --tier T2 --budget 360 || true
 
       - name: Upload test logs
         if: failure()
