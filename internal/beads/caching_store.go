@@ -766,6 +766,7 @@ func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppr
 		}
 		now := time.Now()
 		absorbed := 0
+		var notifications []cacheNotification
 		for _, f := range fetched {
 			// Fence discipline (I3): never overwrite a mutation that landed
 			// after the snapshot. A skipped-but-still-dirty row is caught by
@@ -785,6 +786,9 @@ func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppr
 				opts.depsMode = depsExplicit
 				opts.deps = f.deps
 			}
+			if note, ok := c.observedBackingCloseLocked(f.id, f.bead); ok {
+				notifications = append(notifications, note)
+			}
 			c.absorbFreshLocked(f.id, f.bead, now, opts)
 			absorbed++
 		}
@@ -795,13 +799,16 @@ func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppr
 		if len(c.dirtyToRefreshLocked(suppressed)) == 0 {
 			if c.retrySuppressedChurnLocked(suppressed, startSeq) {
 				c.mu.Unlock()
+				c.notifyChanges(notifications)
 				continue
 			}
 			collect(suppressed)
 			c.mu.Unlock()
+			c.notifyChanges(notifications)
 			return nil
 		}
 		c.mu.Unlock()
+		c.notifyChanges(notifications)
 	}
 	return errDirtyOverlayFallback
 }

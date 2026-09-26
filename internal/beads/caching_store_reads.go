@@ -100,6 +100,30 @@ func liveListQuery(query ListQuery) ListQuery {
 	return query
 }
 
+// observedBackingCloseLocked returns the event for a close discovered by a
+// read-through path. Without it, the read installs the closed row in the cache
+// and the periodic reconciler can no longer detect the transition. Caller must
+// hold c.mu; emit the returned notification only after releasing the lock.
+func (c *CachingStore) observedBackingCloseLocked(id string, fresh Bead) (cacheNotification, bool) {
+	previous, ok := c.beads[id]
+	if !ok || previous.Status == "closed" || fresh.Status != "closed" {
+		return cacheNotification{}, false
+	}
+	return cacheNotification{eventType: "bead.closed", bead: cloneBead(fresh)}, true
+}
+
+// observedMissingCloseLocked mirrors the reconciler's synthetic close when a
+// read-through Get confirms that an active cached bead has disappeared.
+func (c *CachingStore) observedMissingCloseLocked(id string) (cacheNotification, bool) {
+	previous, ok := c.beads[id]
+	if !ok || previous.Status == "closed" {
+		return cacheNotification{}, false
+	}
+	closed := cloneBead(previous)
+	setBeadStatus(&closed, "closed")
+	return cacheNotification{eventType: "bead.closed", bead: closed}, true
+}
+
 // Count returns the number of beads List would return for query, minus
 // beads whose Type is in excludeTypes. Active-bead queries are answered
 // from the in-memory cache when it is live and clean; everything else
@@ -333,12 +357,13 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		return items
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.state != cacheLive && c.state != cachePartial {
+		c.mu.Unlock()
 		return items
 	}
 	now := time.Now()
 	refreshed := make([]Bead, 0, len(items))
+	var notifications []cacheNotification
 	for _, item := range items {
 		if c.deletedSeq[item.ID] > startSeq {
 			continue
@@ -362,6 +387,9 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 				continue
 			}
 		}
+		if note, ok := c.observedBackingCloseLocked(item.ID, item); ok {
+			notifications = append(notifications, note)
+		}
 		c.absorbFreshLocked(item.ID, item, now, absorbOpts{
 			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqClearGuarded,
@@ -378,6 +406,9 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
 			continue
 		}
+		if note, ok := c.observedBackingCloseLocked(id, bead); ok {
+			notifications = append(notifications, note)
+		}
 		c.absorbFreshLocked(id, bead, now, absorbOpts{
 			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqClearGuarded,
@@ -391,6 +422,9 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
 			continue
 		}
+		if note, ok := c.observedMissingCloseLocked(id); ok {
+			notifications = append(notifications, note)
+		}
 		c.evictLocked(id)
 	}
 	for id, bead := range refreshedLiveMissing {
@@ -399,6 +433,9 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		}
 		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
 			continue
+		}
+		if note, ok := c.observedBackingCloseLocked(id, bead); ok {
+			notifications = append(notifications, note)
 		}
 		c.absorbFreshLocked(id, bead, now, absorbOpts{
 			depsMode:   depsFromFieldsIfCarried,
@@ -413,10 +450,15 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
 			continue
 		}
+		if note, ok := c.observedMissingCloseLocked(id); ok {
+			notifications = append(notifications, note)
+		}
 		c.evictLocked(id)
 	}
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
+	c.mu.Unlock()
+	c.notifyChanges(notifications)
 	return refreshed
 }
 
@@ -531,6 +573,7 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 				c.mu.Unlock()
 				return Bead{}, ErrNotFound
 			}
+			note, observedClose := c.observedBackingCloseLocked(id, fresh)
 			c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
 				depsMode:   depsFromFields,
 				seqMode:    seqClearBeadSeqOnly,
@@ -539,6 +582,9 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 			c.markFreshLocked(time.Now())
 			c.updateStatsLocked()
 			c.mu.Unlock()
+			if observedClose {
+				c.notifyChange(note.eventType, note.bead)
+			}
 			return fresh, nil
 		}
 		if b, ok := c.beads[id]; ok {
