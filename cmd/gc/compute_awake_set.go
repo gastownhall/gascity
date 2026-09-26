@@ -213,7 +213,15 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			}
 			if sn := resolveNamedSessionBeadName(input.SessionBeads, ns); sn != "" {
 				bead := findBeadBySessionName(input.SessionBeads, sn)
-				if bead != nil && !bead.DependencyOnly && !bead.Drained && bead.State != "closed" {
+				// Drained override — routed-demand and named-demand wake even
+				// a drained bead (ga-j4lqwa.1): both are real, unambiguous
+				// demand for this exact identity, the same override strength
+				// already given to attached/pending above. work-query stays
+				// gated: it lacks NamedSessionRoutedDemand's deliberate
+				// UsesCanonicalSingletonPoolIdentity() scoping, so exempting
+				// it here would risk a herd-wake on multi-instance pools.
+				drainedExempt := reason == "named-demand" || reason == "routed-demand"
+				if bead != nil && !bead.DependencyOnly && (!bead.Drained || drainedExempt) && bead.State != "closed" {
 					desired[sn] = reason
 				}
 			} else {
