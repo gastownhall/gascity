@@ -139,14 +139,14 @@ name = "my-city"
 schema = 2
 
 [imports.core]
-source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+source = "https://github.com/gastownhall/gascity/tree/main/internal/bootstrap/packs/core"
 version = "sha:<pinned commit>"
 
 [imports.bd]
-source = "https://github.com/gastownhall/gascity.git//examples/bd"
+source = "https://github.com/gastownhall/gascity/tree/main/examples/bd"
 version = "sha:<pinned commit>"
 
-[imports.gascity]
+[imports.gc]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 version = "sha:<pinned commit>"
 
@@ -162,8 +162,8 @@ so nothing is written for it (you'll meet formulas in
 [Tutorial 05](/tutorials/05-formulas)). The `[imports]` entries
 in `pack.toml` are explicit pack composition, not hidden load-time behavior.
 `core` and, for cities on the default `bd` beads provider, `bd` are bundled
-system packs that resolve offline from the user-global pack cache. The
-`gascity` import is the public planning and implementation skills pack pinned
+system packs that resolve offline from the user-global pack cache. The `gc`
+import is the public Gas City planning and implementation skills pack pinned
 to the registry release embedded with this `gc` binary. If required builtin
 imports go missing, `gc doctor --fix` restores them. The machine-local
 workspace identity lives in `.gc/site.toml` instead, which is how `gc
@@ -301,26 +301,26 @@ One command set the whole loop in motion: sling created a work bead, attached
 a workflow from the agent's default formula (`mol-do-work` — read the bead, do
 the work, close it), and the orchestrator spawned a session to run it.
 
-![Work lifecycle after a sling: you run gc sling, the beads store creates a work bead and route, the orchestrator's reconcile tick spawns a session, the agent receives a primed prompt and finds its hooked work, edits the rig and runs commands, then updates the bead's progress and closes it when done — while the event bus records every step and gc bd show --watch streams live status back to you.](/diagrams/excalidraw-rendered/work-lifecycle.svg)
+![Work lifecycle after a sling: you run gc sling, the beads store creates a work bead and route, the orchestrator's reconcile tick spawns a session, the agent receives a primed prompt and finds its hooked work, edits the rig and runs commands, then updates the bead's progress and closes it when done — while the event bus records every step and gc bd show reports the bead's status back to you.](/diagrams/excalidraw-rendered/work-lifecycle.svg)
 
-Watch the bead progress with `--watch`:
+Check on the bead's progress with `gc bd show`:
 
 ```shell
 ~/my-project
-$ gc bd show mp-ff9 --watch
+$ gc bd show mp-ff9
 ○ mp-ff9 · Write hello world in python to the file hello.py   [P2 · OPEN]
 Owner: Chris Sells · Type: task
 Created: 2026-04-07 · Updated: 2026-04-07
 
 BLOCKS
   ← ○ mp-4tl: input convoy for mp-ff9 P2
-
-Watching for changes... (Press Ctrl+C to exit)
 ```
 
-The `BLOCKS` line is the input convoy sling created to track your bead. When
-the agent finishes, the status flips from `OPEN` to `CLOSED` — and the file is
-there:
+The `BLOCKS` line is the input convoy sling created to track your bead. Run
+`gc bd show mp-ff9` again after a minute or two. When the agent finishes, the
+status flips from `OPEN` to `CLOSED` — and the file is there. (`--watch` is not
+available on a city that uses the default proxied beads transport, so re-run
+the command instead.)
 
 ```shell
 ~/my-project

@@ -138,7 +138,7 @@ func TestTutorial01Cities(t *testing.T) {
 				`schema = 2`,
 				`[imports.core]`,
 				`[imports.bd]`,
-				`[imports.gascity]`,
+				`[imports.gc]`,
 				`[[named_session]]`,
 				`template = "mayor"`,
 				`mode = "always"`,
@@ -231,25 +231,25 @@ func TestTutorial01Cities(t *testing.T) {
 			}
 		})
 
-		t.Run("gc bd show mp-ff9 --watch", func(t *testing.T) {
+		t.Run("gc bd show mp-ff9", func(t *testing.T) {
 			if helloTaskID == "" {
 				t.Fatal("missing hello.py task id from prior sling step")
 			}
 			const helloPyReadyTimeout = 3 * time.Minute
-			rs, err := ws.startShell(fmt.Sprintf("gc bd show %s --watch", helloTaskID), "")
+			// The tutorial re-runs `gc bd show` rather than using --watch: bd
+			// refuses watch mode in the default proxied-server transport.
+			out, err := ws.runShell(fmt.Sprintf("gc bd show %s", helloTaskID), "")
 			if err != nil {
-				t.Fatalf("gc bd show --watch start: %v", err)
+				t.Fatalf("gc bd show: %v\n%s", err, out)
 			}
-			defer func() { _ = rs.stop() }()
-
-			if err := rs.waitFor(helloTaskID, 30*time.Second); err != nil {
-				t.Fatalf("gc bd show --watch did not render target bead: %v", err)
+			if !strings.Contains(out, helloTaskID) {
+				t.Fatalf("gc bd show did not render target bead %s:\n%s", helloTaskID, out)
 			}
 			if !waitForCondition(t, helloPyReadyTimeout, 2*time.Second, func() bool {
 				data, err := os.ReadFile(filepath.Join(myProject, "hello.py"))
 				return err == nil && strings.TrimSpace(string(data)) != ""
 			}) {
-				ws.noteWarning("tutorial 01 provider failure: gc sling rendered the visible watch flow but did not create hello.py within the acceptance timeout")
+				ws.noteWarning("tutorial 01 provider failure: gc sling rendered the target bead but did not create hello.py within the acceptance timeout")
 				data, readErr := os.ReadFile(filepath.Join(myProject, "hello.py"))
 				switch {
 				case readErr != nil:
