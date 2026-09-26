@@ -1,63 +1,5 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
-# Bounded Experiment 4b targets over real production source files. The complete
-# config closure is still decomposing; `go test ./internal/config` remains
-# authoritative for all config behavior.
-go_library(
-    name = "config_hermetic",
-    srcs = [
-        "diagnostic_locations.go",
-        "envname.go",
-        "identity_seam.go",
-        "session_setup_path.go",
-        "storage_endpoint.go",
-    ],
-    importpath = "github.com/gastownhall/gascity/internal/config",
-    visibility = ["//visibility:public"],
-)
-
-go_test(
-    name = "config_envname_test",
-    srcs = ["config_envname_bazel_test.go"],
-    embed = [":config_hermetic"],
-    visibility = ["//visibility:public"],
-)
-
-# Second hermetic probe: diagnostic line parsing uses only the standard
-# library and has no filesystem/process dependencies. It shares the bounded
-# production library above, while the full config closure remains separate.
-go_test(
-    name = "config_diagnostic_locations_test",
-    srcs = [
-        "diagnostic_locations_fixture_bazel_test.go",
-        "diagnostic_locations_test.go",
-    ],
-    embed = [":config_hermetic"],
-    embedsrcs = ["testdata/diagnostic_locator.toml"],
-    visibility = ["//visibility:public"],
-)
-
-go_test(
-    name = "config_storage_endpoint_test",
-    srcs = ["storage_endpoint_bazel_test.go"],
-    embed = [":config_hermetic"],
-    visibility = ["//visibility:public"],
-)
-
-go_test(
-    name = "config_identity_seam_test",
-    srcs = ["identity_seam_bazel_test.go"],
-    embed = [":config_hermetic"],
-    visibility = ["//visibility:public"],
-)
-
-go_test(
-    name = "config_session_setup_path_test",
-    srcs = ["session_setup_path_test.go"],
-    embed = [":config_hermetic"],
-    visibility = ["//visibility:public"],
-)
-
 go_library(
     name = "config",
     srcs = [
@@ -67,14 +9,16 @@ go_library(
         "command_discovery.go",
         "compose.go",
         "config.go",
+        "context_advisory.go",
         "diagnostic_locations.go",
         "doctor_discovery.go",
         "duplicate_agent_error.go",
         "endpoint_compat_edit.go",
         "envname.go",
         "extmsg.go",
+        "fingerprint_ctime_unix.go",
+        "fingerprint_ctime_windows.go",
         "github_pr_monitor.go",
-        "identity_seam.go",
         "implicit.go",
         "launch_command.go",
         "legacy_detector.go",
@@ -105,10 +49,10 @@ go_library(
         "session_setup_path.go",
         "session_sleep.go",
         "site_binding.go",
+        "site_binding_agent_suspend.go",
         "site_binding_durability.go",
         "skill_discovery.go",
         "storage.go",
-        "storage_binding_validation.go",
         "storage_endpoint.go",
         "undecoded.go",
         "upstream.go",
@@ -147,6 +91,7 @@ go_library(
 go_test(
     name = "config_test",
     srcs = [
+        "acp_session_config_test.go",
         "agent_discovery_test.go",
         "agent_layout_test.go",
         "builtin_family_test.go",
@@ -156,9 +101,8 @@ go_test(
         "compose_beads_test.go",
         "compose_storage_test.go",
         "compose_test.go",
-        "config_envname_bazel_test.go",
         "config_test.go",
-        "diagnostic_locations_fixture_bazel_test.go",
+        "context_advisory_test.go",
         "diagnostic_locations_test.go",
         "doctor_config_test.go",
         "doctor_discovery_test.go",
@@ -169,7 +113,6 @@ go_test(
         "field_sync_test.go",
         "github_pr_monitor_test.go",
         "home_fallback_test.go",
-        "identity_seam_bazel_test.go",
         "implicit_agent_patch_repro_test.go",
         "implicit_test.go",
         "import_negative_test.go",
@@ -212,35 +155,49 @@ go_test(
         "session_model_phase0_spec_test.go",
         "session_setup_path_test.go",
         "session_sleep_test.go",
+        "site_binding_agent_suspend_test.go",
         "site_binding_durability_test.go",
         "site_binding_rewrite_test.go",
         "site_binding_test.go",
         "skill_discovery_test.go",
-        "storage_endpoint_bazel_test.go",
         "storage_example_test.go",
         "storage_test.go",
         "testenv_import_test.go",
         "testutil_test.go",
         "undecoded_test.go",
+        "unhonored_pins_test.go",
         "upstream_test.go",
+        "validate_dolt_test.go",
         "validate_durations_test.go",
         "validate_semantics_test.go",
         "webhook_test.go",
         "workquery_ephemeral_blocked_test.go",
         "workquery_ephemeral_inprogress_hold_test.go",
+        "workquery_ephemeral_scan_reuse_test.go",
         "workquery_federation_test.go",
+        "workquery_graph_anchor_test.go",
         "workquery_hold_label_test.go",
         "workquery_inprogress_blocked_test.go",
         "workquery_inprogress_federated_test.go",
         "workquery_inprogress_federation_test.go",
         "workquery_inprogress_hold_test.go",
+        "workquery_named_routed_gate_test.go",
         "workquery_parity_test.go",
         "workquery_recovery_test.go",
+        "workquery_single_session_routed_test.go",
     ],
-    data = glob(["testdata/**"]),
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_source_tree",
+        "//docs:all_files",
+        "//examples/storage:pack_files",
+    ],
     embed = [":config"],
-    embedsrcs = ["testdata/diagnostic_locator.toml"],
     deps = [
+        "//internal/bazeltest",
         "//internal/beadmeta",
         "//internal/builtinpacks",
         "//internal/citylayout",
@@ -253,4 +210,16 @@ go_test(
         "//internal/testenv",
         "@com_github_burntsushi_toml//:toml",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

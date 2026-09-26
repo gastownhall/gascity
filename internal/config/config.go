@@ -1761,7 +1761,19 @@ type ACPSessionConfig struct {
 	// OutputBufferLines is the number of output lines to keep in the
 	// circular buffer for Peek. Defaults to 1000.
 	OutputBufferLines int `toml:"output_buffer_lines,omitempty" jsonschema:"default=1000"`
+	// StopGrace is how long stopping an ACP session waits after SIGTERM
+	// before escalating to SIGKILL. Raise it for agents that need longer to
+	// drain in-flight tool calls on shutdown. Duration string (e.g., "5s",
+	// "20s"). Defaults to "5s"; non-positive or unparseable values fall back
+	// to the default. gc stop bounds each session at 30s, so keep stop_grace
+	// comfortably below that.
+	StopGrace string `toml:"stop_grace,omitempty" jsonschema:"default=5s"`
 }
+
+// DefaultACPStopGrace is the ACP SIGTERM-to-SIGKILL grace used when
+// [session.acp] stop_grace is unset or invalid. It matches the grace every
+// managed-process runtime uses.
+const DefaultACPStopGrace = 5 * time.Second
 
 // HandshakeTimeoutDuration returns the handshake timeout as a time.Duration.
 // Defaults to 30s if empty or unparseable.
@@ -1773,6 +1785,15 @@ func (a *ACPSessionConfig) HandshakeTimeoutDuration() time.Duration {
 // Defaults to 60s if empty or unparseable.
 func (a *ACPSessionConfig) NudgeBusyTimeoutDuration() time.Duration {
 	return durationOr(a.NudgeBusyTimeout, 60*time.Second)
+}
+
+// StopGraceDuration returns the ACP stop grace as a time.Duration.
+// Defaults to DefaultACPStopGrace if empty, unparseable, or non-positive.
+func (a *ACPSessionConfig) StopGraceDuration() time.Duration {
+	if d := durationOr(a.StopGrace, DefaultACPStopGrace); d > 0 {
+		return d
+	}
+	return DefaultACPStopGrace
 }
 
 // OutputBufferLinesOrDefault returns the output buffer line count.
@@ -2130,10 +2151,22 @@ type OrdersConfig struct {
 	// BurntSushi's omitempty does not drop a zero int, so a plain int would
 	// emit max_dispatches_per_tick = 0 into every marshaled city.toml.
 
-	// MaxDispatchesPerTick caps how many orders the supervisor dispatches
-	// per tick. Unset keeps the built-in default of 4; set to 1 to drain
-	// overdue cooldown orders one-per-tick at cold start instead of firing
-	// several concurrent goroutines at once.
+	// MaxDispatchesPerTick caps how many clock-driven orders (cooldown, cron
+	// and event triggers) the supervisor dispatches per tick, in a rotation
+	// that resumes where the previous tick stopped. Unset keeps the built-in
+	// default of 4; set to 1 to drain overdue cooldown orders one-per-tick at
+	// cold start instead of firing several concurrent goroutines at once.
+	// Condition-triggered orders are outside this budget: a passing check
+	// means work is pending right now, so they dispatch on the tick that
+	// observes it. The open-tracking and open-work gates still run for them
+	// (unless the order sets no_work_gate), but those gates are keyed per
+	// order and only hold back a redispatch of an order whose previous run
+	// is still moving, so they do not bound the tick as a whole: a tick
+	// launches at most this budget plus one dispatch per condition order
+	// whose check passed on that tick. That second term grows with how many
+	// condition orders a city defines, not with this setting, and at cold
+	// start, before any tracking bead exists, neither gate holds a
+	// simultaneously-due set back.
 	MaxDispatchesPerTick *int `toml:"max_dispatches_per_tick,omitempty"`
 	// Overrides apply per-order field overrides after scanning.
 	// Each override targets an order by name and optionally by rig.

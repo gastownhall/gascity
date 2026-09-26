@@ -39,10 +39,13 @@ go_test(
         "carrier_test.go",
         "dialog_model_switch_test.go",
         "dialog_test.go",
+        "dialog_trust_closed_loop_test.go",
+        "dialog_trust_selection_test.go",
         "envsecret_test.go",
         "fake_conformance_test.go",
         "fake_test.go",
         "fingerprint_breakdown_v1_test.go",
+        "fingerprint_config_env_test.go",
         "fingerprint_golden_test.go",
         "fingerprint_partition_test.go",
         "fingerprint_test.go",
@@ -55,16 +58,42 @@ go_test(
         "redact_test.go",
         "runtime_test.go",
         "seam_adapter_test.go",
+        "session_events_contract_test.go",
         "setupcommand_test.go",
         "staging_hash_test.go",
+        "staging_preserve_test.go",
         "staging_skip_mergeable_test.go",
         "staging_test.go",
         "testenv_import_test.go",
     ],
-    data = glob(["testdata/**"]),
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
     embed = [":runtime"],
     deps = [
         "//internal/runtime/runtimetest",
         "//internal/testenv",
     ],
+)
+
+filegroup(
+    name = "all_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

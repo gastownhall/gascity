@@ -81,6 +81,49 @@ die() {
     exit 1
 }
 
+# trace_bd_argv records one bd invocation this script is about to fork, as a
+# single line appended to the file named by $GC_BD_TRACE. No-op when the
+# variable is unset, which is every ordinary run.
+#
+# It exists because this script is a blind spot in gc's own fork accounting.
+# gc records the bd calls it makes in-process, but the provider script is a
+# separate process that writes nothing, so every bd it forks — the ping behind
+# start/ensure-ready/health/probe, the init, the stop — was invisible to the
+# very measurement the proxied topology made worth taking.
+#
+# It deliberately writes the LINE format under $GC_BD_TRACE rather than the
+# JSONL under $GC_BD_TRACE_JSON. The JSONL file is where the fork-count gate
+# counts, and a test that also substitutes a recording BD_BIN shim would have
+# every fork in it twice — once from the shim and once from here. Two formats
+# under two variables keep the census and this breadcrumb trail separate.
+#
+# Best-effort in both directions: an unwritable path is ignored rather than
+# failing the operation it was only observing.
+trace_bd_argv() {
+    # The JSONL trace claims tracing when it is set, exactly as the in-process
+    # writer does (internal/beads/bdstore.go newBDExecTrace): that file is where
+    # the fork-count gate counts, and a run that also substitutes a recording
+    # BD_BIN shim would otherwise have every fork twice, once from the shim and
+    # once from here. Two formats sharing one file is the other half of the same
+    # hazard. The implementer's claim that the formats never interleave rests on
+    # this guard, so the script has to honour it too.
+    [ -z "${GC_BD_TRACE_JSON:-}" ] || return 0
+    [ -n "${GC_BD_TRACE:-}" ] || return 0
+    trace_args=$*
+    # One fork, one line. An argv can carry a newline — a bead title, a JSON
+    # payload on `bd create` — and a raw one here splits the breadcrumb into two
+    # lines, the second with no source= prefix, which any reader counts as a
+    # record it cannot attribute. The fold costs a subshell only when there is
+    # actually a newline to fold, which no gc-built argv has.
+    case $trace_args in
+    *"
+"*) trace_args=$(printf '%s' "$trace_args" | tr '\n\r' '  ') ;;
+    esac
+    printf '%s source=provider-script subcommand=%s pid=%s dir=%s args=%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${1:-unknown}" "$$" "$(pwd)" "$trace_args" \
+        >>"$GC_BD_TRACE" 2>/dev/null || true
+}
+
 resolve_gc_helper_bin() {
     if [ -n "${GC_BIN:-}" ]; then
         printf '%s\n' "$GC_BIN"
@@ -446,6 +489,7 @@ seed_fresh_managed_bd_version_witness() {
 
     [ ! -e "$marker" ] || return 0
 
+    trace_bd_argv version
     if ! raw=$("${BD_BIN:-bd}" version 2>/dev/null); then
         die "failed to read bd version while initializing fresh managed Dolt workspace at $dir"
     fi
@@ -713,10 +757,74 @@ valid_custom_types_value() {
     return 0
 }
 
+# ensure_bd_runtime_custom_types registers GC's custom bead types with bd's
+# runtime SQL state, in raw SQL only (ga-5mym: no `bd config set` inside the
+# provider op timeout).
+#
+# bd validates a bead type against the normalized custom_types table first and
+# falls back to the config row's types.custom only when that table is empty;
+# .beads/config.yaml is invisible to the native (library) store. So:
+#
+#   - The config row is MERGED, never overwritten: every missing GC type is
+#     appended and every existing entry, operator extras included, is kept.
+#     A JSON-array row (bd config set's form) is normalized to CSV first so
+#     the append stays well-formed.
+#   - When custom_types is non-empty, the GC types are INSERT IGNOREd into it.
+#     This is what heals an upgraded store whose table an older bd populated
+#     with an older GC list: the row alone never reaches the validator then
+#     (#6495). An empty table is left alone -- bd still validates against the
+#     row, and its backfill copies the row in later. A missing table (a schema
+#     older than bd's custom_types migration) is likewise left to bd.
+#   - Against a remote Dolt server GC does not own the table, so it only
+#     warns about required types missing from it and points at `gc doctor`.
+#     The row merge still happens there, as the row write always has, but it
+#     can no longer narrow the list.
 ensure_bd_runtime_custom_types() {
     local db="$1"
     local types="$2"
-    ensure_bd_runtime_config_value "$db" "types.custom" "$types"
+    local old_ifs typ row_sql table_sql req_sql output tables_changed missing
+    [ -n "$db" ] || return 0
+    [ -n "$types" ] || return 0
+    valid_sql_name "$db" || die "invalid dolt database name: $db"
+    validate_bd_runtime_config_value "types.custom" "$types"
+
+    row_sql="USE \`$db\`; INSERT INTO config (\`key\`, value) VALUES ('types.custom', '$types') ON DUPLICATE KEY UPDATE value = value; UPDATE config SET value = REPLACE(REPLACE(REPLACE(REPLACE(value, '[', ''), ']', ''), '\"', ''), ' ', '') WHERE \`key\` = 'types.custom' AND TRIM(value) LIKE '[%';"
+    req_sql=""
+    old_ifs=$IFS
+    IFS=','
+    for typ in $types; do
+        row_sql="$row_sql UPDATE config SET value = IF(TRIM(value) = '', '$typ', CONCAT(value, ',$typ')) WHERE \`key\` = 'types.custom' AND FIND_IN_SET('$typ', REPLACE(value, ' ', '')) = 0;"
+        if [ -z "$req_sql" ]; then
+            req_sql="SELECT '$typ' AS n"
+        else
+            req_sql="$req_sql UNION ALL SELECT '$typ'"
+        fi
+    done
+    IFS=$old_ifs
+
+    server_sql_retry "$row_sql" >/dev/null || die "failed to set bd runtime types.custom for $db"
+
+    tables_changed=config
+    if is_remote; then
+        # Read-only on a server GC does not own: report, never write.
+        output=$(server_sql "USE \`$db\`; SELECT CONCAT('gc-missing-custom-types:', COALESCE(GROUP_CONCAT(n), '')) AS r FROM ($req_sql) req WHERE EXISTS (SELECT 1 FROM custom_types) AND n NOT IN (SELECT name FROM custom_types)" 2>&1) || output=""
+        missing=$(printf '%s\n' "$output" | sed -n 's/.*gc-missing-custom-types:\([A-Za-z0-9_,-]*\).*/\1/p' | head -n 1)
+        if [ -n "$missing" ]; then
+            echo "warning: bd custom_types table for $db on external Dolt server is missing required types ($missing); bd will reject beads of those types. Run \`gc doctor\` and, if custom-types fails, \`gc doctor --fix\`." >&2
+        fi
+    else
+        table_sql="USE \`$db\`; INSERT IGNORE INTO custom_types (name) SELECT n FROM ($req_sql) req WHERE EXISTS (SELECT 1 FROM custom_types)"
+        if output=$(server_sql_retry "$table_sql" 2>&1); then
+            tables_changed="config custom_types"
+        else
+            case "$output" in
+                *"table not found"*) ;;
+                *) echo "warning: failed to register required types in bd custom_types table for $db; bd may reject GC bead types until \`gc doctor --fix\` runs: $output" >&2 ;;
+            esac
+        fi
+    fi
+    # shellcheck disable=SC2086 # tables_changed is a word list of table names.
+    commit_bd_runtime_config "$db" "types.custom" $tables_changed
 }
 
 validate_bd_runtime_config_value() {
@@ -767,7 +875,8 @@ ensure_bd_runtime_config_value() {
 #     GC for that database (the same hazard the read-only probe table is
 #     registered in dolt_ignore to avoid).
 #
-# Staging is scoped to `config` alone: a blanket DOLT_ADD('.') would sweep
+# Staging is scoped to the tables GC wrote (`config`, plus `custom_types` for
+# the custom-types writer): a blanket DOLT_ADD('.') would sweep
 # whatever else happens to be dirty into GC's commit, which is the hash-drift
 # failure above rather than a fix for it.
 #
@@ -775,12 +884,27 @@ ensure_bd_runtime_config_value() {
 # the pre-existing (dirty but functional) state rather than breaking
 # provisioning -- notably on a read-only replica. It is always reported, never
 # swallowed, so the operator knows the working set needs attention.
+#
+# Extra arguments name the tables the caller wrote (default: config). The
+# custom-types writer also stages custom_types, and only when it actually wrote
+# it: DOLT_ADD of a table the schema does not have yet is an error.
 commit_bd_runtime_config() {
     local db="$1"
     local key="$2"
-    local output
+    local output tbl add_args
     [ -n "$db" ] || return 0
-    output=$(server_sql "USE \`$db\`; CALL DOLT_ADD('config'); CALL DOLT_COMMIT('-m', 'gc: record beads runtime config', '--author', 'gascity-builder <builder@gascity.local>')" 2>&1) && return 0
+    if [ "$#" -ge 2 ]; then shift 2; else set --; fi
+    [ "$#" -gt 0 ] || set -- config
+    add_args=""
+    for tbl in "$@"; do
+        valid_sql_name "$tbl" || continue
+        if [ -z "$add_args" ]; then
+            add_args="'$tbl'"
+        else
+            add_args="$add_args, '$tbl'"
+        fi
+    done
+    output=$(server_sql "USE \`$db\`; CALL DOLT_ADD($add_args); CALL DOLT_COMMIT('-m', 'gc: record beads runtime config', '--author', 'gascity-builder <builder@gascity.local>')" 2>&1) && return 0
     # An idempotent re-run has nothing to commit; that is success, not failure.
     case "$output" in
         *"nothing to commit"*|*"no changes added to commit"*|*"No changes"*) return 0 ;;
@@ -2709,6 +2833,7 @@ run_bd_pinned() {
         export GC_DOLT_PASSWORD="$DOLT_PASSWORD"
         export BEADS_DOLT_SERVER_USER="$DOLT_USER"
         export BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"
+        trace_bd_argv "$@"
         "${BD_BIN:-bd}" "$@"
     )
 }
@@ -2762,6 +2887,7 @@ run_bd_init_proxied() {
             set -- "$@" --database "$dolt_database"
         fi
         set -- "$@" --skip-hooks --skip-agents "$dir"
+        trace_bd_argv "$@"
         "$bd_bin" "$@"
     )
 }
@@ -2778,6 +2904,7 @@ run_bd_doltlite() {
         unset BEADS_DOLT_DATABASE BEADS_DOLT_PORT
         unset BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_MODE BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_SOCKET BEADS_DOLT_SERVER_USER BEADS_DOLT_PASSWORD
         export BEADS_DOLT_AUTO_START=0
+        trace_bd_argv "$@"
         "${BD_BIN:-bd}" "$@"
     )
 }
@@ -3004,7 +3131,21 @@ op_init() {
         # BD_BIN here just as run_bd_init_proxied does; tests and pinned
         # deployments must not silently invoke an unrelated PATH binary.
         bd_bin="${BD_BIN:-bd}"
-        if [ ! -f "$metadata_path" ] || ! (cd "$dir" && BEADS_DIR="$dir/.beads" BEADS_DOLT_PROXIED_SERVER=1 "$bd_bin" context >/dev/null 2>&1); then
+        # The context probe is a bd fork like any other and has to be recorded
+        # like one: a fork census with a hole in it is worse than none, because
+        # the budget it informs reads as met. The condition is split rather than
+        # traced in place because the original `[ ! -f metadata ] || ! (… bd
+        # context …)` short-circuits — a trace above it would count a fork that
+        # never happened on a scope with no metadata.json, which is the common
+        # case on a first init.
+        proxied_needs_init=true
+        if [ -f "$metadata_path" ]; then
+            trace_bd_argv context
+            if (cd "$dir" && BEADS_DIR="$dir/.beads" BEADS_DOLT_PROXIED_SERVER=1 "$bd_bin" context >/dev/null 2>&1); then
+                proxied_needs_init=false
+            fi
+        fi
+        if [ "$proxied_needs_init" = true ]; then
             run_bd_init_proxied "$dir" "$prefix" "$dolt_database" || die "bd proxied-server init failed for $dir"
         fi
         ensure_beads_dir_permissions "$dir"
@@ -3199,7 +3340,8 @@ op_init() {
     # Configure custom bead types without invoking `bd config set`, which can
     # spend tens of seconds in auto-migrate on populated stores. The canonical
     # .beads/config.yaml types.custom line is now Go-owned (EnsureCanonicalConfig);
-    # here we only register the types in bd's runtime SQL config table.
+    # here we only register the types in bd's runtime SQL state (the config row
+    # and, when bd has populated it, the custom_types table).
     ensure_bd_runtime_custom_types "$dolt_database" "$custom_types"
 
     # Keep bd's runtime config in sync with GC's canonical prefix. This is
@@ -3606,6 +3748,7 @@ run_provider_owned_bd() {
             # the parent process. The binding determines its own transport.
             unset BEADS_DOLT_PROXIED_SERVER
         fi
+        trace_bd_argv "$@"
         "${BD_BIN:-bd}" "$@"
     )
 }

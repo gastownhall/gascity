@@ -9,6 +9,7 @@ go_library(
         "interaction.go",
         "process_group_unix.go",
         "process_group_windows.go",
+        "process_signal.go",
         "seams.go",
         "server_socket_probe.go",
         "server_socket_probe_darwin.go",
@@ -22,6 +23,7 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/runtime/tmux",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/citylayout",
         "//internal/execgrace",
         "//internal/overlay",
         "//internal/processenv",
@@ -56,11 +58,13 @@ go_test(
         "agent_slice_test.go",
         "codex_submit_test.go",
         "copymode_cancel_test.go",
+        "dialog_feedback_survey_test.go",
         "dialog_model_switch_test.go",
         "escape_skip_test.go",
         "executor_test.go",
         "holder_token_test.go",
         "interaction_test.go",
+        "kimi_process_test.go",
         "lifecycle_test.go",
         "main_test.go",
         "nudge_poke_hidden_test.go",
@@ -70,20 +74,41 @@ go_test(
         "session_env_file_test.go",
         "session_roster_test.go",
         "staging_test.go",
+        "start_ops_construction_test.go",
         "startcrash_redaction_test.go",
+        "startup_oversized_nudge_test.go",
         "startup_test.go",
         "state_cache_empty_server_test.go",
+        "state_cache_snapshot_backoff_test.go",
         "state_cache_test.go",
         "testenv_import_test.go",
         "theme_test.go",
         "tmux_unit_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
     embed = [":tmux"],
     deps = [
+        "//internal/citylayout",
         "//internal/runtime",
+        "//internal/runtime/proctable",
         "//internal/shellquote",
         "//internal/testenv",
         "//internal/worker/workertest",
         "//test/tmuxtest",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

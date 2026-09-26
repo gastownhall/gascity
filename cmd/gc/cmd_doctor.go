@@ -369,6 +369,13 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 
 	// One preflight gates all store-dependent checks so outages are not re-probed (#5064).
 	storeOK := true
+	// storePreflightPassed is strictly stronger than storeOK: it means the
+	// probe actually ran and the controller's own read succeeded. storeOK stays
+	// true when the probe is skipped and when it failed in a non-outage shape
+	// (isBeadStoreUnreachable deliberately excludes missing/uninitialized
+	// stores). Only a check that asserts a differential against the controller
+	// needs the stronger signal.
+	storePreflightPassed := false
 	var storePreflightErr error
 	var activeRigs []config.Rig
 	if cfgErr == nil && cfg != nil {
@@ -386,6 +393,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		var probeErr error
 		if !opts.SkipStorePreflight {
 			probeErr = doctorBeadStorePreflight(cityPath, storeFactory)
+			storePreflightPassed = probeErr == nil
 		}
 		if isBeadStoreUnreachable(probeErr) {
 			storeOK = false
@@ -416,7 +424,14 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			// Differential probe: the preflight above just proved the store
 			// reachable with the controller's environment, so a read that
 			// fails under the gate sandbox isolates the sandbox (ga-pqlgh).
-			register(newGateSandboxReadCheck(cityPath))
+			// The check's message asserts that control ("the same read
+			// succeeded for the controller"), so it needs the preflight to
+			// have actually run and passed — storeOK alone also holds when the
+			// probe was skipped or failed in a non-outage shape, and in both
+			// of those the assertion would be false.
+			if storePreflightPassed {
+				register(newGateSandboxReadCheck(cityPath))
+			}
 		}
 	}
 	register(newDoctorDoltServerCheck(cityPath, opts.SkipCityDoltCheck))
@@ -459,6 +474,15 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// line per city says so; registered only when the city actually has a
 	// proxied scope, so nothing changes for a direct or external city.
 	if c := doctor.NewProxiedBackupCoverageCheckForConfig(cityPath, cfg, cfgErr); c != nil {
+		register(c)
+	}
+	// A gc-owned proxied scope whose sidecar does not pin its proxy resident.
+	// bd elides a zero idle_timeout, so an absent key means its provider
+	// substitutes 30s and retires the proxy and its Dolt child after every
+	// quiet period — invisible to every other check, and paid for as a cold
+	// start on the next command against that scope. Registered only when the
+	// city actually has such a scope.
+	if c := doctor.NewProxiedIdleTimeoutCheckForConfig(cityPath, cfg, cfgErr); c != nil {
 		register(c)
 	}
 	// Worktree checks deliberately run even when cfgErr != nil — they
@@ -887,6 +911,10 @@ type doctorJSONResult struct {
 	// distinguish an abandoned check (outcome unknown, worth retrying) from a
 	// check that ran and returned an ordinary advisory error.
 	TimedOut bool `json:"timed_out,omitempty"`
+	// Payload projects CheckResult.Payload: a check's structured findings, for
+	// consumers that must not parse Message. Absent for the checks that set
+	// none, which is nearly all of them.
+	Payload any `json:"payload,omitempty"`
 }
 
 type doctorJSONReport struct {
@@ -942,6 +970,7 @@ func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
 			FixError:     r.FixError,
 			Fixed:        r.Fixed,
 			TimedOut:     r.TimedOut,
+			Payload:      r.Payload,
 		})
 	}
 	return writeCLIJSONLine(w, out)

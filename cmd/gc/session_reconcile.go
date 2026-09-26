@@ -33,10 +33,12 @@ type wakeEvaluation struct {
 	Reasons []WakeReason
 	// Reason mirrors AwakeDecision.Reason on the ComputeAwakeSet bridge path.
 	// It is only actionable when Reasons contains the matching effective wake.
-	Reason           string
-	Policy           resolvedSessionSleepPolicy
-	ConfigSuppressed bool
-	HasAssignedWork  bool
+	Reason              string
+	Policy              resolvedSessionSleepPolicy
+	ConfigSuppressed    bool
+	HasAssignedWork     bool
+	AssignedWorkBeadID  string
+	AssignedWorkClaimed bool
 }
 
 const (
@@ -605,6 +607,26 @@ func recordRateLimitQuarantine(info sessionpkg.Info, sessFront *sessionpkg.Store
 	return next, nil
 }
 
+// providerTerminalErrorPatch is the terminal-provider-error health/sleep
+// metadata batch. markProviderTerminalError applies it directly; the fenced
+// pending-create rollback (rollbackPendingCreateMarkingTerminal) instead folds
+// this same batch into its rollback Tx, so the terminal mark rides the same
+// fence as the failed-create close rather than preceding it (ga-z8yi2j).
+func providerTerminalErrorPatch(reason string, now time.Time) map[string]string {
+	return map[string]string{
+		"state":                                 string(sessionpkg.StateAsleep),
+		"sleep_reason":                          string(sessionpkg.SleepReasonProviderTerminalError),
+		"last_woke_at":                          "",
+		"pending_create_claim":                  "",
+		"pending_create_started_at":             "",
+		sessionHealthStateMetadataKey:           "unhealthy",
+		sessionHealthReasonMetadataKey:          reason,
+		sessionDrainableMetadataKey:             boolMetadata(true),
+		sessionProviderTerminalErrorMetadataKey: reason,
+		sessionProviderTerminalErrorAtKey:       now.Format(time.RFC3339),
+	}
+}
+
 // markProviderTerminalError records the terminal-provider-error health/sleep
 // metadata on a zombie session bead. It returns the snapshot Info with that write
 // folded in (write-returns-Info, front-door migration Step 6d) and any persist
@@ -624,19 +646,7 @@ func markProviderTerminalError(info sessionpkg.Info, sessFront *sessionpkg.Store
 	if clk != nil {
 		now = clk.Now().UTC()
 	}
-	batch := map[string]string{
-		"state":                                 string(sessionpkg.StateAsleep),
-		"sleep_reason":                          string(sessionpkg.SleepReasonProviderTerminalError),
-		"last_woke_at":                          "",
-		"pending_create_claim":                  "",
-		"pending_create_started_at":             "",
-		sessionHealthStateMetadataKey:           "unhealthy",
-		sessionHealthReasonMetadataKey:          reason,
-		sessionDrainableMetadataKey:             boolMetadata(true),
-		sessionProviderTerminalErrorMetadataKey: reason,
-		sessionProviderTerminalErrorAtKey:       now.Format(time.RFC3339),
-	}
-	return sessFront.ApplyPatchInfo(info, batch)
+	return sessFront.ApplyPatchInfo(info, providerTerminalErrorPatch(reason, now))
 }
 
 // sessionHasProviderTerminalErrorInfo reads the typed health/terminal-error

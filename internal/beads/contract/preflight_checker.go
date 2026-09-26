@@ -57,16 +57,58 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 	if err != nil {
 		return PreflightResult{}, err
 	}
-	bdCtx, bdCtxErr := c.readBDContext(scope)
+	providerCheck := c.checkProvider()
+	metadataCheck := c.checkMetadataBackend(metadata)
 
-	checks := []PreflightCheckResult{
-		c.checkProvider(),
-		c.checkMetadataBackend(metadata),
-		c.checkBDContextAgreement(metadata, bdCtx, bdCtxErr),
-		c.checkDoltModeSafe(metadata, bdCtx, bdCtxErr),
-		c.checkIdentityMatch(scope, metadata),
-		c.checkVersionCompat(bdCtx, bdCtxErr),
-		c.checkContractShape(metadata),
+	// `bd context` is a subprocess per scope (~0.3-0.4 s, plus the git probes
+	// bd runs to resolve the repo). Its answer can only matter when the
+	// checks that precede it pass: once provider_contract or metadata_backend
+	// FAILs, the verdict is BLOCKED, and because those checks come FIRST in
+	// the order, they are also the gate and fallback reason whatever bd
+	// context would have said. So bd context is not consulted for a scope
+	// that is already blocked (e.g. a non-dolt backend, which is every scope
+	// of a postgres city). Nothing is cached: every Check re-reads metadata,
+	// so a long-lived controller sees an operator's config change on the next
+	// open exactly as before.
+	//
+	// Scope limit on that win: only the bd context subprocess is removed.
+	// identity_match still runs on the blocked branch, and whether its
+	// production reader dials is decided by the scope's .beads/config.yaml,
+	// not by the metadata backend that blocked the scope
+	// (cmd/gc.canonicalScopeDoltTarget -> ResolveScopeConfigState). A scope
+	// carrying no endpoint keys is legacy-minimal and bails before dialing,
+	// so for it the removed subprocess is the whole cost change; one that
+	// still carries gc.endpoint_origin plus dolt.host/dolt.port -- the
+	// residue a dolt-to-postgres migration leaves behind -- resolves
+	// authoritative and can still spend up to 5 s pinging an endpoint that is
+	// gone. That probe is pre-existing and unchanged here, but it bounds the
+	// figures above to the clean-config case.
+	var (
+		checks   []PreflightCheckResult
+		bdCtxErr error
+	)
+	if blocker, blocked := firstFailedCheck(providerCheck, metadataCheck); blocked {
+		checks = []PreflightCheckResult{
+			providerCheck,
+			metadataCheck,
+			bdContextNotConsultedCheck(PreflightCheckBDContextAgreement, blocker),
+			bdContextNotConsultedCheck(PreflightCheckDoltModeSafe, blocker),
+			c.checkIdentityMatch(scope, metadata),
+			bdContextNotConsultedCheck(PreflightCheckVersionCompat, blocker),
+			c.checkContractShape(metadata),
+		}
+	} else {
+		var bdCtx PreflightBDContext
+		bdCtx, bdCtxErr = c.readBDContext(scope)
+		checks = []PreflightCheckResult{
+			providerCheck,
+			metadataCheck,
+			c.checkBDContextAgreement(metadata, bdCtx, bdCtxErr),
+			c.checkDoltModeSafe(metadata, bdCtx, bdCtxErr),
+			c.checkIdentityMatch(scope, metadata),
+			c.checkVersionCompat(bdCtx, bdCtxErr),
+			c.checkContractShape(metadata),
+		}
 	}
 	verdict := preflightVerdictForChecks(checks)
 	// A DEGRADED verdict caused solely by an unreachable bd context (e.g. a
@@ -94,6 +136,26 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 		result.FallbackReason = preflightFallbackReason(checks)
 	}
 	return NewPreflightResult(result), nil
+}
+
+// firstFailedCheck returns the first FAILed check among checks.
+func firstFailedCheck(checks ...PreflightCheckResult) (PreflightCheckResult, bool) {
+	for _, check := range checks {
+		if check.State == PreflightCheckFail {
+			return check, true
+		}
+	}
+	return PreflightCheckResult{}, false
+}
+
+// bdContextNotConsultedCheck reports a bd-context-derived check that was not
+// evaluated because blocker already FAILed ahead of it. It WARNs rather than
+// PASSes: nothing was verified, and a WARN can neither move the gate nor the
+// fallback reason off the earlier FAIL, nor add a repair step.
+func bdContextNotConsultedCheck(id PreflightCheckID, blocker PreflightCheckResult) PreflightCheckResult {
+	return NewPreflightCheckResult(id, PreflightCheckWarn,
+		fmt.Sprintf("bd context not consulted; native store is already blocked by %s", blocker.ID),
+		PreflightDetails{MetadataBackend: blocker.Details.MetadataBackend, Provider: blocker.Details.Provider})
 }
 
 func (c PreflightChecker) readMetadata(scope string) (preflightMetadata, error) {

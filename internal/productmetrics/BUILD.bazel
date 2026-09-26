@@ -52,8 +52,10 @@ go_test(
         "config_state_test.go",
         "control_unix_test.go",
         "event_test.go",
+        "hangbudget_test.go",
         "marker_protocol_unix_test.go",
         "notice_state_unix_test.go",
+        "pause_allocation_test.go",
         "pause_test.go",
         "platform_unsupported_test.go",
         "quota_test.go",
@@ -78,8 +80,12 @@ go_test(
         "upload_test.go",
         "uploader_unix_test.go",
     ],
-    data = glob(["testdata/**"]),
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
     embed = [":productmetrics"],
+    shard_count = 2,
     deps = [
         "//internal/testenv",
     ] + select({
@@ -137,4 +143,16 @@ go_test(
         ],
         "//conditions:default": [],
     }),
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

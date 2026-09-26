@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -206,7 +207,10 @@ func TestBuildRecipeApplyPlanReviewQuorumSubstitutesSynthesisTarget(t *testing.T
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
-	repoRoot := filepath.Clean(filepath.Join(cwd, "..", ".."))
+	repoRoot := bazeltest.OverrideRoot()
+	if repoRoot == "" {
+		repoRoot = filepath.Clean(filepath.Join(cwd, "..", ".."))
+	}
 	searchDir := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core", "formulas")
 	recipe, err := formula.Compile(context.Background(), "mol-review-quorum", []string{searchDir}, map[string]string{
 		"subject":           "PR-123",
@@ -1454,6 +1458,17 @@ func TestLogicalRecipeStepIDV2AttemptAndIteration(t *testing.T) {
 				Metadata: map[string]string{"gc.attempt": "3", "gc.kind": "scope"},
 			},
 			wantID: "mol-arch.converge",
+			wantOK: true,
+		},
+		{
+			// Inside a ralph body gc.attempt is the iteration and the retry
+			// counter is gc.retry_attempt; the ref suffix names the latter.
+			name: "v2 retry attempt inside a later ralph iteration",
+			step: formula.RecipeStep{
+				ID:       "mol-feature.loop.iteration.3.review.attempt.1",
+				Metadata: map[string]string{"gc.attempt": "3", "gc.iteration": "3", "gc.retry_attempt": "1"},
+			},
+			wantID: "mol-feature.loop.iteration.3.review",
 			wantOK: true,
 		},
 		{

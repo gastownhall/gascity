@@ -82,6 +82,7 @@ formula_tests=(
   TestPersonalWorkFormulaCompileAndRun
   TestAdoptPRFormulaRetriesTransientReviewerStep
   TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries
+  TestReviewLoopApprovesInIterationTwoWithBodyRetry
   TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash
 )
 
@@ -93,6 +94,7 @@ review_formulas_basic_tests=(
 review_formulas_retry_tests=(
   TestAdoptPRFormulaRetriesTransientReviewerStep
   TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries
+  TestReviewLoopApprovesInIterationTwoWithBodyRetry
 )
 
 review_formulas_recovery_tests=(
@@ -120,6 +122,9 @@ cmd_gc_integration_tests=(
   TestControllerDiscoversAddedCronOrderWithoutRestart
   TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
   TestManagedBeadsNativeCLICompatibility
+  TestPhase2RealTransportBoundsStayAHangDetector
+  TestPhase2RealTransportResultStillFailsWhenGenuinelyBroken
+  TestPhase2RealTransportResultToleratesASlowButCorrectStart
   TestPhase2WorkerCoreRealTransportProof
   TestRigAddIncludeResolvesScopedRegistryPackName
   TestStorageGateServesACityFromItsBeadsWorkspace

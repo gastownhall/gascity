@@ -33,13 +33,17 @@ go_test(
         "agentname_test.go",
         "client_test.go",
         "conformance_test.go",
+        "dial_bound_test.go",
         "effectiveworkdir_test.go",
+        "errorcode_test.go",
         "events_live_test.go",
         "events_test.go",
         "identity_meta_test.go",
         "kindpath_live_test.go",
         "launchspec_test.go",
+        "livegate_test.go",
         "liveness_test.go",
+        "no_named_agent_test.go",
         "panebinding_live_test.go",
         "panebinding_provider_test.go",
         "panebinding_test.go",
@@ -58,9 +62,22 @@ go_test(
     embed = [":herdr"],
     deps = [
         "//internal/runtime",
+        "//internal/runtime/herdr/herdrtest",
         "//internal/runtime/proctable",
         "//internal/runtime/runtimetest",
         "//internal/shellquote",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

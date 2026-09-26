@@ -5,7 +5,10 @@ go_library(
     srcs = ["registry.go"],
     importpath = "github.com/gastownhall/gascity/internal/runtime/registry",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/runtime"],
+    deps = [
+        "//internal/config",
+        "//internal/runtime",
+    ],
 )
 
 go_test(
@@ -16,7 +19,20 @@ go_test(
     ],
     embed = [":registry"],
     deps = [
+        "//internal/config",
         "//internal/runtime",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

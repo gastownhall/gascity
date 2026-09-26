@@ -109,6 +109,9 @@ type AwakeDecision struct {
 	// use it to persist currently_processing_bead_id and to detect when an
 	// alive session has been reassigned to a different bead.
 	AssignedWorkBeadID string
+	// AssignedWorkClaimed distinguishes an in-progress claim from ready open
+	// work. Destructive idle recovery must never recycle a live claim holder.
+	AssignedWorkClaimed bool
 	// RequiresFreshCycle is true when an alive session's recorded
 	// currently_processing_bead_id differs from AssignedWorkBeadID. The
 	// reconciler combines this with wake_mode=fresh to trigger a
@@ -414,6 +417,15 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		}
 		if hasAssignedWork {
 			decision.AssignedWorkBeadID = anchor
+			for _, work := range input.WorkBeads {
+				if work.Status != "in_progress" {
+					continue
+				}
+				if sessionAssigneeMatches(input.NamedSessions, bead, strings.TrimSpace(work.Assignee)) {
+					decision.AssignedWorkClaimed = true
+					break
+				}
+			}
 			if bead.CurrentlyProcessingBeadID != "" && anchor != bead.CurrentlyProcessingBeadID {
 				decision.RequiresFreshCycle = true
 			}

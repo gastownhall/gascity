@@ -10,6 +10,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/citylayout",
+        "//internal/config",
         "//internal/fsys",
         "//internal/suspensionstate",
         "//internal/workspacesvc",
@@ -23,13 +24,27 @@ go_test(
         "configedit_test.go",
         "formulas_test.go",
         "rigpatch_identity_internal_test.go",
+        "suspend_resume_comment_preservation_test.go",
         "testenv_import_test.go",
     ],
     embed = [":configedit"],
     deps = [
+        "//internal/config",
         "//internal/fsys",
         "//internal/pathutil",
         "//internal/suspensionstate",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

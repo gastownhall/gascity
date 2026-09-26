@@ -610,43 +610,61 @@ func desiredScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.
 // It lives here rather than in gc-beads-bd.sh on purpose: ga-5mym bans
 // `bd config set` from that script because it runs inside the provider op
 // timeout, where bd's auto-migrate can cost tens of seconds on a populated
-// store. This runs once, after init, outside that budget, against a store bd
-// has just created and is therefore empty.
+// store. This runs after the provider's init op on every start, outside that
+// budget; on a store that is already registered it costs two bd reads and no
+// write.
 //
-// Only an unset value is written. A scope that already carries types is an
-// operator's extension or a retried init, and narrowing that list would delete
-// types whose beads exist; `gc doctor --fix` owns reconciling a partial one.
+// Existing registrations are merged, never narrowed: the value written is the
+// config row ∪ what `bd types --json` reports (the custom_types table bd's
+// validator reads) ∪ doctor.RequiredCustomTypes, and it is written only when a
+// required type is missing from the row or the table. A scope migrated from a
+// legacy city, or any scope an older gc registered, already carries a list
+// without the newer required types (startup-health-episode, #6495); skipping
+// it because the row was non-empty left those types unregistered. Reading the
+// table as well matters twice: bd validates against it whenever it is
+// non-empty, and `bd config set` replaces it wholesale, so a table-only extra
+// must be in the merged value or the write would delete it.
 //
-// Best-effort by design. The canonical config gc just wrote is what bd
-// validates bead types against, so a scope whose table sync did not happen
-// still works; `gc doctor` reports the drift and `--fix` reconciles it with
-// this same call. Failing the whole init over a cache that doctor owns would
-// destroy a city that is otherwise complete.
+// Best-effort by design. A read failure writes nothing — a list that cannot be
+// proven a superset must not replace the table — and every failure logs the
+// `gc doctor --fix` hint instead of failing init: doctor's custom-types check
+// reports the same drift and --fix performs the same merge. Failing the whole
+// init over it would destroy a city that is otherwise complete.
 func registerProviderOwnedScopeCustomTypes(cityPath, dir string) {
+	const hint = "; run `gc doctor --fix`"
 	env, err := providerOwnedScopeCustomTypesEnv(cityPath, dir)
 	if err != nil {
-		log.Printf("gc: custom bead types not registered for %s: %v", dir, err)
+		log.Printf("gc: custom bead types not registered for %s: %v%s", dir, err, hint)
 		return
 	}
 	run := beads.ExecCommandRunnerWithEnv(env)
 
 	out, err := run(dir, "bd", "config", "get", "--json", "types.custom")
 	if err != nil {
-		log.Printf("gc: custom bead types not registered for %s: read: %v", dir, err)
+		log.Printf("gc: custom bead types not registered for %s: read types.custom: %v%s", dir, err, hint)
 		return
 	}
-	var current struct {
-		Value string `json:"value"`
-	}
-	if err := json.Unmarshal(out, &current); err != nil {
-		log.Printf("gc: custom bead types not registered for %s: parse: %v", dir, err)
+	row, err := doctor.ParseCustomTypesConfigJSON(out)
+	if err != nil {
+		log.Printf("gc: custom bead types not registered for %s: %v%s", dir, err, hint)
 		return
 	}
-	if strings.TrimSpace(current.Value) != "" {
+	out, err = run(dir, "bd", "types", "--json")
+	if err != nil {
+		log.Printf("gc: custom bead types not registered for %s: read custom_types: %v%s", dir, err, hint)
 		return
 	}
-	if _, err := run(dir, "bd", "config", "set", "types.custom", strings.Join(doctor.RequiredCustomTypes, ",")); err != nil {
-		log.Printf("gc: custom bead types not registered for %s: %v; run `gc doctor --fix`", dir, err)
+	table, err := doctor.ParseRegisteredTypesJSON(out)
+	if err != nil {
+		log.Printf("gc: custom bead types not registered for %s: %v%s", dir, err, hint)
+		return
+	}
+	if !doctor.CustomTypesNeedRegistration(row, table) {
+		return
+	}
+	merged := doctor.MergeRequiredCustomTypes(row, table)
+	if _, err := run(dir, "bd", "config", "set", "types.custom", strings.Join(merged, ",")); err != nil {
+		log.Printf("gc: custom bead types not registered for %s: %v%s", dir, err, hint)
 	}
 }
 
@@ -1168,6 +1186,20 @@ func runProviderOwnedLifecycleOpContext(parent context.Context, cityPath, op str
 }
 
 func runProviderOwnedScopeLifecycleOpContext(parent context.Context, cityPath, scopeRoot, op string) error {
+	return runProviderOwnedScopeLifecycleOpGuarded(parent, cityPath, scopeRoot, op, nil)
+}
+
+// runProviderOwnedScopeLifecycleOpGuarded is runProviderOwnedScopeLifecycleOpContext
+// with a precondition checked while the per-city lifecycle slot is HELD, after
+// any wait for it and before the provider script runs. A non-nil error from it
+// is returned as-is and nothing is run.
+//
+// It exists for a verb aimed at a particular state that another holder of the
+// slot may change while this one queues: the proxied admission recover, whose
+// target generation the health loop's own recover of the same zombie may have
+// replaced with a healthy proxy by the time the slot is granted (round4
+// review F3).
+func runProviderOwnedScopeLifecycleOpGuarded(parent context.Context, cityPath, scopeRoot, op string, precondition func() error) error {
 	provider := beadsProvider(cityPath)
 	if !strings.HasPrefix(provider, "exec:") {
 		return fmt.Errorf("provider-owned scope requires an exec beads provider")
@@ -1193,6 +1225,11 @@ func runProviderOwnedScopeLifecycleOpContext(parent context.Context, cityPath, s
 		return err
 	}
 	defer release()
+	if precondition != nil {
+		if err := precondition(); err != nil {
+			return err
+		}
+	}
 	env, err := providerLifecycleProcessEnvForScopeInitWithError(cityPath, scopeRoot, provider)
 	if err != nil {
 		return err
@@ -1501,6 +1538,56 @@ func validatePendingProviderEndpoint(cityPath, scopeRoot string, intent provider
 	return nil
 }
 
+// providerScriptTraceSource is the `source` every provider-script record
+// carries, so a trace consumer can separate the bd calls gc makes in-process
+// from the ones it delegates to the exec provider.
+const providerScriptTraceSource = "provider-script"
+
+// traceProviderScriptCall records one provider-script invocation in the same
+// JSONL trace gc's in-process bd calls use.
+//
+// Without it the trace is a partial census of its own subject. gc's bd calls go
+// through internal/beads and are recorded; the provider script's do not — it is
+// a separate process that never writes the trace file — so every `bd ping` the
+// lifecycle delegates to the script was invisible to the fork accounting, which
+// is exactly the traffic the proxied topology added. The record names the op
+// rather than the bd subcommand, because that is the level gc controls: one
+// `health` becomes one `bd ping`, and an op that fans out is the thing worth
+// seeing.
+//
+// Best-effort and unconditional in cost: TraceBDCall returns immediately when
+// the trace env var is unset.
+func traceProviderScriptCall(script, dir string, args []string, start time.Time, err error) {
+	record := make([]string, 0, len(args)+1)
+	record = append(record, filepath.Base(script))
+	record = append(record, args...)
+
+	exitCode := 0
+	if err != nil {
+		// -1 for a kill, a spawn failure or a context cancellation: the child
+		// never reported a status of its own, and reporting 0 for those would
+		// make a failed op read as a successful one.
+		exitCode = -1
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+	}
+	beads.TraceBDCall(providerScriptTraceSource, dir, record, start, exitCode, err)
+}
+
+// providerScriptTraceDir reports the city the script was pointed at, read back
+// out of the environment gc built for it. The trace's dir field is per-call
+// context, and the script runs with no working directory of its own.
+func providerScriptTraceDir(environ []string) string {
+	for _, entry := range environ {
+		if value, ok := strings.CutPrefix(entry, "GC_CITY_PATH="); ok {
+			return value
+		}
+	}
+	return ""
+}
+
 // runProviderOwnedOpStrict differs from the legacy generic provider runner:
 // an exit status of 2 is a provider failure for a scope GC has explicitly
 // handed to the provider, never an invitation to fall back to GC lifecycle.
@@ -1517,7 +1604,10 @@ func runProviderOwnedOpStrict(parent context.Context, timeout time.Duration, scr
 	cmd.Env = environ
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	start := time.Now()
+	err := cmd.Run()
+	traceProviderScriptCall(script, providerScriptTraceDir(environ), args, start, err)
+	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return fmt.Errorf("provider-owned beads %s: %w", op, ctxErr)
 		}
@@ -1525,10 +1615,31 @@ func runProviderOwnedOpStrict(parent context.Context, timeout time.Duration, scr
 		if msg == "" {
 			msg = err.Error()
 		}
-		return fmt.Errorf("provider-owned beads %s: %s", op, msg)
+		text := fmt.Sprintf("provider-owned beads %s: %s", op, msg)
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return &providerOpExitError{text: text, exit: exitErr}
+		}
+		return errors.New(text)
 	}
 	return nil
 }
+
+// providerOpExitError is a provider-owned op whose script RAN and exited
+// non-zero before gc's deadline: the text runProviderOwnedOpStrict has always
+// returned, now with the child's exit status as its cause instead of dropped.
+//
+// The proxied lane needs that cause to tell bd's own answer from gc's
+// contention (see markProviderReportedFailure). Everything else reads the text
+// alone, which is unchanged.
+type providerOpExitError struct {
+	text string
+	exit *exec.ExitError
+}
+
+func (e *providerOpExitError) Error() string { return e.text }
+
+func (e *providerOpExitError) Unwrap() error { return e.exit }
 
 func ensureBeadsProvider(cityPath string) error {
 	if owned, err := cityScopeProviderOwned(cityPath); err != nil {
@@ -3305,7 +3416,10 @@ func runProviderProbe(script, cityPath, provider string) bool {
 		}
 		cmd.Env = env
 	}
-	return cmd.Run() == nil
+	start := time.Now()
+	err := cmd.Run()
+	traceProviderScriptCall(script, cityPath, []string{"probe"}, start, err)
+	return err == nil
 }
 
 func providerLifecycleDoltPathEnv(cityPath string) []string {
@@ -3822,7 +3936,9 @@ func runProviderOpWithEnvContext(parent context.Context, script string, environ 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
+	start := time.Now()
 	err := cmd.Run()
+	traceProviderScriptCall(script, providerScriptTraceDir(environ), args, start, err)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return fmt.Errorf("exec beads %s: %w", args[0], ctxErr)

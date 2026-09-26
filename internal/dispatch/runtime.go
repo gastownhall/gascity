@@ -916,22 +916,30 @@ func preserveScopeCheckForSubject(candidate beads.Bead, deps []beads.Dep, subjec
 }
 
 // beadOutcomeFailed reports whether a closed bead counts as failed for
-// scope-abort and outcome-aggregation purposes. gc.outcome=fail is always a
-// failure. For beads that opted into gc.on_fail=abort_scope, the
+// scope-abort and outcome-aggregation purposes. For beads that opted into
+// gc.on_fail=abort_scope, a retry-managed attempt subject is exempt no
+// matter what gc.outcome it closed with — including gc.outcome=fail — because
+// its contract violations are classified by retry-eval as transient retries,
+// not scope aborts; the retry controller itself carries gc.on_fail=abort_scope
+// and aborts the scope at the level that owns the retry budget if the retry
+// is ultimately exhausted. Outside that exemption, gc.outcome=fail is always
+// a failure. For beads that opted into gc.on_fail=abort_scope, the
 // worker-result contract is fail-closed (mirroring the retry metadata
 // firewall in classifyRetryAttempt): a bare close with no gc.outcome, or an
 // unknown gc.outcome value, is treated as a failure rather than as success.
 // gc.outcome=canceled (a run canceled via POST /runs/{id}/cancel) is an
 // explicit terminal non-failure, so a canceled scope member does not drive the
-// abort-scope failure path. Retry-managed attempt subjects are exempt — their
-// contract violations are classified by retry-eval as transient retries, not
-// scope aborts.
+// abort-scope failure path.
 func beadOutcomeFailed(subject beads.Bead) bool {
+	onFailAbortScope := strings.TrimSpace(subject.Metadata[beadmeta.OnFailMetadataKey]) == "abort_scope"
+	if onFailAbortScope && isRetryAttemptSubject(subject) {
+		return false
+	}
 	outcome := strings.TrimSpace(subject.Metadata[beadmeta.OutcomeMetadataKey])
 	if outcome == beadmeta.OutcomeFail {
 		return true
 	}
-	if strings.TrimSpace(subject.Metadata[beadmeta.OnFailMetadataKey]) != "abort_scope" || isRetryAttemptSubject(subject) {
+	if !onFailAbortScope {
 		return false
 	}
 	switch outcome {
@@ -951,8 +959,9 @@ func isRetryAttemptSubject(subject beads.Bead) bool {
 	case "retry-run", "retry-eval":
 		return true
 	}
-	// v2 pattern: attempt beads keep their original kind but carry gc.attempt.
-	if subject.Metadata[beadmeta.AttemptMetadataKey] != "" {
+	// v2 pattern: attempt beads keep their original kind but carry gc.attempt
+	// (and, since the counter split, gc.retry_attempt).
+	if subject.Metadata[beadmeta.AttemptMetadataKey] != "" || subject.Metadata[beadmeta.RetryAttemptMetadataKey] != "" {
 		return true
 	}
 	return false

@@ -379,7 +379,35 @@ func ReadDoltMode(fs fsys.FS, path string) (string, bool, error) {
 // directory (internal/doltserver physical_root.go, configfile.Config.DatabasePath)
 // and uses it to root a scope's Dolt store somewhere other than
 // <scope>/.beads/dolt. Same tolerant reader contract as ReadDoltMode.
+//
+// The value is trimmed, which suits gc's own writers: SetMetadataDoltDataDir
+// trims before writing, so every value gc put there is already trimmed, and the
+// callers that compare one against a path they built want the tidy form. A
+// caller that has to resolve the same directory bd resolves must not trim —
+// see ReadMetadataDoltDataDirRaw.
 func ReadMetadataDoltDataDir(fs fsys.FS, path string) (string, bool, error) {
+	value, ok, err := ReadMetadataDoltDataDirRaw(fs, path)
+	if err != nil || !ok {
+		return "", false, err
+	}
+	if trimmed := strings.TrimSpace(value); trimmed != "" {
+		return trimmed, true, nil
+	}
+	return "", false, nil
+}
+
+// ReadMetadataDoltDataDirRaw reports dolt_data_dir exactly as metadata.json
+// decodes it, whitespace included.
+//
+// beads takes the value as written: configfile.Config.GetDoltDataDir returns
+// c.DoltDataDir straight off the decoded struct and DatabasePath joins it to
+// .beads, so {"dolt_data_dir":" elsewhere/dolt"} roots a scope at
+// "<.beads>/ elsewhere/dolt" — a directory whose name begins with a space. A
+// reader that trims resolves "<.beads>/elsewhere/dolt" instead, finds no
+// proxy.pid there, and reports no_record for a proxy that is serving. Same file
+// as bd's config (configfile.ConfigFileName is "metadata.json"), so this is not
+// a hypothetical second spelling of the key.
+func ReadMetadataDoltDataDirRaw(fs fsys.FS, path string) (string, bool, error) {
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -391,7 +419,7 @@ func ReadMetadataDoltDataDir(fs fsys.FS, path string) (string, bool, error) {
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return "", false, nil
 	}
-	if value := trimmedString(meta["dolt_data_dir"]); value != "" {
+	if value := decodedString(meta["dolt_data_dir"]); value != "" {
 		return value, true, nil
 	}
 	return "", false, nil
@@ -1403,11 +1431,18 @@ func deleteKeys(root *yaml.Node, keys ...string) bool {
 }
 
 func trimmedString(value any) string {
-	trimmed := strings.TrimSpace(fmt.Sprint(value))
-	if trimmed == "<nil>" {
+	return strings.TrimSpace(decodedString(value))
+}
+
+// decodedString renders a decoded JSON value as the string beads would have in
+// the corresponding struct field, without trimming: a caller resolving a path
+// beads resolves has to keep the whitespace beads keeps.
+func decodedString(value any) string {
+	rendered := fmt.Sprint(value)
+	if strings.TrimSpace(rendered) == "<nil>" {
 		return ""
 	}
-	return trimmed
+	return rendered
 }
 
 // repairMalformedConfigLines splits top-level config lines that have been

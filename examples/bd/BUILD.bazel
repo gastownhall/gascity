@@ -10,7 +10,34 @@ go_library(
         "doctor/check-bd/run.sh",
         "pack.toml",
         "template-fragments/bead-worktree.template.md",
+        "//examples/bd/dolt:embed_files",
     ],
     importpath = "github.com/gastownhall/gascity/examples/bd",
+    visibility = ["//visibility:public"],
+)
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+filegroup(
+    name = "pack_files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
     visibility = ["//visibility:public"],
 )
