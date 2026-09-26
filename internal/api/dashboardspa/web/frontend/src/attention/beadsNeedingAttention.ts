@@ -2,15 +2,17 @@ import type { Bead } from 'gas-city-dashboard-shared/gc-supervisor';
 import { elapsedSince, formatElapsed, formatElapsedFine } from './elapsed';
 
 // gascity-dashboard-2j8e.3: the single selector behind the Beads nav badge AND
-// the /beads "Needs you" section. It counts beads that genuinely need the
-// operator — ready-unclaimed work, abnormally-blocked (escalated /
-// help-requested) beads, stalled in-progress work, and work waiting on a named
-// human — and EXCLUDES plain dependency-blocked beads. bd defines `blocked` as
-// "blocked by a dependency": a bead waiting on its blocker is
-// working-as-intended queuing, not attention. The badge (registry
-// deriveBeadsAttention) and the page both read this projection, so the nav
-// count and the page count cannot disagree — the parity contract the Runs badge
-// established (selectBlockedRuns, gascity-dashboard-2j8e.2).
+// the /beads "Needs you" section. It counts beads that need a HUMAN: general
+// beads explicitly assigned to the reserved alias `human`, open escalation
+// queue entries, and work parked on a named human checkpoint. Machine-
+// operable work is EXCLUDED even when nobody is actively moving it: an
+// unassigned open bead can still be claimed by an idle agent, a stalled
+// in-progress bead can still be resumed by one, and a plain dependency-blocked
+// bead (bd `blocked` = "blocked by a dependency") is working-as-intended
+// queuing. The badge (registry deriveBeadsAttention) and the page both read
+// this projection, so the nav count and the page count cannot disagree — the
+// parity contract the Runs badge established (selectBlockedRuns,
+// gascity-dashboard-2j8e.2).
 //
 // Inputs arrive from separate reads with different filtering:
 //  - `beads` is the general engineering-bead list. The dashboard's bead reads
@@ -19,16 +21,6 @@ import { elapsedSince, formatElapsed, formatElapsedFine } from './elapsed';
 //    prior `gc dashboard` escalations panel keyed on), fetched separately so the
 //    gc:-label filter does not hide it — the same shape as the mayor-decision
 //    queue.
-//  - `sessions` is the city session list, used to decide whether an
-//    in-progress bead's assignee is still alive. Optional: when the session
-//    read failed, session-dependent stall checks are skipped rather than
-//    marking every in-progress bead stalled during a sessions outage.
-
-// Aging for ready-unclaimed work: a just-filed open bead is normal churn, not
-// attention. It enters the badge as `watch` once it has sat unclaimed past the
-// watch window, and escalates to `attention` once it is genuinely stale.
-const READY_UNCLAIMED_WATCH_MS = 24 * 60 * 60 * 1000;
-const READY_UNCLAIMED_STALE_MS = 72 * 60 * 60 * 1000;
 
 // Stalled: an in-progress bead whose assignee shows no sign of life for this
 // long. Matches the operator intuition that an agent quiet for an hour mid-task
@@ -92,15 +84,16 @@ const HEARTBEAT_META_KEY = 'gc.last_heartbeat_at';
 const SESSION_ID_META_KEY = 'gc.session_id';
 
 /**
- * Why a bead needs the operator. `escalated` is an abnormally-blocked bead that
- * raised the escalation marker (a help-request / escalation); `ready-unclaimed`
- * is open work nobody claimed; `stalled` is in-progress work whose assignee
- * shows no sign of life; `waiting-human` is work parked on a named human
- * checkpoint. Plain dependency-blocked is none of these — excluded.
+ * Why a bead needs a human. `escalated` is an open escalation-queue bead;
+ * `human-assigned` is general work explicitly handed to the reserved `human`
+ * alias; `waiting-human` is work parked on a named human checkpoint. `stalled`
+ * is retained only as the reason `inProgressCardNote` surfaces on the board
+ * card — a stalled agent is machine work, so it never appears in
+ * `selectBeadsNeedingAttention` output.
  */
-export type BeadAttentionReason = 'ready-unclaimed' | 'escalated' | 'stalled' | 'waiting-human';
+export type BeadAttentionReason = 'escalated' | 'human-assigned' | 'stalled' | 'waiting-human';
 
-/** The badge-driving severities — escalation acts now, stale unclaimed escalates. */
+/** Badge-driving severity. Waiting checkpoints start as watch items. */
 export type BeadAttentionSeverity = 'attention' | 'watch';
 
 export interface BeadAttentionRow {
@@ -130,8 +123,6 @@ export interface BeadAttentionInputs {
   beads: readonly Bead[];
   /** The dedicated open-`gc:escalation` queue (help-request / escalation). */
   escalations: readonly Bead[];
-  /** City sessions for liveness checks; omit when the session read failed. */
-  sessions?: readonly BeadAttentionSession[];
 }
 
 /**
@@ -148,14 +139,14 @@ export function selectBeadsNeedingAttention(
     const row = escalatedRow(bead);
     if (row !== null) rows.push(row);
   }
-  // waiting-human is checked first: a held bead may also be open+unassigned
-  // (a gate bead) or look stalled (a parked worker), and the operator-facing
-  // fact in every such case is WHO it waits on.
+  // waiting-human is checked first: a held bead may also be explicitly
+  // assigned to `human`, and the operator-facing fact in either case is
+  // WHO/WHAT it is waiting on. Unassigned ready work and stalled in-progress
+  // work are machine-operable — an idle agent can claim or resume either — so
+  // neither is membership here; inProgressCardNote still surfaces stalled on
+  // the board card.
   for (const bead of inputs.beads) {
-    const row =
-      waitingHumanRow(bead, nowMs) ??
-      readyUnclaimedRow(bead, nowMs) ??
-      stalledRow(bead, inputs.sessions, nowMs);
+    const row = waitingHumanRow(bead, nowMs) ?? humanAssignedRow(bead);
     if (row !== null) rows.push(row);
   }
   return rows;
@@ -184,34 +175,32 @@ export function inProgressCardNote(
   return assignee.length > 0 ? `${assignee} · ${phrase}` : phrase;
 }
 
-// Escalated / help-requested: an open escalation bead is abnormal blocking —
-// counted immediately, regardless of age. A resolved (closed) escalation is not.
+// Escalated / help-requested: an open escalation queue entry already records
+// an explicit escalation to a human, so count it immediately regardless of
+// age or current worker assignment. A resolved escalation is not attention.
 function escalatedRow(bead: Bead): BeadAttentionRow | null {
   if (bead.status === 'closed') return null;
   return {
     beadId: bead.id,
     reason: 'escalated',
     severity: 'attention',
-    summary: `${bead.title} — escalation raised`,
+    summary: `${bead.title} — escalation raised for human`,
     updatedAt: bead.updated_at ?? bead.created_at,
   };
 }
 
-// Ready-unclaimed: open work with no assignee, aged past the watch window so
-// normal churn does not inflate the badge. Plain dependency-blocked (bd
-// `blocked` = "blocked by a dependency") and in-progress/closed work are not
-// surfaced — only genuinely-claimable open beads.
-function readyUnclaimedRow(bead: Bead, nowMs: number): BeadAttentionRow | null {
-  if (bead.status !== 'open' || hasAssignee(bead)) return null;
-  const ageMs = elapsedSince(bead.created_at, nowMs);
-  if (ageMs === null || ageMs < READY_UNCLAIMED_WATCH_MS) return null;
-  const stale = ageMs >= READY_UNCLAIMED_STALE_MS;
+// Human-assigned: nonclosed general work explicitly handed to the reserved
+// `human` alias — the operator IS the assignee, so this is attention
+// unconditionally, regardless of status or age (open, blocked, or
+// in-progress all still need the human named on them).
+function humanAssignedRow(bead: Bead): BeadAttentionRow | null {
+  if (bead.status === 'closed' || !isHumanAssignee(bead)) return null;
   return {
     beadId: bead.id,
-    reason: 'ready-unclaimed',
-    severity: stale ? 'attention' : 'watch',
-    summary: `${bead.title} opened ${formatElapsed(ageMs)} ago`,
-    updatedAt: bead.created_at,
+    reason: 'human-assigned',
+    severity: 'attention',
+    summary: `${bead.title} assigned to human`,
+    updatedAt: bead.updated_at ?? bead.created_at,
   };
 }
 
@@ -379,6 +368,10 @@ function hasLabel(bead: Bead, wanted: string): boolean {
   return (bead.labels ?? []).some((label) => label.trim() === wanted);
 }
 
-function hasAssignee(bead: Bead): boolean {
-  return bead.assignee !== undefined && bead.assignee.trim().length > 0;
+// The reserved alias marking a bead as explicitly handed to a human rather
+// than a concrete agent session (gascity-dashboard-2j8e.8: assignee is
+// otherwise always a concrete session, never the human operator, so this
+// exact value is unambiguous whenever a worker or the mayor does stamp it).
+function isHumanAssignee(bead: Bead): boolean {
+  return bead.assignee?.trim() === 'human';
 }

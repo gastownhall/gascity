@@ -144,13 +144,11 @@ export async function fetchBeadsAttention(
   signal?: AbortSignal,
 ): Promise<BeadsAttentionFacts> {
   if (cityName === null) return { decisionLabel };
-  // Four independent reads: the general bead list (capped), two dedicated
-  // label+status-filtered queues — the mayor-decision queue and the escalation
-  // queue — and the session list for the stalled-in-progress check (gp-6xd).
-  // The queues bypass the general list's gc:-label filter and are always
-  // complete. Settled separately so one failing does not blank the others — the
-  // decision queue, the escalation queue, and generic bead alerts are distinct
-  // signals (gascity-dashboard-2j8e.3).
+  // Three independent reads: the general bead list (capped), plus dedicated
+  // label+status-filtered mayor-decision and escalation queues. The queues
+  // bypass the general list's gc:-label filter and are always complete.
+  // Settle each read separately so one failure does not blank the other
+  // independent signals (gascity-dashboard-2j8e.3).
   const read = () =>
     Promise.allSettled([
       listSupervisorBeads({
@@ -160,7 +158,6 @@ export async function fetchBeadsAttention(
       }),
       listDecisionBeads(cityName, decisionLabel, signal),
       listEscalationBeads(cityName, signal),
-      listCitySessions(cityName),
     ] as const);
   throwIfAborted(signal);
   let reads = await read();
@@ -172,7 +169,7 @@ export async function fetchBeadsAttention(
     reads = await read();
     throwIfAborted(signal);
   }
-  const [list, decisions, escalations, sessions] = reads;
+  const [list, decisions, escalations] = reads;
   const facts: BeadsAttentionFacts = { nowMs: Date.now(), decisionLabel };
   const cityUnavailable = reads.find(isCityUnavailableRead);
   if (cityUnavailable !== undefined && cityUnavailable.status === 'rejected') {
@@ -200,13 +197,6 @@ export async function fetchBeadsAttention(
     facts.escalations = escalations.value.items ?? [];
   } else {
     facts.escalationsError = formatApiError(escalations.reason, 'escalation queue unavailable');
-  }
-  // Session-read failure — including a partial list, where a missing shard's
-  // workers would read as sessionless — degrades silently: the selector then
-  // skips the session-dependent stall checks (waiting-human still works)
-  // rather than raising false stalled alerts or a fourth error identity.
-  if (sessions.status === 'fulfilled' && sessions.value.partial !== true) {
-    facts.sessions = sessions.value.items ?? [];
   }
   return facts;
 }
@@ -264,14 +254,6 @@ async function listEscalationBeads(cityName: string, signal?: AbortSignal) {
     },
     signal,
   );
-}
-
-// Async so a client that is missing `listSessions` entirely (a partial test
-// double, an older generated client) becomes a REJECTED leg rather than a
-// synchronous throw out of the `Promise.allSettled` argument list — which
-// would abandon the three sibling reads before allSettled ever saw them.
-async function listCitySessions(cityName: string) {
-  return supervisorApi().listSessions(cityName);
 }
 
 async function fetchMailAttention(
