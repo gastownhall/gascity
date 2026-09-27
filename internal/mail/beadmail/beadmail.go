@@ -414,19 +414,15 @@ type ArchiveFilter struct {
 // (all listing paths filter Status != "open"). Archiving an already-closed
 // message is idempotent and returns ErrAlreadyArchived without mutating it.
 func (p *Provider) Archive(id string) error {
-	rows, err := p.store.List(beads.ListQuery{
-		IDs:           []string{id},
-		IncludeClosed: true,
-		TierMode:      beads.TierBoth,
-		Live:          true,
-	})
+	// The cached Get can answer ErrNotFound from a stale tombstone for a bead
+	// that is still open in the backing store; read live so archive repairs it.
+	b, err := beads.HandlesFor(p.store).Live.Get(id)
 	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return mail.ErrAlreadyArchived
+		}
 		return fmt.Errorf("beadmail archive: %w", err)
 	}
-	if len(rows) == 0 {
-		return mail.ErrAlreadyArchived
-	}
-	b := rows[0]
 	if b.Type != messageBeadType {
 		return fmt.Errorf("beadmail archive: bead %s is not a message", id)
 	}

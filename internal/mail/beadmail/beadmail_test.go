@@ -1,6 +1,8 @@
 package beadmail
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -1044,23 +1046,34 @@ func TestArchive(t *testing.T) {
 	}
 }
 
-type archiveGetMissingStore struct {
-	*beads.MemStore
-}
-
-func (s archiveGetMissingStore) Get(string) (beads.Bead, error) {
-	return beads.Bead{}, beads.ErrNotFound
-}
-
 func TestArchiveRepairsOpenMessageMissingFromDirectLookup(t *testing.T) {
 	store := beads.NewMemStore()
+	cs := beads.NewCachingStoreForTest(store, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
 	sender := New(store)
 	sent, err := sender.Send("human", "worker", "", "dismiss me")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	p := New(archiveGetMissingStore{MemStore: store})
+	// Plant a stale tombstone: the cache believes the bead is deleted while
+	// it is still open in the backing store.
+	stale, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.ApplyEvent("bead.deleted", payload)
+	if _, err := cs.Get(sent.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("precondition: cached Get error = %v, want ErrNotFound", err)
+	}
+
+	p := New(cs)
 	if err := p.Archive(sent.ID); err != nil {
 		t.Fatalf("Archive: %v", err)
 	}
