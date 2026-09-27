@@ -92,6 +92,13 @@ func TestWispGC_PurgesExpiredMolecules(t *testing.T) {
 	assertDeletedIDs(t, store.deletedIDs, "mol-1", "wisp-1", "mol-3")
 }
 
+func TestInfraSessionPurgeAgeDefaultsToThreeDays(t *testing.T) {
+	t.Setenv("GC_INFRA_SESSION_PURGE_AGE", "")
+	if got := defaultInfraSessionPurgeAge(); got != 72*time.Hour {
+		t.Fatalf("default age = %s, want 72h", got)
+	}
+}
+
 func TestPurgeClosedInfraSessionsLeavesLiveWork(t *testing.T) {
 	now := time.Now()
 	old := now.Add(-40 * 24 * time.Hour)

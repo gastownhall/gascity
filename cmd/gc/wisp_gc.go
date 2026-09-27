@@ -77,17 +77,18 @@ var wispGCReapOrphanProbeCap = 500
 // unbounded pass. Package var so tests can shrink it.
 var wispGCClosurePurgeBatchCap = 500
 
-// infraSessionPurgeAgeDefault matches the reaper order's SESSION_PURGE_AGE
-// (GC_REAPER_SESSION_PURGE_AGE, default 720h). Session rows are coordination
-// history, not wisps, so they do not use the 24h wisp TTL.
-const infraSessionPurgeAgeDefault = 720 * time.Hour
+// infraSessionPurgeAgeDefault is how long a closed infra session bead is kept.
+// Three days, not the Dolt reaper's 30-day SESSION_PURGE_AGE: these rows are
+// coordination records, and a 30-day tail is what made the graph file large
+// enough for SQLITE_BUSY_SNAPSHOT. Override with GC_INFRA_SESSION_PURGE_AGE.
+const infraSessionPurgeAgeDefault = 72 * time.Hour
 
 // infraSessionPurgeAge is the idle age a closed session bead must reach
 // before purgeClosedInfraSessions deletes it. Tests replace it.
 var infraSessionPurgeAge = defaultInfraSessionPurgeAge
 
 func defaultInfraSessionPurgeAge() time.Duration {
-	raw := strings.TrimSpace(os.Getenv("GC_REAPER_SESSION_PURGE_AGE"))
+	raw := strings.TrimSpace(os.Getenv("GC_INFRA_SESSION_PURGE_AGE"))
 	if raw == "" {
 		return infraSessionPurgeAgeDefault
 	}
@@ -239,8 +240,8 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 	// Closed agent-session rows (gcg-session-*, gcs-*) live in this same infra
 	// ledger, not in the Dolt work database the reaper order queries. The
 	// root-blind SQLite retention sweeper stays off, so this is the sweep that
-	// deletes them. Its clock is the reaper's session purge age (30 days), not
-	// the 24h wisp TTL, and it never deletes a non-session bead.
+	// deletes them after infraSessionPurgeAgeDefault (3 days, not the Dolt
+	// reaper's 30 days), and it never deletes a non-session bead.
 	sessionPurged, sessionErr := purgeClosedInfraSessions(store, now, infraSessionPurgeAge(), wispGCSessionPurgeBatchCap)
 	purged += sessionPurged
 	deleteErr = errors.Join(deleteErr, sessionErr)
