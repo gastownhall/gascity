@@ -36,10 +36,34 @@ type testStore struct {
 	metadataBatchCalls   int
 	metadataBatchPatches []map[string]string
 	metadataBatchErr     error
+	local                map[string]map[string]string // id -> key -> value (clone-local, mirrors MemStore.localStrings)
 }
 
 func newTestStore() *testStore {
-	return &testStore{Store: beads.NewMemStore(), metadata: make(map[string]map[string]string)}
+	return &testStore{Store: beads.NewMemStore(), metadata: make(map[string]map[string]string), local: make(map[string]map[string]string)}
+}
+
+// SetLocalString mirrors MemStore.SetLocalString's contract (empty value
+// deletes) so callers that clear/set an allowlisted local-only metadata key
+// (session/store.go:setMetadataValue) exercise a real implementation instead
+// of the embedded beads.Store's existence-checked semantics, which reject
+// synthetic fixture IDs that were never Create'd in the store.
+func (s *testStore) SetLocalString(id, key, value string) error {
+	if value == "" {
+		delete(s.local[id], key)
+		return nil
+	}
+	if s.local[id] == nil {
+		s.local[id] = make(map[string]string)
+	}
+	s.local[id][key] = value
+	return nil
+}
+
+// GetLocalString mirrors MemStore.GetLocalString's contract: an unset key
+// returns ("", nil), indistinguishable from an explicitly cleared one.
+func (s *testStore) GetLocalString(id, key string) (string, error) {
+	return s.local[id][key], nil
 }
 
 func (s *testStore) SetMetadata(id, key, value string) error {

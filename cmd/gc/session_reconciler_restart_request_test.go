@@ -660,7 +660,11 @@ func TestReconcileSessionBeads_RestartRequestNamedAlwaysWakesSameTick(t *testing
 	if got.Metadata["restart_requested"] != "" {
 		t.Fatalf("restart_requested = %q, want cleared after patch applied", got.Metadata["restart_requested"])
 	}
-	if got.Metadata["last_woke_at"] == "" {
+	lastWokeAt, err := env.store.GetLocalString(session.ID, "last_woke_at")
+	if err != nil {
+		t.Fatalf("GetLocalString(last_woke_at): %v", err)
+	}
+	if lastWokeAt == "" {
 		t.Fatal("last_woke_at = empty, want timestamp from same-tick wake")
 	}
 }
