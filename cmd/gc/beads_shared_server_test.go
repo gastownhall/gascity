@@ -1,8 +1,10 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -288,5 +290,89 @@ func TestEnsureGCOwnedProxiedScopeSharedServerOffSkipsUnmaterializedScope(t *tes
 	}
 	if _, err := os.Stat(filepath.Join(rig, ".beads")); !os.IsNotExist(err) {
 		t.Fatalf("pin created %s/.beads (stat err %v)", rig, err)
+	}
+}
+
+// An owned scope initialized by a build that wrote no pin (the RC) must be
+// pinned BEFORE any provider op on it runs bd: the ready scope's `start` op is a
+// `bd ping`, and under a user-level shared-server: true an unpinned ping roots a
+// proxy and Dolt child in ~/.beads/shared-server. Drives the real start path for
+// an owned city and an owned rig.
+func TestStartPinsOwnedScopesBeforeTheirFirstProviderOp(t *testing.T) {
+	city := t.TempDir()
+	rig := filepath.Join(city, "rigs", "r1")
+	logPath := filepath.Join(city, "provider-ops")
+	script := filepath.Join(city, "provider.sh")
+	body := "#!/bin/sh\npin=no\ngrep -q 'shared-server: false' \"$BEADS_DIR/config.yaml\" 2>/dev/null && pin=yes\nprintf '%s %s cfgpin=%s\\n' \"$1\" \"$BEADS_DIR\" \"$pin\" >> \"$GC_TEST_PROVIDER_LOG\"\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil { //nolint:gosec // fixture must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("GC_TEST_PROVIDER_LOG", logPath)
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"test\"\n[beads]\nprovider = \"exec:"+script+"\"\n\n[[rigs]]\nname = \"r1\"\npath = \""+rig+"\"\nprefix = \"r1\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for scope, db := range map[string]string{city: "hq", rig: "r1"} {
+		writeScopeBeadsMetadata(t, scope, `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"`+db+`"}`)
+		writeScopeConfigYAML(t, scope, "issue_prefix: "+db+"\n")
+		journalProxiedScope(t, city, scope, true)
+	}
+	cfg, err := loadCityConfig(city, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := startBeadsLifecycle(city, "", cfg, io.Discard); err != nil {
+		t.Fatalf("startBeadsLifecycle: %v", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawRig := false
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.Contains(line, filepath.Join(rig, ".beads")) {
+			sawRig = true
+		}
+		if !strings.HasSuffix(line, "cfgpin=yes") {
+			t.Errorf("provider op ran on an owned scope before its pin was written: %s", line)
+		}
+	}
+	if !sawRig {
+		t.Fatalf("no provider op ran for the rig:\n%s", data)
+	}
+}
+
+// A proxied rig gc merely found, under a gc-owned city, must not inherit the
+// city's opt-out: gc's bd for the rig and an agent's bd in the rig agree.
+func TestFoundProxiedRigUnderOwnedCityAgreesWithAgentEnv(t *testing.T) {
+	cityPath, _ := proxiedEnvTestCity(t)
+	journalProxiedScope(t, cityPath, cityPath, true)
+	rig := filepath.Join(cityPath, "rigs", "found")
+	writeScopeBeadsMetadata(t, rig, `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"found"}`)
+	const body = "dolt:\n  shared-server: true\n"
+	writeScopeConfigYAML(t, rig, body)
+
+	cityEnv, err := bdRuntimeEnvWithError(cityPath)
+	if err != nil {
+		t.Fatalf("bdRuntimeEnvWithError: %v", err)
+	}
+	assertSharedServerPinnedOff(t, "owned city", cityEnv)
+
+	rigEnv, err := bdRuntimeEnvForRigWithError(cityPath, nil, rig)
+	if err != nil {
+		t.Fatalf("bdRuntimeEnvForRigWithError: %v", err)
+	}
+	sessionEnv, _ := sessionBackendEnvWithError(cityPath, rig, nil)
+	for label, env := range map[string]map[string]string{"gc rig runtime": rigEnv, "agent rig session": sessionEnv} {
+		for _, key := range []string{"BD_DOLT_SHARED_SERVER", "BEADS_DOLT_SHARED_SERVER"} {
+			if value, projected := env[key]; projected {
+				t.Errorf("%s env for a found proxied rig projects %s=%q; gc and agent bd would disagree", label, key, value)
+			}
+		}
+	}
+	if err := ensureGCOwnedProxiedScopeSharedServerOff(cityPath, rig); err != nil {
+		t.Fatal(err)
+	}
+	if pin := readScopeSharedServerPin(t, rig); pin != contract.SharedServerPinnedOn {
+		t.Fatalf("found rig config rewritten: pin = %v", pin)
 	}
 }

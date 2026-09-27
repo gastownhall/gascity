@@ -862,6 +862,14 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		if !strings.HasPrefix(provider, "exec:") {
 			return fmt.Errorf("provider-owned scope %q requires an exec beads provider", dir)
 		}
+		// A ready scope's init op is the provider `start` (a bd ping), and the
+		// script pins bd's shared-server mode off from this pin: write it first
+		// so a scope initialized by a build that wrote none is never pinged
+		// unpinned. No-op for an unmaterialized scope; re-applied after init,
+		// which rewrites config.yaml.
+		if err := ensureGCOwnedProxiedScopeSharedServerOff(cityPath, dir); err != nil {
+			return err
+		}
 		pending, err := runProviderOwnedScopeInit(cityPath, dir, prefix, strings.TrimPrefix(provider, "exec:"))
 		if err != nil {
 			return err

@@ -4043,6 +4043,11 @@ run_provider_owned_bd() {
         # A scope gc is initializing as proxied is gc-owned by construction.
         # Any other proxied scope is pinned only when its config.yaml carries
         # gc's pin (gc-owned); a found workspace keeps its own resolution.
+        # Known corner: a found scope whose own config already says
+        # shared-server: false (e.g. a clone of a gc city) under an explicitly
+        # exported BEADS_DOLT_SHARED_SERVER=1 is neutralized here (local),
+        # while gc's runtime env and an agent's bd honour the =1 (shared).
+        # That split needs the operator to force the mode on by env.
         if [ "${GC_BEADS_PROVIDER_INIT:-}" = "1" ] && [ "${GC_BEADS_TRANSPORT:-}" = "proxied" ]; then
             pin_proxied_shared_server_off
         elif { [ "${GC_BEADS_TRANSPORT:-}" = "proxied" ] || scope_is_proxied "$dir"; } && scope_pins_shared_server_off "$dir"; then

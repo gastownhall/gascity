@@ -146,7 +146,7 @@ func (c *ProxiedSharedServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.FixHint = fixHint + "; beads written while bound stay in the shared server's Dolt root and are not moved back"
 	case len(stranded) > 0:
 		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("bd's shared server holds a database named like %d gc-owned proxied scope(s): %s — if a scope was ever bound there (dolt.shared-server: true), beads it wrote then are stranded in the shared server and were not migrated back",
+		r.Message = fmt.Sprintf("bd's shared server holds a database named like %d gc-owned proxied scope(s) and may hold stranded beads: %s — if a scope was ever bound there (dolt.shared-server: true), beads it wrote then stay in the shared server and were not migrated back",
 			len(stranded), strings.Join(stranded, ", "))
 		r.FixHint = "inspect that database (another workspace on the host may legitimately share the name); gc does not move or delete it. Copy any stranded beads back into the scope, then remove or rename the shared-server database directory to clear this warning"
 	case userOn && len(unpinned) > 0:
