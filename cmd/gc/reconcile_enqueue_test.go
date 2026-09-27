@@ -409,7 +409,9 @@ func TestSendKeyedPokeHungControllerCostsOneTimeout(t *testing.T) {
 	if !errors.Is(err, errControllerUnresponsive) {
 		t.Fatalf("err = %v, want unresponsive (read timeout)", err)
 	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
+	// Two timeouts would take at least 600ms; the command list below is the
+	// authoritative no-retry check, this bound only rejects a double wait.
+	if elapsed := time.Since(start); elapsed >= 600*time.Millisecond {
 		t.Fatalf("elapsed = %s, want a single 300ms timeout", elapsed)
 	}
 	assertCommands(t, "controller", sock.seen(), []string{keyedPokeCommand(reconcilekey.Session("gc-1"))})
