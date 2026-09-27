@@ -57,6 +57,9 @@ name = "phase-city"
 [orders]
 skip = ["beads-health", "cross-rig-deps", "gate-sweep", "jsonl-export", "reaper", "order-tracking-sweep", "orphan-sweep", "prune-branches", "spawn-storm-detect", "wisp-compact"]
 
+[beads]
+conditional_writes = "require"
+
 [session]
 provider = "fake"
 
