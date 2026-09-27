@@ -27,7 +27,7 @@ is provenance; it is not a push target. No rebase or review carryover was used.
 | 4 | No open high-severity findings | PASS | Reviewer PASS has no unresolved HIGH findings. |
 | 5 | Clean deployment checkout | PASS | Exact reviewed source checkout was clean before adding this gate record. The record is the only deployment addition; the gate commit leaves the checkout clean. |
 | 6 | Clean merge with main | PASS | Both pinned full-suite merge and latest-main merge materialize without conflicts and pass `go build ./...` and `go vet ./...`. |
-| 7 | Single feature theme | PASS | Two source files in `cmd/gc`: the on-demand named-session guard and its regression tests. |
+| 7 | Single feature theme | PASS | (Pre-amendment.) Two source files in `cmd/gc`: the on-demand named-session guard and its regression tests. |
 
 ## Test command and environment
 
@@ -58,7 +58,7 @@ including cached results, not distinct test names. Root events alone:
 53478 PASS / 6 FAIL /
 232 SKIP. Four runner/compile/test-hook jobs emit no Go test-event tally.
 
-`diff_tests_executed: all three added regressions PASS in both tiers; zero FAIL/SKIP`
+`diff_tests_executed: (pre-amendment) all three added regressions PASS in both tiers; zero FAIL/SKIP`
 
 `waiver_ref: none (gascity has no waiver path)`
 
@@ -168,7 +168,8 @@ or change to this diff's guard/tests or the failing prefix fixtures. No claim
 is made that the full sweep executed on the newer base.
 
 There is no API/dashboard, generated schema, import, package or CI-config
-change, so dashboard CI, Bazel sync and a new CI lane do not apply.
+change, so dashboard CI, Bazel sync and a new CI lane do not apply. (The
+PR's `BUILD files in sync` CI check nevertheless ran and passed.)
 `docs/PROJECT_MANIFEST.md` is absent in this checkout; the supplied release
 criteria and current TESTING.md/Makefile define the gate.
 
