@@ -241,4 +241,103 @@ Reproduce with `agent-observatory silver-collapse` (see the README). The
 artifacts are `silver_collapse_4judge_150.json`, `sensitivity.json` and
 `summary.md` under `/home/coolhenrylinux/reports/jev-xb17jn/collapse/`.
 
+## Measured outcome, 2026-09-27 (two-stage abstention split)
+
+The collapse re-score concluded that a passing gate needs a different reference
+design, "for example an explicit abstention/`known` split, adjudication, or human
+review of the 65 contested episodes". The owner chose the explicit split on
+2026-09-27: `two_stage.py` asks the **evidence gate** as its own question
+(stage 1: `known` vs `unknown`) and asks the **intent** only of episodes a 3-of-4
+majority called `known`, over the eight substantive labels with **no `unknown`
+option** (stage 2). Each stage is scored on its own, and the gate is fail-closed:
+a pass requires the conservative minimum pairwise Cohen's kappa to clear `0.6`
+on **both** stages, on a large-enough sample whose judge pairs clear the shared
+usable-overlap floor. No `--allow-untrusted` pass is claimable.
+
+### Zero-call approximation (preview, no judge call)
+
+`agent-observatory silver-two-stage --checkpoint judge_checkpoint_4judge.json`
+derives stage 1 from the recorded `unknown` vs non-`unknown` votes and stage 2
+from the non-`unknown` votes on the 131 episodes a 3-of-4 majority called
+non-`unknown`. It makes no judge call, but it is only a preview: a judge that
+abstained has no stage-2 answer, so stage-2 overlap is below a live run's (110 of
+131 on the worst pair, under the 0.9 coverage floor).
+
+| Stage | Label set | min pairwise Cohen | Fleiss | Trust reason |
+| --- | --- | --- | --- | --- |
+| 1 evidence (derived) | known / unknown | 0.153 | 0.240 | kappa below floor |
+| 2 intent | original 8 labels | 0.317 | 0.444 | overlap below floor |
+| 2 intent | `primary_intent_collapse_v1` | 0.482 | 0.554 | overlap below floor |
+
+`clears_floor` is false. (Artifact:
+`/home/coolhenrylinux/reports/jev-xb17jn/two-stage/approximation.json`.)
+
+### Live run (four judges, same 150 episodes)
+
+Prompt pair `two-stage-1.0.0` (`two-stage-evidence-1.0.0` +
+`two-stage-intent-1.0.0`). The same 150 stripped episode documents as the
+four-judge run, the same four judges and backends: GLM 5.3 Flash and DeepSeek V4
+Flash through the gateway, GPT 6 Luna through `codex-cli` 0.155.1, Gemini 3.8
+Flash through `agy-cli` 1.2.11. Stage 1 ran on all 150 episodes; stage 2 ran on
+the 31 episodes a 3-of-4 majority called `known`. Artifacts:
+`two_stage_report_150.json`, `stage1_checkpoint.json` and
+`stage2_checkpoint.json` under `/home/coolhenrylinux/reports/jev-xb17jn/two-stage/`.
+
+**Stage 1.** Asking the evidence question directly is a different measurement
+from the derived labels: the judges abstain far more often. `known`/`unknown`
+counts per judge: GLM 67/83, DeepSeek 40/110, GPT 6 Luna 56/94, Gemini 24/125
+(one agy answer failed twice and is missing, 0.7% of that judge's stage-1 pairs,
+within the coverage floor and never imputed). 60 episodes drew a unanimous
+`unknown`; only 31 drew 3-of-4 `known`.
+
+- Minimum pairwise Cohen's kappa **0.274** (GLM x GPT 6 Luna), Fleiss 0.395 —
+  below the floor. All pairs: GLM x DeepSeek 0.593, DeepSeek x Gemini 0.570,
+  DeepSeek x GPT 6 0.365, GPT 6 x Gemini 0.354, GLM x Gemini 0.323, GLM x GPT 6
+  0.274.
+- References: 77 unanimous, 56 majority, 17 none. Jev's own abstention decision
+  scored against the 77 unanimous evidence references: accuracy 0.697, macro-F1
+  0.677; against the 133 majority-or-better references: 0.583 / 0.575.
+- **Stage 1 does not clear, so the two-stage gate cannot pass regardless of
+  stage 2.**
+
+**Stage 2.** On the 31 eligible episodes, intent agreement with no `unknown`
+option:
+
+- Original 8 labels: minimum pairwise Cohen's kappa **0.421** (GLM x GPT 6
+  Luna), Fleiss 0.533.
+- `primary_intent_collapse_v1`: minimum pairwise **0.549** (GLM x GPT 6 Luna),
+  Fleiss 0.648. Four of the six pairs clear 0.6 — DeepSeek x Gemini 0.704,
+  GPT 6 x Gemini 0.734, GLM x DeepSeek 0.668, GLM x Gemini 0.608 — but GLM x
+  GPT 6 caps the minimum below the floor.
+- Jev against the stage-2 references: original unanimous (16) 0.800 / 0.489,
+  majority (28) 0.556 / 0.428; collapsed unanimous (22) 0.857 / 0.480, majority
+  (30) 0.759 / 0.474.
+
+**Gate: not claimed.** Stage 1's 0.274 and stage 2's 0.421 (0.549 collapsed) are
+both below 0.6, so `clears_floor` and `clears_floor_all_scorings` are false.
+
+### What the split establishes
+
+- **The abstention split helps, but not enough.** On the same documents the
+  dedicated evidence question raises stage-1 agreement from the derived 0.153 to
+  0.274, and the stage-2 collapse raises the single-pass collapse abstain kappa
+  from 0.482 to 0.549. Neither reaches 0.6, and the gate needs both.
+- **Asking the question directly changes the answer.** The single-pass judges
+  called 137-147 of 150 episodes non-`unknown`; asked whether there is enough
+  evidence at all, they call only 24-67 `known` and 60 episodes draw a unanimous
+  `unknown`. The boundary was never a stable label — it was an unstable
+  confidence threshold, which is why mapping it from single-pass votes (0.153)
+  understates how much the judges disagreed about it.
+- **The remaining substantive boundary still caps stage 2.** Even with no
+  `unknown` option and only 31 "easy" episodes, GLM and GPT 6 Luna disagree on
+  intent (0.421 original, 0.549 collapsed). More judges or a lower floor are not
+  the missing ingredient; adjudication or human review of the contested
+  episodes is.
+
+Judge calls spent: 600 stage-1 answers attempted (599 stored; the one agy failure
+above) and 124 stage-2 answers (all stored). An early version of the operational
+driver duplicated calls before its worker partitioning was fixed; the durable
+counts above are the stored answers, and the run is resumable from the two raw
+checkpoints.
+
 

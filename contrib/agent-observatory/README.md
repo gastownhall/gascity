@@ -497,6 +497,52 @@ the nine labels into at least three classes of at most three source labels finds
 no minimum pair kappa above 0.243 (label) or 0.482 (abstain). See
 `MEASUREMENT-SILVER.md`.
 
+### Two-stage abstention split
+
+The collapse work showed the dominant boundary is abstention calibration, so the
+owner chose a reference design that separates it from the taxonomy. `two_stage.py`
+splits `primary_intent` agreement into two independent, separately-scored
+stages:
+
+- **Stage 1 — evidence gate.** Each judge answers only `known` vs `unknown`:
+  "is there enough evidence to name exactly one primary task?" Agreement is
+  scored on its own (pairwise Cohen's and Fleiss' kappa).
+- **Stage 2 — intent.** Only on episodes a majority called `known`, each judge
+  picks one of the eight substantive labels; there is **no `unknown` option**.
+  Agreement is scored on its own on the original labels and projected through
+  `primary_intent_collapse_v1`.
+
+```
+agent-observatory silver-two-stage \
+  (--checkpoint single_pass_checkpoint.json |
+   --stage1-checkpoint stage1.json [--stage2-checkpoint stage2.json]) \
+  --jev-predictions jev_predictions.json --out two_stage_report.json \
+  [--judge JUDGE ...] [--majority 3] [--require-clear]
+
+agent-observatory silver-two-stage-run --episodes-file episodes.json \
+  --out-report two_stage_report.json \
+  [--stage1-checkpoint stage1.json] [--stage2-checkpoint stage2.json] \
+  [--jev-predictions jev_predictions.json] [--judge JUDGE ...] [--majority 3] \
+  [--evidence-prompt-version V] [--intent-prompt-version V] [--require-clear]
+```
+
+`--checkpoint` is the **zero-call approximation**: stage 1 is the recorded
+`unknown` vs non-`unknown` decision, and stage 2 uses the non-`unknown` votes on
+episodes a majority called non-`unknown`. It is a preview only, because a judge
+that abstained has no stage-2 answer, so its stage-2 overlap is lower than a live
+run's. `--stage1-checkpoint`/`--stage2-checkpoint` score recorded live answers,
+and `silver-two-stage-run` drives the live pass through the same judge backends
+as `silver-build` (the two stages use separate checkpoints so a stage-2 call
+never replays a cached stage-1 answer). The gate is fail-closed: a pass requires
+the conservative minimum pairwise Cohen's kappa to clear `KAPPA_TRUST_FLOOR` on a
+large-enough sample whose judge pairs clear the usable-overlap floor, for stage 1
+**and** the original stage-2 labels; `clears_floor_all_scorings` additionally
+requires the collapsed projection. No `--allow-untrusted` pass is claimable. Jev
+is scored against the stage-1 abstention reference and each stage-2 reference
+(accuracy / macro-F1). The prompt pair is versioned
+(`TWO_STAGE_PROMPT_VERSION` plus the stage-specific versions). The measured
+outcome is in `MEASUREMENT-SILVER.md`.
+
 ## 8. Optimization change and exposure registry
 
 `changes-sync` imports an explicit, versioned **change bundle** (there is no live
@@ -994,6 +1040,19 @@ agent-observatory silver-collapse (--checkpoint CKPT.json | --report REPORT.json
     --jev-predictions PRED.json --out FILE
     [--collapse ID] [--judge JUDGE ...] [--majority N] [--taxonomy PATH]
     [--require-clear]
+agent-observatory silver-two-stage (--checkpoint CKPT.json |
+    --stage1-checkpoint S1.json [--stage2-checkpoint S2.json])
+    --jev-predictions PRED.json --out FILE
+    [--judge JUDGE ...] [--majority N] [--taxonomy PATH] [--require-clear]
+agent-observatory silver-two-stage-run --episodes-file EPISODES.json
+    --out-report REPORT.json [--jev-predictions PRED.json]
+    [--stage1-checkpoint S1.json] [--stage2-checkpoint S2.json]
+    [--judge JUDGE ...] [--judges-file JUDGES.json] [--majority N]
+    [--evidence-prompt-version V] [--intent-prompt-version V]
+    [--pair-prompt-version V] [--taxonomy PATH]
+    [--base-url URL] [--api-key-env ENV] [--max-judge-requests N]
+    [--judge-timeout S] [--cli-judge-timeout S] [--judge-text-bytes N]
+    [--tolerate-judge-failures] [--require-clear]
 agent-observatory impact [--input BUNDLE.json] [--db DB]
     [--primary-outcome OUTCOME] [--bootstrap-resamples N] [--out FILE]
 agent-observatory shadow --catalog CATALOG.json --input BUNDLE.json
@@ -1013,7 +1072,9 @@ writes the multi-judge silver gold set plus its agreement report (and optional J
 predictions read from the projection); `silver-evaluate` writes the
 Jev-vs-reference report; `silver-collapse` re-scores a recorded judge checkpoint
 or silver report under the collapsed taxonomy (no judge call) and writes the
-collapse report. `queue-drain` sends redacted transcript text unless
+collapse report; `silver-two-stage` scores (or approximates) the two-stage
+abstention split with no judge call and `silver-two-stage-run` drives the live
+two-stage judge pass. `queue-drain` sends redacted transcript text unless
 `--metadata-state` is passed.
 
 When `--snapshot-hash` is supplied together with `--db` and `--session`, the

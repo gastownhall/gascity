@@ -1473,19 +1473,27 @@ class HTTPJudgeClient:
 # -- subscription CLI judge backends ----------------------------------------
 
 
-def build_judge_schema(allowed_labels: Iterable[str]) -> dict[str, Any]:
-    """The JSON schema the CLI judges are constrained to return."""
+def build_judge_schema(allowed_labels: Iterable[str], *, key: str = "primary_intent") -> dict[str, Any]:
+    """The JSON schema the CLI judges are constrained to return.
+
+    *key* is the answer property name. It defaults to ``primary_intent`` (the
+    silver/collapse judges); a two-stage evidence-gate judge passes ``evidence``
+    so the CLI schema cannot force the intent answer onto a known/unknown
+    question.
+    """
 
     labels = sorted(set(allowed_labels))
     if not labels:
         raise SilverError("a judge schema needs at least one allowed label")
+    if not key or not key.isidentifier():
+        raise SilverError("a judge schema key must be a non-empty identifier")
     return {
         "type": "object",
         "properties": {
-            "primary_intent": {"type": "string", "enum": labels},
+            key: {"type": "string", "enum": labels},
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         },
-        "required": ["primary_intent", "confidence"],
+        "required": [key, "confidence"],
         "additionalProperties": False,
     }
 
@@ -1519,6 +1527,7 @@ class _CLIJudgeClient:
         work_dir: str | Path | None = None,
         binary: str | None = None,
         runner: Callable[..., Any] | None = None,
+        schema_key: str = "primary_intent",
     ) -> None:
         if spec.backend != self.backend:
             raise SilverError(
@@ -1545,9 +1554,11 @@ class _CLIJudgeClient:
             Path(work_dir) if work_dir is not None else Path(tempfile.mkdtemp(prefix=f"silver-{spec.judge_id}-"))
         )
         self.work_dir.mkdir(parents=True, exist_ok=True)
+        self.schema_key = schema_key
         self.schema_path = self.work_dir / "schema.json"
         self.schema_path.write_text(
-            json.dumps(build_judge_schema(labels), sort_keys=True), encoding="utf-8"
+            json.dumps(build_judge_schema(labels, key=schema_key), sort_keys=True),
+            encoding="utf-8",
         )
         self.calls_made = 0
         self.cli_version = self._capture_version()
@@ -1702,6 +1713,7 @@ def build_judge_client(
     max_requests: int | None = None,
     cli_work_dir: str | Path | None = None,
     runner: Callable[..., Any] | None = None,
+    schema_key: str = "primary_intent",
 ) -> JudgeClient:
     """Build the client for a :class:`JudgeSpec`'s backend."""
 
@@ -1724,6 +1736,7 @@ def build_judge_client(
             retry_backoff_seconds=retry_backoff_seconds,
             work_dir=cli_work_dir,
             runner=runner,
+            schema_key=schema_key,
         )
     if spec.backend == "agy-cli":
         return AgyCLIJudgeClient(
@@ -1734,6 +1747,7 @@ def build_judge_client(
             retry_backoff_seconds=retry_backoff_seconds,
             work_dir=cli_work_dir,
             runner=runner,
+            schema_key=schema_key,
         )
     raise SilverError(
         f"unknown judge backend {spec.backend!r}; expected one of: " + ", ".join(JUDGE_BACKENDS)

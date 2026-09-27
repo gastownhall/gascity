@@ -1078,6 +1078,14 @@ class JudgeResolutionTests(unittest.TestCase):
         self.assertEqual(schema["properties"]["primary_intent"]["enum"], ["bugfix", "unknown"])
         self.assertFalse(schema["additionalProperties"])
 
+    def test_build_judge_schema_supports_a_custom_answer_key(self):
+        schema = build_judge_schema(["known", "unknown"], key="evidence")
+        self.assertEqual(schema["properties"]["evidence"]["enum"], ["known", "unknown"])
+        self.assertEqual(schema["required"], ["evidence", "confidence"])
+        self.assertNotIn("primary_intent", schema["properties"])
+        with self.assertRaises(SilverError):
+            build_judge_schema(["known"], key="not an identifier")
+
 
 class CLIJudgeClientTests(unittest.TestCase):
     def test_codex_client_uses_schema_read_only_and_reads_output(self):
@@ -1101,6 +1109,14 @@ class CLIJudgeClientTests(unittest.TestCase):
         self.assertIn("read-only", captured["argv"])
         self.assertIn("--ephemeral", captured["argv"])
         self.assertEqual(captured["argv"][captured["argv"].index("-m") + 1], "gpt-6-luna")
+
+    def test_cli_client_writes_a_custom_schema_key(self):
+        client = CodexCLIJudgeClient(
+            JUDGE_GPT6_LUNA, ["known", "unknown"], runner=lambda *a, **k: None, schema_key="evidence"
+        )
+        schema = json.loads(client.schema_path.read_text(encoding="utf-8"))
+        self.assertEqual(schema["properties"]["evidence"]["enum"], ["known", "unknown"])
+        self.assertEqual(schema["required"], ["evidence", "confidence"])
 
     def test_agy_client_parses_structured_output(self):
         captured = {}
