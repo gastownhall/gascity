@@ -54,7 +54,7 @@ func TestControllerStateOrdersOverrideDisablesOrder(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	cityDir, cfg := newOrderEnabledFilterCity(t)
 
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs, _ := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
 	requireOrderNames(t, cs.Orders(), "keep")
 }
 
@@ -62,7 +62,7 @@ func TestControllerStateOrdersDisableEnableRoundTrip(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	cityDir, cfg := newPersistedOrderEnabledFilterCity(t)
 
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs, _ := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
 	if err := cs.DisableOrder("keep", ""); err != nil {
 		t.Fatalf("DisableOrder: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestControllerStateOrdersAllLogsOverrideErrors(t *testing.T) {
 	cityDir, cfg := newOrderEnabledFilterCity(t)
 	cfg.Orders.Overrides = []config.OrderOverride{{Name: "missing"}}
 
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs, _ := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
 	logs := captureCmdOrderLogs(t, func() {
 		_ = cs.OrdersAll()
 	})

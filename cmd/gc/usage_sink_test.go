@@ -94,7 +94,7 @@ func TestControllerStateReloadRefreshesUsageSink(t *testing.T) {
 		Usage:     config.UsageConfig{Provider: "discard"},
 	}
 
-	cs := newControllerState(context.Background(), discardCfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs, _ := newControllerState(context.Background(), discardCfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	assertSinkKind(t, cs.UsageSink(), "discard")
 
 	// Full-rebuild reload path, both directions.

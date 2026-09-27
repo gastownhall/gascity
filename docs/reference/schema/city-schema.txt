@@ -1083,7 +1083,7 @@
             "auto",
             "require"
           ],
-          "description": "ConditionalWrites selects the bead-write discipline: \"off\" (legacy,\nbyte-identical), \"auto\" (compare-and-swap where the store is capable,\nloud degrade otherwise), or \"require\" (CAS or a typed refusal). Empty\ndefaults to \"off\". Any other value fails config load."
+          "description": "ConditionalWrites selects the bead-write discipline: \"off\" (legacy,\nbyte-identical), \"auto\" (compare-and-swap where the store is capable,\nloud degrade otherwise), or \"require\" (CAS or a typed refusal). Empty\ndefaults to \"off\". Any other value fails config load.\n\nA startup boot latch (assertConditionalWritesBootReady) additionally\nrefuses to start the controller unless this resolves to \"require\" from\nan explicit config or env origin AND every bound bead-store scope\npasses a live capability probe: \"off\", \"auto\", and an unset/default\norigin all refuse to boot, not merely to write. This is stricter than\nthe \"off\"/\"auto\"/\"require\" per-write description above and is\ndeliberate (ADR-0019): a controller must not silently run without the\nsafety property it claims. See api_state_boot_latch.go."
         },
         "guarded_release": {
           "type": "string",

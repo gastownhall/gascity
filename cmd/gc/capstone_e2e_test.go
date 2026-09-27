@@ -127,7 +127,7 @@ func newCapstoneHarness(t *testing.T) *capstoneHarness {
 		t.Fatalf("load city config: %v", err)
 	}
 
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), cityName, cityPath)
+	cs, _ := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), cityName, cityPath)
 
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

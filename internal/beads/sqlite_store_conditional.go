@@ -22,7 +22,20 @@ import (
 	"time"
 )
 
-var _ ConditionalWriter = (*SQLiteStore)(nil)
+var (
+	_ ConditionalWriter                = (*SQLiteStore)(nil)
+	_ conditionalWriteCapabilityProber = (*SQLiteStore)(nil)
+)
+
+func (s *SQLiteStore) probeConditionalWriteCapability() (bool, string) {
+	if err := s.ensureOpen(); err != nil {
+		return false, err.Error()
+	}
+	if !s.hasRevisionColumn {
+		return false, "sqlite schema lacks the revision column needed for conditional writes"
+	}
+	return true, ""
+}
 
 // UpdateIfMatch applies opts only when the stored revision matches.
 func (s *SQLiteStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {

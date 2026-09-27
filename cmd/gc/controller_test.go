@@ -162,7 +162,7 @@ func TestControllerShutdown(t *testing.T) {
 
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
-		Beads:     config.BeadsConfig{Provider: "file"},
+		Beads:     config.BeadsConfig{Provider: "file", ConditionalWrites: "require"},
 		Agents:    []config.Agent{{Name: "mayor", StartCommand: "echo hello"}},
 		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
 	}
@@ -440,7 +440,7 @@ func writeCityTOML(t *testing.T, dir string, cityName string, agentNames ...stri
 	tomlPath := filepath.Join(dir, "city.toml")
 	var buf bytes.Buffer
 	buf.WriteString("[workspace]\nname = " + `"` + cityName + `"` + "\n\n")
-	buf.WriteString("[beads]\nprovider = \"file\"\n\n")
+	buf.WriteString("[beads]\nprovider = \"file\"\nconditional_writes = \"require\"\n\n")
 	for _, name := range agentNames {
 		buf.WriteString("[[agent]]\nname = " + `"` + name + `"` + "\n")
 		buf.WriteString("start_command = \"echo hello\"\n\n")
@@ -458,7 +458,7 @@ func writeControllerNamedSessionCityTOML(t *testing.T, dir, cityName, mode, idle
 	tomlPath := filepath.Join(dir, "city.toml")
 	var buf bytes.Buffer
 	buf.WriteString("[workspace]\nname = " + `"` + cityName + `"` + "\n\n")
-	buf.WriteString("[beads]\nprovider = \"file\"\n\n")
+	buf.WriteString("[beads]\nprovider = \"file\"\nconditional_writes = \"require\"\n\n")
 	buf.WriteString("[daemon]\nshutdown_timeout = \"100ms\"\n\n")
 	buf.WriteString("[[agent]]\nname = \"mayor\"\nstart_command = \"echo hello\"\n")
 	if idleTimeout != "" {
@@ -2050,7 +2050,7 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
-		Beads:     config.BeadsConfig{Provider: "file"},
+		Beads:     config.BeadsConfig{Provider: "file", ConditionalWrites: "require"},
 	}
 
 	// Write a city.toml so the controller uses the temp dir for bead store

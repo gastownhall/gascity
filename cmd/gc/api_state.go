@@ -183,7 +183,7 @@ func newControllerState(
 	sp runtime.Provider,
 	ep events.Provider,
 	cityName, cityPath string,
-) *controllerState {
+) (*controllerState, error) {
 	return newControllerStateWithRoutes(ctx, nil, cfg, sp, ep, cityName, cityPath)
 }
 
@@ -205,7 +205,7 @@ func newControllerStateWithRoutes(
 	sp runtime.Provider,
 	ep events.Provider,
 	cityName, cityPath string,
-) *controllerState {
+) (*controllerState, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -218,10 +218,6 @@ func newControllerStateWithRoutes(
 			beadEventStartSeqOK = true
 		}
 	}
-	// Latch the rollout-gate snapshot ONCE from the boot config. A resolve error
-	// (nil cfg or an out-of-enum config value) is warn-and-continue: the zero
-	// Flags is degraded-safe (legacy paths), and this constructor returns no
-	// error — mirroring the best-effort city-store warn below.
 	rolloutFlags, rolloutErr := rollout.Resolve(cfg, rollout.ResolveOptions{})
 	if rolloutErr != nil {
 		fmt.Fprintf(os.Stderr, "api: rollout gates: %v (using zero Flags; legacy paths)\n", rolloutErr)
@@ -267,7 +263,10 @@ func newControllerStateWithRoutes(
 	}
 	cs.preflightConditionalWrites()
 	cs.storeMetadataSignature = storeMetadataSignature(cityPath, cfg)
-	return cs
+	if err := cs.assertConditionalWritesBootReady(); err != nil {
+		return cs, err
+	}
+	return cs, nil
 }
 
 // wrapWithCachingStore wraps store in an in-memory read cache. When

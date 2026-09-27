@@ -57,7 +57,7 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 
 	cfg := &config.City{
 		Workspace: config.Workspace{},
-		Beads:     config.BeadsConfig{Provider: "file"},
+		Beads:     config.BeadsConfig{Provider: "file", ConditionalWrites: "require"},
 		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
 	}
 	data, err := cfg.Marshal()
@@ -244,7 +244,7 @@ func TestCmdStopForceDelegatesImmediateControllerStop(t *testing.T) {
 
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "force-stop-city"},
-		Beads:     config.BeadsConfig{Provider: "file"},
+		Beads:     config.BeadsConfig{Provider: "file", ConditionalWrites: "require"},
 		Daemon:    config.DaemonConfig{ShutdownTimeout: "250ms"},
 	}
 	data, err := cfg.Marshal()
@@ -320,7 +320,7 @@ func TestCmdStopForceEscalatesInProgressControllerStop(t *testing.T) {
 
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "force-escalate-city"},
-		Beads:     config.BeadsConfig{Provider: "file"},
+		Beads:     config.BeadsConfig{Provider: "file", ConditionalWrites: "require"},
 		Daemon:    config.DaemonConfig{ShutdownTimeout: "5s"},
 	}
 	data, err := cfg.Marshal()
@@ -1380,7 +1380,7 @@ func TestCmdStopMarginExhaustion(t *testing.T) {
 
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-margin"},
-		Beads:     config.BeadsConfig{Provider: "file"},
+		Beads:     config.BeadsConfig{Provider: "file", ConditionalWrites: "require"},
 		Daemon:    config.DaemonConfig{ShutdownTimeout: "1s"},
 	}
 	data, err := cfg.Marshal()
