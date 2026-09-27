@@ -168,9 +168,9 @@ func (cr *CityRuntime) ordersBeadStore(_ string) beads.OrdersStore {
 // through the routes this process opened at boot rather than the one-shot CLI
 // funnel. nil is what keeps a federation on a single-store city byte-identical:
 // there is no second store to add. Its caller runs on the orders lane, so it
-// reads the config a reload publishes under lock.
-func (cr *CityRuntime) relocatedOrdersStore() beads.Store {
-	return resolveOrderStore(cr.storageRoutes, nil, cr.serviceConfigSnapshot(), cr.cityPath, cr.rec)
+// resolves from that pass's config snapshot, never cr.cfg.
+func (cr *CityRuntime) relocatedOrdersStore(cfg *config.City) beads.Store {
+	return resolveOrderStore(cr.storageRoutes, nil, cfg, cr.cityPath, cr.rec)
 }
 
 // cityWorkStore returns the runtime's city-level WORK-class bead store. Work is

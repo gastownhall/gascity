@@ -125,6 +125,52 @@ func TestOrdersLaneDispatchesDuringColdStartReconcile(t *testing.T) {
 	waitForCalls(t, od.calls.Load, 3)
 }
 
+// A forced shutdown that overlaps a lane pass still holding passMu skips the
+// order dispatcher drain instead of blocking on the pass or racing it for the
+// dispatchers the lane owns.
+func TestOrdersLaneForcedShutdownSkipsDrainWhileLaneHoldsPass(t *testing.T) {
+	cfg := &config.City{}
+	cfg.Daemon.ShutdownTimeout = "1s"
+	od := &recordingOrderDispatcher{}
+	forceStop := &atomic.Bool{}
+	forceStop.Store(true)
+	var stderr syncWriter
+	cr := &CityRuntime{
+		cfg:               cfg,
+		sp:                runtime.NewFake(),
+		od:                od,
+		rec:               events.Discard,
+		logPrefix:         "gc start",
+		stdout:            io.Discard,
+		stderr:            &stderr,
+		forceStopShutdown: forceStop,
+	}
+	// Stand in for a lane pass still in flight.
+	lane := cr.ordersLaneOf()
+	lane.passMu.Lock()
+	var unlockOnce sync.Once
+	endPass := func() { unlockOnce.Do(lane.passMu.Unlock) }
+	t.Cleanup(endPass)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		cr.shutdown()
+	}()
+	awaitClose(t, done, "forced shutdown while the orders lane holds its pass lock")
+	endPass()
+
+	stderr.mu.Lock()
+	out := stderr.buf.String()
+	stderr.mu.Unlock()
+	if !strings.Contains(out, "skipping order dispatcher drain") {
+		t.Fatalf("stderr = %q, want the skipped-drain notice", out)
+	}
+	if od.drainCalls != 0 {
+		t.Fatalf("order dispatcher drain calls = %d, want 0 while the lane holds the dispatchers", od.drainCalls)
+	}
+}
+
 // ordersLaneTestRuntime is a directly-constructed runtime with a fast patrol
 // cadence and FS pressure pinned off, so a lane test depends on neither the
 // host's /proc/pressure/io nor a 30s default interval.
@@ -237,9 +283,11 @@ func TestCityRuntimeTickDoesNotDispatchOrders(t *testing.T) {
 	}
 }
 
-// Every tick that used to dispatch orders now wakes the lane instead, so a
-// poke-driven tick still gets its orders evaluated promptly rather than at the
-// lane's next patrol-interval pass.
+// Every tick that used to dispatch orders now wakes the lane instead. A lane
+// that has idled at least as long as its last pass ran — here, one that has
+// not passed yet — runs the wake's pass at once, so a poke-driven tick still
+// gets its orders evaluated promptly rather than at the lane's next
+// patrol-interval pass.
 func TestOrdersLaneWakesOnTick(t *testing.T) {
 	od := &recordingOrderDispatcher{}
 	cr := ordersLaneTestRuntime(t, od, "1h", nil)
@@ -323,6 +371,28 @@ func TestOrdersLanePassReturnsWhenCanceled(t *testing.T) {
 	cr.runOrdersLanePass(ctx, cr.cityPath, ordersLaneReasonCadence)
 	if od.called.Load() {
 		t.Fatal("order dispatch ran after the lane context was canceled")
+	}
+}
+
+// The tick trace reports the lane's last-pass age so a stuck lane is visible.
+// A lane that has never finished a pass reports no age at all, and a finished
+// pass latches its time and trigger.
+func TestOrdersLaneLastPassFeedsTheTickTrace(t *testing.T) {
+	cr := ordersLaneTestRuntime(t, &recordingOrderDispatcher{}, "1h", nil)
+	lane := cr.ordersLaneOf()
+	if _, _, ran := lane.lastPass(); ran {
+		t.Fatal("a lane that never passed reports a pass")
+	}
+	before := time.Now()
+	cr.runOrdersLanePass(context.Background(), cr.cityPath, ordersLaneReasonWake)
+	at, reason, ran := lane.lastPass()
+	if !ran || reason != ordersLaneReasonWake || at.Before(before) {
+		t.Fatalf("lastPass = (%s, %q, %t), want the wake pass just run", at, reason, ran)
+	}
+	fields := map[string]any{}
+	addBackstopAgeFields(fields, at, reason, ran)
+	if fields["backstop_ran"] != true || fields["backstop_last_reason"] != ordersLaneReasonWake {
+		t.Fatalf("tick fields = %v, want the lane's last pass", fields)
 	}
 }
 
@@ -410,5 +480,198 @@ func TestOrdersLaneStagedDispatcherInstallsImmediatelyWhenIdle(t *testing.T) {
 	}
 	if oldOD.drainCalls != 1 {
 		t.Fatalf("old dispatcher drain calls = %d, want 1", oldOD.drainCalls)
+	}
+}
+
+// M1: a lane rescan that started before a reload must not overwrite the
+// reload's newer dispatcher or revert the order set when it finishes. The scan
+// seam parks the lane's rescan mid-scan while a reload stages its result.
+func TestOrdersLaneStaleRescanDoesNotOverwriteNewerReload(t *testing.T) {
+	oldOD := &recordingOrderDispatcher{}
+	cr := ordersLaneTestRuntime(t, oldOD, "1h", nil)
+	cr.orderRescanEnabled = true
+	cr.tomlPath = filepath.Join(cr.cityPath, "city.toml")
+	cr.orderSetSignature = "sig-boot"
+
+	scanEntered := make(chan struct{})
+	scanRelease := make(chan struct{})
+	var once, releaseOnce sync.Once
+	releaseScan := func() { releaseOnce.Do(func() { close(scanRelease) }) }
+	cr.orderSetScan = func(string, *config.City, string) (orderSetSnapshot, error) {
+		once.Do(func() { close(scanEntered) })
+		<-scanRelease
+		// What the lane read before the reload landed: a different, older set.
+		return orderSetSnapshot{Signature: "sig-stale"}, nil
+	}
+
+	passDone := make(chan struct{})
+	go func() {
+		defer close(passDone)
+		cr.runOrdersLanePass(context.Background(), cr.cityPath, ordersLaneReasonCadence)
+	}()
+	// Release the parked scan even if a wait below fails, so the pass never
+	// outlives the test.
+	t.Cleanup(func() {
+		releaseScan()
+		awaitClose(t, passDone, "the parked rescan pass finishing")
+	})
+	awaitClose(t, scanEntered, "the lane pass starting its rescan")
+
+	reloadOD := &recordingOrderDispatcher{}
+	reloadSet := []orders.Order{{Name: "from-reload", Trigger: "cooldown", Interval: "1h", Exec: "true"}}
+	cr.stageOrderDispatcher(reloadOD, reloadSet, "sig-reload", time.Now())
+	cr.tryInstallPendingOrderDispatcher(context.Background())
+
+	releaseScan()
+	awaitClose(t, passDone, "the released rescan pass finishing")
+
+	if cr.od != orderDispatcher(reloadOD) {
+		t.Fatalf("cr.od = %#v, want the reload's dispatcher; a stale rescan overwrote it", cr.od)
+	}
+	if got := reloadOD.calls.Load(); got != 1 {
+		t.Fatalf("reload dispatcher calls = %d, want 1 (installed before this pass dispatched)", got)
+	}
+	if cr.orderSetSignature != "sig-reload" || len(cr.orderSet) != 1 || cr.orderSet[0].Name != "from-reload" {
+		t.Fatalf("order set = %q %#v, want the reload's set; the stale rescan reverted it", cr.orderSetSignature, cr.orderSet)
+	}
+}
+
+// A pass's config is never read before its order-set generation. The hook
+// lands a reload that has just published its config and staged (bumping the
+// generation) inside orderPassConfig's critical section, before either read:
+// the pass must read the reloaded config with the bumped generation, so its
+// rescan stages. A config read before the generation would rescan the old
+// config under the new generation and stage it over the reload. The test does
+// not prove the two reads are atomic against every interleaving; it pins that
+// neither read escapes the section the hook runs in.
+func TestOrdersLanePassConfigIsNeverReadBeforeGeneration(t *testing.T) {
+	cr := ordersLaneTestRuntime(t, &recordingOrderDispatcher{}, "1h", nil)
+	cr.orderRescanEnabled = true
+	cr.tomlPath = filepath.Join(cr.cityPath, "city.toml")
+	cr.orderSetSignature = "sig-boot"
+	cr.cfg.Daemon.ShutdownTimeout = "5s"
+	var scanned []string
+	cr.orderSetScan = func(_ string, cfg *config.City, _ string) (orderSetSnapshot, error) {
+		scanned = append(scanned, cfg.Daemon.ShutdownTimeout)
+		return orderSetSnapshot{Signature: "sig-" + cfg.Daemon.ShutdownTimeout}, nil
+	}
+	var once sync.Once
+	cr.inOrderPassConfig = func(lane *ordersLane) {
+		once.Do(func() {
+			reloaded := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Daemon:    config.DaemonConfig{PatrolInterval: "1h", ShutdownTimeout: "6s"},
+			}
+			cr.serviceStateMu.Lock()
+			cr.cfg = reloaded
+			cr.serviceStateMu.Unlock()
+			lane.generation++ // the reload's stage; setMu is held here
+		})
+	}
+
+	cr.runOrdersLanePass(context.Background(), cr.cityPath, ordersLaneReasonCadence)
+
+	if len(scanned) != 1 || scanned[0] != "6s" {
+		t.Fatalf("rescan read shutdown_timeout %v, want [6s]: the config was read outside the generation pair", scanned)
+	}
+	if cr.orderSetSignature != "sig-6s" {
+		t.Fatalf("order set signature = %q, want %q: a rescan of the pair's config must stage", cr.orderSetSignature, "sig-6s")
+	}
+}
+
+// M2: while ticks keep waking the lane, the lane's own timer must not add
+// passes on top; it is only a backstop for a wedged tick. One pass per wake,
+// not one per wake plus one per patrol interval.
+func TestOrdersLaneTimerOnlyFiresWithoutWakes(t *testing.T) {
+	od := &recordingOrderDispatcher{}
+	cr := ordersLaneTestRuntime(t, od, "150ms", nil)
+	lane := cr.ordersLaneOf()
+	startOrdersLaneForTest(t, cr)
+
+	const wakes = 15
+	for i := 0; i < wakes; i++ {
+		lane.wake()
+		time.Sleep(50 * time.Millisecond)
+	}
+	cadence := lane.cadencePasses.Load()
+	total := lane.cadencePasses.Load() + lane.wakePasses.Load()
+	if cadence != 0 {
+		t.Fatalf("cadence passes while ticks woke the lane every 50ms = %d, want 0 (patrol interval 150ms)", cadence)
+	}
+	if total > wakes {
+		t.Fatalf("lane passes = %d for %d wakes, want at most one pass per wake", total, wakes)
+	}
+
+	// With the wakes gone, the backstop timer takes over.
+	deadline := time.Now().Add(10 * time.Second)
+	for lane.cadencePasses.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("backstop timer never fired after wakes stopped")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// The real lane running concurrently with real config reloads, for the race
+// detector: reloads stage dispatchers and swap config while lane passes rescan,
+// install and dispatch.
+func TestOrdersLaneConcurrentWithReloadConfigTraced(t *testing.T) {
+	t.Setenv(fsPressureThresholdEnv, "100")
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeSoftReloadConfig(t, tomlPath, "5s")
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+	// The backstop runs a pass a patrol interval after the last one; a 1ms
+	// interval keeps passes flowing through the reloads rather than one per
+	// 30s default.
+	cfg.Daemon.PatrolInterval = "1ms"
+	sp := runtime.NewFake()
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		ConfigRev: configRev,
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	lane := cr.ordersLaneOf()
+	startOrdersLaneForTest(t, cr)
+
+	stopWaking := make(chan struct{})
+	wakerDone := make(chan struct{})
+	go func() {
+		defer close(wakerDone)
+		for {
+			select {
+			case <-stopWaking:
+				return
+			default:
+			}
+			cr.markOrderRescan(time.Time{}) // make every pass rescan
+			lane.wake()
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	lastProviderName := "fake"
+	for i := 0; i < 6; i++ {
+		timeout := "5s"
+		if i%2 == 0 {
+			timeout = "6s"
+		}
+		writeCityRuntimeSoftReloadConfig(t, tomlPath, timeout)
+		cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceWatch)
+	}
+	close(stopWaking)
+	<-wakerDone
+	if lane.wakePasses.Load() == 0 {
+		t.Fatal("the lane never ran a pass during the reloads; the test exercised nothing")
 	}
 }

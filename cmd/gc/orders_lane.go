@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -32,23 +35,52 @@ import (
 // every directly-driven test observes); a busy lane installs it at the start of
 // its next pass, draining the outgoing dispatcher first exactly as the reload
 // did. Waiting would make reload-reply latency scale with order count again
-// (#3206).
+// (#3206). The cost is bounded by one pass: a pass already in flight when the
+// reload lands finishes on the outgoing dispatcher, as if the reload had
+// arrived just after it.
+//
+// A reload publishes its config and then, when it stages a dispatcher, bumps
+// the order-set generation under setMu. Each pass reads the generation and the
+// one config snapshot everything in the pass reads — the trace, the periodic
+// rescan and the watchdogs — as a pair under setMu (orderPassConfig), so no
+// stage lands between them, and the rescan stages its result only if the
+// generation is unchanged. A rescan whose pair predates a stage is therefore
+// discarded, and one whose pair follows it reads the reloaded config. Without
+// this, a rescan that read the pre-reload config could finish after the
+// reload, overwrite the newer dispatcher and revert the order set.
 type ordersLane struct {
 	passMu sync.Mutex
 
 	setMu      sync.Mutex
 	pending    orderDispatcher
 	hasPending bool
+	// generation counts reload-side order-set publications (setMu).
+	generation uint64
 
-	// wakeCh coalesces "a tick would have dispatched orders now" signals into
-	// at most one extra pass. Buffered 1: a wake that lands mid-pass runs one
-	// more pass after it, never a queue of them.
+	// wakeCh carries "a tick would have dispatched orders now" signals.
+	// Buffered 1, and wakes that must wait out the duty cycle join the one
+	// pass that follows it, so a burst of wakes is never a queue of passes.
 	wakeCh chan struct{}
 
-	// Lane-local FS pressure episode, guarded by passMu. The tick's own episode
-	// counters stay the tick's: the two paths shed independently.
+	// Lane-local FS pressure episode, guarded by passMu. The tick's own
+	// episode counters stay the tick's: the two paths shed independently, and
+	// the lane ends its episode only when it sees pressure drop or forces a
+	// pass. A tick forced every few seconds under pressure must not reset the
+	// lane's count, or the lane would never reach its own forced pass.
 	fsPressureSkips  int
 	fsPressureLogged bool
+
+	// Last pass that reached dispatch, for the tick trace (statusMu). A pass
+	// the FS gate skipped does not count, so a lane starved by pressure shows
+	// a growing age.
+	statusMu       sync.Mutex
+	lastPassAt     time.Time
+	lastPassReason string
+	passRan        bool
+
+	// Pass counts by trigger, for observability and tests.
+	cadencePasses atomic.Int64
+	wakePasses    atomic.Int64
 }
 
 const (
@@ -74,8 +106,8 @@ func (cr *CityRuntime) ordersLaneOf() *ordersLane {
 	return cr.ordersLane
 }
 
-// wake asks the lane for a pass as soon as it is free. Non-blocking; harmless
-// when no lane goroutine is running.
+// wake asks the lane for a pass. Non-blocking; harmless when no lane goroutine
+// is running.
 func (l *ordersLane) wake() {
 	select {
 	case l.wakeCh <- struct{}{}:
@@ -83,33 +115,115 @@ func (l *ordersLane) wake() {
 	}
 }
 
+// notePass records a pass that reached dispatch, for the tick trace.
+func (l *ordersLane) notePass(at time.Time, reason string) {
+	l.statusMu.Lock()
+	defer l.statusMu.Unlock()
+	l.lastPassAt, l.lastPassReason, l.passRan = at, reason, true
+}
+
+// lastPass reports when the last pass that reached dispatch finished, what
+// triggered it, and whether one has at all.
+func (l *ordersLane) lastPass() (at time.Time, reason string, ran bool) {
+	l.statusMu.Lock()
+	defer l.statusMu.Unlock()
+	return l.lastPassAt, l.lastPassReason, l.passRan
+}
+
 // startOrdersLane starts the lane goroutine and returns a channel closed when
-// it exits. The cadence is the patrol interval — the rate the tick used to
-// offer orders a pass — read once, as the tick's own ticker is. Ticks also wake
-// the lane, so a poke-driven tick still gets a prompt dispatch.
+// it exits.
+//
+// Two rules pace the lane, both measured from the end of the previous pass:
+//
+//   - Duty cycle. A tick wake starts a pass at once if the lane has been idle
+//     at least as long as its previous pass ran. Otherwise the wake waits
+//     until it has, and every wake in that wait (including one that lands
+//     mid-pass) joins the one pass that follows. The lane is therefore busy
+//     at most half the time while a pass fits in the patrol interval (a
+//     longer pass is followed by one interval idle), never runs two passes
+//     back to back, and a city with short passes keeps the tick's poke
+//     latency.
+//   - Backstop. One timer, reset at the end of every pass, runs a pass one
+//     patrol interval (read once, as the tick's ticker is) after the previous
+//     pass ended if nothing else has — the backstop for a wedged or slow
+//     tick. A wake never waits longer than the backstop would.
+//
+// On maintainer-city, where a pass (~32s) outlasts the patrol interval (15s),
+// the backstop comes first and the lane runs one pass per interval plus pass
+// time, whatever the tick does. A free-running ticker would add passes on
+// its own grid; a wake that ignored the duty cycle would run passes back to
+// back.
 func (cr *CityRuntime) startOrdersLane(ctx context.Context, cityRoot string) <-chan struct{} {
 	lane := cr.ordersLaneOf()
 	interval := cr.serviceConfigSnapshot().Daemon.PatrolIntervalDuration()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
+		var pace ordersLanePace
+		wakePending := false
 		for {
 			reason := ordersLaneReasonCadence
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
 			case <-lane.wakeCh:
+				wait := pace.wakeWait(time.Now(), interval)
+				if wait > 0 {
+					if !wakePending {
+						wakePending = true
+						timer.Reset(wait)
+					}
+					continue
+				}
 				reason = ordersLaneReasonWake
+			case <-timer.C:
+				if wakePending {
+					reason = ordersLaneReasonWake
+				}
 			}
+			wakePending = false
+			if reason == ordersLaneReasonWake {
+				lane.wakePasses.Add(1)
+			} else {
+				lane.cadencePasses.Add(1)
+			}
+			start := time.Now()
 			cr.safeTick(func() {
 				cr.runOrdersLanePass(ctx, cityRoot, reason)
 			}, ordersLaneSafeTickTrigger)
+			pace = ordersLanePace{lastEnd: time.Now(), lastRun: time.Since(start), passed: true}
+			// Go 1.23+ timers: Reset discards any pending fire, so a timer that
+			// expired during the pass does not start one straight away.
+			timer.Reset(interval)
 		}
 	}()
 	return done
+}
+
+// ordersLanePace is what the lane remembers of its previous pass.
+type ordersLanePace struct {
+	lastEnd time.Time
+	lastRun time.Duration
+	passed  bool
+}
+
+// wakeWait is how long a wake at now must wait before its pass may start:
+// zero once the lane has idled as long as its previous pass ran, and never
+// longer than the backstop, which fires interval after that pass ended.
+func (p ordersLanePace) wakeWait(now time.Time, interval time.Duration) time.Duration {
+	if !p.passed {
+		return 0
+	}
+	gap := p.lastRun
+	if gap > interval {
+		gap = interval
+	}
+	if wait := p.lastEnd.Add(gap).Sub(now); wait > 0 {
+		return wait
+	}
+	return 0
 }
 
 // runOrdersLanePass is one lane pass: the FS-pressure gate, then the
@@ -128,7 +242,8 @@ func (cr *CityRuntime) runOrdersLanePass(ctx context.Context, cityRoot, reason s
 		return
 	}
 
-	trace := cr.beginOrdersLaneTrace(reason)
+	generation, cfg := cr.orderPassConfig()
+	trace := cr.beginOrdersLaneTrace(cfg, reason)
 	completion := TraceCompletionAborted
 	defer func() {
 		if trace != nil {
@@ -152,7 +267,8 @@ func (cr *CityRuntime) runOrdersLanePass(ctx context.Context, cityRoot, reason s
 	}
 
 	phaseStart = time.Now()
-	cr.dispatchOrdersLocked(ctx, cityRoot)
+	cr.dispatchOrdersLocked(ctx, cityRoot, generation, cfg)
+	lane.notePass(time.Now(), reason)
 	if trace != nil {
 		trace.RecordControllerOperation(TraceSiteOrderDispatch, TraceReasonRetained, TraceOutcomeComplete,
 			"dispatch_orders", time.Since(phaseStart), nil)
@@ -163,10 +279,26 @@ func (cr *CityRuntime) runOrdersLanePass(ctx context.Context, cityRoot, reason s
 	completion = TraceCompletionCompleted
 }
 
-// beginOrdersLaneTrace opens the pass's trace cycle from the published config.
-// The config revision is omitted: it is written unlocked on the controller
-// goroutine, and a lane pass is not a config-revision boundary.
-func (cr *CityRuntime) beginOrdersLaneTrace(reason string) *sessionReconcilerTraceCycle {
+// orderPassConfig returns the order-set generation and the one config snapshot
+// a pass reads, as a pair read under setMu. A reload publishes its config and
+// then bumps the generation under setMu when it stages, so no stage can land
+// between the two reads: either the pair predates the stage (and the stage's
+// bump discards a rescan of it) or it includes the stage's config. Nothing a
+// pass runs reads cr.cfg itself.
+func (cr *CityRuntime) orderPassConfig() (uint64, *config.City) {
+	lane := cr.ordersLaneOf()
+	lane.setMu.Lock()
+	defer lane.setMu.Unlock()
+	if cr.inOrderPassConfig != nil {
+		cr.inOrderPassConfig(lane)
+	}
+	return lane.generation, cr.serviceConfigSnapshot()
+}
+
+// beginOrdersLaneTrace opens the pass's trace cycle from the pass's config
+// snapshot. The config revision is omitted: it is written unlocked on the
+// controller goroutine, and a lane pass is not a config-revision boundary.
+func (cr *CityRuntime) beginOrdersLaneTrace(cfg *config.City, reason string) *sessionReconcilerTraceCycle {
 	if cr.trace == nil {
 		return nil
 	}
@@ -174,11 +306,11 @@ func (cr *CityRuntime) beginOrdersLaneTrace(reason string) *sessionReconcilerTra
 		TickTrigger:   string(ordersLaneTraceTrigger),
 		TriggerDetail: reason,
 		CityPath:      cr.cityPath,
-	}, cr.serviceConfigSnapshot(), nil)
+	}, cfg, nil)
 }
 
-// ordersLaneShouldSkipForFSPressureLocked is the tick's pressure gate applied
-// to the lane: skip while pressure is high, but force a pass after
+// ordersLaneShouldSkipForFSPressureLocked is the tick's pressure gate applied to the
+// lane (passMu must be held): skip while pressure is high, but force a pass after
 // maxConsecutiveFSPressureSkips so orders cannot starve. It logs once per
 // episode and records the decision on the lane's trace; the supervisor
 // skipped-tick event stays the tick's, so its counts keep meaning ticks.
@@ -217,40 +349,61 @@ func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
 	lane := cr.ordersLaneOf()
 	lane.passMu.Lock()
 	defer lane.passMu.Unlock()
-	cr.dispatchOrdersLocked(ctx, cityRoot)
+	generation, cfg := cr.orderPassConfig()
+	cr.dispatchOrdersLocked(ctx, cityRoot, generation, cfg)
 }
 
-// dispatchOrdersLocked is the dispatch body. passMu must be held.
-func (cr *CityRuntime) dispatchOrdersLocked(ctx context.Context, cityRoot string) {
+// dispatchOrdersLocked is the dispatch body. passMu must be held; generation
+// and cfg come from orderPassConfig.
+func (cr *CityRuntime) dispatchOrdersLocked(ctx context.Context, cityRoot string, generation uint64, cfg *config.City) {
 	if ctx.Err() != nil {
 		return
 	}
 	now := time.Now()
-	// A reload staged while the previous pass held the lock is installed
-	// before anything dispatches against the outgoing dispatcher.
-	cr.installPendingOrderDispatcherLocked(ctx)
 	if !cr.wispIndexMigrationApplied {
 		cr.wispIndexMigrationApplied = true
 		cr.applyWispQueryIndexes(ctx)
 	}
-	cr.rescanOrderDispatcherIfDue(ctx, cityRoot, now)
+	cr.rescanOrderDispatcherIfDue(cityRoot, cfg, generation, now)
+	// Installs whatever is staged — this rescan's result, or a reload staged
+	// while the previous pass held the lock — before anything dispatches
+	// against the outgoing dispatcher.
 	cr.installPendingOrderDispatcherLocked(ctx)
-	cr.runOrderTrackingSweepWatchdog(now)
-	cr.runOrderTrackingRetentionWatchdog(now)
-	cr.runNudgeMailSweepWatchdog(now)
+	cr.runOrderTrackingSweepWatchdog(cfg, now)
+	cr.runOrderTrackingRetentionWatchdog(cfg, now)
+	cr.runNudgeMailSweepWatchdog(cfg, now)
 	if cr.od != nil {
 		cr.od.dispatch(ctx, cityRoot, now)
 	}
 }
 
-// stageOrderDispatcher records next as the dispatcher the lane should run and
-// the order set it was built from, returning the change summary against the
-// previously staged-or-live set. It never blocks on a pass. A staged dispatcher
-// superseded before install never dispatched, so it has nothing to drain.
+// stageOrderDispatcher is the reload-side stage: it records next as the
+// dispatcher the lane should run and the order set it was built from, bumps
+// the order-set generation so an in-flight lane rescan cannot overwrite it,
+// and returns the change summary against the previously staged-or-live set.
+// It never blocks on a pass. A staged dispatcher superseded before install
+// never dispatched, so it has nothing to drain.
 func (cr *CityRuntime) stageOrderDispatcher(next orderDispatcher, set []orders.Order, signature string, now time.Time) string {
 	lane := cr.ordersLaneOf()
 	lane.setMu.Lock()
 	defer lane.setMu.Unlock()
+	lane.generation++
+	return cr.stageOrderDispatcherLocked(lane, next, set, signature, now)
+}
+
+// stageRescannedOrderDispatcher is the lane-rescan stage: it stages only if no
+// reload published since generation was captured, and reports whether it did.
+func (cr *CityRuntime) stageRescannedOrderDispatcher(generation uint64, next orderDispatcher, set []orders.Order, signature string, now time.Time) (string, bool) {
+	lane := cr.ordersLaneOf()
+	lane.setMu.Lock()
+	defer lane.setMu.Unlock()
+	if lane.generation != generation {
+		return "", false
+	}
+	return cr.stageOrderDispatcherLocked(lane, next, set, signature, now), true
+}
+
+func (cr *CityRuntime) stageOrderDispatcherLocked(lane *ordersLane, next orderDispatcher, set []orders.Order, signature string, now time.Time) string {
 	summary := orderSetChangeSummary(cr.orderSet, set)
 	lane.pending = next
 	lane.hasPending = true
@@ -258,6 +411,14 @@ func (cr *CityRuntime) stageOrderDispatcher(next orderDispatcher, set []orders.O
 	cr.orderSetSignature = signature
 	cr.orderRescanLast = now
 	return summary
+}
+
+// scanOrderSet scans the order set, through the orderSetScan seam when set.
+func (cr *CityRuntime) scanOrderSet(cityRoot string, cfg *config.City, cmdName string) (orderSetSnapshot, error) {
+	if cr.orderSetScan != nil {
+		return cr.orderSetScan(cityRoot, cfg, cmdName)
+	}
+	return scanOrderSetSnapshotFS(fsys.OSFS{}, cityRoot, cfg, cr.stderr, cmdName)
 }
 
 // tryInstallPendingOrderDispatcher installs a staged dispatcher now if no pass

@@ -144,10 +144,10 @@ func (cr *CityRuntime) resetFSPressureEpisode() {
 // shouldSkipTickForFSPressure gates only the patrol/poke tick path after
 // config reload and before managed-Dolt preflight, session sync, demand
 // build, and reconciliation. Order dispatch runs on its own lane and applies
-// the same gate there (ordersLaneShouldSkipForFSPressureLocked). Pressure-skipped ticks still drain
-// already queued convergence requests; nudge-dispatch, control-dispatcher,
-// socket-driven convergence requests, and manual reload refreshes are separate
-// high-priority paths and are not covered by this gate.
+// the same gate there (ordersLaneShouldSkipForFSPressureLocked). Pressure-skipped
+// ticks still drain already queued convergence requests; nudge-dispatch,
+// control-dispatcher, socket-driven convergence requests, and manual reload
+// refreshes are separate high-priority paths and are not covered by this gate.
 func (cr *CityRuntime) shouldSkipTickForFSPressure(trace *sessionReconcilerTraceCycle, trigger string) bool {
 	status, ok := currentFSPressureStatus(cr.stderr)
 	if !ok || !status.High {

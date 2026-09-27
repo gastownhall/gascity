@@ -1182,6 +1182,7 @@ go_test(
         "order_outcome_test.go",
         "order_scan_contract_test.go",
         "order_store_concurrency_test.go",
+        "orders_lane_cadence_test.go",
         "orders_lane_fs_pressure_test.go",
         "orders_lane_test.go",
         "pack_command_discovery_lock_test.go",
