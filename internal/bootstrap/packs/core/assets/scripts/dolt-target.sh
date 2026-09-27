@@ -89,17 +89,20 @@ managed_runtime_pid_listener_state() (
             n = split($2, addr, ":")
             if (addr[n] == port_hex) print $10
         }
-    ' $tables 2>/dev/null)
+    ' $tables 2>/dev/null) || return 3
     [ -n "$inodes" ] || return 2
 
-    fd_links=$(ls -l "/proc/$pid/fd" 2>/dev/null) || return 3
-    for inode in $inodes; do
-        case "$fd_links" in
-            *"socket:[$inode]"*)
-                return 0
-                ;;
-        esac
+    [ -r "/proc/$pid/fd" ] && [ -x "/proc/$pid/fd" ] || return 3
+    found_fd=0
+    for fd in /proc/"$pid"/fd/*; do
+        [ -e "$fd" ] || [ -L "$fd" ] || continue
+        found_fd=1
+        target=$(readlink "$fd" 2>/dev/null) || continue
+        for inode in $inodes; do
+            [ "$target" = "socket:[$inode]" ] && return 0
+        done
     done
+    [ "$found_fd" = 1 ] || return 3
     return 1
 )
 
