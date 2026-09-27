@@ -50,6 +50,59 @@ pid_is_running() (
     return 1
 )
 
+# managed_runtime_pid_listener_state answers "is $pid the process listening on
+# $port" from /proc, without lsof. `lsof -iTCP:<port>` walks the descriptors of
+# every process on the host, which costs seconds of kernel CPU per call on a
+# busy machine; this reads the kernel's TCP tables for the listening socket's
+# inode and then only $pid's own fd directory.
+#   0  $pid holds the listener
+#   1  something else holds it ($pid's descriptors are readable and lack it)
+#   2  nothing is listening on $port
+#   3  cannot tell here: no /proc/net (darwin), or $pid's descriptors are
+#      unreadable (exited, or another user's) -- callers fall back to lsof
+managed_runtime_pid_listener_state() (
+    pid="$1"
+    port="$2"
+
+    case "$pid" in
+        ''|*[!0-9]*)
+            return 3
+            ;;
+    esac
+    case "$port" in
+        ''|*[!0-9]*)
+            return 3
+            ;;
+    esac
+
+    tables=""
+    for table in /proc/net/tcp /proc/net/tcp6; do
+        [ -r "$table" ] && tables="$tables $table"
+    done
+    [ -n "$tables" ] || return 3
+
+    # st 0A is TCP_LISTEN; the local port is the hex after the last colon of
+    # column 2 and the socket inode is column 10.
+    # shellcheck disable=SC2086 # $tables is a space-separated path list.
+    inodes=$(awk -v port_hex="$(printf '%04X' "$port")" '
+        $4 == "0A" && $10 != "0" {
+            n = split($2, addr, ":")
+            if (addr[n] == port_hex) print $10
+        }
+    ' $tables 2>/dev/null)
+    [ -n "$inodes" ] || return 2
+
+    fd_links=$(ls -l "/proc/$pid/fd" 2>/dev/null) || return 3
+    for inode in $inodes; do
+        case "$fd_links" in
+            *"socket:[$inode]"*)
+                return 0
+                ;;
+        esac
+    done
+    return 1
+)
+
 managed_runtime_listener_pid() (
     port="$1"
 
@@ -128,7 +181,23 @@ managed_runtime_port() (
     [ "$data_dir" = "$expected_data_dir" ] || return 0
     pid_is_running "$pid" || return 0
 
-    holder_pid=$(managed_runtime_listener_pid "$port" || true)
+    listener_state=0
+    managed_runtime_pid_listener_state "$pid" "$port" || listener_state=$?
+    case "$listener_state" in
+        0)
+            printf '%s\n' "$port"
+            return 0
+            ;;
+        1)
+            return 0
+            ;;
+        2)
+            holder_pid=""
+            ;;
+        *)
+            holder_pid=$(managed_runtime_listener_pid "$port" || true)
+            ;;
+    esac
     if [ -n "$holder_pid" ]; then
         [ "$holder_pid" = "$pid" ] || return 0
         printf '%s\n' "$port"

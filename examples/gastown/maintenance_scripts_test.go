@@ -3092,12 +3092,19 @@ func TestMaintenanceDoltScriptsFallbackToManagedRuntimePortsWithInconclusiveLsof
 		},
 	}
 
+	// On Linux the scripts answer "does the recorded pid hold the listener"
+	// from /proc before consulting lsof, so each case also sets up the real
+	// process state its lsof stub describes: a live pid that does not hold the
+	// listener for the mismatch, and no listener at all for the unreachable
+	// port.
 	cases := []struct {
-		name        string
-		lsofBody    string
-		ncBody      func(port string) string
-		wantManaged bool
-		wantExit78  bool
+		name          string
+		lsofBody      string
+		ncBody        func(port string) string
+		foreignPID    bool
+		closeListener bool
+		wantManaged   bool
+		wantExit78    bool
 	}{
 		{
 			name:     "inconclusive lsof accepts reachable port",
@@ -3122,6 +3129,7 @@ exit 1
 exit 0
 `
 			},
+			foreignPID: true,
 			wantExit78: true,
 		},
 		{
@@ -3132,7 +3140,8 @@ exit 0
 exit 1
 `
 			},
-			wantExit78: true,
+			closeListener: true,
+			wantExit78:    true,
 		},
 	}
 
@@ -3146,7 +3155,16 @@ exit 1
 				listener := listenManagedDoltPort(t)
 				managedPort := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
 				wantPort := managedPort
-				writeManagedRuntimeState(t, cityDir, listener.Addr().(*net.TCPAddr).Port)
+				statePID := os.Getpid()
+				if tc.foreignPID {
+					// The test binary's parent (go test) is alive and does
+					// not hold this listener.
+					statePID = os.Getppid()
+				}
+				writeManagedRuntimeStateWithPID(t, cityDir, listener.Addr().(*net.TCPAddr).Port, statePID)
+				if tc.closeListener {
+					_ = listener.Close()
+				}
 
 				writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
 				writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh

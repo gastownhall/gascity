@@ -2540,7 +2540,7 @@ func validDoltRuntimeStateIdentity(state doltRuntimeState, cityPath string) (man
 }
 
 func managedDoltRuntimeProcessOwned(state doltRuntimeState, layout managedDoltRuntimeLayout) bool {
-	holderPID := findPortHolderPID(strconv.Itoa(state.Port))
+	holderPID := findPortHolderPID(strconv.Itoa(state.Port), state.PID)
 	if holderPID > 0 && holderPID != state.PID {
 		return false
 	}
