@@ -32,9 +32,9 @@ const (
 )
 
 func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
-	attempt, err := strconv.Atoi(bead.Metadata[beadmeta.AttemptMetadataKey])
+	attempt, err := strconv.Atoi(beadmeta.RetryAttemptValue(bead.Metadata))
 	if err != nil || attempt < 1 {
-		return ControlResult{}, fmt.Errorf("%s: invalid gc.attempt %q", bead.ID, bead.Metadata[beadmeta.AttemptMetadataKey])
+		return ControlResult{}, fmt.Errorf("%s: invalid gc.retry_attempt/gc.attempt %q", bead.ID, beadmeta.RetryAttemptValue(bead.Metadata))
 	}
 	maxAttempts, err := strconv.Atoi(bead.Metadata[beadmeta.MaxAttemptsMetadataKey])
 	if err != nil || maxAttempts < 1 {
@@ -270,7 +270,7 @@ func resolveRetryRunSubject(store beads.Store, eval beads.Bead, logicalID string
 			if candidate.Metadata[beadmeta.LogicalBeadIDMetadataKey] != logicalID {
 				continue
 			}
-			if candidate.Metadata[beadmeta.AttemptMetadataKey] != attemptStr {
+			if beadmeta.RetryAttemptValue(candidate.Metadata) != attemptStr {
 				continue
 			}
 			return candidate, nil
@@ -542,17 +542,20 @@ func requiredArtifactWorkDir(meta map[string]string) string {
 //	{worktree}          the resolved worktree root (also the implicit base for
 //	                    a relative template)
 //	{root} / {root_id}  the workflow root bead ID
-//	{attempt}           gc.attempt — this step's own retry counter
+//	{attempt}           gc.attempt — the v1.4.2 value: the loop iteration
+//	                    inside a ralph body, the retry counter outside one
 //	{iteration}         gc.iteration — the loop iteration the step ran in
+//	{retry_attempt}     gc.retry_attempt — this step's own retry counter
 //
-// {attempt} and {iteration} are NOT interchangeable. A directory shared by the
-// steps of one loop iteration is named by {iteration}; only {attempt} advances
-// when a single step retries. Any token left unexpanded fails the template
-// loudly rather than resolving to a partial path.
+// A directory shared by the steps of one loop iteration is named by
+// {iteration} (or, for packs that must also run on v1.4.2, {attempt}); only
+// {retry_attempt} advances when a single step retries. Any token left
+// unexpanded fails the template loudly rather than resolving to a partial path.
 func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath string, opts ProcessOptions) (string, string, string, error) {
 	rootID := strings.TrimSpace(subject.Metadata[beadmeta.RootBeadIDMetadataKey])
 	attempt := strings.TrimSpace(subject.Metadata[beadmeta.AttemptMetadataKey])
 	iteration := strings.TrimSpace(subject.Metadata[beadmeta.IterationMetadataKey])
+	retryAttempt := beadmeta.RetryAttemptValue(subject.Metadata)
 	worktree := requiredArtifactWorkDir(subject.Metadata)
 
 	if worktree == "" {
@@ -574,14 +577,17 @@ func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath 
 	path = strings.ReplaceAll(path, "{root}", rootID)
 	path = strings.ReplaceAll(path, "{root_id}", rootID)
 	path = strings.ReplaceAll(path, "{attempt}", attempt)
+	// {retry_attempt} is one step's own retry counter. It falls back to
+	// gc.attempt on a bead minted before the key existed.
+	if retryAttempt != "" {
+		path = strings.ReplaceAll(path, "{retry_attempt}", retryAttempt)
+	}
 	// {iteration} names the loop iteration a whole sub-DAG ran in, which is the
-	// directory a set of sibling steps share. {attempt} names one step's own
-	// retry counter, which only the step that retried advances — so a template
-	// built from it sends a retried reader to a directory its siblings never
-	// wrote. Substituted only when the bead actually carries the value: an empty
-	// replacement would produce a silently wrong path segment and the gate would
-	// then blame the step for the resolver's gap, where falling through to the
-	// unresolved-template check below names the real fault (ga-la0py).
+	// directory a set of sibling steps share. Substituted only when the bead
+	// actually carries the value: an empty replacement would produce a silently
+	// wrong path segment and the gate would then blame the step for the
+	// resolver's gap, where falling through to the unresolved-template check
+	// below names the real fault (ga-la0py).
 	if iteration != "" {
 		path = strings.ReplaceAll(path, "{iteration}", iteration)
 	}
@@ -797,9 +803,9 @@ func propagateRetrySubjectMetadata(store beads.Store, logicalID string, subject 
 }
 
 func appendRetryAttempt(store beads.Store, logicalID string, prevRun, prevEval beads.Bead, nextAttempt int, routeCfg *config.City) error {
-	oldAttempt, err := strconv.Atoi(prevRun.Metadata[beadmeta.AttemptMetadataKey])
+	oldAttempt, err := strconv.Atoi(beadmeta.RetryAttemptValue(prevRun.Metadata))
 	if err != nil || oldAttempt < 1 {
-		return fmt.Errorf("%s: invalid gc.attempt %q", prevRun.ID, prevRun.Metadata[beadmeta.AttemptMetadataKey])
+		return fmt.Errorf("%s: invalid gc.retry_attempt/gc.attempt %q", prevRun.ID, beadmeta.RetryAttemptValue(prevRun.Metadata))
 	}
 	rootID := prevRun.Metadata[beadmeta.RootBeadIDMetadataKey]
 	if rootID == "" {
@@ -855,7 +861,7 @@ func retryAttemptBead(prev beads.Bead, logicalID, stepRef string, attempt int, r
 	if assignee == "" {
 		clearSessionAffinityMetadata(meta)
 	}
-	meta[beadmeta.AttemptMetadataKey] = strconv.Itoa(attempt)
+	beadmeta.StampRetryAttempt(meta, attempt)
 	meta[beadmeta.RetryFromMetadataKey] = prev.ID
 	meta[beadmeta.StepRefMetadataKey] = stepRef
 	meta[beadmeta.LogicalBeadIDMetadataKey] = logicalID
@@ -876,7 +882,7 @@ func retryEvalBead(prev beads.Bead, logicalID, stepRef string, attempt int) bead
 	meta := cloneMetadata(prev.Metadata)
 	clearRetryEphemera(meta)
 	clearSessionAffinityMetadata(meta)
-	meta[beadmeta.AttemptMetadataKey] = strconv.Itoa(attempt)
+	beadmeta.StampRetryAttempt(meta, attempt)
 	meta[beadmeta.RetryFromMetadataKey] = prev.ID
 	meta[beadmeta.StepRefMetadataKey] = stepRef
 	meta[beadmeta.LogicalBeadIDMetadataKey] = logicalID

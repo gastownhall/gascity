@@ -5275,6 +5275,104 @@ func TestCommitStartResult_AtomicBatchLandsStateAndClaimClearTogether(t *testing
 	}
 }
 
+// TestCommitStartResult_HealedAwakeBeforeCommitStillConfirmsCreation pins the
+// Tier C first-run race: the async start is enqueued while the bead is
+// "creating", the reconciler's heal pass sees the live runtime and projects
+// "awake" onto the bead, and only then does the start commit land. The commit
+// must still stamp state_reason=creation_complete — that marker is what
+// poolSessionWithinPostCreateProtection keys the post-create demand floor on,
+// and without it the fresh pool worker was drained as "orphaned" seconds after
+// claiming its first step. The in-flight awake interval the heal opened must
+// not be reset (mirrors recoverRunningPendingCreate).
+func TestCommitStartResult_HealedAwakeBeforeCommitStillConfirmsCreation(t *testing.T) {
+	store := beads.NewMemStore()
+	healedAwakeAt := "2026-03-18T11:59:58Z"
+	bead, err := store.Create(beads.Bead{
+		Title:  "claude",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "claude-w1",
+			"template":             "claude",
+			"pool_managed":         "true",
+			"pending_create_claim": "true",
+			// The heal pass already rewrote creating -> awake.
+			"state":            "awake",
+			"awake_started_at": healedAwakeAt,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := startResult{
+		prepared: preparedStart{
+			candidate: startCandidate{
+				info: sessiontest.SeedBead(t, bead),
+				tp: TemplateParams{
+					SessionName:  "claude-w1",
+					TemplateName: "claude",
+				},
+			},
+			coreHash: "core",
+			liveHash: "live",
+		},
+		outcome:  "success",
+		started:  time.Date(2026, 3, 18, 11, 59, 57, 0, time.UTC),
+		finished: time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC),
+	}
+	commitAt := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
+	if !commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: commitAt}, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
+		t.Fatal("commitStartResult returned false for a successful start onto a healed-awake bead")
+	}
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["state"] != "active" {
+		t.Errorf("state = %q, want active", got.Metadata["state"])
+	}
+	if got.Metadata["state_reason"] != "creation_complete" {
+		t.Errorf("state_reason = %q, want creation_complete: a start committed after the heal pass wrote awake lost its post-create protection", got.Metadata["state_reason"])
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Errorf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
+	}
+	if got.Metadata["awake_started_at"] != healedAwakeAt {
+		t.Errorf("awake_started_at = %q, want the in-flight interval %q kept (StartsAwakeInterval must stay keyed on a genuine pending start)", got.Metadata["awake_started_at"], healedAwakeAt)
+	}
+	if info := sessiontest.SeedBead(t, got); !poolSessionWithinPostCreateProtection(info, commitAt.Add(30*time.Second)) {
+		t.Error("fresh pool worker is not within post-create protection after its start committed onto a healed-awake bead")
+	}
+}
+
+// TestConfirmStartCommitState pins the shared start-commit confirm predicate
+// used by both commitStartResultTraced and recoverRunningPendingCreate.
+func TestConfirmStartCommitState(t *testing.T) {
+	for state, want := range map[string]bool{
+		"":              true,
+		"start-pending": true,
+		"creating":      true,
+		"asleep":        true,
+		"drained":       true,
+		"awake":         true,
+		"active":        false,
+		"draining":      false,
+		"archived":      false,
+		"quarantined":   false,
+	} {
+		if got := confirmStartCommitState(state); got != want {
+			t.Errorf("confirmStartCommitState(%q) = %v, want %v", state, got, want)
+		}
+		if confirmPendingStart(state) && !confirmStartCommitState(state) {
+			t.Errorf("confirmStartCommitState(%q) must be a superset of confirmPendingStart", state)
+		}
+	}
+	if confirmPendingStart("awake") {
+		t.Error("confirmPendingStart(awake) = true; StartsAwakeInterval would reset an in-flight awake interval")
+	}
+}
+
 func TestExecutePlannedStarts_UsesLogicalTemplateForDependencyRechecks(t *testing.T) {
 	maxWakes := 8
 	dropAfter := 3
@@ -5948,7 +6046,7 @@ func TestStopTargetsBounded_AllUnresolvedFallsBackToSerial(t *testing.T) {
 }
 
 func TestCommitStartResult_LogsSuccessOutcome(t *testing.T) {
-	store := newTestStore()
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "b1", Type: sessionBeadType, Status: "open"}}, nil)
 	candidate := startCandidate{
 		info: sessionpkg.Info{
 			ID:                  "b1",
@@ -6045,6 +6143,101 @@ func TestCommitStartResult_TerminalProviderErrorMarksUnhealthy(t *testing.T) {
 	}
 	if got["last_woke_at"] != "" {
 		t.Fatalf("last_woke_at = %q, want cleared", got["last_woke_at"])
+	}
+}
+
+func seedTerminalPendingCreate(t *testing.T, store beads.Store) beads.Bead {
+	t.Helper()
+	b, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":             "worker",
+			"session_name":         "worker",
+			"state":                "creating",
+			"pending_create_claim": "true",
+			"generation":           "1",
+			"instance_token":       "tok-1",
+			"last_woke_at":         "2026-05-27T12:00:00Z",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func terminalPendingCreateResult(t *testing.T, store beads.Store, id string, now time.Time) startResult {
+	t.Helper()
+	info, err := sessionFrontDoor(store).Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return startResult{
+		prepared:        preparedStart{candidate: startCandidate{info: info, tp: TemplateParams{TemplateName: "worker", SessionName: "worker"}}},
+		err:             errors.New("model_not_found: gpt-5.3-codex-spark"),
+		outcome:         "provider_error",
+		started:         now,
+		finished:        now,
+		rollbackPending: true,
+	}
+}
+
+// A pending create whose first start hits a terminal provider error closes as
+// failed-create and keeps the terminal record (ga-z8yi2j: marking first cleared
+// the claim the fenced rollback requires, so the row stayed open and asleep).
+func TestCommitStartResult_TerminalProviderErrorRollsBackPendingCreate(t *testing.T) {
+	store := beads.NewMemStore()
+	b := seedTerminalPendingCreate(t, store)
+	now := time.Unix(3, 0).UTC()
+	result := terminalPendingCreateResult(t, store, b.ID, now)
+	var stderr bytes.Buffer
+	if commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: now}, events.NewFake(), 0, &stderr, &stderr) {
+		t.Fatal("commitStartResult returned true for a terminal provider error")
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed (stderr %q)", got.Status, stderr.String())
+	}
+	for key, want := range map[string]string{
+		"state":                                 "failed-create",
+		"pending_create_claim":                  "",
+		"sleep_reason":                          "provider-terminal-error",
+		sessionProviderTerminalErrorMetadataKey: "model_not_found",
+		sessionHealthStateMetadataKey:           "unhealthy",
+	} {
+		if got.Metadata[key] != want {
+			t.Errorf("%s = %q, want %q", key, got.Metadata[key], want)
+		}
+	}
+}
+
+// The terminal mark shares the rollback's fence: a result whose observed
+// incarnation was superseded must neither close nor mark the newer one.
+func TestCommitStartResult_TerminalProviderErrorLeavesSupersededPendingCreateUntouched(t *testing.T) {
+	store := beads.NewMemStore()
+	b := seedTerminalPendingCreate(t, store)
+	now := time.Unix(3, 0).UTC()
+	result := terminalPendingCreateResult(t, store, b.ID, now)
+	if err := store.SetMetadata(b.ID, "instance_token", "tok-2"); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: now}, events.NewFake(), 0, &stderr, &stderr)
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == "closed" {
+		t.Fatal("a superseded incarnation was closed by a stale terminal-error result")
+	}
+	if got.Metadata["pending_create_claim"] != "true" || got.Metadata["state"] != "creating" || got.Metadata[sessionProviderTerminalErrorMetadataKey] != "" {
+		t.Fatalf("superseded row claim/state/terminal = %q/%q/%q, want true/creating/empty",
+			got.Metadata["pending_create_claim"], got.Metadata["state"], got.Metadata[sessionProviderTerminalErrorMetadataKey])
 	}
 }
 
@@ -7700,8 +7893,8 @@ func TestPrepareStartCandidate_EmptyPoolBeadAliasScrubsStampedTemplateIdentity(t
 	} else if got != "" {
 		t.Fatalf("GC_ALIAS = %q, want empty because the pool alias is deferred", got)
 	}
-	if got := prepared.cfg.Env["GC_AGENT"]; got != "ants-pool-gc123" {
-		t.Fatalf("GC_AGENT = %q, want non-conflicting session name %q", got, "ants-pool-gc123")
+	if got := prepared.cfg.Env["GC_AGENT"]; got != bead.ID {
+		t.Fatalf("GC_AGENT = %q, want the unaliased pool session bead id %q", got, bead.ID)
 	}
 	if got := prepared.cfg.Env["TEMPLATE_KEY"]; got != "keep" {
 		t.Fatalf("TEMPLATE_KEY = %q, want %q (unrelated template env must survive merge)", got, "keep")

@@ -1449,10 +1449,12 @@ func (cr *CityRuntime) tick(
 	// Wisp GC: purge expired closed molecules. The molecule/wisp/workflow purge
 	// arm routes through the typed graph-class store; the read-message retention
 	// arm through the typed messaging-class store. Both collapse to the city store
-	// today, so the GC is byte-identical.
+	// today, so the GC is byte-identical. The closed session purge arm gets the
+	// sessions class only when it is relocated onto a SQLite infra ledger; on an
+	// unsplit city it gets nothing and never touches the work store.
 	if graphStore := cr.graphBeadStore(); cr.wg != nil && graphStore.Store != nil && cr.wg.shouldRun(time.Now()) {
 		phaseStart = time.Now()
-		purged, gcErr := cr.wg.runGC(graphStore, cr.mailBeadStore(), time.Now())
+		purged, gcErr := cr.wg.runGC(graphStore, cr.infraSessionLedger(), cr.mailBeadStore(), time.Now())
 		recordPhase(TraceSiteControllerTickPhase, "wisp_gc", phaseStart, map[string]any{"purged": purged})
 		if gcErr != nil {
 			for _, line := range strings.Split(gcErr.Error(), "\n") {
@@ -2849,31 +2851,6 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 			time.Now(),
 			cr.rec,
 			cr.requestExecutionStalledDrain,
-			cr.stdout,
-		)
-		// The never-claimed lane (ga-evxqd). The three above key on a bead the
-		// seat was BOUND to, on one preassigned successor, or on an in_progress
-		// claim; this one keys on the seat's own OPEN ready work — assigned to
-		// it or merely routed to its identity — which is the residual none of
-		// them can see. It reads the BROAD open-routed view rather than the
-		// pool-demand-narrowed one because it settles readiness itself, from
-		// each row's own dependency edges: a named seat's routed work is not
-		// pool demand, so the narrowed view can be silent on exactly the rows
-		// this lane exists for. It nudges and reports; it never drains.
-		nudgeStalledSeatClaims(
-			cr.sp,
-			cr.cfg,
-			sessStore,
-			stalledPoolBeads,
-			result.AssignedWorkBeads,
-			result.AssignedWorkStores,
-			result.AssignedWorkStoreRefs,
-			result.OpenRoutedWorkBeads,
-			result.OpenRoutedWorkStores,
-			result.OpenRoutedWorkStoreRefs,
-			result.StoreQueryPartial || result.SessionQueryPartial || result.OpenRoutedWorkQueryPartial,
-			time.Now(),
-			cr.rec,
 			cr.stdout,
 		)
 	}

@@ -88,3 +88,83 @@ func readRecordedBdCalls(t *testing.T, recorded string) string {
 	}
 	return string(data)
 }
+
+// writeCustomTypesStateBdStub is a pinned bd that answers the config row with
+// row and `types --json` with table, and records every call.
+func writeCustomTypesStateBdStub(t *testing.T, dir, recorded, row string, table []string) string {
+	t.Helper()
+	path := filepath.Join(dir, "state-bd")
+	script := "#!/bin/sh\n" +
+		"echo \"$@\" >> " + recorded + "\n" +
+		"case \"$1 $2\" in\n" +
+		"  'config get') echo '{\"value\":\"" + row + "\"}' ;;\n" +
+		"  'types --json') echo '{\"custom_types\":[\"" + strings.Join(table, "\",\"") + "\"]}' ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestCustomTypesCheckFixPreservesTableOnlyTypes is the A3 guard for #6495.
+// `bd config set types.custom` replaces the custom_types table wholesale, so a
+// Fix that merged only the config row deleted every type the table alone
+// carried -- the shape an upgraded legacy-managed store has once gc's start
+// path rewrote the row. Fix must merge row ∪ table ∪ required.
+func TestCustomTypesCheckFixPreservesTableOnlyTypes(t *testing.T) {
+	dir := guardedTempDir(t)
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	v142 := RequiredCustomTypes[:len(RequiredCustomTypes)-1] // everything but startup-health-episode
+	if RequiredCustomTypes[len(RequiredCustomTypes)-1] != "startup-health-episode" {
+		t.Fatalf("test assumes startup-health-episode is the last required type: %v", RequiredCustomTypes)
+	}
+	table := append(append([]string{}, v142...), "ops-extra")
+	recorded := filepath.Join(dir, "bd-calls")
+	pinned := writeCustomTypesStateBdStub(t, dir, recorded, strings.Join(RequiredCustomTypes, ","), table)
+
+	c := NewCustomTypesCheck(dir, "test", pinned)
+	r := c.Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusError || !strings.Contains(r.Message, "startup-health-episode") {
+		t.Fatalf("Run = %v %q, want an error naming the table-missing startup-health-episode", r.Status, r.Message)
+	}
+	if err := c.Fix(&CheckContext{CityPath: dir}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	var set string
+	for _, line := range strings.Split(readRecordedBdCalls(t, recorded), "\n") {
+		if v, ok := strings.CutPrefix(line, "config set types.custom "); ok {
+			set = v
+		}
+	}
+	want := strings.Join(append(append([]string{}, RequiredCustomTypes...), "ops-extra"), ",")
+	if set != want {
+		t.Fatalf("Fix wrote types.custom = %q, want %q (table-only ops-extra must survive)", set, want)
+	}
+}
+
+// TestCustomTypesCheckFixRefusesWithoutTheTable: a Fix that cannot read the
+// custom_types table cannot prove its write is a superset, so it must fail
+// rather than risk deleting table-only types.
+func TestCustomTypesCheckFixRefusesWithoutTheTable(t *testing.T) {
+	dir := guardedTempDir(t)
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	recorded := filepath.Join(dir, "bd-calls")
+	path := filepath.Join(dir, "no-types-bd")
+	script := "#!/bin/sh\necho \"$@\" >> " + recorded + "\n" +
+		"case \"$1 $2\" in\n  'config get') echo '{\"value\":\"molecule\"}' ;;\n  'types --json') exit 1 ;;\nesac\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	c := NewCustomTypesCheck(dir, "test", path)
+	c.missing = []string{"convoy"}
+	if err := c.Fix(&CheckContext{CityPath: dir}); err == nil {
+		t.Fatal("Fix succeeded without reading custom_types")
+	}
+	if calls := readRecordedBdCalls(t, recorded); strings.Contains(calls, "config set") {
+		t.Fatalf("Fix wrote types.custom without reading custom_types; calls:\n%s", calls)
+	}
+}

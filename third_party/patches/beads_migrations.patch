@@ -1,7 +1,20 @@
+diff -ruN a/internal/storage/issueops/BUILD.bazel b/internal/storage/issueops/BUILD.bazel
+--- a/internal/storage/issueops/BUILD.bazel	2026-09-24 12:00:00.000000000 +0000
++++ b/internal/storage/issueops/BUILD.bazel	2026-09-24 12:00:00.000000000 +0000
+@@ -0,0 +1,9 @@
++
++# Patched for gascity bazel farm: expose search.go as runfiles data for
++# internal/beads' schema_cursor_drift_test (TestNativeGetFilterShapeMatchesTheH1Claim),
++# which reads the pinned library's own source.
++filegroup(
++    name = "drift_srcs",
++    srcs = ["search.go"],
++    visibility = ["//visibility:public"],
++)
 diff -ruN a/internal/storage/schema/BUILD.bazel b/internal/storage/schema/BUILD.bazel
 --- a/internal/storage/schema/BUILD.bazel	2026-09-23 12:15:55.244530897 +0000
 +++ b/internal/storage/schema/BUILD.bazel	2026-09-23 12:15:55.257530882 +0000
-@@ -0,0 +1,9 @@
+@@ -0,0 +1,18 @@
 +
 +# Patched for gascity bazel farm: expose the schema migrations as a public
 +# filegroup so the pinned-cursor drift test can declare them as runfiles
@@ -9,5 +22,27 @@ diff -ruN a/internal/storage/schema/BUILD.bazel b/internal/storage/schema/BUILD.
 +filegroup(
 +    name = "migrations",
 +    srcs = glob(["migrations/**"]),
++    visibility = ["//visibility:public"],
++)
++
++# Every non-test Go source of the package: the sentinel half of the drift
++# pin parses the whole declared migrationSource set, so the filegroup must
++# match the test's own readGoSources filter (*.go minus *_test.go).
++filegroup(
++    name = "drift_srcs",
++    srcs = glob(["*.go"], exclude = ["*_test.go"]),
++    visibility = ["//visibility:public"],
++)
+diff -ruN a/internal/types/BUILD.bazel b/internal/types/BUILD.bazel
+--- a/internal/types/BUILD.bazel	2026-09-24 12:00:00.000000000 +0000
++++ b/internal/types/BUILD.bazel	2026-09-24 12:00:00.000000000 +0000
+@@ -0,0 +1,9 @@
++
++# Patched for gascity bazel farm: expose types.go as runfiles data for
++# internal/beads' schema_cursor_drift_test (TestNativeGetFilterShapeMatchesTheH1Claim),
++# which reads the pinned library's own source.
++filegroup(
++    name = "drift_srcs",
++    srcs = ["types.go"],
 +    visibility = ["//visibility:public"],
 +)

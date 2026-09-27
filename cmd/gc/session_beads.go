@@ -1882,6 +1882,22 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				}
 			}
 		}
+		if !exists && isPoolInstance {
+			// Identity lease, same as the planner's create path
+			// (createPoolSessionBeadWithIdentifiers): this lane mints a
+			// bead-scoped name too, so it must not mint a second generation
+			// beside an open, unconfirmed create for the same slot identity —
+			// that row may still own a box whose teardown has not been
+			// confirmed (releaseBeadScopedPoolRuntime, ga-vcjr9).
+			leaseTemplate := tp.TemplateName
+			if tp.RigName != "" && !strings.Contains(leaseTemplate, "/") {
+				leaseTemplate = tp.RigName + "/" + leaseTemplate
+			}
+			if err := ensurePoolIdentityNotHeldByOpenRow(store, cfg, nil, leaseTemplate, agentName); err != nil {
+				fmt.Fprintf(stderr, "session beads: not creating pool session for %s: %v\n", agentName, err) //nolint:errcheck
+				continue
+			}
+		}
 		if !exists {
 			// Create a new session bead.
 			createState := state
@@ -1999,11 +2015,13 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			finalizeCreatedSessionName := func() {
 				createdSessionName = strings.TrimSpace(newBead.Metadata["session_name"])
 				if isPoolInstance {
-					// Derived from the pool identity, never the bead ID: a
-					// bead-ID name is a fresh runtime box per attempt, which is
-					// the ga-vcjr9 leak. Same derivation as the planner's
-					// create path (derivePoolSessionName).
-					createdSessionName = poolRuntimeSessionName(cfg, agentName, qualifiedTemplate, transientPoolSlot)
+					// Bead-ID scoped, same as the planner's create path
+					// (createPoolSessionBeadWithIdentifiers): the runtime name
+					// resolves back to its bead. ga-vcjr9's leak is closed by
+					// releaseBeadScopedPoolRuntime (a failed create's runtime is
+					// torn down before its row may close) plus the identity
+					// lease, not by reusing a name across generations.
+					createdSessionName = PoolSessionName(qualifiedTemplate, newBead.ID)
 					if err := sessFront.SetMarker(newBead.ID, "session_name", createdSessionName); err != nil {
 						finalizeErr = err
 						fmt.Fprintf(stderr, "session beads: setting pool session_name for %s: %v\n", agentName, err) //nolint:errcheck
@@ -2869,6 +2887,15 @@ func reapStaleSessionBeads(
 				continue
 			}
 		}
+		// A bead-scoped pool row may only close once its runtime is confirmed
+		// gone (releaseBeadScopedPoolRuntime, ga-vcjr9). IsRunning=false is not
+		// proof of teardown (k8s reports false for a pod whose tmux is not up,
+		// or on an API error), and closing releases the identity lease so a
+		// successor mints under a new name, leaving this box unaddressed. Hold
+		// the row; the next pass retries.
+		if !releaseBeadScopedPoolRuntime(info, sp, stderr) {
+			continue
+		}
 		if closeBead(store, info.ID, "stale-session", now.UTC(), stderr) {
 			fmt.Fprintf(stderr, "WARN: reconciler: reaped stuck-creating session bead %s — tmux session %q not found\n", info.ID, sn) //nolint:errcheck
 			reaped++
@@ -3248,7 +3275,7 @@ func (s *fencedInfrastructureRootSet) put(cityPath string, keys map[string]struc
 
 func sweepProcessTableOrphans(
 	sp runtime.Provider,
-	_ *sessionBeadSnapshot,
+	sessionBeads *sessionBeadSnapshot,
 	store beads.Store,
 	cityPath string,
 	stderr io.Writer,
@@ -3261,6 +3288,19 @@ func sweepProcessTableOrphans(
 	}
 	scanner, ok := sp.(runtime.ProcessTableScanner)
 	if !ok {
+		return 0
+	}
+	// Terminating a live runtime is irreversible, so an orphan verdict needs two
+	// independent reads to agree: this tick's session-bead snapshot (the open
+	// set) and a direct store lookup. Without a cleanly loaded snapshot there is
+	// no second read — the tick path hands us nil when the list failed — so
+	// no runtime can be proven orphaned this sweep; the next tick retries.
+	if sessionBeads == nil {
+		fmt.Fprintf(stderr, "session reconciler: skipping process-table orphan sweep: no session-bead snapshot to corroborate orphan verdicts\n") //nolint:errcheck
+		return 0
+	}
+	if err := sessionBeads.LoadError(); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: skipping process-table orphan sweep: session-bead snapshot incomplete: %v\n", err) //nolint:errcheck
 		return 0
 	}
 	found, err := scanner.FindRuntimesBySessionID("")
@@ -3302,7 +3342,21 @@ func sweepProcessTableOrphans(
 			fmt.Fprintf(stderr, "session reconciler: looking up process-table orphan session bead %s pid=%d: %v\n", live.SessionID, live.PID, err) //nolint:errcheck
 			continue
 		}
-		// here: bead is closed, or confirmed absent (ErrNotFound) — reap below,
+		// The store says closed or absent. The snapshot must agree: if it still
+		// lists the bead open, the two reads disagree (a stale cache, a
+		// transient error mapped to not-found, or a bead closed and reopened
+		// between them) and killing on the store's word alone could SIGTERM a
+		// healthy worker. Leave it for a later sweep, when both reads settle.
+		if _, open := sessionBeads.FindInfoByID(live.SessionID); open {
+			storeVerdict := "closed"
+			if err != nil {
+				storeVerdict = "not found"
+			}
+			fmt.Fprintf(stderr, "session reconciler: leaving process-table root pid=%d session=%s alone: store reports bead %s but session-bead snapshot has it open\n", live.PID, live.SessionID, storeVerdict) //nolint:errcheck
+			continue
+		}
+		// here: bead is closed, or confirmed absent (ErrNotFound), and the
+		// snapshot agrees it is not open — reap below,
 		// unless the root is city infrastructure that merely inherited the
 		// session's environment (a managed Dolt scope watchdog or bd's
 		// db-proxy-child started from an agent shell). Terminating it signals
@@ -3336,7 +3390,7 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	cfg *config.City,
 	b beads.Bead,
 	closeReason string,
-	stopReason string,
+	_ string, // stopReason: unused -- a running session is declined here, never stopped
 	now time.Time,
 	stderr io.Writer,
 ) bool {
@@ -3351,7 +3405,9 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	if hasAssignedWork {
 		return false
 	}
-	if !stopRuntimeBeforeSessionBeadMutation(store, sp, cfg, b, stopReason, stderr) {
+	sessionName := strings.TrimSpace(b.Metadata["session_name"])
+	if sessionName != "" && sp != nil && sp.IsRunning(sessionName) {
+		fmt.Fprintf(stderr, "session work guard: declining to close %s: runtime %q is still running\n", b.ID, sessionName) //nolint:errcheck
 		return false
 	}
 	hasAssignedWork, err = sessionHasOpenAssignedWorkForConfig(cityPath, cfg, store, rigStores, b)
