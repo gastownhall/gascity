@@ -98,17 +98,10 @@ jobs:
           mkdir -p /tmp/gc-test-home
           echo "HOME=/tmp/gc-test-home" >> "$GITHUB_ENV"
 
-      - name: "bazel test //... (single server, sync check + test)"
+      - name: "bazel test //..."
         run: |
           ARGS=(--output_user_root="$RUNNER_TEMP"/bazel-outputs)
           PROFILE=(--profile=/tmp/bazel-profile.json)
-          # Sync check first (reuses this step's server):
-          make bazel-sync
-          git diff --exit-code || {
-            echo "BUILD files out of sync; run 'make bazel-sync' and commit the result." >&2
-            git diff | head -80 >&2
-            exit 1
-          }
           if [ -f .bazelrc.local ]; then
             bazel "${ARGS[@]}" test "${PROFILE[@]}" //... --config=remote-exec --test_output=errors --keep_going
           else
@@ -127,3 +120,27 @@ jobs:
           path: |
             bazel-testlogs/**/test.log
           retention-days: 7
+
+  sync-check:
+    name: BUILD files in sync
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+      - name: Install bazel via bazelisk
+        run: |
+          curl -sSfL -o /tmp/bazelisk             https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
+          sudo install -m 0755 /tmp/bazelisk /usr/local/bin/bazel
+          sudo chmod 755 /home/ubuntu 2>/dev/null || true
+          sudo mkdir -p /home/ubuntu/.cache && sudo chown "$(id -u):$(id -g)" /home/ubuntu/.cache
+      - name: BUILD files are in sync (gazelle + repo tree)
+        run: |
+          make bazel-sync
+          git diff --exit-code || {
+            echo "BUILD files out of sync; run 'make bazel-sync' and commit the result." >&2
+            git diff | head -80 >&2
+            exit 1
+          }
