@@ -366,7 +366,7 @@ func TestOrderRunAcceptsSuppliedRequiredVar(t *testing.T) {
 	aa := []orders.Order{{Name: "needs-target", Trigger: "manual", Formula: "e1-var-required", FormulaLayer: dir}}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunWithJSON(aa, "needs-target", "", "/city", beads.OrdersStore{Store: beads.NewMemStore()},
+	code := doOrderRunWithJSON(aa, "needs-target", "", dir, beads.OrdersStore{Store: beads.NewMemStore()},
 		nil, false, map[string]string{"target": "srvcity"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRunWithJSON = %d, want 0; stderr: %s\n"+
@@ -377,7 +377,7 @@ func TestOrderRunAcceptsSuppliedRequiredVar(t *testing.T) {
 
 	// Omitting it must still be refused — the fix must not turn required off.
 	var stdout2, stderr2 bytes.Buffer
-	if code := doOrderRunWithJSON(aa, "needs-target", "", "/city", beads.OrdersStore{Store: beads.NewMemStore()},
+	if code := doOrderRunWithJSON(aa, "needs-target", "", dir, beads.OrdersStore{Store: beads.NewMemStore()},
 		nil, false, nil, &stdout2, &stderr2); code == 0 {
 		t.Fatal("doOrderRunWithJSON with no vars = 0, want non-zero: a required var with no " +
 			"default must still be refused when omitted")
