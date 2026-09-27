@@ -4064,7 +4064,55 @@ op_provider_owned_init() {
     # under the provider op timeout; cmd/gc owns that step (see
     # registerProviderOwnedScopeCustomTypes) alongside the canonical config it
     # writes for the same scope.
-    GC_BEADS_PROVIDER_INIT=1 run_provider_owned_bd "$dir" "$@"
+    local anchored=false status=0
+    if anchor_fresh_beads_dir "$dir"; then
+        anchored=true
+    fi
+    GC_BEADS_PROVIDER_INIT=1 run_provider_owned_bd "$dir" "$@" || status=$?
+    if [ "$status" -ne 0 ] && [ "$anchored" = true ]; then
+        release_fresh_beads_dir_anchor "$dir"
+    fi
+    return "$status"
+}
+
+# anchor_fresh_beads_dir makes BEADS_DIR authoritative for a scope bd has not
+# initialized yet. bd honors BEADS_DIR only once that directory already holds
+# a project file (metadata.json, config.yaml, dolt/, embeddeddolt/ or *.db —
+# beads internal/beads FindBeadsDir/hasBeadsProjectFiles); an empty or missing
+# .beads is skipped and bd falls back to walking up from the CWD. A scope
+# created anywhere below another bd workspace (a city inside a repo that uses
+# beads, or under a home directory with ~/.beads) then binds that ancestor:
+# `bd init --init-if-missing --database <db>` aborts with "workspace already
+# initialized as database <ancestor>", and without --database it would
+# silently reuse the ancestor's store. An empty config.yaml is the smallest
+# project file that pins resolution to this scope; bd init keeps an existing
+# config.yaml rather than writing its all-comment template, and every setting
+# it persists (dolt.mode, sync.remote, ...) still lands in this file.
+#
+# Returns 0 only when it created the anchor, so a caller whose bd init fails
+# can remove it again: a leftover config.yaml reads as a persisted beads
+# identity to gc (scopeHasPersistedBeadsIdentity) and would misclassify the
+# retry.
+anchor_fresh_beads_dir() {
+    local dir="$1" beads_dir
+    beads_dir="$dir/.beads"
+    if [ -e "$beads_dir/metadata.json" ] || [ -e "$beads_dir/config.yaml" ] ||
+        [ -d "$beads_dir/dolt" ] || [ -d "$beads_dir/embeddeddolt" ]; then
+        return 1
+    fi
+    ensure_beads_dir_permissions "$dir"
+    : > "$beads_dir/config.yaml" || die "failed to create $beads_dir/config.yaml"
+    chmod 600 "$beads_dir/config.yaml" 2>/dev/null || true
+    return 0
+}
+
+# release_fresh_beads_dir_anchor removes the anchor anchor_fresh_beads_dir
+# created, but only while it is still the empty file this script wrote.
+release_fresh_beads_dir_anchor() {
+    local config="$1/.beads/config.yaml"
+    if [ -f "$config" ] && [ ! -s "$config" ] && [ ! -e "$1/.beads/metadata.json" ]; then
+        rm -f "$config"
+    fi
 }
 
 # provider_owned_retire_local_dolt retires the local Dolt lifecycle bd owns for
