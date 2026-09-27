@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -68,7 +69,16 @@ func ensureGCOwnedProxiedScopeSharedServerOff(cityPath, scopeRoot string) error 
 	if err != nil || !owned {
 		return err
 	}
-	path := filepath.Join(scopeRoot, ".beads", "config.yaml")
+	beadsDir := filepath.Join(scopeRoot, ".beads")
+	if _, err := os.Stat(beadsDir); err != nil {
+		if os.IsNotExist(err) {
+			// bd has not materialized the scope; there is no config to pin
+			// yet. The next init or start that creates it writes the pin.
+			return nil
+		}
+		return fmt.Errorf("inspecting %s: %w", beadsDir, err)
+	}
+	path := filepath.Join(beadsDir, "config.yaml")
 	changed, previous, err := contract.EnsureSharedServerDisabled(fsys.OSFS{}, path)
 	if err != nil {
 		return fmt.Errorf("pinning %s off in %s: %w", contract.SharedServerConfigKey, path, err)

@@ -209,3 +209,22 @@ func TestSessionEnvPinsBdSharedServerOffForGCOwnedProxiedScopes(t *testing.T) {
 		}
 	})
 }
+
+// A journaled scope bd has not materialized yet has no config to pin; the pin
+// must not conjure a .beads directory (the next init or start writes it).
+func TestEnsureGCOwnedProxiedScopeSharedServerOffSkipsUnmaterializedScope(t *testing.T) {
+	cityPath, _ := proxiedEnvTestCity(t)
+	rig := filepath.Join(cityPath, "rigs", "fresh")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := persistProviderScopeOwnership(cityPath, rig, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureGCOwnedProxiedScopeSharedServerOff(cityPath, rig); err != nil {
+		t.Fatalf("ensureGCOwnedProxiedScopeSharedServerOff: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rig, ".beads")); !os.IsNotExist(err) {
+		t.Fatalf("pin created %s/.beads (stat err %v)", rig, err)
+	}
+}
