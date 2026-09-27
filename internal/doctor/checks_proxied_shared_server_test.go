@@ -121,8 +121,10 @@ func TestUserLevelBdSharedServerMode(t *testing.T) {
 		t.Fatalf("legacy config: on=%v src=%q, want on from %s", on, src, legacy)
 	}
 
-	// ~/.config/bd (here: XDG_CONFIG_HOME/bd) outranks the legacy file.
-	userCfg := filepath.Join(xdg, "bd", "config.yaml")
+	// ~/.config/bd outranks the legacy file. (Not XDG_CONFIG_HOME/bd: on macOS
+	// os.UserConfigDir ignores XDG, so only the literal ~/.config path is
+	// portable.)
+	userCfg := filepath.Join(home, ".config", "bd", "config.yaml")
 	if err := os.MkdirAll(filepath.Dir(userCfg), 0o755); err != nil {
 		t.Fatal(err)
 	}
