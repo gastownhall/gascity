@@ -56,7 +56,12 @@ const (
 	// internal/bootstrap/packs/core/assets/scripts/** so a reaper.sh-only
 	// change runs the real-Dolt reaper tests. Reviewed delta: one filter path,
 	// no new job, trigger or permission.
-	expectedCIExecutionHash     = "e1ce0c687c18f42a0d5b0f8d32383154a2823db6c912dc1bce2d6c5c58f1fd37"
+	//
+	// Bumped again (F9 backport): beads-topology-acceptance gains one step
+	// running TestBeadsProxiedIgnoresUserLevelSharedServer (-timeout 15m) and
+	// its job cap moves 90 -> 110 minutes (release step budget 95). Reviewed
+	// delta: one test step and the cap, no new job, trigger or permission.
+	expectedCIExecutionHash     = "0a3358bcebb9b504bddc0b7d169303639ee6c23b926cc2c4f4cc956c612f94b8"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (v1.5.0 Tier C
 	// first-run drain) the tier-c job's -run selector gained

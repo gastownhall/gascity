@@ -2867,6 +2867,7 @@ run_bd_init_proxied() {
         cd "$dir" || exit 1
         export BEADS_DIR="$dir/.beads"
         export BEADS_DOLT_PROXIED_SERVER=1
+        pin_proxied_shared_server_off
         unset BEADS_DOLT_AUTO_START
         unset GC_DOLT GC_DOLT_HOST GC_DOLT_PORT GC_DOLT_USER GC_DOLT_PASSWORD
         unset GC_DOLT_DATA_DIR GC_DOLT_LOG_FILE GC_DOLT_STATE_FILE GC_DOLT_PID_FILE GC_DOLT_LOCK_FILE GC_DOLT_CONFIG_FILE
@@ -3141,7 +3142,7 @@ op_init() {
         proxied_needs_init=true
         if [ -f "$metadata_path" ]; then
             trace_bd_argv context
-            if (cd "$dir" && BEADS_DIR="$dir/.beads" BEADS_DOLT_PROXIED_SERVER=1 "$bd_bin" context >/dev/null 2>&1); then
+            if (cd "$dir" && { ! scope_pins_shared_server_off "$dir" || pin_proxied_shared_server_off; } && BEADS_DIR="$dir/.beads" BEADS_DOLT_PROXIED_SERVER=1 "$bd_bin" context >/dev/null 2>&1); then
                 proxied_needs_init=false
             fi
         fi
@@ -3725,6 +3726,39 @@ provider_owned_scope_is_local() {
     return 0
 }
 
+# pin_proxied_shared_server_off keeps a gc-owned proxied scope out of bd's
+# user-level shared-server mode. A `dolt.shared-server: true` in
+# ~/.beads/config.yaml or ~/.config/bd/config.yaml would otherwise root the
+# scope's proxy and Dolt child in ~/.beads/shared-server -- one Dolt root for
+# every city on the host, so two cities' hq stores become one database.
+# BD_DOLT_SHARED_SERVER is bd's env binding for the config key and outranks
+# every config file; BEADS_DOLT_SHARED_SERVER is bd's separate switch, read
+# before config and only for 1/true, so an inherited value is neutralized
+# rather than trusted. Mirrors applyProxiedSharedServerOptOut in cmd/gc.
+# Applied only to scopes gc owns: a scope being initialized through gc, or one
+# whose config.yaml carries gc's pin (scope_pins_shared_server_off). A proxied
+# scope gc merely found keeps the operator's resolution, so this script's bd
+# and an agent's bd never split one store across two Dolt roots.
+pin_proxied_shared_server_off() {
+    export BEADS_DOLT_SHARED_SERVER=0
+    export BD_DOLT_SHARED_SERVER=false
+}
+
+# scope_pins_shared_server_off succeeds when the scope's .beads/config.yaml
+# sets dolt.shared-server: false -- the pin gc writes into every gc-owned
+# proxied scope (nested form), or bd's flat dotted spelling.
+scope_pins_shared_server_off() {
+    local cfg="$1/.beads/config.yaml"
+    [ -f "$cfg" ] || return 1
+    awk '
+        { sub(/\r$/, "") }
+        /^[^[:space:]#]/ { in_dolt = ($0 ~ /^dolt:[[:space:]]*(#.*)?$/) }
+        in_dolt && /^[[:space:]]+shared-server:[[:space:]]*false[[:space:]]*(#.*)?$/ { found = 1 }
+        /^dolt\.shared-server:[[:space:]]*false[[:space:]]*(#.*)?$/ { found = 1 }
+        END { exit(found ? 0 : 1) }
+    ' "$cfg"
+}
+
 run_provider_owned_bd() {
     local dir="$1"
     shift
@@ -3747,6 +3781,19 @@ run_provider_owned_bd() {
             # A direct ready binding must not inherit a proxy selector from
             # the parent process. The binding determines its own transport.
             unset BEADS_DOLT_PROXIED_SERVER
+        fi
+        # A scope gc is initializing as proxied is gc-owned by construction.
+        # Any other proxied scope is pinned only when its config.yaml carries
+        # gc's pin (gc-owned); a found workspace keeps its own resolution.
+        # Known corner: a found scope whose own config already says
+        # shared-server: false (e.g. a clone of a gc city) under an explicitly
+        # exported BEADS_DOLT_SHARED_SERVER=1 is neutralized here (local),
+        # while gc's runtime env and an agent's bd honour the =1 (shared).
+        # That split needs the operator to force the mode on by env.
+        if [ "${GC_BEADS_PROVIDER_INIT:-}" = "1" ] && [ "${GC_BEADS_TRANSPORT:-}" = "proxied" ]; then
+            pin_proxied_shared_server_off
+        elif { [ "${GC_BEADS_TRANSPORT:-}" = "proxied" ] || scope_is_proxied "$dir"; } && scope_pins_shared_server_off "$dir"; then
+            pin_proxied_shared_server_off
         fi
         trace_bd_argv "$@"
         "${BD_BIN:-bd}" "$@"

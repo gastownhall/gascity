@@ -494,6 +494,10 @@ jobs:
   # for now these skip on their own GC_REQUIRE_ACCEPTANCE_LEGACY_GC switch
   # rather than the tooling one, and the skip is named in the job summary so it
   # reads as a known gap instead of a pass.
+  #
+  # Budget: the step -timeouts sum to 95 minutes (35 + 15 + 30 + 15, the last
+  # being the user-level shared-server isolation test) under a 110-minute job
+  # cap, leaving 15 for checkout, setup, the bd build and the test compile.
   beads-topology-acceptance:
     name: Beads / topology acceptance
     needs:
@@ -501,7 +505,7 @@ jobs:
       - changes
     if: ${{ needs.changes.outputs.beads_topology == 'true' }}
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    timeout-minutes: 90
+    timeout-minutes: 110
     env:
       DOLT_VERSION: "2.1.7"
       GC_REQUIRE_ACCEPTANCE_TOOLING: "1"
@@ -558,6 +562,12 @@ jobs:
           go test -tags acceptance_a -timeout 35m -count=1 -v \
             -run 'TestBeadsProxiedDefault$' ./test/acceptance/ 2>&1 \
             | tee "${RUNNER_TEMP}/proxied-default.log"
+      - name: User-level shared-server isolation acceptance
+        run: |
+          set -euo pipefail
+          go test -tags acceptance_a -timeout 15m -count=1 -v \
+            -run 'TestBeadsProxiedIgnoresUserLevelSharedServer$' ./test/acceptance/ 2>&1 \
+            | tee "${RUNNER_TEMP}/shared-server.log"
       - name: Migration acceptance (AC-X)
         run: |
           set -euo pipefail
