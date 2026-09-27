@@ -1,3 +1,0 @@
-build:remote-exec --remote_executor=grpcs://rbe.ops.gascity.com:443
-build:remote-exec --tls_client_certificate=/data/tmp/rbe-mtls/ci-client.pem
-build:remote-exec --tls_client_key=/data/tmp/rbe-mtls/ci-client-p8.key
