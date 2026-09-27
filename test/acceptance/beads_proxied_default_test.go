@@ -285,6 +285,11 @@ func beadsTopologyCheck(name string) bool {
 		// initialises here is asserted to carry idle_timeout -1, so a warning
 		// means gc's init stopped producing the topology it intends.
 		"proxied-idle-timeout",
+		// Every gc-owned proxied scope is pinned out of bd's user-level
+		// shared-server mode at init and start; a warning means the pin went
+		// missing and a user-level dolt.shared-server: true would relocate
+		// the store into ~/.beads/shared-server.
+		"proxied-shared-server",
 		// dolt-config is a statement about who runs the scope's Dolt: on a
 		// bd-owned scope gc retires its own managed config on purpose, so a
 		// warning here means doctor classified the scope as gc-managed. Its

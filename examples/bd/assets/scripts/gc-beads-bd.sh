@@ -3055,6 +3055,7 @@ run_bd_init_proxied() {
         cd "$dir" || exit 1
         export BEADS_DIR="$dir/.beads"
         export BEADS_DOLT_PROXIED_SERVER=1
+        pin_proxied_shared_server_off
         unset BEADS_DOLT_AUTO_START
         unset GC_DOLT GC_DOLT_HOST GC_DOLT_PORT GC_DOLT_USER GC_DOLT_PASSWORD
         unset GC_DOLT_DATA_DIR GC_DOLT_LOG_FILE GC_DOLT_STATE_FILE GC_DOLT_PID_FILE GC_DOLT_LOCK_FILE GC_DOLT_CONFIG_FILE
@@ -3329,7 +3330,7 @@ op_init() {
         proxied_needs_init=true
         if [ -f "$metadata_path" ]; then
             trace_bd_argv context
-            if (cd "$dir" && BEADS_DIR="$dir/.beads" BEADS_DOLT_PROXIED_SERVER=1 "$bd_bin" context >/dev/null 2>&1); then
+            if (cd "$dir" && pin_proxied_shared_server_off && BEADS_DIR="$dir/.beads" BEADS_DOLT_PROXIED_SERVER=1 "$bd_bin" context >/dev/null 2>&1); then
                 proxied_needs_init=false
             fi
         fi
@@ -3983,6 +3984,20 @@ provider_owned_scope_is_local() {
     return 0
 }
 
+# pin_proxied_shared_server_off keeps a gc-owned proxied scope out of bd's
+# user-level shared-server mode. A `dolt.shared-server: true` in
+# ~/.beads/config.yaml or ~/.config/bd/config.yaml would otherwise root the
+# scope's proxy and Dolt child in ~/.beads/shared-server -- one Dolt root for
+# every city on the host, so two cities' hq stores become one database.
+# BD_DOLT_SHARED_SERVER is bd's env binding for the config key and outranks
+# every config file; BEADS_DOLT_SHARED_SERVER is bd's separate switch, read
+# before config and only for 1/true, so an inherited value is neutralized
+# rather than trusted. Mirrors applyProxiedSharedServerOptOut in cmd/gc.
+pin_proxied_shared_server_off() {
+    export BEADS_DOLT_SHARED_SERVER=0
+    export BD_DOLT_SHARED_SERVER=false
+}
+
 run_provider_owned_bd() {
     local dir="$1"
     shift
@@ -4005,6 +4020,11 @@ run_provider_owned_bd() {
             # A direct ready binding must not inherit a proxy selector from
             # the parent process. The binding determines its own transport.
             unset BEADS_DOLT_PROXIED_SERVER
+        fi
+        # A ready scope carries no GC_BEADS_TRANSPORT: its persisted binding
+        # decides, so ask it (after the selector above is settled).
+        if [ "${GC_BEADS_TRANSPORT:-}" = "proxied" ] || { [ -z "${GC_BEADS_TRANSPORT:-}" ] && scope_is_proxied "$dir"; }; then
+            pin_proxied_shared_server_off
         fi
         trace_bd_argv "$@"
         "${BD_BIN:-bd}" "$@"

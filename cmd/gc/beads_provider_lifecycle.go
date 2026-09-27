@@ -859,6 +859,9 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		if err != nil {
 			return err
 		}
+		if err := ensureGCOwnedProxiedScopeSharedServerOff(cityPath, dir); err != nil {
+			return err
+		}
 		registerProviderOwnedScopeCustomTypes(cityPath, dir)
 		if err := installBeadHooks(dir, cityPath); err != nil {
 			return fmt.Errorf("install hooks at %s: %w", dir, err)
@@ -887,6 +890,9 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		return err
 	}
 	if err := normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase); err != nil {
+		return err
+	}
+	if err := ensureGCOwnedProxiedScopeSharedServerOff(cityPath, dir); err != nil {
 		return err
 	}
 	if cityUsesBdStoreContract(cityPath) && currentResolvableManagedDoltPort(cityPath) != "" {
@@ -2000,6 +2006,10 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 	args := []string{"init", "-p", prefix, "--skip-hooks"}
 	if scopeInitUsesProxiedDoltMode(cityPath, dir) {
 		env["BEADS_DOLT_PROXIED_SERVER"] = "1"
+		// bd init under a user-level dolt.shared-server: true would root the
+		// new proxy in ~/.beads/shared-server and persist that choice into the
+		// scope's config.yaml. See applyProxiedSharedServerOptOut.
+		applyProxiedSharedServerOptOut(env)
 		// Idle-never is not an optimization, it is D3: without it bd retires
 		// the proxy and its Dolt child after 30s quiet and every later command
 		// pays a cold start. It also has to be passed for bd to write the
@@ -2051,7 +2061,7 @@ func finalizeCanonicalBdScopeInit(cityPath, dir, prefix, doltDatabase string) er
 	// that path can run direct SQL preflight and would either fail before the
 	// proxy is ready or accidentally create a second managed server.
 	if scopeInitUsesProxiedDoltMode(cityPath, dir) {
-		return nil
+		return ensureGCOwnedProxiedScopeSharedServerOff(cityPath, dir)
 	}
 	store, err := openStoreAtForCity(dir, cityPath)
 	if err != nil {
