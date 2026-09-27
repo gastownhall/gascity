@@ -45,6 +45,9 @@ const (
 	hookClaimReasonNonTurnContext             = "non_turn_context"
 	hookClaimReasonDrainPending               = "drain_pending"
 	hookClaimReasonMissingSessionRegistration = "missing_session_registration"
+	hookClaimReasonCitySuspended              = "city_suspended"
+	hookClaimReasonAgentSuspended             = "agent_suspended"
+	hookClaimReasonRigSuspended               = "rig_suspended"
 )
 
 // Reasons carried on a bead.claim_released event: which unwind gave the claim
@@ -758,6 +761,20 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 			)
 			return hookClaimResult{terminal: true, code: 1}
 		}
+		// The claim ran as the bead's stored spelling (bd's idempotent --claim
+		// requires it), so a ready bead assigned to a legacy spelling of this
+		// session — e.g. an open bead pinned to the pool session_name before
+		// #6324 — is now in_progress under that spelling, and bd would reject
+		// this worker's close/update actored as BEADS_ACTOR (ga-uk5jj). Move it
+		// to the claim identity exactly as adoption does. A lost CAS means the
+		// bead changed hands after our claim: move on to the next candidate. A
+		// failed one still hands the bead out (this invocation just minted the
+		// claim, and refusing would strand it) with the manual recovery on stderr.
+		restamped, keep := restampHookAdoption(claimed, claimed.Assignee, hookClaimMinted, opts, ops, dir, stderr)
+		if !keep {
+			continue
+		}
+		claimed = restamped
 		claimed = mergeHookClaimCandidateMetadata(candidate, claimed)
 		result := hookClaimJSONResult{
 			SchemaVersion: "1",
@@ -1008,6 +1025,12 @@ const (
 	// hookAdoptionRefused: the canonical store names a different owner. The
 	// receipt is withheld.
 	hookAdoptionRefused
+	// hookClaimMinted: not an adoption at all — the ready-assignment tier just
+	// won this claim and read it back canonically. Used only to tell
+	// restampHookAdoption that a failed re-stamp must still hand the bead out
+	// (with the recovery warning): refusing would strand a claim this
+	// invocation minted.
+	hookClaimMinted
 )
 
 // certifyHookAdoption checks a bead the work query says this session already
@@ -1116,6 +1139,9 @@ func adoptAfterFailedRestamp(beadID, current, target string, verdict hookAdoptio
 	switch {
 	case errors.Is(err, errRestampGraphResident):
 		fmt.Fprintf(stderr, "gc hook --claim: adopting %s under legacy assignee %q: it is graph-resident, which has no conditional-transfer primitive and no close-path actor fence, so the spelling does not need to move to %q\n", beadID, current, target) //nolint:errcheck
+		return true
+	case verdict == hookClaimMinted:
+		fmt.Fprintf(stderr, "gc hook --claim: claimed %s under assignee %q; re-stamping it to %q failed: %v (bd will reject this worker's close/update until it moves; recover with: bd update %s --if-assignee %q --if-status in_progress --assignee %q)\n", beadID, current, target, err, beadID, current, target) //nolint:errcheck
 		return true
 	case verdict == hookAdoptionUnverified:
 		fmt.Fprintf(stderr, "gc hook --claim: adopting %s under assignee %q without a canonical readback; re-stamping it to %q failed: %v (if the stored spelling really is %q, bd will reject this worker's close/update; recover with: bd update %s --if-assignee %q --if-status in_progress --assignee %q)\n", beadID, current, target, err, current, beadID, current, target) //nolint:errcheck
@@ -1372,6 +1398,14 @@ func writeHookClaimDrainPending(label, sessionID string, opts hookClaimOptions, 
 // retrying the refusal forever.
 func writeHookClaimStaleSessionDrain(opts hookCommandOptions, stdout, stderr io.Writer) int {
 	return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, hookRuntimeDrainAck, stdout, stderr)
+}
+
+func writeHookClaimSuspensionDrain(reason string, opts hookCommandOptions, stdout, stderr io.Writer) int {
+	drainAckFn := opts.DrainAckFn
+	if drainAckFn == nil {
+		drainAckFn = hookRuntimeDrainAck
+	}
+	return writeHookClaimDrain(hookClaimLabel, reason, opts.JSON, opts.DrainAck, drainAckFn, stdout, stderr)
 }
 
 // writeHookClaimMissingSessionRegistrationDrain emits the terminal result for a

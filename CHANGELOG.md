@@ -76,8 +76,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-arms it. The `execution.claim_stalled` event type is gone; leftover
   `seat_claim_*` and `execution_claim_nudge_*` session metadata is inert
   (#6524).
+- **New cities import the Gas City pack as `[imports.gc]`.** `gc init`
+  (default or `--template gascity`) used to write `[imports.gascity]`; the new
+  key matches the binding the pack documents, so the pack's skill now shows as
+  `gc.mayor` instead of `gascity.mayor`. Cities with `[imports.gascity]` are
+  not rewritten and keep working. Before moving a city past Gas City pack
+  0.1.6, whose role prompts run `gc gc claim`, rename the key to `gc`;
+  `gc doctor --fix` offers the rename (#6683). Do not add a second `gc` import
+  next to the old key: that imports the pack twice (#4508).
+
+### Known Issues
+
+- **Wisp reaping and JSONL export do not run yet on proxied cities.** On
+  cities using the default bd-owned proxied Dolt, the core `reaper` and
+  `jsonl-export` orders now skip with a log line instead of failing on every
+  run. Until a follow-up lands, those cities get no wisp reaping,
+  closed-molecule purge, stale-issue or expired-nudge close, session-bead
+  prune or JSONL export, so they have no off-database JSONL copy;
+  `wisp-compact` and the opt-in Go wisp GC (`wisp_ttl`) still run (#6696).
 
 ### Added
+
+- **`gc doctor` offers to rebind the Gas City pack import as `gc`.** The new
+  `gascity-pack-binding` check warns when a city imports the public Gas City
+  pack under another key, and `gc doctor --fix` renames it to `[imports.gc]`
+  in place; `packs.lock` is unchanged. The fix refuses and explains when `gc`
+  is already bound to a different pack, when the pack is imported twice with
+  different settings, or when `pack.toml` or `city.toml` still reference
+  `gascity.`-qualified names (#6683).
 
 - **`gc storage preflight` reports everything the infra-class cutover would
   refuse, from outside the window.** `gc storage migrate --from-work` runs its
@@ -107,6 +133,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   size is not something the verdict established — not that the copy is empty.
 
 ### Changed
+
+- **Closed session beads in a SQLite infra ledger are purged after
+  `GC_INFRA_SESSION_PURGE_AGE` (default 72h).** This applies only when a city
+  relocates sessions to a SQLite infra ledger and `wisp_ttl` is greater than
+  zero; an invalid value logs one warning and falls back to 72h. A named
+  session closed for more than 3 days loses its bead and reopens fresh. The
+  Dolt reaper keeps `GC_REAPER_SESSION_PURGE_AGE` (default 720h) (#6689).
 
 - **`gc pack registry publish` now refuses an unscoped pack name unless you
   pass `--allow-unscoped-name`.** Registry pack names are scoped as
@@ -207,8 +240,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Unaliased pool workers no longer loop on claim and close.** A pre-release
   regression claimed work under one identity and closed it under another, so
   `bd` rejected every close with "assignee mismatch" and the worker retried
-  forever. Claim, close and the runtime actor now agree on the session bead id
-  (#5716, #6324).
+  forever. Claim, close and the runtime actor now agree on the session bead
+  id. `gc hook --claim` re-stamps a bead held under the old spelling, the bd
+  pack's stale-DB dog closes its wisp under the claim identity, and `gc sling`
+  recognises a pool's bead-id claims (#5716, #6324, #6597, #6632, #6640).
 
 - **Unaliased pool workers are named `<template>-<beadID>` again.**
   Pre-release builds named the first worker with the bare template name (for
@@ -271,6 +306,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offline.** A pre-release regression made an ambient `BD_BIN` that was
   relative or not executable a hard error for every `gc bd` and bd-backed
   command; it is now ignored with a warning (#6550).
+
+- **`gc bd show --watch` works on proxied cities.** bd v1.3.0 refuses watch
+  mode under the default proxied beads transport, so `gc bd show <id> --watch`
+  (also `view` and `--current`) now polls the bead every 2 seconds and redraws
+  it when it changes. Plain `bd show --watch` still refuses there until beads
+  fixes it upstream; use `gc bd show --watch` (#6681).
+
+- **The tutorials match the `gc` pack binding.** Tutorial 01 and the
+  quickstart now show `[imports.gc]`, as `gc init` writes it (#6676).
+
+- **`gc init` works again below a directory that holds a bd workspace.** A
+  city, or a `gc rig add` rig that is not a git repo, created anywhere under a
+  beads repo or a home with `~/.beads` failed with
+  `workspace already initialized as database "ws00"`. gc now pins bd to the
+  new scope's own `.beads` before `bd init` (#6701).
+
+- **gc-owned proxied city and rig stores no longer move into bd's host-wide
+  shared server.** When the user-level bd config set
+  `dolt.shared-server: true`, gc-owned proxied stores were silently moved into
+  `~/.beads/shared-server`, which could merge two cities' `hq` databases. gc
+  now pins the mode off for every bd it spawns, for agent sessions, and in
+  each gc-owned scope's `.beads/config.yaml` (written at init and on every
+  `gc start`). A new `gc doctor` check, `proxied-shared-server`, reports and
+  fixes scopes that are unpinned or bound to the shared server. Beads a scope
+  wrote while bound to the shared server stay there and are not migrated;
+  `gc doctor` warns while that database exists (#6697).
+
+- **Retry attempts that pass no longer abort their scope or fail their
+  workflow.** A spawned retry or ralph attempt was not recognised as
+  retry-managed, and an attempt's `gc.outcome=fail` was read as a terminal
+  `on_fail=abort_scope` failure before the retry controller could act, so
+  retries on such steps were inert (#6534).
+
+- **Secret session metadata no longer appears in process argv.** The local
+  tmux `SetMeta` backend (`tmux set-environment`) and the ssh provider's
+  `SetMeta` put the value on the command line, visible in `ps` and
+  `/proc/*/cmdline` on shared hosts. Secret values now go through a private
+  0600 command file (tmux) or are staged over stdin (ssh); if staging fails,
+  the write is refused instead of falling back to argv (#6537).
+
+- **Session-bead cleanup no longer stops a running session.** Closing the
+  unassigned session bead of a reconfigured, suspended or orphaned session
+  used to stop its runtime first; the bead now stays open until the runtime
+  has stopped (#6596).
+
+- **The orphan sweep no longer kills a live worker on one transient read.**
+  The process-table sweep terminated any untracked runtime whose single store
+  read said closed or not found, and `BdStore.Get` reported not found for
+  transient bd or Dolt errors. A kill now needs the store and the tick's
+  session snapshot to agree, and only bead-level misses count as not found
+  (#6649).
+
+- **A new pool worker that holds a live claim is no longer drained as
+  orphaned.** On a fresh city the first pool worker was often drained seconds
+  after claiming its first step, because the claim hid its demand from the
+  reconciler. The reconciler now reads the session's current claim live before
+  an orphaned or idle drain, and cancels an in-flight orphaned drain once the
+  claim is visible (#6665, #6666).
 
 - **A condition-triggered order whose check passes now dispatches on the tick
   that observes it, instead of queueing behind the per-tick dispatch budget.**

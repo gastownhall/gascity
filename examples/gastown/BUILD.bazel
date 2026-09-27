@@ -24,6 +24,7 @@ go_test(
         "//examples/bd/dolt:pack_files",
         "//internal/bootstrap/packs/core:pack_files",
     ],
+    shard_count = 2,
     deps = [
         "//internal/bazeltest",
         "//internal/beads",

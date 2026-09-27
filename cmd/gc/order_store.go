@@ -459,7 +459,7 @@ func validPublishedManagedDoltDataDirState(cityPath string, state doltRuntimeSta
 	if !pidAlive(state.PID) || !doltPortReachable(strconv.Itoa(state.Port)) {
 		return false
 	}
-	holderPID := findPortHolderPID(strconv.Itoa(state.Port))
+	holderPID := findPortHolderPID(strconv.Itoa(state.Port), state.PID)
 	if holderPID > 0 {
 		return holderPID == state.PID
 	}
@@ -525,7 +525,7 @@ func validDoltRuntimeStateForLayout(state doltRuntimeState, layout managedDoltRu
 	if !pidAlive(state.PID) || !doltPortReachable(strconv.Itoa(state.Port)) {
 		return false
 	}
-	holderPID := findPortHolderPID(strconv.Itoa(state.Port))
+	holderPID := findPortHolderPID(strconv.Itoa(state.Port), state.PID)
 	if holderPID > 0 && holderPID != state.PID {
 		return false
 	}

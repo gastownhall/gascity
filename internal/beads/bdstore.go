@@ -1170,6 +1170,43 @@ func isBdNotFound(err error) bool {
 		strings.Contains(msg, "no issues found")
 }
 
+// bdInfraNotFoundMarkers are "not found" phrasings that describe the bd
+// binary, the Dolt server, or the workspace — not a missing bead. They
+// appear when bd cannot run or its database is mid-restart, which says
+// nothing about whether a given bead exists.
+var bdInfraNotFoundMarkers = []string{
+	"executable file not found",
+	"command not found",
+	"exec: \"bd\"",
+	"exec: bd",
+	"database not found",
+	"database path not found",
+	"table not found",
+	"column not found",
+	"workspace not found",
+	"branch not found",
+	"page not found",
+	"no such file or directory",
+}
+
+// isBdBeadNotFound reports whether err is bd saying the requested bead does
+// not exist, as opposed to isBdNotFound's loose "not found anywhere in the
+// text" match, which also fires on infrastructure failures (a missing bd
+// binary, a Dolt "database not found" during a server restart). Get uses it
+// so only a bead-level miss becomes ErrNotFound.
+func isBdBeadNotFound(err error) bool {
+	if !isBdNotFound(err) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range bdInfraNotFoundMarkers {
+		if strings.Contains(msg, marker) {
+			return false
+		}
+	}
+	return true
+}
+
 // isBdOperationUnsupported reports whether err is bd telling us a backend
 // does not implement the attempted operation at all (e.g. the Postgres
 // backend's "IssueRelations" gap behind `bd dep list`, ga-7i7ts) as opposed
@@ -1383,7 +1420,11 @@ func (s *BdStore) Get(id string) (Bead, error) {
 	// BdStore read/write path (ga-gellq1).
 	out, err := s.runBDTransientRead("show", "--json", id)
 	if err != nil {
-		if !isBdNotFound(err) {
+		// Only a bead-level miss may become ErrNotFound. Callers treat
+		// ErrNotFound as "confirmed absent" (the process-table orphan sweep
+		// SIGTERMs a live runtime on it), so an infrastructure failure whose
+		// text happens to say "not found" must surface as itself.
+		if !isBdBeadNotFound(err) {
 			return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
 		}
 		// bd show only queries the issues table; ephemeral beads live in the
@@ -1395,12 +1436,16 @@ func (s *BdStore) Get(id string) (Bead, error) {
 		// must not leak into a supplemental wisp query.
 		if isWispQueryableID(id) {
 			wisps, queryErr := s.getEphemeralByID(id)
-			if queryErr == nil {
-				for _, b := range wisps {
-					if b.ID == id {
-						return b, nil
-					}
+			for _, b := range wisps {
+				if b.ID == id {
+					return b, nil
 				}
+			}
+			// The wisp lookup is half of the "absent" verdict: if it failed,
+			// absence is unproven. Return the real error so callers can tell
+			// a transient read failure from a missing bead.
+			if queryErr != nil && !isBdBeadNotFound(queryErr) {
+				return Bead{}, fmt.Errorf("getting bead %q: %w", id, queryErr)
 			}
 		}
 		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
@@ -3002,7 +3047,7 @@ func isWispQueryableID(id string) bool {
 func (s *BdStore) getEphemeralByID(id string) ([]Bead, error) {
 	clause := "ephemeral=true AND id=" + id
 	args := []string{"query", "--json", clause, "--all", "--limit", "1"}
-	out, err := s.runner(s.dir, "bd", args...)
+	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		if isBdQueryUnsupported(err) {
 			return nil, nil

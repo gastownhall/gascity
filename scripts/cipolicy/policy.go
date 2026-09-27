@@ -77,7 +77,12 @@ const (
 	// internal/bootstrap/packs/core/assets/scripts/** so a reaper.sh-only
 	// change runs the real-Dolt reaper tests. Reviewed delta: one filter path,
 	// no new job, trigger or permission.
-	expectedCIExecutionHash     = "7bf12250c2b6d756458cc48e70fd716b01e517fa4d629f237b542aa8f67cb139"
+	//
+	// Bumped again (F9): beads-topology-acceptance gains one step running
+	// TestBeadsProxiedIgnoresUserLevelSharedServer (-timeout 15m) and its job
+	// cap moves 90 -> 105 minutes to keep the step budget under it. Reviewed
+	// delta: one test step and the cap, no new job, trigger or permission.
+	expectedCIExecutionHash     = "10f31160f31aa60e705a2098ae2722ec82e4fd14dc76895800b8d0acab486416"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -86,8 +91,11 @@ const (
 	// PR jobs' resolve-pin / build-bd-from-BD_CURRENT_REF / verify steps
 	// verbatim, and one `go test -tags acceptance_a -timeout 45m -run
 	// 'TestBeadsProxiedDefault$'` step. No new trigger, no new permission, no
-	// provider selector.
-	expectedNightlyExecutionHash = "04ca67750b129d1e4b52702116e79f0c0547e67d1a1f050932511cf3fed10db2"
+	// provider selector. Then (v1.5.0 Tier C first-run drain) the tier-c job's
+	// -run selector gained TestFreshInit_SlingSpawnsDefaultPoolWorker and
+	// TestFreshInit_ClaudeUnrestricted, mirroring RC Gate's acceptance C shards;
+	// same job, env, secrets and runner.
+	expectedNightlyExecutionHash = "54aa1f894d2c3167efb3bb5b439b3d76f00dc1c5d5abd92a3247ae4d1bc604bb"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 

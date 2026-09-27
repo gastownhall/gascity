@@ -503,14 +503,14 @@ jobs:
   # rather than the tooling one, and the skip is named in the job summary so it
   # reads as a known gap instead of a pass.
   #
-  # Budget (round3 D-F17): the step -timeouts sum to 75 minutes (30 + 15 + 30)
-  # under the 90-minute job cap, leaving 15 for checkout, setup, the bd build
+  # Budget (round3 D-F17): the step -timeouts sum to 90 minutes (30 + 15 + 30
+  # + 15) under the 105-minute job cap, leaving 15 for checkout, setup, the bd build
   # and the test binary's compile. They used to sum to 115 (35 + 15 + 30 + 35),
   # so a slow-but-live run was cancelled by the job timeout — losing the
   # `--- FAIL` line and the tee'd log the skip report reads — instead of being
   # reported by the test timeout. Measured on a loaded 32-core box:
-  # TestBeadsProxiedDefault 13-15 min, AC-X ~11 min, M1+M5 ~9.5 min; CI
-  # runners are faster. The proxied-native lifecycle and safety rows moved to
+  # TestBeadsProxiedDefault 13-15 min, AC-X ~11 min, M1+M5 ~9.5 min, the
+  # user-level shared-server isolation test ~7.5 min; CI runners are faster. The proxied-native lifecycle and safety rows moved to
   # their own job below.
   beads-topology-acceptance:
     name: Beads / topology acceptance
@@ -519,7 +519,7 @@ jobs:
       - changes
     if: ${{ needs.changes.outputs.beads_topology == 'true' }}
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    timeout-minutes: 90
+    timeout-minutes: 105
     env:
       DOLT_VERSION: "2.1.7"
       GC_REQUIRE_ACCEPTANCE_TOOLING: "1"
@@ -576,6 +576,12 @@ jobs:
           go test -tags acceptance_a -timeout 30m -count=1 -v \
             -run 'TestBeadsProxiedDefault$' ./test/acceptance/ 2>&1 \
             | tee "${RUNNER_TEMP}/proxied-default.log"
+      - name: User-level shared-server isolation acceptance
+        run: |
+          set -euo pipefail
+          go test -tags acceptance_a -timeout 15m -count=1 -v \
+            -run 'TestBeadsProxiedIgnoresUserLevelSharedServer$' ./test/acceptance/ 2>&1 \
+            | tee "${RUNNER_TEMP}/shared-server.log"
       - name: Migration acceptance (AC-X)
         run: |
           set -euo pipefail
