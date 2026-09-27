@@ -21,12 +21,13 @@ NL_SHA256=a3d7abc2598e976d022fcdabe88a2f8fae46a3ae64f1868698002ca968dd88e9
 GO_VERSION=$(awk '/^go /{print $2; exit}' go.mod)
 DOLT_VERSION=2.1.8
 DOLT_SHA256=f66318f08ed66e409fc39363ae0fff8ce6fbf6dba9f5bac632b91527b9632a74
-ROOT="$RUNNER_TEMP/nativelink"
+ROOT="$RUNNER_TEMP/nl-worker"
+NL_BIN_DIR="$RUNNER_TEMP/nl-bin"
 
 # Host toolset: test actions exec tools via the client PATH
 # (/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin), and cgo actions compile
 # against host headers. Keep in sync with infra nativelink-cas/scripts/elastic.sh.
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y -qq \
 	make jq sqlite3 tmux lsof cmake git libicu-dev zlib1g-dev libsqlite3-dev \
 	libbz2-dev liblzma-dev libffi-dev libexpat1-dev libxml2-dev libreadline-dev \
 	libncurses-dev python3-dev >/dev/null
@@ -45,7 +46,7 @@ if ! dolt version 2>/dev/null | grep -q "$DOLT_VERSION"; then
 fi
 curl -fsSL -o "$RUNNER_TEMP/nl.tgz" "https://github.com/TraceMachina/nativelink/releases/download/v${NL_VERSION}/nativelink-${NL_VERSION}-x86_64-unknown-linux-musl.tar.gz"
 echo "${NL_SHA256}  $RUNNER_TEMP/nl.tgz" | sha256sum -c -
-tar -C "$RUNNER_TEMP" -xzf "$RUNNER_TEMP/nl.tgz" nativelink
+mkdir -p "$NL_BIN_DIR" && tar -C "$NL_BIN_DIR" -xzf "$RUNNER_TEMP/nl.tgz" nativelink
 
 mkdir -p "$ROOT"/{content,tmp,work,pki}
 umask 077
@@ -83,7 +84,7 @@ jq -n --arg host "grpcs://${RBE_WEST_HOST}:443" --arg root "$ROOT" --arg name "$
     servers: []
   }' >"$ROOT/worker.json"
 
-"$RUNNER_TEMP/nativelink" "$ROOT/worker.json" >"$ROOT/worker.log" 2>&1 &
+"$NL_BIN_DIR/nativelink" "$ROOT/worker.json" >"$ROOT/worker.log" 2>&1 &
 nl=$!
 echo "worker $WORKER_NAME started (pid $nl, $slots slots)"
 
