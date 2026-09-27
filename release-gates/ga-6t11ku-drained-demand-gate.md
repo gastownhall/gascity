@@ -186,3 +186,20 @@ criteria and current TESTING.md/Makefile define the gate.
 Failed preparation attempts (missing log directory and an aborted private
 module-tree compilation) produced no test evidence. They remain disclosed
 in the bead's notes and are excluded from the counts above.
+
+## Maintainer amendment
+
+During PR review the drained exemption was narrowed to `routed-demand` only.
+`named-demand` stays gated by `Drained`: `NamedSessionDemand`
+(`namedWorkReady`) does not filter blocked `in_progress` work, so exempting it
+would re-wake sessions that drain-acked on blocked work, the wake/drain loop
+the `reset-pending` guard exists to prevent. Ready assignee-direct work
+already wakes a drained bead through the `assigned-work` pass, which filters
+blocked work via `workBeadHasAwakeDemand`.
+`TestNamedOnDemand_NamedDemandWakesDrainedSession` was replaced by
+`TestNamedOnDemand_DrainedSessionWithReadyAssignedWorkWakes` and
+`TestNamedOnDemand_NamedDemandDoesNotWakeDrainedSessionWithBlockedWork`. The
+counts and shard table above describe the original, pre-amendment diff. The
+targeted tests (`go test ./cmd/gc/ -run
+'TestNamedOnDemand|TestComputeAwake|Drain|ResetPending'`), `go build ./...`,
+and `go vet ./cmd/gc/` were re-run on the amended diff and passed.

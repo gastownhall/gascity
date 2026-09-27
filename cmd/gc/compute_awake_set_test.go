@@ -480,20 +480,38 @@ func TestNamedOnDemand_RoutedDemandWakesDrainedSession(t *testing.T) {
 	assertReason(t, result, "hello-world--refinery", "routed-demand")
 }
 
-// TestNamedOnDemand_NamedDemandWakesDrainedSession is the named-demand
-// sibling of the same fix: operator/assignee-direct demand (NamedSessionDemand)
-// gets the same override strength as routed-demand, since both are real,
-// unambiguous demand for this exact identity.
-func TestNamedOnDemand_NamedDemandWakesDrainedSession(t *testing.T) {
+// TestNamedOnDemand_DrainedSessionWithReadyAssignedWorkWakes pins that
+// assignee-direct demand still wakes a drained on-demand named session: ready
+// assigned work reaches it through the assigned-work pass, which is not gated
+// on Drained, so named-demand needs no drained exemption of its own.
+func TestNamedOnDemand_DrainedSessionWithReadyAssignedWorkWakes(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:             []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
 		NamedSessions:      []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
 		SessionBeads:       []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "drained", Drained: true, NamedIdentity: "hello-world/refinery"}},
+		WorkBeads:          []AwakeWorkBead{{ID: "w-1", Assignee: "hello-world/refinery", Status: "open", Ready: true}},
 		NamedSessionDemand: map[string]bool{"hello-world/refinery": true},
 		Now:                now,
 	})
 	assertAwake(t, result, "hello-world--refinery")
-	assertReason(t, result, "hello-world--refinery", "named-demand")
+	assertReason(t, result, "hello-world--refinery", "assigned-work")
+}
+
+// TestNamedOnDemand_NamedDemandDoesNotWakeDrainedSessionWithBlockedWork is the
+// loop guard: NamedSessionDemand does not filter blocked in_progress work, so
+// exempting named-demand from the Drained gate would re-wake a session that
+// drain-acked on blocked work every tick. A drained session whose only
+// assigned work is blocked must stay asleep.
+func TestNamedOnDemand_NamedDemandDoesNotWakeDrainedSessionWithBlockedWork(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:             []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions:      []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
+		SessionBeads:       []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "drained", Drained: true, NamedIdentity: "hello-world/refinery"}},
+		WorkBeads:          []AwakeWorkBead{{ID: "w-1", Assignee: "hello-world/refinery", Status: "in_progress", Blocked: true}},
+		NamedSessionDemand: map[string]bool{"hello-world/refinery": true},
+		Now:                now,
+	})
+	assertAsleep(t, result, "hello-world--refinery")
 }
 
 // TestNamedOnDemand_WorkQueryDoesNotWakeDrainedSession is the negative/
