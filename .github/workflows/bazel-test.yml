@@ -8,6 +8,14 @@
 #   RBE_TLS_CERT / RBE_TLS_KEY / RBE_TLS_CA
 #                 client certificate for mTLS endpoints (optional, base64).
 #   RBE_INSTANCE  RE instance name (optional, default empty).
+#
+# rbe-west (farm v2, opt-in with repo variable RBE_WEST_WORKERS=true):
+#   RBE_WEST_EXECUTOR  grpcs:// endpoint of the Phoenix core (secret; not in git).
+#   RBE_WORKER_TLS_CERT / RBE_WORKER_TLS_KEY  base64 PEM, CN=rbe-oss-worker.
+#   The bazel job targets instance "oss"; the rbe-workers jobs run NativeLink
+#   workers on Blacksmith runners for the OSS scheduler and exit when the bazel
+#   job ends. Blacksmith donates that compute for OSS-repo workflows only, so
+#   only this repo's own runs (never fork PRs, never developer builds) use it.
 name: bazel-test
 
 on:
@@ -32,7 +40,8 @@ jobs:
     env:
       # Hoisted so the step-level `if:` below can see it (empty on forks,
       # where secrets are unavailable — the job then runs locally).
-      BAZEL_REMOTE_EXECUTOR: ${{ secrets.BAZEL_REMOTE_EXECUTOR }}
+      BAZEL_REMOTE_EXECUTOR: ${{ (vars.RBE_WEST_WORKERS == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && secrets.RBE_WEST_EXECUTOR || secrets.BAZEL_REMOTE_EXECUTOR }}
+      RBE_INSTANCE_OVERRIDE: ${{ (vars.RBE_WEST_WORKERS == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && 'oss' || '' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -69,7 +78,7 @@ jobs:
           RBE_TLS_CERT: ${{ secrets.RBE_TLS_CERT }}
           RBE_TLS_KEY: ${{ secrets.RBE_TLS_KEY }}
           RBE_TLS_CA: ${{ secrets.RBE_TLS_CA }}
-          RBE_INSTANCE: ${{ secrets.RBE_INSTANCE }}
+          RBE_INSTANCE: ${{ env.RBE_INSTANCE_OVERRIDE || secrets.RBE_INSTANCE }}
         run: |
           {
             echo 'build:remote-exec --remote_executor='"$BAZEL_REMOTE_EXECUTOR"
@@ -120,6 +129,30 @@ jobs:
           path: |
             bazel-testlogs/**/test.log
           retention-days: 7
+
+  rbe-workers:
+    name: rbe worker ${{ matrix.n }} (Blacksmith, OSS scheduler)
+    if: vars.RBE_WEST_WORKERS == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 100
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: NativeLink worker until the bazel job finishes
+        env:
+          RBE_WORKER_TLS_CERT: ${{ secrets.RBE_WORKER_TLS_CERT }}
+          RBE_WORKER_TLS_KEY: ${{ secrets.RBE_WORKER_TLS_KEY }}
+          RBE_WEST_HOST: ${{ secrets.RBE_WEST_HOST }}
+          BAZEL_JOB_NAME: bazel test (side-by-side)
+          GH_TOKEN: ${{ github.token }}
+          WORKER_NAME: gha-${{ github.repository_owner }}-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.n }}
+        run: tools/rbe/blacksmith-worker.sh
 
   sync-check:
     name: BUILD files in sync
