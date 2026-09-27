@@ -70,8 +70,7 @@ shutdown_timeout = "100ms"
 		t.Fatal(err)
 	}
 
-	script := writeSpyScript(t, filepath.Join(t.TempDir(), "ops.log"))
-	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
 	clock := &fakeBootStepClock{step: 2 * time.Second, base: time.Now()}
