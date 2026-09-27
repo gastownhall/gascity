@@ -987,7 +987,7 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 		// distinctly (normal "condition false" is not logged) so a check
 		// outgrowing its budget is diagnosable instead of invisible
 		// (ga-ocypq2). Raise the order's check_timeout to fix.
-		if a.Trigger == "condition" && strings.Contains(result.Reason, orders.ConditionCheckTimedOutMarker) {
+		if a.Trigger == "condition" && result.TimedOut {
 			logDispatchError(m.stderr, "gc: order dispatch: %s %s — raise check_timeout if the check needs a slow store read", a.ScopedName(), result.Reason)
 		}
 		return false

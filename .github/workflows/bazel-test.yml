@@ -8,6 +8,14 @@
 #   RBE_TLS_CERT / RBE_TLS_KEY / RBE_TLS_CA
 #                 client certificate for mTLS endpoints (optional, base64).
 #   RBE_INSTANCE  RE instance name (optional, default empty).
+#
+# rbe-west (farm v2, opt-in with repo variable RBE_WEST_WORKERS=true):
+#   RBE_WEST_EXECUTOR  grpcs:// endpoint of the Phoenix core (secret; not in git).
+#   RBE_WORKER_TLS_CERT / RBE_WORKER_TLS_KEY  base64 PEM, CN=rbe-oss-worker.
+#   The bazel job targets instance "oss"; the rbe-workers jobs run NativeLink
+#   workers on Blacksmith runners for the OSS scheduler and exit when the bazel
+#   job ends. Blacksmith donates that compute for OSS-repo workflows only, so
+#   only this repo's own runs (never fork PRs, never developer builds) use it.
 name: bazel-test
 
 on:
@@ -32,7 +40,8 @@ jobs:
     env:
       # Hoisted so the step-level `if:` below can see it (empty on forks,
       # where secrets are unavailable — the job then runs locally).
-      BAZEL_REMOTE_EXECUTOR: ${{ secrets.BAZEL_REMOTE_EXECUTOR }}
+      BAZEL_REMOTE_EXECUTOR: ${{ (vars.RBE_WEST_WORKERS == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && secrets.RBE_WEST_EXECUTOR || secrets.BAZEL_REMOTE_EXECUTOR }}
+      RBE_INSTANCE_OVERRIDE: ${{ (vars.RBE_WEST_WORKERS == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && 'oss' || '' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -53,10 +62,11 @@ jobs:
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
-            ${{ runner.temp }}/bazel-outputs/*/cache
-            ${{ runner.temp }}/bazel-outputs/*/cache/repos
+            ${{ runner.temp }}/bazel-outputs
           key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock') }}
-          restore-keys: bazel-${{ runner.os }}-
+          restore-keys: |
+            bazel-${{ runner.os }}-
+          save-always: true
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
@@ -68,7 +78,7 @@ jobs:
           RBE_TLS_CERT: ${{ secrets.RBE_TLS_CERT }}
           RBE_TLS_KEY: ${{ secrets.RBE_TLS_KEY }}
           RBE_TLS_CA: ${{ secrets.RBE_TLS_CA }}
-          RBE_INSTANCE: ${{ secrets.RBE_INSTANCE }}
+          RBE_INSTANCE: ${{ env.RBE_INSTANCE_OVERRIDE || secrets.RBE_INSTANCE }}
         run: |
           {
             echo 'build:remote-exec --remote_executor='"$BAZEL_REMOTE_EXECUTOR"
@@ -91,24 +101,13 @@ jobs:
             echo 'build --jobs=64'
           } > .bazelrc.local
 
-      - name: BUILD files are in sync (gazelle + repo tree)
-        run: |
-          make bazel-sync
-          git diff --exit-code || {
-            echo "BUILD files out of sync; run 'make bazel-sync' and commit the result." >&2
-            git diff | head -80 >&2
-            exit 1
-          }
 
       - name: Writable test HOME
         run: |
           mkdir -p /tmp/gc-test-home
           echo "HOME=/tmp/gc-test-home" >> "$GITHUB_ENV"
 
-      - name: bazel build //...
-        run: bazel --output_user_root="$RUNNER_TEMP"/bazel-outputs build //... $( [ -f .bazelrc.local ] && echo --config=remote-exec )
-
-      - name: bazel test //...
+      - name: "bazel test //..."
         run: |
           ARGS=(--output_user_root="$RUNNER_TEMP"/bazel-outputs)
           PROFILE=(--profile=/tmp/bazel-profile.json)
@@ -120,7 +119,7 @@ jobs:
 
       - name: Critical-path report + budget (the optimization loop metric)
         if: always()
-        run: python3 tools/bazel/critpath.py /tmp/bazel-profile.json --tier T2 --budget 180 || true
+        run: python3 tools/bazel/critpath.py /tmp/bazel-profile.json --tier T2 --budget 150 || true
 
       - name: Upload test logs
         if: failure()
@@ -130,3 +129,51 @@ jobs:
           path: |
             bazel-testlogs/**/test.log
           retention-days: 7
+
+  rbe-workers:
+    name: rbe worker ${{ matrix.n }} (Blacksmith, OSS scheduler)
+    if: vars.RBE_WEST_WORKERS == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 100
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: NativeLink worker until the bazel job finishes
+        env:
+          RBE_WORKER_TLS_CERT: ${{ secrets.RBE_WORKER_TLS_CERT }}
+          RBE_WORKER_TLS_KEY: ${{ secrets.RBE_WORKER_TLS_KEY }}
+          RBE_WEST_HOST: ${{ secrets.RBE_WEST_HOST }}
+          BAZEL_JOB_NAME: bazel test (side-by-side)
+          GH_TOKEN: ${{ github.token }}
+          WORKER_NAME: gha-${{ github.repository_owner }}-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.n }}
+        run: tools/rbe/blacksmith-worker.sh
+
+  sync-check:
+    name: BUILD files in sync
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+      - name: Install bazel via bazelisk
+        run: |
+          curl -sSfL -o /tmp/bazelisk             https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
+          sudo install -m 0755 /tmp/bazelisk /usr/local/bin/bazel
+          sudo chmod 755 /home/ubuntu 2>/dev/null || true
+          sudo mkdir -p /home/ubuntu/.cache && sudo chown "$(id -u):$(id -g)" /home/ubuntu/.cache
+      - name: BUILD files are in sync (gazelle + repo tree)
+        run: |
+          make bazel-sync
+          git diff --exit-code || {
+            echo "BUILD files out of sync; run 'make bazel-sync' and commit the result." >&2
+            git diff | head -80 >&2
+            exit 1
+          }

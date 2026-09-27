@@ -3521,6 +3521,9 @@ func TestNativeDoltStoreReadyWorkOutcomeFilterToleratesOpenGates(t *testing.T) {
 // The start-time shell heal (INSERT IGNORE into custom_types) is covered end to
 // end by TestEnsureBdRuntimeCustomTypesHealsUpgradedNativeStore in cmd/gc.
 func TestNativeDoltStoreCustomTypesComeFromTheDatabaseNotYAML(t *testing.T) {
+	// Bazel passes a hermetic HOME path, but that directory is not itself a
+	// runfile. Give embedded Dolt an existing private home for its local config.
+	t.Setenv("HOME", t.TempDir())
 	ctx := context.Background()
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	storage, err := beadslib.OpenBestAvailable(ctx, beadsDir)

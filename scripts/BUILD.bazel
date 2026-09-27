@@ -62,7 +62,7 @@ go_test(
         "//scripts/testdata/test-go-test-shard/env_required:pkg_files",
         "//scripts/testdata/test-go-test-shard/no_extra_env:pkg_files",
     ],
-    shard_count = 3,
+    shard_count = 6,
     deps = [
         "//internal/bazeltest",
         "//internal/deps",

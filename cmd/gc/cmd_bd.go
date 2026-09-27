@@ -109,7 +109,13 @@ exception: a "list" that filters on the wisps (ephemeral) tier —
 filters would otherwise return [] and exit 0 on a ledger full of live
 molecules. Every other list is forwarded as written. "heartbeat
 <issue-id>" forwards to bd's native heartbeat, which refreshes the claim's
-lease and fails loudly when the caller no longer owns it. gc adds one
+lease and fails loudly when the caller no longer owns it. "show <id>
+--watch" (or "show --current --watch", or the "view" alias) on a scope that
+uses bd's proxied-server transport (the default for a new city), where bd
+refuses watch mode, is served by gc instead: it re-runs "bd show" every 2
+seconds and redraws when the bead's status or update time changes, until
+Ctrl+C. Like bd's own watch, it renders the plain form and ignores show's
+display flags (--json, --short, --long, --refs, --children). gc adds one
 subcommand of its own: "release-if-current <issue-id> <assignee>", which
 conditionally resets an in-progress assignment only when the bead still has
 that assignee.
@@ -664,6 +670,19 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
+
+	// bd refuses `show --watch` in proxied-server mode, the default transport
+	// for a new city, and bd cannot call back into gc. gc serves the watch
+	// itself there by polling plain `bd show` reads; every other scope keeps
+	// bd's own watch. Every bd call the watch makes goes through the same
+	// trace and the same silent-fallback / dolt-start stderr checks as this
+	// passthrough. See cmd_bd_show_watch.go.
+	if req, ok := parseBdShowWatchArgs(bdArgs); ok && bdScopeRefusesShowWatch(cityPath, target, cmd.Env) {
+		return serveBdShowWatch(req, &bdWatchRunner{
+			bdPath: bdPath, dir: cmd.Dir, env: cmd.Env,
+			cityPath: cityPath, scopeRoot: target.ScopeRoot, stderr: stderr,
+		}, stdout, stderr)
+	}
 
 	traceStart := time.Now()
 	runErr := cmd.Run()

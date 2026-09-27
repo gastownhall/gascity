@@ -450,7 +450,7 @@ go_test(
         "//internal/worker:operation_events.go",
     ],
     embed = [":api"],
-    shard_count = 3,
+    shard_count = 6,
     deps = [
         "//internal/agent",
         "//internal/agentutil",

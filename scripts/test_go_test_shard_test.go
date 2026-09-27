@@ -755,6 +755,7 @@ func TestGoTestShardPreservesAcceptanceAuthEnv(t *testing.T) {
 	cmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + t.TempDir(),
+		"TMPDIR=" + t.TempDir(),
 		"GO_TEST_TIMEOUT=1m",
 		"ANTHROPIC_AUTH_TOKEN=synthetic-token",
 		// Isolated HOME redirects GOMODCACHE into t.TempDir(); a toolchain
@@ -787,6 +788,7 @@ func TestGoTestShardRunsWithoutPreservedProviderEnv(t *testing.T) {
 	cmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + t.TempDir(),
+		"TMPDIR=" + t.TempDir(),
 		"GO_TEST_TIMEOUT=1m",
 		// Keep toolchain downloads out of the isolated HOME; its read-only
 		// module files would defeat t.TempDir cleanup.

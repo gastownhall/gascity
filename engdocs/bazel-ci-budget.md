@@ -14,7 +14,7 @@ Bazel caching makes single numbers lie. Every number is tagged:
 
 Every CI run prints `[T2] elapsed / critical-path / gap` via
 `tools/bazel/critpath.py` and checks it against a budget (currently
-360s at T2; tighten as the disk cache proves itself, then move the
+120s at T2; tighten as the disk cache proves itself, then move the
 gate to T1 / 60s).
 
 ## The decision rule (formalized)

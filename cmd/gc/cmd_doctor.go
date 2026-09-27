@@ -309,6 +309,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
 		register(newBuiltinImportDoctorCheck(cityPath))
 		register(newImportStateDoctorCheck(cityPath))
+		register(newGascityPackBindingDoctorCheck(cityPath))
 		register(newJsonlArchiveDoctorCheck(cityPath))
 	}
 
@@ -484,6 +485,16 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// city actually has such a scope.
 	if c := doctor.NewProxiedIdleTimeoutCheckForConfig(cityPath, cfg, cfgErr); c != nil {
 		register(c)
+	}
+	// A gc-owned proxied scope exposed to bd's user-level shared-server mode
+	// (dolt.shared-server: true in ~/.beads or ~/.config/bd) would have its
+	// store relocated into ~/.beads/shared-server, shared with every other
+	// city on the host. Registered only when the city has such a scope.
+	if cfgErr == nil {
+		roots, classifyErrs := gcOwnedProxiedScopeRoots(cityPath, cfg)
+		if c := doctor.NewProxiedSharedServerCheck(cityPath, roots, classifyErrs); c != nil {
+			register(c)
+		}
 	}
 	// Worktree checks deliberately run even when cfgErr != nil — they
 	// only need the city path, and a broken city.toml is exactly when
