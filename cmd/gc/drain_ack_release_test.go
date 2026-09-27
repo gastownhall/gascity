@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -316,7 +317,7 @@ func TestDrainAckReleasesBeforeAcknowledging(t *testing.T) {
 		drainAckReleaseHeldClaims = originalRelease
 		drainAckPokeController = originalPoke
 	})
-	drainAckPokeController = func(string) error { return nil }
+	drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
 
 	dops := newFakeDrainOps()
 	releaseRan := false

@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/spf13/cobra"
 )
 
@@ -131,7 +132,7 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 		}
 	}
 
-	_ = pokeController(cityPath)
+	_ = enqueueController(cityPath, reconcilekey.Session(sessionID))
 
 	// Mode tells a caller which outcome it got. A rollback closed the bead, so
 	// a script waiting for this session to restart in place would otherwise
@@ -169,7 +170,7 @@ func resetSessionCircuitBreakerAfterExplicitKill(cityPath string, store beads.St
 		if err := resetSessionCircuitBreakerOnController(cityPath, sessionID, identity); err != nil {
 			return err
 		}
-		_ = pokeController(cityPath)
+		_ = enqueueController(cityPath, reconcilekey.Session(sessionID))
 		return nil
 	}
 	return resetSessionCircuitBreakerState(store, sessionID, identity, defaultSessionCircuitBreaker())

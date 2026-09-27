@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -196,11 +197,15 @@ type State interface {
 	// Returns nil if orders are not configured.
 	OrdersAll() []orders.Order
 
-	// Poke signals the controller to trigger an immediate reconciler tick.
-	// Used after sling assigns work so WakeWork wakes the target without
-	// waiting for the next patrol interval. Best-effort: no-op if poke
-	// is not available (e.g., in tests).
-	Poke()
+	// Enqueue asks the controller to reconcile the given keys promptly
+	// instead of waiting for the next patrol interval. Callers pass the most
+	// specific key they know (a session they just created or changed, the
+	// control dispatcher after a workflow launch); a call with no keys means
+	// the city-wide allocator. Under the legacy reconciler every key maps to
+	// the existing poke (control-dispatch keys to the control-dispatcher
+	// signal), so one call is at most one tick. Best-effort and non-blocking:
+	// a no-op when the controller signal is unavailable (e.g., in tests).
+	Enqueue(keys ...reconcilekey.Key)
 
 	// ServiceRegistry returns the workspace service registry, or nil when
 	// workspace services are not enabled for this city.

@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -61,7 +62,9 @@ type fakeState struct {
 	allOrders         []orders.Order
 	services          workspacesvc.Registry
 	webhookDispatcher orderdispatch.Dispatcher // backs WebhookDispatchProvider; nil disables webhook dispatch
-	pokeCount         int
+	pokeCount         int                      // Enqueue calls (each maps to one legacy Poke)
+	enqueueMu         sync.Mutex               // guards enqueued
+	enqueued          []reconcilekey.Key       // every key passed to Enqueue, in order
 	extmsgSvc         *extmsg.Services
 	adapterReg        *extmsg.AdapterRegistry
 	maintenance       MaintenanceProvider
@@ -193,7 +196,25 @@ func (f *fakeState) OrdersAll() []orders.Order {
 	}
 	return f.autos
 }
-func (f *fakeState) Poke()                                  { f.pokeCount++ }
+
+func (f *fakeState) Enqueue(keys ...reconcilekey.Key) {
+	f.enqueueMu.Lock()
+	defer f.enqueueMu.Unlock()
+	f.pokeCount++
+	if len(keys) == 0 {
+		keys = []reconcilekey.Key{reconcilekey.Allocator()}
+	}
+	for _, k := range keys {
+		f.enqueued = append(f.enqueued, k.Normalize())
+	}
+}
+
+// enqueuedKeys returns a copy of every key passed to Enqueue so far.
+func (f *fakeState) enqueuedKeys() []reconcilekey.Key {
+	f.enqueueMu.Lock()
+	defer f.enqueueMu.Unlock()
+	return append([]reconcilekey.Key(nil), f.enqueued...)
+}
 func (f *fakeState) ServiceRegistry() workspacesvc.Registry { return f.services }
 
 // WebhookDispatcher lets fakeState satisfy WebhookDispatchProvider so webhook

@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/spf13/cobra"
 )
@@ -708,7 +709,7 @@ func doRuntimeRequestRestart(dops drainOps, persistRestart func() error, pinned 
 		Message: "restart requested by session",
 	})
 
-	if err := pokeControllerForRestart(cityPath); err != nil {
+	if err := pokeControllerForRestart(cityPath, reconcilekey.SessionNamed(sn)); err != nil {
 		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -761,27 +762,9 @@ func waitForControllerRestart(ctx context.Context, dops drainOps, sp runtime.Pro
 	}
 }
 
-// pokeControllerForRestart signals the controller to run an immediate
-// reconcile tick instead of waiting for the next periodic patrol. It does not
-// wait for the controller to act: the restart-requested flag is durable, so a
-// signal failure just means the next periodic tick picks up the request
-// instead of an immediate one.
-//
-// This calls sendControllerCommandWithTimeouts directly rather than going
-// through pokeController: pokeController silently falls back to the
-// city-agnostic global supervisor socket on any send failure, which would
-// make an explicit-restart request for one city spuriously report success
-// via an unrelated supervisor.
-func pokeControllerForRestart(cityPath string) error {
-	if _, err := sendControllerCommandWithTimeouts(cityPath, "poke", 2*time.Second, 2*time.Second, 5*time.Second); err != nil {
-		return fmt.Errorf("signaling controller: %w (restart request remains durably set for the next reconcile tick)", err)
-	}
-	return nil
-}
-
-// drainAckPokeController is a mutable global test seam over pokeController.
+// drainAckPokeController is a mutable global test seam over enqueueController.
 // Tests that swap it MUST NOT call t.Parallel().
-var drainAckPokeController = pokeController
+var drainAckPokeController = enqueueController
 
 // drainAckReleaseHeldClaims is a mutable global test seam over
 // releaseUnexecutedClaimsForSession, matching drainAckPokeController above.
@@ -905,7 +888,7 @@ func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn string, jsonOutpu
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := drainAckPokeController(cityPath); err != nil {
+	if err := drainAckPokeController(cityPath, reconcilekey.SessionNamed(sn)); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	if jsonOutput {

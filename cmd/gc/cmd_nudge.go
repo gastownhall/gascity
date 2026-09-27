@@ -30,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
@@ -120,7 +121,7 @@ var (
 	// Test seams for cmd_nudge_test.go. Tests that replace these package
 	// variables must stay serial; do not use t.Parallel in those tests.
 	nudgeCityUsesManagedReconciler           = cityUsesManagedReconciler
-	nudgePokeController                      = pokeController
+	nudgePokeController                      = enqueueController
 	nudgeObserveTarget                       = workerObserveNudgeTarget
 	nudgeWithdrawQueuedWaitNudges            = withdrawQueuedWaitNudges
 	nudgePollDeliverQueued                   = tryDeliverQueuedNudgesByPoller
@@ -1291,7 +1292,7 @@ func queueManagedSessionNudgeWake(target nudgeTarget, store beads.Store, message
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if err := nudgePokeController(target.cityPath); err != nil {
+	if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: warning: poke failed: %v\n", err) //nolint:errcheck
 	}
 	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, "", stdout, stderr)
@@ -1619,7 +1620,7 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		if err := enqueueManagedNudgeThenWake(target, store, item); err != nil {
 			return err
 		}
-		if err := nudgePokeController(target.cityPath); err != nil {
+		if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
 			if nudgeWarningWriter != nil {
 				fmt.Fprintf(nudgeWarningWriter, "gc mail notify: warning: poke failed after managed wake: %v\n", err) //nolint:errcheck
 			}

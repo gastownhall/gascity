@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -1873,10 +1874,7 @@ func (cr *CityRuntime) handleReloadRequest(req *reloadRequest) {
 			),
 		})
 	}
-	select {
-	case cr.pokeCh <- struct{}{}:
-	default:
-	}
+	legacyEnqueue(cr.pokeCh, nil, reconcilekey.Allocator()) // config reload: allocator
 	req.acceptedCh <- reloadControlReply{
 		Outcome: reloadOutcomeAccepted,
 		Message: "Reload requested.",
@@ -3163,10 +3161,8 @@ func (cr *CityRuntime) requestDeferredDrainFollowUpTick() {
 	if !cr.sessionDrains.consumeFollowUpTick() {
 		return
 	}
-	select {
-	case cr.pokeCh <- struct{}{}:
-	default:
-	}
+	// Key-less: the follow-up covers every deferred drain at once.
+	legacyEnqueue(cr.pokeCh, nil, reconcilekey.Allocator())
 }
 
 func (cr *CityRuntime) ensureAsyncStartLimiter() *asyncStartLimiter {
@@ -3185,10 +3181,9 @@ func (cr *CityRuntime) requestAsyncStartFollowUpTick() {
 	}
 	// Async completion can commit, rollback, or reject stale work; each case
 	// should prompt one cheap reconciliation pass to observe the new reality.
-	select {
-	case cr.pokeCh <- struct{}{}:
-	default:
-	}
+	// Key-less: the completion callback does not carry the session, and a
+	// start also changes supply, which the allocator must re-plan.
+	legacyEnqueue(cr.pokeCh, nil, reconcilekey.Allocator())
 }
 
 func (cr *CityRuntime) waitForAsyncStarts() bool {

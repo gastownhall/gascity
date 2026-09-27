@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -83,10 +84,12 @@ func TestCmdSessionKill_PokesControllerAfterSleep(t *testing.T) {
 
 	calls := 0
 	var gotCityPath, stateAtPoke string
+	var gotKey reconcilekey.Key
 	old := sessionKillPokeController
-	sessionKillPokeController = func(cityPath string) error {
+	sessionKillPokeController = func(cityPath string, key reconcilekey.Key) error {
 		calls++
 		gotCityPath = cityPath
+		gotKey = key
 		if b, gErr := store.Get(bead.ID); gErr == nil {
 			stateAtPoke = b.Metadata["state"]
 		}
@@ -105,6 +108,9 @@ func TestCmdSessionKill_PokesControllerAfterSleep(t *testing.T) {
 	if gotCityPath != cityDir {
 		t.Errorf("poke cityPath = %q, want %q", gotCityPath, cityDir)
 	}
+	if want := reconcilekey.Session(bead.ID); gotKey != want {
+		t.Errorf("poke key = %v, want %v", gotKey, want)
+	}
 	if stateAtPoke != string(sessionpkg.StateAsleep) {
 		t.Errorf("state at poke time = %q, want %q (poke must run after the SleepPatch write)", stateAtPoke, sessionpkg.StateAsleep)
 	}
@@ -120,7 +126,7 @@ func TestCmdSessionKill_PokeFailureIsNonFatal(t *testing.T) {
 	_, _, _ = newKillPokeSession(t, sessionName)
 
 	old := sessionKillPokeController
-	sessionKillPokeController = func(string) error { return errors.New("dial failed") }
+	sessionKillPokeController = func(string, reconcilekey.Key) error { return errors.New("dial failed") }
 	t.Cleanup(func() { sessionKillPokeController = old })
 
 	var stdout, stderr bytes.Buffer

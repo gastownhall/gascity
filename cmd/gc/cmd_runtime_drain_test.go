@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -691,7 +692,7 @@ func TestDoRuntimeDrainCheckJSONNotDrainingWritesFalseResult(t *testing.T) {
 
 func TestDoRuntimeDrainAck(t *testing.T) {
 	old := drainAckPokeController
-	drainAckPokeController = func(string) error { return nil }
+	drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
 	t.Cleanup(func() { drainAckPokeController = old })
 
 	dops := newFakeDrainOps()
@@ -733,7 +734,7 @@ func TestJoinDrainAckMutationErrorsMissingSessionBeadIsIdempotent(t *testing.T) 
 
 func TestDoRuntimeDrainAckJSON(t *testing.T) {
 	old := drainAckPokeController
-	drainAckPokeController = func(string) error { return nil }
+	drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
 	t.Cleanup(func() { drainAckPokeController = old })
 
 	dops := newFakeDrainOps()
@@ -756,11 +757,13 @@ func TestDoRuntimeDrainAckJSON(t *testing.T) {
 
 func TestDoRuntimeDrainAckPokesController(t *testing.T) {
 	var gotCityPath string
+	var gotKey reconcilekey.Key
 	calls := 0
 	old := drainAckPokeController
-	drainAckPokeController = func(cityPath string) error {
+	drainAckPokeController = func(cityPath string, key reconcilekey.Key) error {
 		calls++
 		gotCityPath = cityPath
+		gotKey = key
 		return nil
 	}
 	t.Cleanup(func() { drainAckPokeController = old })
@@ -779,6 +782,9 @@ func TestDoRuntimeDrainAckPokesController(t *testing.T) {
 	if gotCityPath != "/city/path" {
 		t.Errorf("poke cityPath = %q, want %q", gotCityPath, "/city/path")
 	}
+	if want := reconcilekey.SessionNamed("session-name"); gotKey != want {
+		t.Errorf("poke key = %v, want %v", gotKey, want)
+	}
 	if !dops.acked["session-name"] {
 		t.Error("drain ack flag not set")
 	}
@@ -787,7 +793,7 @@ func TestDoRuntimeDrainAckPokesController(t *testing.T) {
 func TestDoRuntimeDrainAckErrorDoesNotPoke(t *testing.T) {
 	calls := 0
 	old := drainAckPokeController
-	drainAckPokeController = func(string) error {
+	drainAckPokeController = func(string, reconcilekey.Key) error {
 		calls++
 		return nil
 	}
@@ -807,7 +813,7 @@ func TestDoRuntimeDrainAckErrorDoesNotPoke(t *testing.T) {
 
 func TestDoRuntimeDrainAckPokeFailureWarns(t *testing.T) {
 	old := drainAckPokeController
-	drainAckPokeController = func(string) error { return errors.New("dial failed") }
+	drainAckPokeController = func(string, reconcilekey.Key) error { return errors.New("dial failed") }
 	t.Cleanup(func() { drainAckPokeController = old })
 
 	dops := newFakeDrainOps()
@@ -1276,7 +1282,7 @@ func TestDrainAckNoArgsErrorMessage(t *testing.T) {
 
 func TestDrainAckNoArgsFallsBackToCityPathEnv(t *testing.T) {
 	old := drainAckPokeController
-	drainAckPokeController = func(string) error { return nil }
+	drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
 	t.Cleanup(func() { drainAckPokeController = old })
 
 	// drain-ack now reads the city store to release any in_progress claim the
