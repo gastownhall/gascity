@@ -14,8 +14,7 @@ import (
 // (both-or-neither, launch-confirmed) and cleared at every started_config_hash
 // clear site, so a fresh incarnation re-primes and a resumed/churned
 // incarnation keeps its markers. S19 Stage 2 is WRITE-ONLY: they are
-// stamped/cleared but read by no decision path (Stage 3 shadows them, Stage 4
-// acts on them).
+// stamped/cleared but read by no decision path yet.
 const (
 	// PrimedAtMetadataKey records when this incarnation's startup-prompt
 	// delivery was attempted (RFC3339): a delivery mechanism was selected and

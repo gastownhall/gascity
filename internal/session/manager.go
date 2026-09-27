@@ -173,12 +173,9 @@ type Info struct {
 	// RAW priming-marker mirrors (primed_at / priming_attempted_at / prompt_hash),
 	// verbatim. They follow the same raw-mirror house pattern as the canonical
 	// keys: projected by infoFromPersistedBead and folded per-key (verbatim copy)
-	// by ApplyPatch. The S19 Stage 3 shadow harness snapshots the compared keys
-	// off these Info mirrors at tick start/end (the reconciler loop carries no raw
-	// session beads), so every compared key must be a projected Info field.
-	// Additive, internal-only (absent from the HTTP wire). S19 Stage 2 is
-	// WRITE-ONLY: stamped/cleared at start/clear sites but read by no decision
-	// path yet (the harness observes them; Stage 4 acts on them).
+	// by ApplyPatch. Additive, internal-only (absent from the HTTP wire). S19
+	// Stage 2 is WRITE-ONLY: stamped/cleared at start/clear sites but read by no
+	// decision path yet.
 	PrimedAtMetadata           string // primed_at (raw RFC3339)
 	PrimingAttemptedAtMetadata string // priming_attempted_at (raw RFC3339)
 	PromptHashMetadata         string // prompt_hash (raw sha256 hex)

@@ -11,16 +11,12 @@ import (
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
-// TestRetireDuplicateRows_RecordsTypedRetirementForShadow pins council finding 6:
-// the typed duplicate-retire path (retireDuplicateConfiguredNamedSessionRows) must
-// feed its canonical-identity clears to the S19 converge recorder, exactly as the
-// raw sibling (retireDuplicateConfiguredNamedSessionBeads) does. RetireNamedSessionPatch
-// clears the compared keys canonical_instance_name and canonical_pool_slot; without
-// a recorder entry, a GC_CONVERGE_SHADOW soak sees that owned-key delta with no
-// recorded write and false-classifies it as a foreign_write. The file-level
-// write-site guard misses this because session_beads.go has other recorder calls,
-// so this path-specific test is the real assertion.
-func TestRetireDuplicateRows_RecordsTypedRetirementForShadow(t *testing.T) {
+// TestRetireDuplicateRows_ClearsLoserCanonicalIdentity pins that the typed
+// duplicate-retire path (retireDuplicateConfiguredNamedSessionRows) persists
+// RetireNamedSessionPatch's canonical-identity clears on the losing row and
+// leaves the winner's canonical identity intact, so the retired duplicate no
+// longer claims the named session's canonical instance name or pool slot.
+func TestRetireDuplicateRows_ClearsLoserCanonicalIdentity(t *testing.T) {
 	cfg := &config.City{
 		Agents:        []config.Agent{{Name: "mayor"}},
 		NamedSessions: []config.NamedSession{{Template: "mayor"}},
@@ -56,12 +52,6 @@ func TestRetireDuplicateRows_RecordsTypedRetirementForShadow(t *testing.T) {
 	winner := mkSession("5", spec.SessionName, spec.SessionName)         // canonical name + higher generation → wins
 	loser := mkSession("3", spec.SessionName, spec.SessionName+"-stale") // retired duplicate
 
-	// Install a recorder directly (no env var needed: recordLegacyCompareWrites is
-	// gated only on an attached recorder).
-	rec := &legacyWriteRecorder{}
-	convergeGlobalRecorder.Store(rec)
-	t.Cleanup(func() { convergeGlobalRecorder.Store(nil) })
-
 	rows := []session.ReconcileSession{
 		{Info: sessiontest.SeedBead(t, mustGet(t, store, winner))},
 		{Info: sessiontest.SeedBead(t, mustGet(t, store, loser))},
@@ -69,32 +59,18 @@ func TestRetireDuplicateRows_RecordsTypedRetirementForShadow(t *testing.T) {
 
 	retireDuplicateConfiguredNamedSessionRows("", store, nil, runtime.NewFake(), cfg, cityName, rows, now, nil)
 
-	// The loser's typed retirement must have recorded the compared canonical-identity
-	// clears; the winner must not have been retired.
-	loserWrites := rec.forSession(loser)
-	if len(loserWrites) == 0 {
-		t.Fatalf("typed retirement recorded NO compared-key writes for the loser — shadow soak would see a foreign_write")
-	}
-	sawInstance, sawSlot := false, false
-	for _, w := range loserWrites {
-		switch w.key {
-		case session.CanonicalInstanceNameMetadata:
-			sawInstance = true
-			if w.value != "" {
-				t.Errorf("recorded %s = %q, want cleared", w.key, w.value)
-			}
-		case session.CanonicalPoolSlotMetadata:
-			sawSlot = true
-			if w.value != "" {
-				t.Errorf("recorded %s = %q, want cleared", w.key, w.value)
-			}
+	loserBead := mustGet(t, store, loser)
+	for _, key := range []string{session.CanonicalInstanceNameMetadata, session.CanonicalPoolSlotMetadata} {
+		if got := loserBead.Metadata[key]; got != "" {
+			t.Errorf("loser %s = %q after retirement, want cleared", key, got)
 		}
 	}
-	if !sawInstance || !sawSlot {
-		t.Errorf("recorder missing canonical clears (instance=%v slot=%v); writes=%#v", sawInstance, sawSlot, loserWrites)
+	winnerBead := mustGet(t, store, winner)
+	if got := winnerBead.Metadata[session.CanonicalInstanceNameMetadata]; got != spec.SessionName {
+		t.Errorf("winner %s = %q, want %q (winner is not retired)", session.CanonicalInstanceNameMetadata, got, spec.SessionName)
 	}
-	if got := rec.forSession(winner); len(got) != 0 {
-		t.Errorf("winner recorded %d writes, want 0 (winner is not retired)", len(got))
+	if got := winnerBead.Metadata[session.CanonicalPoolSlotMetadata]; got != "1" {
+		t.Errorf("winner %s = %q, want %q (winner is not retired)", session.CanonicalPoolSlotMetadata, got, "1")
 	}
 }
 

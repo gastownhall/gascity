@@ -2407,9 +2407,6 @@ func clearStaleResumeKeyMetadata(handle string, sessFront *sessionpkg.Store) map
 	}
 	if sessFront != nil && strings.TrimSpace(handle) != "" {
 		_ = sessFront.ApplyPatch(handle, patch)
-		// S19 Stage 3 shadow: record the legacy priming-marker clears (no-op
-		// unless the shadow harness is enabled).
-		recordLegacyCompareWrites(handle, "clearStaleResumeKeyMetadata", patch)
 	}
 	return patch
 }
