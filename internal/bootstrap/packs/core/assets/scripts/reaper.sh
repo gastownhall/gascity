@@ -1249,8 +1249,12 @@ EOF
 # that database's issues table. On a split city, agent sessions (gcg-session-*,
 # gcs-*) live in the sqlite infra ledger (.gc/store/graph/beads.sqlite), which
 # this Dolt loop cannot see. Those rows are purged by the daemon wisp GC
-# (purgeClosedInfraSessions) after GC_INFRA_SESSION_PURGE_AGE (default 72h).
-# This step's own clock stays GC_REAPER_SESSION_PURGE_AGE (default 720h).
+# (purgeClosedInfraSessions) after GC_INFRA_SESSION_PURGE_AGE (default 72h),
+# only when the city's sessions class is relocated onto that SQLite ledger and
+# wisp_ttl is set; it reads that variable from the controller's environment,
+# not this order's. This step's own clock stays GC_REAPER_SESSION_PURGE_AGE
+# (default 720h). On an unsplit city the wisp GC leaves sessions alone and
+# this step is the only session prune.
 # Do not point this script at an unrelated Dolt server to reach them.
 if [ -d "$CITY_BEADS_DIR" ]; then
     SESSION_PRUNE_ATTEMPTED=1
