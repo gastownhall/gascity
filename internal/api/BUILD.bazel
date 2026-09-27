@@ -356,6 +356,7 @@ go_test(
         "idempotency_endpoints_test.go",
         "idempotency_guard_test.go",
         "idempotency_helper_test.go",
+        "idempotency_session_actions_test.go",
         "idempotency_test.go",
         "keyset_page_test.go",
         "logwatcher_test.go",
@@ -449,6 +450,7 @@ go_test(
         "//internal/worker:operation_events.go",
     ],
     embed = [":api"],
+    shard_count = 6,
     deps = [
         "//internal/agent",
         "//internal/agentutil",

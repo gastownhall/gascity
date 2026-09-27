@@ -251,6 +251,21 @@ func EnsureGitRepo(t *testing.T, root string) error {
 		}
 		return nil
 	}
+	// Concurrent shards of one test target share the runfiles tree; serialize
+	// the one-time git stand-in behind a flock so parallel EnsureGitRepo
+	// callers do not race init/add/commit.
+	// Best-effort: if the lock can't be opened or acquired we fall through unlocked, same as before sharding.
+	lock, err := os.OpenFile(filepath.Join(filepath.Dir(root), ".gascity-git-standin.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err == nil {
+		defer lock.Close() //nolint:errcheck
+		if lockFile(lock) == nil {
+			defer unlockFile(lock)
+			// Re-check under the lock: a sibling shard may have finished.
+			if _, err := os.Stat(filepath.Join(root, ".git")); err == nil {
+				return nil
+			}
+		}
+	}
 	if err := run("init", "-q"); err != nil {
 		return err
 	}

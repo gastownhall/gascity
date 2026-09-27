@@ -39,6 +39,7 @@ go_test(
         "carrier_test.go",
         "dialog_model_switch_test.go",
         "dialog_test.go",
+        "dialog_trust_closed_loop_test.go",
         "dialog_trust_selection_test.go",
         "envsecret_test.go",
         "fake_conformance_test.go",

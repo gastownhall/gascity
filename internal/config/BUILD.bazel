@@ -91,6 +91,7 @@ go_library(
 go_test(
     name = "config_test",
     srcs = [
+        "acp_session_config_test.go",
         "agent_discovery_test.go",
         "agent_layout_test.go",
         "builtin_family_test.go",

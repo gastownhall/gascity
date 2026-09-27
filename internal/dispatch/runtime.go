@@ -959,8 +959,9 @@ func isRetryAttemptSubject(subject beads.Bead) bool {
 	case "retry-run", "retry-eval":
 		return true
 	}
-	// v2 pattern: attempt beads keep their original kind but carry gc.attempt.
-	if subject.Metadata[beadmeta.AttemptMetadataKey] != "" {
+	// v2 pattern: attempt beads keep their original kind but carry gc.attempt
+	// (and, since the counter split, gc.retry_attempt).
+	if subject.Metadata[beadmeta.AttemptMetadataKey] != "" || subject.Metadata[beadmeta.RetryAttemptMetadataKey] != "" {
 		return true
 	}
 	return false
