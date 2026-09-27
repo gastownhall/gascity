@@ -12,10 +12,12 @@
 # rbe-west (farm v2, opt-in with repo variable RBE_WEST_WORKERS=true):
 #   RBE_WEST_EXECUTOR  grpcs:// endpoint of the Phoenix core (secret; not in git).
 #   RBE_WORKER_TLS_CERT / RBE_WORKER_TLS_KEY  base64 PEM, CN=rbe-oss-worker.
-#   The bazel job targets instance "oss"; the rbe-workers jobs run NativeLink
-#   workers on Blacksmith runners for the OSS scheduler and exit when the bazel
-#   job ends. Blacksmith donates that compute for OSS-repo workflows only, so
-#   only this repo's own runs (never fork PRs, never developer builds) use it.
+#   The bazel job targets instance "oss" (rbe-west's OSS scheduler), served by
+#   the Blacksmith worker pool (rbe-worker-pool.yml). The job pre-warms the
+#   pool (one worker if none is up) so capacity boots during checkout and
+#   analysis; the rbe-west scaler adds workers from OSS queue depth. Blacksmith
+#   donates that compute for OSS-repo workflows only, so only this repo's own
+#   runs (never fork PRs, never developer builds) use it.
 name: bazel-test
 
 on:
@@ -37,12 +39,32 @@ jobs:
     name: bazel test (side-by-side)
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: write # dispatch rbe-worker-pool.yml (pre-warm)
     env:
       # Hoisted so the step-level `if:` below can see it (empty on forks,
       # where secrets are unavailable — the job then runs locally).
       BAZEL_REMOTE_EXECUTOR: ${{ (vars.RBE_WEST_WORKERS == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && secrets.RBE_WEST_EXECUTOR || secrets.BAZEL_REMOTE_EXECUTOR }}
       RBE_INSTANCE_OVERRIDE: ${{ (vars.RBE_WEST_WORKERS == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && 'oss' || '' }}
     steps:
+      # Best effort: a worker boots (~30 s) while this job checks out and
+      # analyzes. The rbe-west scaler covers anything beyond one worker.
+      - name: Pre-warm the OSS worker pool (rbe-west)
+        if: vars.RBE_WEST_WORKERS == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          active=$(gh run list -R "$GITHUB_REPOSITORY" --workflow rbe-worker-pool.yml --limit 50 \
+            --json status --jq '[.[] | select(.status != "completed")] | length' || echo 0)
+          if [ "${active:-0}" -eq 0 ]; then
+            gh workflow run rbe-worker-pool.yml -R "$GITHUB_REPOSITORY" --ref "$DEFAULT_BRANCH" \
+              && echo "dispatched a pool worker" || echo "::warning::pool dispatch failed; relying on the rbe-west scaler"
+          else
+            echo "${active} pool worker(s) already up"
+          fi
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install bazel via bazelisk
@@ -129,30 +151,6 @@ jobs:
           path: |
             bazel-testlogs/**/test.log
           retention-days: 7
-
-  rbe-workers:
-    name: rbe worker ${{ matrix.n }} (Blacksmith, OSS scheduler)
-    if: vars.RBE_WEST_WORKERS == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: blacksmith-32vcpu-ubuntu-2404
-    timeout-minutes: 100
-    permissions:
-      contents: read
-      actions: read
-    strategy:
-      fail-fast: false
-      matrix:
-        n: [1, 2]
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - name: NativeLink worker until the bazel job finishes
-        env:
-          RBE_WORKER_TLS_CERT: ${{ secrets.RBE_WORKER_TLS_CERT }}
-          RBE_WORKER_TLS_KEY: ${{ secrets.RBE_WORKER_TLS_KEY }}
-          RBE_WEST_HOST: ${{ secrets.RBE_WEST_HOST }}
-          BAZEL_JOB_NAME: bazel test (side-by-side)
-          GH_TOKEN: ${{ github.token }}
-          WORKER_NAME: gha-${{ github.repository_owner }}-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.n }}
-        run: tools/rbe/blacksmith-worker.sh
 
   sync-check:
     name: BUILD files in sync
