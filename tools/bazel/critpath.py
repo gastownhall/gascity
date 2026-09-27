@@ -51,7 +51,14 @@ def main():
     gap = elapsed - cp
     pct = (gap / elapsed * 100) if elapsed else 0.0
 
-    print(f"[{args.tier}] elapsed        {elapsed:7.1f}s")
+    import time as _t
+    wall = 0.0
+    # wall clock: earliest-to-latest event timestamp span
+    ts_list = [e.get('ts', 0) for e in ev if e.get('ts')]
+    if ts_list:
+        wall = (max(ts_list) - min(ts_list)) / 1e6
+    print(f"[{args.tier}] wall clock     {wall:7.1f}s   (server boot → last action)")
+    print(f"[{args.tier}] elapsed        {elapsed:7.1f}s   (build graph)")
     print(f"[{args.tier}] critical path  {cp:7.1f}s   ({', '.join(e['name'].split('action ')[-1][:44] for e in cps[:2])})")
     print(f"[{args.tier}] gap            {gap:7.1f}s   ({pct:.0f}% of elapsed)")
     print()
@@ -70,10 +77,11 @@ def main():
         print("      or add a runner disk cache so inputs are not re-hashed.")
 
     if args.budget is not None:
-        if elapsed > args.budget:
-            print(f"\nBUDGET: FAIL — {elapsed:.1f}s > {args.budget:.0f}s ({args.tier})")
+        gate = max(elapsed, wall)
+        if gate > args.budget:
+            print(f"\nBUDGET: FAIL — {gate:.1f}s > {args.budget:.0f}s ({args.tier})")
             return 1
-        print(f"\nBUDGET: pass — {elapsed:.1f}s ≤ {args.budget:.0f}s ({args.tier})")
+        print(f"\nBUDGET: pass — {gate:.1f}s ≤ {args.budget:.0f}s ({args.tier})")
     return 0
 
 if __name__ == "__main__":
