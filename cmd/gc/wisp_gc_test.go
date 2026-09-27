@@ -7,6 +7,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -122,6 +123,42 @@ func TestInfraSessionPurgeAgeEnv(t *testing.T) {
 		if got := defaultInfraSessionPurgeAge(); got != tc.want {
 			t.Errorf("GC_INFRA_SESSION_PURGE_AGE=%q: age = %s, want %s", tc.raw, got, tc.want)
 		}
+	}
+}
+
+// A bad override falls back to 72h and says so, once per process, rather
+// than silently ignoring the operator (30d is the likely typo).
+func TestInfraSessionPurgeAgeWarnsOnceOnBadOverride(t *testing.T) {
+	prevOnce := infraSessionPurgeAgeWarnOnce
+	infraSessionPurgeAgeWarnOnce = &sync.Once{}
+	var buf bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		infraSessionPurgeAgeWarnOnce = prevOnce
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+
+	t.Setenv("GC_INFRA_SESSION_PURGE_AGE", "48h")
+	if got := defaultInfraSessionPurgeAge(); got != 48*time.Hour || buf.Len() != 0 {
+		t.Fatalf("valid override: age=%s log=%q, want 48h and no warning", got, buf.String())
+	}
+	t.Setenv("GC_INFRA_SESSION_PURGE_AGE", "30d")
+	for i := 0; i < 3; i++ {
+		if got := defaultInfraSessionPurgeAge(); got != 72*time.Hour {
+			t.Fatalf("age = %s, want 72h", got)
+		}
+	}
+	t.Setenv("GC_INFRA_SESSION_PURGE_AGE", "-1h")
+	_ = defaultInfraSessionPurgeAge()
+	out := buf.String()
+	if n := strings.Count(out, "GC_INFRA_SESSION_PURGE_AGE"); n != 1 {
+		t.Fatalf("warnings = %d, want exactly 1; log=%q", n, out)
+	}
+	if !strings.Contains(out, `"30d"`) || !strings.Contains(out, "72h0m0s") {
+		t.Fatalf("warning %q should name the bad value and the default", out)
 	}
 }
 

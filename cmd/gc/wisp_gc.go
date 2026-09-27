@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -95,10 +96,18 @@ func defaultInfraSessionPurgeAge() time.Duration {
 	}
 	age, err := time.ParseDuration(raw)
 	if err != nil || age <= 0 {
+		infraSessionPurgeAgeWarnOnce.Do(func() {
+			log.Printf("wisp gc: GC_INFRA_SESSION_PURGE_AGE=%q is not a positive Go duration (e.g. 72h; days like 30d are not accepted); using the default %s",
+				raw, infraSessionPurgeAgeDefault)
+		})
 		return infraSessionPurgeAgeDefault
 	}
 	return age
 }
+
+// infraSessionPurgeAgeWarnOnce limits the invalid-override warning to one line
+// per process: the age is re-read every GC tick. Tests reset it.
+var infraSessionPurgeAgeWarnOnce = &sync.Once{}
 
 // wispGCSessionPurgeBatchCap bounds how many closed infra session beads one
 // sweep deletes. The backlog drains across ticks instead of one unbounded pass.
