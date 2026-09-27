@@ -1449,10 +1449,12 @@ func (cr *CityRuntime) tick(
 	// Wisp GC: purge expired closed molecules. The molecule/wisp/workflow purge
 	// arm routes through the typed graph-class store; the read-message retention
 	// arm through the typed messaging-class store. Both collapse to the city store
-	// today, so the GC is byte-identical.
+	// today, so the GC is byte-identical. The closed session purge arm gets the
+	// sessions class only when it is relocated onto a SQLite infra ledger; on an
+	// unsplit city it gets nothing and never touches the work store.
 	if graphStore := cr.graphBeadStore(); cr.wg != nil && graphStore.Store != nil && cr.wg.shouldRun(time.Now()) {
 		phaseStart = time.Now()
-		purged, gcErr := cr.wg.runGC(graphStore, cr.mailBeadStore(), time.Now())
+		purged, gcErr := cr.wg.runGC(graphStore, cr.infraSessionLedger(), cr.mailBeadStore(), time.Now())
 		recordPhase(TraceSiteControllerTickPhase, "wisp_gc", phaseStart, map[string]any{"purged": purged})
 		if gcErr != nil {
 			for _, line := range strings.Split(gcErr.Error(), "\n") {
