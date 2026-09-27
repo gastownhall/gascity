@@ -90,6 +90,51 @@ per-city `.gc/system/packs` tree, adds the missing pinned import(s) to
 `pack.toml`, and refreshes `packs.lock` and the cache. Leftover
 `.gc/system/packs` directories on disk are pruned automatically.
 
+## `gascity-pack-binding` Doctor Warning
+
+Cities created by gc v1.4.x import the public Gas City pack under the key
+`gascity`:
+
+```toml
+[imports.gascity]
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
+```
+
+The import key namespaces the pack's commands and skills, and the pack
+ecosystem is written against `gc`: the pack documents skill `gc.mayor`, and
+role prompts in Gas City pack releases after 0.1.6 run `gc gc claim`. Under
+`[imports.gascity]` that command is `gc gascity claim`, so role workers fail
+their first claim once the pack is bumped past 0.1.6. Current `gc init` writes
+`[imports.gc]`.
+
+`gc doctor` reports this as a warning; the city keeps working at the pinned
+0.1.6 pack. Run:
+
+```bash
+gc doctor --fix
+```
+
+The `gascity-pack-binding` check renames the key to `[imports.gc]` in
+`pack.toml` (or in a city.toml root `[imports]` override), keeping the source,
+version, and every other field. `packs.lock` is keyed by source, so no
+reinstall is needed. The check identifies the pack by its source (any https,
+http, or SSH spelling of `gastownhall/gascity-packs` with the `gascity` pack
+directory), not by the key name, so a fork or a different pack bound as
+`gascity` is left alone, and it never
+touches rig imports or `[defaults.rig.imports]`.
+
+The fix changes nothing and explains why when:
+
+- `[imports.gc]` already imports a different pack. Rename one of the imports
+  by hand.
+- `[imports.gc]` already imports the Gas City pack with a different version or
+  settings. Remove one of the two imports by hand. An exact duplicate (same
+  source and version) is removed automatically.
+- A string value in `pack.toml` or `city.toml` is shaped like a
+  `gascity.`-qualified name, for example a patch targeting `gascity.<agent>`.
+  The message names the file and key. Update the value to `gc.` and rerun, or
+  rename the import by hand if the value is unrelated. Comments are ignored.
+
 ## "command not found" After Install
 
 If `gc` is installed but your shell cannot find it, the binary is not on your

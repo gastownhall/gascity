@@ -45,6 +45,7 @@ mcp-config
 mcp-shared-target
 builtin-pack-imports
 packv2-import-state
+gascity-pack-binding
 jsonl-archive
 pack-credentials
 tmux-binary

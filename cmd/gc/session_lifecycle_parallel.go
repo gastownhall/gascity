@@ -21,10 +21,12 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -2182,6 +2184,25 @@ func startPreparedStartCandidate(
 			}
 		}
 	}
+	if rigName := strings.TrimSpace(item.candidate.tp.RigName); rigName != "" {
+		st, err := loadSuspensionState(fsys.OSFS{}, cityPath)
+		if err != nil {
+			return false, fmt.Errorf("loading suspension state before starting session %q: %w", name, err)
+		}
+		suspendedOnStart := false
+		if cfg != nil {
+			for i := range cfg.Rigs {
+				rig := &cfg.Rigs[i]
+				if rig.Name == rigName {
+					suspendedOnStart = rig.EffectiveSuspendedOnStart()
+					break
+				}
+			}
+		}
+		if suspensionstate.EffectiveRigSuspended(st, rigName, suspendedOnStart) {
+			return false, fmt.Errorf("rig %q is suspended", rigName)
+		}
+	}
 	if store == nil || strings.TrimSpace(item.candidate.info.ID) == "" {
 		handle, err := runtimeWorkerHandleWithConfig(
 			cityPath,
@@ -2380,6 +2401,26 @@ func confirmPendingStart(currentState string) bool {
 	return sessionpkg.StateConfirmsPendingStart(sessionpkg.State(strings.TrimSpace(currentState)))
 }
 
+// confirmStartCommitState reports whether a start commit (the async/sync commit
+// in commitStartResultTraced and the recovery commit in
+// recoverRunningPendingCreate) should stamp state=active +
+// state_reason=creation_complete. It is confirmPendingStart plus "awake": the
+// reconciler's heal pass projects "awake" for any live runtime, so it can land
+// on a bead between the runtime spawn and this commit. Treating that healed
+// "awake" as already-confirmed left state_reason unset, which silently dropped
+// the post-create demand floor (poolSessionWithinPostCreateProtection) for a
+// fresh pool worker — the first-run "orphaned" drain of a worker that had just
+// claimed its step. Both commit paths share this one predicate so they cannot
+// drift apart again.
+//
+// It deliberately does NOT drive StartsAwakeInterval: re-confirming an
+// already-awake runtime must not reset its in-flight awake interval, so that
+// epoch stays keyed on confirmPendingStart alone.
+func confirmStartCommitState(currentState string) bool {
+	return confirmPendingStart(currentState) ||
+		sessionpkg.State(strings.TrimSpace(currentState)) == sessionpkg.StateAwake
+}
+
 func commitStartResultTraced(
 	result startResult,
 	sessFront *sessionpkg.Store,
@@ -2429,16 +2470,21 @@ func commitStartResultTraced(
 		promptHash = result.prepared.promptHash
 	}
 	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
-		CoreHash:                result.prepared.coreHash,
-		LiveHash:                result.prepared.liveHash,
-		ProvisionHash:           result.prepared.provisionHash,
-		LaunchHash:              result.prepared.launchHash,
-		CoreBreakdown:           coreBreakdown,
-		ConfirmState:            confirmPendingStart(info.MetadataState),
+		CoreHash:      result.prepared.coreHash,
+		LiveHash:      result.prepared.liveHash,
+		ProvisionHash: result.prepared.provisionHash,
+		LaunchHash:    result.prepared.launchHash,
+		CoreBreakdown: coreBreakdown,
+		// The heal pass may already have projected "awake" onto this bead
+		// before the commit landed; confirm from there too so the commit still
+		// stamps state_reason=creation_complete (confirmStartCommitState).
+		ConfirmState:            confirmStartCommitState(info.MetadataState),
 		ClearSleepReason:        info.SleepReason != "",
 		ClearPendingCreateClaim: shouldRollbackPendingCreateInfo(info),
 		// A confirmed transition out of a dormant/creating state opens a new
-		// awake interval — stamp a fresh compute-usage epoch for it.
+		// awake interval — stamp a fresh compute-usage epoch for it. Keyed on
+		// confirmPendingStart, not confirmStartCommitState: an already-awake
+		// bead keeps its in-flight interval (mirrors recoverRunningPendingCreate).
 		StartsAwakeInterval: confirmPendingStart(info.MetadataState),
 		Now:                 clk.Now(),
 		PrimedAt:            primedAt,
@@ -2765,8 +2811,7 @@ func recoverRunningPendingCreate(
 		// confirmPendingStart / StateAwake / sleep_reason checks are byte-identical
 		// to the former raw session.Metadata reads) — the two transitional W6
 		// lockstep mirrors that kept this raw read coherent are gone.
-		ConfirmState: confirmPendingStart(info.MetadataState) ||
-			sessionpkg.State(strings.TrimSpace(info.MetadataState)) == sessionpkg.StateAwake,
+		ConfirmState:     confirmStartCommitState(info.MetadataState),
 		ClearSleepReason: info.SleepReason != "",
 		// recoverRunningPendingCreate's caller (session_reconciler.go)
 		// already gates entry on shouldRollbackPendingCreateInfo(info), so
