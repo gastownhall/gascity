@@ -514,6 +514,24 @@ func TestNamedOnDemand_NamedDemandDoesNotWakeDrainedSessionWithBlockedWork(t *te
 	assertAsleep(t, result, "hello-world--refinery")
 }
 
+// TestNamedOnDemand_RoutedDemandWakesDrainedSessionDespiteBlockedNamedDemand
+// pins the combined case: named-demand from blocked in_progress work wins the
+// reason switch, but on a drained holder it must not mask live routed demand,
+// or the ga-j4lqwa.1 strand survives whenever both signals are set.
+func TestNamedOnDemand_RoutedDemandWakesDrainedSessionDespiteBlockedNamedDemand(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:                   []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions:            []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
+		SessionBeads:             []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "drained", Drained: true, NamedIdentity: "hello-world/refinery"}},
+		WorkBeads:                []AwakeWorkBead{{ID: "w-1", Assignee: "hello-world/refinery", Status: "in_progress", Blocked: true}},
+		NamedSessionDemand:       map[string]bool{"hello-world/refinery": true},
+		NamedSessionRoutedDemand: map[string]bool{"hello-world/refinery": true},
+		Now:                      now,
+	})
+	assertAwake(t, result, "hello-world--refinery")
+	assertReason(t, result, "hello-world--refinery", "routed-demand")
+}
+
 // TestNamedOnDemand_WorkQueryDoesNotWakeDrainedSession is the negative/
 // regression guard for the same fix: "work-query" is deliberately NOT
 // exempted from the Drained gate (ga-j4lqwa.1 acceptance criteria) because it

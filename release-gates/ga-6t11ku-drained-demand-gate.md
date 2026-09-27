@@ -22,7 +22,7 @@ is provenance; it is not a push target. No rebase or review carryover was used.
 | # | Criterion | Result | Evidence |
 |---|-----------|--------|----------|
 | 1 | Review PASS present | PASS | Closed review `ga-lklarp` records PASS for the exact resolved source. |
-| 2 | Acceptance criteria met | PASS | Routed and named demand wake drained on-demand sessions; broad work-query demand remains gated. Three added regressions pass in both process and integration tiers. Suspension, dependency-only and closed-state guards remain intact. |
+| 2 | Acceptance criteria met | PASS | (Pre-amendment; see *Maintainer amendment* below.) Routed and named demand wake drained on-demand sessions; broad work-query demand remains gated. Three added regressions pass in both process and integration tiers. Suspension, dependency-only and closed-state guards remain intact. |
 | 3 | Full-scope tests | PASS, attributed failures | All 40 jobs completed: 36 raw passing jobs, 4 raw failed jobs; 95708 PASS / 6 FAIL / 327 SKIP test/subtest events. All six raw failures satisfy the pre-existing-failure protocol below; no diff-owned FAIL or SKIP. |
 | 4 | No open high-severity findings | PASS | Reviewer PASS has no unresolved HIGH findings. |
 | 5 | Clean deployment checkout | PASS | Exact reviewed source checkout was clean before adding this gate record. The record is the only deployment addition; the gate commit leaves the checkout clean. |
@@ -63,6 +63,8 @@ including cached results, not distinct test names. Root events alone:
 `waiver_ref: none (gascity has no waiver path)`
 
 `ci_lane_run: n/a (no CI configuration change)`
+
+Pre-amendment; see *Maintainer amendment* below.
 
 | Diff-owned test | Full-suite shard | Result |
 |----------------|------------------|--------|
@@ -203,3 +205,13 @@ counts and shard table above describe the original, pre-amendment diff. The
 targeted tests (`go test ./cmd/gc/ -run
 'TestNamedOnDemand|TestComputeAwake|Drain|ResetPending'`), `go build ./...`,
 and `go vet ./cmd/gc/` were re-run on the amended diff and passed.
+
+A second amendment closed the combined case: when a drained holder has both
+`NamedSessionDemand` (from blocked `in_progress` work) and
+`NamedSessionRoutedDemand`, `named-demand` won the reason switch and the
+`Drained` gate discarded the routed signal. The reason is now promoted to
+`routed-demand` for drained beads in that case; precedence for non-drained
+beads is unchanged. Added
+`TestNamedOnDemand_RoutedDemandWakesDrainedSessionDespiteBlockedNamedDemand`.
+Re-run on the amended diff and passed: `go build ./...`, `go vet ./cmd/gc/`,
+`go test ./cmd/gc/ -run 'TestNamedOnDemand|TestComputeAwake|Drain|ResetPending' -count=1`.

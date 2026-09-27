@@ -227,6 +227,13 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 				// NamedSessionRoutedDemand's deliberate
 				// UsesCanonicalSingletonPoolIdentity() scoping, so exempting
 				// it here would risk a herd-wake on multi-instance pools.
+				// A drained holder with live routed demand must not have that signal
+				// masked by named-demand from blocked in_progress work (namedWorkReady
+				// does not filter blocked work), or the ga-j4lqwa.1 strand survives in
+				// the combined case.
+				if bead != nil && bead.Drained && reason == "named-demand" && input.NamedSessionRoutedDemand[ns.Identity] {
+					reason = "routed-demand"
+				}
 				drainedExempt := reason == "routed-demand"
 				if bead != nil && !bead.DependencyOnly && (!bead.Drained || drainedExempt) && bead.State != "closed" {
 					desired[sn] = reason
