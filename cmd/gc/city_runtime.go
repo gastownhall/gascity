@@ -160,6 +160,9 @@ type CityRuntime struct {
 
 	// orderSetScan overrides the order-set scan (tests); nil scans the city.
 	orderSetScan func(cityRoot string, cfg *config.City, cmdName string) (orderSetSnapshot, error)
+	// afterReloadStagesOrders, when set (tests), runs right after a config
+	// reload stages its order dispatcher.
+	afterReloadStagesOrders func()
 	// inOrderPassConfig, when set (tests), runs inside orderPassConfig's
 	// critical section, before the generation and config are read.
 	inOrderPassConfig func(*ordersLane)
@@ -2361,6 +2364,15 @@ func (cr *CityRuntime) reloadConfigTraced(
 
 	cr.wg = newWispGCForConfig(nextCfg)
 
+	// The new config was published above (publishRuntimeConfig), BEFORE
+	// this stage. The stage bumps the order-set generation under the lane's
+	// setMu, and each lane pass reads the generation and the config as one
+	// pair under that lock (orderPassConfig): a pair read before the stage is
+	// discarded when its rescan tries to stage, and one read after holds this
+	// config. Staging first would let a pass read the bumped generation with
+	// the old config and stage a stale dispatcher (orders_lane.go). A
+	// superseded reload returns before publication, so it never stages.
+	//
 	// Stage the rebuilt dispatcher, then install it if the orders lane is
 	// idle. Install drains the outgoing dispatcher first so in-flight
 	// dispatchOne goroutines persist their tracking-bead outcomes against
@@ -2375,6 +2387,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 	nextOD, orderSnapshot := buildOrderDispatcherWithSnapshot(cr.storageRoutes, cityRoot, nextCfg, cr.rec, cr.stderr, "gc reload: order scan")
 	orderSummary := cr.stageOrderDispatcher(nextOD, orderSnapshot.Orders, orderSnapshot.Signature, time.Now())
 	cr.tryInstallPendingOrderDispatcher(ctx)
+	if cr.afterReloadStagesOrders != nil {
+		cr.afterReloadStagesOrders()
+	}
 	if orderSummary != "unchanged" {
 		fmt.Fprintf(cr.stderr, "%s: orders reloaded: %s\n", cr.logPrefix, orderSummary) //nolint:errcheck // best-effort stderr
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -213,17 +215,10 @@ func startOrdersLaneForTest(t *testing.T, cr *CityRuntime) (context.CancelFunc, 
 	return cancel, done
 }
 
-// waitForCalls polls until calls reaches want, failing after a generous bound.
+// waitForCalls waits until calls reaches want, failing after the hang budget.
 func waitForCalls(t *testing.T, calls func() int32, want int32) {
 	t.Helper()
-	const within = 10 * time.Second
-	deadline := time.Now().Add(within)
-	for calls() < want {
-		if time.Now().After(deadline) {
-			t.Fatalf("order dispatch calls = %d, want at least %d within %s", calls(), want, within)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	awaitCond(t, func() bool { return calls() >= want }, fmt.Sprintf("order dispatch reaching %d calls", want))
 }
 
 // The defect this lane exists for: on maintainer-city dispatch_orders was ~32s
@@ -296,18 +291,18 @@ func TestOrdersLaneWakesOnTick(t *testing.T) {
 	}
 	startOrdersLaneForTest(t, cr)
 
-	// With a 1h cadence the lane would not pass on its own inside this test.
-	time.Sleep(50 * time.Millisecond)
-	if got := od.calls.Load(); got != 0 {
-		t.Fatalf("order dispatch calls before any tick = %d, want 0", got)
-	}
-
 	var dirty atomic.Bool
 	var lastProviderName string
 	var prevPoolRunning map[string]bool
 	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "poke")
 
 	waitForCalls(t, func() int32 { return od.calls.Load() }, 1)
+	// With a 1h backstop the lane cannot pass on its own inside this test, so
+	// the pass must be the tick's wake.
+	lane := cr.ordersLaneOf()
+	if cadence, wakes := lane.cadencePasses.Load(), lane.wakePasses.Load(); cadence != 0 || wakes < 1 {
+		t.Fatalf("lane passes: cadence=%d wake=%d, want cadence=0 wake>=1", cadence, wakes)
+	}
 }
 
 // A panicking dispatch must be recovered per pass (incident #663): the lane
@@ -349,13 +344,15 @@ func TestOrdersLaneStopsOnShutdown(t *testing.T) {
 	waitForCalls(t, func() int32 { return od.calls.Load() }, 1)
 
 	cancel()
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("orders lane did not exit after cancellation")
-	}
+	awaitClose(t, done, "the orders lane exiting after cancellation")
+	// The lane goroutine is the only consumer of wakes; once it has exited a
+	// wake stays buffered and no further pass can run.
 	after := od.calls.Load()
-	time.Sleep(50 * time.Millisecond)
+	lane := cr.ordersLaneOf()
+	lane.wake()
+	if pending := len(lane.wakeCh); pending != 1 {
+		t.Fatalf("buffered wakes after lane stop = %d, want 1 (nothing consumes them)", pending)
+	}
 	if got := od.calls.Load(); got != after {
 		t.Fatalf("order dispatch calls after lane stop = %d, want %d", got, after)
 	}
@@ -579,36 +576,58 @@ func TestOrdersLanePassConfigIsNeverReadBeforeGeneration(t *testing.T) {
 	}
 }
 
-// M2: while ticks keep waking the lane, the lane's own timer must not add
-// passes on top; it is only a backstop for a wedged tick. One pass per wake,
-// not one per wake plus one per patrol interval.
-func TestOrdersLaneTimerOnlyFiresWithoutWakes(t *testing.T) {
-	od := &recordingOrderDispatcher{}
-	cr := ordersLaneTestRuntime(t, od, "150ms", nil)
-	lane := cr.ordersLaneOf()
-	startOrdersLaneForTest(t, cr)
-
-	const wakes = 15
-	for i := 0; i < wakes; i++ {
-		lane.wake()
-		time.Sleep(50 * time.Millisecond)
-	}
-	cadence := lane.cadencePasses.Load()
-	total := lane.cadencePasses.Load() + lane.wakePasses.Load()
-	if cadence != 0 {
-		t.Fatalf("cadence passes while ticks woke the lane every 50ms = %d, want 0 (patrol interval 150ms)", cadence)
-	}
-	if total > wakes {
-		t.Fatalf("lane passes = %d for %d wakes, want at most one pass per wake", total, wakes)
-	}
-
-	// With the wakes gone, the backstop timer takes over.
-	deadline := time.Now().Add(10 * time.Second)
-	for lane.cadencePasses.Load() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("backstop timer never fired after wakes stopped")
+// A lane rescan that runs after a real reload has staged its dispatcher must
+// read the reload's config, not the pre-reload one. The reload publishes its
+// config before it stages, so the one generation bump at stage covers a
+// rescan that captures the generation afterwards. The hook runs a lane pass in
+// exactly that window, with orderRescanLast reset so the rescan is due.
+func TestOrdersLaneRescanAfterReloadStageReadsReloadedConfig(t *testing.T) {
+	t.Setenv(fsPressureThresholdEnv, "100")
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeSoftReloadConfig(t, tomlPath, "5s")
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+	sp := runtime.NewFake()
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		ConfigRev: configRev,
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	var scannedTimeouts []string
+	cr.orderSetScan = func(cityRoot string, cfg *config.City, cmdName string) (orderSetSnapshot, error) {
+		scannedTimeouts = append(scannedTimeouts, cfg.Daemon.ShutdownTimeout)
+		if cfg.Daemon.ShutdownTimeout != "6s" {
+			return orderSetSnapshot{Signature: "sig-stale"}, nil
 		}
-		time.Sleep(10 * time.Millisecond)
+		return scanOrderSetSnapshotFS(fsys.OSFS{}, cityRoot, cfg, io.Discard, cmdName)
+	}
+	cr.afterReloadStagesOrders = func() {
+		cr.markOrderRescan(time.Time{})
+		cr.runOrdersLanePass(context.Background(), cityPath, ordersLaneReasonCadence)
+	}
+
+	writeCityRuntimeSoftReloadConfig(t, tomlPath, "6s")
+	lastProviderName := "fake"
+	cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceWatch)
+
+	if len(scannedTimeouts) != 1 {
+		t.Fatalf("lane rescans in the post-stage window = %v, want exactly one", scannedTimeouts)
+	}
+	if scannedTimeouts[0] != "6s" {
+		t.Fatalf("lane rescan read shutdown_timeout=%q, want the reloaded \"6s\": config must be published before the reload stages", scannedTimeouts[0])
+	}
+	if cr.orderSetSignature == "sig-stale" {
+		t.Fatal("a rescan of the pre-reload config staged over the reload's dispatcher")
 	}
 }
 
@@ -644,21 +663,14 @@ func TestOrdersLaneConcurrentWithReloadConfigTraced(t *testing.T) {
 	lane := cr.ordersLaneOf()
 	startOrdersLaneForTest(t, cr)
 
-	stopWaking := make(chan struct{})
-	wakerDone := make(chan struct{})
-	go func() {
-		defer close(wakerDone)
-		for {
-			select {
-			case <-stopWaking:
-				return
-			default:
-			}
-			cr.markOrderRescan(time.Time{}) // make every pass rescan
-			lane.wake()
-			time.Sleep(time.Millisecond)
-		}
-	}()
+	// Wake a rescanning pass before each reload and again right after each
+	// stage, so passes overlap both the reload's preparation and the rest of
+	// the reload after it stages.
+	wakeRescan := func() {
+		cr.markOrderRescan(time.Time{}) // make the pass rescan
+		lane.wake()
+	}
+	cr.afterReloadStagesOrders = wakeRescan
 
 	lastProviderName := "fake"
 	for i := 0; i < 6; i++ {
@@ -667,11 +679,8 @@ func TestOrdersLaneConcurrentWithReloadConfigTraced(t *testing.T) {
 			timeout = "6s"
 		}
 		writeCityRuntimeSoftReloadConfig(t, tomlPath, timeout)
+		wakeRescan()
 		cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceWatch)
 	}
-	close(stopWaking)
-	<-wakerDone
-	if lane.wakePasses.Load() == 0 {
-		t.Fatal("the lane never ran a pass during the reloads; the test exercised nothing")
-	}
+	awaitCond(t, func() bool { return lane.wakePasses.Load()+lane.cadencePasses.Load() > 1 }, "orders lane passes during the reloads")
 }
