@@ -43,8 +43,9 @@ type SessionRequest struct {
 	// BrainParentSID is gc.brain_parent_sid from the driving work bead, when
 	// set: the parent session to fork this launch off of (warm-arm fork-launch).
 	BrainParentSID string
-	// FloorGuarantee marks a "new" request created to satisfy an agent's
-	// min_active_sessions floor (as opposed to elastic scale-check demand).
+	// FloorGuarantee marks a "new" request that satisfies an agent's
+	// min_active_sessions floor, whether reserveNestedCapFloors minted it for
+	// the floor or it was an elastic scale-check request the floor absorbed.
 	// The per-tick create-budget allocator reserves a token for each
 	// floor-bearing template before round-robining the remainder, so a cold
 	// pool's floor spawn cannot be starved by a warm pool's large elastic
@@ -572,10 +573,7 @@ func computePoolDesiredStatesAt(
 		effectiveDemand := max(scaleCount, len(protected), inFlightFloor)
 		newCount := capNewDemandCount(limits, usage, floorReservations, agent, effectiveDemand)
 		recordNewDemandCapTrace(trace, template, agent, limits, usage, effectiveDemand, newCount)
-		concreteLimit := newCount
-		if limits.agentRigUnresolved[template] {
-			concreteLimit = minInt(effectiveDemand, len(protected)+len(inFlight))
-		}
+		concreteLimit := concreteNestedCapLimit(limits, usage, template, newCount, effectiveDemand, len(protected)+len(inFlight))
 		protectedCount := minInt(len(protected), concreteLimit)
 		inFlightCount := minInt(len(inFlight), concreteLimit-protectedCount)
 		reusedCount := protectedCount + inFlightCount
@@ -930,11 +928,36 @@ func poolSessionConsumesNewDemandInfo(info sessionpkg.Info) bool {
 }
 
 // applyNestedCaps enforces workspace, rig, and agent max_active_sessions caps.
-// Agent floors reserve capacity before remaining demand competes by priority.
-// When floors exceed a cap, qualified template name order decides which floor
-// receives the scarce capacity; rejected floor traces identify the loser.
+//
+// Admission runs in three phases, and the phase order — not BeadPriority — is
+// the outer precedence:
+//
+//  1. Concrete requests (resume-like tier, or any request carrying a
+//     SessionBeadID) are admitted first, so among the requests this function
+//     is given they outrank *all* new demand regardless of BeadPriority: at a
+//     saturated cap a low-priority live session keeps the last slot and a
+//     higher-priority new request is rejected. That is deliberate.
+//     Reconciliation already owns those sessions, so preempting one to start a
+//     new request would trade work in progress for work not yet begun, and no
+//     cap this pass enforces is violated by keeping it. The guarantee stops at
+//     this function's inputs: computePoolDesiredStatesAt's demand pre-pass
+//     selects each template's concrete candidates under newCount (see
+//     concreteNestedCapLimit), so a template declared later in cfg.Agents can
+//     lose a live session before phase 1 ever sees the request (ga-2c8ll).
+//  2. Agent floors reserve capacity out of what phase 1 left. When floors
+//     exceed a cap, qualified template name order decides which floor receives
+//     the scarce capacity; rejected floor traces identify the loser.
+//  3. Demand not consumed by phase 1 or 2 competes by BeadPriority. Priority is
+//     therefore the precedence *within* new demand, not across phases.
+//
+// TestApplyNestedCaps_NoFloorsPreservesDemandPriority pins both regimes.
 func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTemplates map[string]struct{}, trace *sessionReconcilerTraceCycle) []PoolDesiredState {
-	// Sort by priority DESC, resume tier first within same priority.
+	// Order the phase-3 priority walk: priority DESC, resume tier first within
+	// same priority. Phase 1 walks this same slice but does not honor the order
+	// as an admission ranking against new demand — it admits every concrete
+	// request that fits — so this sort does not decide concrete-versus-new
+	// precedence. Among concrete requests competing for a binding cap the order
+	// is still the tiebreaker: the earlier one in this order wins.
 	sort.SliceStable(requests, func(i, j int) bool {
 		if requests[i].BeadPriority != requests[j].BeadPriority {
 			return requests[i].BeadPriority > requests[j].BeadPriority
@@ -1276,6 +1299,51 @@ func newNestedCapFloorReservations(
 		}
 	}
 	return reservations
+}
+
+// concreteNestedCapLimit bounds how many already-concrete requests (protected
+// plus in-flight) the demand pre-pass selects for a template and charges to the
+// shared cap usage. For a normally-capped template newCount already carries
+// every applicable bound. capNewDemandCount instead fails closed at 0 for an
+// explicitly rig-scoped agent whose rig does not resolve, which must not also
+// drop the concrete sessions reconciliation already owns, so the bound is
+// rebuilt here from the template's own agent max. Of the three caps, that is
+// the one applyNestedCaps still enforces per-template on such a request: the
+// rig cap drops out because an unresolved rig contributes no rig counter
+// (nestedCapAgentRigName leaves agentRig empty), and the workspace cap is
+// shared rather than per-template (see below). Floor reservations are
+// deliberately not subtracted — a floor must never displace concrete capacity.
+//
+// Without the agent-max bound the pre-pass charged usage for concrete requests
+// the authoritative applyNestedCaps pass rejects anyway, and because that pass
+// can only reject candidates and never mint them, the over-charge permanently
+// cost every later template in the cfg.Agents loop that much new-demand
+// headroom. The shared workspace max is deliberately still not applied here: it
+// would make a live session's survival depend on cfg.Agents order, dropping a
+// late template's protected session before applyNestedCaps — whose
+// concrete-first phase is the authority on that contest — ever sees it. Leaving
+// it out only over-generates concrete candidates for that pass to reject, and
+// the workspace over-charge that can remain is inert: once usage reaches the
+// workspace cap, later templates have no new-demand headroom either way.
+func concreteNestedCapLimit(limits nestedCapLimits, usage nestedCapUsage, template string, newCount, effectiveDemand, concreteCount int) int {
+	// The normal path leaves the whole bound to newCount, which is already net
+	// of the capacity earlier cfg.Agents templates consumed, so the call site
+	// can drop a later-declared template's live session before applyNestedCaps'
+	// concrete-first phase — the authority on that contest — ever sees the
+	// request. That is base behavior, not a bound introduced here, but it is
+	// the asymmetry with the unresolved-rig branch below, which ignores
+	// newCount precisely so concrete survives. Making concrete-first hold end
+	// to end means hoisting concrete selection out of the per-template loop the
+	// way floorUsage already does for floors: a design change, not this bound.
+	// Tracked in ga-2c8ll.
+	if !limits.agentRigUnresolved[template] {
+		return newCount
+	}
+	limit := minInt(effectiveDemand, concreteCount)
+	if agentMax := limits.agentMax[template]; agentMax >= 0 {
+		limit = minInt(limit, max(0, agentMax-usage.agentCount[template]))
+	}
+	return limit
 }
 
 func capNewDemandCount(limits nestedCapLimits, usage nestedCapUsage, floors nestedCapFloorReservations, agent *config.Agent, demand int) int {

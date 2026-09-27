@@ -207,6 +207,36 @@ func TestComputePoolDesiredStates_UnresolvedRigPreservesInFlightSession(t *testi
 	}
 }
 
+// The unresolved-rig carve-out preserves concrete sessions, but it must not
+// charge the shared pre-pass usage for concrete capacity applyNestedCaps will
+// reject anyway: that pass can only reject candidates, never mint them, so an
+// over-charge permanently costs every later template its new-demand headroom.
+func TestComputePoolDesiredStates_UnresolvedRigConcreteRespectsAgentCap(t *testing.T) {
+	now := time.Date(2026, 9, 23, 21, 0, 0, 0, time.UTC)
+	workspaceMax := 4
+	unresolved := poolAgent("claude", "", intPtr(1), 0)
+	unresolved.Scope = "rig"
+	other := poolAgent("worker", "", nil, 0)
+	other.Scope = "city"
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &workspaceMax},
+		Agents:    []config.Agent{unresolved, other},
+	}
+	// Two protected sessions against max_active_sessions=1: applyNestedCaps
+	// admits exactly one of them, so only one may be charged here.
+	sessions := []beads.Bead{
+		protectedPoolSessionBeadAt("session-1", now.Add(-30*time.Second)),
+		protectedPoolSessionBeadAt("session-2", now.Add(-20*time.Second)),
+	}
+
+	result := ComputePoolDesiredStatesAt(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"worker": 3}, now)
+	counts := poolDesiredRequestCounts(result)
+
+	if counts["claude"] != 1 || counts["worker"] != 3 {
+		t.Fatalf("request counts = %#v, want claude=1 and worker=3: an over-provisioned unresolved-rig template must not strand workspace headroom", counts)
+	}
+}
+
 func TestComputePoolDesiredStates_CityScopedAgentNeedsNoRigCap(t *testing.T) {
 	workspaceMax := 10
 	agent := poolAgent("worker", "/tmp/not-a-rig", nil, 1)
@@ -366,28 +396,64 @@ func TestApplyNestedCaps_OvercommittedFloorsUseLexicalTemplateOrder(t *testing.T
 	}
 }
 
+// TestApplyNestedCaps_NoFloorsPreservesDemandPriority pins both precedence
+// regimes applyNestedCaps implements when no floor is configured: BeadPriority
+// orders competing *new* demand, while a concrete request (resume-like tier or
+// one carrying a SessionBeadID) is admitted in phase 1 and so outranks new
+// demand of any priority.
 func TestApplyNestedCaps_NoFloorsPreservesDemandPriority(t *testing.T) {
-	workspaceMax := 3
-	cfg := &config.City{
-		Workspace: config.Workspace{MaxActiveSessions: &workspaceMax},
-		Agents: []config.Agent{
-			poolAgent("a", "", nil, 0),
-			poolAgent("b", "", nil, 0),
-		},
-	}
-	requests := []SessionRequest{
-		{Template: "b", Tier: "new", BeadPriority: 3, WorkBeadID: "b-1"},
-		{Template: "a", Tier: "new", BeadPriority: 4, WorkBeadID: "a-1"},
-		{Template: "b", Tier: "new", BeadPriority: 3, WorkBeadID: "b-2"},
-		{Template: "a", Tier: "new", BeadPriority: 4, WorkBeadID: "a-2"},
-	}
+	t.Run("new demand competes by priority", func(t *testing.T) {
+		workspaceMax := 3
+		cfg := &config.City{
+			Workspace: config.Workspace{MaxActiveSessions: &workspaceMax},
+			Agents: []config.Agent{
+				poolAgent("a", "", nil, 0),
+				poolAgent("b", "", nil, 0),
+			},
+		}
+		requests := []SessionRequest{
+			{Template: "b", Tier: "new", BeadPriority: 3, WorkBeadID: "b-1"},
+			{Template: "a", Tier: "new", BeadPriority: 4, WorkBeadID: "a-1"},
+			{Template: "b", Tier: "new", BeadPriority: 3, WorkBeadID: "b-2"},
+			{Template: "a", Tier: "new", BeadPriority: 4, WorkBeadID: "a-2"},
+		}
 
-	result := applyNestedCaps(cfg, requests, nil, nil)
-	counts := poolDesiredRequestCounts(result)
+		result := applyNestedCaps(cfg, requests, nil, nil)
+		counts := poolDesiredRequestCounts(result)
 
-	if counts["a"] != 2 || counts["b"] != 1 {
-		t.Fatalf("request counts = %#v, want priority allocation a=2 b=1", counts)
-	}
+		if counts["a"] != 2 || counts["b"] != 1 {
+			t.Fatalf("request counts = %#v, want priority allocation a=2 b=1", counts)
+		}
+	})
+
+	// The concrete-first phase outranks BeadPriority across tiers, which the
+	// rows above cannot observe: they are all "new" tier with no SessionBeadID,
+	// so every one of them skips phase 1. Before the concrete-first phase
+	// existed the single priority walk gave this slot to b.
+	t.Run("concrete outranks higher-priority new demand", func(t *testing.T) {
+		workspaceMax := 1
+		cfg := &config.City{
+			Workspace: config.Workspace{MaxActiveSessions: &workspaceMax},
+			Agents: []config.Agent{
+				poolAgent("a", "", nil, 0),
+				poolAgent("b", "", nil, 0),
+			},
+		}
+		requests := []SessionRequest{
+			{Template: "a", Tier: "resume", BeadPriority: 1, SessionBeadID: "session-1"},
+			{Template: "b", Tier: "new", BeadPriority: 9, WorkBeadID: "b-1"},
+		}
+
+		result := applyNestedCaps(cfg, requests, nil, nil)
+		counts := poolDesiredRequestCounts(result)
+
+		if counts["a"] != 1 || counts["b"] != 0 {
+			t.Fatalf("request counts = %#v, want a=1 and b=0: a live session keeps the last slot against higher-priority new demand", counts)
+		}
+		if ids := poolDesiredSessionIDs(result, "a"); len(ids) != 1 || ids[0] != "session-1" {
+			t.Fatalf("template a session ids = %#v, want [session-1]", ids)
+		}
+	})
 }
 
 func TestApplyNestedCaps_PathShapedAgentDirHonorsRigCap(t *testing.T) {
