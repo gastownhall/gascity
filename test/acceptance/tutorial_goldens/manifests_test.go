@@ -31,7 +31,7 @@ var tutorialPageManifests = []pageManifest{
 			"gc rig list",
 			"cd ~/my-project",
 			`gc sling my-project/claude "Write hello world in python to the file hello.py"`,
-			"gc bd show mp-ff9",
+			"gc bd show mp-ff9 --watch",
 			"ls",
 		},
 	},

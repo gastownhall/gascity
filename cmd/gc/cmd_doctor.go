@@ -309,6 +309,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
 		register(newBuiltinImportDoctorCheck(cityPath))
 		register(newImportStateDoctorCheck(cityPath))
+		register(newGascityPackBindingDoctorCheck(cityPath))
 		register(newJsonlArchiveDoctorCheck(cityPath))
 	}
 
