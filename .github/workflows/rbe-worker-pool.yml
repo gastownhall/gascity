@@ -1,0 +1,51 @@
+# OSS remote-execution worker pool on Blacksmith (farm v2, infra
+# docs/architecture/rbe-farm-west-v0.md). Dispatched by the rbe-west pool
+# scaler: each run is one NativeLink worker for rbe-west's OSS scheduler that
+# retires itself after idle_minutes with nothing in flight (or at max_minutes),
+# draining first.
+#
+# Blacksmith donates this compute for workflows of our OSS repos only. These
+# workers register with the OSS scheduler (dedicated rbe-oss-worker cert);
+# developer and agent builds use the default instance and never run here.
+name: rbe-worker-pool
+
+on:
+  workflow_dispatch:
+    inputs:
+      idle_minutes:
+        description: Retire after this many minutes with no action in flight
+        default: "15"
+        type: string
+      max_minutes:
+        description: Retire after this many minutes regardless (recycles the VM)
+        default: "300"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    name: rbe pool worker (Blacksmith, OSS scheduler)
+    # Default branch only: its sticky-disk commits are the trusted cache snapshot.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Worker CAS cache (sticky disk)
+        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1
+        with:
+          key: ${{ github.repository }}-rbe-worker-cas
+          path: ${{ runner.temp }}/rbe-cache
+      - name: NativeLink worker until idle or max age
+        env:
+          RBE_WORKER_TLS_CERT: ${{ secrets.RBE_WORKER_TLS_CERT }}
+          RBE_WORKER_TLS_KEY: ${{ secrets.RBE_WORKER_TLS_KEY }}
+          RBE_WEST_HOST: ${{ secrets.RBE_WEST_HOST }}
+          WORKER_MODE: pool
+          POOL_IDLE_MINUTES: ${{ inputs.idle_minutes }}
+          POOL_MAX_MINUTES: ${{ inputs.max_minutes }}
+          CACHE_DIR: ${{ runner.temp }}/rbe-cache
+          WORKER_NAME: gha-pool-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: tools/rbe/blacksmith-worker.sh

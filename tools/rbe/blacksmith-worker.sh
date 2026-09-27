@@ -10,12 +10,22 @@
 # Env (from the workflow):
 #   RBE_WORKER_TLS_CERT / RBE_WORKER_TLS_KEY  base64 PEM, CN=rbe-oss-worker
 #   RBE_WEST_HOST       e.g. rbe-west.ops.gascity.com (from a secret; not in git)
-#   BAZEL_JOB_NAME      the job whose completion ends this worker
-#   GH_TOKEN            github.token with actions:read
-#   WORKER_NAME         unique per matrix leg
+#   WORKER_NAME         unique per worker
+#   WORKER_MODE         run  (default): serve until BAZEL_JOB_NAME in this run completes
+#                                       (needs GH_TOKEN with actions:read)
+#                       pool: serve the shared OSS queue; retire after POOL_IDLE_MINUTES
+#                             with nothing in flight, or at POOL_MAX_MINUTES
+#   CACHE_DIR           optional (Blacksmith sticky disk): keeps the worker's local
+#                       CAS warm across runs
 set -euo pipefail
 
-: "${RBE_WORKER_TLS_CERT:?}" "${RBE_WORKER_TLS_KEY:?}" "${RBE_WEST_HOST:?}" "${BAZEL_JOB_NAME:?}" "${WORKER_NAME:?}"
+: "${RBE_WORKER_TLS_CERT:?}" "${RBE_WORKER_TLS_KEY:?}" "${RBE_WEST_HOST:?}" "${WORKER_NAME:?}"
+WORKER_MODE=${WORKER_MODE:-run}
+case "$WORKER_MODE" in
+run) : "${BAZEL_JOB_NAME:?}" ;;
+pool) POOL_IDLE_MINUTES=${POOL_IDLE_MINUTES:-15} POOL_MAX_MINUTES=${POOL_MAX_MINUTES:-300} ;;
+*) echo "WORKER_MODE must be run or pool" >&2; exit 2 ;;
+esac
 NL_VERSION=1.7.1
 NL_SHA256=a3d7abc2598e976d022fcdabe88a2f8fae46a3ae64f1868698002ca968dd88e9
 GO_VERSION=$(awk '/^go /{print $2; exit}' go.mod)
@@ -48,7 +58,11 @@ curl -fsSL -o "$RUNNER_TEMP/nl.tgz" "https://github.com/TraceMachina/nativelink/
 echo "${NL_SHA256}  $RUNNER_TEMP/nl.tgz" | sha256sum -c -
 mkdir -p "$NL_BIN_DIR" && tar -C "$NL_BIN_DIR" -xzf "$RUNNER_TEMP/nl.tgz" nativelink
 
-mkdir -p "$ROOT"/{content,tmp,work,pki}
+# Local CAS (and its temp dir, which must share the filesystem for renames)
+# lives on the sticky disk when one is mounted. content.exec sits next to
+# content and is wiped by NativeLink at startup.
+STORE=${CACHE_DIR:-$ROOT}
+mkdir -p "$ROOT"/{work,pki} "$STORE"/{content,tmp}
 umask 077
 printf '%s' "$RBE_WORKER_TLS_CERT" | base64 -d >"$ROOT/pki/worker.pem"
 printf '%s' "$RBE_WORKER_TLS_KEY" | base64 -d >"$ROOT/pki/worker.key"
@@ -57,7 +71,7 @@ umask 022
 # One action per two vCPUs. NativeLink ignores the client cert when
 # use_native_roots is set, so trust the system bundle via ca_file instead.
 slots=$(($(nproc) / 2)); [ "$slots" -ge 1 ] || slots=1
-jq -n --arg host "grpcs://${RBE_WEST_HOST}:443" --arg root "$ROOT" --arg name "$WORKER_NAME" --argjson slots "$slots" '
+jq -n --arg host "grpcs://${RBE_WEST_HOST}:443" --arg root "$ROOT" --arg store "$STORE" --arg name "$WORKER_NAME" --argjson slots "$slots" '
   { cert_file: ($root + "/pki/worker.pem"), key_file: ($root + "/pki/worker.key"),
     ca_file: "/etc/ssl/certs/ca-certificates.crt" } as $tls |
   {
@@ -65,8 +79,8 @@ jq -n --arg host "grpcs://${RBE_WEST_HOST}:443" --arg root "$ROOT" --arg name "$
       { name: "REMOTE_CAS", grpc: { instance_name: "", endpoints: [{ address: $host, tls_config: $tls }], store_type: "cas" } },
       { name: "REMOTE_AC", grpc: { instance_name: "", endpoints: [{ address: $host, tls_config: $tls }], store_type: "ac" } },
       { name: "WFS", fast_slow: {
-          fast: { filesystem: { content_path: ($root + "/content"), temp_path: ($root + "/tmp"),
-                                eviction_policy: { max_bytes: 200000000000 } } },
+          fast: { filesystem: { content_path: ($store + "/content"), temp_path: ($store + "/tmp"),
+                                eviction_policy: { max_bytes: 150000000000 } } },
           slow: { ref_store: { name: "REMOTE_CAS" } } } }
     ],
     workers: [ { local: {
@@ -88,14 +102,27 @@ jq -n --arg host "grpcs://${RBE_WEST_HOST}:443" --arg root "$ROOT" --arg name "$
 nl=$!
 echo "worker $WORKER_NAME started (pid $nl, $slots slots)"
 
-# Serve until this run's Bazel job completes; SIGTERM makes nativelink finish
-# in-flight actions and send GoingAway before exiting.
-jobs_url="repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100"
-while kill -0 "$nl" 2>/dev/null; do
-	status=$(gh api "$jobs_url" --jq ".jobs[] | select(.name == \"$BAZEL_JOB_NAME\") | .status" 2>/dev/null || true)
-	[ "$status" = "completed" ] && break
-	sleep 15
-done
+# SIGTERM makes nativelink finish in-flight actions and send GoingAway.
+if [ "$WORKER_MODE" = run ]; then
+	# Until this run's Bazel job completes. 30s polls keep a run's two
+	# workers well under GITHUB_TOKEN's 1,000 requests/hour/repository.
+	jobs_url="repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100"
+	while kill -0 "$nl" 2>/dev/null; do
+		status=$(gh api "$jobs_url" --jq ".jobs[] | select(.name == \"$BAZEL_JOB_NAME\") | .status" 2>/dev/null || true)
+		[ "$status" = "completed" ] && break
+		sleep 30
+	done
+else
+	# Pool: one running action = one directory under work/. No GitHub API use.
+	started=$SECONDS idle=0
+	while kill -0 "$nl" 2>/dev/null; do
+		inflight=$(find "$ROOT/work" -mindepth 1 -maxdepth 1 -type d | wc -l)
+		if [ "$inflight" -eq 0 ]; then idle=$((idle + 30)); else idle=0; fi
+		[ "$idle" -ge $((POOL_IDLE_MINUTES * 60)) ] && { echo "idle ${POOL_IDLE_MINUTES}m, retiring"; break; }
+		[ $((SECONDS - started)) -ge $((POOL_MAX_MINUTES * 60)) ] && { echo "max age ${POOL_MAX_MINUTES}m, retiring"; break; }
+		sleep 30
+	done
+fi
 if kill -0 "$nl" 2>/dev/null; then
 	kill -TERM "$nl"
 	timeout 300 tail --pid="$nl" -f /dev/null || kill -KILL "$nl"
