@@ -1255,7 +1255,6 @@ func applyProxiedDoltEnv(env map[string]string) {
 	env["GC_BEADS_BACKEND"] = "dolt"
 	env["BEADS_BACKEND"] = "dolt"
 	env["BEADS_DOLT_PROXIED_SERVER"] = "1"
-	applyProxiedSharedServerOptOut(env)
 }
 
 // applyProxiedSharedServerOptOut keeps a gc-owned proxied scope out of bd's
@@ -1268,7 +1267,7 @@ func applyProxiedDoltEnv(env map[string]string) {
 // ~/.beads/shared-server — silently, and with one Dolt root for every city on
 // the host, so two cities' `hq` stores become one database. gc never supported
 // that topology (v1.4.2 refused it loudly), so every bd process gc spawns for a
-// proxied scope pins the mode off:
+// proxied scope gc OWNS (gcOwnsProxiedScope) pins the mode off:
 //
 //   - BD_DOLT_SHARED_SERVER=false is bd's viper env binding for the key and
 //     outranks every config file layer;
@@ -1279,8 +1278,9 @@ func applyProxiedDoltEnv(env map[string]string) {
 //     reads as "not forced on" and then falls through to the BD_ override.
 //
 // The scope's own config.yaml carries the same pin (see
-// ensureProxiedScopeSharedServerOff) for the bd processes gc does not spawn —
-// an agent running `bd` in its shell.
+// ensureGCOwnedProxiedScopeSharedServerOff) for the bd processes gc does not
+// spawn — an agent running `bd` in its shell. A proxied scope gc merely found
+// gets neither, so gc's bd and an agent's bd resolve it the same way.
 func applyProxiedSharedServerOptOut(env map[string]string) {
 	env[proxiedSharedServerModeEnv] = "0"
 	env[proxiedSharedServerConfigEnv] = "false"
@@ -1868,6 +1868,9 @@ func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath st
 		if err := applyProxiedScopeRuntimeEnvFn(env, rigPath); err != nil {
 			return env, err
 		}
+		if err := applyGCOwnedScopeSharedServerOptOut(env, cityPath, rigPath); err != nil {
+			return env, err
+		}
 		if cityErr != nil {
 			return env, cityErr
 		}
@@ -2044,6 +2047,9 @@ func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, 
 	// every bd command gc makes. See bd_env_proxied.go.
 	if scopeUsesProxiedDoltMode(cityPath, cityPath) {
 		if err := applyProxiedScopeRuntimeEnvFn(env, cityPath); err != nil {
+			return env, err
+		}
+		if err := applyGCOwnedScopeSharedServerOptOut(env, cityPath, cityPath); err != nil {
 			return env, err
 		}
 		return rememberProxiedScopeRuntimeEnv(cityPath, cityPath, stamp, env), nil

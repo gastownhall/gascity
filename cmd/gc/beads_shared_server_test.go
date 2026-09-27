@@ -26,11 +26,25 @@ func assertSharedServerPinnedOff(t *testing.T, label string, env map[string]stri
 	}
 }
 
+func journalProxiedScope(t *testing.T, cityPath, scopeRoot string, ready bool) {
+	t.Helper()
+	if err := persistProviderScopeOwnership(cityPath, scopeRoot, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	if ready {
+		if err := markProviderScopeOwnershipReady(cityPath, scopeRoot); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestProxiedRuntimeEnvPinsBdSharedServerOff(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
 	cityPath, _ := proxiedEnvTestCity(t)
 	rig := filepath.Join(cityPath, "rigs", "r1")
 	writeScopeBeadsMetadata(t, rig, `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"r1"}`)
+	journalProxiedScope(t, cityPath, cityPath, true)
+	journalProxiedScope(t, cityPath, rig, true)
 
 	cityEnv, err := bdRuntimeEnvWithError(cityPath)
 	if err != nil {
@@ -43,14 +57,62 @@ func TestProxiedRuntimeEnvPinsBdSharedServerOff(t *testing.T) {
 		t.Fatalf("bdRuntimeEnvForRigWithError: %v", err)
 	}
 	assertSharedServerPinnedOff(t, "rig", rigEnv)
+}
 
-	// The provider script's own process env (init, start, health, stop run
-	// bd from there) takes the same projection.
+// The provider script's process env is city-wide (it serves rig ops too), so it
+// carries the opt-out only while a journaled proxied init is in flight — gc-owned
+// by construction. A ready scope is pinned by the script itself, per scope, from
+// its config.yaml pin.
+func TestProviderLifecycleEnvPinsSharedServerOffOnlyForInitializingProxiedCity(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	cityPath, _ := proxiedEnvTestCity(t)
+	journalProxiedScope(t, cityPath, cityPath, false)
 	provEnv, err := providerLifecycleProcessEnvFromBase(cityPath, beadsProvider(cityPath), os.Environ())
 	if err != nil {
 		t.Fatalf("providerLifecycleProcessEnvFromBase: %v", err)
 	}
-	assertSharedServerPinnedOff(t, "provider lifecycle", runtimeEnvEntriesToMap(provEnv))
+	assertSharedServerPinnedOff(t, "initializing provider lifecycle", runtimeEnvEntriesToMap(provEnv))
+
+	if err := markProviderScopeOwnershipReady(cityPath, cityPath); err != nil {
+		t.Fatal(err)
+	}
+	provEnv, err = providerLifecycleProcessEnvFromBase(cityPath, beadsProvider(cityPath), os.Environ())
+	if err != nil {
+		t.Fatalf("providerLifecycleProcessEnvFromBase: %v", err)
+	}
+	m := runtimeEnvEntriesToMap(provEnv)
+	if m["BD_DOLT_SHARED_SERVER"] == "false" || m["BEADS_DOLT_SHARED_SERVER"] != "1" {
+		t.Errorf("ready provider lifecycle env was pinned city-wide: BD=%q BEADS=%q", m["BD_DOLT_SHARED_SERVER"], m["BEADS_DOLT_SHARED_SERVER"])
+	}
+}
+
+// A proxied workspace gc merely found (no journal, handoff or endpoint marker)
+// whose config says shared-server: true must be resolved the SAME way by gc's
+// own bd and by an agent's shell bd: gc must not pin its runners off while the
+// agent follows the scope config into the shared server.
+func TestFoundProxiedScopeGetsNoSharedServerOptOutAnywhere(t *testing.T) {
+	cityPath, _ := proxiedEnvTestCity(t)
+	const body = "dolt:\n  shared-server: true\n"
+	writeScopeConfigYAML(t, cityPath, body)
+
+	runtimeEnv, err := bdRuntimeEnvWithError(cityPath)
+	if err != nil {
+		t.Fatalf("bdRuntimeEnvWithError: %v", err)
+	}
+	sessionEnv, _ := sessionBackendEnvWithError(cityPath, "", nil)
+	for label, env := range map[string]map[string]string{"gc runtime": runtimeEnv, "agent session": sessionEnv} {
+		for _, key := range []string{"BD_DOLT_SHARED_SERVER", "BEADS_DOLT_SHARED_SERVER"} {
+			if value, projected := env[key]; projected {
+				t.Errorf("%s env for a found proxied scope projects %s=%q; gc and agent bd would disagree", label, key, value)
+			}
+		}
+	}
+	if err := ensureGCOwnedProxiedScopeSharedServerOff(cityPath, cityPath); err != nil {
+		t.Fatal(err)
+	}
+	if pin := readScopeSharedServerPin(t, cityPath); pin != contract.SharedServerPinnedOn {
+		t.Fatalf("found scope config rewritten: pin = %v", pin)
+	}
 }
 
 // The opt-out is a statement about proxied scopes gc owns. A rig that is not

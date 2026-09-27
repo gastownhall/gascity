@@ -94,8 +94,9 @@ func ensureGCOwnedProxiedScopeSharedServerOff(cityPath, scopeRoot string) error 
 }
 
 // gcOwnedProxiedScopeRoots lists the city and rig scopes gcOwnsProxiedScope
-// accepts, for the doctor check that reports their shared-server pin.
-func gcOwnedProxiedScopeRoots(cityPath string, cfg *config.City) []string {
+// accepts, for the doctor check that reports their shared-server pin, plus the
+// scopes whose ownership could not be decided (reported, not dropped).
+func gcOwnedProxiedScopeRoots(cityPath string, cfg *config.City) ([]string, []error) {
 	candidates := []string{cityPath}
 	if cfg != nil {
 		for _, rig := range cfg.Rigs {
@@ -105,12 +106,34 @@ func gcOwnedProxiedScopeRoots(cityPath string, cfg *config.City) []string {
 		}
 	}
 	var roots []string
+	var errs []error
 	for _, root := range candidates {
-		if owned, err := gcOwnsProxiedScope(cityPath, root); err == nil && owned {
+		owned, err := gcOwnsProxiedScope(cityPath, root)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("%s: %w", root, err))
+		case owned:
 			roots = append(roots, root)
 		}
 	}
-	return roots
+	return roots, errs
+}
+
+// applyGCOwnedScopeSharedServerOptOut adds the shared-server opt-out to a bd
+// env projected for scopeRoot when, and only when, that scope is a gc-owned
+// proxied one. A proxied scope gc merely found keeps the operator's own
+// resolution: pinning gc's bd off while an agent's bd (which reads the scope's
+// unpinned config.yaml) follows the user-level mode would split one store
+// across two Dolt roots.
+func applyGCOwnedScopeSharedServerOptOut(env map[string]string, cityPath, scopeRoot string) error {
+	owned, err := gcOwnsProxiedScope(cityPath, scopeRoot)
+	if err != nil {
+		return fmt.Errorf("classifying %s for the bd shared-server opt-out: %w", scopeRoot, err)
+	}
+	if owned {
+		applyProxiedSharedServerOptOut(env)
+	}
+	return nil
 }
 
 // applySessionSharedServerOptOut carries the shared-server opt-out into an
@@ -123,13 +146,8 @@ func applySessionSharedServerOptOut(env map[string]string, cityPath, scopeRoot s
 	if scopeRoot == "" {
 		scopeRoot = cityPath
 	}
-	owned, err := gcOwnsProxiedScope(cityPath, scopeRoot)
-	if err != nil {
+	if err := applyGCOwnedScopeSharedServerOptOut(env, cityPath, scopeRoot); err != nil {
 		// The scope's config.yaml pin still applies; only the env belt is lost.
-		log.Printf("gc: session env: cannot classify %s for the bd shared-server opt-out: %v", scopeRoot, err)
-		return
-	}
-	if owned {
-		applyProxiedSharedServerOptOut(env)
+		log.Printf("gc: session env: %v", err)
 	}
 }

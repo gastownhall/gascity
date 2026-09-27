@@ -24,28 +24,39 @@ func writeEnvRecordingBd(t *testing.T, dir string) (bin, logPath string) {
 }
 
 // F9: the provider script runs bd for provider-owned scopes (init, start,
-// health, stop). For a proxied scope every one of those must pin bd's
-// shared-server mode off, including when the parent process carries
-// BEADS_DOLT_SHARED_SERVER=1 and including a READY scope, whose adapter env has
-// no GC_BEADS_TRANSPORT (the persisted binding decides the transport).
+// health, stop). It pins bd's shared-server mode off for a proxied scope gc
+// owns — one being initialized (transport selector present) or a ready one whose
+// config.yaml carries gc's pin — including when the parent process carries
+// BEADS_DOLT_SHARED_SERVER=1. A ready proxied scope WITHOUT gc's pin (a
+// workspace gc merely found) keeps the inherited resolution, exactly what an
+// agent's shell bd in that scope sees.
 func TestProviderScriptPinsSharedServerOffForProxiedScopes(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		ready bool
+		name   string
+		ready  bool
+		config string
+		pinned bool
 	}{
-		{name: "initializing (transport selector present)"},
-		{name: "ready (binding decides)", ready: true},
+		{name: "initializing (provider init, transport selector present)", pinned: true},
+		{name: "ready gc-owned (config pin)", ready: true, config: "dolt:\n  shared-server: false\n", pinned: true},
+		{name: "ready found workspace (no pin)", ready: true, config: "dolt:\n  shared-server: true\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			city := t.TempDir()
 			writeScopeBeadsMetadata(t, city, `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hq"}`)
 			writeProxiedSidecar(t, city, filepath.Join(city, ".beads", "dolt"))
+			if tc.config != "" {
+				writeScopeConfigYAML(t, city, tc.config)
+			}
 			bin, logPath := writeEnvRecordingBd(t, city)
 			env := providerOwnedScriptEnv(city, city, bin)
 			if tc.ready {
 				env = removeEnvKey(removeEnvKey(removeEnvKey(env, "GC_BEADS_TRANSPORT"), "GC_BEADS_TARGET"), "BEADS_DOLT_PROXIED_SERVER")
+			} else {
+				env = append(env, "GC_BEADS_PROVIDER_INIT=1")
 			}
-			env = append(env, "BEADS_DOLT_SHARED_SERVER=1")
+			env = removeEnvKey(env, "BD_DOLT_SHARED_SERVER")
+			env = append(removeEnvKey(env, "BEADS_DOLT_SHARED_SERVER"), "BEADS_DOLT_SHARED_SERVER=1")
 
 			out, err := runProviderOwnedScriptOp(t, env, "health")
 			if err != nil {
@@ -55,9 +66,13 @@ func TestProviderScriptPinsSharedServerOffForProxiedScopes(t *testing.T) {
 			if len(calls) == 0 {
 				t.Fatalf("health ran no bd\n%s", out)
 			}
+			want := "BEADS_DOLT_SHARED_SERVER=1 BD_DOLT_SHARED_SERVER=unset "
+			if tc.pinned {
+				want = "BEADS_DOLT_SHARED_SERVER=0 BD_DOLT_SHARED_SERVER=false "
+			}
 			for _, call := range calls {
-				if !strings.HasPrefix(call, "BEADS_DOLT_SHARED_SERVER=0 BD_DOLT_SHARED_SERVER=false ") {
-					t.Errorf("bd ran without the shared-server pin: %s", call)
+				if !strings.HasPrefix(call, want) {
+					t.Errorf("bd env = %s, want prefix %q", call, want)
 				}
 			}
 		})

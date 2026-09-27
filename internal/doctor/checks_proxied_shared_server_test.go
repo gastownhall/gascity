@@ -25,7 +25,8 @@ func sharedServerCheckScope(t *testing.T, cityPath, rel, config string) string {
 }
 
 func newTestSharedServerCheck(cityPath string, userOn bool, roots ...string) *ProxiedSharedServerCheck {
-	c := NewProxiedSharedServerCheck(cityPath, roots)
+	c := NewProxiedSharedServerCheck(cityPath, roots, nil)
+	c.sharedRoot = func() string { return filepath.Join(cityPath, "no-shared-server") }
 	c.userMode = func() (bool, string) {
 		if userOn {
 			return true, "/home/op/.beads/config.yaml"
@@ -36,7 +37,7 @@ func newTestSharedServerCheck(cityPath string, userOn bool, roots ...string) *Pr
 }
 
 func TestProxiedSharedServerCheckIsOnlyRegisteredForProxiedScopes(t *testing.T) {
-	if c := NewProxiedSharedServerCheck(t.TempDir(), nil); c != nil {
+	if c := NewProxiedSharedServerCheck(t.TempDir(), nil, nil); c != nil {
 		t.Fatalf("check registered for a city with no gc-owned proxied scope: %+v", c)
 	}
 }
@@ -144,5 +145,63 @@ func TestUserLevelBdSharedServerMode(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
 	if on, src := UserLevelBdSharedServerMode(); !on || src != "BEADS_DOLT_SHARED_SERVER" {
 		t.Fatalf("BEADS_ env: on=%v src=%q", on, src)
+	}
+}
+
+// Beads a scope wrote while bound to the shared server stay there after the
+// pin flips off; doctor keeps saying so for as long as the database exists.
+func TestProxiedSharedServerCheckWarnsAboutStrandedSharedServerDatabase(t *testing.T) {
+	city := t.TempDir()
+	root := sharedServerCheckScope(t, city, ".", "dolt:\n  shared-server: false\n")
+	if err := os.WriteFile(filepath.Join(root, ".beads", "metadata.json"), []byte(`{"dolt_database":"hq"}`), 0o644); err != nil { //nolint:gosec // fixture
+		t.Fatal(err)
+	}
+	shared := filepath.Join(city, "shared")
+	c := newTestSharedServerCheck(city, false, root)
+	c.sharedRoot = func() string { return shared }
+	if r := c.Run(&CheckContext{CityPath: city}); r.Status != StatusOK {
+		t.Fatalf("no shared database yet: %+v, want OK", r)
+	}
+	if err := os.MkdirAll(filepath.Join(shared, "dolt", "hq"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := c.Run(&CheckContext{CityPath: city})
+	if r.Status != StatusWarning || !strings.Contains(r.Message, "stranded") || !strings.Contains(r.Message, filepath.Join(shared, "dolt", "hq")) {
+		t.Fatalf("result = %+v, want a stranded-data warning naming the database", r)
+	}
+}
+
+// A journaled scope bd has not materialized yet is neither reported unpinned
+// nor touched by --fix (which used to fail writing into a missing .beads).
+func TestProxiedSharedServerCheckSkipsUnmaterializedScopes(t *testing.T) {
+	city := t.TempDir()
+	cityRoot := sharedServerCheckScope(t, city, ".", "dolt:\n  shared-server: false\n")
+	fresh := filepath.Join(city, "rigs", "fresh")
+	if err := os.MkdirAll(fresh, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := newTestSharedServerCheck(city, true, cityRoot, fresh)
+	if r := c.Run(&CheckContext{CityPath: city}); r.Status != StatusOK {
+		t.Fatalf("result = %+v, want OK", r)
+	}
+	if err := c.Fix(&CheckContext{CityPath: city}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(fresh, ".beads")); !os.IsNotExist(err) {
+		t.Fatalf("Fix created %s/.beads (stat err %v)", fresh, err)
+	}
+}
+
+// Scopes whose ownership could not be classified are reported, not dropped.
+func TestProxiedSharedServerCheckReportsClassificationErrors(t *testing.T) {
+	city := t.TempDir()
+	c := NewProxiedSharedServerCheck(city, nil, []error{os.ErrPermission})
+	if c == nil {
+		t.Fatal("check not registered for a classification failure")
+	}
+	c.userMode = func() (bool, string) { return false, "" }
+	c.sharedRoot = func() string { return "" }
+	if r := c.Run(&CheckContext{CityPath: city}); r.Status != StatusWarning {
+		t.Fatalf("result = %+v, want a warning", r)
 	}
 }

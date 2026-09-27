@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,25 +27,37 @@ import (
 type ProxiedSharedServerCheck struct {
 	cityPath   string
 	scopeRoots []string
+	// classifyErrs are the scopes whose gc ownership could not be decided;
+	// they are reported rather than silently dropped.
+	classifyErrs []string
 	// userMode reports the user-level shared-server setting bd would apply to
 	// a scope with no opinion of its own, and where it came from. Injected so
 	// tests never read the real home directory.
 	userMode func() (bool, string)
+	// sharedRoot is bd's shared-server directory (BEADS_SHARED_SERVER_DIR or
+	// ~/.beads/shared-server). Injected for the same reason.
+	sharedRoot func() string
 }
 
 // NewProxiedSharedServerCheck returns the check for the given gc-owned proxied
-// scope roots, or nil when there are none (nothing changes for a direct or
-// external city). The caller decides ownership: gc's ownership journal, a
-// committed ownership handoff, or gc's canonical endpoint marker.
-func NewProxiedSharedServerCheck(cityPath string, scopeRoots []string) *ProxiedSharedServerCheck {
-	if len(scopeRoots) == 0 {
+// scope roots, or nil when there are none and no classification failed
+// (nothing changes for a direct or external city). The caller decides
+// ownership: gc's ownership journal, a committed ownership handoff, or gc's
+// canonical endpoint marker; classifyErrs are the scopes it could not decide.
+func NewProxiedSharedServerCheck(cityPath string, scopeRoots []string, classifyErrs []error) *ProxiedSharedServerCheck {
+	if len(scopeRoots) == 0 && len(classifyErrs) == 0 {
 		return nil
 	}
-	return &ProxiedSharedServerCheck{
+	c := &ProxiedSharedServerCheck{
 		cityPath:   cityPath,
 		scopeRoots: append([]string(nil), scopeRoots...),
 		userMode:   UserLevelBdSharedServerMode,
+		sharedRoot: BdSharedServerDir,
 	}
+	for _, err := range classifyErrs {
+		c.classifyErrs = append(c.classifyErrs, err.Error())
+	}
+	return c
 }
 
 // Name returns the check identifier.
@@ -61,15 +74,56 @@ func (c *ProxiedSharedServerCheck) configPath(scopeRoot string) string {
 	return filepath.Join(scopeRoot, ".beads", "config.yaml")
 }
 
+// materialized reports whether bd has created the scope's .beads directory. A
+// journaled scope whose init has not run yet has nothing to pin or report.
+func materialized(scopeRoot string) bool {
+	info, err := os.Stat(filepath.Join(scopeRoot, ".beads"))
+	return err == nil && info.IsDir()
+}
+
+// strandedSharedServerDatabase returns the shared-server database directory
+// that carries this scope's Dolt database name, if one exists. A scope that
+// was ever bound to bd's shared server wrote its rows there; flipping the pin
+// off does not move them back.
+func (c *ProxiedSharedServerCheck) strandedSharedServerDatabase(scopeRoot string) string {
+	root := c.sharedRoot()
+	if root == "" {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(scopeRoot, ".beads", "metadata.json"))
+	if err != nil {
+		return ""
+	}
+	var meta struct {
+		DoltDatabase string `json:"dolt_database"`
+	}
+	if json.Unmarshal(data, &meta) != nil || strings.TrimSpace(meta.DoltDatabase) == "" {
+		return ""
+	}
+	dir := filepath.Join(root, "dolt", strings.TrimSpace(meta.DoltDatabase))
+	if info, err := os.Stat(dir); err == nil && info.IsDir() {
+		return dir
+	}
+	return ""
+}
+
 // Run classifies each scope's pin against the user-level setting.
 func (c *ProxiedSharedServerCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	userOn, userSource := c.userMode()
 
-	var boundOn, unpinned, unreadable []string
-	pinned := 0
+	var boundOn, unpinned, stranded []string
+	unreadable := append([]string(nil), c.classifyErrs...)
+	pinned, scopes := 0, 0
 	for _, scopeRoot := range c.scopeRoots {
+		if !materialized(scopeRoot) {
+			continue
+		}
+		scopes++
 		label := proxiedScopeLabel(c.cityPath, scopeRoot)
+		if dir := c.strandedSharedServerDatabase(scopeRoot); dir != "" {
+			stranded = append(stranded, fmt.Sprintf("%s: %s", label, dir))
+		}
 		pin, err := contract.ReadSharedServerPin(fsys.OSFS{}, c.configPath(scopeRoot))
 		switch {
 		case err != nil:
@@ -90,6 +144,11 @@ func (c *ProxiedSharedServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("%d gc-owned proxied scope(s) are bound to bd's host-wide shared server (dolt.shared-server: true in the scope config): %s — their store lives in ~/.beads/shared-server, shared with every other workspace on the host",
 			len(boundOn), strings.Join(boundOn, ", "))
 		r.FixHint = fixHint + "; beads written while bound stay in the shared server's Dolt root and are not moved back"
+	case len(stranded) > 0:
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("bd's shared server holds a database named like %d gc-owned proxied scope(s): %s — if a scope was ever bound there (dolt.shared-server: true), beads it wrote then are stranded in the shared server and were not migrated back",
+			len(stranded), strings.Join(stranded, ", "))
+		r.FixHint = "inspect that database (another workspace on the host may legitimately share the name); gc does not move or delete it. Copy any stranded beads back into the scope, then remove or rename the shared-server database directory to clear this warning"
 	case userOn && len(unpinned) > 0:
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("%s enables bd's shared-server mode and %d gc-owned proxied scope(s) do not pin it off: %s — a bd process gc does not spawn (e.g. an agent running `bd` in its shell) would move the store into ~/.beads/shared-server",
@@ -97,7 +156,7 @@ func (c *ProxiedSharedServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.FixHint = fixHint
 	case len(unreadable) > 0:
 		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("could not read the shared-server pin of %d gc-owned proxied scope(s)", len(unreadable))
+		r.Message = fmt.Sprintf("could not read or classify the shared-server pin of %d proxied scope(s)", len(unreadable))
 		r.FixHint = "inspect <scope>/.beads/config.yaml"
 	default:
 		r.Status = StatusOK
@@ -105,12 +164,12 @@ func (c *ProxiedSharedServerCheck) Run(_ *CheckContext) *CheckResult {
 		case userOn:
 			r.Message = fmt.Sprintf("%s enables bd's shared-server mode; all %d gc-owned proxied scope(s) pin it off", userSource, pinned)
 		case len(unpinned) > 0:
-			r.Message = fmt.Sprintf("bd shared-server mode is off at user level; %d of %d gc-owned proxied scope(s) pin it off (gc start pins the rest)", pinned, len(c.scopeRoots))
+			r.Message = fmt.Sprintf("bd shared-server mode is off at user level; %d of %d gc-owned proxied scope(s) pin it off (gc start pins the rest)", pinned, scopes)
 		default:
 			r.Message = fmt.Sprintf("%d gc-owned proxied scope(s) pin bd's shared-server mode off", pinned)
 		}
 	}
-	r.Details = append(append(r.Details, boundOn...), unreadable...)
+	r.Details = append(append(append(r.Details, boundOn...), stranded...), unreadable...)
 	return r
 }
 
@@ -118,6 +177,9 @@ func (c *ProxiedSharedServerCheck) Run(_ *CheckContext) *CheckResult {
 func (c *ProxiedSharedServerCheck) Fix(_ *CheckContext) error {
 	var errs []string
 	for _, scopeRoot := range c.scopeRoots {
+		if !materialized(scopeRoot) {
+			continue
+		}
 		if _, _, err := contract.EnsureSharedServerDisabled(fsys.OSFS{}, c.configPath(scopeRoot)); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", proxiedScopeLabel(c.cityPath, scopeRoot), err))
 		}
@@ -126,6 +188,19 @@ func (c *ProxiedSharedServerCheck) Fix(_ *CheckContext) error {
 		return fmt.Errorf("pinning dolt.shared-server off: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// BdSharedServerDir returns bd's shared-server directory: BEADS_SHARED_SERVER_DIR
+// when set, else ~/.beads/shared-server (bd doltserver.SharedServerDir).
+func BdSharedServerDir() string {
+	if dir := strings.TrimSpace(os.Getenv("BEADS_SHARED_SERVER_DIR")); dir != "" {
+		return dir
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".beads", "shared-server")
 }
 
 // UserLevelBdSharedServerMode reports whether bd's user-level configuration

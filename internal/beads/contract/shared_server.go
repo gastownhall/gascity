@@ -85,10 +85,13 @@ func sharedServerPinFromRoot(root *yaml.Node) SharedServerPin {
 // rewrites config.yaml from its template, and under a user-level shared-server
 // mode it would write `dolt.shared-server: true` into it itself.
 //
-// Everything else in the file is preserved. A flat `dolt.shared-server` key is
-// removed so the file carries exactly one, nested, answer. A file that holds
-// only comments (bd's init template) is appended to rather than re-encoded,
-// so the template's documentation survives.
+// Everything else in the file is preserved. When the file has no dolt section
+// and no flat key (bd's init template, or any block-mapping config that simply
+// never mentioned the mode) the pin is appended as text, so comments, blank
+// lines and line endings survive byte for byte. Otherwise the document is
+// re-encoded: a flat `dolt.shared-server` key is removed so the file carries
+// exactly one, nested, answer, and CRLF line endings are kept (yaml.v3 does
+// drop blank lines on that path).
 func EnsureSharedServerDisabled(fs fsys.FS, path string) (bool, SharedServerPin, error) {
 	data, err := fs.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
@@ -103,14 +106,20 @@ func EnsureSharedServerDisabled(fs fsys.FS, path string) (bool, SharedServerPin,
 	}
 	root := mappingRoot(doc)
 	previous := sharedServerPinFromRoot(root)
-	if len(root.Content) == 0 {
-		// Missing, empty, or comment-only: nothing to re-encode.
+	eol := "\n"
+	if bytes.Contains(data, []byte("\r\n")) {
+		eol = "\r\n"
+	}
+	appendable := len(root.Content) == 0 ||
+		(root.Kind == yaml.MappingNode && root.Style&yaml.FlowStyle == 0 &&
+			findValue(root, sharedServerSection) == nil && findValue(root, SharedServerConfigKey) == nil)
+	if appendable {
 		var out bytes.Buffer
 		out.Write(data)
 		if out.Len() > 0 && !bytes.HasSuffix(data, []byte("\n")) {
-			out.WriteByte('\n')
+			out.WriteString(eol)
 		}
-		out.WriteString(sharedServerSection + ":\n  " + sharedServerField + ": false\n")
+		out.WriteString(sharedServerSection + ":" + eol + "  " + sharedServerField + ": false" + eol)
 		return true, previous, fsys.WriteFileAtomic(fs, path, out.Bytes(), canonicalScopeFilePerm(fs, path))
 	}
 	changed := deleteKeys(root, SharedServerConfigKey)
@@ -121,6 +130,9 @@ func EnsureSharedServerDisabled(fs fsys.FS, path string) (bool, SharedServerPin,
 	encoded, err := marshalConfigDoc(doc)
 	if err != nil {
 		return false, previous, err
+	}
+	if eol != "\n" {
+		encoded = bytes.ReplaceAll(encoded, []byte("\n"), []byte(eol))
 	}
 	return true, previous, fsys.WriteFileAtomic(fs, path, encoded, canonicalScopeFilePerm(fs, path))
 }

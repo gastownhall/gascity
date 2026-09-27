@@ -491,7 +491,8 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// store relocated into ~/.beads/shared-server, shared with every other
 	// city on the host. Registered only when the city has such a scope.
 	if cfgErr == nil {
-		if c := doctor.NewProxiedSharedServerCheck(cityPath, gcOwnedProxiedScopeRoots(cityPath, cfg)); c != nil {
+		roots, classifyErrs := gcOwnedProxiedScopeRoots(cityPath, cfg)
+		if c := doctor.NewProxiedSharedServerCheck(cityPath, roots, classifyErrs); c != nil {
 			register(c)
 		}
 	}

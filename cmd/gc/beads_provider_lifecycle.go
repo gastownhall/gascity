@@ -257,6 +257,13 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	}
 	if cityProviderOwned {
 		if cityState.State == providerScopeReady {
+			// The provider script pins a ready scope out of bd's shared-server
+			// mode by reading this pin, so it has to be in place before the
+			// start op runs bd (a city initialized by a build that did not
+			// write it is repaired here).
+			if err := ensureGCOwnedProxiedScopeSharedServerOff(cityPath, cityPath); err != nil {
+				return err
+			}
 			if err := ensureBeadsProvider(cityPath); err != nil {
 				return fmt.Errorf("provider-owned bead store: %w", err)
 			}
@@ -3536,6 +3543,8 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		}
 		if entry.Intent.Transport == "proxied" {
 			applyProxiedDoltEnv(envMap)
+			// A journaled, initializing scope is gc-owned by construction.
+			applyProxiedSharedServerOptOut(envMap)
 		}
 		return mergeRuntimeEnv(nil, envMap), nil
 	}

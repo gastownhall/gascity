@@ -142,3 +142,49 @@ func TestEnsureCanonicalConfigPreservesTheSharedServerPin(t *testing.T) {
 		t.Fatalf("pin after canonicalization = %v, %v; want pinned off\n%s", pin, err, data)
 	}
 }
+
+// A config with other keys but no dolt section is pinned by appending, so its
+// blank lines and CRLF line endings survive untouched.
+func TestEnsureSharedServerDisabledAppendsAndKeepsLayout(t *testing.T) {
+	for _, tc := range []struct{ name, body, eol string }{
+		{name: "lf with blank lines", body: "issue_prefix: hq\n\n# note\nsync:\n  mode: none\n", eol: "\n"},
+		{name: "crlf", body: "issue_prefix: hq\r\n\r\nsync:\r\n  mode: none\r\n", eol: "\r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeSharedServerFixture(t, tc.body)
+			changed, _, err := EnsureSharedServerDisabled(fsys.OSFS{}, path)
+			if err != nil || !changed {
+				t.Fatalf("changed=%v err=%v", changed, err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := tc.body + "dolt:" + tc.eol + "  shared-server: false" + tc.eol
+			if string(data) != want {
+				t.Fatalf("got %q, want %q", data, want)
+			}
+			if v, _ := decodeSharedServer(t, path); v != false {
+				t.Fatalf("shared-server = %v, want false", v)
+			}
+		})
+	}
+}
+
+// Re-encoding (the file already has a dolt section) keeps CRLF endings.
+func TestEnsureSharedServerDisabledReencodeKeepsCRLF(t *testing.T) {
+	path := writeSharedServerFixture(t, "issue_prefix: hq\r\ndolt:\r\n  shared-server: true\r\n")
+	if _, prev, err := EnsureSharedServerDisabled(fsys.OSFS{}, path); err != nil || prev != SharedServerPinnedOn {
+		t.Fatalf("prev=%v err=%v", prev, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(data), "\n") != strings.Count(string(data), "\r\n") {
+		t.Fatalf("line endings not preserved: %q", data)
+	}
+	if v, _ := decodeSharedServer(t, path); v != false {
+		t.Fatalf("shared-server = %v, want false", v)
+	}
+}
