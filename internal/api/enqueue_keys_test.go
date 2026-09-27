@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 )
@@ -14,6 +15,24 @@ import (
 // These tests pin which reconcile key each API trigger enqueues. Under the
 // legacy reconciler every Enqueue is one Poke, so pokeCount must stay at the
 // pre-key values; the keys are what a keyed reconciler will route on.
+
+// waitForEnqueuedKey polls until key has been enqueued: async creates
+// enqueue from a background goroutine, possibly after the success event.
+func waitForEnqueuedKey(t *testing.T, fs *fakeState, key reconcilekey.Key) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		for _, k := range fs.enqueuedKeys() {
+			if k == key {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for enqueue of %v; enqueued %v", key, fs.enqueuedKeys())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
 
 func assertEnqueued(t *testing.T, fs *fakeState, want ...reconcilekey.Key) {
 	t.Helper()
@@ -38,9 +57,10 @@ func TestAPISessionCreateAsyncEnqueuesSessionKey(t *testing.T) {
 	if success == nil {
 		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
+	waitForEnqueuedKey(t, fs, reconcilekey.Session(success.Session.ID))
 	assertEnqueued(t, fs, reconcilekey.Session(success.Session.ID))
-	if fs.pokeCount != 1 {
-		t.Fatalf("pokeCount = %d, want 1", fs.pokeCount)
+	if got := fs.enqueueCalls(); got != 1 {
+		t.Fatalf("pokeCount = %d, want 1", got)
 	}
 }
 
@@ -58,6 +78,7 @@ func TestAPILegacySessionCreateEnqueuesSessionKey(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
+	waitForEnqueuedKey(t, fs, reconcilekey.Session(resp.ID))
 	assertEnqueued(t, fs, reconcilekey.Session(resp.ID))
 }
 
@@ -67,8 +88,8 @@ func TestAPINamedSessionMaterializeEnqueuesSessionKey(t *testing.T) {
 
 	id := phase0MaterializeCityScopedNamedWorker(t, srv, fs)
 	assertEnqueued(t, fs, reconcilekey.Session(id))
-	if fs.pokeCount != 1 {
-		t.Fatalf("pokeCount = %d, want 1", fs.pokeCount)
+	if got := fs.enqueueCalls(); got != 1 {
+		t.Fatalf("pokeCount = %d, want 1", got)
 	}
 }
 
@@ -88,6 +109,9 @@ func TestAPIPermissionModeChangeEnqueuesSessionKey(t *testing.T) {
 	if success == nil {
 		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
+	// The create enqueues from its background goroutine; let that land
+	// before snapshotting, or it could be counted as the mode change's.
+	waitForEnqueuedKey(t, fs, reconcilekey.Session(success.Session.ID))
 	suspendSessionForPermissionModeTest(t, fs, success.Session.ID)
 	before := len(fs.enqueuedKeys())
 

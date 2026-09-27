@@ -332,7 +332,7 @@ func TestDrainAckReleasesBeforeAcknowledging(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := doRuntimeDrainAck(dops, t.TempDir(), "worker-1", "worker-1", false, &stdout, &stderr); code != 0 {
+	if code := doRuntimeDrainAck(dops, t.TempDir(), "worker-1", "worker-1", "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("doRuntimeDrainAck = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if !releaseRan {

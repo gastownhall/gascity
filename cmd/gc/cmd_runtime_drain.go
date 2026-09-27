@@ -550,7 +550,7 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 			return 1
 		}
 		dops := newDrainOps(sp)
-		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, jsonOutput, stdout, stderr)
+		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, target.sessionID, jsonOutput, stdout, stderr)
 	}
 
 	current, err := currentSessionRuntimeTarget()
@@ -564,7 +564,8 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 		return 1
 	}
 	dops := newDrainOps(sp)
-	return doRuntimeDrainAck(dops, current.cityPath, current.display, current.sessionName, jsonOutput, stdout, stderr)
+	// Name-only key: the env-derived GC_SESSION_ID can be stale.
+	return doRuntimeDrainAck(dops, current.cityPath, current.display, current.sessionName, "", jsonOutput, stdout, stderr)
 }
 
 // ---------------------------------------------------------------------------
@@ -709,6 +710,7 @@ func doRuntimeRequestRestart(dops drainOps, persistRestart func() error, pinned 
 		Message: "restart requested by session",
 	})
 
+	// Name-only key: sn is authoritative here, while GC_SESSION_ID can be stale.
 	if err := pokeControllerForRestart(cityPath, reconcilekey.SessionNamed(sn)); err != nil {
 		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -882,13 +884,13 @@ const drainAckReleaseBudget = 15 * time.Second
 // tells the controller it may stop this session, so acknowledging first opens a
 // window in which the session dies still holding exactly the claim this release
 // exists to clear.
-func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
+func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer) int {
 	drainAckReleaseHeldClaims(cityPath, sn, stderr)
 	if err := dops.setDrainAck(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := drainAckPokeController(cityPath, reconcilekey.SessionNamed(sn)); err != nil {
+	if err := drainAckPokeController(cityPath, reconcilekey.SessionRef(sessionID, sn)); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	if jsonOutput {

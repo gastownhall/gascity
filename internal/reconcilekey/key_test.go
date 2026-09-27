@@ -30,17 +30,6 @@ func TestConstructorsProduceNormalizedKeys(t *testing.T) {
 	}
 }
 
-func TestSessionInStoreCarriesStoreRef(t *testing.T) {
-	got := Session("gc-1").InStore(" rig:alpha ")
-	want := Key{Kind: KindSession, SessionID: "gc-1", StoreRef: "rig:alpha"}
-	if got != want {
-		t.Fatalf("got %+v, want %+v", got, want)
-	}
-	if got := Allocator().InStore("rig:alpha"); got != Allocator() {
-		t.Fatalf("InStore on a non-session key = %+v, want allocator unchanged", got)
-	}
-}
-
 func TestNormalizeTreatsKeylessAsAllocator(t *testing.T) {
 	tests := []struct {
 		name string
@@ -69,7 +58,8 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		ControlDispatch(),
 		Session("gc-1"),
 		SessionNamed("worker-1"),
-		Session("gc-2").InStore("rig:alpha"),
+		{Kind: KindSession, SessionID: "gc-2", StoreRef: "rig:alpha"},
+		Session("gc-3\nnext-line\r\x00\x1b[0m"),
 	} {
 		payload := k.Encode()
 		if strings.ContainsAny(payload, "\n\r") {
@@ -101,18 +91,19 @@ func TestDecodeNormalizesPayload(t *testing.T) {
 	}
 }
 
-func TestStringIsReadable(t *testing.T) {
-	tests := map[Key]string{
-		Allocator():                        "allocator",
-		ControlDispatch():                  "control_dispatch",
-		Session("gc-1"):                    "session:gc-1",
-		SessionNamed("worker-1"):           "session:name=worker-1",
-		Session("gc-1").InStore("rig:a"):   "session:gc-1@rig:a",
-		{Kind: KindSession, SessionID: ""}: "allocator",
-	}
-	for k, want := range tests {
-		if got := k.String(); got != want {
-			t.Fatalf("%+v.String() = %q, want %q", k, got, want)
+func TestEncodeEscapesLineBreaksAndControlCharsInIdentities(t *testing.T) {
+	k := SessionRef("gc-1\nstop", "worker\r\n\x00\x1b[31m")
+	payload := k.Encode()
+	for _, c := range payload {
+		if c < 0x20 || c == 0x7f {
+			t.Fatalf("Encode(%+v) = %q contains raw control char %q; socket commands are line-framed", k, payload, c)
 		}
+	}
+	got, err := Decode(payload)
+	if err != nil {
+		t.Fatalf("Decode(%q): %v", payload, err)
+	}
+	if got != k {
+		t.Fatalf("round trip %+v -> %q -> %+v", k, payload, got)
 	}
 }

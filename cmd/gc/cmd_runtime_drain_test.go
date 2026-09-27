@@ -697,7 +697,7 @@ func TestDoRuntimeDrainAck(t *testing.T) {
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "", "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "", "worker", "worker", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -713,7 +713,7 @@ func TestDoRuntimeDrainAckError(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "", "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "", "worker", "worker", "", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -739,7 +739,7 @@ func TestDoRuntimeDrainAckJSON(t *testing.T) {
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "", "worker", "worker", true, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "", "worker", "worker", "", true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -772,7 +772,7 @@ func TestDoRuntimeDrainAckPokesController(t *testing.T) {
 	// of the three adjacent string params in the new signature.
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "/city/path", "display-name", "session-name", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "/city/path", "display-name", "session-name", "gc-42", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -782,7 +782,7 @@ func TestDoRuntimeDrainAckPokesController(t *testing.T) {
 	if gotCityPath != "/city/path" {
 		t.Errorf("poke cityPath = %q, want %q", gotCityPath, "/city/path")
 	}
-	if want := reconcilekey.SessionNamed("session-name"); gotKey != want {
+	if want := reconcilekey.SessionRef("gc-42", "session-name"); gotKey != want {
 		t.Errorf("poke key = %v, want %v", gotKey, want)
 	}
 	if !dops.acked["session-name"] {
@@ -802,7 +802,7 @@ func TestDoRuntimeDrainAckErrorDoesNotPoke(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", "", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -818,7 +818,7 @@ func TestDoRuntimeDrainAckPokeFailureWarns(t *testing.T) {
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0 (poke failure is best-effort)", code)
 	}

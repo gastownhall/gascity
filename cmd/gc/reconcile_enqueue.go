@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -69,6 +71,23 @@ func legacyEnqueue(pokeCh, controlDispatcherCh chan<- struct{}, keys ...reconcil
 	return landed
 }
 
+// controllerStateWiredHook, when set by a test, observes each
+// controllerState right after wireControllerWakeSignals. Tests that set it
+// MUST NOT call t.Parallel().
+var controllerStateWiredHook func(*controllerState)
+
+// wireControllerWakeSignals connects cs.Enqueue to the controller's wake
+// channels. Both the standalone controller and the supervisor's per-city
+// start call it, so neither can forget the control-dispatcher channel
+// (without it, control-dispatch enqueues from the API would be dropped).
+func wireControllerWakeSignals(cs *controllerState, pokeCh, controlDispatcherCh chan struct{}) {
+	cs.pokeCh = pokeCh
+	cs.controlDispatcherCh = controlDispatcherCh
+	if hook := controllerStateWiredHook; hook != nil {
+		hook(cs)
+	}
+}
+
 // parsePokeSocketCommand reports whether line is a poke command and, if so,
 // which key it carries. The bare "poke" verb, an empty payload, and a
 // malformed payload all mean the allocator.
@@ -93,17 +112,31 @@ func keyedPokeCommand(key reconcilekey.Key) string {
 }
 
 // sendKeyedPoke sends key over the controller socket with send. Session
-// keys go out as "poke:<json>" first; if that is not acknowledged (an older
-// controller closes the connection on an unknown verb) the plain "poke" verb
-// follows, so a new client never loses a wake. Other keys send "poke".
+// keys go out as "poke:<json>" first. Only an older controller's answer to
+// an unknown verb (it closes the connection without replying) or a reply
+// other than "ok" triggers the plain "poke" retry, so a new client never
+// loses a wake against an old controller. Any other failure (controller
+// unavailable, read timeout) is returned as is: retrying would only repeat
+// the dial or the wait. Other keys send "poke".
 func sendKeyedPoke(key reconcilekey.Key, send func(command string) ([]byte, error)) error {
 	if key = key.Normalize(); key.Kind == reconcilekey.KindSession {
-		if resp, err := send(keyedPokeCommand(key)); err == nil && strings.TrimSpace(string(resp)) == "ok" {
+		resp, err := send(keyedPokeCommand(key))
+		switch {
+		case err == nil && strings.TrimSpace(string(resp)) == "ok":
 			return nil
+		case err != nil && !keyedPokeUnsupported(err):
+			return err
 		}
 	}
 	_, err := send("poke")
 	return err
+}
+
+// keyedPokeUnsupported reports whether err is an older controller's
+// response to the unknown "poke:<json>" verb: the connection closed before
+// any reply line.
+func keyedPokeUnsupported(err error) bool {
+	return errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF)
 }
 
 // enqueueController asks the controller for cityPath to reconcile key,

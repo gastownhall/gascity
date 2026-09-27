@@ -209,6 +209,13 @@ func (f *fakeState) Enqueue(keys ...reconcilekey.Key) {
 	}
 }
 
+// enqueueCalls returns the number of Enqueue calls (legacy pokes) so far.
+func (f *fakeState) enqueueCalls() int {
+	f.enqueueMu.Lock()
+	defer f.enqueueMu.Unlock()
+	return f.pokeCount
+}
+
 // enqueuedKeys returns a copy of every key passed to Enqueue so far.
 func (f *fakeState) enqueuedKeys() []reconcilekey.Key {
 	f.enqueueMu.Lock()

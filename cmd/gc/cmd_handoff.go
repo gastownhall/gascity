@@ -187,6 +187,7 @@ func cmdHandoffWithForce(args []string, target string, auto bool, hookFormat str
 		return 0
 	}
 
+	// Name-only key: the env-derived GC_SESSION_ID can be stale.
 	if err := pokeControllerForRestart(current.cityPath, reconcilekey.SessionNamed(current.sessionName)); err != nil {
 		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

@@ -2343,8 +2343,7 @@ func startOneCity(
 		return
 	}
 	cs.ct = cityRuntime.crashTrack()
-	cs.pokeCh = pokeCh
-	cs.controlDispatcherCh = controlDispatcherCh
+	wireControllerWakeSignals(cs, pokeCh, controlDispatcherCh)
 	cs.configDirty = configDirty
 	cs.services = cityRuntime.svc
 	cityRuntime.setControllerState(cs)

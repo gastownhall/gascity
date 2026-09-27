@@ -1388,8 +1388,7 @@ func runController(
 	// session-bead sync and rig-scoped wake decisions.
 	cs := newControllerStateWithRoutes(ctx, cr.storageRoutes, cfg, sp, eventProv, cityName, cityPath)
 	cs.ct = cr.crashTrack()
-	cs.pokeCh = pokeCh
-	cs.controlDispatcherCh = controlDispatcherCh
+	wireControllerWakeSignals(cs, pokeCh, controlDispatcherCh)
 	cs.configDirty = configDirty
 	cs.services = cr.svc
 	cs.emergencyCh = make(chan emergency.Record, 64)

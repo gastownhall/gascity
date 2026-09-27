@@ -66,16 +66,6 @@ func SessionRef(id, name string) Key {
 	return Key{Kind: KindSession, SessionID: id, SessionName: name}.Normalize()
 }
 
-// InStore returns a copy of a session key pinned to storeRef. Non-session
-// keys are returned unchanged.
-func (k Key) InStore(storeRef string) Key {
-	if k.Kind != KindSession {
-		return k
-	}
-	k.StoreRef = storeRef
-	return k.Normalize()
-}
-
 // Normalize trims fields and folds anything that does not identify a
 // session or the control dispatcher into the allocator key, so key-less and
 // malformed triggers keep their legacy meaning.
@@ -97,24 +87,6 @@ func (k Key) Normalize() Key {
 	default:
 		return Allocator()
 	}
-}
-
-// String renders the key for logs and traces.
-func (k Key) String() string {
-	k = k.Normalize()
-	if k.Kind != KindSession {
-		return string(k.Kind)
-	}
-	s := "session:"
-	if k.SessionID != "" {
-		s += k.SessionID
-	} else {
-		s += "name=" + k.SessionName
-	}
-	if k.StoreRef != "" {
-		s += "@" + k.StoreRef
-	}
-	return s
 }
 
 // Encode renders the normalized key as single-line JSON, suitable for a
