@@ -1416,6 +1416,15 @@ type BeadsConfig struct {
 	// byte-identical), "auto" (compare-and-swap where the store is capable,
 	// loud degrade otherwise), or "require" (CAS or a typed refusal). Empty
 	// defaults to "off". Any other value fails config load.
+	//
+	// A startup boot latch (assertConditionalWritesBootReady) additionally
+	// refuses to start the controller unless this resolves to "require" from
+	// an explicit config or env origin AND every bound bead-store scope
+	// passes a live capability probe: "off", "auto", and an unset/default
+	// origin all refuse to boot, not merely to write. This is stricter than
+	// the "off"/"auto"/"require" per-write description above and is
+	// deliberate (ADR-0019): a controller must not silently run without the
+	// safety property it claims. See api_state_boot_latch.go.
 	ConditionalWrites string `toml:"conditional_writes,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
 	// GuardedRelease selects the ownership-release discipline for work beads:
 	// "off" (legacy, owner-blind bd update/unclaim), "auto" (fence-guarded
