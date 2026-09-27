@@ -92,24 +92,23 @@ jobs:
             echo 'build --jobs=64'
           } > .bazelrc.local
 
-      - name: BUILD files are in sync (gazelle + repo tree)
-        run: |
-          make bazel-sync
-          git diff --exit-code || {
-            echo "BUILD files out of sync; run 'make bazel-sync' and commit the result." >&2
-            git diff | head -80 >&2
-            exit 1
-          }
 
       - name: Writable test HOME
         run: |
           mkdir -p /tmp/gc-test-home
           echo "HOME=/tmp/gc-test-home" >> "$GITHUB_ENV"
 
-      - name: bazel test //... (build subsumed)
+      - name: "bazel test //... (single server, sync check + test)"
         run: |
           ARGS=(--output_user_root="$RUNNER_TEMP"/bazel-outputs)
           PROFILE=(--profile=/tmp/bazel-profile.json)
+          # Sync check first (reuses this step's server):
+          make bazel-sync
+          git diff --exit-code || {
+            echo "BUILD files out of sync; run 'make bazel-sync' and commit the result." >&2
+            git diff | head -80 >&2
+            exit 1
+          }
           if [ -f .bazelrc.local ]; then
             bazel "${ARGS[@]}" test "${PROFILE[@]}" //... --config=remote-exec --test_output=errors --keep_going
           else

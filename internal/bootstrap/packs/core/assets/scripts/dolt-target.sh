@@ -150,6 +150,41 @@ else
     DOLT_PROVIDER_STATE_FILE="$DOLT_PACK_DIR/dolt-provider-state.json"
 fi
 
+DOLT_SYSTEM_PACKS_DIR="${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}"
+DOLT_PORT_RESOLVE_SCRIPT="$DOLT_SYSTEM_PACKS_DIR/dolt/assets/scripts/port_resolve.sh"
+if [ ! -f "$DOLT_PORT_RESOLVE_SCRIPT" ]; then
+    DOLT_PORT_RESOLVE_SCRIPT="$DOLT_SYSTEM_PACKS_DIR/bd/dolt/assets/scripts/port_resolve.sh"
+fi
+if [ ! -f "$DOLT_PORT_RESOLVE_SCRIPT" ] && [ -n "${SCRIPT_DIR:-}" ]; then
+    DOLT_SOURCE_SCRIPT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../../../../../../examples/bd/dolt/assets/scripts" 2>/dev/null && pwd || true)
+    if [ -n "$DOLT_SOURCE_SCRIPT_DIR" ]; then
+        DOLT_PORT_RESOLVE_SCRIPT="$DOLT_SOURCE_SCRIPT_DIR/port_resolve.sh"
+    fi
+fi
+
+# Proxied-scope guard. A city on bd-owned proxied Dolt (the default for new
+# cities since #6273: <city>/.beads/metadata.json dolt_mode=proxied-server)
+# has no gc-managed sql-server: bd starts, supervises and stops the Dolt
+# child under its own db-proxy-child, publishes no endpoint for gc to
+# project, and owns every write to that database. These maintenance scripts
+# speak raw SQL (DML plus DOLT_COMMIT) to a gc-resolved port and assume one
+# server holding every scope's database, so they have no safe target there.
+# Skip (exit 0) with a typed line instead of dying in port resolution
+# (exit 78, "cannot resolve runtime port") on every cooldown. The check runs
+# before the GC_DOLT_PORT shortcut below so a port projected for a proxied
+# scope's external upstream cannot route raw SQL around bd's proxy either.
+# bd_owns_proxied_scope is the dolt pack's sh twin of cmd/gc's
+# scopeBindingIsProviderOwnedProxied (pinned by
+# examples/bd/dolt/proxied_scope_test.go).
+DOLT_PROXIED_SCOPE_SCRIPT="$(dirname -- "$DOLT_PORT_RESOLVE_SCRIPT")/proxied_scope.sh"
+if [ -f "$DOLT_PROXIED_SCOPE_SCRIPT" ]; then
+    . "$DOLT_PROXIED_SCOPE_SCRIPT"
+    if bd_owns_proxied_scope "$GC_CITY_PATH"; then
+        echo "core: city Dolt is bd-owned (dolt_mode=proxied-server); direct-SQL maintenance is not supported on proxied scopes; skipping ${0##*/}"
+        exit 0
+    fi
+fi
+
 # No-Dolt guard. Core ships these maintenance scripts to every city, but
 # they only have work when the city has a Dolt target. Skip (exit 0)
 # instead of failing (exit 78) when no Dolt evidence exists, so cities on
@@ -170,17 +205,6 @@ if ! core_city_has_dolt_target; then
     exit 0
 fi
 
-DOLT_SYSTEM_PACKS_DIR="${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}"
-DOLT_PORT_RESOLVE_SCRIPT="$DOLT_SYSTEM_PACKS_DIR/dolt/assets/scripts/port_resolve.sh"
-if [ ! -f "$DOLT_PORT_RESOLVE_SCRIPT" ]; then
-    DOLT_PORT_RESOLVE_SCRIPT="$DOLT_SYSTEM_PACKS_DIR/bd/dolt/assets/scripts/port_resolve.sh"
-fi
-if [ ! -f "$DOLT_PORT_RESOLVE_SCRIPT" ] && [ -n "${SCRIPT_DIR:-}" ]; then
-    DOLT_SOURCE_SCRIPT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../../../../../../examples/bd/dolt/assets/scripts" 2>/dev/null && pwd || true)
-    if [ -n "$DOLT_SOURCE_SCRIPT_DIR" ]; then
-        DOLT_PORT_RESOLVE_SCRIPT="$DOLT_SOURCE_SCRIPT_DIR/port_resolve.sh"
-    fi
-fi
 . "${DOLT_PORT_RESOLVE_SCRIPT:?port_resolve.sh not resolved}"
 if [ -n "${DOLT_PROVIDER_STATE_FILE:-}" ]; then
     GC_DOLT_PORT="$(resolve_dolt_port_or_die "$DOLT_STATE_FILE" "$DOLT_PROVIDER_STATE_FILE" "$GC_CITY_PATH/.beads/dolt" "$GC_CITY_PATH")" || exit $?
