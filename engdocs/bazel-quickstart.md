@@ -35,35 +35,25 @@ Bazelisk reads `.bazelversion` (committed) and pins the exact version.
 
 ### 2. Point at the remote cache (the free win)
 
-Create `.bazelrc.local` in the repo root (gitignored):
+Create `.bazelrc.local` in the repo root (gitignored) using your team's
+Bazel remote cache endpoint:
 
 ```bash
 # read + write the shared CAS — safe: content-addressed, never corrupts
-build --remote_cache=grpcs://rbe.ops.gascity.com:443
+build --remote_cache=grpcs://<your-cache-endpoint>:443
 ```
 
 For **read-only** (cheaper, no upload):
 
 ```bash
-build --remote_cache=grpcs://rbe.ops.gascity.com:443
+build --remote_cache=grpcs://<your-cache-endpoint>:443
 build --remote_upload_local_results=false
 ```
 
-### 3. (Optional) remote execution — compile on the farm
-
-If you want compiles to run on elastic workers instead of your machine:
-
-```bash
-# same as above, plus:
-build --remote_executor=grpcs://rbe.ops.gascity.com:443
-build --tls_client_certificate=/path/to/client-cert.pem
-build --tls_client_key=/path/to/client-key.pem
-build --jobs=32
-```
-
-Client certs are issued by the farm team (the CA lives in OpenBao,
-`kv/operator-env/rbe-edge-mtls`). For most dev work the cache alone is
-enough — you compile locally but hit the shared results.
+If your team runs a remote execution farm, ask the owners for the
+executor endpoint and mTLS client certificate. For most dev work the
+cache alone is enough — you compile locally but hit shared results,
+which is where the ~0.6s warm suite comes from.
 
 ### 4. Verify
 
