@@ -144,6 +144,14 @@ jobs:
         n: [1, 2]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      # Read-only: hydrate the pool's warm worker cache, never commit to it
+      # (only default-branch pool workers write the trusted snapshot).
+      - name: Worker CAS cache (sticky disk, read-only)
+        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1
+        with:
+          key: ${{ github.repository }}-rbe-worker-cas
+          path: ${{ runner.temp }}/rbe-cache
+          commit: "false"
       - name: NativeLink worker until the bazel job finishes
         env:
           RBE_WORKER_TLS_CERT: ${{ secrets.RBE_WORKER_TLS_CERT }}
@@ -152,6 +160,7 @@ jobs:
           BAZEL_JOB_NAME: bazel test (side-by-side)
           GH_TOKEN: ${{ github.token }}
           WORKER_NAME: gha-${{ github.repository_owner }}-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.n }}
+          CACHE_DIR: ${{ runner.temp }}/rbe-cache
         run: tools/rbe/blacksmith-worker.sh
 
   sync-check:
