@@ -90,8 +90,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Wisp reaping and JSONL export do not run yet on proxied cities.** On
   cities using the default bd-owned proxied Dolt, the core `reaper` and
   `jsonl-export` orders now skip with a log line instead of failing on every
-  run. Wisp reaping and JSONL export do not yet run on those cities, so they
-  have no off-database JSONL copy until a follow-up lands (#6696).
+  run. Until a follow-up lands, those cities get no wisp reaping,
+  closed-molecule purge, stale-issue or expired-nudge close, session-bead
+  prune or JSONL export, so they have no off-database JSONL copy;
+  `wisp-compact` and the opt-in Go wisp GC (`wisp_ttl`) still run (#6696).
 
 ### Added
 
