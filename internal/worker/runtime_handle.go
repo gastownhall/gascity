@@ -279,14 +279,29 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 	}
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault:
-		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
+		// Proactive: the provider's own Nudge has no interaction awareness, so
+		// without this check it would type straight into an open dialog.
+		// nudgeWaitIdle needs no matching check — WaitForIdle already keeps
+		// waiting (or times out) on a dialog-owned pane via the fixed
+		// snapshotPaneIdleWithPrefix (gm-55kp2u).
+		if pending, err := h.Pending(ctx); err != nil {
 			return NudgeResult{}, err
+		} else if pending != nil {
+			return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredBlockedByDialog}, nil
+		}
+		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
+			return nudgeResultForPendingInteraction(err)
 		}
 		result = NudgeResult{Delivered: true}
 		return result, nil
 	case NudgeDeliveryImmediate:
-		if err := h.nudgeNow(req.Text); err != nil {
+		if pending, err := h.Pending(ctx); err != nil {
 			return NudgeResult{}, err
+		} else if pending != nil {
+			return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredBlockedByDialog}, nil
+		}
+		if err := h.nudgeNow(req.Text); err != nil {
+			return nudgeResultForPendingInteraction(err)
 		}
 		result = NudgeResult{Delivered: true}
 		return result, nil
@@ -435,7 +450,7 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 	}
 	if h.transport == "acp" {
 		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
-			return NudgeResult{}, err
+			return nudgeResultForPendingInteraction(err)
 		}
 		return NudgeResult{Delivered: true}, nil
 	}
@@ -464,7 +479,7 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredNoIdleBoundary}, nil
 	}
 	if err := h.nudgeNow(formatRuntimeWaitIdleReminder(req.Source, req.Text)); err != nil {
-		return NudgeResult{}, err
+		return nudgeResultForPendingInteraction(err)
 	}
 	return NudgeResult{Delivered: true}, nil
 }

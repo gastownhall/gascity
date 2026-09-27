@@ -209,7 +209,23 @@ const (
 	// NudgeUndeliveredNoIdleBoundary means the provider CAN take live delivery
 	// but the session never reached the idle boundary within the wait window.
 	NudgeUndeliveredNoIdleBoundary NudgeUndeliveredReason = "no_idle_boundary"
+	// NudgeUndeliveredBlockedByDialog means the session has an open blocking
+	// interaction (e.g. an AskUserQuestion dialog) that owns the pane: a live
+	// nudge would type into the dialog instead of reaching the agent, so it
+	// was held rather than delivered.
+	NudgeUndeliveredBlockedByDialog NudgeUndeliveredReason = "blocked_by_dialog"
 )
+
+// nudgeResultForPendingInteraction converts a pending-interaction error from
+// either the session or runtime layer into an explicit NudgeResult, so a
+// dialog-blocked nudge reaches callers as a named hold — not a Go error
+// indistinguishable from a genuine delivery failure (gm-55kp2u).
+func nudgeResultForPendingInteraction(err error) (NudgeResult, error) {
+	if errors.Is(err, sessionpkg.ErrPendingInteraction) || errors.Is(err, runtime.ErrPendingInteraction) {
+		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredBlockedByDialog}, nil
+	}
+	return NudgeResult{}, err
+}
 
 // NudgeWakePolicy controls whether a nudge may wake a stopped session.
 type NudgeWakePolicy string

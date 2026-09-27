@@ -214,6 +214,32 @@ func TestDrainReminderDeliversOnFirstSightOfAWedgedStopPendingRow(t *testing.T) 
 	}
 }
 
+// A pending AskUserQuestion-style dialog is a safe refusal at the tmux layer
+// (gm-55kp2u), not a delivery failure — the reminder must not spend the
+// bounded reminder budget for a session that was never actually reachable.
+func TestDrainReminderSkipsBudgetWhenDialogPending(t *testing.T) {
+	e := newDrainReminderEnv(t)
+	e.sp.SetPendingInteraction(e.name, &runtime.PendingInteraction{RequestID: "req-1", Kind: "question", Prompt: "How do you want to proceed?"})
+
+	if got := e.remind(); got != drainReminderSkipped {
+		t.Fatalf("outcome = %v, want skipped", got)
+	}
+	if n := len(e.nudges()); n != 0 {
+		t.Fatalf("nudge count = %d, want 0 while dialog is pending", n)
+	}
+	if got := e.meta(drainReminderCountKey); got != "" {
+		t.Errorf("%s = %q, want unset — a dialog-blocked reminder must not spend the budget", drainReminderCountKey, got)
+	}
+
+	e.sp.SetPendingInteraction(e.name, nil)
+	if got := e.remind(); got != drainReminderDelivered {
+		t.Fatalf("outcome after dialog clears = %v, want delivered", got)
+	}
+	if got := e.meta(drainReminderCountKey); got != "1" {
+		t.Errorf("%s after dialog clears = %q, want 1 (not pre-spent while blocked)", drainReminderCountKey, got)
+	}
+}
+
 // The stale-pane-environment survival contract: the no-argument ack binds the
 // requester from the pane's own environment, which an adopted pane may no
 // longer have. The reminder must name the id in the command it asks for.

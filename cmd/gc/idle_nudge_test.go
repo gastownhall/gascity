@@ -288,6 +288,48 @@ func TestNudgeStalledPoolClaims_DeliveryFailureConsumesAttempt(t *testing.T) {
 	}
 }
 
+// A pending AskUserQuestion-style dialog is a safe refusal at the tmux layer
+// (gm-55kp2u), not a delivery failure — unlike
+// TestNudgeStalledPoolClaims_DeliveryFailureConsumesAttempt, it must not
+// consume the bounded attempts budget. Once the dialog clears, the very next
+// tick nudges normally and spends attempt 1, proving nothing was silently
+// pre-spent while blocked.
+func TestNudgeStalledPoolClaims_DialogBlockedDoesNotConsumeAttempt(t *testing.T) {
+	sp := runningIdleClaimFake(t, "session-a")
+	cfg := idleClaimTestCfg()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	session := idleClaimPoolSession()
+	session.Metadata[idleClaimNudgeTriggerKey] = "work-a"
+	session.Metadata[idleClaimNudgeCountKey] = "0"
+	session.Metadata[idleClaimNudgeAtKey] = base.Format(time.RFC3339)
+	work := []beads.Bead{{ID: "work-a", Status: "open"}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+	clk := &clock.Fake{Time: base.Add(idleClaimNudgeGrace + time.Second)}
+	var out bytes.Buffer
+
+	sp.SetPendingInteraction("session-a", &runtime.PendingInteraction{RequestID: "req-1", Kind: "question", Prompt: "How do you want to proceed?"})
+
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), &out)
+	if got := sp.CountCalls("Nudge", "session-a"); got != 0 {
+		t.Fatalf("Nudge calls while dialog pending = %d, want 0", got)
+	}
+	session = mustGetTestBead(t, store, session.ID)
+	if got := session.Metadata[idleClaimNudgeCountKey]; got != "0" {
+		t.Fatalf("attempt count while dialog pending = %q, want unchanged 0", got)
+	}
+
+	sp.SetPendingInteraction("session-a", nil)
+	clk.Advance(time.Second)
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), &out)
+	if got := sp.CountCalls("Nudge", "session-a"); got != 1 {
+		t.Fatalf("Nudge calls after dialog clears = %d, want 1", got)
+	}
+	session = mustGetTestBead(t, store, session.ID)
+	if got := session.Metadata[idleClaimNudgeCountKey]; got != "1" {
+		t.Fatalf("attempt count after dialog clears = %q, want 1 (not pre-spent while blocked)", got)
+	}
+}
+
 func TestNudgeStalledPoolClaims_SkipsNonPool(t *testing.T) {
 	sp := runningIdleClaimFake(t, "session-a")
 	cfg := idleClaimTestCfg()

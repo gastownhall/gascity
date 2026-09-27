@@ -405,6 +405,15 @@ func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info session
 // input-dead pane re-send forever) and records that nothing ARRIVED, so the
 // escalation reports what actually happened.
 func deliverDrainReminder(sp runtime.Provider, store beads.Store, info sessions.Info, name string, due drainReminderDue, stdout io.Writer) drainReminderOutcome {
+	if pendingDialogBlocked(sp, name) {
+		// An open dialog owns this pane. The reminder is safely refused at
+		// the tmux layer (gm-55kp2u), but it must not spend the bounded
+		// reminder budget for a session that was never actually reachable.
+		fmt.Fprintf(stdout, //nolint:errcheck // best-effort
+			"%s: %s has a pending dialog, deferring without spending an attempt\n",
+			drainReminderLabel, name)
+		return drainReminderSkipped
+	}
 	if !writeDrainReminderMarker(store, info, due.drainID, due.attempts+1, due.failed, due.now, stdout) {
 		return drainReminderSkipped
 	}

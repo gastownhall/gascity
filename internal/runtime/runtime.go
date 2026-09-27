@@ -136,6 +136,16 @@ func MetaValue(v string, err error) (string, error) {
 	return v, err
 }
 
+// ErrPendingInteraction reports that a provider refused to type into a
+// session because its pane currently shows an open interaction dialog (an
+// approval prompt or an AskUserQuestion-style choice). A queued or live
+// nudge that types "Enter" into such a pane would silently forge an answer
+// to that dialog — this is the runtime-layer half of that guard; see
+// [session.ErrPendingInteraction] for the session-layer counterpart that
+// callers above this package observe (internal/runtime cannot import
+// internal/session — no upward dependencies).
+var ErrPendingInteraction = errors.New("session has a pending interaction")
+
 // IsSessionGone reports whether err represents a "the session is not
 // there" condition — either ErrSessionNotFound or the legacy provider
 // phrasings that predate the sentinel (tmux/subprocess providers may

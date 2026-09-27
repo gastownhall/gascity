@@ -2851,6 +2851,19 @@ func (t *Tmux) nudgeSession(
 		target = agentPane
 	}
 
+	// Refuse before the first keystroke if the pane currently shows an open
+	// AskUserQuestion dialog: every send below (the C-u clear, the pasted
+	// text, the submit Enter) would type into that dialog, and the Enter
+	// would silently select its focused option — forging what looks like an
+	// operator's answer (gm-55kp2u). A capture error here is not treated as a
+	// refusal signal (only a confirmed dialog is); the send below will
+	// surface the same underlying error if the pane is genuinely gone.
+	if paneText, err := t.CapturePane(target, promptObservationLines); err == nil {
+		if parseAskUserQuestionPrompt(paneText) != nil {
+			return fmt.Errorf("%w: session %q has an open AskUserQuestion dialog", runtime.ErrPendingInteraction, session)
+		}
+	}
+
 	// Snapshot genuine activity BEFORE the first keystroke, and stamp the poke
 	// only once delivery is actually confirmed (see delivered below). This
 	// mirrors recordPoke/GetSessionActivity (see discountPokeActivity) so gc's
@@ -4571,6 +4584,14 @@ func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, e
 	// Claude Code shows "esc to interrupt" while processing — if present,
 	// the agent is busy regardless of whether the prompt is visible.
 	if paneContainsBusyIndicator(lines) {
+		return false, nil
+	}
+
+	// An open AskUserQuestion dialog is never idle even though its focused
+	// row ("❯ 1. …") would otherwise match promptPrefix below: WaitForIdle
+	// must keep waiting (or time out), not report idle and let
+	// Provider.Nudge submit into it (gm-55kp2u).
+	if parseAskUserQuestionPrompt(strings.Join(lines, "\n")) != nil {
 		return false, nil
 	}
 
