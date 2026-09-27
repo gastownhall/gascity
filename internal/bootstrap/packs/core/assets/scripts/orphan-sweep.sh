@@ -459,9 +459,22 @@ reset_orphan_if_current() {
             # --append-notes whole (notes have no representation in the class
             # store contract), while every store serves --set-metadata. The
             # value is text, so bd and the class store both keep a string.
-            if ! gc bd update "$bead_id" --set-metadata "gc.orphan_sweep_reason=orphan-sweep: reset from assignee $expected_assignee -- no live session matched" ${scope_args[@]+"${scope_args[@]}"} >/dev/null 2>&1; then
-                echo "orphan-sweep: failed to record the reset cause on $bead_id" >&2
-            fi
+            # The stamp is the bead-side triage record the summary mail points
+            # at. Under Dolt load the write can fail transiently, so retry
+            # before giving up; on persistent failure record the bead in
+            # $CAUSE_FAILED so the summary discloses it instead of letting the
+            # mail claim a cause that is not there.
+            local attempt
+            for attempt in 1 2 3; do
+                if gc bd update "$bead_id" --set-metadata "gc.orphan_sweep_reason=orphan-sweep: reset from assignee $expected_assignee -- no live session matched" ${scope_args[@]+"${scope_args[@]}"} >/dev/null 2>&1; then
+                    return 0
+                fi
+                if [ "$attempt" -lt 3 ]; then
+                    sleep 1
+                fi
+            done
+            echo "orphan-sweep: failed to record the reset cause on $bead_id" >&2
+            CAUSE_FAILED="${CAUSE_FAILED}${CAUSE_FAILED:+, }${bead_id}"
             return 0
             ;;
         skipped) return 2 ;;
@@ -710,6 +723,21 @@ CLAIM_ROWS=$(echo "$IN_PROGRESS" | jq -r '.[]
     | select(.assignee != null and .assignee != "")
     | ([.id, .assignee] | map(tostring | test("[\\t\\n\\r]")) | any) as $untrusted
     | "\(.id | tostring | gsub("[\\t\\n\\r]"; " "))\t\(if $untrusted then "untrusted" elif ._gc_scope == "" then "hq" else "rig:" + ._gc_scope end)\t\(.assignee | tostring | gsub("[\\t\\n\\r]"; " "))"' 2>/dev/null) || CLAIM_ROWS=""
+
+# bead_scope names the scope a reset bead was listed from, for the reset
+# summary: "hq", the rig name, or "federated" for a claim only the federated
+# read returned (it names no store). It reads the deduplicated IN_PROGRESS,
+# where a scope read's row for an id already wins over the federated read's.
+bead_scope() {
+    local scope
+    scope=$(jq -r --arg id "$1" '
+        first(.[] | select(type == "object" and .id == $id))
+        | if ._gc_federated == true then "federated"
+          elif ._gc_scope == "" then "hq"
+          else ._gc_scope end
+    ' <<<"$IN_PROGRESS" 2>/dev/null) || scope=""
+    printf '%s' "${scope:-unknown}"
+}
 UNRECOGNIZED_ROWS=""
 if [ -n "$CLAIM_ROWS" ]; then
     UNRECOGNIZED_ROWS=$(while IFS=$'\t' read -r _bead _scope _assignee; do
@@ -748,6 +776,12 @@ ORPHANED=0
 UNVERIFIABLE=0
 # Count of undeliverable summaries. Load-bearing for the exit code below.
 FAILED=0
+# Triage ledger for the summary: one "<id> (<scope>)" entry per reset,
+# comma-joined.
+RESET_LEDGER=""
+# Beads whose reset-cause stamp kept failing after retries. The summary must
+# disclose these -- the mail otherwise claims every reset bead records a cause.
+CAUSE_FAILED=""
 # Process substitution (not a pipe) keeps the loop body in the parent
 # shell so $ORPHANED survives for the summary message below.
 while IFS=$'\t' read -r bead_id scope_tok assignee; do
@@ -782,6 +816,7 @@ while IFS=$'\t' read -r bead_id scope_tok assignee; do
     fi
     if reset_orphan_if_current "$bead_id" "$assignee" "$scope"; then
         ORPHANED=$((ORPHANED + 1))
+        RESET_LEDGER="${RESET_LEDGER}${RESET_LEDGER:+, }${bead_id} ($(bead_scope "$bead_id"))"
     else
         reset_status=$?
         if [ "$reset_status" != "2" ]; then
@@ -822,17 +857,28 @@ fi
 
 if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ] || [ "$PROTECTED" -gt 0 ]; then
     SUMMARY="orphan-sweep: reset $ORPHANED orphaned beads"
+    if [ -n "$RESET_LEDGER" ]; then
+        SUMMARY="$SUMMARY: $RESET_LEDGER"
+    fi
     if [ "$UNVERIFIABLE" -gt 0 ]; then
         SUMMARY="$SUMMARY, skipped $UNVERIFIABLE unverifiable"
     fi
     if [ "$PROTECTED" -gt 0 ]; then
         SUMMARY="$SUMMARY, protected $PROTECTED foreign/unknown claims"
     fi
+    if [ -n "$CAUSE_FAILED" ]; then
+        SUMMARY="$SUMMARY; cause record failed: $CAUSE_FAILED"
+    fi
     echo "$SUMMARY"
     if [ -n "$PROTECTED_DETAIL" ]; then
         echo "$PROTECTED_DETAIL"
     fi
     if [ "$ORPHANED" -gt 0 ]; then
+        if [ -n "$CAUSE_FAILED" ]; then
+            CAUSE_LINE="WARNING: recording the reset cause failed (after retries) for: $CAUSE_FAILED. Those beads carry NO gc.orphan_sweep_reason metadata -- inspect their history directly."
+        else
+            CAUSE_LINE="Each reset bead records the cause in its gc.orphan_sweep_reason metadata."
+        fi
         if ! gc mail send "$ESCALATION_TARGET" \
             -s "orphan-sweep: reset $ORPHANED orphaned beads" \
             -m "$SUMMARY${PROTECTED_DETAIL:+
@@ -841,9 +887,9 @@ $PROTECTED_DETAIL}
 orphan-sweep resets in-progress beads whose assignee has no live session or
 known agent, and only once gc agent is-foreign vouches for the assignee as
 this city's own; claims it cannot vouch for are kept, and any kept this pass
-are listed above. Each reset bead records the cause in its
-gc.orphan_sweep_reason metadata. Repeated resets of the same bead may indicate
-a stuck or misidentified live session -- inspect via gc bd show <id> --json." \
+are listed above. $CAUSE_LINE
+Repeated resets of the same bead may indicate a stuck or
+misidentified live session -- inspect via gc bd show <id> --json." \
             2>/dev/null; then
             # Do not swallow an undeliverable summary — a vanished escalation
             # is invisible. Surfacing it requires a non-zero exit (see below).
