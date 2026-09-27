@@ -27,17 +27,14 @@ permissions:
 jobs:
   worker:
     name: rbe pool worker (Blacksmith, OSS scheduler)
-    # Default branch only: its sticky-disk commits are the trusted cache snapshot.
+    # Default branch only. (A Blacksmith sticky disk for a warm worker cache
+    # needs useblacksmith/stickydisk in this repo's allowed-actions list;
+    # blacksmith-worker.sh takes it via CACHE_DIR.)
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 330
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - name: Worker CAS cache (sticky disk)
-        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1
-        with:
-          key: ${{ github.repository }}-rbe-worker-cas
-          path: ${{ runner.temp }}/rbe-cache
       - name: NativeLink worker until idle or max age
         env:
           RBE_WORKER_TLS_CERT: ${{ secrets.RBE_WORKER_TLS_CERT }}
@@ -46,6 +43,5 @@ jobs:
           WORKER_MODE: pool
           POOL_IDLE_MINUTES: ${{ inputs.idle_minutes }}
           POOL_MAX_MINUTES: ${{ inputs.max_minutes }}
-          CACHE_DIR: ${{ runner.temp }}/rbe-cache
           WORKER_NAME: gha-pool-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}
         run: tools/rbe/blacksmith-worker.sh
