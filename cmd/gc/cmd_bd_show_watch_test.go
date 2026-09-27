@@ -19,6 +19,7 @@ func TestParseBdShowWatchArgs(t *testing.T) {
 		args     []string
 		ok       bool
 		id       string
+		current  bool
 		display  []string
 		snapshot []string
 	}{
@@ -31,11 +32,20 @@ func TestParseBdShowWatchArgs(t *testing.T) {
 			snapshot: []string{"show", "--json", "--id=mp-ff9"},
 		},
 		{
-			name:     "short -w before id keeps other show flags",
-			args:     []string{"show", "-w", "--long", "mp-ff9"},
+			name:     "view alias",
+			args:     []string{"view", "mp-ff9", "-w"},
 			ok:       true,
 			id:       "mp-ff9",
-			display:  []string{"show", "--long", "mp-ff9"},
+			display:  []string{"show", "mp-ff9"},
+			snapshot: []string{"show", "--json", "--id=mp-ff9"},
+		},
+		{
+			// bd's watchIssue ignores show's display flags and --json.
+			name:     "display flags are dropped like bd's watch drops them",
+			args:     []string{"show", "-w", "--long", "--json", "--short", "--refs", "--children", "mp-ff9"},
+			ok:       true,
+			id:       "mp-ff9",
+			display:  []string{"show", "mp-ff9"},
 			snapshot: []string{"show", "--json", "--id=mp-ff9"},
 		},
 		{
@@ -43,7 +53,7 @@ func TestParseBdShowWatchArgs(t *testing.T) {
 			args:     []string{"show", "--id", "--odd", "--watch=true"},
 			ok:       true,
 			id:       "--odd",
-			display:  []string{"show", "--id", "--odd"},
+			display:  []string{"show", "--id=--odd"},
 			snapshot: []string{"show", "--json", "--id=--odd"},
 		},
 		{
@@ -54,12 +64,28 @@ func TestParseBdShowWatchArgs(t *testing.T) {
 			display:  []string{"--db", "/x", "show", "mp-1"},
 			snapshot: []string{"--db", "/x", "show", "--json", "--id=mp-1"},
 		},
+		{
+			name:     "global flags after the id reach the change poll too",
+			args:     []string{"show", "mp-1", "--watch", "--db", "/p", "--actor=me", "--no-color"},
+			ok:       true,
+			id:       "mp-1",
+			display:  []string{"--db", "/p", "--actor=me", "--no-color", "show", "mp-1"},
+			snapshot: []string{"--db", "/p", "--actor=me", "--no-color", "show", "--json", "--id=mp-1"},
+		},
+		{
+			name:    "--current",
+			args:    []string{"show", "--current", "--watch", "--db", "/p"},
+			ok:      true,
+			current: true,
+		},
 		{name: "no watch", args: []string{"show", "mp-1"}},
 		{name: "--watch=false", args: []string{"show", "mp-1", "--watch=false"}},
 		{name: "two ids", args: []string{"show", "mp-1", "mp-2", "--watch"}},
 		{name: "no id", args: []string{"show", "--watch"}},
-		{name: "--current", args: []string{"show", "--current", "--watch"}},
+		{name: "--current with an id", args: []string{"show", "mp-1", "--current", "--watch"}},
 		{name: "--as-of", args: []string{"show", "mp-1", "--as-of", "main", "--watch"}},
+		{name: "--help", args: []string{"show", "mp-1", "--watch", "--help"}},
+		{name: "unknown flag", args: []string{"show", "mp-1", "--watch", "--bogus"}},
 		{name: "list --watch is bd's", args: []string{"list", "--watch"}},
 	}
 	for _, tt := range tests {
@@ -71,14 +97,20 @@ func TestParseBdShowWatchArgs(t *testing.T) {
 			if !ok {
 				return
 			}
-			if req.ID != tt.id {
-				t.Errorf("ID = %q, want %q", req.ID, tt.id)
+			if req.ID != tt.id || req.Current != tt.current {
+				t.Errorf("ID, Current = %q, %v; want %q, %v", req.ID, req.Current, tt.id, tt.current)
 			}
-			if !reflect.DeepEqual(req.DisplayArgs, tt.display) {
-				t.Errorf("DisplayArgs = %q, want %q", req.DisplayArgs, tt.display)
+			if tt.current {
+				if got, want := req.currentArgs(true), []string{"--db", "/p", "show", "--current", "--json"}; !reflect.DeepEqual(got, want) {
+					t.Errorf("currentArgs = %q, want %q", got, want)
+				}
+				return
 			}
-			if !reflect.DeepEqual(req.SnapshotArgs, tt.snapshot) {
-				t.Errorf("SnapshotArgs = %q, want %q", req.SnapshotArgs, tt.snapshot)
+			if got := req.displayArgs(req.ID); !reflect.DeepEqual(got, tt.display) {
+				t.Errorf("displayArgs = %q, want %q", got, tt.display)
+			}
+			if got := req.snapshotArgs(req.ID); !reflect.DeepEqual(got, tt.snapshot) {
+				t.Errorf("snapshotArgs = %q, want %q", got, tt.snapshot)
 			}
 		})
 	}
@@ -335,5 +367,130 @@ func TestGcBdShowWatchPassesThroughOnNonProxiedScope(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(log)); got != "show mp-1 --watch" {
 		t.Fatalf("bd argv = %q, want the original show mp-1 --watch", got)
+	}
+}
+
+// bd resolves --current once and watches that bead; gc does the same, and
+// carries the globals into the lookup.
+func TestRunBdShowWatchResolvesCurrentOnce(t *testing.T) {
+	var mu sync.Mutex
+	var calls [][]string
+	polled := make(chan struct{})
+	var run bdWatchRunFunc = func(ctx context.Context, args []string, stdout, _ io.Writer) int {
+		mu.Lock()
+		calls = append(calls, append([]string{}, args...))
+		mu.Unlock()
+		joined := strings.Join(args, " ")
+		switch joined {
+		case "--db /p show --current --json":
+			_, _ = io.WriteString(stdout, `[{"id":"mp-7","status":"open","updated_at":"t1"}]`)
+		case "--db /p show --json --id=mp-7":
+			_, _ = io.WriteString(stdout, `[{"id":"mp-7","status":"open","updated_at":"t1"}]`)
+			select {
+			case polled <- struct{}{}:
+			case <-ctx.Done():
+			}
+		case "--db /p show mp-7":
+			_, _ = io.WriteString(stdout, "mp-7 [OPEN]\n")
+		default:
+			t.Errorf("unexpected bd call %q", joined)
+			return 2
+		}
+		return 0
+	}
+	req, ok := parseBdShowWatchArgs([]string{"show", "--current", "--watch", "--db", "/p"})
+	if !ok {
+		t.Fatal("parse failed")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stdout, stderr := newSyncBuffer(), newSyncBuffer()
+	done := make(chan int, 1)
+	go func() { done <- runBdShowWatch(ctx, req, run, time.Millisecond, stdout, stderr) }()
+	<-polled // initial snapshot
+	<-polled // first tick: the render is done
+	cancel()
+	if code := <-done; code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	if !strings.Contains(stdout.String(), "mp-7 [OPEN]") {
+		t.Fatalf("current bead not rendered:\n%s", stdout.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	lookups := 0
+	for _, c := range calls {
+		if strings.Contains(strings.Join(c, " "), "--current") {
+			lookups++
+		}
+	}
+	if lookups != 1 {
+		t.Fatalf("--current resolved %d times, want once: %q", lookups, calls)
+	}
+}
+
+// When --current names nothing, bd's own error and exit code come back.
+func TestRunBdShowWatchCurrentUnresolvedReturnsBdError(t *testing.T) {
+	var run bdWatchRunFunc = func(_ context.Context, args []string, _, stderr io.Writer) int {
+		if strings.Join(args, " ") == "show --current" {
+			_, _ = io.WriteString(stderr, "Error: no current issue found\n")
+		}
+		return 1
+	}
+	req, _ := parseBdShowWatchArgs([]string{"show", "--current", "--watch"})
+	var stdout, stderr bytes.Buffer
+	if code := runBdShowWatch(context.Background(), req, run, time.Millisecond, &stdout, &stderr); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "no current issue found") || strings.Contains(stderr.String(), "Watching") {
+		t.Fatalf("stderr = %q, want bd's error and no watch", stderr.String())
+	}
+}
+
+// forceGCServedWatch makes doBd take the gc watch path on a test city that is
+// not proxied, so the passthrough's stderr checks can be exercised on it.
+func forceGCServedWatch(t *testing.T) {
+	t.Helper()
+	orig := bdScopeRefusesShowWatch
+	t.Cleanup(func() { bdScopeRefusesShowWatch = orig })
+	bdScopeRefusesShowWatch = func(string, execStoreTarget, []string) bool { return true }
+}
+
+// The watch path traces its bd calls and fails loudly on bd's silent fallback
+// to on-disk auto-import, exactly like the passthrough.
+func TestGcBdShowWatchTracesAndSurfacesSilentFallback(t *testing.T) {
+	silentFallbackTestSetup(t, silentFallbackFakeBdScript)
+	forceGCServedWatch(t)
+	tracePath := filepath.Join(t.TempDir(), "trace.jsonl")
+	t.Setenv("GC_BD_TRACE_JSON", tracePath)
+
+	var stdout, stderr bytes.Buffer
+	if code := doBd([]string{"show", "demo-abc", "--watch"}, &stdout, &stderr); code != bdSilentFallbackExitCode {
+		t.Fatalf("doBd = %d, want %d; stderr=%q", code, bdSilentFallbackExitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "managed Dolt unreachable") {
+		t.Fatalf("stderr missing loud-fail message: %q", stderr.String())
+	}
+	trace, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(trace), `"go:gc-bd-show-watch"`) {
+		t.Fatalf("watch bd call not traced:\n%s", trace)
+	}
+}
+
+// bd's "bd dolt start" advice gets the gc-managed remedy on the watch path
+// too, once, and bd's exit code is kept.
+func TestGcBdShowWatchSurfacesDoltStartConflictHintOnce(t *testing.T) {
+	managedDoltTestSetup(t, doltStartConflictFakeBdScript)
+	forceGCServedWatch(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := doBd([]string{"show", "demo-abc", "--watch"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("doBd = %d, want bd's 1; stderr=%q", code, stderr.String())
+	}
+	if got := strings.Count(stderr.String(), bdDoltStartConflictUserMessage); got != 1 {
+		t.Fatalf("conflict hint printed %d times, want 1:\n%s", got, stderr.String())
 	}
 }
