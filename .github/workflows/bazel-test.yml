@@ -98,7 +98,7 @@ jobs:
           mkdir -p /tmp/gc-test-home
           echo "HOME=/tmp/gc-test-home" >> "$GITHUB_ENV"
 
-      - name: bazel test //... (single server: sync check + test)
+      - name: "bazel test //... (single server, sync check + test)"
         run: |
           ARGS=(--output_user_root="$RUNNER_TEMP"/bazel-outputs)
           PROFILE=(--profile=/tmp/bazel-profile.json)
