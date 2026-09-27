@@ -202,7 +202,7 @@ func TestControllerStateCreateRigRejectsSymlinkEscape(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
-	cs := newControllerState(context.Background(), &config.City{Workspace: config.Workspace{Name: "city1"}},
+	cs, _ := newControllerState(context.Background(), &config.City{Workspace: config.Workspace{Name: "city1"}},
 		runtime.NewFake(), events.NewFake(), "city1", cityDir)
 
 	for _, p := range []string{"link/evil", "link/absent"} {
@@ -238,7 +238,7 @@ func TestProvisionRigFromGitRejectsSymlinkEscape(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
-	cs := newControllerState(context.Background(), &config.City{Workspace: config.Workspace{Name: "city1"}},
+	cs, _ := newControllerState(context.Background(), &config.City{Workspace: config.Workspace{Name: "city1"}},
 		runtime.NewFake(), events.NewFake(), "city1", cityDir)
 
 	manifested := 0
@@ -298,7 +298,7 @@ func TestTeardownPartialRigRefusesUncanonicalizablePathThroughGlue(t *testing.T)
 		t.Fatalf("precondition: lexicalContainment(%q) = %v, want nil", createdDir, err)
 	}
 
-	cs := newControllerState(context.Background(), &config.City{Workspace: config.Workspace{Name: "city1"}},
+	cs, _ := newControllerState(context.Background(), &config.City{Workspace: config.Workspace{Name: "city1"}},
 		runtime.NewFake(), events.NewFake(), "city1", cityDir)
 
 	err := cs.TeardownPartialRig(context.Background(),
