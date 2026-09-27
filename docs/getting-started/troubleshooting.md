@@ -117,8 +117,10 @@ gc doctor --fix
 The `gascity-pack-binding` check renames the key to `[imports.gc]` in
 `pack.toml` (or in a city.toml root `[imports]` override), keeping the source,
 version, and every other field. `packs.lock` is keyed by source, so no
-reinstall is needed. The check identifies the pack by its source, not by the
-key name, so a different pack bound as `gascity` is left alone, and it never
+reinstall is needed. The check identifies the pack by its source (any https,
+http, or SSH spelling of `gastownhall/gascity-packs` with the `gascity` pack
+directory), not by the key name, so a fork or a different pack bound as
+`gascity` is left alone, and it never
 touches rig imports or `[defaults.rig.imports]`.
 
 The fix changes nothing and explains why when:
@@ -128,8 +130,10 @@ The fix changes nothing and explains why when:
 - `[imports.gc]` already imports the Gas City pack with a different version or
   settings. Remove one of the two imports by hand. An exact duplicate (same
   source and version) is removed automatically.
-- `pack.toml` or `city.toml` still references `gascity.`-qualified names, for
-  example a patch targeting `gascity.<agent>`. Update them to `gc.` and rerun.
+- A string value in `pack.toml` or `city.toml` is shaped like a
+  `gascity.`-qualified name, for example a patch targeting `gascity.<agent>`.
+  The message names the file and key. Update the value to `gc.` and rerun, or
+  rename the import by hand if the value is unrelated. Comments are ignored.
 
 ## "command not found" After Install
 

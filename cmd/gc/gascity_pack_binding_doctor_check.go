@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
@@ -63,12 +64,55 @@ type gascityPackBindingPlan struct {
 func (p gascityPackBindingPlan) empty() bool { return len(p.Keys) == 0 }
 
 // isPublicGascityPackSource reports whether source addresses the public Gas
-// City pack (gastownhall/gascity-packs, pack root "gascity") in any
-// spelling. The gc-roles subpack ("gascity/roles") and every other pack
+// City pack (gastownhall/gascity-packs, pack root "gascity") in any spelling
+// a user may have authored: tree URL, .git and //subpath forms, https,
+// http, SSH (git@github.com:... or ssh://), and any letter case in the
+// GitHub host/owner/repo (GitHub treats those case-insensitively). Forks,
+// other hosts, the gc-roles subpack ("gascity/roles"), and every other pack
 // return false.
 func isPublicGascityPackSource(source string) bool {
-	name, repository, ok := builtinpacks.SourceLayout(strings.TrimSpace(source))
+	name, repository, ok := builtinpacks.SourceLayout(canonicalGitHubSourceSpelling(source))
 	return ok && repository == builtinpacks.PublicRepository && name == "gascity"
+}
+
+// canonicalGitHubSourceSpelling rewrites a GitHub source into the https form
+// with a lowercase host/owner/repo so builtinpacks.SourceLayout (which
+// compares the https spelling exactly) recognizes it. The pack subpath and
+// ref keep their case. Non-GitHub sources are returned trimmed but otherwise
+// unchanged.
+func canonicalGitHubSourceSpelling(source string) string {
+	s := strings.TrimSpace(source)
+	lower := strings.ToLower(s)
+	var rest string
+	switch {
+	case strings.HasPrefix(lower, "https://"):
+		rest = s[len("https://"):]
+	case strings.HasPrefix(lower, "http://"):
+		rest = s[len("http://"):]
+	case strings.HasPrefix(lower, "ssh://"):
+		rest = s[len("ssh://"):]
+		if strings.HasPrefix(strings.ToLower(rest), "git@") {
+			rest = rest[len("git@"):]
+		}
+	case strings.HasPrefix(lower, "git@"):
+		rest = s[len("git@"):]
+		if i := strings.Index(rest, ":"); i >= 0 && !strings.Contains(rest[:i], "/") {
+			rest = rest[:i] + "/" + rest[i+1:]
+		}
+	case strings.HasPrefix(lower, "github.com/"):
+		rest = s
+	default:
+		return s
+	}
+	parts := strings.SplitN(rest, "/", 4)
+	if len(parts) < 3 || !strings.EqualFold(parts[0], "github.com") {
+		return s
+	}
+	out := "https://github.com/" + strings.ToLower(parts[1]) + "/" + strings.ToLower(parts[2])
+	if len(parts) == 4 {
+		out += "/" + parts[3]
+	}
+	return out
 }
 
 // gascityPackBindingImports returns the city pack's effective root imports:
@@ -99,8 +143,8 @@ func planGascityPackBinding(fs fsys.FS, cityPath string, effective map[string]co
 	sort.Strings(plan.Keys)
 
 	for _, key := range plan.Keys {
-		if files := gascityBindingReferenceFiles(fs, cityPath, key); len(files) > 0 {
-			plan.Blocked = append(plan.Blocked, fmt.Sprintf("%s: %s reference(s) %q-qualified names; update them to \"gc.\" by hand, then rerun", key, strings.Join(files, " and "), key+"."))
+		for _, ref := range gascityBindingReferences(fs, cityPath, key) {
+			plan.Blocked = append(plan.Blocked, fmt.Sprintf("%s: %s looks like a %q-qualified name that the rename would leave dangling; if it refers to this import, change it to %q by hand and rerun, otherwise rename the import key by hand", key, ref, key+".", gascityPackCanonicalBinding+"."))
 		}
 	}
 
@@ -152,22 +196,54 @@ func sameImportAuthoring(a, b config.Import) bool {
 	return a.Transitive == nil || *a.Transitive == *b.Transitive
 }
 
-// gascityBindingReferenceFiles reports which city manifests contain a quoted
-// "<key>.<name>" or "<rig>/<key>.<name>" string — an agent, skill, or
-// session name qualified by the binding that a rename would leave dangling.
-func gascityBindingReferenceFiles(fs fsys.FS, cityPath, key string) []string {
-	re := regexp.MustCompile(`["']([A-Za-z0-9_.-]+/)?` + regexp.QuoteMeta(key) + `\.[A-Za-z0-9_-]`)
-	var files []string
+// gascityBindingReferences reports string values in the city manifests
+// (pack.toml and city.toml; comments are ignored) shaped exactly like a name
+// qualified by the binding — "<key>.<name>" or "<rig>/<key>.<name>", with no
+// further dots or slashes — such as an agent, skill, or session name that a
+// rename would leave dangling. Each entry names the file and TOML path.
+func gascityBindingReferences(fs fsys.FS, cityPath, key string) []string {
+	re := regexp.MustCompile(`^([A-Za-z0-9_-]+/)?` + regexp.QuoteMeta(key) + `\.[A-Za-z0-9_-]+$`)
+	var refs []string
 	for _, name := range []string{"pack.toml", "city.toml"} {
 		data, err := fs.ReadFile(filepath.Join(cityPath, name))
 		if err != nil {
 			continue
 		}
-		if re.Match(data) {
-			files = append(files, name)
+		var doc map[string]any
+		if _, err := toml.Decode(string(data), &doc); err != nil {
+			continue
+		}
+		walkTOMLStrings(doc, "", func(path, value string) {
+			if re.MatchString(value) {
+				refs = append(refs, fmt.Sprintf("%s %s = %q", name, path, value))
+			}
+		})
+	}
+	sort.Strings(refs)
+	return refs
+}
+
+func walkTOMLStrings(v any, path string, visit func(path, value string)) {
+	switch t := v.(type) {
+	case string:
+		visit(path, t)
+	case map[string]any:
+		for k, child := range t {
+			next := k
+			if path != "" {
+				next = path + "." + k
+			}
+			walkTOMLStrings(child, next, visit)
+		}
+	case []map[string]any:
+		for i, child := range t {
+			walkTOMLStrings(child, fmt.Sprintf("%s[%d]", path, i), visit)
+		}
+	case []any:
+		for i, child := range t {
+			walkTOMLStrings(child, fmt.Sprintf("%s[%d]", path, i), visit)
 		}
 	}
-	return files
 }
 
 func (c *gascityPackBindingDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {

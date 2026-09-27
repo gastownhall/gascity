@@ -142,7 +142,17 @@ func TestGascityPackBindingV14CityWarnsFixesAndStaysLoadable(t *testing.T) {
 	if !containsString(before.skills, "gascity.mayor") {
 		t.Fatalf("v1.4 city skills = %v, want gascity.mayor", before.skills)
 	}
-	lockBefore, lockErr := os.ReadFile(filepath.Join(cityDir, "packs.lock"))
+	lockPath := filepath.Join(cityDir, "packs.lock")
+	lockBefore := fmt.Sprintf(`schema = 1
+
+[packs.%q]
+version = %q
+commit = %q
+fetched = "2026-09-26T21:59:25Z"
+`, config.PublicGascityPackSource, config.PublicGascityPackVersion, strings.TrimPrefix(config.PublicGascityPackVersion, "sha:"))
+	if err := os.WriteFile(lockPath, []byte(lockBefore), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	result := runGascityBindingCheck(t, cityDir)
 	if result.Status != doctor.StatusWarning {
@@ -181,9 +191,8 @@ func TestGascityPackBindingV14CityWarnsFixesAndStaysLoadable(t *testing.T) {
 	if len(packCfg.NamedSessions) != 1 || packCfg.NamedSessions[0].Template != "mayor" {
 		t.Fatalf("named sessions not preserved: %#v", packCfg.NamedSessions)
 	}
-	lockAfter, lockAfterErr := os.ReadFile(filepath.Join(cityDir, "packs.lock"))
-	if string(lockBefore) != string(lockAfter) || (lockErr == nil) != (lockAfterErr == nil) {
-		t.Fatalf("packs.lock changed across the rename (it is keyed by source)")
+	if got := readCityFile(t, cityDir, "packs.lock"); got != lockBefore {
+		t.Fatalf("packs.lock changed across the rename (it is keyed by source):\n%s", got)
 	}
 
 	if second := runGascityBindingCheck(t, cityDir); second.Status != doctor.StatusOK {
@@ -361,7 +370,7 @@ suspended = true
 `
 	cityDir := setupGascityBindingCity(t, pack, "[workspace]\nname = \"bright-lights\"\n")
 	result := runGascityBindingCheck(t, cityDir)
-	if result.Status != doctor.StatusWarning || !strings.Contains(strings.Join(result.Details, "\n"), "pack.toml reference(s)") {
+	if result.Status != doctor.StatusWarning || !strings.Contains(strings.Join(result.Details, "\n"), `pack.toml patches.agent[0].name = "gascity.mayor"`) {
 		t.Fatalf("result = %#v, want reference report", result)
 	}
 	if err := newGascityPackBindingDoctorCheck(cityDir).Fix(&doctor.CheckContext{CityPath: cityDir}); err == nil {
@@ -369,6 +378,25 @@ suspended = true
 	}
 	if got := readCityFile(t, cityDir, "pack.toml"); got != pack {
 		t.Fatalf("refused Fix changed pack.toml:\n%s", got)
+	}
+}
+
+func TestGascityPackBindingReferenceScanIgnoresCommentsAndNonNames(t *testing.T) {
+	pack := strings.Replace(v14GascityPackToml(), "[[named_session]]", `# old skill name was "gascity.mayor"
+[[named_session]]`, 1)
+	cityToml := `[workspace]
+name = "bright-lights"
+# patches used to target "gascity.planner"
+
+[beads]
+host = "gascity.example.com"
+`
+	cityDir := setupGascityBindingCity(t, pack, cityToml)
+	if err := newGascityPackBindingDoctorCheck(cityDir).Fix(&doctor.CheckContext{CityPath: cityDir}); err != nil {
+		t.Fatalf("Fix: %v (comments and hostnames must not block the rename)", err)
+	}
+	if !strings.Contains(readCityFile(t, cityDir, "pack.toml"), "[imports.gc]") {
+		t.Fatalf("pack.toml not renamed:\n%s", readCityFile(t, cityDir, "pack.toml"))
 	}
 }
 
@@ -381,6 +409,16 @@ func TestIsPublicGascityPackSource(t *testing.T) {
 		{"https://github.com/gastownhall/gascity-packs/tree/main/gascity/", true},
 		{"https://github.com/gastownhall/gascity-packs.git//gascity", true},
 		{"github.com/gastownhall/gascity-packs//gascity", true},
+		{"git@github.com:gastownhall/gascity-packs.git//gascity", true},
+		{"ssh://git@github.com/gastownhall/gascity-packs.git//gascity", true},
+		{"http://github.com/gastownhall/gascity-packs/tree/main/gascity", true},
+		{"https://GitHub.com/GastownHall/Gascity-Packs/tree/main/gascity", true},
+		{"git@github.com:GastownHall/gascity-packs.git//gascity#v0.1.6", true},
+		{"git@github.com:someone/gascity-packs.git//gascity", false},
+		{"https://gitlab.com/gastownhall/gascity-packs/-/tree/main/gascity", false},
+		{"git@gitlab.com:gastownhall/gascity-packs.git//gascity", false},
+		{"https://github.com/gastownhall/gascity.git//gascity", false},
+		{"git@github.com:gastownhall/gascity-packs.git//gascity/roles", false},
 		{config.PublicGascityRolesPackSource, false},
 		{config.PublicGastownPackSource, false},
 		{"https://github.com/example/gascity.git", false},
