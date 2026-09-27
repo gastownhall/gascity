@@ -177,12 +177,6 @@ type configMutationSnapshot struct {
 // newControllerStateWithRoutes wherever a city runtime has already opened a
 // storage binding — the class-routed services this constructor builds are built
 // HERE, so routes that arrive afterwards arrive too late to route them.
-//
-// The returned *controllerState is always fully constructed and non-nil, even
-// when the error is non-nil: the error reports the conditional-writes boot
-// latch's verdict (see assertConditionalWritesBootReady), not a construction
-// failure. Callers that must refuse to start check the error; callers that
-// only need a populated controllerState (most tests) may ignore it.
 func newControllerState(
 	ctx context.Context,
 	cfg *config.City,
@@ -204,13 +198,6 @@ func newControllerState(
 // routes in also makes the field write-once at construction, which is what
 // removes the unsynchronized second write the API's own RLock-guarded class
 // accessors were racing.
-//
-// The returned *controllerState is always fully constructed and non-nil, even
-// when the error is non-nil (see assertConditionalWritesBootReady's doc
-// comment for why: the latch verdict is carried on the error return, not on
-// cs's nilness). A caller that must refuse to start on the latch failing —
-// today, runController and the supervisor's per-city startup — checks the
-// error and aborts; every other caller (chiefly tests) may discard it.
 func newControllerStateWithRoutes(
 	ctx context.Context,
 	routes *storageRoutes,
@@ -231,13 +218,6 @@ func newControllerStateWithRoutes(
 			beadEventStartSeqOK = true
 		}
 	}
-	// Latch the rollout-gate snapshot ONCE from the boot config. A resolve error
-	// (nil cfg or an out-of-enum config value) is warn-and-continue here: the
-	// zero Flags is degraded-safe (legacy paths) — mirroring the best-effort
-	// city-store warn below. This constructor DOES return an error overall
-	// (see assertConditionalWritesBootReady, called just before return), but
-	// that latch is a separate, later check over the resolved Flags and the
-	// built store map; a malformed rollout config is never itself fatal here.
 	rolloutFlags, rolloutErr := rollout.Resolve(cfg, rollout.ResolveOptions{})
 	if rolloutErr != nil {
 		fmt.Fprintf(os.Stderr, "api: rollout gates: %v (using zero Flags; legacy paths)\n", rolloutErr)

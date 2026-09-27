@@ -119,6 +119,27 @@ func TestAssertConditionalWritesBootReadyIncapableBdStore(t *testing.T) {
 	}
 }
 
+// TestAssertConditionalWritesBootReadyRefusesNilStore proves a scope whose
+// store failed to open (nil in the store map) refuses startup under require
+// rather than being silently treated as capable. A nil store cannot possibly
+// honor a fenced write, so skipping it would let the exact failure this latch
+// exists to catch — a required scope with no fencing — pass unnoticed.
+func TestAssertConditionalWritesBootReadyRefusesNilStore(t *testing.T) {
+	cs := &controllerState{
+		rolloutFlags: rollout.ForTest(rollout.WithBeadsConditionalWrites(rollout.Require)),
+	}
+	cs.cityBeadStore = nil
+	cs.beadStores = map[string]beads.Store{"rig1": beads.NewMemStore()}
+
+	err := cs.assertConditionalWritesBootReady()
+	if err == nil {
+		t.Fatal("assertConditionalWritesBootReady succeeded with a nil city store under require, want an error")
+	}
+	if !strings.Contains(err.Error(), "city") {
+		t.Fatalf("nil-store error = %q, want it to name the city scope", err.Error())
+	}
+}
+
 // TestAssertConditionalWritesBootReadySucceedsForCapableFileStore proves the
 // success path: conditional_writes=require, resolved with an explicit
 // (config) origin, and every scope backed by a store that is genuinely
