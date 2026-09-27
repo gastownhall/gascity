@@ -4132,24 +4132,38 @@ op_provider_owned_init() {
 # `bd init --init-if-missing --database <db>` aborts with "workspace already
 # initialized as database <ancestor>", and without --database it would
 # silently reuse the ancestor's store. An empty config.yaml is the smallest
-# project file that pins resolution to this scope; bd init keeps an existing
-# config.yaml rather than writing its all-comment template, and every setting
-# it persists (dolt.mode, sync.remote, ...) still lands in this file.
+# project file that pins resolution to this scope, and bd init never reads it
+# as "already initialized". What bd then does with it depends on the
+# transport: proxied init replaces it with bd's all-comment template, direct
+# init keeps the existing file and writes the settings it persists
+# (dolt.mode, sync.remote, ...) into it. Either way the result matches a
+# clean-directory init.
+#
+# The anchor is created exclusively (noclobber) under a 077 umask, so it can
+# never truncate a config.yaml that appeared after the checks, and it is never
+# briefly world-readable.
 #
 # Returns 0 only when it created the anchor, so a caller whose bd init fails
 # can remove it again: a leftover config.yaml reads as a persisted beads
 # identity to gc (scopeHasPersistedBeadsIdentity) and would misclassify the
 # retry.
 anchor_fresh_beads_dir() {
-    local dir="$1" beads_dir
+    local dir="$1" beads_dir db
     beads_dir="$dir/.beads"
     if [ -e "$beads_dir/metadata.json" ] || [ -e "$beads_dir/config.yaml" ] ||
         [ -d "$beads_dir/dolt" ] || [ -d "$beads_dir/embeddeddolt" ]; then
         return 1
     fi
+    for db in "$beads_dir"/*.db; do
+        [ -e "$db" ] && return 1
+    done
     ensure_beads_dir_permissions "$dir"
-    : > "$beads_dir/config.yaml" || die "failed to create $beads_dir/config.yaml"
-    chmod 600 "$beads_dir/config.yaml" 2>/dev/null || true
+    if ! (umask 077 && set -C && : > "$beads_dir/config.yaml") 2>/dev/null; then
+        # Lost the race to another writer: its file already anchors the scope,
+        # and it is not ours to remove.
+        [ -e "$beads_dir/config.yaml" ] && return 1
+        die "failed to create $beads_dir/config.yaml"
+    fi
     return 0
 }
 

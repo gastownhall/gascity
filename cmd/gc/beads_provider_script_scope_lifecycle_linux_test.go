@@ -219,39 +219,59 @@ func TestProviderScriptRecoverStillCyclesTheCityScopesOwnProxy(t *testing.T) {
 // carries one, and must not leave that anchor behind when bd init fails, since
 // a stray config.yaml reads as a persisted beads identity to gc.
 func TestGcBeadsBdProviderOwnedInitAnchorsBeadsDirBeforeBdInit(t *testing.T) {
+	const userConfig = "dolt.auto-start: true\n"
 	for _, tt := range []struct {
-		name         string
-		transport    string
-		existing     string // pre-existing config.yaml content; "" = none
-		bdExit       int
-		wantSeen     string // what bd must see at invocation
-		wantAfter    bool   // config.yaml present after the op
-		wantAfterStr string
+		name          string
+		transport     string
+		seed          map[string]string // .beads files present before the op
+		bdExit        int
+		bdWritesMeta  bool   // bd writes metadata.json before exiting
+		wantSeen      string // what bd must see at invocation
+		wantAfter     bool   // config.yaml present after the op
+		wantAfterStr  string
+		wantAfterPerm os.FileMode // 0 = not checked
 	}{
-		{name: "proxied fresh scope", transport: "proxied", wantSeen: "config.yaml=empty", wantAfter: true},
-		{name: "direct fresh scope", transport: "direct", wantSeen: "config.yaml=empty", wantAfter: true},
+		{name: "proxied fresh scope", transport: "proxied", wantSeen: "config.yaml=empty", wantAfter: true, wantAfterPerm: 0o600},
+		{name: "direct fresh scope", transport: "direct", wantSeen: "config.yaml=empty", wantAfter: true, wantAfterPerm: 0o600},
 		{name: "failed init removes the anchor", transport: "proxied", bdExit: 1, wantSeen: "config.yaml=empty"},
 		{
-			name: "existing config is left alone", transport: "proxied", existing: "dolt.auto-start: true\n",
-			wantSeen: "config.yaml=present", wantAfter: true, wantAfterStr: "dolt.auto-start: true\n",
+			name: "init that wrote metadata then failed keeps the anchor", transport: "proxied", bdExit: 1, bdWritesMeta: true,
+			wantSeen: "config.yaml=empty", wantAfter: true,
 		},
 		{
-			name: "existing config survives a failed init", transport: "direct", existing: "dolt.auto-start: true\n", bdExit: 1,
-			wantSeen: "config.yaml=present", wantAfter: true, wantAfterStr: "dolt.auto-start: true\n",
+			name: "retry after a leftover empty anchor", transport: "proxied", seed: map[string]string{"config.yaml": ""},
+			wantSeen: "config.yaml=empty", wantAfter: true,
+		},
+		{
+			name: "failed retry leaves a leftover anchor it did not create", transport: "direct", seed: map[string]string{"config.yaml": ""}, bdExit: 1,
+			wantSeen: "config.yaml=empty", wantAfter: true,
+		},
+		{
+			name: "existing db file already anchors the scope", transport: "direct", seed: map[string]string{"beads.db": ""},
+			wantSeen: "config.yaml=missing",
+		},
+		{
+			name: "existing config is left alone", transport: "proxied", seed: map[string]string{"config.yaml": userConfig},
+			wantSeen: "config.yaml=present", wantAfter: true, wantAfterStr: userConfig,
+		},
+		{
+			name: "existing config survives a failed init", transport: "direct", seed: map[string]string{"config.yaml": userConfig}, bdExit: 1,
+			wantSeen: "config.yaml=present", wantAfter: true, wantAfterStr: userConfig,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cityDir := t.TempDir()
 			scopeDir := filepath.Join(cityDir, "rigs", "anchored")
+			beadsDir := filepath.Join(scopeDir, ".beads")
 			if err := os.MkdirAll(scopeDir, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			configPath := filepath.Join(scopeDir, ".beads", "config.yaml")
-			if tt.existing != "" {
-				if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+			configPath := filepath.Join(beadsDir, "config.yaml")
+			for name, content := range tt.seed {
+				if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(configPath, []byte(tt.existing), 0o640); err != nil {
+				if err := os.WriteFile(filepath.Join(beadsDir, name), []byte(content), 0o640); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -259,14 +279,17 @@ func TestGcBeadsBdProviderOwnedInitAnchorsBeadsDirBeforeBdInit(t *testing.T) {
 			bdPath := filepath.Join(t.TempDir(), "bd")
 			fakeBD := "#!/bin/sh\n" +
 				"if [ ! -f \"$BEADS_DIR/config.yaml\" ]; then s=missing; elif [ -s \"$BEADS_DIR/config.yaml\" ]; then s=present; else s=empty; fi\n" +
-				"printf 'config.yaml=%s\\n' \"$s\" >> " + strconv.Quote(logPath) + "\n" +
-				"exit " + strconv.Itoa(tt.bdExit) + "\n"
+				"printf 'config.yaml=%s\\n' \"$s\" >> " + strconv.Quote(logPath) + "\n"
+			if tt.bdWritesMeta {
+				fakeBD += "printf '{}\\n' > \"$BEADS_DIR/metadata.json\"\n"
+			}
+			fakeBD += "exit " + strconv.Itoa(tt.bdExit) + "\n"
 			if err := os.WriteFile(bdPath, []byte(fakeBD), 0o755); err != nil { //nolint:gosec // fixture must be executable
 				t.Fatal(err)
 			}
 			env := sanitizedBaseEnv(
 				"GC_CITY_PATH="+cityDir,
-				"BEADS_DIR="+filepath.Join(scopeDir, ".beads"),
+				"BEADS_DIR="+beadsDir,
 				"BD_BIN="+bdPath,
 				"GC_BEADS_PROVIDER_OWNED=1",
 				"GC_BEADS_TRANSPORT="+tt.transport,
@@ -289,7 +312,7 @@ func TestGcBeadsBdProviderOwnedInitAnchorsBeadsDirBeforeBdInit(t *testing.T) {
 			after, err := os.ReadFile(configPath)
 			if !tt.wantAfter {
 				if !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("config.yaml after failed init = %q (err %v), want removed", after, err)
+					t.Fatalf("config.yaml after init = %q (err %v), want absent", after, err)
 				}
 				return
 			}
@@ -298,6 +321,15 @@ func TestGcBeadsBdProviderOwnedInitAnchorsBeadsDirBeforeBdInit(t *testing.T) {
 			}
 			if string(after) != tt.wantAfterStr {
 				t.Fatalf("config.yaml after init = %q, want %q", after, tt.wantAfterStr)
+			}
+			if tt.wantAfterPerm != 0 {
+				info, err := os.Stat(configPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := info.Mode().Perm(); got != tt.wantAfterPerm {
+					t.Fatalf("anchor mode = %v, want %v", got, tt.wantAfterPerm)
+				}
 			}
 		})
 	}
