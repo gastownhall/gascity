@@ -14,7 +14,7 @@ This guide sets up the second for your dev machine.
 | CI-parity | yes | yes (same test binaries) |
 
 Bazel's remote cache stores every compiled object, test result, and
-file digest on the shared farm (cherry). Any machine — your laptop,
+file digest in a shared remote cache. Any machine — your laptop,
 a worktree, a CI runner — hits the same cache. Work you've already
 done never repeats.
 
@@ -55,7 +55,7 @@ executor endpoint and mTLS client certificate. For most dev work the
 cache alone is enough — you compile locally but hit shared results,
 which is where the ~0.6s warm suite comes from.
 
-### 4. Verify
+### 3. Verify
 
 ```bash
 bazel build //cmd/gc          # first run: compiles everything
