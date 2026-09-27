@@ -4154,8 +4154,13 @@ anchor_fresh_beads_dir() {
         [ -d "$beads_dir/dolt" ] || [ -d "$beads_dir/embeddeddolt" ]; then
         return 1
     fi
+    # Mirror bd's own *.db rule: vc.db and backups do not count.
     for db in "$beads_dir"/*.db; do
-        [ -e "$db" ] && return 1
+        [ -e "$db" ] || continue
+        case "${db##*/}" in
+        vc.db | *.backup*) ;;
+        *) return 1 ;;
+        esac
     done
     ensure_beads_dir_permissions "$dir"
     if ! (umask 077 && set -C && : > "$beads_dir/config.yaml") 2>/dev/null; then

@@ -251,6 +251,11 @@ func TestGcBeadsBdProviderOwnedInitAnchorsBeadsDirBeforeBdInit(t *testing.T) {
 			wantSeen: "config.yaml=missing",
 		},
 		{
+			name: "vc.db and backups do not count as project files", transport: "proxied",
+			seed:     map[string]string{"vc.db": "", "issues.backup.db": ""},
+			wantSeen: "config.yaml=empty", wantAfter: true, wantAfterPerm: 0o600,
+		},
+		{
 			name: "existing config is left alone", transport: "proxied", seed: map[string]string{"config.yaml": userConfig},
 			wantSeen: "config.yaml=present", wantAfter: true, wantAfterStr: userConfig,
 		},
