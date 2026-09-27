@@ -60,6 +60,13 @@ describe('Header attention indicators', () => {
     expect(screen.getByLabelText('Activity: 1 attention item').textContent).toBe('1');
     expect(screen.queryByLabelText(/Agents:/)).toBeNull();
   });
+
+  it('exposes the Workbench tab from the control centre nav', async () => {
+    renderHeader([]);
+
+    const link = await screen.findByRole('link', { name: /^workbench$/i });
+    expect(link.getAttribute('href')).toBe('/workbench');
+  });
 });
 
 function renderHeader(contributors: readonly AttentionContributor[]) {

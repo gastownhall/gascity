@@ -207,7 +207,7 @@ require (
 	github.com/vbauerster/mpb/v8 v8.7.2 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/xitongsys/parquet-go v1.6.2 // indirect
-	github.com/xitongsys/parquet-go-source v0.0.0-20240122235623-d6294584ab18 // indirect
+	github.com/xitongsys/parquet-go-source v0.0.0-20241021075129-b732d2ac9c9b // indirect
 	github.com/xtaci/smux v1.5.56 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	github.com/zeebo/xxh3 v1.0.2 // indirect

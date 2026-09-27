@@ -2396,6 +2396,38 @@
         ],
         "type": "object"
       },
+      "Diff": {
+        "additionalProperties": false,
+        "properties": {
+          "binary": {
+            "type": "boolean"
+          },
+          "bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "state": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "worktree": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "worktree",
+          "state",
+          "truncated",
+          "binary",
+          "bytes"
+        ],
+        "type": "object"
+      },
       "ErrorDetail": {
         "additionalProperties": false,
         "properties": {
@@ -29583,6 +29615,128 @@
           }
         },
         "summary": "Post v0 city by city name bead by ID assign"
+      }
+    },
+    "/v0/city/{cityName}/bead/{id}/attempts/diff": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-bead-by-id-attempts-diff",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Bead ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Bead ID.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Diff"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Index": {
+                "schema": {
+                  "description": "Latest event sequence number.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name bead by ID attempts diff"
       }
     },
     "/v0/city/{cityName}/bead/{id}/close": {

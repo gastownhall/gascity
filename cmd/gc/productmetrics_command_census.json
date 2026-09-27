@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 209,
+  "next_id": 210,
   "permanent_ids": [
     {
       "name": "help",
@@ -1589,6 +1589,37 @@
       "classification": "extmsg-unbind",
       "owner": "immediate",
       "id": 54
+    },
+    {
+      "path": "gc factory",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "structural",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "help",
+      "canonical_target": "@help",
+      "owner": "structural",
+      "id": 1
+    },
+    {
+      "path": "gc factory validate",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "factory-validate",
+      "owner": "immediate",
+      "id": 209
     },
     {
       "path": "gc formula",

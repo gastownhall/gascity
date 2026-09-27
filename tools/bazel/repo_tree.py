@@ -56,37 +56,39 @@ def packages() -> list[str]:
 def refresh_pkg_block(path: str) -> None:
     """Replace or append the managed filegroup block in one BUILD file."""
     block = (
-        f"\n{BLOCK_MARKER}\n\n"
+        f"{BLOCK_MARKER}\n\n"
         f"filegroup(\n"
         f'    name = "{PKG_FILEGROUP}",\n'
-        f'    srcs = glob(["**"], exclude = ["BUILD.bazel"], allow_empty = True),\n'
+        f'    srcs = glob(\n'
+        f'        ["**"],\n'
+        f'        allow_empty = True,\n'
+        f'        exclude = ["BUILD.bazel"],\n'
+        f'    ),\n'
         f'    visibility = ["//visibility:public"],\n'
         f")\n"
     )
-    src = open(path).read()
-    canonical = BLOCK_MARKER + "\n\n" + block[len(BLOCK_MARKER) + 2:]
-    if BLOCK_MARKER in src:
-        out = re.sub(
-            re.escape(BLOCK_MARKER) + r"\nfilegroup\(\n(?:[^()]|\([^()]*\))*?\)\n",
-            canonical,
-            src,
-            flags=re.DOTALL,
-        )
-        # drop any duplicate appended blocks beyond the first replacement
-        first_end = out.find(BLOCK_MARKER) + len(canonical)
-        rest = out[first_end:]
-        while BLOCK_MARKER in rest:
-            rest = re.sub(
-                r"\n?" + re.escape(BLOCK_MARKER) + r"\nfilegroup\(\n(?:[^()]|\([^()]*\))*?\)\n?",
-                "\n",
-                rest,
-                flags=re.DOTALL,
-            )
-        out = out[:first_end] + rest
+    with open(path) as source:
+        src = source.read()
+    pattern = re.compile(
+        re.escape(BLOCK_MARKER) + r"\n+filegroup\(\n(?:[^()]|\([^()]*\))*?\)\n",
+        flags=re.DOTALL,
+    )
+    matches = list(pattern.finditer(src))
+    if matches:
+        out = src
+        # Remove duplicate managed blocks, then replace the first one. Gazelle
+        # may reformat glob() across lines; either layout must be recognized.
+        for match in reversed(matches[1:]):
+            out = out[:match.start()] + out[match.end():]
+        first = matches[0]
+        out = out[:first.start()] + block + out[first.end():]
+    elif BLOCK_MARKER in src:
+        raise ValueError(f"could not parse managed filegroup in {path}")
     else:
-        out = src.rstrip("\n") + "\n" + block
+        out = src.rstrip("\n") + "\n\n" + block
     if out != src:
-        open(path, "w").write(out)
+        with open(path, "w") as destination:
+            destination.write(out)
 
 
 def refresh_root(labels: list[str]) -> None:

@@ -36,6 +36,10 @@ vi.mock('./routes/Runs', () => ({
   RunsPage: () => <h1>Runs route</h1>,
 }));
 
+vi.mock('./routes/Workbench', () => ({
+  WorkbenchPage: () => <h1>Workbench route</h1>,
+}));
+
 vi.mock('./routes/CockpitHome', () => ({
   CockpitHomePage: () => <h1>Cockpit home route</h1>,
 }));
@@ -95,6 +99,13 @@ describe('App routes', () => {
 
     expect(await screen.findByRole('heading', { name: 'Runs route' })).toBeTruthy();
     expect(screen.getByTestId('pathname').textContent).toBe('/runs');
+  });
+
+  it('/workbench renders the workbench route', async () => {
+    renderAt('/workbench');
+
+    expect(await screen.findByRole('heading', { name: 'Workbench route' })).toBeTruthy();
+    expect(screen.getByTestId('pathname').textContent).toBe('/workbench');
   });
 
   it('/ renders the live cockpit fallback', async () => {

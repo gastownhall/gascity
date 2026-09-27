@@ -27,7 +27,9 @@ permissions:
 jobs:
   bazel:
     name: bazel test (side-by-side)
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    # The fork has no Blacksmith runner; use a GitHub-hosted runner so the
+    # side-by-side check can actually start on rhar1511 PRs.
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       # Hoisted so the step-level `if:` below can see it (empty on forks,
@@ -41,11 +43,14 @@ jobs:
           curl -sSfL -o /tmp/bazelisk \
             https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
           sudo install -m 0755 /tmp/bazelisk /usr/local/bin/bazel
-          # Blacksmith (gastownhall pool): the image user's ~/.cache is root-owned and the
-          # bazel JVM stats user.home/.cache regardless of HOME/output_user_root. Make it
-          # writable; also keep bazelisk state under the runner temp.
-          sudo chmod 755 /home/ubuntu
-          sudo mkdir -p /home/ubuntu/.cache && sudo chown "$(id -u):$(id -g)" /home/ubuntu/.cache
+          # The bazel JVM stats user.home/.cache regardless of HOME/output_user_root.
+          # On the former Blacksmith image this directory was root-owned; hosted
+          # runners already have a writable user cache.
+          if [ -d /home/ubuntu ]; then
+            sudo chmod 755 /home/ubuntu
+            sudo mkdir -p /home/ubuntu/.cache
+            sudo chown "$(id -u):$(id -g)" /home/ubuntu/.cache
+          fi
           mkdir -p "$RUNNER_TEMP/bazel-home" && echo "BAZELISK_HOME=$RUNNER_TEMP/bazel-home" >> "$GITHUB_ENV"
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
@@ -93,7 +98,12 @@ jobs:
           echo "HOME=/tmp/gc-test-home" >> "$GITHUB_ENV"
 
       - name: bazel build //...
-        run: bazel --output_user_root="$RUNNER_TEMP"/bazel-outputs build //... $( [ -f .bazelrc.local ] && echo --config=remote-exec )
+        run: |
+          if [ -f .bazelrc.local ]; then
+            bazel --output_user_root="$RUNNER_TEMP"/bazel-outputs build //... --config=remote-exec
+          else
+            bazel --output_user_root="$RUNNER_TEMP"/bazel-outputs build //...
+          fi
 
       - name: bazel test //...
         run: |

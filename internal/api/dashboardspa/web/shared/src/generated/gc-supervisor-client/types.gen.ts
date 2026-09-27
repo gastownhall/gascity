@@ -847,6 +847,15 @@ export type Dep = {
     type: string;
 };
 
+export type Diff = {
+    binary: boolean;
+    bytes: number;
+    state: string;
+    text?: string;
+    truncated: boolean;
+    worktree: string;
+};
+
 export type ErrorDetail = {
     /**
      * Where the error occurred, e.g. 'body.items[3].tags' or 'path.thing-id'
@@ -11226,6 +11235,52 @@ export type PostV0CityByCityNameBeadByIdAssignResponses = {
 };
 
 export type PostV0CityByCityNameBeadByIdAssignResponse = PostV0CityByCityNameBeadByIdAssignResponses[keyof PostV0CityByCityNameBeadByIdAssignResponses];
+
+export type GetV0CityByCityNameBeadByIdAttemptsDiffData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Bead ID.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/bead/{id}/attempts/diff';
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptsDiffErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptsDiffError = GetV0CityByCityNameBeadByIdAttemptsDiffErrors[keyof GetV0CityByCityNameBeadByIdAttemptsDiffErrors];
+
+export type GetV0CityByCityNameBeadByIdAttemptsDiffResponses = {
+    /**
+     * OK
+     */
+    200: Diff;
+};
+
+export type GetV0CityByCityNameBeadByIdAttemptsDiffResponse = GetV0CityByCityNameBeadByIdAttemptsDiffResponses[keyof GetV0CityByCityNameBeadByIdAttemptsDiffResponses];
 
 export type PostV0CityByCityNameBeadByIdCloseData = {
     body?: never;

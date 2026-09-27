@@ -436,6 +436,15 @@ export const zConvoyGetResponse = z.object({
     progress: zConvoyProgress.optional()
 });
 
+export const zDiff = z.object({
+    binary: z.boolean(),
+    bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    state: z.string(),
+    text: z.string().optional(),
+    truncated: z.boolean(),
+    worktree: z.string()
+});
+
 export const zErrorDetail = z.object({
     location: z.string().optional(),
     message: z.string().optional(),
@@ -7819,6 +7828,16 @@ export const zPostV0CityByCityNameBeadByIdAssignPath = z.object({
  * OK
  */
 export const zPostV0CityByCityNameBeadByIdAssignResponse = z.record(z.string(), z.string());
+
+export const zGetV0CityByCityNameBeadByIdAttemptsDiffPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNameBeadByIdAttemptsDiffResponse = zDiff;
 
 export const zPostV0CityByCityNameBeadByIdCloseHeaders = z.object({
     'X-GC-Request': z.string().min(1)

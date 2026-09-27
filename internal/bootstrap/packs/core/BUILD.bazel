@@ -69,6 +69,9 @@ go_library(
         "skills/gc-rigs/SKILL.md",
         "skills/gc-work/SKILL.md",
         "template-fragments/claim-protocol.template.md",
+        "formulas/mol-rsi-candidate.toml",
+        "formulas/mol-software-factory.toml",
+        "skills/gc-factory/SKILL.md",
     ],
     importpath = "github.com/gastownhall/gascity/internal/bootstrap/packs/core",
     visibility = ["//:__subpackages__"],
@@ -81,6 +84,7 @@ go_test(
         "pack_assets_test.go",
         "pack_formulas_test.go",
         "pack_orders_test.go",
+        "software_factory_test.go",
         "testenv_import_test.go",
     ],
     data = glob(

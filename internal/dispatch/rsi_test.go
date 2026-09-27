@@ -70,7 +70,6 @@ func TestProcessRSIPromotionGatePromotesFromDurableEvidence(t *testing.T) {
 	}
 }
 
-
 func TestProcessRSIPromotionGateRequiresHumanApprovalForSensitiveAuthority(t *testing.T) {
 	store := beads.NewMemStore()
 	evidence := passingRSICandidateEvidence()

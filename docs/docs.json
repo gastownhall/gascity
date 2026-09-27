@@ -192,7 +192,8 @@
               "guides/gastown-config-recipes",
               "guides/using-json-from-gc",
               "guides/connected-clients",
-              "guides/multi-agent-engineering-environment"
+              "guides/multi-agent-engineering-environment",
+              "guides/workbench"
             ]
           }
         ]
@@ -237,7 +238,8 @@
               "reference/exec-session-provider",
               "reference/exec-beads-provider",
               "reference/tmux-agent-slice",
-              "reference/herdr-provider"
+              "reference/herdr-provider",
+              "reference/software-factory"
             ]
           },
           {
@@ -255,7 +257,8 @@
             "group": "Internal",
             "pages": [
               "reference/internal/index",
-              "reference/internal/beads-topology"
+              "reference/internal/beads-topology",
+              "research/2026-09-24-builderio-software-factory"
             ]
           }
         ]
