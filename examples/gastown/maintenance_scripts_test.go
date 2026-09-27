@@ -231,6 +231,139 @@ exit 0
 	}
 }
 
+// TestMaintenanceDoltScriptsSkipBdOwnedProxiedCity pins the proxied-scope
+// guard in dolt-target.sh. A new city defaults to bd-owned proxied Dolt
+// (metadata dolt_mode=proxied-server, a .beads/dolt data dir, no gc-managed
+// dolt-state.json, and no GC_DOLT_PORT projected by order dispatch). Before
+// the guard, reaper and jsonl-export saw the data dir, fell through to port
+// resolution and exited 78 "cannot resolve runtime port" on every cooldown.
+// bd owns that Dolt server and every write to it, so the scripts must skip
+// with exit 0 and never dial Dolt, even when a port is projected (a proxied
+// scope's external upstream). The legacy gc-managed cases pin that the guard
+// is narrow: a dolt_mode=server city still resolves its port (and still fails
+// loudly when it cannot).
+func TestMaintenanceDoltScriptsSkipBdOwnedProxiedCity(t *testing.T) {
+	scripts := []struct {
+		name   string
+		script string
+		env    map[string]string
+	}{
+		{
+			name:   "reaper",
+			script: coreScriptPath("reaper.sh"),
+			env:    map[string]string{"GC_REAPER_DRY_RUN": "1"},
+		},
+		{
+			name:   "jsonl export",
+			script: coreScriptPath("jsonl-export.sh"),
+			env: map[string]string{
+				"GC_JSONL_ARCHIVE_REPO":      "archive",
+				"GC_JSONL_MAX_PUSH_FAILURES": "99",
+			},
+		},
+	}
+	cases := []struct {
+		name       string
+		metadata   string
+		port       string
+		wantSkip   bool
+		wantExit78 bool
+	}{
+		{
+			name:     "proxied without projected port",
+			metadata: `{"backend":"dolt","database":"dolt","dolt_mode":"proxied-server","dolt_database":"hq"}`,
+			wantSkip: true,
+		},
+		{
+			name:     "proxied with projected port",
+			metadata: `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hq"}`,
+			port:     "4406",
+			wantSkip: true,
+		},
+		{
+			name:       "legacy managed without runtime state",
+			metadata:   `{"backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`,
+			wantExit78: true,
+		},
+		{
+			name:     "legacy managed with projected port",
+			metadata: `{"backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`,
+			port:     "4406",
+		},
+	}
+
+	for _, sc := range scripts {
+		for _, tc := range cases {
+			t.Run(sc.name+"/"+tc.name, func(t *testing.T) {
+				cityDir := t.TempDir()
+				binDir := t.TempDir()
+				doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+				gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+				if err := os.MkdirAll(filepath.Join(cityDir, ".beads", "dolt"), 0o755); err != nil {
+					t.Fatalf("MkdirAll(.beads/dolt): %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(tc.metadata+"\n"), 0o644); err != nil {
+					t.Fatalf("WriteFile(metadata.json): %v", err)
+				}
+				writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+				writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+				env := map[string]string{
+					"DOLT_ARGS_LOG":       doltLog,
+					"GC_CALL_LOG":         gcLog,
+					"GC_CITY":             cityDir,
+					"GC_CITY_PATH":        cityDir,
+					"GC_CITY_RUNTIME_DIR": filepath.Join(cityDir, ".gc", "runtime"),
+					"GC_PACK_STATE_DIR":   t.TempDir(),
+					"GC_DOLT_HOST":        "",
+					"GC_DOLT_PORT":        tc.port,
+					"GC_DOLT_STATE_FILE":  "",
+					"GIT_CONFIG_GLOBAL":   filepath.Join(t.TempDir(), "gitconfig"),
+					"GIT_CONFIG_NOSYSTEM": "1",
+					"PATH":                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+				}
+				for key, value := range sc.env {
+					if key == "GC_JSONL_ARCHIVE_REPO" {
+						value = filepath.Join(cityDir, value)
+					}
+					env[key] = value
+				}
+
+				out, err := runScriptResult(t, scriptPath(sc.script), env)
+				doltCalls, _ := os.ReadFile(doltLog)
+				switch {
+				case tc.wantSkip:
+					if err != nil {
+						t.Fatalf("%s should skip a bd-owned proxied city with exit 0: %v\n%s", filepath.Base(sc.script), err, out)
+					}
+					if !strings.Contains(string(out), "city Dolt is bd-owned (dolt_mode=proxied-server)") {
+						t.Fatalf("missing proxied skip message:\n%s", out)
+					}
+					if len(doltCalls) > 0 {
+						t.Fatalf("dolt must not be dialed on a bd-owned proxied city:\n%s", doltCalls)
+					}
+					if data, err := os.ReadFile(gcLog); err == nil && len(data) > 0 {
+						t.Fatalf("gc must not be invoked on a bd-owned proxied city:\n%s", data)
+					}
+				case tc.wantExit78:
+					assertMaintenanceScriptExit78(t, err, out)
+				default:
+					if strings.Contains(string(out), "bd-owned") {
+						t.Fatalf("legacy managed city must not take the proxied skip:\n%s", out)
+					}
+					if !strings.Contains(string(doltCalls), "--port "+tc.port) {
+						t.Fatalf("legacy managed city should dial the projected port %s; dolt calls:\n%s\noutput:\n%s", tc.port, doltCalls, out)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestOrphanSweepPreservesQualifiedRigAssignees(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
