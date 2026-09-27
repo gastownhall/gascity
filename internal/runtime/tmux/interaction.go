@@ -137,6 +137,95 @@ func extractToolInput(textBeforeApproval, toolName string) string {
 }
 
 // ---------------------------------------------------------------------------
+// Pane-based AskUserQuestion detection
+// ---------------------------------------------------------------------------
+
+// askUserQuestion* patterns detect Claude Code's AskUserQuestion dialog in
+// tmux pane output. Defined once here and shared by Pending (below),
+// nudgeSession and snapshotPaneIdleWithPrefix (tmux.go), and
+// sendHiddenAttachedText (a sibling fix) — the dialog shape must not be
+// duplicated per call site (gm-55kp2u).
+var (
+	// Dialog footer. Deliberately distinct from the folder-trust dialog's
+	// "Enter to confirm · Esc to cancel" footer, which must stay nudgeable.
+	askUserQuestionFooterRe = regexp.MustCompile(`Enter to select.*Esc to cancel`)
+
+	// Focused (arrow-selected) option row: "❯ 1. <label>". Claude's idle
+	// composer also starts a line with "❯ ", but never followed by
+	// "<digit>. " — so this cannot mistake an idle composer prompt for a
+	// focused dialog option.
+	askUserQuestionOptionRe = regexp.MustCompile(`(?m)^❯\s+\d+\.\s*(.*)$`)
+
+	// Header row above the question text, e.g. " ☐ be-tx30v".
+	askUserQuestionHeaderRe = regexp.MustCompile(`(?m)^\s*☐\s+(.+)$`)
+)
+
+// parsedAskUserQuestion holds a parsed AskUserQuestion dialog from a tmux
+// pane capture: the bead/topic header, the question text, and the label of
+// the currently focused (arrow-selected) option.
+type parsedAskUserQuestion struct {
+	Header  string
+	Prompt  string
+	Focused string
+}
+
+// parseAskUserQuestionPrompt parses tmux pane text for an open Claude Code
+// AskUserQuestion dialog. Returns nil unless all three anchors are present —
+// footer, a focused numbered option row, and a header row — the three-signal
+// design the ruling requires to avoid false positives from an idle composer,
+// whose own "❯ " glyph is otherwise indistinguishable from the dialog's
+// focused-option row.
+func parseAskUserQuestionPrompt(paneText string) *parsedAskUserQuestion {
+	if !askUserQuestionFooterRe.MatchString(paneText) {
+		return nil
+	}
+	optionMatches := askUserQuestionOptionRe.FindAllStringSubmatch(paneText, -1)
+	if len(optionMatches) == 0 {
+		return nil
+	}
+	headerMatches := askUserQuestionHeaderRe.FindAllStringSubmatchIndex(paneText, -1)
+	if len(headerMatches) == 0 {
+		return nil
+	}
+
+	// Bind to the LAST occurrence of each anchor, mirroring parseApprovalPrompt:
+	// scrollback may still hold an earlier, already-answered dialog above the
+	// live one.
+	focused := optionMatches[len(optionMatches)-1]
+	headerLoc := headerMatches[len(headerMatches)-1]
+
+	return &parsedAskUserQuestion{
+		Header:  strings.TrimSpace(paneText[headerLoc[2]:headerLoc[3]]),
+		Prompt:  extractAskUserQuestionPromptText(paneText[headerLoc[1]:]),
+		Focused: strings.TrimSpace(focused[1]),
+	}
+}
+
+// extractAskUserQuestionPromptText returns the question text on the first
+// "│ …" line after the dialog's header row (the dialog left-rules its prompt
+// text; the header row itself is the bead/topic line, not the question).
+func extractAskUserQuestionPromptText(afterHeader string) string {
+	for _, line := range strings.Split(afterHeader, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if rest, ok := strings.CutPrefix(trimmed, "│"); ok {
+			return strings.TrimSpace(rest)
+		}
+		return ""
+	}
+	return ""
+}
+
+// askUserQuestionHash returns a short stable hash identifying a parsed
+// AskUserQuestion dialog, mirroring approvalHash.
+func askUserQuestionHash(q *parsedAskUserQuestion) string {
+	h := sha256.Sum256([]byte(q.Header + "\x00" + q.Prompt + "\x00" + q.Focused))
+	return fmt.Sprintf("%x", h[:8])
+}
+
+// ---------------------------------------------------------------------------
 // Deduplication
 // ---------------------------------------------------------------------------
 
@@ -202,6 +291,18 @@ func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 	approval := parseApprovalPrompt(paneText)
 	if approval == nil {
 		t.approvalDedup().clear(name)
+		if question := parseAskUserQuestionPrompt(paneText); question != nil {
+			return &runtime.PendingInteraction{
+				RequestID: "tmux-question-" + askUserQuestionHash(question),
+				Kind:      "question",
+				Prompt:    question.Prompt,
+				Options:   []string{question.Focused},
+				Metadata: map[string]string{
+					"header": question.Header,
+					"source": "tmux",
+				},
+			}, nil
+		}
 		return nil, nil
 	}
 
@@ -247,6 +348,13 @@ func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error 
 		}
 		return fmt.Errorf("pre-verify capture failed: %w", err)
 	}
+	// An AskUserQuestion dialog's option menu is per-dialog, not the fixed
+	// Yes/Yes-always/No layout the switch below encodes: refuse before it can
+	// map an approval action onto the wrong numbered option (gm-55kp2u).
+	if parseAskUserQuestionPrompt(paneText) != nil {
+		return fmt.Errorf("cannot respond to a question prompt (Kind %q) with approval action %q", "question", response.Action)
+	}
+
 	current := parseApprovalPrompt(paneText)
 	if current == nil {
 		t.approvalDedup().clear(name)

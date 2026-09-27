@@ -998,6 +998,9 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 			delivered = false
 			return nil
 		}
+		if err := m.pendingInteractionLocked(sessName); err != nil {
+			return err
+		}
 		if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
 			return err
 		}

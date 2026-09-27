@@ -359,13 +359,13 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
 			delivered, err := h.manager.SendLiveOnly(ctx, id, req.Text)
 			if err != nil {
-				return NudgeResult{}, err
+				return nudgeResultForPendingInteraction(err)
 			}
 			result = NudgeResult{Delivered: delivered}
 			return result, nil
 		}
 		if err := h.manager.Send(ctx, id, req.Text, resumeCommand, h.runtimeHints()); err != nil {
-			return NudgeResult{}, err
+			return nudgeResultForPendingInteraction(err)
 		}
 		result = NudgeResult{Delivered: true}
 		return result, nil
@@ -373,13 +373,13 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
 			delivered, err := h.manager.SendImmediateLiveOnly(ctx, id, req.Text)
 			if err != nil {
-				return NudgeResult{}, err
+				return nudgeResultForPendingInteraction(err)
 			}
 			result = NudgeResult{Delivered: delivered}
 			return result, nil
 		}
 		if err := h.manager.SendImmediate(ctx, id, req.Text, resumeCommand, h.runtimeHints()); err != nil {
-			return NudgeResult{}, err
+			return nudgeResultForPendingInteraction(err)
 		}
 		result = NudgeResult{Delivered: true}
 		return result, nil
@@ -387,14 +387,14 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
 			delivered, err := h.manager.TryWaitIdleNudgeLiveOnly(ctx, id, req.Source, req.Text)
 			if err != nil {
-				return NudgeResult{}, err
+				return nudgeResultForPendingInteraction(err)
 			}
 			result = NudgeResult{Delivered: delivered}
 			return result, nil
 		}
 		delivered, err := h.manager.TryWaitIdleNudge(ctx, id, req.Source, req.Text, resumeCommand, h.runtimeHints())
 		if err != nil {
-			return NudgeResult{}, err
+			return nudgeResultForPendingInteraction(err)
 		}
 		result = NudgeResult{Delivered: delivered}
 		return result, nil

@@ -143,6 +143,24 @@ func decideBackstopAction(attempts int, last, now time.Time) backstopAction {
 	return backstopActionNudge
 }
 
+// pendingDialogBlocked reports whether name currently has an open blocking
+// dialog (e.g. AskUserQuestion) that the tmux layer will safely refuse to
+// type into (gm-55kp2u). Callers use this to skip a nudge attempt WITHOUT
+// spending it against a bounded retry/backstop budget: the refusal is not a
+// delivery failure, and charging it as one could exhaust the budget before
+// the agent ever gets a chance to answer the dialog and become nudgeable
+// again. A provider that cannot report interaction state, or an error
+// probing it, both return false — the caller falls back to its pre-existing
+// behavior exactly as if this check did not exist.
+func pendingDialogBlocked(sp runtime.Provider, name string) bool {
+	ip, ok := sp.(runtime.InteractionProvider)
+	if !ok {
+		return false
+	}
+	pending, err := ip.Pending(name)
+	return err == nil && pending != nil
+}
+
 // runNudgeBackstop drives pred over sessionBeads: for each session it governs
 // that is running and has outstanding work, it paces re-delivery of pred's
 // nudge content through the shared grace → nudge → backoff → give-up engine,
@@ -242,6 +260,14 @@ func runNudgeBackstop(
 				// is nothing to wait for, so go straight to the terminal action
 				// after the same grace window.
 				pred.exhausted(store, s, stdout)
+				continue
+			}
+			if pendingDialogBlocked(sp, sessName) {
+				// An open dialog owns this pane. The tmux layer already
+				// refuses to type into it; deferring here without reserving
+				// an attempt keeps the refusal from burning the budget the
+				// agent needs to actually answer the dialog and resume.
+				fmt.Fprintf(stdout, "%s: %s has a pending dialog, deferring without spending an attempt\n", label, sessName) //nolint:errcheck // best-effort
 				continue
 			}
 			// Write ahead of the external delivery. If the process crashes
