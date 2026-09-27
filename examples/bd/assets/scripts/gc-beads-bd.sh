@@ -3055,6 +3055,7 @@ run_bd_init_proxied() {
         cd "$dir" || exit 1
         export BEADS_DIR="$dir/.beads"
         export BEADS_DOLT_PROXIED_SERVER=1
+        pin_proxied_shared_server_off
         unset BEADS_DOLT_AUTO_START
         unset GC_DOLT GC_DOLT_HOST GC_DOLT_PORT GC_DOLT_USER GC_DOLT_PASSWORD
         unset GC_DOLT_DATA_DIR GC_DOLT_LOG_FILE GC_DOLT_STATE_FILE GC_DOLT_PID_FILE GC_DOLT_LOCK_FILE GC_DOLT_CONFIG_FILE
@@ -3329,7 +3330,7 @@ op_init() {
         proxied_needs_init=true
         if [ -f "$metadata_path" ]; then
             trace_bd_argv context
-            if (cd "$dir" && BEADS_DIR="$dir/.beads" BEADS_DOLT_PROXIED_SERVER=1 "$bd_bin" context >/dev/null 2>&1); then
+            if (cd "$dir" && { ! scope_pins_shared_server_off "$dir" || pin_proxied_shared_server_off; } && BEADS_DIR="$dir/.beads" BEADS_DOLT_PROXIED_SERVER=1 "$bd_bin" context >/dev/null 2>&1); then
                 proxied_needs_init=false
             fi
         fi
@@ -3983,6 +3984,39 @@ provider_owned_scope_is_local() {
     return 0
 }
 
+# pin_proxied_shared_server_off keeps a gc-owned proxied scope out of bd's
+# user-level shared-server mode. A `dolt.shared-server: true` in
+# ~/.beads/config.yaml or ~/.config/bd/config.yaml would otherwise root the
+# scope's proxy and Dolt child in ~/.beads/shared-server -- one Dolt root for
+# every city on the host, so two cities' hq stores become one database.
+# BD_DOLT_SHARED_SERVER is bd's env binding for the config key and outranks
+# every config file; BEADS_DOLT_SHARED_SERVER is bd's separate switch, read
+# before config and only for 1/true, so an inherited value is neutralized
+# rather than trusted. Mirrors applyProxiedSharedServerOptOut in cmd/gc.
+# Applied only to scopes gc owns: a scope being initialized through gc, or one
+# whose config.yaml carries gc's pin (scope_pins_shared_server_off). A proxied
+# scope gc merely found keeps the operator's resolution, so this script's bd
+# and an agent's bd never split one store across two Dolt roots.
+pin_proxied_shared_server_off() {
+    export BEADS_DOLT_SHARED_SERVER=0
+    export BD_DOLT_SHARED_SERVER=false
+}
+
+# scope_pins_shared_server_off succeeds when the scope's .beads/config.yaml
+# sets dolt.shared-server: false -- the pin gc writes into every gc-owned
+# proxied scope (nested form), or bd's flat dotted spelling.
+scope_pins_shared_server_off() {
+    local cfg="$1/.beads/config.yaml"
+    [ -f "$cfg" ] || return 1
+    awk '
+        { sub(/\r$/, "") }
+        /^[^[:space:]#]/ { in_dolt = ($0 ~ /^dolt:[[:space:]]*(#.*)?$/) }
+        in_dolt && /^[[:space:]]+shared-server:[[:space:]]*false[[:space:]]*(#.*)?$/ { found = 1 }
+        /^dolt\.shared-server:[[:space:]]*false[[:space:]]*(#.*)?$/ { found = 1 }
+        END { exit(found ? 0 : 1) }
+    ' "$cfg"
+}
+
 run_provider_owned_bd() {
     local dir="$1"
     shift
@@ -4005,6 +4039,19 @@ run_provider_owned_bd() {
             # A direct ready binding must not inherit a proxy selector from
             # the parent process. The binding determines its own transport.
             unset BEADS_DOLT_PROXIED_SERVER
+        fi
+        # A scope gc is initializing as proxied is gc-owned by construction.
+        # Any other proxied scope is pinned only when its config.yaml carries
+        # gc's pin (gc-owned); a found workspace keeps its own resolution.
+        # Known corner: a found scope whose own config already says
+        # shared-server: false (e.g. a clone of a gc city) under an explicitly
+        # exported BEADS_DOLT_SHARED_SERVER=1 is neutralized here (local),
+        # while gc's runtime env and an agent's bd honour the =1 (shared).
+        # That split needs the operator to force the mode on by env.
+        if [ "${GC_BEADS_PROVIDER_INIT:-}" = "1" ] && [ "${GC_BEADS_TRANSPORT:-}" = "proxied" ]; then
+            pin_proxied_shared_server_off
+        elif { [ "${GC_BEADS_TRANSPORT:-}" = "proxied" ] || scope_is_proxied "$dir"; } && scope_pins_shared_server_off "$dir"; then
+            pin_proxied_shared_server_off
         fi
         trace_bd_argv "$@"
         "${BD_BIN:-bd}" "$@"
@@ -4064,7 +4111,55 @@ op_provider_owned_init() {
     # under the provider op timeout; cmd/gc owns that step (see
     # registerProviderOwnedScopeCustomTypes) alongside the canonical config it
     # writes for the same scope.
-    GC_BEADS_PROVIDER_INIT=1 run_provider_owned_bd "$dir" "$@"
+    local anchored=false status=0
+    if anchor_fresh_beads_dir "$dir"; then
+        anchored=true
+    fi
+    GC_BEADS_PROVIDER_INIT=1 run_provider_owned_bd "$dir" "$@" || status=$?
+    if [ "$status" -ne 0 ] && [ "$anchored" = true ]; then
+        release_fresh_beads_dir_anchor "$dir"
+    fi
+    return "$status"
+}
+
+# anchor_fresh_beads_dir makes BEADS_DIR authoritative for a scope bd has not
+# initialized yet. bd honors BEADS_DIR only once that directory already holds
+# a project file (metadata.json, config.yaml, dolt/, embeddeddolt/ or *.db —
+# beads internal/beads FindBeadsDir/hasBeadsProjectFiles); an empty or missing
+# .beads is skipped and bd falls back to walking up from the CWD. A scope
+# created anywhere below another bd workspace (a city inside a repo that uses
+# beads, or under a home directory with ~/.beads) then binds that ancestor:
+# `bd init --init-if-missing --database <db>` aborts with "workspace already
+# initialized as database <ancestor>", and without --database it would
+# silently reuse the ancestor's store. An empty config.yaml is the smallest
+# project file that pins resolution to this scope; bd init keeps an existing
+# config.yaml rather than writing its all-comment template, and every setting
+# it persists (dolt.mode, sync.remote, ...) still lands in this file.
+#
+# Returns 0 only when it created the anchor, so a caller whose bd init fails
+# can remove it again: a leftover config.yaml reads as a persisted beads
+# identity to gc (scopeHasPersistedBeadsIdentity) and would misclassify the
+# retry.
+anchor_fresh_beads_dir() {
+    local dir="$1" beads_dir
+    beads_dir="$dir/.beads"
+    if [ -e "$beads_dir/metadata.json" ] || [ -e "$beads_dir/config.yaml" ] ||
+        [ -d "$beads_dir/dolt" ] || [ -d "$beads_dir/embeddeddolt" ]; then
+        return 1
+    fi
+    ensure_beads_dir_permissions "$dir"
+    : > "$beads_dir/config.yaml" || die "failed to create $beads_dir/config.yaml"
+    chmod 600 "$beads_dir/config.yaml" 2>/dev/null || true
+    return 0
+}
+
+# release_fresh_beads_dir_anchor removes the anchor anchor_fresh_beads_dir
+# created, but only while it is still the empty file this script wrote.
+release_fresh_beads_dir_anchor() {
+    local config="$1/.beads/config.yaml"
+    if [ -f "$config" ] && [ ! -s "$config" ] && [ ! -e "$1/.beads/metadata.json" ]; then
+        rm -f "$config"
+    fi
 }
 
 # provider_owned_retire_local_dolt retires the local Dolt lifecycle bd owns for

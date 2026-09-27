@@ -4,11 +4,18 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // providerScriptPath is the real script every test in this file drives. The
@@ -23,14 +30,15 @@ func providerScriptPath(t *testing.T) string {
 	return script
 }
 
-// runProviderOwnedScriptOp runs one provider-owned op against the real script.
+// runProviderOwnedScriptOp runs one provider-owned op, with its positional
+// arguments, against the real script.
 //
 // It is the single subprocess call site for the provider-script tests on purpose:
 // the source resource census ratchet is shrink-only, so a new shape is covered by
 // another call to this helper rather than another exec.Command.
-func runProviderOwnedScriptOp(t *testing.T, env []string, op string) (string, error) {
+func runProviderOwnedScriptOp(t *testing.T, env []string, op string, args ...string) (string, error) {
 	t.Helper()
-	cmd := exec.Command("bash", providerScriptPath(t), op) //nolint:gosec // repository script under test
+	cmd := exec.Command("bash", append([]string{providerScriptPath(t), op}, args...)...) //nolint:gosec // repository script under test
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	return string(out), err
@@ -203,4 +211,199 @@ func TestProviderScriptRecoverStillCyclesTheCityScopesOwnProxy(t *testing.T) {
 	if !stopped {
 		t.Fatalf("city recover did not retire its own proxy; bd calls %q\n%s", bdCalls(t, logPath), out)
 	}
+}
+
+// bd honors BEADS_DIR only when that directory already holds a project file;
+// otherwise it walks up from the CWD and binds whatever bd workspace sits above
+// the scope. Provider-owned init must therefore hand bd a scope that already
+// carries one, and must not leave that anchor behind when bd init fails, since
+// a stray config.yaml reads as a persisted beads identity to gc.
+func TestGcBeadsBdProviderOwnedInitAnchorsBeadsDirBeforeBdInit(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		transport    string
+		existing     string // pre-existing config.yaml content; "" = none
+		bdExit       int
+		wantSeen     string // what bd must see at invocation
+		wantAfter    bool   // config.yaml present after the op
+		wantAfterStr string
+	}{
+		{name: "proxied fresh scope", transport: "proxied", wantSeen: "config.yaml=empty", wantAfter: true},
+		{name: "direct fresh scope", transport: "direct", wantSeen: "config.yaml=empty", wantAfter: true},
+		{name: "failed init removes the anchor", transport: "proxied", bdExit: 1, wantSeen: "config.yaml=empty"},
+		{
+			name: "existing config is left alone", transport: "proxied", existing: "dolt.auto-start: true\n",
+			wantSeen: "config.yaml=present", wantAfter: true, wantAfterStr: "dolt.auto-start: true\n",
+		},
+		{
+			name: "existing config survives a failed init", transport: "direct", existing: "dolt.auto-start: true\n", bdExit: 1,
+			wantSeen: "config.yaml=present", wantAfter: true, wantAfterStr: "dolt.auto-start: true\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			scopeDir := filepath.Join(cityDir, "rigs", "anchored")
+			if err := os.MkdirAll(scopeDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(scopeDir, ".beads", "config.yaml")
+			if tt.existing != "" {
+				if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(configPath, []byte(tt.existing), 0o640); err != nil {
+					t.Fatal(err)
+				}
+			}
+			logPath := filepath.Join(t.TempDir(), "bd.log")
+			bdPath := filepath.Join(t.TempDir(), "bd")
+			fakeBD := "#!/bin/sh\n" +
+				"if [ ! -f \"$BEADS_DIR/config.yaml\" ]; then s=missing; elif [ -s \"$BEADS_DIR/config.yaml\" ]; then s=present; else s=empty; fi\n" +
+				"printf 'config.yaml=%s\\n' \"$s\" >> " + strconv.Quote(logPath) + "\n" +
+				"exit " + strconv.Itoa(tt.bdExit) + "\n"
+			if err := os.WriteFile(bdPath, []byte(fakeBD), 0o755); err != nil { //nolint:gosec // fixture must be executable
+				t.Fatal(err)
+			}
+			env := sanitizedBaseEnv(
+				"GC_CITY_PATH="+cityDir,
+				"BEADS_DIR="+filepath.Join(scopeDir, ".beads"),
+				"BD_BIN="+bdPath,
+				"GC_BEADS_PROVIDER_OWNED=1",
+				"GC_BEADS_TRANSPORT="+tt.transport,
+				"GC_BEADS_TARGET=local",
+			)
+			out, err := runProviderOwnedScriptOp(t, env, "init", scopeDir, "anc", "hq")
+			if tt.bdExit == 0 && err != nil {
+				t.Fatalf("gc-beads-bd init: %v\n%s", err, out)
+			}
+			if tt.bdExit != 0 && err == nil {
+				t.Fatalf("gc-beads-bd init succeeded although bd init failed:\n%s", out)
+			}
+			data, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(string(data)); got != tt.wantSeen {
+				t.Fatalf("bd init saw %q, want %q", got, tt.wantSeen)
+			}
+			after, err := os.ReadFile(configPath)
+			if !tt.wantAfter {
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("config.yaml after failed init = %q (err %v), want removed", after, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("config.yaml after init: %v", err)
+			}
+			if string(after) != tt.wantAfterStr {
+				t.Fatalf("config.yaml after init = %q, want %q", after, tt.wantAfterStr)
+			}
+		})
+	}
+}
+
+// A city (or rig) created anywhere below another bd workspace — inside a repo
+// that uses beads, or under a home directory holding ~/.beads — must get its
+// own store. Before the anchor, bd v1.3.0 ignored the scope's still-empty
+// BEADS_DIR, walked up to the ancestor, and `bd init --init-if-missing
+// --database hq` aborted with `workspace already initialized as database
+// "ancestor"`, failing every fresh `gc init` there (v1.4.2 regression).
+func TestGcBeadsBdProviderOwnedRealInitIgnoresAncestorBeadsWorkspace(t *testing.T) {
+	skipSlowCmdGCTest(t, "runs the real bd provider init; run make test-cmd-gc-process for full coverage")
+	bdPath := waitTestRealBDPath(t)
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt not installed")
+	}
+	for _, transport := range []string{"direct", "proxied"} {
+		t.Run(transport, func(t *testing.T) {
+			parent := t.TempDir()
+			home := filepath.Join(t.TempDir(), "home")
+			if err := os.MkdirAll(home, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			testutil.RunGit(t, parent, "init", "-q")
+			// The ancestor workspace, in the on-disk shape of an ordinary
+			// embedded bd project (the pinned test bd is built without the
+			// embedded engine, so it cannot create one itself). bd's
+			// already-initialized probe keys on exactly these two artifacts.
+			ancestorBeads := filepath.Join(parent, ".beads")
+			if err := os.MkdirAll(filepath.Join(ancestorBeads, "embeddeddolt", "ancestor", ".dolt"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			ancestorMetadata := []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"ancestor"}` + "\n")
+			if err := os.WriteFile(filepath.Join(ancestorBeads, "metadata.json"), ancestorMetadata, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			dir := filepath.Join(parent, "city")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			env := sanitizedBaseEnv("HOME="+home, "DOLT_ROOT_PATH="+home, "GC_CITY_PATH="+dir, "BEADS_DIR="+filepath.Join(dir, ".beads"), "BD_BIN="+bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT="+transport, "GC_BEADS_TARGET=local")
+			t.Cleanup(func() {
+				_, _ = runProviderOwnedScriptOp(t, env, "stop")
+				for _, root := range []string{dir, parent} {
+					if leaked := providerOwnedDoltPIDsUnderRoot(t, root); len(leaked) != 0 {
+						if errs := reapDoltLeakPIDs(leaked); len(errs) != 0 {
+							t.Errorf("reap processes under %s: %v", root, errs)
+						}
+					}
+				}
+			})
+			if out, err := runProviderOwnedScriptOp(t, env, "init", dir, "hq", "hq"); err != nil {
+				t.Fatalf("gc-beads-bd init below an ancestor bd workspace: %v\n%s", err, out)
+			}
+			meta, ok, err := contract.LoadMetadataState(fsys.OSFS{}, filepath.Join(dir, ".beads", "metadata.json"))
+			if err != nil || !ok {
+				t.Fatalf("scope metadata after init: ok=%v err=%v", ok, err)
+			}
+			if meta.DoltDatabase != "hq" {
+				t.Fatalf("scope dolt_database = %q, want hq (bound to the ancestor?)", meta.DoltDatabase)
+			}
+			wantMode := "server"
+			if transport == "proxied" {
+				wantMode = "proxied-server"
+			}
+			if meta.DoltMode != wantMode {
+				t.Fatalf("scope dolt_mode = %q, want %q", meta.DoltMode, wantMode)
+			}
+			if after, err := os.ReadFile(filepath.Join(ancestorBeads, "metadata.json")); err != nil || !bytes.Equal(after, ancestorMetadata) {
+				t.Fatalf("ancestor metadata changed by scope init:\nbefore: %s\nafter:  %s (err %v)", ancestorMetadata, after, err)
+			}
+			if out, err := runProviderOwnedScriptOp(t, env, "health"); err != nil {
+				t.Fatalf("gc-beads-bd health after init: %v\n%s", err, out)
+			}
+		})
+	}
+}
+
+// providerOwnedDoltPIDsUnderRoot lists live bd proxy / Dolt server processes
+// whose command line names root. It reads /proc directly so this file keeps a
+// single subprocess call site (see runProviderOwnedScriptOp).
+func providerOwnedDoltPIDsUnderRoot(t *testing.T, root string) []int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		t.Fatalf("read process table: %v", err)
+	}
+	var pids []int
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err != nil {
+			continue // exited between the listing and the read
+		}
+		args := string(bytes.ReplaceAll(raw, []byte{0}, []byte{' '}))
+		if !strings.Contains(args, root) {
+			continue
+		}
+		if strings.Contains(args, "db-proxy-child") || strings.Contains(args, "sql-server") {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
 }
