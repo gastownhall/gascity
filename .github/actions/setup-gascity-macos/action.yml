@@ -3,9 +3,12 @@ description: Install the shared macOS dependencies for Gas City CI jobs on ARM64
 
 inputs:
   go-version:
-    description: Go version to install. Default matches setup-gascity-ubuntu; bump both together.
+    description: >-
+      Go version to install. Empty (the default) reads the version from go.mod,
+      so the toolchain can never skew from the module directive. Pass an
+      explicit version only to test against a different toolchain.
     required: false
-    default: "1.26.5"
+    default: ""
   node-version:
     description: Node.js version to install
     required: false
@@ -47,11 +50,15 @@ runs:
 
     - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
       with:
-        # Keep this default in lock-step with setup-gascity-ubuntu —
-        # a split between Mac and Linux toolchains would surface as
-        # false "Mac-only" regressions. Track the same pin both
-        # actions use today; bump them together.
+        # Resolved from go.mod, not a literal pin, exactly as
+        # setup-gascity-ubuntu already does. A hardcoded version here skews
+        # from the module directive the moment go.mod is bumped, and it
+        # surfaces as a false "Mac-only" regression on every open PR:
+        #   go: go.mod requires go >= 1.26.6 (running go 1.26.5; GOTOOLCHAIN=local)
+        # That is ga-1qp5qo — nightly main was red on it continuously from
+        # 2026-08-15, with at least five open PRs red on this and nothing else.
         go-version: ${{ inputs.go-version }}
+        go-version-file: ${{ inputs.go-version == '' && 'go.mod' || '' }}
         # Keep macOS parity deterministic across hosted and reused runners.
         cache: false
 

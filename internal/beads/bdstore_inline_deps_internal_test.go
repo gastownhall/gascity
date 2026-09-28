@@ -18,6 +18,13 @@ type bdLedgerRow struct {
 	closed    bool
 	assignee  string
 	deps      []Dep
+	// offscope marks a row bd's ledger HOLDS but this scope's cache never
+	// receives: gc routes relocated classes (the `gcg-` graph beads) to another
+	// store, so `bd list` and `bd query` for this scope do not hand it over.
+	// bd's own answers — ready, sql, blocked — still see it, which is what
+	// makes an edge onto it invisible to the cache's predicate and visible to
+	// bd's column.
+	offscope bool
 }
 
 // fakeBdLedger answers the bd subcommands a CachingStore prime spends, the way
@@ -54,13 +61,15 @@ func (f *fakeBdLedger) run(_, name string, args ...string) ([]byte, error) {
 	case joined == "version":
 		return []byte("bd version 1.1.0\n"), nil
 	case args[0] == "list":
-		return f.renderRows(func(r bdLedgerRow) bool { return !r.ephemeral && !r.closed })
+		return f.renderRows(func(r bdLedgerRow) bool { return !r.ephemeral && !r.closed && !r.offscope })
 	case args[0] == "query":
-		return f.renderRows(func(r bdLedgerRow) bool { return r.ephemeral && !r.closed })
+		return f.renderRows(func(r bdLedgerRow) bool { return r.ephemeral && !r.closed && !r.offscope })
 	case args[0] == "ready":
 		// bd ready filters is_blocked = 0 (sqlbuild.ReadyWhere). This is the
 		// backing's own verdict, the one the cache may never exceed.
 		return f.renderRows(func(r bdLedgerRow) bool { return !r.blocked && !r.closed })
+	case args[0] == "blocked":
+		return f.renderBlocked()
 	case args[0] == "show":
 		// `bd show --json` answers from types.IssueDetails, which embeds
 		// types.Issue — and NOTHING in beads carries a `json:"is_blocked"` tag.
@@ -197,6 +206,67 @@ func (f *fakeBdLedger) renderReadyProjection() ([]byte, error) {
 	return json.Marshal(out)
 }
 
+// renderBlocked answers `bd blocked --json` the way issueops.GetBlockedIssuesInTx
+// does, in both halves, because only the second half can falsify the door built
+// on it:
+//
+//  1. Seed from the denormalized is_blocked column —
+//     `WHERE is_blocked = 1 AND status <> 'closed'` — which is the same column
+//     `bd ready` filters with `is_blocked = 0` above. Rendering both from
+//     bdLedgerRow.blocked is what makes the two answers provably the same
+//     closure here as they are in bd.
+//  2. Narrow to rows whose blocker bd can NAME: an active blocking dep whose
+//     target is a live ledger row, or failing that any parent-child edge, whose
+//     parent is attributed without regard to the parent's own state. A row with
+//     neither is dropped from bd's OUTPUT even though its column says blocked.
+//
+// Modeling (2) is the point. Without it every fixture row would come back and
+// a gc-side reader that mistook membership for the column would pass for the
+// wrong reason.
+func (f *fakeBdLedger) renderBlocked() ([]byte, error) {
+	live := make(map[string]struct{}, len(f.rows))
+	for _, row := range f.rows {
+		if !row.closed {
+			live[row.id] = struct{}{}
+		}
+	}
+	out := make([]map[string]any, 0, len(f.rows))
+	for _, row := range f.rows {
+		if !row.blocked || row.closed {
+			continue
+		}
+		var blockers []string
+		for _, dep := range row.deps {
+			if !isReadyBlockingDependencyType(dep.Type) {
+				continue
+			}
+			if _, ok := live[dep.DependsOnID]; !ok {
+				continue
+			}
+			blockers = append(blockers, dep.DependsOnID)
+		}
+		if len(blockers) == 0 {
+			for _, dep := range row.deps {
+				if dep.Type == "parent-child" {
+					blockers = []string{dep.DependsOnID}
+					break
+				}
+			}
+		}
+		if len(blockers) == 0 {
+			continue
+		}
+		out = append(out, map[string]any{
+			"id":               row.id,
+			"title":            row.id,
+			"status":           "open",
+			"blocked_by":       blockers,
+			"blocked_by_count": len(blockers),
+		})
+	}
+	return json.Marshal(out)
+}
+
 func (f *fakeBdLedger) renderDepRecords(ids []string) ([]byte, error) {
 	wanted := make(map[string]bool, len(ids))
 	for _, id := range ids {
@@ -242,9 +312,10 @@ func (f *fakeBdLedger) callsNamed(sub ...string) [][]string {
 // extended with the tier that actually carries molecule steps.
 //
 //	blocker (open) <-- blocks -- parent <-- parent-child -- child
-//	gcg-offscope (not in this scope) <-- blocks -- xstore
+//	gcg-offscope (in bd's ledger, not in this cache) <-- blocks -- xstore
 //	parent <-- parent-child -- wisp-step   (ephemeral)
 //	unrelated <-- blocks -- wisp-gate      (ephemeral)
+//	unrelated <-- waits-for -- gate-open   (gate already opened)
 //
 // child and wisp-step carry no blocking dep of their own, so the cache's
 // dependency-derived predicate calls them ready while bd marks them
@@ -254,6 +325,24 @@ func (f *fakeBdLedger) callsNamed(sub ...string) [][]string {
 // it too. wisp-gate is the wisp tier's blocking edge, so the tier bd serves
 // through `bd query` rather than `bd list` also has a row that can prove — and
 // disprove — the projection. unrelated is the control both models call ready.
+//
+// Two rows exist so the projection can be disproved in BOTH directions.
+//
+// gcg-offscope is xstore's blocker as a row of bd's ledger rather than as a
+// dangling id. That is the only internally consistent way to state what the
+// fixture claims: bd's recompute joins the target table
+// (issueops.shouldBeBlockedDisjunction), so a dep onto an id bd cannot see
+// leaves is_blocked = 0 and bd's ready OFFERS the row. A cross-store blocker is
+// therefore a row bd holds and gc's class routing keeps out of THIS cache,
+// which is exactly what offscope models. It is itself blocked so bd's ready
+// hides it too, keeping every backing-verdict assertion in this file unchanged.
+//
+// gate-open is the reverse disagreement, and it is what makes "absence means
+// not blocked" falsifiable. Its waits-for gate has opened, so bd's column reads
+// is_blocked = 0 and bd's ready OFFERS it — while the cache's direct-dep
+// predicate, which calls any non-closed blocking target a blocker, would HIDE
+// it. A projection that leaves unblocked rows nil instead of writing false
+// falls back to that predicate and starves the row.
 func bdReadyDisagreementLedger() *fakeBdLedger {
 	return &fakeBdLedger{
 		depListRefusal: `exit status 1: Error: operation "IssueRelations" not supported by the postgres backend`,
@@ -262,7 +351,9 @@ func bdReadyDisagreementLedger() *fakeBdLedger {
 			{id: "bd-parent", blocked: true, deps: []Dep{{IssueID: "bd-parent", DependsOnID: "bd-blocker", Type: "blocks"}}},
 			{id: "bd-child", blocked: true, deps: []Dep{{IssueID: "bd-child", DependsOnID: "bd-parent", Type: "parent-child"}}},
 			{id: "bd-xstore", blocked: true, deps: []Dep{{IssueID: "bd-xstore", DependsOnID: "gcg-offscope", Type: "blocks"}}},
+			{id: "gcg-offscope", offscope: true, blocked: true, deps: []Dep{{IssueID: "gcg-offscope", DependsOnID: "bd-blocker", Type: "blocks"}}},
 			{id: "bd-unrelated"},
+			{id: "bd-gate-open", deps: []Dep{{IssueID: "bd-gate-open", DependsOnID: "bd-unrelated", Type: "waits-for"}}},
 			{id: "bd-wisp-step", ephemeral: true, blocked: true, deps: []Dep{{IssueID: "bd-wisp-step", DependsOnID: "bd-parent", Type: "parent-child"}}},
 			{id: "bd-wisp-gate", ephemeral: true, blocked: true, deps: []Dep{{IssueID: "bd-wisp-gate", DependsOnID: "bd-unrelated", Type: "blocks"}}},
 		},
@@ -271,7 +362,28 @@ func bdReadyDisagreementLedger() *fakeBdLedger {
 
 func primedBdCache(t *testing.T, ledger *fakeBdLedger) (*CachingStore, *BdStore) {
 	t.Helper()
-	store := NewBdStore(t.TempDir(), ledger.run)
+	return primeBdCacheOverScope(t, ledger, t.TempDir())
+}
+
+// primedBdCacheOnUnimplementedBackend primes the same fixture over a scope whose
+// metadata names a backend gc does not register — maintainer-city's shape. That
+// scope's `bd sql` is withheld by the backend gate, so its is_blocked column can
+// only come from `bd blocked`.
+func primedBdCacheOnUnimplementedBackend(t *testing.T, ledger *fakeBdLedger) (*CachingStore, *BdStore) {
+	t.Helper()
+	scope := t.TempDir()
+	writeScopeMetadata(t, scope, map[string]any{
+		"database":   "dolt",
+		"backend":    "postgres",
+		"dolt_mode":  "server",
+		"project_id": "d2e95604-e869-478c-ad1a-ddee6e8bc3fc",
+	})
+	return primeBdCacheOverScope(t, ledger, scope)
+}
+
+func primeBdCacheOverScope(t *testing.T, ledger *fakeBdLedger, scope string) (*CachingStore, *BdStore) {
+	t.Helper()
+	store := NewBdStore(scope, ledger.run)
 	cache := NewCachingStoreForTest(store, nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
@@ -298,7 +410,7 @@ func TestBdBackedCacheServesTheCompleteReadyProjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadyContext error = %v, want rows served from cache", err)
 	}
-	want := wantReadyIDs("bd-blocker", "bd-unrelated")
+	want := wantReadyIDs("bd-blocker", "bd-gate-open", "bd-unrelated")
 	if got := sortedIDs(rows); !equalIDs(got, want) {
 		t.Fatalf("ReadyContext = %v, want %v", got, want)
 	}
@@ -345,10 +457,59 @@ func TestBdBackedCachedReadyNeverOffersWorkTheBackingHides(t *testing.T) {
 	t.Run("after prime", func(t *testing.T) {
 		ledger := bdReadyDisagreementLedger()
 		cache, store := primedBdCache(t, ledger)
-		stage := newReadyInvariantStage(t, cache, bdLiveReady(t, store, "bd-blocker", "bd-unrelated"))
+		stage := newReadyInvariantStage(t, cache, bdLiveReady(t, store, "bd-blocker", "bd-gate-open", "bd-unrelated"))
 
 		stage.assertNeverExceedsBacking("after prime", bdReadyDisagreementHidden)
 		stage.assertStillAnswers("after prime")
+	})
+
+	// The same invariant on the scope whose column comes from `bd blocked`
+	// instead of `bd sql` — maintainer-city's shape, where the backend gate
+	// withholds `bd sql` because gc does not implement the backend.
+	//
+	// Both halves are load-bearing and they pull in opposite directions.
+	// assertNeverExceedsBacking would pass vacuously on a cache that declined
+	// every readiness read, which is exactly today's behavior and exactly what
+	// this door exists to stop; assertStillAnswers is what makes the subset
+	// claim mean something. Red before the fix:
+	//
+	//	CachedReady declined (bd blocked door, after prime): a backing that can answer is_blocked must keep serving readiness from cache
+	t.Run("bd blocked door", func(t *testing.T) {
+		ledger := bdReadyDisagreementLedger()
+		cache, store := primedBdCacheOnUnimplementedBackend(t, ledger)
+		stage := newReadyInvariantStage(t, cache, bdLiveReady(t, store, "bd-blocker", "bd-gate-open", "bd-unrelated"))
+
+		stage.assertNeverExceedsBacking("bd blocked door, after prime", bdReadyDisagreementHidden)
+		stage.assertStillAnswers("bd blocked door, after prime")
+
+		// The gate's whole reason for withholding `bd sql` on an unregistered
+		// backend is that gc cannot assume that backend's SCHEMA. So the door
+		// must not have been opened by accident.
+		if calls := ledger.callsNamed("sql"); len(calls) != 0 {
+			t.Fatalf("an unimplemented backend spent %v; the schema assumption behind `bd sql` is exactly what the gate refuses", calls)
+		}
+		if calls := ledger.callsNamed("blocked"); len(calls) == 0 {
+			t.Fatal("no `bd blocked` was spent; the column cannot have come from bd")
+		}
+
+		// Absence means NOT BLOCKED, written rather than left nil. bd-gate-open
+		// is the row that can tell the difference: its waits-for gate has
+		// opened, so bd offers it, while the direct-dependency predicate a nil
+		// verdict falls back to calls its open target a blocker and hides it.
+		if blocked := cachedIsBlockedForTest(cache, "bd-gate-open"); blocked == nil || *blocked {
+			t.Fatalf("cached is_blocked for bd-gate-open = %v, want false written explicitly: a nil verdict hands the row to the weaker predicate, which starves it", blocked)
+		}
+		for _, id := range []string{"bd-child", "bd-wisp-step", "bd-xstore"} {
+			if blocked := cachedIsBlockedForTest(cache, id); blocked == nil || !*blocked {
+				t.Fatalf("cached is_blocked for %s = %v, want bd's true", id, blocked)
+			}
+		}
+
+		// One subprocess per prime, not one per bead: the door is a whole-scope
+		// projection exactly as `bd sql` was.
+		if calls := ledger.callsNamed("blocked"); len(calls) != 1 {
+			t.Fatalf("prime spent %d `bd blocked` calls, want exactly 1 for the whole scope: %v", len(calls), calls)
+		}
 	})
 
 	// A write-through refresh (CachingStore.Update -> backing.Get) reinstalls the
@@ -356,7 +517,7 @@ func TestBdBackedCachedReadyNeverOffersWorkTheBackingHides(t *testing.T) {
 	t.Run("after update", func(t *testing.T) {
 		ledger := bdReadyDisagreementLedger()
 		cache, store := primedBdCache(t, ledger)
-		stage := newReadyInvariantStage(t, cache, bdLiveReady(t, store, "bd-blocker", "bd-unrelated"))
+		stage := newReadyInvariantStage(t, cache, bdLiveReady(t, store, "bd-blocker", "bd-gate-open", "bd-unrelated"))
 
 		for _, id := range []string{"bd-child", "bd-xstore"} {
 			assignee := "agent"
@@ -381,7 +542,7 @@ func TestBdBackedCachedReadyNeverOffersWorkTheBackingHides(t *testing.T) {
 	t.Run("after dirty overlay ready", func(t *testing.T) {
 		ledger := bdReadyDisagreementLedger()
 		cache, store := primedBdCache(t, ledger)
-		stage := newReadyInvariantStage(t, cache, bdLiveReady(t, store, "bd-blocker", "bd-unrelated"))
+		stage := newReadyInvariantStage(t, cache, bdLiveReady(t, store, "bd-blocker", "bd-gate-open", "bd-unrelated"))
 
 		markDirtyForTest(cache, "bd-child")
 		if _, err := cache.Ready(); err != nil {
@@ -664,7 +825,7 @@ func TestBdWithoutTheBlockedColumnSendsReadyToTheLiveVerdict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ready: %v", err)
 	}
-	want := wantReadyIDs("bd-blocker", "bd-unrelated")
+	want := wantReadyIDs("bd-blocker", "bd-gate-open", "bd-unrelated")
 	if got := sortedIDs(rows); !equalIDs(got, want) {
 		t.Fatalf("Ready = %v, want %v: the transitively blocked rows must not be offered", got, want)
 	}
@@ -684,7 +845,16 @@ func TestBdWithoutTheBlockedColumnSendsReadyToTheLiveVerdict(t *testing.T) {
 	if !ok {
 		t.Fatal("CachedList declined: the degrade must not make non-readiness reads unavailable")
 	}
-	if len(cached) != len(oldBd.rows) {
-		t.Fatalf("CachedList returned %d rows, want %d", len(cached), len(oldBd.rows))
+	// Every row bd hands THIS scope, which is every row but the relocated one:
+	// gc routes `gcg-` beads to another store, so `bd list`/`bd query` never
+	// return them here.
+	resident := 0
+	for _, row := range oldBd.rows {
+		if !row.offscope {
+			resident++
+		}
+	}
+	if len(cached) != resident {
+		t.Fatalf("CachedList returned %d rows, want %d", len(cached), resident)
 	}
 }

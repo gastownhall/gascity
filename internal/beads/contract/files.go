@@ -42,10 +42,14 @@ type ConfigState struct {
 	EndpointStatus EndpointStatus
 	DoltHost       string
 	DoltPort       string
+	DoltSocket     string
 	DoltUser       string
 	// DoltMode is the beads dolt.mode value to write to config.yaml.
-	// When non-empty, EnsureCanonicalConfig writes dolt.mode to the canonical config.
-	// When empty, the existing dolt.mode value is preserved.
+	// When non-empty, EnsureCanonicalConfig writes dolt.mode to the canonical
+	// config. When empty, it deletes the key — the same own-it-or-drop-it rule
+	// the endpoint fields above follow. metadata.json is the topology authority
+	// (D1); a config.yaml mode nobody claims is stale mirror state, and the
+	// only writer that could have cleared it is this one.
 	DoltMode string
 	Dolt     DoltConfig
 	// CustomTypes is a caller-supplied list of bd custom bead types to ensure
@@ -118,14 +122,32 @@ func (e *MetadataParseError) Error() string {
 // Unwrap exposes the typed cause for errors.Is and errors.As.
 func (e *MetadataParseError) Unwrap() error { return e.Err }
 
+// deprecatedMetadataKeys are the endpoint keys gc itself used to write into
+// metadata.json and no longer reads. Canonicalisation always removes them: gc
+// records its own endpoints in config.yaml, so a copy here is a leftover.
 var deprecatedMetadataKeys = []string{
 	"dolt_host",
 	"dolt_user",
 	"dolt_password",
+	"dolt_port",
+}
+
+// persistedServerBindingKeys are bd's record of the server a direct scope is
+// bound to, not gc's. `bd init --server --external --server-host <h>
+// --server-port <p>` writes them and nothing else on disk carries that
+// endpoint — ReadPersistedServerBinding is the reader, and for a bd-owned
+// direct scope it is the whole upstream.
+//
+// Canonicalisation removes them only when what is on disk is not a usable
+// binding, i.e. a fragment gc can scrub without destroying an endpoint it
+// cannot put back. A real binding is left alone whoever owns the scope: for a
+// scope gc owns it is inert (ResolveDoltConnectionTarget consults the binding
+// only for a scope that carries no gc endpoint keys), and for a scope bd owns
+// it is the only record of where the beads live.
+var persistedServerBindingKeys = []string{
 	"dolt_server_host",
 	"dolt_server_port",
 	"dolt_server_user",
-	"dolt_port",
 }
 
 // crossBackendKeysToScrub returns the on-disk metadata keys that should be
@@ -352,6 +374,112 @@ func ReadDoltMode(fs fsys.FS, path string) (string, bool, error) {
 	return "", false, nil
 }
 
+// ReadMetadataDoltDataDir reports the dolt_data_dir recorded in metadata.json
+// at path, if any. Beads resolves this key relative to the scope's .beads
+// directory (internal/doltserver physical_root.go, configfile.Config.DatabasePath)
+// and uses it to root a scope's Dolt store somewhere other than
+// <scope>/.beads/dolt. Same tolerant reader contract as ReadDoltMode.
+//
+// The value is trimmed, which suits gc's own writers: SetMetadataDoltDataDir
+// trims before writing, so every value gc put there is already trimmed, and the
+// callers that compare one against a path they built want the tidy form. A
+// caller that has to resolve the same directory bd resolves must not trim —
+// see ReadMetadataDoltDataDirRaw.
+func ReadMetadataDoltDataDir(fs fsys.FS, path string) (string, bool, error) {
+	value, ok, err := ReadMetadataDoltDataDirRaw(fs, path)
+	if err != nil || !ok {
+		return "", false, err
+	}
+	if trimmed := strings.TrimSpace(value); trimmed != "" {
+		return trimmed, true, nil
+	}
+	return "", false, nil
+}
+
+// ReadMetadataDoltDataDirRaw reports dolt_data_dir exactly as metadata.json
+// decodes it, whitespace included.
+//
+// beads takes the value as written: configfile.Config.GetDoltDataDir returns
+// c.DoltDataDir straight off the decoded struct and DatabasePath joins it to
+// .beads, so {"dolt_data_dir":" elsewhere/dolt"} roots a scope at
+// "<.beads>/ elsewhere/dolt" — a directory whose name begins with a space. A
+// reader that trims resolves "<.beads>/elsewhere/dolt" instead, finds no
+// proxy.pid there, and reports no_record for a proxy that is serving. Same file
+// as bd's config (configfile.ConfigFileName is "metadata.json"), so this is not
+// a hypothetical second spelling of the key.
+func ReadMetadataDoltDataDirRaw(fs fsys.FS, path string) (string, bool, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", false, nil
+	}
+	if value := decodedString(meta["dolt_data_dir"]); value != "" {
+		return value, true, nil
+	}
+	return "", false, nil
+}
+
+// SetMetadataDoltDataDir records a relative dolt_data_dir in metadata.json,
+// leaving every other key untouched.
+//
+// Relative is not a preference: beads' configfile.Config.Save silently drops an
+// absolute dolt_data_dir, and `bd migrate` saves the config partway through the
+// mode flip — an absolute value would vanish mid-migration and leave the scope
+// rooted at an empty directory. Refuse rather than write one.
+func SetMetadataDoltDataDir(fs fsys.FS, path, dataDir string) error {
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return fmt.Errorf("empty dolt_data_dir for %s", path)
+	}
+	if filepath.IsAbs(dataDir) {
+		return fmt.Errorf("dolt_data_dir %q for %s must be relative to the scope's .beads directory; beads drops absolute values on save", dataDir, path)
+	}
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	meta := map[string]any{}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return &MetadataParseError{Path: path, Reason: fmt.Sprintf("invalid metadata.json: %v", err)}
+	}
+	if trimmedString(meta["dolt_data_dir"]) == dataDir {
+		return nil
+	}
+	meta["dolt_data_dir"] = dataDir
+	encoded, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return err
+	}
+	return fsys.WriteFileAtomic(fs, path, append(encoded, '\n'), canonicalScopeFilePerm(fs, path))
+}
+
+// ReadMetadataBackend reports the non-empty backend marker in metadata.json.
+// Malformed JSON and an absent file report no marker so callers deciding
+// whether to rewrite a scope can preserve their existing repair policy.
+func ReadMetadataBackend(fs fsys.FS, path string) (string, bool, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", false, nil
+	}
+	if value := trimmedString(meta["backend"]); value != "" {
+		return value, true, nil
+	}
+	return "", false, nil
+}
+
 // LoadMetadataState parses .beads/metadata.json at path and returns the
 // canonical MetadataState if the file exists and validates.
 //
@@ -400,6 +528,27 @@ func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 	}
 
 	return state, true, nil
+}
+
+// canonicalScopeFilePerm reports the mode a canonical-file rewrite must stamp
+// on path.
+//
+// [fsys.WriteFileAtomic] publishes a fresh inode by rename, so it applies the
+// mode it is handed rather than inheriting the replaced file's — unlike the
+// truncate-in-place [fsys.FS.WriteFile] these writers used before, whose perm
+// argument only takes effect on create. bd creates both .beads/config.yaml and
+// .beads/metadata.json 0600 and re-saves metadata.json 0600 partway through
+// `bd migrate`, so canonicalising a bd-created scope would otherwise widen
+// those files to 0644 on every boot-door pass, every `gc rig set-endpoint`,
+// and every migrate-proxied turn. Preserve whatever mode is already on disk;
+// fall back to gc's own 0644 default only when the file does not exist yet.
+func canonicalScopeFilePerm(fs fsys.FS, path string) os.FileMode {
+	const defaultPerm os.FileMode = 0o644
+	info, err := fs.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return defaultPerm
+	}
+	return info.Mode().Perm()
 }
 
 // EnsureCanonicalConfig rewrites config.yaml into canonical GC-managed form.
@@ -471,6 +620,12 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 	} else {
 		changed = deleteKeys(root, "dolt.port") || changed
 	}
+	socket := strings.TrimSpace(state.DoltSocket)
+	if socket != "" {
+		changed = setString(root, "dolt.socket", socket) || changed
+	} else {
+		changed = deleteKeys(root, "dolt.socket") || changed
+	}
 	if user != "" {
 		changed = setString(root, "dolt.user", user) || changed
 	} else {
@@ -479,6 +634,13 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 
 	if mode := strings.TrimSpace(state.DoltMode); mode != "" {
 		changed = setString(root, "dolt.mode", mode) || changed
+	} else {
+		// Same rule as host/port/socket/user: a canonical state that does not
+		// set the mode means the key does not belong in the file. Leaving it
+		// meant a scope bd had migrated to proxied-server kept gc's
+		// pre-migration `dolt.mode: server` forever, with no writer able to
+		// clear it.
+		changed = deleteKeys(root, "dolt.mode") || changed
 	}
 
 	if len(state.CustomTypes) > 0 {
@@ -502,18 +664,20 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 	if err != nil {
 		return false, err
 	}
-	return true, fs.WriteFile(path, encoded, 0o644)
+	return true, fsys.WriteFileAtomic(fs, path, encoded, canonicalScopeFilePerm(fs, path))
 }
 
 // EnsureCanonicalMetadata rewrites metadata.json into canonical GC-managed form.
 func EnsureCanonicalMetadata(fs fsys.FS, path string, state MetadataState) (bool, error) {
 	meta := map[string]any{}
+	boundToPersistedServer := false
 	data, err := fs.ReadFile(path)
 	switch {
 	case err == nil:
 		if err := json.Unmarshal(data, &meta); err != nil {
 			meta = map[string]any{}
 		}
+		_, boundToPersistedServer = persistedServerBinding(data)
 	case os.IsNotExist(err):
 	case err != nil:
 		return false, err
@@ -541,6 +705,14 @@ func EnsureCanonicalMetadata(fs fsys.FS, path string, state MetadataState) (bool
 			changed = true
 		}
 	}
+	if !boundToPersistedServer {
+		for _, key := range persistedServerBindingKeys {
+			if _, ok := meta[key]; ok {
+				delete(meta, key)
+				changed = true
+			}
+		}
+	}
 	for _, key := range crossBackendKeysToScrub(strings.TrimSpace(state.Backend)) {
 		if _, ok := meta[key]; ok {
 			delete(meta, key)
@@ -564,7 +736,7 @@ func EnsureCanonicalMetadata(fs fsys.FS, path string, state MetadataState) (bool
 		return false, err
 	}
 	encoded = append(encoded, '\n')
-	return true, fs.WriteFile(path, encoded, 0o644)
+	return true, fsys.WriteFileAtomic(fs, path, encoded, canonicalScopeFilePerm(fs, path))
 }
 
 func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (bool, error) {
@@ -628,6 +800,8 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 	}
 	if mode := strings.TrimSpace(state.DoltMode); mode != "" {
 		replacements["dolt.mode"] = "dolt.mode: " + mode
+	} else {
+		deletions["dolt.mode"] = struct{}{}
 	}
 	if len(state.CustomTypes) > 0 {
 		// Same never-narrow union as the main path, but sourced from the raw
@@ -692,6 +866,7 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 		"gc.endpoint_status",
 		"dolt.host",
 		"dolt.port",
+		"dolt.socket",
 		"dolt.user",
 		"dolt.mode",
 		"types.custom",
@@ -714,7 +889,7 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 	if len(out) == 0 || strings.TrimSpace(out[len(out)-1]) != "" {
 		out = append(out, "")
 	}
-	return true, fs.WriteFile(path, []byte(strings.Join(out, "\n")), 0o644)
+	return true, fsys.WriteFileAtomic(fs, path, []byte(strings.Join(out, "\n")), canonicalScopeFilePerm(fs, path))
 }
 
 // parseCustomTypesValue splits a raw `types.custom` value ("a,b,c") into
@@ -930,7 +1105,9 @@ func readConfigStateFromData(data []byte) ConfigState {
 		EndpointStatus: endpointStatusValue(scanConfigValueFromData(data, "gc.endpoint_status:")),
 		DoltHost:       scanConfigValueFromData(data, "dolt.host:"),
 		DoltPort:       scanConfigValueFromData(data, "dolt.port:"),
+		DoltSocket:     scanConfigValueFromData(data, "dolt.socket:"),
 		DoltUser:       scanConfigValueFromData(data, "dolt.user:"),
+		DoltMode:       scanConfigValueFromData(data, "dolt.mode:"),
 		Dolt:           readDoltConfigFromDataOrEmpty(data),
 	}
 }
@@ -942,7 +1119,9 @@ func readConfigStateFromRoot(root *yaml.Node) ConfigState {
 		EndpointStatus: endpointStatusValue(configValue(root, "gc.endpoint_status")),
 		DoltHost:       configValue(root, "dolt.host"),
 		DoltPort:       configValue(root, "dolt.port"),
+		DoltSocket:     configValue(root, "dolt.socket"),
 		DoltUser:       configValue(root, "dolt.user"),
+		DoltMode:       configValue(root, "dolt.mode"),
 		Dolt:           readDoltConfigFromRoot(root),
 	}
 }
@@ -1252,11 +1431,18 @@ func deleteKeys(root *yaml.Node, keys ...string) bool {
 }
 
 func trimmedString(value any) string {
-	trimmed := strings.TrimSpace(fmt.Sprint(value))
-	if trimmed == "<nil>" {
+	return strings.TrimSpace(decodedString(value))
+}
+
+// decodedString renders a decoded JSON value as the string beads would have in
+// the corresponding struct field, without trimming: a caller resolving a path
+// beads resolves has to keep the whitespace beads keeps.
+func decodedString(value any) string {
+	rendered := fmt.Sprint(value)
+	if strings.TrimSpace(rendered) == "<nil>" {
 		return ""
 	}
-	return trimmed
+	return rendered
 }
 
 // repairMalformedConfigLines splits top-level config lines that have been

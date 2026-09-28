@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 type rowsErrorStore struct {
@@ -90,6 +91,129 @@ func TestLastRunUsesRowsFromPartialTierError(t *testing.T) {
 	}
 	if !got.Equal(want) {
 		t.Fatalf("LastRun() = %s, want %s from surviving rows", got, want)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_UsesStoreResult(t *testing.T) {
+	want := time.Date(2026, 6, 9, 0, 23, 0, 0, time.UTC)
+	storeFn := func(string) (time.Time, error) { return want, nil }
+	ep := events.NewFake()
+	// Event with a later timestamp — must NOT be chosen when store succeeds.
+	ep.Record(events.Event{
+		Type:    events.OrderFired,
+		Subject: "digest-generate",
+		Ts:      want.Add(time.Hour),
+	})
+
+	got, err := LastRunFuncWithEventFallback(storeFn, ep)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Equal(want) {
+		t.Fatalf("got %s, want store result %s", got, want)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_FallsBackToEvents(t *testing.T) {
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+	ep := events.NewFake()
+	want := time.Date(2026, 6, 9, 0, 23, 0, 0, time.UTC)
+	ep.Record(events.Event{
+		Type:    events.OrderFired,
+		Subject: "digest-generate",
+		Ts:      want,
+	})
+
+	got, err := LastRunFuncWithEventFallback(storeFn, ep)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Equal(want) {
+		t.Fatalf("got %s, want event timestamp %s", got, want)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_FallsBackToLatestEvent(t *testing.T) {
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+	ep := events.NewFake()
+	older := time.Date(2026, 6, 8, 0, 23, 0, 0, time.UTC)
+	newer := time.Date(2026, 6, 9, 0, 23, 0, 0, time.UTC)
+	ep.Record(events.Event{Type: events.OrderFired, Subject: "digest-generate", Ts: older})
+	ep.Record(events.Event{Type: events.OrderFired, Subject: "digest-generate", Ts: newer})
+
+	got, err := LastRunFuncWithEventFallback(storeFn, ep)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Equal(newer) {
+		t.Fatalf("got %s, want newest event %s", got, newer)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_IgnoresOtherOrderEvents(t *testing.T) {
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+	ep := events.NewFake()
+	ep.Record(events.Event{
+		Type:    events.OrderFired,
+		Subject: "other-order",
+		Ts:      time.Date(2026, 6, 9, 0, 23, 0, 0, time.UTC),
+	})
+
+	got, err := LastRunFuncWithEventFallback(storeFn, ep)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.IsZero() {
+		t.Fatalf("got %s, want zero (event is for a different order)", got)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_NilProviderReturnsStoreResult(t *testing.T) {
+	want := time.Date(2026, 6, 9, 0, 23, 0, 0, time.UTC)
+	storeFn := func(string) (time.Time, error) { return want, nil }
+
+	got, err := LastRunFuncWithEventFallback(storeFn, nil)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Equal(want) {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_NilProviderZeroStore(t *testing.T) {
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+
+	got, err := LastRunFuncWithEventFallback(storeFn, nil)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.IsZero() {
+		t.Fatalf("got %s, want zero (nil provider, no store result)", got)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_StoreErrorPropagated(t *testing.T) {
+	wantErr := errors.New("store error")
+	storeFn := func(string) (time.Time, error) { return time.Time{}, wantErr }
+	ep := events.NewFake()
+
+	_, err := LastRunFuncWithEventFallback(storeFn, ep)("digest-generate")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("got err %v, want %v", err, wantErr)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_EventErrorFailsOpen(t *testing.T) {
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+	ep := events.NewFailFake()
+
+	got, err := LastRunFuncWithEventFallback(storeFn, ep)("digest-generate")
+	if err != nil {
+		t.Fatalf("expected nil error (fail-open), got: %v", err)
+	}
+	if !got.IsZero() {
+		t.Fatalf("got %s, want zero time (fail-open on broken provider)", got)
 	}
 }
 

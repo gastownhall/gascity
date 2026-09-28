@@ -247,6 +247,78 @@ func countStepIDs(steps []*Step, counts map[string]int) {
 	}
 }
 
+// substituteDescriptionPreservingPath applies substitute to every description
+// segment except the already-resolved oversized description_file path.
+func substituteDescriptionPreservingPath(description, resolvedPath string, substitute func(string) string) string {
+	if resolvedPath == "" {
+		return substitute(description)
+	}
+
+	const token = "\x00gc-description-file-resolved-path\x00"
+	protected := strings.ReplaceAll(description, resolvedPath, token)
+	return strings.ReplaceAll(substitute(protected), token, resolvedPath)
+}
+
+// substituteResolvedStubVars resolves both {{name}} values in the generated
+// Formula Variables block and ordinary {name} expansion placeholders without
+// recursively substituting inside the resolved values themselves.
+func substituteResolvedStubVars(value string, vars map[string]string) string {
+	var replacements []string
+	protected := varPattern.ReplaceAllStringFunc(value, func(match string) string {
+		name := match[2 : len(match)-2]
+		replacement := match
+		if resolved, ok := vars[name]; ok {
+			replacement = resolved
+		}
+		token := fmt.Sprintf("\x00gc-description-formula-var-%d\x00", len(replacements))
+		replacements = append(replacements, replacement)
+		return token
+	})
+	protected = substituteVars(protected, vars)
+	for i, replacement := range replacements {
+		token := fmt.Sprintf("\x00gc-description-formula-var-%d\x00", i)
+		protected = strings.ReplaceAll(protected, token, replacement)
+	}
+	return protected
+}
+
+// substituteExpandedDescription expands all non-path portions of a template
+// description and carries the protected path through target-description
+// composition so a later expansion can protect it again.
+func substituteExpandedDescription(tmpl, target *Step, vars map[string]string) (string, string) {
+	const targetPathToken = "\x00gc-target-description-file-resolved-path\x00"
+	carriesResolvedTargetDescription := target.DescriptionFileResolvedPath != "" &&
+		strings.Contains(tmpl.Description, "{target.description}")
+
+	targetForSubstitution := *target
+	if target.DescriptionFileResolvedPath != "" {
+		targetForSubstitution.Description = strings.ReplaceAll(
+			target.Description,
+			target.DescriptionFileResolvedPath,
+			targetPathToken,
+		)
+	}
+
+	description := substituteDescriptionPreservingPath(
+		tmpl.Description,
+		tmpl.DescriptionFileResolvedPath,
+		func(value string) string {
+			value = substituteTargetPlaceholders(value, &targetForSubstitution)
+			if tmpl.DescriptionFileResolvedPath != "" || carriesResolvedTargetDescription {
+				return substituteResolvedStubVars(value, vars)
+			}
+			return substituteVars(value, vars)
+		},
+	)
+	description = strings.ReplaceAll(description, targetPathToken, target.DescriptionFileResolvedPath)
+
+	resolvedPath := tmpl.DescriptionFileResolvedPath
+	if resolvedPath == "" && carriesResolvedTargetDescription {
+		resolvedPath = target.DescriptionFileResolvedPath
+	}
+	return description, resolvedPath
+}
+
 // expandStep expands a target step using the given template.
 // Returns the expanded steps with placeholders substituted.
 // The depth parameter tracks recursion depth for children; if it exceeds
@@ -264,7 +336,7 @@ func expandStep(target *Step, template []*Step, depth int, vars map[string]strin
 		expanded := cloneStep(tmpl)
 		expanded.ID = substituteVars(substituteTargetPlaceholders(tmpl.ID, target), vars)
 		expanded.Title = substituteVars(substituteTargetPlaceholders(tmpl.Title, target), vars)
-		expanded.Description = substituteVars(substituteTargetPlaceholders(tmpl.Description, target), vars)
+		expanded.Description, expanded.DescriptionFileResolvedPath = substituteExpandedDescription(tmpl, target, vars)
 		expanded.Notes = substituteVars(substituteTargetPlaceholders(tmpl.Notes, target), vars)
 		expanded.Assignee = substituteVars(tmpl.Assignee, vars)
 		// Keep condition expressions intact for the normal condition-filtering

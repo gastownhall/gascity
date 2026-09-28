@@ -34,6 +34,7 @@ func (ExecutionStepStalledPayload) IsEventPayload() {}
 
 func init() {
 	RegisterPayload(ExecutionWorkAssociated, NoPayload{})
+	RegisterPayload(ExecutionRunAnchored, NoPayload{})
 	RegisterPayload(ExecutionStepDefined, NoPayload{})
 	RegisterPayload(ExecutionStepStarted, NoPayload{})
 	RegisterPayload(ExecutionStepCompleted, NoPayload{})

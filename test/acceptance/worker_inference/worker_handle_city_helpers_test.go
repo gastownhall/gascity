@@ -23,11 +23,12 @@ import (
 //
 // The set mirrors the hook-managed providers in
 // internal/worker/provider_resume_test.go (hook-time GC_PROVIDER_SESSION_ID
-// is authoritative; no derived resume keys): opencode, mimocode, kimi, pi,
-// and antigravity. omp has no live harness profile today.
+// is authoritative; no derived resume keys): cursor, opencode, mimocode,
+// kimi, pi, and antigravity. omp has no live harness profile today.
 func profileUsesHookSessionKeyPersistence(profile workerpkg.Profile) bool {
 	switch profile {
-	case workerpkg.ProfileOpenCodeTmuxCLI,
+	case workerpkg.ProfileCursorTmuxCLI,
+		workerpkg.ProfileOpenCodeTmuxCLI,
 		workerpkg.ProfileMimoCodeTmuxCLI,
 		workerpkg.ProfileKimiTmuxCLI,
 		workerpkg.ProfilePiTmuxCLI,

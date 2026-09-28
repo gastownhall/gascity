@@ -1,0 +1,38 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "featureflags",
+    srcs = ["featureflags.go"],
+    importpath = "github.com/gastownhall/gascity/internal/featureflags",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/config",
+        "//internal/formula",
+        "//internal/molecule",
+    ],
+)
+
+go_test(
+    name = "featureflags_test",
+    srcs = [
+        "featureflags_test.go",
+        "testenv_import_test.go",
+    ],
+    deps = [
+        ":featureflags",
+        "//internal/config",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

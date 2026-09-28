@@ -200,6 +200,63 @@ func TestResolveWorkDirPathStrictRejectsInvalidTemplate(t *testing.T) {
 	}
 }
 
+// TestResolveWorkDirPathStrictIsolatesDynamicInstancesOfDirlessWorkDirlessAgent
+// is the ga-2c8f5o regression guard folded into ga-61igzb's fresh port of
+// pool_isolation.go: an agent with neither Dir nor WorkDir set falls through
+// to the bare city path today regardless of qualifiedName, so a dynamically
+// named instance (a wisp, or any alias distinct from the agent's own
+// canonical identity) silently shares a working directory with every other
+// such instance the moment more than one exists concurrently.
+func TestResolveWorkDirPathStrictIsolatesDynamicInstancesOfDirlessWorkDirlessAgent(t *testing.T) {
+	cityPath := t.TempDir()
+	a := config.Agent{Name: "drifter"}
+
+	basePath, err := ResolveWorkDirPathStrict(cityPath, "gastown", a.QualifiedName(), a, nil)
+	if err != nil {
+		t.Fatalf("resolving canonical identity path: %v", err)
+	}
+
+	instanceName := a.QualifiedInstanceName("drifter-wisp-7")
+	instancePath, err := ResolveWorkDirPathStrict(cityPath, "gastown", instanceName, a, nil)
+	if err != nil {
+		t.Fatalf("resolving dynamic instance path: %v", err)
+	}
+
+	if instancePath == basePath {
+		t.Fatalf("dynamic instance %q shares a work_dir with canonical identity %q (both resolved to %q); "+
+			"a dir-less, work_dir-less agent's dynamic instances must get isolated working directories",
+			instanceName, a.QualifiedName(), basePath)
+	}
+}
+
+// TestResolveWorkDirPathStrictDoesNotAutoIsolateExplicitPoolAgents locks in
+// the exclusion ga-2c8f5o's fix carries alongside the isolation above: an
+// agent that explicitly signals it may run more than one concurrent instance
+// is left to ValidatePoolWorkDirIsolation's config-time rejection instead of
+// being silently auto-isolated here, which would otherwise mask that
+// misconfiguration.
+func TestResolveWorkDirPathStrictDoesNotAutoIsolateExplicitPoolAgents(t *testing.T) {
+	cityPath := t.TempDir()
+	a := config.Agent{Name: "drifter", MaxActiveSessions: intPtr(3)}
+
+	basePath, err := ResolveWorkDirPathStrict(cityPath, "gastown", a.QualifiedName(), a, nil)
+	if err != nil {
+		t.Fatalf("resolving canonical identity path: %v", err)
+	}
+
+	instanceName := a.QualifiedInstanceName("drifter-3")
+	instancePath, err := ResolveWorkDirPathStrict(cityPath, "gastown", instanceName, a, nil)
+	if err != nil {
+		t.Fatalf("resolving pool instance path: %v", err)
+	}
+
+	if instancePath != basePath {
+		t.Fatalf("explicit pool agent %q got auto-isolated by ResolveWorkDirPathStrict (base=%q instance=%q); "+
+			"ValidatePoolWorkDirIsolation is responsible for rejecting this misconfiguration, not this fallback",
+			a.QualifiedName(), basePath, instancePath)
+	}
+}
+
 func TestExpandCommandTemplateFallsBackToCityDirBase(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "demo-city")
 	agent := config.Agent{Name: "worker"}
@@ -533,5 +590,86 @@ func TestPathContextRigScopedAgentPrefersStampedDir(t *testing.T) {
 	}
 	if ctx.RigRoot != rigPath {
 		t.Fatalf("ctx.RigRoot = %q, want %q", ctx.RigRoot, rigPath)
+	}
+}
+
+// TestPathContextCarriesConfiguredDefaultBranch proves work_dir /
+// session_setup / pre_start templates can hand the rig's configured mainline
+// to setup scripts, so they stop re-probing origin/HEAD and silently anchoring
+// on a stale local HEAD.
+func TestPathContextCarriesConfiguredDefaultBranch(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "thriva")
+	rigs := []config.Rig{{Name: "thriva", Path: rigPath, DefaultBranch: "develop"}}
+	a := config.Agent{Name: "polecat", Dir: "thriva", Scope: "rig"}
+
+	ctx := PathContextForQualifiedName(cityPath, "city", "thriva/polecat", a, rigs)
+	if ctx.DefaultBranch != "develop" {
+		t.Fatalf("ctx.DefaultBranch = %q, want %q", ctx.DefaultBranch, "develop")
+	}
+}
+
+// TestPathContextDefaultBranchEmptyWhenUnconfigured pins the deliberate
+// no-probe contract: an unset default_branch expands to "" rather than a live
+// origin/HEAD lookup. Path expansion runs on reconciler hot paths.
+func TestPathContextDefaultBranchEmptyWhenUnconfigured(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{{Name: "thriva", Path: filepath.Join(cityPath, "rigs", "thriva")}}
+
+	rigScoped := PathContextForQualifiedName(cityPath, "city", "thriva/polecat",
+		config.Agent{Name: "polecat", Dir: "thriva", Scope: "rig"}, rigs)
+	if rigScoped.DefaultBranch != "" {
+		t.Fatalf("rig without default_branch: DefaultBranch = %q, want empty", rigScoped.DefaultBranch)
+	}
+
+	cityScoped := PathContextForQualifiedName(cityPath, "city", "mayor",
+		config.Agent{Name: "mayor", Scope: "city"}, rigs)
+	if cityScoped.DefaultBranch != "" {
+		t.Fatalf("city-scoped agent: DefaultBranch = %q, want empty", cityScoped.DefaultBranch)
+	}
+}
+
+func TestExpandTemplateRendersDefaultBranch(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{
+		{Name: "thriva", Path: filepath.Join(cityPath, "rigs", "thriva"), DefaultBranch: "release/v2"},
+		{Name: "bare", Path: filepath.Join(cityPath, "rigs", "bare")},
+	}
+
+	for _, tc := range []struct {
+		name string
+		rig  string
+		want string
+	}{
+		{name: "configured", rig: "thriva", want: "setup.sh release/v2"},
+		{name: "unset", rig: "bare", want: "setup.sh "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := config.Agent{Name: "polecat", Dir: tc.rig, Scope: "rig"}
+			got, err := ExpandCommandTemplate("setup.sh {{.DefaultBranch}}", cityPath, "city", a, rigs)
+			if err != nil {
+				t.Fatalf("ExpandCommandTemplate: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDefaultBranchForRigName(t *testing.T) {
+	rigs := []config.Rig{
+		{Name: "padded", DefaultBranch: "  develop  "},
+		{Name: "plain", DefaultBranch: "main"},
+	}
+	for _, tc := range []struct{ rig, want string }{
+		{rig: "padded", want: "develop"},
+		{rig: "plain", want: "main"},
+		{rig: "missing", want: ""},
+		{rig: "", want: ""},
+	} {
+		if got := DefaultBranchForRigName(tc.rig, rigs); got != tc.want {
+			t.Errorf("DefaultBranchForRigName(%q) = %q, want %q", tc.rig, got, tc.want)
+		}
 	}
 }

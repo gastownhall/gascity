@@ -20,11 +20,17 @@ import (
 // pending_create_started_at anchors on the same clock the reconciler reads —
 // no manual re-anchoring needed.
 
-// runDesiredPendingCreateTicks reconciles up to ticks one-minute steps and
-// returns the tick at which the pending-create claim was released, or -1.
-func runDesiredPendingCreateTicks(t *testing.T, h *sessionChaosHarness, ticks int) int {
+// desiredPendingCreateMaxTicks bounds runDesiredPendingCreateTicks: every
+// caller wants the same generous one-minute-step ceiling, so it is a
+// constant rather than a parameter no caller varies.
+const desiredPendingCreateMaxTicks = 30
+
+// runDesiredPendingCreateTicks reconciles up to desiredPendingCreateMaxTicks
+// one-minute steps and returns the tick at which the pending-create claim was
+// released, or -1.
+func runDesiredPendingCreateTicks(t *testing.T, h *sessionChaosHarness) int {
 	t.Helper()
-	for i := 1; i <= ticks; i++ {
+	for i := 1; i <= desiredPendingCreateMaxTicks; i++ {
 		h.reconcileTick()
 		h.env.clk.Advance(time.Minute)
 		got, err := h.env.store.Get(h.sessionID)
@@ -56,7 +62,7 @@ func TestDesiredPendingCreateRollsBackWhenStartKeepsFailing(t *testing.T) {
 
 	h.env.sp.StartErrors[h.sessionName] = errors.New("provider start failure")
 
-	if at := runDesiredPendingCreateTicks(t, h, 30); at < 0 {
+	if at := runDesiredPendingCreateTicks(t, h); at < 0 {
 		got, _ := h.env.store.Get(h.sessionID)
 		t.Fatalf("desired pending-create still claimed after 30m: status=%q state=%q claim=%q running=%v",
 			got.Status,
@@ -88,7 +94,7 @@ func TestDesiredQuarantinedPendingCreateRollsBackAfterLeaseExpiry(t *testing.T) 
 	// Healing must come from the rollback, never from a successful start.
 	h.env.sp.StartErrors[h.sessionName] = errors.New("provider start failure")
 
-	at := runDesiredPendingCreateTicks(t, h, 30)
+	at := runDesiredPendingCreateTicks(t, h)
 	if at < 0 {
 		got, _ := h.env.store.Get(h.sessionID)
 		t.Fatalf("quarantined never-started pending-create survived 30m (lease expired at %s): status=%q state=%q claim=%q",
@@ -123,7 +129,7 @@ func TestDesiredCreatingPendingCreateReleasesClaim(t *testing.T) {
 	}
 	h.env.sp.StartErrors[h.sessionName] = errors.New("provider start failure")
 
-	if at := runDesiredPendingCreateTicks(t, h, 30); at < 0 {
+	if at := runDesiredPendingCreateTicks(t, h); at < 0 {
 		got, _ := h.env.store.Get(h.sessionID)
 		t.Fatalf("creating+claim+never-started survived 30m: status=%q state=%q claim=%q",
 			got.Status,

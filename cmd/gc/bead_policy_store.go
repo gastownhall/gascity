@@ -51,8 +51,10 @@ var (
 func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
 
 var (
-	_ beads.BatchDeleter = (*beadPolicyStore)(nil)
-	_ beads.BatchDeleter = (*beadPolicyGraphStore)(nil)
+	_ beads.BatchDeleter      = (*beadPolicyStore)(nil)
+	_ beads.BatchDeleter      = (*beadPolicyGraphStore)(nil)
+	_ beads.DepMetadataReader = (*beadPolicyStore)(nil)
+	_ beads.DepMetadataReader = (*beadPolicyGraphStore)(nil)
 )
 
 func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
@@ -70,6 +72,24 @@ func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store 
 		}
 	}
 	return policyStore
+}
+
+// ProxiedStore hands back the proxied-native split store underneath this policy
+// layer, if there is one.
+//
+// The policy wrapper is the OUTERMOST thing every caller holds — it is applied
+// after the factory, outside the cache — and it embeds the beads.Store
+// interface, which strips everything the interface does not name. That is what
+// left `gc doctor` reporting a handle as native half an hour after it stood
+// down: the wrapper could not be asked. Participating in the seam costs one
+// forward and makes the question answerable from any layer.
+//
+// beadPolicyGraphStore inherits this through its embedded *beadPolicyStore.
+func (s *beadPolicyStore) ProxiedStore() (beads.ProxiedStoreView, bool) {
+	if s == nil {
+		return nil, false
+	}
+	return beads.ProxiedStoreFrom(s.Store)
 }
 
 func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bool) {
@@ -108,6 +128,26 @@ func (s *beadPolicyStore) ReadyContext(ctx context.Context, query ...beads.Ready
 	return reader.ReadyContext(ctx, expandPolicyReadyQuery(query...))
 }
 
+// DepMetadata forwards the inner store's edge-payload read. The policy layer
+// shapes creation and reads by tier; it has nothing to say about what an edge
+// carries, so the answer passes through untouched.
+//
+// Forwarded explicitly for the same reason as Count and ReadyContext — the
+// embedded Store interface strips optional capabilities — but the stakes here
+// are higher than a fallback: a caller that refuses on uncertainty, as the
+// infra-class migration does, would read the wrapper as UNABLE TO ANSWER and
+// refuse a city whose leaf store answers fine. An inner store without the read
+// gets an error rather than ("", false, nil), because "cannot be asked" and
+// "carries nothing" are different answers and collapsing them is what let the
+// migration drop edge payloads silently.
+func (s *beadPolicyStore) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	reader, ok := s.Store.(beads.DepMetadataReader)
+	if !ok {
+		return "", false, fmt.Errorf("reading dependency metadata %s -> %s: policy-wrapped store %T exposes no edge-payload read", issueID, dependsOnID, s.Store)
+	}
+	return reader.DepMetadata(issueID, dependsOnID)
+}
+
 // Count implements beads.Counter with the same read-tier expansion as List.
 // The embedded Store interface does not promote optional capabilities, so
 // the delegation must be explicit. Inner stores without a Counter report
@@ -134,6 +174,27 @@ func (s *beadPolicyStore) DeleteBatch(ids []string) error {
 		return beads.ErrBatchDeleteUnsupported
 	}
 	return deleter.DeleteBatch(ids)
+}
+
+var (
+	_ beads.RowWitness = (*beadPolicyStore)(nil)
+	_ beads.RowWitness = (*beadPolicyGraphStore)(nil)
+)
+
+// SawRows implements beads.RowWitness by forwarding to the wrapped store. Like
+// Count and DeleteBatch, the delegation must be explicit, and here the cost of
+// omitting it is silent rather than loud: an absent optional capability reads
+// to a caller as "this store cannot witness itself", which is a supported
+// state. The store-health row count would keep certifying a zero it has the
+// evidence to refuse, on every controller-opened city, because both the store
+// opener and wrapWithCachingStore hand the API server its city store through
+// this wrapper. Inner stores that cannot witness themselves report no
+// evidence, which leaves the caller on its prior behavior rather than
+// refusing a count. beadPolicyGraphStore embeds *beadPolicyStore, so it
+// forwards through this too.
+func (s *beadPolicyStore) SawRows() bool {
+	witness, ok := s.Store.(beads.RowWitness)
+	return ok && witness.SawRows()
 }
 
 func (s *beadPolicyStore) Handles() beads.StoreHandles {

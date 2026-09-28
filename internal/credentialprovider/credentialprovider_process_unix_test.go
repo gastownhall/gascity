@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 const integrationCredentialJSON = `{"version":"gascity.dev/credential-provider/v1","kind":"Credential","access_token":"opaque-token","authorization_scheme":"Bearer","expires_at":"2026-07-16T12:05:00Z","audience":"manifold","scopes":["manifold:pool:acme","manifold:proxy"]}`
@@ -174,7 +173,7 @@ func TestCredentialProviderWholeResponseTimeout(t *testing.T) {
 		if !errors.Is(mintErr, context.DeadlineExceeded) {
 			t.Fatalf("Mint error = %v, want context deadline", mintErr)
 		}
-	case <-time.After(helperTimeout + testutil.ExecRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("Mint did not honor the whole-response deadline")
 	}
 
@@ -209,7 +208,7 @@ func TestCredentialProviderParentCancellationCleanup(t *testing.T) {
 		if !errors.Is(mintErr, context.Canceled) {
 			t.Fatalf("Mint error = %v, want parent cancellation", mintErr)
 		}
-	case <-time.After(helperTimeout + testutil.ExecRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("Mint did not honor parent cancellation")
 	}
 	waitForProcessGone(t, pidPath)
@@ -248,7 +247,7 @@ func TestCredentialProviderDescendantPipeCleanupFailsClosed(t *testing.T) {
 		if mintErr == nil {
 			t.Fatal("Mint accepted a response whose descendant held the response pipes open")
 		}
-	case <-time.After(helperTimeout + testutil.ExecRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("Mint did not bound descendant-held response pipes")
 	}
 	waitForProcessGone(t, pidPath)
@@ -258,7 +257,7 @@ func waitForFile(t *testing.T, path string) {
 	t.Helper()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
-	deadline := time.After(testutil.ExecRaceTimeout)
+	deadline := time.After(hangBudget)
 	for {
 		if _, err := os.Stat(path); err == nil {
 			return
@@ -286,7 +285,7 @@ func waitForProcessGone(t *testing.T, pidPath string) {
 
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
-	deadline := time.After(testutil.ExecRaceTimeout)
+	deadline := time.After(hangBudget)
 	for {
 		err := syscall.Kill(pid, 0)
 		if errors.Is(err, syscall.ESRCH) {

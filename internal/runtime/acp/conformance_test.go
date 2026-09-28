@@ -36,6 +36,34 @@ func TestACPConformance(t *testing.T) {
 	})
 }
 
+// TestACPDefaultDirConformance runs the same full Provider conformance
+// suite against the constructor cmd/gc's "acp" registration calls when a city
+// path is absent: NewSeamBacked, which (via NewProvider -> defaultProviderDir)
+// keeps socket and meta files under the shared, per-euid default temporary
+// directory (os.TempDir()/gc-acp-<euid>) rather than an injected one. That
+// directory is process-shared by design, so session names carry the PID — the
+// suite only asserts membership of its own names, and PID-scoped names keep
+// concurrent runs on one machine from colliding there.
+//
+// The on-disk socket filename is always a short fixed-length hash of the
+// session name (sockKey: "s" + 4 bytes of hex, 14 bytes total with the
+// ".sock" suffix — see acp.go, "same as subprocess") regardless of how long
+// the session name itself is, so this exercises the exact mechanism that
+// keeps the default provider directory within the platform sun_path limit
+// (104 bytes on Darwin, 108 on Linux) without any dir injection, TMPDIR
+// mutation, or skip.
+func TestACPDefaultDirConformance(t *testing.T) {
+	var fixture acpConformanceFixture
+	var counter int64
+
+	runtimetest.RunProviderTests(t, func(caseT *testing.T) (runtime.Provider, runtime.Config, string) {
+		return NewSeamBacked(Config{}), runtime.Config{
+			Command: acpConformanceCommand(caseT, t, &fixture),
+			WorkDir: caseT.TempDir(),
+		}, fmt.Sprintf("gc-acp-default-%d-%d", os.Getpid(), atomic.AddInt64(&counter, 1))
+	})
+}
+
 func acpConformanceDir(caseT, ownerT *testing.T, fixture *acpConformanceFixture) string {
 	caseT.Helper()
 	if err := prepareACPConformanceFixture(ownerT, fixture); err != nil {

@@ -16,7 +16,7 @@ import (
 // command instead of passing the literal template to sh.
 //
 // The expansion context mirrors work_dir's PathContext surface: Agent,
-// AgentBase, Rig, RigRoot, CityRoot, and CityName.
+// AgentBase, Rig, RigRoot, CityRoot, CityName, and DefaultBranch.
 //
 // Malformed templates are logged to stderr and fall back to the raw string.
 // This matches the graceful behavior of work_dir's ExpandTemplate without

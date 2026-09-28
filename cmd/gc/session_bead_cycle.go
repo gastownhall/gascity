@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -42,6 +43,29 @@ func recordCurrentBeadIDOnWake(info sessionpkg.Info, sessFront *sessionpkg.Store
 		return nil
 	}
 	return sessionpkg.MetadataPatch{sessionpkg.CurrentBeadIDKey: beadID}
+}
+
+// prevAssignedBeadStatus looks up a single bead by id and reports whether it
+// is still open (non-terminal, via convoycore.IsTerminalStatus) and, when
+// terminal, the closed_at timestamp from its metadata. One store round trip
+// answers both questions, so the fresh-cycle guard in session_reconciler.go
+// does not need a second lookup to get closed_at after checking status.
+// closedAt is the zero Time when the bead is open or closed_at is absent or
+// unparseable.
+func prevAssignedBeadStatus(store beads.Store, id string) (open bool, closedAt time.Time, err error) {
+	b, err := store.Get(id)
+	if err != nil {
+		return false, time.Time{}, err
+	}
+	if !convoycore.IsTerminalStatus(b.Status) {
+		return true, time.Time{}, nil
+	}
+	if ca := b.Metadata["closed_at"]; ca != "" {
+		if t, perr := time.Parse(time.RFC3339Nano, ca); perr == nil {
+			closedAt = t
+		}
+	}
+	return false, closedAt, nil
 }
 
 // cycleAliveSessionForFreshReassign tears down a live wake_mode=fresh

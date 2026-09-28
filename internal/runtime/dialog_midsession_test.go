@@ -20,6 +20,16 @@ Enter to confirm · Esc to cancel`
 	claudeSessionLimitPane = `You've hit your session limit · resets 8:40am
 ❯ 1. Stop and wait for limit to reset
   2. Upgrade`
+
+	// claudeSpendLimitModalPane is Claude's spend-limit modal (see the
+	// ContainsProviderRateLimitScreen fixture). It ends in the same "Enter to
+	// confirm" footer as the resume dialog, with the spend-raising option
+	// pre-selected, so an Enter meant for a stale resume dialog would accept it.
+	claudeSpendLimitModalPane = `What do you want to do?
+Usage credit balance: $573.37
+❯ Adjust monthly spend limit: $1503.19
+  Wait for limit to reset      Resets Jul 12 at 11pm (America/Los_Angeles)
+Enter to confirm · Esc to cancel`
 )
 
 func TestDismissMidSessionDialogsSendsExpectedKeys(t *testing.T) {
@@ -130,6 +140,28 @@ func TestDismissMidSessionDialogsSendsExpectedKeys(t *testing.T) {
 			// above a live prompt must not inject "1 Enter".
 			name:          "stale full session-limit dialog above idle prompt",
 			pane:          claudeSessionLimitPane + "\n❯ ",
+			wantKeys:      nil,
+			wantDismissed: false,
+		},
+		{
+			// A stale resume dialog left above Claude's active spend-limit
+			// modal: both end in "Enter to confirm", so the last-line anchor
+			// alone would pass. The resume body must be inside the bottom
+			// block, so this must not send an Enter that raises the spend
+			// limit.
+			name:          "stale resume dialog above active spend-limit modal",
+			pane:          claudeResumeDialogPane + "\n" + claudeSpendLimitModalPane,
+			wantKeys:      nil,
+			wantDismissed: false,
+		},
+		{
+			// Resume option lines far above an unrelated lone footer: the
+			// options are outside the bottom block, so the footer alone must
+			// not trigger keystrokes.
+			name: "resume options separated from lone confirm footer",
+			pane: "❯ Resume from summary\n  Resume full session as-is\n" +
+				"line one\nline two\nline three\nline four\nline five\n" +
+				"Enter to confirm · Esc to cancel",
 			wantKeys:      nil,
 			wantDismissed: false,
 		},

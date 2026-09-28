@@ -10,6 +10,15 @@ import (
 // slice, but should surface the degraded backend error to operators.
 type PartialListError struct {
 	Err error
+	// ServerAbsent reports that the backend's runtime server was not running
+	// at all. An absent server is still a failed observation, not proof that
+	// zero sessions exist (see gastownhall/gascity#4082), so this never
+	// relaxes the fail-safe on its own - it only lets callers holding
+	// independent proof of death distinguish the two failure shapes.
+	//
+	// Never set on a merged multi-backend result: the absence of one backend
+	// says nothing about its siblings.
+	ServerAbsent bool
 }
 
 // Error returns the aggregated backend failure message.
@@ -39,6 +48,23 @@ type BackendListResult struct {
 	Label string
 	Names []string
 	Err   error
+}
+
+// IsRuntimeServerAbsent reports whether err is a [PartialListError] whose
+// consulted backend was not running at all, as opposed to a server that was up
+// and answered incompletely. Reap paths holding independent proof of death use
+// it to act instead of deferring forever.
+//
+// It deliberately does NOT unwrap: only an error returned directly by a single
+// backend can assert absence. A composite provider joins its backends' errors
+// (and returns a bare join when every backend fails), so any traversing check
+// would report absence whenever ANY backend was absent - including when a
+// sibling backend is healthy, or merely failed for an unrelated reason, while
+// still holding live sessions. Wrapping therefore degrades to "not absent",
+// which is the fail-safe answer.
+func IsRuntimeServerAbsent(err error) bool {
+	target, ok := err.(*PartialListError) //nolint:errorlint // the non-traversing assertion is the point: see the doc comment above — errors.As would report absence whenever ANY joined backend was absent, including when a healthy sibling still holds live sessions
+	return ok && target.ServerAbsent
 }
 
 // IsPartialListError reports whether err represents a degraded-but-usable

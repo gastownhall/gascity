@@ -18,10 +18,11 @@ import (
 //	T1  whole split: one binding carrying all five infrastructure classes
 //	T2  T1 plus two rigs
 //	T3  standing refusal (the deleted-[storage] trap)
+//	T3k T3 whose binding is PROVEN to have held work-prefixed relics
 //	T4  T2 with one rig suspended — the constructor excluded it
 //	T5  per-class split: graph and sessions on two DIFFERENT bindings
 //	T6  T1 with a mint-truthful binding (the section-5 retirement shape)
-//	T6r T6 with legacy residents still open — the retirement's other half
+//	T6r T6 with legacy residents present — the retirement's other half
 const (
 	cityPrefix  = "ga"
 	alphaPrefix = "ra"
@@ -29,12 +30,18 @@ const (
 )
 
 // infraClasses is the class set a whole-split binding carries, and
-// infraPrefixes the reserved id prefixes those classes mint. They are stated
-// here rather than read from internal/config because storeref is a leaf: a
-// caller supplies the prefixes, so the corpus supplies them too.
+// infraPrefixes the reserved id namespaces it holds beads under. They are
+// stated here rather than read from internal/config because storeref is a leaf:
+// a caller supplies the prefixes, so the corpus supplies them too.
+//
+// "gcnq" is in the list and is not a fifth-class mint prefix: it is the nudge
+// queue's own namespace inside the nudges binding, minted by a subsystem rather
+// than by the store's sequence. The resolver draws no distinction — a namespace
+// a binding holds is a namespace it has authority over — and that is the
+// property these rows pin.
 var (
 	infraClasses  = []coordclass.Class{coordclass.ClassGraph, coordclass.ClassMessaging, coordclass.ClassSessions, coordclass.ClassOrders, coordclass.ClassNudges}
-	infraPrefixes = []string{"gcg", "gcm", "gcs", "gco", "gcn"}
+	infraPrefixes = []string{"gcg", "gcm", "gcs", "gco", "gcn", "gcnq"}
 )
 
 // errRefused stands in for the standing storage refusal a refused city's boot
@@ -148,11 +155,21 @@ func (f topoFixture) resetGets() {
 	}
 }
 
+// bindingSpec is one binding of a corpus topology.
+//
+// mints and relics are not independent, and the corpus may not spell a pair
+// production cannot produce. A census only ever runs against a binding whose
+// mint bit verified (cmd/gc's censusBindingRelics), so a binding with mints
+// false was never asked, and BuildBindings leaves it on the pessimistic default:
+// relics TRUE. mints=false with relics=false is therefore unreachable, and a
+// fixture carrying it silently exempts itself from any rule keyed on the
+// pessimistic bit. TestCorpusBindingsAreProductionReachable is the guard.
 type bindingSpec struct {
 	classes  []coordclass.Class
 	prefixes []string
 	mints    bool
 	relics   bool
+	known    bool
 	refusing bool
 }
 
@@ -187,18 +204,22 @@ func buildTopology(name string, rigs map[string]string, specs []bindingSpec, ref
 		}
 		f.bindings[ref] = s
 		f.topo.Bindings = append(f.topo.Bindings, ClassBinding{
-			Classes:            append([]coordclass.Class(nil), spec.classes...),
-			Prefixes:           append([]string(nil), spec.prefixes...),
-			Leg:                Leg{Ref: ref, Store: s},
-			MintsReserved:      spec.mints,
-			HasLegacyResidents: spec.relics,
+			Classes:              append([]coordclass.Class(nil), spec.classes...),
+			Prefixes:             append([]string(nil), spec.prefixes...),
+			Leg:                  Leg{Ref: ref, Store: s},
+			MintsReserved:        spec.mints,
+			HasLegacyResidents:   spec.relics,
+			KnownLegacyResidents: spec.known,
 		})
 	}
 	return f
 }
 
+// wholeSplit is a binding carrying all five infrastructure classes, unverified:
+// no mint declaration, and therefore never censused, so the pessimistic relic
+// bit stands. A fixture that verifies the mint bit lowers relics explicitly.
 func wholeSplit() bindingSpec {
-	return bindingSpec{classes: infraClasses, prefixes: infraPrefixes}
+	return bindingSpec{classes: infraClasses, prefixes: infraPrefixes, relics: true}
 }
 
 func newT0() topoFixture { return buildTopology("T0", nil, nil, nil) }
@@ -215,6 +236,18 @@ func newT3() topoFixture {
 	return buildTopology("T3", nil, []bindingSpec{spec}, refusal)
 }
 
+// newT3Known is T3 whose binding a durable census PROVED holds ids outside its
+// reserved namespaces. The refusal is the same; what changes is that the
+// tolerated-refusal rationale — "this leg was only ever a residence probe for an
+// id no relocated class could own" — is known to be false here.
+func newT3Known() topoFixture {
+	refusal := newRefusal()
+	spec := wholeSplit()
+	spec.refusing = true
+	spec.known = true
+	return buildTopology("T3k", nil, []bindingSpec{spec}, refusal)
+}
+
 // newT4 is T2 with the bravo rig suspended. The constructor is TOLD which rigs
 // to include; it does not decide. So a suspended rig is simply absent, and the
 // row proves the resolver never re-invents it.
@@ -227,26 +260,50 @@ func newT4() topoFixture {
 // skip-until row rots, and the tripwire this replaces lived in two files.
 func newT5() topoFixture {
 	return buildTopology("T5", nil, []bindingSpec{
-		{classes: []coordclass.Class{coordclass.ClassGraph}, prefixes: []string{"gcg"}},
-		{classes: []coordclass.Class{coordclass.ClassSessions}, prefixes: []string{"gcs"}},
+		{classes: []coordclass.Class{coordclass.ClassGraph}, prefixes: []string{"gcg"}, relics: true},
+		{classes: []coordclass.Class{coordclass.ClassSessions}, prefixes: []string{"gcs"}, relics: true},
 	}, nil)
 }
 
+// newT6 is the retirement shape: a binding that mints truthfully AND was
+// censused clean, which is the only way the pessimistic bit comes down.
 func newT6() topoFixture {
 	spec := wholeSplit()
 	spec.mints = true
+	spec.relics = false
 	return buildTopology("T6", nil, []bindingSpec{spec}, nil)
 }
 
 func newT6Relics() topoFixture {
 	spec := wholeSplit()
 	spec.mints = true
-	spec.relics = true
 	return buildTopology("T6r", nil, []bindingSpec{spec}, nil)
 }
 
 func allTopologies() []topoFixture {
-	return []topoFixture{newT0(), newT1(), newT2(), newT3(), newT4(), newT5(), newT6(), newT6Relics()}
+	return []topoFixture{newT0(), newT1(), newT2(), newT3(), newT3Known(), newT4(), newT5(), newT6(), newT6Relics()}
+}
+
+// TestCorpusBindingsAreProductionReachable keeps the corpus from asserting about
+// states no city can be in.
+//
+// A fixture in an impossible state is worse than a missing fixture: it looks
+// like coverage. The refused topology carried mints=false with relics=false for
+// exactly this reason, and it made a rule keyed on the pessimistic bit
+// indistinguishable from a rule keyed on the proof — the two collapse only on a
+// binding where the pessimistic bit is false, which a refused binding's never
+// is. Both bits are then checked here rather than in each row.
+func TestCorpusBindingsAreProductionReachable(t *testing.T) {
+	for _, f := range allTopologies() {
+		for _, b := range f.topo.Bindings {
+			if !b.MintsReserved && !b.HasLegacyResidents {
+				t.Errorf("%s binding %s: mints=false with HasLegacyResidents=false; a binding that does not mint truthfully is never censused, so production leaves the pessimistic bit standing", f.name, b.Leg.Ref)
+			}
+			if b.KnownLegacyResidents && !b.HasLegacyResidents {
+				t.Errorf("%s binding %s: proven to hold relics yet pessimistically clean; BuildBindings raises the bit on proof and no city reports this pair", f.name, b.Leg.Ref)
+			}
+		}
+	}
 }
 
 // planString renders a row: the plan, or "error: <msg>" when the intent cannot

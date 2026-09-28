@@ -5,19 +5,21 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
+
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// TestRestoreCarriedWorkRoutes covers ga-n2d.4: after a controller restart,
+// TestRouteRecoveryBackstopLegRestoresCarriedWorkRoutes covers ga-n2d.4: after a controller restart,
 // open+unassigned work that carries a gc.run_target pool route but no
 // gc.routed_to is invisible to the pool autoscaler (which keys on gc.routed_to)
-// and never spawns a worker. restoreCarriedWorkRoutes must re-stamp gc.routed_to
+// and never spawns a worker. The lane's backstop leg scan must re-stamp gc.routed_to
 // from the route the bead already declares, for both carriers of a legacy route
 // — a plain (kind-less) standalone work bead and a pre-ga-eld2x workflow root —
 // while leaving every bead for which gc.run_target is not a recoverable pool
 // route untouched: already-routed, assigned, closed, control-dispatcher, and
 // workflow-topology beads.
-func TestRestoreCarriedWorkRoutes(t *testing.T) {
+func TestRouteRecoveryBackstopLegRestoresCarriedWorkRoutes(t *testing.T) {
 	const pool = "gascity/gastown.polecat"
 	store := beads.NewMemStoreFrom(0, []beads.Bead{
 		// Recoverable: open workflow root, run_target set, routed_to empty.
@@ -64,9 +66,9 @@ func TestRestoreCarriedWorkRoutes(t *testing.T) {
 		}},
 	}, nil)
 
-	restored, err := restoreCarriedWorkRoutes(store)
+	restored, err := scanOneRouteRecoveryLeg(store)
 	if err != nil {
-		t.Fatalf("restoreCarriedWorkRoutes: %v", err)
+		t.Fatalf("backstop leg scan: %v", err)
 	}
 	if restored != 2 {
 		t.Fatalf("restored = %d, want 2 (WR-1 workflow root + T-1 plain work bead)", restored)
@@ -94,21 +96,21 @@ func TestRestoreCarriedWorkRoutes(t *testing.T) {
 
 	// Idempotent: a second pass restores nothing because WR-1 and T-1 now carry
 	// gc.routed_to and yield no recoverable carried route.
-	restored2, err := restoreCarriedWorkRoutes(store)
+	restored2, err := scanOneRouteRecoveryLeg(store)
 	if err != nil {
-		t.Fatalf("restoreCarriedWorkRoutes (second pass): %v", err)
+		t.Fatalf("backstop leg scan (second pass): %v", err)
 	}
 	if restored2 != 0 {
 		t.Errorf("second pass restored = %d, want 0 (idempotent)", restored2)
 	}
 }
 
-// TestRestoreCarriedWorkRoutesNilStore guards the nil-store path the controller
+// TestRouteRecoveryBackstopLegNilStore guards the nil-store path the controller
 // hits when a scope's bead store is unavailable.
-func TestRestoreCarriedWorkRoutesNilStore(t *testing.T) {
-	restored, err := restoreCarriedWorkRoutes(nil)
+func TestRouteRecoveryBackstopLegNilStore(t *testing.T) {
+	restored, err := scanOneRouteRecoveryLeg(nil)
 	if err != nil {
-		t.Fatalf("restoreCarriedWorkRoutes(nil): %v", err)
+		t.Fatalf("backstop leg scan(nil): %v", err)
 	}
 	if restored != 0 {
 		t.Errorf("restored = %d, want 0 for nil store", restored)
@@ -117,7 +119,7 @@ func TestRestoreCarriedWorkRoutesNilStore(t *testing.T) {
 
 // staleOpenListStore returns a fixed open-bead snapshot from List while
 // delegating every live read/write (Get, SetMetadata, …) to an embedded store.
-// It reproduces the reconcile TOCTOU: restoreCarriedWorkRoutes captures the open
+// It reproduces the reconcile TOCTOU: the backstop leg scan captures the open
 // snapshot, but a polecat claims the bead before the per-bead re-stamp runs, so
 // the live store already holds the claimed (in_progress) bead.
 type staleOpenListStore struct {
@@ -129,7 +131,7 @@ func (s staleOpenListStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	return append([]beads.Bead(nil), s.openSnapshot...), nil
 }
 
-// TestRestoreCarriedWorkRoutesSkipsRaceClaimedBead covers ga-bgu: restore must
+// TestRouteRecoveryBackstopLegSkipsRaceClaimedBead covers ga-bgu: restore must
 // not re-stamp gc.routed_to onto a bead that a polecat claimed after the
 // open-bead List snapshot. The claim atomically consumes the pool route
 // (open->in_progress, assignee set, gc.routed_to cleared, gc.run_target recorded
@@ -137,7 +139,7 @@ func (s staleOpenListStore) List(beads.ListQuery) ([]beads.Bead, error) {
 // gc.routed_to on the now-in_progress bead, feeding the dispatcher a phantom
 // pool-demand bead that flaps open<->in_progress. Restore must re-read the live
 // bead and skip the write when it is no longer open+unassigned.
-func TestRestoreCarriedWorkRoutesSkipsRaceClaimedBead(t *testing.T) {
+func TestRouteRecoveryBackstopLegSkipsRaceClaimedBead(t *testing.T) {
 	const pool = "gascity/gastown.polecat"
 	// Live store: the bead has ALREADY been claimed — open->in_progress, assignee
 	// set, gc.routed_to consumed, gc.run_target carrying the route (ga-sa0 claim).
@@ -160,9 +162,9 @@ func TestRestoreCarriedWorkRoutesSkipsRaceClaimedBead(t *testing.T) {
 		},
 	}
 
-	restored, err := restoreCarriedWorkRoutes(store)
+	restored, err := scanOneRouteRecoveryLeg(store)
 	if err != nil {
-		t.Fatalf("restoreCarriedWorkRoutes: %v", err)
+		t.Fatalf("backstop leg scan: %v", err)
 	}
 	if restored != 0 {
 		t.Fatalf("restored = %d, want 0 (must not re-stamp a bead claimed since the snapshot)", restored)
@@ -185,7 +187,7 @@ func TestRestoreCarriedWorkRoutesSkipsRaceClaimedBead(t *testing.T) {
 // returns a STALE cached bead — a cross-process claim not yet absorbed into this
 // process's cache — while its authoritative Live handle bypasses the cache to the
 // backing store and sees the claim. List likewise serves the stale open snapshot.
-// It reproduces the production hazard restoreCarriedWorkRoutes must survive: both
+// It reproduces the production hazard the backstop leg scan must survive: both
 // the List snapshot and a plain store.Get show the pre-claim bead, so only a
 // cache-bypassing live read (HandlesFor(store).Live.Get) catches the race.
 type staleCacheStore struct {
@@ -210,14 +212,14 @@ func (s staleCacheStore) Handles() beads.StoreHandles {
 	return beads.StoreHandles{Cached: h.Cached, Live: h.Live, Writer: s.Store}
 }
 
-// TestRestoreCarriedWorkRoutesSkipsCacheStaleClaimedBead covers the CachingStore
+// TestRouteRecoveryBackstopLegSkipsCacheStaleClaimedBead covers the CachingStore
 // leg of ga-bgu: on production stores a plain Get can return a cached bead that
 // predates a cross-process claim, so restore must re-read through the
 // authoritative cache-bypassing live handle. With a stale-cache Get the bead
 // still looks open+unassigned+unrouted; only the live backing read shows the
 // claim (in_progress, assigned, route consumed). Restore must skip the re-stamp.
 // It fails against a plain store.Get re-read and passes with handles.Live.Get.
-func TestRestoreCarriedWorkRoutesSkipsCacheStaleClaimedBead(t *testing.T) {
+func TestRouteRecoveryBackstopLegSkipsCacheStaleClaimedBead(t *testing.T) {
 	const pool = "gascity/gastown.polecat"
 	// Backing/live store: T-1 has ALREADY been claimed (ga-sa0).
 	live := beads.NewMemStoreFrom(0, []beads.Bead{
@@ -239,9 +241,9 @@ func TestRestoreCarriedWorkRoutesSkipsCacheStaleClaimedBead(t *testing.T) {
 		},
 	}
 
-	restored, err := restoreCarriedWorkRoutes(store)
+	restored, err := scanOneRouteRecoveryLeg(store)
 	if err != nil {
-		t.Fatalf("restoreCarriedWorkRoutes: %v", err)
+		t.Fatalf("backstop leg scan: %v", err)
 	}
 	if restored != 0 {
 		t.Fatalf("restored = %d, want 0 (stale-cache Get must not defeat the claim guard)", restored)
@@ -291,6 +293,14 @@ func TestCityRuntimeRecoverUnroutedWorkRoutes(t *testing.T) {
 	}
 }
 
+// scanOneRouteRecoveryLeg runs the lane's authoritative per-leg scan on a fresh
+// lane, which is the unit the pre-lane restoreCarriedWorkRoutes was: one store,
+// one full live open read, one batched re-verify, no cross-pass accounting.
+func scanOneRouteRecoveryLeg(store beads.Store) (int, error) {
+	report := newRouteRecoveryLane().backstopLeg(planeLeg{store: store})
+	return report.restored, report.err
+}
+
 func mustRoutedTo(t *testing.T, store beads.Store, id string) string {
 	t.Helper()
 	b, err := store.Get(id)
@@ -328,7 +338,7 @@ func (s collapsedBlockedStatusStore) List(q beads.ListQuery) ([]beads.Bead, erro
 	return append([]beads.Bead(nil), s.cachedSnapshot...), nil
 }
 
-// TestRestoreCarriedWorkRoutesSkipsBlockedBead covers gc-4zb: restore must not
+// TestRouteRecoveryBackstopLegSkipsBlockedBead covers gc-4zb: restore must not
 // re-stamp gc.routed_to onto a bead that is blocked in the backing store.
 //
 // Live reproduction (EnterpriseBench-42o8, root EnterpriseBench-c7ga, step
@@ -343,7 +353,7 @@ func (s collapsedBlockedStatusStore) List(q beads.ListQuery) ([]beads.Bead, erro
 // belt-and-braces b.Status check, and the live re-read all observe the collapsed
 // "open". Gating requires a read that filters on the raw status, which is what
 // the Live query delegates to bd.
-func TestRestoreCarriedWorkRoutesSkipsBlockedBead(t *testing.T) {
+func TestRouteRecoveryBackstopLegSkipsBlockedBead(t *testing.T) {
 	const pool = "/home/ds/projects/EnterpriseBench/enterprisebench-worker"
 	// Backing bead: blocked in bd, but decoded as "open" by mapBdStatus, so a
 	// live Get cannot reveal the block either. The reaper has already cleared
@@ -364,14 +374,78 @@ func TestRestoreCarriedWorkRoutesSkipsBlockedBead(t *testing.T) {
 		liveSnapshot: nil,
 	}
 
-	restored, err := restoreCarriedWorkRoutes(store)
+	restored, err := scanOneRouteRecoveryLeg(store)
 	if err != nil {
-		t.Fatalf("restoreCarriedWorkRoutes: %v", err)
+		t.Fatalf("backstop leg scan: %v", err)
 	}
 	if restored != 0 {
 		t.Fatalf("restored = %d, want 0 (must not re-stamp gc.routed_to onto a blocked bead)", restored)
 	}
 	if route := strings.TrimSpace(mustRoutedTo(t, live, "EB-42o8")); route != "" {
 		t.Errorf("gc.routed_to = %q, want empty (a blocked bead must stay unrouted)", route)
+	}
+}
+
+// TestBackstopCountsRoutedWorkTheRuntimePlaneCannotSee pins the visibility half
+// of the tick's routed-demand narrowing (ga-l7jdg).
+//
+// The controller's demand read is binding-only, so a routed bead left on a work
+// leg is demanded by nothing and no seat is ever spawned for it. That is a
+// migration defect rather than a demand bug — but only if somebody counts it.
+// This lane already reads every leg's open corpus on its own cadence, so the
+// count is free and the assumption "there is no routed work out there" becomes
+// checkable instead of load-bearing.
+func TestBackstopCountsRoutedWorkTheRuntimePlaneCannotSee(t *testing.T) {
+	routed := func(id, assignee string) beads.Bead {
+		return beads.Bead{
+			ID:       id,
+			Title:    id,
+			Type:     "task",
+			Assignee: assignee,
+			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "pool/worker"},
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		leg     planeLeg
+		seed    beads.Bead
+		want    int
+		because string
+	}{
+		{
+			name: "unassigned routed work on a work leg",
+			leg:  planeLeg{label: "city"},
+			seed: routed("ga-off-plane", ""),
+			want: 1, because: "the tick's demand read refuses this leg, so nothing spawns for the bead",
+		},
+		{
+			name: "the same bead on the binding",
+			leg:  planeLeg{label: "class:gmnos", binding: true},
+			seed: routed("gcg-on-plane", ""),
+			want: 0, because: "the runtime plane reads the binding, so this bead IS demanded",
+		},
+		{
+			name: "a routed bead on a work leg that already has a holder",
+			leg:  planeLeg{label: "city"},
+			seed: routed("ga-held", "worker-1"),
+			want: 0, because: "an assigned bead needs no seat spawned for it",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			store.HonorExplicitIDs = true
+			if _, err := store.Create(tc.seed); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			leg := tc.leg
+			leg.store = store
+			report := newRouteRecoveryLane().backstopLeg(leg)
+			if report.err != nil {
+				t.Fatalf("backstop leg: %v", report.err)
+			}
+			if report.offPlaneRouted != tc.want {
+				t.Fatalf("off_plane_routed = %d, want %d: %s", report.offPlaneRouted, tc.want, tc.because)
+			}
+		})
 	}
 }

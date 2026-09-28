@@ -5,7 +5,7 @@ When you create a git worktree (via `git worktree add` or the EnterWorktree tool
 
 1. Find your assigned bead:
    ```
-   gc bd list --json --assignee="{{.AgentName}}" --status=in-progress
+   gc bd list --json --assignee="$BEADS_ACTOR" --status=in_progress
    ```
 2. Update the bead with the absolute worktree path:
    ```

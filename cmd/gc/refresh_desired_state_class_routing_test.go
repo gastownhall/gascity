@@ -1,13 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -67,22 +68,81 @@ func seedPoolRootSessionBead(t *testing.T, store beads.Store) {
 	}
 }
 
-// TestRefreshDesiredStateWritesSessionBeadsToSessionsClass is the stranded-write
-// guard for the controller reconcile loop.
-//
-// cr.refreshDesiredState's store becomes agentBuildParams.beadStore, and the
-// session-bead overlay MINTS through it: realizeDependencyFloors ->
-// ensureDependencyOnlyTemplate -> selectOrCreateDependencyPoolSessionBead ->
-// CreateSessionInfo. Routed at the work store on a converged split city that
-// create is a stranded `type=session` bead — invisible to the sessions binding
-// and named by the per-boot containment re-check. It also recurs, because the
-// reuse check reads the sessions snapshot while the create wrote the work store,
-// so the floor can never satisfy itself.
-func TestRefreshDesiredStateWritesSessionBeadsToSessionsClass(t *testing.T) {
+// TestFullBuildWritesDependencyFloorToSessionsClass preserves the placement
+// proof independently of refresh. A full build performs the complete Session-
+// leg census and may therefore mint the missing floor, but the create must land
+// only in the relocated sessions binding—not the city or rig work stores.
+func TestFullBuildWritesDependencyFloorToSessionsClass(t *testing.T) {
+	cityPath := t.TempDir()
+	workStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	sessionsStore := beads.NewMemStore()
+	seedPoolRootSessionBead(t, sessionsStore)
+	cfg := dependencyFloorCity()
+
+	cr := &CityRuntime{
+		cs: &controllerState{
+			cfg:           cfg,
+			cityBeadStore: workStore,
+			beadStores:    map[string]beads.Store{"fixture": rigStore},
+			cityName:      "demo",
+			cityPath:      cityPath,
+		},
+		cfg:           cfg,
+		sp:            runtime.NewFake(),
+		cityName:      "demo",
+		cityPath:      cityPath,
+		stderr:        io.Discard,
+		storageRoutes: relocatedSessionRoutes(sessionsStore),
+	}
+	cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cityPath, "demo", io.Discard)
+
+	result := cr.buildDesiredState(cr.loadSessionBeadSnapshot(), nil)
+	floor := false
+	for _, params := range result.State {
+		if params.TemplateName == "gascity/db" && params.DependencyOnly {
+			floor = true
+		}
+	}
+	if !floor {
+		t.Fatalf("full build did not realize the dependency floor; keys=%v", mapKeys(result.State))
+	}
+
+	sessions, err := sessionsStore.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("list sessions store: %v", err)
+	}
+	var floorRows int
+	for _, row := range sessions {
+		if row.Metadata["template"] == "gascity/db" && row.Metadata["pool_managed"] == "true" {
+			floorRows++
+		}
+	}
+	if floorRows != 1 {
+		t.Fatalf("sessions binding dependency-floor rows = %d, want exactly one; rows=%#v", floorRows, sessions)
+	}
+	for name, store := range map[string]beads.Store{"city work": workStore, "rig work": rigStore} {
+		rows, err := store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+		if err != nil {
+			t.Fatalf("list %s store: %v", name, err)
+		}
+		if len(rows) != 0 {
+			t.Fatalf("%s store holds session-class rows after full build: %#v", name, rows)
+		}
+	}
+}
+
+// TestRefreshDesiredStateDefersFreshSessionCreationOnRelocatedCity pins the
+// post-build safety boundary. Refresh reloads only the primary sessions store,
+// not the complete Session residency union, so it may reuse the seeded root but
+// must defer a missing dependency floor to the next full build/census. Neither
+// the work store nor the sessions binding may receive a speculative new row.
+func TestRefreshDesiredStateDefersFreshSessionCreationOnRelocatedCity(t *testing.T) {
 	cityPath := t.TempDir()
 	workStore := beads.NewMemStore()
 	sessionsStore := beads.NewMemStore()
 	seedPoolRootSessionBead(t, sessionsStore)
+	var stderr bytes.Buffer
 
 	cr := &CityRuntime{
 		cs:            &controllerState{cityBeadStore: workStore, cityName: "demo", cityPath: cityPath},
@@ -90,7 +150,7 @@ func TestRefreshDesiredStateWritesSessionBeadsToSessionsClass(t *testing.T) {
 		sp:            runtime.NewFake(),
 		cityName:      "demo",
 		cityPath:      cityPath,
-		stderr:        io.Discard,
+		stderr:        &stderr,
 		storageRoutes: relocatedSessionRoutes(sessionsStore),
 	}
 
@@ -98,19 +158,23 @@ func TestRefreshDesiredStateWritesSessionBeadsToSessionsClass(t *testing.T) {
 	if sessionBeads == nil {
 		t.Fatal("session-bead snapshot is nil; the sessions store never loaded")
 	}
-	refreshed := cr.refreshDesiredState(DesiredStateResult{BeaconTime: time.Now().UTC()}, sessionBeads)
+	refreshed := cr.refreshDesiredState(DesiredStateResult{
+		BeaconTime:              time.Now().UTC(),
+		SessionSnapshotComplete: true,
+		SessionOccupancyInfos:   sessionBeads.OpenInfos(),
+	}, sessionBeads)
 
-	// The overlay must actually have realized the floor — otherwise the
-	// zero-work-store assertion below would hold for the trivial reason that
-	// nothing was created at all.
 	floor := false
 	for _, params := range refreshed.State {
 		if params.TemplateName == "gascity/db" && params.DependencyOnly {
 			floor = true
 		}
 	}
-	if !floor {
-		t.Fatal("fixture no longer realizes a dependency floor; the create path this guards is not being exercised")
+	if floor {
+		t.Fatal("refresh realized a dependency floor without re-censusing every Session leg")
+	}
+	if got := stderr.String(); !strings.Contains(got, "dependency floor \"gascity/db\"") || !strings.Contains(got, errPoolSessionCreatePartial.Error()) {
+		t.Fatalf("refresh did not exercise and fail closed at dependency creation: stderr=%q", got)
 	}
 
 	work, err := workStore.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
@@ -118,28 +182,27 @@ func TestRefreshDesiredStateWritesSessionBeadsToSessionsClass(t *testing.T) {
 		t.Fatalf("list work store: %v", err)
 	}
 	if len(work) != 0 {
-		t.Fatalf("STRANDED WRITE: work store holds %d bead(s) after a desired-state refresh (first: id=%s type=%s class=%v); session-class creates must land in the sessions binding",
-			len(work), work[0].ID, work[0].Type, coordclass.Classify(work[0]))
+		t.Fatalf("work store holds %d bead(s) after freshness-incomplete refresh; want zero", len(work))
 	}
 
 	sessions, err := sessionsStore.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
 	if err != nil {
 		t.Fatalf("list sessions store: %v", err)
 	}
-	if len(sessions) < 2 {
-		t.Fatalf("sessions store holds %d bead(s); the realized dependency floor must be minted there alongside the seeded root", len(sessions))
+	if len(sessions) != 1 {
+		t.Fatalf("sessions store holds %d bead(s), want only the seeded root until the next full census", len(sessions))
 	}
 }
 
-// TestRefreshDesiredStateIsUnchangedOnSingleStoreCity is the byte-identity proof
-// for the refresh path on a city that relocates nothing: the store it threads is
-// the exact value cr.cityBeadStore() returns, and the realized floor is minted
-// into that one city store — the same place, and the same bead, as before the
-// accessor substitution.
-func TestRefreshDesiredStateIsUnchangedOnSingleStoreCity(t *testing.T) {
+// TestRefreshDesiredStateDefersFreshSessionCreationOnSingleStoreCity keeps the
+// same fail-closed rule on today's single-store topology. That topology can
+// evolve through class bindings and graph-run foreign writers, so refresh does
+// not infer a permanent one-leg invariant from the current accessor identity.
+func TestRefreshDesiredStateDefersFreshSessionCreationOnSingleStoreCity(t *testing.T) {
 	cityPath := t.TempDir()
 	cityStore := beads.NewMemStore()
 	seedPoolRootSessionBead(t, cityStore)
+	var stderr bytes.Buffer
 
 	cr := &CityRuntime{
 		cs:       &controllerState{cityBeadStore: cityStore, cityName: "demo", cityPath: cityPath},
@@ -147,28 +210,36 @@ func TestRefreshDesiredStateIsUnchangedOnSingleStoreCity(t *testing.T) {
 		sp:       runtime.NewFake(),
 		cityName: "demo",
 		cityPath: cityPath,
-		stderr:   io.Discard,
+		stderr:   &stderr,
 	}
 	if got := cr.sessionsBeadStore().Store; got != cr.cityBeadStore() {
 		t.Fatal("default backend: the refresh path's sessions store must be the identical value cr.cityBeadStore() returns")
 	}
 
-	refreshed := cr.refreshDesiredState(DesiredStateResult{BeaconTime: time.Now().UTC()}, cr.loadSessionBeadSnapshot())
+	sessionBeads := cr.loadSessionBeadSnapshot()
+	refreshed := cr.refreshDesiredState(DesiredStateResult{
+		BeaconTime:              time.Now().UTC(),
+		SessionSnapshotComplete: true,
+		SessionOccupancyInfos:   sessionBeads.OpenInfos(),
+	}, sessionBeads)
 	floor := false
 	for _, params := range refreshed.State {
 		if params.TemplateName == "gascity/db" && params.DependencyOnly {
 			floor = true
 		}
 	}
-	if !floor {
-		t.Fatal("single-store city: the dependency floor must still be realized")
+	if floor {
+		t.Fatal("single-store refresh realized a dependency floor without a new full Session-leg census")
+	}
+	if got := stderr.String(); !strings.Contains(got, "dependency floor \"gascity/db\"") || !strings.Contains(got, errPoolSessionCreatePartial.Error()) {
+		t.Fatalf("single-store refresh did not exercise and fail closed at dependency creation: stderr=%q", got)
 	}
 
 	all, err := cityStore.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
 	if err != nil {
 		t.Fatalf("list city store: %v", err)
 	}
-	if len(all) != 2 {
-		t.Fatalf("city store holds %d bead(s), want 2 (the seeded root plus the realized floor); the single-store path must be unchanged", len(all))
+	if len(all) != 1 {
+		t.Fatalf("city store holds %d bead(s), want only the seeded root until the next full census", len(all))
 	}
 }

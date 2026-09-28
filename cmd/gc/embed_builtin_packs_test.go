@@ -332,7 +332,11 @@ func TestBundledPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("before_agent_start"`,
 		"GC_PI_HOOK_VERSION",
 		"gc hook --inject",
-		`run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx))`,
+		`run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "SessionStart"))`,
+		`run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "PreCompact"))`,
+		"GC_MANAGED_SESSION_HOOK",
+		"GC_HOOK_EVENT_NAME",
+		"pendingPrimeContext",
 		"GC_PROVIDER_SESSION_ID",
 		"GC_PROVIDER_SESSION_ID_REQUIRED",
 		`stdio: ["ignore", "pipe", "inherit"]`,
@@ -424,7 +428,7 @@ func TestBundledBuiltinPackOrdersScanWithoutWarnings(t *testing.T) {
 }
 
 func TestBundledWorkerPromptsIncludeFilesystemSearchGuidance(t *testing.T) {
-	for _, name := range []string{"pool-worker.md", "graph-worker.md"} {
+	for _, name := range []string{"pool-worker.template.md", "graph-worker.md"} {
 		t.Run(name, func(t *testing.T) {
 			data := readBundledPackFileForTest(t, "core", "assets/prompts/"+name)
 			if !strings.Contains(data, formulaFilesystemSearchGuidance) {
@@ -681,7 +685,7 @@ func TestEnsureBuiltinRuntimeAssetsHydratesCacheAndShim(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RepoCachePath(%s): %v", name, err)
 		}
-		if err := builtinpacks.ValidateSyntheticRepo(cachePath, commit); err != nil {
+		if err := builtinpacks.ValidateSyntheticRepo(cachePath, builtinpacks.Repository, commit); err != nil {
 			t.Errorf("%s cache invalid after hydration: %v", name, err)
 		}
 	}
@@ -739,7 +743,7 @@ func TestEnsureBuiltinRuntimeAssetsSkipsShimForNonBdCity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RepoCachePath(core): %v", err)
 	}
-	if err := builtinpacks.ValidateSyntheticRepo(coreCache, commit); err != nil {
+	if err := builtinpacks.ValidateSyntheticRepo(coreCache, builtinpacks.Repository, commit); err != nil {
 		t.Errorf("core cache invalid after hydration: %v", err)
 	}
 }
@@ -1049,7 +1053,7 @@ func TestEnsureBuiltinRuntimeAssetsRehydratesEvictedOptionalLockedBundledCache(t
 	if err != nil {
 		t.Fatalf("RepoCachePath(gastown): %v", err)
 	}
-	if err := builtinpacks.ValidateSyntheticRepo(cachePath, commit); err != nil {
+	if err := builtinpacks.ValidateSyntheticRepo(cachePath, builtinpacks.PublicRepository, commit); err != nil {
 		t.Fatalf("gastown cache invalid after ready: %v", err)
 	}
 
@@ -1065,7 +1069,7 @@ func TestEnsureBuiltinRuntimeAssetsRehydratesEvictedOptionalLockedBundledCache(t
 		t.Fatalf("EnsureBuiltinRuntimeAssets after optional cache eviction: %v", err)
 	}
 
-	if err := builtinpacks.ValidateSyntheticRepo(cachePath, commit); err != nil {
+	if err := builtinpacks.ValidateSyntheticRepo(cachePath, builtinpacks.PublicRepository, commit); err != nil {
 		t.Fatalf("optional locked bundled cache not rehydrated after ready fast path: %v", err)
 	}
 }
@@ -1158,7 +1162,7 @@ func TestLoadCityConfigFSHydratesBuiltinRuntimeAssets(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RepoCachePath(%s): %v", name, err)
 		}
-		if err := builtinpacks.ValidateSyntheticRepo(cachePath, commit); err != nil {
+		if err := builtinpacks.ValidateSyntheticRepo(cachePath, builtinpacks.Repository, commit); err != nil {
 			t.Errorf("%s cache invalid after loadCityConfigFS: %v", name, err)
 		}
 	}

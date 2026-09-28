@@ -63,6 +63,55 @@ func TestHoldLabelConventionsCheckFlagsRetiredLabels(t *testing.T) {
 	}
 }
 
+func TestHoldLabelConventionsCheckBareHumanNotFlagged(t *testing.T) {
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "H-1", Title: "operator card", Type: "task", Status: "open", Labels: []string{"human"}},
+		{ID: "H-2", Title: "mayor hold", Type: "task", Status: "open", Labels: []string{"hold:mayor"}},
+		{ID: "H-3", Title: "external hold", Type: "task", Status: "open", Labels: []string{"hold:external"}},
+	}, nil)
+
+	check := newHoldLabelConventionsCheck("/city", "city", func(string) (beads.Store, error) { return store, nil })
+	res := check.Run(&doctor.CheckContext{})
+
+	if res.Status != doctor.StatusOK {
+		t.Fatalf("Status = %v, want OK (bare human is not a retired hold label): %#v", res.Status, res)
+	}
+	if len(res.Details) != 0 {
+		t.Errorf("Details = %v, want empty", res.Details)
+	}
+}
+
+func TestHoldLabelConventionsCheckFlagsHumanHold(t *testing.T) {
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "R-1", Title: "legacy human hold", Type: "task", Status: "open", Labels: []string{"human-hold"}},
+		{ID: "H-1", Title: "operator card", Type: "task", Status: "open", Labels: []string{"human"}},
+		{ID: "H-2", Title: "mayor hold", Type: "task", Status: "open", Labels: []string{"hold:mayor"}},
+		{ID: "H-3", Title: "external hold", Type: "task", Status: "open", Labels: []string{"hold:external"}},
+	}, nil)
+
+	check := newHoldLabelConventionsCheck("/city", "city", func(string) (beads.Store, error) { return store, nil })
+	res := check.Run(&doctor.CheckContext{})
+
+	if res.Status != doctor.StatusError {
+		t.Fatalf("Status = %v, want Error: %#v", res.Status, res)
+	}
+	if len(res.Details) != 1 {
+		t.Fatalf("Details = %v, want exactly 1 entry (human-hold only)", res.Details)
+	}
+	if !strings.Contains(res.Details[0], "human-hold") || !strings.Contains(res.Details[0], "R-1") {
+		t.Errorf("Details[0] = %q, want retired label human-hold on R-1", res.Details[0])
+	}
+	if strings.Contains(res.Details[0], `"human"`) {
+		t.Errorf("Details[0] = %q, must not flag bare human", res.Details[0])
+	}
+	if strings.Contains(res.FixHint, "and human migrate") || strings.Contains(res.FixHint, "human-hold, and human") {
+		t.Errorf("FixHint must not prescribe migrating bare human: %q", res.FixHint)
+	}
+	if !strings.Contains(res.FixHint, "human-hold") {
+		t.Errorf("FixHint should still mention human-hold: %q", res.FixHint)
+	}
+}
+
 func TestHoldLabelConventionsCheckOutOfScopeLabelsExactMatchOnly(t *testing.T) {
 	store := beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "O-1", Title: "build blocker", Type: "task", Status: "open", Labels: []string{"build-blocker"}},
@@ -73,6 +122,7 @@ func TestHoldLabelConventionsCheckOutOfScopeLabelsExactMatchOnly(t *testing.T) {
 		{ID: "O-6", Title: "needs mayor", Type: "task", Status: "open", Labels: []string{"needs-mayor"}},
 		{ID: "O-7", Title: "needs mayor decision", Type: "task", Status: "open", Labels: []string{"needs-mayor-decision"}},
 		{ID: "O-8", Title: "mpr human hold", Type: "task", Status: "open", Labels: []string{"mpr-human-hold"}},
+		{ID: "O-9", Title: "bare human executor", Type: "task", Status: "open", Labels: []string{"human"}},
 	}, nil)
 
 	check := newHoldLabelConventionsCheck("/city", "city", func(string) (beads.Store, error) { return store, nil })

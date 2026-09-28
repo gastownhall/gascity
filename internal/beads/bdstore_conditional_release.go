@@ -31,15 +31,17 @@ import (
 // whole reason to prefer this verb: the load-bearing branch stops depending on
 // message text.
 //
-// BOTH bd pins predate the flags, so the raw-SQL path stays as the fallback,
-// selected by a per-store latch the first time bd rejects the flag as unknown:
-// the contract-tested minimum (deps.env BD_PREV_VERSION, 1.0.4) and — the
-// load-bearing one — the installable default CI and operators actually install
-// (deps.env BD_VERSION, 1.1.0). The flags landed on beads main after that
-// release, in beads#5008, and no published release carries them yet, so on a
-// stock install the FALLBACK is still the live path. The verb is exercised
-// against the source-built deps.env BD_CURRENT_REF bd
-// (make test-bd-conditional-release-contract).
+// The raw-SQL path stays as the fallback, selected by a per-store latch the
+// first time bd rejects the flag as unknown. What reaches it is the
+// contract-tested minimum: deps.env BD_PREV_VERSION (1.0.4) predates
+// beads#5008, so a store opened against that bd latches and stays there.
+//
+// The installable default does not reach it. deps.env BD_VERSION is
+// v1.3.0, cut from beads main past beads#5008, so on a stock install the
+// VERB is the live path and the fallback serves the floor alone. The verb is
+// also exercised against the source-built deps.env BD_CURRENT_REF bd
+// (make test-bd-conditional-release-contract) — now where the contract is
+// homed by choice, not the only cell that can run it.
 
 // bdCASPreconditionExitCode is bd's dedicated exit status for a rejected
 // --if-assignee / --if-status precondition: nothing was written, and the verdict
@@ -225,4 +227,65 @@ func isBdUnknownFlagError(msg, flag string) bool {
 		}
 	}
 	return false
+}
+
+// ErrConditionalTransferUnsupported reports that this bd does not understand the
+// --if-assignee / --if-status preconditions, so an assignee transfer cannot be
+// made conditional. Callers must not fall back to an unconditional write.
+var ErrConditionalTransferUnsupported = errors.New("bd does not support conditional assignee transfer")
+
+// TransferIfCurrent moves an in_progress bead from one exact assignee spelling
+// to another, only while the bead still carries fromAssignee:
+//
+//	bd update <id> --if-assignee <from> --if-status in_progress --assignee <to>
+//
+// It reports true when the bead now carries toAssignee. A rejected precondition
+// (bd exit 13) or an unresolvable id reports false with no error: someone else
+// holds the bead, or it is no longer in progress. A transfer that already landed
+// (a retried write whose first attempt committed) is recognized by a readback
+// and reported as true.
+//
+// bd skips its reassignment-steal fence under --if-assignee, because the CAS
+// names the holder explicitly; that is what lets a session rewrite its own
+// legacy spelling without --force.
+func (s *BdStore) TransferIfCurrent(id, fromAssignee, toAssignee string) (bool, error) {
+	fromAssignee = strings.TrimSpace(fromAssignee)
+	toAssignee = strings.TrimSpace(toAssignee)
+	if fromAssignee == "" || toAssignee == "" {
+		return false, fmt.Errorf("bd transfer-if-current %s: from and to assignees are required", id)
+	}
+	if fromAssignee == toAssignee {
+		return true, nil
+	}
+	if err := s.guardRelocatedClassIDs("transfer-if-current "+id, id); err != nil {
+		return false, err
+	}
+	if collision := s.releaseIDCollision(id); collision != nil {
+		return false, collision
+	}
+	out, runErr := s.runBDTransientWriteOutput(
+		"update", id,
+		"--if-assignee", fromAssignee,
+		"--if-status", "in_progress",
+		"--assignee", toAssignee,
+	)
+	if runErr == nil {
+		return true, nil
+	}
+	if bdExitCode(runErr) == bdCASPreconditionExitCode {
+		// Either another claimant holds it, or a retried attempt already
+		// committed this very transfer. Only the readback can tell them apart.
+		if current, err := s.Get(id); err == nil && strings.TrimSpace(current.Assignee) == toAssignee {
+			return true, nil
+		}
+		return false, nil
+	}
+	detail := strings.TrimSpace(string(out)) + " " + runErr.Error()
+	if isBdUnknownFlagError(detail, "--if-assignee") || isBdUnknownFlagError(detail, "--if-status") {
+		return false, ErrConditionalTransferUnsupported
+	}
+	if isBdIssueNotFound(runErr) {
+		return false, nil
+	}
+	return false, fmt.Errorf("bd transfer-if-current: %w", runErr)
 }

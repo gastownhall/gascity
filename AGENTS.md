@@ -447,6 +447,63 @@ GOCACHE="$tmp" TMPDIR="$tmp" go build ./cmd/gc/
 test-result cache, not the compiled-object cache, and does not corrupt
 concurrent builds.
 
+**Hermetic Git test config is mirrored.** `Makefile`'s `TEST_ENV` and the
+nested `env -i` wrappers in `scripts/test-local-parallel`,
+`scripts/test-go-test-shard`, and `scripts/test-integration-shard` must all pin
+`GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=/dev/null`. Updating only the
+Makefile is insufficient because each nested runner rebuilds the environment
+and would otherwise restore user Git configuration through the preserved
+`HOME`.
+
+## Bazel (side-by-side build)
+
+The repo has a **second, parallel build system: Bazel**. It is side-by-side
+by design — `go build` / `go test` / the Makefile CI remain untouched and
+authoritative. Bazel adds remote caching, remote execution on the shared
+farm, and hermetic test inputs that work identically on any machine.
+
+**Agents should prefer Bazel for repeated build+test cycles.** The first
+`bazel build //...` costs the same as `go build ./...`; every subsequent
+one is a cache hit (seconds). The remote CAS is shared across all
+worktrees, all CI runs, and all developers — a test that passed once on
+CI never re-executes for you locally.
+
+```bash
+bazel test //...                 # full suite, ~0.6s when cached
+bazel test //internal/config     # one package
+bazel build //cmd/gc             # build only
+```
+
+**When to use which:**
+
+| situation | use |
+|---|---|
+| iterating on one package's tests | `bazel test //pkg/...` (remote-cached) |
+| verifying a cross-cutting change | `bazel test //...` |
+| quick syntax check of one file | `go build ./pkg/` (no server startup) |
+| running the existing CI gate | `make test-cover-*` (go test, unchanged) |
+| adding a new dependency | `go get` then `make bazel-sync` |
+
+**After changing imports or adding packages**, run:
+
+```bash
+make bazel-sync    # gazelle + repo tree regeneration; commit the result
+```
+
+The CI gate `BUILD files are in sync` fails if you forget.
+
+**Test sharding:** the heavy suites (cmd/gc, scripts, api, examples) are
+sharded for parallel remote execution. Sharded helpers re-exec the test
+binary; if you add a helper-spawning test, strip `TEST_SHARD_INDEX` /
+`TEST_TOTAL_SHARDS` from the helper's env (see `sanitizedBaseEnv` in
+`cmd/gc/fast_loop_helpers_test.go`).
+
+**Do NOT commit machine-specific endpoints.** `grpc://127.0.0.1:5005x`
+endpoints belong in `.bazelrc.local` (gitignored) for dev machines, or
+in CI secrets. The repo's `.bazelrc` has no executor hardcoded.
+
+**Local cache setup:** see [engdocs/bazel-quickstart.md](engdocs/bazel-quickstart.md).
+
 ## Code quality gates
 
 Before considering any task complete:
@@ -456,8 +513,10 @@ Before considering any task complete:
 - Broader process/integration coverage uses the sharded targets documented in
   `TESTING.md` instead of one monolithic `go test ./...` sweep
 - `go vet ./...` clean
-- `.githooks/pre-commit` is active locally (`git config core.hooksPath`
-  prints `.githooks`) and has run for the staged change
+- `.githooks/pre-commit` is active locally (verify with `make check-hooks`)
+  and has run for the staged change. See "Git hook ownership" below — beads'
+  installer silently takes `core.hooksPath` over, and a bypassed hook cannot
+  report its own absence.
 - `make dashboard-ci` passes for any change touching `internal/api/`,
   `internal/api/openapi.json`, `docs/reference/schema/openapi.*`,
   `internal/api/dashboardspa/`, or generated dashboard types
@@ -467,6 +526,32 @@ Before considering any task complete:
 - Every exported function has a doc comment
 - No premature abstractions
 - Tests cover happy path AND edge cases
+
+## Git hook ownership
+
+**`.githooks` is the single owner of `core.hooksPath`.** Install it with
+`make setup`; verify it with `make check-hooks`.
+
+Only one directory can own `core.hooksPath`, and beads' installer claims it
+for `.beads/hooks`. Those hooks exec `bd hooks run <hook>` without chaining
+onward, so while beads owns the path every gate in `.githooks` — staged-Go
+formatting, `lint-changed`, the three codegen+stage steps, `make vet`, and the
+push-time suite — is skipped on every commit. Nothing reports this: git simply
+stops invoking the hooks, so commits look clean while spec-derived drift lands
+on the mainline until a later suite failure surfaces the drift.
+
+Reclaiming the path does not disable beads. Each `.githooks` hook forwards to
+`.githooks/lib/beads-chain.sh`, which runs `bd hooks run <hook>` with the same
+timeout and exit-code carve-outs beads' own integration block used. Adding a
+hook that beads manages means adding its `.githooks` counterpart too —
+`TestGitHooksCoverEveryBeadsManagedHook` in `scripts/` fails otherwise.
+
+Beads' installer can reclaim `core.hooksPath` at any time. When it does,
+`make check-hooks` fails and `make setup` puts it back.
+
+`make spec-ci` (run by the required `preflight-generated` CI job) is the
+backstop for spec/client drift, but it only sees work that reaches a PR —
+locally merged branches depend on the pre-commit gate actually running.
 
 ## Non-Interactive Shell Commands
 
@@ -535,6 +620,13 @@ bd close <id>         # Complete work
    NOTE: gascity Dolt is LOCAL-ONLY (no remote). Do NOT run `bd dolt push`,
    `bd dolt pull`, or `bd dolt remote add` here -- they fail and re-introduce
    a doomed `origin` remote (ga-9wsri). Use `git push` only.
+
+   That same no-remote shape is why bd >= 1.3.0 refuses to auto-apply pending
+   schema migrations to gascity's shared Dolt sql-server: migrating would lock
+   out every co-resident bd still on the old schema. If a bd WRITE fails with a
+   refusal naming pending migrations, the sanctioned fix is `bd migrate schema`
+   run once by a designated migrator after every bd client is upgraded -- NOT
+   `bd dolt pull`, and not an ad-hoc `BD_ALLOW_REMOTE_MIGRATE=1`.
 5. **Clean up** - Clear stashes, prune remote branches
 6. **Verify** - All changes committed AND pushed
 7. **Hand off** - Provide context for next session

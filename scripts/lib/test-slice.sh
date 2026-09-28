@@ -17,6 +17,12 @@
 
 GC_TEST_SLICE_UNIT="gascity-test.slice"
 
+# Per-run task cap: half the slice-wide TasksMax hosts typically provision
+# (16384). Bounds the blast radius of one leaky or runaway run — without
+# it, accumulated leaks from a single scope can exhaust the slice quota
+# and fork-reject every later test run. Override per host via env.
+: "${GC_TEST_SLICE_TASKS_MAX:=8192}"
+
 # Test seam: the self-test overrides the cgroup membership probe with a
 # fixture file because /proc/self/cgroup cannot be faked.
 : "${GC_TEST_SLICE_CGROUP_FILE:=/proc/self/cgroup}"
@@ -48,6 +54,7 @@ gc_test_slice_should_wrap() {
   # real command to it (containers and stale sessions can pass the checks
   # above yet fail systemd-run). Fall back to plain execution otherwise.
   systemd-run --user --slice="$GC_TEST_SLICE_UNIT" --scope --collect --quiet \
+    --property=TasksMax="$GC_TEST_SLICE_TASKS_MAX" \
     -- true >/dev/null 2>&1 || return 1
 }
 
@@ -58,7 +65,8 @@ gc_test_slice_should_wrap() {
 gc_test_slice_reexec() {
   if gc_test_slice_should_wrap; then
     GC_TEST_SLICE_ENROLLED=1 exec systemd-run --user \
-      --slice="$GC_TEST_SLICE_UNIT" --scope --collect --quiet -- "$@"
+      --slice="$GC_TEST_SLICE_UNIT" --scope --collect --quiet \
+      --property=TasksMax="$GC_TEST_SLICE_TASKS_MAX" -- "$@"
   fi
   return 0
 }

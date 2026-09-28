@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","cwd":"/tmp/gascity/phase1/cursor","session_id":"cursor-phase1-reset"}
+{"id":"cursor-r1","type":"user","timestamp":"2026-04-04T10:00:00Z","message":{"role":"user","content":"Repeat the exact Cursor phase-1 summary from earlier before answering. Start a new worker session."},"session_id":"cursor-phase1-reset"}
+{"id":"cursor-r2","type":"assistant","timestamp":"2026-04-04T10:00:08Z","message":{"role":"assistant","content":"I cannot repeat the earlier Cursor summary because this session started fresh. This capture represents a fresh logical conversation."},"session_id":"cursor-phase1-reset"}

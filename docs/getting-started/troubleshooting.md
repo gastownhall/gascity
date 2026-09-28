@@ -90,6 +90,51 @@ per-city `.gc/system/packs` tree, adds the missing pinned import(s) to
 `pack.toml`, and refreshes `packs.lock` and the cache. Leftover
 `.gc/system/packs` directories on disk are pruned automatically.
 
+## `gascity-pack-binding` Doctor Warning
+
+Cities created by gc v1.4.x import the public Gas City pack under the key
+`gascity`:
+
+```toml
+[imports.gascity]
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
+```
+
+The import key namespaces the pack's commands and skills, and the pack
+ecosystem is written against `gc`: the pack documents skill `gc.mayor`, and
+role prompts in Gas City pack releases after 0.1.6 run `gc gc claim`. Under
+`[imports.gascity]` that command is `gc gascity claim`, so role workers fail
+their first claim once the pack is bumped past 0.1.6. Current `gc init` writes
+`[imports.gc]`.
+
+`gc doctor` reports this as a warning; the city keeps working at the pinned
+0.1.6 pack. Run:
+
+```bash
+gc doctor --fix
+```
+
+The `gascity-pack-binding` check renames the key to `[imports.gc]` in
+`pack.toml` (or in a city.toml root `[imports]` override), keeping the source,
+version, and every other field. `packs.lock` is keyed by source, so no
+reinstall is needed. The check identifies the pack by its source (any https,
+http, or SSH spelling of `gastownhall/gascity-packs` with the `gascity` pack
+directory), not by the key name, so a fork or a different pack bound as
+`gascity` is left alone, and it never
+touches rig imports or `[defaults.rig.imports]`.
+
+The fix changes nothing and explains why when:
+
+- `[imports.gc]` already imports a different pack. Rename one of the imports
+  by hand.
+- `[imports.gc]` already imports the Gas City pack with a different version or
+  settings. Remove one of the two imports by hand. An exact duplicate (same
+  source and version) is removed automatically.
+- A string value in `pack.toml` or `city.toml` is shaped like a
+  `gascity.`-qualified name, for example a patch targeting `gascity.<agent>`.
+  The message names the file and key. Update the value to `gc.` and rerun, or
+  rename the import by hand if the value is unrelated. Comments are ignored.
+
 ## "command not found" After Install
 
 If `gc` is installed but your shell cannot find it, the binary is not on your
@@ -328,9 +373,10 @@ the flock requirement entirely.
 
 ## Cursor MCP Tools Still Prompt or Appear Unavailable
 
-The built-in `cursor` provider starts `cursor-agent` with `-f` and leaves
-Cursor's MCP approval prompt enabled by default. This avoids silently approving
-user or global MCP servers that Cursor can also see through `~/.cursor/mcp.json`.
+The built-in `cursor` provider starts `cursor-agent` with `-f --trust` so an
+unattended worker does not stop at Cursor's workspace-trust dialog. Use it only
+for workspaces whose contents you trust. The flag does not approve MCP servers;
+Cursor's MCP approval prompt remains enabled by default.
 
 For unattended Cursor pool workers, opt in only after confirming that every
 workspace and user/global MCP server visible to Cursor is trusted. The
@@ -344,8 +390,8 @@ mcp_approval = "approve"
 ```
 
 If you override Cursor `args` directly, the override replaces the built-in
-args. Include `-f` yourself and add `--approve-mcps` only for the same explicit
-trust decision. Agent-level `args` overrides behave the same way.
+args. Include `-f --trust` yourself and add `--approve-mcps` only for the same
+explicit MCP trust decision. Agent-level `args` overrides behave the same way.
 
 Existing Cursor sessions keep the command fingerprint they were created with.
 The supervisor reconciler restarts sessions automatically after the fingerprint
@@ -627,12 +673,23 @@ instead of mailing a hardcoded role. Orders inherit the orchestrator's
 environment, so set these at orchestrator start to customize routing:
 
 - `GC_ESCALATION_RECIPIENT` — mail recipient for escalations (default:
-  `human`, the reserved human mailbox).
+  `human`, the reserved human mailbox). An agent recipient is woken with
+  `--notify`; the `human` default is a mailbox with no session behind it,
+  so nothing is woken and the escalation waits until somebody reads that
+  inbox. Point this at the agent that surfaces alerts (the manager, on a
+  Slack-connected city) if you want maintenance advisories acted on rather
+  than filed.
 - `GC_ESCALATE_SCRIPT` — absolute path to an escalation script to run
   instead of searching packs.
 - `GC_ESCALATE_SEARCH_PACKS` — space-separated pack names searched (in
   order) for an `assets/scripts/escalate.sh` override (default:
   `gastown maintenance bd core`). A pack earlier in the list wins.
+- `GC_ESCALATE_SEND_TIMEOUT_SECS` — wall-clock bound on one escalation
+  send (default: 30). The wake can outlive the send it follows, and
+  escalations run inline in maintenance orders, so the bound keeps a slow
+  wake from stalling the run that raised the alarm. The mail is written
+  before the wake blocks, so a tripped bound costs the wake, not the
+  message, and the script still exits 0.
 - `GC_MAINTENANCE_DONE_TARGET` — session target to nudge with
   `MAINTENANCE_DONE:`/warn summaries when a maintenance run completes
   (default: unset, no completion nudge). Deployments that relied on the

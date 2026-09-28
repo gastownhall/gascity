@@ -3,6 +3,8 @@ package clientcontext
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -17,11 +19,13 @@ func sampleFile() *File {
 				GrantCommand: "gc-write-mint --key ~/.gc/keys/city.ed25519",
 			},
 			{
-				Name:              "remote",
-				URL:               "https://gc.example.com/city-api",
-				City:              "acme",
-				CredentialCommand: "token-helper --audience gc-city",
-				CAFile:            "/etc/ssl/gc/remote-ca.pem",
+				Name:                     "remote",
+				URL:                      "https://gc.example.com/city-api",
+				City:                     "acme",
+				CredentialAudience:       "gascity-control",
+				CredentialRequiredScopes: []string{"gascity:read", "gascity:write"},
+				CredentialOrg:            "org-acme",
+				CAFile:                   "/etc/ssl/gc/remote-ca.pem",
 			},
 		},
 	}
@@ -44,9 +48,52 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		t.Fatalf("Contexts len = %d, want %d", len(got.Contexts), len(want.Contexts))
 	}
 	for i := range want.Contexts {
-		if got.Contexts[i] != want.Contexts[i] {
+		if !reflect.DeepEqual(got.Contexts[i], want.Contexts[i]) {
 			t.Errorf("Contexts[%d] = %+v, want %+v", i, got.Contexts[i], want.Contexts[i])
 		}
+	}
+}
+
+func TestProviderContextPersistsRequestTupleWithoutProviderArgv(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "contexts.toml")
+	file := &File{Contexts: []Context{{
+		Name:                     "remote",
+		URL:                      "https://city.example",
+		CredentialAudience:       "gascity-control",
+		CredentialRequiredScopes: []string{"gascity:read", "gascity:write"},
+		CredentialOrg:            "org-acme",
+	}}}
+	if err := file.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, required := range []string{"credential_audience", "credential_required_scopes", "credential_org"} {
+		if !strings.Contains(text, required) {
+			t.Errorf("contexts.toml omits %s: %s", required, text)
+		}
+	}
+	for _, forbidden := range []string{"GC_CREDENTIAL_PROVIDER", "credential_provider_argv", "gasworks credential-provider"} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("contexts.toml persisted provider argv/configuration %q: %s", forbidden, text)
+		}
+	}
+}
+
+func TestLoadRejectsIncompleteCredentialProviderTuple(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "contexts.toml")
+	if err := os.WriteFile(path, []byte(`[[context]]
+name = "remote"
+url = "https://city.example"
+credential_audience = "gascity-control"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "credential_required_scopes") {
+		t.Fatalf("Load() error = %v, want incomplete provider tuple rejection", err)
 	}
 }
 
@@ -139,6 +186,45 @@ func TestContextValidate(t *testing.T) {
 			err := tt.ctx.Validate()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Validate() err = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestContextValidateCredentialProviderTuple(t *testing.T) {
+	valid := Context{
+		Name:                     "prod",
+		URL:                      "https://city.example",
+		CredentialAudience:       "gascity-control",
+		CredentialRequiredScopes: []string{"gascity:read"},
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("complete credential provider tuple: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		edit func(*Context)
+		want string
+	}{
+		{name: "missing audience", edit: func(c *Context) { c.CredentialAudience = "" }, want: "credential_audience"},
+		{name: "missing scopes", edit: func(c *Context) { c.CredentialRequiredScopes = nil }, want: "credential_required_scopes"},
+		{name: "empty scope", edit: func(c *Context) { c.CredentialRequiredScopes = []string{""} }, want: "credential_required_scopes"},
+		{name: "org alone is partial", edit: func(c *Context) {
+			c.CredentialAudience = ""
+			c.CredentialRequiredScopes = nil
+			c.CredentialOrg = "org-acme"
+		}, want: "credential_provider"},
+		{name: "legacy command conflicts", edit: func(c *Context) { c.CredentialCommand = "legacy-helper" }, want: "credential_command"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := valid
+			candidate.CredentialRequiredScopes = append([]string(nil), valid.CredentialRequiredScopes...)
+			test.edit(&candidate)
+			err := candidate.Validate()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want field %q", err, test.want)
 			}
 		})
 	}

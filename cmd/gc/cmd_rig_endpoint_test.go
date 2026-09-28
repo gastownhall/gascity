@@ -213,7 +213,7 @@ func TestDoRigSetEndpointInheritWritesManagedInheritedRigConfig(t *testing.T) {
 	}
 }
 
-func TestEnsureCanonicalScopeMetadataIfPresentPreservesExistingManagedProbeDatabase(t *testing.T) {
+func TestRequireCanonicalizedScopeMetadataPreservesExistingManagedProbeDatabase(t *testing.T) {
 	scopeDir := t.TempDir()
 	metadataPath := filepath.Join(scopeDir, ".beads", "metadata.json")
 	if err := os.MkdirAll(filepath.Dir(metadataPath), 0o700); err != nil {
@@ -227,8 +227,8 @@ func TestEnsureCanonicalScopeMetadataIfPresentPreservesExistingManagedProbeDatab
 	}); err != nil {
 		t.Fatalf("EnsureCanonicalMetadata: %v", err)
 	}
-	if err := ensureCanonicalScopeMetadataIfPresent(fsys.OSFS{}, scopeDir); err != nil {
-		t.Fatalf("ensureCanonicalScopeMetadataIfPresent: %v", err)
+	if err := requireCanonicalizedScopeMetadata(fsys.OSFS{}, scopeDir, scopeDir); err != nil {
+		t.Fatalf("requireCanonicalizedScopeMetadata: %v", err)
 	}
 	got, ok, err := contract.ReadDoltDatabase(fsys.OSFS{}, metadataPath)
 	if err != nil {
@@ -237,6 +237,52 @@ func TestEnsureCanonicalScopeMetadataIfPresentPreservesExistingManagedProbeDatab
 	if !ok || got != strings.ToUpper(managedDoltProbeDatabase) {
 		t.Fatalf("dolt_database = %q, ok=%v; want existing reserved name preserved", got, ok)
 	}
+}
+
+// TestCanonicalizeScopeMetadataIfPresentSkipsOnlyAbsentMetadata pins the split
+// the ga-5k989 fix rests on: absent means skip, and every other reason the
+// metadata cannot be canonicalized still errors.
+func TestCanonicalizeScopeMetadataIfPresentSkipsOnlyAbsentMetadata(t *testing.T) {
+	t.Run("absent metadata is not an error and fabricates nothing", func(t *testing.T) {
+		scopeDir := filepath.Join(t.TempDir(), "never-initialized")
+		if err := canonicalizeScopeMetadataIfPresent(fsys.OSFS{}, scopeDir, scopeDir); err != nil {
+			t.Fatalf("canonicalizeScopeMetadataIfPresent: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(scopeDir, ".beads", "metadata.json")); !os.IsNotExist(err) {
+			t.Fatalf("skipping a scope must not write its metadata, stat err = %v", err)
+		}
+	})
+
+	t.Run("metadata without a pinned dolt_database still errors", func(t *testing.T) {
+		scopeDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(scopeDir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(scopeDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		err := canonicalizeScopeMetadataIfPresent(fsys.OSFS{}, scopeDir, scopeDir)
+		if err == nil || !strings.Contains(err.Error(), "missing pinned dolt_database") {
+			t.Fatalf("canonicalizeScopeMetadataIfPresent error = %v, want missing pinned dolt_database", err)
+		}
+	})
+
+	t.Run("present metadata is canonicalized exactly as the named scope is", func(t *testing.T) {
+		scopeDir := t.TempDir()
+		metadataPath := filepath.Join(scopeDir, ".beads", "metadata.json")
+		if err := os.MkdirAll(filepath.Dir(metadataPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(metadataPath, []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"fe"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := canonicalizeScopeMetadataIfPresent(fsys.OSFS{}, scopeDir, scopeDir); err != nil {
+			t.Fatalf("canonicalizeScopeMetadataIfPresent: %v", err)
+		}
+		if mode := readScopeDoltMode(t, scopeDir); mode != "embedded" {
+			t.Fatalf("dolt_mode = %q, want embedded", mode)
+		}
+	})
 }
 
 func TestDoRigSetEndpointInheritMirrorsExternalCity(t *testing.T) {
@@ -1369,6 +1415,30 @@ func TestDoRigSetEndpointRequiresCanonicalMetadata(t *testing.T) {
 	}
 }
 
+// configWriteFailureFS fails every write that would land on config.yaml: the
+// direct write, the temp file an atomic writer stages it in, and the rename that
+// publishes it. The injection has to cover all three because the contract's
+// canonical writers are atomic, and the chmod 0444 this test used to rely on
+// injects nothing under one — a rename needs the directory's write bit, not the
+// file's, so the "failure" quietly succeeded and the rollback under test stopped
+// being exercised. Metadata writes are left alone, which is the point: the
+// assertion is that a config failure rolls the metadata back.
+type configWriteFailureFS struct{ fsys.FS }
+
+func (f configWriteFailureFS) WriteFile(name string, data []byte, perm os.FileMode) error {
+	if strings.HasPrefix(filepath.Base(name), "config.yaml") {
+		return fmt.Errorf("simulated config.yaml write failure")
+	}
+	return f.FS.WriteFile(name, data, perm)
+}
+
+func (f configWriteFailureFS) Rename(oldpath, newpath string) error {
+	if strings.HasPrefix(filepath.Base(newpath), "config.yaml") {
+		return fmt.Errorf("simulated config.yaml publish failure")
+	}
+	return f.FS.Rename(oldpath, newpath)
+}
+
 func TestDoRigSetEndpointConfigFailureRollsBackMetadata(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
@@ -1393,17 +1463,13 @@ func TestDoRigSetEndpointConfigFailureRollsBackMetadata(t *testing.T) {
 	})
 	beforeMeta := mustReadFile(t, metadataPath)
 	beforeConfig := mustReadFile(t, configPath)
-	if err := os.Chmod(configPath, 0o444); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.Chmod(configPath, 0o644) }()
 
 	origVerify := verifyRigExternalEndpoint
 	defer func() { verifyRigExternalEndpoint = origVerify }()
 	verifyRigExternalEndpoint = func(contract.ConfigState, string, string) error { return nil }
 
 	var stdout, stderr bytes.Buffer
-	code := doRigSetEndpoint(fsys.OSFS{}, cityDir, "frontend", rigEndpointOptions{
+	code := doRigSetEndpoint(configWriteFailureFS{fsys.OSFS{}}, cityDir, "frontend", rigEndpointOptions{
 		External: true,
 		Host:     "new-db.example.com",
 		Port:     "4406",

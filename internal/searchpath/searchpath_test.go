@@ -121,6 +121,39 @@ func TestDedupePreservesOrder(t *testing.T) {
 	}
 }
 
+func TestExpandIncludesNixProfileBin(t *testing.T) {
+	home := t.TempDir()
+	nixProfileBin := filepath.Join(home, ".nix-profile", "bin")
+	if err := os.MkdirAll(nixProfileBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dirs := Expand(home, "darwin", "/usr/bin")
+	if !slices.Contains(dirs, nixProfileBin) {
+		t.Fatalf("expected %q in dirs: %v", nixProfileBin, dirs)
+	}
+}
+
+func TestExpandIncludesNixProfileInstallBin(t *testing.T) {
+	home := t.TempDir()
+	nixProfileInstallBin := filepath.Join(home, ".local", "state", "nix", "profiles", "profile", "bin")
+	if err := os.MkdirAll(nixProfileInstallBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dirs := Expand(home, "linux", "/usr/bin")
+	if !slices.Contains(dirs, nixProfileInstallBin) {
+		t.Fatalf("expected %q in dirs: %v", nixProfileInstallBin, dirs)
+	}
+}
+
+func TestExpandOmitsAbsentNixProfileBin(t *testing.T) {
+	home := t.TempDir()
+	dirs := Expand(home, "darwin", "/usr/bin")
+	nixProfileBin := filepath.Join(home, ".nix-profile", "bin")
+	if slices.Contains(dirs, nixProfileBin) {
+		t.Fatalf("did not expect absent %q in dirs: %v", nixProfileBin, dirs)
+	}
+}
+
 func TestExpandNVMVersionsReverseSorted(t *testing.T) {
 	home := t.TempDir()
 	// Create two nvm version dirs.

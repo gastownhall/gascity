@@ -55,17 +55,17 @@ A bead is a unit of work with an ID, a title, a status, and a type. We use the
 ```shell
 ~/my-city
 $ bd list
-○ mc-0ez ● P2 Mix wet ingredients
-○ mc-265 ● P2 Combine wet and dry
-○ mc-79s ● P2 pancakes
-○ mc-9vb ● P2 Finalize workflow
-○ mc-a4l ● P2 Refactor auth module
-○ mc-b8g ● P2 Mix dry ingredients
-○ mc-d4g ● P2 Sprint 42
-○ mc-io4 ● P2 mayor
-○ mc-k3q ● P2 Serve
-○ mc-nia ● P2 Cook the pancakes
-○ mc-xp7 ● P2 Update API docs
+○ mc-0ez P2 Mix wet ingredients
+○ mc-265 P2 Combine wet and dry
+○ mc-79s P2 pancakes
+○ mc-9vb P2 Finalize workflow
+○ mc-a4l P2 Refactor auth module
+○ mc-b8g P2 Mix dry ingredients
+○ mc-d4g P2 Sprint 42
+○ mc-io4 P2 mayor
+○ mc-k3q P2 Serve
+○ mc-nia P2 Cook the pancakes
+○ mc-xp7 P2 Update API docs
 
 --------------------------------------------------------------------------------
 Total: 11 issues (11 open, 0 in progress)
@@ -166,8 +166,8 @@ $ bd close mc-ykp
 ✓ Closed mc-ykp — Fix the login bug: Closed
 
 $ bd list --status open --flat
-○ mc-a4l [● P2] [feature] - Refactor auth module
-○ mc-xp7 [● P2] [task]    - Update API docs
+○ mc-a4l [P2] [feature] - Refactor auth module
+○ mc-xp7 [P2] [task]    - Update API docs
 ```
 
 Note that the flag is `--status` (`--state` is a different command for state
@@ -184,7 +184,7 @@ what the city is doing right now, query the store:
 ```shell
 ~/my-city
 $ bd list --status in_progress --flat
-◐ mc-io4 [● P2] [session] - mayor
+◐ mc-io4 [P2] [session] - mayor
 ```
 
 Because work lives in the store rather than in memory, agent sessions are
@@ -208,7 +208,7 @@ $ bd label add mc-a4l frontend
 ✓ Added label 'frontend' to mc-a4l
 
 $ bd list --label priority:high --flat
-○ mc-a4l [● P2] [feature] - Refactor auth module
+○ mc-a4l [P2] [feature] - Refactor auth module
 ```
 
 `bd label add` takes a single label per call — apply multiples one at a time.
@@ -450,11 +450,11 @@ yours too.)
 ```shell
 ~/my-city
 $ bd list --status open --type task --flat
-○ mc-xp7 [● P2] [task] - Update API docs
-○ mc-b8g [● P2] [task] - Mix dry ingredients (blocks: mc-265)
+○ mc-xp7 [P2] [task] - Update API docs
+○ mc-b8g [P2] [task] - Mix dry ingredients (blocks: mc-265)
 
 $ bd show mc-a4l
-○ mc-a4l · Refactor auth module   [● P2 · OPEN]
+○ mc-a4l · Refactor auth module   [P2 · OPEN]
 Owner: dbox · Type: feature
 Created: 2026-04-08 · Updated: 2026-04-08
 
@@ -465,8 +465,8 @@ METADATA
   reviewer: sky
 
 BLOCKS
-  ← ○ mc-xp7: Update API docs ● P2
-  ← ○ mc-d4g: Sprint 42 ● P2
+  ← ○ mc-xp7: Update API docs P2
+  ← ○ mc-d4g: Sprint 42 P2
 
 $ bd close mc-a4l
 ✓ Closed mc-a4l — Refactor auth module: Closed

@@ -24,8 +24,11 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	return scanWithRoot(scanRoot, id)
 }
 
-// IsScanRoot reports whether pid is outside its GC_SESSION_ID parent's
-// envelope and should be treated as an agent root.
+// IsScanRoot reports whether pid should be treated as an agent root. A root
+// carries a GC_SESSION_ID, is not itself infrastructure — a tmux server or
+// client is never a root, whoever its parent is — and sits outside its
+// parent's envelope: the parent is gone, carries a different GC_SESSION_ID,
+// or is infrastructure.
 func IsScanRoot(pid int) bool {
 	if err := liveScanGuard(); err != nil {
 		return false
@@ -47,6 +50,9 @@ func IsScanRoot(pid int) bool {
 	if sessionID == "" {
 		return false
 	}
+	if isInfrastructureProcess(scanRoot, pid) {
+		return false
+	}
 	isRoot, err := isRootWithSessionID(scanRoot, pid, sessionID)
 	return err == nil && isRoot
 }
@@ -65,47 +71,15 @@ func scanWithRoot(root, id string) ([]runtime.LiveRuntime, error) {
 		if !entry.IsDir() {
 			continue
 		}
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid <= 1 {
-			continue
-		}
-		env, err := parseEnvironFile(filepath.Join(root, entry.Name(), "environ"))
+		live, reported, err := scanProcEntry(root, entry.Name(), id)
 		if err != nil {
-			scanErr = errors.Join(scanErr, fmt.Errorf("reading environ for pid %d: %w", pid, err))
+			scanErr = errors.Join(scanErr, err)
 			continue
 		}
-		if root == "/proc" && pid == os.Getpid() {
-			env = mergeCurrentEnv(env)
-		}
-		if len(env) == 0 {
+		if !reported {
 			continue
 		}
-		sessionID := env["GC_SESSION_ID"]
-		if sessionID == "" {
-			continue
-		}
-		if id != "" && sessionID != id {
-			continue
-		}
-		rootProcess, err := isRootWithSessionID(root, pid, sessionID)
-		if err != nil {
-			scanErr = errors.Join(scanErr, fmt.Errorf("checking root for pid %d: %w", pid, err))
-			continue
-		}
-		if !rootProcess {
-			continue
-		}
-		epoch, _ := strconv.Atoi(env["GC_RUNTIME_EPOCH"])
-		city := env["GC_CITY_PATH"]
-		if city == "" {
-			city = env["GC_CITY"]
-		}
-		out = append(out, runtime.LiveRuntime{
-			SessionID: sessionID,
-			City:      city,
-			Epoch:     epoch,
-			PID:       pid,
-		})
+		out = append(out, live)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].PID < out[j].PID
@@ -114,6 +88,74 @@ func scanWithRoot(root, id string) ([]runtime.LiveRuntime, error) {
 		out = []runtime.LiveRuntime{}
 	}
 	return out, scanErr
+}
+
+// scanProcEntry decides whether one /proc entry is an agent root for id and,
+// when it is, builds the record to report. reported is false for every entry
+// the scan declines to surface; err is returned only for a read that failed in
+// a way the caller must accumulate, never for an ordinary decline.
+//
+// It is a separate function from the enumeration loop because the decision is a
+// sequence of independent refusals; keeping them inside the loop nests every
+// one of them, which is how this became the most complex function in the
+// package.
+func scanProcEntry(root, entryName, id string) (runtime.LiveRuntime, bool, error) {
+	pid, err := strconv.Atoi(entryName)
+	if err != nil || pid <= 1 {
+		return runtime.LiveRuntime{}, false, nil
+	}
+	env, err := parseEnvironFile(filepath.Join(root, entryName, "environ"))
+	if err != nil {
+		return runtime.LiveRuntime{}, false, fmt.Errorf("reading environ for pid %d: %w", pid, err)
+	}
+	if root == "/proc" && pid == os.Getpid() {
+		env = mergeCurrentEnv(env)
+	}
+	if len(env) == 0 {
+		return runtime.LiveRuntime{}, false, nil
+	}
+	sessionID := env["GC_SESSION_ID"]
+	if sessionID == "" {
+		return runtime.LiveRuntime{}, false, nil
+	}
+	if id != "" && sessionID != id {
+		return runtime.LiveRuntime{}, false, nil
+	}
+	// Infrastructure is never an agent root, whoever its parent is: the
+	// tmux server a session founded inherits its GC_SESSION_ID and
+	// reparents to init, and the parent test below would report it — and
+	// the orphan sweep would kill the server every agent in the city
+	// shares (gastownhall/gascity#5392).
+	if isInfrastructureProcess(root, pid) {
+		return runtime.LiveRuntime{}, false, nil
+	}
+	rootProcess, err := isRootWithSessionID(root, pid, sessionID)
+	if err != nil {
+		return runtime.LiveRuntime{}, false, fmt.Errorf("checking root for pid %d: %w", pid, err)
+	}
+	if !rootProcess {
+		return runtime.LiveRuntime{}, false, nil
+	}
+	epoch, _ := strconv.Atoi(env["GC_RUNTIME_EPOCH"])
+	city := env["GC_CITY_PATH"]
+	if city == "" {
+		city = env["GC_CITY"]
+	}
+	ppid, _, _ := readParentPID(filepath.Join(root, entryName, "stat"))
+	comm, _ := os.ReadFile(filepath.Join(root, entryName, "comm"))
+	return runtime.LiveRuntime{
+		SessionID: sessionID,
+		City:      city,
+		Epoch:     epoch,
+		PID:       pid,
+		PPID:      ppid,
+		// Read from the SAME ppid that is reported above, so a caller fencing
+		// on this field is fencing on the parent it was told about. A pid <= 1
+		// parent is init or an unreadable stat, never the provider's server, so
+		// it is refused without a comm read.
+		ParentIsProviderInfrastructure: ppid > 1 && isInfrastructureProcess(root, ppid),
+		Name:                           strings.TrimSpace(string(comm)),
+	}, true, nil
 }
 
 func mergeCurrentEnv(env map[string]string) map[string]string {
@@ -169,41 +211,63 @@ func isRootWithSessionID(root string, pid int, sessionID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if parentEnv["GC_SESSION_ID"] == sessionID && isInfrastructureParent(root, ppid) {
+	if parentEnv["GC_SESSION_ID"] == sessionID && isInfrastructureProcess(root, ppid) {
 		return true, nil
 	}
 	return parentEnv["GC_SESSION_ID"] != sessionID, nil
 }
 
-func isInfrastructureParent(root string, pid int) bool {
+// isInfrastructureProcess reports whether pid's comm names infrastructure (a
+// tmux server or client) rather than an agent; see isInfrastructureCommand.
+func isInfrastructureProcess(root string, pid int) bool {
 	data, err := os.ReadFile(filepath.Join(root, strconv.Itoa(pid), "comm"))
 	if err != nil {
 		return false
 	}
-	command := strings.ToLower(strings.TrimSpace(string(data)))
-	return strings.Contains(command, "tmux")
+	return isInfrastructureCommand(string(data))
 }
 
 func readParentPID(path string) (int, bool, error) {
+	ppid, _, _, ok, err := readProcStatIdentity(path)
+	return ppid, ok, err
+}
+
+func readProcStatIdentity(path string) (ppid, pgid int, startTime string, ok bool, err error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) || os.IsPermission(err) {
-			return 0, false, nil
+			return 0, 0, "", false, nil
 		}
-		return 0, false, err
+		return 0, 0, "", false, err
 	}
-	text := string(data)
-	closeParen := strings.LastIndex(text, ")")
+	ppid, pgid, startTime, ok, err = parseProcStatIdentity(string(data))
+	if err != nil {
+		return 0, 0, "", false, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	return ppid, pgid, startTime, ok, nil
+}
+
+func parseProcStatIdentity(text string) (ppid, pgid int, startTime string, ok bool, err error) {
+	closeParen := strings.LastIndexByte(text, ')')
 	if closeParen < 0 || closeParen+1 >= len(text) {
-		return 0, false, fmt.Errorf("malformed stat file %s", path)
+		return 0, 0, "", false, fmt.Errorf("malformed proc stat record")
 	}
 	fields := strings.Fields(text[closeParen+1:])
-	if len(fields) < 2 {
-		return 0, false, fmt.Errorf("malformed stat file %s", path)
+	const startTimeIndexAfterComm = 19
+	if len(fields) <= startTimeIndexAfterComm {
+		return 0, 0, "", false, fmt.Errorf("malformed proc stat record: got %d post-comm fields", len(fields))
 	}
-	ppid, err := strconv.Atoi(fields[1])
+	ppid, err = strconv.Atoi(fields[1])
 	if err != nil {
-		return 0, false, fmt.Errorf("parsing ppid from %s: %w", path, err)
+		return 0, 0, "", false, fmt.Errorf("parsing proc stat ppid: %w", err)
 	}
-	return ppid, true, nil
+	pgid, err = strconv.Atoi(fields[2])
+	if err != nil {
+		return 0, 0, "", false, fmt.Errorf("parsing proc stat pgid: %w", err)
+	}
+	startTime = fields[startTimeIndexAfterComm]
+	if startTime == "" {
+		return 0, 0, "", false, fmt.Errorf("proc stat start time is empty")
+	}
+	return ppid, pgid, startTime, true, nil
 }

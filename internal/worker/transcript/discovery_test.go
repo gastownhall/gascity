@@ -812,3 +812,37 @@ func quoteJSONString(value string) string {
 	}
 	return string(raw)
 }
+
+// DiscoverScopedPath is the seam the session manager reaches a zcode mirror
+// through, and the mirror scope is keyed by the seat — session name, session
+// bead id, continuation epoch — not by name and epoch alone: two seats can
+// share those. A seat with no seat-scoped mirror still reads the name-only
+// scope an earlier adapter wrote.
+func TestDiscoverScopedPathZCodeKeysBySeat(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "zcode-project")
+	write := func(scope, id string) string {
+		dir := filepath.Join(base, scope)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, id+".json")
+		body := `{"info":{"id":"` + id + `","directory":"` + filepath.ToSlash(workDir) + `"},"messages":[]}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	seat := write("pool-1@gcg-session-a#1", "sess_seat")
+	legacy := write("pool-1#1", "sess_legacy")
+
+	if got := DiscoverScopedPath([]string{base}, "zcode/tmux-cli", workDir, "pool-1", "gcg-session-a", "1"); got != seat {
+		t.Fatalf("DiscoverScopedPath(seat a) = %q, want %q", got, seat)
+	}
+	if got := DiscoverScopedPath([]string{base}, "zcode/tmux-cli", workDir, "pool-1", "gcg-session-b", "1"); got != legacy {
+		t.Fatalf("DiscoverScopedPath(seat without a seat-scoped mirror) = %q, want the name-only %q", got, legacy)
+	}
+	if got := DiscoverScopedPath([]string{base}, "claude/tmux-cli", workDir, "pool-1", "gcg-session-a", "1"); got != "" {
+		t.Fatalf("DiscoverScopedPath(claude) = %q, want empty for a non-zcode family", got)
+	}
+}

@@ -331,3 +331,57 @@ func TestRenudgeStaleHumanGatesScriptContract(t *testing.T) {
 		t.Error("renudge-stale-human-gates.sh must exit non-zero when a re-nudge failed, or the loud-fail message is never logged (#4543)")
 	}
 }
+
+// TestCoreEscalationScriptContract guards the escalation contract shared by the
+// two exec-order scripts that mail somebody when they detect trouble. Core
+// ships no coordinator or work-health role, so both properties below are
+// load-bearing and neither is visible at runtime when it regresses:
+//
+//   - The recipient must be configurable via $GC_ESCALATION_TARGET and must
+//     default to the reserved `human` alias, which resolves in every city. A
+//     hardcoded `mayor/` or `<rig>/witness` names a role core does not ship, so
+//     the send fails in every core-only city — and it fails into a discarded
+//     stream, which is the second half of this contract.
+//   - Loud-fail: an undeliverable escalation must surface to stderr AND the
+//     script must exit non-zero. The controller captures an exec order's
+//     combined output but logs it only on a non-zero exit
+//     (cmd/gc/order_dispatch.go), so a fire-and-forget exit 0 discards the
+//     stderr line and the escalation evaporates without a trace
+//     (gastownhall/gascity#4543). The non-zero exit must come AFTER the
+//     script's own state write / summary output, so neither is lost.
+func TestCoreEscalationScriptContract(t *testing.T) {
+	for _, script := range []string{
+		"spawn-storm-detect.sh",
+		"orphan-sweep.sh",
+	} {
+		t.Run(script, func(t *testing.T) {
+			data, err := fs.ReadFile(PackFS, "assets/scripts/"+script)
+			if err != nil {
+				t.Fatalf("reading %s: %v", script, err)
+			}
+			body := string(data)
+
+			for _, want := range []string{
+				`ESCALATION_TARGET="${GC_ESCALATION_TARGET:-human}"`, // configurable, human-safe default
+				`gc mail send "$ESCALATION_TARGET"`,                  // send to the configured target
+				"if ! gc mail send",                                  // branch on the result, not fire-and-forget
+				`"$FAILED" -gt 0`,                                    // non-zero exit so the failure is logged
+			} {
+				if !strings.Contains(body, want) {
+					t.Errorf("%s missing load-bearing escalation element %q", script, want)
+				}
+			}
+
+			// Roles core does not ship. Either one routes the escalation to a
+			// recipient that cannot resolve in a core-only city.
+			for _, banned := range []string{
+				"gc mail send mayor/",
+				"<rig>/witness",
+			} {
+				if strings.Contains(body, banned) {
+					t.Errorf("%s hardcodes %q; core ships no such role — route via $ESCALATION_TARGET", script, banned)
+				}
+			}
+		})
+	}
+}

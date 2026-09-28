@@ -369,6 +369,42 @@ func TestMailMarkUnread(t *testing.T) {
 	}
 }
 
+// TestMailSendOmittedBodyStaysEmpty pins the POST /v0/mail contract for a
+// request that carries a subject and no body. MailSendInput marks Subject
+// required (minLength:"1") and Body optional, so this is a well-formed
+// request, and the omitted body must round-trip as empty rather than being
+// silently backfilled from the subject.
+//
+// The point is cross-surface agreement: `gc mail send <to> -s "text"` stores
+// an empty body too (cmd/gc: TestMailSendSubjectOnlyStoresEmptyBody), so
+// mail.Provider.Send behaves identically whichever surface issued it. A
+// backfill applied at one ingress and not the others is what makes the two
+// diverge. The rendering of a bodyless message is handled in the read paths,
+// downstream of every ingress (ga-6eukj0).
+func TestMailSendOmittedBodyStaysEmpty(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+
+	body := `{"from":"alice","to":"worker","subject":"Build is green"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/mail"), bytes.NewBufferString(body)))
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	var msg mail.Message
+	if err := json.NewDecoder(rec.Body).Decode(&msg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if msg.Subject != "Build is green" {
+		t.Errorf("Subject = %q, want %q", msg.Subject, "Build is green")
+	}
+	if msg.Body != "" {
+		t.Errorf("Body = %q, want empty (an omitted optional body must not be backfilled)", msg.Body)
+	}
+}
+
 func TestMailSendValidation(t *testing.T) {
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)

@@ -45,6 +45,11 @@ const (
 	autoSessionNamePrefix     = "s-"
 )
 
+// MaxExplicitSessionNameLen is the longest explicit session name
+// [ValidateExplicitName] accepts. Callers that derive a name from an identity
+// of unbounded length need it to shorten deterministically instead of failing.
+const MaxExplicitSessionNameLen = explicitSessionNameMaxLen
+
 type sessionIdentifierReservationLockEntry struct {
 	mu   sync.Mutex
 	refs int

@@ -41,7 +41,7 @@ func stubGitHubRepairWorkflowAttach(t *testing.T) *[]string {
 	t.Helper()
 	old := attachGitHubPRRepairWorkflow
 	calls := []string{}
-	attachGitHubPRRepairWorkflow = func(_ beads.Store, _ *config.City, _ config.Rig, monitor config.GitHubPRMonitor, _ beads.Bead, _ githubmonitor.Result) error {
+	attachGitHubPRRepairWorkflow = func(_ beads.Store, _ beads.GraphStore, _ *config.City, _ config.Rig, monitor config.GitHubPRMonitor, _ beads.Bead, _ githubmonitor.Result) error {
 		calls = append(calls, monitor.RepairWorkflowOrDefault())
 		return nil
 	}

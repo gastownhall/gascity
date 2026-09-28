@@ -804,9 +804,13 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 
 	// Dep edges, after every row exists, so an edge's far endpoint can be
 	// resolved. Only edges the binding lacks are written: the pass is a diff, so
-	// re-running it on a converged city writes nothing and says so.
+	// re-running it on a converged city writes nothing and says so. Each goes
+	// through the migration's own edge writer, carrying the payload the source
+	// holds for it — a repair that restored the edges and dropped their payloads
+	// would report the same "edges: N restored" line while leaving the binding
+	// short of what it is being repaired toward.
 	for _, d := range plan.missing {
-		if err := destination.DepAdd(d.IssueID, d.DependsOnID, d.Type); err != nil {
+		if err := infraCopyDepEdge(destination, source, d.IssueID, d.DependsOnID, d.Type); err != nil {
 			fmt.Fprintf(stderr, "%s: restoring dep %s -> %s: %v\n", logPrefix, d.IssueID, d.DependsOnID, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -900,6 +904,40 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 				fmt.Fprintf(stderr, "%s: %s. The manifest was NOT extended\n", logPrefix, diff) //nolint:errcheck // best-effort stderr
 				return 1
 			}
+		}
+	}
+
+	// The payload on every edge this run wrote, re-read from the reopened
+	// binding and compared against the source.
+	//
+	// The presence loop above cannot see this: a restore that wrote all of
+	// plan.missing and dropped every gate produces exactly the Dep set it
+	// demands, and the run would report "edges: N restored" and extend the
+	// manifest over a binding short of what it was being repaired toward. That is
+	// the same blindness verifyInfraCopy carried until the migration learned to
+	// witness payloads, and the repair path has no business being held to a
+	// weaker standard than the copy it repairs.
+	//
+	// The scope is plan.missing rather than every resident edge, and deliberately:
+	// an edge the binding was already serving may have diverged from the source
+	// legitimately, exactly as the field comparison above declines to hold
+	// already-resident rows to source equality. This run is answerable for what
+	// it wrote.
+	for _, d := range plan.missing {
+		want, err := infraReadEdgePayload(source, d.IssueID, d.DependsOnID)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: re-reading the source payload on dep %s -> %s: %v. The manifest was NOT extended\n", logPrefix, d.IssueID, d.DependsOnID, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		got, err := infraReadEdgePayload(verifier, d.IssueID, d.DependsOnID)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: reading the restored payload on dep %s -> %s: %v. The manifest was NOT extended\n", logPrefix, d.IssueID, d.DependsOnID, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if want != got {
+			fmt.Fprintf(stderr, "%s: dep %s -> %s was restored carrying %s, and the work store holds %s. The manifest was NOT extended\n", //nolint:errcheck // best-effort stderr
+				logPrefix, d.IssueID, d.DependsOnID, infraFormatEdgePayload(got), infraFormatEdgePayload(want))
+			return 1
 		}
 	}
 

@@ -124,6 +124,17 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	if !nudgeDispatcherIsSupervisor(cfg) {
 		return 0, nil
 	}
+	now := time.Now()
+	// Run the queue's TTL/max-attempts maintenance sweep unconditionally,
+	// independent of whether any item below matches an open session. The
+	// per-session loop's only path to recover/prune is a successful claim in
+	// claimDueQueuedNudgesForTarget, which a structurally orphaned item
+	// (target agent has no open session, and never will again) can never
+	// reach — leaving it in Pending past its ExpiresAt forever. See
+	// ra-oudpha finding-3.
+	if err := runNudgeQueueMaintenanceSweep(cityPath, now); err != nil {
+		return 0, fmt.Errorf("nudge queue maintenance sweep: %w", err)
+	}
 	state, err := nudgequeue.LoadState(cityPath)
 	if err != nil {
 		return 0, fmt.Errorf("loading nudge queue: %w", err)
@@ -131,7 +142,6 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	if len(state.Pending) == 0 && len(state.InFlight) == 0 {
 		return 0, nil
 	}
-	now := time.Now()
 	pendingAgents := make(map[string]bool, len(state.Pending))
 	for _, item := range state.Pending {
 		if item.Agent == "" {

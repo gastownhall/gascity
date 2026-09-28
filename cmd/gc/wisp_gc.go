@@ -7,12 +7,14 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -61,6 +63,14 @@ var closeAbandonedEnforced = func() bool {
 // unbounded amount of deletion work. Package var so tests can shrink it.
 var wispGCReapOrphanBatchCap = 500
 
+// wispGCReapOrphanProbeCap bounds how many rootless candidates one sweep will
+// probe for leaf-ness (Children/DepList). Unlike wispGCReapOrphanBatchCap it
+// applies in DRY-RUN TOO: the dry run performs no deletes but still pays one
+// backend read per aged rootless candidate, so without this bound the default
+// config does unbounded reads per tick against the very backlog this reaps.
+// Package var so tests can shrink it.
+var wispGCReapOrphanProbeCap = 500
+
 // wispGCClosurePurgeBatchCap bounds how many closed-root ownership closures a
 // single sweep will purge. Like wispGCReapOrphanBatchCap it caps DELETE
 // ATTEMPTS per tick — counting failures, not just successful purges — so the
@@ -68,6 +78,48 @@ var wispGCReapOrphanBatchCap = 500
 // a failing delete backend, drain across successive ticks instead of one
 // unbounded pass. Package var so tests can shrink it.
 var wispGCClosurePurgeBatchCap = 500
+
+// infraSessionPurgeAgeDefault is how long a closed infra session bead is kept.
+// Three days, not the Dolt reaper's 30-day SESSION_PURGE_AGE: these rows are
+// coordination records, and a 30-day tail is what made the graph file large
+// enough for SQLITE_BUSY_SNAPSHOT. Override with GC_INFRA_SESSION_PURGE_AGE.
+const infraSessionPurgeAgeDefault = 72 * time.Hour
+
+// infraSessionPurgeAge is the idle age a closed session bead must reach
+// before purgeClosedInfraSessions deletes it. Tests replace it.
+var infraSessionPurgeAge = defaultInfraSessionPurgeAge
+
+func defaultInfraSessionPurgeAge() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("GC_INFRA_SESSION_PURGE_AGE"))
+	if raw == "" {
+		return infraSessionPurgeAgeDefault
+	}
+	age, err := time.ParseDuration(raw)
+	if err != nil || age <= 0 {
+		infraSessionPurgeAgeWarnOnce.Do(func() {
+			log.Printf("wisp gc: GC_INFRA_SESSION_PURGE_AGE=%q is not a positive Go duration (e.g. 72h; days like 30d are not accepted); using the default %s",
+				raw, infraSessionPurgeAgeDefault)
+		})
+		return infraSessionPurgeAgeDefault
+	}
+	return age
+}
+
+// infraSessionPurgeAgeWarnOnce limits the invalid-override warning to one line
+// per process: the age is re-read every GC tick. Tests reset it.
+var infraSessionPurgeAgeWarnOnce = &sync.Once{}
+
+// wispGCSessionPurgeBatchCap bounds how many closed infra session beads one
+// sweep deletes. The backlog drains across ticks instead of one unbounded pass.
+var wispGCSessionPurgeBatchCap = 500
+
+// wispGCSessionPurgeScanCap bounds how many candidates one sweep examines,
+// kept or deleted. A session that still owns children is kept, and it counts
+// against this budget, so the per-tick Children/DepList/Get probes stay bounded
+// even when the backlog is mostly sessions that cannot be purged. The sweep
+// resumes after the last examined candidate on the next tick (see
+// memoryWispGC.sessionPurgeCursor), so kept sessions do not starve the rest.
+var wispGCSessionPurgeScanCap = 2000
 
 // reapOrphansEnforced reports whether orphaned-closed-wisp reaping should
 // actually delete rows (true) or run dry (false). It is a package var so tests
@@ -106,7 +158,13 @@ type wispGC interface {
 	// also covers list failures. The molecule/wisp/workflow purge arm operates on
 	// the graph-class store; the read-message retention arm on the messaging-class
 	// store. Both wrap the same underlying work store until either class relocates.
-	runGC(graphStore beads.GraphStore, mailStore beads.MailStore, now time.Time) (int, error)
+	//
+	// sessionLedger is the sessions-class store ONLY when the city has relocated
+	// that class off its work store onto a SQLite infra ledger (see
+	// relocatedSQLiteSessionLedger); otherwise its Store is nil and the closed
+	// session purge arm does nothing. Sessions on a work store belong to the
+	// reaper order's step 6, with its own pattern, backup and anomaly guards.
+	runGC(graphStore beads.GraphStore, sessionLedger beads.SessionStore, mailStore beads.MailStore, now time.Time) (int, error)
 }
 
 // memoryWispGC is the production implementation of wispGC.
@@ -115,6 +173,11 @@ type memoryWispGC struct {
 	ttl              time.Duration
 	mailRetentionTTL time.Duration
 	lastRun          time.Time
+	// sessionPurgeCursor is where the closed infra session sweep resumes: the
+	// last candidate the previous sweep examined, in (created_at, id) order.
+	// nil starts from the oldest candidate; a sweep that reaches the end of the
+	// candidate list resets it so the next pass starts over.
+	sessionPurgeCursor *beads.SeekBoundary
 }
 
 // newWispGC creates a wisp GC tracker. Returns nil if disabled. The tracker
@@ -146,7 +209,7 @@ func (m *memoryWispGC) shouldRun(now time.Time) bool {
 	return now.Sub(m.lastRun) >= m.interval
 }
 
-func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailStore, now time.Time) (int, error) {
+func (m *memoryWispGC) runGC(graphStore beads.GraphStore, sessionLedger beads.SessionStore, mailStore beads.MailStore, now time.Time) (int, error) {
 	m.lastRun = now
 	// The molecule/wisp/workflow purge arm operates on the graph-class store; the
 	// read-message retention arm on the messaging-class store. Pass the unwrapped
@@ -201,6 +264,27 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 		orphanReaped, orphanErr := reapOrphanedClosedWisps(store, cutoff, wispGCReapOrphanBatchCap)
 		purged += orphanReaped
 		deleteErr = errors.Join(deleteErr, orphanErr)
+	}
+
+	// Closed agent-session rows (gcg-session-*, gcs-*) in a SQLite infra ledger
+	// are invisible to the reaper order, whose step 6 queries the Dolt work
+	// database, and the root-blind SQLite retention sweeper stays off, so this
+	// arm is what deletes them. It runs only when both hold:
+	//   - the graph-class GC is on (wisp_ttl > 0). A GC enabled only for mail
+	//     retention is a messaging policy and does not opt the city into
+	//     deleting session history;
+	//   - the caller handed over a relocated SQLite sessions ledger. On an
+	//     unsplit city sessions live on the work store, sessionLedger.Store is
+	//     nil, and this arm is a no-op: those rows belong to reaper step 6.
+	// Its clock is infraSessionPurgeAge (GC_INFRA_SESSION_PURGE_AGE, default
+	// 3 days) — neither the 24h wisp TTL nor the Dolt reaper's 30-day
+	// GC_REAPER_SESSION_PURGE_AGE — and it never deletes a non-session bead.
+	if m.ttl > 0 && sessionLedger.Store != nil {
+		sessionPurged, next, sessionErr := purgeClosedInfraSessionsPage(sessionLedger.Store, now, infraSessionPurgeAge(),
+			wispGCSessionPurgeBatchCap, wispGCSessionPurgeScanCap, m.sessionPurgeCursor)
+		m.sessionPurgeCursor = next
+		purged += sessionPurged
+		deleteErr = errors.Join(deleteErr, sessionErr)
 	}
 
 	if m.mailRetentionTTL > 0 && mailStore.Store != nil {
@@ -317,15 +401,27 @@ func closedWispGCEntries(store beads.Store) ([]beads.Bead, error) {
 // reapOrphanedClosedWisps reaps closed wisp-tier descendants whose owning root
 // is gone or already terminal but which the root-rooted closure purge never
 // enumerates (their root is absent from, or never appears in, the closed-root
-// list). Candidates are closed wisp-tier rows carrying a gc.root_bead_id
-// pointer and older than cutoff.
+// list), plus rootless plain-task wisps that never had an owning root at all
+// (gastownhall/gascity#3780). Candidates are closed wisp-tier rows older than
+// cutoff, either carrying a gc.root_bead_id pointer or a bare type=task row.
 //
-// Safety: a descendant is reaped only when its root is provably collectible —
-// the root Get returns ErrNotFound (root gone) or the root is terminal
-// (closed/tombstone). A live/open root, or any other (unreadable) Get error,
-// causes the descendant to be SKIPPED so an in-flight workflow is never
-// stripped of its closed steps. The per-root Get decision is cached so many
-// siblings sharing one dead root cost a single Get.
+// Safety: a descendant with a root pointer is reaped only when its root is
+// provably collectible — the root Get returns ErrNotFound (root gone) or the
+// root is terminal (closed/tombstone). A live/open root, or any other
+// (unreadable) Get error, causes the descendant to be SKIPPED so an in-flight
+// workflow is never stripped of its closed steps. The per-root Get decision
+// is cached so many siblings sharing one dead root cost a single Get. A
+// rootless row needs no such check when it is a plain-task LEAF — no parent and
+// no children by either the parent_id COLUMN or a parent-child DEP ROW, since
+// ownership travels over both (collectExpiredBeadClosure walks both too) —
+// because its own closed status is then the entire collectibility fence;
+// deleteWorkflowBead removes a single bead, not a closure, so a rootless row
+// that owns a subtree stays SKIPPED rather than stranding descendants no GC
+// path could reach again, and one that is a subtree MEMBER stays SKIPPED rather
+// than being stripped from a live parent. A rootless row that is not a plain
+// task is an unrecognized shape and also stays SKIPPED. The leaf-ness probes
+// cost backend reads even in dry-run, so wispGCReapOrphanProbeCap bounds how
+// many of them one sweep performs regardless of enforcement.
 //
 // With reapOrphansEnforced() false (the dry-run default, GC_WISP_GC_REAP_ORPHANS
 // unset) the function mutates nothing: it counts the would-be reaps and logs a
@@ -353,6 +449,11 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 
 	reaped := 0
 	attempted := 0
+	// probed bounds the rootless leaf-ness probes (Children + DepList) for the
+	// sweep. It advances in DRY-RUN TOO, unlike attempted: the dry run performs
+	// no deletes but still pays those backend reads per aged rootless candidate.
+	probed := 0
+	probeTruncated := false
 	var deleteErr error
 	for _, c := range candidates {
 		// The batch cap bounds DELETION ATTEMPTS per sweep — counting failed
@@ -366,8 +467,9 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 		}
 
 		rootID := c.Metadata[beadmeta.RootBeadIDMetadataKey]
-		if rootID == "" {
-			// No root pointer — out of scope for orphan reaping.
+		if rootID == "" && c.Type != "task" {
+			// No root pointer and not a plain task: an unrecognized shape
+			// this reaper cannot prove safe to collect — out of scope.
 			continue
 		}
 
@@ -376,23 +478,76 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 			continue
 		}
 
-		decision, cached := rootCollectible[rootID]
-		if !cached {
-			root, getErr := store.Get(rootID)
-			switch {
-			case errors.Is(getErr, beads.ErrNotFound):
-				decision = true // root gone
-			case getErr == nil && convoycore.IsTerminalStatus(root.Status):
-				decision = true // root terminal
-			case getErr == nil:
-				decision = false // root live/open — never reap its descendants
-			default:
-				// Any other Get error: cannot prove safe — skip without caching
-				// as collectible. Surface so the sweep records the failure.
-				decision = false
-				collectErr = errors.Join(collectErr, fmt.Errorf("resolving root %q for orphan %q: %w", rootID, c.ID, getErr))
+		var decision bool
+		if rootID == "" {
+			// A rootless plain-task wisp is collectible only when it is a
+			// LEAF. deleteWorkflowBead removes a single bead, not a closure
+			// (unlike the root-rooted purge, which deletes the whole
+			// ownership tree), so reaping a row that owns a parent-child
+			// subtree would strand descendants that neither GC path can
+			// reach again, and reaping a subtree member would strip a step
+			// from a live parent. Its own closed status is the entire
+			// collectibility fence only once both directions of ownership —
+			// column and dep row — come back empty (gastownhall/gascity#3780).
+			if strings.TrimSpace(c.ParentID) != "" {
+				continue
 			}
-			rootCollectible[rootID] = decision
+			// Every remaining rootless candidate costs backend reads whether or
+			// not this sweep enforces, so the probe budget is checked before the
+			// first of them. break, not continue: the rest of the candidate
+			// slice cannot be probed either, so walking it buys nothing.
+			if wispGCReapOrphanProbeCap > 0 && probed >= wispGCReapOrphanProbeCap {
+				probeTruncated = true
+				break
+			}
+			probed++
+			children, childErr := store.Children(c.ID, beads.IncludeClosed, beads.WithBothTiers)
+			if childErr != nil {
+				// Cannot prove safe — skip, matching the unreadable-Get
+				// posture on the rooted branch.
+				collectErr = errors.Join(collectErr, fmt.Errorf("listing children for rootless orphan %q: %w", c.ID, childErr))
+				continue
+			}
+			if len(children) > 0 {
+				continue
+			}
+			// Mirror collectExpiredBeadClosure: ownership is carried by the
+			// parent_id COLUMN or by a parent-child DEP ROW, and some step
+			// beads have only the dep row. A column-only fence would reap such
+			// a row out from under a live parent ("down": rows where this bead
+			// depends on another), or out from under its own dep-linked
+			// children ("up": rows where another bead depends on this one).
+			// Both reads sit inside the single probe budget charged above.
+			linked, linkErr := hasParentChildDepEdge(store, c.ID)
+			if linkErr != nil {
+				collectErr = errors.Join(collectErr, fmt.Errorf("listing parent-child deps for rootless orphan %q: %w", c.ID, linkErr))
+				continue
+			}
+			if linked {
+				continue
+			}
+			decision = true
+		} else {
+			cached, ok := rootCollectible[rootID]
+			if !ok {
+				root, getErr := store.Get(rootID)
+				switch {
+				case errors.Is(getErr, beads.ErrNotFound):
+					cached = true // root gone
+				case getErr == nil && convoycore.IsTerminalStatus(root.Status):
+					cached = true // root terminal
+				case getErr == nil:
+					cached = false // root live/open — never reap its descendants
+				default:
+					// Any other Get error: cannot prove safe — skip without
+					// caching as collectible. Surface so the sweep records
+					// the failure.
+					cached = false
+					collectErr = errors.Join(collectErr, fmt.Errorf("resolving root %q for orphan %q: %w", rootID, c.ID, getErr))
+				}
+				rootCollectible[rootID] = cached
+			}
+			decision = cached
 		}
 		if !decision {
 			continue
@@ -403,8 +558,19 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 			continue
 		}
 
+		err := deleteWorkflowBead(store, c.ID)
+		if errors.Is(err, errWorkflowDeleteLiveDescendants) {
+			// A closed orphan can itself be an intermediate step that still
+			// owns open sub-steps; the delete refuses those. That is a skip,
+			// not a sweep failure — it becomes eligible once they finish —
+			// and it is not charged to the batch cap: no delete was
+			// attempted, and an orphan refused on every sweep would otherwise
+			// hold a cap slot on every sweep, starving the reapable orphans
+			// listed behind it.
+			continue
+		}
 		attempted++
-		if err := deleteWorkflowBead(store, c.ID); err != nil {
+		if err != nil {
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("reaping orphaned closed wisp %q: %w", c.ID, err))
 			continue
 		}
@@ -422,6 +588,10 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 		}
 	}
 
+	if probeTruncated {
+		log.Printf("wisp gc: rootless-orphan scan stopped after %d probes (cap); the reported count is a floor, not the full eligible backlog", probed)
+	}
+
 	if !enforce {
 		// Dry-run never mutates: report would-be count via log only, return 0
 		// purged so callers don't over-count deletions that did not happen.
@@ -429,6 +599,181 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 	}
 
 	return reaped, errors.Join(collectErr, deleteErr)
+}
+
+// relocatedSQLiteSessionLedger returns sessionStore — the sessions-class store
+// as resolveSessionStore / sessionsBeadStore() resolved it — when, and only
+// when, the storage routes relocate the sessions class off the work store onto
+// a SQLite Beads ledger (the whole-split infra binding). Anything else — no
+// routes, sessions left on the work binding, a relocated binding served by
+// another engine (a Dolt workspace), or a refused binding — returns nil, which
+// is what keeps the closed session purge off every store the reaper order
+// already governs.
+func relocatedSQLiteSessionLedger(routes *storageRoutes, sessionStore, workStore beads.Store) beads.Store {
+	routed, relocated := routes.storeFor(coordclass.ClassSessions) // residency:allow — asks whether the sessions class is relocated, to gate a purge; resolves no bead
+	if !relocated || routed == nil || sessionStore == nil {
+		return nil
+	}
+	ledger, ok := sessionStore.(*beads.SQLiteStore)
+	if !ok || ledger == nil {
+		return nil
+	}
+	if routedLedger, ok := routed.(*beads.SQLiteStore); !ok || routedLedger != ledger {
+		return nil
+	}
+	if work, ok := workStore.(*beads.SQLiteStore); ok && work == ledger {
+		return nil
+	}
+	return ledger
+}
+
+// purgeClosedInfraSessions deletes closed session beads that have been idle
+// longer than age, examining candidates from the oldest. It is the one-pass
+// form of purgeClosedInfraSessionsPage with the default scan budget.
+func purgeClosedInfraSessions(store beads.Store, now time.Time, age time.Duration, batchCap int) (int, error) {
+	purged, _, err := purgeClosedInfraSessionsPage(store, now, age, batchCap, wispGCSessionPurgeScanCap, nil)
+	return purged, err
+}
+
+// purgeClosedInfraSessionsPage deletes closed session beads that have been
+// idle longer than age. The store must be the relocated SQLite sessions ledger
+// (relocatedSQLiteSessionLedger), where agent sessions are minted as
+// gcg-session-* or the older gcs-* prefix. The Dolt reaper only sees
+// issue_type=session in a Dolt `issues` table, so this arm is what keeps the
+// sqlite ledger from retaining every closed session forever.
+//
+// It deletes only type=session rows that are closed and old. A closed workflow
+// step, an open session, and a session that still owns a parent-child child
+// stay. Each candidate is re-read immediately before its delete, and skipped
+// unless it is still a closed session past the cutoff, so a session reopened
+// after the list is not deleted. Delete is the store's own delete, so labels,
+// metadata, and deps go with the bead.
+//
+// The sweep is bounded twice: at most batchCap delete attempts and at most
+// scanCap examined candidates, kept ones included. It starts after cursor in
+// (created_at, id) order and returns where the next sweep should resume: the
+// last examined candidate, or nil once the candidate list is exhausted.
+func purgeClosedInfraSessionsPage(store beads.Store, now time.Time, age time.Duration, batchCap, scanCap int, cursor *beads.SeekBoundary) (int, *beads.SeekBoundary, error) {
+	if store == nil || age <= 0 {
+		return 0, nil, nil
+	}
+	cutoff := now.Add(-age)
+	query := beads.ListQuery{
+		Status:        "closed",
+		Type:          "session",
+		UpdatedBefore: cutoff,
+		TierMode:      beads.TierBoth,
+		Sort:          beads.SortCreatedAsc,
+		SeekAfter:     cursor,
+	}
+	if scanCap > 0 {
+		query.Limit = scanCap
+	}
+	candidates, err := store.List(query)
+	if err != nil {
+		return 0, cursor, fmt.Errorf("listing closed infra sessions: %w", err)
+	}
+	purged := 0
+	attempted := 0
+	examined := 0
+	var last *beads.SeekBoundary
+	var deleteErr error
+	for _, candidate := range candidates {
+		if batchCap > 0 && attempted >= batchCap {
+			break
+		}
+		examined++
+		last = &beads.SeekBoundary{CreatedAt: candidate.CreatedAt, ID: candidate.ID}
+		if !closedInfraSessionPastCutoff(candidate, cutoff) {
+			continue
+		}
+		children, childErr := store.Children(candidate.ID, beads.IncludeClosed, beads.WithBothTiers)
+		if childErr != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("listing children for session %q: %w", candidate.ID, childErr))
+			continue
+		}
+		if len(children) > 0 {
+			continue
+		}
+		linked, linkErr := hasParentChildDepEdge(store, candidate.ID)
+		if linkErr != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("listing parent-child deps for session %q: %w", candidate.ID, linkErr))
+			continue
+		}
+		if linked {
+			continue
+		}
+		// Re-read right before the delete: the list is a snapshot, and a
+		// configured named session can be reopened in the meantime.
+		current, getErr := store.Get(candidate.ID)
+		if getErr != nil {
+			if !errors.Is(getErr, beads.ErrNotFound) {
+				deleteErr = errors.Join(deleteErr, fmt.Errorf("re-reading session %q: %w", candidate.ID, getErr))
+			}
+			continue
+		}
+		if !closedInfraSessionPastCutoff(current, cutoff) {
+			continue
+		}
+		attempted++
+		if err := store.Delete(candidate.ID); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("purging closed infra session %q: %w", candidate.ID, err))
+			continue
+		}
+		purged++
+	}
+	next := last
+	if examined == len(candidates) && (scanCap <= 0 || len(candidates) < scanCap) {
+		// Every candidate after the cursor was examined: the next sweep
+		// starts over from the oldest.
+		next = nil
+	}
+	if purged > 0 {
+		log.Printf("wisp gc: purged %d closed infra session bead(s) older than %s", purged, age)
+	}
+	return purged, next, deleteErr
+}
+
+// closedInfraSessionPastCutoff reports whether b is a closed session bead whose
+// last activity (UpdatedAt, falling back to CreatedAt) is before cutoff. A bead
+// with no timestamp at all is never past the cutoff.
+func closedInfraSessionPastCutoff(b beads.Bead, cutoff time.Time) bool {
+	if b.Type != "session" || b.Status != "closed" {
+		return false
+	}
+	activity := b.UpdatedAt
+	if activity.IsZero() {
+		activity = b.CreatedAt
+	}
+	return !activity.IsZero() && activity.Before(cutoff)
+}
+
+// hasParentChildDepEdge reports whether id sits on either end of a parent-child
+// dependency row. The parent_id column is not the only ownership link: some
+// molecule step beads are joined to their parent purely by a dep row (see
+// collectExpiredBeadClosure, which walks both). "down" deps answer "does this
+// bead have a dep-linked parent", "up" deps answer "does it have dep-linked
+// children" — either makes it a subtree member rather than a free-standing
+// leaf, so the orphan reaper must leave it to the owning root's closure purge.
+func hasParentChildDepEdge(store beads.Store, id string) (bool, error) {
+	for _, direction := range []string{"down", "up"} {
+		deps, err := store.DepList(id, direction)
+		if err != nil {
+			return false, fmt.Errorf("listing %q deps: %w", direction, err)
+		}
+		for _, dep := range deps {
+			if dep.Type != "parent-child" {
+				continue
+			}
+			if dep.IssueID != "" && dep.DependsOnID != "" {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // closeAbandonedRoots closes OPEN workflow and v1 molecule roots whose entire
@@ -582,12 +927,20 @@ func purgeExpiredBeadClosures(store beads.Store, entries []beads.Bead, cutoff ti
 	return purgeExpiredBeads(store, entries, cutoff, batchCap, deleteExpiredBeadClosure)
 }
 
+// errBeadNoLongerEligible signals that deleteFn's live re-check found the
+// candidate no longer eligible for deletion (reopened, or already gone) — a
+// deliberate skip, not a delete failure, so purgeExpiredBeads must not count
+// it as either purged or an error.
+var errBeadNoLongerEligible = errors.New("bead skipped: no longer eligible for deletion")
+
 // purgeExpiredBeads deletes each entry older than cutoff via deleteFn and
 // returns the count successfully purged. When batchCap > 0 it bounds the number
 // of DELETE ATTEMPTS per call — counting failures, not just successes — so a
 // large backlog or a failing delete backend cannot make one sweep attempt an
 // unbounded amount of deletion work; the remainder drains on later ticks.
-// batchCap <= 0 disables the bound. Entries skipped for age never consume the cap.
+// batchCap <= 0 disables the bound. Entries skipped for age never consume the
+// cap, nor do entries whose delete the strand guard refused
+// (errWorkflowDeleteLiveDescendants): no delete was attempted for those.
 func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time, batchCap int, deleteFn func(beads.Store, string) error) (int, error) {
 	purged := 0
 	attempted := 0
@@ -599,8 +952,22 @@ func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time
 		if entry.CreatedAt.IsZero() || !entry.CreatedAt.Before(cutoff) {
 			continue
 		}
+		err := deleteFn(store, entry.ID)
+		if errors.Is(err, errWorkflowDeleteLiveDescendants) {
+			// The strand guard refused the closure delete: an open descendant
+			// the closure collector did not see still holds the root. That is
+			// a skip, not a sweep failure — the root becomes eligible once the
+			// descendant finishes — and it is not charged to the cap: no
+			// delete was attempted, and a root refused on every sweep would
+			// otherwise hold a cap slot on every sweep, starving the
+			// collectible roots listed behind it.
+			continue
+		}
 		attempted++
-		if err := deleteFn(store, entry.ID); err != nil {
+		if err != nil {
+			if errors.Is(err, errBeadNoLongerEligible) {
+				continue
+			}
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting expired bead %q: %w", entry.ID, err))
 			continue
 		}
@@ -610,6 +977,26 @@ func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time
 }
 
 func deleteExpiredBeadClosure(store beads.Store, rootID string) error {
+	// closedWispGCEntries can answer from a stale cached snapshot. A root
+	// reopened (live work resumed) inside the cache window — after the
+	// snapshot was taken but before this purge reaches it — is no longer
+	// gc-eligible; re-verify against the live store immediately before the
+	// destructive batch delete. A root that is already gone has nothing to
+	// delete.
+	live, err := beads.HandlesFor(store).Live.Get(rootID)
+	switch {
+	case errors.Is(err, beads.ErrNotFound):
+		// Root already gone — nothing to delete.
+		return errBeadNoLongerEligible
+	case err != nil:
+		// Any other live-read failure means we cannot PROVE the root is still
+		// collectible; surface it rather than silently skipping, matching
+		// reapOrphanedClosedWisps' treatment of an unreadable root Get.
+		return fmt.Errorf("live re-verify of root %q before closure delete: %w", rootID, err)
+	}
+	if live.Status != "closed" {
+		return errBeadNoLongerEligible
+	}
 	// The closure is deleted as one batch: a store that supports
 	// beads.BatchDeleter (the sqlite/Dolt graph store) removes the collected
 	// ownership tree with a single `bd delete … --force`, which deletes exactly

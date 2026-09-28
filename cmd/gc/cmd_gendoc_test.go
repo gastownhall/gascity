@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/docgen"
 	"github.com/spf13/cobra"
 )
@@ -120,7 +121,10 @@ func TestCLIDocsFreshness(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
+	repoRoot := bazeltest.OverrideRoot()
+	if repoRoot == "" {
+		repoRoot = filepath.Join(filepath.Dir(thisFile), "..", "..")
+	}
 
 	committedPath := filepath.Join(repoRoot, "docs", "reference", "cli.md")
 	committed, err := os.ReadFile(committedPath)

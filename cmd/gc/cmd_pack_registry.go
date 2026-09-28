@@ -423,6 +423,7 @@ func doPackRegistryRefresh(name string, jsonOutput bool, stdout, stderr io.Write
 		if err != nil {
 			failures = append(failures, packRegistryFailureJSON{Name: reg.Name, Message: err.Error()})
 			fmt.Fprintf(stderr, "gc pack registry refresh: %s: %v\n", reg.Name, err) //nolint:errcheck
+			writeRegistryCacheRecoveryHint(stderr, home, reg, err)
 			continue
 		}
 		refreshed = append(refreshed, packRegistryRefreshJSON{Name: reg.Name, PackCount: len(catalog.Packs)})
@@ -452,6 +453,11 @@ func doPackRegistryRefresh(name string, jsonOutput bool, stdout, stderr io.Write
 type registrySearchResult struct {
 	registry string
 	pack     packregistry.CatalogPack
+}
+
+type registryCacheUnavailable struct {
+	reg packregistry.Registry
+	err error
 }
 
 func doPackRegistrySearch(query, registry string, refresh bool, limit int, all bool, jsonOutput bool, stdout, stderr io.Writer) int {
@@ -487,6 +493,7 @@ func doPackRegistrySearch(query, registry string, refresh bool, limit int, all b
 			failures++
 			cacheFailures = append(cacheFailures, packRegistryFailureJSON{Name: reg.Name, Message: err.Error()})
 			fmt.Fprintf(stderr, "warning: registry %s cache unavailable: %v\n", reg.Name, err) //nolint:errcheck
+			writeRegistryCacheRecoveryHint(stderr, home, reg, err)
 			continue
 		}
 		warnStaleRegistryCache(home, reg.Name, stderr)
@@ -590,7 +597,7 @@ func doPackRegistryShow(target string, refresh bool, jsonOutput bool, stdout, st
 		qualified = true
 	}
 	matches := []registrySearchResult{}
-	unavailable := []string{}
+	unavailable := []registryCacheUnavailable{}
 	for _, reg := range regs {
 		if refresh {
 			if _, err := packregistry.RefreshRegistry(context.Background(), home, reg, packregistry.FetchOptions{}); err != nil {
@@ -599,7 +606,7 @@ func doPackRegistryShow(target string, refresh bool, jsonOutput bool, stdout, st
 		}
 		catalog, err := readPackRegistryCatalogForCommand(context.Background(), home, reg, !refresh)
 		if err != nil {
-			unavailable = append(unavailable, reg.Name)
+			unavailable = append(unavailable, registryCacheUnavailable{reg: reg, err: err})
 			continue
 		}
 		warnStaleRegistryCache(home, reg.Name, stderr)
@@ -610,11 +617,13 @@ func doPackRegistryShow(target string, refresh bool, jsonOutput bool, stdout, st
 		}
 	}
 	if !qualified && len(unavailable) > 0 {
-		fmt.Fprintf(stderr, "gc pack registry show: registry %s unavailable; qualify the pack name after refreshing registries\n", strings.Join(unavailable, ", ")) //nolint:errcheck
+		writeRegistryCacheUnavailableWarnings(stderr, home, unavailable)
+		fmt.Fprintf(stderr, "gc pack registry show: registry %s unavailable; qualify the pack name after refreshing registries\n", strings.Join(registryCacheUnavailableNames(unavailable), ", ")) //nolint:errcheck
 		return 1
 	}
 	if qualified && len(unavailable) > 0 && len(matches) == 0 {
-		fmt.Fprintf(stderr, "gc pack registry show: registry %s cache unavailable\n", strings.Join(unavailable, ", ")) //nolint:errcheck
+		writeRegistryCacheUnavailableWarnings(stderr, home, unavailable)
+		fmt.Fprintf(stderr, "gc pack registry show: registry %s cache unavailable\n", strings.Join(registryCacheUnavailableNames(unavailable), ", ")) //nolint:errcheck
 		return 1
 	}
 	if len(matches) == 0 {
@@ -728,6 +737,33 @@ func readPackRegistryCatalogForCommand(ctx context.Context, home string, reg pac
 		return packregistry.Catalog{}, err
 	}
 	return packregistry.RefreshRegistry(ctx, home, reg, packregistry.FetchOptions{})
+}
+
+func registryCacheUnavailableNames(unavailable []registryCacheUnavailable) []string {
+	names := make([]string, 0, len(unavailable))
+	for _, item := range unavailable {
+		names = append(names, item.reg.Name)
+	}
+	return names
+}
+
+func writeRegistryCacheUnavailableWarnings(stderr io.Writer, home string, unavailable []registryCacheUnavailable) {
+	for _, item := range unavailable {
+		if !packregistry.IsInvalidCachedCatalog(item.err) {
+			continue
+		}
+		fmt.Fprintf(stderr, "warning: registry %s cache unavailable: %v\n", item.reg.Name, item.err) //nolint:errcheck
+		writeRegistryCacheRecoveryHint(stderr, home, item.reg, item.err)
+	}
+}
+
+func writeRegistryCacheRecoveryHint(stderr io.Writer, home string, reg packregistry.Registry, err error) {
+	if !packregistry.IsInvalidCachedCatalog(err) {
+		return
+	}
+	removeCmd := shellquote.Join([]string{"rm", "-f", packregistry.CachePath(home, reg.Name)})
+	refreshCmd := shellquote.Join([]string{"gc", "pack", "registry", "refresh", reg.Name})
+	fmt.Fprintf(stderr, "Recovery: cached catalog for registry %q is unreadable or invalid. Run %s, then %s.\n", reg.Name, removeCmd, refreshCmd) //nolint:errcheck
 }
 
 func warnStaleRegistryCache(home, registry string, stderr io.Writer) {

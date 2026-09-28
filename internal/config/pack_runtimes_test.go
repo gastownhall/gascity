@@ -18,6 +18,7 @@ schema = 1
 [runtimes.cloudflare]
 command = "scripts/gc-runtime-cloudflare"
 protocol = 0
+prompt_delivery = "nudge-fallback"
 
 [runtimes.bridge]
 command = "gc-runtime-bridge"
@@ -48,6 +49,9 @@ command = "gc-runtime-bridge"
 	if cf.Name != "cloudflare" {
 		t.Errorf("Name = %q, want cloudflare", cf.Name)
 	}
+	if cf.PromptDelivery != "nudge-fallback" {
+		t.Errorf("PromptDelivery = %q, want nudge-fallback", cf.PromptDelivery)
+	}
 
 	// Bare names (no path separator) stay as-is for PATH lookup.
 	br, ok := cfg.Runtimes["bridge"]
@@ -56,6 +60,11 @@ command = "gc-runtime-bridge"
 	}
 	if br.Command != "gc-runtime-bridge" {
 		t.Errorf("bare command = %q, want gc-runtime-bridge (PATH name)", br.Command)
+	}
+	// prompt_delivery is opt-in: an undeclared runtime must not inherit any
+	// value merely by sharing a pack.toml with a declaring sibling.
+	if br.PromptDelivery != "" {
+		t.Errorf("PromptDelivery = %q, want empty (unset/default) for bridge", br.PromptDelivery)
 	}
 }
 
@@ -263,6 +272,28 @@ func TestMergeCityRuntimes_SameDirReDeclarationDedupes(t *testing.T) {
 	}
 }
 
+func TestMergeCityRuntimes_SameDirDifferentPromptDeliveryConflicts(t *testing.T) {
+	// Same resolved pack directory/command/protocol but a different declared
+	// PromptDelivery is not a diamond-import identical re-declaration: it is a
+	// genuine conflict a caller must not silently dedupe away, matching the
+	// existing treatment of a differing command or protocol.
+	cfg := &City{}
+	dir := t.TempDir()
+	a := DiscoveredRuntime{Name: "common", Command: "gc-runtime", Protocol: 0, PackName: "shared", PackDir: dir, PromptDelivery: "nudge-fallback"}
+	b := DiscoveredRuntime{Name: "common", Command: "gc-runtime", Protocol: 0, PackName: "shared", PackDir: dir, PromptDelivery: ""}
+
+	if err := mergeCityRuntimes(cfg, []DiscoveredRuntime{a}); err != nil {
+		t.Fatalf("first declaration must register: %v", err)
+	}
+	err := mergeCityRuntimes(cfg, []DiscoveredRuntime{b})
+	if err == nil {
+		t.Fatal("same dir/command/protocol with a different declared prompt_delivery must conflict, not dedupe")
+	}
+	if !strings.Contains(err.Error(), "common") {
+		t.Errorf("error %q should name the runtime", err)
+	}
+}
+
 func TestExpandCityPacks_PackRuntimeValidation(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -326,6 +357,15 @@ command = "run.sh"
 command = "run.sh"
 `,
 			wantErr: "must not contain",
+		},
+		{
+			name: "invalid prompt_delivery value",
+			toml: `
+[runtimes.foo]
+command = "run.sh"
+prompt_delivery = "bogus"
+`,
+			wantErr: "prompt_delivery",
 		},
 	}
 	for _, tc := range cases {

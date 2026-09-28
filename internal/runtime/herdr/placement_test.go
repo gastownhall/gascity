@@ -50,6 +50,44 @@ func TestPlacementFor(t *testing.T) {
 			wantTab:  "polecat-gc-wisp-abc123",
 		},
 		{
+			// The wisp id is a bead id minted by the pouring scope, so it carries
+			// that scope's beads prefix — "gc-" only when the city's HQ prefix is
+			// literally "gc". Detection must be prefix-agnostic or every other
+			// city keeps raw wisp ids in its tabs.
+			name:     "wisp with non-gc city prefix gets themed tab",
+			sessName: "gastown__polecat-az-wisp-z0pu0",
+			env:      map[string]string{"GC_RIG": "gascity", "GC_ALIAS": "gascity/gastown.furiosa"},
+			wantWS:   "gascity",
+			wantTab:  "polecat-furiosa",
+		},
+		{
+			name:     "wisp id with no role prefix is replaced whole",
+			sessName: "gastown__az-wisp-z0pu0",
+			env:      map[string]string{"GC_RIG": "gascity", "GC_ALIAS": "gascity/gastown.furiosa"},
+			wantWS:   "gascity",
+			wantTab:  "furiosa",
+		},
+		{
+			// The deferred pool spawn blanks GC_ALIAS and leaves the session name
+			// in GC_AGENT (build_desired_state_pool_info.go); once the alias
+			// resolves the reconciler repopulates it.
+			name:     "non-gc wisp falls back to GC_AGENT when alias not yet resolved",
+			sessName: "gastown__polecat-az-wisp-g8ha3",
+			env:      map[string]string{"GC_RIG": "gascity", "GC_ALIAS": "", "GC_AGENT": "gascity/gastown.nux"},
+			wantWS:   "gascity",
+			wantTab:  "polecat-nux",
+		},
+		{
+			// Guard case: the deferred fallback hands back the session name
+			// itself, which still carries the wisp id. Substituting it would
+			// produce "polecat-gastown__polecat-az-wisp-z0pu0".
+			name:     "non-gc alias that is itself the wisp identity is ignored",
+			sessName: "gastown__polecat-az-wisp-z0pu0",
+			env:      map[string]string{"GC_RIG": "gascity", "GC_ALIAS": "", "GC_AGENT": "gastown__polecat-az-wisp-z0pu0"},
+			wantWS:   "gascity",
+			wantTab:  "polecat-az-wisp-z0pu0",
+		},
+		{
 			name:     "persistent rig agent unchanged",
 			sessName: "webapp--gastown__witness",
 			env:      map[string]string{"GC_RIG": "webapp", "GC_ALIAS": "webapp/gastown.witness"},

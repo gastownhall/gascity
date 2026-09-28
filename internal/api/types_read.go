@@ -109,10 +109,18 @@ type StatusSessionCountsView struct {
 // StatusStoreHealthView mirrors the CLI's StoreHealth struct. Values
 // render into the store health block appended to text output; fallback
 // callers read the same shape from the local event log.
+//
+// RowsMeasured must be checked before LiveRows, RatioMB or Warning are
+// read: when it is false the count never happened and all three are
+// zero-valued rather than measured. It is spelled for the measured state
+// so that a decoder which never sets it — a response from a supervisor
+// predating the wire field — leaves it false and the renderer withholds
+// the number, instead of the omission quietly claiming a measurement.
 type StatusStoreHealthView struct {
 	Path         string
 	SizeBytes    int64
 	LiveRows     int
+	RowsMeasured bool
 	RatioMB      float64
 	Warning      bool
 	ThresholdMB  float64

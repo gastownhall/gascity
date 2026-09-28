@@ -1587,3 +1587,28 @@ title = "Do work for {{convoy_id}}"
 		}
 	}
 }
+
+// TestFormulaCookAttachHelpDoesNotClaimParentChild pins the #2392 fix:
+// --attach only ever creates a "blocks" dependency back to the attached
+// bead (ensureFormulaCookAttachDep / molecule.Attach both call
+// store.DepAdd(attachBeadID, rootID, "blocks"), never setting ParentID) —
+// the sub-DAG root never becomes a child of the attached bead. The help
+// text previously claimed otherwise ("created as children of the given
+// bead"), which is actionably wrong: convoy auto-close watches
+// parent-child children, not blocks dependents, so a user following the
+// old description would wrongly expect an attached sub-DAG's completion
+// to trigger the attached convoy's auto-close.
+func TestFormulaCookAttachHelpDoesNotClaimParentChild(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := newFormulaCookCmd(&stdout, &stderr)
+	long := strings.ToLower(cmd.Long)
+	if strings.Contains(long, "created as children") {
+		t.Fatalf("gc formula cook --help still claims --attach creates a parent-child relationship; Long=%q", cmd.Long)
+	}
+	if !strings.Contains(long, "blocking dependency") && !strings.Contains(long, "blocks") {
+		t.Fatalf("gc formula cook --help no longer describes the actual blocks-only relationship; Long=%q", cmd.Long)
+	}
+	if !strings.Contains(long, "not") || !strings.Contains(long, "parent") {
+		t.Fatalf("gc formula cook --help does not clarify that --attach is not a parent-child relationship; Long=%q", cmd.Long)
+	}
+}

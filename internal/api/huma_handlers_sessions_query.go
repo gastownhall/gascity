@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -99,6 +100,21 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 
 // --- Session Get ---
 
+// resolveSessionGetID picks the resolver for GET /session/{id}. With exact_id
+// the identifier is a durable bead id by the caller's own claim, so the read is
+// the single store.Get of session.ResolveSessionIDByExactID (which finds closed
+// sessions too) and a miss is a 404 straight away. Without it the full target
+// ladder runs — configured name, live, path alias, closed — whose closed-
+// inclusive steps scan the closed session population by metadata; that is what a
+// caller holding a durable id (the dashboard's run detail, one read per retired
+// seat on every render) must never pay for a miss.
+func (s *Server) resolveSessionGetID(store beads.Store, input *SessionGetInput) (string, error) {
+	if input.ExactID {
+		return session.ResolveSessionIDByExactID(store, input.ID)
+	}
+	return s.resolveSessionIDAllowClosedWithConfig(store, input.ID)
+}
+
 // humaHandleSessionGet is the Huma-typed handler for GET /v0/session/{id}.
 
 func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput) (*IndexOutput[sessionResponse], error) {
@@ -110,7 +126,7 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, input.ID)
+	id, err := s.resolveSessionGetID(store.Store, input)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}

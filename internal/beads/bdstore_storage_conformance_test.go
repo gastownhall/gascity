@@ -331,10 +331,13 @@ func TestBdStoreListStorageTierConformance(t *testing.T) {
 			wantIDs: []string{"bd-history", "bd-no-history"},
 		},
 		{
-			name:                  "issues tier applies limit after client storage filtering",
-			query:                 beads.ListQuery{Label: "scope", Limit: 1},
-			wantIDs:               []string{"bd-history"},
-			wantUnlimitedPrelimit: true,
+			// gc-i4j3y: issues-tier bd list never returns ephemeral rows (no
+			// --include-templates), so the Go-side matchesTier filter is a
+			// no-op backstop here — a bounded caller Limit is safe to push
+			// down to bd list directly instead of forcing --limit 0.
+			name:    "issues tier applies limit after client storage filtering",
+			query:   beads.ListQuery{Label: "scope", Limit: 1},
+			wantIDs: []string{"bd-history"},
 		},
 		{
 			name:                  "wisps tier keeps no-history and ephemeral rows",

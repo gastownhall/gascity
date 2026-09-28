@@ -69,21 +69,40 @@ func (s *convergenceScope) triggerName(prefix string) string {
 // store from the current config: the city/HQ store plus every bound rig
 // store. Returns nil when no city store is available yet, in which case
 // callers leave the existing scopes untouched.
+//
+// The CITY scope takes the GRAPH-class store. A convergence root is graph class
+// — coordclass.Classify has an explicit typeConvergence arm — and so are the
+// wisps it pours. Minting them in the work store made the engine self-consistent
+// but left `gc storage migrate` to copy every root into the graph binding while
+// the engine kept reading and writing the retained work-store copies: two
+// divergent convergence ledgers, and every root minted after cutover a strand
+// the per-boot containment re-check names. That re-check is what made
+// maintainer-city boot-fatal at ~42 strands/hour (#5127's bug class).
+//
+// RIG scopes keep their rig WORK store. This is the same city-only rule
+// controlScopeTakesGraphClass (cmd_convoy_dispatch.go) already applies to
+// control beads, which are ClassGraph too, and it is forced: class routing is
+// city-keyed, so there is ONE graph binding per city. Routing rig scopes to it
+// would merge every rig's convergence loops into a single ledger keyed by
+// nothing, and the scopes would stop being scopes.
 func (cr *CityRuntime) buildConvergenceScopes() map[string]*convergenceScope {
 	cityStore := cr.cityBeadStore()
 	if cityStore == nil {
 		return nil
 	}
+	_, graphRelocated := graphClassBinding(cr.storageRoutes)
 	scopes := map[string]*convergenceScope{
-		"": cr.newConvergenceScope("", cityStore, cr.cityPath, cr.cfg.FormulaLayers.City),
+		"": cr.newConvergenceScope("", cr.graphBeadStore().Store, cr.cityPath, cr.cfg.FormulaLayers.City, graphRelocated),
 	}
 	rigStorePaths := cr.convergenceRigStorePaths()
 	for rigName, store := range cr.rigBeadStores() {
 		if store == nil {
 			continue
 		}
+		// relocated=false: a rig scope's store IS that rig's work ledger, so a
+		// work-class pour belongs there and must not be refused.
 		scopes[rigName] = cr.newConvergenceScope(
-			rigName, store, rigStorePaths[rigName], cr.cfg.FormulaLayers.SearchPaths(rigName))
+			rigName, store, rigStorePaths[rigName], cr.cfg.FormulaLayers.SearchPaths(rigName), false)
 	}
 	return scopes
 }
@@ -126,8 +145,15 @@ func (cr *CityRuntime) rebuildConvergenceHandler() {
 // newConvergenceScope wires a store adapter and convergence handler for a
 // single bead store. Each rig scope resolves formulas through that rig's
 // formula search paths so rig-local formulas are honored.
-func (cr *CityRuntime) newConvergenceScope(rig string, store beads.Store, storePath string, formulaSearchPaths []string) *convergenceScope {
-	adapter := newConvergenceStoreAdapter(store, formulaSearchPaths)
+//
+// storePath stays the scope's ROOT DIRECTORY (the city path, or the rig path)
+// even when store is a relocated class store: it is what the handler hands to
+// gate commands as their working directory, not a database locator. relocated
+// says whether store is a class binding the scope directory's own `bd` cannot
+// reach; the adapter needs it to refuse pouring work-class molecules into the
+// infrastructure binding.
+func (cr *CityRuntime) newConvergenceScope(rig string, store beads.Store, storePath string, formulaSearchPaths []string, relocated bool) *convergenceScope {
+	adapter := newConvergenceStoreAdapter(store, formulaSearchPaths, relocated)
 	return &convergenceScope{
 		rig:       rig,
 		storePath: storePath,

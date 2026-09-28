@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/pathutil"
@@ -66,6 +68,16 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	result, err := runRalphCheck(store, bead, subject, attempt, opts)
 	if err != nil {
 		return ControlResult{}, err
+	}
+	// A gate that ran but could not see its infrastructure (ga-pqlgh: bd/gc
+	// reads blinded by the gate sandbox) exits nonzero and would otherwise be
+	// indistinguishable from a real verdict. Normalize it to GateError so it
+	// takes the attempt-free re-run path below, bounded by the same
+	// maxCheckInfraRetries budget.
+	if reason, blind := convergence.ClassifyInfraBlind(result); blind {
+		opts.tracef("ralph check-infra-blind bead=%s attempt=%d reason=%s exit=%s (reclassified %s -> %s)",
+			bead.ID, attempt, reason, formatGateExitCode(result.ExitCode), result.Outcome, convergence.GateError)
+		result.Outcome = convergence.GateError
 	}
 	opts.tracef("ralph check-result bead=%s logical=%s attempt=%d outcome=%s exit=%s dur=%s truncated=%v stderr=%q stdout=%q",
 		bead.ID, logicalID, attempt, result.Outcome, formatGateExitCode(result.ExitCode), result.Duration, result.Truncated,
@@ -261,6 +273,9 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	// tree even when the script lives in the city tree.
 	trustedAbsRoots := ralphCheckTrustedAbsoluteRoots(cityPath, storePath, opts.FormulaSearchPaths)
 	if filepath.IsAbs(checkPath) && !pathWithinAny(checkPath, trustedAbsRoots) {
+		trustedAbsRoots = append(trustedAbsRoots, ralphCheckHistoricalFormulaRoots(store, bead, checkPath)...)
+	}
+	if filepath.IsAbs(checkPath) && !pathWithinAny(checkPath, trustedAbsRoots) {
 		return convergence.GateResult{}, fmt.Errorf("%s: absolute gc.check_path %q escapes trusted roots", bead.ID, checkPath)
 	}
 	scriptPath, err := convergence.ResolveConditionPath(cityPath, scriptBase, checkPath)
@@ -333,6 +348,109 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	}, timeout, 0)
 	opts.tracef("ralph check-done bead=%s outcome=%s dur=%s", bead.ID, result.Outcome, result.Duration)
 	return result, nil
+}
+
+// ralphCheckHistoricalFormulaRoots preserves the trust decision made when a
+// workflow was materialized from a content-addressed pack cache. A pack pin
+// upgrade changes FormulaSearchPaths immediately, while in-flight controls
+// retain absolute check paths into the previous cache entry. The workflow root
+// records the exact formula source and SHA-256 at materialization time; admit
+// the old entry only when that provenance still matches and the check lives in
+// the same canonical cache entry.
+//
+// Trust granted here is the whole canonical cache entry, not just the formula
+// layer: for the standard <entry>/formulas/x.toml layout,
+// ralphCheckTrustedAbsoluteRoots adds the layer's parent (the entry itself),
+// and the PathWithin(sourceEntry, root) filter below keeps it. That matches
+// what the current-pin path already trusts for a "formulas"-named layer, and
+// the entry is content-addressed — but it is wider than "the layer plus its
+// sibling assets/", so say it out loud.
+//
+// This is deliberately a fallback for paths outside the current roots. It does
+// one small file read and no Git or network work.
+func ralphCheckHistoricalFormulaRoots(store beads.Store, bead beads.Bead, checkPath string) []string {
+	formulaSource, formulaHash := ralphCheckFormulaProvenance(store, bead)
+	if formulaSource == "" || formulaHash == "" || !filepath.IsAbs(formulaSource) {
+		return nil
+	}
+	cacheRoot, err := config.GlobalRepoCacheRoot()
+	if err != nil {
+		return nil
+	}
+	sourceEntry, ok := canonicalRepoCacheEntry(cacheRoot, formulaSource)
+	if !ok {
+		return nil
+	}
+	checkEntry, ok := canonicalRepoCacheEntry(cacheRoot, checkPath)
+	if !ok || !pathutil.SamePath(sourceEntry, checkEntry) {
+		return nil
+	}
+	source, err := os.ReadFile(formulaSource)
+	if err != nil || formula.ContentHash(source) != formulaHash {
+		return nil
+	}
+
+	roots := ralphCheckTrustedAbsoluteRoots("", "", []string{filepath.Dir(formulaSource)})
+	trusted := roots[:0]
+	for _, root := range roots {
+		if pathutil.PathWithin(sourceEntry, root) {
+			trusted = append(trusted, root)
+		}
+	}
+	return trusted
+}
+
+func ralphCheckFormulaProvenance(store beads.Store, bead beads.Bead) (string, string) {
+	formulaSource := strings.TrimSpace(bead.Metadata[beadmeta.FormulaSourceMetadataKey])
+	formulaHash := strings.TrimSpace(bead.Metadata[beadmeta.FormulaHashMetadataKey])
+	if formulaSource != "" && formulaHash != "" {
+		return formulaSource, formulaHash
+	}
+	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
+	if rootID == "" || rootID == bead.ID {
+		return formulaSource, formulaHash
+	}
+	root, err := store.Get(rootID)
+	if err != nil {
+		return "", ""
+	}
+	if formulaSource == "" {
+		formulaSource = strings.TrimSpace(root.Metadata[beadmeta.FormulaSourceMetadataKey])
+	}
+	if formulaHash == "" {
+		formulaHash = strings.TrimSpace(root.Metadata[beadmeta.FormulaHashMetadataKey])
+	}
+	return formulaSource, formulaHash
+}
+
+func canonicalRepoCacheEntry(cacheRoot, path string) (string, bool) {
+	cacheRoot = pathutil.NormalizePathForCompare(cacheRoot)
+	path = pathutil.NormalizePathForCompare(path)
+	if !pathutil.PathWithin(cacheRoot, path) {
+		return "", false
+	}
+	rel, err := filepath.Rel(cacheRoot, path)
+	if err != nil || rel == "." || pathutil.IsOutsideDir(rel) {
+		return "", false
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	if len(parts) < 2 || !isLowerHexString(parts[0], 64) {
+		return "", false
+	}
+	entry := filepath.Join(cacheRoot, parts[0])
+	return entry, pathutil.PathWithin(entry, path)
+}
+
+func isLowerHexString(value string, length int) bool {
+	if len(value) != length {
+		return false
+	}
+	for _, c := range value {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func ralphCheckTrustedAbsoluteRoots(cityPath, storePath string, formulaSearchPaths []string) []string {
@@ -512,7 +630,7 @@ func appendRalphRetryLegacy(store beads.Store, logicalID string, prevSubject, pr
 	// Create the subject first so scope_ref remapping is stable for nested attempts.
 	subjectMeta := cloneMetadata(prevSubject.Metadata)
 	clearRetryEphemera(subjectMeta)
-	subjectMeta[beadmeta.AttemptMetadataKey] = strconv.Itoa(nextAttempt)
+	stampRalphRetryIteration(subjectMeta, prevSubject, nextAttempt)
 	subjectMeta[beadmeta.RetryFromMetadataKey] = prevSubject.ID
 	subjectMeta[beadmeta.LogicalBeadIDMetadataKey] = logicalID
 	subjectMeta[beadmeta.StepRefMetadataKey] = rewriteRetryStepRef(prevSubject.Metadata, prevSubject.Ref, oldScopeRef, newScopeRef, oldAttempt, nextAttempt)
@@ -547,7 +665,7 @@ func appendRalphRetryLegacy(store beads.Store, logicalID string, prevSubject, pr
 		}
 		meta := cloneMetadata(old.Metadata)
 		clearRetryEphemera(meta)
-		meta[beadmeta.AttemptMetadataKey] = strconv.Itoa(nextAttempt)
+		stampRalphRetryIteration(meta, old, nextAttempt)
 		meta[beadmeta.RetryFromMetadataKey] = old.ID
 		if currentScopeRef := strings.TrimSpace(meta[beadmeta.ScopeRefMetadataKey]); currentScopeRef != "" {
 			meta[beadmeta.ScopeRefMetadataKey] = rewriteRetryScopeRef(currentScopeRef, oldScopeRef, newScopeRef, prevSubject.ID)
@@ -581,7 +699,7 @@ func appendRalphRetryLegacy(store beads.Store, logicalID string, prevSubject, pr
 
 	checkMeta := cloneMetadata(prevCheck.Metadata)
 	clearRetryEphemera(checkMeta)
-	checkMeta[beadmeta.AttemptMetadataKey] = strconv.Itoa(nextAttempt)
+	stampRalphRetryIteration(checkMeta, prevCheck, nextAttempt)
 	checkMeta[beadmeta.RetryFromMetadataKey] = prevCheck.ID
 	checkMeta[beadmeta.TerminalMetadataKey] = ""
 	checkMeta[beadmeta.LogicalBeadIDMetadataKey] = logicalID
@@ -730,7 +848,7 @@ func appendRalphRetryViaGraphApply(store beads.Store, applier beads.GraphApplySt
 func buildRalphRetryGraphNode(old beads.Bead, logicalID, oldScopeRef, newScopeRef string, oldAttempt, nextAttempt int, attemptIDs map[string]bool, cfg *config.City) beads.GraphApplyNode {
 	meta := cloneMetadata(old.Metadata)
 	clearRetryEphemera(meta)
-	meta[beadmeta.AttemptMetadataKey] = strconv.Itoa(nextAttempt)
+	stampRalphRetryIteration(meta, old, nextAttempt)
 	meta[beadmeta.RetryFromMetadataKey] = old.ID
 	if currentScopeRef := strings.TrimSpace(meta[beadmeta.ScopeRefMetadataKey]); currentScopeRef != "" {
 		meta[beadmeta.ScopeRefMetadataKey] = rewriteRetryScopeRef(currentScopeRef, oldScopeRef, newScopeRef, old.ID)
@@ -786,6 +904,97 @@ func buildRalphRetryGraphNode(old beads.Bead, logicalID, oldScopeRef, newScopeRe
 		MetadataRefs:      metadataRefs,
 		ParentKey:         parentKey,
 		ParentID:          parentID,
+	}
+}
+
+// stampRalphRetryIteration advances the iteration/attempt counters on a bead
+// cloned to form the next Ralph outer iteration, reproducing the contract the
+// mint paths establish (internal/formula/ralph.go and
+// dispatch.buildAttemptRecipe). gc.iteration and gc.attempt both advance to
+// nextAttempt on every cloned bead: gc.attempt names the iteration on the loop
+// itself and on every body member, which is what pack gates join on. A retry
+// attempt nested in the body keeps its own counter in gc.retry_attempt instead
+// (see ralphRetryMemberRetryAttempt), so it is not born exhausted.
+//
+// Callers pass the ORIGINAL bead so the classification is not affected by
+// rewrites already applied to the clone's meta.
+func stampRalphRetryIteration(meta map[string]string, old beads.Bead, nextAttempt int) {
+	meta[beadmeta.IterationMetadataKey] = strconv.Itoa(nextAttempt)
+	meta[beadmeta.AttemptMetadataKey] = strconv.Itoa(nextAttempt)
+	if strings.TrimSpace(old.Metadata[beadmeta.ScopeRefMetadataKey]) == "" {
+		delete(meta, beadmeta.RetryAttemptMetadataKey)
+		return
+	}
+	if retryAttempt := ralphRetryMemberRetryAttempt(old); retryAttempt != "" {
+		meta[beadmeta.RetryAttemptMetadataKey] = retryAttempt
+		return
+	}
+	delete(meta, beadmeta.RetryAttemptMetadataKey)
+}
+
+// ralphRetryMemberRetryAttempt derives the gc.retry_attempt a cloned Ralph body
+// member carries in the next outer iteration, matching the runtime mint
+// (dispatch.buildAttemptRecipe -> formula.RalphBodyChildRetryAttempt): an
+// already-materialized attempt.N run keeps the retry number its ref names; a
+// control or plain member has no retry counter of its own. Classification is
+// structural because a pre-key bead's gc.attempt cannot be told apart by value.
+func ralphRetryMemberRetryAttempt(old beads.Bead) string {
+	if !ralphRetryMemberIsFrozenAttempt(old) {
+		return ""
+	}
+	if own := strings.TrimSpace(old.Metadata[beadmeta.RetryAttemptMetadataKey]); own != "" {
+		return own
+	}
+	for _, ref := range []string{old.Metadata[beadmeta.StepRefMetadataKey], old.Ref} {
+		if n := trailingAttemptSegment(ref); n != "" {
+			return n
+		}
+	}
+	// The ref names an attempt segment that is not its tail (a bead nested
+	// under an attempt, such as a scope-check), so it is not a retry attempt
+	// root. Its gc.attempt is not a retry counter either: a v1.4.2 bead there
+	// carries the inflated iteration+retry-1 value.
+	return ""
+}
+
+// trailingAttemptSegment returns n when ref ends in ".attempt.<n>", else "".
+func trailingAttemptSegment(ref string) string {
+	const marker = ".attempt."
+	idx := strings.LastIndex(ref, marker)
+	if idx < 0 {
+		return ""
+	}
+	n := ref[idx+len(marker):]
+	if _, err := strconv.Atoi(n); err != nil {
+		return ""
+	}
+	return n
+}
+
+// ralphRetryMemberIsFrozenAttempt reports whether a Ralph body member is an
+// already-materialized retry attempt run — its ref carries a ".attempt.<n>"
+// segment — as opposed to a retry control or a plain member. Such a bead owns
+// its attempt number and must keep it across an outer iteration rather than
+// inherit the iteration index.
+func ralphRetryMemberIsFrozenAttempt(old beads.Bead) bool {
+	return refHasAttemptSegment(old.Metadata[beadmeta.StepRefMetadataKey]) || refHasAttemptSegment(old.Ref)
+}
+
+// refHasAttemptSegment reports whether ref contains a ".attempt.<digits>"
+// segment. The trailing digit requirement rejects a step literally named
+// "attempt" (whose ref would end at ".attempt" with no counter).
+func refHasAttemptSegment(ref string) bool {
+	const marker = ".attempt."
+	for {
+		idx := strings.Index(ref, marker)
+		if idx < 0 {
+			return false
+		}
+		rest := ref[idx+len(marker):]
+		if len(rest) > 0 && rest[0] >= '0' && rest[0] <= '9' {
+			return true
+		}
+		ref = rest
 	}
 }
 
@@ -998,6 +1207,10 @@ func logicalStepRefForAttemptBead(bead beads.Bead) string {
 		normalized = strings.TrimSuffix(normalized, "-scope-check")
 	}
 	attempt := strings.TrimSpace(bead.Metadata[beadmeta.AttemptMetadataKey])
+	if kind == beadmeta.KindRetryRun || kind == beadmeta.KindRetryEval {
+		// A v1 retry bead's ref suffix names its retry counter, not an iteration.
+		attempt = beadmeta.RetryAttemptValue(bead.Metadata)
+	}
 	if trimmed, ok := trimAttemptStepRefForKind(normalized, kind, attempt); ok {
 		return trimmed
 	}
@@ -1125,6 +1338,11 @@ func clearRetryEphemera(meta map[string]string) {
 		beadmeta.DurationMsMetadataKey,
 		beadmeta.TruncatedMetadataKey,
 		beadmeta.TerminalMetadataKey,
+		// A retry attempt clones the previous attempt's metadata, so it must not
+		// inherit the projector's per-step step_defined marker: a born-marked
+		// clone would be skipped by EmitCurrent and never get its own
+		// step_defined (ga-rd8le). Every clone path here strips it via this list.
+		beadmeta.StepDefinedEmittedMetadataKey,
 		beadmeta.FailedAttemptMetadataKey,
 		beadmeta.FanoutStateMetadataKey,
 		beadmeta.SpawnedCountMetadataKey,

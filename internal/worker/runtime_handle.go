@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -134,6 +135,15 @@ func (h *RuntimeHandle) Stop(ctx context.Context) (err error) {
 
 	err = h.provider.Stop(h.sessionName)
 	return err
+}
+
+// StopForShutdown is Stop for the city shutdown sweep. A RuntimeHandle has no
+// session bead and therefore no lifecycle state to reject, so the shutdown
+// intent adds nothing here and this is deliberately identical to Stop. It exists
+// so the sweep can express its intent through one interface regardless of which
+// handle kind it holds.
+func (h *RuntimeHandle) StopForShutdown(ctx context.Context) error {
+	return h.Stop(ctx)
 }
 
 // Kill asks the provider to stop the live runtime session immediately.
@@ -298,6 +308,11 @@ func (h *RuntimeHandle) AgentMappings(context.Context) ([]AgentMapping, error) {
 	return nil, ErrHistoryUnavailable
 }
 
+// TranscriptRecords reports unavailable because runtime-only handles have no transcript.
+func (h *RuntimeHandle) TranscriptRecords(context.Context) ([]json.RawMessage, error) {
+	return nil, ErrHistoryUnavailable
+}
+
 // AgentTranscript reports unavailable because runtime-only handles have no agent transcripts.
 func (h *RuntimeHandle) AgentTranscript(context.Context, string) (*AgentTranscriptResult, error) {
 	return nil, ErrHistoryUnavailable
@@ -346,7 +361,10 @@ func (h *RuntimeHandle) PendingStatus(ctx context.Context) (*PendingInteraction,
 // LiveObservation reports runtime presence metadata for a legacy runtime-only
 // worker target.
 func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, error) {
-	liveness := runtime.ObserveLiveness(h.provider, h.sessionName, h.processNames)
+	liveness, err := runtime.ObserveLivenessWithError(h.provider, h.sessionName, h.processNames)
+	if err != nil {
+		return LiveObservation{}, err
+	}
 	obs := LiveObservation{
 		Running:     liveness.Running,
 		Alive:       liveness.Alive,
@@ -360,7 +378,11 @@ func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, err
 	}
 	if obs.Running {
 		obs.Attached = h.provider.IsAttached(h.sessionName)
-		if last, err := h.provider.GetLastActivity(h.sessionName); err == nil && !last.IsZero() {
+		last, err := h.provider.GetLastActivity(h.sessionName)
+		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			return LiveObservation{}, fmt.Errorf("observe last activity for %q: %w", h.sessionName, err)
+		}
+		if err == nil && !last.IsZero() {
 			lastCopy := last
 			obs.LastActivity = &lastCopy
 		}

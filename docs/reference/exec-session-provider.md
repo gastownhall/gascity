@@ -47,12 +47,16 @@ Rules:
   errors — no silent shadowing. Identical re-declarations of the same
   pack reached through a diamond import graph dedupe.
 - The `pack-runtimes` doctor check verifies each declared executable is
-  installed and answers the `protocol` handshake.
+  installed and that its RPP handshake works. An executable with no
+  `protocol` op is the version-0 floor and passes; a present-but-broken
+  handshake fails.
 - Config reload enforces the same registration rules, and rebuilds the
   session provider when the declaration behind the selected name changes
   (the executable binding is fixed at provider construction).
-- `gc runtime check <name>` resolves the declared name and runs the
-  full conformance suite against the pack's executable.
+- `gc runtime check <name>` and `gc runtime conformance <name>` both
+  resolve the declared name and run against the pack's executable:
+  `check` is the smoke test, `conformance` the full requirement-coded
+  suite.
 
 ## Calling Convention
 

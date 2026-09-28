@@ -55,6 +55,13 @@ type RunLane struct {
 	// AND the active gc.step_id mapped into one of those formula stages.
 	FormulaStageResolved bool               `json:"formulaStageResolved"`
 	Health               RunLaneHealthState `json:"health"`
+	// Stale marks an in-flight run that has gone silent past staleRunSilenceMs
+	// (its terminal events never arrived — e.g. an event-emission gap), so its
+	// last-known step states are no longer trustworthy. Stale lanes stay visible
+	// in Lanes but are excluded from TotalActive/RunCounts (see EnrichRunSummary).
+	Stale bool `json:"stale,omitempty"`
+	// StaleSince is the run's last-activity time (UpdatedAt.At) when Stale is set.
+	StaleSince string `json:"staleSince,omitempty"`
 }
 
 // RunLaneFormula is the discriminated formula-identity union. TS RunLaneFormula:

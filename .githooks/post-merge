@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# The repo has no post-merge gate of its own; this exists so .githooks can own
+# core.hooksPath without dropping the beads post-merge hook.
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+exec "$repo_root/.githooks/lib/beads-chain.sh" post-merge "$@"

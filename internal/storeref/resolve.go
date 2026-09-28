@@ -25,7 +25,11 @@ package storeref
 //     [binding as a residence probe, work, shadows]. `gc storage migrate`
 //     preserves ids, so a relocated bead keeps its work-era prefix; nil from
 //     the namespace gate means "cannot decide", never "work owns it"
-//     (ga-axin6/#5245, #5132). Retired per ClassBinding.MintsReserved.
+//     (ga-axin6/#5245, #5132). Retired per ClassBinding.MintsReserved. The
+//     probe tolerates a standing refusal, because a refused city still serves
+//     work — unless the binding is PROVEN to hold such relics, where skipping
+//     it falls back to the migration's frozen copy rather than to nothing
+//     (ga-q8ick).
 //
 //   ByID, single-store city
 //     [work], returned unprobed. The identity fast-path: a city that relocates
@@ -123,6 +127,15 @@ type ByID struct {
 // route byte-identical to the caller reading its own store. Any further legs
 // are read in order, so a multi-leg answer proves absence rather than handing
 // back a residual.
+//
+// DECLARING ONE IS A REVIEWED ACT. An implementation replaces this package's
+// by-id work rule with the plane's own, so a second one is a second answer to
+// the same question — the bug class the residency resolver exists to end,
+// wearing the resolver's API. A plane may declare at most one axis, every
+// declaration is named in scripts/residency-boundary-baseline.txt under the
+// c:WorkAxisRouter pattern, and the day a SECOND plane declares one the two
+// must land with a cross-plane router-agreement pin. The rule is stated in
+// full beside the pattern in scripts/residency-boundary-patterns.txt.
 type WorkAxisRouter interface {
 	// WorkLegsForID returns the work legs for id, or nil to leave the
 	// resolver's own [work, covering-shadows] rule in place.
@@ -262,7 +275,7 @@ func planByID(in ByID, t Topology) (ResolvedPlan, error) {
 			if b.probeRetired() {
 				continue
 			}
-			plan.Legs = append(plan.Legs, PlanLeg{Leg: b.Leg, Role: RoleResidenceProbe, OnError: PolicyRefusalTolerated})
+			plan.Legs = append(plan.Legs, PlanLeg{Leg: b.Leg, Role: RoleResidenceProbe, OnError: b.probeRefusalPolicy()})
 		}
 		// Outside every reserved namespace a plane with its own by-id router
 		// owns the work axis, and its answer REPLACES the probed tail below
@@ -585,35 +598,162 @@ type Owner struct {
 // binding — the hot path, and exactly the funnel cost the identity fast-path
 // exists to avoid.
 func ResolveOwnerRow(p ResolvedPlan, id string) (Owner, error) {
+	owner, found, err := resolveByID(p, id, false)
+	switch {
+	case err != nil:
+		return owner, err
+	case !found:
+		return Owner{}, beads.ErrNotFound
+	default:
+		return owner, nil
+	}
+}
+
+// ResolveBindingOwner is the ModeFirstOwner executor for a caller that owns its
+// own work axis: it answers only the BINDING half of the by-id question.
+//
+// `gc convoy`'s member scan and `gc beads show`'s store fallback reach a work
+// store that is not a beads.Store — a directory of files, a subprocess they
+// shell out to — so they cannot let the resolver walk the work leg on their
+// behalf. What they need is the one thing they cannot compute themselves:
+// whether a relocated class binding owns this id. `ok` false means "no binding
+// answered; run your own axis", and it is returned WITHOUT touching the work
+// leg the plan carries for everyone else.
+//
+// The `gc bd` class door is a caller of that SHAPE which this seam does not yet
+// serve, and naming it here would misreport the tree. It reaches its binding
+// through cmd/gc's plain bindings memo and hand-rolls the tolerated-refusal
+// carve-out over its own graph handle (cmd/gc/cmd_bd_by_id.go,
+// cmd/gc/claim_class_route.go), so it never sees the proven-relic bit and still
+// answers — and closes — a refused city's by-id read from the frozen
+// pre-migration copy. Converting it is deferred, not done: ga-3htcm.
+//
+// That untouched work leg is the whole point. `gc storage migrate` preserved
+// ids and deleted nothing, so the work store still holds a frozen copy of every
+// relocated bead. Probing it here would hand a caller its own stale copy as an
+// authoritative owner — succeeding, against the wrong store, with no
+// diagnostic. TestResolveBindingOwnerNeverProbesTheWorkLeg pins the zero.
+//
+// The walk stops at the FIRST leg of that axis rather than at the plan's last
+// leg, so legs ordered below it — a rig whose configured prefix shadows the id
+// — are left to the caller too. Declining is always safe; claiming an id a
+// caller's own axis owns is not. The stop reads the leg's role rather than its
+// position, because the residual is not always there to stop at: dedupeLegs
+// removes it on a city whose binding resolved back to the work store, and the
+// shadows behind it stay.
+//
+// A read fault is still an error rather than a decline: a binding that could
+// not answer has said nothing about the id, and turning that into "no binding
+// owns it" sends the caller straight at the frozen copy.
+func ResolveBindingOwner(p ResolvedPlan, id string) (Owner, bool, error) {
+	return resolveByID(p, id, true)
+}
+
+// ErrProvenRelicRefusal explains a by-id denial that a refused city's binding
+// would otherwise have been forgiven for.
+//
+// A standing storage refusal is normally tolerated on a residence probe — a
+// refused city still serves WORK — and the two cases are then indistinguishable
+// in the text: the operator sees the boot gate's own sentence and goes looking
+// for a bead. What actually happened is that a census proved this binding holds
+// ids the migration preserved, which withdrew the carve-out and denied a read
+// that would otherwise have been served from the frozen copy.
+//
+// It is a sentinel as well as a sentence because the remedy is the CALLER's to
+// phrase: this package knows the reason, and not what a plane has to do to make
+// the condition go away. cmd/gc's by-id seam matches on it and appends its own.
+var ErrProvenRelicRefusal = errors.New("a relic census proved this binding holds ids outside its reserved namespaces, so its standing storage refusal is a denial rather than a leg to skip")
+
+// resolveByID is the leg walk both ModeFirstOwner executors share. found
+// reports whether an owner was pinned; bindingOnly stops the walk at the work
+// axis instead of handing the work leg back unprobed.
+func resolveByID(p ResolvedPlan, id string, bindingOnly bool) (Owner, bool, error) {
 	if p.Mode != ModeFirstOwner {
-		return Owner{}, fmt.Errorf("storeref: ResolveOwner needs a %s plan, got %s", ModeFirstOwner, p.Mode)
+		// Named for the executor the caller actually called. This is the one
+		// message in the package a shared body can get wrong that way, and a
+		// caller sent to ResolveOwner's contract when it broke
+		// ResolveBindingOwner's reads a doc about a work leg it does not have.
+		executor := "ResolveOwner"
+		if bindingOnly {
+			executor = "ResolveBindingOwner"
+		}
+		return Owner{}, false, fmt.Errorf("storeref: %s needs a %s plan, got %s", executor, ModeFirstOwner, p.Mode)
 	}
 	id = strings.TrimSpace(id)
 	if p.ID != "" && p.ID != id {
-		return Owner{}, fmt.Errorf("storeref: plan was resolved for %q, executed for %q — a by-id plan is id-specific", p.ID, id)
+		return Owner{}, false, fmt.Errorf("storeref: plan was resolved for %q, executed for %q — a by-id plan is id-specific", p.ID, id)
 	}
 	if len(p.Legs) == 0 {
-		return Owner{}, errors.New("storeref: plan has no legs")
+		return Owner{}, false, errors.New("storeref: plan has no legs")
 	}
 	for i, leg := range p.Legs {
+		if bindingOnly && leg.Role.ownedByCallersWorkAxis() {
+			return Owner{}, false, nil
+		}
 		if leg.Role == RoleWorkFallback && i == len(p.Legs)-1 {
-			return Owner{Store: leg.Leg.Store, Ref: leg.Leg.Ref}, nil
+			return Owner{Store: leg.Leg.Store, Ref: leg.Leg.Ref}, true, nil
 		}
 		b, err := leg.Leg.Store.Get(id)
 		switch {
 		case err == nil:
-			return Owner{Store: leg.Leg.Store, Ref: leg.Leg.Ref, Bead: b, Read: true}, nil
+			return Owner{Store: leg.Leg.Store, Ref: leg.Leg.Ref, Bead: b, Read: true}, true, nil
 		case errors.Is(err, beads.ErrNotFound):
 			continue
+		case leg.Role == RoleResidenceProbe && leg.OnError == PolicyFatal && IsStandingRefusal(err):
+			// A residence probe the planner made Fatal: the carve-out below was
+			// withdrawn because this binding is PROVEN to hold ids outside its
+			// reserved namespaces. Say so, or the operator reads a sentence
+			// identical to an in-namespace refusal and looks for a missing bead
+			// rather than for the evidence that denied it.
+			//
+			// The POLICY is the key here, not the role, and this arm is ordered
+			// first so that stays true. planByID is the only producer of a Fatal
+			// residence probe today, so keying on the role alone selects the
+			// same legs — but the sentence this arm attaches is a claim about
+			// the EVIDENCE, and the evidence is what set the policy. Below the
+			// tolerated arm the role key would have been load-bearing for
+			// nothing and unfalsifiable besides; above it, dropping the policy
+			// clause claims every tolerated residence probe and the no-evidence
+			// controls die (ga-e3dvx).
+			return Owner{Ref: leg.Leg.Ref}, false, fmt.Errorf("reading %q from %s: %w: %w", id, legName(leg.Leg.Ref), err, ErrProvenRelicRefusal)
 		case leg.OnError == PolicyRefusalTolerated && IsStandingRefusal(err):
 			// A refused city still serves WORK, and this leg was only ever a
 			// residence probe for an id no relocated class could own.
 			continue
 		default:
-			return Owner{Ref: leg.Leg.Ref}, fmt.Errorf("reading %q from %s: %w", id, legName(leg.Leg.Ref), err)
+			return Owner{Ref: leg.Leg.Ref}, false, fmt.Errorf("reading %q from %s: %w", id, legName(leg.Leg.Ref), err)
 		}
 	}
-	return Owner{}, beads.ErrNotFound
+	return Owner{}, false, nil
+}
+
+// ResolvePlacement is the ModeSingleOwner executor: the one store a
+// class-pure operation — above all a CREATE — acts on.
+//
+// It performs no I/O, because placement is not a search. A by-id plan asks
+// "where does this bead live" and probes until something answers; a placement
+// plan asks "where does this class BELONG", and the topology already knows.
+// That difference is why the modes need separate executors rather than one
+// leg-walking loop: running a FirstOwner plan through this function would
+// return the leg that merely LEADS a probe order and place the bead there, and
+// running a placement plan through ResolveOwner would probe the owner and
+// report a not-yet-created bead's absence as a miss.
+//
+// A refused city never reaches here for a relocated class — Plan returns the
+// standing refusal as an error, which is what keeps an infrastructure-class
+// create off the work ledger the class was moved away from.
+func ResolvePlacement(p ResolvedPlan) (Leg, error) {
+	if p.Mode != ModeSingleOwner {
+		return Leg{}, fmt.Errorf("storeref: ResolvePlacement needs a %s plan, got %s", ModeSingleOwner, p.Mode)
+	}
+	if len(p.Legs) != 1 {
+		return Leg{}, fmt.Errorf("storeref: a %s plan names exactly one store, got %d (%s)", ModeSingleOwner, len(p.Legs), p)
+	}
+	owner := p.Legs[0].Leg
+	if owner.Store == nil {
+		return Leg{}, fmt.Errorf("storeref: %s plan leg %s has no store", ModeSingleOwner, legName(owner.Ref))
+	}
+	return owner, nil
 }
 
 // LegError names a leg whose read failed and was tolerated as a partial

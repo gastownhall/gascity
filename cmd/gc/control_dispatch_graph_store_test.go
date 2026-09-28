@@ -142,8 +142,8 @@ func TestControlDispatchReadsAndWritesTheGraphStoreOnSplitCity(t *testing.T) {
 // TestControlDispatchSingleStoreUsesTheOneStore is the compatibility guarantee.
 // A city that relocates nothing routes nothing, so control dispatch runs against
 // the exact scope store it always did — same instance, so the bd command runner,
-// the scope issue prefix and the optional-capability assertions the scope-skip
-// paths make (DepListBatch, UpdateAll) all still land on the store they used to.
+// the scope issue prefix and the optional-capability assertion the scope-skip
+// paths make (DepListBatch) all still land on the store they used to.
 //
 // Green before and after by design; its teeth are proven by mutation.
 func TestControlDispatchSingleStoreUsesTheOneStore(t *testing.T) {

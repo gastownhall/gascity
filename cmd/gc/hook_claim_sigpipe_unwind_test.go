@@ -68,7 +68,7 @@ func runSigpipeUnwindHelper(mode, markerPath string) {
 		EmitExecutionStepStarted: func(beads.Bead, string, []string, string) {},
 		PublishRunMap:            func(string, string, ...string) error { return nil },
 		StampWorkMeta:            func(context.Context, string, []string, string, string, map[string]string) error { return nil },
-		ResolveWorkBranch:        func(string) string { return "" },
+		ResolveWorkBranch:        func(hookClaimWorkTree) string { return "" },
 	}
 	// os.Stdout, not a buffer: the whole point is the real file descriptor.
 	code := doHookClaim("query", "/rig", hookClaimOptions{

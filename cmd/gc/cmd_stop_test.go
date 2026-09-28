@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -362,7 +364,7 @@ func TestCmdStopForceEscalatesInProgressControllerStop(t *testing.T) {
 	var normalStdout, normalStderr lockedBuffer
 	normalDone := make(chan int, 1)
 	go func() {
-		normalDone <- cmdStop([]string{dir}, &normalStdout, &normalStderr, 10*time.Second, false)
+		normalDone <- cmdStop([]string{dir}, &normalStdout, &normalStderr, 0, false)
 	}()
 
 	interrupted := sp.waitForInterrupts(t, 1)
@@ -373,7 +375,7 @@ func TestCmdStopForceEscalatesInProgressControllerStop(t *testing.T) {
 	var forceStdout, forceStderr lockedBuffer
 	forceDone := make(chan int, 1)
 	go func() {
-		forceDone <- cmdStop([]string{dir}, &forceStdout, &forceStderr, 10*time.Second, true)
+		forceDone <- cmdStop([]string{dir}, &forceStdout, &forceStderr, 0, true)
 	}()
 
 	stopped := sp.waitForStops(t, 1)
@@ -534,7 +536,7 @@ func TestCmdStopSupervisorManagedInvalidCityTomlWaitsForControllerStop(t *testin
 	}
 
 	var stdout, stderr lockedBuffer
-	code := cmdStop([]string{cityDir}, &stdout, &stderr, time.Second, false)
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, 0, false)
 	if code != 0 {
 		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
@@ -563,7 +565,7 @@ func setupSupervisorManagedInvalidCity(t *testing.T) string {
 		t.Fatal(err)
 	}
 	reg := registryAt(t, gcHome)
-	if err := reg.Register(cityDir, "invalid-supervisor-city"); err != nil {
+	if err := reg.Register(cityDir, "registered-invalid-city"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -581,6 +583,23 @@ func setupSupervisorManagedInvalidCity(t *testing.T) string {
 
 func TestCmdStopWallClockTimeoutBoundsSupervisorManagedInvalidConfigStop(t *testing.T) {
 	cityDir := setupSupervisorManagedInvalidCity(t)
+	reg := registryAt(t, os.Getenv("GC_HOME"))
+	assertOriginalRegistration := func(when string) {
+		t.Helper()
+		entries, err := reg.List()
+		if err != nil {
+			t.Fatalf("list registry %s: %v", when, err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("registry %s = %v, want the original city entry", when, entries)
+		}
+		if got, want := canonicalTestPath(entries[0].Path), canonicalTestPath(cityDir); got != want {
+			t.Fatalf("registry path %s = %q, want %q", when, got, want)
+		}
+		if got, want := entries[0].EffectiveName(), "registered-invalid-city"; got != want {
+			t.Fatalf("registry name %s = %q, want %q", when, got, want)
+		}
+	}
 	waitEntered := make(chan struct{})
 	releaseWait := make(chan struct{})
 	waitExited := make(chan struct{})
@@ -658,7 +677,12 @@ func TestCmdStopWallClockTimeoutBoundsSupervisorManagedInvalidConfigStop(t *test
 	if !strings.Contains(stderr.String(), fmt.Sprintf("timed out after %s", testWallClockCap)) {
 		t.Fatalf("stderr = %q, want wall-clock timeout message", stderr.String())
 	}
+	assertOriginalRegistration("when the timeout returns")
+	if !strings.Contains(stderr.String(), "restored registration for 'registered-invalid-city'") {
+		t.Fatalf("stderr = %q, want timeout rollback message", stderr.String())
+	}
 	releaseAndDrainWorker()
+	assertOriginalRegistration("after the late worker exits")
 	if stdout.String() != "" {
 		t.Fatalf("stdout = %q after timed-out worker exited, want no late success JSON", stdout.String())
 	}
@@ -690,6 +714,130 @@ func TestControllerStopTimeoutUsesHostingMode(t *testing.T) {
 	}
 }
 
+// TestCmdStopJSONReportsUnregisteredTrueForSupervisorManagedCity pins the
+// #4366 fix: gc stop --json must report that a supervisor-managed city was
+// unregistered from the registry as part of the stop, not just that
+// sessions stopped. Reuses the invalid-city-toml scaffolding from
+// TestCmdStopSupervisorManagedInvalidCityTomlWaitsForControllerStop, the
+// simplest existing setup that reaches the supervisor-managed success path.
+func TestCmdStopJSONReportsUnregisteredTrueForSupervisorManagedCity(t *testing.T) {
+	resetFlags(t)
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := filepath.Join(t.TempDir(), "invalid-supervisor-city")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace\nname = \"broken\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := registryAt(t, gcHome)
+	if err := reg.Register(cityDir, "invalid-supervisor-city"); err != nil {
+		t.Fatal(err)
+	}
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 4242 },
+		func(string) (bool, string, bool) { return false, "", true },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+	waitForSupervisorControllerStopHook = func(string, time.Duration) error { return nil }
+
+	var stdout, stderr lockedBuffer
+	code := cmdStopJSON([]string{cityDir}, &stdout, &stderr, 5*time.Second, false, true)
+	if code != 0 {
+		t.Fatalf("cmdStopJSON() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var got lifecycleActionJSON
+	if err := json.Unmarshal([]byte(stdout.String()), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got.Unregistered == nil || !*got.Unregistered {
+		t.Fatalf("payload.Unregistered = %v, want pointer to true; payload=%+v", got.Unregistered, got)
+	}
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("registry after successful JSON stop = %v, want committed removal", entries)
+	}
+}
+
+// TestCmdStopJSONReportsUnregisteredTrueWhenSupervisorNotRunning closes the
+// remaining #4366 branch: a registered city whose supervisor is not alive
+// falls through to the ordinary loaded-config stop, so the unregister the
+// command just performed must still be reported. The sibling
+// TestCmdStopJSONReportsUnregisteredTrueForSupervisorManagedCity only covers
+// the alive-supervisor early return and never reaches this path, because it
+// stubs the alive hook to a live PID and writes an invalid city.toml. Here
+// the alive hook returns 0 and city.toml is valid, so cmdStopJSONSequence
+// runs stopLoadedCity.
+func TestCmdStopJSONReportsUnregisteredTrueWhenSupervisorNotRunning(t *testing.T) {
+	resetFlags(t)
+	gcHome := shortSocketTempDir(t, "gc-home-")
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := shortSocketTempDir(t, "gc-stop-city-")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "unregistered-on-stop"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Session:   config.SessionConfig{Provider: "subprocess"},
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := registryAt(t, gcHome)
+	if err := reg.Register(cityDir, "unregistered-on-stop"); err != nil {
+		t.Fatal(err)
+	}
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 0 },
+		func(string) (bool, string, bool) { return false, "", true },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	oldFactory := sessionProviderForStopCity
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
+		return runtime.NewFake(), nil
+	}
+
+	var stdout, stderr lockedBuffer
+	code := cmdStopJSON([]string{cityDir}, &stdout, &stderr, 0, false, true)
+	if code != 0 {
+		t.Fatalf("cmdStopJSON() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var got lifecycleActionJSON
+	if err := json.Unmarshal([]byte(stdout.String()), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got.Unregistered == nil || !*got.Unregistered {
+		t.Fatalf("payload.Unregistered = %v, want pointer to true; payload=%+v", got.Unregistered, got)
+	}
+}
+
 func TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails(t *testing.T) {
 	resetFlags(t)
 	cityDir := setupInvalidConfigManagedRuntime(t)
@@ -717,7 +865,24 @@ func TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails(t *testin
 	})
 
 	var stdout, stderr lockedBuffer
-	code := cmdStop([]string{cityDir}, &stdout, &stderr, 5*time.Second, false)
+	// Input 0 selects production's normal config-derived timeout path instead
+	// of an arbitrary test override; completion is observed via the package
+	// hang detector below rather than via this input, so a scheduler-starved
+	// run reports a hang budget failure instead of racing a tight deadline.
+	codeCh := make(chan int, 1)
+	go func() {
+		codeCh <- cmdStop([]string{cityDir}, &stdout, &stderr, 0, false)
+	}()
+
+	var code int
+	awaitCond(t, func() bool {
+		select {
+		case code = <-codeCh:
+			return true
+		default:
+			return false
+		}
+	}, "cmdStop to finish for invalid-config shutdown failure")
 	if code != 1 {
 		t.Fatalf("cmdStop() = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
@@ -727,15 +892,174 @@ func TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails(t *testin
 	if !strings.Contains(stderr.String(), "bead store") || !strings.Contains(stderr.String(), "provider-stop-failed") {
 		t.Fatalf("stderr = %q, want bead-store shutdown error", stderr.String())
 	}
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !samePath(entries[0].Path, cityDir) || entries[0].EffectiveName() != "invalid-supervisor-city" {
+		t.Fatalf("registry after managed-provider stop failure = %v, want exact original entry", entries)
+	}
+	if !strings.Contains(stderr.String(), "restored registration for 'invalid-supervisor-city'") {
+		t.Fatalf("stderr = %q, want registration rollback after managed-provider stop failure", stderr.String())
+	}
+	if probeControllerLockHeld(t, cityDir) {
+		t.Fatal("controller lock still held after failed gc stop restored the registration")
+	}
+}
+
+// After the supervisor stops a registered city's controller, gc stop must keep
+// the controller lock until the city's bead store is retired, so the
+// supervisor (or anything else) cannot bring a controller back up against it.
+func TestCmdStopSupervisorManagedCityHoldsControllerLockThroughProviderShutdown(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// aliveCalls is how many supervisorAliveHook calls see a live
+		// supervisor; later calls see it gone.
+		aliveCalls int
+	}{
+		{name: "supervisor stays up", aliveCalls: -1},
+		// The supervisor exiting after the unregister must not send gc stop
+		// down the standalone path, which would wait on the lock it holds.
+		{name: "supervisor exits after unregister", aliveCalls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetFlags(t)
+			cityDir := setupInvalidConfigManagedRuntime(t)
+			reg := registryAt(t, os.Getenv("GC_HOME"))
+			if err := reg.Register(cityDir, "invalid-supervisor-city"); err != nil {
+				t.Fatal(err)
+			}
+
+			var aliveCalls atomic.Int32
+			withSupervisorTestHooks(
+				t,
+				func(_, _ io.Writer) int { return 0 },
+				func(_, _ io.Writer) int { return 0 },
+				func() int {
+					n := aliveCalls.Add(1)
+					if tc.aliveCalls >= 0 && int(n) > tc.aliveCalls {
+						return 0
+					}
+					return 4242
+				},
+				func(string) (bool, string, bool) { return false, "", true },
+				20*time.Millisecond,
+				time.Millisecond,
+			)
+			var waited int
+			waitForSupervisorControllerStopHook = func(path string, _ time.Duration) error {
+				waited++
+				assertSameTestPath(t, path, cityDir)
+				return nil
+			}
+			var shutdowns int
+			heldDuringShutdown := false
+			overrideShutdownBeadsProviderForStop(t, func(path string) error {
+				shutdowns++
+				assertSameTestPath(t, path, cityDir)
+				heldDuringShutdown = probeControllerLockHeld(t, path)
+				return nil
+			})
+
+			var stdout, stderr lockedBuffer
+			code := cmdStop([]string{cityDir}, &stdout, &stderr, 0, false)
+			if code != 0 {
+				t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if waited != 1 {
+				t.Fatalf("supervisor controller-stop waits = %d, want 1", waited)
+			}
+			if shutdowns != 1 {
+				t.Fatalf("provider shutdown calls = %d, want 1", shutdowns)
+			}
+			if !heldDuringShutdown {
+				t.Fatal("controller lock was released before the supervisor-managed city's provider shutdown")
+			}
+			if probeControllerLockHeld(t, cityDir) {
+				t.Fatal("controller lock still held after gc stop returned")
+			}
+			entries, err := reg.List()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("registry after successful stop = %v, want committed removal", entries)
+			}
+		})
+	}
+}
+
+// If a controller grabs the lock between the supervisor-side stop wait and gc
+// stop claiming it, gc stop must not retire the bead store under that
+// controller, and must hand the registration back.
+func TestCmdStopSupervisorManagedCityFailsClosedWhenControllerRestartsBeforeClaim(t *testing.T) {
+	resetFlags(t)
+	cityDir := setupInvalidConfigManagedRuntime(t)
+	reg := registryAt(t, os.Getenv("GC_HOME"))
+	if err := reg.Register(cityDir, "invalid-supervisor-city"); err != nil {
+		t.Fatal(err)
+	}
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 4242 },
+		func(string) (bool, string, bool) { return false, "", true },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+	var restarted *os.File
+	t.Cleanup(func() {
+		if restarted != nil {
+			_ = restarted.Close()
+		}
+	})
+	waitForSupervisorControllerStopHook = func(path string, _ time.Duration) error {
+		lock, err := acquireControllerLock(path)
+		if err != nil {
+			return err
+		}
+		restarted = lock
+		return nil
+	}
+	var shutdowns int
+	overrideShutdownBeadsProviderForStop(t, func(string) error {
+		shutdowns++
+		return nil
+	})
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, 0, false)
+	if code != 1 {
+		t.Fatalf("cmdStop() = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if shutdowns != 0 {
+		t.Fatalf("provider shutdown calls = %d, want 0 while another controller holds the lock", shutdowns)
+	}
+	if !strings.Contains(stderr.String(), "a controller started for the city") {
+		t.Fatalf("stderr = %q, want controller-restart error", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "restored registration for 'invalid-supervisor-city'") {
+		t.Fatalf("stderr = %q, want registration rollback", stderr.String())
+	}
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("registry after fail-closed stop = %v, want original entry restored", entries)
+	}
 }
 
 func TestCmdStopInvalidConfigManagedRuntimeStopsAfterVerifiedShutdown(t *testing.T) {
 	resetFlags(t)
 	cityDir := setupInvalidConfigManagedRuntime(t)
 	var shutdowns int
+	heldDuringShutdown := false
 	overrideShutdownBeadsProviderForStop(t, func(path string) error {
 		shutdowns++
 		assertSameTestPath(t, path, cityDir)
+		heldDuringShutdown = probeControllerLockHeld(t, path)
 		return nil
 	})
 
@@ -753,6 +1077,12 @@ func TestCmdStopInvalidConfigManagedRuntimeStopsAfterVerifiedShutdown(t *testing
 	if shutdowns != 1 {
 		t.Fatalf("shutdown calls = %d, want 1", shutdowns)
 	}
+	if !heldDuringShutdown {
+		t.Fatal("controller lock was released between the absence probe and managed provider shutdown")
+	}
+	if probeControllerLockHeld(t, cityDir) {
+		t.Fatal("controller lock still held after gc stop returned")
+	}
 }
 
 func TestCmdStopInvalidConfigManagedRuntimeStopsStandaloneController(t *testing.T) {
@@ -760,9 +1090,11 @@ func TestCmdStopInvalidConfigManagedRuntimeStopsStandaloneController(t *testing.
 	cityDir := setupInvalidConfigManagedRuntime(t)
 	stopCommands := startAcknowledgingStandaloneController(t, cityDir)
 	var shutdowns int
+	heldDuringShutdown := false
 	overrideShutdownBeadsProviderForStop(t, func(path string) error {
 		shutdowns++
 		assertSameTestPath(t, path, cityDir)
+		heldDuringShutdown = probeControllerLockHeld(t, path)
 		return nil
 	})
 
@@ -785,6 +1117,12 @@ func TestCmdStopInvalidConfigManagedRuntimeStopsStandaloneController(t *testing.
 	}
 	if shutdowns != 1 {
 		t.Fatalf("shutdown calls = %d, want 1", shutdowns)
+	}
+	if !heldDuringShutdown {
+		t.Fatal("controller lock was released before managed provider shutdown")
+	}
+	if probeControllerLockHeld(t, cityDir) {
+		t.Fatal("controller lock still held after gc stop returned")
 	}
 	if !strings.Contains(stdout.String(), "Controller stopping...") {
 		t.Fatalf("stdout missing controller stop message: %q", stdout.String())
@@ -1314,4 +1652,226 @@ func controllerAcceptsPing(dir string, timeout time.Duration) bool {
 	buf := make([]byte, 64)
 	n, err := conn.Read(buf)
 	return err == nil && strings.TrimSpace(string(buf[:n])) != ""
+}
+
+// TestWriteCityStopSuccessReportsUnregisteredFlag pins the #4366 JSON
+// envelope contract at the unit level: the unregistered bool passed to
+// writeCityStopSuccess must come through verbatim (not omitted, not
+// defaulted), so gc stop --json can distinguish an unmanaged-city stop from
+// one that also removed a supervisor registration.
+func TestWriteCityStopSuccessReportsUnregisteredFlag(t *testing.T) {
+	for _, unregistered := range []bool{true, false} {
+		t.Run(fmt.Sprintf("unregistered=%v", unregistered), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := writeCityStopSuccess(&stdout, &stderr, "/city", false, unregistered)
+			if code != 0 {
+				t.Fatalf("writeCityStopSuccess() = %d, want 0; stderr=%q", code, stderr.String())
+			}
+			var got lifecycleActionJSON
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+			}
+			if got.Unregistered == nil || *got.Unregistered != unregistered {
+				t.Fatalf("payload.Unregistered = %v, want pointer to %v; payload=%+v", got.Unregistered, unregistered, got)
+			}
+		})
+	}
+}
+
+// TestStopHelpDocumentsSupervisorUnregisterBehavior pins the #4366
+// help/behavior parity fix: gc stop's long help must state that it
+// unregisters a supervisor-managed city, since cmdStopJSON actually does
+// that (via unregisterCityFromSupervisorWithForce) before help readers would
+// otherwise expect from "Stop all agent sessions in the city".
+func TestStopHelpDocumentsSupervisorUnregisterBehavior(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := newStopCmd(&stdout, &stderr)
+	long := strings.ToLower(cmd.Long)
+	if !strings.Contains(long, "unregister") {
+		t.Fatalf("gc stop --help does not mention unregistering a supervisor-managed city; Long=%q", cmd.Long)
+	}
+}
+
+// probeControllerLockHeld reports whether some other owner holds the city's
+// controller lock right now, releasing the probe when it was free.
+func probeControllerLockHeld(t *testing.T, cityPath string) bool {
+	t.Helper()
+	lock, err := acquireControllerLock(cityPath)
+	switch {
+	case err == nil:
+		_ = lock.Close()
+		return false
+	case errors.Is(err, errControllerAlreadyRunning):
+		return true
+	default:
+		t.Errorf("probing controller lock: %v", err)
+		return false
+	}
+}
+
+func acknowledgedControllerStopCity(t *testing.T, name string) (string, *config.City) {
+	t.Helper()
+	cityDir := setupCity(t, name)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: name},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+	}
+	return cityDir, cfg
+}
+
+// A controller that acknowledged "stop" and exited leaves gc stop as the only
+// party entitled to the city until the bead store is retired. gc stop must
+// hold the controller lock through that shutdown and release it afterwards,
+// including when the shutdown fails.
+func TestCmdStopBodyHoldsControllerLockThroughProviderShutdown(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		shutdownErr error
+	}{
+		{name: "shutdown succeeds"},
+		{name: "shutdown fails", shutdownErr: errors.New("provider-stop-failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir, cfg := acknowledgedControllerStopCity(t, "ack-stop-ownership")
+			startAcknowledgingStandaloneController(t, cityDir)
+
+			var shutdowns int
+			heldDuringShutdown := false
+			overrideShutdownBeadsProviderForStop(t, func(path string) error {
+				shutdowns++
+				assertSameTestPath(t, path, cityDir)
+				heldDuringShutdown = probeControllerLockHeld(t, path)
+				return tc.shutdownErr
+			})
+
+			var stdout, stderr lockedBuffer
+			code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr)
+
+			if code != 0 {
+				t.Fatalf("cmdStopBody() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if shutdowns != 1 {
+				t.Fatalf("provider shutdown calls = %d, want 1", shutdowns)
+			}
+			if !heldDuringShutdown {
+				t.Fatal("controller lock was released before bead-store provider shutdown")
+			}
+			if probeControllerLockHeld(t, cityDir) {
+				t.Fatal("controller lock still held after gc stop returned")
+			}
+			if tc.shutdownErr != nil && !strings.Contains(stderr.String(), "provider-stop-failed") {
+				t.Fatalf("stderr = %q, want provider shutdown warning", stderr.String())
+			}
+		})
+	}
+}
+
+// Regression for the stop/restart race: a replacement controller (supervisor
+// restart, second gc start) spinning on the controller lock must not win it
+// while gc stop is retiring the bead store, and must win it once gc stop is
+// done.
+func TestCmdStopBodyReplacementControllerCannotAcquireLockDuringProviderShutdown(t *testing.T) {
+	cityDir, cfg := acknowledgedControllerStopCity(t, "ack-stop-race")
+	startAcknowledgingStandaloneController(t, cityDir)
+
+	shutdownEntered := make(chan struct{})
+	replacementAcquired := make(chan struct{})
+	var shutdownDone atomic.Bool
+	var acquiredBeforeShutdownDone atomic.Bool
+	stopReplacement := make(chan struct{})
+	replacementDone := make(chan struct{})
+	go func() {
+		defer close(replacementDone)
+		select {
+		case <-shutdownEntered:
+		case <-stopReplacement:
+			return
+		}
+		for {
+			lock, err := acquireControllerLock(cityDir)
+			if err == nil {
+				acquiredBeforeShutdownDone.Store(!shutdownDone.Load())
+				_ = lock.Close()
+				close(replacementAcquired)
+				return
+			}
+			if !errors.Is(err, errControllerAlreadyRunning) {
+				t.Errorf("replacement controller lock: %v", err)
+				return
+			}
+			select {
+			case <-stopReplacement:
+				return
+			case <-time.After(time.Millisecond):
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		close(stopReplacement)
+		<-replacementDone
+	})
+
+	overrideShutdownBeadsProviderForStop(t, func(string) error {
+		close(shutdownEntered)
+		// Give the replacement a real window to race the shutdown; on the
+		// unfixed stop path it wins the lock here immediately.
+		select {
+		case <-replacementAcquired:
+		case <-time.After(200 * time.Millisecond):
+		}
+		shutdownDone.Store(true)
+		return nil
+	})
+
+	var stdout, stderr lockedBuffer
+	code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdStopBody() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+
+	awaitClose(t, replacementAcquired, "replacement controller to acquire the lock after gc stop returned")
+	if acquiredBeforeShutdownDone.Load() {
+		t.Fatal("replacement controller acquired the controller lock while gc stop was retiring the bead store")
+	}
+}
+
+// Ownership is only handed out once no other owner holds the lock; a
+// controller that still (or again) holds it makes the wait fail closed with
+// nothing held, and the returned lock excludes every other acquirer until it
+// is closed.
+func TestAcquireStoppedControllerOwnership(t *testing.T) {
+	cityDir := setupCity(t, "stopped-controller-ownership")
+
+	other, err := acquireControllerLock(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := acquireStoppedControllerOwnership(cityDir, 100*time.Millisecond)
+	if err == nil {
+		_ = lock.Close()
+		t.Fatal("acquireStoppedControllerOwnership succeeded while another owner held the controller lock")
+	}
+	if !strings.Contains(err.Error(), "timed out waiting") {
+		t.Fatalf("error = %v, want controller-stop timeout", err)
+	}
+	if lock != nil {
+		t.Fatal("acquireStoppedControllerOwnership returned a lock alongside an error")
+	}
+	_ = other.Close()
+
+	lock, err = acquireStoppedControllerOwnership(cityDir, time.Second)
+	if err != nil {
+		t.Fatalf("acquireStoppedControllerOwnership() error = %v", err)
+	}
+	if !probeControllerLockHeld(t, cityDir) {
+		_ = lock.Close()
+		t.Fatal("acquireStoppedControllerOwnership returned without holding the controller lock")
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if probeControllerLockHeld(t, cityDir) {
+		t.Fatal("controller lock still held after closing ownership")
+	}
 }

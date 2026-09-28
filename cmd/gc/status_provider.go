@@ -24,7 +24,10 @@ type statusProvider struct {
 	partial  atomic.Bool
 }
 
-var _ runtime.RelaunchProvider = (*statusProvider)(nil)
+var (
+	_ runtime.RelaunchProvider          = (*statusProvider)(nil)
+	_ runtime.LivenessObserverWithError = (*statusProvider)(nil)
+)
 
 func statusProviderPartial(sp any) bool {
 	p, ok := sp.(*statusProvider)
@@ -104,6 +107,19 @@ func (p *statusProvider) ObserveLiveness(name string, processNames []string) run
 	return boundedStatusCall(p, runtime.Liveness{}, func() runtime.Liveness {
 		return runtime.ObserveLiveness(p.base, name, processNames)
 	})
+}
+
+func (p *statusProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	type result struct {
+		observation runtime.Liveness
+		err         error
+	}
+	fallbackErr := fmt.Errorf("%w: status liveness probe timed out", runtime.ErrRuntimeUnavailable)
+	got := boundedStatusCall(p, result{err: fallbackErr}, func() result {
+		observation, err := runtime.ObserveLivenessWithError(p.base, name, processNames)
+		return result{observation: observation, err: err}
+	})
+	return got.observation, got.err
 }
 
 func (p *statusProvider) Nudge(name string, content []runtime.ContentBlock) error {

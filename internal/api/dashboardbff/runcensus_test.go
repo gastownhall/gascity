@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,7 +13,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runproj"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestRunCensusSourceServesOnlyWarmAggregateCounts(t *testing.T) {
@@ -58,7 +58,8 @@ func TestRunProjectionSourceReturnsImmediatelyWhileColdLoadIsPending(t *testing.
 	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"alpha": dir}}})
 	started := make(chan struct{})
 	release := make(chan struct{})
-	defer close(release)
+	var releaseOnce sync.Once
+	releaseLoad := func() { releaseOnce.Do(func() { close(release) }) }
 	previous := readRunColdLoad
 	readRunColdLoad = func(*runproj.Projector, string) error {
 		close(started)
@@ -68,12 +69,10 @@ func TestRunProjectionSourceReturnsImmediatelyWhileColdLoadIsPending(t *testing.
 	t.Cleanup(func() { readRunColdLoad = previous })
 
 	p.Start(t.Context())
-	t.Cleanup(p.Stop)
-	select {
-	case <-started:
-	case <-time.After(testutil.GoroutineRaceTimeout):
-		t.Fatal("background cold load did not start")
-	}
+	t.Cleanup(func() {
+		releaseLoad()
+		p.Stop()
+	})
 
 	done := make(chan runproj.RunProjectionSnapshot, 1)
 	go func() {
@@ -82,11 +81,17 @@ func TestRunProjectionSourceReturnsImmediatelyWhileColdLoadIsPending(t *testing.
 	}()
 
 	select {
+	case <-started:
+	case <-time.After(hangBudget):
+		t.Fatal("first projection demand did not start the cold load")
+	}
+
+	select {
 	case projection := <-done:
 		if projection.Ready || !projection.Partial || len(projection.Beads) != 0 {
 			t.Fatalf("cold projection = %+v, want empty partial warming snapshot", projection)
 		}
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("RunProjection blocked on the unfinished cold load")
 	}
 }

@@ -139,14 +139,14 @@ name = "my-city"
 schema = 2
 
 [imports.core]
-source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+source = "https://github.com/gastownhall/gascity/tree/main/internal/bootstrap/packs/core"
 version = "sha:<pinned commit>"
 
 [imports.bd]
-source = "https://github.com/gastownhall/gascity.git//examples/bd"
+source = "https://github.com/gastownhall/gascity/tree/main/examples/bd"
 version = "sha:<pinned commit>"
 
-[imports.gascity]
+[imports.gc]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 version = "sha:<pinned commit>"
 
@@ -162,8 +162,8 @@ so nothing is written for it (you'll meet formulas in
 [Tutorial 05](/tutorials/05-formulas)). The `[imports]` entries
 in `pack.toml` are explicit pack composition, not hidden load-time behavior.
 `core` and, for cities on the default `bd` beads provider, `bd` are bundled
-system packs that resolve offline from the user-global pack cache. The
-`gascity` import is the public planning and implementation skills pack pinned
+system packs that resolve offline from the user-global pack cache. The `gc`
+import is the public Gas City planning and implementation skills pack pinned
 to the registry release embedded with this `gc` binary. If required builtin
 imports go missing, `gc doctor --fix` restores them. The machine-local
 workspace identity lives in `.gc/site.toml` instead, which is how `gc
@@ -308,12 +308,12 @@ Watch the bead progress with `--watch`:
 ```shell
 ~/my-project
 $ gc bd show mp-ff9 --watch
-○ mp-ff9 · Write hello world in python to the file hello.py   [● P2 · OPEN]
+○ mp-ff9 · Write hello world in python to the file hello.py   [P2 · OPEN]
 Owner: Chris Sells · Type: task
 Created: 2026-04-07 · Updated: 2026-04-07
 
 BLOCKS
-  ← ○ mp-4tl: input convoy for mp-ff9 ● P2
+  ← ○ mp-4tl: input convoy for mp-ff9 P2
 
 Watching for changes... (Press Ctrl+C to exit)
 ```

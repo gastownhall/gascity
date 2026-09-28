@@ -10,8 +10,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 type cacheTestClock struct {
@@ -470,7 +468,7 @@ func waitForCacheFlightWaiters(t *testing.T, cache *Cache, provider *Provider, r
 		t.Fatalf("validate request: %v", err)
 	}
 	key := newCredentialCacheKey(provider.argv, minimalEnvironment(provider.environ()), request, scopes)
-	deadline := time.NewTimer(testutil.GoroutineRaceTimeout)
+	deadline := time.NewTimer(hangBudget)
 	defer deadline.Stop()
 	for {
 		cache.mu.Lock()
@@ -494,7 +492,7 @@ func waitForCacheFlightWaiters(t *testing.T, cache *Cache, provider *Provider, r
 
 func awaitCacheValue[T any](t *testing.T, values <-chan T, description string) T {
 	t.Helper()
-	timer := time.NewTimer(testutil.GoroutineRaceTimeout)
+	timer := time.NewTimer(hangBudget)
 	defer timer.Stop()
 	select {
 	case value := <-values:

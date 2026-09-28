@@ -320,7 +320,7 @@ func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Be
 		if isAttemptControlKind(step.Metadata[beadmeta.KindMetadataKey]) {
 			target := strings.TrimSpace(step.Metadata[beadmeta.ExecutionRoutedToMetadataKey])
 			if target == "" {
-				target = fanoutFragmentStepTarget(*step, executionRoute, routeCfg)
+				target = fanoutFragmentStepTarget(*step, executionRoute, executionRigContext, routeCfg)
 			}
 			if err := applyAttemptControlStepRoute(step, target, routeCfg, store); err != nil {
 				return fmt.Errorf("routing fanout control step %s: %w", step.ID, err)
@@ -330,7 +330,7 @@ func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Be
 		if fanoutFragmentStepHasRoute(*step) {
 			continue
 		}
-		target := fanoutFragmentStepTarget(*step, executionRoute, routeCfg)
+		target := fanoutFragmentStepTarget(*step, executionRoute, executionRigContext, routeCfg)
 		if target == "" {
 			continue
 		}
@@ -339,7 +339,7 @@ func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Be
 	return nil
 }
 
-func fanoutFragmentStepTarget(step formula.RecipeStep, executionRoute string, routeCfg *config.City) string {
+func fanoutFragmentStepTarget(step formula.RecipeStep, executionRoute, executionRigContext string, routeCfg *config.City) string {
 	target := strings.TrimSpace(step.Metadata[beadmeta.RunTargetMetadataKey])
 	if target == "" {
 		target = strings.TrimSpace(step.Metadata[beadmeta.RoutedToMetadataKey])
@@ -350,7 +350,11 @@ func fanoutFragmentStepTarget(step formula.RecipeStep, executionRoute string, ro
 	if target == "" {
 		return executionRoute
 	}
-	return qualifyAttemptTargetWithSourceRoute(target, executionRoute, routeCfg)
+	stepRigContext := strings.TrimSpace(step.Metadata[beadmeta.ExecutionRigContextMetadataKey])
+	if stepRigContext == "" {
+		stepRigContext = executionRigContext
+	}
+	return qualifyAttemptTargetWithSourceRoute(target, executionRoute, stepRigContext, routeCfg)
 }
 
 func fanoutFragmentStepHasRoute(step formula.RecipeStep) bool {

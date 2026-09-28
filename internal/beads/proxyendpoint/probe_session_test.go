@@ -1,0 +1,742 @@
+package proxyendpoint
+
+import (
+	"context"
+	"database/sql/driver"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/doltpool"
+	mysql "github.com/go-sql-driver/mysql"
+)
+
+// TestProbeSessionClosesEveryConnectionItOpens is the fence under the hard
+// constraint: a probe may not leave a connection to bd's proxy open once it has
+// answered.
+//
+// bd's idle watcher counts every accepted TCP connection and cannot arm while
+// one is open, so a session that outlived the check would defer the retirement
+// the check exists to report. It is asserted at the driver level rather than
+// through sql.DB's counters because the driver is where the socket is: a closed
+// driver connection is the property, and a handle that merely reports zero open
+// connections while a pool elsewhere still holds one would satisfy the weaker
+// claim.
+func TestProbeSessionClosesEveryConnectionItOpens(t *testing.T) {
+	t.Run("a served session", func(t *testing.T) {
+		fake := &fakeProbeConnector{cursors: map[string]int64{mainCursorQuery: 66, ignoredCursorQuery: 26}}
+		report, err := readCursorsOver(context.Background(), fake)
+		if err != nil {
+			t.Fatalf("readCursorsOver: %v", err)
+		}
+		if report.Cursors != (Cursors{Main: 66, Ignored: 26}) {
+			t.Fatalf("cursors = %v, want main=66 ignored=26", report.Cursors)
+		}
+		if got := fake.opened.Load(); got != 1 {
+			t.Fatalf("the probe opened %d connection(s), want exactly 1", got)
+		}
+		if opened, closed := fake.opened.Load(), fake.closed.Load(); opened != closed {
+			t.Fatalf("the probe opened %d connection(s) and closed %d; a session that outlives the check keeps bd's idle watcher from arming", opened, closed)
+		}
+	})
+
+	t.Run("a failed cursor read", func(t *testing.T) {
+		fake := &fakeProbeConnector{queryErr: errors.New("Error 1146 (42S02): Table doesn't exist")}
+		if _, err := readCursorsOver(context.Background(), fake); err == nil {
+			t.Fatal("readCursorsOver reported success for a failing query")
+		}
+		if opened, closed := fake.opened.Load(), fake.closed.Load(); opened != closed || opened != 1 {
+			t.Fatalf("a failed read opened %d connection(s) and closed %d, want 1 and 1", opened, closed)
+		}
+	})
+
+	t.Run("a caller who has already given up", func(t *testing.T) {
+		// doctor abandons a timed-out check's goroutine, so the probe must
+		// close whatever it opened on the canceled path too.
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		fake := &fakeProbeConnector{cursors: map[string]int64{mainCursorQuery: 66, ignoredCursorQuery: 26}}
+		if _, err := readCursorsOver(ctx, fake); !errors.Is(err, context.Canceled) {
+			t.Fatalf("readCursorsOver with a canceled context = %v, want context.Canceled", err)
+		}
+		if opened, closed := fake.opened.Load(), fake.closed.Load(); opened != closed {
+			t.Fatalf("a canceled probe opened %d connection(s) and closed %d", opened, closed)
+		}
+	})
+}
+
+// TestProbeSessionLeavesNoSocketOpenOnARealListener proves the same property on
+// a real socket, through the real driver, against a listener that behaves like a
+// proxy whose backend never answers: it accepts and then says nothing.
+//
+// The assertion is made from the SERVER side on purpose. Only the peer can tell
+// whether the client's socket is really gone, and "the proxy sees the connection
+// close before the check returns" is the constraint stated in the design, where
+// a client-side counter is only gc's opinion of it.
+func TestProbeSessionLeavesNoSocketOpenOnARealListener(t *testing.T) {
+	proxy := startProbeListener(t, listenerStaysSilent)
+
+	// A budget well below ProbeSessionTimeout: the probe's own deadline is what
+	// ends this session, and the test is about what it leaves behind.
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	if _, err := DefaultProbeIO(proxy.port, "beads").Session(ctx); err == nil {
+		t.Fatal("a listener that never greets produced a successful session")
+	}
+
+	select {
+	case <-proxy.gone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the proxy still sees the probe's connection after the probe returned; a session that outlives the check blocks bd's idle watcher for as long as it is held")
+	}
+	if got := proxy.accepted.Load(); got != 1 {
+		t.Fatalf("the session cost the proxy %d accept(s), want exactly 1", got)
+	}
+	if got := doltpool.Len(); got != 0 {
+		t.Fatalf("the probe registered %d pool(s) in the process-lifetime doltpool registry, want 0: a handle nobody may close keeps its connections for the life of the process", got)
+	}
+	if got := doltpool.TotalOpenConns(); got != 0 {
+		t.Fatalf("doltpool holds %d open connection(s) after the probe, want 0", got)
+	}
+	proxy.stop(t)
+}
+
+// TestProbeSessionIsOneDialWhenTheHandshakeFailsAsABadConnection pins "one
+// probe is one session" against database/sql's retry policy.
+//
+// database/sql re-dials, up to maxBadConnRetries more times, whenever acquiring
+// a connection fails with an error that errors.Is driver.ErrBadConn. The session
+// here is the real driver over a real socket against a proxy whose child is
+// gone, with one change: the handshake failure is spelled driver.ErrBadConn, as
+// go-sql-driver releases before 1.8 spelled it ("for sql.Driver to retry"). A
+// session acquired through db.Conn pays three accepts for that — three sessions
+// against bd's idle watcher, and three withheld greetings for one probe. The
+// probe must pay exactly one, return the failure as it was produced, and reach
+// the verdict the existing rules give it.
+func TestProbeSessionIsOneDialWhenTheHandshakeFailsAsABadConnection(t *testing.T) {
+	const budget = 2 * time.Second
+	proxy := startProbeListener(t, listenerClosesAtOnce)
+	connector, err := probeConnector(proxy.port, "beads", probeDriverTimeout(budget))
+	if err != nil {
+		t.Fatalf("probeConnector: %v", err)
+	}
+	bait := &badConnHandshakeConnector{Connector: connector}
+	probeIO := probeIOWithDriverTimeout(proxy.port, "beads", probeDriverTimeout(budget))
+	dials := 0
+	var sessionErr error
+	result := probeWithBudget(context.Background(), ProbeIO{
+		Session: func(ctx context.Context) (CursorReport, error) {
+			report, err := readCursorsOver(ctx, bait)
+			sessionErr = err
+			return report, err
+		},
+		Dial: func(ctx context.Context) error {
+			dials++
+			return probeIO.Dial(ctx)
+		},
+	}, budget)
+
+	if !errors.Is(sessionErr, driver.ErrBadConn) {
+		t.Fatalf("the session failed with %v, want the handshake's own driver.ErrBadConn returned as produced", sessionErr)
+	}
+	if got := bait.connects.Load(); got != 1 {
+		t.Fatalf("the session dialed %d time(s), want exactly 1: database/sql retried a bad connection on a fresh dial", got)
+	}
+	if result.Outcome != ProbeAcceptedNoGreeting {
+		t.Fatalf("verdict = %v (%v), want accepted_no_greeting", result.Outcome, result.Err)
+	}
+	if dials != 1 {
+		t.Fatalf("the probe spent %d confirming dial(s), want exactly 1", dials)
+	}
+	// One accept for the session and one for the confirming dial, counted by
+	// the proxy.
+	if got := proxy.acceptsBefore(t); got != 2 {
+		t.Fatalf("the probe cost the proxy %d accept(s), want exactly 2 (one session, one confirming dial)", got)
+	}
+	proxy.stop(t)
+}
+
+// TestProbeSessionNeverRedialsAPinnedConnection is the same property after the
+// handshake: the real driver's own driver.ErrBadConn, from a proxy that reset the
+// session before the Ping or before the first statement, must end the session
+// on its one connection. database/sql does not retry statements on a pinned
+// *sql.Conn; this holds the probe to running every one of them there.
+func TestProbeSessionNeverRedialsAPinnedConnection(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		behavior probeListenerBehavior
+	}{
+		{name: "reset before the Ping", behavior: listenerGreetsThenResets},
+		{name: "reset before the first statement", behavior: listenerAnswersPingThenResets},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proxy := startProbeListener(t, tc.behavior)
+			ctx, cancel := context.WithTimeout(context.Background(), ProbeSessionTimeout)
+			defer cancel()
+			_, err := DefaultProbeIO(proxy.port, "beads").Session(ctx)
+			if !IsPostAcceptFailure(err) {
+				t.Fatalf("the session failed with %v, want a post-accept connection failure", err)
+			}
+			if got := proxy.acceptsBefore(t); got != 1 {
+				t.Fatalf("the session cost the proxy %d accept(s), want exactly 1", got)
+			}
+			proxy.stop(t)
+		})
+	}
+}
+
+// TestProbeSessionHandleCannotDialASecondConnection holds the cap itself: the
+// handle a probe session runs on hands database/sql its one connection and
+// refuses every later request without dialing, with an error that classifies as
+// unknown rather than as a claim about the proxy.
+func TestProbeSessionHandleCannotDialASecondConnection(t *testing.T) {
+	t.Run("a connector that fails as a bad connection", func(t *testing.T) {
+		fake := &fakeProbeConnector{connectErr: driver.ErrBadConn}
+		_, err := readCursorsOver(context.Background(), fake)
+		if !errors.Is(err, driver.ErrBadConn) {
+			t.Fatalf("readCursorsOver = %v, want driver.ErrBadConn", err)
+		}
+		if got := fake.dials.Load(); got != 1 {
+			t.Fatalf("the probe dialed %d time(s), want exactly 1", got)
+		}
+	})
+	t.Run("a second request", func(t *testing.T) {
+		fake := &fakeProbeConnector{}
+		session, err := fake.Connect(context.Background())
+		if err != nil {
+			t.Fatalf("Connect: %v", err)
+		}
+		one := &oneSessionConnector{session: session, driver: fake.Driver()}
+		if _, err := one.Connect(context.Background()); err != nil {
+			t.Fatalf("the first request: %v", err)
+		}
+		_, err = one.Connect(context.Background())
+		if !errors.Is(err, errProbeRedial) {
+			t.Fatalf("the second request = %v, want errProbeRedial", err)
+		}
+		if got := fake.dials.Load(); got != 1 {
+			t.Fatalf("the handle dialed %d time(s), want exactly 1", got)
+		}
+		if got := ClassifyProbe(err, nil); got != ProbeUnknown {
+			t.Fatalf("a refused second dial classified as %v, want unknown", got)
+		}
+		one.closeUntaken()
+		if got := fake.closed.Load(); got != 0 {
+			t.Fatalf("closeUntaken closed a session database/sql had taken")
+		}
+		_ = session.Close() //nolint:errcheck // the fake's connection
+	})
+	t.Run("a session database/sql never took", func(t *testing.T) {
+		fake := &fakeProbeConnector{}
+		session, err := fake.Connect(context.Background())
+		if err != nil {
+			t.Fatalf("Connect: %v", err)
+		}
+		one := &oneSessionConnector{session: session, driver: fake.Driver()}
+		one.closeUntaken()
+		if got := fake.closed.Load(); got != 1 {
+			t.Fatalf("an untaken session was closed %d time(s), want exactly 1", got)
+		}
+		if _, err := one.Connect(context.Background()); !errors.Is(err, errProbeRedial) {
+			t.Fatalf("Connect after closeUntaken = %v, want errProbeRedial", err)
+		}
+	})
+}
+
+// badConnHandshakeConnector is the real driver with its handshake failure
+// spelled the way database/sql retries: mysql.ErrInvalidConn out of Connect
+// becomes driver.ErrBadConn. It counts every Connect.
+type badConnHandshakeConnector struct {
+	driver.Connector
+	connects atomic.Int64
+}
+
+func (c *badConnHandshakeConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	c.connects.Add(1)
+	conn, err := c.Connector.Connect(ctx)
+	if errors.Is(err, mysql.ErrInvalidConn) {
+		return nil, driver.ErrBadConn
+	}
+	return conn, err
+}
+
+// TestProbeOnARealSocketNeverCallsASlowProxyAZombie is the fence the fake
+// connector could not carry: the real driver, a real socket, and a proxy that
+// accepted the connection and has not answered yet.
+//
+// The fake-connector tests inject context.DeadlineExceeded, which is the error
+// go-sql-driver returns only when its context watcher wins the race against its
+// own socket deadline. In the shipped configuration it usually LOST that race:
+// readPacket turns a read deadline into mysql.ErrInvalidConn, the classifier read
+// that as a wire failure, the confirming dial succeeded, and the verdict was
+// accepted_no_greeting — the token §3.4 escalates to `bd dolt stop` — for a proxy
+// that is alive and slow. Measured 5 of 8 probes at production budgets against
+// the listener below.
+//
+// Both arms run through the real driver. The first is what production sets. The
+// second sets the driver's deadlines EQUAL to the session budget, which is the
+// configuration that misclassified, and it must still answer unknown: the
+// verdict has to come from the expired budget itself rather than from the margin
+// that keeps the driver quiet.
+func TestProbeOnARealSocketNeverCallsASlowProxyAZombie(t *testing.T) {
+	// Short enough to run 8 probes per arm, long enough that a loaded box does
+	// not turn the handshake into the thing under test.
+	const budget = 200 * time.Millisecond
+	const probes = 8
+
+	arms := []struct {
+		name          string
+		driverTimeout time.Duration
+	}{
+		{name: "the shipped driver backstop", driverTimeout: probeDriverTimeout(budget)},
+		{name: "driver deadlines equal to the session budget", driverTimeout: budget},
+	}
+	for _, arm := range arms {
+		t.Run(arm.name, func(t *testing.T) {
+			proxy := startProbeListener(t, listenerStaysSilent)
+			probeIO := probeIOWithDriverTimeout(proxy.port, "beads", arm.driverTimeout)
+			dials := 0
+			outcomes := map[string]int{}
+			for i := 0; i < probes; i++ {
+				result := probeWithBudget(context.Background(), ProbeIO{
+					Session: probeIO.Session,
+					Dial: func(ctx context.Context) error {
+						dials++
+						return probeIO.Dial(ctx)
+					},
+				}, budget)
+				outcomes[result.Outcome.String()]++
+				if result.Outcome != ProbeUnknown {
+					t.Errorf("probe %d of a live-but-silent proxy reported %v (%v), want unknown: %s is the token the design escalates with `bd dolt stop`",
+						i+1, result.Outcome, result.Err, result.Outcome)
+				}
+			}
+			if outcomes["accepted_no_greeting"] != 0 {
+				t.Errorf("%d of %d probes called a live proxy a zombie: %v", outcomes["accepted_no_greeting"], probes, outcomes)
+			}
+			// A deadline is not something a second connection can settle, and
+			// spending one charges the proxy for the probe's own impatience.
+			if dials != 0 {
+				t.Errorf("the probes spent %d confirming dial(s) on their own expired budget, want 0", dials)
+			}
+			proxy.stop(t)
+		})
+	}
+}
+
+// TestProbeOnARealSocketStillNamesAProxyWhoseChildIsGone is the other half of
+// the same fence: the fix must not buy its quiet by losing the one verdict this
+// probe exists to produce.
+//
+// A proxy whose Dolt child has exited accepts the connection and closes it
+// without a greeting, because bd's proxy parses no wire protocol. That is the
+// only legitimate producer of accepted_no_greeting, it happens far inside the
+// budget rather than at the end of it, and it must still be recognized over a
+// real socket through the real driver.
+func TestProbeOnARealSocketStillNamesAProxyWhoseChildIsGone(t *testing.T) {
+	const budget = 200 * time.Millisecond
+	proxy := startProbeListener(t, listenerClosesAtOnce)
+	probeIO := probeIOWithDriverTimeout(proxy.port, "beads", probeDriverTimeout(budget))
+	dials := 0
+	result := probeWithBudget(context.Background(), ProbeIO{
+		Session: probeIO.Session,
+		Dial: func(ctx context.Context) error {
+			dials++
+			return probeIO.Dial(ctx)
+		},
+	}, budget)
+	if result.Outcome != ProbeAcceptedNoGreeting {
+		t.Fatalf("a listener that accepts and closes reported %v (%v), want accepted_no_greeting", result.Outcome, result.Err)
+	}
+	if dials != 1 {
+		t.Fatalf("the probe spent %d confirming dial(s), want exactly 1", dials)
+	}
+	if !IsConnectionLevel(result.Err) || IsIndeterminate(result.Err) {
+		t.Fatalf("the session error %v is not classified as a wire failure", result.Err)
+	}
+	proxy.stop(t)
+}
+
+// probeListenerBehavior is what the fixture listener does with a connection it
+// has accepted. The two behaviors are the two states of bd's byte-pump proxy a
+// probe has to keep apart.
+type probeListenerBehavior int
+
+const (
+	// listenerStaysSilent accepts and never writes: a proxy in front of a Dolt
+	// that is alive and has not answered yet. Every session against it ends on
+	// the probe's own budget.
+	listenerStaysSilent probeListenerBehavior = iota
+	// listenerClosesAtOnce accepts and closes without a greeting: a proxy whose
+	// Dolt child has exited, which is accepted_no_greeting's one true source.
+	listenerClosesAtOnce
+	// listenerGreetsThenResets completes the handshake and resets the
+	// connection before the session's first command (the Ping).
+	listenerGreetsThenResets
+	// listenerAnswersPingThenResets completes the handshake, answers the Ping,
+	// and resets the connection before the session's first statement.
+	listenerAnswersPingThenResets
+)
+
+// probeListener is one loopback listener standing in for a proxy's data port.
+type probeListener struct {
+	port     int
+	accepted *atomic.Int64
+	// gone receives once for every accepted connection the listener has seen go
+	// away, which is the only place the client's socket close can be observed.
+	gone <-chan struct{}
+	stop func(t *testing.T)
+	// peers is every accepted connection's remote address, in accept order.
+	peers func() []string
+}
+
+// startProbeListener opens the one listener this file uses, in the requested
+// behavior, and closes it (waiting for its handlers) on test cleanup.
+//
+// One call site on purpose: every real-socket test here shares it, so the
+// package's stream-listener footprint in the repo's shrink-only resource census
+// stays at one regardless of how many cases are added.
+func startProbeListener(t *testing.T, behavior probeListenerBehavior) probeListener {
+	t.Helper()
+	listener, err := net.Listen("tcp", net.JoinHostPort(Host, "0"))
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var accepted atomic.Int64
+	var peersMu sync.Mutex
+	var peers []string
+	var wg sync.WaitGroup
+	gone := make(chan struct{}, 64)
+	go func() {
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			accepted.Add(1)
+			peersMu.Lock()
+			peers = append(peers, conn.RemoteAddr().String())
+			peersMu.Unlock()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer conn.Close() //nolint:errcheck // the fixture's accepted connection
+				switch behavior {
+				case listenerClosesAtOnce:
+					// The deferred close IS the behavior: no greeting, and the
+					// peer learns about it immediately.
+					return
+				case listenerGreetsThenResets, listenerAnswersPingThenResets:
+					serveThenReset(conn, behavior == listenerAnswersPingThenResets)
+					return
+				}
+				// No greeting, ever: the read returns only when the client
+				// closes, which is what the socket-lifetime test waits for.
+				_, _ = io.Copy(io.Discard, conn)
+				select {
+				case gone <- struct{}{}:
+				default:
+				}
+			}()
+		}
+	}()
+	var once sync.Once
+	stop := func(t *testing.T) {
+		t.Helper()
+		once.Do(func() {
+			if closeErr := listener.Close(); closeErr != nil {
+				t.Errorf("close listener: %v", closeErr)
+			}
+			wg.Wait()
+		})
+	}
+	t.Cleanup(func() { stop(t) })
+	return probeListener{
+		port:     listener.Addr().(*net.TCPAddr).Port,
+		accepted: &accepted,
+		gone:     gone,
+		stop:     stop,
+		peers: func() []string {
+			peersMu.Lock()
+			defer peersMu.Unlock()
+			return append([]string(nil), peers...)
+		},
+	}
+}
+
+// serveThenReset speaks just enough MySQL to hand the driver an established
+// session — a v10 greeting and an OK to whatever login it sends, optionally an
+// OK to one COM_PING as well — and then resets the connection (SO_LINGER 0), so
+// the driver's next write fails before it sends a byte. That is the one place
+// go-sql-driver spells a failure driver.ErrBadConn (mc.markBadConn over
+// errBadConnNoWrite), which is exactly the error database/sql retries on a new
+// dial whenever the statement did not run on a pinned connection.
+func serveThenReset(conn net.Conn, answerPing bool) {
+	if writeMySQLPacket(conn, 0, mysqlGreeting()) != nil {
+		return
+	}
+	if skipMySQLPacket(conn) != nil {
+		return
+	}
+	if writeMySQLPacket(conn, 2, mysqlOK()) != nil {
+		return
+	}
+	if answerPing {
+		if skipMySQLPacket(conn) != nil {
+			return
+		}
+		if writeMySQLPacket(conn, 1, mysqlOK()) != nil {
+			return
+		}
+	}
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		_ = tcp.SetLinger(0) //nolint:errcheck // the reset is best effort; a FIN still ends the session
+	}
+}
+
+// mysqlGreeting is a protocol-10 handshake offering mysql_native_password with
+// the capabilities go-sql-driver requires (protocol 41, secure connection,
+// plugin auth).
+func mysqlGreeting() []byte {
+	const caps = uint32(0x1 | 0x8 | 0x200 | 0x2000 | 0x8000 | 0x80000)
+	p := []byte{10}
+	p = append(p, "8.0.33\x00"...)
+	p = binary.LittleEndian.AppendUint32(p, 1)
+	p = append(p, "abcdefgh\x00"...)
+	p = binary.LittleEndian.AppendUint16(p, uint16(caps&0xffff))
+	p = append(p, 33)
+	p = binary.LittleEndian.AppendUint16(p, 2)
+	p = binary.LittleEndian.AppendUint16(p, uint16(caps>>16))
+	p = append(p, 21)
+	p = append(p, make([]byte, 10)...)
+	p = append(p, "ijklmnopqrst\x00"...)
+	p = append(p, "mysql_native_password\x00"...)
+	return p
+}
+
+// mysqlOK is an OK packet with nothing affected and autocommit set.
+func mysqlOK() []byte { return []byte{0, 0, 0, 2, 0, 0, 0} }
+
+func writeMySQLPacket(conn net.Conn, seq byte, payload []byte) error {
+	header := []byte{byte(len(payload)), byte(len(payload) >> 8), byte(len(payload) >> 16), seq}
+	_, err := conn.Write(append(header, payload...))
+	return err
+}
+
+// skipMySQLPacket reads one client packet and discards it: the fixture accepts
+// whatever the driver sends.
+func skipMySQLPacket(conn net.Conn) error {
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return err
+	}
+	_, err := io.CopyN(io.Discard, conn, int64(header[0])|int64(header[1])<<8|int64(header[2])<<16)
+	return err
+}
+
+// acceptsBefore returns how many connections the fixture accepted before a
+// sentinel connection the test dials now, with no grace period and no guess.
+//
+// The listener accepts in arrival order, so once the sentinel has been accepted
+// every connection that reached the kernel before it has been accepted too, and
+// everything a finished session dialed reached the kernel before the session
+// returned. Counting the peers ahead of the sentinel is therefore the whole
+// number, where a bare read of the counter could race an Accept still in flight.
+func (p probeListener) acceptsBefore(t *testing.T) int {
+	t.Helper()
+	var dialer net.Dialer
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	sentinel, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(Host, strconv.Itoa(p.port)))
+	if err != nil {
+		t.Fatalf("dial the sentinel: %v", err)
+	}
+	defer sentinel.Close() //nolint:errcheck // the sentinel carries nothing
+	mark := sentinel.LocalAddr().String()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		for i, peer := range p.peers() {
+			if peer == mark {
+				return i
+			}
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatal("the fixture never accepted the sentinel connection")
+		}
+	}
+}
+
+// fakeProbeConnector is a driver.Connector that counts the connections a probe
+// opens and closes, so the lifecycle can be asserted without a listener, a
+// database or a byte of MySQL wire protocol.
+type fakeProbeConnector struct {
+	cursors    map[string]int64
+	connectErr error
+	pingErr    error
+	queryErr   error
+	// absentTables and absentColumns are the schema objects this database does
+	// NOT have, keyed by table name and "table.column". Everything not named
+	// here exists, which keeps a healthy fixture a zero value.
+	absentTables  map[string]bool
+	absentColumns map[string]bool
+	// head is what DOLT_HASHOF('HEAD') answers on the main-lane existence
+	// statement; "" means the fixture default, fakeProbeHead.
+	head string
+	// headErr is what the main-lane existence statement fails with when the
+	// server cannot answer DOLT_HASHOF('HEAD').
+	headErr error
+	// dials counts every Connect call, failed ones included.
+	dials  atomic.Int64
+	opened atomic.Int64
+	closed atomic.Int64
+	mu     sync.Mutex
+	issued []string
+}
+
+func (c *fakeProbeConnector) Connect(context.Context) (driver.Conn, error) {
+	c.dials.Add(1)
+	if c.connectErr != nil {
+		return nil, c.connectErr
+	}
+	c.opened.Add(1)
+	return &fakeProbeConn{connector: c}, nil
+}
+
+func (c *fakeProbeConnector) Driver() driver.Driver { return fakeProbeDriver{} }
+
+// record appends the statement a session issued, with its arguments rendered
+// inline, so a test can assert WHICH evidence a probe actually read rather than
+// only what it concluded.
+func (c *fakeProbeConnector) record(query string, args []driver.NamedValue) {
+	rendered := query
+	for _, arg := range args {
+		rendered += " | " + fmt.Sprint(arg.Value)
+	}
+	c.mu.Lock()
+	c.issued = append(c.issued, rendered)
+	c.mu.Unlock()
+}
+
+// statements returns the statements a session issued.
+func (c *fakeProbeConnector) statements() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.issued...)
+}
+
+// fakeProbeDriver exists only because driver.Connector requires one; nothing
+// opens a connection through a DSN here.
+type fakeProbeDriver struct{}
+
+func (fakeProbeDriver) Open(string) (driver.Conn, error) {
+	return nil, errors.New("proxyendpoint: the probe fixture has no DSN driver")
+}
+
+type fakeProbeConn struct {
+	connector *fakeProbeConnector
+}
+
+func (c *fakeProbeConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("proxyendpoint: the probe fixture answers queries directly")
+}
+
+func (c *fakeProbeConn) Close() error {
+	c.connector.closed.Add(1)
+	return nil
+}
+
+func (c *fakeProbeConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("proxyendpoint: the probe fixture is read-only")
+}
+
+// Ping answers the probe's handshake check.
+func (c *fakeProbeConn) Ping(context.Context) error { return c.connector.pingErr }
+
+// QueryContext answers the existence probe and both cursor reads, which is the
+// whole statement surface readCursors uses.
+func (c *fakeProbeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	c.connector.record(query, args)
+	if c.connector.queryErr != nil && query != cursorExistsQuery && query != cursorExistsWithHeadQuery {
+		return nil, c.connector.queryErr
+	}
+	if query == cursorExistsQuery || query == cursorExistsWithHeadQuery {
+		table := namedArg(args, 0)
+		exists := int64(1)
+		if c.connector.absentTables[table] {
+			exists = 0
+		}
+		if query == cursorExistsQuery {
+			return &fakeProbeRows{value: exists}, nil
+		}
+		if c.connector.headErr != nil {
+			return nil, c.connector.headErr
+		}
+		head := c.connector.head
+		if head == "" {
+			head = fakeProbeHead
+		}
+		return &fakeProbeRows{value: exists, extra: []driver.Value{head}}, nil
+	}
+	if query == columnExistsQuery {
+		key := namedArg(args, 0) + "." + namedArg(args, 1)
+		if c.connector.absentColumns[key] {
+			return &fakeProbeRows{value: 0}, nil
+		}
+		return &fakeProbeRows{value: 1}, nil
+	}
+	value, ok := c.connector.cursors[query]
+	if !ok {
+		return nil, errors.New("proxyendpoint: the probe fixture has no answer for " + query)
+	}
+	return &fakeProbeRows{value: value}, nil
+}
+
+// namedArg renders the nth bound argument, or "" when it is absent.
+func namedArg(args []driver.NamedValue, n int) string {
+	if n >= len(args) {
+		return ""
+	}
+	return fmt.Sprint(args[n].Value)
+}
+
+// fakeProbeHead is the HEAD hash the fixture answers when a test names none.
+const fakeProbeHead = "fakehead0000000000000000000000000"
+
+// fakeProbeRows is one row: an integer column, which is the shape of every
+// answer the probe reads, plus whatever extra columns the statement carries
+// (the main-lane existence statement carries HEAD).
+type fakeProbeRows struct {
+	value int64
+	extra []driver.Value
+	done  bool
+}
+
+func (r *fakeProbeRows) Columns() []string {
+	columns := []string{"value"}
+	for i := range r.extra {
+		columns = append(columns, fmt.Sprintf("extra%d", i))
+	}
+	return columns
+}
+
+func (r *fakeProbeRows) Close() error { return nil }
+
+func (r *fakeProbeRows) Next(dest []driver.Value) error {
+	if r.done {
+		return io.EOF
+	}
+	r.done = true
+	dest[0] = r.value
+	copy(dest[1:], r.extra)
+	return nil
+}

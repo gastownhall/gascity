@@ -1,0 +1,63 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "workspacesvc",
+    srcs = [
+        "manager.go",
+        "orphan_reap.go",
+        "proxy_process.go",
+        "proxy_process_linux.go",
+        "proxy_process_other.go",
+        "publication.go",
+        "registry.go",
+        "types.go",
+        "validate.go",
+        "workflow_healthz.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/workspacesvc",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads",
+        "//internal/citylayout",
+        "//internal/config",
+        "//internal/execenv",
+        "//internal/pidutil",
+        "//internal/runtime",
+        "//internal/supervisor",
+    ],
+)
+
+go_test(
+    name = "workspacesvc_test",
+    srcs = [
+        "manager_test.go",
+        "orphan_reap_test.go",
+        "proxy_process_test.go",
+        "publication_test.go",
+        "testenv_import_test.go",
+        "validate_test.go",
+    ],
+    embed = [":workspacesvc"],
+    deps = [
+        "//internal/beads",
+        "//internal/citylayout",
+        "//internal/config",
+        "//internal/execenv",
+        "//internal/pidutil",
+        "//internal/runtime",
+        "//internal/supervisor",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

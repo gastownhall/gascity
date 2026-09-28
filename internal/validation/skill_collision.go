@@ -11,20 +11,8 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/materialize"
 )
-
-// supportedSkillVendors lists the providers whose skill sinks the
-// materializer writes under a scope root. Providers outside this set
-// have no sink (see "Vendor mapping" in
-// engdocs/proposals/skill-materialization.md), so their agent-local
-// skills cannot collide.
-var supportedSkillVendors = map[string]struct{}{
-	"claude":   {},
-	"codex":    {},
-	"gemini":   {},
-	"opencode": {},
-	"mimocode": {},
-}
 
 // citySentinel is the ScopeRoot marker used for city-scoped groupings.
 // The validator operates on an in-memory *config.City and does not know
@@ -33,27 +21,35 @@ var supportedSkillVendors = map[string]struct{}{
 const citySentinel = "<city>"
 
 // SkillCollision describes an agent-local skill name provided by two
-// or more agents sharing the same scope root and vendor.
+// or more agents whose skills materialize into the same scope root and
+// the same on-disk sink. Providers are grouped by resolved sink, not by
+// name: distinct providers that share a sink (codex and pi both use
+// .agents/skills) collide with each other.
 type SkillCollision struct {
 	// ScopeRoot is the scope root the colliding agents materialize
 	// into. For rig-scoped agents this is the rig's configured path
 	// (which may be relative to the city root). For city-scoped
 	// agents this is the sentinel "<city>".
 	ScopeRoot string
-	// Vendor is the provider whose sink the collision lands in
-	// (one of "claude", "codex", "gemini", "opencode", "mimocode").
+	// Vendor names one provider contributing to the collision — the
+	// one belonging to the first agent in AgentNames. Grouping is by
+	// resolved sink, so when providers share a sink the other
+	// contributors' providers may differ; this field exists to give
+	// operator-facing messages a concrete provider to name.
 	Vendor string
 	// SkillName is the colliding agent-local skill name.
 	SkillName string
 	// AgentNames lists, in sorted order, every agent providing the
-	// same agent-local skill name into this (ScopeRoot, Vendor) sink.
+	// same agent-local skill name into this (ScopeRoot, sink) pair.
 	AgentNames []string
 }
 
-// ValidateSkillCollisions groups agents by (scope-root, vendor), builds
-// the multi-map agent-local-skill-name → [agent-names], and returns one
-// SkillCollision entry per name with more than one agent. Returns nil
-// when there are no collisions.
+// ValidateSkillCollisions groups agents by (scope-root, resolved sink),
+// builds the multi-map agent-local-skill-name → [agent-names], and
+// returns one SkillCollision entry per name with more than one agent.
+// Returns nil when there are no collisions. The sink comes from
+// materialize.VendorSink, so this gate stays in step with what the
+// materializer actually writes — including providers that share a sink.
 //
 // Scope-root derivation mirrors the spec:
 //   - agent.Scope == "city" → scope root = city sentinel
@@ -62,9 +58,9 @@ type SkillCollision struct {
 //     Dir is used as-is (supports inline agents with a custom Dir)
 //   - empty scope is treated as "rig" (the default)
 //
-// Agents whose provider is not in the skill-sink vendor set contribute
-// nothing — they have no sink, so they cannot collide. Agents with no
-// SkillsDir or whose SkillsDir holds no skills also contribute nothing.
+// Agents whose provider resolves to no sink contribute nothing — they
+// have nowhere to collide. Agents with no SkillsDir or whose SkillsDir
+// holds no skills also contribute nothing.
 //
 // Collisions are returned sorted by (ScopeRoot, Vendor, SkillName) so
 // tests and user-facing output are stable.
@@ -78,9 +74,10 @@ func ValidateSkillCollisions(cfg *config.City) []SkillCollision {
 		rigPath[rig.Name] = rig.Path
 	}
 
-	type bucketKey struct{ scope, vendor string }
-	// buckets: scope+vendor → skillName → set of agent names.
-	buckets := make(map[bucketKey]map[string]map[string]struct{})
+	type bucketKey struct{ scope, sink string }
+	// buckets: scope+sink → skillName → agent name → that agent's
+	// provider (kept so the collision can name a concrete provider).
+	buckets := make(map[bucketKey]map[string]map[string]string)
 
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
@@ -97,7 +94,8 @@ func ValidateSkillCollisions(cfg *config.City) []SkillCollision {
 		if vendor == "" {
 			vendor = cfg.Workspace.Provider
 		}
-		if _, ok := supportedSkillVendors[vendor]; !ok {
+		sink, ok := materialize.VendorSink(vendor)
+		if !ok {
 			continue
 		}
 
@@ -113,19 +111,19 @@ func ValidateSkillCollisions(cfg *config.City) []SkillCollision {
 			continue
 		}
 
-		key := bucketKey{scope: scope, vendor: vendor}
+		key := bucketKey{scope: scope, sink: sink}
 		bucket := buckets[key]
 		if bucket == nil {
-			bucket = make(map[string]map[string]struct{})
+			bucket = make(map[string]map[string]string)
 			buckets[key] = bucket
 		}
 		for _, name := range names {
 			agents := bucket[name]
 			if agents == nil {
-				agents = make(map[string]struct{})
+				agents = make(map[string]string)
 				bucket[name] = agents
 			}
-			agents[a.QualifiedName()] = struct{}{}
+			agents[a.QualifiedName()] = vendor
 		}
 	}
 
@@ -141,8 +139,10 @@ func ValidateSkillCollisions(cfg *config.City) []SkillCollision {
 			}
 			sort.Strings(names)
 			collisions = append(collisions, SkillCollision{
-				ScopeRoot:  key.scope,
-				Vendor:     key.vendor,
+				ScopeRoot: key.scope,
+				// Deterministic: the provider of the first agent
+				// in sorted order.
+				Vendor:     agents[names[0]],
 				SkillName:  skillName,
 				AgentNames: names,
 			})

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 )
 
 // RunnableOwner is the canonical package plus top-level Go test identity.
@@ -68,13 +67,13 @@ func (c Census) SmallCount(scope Scope, resource Resource, medium []MediumOwner)
 	return count
 }
 
-func validateMediumOwners(rows []MediumOwner, census Census, now time.Time) error {
+func validateMediumOwners(rows []MediumOwner, census Census) error {
 	runnables := make(map[runnableKey]struct{}, len(census.Runnables))
 	for _, runnable := range census.Runnables {
 		runnables[runnableKey{packageDir: runnable.PackageDir, packageName: runnable.PackageName, owner: runnable.Owner}] = struct{}{}
 	}
 
-	problems := validateMediumDefinitions(rows, now)
+	problems := validateMediumDefinitions(rows)
 	for _, row := range rows {
 		key := runnableKey{packageDir: row.PackageDir, packageName: row.PackageName, owner: row.Owner}
 		prefix := fmt.Sprintf("medium owner package_dir=%s package_name=%s owner=%s", row.PackageDir, row.PackageName, row.Owner)
@@ -89,7 +88,7 @@ func validateMediumOwners(rows []MediumOwner, census Census, now time.Time) erro
 	return errors.New(strings.Join(problems, "\n"))
 }
 
-func validateMediumDefinitions(rows []MediumOwner, now time.Time) []string {
+func validateMediumDefinitions(rows []MediumOwner) []string {
 	seen := make(map[runnableKey]struct{}, len(rows))
 	var problems []string
 	for _, row := range rows {
@@ -121,14 +120,14 @@ func validateMediumDefinitions(rows []MediumOwner, now time.Time) []string {
 				problems = append(problems, fmt.Sprintf("%s: unknown resource %q", prefix, resource))
 			}
 		}
-		problems = append(problems, validateOwnershipFields(prefix, row.OwnerBead, row.Invariant, row.ResourceOwner, row.MigrationTarget, row.Expires, now)...)
+		problems = append(problems, validateOwnershipFields(prefix, row.OwnerBead, row.Invariant, row.ResourceOwner, row.MigrationTarget, row.Expires)...)
 	}
 	return problems
 }
 
-func validateMediumRowsAgainstPolicy(policyRows, ledgerRows []MediumOwner, now time.Time) []string {
-	problems := validateMediumDefinitions(policyRows, now)
-	problems = append(problems, validateMediumDefinitions(ledgerRows, now)...)
+func validateMediumRowsAgainstPolicy(policyRows, ledgerRows []MediumOwner) []string {
+	problems := validateMediumDefinitions(policyRows)
+	problems = append(problems, validateMediumDefinitions(ledgerRows)...)
 	policyByKey := make(map[runnableKey]MediumOwner, len(policyRows))
 	for _, row := range policyRows {
 		policyByKey[runnableKey{packageDir: row.PackageDir, packageName: row.PackageName, owner: row.Owner}] = row

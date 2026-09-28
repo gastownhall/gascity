@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -30,4 +32,29 @@ func clearSessionAffinityMetadataOnBead(store beads.Store, beadID string) error 
 		}
 	}
 	return nil
+}
+
+// clearSessionCurrentClaim clears the claim back-channel
+// (beadmeta.CurrentClaimBeadIDMetadataKey) that `gc hook --claim` stamped onto
+// sessionID's own bead.
+//
+// It is the session-side sibling of the affinity clearing above and exists for
+// the same reason: a session that has had its work taken away must stop naming a
+// bead it no longer owns. `gc hook current` is what a formula step uses to close
+// the bead it is running, so a stale stamp is not merely untidy — the next step
+// to read it would close somebody else's bead. Callers on the work-bead side of
+// a release have no session identity in hand and cannot clear it; every path
+// that releases work FROM A KNOWN SESSION calls this.
+//
+// Best-effort and silent: it runs inside close/retire cascades that are
+// themselves best-effort, the failure mode is a stale stamp that the session's
+// next claim overwrites anyway, and a closing session's bead may already be
+// unreadable. Errors are returned for callers that want to report them.
+func clearSessionCurrentClaim(store beads.Store, sessionID string) error {
+	sessionID = strings.TrimSpace(sessionID)
+	if store == nil || sessionID == "" {
+		return nil
+	}
+	_, err := sessionFrontDoor(store).SetCurrentClaim(sessionID, "")
+	return err
 }

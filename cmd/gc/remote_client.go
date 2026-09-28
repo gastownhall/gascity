@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -8,7 +9,10 @@ import (
 	"github.com/gastownhall/gascity/internal/citywriteauth"
 	"github.com/gastownhall/gascity/internal/clientauth"
 	"github.com/gastownhall/gascity/internal/clientgrant"
+	"github.com/gastownhall/gascity/internal/credentialprovider"
 )
+
+var remoteCredentialCache = credentialprovider.NewCache()
 
 // remoteClientOptions builds the transport options (TLS + bearer) shared by
 // every remote client for a resolved target. TLS options come from the target's
@@ -20,6 +24,9 @@ import (
 func remoteClientOptions(target *remoteTarget) (api.RemoteOptions, error) {
 	opts := api.RemoteOptions{}
 	if ctx := target.Ctx; ctx != nil {
+		if err := ctx.Validate(); err != nil {
+			return api.RemoteOptions{}, err
+		}
 		opts.CAFile = ctx.CAFile
 		opts.TLSServerName = ctx.TLSServerName
 		opts.InsecureSkipVerify = ctx.InsecureSkipVerify
@@ -30,7 +37,38 @@ func remoteClientOptions(target *remoteTarget) (api.RemoteOptions, error) {
 			}
 			opts.RESTTimeout = d
 		}
-		if ctx.CredentialCommand != "" {
+		if ctx.CredentialAudience != "" {
+			argv, err := registryCredentialProviderArgv()
+			if err != nil {
+				return api.RemoteOptions{}, err
+			}
+			provider, err := credentialprovider.New(argv)
+			if err != nil {
+				return api.RemoteOptions{}, err
+			}
+			request := credentialprovider.Request{
+				Audience:       ctx.CredentialAudience,
+				RequiredScopes: append([]string(nil), ctx.CredentialRequiredScopes...),
+				Org:            ctx.CredentialOrg,
+			}
+			opts.Token = func() (string, error) {
+				credential, err := remoteCredentialCache.Mint(context.Background(), provider, request)
+				if err != nil {
+					return "", err
+				}
+				return credential.AccessToken, nil
+			}
+			opts.RefreshToken = func(ctx context.Context) (string, error) {
+				forced := request
+				forced.RequiredScopes = append([]string(nil), request.RequiredScopes...)
+				forced.ForceRefresh = true
+				credential, err := remoteCredentialCache.Mint(ctx, provider, forced)
+				if err != nil {
+					return "", err
+				}
+				return credential.AccessToken, nil
+			}
+		} else if ctx.CredentialCommand != "" {
 			cs, err := clientauth.NewCredentialSource(ctx.CredentialCommand, target.BaseURL, target.CityName, false)
 			if err != nil {
 				return api.RemoteOptions{}, err
@@ -38,12 +76,15 @@ func remoteClientOptions(target *remoteTarget) (api.RemoteOptions, error) {
 			opts.Token = cs.Token
 			// Force-mint on a 401 so a token rejected before its expiry (edge key
 			// rotation / early revocation) recovers without a fresh gc invocation.
-			opts.RefreshToken = cs.Refresh
+			opts.RefreshToken = func(ctx context.Context) (string, error) {
+				return cs.RefreshContext(ctx)
+			}
 		}
 	}
 	if target.Token != "" {
 		tok := target.Token
 		opts.Token = func() (string, error) { return tok, nil }
+		opts.RefreshToken = nil
 	}
 	return opts, nil
 }

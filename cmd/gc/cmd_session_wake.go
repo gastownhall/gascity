@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
 
@@ -103,8 +104,16 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 		return 1
 	}
 	nudgeIDs := res.NudgeIDs
-	hasRunnableTemplate := sessionWakeHasRunnableTemplateInfo(res.Info, deps.cfg)
-	if !hasRunnableTemplate && sessionWakeRequestedCreateInfo(res.Info) {
+	agent := sessionWakeResolveAgentInfo(res.Info, deps.cfg)
+	hasRunnableTemplate := deps.cfg == nil || agent != nil
+	startupTimeout := time.Duration(0)
+	if deps.cfg != nil {
+		startupTimeout = deps.cfg.Session.StartupTimeoutDuration()
+	}
+	createAbandoned := sessionWakeCreateAbandonedInfo(res.Info, startupTimeout)
+	rejectStuck := false
+	switch {
+	case !hasRunnableTemplate && (sessionWakeRequestedCreateInfo(res.Info) || createAbandoned):
 		if err := sessFront.ApplyPatch(id, map[string]string{
 			"state":                     string(session.StateAsleep),
 			"state_reason":              "",
@@ -116,6 +125,26 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 			fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
 			return 1
 		}
+	// WakeSession has already recorded the wake on the bead (wake_request=explicit,
+	// wake_requested_at set, quarantine cleared) before this arm is reached, so the
+	// nonzero exit reports "wake cannot complete", not "nothing happened". The exit
+	// is deferred to after the cleanup block below so the waits WakeSession already
+	// canceled still get their queued nudges withdrawn.
+	case hasRunnableTemplate && createAbandoned:
+		since := "an unknown time"
+		if started := stuckCreatingSinceInfo(res.Info); !started.IsZero() {
+			since = started.UTC().Format(time.RFC3339)
+		}
+		fmt.Fprintf(stderr, "gc session wake: session %s has been in state %q since %s without completing its create; the wake request was recorded but cannot complete now. If its runtime is gone, use `gc session close` to release the slot.\n", id, res.Info.MetadataState, since) //nolint:errcheck
+		rejectStuck = true
+	// Same "wake recorded but cannot complete" shape as the createAbandoned arm
+	// above: the reconciler never acts on a suspended rig's sessions, so a
+	// wake here is otherwise silently swallowed with no error and no event.
+	case agent != nil:
+		if rigName, suspended := sessionWakeOwningRigSuspended(agent, deps.cfg, deps.cityPath); suspended {
+			fmt.Fprintf(stderr, "gc session wake: rig %q is suspended -- wake dropped; run `gc rig resume %s`\n", rigName, rigName) //nolint:errcheck
+			rejectStuck = true
+		}
 	}
 	if deps.cityResolved {
 		if err := deps.withdrawQueuedWaitNudges(deps.cityPath, nudgeIDs); err != nil {
@@ -126,6 +155,9 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 				fmt.Fprintf(stderr, "gc session wake: warning: poke failed: %v\n", err) //nolint:errcheck
 			}
 		}
+	}
+	if rejectStuck {
+		return 1
 	}
 
 	if asJSON {
@@ -148,14 +180,90 @@ func sessionWakeHasRunnableTemplateInfo(info session.Info, cfg *config.City) boo
 	if cfg == nil {
 		return true
 	}
+	return sessionWakeResolveAgentInfo(info, cfg) != nil
+}
+
+// sessionWakeResolveAgentInfo resolves the config.Agent that owns this
+// session's template, the same lookup sessionWakeHasRunnableTemplateInfo
+// uses to decide runnability. Returns nil when cfg is nil or no agent
+// matches -- callers that also need "is there a runnable template"
+// should treat a nil cfg as runnable themselves, since this helper
+// can't distinguish "no cfg" from "no match" on its own.
+func sessionWakeResolveAgentInfo(info session.Info, cfg *config.City) *config.Agent {
+	if cfg == nil {
+		return nil
+	}
 	template := normalizedSessionTemplateInfo(info, cfg)
 	if template == "" {
 		template = info.Template
 	}
-	return findAgentByTemplate(cfg, template) != nil
+	return findAgentByTemplate(cfg, template)
+}
+
+// sessionWakeOwningRigSuspended reports whether agent's configured rig
+// is effectively suspended (runtime override, else the rig's authored
+// suspended_on_start), returning the rig name for the caller's error
+// message. An agent with no configured rig (city-scoped) is never
+// blocked here.
+//
+// This is deliberately rig-only. The canonical superset predicate is
+// isAgentEffectivelySuspendedWith (cmd/gc/cmd_suspend.go), which also
+// covers city-level suspension and the per-agent `suspended` flag;
+// both gates resolve the owning rig through configuredRigName so they
+// cannot drift on rig-bound agents whose Dir is a filesystem path.
+// The narrower scope here keeps this wake-time message specific to the
+// one case that carries an actionable `gc rig resume` hint.
+func sessionWakeOwningRigSuspended(agent *config.Agent, cfg *config.City, cityPath string) (rigName string, suspended bool) {
+	rigName = configuredRigName(cityPath, agent, cfg.Rigs)
+	if rigName == "" {
+		return "", false
+	}
+	suspState := loadSuspensionStateBestEffort(cityPath)
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].Name != rigName {
+			continue
+		}
+		return rigName, suspensionstate.EffectiveRigSuspended(suspState, rigName, cfg.Rigs[i].EffectiveSuspendedOnStart())
+	}
+	return "", false
 }
 
 func sessionWakeRequestedCreateInfo(info session.Info) bool {
 	state := session.State(strings.TrimSpace(info.MetadataState))
 	return state == session.StateSuspended || state == session.StateDrained
+}
+
+// sessionWakeStuckInFlightInfo reports whether info was already mid-create
+// (creating or start-pending) before this wake call. Unlike
+// sessionWakeRequestedCreateInfo, it deliberately excludes suspended/drained:
+// those are the normal, successful wake path when a runnable template exists,
+// and must not be treated as stuck.
+func sessionWakeStuckInFlightInfo(info session.Info) bool {
+	state := session.State(strings.TrimSpace(info.MetadataState))
+	return state == session.StateCreating || state == session.StateStartPending
+}
+
+// sessionWakeCreateAbandonedInfo reports whether an in-flight create is
+// genuinely abandoned and so may be acted on by the CLI.
+//
+// Mirrors the sweep's gate order in city_runtime.go:2853-2857: the
+// pending-create lease is checked FIRST, staleness second. Checking only
+// staleness rejects a create the reconciler still protects, because
+// pendingCreateNeverStartedTimeout (10m) is deliberately longer than
+// staleCreatingStateTimeout (1m).
+func sessionWakeCreateAbandonedInfo(info session.Info, startupTimeout time.Duration) bool {
+	return sessionWakeStuckInFlightInfo(info) &&
+		!pendingCreateClaimStillLeasedForSweepInfo(info, startupTimeout) &&
+		isStaleCreatingInfo(info)
+}
+
+// stuckCreatingSinceInfo returns the timestamp isStaleCreatingInfo measures
+// staleness from (the per-attempt pending_create_started_at marker, falling
+// back to CreatedAt), so the CLI's rejection message names exactly what was
+// checked instead of duplicating the staleness decision itself.
+func stuckCreatingSinceInfo(info session.Info) time.Time {
+	if started, ok := parseRFC3339Metadata(info.PendingCreateStartedAt); ok {
+		return started
+	}
+	return info.CreatedAt
 }

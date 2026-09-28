@@ -105,7 +105,19 @@ type ListQuery struct {
 	// batched form of ParentID for graph/subtree walks. Backends that do not
 	// recognize it should ignore it (returning a superset); callers that need
 	// exact results must filter the returned beads by parent in memory.
-	ParentIDs     []string
+	ParentIDs []string
+	// IDs matches beads whose id is any of the listed ids — the IN-list form of
+	// a batch of Gets. It exists so a lane that already knows WHICH beads it
+	// needs pays one store round trip instead of one per bead: on a city whose
+	// work ledger is remote, N sequential Gets is N x the round-trip latency and
+	// is how the controller tick's route-repair leg came to cost minutes
+	// (ga-l7jdg).
+	//
+	// Same backend contract as ParentIDs: a store that cannot push the IN-list
+	// into its backend returns a superset, which ApplyListQuery/Matches then cut
+	// exactly — so the RESULT is always exact and only the pushdown is
+	// best-effort. It counts as a filter, so an IDs query needs no AllowScan.
+	IDs           []string
 	Metadata      map[string]string
 	CreatedBefore time.Time
 	// UpdatedBefore matches beads whose UpdatedAt is before this timestamp.
@@ -208,6 +220,7 @@ func (q ListQuery) HasFilter() bool {
 		q.Assignee != "" ||
 		len(q.Assignees) > 0 ||
 		q.ParentID != "" ||
+		len(q.IDs) > 0 ||
 		len(q.Metadata) > 0 ||
 		!q.CreatedBefore.IsZero() ||
 		!q.UpdatedBefore.IsZero() ||
@@ -268,6 +281,18 @@ func (q ListQuery) Matches(b Bead) bool {
 	}
 	if q.ParentID != "" && b.ParentID != q.ParentID {
 		return false
+	}
+	if len(q.IDs) > 0 {
+		matched := false
+		for _, id := range q.IDs {
+			if b.ID == id {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
 	}
 	if len(q.Metadata) > 0 && !matchesMetadata(b, q.Metadata) {
 		return false

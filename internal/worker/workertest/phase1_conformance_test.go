@@ -37,10 +37,17 @@ func TestPhase1CatalogProfilesStayAligned(t *testing.T) {
 	}
 
 	profiles := Phase1Profiles()
-	if len(profiles) != 8 {
-		t.Fatalf("profiles = %d, want 8", len(profiles))
+	if len(profiles) != 10 {
+		t.Fatalf("profiles = %d, want 10", len(profiles))
 	}
+	cursorFound := false
 	for _, profile := range profiles {
+		if profile.ID == ProfileCursorTmuxCLI {
+			cursorFound = true
+			if profile.Provider != "cursor/tmux-cli" || profile.WorkDir != "/tmp/gascity/phase1/cursor" {
+				t.Fatalf("cursor profile = %+v, want canonical provider and workdir", profile)
+			}
+		}
 		if profile.Continuation.AnchorText == "" {
 			t.Fatalf("profile %s missing continuation anchor text", profile.ID)
 		}
@@ -53,6 +60,9 @@ func TestPhase1CatalogProfilesStayAligned(t *testing.T) {
 		if profile.Continuation.ResetResponseContains == "" {
 			t.Fatalf("profile %s missing reset response matcher", profile.ID)
 		}
+	}
+	if !cursorFound {
+		t.Fatal("phase-1 profiles missing cursor/tmux-cli")
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -180,6 +181,7 @@ func newSplitEnvWith(t *testing.T, split bool, opts splitEnvOptions) splitEnv {
 		// map straight to the value OpenEngine returned. See the file header.
 		e.class = newSplitEnvClassLeaf(t)
 		e.routes = splitEnvRoutes(e.class)
+		assertSplitEnvStagesAServingSplit(t, e.class, e.routes)
 	}
 	writeSplitTopologyCityConfig(t, cityPath, rigPath, split)
 	// The assigned-work spine resolves a city's bindings BY PATH, because its
@@ -197,6 +199,39 @@ func newSplitEnvWith(t *testing.T, split bool, opts splitEnvOptions) splitEnv {
 		e.attachRigLeg(t, rigPath)
 	}
 	return e
+}
+
+// assertSplitEnvStagesAServingSplit refuses to hand back a fixture whose split
+// is only nominal.
+//
+// Every invariant in the conformance suite reads "this is the split topology"
+// off the fields this constructor sets, and nothing downstream re-checks that
+// the binding it names can be READ. Substitute a refusedClassStore for the class
+// leg — the store a city configured for a binding it has not converged on
+// resolves to, and one line of fixture code away — and the whole suite still
+// passes: every row that expects a class-resident bead to be absent from the
+// work store gets its expectation from a store that answers the boot refusal to
+// everything, and a topology that serves nothing reads as a healthy split.
+//
+// So both halves are asserted here, once, where the fixture makes the claim: the
+// leg answers reads, and the routes derived from it group into one binding with
+// no refusal carried. The probes are read-only — a create here would seed a bead
+// the residence rows then have to account for.
+func assertSplitEnvStagesAServingSplit(t *testing.T, class beads.Store, routes *storageRoutes) {
+	t.Helper()
+	if err := class.Ping(); err != nil {
+		t.Fatalf("the fixture's class leg refuses Ping (%v); this stages a city whose binding serves nothing, and every split-topology invariant below would be asserted against a store that answers the boot refusal to every read", err)
+	}
+	if _, err := class.List(beads.ListQuery{AllowScan: true}); err != nil {
+		t.Fatalf("the fixture's class leg refuses List (%v); see Ping above — a refusing leg makes 'the bead is not in the work store' true for the wrong reason", err)
+	}
+	bindings, refused := residencyBindingsFromRoutes(routes)
+	if refused != nil {
+		t.Fatalf("the routes the fixture staged carry a standing refusal (%v); this is a city that has not converged, not the served whole-split every invariant here describes", refused)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("the routes the fixture staged group into %d binding(s), want exactly 1; this build serves the whole split or nothing (storageSplitWhole)", len(bindings))
+	}
 }
 
 // newSplitEnvClassLeaf opens the class leg on the store a split city is really
@@ -222,7 +257,11 @@ func newSplitEnvClassLeaf(t *testing.T) beads.Store {
 	if !ok {
 		t.Fatal("config.ReservedClassPrefix(graph) = ok:false; the fixture has no reserved namespace to open a class store under")
 	}
-	leaf, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix(prefix))
+	namespaces := splitEnvClassNamespaces(t)
+	leaf, err := beads.OpenSQLiteStore(t.TempDir(),
+		beads.WithSQLiteStoreIDPrefix(prefix),
+		beads.WithSQLiteStoreReservedIDPrefixes(namespaces...),
+	)
 	if err != nil {
 		t.Fatalf("opening the SQLite class store the split binding serves from: %v", err)
 	}
@@ -231,7 +270,45 @@ func newSplitEnvClassLeaf(t *testing.T) beads.Store {
 			_ = closer.CloseStore()
 		}
 	})
-	return splittest.Strict(t, leaf, splittest.SQLiteSemantics)
+	// Both halves carry the same fence, from the one variable above, so they
+	// cannot diverge here. Passing it to both is still not redundant, but the
+	// reach is one-directional: the wrapper answers first, so an unfenced
+	// wrapper over this fenced leaf records the create as an accepted residence
+	// violation and only then has the leaf refuse it — a fixture reading a
+	// corruption that never happened. The other direction is invisible: a fenced
+	// wrapper over an unfenced leaf refuses before the leaf is asked, so the leaf
+	// losing its fence would not show up here. That direction is covered where it
+	// belongs, on the provider itself — beadstest.RunPinnedIDFenceConformance
+	// runs against beads.OpenSQLiteStore directly.
+	return splittest.Strict(t, leaf, splittest.SQLiteSemantics, namespaces...)
+}
+
+// splitEnvClassNamespaces is the id-namespace fence a whole-split boot puts on
+// this binding: every namespace the five infrastructure classes claim, which is
+// what internal/storebinding/sqlite's OpenEngine derives from the served class
+// set and passes into the store.
+//
+// It goes through storebinding.EngineReservedPrefixes rather than listing the
+// prefixes, because that function is the production derivation — including its
+// rule that a set containing work is unfenced. A fixture that spelled the
+// prefixes itself would keep passing through a change to either.
+func splitEnvClassNamespaces(t *testing.T) []string {
+	t.Helper()
+	served := make([]coordclass.Class, 0, len(coordclass.Classes()))
+	for _, c := range coordclass.Classes() {
+		if c.IsInfrastructure() {
+			served = append(served, c)
+		}
+	}
+	set, err := storebinding.NewClassSet(served...)
+	if err != nil {
+		t.Fatalf("building the served class set: %v", err)
+	}
+	namespaces := storebinding.EngineReservedPrefixes(set)
+	if len(namespaces) == 0 {
+		t.Fatal("the whole-split binding derived no id namespaces; an unfenced class store accepts another ledger's bead and its namespace claim stops holding")
+	}
+	return namespaces
 }
 
 // splitEnvStorageConfig is the [storage] section of a converged split city: work
@@ -980,18 +1057,26 @@ func assertRigPrefixDisjoint(t *testing.T, e splitEnv) {
 		t.Errorf("work front door accepted a rig-prefixed create (minted %q)", leaked.ID)
 	}
 	if e.split {
-		// The class store models SQLite, which accepts a foreign-prefix pinned id
-		// and corrupts quietly. The kit records that instead of rejecting, and the
-		// fixture CLAIMS the record: this is the production outcome being pinned,
-		// not a routing bug in the fixture.
+		// SQLite itself keeps a pinned id verbatim — normalizeCreate has no
+		// prefix check — but the binding this store serves is FENCED to the
+		// namespaces its five infrastructure classes claim, so the write is
+		// refused before SQLite can land it. A rig work prefix is in none of
+		// them, which is what makes this row the fence's and not the backend's.
 		leaked, err := e.class.Create(beads.Bead{ID: rigPrefix + "-leak", Title: "misrouted rig bead", Type: "task"})
-		if err != nil {
-			t.Errorf("class front door rejected a rig-prefixed create (%v); SQLite keeps a pinned id verbatim, so production lands this row", err)
-		} else if leaked.ID != rigPrefix+"-leak" {
-			t.Errorf("class front door rewrote the pinned id to %q", leaked.ID)
+		if !errors.Is(err, beads.ErrPinnedIDOutsideNamespace) {
+			t.Errorf("class front door answered (%q, %v) for a rig-prefixed create, want ErrPinnedIDOutsideNamespace; an unfenced binding lands another ledger's bead where no prefix route will ever look for it", leaked.ID, err)
 		}
-		if violations := splittest.TakeResidenceViolations(e.class); len(violations) == 0 {
-			t.Error("class store recorded no residence violation for a foreign-prefix create; the SQLite-semantics leaf is not modeling the silent-acceptance failure mode")
+		if _, err := e.class.Get(rigPrefix + "-leak"); !errors.Is(err, beads.ErrNotFound) {
+			t.Errorf("after the refusal the class store still holds %q (err=%v)", rigPrefix+"-leak", err)
+		}
+		// The must-be-silent counterpart: the fence admits the namespaces the
+		// binding does hold, so this row is not passing on a store that refuses
+		// every pinned id.
+		held := classPrefix + "-wisp-fixture"
+		if created, err := e.class.Create(beads.Bead{ID: held, Title: "held by this binding", Type: "task"}); err != nil {
+			t.Errorf("class front door refused %q, a pinned id in a namespace it serves: %v", held, err)
+		} else if created.ID != held {
+			t.Errorf("class front door rewrote the pinned id to %q", created.ID)
 		}
 	}
 }

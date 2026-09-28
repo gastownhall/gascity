@@ -1,0 +1,57 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "builtinpacks",
+    srcs = ["registry.go"],
+    importpath = "github.com/gastownhall/gascity/internal/builtinpacks",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//examples/bd",
+        "//examples/bd/dolt",
+        "//internal/bootstrap/packs/core",
+        "//internal/fsys",
+        "//internal/git",
+        "//internal/remotesource",
+        "@com_github_burntsushi_toml//:toml",
+        "@com_github_gastownhall_gascity_packs//:gascity-packs",
+    ],
+)
+
+go_test(
+    name = "builtinpacks_test",
+    srcs = [
+        "embedded_overlay_test.go",
+        "registry_content_memo_test.go",
+        "registry_scoped_test.go",
+        "registry_test.go",
+        "registry_validate_tree_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_source_tree",
+        "//examples/bd:pack_files",
+        "//examples/bd/dolt:pack_files",
+        "//internal/bootstrap/packs/core:pack_files",
+    ],
+    embed = [":builtinpacks"],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

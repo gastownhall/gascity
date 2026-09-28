@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/overlay"
 )
@@ -132,8 +133,44 @@ func stageCopyFiles(workDir string, copyFiles []CopyEntry) error {
 // the runtime task-worktree staging path: it stages every overlay file
 // (including reconciler-owned mergeable hook files) because staging is the sole
 // writer for live task sessions — hooks.Install never runs against these dirs.
-func StageProviderOverlayDir(srcDir, dstDir string, providers []string, warnings io.Writer) error {
-	return stageProviderOverlayDir(srcDir, dstDir, providers, nil, warnings)
+func StageProviderOverlayDir(srcDir, dstDir string, providers []string, warnings io.Writer, opts ...StageOption) error {
+	return stageProviderOverlayDir(srcDir, dstDir, providers, nil, warnings, opts...)
+}
+
+// PreserveFunc reports whether an existing file already in the destination must
+// be left alone by overlay staging. relPath is the flattened per-provider path
+// (e.g. ".opencode/plugins/gascity.js") and existing is its current content.
+//
+// It exists so a caller that understands managed-hook versioning can stop
+// staging from clobbering a hook file that is already current, without package
+// runtime having to depend on internal/hooks.
+type PreserveFunc func(relPath string, existing []byte) bool
+
+// StageOption configures overlay staging.
+type StageOption func(*stageConfig)
+
+type stageConfig struct {
+	preserve PreserveFunc
+	staged   map[string]bool
+	mu       *sync.Mutex
+}
+
+// WithPreserve installs a predicate consulted for every non-directory overlay
+// entry whose destination existed BEFORE this staging pass began. Paths written
+// during the pass keep the documented last-writer-wins precedence, so a later
+// overlay layer can still override an earlier one. Without it, staging keeps its
+// historical behavior of overwriting unconditionally.
+//
+// The returned option carries per-transaction state: reuse one value across the
+// ordered sequence of staging calls that make up a single pass.
+func WithPreserve(preserve PreserveFunc) StageOption {
+	staged := make(map[string]bool)
+	mu := &sync.Mutex{}
+	return func(c *stageConfig) {
+		c.preserve = preserve
+		c.staged = staged
+		c.mu = mu
+	}
 }
 
 // StageProviderOverlayDirSkippingMergeable copies a provider-aware overlay
@@ -152,11 +189,11 @@ func StageProviderOverlayDir(srcDir, dstDir string, providers []string, warnings
 // through the non-skipping StageProviderOverlayDir (tmux.stageStartFiles,
 // StageSessionWorkDir). A hybrid can therefore reappear at session start and is
 // converged by the next tick — permanent drift becomes transient.
-func StageProviderOverlayDirSkippingMergeable(srcDir, dstDir string, providers []string, warnings io.Writer) error {
+func StageProviderOverlayDirSkippingMergeable(srcDir, dstDir string, providers []string, warnings io.Writer, opts ...StageOption) error {
 	skip := func(relPath string, isDir bool) bool {
 		return !isDir && overlay.IsMergeablePath(relPath)
 	}
-	return stageProviderOverlayDir(srcDir, dstDir, providers, skip, warnings)
+	return stageProviderOverlayDir(srcDir, dstDir, providers, skip, warnings, opts...)
 }
 
 // stageProviderOverlayDir stages srcDir into dstDir for the given provider
@@ -168,7 +205,45 @@ func StageProviderOverlayDirSkippingMergeable(srcDir, dstDir string, providers [
 // boundary guard (internal/testutil/providerledger) checks this package
 // hermetically and requires module-local references to stay inside function
 // bodies.
-func stageProviderOverlayDir(srcDir, dstDir string, providers []string, skip func(relPath string, isDir bool) bool, warnings io.Writer) error {
+func stageProviderOverlayDir(srcDir, dstDir string, providers []string, skip func(relPath string, isDir bool) bool, warnings io.Writer, opts ...StageOption) error {
+	cfg := stageConfig{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	if cfg.preserve != nil {
+		base := skip
+		skip = func(relPath string, isDir bool) bool {
+			if base != nil && base(relPath, isDir) {
+				return true
+			}
+			if isDir {
+				return false
+			}
+			abs := filepath.Join(dstDir, relPath)
+			cfg.mu.Lock()
+			defer cfg.mu.Unlock()
+			// Written earlier in this same staging pass: not a pre-existing
+			// local file, so later layers keep last-writer-wins precedence.
+			if cfg.staged[abs] {
+				return false
+			}
+			// Only an existing destination can be preserved; a missing one is
+			// always staged, so a fresh work directory still gets the file.
+			existing, err := os.ReadFile(abs)
+			if err != nil {
+				cfg.staged[abs] = true
+				return false
+			}
+			if cfg.preserve(relPath, existing) {
+				return true
+			}
+			cfg.staged[abs] = true
+			return false
+		}
+	}
+
 	var stderr bytes.Buffer
 	if err := overlay.CopyDirForProvidersWithSkip(srcDir, dstDir, providers, skip, &stderr); err != nil {
 		return err

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
@@ -43,12 +44,15 @@ func ExtractTailMeta(path string) (*TailMeta, error) {
 	}
 	defer f.Close() //nolint:errcheck // best-effort close on read-only file
 
-	data, startsMidLine, err := readTail(f, tailChunkSize)
+	data, startsMidLine, err := readTail(f)
 	if err != nil {
 		return nil, err
 	}
 
-	lines := splitLines(data)
+	lines, err := splitLines(data)
+	if err != nil {
+		return nil, err
+	}
 	return extractFromLines(lines, startsMidLine), nil
 }
 
@@ -87,9 +91,18 @@ func validateSearchPathFile(searchPaths []string, path string) (string, error) {
 	return "", fmt.Errorf("session log path is outside configured search paths")
 }
 
-// readTail reads the last n bytes of r (or the whole thing if smaller).
-func readTail(r io.ReadSeeker, n int64) ([]byte, bool, error) {
-	data, startsMidLine, _, err := readTailWindow(r, n)
+// readTail reads the last tailChunkSize bytes of r (or the whole thing if smaller).
+func readTail(r io.ReadSeeker) ([]byte, bool, error) {
+	data, startsMidLine, _, err := readTailWindow(r, tailChunkSize)
+	return data, startsMidLine, err
+}
+
+// readTailAt is readTail against a size snapshot the caller already took. A
+// caller that scans two windows of the same file uses it so both windows are
+// derived from one Seek: two independent SeekEnd snapshots of a file being
+// appended to disagree, leaving the bytes written in between in neither window.
+func readTailAt(r io.ReadSeeker, size, n int64) ([]byte, bool, error) {
+	data, startsMidLine, _, err := readTailWindowAt(r, size, n)
 	return data, startsMidLine, err
 }
 
@@ -101,6 +114,12 @@ func readTailWindow(r io.ReadSeeker, n int64) ([]byte, bool, bool, error) {
 	if err != nil {
 		return nil, false, false, err
 	}
+	return readTailWindowAt(r, size, n)
+}
+
+// readTailWindowAt is readTailWindow against a size snapshot the caller already
+// took.
+func readTailWindowAt(r io.ReadSeeker, size, n int64) ([]byte, bool, bool, error) {
 	offset := size - n
 	if offset < 0 {
 		offset = 0
@@ -124,11 +143,30 @@ func readTailWindow(r io.ReadSeeker, n int64) ([]byte, bool, bool, error) {
 	return data, startsMidLine, offset > 0, nil
 }
 
+// maxTailTokenBytes bounds a single JSONL line during a tail scan. Claude
+// entries can be large (tool results with full file contents, base64 images),
+// so the tail path uses the same 50MB ceiling the full-file reader adopted for
+// exactly that reason (parseFileDetailed).
+//
+// No current caller can reach this ceiling. The fixed-window paths scan
+// tailChunkSize (64KB), and ExtractTailUsageSince's growth loop stops at
+// maxUsageScanBytes (16MB), so the widest window any caller hands to splitLines
+// is three times below this bound and cannot hold a token that exceeds it. The
+// error return below is defense-in-depth against a future cap change, not a
+// live path — maxUsageScanBytes documents what raising the growth cap past this
+// constant would cost.
+const maxTailTokenBytes = 50 * 1024 * 1024
+
 // splitLines splits data into JSONL lines. Partial lines from a mid-file
 // read are tolerated — they fail json.Unmarshal silently in the caller.
-func splitLines(data []byte) [][]byte {
+//
+// A line longer than maxTailTokenBytes is reported rather than dropped:
+// bufio.Scanner stops permanently on bufio.ErrTooLong, so swallowing that
+// error would silently return a prefix of the window and hide every entry
+// after the oversized line — including the newest ones the caller came for.
+func splitLines(data []byte) ([][]byte, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(data))
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	scanner.Buffer(make([]byte, 0, 256*1024), maxTailTokenBytes)
 	var lines [][]byte
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -139,15 +177,43 @@ func splitLines(data []byte) [][]byte {
 		copy(cp, line)
 		lines = append(lines, cp)
 	}
-	return lines
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("splitting session log tail: %w", err)
+	}
+	return lines, nil
 }
 
 // tailEntry is the minimal structure we decode from each JSONL line.
 type tailEntry struct {
-	Type    string          `json:"type"`
-	Subtype string          `json:"subtype,omitempty"`
-	UUID    string          `json:"uuid"`
-	Message json.RawMessage `json:"message"`
+	Type      string          `json:"type"`
+	Subtype   string          `json:"subtype,omitempty"`
+	UUID      string          `json:"uuid"`
+	Message   json.RawMessage `json:"message"`
+	Timestamp tailTime        `json:"timestamp"`
+}
+
+// tailTime decodes a transcript entry timestamp without letting an
+// off-format value reject the whole line. Anything that is not a parseable
+// RFC3339 string decodes to the zero time, which is what TailUsage.Timestamp
+// documents and what every consumer already handles via the fall-back-to-now
+// path in modelUsageFact. A strict time.Time field would instead fail the
+// whole json.Unmarshal, and both decode sites drop the entry on error —
+// taking usage, model, context and activity with it.
+type tailTime struct{ time.Time }
+
+// UnmarshalJSON decodes an RFC3339 timestamp string, yielding the zero time
+// for any other shape.
+func (t *tailTime) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		t.Time = time.Time{}
+		return nil
+	}
+	// parseCodexSessionTime is the package's lenient RFC3339Nano→RFC3339
+	// parser (reader.go); despite the name it is format-generic and returns
+	// the zero time rather than an error.
+	t.Time = parseCodexSessionTime(s)
+	return nil
 }
 
 // messageStopReason extracts stop_reason from an assistant message.
@@ -303,6 +369,9 @@ func extractFromLines(lines [][]byte, startsMidLine bool) *TailMeta {
 		// Infer activity from the last valid entry (first hit walking backwards).
 		if activity == "" {
 			activity = InferActivity(entry.Type, entry.Subtype, rawMsg)
+			if activity == "" {
+				activity = kimiCodeTailActivity(entry.Type, lines[i])
+			}
 		}
 
 		// Check for assistant message with model/usage.

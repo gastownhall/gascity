@@ -12,6 +12,7 @@ func TestProfileFamily(t *testing.T) {
 	}{
 		{profile: ProfileClaudeTmuxCLI, want: "claude"},
 		{profile: ProfileCodexTmuxCLI, want: "codex"},
+		{profile: ProfileCursorTmuxCLI, want: "cursor"},
 		{profile: ProfileGeminiTmuxCLI, want: "gemini"},
 		{profile: ProfileKimiTmuxCLI, want: "kimi"},
 		{profile: ProfileOpenCodeTmuxCLI, want: "opencode"},

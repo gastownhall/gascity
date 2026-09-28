@@ -69,9 +69,21 @@ func TestSlingDashboardURLResolver(t *testing.T) {
 			want:       "http://127.0.0.1:8372/city/test-city/runs/gcg-run-1",
 		},
 		{
-			name:       "city name outside BFF grammar omits link",
+			// gascity#5316: the registry grammar allows dots, so a dotted
+			// city name is servable and must mint a link, not be dropped.
+			name:       "dotted city name mints a link",
 			base:       "http://127.0.0.1:8372",
 			cityName:   "bright.lights",
+			workflowID: "gcg-run-1",
+			want:       "http://127.0.0.1:8372/city/bright.lights/runs/gcg-run-1",
+		},
+		{
+			// The registry has no length cap, but dashboardbff.ValidCityName
+			// caps at 64 chars — a registry-valid name can still exceed the
+			// BFF's own limit.
+			name:       "city name outside BFF grammar omits link",
+			base:       "http://127.0.0.1:8372",
+			cityName:   strings.Repeat("a", 65),
 			workflowID: "gcg-run-1",
 			want:       "",
 		},
@@ -249,11 +261,12 @@ func TestSlingResponseOmitsDashboardURLWhenUnmounted(t *testing.T) {
 }
 
 func TestSlingResponseOmitsDashboardURLForUnservableCityName(t *testing.T) {
-	// The supervisor registry grammar accepts names (e.g. with dots) that
-	// the dashboard BFF grammar rejects; such cities are
-	// dashboard-unreachable so the link must be omitted, not minted dead.
+	// The supervisor registry has no length cap, but the dashboard BFF's
+	// dashboardbff.ValidCityName caps names at 64 chars — a registry-valid
+	// name can still exceed the BFF's own limit and be dashboard-unreachable,
+	// so the link must be omitted, not minted dead.
 	state := newFakeMutatorState(t)
-	state.cityName = "bright.lights"
+	state.cityName = strings.Repeat("a", 65)
 	state.cfg.Rigs[0].Prefix = "gc"
 	srv := New(state)
 	srv.SlingRunnerFunc = func(_ string, _ string, _ map[string]string) (string, error) {

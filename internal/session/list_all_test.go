@@ -324,3 +324,60 @@ func TestListAllSessionBeads_NilStore(t *testing.T) {
 		t.Errorf("nil store should return empty, got %d beads", len(got))
 	}
 }
+
+// TestListAll_CachePartialDoesNotReadThroughToBackingStore is the regression
+// test for ga-tr8iti / #5276. listAllBeads built its query with no Status
+// field, so cacheServableForListQueryLocked (internal/beads/caching_store_reads.go)
+// never matched it against partialPrimeStatuses and the census fell through to
+// a live backing-store read on every call under a partial prime (PrimeActive),
+// defeating the cache for this hot path. ListAll must pin Status "open" when
+// !IncludeClosed, mirroring listSessionBeadsByMetadata (resolve.go), so a
+// cachePartial CachingStore serves the census from its primed snapshot and
+// stays blind to a bead written directly to the backing store afterwards.
+func TestListAll_CachePartialDoesNotReadThroughToBackingStore(t *testing.T) {
+	backing := beads.NewMemStore()
+	primed, err := backing.Create(beads.Bead{
+		Title:    "primed",
+		Type:     BeadType,
+		Labels:   []string{LabelSession},
+		Metadata: map[string]string{"session_name": "primed"},
+	})
+	if err != nil {
+		t.Fatalf("create primed session bead: %v", err)
+	}
+
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	// Written directly to the backing store AFTER the partial-prime snapshot
+	// was taken — the cache never observed it, so a cache-served census must
+	// not see it either.
+	direct, err := backing.Create(beads.Bead{
+		Title:    "direct",
+		Type:     BeadType,
+		Labels:   []string{LabelSession},
+		Metadata: map[string]string{"session_name": "direct"},
+	})
+	if err != nil {
+		t.Fatalf("create direct session bead: %v", err)
+	}
+
+	store := NewStore(beads.SessionStore{Store: cache})
+	got, err := store.ListAll(ListAllOptions{})
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+
+	gotIDs := make(map[string]bool, len(got))
+	for _, info := range got {
+		gotIDs[info.ID] = true
+	}
+	if !gotIDs[primed.ID] {
+		t.Errorf("expected primed bead %s (present at PrimeActive time) in cache-served result", primed.ID)
+	}
+	if gotIDs[direct.ID] {
+		t.Errorf("bead %s written directly to backing after PrimeActive leaked into the census — ListAll should be cache-served under a partial prime, not read through to backing", direct.ID)
+	}
+}

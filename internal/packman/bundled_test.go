@@ -48,7 +48,7 @@ func TestEnsureRepoInCacheMaterializesBundledSourceWithoutGit(t *testing.T) {
 	if _, err := os.Stat(packToml); err != nil {
 		t.Fatalf("synthetic cache missing gastown pack.toml: %v", err)
 	}
-	if err := builtinpacks.ValidateSyntheticRepo(got, commit); err != nil {
+	if err := builtinpacks.ValidateSyntheticRepo(got, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("ValidateSyntheticRepo: %v", err)
 	}
 }
@@ -123,7 +123,7 @@ func TestReadCachedPackImportsAcceptsBundledSyntheticCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RepoCachePath: %v", err)
 	}
-	if err := builtinpacks.MaterializeSyntheticRepo(cachePath, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cachePath, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("MaterializeSyntheticRepo: %v", err)
 	}
 
@@ -170,7 +170,7 @@ func TestMaterializeBundledRepoInCacheLockedRejectsNonCanonicalPath(t *testing.T
 	nonCanonical := filepath.Join(t.TempDir(), "cache")
 
 	prevMaterialize := materializeSyntheticRepo
-	materializeSyntheticRepo = func(string, string) error {
+	materializeSyntheticRepo = func(string, string, string) error {
 		t.Fatal("materializeSyntheticRepo was called for non-canonical path")
 		return nil
 	}
@@ -213,7 +213,7 @@ func TestEnsureBundledCacheMaterializeFailureIncludesRecoveryCause(t *testing.T)
 	t.Cleanup(func() { runGit = prevGit })
 
 	prevMaterialize := materializeSyntheticRepo
-	materializeSyntheticRepo = func(dst, gotCommit string) error {
+	materializeSyntheticRepo = func(dst, _, gotCommit string) error {
 		if dst != cachePath {
 			t.Fatalf("materialize dst = %q, want %q", dst, cachePath)
 		}
@@ -278,7 +278,7 @@ func TestEnsureRepoInCacheClonesBundledSourceAtNonCanonicalPin(t *testing.T) {
 	t.Cleanup(func() { runNetworkGit = prevNetGit })
 
 	prevMaterialize := materializeSyntheticRepo
-	materializeSyntheticRepo = func(string, string) error {
+	materializeSyntheticRepo = func(string, string, string) error {
 		t.Fatal("materializeSyntheticRepo was called for a non-canonical pin")
 		return nil
 	}
@@ -307,7 +307,7 @@ func TestEnsureRepoInCacheClonesBundledSourceAtNonCanonicalPin(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(got, ".gc-bundled-pack-cache.toml")); !os.IsNotExist(err) {
 		t.Fatalf("synthetic marker stat err = %v, want not exist", err)
 	}
-	if err := builtinpacks.ValidateSyntheticRepo(got, commit); err == nil {
+	if err := builtinpacks.ValidateSyntheticRepo(got, builtinpacks.Repository, commit); err == nil {
 		t.Fatal("clone result validates as a synthetic cache; embedded content must not be materialized")
 	}
 	data, err := os.ReadFile(filepath.Join(got, "examples", "gastown", "packs", "gastown", "pack.toml"))

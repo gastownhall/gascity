@@ -27,6 +27,13 @@ internal/api/dashboardspa/web/frontend/.playwright/
 *.test
 **/.beads/*
 !**/.beads/identity.toml
+# bd's workspace gate sits BESIDE .beads, not inside it (`<dir>/.beads.gate.lock`),
+# so the pattern above never covered it. These flock files are never deleted, so
+# every scope root accumulates one as an untracked stray -- which the plain `git
+# status --porcelain` run by pack-source hashing (internal/config/pack_include.go)
+# and by review quorum (internal/reviewquorum/mutations.go) then reports as a
+# spurious mutation. Same pattern `bd doctor --fix` writes.
+*.gate.lock*
 .claude/
 !examples/gastown/packs/gastown/overlays/default/.claude/
 !examples/gastown/packs/gastown/overlays/default/.claude/settings.json
@@ -45,6 +52,9 @@ internal/api/dashboardspa/web/frontend/.playwright/
 # sync-project-agents writes local migration backups here; don't commit them.
 .agents/migration/
 .gc/
+
+# Seat home (IDENTITY, diary, laurels) — agent-local runtime memory, never committed.
+/seat/
 
 # Dolt database files (added by bd init)
 .dolt/
@@ -76,3 +86,8 @@ __pycache__/
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/
 .beads.backup-*
+
+# Bazel convenience symlinks
+/bazel-bin
+/bazel-out
+/bazel-testlogs

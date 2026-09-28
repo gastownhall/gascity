@@ -361,34 +361,22 @@ func (s *Server) streamEvents(hctx huma.Context, input *EventStreamInput, send s
 	keepalive := time.NewTicker(sseKeepalive)
 	defer keepalive.Stop()
 
-	type result struct {
-		event events.Event
-		err   error
-	}
-	ch := make(chan result, 1)
-
-	readNext := func() {
-		go func() {
-			e, err := watcher.Next()
-			select {
-			case ch <- result{event: e, err: err}:
-			case <-ctx.Done():
-			}
-		}()
-	}
-
-	readNext()
+	ch := readEventsAhead(ctx, watcher.Next)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case r := <-ch:
+		case r, ok := <-ch:
+			if !ok {
+				return
+			}
 			if r.err != nil {
 				log.Printf("api: events-stream: watcher Next failed: %v", r.err)
 				return
 			}
-			envelope, decodeErr := wireEventFrom(r.event, projectWorkflowEvent(s.state, r.event))
+			workflow := projectWorkflowEventWithSlack(s.state, r.event, len(ch))
+			envelope, decodeErr := wireEventFrom(r.event, workflow)
 			if decodeErr != nil {
 				// Strict registry policy (Principle 7): any event type
 				// without a registered payload is a programming error.
@@ -397,13 +385,11 @@ func (s *Server) streamEvents(hctx huma.Context, input *EventStreamInput, send s
 				// diagnosis; the registry-coverage test in
 				// event_payloads_coverage_test.go prevents this at CI.
 				log.Printf("api: events-stream skip %s seq=%d: %v", r.event.Type, r.event.Seq, decodeErr)
-				readNext()
 				continue
 			}
 			if err := send(sse.Message{ID: int(r.event.Seq), Data: envelope}); err != nil {
 				return
 			}
-			readNext()
 		case t := <-keepalive.C:
 			if err := send.Data(HeartbeatEvent{Timestamp: t.UTC().Format(time.RFC3339)}); err != nil {
 				return

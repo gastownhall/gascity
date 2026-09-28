@@ -2423,6 +2423,9 @@ func TestHumaHandleSessionCreateUsesACPTransportCommandForAgentTemplate(t *testi
 	if got, want := bead.Metadata["transport"], "acp"; got != want {
 		t.Fatalf("transport metadata = %q, want %q", got, want)
 	}
+	if got := bead.Metadata["session_origin"]; got != "ephemeral" {
+		t.Fatalf("session_origin = %q, want ephemeral for Huma agent create", got)
+	}
 }
 
 func TestHandleSessionCreateRejectsACPAgentWithoutACPRouting(t *testing.T) {

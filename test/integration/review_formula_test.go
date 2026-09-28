@@ -346,6 +346,122 @@ on_exhausted = "hard_fail"
 	}
 }
 
+// TestReviewLoopApprovesInIterationTwoWithBodyRetry drives a review loop past
+// iteration 1, which none of the review-formulas shards do. It is the
+// mol-adopt-pr-v2 review-loop shape (a scope member ralph loop whose
+// apply-fixes child carries its own retry) with the pooled reviewer fan-out
+// left out, so it fits the every-PR rest-smoke budget.
+//
+// Iteration 1 records review.verdict=iterate, so the check fails and the loop
+// spawns iteration 2, where apply-fixes records done. The check joins
+// apply-fixes beads on gc.attempt == the iteration, like the workflows pack
+// gates do. Every bead of iteration 2, retry attempts included, must carry the
+// iteration in gc.attempt: pack reviewer prompts name their artifact
+// directory from their own bead's gc.attempt, and {attempt} artifact paths
+// resolve it (ga-ud05j). The retry counter lives in gc.retry_attempt.
+//
+// In iteration 2 the review child also fails transiently once and must retry.
+// It allows 2 attempts, so that retry only exists if the retry counter
+// restarts at 1 in every iteration instead of starting at the iteration
+// number (ga-v7pu5), and if the retry attempt is linked to its control so its
+// failure retries instead of aborting the scope.
+func TestReviewLoopApprovesInIterationTwoWithBodyRetry(t *testing.T) {
+	cityDir := setupReviewFormulaCity(t, "success", map[string]string{
+		"GC_GRAPH_ITERATE_VERDICT_SUFFIXES": "review-loop.iteration.1.apply-fixes.attempt.1",
+		"GC_GRAPH_TRANSIENT_ONCE_SUFFIXES":  "review-loop.iteration.2.review.attempt.1",
+	})
+	writeLocalFormula(t, cityDir, "mol-review-loop-iteration-smoke", `description = """
+Minimal review loop that must approve in iteration 2 after a body retry.
+"""
+formula = "mol-review-loop-iteration-smoke"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "body"
+title = "Review body"
+needs = ["review-loop"]
+description = "Terminal latch for the workflow body."
+metadata = { "gc.kind" = "scope", "gc.scope_name" = "review", "gc.scope_role" = "body" }
+
+[[steps]]
+id = "review-loop"
+title = "Review loop"
+description = "Check loop for iterative review and fixes."
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/adopt-pr-review-approved.sh"
+timeout = "2m"
+
+[[steps.children]]
+id = "review"
+title = "Review"
+description = "Review step with its own retry budget."
+
+[steps.children.retry]
+max_attempts = 2
+on_exhausted = "hard_fail"
+
+[[steps.children]]
+id = "apply-fixes"
+title = "Apply fixes"
+needs = ["review"]
+description = "Apply review feedback and mark the Check verdict."
+
+[steps.children.retry]
+max_attempts = 2
+on_exhausted = "hard_fail"
+`)
+
+	_, workflowID := startReviewWorkflow(t, cityDir, "mol-review-loop-iteration-smoke", map[string]string{})
+
+	workflow := waitForBeadClosed(t, cityDir, workflowID, 8*time.Minute)
+	if got := metaValue(workflow, "gc.outcome"); got != "pass" {
+		dumpWorkflowState(t, cityDir, workflowID)
+		t.Fatalf("workflow outcome = %q, want pass (review loop must approve in iteration 2)", got)
+	}
+
+	steps := listWorkflowSteps(t, cityDir, workflowID)
+	if hasStepWithSuffix(steps, "review-loop.iteration.3") {
+		dumpWorkflowState(t, cityDir, workflowID)
+		t.Fatalf("review loop reached iteration 3; iteration 2 should have approved; got: %v", steps)
+	}
+
+	type counters struct{ attempt, retryAttempt, iteration string }
+	for suffix, want := range map[string]counters{
+		"review-loop.iteration.1.apply-fixes.attempt.1": {attempt: "1", retryAttempt: "1", iteration: "1"},
+		"review-loop.iteration.2":                       {attempt: "2", iteration: "2"},
+		"review-loop.iteration.2.review":                {attempt: "2", iteration: "2"},
+		"review-loop.iteration.2.review.attempt.1":      {attempt: "2", retryAttempt: "1", iteration: "2"},
+		"review-loop.iteration.2.review.attempt.2":      {attempt: "2", retryAttempt: "2", iteration: "2"},
+		"review-loop.iteration.2.apply-fixes":           {attempt: "2", iteration: "2"},
+		"review-loop.iteration.2.apply-fixes.attempt.1": {attempt: "2", retryAttempt: "1", iteration: "2"},
+	} {
+		bead := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, suffix)
+		got := counters{
+			attempt:      metaValue(bead, "gc.attempt"),
+			retryAttempt: metaValue(bead, "gc.retry_attempt"),
+			iteration:    metaValue(bead, "gc.iteration"),
+		}
+		if got != want {
+			dumpWorkflowState(t, cityDir, workflowID)
+			t.Fatalf("%s counters (gc.attempt, gc.retry_attempt, gc.iteration) = %+v, want %+v", suffix, got, want)
+		}
+	}
+
+	for _, suffix := range []string{"review-loop.iteration.2.review", "review-loop.iteration.2.apply-fixes"} {
+		control := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, suffix)
+		if got := metaValue(control, "gc.outcome"); got != "pass" {
+			t.Fatalf("%s outcome = %q, want pass", suffix, got)
+		}
+	}
+}
+
 // --- helpers ---
 
 func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]string) string {

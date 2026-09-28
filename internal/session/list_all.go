@@ -338,6 +338,22 @@ func (s *Store) listAllBeads(opts ListAllOptions) ([]beads.Bead, error) {
 		Limit:         opts.Limit,
 		Live:          opts.Live,
 	}
+	if !opts.IncludeClosed && !opts.Live {
+		// Session bead status is open/closed; richer lifecycle states live in
+		// metadata. Stating the predicate keeps this census cache-servable
+		// under a partial prime, mirroring listSessionBeadsByMetadata. Scoped
+		// to !Live: a Live query bypasses CachingStore's cache path entirely
+		// (query.Live routes straight to the backing store — see
+		// CachingStore.List), so cacheServableForListQueryLocked never sees
+		// it and the predicate would be inert for cache-servability. Setting
+		// it anyway would change the query SHAPE of every Live+non-IncludeClosed
+		// census (e.g. the pool-availability live check in
+		// executePlannedPoolSessionBeadCreate) from {Live:true,Status:""} to
+		// {Live:true,Status:"open"}, which can collide with unrelated
+		// Status=="open"-keyed backing-store error/outage handling that has
+		// nothing to do with this cache fix.
+		base.Status = "open"
+	}
 	// CacheFirst peek — skipped when Live is set (Live wins; the caller demands
 	// a store read, not a cache peek).
 	if opts.CacheFirst && !opts.Live {

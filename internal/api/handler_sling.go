@@ -352,9 +352,33 @@ func (s *Server) slingStoreScopeForBead(beadID string) (rigName string, cityScop
 	return rig.Name, false
 }
 
+// sourceWorkflowStores lists every store the source-bead singleton guard must
+// scan for a live workflow root.
+//
+// Graph-first, for the same reason workflowStores() leads with the graph store:
+// a workflow root is graph class, so on a city that relocates the graph class
+// every live root is in the binding and NOT in the work stores below. Scanning
+// only those answered "no conflict" from stores that structurally cannot hold
+// the answer, and the sling admitted a second live workflow beside the first
+// (ga-nqdff). The leg is STRICT — a fault on the store that holds the answer
+// refuses the sling instead of degrading to the tolerated non-source-store
+// warning, because a binding fault is an error, never absence.
+//
+// It is skipped on a default (non-relocated) city, where GraphBeadStore() ==
+// CityBeadStore(), so the single-store enumeration stays byte-identical and no
+// store is scanned twice. Its ref reuses workflowStores()'s "graph:<city>"
+// spelling so the store_ref round trip has one parse, not two.
 func (s *Server) sourceWorkflowStores() []sling.SourceWorkflowStore {
-	stores := make([]sling.SourceWorkflowStore, 0, len(s.state.BeadStores())+1)
-	if cityStore := s.state.CityBeadStore(); cityStore != nil {
+	stores := make([]sling.SourceWorkflowStore, 0, len(s.state.BeadStores())+2)
+	cityStore := s.state.CityBeadStore()
+	if graphStore := s.state.GraphBeadStore().Store; graphStore != nil && graphStore != cityStore {
+		stores = append(stores, sling.SourceWorkflowStore{
+			Store:    graphStore,
+			StoreRef: sourceworkflow.GraphStoreRef(s.state.CityName()),
+			Strict:   true,
+		})
+	}
+	if cityStore != nil {
 		stores = append(stores, sling.SourceWorkflowStore{
 			Store:    cityStore,
 			StoreRef: "city:" + s.state.CityName(),

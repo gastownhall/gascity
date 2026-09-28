@@ -225,7 +225,7 @@ func TestGcExecLifecycleInitProcessEnvDoesNotLeakAmbientBEADS_DIRForGcBeadsK8s(t
 func TestGcExecStoreEnvProjectsGCBinForGcBeadsBd(t *testing.T) {
 	cityDir := t.TempDir()
 	oldResolve := resolveProviderLifecycleGCBinary
-	resolveProviderLifecycleGCBinary = func() string { return "/opt/gc/bin/gc" }
+	resolveProviderLifecycleGCBinary = func() (string, error) { return "/opt/gc/bin/gc", nil }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
 	env := gcExecStoreEnv(cityDir, execStoreTarget{
@@ -242,7 +242,7 @@ func TestGcExecStoreEnvProjectsGCBinForGcBeadsBd(t *testing.T) {
 func TestGcExecStoreEnvDoesNotProjectGCBinForUnrelatedExecProvider(t *testing.T) {
 	cityDir := t.TempDir()
 	oldResolve := resolveProviderLifecycleGCBinary
-	resolveProviderLifecycleGCBinary = func() string { return "/opt/gc/bin/gc" }
+	resolveProviderLifecycleGCBinary = func() (string, error) { return "/opt/gc/bin/gc", nil }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
 	env := gcExecStoreEnv(cityDir, execStoreTarget{
@@ -253,6 +253,38 @@ func TestGcExecStoreEnvDoesNotProjectGCBinForUnrelatedExecProvider(t *testing.T)
 
 	if got := env["GC_BIN"]; got != "" {
 		t.Fatalf("GC_BIN = %q, want empty for unrelated exec provider", got)
+	}
+}
+
+// gcExecStoreEnv opens a store for a read or a write. A gc whose own on-disk
+// path an upgrade removed must still serve the dashboard, the API and its
+// supervisor's reconciler, so an unresolvable GC_BIN degrades here rather than
+// failing every store open until the process restarts. The strict refusal stays
+// where bd re-invokes gc through a hook: the bd store bridge and the
+// provider-owned lifecycle env.
+func TestGcExecStoreEnvDegradesOnGCBinaryResolutionFailureForGcBeadsBd(t *testing.T) {
+	cityDir := t.TempDir()
+	original := resolveProviderLifecycleGCBinary
+	resolveProviderLifecycleGCBinary = func() (string, error) { return "", fmt.Errorf("unavailable") }
+	t.Cleanup(func() { resolveProviderLifecycleGCBinary = original })
+	stubRemovedGCExecutable(t)
+
+	degraded := gcExecStoreEnv(cityDir, execStoreTarget{
+		ScopeRoot: cityDir,
+		ScopeKind: "city",
+		Prefix:    "gc",
+	}, "exec:/tmp/gc-beads-bd")
+	if degraded["GC_STORE_ROOT"] != cityDir {
+		t.Fatalf("degraded env lost its store root: %v", degraded)
+	}
+
+	env := gcExecStoreEnv(cityDir, execStoreTarget{
+		ScopeRoot: cityDir,
+		ScopeKind: "city",
+		Prefix:    "gc",
+	}, "exec:/tmp/custom-provider")
+	if got := env["GC_BIN"]; got != "" {
+		t.Fatalf("GC_BIN = %q, want empty for unrelated provider", got)
 	}
 }
 

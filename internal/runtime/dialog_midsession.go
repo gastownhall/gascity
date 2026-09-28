@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"slices"
 	"strings"
 )
 
@@ -17,11 +18,19 @@ import (
 // dialog left above a later idle prompt or newer agent output, which would
 // otherwise satisfy the contains-based match and inject dismissal keys into a
 // live prompt.
+//
+// tailSpan bounds how many trailing non-blank lines of the capture match may
+// inspect: the dialog's full body must sit inside that bottom block. Without
+// it, match would scan the whole visible screen while tailAnchor checks only
+// the last line, so a stale dialog above a different active modal sharing the
+// same footer (e.g. Claude's spend-limit modal, which also ends in "Enter to
+// confirm") would satisfy both and receive the stale dialog's keys.
 type midSessionDialog struct {
 	name       string
 	match      func(string) bool
 	keys       []string
 	tailAnchor string
+	tailSpan   int
 }
 
 // midSessionDialogs lists the dialogs known to appear during a running
@@ -49,6 +58,7 @@ var midSessionDialogs = []midSessionDialog{
 		match:      containsClaudeResumeDialog,
 		keys:       []string{"Enter"},
 		tailAnchor: "Enter to confirm",
+		tailSpan:   6,
 	},
 	{
 		// Periodic "How is Claude doing this session?" feedback prompt.
@@ -57,6 +67,7 @@ var midSessionDialogs = []midSessionDialog{
 		match:      containsClaudeSessionFeedbackDialog,
 		keys:       []string{"0", "Enter"},
 		tailAnchor: "0: Dismiss",
+		tailSpan:   4,
 	},
 	{
 		// Provider session/usage-limit chooser ("You've hit your session
@@ -68,6 +79,7 @@ var midSessionDialogs = []midSessionDialog{
 		match:      containsClaudeSessionLimitDialog,
 		keys:       []string{"1", "Enter"},
 		tailAnchor: "Upgrade",
+		tailSpan:   4,
 	},
 }
 
@@ -86,9 +98,10 @@ var midSessionDialogs = []midSessionDialog{
 // scrollback is the first line of defense against matching an already-
 // dismissed dialog. On top of that, a dialog fires only when it is the
 // active bottom-most rendered block — its tailAnchor is on the last non-blank
-// line of the capture. Together these reject a fully rendered but stale
-// dialog left above a later idle prompt, which the contains-based matchers
-// alone would treat as live and inject dismissal keys into the real prompt.
+// line of the capture and its full body is within its last tailSpan non-blank
+// lines. Together these reject a fully rendered but stale dialog left above a
+// later idle prompt or a different active modal, which the contains-based
+// matchers alone would treat as live and inject dismissal keys into.
 func DismissMidSessionDialogs(
 	ctx context.Context,
 	peek func() (string, error),
@@ -103,7 +116,7 @@ func DismissMidSessionDialogs(
 	}
 	tail := lastNonBlankLine(content)
 	for _, dialog := range midSessionDialogs {
-		if dialog.match(content) && strings.Contains(tail, dialog.tailAnchor) {
+		if dialog.match(lastNonBlankLines(content, dialog.tailSpan)) && strings.Contains(tail, dialog.tailAnchor) {
 			if err := sendDialogKeys(ctx, sendKeys, dialog.keys, bypassDialogConfirmDelay); err != nil {
 				return false, err
 			}
@@ -128,12 +141,31 @@ func lastNonBlankLine(content string) string {
 	return ""
 }
 
+// lastNonBlankLines returns the final n non-blank lines of content, joined by
+// newlines in their original order. Blank lines are skipped rather than
+// counted, so tmux's trailing padding and blank separators inside a dialog do
+// not shrink the window. It returns all non-blank lines when content has
+// fewer than n.
+func lastNonBlankLines(content string, n int) string {
+	lines := strings.Split(content, "\n")
+	block := make([]string, 0, n)
+	for i := len(lines) - 1; i >= 0 && len(block) < n; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			block = append(block, lines[i])
+		}
+	}
+	slices.Reverse(block)
+	return strings.Join(block, "\n")
+}
+
 // containsClaudeSessionFeedbackDialog reports whether the pane is actively
 // showing the periodic "How is Claude doing this session?" feedback dialog. It
 // requires the question AND the "0: Dismiss" option line so that ordinary
 // scrollback merely quoting the question cannot false-match and receive a
 // spurious "0" keystroke when checked mid-session against a working pane. The
-// capture is scrollback-inclusive, so a single-phrase match here is hazardous.
+// pre-nudge caller reads only the visible screen, and DismissMidSessionDialogs
+// applies this matcher to the bottom-most block only, so the dialog must be the
+// active bottom block of the screen to match.
 func containsClaudeSessionFeedbackDialog(content string) bool {
 	return strings.Contains(content, "How is Claude doing this session?") &&
 		strings.Contains(content, "0: Dismiss")

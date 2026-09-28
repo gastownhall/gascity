@@ -52,7 +52,7 @@ func hookFanoutBaseOps(claim hookClaimFunc) hookClaimOps {
 	return hookClaimOps{
 		Claim:             claim,
 		EmitClaimRejected: func(string, string, string) {},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 		DrainAck:          func(io.Writer) error { return nil },
 		StampWorkMeta: func(context.Context, string, []string, string, string, map[string]string) error {
 			return nil

@@ -77,3 +77,49 @@ func TestRecentRunsUnlimitedStaysUnlimited(t *testing.T) {
 		}
 	}
 }
+
+// TestListTrackingPushesLimitToBacking guards the same class of read cost as
+// TestRecentRunsPushesLimitToBacking: the /v0/orders/feed read must bound the
+// backing scan instead of fetching every retained tracking bead and slicing
+// client-side.
+func TestListTrackingPushesLimitToBacking(t *testing.T) {
+	spy := &listSpyStore{Store: beads.NewMemStore()}
+	store := NewStore(beads.OrdersStore{Store: spy})
+
+	if _, err := store.ListTracking(20); err != nil {
+		t.Fatalf("ListTracking(): %v", err)
+	}
+	if len(spy.queries) == 0 {
+		t.Fatal("ListTracking issued no list query")
+	}
+	for i, q := range spy.queries {
+		if q.Limit != 20 {
+			t.Fatalf("query %d: Limit = %d, want 20 (the caller's bound must be threaded through)", i, q.Limit)
+		}
+		if !q.IncludeClosed {
+			t.Fatalf("query %d: IncludeClosed = false, want true; the feed lists completed runs too", i)
+		}
+		if !q.AllowBackingCreatedLimit {
+			t.Fatalf("query %d: AllowBackingCreatedLimit = false, want true; the bound must reach the backing", i)
+		}
+	}
+}
+
+// TestListTrackingUnlimitedStaysUnlimited keeps the explicit opt-out working,
+// matching RecentRuns's limit<=0-means-unlimited convention.
+func TestListTrackingUnlimitedStaysUnlimited(t *testing.T) {
+	spy := &listSpyStore{Store: beads.NewMemStore()}
+	store := NewStore(beads.OrdersStore{Store: spy})
+
+	if _, err := store.ListTracking(0); err != nil {
+		t.Fatalf("ListTracking(): %v", err)
+	}
+	if len(spy.queries) == 0 {
+		t.Fatal("ListTracking issued no list query")
+	}
+	for i, q := range spy.queries {
+		if q.Limit != 0 {
+			t.Fatalf("query %d: Limit = %d, want 0 (unlimited opt-out)", i, q.Limit)
+		}
+	}
+}

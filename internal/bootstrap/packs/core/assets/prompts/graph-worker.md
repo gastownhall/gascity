@@ -65,8 +65,8 @@ filesystem search. If no command exists for what you need, file a bead.
 
 `gc hook --claim` handles `gc.continuation_group` for you. After it claims a
 bead with `gc.root_bead_id` and `gc.continuation_group`, it preassigns other
-open, unassigned siblings in that group to `$GC_SESSION_NAME` so they stay with
-your live context. The JSON result lists them in `continuation_assigned`.
+open, unassigned siblings in that group to your session bead ID
+(`$GC_SESSION_ID`) so they stay with your live context. The JSON result lists them in `continuation_assigned`.
 
 ## Re-checking Before Drain
 
@@ -121,10 +121,12 @@ gc hook --claim --drain-ack --json
 
 ## Escalation
 
-When blocked, escalate — do not wait silently:
+When blocked, escalate — do not wait silently. `human` is the reserved
+recipient alias that resolves in every city; if your city staffs a
+coordinator role (e.g. the gastown pack's mayor), mail that instead:
 
 ```bash
-gc mail send mayor -s "BLOCKED: Brief description" -m "Details of the issue"
+gc mail send human -s "BLOCKED: Brief description" -m "Details of the issue"
 ```
 
 ## Context Exhaustion

@@ -8,7 +8,7 @@ import (
 )
 
 func TestResolveActiveWispStep_NoStore(t *testing.T) {
-	b, err := resolveActiveWispStep(nil, []string{"alice"})
+	b, err := resolveActiveWispStep(nil, nil, []string{"alice"})
 	if err != nil || b != nil {
 		t.Fatalf("expected nil, nil; got %v, %v", b, err)
 	}
@@ -16,7 +16,7 @@ func TestResolveActiveWispStep_NoStore(t *testing.T) {
 
 func TestResolveActiveWispStep_NoAssignees(t *testing.T) {
 	store := beads.NewMemStore()
-	b, err := resolveActiveWispStep(store, nil)
+	b, err := resolveActiveWispStep(store, store, nil)
 	if err != nil || b != nil {
 		t.Fatalf("expected nil, nil; got %v, %v", b, err)
 	}
@@ -45,7 +45,7 @@ func TestResolveActiveWispStep_FoundWithDescription(t *testing.T) {
 		Assignee:    "alice",
 	})
 
-	b, err := resolveActiveWispStep(store, []string{"alice"})
+	b, err := resolveActiveWispStep(store, store, []string{"alice"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestResolveActiveWispStep_SkipsEmptyDescription(t *testing.T) {
 		Assignee: "alice",
 	})
 
-	b, err := resolveActiveWispStep(store, []string{"alice"})
+	b, err := resolveActiveWispStep(store, store, []string{"alice"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestResolveActiveWispStep_WrongAssignee(t *testing.T) {
 		Assignee:    "bob",
 	})
 
-	b, err := resolveActiveWispStep(store, []string{"alice"})
+	b, err := resolveActiveWispStep(store, store, []string{"alice"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestResolveActiveWispStep_MultipleAssignees(t *testing.T) {
 		Assignee:    "bob",
 	})
 
-	b, err := resolveActiveWispStep(store, []string{"alice", "bob"})
+	b, err := resolveActiveWispStep(store, store, []string{"alice", "bob"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestResolveActiveWispStep_MoleculeInProgressStep(t *testing.T) {
 		ParentID:    mol.ID,
 	})
 
-	b, err := resolveActiveWispStep(store, []string{"alice"})
+	b, err := resolveActiveWispStep(store, store, []string{"alice"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestResolveActiveWispStep_MoleculeEntryStepFallback(t *testing.T) {
 		ParentID:    mol.ID,
 	})
 
-	b, err := resolveActiveWispStep(store, []string{"alice"})
+	b, err := resolveActiveWispStep(store, store, []string{"alice"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestResolveActiveWispStep_MoleculeNoSteps(t *testing.T) {
 		Assignee: "alice",
 	})
 
-	b, err := resolveActiveWispStep(store, []string{"alice"})
+	b, err := resolveActiveWispStep(store, store, []string{"alice"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestResolveActiveWispStep_WispTypeMolecule(t *testing.T) {
 		ParentID:    wisp.ID,
 	})
 
-	b, err := resolveActiveWispStep(store, []string{"alice"})
+	b, err := resolveActiveWispStep(store, store, []string{"alice"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestResolveActiveWispStep_AttachedMoleculeIDBridge(t *testing.T) {
 		t.Fatalf("SetMetadata(molecule_id): %v", err)
 	}
 
-	b, err := resolveActiveWispStep(store, []string{"alice"})
+	b, err := resolveActiveWispStep(store, store, []string{"alice"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -361,4 +361,76 @@ func contains(s, sub string) bool {
 			}
 			return false
 		}())
+}
+
+// TestResolveActiveWispStepSpansTheClassBoundary is the split-store shape: the
+// source work bead is in the work ledger, the root and its steps in the binding.
+func TestResolveActiveWispStepSpansTheClassBoundary(t *testing.T) {
+	// Disjoint ID spaces: two fresh MemStores both mint gc-1, so a wrong-store
+	// Get would collide and silently succeed.
+	work := beads.NewMemStore()
+	graph := beads.NewMemStoreFrom(100, nil, nil)
+
+	root := mustCreateInProgress(t, graph, beads.Bead{
+		Title: "Formula: mol-attached-work",
+		Type:  "molecule",
+	})
+	step := mustCreateInProgress(t, graph, beads.Bead{
+		Title:       "Step 1: attached implement",
+		Description: "Write the attached implementation",
+		Type:        "step",
+		Assignee:    "alice",
+		ParentID:    root.ID,
+	})
+
+	// The only agent-assigned in-progress bead, carrying the bridge stamp. It
+	// has a description, so losing the bridge returns THIS instead of the step.
+	source := mustCreateInProgress(t, work, beads.Bead{
+		Title:       "Source work bead",
+		Description: "Do the attached work",
+		Type:        "task",
+		Assignee:    "alice",
+	})
+	if err := work.SetMetadata(source.ID, beadmeta.MoleculeIDMetadataKey, root.ID); err != nil {
+		t.Fatalf("SetMetadata(molecule_id): %v", err)
+	}
+
+	b, err := resolveActiveWispStep(work, graph, []string{"alice"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if b == nil {
+		t.Fatal("resolution returned nil across the class boundary; the molecule_id bridge did not cross from the work store to the graph store")
+	}
+	if b.ID == source.ID {
+		t.Fatalf("resolution returned the source work bead %q; the bridge was lost and the legacy description fallback answered instead of the current step %q", source.ID, step.ID)
+	}
+	if b.ID != step.ID {
+		t.Errorf("got bead ID %q (type %q), want the bridged step %q", b.ID, b.Type, step.ID)
+	}
+}
+
+// TestResolveActiveWispStepKeepsTheLegacyFallbackOnWork pins the other side: with
+// no molecule anywhere, the legacy answer must still come from the WORK store.
+func TestResolveActiveWispStepKeepsTheLegacyFallbackOnWork(t *testing.T) {
+	work := beads.NewMemStore()
+	graph := beads.NewMemStoreFrom(100, nil, nil)
+
+	legacy := mustCreateInProgress(t, work, beads.Bead{
+		Title:       "Plain work bead",
+		Description: "No formula here",
+		Type:        "task",
+		Assignee:    "alice",
+	})
+
+	b, err := resolveActiveWispStep(work, graph, []string{"alice"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if b == nil {
+		t.Fatal("the legacy fallback returned nil; it must read the work store, which is where an agent's plain in-progress bead lives")
+	}
+	if b.ID != legacy.ID {
+		t.Errorf("got bead ID %q, want the work-store bead %q", b.ID, legacy.ID)
+	}
 }

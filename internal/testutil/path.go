@@ -38,6 +38,9 @@ func ShortTempDir(t *testing.T, prefix string) string {
 	if err != nil {
 		t.Fatalf("MkdirTemp(%q, %q): %v", root, prefix, err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Cleanup(func() {
+		saveFailureDiagnostics(t, dir)
+		_ = os.RemoveAll(dir)
+	})
 	return dir
 }

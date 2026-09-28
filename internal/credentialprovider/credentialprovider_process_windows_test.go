@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/testutil"
 	"golang.org/x/sys/windows"
 )
 
@@ -72,10 +71,10 @@ func TestCredentialProviderWindowsJobKillsDescendants(t *testing.T) {
 		if !errors.Is(mintErr, context.Canceled) {
 			t.Fatalf("Mint error = %v, want context cancellation", mintErr)
 		}
-	case <-time.After(testutil.ExecRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("Mint did not return after cancellation")
 	}
-	event, err := windows.WaitForSingleObject(process, uint32(testutil.ExecRaceTimeout/time.Millisecond))
+	event, err := windows.WaitForSingleObject(process, uint32(hangBudget/time.Millisecond))
 	if err != nil {
 		t.Fatalf("wait for descendant process %d: %v", pid, err)
 	}
@@ -167,10 +166,10 @@ func TestCredentialProviderWindowsJobCloseKillsDescendantsAfterParentExit(t *tes
 		if got, want := string(result.output.stdout), response+"\n"; got != want {
 			t.Fatalf("stdout = %q, want exact response %q", got, want)
 		}
-	case <-time.After(testutil.ExecRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("runCommand did not bound descendant-held response pipes after the provider parent exited")
 	}
-	event, err := windows.WaitForSingleObject(process, uint32(testutil.ExecRaceTimeout/time.Millisecond))
+	event, err := windows.WaitForSingleObject(process, uint32(hangBudget/time.Millisecond))
 	if err != nil {
 		t.Fatalf("wait for descendant process %d: %v", pid, err)
 	}
@@ -294,7 +293,7 @@ func waitForWindowsPIDFile[T any](t *testing.T, path string, done <-chan T, desc
 	t.Helper()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
-	deadline := time.NewTimer(testutil.ExecRaceTimeout + commandWaitDelay + commandKillGrace)
+	deadline := time.NewTimer(hangBudget)
 	defer deadline.Stop()
 	for {
 		raw, err := os.ReadFile(path)

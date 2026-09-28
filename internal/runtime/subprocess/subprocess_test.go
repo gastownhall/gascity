@@ -687,6 +687,49 @@ func TestEnvPassedToProcess(t *testing.T) {
 	t.Fatal("timed out waiting for env marker file")
 }
 
+func TestEmptyEnvOverrideIsAbsentFromProcess(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "env.txt")
+	t.Setenv("BEADS_DB", "ambient-database")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example")
+
+	p := newTestProvider(t)
+	err := p.Start(context.Background(), "env-withhold", runtime.Config{
+		Command: "env | sort > " + marker,
+		Env: map[string]string{
+			"BEADS_DB":               "",
+			"BEADS_DOLT_SERVER_HOST": "",
+			"BEADS_DIR":              "/selected/.beads",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop("env-withhold") //nolint:errcheck
+	p.mu.Lock()
+	conn := p.procs["env-withhold"]
+	p.mu.Unlock()
+	if conn == nil {
+		t.Fatal("environment child was not tracked")
+	}
+	select {
+	case <-conn.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for environment child process")
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if strings.Contains(got, "BEADS_DB=") || strings.Contains(got, "BEADS_DOLT_SERVER_HOST=") {
+		t.Fatalf("withheld variables reached child: %q", got)
+	}
+	if !strings.Contains(got, "BEADS_DIR=/selected/.beads\n") {
+		t.Fatalf("explicit environment did not reach child: %q", got)
+	}
+}
+
 func TestWorkDirSet(t *testing.T) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "pwd.txt")

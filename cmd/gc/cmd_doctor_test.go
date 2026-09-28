@@ -230,7 +230,7 @@ prefix = "fe"
 	})
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, false, false, 0, &stdout, &stderr)
+	_ = doDoctor(doctorOpts{}, &stdout, &stderr)
 
 	if citySkip == nil || *citySkip {
 		t.Fatalf("city dolt check skip = %v, want false when a bd-backed rig inherits the city endpoint", citySkip)
@@ -467,7 +467,7 @@ dolt_port = "3308"
 	})
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, false, false, 0, &stdout, &stderr)
+	_ = doDoctor(doctorOpts{}, &stdout, &stderr)
 
 	if !strings.Contains(stdout.String(), "canonical/compat Dolt drift") {
 		t.Fatalf("doctor output missing Dolt topology drift:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
@@ -499,7 +499,7 @@ source = "https://github.com/gastownhall/gc-actual-packs"
 	cleanupManagedDoltTestCity(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, true, false, 0, &stdout, &stderr)
+	_ = doDoctor(doctorOpts{Verbose: true}, &stdout, &stderr)
 	out := stdout.String() + stderr.String()
 	if !strings.Contains(out, "stale-local-pack-dirs") {
 		t.Fatalf("doctor output missing stale-local-pack-dirs check:\n%s", out)
@@ -688,7 +688,7 @@ func runDoctorForStaleLocalPackDirTest(t *testing.T, cityDir string) string {
 	cleanupManagedDoltTestCity(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, true, false, 0, &stdout, &stderr)
+	_ = doDoctor(doctorOpts{Verbose: true}, &stdout, &stderr)
 	return stdout.String() + stderr.String()
 }
 
@@ -716,7 +716,7 @@ func TestDoDoctorReportsLegacyBDSplitStore(t *testing.T) {
 	t.Cleanup(func() { cityFlag = origCityFlag })
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, false, false, 0, &stdout, &stderr)
+	_ = doDoctor(doctorOpts{}, &stdout, &stderr)
 	out := stdout.String() + stderr.String()
 	if !strings.Contains(out, "bd-split-store") {
 		t.Fatalf("doctor output missing bd-split-store check:\n%s", out)
@@ -1067,5 +1067,38 @@ func TestWriteDoctorJSONProjectsTimedOut(t *testing.T) {
 	// consumers of non-timed-out results see unchanged output.
 	if n := strings.Count(buf.String(), "timed_out"); n != 1 {
 		t.Fatalf("timed_out appears %d times, want exactly 1 (only the abandoned check); out=%s", n, buf.String())
+	}
+}
+
+// The wiring is the fix: RigWorktreesCheck only sees the per-bead
+// worktree population if buildDoctorChecks registers it in the per-rig
+// loop, and it must inherit that loop's suspended-rig skip like every
+// other rig check.
+func TestBuildDoctorChecksRegistersRigWorktreesCheck(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs: []config.Rig{
+			{Name: "awake", Path: "awake", Prefix: "aw"},
+			{Name: "sleeping", Path: "sleeping", Prefix: "sl", SuspendedOnStart: true},
+		},
+	}
+	checks := buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{
+		ControllerRunning:    true,
+		SkipCityDoltCheck:    true,
+		SkipManagedDoltCheck: true,
+		SkipRigDoltChecks:    true,
+	})
+
+	names := doctorCheckNames(checks)
+	if doctorCheckIndex(names, "rig:awake:worktrees") < 0 {
+		t.Errorf("rig:awake:worktrees not registered; names=%v", names)
+	}
+	if doctorCheckIndex(names, "rig:sleeping:worktrees") >= 0 {
+		t.Errorf("rig:sleeping:worktrees registered for a suspended rig; names=%v", names)
 	}
 }

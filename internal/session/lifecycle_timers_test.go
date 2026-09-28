@@ -37,6 +37,9 @@ func TestDecideMaxSessionAgeLadder(t *testing.T) {
 			reason:  "quarantine",
 			outcome: "deferred_quarantine",
 		},
+		// No "pinned" case here on purpose: the max-session-age caller does
+		// not report the durable pin as a blocker, so this ladder never sees
+		// it. cmd/gc's TestMaxSessionAgeBlockerInfo is what pins that.
 		{
 			name:   "unknown pending interaction must be gathered",
 			facts:  TimerFacts{Triggered: true},
@@ -128,6 +131,15 @@ func TestDecideIdleTimeoutLadder(t *testing.T) {
 			outcome: "deferred_quarantine",
 		},
 		{
+			// The idle ladder is the only one the durable pin reaches; the
+			// max-session-age caller withholds it (see that ladder's test).
+			name:    "pinned blocks the idle ladder",
+			facts:   TimerFacts{Triggered: true, Blocker: "pinned", Pending: PendingYes},
+			action:  TimerActionDefer,
+			reason:  "pinned",
+			outcome: "deferred_pinned",
+		},
+		{
 			name:   "unknown pending interaction must be gathered",
 			facts:  TimerFacts{Triggered: true},
 			action: TimerActionGatherPending,
@@ -145,8 +157,8 @@ func TestDecideIdleTimeoutLadder(t *testing.T) {
 			outcome: "deferred_busy",
 		},
 		{
-			name:    "free idle session stops",
-			facts:   TimerFacts{Triggered: true, Pending: PendingNo, AssignedWork: AssignedWorkNone},
+			name:    "free non-floor idle session stops",
+			facts:   TimerFacts{Triggered: true, Pending: PendingNo, AssignedWork: AssignedWorkNone, MinFloor: MinFloorNo},
 			action:  TimerActionStop,
 			reason:  "idle_timeout",
 			outcome: "stop",
@@ -200,7 +212,7 @@ func TestDecideMaxSessionAgePendingKeepsWakePass(t *testing.T) {
 }
 
 func TestDecideIdleTimeoutStopSleepReason(t *testing.T) {
-	dec := DecideIdleTimeout(TimerFacts{Triggered: true, Pending: PendingNo, AssignedWork: AssignedWorkNone})
+	dec := DecideIdleTimeout(TimerFacts{Triggered: true, Pending: PendingNo, AssignedWork: AssignedWorkNone, MinFloor: MinFloorNo})
 	if dec.SleepReason != "idle-timeout" {
 		t.Fatalf("sleep reason = %q, want %q", dec.SleepReason, "idle-timeout")
 	}
@@ -246,21 +258,103 @@ func TestDecideAssignedWorkExhausted(t *testing.T) {
 	}
 }
 
-// The gather loop must terminate: once both gatherable facts are known the
+// A min_active_sessions floor member with no assigned work is kept WARM: the
+// idle-timeout ladder gathers the floor fact after assigned work, then defers
+// the kill under its own trace/outcome so the concrete session is never
+// idle-killed and cold-recreated (sc-5mtyhy). MinFloorNo falls through to the
+// ordinary idle stop — an above-floor elastic session still idle-reclaims.
+func TestDecideIdleTimeoutMinFloorRung(t *testing.T) {
+	base := TimerFacts{Triggered: true, Pending: PendingNo, AssignedWork: AssignedWorkNone}
+
+	t.Run("unknown floor membership is gathered after assigned work", func(t *testing.T) {
+		dec := DecideIdleTimeout(base) // MinFloor defaults to MinFloorUnknown
+		if dec.Action != TimerActionGatherMinFloor {
+			t.Fatalf("action = %v, want TimerActionGatherMinFloor", dec.Action)
+		}
+	})
+
+	t.Run("floor member defers the idle kill (kept warm)", func(t *testing.T) {
+		f := base
+		f.MinFloor = MinFloorYes
+		dec := DecideIdleTimeout(f)
+		if dec.Action != TimerActionDefer {
+			t.Fatalf("action = %v, want TimerActionDefer", dec.Action)
+		}
+		if dec.TraceReason != "min_floor_idle_worker" || dec.TraceOutcome != "deferred_min_floor" {
+			t.Fatalf("trace = %q/%q, want min_floor_idle_worker/deferred_min_floor", dec.TraceReason, dec.TraceOutcome)
+		}
+		if dec.CancelDrain || dec.SkipWakePass {
+			t.Fatalf("min-floor deferral must not cancel drain or skip wake pass: %+v", dec)
+		}
+	})
+
+	t.Run("above-floor elastic session still stops", func(t *testing.T) {
+		f := base
+		f.MinFloor = MinFloorNo
+		dec := DecideIdleTimeout(f)
+		if dec.Action != TimerActionStop {
+			t.Fatalf("action = %v, want TimerActionStop", dec.Action)
+		}
+		if dec.TraceReason != "idle_timeout" || dec.SleepReason != string(SleepReasonIdleTimeout) {
+			t.Fatalf("non-floor idle session must stop with idle_timeout: %+v", dec)
+		}
+	})
+}
+
+// Assigned work is consulted BEFORE min-floor membership: a busy floor session
+// defers as assigned_work (feeding the same-bead exhausted backstop), never as
+// min_floor. The floor keep-warm rung only protects idle floor members.
+func TestDecideIdleTimeoutAssignedWorkBeatsMinFloor(t *testing.T) {
+	dec := DecideIdleTimeout(TimerFacts{
+		Triggered:    true,
+		Pending:      PendingNo,
+		AssignedWork: AssignedWorkHas,
+		MinFloor:     MinFloorYes,
+	})
+	if dec.Action != TimerActionDefer {
+		t.Fatalf("action = %v, want defer", dec.Action)
+	}
+	if dec.TraceReason != "assigned_work" || dec.TraceOutcome != "deferred_busy" {
+		t.Fatalf("trace = %q/%q, want assigned_work/deferred_busy (assigned work outranks min-floor)", dec.TraceReason, dec.TraceOutcome)
+	}
+}
+
+// The floor keep-warm exemption is idle-timeout only. Max-session-age never
+// consults MinFloor: an aged floor session is still restarted (defense-in-depth
+// churn), and the pool min-fill recreates it.
+func TestDecideMaxSessionAgeIgnoresMinFloor(t *testing.T) {
+	dec := DecideMaxSessionAge(TimerFacts{
+		Triggered:    true,
+		Pending:      PendingNo,
+		AssignedWork: AssignedWorkNone,
+		MinFloor:     MinFloorYes,
+	})
+	if dec.Action != TimerActionStop {
+		t.Fatalf("action = %v, want stop; max-age must not honor the floor exemption", dec.Action)
+	}
+	if dec.TraceReason != "max_session_age" {
+		t.Fatalf("trace reason = %q, want max_session_age", dec.TraceReason)
+	}
+}
+
+// The gather loop must terminate: once every gatherable fact is known the
 // decider may only defer or stop.
 func TestTimerDecisionsTerminate(t *testing.T) {
 	pendings := []PendingFact{PendingNo, PendingYes}
 	works := []AssignedWorkFact{AssignedWorkNone, AssignedWorkHas}
-	blockers := []string{"", "user_hold", "quarantine"}
+	minfloors := []MinFloorFact{MinFloorNo, MinFloorYes}
+	blockers := []string{"", "user_hold", "quarantine", "pinned"}
 	for _, b := range blockers {
 		for _, p := range pendings {
 			for _, w := range works {
-				facts := TimerFacts{Triggered: true, Blocker: b, Pending: p, AssignedWork: w}
-				for _, dec := range []TimerDecision{DecideMaxSessionAge(facts), DecideIdleTimeout(facts)} {
-					switch dec.Action {
-					case TimerActionDefer, TimerActionStop:
-					default:
-						t.Fatalf("facts %+v produced non-terminal action %v", facts, dec.Action)
+				for _, m := range minfloors {
+					facts := TimerFacts{Triggered: true, Blocker: b, Pending: p, AssignedWork: w, MinFloor: m}
+					for _, dec := range []TimerDecision{DecideMaxSessionAge(facts), DecideIdleTimeout(facts)} {
+						switch dec.Action {
+						case TimerActionDefer, TimerActionStop:
+						default:
+							t.Fatalf("facts %+v produced non-terminal action %v", facts, dec.Action)
+						}
 					}
 				}
 			}

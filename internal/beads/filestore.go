@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,13 +22,13 @@ type fileData struct {
 	// because Bead.Revision is json:"-" and never survives the on-disk []Bead.
 	// Without this, every reloadFromDisk (which runs before each write in
 	// cross-process flock mode) would reset all revisions to 0, breaking the
-	// monotonic-never-reused contract. Absent (legacy files) ≡ all zero.
+	// FileStore's monotonic-never-reused guarantee. Absent (legacy files) ≡ all zero.
 	Revisions map[string]int64 `json:"revisions,omitempty"`
 	// RevisionsSealed marks a file written by a revisions-aware binary. An
 	// OLDER binary's full rewrite drops both this marker and the revisions
 	// map while keeping the beads — the exact state in which fresh-from-zero
 	// revisions would REUSE previously issued tokens and break the
-	// monotonic-never-reused contract. Loading an unsealed file with beads
+	// FileStore's monotonic-never-reused guarantee. Loading an unsealed file with beads
 	// therefore re-seeds every revision at a deterministic floor far above
 	// any counter a prior writer could have issued (see
 	// applyBeadRevisionsSealed).
@@ -151,6 +152,20 @@ type FileStore struct {
 
 var _ ConditionalAssignmentReleaser = (*FileStore)(nil)
 
+// FileStore answers the edge-payload read through the MemStore it embeds, and
+// the answer — no edge here carries a payload — is as honest for the file store
+// as it is for the store inside it: FileStore adds JSON persistence around
+// MemStore's bead logic and no metadata path of its own, and its DepAdd
+// delegates straight through.
+//
+// Asserted rather than left to method promotion because a caller that cannot
+// ask a store treats it as UNABLE TO ANSWER, not as answering no — the
+// infra-class migration refuses such a source outright. A refactor that gave
+// FileStore its own DepAdd surface without this method would turn a store with
+// nothing to lose into a city that cannot cut over, and nothing else in the
+// tree would notice.
+var _ DepMetadataReader = (*FileStore)(nil)
+
 type fileFreshness struct {
 	known   bool
 	exists  bool
@@ -171,11 +186,26 @@ func (f fileFreshness) same(other fileFreshness) bool {
 	return f.size == other.size && f.modTime.Equal(other.modTime)
 }
 
+// FileStoreOption configures a FileStore at open time.
+type FileStoreOption func(*FileStore)
+
+// WithFileStoreIDPrefix sets the bead ID prefix this store mints under, mirroring
+// WithSQLiteStoreIDPrefix. Without it a file store mints "gc-<n>", so in a
+// multi-rig city every rig's file store collides on gc-N and convoy resolution
+// cannot uniquely address a bead. A blank/whitespace prefix keeps the default.
+func WithFileStoreIDPrefix(prefix string) FileStoreOption {
+	return func(s *FileStore) {
+		if strings.TrimSpace(prefix) != "" {
+			s.IDPrefix = normalizeIDPrefix(prefix)
+		}
+	}
+}
+
 // OpenFileStore opens or creates a file-backed bead store at path. All file
 // I/O goes through fs for testability. If the file exists, its contents are
 // loaded into memory. If it doesn't exist, the store starts empty. Parent
 // directories are created as needed.
-func OpenFileStore(fs fsys.FS, path string) (*FileStore, error) {
+func OpenFileStore(fs fsys.FS, path string, opts ...FileStoreOption) (*FileStore, error) {
 	if err := fs.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("opening file store: %w", err)
 	}
@@ -188,13 +218,17 @@ func OpenFileStore(fs fsys.FS, path string) (*FileStore, error) {
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &FileStore{
+			store := &FileStore{
 				MemStore:  NewMemStore(),
 				fs:        fs,
 				path:      path,
 				locker:    locker,
 				freshness: fileFreshness{known: true},
-			}, nil
+			}
+			for _, o := range opts {
+				o(store)
+			}
+			return store, nil
 		}
 		return nil, fmt.Errorf("opening file store: %w", err)
 	}
@@ -210,6 +244,9 @@ func OpenFileStore(fs fsys.FS, path string) (*FileStore, error) {
 		fs:       fs,
 		path:     path,
 		locker:   locker,
+	}
+	for _, o := range opts {
+		o(store)
 	}
 	// The JSON we just loaded and the file's current freshness can diverge if
 	// another handle rewrites the store between ReadFile and a follow-up Stat.

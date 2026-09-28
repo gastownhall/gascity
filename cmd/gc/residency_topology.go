@@ -23,12 +23,14 @@ package main
 // A constructor takes the opened work and rig stores it is handed and the
 // routes this process already resolved. It does not decide which rigs are
 // serving — a suspended rig is simply absent from the map it is given — and it
-// does not decide whether a binding mints truthfully: nothing in this build
-// verifies a binding's mint prefix, so MintsReserved stays false everywhere
-// here and the residence probe stays in every plan. The corpus already carries
-// the retired row, so the day verification ships this is a bit, not a redesign.
+// does not decide whether a binding mints truthfully: it asks the store, which
+// declares the namespace it mints into. The residence probe nonetheless stays
+// in every plan, because retirement also needs a binding known to hold no
+// relics and nothing here censuses residents. The corpus already carries the
+// retired row, so the day the census ships this is a bit, not a redesign.
 
 import (
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -50,6 +52,14 @@ func (s refusedClassStore) StorageRefusal() error { return s.err }
 // (storeref.StandingRefusal). The resolver keys its one tolerated non-fault on
 // it: a refused city still serves WORK from its work ledger, so a residence
 // probe for an id no relocated class could own may skip the refusing leg.
+//
+// That carve-out is CONDITIONAL, and storeref.ClassBinding.KnownLegacyResidents
+// is the condition that withdraws it. A binding proven to hold ids outside its
+// reserved namespaces has falsified the sentence above — the migration
+// preserved those ids, so a work-shaped id can be resident there — and
+// ClassBinding.probeRefusalPolicy raises the probe back to PolicyFatal for it.
+// New code written against this marker must not assume the tolerance is
+// unconditional.
 func (standingStorageRefusal) StandingStorageRefusal() {}
 
 // cliResidencyTopology builds the one-shot CLI's topology.
@@ -77,9 +87,9 @@ func cliResidencyTopology(cityPath string, cfg *config.City, work beads.Store, r
 // (buildSuspendedRigPathsForCity, threaded through the census arms) rather than
 // being re-derived here: the constructor is told, it does not decide.
 //
-// MintsReserved stays false for the same reason it does everywhere else —
-// nothing in this build verifies a binding's mint prefix — so the residence
-// probe stays in every plan.
+// The residence probe stays in every plan for the same reason it does
+// everywhere else: the mint bit is observed, but nothing censuses a binding's
+// relics, so the retirement condition's other half is never satisfied.
 func (cr *CityRuntime) residencyTopology(servingRigs map[string]beads.Store) storeref.Topology {
 	bindings, refused := residencyBindingsFromRoutes(cr.storageRoutes)
 	return assembleResidencyTopology(cr.cfg, cr.cityBeadStore(), servingRigs, bindings, refused)
@@ -104,6 +114,27 @@ func residencyTopologyForCity(cityPath string, cfg *config.City, work beads.Stor
 		return assembleResidencyTopology(cfg, work, rigs, bindings, refused)
 	}
 	return cliResidencyTopology(cityPath, cfg, work, rigs)
+}
+
+// residencyRoutesForCity returns the routes THIS process answers residency from
+// for cityPath: a running controller's registered ones, else the one-shot
+// funnel's.
+//
+// It is the routes half of the branch above, split out for the by-id door's
+// relic proof, which re-derives the bindings over a topology it already
+// resolved. That re-derivation must read the SAME routes the first one did.
+// Calling the funnel unconditionally would resolve it for a city a controller
+// registered, which is a second handle on the binding root — a duplicate
+// managed-Dolt server or a second sqlite writer, and the reason the
+// registration exists at all. The proof's own gate happens to exclude that case
+// today (a refused city aborts controller construction, so registered routes
+// are never refusing), but a branch that is correct only because of an
+// invariant three files away is one edit from being wrong.
+func residencyRoutesForCity(cityPath string) *storageRoutes {
+	if entry, ok := registeredResidencyEntry(cityPath); ok {
+		return entry.routes
+	}
+	return cliStorageRoutes(cityPath)
 }
 
 // registeredCityWorkStore returns the CITY WORK store the runtime serving
@@ -266,16 +297,96 @@ func cliResidencyBindings(cityPath string) ([]storeref.ClassBinding, error) {
 	if existing, raced := cliResidencyBindingsByCity[key]; raced {
 		return existing.bindings, existing.refused
 	}
+	// A nil map HERE is not the cold start the first section handles — that
+	// section made it non-nil before this goroutine ever left the lock. It means
+	// resetCLIResidencyBindings ran while this derivation was in flight, which
+	// happens on the shutdown path of a long-lived `gc start`. Storing anyway
+	// would do two wrong things at once: assign into a nil map, which panics the
+	// process during its own teardown, and re-populate a retired memo with
+	// bindings over stores closeCLIStorageRoutes has already closed. The answer
+	// is still correct for THIS caller, so it is returned unmemoized.
+	if cliResidencyBindingsByCity == nil {
+		return bindings, refused
+	}
 	cliResidencyBindingsByCity[key] = &cliResidencyBindingsEntry{bindings: bindings, refused: refused}
 	return bindings, refused
 }
 
-// resetCLIResidencyBindings drops the memo. Wired into closeCLIStorageRoutes's
-// caller-visible lifecycle by the tests that need a second city in one process.
+// cliRelocatedBinding is the one relocated class binding a city is served from.
+//
+// It carries the opened store rather than the storeref.ClassBinding it was
+// derived from, and that is the residency boundary rather than a convenience: a
+// caller handed the ClassBinding would read binding.Leg.Store, which is a
+// consumer picking a store out of a plan leg — the shape the boundary check
+// forbids, because a second consumer will pick a different one. The leg access
+// happens here, in the file that assembles legs, exactly once.
+//
+// Name is the operator-facing name of the configured [storage] binding, which is
+// not derivable from the ClassBinding: storeref carries a class REF
+// ("class:graph+sessions+…"), describing what the binding answers for and not
+// which configured binding it is. Operator text wants the latter.
+type cliRelocatedBinding struct {
+	Store   beads.Store
+	Classes []coordclass.Class
+	Name    string
+}
+
+// cliSoleClassBinding returns the single relocated class binding serving this
+// city, for the callers that answer EVERY reserved prefix from ONE store.
+//
+// # It turns a comment into a check
+//
+// The by-id front door and the claim route both used to ask
+// graphClassBinding — "which store serves the graph class" — and then answer
+// for sessions, convoy and mail ids out of that same store. That is correct
+// only because storageSplitShapeOf admits a split only when all five
+// infrastructure classes name the same binding and refuses a per-class fan-out
+// outright, and until now that argument lived entirely in a comment. Reading
+// the grouped bindings instead makes it a runtime condition: two bindings is a
+// fan-out neither caller can serve, and it says so rather than quietly picking
+// the graph one and letting a sessions-class read come back truthfully absent.
+//
+// # The refusal is carried, not returned
+//
+// A city configured for a binding it has not converged on still produces a
+// binding here — a refusedClassStore whose every operation returns the boot
+// gate's sentence — and cliResidencyBindings reports that refusal alongside it.
+// Both callers want the STORE in that case, exactly as they got it before: the
+// refusal reaches them through the reads they were going to make anyway, and is
+// classified there. Neither classifies it itself any more: bdByIDClassDoor.resolve
+// runs storeref's plan (ga-qdt5y.18) and hookClaimClassRoute.holds runs the same
+// plan over its own captured frame (ga-qdt5y.16), and the plan tolerates the
+// refusal on a residence probe and surfaces it on the authority leg.
+// Returning it here instead would collapse "this city cannot be served" into
+// "this city relocates nothing", which sends those reads back to the work
+// ledger the beads were migrated off — the exact stale-answer path the door was
+// built to close.
+func cliSoleClassBinding(cityPath string) (cliRelocatedBinding, bool, error) {
+	bindings, _ := cliResidencyBindings(cityPath)
+	switch len(bindings) {
+	case 0:
+		return cliRelocatedBinding{}, false, nil
+	case 1:
+		return cliRelocatedBinding{
+			Store:   bindings[0].Leg.Store,
+			Classes: bindings[0].Classes,
+			Name:    cliStorageRoutes(cityPath).binding,
+		}, true, nil
+	default:
+		return cliRelocatedBinding{}, false, fmt.Errorf(
+			"this city serves its coordination classes from %d separate bindings; %s",
+			len(bindings), storageSupportedTopologyStatement)
+	}
+}
+
+// resetCLIResidencyBindings drops the memo wholesale. closeCLIStorageRoutes
+// calls it: this grouping is DERIVED from the routes that call closes, so it
+// cannot outlive them.
 func resetCLIResidencyBindings() {
 	cliResidencyBindingsMu.Lock()
 	cliResidencyBindingsByCity = nil
 	cliResidencyBindingsMu.Unlock()
+	resetProvenRelicRefs()
 }
 
 // dropCLIResidencyBindings drops one city's memoized funnel answer.
@@ -283,6 +394,7 @@ func dropCLIResidencyBindings(key string) {
 	cliResidencyBindingsMu.Lock()
 	delete(cliResidencyBindingsByCity, key)
 	cliResidencyBindingsMu.Unlock()
+	dropProvenRelicRefs(key)
 }
 
 // residencyBindingsFromRoutes groups the relocated classes by the STORE that
@@ -297,15 +409,46 @@ func dropCLIResidencyBindings(key string) {
 // # Why a map keyed by beads.Store is safe HERE and is not in the resolver
 //
 // storeref.dedupeLegs cannot key a map on a store — beads.Store is an interface,
-// and an implementation whose dynamic type carries a slice is neither hashable
-// nor ==-able, so a caller's store panics it. This map is confined to the
-// CONSTRUCTORS: every value in it comes from routes.storeFor, which returns what
-// storage boot opened — a *SQLiteStore, a *BdStore, a *CachingStore or a
-// refusedClassStore, all pointer-typed and therefore reference-identified. Same
-// confinement for relocatedGraphLegFrom's `binding == cityStore`. A route that
-// ever yields a value-typed store makes both of these the resolver's bug, one
-// file over; reuse storeref's identity-based set at that point.
+// and an implementation whose dynamic type carries a slice, a map or a func is
+// neither hashable nor ==-able, so a caller's store panics it. This map is
+// confined to the CONSTRUCTORS: every value in it comes from routes.storeFor,
+// which returns what storage boot opened — *SQLiteStore, *BdStore and
+// *CachingStore, all pointer-typed and so reference-identified, plus
+// refusedClassStore, which is a value carrying one error field.
+//
+// That last one is comparable rather than reference-identified, and the
+// difference is visible: two refusedClassStore values built from the SAME error
+// compare equal, so a refused city's five classes group into one binding even
+// though storeFor handed back five separate values. That is the answer this
+// build wants — a refused city is refused as a whole, and cliSoleClassBinding
+// reports one binding for it rather than a five-way fan-out — but it is a
+// property of the type being comparable, not of the map being identity-keyed,
+// and a second value-typed route with a differing field would group differently
+// for the same reason. Same confinement for relocatedGraphLegFrom's
+// `binding == cityStore`. A route that ever yields a NON-comparable store makes
+// both of these the resolver's bug, one file over; reuse storeref's
+// identity-based set at that point.
 func residencyBindingsFromRoutes(routes *storageRoutes) ([]storeref.ClassBinding, error) {
+	return residencyBindingsFromRoutesWithProof(routes, nil)
+}
+
+// residencyBindingsFromRoutesWithProof is the grouping plus a relic PROOF the
+// caller took, for the one plane that has one: the by-id door on a refused
+// city (by_id_relic_proof.go).
+//
+// The proof cannot come from these routes, and that is why it is a parameter.
+// A refused city's every infrastructure class resolves to a refusedClassStore,
+// so routes.hasLegacyResidents answers the pessimistic default and the live
+// boot census never ran — there was no store for it to read. The by-id door
+// opens the configured binding itself and censuses it, then hands the verdict
+// back in here so the binding it applies to is derived exactly once, by this
+// function, for both the proof side and the plan side. Spelling the ref twice
+// is the failure d94358b5aa was written against: the two would agree today and
+// the lookup would miss silently the day either narrowed its class set.
+//
+// A nil proof is the honest "no evidence", which is what every other caller
+// has. It is also the safe one: this bit only ever DENIES a read.
+func residencyBindingsFromRoutesWithProof(routes *storageRoutes, known func(storeref.StoreRef) bool) ([]storeref.ClassBinding, error) {
 	byStore := map[beads.Store][]coordclass.Class{}
 	var order []beads.Store
 	for _, class := range coordclass.Classes() {
@@ -321,33 +464,52 @@ func residencyBindingsFromRoutes(routes *storageRoutes) ([]storeref.ClassBinding
 		}
 		byStore[store] = append(byStore[store], class)
 	}
-	return residencyBindingsFor(order, byStore)
+	return residencyBindingsFor(order, byStore, routes.hasLegacyResidents, known)
 }
 
 // residencyBindingsFor turns a store->classes grouping into bindings, and
 // reports the standing refusal when any binding is a refusing store.
-func residencyBindingsFor(order []beads.Store, byStore map[beads.Store][]coordclass.Class) ([]storeref.ClassBinding, error) {
-	var refused error
-	bindings := make([]storeref.ClassBinding, 0, len(order))
-	for _, store := range order {
-		classes := byStore[store]
-		bindings = append(bindings, storeref.ClassBinding{
-			Classes:  classes,
-			Prefixes: reservedPrefixesFor(classes),
-			Leg:      storeref.Leg{Ref: storeref.ClassRef(classes), Store: store},
-			// MintsReserved and HasLegacyResidents stay false: nothing in this
-			// build verifies a binding's mint prefix or censuses its relics, so
-			// the residence probe stays in every plan.
-		})
-		if refusing, ok := store.(storeref.RefusingStore); ok && refused == nil {
-			refused = refusing.StorageRefusal()
-		}
-	}
-	if len(bindings) == 0 {
-		return nil, nil
-	}
-	sort.SliceStable(bindings, func(i, j int) bool { return bindings[i].Leg.Ref < bindings[j].Leg.Ref })
-	return bindings, refused
+//
+// The body is storeref.BuildBindings, shared with the API plane. What survives
+// here is the only thing that is this plane's own: which options it passes.
+// storageRoutes resolves every coordination class directly, so there is no
+// blind spot to correct for and the observed class set stands as observed.
+//
+// relics answers the boot census's question for a binding store. A nil one is
+// the pessimistic answer for every store, which is what a caller holding no
+// censused routes is entitled to claim.
+//
+// known answers the proof question for a binding ref, and its nil is the
+// OPPOSITE default: no proof is no evidence, and this bit only ever denies.
+func residencyBindingsFor(order []beads.Store, byStore map[beads.Store][]coordclass.Class, relics func(beads.Store) bool, known func(storeref.StoreRef) bool) ([]storeref.ClassBinding, error) {
+	return storeref.BuildBindings(order, byStore, storeref.BindingOptions{Relics: relics, KnownRelics: known})
+}
+
+// soleBindingResidency derives the bindings for a caller that holds ONE opened
+// class store and no census — the shape a route constructed over a bare store is
+// in, with no routes behind it to ask.
+//
+// It lives here rather than at that call site because this file is where the
+// city's class sets are named, and it goes through storeref.BuildBinding for
+// the reason every other constructor goes through BuildBindings: Prefixes,
+// Classes, Ref and both retirement bits then come from the one derivation, so
+// a topology built from a bare store cannot disagree with one built from a city
+// about what a binding's namespaces are.
+//
+// The zero BindingOptions is the honest verdict for a caller that took no
+// census, and its two nil evidence funcs mean opposite things by design. A nil
+// relics func reads as HasLegacyResidents=true for every store, which keeps the
+// residence probe running. A nil proof func reads as KnownLegacyResidents=false
+// — a bit that only ever DENIES a read must never be asserted without evidence.
+//
+// store reaches BuildBinding as a MAP KEY, so it inherits
+// residencyBindingsFromRoutes's confinement verbatim: a beads.Store whose
+// dynamic type carries a slice, a map or a func is not hashable and panics
+// there. Every caller's store is one storage boot opened or one a test wrapped
+// around it, all pointer- or field-comparable, which is the same argument that
+// makes the grouping above safe.
+func soleBindingResidency(store beads.Store) ([]storeref.ClassBinding, error) {
+	return storeref.BuildBinding(store, infrastructureClasses(), storeref.BindingOptions{})
 }
 
 // infrastructureClasses is the class set a whole split relocates: every
@@ -361,17 +523,6 @@ func infrastructureClasses() []coordclass.Class {
 		}
 	}
 	return classes
-}
-
-// reservedPrefixesFor returns the reserved id prefixes a class set mints.
-func reservedPrefixesFor(classes []coordclass.Class) []string {
-	prefixes := make([]string, 0, len(classes))
-	for _, class := range classes {
-		if prefix, ok := config.ReservedClassPrefix(class.String()); ok {
-			prefixes = append(prefixes, prefix)
-		}
-	}
-	return prefixes
 }
 
 // assembleResidencyTopology puts the work leg, the rig legs and the bindings

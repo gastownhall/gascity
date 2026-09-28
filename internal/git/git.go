@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -80,29 +81,74 @@ func (g *Git) DefaultBranch() (string, error) {
 	return "main", nil
 }
 
-// ProbeDefaultBranch returns the repo's mainline branch name with a richer
-// fallback chain than DefaultBranch:
-//  1. refs/remotes/origin/HEAD symref (the configured default)
-//  2. the currently checked-out branch (when origin/HEAD is unset, the
-//     first branch is usually the mainline)
-//  3. empty string (caller decides)
+// ProbeDefaultBranch returns the repo's mainline branch name. See
+// ProbeDefaultBranchFrom for the fallback chain; this drops the remote the
+// answer came from.
+func (g *Git) ProbeDefaultBranch() string {
+	branch, _ := g.ProbeDefaultBranchFrom()
+	return branch
+}
+
+// ProbeDefaultBranchFrom returns the repo's mainline branch name and the
+// remote whose HEAD supplied it, with a richer fallback chain than
+// DefaultBranch:
+//  1. refs/remotes/origin/HEAD symref (the conventional default)
+//  2. refs/remotes/<remote>/HEAD for every other configured remote, in
+//     `git remote` order — a repo whose remote is named something other than
+//     origin still has a mainline, and guessing from the checked-out branch
+//     instead silently registers a feature branch as the rig's target
+//  3. the currently checked-out branch, reported with an empty remote so
+//     callers can say the mainline was inferred rather than read
+//  4. empty branch and remote (caller decides)
 //
 // Use this at registration time (gc rig add) where we want to record the
 // repo's actual mainline rather than a generic "main" placeholder.
-func (g *Git) ProbeDefaultBranch() string {
-	if out, err := g.run("symbolic-ref", "refs/remotes/origin/HEAD"); err == nil {
-		ref := strings.TrimSpace(out)
-		if branch := strings.TrimPrefix(ref, "refs/remotes/origin/"); branch != "" {
-			return branch
+func (g *Git) ProbeDefaultBranchFrom() (branch, remote string) {
+	for _, name := range g.remoteNamesOriginFirst() {
+		ref := "refs/remotes/" + name + "/HEAD"
+		out, err := g.run("symbolic-ref", ref)
+		if err != nil {
+			continue
+		}
+		if b := strings.TrimPrefix(strings.TrimSpace(out), "refs/remotes/"+name+"/"); b != "" {
+			return b, name
 		}
 	}
-	if branch, err := g.CurrentBranch(); err == nil {
-		branch = strings.TrimSpace(branch)
-		if branch != "" && branch != "HEAD" {
-			return branch
+	if b, err := g.CurrentBranch(); err == nil {
+		b = strings.TrimSpace(b)
+		if b != "" && b != "HEAD" {
+			return b, ""
 		}
 	}
-	return ""
+	return "", ""
+}
+
+// remoteNamesOriginFirst lists the repo's configured remotes with "origin"
+// hoisted to the front, so the conventional remote keeps winning when a repo
+// has several. Returns just {"origin"} when the remote list is unreadable, so
+// the probe still behaves like it always has on a broken or bare-ish repo.
+func (g *Git) remoteNamesOriginFirst() []string {
+	out, err := g.run("remote")
+	if err != nil {
+		return []string{"origin"}
+	}
+	names := []string{}
+	hasOrigin := false
+	for _, line := range strings.Split(out, "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" {
+			continue
+		}
+		if name == "origin" {
+			hasOrigin = true
+			continue
+		}
+		names = append(names, name)
+	}
+	if hasOrigin || len(names) == 0 {
+		return append([]string{"origin"}, names...)
+	}
+	return names
 }
 
 // CheckoutDetach switches the working tree to a detached HEAD at ref.
@@ -478,7 +524,7 @@ func parseWorktreeList(output string) []Worktree {
 		}
 		switch {
 		case strings.HasPrefix(line, "worktree "):
-			current.Path = canonicalWorktreePath(strings.TrimPrefix(line, "worktree "))
+			current.Path = canonicalWorktreePath(unquoteGitPath(strings.TrimPrefix(line, "worktree ")))
 		case strings.HasPrefix(line, "HEAD "):
 			current.Head = strings.TrimPrefix(line, "HEAD ")
 		case strings.HasPrefix(line, "branch "):
@@ -492,6 +538,22 @@ func parseWorktreeList(output string) []Worktree {
 		worktrees = append(worktrees, current)
 	}
 	return worktrees
+}
+
+// unquoteGitPath decodes git's C-style quoting, which porcelain output
+// applies to any path containing non-ASCII or control characters. Consuming
+// the quoted text verbatim would canonicalize a registered worktree to a
+// path that matches nothing, and the safety scans built on it would report a
+// live registration as absent.
+func unquoteGitPath(path string) string {
+	if !strings.HasPrefix(path, `"`) {
+		return path
+	}
+	unquoted, err := strconv.Unquote(path)
+	if err != nil {
+		return path
+	}
+	return unquoted
 }
 
 func canonicalWorktreePath(path string) string {

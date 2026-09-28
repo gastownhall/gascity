@@ -22,12 +22,21 @@ import (
 
 const corpusDir = "testdata/corpus"
 
-// rehydrateTimestamps swaps the canonical "<TS>" placeholder for a real RFC3339
-// timestamp so blobs decode into bdIssue's time.Time fields. The committed
-// corpus stays canonicalized (the byte-stable cross-version diff anchor); only
-// the in-memory copy under test is rehydrated.
-func rehydrateTimestamps(b []byte) []byte {
-	return bytes.ReplaceAll(b, []byte(`"<TS>"`), []byte(`"2026-01-01T00:00:00Z"`))
+// rehydratePlaceholders swaps the corpus's canonical placeholders for real
+// values so blobs decode into bdIssue's typed fields: "<TS>" for an RFC3339
+// timestamp, "<REVISION>" for a decimal-string CAS token. The committed corpus
+// stays canonicalized (the byte-stable cross-version diff anchor); only the
+// in-memory copy under test is rehydrated.
+//
+// Note the revision replacement keeps bd's own quoting: bd emits the token as a
+// JSON STRING, and bdRevision.UnmarshalJSON is what turns it into an int64. A
+// bare number here would test a shape bd no longer sends.
+//
+// version.json's "<VERSION>"/"<BRANCH>"/"<BUILD>" are deliberately not handled —
+// no gascity decoder reads that blob, so rehydrating them would be dead code.
+func rehydratePlaceholders(b []byte) []byte {
+	b = bytes.ReplaceAll(b, []byte(`"<TS>"`), []byte(`"2026-01-01T00:00:00Z"`))
+	return bytes.ReplaceAll(b, []byte(`"<REVISION>"`), []byte(`"1767225600000000001"`))
 }
 
 func loadCorpusBlob(t *testing.T, rel string) []byte {
@@ -43,7 +52,7 @@ func loadCorpusBlob(t *testing.T, rel string) []byte {
 // committed bd show shape into a fully-populated bdIssue, including the nested
 // dependency. A bd wire change to any of these fields breaks this offline.
 func TestCorpusFlatShowDecodes(t *testing.T) {
-	issues, err := parseIssuesTolerant(rehydrateTimestamps(loadCorpusBlob(t, "flat/show.json")))
+	issues, err := parseIssuesTolerant(rehydratePlaceholders(loadCorpusBlob(t, "flat/show.json")))
 	if err != nil {
 		t.Fatalf("parseIssuesTolerant(flat/show): %v", err)
 	}
@@ -75,7 +84,7 @@ func TestCorpusFlatShowDecodes(t *testing.T) {
 // decode cleanly through the same tolerant parser gascity uses in production.
 func TestCorpusFlatListReadyDecode(t *testing.T) {
 	for _, name := range []string{"flat/list.json", "flat/ready.json"} {
-		if _, err := parseIssuesTolerant(rehydrateTimestamps(loadCorpusBlob(t, name))); err != nil {
+		if _, err := parseIssuesTolerant(rehydratePlaceholders(loadCorpusBlob(t, name))); err != nil {
 			t.Errorf("parseIssuesTolerant(%s): %v", name, err)
 		}
 	}
@@ -85,7 +94,7 @@ func TestCorpusFlatListReadyDecode(t *testing.T) {
 // bare issue object (not an array) that gascity decodes as a single bdIssue.
 func TestCorpusCreateDecodesSingleIssue(t *testing.T) {
 	var issue bdIssue
-	if err := json.Unmarshal(rehydrateTimestamps(loadCorpusBlob(t, "flat/create_root.json")), &issue); err != nil {
+	if err := json.Unmarshal(rehydratePlaceholders(loadCorpusBlob(t, "flat/create_root.json")), &issue); err != nil {
 		t.Fatalf("decode flat/create_root: %v", err)
 	}
 	if issue.ID != "corpus-root" {
@@ -115,7 +124,7 @@ func TestCorpusErrorEnvelopeClassified(t *testing.T) {
 // the signal to update them as part of the coordinated migration, not a
 // surprise in production.
 func TestCorpusV2EnvelopeIsForwardIncompatible(t *testing.T) {
-	if _, err := parseIssuesTolerant(rehydrateTimestamps(loadCorpusBlob(t, "envelope/show.json"))); err == nil {
+	if _, err := parseIssuesTolerant(rehydratePlaceholders(loadCorpusBlob(t, "envelope/show.json"))); err == nil {
 		t.Fatal("decoder parsed the v2 {schema_version,data} envelope; gascity gained v2 support — update the forward-compat expectations and the coordination protocol")
 	}
 	if detail := bdStdoutErrorDetail(loadCorpusBlob(t, "envelope/error.json")); detail != "" {

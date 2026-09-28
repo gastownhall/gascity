@@ -9,23 +9,20 @@ import (
 )
 
 // TestNativeDoltStoreMetadataCASConformance holds NativeDoltStore to the
-// narrow value-CAS contract, including both traps the in-tree implementations
-// historically diverged on.
-//
-// The contention leg is declared unevaluatable HERE and only here: the
-// in-memory fixture behind this factory snapshots for rollback and then runs
-// the transaction callback unlocked, so concurrent CAS calls interleave freely
-// no matter how the store behaves. The property is not waived — it is proven
-// against real Dolt by
-// TestNativeDoltStoreMetadataCASContentionAgainstRealDolt (build tag
-// `integration`), where 8 racers yield exactly one winner.
+// complete value-CAS contract. The in-memory native fixture serializes
+// transaction callbacks so its contention behavior matches real Dolt.
 func TestNativeDoltStoreMetadataCASConformance(t *testing.T) {
-	beadstest.RunMetadataCASConformanceWithOptions(t, "NativeDoltStore",
+	beadstest.RunMetadataCASConformance(t, "NativeDoltStore",
+		func(_ *testing.T) beads.Store { return beads.NewNativeDoltStoreForConformance() })
+}
+
+func TestNativeDoltStoreConditionalWriterConformance(t *testing.T) {
+	beadstest.RunConditionalWriterConformanceWithOptions(t, "NativeDoltStore",
 		func(_ *testing.T) beads.Store { return beads.NewNativeDoltStoreForConformance() },
-		beadstest.MetadataCASOptions{
-			FixtureLacksIsolationReason: "nativeDoltMemStorage.RunInTransaction models rollback but not " +
-				"isolation (it unlocks before running the callback); contention is covered against real " +
-				"Dolt by TestNativeDoltStoreMetadataCASContentionAgainstRealDolt (-tags=integration)",
+		beadstest.ConditionalWriterOptions{
+			RowBackedMutationFlavors: true,
+			RestrictedUpdateFields:   true,
+			SuppliesCurrent:          true,
 		},
 	)
 }
