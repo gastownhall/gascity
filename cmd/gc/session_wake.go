@@ -69,6 +69,9 @@ func preWakeCommit(
 		Now:               clk.Now(),
 		SleepReason:       sleepReason,
 		FreshWake:         freshWake,
+		// A retry of a claimed pending create continues its episode, so the
+		// stale-create bound must keep measuring from the episode start.
+		EpisodePendingCreateStartedAt: pendingCreateEpisodeStartedAt(info),
 	})
 	if writeErr := sessFront.ApplyPatch(info.ID, batch); writeErr != nil {
 		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
@@ -76,6 +79,26 @@ func preWakeCommit(
 	traceFreshWakeMetadataReset(name, freshWakeResetPriorValues(info), batch, freshWake)
 
 	return newGen, token, batch, nil
+}
+
+// pendingCreateEpisodeStartedAt returns the pending_create_started_at a wake
+// must carry forward, or "" when the wake opens a new episode and should stamp
+// a fresh one.
+//
+// Only a held pending_create_claim continues an episode. Every site that sets
+// the claim (bead creation, named-session reopen, wake requests) stamps a
+// fresh marker in the same write, so while the claim is held the marker is the
+// start of the current episode. Claimed rows are also the only ones whose
+// stale-create rollback checks the configured start lease first, so keeping an
+// old marker cannot make an in-flight start look stale. A claimless wake keeps
+// the per-attempt stamp: the lifecycle projection ages a claimless creating
+// row out on that marker alone, and an inherited one could project a healthy
+// start asleep mid-spawn.
+func pendingCreateEpisodeStartedAt(info sessions.Info) string {
+	if !info.PendingCreateClaim {
+		return ""
+	}
+	return info.PendingCreateStartedAt
 }
 
 // freshWakeResetPriorValues reconstructs the pre-reset values of the fresh-wake
