@@ -385,3 +385,35 @@ func TestCoreEscalationScriptContract(t *testing.T) {
 		})
 	}
 }
+
+// TestConvoyAutocloseBackstopOrder pins the shape of the bundled backstop
+// order: a city-scoped, idempotent cooldown exec of `gc convoy check`, so the
+// scan runs once per city rather than once per importing rig.
+func TestConvoyAutocloseBackstopOrder(t *testing.T) {
+	const file = "convoy-autoclose-backstop.toml"
+	o := readOrder(t, file)
+	if err := orders.Validate(o); err != nil {
+		t.Fatalf("%s failed validation: %v", file, err)
+	}
+	if o.Trigger != "cooldown" {
+		t.Errorf("trigger = %q, want %q", o.Trigger, "cooldown")
+	}
+	if o.On != "" {
+		t.Errorf("on = %q, want empty for a cooldown order", o.On)
+	}
+	if !o.IsExec() {
+		t.Errorf("want exec dispatch, got formula %q", o.Formula)
+	}
+	if o.Exec != "gc convoy check" {
+		t.Errorf("exec = %q, want %q", o.Exec, "gc convoy check")
+	}
+	if o.Pool != "" {
+		t.Errorf("exec orders must not set a pool, got %q", o.Pool)
+	}
+	if !o.IsCityScoped() {
+		t.Errorf("scope = %q, want city", o.Scope)
+	}
+	if !o.Idempotent {
+		t.Error("idempotent = false, want true")
+	}
+}

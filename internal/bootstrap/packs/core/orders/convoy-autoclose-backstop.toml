@@ -1,0 +1,10 @@
+# Reconciles convoys that missed the reactive bead.closed autoclose path.
+# The command scans all configured stores, so this runs once per city rather
+# than once for every rig that imports the bundled core pack.
+[order]
+description = "Reconcile completed convoys after missed close events"
+scope = "city"
+trigger = "cooldown"
+interval = "5m"
+exec = "gc convoy check"
+idempotent = true
