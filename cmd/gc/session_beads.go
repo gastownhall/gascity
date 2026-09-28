@@ -878,11 +878,13 @@ func sessionAssignmentIdentifiers(sessionBead beads.Bead) []string {
 }
 
 // sessionAssignmentIdentifiersForConfig extends the persisted session-bead
-// identifiers with the configured named-session identity when a recovered bead
-// is missing identity metadata. Keep this fallback aligned with
-// sessionAssigneeMatches and compute_awake_bridge's AwakeNamedSession fields.
+// identifiers with the session's stable alias (stableAssignmentAliasForConfig)
+// and with the configured named-session identity when a recovered bead is
+// missing identity metadata. Keep these additions aligned with
+// sessionAssigneeMatches and compute_awake_bridge's AwakeSessionBead.Alias and
+// AwakeNamedSession fields.
 func sessionAssignmentIdentifiersForConfig(sessionBead beads.Bead, cfg *config.City) []string {
-	raw := sessionAssignmentIdentifierRaw(sessionBead)
+	raw := append(sessionAssignmentIdentifierRaw(sessionBead), stableAssignmentAliasForConfig(sessionBead, cfg))
 	if cfg == nil ||
 		strings.TrimSpace(sessionBead.Metadata[namedSessionMetadataKey]) != "true" ||
 		strings.TrimSpace(sessionBead.Metadata[namedSessionIdentityMetadata]) != "" {
@@ -929,7 +931,7 @@ func sessionAssignmentIdentifierRaw(sessionBead beads.Bead) []string {
 // SessionNameMetadata, Template) instead of cracking the raw bead, staying
 // byte-identical to the raw form (TestSessionClassifierInfoEquivalence pins it).
 func sessionAssignmentIdentifiersForConfigInfo(info session.Info, cfg *config.City) []string {
-	raw := sessionAssignmentIdentifierRawInfo(info)
+	raw := append(sessionAssignmentIdentifierRawInfo(info), stableAssignmentAliasForConfigInfo(info, cfg))
 	if cfg == nil ||
 		!info.ConfiguredNamedSession ||
 		strings.TrimSpace(info.ConfiguredNamedIdentity) != "" {
@@ -968,6 +970,51 @@ func sessionAssignmentIdentifierRawInfo(info session.Info) []string {
 		strings.TrimSpace(info.SessionNameMetadata),
 		strings.TrimSpace(info.ConfiguredNamedIdentity),
 	}
+}
+
+// stableAssignmentAliasForConfig returns the session's alias when it is a
+// stable ownership identity, and "" otherwise. A session claims work under its
+// alias first (session.AssigneeIdentifier, `gc hook --claim`), so a namepool
+// member ("rig/furiosa"), a canonical singleton pool member, or an aliased
+// manual session owns alias-form work, and the awake set, drain guards and
+// pool reuse guard must all see it.
+//
+// A rebinding numeric pool slot is the exception: the controller hands it to
+// the next occupant, so slot-form ownership must never keep a session alive
+// (TestAssignmentGuardsIgnoreTransientPoolSlotAliases). Current pool beads of
+// that shape carry no alias at all; this filter covers legacy beads that still
+// do. A namepool member also records pool_slot, so the slot marker alone cannot
+// tell the two apart — the configured agent decides. When the agent cannot be
+// resolved the alias is dropped, keeping the narrower pre-alias behavior.
+func stableAssignmentAliasForConfig(sessionBead beads.Bead, cfg *config.City) string {
+	alias := strings.TrimSpace(sessionBead.Metadata["alias"])
+	if alias == "" || !isPoolManagedSessionBead(sessionBead) || strings.TrimSpace(sessionBead.Metadata["pool_slot"]) == "" {
+		return alias
+	}
+	if !poolSlotAliasIsStable(findAgentByTemplate(cfg, normalizedSessionTemplate(sessionBead, cfg))) {
+		return ""
+	}
+	return alias
+}
+
+// stableAssignmentAliasForConfigInfo is the session.Info form of
+// stableAssignmentAliasForConfig.
+func stableAssignmentAliasForConfigInfo(info session.Info, cfg *config.City) string {
+	alias := strings.TrimSpace(info.Alias)
+	if alias == "" || !isPoolManagedSessionInfo(info) || strings.TrimSpace(info.PoolSlot) == "" {
+		return alias
+	}
+	if !poolSlotAliasIsStable(findAgentByTemplate(cfg, normalizedSessionTemplateInfo(info, cfg))) {
+		return ""
+	}
+	return alias
+}
+
+// poolSlotAliasIsStable reports whether a slotted pool member of cfgAgent
+// carries a stable alias (namepool name, canonical singleton) rather than a
+// rebinding numeric slot. An unresolvable agent is treated as rebinding.
+func poolSlotAliasIsStable(cfgAgent *config.Agent) bool {
+	return cfgAgent != nil && !usesTransientPoolSlotIdentity(cfgAgent)
 }
 
 // sessionAssignmentIdentifiersInfo is the session.Info form of

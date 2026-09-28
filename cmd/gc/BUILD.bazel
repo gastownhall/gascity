@@ -1168,6 +1168,7 @@ go_test(
         "per_dispatch_model_test.go",
         "phase2_reporting_test.go",
         "polecat_report_formula_test.go",
+        "pool_alias_assignment_test.go",
         "pool_demand_class_binding_test.go",
         "pool_desired_state_asleep_alias_test.go",
         "pool_desired_state_nil_priority_test.go",
