@@ -81,7 +81,12 @@ append_hq_scope() {
         rm -f "$bead_fetch_tmp"
         return 1
     }
-    cat "$bead_fetch_tmp" >>"$TMP"
+    # Tag each staged row with its scope so the summary can attribute a reset
+    # to the rig whose store holds the bead. Fall back to the raw rows if the
+    # annotation cannot parse -- the summary then reports an unknown scope
+    # rather than losing the bead (vp-gsjw3).
+    jq -c 'map(. + {rig: "hq"})' "$bead_fetch_tmp" >>"$TMP" 2>/dev/null \
+        || cat "$bead_fetch_tmp" >>"$TMP"
     rm -f "$bead_fetch_tmp"
 }
 
@@ -98,7 +103,8 @@ append_rig_scope() {
         rm -f "$bead_fetch_tmp"
         return 1
     }
-    cat "$bead_fetch_tmp" >>"$TMP"
+    jq -c --arg rig "$rig" 'map(. + {rig: $rig})' "$bead_fetch_tmp" >>"$TMP" 2>/dev/null \
+        || cat "$bead_fetch_tmp" >>"$TMP"
     rm -f "$bead_fetch_tmp"
 }
 
@@ -335,9 +341,22 @@ reset_orphan_if_current() {
     reset_state=$(printf '%s\n' "$reset_output" | awk 'NF { print $1; exit }')
     case "$reset_state" in
         released)
-            if ! gc bd update "$bead_id" --append-notes "orphan-sweep: reset from assignee $expected_assignee -- no live session matched" >/dev/null 2>&1; then
-                echo "orphan-sweep: failed to record cause note on $bead_id" >&2
-            fi
+            # The cause note is the bead-side triage record the summary mail
+            # points at. Under Dolt load the append can fail transiently
+            # (va-069r.57 shipped noteless exactly this way), so retry before
+            # giving up; on persistent failure record the bead in $NOTE_FAILED
+            # so the summary discloses it instead of letting the mail claim a
+            # note that is not there (vp-gsjw3).
+            local attempt
+            for attempt in 1 2 3; do
+                if gc bd update "$bead_id" --append-notes "orphan-sweep: reset from assignee $expected_assignee -- no live session matched" >/dev/null 2>&1; then
+                    return 0
+                fi
+                if [ "$attempt" -lt 3 ]; then
+                    sleep 1
+                fi
+            done
+            NOTE_FAILED="${NOTE_FAILED}${NOTE_FAILED:+, }${bead_id}"
             return 0
             ;;
         skipped) return 2 ;;
@@ -404,9 +423,16 @@ ORPHANED=0
 UNVERIFIABLE=0
 # Count of undeliverable summaries. Load-bearing for the exit code below.
 FAILED=0
+# Triage ledger for the summary: one "<id> (<rig>)" entry per reset,
+# comma-joined. Plain strings, not arrays: fleet controllers still run bash
+# 3.2 (vp-gsjw3).
+RESET_LEDGER=""
+# Beads whose cause-note append kept failing after retries. The summary must
+# disclose these -- the mail otherwise claims every reset bead carries a note.
+NOTE_FAILED=""
 # Process substitution (not a pipe) keeps the loop body in the parent
 # shell so $ORPHANED survives for the summary message below.
-while IFS=$'\t' read -r bead_id assignee; do
+while IFS=$'\t' read -r bead_id assignee rig; do
     if ! is_known_agent "$assignee"; then
         if work_bead_still_resettable "$bead_id" "$assignee"; then
             :
@@ -428,6 +454,7 @@ while IFS=$'\t' read -r bead_id assignee; do
         fi
         if reset_orphan_if_current "$bead_id" "$assignee"; then
             ORPHANED=$((ORPHANED + 1))
+            RESET_LEDGER="${RESET_LEDGER}${RESET_LEDGER:+, }${bead_id} (${rig:-unknown})"
         else
             reset_status=$?
             if [ "$reset_status" != "2" ]; then
@@ -435,22 +462,33 @@ while IFS=$'\t' read -r bead_id assignee; do
             fi
         fi
     fi
-done < <(echo "$IN_PROGRESS" | jq -r '.[] | select(.assignee != null and .assignee != "") | "\(.id)\t\(.assignee)"' 2>/dev/null)
+done < <(echo "$IN_PROGRESS" | jq -r '.[] | select(.assignee != null and .assignee != "") | "\(.id)\t\(.assignee)\t\(.rig // "unknown")"' 2>/dev/null)
 
 if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ]; then
     SUMMARY="orphan-sweep: reset $ORPHANED orphaned beads"
+    if [ -n "$RESET_LEDGER" ]; then
+        SUMMARY="$SUMMARY: $RESET_LEDGER"
+    fi
     if [ "$UNVERIFIABLE" -gt 0 ]; then
         SUMMARY="$SUMMARY, skipped $UNVERIFIABLE unverifiable"
     fi
+    if [ -n "$NOTE_FAILED" ]; then
+        SUMMARY="$SUMMARY; note append failed: $NOTE_FAILED"
+    fi
     echo "$SUMMARY"
     if [ "$ORPHANED" -gt 0 ]; then
+        if [ -n "$NOTE_FAILED" ]; then
+            CAUSE_NOTE_LINE="WARNING: the cause-note append failed (after retries) for: $NOTE_FAILED. Those beads carry NO cause note -- inspect their history directly."
+        else
+            CAUSE_NOTE_LINE="Each reset bead now carries a one-line cause note (see its history)."
+        fi
         if ! gc mail send "$ESCALATION_TARGET" \
             -s "orphan-sweep: reset $ORPHANED orphaned beads" \
             -m "$SUMMARY
 
 orphan-sweep resets in-progress beads whose assignee has no live session or
-known agent. Each reset bead now carries a one-line cause note (see its
-history). Repeated resets of the same bead may indicate a stuck or
+known agent. $CAUSE_NOTE_LINE
+Repeated resets of the same bead may indicate a stuck or
 misidentified live session -- inspect via gc bd show <id> --json." \
             2>/dev/null; then
             # Do not swallow an undeliverable summary — a vanished escalation

@@ -2212,7 +2212,9 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 			if err != nil {
 				t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, orphanSweepFailureContext(out, gcLog))
 			}
-			if got, want := strings.TrimSpace(string(out)), "orphan-sweep: reset 1 orphaned beads"; got != want {
+			// vp-gsjw3: the summary names each reset bead and its rig scope,
+			// so the pinned output now carries the ledger.
+			if got, want := strings.TrimSpace(string(out)), "orphan-sweep: reset 1 orphaned beads: "+tt.orphanID+" ("+tt.scope+")"; got != want {
 				t.Fatalf("orphan-sweep output = %q, want %q\n%s", got, want, orphanSweepFailureContext(out, gcLog))
 			}
 
@@ -2911,6 +2913,338 @@ exit 1
 	}
 	if !strings.Contains(log, "orphan-sweep") {
 		t.Fatalf("cause note did not name orphan-sweep as the actor:\n%s", log)
+	}
+}
+
+// TestOrphanSweepSummaryListsResetBeadIDsAndRigs covers vp-gsjw3 defect 1: the
+// summary (stdout and mail body) must name each reset bead and the rig it came
+// from. Before the fix the mail carried only a count, so triage required
+// cross-referencing bead updated-times across every rig store.
+func TestOrphanSweepSummaryListsResetBeadIDsAndRigs(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+if [ "$1" = "--rig" ]; then
+  shift 2
+fi
+case "$1" in
+  mail)
+    exit 0
+    ;;
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: deacon
+  source: pack
+Agent: project/gastown.refinery
+  source: pack
+Agent: project/gastown.polecat
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true},{"name":"project","hq":false}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      case "$*" in
+        *"--rig project"*)
+          cat <<'EOF'
+[
+  {"id":"ga-rig-orphan","status":"in_progress","assignee":"project/gastown.missing"}
+]
+EOF
+          ;;
+        *)
+          cat <<'EOF'
+[
+  {"id":"ga-hq-orphan","status":"in_progress","assignee":"gastown.longgone"}
+]
+EOF
+          ;;
+      esac
+      exit 0
+    fi
+    if [ "$2" = "show" ]; then
+      case "$3" in
+        ga-hq-orphan)
+          printf '[{"id":"ga-hq-orphan","status":"in_progress","assignee":"gastown.longgone"}]\n'
+          ;;
+        ga-rig-orphan)
+          printf '[{"id":"ga-rig-orphan","status":"in_progress","assignee":"project/gastown.missing"}]\n'
+          ;;
+      esac
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := coreScriptPath("orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "orphan-sweep: reset 2 orphaned beads: ga-hq-orphan (hq), ga-rig-orphan (project)") {
+		t.Fatalf("summary does not list reset bead IDs with their rigs:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	// The mail body opens with the same ledger so the recipient can triage
+	// straight from the message. $* in the stub joins the mail arguments with
+	// spaces, so the subject and the first body line are adjacent on one line.
+	if !strings.Contains(log, "mail send human -s orphan-sweep: reset 2 orphaned beads -m orphan-sweep: reset 2 orphaned beads: ga-hq-orphan (hq), ga-rig-orphan (project)") {
+		t.Fatalf("mail body does not list reset bead IDs with their rigs:\n%s", log)
+	}
+}
+
+// TestOrphanSweepRetriesCauseNoteAppend covers vp-gsjw3 defect 2 (transient
+// path): a cause-note append that fails once under Dolt load must be retried,
+// and a retry that succeeds must leave the summary's "each bead carries a
+// note" claim true.
+func TestOrphanSweepRetriesCauseNoteAppend(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	noteFails := filepath.Join(t.TempDir(), "note-fails")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  mail)
+    exit 0
+    ;;
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: deacon
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-genuinely-dead","status":"in_progress","assignee":"gastown.longgone"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "ga-genuinely-dead" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-genuinely-dead","status":"in_progress","assignee":"gastown.longgone"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      n=0
+      if [ -f "$ORPHAN_SWEEP_NOTE_FAILS" ]; then
+        n=$(cat "$ORPHAN_SWEEP_NOTE_FAILS")
+      fi
+      n=$((n + 1))
+      printf '%s' "$n" > "$ORPHAN_SWEEP_NOTE_FAILS"
+      if [ "$n" -ge 2 ]; then
+        exit 0
+      fi
+      exit 1
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":                 cityDir,
+		"GC_CITY_PATH":            cityDir,
+		"GC_CALL_LOG":             gcLog,
+		"ORPHAN_SWEEP_NOTE_FAILS": noteFails,
+		"PATH":                    binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := coreScriptPath("orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	if got := strings.Count(log, "bd update ga-genuinely-dead --append-notes"); got != 2 {
+		t.Fatalf("cause-note append attempts = %d, want 2 (one failure, one retry):\n%s", got, log)
+	}
+	if strings.Contains(string(out), "note append failed") {
+		t.Fatalf("summary discloses a note failure that the retry recovered from:\n%s", out)
+	}
+	if !strings.Contains(log, "Each reset bead now carries a one-line cause note") {
+		t.Fatalf("successful note append must keep the carries-a-note claim in the mail body:\n%s", log)
+	}
+	if strings.Contains(log, "note append failed") {
+		t.Fatalf("mail body discloses a note failure that the retry recovered from:\n%s", log)
+	}
+}
+
+// TestOrphanSweepDisclosesFailedNoteAppendInSummary covers vp-gsjw3 defect 2
+// (persistent path): when the cause-note append keeps failing, the script must
+// retry, and the summary must say "note append failed" instead of claiming the
+// bead carries a note it does not have (va-069r.57 shipped noteless this way).
+func TestOrphanSweepDisclosesFailedNoteAppendInSummary(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  mail)
+    exit 0
+    ;;
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: deacon
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-genuinely-dead","status":"in_progress","assignee":"gastown.longgone"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "ga-genuinely-dead" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-genuinely-dead","status":"in_progress","assignee":"gastown.longgone"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 1
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := coreScriptPath("orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	if got := strings.Count(log, "bd update ga-genuinely-dead --append-notes"); got != 3 {
+		t.Fatalf("cause-note append attempts = %d, want 3 (retried before giving up):\n%s", got, log)
+	}
+	if !strings.Contains(string(out), "orphan-sweep: reset 1 orphaned beads: ga-genuinely-dead (hq); note append failed: ga-genuinely-dead") {
+		t.Fatalf("summary does not disclose the failed note append:\n%s", out)
+	}
+	if strings.Contains(string(out), "Each reset bead now carries a one-line cause note") {
+		t.Fatalf("mail claims beads carry notes that were never written:\n%s", out)
+	}
+	if strings.Contains(log, "Each reset bead now carries a one-line cause note") {
+		t.Fatalf("mail body claims beads carry notes that were never written:\n%s", log)
+	}
+	if !strings.Contains(log, "WARNING: the cause-note append failed (after retries) for: ga-genuinely-dead") {
+		t.Fatalf("mail body does not warn about the failed note append:\n%s", log)
+	}
+	if !strings.Contains(log, "mail send human -s orphan-sweep: reset 1 orphaned beads") {
+		t.Fatalf("summary was not mailed despite the reset:\n%s", log)
 	}
 }
 
