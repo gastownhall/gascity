@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -92,11 +93,37 @@ func TestSessionEventPumpLiveHerdr(t *testing.T) {
 	}
 }
 
-// usePrivateHerdrConfigRoot is a RED-stage stub (tdd_red_sha): it compiles
-// but does not yet point herdr at a private config root, so the sun_path
-// overflow this bead fixes still reproduces. GREEN replaces the body.
+// usePrivateHerdrConfigRoot points herdr at a fresh config root under /tmp for
+// the rest of the test. herdr binds <root>/herdr/sessions/<session>/
+// herdr-client.sock and exits at once when that path overflows sun_path (108
+// bytes). The provider discards the server's stderr, so all the test sees is
+// ConfigureServer timing out ("did not become ready"). The default root is the
+// invoking user's config dir, which is $HOME/.config under the env -i test
+// wrappers that drop XDG_CONFIG_HOME. With this test's 36-byte session name,
+// any HOME of 31 bytes or more overflows, and a release gate's private
+// /var/tmp HOME easily does (ga-th9i5m). /tmp keeps the path short whatever
+// HOME and TMPDIR are: this package's TestMain moves TMPDIR under a per-run
+// root, so os.MkdirTemp("") and t.TempDir() are already too long. A private
+// root also stops each run leaving its session dir in the user's config.
+// Linux only: os.UserConfigDir follows XDG_CONFIG_HOME there, and herdr's own
+// resolution was verified there (ga-nqlb8q).
 func usePrivateHerdrConfigRoot(t *testing.T) {
 	t.Helper()
+	if goruntime.GOOS != "linux" {
+		return
+	}
+	root, err := os.MkdirTemp("/tmp", "gchp")
+	if err != nil {
+		t.Fatalf("creating private herdr config root: %v", err)
+	}
+	// Registered before the provider's TeardownServer cleanup, so it runs after
+	// the server has stopped.
+	t.Cleanup(func() {
+		if err := os.RemoveAll(root); err != nil {
+			t.Logf("removing private herdr config root %s: %v", root, err)
+		}
+	})
+	t.Setenv("XDG_CONFIG_HOME", root)
 }
 
 // herdrLivePaneID resolves the pane herdr bound to a gc session by reading the
