@@ -45,6 +45,37 @@ case "$BACKUP_SYNC_ATTEMPTS" in
     *) BACKUP_SYNC_ATTEMPTS=3 ;;
 esac
 
+# Grace period for Dolt's native backup prune, or empty to disable it.
+#
+# A sync killed after it uploads a table file but before it commits the
+# manifest leaves that file behind, unreferenced and never reused. Those
+# orphans accumulate without bound, and a larger destination makes the next
+# sync slower, which makes the next kill more likely. On one city they reached
+# 17.92 GB across 19 archives against 0.83 GB the manifest actually
+# referenced — 95 percent of the backup unreachable from its own root hash.
+#
+# `dolt backup sync --prune-with-grace-period` reclaims them before uploading.
+# It deletes only table files no manifest references, and it deletes nothing at
+# all if any file in the destination changed inside the grace period, so a
+# concurrent writer cannot lose data to it. Dolt's floor is 10m, and the period
+# must be shorter than the interval between syncs or the previous sync's own
+# files veto every prune. With the 6h interval in orders/mol-dog-backup.toml,
+# the documented 1h default satisfies both bounds.
+#
+# The flag arrived in Dolt 2.3.0 and is valid only against file:// backups, so
+# prune_flag_for attaches it per database instead of unconditionally.
+BACKUP_PRUNE_GRACE="${GC_DOLT_BACKUP_PRUNE_GRACE:-1h}"
+MIN_DOLT_PRUNE_VERSION="2.3.0"
+# A malformed period is rejected by dolt and would fail every sync, so fall
+# back to the default rather than letting a typo stop all backups.
+case "$BACKUP_PRUNE_GRACE" in
+    ''|off|none) BACKUP_PRUNE_GRACE="" ;;
+    *[!0-9mh]*|*m*h*|*h*m*) BACKUP_PRUNE_GRACE="1h" ;;
+    *m) [ "${BACKUP_PRUNE_GRACE%m}" -ge 10 ] 2>/dev/null || BACKUP_PRUNE_GRACE="1h" ;;
+    *h) [ "${BACKUP_PRUNE_GRACE%h}" -ge 1 ] 2>/dev/null || BACKUP_PRUNE_GRACE="1h" ;;
+    *) BACKUP_PRUNE_GRACE="1h" ;;
+esac
+
 dolt_sql() {
     DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" \
         run_bounded 30 \
@@ -143,6 +174,19 @@ classify_sync_failure() {
     fi
 }
 
+# prune_flag_for <db> <db-dir> — echo the prune flag when this dolt supports it
+# and this database's backup destination is a local directory, otherwise echo
+# nothing. Passing the flag to an older dolt, or against a non-file:// backup,
+# is an error that would fail the sync outright.
+prune_flag_for() {
+    [ -n "$BACKUP_PRUNE_GRACE" ] || return 0
+    dolt_version_at_least "$DOLT_VERSION" "$MIN_DOLT_PRUNE_VERSION" || return 0
+    (cd "$2" && run_bounded 30 dolt backup -v 2>/dev/null) |
+        awk -v name="$1-backup" '$1 == name && $2 ~ /^file:\/\// { found = 1 }
+            END { exit !found }' || return 0
+    printf -- '--prune-with-grace-period=%s' "$BACKUP_PRUNE_GRACE"
+}
+
 # sync_one_database <db> <db-dir> — run `dolt backup sync` with bounded retries.
 # Emits nothing on success. On total failure it echoes the classified
 # diagnostic from the LAST attempt on stdout for the caller to record.
@@ -158,11 +202,13 @@ sync_one_database() {
         printf 'cannot create temp file for sync diagnostics'
         return 1
     }
+    sync_prune_flag=$(prune_flag_for "$sync_db" "$sync_db_dir")
     sync_attempt=1
     while [ "$sync_attempt" -le "$BACKUP_SYNC_ATTEMPTS" ]; do
         sync_rc=0
         (cd "$sync_db_dir" && run_bounded "$BACKUP_SYNC_TIMEOUT_SECS" \
-            dolt backup sync "${sync_db}-backup" >/dev/null 2>"$sync_err_tmp") || sync_rc=$?
+            dolt backup sync ${sync_prune_flag:+"$sync_prune_flag"} \
+            "${sync_db}-backup" >/dev/null 2>"$sync_err_tmp") || sync_rc=$?
         if [ "$sync_rc" -eq 0 ]; then
             if [ "$sync_attempt" -gt 1 ]; then
                 echo "backup: $sync_db: succeeded on attempt $sync_attempt/$BACKUP_SYNC_ATTEMPTS" >&2
