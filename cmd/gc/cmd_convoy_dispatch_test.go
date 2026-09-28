@@ -341,6 +341,229 @@ func TestCollectSourceWorkflowMatchesFailsWhenNoStoreIsAvailable(t *testing.T) {
 	}
 }
 
+// unnamedCityPath is a city with no [workspace] name. gc renders its city
+// store as "city:mc" (the directory's basename), while a caller that builds the
+// ref from city.toml alone renders the same store as a bare "city:".
+const unnamedCityPath = "/cities/mc"
+
+// TestCollectSourceWorkflowMatchesAcceptsBareCityStoreRef pins the store ref a
+// caller produces when the city has no [workspace] name: the bare "city:" must
+// select the city store rather than report it unavailable to scan. Every other
+// test here names the workspace, so the presence check only ever saw
+// "city:<name>" and a bare ref failed every delete-source.
+func TestCollectSourceWorkflowMatchesAcceptsBareCityStoreRef(t *testing.T) {
+	cfg := &config.City{Rigs: []config.Rig{{Name: "rig-a", Path: "rigs/a"}}}
+	cityStore := beads.NewMemStore()
+	root, err := cityStore.Create(beads.Bead{
+		Title:  "city workflow",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:           beadmeta.KindWorkflow,
+			beadmeta.SourceBeadIDMetadataKey:   "mc-source",
+			beadmeta.SourceStoreRefMetadataKey: "city:",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	stores := []convoyStoreView{
+		{path: unnamedCityPath, store: cityStore},
+		{path: filepath.Join(unnamedCityPath, "rigs/a"), store: beads.NewMemStore()},
+	}
+
+	matches, _, _, err := collectSourceWorkflowMatchesFromStores(cfg, unnamedCityPath, "mc-source", "city:", stores, nil)
+	if err != nil {
+		t.Fatalf("collectSourceWorkflowMatchesFromStores(city:) error = %v, want the city store to be scannable", err)
+	}
+	if len(matches) != 1 || len(matches[0].roots) != 1 || matches[0].roots[0].ID != root.ID {
+		t.Fatalf("matches = %#v, want city root %s", matches, root.ID)
+	}
+}
+
+// TestCollectSourceWorkflowMatchesEquatesBareAndNamedCityRefsInBothDirections
+// walks the PR-review shape: a city source bead fans out to a rig launch bead
+// whose gc.source_store_ref names the city, and the rig workflow hangs off the
+// launch bead. The launch bead's stamp and the caller's selection may each use
+// the bare "city:" or the rendered "city:mc"; every pairing names the same
+// store, so every pairing must find the rig workflow. A miss is worse than an
+// error here: delete-source would report already_clean and leave it running.
+func TestCollectSourceWorkflowMatchesEquatesBareAndNamedCityRefsInBothDirections(t *testing.T) {
+	for _, tc := range []struct{ stamped, selected string }{
+		{stamped: "city:", selected: "city:"},
+		{stamped: "city:", selected: "city:mc"},
+		{stamped: "city:mc", selected: "city:"},
+		{stamped: "city:mc", selected: "city:mc"},
+		// A city directly slung from the city store is stamped the way gc
+		// renders it; a legacy root carries no stamp and is judged by the
+		// store it lives in.
+		{stamped: "", selected: "city:"},
+	} {
+		t.Run(fmt.Sprintf("stamped=%q/selected=%q", tc.stamped, tc.selected), func(t *testing.T) {
+			cfg := &config.City{Rigs: []config.Rig{{Name: "rig-a", Path: "rigs/a"}}}
+			cityStore := beads.NewMemStore()
+			rigStore := beads.NewMemStore()
+			var wantRoot beads.Bead
+			var err error
+			if tc.stamped == "" {
+				wantRoot, err = cityStore.Create(beads.Bead{
+					Title:  "legacy city workflow",
+					Type:   "task",
+					Status: "in_progress",
+					Metadata: map[string]string{
+						beadmeta.KindMetadataKey:         beadmeta.KindWorkflow,
+						beadmeta.SourceBeadIDMetadataKey: "mc-source",
+					},
+				})
+				if err != nil {
+					t.Fatalf("Create(legacy root): %v", err)
+				}
+			} else {
+				launch, err := rigStore.Create(beads.Bead{
+					Title:  "rig launch",
+					Type:   "task",
+					Status: "open",
+					Metadata: map[string]string{
+						beadmeta.SourceBeadIDMetadataKey:   "mc-source",
+						beadmeta.SourceStoreRefMetadataKey: tc.stamped,
+					},
+				})
+				if err != nil {
+					t.Fatalf("Create(launch): %v", err)
+				}
+				wantRoot, err = rigStore.Create(beads.Bead{
+					Title:  "rig workflow",
+					Type:   "task",
+					Status: "in_progress",
+					Metadata: map[string]string{
+						beadmeta.KindMetadataKey:           beadmeta.KindWorkflow,
+						beadmeta.SourceBeadIDMetadataKey:   launch.ID,
+						beadmeta.SourceStoreRefMetadataKey: "rig:rig-a",
+					},
+				})
+				if err != nil {
+					t.Fatalf("Create(rig root): %v", err)
+				}
+			}
+			stores := []convoyStoreView{
+				{path: unnamedCityPath, store: cityStore},
+				{path: filepath.Join(unnamedCityPath, "rigs/a"), store: rigStore},
+			}
+
+			matches, _, _, err := collectSourceWorkflowMatchesFromStores(cfg, unnamedCityPath, "mc-source", tc.selected, stores, nil)
+			if err != nil {
+				t.Fatalf("collectSourceWorkflowMatchesFromStores(%q) error = %v", tc.selected, err)
+			}
+			if len(matches) != 1 || len(matches[0].roots) != 1 || matches[0].roots[0].ID != wantRoot.ID {
+				t.Fatalf("matches = %#v, want workflow root %s", matches, wantRoot.ID)
+			}
+		})
+	}
+}
+
+// TestCollectSourceWorkflowMatchesKeepsAnotherCitysStampApart is the control
+// for the test above: canonicalizing the bare ref names THIS city, so a child
+// stamped for a different city is still not this source's workflow.
+func TestCollectSourceWorkflowMatchesKeepsAnotherCitysStampApart(t *testing.T) {
+	cfg := &config.City{Rigs: []config.Rig{{Name: "rig-a", Path: "rigs/a"}}}
+	rigStore := beads.NewMemStore()
+	if _, err := rigStore.Create(beads.Bead{
+		Title:  "foreign workflow",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:           beadmeta.KindWorkflow,
+			beadmeta.SourceBeadIDMetadataKey:   "mc-source",
+			beadmeta.SourceStoreRefMetadataKey: "city:other",
+		},
+	}); err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	stores := []convoyStoreView{
+		{path: unnamedCityPath, store: beads.NewMemStore()},
+		{path: filepath.Join(unnamedCityPath, "rigs/a"), store: rigStore},
+	}
+
+	matches, _, _, err := collectSourceWorkflowMatchesFromStores(cfg, unnamedCityPath, "mc-source", "city:", stores, nil)
+	if err != nil {
+		t.Fatalf("collectSourceWorkflowMatchesFromStores(city:) error = %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("matches = %#v, want a city:other stamp to stay outside a city: selection", matches)
+	}
+}
+
+// TestCollectSourceWorkflowMatchesKeepsBareSelectedCityStoreFailureStrict pins
+// the second half of the selected-store contract for the bare ref: a scan
+// failure in the selected city store must abort the walk, not be tolerated as
+// an unrelated store's failure.
+func TestCollectSourceWorkflowMatchesKeepsBareSelectedCityStoreFailureStrict(t *testing.T) {
+	cfg := &config.City{Rigs: []config.Rig{{Name: "healthy", Path: "rigs/healthy"}}}
+	selectedErr := errors.New("selected store read failed")
+	stores := []convoyStoreView{
+		{path: unnamedCityPath, store: sourceWorkflowScanFailStore{Store: beads.NewMemStore(), err: selectedErr}},
+		{path: filepath.Join(unnamedCityPath, "rigs/healthy"), store: beads.NewMemStore()},
+	}
+
+	_, _, _, err := collectSourceWorkflowMatchesFromStores(cfg, unnamedCityPath, "mc-source", "city:", stores, nil)
+	if !errors.Is(err, selectedErr) {
+		t.Fatalf("collectSourceWorkflowMatchesFromStores(city:) error = %v, want selected store error %v", err, selectedErr)
+	}
+}
+
+func TestEnsureSelectedSourceStorePresentWrapsBareCityRefOpenFailure(t *testing.T) {
+	cfg := &config.City{Rigs: []config.Rig{{Name: "rig-a", Path: "rigs/a"}}}
+	stores := []convoyStoreView{{path: filepath.Join(unnamedCityPath, "rigs/a"), store: beads.NewMemStore()}}
+	openErr := errors.New("city store reopen failed")
+	skips := []sourceWorkflowStoreSkip{{path: unnamedCityPath, err: openErr}}
+
+	err := ensureSelectedSourceStorePresent(cfg, unnamedCityPath, loadedCityName(cfg, unnamedCityPath), "city:", stores, skips)
+	if !errors.Is(err, openErr) {
+		t.Fatalf("ensureSelectedSourceStorePresent(city:) = %v, want the city store's open failure %v", err, openErr)
+	}
+}
+
+// TestEnsureSelectedSourceStorePresentStillRejectsAnUnopenedCityStore is a
+// control: accepting the bare ref must not make the presence check vacuous.
+func TestEnsureSelectedSourceStorePresentStillRejectsAnUnopenedCityStore(t *testing.T) {
+	cfg := &config.City{Rigs: []config.Rig{{Name: "rig-a", Path: "rigs/a"}}}
+	stores := []convoyStoreView{{path: filepath.Join(unnamedCityPath, "rigs/a"), store: beads.NewMemStore()}}
+
+	err := ensureSelectedSourceStorePresent(cfg, unnamedCityPath, loadedCityName(cfg, unnamedCityPath), "city:", stores, nil)
+	if err == nil || !strings.Contains(err.Error(), "unavailable to scan") {
+		t.Fatalf("ensureSelectedSourceStorePresent(city:) = %v, want an unavailable-to-scan failure when no city store was opened", err)
+	}
+}
+
+// TestEnsureSelectedSourceStorePresentStillRejectsAnotherCityName is the second
+// control: a ref naming a DIFFERENT city is still a miss, so the bare-ref rule
+// does not become a prefix match.
+func TestEnsureSelectedSourceStorePresentStillRejectsAnotherCityName(t *testing.T) {
+	for _, cfg := range []*config.City{{}, {Workspace: config.Workspace{Name: "test"}}} {
+		stores := []convoyStoreView{{path: unnamedCityPath, store: beads.NewMemStore()}}
+		err := ensureSelectedSourceStorePresent(cfg, unnamedCityPath, loadedCityName(cfg, unnamedCityPath), "city:other", stores, nil)
+		if err == nil || !strings.Contains(err.Error(), "unavailable to scan") {
+			t.Fatalf("ensureSelectedSourceStorePresent(city:other, workspace %q) = %v, want an unavailable-to-scan failure", cfg.Workspace.Name, err)
+		}
+	}
+}
+
+func TestUnscannedSourceWorkflowStoreSkipsRecoversBareSelectedCityStore(t *testing.T) {
+	cfg := &config.City{Rigs: []config.Rig{{Name: "stale", Path: "rigs/stale"}}}
+	skips := []sourceWorkflowStoreSkip{
+		{path: unnamedCityPath, err: errors.New("selected reopen failed")},
+		{path: filepath.Join(unnamedCityPath, "rigs/stale"), err: errors.New("stale rig failed")},
+	}
+
+	unscanned, selectedRecovered := unscannedSourceWorkflowStoreSkips(cfg, unnamedCityPath, "city:", skips)
+	if !selectedRecovered {
+		t.Fatal("selectedRecovered = false, want the bare city: ref to name the city store")
+	}
+	if len(unscanned) != 1 || !strings.Contains(unscanned[0].path, "rigs/stale") {
+		t.Fatalf("unscanned skips = %#v, want only stale non-selected rig", unscanned)
+	}
+}
+
 func TestWorkflowFinalizeRetriesWhenSourceWorkflowStoreScanSkipsLiveRoot(t *testing.T) {
 	cityPath := "/city"
 	cfg := &config.City{

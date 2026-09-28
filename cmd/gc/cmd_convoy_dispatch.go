@@ -2721,19 +2721,34 @@ func ensureSelectedSourceStorePresent(cfg *config.City, cityPath, cityName, sour
 		return nil
 	}
 	present := slices.ContainsFunc(stores, func(info convoyStoreView) bool {
-		return info.store != nil &&
-			sourceworkflow.NormalizeSourceStoreRef(workflowStoreRefForDir(info.scopePath(cityPath), cityPath, cityName, cfg)) == selectedRef
+		return info.store != nil && sourceStoreRefSelectsDir(selectedRef, info.scopePath(cityPath), cityPath, cityName, cfg)
 	})
 	if present {
 		return nil
 	}
 	for _, skip := range skips {
-		skipRef := sourceworkflow.NormalizeSourceStoreRef(workflowStoreRefForDir(skip.path, cityPath, cityName, cfg))
-		if skipRef == selectedRef && skip.err != nil {
+		if skip.err != nil && sourceStoreRefSelectsDir(selectedRef, skip.path, cityPath, cityName, cfg) {
 			return fmt.Errorf("selected source workflow store %s is unavailable to scan: %w", selectedRef, skip.err)
 		}
 	}
 	return fmt.Errorf("selected source workflow store %s is unavailable to scan", selectedRef)
+}
+
+// sourceStoreRefSelectsDir reports whether selectedRef names the store rooted
+// at storeDir.
+//
+// It is not a string comparison because the two sides come from different
+// code. workflowStoreRefForDir always renders the city store as
+// "city:<name>", using the city directory's basename when the config has no
+// [workspace] name. A caller that builds the ref from city.toml alone has no
+// basename to fall back to and names the same store with a bare "city:", the
+// form openSourceWorkflowStoreRef, makeStoreRefResolver, and
+// sourceworkflow.LockScopeForStoreRef already accept. SameSourceStoreRef
+// canonicalizes the bare form to this city's name, so a ref naming a different
+// city is still a miss.
+func sourceStoreRefSelectsDir(selectedRef, storeDir, cityPath, cityName string, cfg *config.City) bool {
+	dirRef := workflowStoreRefForDir(storeDir, cityPath, cityName, cfg)
+	return dirRef != "" && sourceworkflow.SameSourceStoreRef(selectedRef, dirRef, cityName)
 }
 
 // sourceWorkflowMatchCollector walks the source-workflow graph across every
@@ -2807,14 +2822,14 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 	c.visited[visitKey] = struct{}{}
 	c.attemptedStores[index] = struct{}{}
 
-	roots, err := sourceworkflow.ListLiveRoots(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef)
+	roots, err := sourceworkflow.ListLiveRootsInCity(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
 	if err != nil {
 		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing live source workflows", err)
 	}
 	if err := c.mergeRootMatches(info, roots); err != nil {
 		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow beads", err)
 	}
-	children, err := sourceWorkflowChildSources(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef)
+	children, err := sourceWorkflowChildSources(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
 	if err != nil {
 		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow children", err)
 	}
@@ -2874,10 +2889,7 @@ func (c *sourceWorkflowMatchCollector) recordScanFailure(index int, info convoyS
 	if info.isClassBinding() {
 		return refusePartialSweep(operation+" in", label, scanErr)
 	}
-	rootStoreRef := workflowStoreRefForDir(info.scopePath(c.cityPath), c.cityPath, c.cityName, c.cfg)
-	selectedStore := strings.TrimSpace(currentSourceStoreRef) != "" &&
-		sourceworkflow.NormalizeSourceStoreRef(rootStoreRef) == sourceworkflow.NormalizeSourceStoreRef(currentSourceStoreRef)
-	if selectedStore {
+	if sourceStoreRefSelectsDir(currentSourceStoreRef, info.scopePath(c.cityPath), c.cityPath, c.cityName, c.cfg) {
 		return wrapped
 	}
 	return nil
@@ -3012,7 +3024,7 @@ func mergeSourceWorkflowMatch(matches map[string]sourceWorkflowStoreMatch, next 
 	matches[next.label] = current
 }
 
-func sourceWorkflowChildSources(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef string) ([]beads.Bead, error) {
+func sourceWorkflowChildSources(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef, cityName string) ([]beads.Bead, error) {
 	sourceBeadID = strings.TrimSpace(sourceBeadID)
 	if store == nil || sourceBeadID == "" {
 		return nil, nil
@@ -3031,7 +3043,7 @@ func sourceWorkflowChildSources(store beads.Store, sourceBeadID, sourceStoreRef,
 		if candidate.ID == "" || sourceworkflow.IsWorkflowRoot(candidate) {
 			continue
 		}
-		if !sourceworkflow.WorkflowMatchesSource(candidate, sourceBeadID, sourceStoreRef, rootStoreRef) {
+		if !sourceworkflow.WorkflowMatchesSourceInCity(candidate, sourceBeadID, sourceStoreRef, rootStoreRef, cityName) {
 			continue
 		}
 		children = append(children, candidate)
@@ -3118,8 +3130,7 @@ func unscannedSourceWorkflowStoreSkips(cfg *config.City, cityPath, selectedStore
 	unscanned := make([]sourceWorkflowStoreSkip, 0, len(skips))
 	selectedRecovered := false
 	for _, skip := range skips {
-		skipRef := sourceworkflow.NormalizeSourceStoreRef(workflowStoreRefForDir(skip.path, cityPath, cityName, cfg))
-		if skipRef == selectedStoreRef {
+		if sourceStoreRefSelectsDir(selectedStoreRef, skip.path, cityPath, cityName, cfg) {
 			selectedRecovered = true
 			continue
 		}
