@@ -3722,6 +3722,207 @@ func TestDeliverSlingNudgeQueuesFencedReminderAndStartsPollerForAsleepSession(t 
 	}
 }
 
+// TestDeliverSlingNudgeRequestsManagedWakeForDrainedSession is ga-qj4ids: a
+// Drained on_demand named session is invisible to demand-driven wake
+// (compute_awake_set.go's !bead.Drained guard), so gc sling --nudge is the
+// only thing left that can reach it. Before this fix, deliverSlingNudge's
+// not-running branch only queued a nudge and poked the controller — neither
+// of which breaks a Drained session out of that guard. Mirrors
+// TestWakeSessionRecordsExplicitWakeForSuspendedBead's assertion shape
+// (internal/session/waits_test.go), but drives it through
+// deliverSlingNudge itself — the actual reported entry point — against a
+// target whose session bead is genuinely Drained, not merely not-running.
+func TestDeliverSlingNudgeRequestsManagedWakeForDrainedSession(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Suspend actually tears down the fake runtime process, so the observe
+	// path genuinely reports not-running rather than merely claiming so via
+	// beads metadata a live process would contradict.
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	// Overlay the exact lifecycle state this bug names: an acknowledged
+	// drain-ack (state=drained), the same patch session_reconciler.go's
+	// drain-ack path applies. Suspended and Drained are both non-conflict
+	// wake targets, but Drained is the specific trap ga-qj4ids reports.
+	if err := store.SetMetadataBatch(info.ID, session.AcknowledgeDrainPatch(time.Now(), false)); err != nil {
+		t.Fatalf("SetMetadataBatch(drained): %v", err)
+	}
+
+	prevManaged := nudgeCityUsesManagedReconciler
+	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
+	t.Cleanup(func() { nudgeCityUsesManagedReconciler = prevManaged })
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		cfg:         &config.City{Agents: []config.Agent{{Name: "worker", Provider: "claude"}}},
+		sessionID:   info.ID,
+		sessionName: info.SessionName,
+		identity:    "worker",
+		agent:       config.Agent{Name: "worker", Provider: "claude"},
+	}
+
+	var stdout, stderr bytes.Buffer
+	deliverSlingNudge(target, fake, store, dir, &stdout, &stderr)
+
+	updated, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := updated.Metadata["wake_request"]; got != string(session.WakeCauseExplicit) {
+		t.Fatalf("wake_request = %q, want %q — deliverSlingNudge must request a managed wake for a drained target, not just queue+poke", got, session.WakeCauseExplicit)
+	}
+	if got := updated.Metadata["wake_requested_at"]; got == "" {
+		t.Fatal("wake_requested_at = empty, want timestamp")
+	}
+	if got := updated.Metadata["state"]; got != string(session.StateAsleep) {
+		t.Fatalf("state = %q, want %q — a real wake must clear the drained state", got, session.StateAsleep)
+	}
+
+	// The wake request is additive to, not a replacement for, the existing
+	// queue-and-poke behavior.
+	pending, inFlight, dead, err := listQueuedNudges(dir, target.agent.QualifiedName(), time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 1/0/0", len(pending), len(inFlight), len(dead))
+	}
+}
+
+// TestDeliverSlingNudgeSkipsManagedWakeWhenReconcilerUnmanaged pins the
+// gate-false side of ga-qj4ids: without a managed reconciler the sling path
+// keeps today's queue-and-poke behavior and records no wake request.
+func TestDeliverSlingNudgeSkipsManagedWakeWhenReconcilerUnmanaged(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if err := store.SetMetadataBatch(info.ID, session.AcknowledgeDrainPatch(time.Now(), false)); err != nil {
+		t.Fatalf("SetMetadataBatch(drained): %v", err)
+	}
+
+	prevManaged := nudgeCityUsesManagedReconciler
+	nudgeCityUsesManagedReconciler = func(string) bool { return false }
+	t.Cleanup(func() { nudgeCityUsesManagedReconciler = prevManaged })
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		cfg:         &config.City{Agents: []config.Agent{{Name: "worker", Provider: "claude"}}},
+		sessionID:   info.ID,
+		sessionName: info.SessionName,
+		identity:    "worker",
+		agent:       config.Agent{Name: "worker", Provider: "claude"},
+	}
+
+	var stdout, stderr bytes.Buffer
+	deliverSlingNudge(target, fake, store, dir, &stdout, &stderr)
+
+	updated, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := updated.Metadata["wake_request"]; got != "" {
+		t.Fatalf("wake_request = %q, want empty when the reconciler is unmanaged", got)
+	}
+	if got := updated.Metadata["state"]; got != string(session.StateDrained) {
+		t.Fatalf("state = %q, want %q — an unmanaged city must not wake the drained session", got, session.StateDrained)
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, target.agent.QualifiedName(), time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 1/0/0", len(pending), len(inFlight), len(dead))
+	}
+}
+
+// TestDeliverSlingNudgeSkipsManagedWakeWhenObservationFails pins that an
+// observe error is not treated as a confirmed not-running session: runtime
+// state is unknown, so deliverSlingNudge must not call WakeSession (which
+// clears drained/hold/quarantine) and instead keeps queue-and-poke, matching
+// gc mail notify.
+func TestDeliverSlingNudgeSkipsManagedWakeWhenObservationFails(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if err := store.SetMetadataBatch(info.ID, session.AcknowledgeDrainPatch(time.Now(), false)); err != nil {
+		t.Fatalf("SetMetadataBatch(drained): %v", err)
+	}
+
+	prevManaged := nudgeCityUsesManagedReconciler
+	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
+	t.Cleanup(func() { nudgeCityUsesManagedReconciler = prevManaged })
+
+	// A whitespace-only session name is non-empty, so observation targets it,
+	// but it trims to empty and resolves to ErrSessionNotFound — a genuine
+	// observe error — while sessionID still satisfies the managed-wake gate.
+	target := nudgeTarget{
+		cityPath:    dir,
+		cfg:         &config.City{Agents: []config.Agent{{Name: "worker", Provider: "claude"}}},
+		sessionID:   info.ID,
+		sessionName: " ",
+		identity:    "worker",
+		agent:       config.Agent{Name: "worker", Provider: "claude"},
+	}
+	if _, err := workerObserveNudgeTarget(target, store, fake); err == nil {
+		t.Fatal("workerObserveNudgeTarget error = nil, want an observe error for this fixture")
+	}
+	if !canRequestManagedNudgeWake(target, store) {
+		t.Fatal("canRequestManagedNudgeWake = false, want true so only the observe error gates the wake")
+	}
+
+	var stdout, stderr bytes.Buffer
+	deliverSlingNudge(target, fake, store, dir, &stdout, &stderr)
+
+	updated, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := updated.Metadata["wake_request"]; got != "" {
+		t.Fatalf("wake_request = %q, want empty when observation failed", got)
+	}
+	if got := updated.Metadata["state"]; got != string(session.StateDrained) {
+		t.Fatalf("state = %q, want %q — an observe error must not wake the drained session", got, session.StateDrained)
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, target.agent.QualifiedName(), time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 1/0/0", len(pending), len(inFlight), len(dead))
+	}
+}
+
 func assertSessionLastNudgeDeliveredAtStamped(t *testing.T, store beads.Store, sessionID string) {
 	t.Helper()
 	refetched, err := store.Get(sessionID)
