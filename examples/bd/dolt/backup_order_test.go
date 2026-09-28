@@ -190,7 +190,7 @@ func readBackupOutcome(t *testing.T, path string) (backupOutcome, bool) {
 }
 
 func TestBackupOrderSyncsEveryScopeThroughGCBdAndPublishesOffsite(t *testing.T) {
-	cityPath := t.TempDir()
+	cityPath := resolvedTempDir(t)
 	artifactDir := filepath.Join(cityPath, ".dolt-backup")
 	offsiteDir := filepath.Join(t.TempDir(), "offsite")
 	for _, dir := range []string{artifactDir, offsiteDir} {
@@ -235,7 +235,7 @@ func TestBackupOrderSyncsEveryScopeThroughGCBdAndPublishesOffsite(t *testing.T) 
 }
 
 func TestBackupOrderRegistersMissingDestinationUnderArtifactDir(t *testing.T) {
-	cityPath := t.TempDir()
+	cityPath := resolvedTempDir(t)
 	binDir := t.TempDir()
 	gc := writeBackupFakeGC(t, binDir)
 
@@ -264,7 +264,7 @@ func TestBackupOrderRegistersMissingDestinationUnderArtifactDir(t *testing.T) {
 }
 
 func TestBackupOrderCountsFailedDestinationRegistration(t *testing.T) {
-	cityPath := t.TempDir()
+	cityPath := resolvedTempDir(t)
 	binDir := t.TempDir()
 	gc := writeBackupFakeGC(t, binDir)
 	outcomeFile := filepath.Join(t.TempDir(), "outcome.json")
@@ -295,7 +295,7 @@ func TestBackupOrderCountsFailedDestinationRegistration(t *testing.T) {
 }
 
 func TestBackupOrderEscalatesFailedSyncWithDiagnostic(t *testing.T) {
-	cityPath := t.TempDir()
+	cityPath := resolvedTempDir(t)
 	binDir := t.TempDir()
 	gc := writeBackupFakeGC(t, binDir)
 
@@ -323,7 +323,7 @@ func TestBackupOrderEscalatesFailedSyncWithDiagnostic(t *testing.T) {
 }
 
 func TestBackupOrderRetriesMarginalSyncFailure(t *testing.T) {
-	cityPath := t.TempDir()
+	cityPath := resolvedTempDir(t)
 	binDir := t.TempDir()
 	gc := writeBackupFakeGC(t, binDir)
 
@@ -340,7 +340,7 @@ func TestBackupOrderRetriesMarginalSyncFailure(t *testing.T) {
 }
 
 func TestBackupOrderReportsUnsupportedBackupAsSkippedWithoutEscalating(t *testing.T) {
-	cityPath := t.TempDir()
+	cityPath := resolvedTempDir(t)
 	binDir := t.TempDir()
 	gc := writeBackupFakeGC(t, binDir)
 	outcomeFile := filepath.Join(t.TempDir(), "outcome.json")
@@ -366,7 +366,7 @@ func TestBackupOrderReportsUnsupportedBackupAsSkippedWithoutEscalating(t *testin
 }
 
 func TestBackupOrderUnreachableScopeIsFailedAndDeclared(t *testing.T) {
-	cityPath := t.TempDir()
+	cityPath := resolvedTempDir(t)
 	binDir := t.TempDir()
 	gc := writeBackupFakeGC(t, binDir)
 	outcomeFile := filepath.Join(t.TempDir(), "outcome.json")
@@ -391,7 +391,7 @@ func TestBackupOrderUnreachableScopeIsFailedAndDeclared(t *testing.T) {
 }
 
 func TestBackupOrderHonorsDatabaseFilter(t *testing.T) {
-	cityPath := t.TempDir()
+	cityPath := resolvedTempDir(t)
 	binDir := t.TempDir()
 	_ = writeBackupFakeGC(t, binDir)
 
@@ -410,7 +410,7 @@ func TestBackupOrderHonorsDatabaseFilter(t *testing.T) {
 }
 
 func TestBackupOrderEscalatesOffsiteFailureWithConfiguredBound(t *testing.T) {
-	cityPath := t.TempDir()
+	cityPath := resolvedTempDir(t)
 	offsiteDir := filepath.Join(t.TempDir(), "offsite")
 	if err := os.MkdirAll(filepath.Join(cityPath, ".dolt-backup"), 0o755); err != nil {
 		t.Fatalf("mkdir artifact dir: %v", err)
@@ -452,7 +452,7 @@ func TestBackupOrderRejectsUnusableOffsiteTimeout(t *testing.T) {
 	// must fall back to the documented 300s default.
 	for _, configured := range []string{"0", "not-a-number"} {
 		t.Run(configured, func(t *testing.T) {
-			cityPath := t.TempDir()
+			cityPath := resolvedTempDir(t)
 			offsiteDir := filepath.Join(t.TempDir(), "offsite")
 			if err := os.MkdirAll(filepath.Join(cityPath, ".dolt-backup"), 0o755); err != nil {
 				t.Fatalf("mkdir artifact dir: %v", err)
@@ -485,7 +485,7 @@ func TestBackupOrderSkipsConcurrentRunBeforeBackupSync(t *testing.T) {
 	if _, err := exec.LookPath("flock"); err != nil {
 		t.Skip("flock not installed; skipping")
 	}
-	cityPath := t.TempDir()
+	cityPath := resolvedTempDir(t)
 	binDir := t.TempDir()
 	_ = writeBackupFakeGC(t, binDir)
 	startedFile := filepath.Join(binDir, "sync-started")
@@ -563,7 +563,7 @@ exec "$@"
 }
 
 func TestBackupOrderSkipsNonBdStoresQuietly(t *testing.T) {
-	cityPath := t.TempDir()
+	cityPath := resolvedTempDir(t)
 	binDir := t.TempDir()
 	gc := writeBackupFakeGC(t, binDir)
 	outcomeFile := filepath.Join(t.TempDir(), "outcome.json")
@@ -579,4 +579,16 @@ func TestBackupOrderSkipsNonBdStoresQuietly(t *testing.T) {
 	if !ok || outcome.Outcome != "skipped" || outcome.Scopes[0].Reason != "not a bd bead store" {
 		t.Fatalf("outcome = %+v (declared %v), want skipped with not a bd bead store", outcome, ok)
 	}
+}
+
+// resolvedTempDir returns a t.TempDir with symlinks resolved: the order
+// resolves the city path physically (pwd -P), and macOS temp dirs live under
+// the /var -> /private/var symlink.
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks(temp dir): %v", err)
+	}
+	return dir
 }

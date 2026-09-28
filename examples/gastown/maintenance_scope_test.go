@@ -29,8 +29,14 @@ type scopeFixture struct {
 
 func newScopeFixture(t *testing.T, storeCases string) scopeFixture {
 	t.Helper()
+	// The orders resolve the city path physically (pwd -P); resolve it here
+	// too so path assertions hold where the temp dir is a symlink (macOS).
+	cityDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks(city dir): %v", err)
+	}
 	f := scopeFixture{
-		cityDir:     t.TempDir(),
+		cityDir:     cityDir,
 		binDir:      t.TempDir(),
 		gcLog:       filepath.Join(t.TempDir(), "gc.log"),
 		bdLog:       filepath.Join(t.TempDir(), "bd.log"),
