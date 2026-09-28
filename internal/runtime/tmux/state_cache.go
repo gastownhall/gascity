@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,6 +55,8 @@ const (
 type StateFetcher interface {
 	// FetchState returns a runtime-state snapshot for live sessions.
 	// Sessions with remain-on-exit corpses (pane_dead=1) are excluded.
+	// The returned snapshot is handed to StateCache, which publishes it to
+	// lock-free readers, so the fetcher must not retain or mutate its maps.
 	FetchState(ctx context.Context) (runtimeStateSnapshot, error)
 }
 
@@ -97,7 +100,11 @@ type runtimeStateSnapshot struct {
 // status check or reconciler pass. Concurrent callers are coalesced via
 // singleflight so at most one tmux/process snapshot refresh runs at a time.
 type StateCache struct {
-	mu         sync.RWMutex
+	mu sync.RWMutex
+	// state is the published snapshot. It is copy-on-write: readers copy it
+	// under mu and then read its maps after releasing the lock (IsRunning,
+	// ProcessAlive), so once published its maps must never be mutated in
+	// place. Writers replace a map wholesale under mu instead.
 	state      runtimeStateSnapshot
 	fetchedAt  time.Time
 	lastError  error
@@ -186,9 +193,18 @@ func (c *StateCache) Invalidate() {
 // EvictSession removes a specific session from the cache and marks it dirty.
 // Used by Stop to immediately reflect the killed session without waiting for
 // the next refresh cycle (which may race with singleflight coalescing).
+//
+// The published Sessions map may still be held by readers that dropped the
+// lock, so the eviction publishes a copy rather than deleting in place:
+// an in-place delete is a concurrent map read/write, a fatal runtime error
+// that recover cannot catch.
 func (c *StateCache) EvictSession(name string) {
 	c.mu.Lock()
-	delete(c.state.Sessions, name)
+	if _, ok := c.state.Sessions[name]; ok {
+		sessions := maps.Clone(c.state.Sessions)
+		delete(sessions, name)
+		c.state.Sessions = sessions
+	}
 	c.dirty = true
 	c.generation++
 	c.mu.Unlock()
