@@ -141,7 +141,7 @@ func TestBdStoreConditionalWriterConformance(t *testing.T) {
 // mirroring the libstore env-pinning precedent.
 func newConditionalIntegrationBdStore(t *testing.T) (*beads.BdStore, string) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := beadstest.GuardedTempDir(t)
 	git := exec.Command("git", "init", "--quiet", dir)
 	// GIT_DIR/GIT_WORK_TREE from the invoking shell would redirect init away
 	// from the TempDir; strip them for this one call (setting them to the
@@ -189,5 +189,8 @@ func newConditionalIntegrationRunner(t *testing.T, scopeDir string) beads.Comman
 	}
 	env["BEADS_DIR"] = filepath.Join(scopeDir, ".beads")
 	env["BEADS_DOLT_AUTO_START"] = "0"
-	return beads.ExecCommandRunnerWithExactEnvContext(context.Background(), env)
+	// toolhome.Environ drops every BEADS_* name, so BdSubprocessEnv re-applies the
+	// test-mode default that keeps bd's detached metrics flusher from racing the
+	// TempDir removal (ga-aik16g).
+	return beads.ExecCommandRunnerWithExactEnvContext(context.Background(), beadstest.BdSubprocessEnv(env))
 }

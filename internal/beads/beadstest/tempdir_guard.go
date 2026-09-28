@@ -1,6 +1,7 @@
 package beadstest
 
 import (
+	"os"
 	"testing"
 	"time"
 )
@@ -8,56 +9,98 @@ import (
 // EnvBeadsTestMode is the environment variable bd's own metrics/spawn.go
 // checks (inTestMode / shouldSpawnFlusher) to skip launching the detached
 // send-metrics child that otherwise races t.TempDir's RemoveAll for
-// $HOME/.beads/eventsData/eventkit.lock (gastownhall/beads#5032).
+// $HOME/.beads/eventsData/eventkit.lock (gastownhall/beads#5032). The
+// currently-installed bd (v1.1.0) predates that fix, so this is included for
+// forward compatibility only — the retrying removal below is what actually
+// makes cleanup reliable against today's bd.
 const EnvBeadsTestMode = "BEADS_TEST_MODE"
 
-// RemoveRetryAttempts is a placeholder pending ga-etb0b3's GREEN step, which
-// must widen it past the 10-attempt/50ms budget internal/doctor's original
-// guard used — ga-aik16g's third occurrence found that budget still
-// insufficient under fleet-load contention.
-//
-// TODO(ga-etb0b3): replace with the real, widened attempt budget.
-const RemoveRetryAttempts = 0
+const (
+	// RemoveRetryAttempts is the retry budget for retryRemoveAll. It is wider
+	// than internal/doctor's original 10-attempt/50ms (500ms) guard: ga-aik16g
+	// recurred a third time under fleet-load contention with that budget, so
+	// this trades a longer worst-case (only ever paid when a removal is
+	// actually still contended) for headroom the narrower guard lacked.
+	RemoveRetryAttempts = 30
+	removeRetryDelay    = 100 * time.Millisecond
+)
 
-// retryRemoveAll is a placeholder pending ga-etb0b3's GREEN step — it must
-// retry remove(dir) until it succeeds or the attempt budget is exhausted,
-// pausing delay between tries. Left as a single unconditional call, the RED
-// tests fail at their own assertions (call count, returned error) rather
-// than at compile time, so RED stays compatible with this repo's pre-commit
-// typecheck gate (make lint-changed rejects any commit that doesn't build).
-func retryRemoveAll(dir string, remove func(string) error, _ int, _ time.Duration) error {
-	return remove(dir)
+// retryRemoveAll calls remove(dir) until it reports success or the attempt
+// budget runs out, pausing delay between tries but not after the last one.
+// It returns nil once a removal succeeds, and otherwise the final failure so
+// the caller can report the give-up rather than discard it.
+func retryRemoveAll(dir string, remove func(string) error, attempts int, delay time.Duration) error {
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		lastErr = remove(dir)
+		if lastErr == nil {
+			return nil
+		}
+		if i < attempts-1 {
+			time.Sleep(delay)
+		}
+	}
+	return lastErr
 }
 
-// GuardedTempDir is a placeholder pending ga-etb0b3's GREEN step — it must
-// return a t.TempDir() whose removal is retried by retryRemoveAll before
-// t.TempDir()'s own single-shot RemoveAll can race a lingering writer. Left
-// as a bare t.TempDir(), it registers no retrying cleanup.
-func GuardedTempDir(t *testing.T) string {
+// retryRemoveAllForTest retries remove briefly to absorb a lingering
+// embedded-dolt/eventkit background writer that can hold files open a
+// few dozen ms to a few hundred ms past the owning bd subprocess's apparent
+// exit — which otherwise races t.TempDir()'s single-shot RemoveAll cleanup
+// with an intermittent "directory not empty" error. It logs rather than
+// fails on a final give-up, so TempDir's own best-effort cleanup still gets
+// the last word while a future red run can still tell an insufficient guard
+// from a missing one.
+func retryRemoveAllForTest(t testing.TB, dir string, remove func(string) error) {
 	t.Helper()
-	return t.TempDir()
+	if err := retryRemoveAll(dir, remove, RemoveRetryAttempts, removeRetryDelay); err != nil {
+		t.Logf("guarded removal of %s exhausted %d attempts: %v", dir, RemoveRetryAttempts, err)
+	}
 }
 
-// GuardedTempDirWith is a placeholder pending ga-etb0b3's GREEN step — see
-// GuardedTempDir. Ordinary callers want GuardedTempDir; this variant exists
-// so a test can observe that the retrying removal was actually registered.
-func GuardedTempDirWith(t *testing.T, _ func(string) error) string {
+// GuardedTempDir returns a t.TempDir() whose removal is retried by
+// retryRemoveAllForTest. Registering the cleanup after t.TempDir() has
+// registered its own means LIFO ordering runs the retrying removal first,
+// leaving TempDir's single-shot RemoveAll nothing to trip over. Every temp
+// dir a real bd subprocess writes into needs this.
+func GuardedTempDir(t testing.TB) string {
 	t.Helper()
-	return t.TempDir()
+	return GuardedTempDirWith(t, os.RemoveAll)
 }
 
-// TestOwnedHome is a placeholder pending ga-etb0b3's GREEN step — it must pin
-// HOME to a fresh GuardedTempDir for the duration of the test and return it.
-// Left as a bare TempDir with HOME untouched.
-func TestOwnedHome(t *testing.T) string {
+// GuardedTempDirWith is GuardedTempDir with the removal call injected. The
+// registration is the whole point of the helper and yet is invisible to a
+// dir-is-gone assertion, because t.TempDir() removes an idle dir on its own;
+// injecting the removal is what lets a test observe that the cleanup was
+// registered at all. Ordinary callers want GuardedTempDir.
+func GuardedTempDirWith(t testing.TB, remove func(string) error) string {
 	t.Helper()
-	return t.TempDir()
+	dir := t.TempDir()
+	t.Cleanup(func() { retryRemoveAllForTest(t, dir, remove) })
+	return dir
 }
 
-// BdSubprocessEnv is a placeholder pending ga-etb0b3's GREEN step — it must
-// default EnvBeadsTestMode to "1" in the returned map while letting any
-// caller-supplied override for that key win. Left as an identity passthrough,
-// it never adds the default.
+// TestOwnedHome pins HOME to a fresh guarded temp dir for the duration of the
+// test and returns it. bd's config precedence falls through, as a last
+// resort, to $HOME/.beads/config.yaml, so only a test-owned HOME keeps a
+// machine-level dolt.shared-server setting out of the bd subprocesses these
+// tests spawn. bd then writes $HOME/.beads/ itself, which is why that dir
+// needs the same retrying removal as the working dir.
+func TestOwnedHome(t testing.TB) string {
+	t.Helper()
+	home := GuardedTempDir(t)
+	t.Setenv("HOME", home)
+	return home
+}
+
+// BdSubprocessEnv builds an env map for a real bd subprocess, defaulting
+// EnvBeadsTestMode to "1" while letting any caller-supplied override for that
+// key win — the default is applied first and overrides are layered on top,
+// never the reverse.
 func BdSubprocessEnv(overrides map[string]string) map[string]string {
-	return overrides
+	env := map[string]string{EnvBeadsTestMode: "1"}
+	for k, v := range overrides {
+		env[k] = v
+	}
+	return env
 }

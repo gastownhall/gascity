@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -6132,7 +6133,7 @@ func TestBuildDesiredState_MinZeroDefaultScaleCheckRoutedWorkCreatesPoolSession(
 	}
 	pinTestOwnedBDHome(t)
 
-	cityPath := t.TempDir()
+	cityPath := beadstest.GuardedTempDir(t)
 	registerRealBDServerStop(t, cityPath)
 	beadsDir := filepath.Join(cityPath, ".beads")
 	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(jqPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
@@ -6143,9 +6144,9 @@ func TestBuildDesiredState_MinZeroDefaultScaleCheckRoutedWorkCreatesPoolSession(
 	runExternal(t, cityPath, bdPath, "init", "-p", "ct", "--skip-hooks", "-q")
 	runExternal(t, cityPath, bdPath, "config", "set", "types.custom", "session")
 
-	store := beads.NewBdStore(cityPath, beads.ExecCommandRunnerWithEnv(map[string]string{
+	store := beads.NewBdStore(cityPath, beads.ExecCommandRunnerWithEnv(beadstest.BdSubprocessEnv(map[string]string{
 		"BEADS_DIR": beadsDir,
-	}))
+	})))
 	if _, err := store.Create(beads.Bead{
 		Title:  "queued polecat work",
 		Type:   "task",
