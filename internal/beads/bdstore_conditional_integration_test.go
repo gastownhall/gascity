@@ -133,6 +133,45 @@ func TestBdStoreConditionalWriterConformance(t *testing.T) {
 	})
 }
 
+// TestNewConditionalIntegrationRunnerIsolatesHOMEFromSharedServerConfig pins
+// a synthetic HOME whose .beads/config.yaml declares dolt.shared-server:
+// true — the shape ga-1037rg named as the gate host's ambient config — and
+// proves the conditional-integration scaffold still round-trips a bead
+// against the scope's own embedded database. Before HOME was added to
+// newConditionalIntegrationRunner's env overlay, bd inherited this polluted
+// ambient HOME unfiltered and misrouted to the shared Dolt server instead of
+// the scope directory, so this test fails on the pre-fix runner and passes
+// once HOME is pinned per scope (ga-wapfnm).
+func TestNewConditionalIntegrationRunnerIsolatesHOMEFromSharedServerConfig(t *testing.T) {
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skipf("bd not on PATH: %v", err)
+	}
+
+	pollutedHome := t.TempDir()
+	beadsDir := filepath.Join(pollutedHome, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("creating polluted HOME .beads dir: %v", err)
+	}
+	cfg := "no-db: true\ndolt:\n    shared-server: true\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("writing polluted HOME config.yaml: %v", err)
+	}
+	t.Setenv("HOME", pollutedHome)
+
+	store, _ := newConditionalIntegrationBdStore(t)
+	created, err := store.Create(beads.Bead{Title: "home-isolation probe"})
+	if err != nil {
+		t.Fatalf("Create against real bd under a shared-server HOME: %v", err)
+	}
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) against real bd under a shared-server HOME: %v", created.ID, err)
+	}
+	if got.Title != "home-isolation probe" {
+		t.Fatalf("roundtrip title = %q", got.Title)
+	}
+}
+
 // newConditionalIntegrationBdStore stands up a REAL bd scope in a fresh
 // TempDir — git init + `bd init` in embedded (serverless) mode — and returns
 // the production BdStore over it plus the scope root. Environment is pinned
