@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "suspensionstate",
-    srcs = ["suspensionstate.go"],
+    srcs = [
+        "lock.go",
+        "suspensionstate.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/suspensionstate",
     visibility = ["//:__subpackages__"],
     deps = [
