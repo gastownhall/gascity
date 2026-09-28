@@ -2660,6 +2660,9 @@
             "$ref": "#/components/schemas/NoPayload"
           },
           {
+            "$ref": "#/components/schemas/OrderSkippedPayload"
+          },
+          {
             "$ref": "#/components/schemas/OrderSuppressedPayload"
           },
           {
@@ -5424,6 +5427,52 @@
         },
         "required": [
           "status"
+        ],
+        "type": "object"
+      },
+      "OrderSkippedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "order_name": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "$ref": "#/components/schemas/OrderSkippedScope"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "order_name",
+          "outcome",
+          "reason",
+          "scopes"
+        ],
+        "type": "object"
+      },
+      "OrderSkippedScope": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "reason"
         ],
         "type": "object"
       },
@@ -12407,6 +12456,7 @@
             "order.completed": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedEventStreamEnvelopeOrderFired",
+            "order.skipped": "#/components/schemas/TypedEventStreamEnvelopeOrderSkipped",
             "order.suppressed": "#/components/schemas/TypedEventStreamEnvelopeOrderSuppressed",
             "project.identity.stamped": "#/components/schemas/TypedEventStreamEnvelopeProjectIdentityStamped",
             "provider.swapped": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped",
@@ -12622,6 +12672,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderFired"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderSkipped"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderSuppressed"
@@ -14123,6 +14176,7 @@
                 "order.completed",
                 "order.failed",
                 "order.suppressed",
+                "order.skipped",
                 "provider.swapped",
                 "worker.operation",
                 "project.identity.stamped",
@@ -16109,6 +16163,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope order.fired",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeOrderSkipped": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OrderSkippedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "order.skipped",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope order.skipped",
         "type": "object"
       },
       "TypedEventStreamEnvelopeOrderSuppressed": {
@@ -18679,6 +18790,7 @@
             "order.completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired",
+            "order.skipped": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderSkipped",
             "order.suppressed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderSuppressed",
             "project.identity.stamped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProjectIdentityStamped",
             "provider.swapped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped",
@@ -18894,6 +19006,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderSkipped"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderSuppressed"
@@ -20486,6 +20601,7 @@
                 "order.completed",
                 "order.failed",
                 "order.suppressed",
+                "order.skipped",
                 "provider.swapped",
                 "worker.operation",
                 "project.identity.stamped",
@@ -22609,6 +22725,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope order.fired",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeOrderSkipped": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OrderSkippedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "order.skipped",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope order.skipped",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeOrderSuppressed": {

@@ -84,18 +84,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.1.6, whose role prompts run `gc gc claim`, rename the key to `gc`;
   `gc doctor --fix` offers the rename (#6683). Do not add a second `gc` import
   next to the old key: that imports the pack twice (#4508).
+- **The `reaper`, `jsonl-export` and dolt `mol-dog-backup` orders now work
+  through bd on every city topology.** Each bead scope (the city and every
+  rig) is reached with `gc bd`, so bd-owned proxied, gc-managed and mixed
+  cities are all maintained; the orders no longer dial Dolt themselves.
+  - **Unbound databases are no longer maintained.** Databases on a gc-managed
+    Dolt server that no city or rig binds are no longer reaped, exported or
+    backed up. Drop orphaned databases, or bind them to a rig.
+  - **The JSONL archive switches to `bd export` format** (one issue per line,
+    with labels, dependencies and comments), which restores with
+    `bd import <file>`. The first run moves each database's old
+    `{"rows":[...]}` snapshot files into `<db>/legacy/` with `git mv`; nothing
+    is deleted.
+  - **Backups use `bd backup`.** `mol-dog-backup` registers
+    `<city>/.dolt-backup/<db>` as each scope's `bd backup` destination when it
+    has none, then runs `bd backup sync`; the reaper's session-prune backup gate
+    reads `bd backup status`. bd v1.3.0 refuses backup on proxied scopes: those
+    are reported as skipped (an `order.skipped` event) and their session-bead
+    prune waits until a bd with proxied backup support is pinned.
+  - **Closed-wisp purge uses `bd purge`.** It needs a bd whose `bd purge`
+    selects the whole wisps plane (`--wisps-plane`), keeps closed wisps a live
+    wisp depends on, and purges in bounded batches (`--limit`); a backlog is
+    cleared across runs within `GC_REAPER_PURGE_BUDGET_SECS` (default 300s).
+    With bd v1.3.0 the purge step is reported as skipped. A run that uses up
+    `GC_REAPER_RUN_BUDGET_SECS` (default 780s, below the 900s order timeout)
+    stops starting new work, reports a partial outcome, and the next run
+    continues.
+  - Both orders now run with a 900s timeout.
 
 ### Known Issues
 
-- **Wisp reaping and JSONL export do not run yet on proxied cities.** On
-  cities using the default bd-owned proxied Dolt, the core `reaper` and
-  `jsonl-export` orders now skip with a log line instead of failing on every
-  run. Until a follow-up lands, those cities get no wisp reaping,
-  closed-molecule purge, stale-issue or expired-nudge close, session-bead
-  prune or JSONL export, so they have no off-database JSONL copy;
-  `wisp-compact` and the opt-in Go wisp GC (`wisp_ttl`) still run (#6696).
+- **Proxied cities get no closed-wisp purge, bd backup or `gm-*` session
+  prune until gc's bd pin moves to the beads 1.3.x hotfix.** The `reaper`,
+  `jsonl-export` and `mol-dog-backup` orders now run on bd-owned proxied
+  cities, but with the pinned bd v1.3.0 `bd purge --wisps-plane --limit` and
+  `bd backup` on a proxied scope are not available: those steps are reported
+  as skipped (`order.skipped`) every run instead of running, and the session
+  prune waits for a backup it can see. Stale-wisp, workflow-root, nudge and
+  stale-issue closes and the JSONL archive work today. The bd pin bump
+  removes this entry.
 
 ### Added
+
+- **`order.skipped` event.** An exec order that exits 0 but could not do all
+  of its work (an unreachable bead scope, a safety gate that held a step back)
+  now says so: the controller records a typed `order.skipped` event, with
+  outcome `skipped` or `partial` and the scopes that did not run, next to
+  `order.completed`. `gc order run` prints the same declaration.
 
 - **`gc doctor` offers to rebind the Gas City pack import as `gc`.** The new
   `gascity-pack-binding` check warns when a city imports the public Gas City
@@ -203,6 +238,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   minter, which is the premise this change retires (ga-8w5c7).
 
 ### Fixed
+
+- **The reaper's stale-issue auto-close works again when an open bead
+  depends on a wisp or external bead.** Such a dependency has no
+  `depends_on_issue_id`, and that NULL emptied the active-dependency exclusion,
+  so no stale issue in the store was ever closed.
 
 - **The Dolt compactor no longer rewrites adopted or shared history.** The
   default-on `mol-dog-compactor` (`gc dolt compact`) flattened any managed

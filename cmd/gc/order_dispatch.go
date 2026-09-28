@@ -1901,6 +1901,9 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 	env, err := orderExecEnvWithError(cityPath, m.cfg, target, a, vars)
 	var output []byte
 	var execErrMsg string
+	// declared is the outcome file of a run that exited 0; its skipped/partial
+	// declaration (if any) is reported after order.completed.
+	var declared *orderOutcomeFile
 	if err != nil {
 		redactionEnv := append(os.Environ(), env...)
 		redacted := redactOrderEnvError(err, redactionEnv)
@@ -1908,7 +1911,22 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 		outcome = orders.RunOutcomeExecEnvFailed
 		logDispatchError(m.stderr, "gc: order exec %s env failed: %s", scoped, redacted)
 	} else {
+		outcomeFile, outcomeErr := newOrderOutcomeFile()
+		if outcomeErr != nil {
+			// The order still runs; it just has nowhere to declare a skip.
+			logDispatchError(m.stderr, "gc: order %s: %v", scoped, outcomeErr)
+		} else {
+			env = append(env, outcomeFile.envEntry())
+			defer func() {
+				if err := outcomeFile.remove(); err != nil {
+					logDispatchError(m.stderr, "gc: order %s: %v", scoped, err)
+				}
+			}()
+		}
 		output, err = m.execRun(ctx, a.Exec, target.ScopeRoot, env)
+		if err == nil {
+			declared = outcomeFile
+		}
 		if err != nil {
 			redactionEnv := append(os.Environ(), env...)
 			execErrMsg = execenv.RedactText(err.Error(), redactionEnv)
@@ -1957,6 +1975,9 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 		Actor:   "controller",
 		Subject: scoped,
 	})
+	if declared != nil {
+		recordOrderOutcome(m.rec, m.stderr, scoped, declared)
+	}
 }
 
 // prepareOrderWispRecipe compiles an order's formula into a recipe and returns

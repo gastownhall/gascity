@@ -16,8 +16,9 @@ import (
 
 // DoltBackupCheck verifies that a rig's Dolt database has a backup remote
 // configured. `gc rig add` provisions the rig but does not register a
-// backup. mol-dog-backup auto-configures a local <db>-backup remote on its
-// next run (#3176), so this warning self-heals within one backup interval;
+// backup. mol-dog-backup registers <city>/.dolt-backup/<db> as the scope's
+// `bd backup` destination on its next run (#3176), so this warning self-heals
+// within one backup interval;
 // it catches the not-yet-covered window up-front in `gc doctor` and stays
 // loud when the backup dog itself is failing.
 //
@@ -27,8 +28,10 @@ import (
 //     mol-dog-backup syncs here, so populated contents are evidence that
 //     a sync has run.
 //   - Repo state: <managed-dolt-data-dir>/<db>/.dolt/repo_state.json
-//     contains a backup entry named <db>-backup. This is the
-//     post-registration, pre-sync state.
+//     contains a backup entry named <db>-backup (the pre-bd registration),
+//     or bd's "default" backup pointing at <city>/.dolt-backup/<db> (the
+//     `bd backup init` registration). This is the post-registration,
+//     pre-sync state.
 //
 // When both signals are absent the check emits StatusWarning with the
 // exact copy-pasteable invocation needed to register and sync the
@@ -118,16 +121,16 @@ func (c *DoltBackupCheck) Run(_ *CheckContext) *CheckResult {
 	}
 
 	// Signal 2: backup remote is registered in repo_state.json.
-	registered, err := backupRemoteRegistered(c.doltDataDir, dbName)
+	registered, err := backupRemoteRegistered(c.doltDataDir, dbName, "file://"+backupDir)
 	switch {
 	case err != nil:
 		// Treat read errors as "not registered" but record the cause in
 		// Details for verbose runs. We still want the warning + fix
 		// command to reach the operator.
 		r.Details = append(r.Details, fmt.Sprintf("read repo_state.json: %v", err))
-	case registered:
+	case registered != "":
 		r.Status = StatusOK
-		r.Message = fmt.Sprintf("backup remote %q registered (sync pending)", dbName+"-backup")
+		r.Message = fmt.Sprintf("backup remote %q registered (sync pending)", registered)
 		return r
 	}
 
@@ -187,27 +190,37 @@ func resolveDoltDBName(rig config.Rig, rigPath string) (string, []string) {
 	return rig.Name, nil
 }
 
-// backupRemoteRegistered reports whether
-// <managed-dolt-data-dir>/<db>/.dolt/repo_state.json declares a backup remote
-// named "<db>-backup". A missing file returns (false, nil) — that is the
-// expected state for a freshly-provisioned rig and not itself an error.
-func backupRemoteRegistered(doltDataDir, dbName string) (bool, error) {
+// backupRemoteRegistered returns the name of the backup registered for the
+// scope in <managed-dolt-data-dir>/<db>/.dolt/repo_state.json: "<db>-backup"
+// (the pre-bd registration), or bd's "default" backup when it points at
+// artifactURL (the `bd backup init` registration mol-dog-backup makes). It
+// returns "" when neither is registered. A missing file returns ("", nil) —
+// that is the expected state for a freshly-provisioned rig and not itself an
+// error.
+func backupRemoteRegistered(doltDataDir, dbName, artifactURL string) (string, error) {
 	statePath := filepath.Join(doltDataDir, dbName, ".dolt", "repo_state.json")
 	data, err := os.ReadFile(statePath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return false, nil
+			return "", nil
 		}
-		return false, err
+		return "", err
 	}
 	var state struct {
-		Backups map[string]json.RawMessage `json:"backups"`
+		Backups map[string]struct {
+			URL string `json:"url"`
+		} `json:"backups"`
 	}
 	if err := json.Unmarshal(data, &state); err != nil {
-		return false, fmt.Errorf("parse %s: %w", statePath, err)
+		return "", fmt.Errorf("parse %s: %w", statePath, err)
 	}
-	_, ok := state.Backups[dbName+"-backup"]
-	return ok, nil
+	if _, ok := state.Backups[dbName+"-backup"]; ok {
+		return dbName + "-backup", nil
+	}
+	if backup, ok := state.Backups["default"]; ok && backup.URL == artifactURL {
+		return "default", nil
+	}
+	return "", nil
 }
 
 func dirHasEntries(path string) (bool, error) {

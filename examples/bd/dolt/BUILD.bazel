@@ -89,6 +89,7 @@ go_library(
         "orders/mol-dog-stale-db.toml",
         "pack.toml",
         "assets/scripts/proxied_scope.sh",
+        "assets/scripts/_bounded.sh",
     ],
     importpath = "github.com/gastownhall/gascity/examples/bd/dolt",
     visibility = ["//visibility:public"],
@@ -98,6 +99,7 @@ go_test(
     name = "dolt_test",
     srcs = [
         "agent_workdir_test.go",
+        "backup_order_test.go",
         "cleanup_test.go",
         "compact_backup_remotes_test.go",
         "compact_history_protection_test.go",
