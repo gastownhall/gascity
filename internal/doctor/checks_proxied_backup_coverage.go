@@ -17,8 +17,8 @@ import (
 // the "no backup at all" signal to the dolt-backup check by name. Between them
 // a default-topology city reads as fully covered while nothing — not gc, not
 // bd, not the backup dog — can produce a recovery point: bd v1.3.0
-// refuses `backup` on the proxied path, and mol-dog-backup talks to the
-// managed server, which a proxied scope does not have.
+// refuses `backup` on the proxied path, and mol-dog-backup backs scopes up
+// only through `bd backup`.
 //
 // It is an advisory, not a warning: a proxied city is a healthy city on this
 // branch and there is no action the operator can take on v1.3.0, so a warning
@@ -87,7 +87,7 @@ func (c *ProxiedBackupCoverageCheck) Run(_ *CheckContext) *CheckResult {
 			len(c.scopeLabels), scopeNoun, strings.Join(c.scopeLabels, ", "), proxiedBackupRefusal),
 		Details: []string{
 			"gc cannot register a Dolt backup against a proxy root it does not own.",
-			"mol-dog-backup targets the managed server, which a proxied scope has none of.",
+			"mol-dog-backup backs every scope up with `bd backup`, which this bd refuses on the proxied path.",
 			"Copy <scope>/.beads/dolt out of band until beads lifts the proxied refusal.",
 		},
 	}

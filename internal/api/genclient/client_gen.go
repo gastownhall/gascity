@@ -2799,6 +2799,20 @@ type OrderRunOutputBody struct {
 	TrackingId *string `json:"tracking_id,omitempty"`
 }
 
+// OrderSkippedPayload defines model for OrderSkippedPayload.
+type OrderSkippedPayload struct {
+	OrderName string               `json:"order_name"`
+	Outcome   string               `json:"outcome"`
+	Reason    string               `json:"reason"`
+	Scopes    *[]OrderSkippedScope `json:"scopes"`
+}
+
+// OrderSkippedScope defines model for OrderSkippedScope.
+type OrderSkippedScope struct {
+	Reason string `json:"reason"`
+	Scope  string `json:"scope"`
+}
+
 // OrderSuppressedPayload defines model for OrderSuppressedPayload.
 type OrderSuppressedPayload struct {
 	Consecutive     int64  `json:"consecutive"`
@@ -6301,6 +6315,22 @@ type TypedEventStreamEnvelopeOrderFired struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeOrderSkipped defines model for TypedEventStreamEnvelopeOrderSkipped.
+type TypedEventStreamEnvelopeOrderSkipped struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          OrderSkippedPayload      `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeOrderSuppressed defines model for TypedEventStreamEnvelopeOrderSuppressed.
 type TypedEventStreamEnvelopeOrderSuppressed struct {
 	Actor            string                   `json:"actor"`
@@ -7969,6 +7999,23 @@ type TypedTaggedEventStreamEnvelopeOrderFired struct {
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
 	Message          *string                  `json:"message,omitempty"`
 	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeOrderSkipped defines model for TypedTaggedEventStreamEnvelopeOrderSkipped.
+type TypedTaggedEventStreamEnvelopeOrderSkipped struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          OrderSkippedPayload      `json:"payload"`
 	RunId            *string                  `json:"run_id,omitempty"`
 	Seq              int64                    `json:"seq"`
 	SessionId        *string                  `json:"session_id,omitempty"`
@@ -10931,6 +10978,32 @@ func (t *EventPayload) FromNoPayload(v NoPayload) error {
 
 // MergeNoPayload performs a merge with any union data inside the EventPayload, using the provided NoPayload
 func (t *EventPayload) MergeNoPayload(v NoPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsOrderSkippedPayload returns the union data inside the EventPayload as a OrderSkippedPayload
+func (t EventPayload) AsOrderSkippedPayload() (OrderSkippedPayload, error) {
+	var body OrderSkippedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromOrderSkippedPayload overwrites any union data inside the EventPayload as the provided OrderSkippedPayload
+func (t *EventPayload) FromOrderSkippedPayload(v OrderSkippedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeOrderSkippedPayload performs a merge with any union data inside the EventPayload, using the provided OrderSkippedPayload
+func (t *EventPayload) MergeOrderSkippedPayload(v OrderSkippedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -15042,6 +15115,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeOrderFired(v Typ
 	return err
 }
 
+// AsTypedEventStreamEnvelopeOrderSkipped returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeOrderSkipped
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeOrderSkipped() (TypedEventStreamEnvelopeOrderSkipped, error) {
+	var body TypedEventStreamEnvelopeOrderSkipped
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeOrderSkipped overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeOrderSkipped
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeOrderSkipped(v TypedEventStreamEnvelopeOrderSkipped) error {
+	v.Type = "order.skipped"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeOrderSkipped performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeOrderSkipped
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeOrderSkipped(v TypedEventStreamEnvelopeOrderSkipped) error {
+	v.Type = "order.skipped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeOrderSuppressed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeOrderSuppressed
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeOrderSuppressed() (TypedEventStreamEnvelopeOrderSuppressed, error) {
 	var body TypedEventStreamEnvelopeOrderSuppressed
@@ -16430,6 +16531,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeOrderFailed()
 	case "order.fired":
 		return t.AsTypedEventStreamEnvelopeOrderFired()
+	case "order.skipped":
+		return t.AsTypedEventStreamEnvelopeOrderSkipped()
 	case "order.suppressed":
 		return t.AsTypedEventStreamEnvelopeOrderSuppressed()
 	case "project.identity.stamped":
@@ -18101,6 +18204,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeOrde
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeOrderSkipped returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeOrderSkipped
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeOrderSkipped() (TypedTaggedEventStreamEnvelopeOrderSkipped, error) {
+	var body TypedTaggedEventStreamEnvelopeOrderSkipped
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeOrderSkipped overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeOrderSkipped
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeOrderSkipped(v TypedTaggedEventStreamEnvelopeOrderSkipped) error {
+	v.Type = "order.skipped"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeOrderSkipped performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeOrderSkipped
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeOrderSkipped(v TypedTaggedEventStreamEnvelopeOrderSkipped) error {
+	v.Type = "order.skipped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeOrderSuppressed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeOrderSuppressed
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeOrderSuppressed() (TypedTaggedEventStreamEnvelopeOrderSuppressed, error) {
 	var body TypedTaggedEventStreamEnvelopeOrderSuppressed
@@ -19489,6 +19620,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeOrderFailed()
 	case "order.fired":
 		return t.AsTypedTaggedEventStreamEnvelopeOrderFired()
+	case "order.skipped":
+		return t.AsTypedTaggedEventStreamEnvelopeOrderSkipped()
 	case "order.suppressed":
 		return t.AsTypedTaggedEventStreamEnvelopeOrderSuppressed()
 	case "project.identity.stamped":

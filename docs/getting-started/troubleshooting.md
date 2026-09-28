@@ -550,19 +550,21 @@ same kind of hard error — delegation is a systemd contract.
 
 ## JSONL Archive Push Failures
 
-The core pack runs `jsonl-export` every 15 minutes to dump each bead
-database to a text-diffable JSONL snapshot inside a local git repository
-(the "JSONL archive"). The archive serves as a disaster-recovery backup:
-if the live Dolt server loses data, the last-known-good bead graph can be
-reconstructed from the archive's commit history.
+The core pack runs `jsonl-export` every 15 minutes to export each bead
+store (the city and every rig) with `bd export` into a text-diffable JSONL
+snapshot inside a local git repository (the "JSONL archive"): one issue per
+line, with its labels, dependencies and comments. The archive serves as a
+disaster-recovery backup: a snapshot from any commit restores with
+`gc bd import <file>`.
 
 `jsonl-export` (every 15 minutes) and `reaper` (every 30 minutes) ship in
 the core pack, so they are active in every city by default — including
 cities that previously ran them only via the opt-in gastown maintenance
-pack. On cities without a Dolt target (for example `[beads]
-provider = "file"`), both orders skip with a one-line `no managed dolt
-target for this city` message instead of running. To turn them off
-entirely, skip them by name in `city.toml`:
+pack. Both reach every bead store through `gc bd`, so they work the same on
+bd-owned proxied, gc-managed and mixed cities. On cities whose beads
+provider is not bd (for example `[beads] provider = "file"`), both orders
+skip with a one-line message and an `order.skipped` event instead of
+running. To turn them off entirely, skip them by name in `city.toml`:
 
 ```toml
 [orders]

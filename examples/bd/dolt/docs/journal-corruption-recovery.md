@@ -43,10 +43,10 @@ gc dolt stop 2>/dev/null || true
 # WARNING: all changes after the backup snapshot are lost
 gc dolt backup restore <dbname>-backup <dbname>
 
-# 4b. Reconstruct from JSONL export (fallback)
-# WARNING: reconstructs from the passive export; open/in-progress bead state
-#          may be partially stale compared to the last committed Dolt state
-gc bd import --from-file /path/to/city/.beads/issues.jsonl --db <dbname>
+# 4b. Reconstruct from the JSONL archive (fallback)
+# WARNING: reconstructs from the passive 15-minute export; open/in-progress
+#          bead state may be partially stale compared to the last committed Dolt state
+gc bd import /path/to/city/.gc/runtime/packs/core/jsonl-archive/<dbname>/issues.jsonl
 
 # 5. Verify
 dolt --host 127.0.0.1 --port "$GC_DOLT_PORT" --user root sql -q "SELECT active_branch()"
@@ -135,10 +135,9 @@ If no backup is configured or the backup itself is corrupt, proceed to Step 4b.
 
 ## Step 4 (fallback): Reconstruct From JSONL Export
 
-> **[WARNING]** The `.beads/issues.jsonl` export is a **passive** snapshot updated on each
-> Dolt commit. It may lag the last committed state by one reconciler tick. Any bead changes
-> between the last Dolt commit and the corruption event are not reflected. In-progress beads
-> may require manual status correction after import.
+> **[WARNING]** The JSONL archive snapshot is **passive**: the core `jsonl-export` order
+> writes it every 15 minutes. Any bead changes after the last export are not reflected, and
+> wisps are not archived. In-progress beads may require manual status correction after import.
 
 ```bash
 # Drop the corrupt database directory
@@ -147,8 +146,9 @@ rm -rf /path/to/city/.beads/dolt/<dbname>
 # Re-initialize an empty store
 gc bd init --db <dbname>
 
-# Import from the JSONL export
-gc bd import --from-file .beads/issues.jsonl --db <dbname>
+# Import the latest JSONL archive snapshot of this database (written by the
+# core jsonl-export order in bd export format)
+gc bd import .gc/runtime/packs/core/jsonl-archive/<dbname>/issues.jsonl
 
 # Inspect open/in-progress beads and correct state if needed
 gc bd list --status in_progress --json | jq '.[] | {id, title, status}'

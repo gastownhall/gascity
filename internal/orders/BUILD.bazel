@@ -6,6 +6,7 @@ go_library(
         "cron.go",
         "discovery.go",
         "env.go",
+        "exec_outcome.go",
         "filenames.go",
         "filter.go",
         "order.go",
@@ -82,6 +83,7 @@ go_test(
     srcs = [
         "discovery_test.go",
         "env_test.go",
+        "exec_outcome_test.go",
         "filenames_test.go",
         "filter_test.go",
         "order_test.go",
