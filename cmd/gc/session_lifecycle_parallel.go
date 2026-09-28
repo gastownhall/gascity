@@ -1937,26 +1937,19 @@ func commitAsyncStartResultWithContext(
 	}()
 
 	refreshBegin := time.Now()
-	refreshed, ok, cleanupRuntime, releaseInFlight := refreshAsyncStartResult(result, store, stderr)
+	refreshed, refresh := refreshAsyncStartResult(result, store, stderr)
 	commitRefreshElapsed := time.Since(refreshBegin)
 	// Carry the per-phase timings forward: refresh's elapsed time is
 	// commit-side, distinct from the start phases captured in
 	// runPreparedStartCandidate. Both flow into the lifecycle log.
 	refreshed.phases.CommitRefresh = commitRefreshElapsed
-	if !ok {
-		// refreshAsyncStartResult returns result unchanged on every !ok
-		// branch (store.Get error, stale prepared command, stale runtime
-		// session), so refreshed.phases already carries the original
+	if !refresh.commit {
+		// refreshAsyncStartResult returns result unchanged on every
+		// non-commit branch (store.Get error, stale prepared command, stale
+		// runtime session), so refreshed.phases already carries the original
 		// start_call / post_start_observe; only commit_refresh was
 		// stamped above. No restore needed.
-		if cleanupRuntime && !startOutcomeDefersCommit(result.outcome) {
-			stopStaleAsyncStartRuntime(result, sp, stderr)
-		}
-		outcome := "stale_async_start"
-		if releaseInFlight {
-			clearPendingStartInFlightLease(result.prepared.candidate.info.ID, sessFront, stderr)
-			outcome = "async_start_refresh_failed"
-		}
+		outcome := settleUncommittedAsyncStart(result, refresh, sp, sessFront, clk, stderr)
 		logLifecycleOutcome(stderr, "start", wave, name, template, outcome, result.started, time.Now(), nil, refreshed.phases)
 		return false
 	}
@@ -1998,6 +1991,40 @@ func commitAsyncStartResultWithContext(
 	return verdict == startCommitSucceeded
 }
 
+// settleUncommittedAsyncStart carries out a non-commit refresh verdict and
+// returns the lifecycle outcome to log.
+//
+// A deferred or still-initializing outcome means the runtime is there but this
+// tick could not decide about it, which is no state to stop it from, or to
+// close a bead and free an alias from. It keeps the lease handling below and
+// retries next tick.
+func settleUncommittedAsyncStart(result startResult, refresh asyncStartRefreshVerdict, sp runtime.Provider, sessFront *sessionpkg.Store, clk clock.Clock, stderr io.Writer) string {
+	deferred := startOutcomeDefersCommit(result.outcome)
+	switch {
+	case refresh.rollbackPendingCreate && !deferred:
+		// The rollback frees the alias, so it waits until the runtime this
+		// start spawned is confirmed gone. When it survives or cannot be
+		// observed, the row keeps the discard below and retries.
+		if pendingCreateRuntimeClearedForRollback(result, sp, stderr) {
+			switch rollbackPendingCreateConfirmed(result.prepared.candidate.info, refresh.current, sessFront, clk.Now().UTC(), stderr) {
+			case pendingCreateRolledBack:
+				// The rollback cleared last_woke_at inside its own Tx.
+				return "async_start_drift_rolled_back"
+			case pendingCreateRollbackSuperseded:
+				// The row moved on; the in-flight lease is no longer ours.
+				return "stale_async_start"
+			}
+		}
+	case refresh.cleanupRuntime && !deferred:
+		stopStaleAsyncStartRuntime(result, sp, stderr)
+	}
+	if refresh.releaseInFlight {
+		clearPendingStartInFlightLease(result.prepared.candidate.info.ID, sessFront, stderr)
+		return "async_start_refresh_failed"
+	}
+	return "stale_async_start"
+}
+
 // refreshAsyncStartResult re-reads the session bead just before commit so the async
 // commit protocol decides against the CURRENT persisted state, not the tick
 // snapshot the start goroutine was enqueued with (which can be stale by the time
@@ -2018,26 +2045,44 @@ func commitAsyncStartResultWithContext(
 // TestRefreshAsyncStartRejectsNonSessionBead. candidate.info is refreshed to the
 // re-read Info; the prepared side (result.prepared.candidate.info) is the enqueue-time
 // twin the gates compare against.
-func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Writer) (startResult, bool, bool, bool) {
+func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Writer) (startResult, asyncStartRefreshVerdict) {
 	preparedInfo := result.prepared.candidate.info
 	if store == nil || strings.TrimSpace(preparedInfo.ID) == "" {
-		return result, true, false, false
+		return result, asyncStartRefreshVerdict{commit: true}
 	}
 	currentInfo, _, err := sessionFrontDoor(store).GetPersistedResponse(preparedInfo.ID)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: refreshing async start %s: %v\n", result.prepared.candidate.name(), err) //nolint:errcheck
-		return result, false, false, true
+		return result, asyncStartRefreshVerdict{releaseInFlight: true}
 	}
 	if asyncStartPreparedCommandStaleInfo(result.prepared, currentInfo) {
+		// last_woke_at is the in-flight lease of whichever incarnation owns
+		// the row now, so only the attempt that owns it may release it: the
+		// same rule the still-current gate below applies. A late attempt must
+		// not clear the lease of a newer incarnation that is mid-spawn.
+		identityMatches := asyncStartIdentityMatchesInfo(preparedInfo, currentInfo)
+		verdict := asyncStartRefreshVerdict{
+			cleanupRuntime:  true,
+			releaseInFlight: identityMatches,
+			current:         currentInfo,
+		}
+		if asyncStartDriftRollbackEligibleInfo(preparedInfo, currentInfo) {
+			fmt.Fprintf(stderr, "session reconciler: rolling back pending create for %s: its command drifted before the create committed and a retry cannot converge\n", result.prepared.candidate.name()) //nolint:errcheck
+			verdict.rollbackPendingCreate = true
+			return result, verdict
+		}
 		fmt.Fprintf(stderr, "session reconciler: ignoring stale async start result for %s: desired command changed during startup\n", result.prepared.candidate.name()) //nolint:errcheck
-		return result, false, true, true
+		return result, verdict
 	}
 	if !asyncStartSessionStillCurrentInfo(preparedInfo, currentInfo) {
 		fmt.Fprintf(stderr, "session reconciler: ignoring stale async start result for %s\n", result.prepared.candidate.name()) //nolint:errcheck
-		return result, false, asyncStartStaleRuntimeCleanupAllowedInfo(preparedInfo, currentInfo), false
+		return result, asyncStartRefreshVerdict{
+			cleanupRuntime: asyncStartStaleRuntimeCleanupAllowedInfo(preparedInfo, currentInfo),
+			current:        currentInfo,
+		}
 	}
 	result.prepared.candidate.info = currentInfo
-	return result, true, false, false
+	return result, asyncStartRefreshVerdict{commit: true, current: currentInfo}
 }
 
 // asyncStartPreparedCommandStaleInfo is the async-start command-drift gate: it
