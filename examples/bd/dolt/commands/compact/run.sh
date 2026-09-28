@@ -36,8 +36,10 @@
 #      otherwise looks identical to the ambiguous gain+drift corruption signal.
 #      Quarantining that false positive blocks all future GC of the db and
 #      starves DOLT_GC until host memory is exhausted. So, mirroring the remote-
-#      push path's HEAD-stability defer, gain+drift, row-count-decrease, and
-#      same-count value-hash-drift cases are downgraded from a blocking
+#      push path's HEAD-stability defer, gain+drift, row-count-decrease,
+#      same-count value-hash-drift, and the mixed gain+drift plus same-count
+#      case one writer transaction produces (an INSERT into one table with an
+#      UPDATE in another) are downgraded from a blocking
 #      quarantine to a skip-and-retry-next-run ONLY when a concurrent writer is
 #      proven. A writer is proven (and distinguished from the flatten's OWN
 #      commit) when either HEAD captured immediately before the mutating reset
@@ -3278,11 +3280,13 @@ flatten_database() {
     integrity_guidance="${verify_counts_failure_guidance:-post-flatten integrity check failed; investigate before re-running}"
     # Downgrade quarantine -> defer for specific integrity-failure categories
     # where a concurrent writer is proven, rather than assuming corruption.
-    # Three categories get their own proof-gated defer path below: gain+drift
+    # Four categories get their own proof-gated defer path below: gain+drift
     # (HEAD-proven writer race, or an absorbed-writer race proven
     # additive-only via diff), row-count decrease (HEAD-proven concurrent
-    # DELETE), and same-count hash drift (HEAD-proven writer race proven
-    # additive-only via diff — a concurrent UPDATE). Table-list drift, probe
+    # DELETE), same-count hash drift (HEAD-proven writer race proven
+    # additive-only via diff — a concurrent UPDATE), and the mixed
+    # gain+drift plus same-count case (HEAD-proven writer race with both
+    # kinds of table proven additive-only via diff). Table-list drift, probe
     # failure, or any case whose specific proof fails still quarantine below
     # unchanged.
     if [ "$writer_race_detected" = "1" ] && \
@@ -3372,6 +3376,41 @@ flatten_database() {
        gain_drift_is_additive_only "$db" "$head" "$flatten_head" "$verify_counts_same_count_drift_tables"; then
       printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — same-count table value hash drift proven additive-only via DOLT_DIFF(%s..%s) for tables [%s] is concurrent-writer UPDATE, not corruption; deferring, will retry next run\n' \
         "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" "$head" "$flatten_head" "${verify_counts_same_count_drift_tables# }" >&2
+      if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
+        "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
+        "$compacted_from_head" "$local_branch" "$remote_branch"; then
+        rm -f "$preflight_tmp"
+        return 1
+      fi
+      rm -f "$preflight_tmp"
+      return 0
+    fi
+    # Downgrade quarantine -> defer for the mixed hot-DB race. One writer
+    # transaction routinely INSERTs into one table (an event row: gain+drift)
+    # and UPDATEs a row in another (same-count drift) inside the flatten
+    # window, so on a busy database both drift categories appear together. The
+    # gain+drift and same-count paths above each require the other category to
+    # be absent, so neither can fire on exactly the databases they protect and
+    # the benign race quarantines permanently. Combine the two existing proofs
+    # rather than relaxing either: defer only when a concurrent writer is
+    # HEAD-proven AND the pre-flight snapshot..flatten commit diff is purely
+    # additive for every gained table and every same-count drifted table (the
+    # flatten itself touched no pre-flight row, so the drift is the writer's).
+    # Any removed/modified row, a diff-probe failure, an unproven HEAD
+    # movement, or any other failure category fails closed and falls through
+    # to quarantine.
+    if [ "$writer_race_detected" = "1" ] && \
+       [ "${verify_counts_saw_gain:-0}" = "1" ] && \
+       [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] && \
+       [ "${verify_counts_saw_same_count_hash_drift:-0}" = "1" ] && \
+       [ "${verify_counts_saw_row_decrease:-0}" != "1" ] && \
+       [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
+       [ "${verify_counts_saw_probe_failure:-0}" != "1" ] && \
+       gain_drift_is_additive_only "$db" "$head" "$flatten_head" "$verify_counts_gain_drift_tables" && \
+       gain_drift_is_additive_only "$db" "$head" "$flatten_head" "$verify_counts_same_count_drift_tables"; then
+      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — gain+drift on table(s) [%s] and same-count drift on table(s) [%s] proven additive-only via DOLT_DIFF(%s..%s) is one concurrent-writer transaction, not corruption; deferring, will retry next run\n' \
+        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" \
+        "${verify_counts_gain_drift_tables# }" "${verify_counts_same_count_drift_tables# }" "$head" "$flatten_head" >&2
       if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
         "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
         "$compacted_from_head" "$local_branch" "$remote_branch"; then

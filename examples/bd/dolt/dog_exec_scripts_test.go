@@ -1246,6 +1246,34 @@ case "$query" in
       writer_race_same_count_hash_drift_diff_fails)
         print_cell 1
         ;;
+      mixed_row_count_gain_and_same_count_hash_drift|writer_race_with_mixed_same_count_hash_drift)
+        # Mixed gain+drift / same-count race: beads is the gained table. Its
+        # diff is additive-only unless the test lists it in
+        # GC_FAKE_DOLT_DIFF_NONADDED_TABLES.
+        case " ${GC_FAKE_DOLT_DIFF_NONADDED_TABLES:-} " in
+          *" beads "*) print_cell 1 ;;
+          *) print_cell 0 ;;
+        esac
+        ;;
+      *)
+        printf 'unexpected DOLT_DIFF query: %%s\n' "$query" >&2
+        exit 64
+        ;;
+    esac
+    exit 0
+    ;;
+  *"DOLT_DIFF("*"'notes')"*)
+    # Same ordering requirement as the beads arm above: without this arm the
+    # generic "SELECT COUNT(*) FROM"*"notes"* arm answers 10 for the diff probe.
+    # Content diff of table "notes", the same-count drifted table of the mixed
+    # race. A zero count means the flatten commit never touched its rows.
+    case "$mode" in
+      mixed_row_count_gain_and_same_count_hash_drift|writer_race_with_mixed_same_count_hash_drift)
+        case " ${GC_FAKE_DOLT_DIFF_NONADDED_TABLES:-} " in
+          *" notes "*) print_cell 1 ;;
+          *) print_cell 0 ;;
+        esac
+        ;;
       *)
         printf 'unexpected DOLT_DIFF query: %%s\n' "$query" >&2
         exit 64
@@ -2610,6 +2638,10 @@ func TestCompactScriptQuarantinesSameTableRowGainWithValueHashDriftBeforeFullGC(
 	}
 }
 
+// Mixed gain+drift and same-count drift with a stable HEAD. The fake dolt
+// reports both additive-only diff proofs as passing, so the only thing keeping
+// the mixed-race defer from firing is that no concurrent writer is proven:
+// HEAD-proven writer evidence is a load-bearing condition, not decoration.
 func TestCompactScriptQuarantinesMixedRowGainAndSameCountHashDriftBeforeFullGC(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "mixed_row_count_gain_and_same_count_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
@@ -2639,11 +2671,47 @@ func TestCompactScriptQuarantinesMixedRowGainAndSameCountHashDriftBeforeFullGC(t
 	}
 }
 
-func TestCompactScriptQuarantinesMixedSignalsDespiteWriterRace(t *testing.T) {
+// The routine hot-DB race: one concurrent writer transaction INSERTs into one
+// table (gain+drift on beads) and UPDATEs a row in another (same-count drift on
+// notes) in the flatten window. HEAD moving past the flatten's own commit proves
+// the writer, and diffing the pre-flight snapshot against the flatten commit
+// shows only added rows for BOTH tables, so the flatten itself touched no
+// pre-flight row and the drift is the writer's. The gain+drift and same-count
+// defers each exclude the other category's flag, so before the mixed-race gate
+// this shape always quarantined.
+func TestCompactScriptDefersProvenWriterRaceMixedGainAndSameCountHashDrift(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "writer_race_with_mixed_same_count_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if !strings.Contains(out, "table=beads gained rows during flatten") ||
+		!strings.Contains(out, "table=notes value hash changed after flatten without row-count increase") {
+		t.Fatalf("output missing the mixed integrity signals that the gate downgrades:\n%s", out)
+	}
+	if !strings.Contains(out, "post_verify_HEAD=writercommit") {
+		t.Fatalf("defer message should report HEAD moving past the flatten commit:\n%s", out)
+	}
+	if !strings.Contains(out, "gain+drift on table(s) [beads] and same-count drift on table(s) [notes] proven additive-only") {
+		t.Fatalf("defer message should name both proven tables:\n%s", out)
+	}
+	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "'beads') WHERE diff_type <> 'added'") ||
+		!strings.Contains(log, "'notes') WHERE diff_type <> 'added'") {
+		t.Fatalf("both the gained and the same-count table must be proven via an additive-only diff probe:\n%s", log)
+	}
+}
+
+// assertCompactMixedRaceQuarantined encodes the shared expectations for a mixed
+// gain+drift and same-count race whose proof did not hold: the writer is
+// proven, but the run still quarantines, blocks full GC, and records no
+// pending-GC retry marker.
+func assertCompactMixedRaceQuarantined(t *testing.T, fixture compactScriptFixture, out string, err error) {
+	t.Helper()
 	if err == nil {
-		t.Fatalf("compact succeeded despite proven writer plus same-count hash drift:\n%s", out)
+		t.Fatalf("compact succeeded despite a mixed race whose additive-only proof failed:\n%s", out)
 	}
 	if !strings.Contains(out, "writer race detected") {
 		t.Fatalf("output missing proven writer evidence:\n%s", out)
@@ -2652,22 +2720,57 @@ func TestCompactScriptQuarantinesMixedSignalsDespiteWriterRace(t *testing.T) {
 		!strings.Contains(out, "table=notes value hash changed after flatten without row-count increase") {
 		t.Fatalf("output missing mixed integrity signals:\n%s", out)
 	}
-	logData, err := os.ReadFile(fixture.doltLog)
-	if err != nil {
-		t.Fatalf("read dolt log: %v", err)
+	if !strings.Contains(out, "additional integrity failure category prevents defer") {
+		t.Fatalf("output missing blocked-defer explanation:\n%s", out)
 	}
-	log := string(logData)
-	if strings.Contains(log, "DOLT_GC") {
-		t.Fatalf("mixed hard integrity signals must block full GC despite writer race:\n%s", log)
+	if strings.Contains(out, "proven additive-only via DOLT_DIFF") {
+		t.Fatalf("a failed additive-only proof must not be reported as proven:\n%s", out)
+	}
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("mixed hard integrity signals must block full GC despite writer race:\n%s", logData)
 	}
 	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
-	if _, err := os.Stat(quarantine); err != nil {
-		t.Fatalf("mixed hard integrity signals should write quarantine marker: %v", err)
+	if _, statErr := os.Stat(quarantine); statErr != nil {
+		t.Fatalf("mixed hard integrity signals should write quarantine marker: %v", statErr)
 	}
+	assertCompactMarkerHasEvidence(t, quarantine,
+		"reason=post-flatten table value hash changed with row-count increase",
+		"table=beads,before_rows=10,after_rows=11,before_hash=hash-beads-before,after_hash=hash-beads-after-writer,category=row_count_gain_hash_drift",
+		"table=notes,before_rows=10,after_rows=10,before_hash=hash-notes-before,after_hash=hash-notes-after-writer,category=same_row_count_hash_drift",
+		"flatten_head=compactcommit",
+		"flatten_post_verify_head=writercommit",
+		"decision=preserve_marker_manual_review_required",
+	)
 	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
-	if _, err := os.Stat(pendingGC); !os.IsNotExist(err) {
-		t.Fatalf("mixed hard integrity signals must not write pending-GC marker; stat=%v", err)
+	if _, statErr := os.Stat(pendingGC); !os.IsNotExist(statErr) {
+		t.Fatalf("mixed hard integrity signals must not write pending-GC marker; stat=%v", statErr)
 	}
+}
+
+// Control: the same mixed race, but the same-count table's diff shows a
+// modified or removed row between the pre-flight snapshot and the flatten
+// commit, so the flatten cannot be shown to have left that table's rows
+// untouched. The proof fails closed and the run quarantines despite the
+// proven writer.
+func TestCompactScriptQuarantinesMixedSignalsWhenSameCountDiffProofFails(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "writer_race_with_mixed_same_count_hash_drift",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_FAKE_DOLT_DIFF_NONADDED_TABLES=notes")
+	assertCompactMixedRaceQuarantined(t, fixture, out, err)
+}
+
+// Control: the same mixed race, but the gained table's diff shows a modified or
+// removed row. Neither table's proof may vouch for the other, so this
+// quarantines too.
+func TestCompactScriptQuarantinesMixedSignalsWhenGainedTableDiffProofFails(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "writer_race_with_mixed_same_count_hash_drift",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_FAKE_DOLT_DIFF_NONADDED_TABLES=beads")
+	assertCompactMixedRaceQuarantined(t, fixture, out, err)
 }
 
 // assertCompactWriterRaceDeferred encodes the shared expectations for a proven
