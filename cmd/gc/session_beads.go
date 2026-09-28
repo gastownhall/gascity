@@ -3038,6 +3038,56 @@ func reapPreBootSessionBeads(
 	return reaped
 }
 
+// sessionBeadClaimsLiveRuntime reports whether the row asserts an incarnation
+// that should be running now. It asks the lifecycle projection rather than one
+// spelling of the state string, so both spellings of a running row ("active"
+// before the status heal, "awake" after) and every dormant spelling are
+// classified the way the rest of the reconciler classifies them.
+func sessionBeadClaimsLiveRuntime(info session.Info) bool {
+	switch session.ProjectLifecycle(session.LifecycleInputFromInfo(info)).BaseState {
+	case session.BaseStateActive, session.BaseStateStartPending,
+		session.BaseStateCreating, session.BaseStateDraining:
+		return true
+	default:
+		return false
+	}
+}
+
+// deadRuntimeBelongsToRow reports whether a runtime already confirmed dead is
+// the incarnation a row claiming a live runtime records. A restart rotates the
+// row's instance_token in preWakeCommit and only then starts the new runtime,
+// so for that window the name can still carry the previous incarnation's
+// corpse under a row that claims a live runtime. That corpse proves nothing
+// about the row, and the in-flight start recycles it.
+//
+// The token is read after the caller's death check, so a matching token is
+// followed by a second death check: the start may have replaced the old corpse
+// with the row's new, live runtime between the two reads. A row without a
+// token, or a runtime without GC_INSTANCE_TOKEN, cannot be told apart this way
+// and counts as a match, the same way the reconciler's other token fences
+// treat an empty runtime token.
+func deadRuntimeBelongsToRow(info session.Info, name string, sp runtime.Provider, deadChecker runtime.DeadRuntimeSessionChecker, stderr io.Writer) bool {
+	rowToken := strings.TrimSpace(info.InstanceToken)
+	if rowToken == "" {
+		return true
+	}
+	runtimeToken, err := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: reading instance token of dead runtime session %s: %v\n", name, err) //nolint:errcheck
+		return false
+	}
+	if runtimeToken = strings.TrimSpace(runtimeToken); runtimeToken != "" && runtimeToken != rowToken {
+		fmt.Fprintf(stderr, "session reconciler: dead runtime session %s belongs to another incarnation than session bead %s; leaving it to the in-flight start\n", name, info.ID) //nolint:errcheck
+		return false
+	}
+	dead, err := deadChecker.IsDeadRuntimeSession(name)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: re-confirming dead runtime session %s: %v\n", name, err) //nolint:errcheck
+		return false
+	}
+	return dead
+}
+
 func cleanupDeadRuntimeSessionCorpses(
 	store beads.Store,
 	_ map[string]beads.Store,
@@ -3112,6 +3162,13 @@ func cleanupDeadRuntimeSessionCorpses(
 		if !dead {
 			continue
 		}
+		// A dormant row has no start in flight, so its corpse is reaped without
+		// the incarnation fence; only a row claiming a live runtime can be
+		// mid-restart, and only that row is closed below.
+		claimsLive := sessionBeadClaimsLiveRuntime(info)
+		if claimsLive && !deadRuntimeBelongsToRow(info, name, sp, deadChecker, stderr) {
+			continue
+		}
 		if err := sp.Stop(name); err != nil {
 			if runtime.IsSessionGone(err) {
 				continue
@@ -3136,7 +3193,16 @@ func cleanupDeadRuntimeSessionCorpses(
 		// The outer `if store != nil` guard tolerates a nil store so the
 		// runtime-Stop side effect still runs in test contexts that do not
 		// wire a real store; closeBead is idempotent on already-closed beads.
-		if store != nil {
+		//
+		// Only a row that claims the runtime it just lost is closed. A dormant
+		// row (asleep, drained, suspended, quarantined, archived) records no
+		// running incarnation: `gc session kill` stops the runtime and marks
+		// the row asleep precisely so a later wake can start a fresh one, and
+		// the dead pane is that sleep's leftover. Closing it would make the
+		// session impossible to wake. Reaping the pane above is still right: it
+		// frees the name for that wake.
+		if store != nil && claimsLive {
+			fmt.Fprintf(stderr, "session reconciler: closing session bead %s as dead-runtime (session %s, state %q)\n", info.ID, name, strings.TrimSpace(info.MetadataState)) //nolint:errcheck
 			closeBead(store, info.ID, "dead-runtime", clk.Now().UTC(), stderr)
 		}
 		cleaned++
