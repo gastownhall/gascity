@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"reflect"
@@ -606,6 +607,116 @@ func (s *Store) CloseWithTerminalPatch(id string, patch MetadataPatch, commitMsg
 		return false, err
 	}
 	return true, nil
+}
+
+// errPendingCreateRollbackSuperseded is the guard verdict that stops
+// RollbackPendingCreateAtomically when the row it read is no longer the
+// pending create the caller observed. It never leaves this file.
+var errPendingCreateRollbackSuperseded = errors.New("pending create is no longer rollback-eligible")
+
+// RollbackPendingCreateAtomically is the atomic arm of the controller's
+// pending-create rollback (rollbackPendingCreateClears in cmd/gc). closePatch
+// is the whole terminal patch, which the close commits with the closed status.
+// postClosePatch holds the writes that must land only AFTER the close, the
+// explicit session_name clear. They are applied only once the close succeeded.
+//
+// It holds the same per-session mutation lock as WithPendingCreateRollback,
+// start completion and incarnation allocation. Under that lock it reads the
+// row once. That read's revision fences the close, and the read must pass
+// PendingCreateLease.CanRollback against expected, as in
+// WithPendingCreateRollback. So closePatch and the closed status commit as ONE
+// write, and only on the exact row the rollback approved. A writer from another
+// process that lands after the read (a wake stamping state=awake, a start
+// completion, a new incarnation, a `gc session kill` fence) wins the fence. The
+// close writes nothing, re-reads, and closes only if the re-read row still
+// passes CanRollback. A kill fence never does, because KillPendingPatch clears
+// pending_create_claim. Re-reads are bounded by terminalCloseMaxAttempts. The
+// close never degrades to a split write, so no reader can see the row closed
+// with live-looking metadata.
+//
+// postClosePatch is then written as a separate step, still under the lock, and
+// only while the row still reads closed. A row reopened in between keeps its
+// values. Where the store resolves a conditional writer, that write is fenced
+// on the revision it re-read.
+//
+// Results:
+//   - closed is true when this call closed the row. It is false, with a nil
+//     error and nothing written, when the row was already closed or is no
+//     longer rollback-eligible.
+//   - postClosed reports whether postClosePatch was written.
+//   - err is non-nil when a write failed. With closed true it is the
+//     post-close write that failed, and the close itself stands.
+//   - A store without beads.AtomicConditionalCloser, or one that refuses it at
+//     call time, returns an error matching beads.IsConditionalWriteUnsupported,
+//     with closed false and nothing written. The caller then keeps its
+//     transaction.
+func (s *Store) RollbackPendingCreateAtomically(expected Info, closePatch, postClosePatch MetadataPatch) (closed, postClosed bool, err error) {
+	closer, ok := beads.AtomicConditionalCloserFor(s.store)
+	if !ok {
+		return false, false, beads.ErrConditionalWriteUnsupported
+	}
+	lease := LeaseFromInfo(expected)
+	err = WithSessionMutationLock(expected.ID, func() error {
+		bead, err := s.validatedBead(expected.ID)
+		if err != nil {
+			return err
+		}
+		if bead.Status == "closed" {
+			return nil
+		}
+		closed, err = s.closeAtomically(closer, bead, closePatch, func(open beads.Bead) error {
+			if !lease.CanRollback(LeaseFromInfo(infoFromPersistedBead(open))) {
+				return errPendingCreateRollbackSuperseded
+			}
+			return nil
+		})
+		if errors.Is(err, errPendingCreateRollbackSuperseded) {
+			return nil
+		}
+		if err != nil || !closed || len(postClosePatch) == 0 {
+			return err
+		}
+		postClosed, err = s.applyPatchIfClosed(expected.ID, postClosePatch)
+		return err
+	})
+	return closed, postClosed, err
+}
+
+// applyPatchIfClosed writes patch to id only while the row reads closed. It
+// reports whether it wrote. Where the store resolves a conditional writer, the
+// write is fenced on the revision of the closed row it read, and a lost fence
+// re-reads, bounded by terminalCloseMaxAttempts. Without a conditional writer
+// it writes after the check, which leaves only the window between the read and
+// the write.
+func (s *Store) applyPatchIfClosed(id string, patch MetadataPatch) (bool, error) {
+	writer, _, err := beads.ResolveConditionalWriter(s.store)
+	if err != nil {
+		return false, fmt.Errorf("updating closed session %q: %w", id, err)
+	}
+	for attempt := 1; ; attempt++ {
+		bead, err := s.validatedBead(id)
+		if err != nil {
+			return false, err
+		}
+		if bead.Status != "closed" {
+			return false, nil
+		}
+		if writer == nil {
+			if err := s.ApplyPatch(id, patch); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		err = writer.UpdateIfMatch(id, bead.Revision, beads.UpdateOpts{Metadata: map[string]string(patch)})
+		switch {
+		case err == nil:
+			return true, nil
+		case !beads.IsPreconditionFailed(err):
+			return false, fmt.Errorf("updating closed session %q: %w", id, err)
+		case attempt == terminalCloseMaxAttempts:
+			return false, fmt.Errorf("updating closed session %q: lost the revision fence %d times: %w", id, terminalCloseMaxAttempts, err)
+		}
+	}
 }
 
 // SetStatusOpen sets the session bead status to "open". It is the front door
