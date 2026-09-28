@@ -378,15 +378,15 @@ func TestReconcilerWakeDemandOverridesSleepSuppressionForMinActive(t *testing.T)
 	decision := AwakeDecision{ShouldWake: true, Reason: "min-active"}
 	eval := wakeEvaluation{Reasons: []WakeReason{WakeConfig}}
 
-	if !wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", false) {
+	if !wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", false, false) {
 		t.Fatal("min-active config wake should override stale interactive sleep suppression")
 	}
-	if wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", true) {
+	if wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", true, false) {
 		t.Fatal("explicit sleep intent should still override min-active demand")
 	}
 
 	scaledDemand := AwakeDecision{ShouldWake: true, Reason: "scaled:demand"}
-	if wakeDemandOverridesSleepSuppression(scaledDemand, eval, policy, map[string]int{"worker": 1}, "worker", false) {
+	if wakeDemandOverridesSleepSuppression(scaledDemand, eval, policy, map[string]int{"worker": 1}, "worker", false, false) {
 		t.Fatal("ordinary interactive pool demand should still honor sleep suppression")
 	}
 }
@@ -399,10 +399,10 @@ func TestReconcilerWakeDemandOverridesSleepSuppressionForAssignedWork(t *testing
 		HasAssignedWork: true,
 	}
 
-	if !wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", false) {
+	if !wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", false, false) {
 		t.Fatal("assigned-work wake should override interactive sleep suppression")
 	}
-	if wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", true) {
+	if wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", true, false) {
 		t.Fatal("explicit sleep intent should still override assigned-work demand")
 	}
 }
@@ -416,13 +416,13 @@ func TestReconcilerWakeDemandOverridesSleepSuppressionForRoutedDemand(t *testing
 	decision := AwakeDecision{ShouldWake: true, Reason: "routed-demand"}
 	eval := wakeEvaluation{Reasons: []WakeReason{WakeWork}}
 
-	if !wakeDemandOverridesSleepSuppression(decision, eval, policy, map[string]int{"worker": 0}, "worker", false) {
+	if !wakeDemandOverridesSleepSuppression(decision, eval, policy, map[string]int{"worker": 0}, "worker", false, false) {
 		t.Fatal("routed demand should override noninteractive sleep suppression when alias suppression zeroed poolDesired")
 	}
-	if !wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", false) {
+	if !wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", false, false) {
 		t.Fatal("routed demand should override noninteractive sleep suppression with no pool entry at all")
 	}
-	if wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", true) {
+	if wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", true, false) {
 		t.Fatal("explicit sleep intent should still override routed demand")
 	}
 }

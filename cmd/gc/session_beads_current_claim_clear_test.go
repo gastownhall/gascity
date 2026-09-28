@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 	"time"
 
@@ -154,5 +155,55 @@ func TestCloseBeadClearsTheCurrentClaim(t *testing.T) {
 	}
 	if got := currentClaimStamp(t, store, sessionBead.ID); got != "" {
 		t.Fatalf("current claim = %q, want cleared by the session-close cascade", got)
+	}
+}
+
+// TestUnclaimWorkAssignedToRetiredSessionClearsClaimInTheSessionStore pins the
+// `gc session close` split-store case: the sweep leads with the WORK store, but
+// the session bead lives in the sessions-class store. Clearing the claim
+// back-channel through the work store looked the session bead up where it does
+// not live — the close logged "clearing current claim on retired session ...:
+// getting bead ...: bead not found" and left current_claim_bead_id stamped on
+// the closed session.
+func TestUnclaimWorkAssignedToRetiredSessionClearsClaimInTheSessionStore(t *testing.T) {
+	sessions := beads.NewMemStore()
+	work := beads.NewMemStore()
+	sessionBead, err := sessions.Create(beads.Bead{
+		Title:    "olivia",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: map[string]string{"session_name": "olivia", "state": "asleep"},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	workBead, err := work.Create(beads.Bead{
+		Title:    "step",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: sessionBead.ID,
+	})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	if err := sessions.SetMetadata(sessionBead.ID, beadmeta.CurrentClaimBeadIDMetadataKey, workBead.ID); err != nil {
+		t.Fatalf("seed claim stamp: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	unclaimWorkAssignedToRetiredSessionBeadVia("", nil, work, sessions, nil, sessionBead, "", &stderr)
+
+	if got := currentClaimStamp(t, sessions, sessionBead.ID); got != "" {
+		t.Fatalf("current claim = %q, want cleared in the session store", got)
+	}
+	if strings.Contains(stderr.String(), "clearing current claim") {
+		t.Fatalf("stderr = %q, want no claim-clear failure: the clear must target the session store", stderr.String())
+	}
+	released, err := work.Get(workBead.ID)
+	if err != nil {
+		t.Fatalf("get work bead: %v", err)
+	}
+	if released.Assignee != "" {
+		t.Fatalf("work bead Assignee = %q, want released from the work store", released.Assignee)
 	}
 }
