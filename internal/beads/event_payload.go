@@ -1,6 +1,15 @@
 package beads
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+)
+
+// ErrBeadEventIdentityMismatch reports a bead.* event whose envelope subject
+// names a different bead than the snapshot in its payload.
+var ErrBeadEventIdentityMismatch = errors.New("bead event subject does not match payload bead id")
 
 // EncodeBeadEventPayload marshals a canonical raw bead-event snapshot. A bd
 // status-based indefinite deferral is restored only for its normalized open
@@ -77,4 +86,29 @@ func decodeRawBead(data json.RawMessage) (Bead, bool) {
 		}
 	}
 	return b, true
+}
+
+// BeadEventID returns the bead a bead.* event names. The payload snapshot is
+// authoritative: consumers that apply the payload (CachingStore.ApplyEvent, the
+// run projection) key it by the snapshot's own ID, so every other use of the
+// event's identity must agree with that key. The envelope subject is only a
+// fallback for a payload that does not decode to a bead with an id.
+//
+// The subject and the payload are supplied independently (for example
+// `gc event emit --subject ... --payload ...` from a bd hook), so they can
+// disagree. When a non-empty subject names a different bead than a decoded
+// payload, BeadEventID returns ErrBeadEventIdentityMismatch: routing by either
+// identity would act on one bead with another bead's snapshot, so callers must
+// drop the event and let reconciliation converge instead.
+func BeadEventID(subject string, payload json.RawMessage) (string, error) {
+	subject = strings.TrimSpace(subject)
+	b, ok := DecodeBeadEventPayload(payload)
+	payloadID := strings.TrimSpace(b.ID)
+	if !ok || payloadID == "" {
+		return subject, nil
+	}
+	if subject != "" && subject != payloadID {
+		return "", fmt.Errorf("%w: subject=%q payload_id=%q", ErrBeadEventIdentityMismatch, subject, payloadID)
+	}
+	return payloadID, nil
 }
