@@ -103,8 +103,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     are reported as skipped (an `order.skipped` event) and their session-bead
     prune waits until a bd with proxied backup support is pinned.
   - **Closed-wisp purge uses `bd purge`.** It needs a bd whose `bd purge`
-    selects the whole wisps plane and keeps closed wisps a live wisp depends
-    on; with bd v1.3.0 the purge step is reported as skipped.
+    selects the whole wisps plane (`--wisps-plane`), keeps closed wisps a live
+    wisp depends on, and purges in bounded batches (`--limit`); a backlog is
+    cleared across runs within `GC_REAPER_PURGE_BUDGET_SECS` (default 300s).
+    With bd v1.3.0 the purge step is reported as skipped.
   - Both orders now run with a 900s timeout.
 
 ### Added

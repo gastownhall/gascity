@@ -49,6 +49,8 @@ fi
 if [ "${1:-}" != "bd" ]; then
   exit 0
 fi
+# Real gc prints config warnings on stderr; the order must parse only stdout.
+printf 'warning: fake gc stderr noise\n' >&2
 shift
 scope=city
 if [ "${1:-}" = "--city" ]; then shift 2; fi

@@ -85,6 +85,14 @@ STALE_WISP_CLOSE_REASON="stale wisp whose owning parent or root is closed, auto-
 # wisp that an open, hooked or in-progress wisp still depends on through
 # parent-child, tracks or blocks.
 PURGE_PLANE_FLAG="${GC_REAPER_PURGE_PLANE_FLAG:---wisps-plane}"
+# Closed wisps deleted per bd purge call, and the wall-clock budget (seconds,
+# shared by every scope) the purge step may spend per run. Both keep a large
+# backlog from outrunning the order timeout.
+PURGE_BATCH="${GC_REAPER_PURGE_BATCH:-500}"
+case "$PURGE_BATCH" in ''|*[!0-9]*|0) PURGE_BATCH=500 ;; esac
+PURGE_BUDGET_SECS="${GC_REAPER_PURGE_BUDGET_SECS:-300}"
+case "$PURGE_BUDGET_SECS" in ''|*[!0-9]*) PURGE_BUDGET_SECS=300 ;; esac
+PURGE_DEADLINE=$(( $(date +%s) + PURGE_BUDGET_SECS ))
 
 # Convert Go-style hour durations to SQL INTERVAL hours.
 duration_to_hours() {
@@ -686,42 +694,70 @@ reap_scope() {
 # reap_scope_purge is Step 3 for the current scope.
 reap_scope_purge() {
     local out
+    local err_file
     local count
+    local more
+    local batches=0
     local purge_args=(purge "$PURGE_PLANE_FLAG" --older-than "$PURGE_AGE" --json)
 
     if [ -n "$DRY_RUN" ]; then
         purge_args+=(--dry-run)
     else
-        purge_args+=(--force)
+        # One purge runs in one transaction, so a large backlog is cleared in
+        # bounded batches (oldest closed first) within this run's purge
+        # budget; whatever is left is picked up by the next run.
+        purge_args+=(--force --limit "$PURGE_BATCH")
     fi
-    if ! out=$(scope_bd "${purge_args[@]}" 2>&1); then
-        case "$out" in
-            *"unknown flag: $PURGE_PLANE_FLAG"*)
-                # A bd whose purge cannot select the wisps plane (bd v1.3.0).
-                # Nothing is wrong with the store; the step waits for a bd
-                # that supports it, and the run says so without escalating.
-                order_outcome_scope_skipped "$SCOPE_LABEL" "bd-purge-wisps-plane-unsupported"
-                return 0
+    err_file=$(mktemp)
+    while :; do
+        if ! out=$(scope_bd "${purge_args[@]}" 2>"$err_file"); then
+            out="$(cat "$err_file" 2>/dev/null) $out"
+            case "$out" in
+                *"unknown flag: $PURGE_PLANE_FLAG"*)
+                    # A bd whose purge cannot select the wisps plane (bd
+                    # v1.3.0). Nothing is wrong with the store; the step waits
+                    # for a bd that supports it, and the run says so without
+                    # escalating.
+                    order_outcome_scope_skipped "$SCOPE_LABEL" "bd-purge-wisps-plane-unsupported"
+                    rm -f "$err_file"
+                    return 0
+                    ;;
+            esac
+            scope_anomaly "purging closed wisps failed for $SCOPE_DB: $(sanitize_output "$out")"
+            order_outcome_scope_skipped "$SCOPE_LABEL" "purge failed"
+            rm -f "$err_file"
+            return 0
+        fi
+        if [ -n "$DRY_RUN" ]; then
+            count=$(printf '%s' "$out" | jq -r '.purge_count // .purged_count // 0' 2>/dev/null || echo 0)
+            case "$count" in ''|*[!0-9]*) count=0 ;; esac
+            TOTAL_WOULD_PURGE=$((TOTAL_WOULD_PURGE + count))
+            break
+        fi
+        count=$(printf '%s' "$out" | jq -r '.purged_count // 0' 2>/dev/null || echo "")
+        case "$count" in
+            ''|*[!0-9]*)
+                scope_anomaly "gc bd purge returned an unreadable result for $SCOPE_DB: $(sanitize_output "$out")"
+                break
                 ;;
         esac
-        scope_anomaly "purging closed wisps failed for $SCOPE_DB: $(sanitize_output "$out")"
-        order_outcome_scope_skipped "$SCOPE_LABEL" "purge failed"
-        return 0
-    fi
-    if [ -n "$DRY_RUN" ]; then
-        count=$(printf '%s' "$out" | jq -r '.purge_count // .purged_count // 0' 2>/dev/null || echo 0)
-        case "$count" in ''|*[!0-9]*) count=0 ;; esac
-        TOTAL_WOULD_PURGE=$((TOTAL_WOULD_PURGE + count))
-        return 0
-    fi
-    count=$(printf '%s' "$out" | jq -r '.purged_count // 0' 2>/dev/null || echo "")
-    case "$count" in
-        ''|*[!0-9]*)
-            scope_anomaly "gc bd purge returned an unreadable result for $SCOPE_DB: $(sanitize_output "$out")"
-            return 0
-            ;;
-    esac
-    TOTAL_PURGED=$((TOTAL_PURGED + count))
+        TOTAL_PURGED=$((TOTAL_PURGED + count))
+        batches=$((batches + 1))
+        # bd reports whether closed wisps are left beyond this batch; a
+        # result without that signal is read as "a full batch may have more".
+        more=$(printf '%s' "$out" | jq -r --argjson limit "$PURGE_BATCH" '
+            if has("has_more") then .has_more
+            elif has("remaining") then (.remaining > 0)
+            else (.purged_count // 0) >= $limit end' 2>/dev/null || echo false)
+        if [ "$more" != "true" ] || [ "$count" -eq 0 ]; then
+            break
+        fi
+        if [ "$(date +%s)" -ge "$PURGE_DEADLINE" ]; then
+            order_outcome_scope_skipped "$SCOPE_LABEL" "purge backlog remains after this run's purge budget"
+            break
+        fi
+    done
+    rm -f "$err_file"
 }
 
 # Scopes are resolved first so that scopes sharing one database (a rig bound
@@ -807,7 +843,8 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
         _PRUNE_SKIP_REASON=""
         _PRUNE_BACKUP_UNSUPPORTED=0
         _BACKUP_TS=""
-        if _BACKUP_STATUS=$(scope_bd backup status --json 2>&1); then
+        _BACKUP_ERR_FILE=$(mktemp)
+        if _BACKUP_STATUS=$(scope_bd backup status --json 2>"$_BACKUP_ERR_FILE"); then
             _BACKUP_TS=$(printf '%s' "$_BACKUP_STATUS" | jq -r '
                 [(.dolt.last_sync // empty), (.backup.timestamp // empty)]
                 | map(select(type == "string" and . != "" and (startswith("0001-") | not)))
@@ -817,6 +854,7 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
                 _PRUNE_SKIP=1
             fi
         else
+            _BACKUP_STATUS="$(cat "$_BACKUP_ERR_FILE" 2>/dev/null) $_BACKUP_STATUS"
             case "$_BACKUP_STATUS" in
                 *'"proxy.backup.unsupported"'* | *"not supported in proxied-server mode"*)
                     # This bd cannot back up the city scope's transport, so no
@@ -828,6 +866,7 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
             _PRUNE_SKIP_REASON="source=bd-backup-status unavailable: $(sanitize_output "$_BACKUP_STATUS")"
             _PRUNE_SKIP=1
         fi
+        rm -f "$_BACKUP_ERR_FILE"
         if [ "$_PRUNE_SKIP" -eq 0 ]; then
             # bd timestamps are RFC3339 (possibly with fractional seconds).
             # Truncate to whole seconds, as Step 4's SQL does.

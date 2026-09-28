@@ -91,10 +91,14 @@ scope_bd_bounded() {
 scope_database() {
     local out
     local db
-    out=$(scope_bd_bounded "$BACKUP_BD_TIMEOUT_SECS" sql --csv "SELECT DATABASE()" 2>&1) || {
-        printf '%s' "$out"
+    local err_file
+    err_file=$(mktemp)
+    out=$(scope_bd_bounded "$BACKUP_BD_TIMEOUT_SECS" sql --csv "SELECT DATABASE()" 2>"$err_file") || {
+        printf '%s %s' "$(cat "$err_file" 2>/dev/null)" "$out"
+        rm -f "$err_file"
         return 1
     }
+    rm -f "$err_file"
     db=$(printf '%s\n' "$out" | tail -n 1 | tr -d '\r')
     case "$db" in
         '' | -* | *[!A-Za-z0-9_-]*)

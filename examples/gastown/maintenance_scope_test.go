@@ -308,7 +308,7 @@ func TestReaperPurgesClosedWispsThroughBdPurgeOverTheWispsPlane(t *testing.T) {
 
 	bdLog := f.read(t, f.bdLog)
 	for _, scope := range []string{"scope=city", "scope=rig:api"} {
-		if !strings.Contains(bdLog, scope+" args=purge --wisps-plane --older-than 36h --json --force") {
+		if !strings.Contains(bdLog, scope+" args=purge --wisps-plane --older-than 36h --json --force --limit 500") {
 			t.Fatalf("reaper did not purge %s through bd purge over the wisps plane:\n%s", scope, bdLog)
 		}
 	}
@@ -654,5 +654,43 @@ func TestMaintenanceOrdersSkipNonBdStoresQuietly(t *testing.T) {
 				t.Fatalf("outcome = %+v (declared %v), want skipped with city not a bd bead store", out, ok)
 			}
 		})
+	}
+}
+
+func TestReaperPurgesBacklogInBoundedBatches(t *testing.T) {
+	f := newScopeFixture(t, "")
+	f.env["BD_PURGE_COUNT"] = "500"
+	f.env["BD_PURGE_STATE"] = filepath.Join(t.TempDir(), "purge-calls")
+	f.env["BD_PURGE_MORE_BATCHES"] = "2"
+	f.runReaper(t)
+
+	if got := strings.Count(f.read(t, f.bdLog), "args=purge --wisps-plane"); got != 3 {
+		t.Fatalf("purge ran %d batch(es), want 3 (two reported more, the third did not):\n%s", got, f.read(t, f.bdLog))
+	}
+	if !strings.Contains(f.read(t, f.gcLog), "purged:1500") {
+		t.Fatalf("summary did not add every batch:\n%s", f.read(t, f.gcLog))
+	}
+	if _, declared := f.outcome(t); declared {
+		t.Fatalf("a drained backlog must not declare a skip:\n%s", f.read(t, f.outcomeFile))
+	}
+}
+
+func TestReaperStopsPurgingAtItsBudgetAndDeclaresTheBacklog(t *testing.T) {
+	f := newScopeFixture(t, "")
+	f.env["BD_PURGE_COUNT"] = "500"
+	f.env["BD_PURGE_STATE"] = filepath.Join(t.TempDir(), "purge-calls")
+	f.env["BD_PURGE_MORE_BATCHES"] = "99"
+	f.env["GC_REAPER_PURGE_BUDGET_SECS"] = "0"
+	f.runReaper(t)
+
+	if got := strings.Count(f.read(t, f.bdLog), "args=purge --wisps-plane"); got != 1 {
+		t.Fatalf("purge ran %d batch(es) with no budget left, want 1:\n%s", got, f.read(t, f.bdLog))
+	}
+	out, ok := f.outcome(t)
+	if !ok || !out.hasScope("city", "purge backlog remains after this run's purge budget") {
+		t.Fatalf("outcome = %+v (declared %v), want the remaining purge backlog declared", out, ok)
+	}
+	if strings.Contains(f.read(t, f.gcLog), "ESCALATION") {
+		t.Fatalf("a purge backlog is not an anomaly:\n%s", f.read(t, f.gcLog))
 	}
 }

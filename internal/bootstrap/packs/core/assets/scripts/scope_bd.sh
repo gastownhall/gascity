@@ -104,13 +104,18 @@ scope_resolve_db() {
     SCOPE_DB=""
     SCOPE_LAST_ERROR=""
     SCOPE_NOT_BD=0
-    if ! out=$(scope_sql_read csv "SELECT DATABASE()" 2>&1); then
+    local err_file
+    err_file=$(mktemp)
+    if ! out=$(scope_sql_read csv "SELECT DATABASE()" 2>"$err_file"); then
+        out="$(cat "$err_file" 2>/dev/null) $out"
+        rm -f "$err_file"
         SCOPE_LAST_ERROR="$out"
         case "$out" in
             *"only supported for bd-backed beads providers"*) SCOPE_NOT_BD=1 ;;
         esac
         return 1
     fi
+    rm -f "$err_file"
     db=$(printf '%s\n' "$out" | tail -n 1 | tr -d '\r')
     case "$db" in
         '' | *[!A-Za-z0-9_-]* | -*)

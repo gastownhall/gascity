@@ -3227,7 +3227,7 @@ exit 0
 	if err != nil {
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
-	if !strings.Contains(string(bdData), "args=purge --wisps-plane --older-than 168h --json --force") {
+	if !strings.Contains(string(bdData), "args=purge --wisps-plane --older-than 168h --json --force --limit 500") {
 		t.Errorf("reaper did not purge closed wisps through bd purge over the wisps plane:\n%s", bdData)
 	}
 
@@ -6441,7 +6441,16 @@ case "$1" in
       printf '%s\n' "$BD_PURGE_FAIL" >&2
       exit 1
     fi
-    printf '{"purged_count":%s,"purge_count":%s}\n' "${BD_PURGE_COUNT:-0}" "${BD_PURGE_COUNT:-0}"
+    # BD_PURGE_MORE_BATCHES=N reports has_more for the first N calls
+    # (counted in BD_PURGE_STATE).
+    more=false
+    if [ -n "${BD_PURGE_STATE:-}" ]; then
+      printf 'x' >> "$BD_PURGE_STATE"
+      if [ "$(wc -c < "$BD_PURGE_STATE" | tr -d ' ')" -le "${BD_PURGE_MORE_BATCHES:-0}" ]; then
+        more=true
+      fi
+    fi
+    printf '{"purged_count":%s,"purge_count":%s,"has_more":%s}\n' "${BD_PURGE_COUNT:-0}" "${BD_PURGE_COUNT:-0}" "$more"
     ;;
   backup)
     if [ "${2:-}" = "status" ]; then
@@ -6549,6 +6558,9 @@ if [ "${1:-}" = "bd" ]; then
   if [ -n "${GC_CALL_LOG:-}" ]; then
     printf '%s\n' "$*" >> "$GC_CALL_LOG"
   fi
+  # Real gc prints config warnings on stderr ahead of bd's output; the orders
+  # must parse only stdout.
+  printf 'warning: fake gc stderr noise for this city\n' >&2
   shift
   fake_scope=city
   if [ "${1:-}" = "--city" ]; then

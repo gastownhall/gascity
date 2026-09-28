@@ -129,6 +129,22 @@ gc dolt backup restore <dbname>-backup <dbname>
 # dolt clone <backup-url> /path/to/city/.beads/dolt/<dbname>
 ```
 
+**bd-owned proxied scopes** (the default for new cities; `dolt_mode` is
+`proxied-server` in the scope's `.beads/metadata.json`) are backed up by the
+`mol-dog-backup` order with `bd backup` into `<city>/.dolt-backup/<dbname>`, and
+restored with bd itself. `bd backup restore` refuses while any other bd client
+is attached to the scope, so stop the city first (Step 3), and it leaves the
+scope's store stopped:
+
+```bash
+gc stop
+gc bd backup status --json              # the city scope; add --rig <rig> for a rig
+gc bd backup restore /path/to/city/.dolt-backup/<dbname> --force
+gc start
+```
+
+No maintenance order ever runs a restore.
+
 If no backup is configured or the backup itself is corrupt, proceed to Step 4b.
 
 ---

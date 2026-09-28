@@ -25,8 +25,8 @@ import (
 //
 // bd comes from GC_TEST_BD_BIN or PATH (CI pins v1.3.0). Steps that need a bd
 // newer than the pin skip with the reason when bd lacks them:
-//   - the reaper's Step 3 needs `bd purge` to select the wisps plane
-//     (the beads purge hotfix);
+//   - the reaper's Step 3 needs `bd purge --wisps-plane --limit` (the beads
+//     purge hotfix);
 //   - backing up a proxied scope needs proxied `bd backup` (beads PR 6879).
 // Fixtures live in t.TempDir with an isolated HOME and never touch port 3307.
 
@@ -299,7 +299,7 @@ func (c *bdTopologyCity) sqlValue(t *testing.T, s bdTopologyScope, query string)
 func (c *bdTopologyCity) bdSupportsPurgeWispsPlane(t *testing.T) bool {
 	t.Helper()
 	out, _ := c.run(t, c.root, nil, c.bd, "purge", "--help")
-	return strings.Contains(out, "--wisps-plane")
+	return strings.Contains(out, "--wisps-plane") && strings.Contains(out, "--limit")
 }
 
 // seedScope creates, in one scope: an old closed parent wisp with an old open
