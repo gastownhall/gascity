@@ -10,7 +10,7 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 705
+baseline_calls = 706
 baseline_files = 206
 reported_calls = 495
 reported_files = 135
@@ -51,7 +51,7 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 475
+baseline_calls = 476
 baseline_files = 136
 reported_calls = 380
 reported_files = 98
@@ -421,7 +421,7 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 456
+baseline_calls = 457
 baseline_files = 129
 reported_calls = 394
 reported_files = 105
