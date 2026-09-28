@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 	"log"
+	"reflect"
 	"strings"
 	"time"
 
@@ -90,6 +91,78 @@ func (s *Store) WithPendingCreateRollback(expected Info, fn func() error) (bool,
 		return nil
 	})
 	return applied, err
+}
+
+// ApplyPatchIfLifecycleUnchanged persists patch for expected.ID only while the
+// durable row still carries the lifecycle facts expected was read with. It is
+// the write path for a patch DECIDED from an earlier read (the reconciler's
+// advisory status heal, computed from its tick snapshot): an unconditional
+// write of such a patch is a lost update. A `gc session suspend`, wake, kill, or
+// close that lands after the read would be overwritten by a decision that never
+// saw it.
+//
+// "Lifecycle facts" are exactly what LifecycleInputFromInfo carries: the
+// open/closed status plus the persisted keys the lifecycle projection reads
+// (state, sleep_reason, held_until, quarantined_until, session_key,
+// started_config_hash, the pending-create lease, wake_request, pin_awake, ...).
+// Writes to other keys (a claim stamp, a nudge timestamp) do not block the
+// patch.
+//
+// The row is re-read, and the patch is refused with (false, nil) when the row
+// is closed or its lifecycle facts differ from expected's. Where the store
+// resolves a conditional writer (beads.ResolveConditionalWriter), the write is
+// then fenced on the re-read row's revision, so a writer that lands between the
+// re-read and the write also wins: the fenced write is refused with (false,
+// nil). The revision is passed through as-is: bd revisions are signed, and
+// whether a token is usable is the store's call. Without a conditional writer
+// the patch is written unconditionally after the re-read check, which leaves
+// only the window between that re-read and the write.
+//
+// A refused patch writes nothing, and the caller must not fold it. A
+// require-mode store that cannot fence, and a store that reports
+// beads.ErrConditionalWriteUnsupported at call time, return an error rather
+// than falling back to an unconditional write.
+func (s *Store) ApplyPatchIfLifecycleUnchanged(expected Info, patch MetadataPatch) (bool, error) {
+	if len(patch) == 0 {
+		return false, nil
+	}
+	bead, err := s.validatedBead(expected.ID)
+	if err != nil {
+		return false, err
+	}
+	if bead.Status == "closed" {
+		return false, nil
+	}
+	if !sameLifecycleFacts(expected, infoFromPersistedBead(bead)) {
+		return false, nil
+	}
+	writer, _, err := beads.ResolveConditionalWriter(s.store)
+	if err != nil {
+		return false, fmt.Errorf("updating session %q: %w", expected.ID, err)
+	}
+	if writer == nil {
+		if err := s.ApplyPatch(expected.ID, patch); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	err = writer.UpdateIfMatch(expected.ID, bead.Revision, beads.UpdateOpts{Metadata: map[string]string(patch)})
+	switch {
+	case err == nil:
+		return true, nil
+	case beads.IsPreconditionFailed(err):
+		return false, nil
+	default:
+		return false, fmt.Errorf("updating session %q: %w", expected.ID, err)
+	}
+}
+
+// sameLifecycleFacts reports whether a and b agree on every persisted fact the
+// lifecycle projection reads (LifecycleInputFromInfo). Comparing the projected
+// inputs rather than a hand-picked key list keeps this check in step with the
+// projection when it learns a new key.
+func sameLifecycleFacts(a, b Info) bool {
+	return reflect.DeepEqual(LifecycleInputFromInfo(a), LifecycleInputFromInfo(b))
 }
 
 // ApplyPatchInfo persists patch for info.ID (via ApplyPatch) and returns the
@@ -380,9 +453,10 @@ func (s *Store) GetState(id string) (state State, closed bool, err error) {
 const terminalCloseMaxAttempts = 3
 
 // Close closes the session bead and stamps its terminal close metadata
-// (ClosePatch). It is the front door for closeBead / closeFailedCreateBead.
-// stateCode is the canonical short state code recorded before close;
-// ClosePatch expands it to a validator-safe close_reason.
+// (ClosePatch). The controller's closeBead / closeFailedCreateBead use its
+// sibling CloseWithTerminalPatch, which shares the atomic arm. stateCode is
+// the canonical short state code recorded before close; ClosePatch expands it
+// to a validator-safe close_reason.
 //
 // When the backing store provides beads.AtomicConditionalCloser (native Dolt,
 // SQLite with a revision column, FileStore, and a CachingStore over any of
@@ -418,7 +492,7 @@ func (s *Store) Close(id, stateCode string, now time.Time) (bool, error) {
 	}
 	patch := ClosePatch(now, stateCode)
 	if closer, ok := beads.AtomicConditionalCloserFor(s.store); ok {
-		closed, err := s.closeAtomically(closer, bead, patch)
+		closed, err := s.closeAtomically(closer, bead, patch, nil)
 		if !beads.IsConditionalWriteUnsupported(err) {
 			return closed, err
 		}
@@ -437,11 +511,18 @@ func (s *Store) Close(id, stateCode string, now time.Time) (bool, error) {
 // 0: whether a token is usable is the store's call (a fresh SQLite row fences
 // on 0), and a store that rejects it answers with a precondition failure,
 // which this loop re-reads and bounds. An ErrConditionalWriteUnsupported error
-// is returned unwrapped so Close can fall back.
-func (s *Store) closeAtomically(closer beads.AtomicConditionalCloser, bead beads.Bead, patch MetadataPatch) (bool, error) {
+// is returned unwrapped so Close can fall back. A non-nil guard vets every open
+// row the loop is about to close, the first read and each re-read alike; its
+// error aborts the close before the write.
+func (s *Store) closeAtomically(closer beads.AtomicConditionalCloser, bead beads.Bead, patch MetadataPatch, guard func(beads.Bead) error) (bool, error) {
 	id := bead.ID
 	var conflict error
 	for attempt := 1; ; attempt++ {
+		if guard != nil {
+			if err := guard(bead); err != nil {
+				return false, err
+			}
+		}
 		_, err := closer.CloseWithMetadataIfMatch(id, bead.Revision, map[string]string(patch))
 		switch {
 		case err == nil:
@@ -463,6 +544,68 @@ func (s *Store) closeAtomically(closer beads.AtomicConditionalCloser, bead beads
 			return false, nil
 		}
 	}
+}
+
+// CloseWithTerminalPatch is the controller's terminal close (closeBead and
+// closeFailedCreateBead in cmd/gc). patch is the complete terminal metadata the
+// caller built, normally ClosePatch plus any path-specific clears (the
+// failed-create close also clears pending_create_claim,
+// pending_create_started_at and sleep_intent). commitMsg names the fallback
+// transaction.
+//
+// When the backing store provides beads.AtomicConditionalCloser, patch and the
+// closed status commit as ONE write fenced on the revision this call read,
+// exactly as in Close: a lost fence re-reads and retries, bounded by
+// terminalCloseMaxAttempts, and never degrades to a split write. It reports
+// false, having written nothing, when the row is already closed, whether it
+// was closed before the first read or by a concurrent closer that won the
+// fence. It also yields to a fresh `gc session kill` fence (IsKillPendingInfo
+// at now) on any row it reads, returning ErrSessionKillPending with nothing
+// written: the kill owns that row, and lifecycle passes must not close it. The
+// caller decided to close on an older read, and without this check a lost
+// fence would re-read the kill fence and then close over it. The caller's next
+// pass decides again once the kill completes.
+//
+// Stores without the capability (BdStore, the exec store, plain MemStore, a
+// legacy SQLite layout, or conditional writes disabled), and a store that
+// refuses the capability at call time with beads.ErrConditionalWriteUnsupported,
+// keep the controller's historical write unchanged: one
+// store.Tx(commitMsg) of SetMetadataBatch(patch) then Close, with no pre-read.
+// On BdStore that Tx is staged so `bd close` carries patch's close_reason; on
+// the exec store and MemStore it runs as sequential writes. The metadata is
+// ordered first, so if the Close then fails the clears have still landed and
+// the caller retries the close. That arm keeps the residual closed-but-awake
+// race documented on Close, and it reports true on success without checking
+// whether the row was already closed or kill-fenced. The caller owns those
+// checks.
+func (s *Store) CloseWithTerminalPatch(id string, patch MetadataPatch, commitMsg string, now time.Time) (bool, error) {
+	if closer, ok := beads.AtomicConditionalCloserFor(s.store); ok {
+		bead, err := s.validatedBead(id)
+		if err != nil {
+			return false, err
+		}
+		if bead.Status == "closed" {
+			return false, nil
+		}
+		closed, err := s.closeAtomically(closer, bead, patch, func(open beads.Bead) error {
+			if IsKillPendingInfo(infoFromPersistedBead(open), now) {
+				return fmt.Errorf("closing session %q: %w", id, ErrSessionKillPending)
+			}
+			return nil
+		})
+		if !beads.IsConditionalWriteUnsupported(err) {
+			return closed, err
+		}
+	}
+	if err := s.store.Tx(commitMsg, func(tx beads.Tx) error {
+		if err := tx.SetMetadataBatch(id, map[string]string(patch)); err != nil {
+			return err
+		}
+		return tx.Close(id)
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // SetStatusOpen sets the session bead status to "open". It is the front door

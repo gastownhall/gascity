@@ -1274,12 +1274,18 @@ func configReloadSummary(oldAgents, oldRigs, newAgents, newRigs int) string {
 	return strings.Join(parts, ", ")
 }
 
-// runController runs the persistent controller loop. It acquires a lock,
-// opens a control socket, runs the reconciliation loop, and on shutdown
+// runController runs the persistent controller loop. It holds the controller
+// lock, opens a control socket, runs the reconciliation loop, and on shutdown
 // stops all agents. Returns an exit code. initialWatchTargets is the set of
 // paths to watch for config changes (from initial provenance).
+//
+// heldLock is the controller lock when the caller already took it (gc start
+// --foreground does, before it starts the bead-store provider); the caller
+// keeps ownership and releases it after this returns. When heldLock is nil,
+// runController acquires the lock itself and releases it last.
 func runController(
 	cityPath string,
+	heldLock *os.File,
 	tomlPath string,
 	cfg *config.City,
 	configRev string,
@@ -1294,12 +1300,14 @@ func runController(
 	eventProv events.Provider,
 	stdout, stderr io.Writer,
 ) int {
-	lock, err := acquireControllerLock(cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+	if heldLock == nil {
+		lock, err := acquireControllerLock(cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		defer lock.Close() //nolint:errcheck // best-effort cleanup
 	}
-	defer lock.Close() //nolint:errcheck // best-effort cleanup
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

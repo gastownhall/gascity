@@ -293,7 +293,7 @@ func poolSlotRetireBlocker(info sessionpkg.Info, now time.Time) string {
 // form <template>-<n> as a legitimate claim by that pool's own session. A pool
 // slot's alias diverges from its session_name exactly when the runtime name
 // steps aside to "<identity>-pool" — the ga-rxhu2 specimen's own shape. Probing
-// the narrower {ID, session_name, configured_named_identity} set would be blind
+// the narrower config-aware set, which drops a rebinding slot alias, would be blind
 // to the agent's own claims on precisely the configuration this bound targets,
 // and unlike every other consumer of that narrow set, this path uses the answer
 // to authorize a Kill, not just a close of an already-dead runtime.

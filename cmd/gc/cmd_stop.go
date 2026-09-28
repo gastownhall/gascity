@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -36,6 +37,13 @@ unregisters it (equivalent to a following "gc unregister") — the city
 will not be found by name or auto-started again until it is re-registered
 with "gc register". Use "gc unregister" directly to remove a registration
 without stopping sessions.
+
+gc stop reports "City stopped." only when it could confirm that every
+session stopped. If it could not list the runtime's sessions completely,
+or could not check whether a session is still running, it names what it
+could not verify, still stops every session it did see, and exits
+non-zero; a supervisor registration is restored. Resolve the reported
+error and run gc stop again.
 
 Use --timeout=DURATION to cap the wall-clock time gc stop will spend
 before giving up; the default budgets configured session interrupt and
@@ -420,8 +428,13 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	code := doStopWithoutSuccess(sessionNames, sp, cfg, sessStore, graceTimeout, recorder, stdout, stderr)
 
 	// Clean up orphan sessions (sessions with the city prefix that are
-	// not in the current config).
-	stopOrphans(sp, desired, cfg, sessionFrontDoor(sessStore), graceTimeout, recorder, stdout, stderr)
+	// not in the current config). An orphan sweep that could not see the
+	// whole runtime leaves the stop unconfirmed, but the remaining cleanup
+	// below still runs: it only retires things this stop owns.
+	if !stopOrphans(sp, desired, cfg, sessionFrontDoor(sessStore), graceTimeout, recorder, stdout, stderr) && code == 0 {
+		fmt.Fprintln(stderr, "gc stop: stop not confirmed: the runtime inventory was incomplete, so sessions outside the configuration may still be running; resolve the runtime error and run gc stop again") //nolint:errcheck // best-effort stderr
+		code = 1
+	}
 
 	teardownServerForStop(sp, stderr, "gc stop")
 
@@ -596,18 +609,13 @@ func warnInvalidConfigStopSuccess(err error, stderr io.Writer) {
 // stopOrphans stops sessions that are not in the desired set. Used by gc stop
 // to clean up orphans after stopping config agents. With per-city socket
 // isolation, all sessions on the socket belong to this city.
+//
+// It reports whether its runtime inventory was complete. False means an
+// orphan may have been invisible to the sweep and may still be running.
 func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City, sessFront *session.Store,
 	timeout time.Duration, rec events.Recorder, stdout, stderr io.Writer,
-) {
-	running, err := sp.ListRunning("")
-	partialList := runtime.IsPartialListError(err)
-	if err != nil && !partialList {
-		fmt.Fprintf(stderr, "gc stop: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
-		return
-	}
-	if partialList {
-		fmt.Fprintf(stderr, "gc stop: listing sessions partially failed: %v\n", err) //nolint:errcheck // best-effort stderr
-	}
+) bool {
+	running, complete := listRunningForStop(sp, stderr)
 	var orphans []string
 	for _, name := range running {
 		if desired[name] {
@@ -616,6 +624,69 @@ func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City,
 		orphans = append(orphans, name)
 	}
 	gracefulStopAll(orphans, sp, timeout, rec, cfg, sessFront.Store(), stdout, stderr)
+	return complete
+}
+
+// listRunningForStop lists the provider's running sessions for gc stop and
+// reports whether the answer is a complete inventory. An incomplete answer
+// still returns every name the provider did observe, so the caller can stop
+// those, but it must not report the city as stopped: a backend it could not
+// see may still be running sessions.
+//
+// A runtime server that is not running at all is the one listing failure that
+// counts as complete. Sessions cannot outlive their server, so an absent server
+// holds none. This is what keeps a repeated gc stop idempotent after the first
+// stop tore the server down.
+func listRunningForStop(sp runtime.Provider, stderr io.Writer) ([]string, bool) {
+	names, err := sp.ListRunning("")
+	switch {
+	case err == nil:
+		return names, true
+	case listFailureIsOnlyServerAbsence(err):
+		return names, true
+	case runtime.IsPartialListError(err):
+		fmt.Fprintf(stderr, "gc stop: listing sessions partially failed: %v\n", err) //nolint:errcheck // best-effort stderr
+		return names, false
+	default:
+		fmt.Fprintf(stderr, "gc stop: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
+		return nil, false
+	}
+}
+
+// listFailureIsOnlyServerAbsence reports whether every backend failure behind
+// a ListRunning error is an absent runtime server.
+//
+// [runtime.IsRuntimeServerAbsent] deliberately does not unwrap, because a
+// composite provider joins its backends' errors and one absent backend says
+// nothing about its siblings. This walk keeps that guarantee by requiring
+// every joined failure to be an absence: a composite whose other backends all
+// answered (their names are in the result) and whose failing backends are all
+// absent has a complete inventory. Any other failure anywhere in the tree
+// makes the answer false.
+func listFailureIsOnlyServerAbsence(err error) bool {
+	if err == nil {
+		return false
+	}
+	if runtime.IsRuntimeServerAbsent(err) {
+		return true
+	}
+	switch wrapped := err.(type) { //nolint:errorlint // walks the error tree by hand: every branch of a join must be an absence, which errors.As cannot express
+	case interface{ Unwrap() []error }:
+		children := wrapped.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !listFailureIsOnlyServerAbsence(child) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		return listFailureIsOnlyServerAbsence(wrapped.Unwrap())
+	default:
+		return false
+	}
 }
 
 // tryStopController connects to the controller socket and sends "stop".
@@ -753,36 +824,49 @@ func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *confi
 	rec events.Recorder, stdout, stderr io.Writer,
 ) int {
 	visible := map[string]bool{}
+	inventoryComplete := true
 	if sp != nil {
-		names, err := sp.ListRunning("")
-		partialList := runtime.IsPartialListError(err)
-		if err != nil && !partialList {
-			fmt.Fprintf(stderr, "gc stop: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
-			names = nil
-		}
-		if partialList {
-			fmt.Fprintf(stderr, "gc stop: listing sessions partially failed: %v\n", err) //nolint:errcheck // best-effort stderr
-		}
+		var names []string
+		names, inventoryComplete = listRunningForStop(sp, stderr)
 		for _, name := range names {
 			if name = strings.TrimSpace(name); name != "" {
 				visible[name] = true
 			}
 		}
 	}
-	var running []string
+	var running, unverified []string
 	for _, sn := range sessionNames {
 		sn = strings.TrimSpace(sn)
 		if sn == "" {
 			continue
 		}
-		if alive, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn); err == nil && alive {
+		alive, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn)
+		switch {
+		case err == nil && alive:
 			running = append(running, sn)
 			continue
+		case err != nil && !errors.Is(err, session.ErrSessionNotFound):
+			// The session's own observation failed, so it is unknown, not
+			// absent. Report it against its name and withhold success; it is
+			// still stopped below if the runtime inventory witnessed it.
+			fmt.Fprintf(stderr, "gc stop: observing session %s: %v\n", sn, err) //nolint:errcheck // best-effort stderr
+			if !slices.Contains(unverified, sn) {
+				unverified = append(unverified, sn)
+			}
 		}
 		if visible[sn] {
 			running = append(running, sn)
 		}
 	}
 	gracefulStopAll(running, sp, timeout, rec, cfg, beads.SessionStore{Store: store}, stdout, stderr)
+	if len(unverified) > 0 {
+		fmt.Fprintf(stderr, "gc stop: stop not confirmed: could not verify that session(s) %s stopped, so they may still be running; resolve the error above and run gc stop again\n", strings.Join(unverified, ", ")) //nolint:errcheck // best-effort stderr
+	}
+	if !inventoryComplete {
+		fmt.Fprintln(stderr, "gc stop: stop not confirmed: the runtime inventory was incomplete, so sessions it could not see may still be running; resolve the runtime error and run gc stop again") //nolint:errcheck // best-effort stderr
+	}
+	if len(unverified) > 0 || !inventoryComplete {
+		return 1
+	}
 	return 0
 }

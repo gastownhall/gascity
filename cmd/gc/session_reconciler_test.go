@@ -10140,6 +10140,10 @@ func TestReconcileSessionBeads_ConfigDriftAttachmentErrorDefersLiveDrift(t *test
 	session := env.createSessionBead("worker", "worker")
 	env.setSessionMetadata(&session, map[string]string{
 		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+		// Converged with the live runtime, so no status heal (which re-reads
+		// the row before writing) consumes the one injected Get failure
+		// ahead of the attachment observation under test.
+		"state": "awake",
 	})
 	backing := env.store
 	env.store = &sessionObservationGetErrorStore{
