@@ -3094,7 +3094,9 @@ func cleanupDeadRuntimeSessionCorpses(
 	cleaned := 0
 	seen := make(map[string]bool)
 	for _, info := range sessionBeads.OpenInfos() {
-		if info.PendingCreateClaim || (dt != nil && dt.get(info.ID) != nil) || isNamedSessionInfo(info) {
+		// A kill-fenced row belongs to the `gc session kill` tearing its runtime
+		// down: the dead pane is the kill in progress, not an abandoned corpse.
+		if info.PendingCreateClaim || (dt != nil && dt.get(info.ID) != nil) || isNamedSessionInfo(info) || session.IsKillPendingInfo(info, clk.Now()) {
 			continue
 		}
 		name := strings.TrimSpace(info.SessionNameMetadata)
