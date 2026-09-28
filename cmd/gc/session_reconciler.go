@@ -2302,7 +2302,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// just below. Stopping a live session here on degraded data is
 						// what killed coordinator sessions on 2026-06-09.
 						if storeQueryPartial {
-							fmt.Fprintf(stdout, "Skipping drain-ack stop for '%s': store query partial (transient failure)\n", name) //nolint:errcheck
+							logDrainSkip(dt, stdout, id, fmt.Sprintf("Skipping drain-ack stop for '%s': store query partial (transient failure)", name), clk.Now())
 							if trace != nil {
 								template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
 								if template == "" {
@@ -2432,7 +2432,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// Draining would send Ctrl-C and interrupt the
 					// running agent mid-tool-call.
 					if storeQueryPartial {
-						fmt.Fprintf(stdout, "Skipping drain for '%s': store query partial (transient failure)\n", name) //nolint:errcheck
+						logDrainSkip(dt, stdout, id, fmt.Sprintf("Skipping drain for '%s': store query partial (transient failure)", name), clk.Now())
 						continue
 					}
 					reason := "orphaned"
@@ -2456,7 +2456,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								"live_assigned_work":  true,
 							})
 						}
-						fmt.Fprintf(stdout, "Skipping drain for '%s': live assigned work found\n", name) //nolint:errcheck
+						logDrainSkip(dt, stdout, id, fmt.Sprintf("Skipping drain for '%s': live assigned work found", name), clk.Now())
 						continue
 					}
 					// Live-claim veto (sessionOwnsLiveClaim): a pool worker that
@@ -2799,7 +2799,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// acks are not reconciler-owned and fall through to stop
 					// promptly: their intent is explicit, not derived from the store.
 					if reconcilerOwnedAck && storeQueryPartial {
-						fmt.Fprintf(stdout, "Skipping reconciler drain-ack stop for '%s': store query partial (transient failure)\n", name) //nolint:errcheck
+						logDrainSkip(dt, stdout, id, fmt.Sprintf("Skipping reconciler drain-ack stop for '%s': store query partial (transient failure)", name), clk.Now())
 						if trace != nil {
 							trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonStoreQueryPartial, TraceOutcomeDeferred, tp.TemplateName, name, traceRecordPayload{
 								"store_query_partial":  true,
@@ -3519,7 +3519,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 										"active_reason": "live_assigned_work",
 									}))
 								}
-								fmt.Fprintf(stdout, "Skipping config-drift drain for '%s': live assigned work found\n", name) //nolint:errcheck
+								logDrainSkip(dt, stdout, id, fmt.Sprintf("Skipping config-drift drain for '%s': live assigned work found", name), clk.Now())
 								continue
 							}
 							if launchOnlyDrift {
@@ -4591,6 +4591,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	}
 	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookup, wakeEvals, cfg, clk, trace)
 	clearMissingIdleProbes(dt, infoByID)
+	// Drain-skip lines print on transition (session_drain_skip_log.go); a
+	// session this pass saw without a skip is re-armed here.
+	dt.sweepDrainSkips(infoByID, clk.Now())
 	recordPhase(TraceSiteSessionReconcileDrainAdvance, "session_reconcile.advance_drains", phaseStart, map[string]any{
 		"ordered_session_count": len(orderedRows),
 		"wake_eval_count":       len(wakeEvals),

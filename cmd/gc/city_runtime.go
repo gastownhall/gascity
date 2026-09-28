@@ -2625,16 +2625,8 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		poolDesired = make(map[string]int)
 	}
 	mergeNamedSessionDemand(poolDesired, result.NamedSessionDemand, cr.cfg)
-	for tmpl, count := range poolDesired {
-		if count > 0 {
-			fmt.Fprintf(cr.stderr, "poolDesired: %s = %d\n", tmpl, count) //nolint:errcheck
-		}
-	}
-	for tmpl, count := range result.ScaleCheckCounts {
-		if count > 0 {
-			fmt.Fprintf(cr.stderr, "scaleCheck: %s = %d\n", tmpl, count) //nolint:errcheck
-		}
-	}
+	logPoolCounts(cr.stderr, "poolDesired", poolDesired)
+	logPoolCounts(cr.stderr, "scaleCheck", result.ScaleCheckCounts)
 	// #3288: defer the undesired-pool-session sweep on the boot tick. The sweep
 	// probes each sweepable candidate against the city store + N rig stores × 2
 	// statuses × identifiers, each a `bd` read (listWispsTier fires two

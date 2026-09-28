@@ -820,14 +820,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		if storePartial {
 			fmt.Fprintf(stderr, "assignedWorkBeads: PARTIAL — store query failed, drain decisions suppressed\n") //nolint:errcheck
 		}
-		if len(assignedWorkBeads) > 0 {
-			fmt.Fprintf(stderr, "assignedWorkBeads: %d beads found\n", len(assignedWorkBeads)) //nolint:errcheck
-			for _, wb := range assignedWorkBeads {
-				fmt.Fprintf(stderr, "  %s assignee=%s routed=%s status=%s\n", wb.ID, wb.Assignee, wb.Metadata[beadmeta.RoutedToMetadataKey], wb.Status) //nolint:errcheck
-			}
-		} else {
-			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
-		}
+		logAssignedWorkBeads(stderr, assignedWorkBeads, len(rigStores))
 		// One-shot repair for beads a prior reconciler tick already clobbered
 		// (ga-3c5isi / #5193): restores gc.work_dir from the still-intact
 		// legacy work_dir when the canonical value was overwritten with a
