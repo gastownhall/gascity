@@ -93,6 +93,12 @@ go_test(
     ),
     embed = [":productmetrics"],
     shard_count = 2,
+    # Storage trust checks walk root-owned ancestors through gchome. Run on
+    # the host so Linux sandbox UID remapping cannot invalidate that boundary.
+    tags = [
+        "no-remote-exec",
+        "no-sandbox",
+    ],
     deps = [
         "//:gascity",
         "//internal/testenv",

@@ -3094,6 +3094,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		Type:                 string(issue.IssueType),
 		Priority:             nativePriorityFromIssue(issue),
 		CreatedAt:            issue.CreatedAt,
+		UpdatedAt:            issue.UpdatedAt,
 		Assignee:             issue.Assignee,
 		From:                 issue.Sender,
 		Description:          issue.Description,
