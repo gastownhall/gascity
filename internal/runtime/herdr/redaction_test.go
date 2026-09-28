@@ -479,6 +479,9 @@ func TestSetupCommandFailureOmitsCredentials(t *testing.T) {
 // Scrubbing only the session env leaves that one in a durable error.
 func TestSetupCommandFailureOmitsInheritedCredentials(t *testing.T) {
 	t.Setenv("SOME_INHERITED_TOKEN", sentinel)
+	// Bazel's HOME equals TEST_TMPDIR, whose unknown key makes its value a
+	// secret. Keep the inert control distinct from inherited secret values.
+	t.Setenv("HOME", "/home/herdr-redaction-test")
 	p := &Provider{}
 
 	err := p.runSetupCommand(context.Background(),
