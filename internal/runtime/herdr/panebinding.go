@@ -154,7 +154,34 @@ func (p *Provider) bindPlacement(name string, info agentInfo, mode string) error
 			return err
 		}
 	}
+	p.publishPaneBinding()
 	return nil
+}
+
+// watchPaneBindings snapshots the binding publication generation and its
+// broadcast channel. Taking the snapshot before reading the sidecars means a
+// publication concurrent with that read is either observed there or wakes the
+// caller afterward; it cannot fall between the two.
+func (p *Provider) watchPaneBindings() (uint64, <-chan struct{}) {
+	p.bindingMu.Lock()
+	defer p.bindingMu.Unlock()
+	if p.bindingChanged == nil {
+		p.bindingChanged = make(chan struct{})
+	}
+	return p.bindingGen, p.bindingChanged
+}
+
+// publishPaneBinding wakes every active event subscriber after bindPlacement
+// has successfully persisted the complete binding.
+func (p *Provider) publishPaneBinding() {
+	p.bindingMu.Lock()
+	defer p.bindingMu.Unlock()
+	if p.bindingChanged == nil {
+		p.bindingChanged = make(chan struct{})
+	}
+	p.bindingGen++
+	close(p.bindingChanged)
+	p.bindingChanged = make(chan struct{})
 }
 
 // clearPaneBinding drops the persisted placement (not the whole sidecar — the
@@ -166,6 +193,7 @@ func (p *Provider) clearPaneBinding(name string) {
 	_ = p.RemoveMeta(name, metaBoundMode)
 	_ = p.RemoveMeta(name, metaBoundName)
 	_ = p.RemoveMeta(name, metaBoundAt)
+	p.publishPaneBinding()
 }
 
 // boundSessionNames enumerates the session names with a live-looking sidecar
@@ -191,6 +219,51 @@ func (p *Provider) boundSessionNames() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+type paneBindingSnapshot struct {
+	names     map[string]string
+	conflicts map[string]bool
+}
+
+// boundPaneNames returns the persisted pane-to-session bindings used by event
+// subscriptions plus panes with conflicting persisted owners. Herdr's agent
+// registry does not include raw shell sessions. Conflicts are explicit so an
+// active stream can reject stale attribution rather than treating the missing
+// name like an ordinary, merge-only disappearance.
+func (p *Provider) boundPaneNames() paneBindingSnapshot {
+	snapshot := paneBindingSnapshot{
+		names:     make(map[string]string),
+		conflicts: make(map[string]bool),
+	}
+	entries, err := os.ReadDir(p.metaDir)
+	if err != nil {
+		return snapshot
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(p.metaDir, e.Name())
+		name, err := readMetaFile(filepath.Join(dir, sanitize(metaBoundName)))
+		if err != nil || name == "" {
+			continue
+		}
+		pane, err := readMetaFile(filepath.Join(dir, sanitize(metaBoundPane)))
+		if err != nil || pane == "" {
+			continue
+		}
+		if snapshot.conflicts[pane] {
+			continue
+		}
+		if previous, ok := snapshot.names[pane]; ok && previous != name {
+			delete(snapshot.names, pane)
+			snapshot.conflicts[pane] = true
+			continue
+		}
+		snapshot.names[pane] = name
+	}
+	return snapshot
 }
 
 // readMetaFile reads one sidecar value ("" when absent).

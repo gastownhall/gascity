@@ -41,7 +41,6 @@ func TestSessionEventsLive(t *testing.T) {
 
 	const session = "gctest-events-live"
 	p := New(session, t.TempDir(), t.TempDir(), 0, 0)
-	skipOnDetectionBasedRegistry(t, p)
 	_ = p.c.stopServer() // clear any leftover server from a crashed prior run
 	t.Cleanup(func() { _ = p.TeardownServer() })
 	if err := p.ConfigureServer(); err != nil {
@@ -67,9 +66,9 @@ func TestSessionEventsLive(t *testing.T) {
 	})
 
 	// Forced status change on evt-a's pane must arrive attributed.
-	a, ok, err := p.c.getAgent(ctx, "evt-a")
-	if err != nil || !ok {
-		t.Fatalf("getAgent evt-a: ok=%v err=%v", ok, err)
+	paneA, err := p.GetMeta("evt-a", metaBoundPane)
+	if err != nil || paneA == "" {
+		t.Fatalf("bound pane evt-a: pane=%q err=%v", paneA, err)
 	}
 	report := func(pane, state string) {
 		t.Helper()
@@ -81,7 +80,7 @@ func TestSessionEventsLive(t *testing.T) {
 	}
 	// Both translations are exercised live: a non-idle state arrives as the
 	// vocabulary-free change kind here, and evt-b forces idle below.
-	report(a.PaneID, "working")
+	report(paneA, "working")
 	waitForEvent(t, ch, 10*time.Second, func(ev runtime.SessionEvent) bool {
 		return ev.Kind == runtime.SessionEventAgentStateChanged && ev.Session == "evt-a"
 	})
@@ -93,16 +92,16 @@ func TestSessionEventsLive(t *testing.T) {
 		t.Fatalf("Start evt-b: %v", err)
 	}
 	t.Cleanup(func() { _ = p.Stop("evt-b") })
-	b, ok, err := p.c.getAgent(ctx, "evt-b")
-	if err != nil || !ok {
-		t.Fatalf("getAgent evt-b: ok=%v err=%v", ok, err)
+	paneB, err := p.GetMeta("evt-b", metaBoundPane)
+	if err != nil || paneB == "" {
+		t.Fatalf("bound pane evt-b: pane=%q err=%v", paneB, err)
 	}
 	// The resubscribe cycle emits a fresh resync; wait for it so the report
 	// below races nothing.
 	waitForEvent(t, ch, 15*time.Second, func(ev runtime.SessionEvent) bool {
 		return ev.Kind == runtime.SessionEventResync
 	})
-	report(b.PaneID, "idle")
+	report(paneB, "idle")
 	waitForEvent(t, ch, 10*time.Second, func(ev runtime.SessionEvent) bool {
 		return ev.Kind == runtime.SessionEventAgentIdle && ev.Session == "evt-b"
 	})
@@ -118,6 +117,11 @@ func TestSessionEventsLive(t *testing.T) {
 	waitForEvent(t, ch, 20*time.Second, func(ev runtime.SessionEvent) bool {
 		return ev.Kind == runtime.SessionEventExited && ev.Session == "evt-c"
 	})
+	// Event delivery does not mutate persisted ownership: reconcile liveness
+	// before the bounce to prune evt-c's now-gone pane binding.
+	if p.IsRunning("evt-c") {
+		t.Fatal("evt-c still running after pane_exited")
+	}
 
 	// Stop closes the pane: pane_closed must arrive attributed.
 	if err := p.Stop("evt-b"); err != nil {

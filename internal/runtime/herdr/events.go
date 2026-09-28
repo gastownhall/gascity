@@ -108,7 +108,7 @@ func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.S
 // backoff. Failures are logged once per streak, not per retry.
 func (p *Provider) runSessionEventStream(ctx context.Context, ch chan runtime.SessionEvent) {
 	defer close(ch)
-	s := &sessionEventStream{c: p.c, ch: ch}
+	s := &sessionEventStream{p: p, c: p.c, ch: ch}
 	backoff := sessionEventMinBackoff
 	for {
 		if ctx.Err() != nil {
@@ -145,6 +145,7 @@ func (p *Provider) runSessionEventStream(ctx context.Context, ch chan runtime.Se
 
 // sessionEventStream is one subscriber's translation state.
 type sessionEventStream struct {
+	p  *Provider
 	c  *client
 	ch chan runtime.SessionEvent
 
@@ -154,7 +155,7 @@ type sessionEventStream struct {
 	// (herdr reaps the record before the pane dies) still attributes.
 	paneNames map[string]string
 	// subscribed tracks pane ids covered by a per-pane agent-status filter in
-	// the current cycle; a known agent pane missing from it forces a
+	// the current cycle; a known pane missing from it forces a
 	// resubscribe. Removals are lazy — herdr just never fires for a gone pane
 	// — so only additions cycle the connection.
 	subscribed map[string]bool
@@ -163,30 +164,32 @@ type sessionEventStream struct {
 	pendingResync bool
 }
 
-// runCycle runs one connection cycle: list agents, subscribe with the derived
-// filter set, emit the leading resync, then translate frames until the
+type watchedPaneSnapshot struct {
+	names     map[string]string
+	conflicts map[string]bool
+}
+
+// runCycle runs one connection cycle: derive the watched panes, subscribe with
+// that filter set, emit the leading resync, then translate frames until the
 // transport fails (err), the filter set must grow (resubscribe), or ctx ends.
 func (s *sessionEventStream) runCycle(ctx context.Context) (resubscribe bool, err error) {
-	agents, err := s.c.sockAgentList(ctx)
+	bindingGen, bindingChanged := s.p.watchPaneBindings()
+	panes, err := s.watchedPaneNames(ctx)
 	if err != nil {
 		return false, err
 	}
-	s.paneNames = make(map[string]string, len(agents))
-	s.subscribed = make(map[string]bool, len(agents))
+	s.paneNames = panes.names
+	s.subscribed = make(map[string]bool, len(panes.names))
 	subs := []subscribeSub{
 		{Type: "pane.created"},
 		{Type: "pane.closed"},
 		{Type: "pane.exited"},
 		{Type: "pane.agent_detected"},
 	}
-	for _, a := range agents {
-		if a.PaneID == "" || a.Name == "" {
-			continue
-		}
-		s.paneNames[a.PaneID] = a.Name
-		if !s.subscribed[a.PaneID] {
-			s.subscribed[a.PaneID] = true
-			subs = append(subs, subscribeSub{Type: "pane.agent_status_changed", PaneID: a.PaneID})
+	for paneID := range panes.names {
+		if !s.subscribed[paneID] {
+			s.subscribed[paneID] = true
+			subs = append(subs, subscribeSub{Type: "pane.agent_status_changed", PaneID: paneID})
 		}
 	}
 
@@ -258,22 +261,29 @@ func (s *sessionEventStream) runCycle(ctx context.Context) (resubscribe bool, er
 			return false, ctx.Err()
 		case err := <-readErr:
 			return false, err
-		case <-relist.C:
-			relistArmed = false
-			s.tryPendingResync() // piggyback: a drained consumer gets its owed resync even in a quiet stream
-			agents, err := s.c.sockAgentList(ctx)
+		case <-bindingChanged:
+			var nextGen uint64
+			nextGen, bindingChanged = s.p.watchPaneBindings()
+			if nextGen == bindingGen {
+				continue
+			}
+			bindingGen = nextGen
+			panes, err := s.watchedPaneNames(ctx)
 			if err != nil {
 				return false, err
 			}
-			for _, a := range agents {
-				if a.PaneID == "" || a.Name == "" {
-					continue
-				}
-				s.paneNames[a.PaneID] = a.Name
-				if !s.subscribed[a.PaneID] {
-					resubscribe = true
-				}
+			resubscribe = s.applyWatchedPaneSnapshot(panes)
+			if resubscribe {
+				return true, nil
 			}
+		case <-relist.C:
+			relistArmed = false
+			s.tryPendingResync() // piggyback: a drained consumer gets its owed resync even in a quiet stream
+			panes, err := s.watchedPaneNames(ctx)
+			if err != nil {
+				return false, err
+			}
+			resubscribe = s.applyWatchedPaneSnapshot(panes)
 			if resubscribe {
 				return true, nil
 			}
@@ -284,6 +294,50 @@ func (s *sessionEventStream) runCycle(ctx context.Context) (resubscribe bool, er
 			}
 		}
 	}
+}
+
+// applyWatchedPaneSnapshot merges ordinary additions and updates, preserving
+// names absent from the snapshot for delayed exit/close attribution. An
+// explicit persisted-owner conflict is different: its old attribution is
+// unsafe and is removed, and an existing targeted subscription is cycled.
+func (s *sessionEventStream) applyWatchedPaneSnapshot(panes watchedPaneSnapshot) (resubscribe bool) {
+	for paneID := range panes.conflicts {
+		delete(s.paneNames, paneID)
+		if s.subscribed[paneID] {
+			resubscribe = true
+		}
+	}
+	for paneID, name := range panes.names {
+		s.paneNames[paneID] = name
+		if !s.subscribed[paneID] {
+			resubscribe = true
+		}
+	}
+	return resubscribe
+}
+
+// watchedPaneNames derives the watched pane map from both herdr's registry and
+// Gas City's persisted bindings. Bindings win for managed panes; registry-only
+// entries preserve attribution for panes not managed by Gas City.
+func (s *sessionEventStream) watchedPaneNames(ctx context.Context) (watchedPaneSnapshot, error) {
+	agents, err := s.c.sockAgentList(ctx)
+	if err != nil {
+		return watchedPaneSnapshot{}, err
+	}
+	names := make(map[string]string, len(agents))
+	for _, a := range agents {
+		if a.PaneID != "" && a.Name != "" {
+			names[a.PaneID] = a.Name
+		}
+	}
+	bindings := s.p.boundPaneNames()
+	for paneID := range bindings.conflicts {
+		delete(names, paneID)
+	}
+	for paneID, name := range bindings.names {
+		names[paneID] = name
+	}
+	return watchedPaneSnapshot{names: names, conflicts: bindings.conflicts}, nil
 }
 
 // handleFrame translates one wire frame into a SessionEvent. It reports

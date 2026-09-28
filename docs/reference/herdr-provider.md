@@ -14,7 +14,7 @@ runtime-selection setting that picks tmux, k8s, ssh, or exec.
 Install the `herdr` binary and make sure it is on `PATH`:
 
 ```bash
-herdr --version   # 0.7.1 is the recorded live validation; read the version note below
+herdr --version   # 0.9.1 is the recorded event/live validation; read the version note below
 ```
 
 The backend is registered as a builtin runtime name (`herdr`) — no pack or
@@ -33,17 +33,16 @@ happened. Nudge delivery surfaced an error rather than going quiet, but nothing
 in the build or the default test suite went red, so the regression had to be
 noticed in the field.
 
-The adapter reads 0.8's spelling now. One gap is known and tracked: 0.8.0 made
-herdr's agent registry detection-based, so the live journey that drives herdr's
-session-event stream waives itself when the installed herdr reports 0.8 or later
-rather than asserting against a registry it no longer matches
-([#5808](https://github.com/gastownhall/gascity/issues/5808)). That waiver reads
-the version, not the registry: a herdr whose version cannot be read or parsed
-runs the journey, and on 0.8 its registry assertions then fail. The other
-real-herdr journeys (provider lifecycle, pane binding, activity, and the runtime
-conformance suite) do run on 0.8; the kind-launch journey needs an installed
-`claude` binary as well and skips without one. 0.7.1 remains the version the
-recorded end-to-end validation ran against.
+The adapter reads 0.8's spelling now. Herdr 0.8 also made the agent registry
+detection-based, which originally left raw-shell sessions out of event-status
+subscriptions and caused the event live journey to waive itself
+([#5808](https://github.com/gastownhall/gascity/issues/5808)). Event
+subscriptions and attribution now use Gas City's persisted pane bindings for
+managed sessions, with the registry retained for unmanaged panes. The waiver is
+removed, and the event journey, including dynamic subscription and reconnect,
+has been validated live against herdr 0.9.1. The kind-launch journey still needs
+an installed `claude` binary and skips without one. The earlier 0.7.1
+end-to-end validation remains a historical result.
 
 That is the reason to pin. The tests that drive a real herdr binary are opt-in
 (`make test-herdr-live`); the default suite runs against a fake, so a change on

@@ -35,6 +35,9 @@ type Provider struct {
 	// plus this absolute ceiling.
 	setupMaxTimeout time.Duration
 	mu              sync.Mutex // serializes workspace/tab find-or-create across concurrent Starts
+	bindingMu       sync.Mutex
+	bindingGen      uint64
+	bindingChanged  chan struct{}
 	// act is the tracker-backed activity source behind GetLastActivity /
 	// CanReportActivity (#4217); started lazily on first GetLastActivity.
 	act activityTracker
@@ -72,7 +75,13 @@ func New(herdrSession, metaDir, cityRoot string, setupTimeout, setupMaxTimeout t
 	if setupTimeout <= 0 {
 		setupTimeout = defaultSetupTimeout
 	}
-	return &Provider{c: newClient(herdrSession, cityRoot), metaDir: metaDir, setupTimeout: setupTimeout, setupMaxTimeout: setupMaxTimeout}
+	return &Provider{
+		c:               newClient(herdrSession, cityRoot),
+		metaDir:         metaDir,
+		setupTimeout:    setupTimeout,
+		setupMaxTimeout: setupMaxTimeout,
+		bindingChanged:  make(chan struct{}),
+	}
 }
 
 // ── ServerLifecycleProvider: own the shared herdr session-server ─────────────
