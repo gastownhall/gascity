@@ -280,7 +280,22 @@ func (p poolExecutionBackstop) sessionIsQuiet(sessName string) bool {
 	if err != nil || last.IsZero() {
 		return false
 	}
-	return p.now.Sub(last) >= idleClaimNudgeGrace
+	if p.now.Sub(last) < idleClaimNudgeGrace {
+		return false
+	}
+	// Tmux activity measures pane output, not whether an agent turn is still
+	// running. A long model turn or quiet tool call can therefore age past the
+	// grace while the pane still shows a provider busy indicator. When the
+	// routed runtime exposes the stronger point-in-time observation, require an
+	// affirmative ready-prompt snapshot before treating stale activity as idle.
+	// Errors and negative observations hold: neither is proof that the turn
+	// ended. Providers without this optional capability retain the existing
+	// activity-clock behavior.
+	if snap, ok := p.sp.(runtime.IdleSnapshotProvider); ok {
+		idle, err := snap.SnapshotIdle(sessName)
+		return err == nil && idle
+	}
+	return true
 }
 
 func (p poolExecutionBackstop) state(s beads.Bead, target backstopTarget) (same bool, attempts int, last time.Time) {
