@@ -41,6 +41,10 @@ sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y -qq
 	make jq sqlite3 tmux lsof cmake git libicu-dev zlib1g-dev libsqlite3-dev \
 	libbz2-dev liblzma-dev libffi-dev libexpat1-dev libxml2-dev libreadline-dev \
 	libncurses-dev python3-dev >/dev/null
+# .bazelrc binds this short test root into every sandbox. Bazel requires a
+# --sandbox_writable_path to exist on the execution host before an action
+# starts; pool workers are long-lived and do not run the client workflow step.
+sudo install -d -m 1777 /tmp/bt
 if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go${GO_VERSION} "; then
 	sum=$(curl -fsSL "https://go.dev/dl/?mode=json&include=all" |
 		jq -r --arg f "go${GO_VERSION}.linux-amd64.tar.gz" '.[].files[] | select(.filename==$f) | .sha256')

@@ -124,9 +124,10 @@ jobs:
           } > .bazelrc.local
 
 
-      - name: Writable test HOME
+      - name: Writable test filesystem roots
         run: |
           mkdir -p /tmp/gc-test-home
+          sudo install -d -m 1777 /tmp/bt
           echo "HOME=/tmp/gc-test-home" >> "$GITHUB_ENV"
 
       - name: "bazel test //..."
