@@ -1275,7 +1275,7 @@ func (cr *CityRuntime) tick(
 	// Session-management phases: snapshot, corpse sweeps, drain finalization,
 	// demand/desired state, bead-driven reconcile.
 	phaseStart = time.Now()
-	sessionBeads := cr.loadSessionBeadSnapshot()
+	sessionBeads := cr.loadTickSessionBeadSnapshot(trigger)
 	recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.initial", phaseStart, traceSessionSnapshotFields(sessionBeads))
 	if trace != nil && sessionBeads != nil {
 		trace.RecordSessionBaseline("", "", traceRecordPayload{
@@ -3629,6 +3629,38 @@ func (cr *CityRuntime) rigBeadStores() map[string]beads.Store {
 func (cr *CityRuntime) loadSessionBeadSnapshot() *sessionBeadSnapshot {
 	sessionBeads, _ := cr.loadSessionBeadSnapshotWithPartial()
 	return sessionBeads
+}
+
+// loadTickSessionBeadSnapshot loads a tick's first session-bead snapshot. A
+// poked tick reads it live, past the bead cache. A poke usually means another
+// process changed something, and gc no longer installs the bd event hooks, so
+// the cache over the city store learns about another process's write only from
+// its own reconcile pass. That pass emits a cache snapshot event, which does
+// not poke. Without this read, the session bead `gc session new` writes before
+// it pokes stays invisible to the poked tick, and its deferred start waits for
+// the next patrol tick.
+//
+// The live read costs one session-bead union (two store lists) per poked tick
+// and nothing on any other tick. It also puts the fresh rows into the cache,
+// so the tick's later snapshot loads see them without another store round
+// trip. If the live read fails, the tick falls back to the cached snapshot
+// it would have used anyway.
+func (cr *CityRuntime) loadTickSessionBeadSnapshot(trigger string) *sessionBeadSnapshot {
+	switch trigger {
+	case "poke", "startup-poke":
+	default:
+		return cr.loadSessionBeadSnapshot()
+	}
+	store := cr.sessionsBeadStore()
+	if store.Store == nil {
+		return nil
+	}
+	sessionBeads, err := loadSessionBeadSnapshotLive(store.Store, true)
+	if err == nil {
+		return sessionBeads
+	}
+	fmt.Fprintf(cr.stderr, "%s: loading session beads live for %s tick: %v (using cached snapshot)\n", cr.logPrefix, trigger, err) //nolint:errcheck
+	return cr.loadSessionBeadSnapshot()
 }
 
 func (cr *CityRuntime) loadSessionBeadSnapshotWithPartial() (*sessionBeadSnapshot, bool) {
