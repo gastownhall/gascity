@@ -30,6 +30,21 @@ const realTrustDialogNoExitSelected = ` Accessing workspace:
 
  Enter to confirm · Esc to cancel`
 
+const codex0156TrustDialog = `› Ask Codex to do anything
+
+  Folder access
+  /Users/u/src/project
+
+  Trust this folder? Codex can read, edit, and run files here, subject to your
+  permission settings. Folder settings can run code automatically, even
+  without a model request. Continue only if you trust these files. Your trust
+  decision will be saved.
+
+› 1. Trust and continue
+  2. Quit
+
+  enter continue · esc quit`
+
 func TestWorkspaceTrustDialogDoesNotConfirmNoExit(t *testing.T) {
 	withZeroDialogTimings(t)
 
@@ -71,6 +86,32 @@ func TestWorkspaceTrustConfirmKeysTrustPreSelected(t *testing.T) {
 	}
 	if want := []string{"Enter"}; !reflect.DeepEqual(keys, want) {
 		t.Errorf("workspaceTrustConfirmKeys() = %v, want %v", keys, want)
+	}
+}
+
+func TestWorkspaceTrustConfirmKeysCodex0156TrustPreSelected(t *testing.T) {
+	if !containsWorkspaceTrustDialog(codex0156TrustDialog) {
+		t.Fatal("Codex 0.156 trust dialog was not recognized")
+	}
+	keys, ok := workspaceTrustConfirmKeys(codex0156TrustDialog)
+	if !ok {
+		t.Fatal("workspaceTrustConfirmKeys() ok = false, want true")
+	}
+	if want := []string{"Enter"}; !reflect.DeepEqual(keys, want) {
+		t.Fatalf("workspaceTrustConfirmKeys() = %v, want %v", keys, want)
+	}
+}
+
+func TestWorkspaceTrustConfirmKeysCodex0156QuitSelected(t *testing.T) {
+	content := strings.Replace(codex0156TrustDialog,
+		"› 1. Trust and continue\n  2. Quit",
+		"  1. Trust and continue\n› 2. Quit", 1)
+	keys, ok := workspaceTrustConfirmKeys(content)
+	if !ok {
+		t.Fatal("workspaceTrustConfirmKeys() ok = false, want true")
+	}
+	if want := []string{"Up", "Enter"}; !reflect.DeepEqual(keys, want) {
+		t.Fatalf("workspaceTrustConfirmKeys() = %v, want %v", keys, want)
 	}
 }
 

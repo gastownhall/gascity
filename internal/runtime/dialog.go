@@ -640,9 +640,10 @@ var ErrWorkspaceTrustUnconfirmed = errors.New("cursor never reached the trust op
 var errStartupDialogStreamInconclusive = errors.New("startup dialog needs a selection move; stream cannot re-read the screen")
 
 // acceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
-// agents. Claude shows "Quick safety check"; Codex shows
-// "Do you trust the contents of this directory?"; pi (>= 0.79) shows
-// "Trust project folder?". The safe option isn't reliably pre-selected — a
+// agents. Claude shows "Quick safety check"; older Codex shows
+// "Do you trust the contents of this directory?", Codex 0.156 shows
+// "Trust this folder?"; pi (>= 0.79) shows "Trust project folder?". The safe
+// option isn't reliably pre-selected — a
 // stale Claude Code build can default the cursor to "No, exit" — so the
 // handler locates the cursor and the trust option in the rendered content
 // and moves the selection before confirming; it never blind-sends a fixed
@@ -759,7 +760,8 @@ func acceptWorkspaceTrustDialogFromStream(
 }
 
 func containsWorkspaceTrustDialog(content string) bool {
-	return strings.Contains(content, "trust this folder") ||
+	return strings.Contains(content, "Trust this folder?") ||
+		strings.Contains(content, "trust this folder") ||
 		strings.Contains(content, "Quick safety check") ||
 		strings.Contains(content, "Do you trust the contents of this directory?") ||
 		strings.Contains(content, "Do you trust the files in this folder?") ||
@@ -785,6 +787,13 @@ var claudeTrustDialogLayout = trustDialogLayout{
 	},
 }
 
+var codexTrustDialogLayout = trustDialogLayout{
+	markers: []string{"›"},
+	isTrustRow: func(label string) bool {
+		return strings.Contains(label, "Trust and continue")
+	},
+}
+
 var geminiTrustDialogLayout = trustDialogLayout{
 	markers: []string{"●"},
 	isTrustRow: func(label string) bool {
@@ -801,13 +810,14 @@ var piTrustDialogLayout = trustDialogLayout{
 
 // workspaceTrustConfirmKeys locates the cursor row and the safe trust
 // option in a rendered workspace-trust dialog and returns the keys that
-// move the selection onto that option and confirm it. Claude, Gemini, and
-// pi each render the confirmation as a cursor-navigable option list, but
+// move the selection onto that option and confirm it. Claude, Codex 0.156,
+// Gemini, and pi each render the confirmation as a cursor-navigable list, but
 // with their own marker glyph and label wording (Claude: "❯"/"trust this
-// folder"; Gemini: "●"/"trust folder"; pi: "→"/"Trust"), so which layout to
-// scan with is chosen by which question text matched. Codex's trust prompt
-// has no rendered option list at all, so it's answered unconditionally —
-// there is no wrong selection to guard against.
+// folder"; Codex 0.156: "›"/"Trust and continue"; Gemini:
+// "●"/"trust folder"; pi: "→"/"Trust"), so which layout to scan with is
+// chosen by which question text matched. Older Codex's trust prompt has no
+// rendered option list at all, so it is answered unconditionally — there is
+// no wrong selection to guard against.
 //
 // For the list-style layouts, it reports ok=false when the cursor or the
 // trust row can't be located — a layout still mid-render, or one none of
@@ -817,6 +827,8 @@ var piTrustDialogLayout = trustDialogLayout{
 // Claude).
 func workspaceTrustConfirmKeys(content string) ([]string, bool) {
 	switch {
+	case strings.Contains(content, "Trust this folder?"):
+		return deriveTrustDialogKeys(content, "Trust this folder?", codexTrustDialogLayout)
 	case strings.Contains(content, "trust this folder") || strings.Contains(content, "Quick safety check"):
 		// "Quick safety check" is the dialog's header line, so it anchors the
 		// scan above every option row. "trust this folder" is itself an option
