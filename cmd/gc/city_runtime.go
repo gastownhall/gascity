@@ -1938,6 +1938,38 @@ func (cr *CityRuntime) reloadConfig(
 	cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, nil, reloadSourceWatch)
 }
 
+// errConfigTransactionInProgress reports a reload deferred because an API
+// config transaction (pack import add/remove, rig provisioning) is mid-write.
+var errConfigTransactionInProgress = errors.New("config mutation in progress; reload retry scheduled")
+
+// loadReloadCandidate reads one candidate config generation. With a
+// controller state it reads only while no config transaction is in flight, so
+// a multi-file write is never observed half-done; it does not wait, so a slow
+// import cannot stall the reconciler.
+func (cr *CityRuntime) loadReloadCandidate(configName, cityRoot string) (*reloadResult, error) {
+	if cr.cs == nil {
+		return tryReloadConfig(cr.tomlPath, configName, cityRoot)
+	}
+	var result *reloadResult
+	var err error
+	if !cr.cs.tryWithConfigTransactionIdle(func() {
+		result, err = tryReloadConfig(cr.tomlPath, configName, cityRoot)
+	}) {
+		return nil, errConfigTransactionInProgress
+	}
+	return result, err
+}
+
+// markConfigReloadPending leaves a config reload pending for the next tick.
+func (cr *CityRuntime) markConfigReloadPending() {
+	cr.reloadMu.Lock()
+	if cr.configDirty == nil {
+		cr.configDirty = &atomic.Bool{}
+	}
+	cr.configDirty.Store(true)
+	cr.reloadMu.Unlock()
+}
+
 func (cr *CityRuntime) applyStartupConfigReload(
 	ctx context.Context,
 	dirty *atomic.Bool,
@@ -1973,8 +2005,14 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if configName == "" {
 		configName = cr.cityName
 	}
-	result, err := tryReloadConfig(cr.tomlPath, configName, cityRoot)
+	result, err := cr.loadReloadCandidate(configName, cityRoot)
 	if err != nil {
+		if errors.Is(err, errConfigTransactionInProgress) {
+			// Keep the reload pending without poking: the transaction pokes when
+			// it publishes, and an immediate retry would only hit the same held
+			// fence and spin reconciliation ticks.
+			cr.markConfigReloadPending()
+		}
 		if result != nil {
 			for _, warning := range result.Warnings {
 				appendWarning(warning)

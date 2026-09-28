@@ -436,16 +436,19 @@ type FormulaMutator interface {
 	DeleteFormula(name string) error
 }
 
-// ConfigWriteSerializer is an optional State extension that runs fn under the
-// per-city config write lock. Pack import add/remove mutate city config files
-// (pack.toml, packs.lock, and sometimes city.toml) outside the
+// ConfigWriteSerializer is an optional State extension that runs fn as one
+// per-city config transaction. Pack import add/remove mutate several city
+// config files (pack.toml, packs.lock, and sometimes city.toml) outside the
 // configedit.Editor callback shape, so running them through this seam
 // serializes them against the agent/rig/provider/formula mutations that take
 // the same Editor lock — otherwise two concurrent net/http goroutines could
 // interleave load→mutate→write and lose an update or desync manifest and
-// lockfile. Like StateMutator it is type-asserted by handlers; a State that
-// does not implement it runs the mutation without extra serialization.
+// lockfile. The controller implementation also keeps its runtime config
+// reload from reading the files while fn is mid-write, restores them when fn
+// fails, and publishes the finished generation. Like StateMutator it is
+// type-asserted by handlers; a State that does not implement it runs the
+// mutation without extra serialization.
 type ConfigWriteSerializer interface {
-	// SerializeConfigWrite runs fn while holding the per-city config write lock.
+	// SerializeConfigWrite runs fn as one per-city config transaction.
 	SerializeConfigWrite(fn func() error) error
 }
