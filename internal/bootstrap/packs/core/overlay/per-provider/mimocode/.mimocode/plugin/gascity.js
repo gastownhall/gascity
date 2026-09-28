@@ -13,7 +13,11 @@
 //   - experimental.session.compacting → gc handoff --auto "context cycle"
 //     and inject the handoff confirmation into the compaction context
 //   - experimental.chat.system.transform → inject gc prime --hook, queued
-//     nudges, and unread mail into the system prompt for each turn
+//     nudges, and unread mail into the system prompt for each turn. The
+//     cached prime is prepended to system[0] so the role stays at the head;
+//     the per-turn text (nudges with their clock line, unread mail) is
+//     appended as a trailing system entry so it lands after every stable
+//     entry and the provider's prompt-cache prefix survives across turns.
 
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
@@ -22,7 +26,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const GC_MIMOCODE_HOOK_VERSION = 2;
+const GC_MIMOCODE_HOOK_VERSION = 3;
 const GC_BIN = process.env.GC_BIN || "gc";
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
@@ -170,11 +174,39 @@ export default async function gascityPlugin({ directory, client }) {
     return existing ? prefix + "\n\n" + existing : prefix;
   }
 
-  async function buildPrefix() {
-    const prime = await readPrime();
+  // readVolatile returns the per-turn text: `gc nudge drain --inject` emits a
+  // `Current time: ...` line on every call even with an empty queue, and
+  // unread mail changes as it arrives. Neither may sit ahead of stable text.
+  async function readVolatile() {
     const nudges = await run(directory, "nudge", "drain", "--inject");
     const mail = await run(directory, "mail", "check", "--inject");
-    return [prime, nudges, mail].filter(Boolean).join("\n\n");
+    return [nudges, mail].filter(Boolean).join("\n\n");
+  }
+
+  // prependStableSystem keeps the cached prime at the head of system[0] so the
+  // role opens the prompt and the bytes before MiMo Code's own system text are
+  // identical from one generation to the next.
+  function prependStableSystem(system, prime) {
+    if (!prime) {
+      return;
+    }
+    if (system[0]) {
+      system[0] = prependText(system[0], prime);
+    } else {
+      system.unshift(prime);
+    }
+  }
+
+  // appendVolatileSystem places the per-turn text after every stable entry.
+  // The OpenCode request path MiMo Code inherits folds system[1..] into one
+  // message only while system[0] is still its own header, so after
+  // prependStableSystem ran this entry stays a separate trailing system
+  // message; the prompt-cache prefix ends at the stable text instead of at
+  // the prime.
+  function appendVolatileSystem(system, volatile) {
+    if (volatile) {
+      system.push(volatile);
+    }
   }
 
   return {
@@ -197,22 +229,15 @@ export default async function gascityPlugin({ directory, client }) {
       }
     },
 
-    "chat.message": async (_input, output) => {
-      const prefix = await buildPrefix();
-      if (prefix) {
-        output.message.system = prependText(output.message.system, prefix);
-      }
-    },
-
+    // No chat.message injection: the user message's system field is
+    // persisted and joined into the tail of system[0] on every generation of
+    // that turn, so anything written there re-enters the stable header and
+    // undoes the split below.
     "experimental.chat.system.transform": async (_input, output) => {
-      const prefix = await buildPrefix();
-      if (prefix) {
-        if (output.system[0]) {
-          output.system[0] = prependText(output.system[0], prefix);
-        } else {
-          output.system.unshift(prefix);
-        }
-      }
+      const prime = await readPrime();
+      const volatile = await readVolatile();
+      prependStableSystem(output.system, prime);
+      appendVolatileSystem(output.system, volatile);
     },
 
     "experimental.session.compacting": async (_input, output) => {
