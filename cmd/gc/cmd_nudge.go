@@ -682,16 +682,16 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	// provider hook context is written per invocation, so JSON formats
 	// (codex/gemini) stay one valid document rather than two concatenated objects.
 	// See clock_inject.go and wisp_step_inject.go.
-	var wispExtra string // set after target resolution; captured by defer closure
+	var wispExtra string // step reminder; captured by defer closure
 	emittedHookContext := false
 	var injectPrefix string
-	var contextHookInput []byte
+	var contextUsage contextUsageSample
 	if inject {
 		// Read the provider hook input once (UserPromptSubmit JSON on stdin,
 		// pipe-only — see readHookStdin) and build the shared inject prefix:
 		// the clock line plus, when context pressure crosses its threshold,
 		// the context-usage guidance (see context_inject.go).
-		contextHookInput = readHookStdin()
+		contextUsage = readContextUsageSample(readHookStdin())
 		injectPrefix = clockInjectLine()
 		defer func() {
 			if !emittedHookContext {
@@ -711,25 +711,49 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	}
 	if targetID == "" {
 		if inject {
-			injectPrefix += contextInjectLine(contextHookInput)
+			injectPrefix += contextInjectLineForSample(contextUsage, nil, nil)
 			return 0
 		}
 		fmt.Fprintln(stderr, "gc nudge drain: session not specified (set $GC_ALIAS/$GC_SESSION_ID or pass an alias/id)") //nolint:errcheck
 		return 1
 	}
 
+	// Empty-queue fast path. Resolving the target loads the city config and
+	// opens the session store, and on an empty queue the only things it would
+	// feed are the context advisory (which renders nothing for a payload with
+	// no usage sample, whatever the agent's policy) and the step reminder
+	// (which depends only on the city and the hook's identity env). The hook
+	// context written is therefore the same as the full path's, so skip the
+	// resolution; a queued item or a usage sample takes the full path.
+	wispPrefetched := false
+	if inject && !contextUsage.ok {
+		if cityPath, ok := nudgeDrainExplicitCityPath(); ok && nudgeQueueIsEmpty(cityPath) {
+			wispExtra = wispStepInjectionContent(cityPath)
+			wispPrefetched = true
+			// The full path writes the step reminder only once the target
+			// resolves, so a non-empty reminder still needs that proof. Recheck
+			// the queue too: a nudge enqueued during the lookup must be claimed.
+			if wispExtra == "" && nudgeQueueIsEmpty(cityPath) {
+				return 0
+			}
+		}
+	}
+
 	target, err := resolveNudgeTarget(targetID, stderr)
 	if err != nil {
 		if inject {
-			injectPrefix += contextInjectLine(contextHookInput)
+			wispExtra = ""
+			injectPrefix += contextInjectLineForSample(contextUsage, nil, nil)
 			return 0
 		}
 		fmt.Fprintf(stderr, "gc nudge drain: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	if inject {
-		injectPrefix += contextInjectLineForAdvisory(contextHookInput, target.cfg.AgentDefaults.ContextAdvisory, target.agent.ContextAdvisory)
-		wispExtra = wispStepInjectionContent(target.cityPath)
+		injectPrefix += contextInjectLineForSample(contextUsage, target.cfg.AgentDefaults.ContextAdvisory, target.agent.ContextAdvisory)
+		if !wispPrefetched {
+			wispExtra = wispStepInjectionContent(target.cityPath)
+		}
 	}
 
 	now := time.Now()
@@ -2449,6 +2473,25 @@ func (m *nudgeMaintenanceStore) close() error {
 // so the Dolt front door need not be opened for this tick.
 func nudgeQueueHasWork(state *nudgeQueueState) bool {
 	return len(state.Pending) > 0 || len(state.InFlight) > 0 || len(state.Dead) > 0
+}
+
+// nudgeQueueIsEmpty reports whether the city's persisted nudge queue holds no
+// pending, in-flight, or dead item. It reads the atomically replaced state file
+// without taking the queue lock; an unreadable queue is not empty.
+func nudgeQueueIsEmpty(cityPath string) bool {
+	state, err := nudgequeue.LoadState(cityPath)
+	return err == nil && !nudgeQueueHasWork(&state)
+}
+
+// nudgeDrainExplicitCityPath returns the city resolveCity would pick when the
+// explicit city environment alone decides it: no --city/--rig flag and no
+// remote selector outranks GC_CITY/GC_CITY_PATH/GC_CITY_ROOT. Unlike
+// resolveCity it does not load the city config to name a rig.
+func nudgeDrainExplicitCityPath() (string, bool) {
+	if cityFlag != "" || rigFlag != "" || readRemoteSelection().hasExplicitRemote() {
+		return "", false
+	}
+	return resolveExplicitCityPathEnv()
 }
 
 func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
