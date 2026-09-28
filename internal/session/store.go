@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 	"log"
+	"reflect"
 	"strings"
 	"time"
 
@@ -90,6 +91,78 @@ func (s *Store) WithPendingCreateRollback(expected Info, fn func() error) (bool,
 		return nil
 	})
 	return applied, err
+}
+
+// ApplyPatchIfLifecycleUnchanged persists patch for expected.ID only while the
+// durable row still carries the lifecycle facts expected was read with. It is
+// the write path for a patch DECIDED from an earlier read (the reconciler's
+// advisory status heal, computed from its tick snapshot): an unconditional
+// write of such a patch is a lost update. A `gc session suspend`, wake, kill, or
+// close that lands after the read would be overwritten by a decision that never
+// saw it.
+//
+// "Lifecycle facts" are exactly what LifecycleInputFromInfo carries: the
+// open/closed status plus the persisted keys the lifecycle projection reads
+// (state, sleep_reason, held_until, quarantined_until, session_key,
+// started_config_hash, the pending-create lease, wake_request, pin_awake, ...).
+// Writes to other keys (a claim stamp, a nudge timestamp) do not block the
+// patch.
+//
+// The row is re-read, and the patch is refused with (false, nil) when the row
+// is closed or its lifecycle facts differ from expected's. Where the store
+// resolves a conditional writer (beads.ResolveConditionalWriter), the write is
+// then fenced on the re-read row's revision, so a writer that lands between the
+// re-read and the write also wins: the fenced write is refused with (false,
+// nil). The revision is passed through as-is: bd revisions are signed, and
+// whether a token is usable is the store's call. Without a conditional writer
+// the patch is written unconditionally after the re-read check, which leaves
+// only the window between that re-read and the write.
+//
+// A refused patch writes nothing, and the caller must not fold it. A
+// require-mode store that cannot fence, and a store that reports
+// beads.ErrConditionalWriteUnsupported at call time, return an error rather
+// than falling back to an unconditional write.
+func (s *Store) ApplyPatchIfLifecycleUnchanged(expected Info, patch MetadataPatch) (bool, error) {
+	if len(patch) == 0 {
+		return false, nil
+	}
+	bead, err := s.validatedBead(expected.ID)
+	if err != nil {
+		return false, err
+	}
+	if bead.Status == "closed" {
+		return false, nil
+	}
+	if !sameLifecycleFacts(expected, infoFromPersistedBead(bead)) {
+		return false, nil
+	}
+	writer, _, err := beads.ResolveConditionalWriter(s.store)
+	if err != nil {
+		return false, fmt.Errorf("updating session %q: %w", expected.ID, err)
+	}
+	if writer == nil {
+		if err := s.ApplyPatch(expected.ID, patch); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	err = writer.UpdateIfMatch(expected.ID, bead.Revision, beads.UpdateOpts{Metadata: map[string]string(patch)})
+	switch {
+	case err == nil:
+		return true, nil
+	case beads.IsPreconditionFailed(err):
+		return false, nil
+	default:
+		return false, fmt.Errorf("updating session %q: %w", expected.ID, err)
+	}
+}
+
+// sameLifecycleFacts reports whether a and b agree on every persisted fact the
+// lifecycle projection reads (LifecycleInputFromInfo). Comparing the projected
+// inputs rather than a hand-picked key list keeps this check in step with the
+// projection when it learns a new key.
+func sameLifecycleFacts(a, b Info) bool {
+	return reflect.DeepEqual(LifecycleInputFromInfo(a), LifecycleInputFromInfo(b))
 }
 
 // ApplyPatchInfo persists patch for info.ID (via ApplyPatch) and returns the
