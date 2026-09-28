@@ -69,6 +69,9 @@ func preWakeCommit(
 		Now:               clk.Now(),
 		SleepReason:       sleepReason,
 		FreshWake:         freshWake,
+		// A retry of a claimed pending create continues its episode, so the
+		// stale-create bound must keep measuring from the episode start.
+		EpisodePendingCreateStartedAt: pendingCreateEpisodeStartedAt(info),
 	})
 	if writeErr := sessFront.ApplyPatch(info.ID, batch); writeErr != nil {
 		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
@@ -76,6 +79,26 @@ func preWakeCommit(
 	traceFreshWakeMetadataReset(name, freshWakeResetPriorValues(info), batch, freshWake)
 
 	return newGen, token, batch, nil
+}
+
+// pendingCreateEpisodeStartedAt returns the pending_create_started_at a wake
+// must carry forward, or "" when the wake opens a new episode and should stamp
+// a fresh one.
+//
+// Only a held pending_create_claim continues an episode. Every site that sets
+// the claim (bead creation, named-session reopen, wake requests) stamps a
+// fresh marker in the same write, so while the claim is held the marker is the
+// start of the current episode. Claimed rows are also the only ones whose
+// stale-create rollback checks the configured start lease first, so keeping an
+// old marker cannot make an in-flight start look stale. A claimless wake keeps
+// the per-attempt stamp: the lifecycle projection ages a claimless creating
+// row out on that marker alone, and an inherited one could project a healthy
+// start asleep mid-spawn.
+func pendingCreateEpisodeStartedAt(info sessions.Info) string {
+	if !info.PendingCreateClaim {
+		return ""
+	}
+	return info.PendingCreateStartedAt
 }
 
 // freshWakeResetPriorValues reconstructs the pre-reset values of the fresh-wake
@@ -229,6 +252,49 @@ func drainReasonCancelable(reason string) bool {
 
 func pendingDrainReasonCancelable(reason string) bool {
 	return reason != "orphaned" && reason != "suspended" && reason != executionStalledDrainReason
+}
+
+// liveClaimDrainReasonCancelable is the live-claim cancel lens: the in-flight
+// drain reasons that a live claim held by the session (sessionOwnsLiveClaim)
+// may cancel. Only "orphaned": it is a demand-class verdict that a one-tick
+// stale view (an out-of-process claim the cache has not seen) can produce, so
+// it must be revisable once the claim is visible. Every other non-cancelable
+// reason is operator or agent intent (suspended, config-drift,
+// execution-stalled, idle-respawn) and stays final; the caller additionally
+// requires liveClaimVetoApplies, so an orphaned drain of a removed or
+// suspended agent is never canceled either.
+func liveClaimDrainReasonCancelable(reason string) bool {
+	return reason == "orphaned"
+}
+
+// orphanedDrainInFlightInfo reports whether the session has a reconciler-owned
+// "orphaned" drain in flight, either tracked in memory or recovered from the
+// runtime's reconciler drain-ack metadata (e.g. after a controller restart).
+// Agent-sourced drain acks are never reported: those are the agent's intent.
+func orphanedDrainInFlightInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker, name string) bool {
+	if dt != nil {
+		if ds := dt.get(info.ID); ds != nil && liveClaimDrainReasonCancelable(ds.reason) {
+			return true
+		}
+	}
+	reason, ok := reconcilerDrainAckMatchesSessionInfo(info, sp, name)
+	return ok && liveClaimDrainReasonCancelable(reason)
+}
+
+// cancelOrphanedDrainForLiveClaimInfo cancels an in-flight reconciler-owned
+// "orphaned" drain — the tracked drain and/or its published drain ack — once the
+// session is known to hold a live claim. It reports whether anything was
+// canceled.
+func cancelOrphanedDrainForLiveClaimInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker, name string) bool {
+	canceled := dt != nil && cancelSessionDrainIfInfo(info, sp, dt, liveClaimDrainReasonCancelable)
+	if reason, ok := reconcilerDrainAckMatchesSessionInfo(info, sp, name); ok && liveClaimDrainReasonCancelable(reason) {
+		_ = clearReconcilerDrainAckMetadata(sp, name)
+		if !canceled {
+			telemetry.RecordDrainTransition(context.Background(), name, reason, "cancel")
+		}
+		canceled = true
+	}
+	return canceled
 }
 
 const (

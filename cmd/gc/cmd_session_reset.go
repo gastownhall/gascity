@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -23,6 +25,13 @@ fresh provider conversation state. Session identity, alias, mail, and queued
 work remain attached to the existing session bead. For named sessions, reset
 also clears any tripped named-session respawn circuit breaker before requesting
 the fresh restart.
+
+One case is not an in-place restart. A session whose create never completed,
+is past its start lease, and has no running runtime cannot be restarted in
+place, because its unfinished create is what blocks it. Reset rolls that
+session back instead: it closes the bead as a failed create and releases the
+alias so the controller can create a replacement. A create that is still
+starting, or whose runtime is running, is never rolled back.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
@@ -100,22 +109,51 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 		}
 	}
 
-	if err := handle.Reset(context.Background()); err != nil {
+	// An unfinished create cannot be rescued by an in-place restart: that
+	// leaves the pending-create claim and the alias in place, so the
+	// controller re-enters the same failing start next tick. Roll it back
+	// instead and let the controller recreate it. The rescue leases against
+	// the same configured start budget as the reconciler's pending-create
+	// lease.
+	startupTimeout := (&config.SessionConfig{}).StartupTimeoutDuration()
+	if cfg != nil {
+		startupTimeout = cfg.Session.StartupTimeoutDuration()
+	}
+	rolledBack, err := rescuePendingCreateForReset(sessStore, sp, startupTimeout, sessionID, clock.Real{}, stderr)
+	if err != nil {
 		fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if !rolledBack {
+		if err := handle.Reset(context.Background()); err != nil {
+			fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	_ = pokeController(cityPath)
 
+	// Mode tells a caller which outcome it got. A rollback closed the bead, so
+	// a script waiting for this session to restart in place would otherwise
+	// wait for something that is not going to happen.
+	mode := "restart"
+	if rolledBack {
+		mode = "rollback"
+	}
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
 			Action:    "reset",
+			Mode:      mode,
 			SessionID: sessionID,
 			Identity:  identity,
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		return 0
+	}
+	if rolledBack {
+		fmt.Fprintf(stdout, "Session %s had an unfinished create; rolled it back and released its alias. Controller will create a replacement.\n", sessionID) //nolint:errcheck // best-effort stdout
 		return 0
 	}
 	fmt.Fprintf(stdout, "Session %s reset requested. Controller will restart it fresh.\n", sessionID) //nolint:errcheck // best-effort stdout

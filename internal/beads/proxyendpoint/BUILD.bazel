@@ -40,8 +40,13 @@ go_test(
         "record_test.go",
         "testenv_import_test.go",
     ],
+    data = [
+        "//:go.mod",
+        "//:repo_source_tree",
+    ],
     embed = [":proxyendpoint"],
     deps = [
+        "//internal/bazeltest",
         "//internal/beads/contract",
         "//internal/beads/proxyendpoint/proxyendpointtest",
         "//internal/doltpool",

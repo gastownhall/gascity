@@ -160,6 +160,14 @@ indicate bugs.
   `.gc/controller.lock`. A second `gc start --foreground` fails
   immediately with "controller already running."
 
+- **`gc stop` keeps the controller lock through bead-store shutdown**:
+  once the controller has stopped (acknowledged `stop`, or the supervisor
+  stopped it during unregister), `gc stop` takes `.gc/controller.lock` and
+  holds it until the bead-store provider is retired, releasing it on every
+  exit path (and before any unregister rollback). A supervisor restart or a
+  second `gc start` therefore cannot bring a controller up against a
+  provider that is being torn down; it fails the lock instead.
+
 - **Config reload preserves city identity**: `tryReloadConfig()` rejects
   any reload where `workspace.name` changes. The city name is locked at
   startup; changing it requires a controller restart.

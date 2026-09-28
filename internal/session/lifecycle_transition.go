@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -194,20 +195,40 @@ type PreWakePatchInput struct {
 	Now               time.Time
 	SleepReason       string
 	FreshWake         bool
+	// EpisodePendingCreateStartedAt is the pending_create_started_at of the
+	// pending-create episode this wake continues, or empty when the wake opens
+	// a new episode. See PreWakePatch.
+	EpisodePendingCreateStartedAt string
 }
 
 // PreWakePatch records the metadata transition for a concrete runtime wake
 // attempt. It intentionally owns the StateStartPending to StateCreating
 // provider-start boundary outside Transition because this patch is the atomic
 // reconciler commit made immediately before runtime start.
+//
+// pending_create_started_at marks the start of a pending-create episode, and
+// the stale-create bounds measure from it. This patch runs before every start
+// attempt, so stamping it unconditionally reset that clock on each retry: a
+// pending create that retried every tick never aged out and kept its alias
+// indefinitely. A wake that continues an episode passes the episode's marker
+// in EpisodePendingCreateStartedAt and the patch keeps it. Every path that
+// sets pending_create_claim stamps a fresh marker in the same write, so a
+// caller that carries the marker only while the claim is held always carries
+// the start of the current episode. A marker that does not parse is replaced.
 func PreWakePatch(input PreWakePatchInput) MetadataPatch {
+	startedAt := pendingCreateStartedAt(input.Now)
+	if episode := strings.TrimSpace(input.EpisodePendingCreateStartedAt); episode != "" {
+		if t, err := time.Parse(time.RFC3339, episode); err == nil && !t.IsZero() {
+			startedAt = episode
+		}
+	}
 	patch := MetadataPatch{
 		"instance_token":             input.InstanceToken,
 		"continuation_epoch":         fmt.Sprintf("%d", input.ContinuationEpoch),
 		"continuation_reset_pending": "",
 		"detached_at":                "",
 		"state":                      string(StateCreating),
-		"pending_create_started_at":  pendingCreateStartedAt(input.Now),
+		"pending_create_started_at":  startedAt,
 		"last_woke_at":               input.Now.UTC().Format(time.RFC3339),
 		"sleep_reason":               input.SleepReason,
 		"sleep_intent":               "",

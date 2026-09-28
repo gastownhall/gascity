@@ -1275,7 +1275,7 @@ func (cr *CityRuntime) tick(
 	// Session-management phases: snapshot, corpse sweeps, drain finalization,
 	// demand/desired state, bead-driven reconcile.
 	phaseStart = time.Now()
-	sessionBeads := cr.loadSessionBeadSnapshot()
+	sessionBeads := cr.loadTickSessionBeadSnapshot(trigger)
 	recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.initial", phaseStart, traceSessionSnapshotFields(sessionBeads))
 	if trace != nil && sessionBeads != nil {
 		trace.RecordSessionBaseline("", "", traceRecordPayload{
@@ -1449,10 +1449,12 @@ func (cr *CityRuntime) tick(
 	// Wisp GC: purge expired closed molecules. The molecule/wisp/workflow purge
 	// arm routes through the typed graph-class store; the read-message retention
 	// arm through the typed messaging-class store. Both collapse to the city store
-	// today, so the GC is byte-identical.
+	// today, so the GC is byte-identical. The closed session purge arm gets the
+	// sessions class only when it is relocated onto a SQLite infra ledger; on an
+	// unsplit city it gets nothing and never touches the work store.
 	if graphStore := cr.graphBeadStore(); cr.wg != nil && graphStore.Store != nil && cr.wg.shouldRun(time.Now()) {
 		phaseStart = time.Now()
-		purged, gcErr := cr.wg.runGC(graphStore, cr.mailBeadStore(), time.Now())
+		purged, gcErr := cr.wg.runGC(graphStore, cr.infraSessionLedger(), cr.mailBeadStore(), time.Now())
 		recordPhase(TraceSiteControllerTickPhase, "wisp_gc", phaseStart, map[string]any{"purged": purged})
 		if gcErr != nil {
 			for _, line := range strings.Split(gcErr.Error(), "\n") {
@@ -2851,31 +2853,6 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 			cr.requestExecutionStalledDrain,
 			cr.stdout,
 		)
-		// The never-claimed lane (ga-evxqd). The three above key on a bead the
-		// seat was BOUND to, on one preassigned successor, or on an in_progress
-		// claim; this one keys on the seat's own OPEN ready work — assigned to
-		// it or merely routed to its identity — which is the residual none of
-		// them can see. It reads the BROAD open-routed view rather than the
-		// pool-demand-narrowed one because it settles readiness itself, from
-		// each row's own dependency edges: a named seat's routed work is not
-		// pool demand, so the narrowed view can be silent on exactly the rows
-		// this lane exists for. It nudges and reports; it never drains.
-		nudgeStalledSeatClaims(
-			cr.sp,
-			cr.cfg,
-			sessStore,
-			stalledPoolBeads,
-			result.AssignedWorkBeads,
-			result.AssignedWorkStores,
-			result.AssignedWorkStoreRefs,
-			result.OpenRoutedWorkBeads,
-			result.OpenRoutedWorkStores,
-			result.OpenRoutedWorkStoreRefs,
-			result.StoreQueryPartial || result.SessionQueryPartial || result.OpenRoutedWorkQueryPartial,
-			time.Now(),
-			cr.rec,
-			cr.stdout,
-		)
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
 }
@@ -3652,6 +3629,38 @@ func (cr *CityRuntime) rigBeadStores() map[string]beads.Store {
 func (cr *CityRuntime) loadSessionBeadSnapshot() *sessionBeadSnapshot {
 	sessionBeads, _ := cr.loadSessionBeadSnapshotWithPartial()
 	return sessionBeads
+}
+
+// loadTickSessionBeadSnapshot loads a tick's first session-bead snapshot. A
+// poked tick reads it live, past the bead cache. A poke usually means another
+// process changed something, and gc no longer installs the bd event hooks, so
+// the cache over the city store learns about another process's write only from
+// its own reconcile pass. That pass emits a cache snapshot event, which does
+// not poke. Without this read, the session bead `gc session new` writes before
+// it pokes stays invisible to the poked tick, and its deferred start waits for
+// the next patrol tick.
+//
+// The live read costs one session-bead union (two store lists) per poked tick
+// and nothing on any other tick. It also puts the fresh rows into the cache,
+// so the tick's later snapshot loads see them without another store round
+// trip. If the live read fails, the tick falls back to the cached snapshot
+// it would have used anyway.
+func (cr *CityRuntime) loadTickSessionBeadSnapshot(trigger string) *sessionBeadSnapshot {
+	switch trigger {
+	case "poke", "startup-poke":
+	default:
+		return cr.loadSessionBeadSnapshot()
+	}
+	store := cr.sessionsBeadStore()
+	if store.Store == nil {
+		return nil
+	}
+	sessionBeads, err := loadSessionBeadSnapshotLive(store.Store, true)
+	if err == nil {
+		return sessionBeads
+	}
+	fmt.Fprintf(cr.stderr, "%s: loading session beads live for %s tick: %v (using cached snapshot)\n", cr.logPrefix, trigger, err) //nolint:errcheck
+	return cr.loadSessionBeadSnapshot()
 }
 
 func (cr *CityRuntime) loadSessionBeadSnapshotWithPartial() (*sessionBeadSnapshot, bool) {

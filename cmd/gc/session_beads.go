@@ -878,11 +878,13 @@ func sessionAssignmentIdentifiers(sessionBead beads.Bead) []string {
 }
 
 // sessionAssignmentIdentifiersForConfig extends the persisted session-bead
-// identifiers with the configured named-session identity when a recovered bead
-// is missing identity metadata. Keep this fallback aligned with
-// sessionAssigneeMatches and compute_awake_bridge's AwakeNamedSession fields.
+// identifiers with the session's stable alias (stableAssignmentAliasForConfig)
+// and with the configured named-session identity when a recovered bead is
+// missing identity metadata. Keep these additions aligned with
+// sessionAssigneeMatches and compute_awake_bridge's AwakeSessionBead.Alias and
+// AwakeNamedSession fields.
 func sessionAssignmentIdentifiersForConfig(sessionBead beads.Bead, cfg *config.City) []string {
-	raw := sessionAssignmentIdentifierRaw(sessionBead)
+	raw := append(sessionAssignmentIdentifierRaw(sessionBead), stableAssignmentAliasForConfig(sessionBead, cfg))
 	if cfg == nil ||
 		strings.TrimSpace(sessionBead.Metadata[namedSessionMetadataKey]) != "true" ||
 		strings.TrimSpace(sessionBead.Metadata[namedSessionIdentityMetadata]) != "" {
@@ -929,7 +931,7 @@ func sessionAssignmentIdentifierRaw(sessionBead beads.Bead) []string {
 // SessionNameMetadata, Template) instead of cracking the raw bead, staying
 // byte-identical to the raw form (TestSessionClassifierInfoEquivalence pins it).
 func sessionAssignmentIdentifiersForConfigInfo(info session.Info, cfg *config.City) []string {
-	raw := sessionAssignmentIdentifierRawInfo(info)
+	raw := append(sessionAssignmentIdentifierRawInfo(info), stableAssignmentAliasForConfigInfo(info, cfg))
 	if cfg == nil ||
 		!info.ConfiguredNamedSession ||
 		strings.TrimSpace(info.ConfiguredNamedIdentity) != "" {
@@ -968,6 +970,51 @@ func sessionAssignmentIdentifierRawInfo(info session.Info) []string {
 		strings.TrimSpace(info.SessionNameMetadata),
 		strings.TrimSpace(info.ConfiguredNamedIdentity),
 	}
+}
+
+// stableAssignmentAliasForConfig returns the session's alias when it is a
+// stable ownership identity, and "" otherwise. A session claims work under its
+// alias first (session.AssigneeIdentifier, `gc hook --claim`), so a namepool
+// member ("rig/furiosa"), a canonical singleton pool member, or an aliased
+// manual session owns alias-form work, and the awake set, drain guards and
+// pool reuse guard must all see it.
+//
+// A rebinding numeric pool slot is the exception: the controller hands it to
+// the next occupant, so slot-form ownership must never keep a session alive
+// (TestAssignmentGuardsIgnoreTransientPoolSlotAliases). Current pool beads of
+// that shape carry no alias at all; this filter covers legacy beads that still
+// do. A namepool member also records pool_slot, so the slot marker alone cannot
+// tell the two apart — the configured agent decides. When the agent cannot be
+// resolved the alias is dropped, keeping the narrower pre-alias behavior.
+func stableAssignmentAliasForConfig(sessionBead beads.Bead, cfg *config.City) string {
+	alias := strings.TrimSpace(sessionBead.Metadata["alias"])
+	if alias == "" || !isPoolManagedSessionBead(sessionBead) || strings.TrimSpace(sessionBead.Metadata["pool_slot"]) == "" {
+		return alias
+	}
+	if !poolSlotAliasIsStable(findAgentByTemplate(cfg, normalizedSessionTemplate(sessionBead, cfg))) {
+		return ""
+	}
+	return alias
+}
+
+// stableAssignmentAliasForConfigInfo is the session.Info form of
+// stableAssignmentAliasForConfig.
+func stableAssignmentAliasForConfigInfo(info session.Info, cfg *config.City) string {
+	alias := strings.TrimSpace(info.Alias)
+	if alias == "" || !isPoolManagedSessionInfo(info) || strings.TrimSpace(info.PoolSlot) == "" {
+		return alias
+	}
+	if !poolSlotAliasIsStable(findAgentByTemplate(cfg, normalizedSessionTemplateInfo(info, cfg))) {
+		return ""
+	}
+	return alias
+}
+
+// poolSlotAliasIsStable reports whether a slotted pool member of cfgAgent
+// carries a stable alias (namepool name, canonical singleton) rather than a
+// rebinding numeric slot. An unresolvable agent is treated as rebinding.
+func poolSlotAliasIsStable(cfgAgent *config.Agent) bool {
+	return cfgAgent != nil && !usesTransientPoolSlotIdentity(cfgAgent)
 }
 
 // sessionAssignmentIdentifiersInfo is the session.Info form of
@@ -3038,6 +3085,56 @@ func reapPreBootSessionBeads(
 	return reaped
 }
 
+// sessionBeadClaimsLiveRuntime reports whether the row asserts an incarnation
+// that should be running now. It asks the lifecycle projection rather than one
+// spelling of the state string, so both spellings of a running row ("active"
+// before the status heal, "awake" after) and every dormant spelling are
+// classified the way the rest of the reconciler classifies them.
+func sessionBeadClaimsLiveRuntime(info session.Info) bool {
+	switch session.ProjectLifecycle(session.LifecycleInputFromInfo(info)).BaseState {
+	case session.BaseStateActive, session.BaseStateStartPending,
+		session.BaseStateCreating, session.BaseStateDraining:
+		return true
+	default:
+		return false
+	}
+}
+
+// deadRuntimeBelongsToRow reports whether a runtime already confirmed dead is
+// the incarnation a row claiming a live runtime records. A restart rotates the
+// row's instance_token in preWakeCommit and only then starts the new runtime,
+// so for that window the name can still carry the previous incarnation's
+// corpse under a row that claims a live runtime. That corpse proves nothing
+// about the row, and the in-flight start recycles it.
+//
+// The token is read after the caller's death check, so a matching token is
+// followed by a second death check: the start may have replaced the old corpse
+// with the row's new, live runtime between the two reads. A row without a
+// token, or a runtime without GC_INSTANCE_TOKEN, cannot be told apart this way
+// and counts as a match, the same way the reconciler's other token fences
+// treat an empty runtime token.
+func deadRuntimeBelongsToRow(info session.Info, name string, sp runtime.Provider, deadChecker runtime.DeadRuntimeSessionChecker, stderr io.Writer) bool {
+	rowToken := strings.TrimSpace(info.InstanceToken)
+	if rowToken == "" {
+		return true
+	}
+	runtimeToken, err := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: reading instance token of dead runtime session %s: %v\n", name, err) //nolint:errcheck
+		return false
+	}
+	if runtimeToken = strings.TrimSpace(runtimeToken); runtimeToken != "" && runtimeToken != rowToken {
+		fmt.Fprintf(stderr, "session reconciler: dead runtime session %s belongs to another incarnation than session bead %s; leaving it to the in-flight start\n", name, info.ID) //nolint:errcheck
+		return false
+	}
+	dead, err := deadChecker.IsDeadRuntimeSession(name)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: re-confirming dead runtime session %s: %v\n", name, err) //nolint:errcheck
+		return false
+	}
+	return dead
+}
+
 func cleanupDeadRuntimeSessionCorpses(
 	store beads.Store,
 	_ map[string]beads.Store,
@@ -3094,7 +3191,9 @@ func cleanupDeadRuntimeSessionCorpses(
 	cleaned := 0
 	seen := make(map[string]bool)
 	for _, info := range sessionBeads.OpenInfos() {
-		if info.PendingCreateClaim || (dt != nil && dt.get(info.ID) != nil) || isNamedSessionInfo(info) {
+		// A kill-fenced row belongs to the `gc session kill` tearing its runtime
+		// down: the dead pane is the kill in progress, not an abandoned corpse.
+		if info.PendingCreateClaim || (dt != nil && dt.get(info.ID) != nil) || isNamedSessionInfo(info) || session.IsKillPendingInfo(info, clk.Now()) {
 			continue
 		}
 		name := strings.TrimSpace(info.SessionNameMetadata)
@@ -3108,6 +3207,13 @@ func cleanupDeadRuntimeSessionCorpses(
 			continue
 		}
 		if !dead {
+			continue
+		}
+		// A dormant row has no start in flight, so its corpse is reaped without
+		// the incarnation fence; only a row claiming a live runtime can be
+		// mid-restart, and only that row is closed below.
+		claimsLive := sessionBeadClaimsLiveRuntime(info)
+		if claimsLive && !deadRuntimeBelongsToRow(info, name, sp, deadChecker, stderr) {
 			continue
 		}
 		if err := sp.Stop(name); err != nil {
@@ -3134,7 +3240,16 @@ func cleanupDeadRuntimeSessionCorpses(
 		// The outer `if store != nil` guard tolerates a nil store so the
 		// runtime-Stop side effect still runs in test contexts that do not
 		// wire a real store; closeBead is idempotent on already-closed beads.
-		if store != nil {
+		//
+		// Only a row that claims the runtime it just lost is closed. A dormant
+		// row (asleep, drained, suspended, quarantined, archived) records no
+		// running incarnation: `gc session kill` stops the runtime and marks
+		// the row asleep precisely so a later wake can start a fresh one, and
+		// the dead pane is that sleep's leftover. Closing it would make the
+		// session impossible to wake. Reaping the pane above is still right: it
+		// frees the name for that wake.
+		if store != nil && claimsLive {
+			fmt.Fprintf(stderr, "session reconciler: closing session bead %s as dead-runtime (session %s, state %q)\n", info.ID, name, strings.TrimSpace(info.MetadataState)) //nolint:errcheck
 			closeBead(store, info.ID, "dead-runtime", clk.Now().UTC(), stderr)
 		}
 		cleaned++
@@ -3275,7 +3390,7 @@ func (s *fencedInfrastructureRootSet) put(cityPath string, keys map[string]struc
 
 func sweepProcessTableOrphans(
 	sp runtime.Provider,
-	_ *sessionBeadSnapshot,
+	sessionBeads *sessionBeadSnapshot,
 	store beads.Store,
 	cityPath string,
 	stderr io.Writer,
@@ -3288,6 +3403,19 @@ func sweepProcessTableOrphans(
 	}
 	scanner, ok := runtime.AsProcessTableScanner(sp)
 	if !ok {
+		return 0
+	}
+	// Terminating a live runtime is irreversible, so an orphan verdict needs two
+	// independent reads to agree: this tick's session-bead snapshot (the open
+	// set) and a direct store lookup. Without a cleanly loaded snapshot there is
+	// no second read — the tick path hands us nil when the list failed — so
+	// no runtime can be proven orphaned this sweep; the next tick retries.
+	if sessionBeads == nil {
+		fmt.Fprintf(stderr, "session reconciler: skipping process-table orphan sweep: no session-bead snapshot to corroborate orphan verdicts\n") //nolint:errcheck
+		return 0
+	}
+	if err := sessionBeads.LoadError(); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: skipping process-table orphan sweep: session-bead snapshot incomplete: %v\n", err) //nolint:errcheck
 		return 0
 	}
 	found, err := scanner.FindRuntimesBySessionID("")
@@ -3329,7 +3457,21 @@ func sweepProcessTableOrphans(
 			fmt.Fprintf(stderr, "session reconciler: looking up process-table orphan session bead %s pid=%d: %v\n", live.SessionID, live.PID, err) //nolint:errcheck
 			continue
 		}
-		// here: bead is closed, or confirmed absent (ErrNotFound) — reap below,
+		// The store says closed or absent. The snapshot must agree: if it still
+		// lists the bead open, the two reads disagree (a stale cache, a
+		// transient error mapped to not-found, or a bead closed and reopened
+		// between them) and killing on the store's word alone could SIGTERM a
+		// healthy worker. Leave it for a later sweep, when both reads settle.
+		if _, open := sessionBeads.FindInfoByID(live.SessionID); open {
+			storeVerdict := "closed"
+			if err != nil {
+				storeVerdict = "not found"
+			}
+			fmt.Fprintf(stderr, "session reconciler: leaving process-table root pid=%d session=%s alone: store reports bead %s but session-bead snapshot has it open\n", live.PID, live.SessionID, storeVerdict) //nolint:errcheck
+			continue
+		}
+		// here: bead is closed, or confirmed absent (ErrNotFound), and the
+		// snapshot agrees it is not open — reap below,
 		// unless the root is city infrastructure that merely inherited the
 		// session's environment (a managed Dolt scope watchdog or bd's
 		// db-proxy-child started from an agent shell). Terminating it signals
@@ -3363,7 +3505,7 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	cfg *config.City,
 	b beads.Bead,
 	closeReason string,
-	stopReason string,
+	_ string, // stopReason: unused -- a running session is declined here, never stopped
 	now time.Time,
 	stderr io.Writer,
 ) bool {
@@ -3378,7 +3520,9 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	if hasAssignedWork {
 		return false
 	}
-	if !stopRuntimeBeforeSessionBeadMutation(store, sp, cfg, b, stopReason, stderr) {
+	sessionName := strings.TrimSpace(b.Metadata["session_name"])
+	if sessionName != "" && sp != nil && sp.IsRunning(sessionName) {
+		fmt.Fprintf(stderr, "session work guard: declining to close %s: runtime %q is still running\n", b.ID, sessionName) //nolint:errcheck
 		return false
 	}
 	hasAssignedWork, err = sessionHasOpenAssignedWorkForConfig(cityPath, cfg, store, rigStores, b)

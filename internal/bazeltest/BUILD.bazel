@@ -2,7 +2,11 @@ load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "bazeltest",
-    srcs = ["bazeltest.go"],
+    srcs = [
+        "bazeltest.go",
+        "lock_other.go",
+        "lock_unix.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/bazeltest",
     visibility = ["//:__subpackages__"],
 )

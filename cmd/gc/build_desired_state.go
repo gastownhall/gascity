@@ -94,21 +94,6 @@ type DesiredStateResult struct {
 	// ReadyUnassignedRoutedWorkStoreRefs is index-aligned with
 	// ReadyUnassignedRoutedWorkBeads and uses canonical city:/rig: refs.
 	ReadyUnassignedRoutedWorkStoreRefs []string
-	// OpenRoutedWorkBeads is the BROAD open/unassigned/routed snapshot, before
-	// ReadyUnassignedRoutedWorkBeads narrows it to the rows the default pool
-	// demand probes selected. The seat-claim backstop reads this one because it
-	// settles readiness itself, from each row's own dependency edges rather than
-	// from pool-demand selection: a named seat's routed work is not pool demand,
-	// so the narrowed view can be silent on exactly the rows that lane exists
-	// for. OpenRoutedWorkStores and OpenRoutedWorkStoreRefs are index-aligned
-	// with it, the same contract AssignedWorkStores/StoreRefs carry.
-	OpenRoutedWorkBeads     []beads.Bead
-	OpenRoutedWorkStores    []beads.Store
-	OpenRoutedWorkStoreRefs []string
-	// OpenRoutedWorkQueryPartial is true when the open-routed read above was
-	// incomplete. A missing row makes a seat's own work look absent, so
-	// consumers that act on ABSENCE must disable themselves for that tick.
-	OpenRoutedWorkQueryPartial bool
 	// NamedSessionDemand records which named-session identities have active
 	// direct assignee demand (Assignee == identity). The reconciler merges this
 	// into poolDesired so that on-demand named sessions remain config-eligible.
@@ -805,7 +790,6 @@ func buildDesiredStateWithSessionBeadsAt(
 	var unassignedRoutedBeads []beads.Bead
 	var unassignedRoutedStores []beads.Store
 	var unassignedRoutedStoreRefs []string
-	var unassignedRoutedPartial bool
 	var controlDispatcherScopeGaps []ControlDispatcherScopeGap
 	var readyUnassignedRoutedWorkBeads []beads.Bead
 	var readyUnassignedRoutedWorkStoreRefs []string
@@ -876,6 +860,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		// the route must be canonicalized before demand is counted or the cold
 		// pool never wakes for it.
 		subPhaseStart = time.Now()
+		var unassignedRoutedPartial bool
 		unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, unassignedRoutedPartial = collectOpenUnassignedRoutedWork(cityPath, cfg, store, rigStores, suspendedRigPaths, stderr)
 		// Same repair as above, over the open/unassigned collection: a bead
 		// released back to open by a drain is clobbered the same way an
@@ -1238,10 +1223,6 @@ func buildDesiredStateWithSessionBeadsAt(
 		AssignedWorkStoreRefs:              assignedWorkStoreRefs,
 		ReadyUnassignedRoutedWorkBeads:     readyUnassignedRoutedWorkBeads,
 		ReadyUnassignedRoutedWorkStoreRefs: readyUnassignedRoutedWorkStoreRefs,
-		OpenRoutedWorkBeads:                unassignedRoutedBeads,
-		OpenRoutedWorkStores:               unassignedRoutedStores,
-		OpenRoutedWorkStoreRefs:            unassignedRoutedStoreRefs,
-		OpenRoutedWorkQueryPartial:         unassignedRoutedPartial,
 		ReadyAssigned:                      readyAssigned,
 		ContinuationClaimCandidates:        continuationClaimCandidates,
 		ContinuationClaimQueryPartial:      continuationClaimQueryPartial,
@@ -5026,23 +5007,28 @@ func isFailedCreateSessionInfo(i session.Info) bool {
 }
 
 // sessionBeadHasAssignedWorkInfo reports whether any open/in-progress work bead is
-// assigned to the session: the SESSION side reads typed Info fields (ID,
-// SessionNameMetadata, ConfiguredNamedIdentity) while the WORK bead slice stays raw
-// (ClassWork — Bead is the domain object). It is the production reuse predicate the
-// pool selection path calls; its behavior is pinned by TestSessionBeadHasAssignedWorkInfo
-// (WI-7 W-delete retired the raw sessionBeadHasAssignedWork equivalence reference along
-// with the rest of the raw pool cluster and re-pointed the pin to a golden).
-func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) bool {
+// assigned to the session: the SESSION side reads typed Info fields through
+// sessionAssignmentIdentifiersForConfigInfo (ID, SessionNameMetadata,
+// ConfiguredNamedIdentity, the stable alias, and the configured named-session
+// fallback) while the WORK bead slice stays raw (ClassWork — Bead is the domain
+// object). It is the production reuse predicate the pool selection path calls, so
+// it must recognize the same identities as the drain guards and the awake set: a
+// namepool member claims under its alias, and missing that claim lets pool
+// selection reuse a seat that is still working. Its behavior is pinned by
+// TestSessionBeadHasAssignedWorkInfo (WI-7 W-delete retired the raw
+// sessionBeadHasAssignedWork equivalence reference along with the rest of the raw
+// pool cluster and re-pointed the pin to a golden).
+func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info, cfg *config.City) bool {
+	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
 	for _, wb := range workBeads {
 		assignee := strings.TrimSpace(wb.Assignee)
 		if assignee == "" || (wb.Status != "open" && wb.Status != "in_progress") {
 			continue
 		}
-		if assignee == info.ID || assignee == strings.TrimSpace(info.SessionNameMetadata) {
-			return true
-		}
-		if namedIdentity := strings.TrimSpace(info.ConfiguredNamedIdentity); namedIdentity != "" && assignee == namedIdentity {
-			return true
+		for _, identifier := range identifiers {
+			if assignee == identifier {
+				return true
+			}
 		}
 	}
 	return false
@@ -5052,11 +5038,11 @@ func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) b
 // sessionBeadHasAssignedWorkInfo: it matches an open/in-progress work bead's
 // Assignee against every current identity of the session (ID,
 // SessionNameMetadata, ConfiguredNamedIdentity, Alias, AliasHistory — see
-// session.AssigneeIdentities), not just the narrower ID/SessionNameMetadata/
-// ConfiguredNamedIdentity trio sessionBeadHasAssignedWorkInfo pins. Work
-// claimed by an agent is commonly assigned under its actor alias (GC_ALIAS /
-// BEADS_ACTOR, see session.AssigneeIdentifier), which the narrower check
-// does not consider, so it can miss live assigned work entirely.
+// session.AssigneeIdentities), not just the current-identity set
+// sessionBeadHasAssignedWorkInfo matches. The narrower check honors a stable
+// alias but deliberately ignores a rebinding pool-slot alias and every prior
+// alias in alias_history, so it can miss work a one_shot exit left assigned
+// under one of those forms.
 //
 // It exists as a separate function (not a change to the pinned
 // sessionBeadHasAssignedWorkInfo) so its wider match is opt-in for callers

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -450,6 +451,10 @@ type NativeDoltStore struct {
 	// should demote to the bd leaf in seconds rather than hold a caller
 	// through a minute and a half of mysql i/o timeouts.
 	readRetryBudgetOverride time.Duration
+	// afterMetadataMergeRead, when set, runs after each read that starts a
+	// metadata merge attempt, before its checked write. Only tests set it, to
+	// land a competing write in the window the compare-and-swap protects.
+	afterMetadataMergeRead func(id string)
 
 	// readOnlyReason, when non-empty, latches this handle read-only: every
 	// mutating method refuses with ErrProxiedNativeReadOnly before it reaches
@@ -1885,14 +1890,23 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 // s.DepList/s.List (each of which reacquire s.withReadRetry's lock): this
 // method runs INSIDE Ready's withReadRetry closure, so nesting another
 // withReadRetry call would risk a sync.RWMutex RLock reentrancy hazard.
-// GetDependenciesWithMetadata is a base beadslib.Storage method (no
-// capability probe needed, unlike DependencyBatchLister) and returns each
-// blocker's full Issue row — status and metadata together — alongside the
-// edge type in one call per candidate, so no second batched issue fetch is
-// needed the way BdStore's mirror image requires.
+//
+// The read is batched when the storage can batch it: one source-keyed edge
+// read for every candidate (GetDependencyRecordsForIssues) and one issue read
+// for the distinct ready-blocking targets (GetIssuesByIDs), the same two-step
+// shape as BdStore's mirror. Per candidate, GetDependenciesWithMetadata is
+// exactly those two reads for one id, so the batched pair sees the same rows
+// — and a frontier of N candidates costs two storage API calls instead of N
+// (each one a round trip on a served store), which over a network link
+// exhausted the whole read-retry budget every controller tick (#6491). A
+// storage without the batched edge read takes the per-candidate path
+// unchanged.
 func (s *NativeDoltStore) filterReadyByWorkOutcome(ctx context.Context, storage beadslib.Storage, candidates []Bead) ([]Bead, error) {
 	if len(candidates) == 0 {
 		return candidates, nil
+	}
+	if batch, ok := storage.(nativeDependencyRecordsBatchReader); ok {
+		return filterReadyByWorkOutcomeBatched(ctx, batch, storage, candidates)
 	}
 	result := make([]Bead, 0, len(candidates))
 	for _, c := range candidates {
@@ -1921,6 +1935,99 @@ func (s *NativeDoltStore) filterReadyByWorkOutcome(ctx context.Context, storage 
 				blocked = true
 				break
 			}
+		}
+		if !blocked {
+			result = append(result, c)
+		}
+	}
+	return result, nil
+}
+
+// nativeDependencyRecordsBatchReader is the source-keyed batched edge read
+// every Dolt-backed beadslib storage offers (storage.DependencyQueryStore,
+// promoted through the DoltStorage decorator contract) but the base
+// beadslib.Storage does not name, so it is reached by capability probe.
+type nativeDependencyRecordsBatchReader interface {
+	GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*beadslib.Dependency, error)
+}
+
+// filterReadyByWorkOutcomeBatched is filterReadyByWorkOutcome's veto over two
+// batched reads. The RULE is the per-candidate path's: only a ready-blocking
+// edge whose target is closed with gc.work_outcome=blocked removes a
+// candidate, and a target the issue read does not return (the per-candidate
+// read skips it too) is no evidence of blocking. The error contract differs
+// in two ways: only ready-blocking targets are hydrated, so a non-blocking
+// target's row is never read and can never fail; and a storage-level failure
+// of either batched read (the edge read's wisp/permanent partition included)
+// fails the whole filter rather than one candidate's read.
+//
+// The result does not depend on edge order. The batched edge read is sorted
+// by the store and the per-candidate read is not, so a veto that stopped at
+// the first closed-and-blocked target — and parsed a malformed target's
+// metadata only when it sorted before that one — would let the two paths
+// disagree. Every fetched ready-blocking target's metadata is therefore
+// parsed exactly once up front, and a malformed one is reported against the
+// first candidate (in candidate order) that references it, choosing the
+// lowest target id when that candidate references more than one.
+func filterReadyByWorkOutcomeBatched(ctx context.Context, batch nativeDependencyRecordsBatchReader, storage beadslib.Storage, candidates []Bead) ([]Bead, error) {
+	ids := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		ids = append(ids, c.ID)
+	}
+	edges, err := batch.GetDependencyRecordsForIssues(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("checking blocking dependency outcomes: reading dependency edges: %w", err)
+	}
+	var blockerIDs []string
+	seen := make(map[string]bool)
+	for _, id := range ids {
+		for _, dep := range edges[id] {
+			if dep == nil || !IsReadyBlockingDependencyType(string(dep.Type)) || seen[dep.DependsOnID] {
+				continue
+			}
+			seen[dep.DependsOnID] = true
+			blockerIDs = append(blockerIDs, dep.DependsOnID)
+		}
+	}
+	if len(blockerIDs) == 0 {
+		return candidates, nil
+	}
+	blockers, err := storage.GetIssuesByIDs(ctx, blockerIDs)
+	if err != nil {
+		return nil, fmt.Errorf("checking blocking dependency outcomes: fetching blockers: %w", err)
+	}
+	// One parse per fetched target: vetoes records the closed-and-blocked
+	// verdict, malformed records the parse failure for the report below.
+	vetoes := make(map[string]bool, len(blockers))
+	malformed := make(map[string]error)
+	for _, b := range blockers {
+		if b == nil {
+			continue
+		}
+		metadata, err := metadataMapFromNative(b.Metadata)
+		if err != nil {
+			malformed[b.ID] = err
+			continue
+		}
+		vetoes[b.ID] = string(b.Status) == "closed" && metadata[beadmeta.WorkOutcomeMetadataKey] == beadmeta.WorkOutcomeBlocked
+	}
+	result := make([]Bead, 0, len(candidates))
+	for _, c := range candidates {
+		blocked := false
+		badBlocker := ""
+		for _, dep := range edges[c.ID] {
+			if dep == nil || !IsReadyBlockingDependencyType(string(dep.Type)) {
+				continue
+			}
+			if _, bad := malformed[dep.DependsOnID]; bad && (badBlocker == "" || dep.DependsOnID < badBlocker) {
+				badBlocker = dep.DependsOnID
+			}
+			if vetoes[dep.DependsOnID] {
+				blocked = true
+			}
+		}
+		if badBlocker != "" {
+			return nil, fmt.Errorf("checking blocking dependency outcomes for %s: parsing blocker %s metadata: %w", c.ID, badBlocker, malformed[badBlocker])
 		}
 		if !blocked {
 			result = append(result, c)
@@ -2061,10 +2168,33 @@ const (
 // mid-retry, so a retry could run against a different storage than the one whose
 // transaction it is repeating.
 func retryOnNativeDoltSerializationConflict(attempt func() error) error {
+	return retryNativeDoltWrite(attempt, isNativeDoltSerializationConflict)
+}
+
+// retryOnNativeDoltMergeRace re-runs a checked read-merge-write attempt when a
+// concurrent writer preempted it: either the backend reported a serialization
+// conflict (the attempt's write never committed) or the compare-and-swap
+// refused with ErrVersionMismatch (the row changed after the attempt's read).
+// Both mean the attempt must read again and merge onto the committed row, so
+// both are retried with the budget retryOnNativeDoltSerializationConflict
+// applies; every other error is returned on the first try, as there. A version
+// mismatch is retried here and only here: for the conditional writers
+// (UpdateIfMatch and its siblings) it is the caller's fence and propagates.
+func retryOnNativeDoltMergeRace(attempt func() error) error {
+	return retryNativeDoltWrite(attempt, func(err error) bool {
+		return isNativeDoltSerializationConflict(err) || errors.Is(err, beadslib.ErrVersionMismatch)
+	})
+}
+
+// retryNativeDoltWrite runs attempt up to nativeWriteAttempts times, sleeping a
+// growing nativeWriteRetryBackoff after each error retryable accepts. The first
+// error retryable rejects, and the last attempt's error, are returned as they
+// are.
+func retryNativeDoltWrite(attempt func() error, retryable func(error) bool) error {
 	var err error
 	for n := 1; n <= nativeWriteAttempts; n++ {
 		err = attempt()
-		if err == nil || !isNativeDoltSerializationConflict(err) || n == nativeWriteAttempts {
+		if err == nil || !retryable(err) || n == nativeWriteAttempts {
 			return err
 		}
 		time.Sleep(time.Duration(n) * nativeWriteRetryBackoff)
@@ -2073,6 +2203,14 @@ func retryOnNativeDoltSerializationConflict(attempt func() error) error {
 }
 
 // SetMetadataBatch sets multiple metadata keys on a bead.
+//
+// The merge is a read-modify-write of the whole metadata map, so the write is a
+// compare-and-swap on the row version the read returned: an update that commits
+// between the read and the write makes the swap refuse, and the whole
+// read-merge-write runs again against the committed row instead of replacing it
+// with the stale map. An unchecked write-back cannot see that anything changed
+// and silently undoes the other writer's keys — a fence activation was lost
+// that way to a one-key stamp.
 func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	if err := s.readOnlyGuard(); err != nil {
 		return err
@@ -2083,17 +2221,50 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 	}
 	defer release()
 
-	return retryOnNativeDoltSerializationConflict(func() error {
+	// lastRead is the row version the final attempt's read returned, the
+	// version its refused swap expected.
+	var lastRead int64
+	err = retryOnNativeDoltMergeRace(func() error {
 		ctx, cancel := nativeDoltOperationContext(context.TODO())
 		defer cancel()
-		return s.setMetadataBatchOnce(ctx, storage, id, kvs)
+		return s.setMetadataBatchOnce(ctx, storage, id, kvs, &lastRead)
 	})
+	if errors.Is(err, beadslib.ErrVersionMismatch) {
+		// Every attempt lost its swap to a concurrent writer: contention, not
+		// a broken bead. Wrapping the exhaustion type lets callers that
+		// classify errors (dispatch's ClassifyControllerError, the drain
+		// reservation retry) re-enter instead of failing the work, while
+		// errors.Is(err, ErrVersionMismatch) still holds.
+		return fmt.Errorf("%w: %w", &CASRetriesExhaustedError{
+			ID:           id,
+			Key:          metadataBatchKeyList(kvs),
+			Attempts:     nativeWriteAttempts,
+			LastRevision: lastRead,
+		}, err)
+	}
+	return err
 }
 
-// setMetadataBatchOnce performs one complete metadata read-merge-write attempt.
-// A retry must call this whole operation again so metadata committed by the
-// competing transaction is included rather than overwritten from a stale read.
-func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage beadslib.Storage, id string, kvs map[string]string) error {
+// metadataBatchKeyList names the keys of a metadata batch, sorted, for error
+// messages.
+func metadataBatchKeyList(kvs map[string]string) string {
+	keys := make([]string, 0, len(kvs))
+	for k := range kvs {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return strings.Join(keys, ",")
+}
+
+// setMetadataBatchOnce performs one complete metadata read-merge-write attempt:
+// it reads the bead, merges kvs into the map it read, and writes the merged map
+// back only while the bead still carries the row version that read returned. A
+// retry must call this whole operation again so metadata committed by the
+// competing writer is merged rather than overwritten from a stale read.
+//
+// readVersion receives the row version the read returned, for the caller's
+// exhaustion report.
+func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage beadslib.Storage, id string, kvs map[string]string, readVersion *int64) error {
 	issue, err := storage.GetIssue(ctx, id)
 	if err != nil {
 		return nativeStoreError(id, err)
@@ -2101,11 +2272,18 @@ func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage bead
 	if issue == nil {
 		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
 	}
+	if s.afterMetadataMergeRead != nil {
+		s.afterMetadataMergeRead(id)
+	}
 	raw, err := metadataRawWithOverrides(issue.Metadata, kvs)
 	if err != nil {
 		return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
 	}
-	return nativeStoreError(id, storage.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor))
+	expected := issue.RowVersion
+	*readVersion = expected
+	return nativeStoreError(id, storage.UpdateIssueChecked(ctx, id, map[string]interface{}{"metadata": raw}, s.actor, beadslib.UpdateIssueOptions{
+		ExpectedVersion: &expected,
+	}))
 }
 
 // isNativeDoltSerializationConflict reports only Dolt/MySQL transaction

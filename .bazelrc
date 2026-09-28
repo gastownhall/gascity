@@ -2,8 +2,8 @@ common --enable_bzlmod
 common --color=no
 
 # Side-by-side opt-in bazel arm. `go build`/`go test` continues to work unchanged.
-# To use the remote cache on cherry, uncomment:
-# build --remote_cache=grpc://127.0.0.1:50051
+# To use a remote cache, uncomment:
+# build --remote_cache=<your-cache-endpoint>
 
 test --test_output=errors
 test --flaky_test_attempts=2
@@ -28,8 +28,10 @@ test --test_env=HOME
 # is minimal, so forward the client's.
 test --test_env=PATH
 
-# Remote execution on the NativeLink farm (scheduler on cherry). Local
-# clients reach it on loopback; off-host agents should use the tailnet
-# endpoint grpc://cherry.tail3127c0.ts.net:50051 instead.
-build:remote-exec --remote_executor=grpc://127.0.0.1:50052
+# Remote execution on the NativeLink farm. The executor endpoint is
+# environment-specific and deliberately NOT hardcoded here: machines put it
+# in the gitignored .bazelrc.local (e.g. a loopback grpc:// endpoint on the
+# cache host, or your team's grpcs:// endpoint with mTLS), and CI passes it via
+# the RBE step. Command-line flags always win.
+try-import %workspace%/.bazelrc.local
 build:remote-exec --remote_timeout=3600

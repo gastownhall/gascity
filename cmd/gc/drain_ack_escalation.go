@@ -68,11 +68,12 @@ package main
 //
 // # The identity set is the whole ballgame
 //
-// The assigned-work gate probes session.AssigneeIdentities, NOT the narrow
-// {ID, session_name, configured_named_identity} set. Pool polecat aliases are
-// first-class assignment identities: an agent that claimed work as "nux" holds
-// it under an identifier the narrow set cannot see, so a narrow probe would
-// report "no assigned work" for a busy agent and authorize killing it.
+// The assigned-work gate probes session.AssigneeIdentities, NOT the narrower
+// config-aware set (sessionAssignmentIdentifiersForConfigInfo). That set honors
+// a session's current stable alias ("nux") but drops a rebinding pool-slot alias
+// and every prior alias in alias_history; an agent that claimed work under one
+// of those holds it under an identifier the narrow set cannot see, so a narrow
+// probe would report "no assigned work" for a busy agent and authorize killing it.
 //
 // The drain-ack CLOSE gate deliberately does NOT adopt this wide set. A
 // transient pool SLOT alias ("gascity/gc.run-operator-1") is a rebinding chair
@@ -163,10 +164,11 @@ const (
 // alias_history), unioned with the configured-named-session fallback the other
 // reconciler gates resolve from config.
 //
-// Deliberately wider than sessionAssignmentIdentifiersForConfigInfo, which stops
-// at {ID, session_name, configured_named_identity} and therefore cannot see work
-// claimed under a pool alias. Being a superset it can only ever find MORE work,
-// so it can only refuse more kills and more closes — never authorize either.
+// Deliberately wider than sessionAssignmentIdentifiersForConfigInfo, which
+// honors only the current stable alias and therefore cannot see work claimed
+// under a rebinding pool-slot alias or a prior alias. Being a superset it can
+// only ever find MORE work, so it can only refuse more kills and more closes —
+// never authorize either.
 func drainAckAssigneeIdentities(info sessionpkg.Info, cfg *config.City) []string {
 	configured := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
 	wide := sessionpkg.AssigneeIdentities(info)
