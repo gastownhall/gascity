@@ -1218,6 +1218,7 @@ go_test(
         "provider_store_resolution_test.go",
         "providers_cli_recorder_test.go",
         "providers_events_rotation_test.go",
+        "providers_events_scan_budget_test.go",
         "providers_test.go",
         "quality_gate_fallback_test.go",
         "reconcile_ready_fanout_test.go",

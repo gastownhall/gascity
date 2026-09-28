@@ -1177,6 +1177,7 @@ func eventsFileRecorderOptions(eventsCfg config.EventsConfig, stderr io.Writer) 
 		events.WithRotationCheckRecords(settings.checkIntervalRecords),
 		events.WithRotationCheckInterval(settings.checkInterval),
 		events.WithArchiveRetainAge(settings.archiveRetainAge),
+		events.WithScanBudget(eventsCfg.ScanBudget.MaxArchiveBytesPerRequestOrDefault()),
 	}
 }
 

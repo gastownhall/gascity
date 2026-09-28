@@ -109,6 +109,7 @@ go_test(
         "duplicate_agent_error_test.go",
         "endpoint_compat_edit_test.go",
         "events_rotation_test.go",
+        "events_scan_budget_test.go",
         "extmsg_config_test.go",
         "field_sync_test.go",
         "github_pr_monitor_test.go",

@@ -378,7 +378,7 @@ function EventsSection({
           Event history unavailable: {error}.
         </p>
       )}
-      {events?.partial === true && (
+      {(events?.partial === true || events?.scan_truncated === true) && (
         <p className="text-body text-warn">
           Event history incomplete{partialErrors.length > 0 ? `: ${partialErrors.join('; ')}` : '.'}
         </p>

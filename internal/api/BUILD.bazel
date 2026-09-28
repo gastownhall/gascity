@@ -305,6 +305,7 @@ go_test(
         "handler_convoy_dispatch_test.go",
         "handler_convoys_rollback_test.go",
         "handler_convoys_test.go",
+        "handler_events_bounded_scan_test.go",
         "handler_events_keyset_test.go",
         "handler_events_test.go",
         "handler_extmsg_agent_binding_test.go",
