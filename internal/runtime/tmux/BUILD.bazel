@@ -81,6 +81,7 @@ go_test(
         "startup_test.go",
         "state_cache_empty_server_test.go",
         "state_cache_snapshot_backoff_test.go",
+        "state_cache_superseded_refresh_test.go",
         "state_cache_test.go",
         "testenv_import_test.go",
         "theme_test.go",
