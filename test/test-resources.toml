@@ -483,6 +483,17 @@ expires = "2026-12-31"
 [[medium]]
 package_dir = "scripts"
 package_name = "scripts_test"
+owner = "TestMakeInstallOapiCodegenRetriesTransientGoInstallFailure"
+resources = ["subprocess"]
+owner_bead = "ga-6hg5mi"
+invariant = "the install-oapi-codegen retry proof is a checked Medium subprocess owner"
+resource_owner = "the make subprocess is confined to TestMakeInstallOapiCodegenRetriesTransientGoInstallFailure, which exists to exercise the install-oapi-codegen recipe end to end: a Make recipe is shell, so only a real make run against a PATH-injected fake go can prove the retry and fail-closed paths"
+migration_target = "P0.4b"
+expires = "2026-12-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
 owner = "TestProviderOverridesAndSuiteContractsCrossMakeIsolation"
 resources = ["subprocess"]
 owner_bead = "ga-cp3hwi"

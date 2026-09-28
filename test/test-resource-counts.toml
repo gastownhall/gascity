@@ -2952,7 +2952,8 @@ calls = 1
 [[count]]
 path = "scripts/makefile_install_test.go"
 resource = "subprocess"
-calls = 1
+calls = 2
+medium = 1
 
 [[count]]
 path = "scripts/precommit_contract_test.go"

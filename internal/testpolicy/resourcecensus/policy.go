@@ -472,6 +472,17 @@ var bootstrapPolicy = Ledger{
 		{
 			PackageDir:      "scripts",
 			PackageName:     "scripts_test",
+			Owner:           "TestMakeInstallOapiCodegenRetriesTransientGoInstallFailure",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-6hg5mi",
+			Invariant:       "the install-oapi-codegen retry proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the make subprocess is confined to TestMakeInstallOapiCodegenRetriesTransientGoInstallFailure, which exists to exercise the install-oapi-codegen recipe end to end: a Make recipe is shell, so only a real make run against a PATH-injected fake go can prove the retry and fail-closed paths",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-12-31",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
 			Owner:           "TestProviderOverridesAndSuiteContractsCrossMakeIsolation",
 			Resources:       []Resource{ResourceSubprocess},
 			OwnerBead:       "ga-cp3hwi",
