@@ -81,13 +81,21 @@ jobs:
 
       # Runner-side bazel caches: without these every run re-hashes the
       # 205MB repo_source_tree + SDK before a single action can start.
+      # The output base's local action cache records outputs that live only in
+      # the remote CAS (--remote_download_minimal). A key that never changes is
+      # never re-saved, so those records go stale when the farm or its CAS
+      # changes and every run pays a lost-inputs build restart. Rotate daily.
+      - name: Bazel cache day
+        id: bazel-cache-day
+        run: echo "day=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ${{ runner.temp }}/bazel-outputs
-          key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock') }}
+          key: bazel-v2-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock') }}-${{ steps.bazel-cache-day.outputs.day }}
           restore-keys: |
-            bazel-${{ runner.os }}-
+            bazel-v2-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock') }}-
+            bazel-v2-${{ runner.os }}-
           save-always: true
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
