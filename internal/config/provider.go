@@ -325,6 +325,26 @@ func (rp *ResolvedProvider) DefaultSessionTransport() string {
 	return ""
 }
 
+// HookSuppliesRolePerTurn reports whether the hook gc stages for this
+// provider supplies the rendered role prompt to every model generation
+// (see workerbuiltin.BuiltinProviderSpec.HookSuppliesRolePerTurn). It is a
+// fact about the builtin overlay, not an operator-authored setting, so it is
+// derived strictly from BuiltinAncestor: a wrapped custom provider
+// (base = "builtin:opencode") inherits it, while an explicit standalone
+// provider (base = "") never claims it even when it carries a builtin name —
+// Kind and Name are deliberately not consulted, because resolveProviderKind
+// reports the name for such a provider and would misattribute the overlay.
+// Whether that hook is actually installed for a given agent is a separate
+// question answered by AgentHasHooks; a wrapped provider whose overridden
+// command does not load the staged plugin directory should set
+// hooks_installed = false to keep the resume replay.
+func (rp *ResolvedProvider) HookSuppliesRolePerTurn() bool {
+	if rp == nil {
+		return false
+	}
+	return workerbuiltin.HookSuppliesRolePerTurn(strings.TrimSpace(rp.BuiltinAncestor))
+}
+
 // ProviderSessionCreateTransport returns the transport to use when creating a
 // provider-backed session without any template-level session override.
 func (rp *ResolvedProvider) ProviderSessionCreateTransport() string {

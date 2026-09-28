@@ -20,6 +20,7 @@ func TestPhase2Catalog(t *testing.T) {
 		RequirementInputOverrideDefaults,
 		RequirementInputInProgressResumeRestart,
 		RequirementInputPreClaimResumeRestart,
+		RequirementInputHookPrimedResumeRoleOmitted,
 		RequirementTranscriptDiagnostics,
 		RequirementInteractionSignal,
 		RequirementInteractionPending,

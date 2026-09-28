@@ -73,6 +73,100 @@ func TestPhase2InitialInputDelivery(t *testing.T) {
 	}
 }
 
+// TestPhase2HookInstalledResumeInputDelivery re-runs the resume input
+// requirements with the profile's provider hooks installed and adds
+// WC-INPUT-006. Installing hooks is what flips a hook-primed family
+// (opencode, mimocode) onto the configured-nudge-only resume path; every
+// other family must keep the rendered prompt in its restart turn even with
+// hooks installed, because their hooks prime once at SessionStart.
+func TestPhase2HookInstalledResumeInputDelivery(t *testing.T) {
+	reporter := newPhase2Reporter(t, "phase2-input-delivery-hook-installed")
+
+	prevProbe := staleResumeKeyProbe
+	staleResumeKeyProbe = func(string, string, string) (present, probeable bool) { return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
+
+	for _, tc := range selectedPhase2ProviderCases(t) {
+		tc := tc
+		t.Run(string(tc.profileID), func(t *testing.T) {
+			t.Run(string(workertest.RequirementInputHookPrimedResumeRoleOmitted), func(t *testing.T) {
+				prepared := preparePhase2StartWithHooks(t, tc, "already-started", map[string]string{
+					"initial_message": "Do the first task.",
+				}, true)
+
+				reporter.Require(t, hookPrimedResumeRoleResult(tc, prepared))
+			})
+
+			t.Run(string(workertest.RequirementInputInitialMessageResume), func(t *testing.T) {
+				prepared := preparePhase2StartWithHooks(t, tc, "already-started", map[string]string{
+					"initial_message": "Do the first task.",
+				}, true)
+
+				reporter.Require(t, initialMessageResumeResult(tc, prepared))
+			})
+
+			t.Run(string(workertest.RequirementInputInProgressResumeRestart), func(t *testing.T) {
+				prepared := preparePhase2ResumeRestartStartWithHooks(t, tc, map[string]string{
+					"initial_message": "Do the first task.",
+				}, true, true)
+
+				reporter.Require(t, inProgressResumeRestartResult(tc, prepared))
+			})
+
+			t.Run(string(workertest.RequirementInputPreClaimResumeRestart), func(t *testing.T) {
+				prepared := preparePhase2ResumeRestartStartWithHooks(t, tc, map[string]string{
+					"initial_message": "Do the first task.",
+				}, false, true)
+
+				reporter.Require(t, preClaimResumeRestartResult(tc, prepared))
+			})
+
+			// A fresh start with hooks installed still delivers the rendered
+			// prompt on the launch path for every family: the hook-primed
+			// resume shortcut must never leak into a first incarnation
+			// (gastownhall/gascity#5238).
+			t.Run(string(workertest.RequirementInputInitialMessageFirstStart), func(t *testing.T) {
+				prepared := preparePhase2StartWithHooks(t, tc, "", map[string]string{
+					"initial_message": "Do the first task.",
+				}, true)
+
+				reporter.Require(t, initialMessageFirstStartResult(tc, prepared))
+			})
+		})
+	}
+}
+
+// TestPhase2DefaultConfigurationHookPrimedResume pins that the hook-primed
+// resume branch is reachable with the DEFAULT configuration: no
+// install_agent_hooks, no hooks_installed. The runtime stages the launch
+// family's overlay plugin for every opencode/mimocode session, so those
+// profiles are hook-enabled out of the box and WC-INPUT-006 must hold for
+// them without any hook declaration. (TestPhase2HookInstalledResumeInputDelivery
+// covers the explicit-declaration shape for every profile.)
+func TestPhase2DefaultConfigurationHookPrimedResume(t *testing.T) {
+	reporter := newPhase2Reporter(t, "phase2-input-delivery-default-hook-primed")
+
+	prevProbe := staleResumeKeyProbe
+	staleResumeKeyProbe = func(string, string, string) (present, probeable bool) { return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
+
+	for _, tc := range selectedPhase2ProviderCases(t) {
+		if !phase2HookSuppliesRolePerTurnFamilies[tc.family] {
+			continue
+		}
+		tc := tc
+		t.Run(string(tc.profileID), func(t *testing.T) {
+			prepared := preparePhase2Start(t, tc, "already-started", map[string]string{
+				"initial_message": "Do the first task.",
+			})
+			if len(prepared.candidate.tp.Hints.InstallAgentHooks) != 0 {
+				t.Fatalf("fixture declares install_agent_hooks %v; this test models the default configuration", prepared.candidate.tp.Hints.InstallAgentHooks)
+			}
+			reporter.Require(t, hookPrimedResumeRoleResult(tc, prepared))
+		})
+	}
+}
+
 func TestPhase2HookEnabledClaudeFirstTurnStartupPayload(t *testing.T) {
 	tc := phase2ProviderCaseForFamily(t, "claude")
 	prepared := preparePhase2Start(t, tc, "", map[string]string{
@@ -165,6 +259,11 @@ func TestPhase2InputResultFailureClassification(t *testing.T) {
 
 func preparePhase2Start(t *testing.T, tc phase2ProviderCase, startedConfigHash string, overrides map[string]string) *preparedStart {
 	t.Helper()
+	return preparePhase2StartWithHooks(t, tc, startedConfigHash, overrides, false)
+}
+
+func preparePhase2StartWithHooks(t *testing.T, tc phase2ProviderCase, startedConfigHash string, overrides map[string]string, installHooks bool) *preparedStart {
+	t.Helper()
 
 	rawOverrides, err := json.Marshal(overrides)
 	if err != nil {
@@ -193,7 +292,7 @@ func preparePhase2Start(t *testing.T, tc phase2ProviderCase, startedConfigHash s
 
 	prepared, err := prepareStartCandidate(startCandidate{
 		info: sessiontest.SeedBead(t, session),
-		tp:   phase2TemplateParams(t, tc, "Base worker prompt"),
+		tp:   phase2TemplateParamsWithHooks(t, tc, "Base worker prompt", installHooks),
 	}, &config.City{}, store, &clock.Fake{Time: time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)})
 	if err != nil {
 		t.Fatalf("prepareStartCandidate(%s): %v", tc.profileID, err)
@@ -202,6 +301,11 @@ func preparePhase2Start(t *testing.T, tc phase2ProviderCase, startedConfigHash s
 }
 
 func preparePhase2ResumeRestartStart(t *testing.T, tc phase2ProviderCase, overrides map[string]string, assignedWork bool) *preparedStart {
+	t.Helper()
+	return preparePhase2ResumeRestartStartWithHooks(t, tc, overrides, assignedWork, false)
+}
+
+func preparePhase2ResumeRestartStartWithHooks(t *testing.T, tc phase2ProviderCase, overrides map[string]string, assignedWork, installHooks bool) *preparedStart {
 	t.Helper()
 
 	rawOverrides, err := json.Marshal(overrides)
@@ -241,7 +345,7 @@ func preparePhase2ResumeRestartStart(t *testing.T, tc phase2ProviderCase, overri
 		}
 	}
 
-	tp := phase2TemplateParams(t, tc, "Base worker prompt")
+	tp := phase2TemplateParamsWithHooks(t, tc, "Base worker prompt", installHooks)
 	tp.Hints.Nudge = ""
 	prepared, err := prepareStartCandidate(startCandidate{
 		info: sessiontest.SeedBead(t, session),

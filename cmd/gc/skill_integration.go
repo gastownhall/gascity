@@ -292,6 +292,58 @@ func effectiveInjectAssignedSkills(agent *config.Agent) bool {
 	return true
 }
 
+// assignedSkillsPromptAppendix returns the assigned-skills appendix for
+// cfgAgent when the agent has a vendor sink, hasn't opted out, AND the
+// runtime actually delivers the skills to workDir. The appendix claims
+// "these skills are materialized in your provider's skill directory and
+// load automatically" — that claim has to match reality, so it is gated
+// on the same availability conditions as materialization itself:
+//
+//   - Stage-1-eligible runtime + workDir == scope root: stage 1 wrote the
+//     sink into the scope root the agent sees.
+//   - Stage-2-eligible runtime (regardless of workDir): the session
+//     PreStart invokes `gc internal materialize-skills` into the session
+//     workdir before the agent starts.
+//
+// Agents for which neither path delivers (ACP, k8s, hybrid, subprocess
+// with workDir ≠ scope root — because subprocess doesn't execute PreStart)
+// get ""; we'd be lying to them. Discovered via the pass-1 Codex review.
+//
+// Shared by the launch-path render (resolveTemplate) and the hook copy of
+// the role (`gc prime --hook`), so both carry the same fragment under this
+// skills-materialization gate.
+func assignedSkillsPromptAppendix(p *agentBuildParams, cfgAgent *config.Agent, workDir string) string {
+	if p == nil || cfgAgent == nil || !effectiveInjectAssignedSkills(cfgAgent) {
+		return ""
+	}
+	wsProvider := ""
+	if p.workspace != nil {
+		wsProvider = p.workspace.Provider
+	}
+	provider := effectiveAgentProviderFamily(cfgAgent, wsProvider, p.providers)
+	if _, ok := materialize.VendorSink(provider); !ok {
+		return ""
+	}
+	scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
+	canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
+	stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
+	stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent)
+	if !stage1Delivers && !stage2Delivers {
+		return ""
+	}
+	var agentCat materialize.AgentCatalog
+	if cfgAgent.SkillsDir != "" {
+		// Best-effort: a transient I/O failure loading the agent catalog
+		// shouldn't break the prompt render. The error is already surfaced
+		// via effectiveSkillsForAgent's stderr path earlier in the call
+		// graph.
+		if c, err := materialize.LoadAgentCatalog(cfgAgent.SkillsDir); err == nil {
+			agentCat = c
+		}
+	}
+	return buildAssignedSkillsPromptFragment(cfgAgent, p.sharedSkillCatalogForAgent(cfgAgent), agentCat)
+}
+
 // buildAssignedSkillsPromptFragment renders a markdown appendix that
 // lists every skill the agent sees, partitioned into (assigned-to-this-
 // agent, shared-with-the-current-scope). The goal is that agents

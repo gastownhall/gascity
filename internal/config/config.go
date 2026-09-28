@@ -3435,8 +3435,15 @@ type Agent struct {
 	// are manually installed (e.g., merged into the project's own hook config)
 	// and auto-installation via install_agent_hooks is not desired. When true,
 	// the agent is treated as hook-enabled for startup behavior: no prime
-	// instruction in beacon and no delayed nudge. Interacts with
-	// install_agent_hooks — set this instead when hooks are pre-installed.
+	// instruction in the beacon, and on providers whose hook supplies the role
+	// prompt to every generation, a resume delivers only the beacon and
+	// configured nudge. Interacts with install_agent_hooks — set this instead
+	// when hooks are pre-installed. Agents on builtin opencode or mimocode
+	// (or a provider wrapped over them) are hook-enabled by default because
+	// gc stages their overlay plugin for every launch; set this to false for
+	// such a provider whose overridden command does not load the staged
+	// plugin directory, otherwise a session without the plugin would resume
+	// unprimed.
 	HooksInstalled *bool `toml:"hooks_installed,omitempty"`
 	// SessionSetup is a list of shell commands run after session creation.
 	// Each command is a template string supporting placeholders:

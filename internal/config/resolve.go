@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	workerbuiltin "github.com/gastownhall/gascity/internal/worker/builtin"
 )
 
 // Sentinel errors for provider resolution.
@@ -723,8 +725,14 @@ func completeResolvedProviderResumeCommand(rp *ResolvedProvider) {
 //
 //  1. Explicit override: agent.HooksInstalled is set → use that value.
 //  2. Claude-family always has hooks (via --settings override).
-//  3. Provider name appears in the resolved install_agent_hooks list.
-//  4. Otherwise: no hooks.
+//  3. The builtin family's bundled overlay hook is staged for every launch
+//     and primes the session on its own (workerbuiltin ManagedOverlayHooks:
+//     opencode, mimocode) → hooks. The runtime stages the launch family's
+//     per-provider overlay unconditionally; install_agent_hooks only adds
+//     extra slots, so requiring it here would report "no hooks" for a
+//     session that demonstrably has the plugin loaded.
+//  4. Provider name appears in the resolved install_agent_hooks list.
+//  5. Otherwise: no hooks.
 //
 // cityProviders is consulted via BuiltinFamily so a wrapped custom
 // provider (e.g. [providers.claude-max] base = "builtin:claude") is
@@ -740,10 +748,18 @@ func AgentHasHooks(agent *Agent, ws *Workspace, providerName string, cityProvide
 	// 2. Claude-family always has hooks via --settings. Use BuiltinFamily
 	//    so wrapped custom providers (e.g. claude-max with
 	//    base = "builtin:claude") are correctly recognized.
-	if BuiltinFamily(providerName, cityProviders) == "claude" {
+	family := BuiltinFamily(providerName, cityProviders)
+	if family == "claude" {
 		return true
 	}
-	// 3. Check install_agent_hooks (agent-level overrides workspace-level).
+	// 3. Builtins whose bundled overlay hook is always staged and
+	//    self-priming are hook-enabled by default. BuiltinFamily is empty for
+	//    an explicit standalone provider (base = ""), so a provider that only
+	//    carries the builtin name does not inherit this.
+	if workerbuiltin.ManagedOverlayHooks(family) {
+		return true
+	}
+	// 4. Check install_agent_hooks (agent-level overrides workspace-level).
 	installHooks := ResolveInstallHooks(agent, ws)
 	for _, h := range installHooks {
 		if h == providerName {

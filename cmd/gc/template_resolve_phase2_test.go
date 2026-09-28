@@ -192,12 +192,24 @@ func phase2ProviderCaseForFamily(t *testing.T, family string) phase2ProviderCase
 
 func resolvePhase2Template(t *testing.T, tc phase2ProviderCase) TemplateParams {
 	t.Helper()
+	return resolvePhase2TemplateWithHooks(t, tc, false)
+}
+
+// resolvePhase2TemplateWithHooks is resolvePhase2Template with the profile's
+// provider hooks installed at the workspace level (install_agent_hooks), the
+// shape a hook-primed deployment runs with.
+func resolvePhase2TemplateWithHooks(t *testing.T, tc phase2ProviderCase, installHooks bool) TemplateParams {
+	t.Helper()
 
 	cityPath := t.TempDir()
+	workspace := &config.Workspace{Provider: tc.family}
+	if installHooks {
+		workspace.InstallAgentHooks = []string{tc.family}
+	}
 	params := &agentBuildParams{
 		cityName:   "phase2-city",
 		cityPath:   cityPath,
-		workspace:  &config.Workspace{Provider: tc.family},
+		workspace:  workspace,
 		providers:  builtinProviderAliasesForTest(tc.family),
 		lookPath:   func(name string) (string, error) { return filepath.Join("/usr/bin", name), nil },
 		fs:         fsys.OSFS{},
@@ -285,9 +297,9 @@ func TestResolveTemplateMimoCodeExplicitACPOptInComposesACPCommand(t *testing.T)
 	}
 }
 
-func phase2TemplateParams(t *testing.T, tc phase2ProviderCase, prompt string) TemplateParams {
+func phase2TemplateParamsWithHooks(t *testing.T, tc phase2ProviderCase, prompt string, installHooks bool) TemplateParams {
 	t.Helper()
-	tp := resolvePhase2Template(t, tc)
+	tp := resolvePhase2TemplateWithHooks(t, tc, installHooks)
 	tp.Prompt = prompt
 	return tp
 }

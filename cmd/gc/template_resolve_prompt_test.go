@@ -768,7 +768,10 @@ func TestResolveTemplateHookEnabledOpencodeOmitsPrimeInstruction(t *testing.T) {
 
 // A non-hook agent whose rendered prompt is inlined below the beacon already
 // holds the exact bytes `gc prime` would return, so instructing it to run
-// `gc prime` costs a turn and duplicates its context.
+// `gc prime` costs a turn and duplicates its context. codex is the fixture:
+// its SessionStart hook is not staged as hook-enabled by default (unlike
+// opencode, whose overlay plugin makes the agent hook-enabled regardless of
+// install_agent_hooks).
 func TestResolveTemplateInlinedPromptOmitsPrimeInstruction(t *testing.T) {
 	cityPath := t.TempDir()
 	fs := fsys.NewFake()
@@ -778,9 +781,9 @@ func TestResolveTemplateInlinedPromptOmitsPrimeInstruction(t *testing.T) {
 		fs:              fs,
 		cityName:        "bright-lights",
 		cityPath:        cityPath,
-		workspace:       &config.Workspace{Name: "bright-lights", Provider: "opencode"},
+		workspace:       &config.Workspace{Name: "bright-lights", Provider: "codex"},
 		providers:       config.BuiltinProviders(),
-		lookPath:        func(string) (string, error) { return "/usr/bin/opencode", nil },
+		lookPath:        func(string) (string, error) { return "/usr/bin/codex", nil },
 		beaconTime:      testBeaconTime,
 		sessionTemplate: "",
 		beadNames:       make(map[string]string),
@@ -789,7 +792,7 @@ func TestResolveTemplateInlinedPromptOmitsPrimeInstruction(t *testing.T) {
 	agent := &config.Agent{
 		Name:           "mayor",
 		PromptTemplate: "prompts/mayor.md",
-		Provider:       "opencode",
+		Provider:       "codex",
 	}
 
 	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
@@ -808,34 +811,66 @@ func TestResolveTemplateInlinedPromptOmitsPrimeInstruction(t *testing.T) {
 }
 
 // The instruction is still the only way a non-hook agent gets its context when
-// the beacon ships alone, so that path must keep it.
+// the beacon ships alone, so that path must keep it. An opencode agent on the
+// CLI transport is hook-enabled by default (its overlay plugin supplies the
+// prime output to every generation), so the same beacon-only shape omits the
+// instruction there — running `gc prime` would only duplicate what the plugin
+// injects. ACP never loads the CLI plugin and prompt delivery just forwards
+// the beacon, so ACP sessions (opencode's default transport, or an explicit
+// session = "acp") must keep the instruction regardless of hook status.
 func TestResolveTemplateBeaconOnlyKeepsPrimeInstruction(t *testing.T) {
-	cityPath := t.TempDir()
-	fs := fsys.NewFake()
+	for _, tc := range []struct {
+		name            string
+		provider        string
+		session         string
+		wantHooks       bool
+		wantACP         bool
+		wantInstruction bool
+	}{
+		{name: "codex tmux", provider: "codex", session: config.SessionTransportTmux, wantHooks: false, wantInstruction: true},
+		{name: "opencode tmux", provider: "opencode", session: config.SessionTransportTmux, wantHooks: true, wantInstruction: false},
+		{name: "opencode default transport is acp", provider: "opencode", session: "", wantHooks: true, wantACP: true, wantInstruction: true},
+		{name: "opencode explicit acp", provider: "opencode", session: config.SessionTransportACP, wantHooks: true, wantACP: true, wantInstruction: true},
+		{name: "mimocode acp", provider: "mimocode", session: config.SessionTransportACP, wantHooks: true, wantACP: true, wantInstruction: true},
+		{name: "mimocode default transport is cli", provider: "mimocode", session: "", wantHooks: true, wantInstruction: false},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			fs := fsys.NewFake()
 
-	params := &agentBuildParams{
-		fs:              fs,
-		cityName:        "bright-lights",
-		cityPath:        cityPath,
-		workspace:       &config.Workspace{Name: "bright-lights", Provider: "opencode"},
-		providers:       config.BuiltinProviders(),
-		lookPath:        func(string) (string, error) { return "/usr/bin/opencode", nil },
-		beaconTime:      testBeaconTime,
-		sessionTemplate: "",
-		beadNames:       make(map[string]string),
-		stderr:          io.Discard,
-	}
-	agent := &config.Agent{
-		Name:     "mayor",
-		Provider: "opencode",
-	}
+			params := &agentBuildParams{
+				fs:              fs,
+				cityName:        "bright-lights",
+				cityPath:        cityPath,
+				workspace:       &config.Workspace{Name: "bright-lights", Provider: tc.provider},
+				providers:       config.BuiltinProviders(),
+				lookPath:        func(name string) (string, error) { return "/usr/bin/" + name, nil },
+				beaconTime:      testBeaconTime,
+				sessionTemplate: "",
+				beadNames:       make(map[string]string),
+				stderr:          io.Discard,
+			}
+			agent := &config.Agent{
+				Name:     "mayor",
+				Provider: tc.provider,
+				Session:  tc.session,
+			}
 
-	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
-	if err != nil {
-		t.Fatalf("resolveTemplate: %v", err)
-	}
-	if !strings.Contains(tp.Prompt, "Run `gc prime`") {
-		t.Fatalf("beacon-only prompt must keep the gc prime instruction: %q", tp.Prompt)
+			tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+			if err != nil {
+				t.Fatalf("resolveTemplate: %v", err)
+			}
+			if tp.HookEnabled != tc.wantHooks {
+				t.Fatalf("HookEnabled = %v, want %v", tp.HookEnabled, tc.wantHooks)
+			}
+			if tp.IsACP != tc.wantACP {
+				t.Fatalf("IsACP = %v, want %v", tp.IsACP, tc.wantACP)
+			}
+			if got := strings.Contains(tp.Prompt, "Run `gc prime`"); got != tc.wantInstruction {
+				t.Fatalf("beacon-only prompt instruction present = %v, want %v: %q", got, tc.wantInstruction, tp.Prompt)
+			}
+		})
 	}
 }
 
