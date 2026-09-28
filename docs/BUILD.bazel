@@ -1,0 +1,28 @@
+package(default_visibility = ["//visibility:public"])
+
+# Docs/contrib trees are consumed as runfiles by repo-lint tests (test/docsync,
+# scripts, k8s runtime tests). No Go sources live here.
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+filegroup(
+    name = "all_files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

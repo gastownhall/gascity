@@ -526,11 +526,12 @@ func (s *emittingClassStore) CloseWithMetadataIfMatch(id string, revision int64,
 // this wrapper. TestEmittingClassStoreKeepsEveryEngineCapability forces the
 // wrapper to carry CloseWithMetadataIfMatch structurally for every engine, so a
 // bare type assertion would advertise the capability even over a backing (for
-// example the sqlite CLI engine) that cannot honor it — and that discovery is
-// contractually a hard capability gate, not a rollout seam. Consulted first by
-// AtomicConditionalCloserFor, this answers yes only when the resolved backing
-// truly provides the atomic close, and returns the emitting wrapper (not the
-// raw backing) so the discovered closer still emits bead.closed.
+// example a plain MemStore, or a bd CLI store) that cannot honor it — and that
+// discovery is contractually a hard capability gate, not a rollout seam.
+// Consulted first by AtomicConditionalCloserFor, this answers yes only when the
+// resolved backing truly provides the atomic close, and returns the emitting
+// wrapper (not the raw backing) so the discovered closer still emits
+// bead.closed.
 func (s *emittingClassStore) AtomicConditionalCloserHandle() (beads.AtomicConditionalCloser, bool) {
 	if _, ok := beads.AtomicConditionalCloserFor(s.Store); !ok {
 		return nil, false
@@ -676,6 +677,18 @@ func (s *emittingClassStore) Count(ctx context.Context, query beads.ListQuery, e
 	return counter.Count(ctx, query, excludeTypes...)
 }
 
+// ReadOnly forwards the inner store's mutation fence.
+//
+// A store that has none answers false, which is the honest answer for every
+// engine that cannot be latched. Swallowing the question instead — the state
+// this wrapper was in until the proxied-native latch gave *beads.NativeDoltStore
+// the method — would make a wrapped read-only handle report itself writable,
+// which is the one direction this answer must never be wrong in.
+func (s *emittingClassStore) ReadOnly() bool {
+	reporter, ok := s.Store.(beads.ReadOnlyReporter)
+	return ok && reporter.ReadOnly()
+}
+
 func (s *emittingClassStore) WaitForParentProjection(ctx context.Context, parentID, childID, scope string) error {
 	waiter, ok := s.Store.(beads.ParentProjectionWaiter)
 	if !ok {
@@ -745,12 +758,16 @@ func (s *emittingClassStore) AdvanceSequenceFloor(seq int64) {
 	}
 }
 
+// CloseStore is deliberately a no-op. An emittingClassStore only ever wraps a
+// storage route's engine (withCLIEmission), and that engine is owned by the
+// routes: storageRoutes.close releases it through r.closers, never through
+// this method. Every caller that reaches this wrapper borrowed it from a class
+// resolver (cli*Store / resolve*Store over cliStorageRoutes), and the routes
+// memo is process-lived and never reopened, so forwarding a borrower's close
+// here would leave every later class read in the process failing with
+// ErrStoreClosed (#5979). Borrowers close what they opened, not what they hold.
 func (s *emittingClassStore) CloseStore() error {
-	closer, ok := s.Store.(interface{ CloseStore() error })
-	if !ok {
-		return nil
-	}
-	return closer.CloseStore()
+	return nil
 }
 
 func (s *emittingClassStore) IDPrefix() string {

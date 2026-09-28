@@ -1,0 +1,71 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "molecule",
+    srcs = [
+        "artifact.go",
+        "claim_exact.go",
+        "cleanup.go",
+        "graph_apply.go",
+        "molecule.go",
+        "native_step_topology.go",
+        "workflow_bead.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/molecule",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/beads",
+        "//internal/beads/closeorder",
+        "//internal/formula",
+        "//internal/fsys",
+        "//internal/pathutil",
+    ],
+)
+
+go_test(
+    name = "molecule_test",
+    srcs = [
+        "artifact_test.go",
+        "attach_conditional_test.go",
+        "attach_test.go",
+        "claim_exact_test.go",
+        "cleanup_test.go",
+        "cook_choosing_store_test.go",
+        "molecule_test.go",
+        "native_step_topology_test.go",
+        "testenv_import_test.go",
+        "tutorial_regression_test.go",
+        "workflow_bead_test.go",
+    ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_source_tree",
+    ],
+    embed = [":molecule"],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/beadmeta",
+        "//internal/beads",
+        "//internal/formula",
+        "//internal/formulatest",
+        "//internal/fsys",
+        "//internal/rollout/gate",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

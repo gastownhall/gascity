@@ -477,6 +477,109 @@ func TestStateCache_DiscardRefreshAfterEvictSession(t *testing.T) {
 	}
 }
 
+// TestStateCache_EvictSessionDoesNotMutatePublishedSnapshot pins the
+// copy-on-write contract: a snapshot handed out by currentState is read
+// without the cache lock, so EvictSession must publish a new Sessions map
+// rather than deleting from the one readers may still hold.
+func TestStateCache_EvictSessionDoesNotMutatePublishedSnapshot(t *testing.T) {
+	f := &mockFetcher{sessions: map[string]bool{"agent-1": true, "agent-2": true}}
+	cache := NewStateCache(f, time.Hour)
+
+	published := cache.currentState()
+	if !published.Sessions["agent-1"].Running {
+		t.Fatal("published snapshot missing agent-1 before eviction")
+	}
+
+	f.setResult(map[string]bool{"agent-2": true}, nil)
+	cache.EvictSession("agent-1")
+
+	if !published.Sessions["agent-1"].Running || len(published.Sessions) != 2 {
+		t.Fatalf("published snapshot mutated by EvictSession: %v", published.Sessions)
+	}
+	if cache.IsRunning("agent-1") {
+		t.Fatal("IsRunning(agent-1) = true after eviction, want false")
+	}
+	if !cache.IsRunning("agent-2") {
+		t.Fatal("IsRunning(agent-2) = false after evicting agent-1, want true")
+	}
+}
+
+// TestStateCache_EvictSessionDoesNotRaceSnapshotReader reproduces the
+// controller crash deterministically under -race: a reader holds a published
+// snapshot (as IsRunning/ProcessAlive do after dropping the lock) and reads
+// its Sessions map while Stop evicts a session. Deleting from that shared map
+// in place is a concurrent map read/write, which is a fatal runtime error that
+// recover cannot catch. The handoff below orders only "snapshot taken" before
+// the eviction, never the map reads, so the detector sees the conflict
+// regardless of scheduling.
+func TestStateCache_EvictSessionDoesNotRaceSnapshotReader(t *testing.T) {
+	f := &mockFetcher{sessions: map[string]bool{"agent-1": true, "agent-2": true}}
+	cache := NewStateCache(f, time.Hour)
+
+	taken := make(chan struct{})
+	done := make(chan bool)
+	go func() {
+		snapshot := cache.currentState()
+		close(taken)
+		running := false
+		for range 1000 {
+			running = snapshot.Sessions["agent-1"].Running
+		}
+		done <- running
+	}()
+
+	<-taken
+	cache.EvictSession("agent-1")
+	if !<-done {
+		t.Fatal("reader's snapshot lost agent-1 to a concurrent eviction")
+	}
+}
+
+// TestStateCache_ConcurrentReadersAndEvictSession drives the same hazard
+// through the public API the controller uses: status reads (IsRunning,
+// ProcessAlive) racing Stop's EvictSession and Invalidate. Run with -race.
+func TestStateCache_ConcurrentReadersAndEvictSession(t *testing.T) {
+	names := []string{"agent-1", "agent-2", "agent-3", "agent-4"}
+	live := make(map[string]bool, len(names))
+	for _, name := range names {
+		live[name] = true
+	}
+	f := &mockFetcher{sessions: live}
+	cache := NewStateCache(f, time.Hour)
+	if !cache.IsRunning("agent-1") {
+		t.Fatal("IsRunning(agent-1) = false after prime, want true")
+	}
+
+	stop := make(chan struct{})
+	var readers sync.WaitGroup
+	for i := range 4 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				name := names[i%len(names)]
+				_ = cache.IsRunning(name)
+				_ = cache.ProcessAlive(name, []string{"claude"})
+			}
+		}()
+	}
+
+	for i := range 200 {
+		cache.EvictSession(names[i%len(names)])
+		if i%10 == 0 {
+			cache.Invalidate()
+		}
+		runtime.Gosched()
+	}
+	close(stop)
+	readers.Wait()
+}
+
 func TestStateCache_InvalidateForcesNextReadToRefresh(t *testing.T) {
 	f := &mockFetcher{
 		sessions: map[string]bool{"agent-1": true},

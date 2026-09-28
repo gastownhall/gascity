@@ -121,12 +121,23 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 	}
 
 	unregisteredFromSupervisor := false
-	if handled, code := unregisterCityFromSupervisorWithForce(cityPath, stopStdout, stderr, "gc stop", force, unregisterTx); handled {
+	handled, code, ownership := unregisterCityFromSupervisorForStop(cityPath, stopStdout, stderr, "gc stop", force, unregisterTx)
+	if ownership != nil {
+		// The supervisor stopped the controller; hold its lock until the bead
+		// store below is retired. It is released when this returns, before
+		// the caller commits or rolls back the unregister, so a restored
+		// registration never finds the lock still held by this stop.
+		defer ownership.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
+	}
+	if handled {
 		if code != 0 {
 			return stopCommandOutcome{code: code, cityPath: cityPath}
 		}
 		unregisteredFromSupervisor = true
-		if supervisorAliveHook() != 0 {
+		// Retained ownership proves the supervisor path ran; re-probing the
+		// supervisor could fall through to the standalone stop while this
+		// process still holds the lock that path waits on.
+		if ownership != nil || supervisorAliveHook() != 0 {
 			if !stopCityManagedBeadsProviderAfterSuccessfulStop(cityPath, stderr) {
 				return stopCommandOutcome{code: 1, cityPath: cityPath}
 			}
@@ -338,11 +349,17 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	stopResult := tryStopControllerWithForce(cityPath, stdout, force)
 	switch stopResult.outcome {
 	case controllerStopAcknowledged:
-		if err := waitForStandaloneControllerStop(cityPath, cfg.Daemon.ShutdownTimeoutDuration()+15*time.Second); err != nil {
+		ownership, err := acquireStoppedControllerOwnership(cityPath, cfg.Daemon.ShutdownTimeoutDuration()+15*time.Second)
+		if err != nil {
 			fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		// Controller handled the shutdown — still stop bead store below.
+		defer ownership.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
+		// Controller handled the shutdown — still stop the bead store, and
+		// only after waiting for the controller to be gone: a live reader
+		// restarts a provider-owned proxy the moment it is retired. The
+		// controller lock stays held until this returns so a restarted or
+		// second controller cannot come up against a provider being retired.
 		if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 			fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
@@ -408,7 +425,21 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 
 	teardownServerForStop(sp, stderr, "gc stop")
 
-	// Stop bead store's backing service after agents.
+	// Stop the bead store's backing service LAST, and only here. The order
+	// this function runs in is load-bearing for a provider-owned proxied city:
+	//
+	//   controller (agents drain with it) -> sessions -> orphan sessions ->
+	//   runtime server teardown -> bd dolt stop per provider-owned scope
+	//
+	// bd restarts a proxied scope's proxy and Dolt child on ANY read (beads
+	// cmd/bd/main.go:1758 — BEADS_DOLT_AUTO_START does not reach that path),
+	// so a single surviving reader after this point resurrects the processes
+	// this call just retired. Retiring first and stopping readers afterwards
+	// would leave the city up with a live proxy every time.
+	//
+	// The call is re-runnable: `bd dolt stop` is idempotent on rc.2 (exit 0,
+	// stopped/verified true, with or without a live proxy), so a second
+	// `gc stop` finds nothing to do and still exits 0.
 	if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal warning.
@@ -468,11 +499,24 @@ func stopCityManagedBeadsProviderAfterSuccessfulStop(cityPath string, stderr io.
 	return true
 }
 
+// stopCityManagedBeadsProvider retires the city's bead-store backend on the
+// stop paths that do not run the full stop body (supervisor-unregistered, and
+// a city whose config will not load).
+//
+// A provider-owned scope is not gated on a managed Dolt port. bd owns the
+// process for those scopes and publishes no GC-managed port, so the port probe
+// — which is the right question for the legacy managed-Dolt lifecycle — would
+// answer "nothing to stop" for every proxied city and leave its proxy and Dolt
+// child resident.
 func stopCityManagedBeadsProvider(cityPath string) (bool, error) {
 	if rawBeadsProvider(cityPath) != "bd" {
 		return false, nil
 	}
-	if currentResolvableManagedDoltPort(cityPath) == "" {
+	providerOwned, err := cityHasProviderOwnedScope(cityPath)
+	if err != nil {
+		return false, err
+	}
+	if !providerOwned && currentResolvableManagedDoltPort(cityPath) == "" {
 		return false, nil
 	}
 	return true, shutdownBeadsProviderForStop(cityPath)
@@ -481,10 +525,15 @@ func stopCityManagedBeadsProvider(cityPath string) (bool, error) {
 var shutdownBeadsProviderForStop = shutdownBeadsProvider
 
 func stopManagedRuntimeWithoutConfig(cityPath string, cfgErr error, stdout, stderr io.Writer, force bool) (bool, int) {
-	controllerStopped, controllerErr := stopStandaloneControllerWithoutConfig(cityPath, stdout, force)
+	controllerStopped, ownership, controllerErr := stopStandaloneControllerWithoutConfig(cityPath, stdout, force)
 	if controllerErr != nil {
 		fmt.Fprintf(stderr, "gc stop: %v\n", controllerErr) //nolint:errcheck // best-effort stderr
 		return true, 1
+	}
+	if ownership != nil {
+		// Keep the controller lock through provider shutdown; see
+		// acquireStoppedControllerOwnership.
+		defer ownership.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
 	}
 	stopped, stopErr := stopCityManagedBeadsProvider(cityPath)
 	if stopErr != nil {
@@ -498,31 +547,37 @@ func stopManagedRuntimeWithoutConfig(cityPath string, cfgErr error, stdout, stde
 	return true, 0
 }
 
-func stopStandaloneControllerWithoutConfig(cityPath string, stdout io.Writer, force bool) (bool, error) {
+// stopStandaloneControllerWithoutConfig stops (or proves the absence of) a
+// standalone controller for a city whose config does not load. On success the
+// returned lock, when non-nil, is the held controller lock: the caller must
+// keep it through provider shutdown and then Close it.
+func stopStandaloneControllerWithoutConfig(cityPath string, stdout io.Writer, force bool) (bool, *os.File, error) {
 	stopResult := tryStopControllerWithForce(cityPath, stdout, force)
 	switch stopResult.outcome {
 	case controllerStopAcknowledged:
-		if err := waitForStandaloneControllerStop(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
-			return true, err
+		ownership, err := acquireStoppedControllerOwnership(cityPath, supervisorCityStopTimeout(cityPath))
+		if err != nil {
+			return true, nil, err
 		}
-		return true, nil
+		return true, ownership, nil
 	case controllerStopDefinitePreEntryUnavailable:
 		// No stop request entered a controller, so the lock probe may proceed.
 	case controllerStopMayHaveEntered, controllerStopOutcomeInvalid:
-		return true, stopResult.failClosedError()
+		return true, nil, stopResult.failClosedError()
 	default:
-		return true, stopResult.failClosedError()
+		return true, nil, stopResult.failClosedError()
 	}
 	if _, err := os.Stat(filepath.Join(cityPath, ".gc")); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
+			return false, nil, nil
 		}
-		return false, fmt.Errorf("probing standalone controller runtime dir: %w", err)
+		return false, nil, fmt.Errorf("probing standalone controller runtime dir: %w", err)
 	}
-	if err := waitForStandaloneControllerStop(cityPath, 0); err != nil {
-		return false, err
+	ownership, err := acquireStoppedControllerOwnership(cityPath, 0)
+	if err != nil {
+		return false, nil, err
 	}
-	return false, nil
+	return false, ownership, nil
 }
 
 func warnInvalidConfigAfterSuccessfulStop(cityPath string, stderr io.Writer) {
@@ -578,15 +633,63 @@ func tryStopControllerWithForce(cityPath string, stdout io.Writer, force bool) c
 	return result
 }
 
-func waitForStandaloneControllerStop(cityPath string, timeout time.Duration) error {
-	return waitForControllerStop(cityPath, timeout)
-}
-
 func waitForSupervisorControllerStop(cityPath string, timeout time.Duration) error {
 	return waitForControllerStop(cityPath, timeout)
 }
 
+// waitForControllerStop waits until no controller serves the city and then
+// releases the controller lock again. Use it only where nothing that needs
+// the controller to stay down follows; stop paths that go on to retire the
+// bead store use acquireStoppedControllerOwnership and hold the lock.
 func waitForControllerStop(cityPath string, timeout time.Duration) error {
+	lock, err := acquireStoppedControllerOwnership(cityPath, timeout)
+	if err != nil {
+		return err
+	}
+	lock.Close() //nolint:errcheck // best-effort probe cleanup
+	return nil
+}
+
+// claimStoppedControllerOwnership takes the controller lock once, right after
+// a wait has already proven the controller stopped, and returns it held (nil
+// when the city has no runtime dir, so no controller can have run there).
+// Losing the lock here means another controller started in between, so the
+// caller must not go on to retire the bead store underneath it.
+func claimStoppedControllerOwnership(cityPath string) (*os.File, error) {
+	if _, err := os.Stat(filepath.Join(cityPath, ".gc")); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("probing controller runtime dir: %w", err)
+	}
+	lock, err := acquireControllerLock(cityPath)
+	if errors.Is(err, errControllerAlreadyRunning) {
+		return nil, errors.New("a controller started for the city before stop could retire the bead store")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("claiming controller lock: %w", err)
+	}
+	return lock, nil
+}
+
+// acquireStoppedControllerOwnership waits until no controller answers on the
+// city's controller socket and the controller lock is free, then returns the
+// held lock. The caller owns the lock and must Close it on every path.
+//
+// Holding the lock is what makes "the controller is gone" stay true: both a
+// standalone controller (runController) and a supervisor-hosted city take this
+// lock before they serve, so while it is held neither a supervisor restart nor
+// a second `gc start` can bring a controller up against state the caller is
+// still tearing down (the bead-store provider in particular). The controller
+// being stopped released the lock itself as its last shutdown step, so holding
+// it here cannot block that controller's own shutdown.
+//
+// The lock is a non-blocking flock on a close-on-exec descriptor: it is
+// released by Close or process exit and is never inherited by provider
+// subprocesses. Callers must not call waitForControllerStop, ensureNoStandaloneController,
+// or anything else that probes acquireControllerLock while holding it — a
+// second flock on a separate descriptor conflicts even within this process.
+func acquireStoppedControllerOwnership(cityPath string, timeout time.Duration) (*os.File, error) {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
@@ -596,12 +699,11 @@ func waitForControllerStop(cityPath string, timeout time.Duration) error {
 		lock, err := acquireControllerLock(cityPath)
 		switch {
 		case err == nil && pid == 0:
-			lock.Close() //nolint:errcheck // best-effort probe cleanup
-			return nil
+			return lock, nil
 		case err == nil:
-			lock.Close() //nolint:errcheck // best-effort probe cleanup
+			lock.Close() //nolint:errcheck // a controller still answers; retry after it exits
 		case !errors.Is(err, errControllerAlreadyRunning):
-			return fmt.Errorf("probing controller: %w", err)
+			return nil, fmt.Errorf("probing controller: %w", err)
 		}
 		if time.Now().After(deadline) {
 			if pid != 0 {
@@ -609,9 +711,9 @@ func waitForControllerStop(cityPath string, timeout time.Duration) error {
 				if identity.PID == 0 {
 					identity.PID = pid
 				}
-				return controllerStopTimeoutError(identity, false)
+				return nil, controllerStopTimeoutError(identity, false)
 			}
-			return controllerStopTimeoutError(controllerIdentityReply{}, true)
+			return nil, controllerStopTimeoutError(controllerIdentityReply{}, true)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

@@ -74,6 +74,24 @@ func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store 
 	return policyStore
 }
 
+// ProxiedStore hands back the proxied-native split store underneath this policy
+// layer, if there is one.
+//
+// The policy wrapper is the OUTERMOST thing every caller holds — it is applied
+// after the factory, outside the cache — and it embeds the beads.Store
+// interface, which strips everything the interface does not name. That is what
+// left `gc doctor` reporting a handle as native half an hour after it stood
+// down: the wrapper could not be asked. Participating in the seam costs one
+// forward and makes the question answerable from any layer.
+//
+// beadPolicyGraphStore inherits this through its embedded *beadPolicyStore.
+func (s *beadPolicyStore) ProxiedStore() (beads.ProxiedStoreView, bool) {
+	if s == nil {
+		return nil, false
+	}
+	return beads.ProxiedStoreFrom(s.Store)
+}
+
 func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bool) {
 	switch s := store.(type) {
 	case *beadPolicyGraphStore:

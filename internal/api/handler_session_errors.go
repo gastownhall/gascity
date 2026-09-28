@@ -25,7 +25,7 @@ func writeSessionManagerError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "no_pending", err.Error())
 	case errors.Is(err, session.ErrInteractionMismatch):
 		writeError(w, http.StatusConflict, "invalid_interaction", err.Error())
-	case errors.Is(err, session.ErrSessionClosed), errors.Is(err, session.ErrResumeRequired):
+	case errors.Is(err, session.ErrSessionClosed), errors.Is(err, session.ErrResumeRequired), errors.Is(err, session.ErrSessionKillPending):
 		writeError(w, http.StatusConflict, "conflict", err.Error())
 	case errors.Is(err, session.ErrNotSession):
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())

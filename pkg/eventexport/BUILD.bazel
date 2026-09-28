@@ -1,0 +1,36 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "eventexport",
+    srcs = [
+        "cursors.go",
+        "exporter.go",
+        "project.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/pkg/eventexport",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "eventexport_test",
+    srcs = [
+        "cursors_test.go",
+        "exporter_test.go",
+        "golden_test.go",
+        "project_test.go",
+        "validate_test.go",
+    ],
+    embed = [":eventexport"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

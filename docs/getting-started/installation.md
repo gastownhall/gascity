@@ -225,7 +225,10 @@ make check          # runs fmt, lint, vet, and unit tests
 ```
 
 See [CONTRIBUTING.md](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
-for the full contributor workflow.
+for the full contributor workflow, and
+[Bazel quickstart](https://github.com/gastownhall/gascity/blob/main/engdocs/bazel-quickstart.md)
+to set up the remote build cache — warm `bazel test //...` runs complete in
+under a second by sharing compiled artifacts across worktrees and CI.
 
 ## Verify your installation
 

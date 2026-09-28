@@ -1,0 +1,48 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "beadmail",
+    srcs = ["beadmail.go"],
+    importpath = "github.com/gastownhall/gascity/internal/mail/beadmail",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads",
+        "//internal/mail",
+        "//internal/session",
+    ],
+)
+
+go_test(
+    name = "beadmail_test",
+    srcs = [
+        "beadmail_bench_test.go",
+        "beadmail_retention_test.go",
+        "beadmail_test.go",
+        "conformance_test.go",
+        "handoff_archive_test.go",
+        "handoff_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":beadmail"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/beads",
+        "//internal/coordclass",
+        "//internal/mail",
+        "//internal/mail/mailtest",
+        "//internal/session",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

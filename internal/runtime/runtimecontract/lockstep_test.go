@@ -59,6 +59,7 @@ var contractCoverage = map[string]classification{
 	"SetGetMeta_RoundTrip":           {Deferred: "metadata group not yet ported"},
 	"GetMeta_UnsetKey":               {Deferred: "metadata group not yet ported"},
 	"RemoveMeta_ThenGetReturnsEmpty": {Deferred: "metadata group not yet ported"},
+	"SetMeta_EmptyValueOverwrites":   {Deferred: "metadata group not yet ported"},
 	"SetMeta_OverwritesPrevious":     {Deferred: "metadata group not yet ported"},
 	"Meta_MultipleKeys":              {Deferred: "metadata group not yet ported"},
 

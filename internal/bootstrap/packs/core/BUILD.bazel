@@ -1,0 +1,124 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "core",
+    srcs = ["embed.go"],
+    embedsrcs = [
+        "agents/control-dispatcher/agent.toml",
+        "assets/prompts/graph-worker.md",
+        "assets/prompts/pool-worker.template.md",
+        "assets/scripts/_bd_trace.sh",
+        "assets/scripts/cascade-nudge-on-blocker-close.sh",
+        "assets/scripts/cross-rig-deps.sh",
+        "assets/scripts/dolt-target.sh",
+        "assets/scripts/escalate.sh",
+        "assets/scripts/gate-sweep.sh",
+        "assets/scripts/jsonl-export.sh",
+        "assets/scripts/notify-on-human-gate-creation.sh",
+        "assets/scripts/nudge-on-route.sh",
+        "assets/scripts/orphan-sweep.sh",
+        "assets/scripts/prune-branches.sh",
+        "assets/scripts/reaper.sh",
+        "assets/scripts/renudge-stale-human-gates.sh",
+        "assets/scripts/spawn-storm-detect.sh",
+        "assets/scripts/wisp-compact.sh",
+        "doctor/check-binaries/doctor.toml",
+        "doctor/check-binaries/run.sh",
+        "formulas/mol-do-work.toml",
+        "formulas/mol-polecat-base.toml",
+        "formulas/mol-polecat-commit.toml",
+        "formulas/mol-polecat-report.toml",
+        "formulas/mol-prompt-synth.toml",
+        "formulas/mol-review-quorum.toml",
+        "formulas/mol-scoped-work.toml",
+        "orders/beads-health.toml",
+        "orders/cascade-nudge-on-blocker-close.toml",
+        "orders/cross-rig-deps.toml",
+        "orders/gate-sweep.toml",
+        "orders/jsonl-export.toml",
+        "orders/notify-on-human-gate-creation.toml",
+        "orders/nudge-mail-sweep.toml",
+        "orders/nudge-on-route.toml",
+        "orders/order-tracking-sweep.toml",
+        "orders/orphan-sweep.toml",
+        "orders/prune-branches.toml",
+        "orders/reaper.toml",
+        "orders/renudge-stale-human-gates.toml",
+        "orders/spawn-storm-detect.toml",
+        "orders/wisp-compact.toml",
+        "overlay/per-provider/antigravity/.agents/hooks.json",
+        "overlay/per-provider/codex/.codex/hooks.json",
+        "overlay/per-provider/copilot/.github/copilot-instructions.md",
+        "overlay/per-provider/copilot/.github/hooks/gascity.json",
+        "overlay/per-provider/cursor/.cursor/hooks.json",
+        "overlay/per-provider/gemini/.gemini/settings.json",
+        "overlay/per-provider/kimi/.kimi/config.toml",
+        "overlay/per-provider/kimi/.kimi/hooks/gascity-session-start.py",
+        "overlay/per-provider/kiro/.kiro/agents/gascity.json",
+        "overlay/per-provider/kiro/AGENTS.md",
+        "overlay/per-provider/mimocode/.mimocode/plugin/gascity.js",
+        "overlay/per-provider/omp/.omp/hooks/gc-hook.ts",
+        "overlay/per-provider/opencode/.opencode/plugins/gascity.js",
+        "overlay/per-provider/pi/.pi/extensions/gc-hooks.js",
+        "pack.toml",
+        "skills/gc-agents/SKILL.md",
+        "skills/gc-city/SKILL.md",
+        "skills/gc-dashboard/SKILL.md",
+        "skills/gc-dispatch/SKILL.md",
+        "skills/gc-mail/SKILL.md",
+        "skills/gc-rigs/SKILL.md",
+        "skills/gc-work/SKILL.md",
+        "template-fragments/claim-protocol.template.md",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/bootstrap/packs/core",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "core_test",
+    srcs = [
+        "escalate_script_test.go",
+        "pack_assets_test.go",
+        "pack_formulas_test.go",
+        "pack_orders_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+    ],
+    embed = [":core"],
+    deps = [
+        "//internal/orders",
+        "//internal/testenv",
+        "@com_github_burntsushi_toml//:toml",
+    ],
+)
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+filegroup(
+    name = "pack_files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

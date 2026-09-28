@@ -227,9 +227,10 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 //     startCollisionPhrases recognizes.
 //   - foreignBox — the adapter reported the box already up BEFORE this attempt
 //     ran, which is the same fact established structurally instead of by
-//     reading prose. That distinction stopped being academic when session names
-//     became a function of agent identity: a retry now deliberately re-targets
-//     the name the previous attempt used, so collisions are steady state, and a
+//     reading prose. That distinction matters wherever a session name is a
+//     function of agent identity (named sessions, tmux_alias pools): a retry
+//     deliberately re-targets the name the previous attempt used, so collisions
+//     are steady state, and a
 //     phrasing this package has never seen would otherwise tear down a live
 //     agent's box on an ordinary retry (ga-vcjr9). A pack that cannot answer
 //     `is-running` reports neither occupancy nor vacancy and keeps the previous

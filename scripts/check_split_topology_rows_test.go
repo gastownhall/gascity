@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // The split-store conformance suite's whole enforcement deliverable is
@@ -88,7 +90,11 @@ func synthSplitTopologyRepo(t *testing.T, suites map[string]string) string {
 // exit 0 against the real tree. Without it every synthetic case below could
 // pass while the checked-in suite drifted.
 func TestCheckSplitTopologyRowsPassesOnThisRepo(t *testing.T) {
-	out, code := runSplitTopologyGuard(t, repoRoot(t))
+	guardRoot := repoRoot(t)
+	if err := bazeltest.EnsureGitRepo(t, guardRoot); err != nil {
+		t.Fatalf("git-standin for guard tree: %v", err)
+	}
+	out, code := runSplitTopologyGuard(t, guardRoot)
 	if code != 0 {
 		t.Fatalf("the guard fails on the checked-in tree (exit %d):\n%s", code, out)
 	}

@@ -18,17 +18,33 @@ const GateInfraExitCode = 75
 // GateInfraExitCode, for gate commands that simply propagate `gc`/`bd` output
 // and their bare nonzero exit status.
 //
-// Every entry is a typed error our own stack emits — not a heuristic about
-// arbitrary gate output. Matching is case-insensitive against stderr only.
+// Matching is case-insensitive against stderr only, and a match costs a full
+// attempt-free gate re-run (up to the dispatcher's infra budget), so an entry
+// has to satisfy two conditions, not one:
+//
+//  1. it is a typed error our own stack emits, not a heuristic about arbitrary
+//     gate output; and
+//  2. it only appears when the read actually failed — never on a recovered
+//     path, and never as remediation advice attached to some other failure.
+//
+// Condition 2 is what keeps a genuine gate verdict from being re-run 20 times.
+// Two strings that satisfy (1) and fail (2) are deliberately absent:
+//
+//   - "native_store_unavailable" (internal/beads/factory.go) is logged on a
+//     *recovered* path: every logNativeUnavailable call is immediately followed
+//     by openBdFallback, so in any native-ineligible deployment it prints on
+//     every store-open while the read succeeds. Treating it as blindness makes
+//     the first real gate failure in such a city burn the whole infra budget.
+//   - "gc import install" is a remediation substring, not an error: it is the
+//     generic RepairHint in internal/config/pack_include.go,
+//     internal/packman/check.go and cmd/gc/suggest.go, and it is also
+//     cmd/gc/cmd_import.go's own error prefix, so a genuine `gc import install`
+//     failure matches it. The typed pack-cache blindness it was meant to cover
+//     is already covered by "locked but not cached" below.
 var gateInfraMarkers = []string{
-	// internal/beads/factory.go: the native store could not be opened.
-	"native_store_unavailable",
 	// internal/config/pack_include.go: a locked remote import has no cache,
 	// so the pack (and every formula in it) is invisible to this process.
 	"locked but not cached",
-	// internal/config/pack_include.go + internal/packman/check.go: the
-	// remediation every uncached/stale pack-cache error carries.
-	"gc import install",
 	// internal/config/implicit.go: no GC_HOME, so the repo cache root is
 	// unresolvable.
 	"no gc_home available",

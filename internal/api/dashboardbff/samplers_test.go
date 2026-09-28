@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -142,6 +143,151 @@ func TestExecBdPingHonorsCancellation(t *testing.T) {
 	cancel()
 	if _, err := newExecRunner().execBdPing(ctx, beadsPath); err == nil {
 		t.Fatal("execBdPing() with canceled context returned nil error")
+	}
+}
+
+func TestProbeRigExecutionFailuresFailClosedAndDoNotMutateStore(t *testing.T) {
+	tests := []struct {
+		name string
+		// arrange installs the case's fake bd and returns the context to probe
+		// with. They are one step because the post-spawn cancellation case
+		// cancels on a signal from the child it installs.
+		arrange func(t *testing.T, binDir string) context.Context
+		// pingTimeout overrides the runner's default when non-zero, so the row
+		// stays the single source of truth for its own case.
+		pingTimeout time.Duration
+		// queueFull occupies every exec slot before probing, leaving run's
+		// entry select with only its ctx.Done arm ready.
+		queueFull bool
+		// Exactly one of these is set: the whole message when it is fixed, a
+		// prefix when the tail is stdlib error text.
+		wantMessage       string
+		wantMessagePrefix string
+	}{
+		{
+			name: "timeout",
+			arrange: func(t *testing.T, binDir string) context.Context {
+				writeFakeBd(t, binDir, "#!/bin/sh\n/bin/sleep 1\n")
+				return context.Background()
+			},
+			pingTimeout: 20 * time.Millisecond,
+			wantMessage: "bd ping execution failed: exec timed out",
+		},
+		{
+			name: "spawn failure",
+			arrange: func(*testing.T, string) context.Context {
+				return context.Background()
+			},
+			wantMessagePrefix: "bd ping execution failed: spawn failed: ",
+		},
+		{
+			// Cancellation while queued, before the probe holds a slot. A
+			// saturated semaphore is what makes this arm deterministic: with a
+			// free slot both select arms are ready and Go picks at random.
+			name: "cancellation before start",
+			arrange: func(t *testing.T, binDir string) context.Context {
+				writeFakeBd(t, binDir, "#!/bin/sh\nexec /bin/sleep 1\n")
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+			queueFull:   true,
+			wantMessage: "bd ping execution failed: exec canceled before start",
+		},
+		{
+			// Cancellation after bd is already running, which is the only case
+			// that reaches run's post-Run context.Canceled classification.
+			name: "cancellation after spawn",
+			arrange: func(t *testing.T, binDir string) context.Context {
+				// The child announces itself through a FIFO rather than a
+				// polled sentinel file: opening a FIFO for write blocks until
+				// a reader opens it, so the handshake below orders the cancel
+				// after the child is running off the child's own lifecycle
+				// instead of elapsed wall time. ":" and ">" are shell builtins
+				// and /bin/sleep is absolute, so both survive the runner's
+				// scrubbed child environment. exec replaces the shell with the
+				// sleep, so the kill lands on the process itself and leaves no
+				// grandchild holding stdout.
+				started := filepath.Join(t.TempDir(), "bd-started")
+				if err := syscall.Mkfifo(started, 0o600); err != nil {
+					t.Fatalf("Mkfifo(%q) = %v", started, err)
+				}
+				writeFakeBd(t, binDir, "#!/bin/sh\n: > '"+started+"'\nexec /bin/sleep 30\n")
+				ctx, cancel := context.WithCancel(context.Background())
+				go func() {
+					defer cancel()
+					// Returns once the child reaches its redirection.
+					if f, err := os.Open(started); err == nil {
+						_ = f.Close()
+					}
+				}()
+				t.Cleanup(func() {
+					// A child that never ran leaves the reader above blocked;
+					// a non-blocking write open releases it. ENXIO here means
+					// the handshake already completed, which is the normal path.
+					if f, err := os.OpenFile(started, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+						_ = f.Close()
+					}
+				})
+				return ctx
+			},
+			wantMessage: "bd ping execution failed: exec canceled",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if (tt.wantMessage == "") == (tt.wantMessagePrefix == "") {
+				t.Fatal("row must set exactly one of wantMessage/wantMessagePrefix")
+			}
+			rig, bin := newProbeRigFixture(t)
+			ctx := tt.arrange(t, bin)
+			beadsPath := filepath.Join(rig, ".beads")
+			before, err := snapshotProbeDir(beadsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := newExecRunner()
+			if tt.pingTimeout > 0 {
+				runner.bdPingTimeout = tt.pingTimeout
+			}
+			if tt.queueFull {
+				for range maxConcurrent {
+					runner.sem <- struct{}{}
+				}
+			}
+			rep := newSamplerManager(Deps{}, runner).probeRig(ctx, "r1", rig)
+			if rep.Rollup != "down" || !rep.Reachable {
+				t.Fatalf("probeRig() = %+v, want reachable/down", rep)
+			}
+			if len(rep.Problems) != 1 {
+				t.Fatalf("probeRig problems = %+v, want one typed problem", rep.Problems)
+			}
+			problem := rep.Problems[0]
+			if problem.Category != "Beads" || problem.Name != pingConnectivityCheck || problem.Status != "error" {
+				t.Fatalf("probeRig problem = %+v, want typed connectivity error", problem)
+			}
+			if tt.wantMessage != "" {
+				if problem.Message != tt.wantMessage {
+					t.Fatalf("probeRig problem message = %q, want %q", problem.Message, tt.wantMessage)
+				}
+			} else if !strings.HasPrefix(problem.Message, tt.wantMessagePrefix) {
+				t.Fatalf("probeRig problem message = %q, want prefix %q", problem.Message, tt.wantMessagePrefix)
+			}
+			if strings.ContainsAny(problem.Message, "\x00\x1b") {
+				t.Fatalf("probeRig problem message contains unsanitized control bytes: %q", problem.Message)
+			}
+			if rep.DoltConnected == nil || *rep.DoltConnected {
+				t.Fatalf("probeRig DoltConnected = %v, want false", rep.DoltConnected)
+			}
+			after, err := snapshotProbeDir(beadsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(before, after) {
+				t.Fatalf("probe mutated .beads directory: before=%v after=%v", before, after)
+			}
+		})
 	}
 }
 

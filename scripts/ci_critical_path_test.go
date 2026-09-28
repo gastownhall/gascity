@@ -57,7 +57,7 @@ type ciCriticalPathStep struct {
 	With            map[string]string `yaml:"with"`
 }
 
-const cmdGCProcessExtraTestEnv = `GO_TEST_TIMING_FILE="$${GO_TEST_TIMING_FILE}" GO_TEST_TIMING_NAME="$${GO_TEST_TIMING_NAME}" GO_TEST_TIMING_VARIANT="$${GO_TEST_TIMING_VARIANT}" GO_TEST_RUNNER_LABEL="$${GO_TEST_RUNNER_LABEL}" GITHUB_SHA="$${GITHUB_SHA}" GITHUB_WORKFLOW="$${GITHUB_WORKFLOW}" GITHUB_RUN_ID="$${GITHUB_RUN_ID}" GITHUB_RUN_ATTEMPT="$${GITHUB_RUN_ATTEMPT}" GITHUB_JOB="$${GITHUB_JOB}" RUNNER_NAME="$${RUNNER_NAME}" RUNNER_OS="$${RUNNER_OS}" RUNNER_ARCH="$${RUNNER_ARCH}"`
+const cmdGCProcessExtraTestEnv = `GO_TEST_TIMING_FILE="$${GO_TEST_TIMING_FILE}" GO_TEST_TIMING_NAME="$${GO_TEST_TIMING_NAME}" GO_TEST_TIMING_VARIANT="$${GO_TEST_TIMING_VARIANT}" GO_TEST_RUNNER_LABEL="$${GO_TEST_RUNNER_LABEL}" GC_TEST_FAILURE_ARTIFACT_DIR="$${GC_TEST_FAILURE_ARTIFACT_DIR}" GITHUB_SHA="$${GITHUB_SHA}" GITHUB_WORKFLOW="$${GITHUB_WORKFLOW}" GITHUB_RUN_ID="$${GITHUB_RUN_ID}" GITHUB_RUN_ATTEMPT="$${GITHUB_RUN_ATTEMPT}" GITHUB_JOB="$${GITHUB_JOB}" RUNNER_NAME="$${RUNNER_NAME}" RUNNER_OS="$${RUNNER_OS}" RUNNER_ARCH="$${RUNNER_ARCH}"`
 
 const cmdGCProcessRunner = "${{ needs.runner-policy.outputs.runner_32vcpu }}"
 
@@ -158,15 +158,33 @@ func TestCmdGCProcessPublishesAdvisoryTimingArtifacts(t *testing.T) {
 	if len(runIndices) != 1 {
 		t.Fatalf("cmd-gc-process process-shard step indices = %v, want exactly one", runIndices)
 	}
-	if len(uploadIndices) != 1 {
-		t.Fatalf("cmd-gc-process artifact-upload step indices = %v, want exactly one", uploadIndices)
+	// Two uploads: the advisory timing artifact on every run, and the proxy
+	// child's logs only when the shard fails. The second exists because bd's
+	// proxied-server failure names a log file the test temp dir takes with it,
+	// so without it a red shard carries no evidence at all.
+	if len(uploadIndices) != 2 {
+		t.Fatalf("cmd-gc-process artifact-upload step indices = %v, want exactly two", uploadIndices)
 	}
-	runIndex, uploadIndex := runIndices[0], uploadIndices[0]
+	runIndex := runIndices[0]
+	diagnosticsIndex, uploadIndex := uploadIndices[0], uploadIndices[1]
+	if diagnosticsIndex <= runIndex {
+		t.Fatalf("cmd-gc-process diagnostics upload step %d must follow process-shard step %d", diagnosticsIndex, runIndex)
+	}
 	if uploadIndex <= runIndex {
 		t.Fatalf("cmd-gc-process timing upload step %d must follow process-shard step %d", uploadIndex, runIndex)
 	}
 	runStep := &job.Steps[runIndex]
+	diagnosticsStep := &job.Steps[diagnosticsIndex]
 	uploadStep := &job.Steps[uploadIndex]
+	if diagnosticsStep.Name != "Upload cmd/gc process failure diagnostics" {
+		t.Errorf("cmd-gc-process diagnostics upload step name = %q", diagnosticsStep.Name)
+	}
+	if diagnosticsStep.If != "${{ failure() }}" {
+		t.Errorf("cmd-gc-process diagnostics upload condition = %q, want failure()", diagnosticsStep.If)
+	}
+	if want := "${{ runner.temp }}/failure-artifacts/cmd-gc-process-${{ matrix.shard }}-of-12"; diagnosticsStep.With["path"] != want {
+		t.Errorf("cmd-gc-process diagnostics upload path = %q, want %q", diagnosticsStep.With["path"], want)
+	}
 	if runStep.Name != "Run cmd/gc process shard" {
 		t.Errorf("cmd-gc-process execution step name = %q", runStep.Name)
 	}
@@ -185,7 +203,10 @@ func TestCmdGCProcessPublishesAdvisoryTimingArtifacts(t *testing.T) {
 		"GO_TEST_TIMING_NAME":    "cmd-gc-process-${{ matrix.shard }}-of-12",
 		"GO_TEST_TIMING_VARIANT": "linux-default",
 		"GO_TEST_RUNNER_LABEL":   cmdGCProcessRunner,
-		"EXTRA_TEST_ENV":         cmdGCProcessExtraTestEnv,
+		// Named here so the collector directory the shard advertises and the
+		// directory the diagnostics upload reads can never drift apart.
+		"GC_TEST_FAILURE_ARTIFACT_DIR": "${{ runner.temp }}/failure-artifacts/cmd-gc-process-${{ matrix.shard }}-of-12",
+		"EXTRA_TEST_ENV":               cmdGCProcessExtraTestEnv,
 	}
 	if len(runStep.Env) != len(wantEnv) {
 		t.Errorf("cmd-gc-process timing env = %v, want exactly %v", runStep.Env, wantEnv)

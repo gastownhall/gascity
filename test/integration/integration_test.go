@@ -449,14 +449,31 @@ func pinnedIntegrationBeadsModuleVersion() (string, error) {
 	return version, nil
 }
 
+// wantPinnedBeadsModuleVersion is the beads module version this suite expects
+// go.mod to pin. TestBDVersionPins in scripts/bd_version_pin_test.go reads it
+// by name out of this file and asserts it matches go.mod — see
+// TestPinnedIntegrationBeadsModuleVersion for why it is a literal.
+const wantPinnedBeadsModuleVersion = "v1.3.0"
+
 func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	version, err := pinnedIntegrationBeadsModuleVersion()
 	if err != nil {
 		t.Fatalf("pinnedIntegrationBeadsModuleVersion() error = %v", err)
 	}
-	const want = "v1.3.0-rc.2"
-	if version != want {
-		t.Errorf("pinnedIntegrationBeadsModuleVersion() = %q, want %q", version, want)
+	// A deliberate second anchor on go.mod's beads pin: this suite installs
+	// bd from whatever go.mod names (installPinnedBd above), so a bump must be
+	// a reviewed edit here too rather than silently changing which bd the
+	// integration tests run against.
+	//
+	// This test only runs in the `rest-full` integration shard, which is gated
+	// on `push` — i.e. after merge, which is how v1.3.0-rc.2 sat stale here
+	// (tracker ga-rnwg5u). TestBDVersionPins in scripts/bd_version_pin_test.go
+	// reads wantPinnedBeadsModuleVersion by name out of this file and asserts it
+	// against go.mod's pin; `make test-ci-policy` runs it, and that target is on
+	// the PR-time preflight-static job, so drift now fails before merge. Keep
+	// the const name greppable if you move it.
+	if version != wantPinnedBeadsModuleVersion {
+		t.Errorf("pinnedIntegrationBeadsModuleVersion() = %q, want %q", version, wantPinnedBeadsModuleVersion)
 	}
 }
 

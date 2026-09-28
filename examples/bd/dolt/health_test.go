@@ -20,6 +20,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // healthScript is the on-disk path to the health command script. The
@@ -30,6 +32,9 @@ const healthScript = "commands/health/run.sh"
 
 func repoRoot(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return filepath.Join(root, "examples", "bd", "dolt")
+	}
 	_, filename, _, _ := runtime.Caller(0)
 	return filepath.Dir(filename)
 }

@@ -1449,10 +1449,12 @@ func (cr *CityRuntime) tick(
 	// Wisp GC: purge expired closed molecules. The molecule/wisp/workflow purge
 	// arm routes through the typed graph-class store; the read-message retention
 	// arm through the typed messaging-class store. Both collapse to the city store
-	// today, so the GC is byte-identical.
+	// today, so the GC is byte-identical. The closed session purge arm gets the
+	// sessions class only when it is relocated onto a SQLite infra ledger; on an
+	// unsplit city it gets nothing and never touches the work store.
 	if graphStore := cr.graphBeadStore(); cr.wg != nil && graphStore.Store != nil && cr.wg.shouldRun(time.Now()) {
 		phaseStart = time.Now()
-		purged, gcErr := cr.wg.runGC(graphStore, cr.mailBeadStore(), time.Now())
+		purged, gcErr := cr.wg.runGC(graphStore, cr.infraSessionLedger(), cr.mailBeadStore(), time.Now())
 		recordPhase(TraceSiteControllerTickPhase, "wisp_gc", phaseStart, map[string]any{"purged": purged})
 		if gcErr != nil {
 			for _, line := range strings.Split(gcErr.Error(), "\n") {
@@ -2851,31 +2853,6 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 			cr.requestExecutionStalledDrain,
 			cr.stdout,
 		)
-		// The never-claimed lane (ga-evxqd). The three above key on a bead the
-		// seat was BOUND to, on one preassigned successor, or on an in_progress
-		// claim; this one keys on the seat's own OPEN ready work — assigned to
-		// it or merely routed to its identity — which is the residual none of
-		// them can see. It reads the BROAD open-routed view rather than the
-		// pool-demand-narrowed one because it settles readiness itself, from
-		// each row's own dependency edges: a named seat's routed work is not
-		// pool demand, so the narrowed view can be silent on exactly the rows
-		// this lane exists for. It nudges and reports; it never drains.
-		nudgeStalledSeatClaims(
-			cr.sp,
-			cr.cfg,
-			sessStore,
-			stalledPoolBeads,
-			result.AssignedWorkBeads,
-			result.AssignedWorkStores,
-			result.AssignedWorkStoreRefs,
-			result.OpenRoutedWorkBeads,
-			result.OpenRoutedWorkStores,
-			result.OpenRoutedWorkStoreRefs,
-			result.StoreQueryPartial || result.SessionQueryPartial || result.OpenRoutedWorkQueryPartial,
-			time.Now(),
-			cr.rec,
-			cr.stdout,
-		)
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
 }
@@ -3711,10 +3688,19 @@ func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trac
 	// single city store into the class accessors so a future per-class backend
 	// routes each role independently; both collapse to the same store today.
 	sessionsStore := cr.sessionsBeadStore()
+	var result DesiredStateResult
 	if cr.buildFnWithSessionBeads != nil {
-		return cr.buildFnWithSessionBeads(cr.cfg, cr.sp, sessionsStore.Store, unwrapWorkStores(cr.workBeadStores()), sessionBeads, trace)
+		result = cr.buildFnWithSessionBeads(cr.cfg, cr.sp, sessionsStore.Store, unwrapWorkStores(cr.workBeadStores()), sessionBeads, trace)
+	} else {
+		result = cr.buildFn(cr.cfg, cr.sp, sessionsStore.Store)
 	}
-	return cr.buildFn(cr.cfg, cr.sp, sessionsStore.Store)
+	// Emit here, at the FRESH build, rather than where the result is consumed:
+	// loadDemandSnapshot reuses a cached result across stable patrol ticks, so a
+	// consumer-side emission would replay an observation this tick never made.
+	// This keeps the event one-for-one with the stderr line the same build
+	// printed.
+	emitControlDispatcherScopeGapEvents(cr.rec, cr.cityName, result.ControlDispatcherScopeGaps, time.Now())
+	return result
 }
 
 // refreshDesiredState re-applies the session-bead overlay to an already-built
@@ -4022,7 +4008,9 @@ type rigStoreOpenFailure struct {
 // rig is unmounted is worse than running degraded, and the controller has an
 // operator-visible log to say so. `gc ready` (readyRigLegStores) fails the whole
 // query: its entire output is a JSON array with nowhere to say it is short.
-func openStandaloneRigStores(cfg *config.City, cityPath string) (map[string]beads.Store, []rigStoreOpenFailure) {
+//
+// open is how each rig store is opened; see rigStoreOpener.
+func openStandaloneRigStores(cfg *config.City, cityPath string, open rigStoreOpener) (map[string]beads.Store, []rigStoreOpenFailure) {
 	if cfg == nil || len(cfg.Rigs) == 0 {
 		return nil, nil
 	}
@@ -4037,7 +4025,7 @@ func openStandaloneRigStores(cfg *config.City, cityPath string) (map[string]bead
 		if strings.TrimSpace(rig.Path) == "" {
 			continue
 		}
-		store, err := openStoreAtForCity(rig.Path, cityPath)
+		store, err := open(rig.Path, cityPath)
 		if err != nil {
 			failures = append(failures, rigStoreOpenFailure{rig: rig.Name, err: err})
 			continue
@@ -4050,8 +4038,50 @@ func openStandaloneRigStores(cfg *config.City, cityPath string) (map[string]bead
 	return stores, failures
 }
 
+// rigStoreOpener opens the bead store of one rig of the city at cityPath.
+type rigStoreOpener func(rigPath, cityPath string) (beads.Store, error)
+
+// oneShotRigStoreOpener opens each rig store against the supplied cfg instead
+// of reloading the city config inside every open. Only for short-lived
+// processes whose cfg was loaded by this same invocation (same scoping as
+// ensureBuiltinRuntimeAssetsForSuppliedConfig): a long-lived caller's cfg can
+// be stale relative to disk, and the controller keeps its reload-per-open.
+// That freshness is a caller convention, not something this function can
+// check. A nil cfg is not an error: each open falls back to loading the city
+// config itself, exactly like openStoreAtForCity.
+func oneShotRigStoreOpener(cfg *config.City) rigStoreOpener {
+	return func(rigPath, cityPath string) (beads.Store, error) {
+		return openOneShotStoreAtForCityWithConfig(rigPath, cityPath, cfg)
+	}
+}
+
+// buildStandaloneRigStores is the controller's rig-store opener: it warns and
+// continues past rigs it cannot open, and every open re-resolves the city
+// config from disk.
 func buildStandaloneRigStores(cfg *config.City, cityPath string, stderr io.Writer) map[string]beads.Store {
-	stores, failures := openStandaloneRigStores(cfg, cityPath)
+	stores, failures := openStandaloneRigStores(cfg, cityPath, openStoreAtForCity)
+	return reportStandaloneRigStoreFailures(stores, failures, stderr)
+}
+
+// buildStandaloneRigStoresWithConfig is buildStandaloneRigStores for
+// short-lived (one-shot CLI) processes only: the rig opens reuse cfg, which
+// must have been freshly loaded by this invocation, instead of reloading the
+// whole city config once per bound rig. See oneShotRigStoreOpener.
+//
+// residency:allow — the one-shot twin of buildStandaloneRigStores: it walks the
+// same cfg.Rigs through the same openStandaloneRigStores enumeration and differs
+// only in the opener it hands that walk, so it adds no store-enumeration logic.
+func buildStandaloneRigStoresWithConfig(cfg *config.City, cityPath string, stderr io.Writer) map[string]beads.Store {
+	stores, failures := openStandaloneRigStores(cfg, cityPath, oneShotRigStoreOpener(cfg))
+	return reportStandaloneRigStoreFailures(stores, failures, stderr)
+}
+
+// reportStandaloneRigStoreFailures prints the supervisor warning for each rig
+// the open walk could not open and returns the stores it did open.
+//
+// residency:allow — pass-through of the map openStandaloneRigStores already
+// built; it opens no store and consults no binding, namespace or leg order.
+func reportStandaloneRigStoreFailures(stores map[string]beads.Store, failures []rigStoreOpenFailure, stderr io.Writer) map[string]beads.Store {
 	for _, f := range failures {
 		fmt.Fprintf(stderr, "gc supervisor: rig bead store %q: %v\n", f.rig, f.err) //nolint:errcheck // best-effort stderr
 	}

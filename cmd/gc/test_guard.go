@@ -12,6 +12,10 @@ func isTestBinary() bool {
 	if len(os.Args) == 0 {
 		return false
 	}
+	// TEST_SRCDIR covers bazel test binaries, which drop the .test suffix.
+	if os.Getenv("TEST_SRCDIR") != "" {
+		return true
+	}
 	return strings.HasSuffix(os.Args[0], ".test") ||
 		strings.Contains(os.Args[0], ".test")
 }

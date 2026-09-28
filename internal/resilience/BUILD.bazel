@@ -1,0 +1,34 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "resilience",
+    srcs = [
+        "breaker.go",
+        "registry.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/resilience",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "resilience_test",
+    srcs = [
+        "breaker_test.go",
+        "registry_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":resilience"],
+    deps = ["//internal/testenv"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

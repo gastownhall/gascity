@@ -86,3 +86,8 @@ __pycache__/
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/
 .beads.backup-*
+
+# Bazel convenience symlinks
+/bazel-bin
+/bazel-out
+/bazel-testlogs

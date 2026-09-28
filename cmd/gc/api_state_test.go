@@ -120,6 +120,18 @@ type failFormulaWriteFS struct {
 	formulaPath string
 }
 
+type failCityConfigRenameFS struct {
+	fsys.OSFS
+	cityToml string
+}
+
+func (f *failCityConfigRenameFS) Rename(oldpath, newpath string) error {
+	if canonicalTestPath(newpath) == canonicalTestPath(f.cityToml) {
+		return fmt.Errorf("injected city config write failure")
+	}
+	return f.OSFS.Rename(oldpath, newpath)
+}
+
 func (f *failFormulaWriteFS) Rename(oldpath, newpath string) error {
 	if canonicalTestPath(newpath) == canonicalTestPath(f.formulaPath) {
 		return fmt.Errorf("injected formula write failure")
@@ -3966,6 +3978,54 @@ func newControllerStateMutationHarness(t *testing.T) (*controllerState, string) 
 	}, tomlPath
 }
 
+func TestControllerStateDeleteRigDetachesProviderOwnershipBeforeConfigWrite(t *testing.T) {
+	cs, tomlPath := newControllerStateMutationHarness(t)
+	cfg, err := config.Load(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolveRigPaths(cs.cityPath, cfg.Rigs)
+	rigPath := cfg.Rigs[0].Path
+	if err := persistProviderScopeOwnership(cs.cityPath, rigPath, providerScopeIntent{Transport: "direct", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := markProviderScopeOwnershipReady(cs.cityPath, rigPath); err != nil {
+		t.Fatal(err)
+	}
+
+	cs.editor = configedit.NewEditor(&failCityConfigRenameFS{cityToml: tomlPath}, tomlPath)
+	if err := cs.DeleteRig("rig1"); err == nil || !strings.Contains(err.Error(), "injected city config write failure") {
+		t.Fatalf("DeleteRig write failure = %v, want injected city config failure", err)
+	}
+	stillConfigured, err := config.Load(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolveRigPaths(cs.cityPath, stillConfigured.Rigs)
+	if err := validateProviderScopeOwnership(cs.cityPath, stillConfigured); err != nil {
+		t.Fatalf("detached ownership should remain valid while the failed write leaves rig configured: %v", err)
+	}
+	key, _, owned, err := providerScopeOwnershipRecord(cs.cityPath, rigPath)
+	if err != nil || !owned || key != "path:"+normalizePathForCompare(rigPath) {
+		t.Fatalf("ownership after failed delete = (%q, %t, %v), want detached path record", key, owned, err)
+	}
+
+	cs.editor = configedit.NewEditor(fsys.OSFS{}, tomlPath)
+	if err := cs.DeleteRig("rig1"); err != nil {
+		t.Fatalf("DeleteRig retry: %v", err)
+	}
+	removed, err := config.Load(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed.Rigs) != 0 {
+		t.Fatalf("rigs after retry = %+v, want none", removed.Rigs)
+	}
+	if err := validateProviderScopeOwnership(cs.cityPath, removed); err != nil {
+		t.Fatalf("ownership after successful delete: %v", err)
+	}
+}
+
 // TestBuildStores_ExecProviderSetsPerRigEnv is a regression test for #391:
 // when GC_BEADS=exec:<script>, each rig's store must receive distinct
 // GC_BEADS_PREFIX, BEADS_DIR, GC_RIG_ROOT, and GC_RIG env vars.
@@ -4686,5 +4746,76 @@ func TestBeadEventStoresIgnoreReservedPrefixesWithoutARelocation(t *testing.T) {
 	}
 	if store, known := cs.beadEventConfiguredStoreLocked("gcg-1"); known {
 		t.Errorf("a city that relocates nothing claimed to own %q (store=%v); the reserved-prefix arm must be gated on an actual relocation", "gcg-1", store)
+	}
+}
+
+func TestControllerStateUpdateRigPathDetachesProviderOwnershipBeforeConfigWrite(t *testing.T) {
+	cs, tomlPath := newControllerStateMutationHarness(t)
+	cfg, err := config.Load(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolveRigPaths(cs.cityPath, cfg.Rigs)
+	oldPath := cfg.Rigs[0].Path
+	if err := persistProviderScopeOwnership(cs.cityPath, oldPath, providerScopeIntent{Transport: "direct", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := markProviderScopeOwnershipReady(cs.cityPath, oldPath); err != nil {
+		t.Fatal(err)
+	}
+	newPath := filepath.Join(cs.cityPath, "relocated")
+
+	cs.editor = configedit.NewEditor(&failCityConfigRenameFS{cityToml: tomlPath}, tomlPath)
+	if err := cs.UpdateRig("rig1", api.RigUpdate{Path: newPath}); err == nil || !strings.Contains(err.Error(), "injected city config write failure") {
+		t.Fatalf("UpdateRig write failure = %v, want injected city config failure", err)
+	}
+	stillConfigured, err := config.Load(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolveRigPaths(cs.cityPath, stillConfigured.Rigs)
+	if err := validateProviderScopeOwnership(cs.cityPath, stillConfigured); err != nil {
+		t.Fatalf("detached ownership should remain valid while failed update keeps old path: %v", err)
+	}
+	key, _, owned, err := providerScopeOwnershipRecord(cs.cityPath, oldPath)
+	if err != nil || !owned || key != "path:"+normalizePathForCompare(oldPath) {
+		t.Fatalf("ownership after failed update = (%q, %t, %v), want detached old path", key, owned, err)
+	}
+
+	cs.editor = configedit.NewEditor(fsys.OSFS{}, tomlPath)
+	if err := cs.UpdateRig("rig1", api.RigUpdate{Path: newPath}); err != nil {
+		t.Fatalf("UpdateRig retry: %v", err)
+	}
+	updated, err := loadCityConfig(cs.cityPath, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolveRigPaths(cs.cityPath, updated.Rigs)
+	if len(updated.Rigs) != 1 || !samePath(updated.Rigs[0].Path, newPath) {
+		t.Fatalf("rig after path update = %+v, want %q", updated.Rigs, newPath)
+	}
+	if err := validateProviderScopeOwnership(cs.cityPath, updated); err != nil {
+		t.Fatalf("ownership after path update: %v", err)
+	}
+
+	// A non-path patch must keep the configured rig label. Reset the harness so
+	// this assertion does not depend on the detached-record behavior above.
+	cs2, toml2 := newControllerStateMutationHarness(t)
+	cfg2, err := config.Load(fsys.OSFS{}, toml2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolveRigPaths(cs2.cityPath, cfg2.Rigs)
+	if err := persistProviderScopeOwnership(cs2.cityPath, cfg2.Rigs[0].Path, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := markProviderScopeOwnershipReady(cs2.cityPath, cfg2.Rigs[0].Path); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs2.UpdateRig("rig1", api.RigUpdate{Prefix: "renamed"}); err != nil {
+		t.Fatal(err)
+	}
+	if key, _, owned, err := providerScopeOwnershipRecord(cs2.cityPath, cfg2.Rigs[0].Path); err != nil || !owned || key != "rig:rig1" {
+		t.Fatalf("ownership after prefix-only update = (%q, %t, %v), want attached rig label", key, owned, err)
 	}
 }

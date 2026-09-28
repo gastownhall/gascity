@@ -1,0 +1,68 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "supervisor",
+    srcs = [
+        "config.go",
+        "maintenance.go",
+        "maintenance_snapshot.go",
+        "publications.go",
+        "registry.go",
+        "restartcause.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/supervisor",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads",
+        "//internal/citylayout",
+        "//internal/config",
+        "//internal/events",
+        "//internal/fsys",
+        "//internal/mail",
+        "//internal/pathutil",
+        "@com_github_burntsushi_toml//:toml",
+    ],
+)
+
+go_test(
+    name = "supervisor_test",
+    srcs = [
+        "config_test.go",
+        "export_gate_test.go",
+        "home_fallback_test.go",
+        "maintenance_alert_test.go",
+        "maintenance_events_test.go",
+        "maintenance_gc_test.go",
+        "maintenance_snapshot_test.go",
+        "maintenance_test.go",
+        "maintenance_trigger_test.go",
+        "publications_test.go",
+        "registry_test.go",
+        "restartcause_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+    embed = [":supervisor"],
+    deps = [
+        "//internal/config",
+        "//internal/events",
+        "//internal/mail",
+        "//internal/testenv",
+        "//internal/testutil",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

@@ -123,6 +123,15 @@ func (cr *CityRuntime) sessionsBeadStore() beads.SessionStore {
 	return beads.SessionStore{Store: resolveSessionStore(cr.storageRoutes, cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
 }
 
+// infraSessionLedger returns the sessions-class store for the wisp GC's
+// closed session purge: sessionsBeadStore() when this city's routes relocate
+// the sessions class onto a SQLite infra ledger, and an empty SessionStore
+// otherwise. An unsplit city keeps its sessions on the work store, where they
+// belong to the reaper order, so the purge must see nothing there.
+func (cr *CityRuntime) infraSessionLedger() beads.SessionStore {
+	return beads.SessionStore{Store: relocatedSQLiteSessionLedger(cr.storageRoutes, cr.sessionsBeadStore().Store, cr.cityBeadStore())}
+}
+
 // mailBeadStore returns the runtime's mail (message) bead store: the configured
 // messaging class store when [beads.classes.messaging] relocates messaging, else
 // the work store. Byte-identical to cityBeadStore() at the default bd backend.

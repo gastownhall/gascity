@@ -69,6 +69,14 @@ agent_start)
     : > "$STATE/registered"
     : > "$STATE/busy"
     printf '%s' '{"error":{"code":"agent_name_taken","message":"agent name already registered"}}'
+  elif [ -e "$STATE/pane_busy_once" ]; then
+    # A fresh pane's shell can still be sourcing rc files when herdr's own
+    # availability check runs: unlike agent_name_taken above, herdr reports
+    # this by exiting non-zero with the error on stderr (an untyped shape —
+    # ga-iwanrj). Fires once so the retry's second attempt lands below.
+    rm -f "$STATE/pane_busy_once"
+    echo '{"error":{"code":"agent_pane_busy","message":"agent target pane %5 is not an available shell"}}' >&2
+    exit 1
   else
     : > "$STATE/agent_started"
     : > "$STATE/registered"
@@ -292,6 +300,24 @@ func TestStartKindPathRegistersAndPersistsBinding(t *testing.T) {
 	}
 	if got, _ := p.GetMeta("gastown__witness", metaBoundMode); got != bindModeAgent {
 		t.Fatalf("bound mode after Start = %q; want %q", got, bindModeAgent)
+	}
+}
+
+// ga-iwanrj: herdr's agent_pane_busy rejection (a fresh pane's shell still
+// sourcing rc files) arrives via a non-zero exit, an error shape the retry
+// guard at provider.go:198 could not see through herdrErrorCode alone. Start
+// must retry the launch rather than surface the rejection.
+func TestStartRetriesAgentStartOnNonZeroExitPaneBusy(t *testing.T) {
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
+	setState(t, state, "pane_busy_once")
+
+	if err := p.Start(context.Background(), "gastown__witness", runtime.Config{Command: "claude"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	calls := fakeCalls(t, state)
+	if got := strings.Count(calls, "agent start gastown__witness --kind claude --pane %5"); got != 2 {
+		t.Fatalf("agent start attempts = %d; want 2 (one agent_pane_busy rejection, one retry that succeeds):\n%s", got, calls)
 	}
 }
 
