@@ -16,13 +16,18 @@ test --flaky_test_attempts=2
 test --test_tmpdir=/tmp/bt
 test --sandbox_writable_path=/tmp/bt
 
+# Nested shell fixtures deliberately clear TMPDIR and exercise /var/tmp as
+# the Makefile's default. Give each Linux sandbox its own writable mount,
+# without exposing the host's /var/tmp to test writes.
+test --sandbox_tmpfs_path=/var/tmp
+
 # GOROOT is resolved hermetically from runfiles (@go_sdk//:srcs) by
 # internal/bazeltest; no client export is required.
 test --test_env=GC_TEST_REPO_ROOT
 
-# Bazel test actions do not inherit HOME by default; the herdr env scrubber
-# allow-lists the real HOME value, and go-path tests depend on it.
-test --test_env=HOME
+# Leave HOME unset so Bazel's test runner sets it to the action's private,
+# writable TEST_TMPDIR. Client-side homes need not exist in a sandbox or on
+# a remote worker, and sharing a home lets tests race on global Git/Dolt config.
 
 # Repo-lint tests exec `go` and other dev binaries; bazel's default test PATH
 # is minimal, so forward the client's.

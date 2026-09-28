@@ -86,7 +86,6 @@ jobs:
             fi
             echo 'build --remote_download_minimal'
             echo 'test --test_env=PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin'
-            echo 'test --test_env=HOME=/tmp/gc-test-home'
             # 2vcpu runners default --jobs to 2, serializing even REMOTE actions.
             # Execution happens on the farm; the client can keep many in flight.
             echo 'build --jobs=64'
@@ -101,10 +100,11 @@ jobs:
             exit 1
           }
 
-      - name: Writable test HOME
+      - name: Writable test directories
         run: |
-          mkdir -p /tmp/gc-test-home
-          echo "HOME=/tmp/gc-test-home" >> "$GITHUB_ENV"
+          # .bazelrc makes /tmp/bt sandbox-writable; Bazel requires it
+          # to exist before any sandboxed build action starts.
+          mkdir -p /tmp/bt
 
       - name: bazel test //... (build subsumed)
         run: |
