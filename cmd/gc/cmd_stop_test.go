@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -1873,5 +1875,334 @@ func TestAcquireStoppedControllerOwnership(t *testing.T) {
 	}
 	if probeControllerLockHeld(t, cityDir) {
 		t.Fatal("controller lock still held after closing ownership")
+	}
+}
+
+// inventoryStopProvider is a runtime.Fake whose ListRunning answer and
+// per-session liveness observation can be made to fail, modeling a runtime
+// that gc stop cannot fully see.
+type inventoryStopProvider struct {
+	*runtime.Fake
+	mu sync.Mutex
+	// listErrs is consumed one entry per ListRunning call; a nil entry (or an
+	// exhausted slice) answers from the Fake.
+	listErrs    []error
+	listCalls   int
+	livenessErr map[string]error
+}
+
+func newInventoryStopProvider() *inventoryStopProvider {
+	return &inventoryStopProvider{Fake: runtime.NewFake(), livenessErr: map[string]error{}}
+}
+
+func (p *inventoryStopProvider) ListRunning(prefix string) ([]string, error) {
+	p.mu.Lock()
+	call := p.listCalls
+	p.listCalls++
+	var err error
+	if call < len(p.listErrs) {
+		err = p.listErrs[call]
+	}
+	p.mu.Unlock()
+	names, listErr := p.Fake.ListRunning(prefix)
+	if err == nil {
+		return names, listErr
+	}
+	if runtime.IsPartialListError(err) && !runtime.IsRuntimeServerAbsent(err) {
+		return names, err
+	}
+	return nil, err
+}
+
+func (p *inventoryStopProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	p.mu.Lock()
+	err := p.livenessErr[name]
+	p.mu.Unlock()
+	if err != nil {
+		return runtime.Liveness{}, err
+	}
+	return runtime.ObserveLiveness(p.Fake, name, processNames), nil
+}
+
+var _ runtime.LivenessObserverWithError = (*inventoryStopProvider)(nil)
+
+func startStopTestSessions(t *testing.T, sp runtime.Provider, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+			t.Fatalf("Start(%s): %v", name, err)
+		}
+	}
+}
+
+func assertStopNotConfirmed(t *testing.T, code int, stdout, stderr string) {
+	t.Helper()
+	if code != 1 {
+		t.Fatalf("stop code = %d, want fail-closed 1; stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if strings.Contains(stdout, "City stopped.") {
+		t.Fatalf("stdout reported terminal success for an unverified stop: %q", stdout)
+	}
+	if !strings.Contains(stderr, "stop not confirmed") {
+		t.Fatalf("stderr = %q, want a stop-not-confirmed summary", stderr)
+	}
+}
+
+// TestDoStopFailsClosedOnPartialRuntimeInventory proves gc stop withholds
+// "City stopped." when a backend could not be listed, while still stopping
+// every session it positively observed.
+func TestDoStopFailsClosedOnPartialRuntimeInventory(t *testing.T) {
+	const sessionName = "partial-stop-session"
+	tests := []struct {
+		name      string
+		running   bool
+		wantStops int
+	}{
+		{name: "no positively observed names"},
+		{name: "positively observed names are still stopped", running: true, wantStops: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			healthy := runtime.NewFake()
+			if tt.running {
+				startStopTestSessions(t, healthy, sessionName)
+			}
+			sp := sessionhybrid.New(healthy, runtime.NewFailFake(), func(string) bool { return false })
+
+			var stdout, stderr bytes.Buffer
+			code := doStop([]string{sessionName}, sp, nil, nil, 0, events.Discard, &stdout, &stderr)
+
+			assertStopNotConfirmed(t, code, stdout.String(), stderr.String())
+			if !strings.Contains(stderr.String(), "listing sessions partially failed") {
+				t.Fatalf("stderr = %q, want the partial-listing detail", stderr.String())
+			}
+			if got := healthy.CountCalls("Stop", sessionName); got != tt.wantStops {
+				t.Fatalf("Stop calls = %d, want %d", got, tt.wantStops)
+			}
+			if healthy.IsRunning(sessionName) {
+				t.Fatalf("positively observed session %q is still running", sessionName)
+			}
+		})
+	}
+}
+
+// TestDoStopFailsClosedOnFailedRuntimeInventory proves a wholly failed
+// ListRunning is not read as "nothing is running": the target that its own
+// observation proved running is still stopped, but success is withheld.
+func TestDoStopFailsClosedOnFailedRuntimeInventory(t *testing.T) {
+	sp := newInventoryStopProvider()
+	startStopTestSessions(t, sp, "observed-worker")
+	sp.listErrs = []error{errors.New("runtime socket unreachable")}
+
+	var stdout, stderr bytes.Buffer
+	code := doStop([]string{"observed-worker"}, sp, nil, nil, 0, events.Discard, &stdout, &stderr)
+
+	assertStopNotConfirmed(t, code, stdout.String(), stderr.String())
+	if !strings.Contains(stderr.String(), "gc stop: listing sessions: runtime socket unreachable") {
+		t.Fatalf("stderr = %q, want the listing failure", stderr.String())
+	}
+	if sp.IsRunning("observed-worker") {
+		t.Fatal("session observed running by its own liveness check survived the stop")
+	}
+}
+
+// TestDoStopFailsClosedWhenSessionLivenessCheckFails proves a per-session
+// observation error is reported against that session and withholds success,
+// without contaminating a cleanly observed sibling. An unverifiable session is
+// still stopped when the runtime inventory positively witnessed it, and left
+// untouched otherwise.
+func TestDoStopFailsClosedWhenSessionLivenessCheckFails(t *testing.T) {
+	tests := []struct {
+		name      string
+		witnessed bool
+		wantStops int
+	}{
+		{name: "unwitnessed session is left untouched"},
+		{name: "inventory-witnessed session is still stopped", witnessed: true, wantStops: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sp := newInventoryStopProvider()
+			startStopTestSessions(t, sp, "healthy-worker")
+			if tt.witnessed {
+				startStopTestSessions(t, sp, "unverifiable-worker")
+			}
+			sp.livenessErr["unverifiable-worker"] = errors.New("liveness probe timed out")
+
+			var stdout, stderr bytes.Buffer
+			code := doStop([]string{"healthy-worker", "unverifiable-worker"}, sp, nil, nil, 0, events.Discard, &stdout, &stderr)
+
+			assertStopNotConfirmed(t, code, stdout.String(), stderr.String())
+			for _, want := range []string{"gc stop: observing session unverifiable-worker: liveness probe timed out", "could not verify that session(s) unverifiable-worker stopped"} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+				}
+			}
+			if strings.Contains(stderr.String(), "observing session healthy-worker") {
+				t.Fatalf("stderr = %q, attributed an observation failure to the cleanly observed sibling", stderr.String())
+			}
+			if sp.IsRunning("healthy-worker") {
+				t.Fatal("cleanly observed sibling survived the stop")
+			}
+			if got := sp.CountCalls("Stop", "unverifiable-worker"); got != tt.wantStops {
+				t.Fatalf("Stop calls for unverifiable-worker = %d, want %d", got, tt.wantStops)
+			}
+		})
+	}
+}
+
+// TestDoStopTreatsAbsentRuntimeServerAsEmptyInventory keeps a repeated stop
+// idempotent: a runtime server that is not running at all holds no sessions,
+// so its absence confirms the stop instead of failing it. This holds through a
+// composite provider too, as long as every failing backend is merely absent.
+func TestDoStopTreatsAbsentRuntimeServerAsEmptyInventory(t *testing.T) {
+	absent := func() error {
+		return &runtime.PartialListError{Err: errors.New("tmux server unreachable: no tmux server running"), ServerAbsent: true}
+	}
+	absentProvider := func() *inventoryStopProvider {
+		sp := newInventoryStopProvider()
+		sp.listErrs = []error{absent(), absent()}
+		return sp
+	}
+	tests := []struct {
+		name        string
+		provider    func() runtime.Provider
+		wantSuccess bool
+	}{
+		{
+			name:        "single absent server",
+			provider:    func() runtime.Provider { return absentProvider() },
+			wantSuccess: true,
+		},
+		{
+			name: "absent server beside a healthy backend",
+			provider: func() runtime.Provider {
+				return sessionhybrid.New(absentProvider(), runtime.NewFake(), func(string) bool { return false })
+			},
+			wantSuccess: true,
+		},
+		{
+			name: "absent server beside a failing backend",
+			provider: func() runtime.Provider {
+				return sessionhybrid.New(absentProvider(), runtime.NewFailFake(), func(string) bool { return false })
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := doStop([]string{"stopped-worker"}, tt.provider(), nil, nil, 0, events.Discard, &stdout, &stderr)
+			if !tt.wantSuccess {
+				assertStopNotConfirmed(t, code, stdout.String(), stderr.String())
+				return
+			}
+			if code != 0 || !strings.Contains(stdout.String(), "City stopped.") {
+				t.Fatalf("doStop = %d, want 0 with City stopped.; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if strings.Contains(stderr.String(), "listing sessions") {
+				t.Fatalf("stderr = %q, want no listing warning for an absent server", stderr.String())
+			}
+		})
+	}
+}
+
+// TestCmdStopBodyFailsClosedOnFailedOrphanInventory proves the orphan sweep's
+// own inventory counts too: sessions outside the config may still be running,
+// so success is withheld, while the remaining safe cleanup (server teardown,
+// bead-store shutdown) still runs.
+func TestCmdStopBodyFailsClosedOnFailedOrphanInventory(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "orphan-inventory-city"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+	}
+	writeStopLifecycleCityConfig(t, cityDir, cfg)
+
+	sp := &lifecycleOrderProvider{Fake: runtime.NewFake()}
+	var listCalls atomic.Int32
+	failingList := &orphanListFailingProvider{lifecycleOrderProvider: sp, calls: &listCalls}
+
+	shutdownCalled := false
+	overrideShutdownBeadsProviderForStop(t, func(string) error {
+		shutdownCalled = true
+		return nil
+	})
+	oldFactory := sessionProviderForStopCity
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return failingList, nil }
+
+	var stdout, stderr lockedBuffer
+	code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr)
+
+	assertStopNotConfirmed(t, code, stdout.String(), stderr.String())
+	if !strings.Contains(stderr.String(), "gc stop: listing sessions: orphan listing failed") {
+		t.Fatalf("stderr = %q, want the orphan listing failure", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "outside the configuration") {
+		t.Fatalf("stderr = %q, want the orphan-inventory summary", stderr.String())
+	}
+	sp.mu.Lock()
+	providerEvents := append([]string(nil), sp.events...)
+	sp.mu.Unlock()
+	if !containsString(providerEvents, "TeardownServer") {
+		t.Fatalf("provider events = %v, want server teardown to still run", providerEvents)
+	}
+	if !shutdownCalled {
+		t.Fatal("bead-store shutdown did not run after an unconfirmed stop")
+	}
+}
+
+// orphanListFailingProvider answers the first (target) ListRunning cleanly and
+// fails every later one, so only the orphan sweep's inventory fails.
+type orphanListFailingProvider struct {
+	*lifecycleOrderProvider
+	calls *atomic.Int32
+}
+
+func (p *orphanListFailingProvider) ListRunning(prefix string) ([]string, error) {
+	if p.calls.Add(1) > 1 {
+		p.mu.Lock()
+		p.events = append(p.events, "ListRunning")
+		p.mu.Unlock()
+		return nil, errors.New("orphan listing failed")
+	}
+	return p.lifecycleOrderProvider.ListRunning(prefix)
+}
+
+// TestCmdStopFailsClosedOnPartialRuntimeInventory is the command-boundary
+// proof: an unverified stop exits non-zero and never prints "City stopped.".
+func TestCmdStopFailsClosedOnPartialRuntimeInventory(t *testing.T) {
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+
+	cityDir := shortSocketTempDir(t, "gc-stop-city-")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "partial-stop-city"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "sleep 1"}},
+	}
+	writeStopLifecycleCityConfig(t, cityDir, cfg)
+	overrideShutdownBeadsProviderForStop(t, func(string) error { return nil })
+
+	healthy := runtime.NewFake()
+	startStopTestSessions(t, healthy, "orphan-worker")
+	sp := sessionhybrid.New(healthy, runtime.NewFailFake(), func(string) bool { return false })
+	oldFactory := sessionProviderForStopCity
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return sp, nil }
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, 0, false)
+
+	assertStopNotConfirmed(t, code, stdout.String(), stderr.String())
+	if healthy.IsRunning("orphan-worker") {
+		t.Fatal("positively observed orphan survived the stop")
 	}
 }
