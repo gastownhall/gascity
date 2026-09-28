@@ -899,6 +899,7 @@ go_test(
         "cmd_sling_routevars_test.go",
         "cmd_sling_test.go",
         "cmd_sling_undeliverable_test.go",
+        "cmd_start_controller_lock_test.go",
         "cmd_start_drift_bench_test.go",
         "cmd_start_drift_test.go",
         "cmd_start_dryrun_test.go",

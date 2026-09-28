@@ -64,17 +64,17 @@ The hidden standalone compatibility flow still proceeds as follows:
 gc start --foreground
   │
   ├─ 1. Require an initialized city
-  ├─ 2. Fetch remote packs
-  ├─ 3. LoadWithIncludes(city.toml)  →  *config.City + Provenance
-  ├─ 4. ensureBeadsProvider()        →  start dolt server if bd backend
-  ├─ 5. ValidateRigs() + resolve paths
-  ├─ 6. initAllRigBeads()           →  per-rig .beads/ databases + routes
-  ├─ 7. MaterializeSystemFormulas()  →  embed system formulas as Layer 0
-  ├─ 8. ResolveFormulas()            →  symlinks in .beads/formulas/
-  ├─ 9. ValidateAgents() + hooks
-  ├─10. newSessionProvider()         →  tmux / exec / k8s / subprocess
-  ├─11. runController()
-  │     ├─ acquireControllerLock()   →  flock LOCK_EX|LOCK_NB
+  ├─ 2. acquireControllerLock()      →  flock LOCK_EX|LOCK_NB, held until exit
+  ├─ 3. Fetch remote packs
+  ├─ 4. LoadWithIncludes(city.toml)  →  *config.City + Provenance
+  ├─ 5. ensureBeadsProvider()        →  start dolt server if bd backend
+  ├─ 6. ValidateRigs() + resolve paths
+  ├─ 7. initAllRigBeads()           →  per-rig .beads/ databases + routes
+  ├─ 8. MaterializeSystemFormulas()  →  embed system formulas as Layer 0
+  ├─ 9. ResolveFormulas()            →  symlinks in .beads/formulas/
+  ├─10. ValidateAgents() + hooks
+  ├─11. newSessionProvider()         →  tmux / exec / k8s / subprocess
+  ├─12. runController()  (lock already held)
   │     ├─ startControllerSocket()   →  Unix socket for IPC
   │     ├─ build trackers (crash, idle, wisp GC, order)
   │     └─ controllerLoop()
@@ -133,7 +133,8 @@ Each tick of `controllerLoop()` (`cmd/gc/controller.go:268-320`) performs:
   trackers, event recorder, and I/O writers.
 
 - **`runController()`** (`cmd/gc/controller.go:335`): The top-level
-  orchestrator. Acquires the flock, opens the Unix socket, builds
+  orchestrator. Holds the flock (acquiring it unless the caller already
+  did, as `gc start --foreground` does), opens the Unix socket, builds
   trackers, enters the loop, and performs graceful shutdown on exit.
 
 - **`tryReloadConfig()`** (`cmd/gc/controller.go:137`): Config reload
@@ -158,7 +159,10 @@ indicate bugs.
   controller runs per city
   directory. Enforced by `flock(LOCK_EX|LOCK_NB)` on
   `.gc/controller.lock`. A second `gc start --foreground` fails
-  immediately with "controller already running."
+  immediately with "controller already running." It takes the lock before
+  it starts the bead-store provider, so a start that loses the lock (to a
+  running controller, or to a `gc stop` retiring the provider) leaves the
+  provider alone.
 
 - **`gc stop` keeps the controller lock through bead-store shutdown**:
   once the controller has stopped (acknowledged `stop`, or the supervisor
