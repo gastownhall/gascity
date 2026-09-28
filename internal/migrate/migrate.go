@@ -82,6 +82,7 @@ type agentFile struct {
 	MaxActiveSessions      *int                    `toml:"max_active_sessions,omitempty"`
 	MinActiveSessions      *int                    `toml:"min_active_sessions,omitempty"`
 	ScaleCheck             string                  `toml:"scale_check,omitempty"`
+	ColdWake               *bool                   `toml:"cold_wake,omitempty"`
 	DrainTimeout           string                  `toml:"drain_timeout,omitempty"`
 	OnBoot                 string                  `toml:"on_boot,omitempty"`
 	OnDeath                string                  `toml:"on_death,omitempty"`
@@ -940,6 +941,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		MaxActiveSessions:      agent.MaxActiveSessions,
 		MinActiveSessions:      agent.MinActiveSessions,
 		ScaleCheck:             agent.ScaleCheck,
+		ColdWake:               agent.ColdWake,
 		DrainTimeout:           agent.DrainTimeout,
 		OnBoot:                 agent.OnBoot,
 		OnDeath:                agent.OnDeath,
@@ -995,6 +997,7 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		cfg.MaxActiveSessions == nil &&
 		cfg.MinActiveSessions == nil &&
 		cfg.ScaleCheck == "" &&
+		cfg.ColdWake == nil &&
 		cfg.DrainTimeout == "" &&
 		cfg.OnBoot == "" &&
 		cfg.OnDeath == "" &&

@@ -32,6 +32,13 @@ func (a *Agent) EffectiveMinActiveSessions() int {
 	return 0
 }
 
+// EffectiveColdWake reports whether the cold-pool wake probe may override
+// this agent's custom scale_check when it returns an authoritative 0.
+// Defaults to true (unset): see ColdWake's doc comment for when to disable it.
+func (a *Agent) EffectiveColdWake() bool {
+	return a.ColdWake == nil || *a.ColdWake
+}
+
 // SupportsGenericEphemeralSessions reports whether the template may satisfy
 // generic controller demand with ephemeral sessions.
 func (a *Agent) SupportsGenericEphemeralSessions() bool {
