@@ -4844,17 +4844,18 @@ func assignedWorkExistsForSession(
 // own drain step — only the drain-ack close decision should. Use this function
 // (and closeSessionBeadIfReachableStoreUnassigned's excludeOwnDrainStep=true form)
 // ONLY from the drain-ack finalize path.
-// The identifier set here stays NARROW ({ID, session_name,
-// configured_named_identity}) deliberately. Widening it to every alias looks
-// attractive — an alias-form claim landing between a drain-ack kill and this
-// close would be stranded in_progress under a dead owner — but it collides with
-// a stronger invariant: a transient pool SLOT alias
-// ("gascity/gc.run-operator-1") is a REBINDING name, not an owner, and
-// TestAssignmentGuardsIgnoreTransientPoolSlotAliases pins that no guard may
-// honor one. Honoring slot-form ownership would let a rebind shield or inherit a
-// dead session's claim (#4981/#5241), which is the worse ambiguity. The upstream
-// fix unaliases transient slots so real claims arrive in session-name form,
-// which this set already sees.
+// The identifier set here stays NARROW deliberately: {ID, session_name,
+// configured_named_identity} plus the session's stable alias
+// (stableAssignmentAliasForConfigInfo), which a namepool member or canonical
+// singleton claims under. Widening it to every alias looks attractive — an
+// alias-form claim landing between a drain-ack kill and this close would be
+// stranded in_progress under a dead owner — but it collides with a stronger
+// invariant: a transient pool SLOT alias ("gascity/gc.run-operator-1") is a
+// REBINDING name, not an owner, and TestAssignmentGuardsIgnoreTransientPoolSlotAliases
+// pins that no guard may honor one. Honoring slot-form ownership would let a
+// rebind shield or inherit a dead session's claim (#4981/#5241), which is the
+// worse ambiguity. The upstream fix unaliases transient slots so real claims
+// arrive in session-name form, which this set already sees.
 //
 // The escalation's KILL gate uses the wide set instead
 // (drainAckAssigneeIdentities): over-refusing a kill merely leaves a row wedged,

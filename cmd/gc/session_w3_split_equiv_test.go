@@ -158,10 +158,10 @@ func TestSessionBeadHasAssignedWorkInfo(t *testing.T) {
 	got := map[string]bool{}
 	for _, sb := range oracleSessionBeadShapes() {
 		info := sessiontest.SeedBead(t, sb)
-		got[sb.ID] = sessionBeadHasAssignedWorkInfo(work, info)
+		got[sb.ID] = sessionBeadHasAssignedWorkInfo(work, info, nil)
 		// The empty work set is false for every shape (guards the has-work path is
 		// gated on the work set, not the session alone).
-		if sessionBeadHasAssignedWorkInfo(nil, info) {
+		if sessionBeadHasAssignedWorkInfo(nil, info, nil) {
 			t.Errorf("sessionBeadHasAssignedWorkInfo(nil, %s) = true, want false", sb.ID)
 		}
 	}
