@@ -71,14 +71,16 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
 
+	env = runBDInitCompat(t, env, wsDir, "dc", port, "")
+
 	// Use the port we started the server on — NOT a port from a local
 	// state file. This proves the "config port → env → bd" path works.
+	// Built from the HOME-isolated env runBDInitCompat returns so these
+	// direct bd invocations stay protected too (see isolateBdHomeEnv).
 	bdEnv := append(append([]string(nil), env...),
 		"GC_DOLT_HOST=127.0.0.1",
 		"GC_DOLT_PORT="+port,
 	)
-
-	runBDInitCompat(t, env, wsDir, "dc", port, "")
 
 	bdCreate := exec.Command(bdBinary, "create", "config-wired-bead", "--json",
 		"--description=Integration test for issue 011", "-t", "task", "-p", "3")
@@ -127,7 +129,7 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 	// refuses to open the existing database (PROJECT IDENTITY MISMATCH) —
 	// its guard against silently adopting a foreign project's data, not a
 	// cross-workspace sharing failure.
-	runBDInitCompat(t, env, wsDir2, "dc", port, doltDatabaseName(t, wsDir))
+	env = runBDInitCompat(t, env, wsDir2, "dc", port, doltDatabaseName(t, wsDir))
 
 	bdList2 := exec.Command(bdBinary, "list", "--json")
 	bdList2.Dir = wsDir2
@@ -184,7 +186,7 @@ func TestDoltConfigWiringIsolatesHOMEFromSharedServerConfig(t *testing.T) {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
 
-	runBDInitCompat(t, env, wsDir, "hi", port, "")
+	env = runBDInitCompat(t, env, wsDir, "hi", port, "")
 
 	bdCreate := exec.Command(bdBinary, "create", "home-isolation probe", "--json",
 		"--description=Integration test for HOME isolation", "-t", "task", "-p", "3")
@@ -214,8 +216,15 @@ func TestDoltConfigWiringIsolatesHOMEFromSharedServerConfig(t *testing.T) {
 // with bd v0.60.0 (which lacks --skip-agents). A non-empty database joins
 // that existing server database instead of letting bd derive a new one
 // from prefix; leave it empty to create the database.
-func runBDInitCompat(t *testing.T, env []string, dir, prefix, port, database string) {
+//
+// Returns env with HOME isolated (see isolateBdHomeEnv) — callers that build
+// further exec.Command invocations from env after this call (this file's
+// direct `bd create`/`bd list` probes) must capture and reuse the returned
+// value, not their pre-call env, or those later invocations stay exposed to
+// the same shared-server misroute this function itself guards against.
+func runBDInitCompat(t *testing.T, env []string, dir, prefix, port, database string) []string {
 	t.Helper()
+	env = isolateBdHomeEnv(env)
 	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
 	defer cancel()
 	args := []string{
@@ -236,6 +245,7 @@ func runBDInitCompat(t *testing.T, env []string, dir, prefix, port, database str
 	if err != nil {
 		t.Fatalf("bd init: exit status %v: %s", err, out)
 	}
+	return env
 }
 
 // doltDatabaseName returns the server-side Dolt database name bd recorded

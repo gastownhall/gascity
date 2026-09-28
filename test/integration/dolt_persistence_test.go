@@ -59,9 +59,21 @@ var doltPersistenceWorkspaceCounter atomic.Int64
 // guardrail for the Dolt persistence contract, and the timing lines make any
 // fix that adds expensive subprocesses or export work visible in `go test -v`
 // output without baking in brittle machine-specific thresholds.
+//
+// beads.ExecCommandRunnerWithEnv overlays envOverrides on top of the ambient
+// process environment (including HOME) with no isolation of its own — see
+// TestRealBdRunnerIsolatesHOMEFromSharedServerConfig. A HOME override to a
+// fresh, empty per-call temp dir is injected as a baseline here (an explicit
+// caller-supplied HOME in envOverrides still wins, applied after) so a
+// shared-server config.yaml sitting in the real ambient HOME can never
+// divert the bd subprocesses this runner drives.
 func realBdRunner(t testing.TB, envOverrides map[string]string) beads.CommandRunner {
 	t.Helper()
-	base := beads.ExecCommandRunnerWithEnv(envOverrides)
+	overrides := map[string]string{"HOME": t.TempDir()}
+	for k, v := range envOverrides {
+		overrides[k] = v
+	}
+	base := beads.ExecCommandRunnerWithEnv(overrides)
 	return func(dir, name string, args ...string) ([]byte, error) {
 		displayName := name
 		if name == "bd" && realBDBinary != "" {
@@ -105,8 +117,12 @@ func TestRealBdRunnerIsolatesHOMEFromSharedServerConfig(t *testing.T) {
 	if out, err := gitCmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)
 	}
+	// This init step isn't what's under test (realBdRunner, below, is) — pin
+	// its own HOME to wsDir so the t.Setenv pollution above doesn't stop
+	// setup from reaching the part of the test that matters.
 	initCmd := exec.Command(realBDBinary, "init", "-p", "rb", "--skip-hooks", "--skip-agents")
 	initCmd.Dir = wsDir
+	initCmd.Env = replaceEnv(os.Environ(), "HOME", wsDir)
 	if out, err := initCmd.CombinedOutput(); err != nil {
 		t.Fatalf("bd init: %v: %s", err, out)
 	}
@@ -212,7 +228,7 @@ func runRealBDInit(t *testing.T, env []string, dir, prefix, port string) {
 		"--server-host", "127.0.0.1", "--server-port", port, "-p", prefix,
 		"--skip-hooks", "--skip-agents")
 	cmd.Dir = dir
-	cmd.Env = env
+	cmd.Env = isolateBdHomeEnv(env)
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	logSubprocessTiming(t, []string{"bd", "init", "--server"}, start, errorsForTiming(ctx.Err(), err))
@@ -230,7 +246,7 @@ func runRealBDConfigSet(t *testing.T, env []string, dir, key, value string) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, realBDBinary, "config", "set", key, value)
 	cmd.Dir = dir
-	cmd.Env = env
+	cmd.Env = isolateBdHomeEnv(env)
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	logSubprocessTiming(t, []string{"bd", "config", "set", key, value}, start, errorsForTiming(ctx.Err(), err))
@@ -252,7 +268,7 @@ func runRealBDExportAll(t *testing.T, env []string, dir string) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, realBDBinary, "export", "-o", ".beads/issues.jsonl", "--all")
 	cmd.Dir = dir
-	cmd.Env = env
+	cmd.Env = isolateBdHomeEnv(env)
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	logSubprocessTiming(t, []string{"bd", "export", "-o", ".beads/issues.jsonl", "--all"}, start, errorsForTiming(ctx.Err(), err))
@@ -270,7 +286,7 @@ func configureCustomTypesReal(t *testing.T, env []string, dir string, types []st
 	defer cancel()
 	cmd := exec.CommandContext(ctx, realBDBinary, "config", "set", "types.custom", strings.Join(types, ","))
 	cmd.Dir = dir
-	cmd.Env = env
+	cmd.Env = isolateBdHomeEnv(env)
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	logSubprocessTiming(t, []string{"bd", "config", "set", "types.custom", strings.Join(types, ",")}, start, errorsForTiming(ctx.Err(), err))

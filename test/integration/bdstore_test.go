@@ -168,7 +168,7 @@ func runBDInit(t *testing.T, env []string, dir, prefix, port string) {
 
 	bdInit := exec.CommandContext(ctx, bdBinary, "init", "--server", "--server-host", "127.0.0.1", "--server-port", port, "-p", prefix, "--skip-hooks", "--skip-agents")
 	bdInit.Dir = dir
-	bdInit.Env = env
+	bdInit.Env = isolateBdHomeEnv(env)
 	out, err := bdInit.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		t.Fatalf("bd init timed out after %s: %s", bdInitTimeout, out)
@@ -334,7 +334,7 @@ func configureCustomTypes(t *testing.T, env []string, wsDir string, customTypes 
 
 	cmd := exec.CommandContext(ctx, bdBinary, "config", "set", "types.custom", strings.Join(customTypes, ","))
 	cmd.Dir = wsDir
-	cmd.Env = env
+	cmd.Env = isolateBdHomeEnv(env)
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		t.Fatalf("bd config set types.custom timed out after %s: %s", bdInitTimeout, out)

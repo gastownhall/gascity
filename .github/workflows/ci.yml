@@ -410,6 +410,8 @@ jobs:
         run: bd version
       - name: bd CLI contract (minimum supported)
         run: make test-bd-cli-contract
+      - name: bd CLI contract HOME isolation (minimum supported)
+        run: make test-bd-cli-contract-home-isolation
 
   # Cross-version contract gate: the "current" cell of the bd matrix. The
   # "prev" cell is contract-acceptance-previous above (the min-supported
@@ -455,6 +457,8 @@ jobs:
         run: bd version
       - name: bd CLI contract (current)
         run: make test-bd-cli-contract
+      - name: bd CLI contract HOME isolation (current)
+        run: make test-bd-cli-contract-home-isolation
       # The conditional-release CAS contract is wired only on this cell, but that
       # is now a choice, not a capability limit: BdStore.ReleaseIfCurrent prefers
       # bd's --if-assignee/--if-status verb (a rejected precondition is exit 13),
@@ -745,6 +749,8 @@ jobs:
         run: bd version
       - name: bd CLI contract (main HEAD)
         run: make test-bd-cli-contract
+      - name: bd CLI contract HOME isolation (main HEAD)
+        run: make test-bd-cli-contract-home-isolation
 
   preflight-generated:
     name: Preflight / generated artifacts

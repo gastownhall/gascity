@@ -38,35 +38,6 @@ func runBD(t *testing.T, dir string, args ...string) (string, error) {
 	return string(out), err
 }
 
-// TestRunBDIsolatesHOMEFromSharedServerConfig proves runBD does not leak
-// the ambient HOME into the bd subprocess it execs. runBD builds cmd.Env
-// from os.Environ() with no HOME isolation of its own, so a shared-server
-// config.yaml sitting in the real $HOME can make bd route through that
-// shared server instead of dir's own BEADS_DIR-scoped store.
-func TestRunBDIsolatesHOMEFromSharedServerConfig(t *testing.T) {
-	helpers.RequireBD(t)
-
-	pollutedHome := t.TempDir()
-	beadsDir := filepath.Join(pollutedHome, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
-		t.Fatalf("creating polluted HOME .beads dir: %v", err)
-	}
-	cfg := "no-db: true\ndolt:\n    shared-server: true\n"
-	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(cfg), 0o644); err != nil {
-		t.Fatalf("writing polluted HOME config.yaml: %v", err)
-	}
-	t.Setenv("HOME", pollutedHome)
-
-	dir := t.TempDir()
-	requireBD(t, dir, "init", "-p", "ct", "--skip-hooks", "-q")
-	id := createBead(t, dir, "home-isolation probe")
-
-	out := requireBD(t, dir, "list", "--json")
-	if !strings.Contains(out, id) {
-		t.Fatalf("bd list under a shared-server HOME did not see bead %s created in dir's own BEADS_DIR-scoped store:\n%s", id, out)
-	}
-}
-
 // requireBD runs a bd command and fails the test if it returns non-zero.
 func requireBD(t *testing.T, dir string, args ...string) string {
 	t.Helper()

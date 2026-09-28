@@ -86,7 +86,19 @@ const (
 	// Bumped again for the Beads v1.3.0 -> v1.3.1-rc.2 pin: every job's
 	// BD_VERSION env value moves to the new tag. Reviewed delta: that value
 	// only, no new job, step, trigger or permission.
-	expectedCIExecutionHash     = "00c7da41fd7f67a986f1fec6e8730b14632e725063ea977636bd0da2f6cb5ed0"
+	//
+	// Bumped again (ga-nr9epw, restoring ga-1037rg / ga-yoxtux regression
+	// coverage without re-widening test-bd-cli-contract's own -run regex,
+	// which TestAcceptanceTargetsSeparateTierAFromExternalBdContracts pins as
+	// an exact literal substring): one new step, "bd CLI contract HOME
+	// isolation (...)", added immediately after the existing "bd CLI contract
+	// (...)" step in each of contract-acceptance-previous, contract-
+	// acceptance-current and contract-radar-bd-head. Each new step runs `make
+	// test-bd-cli-contract-home-isolation`, a separate Makefile target driving
+	// only TestRunBDIsolatesHOMEFromSharedServerConfig under the same
+	// acceptance_bd_contract tag and bd binary the preceding step already
+	// resolved onto PATH. No new job, trigger or permission.
+	expectedCIExecutionHash     = "5c87deba6587de87ade53c474feebd0fc4feb094422fc5bfb25bc4db393d4a6d"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
