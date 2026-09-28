@@ -133,7 +133,11 @@ scope_resolve_db() {
 # the ids bd returns in its --json array, not from the exit status.
 # SCOPE_CHUNK_OK / SCOPE_CHUNK_FAILED count ids bd did / did not apply the
 # verb to; SCOPE_CHUNK_FAILED_IDS and SCOPE_CHUNK_ERRORS carry the failed ids
-# and bd's diagnostics.
+# and bd's diagnostics. When SCOPE_DEADLINE (epoch seconds) is set and has
+# passed, no further chunk is issued and the ids left over are counted in
+# SCOPE_CHUNK_DEFERRED.
+SCOPE_DEADLINE="${SCOPE_DEADLINE:-}"
+SCOPE_CHUNK_DEFERRED=0
 SCOPE_CHUNK_OK=0
 SCOPE_CHUNK_FAILED=0
 SCOPE_CHUNK_FAILED_IDS=""
@@ -152,6 +156,7 @@ scope_bd_each_chunk() {
 
     SCOPE_CHUNK_OK=0
     SCOPE_CHUNK_FAILED=0
+    SCOPE_CHUNK_DEFERRED=0
     SCOPE_CHUNK_FAILED_IDS=""
     SCOPE_CHUNK_ERRORS=""
     case "$size" in '' | *[!0-9]* | 0) size=200 ;; esac
@@ -159,6 +164,11 @@ scope_bd_each_chunk() {
 
     flush_chunk() {
         [ "${#chunk[@]}" -gt 0 ] || return 0
+        if [ -n "$SCOPE_DEADLINE" ] && [ "$(date +%s)" -ge "$SCOPE_DEADLINE" ]; then
+            SCOPE_CHUNK_DEFERRED=$((SCOPE_CHUNK_DEFERRED + ${#chunk[@]}))
+            chunk=()
+            return 0
+        fi
         out=$(scope_bd "$verb" "${chunk[@]}" "$@" --json 2>"$err_file") || true
         applied=$(printf '%s' "$out" | jq -r 'if type == "array" then .[].id // empty elif type == "object" then .id // empty else empty end' 2>/dev/null || true)
         missing=""

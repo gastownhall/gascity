@@ -51,10 +51,6 @@ func containsReaperCloseCleanupEdgePredicate(text string) bool {
 		strings.Contains(text, "$WISP_CLOSE_EDGE_PREDICATE")
 }
 
-// reaperStaleWispCloseReason is the close reason reaper.sh gives bd close for
-// stale wisps whose owning parent or root is closed.
-const reaperStaleWispCloseReason = "stale wisp whose owning parent or root is closed, auto-closed by reaper"
-
 func containsSQLFragment(text, fragment string) bool {
 	return strings.Contains(strings.Join(strings.Fields(text), ""), strings.Join(strings.Fields(fragment), ""))
 }
@@ -3632,98 +3628,6 @@ exit 0
 	}
 }
 
-func TestReaperClosesStaleWispChainsToFixpoint(t *testing.T) {
-	cityDir := t.TempDir()
-	binDir := t.TempDir()
-	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
-	gcLog := filepath.Join(t.TempDir(), "gc.log")
-	bdLog := filepath.Join(t.TempDir(), "bd.log")
-	closeCountState := filepath.Join(t.TempDir(), "close-count-state")
-
-	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
-printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
-case "$*" in
-  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
-    printf 'Tables_in_db\nwisps\n'
-    ;;
-  *"SHOW DATABASES"*)
-    printf 'Database\nbeads\n'
-    ;;
-  *"SELECT DISTINCT w.id"*)
-    # Each pass exposes the next chain level: closing level 1 makes level 2
-    # eligible, then nothing is left.
-    n=0
-    if [ -f "$CLOSE_COUNT_STATE" ]; then
-      n=$(cat "$CLOSE_COUNT_STATE")
-    fi
-    case "$n" in
-      0)
-        printf '1\n' > "$CLOSE_COUNT_STATE"
-        printf 'id,mode\nbd-wisp-level1,bare\n'
-        ;;
-      1)
-        printf '2\n' > "$CLOSE_COUNT_STATE"
-        printf 'id,mode\nbd-wisp-level2,force\n'
-        ;;
-      *)
-        printf 'id,mode\n'
-        ;;
-    esac
-    ;;
-  *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
-    printf 'COUNT(*)\n2\n'
-    ;;
-  *"COUNT("*)
-    printf 'COUNT(*)\n0\n'
-    ;;
-  *"SELECT id"*)
-    printf 'id\n'
-    ;;
-esac
-exit 0
-`)
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
-printf '%s\n' "$*" >> "$GC_CALL_LOG"
-exit 0
-`)
-
-	env := map[string]string{
-		"CLOSE_COUNT_STATE": closeCountState,
-		"BD_CALL_LOG":       bdLog,
-		"DOLT_ARGS_LOG":     doltLog,
-		"GC_CALL_LOG":       gcLog,
-		"GC_CITY":           cityDir,
-		"GC_CITY_PATH":      cityDir,
-		"GC_DOLT_HOST":      "127.0.0.1",
-		"GC_DOLT_PORT":      "3307",
-		"GC_DOLT_USER":      "root",
-		"GC_DOLT_PASSWORD":  "",
-		"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-	}
-
-	runScript(t, coreScriptPath("reaper.sh"), env)
-
-	bdData, err := os.ReadFile(bdLog)
-	if err != nil {
-		t.Fatalf("ReadFile(bd log): %v", err)
-	}
-	bdLogText := string(bdData)
-	if !strings.Contains(bdLogText, "args=close bd-wisp-level1 --reason "+reaperStaleWispCloseReason) {
-		t.Fatalf("reaper did not close chain level 1 bare through bd close:\n%s", bdLogText)
-	}
-	if !strings.Contains(bdLogText, "args=close bd-wisp-level2 --force --reason "+reaperStaleWispCloseReason) {
-		t.Fatalf("reaper did not close assigned chain level 2 with --force:\n%s", bdLogText)
-	}
-
-	gcData, err := os.ReadFile(gcLog)
-	if err != nil {
-		t.Fatalf("ReadFile(gc log): %v", err)
-	}
-	if !strings.Contains(string(gcData), "closed_wisps:2") {
-		t.Fatalf("reaper summary did not report all closed chain levels:\n%s", gcData)
-	}
-}
-
 func TestReaperDryRunReportsWouldCloseStaleWisps(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -3741,7 +3645,7 @@ case "$*" in
     printf 'Database\nbeads\n'
     ;;
   *"SELECT DISTINCT w.id"*)
-    printf 'id,mode\nbd-wisp-a,bare\nbd-wisp-b,force\n'
+    printf 'id,owner_id,depth,state,mode\nbd-wisp-a,,0,ok,bare\nbd-wisp-b,,0,ok,force\n'
     ;;
   *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
     printf 'COUNT(*)\n2\n'
@@ -3807,10 +3711,10 @@ printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
   *"SELECT DISTINCT w.id"*)
     if [ -f "$CLOSED_FLAG" ]; then
-      printf 'id,mode\n'
+      printf 'id,owner_id,depth,state,mode\n'
     else
       : > "$CLOSED_FLAG"
-      printf 'id,mode\nbd-wisp-stale,bare\n'
+      printf 'id,owner_id,depth,state,mode\nbd-wisp-stale,,0,ok,bare\n'
     fi
     ;;
   *"SELECT COUNT(*) FROM"*"wisps"*"issue_type NOT IN ('message')"*"created_at <"*)
@@ -3962,7 +3866,7 @@ case "$*" in
     printf 'Database\nbeads\n'
     ;;
   *"SELECT DISTINCT w.id"*"wisps w"*"wisp_dependencies d"*)
-    printf 'id,mode\n'
+    printf 'id,owner_id,depth,state,mode\n'
     ;;
   *"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
     printf 'COUNT(*)\n2\n'
@@ -4036,9 +3940,9 @@ case "$*" in
     fi
     if [ "$n" = "0" ]; then
       printf '1\n' > "$CLOSE_COUNT_STATE"
-      printf 'id,mode\nbd-wisp-owned,bare\n'
+      printf 'id,owner_id,depth,state,mode\nbd-wisp-owned,,0,ok,bare\n'
     else
-      printf 'id,mode\n'
+      printf 'id,owner_id,depth,state,mode\n'
     fi
     ;;
   *"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
@@ -4680,9 +4584,9 @@ case "$*" in
     fi
     if [ "$n" = "0" ]; then
       printf '1\n' > "$CLOSE_COUNT_STATE"
-      printf 'id,mode\nbd-wisp-owned,bare\n'
+      printf 'id,owner_id,depth,state,mode\nbd-wisp-owned,,0,ok,bare\n'
     else
-      printf 'id,mode\n'
+      printf 'id,owner_id,depth,state,mode\n'
     fi
     ;;
   *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
@@ -6369,9 +6273,9 @@ case "$*" in
 *"SELECT DISTINCT w.id"*"wisps w"*"wisp_dependencies d"*)
   if close_fixture_matches "$*" && [ ! -f "${REAPER_CLOSED_FLAG:-/nonexistent}" ]; then
     : > "$REAPER_CLOSED_FLAG"
-    printf 'id,mode\nbd-wisp-fixture,bare\n'
+    printf 'id,owner_id,depth,state,mode\nbd-wisp-fixture,,0,ok,bare\n'
   else
-    printf 'id,mode\n'
+    printf 'id,owner_id,depth,state,mode\n'
   fi
   ;;
 *"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
@@ -6403,10 +6307,14 @@ func writeMaintenanceBdStub(t *testing.T, path string) {
 //     BD_BACKUP_STATUS_FAIL makes it fail with that text.
 //   - close/update/delete succeed unless BD_CLOSE_FAIL is set.
 //
-// maintenanceBdPurgeAndBackupVerbs answers `bd purge` and `bd backup status`
+// maintenanceBdPurgeAndBackupVerbs answers `bd prune`, `bd purge` and `bd backup status`
 // the way maintenanceBdStubBody does, for test-specific bd doubles that
 // otherwise only log their calls.
 const maintenanceBdPurgeAndBackupVerbs = `case "$1" in
+  prune)
+    printf '{"pruned_count":%s}\n' "${BD_PRUNE_COUNT:-0}"
+    exit 0
+    ;;
   close|update|delete)
 ` + maintenanceBdAppliedIDsJSON + `
     exit 0
@@ -6471,8 +6379,22 @@ case "$1" in
       fi
     fi
     ;;
-  close|update|delete)
+  close|update)
 ` + maintenanceBdAppliedIDsJSON + `
+    ;;
+  delete)
+    if [ -n "${BD_CLOSE_FAIL:-}" ]; then
+      printf '%s\n' "$BD_CLOSE_FAIL" >&2
+      exit 1
+    fi
+    n=0
+    while [ $# -gt 0 ]; do
+      if [ "$1" = "--from-file" ]; then
+        n=$(grep -c . "$2")
+      fi
+      shift
+    done
+    printf '{"deleted_count":%s}\n' "$n"
     ;;
 esac
 exit 0

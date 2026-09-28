@@ -106,8 +106,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     selects the whole wisps plane (`--wisps-plane`), keeps closed wisps a live
     wisp depends on, and purges in bounded batches (`--limit`); a backlog is
     cleared across runs within `GC_REAPER_PURGE_BUDGET_SECS` (default 300s).
-    With bd v1.3.0 the purge step is reported as skipped.
+    With bd v1.3.0 the purge step is reported as skipped. A run that uses up
+    `GC_REAPER_RUN_BUDGET_SECS` (default 780s, below the 900s order timeout)
+    stops starting new work, reports a partial outcome, and the next run
+    continues.
   - Both orders now run with a 900s timeout.
+
+### Known Issues
+
+- **Proxied cities get no closed-wisp purge, bd backup or `gm-*` session
+  prune until gc's bd pin moves to the beads 1.3.x hotfix.** The `reaper`,
+  `jsonl-export` and `mol-dog-backup` orders now run on bd-owned proxied
+  cities, but with the pinned bd v1.3.0 `bd purge --wisps-plane --limit` and
+  `bd backup` on a proxied scope are not available: those steps are reported
+  as skipped (`order.skipped`) every run instead of running, and the session
+  prune waits for a backup it can see. Stale-wisp, workflow-root, nudge and
+  stale-issue closes and the JSONL archive work today. The bd pin bump
+  removes this entry.
 
 ### Added
 

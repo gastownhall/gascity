@@ -61,7 +61,7 @@ case "$*" in
     printf '{}\n'
     ;;
   *"SELECT DISTINCT w.id"*)
-    printf 'id,mode\n'
+    printf 'id,owner_id,depth,state,mode\n'
     ;;
   *"SELECT"*)
     printf 'id\n'
@@ -342,16 +342,22 @@ func TestReaperDryRunPurgePreviewsOnly(t *testing.T) {
 // cannot select the wisps plane yet (bd v1.3.0): the step is declared skipped
 // every run, and nothing escalates.
 func TestReaperReportsPurgeUnsupportedWithoutEscalating(t *testing.T) {
-	f := newScopeFixture(t, "")
-	f.env["BD_PURGE_FAIL"] = "Error: unknown flag: --wisps-plane"
-	f.runReaper(t)
+	// bd v1.3.0 has neither flag; a build with --wisps-plane but no --limit
+	// fails on the second one.
+	for _, missing := range []string{"--wisps-plane", "--limit"} {
+		t.Run(missing, func(t *testing.T) {
+			f := newScopeFixture(t, "")
+			f.env["BD_PURGE_FAIL"] = "Error: unknown flag: " + missing
+			f.runReaper(t)
 
-	if gcLog := f.read(t, f.gcLog); strings.Contains(gcLog, "ESCALATION") {
-		t.Fatalf("an unsupported purge flag must not escalate:\n%s", gcLog)
-	}
-	out, ok := f.outcome(t)
-	if !ok || out.Outcome != "partial" || !out.hasScope("city", "bd-purge-wisps-plane-unsupported") {
-		t.Fatalf("outcome = %+v (declared %v), want partial with bd-purge-wisps-plane-unsupported", out, ok)
+			if gcLog := f.read(t, f.gcLog); strings.Contains(gcLog, "ESCALATION") {
+				t.Fatalf("an unsupported purge flag must not escalate:\n%s", gcLog)
+			}
+			out, ok := f.outcome(t)
+			if !ok || out.Outcome != "partial" || !out.hasScope("city", "bd-purge-unsupported") {
+				t.Fatalf("outcome = %+v (declared %v), want partial with bd-purge-unsupported", out, ok)
+			}
+		})
 	}
 }
 
@@ -399,6 +405,14 @@ func TestReaperSessionPruneBackupGateReadsBdBackupStatus(t *testing.T) {
 		{"stale backup", map[string]string{"BD_BACKUP_STATUS_JSON": freshBackupStatusJSON(48*time.Hour, false)}, false, true, "session prune skipped: no fresh backup"},
 		{"no backup", map[string]string{"BD_BACKUP_STATUS_JSON": `{"backup":{},"dolt":{"configured":false}}`}, false, true, "session prune skipped: no fresh backup"},
 		{"backup unsupported by bd for this transport", map[string]string{"BD_BACKUP_STATUS_FAIL": `{"code":"proxy.backup.unsupported","error":"backup status is not supported in proxied-server mode"}`}, false, false, "session prune skipped: bd-backup-unsupported"},
+		// A configured Dolt destination is judged on its Dolt sync only: a
+		// fresh legacy backup state must not open the gate (doctor's
+		// scanBackupFreshness rule).
+		{"dolt destination never synced, legacy state fresh", map[string]string{"BD_BACKUP_STATUS_JSON": fmt.Sprintf(`{"backup":{"timestamp":%q},"dolt":{"configured":true}}`, time.Now().UTC().Format(time.RFC3339))}, false, true, "session prune skipped: no fresh backup"},
+		{"dolt destination stale, legacy state fresh", map[string]string{"BD_BACKUP_STATUS_JSON": fmt.Sprintf(`{"backup":{"timestamp":%q},"dolt":{"configured":true,"last_sync":%q}}`, time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Add(-72*time.Hour).Format(time.RFC3339))}, false, true, "session prune skipped: no fresh backup"},
+		{"no dolt destination, legacy state fresh", map[string]string{"BD_BACKUP_STATUS_JSON": fmt.Sprintf(`{"backup":{"timestamp":%q},"dolt":{"configured":false}}`, time.Now().UTC().Format(time.RFC3339))}, true, false, ""},
+		{"malformed backup status", map[string]string{"BD_BACKUP_STATUS_JSON": `not json`}, false, true, "session prune skipped: no fresh backup"},
+		{"unparseable backup timestamp", map[string]string{"BD_BACKUP_STATUS_JSON": `{"dolt":{"configured":true,"last_sync":"yesterday"}}`}, false, true, "session prune skipped: no fresh backup"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -698,5 +712,166 @@ func TestReaperStopsPurgingAtItsBudgetAndDeclaresTheBacklog(t *testing.T) {
 	}
 	if strings.Contains(f.read(t, f.gcLog), "ESCALATION") {
 		t.Fatalf("a purge backlog is not an anomaly:\n%s", f.read(t, f.gcLog))
+	}
+}
+
+// writeChildAwareBdStub installs a bd double that, like real bd, refuses a
+// bare `close` of a bead that still has open children (BD_CHILDREN="p:c ...",
+// open until closed) and records every close in order. A --force close of a
+// bead with an open child is logged as FORCED-WITH-OPEN-CHILD so tests can
+// assert the reaper never does that.
+func writeChildAwareBdStub(t *testing.T, binDir string) (closedLog string) {
+	t.Helper()
+	closedLog = filepath.Join(t.TempDir(), "closed.log")
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf 'scope=%s args=%s\n' "${GC_FAKE_SCOPE:-}" "$*" >> "${BD_CALL_LOG:-/dev/null}"
+case "$1" in
+  purge) printf '{"purged_count":0,"has_more":false}\n'; exit 0 ;;
+  prune) printf '{"pruned_count":0}\n'; exit 0 ;;
+  backup) printf '%s\n' "$BD_BACKUP_STATUS_JSON"; exit 0 ;;
+  close) ;;
+  *) exit 0 ;;
+esac
+shift
+force=""
+ids=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --force) force=1 ;;
+    --reason) shift ;;
+    -*) ;;
+    *) ids="$ids $1" ;;
+  esac
+  shift
+done
+sep=""
+printf '['
+for id in $ids; do
+  open_child=""
+  for pair in ${BD_CHILDREN:-}; do
+    parent="${pair%%:*}"
+    child="${pair#*:}"
+    if [ "$parent" = "$id" ] && ! grep -qx "$child" "`+closedLog+`" 2>/dev/null; then
+      open_child="$child"
+    fi
+  done
+  if [ -n "$open_child" ] && [ -z "$force" ]; then
+    printf 'cannot close %s: 1 open child issue(s); close children first or use --force to override\n' "$id" >&2
+    continue
+  fi
+  if [ -n "$open_child" ]; then
+    printf 'FORCED-WITH-OPEN-CHILD %s\n' "$id" >> "`+closedLog+`.violations"
+  fi
+  printf '%s\n' "$id" >> "`+closedLog+`"
+  printf '%s{"id":"%s"}' "$sep" "$id"
+  sep=","
+done
+printf ']\n'
+exit 0
+`)
+	return closedLog
+}
+
+// TestReaperClosesAnOrphanedWispSubtreeLeafFirst is the root closed -> mid
+// open -> leaf open chain: bd refuses to close mid while leaf is open, so the
+// subtree must be closed deepest-first. An assigned node is closed with
+// --force only once its own children are closed.
+func TestReaperClosesAnOrphanedWispSubtreeLeafFirst(t *testing.T) {
+	f := newScopeFixture(t, `
+  *"SELECT COUNT(*) FROM"*"wisps"*"issue_type NOT IN ('message')"*"created_at <"*)
+    printf 'COUNT(*)\n4\n'
+    ;;
+  *"reap_roots"*)
+    printf 'id,owner_id,depth,state,mode\n'
+    printf 'w-mid,,0,ok,force\n'
+    printf 'w-leaf,w-mid,1,ok,bare\n'
+    printf 'w-leaf2,w-mid,1,ok,bare\n'
+    printf 'w-grandleaf,w-leaf,2,ok,bare\n'
+    ;;`)
+	closed := writeChildAwareBdStub(t, f.binDir)
+	f.env["BD_CHILDREN"] = "w-mid:w-leaf w-mid:w-leaf2 w-leaf:w-grandleaf"
+	f.runReaper(t)
+
+	got := strings.Fields(f.read(t, closed))
+	want := []string{"w-grandleaf", "w-leaf", "w-leaf2", "w-mid"}
+	if len(got) != 4 || got[0] != "w-grandleaf" || got[3] != "w-mid" {
+		t.Fatalf("close order = %v, want deepest first ending with the subtree root (%v)\ngc log:\n%s\nbd log:\n%s", got, want, f.read(t, f.gcLog), f.read(t, f.bdLog))
+	}
+	if v := f.read(t, closed+".violations"); v != "" {
+		t.Fatalf("reaper force-closed a bead that still had an open child:\n%s", v)
+	}
+	gcLog := f.read(t, f.gcLog)
+	if strings.Contains(gcLog, "ESCALATION") || !strings.Contains(gcLog, "closed_wisps:4") {
+		t.Fatalf("reaper did not close the whole subtree cleanly:\n%s", gcLog)
+	}
+	if !strings.Contains(f.read(t, f.bdLog), "args=close w-mid --force --reason") {
+		t.Fatalf("the assigned subtree root was not force-closed after its children:\n%s", f.read(t, f.bdLog))
+	}
+}
+
+// A subtree node with a descendant the reaper must not close (too young, not
+// a wisp, or in a status the reaper leaves alone) keeps its whole ancestry
+// open, without escalating: nothing is ever closed over a live child.
+func TestReaperKeepsAncestorsOfALiveDescendantOpen(t *testing.T) {
+	f := newScopeFixture(t, `
+  *"SELECT COUNT(*) FROM"*"wisps"*"issue_type NOT IN ('message')"*"created_at <"*)
+    printf 'COUNT(*)\n4\n'
+    ;;
+  *"reap_roots"*)
+    printf 'id,owner_id,depth,state,mode\n'
+    printf 'w-mid,,0,ok,bare\n'
+    printf 'w-leaf,w-mid,1,ok,bare\n'
+    printf 'w-young,w-leaf,2,keep,bare\n'
+    printf 'w-other,,0,ok,bare\n'
+    ;;`)
+	closed := writeChildAwareBdStub(t, f.binDir)
+	f.env["BD_CHILDREN"] = "w-mid:w-leaf w-leaf:w-young"
+	f.runReaper(t)
+
+	got := strings.Fields(f.read(t, closed))
+	if len(got) != 1 || got[0] != "w-other" {
+		t.Fatalf("closed = %v, want only the unrelated w-other (w-mid and w-leaf sit over a live wisp)", got)
+	}
+	if strings.Contains(f.read(t, f.gcLog), "ESCALATION") {
+		t.Fatalf("holding a subtree over a live wisp is not an anomaly:\n%s", f.read(t, f.gcLog))
+	}
+}
+
+func TestReaperRunBudgetDeclaresPartialAndCarriesWorkForward(t *testing.T) {
+	f := newScopeFixture(t, "")
+	f.env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api","hq":false}]}`
+	f.env["FAKE_SCOPE_DBS"] = "rig:api=apidb"
+	f.env["GC_REAPER_RUN_BUDGET_SECS"] = "0"
+	f.runReaper(t)
+
+	if strings.Contains(f.read(t, f.gcLog), "--rig api purge") {
+		t.Fatalf("a spent run budget must not start new work:\n%s", f.read(t, f.gcLog))
+	}
+	// Nothing was reaped at all, so the run is "skipped"; each scope it did
+	// not reach is named and picked up by the next run.
+	out, ok := f.outcome(t)
+	if !ok || out.Outcome != "skipped" || !out.hasScope("rig:api", "run budget exhausted before this scope") {
+		t.Fatalf("outcome = %+v (declared %v), want skipped carrying the rig to the next run", out, ok)
+	}
+	if strings.Contains(f.read(t, f.gcLog), "ESCALATION") {
+		t.Fatalf("a spent run budget is not an anomaly:\n%s", f.read(t, f.gcLog))
+	}
+}
+
+func TestReaperRecordsFailedSessionPruneAsAnAnomaly(t *testing.T) {
+	f := sessionPruneFixture(t, "")
+	writeExecutable(t, filepath.Join(f.binDir, "bd"), `#!/bin/sh
+printf 'args=%s\n' "$*" >> "${BD_CALL_LOG:-/dev/null}"
+case "$1" in
+  purge) printf '{"purged_count":0,"has_more":false}\n' ;;
+  backup) printf '%s\n' "$BD_BACKUP_STATUS_JSON" ;;
+  prune) printf 'Error: prune failed: database is locked\n' >&2; exit 1 ;;
+esac
+exit 0
+`)
+	f.runReaper(t)
+
+	if gcLog := f.read(t, f.gcLog); !strings.Contains(gcLog, "session bead prune failed (pattern=gm-*)") || !strings.Contains(gcLog, "database is locked") {
+		t.Fatalf("a failed bd prune must be escalated with bd's error, not counted as 0:\n%s", gcLog)
 	}
 }

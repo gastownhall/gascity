@@ -317,12 +317,22 @@ func (c *bdTopologyCity) seedScope(t *testing.T, s bdTopologyScope) map[string]s
 	create("purgeable", "-t", "task", "closed standalone wisp", "--ephemeral")
 	create("protected", "-t", "molecule", "closed parent of a live wisp", "--ephemeral")
 	create("live", "-t", "task", "young live child", "--ephemeral", "--parent", ids["protected"])
+	// Three levels: closed root -> stale mid -> stale leaf. bd refuses to close
+	// mid while leaf is open, so the reaper must close leaf first.
+	create("chainRoot", "-t", "molecule", "closed chain root", "--ephemeral")
+	create("chainMid", "-t", "task", "stale chain mid", "--ephemeral", "--parent", ids["chainRoot"])
+	create("chainLeaf", "-t", "task", "stale chain leaf", "--ephemeral", "--parent", ids["chainMid"])
+	// Closed root -> stale mid -> YOUNG leaf: mid must stay open (never closed
+	// over a live child) and nothing escalates.
+	create("heldRoot", "-t", "molecule", "closed held root", "--ephemeral")
+	create("heldMid", "-t", "task", "stale mid over a young leaf", "--ephemeral", "--parent", ids["heldRoot"])
+	create("heldYoung", "-t", "task", "young leaf", "--ephemeral", "--parent", ids["heldMid"])
 	create("stale", "-t", "task", "-p", "3", "stale durable task")
 	create("nudge", "-t", "task", "expired nudge", "-l", "gc:nudge", "--metadata", `{"expires_at":"2020-01-01T00:00:00Z"}`)
-	c.bdIn(t, s, "close", ids["parent"], ids["purgeable"], ids["protected"], "--force", "--reason", "seed")
+	c.bdIn(t, s, "close", ids["parent"], ids["purgeable"], ids["protected"], ids["chainRoot"], ids["heldRoot"], "--force", "--reason", "seed")
 	c.bdIn(t, s, "sql", fmt.Sprintf(
-		"UPDATE wisps SET created_at = DATE_SUB(NOW(), INTERVAL 48 HOUR), updated_at = DATE_SUB(NOW(), INTERVAL 48 HOUR), closed_at = IF(status = 'closed', DATE_SUB(NOW(), INTERVAL 400 HOUR), closed_at) WHERE id IN ('%s', '%s', '%s', '%s')",
-		ids["parent"], ids["child"], ids["purgeable"], ids["protected"]))
+		"UPDATE wisps SET created_at = DATE_SUB(NOW(), INTERVAL 48 HOUR), updated_at = DATE_SUB(NOW(), INTERVAL 48 HOUR), closed_at = IF(status = 'closed', DATE_SUB(NOW(), INTERVAL 400 HOUR), closed_at) WHERE id IN ('%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s')",
+		ids["parent"], ids["child"], ids["purgeable"], ids["protected"], ids["chainRoot"], ids["chainMid"], ids["chainLeaf"], ids["heldRoot"], ids["heldMid"]))
 	c.bdIn(t, s, "sql", fmt.Sprintf("UPDATE issues SET updated_at = DATE_SUB(NOW(), INTERVAL 800 HOUR) WHERE id = '%s'", ids["stale"]))
 	if !s.proxied {
 		c.bdIn(t, s, "dolt", "commit", "-m", "seed maintenance fixture")
@@ -379,6 +389,16 @@ func TestMaintenanceOrdersOnRealBdTopologies(t *testing.T) {
 				if got := c.status(t, s, ids["child"]); got != "closed" {
 					t.Errorf("%s: stale child wisp %s = %s, want closed (Step 1)\n%s", s.dir, ids["child"], got, out)
 				}
+				for _, key := range []string{"chainMid", "chainLeaf"} {
+					if got := c.status(t, s, ids[key]); got != "closed" {
+						t.Errorf("%s: %s %s = %s, want closed (Step 1 closes an orphaned subtree leaf-first)", s.dir, key, ids[key], got)
+					}
+				}
+				for _, key := range []string{"heldMid", "heldYoung"} {
+					if got := c.status(t, s, ids[key]); got != "open" {
+						t.Errorf("%s: %s %s = %s, want open (a stale wisp over a young child is never closed)", s.dir, key, ids[key], got)
+					}
+				}
 				if got := c.status(t, s, ids["nudge"]); got != "closed" {
 					t.Errorf("%s: expired nudge %s = %s, want closed (Step 4)", s.dir, ids["nudge"], got)
 				}
@@ -409,11 +429,15 @@ func TestMaintenanceOrdersOnRealBdTopologies(t *testing.T) {
 					}
 				}
 			}
-			if !c.bdSupportsPurgeWispsPlane(t) && !strings.Contains(outcome, "bd-purge-wisps-plane-unsupported") {
+			if !c.bdSupportsPurgeWispsPlane(t) && !strings.Contains(outcome, "bd-purge-unsupported") {
 				t.Errorf("bd without wisps-plane purge must be declared, outcome = %s", outcome)
 			}
-			if gcLog, _ := os.ReadFile(c.gcLog); strings.Contains(string(gcLog), "ESCALATION") && strings.Contains(string(gcLog), "unreachable") {
-				t.Errorf("a scope was unreachable:\n%s", gcLog)
+			if gcLog, _ := os.ReadFile(c.gcLog); strings.Contains(string(gcLog), "ESCALATION") {
+				for _, bad := range []string{"unreachable", "open child", "close failed"} {
+					if strings.Contains(string(gcLog), bad) {
+						t.Errorf("reaper escalated %q:\n%s", bad, gcLog)
+					}
+				}
 			}
 
 			// JSONL export: one bd-export snapshot per scope database, which
@@ -466,4 +490,43 @@ func repoRootForExamples(t *testing.T) string {
 	t.Helper()
 	// coreScriptPath is <repo>/internal/bootstrap/packs/core/assets/scripts/<name>.
 	return filepath.Clean(filepath.Join(filepath.Dir(coreScriptPath("reaper.sh")), "..", "..", "..", "..", "..", ".."))
+}
+
+// TestBackupOrderTakesOverALegacyBackupDestination covers a city backed up
+// before the switch to `bd backup`: the old mol-dog-backup registered a
+// Dolt backup named <db>-backup at <city>/.dolt-backup/<db>. The order must
+// register bd's own destination at the same URL (bd replaces the conflicting
+// legacy entry), sync to it, and leave bd reporting the sync, so backups
+// continue into the same artifact directory.
+func TestBackupOrderTakesOverALegacyBackupDestination(t *testing.T) {
+	bd := requireRealBd(t)
+	c := newBdTopologyCity(t, bd)
+	city := c.addScope(t, "", "legacydb", "lg", false)
+	c.bdIn(t, city, "create", "--silent", "-t", "task", "something to back up")
+	c.bdIn(t, city, "dolt", "commit", "-m", "seed")
+
+	artifact := filepath.Join(c.cityDir, ".dolt-backup", city.db)
+	if err := os.MkdirAll(artifact, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	url := "file://" + artifact
+	c.bdIn(t, city, "sql", fmt.Sprintf("CALL DOLT_BACKUP('add', '%s-backup', '%s')", city.db, url))
+	c.bdIn(t, city, "sql", fmt.Sprintf("CALL DOLT_BACKUP('sync', '%s-backup')", city.db))
+
+	doltPack := filepath.Join(repoRootForExamples(t), "examples", "bd", "dolt")
+	out, outcome := c.runOrder(t, filepath.Join(doltPack, "assets", "scripts", "mol-dog-backup.sh"), "GC_PACK_DIR="+doltPack)
+	if !strings.Contains(out, "synced: 1/1") {
+		t.Fatalf("backup order did not sync the legacy-backed scope:\n%s\noutcome: %s", out, outcome)
+	}
+	backups := c.bdIn(t, city, "sql", "--csv", "SELECT name, url FROM dolt_backups")
+	if !strings.Contains(backups, "default,"+url) {
+		t.Fatalf("bd's default destination is not at the legacy artifact URL:\n%s", backups)
+	}
+	if strings.Contains(backups, city.db+"-backup") {
+		t.Fatalf("the legacy destination was not replaced by bd's:\n%s", backups)
+	}
+	status := c.bdIn(t, city, "backup", "status", "--json")
+	if !strings.Contains(status, `"last_sync"`) || !strings.Contains(status, url) {
+		t.Fatalf("bd backup status does not report the sync to the artifact dir:\n%s", status)
+	}
 }

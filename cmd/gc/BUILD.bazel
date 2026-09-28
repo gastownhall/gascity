@@ -753,6 +753,7 @@ go_test(
         "cmd_agent_script_test.go",
         "cmd_agent_test.go",
         "cmd_analyze_reliability_test.go",
+        "cmd_bd_batch_guard_test.go",
         "cmd_bd_by_id_rig_test.go",
         "cmd_bd_by_id_test.go",
         "cmd_bd_show_watch_test.go",

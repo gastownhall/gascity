@@ -91,3 +91,5 @@ __pycache__/
 /bazel-bin
 /bazel-out
 /bazel-testlogs
+# Bazel creates a bazel-<workspace-dir> convenience symlink per checkout.
+/bazel-*

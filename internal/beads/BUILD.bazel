@@ -41,6 +41,7 @@ go_test(
         "bdstore_conditional_internal_test.go",
         "bdstore_conditional_release_test.go",
         "bdstore_env_internal_test.go",
+        "bdstore_exact_batch_test.go",
         "bdstore_exec_internal_test.go",
         "bdstore_failure_detail_internal_test.go",
         "bdstore_inline_deps_internal_test.go",
