@@ -1270,6 +1270,7 @@ go_test(
         "session_bead_snapshot_test.go",
         "session_bead_snapshot_testhelper_test.go",
         "session_bead_snapshot_wtick_test.go",
+        "session_beads_close_atomic_test.go",
         "session_beads_current_claim_clear_test.go",
         "session_beads_handoff_orphan_test.go",
         "session_beads_mail_release_test.go",
