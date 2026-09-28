@@ -717,7 +717,8 @@ func TestReaperStopsPurgingAtItsBudgetAndDeclaresTheBacklog(t *testing.T) {
 
 // writeChildAwareBdStub installs a bd double that, like real bd, refuses a
 // bare `close` of a bead that still has open children (BD_CHILDREN="p:c ...",
-// open until closed) and records every close in order. A --force close of a
+// open until closed), rejects every close of an id in BD_REJECT_CLOSE (a
+// bead re-claimed since selection), and records every close in order. A --force close of a
 // bead with an open child is logged as FORCED-WITH-OPEN-CHILD so tests can
 // assert the reaper never does that.
 func writeChildAwareBdStub(t *testing.T, binDir string) (closedLog string) {
@@ -755,6 +756,12 @@ for id in $ids; do
       open_child="$child"
     fi
   done
+  case " ${BD_REJECT_CLOSE:-} " in
+    *" $id "*)
+      printf 'cannot close %s: claimed by another actor since it was selected\n' "$id" >&2
+      continue
+      ;;
+  esac
   if [ -n "$open_child" ] && [ -z "$force" ]; then
     printf 'cannot close %s: 1 open child issue(s); close children first or use --force to override\n' "$id" >&2
     continue
@@ -826,14 +833,102 @@ func TestReaperKeepsAncestorsOfALiveDescendantOpen(t *testing.T) {
     ;;`)
 	closed := writeChildAwareBdStub(t, f.binDir)
 	f.env["BD_CHILDREN"] = "w-mid:w-leaf w-leaf:w-young"
+	// Two runs: the held subtree is reported every run (summary count and
+	// outcome scope), never closed, and never escalated.
+	for run := 1; run <= 2; run++ {
+		for _, path := range []string{f.outcomeFile, closed} {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+		}
+		f.runReaper(t)
+
+		got := strings.Fields(f.read(t, closed))
+		if len(got) != 1 || got[0] != "w-other" {
+			t.Fatalf("run %d: closed = %v, want only the unrelated w-other (w-mid and w-leaf sit over a live wisp)", run, got)
+		}
+		gcLog := f.read(t, f.gcLog)
+		if strings.Contains(gcLog, "ESCALATION") {
+			t.Fatalf("run %d: holding a subtree over a live wisp is not an anomaly:\n%s", run, gcLog)
+		}
+		if strings.Count(gcLog, "held_wisps:2") != run {
+			t.Fatalf("run %d: summary does not report held_wisps:2 on every run:\n%s", run, gcLog)
+		}
+		out, ok := f.outcome(t)
+		if !ok || !out.hasScope("city", "2 stale wisp(s) held open under a live descendant") {
+			t.Fatalf("run %d: outcome = %+v (declared %v), want the held subtree named", run, out, ok)
+		}
+	}
+}
+
+// TestReaperNeverClosesAnOwnerOverARejectedChildClose covers a close bd
+// rejects at run time (the leaf was re-claimed after selection): the leaf
+// stays open, so its owner -- even an assigned one that would go out with
+// --force -- must not be closed this run.
+func TestReaperNeverClosesAnOwnerOverARejectedChildClose(t *testing.T) {
+	f := newScopeFixture(t, `
+  *"SELECT COUNT(*) FROM"*"wisps"*"issue_type NOT IN ('message')"*"created_at <"*)
+    printf 'COUNT(*)\n3\n'
+    ;;
+  *"reap_roots"*)
+    printf 'id,owner_id,depth,state,mode\n'
+    printf 'w-mid,,0,ok,force\n'
+    printf 'w-leaf,w-mid,1,ok,bare\n'
+    printf 'w-other,,0,ok,bare\n'
+    ;;`)
+	closed := writeChildAwareBdStub(t, f.binDir)
+	f.env["BD_CHILDREN"] = "w-mid:w-leaf"
+	f.env["BD_REJECT_CLOSE"] = "w-leaf"
 	f.runReaper(t)
 
 	got := strings.Fields(f.read(t, closed))
 	if len(got) != 1 || got[0] != "w-other" {
-		t.Fatalf("closed = %v, want only the unrelated w-other (w-mid and w-leaf sit over a live wisp)", got)
+		t.Fatalf("closed = %v, want only w-other: w-mid's child w-leaf is still open", got)
 	}
-	if strings.Contains(f.read(t, f.gcLog), "ESCALATION") {
-		t.Fatalf("holding a subtree over a live wisp is not an anomaly:\n%s", f.read(t, f.gcLog))
+	if v := f.read(t, closed+".violations"); v != "" {
+		t.Fatalf("reaper force-closed a bead over its open child:\n%s", v)
+	}
+	if strings.Contains(f.read(t, f.bdLog), "close w-mid") {
+		t.Fatalf("reaper tried to close w-mid after its child's close failed:\n%s", f.read(t, f.bdLog))
+	}
+	if !strings.Contains(f.read(t, f.gcLog), "w-leaf") {
+		t.Fatalf("the rejected close was not reported:\n%s", f.read(t, f.gcLog))
+	}
+}
+
+// TestReaperDryRunPreviewsTheSessionPrune: without --force bd prune refuses
+// (exit 1, "would prune N"), so a dry run must ask for bd's --dry-run preview
+// and report its count, not escalate.
+func TestReaperDryRunPreviewsTheSessionPrune(t *testing.T) {
+	f := sessionPruneFixture(t, "")
+	f.env["GC_REAPER_DRY_RUN"] = "1"
+	writeExecutable(t, filepath.Join(f.binDir, "bd"), `#!/bin/sh
+printf 'args=%s\n' "$*" >> "${BD_CALL_LOG:-/dev/null}"
+case "$1" in
+  purge) printf '{"dry_run":true,"purge_count":0}\n' ;;
+  backup) printf '%s\n' "$BD_BACKUP_STATUS_JSON" ;;
+  prune)
+    case " $* " in
+      *" --dry-run "*) printf '{"dry_run":true,"prune_count":3}\n' ;;
+      *" --force "*) printf '{"pruned_count":3}\n' ;;
+      *) printf '{"error":"would prune 3 bead(s)"}\n'; exit 1 ;;
+    esac
+    ;;
+esac
+exit 0
+`)
+	f.runReaper(t)
+
+	bdLog := f.read(t, f.bdLog)
+	if !strings.Contains(bdLog, "args=prune --pattern gm-* --older-than 720h --dry-run --json") || strings.Contains(bdLog, "--force") {
+		t.Fatalf("dry run did not preview the prune with --dry-run:\n%s", bdLog)
+	}
+	gcLog := f.read(t, f.gcLog)
+	if strings.Contains(gcLog, "ESCALATION") {
+		t.Fatalf("a dry-run prune preview must not escalate:\n%s", gcLog)
+	}
+	if !strings.Contains(gcLog, "sessions-pruned:3") {
+		t.Fatalf("dry-run summary did not report bd's preview count:\n%s", gcLog)
 	}
 }
 

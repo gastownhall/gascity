@@ -120,6 +120,7 @@ TOTAL_SCOPES=0
 TOTAL_STALE_WISPS=0
 TOTAL_CLOSED_WISPS=0
 TOTAL_WOULD_CLOSE_WISPS=0
+TOTAL_HELD_WISPS=0
 TOTAL_WOULD_EXPIRE=0
 TOTAL_PURGED=0
 TOTAL_WOULD_PURGE=0
@@ -266,6 +267,7 @@ count_lines() {
 # close that would clobber a concurrent re-claim. CLOSE_IDS_OK holds the
 # number of ids in chunks bd accepted.
 CLOSE_IDS_OK=0
+CLOSE_IDS_FAILED=""
 close_ids() {
     local label="$1"
     local ids="$2"
@@ -274,6 +276,7 @@ close_ids() {
     local ids_file
 
     CLOSE_IDS_OK=0
+    SCOPE_CHUNK_FAILED_IDS=""
     [ -n "$ids" ] || return 0
     ids_file=$(mktemp)
     printf '%s\n' "$ids" >"$ids_file"
@@ -302,12 +305,16 @@ close_ids_by_mode() {
     local force_ids
     local total=0
 
+    local failed=""
+
     bare_ids=$(printf '%s\n' "$rows" | awk -F, '$1 != "" && $2 != "force" { print $1 }')
     force_ids=$(printf '%s\n' "$rows" | awk -F, '$1 != "" && $2 == "force" { print $1 }')
     close_ids "$label" "$bare_ids" "$reason"
     total=$CLOSE_IDS_OK
+    failed="$SCOPE_CHUNK_FAILED_IDS"
     close_ids "$label" "$force_ids" "$reason" force
     CLOSE_IDS_OK=$((total + CLOSE_IDS_OK))
+    CLOSE_IDS_FAILED="${failed}${failed:+ }${SCOPE_CHUNK_FAILED_IDS}"
 }
 
 workflow_root_candidates_cte() {
@@ -521,12 +528,15 @@ SQL
 # held open when it is not closeable itself or when any descendant is held
 # open, so a printed node's open children are all printed too, deeper. The
 # caller closes deepest first.
+#
+# With "held" as $1 it prints instead the ids of the stale wisps held open by
+# a descendant the reaper may not close (their own state is "ok").
 closeable_subtree_leaf_first() {
-    awk -F, '
+    awk -F, -v want="${1:-closeable}" '
         NF >= 5 && $1 != "" {
             id = $1
             if (!(id in depth) || $3 + 0 > depth[id]) depth[id] = $3 + 0
-            if ($4 != "ok") held[id] = 1
+            if ($4 != "ok") { held[id] = 1; notok[id] = 1 }
             mode[id] = $5
             if ($2 != "") parents[id] = parents[id] " " $2
         }
@@ -545,7 +555,37 @@ closeable_subtree_leaf_first() {
                 }
             }
             for (id in depth) {
-                if (!(id in held)) print depth[id] "," id "," mode[id]
+                if (want == "held") {
+                    if ((id in held) && !(id in notok)) print id
+                } else if (!(id in held)) {
+                    print depth[id] "," id "," mode[id]
+                }
+            }
+        }'
+}
+
+# subtree_ancestors <subtree-rows> <ids...> prints every owner, transitively,
+# of the given ids in stale_wisp_subtree_query rows.
+subtree_ancestors() {
+    local tree="$1"
+    shift
+    printf '%s\n' "$tree" | awk -F, -v seeds="$*" '
+        NF >= 5 && $2 != "" { parents[$1] = parents[$1] " " $2 }
+        END {
+            n = split(seeds, queue, " ")
+            for (i = 1; i <= n; i++) seen[queue[i]] = 1
+            head = 1
+            while (head <= n) {
+                id = queue[head++]
+                m = split(parents[id], ps, " ")
+                for (j = 1; j <= m; j++) {
+                    p = ps[j]
+                    if (p != "" && !(p in seen)) {
+                        seen[p] = 1
+                        queue[++n] = p
+                        print p
+                    }
+                }
             }
         }'
 }
@@ -580,19 +620,44 @@ reap_scope() {
     TOTAL_STALE_WISPS=$((TOTAL_STALE_WISPS + stale_wisp_count))
 
     if [ "$stale_wisp_count" -gt 0 ] && get_sql_rows "stale wisp subtree" "$(stale_wisp_subtree_query "$DB")"; then
-        rows=$(printf '%s\n' "$SQL_ROWS_RESULT" | closeable_subtree_leaf_first)
+        local tree=$SQL_ROWS_RESULT
+        local held_count
+        rows=$(printf '%s\n' "$tree" | closeable_subtree_leaf_first)
         count=$(count_lines "$rows")
+        # Stale wisps held open by a descendant the reaper may not close (a
+        # durable issue, a blocked or young wisp) are reported every run
+        # rather than closed; they clear once that descendant closes.
+        held_count=$(count_lines "$(printf '%s\n' "$tree" | closeable_subtree_leaf_first held)")
+        if [ "$held_count" -gt 0 ]; then
+            TOTAL_HELD_WISPS=$((TOTAL_HELD_WISPS + held_count))
+            order_outcome_scope_skipped "$SCOPE_LABEL" "$held_count stale wisp(s) held open under a live descendant"
+        fi
         if [ "$count" -gt 0 ]; then
             if [ -n "$DRY_RUN" ]; then
                 TOTAL_WOULD_CLOSE_WISPS=$((TOTAL_WOULD_CLOSE_WISPS + count))
             else
                 local depth
+                local dropped
+                local level
                 for depth in $(printf '%s\n' "$rows" | awk -F, '{ print $1 }' | sort -rnu); do
                     run_budget_exhausted && break
-                    close_ids_by_mode "closing stale wisps" \
-                        "$(printf '%s\n' "$rows" | awk -F, -v d="$depth" '$1 == d { print $2 "," $3 }')" \
-                        "$STALE_WISP_CLOSE_REASON"
+                    level=$(printf '%s\n' "$rows" | awk -F, -v d="$depth" '$1 == d { print $2 "," $3 }')
+                    [ -n "$level" ] || continue
+                    close_ids_by_mode "closing stale wisps" "$level" "$STALE_WISP_CLOSE_REASON"
                     TOTAL_CLOSED_WISPS=$((TOTAL_CLOSED_WISPS + CLOSE_IDS_OK))
+                    if [ -n "$CLOSE_IDS_FAILED" ]; then
+                        # A close bd rejected at run time (e.g. a leaf
+                        # re-claimed since selection) leaves that bead open,
+                        # so none of its owners may close this run -- not
+                        # even with --force.
+                        # shellcheck disable=SC2086 # space-separated ids
+                        dropped=$(subtree_ancestors "$tree" $CLOSE_IDS_FAILED)
+                        if [ -n "$dropped" ]; then
+                            rows=$(printf '%s\n' "$rows" | awk -F, -v drop="$(printf '%s' "$dropped" | tr '\n' ' ')" '
+                                BEGIN { n = split(drop, d, " "); for (i = 1; i <= n; i++) skip[d[i]] = 1 }
+                                !($2 in skip)')
+                        fi
+                    fi
                 done
             fi
         fi
@@ -1076,7 +1141,9 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
         fi
 
         BD_PRUNE_ARGS=(prune --pattern "$SESSION_BEAD_PATTERN" --older-than "$SESSION_PURGE_AGE")
-        if [ -z "$DRY_RUN" ]; then BD_PRUNE_ARGS+=(--force); fi
+        # Without --force `gc bd prune` refuses (exit 1, "would prune N"), so a dry
+        # run asks for bd's own preview instead.
+        if [ -z "$DRY_RUN" ]; then BD_PRUNE_ARGS+=(--force); else BD_PRUNE_ARGS+=(--dry-run); fi
         BD_PRUNE_ARGS+=(--json)
         if [ "$_PRUNE_SKIP" -eq 0 ] && run_budget_exhausted; then
             order_outcome_scope_skipped "city" "session prune skipped: run budget exhausted"
@@ -1174,7 +1241,7 @@ if [ -n "$ANOMALIES" ]; then
         --message "$ANOMALIES" 2>/dev/null || true
 fi
 
-SUMMARY="reaper — scopes:$TOTAL_SCOPES, stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
+SUMMARY="reaper — scopes:$TOTAL_SCOPES, stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, held_wisps:$TOTAL_HELD_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
 if [ -n "$DRY_RUN" ]; then
     SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_close_workflow_roots:$TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS, would_purge:$TOTAL_WOULD_PURGE, would_expire:$TOTAL_WOULD_EXPIRE (dry run)"
 fi

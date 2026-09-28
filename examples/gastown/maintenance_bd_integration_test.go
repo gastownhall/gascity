@@ -258,6 +258,16 @@ case "$scope" in
 %s  *) echo "router: unknown scope $scope" >&2; exit 1 ;;
 esac
 cd "$scope_dir" || exit 1
+# ROUTER_REJECT_CLOSE=<id> stands in for bd rejecting that bead's close at
+# run time (e.g. it was re-claimed after the reaper selected it).
+if [ "${1:-}" = "close" ] && [ -n "${ROUTER_REJECT_CLOSE:-}" ]; then
+  case " $* " in
+    *" $ROUTER_REJECT_CLOSE "*)
+      printf 'close %%s: claimed by another actor since it was selected\n' "$ROUTER_REJECT_CLOSE" >&2
+      exit 1
+      ;;
+  esac
+fi
 BEADS_DIR="$scope_dir/.beads" exec %s "$@"
 `, shellSingleQuote(rigList), cases.String(), shellSingleQuote(c.bd)))
 }
@@ -528,5 +538,58 @@ func TestBackupOrderTakesOverALegacyBackupDestination(t *testing.T) {
 	status := c.bdIn(t, city, "backup", "status", "--json")
 	if !strings.Contains(status, `"last_sync"`) || !strings.Contains(status, url) {
 		t.Fatalf("bd backup status does not report the sync to the artifact dir:\n%s", status)
+	}
+}
+
+// TestReaperOwnerProtectionOnRealBd pins Step 1's "never close over an open
+// child" rule on real bd in the two cases the subtree selection alone cannot
+// see: a child close bd rejects at run time, and a stale wisp held open by a
+// descendant the reaper must not close (an open durable issue, a blocked
+// wisp). The held wisps are reported on every run and never escalated.
+func TestReaperOwnerProtectionOnRealBd(t *testing.T) {
+	bd := requireRealBd(t)
+	c := newBdTopologyCity(t, bd)
+	city := c.addScope(t, "", "ownerdb", "ow", true)
+	ids := map[string]string{}
+	create := func(key string, args ...string) {
+		ids[key] = strings.TrimSpace(c.bdIn(t, city, append([]string{"create", "--silent"}, args...)...))
+	}
+	// closed root -> assigned stale mid -> stale leaf whose close is rejected.
+	create("root", "-t", "molecule", "closed root", "--ephemeral")
+	create("mid", "-t", "task", "assigned stale mid", "--ephemeral", "--parent", ids["root"], "-a", "someone-else")
+	create("leaf", "-t", "task", "stale leaf", "--ephemeral", "--parent", ids["mid"])
+	// closed root -> stale wisp over a blocked wisp: held.
+	create("heldRoot", "-t", "molecule", "closed held root", "--ephemeral")
+	create("heldOverBlocked", "-t", "task", "stale wisp over a blocked wisp", "--ephemeral", "--parent", ids["heldRoot"])
+	create("blocked", "-t", "task", "blocked wisp", "--ephemeral", "--parent", ids["heldOverBlocked"])
+	c.bdIn(t, city, "update", ids["blocked"], "--status", "blocked")
+	c.bdIn(t, city, "close", ids["root"], ids["heldRoot"], "--force", "--reason", "seed")
+	c.bdIn(t, city, "sql", fmt.Sprintf(
+		"UPDATE wisps SET created_at = DATE_SUB(NOW(), INTERVAL 48 HOUR), updated_at = DATE_SUB(NOW(), INTERVAL 48 HOUR) WHERE id IN ('%s', '%s', '%s', '%s', '%s', '%s')",
+		ids["root"], ids["mid"], ids["leaf"], ids["heldRoot"], ids["heldOverBlocked"], ids["blocked"]))
+
+	for run := 1; run <= 2; run++ {
+		out, outcome := c.runOrder(t, coreScriptPath("reaper.sh"), "ROUTER_REJECT_CLOSE="+ids["leaf"])
+		for _, key := range []string{"mid", "leaf", "heldOverBlocked"} {
+			if got := c.status(t, city, ids[key]); got == "closed" || got == "gone" {
+				t.Fatalf("run %d: %s %s = %s; a bead with an open child must stay open\n%s", run, key, ids[key], got, out)
+			}
+		}
+		if !strings.Contains(out, "held_wisps:1") {
+			t.Fatalf("run %d: summary does not report the held wisp:\n%s", run, out)
+		}
+		if !strings.Contains(outcome, "1 stale wisp(s) held open under a live descendant") {
+			t.Fatalf("run %d: outcome does not name the held wisp: %s", run, outcome)
+		}
+	}
+	calls, err := os.ReadFile(c.gcLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(calls), "close "+ids["mid"]+" ") {
+		t.Fatalf("reaper tried to close the mid wisp over its open (rejected) leaf:\n%s", calls)
+	}
+	if strings.Contains(string(calls), "ESCALATION") && strings.Contains(string(calls), ids["heldOverBlocked"]) {
+		t.Fatalf("a held wisp was escalated:\n%s", calls)
 	}
 }

@@ -3516,7 +3516,7 @@ exit 0
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
 	bdLogText := string(bdData)
-	wantArgs := "args=prune --pattern gm-* --older-than 24h --json"
+	wantArgs := "args=prune --pattern gm-* --older-than 24h --dry-run --json"
 	if !strings.Contains(bdLogText, wantArgs) {
 		t.Fatalf("reaper dry-run did not call bd prune with preview args %q:\n%s", wantArgs, bdLogText)
 	}
