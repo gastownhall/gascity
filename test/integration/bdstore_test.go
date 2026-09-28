@@ -248,6 +248,84 @@ func TestBdStoreMailWispInsert(t *testing.T) {
 	}
 }
 
+// TestBdStoreMailWispInsertIsolatesHOMEFromSharedServerConfig mirrors
+// TestBdStoreMailWispInsert but deliberately points env's HOME at a
+// shared-server config.yaml before running the exact same
+// runBDInit/configureCustomTypes/pinnedBdStoreCommandRunner chain.
+//
+// newIsolatedToolEnv pins env's own HOME to the REAL passwd-db home (via
+// pinRealHomeEnv/integrationEnvFor), not to any test-scoped directory —
+// gc-start/gc-supervisor-start consumers need that real pin (see
+// pinRealHomeEnv's doc comment), so t.Setenv("HOME", ...) cannot reach it.
+// This test substitutes a controlled, worst-case stand-in for "whatever the
+// real invoking user's real home happens to contain" (on a fleet host that
+// runs a real shared bd/dolt server out of that real home — this one does,
+// see CLAUDE.md's gc deploy-point hazard section — that's a real
+// shared-server config, not a hypothetical) so the reproduction is
+// deterministic and machine-independent rather than depending on whatever
+// this specific test run's real $HOME happens to hold.
+func TestBdStoreMailWispInsertIsolatesHOMEFromSharedServerConfig(t *testing.T) {
+	requireDoltIntegration(t)
+	env := newIsolatedToolEnv(t, true)
+
+	pollutedHome := t.TempDir()
+	beadsDir := filepath.Join(pollutedHome, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("creating polluted HOME .beads dir: %v", err)
+	}
+	cfg := "no-db: true\ndolt:\n    shared-server: true\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("writing polluted HOME config.yaml: %v", err)
+	}
+	env = replaceEnv(env, "HOME", pollutedHome)
+
+	rootDir := t.TempDir()
+	doltDataDir := filepath.Join(rootDir, "dolt")
+	wsDir := filepath.Join(rootDir, "ws")
+	serverPort := startSharedDoltServer(t, env, doltDataDir)
+
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatalf("creating workspace: %v", err)
+	}
+	gitCmd := exec.Command("git", "init", "--quiet")
+	gitCmd.Dir = wsDir
+	if out, err := gitCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	runBDInit(t, env, wsDir, "hi", serverPort)
+	configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
+
+	store := beads.NewBdStore(wsDir, pinnedBdStoreCommandRunner())
+
+	sent, err := store.Create(beads.Bead{
+		Title:     "home-isolation probe",
+		Type:      "message",
+		Assignee:  "builder",
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("BdStore Create under a shared-server HOME: %v", err)
+	}
+
+	results, err := store.List(beads.ListQuery{
+		TierMode: beads.TierWisps,
+		Assignee: "builder",
+	})
+	if err != nil {
+		t.Fatalf("BdStore List under a shared-server HOME: %v", err)
+	}
+	var found bool
+	for _, b := range results {
+		if b.ID == sent.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("sent bead %s not in BdStore List(TierWisps) under a shared-server HOME; got %d beads total", sent.ID, len(results))
+	}
+}
+
 func configureCustomTypes(t *testing.T, env []string, wsDir string, customTypes []string) {
 	t.Helper()
 

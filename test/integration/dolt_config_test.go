@@ -144,6 +144,72 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 	t.Logf("SUCCESS: all phases passed — hostname reachable, config port wired, cross-workspace sharing works")
 }
 
+// TestDoltConfigWiringIsolatesHOMEFromSharedServerConfig proves the
+// newIsolatedToolEnv-derived env this file's tests build does not leak the
+// ambient HOME into the bd/dolt subprocesses it drives.
+//
+// newIsolatedToolEnv pins env's own HOME to the REAL passwd-db home (via
+// pinRealHomeEnv/integrationEnvFor) because gc-start/gc-supervisor-start
+// consumers need it. Pure bd/dolt-exec callers like this file's
+// runBDInitCompat and its direct exec.Command(bdBinary, ...) calls inherit
+// that real-home pin unchanged — t.Setenv("HOME", ...) cannot reach it, so
+// this test substitutes a controlled stand-in for "whatever the real
+// invoking user's home happens to contain" instead, matching
+// TestBdStoreMailWispInsertIsolatesHOMEFromSharedServerConfig's technique.
+func TestDoltConfigWiringIsolatesHOMEFromSharedServerConfig(t *testing.T) {
+	requireDoltIntegration(t)
+	env := newIsolatedToolEnv(t, true)
+
+	pollutedHome := t.TempDir()
+	beadsDir := filepath.Join(pollutedHome, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("creating polluted HOME .beads dir: %v", err)
+	}
+	cfg := "no-db: true\ndolt:\n    shared-server: true\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("writing polluted HOME config.yaml: %v", err)
+	}
+	env = replaceEnv(env, "HOME", pollutedHome)
+
+	doltDataDir := filepath.Join(t.TempDir(), "dolt-data")
+	port := startDoltServerOnAllInterfaces(t, env, doltDataDir)
+
+	wsDir := filepath.Join(t.TempDir(), "test-workspace")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitInit := exec.Command("git", "init", "--quiet")
+	gitInit.Dir = wsDir
+	if out, err := gitInit.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+
+	runBDInitCompat(t, env, wsDir, "hi", port, "")
+
+	bdCreate := exec.Command(bdBinary, "create", "home-isolation probe", "--json",
+		"--description=Integration test for HOME isolation", "-t", "task", "-p", "3")
+	bdCreate.Dir = wsDir
+	bdCreate.Env = env
+	out, err := bdCreate.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bd create under a shared-server HOME: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "home-isolation probe") {
+		t.Fatalf("bd create output missing bead title:\n%s", out)
+	}
+
+	bdList := exec.Command(bdBinary, "list", "--json")
+	bdList.Dir = wsDir
+	bdList.Env = env
+	listOut, err := bdList.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bd list under a shared-server HOME: %v\n%s", err, listOut)
+	}
+	if !strings.Contains(string(listOut), "home-isolation probe") {
+		t.Fatalf("bd list output missing created bead:\n%s", listOut)
+	}
+}
+
 // runBDInitCompat initializes beads against a shared server, compatible
 // with bd v0.60.0 (which lacks --skip-agents). A non-empty database joins
 // that existing server database instead of letting bd derive a new one

@@ -94,3 +94,34 @@ func bdRunWithEnv(t *testing.T, bdPath, dir string, extraEnv map[string]string, 
 	}
 	return string(out)
 }
+
+// TestBdRunWithEnvIsolatesHOMEFromSharedServerConfig proves bdRunWithEnv
+// (and bdRun, which wraps it with a nil extraEnv) do not leak the ambient
+// HOME into the bd subprocess they exec. Both build cmd.Env from
+// os.Environ() with no HOME isolation of their own, so a shared-server
+// config.yaml sitting in the real $HOME (a real fleet-host condition, not a
+// hypothetical — see this bead's notes) can make bd try to route through
+// that shared server instead of dir's own local, non-server bd store.
+func TestBdRunWithEnvIsolatesHOMEFromSharedServerConfig(t *testing.T) {
+	bdPath := helpers.RequireBD(t)
+
+	pollutedHome := t.TempDir()
+	beadsDir := filepath.Join(pollutedHome, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("creating polluted HOME .beads dir: %v", err)
+	}
+	cfg := "no-db: true\ndolt:\n    shared-server: true\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("writing polluted HOME config.yaml: %v", err)
+	}
+	t.Setenv("HOME", pollutedHome)
+
+	dir := t.TempDir()
+	bdRun(t, bdPath, dir, "init")
+	bdRun(t, bdPath, dir, "create", "--title", "home-isolation probe", "--priority=P2")
+
+	out := bdRun(t, bdPath, dir, "list")
+	if !strings.Contains(out, "home-isolation probe") {
+		t.Fatalf("bd list under a shared-server HOME did not see the bead created in dir's own local store:\n%s", out)
+	}
+}

@@ -74,6 +74,59 @@ func realBdRunner(t testing.TB, envOverrides map[string]string) beads.CommandRun
 	}
 }
 
+// TestRealBdRunnerIsolatesHOMEFromSharedServerConfig proves realBdRunner
+// does not leak the ambient HOME into the bd subprocesses it runs.
+// realBdRunner builds its CommandRunner via
+// beads.ExecCommandRunnerWithEnv(envOverrides), which overlays envOverrides
+// on top of the ambient process environment — including HOME — with no
+// isolation of its own, unlike newIsolatedToolEnv's chain. A shared-server
+// config.yaml sitting in $HOME can route the store operations this file's
+// tests exercise through that shared server instead of the workspace under
+// test.
+func TestRealBdRunnerIsolatesHOMEFromSharedServerConfig(t *testing.T) {
+	if realBDBinary == "" {
+		t.Skip("realBDBinary not configured")
+	}
+
+	pollutedHome := t.TempDir()
+	beadsDir := filepath.Join(pollutedHome, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("creating polluted HOME .beads dir: %v", err)
+	}
+	cfg := "no-db: true\ndolt:\n    shared-server: true\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("writing polluted HOME config.yaml: %v", err)
+	}
+	t.Setenv("HOME", pollutedHome)
+
+	wsDir := t.TempDir()
+	gitCmd := exec.Command("git", "init", "--quiet")
+	gitCmd.Dir = wsDir
+	if out, err := gitCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	initCmd := exec.Command(realBDBinary, "init", "-p", "rb", "--skip-hooks", "--skip-agents")
+	initCmd.Dir = wsDir
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bd init: %v: %s", err, out)
+	}
+
+	runner := realBdRunner(t, nil)
+	store := beads.NewBdStoreWithPrefix(wsDir, runner, "rb")
+
+	created, err := store.Create(beads.Bead{Title: "home-isolation probe"})
+	if err != nil {
+		t.Fatalf("realBdRunner Create under a shared-server HOME: %v", err)
+	}
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("realBdRunner Get under a shared-server HOME: %v", err)
+	}
+	if got.Title != "home-isolation probe" {
+		t.Fatalf("roundtrip title = %q, want %q", got.Title, "home-isolation probe")
+	}
+}
+
 // doltPersistenceWorkspace bundles the per-test bd workspace + the store handle
 // configured to look like a gascity-managed city.
 type doltPersistenceWorkspace struct {
