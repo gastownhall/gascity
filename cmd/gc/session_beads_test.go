@@ -7570,6 +7570,329 @@ func TestCleanupDeadRuntimeSessionCorpsesReleasesAliasOnBeadClose(t *testing.T) 
 	}
 }
 
+// newDeadRuntimeCorpseRow creates one open session bead in a fresh MemStore
+// and returns the store, the persisted bead, and a snapshot holding it, which
+// is the input shape cleanupDeadRuntimeSessionCorpses reads each tick.
+func newDeadRuntimeCorpseRow(t *testing.T, metadata map[string]string) (beads.Store, beads.Bead, *sessionBeadSnapshot) {
+	t.Helper()
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:    "worker",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: metadata,
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	return store, bead, newSessionBeadSnapshot([]beads.Bead{bead})
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesKeepsKilledAsleepRowWakeable pins the
+// `gc session kill` shape. The kill stops the runtime and syncs the bead to
+// asleep (sleep_reason=killed) so a later wake starts a fresh incarnation on
+// the same durable session. The dead pane that remains is the expected residue
+// of that sleep. The pass should reap the pane, which frees the name for the
+// wake, but it must not close the row: a closed row can never be woken again.
+func TestCleanupDeadRuntimeSessionCorpsesKeepsKilledAsleepRowWakeable(t *testing.T) {
+	const name = "worker-adhoc-cf937f30dc"
+	store, bead, snapshot := newDeadRuntimeCorpseRow(t, map[string]string{
+		"session_name":   name,
+		"template":       "worker",
+		"alias":          "rig/worker-adhoc",
+		"state":          string(session.StateAsleep),
+		"sleep_reason":   "killed",
+		"session_origin": "manual",
+		"instance_token": "token-of-the-killed-incarnation",
+	})
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible[name] = true
+	sp.dead[name] = true
+	if err := sp.SetMeta(name, "GC_INSTANCE_TOKEN", "token-of-the-killed-incarnation"); err != nil {
+		t.Fatalf("stamp corpse instance token: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	if got != 1 || sp.stopCalls[name] != 1 {
+		t.Fatalf("cleanup = %d (Stop calls = %d), want the corpse reaped once; stderr=%q", got, sp.stopCalls[name], stderr.String())
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("re-fetch bead: %v", err)
+	}
+	if after.Status != "open" || after.Metadata["state"] != string(session.StateAsleep) || after.Metadata["sleep_reason"] != "killed" {
+		t.Fatalf("killed row after corpse cleanup = status %q state %q sleep_reason %q close_reason %q, want an untouched open asleep row",
+			after.Status, after.Metadata["state"], after.Metadata["sleep_reason"], after.Metadata["close_reason"])
+	}
+	if _, err := sessionFrontDoor(store).WakeSession(bead.ID, time.Now().UTC(), session.WakeOpts{RejectClosed: true}); err != nil {
+		t.Fatalf("WakeSession after corpse cleanup = %v, want the killed session to accept a wake", err)
+	}
+	woken, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("re-fetch woken bead: %v", err)
+	}
+	if woken.Metadata["wake_request"] != string(session.WakeCauseExplicit) {
+		t.Fatalf("wake_request after wake = %q, want %q", woken.Metadata["wake_request"], session.WakeCauseExplicit)
+	}
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesKeepsDormantRowsOpen extends the killed
+// case to every dormant spelling the lifecycle projection recognizes. None of
+// them claims a running incarnation, so a dead pane under the name proves
+// nothing about whether the session is over.
+func TestCleanupDeadRuntimeSessionCorpsesKeepsDormantRowsOpen(t *testing.T) {
+	cases := []struct {
+		name  string
+		state session.State
+		sleep string
+	}{
+		{name: "asleep-idle", state: session.StateAsleep, sleep: string(session.SleepReasonIdleTimeout)},
+		{name: "asleep-drained", state: session.StateAsleep, sleep: "drained"},
+		{name: "drained", state: session.StateDrained},
+		{name: "suspended", state: session.StateSuspended},
+		{name: "quarantined", state: session.StateQuarantined},
+		{name: "archived", state: session.StateArchived},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const name = "worker-1"
+			meta := map[string]string{
+				"session_name": name,
+				"template":     "worker",
+				"state":        string(tc.state),
+			}
+			if tc.sleep != "" {
+				meta["sleep_reason"] = tc.sleep
+			}
+			store, bead, snapshot := newDeadRuntimeCorpseRow(t, meta)
+			sp := newDeadRuntimeArtifactProvider()
+			sp.visible[name] = true
+			sp.dead[name] = true
+
+			var stderr bytes.Buffer
+			got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+			if got != 1 || sp.stopCalls[name] != 1 {
+				t.Fatalf("cleanup = %d (Stop calls = %d), want the corpse reaped once; stderr=%q", got, sp.stopCalls[name], stderr.String())
+			}
+			after, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("re-fetch bead: %v", err)
+			}
+			if after.Status != "open" || after.Metadata["state"] != string(tc.state) {
+				t.Fatalf("dormant row after corpse cleanup = status %q state %q, want an untouched open %q row",
+					after.Status, after.Metadata["state"], tc.state)
+			}
+		})
+	}
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesReapsAStaleCorpseUnderADormantRow keeps
+// the incarnation fence scoped to rows that can be mid-restart. A wake that
+// rotated the token and then failed leaves the row dormant with the previous
+// incarnation's corpse under its name. No start is in flight, so the corpse is
+// still reaped (freeing the name), and the row still stays open.
+func TestCleanupDeadRuntimeSessionCorpsesReapsAStaleCorpseUnderADormantRow(t *testing.T) {
+	const name = "worker-1"
+	store, bead, snapshot := newDeadRuntimeCorpseRow(t, map[string]string{
+		"session_name":   name,
+		"template":       "worker",
+		"state":          string(session.StateAsleep),
+		"sleep_reason":   "killed",
+		"instance_token": "token-of-the-failed-wake",
+	})
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible[name] = true
+	sp.dead[name] = true
+	if err := sp.SetMeta(name, "GC_INSTANCE_TOKEN", "token-of-the-killed-incarnation"); err != nil {
+		t.Fatalf("stamp corpse instance token: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	if got != 1 || sp.stopCalls[name] != 1 {
+		t.Fatalf("cleanup = %d (Stop calls = %d), want the stale corpse reaped once; stderr=%q", got, sp.stopCalls[name], stderr.String())
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("re-fetch bead: %v", err)
+	}
+	if after.Status != "open" || after.Metadata["state"] != string(session.StateAsleep) {
+		t.Fatalf("dormant row after corpse cleanup = status %q state %q, want an untouched open asleep row", after.Status, after.Metadata["state"])
+	}
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesClosesRowsClaimingALiveRuntime is the
+// #2437 side of the same predicate. A row that says its runtime is running (in
+// any spelling: active before the status heal, awake after, or mid-start)
+// while that runtime is a corpse still loses the row, so its alias is freed
+// for a successor.
+func TestCleanupDeadRuntimeSessionCorpsesClosesRowsClaimingALiveRuntime(t *testing.T) {
+	for _, state := range []session.State{
+		session.StateActive,
+		session.StateAwake,
+		session.StateCreating,
+		session.StateStartPending,
+		session.StateDraining,
+	} {
+		t.Run(string(state), func(t *testing.T) {
+			const name = "worker-1"
+			store, bead, snapshot := newDeadRuntimeCorpseRow(t, map[string]string{
+				"session_name":   name,
+				"template":       "worker",
+				"state":          string(state),
+				"instance_token": "token-current",
+			})
+			sp := newDeadRuntimeArtifactProvider()
+			sp.visible[name] = true
+			sp.dead[name] = true
+			if err := sp.SetMeta(name, "GC_INSTANCE_TOKEN", "token-current"); err != nil {
+				t.Fatalf("stamp corpse instance token: %v", err)
+			}
+
+			var stderr bytes.Buffer
+			got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+			if got != 1 || sp.stopCalls[name] != 1 {
+				t.Fatalf("cleanup = %d (Stop calls = %d), want the corpse reaped once; stderr=%q", got, sp.stopCalls[name], stderr.String())
+			}
+			after, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("re-fetch bead: %v", err)
+			}
+			if after.Status != "closed" || after.Metadata["state"] != "dead-runtime" {
+				t.Fatalf("row claiming a live runtime after corpse cleanup = status %q state %q, want a dead-runtime close",
+					after.Status, after.Metadata["state"])
+			}
+		})
+	}
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesLeavesAMidRestartRowAlone pins the
+// incarnation fence. preWakeCommit rotates the row's instance_token and moves
+// it to creating before the provider start runs, so for that window the row
+// claims a live runtime while the name still carries the previous
+// incarnation's dead pane. That corpse is not this row's runtime. The pass must
+// neither stop it (the in-flight start recycles it) nor close the row out from
+// under the start.
+func TestCleanupDeadRuntimeSessionCorpsesLeavesAMidRestartRowAlone(t *testing.T) {
+	const name = "worker-adhoc-2c4fa75693"
+	store, bead, snapshot := newDeadRuntimeCorpseRow(t, map[string]string{
+		"session_name":   name,
+		"template":       "worker",
+		"state":          string(session.StateCreating),
+		"instance_token": "token-after-the-pre-wake-commit",
+	})
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible[name] = true
+	sp.dead[name] = true
+	if err := sp.SetMeta(name, "GC_INSTANCE_TOKEN", "token-of-the-previous-incarnation"); err != nil {
+		t.Fatalf("stamp corpse instance token: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	if got != 0 || sp.stopCalls[name] != 0 {
+		t.Fatalf("cleanup = %d (Stop calls = %d), want the previous incarnation's corpse left to the start; stderr=%q", got, sp.stopCalls[name], stderr.String())
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("re-fetch bead: %v", err)
+	}
+	if after.Status != "open" || after.Metadata["state"] != string(session.StateCreating) {
+		t.Fatalf("mid-restart row after corpse cleanup = status %q state %q, want the row left to its start",
+			after.Status, after.Metadata["state"])
+	}
+	if !strings.Contains(stderr.String(), "belongs to another incarnation") {
+		t.Fatalf("stderr = %q, want the incarnation-fence skip logged", stderr.String())
+	}
+}
+
+// recyclingCorpseProvider models the in-flight start winning the race against
+// the pass: by the time the pass reads the runtime's instance token, the start
+// has already replaced the old corpse with the row's new, live incarnation.
+type recyclingCorpseProvider struct {
+	*deadRuntimeArtifactProvider
+	name     string
+	newToken string
+}
+
+func (p *recyclingCorpseProvider) GetMeta(name, key string) (string, error) {
+	if name == p.name && key == "GC_INSTANCE_TOKEN" {
+		p.dead[name] = false
+		p.live[name] = true
+		if err := p.SetMeta(name, key, p.newToken); err != nil {
+			return "", err
+		}
+	}
+	return p.deadRuntimeArtifactProvider.GetMeta(name, key)
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesRechecksDeathAfterTheTokenMatches covers
+// the interleaving the token read alone cannot catch: the pass sees the old
+// corpse dead, the start then recycles the name into the row's new incarnation,
+// and the token read returns the new, matching token. Stopping on that match
+// would kill the live session the start just created.
+func TestCleanupDeadRuntimeSessionCorpsesRechecksDeathAfterTheTokenMatches(t *testing.T) {
+	const name = "worker-adhoc-2c4fa75693"
+	store, bead, snapshot := newDeadRuntimeCorpseRow(t, map[string]string{
+		"session_name":   name,
+		"template":       "worker",
+		"state":          string(session.StateCreating),
+		"instance_token": "token-after-the-pre-wake-commit",
+	})
+	base := newDeadRuntimeArtifactProvider()
+	base.visible[name] = true
+	base.dead[name] = true
+	if err := base.SetMeta(name, "GC_INSTANCE_TOKEN", "token-of-the-previous-incarnation"); err != nil {
+		t.Fatalf("stamp corpse instance token: %v", err)
+	}
+	sp := &recyclingCorpseProvider{deadRuntimeArtifactProvider: base, name: name, newToken: "token-after-the-pre-wake-commit"}
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	if got != 0 || base.stopCalls[name] != 0 {
+		t.Fatalf("cleanup = %d (Stop calls = %d), want the freshly started incarnation left running; stderr=%q", got, base.stopCalls[name], stderr.String())
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("re-fetch bead: %v", err)
+	}
+	if after.Status != "open" {
+		t.Fatalf("restarting row after corpse cleanup = status %q, want open", after.Status)
+	}
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesFenceToleratesAnUnstampedRuntime keeps
+// the fence from stranding corpses it cannot judge. A runtime with no
+// GC_INSTANCE_TOKEN does not prove it belongs to another incarnation, matching
+// how the reconciler's other token fences treat an empty runtime token, so the
+// #2437 close still happens.
+func TestCleanupDeadRuntimeSessionCorpsesFenceToleratesAnUnstampedRuntime(t *testing.T) {
+	const name = "worker-1"
+	store, bead, snapshot := newDeadRuntimeCorpseRow(t, map[string]string{
+		"session_name":   name,
+		"template":       "worker",
+		"state":          string(session.StateActive),
+		"instance_token": "token-current",
+	})
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible[name] = true
+	sp.dead[name] = true
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	if got != 1 || sp.stopCalls[name] != 1 {
+		t.Fatalf("cleanup = %d (Stop calls = %d), want the unstamped corpse reaped; stderr=%q", got, sp.stopCalls[name], stderr.String())
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("re-fetch bead: %v", err)
+	}
+	if after.Status != "closed" {
+		t.Fatalf("bead status = %q, want closed", after.Status)
+	}
+}
+
 // TestCleanupDeadRuntimeSessionCorpsesToleratesNilStore protects the
 // existing call-site contract: tests and any future callers that don't
 // wire a real store still get the runtime-Stop side effect without
