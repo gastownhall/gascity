@@ -375,30 +375,94 @@ func (s *Store) GetState(id string) (state State, closed bool, err error) {
 	return info.State, info.Closed, nil
 }
 
-// Close closes the session bead with terminal close metadata via ClosePatch,
-// then sets status closed. It is the front door for closeBead /
-// closeFailedCreateBead. stateCode is the canonical short state code recorded
-// before close; ClosePatch expands it to a validator-safe close_reason.
+// terminalCloseMaxAttempts bounds how many times Close re-reads and re-fences
+// when a concurrent writer keeps winning the atomic close's revision fence.
+const terminalCloseMaxAttempts = 3
+
+// Close closes the session bead and stamps its terminal close metadata
+// (ClosePatch). It is the front door for closeBead / closeFailedCreateBead.
+// stateCode is the canonical short state code recorded before close;
+// ClosePatch expands it to a validator-safe close_reason.
 //
-// Reports whether the bead was actually closed (false when it was already
+// When the backing store provides beads.AtomicConditionalCloser (native Dolt,
+// SQLite with a revision column, FileStore, and a CachingStore over any of
+// them), the metadata and the closed status commit as ONE write fenced on the
+// revision Close observed. No reader can see, and no writer can land between,
+// a closed row and its terminal metadata. If a concurrent writer wins the fence
+// (for example a wake stamping state=awake), the atomic close writes nothing,
+// and Close re-reads and retries, up to terminalCloseMaxAttempts. If the row
+// was closed by someone else meanwhile, Close reports false; if the writer
+// keeps winning, Close returns the precondition error with the row still open,
+// and the caller's next pass retries.
+//
+// Stores WITHOUT the capability (BdStore, the exec store, plain MemStore, a
+// legacy SQLite layout, or a store whose conditional writes are disabled) keep
+// the historical two-write sequence: SetMetadataBatch(ClosePatch), then Close.
+// That sequence has a known residual race. A writer that lands between the two
+// writes leaves the row status=closed while its metadata still looks live. A
+// store that advertises the capability but refuses it at call time with
+// beads.ErrConditionalWriteUnsupported (which contractually writes nothing)
+// falls back to the same sequence.
+//
+// Reports whether this call closed the bead (false when it was already
 // closed). PHASE 0: the work-reassignment side effect that closeBead performs
 // (releaseWorkFromClosedSessionBead) is intentionally NOT part of this method —
 // that is a cross-class WORK op owned by the Phase 6 work/assignment API.
 func (s *Store) Close(id, stateCode string, now time.Time) (bool, error) {
-	info, err := s.Get(id)
+	bead, err := s.validatedBead(id)
 	if err != nil {
 		return false, err
 	}
-	if info.Closed {
+	if bead.Status == "closed" {
 		return false, nil
 	}
-	if err := s.ApplyPatch(id, ClosePatch(now, stateCode)); err != nil {
+	patch := ClosePatch(now, stateCode)
+	if closer, ok := beads.AtomicConditionalCloserFor(s.store); ok {
+		closed, err := s.closeAtomically(closer, bead, patch)
+		if !beads.IsConditionalWriteUnsupported(err) {
+			return closed, err
+		}
+	}
+	if err := s.ApplyPatch(id, patch); err != nil {
 		return false, err
 	}
 	if err := s.store.Close(id); err != nil {
 		return false, fmt.Errorf("closing session %q: %w", id, err)
 	}
 	return true, nil
+}
+
+// closeAtomically runs Close's fenced single-write arm, starting from the
+// observed open row. The observed revision is passed through as-is, including
+// 0: whether a token is usable is the store's call (a fresh SQLite row fences
+// on 0), and a store that rejects it answers with a precondition failure,
+// which this loop re-reads and bounds. An ErrConditionalWriteUnsupported error
+// is returned unwrapped so Close can fall back.
+func (s *Store) closeAtomically(closer beads.AtomicConditionalCloser, bead beads.Bead, patch MetadataPatch) (bool, error) {
+	id := bead.ID
+	var conflict error
+	for attempt := 1; ; attempt++ {
+		_, err := closer.CloseWithMetadataIfMatch(id, bead.Revision, map[string]string(patch))
+		switch {
+		case err == nil:
+			return true, nil
+		case beads.IsConditionalWriteUnsupported(err):
+			return false, err
+		case !beads.IsPreconditionFailed(err):
+			return false, fmt.Errorf("closing session %q: %w", id, err)
+		}
+		conflict = err
+		if attempt == terminalCloseMaxAttempts {
+			return false, fmt.Errorf("closing session %q: lost the revision fence %d times: %w", id, terminalCloseMaxAttempts, conflict)
+		}
+		bead, err = s.validatedBead(id)
+		if err != nil {
+			return false, err
+		}
+		if bead.Status == "closed" {
+			return false, nil
+		}
+	}
 }
 
 // SetStatusOpen sets the session bead status to "open". It is the front door
