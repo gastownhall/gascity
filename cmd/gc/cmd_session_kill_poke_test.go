@@ -15,12 +15,17 @@ import (
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
+// killPokeSessionIdentity is the named-session identity the fixture city
+// (writeGenericNamedSessionCityTOML) declares.
+const killPokeSessionIdentity = "session-a"
+
 // newKillPokeSession stands up a city, store, and fake runtime for an awake
 // named session, returning the store and the session bead. The fake provider
 // is wired through buildSessionProviderByName so cmdSessionKill resolves a real
 // handle and reaches the asleep-sync + poke tail.
-func newKillPokeSession(t *testing.T, identity, sessionName string) (beads.Store, beads.Bead, string) {
+func newKillPokeSession(t *testing.T, sessionName string) (beads.Store, beads.Bead, string) {
 	t.Helper()
+	const identity = killPokeSessionIdentity
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 
@@ -72,9 +77,9 @@ func newKillPokeSession(t *testing.T, identity, sessionName string) (beads.Store
 // has been synced asleep (so the reconciler observes the killed state when it
 // converges).
 func TestCmdSessionKill_PokesControllerAfterSleep(t *testing.T) {
-	const identity = "session-a"
+	const identity = killPokeSessionIdentity
 	const sessionName = "s-gc-kill-poke"
-	store, bead, cityDir := newKillPokeSession(t, identity, sessionName)
+	store, bead, cityDir := newKillPokeSession(t, sessionName)
 
 	calls := 0
 	var gotCityPath, stateAtPoke string
@@ -110,9 +115,9 @@ func TestCmdSessionKill_PokesControllerAfterSleep(t *testing.T) {
 // session state has already been synced asleep, so the reconciler observes it
 // on its normal convergence pass regardless of whether the poke landed.
 func TestCmdSessionKill_PokeFailureIsNonFatal(t *testing.T) {
-	const identity = "session-a"
+	const identity = killPokeSessionIdentity
 	const sessionName = "s-gc-kill-poke-fail"
-	_, _, _ = newKillPokeSession(t, identity, sessionName)
+	_, _, _ = newKillPokeSession(t, sessionName)
 
 	old := sessionKillPokeController
 	sessionKillPokeController = func(string) error { return errors.New("dial failed") }
@@ -125,9 +130,9 @@ func TestCmdSessionKill_PokeFailureIsNonFatal(t *testing.T) {
 }
 
 func TestCmdSessionKillRefusesLiveSubagentsUnlessForced(t *testing.T) {
-	const identity = "session-a"
+	const identity = killPokeSessionIdentity
 	const sessionName = "s-gc-kill-guard"
-	_, _, _ = newKillPokeSession(t, identity, sessionName)
+	_, _, _ = newKillPokeSession(t, sessionName)
 
 	old := liveSubagentsForKill
 	calls := 0
