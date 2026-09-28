@@ -74,6 +74,9 @@ type sessionConn struct {
 	// turnEvents publishes this connection's turns; nil until Start commits
 	// the connection to the Provider that owns it.
 	turnEvents *turnEventSource
+	// turnEventsLost counts dropped turn events not yet logged; callers log
+	// them after releasing mu.
+	turnEventsLost int64
 	// exited is set once the agent process has exited.
 	exited bool
 	// exitReported closes after the exit has been published (or found no
@@ -200,8 +203,10 @@ func (sc *sessionConn) dispatch(msg JSONRPCMessage) {
 			sc.endTurnLocked(outcome, time.Now())
 			sc.markIdleLocked()
 		}
+		lost := sc.takeLostTurnEventsLocked()
 		sc.mu.Unlock()
 		sc.replyCanceled(canceled)
+		logLostTurnEvents(lost)
 		if usageErr != nil {
 			fmt.Fprintf(os.Stderr, "acp: dropping undecodable prompt usage (logged once per session): %v\n", usageErr)
 		}
@@ -385,11 +390,14 @@ func isJSONObjectLine(line []byte) bool {
 // drained: no response could ever settle that turn.
 func (sc *sessionConn) setActivePrompt(id int64) bool {
 	sc.mu.Lock()
-	defer sc.mu.Unlock()
 	if sc.drained {
+		sc.mu.Unlock()
 		return false
 	}
 	sc.markBusyLocked(id)
+	lost := sc.takeLostTurnEventsLocked()
+	sc.mu.Unlock()
+	logLostTurnEvents(lost)
 	return true
 }
 
@@ -410,8 +418,10 @@ func (sc *sessionConn) drainPending(cause error) {
 		close(ch)
 		delete(sc.pending, id)
 	}
+	lost := sc.takeLostTurnEventsLocked()
 	sc.mu.Unlock()
 	sc.replyCanceled(canceled)
+	logLostTurnEvents(lost)
 }
 
 // abandonPrompt fails the turn for prompt id, which was never delivered to
@@ -422,7 +432,9 @@ func (sc *sessionConn) abandonPrompt(id int64, cause error) {
 		sc.endTurnLocked(turnOutcome{state: turnFailed, err: fmt.Sprintf("sending prompt: %v", cause)}, time.Now())
 		sc.markIdleLocked()
 	}
+	lost := sc.takeLostTurnEventsLocked()
 	sc.mu.Unlock()
+	logLostTurnEvents(lost)
 }
 
 // isBusy reports whether a prompt response is pending.

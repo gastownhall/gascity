@@ -253,7 +253,7 @@ func (sc *sessionConn) startTurnLocked(id int64, now time.Time) {
 		State:     turnRunning,
 	}
 	if sc.turnEvents != nil {
-		sc.turnEvents.started(sc.currentTurn)
+		sc.turnEventsLost += sc.turnEvents.started(sc.currentTurn)
 	}
 }
 
@@ -272,7 +272,7 @@ func (sc *sessionConn) endTurnLocked(outcome turnOutcome, now time.Time) {
 	turn.Error = outcome.err
 	sc.lastTurn = turn
 	if sc.turnEvents != nil && turn.eventSeq != 0 {
-		sc.turnEvents.completed(turn, outcome, now)
+		sc.turnEventsLost += sc.turnEvents.completed(turn, outcome, now)
 	}
 }
 

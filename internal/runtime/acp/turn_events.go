@@ -14,7 +14,8 @@ import (
 // sessionConn keeps: a started event when a turn opens (the session/prompt
 // request is about to be written) and a completed event when it ends. The
 // hub never blocks the JSON-RPC read loop or Nudge: an event a subscriber
-// has no room for is dropped and counted, and the count is logged.
+// has no room for is dropped and counted, and the count is logged once the
+// connection lock is released.
 
 // turnEventBuffer sizes each subscriber channel.
 const turnEventBuffer = 256
@@ -82,24 +83,21 @@ func (h *turnEventHub) subscribe(ctx context.Context) <-chan runtime.TurnEvent {
 }
 
 // publishStarted numbers a new turn, offers ev to every subscriber, and
-// returns the turn's number.
-func (h *turnEventHub) publishStarted(ev runtime.TurnEvent) uint64 {
+// returns the turn's number and the dropped events now due to be logged.
+func (h *turnEventHub) publishStarted(ev runtime.TurnEvent) (seq uint64, lost int64) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.seq++
-	seq := h.seq
-	lost := h.offerLocked(ev, seq)
-	h.mu.Unlock()
-	logLostTurnEvents(lost)
-	return seq
+	seq = h.seq
+	return seq, h.offerLocked(ev, seq)
 }
 
 // publishCompleted offers ev, the end of turn seq, to every subscriber that
-// saw the turn start.
-func (h *turnEventHub) publishCompleted(ev runtime.TurnEvent, seq uint64) {
+// saw the turn start, and returns the dropped events now due to be logged.
+func (h *turnEventHub) publishCompleted(ev runtime.TurnEvent, seq uint64) int64 {
 	h.mu.Lock()
-	lost := h.offerLocked(ev, seq)
-	h.mu.Unlock()
-	logLostTurnEvents(lost)
+	defer h.mu.Unlock()
+	return h.offerLocked(ev, seq)
 }
 
 // offerLocked delivers ev for turn seq without blocking. A full subscriber
@@ -133,7 +131,17 @@ func (h *turnEventHub) dropped() int64 {
 	return n
 }
 
-// logLostTurnEvents writes one stderr line for n dropped events.
+// takeLostTurnEventsLocked returns the dropped turn events sc has yet to log
+// and resets the count, so the caller can log them after releasing sc.mu.
+// Caller holds sc.mu.
+func (sc *sessionConn) takeLostTurnEventsLocked() int64 {
+	n := sc.turnEventsLost
+	sc.turnEventsLost = 0
+	return n
+}
+
+// logLostTurnEvents writes one stderr line for n dropped events. Never call
+// it with sc.mu held: a blocked stderr would stall the read loop and Nudge.
 func logLostTurnEvents(n int64) {
 	if n == 0 {
 		return
@@ -149,19 +157,23 @@ type turnEventSource struct {
 	sessionID string
 }
 
-// started publishes the start of rec and remembers its number on rec.
-func (s *turnEventSource) started(rec *turnRecord) {
-	rec.eventSeq = s.hub.publishStarted(runtime.TurnEvent{
+// started publishes the start of rec, remembers its number on rec, and
+// returns the dropped events now due to be logged.
+func (s *turnEventSource) started(rec *turnRecord) int64 {
+	var lost int64
+	rec.eventSeq, lost = s.hub.publishStarted(runtime.TurnEvent{
 		Kind:      runtime.TurnEventStarted,
 		Session:   s.session,
 		SessionID: s.sessionID,
 		TurnID:    rec.ID,
 		Time:      rec.StartedAt,
 	})
+	return lost
 }
 
-// completed publishes how rec ended.
-func (s *turnEventSource) completed(rec *turnRecord, outcome turnOutcome, now time.Time) {
+// completed publishes how rec ended and returns the dropped events now due
+// to be logged.
+func (s *turnEventSource) completed(rec *turnRecord, outcome turnOutcome, now time.Time) int64 {
 	ev := runtime.TurnEvent{
 		Kind:      runtime.TurnEventCompleted,
 		Session:   s.session,
@@ -190,7 +202,7 @@ func (s *turnEventSource) completed(rec *turnRecord, outcome turnOutcome, now ti
 			CachedWriteTokens: u.CachedWriteTokens,
 		}
 	}
-	s.hub.publishCompleted(ev, rec.eventSeq)
+	return s.hub.publishCompleted(ev, rec.eventSeq)
 }
 
 // attachTurnEvents makes sc publish its turns for name, tagged with the gc
