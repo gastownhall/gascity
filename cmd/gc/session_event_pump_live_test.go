@@ -21,6 +21,7 @@ import (
 // Opt-in: see herdrtest.RequireLive.
 func TestSessionEventPumpLiveHerdr(t *testing.T) {
 	herdrtest.RequireLive(t)
+	usePrivateHerdrConfigRoot(t)
 
 	// Unique per run: herdr persists session state across server restarts, so a
 	// fixed name inherits a prior run's leftovers.
@@ -89,6 +90,13 @@ func TestSessionEventPumpLiveHerdr(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("no reconcile poke after the agent process exited")
 	}
+}
+
+// usePrivateHerdrConfigRoot is a RED-stage stub (tdd_red_sha): it compiles
+// but does not yet point herdr at a private config root, so the sun_path
+// overflow this bead fixes still reproduces. GREEN replaces the body.
+func usePrivateHerdrConfigRoot(t *testing.T) {
+	t.Helper()
 }
 
 // herdrLivePaneID resolves the pane herdr bound to a gc session by reading the
