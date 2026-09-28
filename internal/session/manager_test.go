@@ -2659,6 +2659,48 @@ func TestRename(t *testing.T) {
 	}
 }
 
+// TestUpdatePresentationRefusesBlankTitle guards the bead store's non-empty
+// title rule at the boundary that takes the title from user input. Without it a
+// blank rename either reaches the store and comes back as a storage validation
+// error (bd: "title is required", surfaced as a 500 by the API) or, on stores
+// that do not validate, silently blanks the session title.
+func TestUpdatePresentationRefusesBlankTitle(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(
+		context.Background(), CreateOptions{Alias: "old-alias", ExplicitName: "", Template: "helper", Title: "old title", Command: "echo test", WorkDir: "/tmp", Provider: "test", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, blank := range []string{"", "   ", "\t\n"} {
+		err := mgr.Rename(info.ID, blank)
+		if !errors.Is(err, ErrInvalidSessionTitle) {
+			t.Fatalf("Rename(%q) error = %v, want ErrInvalidSessionTitle", blank, err)
+		}
+		// A blank title must also refuse a combined presentation update, so the
+		// alias half is not applied without the title half.
+		nextAlias := "new-alias"
+		err = mgr.UpdatePresentation(info.ID, &blank, &nextAlias)
+		if !errors.Is(err, ErrInvalidSessionTitle) {
+			t.Fatalf("UpdatePresentation(title=%q, alias) error = %v, want ErrInvalidSessionTitle", blank, err)
+		}
+	}
+
+	bead, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bead.Title != "old title" {
+		t.Fatalf("Title = %q, want the original title untouched", bead.Title)
+	}
+	if bead.Metadata["alias"] != "old-alias" {
+		t.Fatalf("alias = %q, want the original alias untouched", bead.Metadata["alias"])
+	}
+}
+
 func TestUpdatePresentationSyncsRuntimeAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

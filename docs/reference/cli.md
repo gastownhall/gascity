@@ -4654,6 +4654,13 @@ will not be found by name or auto-started again until it is re-registered
 with "gc register". Use "gc unregister" directly to remove a registration
 without stopping sessions.
 
+gc stop reports "City stopped." only when it could confirm that every
+session stopped. If it could not list the runtime's sessions completely,
+or could not check whether a session is still running, it names what it
+could not verify, still stops every session it did see, and exits
+non-zero; a supervisor registration is restored. Resolve the reported
+error and run gc stop again.
+
 Use --timeout=DURATION to cap the wall-clock time gc stop will spend
 before giving up; the default budgets configured session interrupt and
 stop waves, the configured shutdown grace wait, and a second orphan

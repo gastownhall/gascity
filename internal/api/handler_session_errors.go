@@ -17,6 +17,8 @@ func writeSessionManagerError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 	case errors.Is(err, session.ErrSessionAliasExists):
 		writeError(w, http.StatusConflict, "conflict", err.Error())
+	case errors.Is(err, session.ErrInvalidSessionTitle):
+		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 	case errors.Is(err, session.ErrInteractionUnsupported):
 		writeError(w, http.StatusNotImplemented, "unsupported", err.Error())
 	case errors.Is(err, session.ErrPendingInteraction):

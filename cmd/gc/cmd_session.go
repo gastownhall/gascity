@@ -1926,6 +1926,10 @@ func newSessionRenameCmd(stdout, stderr io.Writer) *cobra.Command {
 func cmdSessionRename(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
 	asJSON := sessionJSONRequested(jsonOutput)
 	title := args[1]
+	if err := session.ValidateTitle(title); err != nil {
+		fmt.Fprintf(stderr, "gc session rename: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	store, code := openCityStore(stderr, "gc session rename")
 	if store == nil {

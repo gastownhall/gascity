@@ -1670,8 +1670,15 @@ func (m *Manager) Rename(id, title string) error {
 	return m.UpdatePresentation(id, &title, nil)
 }
 
-// UpdatePresentation updates user-facing session attributes.
+// UpdatePresentation updates user-facing session attributes. A blank or
+// whitespace-only title is refused with ErrInvalidSessionTitle before any
+// lock or store work, so neither half of a combined title+alias update lands.
 func (m *Manager) UpdatePresentation(id string, title *string, alias *string) error {
+	if title != nil {
+		if err := ValidateTitle(*title); err != nil {
+			return err
+		}
+	}
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.loadSessionBead(id, true)
 		if err != nil {

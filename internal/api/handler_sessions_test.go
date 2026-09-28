@@ -2195,6 +2195,50 @@ func TestHandleSessionRenameEmptyTitle(t *testing.T) {
 	}
 }
 
+// TestHandleSessionRenameBlankTitle covers the whitespace-only titles that
+// pass Huma's minLength:"1": they must come back as a 400 that names the
+// problem, not reach the store (where bd answers "title is required", which
+// the API surfaced as a 500) and not blank the stored title.
+func TestHandleSessionRenameBlankTitle(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		method string
+		suffix string
+		body   string
+	}{
+		{name: "rename", method: http.MethodPost, suffix: "/rename", body: `{"title":"   "}`},
+		{name: "patch", method: http.MethodPatch, suffix: "", body: `{"title":" \t "}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			srv := New(fs)
+			h := newTestCityHandlerWith(t, fs, srv)
+
+			info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
+
+			req := httptest.NewRequest(tc.method, cityURL(fs, "/session/")+info.ID+tc.suffix, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-GC-Request", "true")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "title cannot be empty") {
+				t.Fatalf("body = %s, want it to name the blank title", w.Body.String())
+			}
+			got, err := fs.cityBeadStore.Get(info.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.Title != "Original" {
+				t.Fatalf("stored title = %q, want %q untouched", got.Title, "Original")
+			}
+		})
+	}
+}
+
 func TestHandleSessionAmbiguousAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)

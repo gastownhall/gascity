@@ -128,6 +128,7 @@ go_test(
         "startup_health_test.go",
         "state_machine_test.go",
         "store_close_backends_test.go",
+        "store_close_terminal_test.go",
         "store_close_test.go",
         "store_patch_fence_test.go",
         "store_resolve_test.go",

@@ -365,6 +365,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an orphaned or idle drain, and cancels an in-flight orphaned drain once the
   claim is visible (#6665, #6666).
 
+- **The controller no longer crashes on a tmux state-cache race.** Evicting a
+  stopped session deleted it from the published tmux snapshot in place while
+  status readers could still be reading that map, a fatal concurrent map read
+  and write that `recover()` cannot catch. Eviction now publishes a copy
+  (#6735).
+
+- **A pending create whose command drifted no longer holds its alias
+  forever.** When the command a start was prepared with differed from the
+  persisted one and a retry could not converge, the row stayed in `creating`
+  and retried every tick, so no replacement could be built. It is now rolled
+  back (the bead closes as `failed-create`, releasing its claim and alias) and
+  recreated on the next tick. The stale-create bound no longer renews on each
+  retry, and `gc session reset` rolls back a stuck create that is past its
+  start lease with no running runtime; `--json` now reports
+  `mode: restart|rollback` (#6744).
+
+- **A codex prompt swallowed during a large paste is submitted again.** A busy
+  codex TUI still ingesting a large pasted prompt ate every submit in the
+  confirm window, leaving the draft staged and the seat idle while holding its
+  claim. gc now re-sends the submit, at most 8 times and only while the live
+  composer still shows the staged draft and the pane is idle; it never sends
+  into an attached session (#6739).
+
+- **`gc session kill` no longer races the reconciler.** The kill stopped the
+  runtime before marking the session asleep, so a controller tick in between
+  could treat it as a crash: resetting the conversation instead of resuming
+  it, closing the bead, or reaping it as a `dead-runtime` corpse. The kill now
+  writes a kill-pending marker first; while it is fresh the reconciler and the
+  corpse cleaner leave the row alone, queued nudges stay pending, and
+  attach/send return HTTP 409 (#6749).
+
+- **Killed and dormant sessions are no longer closed as `dead-runtime`.** The
+  corpse cleaner closed any open row whose tmux pane had died, so a session
+  stopped with `gc session kill` (or drained, suspended, quarantined or
+  archived) could never be woken again. Only rows that claim a live runtime
+  are closed now, and only when the dead pane belongs to the row's current
+  incarnation, so a mid-restart row is left alone (#6752).
+
 - **A condition-triggered order whose check passes now dispatches on the tick
   that observes it, instead of queueing behind the per-tick dispatch budget.**
   `orders.max_dispatches_per_tick` (default 4) capped every trigger type and

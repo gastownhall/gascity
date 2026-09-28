@@ -377,6 +377,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if p.city != nil {
 		packDirs = p.city.PackDirsForRig(rigName)
 	}
+	// renderPrompt returns "" for an empty template path before it reads the
+	// context, so the default-branch probe — up to three git subprocesses when
+	// the rig records no default_branch — is only worth running when there is a
+	// prompt template to render.
+	defaultBranch := ""
+	if cfgAgent.PromptTemplate != "" {
+		defaultBranch = defaultBranchForRig(rigName, p.rigs, workDir)
+	}
 	topo := config.QueryTopology{}
 	if p.city != nil {
 		topo.Beads = p.city.Beads
@@ -400,7 +408,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		RigRoot:                 rigRoot,
 		WorkDir:                 workDir,
 		IssuePrefix:             findRigPrefix(rigName, p.rigs),
-		DefaultBranch:           defaultBranchForRig(rigName, p.rigs, workDir),
+		DefaultBranch:           defaultBranch,
 		AssignedInProgressQuery: expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_in_progress_query", cfgAgent.EffectiveAssignedInProgressQueryFor(topo), p.stderr),
 		AssignedReadyQuery:      expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_ready_query", cfgAgent.EffectiveAssignedReadyQueryFor(topo), p.stderr),
 		RoutedPoolQuery:         expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "routed_pool_query", cfgAgent.EffectiveRoutedPoolQueryFor(topo), p.stderr),
