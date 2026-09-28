@@ -882,6 +882,7 @@ go_test(
         "cmd_session_kill_frontdoor_test.go",
         "cmd_session_kill_poke_test.go",
         "cmd_session_logs_test.go",
+        "cmd_session_rename_test.go",
         "cmd_session_reset_test.go",
         "cmd_session_state_banner_test.go",
         "cmd_session_submit_test.go",
