@@ -28,6 +28,9 @@ type fakeHerdrServer struct {
 
 	mu     sync.Mutex
 	agents []agentInfo // what agent.list returns
+	// agentLists reports each agent.list call so race-order tests can wait for
+	// a specific refresh without sleeping.
+	agentLists chan struct{}
 
 	// subscribes receives each events.subscribe call's decoded filter set.
 	subscribes chan []subscribeSub
@@ -64,6 +67,7 @@ func newFakeHerdrServer(t *testing.T) (*fakeHerdrServer, string) {
 	sock := filepath.Join(dir, "s.sock")
 	f := &fakeHerdrServer{
 		t:          t,
+		agentLists: make(chan struct{}, 64),
 		subscribes: make(chan []subscribeSub, 16),
 		streams:    make(chan *fakeStream, 16),
 	}
@@ -115,6 +119,7 @@ func (f *fakeHerdrServer) serve(conn net.Conn) {
 	}
 	switch req.Method {
 	case "agent.list":
+		f.agentLists <- struct{}{}
 		f.mu.Lock()
 		agents := f.agents
 		f.mu.Unlock()
@@ -175,6 +180,15 @@ func recvSubscribe(t *testing.T, f *fakeHerdrServer, timeout time.Duration) []su
 		t.Fatalf("timed out after %v awaiting events.subscribe filter set", timeout)
 	}
 	panic("unreachable")
+}
+
+func recvAgentList(t *testing.T, f *fakeHerdrServer, timeout time.Duration) {
+	t.Helper()
+	select {
+	case <-f.agentLists:
+	case <-time.After(timeout):
+		t.Fatalf("timed out after %v awaiting agent.list", timeout)
+	}
 }
 
 // TestSessionEventStreamStartupAndTranslation pins the core cycle: subscribe
@@ -275,6 +289,147 @@ func TestSessionEventStreamStartupAndTranslation(t *testing.T) {
 	}
 }
 
+func TestSessionEventStreamUsesPersistedBindingWithoutRegistryAgent(t *testing.T) {
+	f, sock := newFakeHerdrServer(t)
+	p := eventTestProvider(t, sock)
+	if err := p.bindPlacement("raw-shell", agentInfo{PaneID: "w1:p1"}, bindModeShell); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := p.SubscribeSessionEvents(ctx)
+	if err != nil {
+		t.Fatalf("SubscribeSessionEvents: %v", err)
+	}
+
+	subs := recvSubscribe(t, f, 2*time.Second)
+	found := false
+	for _, sub := range subs {
+		if sub.Type == "pane.agent_status_changed" && sub.PaneID == "w1:p1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("subscribe filter set missing persisted pane w1:p1: %v", subs)
+	}
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventResync {
+		t.Fatalf("first event = %v, want resync", ev.Kind)
+	}
+	stream := recvStream(t, f)
+	stream.push(t, `{"data":{"agent_status":"idle","pane_id":"w1:p1"},"event":"pane.agent_status_changed"}`)
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventAgentIdle || ev.Session != "raw-shell" {
+		t.Errorf("bound pane status => %+v, want agent_idle/raw-shell", ev)
+	}
+	stream.push(t, `{"data":{"pane_id":"w1:p1"},"event":"pane_exited"}`)
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventExited || ev.Session != "raw-shell" {
+		t.Errorf("bound pane exit => %+v, want exited/raw-shell", ev)
+	}
+	if pane, err := p.GetMeta("raw-shell", metaBoundPane); err != nil || pane != "w1:p1" {
+		t.Errorf("binding after replayable pane exit = %q, %v; want unchanged", pane, err)
+	}
+}
+
+func TestPersistedBindingOverridesRegistryAttribution(t *testing.T) {
+	f, sock := newFakeHerdrServer(t)
+	f.setAgents(agentInfo{Name: "registry-name", PaneID: "w1:p1"})
+	p := eventTestProvider(t, sock)
+	if err := p.bindPlacement("gas-city-name", agentInfo{PaneID: "w1:p1"}, bindModeAgent); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := p.SubscribeSessionEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventResync {
+		t.Fatalf("first event = %v, want resync", ev.Kind)
+	}
+	stream := recvStream(t, f)
+	stream.push(t, `{"data":{"agent_status":"idle","pane_id":"w1:p1"},"event":"pane.agent_status_changed"}`)
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Session != "gas-city-name" {
+		t.Errorf("session = %q, want authoritative persisted name", ev.Session)
+	}
+}
+
+func TestSessionEventStreamTransitionsThroughBindingCollision(t *testing.T) {
+	f, sock := newFakeHerdrServer(t)
+	p := eventTestProvider(t, sock)
+	if err := p.bindPlacement("owner-a", agentInfo{PaneID: "w1:p1"}, bindModeShell); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := p.SubscribeSessionEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recvSubscribe(t, f, 2*time.Second)
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventResync {
+		t.Fatalf("first event = %v, want resync", ev.Kind)
+	}
+	recvStream(t, f)
+
+	// A second persisted owner makes attribution ambiguous. The publication
+	// wakes the stream, which cycles without a targeted subscription for the
+	// conflicted pane and must not retain owner-a in its attribution map.
+	if err := p.bindPlacement("owner-b", agentInfo{PaneID: "w1:p1"}, bindModeShell); err != nil {
+		t.Fatal(err)
+	}
+	subs := recvSubscribe(t, f, 2*time.Second)
+	for _, sub := range subs {
+		if sub.Type == "pane.agent_status_changed" && sub.PaneID == "w1:p1" {
+			t.Fatalf("conflicted pane retained targeted subscription: %v", subs)
+		}
+	}
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventResync {
+		t.Fatalf("post-conflict event = %v, want resync", ev.Kind)
+	}
+	stream := recvStream(t, f)
+	stream.push(t, `{"data":{"pane_id":"w1:p1"},"event":"pane_closed"}`)
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventClosed || ev.Session != "" {
+		t.Errorf("conflicted pane close => %+v, want unattributed closed event", ev)
+	}
+
+	// Clearing one claimant publishes again. The remaining persisted owner is
+	// adopted and its targeted status subscription returns.
+	p.clearPaneBinding("owner-b")
+	subs = recvSubscribe(t, f, 2*time.Second)
+	found := false
+	for _, sub := range subs {
+		if sub.Type == "pane.agent_status_changed" && sub.PaneID == "w1:p1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("resolved pane missing targeted subscription: %v", subs)
+	}
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventResync {
+		t.Fatalf("post-resolution event = %v, want resync", ev.Kind)
+	}
+	stream = recvStream(t, f)
+	stream.push(t, `{"data":{"agent_status":"idle","pane_id":"w1:p1"},"event":"pane.agent_status_changed"}`)
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventAgentIdle || ev.Session != "owner-a" {
+		t.Errorf("resolved pane status => %+v, want agent_idle/owner-a", ev)
+	}
+}
+
+func TestSessionEventStreamRetainsOrdinaryMissingPaneAttribution(t *testing.T) {
+	s := &sessionEventStream{
+		paneNames:  map[string]string{"w1:p1": "owner-a"},
+		subscribed: map[string]bool{"w1:p1": true},
+	}
+	if s.applyWatchedPaneSnapshot(watchedPaneSnapshot{names: map[string]string{}}) {
+		t.Fatal("ordinary missing pane forced a resubscribe")
+	}
+	if got := s.paneNames["w1:p1"]; got != "owner-a" {
+		t.Fatalf("ordinary missing pane attribution = %q, want retained owner-a", got)
+	}
+}
+
 // TestSessionEventStreamReconnects pins self-healing: when the server drops
 // the stream, the loop reconnects and the new cycle leads with a Resync.
 func TestSessionEventStreamReconnects(t *testing.T) {
@@ -335,6 +490,7 @@ func TestSessionEventStreamAttachesWhenServerAppears(t *testing.T) {
 
 	f := &fakeHerdrServer{
 		t:          t,
+		agentLists: make(chan struct{}, 64),
 		subscribes: make(chan []subscribeSub, 16),
 		streams:    make(chan *fakeStream, 16),
 	}
@@ -467,6 +623,91 @@ func TestSessionEventStreamResubscribesForNewAgentPane(t *testing.T) {
 	stream.push(t, `{"data":{"agent":"claude","agent_status":"idle","pane_id":"w3:p1","workspace_id":"w3"},"event":"pane.agent_status_changed"}`)
 	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventAgentIdle || ev.Session != "gamma" {
 		t.Errorf("new pane agent_status => %+v, want agent_idle/gamma", ev)
+	}
+}
+
+func TestSessionEventStreamResubscribesForNewPersistedBinding(t *testing.T) {
+	f, sock := newFakeHerdrServer(t)
+	p := eventTestProvider(t, sock)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := p.SubscribeSessionEvents(ctx)
+	if err != nil {
+		t.Fatalf("SubscribeSessionEvents: %v", err)
+	}
+	recvAgentList(t, f, 2*time.Second)
+	recvSubscribe(t, f, 2*time.Second)
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventResync {
+		t.Fatalf("first event = %v, want resync", ev.Kind)
+	}
+	stream := recvStream(t, f)
+
+	// Production creates the pane before bindPlacement publishes its sidecar.
+	// Let the pane-created debounce refresh once while the binding is absent.
+	stream.push(t, `{"data":{"pane":{"pane_id":"w2:p1"}},"event":"pane_created"}`)
+	recvAgentList(t, f, 2*time.Second)
+	if err := p.bindPlacement("late-shell", agentInfo{PaneID: "w2:p1"}, bindModeShell); err != nil {
+		t.Fatal(err)
+	}
+
+	subs := recvSubscribe(t, f, 5*time.Second)
+	found := false
+	for _, sub := range subs {
+		if sub.Type == "pane.agent_status_changed" && sub.PaneID == "w2:p1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("resubscribe filter set missing persisted pane w2:p1: %v", subs)
+	}
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventResync {
+		t.Fatalf("post-resubscribe event = %v, want resync", ev.Kind)
+	}
+	stream = recvStream(t, f)
+	stream.push(t, `{"data":{"agent_status":"working","pane_id":"w2:p1"},"event":"pane.agent_status_changed"}`)
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventAgentStateChanged || ev.Session != "late-shell" {
+		t.Errorf("new bound pane status => %+v, want agent_state_changed/late-shell", ev)
+	}
+}
+
+func TestPaneBindingPublicationBroadcasts(t *testing.T) {
+	f, sock := newFakeHerdrServer(t)
+	p := eventTestProvider(t, sock)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	channels := make([]<-chan runtime.SessionEvent, 2)
+	for i := range channels {
+		var err error
+		channels[i], err = p.SubscribeSessionEvents(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recvSubscribe(t, f, 2*time.Second)
+		if ev := recvEvent(t, channels[i], 2*time.Second); ev.Kind != runtime.SessionEventResync {
+			t.Fatalf("subscriber %d first event = %v, want resync", i+1, ev.Kind)
+		}
+		recvStream(t, f)
+	}
+
+	if err := p.bindPlacement("raw-shell", agentInfo{PaneID: "w1:p1"}, bindModeShell); err != nil {
+		t.Fatal(err)
+	}
+	for i, ch := range channels {
+		subs := recvSubscribe(t, f, 2*time.Second)
+		found := false
+		for _, sub := range subs {
+			if sub.Type == "pane.agent_status_changed" && sub.PaneID == "w1:p1" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("subscriber %d did not add published pane: %v", i+1, subs)
+		}
+		if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventResync {
+			t.Fatalf("subscriber %d post-publication event = %v, want resync", i+1, ev.Kind)
+		}
 	}
 }
 

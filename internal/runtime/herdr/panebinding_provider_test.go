@@ -481,3 +481,22 @@ func TestListRunningSkipsGonePanes(t *testing.T) {
 		t.Fatalf("ListRunning = %v, %v; want empty", got, err)
 	}
 }
+
+func TestBoundPaneNamesRejectsDuplicateOwners(t *testing.T) {
+	p, _ := newFakeHerdrProvider(t)
+	for _, name := range []string{"gastown__old", "gastown__new"} {
+		if err := p.SetMeta(name, metaBoundName, name); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.SetMeta(name, metaBoundPane, "%5"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot := p.boundPaneNames()
+	if name, ok := snapshot.names["%5"]; ok {
+		t.Fatalf("duplicate pane owner resolved as %q; want persisted attribution rejected", name)
+	}
+	if !snapshot.conflicts["%5"] {
+		t.Fatal("duplicate pane owner was not reported as an explicit conflict")
+	}
+}
