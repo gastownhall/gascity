@@ -1251,7 +1251,7 @@ func lookupSessionBeadByIDInfo(sessFront *sessionpkg.Store, id string) (sessionp
 	return info, true, nil
 }
 
-func dispatchReadyWaitNudges(cityPath string, store beads.Store, _ runtime.Provider, now time.Time) error {
+func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Provider, now time.Time) error {
 	// Single-store wrapper: fan the one work store into the session and nudges
 	// class params so existing test call sites stay untouched. Both arms route
 	// through their coordination-class store (cliSessionFrontDoor, cliNudgesStore)
@@ -1261,10 +1261,10 @@ func dispatchReadyWaitNudges(cityPath string, store beads.Store, _ runtime.Provi
 	if strings.TrimSpace(cityPath) != "" {
 		cfg, _ = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	}
-	return dispatchReadyWaitNudgesWithSnapshot(cityPath, cfg, cliSessionFrontDoor(store, cfg, cityPath), cliNudgesStore(store, cfg, cityPath), now, nil)
+	return dispatchReadyWaitNudgesWithSnapshot(cityPath, cfg, cliSessionFrontDoor(store, cfg, cityPath), cliNudgesStore(store, cfg, cityPath), sp, now, nil)
 }
 
-func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sessFront *sessionpkg.Store, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) error {
+func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sessFront *sessionpkg.Store, nudges beads.NudgesStore, sp runtime.Provider, now time.Time, sessionBeads *sessionBeadSnapshot) error {
 	if sessionBeads == nil {
 		var err error
 		sessionBeads, err = loadSessionBeadSnapshot(sessFront.Store().Store)
@@ -1327,7 +1327,15 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		// BuiltinAncestor at session-bead creation, so wrapped aliases
 		// already surface as their built-in family here. The provider
 		// fallback covers sessions created before provider_kind was stamped.
-		if waitNudgeProviderNeedsPoller(sessionInfo) && !nudgeDispatcherIsSupervisor(cfg) {
+		// Event-capable session providers retire the sidecar class, but only
+		// while something is actually hosting the replacement: the
+		// controller-hosted nudge event dispatcher. Mirrors
+		// maybeStartNudgePoller's fail-open contract (cmd_nudge.go) — with no
+		// controller answering, nothing owns delivery, so suppress the sidecar
+		// only when a dispatcher is confirmed live, never on provider
+		// capability alone.
+		waitTarget := nudgeTarget{cityPath: cityPath, sessionName: sessionInfo.SessionNameMetadata}
+		if waitNudgeProviderNeedsPoller(sessionInfo) && !nudgeDispatcherIsSupervisor(cfg) && (!providerRetiresNudgePollers(waitTarget, sp) || !nudgePollerDispatcherIsLive(cityPath)) {
 			if err := startNudgePoller(cityPath, waitNudgePollerKey(sessionInfo), sessionInfo.SessionNameMetadata); err != nil {
 				return fmt.Errorf("starting wait nudge poller: %w", err)
 			}

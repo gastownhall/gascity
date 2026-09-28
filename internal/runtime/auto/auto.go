@@ -64,6 +64,15 @@ func (p *Provider) Unroute(name string) {
 	p.mu.Unlock()
 }
 
+// EventCapableRoute reports whether the backend routed for name implements
+// runtime.SessionEventProvider. SubscribeSessionEvents above merges both
+// backends' streams whenever both are event-capable, so a session routed to
+// either backend gets real events whenever this reports true.
+func (p *Provider) EventCapableRoute(name string) bool {
+	_, ok := p.route(name).(runtime.SessionEventProvider)
+	return ok
+}
+
 func (p *Provider) route(name string) runtime.Provider {
 	p.mu.RLock()
 	isACP := p.routes[name]
@@ -431,10 +440,15 @@ func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
 	return runtime.SessionSleepCapabilityDisabled
 }
 
-// SubscribeSessionEvents forwards the session-event stream of whichever
-// backend implements runtime.SessionEventProvider. Today only herdr does, so
-// without this method, wrapping an event-capable default backend (e.g.
-// herdr) behind auto for ACP routing would fail the
+// SubscribeSessionEvents merges the session-event streams of every backend
+// that implements runtime.SessionEventProvider. EventCapableRoute reports
+// event-capability per session, backend by backend, so a caller may rely on
+// events arriving for a session routed to EITHER backend. Forwarding only
+// one backend's stream (the pre-fix behavior) would silently drop events for
+// sessions served by the other backend whenever both are event-capable,
+// while still telling that caller (via EventCapableRoute) that those
+// sessions were covered. Wrapping an event-capable backend (e.g. herdr)
+// behind auto without this method would fail the
 // runtime.SessionEventProvider type assertion in cmd/gc's
 // sessionEventPump.restart and silently drop the whole event-driven
 // reconcile poke, falling back to patrol polling with no underlying
@@ -442,12 +456,23 @@ func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
 func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
 	dSEP, dok := p.defaultSP.(runtime.SessionEventProvider)
 	aSEP, aok := p.acpSP.(runtime.SessionEventProvider)
-	switch {
-	case dok:
-		return dSEP.SubscribeSessionEvents(ctx)
-	case aok:
-		return aSEP.SubscribeSessionEvents(ctx)
-	default:
+	if !dok && !aok {
 		return nil, fmt.Errorf("neither default nor ACP backend implements SubscribeSessionEvents")
 	}
+	if dok && !aok {
+		return dSEP.SubscribeSessionEvents(ctx)
+	}
+	if aok && !dok {
+		return aSEP.SubscribeSessionEvents(ctx)
+	}
+
+	dCh, err := dSEP.SubscribeSessionEvents(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("default backend: %w", err)
+	}
+	aCh, err := aSEP.SubscribeSessionEvents(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("ACP backend: %w", err)
+	}
+	return runtime.MergeSessionEvents(ctx, dCh, aCh), nil
 }

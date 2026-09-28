@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 type primeHookFailWriter struct {
@@ -1365,6 +1366,60 @@ func createPrimeHookSession(t *testing.T, cityDir, sessionName, template string)
 		t.Fatalf("Create(session %s) returned empty ID", sessionName)
 	}
 	return created.ID
+}
+
+// TestDoPrimeWithHook_ResolvesNudgePollerProviderOnceAcrossResolvedAgents
+// pins MEDIUM #1 from the last review: hookNudgePollerSessionProviderFn does
+// not depend on which agent is being primed, but was re-invoked on every
+// resolvedAgents entry inside doPrimeWithHookFormatOpts's loop. Two distinct
+// resolvable candidates (GC_AGENT and GC_TEMPLATE) drive resolvedAgents to
+// two entries here, so a regression back to per-iteration construction would
+// make this test observe 2 calls instead of 1.
+func TestDoPrimeWithHook_ResolvesNudgePollerProviderOnceAcrossResolvedAgents(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = "furiosa"
+start_command = "true"
+
+[[agent]]
+name = "polecat"
+start_command = "true"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_TEMPLATE", "polecat")
+	t.Setenv("GC_SESSION_NAME", "furiosa")
+	t.Setenv("GC_SESSION_ID", "sess-once")
+
+	calls := 0
+	orig := hookNudgePollerSessionProviderFn
+	hookNudgePollerSessionProviderFn = func(spctx sessionProviderContext, stderr io.Writer) runtime.Provider {
+		calls++
+		return orig(spctx, stderr)
+	}
+	t.Cleanup(func() { hookNudgePollerSessionProviderFn = orig })
+
+	// Passing args[0] explicitly (rather than relying on GC_AGENT/GC_ALIAS)
+	// bypasses primeInvocationAgentName's session-template override, so the
+	// candidate list holds both "furiosa" (args[0]) and "polecat"
+	// (GC_TEMPLATE) as two distinct resolvable agents.
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"furiosa"}, &stdout, &stderr, true, false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if calls != 1 {
+		t.Fatalf("hookNudgePollerSessionProviderFn called %d times across resolved agents, want 1; stdout=%q stderr=%q", calls, stdout.String(), stderr.String())
+	}
 }
 
 func TestBuildPrimeContextConfigDir(t *testing.T) {

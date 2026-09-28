@@ -1470,7 +1470,7 @@ func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runti
 	// The observe is a session-class read; route through the session store
 	// (identity today). The enqueue above stays on its own nudge store.
 	if obs, err := workerObserveNudgeTarget(target, cliSessionStore(store, target.cfg, target.cityPath), sp); err == nil && obs.Running {
-		maybeStartNudgePoller(target)
+		maybeStartNudgePoller(target, sp)
 	}
 	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, undelivered, stdout, stderr)
 }
@@ -1606,7 +1606,7 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		return err
 	}
 	if obs.Running {
-		maybeStartNudgePoller(target)
+		maybeStartNudgePoller(target, sp)
 	}
 	return nil
 }
@@ -1928,7 +1928,7 @@ func pollerCanDeliverWithoutActivitySignal(target nudgeTarget, sp runtime.Provid
 	return sleeper.SleepCapability(target.sessionName) == runtime.SessionSleepCapabilityTimedOnly
 }
 
-func maybeStartNudgePoller(target nudgeTarget) {
+func maybeStartNudgePoller(target nudgeTarget, sp runtime.Provider) {
 	if target.sessionName == "" {
 		return
 	}
@@ -1944,6 +1944,17 @@ func maybeStartNudgePoller(target nudgeTarget) {
 	// per-session poller would race with it and reintroduce the bd-shellout
 	// load it was designed to eliminate.
 	if nudgeDispatcherIsSupervisor(target.cfg) {
+		return
+	}
+	// Event-capable providers retire the sidecar class, but only while
+	// something is actually hosting the replacement. The nudge event
+	// dispatcher lives in the controller and owns queued delivery for such
+	// providers in BOTH nudge_dispatcher modes, so a spawned poller would only
+	// race it. With no controller answering, nothing owns it at all, and
+	// suppressing here would leave the queue undelivered until one comes back.
+	// So this fails OPEN: no controller, spawn the poller. Callers without a
+	// resolved provider pass nil and keep today's spawn behavior too.
+	if providerRetiresNudgePollers(target, sp) && nudgePollerDispatcherIsLive(target.cityPath) {
 		return
 	}
 	// ACP session/prompt delivery requires the process that owns the
@@ -1994,6 +2005,43 @@ var startNudgePoller = ensureNudgePoller
 // nudgeDispatcherIsSupervisor reports whether the city is configured to use
 // the supervisor-hosted nudge dispatcher rather than per-session pollers.
 // A nil cfg defaults to legacy mode, matching DaemonConfig.NudgeDispatcherMode.
+// nudgePollerDispatcherIsLive reports whether a controller is answering for
+// this city. That process is the one hosting the nudge event dispatcher, so it
+// is the thing whose absence makes retiring the sidecar unsafe.
+//
+// It asks the running system rather than reading a file or inferring from
+// config, per the house rule that the process table and the socket are the
+// source of truth for what is running. A var so tests can answer it without a
+// controller.
+var nudgePollerDispatcherIsLive = func(cityPath string) bool {
+	nudgePollerLiveMu.Lock()
+	defer nudgePollerLiveMu.Unlock()
+	if live, ok := nudgePollerLiveCache[cityPath]; ok {
+		return live
+	}
+	live := controllerAliveForNudgePoller(cityPath) > 0
+	if nudgePollerLiveCache == nil {
+		nudgePollerLiveCache = map[string]bool{}
+	}
+	nudgePollerLiveCache[cityPath] = live
+	return live
+}
+
+// The probe is answered once per city per process, and that is not an
+// optimization detail. controllerAlive carries a 2s read deadline, and
+// `gc prime` asks this question once per resolved agent inside its loop, so an
+// overloaded controller would otherwise add seconds per agent to a
+// hook-frequency command, at exactly the moment hook latency has to stay
+// bounded. A one-shot process is short enough that a changed answer mid-run
+// would not be actionable anyway.
+var (
+	nudgePollerLiveMu    sync.Mutex
+	nudgePollerLiveCache map[string]bool
+	// controllerAliveForNudgePoller is the probe itself, separated from the
+	// caching around it so a test can count how many times it is reached.
+	controllerAliveForNudgePoller = controllerAlive
+)
+
 func nudgeDispatcherIsSupervisor(cfg *config.City) bool {
 	if cfg == nil {
 		return false
