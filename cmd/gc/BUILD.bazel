@@ -639,6 +639,7 @@ go_test(
         "agent_home_worktree_cleanup_test.go",
         "api_state_cache_reconcile_snapshot_test.go",
         "api_state_dolt_drop_port_test.go",
+        "api_state_pack_transaction_test.go",
         "api_state_rig_path_containment_test.go",
         "api_state_rig_path_symlink_test.go",
         "api_state_rig_rollback_test.go",
