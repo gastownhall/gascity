@@ -144,6 +144,7 @@ go_test(
     embed = [":doctor"],
     deps = [
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/beads/contract",
         "//internal/beads/proxyendpoint",
         "//internal/citylayout",

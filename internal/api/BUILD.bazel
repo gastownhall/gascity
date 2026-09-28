@@ -464,6 +464,7 @@ go_test(
         "//internal/bazeltest",
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/beads/contract",
         "//internal/beads/splittest",
         "//internal/cityinit",
