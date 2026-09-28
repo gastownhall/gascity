@@ -84,6 +84,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.1.6, whose role prompts run `gc gc claim`, rename the key to `gc`;
   `gc doctor --fix` offers the rename (#6683). Do not add a second `gc` import
   next to the old key: that imports the pack twice (#4508).
+- **The first restart after upgrading reaps pre-upgrade ACP agents whose owner
+  is gone.** Any city routing a session to ACP had process-table orphan
+  reaping off — for its ACP sessions, and in a city that mixes ACP with a
+  tmux or subprocess default, for every session including the tmux and
+  subprocess ones. It is on again. An ACP agent started by the previous binary
+  carries no `GC_ACP_CONTROL_SOCKET` marker, and once its supervisor has
+  restarted no connection to it survives, so it reads untracked and the
+  pre-start orphan sweep terminates it. That is the intended verdict — its
+  owner's control socket died with the owner, so the agent could no longer be
+  driven — and it happens once, on the first restart, not on every one
+  (#6543).
 
 ### Known Issues
 

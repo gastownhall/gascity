@@ -55,6 +55,7 @@ go_test(
     name = "proctable_test",
     srcs = [
         "descendants_test.go",
+        "environ_darwin_test.go",
         "environ_linux_test.go",
         "guard_test.go",
         "identity_darwin_test.go",
