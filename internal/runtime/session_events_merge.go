@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 )
 
 // ErrNoSessionEventSource reports that a provider has no session-event
@@ -55,7 +54,7 @@ func SubscribeSessionEventSources(ctx context.Context, a, b SessionEventSource) 
 	}
 	switch len(streams) {
 	case 0:
-		return nil, fmt.Errorf("%w (%s)", ErrNoSessionEventSource, strings.Join([]string{a.Name, b.Name}, ", "))
+		return nil, fmt.Errorf("%w (%s, %s)", ErrNoSessionEventSource, a.Name, b.Name)
 	case 1:
 		return streams[0], nil
 	}

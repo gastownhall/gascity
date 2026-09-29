@@ -269,8 +269,9 @@ func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
 // would fail the runtime.SessionEventProvider type assertion in cmd/gc's
 // sessionEventPump.restart and silently drop the event-driven reconcile
 // poke. When both backends publish events, both streams are merged, so
-// neither backend's session deaths are lost; a nested composite without an
-// event-capable backend is skipped. See runtime.SubscribeSessionEventSources.
+// neither backend's session deaths wait for the patrol scan; a nested
+// composite without an event-capable backend is skipped. See
+// runtime.SubscribeSessionEventSources.
 func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
 	return runtime.SubscribeSessionEventSources(ctx,
 		runtime.SessionEventSource{Name: "local", Provider: p.local},

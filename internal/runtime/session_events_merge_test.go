@@ -157,18 +157,35 @@ func TestSubscribeSessionEventSourcesSkipsNestedNonImplementer(t *testing.T) {
 func TestSubscribeSessionEventSourcesFailsOnBackendError(t *testing.T) {
 	broken := newStreamFake()
 	broken.subscribeErr = errors.New("transport down")
-	for _, order := range [][2]SessionEventSource{
-		{src("broken", broken), src("ok", newStreamFake())},
-		{src("ok", newStreamFake()), src("broken", broken)},
+	// okFirst subscribes before broken fails, so it is the partial-failure
+	// state the doc's "streams already opened close when ctx is done" clause
+	// is about. In the other ordering broken fails first and nothing opens.
+	okFirst := newStreamFake()
+	for _, tc := range []struct {
+		order  [2]SessionEventSource
+		opened *streamFake
+	}{
+		{order: [2]SessionEventSource{src("broken", broken), src("ok", newStreamFake())}},
+		{order: [2]SessionEventSource{src("ok", okFirst), src("broken", broken)}, opened: okFirst},
 	} {
 		ctx, cancel := context.WithCancel(context.Background())
-		_, err := SubscribeSessionEventSources(ctx, order[0], order[1])
+		_, err := SubscribeSessionEventSources(ctx, tc.order[0], tc.order[1])
+		// Capture before cancel: ending the subscription clears the handle.
+		var opened <-chan SessionEvent
+		if tc.opened != nil {
+			if opened = tc.opened.stream(); opened == nil {
+				t.Fatal("the source preceding the failure was never subscribed")
+			}
+		}
 		cancel()
 		if err == nil || !strings.Contains(err.Error(), "broken backend") || !strings.Contains(err.Error(), "transport down") {
 			t.Fatalf("err = %v, want the broken backend's error", err)
 		}
 		if errors.Is(err, ErrNoSessionEventSource) {
 			t.Fatalf("err = %v wraps ErrNoSessionEventSource, want a real failure", err)
+		}
+		if opened != nil {
+			expectClosed(t, opened)
 		}
 	}
 }
