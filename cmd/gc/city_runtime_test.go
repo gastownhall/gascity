@@ -638,6 +638,10 @@ func (d *managedDoltPreflightOrderDispatcher) drain(context.Context) bool {
 	return true
 }
 
+func (d *managedDoltPreflightOrderDispatcher) inFlightTrackingIDs() map[string]struct{} {
+	return nil
+}
+
 func hasLabelPrefix(labels []string, prefix string) bool {
 	for _, label := range labels {
 		if strings.HasPrefix(label, prefix) {
@@ -1554,6 +1558,10 @@ func (r *recordingOrderDispatcher) drain(ctx context.Context) bool {
 	return true
 }
 
+func (r *recordingOrderDispatcher) inFlightTrackingIDs() map[string]struct{} {
+	return nil
+}
+
 type blockingOrderDispatcher struct {
 	mu         sync.Mutex
 	drainCalls int
@@ -1583,6 +1591,10 @@ func (b *blockingOrderDispatcher) drain(ctx context.Context) bool {
 	case <-ctx.Done():
 		return false
 	}
+}
+
+func (b *blockingOrderDispatcher) inFlightTrackingIDs() map[string]struct{} {
+	return nil
 }
 
 func (b *blockingOrderDispatcher) waitForDrainCalls(t *testing.T, want int) {
@@ -1943,8 +1955,9 @@ func TestOrderTrackingSweepWatchdogClosesAllStaleTracking(t *testing.T) {
 	// just order-tracking-sweep's own. The old narrow scope only swept the
 	// sweep order's tracking to bootstrap it, relying on order-tracking-sweep
 	// to then clean the rest — a single-point-of-failure that jammed every
-	// order when slow reconciler cycles kept that one order from firing. The
-	// staleAfter cutoff still protects in-flight dispatches regardless of order.
+	// order when slow reconciler cycles kept that one order from firing. What
+	// keeps a live run's marker open is the dispatcher's in-flight set, not the
+	// staleAfter cutoff (#5481); nothing is in flight here.
 	store := beads.NewMemStore()
 	sweepTracking, err := store.Create(beads.Bead{
 		Title:  "order:" + orderTrackingSweepOrder,
@@ -2245,6 +2258,259 @@ func TestOrderTrackingSweepWatchdogFallsBackToConfiguredRigStore(t *testing.T) {
 	}
 	if gotCity.Status != "closed" {
 		t.Fatalf("city sweep tracking status = %s, want closed", gotCity.Status)
+	}
+}
+
+// TestOrderTrackingSweepWatchdogKeepsInFlightExecTrackingOpen pins #5481. A
+// cooldown exec order's single-flight marker is its open tracking bead: dispatch
+// skips the order while hasOpenTracking reports one. The controller watchdog
+// closes every open tracking bead older than orderTrackingSweepWatchdogStaleAfter
+// without asking whether that run is still executing, yet an exec run may
+// legitimately last until its own timeout (300s by default). A run that outlives
+// the cutoff therefore loses its marker mid-run, and the next tick past the
+// cooldown launches a second, concurrent copy. The order has the shape of the
+// core order-tracking-sweep order the report caught overlapping: cooldown 1m,
+// exec, default timeout, no no_work_gate.
+//
+// The tick runs the way CityRuntime.dispatchOrders runs it (watchdog, then
+// dispatcher, at one now), with now set past the stale cutoff instead of waiting
+// it out. The exec parks on a barrier, so the first run is genuinely in flight
+// when the watchdog looks at its marker.
+func TestOrderTrackingSweepWatchdogKeepsInFlightExecTrackingOpen(t *testing.T) {
+	const (
+		// cooldown mirrors interval = "1m" on the core order-tracking-sweep order.
+		cooldown = time.Minute
+		// pastStaleCutoff is how far beyond the watchdog's stale cutoff the second
+		// tick runs.
+		pastStaleCutoff = time.Second
+		// maxExecLaunches sizes the launch signal buffer: at most one launch per
+		// tick, over two ticks.
+		maxExecLaunches = 2
+	)
+
+	store := beads.NewMemStore()
+	cityPath := t.TempDir()
+
+	release := make(chan struct{})
+	releaseExec := sync.OnceFunc(func() { close(release) })
+	execLaunched := make(chan struct{}, maxExecLaunches)
+	var execLaunches atomic.Int32
+	blockingExec := func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+		execLaunches.Add(1)
+		execLaunched <- struct{}{}
+		select {
+		case <-release:
+			return []byte("ok\n"), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	order := orders.Order{
+		Name:     orderTrackingSweepOrder,
+		Trigger:  "cooldown",
+		Interval: cooldown.String(),
+		Exec:     "gc order sweep-tracking --stale-after 10m --quiet --confirm",
+	}
+	runLabel := orders.RunLabel(order.ScopedName())
+	ad := buildOrderDispatcherFromListExec([]orders.Order{order}, store, nil, blockingExec, nil)
+	mad, ok := ad.(*memoryOrderDispatcher)
+	if !ok {
+		t.Fatalf("dispatcher = %T, want *memoryOrderDispatcher", ad)
+	}
+	// Registered after t.TempDir, so it runs before the directory is removed:
+	// release every parked exec, cancel the dispatcher, and wait for every
+	// dispatch goroutine to return.
+	t.Cleanup(func() {
+		releaseExec()
+		mad.cancel()
+		drainCtx, cancel := context.WithTimeout(context.Background(), hangBudget)
+		defer cancel()
+		if !mad.drain(drainCtx) {
+			t.Errorf("order dispatch goroutines still running %s after the exec barrier was released", hangBudget)
+		}
+	})
+	inFlightDispatches := func() int {
+		mad.inflightMu.Lock()
+		defer mad.inflightMu.Unlock()
+		return mad.inflightN
+	}
+	runSummary := func() string {
+		var parts []string
+		for _, b := range trackingBeads(t, store, runLabel) {
+			parts = append(parts, b.ID+"="+b.Status)
+		}
+		return strings.Join(parts, ", ")
+	}
+
+	cr := &CityRuntime{
+		cityPath:            cityPath,
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		standaloneRigStores: map[string]beads.Store{},
+		od:                  ad,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+
+	// Tick 1: the order has never run, so it fires and its exec parks.
+	cr.od.dispatch(context.Background(), cityPath, time.Now())
+	awaitClose(t, execLaunched, "the first run's exec launch")
+	runs := trackingBeads(t, store, runLabel)
+	if len(runs) != 1 || runs[0].Status != "open" {
+		t.Fatalf("tracking runs after the first tick = [%s], want exactly one open run", runSummary())
+	}
+	marker := runs[0]
+	if n := inFlightDispatches(); n != 1 {
+		t.Fatalf("in-flight dispatches after the first tick = %d, want 1", n)
+	}
+
+	now := marker.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + pastStaleCutoff)
+	runAge := now.Sub(marker.CreatedAt)
+	execTimeout := effectiveTimeout(order, mad.maxTimeout)
+	if runAge >= execTimeout {
+		t.Fatalf("precondition: run age %s must be inside the %s exec timeout, or the run is overdue rather than in flight", runAge, execTimeout)
+	}
+	if runAge < cooldown {
+		t.Fatalf("precondition: run age %s must be past the %s cooldown, or the cooldown alone holds the next dispatch back", runAge, cooldown)
+	}
+
+	// Tick 2, in dispatchOrders' order: the watchdog, then the dispatcher.
+	cr.runOrderTrackingSweepWatchdog(now)
+	got, err := store.Get(marker.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", marker.ID, err)
+	}
+	if got.Status != "open" {
+		// Errorf, not Fatalf: the dispatch below shows what the lost marker costs.
+		t.Errorf("the controller watchdog closed single-flight marker %s of in-flight run %s at run age %s (status=%s, order_tracking_sweep_by=%q, close_reason=%q); its exec was still running inside its %s timeout",
+			marker.ID, order.ScopedName(), runAge, got.Status, got.Metadata["order_tracking_sweep_by"], got.Metadata["close_reason"], execTimeout)
+	}
+
+	cr.od.dispatch(context.Background(), cityPath, now)
+	// launchResolvedDispatch counts a launch as in flight before dispatch
+	// returns, so any second copy is already counted here. Wait for its exec to
+	// start, so the overlap is observed rather than inferred.
+	if inFlightDispatches() > 1 {
+		awaitClose(t, execLaunched, "the second copy's exec launch")
+	}
+	concurrent := execLaunches.Load()
+	if concurrent != 1 {
+		t.Errorf("a dispatch tick past the %s cooldown launched a second copy of %s while run %s was still executing: %d exec launches in flight at once, want 1 (tracking runs: %s)",
+			cooldown, order.ScopedName(), marker.ID, concurrent, runSummary())
+	}
+
+	// Release the parked exec(s) and wait for every dispatch goroutine. The
+	// launch count must not move once they have all returned.
+	releaseExec()
+	drainCtx, cancel := context.WithTimeout(context.Background(), hangBudget)
+	defer cancel()
+	if !mad.drain(drainCtx) {
+		t.Fatalf("order dispatch goroutines did not finish within %s after the exec barrier was released", hangBudget)
+	}
+	if total := execLaunches.Load(); total != concurrent {
+		t.Fatalf("exec launches = %d after drain but %d at the overlap check; a launch escaped the in-flight count", total, concurrent)
+	}
+	if ids := mad.inFlightTrackingIDs(); len(ids) != 0 {
+		t.Errorf("in-flight tracking IDs after drain = %v, want none: a finished run still shields its marker", ids)
+	}
+}
+
+// TestOrderTrackingSweepWatchdogSkipsOnlyInFlightTracking pins the edges of the
+// #5481 skip. A retired dispatcher (its reload drain timed out) still holds its
+// runs, so their markers stay open, and an ID two live runs share stays open
+// until both have ended. A skipped marker spends none of the close budget and is
+// not counted as closed. Every stale marker no live run holds is still closed,
+// and so is a live run's marker once the run has ended without closing it.
+func TestOrderTrackingSweepWatchdogSkipsOnlyInFlightTracking(t *testing.T) {
+	store := beads.NewMemStore()
+	createTracking := func(order string) beads.Bead {
+		t.Helper()
+		b, err := store.Create(beads.Bead{
+			Title:  "order:" + order,
+			Labels: []string{orders.RunLabel(order), labelOrderTracking},
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", order, err)
+		}
+		return b
+	}
+	assertStatus := func(id, want string) {
+		t.Helper()
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != want {
+			t.Errorf("tracking %s status = %s, want %s", id, got.Status, want)
+		}
+	}
+
+	orphans := make([]beads.Bead, 0, orderTrackingSweepCloseBudget)
+	for i := range orderTrackingSweepCloseBudget {
+		orphans = append(orphans, createTracking(fmt.Sprintf("orphan-%d", i)))
+	}
+	// Created last, so the stale read lists it first: if it spent budget, one
+	// orphan would stay open.
+	live := createTracking("slow-exec")
+
+	// Two live runs hold the ID, as a city run and a rig run can when their
+	// scope-local file stores both number beads from gc-1.
+	retired := &memoryOrderDispatcher{}
+	retired.addInflight(live.ID)
+	retired.addInflight(live.ID)
+	snapshot := retired.inFlightTrackingIDs()
+	delete(snapshot, live.ID)
+	if _, held := retired.inFlightTrackingIDs()[live.ID]; !held {
+		t.Fatalf("inFlightTrackingIDs returned the live map: deleting from a snapshot released %s", live.ID)
+	}
+	var stderr bytes.Buffer
+	cr := &CityRuntime{
+		cityName:                "test-city",
+		cfg:                     &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore:     store,
+		od:                      &memoryOrderDispatcher{},
+		retiredOrderDispatchers: []orderDispatcher{retired},
+		stdout:                  io.Discard,
+		stderr:                  &stderr,
+		logPrefix:               "gc test",
+	}
+
+	now := live.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Second)
+	stale, err := orders.NewStore(beads.OrdersStore{Store: store}).StaleOpenRuns(now.Add(-orderTrackingSweepWatchdogStaleAfter))
+	if err != nil {
+		t.Fatalf("StaleOpenRuns: %v", err)
+	}
+	staleIDs := make([]string, 0, len(stale))
+	for _, run := range stale {
+		staleIDs = append(staleIDs, run.ID)
+	}
+	if len(staleIDs) != len(orphans)+1 || staleIDs[0] != live.ID {
+		t.Fatalf("precondition: stale read = %v, want all %d markers with live run %s first", staleIDs, len(orphans)+1, live.ID)
+	}
+
+	cr.runOrderTrackingSweepWatchdog(now)
+	assertStatus(live.ID, "open")
+	for _, orphan := range orphans {
+		assertStatus(orphan.ID, "closed")
+	}
+	if want := fmt.Sprintf("closed %d stale tracking bead(s)", len(orphans)); !strings.Contains(stderr.String(), want) {
+		t.Errorf("watchdog log = %q, want %q: the skipped marker must not count as closed", stderr.String(), want)
+	}
+
+	// One run ends; the other still holds the ID.
+	retired.doneInflight(live.ID)
+	cr.runOrderTrackingSweepWatchdog(now.Add(orderTrackingSweepWatchdogInterval))
+	assertStatus(live.ID, "open")
+
+	// The last run ends and its own close failed: the marker is an orphan now.
+	retired.doneInflight(live.ID)
+	cr.runOrderTrackingSweepWatchdog(now.Add(2 * orderTrackingSweepWatchdogInterval))
+	assertStatus(live.ID, "closed")
+	if ids := retired.inFlightTrackingIDs(); len(ids) != 0 {
+		t.Errorf("in-flight tracking IDs after both runs ended = %v, want none", ids)
 	}
 }
 

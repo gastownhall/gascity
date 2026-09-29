@@ -288,7 +288,7 @@ func TestDispatchOneRefusesMissingRequiredParam(t *testing.T) {
 	mad := ad.(*memoryOrderDispatcher)
 
 	// nil vars → the required "repo" param is missing → dispatch must refuse.
-	mad.addInflight()
+	mad.addInflight(tracking.ID)
 	mad.dispatchOne(context.Background(), store, execStoreTarget{ScopeRoot: t.TempDir()}, mad.aa[0], t.TempDir(), tracking.ID, nil, nil)
 
 	if !rec.hasType(events.OrderFailed) {
@@ -417,7 +417,7 @@ func TestDispatchWispAcceptsSuppliedRequiredVar(t *testing.T) {
 	}
 	mad := ad.(*memoryOrderDispatcher)
 
-	mad.addInflight()
+	mad.addInflight(tracking.ID)
 	mad.dispatchOne(context.Background(), store, execStoreTarget{ScopeRoot: t.TempDir()}, mad.aa[0],
 		t.TempDir(), tracking.ID, map[string]string{"target": "srvcity"}, nil)
 
