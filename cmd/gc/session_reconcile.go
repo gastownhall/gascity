@@ -1037,7 +1037,21 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 
 // healStateWithRollbackInfo computes and persists an advisory-state heal.
 // Callers may fold the returned patch only when err is nil; an error leaves
-// their current projection authoritative for the rest of the pass.
+// their current projection authoritative for the rest of the pass. A nil patch
+// with a nil error means nothing was written: the heal was already converged,
+// or the row changed under it (below).
+//
+// The heal is decided from info, the reconciler's tick snapshot, which can be
+// older than the durable row. Writing it unconditionally was a lost update: a
+// `gc session suspend` (state=suspended, sleep_intent=user-hold, held_until)
+// that landed after the snapshot was read got its state reverted by a heal that
+// never saw it, and a close that landed meanwhile got live-looking state stamped
+// onto the closed row. The write therefore goes through
+// ApplyPatchIfLifecycleUnchanged: it re-reads the row, refuses when its
+// lifecycle facts no longer match the snapshot, and fences the write on the
+// re-read revision where the store has conditional writes. A refused heal is
+// skipped rather than retried. The heal is level-triggered, so the next tick
+// recomputes it from a snapshot that includes the concurrent write.
 func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, observed bool, sessFront *sessionpkg.Store, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) (map[string]string, error) {
 	// Closed beads are terminal; their advisory state metadata should not move
 	// (matches healStateWithRollback's session.Status == "closed" guard —
@@ -1049,14 +1063,13 @@ func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, observed bool, 
 	if len(batch) == 0 {
 		return nil, nil
 	}
-	if err := sessFront.ApplyPatch(info.ID, batch); err != nil {
+	applied, err := sessFront.ApplyPatchIfLifecycleUnchanged(info, batch)
+	if err != nil {
 		return nil, err
 	}
-	// S19 Stage 3 shadow: record the legacy compared-key writes this heal ACTUALLY
-	// applied (no-op unless the shadow harness is enabled). Colocated with the
-	// ApplyPatch so a pure builder (healStatePatchWithRollbackInfo) invoked only for
-	// inspection never records a write that never happened.
-	recordLegacyCompareWrites(info.ID, "healStateWithRollback", batch)
+	if !applied {
+		return nil, nil
+	}
 	return batch, nil
 }
 

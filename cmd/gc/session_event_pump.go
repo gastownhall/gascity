@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -192,11 +193,9 @@ func (p *sessionEventPump) forward(ctx context.Context, gen int64, events <-chan
 // poke signals the reconciler without ever blocking; a full channel means a
 // tick is already owed, which covers this event too.
 func (p *sessionEventPump) poke(kind, session string) {
-	select {
-	case p.pokeCh <- struct{}{}:
-		// Log only when the send lands: a replayed backlog burst fills the
-		// buffer once and stays quiet.
+	// Log only when the send lands: a replayed backlog burst fills the
+	// buffer once and stays quiet.
+	if legacyEnqueue(p.pokeCh, nil, reconcilekey.SessionNamed(session)) {
 		fmt.Fprintf(p.stderr, "%s: session event %s(%s) → reconcile poke\n", p.logPrefix, kind, session) //nolint:errcheck // best-effort stderr
-	default:
 	}
 }

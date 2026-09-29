@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/execenv"
 	gitpkg "github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -492,12 +493,18 @@ type apiNotifier struct {
 	state State
 }
 
+// PokeController enqueues the allocator: sling routed work to a template,
+// and demand for a template is the allocator's to turn into wakes.
 func (n *apiNotifier) PokeController(_ string) {
-	n.state.Poke()
+	n.state.Enqueue(reconcilekey.Allocator())
 }
 
+// PokeControlDispatch enqueues the control-dispatch key, matching the CLI's
+// "control-dispatcher" socket command. It used to call the generic poke,
+// so API workflow launches never ran the targeted control-dispatcher
+// reconcile (OQ-6).
 func (n *apiNotifier) PokeControlDispatch(_ string) {
-	n.state.Poke()
+	n.state.Enqueue(reconcilekey.ControlDispatch())
 }
 
 type apiBeadRouter struct {

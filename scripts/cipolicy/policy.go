@@ -77,7 +77,12 @@ const (
 	// internal/bootstrap/packs/core/assets/scripts/** so a reaper.sh-only
 	// change runs the real-Dolt reaper tests. Reviewed delta: one filter path,
 	// no new job, trigger or permission.
-	expectedCIExecutionHash     = "7bf12250c2b6d756458cc48e70fd716b01e517fa4d629f237b542aa8f67cb139"
+	//
+	// Bumped again (F9): beads-topology-acceptance gains one step running
+	// TestBeadsProxiedIgnoresUserLevelSharedServer (-timeout 15m) and its job
+	// cap moves 90 -> 105 minutes to keep the step budget under it. Reviewed
+	// delta: one test step and the cap, no new job, trigger or permission.
+	expectedCIExecutionHash     = "10f31160f31aa60e705a2098ae2722ec82e4fd14dc76895800b8d0acab486416"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

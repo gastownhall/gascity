@@ -43,6 +43,17 @@ func TestSQLiteStoreConditionalWriterConformance(t *testing.T) {
 	})
 }
 
+// TestSQLiteStoreAtomicCloserConformance runs the shared atomic terminal-close
+// suite against the embedded store. Without the capability a session close on
+// a sqlite-routed city stamps its terminal metadata and closes the row as two
+// writes, and a writer landing between them strands a closed row that still
+// looks live.
+func TestSQLiteStoreAtomicCloserConformance(t *testing.T) {
+	beadstest.RunAtomicConditionalCloserConformance(t, "SQLiteStore", func(t *testing.T) beads.Store {
+		return newSQLiteForConformance(t)
+	})
+}
+
 // TestSQLiteStoreFenceConformance proves the SQLite constructor persists
 // ownership generations instead of exposing a vacuous zero fence.
 func TestSQLiteStoreFenceConformance(t *testing.T) {

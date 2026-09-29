@@ -546,7 +546,7 @@ func (r *cityRegistry) toCityView(path string, mc *managedCity) *cityView {
 	// SAFETY: cs is a pointer to controllerState, which has its own internal
 	// RWMutex protecting all field access. API handlers that receive this pointer
 	// call methods like Config(), SessionProvider(), etc. which acquire cs.mu.RLock().
-	// The Poke() method only does a non-blocking channel send — no managedCity access.
+	// The Enqueue() method only does non-blocking channel sends — no managedCity access.
 	var cs api.State
 	if mc.cr != nil {
 		cs = mc.cr.cs

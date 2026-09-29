@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -144,7 +145,7 @@ func newEscalationEnv(t *testing.T) *escalationEnv {
 	// from inside `go test`, and it is also what lets a test assert the poke.
 	// (Tests using this env therefore must not call t.Parallel.)
 	prevPoke := drainAckAsyncStopPokeController
-	drainAckAsyncStopPokeController = func(string) error {
+	drainAckAsyncStopPokeController = func(string, reconcilekey.Key) error {
 		env.poke.record()
 		return nil
 	}

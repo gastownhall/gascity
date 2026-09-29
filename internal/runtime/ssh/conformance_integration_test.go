@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // fakeSSHScript stands in for the ssh(1) client. sshArgs always shell-quotes
@@ -92,7 +93,13 @@ func buildSSHConformanceFixture(t *testing.T) Endpoint {
 		t.Fatalf("writing fake ssh fixture: %v", err)
 	}
 	t.Setenv("PATH", fixtureDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("TMUX_TMPDIR", t.TempDir())
+	// tmux binds its server socket at $TMUX_TMPDIR/tmux-<uid>/default, and a
+	// Unix socket path is capped at 104 bytes on macOS. There t.TempDir()
+	// nests the subtest name under the long per-user /var/folders temp root,
+	// so the socket path overran the cap, the server never started, and every
+	// subtest failed with "tmux new-session exited 1". ShortTempDir roots the
+	// directory at /tmp on macOS.
+	t.Setenv("TMUX_TMPDIR", testutil.ShortTempDir(t, "gcssh"))
 
 	prevTMUX, hadTMUX := os.LookupEnv("TMUX")
 	if err := os.Unsetenv("TMUX"); err != nil {

@@ -51,21 +51,7 @@ func TestReaperWorkflowRootCleanupRealDoltSemantics(t *testing.T) {
 	if err := os.Symlink(doltPath, filepath.Join(binDir, "dolt")); err != nil {
 		t.Fatalf("Symlink(dolt): %v", err)
 	}
-	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
-set -e
-printf '%s\n' "$*" >> "$BD_CALL_LOG"
-case "$1" in
-  prune)
-    printf '{"pruned_count":0}\n'
-    ;;
-  close)
-    issue_id="$2"
-    DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" dolt --host "$GC_DOLT_HOST" --port "$GC_DOLT_PORT" --user "$GC_DOLT_USER" --no-tls --use-db citydb sql \
-      -q "UPDATE issues SET status='closed', closed_at=NOW() WHERE id='${issue_id}'; CALL DOLT_COMMIT('-Am', 'test bd close')"
-    ;;
-esac
-exit 0
-`)
+	writeRealDoltBdDouble(t, filepath.Join(binDir, "bd"))
 	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 case "$1 $2" in
   "session prune")
@@ -76,14 +62,16 @@ exit 0
 `)
 
 	env := map[string]string{
-		"BD_CALL_LOG":      bdLog,
-		"GC_CITY":          cityDir,
-		"GC_CITY_PATH":     cityDir,
-		"GC_DOLT_HOST":     "127.0.0.1",
-		"GC_DOLT_PORT":     fmt.Sprintf("%d", port),
-		"GC_DOLT_USER":     "root",
-		"GC_DOLT_PASSWORD": "",
-		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BD_CALL_LOG":        bdLog,
+		"GC_CITY":            cityDir,
+		"GC_CITY_PATH":       cityDir,
+		"GC_DOLT_HOST":       "127.0.0.1",
+		"GC_DOLT_PORT":       fmt.Sprintf("%d", port),
+		"GC_DOLT_USER":       "root",
+		"GC_DOLT_PASSWORD":   "",
+		"FAKE_RIG_LIST_JSON": `{"rigs":[{"name":"rig-with-db-alias","hq":false}]}`,
+		"FAKE_SCOPE_DBS":     "city=citydb rig:rig-with-db-alias=rigdb",
+		"PATH":               binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 	runScript(t, coreScriptPath("reaper.sh"), env)
 
@@ -91,7 +79,7 @@ exit 0
 	if err != nil {
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
-	if !strings.Contains(string(bdData), "close issue-close --reason stale inactive workflow root auto-closed by reaper") {
+	if !strings.Contains(string(bdData), " issue-close --reason stale inactive workflow root auto-closed by reaper") {
 		t.Fatalf("reaper did not close city workflow issue root through bd close:\n%s", bdData)
 	}
 
@@ -131,6 +119,75 @@ exit 0
 	requireMaintenanceStatuses(t, rigIssueStatuses, map[string]string{
 		"rig-issue-preserve": "open",
 	})
+}
+
+// writeRealDoltBdDouble installs a bd double that applies the verbs the
+// reaper sends through `gc bd` (close, update --set-metadata) to the scope's
+// database on the real dolt sql-server, so the test observes the end state of
+// the reaper's real-Dolt selections. The scope's database comes from
+// FAKE_SCOPE_DBS via the fake gc route (GC_FAKE_SCOPE). Every call is logged to
+// BD_CALL_LOG.
+func writeRealDoltBdDouble(t *testing.T, path string) {
+	t.Helper()
+	writeExecutable(t, path, `#!/bin/sh
+set -e
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+db=""
+for pair in ${FAKE_SCOPE_DBS:-}; do
+  case "$pair" in
+    "${GC_FAKE_SCOPE:-city}="*) db="${pair#*=}" ;;
+  esac
+done
+run_sql() {
+  DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" dolt --host "$GC_DOLT_HOST" --port "$GC_DOLT_PORT" --user "$GC_DOLT_USER" --no-tls --use-db "$db" sql -q "$1"
+}
+verb="$1"
+shift
+ids=""
+sets=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --reason) shift ;;
+    --force|--json) ;;
+    --set-metadata)
+      key="${2%%=*}"
+      value="${2#*=}"
+      sets="$sets, '\$.\"$key\"', '$value'"
+      shift
+      ;;
+    -*) ;;
+    *) ids="$ids $1" ;;
+  esac
+  shift
+done
+case "$verb" in
+  prune)
+    printf '{"pruned_count":0}\n'
+    ;;
+  purge)
+    printf '{"purged_count":0}\n'
+    ;;
+  backup)
+    printf '{"backup":{},"dolt":{"configured":false}}\n'
+    ;;
+  close|update)
+    # Report every applied id in bd's --json array shape.
+    sep=""
+    printf '['
+    for id in $ids; do
+      if [ "$verb" = close ]; then
+        run_sql "UPDATE issues SET status='closed', closed_at=NOW() WHERE id='$id'; UPDATE wisps SET status='closed', closed_at=NOW() WHERE id='$id'; CALL DOLT_COMMIT('-Am', 'test bd close')" >/dev/null 2>&1 || true
+      else
+        run_sql "UPDATE issues SET metadata = JSON_SET(COALESCE(metadata, JSON_OBJECT())$sets) WHERE id='$id'; UPDATE wisps SET metadata = JSON_SET(COALESCE(metadata, JSON_OBJECT())$sets) WHERE id='$id'; CALL DOLT_COMMIT('-Am', 'test bd update')" >/dev/null 2>&1 || true
+      fi
+      printf '%s{"id":"%s"}' "$sep" "$id"
+      sep=","
+    done
+    printf ']\n'
+    ;;
+esac
+exit 0
+`)
 }
 
 func maintenanceReaperSchemaSQL() string {
@@ -396,6 +453,13 @@ func TestReaperStaleIssueCloseSkipsDurableExtmsgRecordsRealDolt(t *testing.T) {
 	}
 	// Decoy: a durable label for the rig's ordinary row lives only in citydb.
 	seed.WriteString(",\n  ('rig-ord', 'gc:extmsg-group');\n")
+	// A live task blocked by a wisp: its dependency row has a NULL
+	// depends_on_issue_id. Before the NOT IN guard, that NULL turned the whole
+	// active-dependency exclusion list to NULL and no stale issue was closed.
+	seed.WriteString("INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated_at, assignee, metadata) VALUES\n" +
+		"  ('live-on-wisp', 'live task blocked by a wisp', 'open', 'task', 2, NOW(), NOW(), '', '{}');\n" +
+		"INSERT INTO dependencies (issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type) VALUES\n" +
+		"  ('live-on-wisp', NULL, 'some-wisp', NULL, 'blocks');\n")
 
 	// my-rig: rig-ext and rig-ext2 are durable via my-rig's own labels; rig-ord
 	// is ordinary there. The decoy label for the city's ord-stale lives only in
@@ -441,21 +505,7 @@ INSERT INTO labels (issue_id, label) VALUES
 	if err := os.Symlink(doltPath, filepath.Join(binDir, "dolt")); err != nil {
 		t.Fatalf("Symlink(dolt): %v", err)
 	}
-	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
-set -e
-printf '%s\n' "$*" >> "$BD_CALL_LOG"
-case "$1" in
-  prune)
-    printf '{"pruned_count":0}\n'
-    ;;
-  close)
-    issue_id="$2"
-    DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" dolt --host "$GC_DOLT_HOST" --port "$GC_DOLT_PORT" --user "$GC_DOLT_USER" --no-tls --use-db citydb sql \
-      -q "UPDATE issues SET status='closed', closed_at=NOW() WHERE id='${issue_id}'; CALL DOLT_COMMIT('-Am', 'test bd close')"
-    ;;
-esac
-exit 0
-`)
+	writeRealDoltBdDouble(t, filepath.Join(binDir, "bd"))
 	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 case "$1 $2" in
   "session prune")
@@ -480,6 +530,8 @@ exit 0
 		"GC_DOLT_PORT":       fmt.Sprintf("%d", port),
 		"GC_DOLT_USER":       "root",
 		"GC_DOLT_PASSWORD":   "",
+		"FAKE_RIG_LIST_JSON": `{"rigs":[{"name":"my-rig","hq":false}]}`,
+		"FAKE_SCOPE_DBS":     "city=citydb rig:my-rig=my-rig",
 		"PATH":               binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 	reaperOut, err := runScriptResult(t, coreScriptPath("reaper.sh"), env)

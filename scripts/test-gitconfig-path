@@ -12,10 +12,22 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 repo_hash=$(printf '%s' "$repo_root" | cksum | awk '{print $1}')
-path="${TMPDIR:-/var/tmp}/gc-test-gitconfig-$(id -u)-${repo_hash}"
+temp_root=${TMPDIR:-/var/tmp}
+path="$temp_root/gc-test-gitconfig-$(id -u)-${repo_hash}"
 
 if [ ! -f "$path" ]; then
-  tmp=$(mktemp "${path}.XXXXXX")
+  # Bazel's sandbox can make /var/tmp look writable to access(2) while denying
+  # the actual create. Probe with the operation we need, then fall back only to
+  # Bazel's already-declared writable short test root.
+  if ! tmp=$(mktemp "${path}.XXXXXX" 2>/dev/null); then
+    temp_root=/tmp/bt
+    path="$temp_root/gc-test-gitconfig-$(id -u)-${repo_hash}"
+    if [ -f "$path" ]; then
+      printf '%s\n' "$path"
+      exit 0
+    fi
+    tmp=$(mktemp "${path}.XXXXXX")
+  fi
   cat > "$tmp" <<'EOF'
 [user]
 	name = gc-test

@@ -3,13 +3,14 @@ load("@rules_go//go:def.bzl", "go_test")
 go_test(
     name = "integration_test",
     srcs = [
+        "bead_id_test.go",
         "dolt_config_timeout_test.go",
         "testenv_import_test.go",
     ],
     data = glob(
         ["**"],
         exclude = ["BUILD.bazel"],
-    ),
+    ) + ["//test:bazel_repo_srcs"],
     deps = ["//internal/testenv"],
 )
 
