@@ -153,6 +153,7 @@ go_test(
         "sqlite_store_conformance_test.go",
         "sqlite_store_dsn_test.go",
         "sqlite_store_graph_apply_test.go",
+        "sqlite_store_graph_cook_contention_test.go",
         "sqlite_store_hardening_test.go",
         "sqlite_store_readonly_uri_test.go",
         "sqlite_store_ready_test.go",
