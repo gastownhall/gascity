@@ -309,12 +309,12 @@ func TestSessionStartAutoHandoffUsesProvidedStoreWithoutOpeningCity(t *testing.T
 	}
 	auto, ok := createHandoffMail(store, store, events.Discard, sessionInfo.ID, sessionInfo.ID,
 		[]string{"context cycle", "continue from the provided store"}, "context cycle",
-		[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, io.Discard)
+		[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, "", io.Discard)
 	if !ok {
 		t.Fatal("createHandoffMail(auto) failed")
 	}
 	ordinary, ok := createHandoffMail(store, store, events.Discard, "boss", sessionInfo.ID,
-		[]string{"ordinary note", "read me too"}, "ordinary note", nil, io.Discard)
+		[]string{"ordinary note", "read me too"}, "ordinary note", nil, "", io.Discard)
 	if !ok {
 		t.Fatal("createHandoffMail(ordinary) failed")
 	}
@@ -949,7 +949,7 @@ provider = "exec:/not-used-by-auto-handoff"
 			sessionID := createPrimeHookSession(t, cityDir, "gastown--worker", "worker")
 			auto, ok := createHandoffMail(store, store, events.Discard, sessionID, sessionID,
 				[]string{"context cycle", "continue the durable task"}, "context cycle",
-				[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, &bytes.Buffer{})
+				[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, "", &bytes.Buffer{})
 			if !ok {
 				t.Fatal("createHandoffMail(auto) failed")
 			}
@@ -1014,7 +1014,7 @@ provider = "exec:/not-used-by-auto-handoff"
 			// durable for retry; delivery acknowledgement is the archive point.
 			undelivered, ok := createHandoffMail(store, store, events.Discard, sessionID, sessionID,
 				[]string{"context cycle retry", "retry the durable task"}, "context cycle",
-				[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, &bytes.Buffer{})
+				[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, "", &bytes.Buffer{})
 			if !ok {
 				t.Fatal("createHandoffMail(undelivered) failed")
 			}
@@ -1076,7 +1076,7 @@ prompt_template = "prompts/worker.md"
 	sessionID := createPrimeHookSession(t, cityDir, "gastown--worker", "worker")
 	auto, ok := createHandoffMail(store, store, events.Discard, sessionID, sessionID,
 		[]string{"context cycle", "continue the durable task"}, "context cycle",
-		[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, &bytes.Buffer{})
+		[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, "", &bytes.Buffer{})
 	if !ok {
 		t.Fatal("createHandoffMail(auto) failed")
 	}
@@ -1168,7 +1168,7 @@ prompt_template = "prompts/worker.md"
 	sessionID := createPrimeHookSession(t, cityDir, "gastown--worker", "worker")
 	auto, ok := createHandoffMail(store, store, events.Discard, sessionID, sessionID,
 		[]string{"context cycle", "continue the durable task"}, "context cycle",
-		[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, &bytes.Buffer{})
+		[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, "", &bytes.Buffer{})
 	if !ok {
 		t.Fatal("createHandoffMail(auto) failed")
 	}

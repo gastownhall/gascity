@@ -689,6 +689,7 @@ func TestSessionReconcilePhaseTraceUsesDistinctSites(t *testing.T) {
 	want := map[string]TraceSiteCode{
 		"session_reconcile.build_deps":                        TraceSiteSessionReconcileBuildDeps,
 		"session_reconcile.heal_and_retire_duplicates":        TraceSiteSessionReconcileHealRetire,
+		"session_reconcile.handoff_release":                   TraceSiteSessionReconcileHandoffRelease,
 		"session_reconcile.topo_order":                        TraceSiteSessionReconcileTopoOrder,
 		"session_reconcile.circuit_breaker_restore":           TraceSiteSessionReconcileCircuitBreaker,
 		"session_reconcile.forward_pass":                      TraceSiteSessionReconcileForwardPass,

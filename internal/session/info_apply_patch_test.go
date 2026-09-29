@@ -54,6 +54,7 @@ var allProjectedMetadataKeys = []string{
 	"sleep_policy_adjustment_reason", "config_wake_suppressed",
 	CanonicalInstanceNameMetadata, CanonicalPoolSlotMetadata,
 	PrimedAtMetadataKey, PrimingAttemptedAtMetadataKey, PromptHashMetadataKey,
+	"handoff_staged_message_id", "handoff_stage_committed_at", "handoff_release_attempted_at",
 }
 
 // oracleBaseBeads returns diverse session beads: a fully-populated open bead, the

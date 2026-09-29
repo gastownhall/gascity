@@ -39,6 +39,22 @@ const (
 )
 
 const (
+	// handoffStagedMessageIDKey records the staged handoff message's bead ID
+	// on the session bead, so the reconciler can find and release it without
+	// a store-wide scan.
+	handoffStagedMessageIDKey = "handoff_staged_message_id"
+	// handoffStageCommittedAtKey records when a self-handoff's staging became
+	// durable, in RFC3339 UTC. The reconciler's release loop measures the
+	// no-successor timeout from this timestamp.
+	handoffStageCommittedAtKey = "handoff_stage_committed_at"
+	// handoffReleaseAttemptedAtKey records when the reconciler last gave up
+	// waiting for a successor and released the staged message on timeout, so
+	// a repeat reconcile pass does not re-fire session.handoff_failed for the
+	// same staged handoff.
+	handoffReleaseAttemptedAtKey = "handoff_release_attempted_at"
+)
+
+const (
 	// deferredSingletonAliasRetryBase is the shortest interval between two
 	// deferred-singleton alias re-attempts. The first few retries stay brisk so a
 	// conflict that resolves on its own (the previous holder exiting) is picked up

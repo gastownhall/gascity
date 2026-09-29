@@ -491,6 +491,32 @@ type Info struct {
 	// internal-only (absent from the HTTP wire).
 	BuiltinAncestor string // builtin_ancestor (raw)
 
+	// --- self-handoff staging cluster (release path, Phase 0c) ---
+	//
+	// Raw mirrors of the three handoff-staging metadata keys cmd/gc's
+	// createHandoffMail / doHandoffWithOutcome stamp when a self-handoff is
+	// staged rather than sent immediately. releaseStagedSelfHandoffs reads
+	// them off this projected Info during the reconciler's Phase 0c instead of
+	// a per-row store.Get, so a tick with no staged handoffs costs zero Gets
+	// (TestReconcileSessionBeadsFastPathGetBudget). Additive, internal-only
+	// (absent from the HTTP wire).
+	//
+	// HandoffStagedMessageID is the RAW handoff_staged_message_id metadata:
+	// the staged mail bead's ID, or "" when no handoff is staged. Cleared
+	// (set back to "") on successful release; left intact on timeout-failure.
+	HandoffStagedMessageID string // handoff_staged_message_id (raw)
+	// HandoffStageCommittedAt is the RAW handoff_stage_committed_at metadata
+	// (RFC3339 or empty): when the staging became durable. Compared against
+	// controllerRestartTimeout(cfg) to decide whether an unreleased staged
+	// handoff has timed out. Cleared alongside HandoffStagedMessageID on
+	// successful release; left intact on timeout-failure.
+	HandoffStageCommittedAt string // handoff_stage_committed_at (raw RFC3339)
+	// HandoffReleaseAttemptedAt is the RAW handoff_release_attempted_at
+	// metadata (RFC3339 or empty): set only once a staged handoff is marked
+	// failed on timeout, so a later tick does not re-fire
+	// session.handoff_failed for the same staged handoff.
+	HandoffReleaseAttemptedAt string // handoff_release_attempted_at (raw)
+
 	// --- sleep-policy cluster (controller decision-read surface) ---
 	//
 	// Raw mirrors of the seven sleep-policy metadata keys persistSleepPolicyMetadata

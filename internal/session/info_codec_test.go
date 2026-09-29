@@ -153,6 +153,10 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		ProviderKind:                   b.Metadata["provider_kind"],
 		BuiltinAncestor:                b.Metadata["builtin_ancestor"],
 
+		HandoffStagedMessageID:    b.Metadata["handoff_staged_message_id"],
+		HandoffStageCommittedAt:   b.Metadata["handoff_stage_committed_at"],
+		HandoffReleaseAttemptedAt: b.Metadata["handoff_release_attempted_at"],
+
 		SleepPolicyFingerprint:       b.Metadata["sleep_policy_fingerprint"],
 		RequestedSleepAfterIdle:      b.Metadata["requested_sleep_after_idle"],
 		EffectiveSleepAfterIdle:      b.Metadata["effective_sleep_after_idle"],

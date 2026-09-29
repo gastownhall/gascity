@@ -847,8 +847,12 @@ func TestDoHandoff_PinnedAlwaysSessionPersistsResetAndReconcilerStopsSession(t *
 	if !persistCalled {
 		t.Fatal("persistRestart was not called for pinned always-mode session")
 	}
-	if !strings.Contains(stdout.String(), "requesting restart") {
-		t.Errorf("stdout = %q, want restart-requested confirmation", stdout.String())
+	// The session bead carries a live instance_token (createSessionBead's
+	// default), so a pinned+restartable handoff here takes the staged path:
+	// the brief is held durably rather than sent immediately, and stdout
+	// reports that instead of an immediate "requesting restart".
+	if !strings.Contains(stdout.String(), "staged") || !strings.Contains(stdout.String(), "restart") {
+		t.Errorf("stdout = %q, want staged-handoff restart confirmation", stdout.String())
 	}
 
 	got, err := env.store.Get(session.ID)

@@ -196,6 +196,13 @@ var infoKeyCodec = []infoKeySpec{
 	{"builtin_ancestor", func(i *Info, v string) { i.BuiltinAncestor = v }},
 	{"wake_refused_event_at", func(i *Info, v string) { i.WakeRefusedEventAt = v }},
 
+	// self-handoff staging cluster (raw mirrors). Single-field string setters;
+	// releaseStagedSelfHandoffs (reconciler Phase 0c) reads these projected
+	// fields instead of a per-row store.Get.
+	{"handoff_staged_message_id", func(i *Info, v string) { i.HandoffStagedMessageID = v }},
+	{"handoff_stage_committed_at", func(i *Info, v string) { i.HandoffStageCommittedAt = v }},
+	{"handoff_release_attempted_at", func(i *Info, v string) { i.HandoffReleaseAttemptedAt = v }},
+
 	// sleep-policy cluster (raw mirrors). Single-field string setters; the
 	// cmd/gc sleep helpers read these projected fields (W6). Byte-identical to
 	// the inline literals they mirror on the store.

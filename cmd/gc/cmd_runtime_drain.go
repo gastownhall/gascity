@@ -692,7 +692,7 @@ func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
 			return handle.Reset(context.Background())
 		}
 	}
-	_, pinned, err := sessionRestartableByController(sessStore, current.sessionName)
+	_, pinned, _, _, err := sessionRestartableByController(sessStore, current.sessionName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc runtime request-restart: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

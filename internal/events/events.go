@@ -254,10 +254,34 @@ const (
 	// restart.
 	SessionPending        = "session.pending"
 	SessionPendingCleared = "session.pending_cleared"
-	ConvoyCreated         = "convoy.created"
-	ConvoyClosed          = "convoy.closed"
-	ControllerStarted     = "controller.started"
-	ControllerStopped     = "controller.stopped"
+	// SessionHandoffStaged fires when a self-handoff's mail has been committed
+	// as a durable, invisible-until-released staged message — before the
+	// runtime restart flag is set, so the brief is safely on disk before the
+	// handing-off incarnation begins to disappear.
+	SessionHandoffStaged = "session.handoff_staged"
+	// SessionHandoffRestartAccepted fires once the restart request for an
+	// already-staged handoff has been durably accepted (runtime flag set, and
+	// for pinned sessions the bead restart marker persisted).
+	SessionHandoffRestartAccepted = "session.handoff_restart_accepted"
+	// SessionHandoffSuccessorStarted fires when the reconciler observes that a
+	// session bead's current instance_token no longer matches the token a
+	// staged handoff was staged for — proof a genuine successor incarnation
+	// has started and the staged brief may be released.
+	SessionHandoffSuccessorStarted = "session.handoff_successor_started"
+	// SessionHandoffReleased fires immediately after SessionHandoffSuccessorStarted,
+	// once the staged mail has been flipped visible and the session's staging
+	// markers cleared.
+	SessionHandoffReleased = "session.handoff_released"
+	// SessionHandoffFailed fires when a pinned session's restart could not be
+	// durably persisted, or when a staged handoff's release wait exceeded the
+	// controller restart timeout with no confirmed successor. Either way the
+	// staged mail is left exactly as staged — provisional and auditable — for
+	// operator follow-up.
+	SessionHandoffFailed = "session.handoff_failed"
+	ConvoyCreated        = "convoy.created"
+	ConvoyClosed         = "convoy.closed"
+	ControllerStarted    = "controller.started"
+	ControllerStopped    = "controller.stopped"
 	// ControlStalled fires once per disposition whose bounded retry budget
 	// expires: a semantic refusal the control dispatcher then QUARANTINES
 	// (error_class "semantic"), or a drift-pending wait whose loudness horizon
@@ -504,6 +528,8 @@ var KnownEventTypes = []string{
 	SessionDemandClaimDivergence,
 	SessionColdStartTimeout,
 	SessionPending, SessionPendingCleared,
+	SessionHandoffStaged, SessionHandoffRestartAccepted, SessionHandoffSuccessorStarted,
+	SessionHandoffReleased, SessionHandoffFailed,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,

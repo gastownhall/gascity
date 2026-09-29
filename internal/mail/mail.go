@@ -44,6 +44,20 @@ const (
 	// sent through [DedupSender.SendDeduped]. Repeating notifiers (patrol
 	// orders, maintenance loops) use it to suppress duplicate alerts.
 	DedupKeyMetadataKey = "mail.dedup_key"
+	// StagedHandoffLabel marks a self-handoff message staged durably before
+	// its session requests a restart. A staged message stays in the store but
+	// is invisible on every read surface until a genuine successor
+	// incarnation releases it.
+	StagedHandoffLabel = "gc:handoff-staged"
+	// StagedMetadataKey flags a message bead as staged ("true") or released
+	// ("false") for a pending self-handoff. Every beadmail read surface
+	// treats "true" as not-found; release flips it to "false" rather than
+	// clearing it, leaving an audit trail on the bead.
+	StagedMetadataKey = "mail.staged"
+	// StagedForTokenMetadataKey records the instance token that was active
+	// when a self-handoff message was staged, so only a later, differing
+	// (successor) token may release it.
+	StagedForTokenMetadataKey = "mail.staged_for_token"
 )
 
 // Message represents a mail message between agents or humans.

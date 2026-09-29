@@ -1788,6 +1788,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		"session_count": len(rows),
 	})
 
+	// Phase 0c: release any self-handoff staged by a prior incarnation once a
+	// genuine successor (a differing instance_token) has started, or mark it
+	// failed once the no-successor timeout elapses. A no-op for the common
+	// case (no session in rows has a staged handoff).
+	phaseStart = time.Now()
+	releasedHandoffs, failedHandoffs := releaseStagedSelfHandoffs(store, rows, cfg, clk, rec)
+	recordPhase(TraceSiteSessionReconcileHandoffRelease, "session_reconcile.handoff_release", phaseStart, map[string]any{
+		"released_count": releasedHandoffs,
+		"failed_count":   failedHandoffs,
+	})
+
 	// Topo-order rows by template dependencies (reads Info.Template, the verbatim
 	// raw mirror — byte-identical to the old topoOrder over beads). orderedRows is
 	// the tick's typed working set; there is no raw-bead working set any more.

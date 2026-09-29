@@ -24,7 +24,7 @@ func TestCreateHandoffMailRoutesThroughProviderSeam(t *testing.T) {
 	var msg mail.Message
 	msg, ok := createHandoffMail(store, store, rec, "mayor", "mayor",
 		[]string{"HANDOFF: context full", "drain now"}, "HANDOFF: context cycle",
-		[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, &stderr)
+		[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, "", &stderr)
 	if !ok {
 		t.Fatalf("createHandoffMail failed: %s", stderr.String())
 	}
