@@ -85,10 +85,14 @@ jobs:
       # the remote CAS (--remote_download_minimal). A key that never changes is
       # never re-saved, so those records go stale when the farm or its CAS
       # changes and every run pays a lost-inputs build restart. Rotate daily.
+      # Only pushes to main save (~880MB): per-PR saves would churn the repo's
+      # 10GB cache and evict main's entry. PRs restore main's latest.
       - name: Bazel cache day
         id: bazel-cache-day
         run: echo "day=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - name: Restore bazel output base
+        id: bazel-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ${{ runner.temp }}/bazel-outputs
@@ -96,7 +100,6 @@ jobs:
           restore-keys: |
             bazel-v2-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock') }}-
             bazel-v2-${{ runner.os }}-
-          save-always: true
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
@@ -151,6 +154,14 @@ jobs:
           else
             bazel "${ARGS[@]}" test "${PROFILE[@]}" //... --test_output=errors --keep_going
           fi
+
+      - name: Save bazel output base
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.bazel-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ runner.temp }}/bazel-outputs
+          key: ${{ steps.bazel-cache.outputs.cache-primary-key }}
 
       - name: Critical-path report + budget (the optimization loop metric)
         if: always()
