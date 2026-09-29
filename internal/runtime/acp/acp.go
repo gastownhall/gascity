@@ -254,6 +254,15 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			env = append(env, k+"="+cfg.Env[k])
 		}
 	}
+	// The control-socket marker lets any gc process attribute this agent, and
+	// the tool children that inherit its environment, to a live owner; see
+	// [Provider.FindRuntimesBySessionID]. It is appended after the cfg.Env
+	// loop above and deliberately outranks a caller's entry for this key,
+	// including the empty spelling that would otherwise withhold it:
+	// attribution must not be caller-settable, or a caller could point the
+	// marker at any live listener to make its agent read as tracked, or
+	// withhold it to hide the agent from its own owner's handshake rescue.
+	env = append(envWithoutKey(env, controlSocketEnv), controlSocketEnv+"="+p.controlSocketMarker(name))
 	cmd.Env = env
 
 	// Set up stdio pipes for JSON-RPC.

@@ -84,6 +84,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.1.6, whose role prompts run `gc gc claim`, rename the key to `gc`;
   `gc doctor --fix` offers the rename (#6683). Do not add a second `gc` import
   next to the old key: that imports the pack twice (#4508).
+- **The first restart after upgrading reaps pre-upgrade ACP agents whose owner
+  is gone.** Any city routing a session to ACP had process-table orphan
+  reaping off — for its ACP sessions, and in a city that mixes ACP with a
+  tmux or subprocess default, for every session including the tmux and
+  subprocess ones. It is on again. An ACP agent started by the previous binary
+  carries no `GC_ACP_CONTROL_SOCKET` marker, and once its supervisor has
+  restarted no connection to it survives, so it reads untracked and the
+  pre-start orphan sweep terminates it. That is the intended verdict — its
+  owner's control socket died with the owner, so the agent could no longer be
+  driven — and it happens once, on the first restart, not on every one
+  (#6543).
 - **The `reaper`, `jsonl-export` and dolt `mol-dog-backup` orders now work
   through bd on every city topology.** Each bead scope (the city and every
   rig) is reached with `gc bd`, so bd-owned proxied, gc-managed and mixed
@@ -238,6 +249,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   minter, which is the premise this change retires (ga-8w5c7).
 
 ### Fixed
+
+- **`passthroughEnv` now honors `GC_SUPERVISOR_ENV` when deciding which
+  non-`GC_`-prefixed variables reach a spawned agent session, not only which
+  ones survive into the persisted service file.** The two allowlists used to
+  be independent: opting a variable into `GC_SUPERVISOR_ENV` widened the
+  systemd/launchd unit's environment, but `passthroughEnv`'s sweep still only
+  forwarded `GC_`-prefixed keys into sessions, so a variable could be fully
+  persisted into the supervisor's own process and still never reach an agent.
+  One opt-in list now governs both, so declaring a variable once is enough.
+  Behavior change: variables already listed in `GC_SUPERVISOR_ENV` will now
+  also be forwarded into agent sessions.
 
 - **The reaper's stale-issue auto-close works again when an open bead
   depends on a wisp or external bead.** Such a dependency has no

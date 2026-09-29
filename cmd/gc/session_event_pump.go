@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -77,11 +78,12 @@ func newSessionEventPump(parent context.Context, pokeCh chan<- struct{}, stderr 
 }
 
 // restart re-points the pump at sp's session-event stream, canceling any
-// prior subscription. Providers that do not implement
-// runtime.SessionEventProvider deactivate the pump and log the same
-// patrol-polling fallback line a subscribe error would, so the degradation
-// is never silent. Callers serialize restarts (startup and config reload
-// both run on the reconciler goroutine).
+// prior subscription. A provider with no session-event stream to offer --
+// one that does not implement runtime.SessionEventProvider, or a composite
+// whose backends all lack events -- deactivates the pump and announces the
+// patrol-polling fallback, so the degradation is never silent and never
+// reads like a broken transport. Callers serialize restarts (startup and
+// config reload both run on the reconciler goroutine).
 func (p *sessionEventPump) restart(sp runtime.Provider) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -93,13 +95,20 @@ func (p *sessionEventPump) restart(sp runtime.Provider) {
 	p.streamGen.Store(0)
 	sep, ok := sp.(runtime.SessionEventProvider)
 	if !ok {
-		fmt.Fprintf(p.stderr, "%s: provider does not support session events (session liveness stays on patrol polling)\n", p.logPrefix) //nolint:errcheck // best-effort stderr
+		p.logNoEventSource()
 		return
 	}
 	ctx, cancel := context.WithCancel(p.parent)
 	events, err := sep.SubscribeSessionEvents(ctx)
 	if err != nil {
 		cancel()
+		// A composite whose backends all lack events is a non-implementer in
+		// every way that matters here, so it gets that line instead; the
+		// subscribe: line stays reserved for a transport that really failed.
+		if errors.Is(err, runtime.ErrNoSessionEventSource) {
+			p.logNoEventSource()
+			return
+		}
 		fmt.Fprintf(p.stderr, "%s: session-event subscribe: %v (session liveness stays on patrol polling)\n", p.logPrefix, err) //nolint:errcheck // best-effort stderr
 		return
 	}
@@ -107,6 +116,13 @@ func (p *sessionEventPump) restart(sp runtime.Provider) {
 	p.streamGen.Store(p.gen)
 	fmt.Fprintf(p.stderr, "%s: session-event stream active: session death pokes the reconciler\n", p.logPrefix) //nolint:errcheck // best-effort stderr
 	go p.forward(ctx, p.gen, events)
+}
+
+// logNoEventSource announces the patrol-polling fallback for a provider that
+// has no session-event stream to offer. Both callers are benign
+// configurations rather than failures, so they share one line that says so.
+func (p *sessionEventPump) logNoEventSource() {
+	fmt.Fprintf(p.stderr, "%s: provider does not support session events (session liveness stays on patrol polling)\n", p.logPrefix) //nolint:errcheck // best-effort stderr
 }
 
 // streaming reports whether a session-event stream is currently established,

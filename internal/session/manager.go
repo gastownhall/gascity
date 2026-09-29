@@ -717,7 +717,7 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 // replacement is impossible because it does not exist yet.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	_ = ctx
-	scanner, ok := m.sp.(runtime.ProcessTableScanner)
+	scanner, ok := runtime.AsProcessTableScanner(m.sp)
 	if !ok || sessionID == "" {
 		return nil
 	}
