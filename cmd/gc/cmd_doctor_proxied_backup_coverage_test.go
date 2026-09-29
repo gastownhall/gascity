@@ -74,6 +74,11 @@ func TestBuildDoctorChecksProxiedBackupCoverageNeverWakesAStore(t *testing.T) {
 		}
 	}
 
+	// A store whose proxy is up but whose preflight read fails: the
+	// preflight only runs against a running store (doctorStoreGate).
+	oldLive := doctorProxiedStoreNotRunning
+	t.Cleanup(func() { doctorProxiedStoreNotRunning = oldLive })
+	doctorProxiedStoreNotRunning = func(string) bool { return false }
 	doctorBeadStorePreflight = func(string, func(string) (beads.Store, error)) error {
 		return errors.New("dolt server unreachable")
 	}

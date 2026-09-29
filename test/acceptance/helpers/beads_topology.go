@@ -1007,6 +1007,21 @@ func WaitForNoDoltProcesses(t *testing.T, root string, timeout time.Duration) []
 	}
 }
 
+// WaitForDoltProcesses polls for up to within and returns the bd proxy and
+// dolt sql-server processes under root as soon as any appear, or nil. It is
+// the absence check for a command that must not start one: a leaked proxy
+// stays up, so a short window is enough to see it.
+func WaitForDoltProcesses(t *testing.T, root string, within time.Duration) []string {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		if found := DoltProcessesUnder(t, root); len(found) != 0 || time.Now().After(deadline) {
+			return found
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
 // ScopeArtifacts is the on-disk binding of one scope, read through the files bd
 // and gc actually persist.
 type ScopeArtifacts struct {
