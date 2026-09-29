@@ -1095,6 +1095,7 @@ func scanNestedConfigBoolValueFromData(data []byte, section string, keys ...stri
 
 func scanNestedConfigLineValueFromData(data []byte, section string, keys ...string) (string, bool) {
 	inSection := false
+	childIndent := -1
 	for _, line := range strings.Split(string(data), string(rune(10))) {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
@@ -1103,9 +1104,19 @@ func scanNestedConfigLineValueFromData(data []byte, section string, keys ...stri
 		if strings.TrimLeft(line, " \t") == line {
 			key, value, ok := topLevelConfigLine(line)
 			inSection = ok && key == section && value == ""
+			childIndent = -1
 			continue
 		}
 		if !inSection {
+			continue
+		}
+		// Only direct children of the section count; a deeper mapping that
+		// reuses a field name is not the key.
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		if childIndent == -1 {
+			childIndent = indent
+		}
+		if indent != childIndent {
 			continue
 		}
 		key, value, ok := strings.Cut(trimmed, ":")

@@ -233,3 +233,28 @@ func TestEnsureCanonicalConfigFallbackDropsBdNestedEndpoint(t *testing.T) {
 		t.Fatalf("fallback should leave one dolt block holding gc's nested key:\n%s", text)
 	}
 }
+
+func TestScanConfigLineValuePrefersDirectNestedChild(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "direct child after deeper mapping",
+			input: "dolt:\n  sub:\n    host: deeper.example\n  host: direct.example\n: not yaml\n",
+			want:  "direct.example",
+		},
+		{
+			name:  "only deeper mapping",
+			input: "dolt:\n  sub:\n    host: deeper.example\n: not yaml\n",
+			want:  "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := readConfigStateFromData([]byte(tc.input)).DoltHost; got != tc.want {
+				t.Fatalf("DoltHost = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
