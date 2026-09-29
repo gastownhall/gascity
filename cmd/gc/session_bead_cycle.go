@@ -62,7 +62,9 @@ func recordCurrentBeadIDOnWake(info sessionpkg.Info, sessFront *sessionpkg.Store
 // close` ever writes a closed_at metadata key (bd keeps closed_at as a
 // top-level column that neither bdIssue nor beads.Bead decodes), so without
 // this fallback closedAt is always zero for a bead closed the way every real
-// close closes it. closedAt is the zero Time only when the bead is open.
+// close closes it. The UpdatedAt fallback is rounded up to the next whole
+// second, since BdStore truncates it to seconds. closedAt is the zero Time
+// only when the bead is open.
 func prevAssignedBeadStatus(topo storeref.Topology, id string) (open bool, closedAt time.Time, err error) {
 	b, err := byIDBeadForTopology(topo, id)
 	if err != nil {
@@ -71,7 +73,11 @@ func prevAssignedBeadStatus(topo storeref.Topology, id string) (open bool, close
 	if !convoycore.IsTerminalStatus(b.Status) {
 		return true, time.Time{}, nil
 	}
-	closedAt = b.UpdatedAt
+	// UpdatedAt is second-truncated on BdStore; round up so a wake
+	// earlier in the same second as the close never reads as "after".
+	if !b.UpdatedAt.IsZero() {
+		closedAt = b.UpdatedAt.Truncate(time.Second).Add(time.Second)
+	}
 	if ca := b.Metadata["closed_at"]; ca != "" {
 		if t, perr := time.Parse(time.RFC3339Nano, ca); perr == nil {
 			closedAt = t

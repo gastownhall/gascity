@@ -24,6 +24,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -138,6 +139,17 @@ func assertNotCycled(t *testing.T, env *restartRequestTestEnv, session beads.Bea
 	}
 }
 
+func assertCycled(t *testing.T, env *restartRequestTestEnv, session beads.Bead, why string) {
+	t.Helper()
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata["session_key"] == "conversation-A" {
+		t.Fatalf("session_key still conversation-A; want fresh-cycle to rotate it: %s\nstdout: %s", why, env.stdout.String())
+	}
+	if !strings.Contains(env.stdout.String(), "Cycled fresh-mode session") {
+		t.Fatalf("stdout missing cycle line: %s\nstdout: %s", why, env.stdout.String())
+	}
+}
+
 // Case 1 (22:07:37 local, gascity--builder ga-p69yam -> ga-851h6i). The
 // previous bead is OPEN — it had been re-routed to the reviewer — so ruling
 // ga-4byiyc row A says defer. It lives in the gascity RIG store. The guard
@@ -199,4 +211,64 @@ func TestFreshCycleRepro_IncarnationStartedAfterRealCloseInRigStoreDefers(t *tes
 	reconcileFreshCycleRepro(env, []beads.Bead{session}, []beads.Bead{anchor}, map[string]beads.Store{"gascity": rig})
 
 	assertNotCycled(t, env, session, sessionName, "this incarnation started after ga-prev closed (row C, rig store)")
+}
+
+// Row C must not swallow the cycle direction: an incarnation that started
+// BEFORE the previous bead's real close is still carrying that conversation,
+// so the guard must cycle it.
+func TestFreshCycleRepro_IncarnationStartedBeforeRealCloseCycles(t *testing.T) {
+	env, session, _ := freshCycleReproEnv(t, nil)
+	env.store.(*beads.MemStore).HonorExplicitIDs = true
+	reproCreate(t, env.store, beads.Bead{ID: "wb-prev", Title: "previous", Type: "task", Status: "in_progress", Assignee: "witness"})
+	env.setSessionMetadata(&session, map[string]string{
+		sessionpkg.CurrentBeadIDKey: "wb-prev",
+		"awake_started_at":          time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano),
+	})
+	reproCloseForReal(t, env.store, "wb-prev")
+	anchor := beads.Bead{ID: "wb-new", Title: "new", Type: "task", Status: "in_progress", Assignee: "witness"}
+
+	reconcileFreshCycleRepro(env, []beads.Bead{session}, []beads.Bead{anchor}, nil)
+
+	assertCycled(t, env, session, "this incarnation started before wb-prev closed")
+}
+
+// The cycle direction again, with the previous bead in the rig store.
+func TestFreshCycleRepro_IncarnationStartedBeforeRealCloseInRigStoreCycles(t *testing.T) {
+	env, session, _ := freshCycleReproEnv(t, nil)
+	rig := reproMemStore()
+	reproCreate(t, rig, beads.Bead{ID: "ga-prev", Title: "previous", Type: "task", Status: "in_progress", Assignee: "witness"})
+	env.setSessionMetadata(&session, map[string]string{
+		sessionpkg.CurrentBeadIDKey: "ga-prev",
+		"awake_started_at":          time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano),
+	})
+	reproCloseForReal(t, rig, "ga-prev")
+	reproCreate(t, rig, beads.Bead{ID: "ga-new", Title: "new", Type: "task", Status: "in_progress", Assignee: "witness"})
+	anchor, _ := rig.Get("ga-new")
+
+	reconcileFreshCycleRepro(env, []beads.Bead{session}, []beads.Bead{anchor}, map[string]beads.Store{"gascity": rig})
+
+	assertCycled(t, env, session, "this incarnation started before ga-prev closed (rig store)")
+}
+
+// BdStore truncates UpdatedAt to the second, so a wake earlier in the same
+// second as the close must not read as "after" the truncated close time.
+func TestFreshCycleRepro_SameSecondWakeBeforeCloseCycles(t *testing.T) {
+	env, session, _ := freshCycleReproEnv(t, nil)
+	env.store.(*beads.MemStore).HonorExplicitIDs = true
+	reproCreate(t, env.store, beads.Bead{ID: "wb-prev", Title: "previous", Type: "task", Status: "in_progress", Assignee: "witness"})
+	reproCloseForReal(t, env.store, "wb-prev")
+	closed, err := env.store.Get("wb-prev")
+	if err != nil {
+		t.Fatalf("reading back wb-prev: %v", err)
+	}
+	awake := closed.UpdatedAt.Truncate(time.Second).Add(500 * time.Millisecond)
+	env.setSessionMetadata(&session, map[string]string{
+		sessionpkg.CurrentBeadIDKey: "wb-prev",
+		"awake_started_at":          awake.Format(time.RFC3339Nano),
+	})
+	anchor := beads.Bead{ID: "wb-new", Title: "new", Type: "task", Status: "in_progress", Assignee: "witness"}
+
+	reconcileFreshCycleRepro(env, []beads.Bead{session}, []beads.Bead{anchor}, nil)
+
+	assertCycled(t, env, session, "wake falls in the same second as the second-truncated close")
 }
