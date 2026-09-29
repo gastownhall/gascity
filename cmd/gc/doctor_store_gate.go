@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"os"
 	"sync"
 	"time"
 
@@ -18,13 +17,6 @@ import (
 // message carries the reason.
 var errDoctorStoreNotRunning = errors.New(doctor.StoreNotRunningMessage)
 
-// doctorOpenStoppedStoresEnv, set to "1", turns the gate off so doctor opens
-// and reads a stopped proxied store — and so starts its proxy and Dolt. It is
-// an explicit opt-in for diagnosing the store-open path itself (the native
-// lane's admission of a dead or absent proxy record is measured through the
-// beads-store check); nothing sets it by default.
-const doctorOpenStoppedStoresEnv = "GC_DOCTOR_OPEN_STOPPED_STORES"
-
 // doctorProxiedStoreNotRunning is the per-scope liveness test. A variable so
 // tests can model a stopped or running proxy without one.
 var doctorProxiedStoreNotRunning = doctor.ProxiedStoreNotRunning
@@ -36,21 +28,21 @@ var doctorProxiedStoreNotRunning = doctor.ProxiedStoreNotRunning
 // bead-store preflight, asks the gate first and is replaced by a
 // "not checked: store not running" line for a stopped scope.
 type doctorStoreGate struct {
-	mu       sync.Mutex
-	stopped  map[string]bool
-	disabled bool
+	mu            sync.Mutex
+	stopped       map[string]bool
+	expectRunning bool
 }
 
-func newDoctorStoreGate() *doctorStoreGate {
-	return &doctorStoreGate{stopped: map[string]bool{}, disabled: os.Getenv(doctorOpenStoppedStoresEnv) == "1"}
+// newDoctorStoreGate builds the gate for one doctor run. expectRunning is
+// whether the city's controller is up: a stopped store is then a fault the
+// stand-in reports as a warning, not the quiet OK of a stopped city.
+func newDoctorStoreGate(expectRunning bool) *doctorStoreGate {
+	return &doctorStoreGate{stopped: map[string]bool{}, expectRunning: expectRunning}
 }
 
 // Stopped reports whether scopeRoot's proxied store is not running. Scopes
 // that are not proxied are never stopped.
 func (g *doctorStoreGate) Stopped(scopeRoot string) bool {
-	if g.disabled {
-		return false
-	}
 	key := normalizePathForCompare(scopeRoot)
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -74,7 +66,12 @@ func (g *doctorStoreGate) Check(c doctor.Check, scopes, labels []string) doctor.
 	if len(stopped) == 0 {
 		return c
 	}
-	return doctor.StoreNotRunningCheck(c.Name(), stopped...)
+	return g.NotRunning(c.Name(), stopped...)
+}
+
+// NotRunning is the stand-in for a check skipped on stopped scopes.
+func (g *doctorStoreGate) NotRunning(name string, scopeLabels ...string) doctor.Check {
+	return doctor.StoreNotRunningCheck(name, g.expectRunning, scopeLabels...)
 }
 
 // StoreFactory wraps open so a stopped scope answers errDoctorStoreNotRunning

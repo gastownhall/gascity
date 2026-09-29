@@ -30,7 +30,7 @@ func TestProxiedStoreNotRunningOnlyForAStoppedProxiedScope(t *testing.T) {
 }
 
 func TestStoreNotRunningCheckKeepsTheNameAndHasNoFix(t *testing.T) {
-	c := StoreNotRunningCheck("custom-types:city", "city", "r1")
+	c := StoreNotRunningCheck("custom-types:city", false, "city", "r1")
 	if c.Name() != "custom-types:city" || c.CanFix() {
 		t.Fatalf("name/canFix = %q/%v", c.Name(), c.CanFix())
 	}
@@ -40,5 +40,13 @@ func TestStoreNotRunningCheckKeepsTheNameAndHasNoFix(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(r.Details, " "), "gc start") {
 		t.Errorf("details do not say how to get the check run: %q", r.Details)
+	}
+}
+
+// Under a running city a stopped store is a fault, so the stand-in warns.
+func TestStoreNotRunningCheckWarnsWhenTheCityIsRunning(t *testing.T) {
+	r := StoreNotRunningCheck("beads-store", true, "city").Run(&CheckContext{})
+	if r.Status != StatusWarning || !strings.Contains(r.Message, StoreNotRunningMessage) || r.FixHint == "" {
+		t.Fatalf("result = %v %q (hint %q), want a warning with a fix hint", r.Status, r.Message, r.FixHint)
 	}
 }

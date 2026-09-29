@@ -114,7 +114,7 @@ func TestBuildDoctorChecksNeverReadsAStoppedRigStore(t *testing.T) {
 		}
 	}
 
-	gate := newDoctorStoreGate()
+	gate := newDoctorStoreGate(false)
 	opened := 0
 	factory := gate.StoreFactory(func(string) (beads.Store, error) { opened++; return nil, nil })
 	if _, err := factory(filepath.Join(cityDir, "rigstore")); !errors.Is(err, errDoctorStoreNotRunning) {
@@ -125,5 +125,20 @@ func TestBuildDoctorChecksNeverReadsAStoppedRigStore(t *testing.T) {
 	}
 	if opened != 1 {
 		t.Errorf("opened %d stores, want only the running city's", opened)
+	}
+}
+
+// A running city (controller up) whose store proxy is dead: the skipped checks
+// warn rather than read as OK, so the fault is not hidden.
+func TestBuildDoctorChecksWarnsOnAStoppedStoreUnderARunningCity(t *testing.T) {
+	cityDir, cfg := doctorStoreGateCity(t)
+	stubDoctorStoreLiveness(t, "citystore")
+
+	checks := buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{ControllerRunning: true, SkipCityDoltCheck: true, SkipManagedDoltCheck: true, SkipRigDoltChecks: true})
+	for _, name := range []string{"agent-sessions", "beads-store", "custom-types:city"} {
+		r := runDoctorCheckNamed(t, checks, name)
+		if r.Status != doctor.StatusWarning || !strings.Contains(r.Message, doctor.StoreNotRunningMessage) {
+			t.Errorf("%s = %v %q, want a not-running warning", name, r.Status, r.Message)
+		}
 	}
 }

@@ -67,12 +67,8 @@ func newProxiedNativeCity(t *testing.T, bdPath, doltPath string) *proxiedNativeC
 	env, calls := proxiedEnvRecordingBD(t, bdPath, doltPath)
 	city := helpers.NewCity(t, env)
 	c := &proxiedNativeCity{
-		env: env,
-		// The lifecycle rows measure the lane's own admission of a stopped,
-		// dead or foreign proxy record through doctor's beads-store check, so
-		// doctor must be allowed to open that store; by default it never
-		// starts a stopped proxied store (doctorStoreGate).
-		lane:   proxiedNativeLaneEnv(env).With("GC_DOCTOR_OPEN_STOPPED_STORES", "1"),
+		env:    env,
+		lane:   proxiedNativeLaneEnv(env),
 		calls:  calls,
 		bdPath: bdPath,
 		city:   city,
@@ -192,6 +188,20 @@ func (c *proxiedNativeCity) laneServesNatively(t *testing.T, label string) (nati
 	}
 	census = c.census(t)
 	return census.Total == 0, census
+}
+
+// admit drives the lane's admission through `gc status --json` (the census
+// counts the bd verbs it spent), then reads the payload of the store it
+// settled on through doctor, which now finds a live proxy.
+func (c *proxiedNativeCity) admit(t *testing.T, label string) (beadsStorePayloadDoc, doctorCheckResult, proxiedForkCensus) {
+	t.Helper()
+	c.reset(t)
+	if out, err := helpers.RunGC(c.lane, c.root, "status", "--json"); err != nil {
+		t.Logf("%s: gc status --json exited non-zero: %v\n%s", label, err, out)
+	}
+	census := c.census(t)
+	payload, result := c.account(t, label)
+	return payload, result, census
 }
 
 // bd runs the pinned bd directly in the city, the way an operator does.
@@ -394,9 +404,7 @@ func TestProxiedNativeLifecycle(t *testing.T) {
 			t.Fatalf("bd dolt stop left processes behind:\n%s", strings.Join(leaked, "\n"))
 		}
 
-		c.reset(t)
-		payload, result := c.account(t, "a city whose proxy was stopped")
-		census := c.census(t)
+		payload, result, census := c.admit(t, "a city whose proxy was stopped")
 		t.Logf("stop-ping-repin: %s; store=%q %s", census, payload.Store, describeProxiedAccount(payload))
 
 		if payload.Store != "NativeDoltStore" {
@@ -438,9 +446,7 @@ func TestProxiedNativeLifecycle(t *testing.T) {
 			helpers.MissingPrecondition(t, "bd removed its record on SIGKILL (%v), so this host cannot produce the dead-record arm", err)
 		}
 
-		c.reset(t)
-		payload, result := c.account(t, "a city whose proxy was killed")
-		census := c.census(t)
+		payload, result, census := c.admit(t, "a city whose proxy was killed")
 		t.Logf("dead-record-one-ping: %s; store=%q %s", census, payload.Store, describeProxiedAccount(payload))
 
 		if payload.Store != "NativeDoltStore" {
@@ -667,9 +673,7 @@ func (c *proxiedNativeCity) childCrashRow(t *testing.T, want childCrashExpectati
 		t.Logf("%s: the dolt child %v is still alive; the row measures whatever the proxy now answers", want.label, alive)
 	}
 
-	c.reset(t)
-	payload, result := c.account(t, "a city whose dolt child took "+want.label)
-	census := c.census(t)
+	payload, result, census := c.admit(t, "a city whose dolt child took "+want.label)
 	t.Logf("%s: %s; store=%q %s", want.label, census, payload.Store, describeProxiedAccount(payload))
 
 	if census.Pings != want.pings || census.DoltStops != want.doltStops {

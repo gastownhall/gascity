@@ -25,16 +25,20 @@ func ProxiedStoreNotRunning(scopeRoot string) bool {
 
 // StoreNotRunningCheck stands in for a store-reading check whose scope's
 // proxied store is stopped. It keeps the check's name, so the report still
-// lists it, and reports StatusOK with StoreNotRunningMessage: a stopped city is
-// a healthy city, and the check's real answer needs a store doctor will not
-// start. It has no fix, for the same reason.
-func StoreNotRunningCheck(name string, scopeLabels ...string) Check {
-	return &storeNotRunningCheck{name: name, scopes: scopeLabels}
+// lists it, with StoreNotRunningMessage, and has no fix: the check's real
+// answer needs a store doctor will not start.
+//
+// cityRunning is whether the city's controller is up. For a stopped city a
+// stopped store is expected and the result is StatusOK; for a running city it
+// is a fault (a dead proxy) and the result is a warning, so it is not hidden.
+func StoreNotRunningCheck(name string, cityRunning bool, scopeLabels ...string) Check {
+	return &storeNotRunningCheck{name: name, cityRunning: cityRunning, scopes: scopeLabels}
 }
 
 type storeNotRunningCheck struct {
-	name   string
-	scopes []string
+	name        string
+	cityRunning bool
+	scopes      []string
 }
 
 func (c *storeNotRunningCheck) Name() string { return c.name }
@@ -44,12 +48,18 @@ func (c *storeNotRunningCheck) Run(_ *CheckContext) *CheckResult {
 	if len(c.scopes) > 0 {
 		message = fmt.Sprintf("%s (%s)", StoreNotRunningMessage, strings.Join(c.scopes, ", "))
 	}
-	return &CheckResult{
+	r := &CheckResult{
 		Name:    c.name,
 		Status:  StatusOK,
 		Message: message,
 		Details: []string{"doctor reads a bd-owned proxied store only while its proxy is running; a read would start the proxy and its Dolt, and doctor never starts servers. Run `gc start` and re-run doctor to check it."},
 	}
+	if c.cityRunning {
+		r.Status = StatusWarning
+		r.Message = message + " while the city's controller is running"
+		r.FixHint = "the store's proxy is not running under a running city; `gc start` (or `gc bd dolt start` in the scope) restarts it, and the proxied-endpoint line in `gc doctor` shows why it is down"
+	}
+	return r
 }
 
 func (c *storeNotRunningCheck) CanFix() bool { return false }
