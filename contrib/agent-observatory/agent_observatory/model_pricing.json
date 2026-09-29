@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "models": [
+    {
+      "model_id": "gpt-4.1",
+      "provider": "OpenAI",
+      "input_usd_per_million": 2.0,
+      "output_usd_per_million": 8.0,
+      "cache_read_usd_per_million": 0.5,
+      "cache_write_usd_per_million": null,
+      "effective_from": "2025-04-14T00:00:00Z",
+      "source": "https://openai.com/api/pricing/"
+    },
+    {
+      "model_id": "claude-sonnet-4-20250514",
+      "provider": "Anthropic",
+      "input_usd_per_million": 3.0,
+      "output_usd_per_million": 15.0,
+      "cache_read_usd_per_million": 0.3,
+      "cache_write_usd_per_million": null,
+      "effective_from": "2025-05-22T00:00:00Z",
+      "source": "https://www.anthropic.com/pricing"
+    },
+    {
+      "model_id": "deepseek-chat",
+      "provider": "DeepSeek",
+      "input_usd_per_million": 0.27,
+      "output_usd_per_million": 1.1,
+      "cache_read_usd_per_million": 0.07,
+      "cache_write_usd_per_million": null,
+      "effective_from": "2025-02-08T00:00:00Z",
+      "source": "https://api-docs.deepseek.com/quick_start/pricing"
+    }
+  ]
+}

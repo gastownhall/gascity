@@ -89,11 +89,14 @@ from .migrations import migrate_database
 from .policy import (
     DEFAULT_CONFIDENCE_THRESHOLD,
     PolicyConfig,
+    bind_classifications_from_store,
     build_shadow_report,
     load_catalog,
     load_recommendation_bundle,
     recommendation_rows,
 )
+from .pricing import DEFAULT_PRICING_SEED, seed_model_pricing
+
 from .report import build_report
 from .silver import (
     DEFAULT_API_KEY_ENV,
@@ -238,11 +241,26 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
             {
                 "database": result.database_path,
                 "backup": result.backup_path,
+                "backups": list(result.backup_paths),
                 "from_version": result.from_version,
                 "to_version": result.to_version,
                 "preserved_rows": result.preserved_rows,
+                "backfill_summary": result.backfill_summary,
             },
             indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _cmd_seed_pricing(args: argparse.Namespace) -> int:
+    with _open_store(args.db) as store:
+        inserted = seed_model_pricing(store, args.input)
+        total = int(store.conn.execute("SELECT COUNT(*) FROM model_pricing").fetchone()[0])
+    print(
+        json.dumps(
+            {"seed": args.input or str(DEFAULT_PRICING_SEED), "inserted": inserted, "total": total},
             sort_keys=True,
         )
     )
@@ -306,6 +324,7 @@ def _cmd_build_request(args: argparse.Namespace) -> int:
         taxonomy,
         snapshot_hash=snapshot_hash,
         subject_kind=args.subject_kind,
+        session_key=_session_key(args.session) if args.session else None,
     )
 
     stored = False
@@ -396,6 +415,7 @@ def _cmd_classify(args: argparse.Namespace) -> int:
         taxonomy,
         snapshot_hash=snapshot_hash,
         subject_kind=args.subject_kind,
+        session_key=_session_key(args.session) if args.session else None,
     )
     config = _transport_config_from_args(args)
     with _open_store(args.db) as store:
@@ -727,23 +747,32 @@ def _cmd_shadow(args: argparse.Namespace) -> int:
     catalog = load_catalog(args.catalog)
     bundle = load_recommendation_bundle(args.input)
     config = PolicyConfig(confidence_threshold=args.confidence_threshold)
-    report = build_shadow_report(
-        bundle,
-        catalog,
-        config,
-        generated_by=f"agent-observatory/{__version__}",
-    )
-    # Persist exactly the report that is emitted (stable float precision) so a
-    # stored payload and the written report cannot disagree on the numbers.
-    serialized = report_json(report)
+    if args.classifications_from_db and not args.db:
+        raise ObservatoryError("--classifications-from-db requires --db")
+    store = _open_store(args.db) if args.db else None
     stored: int | None = None
     deduplicated: int | None = None
-    if args.db:
-        rows = recommendation_rows(json.loads(serialized))
-        with _open_store(args.db) as store:
+    try:
+        if args.classifications_from_db:
+            assert store is not None
+            bundle = bind_classifications_from_store(bundle, store)
+        report = build_shadow_report(
+            bundle,
+            catalog,
+            config,
+            generated_by=f"agent-observatory/{__version__}",
+        )
+        # Persist exactly the report that is emitted (stable float precision) so
+        # a stored payload and the written report cannot disagree on the numbers.
+        serialized = report_json(report)
+        if store is not None:
+            rows = recommendation_rows(json.loads(serialized))
             result = store.save_recommendations(rows)
             stored = result.inserted
             deduplicated = result.deduplicated
+    finally:
+        if store is not None:
+            store.close()
     _write_output(serialized, args.out)
     shadow = report["shadow"]
     print(
@@ -1560,12 +1589,23 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser.set_defaults(func=_cmd_import_jsonl)
 
     migrate_parser = subparsers.add_parser(
-        "migrate", help="back up and upgrade a schema-4 projection to schema 5"
+        "migrate", help="back up and upgrade a schema-4/5 projection to schema 6"
     )
     migrate_parser.add_argument(
-        "--db", required=True, help="existing schema-4 SQLite projection (a timestamped backup is written first)"
+        "--db",
+        required=True,
+        help="existing schema-4 or schema-5 SQLite projection (a timestamped backup is written first)",
     )
     migrate_parser.set_defaults(func=_cmd_migrate)
+
+    pricing_parser = subparsers.add_parser(
+        "seed-pricing", help="load the checked-in public model-price schedule"
+    )
+    pricing_parser.add_argument("--db", required=True, help="schema-6 SQLite projection path")
+    pricing_parser.add_argument(
+        "--input", default=None, help="optional price seed JSON (defaults to the checked-in seed)"
+    )
+    pricing_parser.set_defaults(func=_cmd_seed_pricing)
 
     report_parser = subparsers.add_parser("report", help="emit a deterministic report JSON")
     report_parser.add_argument("--db", required=True, help="SQLite projection path")
@@ -2011,7 +2051,15 @@ def build_parser() -> argparse.ArgumentParser:
     shadow_parser.add_argument(
         "--db",
         default=None,
-        help="SQLite projection path (optional; persists recommendations append-only)",
+        help="SQLite projection path (for bound classification reads and/or recommendation persistence)",
+    )
+    shadow_parser.add_argument(
+        "--classifications-from-db",
+        action="store_true",
+        help=(
+            "replace predictions for input episodes carrying a 'session' identity "
+            "with the newest bound classification in --db"
+        ),
     )
     shadow_parser.add_argument(
         "--confidence-threshold",

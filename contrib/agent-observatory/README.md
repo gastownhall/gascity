@@ -32,6 +32,9 @@ contrib/agent-observatory/
     canonical.py       canonical JSON, hashing, event/session snapshot identity
     store.py           SQLite schema versioning, transactional import, classifications
     migrations.py      explicit, backed-up SQLite schema upgrades
+    roles.py           GC session-name to agent-template role normalization
+    pricing.py         validated, cited public model-price seed loader
+    model_pricing.json checked-in price schedule with per-row source URLs
     commands.py        conservative, non-executing command categorization
     changes.py         M5 optimization change registry + conservative screen
     exposure.py        M5 commit/fingerprint exposure join + optimization ledger
@@ -163,18 +166,34 @@ the tool executed, and does not prove success. Only a result event with an
 
 - Schema version is stored in `PRAGMA user_version` and `schema_meta`. Opening a
   store with an unknown/future version raises `SchemaVersionError`. The current
-  version is **5**; version 3 excluded identity fields from the payload hash (so a
+  version is **6**; version 3 excluded identity fields from the payload hash (so a
   version-2 projection must be rebuilt rather than reused), version 4 added the
-  M5 change/exposure registry, and version 5 adds the M7 shadow
-  `recommendations` projection.
-- Upgrade a schema-4 projection explicitly with
-  `python3 -m agent_observatory migrate --db /path/to/obs.db`. The command refuses
-  every version except a valid v4 database, writes a timestamped
-  `<db>.v4-pre-schema5-<UTC timestamp>.bak` beside the original first, then adds
-  the schema-5 table/index and updates both version markers in one transaction.
-  It verifies that row counts in `events`, `sessions`, `classifications`, and
-  `classification_answers` match the backup and remain unchanged. Normal store
-  opens never migrate an existing database implicitly.
+  M5 change/exposure registry, version 5 added the M7 shadow `recommendations`
+  projection, and version 6 adds durable classification/session bindings,
+  session roles, model prices and the `event_usage_cost` view.
+- Upgrade a valid schema-4 or schema-5 projection explicitly with
+  `python3 -m agent_observatory migrate --db /path/to/obs.db`. Schema 4 is backed
+  up as `<db>.v4-pre-schema5-<UTC timestamp>.bak` and advanced through schema 5;
+  schema 5 is separately backed up as `<db>.v5-pre-schema6-<UTC timestamp>.bak`
+  before the additive v6 migration. Each step updates both version markers and
+  rolls back atomically on failure. The v5-to-v6 step reports classification
+  binding/match rate and session-role coverage, preserving existing evidence row
+  counts. Normal store opens never migrate an existing database implicitly.
+- `sessions.role` is normalized from the GC runtime session name/template (pool
+  slot numbers are removed); it is never inferred from message `role` fields.
+  `classification_sessions` binds a classification to the full
+  `(city_id, host_id, provider, session_id)` key. At request creation, snapshot
+  matches are captured on `jev_requests` so a later response remains bound even
+  if the session has since grown. The migration matches raw and text-namespaced
+  hashes and uses exact `source_path`/`source_sha256` provenance only when it
+  identifies one session; ambiguous and unmatched rows remain unbound.
+- `model_pricing` stores effective-dated input/output/cache-read/cache-write
+  USD-per-million rates and a citation URL. New stores and schema-6 migrations
+  load the checked-in public price seed automatically; rerun
+  `python3 -m agent_observatory seed-pricing --db /path/to/obs.db` to idempotently
+  restore/check it. The `event_usage_cost` view joins token counters to the most
+  recent applicable model price; unknown model prices and cache categories
+  without a rate remain `NULL` rather than being guessed.
 - Import is **per-file atomic**: the whole file is parsed and type-checked
   before writing, and all writes happen in one transaction. A malformed or
   truncated line reports `path:line` and commits nothing. Records are split on
@@ -191,8 +210,9 @@ the tool executed, and does not prove success. Only a result event with an
   native id cannot erase a whole session's evidence.
 - Each `sessions` row records `first_timestamp` as the **minimum** observed
   timestamp; importing an earlier event later lowers it.
-- Tables: `events`, `event_usage`, `sessions`, `imported_files`, `jev_requests`,
-  `classifications`, `classification_answers`.
+- Tables include `events`, `event_usage`, `sessions`, `imported_files`,
+  `jev_requests`, `classifications`, `classification_answers`,
+  `classification_sessions`, `model_pricing`, and `recommendations`.
 - Classifications are **immutable**. They are keyed by subject (`event`/`session`
   snapshot hash), taxonomy version, question hash, and model version. Replaying
   an identical response deduplicates; a different response for the same key is
@@ -205,9 +225,13 @@ the tool executed, and does not prove success. Only a result event with an
 
 `event` snapshots hash the canonical identity plus the event payload hash;
 `session` snapshots hash the session identity plus its ordered event payload
-hashes. Both are deterministic. The **payload hash covers normalized content
-fields only**: canonical identity (`city_id`/`host_id`/`provider`/`session_id`/
-`event_id`) is matched separately and is covered by the event snapshot hash.
+hashes. Both are deterministic. The text-mode collector then deliberately wraps
+that session hash in the `session-text` namespace so text and metadata
+classifications cannot collide (`collector.py` `_text_snapshot_hash`). A raw
+session-hash join therefore misses text-mode classifications by design. The
+**payload hash covers normalized content fields only**: canonical identity
+(`city_id`/`host_id`/`provider`/`session_id`/`event_id`) is matched separately
+and is covered by the event snapshot hash.
 
 ## 3. Deterministic report
 
@@ -833,6 +857,12 @@ Two explicit, versioned inputs are required:
   `probabilities`, `confidence`, `flags`, `required_capabilities`, `provider`,
   `repo`, `host`, named `features` (each with `available_at`), the current
   `current_routing` decision, and the future `outcome`/`outcome_observed_at`.
+  A record may also carry `session: [city_id, host_id, provider, session_id]`.
+  With `--classifications-from-db --db DB`, the CLI replaces that record's
+  prediction fields with the newest classification joined through
+  `classification_sessions`; an unmatched identity becomes unknown. The bundle
+  remains authoritative for `as_of` and `observed_at`, so the join does not
+  invent temporal provenance.
 
 Recommendation rules:
 
@@ -874,7 +904,10 @@ Recommendation rules:
   `fallback_reasons`, and `executes_changes: false`.
 
 `shadow --db DB` persists every recommendation append-only in the
-`recommendations` table, keyed by its content hash, with queryable eligibility,
+`recommendations` table, keyed by its content hash, with queryable eligibility.
+When the input bundle includes session identities, add
+`--classifications-from-db` to read its intent/scope/confidence through the
+schema-6 session binding. The recommendations retain queryable
 confidence/uncertainty, recommended/current/fallback candidates, fallback path,
 disagreement and leak-free columns. Replaying an identical run deduplicates; a
 changed catalog or classification is retained as new, versioned evidence. The

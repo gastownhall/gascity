@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -126,6 +126,7 @@ _RECORD_KEYS = frozenset(
     {
         "episode_id",
         "work_item_id",
+        "session",
         "as_of",
         "observed_at",
         "intent",
@@ -247,6 +248,7 @@ class ClassificationRecord:
     current_routing: Mapping[str, str] = field(default_factory=dict)
     work_item_id: str | None = None
     evidence: Mapping[str, Any] | None = None
+    session_key: tuple[str, str, str, str] | None = None
 
     def content(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -281,6 +283,8 @@ class ClassificationRecord:
         }
         if self.evidence is not None:
             payload["evidence"] = dict(self.evidence)
+        if self.session_key is not None:
+            payload["session"] = list(self.session_key)
         return payload
 
 
@@ -576,6 +580,16 @@ def _normalize_record(raw: Any, seen: set[str]) -> ClassificationRecord:
     observed_at = _parse_timestamp(
         entry.get("observed_at"), f"episode {episode_id!r} observed_at"
     )
+    raw_session = entry.get("session")
+    session_key: tuple[str, str, str, str] | None = None
+    if raw_session is not None:
+        _require(
+            isinstance(raw_session, list)
+            and len(raw_session) == 4
+            and all(isinstance(part, str) and part for part in raw_session),
+            f"episode {episode_id!r} session must be an array of four non-empty strings",
+        )
+        session_key = tuple(raw_session)  # type: ignore[assignment]
 
     flags = _string_list(entry, "flags", "episode record", required=False)
     unknown_flags = sorted(set(flags) - KNOWN_FLAGS)
@@ -674,6 +688,7 @@ def _normalize_record(raw: Any, seen: set[str]) -> ClassificationRecord:
             if entry.get("evidence") is not None
             else None
         ),
+        session_key=session_key,
     )
 
 
@@ -711,6 +726,79 @@ def load_recommendation_bundle(path: str | Path) -> RecommendationBundle:
         raise PolicyError(f"recommendation bundle {bundle_path} is not valid JSON: {exc}") from exc
     return normalize_recommendation_bundle(raw)
 
+
+
+
+def bind_classifications_from_store(
+    bundle: RecommendationBundle, store: Any
+) -> RecommendationBundle:
+    """Replace inline predictions with the newest session-bound Jev answer.
+
+    The bundle remains the source of temporal and routing context (``as_of``,
+    ``observed_at``, current routing, outcomes, and features). Only prediction
+    fields are read from SQLite, through ``classification_sessions``; an
+    unbound/missing classification becomes unknown rather than a guessed label.
+    """
+    records: list[ClassificationRecord] = []
+    for record in bundle.records:
+        if record.session_key is None:
+            records.append(record)
+            continue
+        stored = store.latest_classification_for_session(
+            record.session_key, subject_kind="session"
+        )
+        evidence = dict(record.evidence or {})
+        if stored is None:
+            evidence["store_classification"] = {"status": "unmatched"}
+            records.append(
+                replace(
+                    record,
+                    intent=None,
+                    scope=None,
+                    confidence=None,
+                    probabilities=None,
+                    evidence=evidence,
+                )
+            )
+            continue
+
+        answers = {
+            answer["question_id"]: answer["answer"] for answer in stored.get("answers", [])
+        }
+        primary = answers.get("primary_intent")
+        intent = primary.get("choice") if isinstance(primary, Mapping) else None
+        confidence = primary.get("confidence") if isinstance(primary, Mapping) else None
+        probabilities = primary.get("probabilities") if isinstance(primary, Mapping) else None
+        scope_answer = answers.get("scope")
+        scope = scope_answer.get("choice") if isinstance(scope_answer, Mapping) else record.scope
+        labels = dict(record.labels)
+        for question_id, answer in answers.items():
+            choice = answer.get("choice") if isinstance(answer, Mapping) else None
+            if isinstance(choice, str) and choice:
+                labels[question_id] = (choice,)
+        evidence["store_classification"] = {
+            "classification_id": stored["classification_id"],
+            "snapshot_hash": stored["snapshot_hash"],
+            "binding_method": stored["binding_method"],
+        }
+        records.append(
+            replace(
+                record,
+                intent=intent if isinstance(intent, str) else None,
+                scope=scope if isinstance(scope, str) else None,
+                confidence=(
+                    float(confidence)
+                    if isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
+                    else None
+                ),
+                probabilities=(
+                    dict(probabilities) if isinstance(probabilities, Mapping) else None
+                ),
+                labels=labels,
+                evidence=evidence,
+            )
+        )
+    return replace(bundle, records=tuple(records))
 
 # -- as-of features and temporal audit --------------------------------------
 

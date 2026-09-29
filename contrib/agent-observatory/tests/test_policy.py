@@ -30,6 +30,7 @@ from agent_observatory.policy import (
     CANDIDATE_KINDS,
     PolicyConfig,
     as_of_features,
+    bind_classifications_from_store,
     build_shadow_report,
     load_catalog,
     load_recommendation_bundle,
@@ -592,6 +593,77 @@ class PersistenceTest(unittest.TestCase):
         self.assertEqual(formula["decision"], "fallback")
         self.assertEqual(formula["fallback_candidate"], "formula:standard")
         self.assertEqual(formula["fallback_path"], "catalog_default")
+
+
+    def test_shadow_replaces_inline_labels_from_bound_classification(self):
+        key = ("city-a", "host-a", "codex", "session-1")
+        path = support.write_jsonl(
+            os.path.join(self.tmp.name, "shadow-session.jsonl"),
+            [support.make_record(event_id="e1", session_id=key[3])],
+        )
+        raw_bundle = {
+            "schema_version": "1.0",
+            "episodes": [
+                {
+                    "episode_id": "bound-episode",
+                    "session": list(key),
+                    "as_of": AS_OF,
+                    "observed_at": OBSERVED,
+                    "intent": "stale-inline-label",
+                    "confidence": 0.1,
+                },
+                {
+                    "episode_id": "missing-episode",
+                    "session": ["city-a", "host-a", "codex", "not-imported"],
+                    "as_of": AS_OF,
+                    "observed_at": OBSERVED,
+                    "intent": "must-not-be-guessed",
+                    "confidence": 0.99,
+                },
+            ],
+        }
+        with ObservatoryStore(self.db) as store:
+            store.import_jsonl(path)
+            snapshot = store.session_snapshot(key)
+            store.save_classification(
+                subject_kind="session",
+                snapshot_hash=snapshot,
+                taxonomy_version="2.0.0",
+                question_hash="q" * 64,
+                model_version="jev-1.13.0",
+                request_hash="r" * 64,
+                response_hash="a" * 64,
+                answers=[
+                    {
+                        "question_id": "primary_intent",
+                        "question_type": "choice",
+                        "answer": {
+                            "choice": "bugfix",
+                            "confidence": 0.95,
+                            "probabilities": {"bugfix": 0.95, "implementation": 0.05},
+                        },
+                    },
+                    {
+                        "question_id": "scope",
+                        "question_type": "choice",
+                        "answer": {"choice": "small", "confidence": 0.9},
+                    },
+                ],
+            )
+            bound = bind_classifications_from_store(
+                normalize_recommendation_bundle(raw_bundle), store
+            )
+        records = {item.episode_id: item for item in bound.records}
+        self.assertEqual(records["bound-episode"].intent, "bugfix")
+        self.assertEqual(records["bound-episode"].scope, "small")
+        self.assertEqual(records["bound-episode"].confidence, 0.95)
+        self.assertEqual(
+            records["bound-episode"].evidence["store_classification"]["binding_method"],
+            "snapshot",
+        )
+        self.assertIsNone(records["missing-episode"].intent)
+        self.assertIsNone(records["missing-episode"].confidence)
+        self.assertEqual(records["missing-episode"].evidence["store_classification"]["status"], "unmatched")
 
 
 class FixtureReplayTest(unittest.TestCase):

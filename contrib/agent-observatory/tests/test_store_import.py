@@ -206,6 +206,31 @@ class StoreImportTest(unittest.TestCase):
         with ObservatoryStore(self.db_path) as reopened:
             self.assertEqual(reopened.schema_version(), ObservatoryStore.SCHEMA_VERSION)
 
+    def test_session_role_comes_from_gc_session_name_not_message_text(self):
+        path = self._write(
+            "roles.jsonl",
+            [
+                support.make_record(
+                    event_id="gc-event",
+                    session_id="gateway-llm-dell--dsh-luna-1-pool",
+                    text="[city] role=assistant",
+                ),
+                support.make_record(
+                    event_id="ordinary-event",
+                    session_id="session-uuid",
+                    text="[city] gateway-llm/mayor",
+                ),
+            ],
+        )
+        with ObservatoryStore(self.db_path) as store:
+            store.import_jsonl(path)
+            roles = {
+                row["session_id"]: row["role"]
+                for row in store.conn.execute("SELECT session_id, role FROM sessions")
+            }
+        self.assertEqual(roles["gateway-llm-dell--dsh-luna-1-pool"], "dsh-luna pool")
+        self.assertIsNone(roles["session-uuid"])
+
     def test_events_are_ordered_chronologically_across_offsets_and_fractions(self):
         path = self._write(
             "time.jsonl",

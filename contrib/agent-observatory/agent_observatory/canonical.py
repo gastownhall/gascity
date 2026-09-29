@@ -80,3 +80,14 @@ def session_snapshot_hash(
     """
     canonical_events = sorted((event_id, payload_hash) for event_id, payload_hash in ordered_events)
     return canonical_hash(["session", list(session_identity), canonical_events])
+
+
+# Text-mode classification deliberately occupies a separate snapshot namespace
+# from metadata-mode classification. Keep this helper aligned with the existing
+# collector namespace so stores and migrations can resolve both scopes.
+SESSION_TEXT_SNAPSHOT_NAMESPACE = "session-text"
+
+
+def session_text_snapshot_hash(snapshot_hash: str) -> str:
+    """Return the text-mode namespace for a raw session snapshot hash."""
+    return canonical_hash([SESSION_TEXT_SNAPSHOT_NAMESPACE, snapshot_hash])
