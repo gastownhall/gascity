@@ -313,6 +313,11 @@ func (e agentScriptExecutor) runAction(action agentScriptAction, ctx agentScript
 			if len(args) >= 2 {
 				beadID = args[1]
 			}
+			// KNOWN GAP, not the documented direct-bd-invocation caveat: this
+			// is gc itself, running an --assignee write through runBDForBead
+			// -> raw bd, without ever calling checkBdAssigneeArgs. Fixing it
+			// means threading config.City into agentScriptContext; tracked
+			// as a follow-up rather than folded into this round: gc-rmvve6.
 			return nil, e.runBDForBead(beadID, args...)
 		case "exit":
 			code, err := agentScriptIntArg(name, arg)

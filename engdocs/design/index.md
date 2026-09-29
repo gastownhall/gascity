@@ -16,6 +16,7 @@ lives in the [Architecture](../architecture/index.md) section.
 
 | Document | Status | Notes |
 |---|---|---|
+| `assignee-routing-gate` | Proposed | Write-time rejection of unroutable assignees, plus the two doctor visibility gaps |
 | `machine-wide-supervisor-v0` | Accepted | Current supervisor direction |
 | `convoy-first-formulas-and-drain-v0` | Implemented | Convoy-first graph.v2 formula inputs and drain scatter semantics |
 | `api-ops-design` | Implemented | State-mutation API surface |
