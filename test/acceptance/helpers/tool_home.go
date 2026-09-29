@@ -86,13 +86,9 @@ func InstallBeadsTooling(env *Env, dir, bdPath, doltPath string) (string, error)
 			return "", fmt.Errorf("link dolt into %s: %w", dir, err)
 		}
 	}
-	script, err := toolhome.WrapperScript(env.ToolHome(), bdPath)
-	if err != nil {
-		return "", err
-	}
 	wrapper := filepath.Join(dir, "bd")
-	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil { //nolint:gosec // the wrapper must be executable
-		return "", fmt.Errorf("write bd tool-home wrapper: %w", err)
+	if err := toolhome.WriteWrapper(wrapper, env.ToolHome(), bdPath); err != nil {
+		return "", err
 	}
 	return wrapper, nil
 }

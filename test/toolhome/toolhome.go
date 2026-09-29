@@ -170,10 +170,15 @@ func WrapperScript(home, realBD string) (string, error) {
 
 // WriteWrapper writes WrapperScript(home, realBD) to path as an executable,
 // creating path's directory and home (bd refuses a HOME that does not exist).
+// It refuses a path that is realBD itself (directly or through a symlink):
+// that would replace the real binary with a script that execs itself.
 func WriteWrapper(path, home, realBD string) error {
 	script, err := WrapperScript(home, realBD)
 	if err != nil {
 		return err
+	}
+	if sameFile(path, realBD) {
+		return fmt.Errorf("bd tool-home wrapper: refusing to write over the real bd %s", realBD)
 	}
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		return fmt.Errorf("create bd tool home: %w", err)
@@ -209,6 +214,19 @@ func ScrubProcessEnv() error {
 		}
 	}
 	return nil
+}
+
+// sameFile reports whether a and b name the same file: the same cleaned
+// absolute path, or two existing paths that resolve to one inode.
+func sameFile(a, b string) bool {
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA == nil && errB == nil && absA == absB {
+		return true
+	}
+	infoA, errA := os.Stat(a)
+	infoB, errB := os.Stat(b)
+	return errA == nil && errB == nil && os.SameFile(infoA, infoB)
 }
 
 func shellQuote(s string) string {

@@ -135,3 +135,30 @@ func TestScrubProcessEnvLeavesOnlyExplicitValues(t *testing.T) {
 		t.Errorf("scrub touched HOME or an unrelated variable")
 	}
 }
+
+// The wrapper execs realBD; written over realBD it would exec itself forever
+// and the real binary would be gone. Refuse both the direct path and a symlink
+// that resolves to it.
+func TestWriteWrapperRefusesToOverwriteTheRealBd(t *testing.T) {
+	dir := t.TempDir()
+	realBD := filepath.Join(dir, "bd-real")
+	original := []byte("#!/bin/sh\necho real\n")
+	if err := os.WriteFile(realBD, original, 0o755); err != nil { //nolint:gosec // test stub must be executable
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "bd")
+	if err := os.Symlink(realBD, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{realBD, link, filepath.Join(dir, ".", "bd-real")} {
+		if err := WriteWrapper(target, filepath.Join(dir, "home"), realBD); err == nil {
+			t.Errorf("WriteWrapper(%s) over the real bd succeeded", target)
+		}
+	}
+	if got, err := os.ReadFile(realBD); err != nil || string(got) != string(original) {
+		t.Fatalf("real bd changed: %q, %v", got, err)
+	}
+	if err := WriteWrapper(filepath.Join(dir, "wrapped", "bd"), filepath.Join(dir, "home"), realBD); err != nil {
+		t.Fatalf("WriteWrapper to a separate path: %v", err)
+	}
+}
