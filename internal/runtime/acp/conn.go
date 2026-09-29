@@ -39,6 +39,20 @@ type sessionConn struct {
 	activityPublisher       *activityPublisher
 	activityPublisherClosed bool
 
+	// permissions holds the agent's unanswered session/request_permission
+	// requests, oldest first.
+	permissions []pendingPermission
+	// permissionNonce makes permission RequestIDs unique to this
+	// connection; set when the first request is held.
+	permissionNonce string
+	// permissionHeld, when non-nil, is closed the next time a permission
+	// request is held, waking waitNudgeable.
+	permissionHeld chan struct{}
+
+	// unsupportedSeen records agent request methods already logged as
+	// unsupported, so each is reported once per connection.
+	unsupportedSeen map[string]struct{}
+
 	// stdinMu serializes writes to the agent's stdin pipe. Separate from
 	// mu so that a slow/blocked stdin write cannot prevent dispatch (which
 	// needs mu) from routing responses, avoiding a circular pipe deadlock.
@@ -90,6 +104,13 @@ func (sc *sessionConn) readLoop(r io.Reader) {
 			continue
 		}
 
+		// Agent->client requests are answered before the typed decode,
+		// which cannot represent string ids.
+		if req, ok := parseAgentRequest([]byte(line)); ok {
+			sc.handleAgentRequest(req)
+			continue
+		}
+
 		var msg JSONRPCMessage
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
 			continue // skip non-JSON lines (e.g., startup banners)
@@ -114,9 +135,20 @@ func (sc *sessionConn) dispatch(msg JSONRPCMessage) {
 		sc.handleUpdate(msg)
 		return
 	}
+	if msg.ID == nil && msg.Method == methodCancelRequest {
+		sc.cancelRequestedPermission(msg.Params)
+		return
+	}
 
 	// Response (has ID, no method): route to waiter.
 	if msg.ID != nil && msg.Method == "" {
+		// The turn is over once its prompt is answered, so no permission the
+		// agent asked for during it can still be granted. Cancel them before
+		// the turn reads as idle. Only this loop adds permissions, so none
+		// can arrive in between.
+		if sc.isActivePrompt(*msg.ID) {
+			sc.cancelOutstandingPermissions()
+		}
 		sc.mu.Lock()
 		ch, ok := sc.pending[*msg.ID]
 		if ok {
@@ -238,10 +270,7 @@ func (sc *sessionConn) sendRequest(msg JSONRPCMessage) (chan JSONRPCMessage, err
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 
-	sc.stdinMu.Lock()
-	_, err = fmt.Fprintf(sc.stdin, "%s\n", data)
-	sc.stdinMu.Unlock()
-	if err != nil {
+	if err := sc.writeMessage(data); err != nil {
 		sc.mu.Lock()
 		delete(sc.pending, *msg.ID)
 		sc.mu.Unlock()
@@ -257,9 +286,16 @@ func (sc *sessionConn) sendNotification(msg JSONRPCMessage) error {
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
+	return sc.writeMessage(data)
+}
+
+// writeMessage writes one encoded JSON-RPC message, newline-terminated, to
+// the agent's stdin. Every stdin write goes through here; stdinMu keeps
+// concurrent writers from interleaving lines.
+func (sc *sessionConn) writeMessage(data []byte) error {
 	sc.stdinMu.Lock()
-	_, err = fmt.Fprintf(sc.stdin, "%s\n", data)
-	sc.stdinMu.Unlock()
+	defer sc.stdinMu.Unlock()
+	_, err := fmt.Fprintf(sc.stdin, "%s\n", data)
 	return err
 }
 
@@ -270,9 +306,11 @@ func (sc *sessionConn) setActivePrompt(id int64) {
 	sc.mu.Unlock()
 }
 
-// drainPending clears busy state and closes all pending response channels.
-// Safe to call multiple times — closed channels are deleted from the map.
+// drainPending cancels outstanding permission requests, clears busy state
+// and closes all pending response channels. Safe to call multiple times —
+// closed channels are deleted from the map.
 func (sc *sessionConn) drainPending() {
+	sc.cancelOutstandingPermissions()
 	sc.mu.Lock()
 	sc.markIdleLocked()
 	for id, ch := range sc.pending {
@@ -288,6 +326,13 @@ func (sc *sessionConn) clearActivePrompt(id int64) {
 		sc.markIdleLocked()
 	}
 	sc.mu.Unlock()
+}
+
+// isActivePrompt reports whether id is the in-flight session/prompt.
+func (sc *sessionConn) isActivePrompt(id int64) bool {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	return sc.activePromptID != 0 && id == sc.activePromptID
 }
 
 // isBusy reports whether a prompt response is pending.

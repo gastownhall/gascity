@@ -235,8 +235,10 @@ func (a *agent) requestPermission(t *turn) permissionDecision {
 	case msg := <-reply:
 		decision, optionID = parsePermissionReply(msg)
 	case <-expired:
-		a.out.forget(id)
-		a.w.notify("$/cancel_request", map[string]any{"requestId": id})
+		if !a.opts.permissionAbandon {
+			a.out.forget(id)
+			a.w.notify("$/cancel_request", map[string]any{"requestId": id})
+		}
 		optionID = "timeout"
 	case <-t.ctx.Done():
 		a.out.forget(id)
