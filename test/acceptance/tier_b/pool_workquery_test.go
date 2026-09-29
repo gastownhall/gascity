@@ -78,9 +78,8 @@ func bdRun(t *testing.T, bdPath, dir string, args ...string) string {
 
 func bdRunWithEnv(t *testing.T, bdPath, dir string, extraEnv map[string]string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command(bdPath, args...)
+	cmd := helpers.ToolCommand(t, bdPath, args...)
 	cmd.Dir = dir
-	cmd.Env = os.Environ()
 	for k, v := range extraEnv {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}

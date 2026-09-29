@@ -125,7 +125,7 @@ func requireProxiedTooling(t *testing.T) (string, string) {
 	if bdPath == "" {
 		helpers.MissingTooling(t, "bd is not available; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0")
 	}
-	out, err := exec.Command(bdPath, "init", "--help").CombinedOutput() //nolint:gosec // resolved test binary
+	out, err := helpers.ToolCommand(t, bdPath, "init", "--help").CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "--proxied-server") {
 		helpers.MissingTooling(t, "bd at %s has no proxied-server support; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0", bdPath)
 	}
@@ -150,22 +150,24 @@ func requireProxiedTooling(t *testing.T) (string, string) {
 // proxiedNativeLaneEnv.
 func proxiedEnv(t *testing.T, bdPath, doltPath string) *helpers.Env {
 	t.Helper()
+	env, _ := proxiedEnvWithBD(t, bdPath, doltPath)
+	return env
+}
+
+// proxiedEnvWithBD is proxiedEnv plus the bd it put on PATH: the tool-home
+// wrapper around bdPath (helpers.LinkBeadsTooling), which is the bd anything
+// standing in for BD_BIN must exec so the operator's HOME never reaches bd.
+func proxiedEnvWithBD(t *testing.T, bdPath, doltPath string) (*helpers.Env, string) {
+	t.Helper()
 	linkDir := filepath.Join(helpers.TempDir(t), "bin")
-	if err := os.MkdirAll(linkDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for name, target := range map[string]string{"bd": bdPath, "dolt": doltPath} {
-		if err := os.Symlink(target, filepath.Join(linkDir, name)); err != nil {
-			t.Fatal(err)
-		}
-	}
+	wrappedBD := helpers.LinkBeadsTooling(t, testEnv, linkDir, bdPath, doltPath)
 	env := testEnv.Clone()
 	entries := filepath.SplitList(env.Get("PATH"))
 	path := append([]string{entries[0], linkDir}, entries[1:]...)
 	return env.With("PATH", strings.Join(path, string(os.PathListSeparator))).
 		With("GC_BEADS", "bd").
 		Without("GC_DOLT").
-		Without(proxiedNativeFlagEnv)
+		Without(proxiedNativeFlagEnv), wrappedBD
 }
 
 // proxiedNativeFlagEnv is PR2's rollout flag: native reads over bd's proxy,
@@ -195,8 +197,9 @@ func proxiedNativeLaneEnv(env *helpers.Env) *helpers.Env {
 // added.
 func proxiedEnvRecordingBD(t *testing.T, bdPath, doltPath string) (*helpers.Env, *helpers.RecordingBD) {
 	t.Helper()
-	recorder := helpers.NewRecordingBD(t, bdPath)
-	return proxiedEnv(t, bdPath, doltPath).With("BD_BIN", recorder.Path), recorder
+	env, wrappedBD := proxiedEnvWithBD(t, bdPath, doltPath)
+	recorder := helpers.NewRecordingBD(t, wrappedBD)
+	return env.With("BD_BIN", recorder.Path), recorder
 }
 
 // doltProcessesUnder returns the command lines of every live bd proxy or dolt
@@ -596,7 +599,7 @@ func makeCityLookLegacyManaged(t *testing.T, env *helpers.Env, bdPath, cityRoot 
 
 	stop := exec.Command(bdPath, "dolt", "stop") //nolint:gosec // resolved test binary
 	stop.Dir = cityRoot
-	stop.Env = env.List()
+	stop.Env = env.ToolList()
 	if out, err := stop.CombinedOutput(); err != nil {
 		t.Fatalf("bd dolt stop on the fixture city: %v\n%s", err, out)
 	}
@@ -962,7 +965,7 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		initCmd := exec.Command(bdPath, "init", "--proxied-server", "--proxied-server-idle-timeout", "0", //nolint:gosec // resolved test binary
 			"-p", "adopt", "--quiet", "--skip-hooks", "--skip-agents", "--non-interactive", adopted)
 		initCmd.Dir = adopted
-		initCmd.Env = env.List()
+		initCmd.Env = env.ToolList()
 		if out, err := initCmd.CombinedOutput(); err != nil {
 			t.Fatalf("bd init --proxied-server: %v\n%s", err, out)
 		}
@@ -972,7 +975,7 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		t.Cleanup(func() {
 			stop := exec.Command(bdPath, "dolt", "stop") //nolint:gosec // resolved test binary
 			stop.Dir = adopted
-			stop.Env = env.List()
+			stop.Env = env.ToolList()
 			stop.Run() //nolint:errcheck // best effort
 		})
 

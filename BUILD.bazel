@@ -409,6 +409,7 @@ filegroup(
         "//test/packlint:bazel_repo_srcs",
         "//test/qualification:bazel_repo_srcs",
         "//test/tmuxtest:bazel_repo_srcs",
+        "//test/toolhome:bazel_repo_srcs",
         "//test/workflows:bazel_repo_srcs",
         ":go.mod",
         ":Makefile",

@@ -41,6 +41,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
+	"github.com/gastownhall/gascity/test/toolhome"
 )
 
 // gcBinary is the path to the built gc binary, set by TestMain.
@@ -95,6 +96,14 @@ var tmuxSocketAliveSentinel *os.File
 func TestMain(m *testing.M) {
 	if os.Getenv("GC_INTEGRATION_SUPERVISOR_STOP_HELPER") == "1" {
 		select {}
+	}
+
+	// Every env this suite builds starts from os.Environ(); drop the shell's
+	// XDG base directories and BEADS_*/BD_* first so only explicit values reach
+	// bd, and pin bd's shared-server mode off. gc keeps the real HOME (see
+	// pinRealHomeEnv); bd is re-homed by the wrapper around realBDBinary below.
+	if err := toolhome.ScrubProcessEnv(); err != nil {
+		panic("integration: scrubbing host bd env: " + err.Error())
 	}
 
 	subprocess := os.Getenv("GC_SESSION") == "subprocess"
@@ -211,6 +220,16 @@ func TestMain(m *testing.M) {
 			panic("integration: building pinned bd binary: " + err.Error())
 		}
 	}
+	// Every real bd this suite runs — directly, through the file-store shim, or
+	// forked by gc — goes through this wrapper, which re-homes bd under the run's
+	// temp dir: gc runs with the real HOME, and bd must never resolve the
+	// operator's ~/.beads (a user-level dolt.shared-server: true starts the
+	// host-wide shared Dolt server).
+	wrappedRealBD := filepath.Join(tmpDir, "bd-real", "bd")
+	if err := toolhome.WriteWrapper(wrappedRealBD, filepath.Join(tmpDir, "bd-tool-home"), realBDBinary); err != nil {
+		panic("integration: wrapping real bd: " + err.Error())
+	}
+	realBDBinary = wrappedRealBD
 	bdBinary = filepath.Join(integrationToolBinDir, "bd")
 	shimCmd := exec.Command("go", "build", "-o", bdBinary, "./test/integration/filebdshim")
 	shimCmd.Dir = findModuleRoot()

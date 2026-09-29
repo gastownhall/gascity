@@ -3,6 +3,8 @@
 package beads_test
 
 import (
+	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/test/toolhome"
 )
 
 // TestBdStoreConditionalWriterConformance is the S2-T12 integration row: the
@@ -169,11 +172,17 @@ func newConditionalIntegrationBdStore(t *testing.T) (*beads.BdStore, string) {
 // this row write a tst database into a live server or leave a dolt sql-server
 // running in the TempDir. (CI's packages shard runs under env -i and is safe
 // either way; this guards local runs.)
+//
+// bd also runs re-homed (toolhome.Environ): it resolves user-level config and
+// state from HOME, and a developer's `dolt.shared-server: true` there would
+// route this row into their host-wide shared Dolt server.
 func newConditionalIntegrationRunner(scopeDir string) beads.CommandRunner {
-	return beads.ExecCommandRunnerWithEnv(map[string]string{
-		"BEADS_DIR":              filepath.Join(scopeDir, ".beads"),
-		"BEADS_DOLT_AUTO_START":  "0",
-		"BEADS_DOLT_SERVER_HOST": "",
-		"BEADS_DOLT_SERVER_PORT": "",
-	})
+	env := map[string]string{}
+	for _, kv := range toolhome.Environ(os.Environ(), filepath.Join(filepath.Dir(scopeDir), "tool-home")) {
+		k, v, _ := strings.Cut(kv, "=")
+		env[k] = v
+	}
+	env["BEADS_DIR"] = filepath.Join(scopeDir, ".beads")
+	env["BEADS_DOLT_AUTO_START"] = "0"
+	return beads.ExecCommandRunnerWithExactEnvContext(context.Background(), env)
 }
