@@ -14,7 +14,13 @@ except ImportError:  # pragma: no cover
 
 from agent_observatory import load_taxonomy
 from agent_observatory.errors import ContractError, LabelConflictError, ResponseError
-from agent_observatory.jev import build_request, import_response, parse_json_document, persist_request
+from agent_observatory.jev import (
+    build_request,
+    import_response,
+    parse_json_document,
+    persist_request,
+    validate_response,
+)
 from agent_observatory.store import ObservatoryStore
 
 
@@ -150,6 +156,32 @@ class JevResponseTest(unittest.TestCase):
             import_response(self.store, second, request_hash=self.request.request_hash)
         self.assertEqual(self.store.classification_count(), 0)
 
+    def _validate_choice_probabilities(self, probabilities):
+        question_id = "custom_choice"
+        options = list(probabilities)
+        request_body = {
+            "model": self.request.body["model"],
+            "questions": {
+                question_id: {
+                    "type": "choice",
+                    "criteria": {option: option for option in options},
+                }
+            },
+        }
+        response = {
+            "model": request_body["model"],
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+            "answers": {
+                question_id: {
+                    "type": "choice",
+                    "choice": options[0],
+                    "confidence": 0.5,
+                    "probabilities": probabilities,
+                }
+            },
+        }
+        return validate_response(response, request_body)
+
     def test_probabilities_must_sum_to_one(self):
         broken = copy.deepcopy(self.valid)
         probabilities = broken["answers"]["primary_intent"]["probabilities"]
@@ -157,6 +189,52 @@ class JevResponseTest(unittest.TestCase):
             probabilities[option] = 0.1
         with self.assertRaises(ResponseError):
             import_response(self.store, broken, request_hash=self.request.request_hash)
+
+    def test_nine_option_probabilities_allow_a_rounded_096_total(self):
+        probabilities = {f"option_{index}": 0.11 for index in range(8)}
+        probabilities["option_8"] = 0.08
+
+        answers = self._validate_choice_probabilities(probabilities)
+
+        self.assertAlmostEqual(
+            sum(answers[0]["answer"]["probabilities"].values()), 0.96
+        )
+
+    def test_nine_option_totals_of_09_and_11_are_rejected(self):
+        for total in (0.9, 1.1):
+            with self.subTest(total=total):
+                probabilities = {f"option_{index}": 0.0 for index in range(9)}
+                probabilities["option_0"] = min(total, 1.0)
+                probabilities["option_1"] = max(total - 1.0, 0.0)
+                with self.assertRaisesRegex(ResponseError, "probabilities sum"):
+                    self._validate_choice_probabilities(probabilities)
+
+    def test_probability_greater_than_one_is_rejected(self):
+        probabilities = {"option_0": 1.01, "option_1": 0.0}
+
+        with self.assertRaisesRegex(ResponseError, "probability for"):
+            self._validate_choice_probabilities(probabilities)
+
+    def test_probability_sum_band_edges_scale_with_option_count(self):
+        for option_count in (2, 9):
+            rounding_band = 0.005 * option_count
+            for total in (1.0 - rounding_band, 1.0 + rounding_band):
+                with self.subTest(option_count=option_count, total=total):
+                    probabilities = {
+                        f"option_{index}": total / option_count
+                        for index in range(option_count)
+                    }
+                    self._validate_choice_probabilities(probabilities)
+
+    def test_probability_sum_tolerance_is_capped_for_large_questions(self):
+        option_count = 11
+        probabilities = {
+            f"option_{index}": 1.051 / option_count
+            for index in range(option_count)
+        }
+
+        with self.assertRaisesRegex(ResponseError, "probabilities sum"):
+            self._validate_choice_probabilities(probabilities)
 
     def test_probabilities_must_cover_every_option(self):
         broken = copy.deepcopy(self.valid)

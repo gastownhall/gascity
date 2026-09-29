@@ -309,8 +309,14 @@ API reference:
 - Question ids and lowercase types must match exactly (no missing/extra answers).
 - `choice` answers: the `choice` field must be one of the question's criteria
   keys; `probabilities` must cover every criterion with finite values in `[0,1]`
-  summing to ~1; `confidence` finite in `[0,1]`. The previously invented
-  `value` field is not accepted.
+  and satisfy `abs(sum(probabilities) - 1.0) <= min(0.005 * option_count + 1e-9,
+  0.05)`. The per-option allowance covers two-decimal rounding, the `1e-9`
+  epsilon preserves inclusive band edges under binary floating-point arithmetic,
+  and the 0.05 (five percentage-point) cap prevents overly broad acceptance for
+  large questions. For nine options, the tolerance is 0.045000001, so totals of
+  0.9 and 1.1 remain rejected. Values are preserved, not renormalized.
+  `confidence` must be finite in `[0,1]`. The previously invented `value` field
+  is not accepted.
 - `noul` answers: exactly one finite `noul` probability in `[0,1]` and **no
   confidence field**.
 - Each answer object accepts only its wire keys (`type` plus `choice`/
