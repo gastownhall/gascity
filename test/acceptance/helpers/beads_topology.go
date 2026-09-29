@@ -7,10 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/mod/semver"
 )
 
 // The init topology matrix.
@@ -610,6 +613,29 @@ func RequireTopologyTooling(t *testing.T) (bdPath, doltPath string) {
 		MissingTooling(t, "dolt is not installed")
 	}
 	return bdPath, doltPath
+}
+
+var bdVersionPattern = regexp.MustCompile(`bd version (\d+\.\d+\.\d+[0-9A-Za-z.+-]*)`)
+
+// RequireBDAtLeast skips the test, cheaply and before any fixture is built,
+// when bdPath reports a version below minVersion (a semver string such as
+// "v1.3.1-0", which admits that release's candidates). feature names what
+// the older bd lacks, for the skip message.
+func RequireBDAtLeast(t *testing.T, bdPath, minVersion, feature string) {
+	t.Helper()
+	out, err := exec.Command(bdPath, "version").CombinedOutput() //nolint:gosec // resolved test binary
+	if err != nil {
+		t.Fatalf("%s version: %v\n%s", bdPath, err, out)
+	}
+	m := bdVersionPattern.FindStringSubmatch(string(out))
+	if m == nil {
+		t.Fatalf("cannot parse a bd version from %q", out)
+	}
+	if semver.Compare("v"+m[1], minVersion) < 0 {
+		// A skip, not MissingTooling: an older bd is a supported pin, not
+		// absent tooling, and must not fail a lane that requires tooling.
+		t.Skipf("bd %s at %s predates %s (needs %s); set GC_ACCEPTANCE_BD_BIN to a newer bd", m[1], bdPath, feature, minVersion)
+	}
 }
 
 // LegacyGCBinary returns the pre-journal gc binary, or "" when unset.

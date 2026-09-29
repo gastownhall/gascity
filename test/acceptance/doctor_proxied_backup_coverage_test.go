@@ -26,6 +26,10 @@ import (
 
 func TestDoctorProxiedBackupCoverageLeavesAStoppedCityStopped(t *testing.T) {
 	bdPath, doltPath := helpers.RequireTopologyTooling(t)
+	// Skip before building a city when bd predates proxied backup (beads
+	// hotfix/1.3.1; its release candidates count): the positive control needs
+	// `bd backup status` to be the thing that starts a stopped store.
+	helpers.RequireBDAtLeast(t, bdPath, "v1.3.1-0", "proxied `bd backup`")
 	var topo helpers.BeadsTopology
 	for _, candidate := range helpers.BeadsTopologies() {
 		if candidate.Name == "M1-proxied-local" {
