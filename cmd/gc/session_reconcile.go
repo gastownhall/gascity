@@ -1070,11 +1070,6 @@ func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, observed bool, 
 	if !applied {
 		return nil, nil
 	}
-	// S19 Stage 3 shadow: record the legacy compared-key writes this heal ACTUALLY
-	// applied (no-op unless the shadow harness is enabled). Colocated with the
-	// write so a pure builder (healStatePatchWithRollbackInfo) invoked only for
-	// inspection never records a write that never happened.
-	recordLegacyCompareWrites(info.ID, "healStateWithRollback", batch)
 	return batch, nil
 }
 

@@ -214,7 +214,28 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			}
 			if sn := resolveNamedSessionBeadName(input.SessionBeads, ns); sn != "" {
 				bead := findBeadBySessionName(input.SessionBeads, sn)
-				if bead != nil && !bead.DependencyOnly && !bead.Drained && bead.State != "closed" {
+				// Drained override. routed-demand wakes even a drained bead
+				// (ga-j4lqwa.1): it is real demand for a canonical-singleton
+				// holder, the same override strength already given to
+				// attached/pending above. named-demand stays gated because
+				// NamedSessionDemand (namedWorkReady) does not filter blocked
+				// work; exempting it would re-wake sessions that drain-acked on
+				// blocked work, the loop the reset-pending guard exists to
+				// prevent. Ready assignee-direct work needs no exemption: the
+				// assigned-work pass already wakes a drained bead, filtering
+				// blocked in_progress work through workBeadHasAwakeDemand.
+				// work-query stays gated: it lacks NamedSessionRoutedDemand's
+				// deliberate UsesCanonicalSingletonPoolIdentity() scoping, so
+				// exempting it would risk a herd-wake on multi-instance pools.
+				// Finally, when a drained holder has both signals, named-demand
+				// from blocked work wins the reason switch above; promote it to
+				// routed-demand so the live routed signal is not masked and the
+				// ga-j4lqwa.1 strand cannot survive in the combined case.
+				if bead != nil && bead.Drained && reason == "named-demand" && input.NamedSessionRoutedDemand[ns.Identity] {
+					reason = "routed-demand"
+				}
+				drainedExempt := reason == "routed-demand"
+				if bead != nil && !bead.DependencyOnly && (!bead.Drained || drainedExempt) && bead.State != "closed" {
 					desired[sn] = reason
 				}
 			} else {

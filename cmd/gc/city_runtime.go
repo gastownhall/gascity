@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -161,6 +162,11 @@ type CityRuntime struct {
 	poolDeathHandlers map[string]poolDeathInfo
 	suspendedNames    map[string]bool
 
+	// standaloneCityStore and standaloneRigStores are the runtime's own store
+	// handles when there is no controller state (API disabled). A config reload
+	// swaps them while background lanes read them, so both are written under
+	// serviceStateMu and read through cityBeadStore/rigBeadStores. Only the
+	// controller goroutine writes them.
 	standaloneCityStore beads.Store // non-nil when API disabled; for chat auto-suspend
 	standaloneRigStores map[string]beads.Store
 
@@ -537,12 +543,13 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// Open standalone city bead store when controllerState is unavailable.
 	// When controllerState is present, it manages the cached city store.
 	if cr.cs == nil && cityRoot != "" {
+		cityStore := cr.standaloneCityStore
 		if store, err := openCityStoreAt(cityRoot); err != nil {
 			fmt.Fprintf(cr.stderr, "%s: city bead store: %v (auto-suspend disabled)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		} else {
-			cr.standaloneCityStore = store
+			cityStore = store
 		}
-		cr.standaloneRigStores = buildStandaloneRigStores(cr.cfg, cr.cityPath, cr.stderr)
+		cr.setStandaloneStores(cityStore, buildStandaloneRigStores(cr.cfg, cr.cityPath, cr.stderr))
 	}
 
 	// Record bead store health metric.
@@ -1873,10 +1880,7 @@ func (cr *CityRuntime) handleReloadRequest(req *reloadRequest) {
 			),
 		})
 	}
-	select {
-	case cr.pokeCh <- struct{}{}:
-	default:
-	}
+	legacyEnqueue(cr.pokeCh, nil, reconcilekey.Allocator()) // config reload: allocator
 	req.acceptedCh <- reloadControlReply{
 		Outcome: reloadOutcomeAccepted,
 		Message: "Reload requested.",
@@ -1938,6 +1942,38 @@ func (cr *CityRuntime) reloadConfig(
 	cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, nil, reloadSourceWatch)
 }
 
+// errConfigTransactionInProgress reports a reload deferred because an API
+// config transaction (pack import add/remove, rig provisioning) is mid-write.
+var errConfigTransactionInProgress = errors.New("config mutation in progress; reload retry scheduled")
+
+// loadReloadCandidate reads one candidate config generation. With a
+// controller state it reads only while no config transaction is in flight, so
+// a multi-file write is never observed half-done; it does not wait, so a slow
+// import cannot stall the reconciler.
+func (cr *CityRuntime) loadReloadCandidate(configName, cityRoot string) (*reloadResult, error) {
+	if cr.cs == nil {
+		return tryReloadConfig(cr.tomlPath, configName, cityRoot)
+	}
+	var result *reloadResult
+	var err error
+	if !cr.cs.tryWithConfigTransactionIdle(func() {
+		result, err = tryReloadConfig(cr.tomlPath, configName, cityRoot)
+	}) {
+		return nil, errConfigTransactionInProgress
+	}
+	return result, err
+}
+
+// markConfigReloadPending leaves a config reload pending for the next tick.
+func (cr *CityRuntime) markConfigReloadPending() {
+	cr.reloadMu.Lock()
+	if cr.configDirty == nil {
+		cr.configDirty = &atomic.Bool{}
+	}
+	cr.configDirty.Store(true)
+	cr.reloadMu.Unlock()
+}
+
 func (cr *CityRuntime) applyStartupConfigReload(
 	ctx context.Context,
 	dirty *atomic.Bool,
@@ -1973,8 +2009,14 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if configName == "" {
 		configName = cr.cityName
 	}
-	result, err := tryReloadConfig(cr.tomlPath, configName, cityRoot)
+	result, err := cr.loadReloadCandidate(configName, cityRoot)
 	if err != nil {
+		if errors.Is(err, errConfigTransactionInProgress) {
+			// Keep the reload pending without poking: the transaction pokes when
+			// it publishes, and an immediate retry would only hit the same held
+			// fence and spin reconciliation ticks.
+			cr.markConfigReloadPending()
+		}
 		if result != nil {
 			for _, warning := range result.Warnings {
 				appendWarning(warning)
@@ -1998,6 +2040,26 @@ func (cr *CityRuntime) reloadConfigTraced(
 	for _, warning := range result.Warnings {
 		appendWarning(warning)
 	}
+	oldRevision := cr.configRev
+	// rejectSuperseded keeps the current runtime generation when the
+	// controller state rejects this candidate because a newer config (an API
+	// mutation or an on-disk edit) won while it was being prepared. The retry
+	// stays pending so the loop converges on the winner.
+	rejectSuperseded := func(phase string) reloadControlReply {
+		cr.requestConfigReloadRetry()
+		err := fmt.Errorf("config reload revision %s was superseded %s; retry scheduled", shortRev(result.Revision), phase)
+		fmt.Fprintf(cr.stderr, "%s: %v (keeping current runtime config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
+		if trace != nil {
+			trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+		}
+		return reloadControlReply{
+			Outcome:  reloadOutcomeFailed,
+			Error:    err.Error(),
+			Revision: result.Revision,
+			Warnings: warnings,
+		}
+	}
 	if cr.configRev != "" && result.Revision == cr.configRev {
 		ordersChanged, orderSummary, orderErr := cr.rescanOrderDispatcher(ctx, cityRoot, result.Cfg, "gc reload: order scan", time.Now())
 		if orderErr != nil {
@@ -2015,7 +2077,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 			}
 		}
 		if cr.cs != nil && cr.cs.storeMetadataChanged(result.Cfg) {
-			cr.cs.update(result.Cfg, cr.sp)
+			if !cr.cs.updateFromRuntime(result.Cfg, cr.sp, result.Revision) {
+				return rejectSuperseded("during same-revision metadata publication")
+			}
 			message := fmt.Sprintf("Config reloaded: bead store metadata changed (rev %s)", shortRev(result.Revision))
 			if ordersChanged {
 				message = fmt.Sprintf("Config reloaded: bead store metadata changed; orders reloaded: %s (rev %s)", orderSummary, shortRev(result.Revision))
@@ -2060,7 +2124,6 @@ func (cr *CityRuntime) reloadConfigTraced(
 
 	oldAgentCount := len(cr.cfg.Agents)
 	oldRigCount := len(cr.cfg.Rigs)
-	oldRevision := cr.configRev
 	nextCfg := result.Cfg
 	applyRuntimeCityIdentity(nextCfg, cr.cityName)
 
@@ -2087,6 +2150,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	nextSp := cr.sp
 	nextDops := cr.dops
 	providerChanged := false
+	providerSwapSummary := ""
 
 	// Detect session provider change. A pack-declared runtime binds its
 	// command into the provider at construction time, so a changed (or
@@ -2166,6 +2230,12 @@ func (cr *CityRuntime) reloadConfigTraced(
 		appendWarning(fmt.Sprintf("config reload: pruning legacy %s scripts: %v", scope, err))
 	})
 
+	// A provider swap stops every running session, which cannot be undone:
+	// refuse a candidate that is already stale before doing it.
+	if providerChanged && cr.cs != nil && !cr.cs.runtimeUpdateWouldBeAccepted(nextCfg, result.Revision) {
+		return rejectSuperseded("before provider effects")
+	}
+
 	if providerChanged {
 		running, lErr := cr.sp.ListRunning("")
 		if lErr != nil {
@@ -2184,7 +2254,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 				Warnings: warnings,
 			}
 		}
-		providerSwapSummary := fmt.Sprintf("%s → %s", displayProviderName(*lastProviderName), displayProviderName(pendingProviderName))
+		providerSwapSummary = fmt.Sprintf("%s → %s", displayProviderName(*lastProviderName), displayProviderName(pendingProviderName))
 		if pendingProviderName == *lastProviderName {
 			providerSwapSummary = fmt.Sprintf("%s runtime declaration changed", displayProviderName(pendingProviderName))
 		}
@@ -2193,6 +2263,33 @@ func (cr *CityRuntime) reloadConfigTraced(
 				providerSwapSummary, len(running))
 			gracefulStopAll(running, cr.sp, nextCfg.Daemon.ShutdownTimeoutDuration(), cr.rec, cr.cfg, cr.sessionsBeadStore(), cr.stdout, cr.stderr)
 		}
+	}
+
+	// Drain the outgoing dispatcher before publication can swap the stores
+	// its in-flight dispatchOne goroutines persist tracking-bead outcomes
+	// against. Reload runs on the same goroutine as tick, so no concurrent
+	// dispatch can create a new in-flight signal on this dispatcher while
+	// drain observes it. The reload budget is capped at
+	// reloadOrderDrainTimeout so a wedged exec order cannot stall the tick
+	// loop; a timed-out dispatcher that is replaced below is retained and
+	// drained again during shutdown. Deriving from ctx (the tick ctx) lets a
+	// shutdown racing with reload short-circuit the drain instead of waiting
+	// the full 1s.
+	outgoingOD := cr.od
+	outgoingODDrained := true
+	if outgoingOD != nil {
+		drainCtx, drainCancel := context.WithTimeout(ctx, reloadOrderDrainTimeout)
+		outgoingODDrained = outgoingOD.drain(drainCtx)
+		drainCancel()
+	}
+
+	// Publish to the controller state first and to the loop only if it
+	// accepts, so the tick loop never runs a config the API rejected. On
+	// rejection the outgoing dispatcher stays active (drain does not stop it).
+	if !cr.publishRuntimeConfig(nextCfg, nextSp, nextDops, result.Revision) {
+		return rejectSuperseded("during runtime publication")
+	}
+	if providerChanged {
 		cr.rec.Record(events.Event{
 			Type:    events.ProviderSwapped,
 			Actor:   "gc",
@@ -2235,20 +2332,8 @@ func (cr *CityRuntime) reloadConfigTraced(
 
 	cr.wg = newWispGCForConfig(nextCfg)
 
-	// Drain the outgoing dispatcher before replacing it so in-flight
-	// dispatchOne goroutines persist their tracking-bead outcomes against
-	// the store they were scheduled against. Reload runs on the same
-	// goroutine as tick, so no concurrent dispatch can create a new
-	// in-flight signal on this dispatcher while drain observes it. The
-	// reload budget is capped at reloadOrderDrainTimeout so a wedged exec
-	// order cannot stall the tick loop; timed-out dispatchers are retained
-	// and drained again during shutdown.
-	// Deriving from ctx (the tick ctx) lets a shutdown racing with reload
-	// short-circuit the drain instead of waiting the full 1s.
-	if cr.od != nil {
-		drainCtx, drainCancel := context.WithTimeout(ctx, reloadOrderDrainTimeout)
-		cr.drainOutgoingOrderDispatcher(drainCtx, cr.od)
-		drainCancel()
+	if outgoingOD != nil && !outgoingODDrained {
+		cr.retiredOrderDispatchers = append(cr.retiredOrderDispatchers, outgoingOD)
 	}
 	nextOD, orderSnapshot := buildOrderDispatcherWithSnapshot(cr.storageRoutes, cityRoot, nextCfg, cr.rec, cr.stderr, "gc reload: order scan")
 	orderSummary := orderSetChangeSummary(cr.orderSet, orderSnapshot.Orders)
@@ -2260,13 +2345,6 @@ func (cr *CityRuntime) reloadConfigTraced(
 		fmt.Fprintf(cr.stderr, "%s: orders reloaded: %s\n", cr.logPrefix, orderSummary) //nolint:errcheck // best-effort stderr
 	}
 
-	cr.serviceStateMu.Lock()
-	cr.cfg = nextCfg
-	cr.sp = nextSp
-	cr.dops = nextDops
-	cr.serviceStateMu.Unlock()
-	cr.demandSnapshot = nil
-
 	// Re-point the session-event pump at the new provider's stream (or
 	// deactivate it when the new provider has none). Nil until run() wires
 	// it — startup one-shot reloads happen before the pump exists.
@@ -2274,9 +2352,6 @@ func (cr *CityRuntime) reloadConfigTraced(
 		cr.sessionEvents.restart(nextSp)
 	}
 
-	if cr.cs != nil {
-		cr.cs.updateFromRuntime(nextCfg, nextSp, result.Revision)
-	}
 	if cr.svc != nil {
 		if err := cr.svc.Reload(); err != nil {
 			appendWarning(fmt.Sprintf("service reload: %v", err))
@@ -2286,14 +2361,16 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if cr.cs == nil {
 		// Refresh standalone city store for auto-suspend.
 		// Also recovers from nil → non-nil when bd becomes available after startup.
+		// The stores are opened before the swap so readers never wait on an open.
+		cityStore := cr.standaloneCityStore
 		if s, err := openCityStoreAt(cityRoot); err != nil {
-			if cr.standaloneCityStore != nil {
+			if cityStore != nil {
 				appendWarning(fmt.Sprintf("city bead store reload: %v", err))
 			}
 		} else {
-			cr.standaloneCityStore = s
+			cityStore = s
 		}
-		cr.standaloneRigStores = buildStandaloneRigStores(nextCfg, cr.cityPath, cr.stderr)
+		cr.setStandaloneStores(cityStore, buildStandaloneRigStores(nextCfg, cr.cityPath, cr.stderr))
 	}
 
 	// Rebuild convergence scopes against the reloaded config so rigs added,
@@ -2625,16 +2702,8 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		poolDesired = make(map[string]int)
 	}
 	mergeNamedSessionDemand(poolDesired, result.NamedSessionDemand, cr.cfg)
-	for tmpl, count := range poolDesired {
-		if count > 0 {
-			fmt.Fprintf(cr.stderr, "poolDesired: %s = %d\n", tmpl, count) //nolint:errcheck
-		}
-	}
-	for tmpl, count := range result.ScaleCheckCounts {
-		if count > 0 {
-			fmt.Fprintf(cr.stderr, "scaleCheck: %s = %d\n", tmpl, count) //nolint:errcheck
-		}
-	}
+	logPoolCounts(cr.stderr, "poolDesired", poolDesired)
+	logPoolCounts(cr.stderr, "scaleCheck", result.ScaleCheckCounts)
 	// #3288: defer the undesired-pool-session sweep on the boot tick. The sweep
 	// probes each sweepable candidate against the city store + N rig stores × 2
 	// statuses × identifiers, each a `bd` read (listWispsTier fires two
@@ -3100,10 +3169,8 @@ func (cr *CityRuntime) requestDeferredDrainFollowUpTick() {
 	if !cr.sessionDrains.consumeFollowUpTick() {
 		return
 	}
-	select {
-	case cr.pokeCh <- struct{}{}:
-	default:
-	}
+	// Key-less: the follow-up covers every deferred drain at once.
+	legacyEnqueue(cr.pokeCh, nil, reconcilekey.Allocator())
 }
 
 func (cr *CityRuntime) ensureAsyncStartLimiter() *asyncStartLimiter {
@@ -3122,10 +3189,9 @@ func (cr *CityRuntime) requestAsyncStartFollowUpTick() {
 	}
 	// Async completion can commit, rollback, or reject stale work; each case
 	// should prompt one cheap reconciliation pass to observe the new reality.
-	select {
-	case cr.pokeCh <- struct{}{}:
-	default:
-	}
+	// Key-less: the completion callback does not carry the session, and a
+	// start also changes supply, which the allocator must re-plan.
+	legacyEnqueue(cr.pokeCh, nil, reconcilekey.Allocator())
 }
 
 func (cr *CityRuntime) waitForAsyncStarts() bool {
@@ -3614,6 +3680,8 @@ func (cr *CityRuntime) cityBeadStore() beads.Store {
 	if cr.cs != nil {
 		return cr.cs.CityBeadStore()
 	}
+	cr.serviceStateMu.RLock()
+	defer cr.serviceStateMu.RUnlock()
 	return cr.standaloneCityStore
 }
 
@@ -3623,7 +3691,21 @@ func (cr *CityRuntime) rigBeadStores() map[string]beads.Store {
 		delete(stores, cr.cityName)
 		return stores
 	}
+	cr.serviceStateMu.RLock()
+	defer cr.serviceStateMu.RUnlock()
 	return cr.standaloneRigStores
+}
+
+// setStandaloneStores publishes the standalone store handles under the lock
+// cityBeadStore and rigBeadStores read them with. Background lanes (route
+// recovery, completions, detached orphans) read them off the controller
+// goroutine, so an unlocked swap on reload would race those reads. The rig
+// map is replaced whole, never mutated in place.
+func (cr *CityRuntime) setStandaloneStores(city beads.Store, rigs map[string]beads.Store) {
+	cr.serviceStateMu.Lock()
+	cr.standaloneCityStore = city
+	cr.standaloneRigStores = rigs
+	cr.serviceStateMu.Unlock()
 }
 
 func (cr *CityRuntime) loadSessionBeadSnapshot() *sessionBeadSnapshot {

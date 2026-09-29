@@ -116,8 +116,7 @@ func freshWakeResetPriorValues(info sessions.Info) map[string]string {
 		// values come off the verbatim raw Info mirrors — otherwise the trace's
 		// before[key] lookup reads "" and the cleared list omits them even though
 		// FreshWakeConversationResetKeys() clears them. Written as raw string keys
-		// (matching the sibling entries) so this read-only prior-value map is not
-		// mistaken for a store write by the compared-key write-site gate.
+		// to match the sibling entries.
 		"primed_at":            info.PrimedAtMetadata,
 		"priming_attempted_at": info.PrimingAttemptedAtMetadata,
 		"prompt_hash":          info.PromptHashMetadata,

@@ -176,6 +176,21 @@ func (s *beadPolicyStore) DeleteBatch(ids []string) error {
 	return deleter.DeleteBatch(ids)
 }
 
+// GetExactBatch forwards the exact batch read to the wrapped store. The policy
+// layer shapes creation and listing, not exact reads by id.
+func (s *beadPolicyStore) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	getter, ok := s.Store.(beads.ExactBatchGetter)
+	if !ok {
+		return nil, nil, beads.ErrExactBatchGetUnsupported
+	}
+	return getter.GetExactBatch(ids)
+}
+
+var (
+	_ beads.ExactBatchGetter = (*beadPolicyStore)(nil)
+	_ beads.ExactBatchGetter = (*beadPolicyGraphStore)(nil)
+)
+
 var (
 	_ beads.RowWitness = (*beadPolicyStore)(nil)
 	_ beads.RowWitness = (*beadPolicyGraphStore)(nil)

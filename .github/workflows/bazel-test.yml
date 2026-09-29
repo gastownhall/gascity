@@ -81,14 +81,25 @@ jobs:
 
       # Runner-side bazel caches: without these every run re-hashes the
       # 205MB repo_source_tree + SDK before a single action can start.
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      # The output base's local action cache records outputs that live only in
+      # the remote CAS (--remote_download_minimal). A key that never changes is
+      # never re-saved, so those records go stale when the farm or its CAS
+      # changes and every run pays a lost-inputs build restart. Rotate daily.
+      # Only pushes to main save (~880MB): per-PR saves would churn the repo's
+      # 10GB cache and evict main's entry. PRs restore main's latest.
+      - name: Bazel cache day
+        id: bazel-cache-day
+        run: echo "day=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+      - name: Restore bazel output base
+        id: bazel-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ${{ runner.temp }}/bazel-outputs
-          key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock') }}
+          key: bazel-v2-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock') }}-${{ steps.bazel-cache-day.outputs.day }}
           restore-keys: |
-            bazel-${{ runner.os }}-
-          save-always: true
+            bazel-v2-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock') }}-
+            bazel-v2-${{ runner.os }}-
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
@@ -128,6 +139,11 @@ jobs:
         run: |
           mkdir -p /tmp/gc-test-home
           echo "HOME=/tmp/gc-test-home" >> "$GITHUB_ENV"
+          # .bazelrc sets test --test_tmpdir=/tmp/bt and
+          # --sandbox_writable_path=/tmp/bt unconditionally (#6525). Nothing
+          # else creates that directory on the runner, so every sandboxed
+          # action fails on a cold runner without this.
+          mkdir -p /tmp/bt
 
       - name: "bazel test //..."
         run: |
@@ -138,6 +154,14 @@ jobs:
           else
             bazel "${ARGS[@]}" test "${PROFILE[@]}" //... --test_output=errors --keep_going
           fi
+
+      - name: Save bazel output base
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.bazel-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ runner.temp }}/bazel-outputs
+          key: ${{ steps.bazel-cache.outputs.cache-primary-key }}
 
       - name: Critical-path report + budget (the optimization loop metric)
         if: always()

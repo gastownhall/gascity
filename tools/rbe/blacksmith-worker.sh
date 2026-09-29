@@ -36,9 +36,12 @@ NL_BIN_DIR="$RUNNER_TEMP/nl-bin"
 
 # Host toolset: test actions exec tools via the client PATH
 # (/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin), and cgo actions compile
-# against host headers. Keep in sync with infra nativelink-cas/scripts/elastic.sh.
+# against host headers. lld: Bazel's auto-configured C toolchain on a client
+# that has lld links with -fuse-ld=lld, so those cgo link actions fail here
+# ("collect2: fatal error: cannot find 'ld'") without it.
+# Keep in sync with infra nativelink-cas/scripts/elastic.sh.
 sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y -qq \
-	make jq sqlite3 tmux lsof cmake git libicu-dev zlib1g-dev libsqlite3-dev \
+	make jq sqlite3 tmux lsof cmake git lld libicu-dev zlib1g-dev libsqlite3-dev \
 	libbz2-dev liblzma-dev libffi-dev libexpat1-dev libxml2-dev libreadline-dev \
 	libncurses-dev python3-dev >/dev/null
 if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go${GO_VERSION} "; then

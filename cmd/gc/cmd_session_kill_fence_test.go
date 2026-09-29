@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -58,7 +59,7 @@ func wrapKillPokeProvider(t *testing.T, hooks *killHookProvider) runtime.Provide
 func stubKillPoke(t *testing.T) {
 	t.Helper()
 	old := sessionKillPokeController
-	sessionKillPokeController = func(string) error { return nil }
+	sessionKillPokeController = func(string, reconcilekey.Key) error { return nil }
 	t.Cleanup(func() { sessionKillPokeController = old })
 }
 

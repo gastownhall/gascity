@@ -30,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/logutil"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sdnotify"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -1684,7 +1685,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			snap := registry.Snapshot()
 			for _, v := range snap.all {
 				if v.Started && v.cs != nil {
-					v.cs.Poke()
+					v.cs.Enqueue(reconcilekey.Allocator()) // reload: re-plan each city
 				}
 			}
 			// Per sd_notify(3) a reload ends with READY=1.
@@ -2342,7 +2343,7 @@ func startOneCity(
 		return
 	}
 	cs.ct = cityRuntime.crashTrack()
-	cs.pokeCh = pokeCh
+	wireControllerWakeSignals(cs, pokeCh, controlDispatcherCh)
 	cs.configDirty = configDirty
 	cs.services = cityRuntime.svc
 	cityRuntime.setControllerState(cs)

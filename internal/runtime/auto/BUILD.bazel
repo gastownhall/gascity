@@ -18,11 +18,13 @@ go_test(
         "conformance_test.go",
         "liveness_forwarding_test.go",
         "proctable_forwarding_test.go",
+        "session_events_test.go",
         "testenv_import_test.go",
     ],
     embed = [":auto"],
     deps = [
         "//internal/runtime",
+        "//internal/runtime/hybrid",
         "//internal/runtime/runtimetest",
         "//internal/testenv",
     ],

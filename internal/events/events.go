@@ -331,7 +331,12 @@ const (
 	// growing is an order that has stopped running with nothing else to say so.
 	// Rate-bounded at the emit site (see cmd/gc/order_dispatch.go) — a
 	// permanently wedged order cannot turn this into a per-tick stream.
-	OrderSuppressed                 = "order.suppressed"
+	OrderSuppressed = "order.suppressed"
+	// OrderSkipped reports that an exec order finished (exit 0) but declared
+	// that some or all of its work did not run: a bead scope it could not
+	// reach, or a safety gate that held a step back. It accompanies the run's
+	// order.completed so a skip is never read as a clean completion.
+	OrderSkipped                    = "order.skipped"
 	ProviderSwapped                 = "provider.swapped"
 	WorkerOperation                 = "worker.operation"
 	ProjectIdentityStamped          = "project.identity.stamped"
@@ -492,7 +497,7 @@ var KnownEventTypes = []string{
 	RequestResultSessionSubmit, RequestResultRigCreate, RequestFailed,
 	RigProvisionProgress,
 	CityCreated, CityUnregisterRequested,
-	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed,
+	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed, OrderSkipped,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
 	MoleculeResolved,
 	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,
