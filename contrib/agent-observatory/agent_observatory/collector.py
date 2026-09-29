@@ -74,7 +74,6 @@ from .adapters import (
 )
 from .adapters.redaction import redact_text
 from .canonical import identity_key, session_text_snapshot_hash, sha256_text
-from .contract import payload_hash
 from .commands import categorize_command
 from .errors import ContractError, ObservatoryError, RequestByteCapExceeded, RequestError
 from .framework import FRAMEWORK_FILTER_VERSION, strip_framework_text
@@ -368,7 +367,9 @@ class UsageBackfillRun:
     sources_deferred: int = 0
     sources_error: int = 0
     unmapped_sources: int = 0
+    events_identity_matched: int = 0
     events_matched: int = 0
+    events_stable_field_rejected: int = 0
     events_unmatched: int = 0
     usage_inserted: int = 0
     reason: str | None = None
@@ -383,7 +384,9 @@ class UsageBackfillRun:
             "sources_deferred": self.sources_deferred,
             "sources_error": self.sources_error,
             "unmapped_sources": self.unmapped_sources,
+            "events_identity_matched": self.events_identity_matched,
             "events_matched": self.events_matched,
+            "events_stable_field_rejected": self.events_stable_field_rejected,
             "events_unmatched": self.events_unmatched,
             "usage_inserted": self.usage_inserted,
             "reason": self.reason,
@@ -993,7 +996,7 @@ def _backfill_missing_usage_locked(
         provider = source_ref["provider"]
         source_events = store.conn.execute(
             "SELECT e.city_id, e.host_id, e.provider, e.session_id, e.event_id, "
-            "e.payload_hash, e.repo, e.commit_sha "
+            "e.timestamp, e.kind, e.model, e.parent_session_id "
             "FROM events AS e LEFT JOIN event_usage AS u "
             "ON u.city_id = e.city_id AND u.host_id = e.host_id AND u.provider = e.provider "
             "AND u.session_id = e.session_id AND u.event_id = e.event_id "
@@ -1051,6 +1054,8 @@ def _backfill_missing_usage_locked(
             provider, source_events, source.get("generation")
         )
         matched_usage: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+        identity_matches: set[tuple[str, str, str, str, str]] = set()
+        stable_field_rejections: set[tuple[str, str, str, str, str]] = set()
         parse_failed = False
         for city_id, host_id in contexts:
             context = AdapterContext(city_id=city_id, host_id=host_id)
@@ -1078,12 +1083,15 @@ def _backfill_missing_usage_locked(
                             record["event_id"],
                         )
                         target = target_by_identity.get(identity)
-                        if (
-                            target is not None
-                            and identity not in matched_usage
-                            and _usage_backfill_matches(target, record)
-                        ):
+                        if target is None:
+                            continue
+                        identity_matches.add(identity)
+                        if identity in matched_usage:
+                            continue
+                        if _usage_backfill_matches(target, record):
                             matched_usage[identity] = record["usage"]
+                        else:
+                            stable_field_rejections.add(identity)
             if parse_failed:
                 break
         if parse_failed:
@@ -1091,7 +1099,9 @@ def _backfill_missing_usage_locked(
             run.events_unmatched += len(source_events)
             continue
 
+        run.events_identity_matched += len(identity_matches)
         run.events_matched += len(matched_usage)
+        run.events_stable_field_rejected += len(stable_field_rejections - matched_usage.keys())
         run.events_unmatched += len(target_by_identity) - len(matched_usage)
         if not matched_usage:
             continue
@@ -1177,16 +1187,20 @@ def _usage_backfill_generations(
 
 
 def _usage_backfill_matches(stored: dict[str, Any], parsed: dict[str, Any]) -> bool:
-    """Require the same event payload (apart from projection-side repo evidence)."""
+    """Validate event-defining fields after the caller matches the full event key.
 
-    for usage in (parsed.get("usage"), None):
-        candidate = dict(parsed)
-        candidate["repo"] = stored.get("repo")
-        candidate["commit_sha"] = stored.get("commit_sha")
-        candidate["usage"] = usage
-        if payload_hash(candidate) == stored.get("payload_hash"):
-            return True
-    return False
+    Provider transcripts can be rewritten or re-normalized after collection, so
+    text, redaction, and repository enrichment may change the payload hash even
+    when a provider-native event id still identifies the same usage-bearing
+    record. The caller already matches the complete canonical identity
+    (city/host/provider/session/event); keep the time, kind, model, and parent
+    stable as a second guard against a reused identifier.
+    """
+
+    return all(
+        stored.get(field) == parsed.get(field)
+        for field in ("timestamp", "kind", "model", "parent_session_id")
+    )
 
 
 def collect_watch(

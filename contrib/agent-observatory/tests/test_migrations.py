@@ -1,4 +1,4 @@
-"""Tests for the explicit, backed-up schema-4/5 to schema-6 migrations."""
+"""Tests for explicit, backed-up schema-4/5/6 migrations through schema 7."""
 
 from __future__ import annotations
 
@@ -11,15 +11,17 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 try:
     from . import support
 except ImportError:  # pragma: no cover
     import support
 
+from agent_observatory import migrations
 from agent_observatory.errors import ObservatoryError, SchemaVersionError
 from agent_observatory.canonical import session_text_snapshot_hash, sha256_bytes
-from agent_observatory.migrations import _V5_REQUIRED_TABLES, migrate_database
+from agent_observatory.migrations import _V6_REQUIRED_TABLES, migrate_database
 from agent_observatory.store import ObservatoryStore
 
 
@@ -69,10 +71,33 @@ class MigrationTest(unittest.TestCase):
                     },
                 ],
             )
+        self._downgrade_schema7_to_v6(db_path)
         return db_path
 
     @staticmethod
+    def _downgrade_schema7_to_v6(db_path):
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute("DROP VIEW events_with_enrichment")
+            connection.execute("DROP TABLE session_enrichment")
+            # Schema 6 derived roles from provider names; these stand in for
+            # legacy values that schema 7 must clear before trusted import.
+            connection.execute("UPDATE sessions SET role = 'legacy-guessed-role'")
+            connection.execute("UPDATE schema_meta SET value = '6' WHERE key = 'schema_version'")
+            connection.execute("PRAGMA user_version = 6")
+            connection.commit()
+        finally:
+            connection.close()
+
+    @staticmethod
     def _downgrade_schema6_to_v5(db_path):
+        connection = sqlite3.connect(db_path)
+        try:
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        finally:
+            connection.close()
+        if version == 7:
+            MigrationTest._downgrade_schema7_to_v6(db_path)
         connection = sqlite3.connect(db_path)
         try:
             connection.execute("DROP VIEW event_usage_cost")
@@ -132,6 +157,16 @@ class MigrationTest(unittest.TestCase):
         )
 
     @staticmethod
+    def _backup_paths_v6(db_path):
+        directory = os.path.dirname(db_path)
+        prefix = os.path.basename(db_path) + ".v6-pre-schema7-"
+        return sorted(
+            os.path.realpath(os.path.join(directory, name))
+            for name in os.listdir(directory)
+            if name.startswith(prefix) and name.endswith(".bak")
+        )
+
+    @staticmethod
     def _table_count(db_path, table):
         connection = sqlite3.connect(db_path)
         try:
@@ -160,18 +195,19 @@ class MigrationTest(unittest.TestCase):
             "classification_answers": 2,
         }
         self.assertEqual(result.from_version, 4)
-        self.assertEqual(result.to_version, 6)
+        self.assertEqual(result.to_version, 7)
         self.assertEqual(result.database_path, os.path.realpath(self.db_path))
-        self.assertEqual(set(result.preserved_rows), _V5_REQUIRED_TABLES)
+        self.assertEqual(set(result.preserved_rows), _V6_REQUIRED_TABLES)
         self.assertEqual(
             {table: result.preserved_rows[table] for table in expected_counts}, expected_counts
         )
         self.assertEqual(result.preserved_rows["imported_files"], 1)
-        self.assertEqual(len(result.backup_paths), 2)
+        self.assertEqual(len(result.backup_paths), 3)
         self.assertEqual(result.backup_path, result.backup_paths[-1])
         self.assertTrue(all(os.path.isfile(path) for path in result.backup_paths))
         self.assertEqual(self._backup_paths(self.db_path), [result.backup_paths[0]])
         self.assertEqual(self._backup_paths_v5(self.db_path), [result.backup_paths[1]])
+        self.assertEqual(self._backup_paths_v6(self.db_path), [result.backup_paths[2]])
         self.assertEqual(self._counts(self.db_path), expected_counts)
         self.assertEqual(self._table_count(self.db_path, "imported_files"), 1)
         self.assertEqual(result.backfill_summary["classifications_total"], 1)
@@ -183,12 +219,12 @@ class MigrationTest(unittest.TestCase):
 
         upgraded = sqlite3.connect(self.db_path)
         try:
-            self.assertEqual(upgraded.execute("PRAGMA user_version").fetchone()[0], 6)
+            self.assertEqual(upgraded.execute("PRAGMA user_version").fetchone()[0], 7)
             self.assertEqual(
                 upgraded.execute(
                     "SELECT value FROM schema_meta WHERE key = 'schema_version'"
                 ).fetchone()[0],
-                "6",
+                "7",
             )
             self.assertEqual(upgraded.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0], 0)
             self.assertEqual(upgraded.execute("SELECT COUNT(*) FROM classification_sessions").fetchone()[0], 0)
@@ -220,6 +256,20 @@ class MigrationTest(unittest.TestCase):
                 "role", {row[1] for row in upgraded.execute("PRAGMA table_info(sessions)")}
             )
             self.assertEqual(
+                upgraded.execute("SELECT COUNT(*) FROM sessions WHERE role IS NOT NULL").fetchone()[0],
+                0,
+            )
+            self.assertIsNotNone(
+                upgraded.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_enrichment'"
+                ).fetchone()
+            )
+            self.assertIsNotNone(
+                upgraded.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = 'events_with_enrichment'"
+                ).fetchone()
+            )
+            self.assertEqual(
                 upgraded.execute(
                     "SELECT command FROM events WHERE event_id = 'event-1'"
                 ).fetchone()[0],
@@ -228,7 +278,7 @@ class MigrationTest(unittest.TestCase):
         finally:
             upgraded.close()
 
-        v4_backup, v5_backup = result.backup_paths
+        v4_backup, v5_backup, v6_backup = result.backup_paths
         backup4 = sqlite3.connect(v4_backup)
         try:
             self.assertEqual(backup4.execute("PRAGMA user_version").fetchone()[0], 4)
@@ -249,8 +299,23 @@ class MigrationTest(unittest.TestCase):
             )
         finally:
             backup5.close()
+        backup6 = sqlite3.connect(v6_backup)
+        try:
+            self.assertEqual(backup6.execute("PRAGMA user_version").fetchone()[0], 6)
+            self.assertEqual(backup6.execute("SELECT COUNT(*) FROM events").fetchone()[0], 2)
+            self.assertEqual(
+                backup6.execute("SELECT COUNT(*) FROM sessions WHERE role IS NOT NULL").fetchone()[0],
+                0,
+            )
+            self.assertIsNone(
+                backup6.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_enrichment'"
+                ).fetchone()
+            )
+        finally:
+            backup6.close()
 
-    def test_v5_migration_backfills_snapshots_provenance_and_session_roles(self):
+    def test_v5_migration_backfills_snapshots_and_leaves_roles_unknown(self):
         session_text = "gateway-llm-dell--dsh-luna-1-pool"
         mayor = "rig--mayor"
         lane_a = "rig--fleet-work-review-2-pool"
@@ -343,9 +408,11 @@ class MigrationTest(unittest.TestCase):
         result = migrate_database(self.db_path)
 
         self.assertEqual(result.from_version, 5)
-        self.assertEqual(result.to_version, 6)
-        self.assertEqual(result.backup_paths, (result.backup_path,))
-        self.assertEqual(self._backup_paths_v5(self.db_path), [result.backup_path])
+        self.assertEqual(result.to_version, 7)
+        self.assertEqual(len(result.backup_paths), 2)
+        self.assertEqual(result.backup_path, result.backup_paths[-1])
+        self.assertEqual(self._backup_paths_v5(self.db_path), [result.backup_paths[0]])
+        self.assertEqual(self._backup_paths_v6(self.db_path), [result.backup_paths[1]])
         summary = result.backfill_summary
         self.assertEqual(summary["classifications_total"], 7)
         self.assertEqual(summary["classifications_bound"], 5)
@@ -366,8 +433,9 @@ class MigrationTest(unittest.TestCase):
         self.assertEqual(summary["request_match_rate"], 1.0)
         self.assertEqual(summary["pricing_seed_rows"], 3)
         self.assertEqual(summary["sessions_total"], 4)
-        self.assertEqual(summary["sessions_with_role"], 4)
-        self.assertEqual(summary["session_role_coverage"], 1.0)
+        self.assertEqual(summary["sessions_with_role"], 0)
+        self.assertEqual(summary["session_role_coverage"], 0.0)
+        self.assertEqual(summary["untrusted_role_values_cleared"], 0)
 
         connection = sqlite3.connect(self.db_path)
         try:
@@ -389,10 +457,7 @@ class MigrationTest(unittest.TestCase):
             roles = dict(connection.execute("SELECT session_id, role FROM sessions"))
         finally:
             connection.close()
-        self.assertEqual(roles[session_text], "dsh-luna pool")
-        self.assertEqual(roles[mayor], "mayor")
-        self.assertEqual(roles[lane_a], "fleet-work review pool")
-        self.assertEqual(roles[lane_b], "fleet-work build pool")
+        self.assertTrue(all(role is None for role in roles.values()))
 
     def test_migrates_database_written_by_v4_era_store(self):
         # This fixture was created with ObservatoryStore from d812ee146^, when
@@ -420,12 +485,194 @@ class MigrationTest(unittest.TestCase):
         result = migrate_database(self.db_path)
 
         self.assertEqual(result.from_version, 4)
-        self.assertEqual(result.to_version, 6)
-        self.assertEqual(set(result.preserved_rows), _V5_REQUIRED_TABLES)
+        self.assertEqual(result.to_version, 7)
+        self.assertEqual(set(result.preserved_rows), _V6_REQUIRED_TABLES)
         self.assertEqual(result.preserved_rows["events"], 1)
         self.assertEqual(result.preserved_rows["imported_files"], 1)
         self.assertEqual(self._table_count(self.db_path, "events"), 1)
         self.assertEqual(self._table_count(self.db_path, "imported_files"), 1)
+
+    def test_v6_migration_backs_up_rows_and_clears_untrusted_roles(self):
+        self._make_schema6_fixture()
+        result = migrate_database(self.db_path)
+
+        self.assertEqual(result.from_version, 6)
+        self.assertEqual(result.to_version, 7)
+        self.assertEqual(result.backup_paths, (result.backup_path,))
+        self.assertEqual(self._backup_paths_v6(self.db_path), [result.backup_path])
+        self.assertEqual(result.backfill_summary["untrusted_role_values_cleared"], 2)
+        self.assertEqual(self._table_count(self.db_path, "events"), 2)
+        self.assertEqual(self._table_count(self.db_path, "session_enrichment"), 0)
+
+        upgraded = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(upgraded.execute("PRAGMA user_version").fetchone()[0], 7)
+            role_count = upgraded.execute(
+                "SELECT COUNT(*) FROM sessions WHERE role IS NOT NULL"
+            ).fetchone()[0]
+            self.assertEqual(role_count, 0)
+        finally:
+            upgraded.close()
+
+        backup = sqlite3.connect(result.backup_path)
+        try:
+            self.assertEqual(backup.execute("PRAGMA user_version").fetchone()[0], 6)
+            legacy_roles = backup.execute(
+                "SELECT COUNT(*) FROM sessions WHERE role = 'legacy-guessed-role'"
+            ).fetchone()[0]
+            self.assertEqual(legacy_roles, 2)
+        finally:
+            backup.close()
+
+    def test_v6_migration_refreshes_cost_view_for_legacy_vendor_prices(self):
+        events_path = support.write_jsonl(
+            os.path.join(self.tmp.name, "legacy-priced-events.jsonl"),
+            [
+                support.make_record(
+                    event_id="legacy-priced-event",
+                    provider="claude",
+                    model="claude-sonnet-4-20250514",
+                    usage={"input_tokens": 1_000_000},
+                )
+            ],
+        )
+        with ObservatoryStore(self.db_path) as store:
+            store.import_jsonl(events_path)
+        self._downgrade_schema7_to_v6(self.db_path)
+
+        connection = sqlite3.connect(self.db_path)
+        try:
+            connection.execute(
+                "UPDATE model_pricing SET provider = 'Anthropic' "
+                "WHERE model_id = 'claude-sonnet-4-20250514' AND provider = 'claude'"
+            )
+            connection.execute("DROP VIEW event_usage_cost")
+            # Model an older v6 projection whose cost view did not resolve
+            # adapter/vendor aliases or expose a measured cost.
+            connection.execute(
+                "CREATE VIEW event_usage_cost AS "
+                "SELECT event_id, 0 AS cost_known, NULL AS cost_usd FROM events"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        migrate_database(self.db_path)
+        with ObservatoryStore(self.db_path) as store:
+            row = dict(
+                store.conn.execute(
+                    "SELECT event_id, model_provider, cost_known, cost_usd "
+                    "FROM event_usage_cost WHERE event_id = 'legacy-priced-event'"
+                ).fetchone()
+            )
+        self.assertEqual(row["model_provider"], "claude")
+        self.assertEqual(row["cost_known"], 1)
+        self.assertEqual(row["cost_usd"], "3")
+
+    def test_v6_migration_failure_rolls_back_and_keeps_v6_backup(self):
+        self._make_schema6_fixture()
+        connection = sqlite3.connect(self.db_path)
+        try:
+            connection.execute(
+                """
+                CREATE TRIGGER delete_event_during_v7_upgrade
+                AFTER UPDATE ON schema_meta
+                WHEN OLD.key = 'schema_version' AND NEW.value = '7'
+                BEGIN
+                    DELETE FROM events WHERE event_id = 'event-1';
+                END
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.assertRaisesRegex(ObservatoryError, "row count"):
+            migrate_database(self.db_path)
+
+        connection = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 6)
+            self.assertEqual(
+                connection.execute(
+                    "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+                ).fetchone()[0],
+                "6",
+            )
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0], 2)
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM sessions WHERE role = 'legacy-guessed-role'"
+                ).fetchone()[0],
+                2,
+            )
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_enrichment'"
+                ).fetchone()
+            )
+        finally:
+            connection.close()
+
+        backups = self._backup_paths_v6(self.db_path)
+        self.assertEqual(len(backups), 1)
+        backup = sqlite3.connect(backups[0])
+        try:
+            self.assertEqual(backup.execute("PRAGMA user_version").fetchone()[0], 6)
+            self.assertEqual(backup.execute("SELECT COUNT(*) FROM events").fetchone()[0], 2)
+        finally:
+            backup.close()
+
+    def test_v6_validation_rejects_schema7_objects_without_backup(self):
+        schema7_objects = (
+            ("table", "CREATE TABLE session_enrichment (placeholder TEXT)"),
+            ("view", "CREATE VIEW events_with_enrichment AS SELECT 1 AS placeholder"),
+        )
+        for name, statement in schema7_objects:
+            with self.subTest(name=name):
+                db_path = os.path.join(self.tmp.name, f"schema6-with-{name}.db")
+                self._make_schema6_fixture(db_path)
+                connection = sqlite3.connect(db_path)
+                try:
+                    connection.execute(statement)
+                    connection.commit()
+                finally:
+                    connection.close()
+
+                with self.assertRaisesRegex(ObservatoryError, "schema-7 objects"):
+                    migrate_database(db_path)
+                self.assertEqual(self._backup_paths_v6(db_path), [])
+
+    def test_v6_migration_refuses_backup_row_count_mismatch(self):
+        self._make_schema6_fixture()
+        create_backup = migrations._create_backup
+
+        def mismatched_backup_counts(database_path, version):
+            backup_path, counts = create_backup(database_path, version)
+            altered_counts = dict(counts)
+            altered_counts["events"] += 1
+            return backup_path, altered_counts
+
+        with mock.patch.object(
+            migrations, "_create_backup", side_effect=mismatched_backup_counts
+        ):
+            with self.assertRaisesRegex(ObservatoryError, "backup row counts do not match"):
+                migrate_database(self.db_path)
+
+        connection = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 6)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0], 2)
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_enrichment'"
+                ).fetchone()
+            )
+        finally:
+            connection.close()
+        backups = self._backup_paths_v6(self.db_path)
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(self._counts(backups[0])["events"], 2)
 
     def test_normal_store_open_does_not_implicitly_migrate_v4(self):
         self._make_v4_fixture()
@@ -433,6 +680,13 @@ class MigrationTest(unittest.TestCase):
             ObservatoryStore(self.db_path)
         self.assertEqual(self._counts(self.db_path)["events"], 2)
         self.assertEqual(self._backup_paths(self.db_path), [])
+
+    def test_normal_store_open_does_not_implicitly_migrate_v6(self):
+        self._make_schema6_fixture()
+        with self.assertRaises(SchemaVersionError):
+            ObservatoryStore(self.db_path)
+        self.assertEqual(self._counts(self.db_path)["events"], 2)
+        self.assertEqual(self._backup_paths_v6(self.db_path), [])
 
     def test_rejects_unsupported_versions_without_writing_a_backup(self):
         for version in (0, 3, 999):
@@ -636,13 +890,13 @@ class MigrationTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["from_version"], 4)
-        self.assertEqual(payload["to_version"], 6)
-        self.assertEqual(len(payload["backups"]), 2)
+        self.assertEqual(payload["to_version"], 7)
+        self.assertEqual(len(payload["backups"]), 3)
         self.assertTrue(os.path.isfile(payload["backup"]))
         self.assertEqual(payload["preserved_rows"]["events"], 2)
         self.assertEqual(payload["backfill_summary"]["classifications_total"], 1)
 
-    def test_cli_migrate_is_noop_when_database_is_already_schema6(self):
+    def test_cli_migrate_is_noop_when_database_is_already_schema7(self):
         self._make_v4_fixture()
         migrate_database(self.db_path)
         with open(self.db_path, "rb") as database:
@@ -650,9 +904,9 @@ class MigrationTest(unittest.TestCase):
         backups_before = self._backup_paths(self.db_path)
 
         result = migrate_database(self.db_path)
-        self.assertEqual(result.from_version, 6)
-        self.assertEqual(result.to_version, 6)
-        self.assertEqual(result.already_at_version, 6)
+        self.assertEqual(result.from_version, 7)
+        self.assertEqual(result.to_version, 7)
+        self.assertEqual(result.already_at_version, 7)
         self.assertIsNone(result.backup_path)
         with open(self.db_path, "rb") as database:
             self.assertEqual(database.read(), migrated_bytes)
@@ -669,7 +923,7 @@ class MigrationTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(completed.stdout.strip(), "already at schema 6")
+        self.assertEqual(completed.stdout.strip(), "already at schema 7")
         self.assertEqual(completed.stderr, "")
         with open(self.db_path, "rb") as database:
             self.assertEqual(database.read(), migrated_bytes)

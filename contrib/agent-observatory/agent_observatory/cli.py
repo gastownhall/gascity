@@ -55,6 +55,7 @@ from .collector import (
 )
 from .episodes import segment_store
 from .errors import ObservatoryError, SilverError
+from .gc_enrichment import enrich_gc_sessions
 from .evaluation import (
     DEFAULT_MULTI_LABEL_FACETS,
     EvaluationConfig,
@@ -1521,6 +1522,19 @@ def _cmd_backfill_usage(args: argparse.Namespace) -> int:
     return 0 if run.status in {"ok", "locked"} else 1
 
 
+def _cmd_enrich_gc_sessions(args: argparse.Namespace) -> int:
+    """Bind exact GC templates and repository contexts from a local session export."""
+    with _open_store(args.db) as store:
+        result = enrich_gc_sessions(
+            store,
+            args.input,
+            city_id=args.city,
+            host_id=args.host,
+        )
+    _print_json(result.to_dict())
+    return 0 if not result.conflicts else 1
+
+
 def _cmd_collect_status(args: argparse.Namespace) -> int:
     with _open_store(args.db) as store:
         status = collector_status(store, kill_switch_path=_kill_switch_path(args))
@@ -1619,19 +1633,31 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser.set_defaults(func=_cmd_import_jsonl)
 
     migrate_parser = subparsers.add_parser(
-        "migrate", help="back up and upgrade a schema-4/5 projection to schema 6"
+        "migrate", help="back up and upgrade a schema-4/5/6 projection to schema 7"
     )
     migrate_parser.add_argument(
         "--db",
         required=True,
-        help="existing schema-4 or schema-5 SQLite projection (a timestamped backup is written first)",
+        help="existing schema-4, schema-5, or schema-6 SQLite projection (a timestamped backup is written first)",
     )
     migrate_parser.set_defaults(func=_cmd_migrate)
+
+    gc_enrichment_parser = subparsers.add_parser(
+        "enrich-gc-sessions",
+        help="bind provider sessions to exact GC templates and local repository remotes",
+    )
+    gc_enrichment_parser.add_argument("--db", required=True, help="schema-7 SQLite projection path")
+    gc_enrichment_parser.add_argument(
+        "--input", required=True, help="explicit JSON file from a complete GC session metadata export"
+    )
+    gc_enrichment_parser.add_argument("--city", required=True, help="city id for the imported projection")
+    gc_enrichment_parser.add_argument("--host", required=True, help="host id for the imported projection")
+    gc_enrichment_parser.set_defaults(func=_cmd_enrich_gc_sessions)
 
     pricing_parser = subparsers.add_parser(
         "seed-pricing", help="load the checked-in public model-price schedule"
     )
-    pricing_parser.add_argument("--db", required=True, help="schema-6 SQLite projection path")
+    pricing_parser.add_argument("--db", required=True, help="schema-7 SQLite projection path")
     pricing_parser.add_argument(
         "--input", default=None, help="optional price seed JSON (defaults to the checked-in seed)"
     )

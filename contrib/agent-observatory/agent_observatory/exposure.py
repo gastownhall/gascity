@@ -25,6 +25,32 @@ from .contract import normalize_timestamp
 EXPOSURE_STATUSES = ("exposed", "unexposed", "unknown")
 LEDGER_VERSION = "1.0"
 
+# Repository sources are ordered from authoritative observed data to fallback
+# metadata. A conflict at the same precedence is ambiguous; lower-precedence
+# evidence never invalidates a selected repository.
+_REPO_PRECEDENCE = {"event": 0, "enrichment": 1, "fingerprint": 2}
+
+
+def _merge_repo_evidence(entry: dict[str, Any], repo: str | None, source: str) -> None:
+    if not repo:
+        return
+    precedence = _REPO_PRECEDENCE[source]
+    current_precedence = entry.get("_repo_precedence")
+    if current_precedence is None and entry.get("repo") is not None:
+        # Caller-provided session evidence is already resolved and outranks the
+        # repository copy carried by a fingerprint row.
+        current_precedence = _REPO_PRECEDENCE["event"]
+        entry["_repo_precedence"] = current_precedence
+    if current_precedence is None or precedence < current_precedence:
+        entry["repo"] = repo
+        entry["_repo_precedence"] = precedence
+        entry["_repo_ambiguous"] = False
+    elif precedence > current_precedence or entry.get("_repo_ambiguous"):
+        return
+    elif entry.get("repo") != repo:
+        entry["repo"] = None
+        entry["_repo_ambiguous"] = True
+
 
 class CommitGraph:
     """A deterministic commit-parent graph used for ancestry decisions.
@@ -70,6 +96,7 @@ def session_evidence_from_store(store: Any) -> list[dict[str, Any]]:
     exposure stays ``unknown`` rather than becoming a false ``unexposed``.
     """
     sessions: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    enrichments = store.load_session_enrichments()
     for event in store.iter_events():
         key = (event["city_id"], event["host_id"], event["provider"], event["session_id"])
         entry = sessions.get(key)
@@ -79,6 +106,8 @@ def session_evidence_from_store(store: Any) -> list[dict[str, Any]]:
                 "commit_shas": set(),
                 "models": set(),
                 "repo": None,
+                "_repo_candidates": set(),
+                "_repo_ambiguous": False,
                 "host_id": key[1],
                 "provider": key[2],
                 "first_timestamp": event["timestamp"],
@@ -93,19 +122,29 @@ def session_evidence_from_store(store: Any) -> list[dict[str, Any]]:
             entry["commit_shas"].add(event["commit_sha"])
         if event.get("model"):
             entry["models"].add(event["model"])
-        if entry["repo"] is None and event.get("repo"):
-            entry["repo"] = event["repo"]
+        if event.get("repo"):
+            entry["_repo_candidates"].add(event["repo"])
         if event["timestamp"] < entry["first_timestamp"]:
             entry["first_timestamp"] = event["timestamp"]
         if event["timestamp"] > entry["last_timestamp"]:
             entry["last_timestamp"] = event["timestamp"]
 
+    for key, entry in sessions.items():
+        direct_repos = entry.pop("_repo_candidates")
+        if direct_repos:
+            for repo in sorted(direct_repos):
+                _merge_repo_evidence(entry, repo, "event")
+        else:
+            _merge_repo_evidence(
+                entry, enrichments.get(key, {}).get("repo"), "enrichment"
+            )
     return [_finalize_session(entry) for entry in sessions.values()]
 
 
 def _finalize_session(entry: dict[str, Any]) -> dict[str, Any]:
     entry["commit_shas"] = sorted(entry["commit_shas"])
     entry["models"] = sorted(entry["models"])
+    entry.pop("_repo_candidates", None)
     return entry
 
 
@@ -130,6 +169,7 @@ def attach_session_fingerprints(
                 "commit_shas": [],
                 "models": [],
                 "repo": None,
+                "_repo_ambiguous": False,
                 "host_id": key[1],
                 "provider": key[2],
                 "first_timestamp": None,
@@ -139,6 +179,7 @@ def attach_session_fingerprints(
                 "derived": False,
             }
             by_key[key] = entry
+        _merge_repo_evidence(entry, fingerprint.get("repo"), "fingerprint")
         entry["fingerprints"].append(
             {
                 "type": fingerprint["type"],
@@ -151,7 +192,11 @@ def attach_session_fingerprints(
             entry["commit_shas"] = sorted(set(entry["commit_shas"]) | {fingerprint["value"]})
         if fingerprint["type"] == "model":
             entry["models"] = sorted(set(entry["models"]) | {fingerprint["value"]})
-    return list(by_key.values())
+    sessions = list(by_key.values())
+    for entry in sessions:
+        entry.pop("_repo_ambiguous", None)
+        entry.pop("_repo_precedence", None)
+    return sessions
 
 
 def _session_in_scope(change: dict[str, Any], session: dict[str, Any]) -> bool:

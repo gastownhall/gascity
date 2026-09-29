@@ -16,14 +16,14 @@ from typing import Any
 
 from .canonical import event_snapshot_hash, session_snapshot_hash, session_text_snapshot_hash
 from .errors import ObservatoryError, SchemaVersionError
-from .roles import role_from_session_name
 
 SCHEMA_VERSION_BEFORE = 4
 SCHEMA_VERSION_V5 = 5
-SCHEMA_VERSION_AFTER = 6
+SCHEMA_VERSION_V6 = 6
+SCHEMA_VERSION_AFTER = 7
 
 # Schema 5 adds this append-only recommendation projection to schema 4.
-# Fresh schema-6 stores also reuse these create statements.
+# Fresh schema-7 stores also reuse these create statements.
 V4_TO_V5_SCHEMA_STATEMENTS = (
     """
     CREATE TABLE IF NOT EXISTS recommendations (
@@ -111,7 +111,7 @@ V6_CORE_SCHEMA_STATEMENTS = (
         e.event_id,
         e.timestamp AS event_timestamp,
         e.model AS model_id,
-        p.provider AS model_provider,
+        normalize_provider_id(p.provider) AS model_provider,
         u.input_tokens,
         u.output_tokens,
         u.cache_read_tokens,
@@ -150,13 +150,61 @@ V6_CORE_SCHEMA_STATEMENTS = (
       ON e.city_id = u.city_id AND e.host_id = u.host_id AND e.provider = u.provider
      AND e.session_id = u.session_id AND e.event_id = u.event_id
     LEFT JOIN model_pricing AS p
-      ON p.model_id = e.model AND p.provider IS e.provider
+      ON p.model_id = e.model
+     AND p.provider IS (
+         SELECT p2.provider
+           FROM model_pricing AS p2
+          WHERE p2.model_id = e.model
+            AND (
+                p2.provider IS NULL
+                OR normalize_provider_id(p2.provider) = normalize_provider_id(e.provider)
+            )
+            AND p2.effective_from <= e.timestamp
+          ORDER BY (p2.provider IS NULL), p2.effective_from DESC
+          LIMIT 1
+     )
      AND p.effective_from = (
          SELECT MAX(p2.effective_from)
            FROM model_pricing AS p2
-          WHERE p2.model_id = e.model AND p2.provider IS e.provider
+          WHERE p2.model_id = e.model AND p2.provider IS p.provider
             AND p2.effective_from <= e.timestamp
      )
+    """,
+)
+
+V7_CORE_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS session_enrichment (
+        city_id TEXT NOT NULL,
+        host_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        template TEXT NOT NULL CHECK (length(template) > 0),
+        repo TEXT,
+        repo_source TEXT CHECK (
+            repo_source IS NULL OR repo_source IN ('explicit', 'worker_dir', 'work_dir', 'ambiguous')
+        ),
+        source_sha256 TEXT NOT NULL CHECK (length(source_sha256) = 64),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        PRIMARY KEY (city_id, host_id, provider, session_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS session_enrichment_repo ON session_enrichment(repo, provider)",
+    """
+    CREATE VIEW IF NOT EXISTS events_with_enrichment AS
+    SELECT
+        e.*,
+        COALESCE(e.repo, x.repo) AS effective_repo,
+        COALESCE(s.role, x.template) AS effective_role,
+        x.template AS gc_template,
+        x.repo_source AS gc_repo_source
+    FROM events AS e
+    LEFT JOIN sessions AS s
+      ON s.city_id = e.city_id AND s.host_id = e.host_id AND s.provider = e.provider
+     AND s.session_id = e.session_id
+    LEFT JOIN session_enrichment AS x
+      ON x.city_id = e.city_id AND x.host_id = e.host_id AND x.provider = e.provider
+     AND x.session_id = e.session_id
     """,
 )
 
@@ -167,6 +215,15 @@ V5_TO_V6_SCHEMA_STATEMENTS = (
     "ALTER TABLE jev_requests ADD COLUMN provider TEXT",
     "ALTER TABLE jev_requests ADD COLUMN session_id TEXT",
     *V6_CORE_SCHEMA_STATEMENTS,
+)
+
+# Schema-6 databases already have this view; drop and recreate it during the
+# explicit v6->v7 migration so existing projections receive the corrected price
+# provider matching without rewriting immutable event payloads.
+V6_TO_V7_SCHEMA_STATEMENTS = (
+    "DROP VIEW IF EXISTS event_usage_cost",
+    V6_CORE_SCHEMA_STATEMENTS[-1],
+    *V7_CORE_SCHEMA_STATEMENTS,
 )
 
 
@@ -189,8 +246,10 @@ _V4_REQUIRED_TABLES = frozenset(
     }
 )
 _V5_REQUIRED_TABLES = frozenset((*_V4_REQUIRED_TABLES, "recommendations"))
+_V6_REQUIRED_TABLES = frozenset((*_V5_REQUIRED_TABLES, "classification_sessions", "model_pricing"))
 _PRESERVED_TABLES = tuple(sorted(_V4_REQUIRED_TABLES))
 _V5_PRESERVED_TABLES = tuple(sorted(_V5_REQUIRED_TABLES))
+_V6_PRESERVED_TABLES = tuple(sorted(_V6_REQUIRED_TABLES))
 _BACKUP_RETRIES = 100
 _SQLITE_TIMEOUT_SECONDS = 30.0
 
@@ -293,8 +352,8 @@ def _validate_v5(connection: sqlite3.Connection, database_path: str) -> None:
         row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'view'")
     }
     if (
-        {"classification_sessions", "model_pricing"} & tables
-        or "event_usage_cost" in views
+        {"classification_sessions", "model_pricing", "session_enrichment"} & tables
+        or {"event_usage_cost", "events_with_enrichment"} & views
         or "role" in _column_names(connection, "sessions")
         or {"city_id", "host_id", "provider", "session_id"} & _column_names(connection, "jev_requests")
     ):
@@ -303,22 +362,13 @@ def _validate_v5(connection: sqlite3.Connection, database_path: str) -> None:
         )
 
 
-def _validate_v6(connection: sqlite3.Connection, database_path: str) -> None:
+def _validate_v6_objects(connection: sqlite3.Connection, database_path: str) -> None:
     tables = _table_names(connection)
     missing_tables = sorted((_V5_REQUIRED_TABLES | {"classification_sessions", "model_pricing"}) - tables)
     if missing_tables:
         raise ObservatoryError(
             f"database {database_path!r} is missing required schema-6 tables: "
             + ", ".join(missing_tables)
-        )
-    version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    metadata = connection.execute(
-        "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-    ).fetchone()
-    if version != SCHEMA_VERSION_AFTER or metadata is None or metadata[0] != str(SCHEMA_VERSION_AFTER):
-        raise ObservatoryError(
-            f"database {database_path!r} does not have both schema version markers set to "
-            f"{SCHEMA_VERSION_AFTER}"
         )
     indexes = {
         row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
@@ -372,6 +422,75 @@ def _validate_v6(connection: sqlite3.Connection, database_path: str) -> None:
         raise ObservatoryError(f"database {database_path!r} is missing request session identity columns")
 
 
+def _validate_v6(connection: sqlite3.Connection, database_path: str) -> None:
+    version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    metadata = connection.execute(
+        "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+    ).fetchone()
+    if version != SCHEMA_VERSION_V6 or metadata is None or metadata[0] != str(SCHEMA_VERSION_V6):
+        raise ObservatoryError(
+            f"database {database_path!r} does not have both schema version markers set to "
+            f"{SCHEMA_VERSION_V6}"
+        )
+    _validate_v6_objects(connection, database_path)
+    views = {
+        row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'view'")
+    }
+    if "session_enrichment" in _table_names(connection) or "events_with_enrichment" in views:
+        raise ObservatoryError(
+            f"database {database_path!r} claims schema 6 but contains schema-7 objects"
+        )
+
+
+def _validate_v7(connection: sqlite3.Connection, database_path: str) -> None:
+    version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    metadata = connection.execute(
+        "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+    ).fetchone()
+    if (
+        version != SCHEMA_VERSION_AFTER
+        or metadata is None
+        or metadata[0] != str(SCHEMA_VERSION_AFTER)
+    ):
+        raise ObservatoryError(
+            f"database {database_path!r} does not have both schema version markers set to "
+            f"{SCHEMA_VERSION_AFTER}"
+        )
+    _validate_v6_objects(connection, database_path)
+    tables = _table_names(connection)
+    indexes = {
+        row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+    }
+    views = {
+        row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'view'")
+    }
+    if "session_enrichment" not in tables or "session_enrichment_repo" not in indexes:
+        raise ObservatoryError(
+            f"database {database_path!r} is missing the schema-7 session enrichment table/index"
+        )
+    if "events_with_enrichment" not in views:
+        raise ObservatoryError(
+            f"database {database_path!r} is missing the schema-7 enriched event view"
+        )
+    if not {
+        "city_id",
+        "host_id",
+        "provider",
+        "session_id",
+        "template",
+        "repo",
+        "repo_source",
+        "source_sha256",
+    } <= _column_names(connection, "session_enrichment"):
+        raise ObservatoryError(
+            f"database {database_path!r} has an incomplete session enrichment table"
+        )
+    if not {"effective_repo", "effective_role", "gc_template", "gc_repo_source"} <= _column_names(
+        connection, "events_with_enrichment"
+    ):
+        raise ObservatoryError(f"database {database_path!r} has an incomplete enriched event view")
+
+
 def _row_counts(
     connection: sqlite3.Connection, tables: tuple[str, ...] = _PRESERVED_TABLES
 ) -> dict[str, int]:
@@ -403,6 +522,8 @@ def _validate_version(connection: sqlite3.Connection, database_path: str, versio
         _validate_v4(connection, database_path)
     elif version == SCHEMA_VERSION_V5:
         _validate_v5(connection, database_path)
+    elif version == SCHEMA_VERSION_V6:
+        _validate_v6(connection, database_path)
     else:
         raise SchemaVersionError(f"no backup validator for schema version {version}")
 
@@ -410,7 +531,11 @@ def _validate_version(connection: sqlite3.Connection, database_path: str, versio
 def _create_backup(database_path: Path, version: int) -> tuple[Path, dict[str, int]]:
     """Back up the locked, unchanged database and verify its schema markers."""
     backup_path = _reserve_backup_path(database_path, version)
-    preserved_tables = _PRESERVED_TABLES if version == SCHEMA_VERSION_BEFORE else _V5_PRESERVED_TABLES
+    preserved_tables = {
+        SCHEMA_VERSION_BEFORE: _PRESERVED_TABLES,
+        SCHEMA_VERSION_V5: _V5_PRESERVED_TABLES,
+        SCHEMA_VERSION_V6: _V6_PRESERVED_TABLES,
+    }[version]
     source: sqlite3.Connection | None = None
     destination: sqlite3.Connection | None = None
     try:
@@ -543,26 +668,6 @@ def _session_indexes(
             if source_path and source_sha256:
                 source_sessions.setdefault((source_path, source_sha256), set()).add(key)
     return snapshot_sessions, source_sessions, snapshot_methods
-
-
-def _backfill_session_roles(connection: sqlite3.Connection) -> tuple[int, int]:
-    rows = connection.execute(
-        "SELECT city_id, host_id, provider, session_id FROM sessions"
-    ).fetchall()
-    with_role = 0
-    for city_id, host_id, provider, session_id in rows:
-        role = role_from_session_name(session_id)
-        if role is None:
-            continue
-        connection.execute(
-            "UPDATE sessions SET role = ? WHERE city_id = ? AND host_id = ? "
-            "AND provider = ? AND session_id = ?",
-            (role, city_id, host_id, provider, session_id),
-        )
-        with_role += 1
-    return len(rows), with_role
-
-
 
 
 def _backfill_request_sessions(
@@ -730,7 +835,8 @@ def _migrate_v5_to_v6(database_path: Path) -> MigrationResult:
                 ],
             )
 
-            sessions_total, sessions_with_role = _backfill_session_roles(connection)
+            sessions_total = int(connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0])
+            sessions_with_role = 0
             snapshot_sessions, source_sessions, snapshot_methods = _session_indexes(connection)
             request_summary = _backfill_request_sessions(
                 connection, snapshot_sessions, source_sessions, snapshot_methods
@@ -752,13 +858,13 @@ def _migrate_v5_to_v6(database_path: Path) -> MigrationResult:
 
             updated = connection.execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_version' AND value = ?",
-                (str(SCHEMA_VERSION_AFTER), str(SCHEMA_VERSION_V5)),
+                (str(SCHEMA_VERSION_V6), str(SCHEMA_VERSION_V5)),
             )
             if updated.rowcount != 1:
                 raise SchemaVersionError(
                     f"database {str(database_path)!r} schema_meta changed during migration"
                 )
-            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION_AFTER}")
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION_V6}")
             _validate_v6(connection, str(database_path))
 
             after_counts = _row_counts(connection, _V5_PRESERVED_TABLES)
@@ -775,7 +881,7 @@ def _migrate_v5_to_v6(database_path: Path) -> MigrationResult:
             database_path=str(database_path),
             backup_path=str(backup_path),
             from_version=SCHEMA_VERSION_V5,
-            to_version=SCHEMA_VERSION_AFTER,
+            to_version=SCHEMA_VERSION_V6,
             preserved_rows=after_counts,
             backup_paths=(str(backup_path),),
             backfill_summary=binding_summary,
@@ -784,13 +890,76 @@ def _migrate_v5_to_v6(database_path: Path) -> MigrationResult:
         connection.close()
 
 
+def _migrate_v6_to_v7(database_path: Path) -> MigrationResult:
+    connection = sqlite3.connect(
+        str(database_path), timeout=_SQLITE_TIMEOUT_SECONDS, isolation_level=None
+    )
+    backup_path: Path | None = None
+    try:
+        _validate_v6(connection, str(database_path))
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            _validate_v6(connection, str(database_path))
+            backup_path, backup_counts = _create_backup(database_path, SCHEMA_VERSION_V6)
+            before_counts = _row_counts(connection, _V6_PRESERVED_TABLES)
+            if before_counts != backup_counts:
+                raise ObservatoryError(
+                    "schema-6 backup row counts do not match the locked database; refusing to migrate"
+                )
+            for statement in V6_TO_V7_SCHEMA_STATEMENTS:
+                connection.execute(statement)
+
+            # Schema 6 populated this field by parsing provider session names.
+            # Those values are not trusted GC agent metadata, so clear them until
+            # an exact session_key -> template binding is imported.
+            roles_cleared = int(
+                connection.execute("SELECT COUNT(*) FROM sessions WHERE role IS NOT NULL").fetchone()[0]
+            )
+            connection.execute("UPDATE sessions SET role = NULL WHERE role IS NOT NULL")
+            updated = connection.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_version' AND value = ?",
+                (str(SCHEMA_VERSION_AFTER), str(SCHEMA_VERSION_V6)),
+            )
+            if updated.rowcount != 1:
+                raise SchemaVersionError(
+                    f"database {str(database_path)!r} schema_meta changed during migration"
+                )
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION_AFTER}")
+            _validate_v7(connection, str(database_path))
+
+            after_counts = _row_counts(connection, _V6_PRESERVED_TABLES)
+            if after_counts != before_counts:
+                raise ObservatoryError(
+                    "schema-6 migration changed a preserved table row count; rolling back"
+                )
+            connection.execute("COMMIT")
+        except BaseException:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        return MigrationResult(
+            database_path=str(database_path),
+            backup_path=str(backup_path),
+            from_version=SCHEMA_VERSION_V6,
+            to_version=SCHEMA_VERSION_AFTER,
+            preserved_rows=after_counts,
+            backup_paths=(str(backup_path),),
+            backfill_summary={
+                "untrusted_role_values_cleared": roles_cleared,
+                "trusted_session_enrichments": 0,
+            },
+        )
+    finally:
+        connection.close()
+
+
 def migrate_database(db_path: str | os.PathLike[str]) -> MigrationResult:
-    """Back up and upgrade an existing schema-4 or schema-5 projection to v6.
+    """Back up and upgrade an existing schema-4, schema-5, or schema-6 projection to v7.
 
     Each step writes and validates a timestamped online backup before modifying
-    the schema. Schema 4 is first advanced through the existing recommendation
-    migration, then through the additive schema-6 migration. A schema-5 failure
-    rolls back atomically while retaining its verified backup.
+    the schema. Older supported versions advance through schema 5 and schema 6
+    before the additive schema-7 enrichment migration. A failed step rolls back
+    atomically while retaining its verified backup.
     """
     raw_path = os.fspath(db_path)
     if raw_path == ":memory:":
@@ -805,7 +974,7 @@ def migrate_database(db_path: str | os.PathLike[str]) -> MigrationResult:
     try:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         if version == SCHEMA_VERSION_AFTER:
-            _validate_v6(connection, str(database_path))
+            _validate_v7(connection, str(database_path))
             return MigrationResult(
                 database_path=str(database_path),
                 backup_path=None,
@@ -820,17 +989,30 @@ def migrate_database(db_path: str | os.PathLike[str]) -> MigrationResult:
     if version == SCHEMA_VERSION_BEFORE:
         v4_result = _migrate_v4_to_v5(database_path)
         v5_result = _migrate_v5_to_v6(database_path)
+        v6_result = _migrate_v6_to_v7(database_path)
         return MigrationResult(
             database_path=str(database_path),
-            backup_path=v5_result.backup_path,
+            backup_path=v6_result.backup_path,
             from_version=SCHEMA_VERSION_BEFORE,
             to_version=SCHEMA_VERSION_AFTER,
-            preserved_rows=v5_result.preserved_rows,
-            backup_paths=v4_result.backup_paths + v5_result.backup_paths,
-            backfill_summary=v5_result.backfill_summary,
+            preserved_rows=v6_result.preserved_rows,
+            backup_paths=v4_result.backup_paths + v5_result.backup_paths + v6_result.backup_paths,
+            backfill_summary={**v5_result.backfill_summary, **v6_result.backfill_summary},
         )
     if version == SCHEMA_VERSION_V5:
-        return _migrate_v5_to_v6(database_path)
+        v5_result = _migrate_v5_to_v6(database_path)
+        v6_result = _migrate_v6_to_v7(database_path)
+        return MigrationResult(
+            database_path=str(database_path),
+            backup_path=v6_result.backup_path,
+            from_version=SCHEMA_VERSION_V5,
+            to_version=SCHEMA_VERSION_AFTER,
+            preserved_rows=v6_result.preserved_rows,
+            backup_paths=v5_result.backup_paths + v6_result.backup_paths,
+            backfill_summary={**v5_result.backfill_summary, **v6_result.backfill_summary},
+        )
+    if version == SCHEMA_VERSION_V6:
+        return _migrate_v6_to_v7(database_path)
     raise SchemaVersionError(
         f"database {str(database_path)!r} has schema version {version}; "
         "migrate supports only valid schema versions 4, 5, or 6"

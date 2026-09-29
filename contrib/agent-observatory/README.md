@@ -32,7 +32,7 @@ contrib/agent-observatory/
     canonical.py       canonical JSON, hashing, event/session snapshot identity
     store.py           SQLite schema versioning, transactional import, classifications
     migrations.py      explicit, backed-up SQLite schema upgrades
-    roles.py           GC session-name to agent-template role normalization
+    gc_enrichment.py   trusted GC session-template and repository enrichment
     pricing.py         validated, cited public model-price seed loader
     model_pricing.json checked-in price schedule with per-row source URLs
     commands.py        conservative, non-executing command categorization
@@ -166,32 +166,39 @@ the tool executed, and does not prove success. Only a result event with an
 
 - Schema version is stored in `PRAGMA user_version` and `schema_meta`. Opening a
   store with an unknown/future version raises `SchemaVersionError`. The current
-  version is **6**; version 3 excluded identity fields from the payload hash (so a
+  version is **7**; version 3 excluded identity fields from the payload hash (so a
   version-2 projection must be rebuilt rather than reused), version 4 added the
   M5 change/exposure registry, version 5 added the M7 shadow `recommendations`
-  projection, and version 6 adds durable classification/session bindings,
-  session roles, model prices and the `event_usage_cost` view.
-- Upgrade a valid schema-4 or schema-5 projection explicitly with
-  `python3 -m agent_observatory migrate --db /path/to/obs.db`. Schema 4 is backed
-  up as `<db>.v4-pre-schema5-<UTC timestamp>.bak` and advanced through schema 5;
-  schema 5 is separately backed up as `<db>.v5-pre-schema6-<UTC timestamp>.bak`
-  before the additive v6 migration. Each step updates both version markers and
-  rolls back atomically on failure. The v5-to-v6 step reports classification
-  binding/match rate and session-role coverage, preserving existing evidence row
-  counts. Normal store opens never migrate an existing database implicitly.
-- `sessions.role` is normalized from the GC runtime session name/template (pool
-  slot numbers are removed); it is never inferred from message `role` fields.
-  `classification_sessions` binds a classification to the full
-  `(city_id, host_id, provider, session_id)` key. At request creation, snapshot
-  matches are captured on `jev_requests` so a later response remains bound even
-  if the session has since grown. The migration matches raw and text-namespaced
-  hashes and uses exact `source_path`/`source_sha256` provenance only when it
-  identifies one session; ambiguous and unmatched rows remain unbound.
+  projection, version 6 adds classification/session bindings, the nullable
+  `sessions.role` column, model prices, and `event_usage_cost`. Version 7 adds
+  trusted GC session enrichment and the `events_with_enrichment` view.
+- Upgrade a valid schema-4, schema-5, or schema-6 projection explicitly with
+  `python3 -m agent_observatory migrate --db /path/to/obs.db`. Each migration step
+  first creates a timestamped online backup (`v4-pre-schema5`, `v5-pre-schema6`,
+  and, when applicable, `v6-pre-schema7`), updates both version markers, and rolls
+  back atomically on failure. Evidence row counts are preserved. The v6-to-v7
+  step clears roles previously guessed from provider session names; role coverage
+  remains unknown until authoritative GC metadata is imported. Normal store opens
+  never migrate an existing database implicitly.
+- `sessions.role` is populated only from the exact GC `template` value joined to
+  a provider transcript by its exact `session_key`. No role is guessed from a
+  session name, message `role`, GC bead ID, or transcript text. The
+  `session_enrichment` side table records this mapping and a normalized repository
+  identity without changing immutable event payload rows. `events_with_enrichment`
+  provides `effective_repo` and `effective_role` alongside each original event;
+  absent or ambiguous repository evidence remains null. The import command and
+  expected metadata are documented below. `classification_sessions` binds a
+  classification to the full `(city_id, host_id, provider, session_id)` key. At
+  request creation, snapshot matches are captured on `jev_requests` so a later
+  response remains bound even if the session has since grown. The migration
+  matches raw and text-namespaced hashes and uses exact
+  `source_path`/`source_sha256` provenance only when it identifies one session;
+  ambiguous and unmatched rows remain unbound.
 - `model_pricing` stores effective-dated, provider-scoped input/output/cache-read/
   cache-write rates as exact decimal `TEXT` in **USD per 1,000,000 tokens**;
   `provider = NULL` is a provider-neutral price and matches only events whose
   provider is also null. A model/provider/effective-time key permits different
-  providers to price the same model independently. New stores and schema-6
+  providers to price the same model independently. New stores and schema-4-to-7
   migrations load the checked-in public price seed automatically; rerun
   `python3 -m agent_observatory seed-pricing --db /path/to/obs.db` to idempotently
   restore/check it. The `event_usage_cost` view joins token counters to the most
@@ -218,7 +225,38 @@ the tool executed, and does not prove success. Only a result event with an
   timestamp; importing an earlier event later lowers it.
 - Tables include `events`, `event_usage`, `sessions`, `imported_files`,
   `jev_requests`, `classifications`, `classification_answers`,
-  `classification_sessions`, `model_pricing`, and `recommendations`.
+  `classification_sessions`, `model_pricing`, `session_enrichment`, and
+  `recommendations`. `events_with_enrichment` is a view, not a rewritten event table.
+
+### GC session enrichment
+
+For schema 7, an operator can import a complete local GC session metadata export:
+
+```bash
+gc session list --state all --json > /tmp/gc-sessions.json
+python3 -m agent_observatory migrate --db /path/to/obs.db
+python3 -m agent_observatory enrich-gc-sessions \
+  --db /path/to/obs.db --input /tmp/gc-sessions.json --city CITY --host HOST
+```
+
+The input rows must include the exact provider `session_key` and GC `template`;
+`provider_session_id` is accepted as an explicit key alias. The GC bead `id` and
+`session_name` are never used as fallbacks, so API/cache exports that omit the
+provider key remain unmatched rather than guessed. Only `claude`, `codex`, and
+`dsh` provider keys are currently accepted. The role is the template string
+verbatim. Repository context uses an explicit `repo`, otherwise the
+`remote.origin.url` found read-only under `worker_dir` or `work_dir`; conflicting
+repositories remain unknown. Remotes are normalized to owner/repository, and
+neither local paths nor remote credentials are persisted. The command prints
+counts only. Keep the local metadata export out of source control because it can
+contain session identifiers and work directories.
+
+The import binds only identities already present in `sessions` or
+`session_fingerprints`. `events_with_enrichment` exposes trusted `effective_repo`
+and `effective_role` next to the original immutable `events` columns. Exposure
+reports also consume this derived repository context for both events and
+fingerprints, enabling repo-scoped joins without rewriting payload hashes.
+
 - Classifications are **immutable**. They are keyed by subject (`event`/`session`
   snapshot hash), taxonomy version, question hash, and model version. Replaying
   an identical response deduplicates; a different response for the same key is
@@ -623,8 +661,10 @@ silently reduced.
 
 `exposure` joins registered changes to observed session evidence -- `commit_sha`
 and `model` values from the projection plus explicitly supplied
-`session_fingerprints` -- and emits the deterministic optimization ledger. The
-join never treats a merge as exposure:
+`session_fingerprints` -- and emits the deterministic optimization ledger. When
+an exact GC session binding supplies a repository, the derived repo is joined to
+the session and its fingerprints for repo-scoped exposure; the event payload
+itself is not rewritten. The join never treats a merge as exposure:
 
 - `exposed` requires positive evidence: an exact observed commit, commit
   ancestry from the change to an observed commit, or an observed
@@ -703,6 +743,17 @@ checkpoint and the source is retried. A per-projection advisory lock
 `queue-drain` takes its own `<realpath(DB)>.drain.lock` so two overlapping drains
 cannot select and pay for the same pending rows. Both locks are keyed on the
 database real path, so a symlink and its target share one lock.
+
+`backfill-usage` re-reads only explicitly checkpointed sources or sources under
+an explicit `--root`. It joins usage on the complete canonical event key
+`(city_id, host_id, provider, session_id, event_id)` and verifies stable
+`timestamp`, `kind`, `model`, and `parent_session_id` fields. It deliberately
+does not require the old payload hash to match: providers may rewrite transcript
+text or the adapter may normalize it differently while the native event key and
+usage-bearing turn stay the same. Usage is inserted only into `event_usage`; no
+event payload, text, or hash is rewritten. The counts-only result distinguishes
+`events_identity_matched` from `events_stable_field_rejected` so a rerun can reveal
+whether missing usage came from absent keys or an event-defining-field change.
 
 Bounds:
 
@@ -919,7 +970,7 @@ Recommendation rules:
 `recommendations` table, keyed by its content hash, with queryable eligibility.
 When the input bundle includes session identities, add
 `--classifications-from-db` to read its intent/scope/confidence through the
-schema-6 session binding. The recommendations retain queryable
+durable classification/session binding. The recommendations retain queryable
 confidence/uncertainty, recommended/current/fallback candidates, fallback path,
 disagreement and leak-free columns. Replaying an identical run deduplicates; a
 changed catalog or classification is retained as new, versioned evidence. The
@@ -1046,6 +1097,9 @@ fixture and an injected runner; no live Dolt server is needed in CI.
 
 ```
 agent-observatory import-jsonl --db DB FILE [FILE ...]
+agent-observatory migrate --db DB
+agent-observatory enrich-gc-sessions --db DB --input GC_SESSIONS.json --city CITY --host HOST
+agent-observatory backfill-usage --db DB [--root DIR ...] [--max-source-bytes N]
 agent-observatory report --db DB [--out FILE]
 agent-observatory build-request --state STATE.json
     [--db DB] [--subject-kind event|session]
@@ -1162,6 +1216,13 @@ commands, instruction-like text treated as data, question-hash sensitivity to
 instructions/criteria, and invalid/NaN responses. `examples/demo.sh` runs the CLI
 end to end against the synthetic fixture; replay preserves event and
 classification counts.
+
+`tests/test_gc_enrichment.py` uses synthetic GC keys and a mock remote URL to
+prove exact-key role binding, path/host non-retention, repository propagation to
+event and fingerprint exposure evidence, and no event
+payload rewrites. `tests/test_collector.py` also covers usage recovery when a
+provider rewrites transcript prose for an unchanged canonical event key, and
+refusal when stable model evidence changes.
 
 The evaluation tests add: v2 facet parsing/cardinality/hash stability, episode
 segmentation (boundaries, work-anchor splitting, stable collision-free ids,

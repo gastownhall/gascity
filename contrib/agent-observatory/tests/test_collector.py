@@ -603,6 +603,88 @@ class UsageBackfillTests(CollectorTestCase):
             self.assertEqual(second.candidate_events, 0)
             self.assertEqual(second.usage_inserted, 0)
 
+    def test_usage_backfill_survives_payload_rewrite_for_same_stable_event_key(self):
+        source = os.path.join(self.claude_dir, "rewritten-usage.jsonl")
+        transcript_record = {
+            "type": "assistant",
+            "uuid": "synthetic-usage-event",
+            "sessionId": "synthetic-usage-session",
+            "timestamp": "2026-09-28T12:00:00.000Z",
+            "message": {
+                "id": "synthetic-usage-message",
+                "role": "assistant",
+                "model": "claude-test-1",
+                "content": [{"type": "text", "text": "Synthetic original event text"}],
+            },
+        }
+        with open(source, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(transcript_record) + "\n")
+
+        with ObservatoryStore(self.db) as store:
+            self.collect(store)
+            event_before = dict(
+                store.conn.execute(
+                    "SELECT payload_hash, text FROM events WHERE provider = 'claude'"
+                ).fetchone()
+            )
+            store.conn.execute("DELETE FROM event_usage")
+
+            # A provider rewrite changes prose while preserving the native event
+            # identity and the event-defining time/kind/model fields.
+            transcript_record["message"]["content"][0]["text"] = "Synthetic rewritten event text"
+            transcript_record["message"]["usage"] = {"input_tokens": 9, "output_tokens": 3}
+            with open(source, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(transcript_record) + "\n")
+
+            run = backfill_missing_usage(store, roots=(SourceRoot(path=self.root),))
+            event_after = store.conn.execute(
+                "SELECT payload_hash, text FROM events WHERE provider = 'claude'"
+            ).fetchone()
+            usage = store.conn.execute(
+                "SELECT input_tokens, output_tokens FROM event_usage WHERE provider = 'claude'"
+            ).fetchone()
+
+        self.assertEqual(run.events_identity_matched, 1)
+        self.assertEqual(run.events_matched, 1)
+        self.assertEqual(run.events_stable_field_rejected, 0)
+        self.assertEqual(run.usage_inserted, 1)
+        self.assertEqual(dict(event_after), event_before)
+        self.assertEqual(tuple(usage), (9, 3))
+
+    def test_usage_backfill_rejects_same_key_when_model_changes(self):
+        source = os.path.join(self.claude_dir, "changed-model-usage.jsonl")
+        transcript_record = {
+            "type": "assistant",
+            "uuid": "synthetic-model-event",
+            "sessionId": "synthetic-model-session",
+            "timestamp": "2026-09-28T12:00:00.000Z",
+            "message": {
+                "id": "synthetic-model-message",
+                "role": "assistant",
+                "model": "claude-test-1",
+                "content": [{"type": "text", "text": "Synthetic event text"}],
+            },
+        }
+        with open(source, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(transcript_record) + "\n")
+
+        with ObservatoryStore(self.db) as store:
+            self.collect(store)
+            store.conn.execute("DELETE FROM event_usage")
+            transcript_record["message"]["model"] = "claude-test-2"
+            transcript_record["message"]["usage"] = {"input_tokens": 9, "output_tokens": 3}
+            with open(source, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(transcript_record) + "\n")
+
+            run = backfill_missing_usage(store, roots=(SourceRoot(path=self.root),))
+            usage_count = store.conn.execute("SELECT COUNT(*) FROM event_usage").fetchone()[0]
+
+        self.assertEqual(run.events_identity_matched, 1)
+        self.assertEqual(run.events_matched, 0)
+        self.assertEqual(run.events_stable_field_rejected, 1)
+        self.assertEqual(run.usage_inserted, 0)
+        self.assertEqual(usage_count, 0)
+
     def test_collector_persists_adapter_session_fingerprints(self):
         source = os.path.join(self.claude_dir, "repo-evidence.jsonl")
         fixture = os.path.join(HERE, "fixtures", "adapters", "claude", "repo-evidence.jsonl")
