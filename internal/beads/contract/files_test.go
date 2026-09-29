@@ -524,7 +524,7 @@ func TestEnsureCanonicalConfigFallbackPreservesFlatDoltDisableEventFlushOptOutIn
 	input := strings.Join([]string{
 		"issue-prefix: gc",
 		"dolt:",
-		"  host: 127.0.0.1",
+		"  shared-server: false",
 		"dolt.disable-event-flush: false",
 		": not yaml",
 		"",
@@ -558,7 +558,7 @@ func TestEnsureCanonicalConfigFallbackPreservesFlatDoltDisableEventFlushOptOutIn
 		t.Fatal(err)
 	}
 	text := string(data)
-	if !strings.Contains(text, "dolt:\n  host: 127.0.0.1\n  disable-event-flush: false") {
+	if !strings.Contains(text, "dolt:\n  shared-server: false\n  disable-event-flush: false") {
 		t.Fatalf("config should insert nested Dolt opt-out into existing block:\n%s", text)
 	}
 	if strings.Contains(text, "dolt.disable-event-flush") {

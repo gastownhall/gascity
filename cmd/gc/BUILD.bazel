@@ -1073,6 +1073,7 @@ go_test(
         "gascity_pack_binding_doctor_check_test.go",
         "gc_beads_bd_bind_host_test.go",
         "gc_beads_bd_config_commit_test.go",
+        "gc_beads_bd_config_value_test.go",
         "gc_beads_bd_force_reinit_guard_test.go",
         "gc_beads_bd_identity_test.go",
         "gc_beads_bd_journal_recovery_test.go",
