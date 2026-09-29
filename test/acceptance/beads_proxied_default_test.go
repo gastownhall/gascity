@@ -67,6 +67,9 @@ type doctorCheckResult struct {
 	Name    string `json:"name"`
 	Status  string `json:"status"`
 	Message string `json:"message"`
+	// Details are the check's supporting lines; proxied-backup-coverage
+	// lists each scope it found backed up here.
+	Details []string `json:"details,omitempty"`
 	// Payload is the check's structured findings, decoded lazily: only
 	// beads-store sets one this test reads, and decoding it eagerly into a
 	// typed field would make every other check's payload a parse this file has
@@ -362,9 +365,10 @@ func assertDoctorGreen(t *testing.T, city *helpers.City, label string) {
 // The line follows the bd, as the check does. bd v1.3.0 refuses `bd backup` on
 // the proxied path, so nothing can produce a recovery point and the advisory
 // is StatusOK (R3: a warning no operator can clear is a line nobody reads). A
-// bd with proxied backup (beads 1.3.1) makes the gap closable, so a fresh
-// scope with no destination is an advisory warning; a scope whose proxy is
-// not running is named as not checked.
+// bd with proxied backup (beads 1.3.1) makes the gap closable, so a scope with
+// no destination is an advisory warning, a scope mol-dog-backup has already
+// registered and synced is listed as backed up in the details, and a scope
+// whose proxy is not running is named as not checked.
 // assertDoctorReportsBdOwnedProxiedStore pins WHICH store a real `gc init`
 // proxied city opens, which assertDoctorGreen cannot see: internal/doctor
 // reports ok both for BdStore behind the proxied_provider gate and for a
@@ -543,21 +547,36 @@ func assertProxiedBackupAdvisory(t *testing.T, city *helpers.City, label string,
 		wantStatus = "ok"
 	case strings.Contains(found.Message, "no bd backup destination is configured"):
 		wantStatus = "warning"
-	case strings.Contains(found.Message, "not checked: store not running"):
-		// Every scope's proxy is stopped: doctor never starts one to ask.
+	case strings.Contains(found.Message, "backed up through bd"),
+		strings.Contains(found.Message, "not checked: store not running"):
+		// Every scope is covered, or its proxy is stopped and doctor never
+		// starts one to ask.
 		wantStatus = "ok"
 	default:
-		t.Fatalf("proxied-backup-coverage on %s names neither a refusal, a missing destination nor a stopped store: %s",
+		t.Fatalf("proxied-backup-coverage on %s names neither a refusal, a missing destination, a backup nor a stopped store: %s",
 			label, found.Message)
 	}
 	if found.Status != wantStatus {
 		t.Errorf("proxied-backup-coverage = %s on %s, want %s: %s", found.Status, label, wantStatus, found.Message)
 	}
 	for _, want := range wantScopes {
-		if !strings.Contains(found.Message, want) {
-			t.Errorf("proxied-backup-coverage on %s does not name scope %q: %s", label, want, found.Message)
+		if !strings.Contains(found.Message, want) && !proxiedScopeBackedUp(found.Details, want) {
+			t.Errorf("proxied-backup-coverage on %s neither names scope %q nor reports it backed up: %s %q",
+				label, want, found.Message, found.Details)
 		}
 	}
+}
+
+// proxiedScopeBackedUp reports whether proxied-backup-coverage's details list
+// scope as backed up through bd ("<scope>: bd backup <url>, last sync <t>").
+func proxiedScopeBackedUp(details []string, scope string) bool {
+	for _, line := range details {
+		label, rest, ok := strings.Cut(line, ": bd backup ")
+		if ok && strings.Contains(label, scope) && strings.Contains(rest, "last sync") {
+			return true
+		}
+	}
+	return false
 }
 
 // makeCityLookLegacyManaged rewrites a freshly initialised proxied city into
