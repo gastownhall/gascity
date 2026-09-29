@@ -185,7 +185,7 @@ func sessionStartAutoHandoffInjectionWithStore(store beads.Store, cityPath strin
 	return primeHookContextInjection{
 		text: formatInjectOutput(messages),
 		afterDelivery: func() {
-			archiveInjectedAutoHandoffMessages(mp, selectMailInjectWindow(messages), stderr)
+			archiveInjectedAutoHandoffMessages(mp, selectMailInjectWindow(messages).allShown(), stderr)
 		},
 	}, ids, ordinaryMailProvider
 }

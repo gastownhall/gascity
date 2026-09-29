@@ -1313,6 +1313,11 @@ func beadToMessage(b beads.Bead) mail.Message {
 		ReplyTo:   extractLabel(b.Labels, "reply-to:"),
 		Priority:  extractPriority(b.Labels),
 		CC:        extractCC(b.Labels),
+		// Matches the ArchiveInjectedAutoHandoffs / CheckAutoHandoffs label
+		// test exactly, independent of body: a body-bearing auto-handoff is
+		// archived on delivery too, it just isn't eligible for the inject
+		// preview's empty-body collapse (ga-8gdkfy).
+		ArchivedOnDelivery: hasLabel(b.Labels, mail.AutoHandoffLabel) && hasLabel(b.Labels, mail.ArchiveAfterInjectLabel),
 	}
 }
 
