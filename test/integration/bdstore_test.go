@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/doctor"
+	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
 const (
@@ -43,16 +44,13 @@ const (
 // Requires: Dolt and bd binaries configured via PATH or the integration
 // override env vars.
 func TestBdStoreConformance(t *testing.T) {
-	// Skipped because BdStore fails this suite's
-	// ParentIDNamesARowThisStoreDoesNotHave row on every pinned bd: it hands
-	// ParentID to bd as --parent, and bd 1.3.x refuses a parent it cannot
-	// resolve ("parent issue ... not found"), the divergence ga-6od57 tracks.
-	// The bd 1.0.4 reason the skip was added for (ga-e7z613) no longer applies;
-	// every pin carries the #3691 empty-DB guard. The suite is in the gating
-	// integration-smoke filter, so un-skipping it (ga-x4j5ka) needs that row
-	// fixed or opted out, and a green run on both pins.
-	t.Skip("BdStore fails ParentIDNamesARowThisStoreDoesNotHave: bd refuses an unresolvable --parent (ga-6od57); un-skip is ga-x4j5ka")
 	requireDoltIntegration(t)
+	// bd 1.0.4 (deps.env BD_PREV_VERSION, the contract-tested floor) was tagged
+	// before #3691 restored bd's empty-DB auto-import guard, so it silently
+	// auto-imports into an empty on-disk DB and trips gascity's
+	// ErrBDSilentFallback guard (#2080). That is bd behavior, not a gascity
+	// regression; v1.0.5 is the first tag that contains #3691.
+	helpers.RequireBDAtLeast(t, realBDBinary, "v1.0.5", "the #3691 empty-DB auto-import guard")
 	env := newIsolatedToolEnv(t, true)
 
 	rootDir := t.TempDir()
@@ -90,7 +88,11 @@ func TestBdStoreConformance(t *testing.T) {
 
 	// Run conformance suite. We skip RunSequentialIDTests because BdStore
 	// uses bd's ID format (prefix-XXXX), not gc-N sequential format.
-	beadstest.RunStoreTests(t, newStore)
+	// BdStore hands ParentID to bd as --parent, which bd resolves
+	// unconditionally, so it cannot keep a parent bd does not have; that one
+	// subtest is opted out through the skip ledger, which names the tracking
+	// bead and expires.
+	beadstest.RunStoreTestsWithOptions(t, newStore, beadstest.Options{SkipForeignParentConformance: true})
 	beadstest.RunMetadataTests(t, newStore)
 	beadstest.RunCloseReasonTests(t, newStore)
 }
