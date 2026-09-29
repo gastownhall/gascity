@@ -314,12 +314,34 @@ beads `cmd/bd/proxy_capability.go`; packs and orders that call those verbs
 against a proxied scope fail typed. The dashboard and doctor use `bd ping`
 rather than `bd doctor --readonly` for exactly this reason.
 
-`backup*` is on that list, and it is the one refusal with a data consequence:
-on rc.2 a proxied scope has no backup, by anyone. gc cannot register a Dolt
-backup against a proxy root it does not own, `mol-dog-backup` talks to the
-managed server a proxied scope does not have, and bd refuses its own verb. The
-per-scope doctor checks therefore go quiet — correctly, since there is nothing
-to register and a permanent warning is a line nobody can clear — so doctor says
-it instead in `rig:<name>:dolt-backup`'s message and once per city in the
-`proxied-backup-coverage` advisory. Until beads lifts the refusal, the store
-under the proxy root is the only copy; copy it out of band.
+`backup*` is on that list in rc.2 and v1.3.0, and it is the one refusal with a
+data consequence: there, a proxied scope has no backup, by anyone. gc cannot
+register a Dolt backup against a proxy root it does not own, and
+`mol-dog-backup` backs scopes up only through `bd backup`, which that bd
+refuses. The store under the proxy root is the only copy; copy it out of band.
+
+beads hotfix/1.3.1 lifts the refusal: `bd backup init/sync/status/restore/remove`
+work on a managed-local proxied scope, so `mol-dog-backup` registers a
+destination (`bd backup init`) when a scope has none and syncs it
+(`bd backup sync`) like any other scope.
+
+The per-scope doctor checks stay quiet on a proxy root — there is nothing for
+gc to register, and `rig:<name>:dolt-backup`'s message says only bd can back it
+up. The city-level `proxied-backup-coverage` check asks each proxied scope's
+pinned bd with `bd backup status --json` and follows the answer, not a version
+string. It asks only about a scope whose proxy gc's endpoint inspection (the
+proxy record plus the process table, no dial) shows running: on bd 1.3.1
+`backup status` sizes the database through the proxy, which would start a
+stopped scope's proxy and Dolt, and doctor never starts servers. Other scopes
+read "not checked: store not running"; suspended rigs are left out, and the
+check is registered only when the bead-store preflight passed. All scopes share
+one 45s deadline with at most four bd calls at a time.
+
+- bd refuses (`proxy.backup.unsupported`, v1.3.0): an OK-status advisory that
+  names the scopes and says the store is the only copy — a permanent warning
+  would be a line nobody can clear.
+- bd answers: the check verifies a destination is configured and its
+  `last_sync` is within 24 hours, and warns (advisory severity) for any scope
+  with no destination, no sync, a stale sync, or an unreadable status. That gap
+  is one the operator can close, with `gc order run mol-dog-backup` or
+  `bd backup init <url>` then `bd backup sync` in the scope.

@@ -77,13 +77,13 @@ func (c *DoltBackupCheck) Run(_ *CheckContext) *CheckResult {
 	// one does.
 	//
 	// It must not read as coverage either, and what coverage exists differs by
-	// transport. On the proxied path v1.3.0 refuses `bd backup` outright, so
-	// there is no backup at all and nothing else reports it —
-	// bd-backup-freshness skips a scope with no backup_state.json and delegates
-	// "no backup at all" to this check by name; that gap also gets one
-	// city-level line in ProxiedBackupCoverageCheck. A direct bd-owned scope
-	// can still be backed up through bd, so its message claims only that gc
-	// does not register it. See bdOwnedBackupCoverageNote.
+	// transport. On the proxied path only bd can back the scope up, and bd
+	// v1.3.0 refuses `bd backup` there outright; this check runs no bd, so
+	// its message says so and defers to ProxiedBackupCoverageCheck, which asks
+	// each proxied scope's bd (`bd backup status`) whether a recent backup
+	// exists. A direct bd-owned scope can be backed up through bd, so its
+	// message claims only that gc does not register it. See
+	// bdOwnedBackupCoverageNote.
 	if scopeIsProviderOwned(c.cityPath, rigPath) {
 		r.Status = StatusOK
 		r.Message = fmt.Sprintf("rig %q: %s — %s", c.rig.Name, bdOwnedStoreNoun(rigPath), bdOwnedBackupCoverageNote(rigPath))

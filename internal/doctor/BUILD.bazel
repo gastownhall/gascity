@@ -109,6 +109,7 @@ go_test(
         "checks_order_outcome_test.go",
         "checks_pack_credentials_test.go",
         "checks_provider_parity_test.go",
+        "checks_proxied_backup_coverage_test.go",
         "checks_proxied_endpoint_test.go",
         "checks_proxied_external_backup_test.go",
         "checks_proxied_provider_test.go",
@@ -137,6 +138,7 @@ go_test(
         "testenv_import_test.go",
         "zz_boolptr_test.go",
     ],
+    data = glob(["testdata/**"]),
     embed = [":doctor"],
     deps = [
         "//internal/beads",
