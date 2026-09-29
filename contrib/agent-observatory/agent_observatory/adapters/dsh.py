@@ -37,6 +37,7 @@ from .base import (
     number_or_none,
     split_jsonl,
 )
+from .git_evidence import attach_git_evidence
 from .redaction import elide_large_text, redact_and_bound, redact_text
 
 _META_TYPES = frozenset(
@@ -318,6 +319,7 @@ class DshAdapter(SourceAdapter):
             # session.
             result.note_skip("no_dsh_signature")
 
+        attach_git_evidence(result, decoded, context)
         return result
 
     # -- record plumbing ---------------------------------------------------

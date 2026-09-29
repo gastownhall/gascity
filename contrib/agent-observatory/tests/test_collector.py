@@ -25,6 +25,7 @@ from agent_observatory.collector import (
     CollectorConfig,
     _collector_lock,
     _drain_lock,
+    backfill_missing_usage,
     collect_once,
     collect_watch,
     collector_status,
@@ -549,6 +550,81 @@ def _fake_classify(outcomes):
     return fake, calls
 
 
+
+
+class UsageBackfillTests(CollectorTestCase):
+    def test_backfill_is_resumable_and_idempotent_with_source_size_cap(self):
+        source = os.path.join(self.claude_dir, "usage-backfill.jsonl")
+        transcript_record = {
+            "type": "assistant",
+            "uuid": "usage-event",
+            "sessionId": "usage-backfill-session",
+            "timestamp": "2026-09-28T12:00:00.000Z",
+            "message": {
+                "id": "usage-message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Synthetic usage evidence"}],
+            },
+        }
+        with open(source, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(transcript_record) + "\n")
+
+        with ObservatoryStore(self.db) as store:
+            self.collect(store)
+            event = store.conn.execute(
+                "SELECT city_id, host_id, provider, session_id, event_id FROM events"
+            ).fetchone()
+            identity = tuple(event)
+            transcript_record["message"]["usage"] = {"input_tokens": 4, "output_tokens": 2}
+            with open(source, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(transcript_record) + "\n")
+            store.conn.execute("DELETE FROM event_usage")
+            store.conn.execute("DELETE FROM collector_sources")
+            roots = (SourceRoot(path=self.root),)
+
+            deferred = backfill_missing_usage(store, max_source_bytes=1, roots=roots)
+            self.assertEqual(deferred.sources_deferred, 1)
+            self.assertEqual(deferred.usage_inserted, 0)
+            self.assertIsNone(store.get_usage(identity))
+
+            first = backfill_missing_usage(
+                store, max_source_bytes=DEFAULT_MAX_SOURCE_BYTES, roots=roots
+            )
+            self.assertEqual(first.sources_read, 1)
+            self.assertEqual(first.events_matched, 1)
+            self.assertEqual(first.usage_inserted, 1)
+            usage = store.get_usage(identity)
+            self.assertEqual(usage["input_tokens"], 4)
+            self.assertEqual(usage["output_tokens"], 2)
+
+            second = backfill_missing_usage(
+                store, max_source_bytes=DEFAULT_MAX_SOURCE_BYTES, roots=roots
+            )
+            self.assertEqual(second.candidate_events, 0)
+            self.assertEqual(second.usage_inserted, 0)
+
+    def test_collector_persists_adapter_session_fingerprints(self):
+        source = os.path.join(self.claude_dir, "repo-evidence.jsonl")
+        fixture = os.path.join(HERE, "fixtures", "adapters", "claude", "repo-evidence.jsonl")
+        shutil.copyfile(fixture, source)
+
+        with ObservatoryStore(self.db) as store:
+            run = self.collect(store)
+            fingerprints = store.load_session_fingerprints()
+            repos = {
+                row["repo"] for row in store.conn.execute("SELECT DISTINCT repo FROM events")
+                if row["repo"]
+            }
+
+        self.assertGreater(run.session_fingerprints_inserted, 0)
+        self.assertTrue(fingerprints)
+        self.assertEqual({item["value"] for item in fingerprints}, {
+            "1111111",
+            "1111111111111111111111111111111111111111",
+            "2222222222222222222222222222222222222222",
+        })
+        self.assertEqual(repos, {"hoomji/gascity"})
+
 class QueueTests(CollectorTestCase):
     def setUp(self) -> None:
         super().setUp()
@@ -827,6 +903,26 @@ class StatusAndCliTests(CollectorTestCase):
             ["collect", "--db", self.db, "--root", self.root, "--city", "c", "--host", "h"]
         )
         self.assertEqual(args.max_source_bytes, DEFAULT_MAX_SOURCE_BYTES)
+
+
+    def test_cli_backfill_usage_exposes_source_byte_cap(self):
+        from agent_observatory.cli import build_parser
+
+        default = build_parser().parse_args(["backfill-usage", "--db", self.db])
+        explicit = build_parser().parse_args(
+            [
+                "backfill-usage",
+                "--db",
+                self.db,
+                "--root",
+                self.root,
+                "--max-source-bytes",
+                "1048576",
+            ]
+        )
+        self.assertEqual(default.max_source_bytes, DEFAULT_MAX_SOURCE_BYTES)
+        self.assertEqual(explicit.max_source_bytes, 1048576)
+        self.assertEqual(explicit.root, [self.root])
 
     def test_cli_queue_drain_requires_request_ceiling(self):
         code, _, err = self.run_cli("queue-drain", "--db", self.db)

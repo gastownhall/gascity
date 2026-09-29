@@ -89,6 +89,8 @@ class AdapterResult:
     partial_trailing_line: bool = False
     line_count: int = 0
     skipped: dict[str, int] = field(default_factory=dict)
+    session_fingerprints: list[dict[str, Any]] = field(default_factory=list)
+    session_evidence_notes: dict[str, list[str]] = field(default_factory=dict)
 
     def note_skip(self, reason: str, detail: str | None = None) -> None:
         self.skipped[reason] = self.skipped.get(reason, 0) + 1
@@ -119,6 +121,11 @@ class AdapterResult:
             "tool_calls": tool_calls,
             "tool_results": tool_results,
             "title_revisions": len(self.title_revisions),
+            "session_fingerprints": len(self.session_fingerprints),
+            "session_evidence_notes": {
+                session_id: list(notes)
+                for session_id, notes in sorted(self.session_evidence_notes.items())
+            },
             "skipped": dict(sorted(self.skipped.items())),
             "partial_trailing_line": self.partial_trailing_line,
             "errors": list(self.errors),

@@ -1,0 +1,11 @@
+{"timestamp":"2026-09-28T12:00:00.000Z","type":"session_meta","payload":{"id":"codex-repo-evidence","cwd":"/home/fixture/project/worktrees/fleet-testdispatch"}}
+{"timestamp":"2026-09-28T12:00:01.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"remote-call","arguments":"{\"cmd\":\"git remote -v\",\"cwd\":\"/home/fixture/project/worktrees/fleet-testdispatch\"}"}}
+{"timestamp":"2026-09-28T12:00:02.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"remote-call","output":"origin git@github.com:hoomji/gascity.git (fetch)\norigin git@github.com:hoomji/gascity.git (push)"}}
+{"timestamp":"2026-09-28T12:00:03.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"toplevel-call","arguments":"{\"cmd\":\"git rev-parse --show-toplevel\"}"}}
+{"timestamp":"2026-09-28T12:00:04.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"toplevel-call","output":"/home/fixture/project/worktrees/fleet-testdispatch"}}
+{"timestamp":"2026-09-28T12:00:05.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"commit-call","arguments":"{\"cmd\":\"git commit -m synthetic\"}"}}
+{"timestamp":"2026-09-28T12:00:06.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"commit-call","output":"[fleet/test 1111111] synthetic commit"}}
+{"timestamp":"2026-09-28T12:00:07.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"push-call","arguments":"{\"cmd\":\"git push origin HEAD\"}"}}
+{"timestamp":"2026-09-28T12:00:08.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"push-call","output":"To https://github.com/hoomji/gascity.git\n1111111111111111111111111111111111111111..2222222222222222222222222222222222222222 main -> main"}}
+{"timestamp":"2026-09-28T12:00:09.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"head-call","arguments":"{\"cmd\":\"git rev-parse HEAD\"}"}}
+{"timestamp":"2026-09-28T12:00:10.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"head-call","output":"2222222222222222222222222222222222222222"}}
