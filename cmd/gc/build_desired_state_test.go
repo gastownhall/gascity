@@ -955,6 +955,56 @@ func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 	}
 }
 
+func TestDefaultScaleCheckCountsAndDemandExcludesDispatchHolds(t *testing.T) {
+	const template = "gascity/workflows.codex-min"
+	for _, holdLabel := range beadmeta.DispatchHoldLabels {
+		t.Run(holdLabel, func(t *testing.T) {
+			store := beads.NewMemStore()
+			held, err := store.Create(beads.Bead{
+				Title:  "held routed work",
+				Type:   "task",
+				Status: "open",
+				Labels: []string{holdLabel},
+				Metadata: map[string]string{
+					beadmeta.RoutedToMetadataKey: template,
+				},
+			})
+			if err != nil {
+				t.Fatalf("create held routed bead: %v", err)
+			}
+			unheld, err := store.Create(beads.Bead{
+				Title:  "claimable routed work",
+				Type:   "task",
+				Status: "open",
+				Metadata: map[string]string{
+					beadmeta.RoutedToMetadataKey: template,
+				},
+			})
+			if err != nil {
+				t.Fatalf("create unheld routed bead: %v", err)
+			}
+
+			counts, demand, _, errs := defaultScaleCheckCountsAndDemand(nil, []defaultScaleCheckTarget{{
+				template: template,
+				storeKey: "rig:gascity",
+				store:    store,
+			}})
+			if len(errs) != 0 {
+				t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
+			}
+			if got := counts[template]; got != 1 {
+				t.Fatalf("defaultScaleCheckCountsAndDemand[%q] = %d, want 1", template, got)
+			}
+			if got := demand[template].WorkBeadIDs; !reflect.DeepEqual(got, []string{unheld.ID}) {
+				t.Fatalf("WorkBeadIDs = %v, want only unheld bead %s (held %s)", got, unheld.ID, held.ID)
+			}
+			if _, ok := demand[template].Titles[held.ID]; ok {
+				t.Fatalf("held bead %s selected as a demand trigger", held.ID)
+			}
+		})
+	}
+}
+
 // TestDefaultScaleCheckCountsAndDemandNormalizesInstanceSuffixedRouteTarget
 // reproduces a writer that stamps gc.routed_to with an instance-suffixed pool
 // identity directly (e.g. `bd update --set-metadata gc.routed_to=hello-world/polecat-1`),
