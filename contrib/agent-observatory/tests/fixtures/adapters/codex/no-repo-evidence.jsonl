@@ -1,0 +1,2 @@
+{"timestamp":"2026-09-28T13:00:00.000Z","type":"session_meta","payload":{"id":"codex-no-repo-evidence"}}
+{"timestamp":"2026-09-28T13:00:01.000Z","type":"response_item","payload":{"type":"message","id":"empty-message","role":"user","content":[{"type":"input_text","text":"Synthetic session with no repository metadata"}]}}

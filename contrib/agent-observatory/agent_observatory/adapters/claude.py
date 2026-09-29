@@ -29,6 +29,7 @@ from .base import (
     number_or_none,
     split_jsonl,
 )
+from .git_evidence import attach_git_evidence
 from .redaction import elide_large_text, redact_and_bound, redact_text
 
 # Block types that carry model reasoning and must never be stored by default.
@@ -142,6 +143,12 @@ class ClaudeAdapter(SourceAdapter):
             else:
                 result.note_skip(f"type:{kind}")
 
+        attach_git_evidence(
+            result,
+            decoded,
+            context,
+            session_id_for_obj=lambda obj: _session_identity(obj, stem)[0],
+        )
         return result
 
     # -- record plumbing ---------------------------------------------------

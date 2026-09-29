@@ -55,6 +55,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import sqlite3
 import tempfile
 import time
@@ -64,6 +65,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from .adapters import (
+    ADAPTERS,
     AdapterContext,
     AdapterError,
     SourceSizeExceeded,
@@ -72,6 +74,7 @@ from .adapters import (
 )
 from .adapters.redaction import redact_text
 from .canonical import canonical_hash, identity_key, sha256_text
+from .contract import payload_hash
 from .commands import categorize_command
 from .errors import ContractError, ObservatoryError, RequestByteCapExceeded, RequestError
 from .framework import FRAMEWORK_FILTER_VERSION, strip_framework_text
@@ -332,6 +335,7 @@ class CollectRun:
     bytes_read: int = 0
     sessions_enqueued: int = 0
     queue_superseded: int = 0
+    session_fingerprints_inserted: int = 0
     ignored_files: dict[str, int] = field(default_factory=dict)
     run_id: int | None = None
 
@@ -349,8 +353,43 @@ class CollectRun:
             "bytes_read": self.bytes_read,
             "sessions_enqueued": self.sessions_enqueued,
             "queue_superseded": self.queue_superseded,
+            "session_fingerprints_inserted": self.session_fingerprints_inserted,
             "ignored_files": dict(sorted(self.ignored_files.items())),
             "run_id": self.run_id,
+        }
+
+
+@dataclass
+class UsageBackfillRun:
+    """Safe summary of one resumable event-usage backfill pass."""
+
+    status: str = "ok"
+    candidate_events: int = 0
+    sources_seen: int = 0
+    sources_read: int = 0
+    sources_missing: int = 0
+    sources_deferred: int = 0
+    sources_error: int = 0
+    unmapped_sources: int = 0
+    events_matched: int = 0
+    events_unmatched: int = 0
+    usage_inserted: int = 0
+    reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "candidate_events": self.candidate_events,
+            "sources_seen": self.sources_seen,
+            "sources_read": self.sources_read,
+            "sources_missing": self.sources_missing,
+            "sources_deferred": self.sources_deferred,
+            "sources_error": self.sources_error,
+            "unmapped_sources": self.unmapped_sources,
+            "events_matched": self.events_matched,
+            "events_unmatched": self.events_unmatched,
+            "usage_inserted": self.usage_inserted,
+            "reason": self.reason,
         }
 
 
@@ -678,6 +717,11 @@ def _import_source(
     run.events_duplicate += imported.duplicates
     run.events_conflicting += imported.skipped_conflicts
     run.by_change[change] = run.by_change.get(change, 0) + 1
+    if result.session_fingerprints:
+        fingerprint_import = store.import_registry(
+            {"session_fingerprints": result.session_fingerprints}
+        )
+        run.session_fingerprints_inserted += fingerprint_import.session_fingerprints_inserted
     sessions = {(record["city_id"], record["host_id"], record["provider"], record["session_id"]) for record in records}
     touched.update(sessions)
     # Queue before the "imported" checkpoint: a crash between the two re-imports
@@ -698,6 +742,11 @@ def _import_source(
         deferral_cap=None,
     )
     reason = f"{change} generation {generation}: {imported.inserted} new, {imported.duplicates} duplicate events"
+    evidence_notes = sorted(
+        {note for notes in result.session_evidence_notes.values() for note in notes}
+    )
+    if evidence_notes:
+        reason += "; session evidence: " + "; ".join(evidence_notes)
     if imported.skipped_conflicts:
         reason += f", {imported.skipped_conflicts} conflicting identities skipped"
     if result.partial_trailing_line:
@@ -865,6 +914,282 @@ def _finish_run(store: ObservatoryStore, run: CollectRun, clock: Callable[[], fl
     )
     run.run_id = int(cursor.lastrowid)
     return run
+
+
+_BACKFILL_GENERATION_RE = re.compile(r"^(?:claude|codex|dsh)-g([1-9][0-9]*)-p")
+
+
+def backfill_missing_usage(
+    store: ObservatoryStore,
+    *,
+    max_source_bytes: int | None = DEFAULT_MAX_SOURCE_BYTES,
+    roots: Sequence[SourceRoot] = (),
+) -> UsageBackfillRun:
+    """Re-read known transcript sources and fill missing usage rows safely.
+
+    Sources are resolved from the collector's explicit-source checkpoint, from
+    optional explicit roots, or from an existing event provenance path
+    recognized by its adapter. Work is committed a source at a time. A retry
+    selects only events that still have no ``event_usage`` row, making
+    interrupted runs resumable and repeated runs
+    idempotent without a new checkpoint table.
+    """
+
+    if max_source_bytes is not None and (
+        isinstance(max_source_bytes, bool)
+        or not isinstance(max_source_bytes, int)
+        or max_source_bytes < 1
+    ):
+        raise ObservatoryError("max_source_bytes must be a positive integer when set")
+    ensure_collector_schema(store.conn)
+    with _collector_lock(store.path) as acquired:
+        if not acquired:
+            return UsageBackfillRun(status="locked", reason="another collector holds the projection lock")
+        return _backfill_missing_usage_locked(store, max_source_bytes, roots)
+
+
+def _backfill_missing_usage_locked(
+    store: ObservatoryStore,
+    max_source_bytes: int | None,
+    roots: Sequence[SourceRoot],
+) -> UsageBackfillRun:
+    run = UsageBackfillRun()
+    missing_join = (
+        "FROM events AS e LEFT JOIN event_usage AS u "
+        "ON u.city_id = e.city_id AND u.host_id = e.host_id AND u.provider = e.provider "
+        "AND u.session_id = e.session_id AND u.event_id = e.event_id "
+        "WHERE u.event_id IS NULL AND e.provider IN ('claude', 'codex', 'dsh')"
+    )
+    run.candidate_events = int(store.conn.execute(f"SELECT COUNT(*) {missing_join}").fetchone()[0])
+    if not run.candidate_events:
+        return run
+    source_refs = store.conn.execute(
+        f"SELECT DISTINCT e.source_path, e.provider {missing_join} "
+        "ORDER BY e.source_path, e.provider"
+    ).fetchall()
+
+    checkpoint_rows = store.conn.execute(
+        "SELECT source_id, provider, path, generation FROM collector_sources"
+    ).fetchall()
+    checkpoints = {
+        row["source_id"]: dict(row)
+        for row in checkpoint_rows
+        if row["source_id"] and row["provider"] in {"claude", "codex", "dsh"}
+    }
+    if roots:
+        discovered, _unsupported = discover_sources(roots)
+        for source in discovered:
+            source_id = sha256_text(source.realpath)[:32]
+            checkpoints.setdefault(
+                source_id,
+                {
+                    "source_id": source_id,
+                    "provider": source.provider,
+                    "path": source.path,
+                    "generation": None,
+                },
+            )
+
+    unmapped_paths: set[str] = set()
+    for source_ref in source_refs:
+        event_source_path = source_ref["source_path"]
+        provider = source_ref["provider"]
+        source_events = store.conn.execute(
+            "SELECT e.city_id, e.host_id, e.provider, e.session_id, e.event_id, "
+            "e.payload_hash, e.repo, e.commit_sha "
+            "FROM events AS e LEFT JOIN event_usage AS u "
+            "ON u.city_id = e.city_id AND u.host_id = e.host_id AND u.provider = e.provider "
+            "AND u.session_id = e.session_id AND u.event_id = e.event_id "
+            "WHERE u.event_id IS NULL AND e.provider = ? AND e.source_path = ? "
+            "ORDER BY e.source_line, e.city_id, e.host_id, e.session_id, e.event_id",
+            (provider, event_source_path),
+        ).fetchall()
+        if not source_events:
+            continue
+        source = _usage_source_for_event(event_source_path, provider, checkpoints)
+        if source is None:
+            unmapped_paths.add(event_source_path)
+            run.events_unmatched += len(source_events)
+            continue
+        run.sources_seen += 1
+        source_path = source["path"]
+        try:
+            stat = os.stat(source_path)
+        except OSError:
+            run.sources_missing += 1
+            run.events_unmatched += len(source_events)
+            continue
+        if max_source_bytes is not None and stat.st_size > max_source_bytes:
+            run.sources_deferred += 1
+            run.events_unmatched += len(source_events)
+            continue
+        try:
+            adapter, data, digest = load_source_data(
+                source_path,
+                provider=provider,
+                max_bytes=max_source_bytes,
+            )
+        except SourceSizeExceeded:
+            run.sources_deferred += 1
+            run.events_unmatched += len(source_events)
+            continue
+        except (AdapterError, OSError):
+            run.sources_error += 1
+            run.events_unmatched += len(source_events)
+            continue
+        run.sources_read += 1
+
+        target_by_identity = {
+            (
+                row["city_id"],
+                row["host_id"],
+                row["provider"],
+                row["session_id"],
+                row["event_id"],
+            ): dict(row)
+            for row in source_events
+        }
+        contexts = sorted({(row["city_id"], row["host_id"]) for row in source_events})
+        generations = _usage_backfill_generations(
+            provider, source_events, source.get("generation")
+        )
+        matched_usage: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+        parse_failed = False
+        for city_id, host_id in contexts:
+            context = AdapterContext(city_id=city_id, host_id=host_id)
+            for generation in generations:
+                try:
+                    result = adapter.parse(
+                        data,
+                        context=context,
+                        generation=generation,
+                        source_path=source_path,
+                        source_sha256=digest,
+                    )
+                except AdapterError:
+                    parse_failed = True
+                    break
+                for raw_record in result.records:
+                    if raw_record.get("usage") is None:
+                        continue
+                    for record in validated_records([raw_record], source_path, result):
+                        identity = (
+                            record["city_id"],
+                            record["host_id"],
+                            record["provider"],
+                            record["session_id"],
+                            record["event_id"],
+                        )
+                        target = target_by_identity.get(identity)
+                        if (
+                            target is not None
+                            and identity not in matched_usage
+                            and _usage_backfill_matches(target, record)
+                        ):
+                            matched_usage[identity] = record["usage"]
+            if parse_failed:
+                break
+        if parse_failed:
+            run.sources_error += 1
+            run.events_unmatched += len(source_events)
+            continue
+
+        run.events_matched += len(matched_usage)
+        run.events_unmatched += len(target_by_identity) - len(matched_usage)
+        if not matched_usage:
+            continue
+        store.conn.execute("BEGIN IMMEDIATE")
+        try:
+            for identity, usage in matched_usage.items():
+                cursor = store.conn.execute(
+                    "INSERT OR IGNORE INTO event_usage(city_id, host_id, provider, session_id, event_id, "
+                    "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    identity + tuple(
+                        usage.get(field)
+                        for field in (
+                            "input_tokens",
+                            "output_tokens",
+                            "cache_read_tokens",
+                            "cache_write_tokens",
+                            "total_tokens",
+                        )
+                    ),
+                )
+                run.usage_inserted += cursor.rowcount
+            store.conn.execute("COMMIT")
+        except BaseException:
+            store.conn.execute("ROLLBACK")
+            raise
+    run.unmapped_sources = len(unmapped_paths)
+    if run.unmapped_sources:
+        run.status = "incomplete"
+        if roots:
+            run.reason = "one or more event source paths could not be mapped to a checkpoint or explicit root"
+        else:
+            run.reason = (
+                "one or more event source paths could not be mapped; no --root was supplied "
+                "to recover missing collector checkpoints"
+            )
+    return run
+
+
+def _usage_source_for_event(
+    event_source_path: str,
+    provider: str,
+    checkpoints: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    source_id = Path(event_source_path).stem
+    checkpoint = checkpoints.get(source_id)
+    if checkpoint and checkpoint.get("provider") == provider:
+        return {
+            "path": checkpoint["path"],
+            "generation": checkpoint.get("generation"),
+        }
+
+    adapter = ADAPTERS.get(provider)
+    if adapter is None:
+        return None
+    try:
+        if Path(event_source_path).is_file() and adapter.detect(event_source_path):
+            return {"path": event_source_path, "generation": None}
+    except OSError:
+        return None
+    return None
+
+
+def _usage_backfill_generations(
+    provider: str,
+    events: Sequence[Any],
+    checkpoint_generation: Any,
+) -> list[int]:
+    generations: set[int] = set()
+    if (
+        isinstance(checkpoint_generation, int)
+        and not isinstance(checkpoint_generation, bool)
+        and checkpoint_generation > 0
+    ):
+        generations.add(checkpoint_generation)
+    for event in events:
+        match = _BACKFILL_GENERATION_RE.match(event["event_id"])
+        if match and match.group(1).isdigit():
+            generations.add(int(match.group(1)))
+    if not generations:
+        generations.add(1)
+    return sorted(generations)
+
+
+def _usage_backfill_matches(stored: dict[str, Any], parsed: dict[str, Any]) -> bool:
+    """Require the same event payload (apart from projection-side repo evidence)."""
+
+    for usage in (parsed.get("usage"), None):
+        candidate = dict(parsed)
+        candidate["repo"] = stored.get("repo")
+        candidate["commit_sha"] = stored.get("commit_sha")
+        candidate["usage"] = usage
+        if payload_hash(candidate) == stored.get("payload_hash"):
+            return True
+    return False
 
 
 def collect_watch(
@@ -1497,6 +1822,8 @@ __all__ = [
     "CollectRun",
     "CollectorConfig",
     "DrainResult",
+    "UsageBackfillRun",
+    "backfill_missing_usage",
     "collect_once",
     "collect_watch",
     "collector_status",

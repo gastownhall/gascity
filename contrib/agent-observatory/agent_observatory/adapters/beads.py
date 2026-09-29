@@ -58,6 +58,7 @@ from .base import (
     SourceSizeExceeded,
     TitleRevision,
 )
+from .git_evidence import normalize_repo_identity
 from .redaction import redact_and_bound, redact_text
 
 PROVIDER = "beads"
@@ -584,6 +585,11 @@ class BeadsAdapter(SourceAdapter):
         result.line_count = rows
         if rows == 0:
             result.note_skip("empty_source")
+        for session_id in sorted({record["session_id"] for record in result.records}):
+            notes = ["commit_sha:none (Dolt bead snapshots contain no paired Git tool results)"]
+            if normalize_repo_identity(context.repo) is None:
+                notes.append("repo:none (no remote URL or valid configured owner/name observed)")
+            result.session_evidence_notes[session_id] = notes
         return result
 
     @staticmethod
@@ -615,7 +621,7 @@ class BeadsAdapter(SourceAdapter):
             "exit_code": None,
             "duration_ms": None,
             "model": None,
-            "repo": context.repo,
+            "repo": normalize_repo_identity(context.repo),
             "commit_sha": None,
             "parent_session_id": None,
             "bead_id": bead_id,

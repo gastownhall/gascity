@@ -1,0 +1,2 @@
+{"type":"user","uuid":"empty-user","sessionId":"claude-no-repo-evidence","timestamp":"2026-09-28T13:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"Synthetic session with no repository metadata"}]}}
+{"type":"assistant","uuid":"empty-assistant","sessionId":"claude-no-repo-evidence","timestamp":"2026-09-28T13:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"No repository commands were run."}]}}

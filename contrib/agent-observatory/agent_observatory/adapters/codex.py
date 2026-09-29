@@ -29,6 +29,7 @@ from .base import (
     number_or_none,
     split_jsonl,
 )
+from .git_evidence import attach_git_evidence
 from .redaction import elide_large_text, redact_and_bound
 
 _EXIT_CODE_RE = re.compile(r"(?:Process )?exited with code (-?\d+)")
@@ -112,6 +113,7 @@ class CodexAdapter(SourceAdapter):
             else:
                 result.note_skip(f"type:{record_type}")
 
+        attach_git_evidence(result, decoded, context)
         return result
 
     # -- metadata ----------------------------------------------------------

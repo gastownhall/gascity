@@ -45,6 +45,7 @@ from .collector import (
     STATE_MODE_METADATA,
     STATE_MODE_TEXT,
     CollectorConfig,
+    backfill_missing_usage,
     collect_once,
     collect_watch,
     collector_status,
@@ -479,15 +480,18 @@ def _cmd_export(args: argparse.Namespace) -> int:
     generation = _validated_generation(args.generation)
     payloads = []
     summaries = []
+    session_fingerprints: list[dict[str, Any]] = []
     for source in inputs:
         result = read_source(source, context=context, provider=args.provider, generation=generation)
         payloads.append(records_to_jsonl(result.records))
+        session_fingerprints.extend(result.session_fingerprints)
         summaries.append(
             {
                 "source": str(source),
                 "session_id": result.session_id,
                 "parent_session_id": result.parent_session_id,
                 "records": len(result.records),
+                "session_fingerprints": len(result.session_fingerprints),
                 "partial_trailing_line": result.partial_trailing_line,
                 "errors": result.errors,
             }
@@ -495,6 +499,7 @@ def _cmd_export(args: argparse.Namespace) -> int:
     payload = "".join(payloads)
     inserted: int | None = None
     duplicate_count: int | None = None
+    fingerprints_inserted = 0
 
     if args.db:
         if args.out:
@@ -503,6 +508,11 @@ def _cmd_export(args: argparse.Namespace) -> int:
             with ObservatoryStore(args.db) as store:
                 imported = store.import_jsonl(import_path)
                 inserted, duplicate_count = imported.inserted, imported.duplicates
+                if session_fingerprints:
+                    fingerprint_import = store.import_registry(
+                        {"session_fingerprints": session_fingerprints}
+                    )
+                    fingerprints_inserted = fingerprint_import.session_fingerprints_inserted
         else:
             handle = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8")
             try:
@@ -511,6 +521,11 @@ def _cmd_export(args: argparse.Namespace) -> int:
                 with ObservatoryStore(args.db) as store:
                     imported = store.import_jsonl(handle.name)
                     inserted, duplicate_count = imported.inserted, imported.duplicates
+                    if session_fingerprints:
+                        fingerprint_import = store.import_registry(
+                            {"session_fingerprints": session_fingerprints}
+                        )
+                        fingerprints_inserted = fingerprint_import.session_fingerprints_inserted
             finally:
                 os.unlink(handle.name)
     elif args.out:
@@ -525,6 +540,8 @@ def _cmd_export(args: argparse.Namespace) -> int:
                 "sources": len(summaries),
                 "inserted": inserted,
                 "duplicates": duplicate_count,
+                "session_fingerprints": sum(item["session_fingerprints"] for item in summaries),
+                "session_fingerprints_inserted": fingerprints_inserted,
                 "out": args.out,
             },
             sort_keys=True,
@@ -1462,6 +1479,19 @@ def _cmd_collect(args: argparse.Namespace) -> int:
     return 0 if last is None or last.status in {"ok", "disabled", "locked"} else 1
 
 
+def _cmd_backfill_usage(args: argparse.Namespace) -> int:
+    """Re-read known source transcripts to fill missing event token counters."""
+    roots = tuple(SourceRoot(path=root) for root in args.root)
+    with _open_store(args.db) as store:
+        run = backfill_missing_usage(
+            store,
+            max_source_bytes=args.max_source_bytes,
+            roots=roots,
+        )
+    _print_json(run.to_dict())
+    return 0 if run.status in {"ok", "locked"} else 1
+
+
 def _cmd_collect_status(args: argparse.Namespace) -> int:
     with _open_store(args.db) as store:
         status = collector_status(store, kill_switch_path=_kill_switch_path(args))
@@ -2158,6 +2188,28 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--interval", type=float, default=60.0, help="seconds between --watch passes")
     collect_parser.add_argument("--iterations", type=int, default=None, help="stop --watch after N passes")
     collect_parser.set_defaults(func=_cmd_collect)
+
+    backfill_usage_parser = subparsers.add_parser(
+        "backfill-usage",
+        help="re-read explicitly collected transcripts to fill missing event usage rows",
+    )
+    backfill_usage_parser.add_argument("--db", required=True, help="SQLite projection path")
+    backfill_usage_parser.add_argument(
+        "--root",
+        action="append",
+        default=[],
+        help="optional explicit transcript root for source paths missing collector checkpoints",
+    )
+    backfill_usage_parser.add_argument(
+        "--max-source-bytes",
+        type=int,
+        default=DEFAULT_MAX_SOURCE_BYTES,
+        help=(
+            "maximum raw or decompressed transcript size to read "
+            f"(default {DEFAULT_MAX_SOURCE_BYTES}; raise for large Codex transcripts)"
+        ),
+    )
+    backfill_usage_parser.set_defaults(func=_cmd_backfill_usage)
 
     status_parser = subparsers.add_parser(
         "collect-status", help="collector coverage, lag and classification queue health"
