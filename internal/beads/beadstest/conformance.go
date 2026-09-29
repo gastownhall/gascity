@@ -26,6 +26,11 @@ type Options struct {
 	// valid, unexpired entry for that subtest exists in the skip ledger;
 	// otherwise the subtest fails loudly.
 	SkipTxApplyConformance bool
+	// SkipForeignParentConformance requests skipping the
+	// ParentIDNamesARowThisStoreDoesNotHave subtest. It is honored only when a
+	// valid, unexpired entry for that subtest exists in the skip ledger;
+	// otherwise the subtest fails loudly.
+	SkipForeignParentConformance bool
 }
 
 // RunStoreTests runs the full conformance suite against a Store implementation.
@@ -163,7 +168,9 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			"pool_slot":    "3",
 			"agent_name":   "tower/polecat",
 		}
-		created, err := s.Create(beads.Bead{Title: "polecat", Type: "gc:session", Labels: []string{"gc:session"}, Metadata: meta})
+		// "session" is the registered bead type and "gc:session" only its label;
+		// a bd-backed store rejects an unregistered type.
+		created, err := s.Create(beads.Bead{Title: "polecat", Type: "session", Labels: []string{"gc:session"}, Metadata: meta})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -690,6 +697,10 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 	// request, and a store that filtered on resolvability would return an empty
 	// step list for a molecule that exists.
 	t.Run("ParentIDNamesARowThisStoreDoesNotHave", func(t *testing.T) {
+		if opts.SkipForeignParentConformance {
+			requireLedgeredSkip(t, "ParentIDNamesARowThisStoreDoesNotHave")
+			return
+		}
 		s := newStore()
 		// Not merely absent: an id in a reserved namespace this store could not
 		// have minted, which is the actual cross-store shape.
