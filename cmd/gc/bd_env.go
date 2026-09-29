@@ -365,7 +365,7 @@ func bdStoreOptionsForConfig(cfg *config.City) []beads.BdStoreOption {
 // JSONL (sa-41j3kp).
 //
 // Cleanup conditions (any of which proves the scope is gc-managed and the
-// JSONL is therefore stale):
+// JSONL is therefore stale, unless export.auto:true explicitly retains it):
 //
 //   - config.yaml explicitly sets export.auto:false (PR 1965 canonical state)
 //   - config.yaml's gc.endpoint_origin is one of the managed origins
@@ -397,8 +397,12 @@ func reapStaleBdExportJSONL(scopeRoot string) {
 }
 
 // scopeIsGCManaged reports whether a scope's .beads/config.yaml proves the
-// scope is gc-managed under the canonical (non-explicit) shape. Either of
-// two signals counts as proof:
+// scope is gc-managed and its issues.jsonl may therefore be reaped. An
+// explicit export.auto:true is the scope-independent retention opt-out; it
+// takes precedence over endpoint ownership so cities can retain JSONL without
+// claiming the rig-only EndpointOriginExplicit topology.
+//
+// Otherwise, either of two signals counts as proof:
 //   - export.auto is explicitly false (PR 1965 wrote it; the user did not
 //     opt back into auto-export afterward)
 //   - gc.endpoint_origin is one of the canonical managed origins (the scope
@@ -418,6 +422,9 @@ func reapStaleBdExportJSONL(scopeRoot string) {
 // or hand-set) is still treated as unmanaged and never reaped.
 func scopeIsGCManaged(scopeRoot string) bool {
 	configPath := filepath.Join(scopeRoot, ".beads", "config.yaml")
+	if autoExport, ok, err := contract.ReadExportAuto(fsys.OSFS{}, configPath); err == nil && ok && autoExport {
+		return false
+	}
 	state, stateOK, stateErr := contract.ReadConfigState(fsys.OSFS{}, configPath)
 	if stateErr == nil && stateOK {
 		switch state.EndpointOrigin {

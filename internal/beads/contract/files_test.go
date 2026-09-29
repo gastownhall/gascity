@@ -292,7 +292,7 @@ func TestEnsureCanonicalConfigCollapsesDuplicateManagedKeys(t *testing.T) {
 	}
 }
 
-func TestEnsureCanonicalConfigForcesAutoExportOff(t *testing.T) {
+func TestEnsureCanonicalConfigDefaultsAutoExportOff(t *testing.T) {
 	// bd's export.auto defaults to true and triggers a full-file import-then-export
 	// cycle on every write. Managed cities never consume issues.jsonl (Dolt is the
 	// source of truth), so this must be forced off at config time — not just via
@@ -328,7 +328,7 @@ func TestEnsureCanonicalConfigForcesAutoExportOff(t *testing.T) {
 		}
 	})
 
-	t.Run("overrides explicit true", func(t *testing.T) {
+	t.Run("preserves explicit true", func(t *testing.T) {
 		fs := fsys.OSFS{}
 		dir := t.TempDir()
 		path := filepath.Join(dir, "config.yaml")
@@ -354,11 +354,8 @@ func TestEnsureCanonicalConfigForcesAutoExportOff(t *testing.T) {
 			t.Fatal(err)
 		}
 		text := string(data)
-		if strings.Contains(text, "export.auto: true") {
-			t.Fatalf("config should scrub export.auto: true:\n%s", text)
-		}
-		if !strings.Contains(text, "export.auto: false") {
-			t.Fatalf("config should force export.auto: false:\n%s", text)
+		if !strings.Contains(text, "export.auto: true") {
+			t.Fatalf("config should preserve explicit export.auto: true:\n%s", text)
 		}
 	})
 }

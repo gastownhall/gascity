@@ -5208,6 +5208,22 @@ func TestScopeIsGCManagedRecognizesManagedOrigin(t *testing.T) {
 	}
 }
 
+func TestScopeIsGCManagedHonorsCityAutoExportOptOut(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\nexport.auto: true\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if scopeIsGCManaged(scope) {
+		t.Fatalf("scopeIsGCManaged = true, want false for city export.auto:true opt-out")
+	}
+}
+
 // TestScopeIsGCManagedDoesNotClaimExplicitOptOut verifies the carve-out
 // for rigs that deliberately keep JSONL-based sharing. Per PR 1965 docs,
 // gc.endpoint_origin: explicit is the supported opt-out path; issues.jsonl
@@ -5275,6 +5291,28 @@ func TestReapStaleBdExportJSONLRemovesFileOnManagedScope(t *testing.T) {
 
 	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
 		t.Fatalf("jsonl present after reap; stat err = %v, want IsNotExist", err)
+	}
+}
+
+func TestReapStaleBdExportJSONLLeavesFileOnCityAutoExportOptOut(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"_type":"issue","id":"zz-1"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\nexport.auto: true\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	reapStaleBdExportJSONL(scope)
+
+	if _, err := os.Stat(jsonlPath); err != nil {
+		t.Fatalf("jsonl removed despite city export.auto:true opt-out; stat err = %v", err)
 	}
 }
 

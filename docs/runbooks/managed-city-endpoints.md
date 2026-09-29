@@ -45,6 +45,13 @@ Two TOML fields, one per scope, describe endpoint ownership:
 | City | `gc.endpoint_origin` | `managed_city`, `city_canonical` |
 | Rig  | `gc.endpoint_origin` | `inherited_city`, `explicit` |
 
+`gc.endpoint_origin` describes endpoint ownership, not JSONL retention. To
+keep a city-root `.beads/issues.jsonl` for JSONL-based sharing, leave the city
+origin as `managed_city` or `city_canonical` and set `export.auto: true` in
+that scope's `.beads/config.yaml`. Gas City preserves that explicit setting
+and skips stale-JSONL cleanup for the scope. Do not use `explicit` at city
+scope; it is a rig-only endpoint origin and fails canonical validation.
+
 - **`managed_city`** — The city owns the Dolt lifecycle. `gc start`
   launches it; `gc stop` shuts it down. This is the default for
   fresh `bd`-backed cities.
