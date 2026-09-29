@@ -121,6 +121,7 @@ func TestProxiedBackupCoverageAdvisoryNamesEveryProxiedScope(t *testing.T) {
 		t.Fatal("no advisory registered for a city with two proxied scopes")
 	}
 	check.status = bdRefusesProxiedBackup
+	check.proxyLive = proxiesRunning
 	result := check.Run(&CheckContext{})
 	if result.Status != StatusOK {
 		t.Fatalf("status = %v (%q), want OK", result.Status, result.Message)

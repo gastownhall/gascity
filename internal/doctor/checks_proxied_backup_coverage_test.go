@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,9 +30,12 @@ func bdBackupStatusFixture(t *testing.T, name string) []byte {
 }
 
 // bdRefusesProxiedBackup is the status reader for a bd v1.3.0 scope.
-func bdRefusesProxiedBackup(*CheckContext, string, string) (bdBackupStatusReport, error) {
+func bdRefusesProxiedBackup(context.Context, *CheckContext, string, string) (bdBackupStatusReport, error) {
 	return bdBackupStatusReport{}, errBdProxiedBackupRefused
 }
+
+// proxiesRunning is the liveness probe for a city whose proxies are all up.
+func proxiesRunning(string) bool { return true }
 
 func writeProxiedLocalScope(t *testing.T, scopeRoot, db string) {
 	t.Helper()
@@ -57,7 +61,8 @@ func proxiedCoverageCity(t *testing.T, now time.Time, statuses map[string]func()
 		t.Fatal("no check registered for a city with two proxied scopes")
 	}
 	check.now = func() time.Time { return now }
-	check.status = func(_ *CheckContext, _ string, scopeRoot string) (bdBackupStatusReport, error) {
+	check.proxyLive = proxiesRunning
+	check.status = func(_ context.Context, _ *CheckContext, _ string, scopeRoot string) (bdBackupStatusReport, error) {
 		answer, ok := statuses[proxiedScopeLabel(city, scopeRoot)]
 		if !ok {
 			t.Fatalf("unexpected status call for %s", scopeRoot)
@@ -151,7 +156,7 @@ func TestProxiedBackupCoverageWarnsOnMissingOrStaleBdBackup(t *testing.T) {
 			// Mixed bd pins: one scope's bd supports proxied backup, the
 			// other refuses. The refusal is a gap too and must be named.
 			name:     "refused beside a working scope",
-			rig:      func() (bdBackupStatusReport, error) { return bdRefusesProxiedBackup(nil, "", "") },
+			rig:      func() (bdBackupStatusReport, error) { return bdRefusesProxiedBackup(context.Background(), nil, "", "") },
 			wantText: proxiedBackupRefusal,
 		},
 	}
@@ -197,14 +202,77 @@ func TestReadBdBackupStatusThroughThePinnedBd(t *testing.T) {
 	}
 
 	ctx := &CheckContext{CityPath: dir}
-	if _, err := readBdBackupStatus(ctx, stub("bd-130", "bd-1.3.0-proxied-refused.json", 1), dir); !errors.Is(err, errBdProxiedBackupRefused) {
+	if _, err := readBdBackupStatus(context.Background(), ctx, stub("bd-130", "bd-1.3.0-proxied-refused.json", 1), dir); !errors.Is(err, errBdProxiedBackupRefused) {
 		t.Fatalf("bd v1.3.0 refusal: err = %v, want errBdProxiedBackupRefused", err)
 	}
-	report, err := readBdBackupStatus(ctx, stub("bd-131", "bd-1.3.1-proxied-synced.json", 0), dir)
+	report, err := readBdBackupStatus(context.Background(), ctx, stub("bd-131", "bd-1.3.1-proxied-synced.json", 0), dir)
 	if err != nil {
 		t.Fatalf("bd 1.3.1 status: %v", err)
 	}
 	if !report.Dolt.Configured || report.Dolt.LastSync != "2026-09-29T04:00:01Z" || report.Dolt.BackupURL != "file:///backups/px" {
 		t.Fatalf("decoded report = %+v", report.Dolt)
+	}
+}
+
+// bd 1.3.1's `backup status` starts a stopped scope's proxy and Dolt, so a
+// scope whose proxy is not running is never handed to bd.
+func TestProxiedBackupCoverageDoesNotAskBdAboutAStoppedScope(t *testing.T) {
+	now := time.Date(2026, 9, 29, 10, 0, 1, 0, time.UTC)
+	synced := decodedStatus(t, "bd-1.3.1-proxied-synced.json", nil)
+	check := proxiedCoverageCity(t, now, map[string]func() (bdBackupStatusReport, error){
+		"city": synced,
+		filepath.Join("rigs", "r1"): func() (bdBackupStatusReport, error) {
+			t.Error("bd was asked about a scope whose proxy is not running")
+			return synced()
+		},
+	})
+	check.proxyLive = func(scopeRoot string) bool { return filepath.Base(scopeRoot) != "r1" }
+
+	result := check.Run(&CheckContext{})
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v (%q), want OK", result.Status, result.Message)
+	}
+	for _, want := range []string{"1 bd-owned proxied scope (city) backed up", "not checked: store not running (" + filepath.Join("rigs", "r1") + ")"} {
+		if !strings.Contains(result.Message, want) {
+			t.Errorf("message %q does not contain %q", result.Message, want)
+		}
+	}
+
+	check.proxyLive = func(string) bool { return false }
+	check.status = func(context.Context, *CheckContext, string, string) (bdBackupStatusReport, error) {
+		t.Error("bd was asked about a stopped scope")
+		return synced()
+	}
+	result = check.Run(&CheckContext{})
+	if result.Status != StatusOK || !strings.Contains(result.Message, "not checked: store not running (city, "+filepath.Join("rigs", "r1")+")") {
+		t.Fatalf("all-stopped result = %v %q", result.Status, result.Message)
+	}
+}
+
+// One deadline covers the whole check, so scopes that hang cannot outlast
+// doctor's per-check timeout and lose the answers already in hand.
+func TestProxiedBackupCoverageBoundsAllScopesByOneDeadline(t *testing.T) {
+	city := t.TempDir()
+	statuses := map[string]func() (bdBackupStatusReport, error){}
+	for i := 0; i < 2*proxiedBackupCoverageParallelism+1; i++ {
+		name := fmt.Sprintf("r%d", i)
+		writeProxiedLocalScope(t, filepath.Join(city, "rigs", name), name)
+		statuses[filepath.Join("rigs", name)] = nil
+	}
+	check := NewProxiedBackupCoverageCheckForConfig(city, nil, errors.New("no city.toml"), nil)
+	check.proxyLive = proxiesRunning
+	check.deadline = 50 * time.Millisecond
+	check.status = func(ctx context.Context, _ *CheckContext, _ string, _ string) (bdBackupStatusReport, error) {
+		<-ctx.Done()
+		return bdBackupStatusReport{}, fmt.Errorf("check deadline reached: %w", ctx.Err())
+	}
+
+	start := time.Now()
+	result := check.Run(&CheckContext{})
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("Run took %s with a 50ms deadline", elapsed)
+	}
+	if result.Status != StatusWarning || strings.Count(result.Message, "could not read bd backup status") != len(statuses) {
+		t.Fatalf("result = %v %q, want one deadline finding per scope", result.Status, result.Message)
 	}
 }

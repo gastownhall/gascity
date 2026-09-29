@@ -799,6 +799,7 @@ go_test(
         "cmd_doctor_local_test.go",
         "cmd_doctor_order_firing_test.go",
         "cmd_doctor_order_outcome_test.go",
+        "cmd_doctor_proxied_backup_coverage_test.go",
         "cmd_doctor_selector_test.go",
         "cmd_doctor_ssh_keepalive_test.go",
         "cmd_doctor_supervisor_http_test.go",

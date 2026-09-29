@@ -329,7 +329,13 @@ The per-scope doctor checks stay quiet on a proxy root — there is nothing for
 gc to register, and `rig:<name>:dolt-backup`'s message says only bd can back it
 up. The city-level `proxied-backup-coverage` check asks each proxied scope's
 pinned bd with `bd backup status --json` and follows the answer, not a version
-string:
+string. It asks only about a scope whose proxy gc's endpoint inspection (the
+proxy record plus the process table, no dial) shows running: on bd 1.3.1
+`backup status` sizes the database through the proxy, which would start a
+stopped scope's proxy and Dolt, and doctor never starts servers. Other scopes
+read "not checked: store not running"; suspended rigs are left out, and the
+check is registered only when the bead-store preflight passed. All scopes share
+one 45s deadline with at most four bd calls at a time.
 
 - bd refuses (`proxy.backup.unsupported`, v1.3.0): an OK-status advisory that
   names the scopes and says the store is the only copy — a permanent warning

@@ -94,12 +94,24 @@ func TestGcBeadsBdConfigValueReadsFlatAndNestedSpellings(t *testing.T) {
 	if err := os.WriteFile(deeper, []byte("dolt:\n  sub:\n    mode: deeper\n  mode: 'nested' # note\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	commented := filepath.Join(root, "commented.yaml")
+	if err := os.WriteFile(commented, []byte("dolt: # bd section\n  mode: nested\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// An empty flat value is the answer (viper returns it), not a reason to
+	// read the nested one.
+	emptyFlat := filepath.Join(root, "empty-flat.yaml")
+	if err := os.WriteFile(emptyFlat, []byte("dolt.mode: ''\ndolt:\n  mode: nested\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body.WriteString("printf '%s\\n' \"commented=$(beads_config_value " + shellSingleQuote(commented) + " dolt.mode)\"\n")
+	body.WriteString("printf '%s\\n' \"emptyflat=$(beads_config_value " + shellSingleQuote(emptyFlat) + " dolt.mode)\"\n")
 	body.WriteString("printf '%s\\n' \"both=$(beads_config_value " + shellSingleQuote(both) + " dolt.mode)\"\n")
 	body.WriteString("printf '%s\\n' \"deeper=$(beads_config_value " + shellSingleQuote(deeper) + " dolt.mode)\"\n")
 	body.WriteString("printf '%s\\n' \"missing=$(beads_config_value " + shellSingleQuote(filepath.Join(root, "nope.yaml")) + " dolt.mode)\"\n")
 
 	out := string(runShHarness(t, gcBeadsBdConfigHarness(t, body.String()), "beads_config_value", os.Environ()))
-	want := []string{"both=flat", "deeper=nested", "missing="}
+	want := []string{"both=flat", "deeper=nested", "missing=", "commented=nested", "emptyflat="}
 	for _, name := range fixtures {
 		want = append(want,
 			name+" dolt.host=127.0.0.1",
@@ -150,6 +162,37 @@ func TestGcBeadsBdScopeTopologyReadsBdNestedConfig(t *testing.T) {
 	} {
 		if !strings.Contains(out, line+"\n") {
 			t.Errorf("missing %q in output:\n%s", line, out)
+		}
+	}
+}
+
+// The bd pack, the dolt pack and the wisps-composite-index schema script each
+// carry a copy of the config reader, because they ship independently. The
+// copies must not drift: compared with indentation and the function name
+// normalized, the bodies are identical.
+func TestBeadsConfigValueCopiesStayInSync(t *testing.T) {
+	root := repoRootForLint(t)
+	normalized := func(rel, name string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := extractShellFunction(t, string(data), name)
+		body = strings.Replace(body, name+"()", "beads_config_value()", 1)
+		lines := strings.Split(body, "\n")
+		for i, line := range lines {
+			lines[i] = strings.TrimLeft(line, " \t")
+		}
+		return strings.Join(lines, "\n")
+	}
+	want := normalized(filepath.Join("examples", "bd", "assets", "scripts", "gc-beads-bd.sh"), "beads_config_value")
+	for rel, name := range map[string]string{
+		filepath.Join("examples", "bd", "dolt", "assets", "scripts", "runtime.sh"): "beads_config_value",
+		filepath.Join("schemas", "wisps-composite-index", "common.sh"):             "config_value",
+	} {
+		if got := normalized(rel, name); got != want {
+			t.Errorf("%s %s() drifted from gc-beads-bd.sh beads_config_value():\n--- got ---\n%s\n--- want ---\n%s", rel, name, got, want)
 		}
 	}
 }

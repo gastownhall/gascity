@@ -9,9 +9,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -36,15 +38,30 @@ import (
 //     is configured and has synced within defaultBackupFreshnessMaxAge, and
 //     warns (advisory severity) for any scope that has none or has gone stale:
 //     that gap is now one the operator can close.
+//
+// Doctor must never start a server. On bd 1.3.1 `bd backup status` dials the
+// store through the proxy to size the database, which starts the proxy and its
+// Dolt child for a stopped scope even with BEADS_DOLT_AUTO_START=0, and a
+// gc-owned scope's zero idle timeout keeps them up. So bd is asked only about a
+// scope whose proxy gc's own endpoint inspection (proxyendpoint.Inspect, the
+// process table, no dial) already proves live; any other scope is reported as
+// "not checked: store not running". cmd/gc also leaves suspended rigs out and
+// registers the check only when the bead-store preflight passed.
 type ProxiedBackupCoverageCheck struct {
 	cityPath string
 	scopes   []proxiedBackupScope
 	// bdBin names the bd executable pinned for a scope ("" means PATH).
 	bdBin func(scopeRoot string) string
+	// proxyLive reports whether a scope's proxy is already running. Injected
+	// by tests.
+	proxyLive func(scopeRoot string) bool
 	// status runs `bd backup status --json` for a scope. Injected by tests.
-	status func(ctx *CheckContext, bdBin, scopeRoot string) (bdBackupStatusReport, error)
-	maxAge time.Duration
-	now    func() time.Time
+	status func(ctx context.Context, cc *CheckContext, bdBin, scopeRoot string) (bdBackupStatusReport, error)
+	// deadline bounds the whole check, all scopes together, so a few slow
+	// scopes cannot outlast doctor's per-check timeout and lose every answer.
+	deadline time.Duration
+	maxAge   time.Duration
+	now      func() time.Time
 }
 
 type proxiedBackupScope struct {
@@ -55,8 +72,10 @@ type proxiedBackupScope struct {
 // NewProxiedBackupCoverageCheckForConfig returns the check for a city with at
 // least one bd-owned proxied scope whose data is here, and nil for a city with
 // none — there is no gap to report, and doctor should not grow a line saying
-// so. bdBin resolves the bd executable pinned for a scope; nil (or an empty
-// answer) runs `bd` from PATH.
+// so. The scopes are the city and cfg's rigs (or, when cfgErr is set, every
+// scope found on disk); a caller that must leave suspended rigs out passes a
+// cfg holding only the active ones. bdBin resolves the bd executable pinned
+// for a scope; nil (or an empty answer) runs `bd` from PATH.
 //
 // A proxied-external scope (M4) is not counted. Its beads live on a server this
 // host does not run, so "the store is the only copy" and "copy
@@ -75,13 +94,34 @@ func NewProxiedBackupCoverageCheckForConfig(cityPath string, cfg *config.City, c
 		return nil
 	}
 	return &ProxiedBackupCoverageCheck{
-		cityPath: cityPath,
-		scopes:   scopes,
-		bdBin:    bdBin,
-		status:   readBdBackupStatus,
-		maxAge:   defaultBackupFreshnessMaxAge,
-		now:      time.Now,
+		cityPath:  cityPath,
+		scopes:    scopes,
+		bdBin:     bdBin,
+		proxyLive: proxiedScopeProxyLive,
+		status:    readBdBackupStatus,
+		deadline:  proxiedBackupCoverageDeadline,
+		maxAge:    defaultBackupFreshnessMaxAge,
+		now:       time.Now,
 	}
+}
+
+// proxiedBackupCoverageDeadline bounds the whole check. It sits under doctor's
+// default 60s per-check timeout so the check always reports what it learned.
+const proxiedBackupCoverageDeadline = 45 * time.Second
+
+// proxiedBackupCoverageParallelism caps concurrent `bd backup status` calls.
+const proxiedBackupCoverageParallelism = 4
+
+// proxiedScopeProxyLive reports whether a proxied scope's bd proxy is running,
+// from its endpoint record and the process table alone. Nothing is dialed or
+// started; an unresolvable root or any verdict other than live is "not
+// running".
+func proxiedScopeProxyLive(scopeRoot string) bool {
+	root, err := proxyendpoint.ProviderRoot(scopeRoot)
+	if err != nil {
+		return false
+	}
+	return proxyendpoint.Inspect(root, proxiedEndpointProcessTable()).Verdict.Live()
 }
 
 // proxiedScopeLabel names a scope the way an operator sees it: "city" for the
@@ -102,16 +142,30 @@ func proxiedScopeLabel(cityPath, scopeRoot string) string {
 // Name returns the check identifier.
 func (c *ProxiedBackupCoverageCheck) Name() string { return "proxied-backup-coverage" }
 
-// Run asks bd for each proxied scope's backup status and reports the result.
-func (c *ProxiedBackupCoverageCheck) Run(ctx *CheckContext) *CheckResult {
+// proxiedBackupAnswer is one scope's bd answer.
+type proxiedBackupAnswer struct {
+	report bdBackupStatusReport
+	err    error
+}
+
+// Run asks bd for the backup status of each proxied scope whose proxy is
+// already running, and reports the result.
+func (c *ProxiedBackupCoverageCheck) Run(cc *CheckContext) *CheckResult {
 	now := c.now()
-	var refused, covered, findings, details []string
+	var live []proxiedBackupScope
+	var notRunning []string
 	for _, scope := range c.scopes {
-		bin := ""
-		if c.bdBin != nil {
-			bin = c.bdBin(scope.root)
+		if c.proxyLive(scope.root) {
+			live = append(live, scope)
+		} else {
+			notRunning = append(notRunning, scope.label)
 		}
-		report, err := c.status(ctx, bin, scope.root)
+	}
+	answers := c.askBd(cc, live)
+
+	var refused, covered, findings, details []string
+	for i, scope := range live {
+		report, err := answers[i].report, answers[i].err
 		switch {
 		case errors.Is(err, errBdProxiedBackupRefused):
 			refused = append(refused, scope.label)
@@ -131,8 +185,27 @@ func (c *ProxiedBackupCoverageCheck) Run(ctx *CheckContext) *CheckResult {
 		covered = append(covered, scope.label)
 	}
 
-	if len(refused) == len(c.scopes) {
-		return c.refusedResult(refused)
+	notChecked := ""
+	if len(notRunning) > 0 {
+		notChecked = fmt.Sprintf("not checked: store not running (%s)", strings.Join(notRunning, ", "))
+	}
+	withNotChecked := func(r *CheckResult) *CheckResult {
+		if notChecked != "" {
+			r.Message += "; " + notChecked
+			r.Details = append(r.Details, "gc asks bd about a scope only while its proxy is running: `bd backup status` would start a stopped store's proxy and Dolt, and doctor never starts servers.")
+		}
+		return r
+	}
+
+	if len(live) == 0 {
+		return withNotChecked(&CheckResult{
+			Name:    c.Name(),
+			Status:  StatusOK,
+			Message: fmt.Sprintf("%d bd-owned proxied %s", len(notRunning), proxiedScopeNoun(len(notRunning))),
+		})
+	}
+	if len(refused) == len(live) {
+		return withNotChecked(c.refusedResult(refused))
 	}
 	r := &CheckResult{Name: c.Name(), Details: details}
 	if len(refused) > 0 {
@@ -142,7 +215,7 @@ func (c *ProxiedBackupCoverageCheck) Run(ctx *CheckContext) *CheckResult {
 		r.Status = StatusOK
 		r.Message = fmt.Sprintf("%d bd-owned proxied %s (%s) backed up through bd within %s",
 			len(covered), proxiedScopeNoun(len(covered)), strings.Join(covered, ", "), c.maxAge)
-		return r
+		return withNotChecked(r)
 	}
 	r.Status = StatusWarning
 	r.Severity = SeverityAdvisory
@@ -150,7 +223,41 @@ func (c *ProxiedBackupCoverageCheck) Run(ctx *CheckContext) *CheckResult {
 	r.FixHint = "run `gc order run mol-dog-backup` (it registers a destination with `bd backup init` " +
 		"when a scope has none, then runs `bd backup sync`), or run `bd backup init <url>` and " +
 		"`bd backup sync` in the scope; `bd backup status` shows the result"
-	return r
+	return withNotChecked(r)
+}
+
+// askBd runs the status reader for each scope, at most
+// proxiedBackupCoverageParallelism at a time and all under one deadline. A
+// scope the deadline reaches first answers with the context's error.
+func (c *ProxiedBackupCoverageCheck) askBd(cc *CheckContext, scopes []proxiedBackupScope) []proxiedBackupAnswer {
+	answers := make([]proxiedBackupAnswer, len(scopes))
+	if len(scopes) == 0 {
+		return answers
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.deadline)
+	defer cancel()
+	sem := make(chan struct{}, proxiedBackupCoverageParallelism)
+	var wg sync.WaitGroup
+	for i, scope := range scopes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				answers[i].err = fmt.Errorf("check deadline %s reached before bd was asked: %w", c.deadline, ctx.Err())
+				return
+			}
+			bin := ""
+			if c.bdBin != nil {
+				bin = c.bdBin(scope.root)
+			}
+			answers[i].report, answers[i].err = c.status(ctx, cc, bin, scope.root)
+		}()
+	}
+	wg.Wait()
+	return answers
 }
 
 // refusedResult is the original advisory, for a bd that refuses backup on the
@@ -179,9 +286,6 @@ func proxiedScopeNoun(n int) string {
 	return "scopes"
 }
 
-// bdProxiedBackupStatusTimeout bounds one `bd backup status` call.
-const bdProxiedBackupStatusTimeout = 30 * time.Second
-
 // errBdProxiedBackupRefused reports that bd refused `backup` on the proxied
 // path (bd v1.3.0's proxy.backup.unsupported).
 var errBdProxiedBackupRefused = errors.New("bd refuses backup on the proxied path")
@@ -205,11 +309,12 @@ func bdProxiedBackupRefused(output []byte) bool {
 }
 
 // readBdBackupStatus runs `bd backup status --json` for one scope in the same
-// scrubbed store environment the custom-types check uses.
-func readBdBackupStatus(ctx *CheckContext, bdBin, scopeRoot string) (bdBackupStatusReport, error) {
+// scrubbed store environment the custom-types check uses. ctx carries the
+// check's overall deadline; bd is killed when it passes.
+func readBdBackupStatus(ctx context.Context, cc *CheckContext, bdBin, scopeRoot string) (bdBackupStatusReport, error) {
 	var report bdBackupStatusReport
 	args := []string{"backup", "status", "--json"}
-	env, err := customTypesStoreEnv(ctx, scopeRoot)
+	env, err := customTypesStoreEnv(cc, scopeRoot)
 	if err != nil {
 		return report, err
 	}
@@ -217,9 +322,7 @@ func readBdBackupStatus(ctx *CheckContext, bdBin, scopeRoot string) (bdBackupSta
 	if bin == "" {
 		bin = "bd"
 	}
-	runCtx, cancel := context.WithTimeout(context.Background(), bdProxiedBackupStatusTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(runCtx, bin, args...)
+	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir, cmd.Env = scopeRoot, env
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -237,6 +340,9 @@ func readBdBackupStatus(ctx *CheckContext, bdBin, scopeRoot string) (bdBackupSta
 	if err != nil {
 		if bdProxiedBackupRefused(stdout.Bytes()) || bdProxiedBackupRefused(stderr.Bytes()) {
 			return report, errBdProxiedBackupRefused
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return report, fmt.Errorf("check deadline reached: %w", ctxErr)
 		}
 		if detail := strings.TrimSpace(stderr.String()); detail != "" {
 			return report, fmt.Errorf("%w: %s", err, detail)

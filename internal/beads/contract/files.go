@@ -1401,9 +1401,13 @@ func findValue(root *yaml.Node, key string) *yaml.Node {
 // findConfigValue resolves a bd config key in either spelling bd reads: the
 // flat dotted key (`dolt.host: x`, what gc and bd <= 1.3.0 write) or the nested
 // path (`dolt:` / `  host: x`, what bd >= 1.3.1 writes on `bd config set`).
-// The flat spelling wins when both are present, matching bd's own resolution
-// (viper tries the longest key prefix first, and bd's direct YAML reader checks
-// the flat key before walking the path).
+// The flat spelling wins when both are present, matching bd's main resolution
+// paths: viper tries the longest key prefix first, and bd's WorkspaceYamlValue /
+// readYamlValueAtPath check the flat key before walking the path. Not every bd
+// reader agrees: config.GetStringFromDir walks the nested path only (bootstrap's
+// dolt.port, dolt.shared-server, the library's dolt.auto-start fallback), so a
+// flat-only key gc writes is invisible to it. Those reads are outranked by the
+// env and metadata gc supplies; nested is the one spelling every bd reader sees.
 func findConfigValue(root *yaml.Node, key string) *yaml.Node {
 	if node := findValue(root, key); node != nil {
 		return node

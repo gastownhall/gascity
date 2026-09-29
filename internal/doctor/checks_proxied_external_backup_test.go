@@ -65,6 +65,7 @@ func TestProxiedBackupCoverageAdvisoryNamesOnlyLocallyStoredScopes(t *testing.T)
 		t.Fatal("no advisory registered for a city with a locally stored proxied rig")
 	}
 	check.status = bdRefusesProxiedBackup
+	check.proxyLive = proxiesRunning
 	message := check.Run(&CheckContext{}).Message
 	if !strings.Contains(message, filepath.Join("rigs", "local")) {
 		t.Errorf("advisory does not name the locally stored scope: %q", message)
