@@ -87,6 +87,76 @@ class ShadowCliTest(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
         self.assertTrue(result.stderr.strip().startswith("error:"), result.stderr)
 
+    def test_shadow_reads_classifications_through_session_binding(self):
+        key = ("city-a", "host-a", "codex", "session-1")
+        event_path = support.write_jsonl(
+            os.path.join(self.tmp.name, "session.jsonl"),
+            [support.make_record(event_id="e1", session_id=key[3])],
+        )
+        with ObservatoryStore(self.db) as store:
+            store.import_jsonl(event_path)
+            snapshot = store.session_snapshot(key)
+            store.save_classification(
+                subject_kind="session",
+                snapshot_hash=snapshot,
+                taxonomy_version="2.0.0",
+                question_hash="q" * 64,
+                model_version="jev-1.13.0",
+                request_hash="r" * 64,
+                response_hash="h" * 64,
+                answers=[
+                    {
+                        "question_id": "primary_intent",
+                        "question_type": "choice",
+                        "answer": {
+                            "choice": "bugfix",
+                            "confidence": 0.96,
+                            "probabilities": {"bugfix": 0.96, "implementation": 0.04},
+                        },
+                    }
+                ],
+            )
+        bundle = os.path.join(self.tmp.name, "bound-input.json")
+        with open(bundle, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "schema_version": "1.0",
+                    "episodes": [
+                        {
+                            "episode_id": "bound-session",
+                            "session": list(key),
+                            "as_of": "2026-09-22T00:00:00Z",
+                            "observed_at": "2026-09-21T23:00:00Z",
+                            "intent": "stale-inline-value",
+                            "confidence": 0.1,
+                        }
+                    ],
+                },
+                handle,
+            )
+        out = os.path.join(self.tmp.name, "report.json")
+        result = run_cli(
+            [
+                "shadow",
+                "--catalog",
+                self.catalog,
+                "--input",
+                bundle,
+                "--db",
+                self.db,
+                "--classifications-from-db",
+                "--out",
+                out,
+            ]
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(out, encoding="utf-8") as handle:
+            report = json.load(handle)
+        rows = [row for row in report["recommendations"] if row["episode_id"] == "bound-session"]
+        self.assertEqual(len(rows), 5)
+        self.assertTrue(all(row["confidence"] == 0.96 for row in rows))
+        self.assertTrue(all(row["probabilities"]["bugfix"] == 0.96 for row in rows))
+
     def test_missing_bundle_reports_clean_error(self):
         result = run_cli(
             ["shadow", "--catalog", self.catalog, "--input", os.path.join(self.tmp.name, "nope.json")]

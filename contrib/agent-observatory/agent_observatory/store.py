@@ -14,19 +14,22 @@ import json
 import os
 import sqlite3
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 from .canonical import (
     canonical_hash,
     canonical_json,
     event_snapshot_hash,
     identity_key,
-    sha256_bytes,
     session_snapshot_hash,
+    session_text_snapshot_hash,
+    sha256_bytes,
 )
 from .contract import (
     USAGE_INT_FIELDS,
+    normalize_timestamp,
     payload_hash,
     record_identity,
     validate_record,
@@ -34,11 +37,14 @@ from .contract import (
 from .errors import (
     ContractError,
     LabelConflictError,
+    ObservatoryError,
+    PricingError,
     RegistryConflictError,
     RegistryError,
     SchemaVersionError,
 )
-from .migrations import SCHEMA_VERSION_AFTER, V4_TO_V5_SCHEMA_STATEMENTS
+from .migrations import SCHEMA_VERSION_AFTER, V4_TO_V5_SCHEMA_STATEMENTS, V6_CORE_SCHEMA_STATEMENTS
+from .roles import role_from_session_name
 
 # Bump when the projection schema changes. Normal opens reject older schemas;
 # use the explicit CLI migration for a supported in-place upgrade.
@@ -53,6 +59,7 @@ from .migrations import SCHEMA_VERSION_AFTER, V4_TO_V5_SCHEMA_STATEMENTS
 # Version 5 adds the M7 shadow-policy ``recommendations`` projection. Rows are
 # append-only and keyed by the recommendation content hash, so replaying an
 # identical shadow run deduplicates while a changed policy version is retained.
+# Version 6 adds classification-to-session bindings, session roles, and pricing.
 DB_SCHEMA_VERSION = SCHEMA_VERSION_AFTER
 
 # Normalized record fields, in table order. ``observed_timestamp`` is not here:
@@ -115,6 +122,7 @@ _SCHEMA_STATEMENTS = (
         session_id TEXT NOT NULL,
         parent_session_id TEXT,
         first_timestamp TEXT,
+        role TEXT,
         PRIMARY KEY (city_id, host_id, provider, session_id)
     )
     """,
@@ -174,7 +182,11 @@ _SCHEMA_STATEMENTS = (
         request_json TEXT NOT NULL,
         request_bytes INTEGER NOT NULL,
         source_path TEXT,
-        source_sha256 TEXT
+        source_sha256 TEXT,
+        city_id TEXT,
+        host_id TEXT,
+        provider TEXT,
+        session_id TEXT
     )
     """,
     """
@@ -299,6 +311,7 @@ _SCHEMA_STATEMENTS = (
     )
     """,
     *V4_TO_V5_SCHEMA_STATEMENTS,
+    *V6_CORE_SCHEMA_STATEMENTS,
 )
 
 @dataclass
@@ -339,6 +352,79 @@ def _reject_json_constant(value: str) -> Any:
     raise ValueError(f"non-finite JSON constant {value!r} is not allowed")
 
 
+def _decimal_event_cost_usd(
+    input_tokens: Any,
+    output_tokens: Any,
+    cache_read_tokens: Any,
+    cache_write_tokens: Any,
+    input_usd_per_million: Any,
+    output_usd_per_million: Any,
+    cache_read_usd_per_million: Any,
+    cache_write_usd_per_million: Any,
+) -> str | None:
+    """Calculate a cost as exact decimal USD text for SQLite's cost view."""
+    token_values = (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
+    price_values = (
+        input_usd_per_million,
+        output_usd_per_million,
+        cache_read_usd_per_million,
+        cache_write_usd_per_million,
+    )
+    if all(value is None for value in token_values):
+        return None
+
+    terms: list[tuple[Decimal, Decimal]] = []
+    for tokens, price in zip(token_values, price_values):
+        if tokens is None:
+            continue
+        try:
+            token_amount = Decimal(str(tokens))
+        except InvalidOperation as exc:
+            raise ValueError("event token count is not a decimal number") from exc
+        if not token_amount.is_finite() or token_amount < 0:
+            raise ValueError("event token count must be finite and nonnegative")
+        if token_amount == 0:
+            continue
+        if price is None:
+            return None
+        try:
+            unit_price = Decimal(str(price))
+        except InvalidOperation as exc:
+            raise ValueError("model price is not a decimal number") from exc
+        if not unit_price.is_finite() or unit_price < 0:
+            raise ValueError("model price must be finite and nonnegative")
+        if unit_price != 0:
+            terms.append((token_amount, unit_price))
+
+    if not terms:
+        return "0"
+
+    min_exponent = min(
+        tokens.as_tuple().exponent + price.as_tuple().exponent - 6
+        for tokens, price in terms
+    )
+    max_adjusted = max(
+        len(tokens.as_tuple().digits) + len(price.as_tuple().digits) - 1
+        + tokens.as_tuple().exponent + price.as_tuple().exponent - 6
+        for tokens, price in terms
+    )
+    product_precision = max(
+        len(tokens.as_tuple().digits) + len(price.as_tuple().digits)
+        for tokens, price in terms
+    )
+    with localcontext() as context:
+        context.prec = max(28, product_precision, max_adjusted - min_exponent + 2)
+        total = sum(
+            (tokens * price / Decimal(1_000_000) for tokens, price in terms),
+            Decimal(0),
+        )
+
+    text = format(total, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
 def _split_jsonl_lines(text: str) -> list[str]:
     """Split JSONL on LF only, dropping one trailing CR per line.
 
@@ -364,7 +450,11 @@ class ObservatoryStore:
                 os.makedirs(parent, exist_ok=True)
         self._conn = sqlite3.connect(self.path, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
+        self._conn.create_function(
+            "decimal_event_cost_usd", 8, _decimal_event_cost_usd, deterministic=True
+        )
         self._conn.execute("PRAGMA foreign_keys = ON")
+        self._session_snapshot_index: dict[str, set[tuple[str, str, str, str]]] | None = None
         try:
             self._ensure_schema()
         except BaseException:
@@ -410,6 +500,13 @@ class ObservatoryStore:
                 f"database {self.path!r} metadata schema version is {row[0]!r}; "
                 f"this build supports only {self.SCHEMA_VERSION}"
             )
+        if version == 0:
+            # Fresh projections start with the checked-in, source-cited price
+            # schedule; existing schema-6 stores can explicitly rerun the
+            # idempotent seed command if they need to refresh it.
+            from .pricing import seed_model_pricing
+
+            seed_model_pricing(self)
 
     # -- import ------------------------------------------------------------
 
@@ -518,9 +615,10 @@ class ObservatoryStore:
                 return "conflict", note
             return "duplicate", None
 
+        role = role_from_session_name(identity[3])
         self._conn.execute(
             "INSERT OR IGNORE INTO sessions(city_id, host_id, provider, session_id, "
-            "parent_session_id, first_timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+            "parent_session_id, first_timestamp, role) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 identity[0],
                 identity[1],
@@ -528,8 +626,15 @@ class ObservatoryStore:
                 identity[3],
                 record.get("parent_session_id"),
                 record.get("timestamp"),
+                role,
             ),
         )
+        if role is not None:
+            self._conn.execute(
+                "UPDATE sessions SET role = ? WHERE city_id = ? AND host_id = ? "
+                "AND provider = ? AND session_id = ? AND role IS NULL",
+                (role, *identity[:4]),
+            )
         # ``first_timestamp`` is the earliest observed event, not merely the first
         # one imported: a later import of an earlier event must lower it.
         self._conn.execute(
@@ -577,6 +682,7 @@ class ObservatoryStore:
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 identity + tuple(usage.get(field) for field in USAGE_INT_FIELDS),
             )
+        self._session_snapshot_index = None
         return "inserted", None
 
     # -- read helpers ------------------------------------------------------
@@ -646,6 +752,51 @@ class ObservatoryStore:
             session_key, [(event["event_id"], event["payload_hash"]) for event in events]
         )
 
+    def _snapshot_bindings(
+        self,
+    ) -> dict[str, set[tuple[tuple[str, str, str, str], str]]]:
+        """Return an in-memory index of current session/event snapshot identities."""
+        if self._session_snapshot_index is not None:
+            return self._session_snapshot_index
+        index: dict[str, set[tuple[tuple[str, str, str, str], str]]] = {}
+        for key in self.session_keys():
+            events = self.session_events(key)
+            if not events:
+                continue
+            raw_snapshot = session_snapshot_hash(
+                key, [(event["event_id"], event["payload_hash"]) for event in events]
+            )
+            index.setdefault(raw_snapshot, set()).add((key, "snapshot"))
+            index.setdefault(session_text_snapshot_hash(raw_snapshot), set()).add(
+                (key, "text_snapshot")
+            )
+            for event in events:
+                event_hash = event_snapshot_hash(
+                    tuple(key) + (event["event_id"],), event["payload_hash"]
+                )
+                index.setdefault(event_hash, set()).add((key, "event_snapshot"))
+        self._session_snapshot_index = index
+        return index
+
+    def resolve_session_binding(
+        self, snapshot_hash: str, subject_kind: str
+    ) -> tuple[tuple[str, str, str, str], str] | None:
+        """Resolve a classification snapshot to one exact session, never by guess."""
+        if subject_kind == "session":
+            allowed = {"snapshot", "text_snapshot"}
+        elif subject_kind == "event":
+            allowed = {"event_snapshot"}
+        else:
+            return None
+        candidates = {
+            (key, method)
+            for key, method in self._snapshot_bindings().get(snapshot_hash, set())
+            if method in allowed
+        }
+        if len(candidates) != 1:
+            return None
+        return next(iter(candidates))
+
     # -- Jev request provenance -------------------------------------------
 
     def save_request(
@@ -661,12 +812,34 @@ class ObservatoryStore:
         request_bytes: int,
         source_path: str | None = None,
         source_sha256: str | None = None,
+        session_key: Sequence[str] | None = None,
     ) -> bool:
-        """Persist a generated request. Returns True when newly stored."""
+        """Persist a generated request and its exact session when resolvable.
+
+        Collectors may build requests without passing an identity. In that case
+        the current snapshot index records the unique owning session at request
+        time; an unmatched or ambiguous hash remains unbound.
+        """
+        binding = self.resolve_session_binding(snapshot_hash, subject_kind)
+        if session_key is not None:
+            if isinstance(session_key, (str, bytes)):
+                raise ContractError("session_key must be a four-item sequence, not text")
+            parts = tuple(session_key)
+            if len(parts) != 4 or not all(isinstance(part, str) and part for part in parts):
+                raise ContractError("session_key must contain four non-empty strings")
+            explicit_key = parts  # type: ignore[assignment]
+            if binding is None or binding[0] != explicit_key:
+                # An explicit identity is accepted only when its snapshot proves
+                # that it names this exact subject.
+                explicit_key = None
+            if explicit_key is not None:
+                binding = (explicit_key, binding[1])
+        identity = binding[0] if binding is not None else (None, None, None, None)
         cursor = self._conn.execute(
             "INSERT OR IGNORE INTO jev_requests(request_hash, snapshot_hash, subject_kind, "
             "taxonomy_version, question_hash, model, request_json, request_bytes, source_path, "
-            "source_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "source_sha256, city_id, host_id, provider, session_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 request_hash,
                 snapshot_hash,
@@ -678,8 +851,16 @@ class ObservatoryStore:
                 request_bytes,
                 source_path,
                 source_sha256,
+                *identity,
             ),
         )
+        if binding is not None:
+            self._conn.execute(
+                "UPDATE jev_requests SET city_id = ?, host_id = ?, provider = ?, session_id = ? "
+                "WHERE request_hash = ? AND city_id IS NULL AND host_id IS NULL "
+                "AND provider IS NULL AND session_id IS NULL",
+                (*binding[0], request_hash),
+            )
         return cursor.rowcount == 1
 
     def get_request(self, request_hash: str) -> dict[str, Any] | None:
@@ -706,6 +887,48 @@ class ObservatoryStore:
             (subject_kind, snapshot_hash, taxonomy_version, question_hash, model_version),
         ).fetchone()
 
+    def _checked_session_binding(
+        self, session_key: Sequence[str], binding_method: str
+    ) -> tuple[tuple[str, str, str, str], str] | None:
+        if isinstance(session_key, (str, bytes)):
+            raise ContractError("session_key must be a four-item sequence, not text")
+        parts = tuple(session_key)
+        if len(parts) != 4 or not all(isinstance(part, str) and part for part in parts):
+            raise ContractError("session_key must contain four non-empty strings")
+        if binding_method not in {
+            "request", "snapshot", "text_snapshot", "event_snapshot", "source_provenance", "explicit"
+        }:
+            raise ContractError(f"unsupported classification binding method {binding_method!r}")
+        exists = self._conn.execute(
+            "SELECT 1 FROM sessions WHERE city_id = ? AND host_id = ? AND provider = ? "
+            "AND session_id = ?",
+            parts,
+        ).fetchone()
+        if exists is None:
+            return None
+        return (parts, binding_method)  # type: ignore[return-value]
+
+    def _record_classification_binding(
+        self, classification_id: int, binding: tuple[tuple[str, str, str, str], str]
+    ) -> None:
+        key, method = binding
+        existing = self._conn.execute(
+            "SELECT city_id, host_id, provider, session_id FROM classification_sessions "
+            "WHERE classification_id = ?",
+            (classification_id,),
+        ).fetchone()
+        if existing is not None:
+            if tuple(existing) != key:
+                raise ObservatoryError(
+                    f"classification {classification_id} is already bound to a different session"
+                )
+            return
+        self._conn.execute(
+            "INSERT INTO classification_sessions(classification_id, city_id, host_id, provider, "
+            "session_id, binding_method) VALUES (?, ?, ?, ?, ?, ?)",
+            (classification_id, *key, method),
+        )
+
     def save_classification(
         self,
         *,
@@ -719,18 +942,20 @@ class ObservatoryStore:
         answers: Iterable[dict[str, Any]],
         source_path: str | None = None,
         source_sha256: str | None = None,
+        session_key: Sequence[str] | None = None,
+        binding_method: str = "explicit",
     ) -> tuple[int, bool]:
-        """Store an immutable classification.
+        """Store an immutable classification and its exact owning session.
 
-        Returns ``(classification_id, deduplicated)``. Replaying the identical
-        response deduplicates; a different response for the same subject and
-        taxonomy is rejected rather than overwriting the stored label.
-
-        The existing-row check runs *inside* the transaction. A concurrent writer
-        that wins the UNIQUE race between the check and the insert lands in the
-        same deduplicated/LabelConflictError paths instead of leaking an
-        ``IntegrityError``.
+        A persisted request identity wins even if the session acquired later
+        events after the request was classified. Without one, only an exact
+        current snapshot match creates a binding; unmatched hashes stay unbound.
         """
+        if session_key is not None:
+            binding = self._checked_session_binding(session_key, binding_method)
+        else:
+            resolved = self.resolve_session_binding(snapshot_hash, subject_kind)
+            binding = resolved
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             existing = self._find_classification(
@@ -742,6 +967,10 @@ class ObservatoryStore:
             )
             if existing is not None:
                 if existing["response_hash"] == response_hash:
+                    if binding is not None:
+                        self._record_classification_binding(
+                            int(existing["classification_id"]), binding
+                        )
                     self._conn.execute("COMMIT")
                     return int(existing["classification_id"]), True
                 raise LabelConflictError(
@@ -778,10 +1007,13 @@ class ObservatoryStore:
                         canonical_json(answer["answer"]),
                     ),
                 )
+            if binding is not None:
+                self._record_classification_binding(classification_id, binding)
             self._conn.execute("COMMIT")
             return classification_id, False
         except sqlite3.IntegrityError:
-            self._conn.execute("ROLLBACK")
+            if self._conn.in_transaction:
+                self._conn.execute("ROLLBACK")
             existing = self._find_classification(
                 subject_kind=subject_kind,
                 snapshot_hash=snapshot_hash,
@@ -791,6 +1023,10 @@ class ObservatoryStore:
             )
             if existing is not None:
                 if existing["response_hash"] == response_hash:
+                    if binding is not None:
+                        self._record_classification_binding(
+                            int(existing["classification_id"]), binding
+                        )
                     return int(existing["classification_id"]), True
                 raise LabelConflictError(
                     "refusing to overwrite classification for subject "
@@ -799,7 +1035,8 @@ class ObservatoryStore:
                 ) from None
             raise
         except BaseException:
-            self._conn.execute("ROLLBACK")
+            if self._conn.in_transaction:
+                self._conn.execute("ROLLBACK")
             raise
 
     def get_classification(
@@ -829,8 +1066,175 @@ class ObservatoryStore:
         ]
         return record
 
+    def classifications_for_session(
+        self,
+        session_key: Sequence[str],
+        *,
+        subject_kind: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Read classifications by durable session binding, newest first."""
+        key = tuple(session_key)
+        if len(key) != 4 or not all(isinstance(part, str) and part for part in key):
+            raise ContractError("session_key must contain four non-empty strings")
+        query = (
+            "SELECT c.*, b.binding_method, b.bound_at, s.role AS session_role, "
+            "a.question_id, a.question_type, a.value_json "
+            "FROM classification_sessions AS b "
+            "JOIN classifications AS c ON c.classification_id = b.classification_id "
+            "JOIN sessions AS s ON s.city_id = b.city_id AND s.host_id = b.host_id "
+            "AND s.provider = b.provider AND s.session_id = b.session_id "
+            "LEFT JOIN classification_answers AS a ON a.classification_id = c.classification_id "
+            "WHERE b.city_id = ? AND b.host_id = ? AND b.provider = ? AND b.session_id = ?"
+        )
+        params: tuple[Any, ...] = key
+        if subject_kind is not None:
+            query += " AND c.subject_kind = ?"
+            params += (subject_kind,)
+        query += " ORDER BY c.classification_id DESC, a.question_id"
+        grouped: dict[int, dict[str, Any]] = {}
+        for row in self._conn.execute(query, params):
+            classification_id = int(row["classification_id"])
+            record = grouped.setdefault(
+                classification_id,
+                {
+                    key: row[key]
+                    for key in row.keys()
+                    if key not in {"question_id", "question_type", "value_json"}
+                },
+            )
+            record.setdefault("session_key", key)
+            record.setdefault("answers", [])
+            if row["question_id"] is not None:
+                record["answers"].append(
+                    {
+                        "question_id": row["question_id"],
+                        "question_type": row["question_type"],
+                        "answer": json.loads(row["value_json"]),
+                    }
+                )
+        return list(grouped.values())
+
+    def latest_classification_for_session(
+        self,
+        session_key: Sequence[str],
+        *,
+        subject_kind: str = "session",
+    ) -> dict[str, Any] | None:
+        """Return the newest bound classification for one session, if present."""
+        rows = self.classifications_for_session(session_key, subject_kind=subject_kind)
+        return rows[0] if rows else None
+
+
     def classification_count(self) -> int:
         return int(self._conn.execute("SELECT COUNT(*) FROM classifications").fetchone()[0])
+
+    def save_model_pricing(self, rows: Iterable[Mapping[str, Any]]) -> int:
+        """Append exact USD-per-million prices idempotently; conflicting keys are refused."""
+        from .pricing import _decimal_text, _price
+
+        columns = (
+            "model_id",
+            "provider",
+            "input_usd_per_million",
+            "output_usd_per_million",
+            "cache_read_usd_per_million",
+            "cache_write_usd_per_million",
+            "effective_from",
+            "source",
+        )
+        normalized_rows: list[tuple[Any, ...]] = []
+        for row in rows:
+            model_id = row.get("model_id")
+            provider = row.get("provider")
+            effective_from = row.get("effective_from")
+            source = row.get("source")
+            if (
+                not isinstance(model_id, str)
+                or not model_id.strip()
+                or "provider" not in row
+                or (
+                    provider is not None
+                    and (not isinstance(provider, str) or not provider.strip())
+                )
+                or not isinstance(effective_from, str)
+                or not effective_from
+                or not isinstance(source, str)
+                or not source
+            ):
+                raise ContractError(
+                    "model pricing needs model_id, provider (or null), effective_from and source"
+                )
+            try:
+                effective_from = normalize_timestamp(effective_from)
+            except ContractError as exc:
+                raise PricingError(
+                    "model pricing.effective_from must be timezone-aware ISO-8601"
+                ) from exc
+            price_values = (
+                _price(
+                    row.get("input_usd_per_million"),
+                    "input_usd_per_million",
+                    "model pricing",
+                    required=True,
+                ),
+                _price(
+                    row.get("output_usd_per_million"),
+                    "output_usd_per_million",
+                    "model pricing",
+                    required=True,
+                ),
+                _price(
+                    row.get("cache_read_usd_per_million"),
+                    "cache_read_usd_per_million",
+                    "model pricing",
+                    required=False,
+                ),
+                _price(
+                    row.get("cache_write_usd_per_million"),
+                    "cache_write_usd_per_million",
+                    "model pricing",
+                    required=False,
+                ),
+            )
+            normalized_rows.append(
+                (
+                    model_id.strip(),
+                    provider.strip() if isinstance(provider, str) else None,
+                    *(_decimal_text(value) for value in price_values),
+                    effective_from,
+                    source,
+                )
+            )
+
+        inserted = 0
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            for values in normalized_rows:
+                cursor = self._conn.execute(
+                    "INSERT OR IGNORE INTO model_pricing(" + ", ".join(columns) + ") "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    values,
+                )
+                if cursor.rowcount == 1:
+                    inserted += 1
+                    continue
+                existing = self._conn.execute(
+                    "SELECT " + ", ".join(columns) + " FROM model_pricing "
+                    "WHERE model_id = ? AND provider IS ? AND effective_from = ?",
+                    (values[0], values[1], values[6]),
+                ).fetchone()
+                if existing is None or tuple(existing) != values:
+                    raise ObservatoryError(
+                        f"conflicting model pricing for {values[0]!r} provider "
+                        f"{values[1]!r} effective {values[6]!r}"
+                    )
+            self._conn.execute("COMMIT")
+            return inserted
+        except BaseException:
+            if self._conn.in_transaction:
+                self._conn.execute("ROLLBACK")
+            raise
+
 
     # -- gold annotations --------------------------------------------------
 

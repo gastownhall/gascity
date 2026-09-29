@@ -1,4 +1,4 @@
-"""Tests for the explicit, backed-up schema-4 to schema-5 migration."""
+"""Tests for the explicit, backed-up schema-4/5 to schema-6 migrations."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 try:
     from . import support
@@ -17,7 +18,8 @@ except ImportError:  # pragma: no cover
     import support
 
 from agent_observatory.errors import ObservatoryError, SchemaVersionError
-from agent_observatory.migrations import _V4_REQUIRED_TABLES, migrate_database
+from agent_observatory.canonical import session_text_snapshot_hash, sha256_bytes
+from agent_observatory.migrations import _V5_REQUIRED_TABLES, migrate_database
 from agent_observatory.store import ObservatoryStore
 
 
@@ -27,8 +29,7 @@ class MigrationTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.db_path = os.path.join(self.tmp.name, "obs.db")
 
-    def _make_v4_fixture(self, db_path=None):
-        """Build populated v5 data, then remove the sole v5 addition for a v4 fixture."""
+    def _make_schema6_fixture(self, db_path=None):
         if db_path is None:
             db_path = self.db_path
         jsonl_path = os.path.join(self.tmp.name, f"{os.path.basename(db_path)}.jsonl")
@@ -68,9 +69,36 @@ class MigrationTest(unittest.TestCase):
                     },
                 ],
             )
+        return db_path
 
-        # v5 only adds this table and index. Remove that addition and set both
-        # schema markers to 4 to create a representative, populated v4 fixture.
+    @staticmethod
+    def _downgrade_schema6_to_v5(db_path):
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute("DROP VIEW event_usage_cost")
+            connection.execute("DROP TABLE classification_sessions")
+            connection.execute("DROP TABLE model_pricing")
+            connection.execute("ALTER TABLE sessions DROP COLUMN role")
+            for column in ("session_id", "provider", "host_id", "city_id"):
+                connection.execute(f"ALTER TABLE jev_requests DROP COLUMN {column}")
+            connection.execute("UPDATE schema_meta SET value = '5' WHERE key = 'schema_version'")
+            connection.execute("PRAGMA user_version = 5")
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _make_v5_fixture(self, db_path=None):
+        if db_path is None:
+            db_path = self.db_path
+        self._make_schema6_fixture(db_path)
+        self._downgrade_schema6_to_v5(db_path)
+        return db_path
+
+    def _make_v4_fixture(self, db_path=None):
+        """Create a populated v4 projection from the current schema fixture."""
+        if db_path is None:
+            db_path = self.db_path
+        self._make_v5_fixture(db_path)
         connection = sqlite3.connect(db_path)
         try:
             connection.execute("DROP TABLE recommendations")
@@ -91,6 +119,17 @@ class MigrationTest(unittest.TestCase):
             }
         finally:
             connection.close()
+
+
+    @staticmethod
+    def _backup_paths_v5(db_path):
+        directory = os.path.dirname(db_path)
+        prefix = os.path.basename(db_path) + ".v5-pre-schema6-"
+        return sorted(
+            os.path.realpath(os.path.join(directory, name))
+            for name in os.listdir(directory)
+            if name.startswith(prefix) and name.endswith(".bak")
+        )
 
     @staticmethod
     def _table_count(db_path, table):
@@ -121,29 +160,64 @@ class MigrationTest(unittest.TestCase):
             "classification_answers": 2,
         }
         self.assertEqual(result.from_version, 4)
-        self.assertEqual(result.to_version, 5)
+        self.assertEqual(result.to_version, 6)
         self.assertEqual(result.database_path, os.path.realpath(self.db_path))
-        self.assertEqual(set(result.preserved_rows), _V4_REQUIRED_TABLES)
+        self.assertEqual(set(result.preserved_rows), _V5_REQUIRED_TABLES)
         self.assertEqual(
             {table: result.preserved_rows[table] for table in expected_counts}, expected_counts
         )
         self.assertEqual(result.preserved_rows["imported_files"], 1)
-        self.assertTrue(os.path.isfile(result.backup_path))
-        self.assertEqual(self._backup_paths(self.db_path), [result.backup_path])
+        self.assertEqual(len(result.backup_paths), 2)
+        self.assertEqual(result.backup_path, result.backup_paths[-1])
+        self.assertTrue(all(os.path.isfile(path) for path in result.backup_paths))
+        self.assertEqual(self._backup_paths(self.db_path), [result.backup_paths[0]])
+        self.assertEqual(self._backup_paths_v5(self.db_path), [result.backup_paths[1]])
         self.assertEqual(self._counts(self.db_path), expected_counts)
         self.assertEqual(self._table_count(self.db_path, "imported_files"), 1)
+        self.assertEqual(result.backfill_summary["classifications_total"], 1)
+        self.assertEqual(result.backfill_summary["classifications_unbound"], 1)
+        self.assertEqual(result.backfill_summary["classification_match_rate"], 0.0)
+        self.assertEqual(result.backfill_summary["sessions_total"], 2)
+        self.assertEqual(result.backfill_summary["sessions_with_role"], 0)
+        self.assertEqual(result.backfill_summary["pricing_seed_rows"], 3)
 
         upgraded = sqlite3.connect(self.db_path)
         try:
-            self.assertEqual(upgraded.execute("PRAGMA user_version").fetchone()[0], 5)
+            self.assertEqual(upgraded.execute("PRAGMA user_version").fetchone()[0], 6)
             self.assertEqual(
                 upgraded.execute(
                     "SELECT value FROM schema_meta WHERE key = 'schema_version'"
                 ).fetchone()[0],
-                "5",
+                "6",
             )
+            self.assertEqual(upgraded.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0], 0)
+            self.assertEqual(upgraded.execute("SELECT COUNT(*) FROM classification_sessions").fetchone()[0], 0)
+            self.assertEqual(upgraded.execute("SELECT COUNT(*) FROM model_pricing").fetchone()[0], 3)
+            pricing_columns = {
+                row[1]: row for row in upgraded.execute("PRAGMA table_info(model_pricing)")
+            }
+            for field in (
+                "input_usd_per_million",
+                "output_usd_per_million",
+                "cache_read_usd_per_million",
+                "cache_write_usd_per_million",
+            ):
+                self.assertEqual(pricing_columns[field][2].upper(), "TEXT")
+            self.assertEqual(pricing_columns["provider"][3], 0)
             self.assertEqual(
-                upgraded.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0], 0
+                tuple(
+                    pricing_columns[field][5]
+                    for field in ("model_id", "provider", "effective_from")
+                ),
+                (1, 2, 3),
+            )
+            self.assertIsNotNone(
+                upgraded.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = 'event_usage_cost'"
+                ).fetchone()
+            )
+            self.assertIn(
+                "role", {row[1] for row in upgraded.execute("PRAGMA table_info(sessions)")}
             )
             self.assertEqual(
                 upgraded.execute(
@@ -154,23 +228,171 @@ class MigrationTest(unittest.TestCase):
         finally:
             upgraded.close()
 
-        backup = sqlite3.connect(result.backup_path)
+        v4_backup, v5_backup = result.backup_paths
+        backup4 = sqlite3.connect(v4_backup)
         try:
-            self.assertEqual(backup.execute("PRAGMA user_version").fetchone()[0], 4)
-            self.assertEqual(
-                backup.execute(
-                    "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-                ).fetchone()[0],
-                "4",
-            )
-            self.assertEqual(self._counts(result.backup_path), expected_counts)
+            self.assertEqual(backup4.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(backup4.execute("SELECT COUNT(*) FROM events").fetchone()[0], 2)
             self.assertIsNone(
-                backup.execute(
+                backup4.execute(
                     "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'recommendations'"
                 ).fetchone()
             )
         finally:
-            backup.close()
+            backup4.close()
+        backup5 = sqlite3.connect(v5_backup)
+        try:
+            self.assertEqual(backup5.execute("PRAGMA user_version").fetchone()[0], 5)
+            self.assertEqual(backup5.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0], 0)
+            self.assertNotIn(
+                "role", {row[1] for row in backup5.execute("PRAGMA table_info(sessions)")}
+            )
+        finally:
+            backup5.close()
+
+    def test_v5_migration_backfills_snapshots_provenance_and_session_roles(self):
+        session_text = "gateway-llm-dell--dsh-luna-1-pool"
+        mayor = "rig--mayor"
+        lane_a = "rig--fleet-work-review-2-pool"
+        lane_b = "rig--fleet-work-build-1-pool"
+        single_path = os.path.join(self.tmp.name, "text-session.jsonl")
+        mayor_path = os.path.join(self.tmp.name, "mayor.jsonl")
+        shared_path = os.path.join(self.tmp.name, "shared.jsonl")
+        support.write_jsonl(
+            single_path,
+            [support.make_record(event_id="e-text", session_id=session_text)],
+        )
+        support.write_jsonl(mayor_path, [support.make_record(event_id="e-mayor", session_id=mayor)])
+        support.write_jsonl(
+            shared_path,
+            [
+                support.make_record(event_id="e-lane-a", session_id=lane_a),
+                support.make_record(event_id="e-lane-b", session_id=lane_b),
+            ],
+        )
+
+        key_text = ("city-a", "host-a", "codex", session_text)
+        key_mayor = ("city-a", "host-a", "codex", mayor)
+        with ObservatoryStore(self.db_path) as store:
+            store.import_jsonl(single_path)
+            store.import_jsonl(mayor_path)
+            store.import_jsonl(shared_path)
+            raw_snapshot = store.session_snapshot(key_text)
+            text_snapshot = session_text_snapshot_hash(raw_snapshot)
+            event_snapshot = store.event_snapshot(key_mayor, "e-mayor")
+
+            def save_classification(
+                snapshot_hash,
+                suffix,
+                *,
+                subject_kind="session",
+                source_path=None,
+                request_source_path=None,
+            ):
+                request_hash = (suffix * 64)[:64]
+                source_sha256 = (
+                    sha256_bytes(Path(source_path).read_bytes()) if source_path is not None else None
+                )
+                if request_source_path is not None:
+                    store.save_request(
+                        request_hash=request_hash,
+                        snapshot_hash=snapshot_hash,
+                        subject_kind=subject_kind,
+                        taxonomy_version="1.1.0",
+                        question_hash="q" * 64,
+                        model="jev-1.13.0",
+                        request_json="{}",
+                        request_bytes=2,
+                        source_path=request_source_path,
+                        source_sha256=sha256_bytes(Path(request_source_path).read_bytes()),
+                    )
+                return store.save_classification(
+                    subject_kind=subject_kind,
+                    snapshot_hash=snapshot_hash,
+                    taxonomy_version="1.1.0",
+                    question_hash="q" * 64,
+                    model_version="jev-1.13.0",
+                    request_hash=request_hash,
+                    response_hash=("r" + suffix) * 32,
+                    answers=[
+                        {
+                            "question_id": "primary_intent",
+                            "question_type": "choice",
+                            "answer": {"choice": "implementation", "confidence": 0.9},
+                        }
+                    ],
+                    source_path=source_path,
+                    source_sha256=source_sha256,
+                )
+
+            save_classification(raw_snapshot, "1")
+            save_classification(text_snapshot, "2")
+            save_classification(event_snapshot, "3", subject_kind="event")
+            drifted_hash = "d" * 64
+            save_classification(
+                drifted_hash, "4", request_source_path=mayor_path
+            )
+            source_hash = "p" * 64
+            save_classification(source_hash, "7", source_path=single_path)
+            ambiguous_hash = "a" * 64
+            save_classification(ambiguous_hash, "5", source_path=shared_path)
+            unmatched_hash = "u" * 64
+            save_classification(unmatched_hash, "6")
+
+        self._downgrade_schema6_to_v5(self.db_path)
+        result = migrate_database(self.db_path)
+
+        self.assertEqual(result.from_version, 5)
+        self.assertEqual(result.to_version, 6)
+        self.assertEqual(result.backup_paths, (result.backup_path,))
+        self.assertEqual(self._backup_paths_v5(self.db_path), [result.backup_path])
+        summary = result.backfill_summary
+        self.assertEqual(summary["classifications_total"], 7)
+        self.assertEqual(summary["classifications_bound"], 5)
+        self.assertEqual(summary["classifications_unbound"], 2)
+        self.assertEqual(summary["classification_match_rate"], 0.714286)
+        self.assertEqual(
+            summary["classification_binding_methods"],
+            {
+                "snapshot": 1,
+                "text_snapshot": 1,
+                "event_snapshot": 1,
+                "request": 1,
+                "source_provenance": 1,
+            },
+        )
+        self.assertEqual(summary["requests_total"], 1)
+        self.assertEqual(summary["requests_bound"], 1)
+        self.assertEqual(summary["request_match_rate"], 1.0)
+        self.assertEqual(summary["pricing_seed_rows"], 3)
+        self.assertEqual(summary["sessions_total"], 4)
+        self.assertEqual(summary["sessions_with_role"], 4)
+        self.assertEqual(summary["session_role_coverage"], 1.0)
+
+        connection = sqlite3.connect(self.db_path)
+        try:
+            bindings = {
+                row[0]: (row[1], row[2], row[3])
+                for row in connection.execute(
+                    "SELECT c.snapshot_hash, b.city_id, b.session_id, b.binding_method "
+                    "FROM classifications c JOIN classification_sessions b "
+                    "ON b.classification_id = c.classification_id"
+                )
+            }
+            self.assertEqual(bindings[raw_snapshot], ("city-a", session_text, "snapshot"))
+            self.assertEqual(bindings[text_snapshot], ("city-a", session_text, "text_snapshot"))
+            self.assertEqual(bindings[event_snapshot], ("city-a", mayor, "event_snapshot"))
+            self.assertEqual(bindings[drifted_hash], ("city-a", mayor, "request"))
+            self.assertEqual(bindings[source_hash], ("city-a", session_text, "source_provenance"))
+            self.assertNotIn(ambiguous_hash, bindings)
+            self.assertNotIn(unmatched_hash, bindings)
+            roles = dict(connection.execute("SELECT session_id, role FROM sessions"))
+        finally:
+            connection.close()
+        self.assertEqual(roles[session_text], "dsh-luna pool")
+        self.assertEqual(roles[mayor], "mayor")
+        self.assertEqual(roles[lane_a], "fleet-work review pool")
+        self.assertEqual(roles[lane_b], "fleet-work build pool")
 
     def test_migrates_database_written_by_v4_era_store(self):
         # This fixture was created with ObservatoryStore from d812ee146^, when
@@ -198,8 +420,8 @@ class MigrationTest(unittest.TestCase):
         result = migrate_database(self.db_path)
 
         self.assertEqual(result.from_version, 4)
-        self.assertEqual(result.to_version, 5)
-        self.assertEqual(set(result.preserved_rows), _V4_REQUIRED_TABLES)
+        self.assertEqual(result.to_version, 6)
+        self.assertEqual(set(result.preserved_rows), _V5_REQUIRED_TABLES)
         self.assertEqual(result.preserved_rows["events"], 1)
         self.assertEqual(result.preserved_rows["imported_files"], 1)
         self.assertEqual(self._table_count(self.db_path, "events"), 1)
@@ -309,6 +531,51 @@ class MigrationTest(unittest.TestCase):
         self.assertEqual(len(backups), 1)
         self.assertEqual(self._counts(backups[0])["events"], 2)
 
+    def test_v5_migration_failure_rolls_back_and_keeps_v5_backup(self):
+        self._make_v5_fixture()
+        connection = sqlite3.connect(self.db_path)
+        try:
+            connection.execute(
+                """
+                CREATE TRIGGER delete_event_during_v6_upgrade
+                AFTER UPDATE ON schema_meta
+                WHEN OLD.key = 'schema_version' AND NEW.value = '6'
+                BEGIN
+                    DELETE FROM events WHERE event_id = 'event-1';
+                END
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.assertRaises(ObservatoryError):
+            migrate_database(self.db_path)
+
+        connection = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 5)
+            self.assertEqual(
+                connection.execute(
+                    "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+                ).fetchone()[0],
+                "5",
+            )
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0], 2)
+            self.assertNotIn(
+                "role", {row[1] for row in connection.execute("PRAGMA table_info(sessions)")}
+            )
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'model_pricing'"
+                ).fetchone()
+            )
+        finally:
+            connection.close()
+        backups = self._backup_paths_v5(self.db_path)
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(self._counts(backups[0])["events"], 2)
+
     def test_failure_rolls_back_imported_file_deletion_during_upgrade(self):
         self._make_v4_fixture()
         self.assertEqual(self._table_count(self.db_path, "imported_files"), 1)
@@ -369,11 +636,13 @@ class MigrationTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["from_version"], 4)
-        self.assertEqual(payload["to_version"], 5)
+        self.assertEqual(payload["to_version"], 6)
+        self.assertEqual(len(payload["backups"]), 2)
         self.assertTrue(os.path.isfile(payload["backup"]))
         self.assertEqual(payload["preserved_rows"]["events"], 2)
+        self.assertEqual(payload["backfill_summary"]["classifications_total"], 1)
 
-    def test_cli_migrate_is_noop_when_database_is_already_schema5(self):
+    def test_cli_migrate_is_noop_when_database_is_already_schema6(self):
         self._make_v4_fixture()
         migrate_database(self.db_path)
         with open(self.db_path, "rb") as database:
@@ -381,9 +650,9 @@ class MigrationTest(unittest.TestCase):
         backups_before = self._backup_paths(self.db_path)
 
         result = migrate_database(self.db_path)
-        self.assertEqual(result.from_version, 5)
-        self.assertEqual(result.to_version, 5)
-        self.assertEqual(result.already_at_version, 5)
+        self.assertEqual(result.from_version, 6)
+        self.assertEqual(result.to_version, 6)
+        self.assertEqual(result.already_at_version, 6)
         self.assertIsNone(result.backup_path)
         with open(self.db_path, "rb") as database:
             self.assertEqual(database.read(), migrated_bytes)
@@ -400,7 +669,7 @@ class MigrationTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(completed.stdout.strip(), "already at schema 5")
+        self.assertEqual(completed.stdout.strip(), "already at schema 6")
         self.assertEqual(completed.stderr, "")
         with open(self.db_path, "rb") as database:
             self.assertEqual(database.read(), migrated_bytes)

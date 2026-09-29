@@ -1302,50 +1302,55 @@ def predictions_from_store(
     *,
     prefer_text: bool = True,
 ) -> tuple[Prediction, ...]:
-    """Read Jev ``primary_intent`` predictions for the sampled sessions.
+    """Read Jev predictions through the durable classification/session binding.
 
-    The text-mode (namespaced) classification is preferred over the metadata one
-    when present. The lookup is by subject snapshot rather than by the caller's
-    taxonomy hash, so classifications stored under an earlier taxonomy revision
-    (the live projection carries 1.1.0 rows) are still readable. A session with
-    no stored classification is simply absent from the result.
+    Snapshot hashes still select the preferred text or metadata scope when they
+    match the current projection. If a session has since acquired events, the
+    binding remains authoritative and the newest classification is a safe
+    fallback; the current snapshot is no longer required to retrieve it.
     """
 
-    from .collector import _text_snapshot_hash  # package-internal namespacing
+    from .canonical import session_text_snapshot_hash
     from .errors import ContractError
-
-    def lookup(snapshot_hash: str) -> Any:
-        return store.conn.execute(
-            "SELECT a.value_json FROM classifications c "
-            "JOIN classification_answers a ON a.classification_id = c.classification_id "
-            "WHERE c.subject_kind = 'session' AND a.question_id = ? "
-            "AND c.snapshot_hash = ? ORDER BY c.classification_id DESC LIMIT 1",
-            (PRIMARY_FACET, snapshot_hash),
-        ).fetchone()
 
     predictions: list[Prediction] = []
     for episode in episodes:
         key = session_key_from_group_key(episode.group_key)
         if key is None:
             continue
+        classifications = store.classifications_for_session(key, subject_kind="session")
+        if not classifications:
+            continue
         try:
-            raw = store.session_snapshot(key)
+            raw_snapshot = store.session_snapshot(key)
         except ContractError:
-            raw = None
-        if raw is None:
+            raw_snapshot = None
+
+        def classification_for_snapshot(snapshot_hash: str | None) -> dict[str, Any] | None:
+            if snapshot_hash is None:
+                return None
+            return next(
+                (item for item in classifications if item["snapshot_hash"] == snapshot_hash),
+                None,
+            )
+
+        classification = (
+            classification_for_snapshot(session_text_snapshot_hash(raw_snapshot))
+            if prefer_text and raw_snapshot is not None
+            else None
+        )
+        if classification is None:
+            classification = classification_for_snapshot(raw_snapshot)
+        if classification is None:
+            classification = classifications[0]
+
+        primary = next(
+            (answer for answer in classification["answers"] if answer["question_id"] == PRIMARY_FACET),
+            None,
+        )
+        if primary is None:
             continue
-        # The text scope wins when it exists; the metadata scope is only a
-        # fallback. Querying by scope in order stops a newer metadata row from
-        # shadowing an older text classification (they are distinct subjects).
-        row = lookup(_text_snapshot_hash(raw)) if prefer_text else None
-        if row is None:
-            row = lookup(raw)
-        if row is None:
-            continue
-        try:
-            answer = json.loads(row["value_json"])
-        except (ValueError, TypeError):
-            continue
+        answer = primary["answer"]
         if not isinstance(answer, Mapping):
             continue
         label = answer.get("choice")
@@ -1358,9 +1363,13 @@ def predictions_from_store(
                 episode_id=episode.episode_id,
                 predictor="jev",
                 labels={PRIMARY_FACET: (label,)},
-                confidence=float(confidence) if isinstance(confidence, (int, float)) and not isinstance(confidence, bool) else None,
+                confidence=(
+                    float(confidence)
+                    if isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
+                    else None
+                ),
                 probabilities=dict(probabilities) if isinstance(probabilities, Mapping) else None,
-                model="jev-1.13.0",
+                model=classification["model_version"],
             )
         )
     return tuple(predictions)

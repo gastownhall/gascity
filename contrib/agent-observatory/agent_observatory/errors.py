@@ -66,6 +66,11 @@ class AnnotationError(ObservatoryError):
     """A gold annotation set or annotation record is invalid."""
 
 
+class PricingError(ObservatoryError):
+    """A checked-in model price or pricing-seed document is invalid."""
+
+
+
 class EpisodeError(ObservatoryError):
     """Episode segmentation or split input is invalid."""
 

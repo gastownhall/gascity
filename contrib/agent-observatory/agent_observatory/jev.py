@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 from .canonical import canonical_hash, canonical_json
 from .errors import ContractError, RequestByteCapExceeded, RequestError, ResponseError
@@ -67,6 +67,7 @@ class JevRequest:
     taxonomy_version: str
     question_hash: str
     model: str
+    session_key: tuple[str, str, str, str] | None = None
 
     @property
     def byte_length(self) -> int:
@@ -79,6 +80,7 @@ def build_request(
     *,
     snapshot_hash: str,
     subject_kind: str = "session",
+    session_key: Sequence[str] | None = None,
 ) -> JevRequest:
     """Build a deterministic request body from explicitly supplied sanitized state.
 
@@ -92,6 +94,14 @@ def build_request(
         raise RequestError("snapshot_hash is required")
     if subject_kind not in {"event", "session"}:
         raise RequestError(f"subject_kind must be 'event' or 'session', got {subject_kind!r}")
+    normalized_session_key = None
+    if session_key is not None:
+        if isinstance(session_key, (str, bytes)):
+            raise RequestError("session_key must be a four-item sequence, not text")
+        parts = tuple(session_key)
+        if len(parts) != 4 or not all(isinstance(part, str) and part for part in parts):
+            raise RequestError("session_key must contain four non-empty strings")
+        normalized_session_key = parts
 
     body = {
         "model": taxonomy.model,
@@ -126,6 +136,7 @@ def build_request(
         taxonomy_version=taxonomy.taxonomy_version,
         question_hash=taxonomy.question_hash(),
         model=taxonomy.model,
+        session_key=normalized_session_key,
     )
 
 
@@ -148,6 +159,7 @@ def persist_request(
         request_bytes=request.byte_length,
         source_path=source_path,
         source_sha256=source_sha256,
+        session_key=request.session_key,
     )
 
 
@@ -406,6 +418,12 @@ def import_response(
         answers=answers,
         source_path=source_path,
         source_sha256=source_sha256,
+        session_key=(
+            tuple(request_record[field] for field in ("city_id", "host_id", "provider", "session_id"))
+            if all(request_record.get(field) for field in ("city_id", "host_id", "provider", "session_id"))
+            else None
+        ),
+        binding_method="request",
     )
     return ResponseImport(
         classification_id=classification_id,
