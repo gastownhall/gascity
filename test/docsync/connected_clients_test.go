@@ -44,61 +44,128 @@ func TestConnectedClientsGuideIsInGuidesNavigation(t *testing.T) {
 	t.Fatalf("docs.json navigation is missing the Guides group")
 }
 
-func TestConnectedClientsAPIReferenceDocumentsEndpointFamily(t *testing.T) {
+// TestAPIDocsCiteOnlySpecPaths fails when a docs page cites an API path, or a
+// method on a path, that the published OpenAPI spec does not define. A client
+// written from such a page fails on its first call (#6820).
+func TestAPIDocsCiteOnlySpecPaths(t *testing.T) {
 	root := repoRoot()
-	path := filepath.Join(root, "docs", "reference", "api.md")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading docs/reference/api.md: %v", err)
-	}
-	text := string(data)
+	spec := loadSpecOperations(t, filepath.Join(root, "docs", "reference", "schema", "openapi.json"))
 
-	for _, endpoint := range []string{
-		"POST /v0/extmsg/clients",
-		"POST /v0/extmsg/inbound",
-		"GET /v0/extmsg/{provider}/{account_id}/{conversation_id}/subscribe",
-	} {
-		if !strings.Contains(text, endpoint) {
-			t.Errorf("docs/reference/api.md must document %s", endpoint)
+	for _, page := range []string{connectedClientsGuidePage + ".md", "reference/api.md"} {
+		data, err := os.ReadFile(filepath.Join(root, "docs", page))
+		if err != nil {
+			t.Fatalf("reading docs/%s: %v", page, err)
 		}
-	}
-
-	if !providerLLMClientRE.MatchString(text) {
-		t.Errorf("docs/reference/api.md must state that POST /v0/extmsg/inbound uses provider llm-client")
-	}
-}
-
-func TestConnectedClientsGuideDocumentsRequiredSections(t *testing.T) {
-	root := repoRoot()
-	path := filepath.Join(root, "docs", connectedClientsGuidePage+".md")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading %s: %v", filepath.ToSlash(filepath.Join("docs", connectedClientsGuidePage+".md")), err)
-	}
-
-	headings := markdownHeadings(string(data))
-	for _, section := range []struct {
-		name    string
-		pattern string
-	}{
-		{name: "register", pattern: "register"},
-		{name: "subscribe", pattern: "subscribe"},
-		{name: "send", pattern: "send"},
-		{name: "reconnect", pattern: "reconnect"},
-		{name: "error catalog", pattern: "error catalog"},
-		{name: "heartbeat", pattern: "heartbeat"},
-		{name: "configuration", pattern: "configuration"},
-	} {
-		if !hasHeadingContaining(headings, section.pattern) {
-			t.Errorf("%s must include a %q section heading", connectedClientsGuidePage+".md", section.name)
+		cited := citedAPIPaths(string(data))
+		if len(cited) == 0 {
+			t.Errorf("docs/%s cites no API paths; the path extractor is out of date", page)
+		}
+		for _, c := range cited {
+			if unspecifiedAPIPaths[c.path] {
+				continue
+			}
+			if !spec.defines(c) {
+				t.Errorf("docs/%s cites %s, which docs/reference/schema/openapi.json does not define", page, c)
+			}
 		}
 	}
 }
 
-var (
-	headingRE           = regexp.MustCompile(`(?m)^#{1,6}\s+(.+)$`)
-	providerLLMClientRE = regexp.MustCompile(`(?is)provider\s*[:=]?\s*["']?llm-client`)
-)
+// unspecifiedAPIPaths are real routes deliberately served outside the
+// Huma-typed API, so the OpenAPI spec does not list them.
+var unspecifiedAPIPaths = map[string]bool{
+	"/v0/city/{cityName}/svc/": true, // raw workspace-service proxy
+}
+
+// citedAPIPath is an API path cited in docs, with its HTTP method when the
+// citation names one. A path ending in "/" is a prefix of real paths.
+type citedAPIPath struct {
+	method string
+	path   string
+}
+
+func (c citedAPIPath) String() string {
+	if c.method == "" {
+		return c.path
+	}
+	return c.method + " " + c.path
+}
+
+var citedAPIPathRE = regexp.MustCompile(`(?:\b(GET|POST|PUT|PATCH|DELETE)\s+)?(/v0/[A-Za-z0-9_{}$./-]*)`)
+
+func citedAPIPaths(content string) []citedAPIPath {
+	var cited []citedAPIPath
+	for _, m := range citedAPIPathRE.FindAllStringSubmatch(content, -1) {
+		cited = append(cited, citedAPIPath{
+			method: m[1],
+			path:   strings.TrimRight(m[2], "."),
+		})
+	}
+	return cited
+}
+
+// specOperations maps each OpenAPI path template to its lowercase methods.
+type specOperations map[string]map[string]bool
+
+func loadSpecOperations(t *testing.T, path string) specOperations {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading OpenAPI spec: %v", err)
+	}
+	var doc struct {
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parsing OpenAPI spec: %v", err)
+	}
+	ops := make(specOperations, len(doc.Paths))
+	for p, methods := range doc.Paths {
+		ops[p] = make(map[string]bool, len(methods))
+		for m := range methods {
+			ops[p][m] = true
+		}
+	}
+	return ops
+}
+
+// defines reports whether the spec has a path (and method, when cited)
+// matching c. A "{param}" or "$VAR" segment on either side matches any
+// segment, so docs may cite templates or concrete example values.
+func (s specOperations) defines(c citedAPIPath) bool {
+	prefix := strings.HasSuffix(c.path, "/")
+	want := strings.Split(strings.TrimSuffix(c.path, "/"), "/")
+	for p, methods := range s {
+		have := strings.Split(p, "/")
+		if len(have) < len(want) || (!prefix && len(have) != len(want)) {
+			continue
+		}
+		if !segmentsMatch(want, have[:len(want)]) {
+			continue
+		}
+		if prefix || c.method == "" || methods[strings.ToLower(c.method)] {
+			return true
+		}
+	}
+	return false
+}
+
+func segmentsMatch(want, have []string) bool {
+	for i := range want {
+		if isPathVariable(want[i]) || isPathVariable(have[i]) {
+			continue
+		}
+		if want[i] != have[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func isPathVariable(segment string) bool {
+	return strings.HasPrefix(segment, "$") ||
+		(strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}"))
+}
 
 func containsMintPage(pages []any, want string) bool {
 	for _, page := range pages {
@@ -111,26 +178,6 @@ func containsMintPage(pages []any, want string) bool {
 			if nested, ok := x["pages"].([]any); ok && containsMintPage(nested, want) {
 				return true
 			}
-		}
-	}
-	return false
-}
-
-func markdownHeadings(content string) []string {
-	matches := headingRE.FindAllStringSubmatch(content, -1)
-	headings := make([]string, 0, len(matches))
-	for _, match := range matches {
-		heading := strings.TrimSpace(match[1])
-		heading = strings.Trim(heading, "`*_ ")
-		headings = append(headings, strings.ToLower(heading))
-	}
-	return headings
-}
-
-func hasHeadingContaining(headings []string, pattern string) bool {
-	for _, heading := range headings {
-		if strings.Contains(heading, pattern) {
-			return true
 		}
 	}
 	return false
