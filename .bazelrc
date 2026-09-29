@@ -20,9 +20,6 @@ test --sandbox_writable_path=/tmp/bt
 # internal/bazeltest; no client export is required.
 test --test_env=GC_TEST_REPO_ROOT
 
-# Bazel test actions do not inherit HOME by default; the herdr env scrubber
-# allow-lists the real HOME value, and go-path tests depend on it.
-test --test_env=HOME
 
 # Repo-lint tests exec `go` and other dev binaries; bazel's default test PATH
 # is minimal, so forward the client's.
