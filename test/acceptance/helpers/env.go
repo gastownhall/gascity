@@ -6,8 +6,10 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -71,6 +73,17 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 		if v := os.Getenv(key); v != "" {
 			e.vars[key] = v
 		}
+	}
+
+	// Pin HOME to the OS user's home directory. Bazel's remote test runner
+	// sets HOME to the per-action TEST_TMPDIR, and the platform supervisor
+	// refuses to start when HOME differs from the passwd entry — an override
+	// attempt by its lights. GC_HOME already carries the isolation, so the
+	// passwd home is the correct, runner-agnostic value. Fails open (keeps
+	// the inherited HOME) if the lookup fails, mirroring the integration
+	// harness's pinRealHomeEnv.
+	if lu, err := user.LookupId(strconv.Itoa(os.Getuid())); err == nil && strings.TrimSpace(lu.HomeDir) != "" {
+		e.vars["HOME"] = lu.HomeDir
 	}
 
 	// Prepend gc binary dir to PATH.

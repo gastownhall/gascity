@@ -128,21 +128,23 @@ jobs:
             fi
             echo 'build --remote_download_minimal'
             echo 'test --test_env=PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin'
-            echo 'test --test_env=HOME=/tmp/gc-test-home'
             # 2vcpu runners default --jobs to 2, serializing even REMOTE actions.
             # Execution happens on the farm; the client can keep many in flight.
             echo 'build --jobs=64'
           } > .bazelrc.local
 
 
-      - name: Writable test HOME
+      - name: Create Bazel test tmpdir
         run: |
-          mkdir -p /tmp/gc-test-home
-          echo "HOME=/tmp/gc-test-home" >> "$GITHUB_ENV"
           # .bazelrc sets test --test_tmpdir=/tmp/bt and
           # --sandbox_writable_path=/tmp/bt unconditionally (#6525). Nothing
           # else creates that directory on the runner, so every sandboxed
           # action fails on a cold runner without this.
+          # HOME is deliberately NOT overridden or forwarded: remote workers
+          # run as their own user, and a HOME pointing at a nonexistent path
+          # makes git fail there (fail-closed code reads that as dirty-repo);
+          # with HOME unset in the action env, git falls back to the passwd
+          # entry, correct on every machine.
           mkdir -p /tmp/bt
 
       - name: "bazel test //... (+ acceptance)"

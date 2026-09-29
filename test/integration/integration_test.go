@@ -1398,7 +1398,30 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	// reliable kill-switch. Mirrors bdRuntimeEnv in cmd/gc/bd_env.go.
 	env = append(env, "BEADS_DOLT_AUTO_START=0")
 	env = pinRealHomeEnv(env)
+	// Seed a global gitconfig under the isolated GC_HOME and point children at
+	// it. The Makefile's TEST_ENV does this via scripts/test-gitconfig-path
+	// (user.name, user.email, beads.role=maintainer); under bazel the ambient
+	// variable is unset and gc subprocesses would read the executing worker's
+	// real global config, which has no beads.role — `gc doctor`'s beads-role
+	// check fails on any machine that never opted in. Writing it per-GC_HOME
+	// keeps every isolated root self-contained.
+	env = replaceEnv(env, "GIT_CONFIG_GLOBAL", ensureIntegrationGitConfig(gcHome))
 	return env
+}
+
+// ensureIntegrationGitConfig writes the isolated global gitconfig mirrors of
+// scripts/test-gitconfig-path into gcHome and returns its path. Panics on
+// failure: a missing beads.role silently breaks agent flows mid-test.
+func ensureIntegrationGitConfig(gcHome string) string {
+	if err := os.MkdirAll(gcHome, 0o755); err != nil {
+		panic("integration: creating GC_HOME for gitconfig: " + err.Error())
+	}
+	path := filepath.Join(gcHome, "gitconfig-global")
+	content := "[user]\n\tname = Gas City Integration Test\n\temail = integration-test@gascity.invalid\n[beads]\n\trole = maintainer\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		panic("integration: writing isolated gitconfig: " + err.Error())
+	}
+	return path
 }
 
 // pinRealHomeEnv pins HOME to the real passwd-db home for the current uid.
