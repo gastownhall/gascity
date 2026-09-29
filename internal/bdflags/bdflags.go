@@ -44,7 +44,7 @@ var globalBoolFlags = map[string]bool{
 // compound bd subcommands, "parent child" ("mol pour"). The key set here
 // defines every subcommand this package knows about — see Known/Subcommands.
 //
-// Sourced from `bd <sub> --help` (bd 1.3.0-rc.2, 2026-09-10).
+// Sourced from `bd <sub> --help` (bd 1.3.1-rc.2, 2026-09-29).
 var valueFlagsBySub = map[string]map[string]bool{
 	"create": {
 		"--acceptance": true, "--append-notes": true, "-a": true, "--assignee": true,
@@ -141,7 +141,7 @@ var valueFlagsBySub = map[string]map[string]bool{
 // boolFlagsBySub holds each subcommand's boolean (no-value) flags beyond the
 // global set. Same keying convention as valueFlagsBySub.
 //
-// Sourced from `bd <sub> --help` (bd 1.3.0-rc.2, 2026-09-10). A flag whose
+// Sourced from `bd <sub> --help` (bd 1.3.1-rc.2, 2026-09-29). A flag whose
 // help renders as `string[="default"]` — cobra's NoOptDefVal — belongs here,
 // not in valueFlagsBySub: it never consumes the next argv token, so
 // `bd list --deps all` leaves "all" positional.
@@ -172,8 +172,8 @@ var boolFlagsBySub = map[string]map[string]bool{
 	"list": {
 		"--all": true, "--brief": true, "--deferred": true, "--deps": true,
 		"--empty-description": true, "--flat": true,
-		"--include-gates": true, "--include-infra": true, "--include-templates": true,
-		"--long": true, "--no-assignee": true, "--no-labels": true, "--no-pager": true,
+		"--include-ephemeral": true, "--include-gates": true, "--include-infra": true,
+		"--include-templates": true, "--long": true, "--no-assignee": true, "--no-labels": true, "--no-pager": true,
 		"--no-parent": true, "--no-pinned": true, "--overdue": true, "--pinned": true,
 		"--pretty": true, "--ready": true, "-r": true, "--reverse": true,
 		"--skip-labels": true, "--tree": true, "-w": true, "--watch": true,
