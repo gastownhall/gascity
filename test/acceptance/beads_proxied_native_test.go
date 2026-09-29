@@ -67,8 +67,12 @@ func newProxiedNativeCity(t *testing.T, bdPath, doltPath string) *proxiedNativeC
 	env, calls := proxiedEnvRecordingBD(t, bdPath, doltPath)
 	city := helpers.NewCity(t, env)
 	c := &proxiedNativeCity{
-		env:    env,
-		lane:   proxiedNativeLaneEnv(env),
+		env: env,
+		// The lifecycle rows measure the lane's own admission of a stopped,
+		// dead or foreign proxy record through doctor's beads-store check, so
+		// doctor must be allowed to open that store; by default it never
+		// starts a stopped proxied store (doctorStoreGate).
+		lane:   proxiedNativeLaneEnv(env).With("GC_DOCTOR_OPEN_STOPPED_STORES", "1"),
 		calls:  calls,
 		bdPath: bdPath,
 		city:   city,
