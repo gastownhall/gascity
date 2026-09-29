@@ -39,7 +39,7 @@ class PricingTest(unittest.TestCase):
         records = [
             support.make_record(
                 event_id="priced",
-                provider="OpenAI",
+                provider="codex",
                 model="gpt-4.1",
                 usage={
                     "input_tokens": 1_000_000,
@@ -54,13 +54,13 @@ class PricingTest(unittest.TestCase):
             ),
             support.make_record(
                 event_id="cache-write-unknown",
-                provider="OpenAI",
+                provider="codex",
                 model="gpt-4.1",
                 usage={"input_tokens": 0, "output_tokens": 0, "cache_write_tokens": 1},
             ),
             support.make_record(
                 event_id="zero-cache-write",
-                provider="OpenAI",
+                provider="codex",
                 model="gpt-4.1",
                 usage={"input_tokens": 0, "output_tokens": 0, "cache_write_tokens": 0},
             ),
@@ -75,7 +75,7 @@ class PricingTest(unittest.TestCase):
             }
         self.assertTrue(rows["priced"]["cost_known"])
         self.assertEqual(rows["priced"]["cost_usd"], "19.5")
-        self.assertEqual(rows["priced"]["model_provider"], "OpenAI")
+        self.assertEqual(rows["priced"]["model_provider"], "codex")
         self.assertTrue(rows["priced"]["pricing_source"].startswith("https://"))
         self.assertFalse(rows["unpriced"]["cost_known"])
         self.assertIsNone(rows["unpriced"]["cost_usd"])
@@ -83,6 +83,47 @@ class PricingTest(unittest.TestCase):
         self.assertIsNone(rows["cache-write-unknown"]["cost_usd"])
         self.assertTrue(rows["zero-cache-write"]["cost_known"])
         self.assertEqual(rows["zero-cache-write"]["cost_usd"], "0")
+
+    def test_seeded_vendor_prices_match_normalized_adapter_ids(self):
+        records = [
+            support.make_record(
+                event_id="seeded-openai",
+                provider="codex",
+                model="gpt-4.1",
+                usage={"input_tokens": 1_000_000},
+            ),
+            support.make_record(
+                event_id="seeded-anthropic",
+                provider="claude",
+                model="claude-sonnet-4-20250514",
+                usage={"input_tokens": 1_000_000},
+            ),
+            support.make_record(
+                event_id="seeded-deepseek",
+                provider="dsh",
+                model="deepseek-chat",
+                usage={"input_tokens": 1_000_000},
+            ),
+        ]
+        path = support.write_jsonl(os.path.join(self.tmp.name, "seeded-usage.jsonl"), records)
+        with ObservatoryStore(self.db_path) as store:
+            store.import_jsonl(path)
+            seed_model_pricing(store)
+            rows = {
+                row["event_id"]: dict(row)
+                for row in store.conn.execute("SELECT * FROM event_usage_cost")
+            }
+
+        expected = {
+            "seeded-openai": ("codex", "2"),
+            "seeded-anthropic": ("claude", "3"),
+            "seeded-deepseek": ("dsh", "0.27"),
+        }
+        for event_id, (provider, cost) in expected.items():
+            with self.subTest(event_id=event_id):
+                self.assertTrue(rows[event_id]["cost_known"])
+                self.assertEqual(rows[event_id]["model_provider"], provider)
+                self.assertEqual(rows[event_id]["cost_usd"], cost)
 
     def test_cost_prices_are_exact_and_provider_scoped(self):
         exact_price = Decimal("0.123456789012345678901234567890123456789")
@@ -163,8 +204,9 @@ class PricingTest(unittest.TestCase):
         self.assertEqual(rows["provider-a"]["model_provider"], "provider-a")
         self.assertEqual(rows["provider-b"]["cost_usd"], "2.5")
         self.assertEqual(rows["provider-b"]["model_provider"], "provider-b")
-        self.assertFalse(rows["provider-c"]["cost_known"])
-        self.assertIsNone(rows["provider-c"]["cost_usd"])
+        self.assertTrue(rows["provider-c"]["cost_known"])
+        self.assertEqual(rows["provider-c"]["cost_usd"], "99")
+        self.assertIsNone(rows["provider-c"]["model_provider"])
 
     def test_conflicts_raise_observatory_error_and_negative_prices_are_rejected(self):
         row = {

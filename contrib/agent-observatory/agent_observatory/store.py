@@ -459,6 +459,11 @@ class ObservatoryStore:
         self._conn.create_function(
             "decimal_event_cost_usd", 8, _decimal_event_cost_usd, deterministic=True
         )
+        from .pricing import normalize_provider_id
+
+        self._conn.create_function(
+            "normalize_provider_id", 1, normalize_provider_id, deterministic=True
+        )
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._session_snapshot_index: dict[str, set[tuple[str, str, str, str]]] | None = None
         try:
@@ -1141,7 +1146,7 @@ class ObservatoryStore:
 
     def save_model_pricing(self, rows: Iterable[Mapping[str, Any]]) -> int:
         """Append exact USD-per-million prices idempotently; conflicting keys are refused."""
-        from .pricing import _decimal_text, _price
+        from .pricing import _decimal_text, _price, normalize_provider_id
 
         columns = (
             "model_id",
@@ -1210,7 +1215,7 @@ class ObservatoryStore:
             normalized_rows.append(
                 (
                     model_id.strip(),
-                    provider.strip() if isinstance(provider, str) else None,
+                    normalize_provider_id(provider) if isinstance(provider, str) else None,
                     *(_decimal_text(value) for value in price_values),
                     effective_from,
                     source,

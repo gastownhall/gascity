@@ -11,12 +11,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 try:
     from . import support
 except ImportError:  # pragma: no cover
     import support
 
+from agent_observatory import migrations
 from agent_observatory.errors import ObservatoryError, SchemaVersionError
 from agent_observatory.canonical import session_text_snapshot_hash, sha256_bytes
 from agent_observatory.migrations import _V6_REQUIRED_TABLES, migrate_database
@@ -521,6 +523,156 @@ class MigrationTest(unittest.TestCase):
             self.assertEqual(legacy_roles, 2)
         finally:
             backup.close()
+
+    def test_v6_migration_refreshes_cost_view_for_legacy_vendor_prices(self):
+        events_path = support.write_jsonl(
+            os.path.join(self.tmp.name, "legacy-priced-events.jsonl"),
+            [
+                support.make_record(
+                    event_id="legacy-priced-event",
+                    provider="claude",
+                    model="claude-sonnet-4-20250514",
+                    usage={"input_tokens": 1_000_000},
+                )
+            ],
+        )
+        with ObservatoryStore(self.db_path) as store:
+            store.import_jsonl(events_path)
+        self._downgrade_schema7_to_v6(self.db_path)
+
+        connection = sqlite3.connect(self.db_path)
+        try:
+            connection.execute(
+                "UPDATE model_pricing SET provider = 'Anthropic' "
+                "WHERE model_id = 'claude-sonnet-4-20250514' AND provider = 'claude'"
+            )
+            connection.execute("DROP VIEW event_usage_cost")
+            # Model an older v6 projection whose cost view did not resolve
+            # adapter/vendor aliases or expose a measured cost.
+            connection.execute(
+                "CREATE VIEW event_usage_cost AS "
+                "SELECT event_id, 0 AS cost_known, NULL AS cost_usd FROM events"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        migrate_database(self.db_path)
+        with ObservatoryStore(self.db_path) as store:
+            row = dict(
+                store.conn.execute(
+                    "SELECT event_id, model_provider, cost_known, cost_usd "
+                    "FROM event_usage_cost WHERE event_id = 'legacy-priced-event'"
+                ).fetchone()
+            )
+        self.assertEqual(row["model_provider"], "claude")
+        self.assertEqual(row["cost_known"], 1)
+        self.assertEqual(row["cost_usd"], "3")
+
+    def test_v6_migration_failure_rolls_back_and_keeps_v6_backup(self):
+        self._make_schema6_fixture()
+        connection = sqlite3.connect(self.db_path)
+        try:
+            connection.execute(
+                """
+                CREATE TRIGGER delete_event_during_v7_upgrade
+                AFTER UPDATE ON schema_meta
+                WHEN OLD.key = 'schema_version' AND NEW.value = '7'
+                BEGIN
+                    DELETE FROM events WHERE event_id = 'event-1';
+                END
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.assertRaisesRegex(ObservatoryError, "row count"):
+            migrate_database(self.db_path)
+
+        connection = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 6)
+            self.assertEqual(
+                connection.execute(
+                    "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+                ).fetchone()[0],
+                "6",
+            )
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0], 2)
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM sessions WHERE role = 'legacy-guessed-role'"
+                ).fetchone()[0],
+                2,
+            )
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_enrichment'"
+                ).fetchone()
+            )
+        finally:
+            connection.close()
+
+        backups = self._backup_paths_v6(self.db_path)
+        self.assertEqual(len(backups), 1)
+        backup = sqlite3.connect(backups[0])
+        try:
+            self.assertEqual(backup.execute("PRAGMA user_version").fetchone()[0], 6)
+            self.assertEqual(backup.execute("SELECT COUNT(*) FROM events").fetchone()[0], 2)
+        finally:
+            backup.close()
+
+    def test_v6_validation_rejects_schema7_objects_without_backup(self):
+        schema7_objects = (
+            ("table", "CREATE TABLE session_enrichment (placeholder TEXT)"),
+            ("view", "CREATE VIEW events_with_enrichment AS SELECT 1 AS placeholder"),
+        )
+        for name, statement in schema7_objects:
+            with self.subTest(name=name):
+                db_path = os.path.join(self.tmp.name, f"schema6-with-{name}.db")
+                self._make_schema6_fixture(db_path)
+                connection = sqlite3.connect(db_path)
+                try:
+                    connection.execute(statement)
+                    connection.commit()
+                finally:
+                    connection.close()
+
+                with self.assertRaisesRegex(ObservatoryError, "schema-7 objects"):
+                    migrate_database(db_path)
+                self.assertEqual(self._backup_paths_v6(db_path), [])
+
+    def test_v6_migration_refuses_backup_row_count_mismatch(self):
+        self._make_schema6_fixture()
+        create_backup = migrations._create_backup
+
+        def mismatched_backup_counts(database_path, version):
+            backup_path, counts = create_backup(database_path, version)
+            altered_counts = dict(counts)
+            altered_counts["events"] += 1
+            return backup_path, altered_counts
+
+        with mock.patch.object(
+            migrations, "_create_backup", side_effect=mismatched_backup_counts
+        ):
+            with self.assertRaisesRegex(ObservatoryError, "backup row counts do not match"):
+                migrate_database(self.db_path)
+
+        connection = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 6)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0], 2)
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_enrichment'"
+                ).fetchone()
+            )
+        finally:
+            connection.close()
+        backups = self._backup_paths_v6(self.db_path)
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(self._counts(backups[0])["events"], 2)
 
     def test_normal_store_open_does_not_implicitly_migrate_v4(self):
         self._make_v4_fixture()

@@ -16,8 +16,14 @@ try:
 except ImportError:  # pragma: no cover
     import support
 
+from agent_observatory.changes import normalize_change
 from agent_observatory.cli import main
-from agent_observatory.exposure import attach_session_fingerprints, session_evidence_from_store
+from agent_observatory.exposure import (
+    CommitGraph,
+    attach_session_fingerprints,
+    evaluate_change,
+    session_evidence_from_store,
+)
 from agent_observatory.gc_enrichment import enrich_gc_sessions
 from agent_observatory.store import ObservatoryStore
 
@@ -182,6 +188,173 @@ class GCEnrichmentTests(unittest.TestCase):
         self.assertEqual(len(evidence), 1)
         self.assertEqual(evidence[0]["repo"], "example/project")
         self.assertEqual(evidence[0]["commit_shas"], ["b" * 40])
+
+    def test_event_repo_precedes_conflicting_enrichment_with_or_without_fingerprint(self):
+        db = os.path.join(self.tmp.name, "repo-precedence.db")
+        session = ["city-r", "host-r", "codex", "synthetic-repo-session"]
+        commit_sha = "c" * 40
+        events = support.write_jsonl(
+            os.path.join(self.tmp.name, "repo-precedence.jsonl"),
+            [
+                support.make_record(
+                    city_id=session[0],
+                    host_id=session[1],
+                    provider=session[2],
+                    session_id=session[3],
+                    event_id="synthetic-repo-event",
+                    timestamp="2026-09-28T12:00:00Z",
+                    repo="event/project",
+                    commit_sha=commit_sha,
+                )
+            ],
+        )
+        gc_export = self._write_gc_export(
+            [
+                {
+                    "provider": "codex",
+                    "session_key": session[3],
+                    "template": "example-rig/worker",
+                    "repo": "gc/project",
+                }
+            ]
+        )
+        change = normalize_change(
+            {
+                "repo": "event/project",
+                "kind": "pr",
+                "pr": 1,
+                "merge_sha": commit_sha,
+                "merged_at": "2026-09-28T11:00:00Z",
+                "changed_paths": ["README.md"],
+            }
+        )
+        graph = CommitGraph({commit_sha: []})
+        activations = [
+            {
+                "change_id": change["change_id"],
+                "activation_id": "synthetic-merge-activation",
+                "mechanism": "merge",
+                "target": None,
+                "activated_at": "2026-09-28T11:00:00Z",
+                "deactivated_at": None,
+                "fingerprint": None,
+                "pending": False,
+            }
+        ]
+
+        with ObservatoryStore(db) as store:
+            store.import_jsonl(events)
+            store.import_registry(
+                {
+                    "session_fingerprints": [
+                        {
+                            "session": session,
+                            "type": "commit_sha",
+                            "value": commit_sha,
+                            "observed_at": "2026-09-28T12:00:00Z",
+                            "evidence": "synthetic fixture",
+                        }
+                    ]
+                }
+            )
+            enrich_gc_sessions(store, gc_export, city_id=session[0], host_id=session[1])
+            without_fingerprint = session_evidence_from_store(store)
+            fingerprints = store.load_session_fingerprints()
+            with_fingerprint = attach_session_fingerprints(
+                session_evidence_from_store(store), fingerprints
+            )
+
+        self.assertEqual(fingerprints[0]["repo"], "gc/project")
+        self.assertEqual(without_fingerprint[0]["repo"], "event/project")
+        self.assertEqual(with_fingerprint[0]["repo"], "event/project")
+        without_verdict = evaluate_change(
+            change, activations, graph=graph, sessions=without_fingerprint
+        )["status"]
+        with_verdict = evaluate_change(
+            change, activations, graph=graph, sessions=with_fingerprint
+        )["status"]
+        self.assertEqual(without_verdict, "exposed")
+        self.assertEqual(with_verdict, without_verdict)
+
+    def test_rerunning_enrichment_over_identical_rows_writes_nothing(self):
+        gc_export = self._write_gc_export(
+            [
+                {
+                    "provider": "codex",
+                    "session_key": "synthetic-provider-session",
+                    "template": "example-rig/worker",
+                    "repo": "example/project",
+                }
+            ]
+        )
+        with ObservatoryStore(self.db) as store:
+            first = enrich_gc_sessions(
+                store, gc_export, city_id="city-t", host_id="host-t"
+            )
+            row_before = tuple(
+                store.conn.execute(
+                    "SELECT template, repo, repo_source, source_sha256, updated_at "
+                    "FROM session_enrichment WHERE session_id = 'synthetic-provider-session'"
+                ).fetchone()
+            )
+            changes_before = store.conn.total_changes
+            second = enrich_gc_sessions(
+                store, gc_export, city_id="city-t", host_id="host-t"
+            )
+            row_after = tuple(
+                store.conn.execute(
+                    "SELECT template, repo, repo_source, source_sha256, updated_at "
+                    "FROM session_enrichment WHERE session_id = 'synthetic-provider-session'"
+                ).fetchone()
+            )
+
+            self.assertEqual(first.bindings_written, 1)
+            self.assertEqual(first.role_bindings_written, 1)
+            self.assertEqual(first.repo_bindings_written, 1)
+            self.assertEqual(second.bindings_written, 0)
+            self.assertEqual(second.role_bindings_written, 0)
+            self.assertEqual(second.repo_bindings_written, 0)
+            self.assertEqual(store.conn.total_changes, changes_before)
+            self.assertEqual(row_after, row_before)
+
+    def test_one_persisted_repo_conflict_is_not_double_counted_as_ambiguous(self):
+        first_export = self._write_gc_export(
+            [
+                {
+                    "provider": "codex",
+                    "session_key": "synthetic-provider-session",
+                    "template": "example-rig/worker",
+                    "repo": "first/project",
+                }
+            ]
+        )
+        with ObservatoryStore(self.db) as store:
+            enrich_gc_sessions(
+                store, first_export, city_id="city-t", host_id="host-t"
+            )
+            conflicting_export = self._write_gc_export(
+                [
+                    {
+                        "provider": "codex",
+                        "session_key": "synthetic-provider-session",
+                        "template": "example-rig/worker",
+                        "repo": "second/project",
+                    }
+                ]
+            )
+            result = enrich_gc_sessions(
+                store, conflicting_export, city_id="city-t", host_id="host-t"
+            )
+            stored_repo = store.conn.execute(
+                "SELECT repo FROM session_enrichment "
+                "WHERE session_id = 'synthetic-provider-session'"
+            ).fetchone()[0]
+
+        self.assertEqual(result.rows_usable, 1)
+        self.assertEqual(result.conflicts, 1)
+        self.assertEqual(result.repo_ambiguous, 0)
+        self.assertEqual(result.bindings_written, 0)
+        self.assertEqual(stored_repo, "first/project")
 
     def test_gc_id_and_session_name_never_substitute_for_provider_session_key(self):
         gc_export = self._write_gc_export(

@@ -111,7 +111,7 @@ V6_CORE_SCHEMA_STATEMENTS = (
         e.event_id,
         e.timestamp AS event_timestamp,
         e.model AS model_id,
-        p.provider AS model_provider,
+        normalize_provider_id(p.provider) AS model_provider,
         u.input_tokens,
         u.output_tokens,
         u.cache_read_tokens,
@@ -150,11 +150,23 @@ V6_CORE_SCHEMA_STATEMENTS = (
       ON e.city_id = u.city_id AND e.host_id = u.host_id AND e.provider = u.provider
      AND e.session_id = u.session_id AND e.event_id = u.event_id
     LEFT JOIN model_pricing AS p
-      ON p.model_id = e.model AND p.provider IS e.provider
+      ON p.model_id = e.model
+     AND p.provider IS (
+         SELECT p2.provider
+           FROM model_pricing AS p2
+          WHERE p2.model_id = e.model
+            AND (
+                p2.provider IS NULL
+                OR normalize_provider_id(p2.provider) = normalize_provider_id(e.provider)
+            )
+            AND p2.effective_from <= e.timestamp
+          ORDER BY (p2.provider IS NULL), p2.effective_from DESC
+          LIMIT 1
+     )
      AND p.effective_from = (
          SELECT MAX(p2.effective_from)
            FROM model_pricing AS p2
-          WHERE p2.model_id = e.model AND p2.provider IS e.provider
+          WHERE p2.model_id = e.model AND p2.provider IS p.provider
             AND p2.effective_from <= e.timestamp
      )
     """,
@@ -205,7 +217,14 @@ V5_TO_V6_SCHEMA_STATEMENTS = (
     *V6_CORE_SCHEMA_STATEMENTS,
 )
 
-V6_TO_V7_SCHEMA_STATEMENTS = V7_CORE_SCHEMA_STATEMENTS
+# Schema-6 databases already have this view; drop and recreate it during the
+# explicit v6->v7 migration so existing projections receive the corrected price
+# provider matching without rewriting immutable event payloads.
+V6_TO_V7_SCHEMA_STATEMENTS = (
+    "DROP VIEW IF EXISTS event_usage_cost",
+    V6_CORE_SCHEMA_STATEMENTS[-1],
+    *V7_CORE_SCHEMA_STATEMENTS,
+)
 
 
 _V4_REQUIRED_TABLES = frozenset(

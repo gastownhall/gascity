@@ -213,9 +213,10 @@ def enrich_gc_sessions(
             )
             if current is not None and current["repo"] is not None and conflicting_repo:
                 # Never replace a durable repo binding with conflicting metadata.
+                # A persisted-binding conflict is counted once as a conflict;
+                # repo_ambiguous counts ambiguity within the incoming evidence.
                 if not binding.repo_ambiguous:
                     result.conflicts += 1
-                    result.repo_ambiguous += 1
                 repo_conflict = True
                 effective_repo = current["repo"]
                 effective_repo_source = current["repo_source"]

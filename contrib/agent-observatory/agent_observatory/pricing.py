@@ -25,6 +25,25 @@ _PRICE_FIELDS = frozenset(
     }
 )
 
+# Checked-in prices use human-facing vendor names, while event rows carry their
+# transcript adapter id. Keep that boundary normalization in one place.
+_PROVIDER_ID_ALIASES = {
+    "anthropic": "claude",
+    "claude": "claude",
+    "openai": "codex",
+    "codex": "codex",
+    "deepseek": "dsh",
+    "dsh": "dsh",
+}
+
+
+def normalize_provider_id(provider: str | None) -> str | None:
+    """Map a price/vendor provider label to the normalized transcript id."""
+    if provider is None:
+        return None
+    value = provider.strip()
+    return _PROVIDER_ID_ALIASES.get(value.casefold(), value)
+
 
 def _reject_json_constant(value: str) -> Any:
     raise ValueError(f"non-finite JSON constant {value!r} is not allowed")
@@ -106,7 +125,9 @@ def load_pricing_seed(path: str | Path | None = None) -> list[dict[str, Any]]:
         model_id = _required_text(item, "model_id", where)
         raw_provider = item["provider"]
         provider = (
-            None if raw_provider is None else _required_text(item, "provider", where)
+            None
+            if raw_provider is None
+            else normalize_provider_id(_required_text(item, "provider", where))
         )
         source = _required_text(item, "source", where)
         if not source.startswith("https://"):
@@ -159,5 +180,6 @@ __all__ = [
     "DEFAULT_PRICING_SEED",
     "PRICING_SEED_SCHEMA_VERSION",
     "load_pricing_seed",
+    "normalize_provider_id",
     "seed_model_pricing",
 ]
