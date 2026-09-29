@@ -118,6 +118,70 @@ func TestHandleSessionResetClosedSessionConflicts(t *testing.T) {
 	}
 }
 
+// TestHandleSessionResetLeavesBreakerClearToTheController pins the half of the
+// published contract that says what this endpoint deliberately does NOT do: it
+// records the restart markers and moves no key of the respawn breaker cluster,
+// because the clear is the controller's to make when it consumes the request.
+// The handler consults no named-session metadata, so the identity key below
+// sets the scenario rather than constraining this assertion; the named-session
+// scoping of the clear is owned by cmd/gc/session_reconciler_restart_request_test.go
+// instead. `gc session reset` clears the breaker synchronously first
+// (cmd/gc/cmd_session_reset.go, resetSessionCircuitBreakerOnController);
+// the reconciler's restart-requested block does it for this path instead
+// (cmd/gc/session_reconciler.go, resetSessionCircuitBreakerState). Without this
+// test the asymmetry lives only in the `describes(...)` prose, which is exactly
+// how that prose drifted out of step with the code once already.
+func TestHandleSessionResetLeavesBreakerClearToTheController(t *testing.T) {
+	fs := newSessionFakeState(t)
+	h := newTestCityHandler(t, fs)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "reset-breaker-test")
+	// A tripped named-session respawn breaker, in the shape the reconciler
+	// persists it (cmd/gc/session_circuit_breaker.go).
+	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
+		session.NamedSessionIdentityMetadata:              "myrig/worker",
+		session.SessionCircuitStateMetadataKey:            "open",
+		session.SessionCircuitOpenedAtMetadataKey:         "2026-01-01T00:00:00Z",
+		session.SessionCircuitOpenRestartCountMetadataKey: "5",
+		session.SessionCircuitResetGenerationMetadataKey:  "3",
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(breaker state): %v", err)
+	}
+	before, err := fs.cityBeadStore.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", info.ID, err)
+	}
+	trippedBefore := session.CircuitStateFromMetadata(before.Metadata)
+	if trippedBefore.State != "open" {
+		t.Fatalf("precondition: circuit state = %q, want open", trippedBefore.State)
+	}
+
+	rec := httptest.NewRecorder()
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/reset", nil)
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reset status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	after, err := fs.cityBeadStore.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", info.ID, err)
+	}
+	// The request is recorded: the controller needs the markers to reach its
+	// restart-requested block, which is where it clears the breaker.
+	if got := after.Metadata["restart_requested"]; got != "true" {
+		t.Errorf("restart_requested = %q, want true", got)
+	}
+	if got := after.Metadata["continuation_reset_pending"]; got != "true" {
+		t.Errorf("continuation_reset_pending = %q, want true", got)
+	}
+	// ...and not one byte of the breaker cluster moved synchronously.
+	if got := session.CircuitStateFromMetadata(after.Metadata); got != trippedBefore {
+		t.Errorf("circuit breaker state changed synchronously:\n got %+v\nwant %+v", got, trippedBefore)
+	}
+}
+
 func TestHandleSessionResetRequiresCSRFHeader(t *testing.T) {
 	fs := newSessionFakeState(t)
 	h := newTestCityHandler(t, fs)
