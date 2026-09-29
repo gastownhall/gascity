@@ -3090,6 +3090,42 @@ run_bd_init_pinned() {
         --server-host "$host" --server-port "$DOLT_PORT" "$dir" 8>&- || die "bd init failed for $dir"
 }
 
+# run_bd_init_pinned_over_verified_empty runs a PLAIN bd init (no --force)
+# over a database op_init has just reconfirmed is genuinely empty. There is
+# nothing on a verified-empty store for --force's destructive
+# --reinit-local preflight to protect: gc's own pre-seeded metadata.json
+# stub is the only thing tripping bd's already-initialized guard, so set it
+# aside first, run a plain init, and restore the stub if that init fails so
+# the scope is never left without any metadata.json at all. Using --force
+# here instead is exactly the bug this guards against: --reinit-local runs a
+# writable, wall-clock-bounded countExistingIssues preflight (beads v1.3.0
+# cmd/bd/init.go ~994/~2702) that migrates a cursor-0 database, and on a
+# loaded host that preflight can be cut mid-migration -- bd's own #5920
+# shared-store gate then refuses the resulting partial schema on the very
+# next open (ga-k8l7y9, ga-h8haz6, gastownhall/beads#6746).
+#
+# The plain-init argv below intentionally mirrors run_bd_init_pinned's
+# non-force branch; change both together if either changes.
+run_bd_init_pinned_over_verified_empty() {
+    local dir="$1"
+    local prefix="$2"
+    local dolt_database="$3"
+    local host="$4"
+    local metadata_path="$dir/.beads/metadata.json"
+    local stub_aside="$metadata_path.gc-init-stub"
+    if [ -f "$metadata_path" ]; then
+        mv -f "$metadata_path" "$stub_aside" || die "could not set aside metadata stub for $dir before a plain bd init over a verified-empty store"
+    fi
+    if ! run_bd_pinned "$dir" init --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
+        --server-host "$host" --server-port "$DOLT_PORT" "$dir" 8>&-; then
+        if [ -f "$stub_aside" ]; then
+            mv -f "$stub_aside" "$metadata_path" || die "bd init failed for $dir, and could not restore the metadata stub set aside at $stub_aside; restore it manually before retrying"
+        fi
+        die "bd init failed for $dir"
+    fi
+    rm -f "$stub_aside"
+}
+
 # run_bd_init_proxied initializes a local workspace through beads RC's
 # proxied-server UOW path. Gas City deliberately does not provide a Dolt
 # host/port here: the RC owns both the proxy and its local Dolt child.
@@ -3291,6 +3327,7 @@ op_init() {
     local existing_db=""
     local allow_reserved_existing=false
     local bd_init_force=""
+    local bd_init_over_verified_empty=false
     local database_created_by_gc=false
     if [ -z "$dir" ] || [ -z "$prefix" ]; then
         die "usage: gc-beads-bd init <dir> <prefix> [dolt_database]"
@@ -3593,18 +3630,35 @@ op_init() {
             fi
         elif [ "$reinit_still_empty" -eq 2 ]; then
             echo "warning: could not confirm '$dolt_database' is still empty immediately before forcing; proceeding on the earlier classification" >&2
+        else
+            # reinit_still_empty == 1: freshly reconfirmed genuinely empty --
+            # no bd tables, no schema_migrations history at all, not merely
+            # "not yet visible". Route the fall-through init through the
+            # verified-empty helper instead of --force: see
+            # run_bd_init_pinned_over_verified_empty for why --force has
+            # nothing to protect here and what it breaks instead
+            # (ga-k8l7y9, ga-h8haz6).
+            bd_init_over_verified_empty=true
         fi
     fi
 
     # Run bd init in server mode through the pinned wrapper so the fallback
     # path uses the same authenticated Dolt target as the rest of init.
     # Metadata-only scopes already look initialized to bd, so schema-repair
-    # fallback must force reinit to seed the missing tables into the pinned DB.
+    # fallback must force reinit to seed the missing tables into the pinned DB
+    # -- UNLESS the revalidation above just reconfirmed the store is
+    # genuinely empty, in which case there is nothing to reinit over and a
+    # plain init through the stub-aside helper avoids --force's destructive
+    # preflight entirely (see run_bd_init_pinned_over_verified_empty).
     # Always pass the pinned server database explicitly; `-p` controls the
     # visible issue prefix, while `--database` tells bd which existing Dolt
     # database to initialize. Without `--database`, bd can seed beads_<prefix>
     # and leave the pinned database schema-less.
-    run_bd_init_pinned "$dir" "$prefix" "$dolt_database" "$host" "${bd_init_force:+true}"
+    if [ "$bd_init_over_verified_empty" = true ]; then
+        run_bd_init_pinned_over_verified_empty "$dir" "$prefix" "$dolt_database" "$host"
+    else
+        run_bd_init_pinned "$dir" "$prefix" "$dolt_database" "$host" "${bd_init_force:+true}"
+    fi
 
     # Release the init lock (acquired above only when bd_init_force was
     # set) promptly rather than holding it through the post-init
