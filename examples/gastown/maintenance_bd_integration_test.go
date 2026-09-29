@@ -515,7 +515,16 @@ func TestBackupOrderTakesOverALegacyBackupDestination(t *testing.T) {
 	c.bdIn(t, city, "create", "--silent", "-t", "task", "something to back up")
 	c.bdIn(t, city, "dolt", "commit", "-m", "seed")
 
-	artifact := filepath.Join(c.cityDir, ".dolt-backup", city.db)
+	// The order names the destination from the city's canonical path (`pwd -P`
+	// in mol-dog-backup.sh), and Dolt matches backup URLs as strings. On macOS
+	// t.TempDir() lives under /var, a symlink to /private/var, so the legacy
+	// entry must be registered at the canonical path too or the order sees no
+	// conflict to take over.
+	cityDir, err := filepath.EvalSymlinks(c.cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(cityDir, ".dolt-backup", city.db)
 	if err := os.MkdirAll(artifact, 0o755); err != nil {
 		t.Fatal(err)
 	}
