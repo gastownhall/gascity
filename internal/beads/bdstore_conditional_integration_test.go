@@ -116,7 +116,7 @@ func TestBdStoreConditionalWriterConformance(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
-		runner := newConditionalIntegrationRunner(dir)
+		runner := newConditionalIntegrationRunner(t, dir)
 		out, runErr := runner(dir, "bd", "update", created.ID,
 			"--if-revision", "1", "--gc-integration-bogus-flag", "--json")
 		if runErr == nil {
@@ -158,7 +158,7 @@ func newConditionalIntegrationBdStore(t *testing.T) (*beads.BdStore, string) {
 	if out, err := git.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
-	runner := newConditionalIntegrationRunner(dir)
+	runner := newConditionalIntegrationRunner(t, dir)
 	if out, err := runner(dir, "bd", "init", "-p", "tst", "--skip-hooks", "--skip-agents"); err != nil {
 		t.Fatalf("bd init: %v\n%s", err, out)
 	}
@@ -176,9 +176,14 @@ func newConditionalIntegrationBdStore(t *testing.T) (*beads.BdStore, string) {
 // bd also runs re-homed (toolhome.Environ): it resolves user-level config and
 // state from HOME, and a developer's `dolt.shared-server: true` there would
 // route this row into their host-wide shared Dolt server.
-func newConditionalIntegrationRunner(scopeDir string) beads.CommandRunner {
+func newConditionalIntegrationRunner(t *testing.T, scopeDir string) beads.CommandRunner {
+	t.Helper()
+	home := filepath.Join(filepath.Dir(scopeDir), "tool-home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatalf("create bd tool home: %v", err)
+	}
 	env := map[string]string{}
-	for _, kv := range toolhome.Environ(os.Environ(), filepath.Join(filepath.Dir(scopeDir), "tool-home")) {
+	for _, kv := range toolhome.Environ(os.Environ(), home) {
 		k, v, _ := strings.Cut(kv, "=")
 		env[k] = v
 	}

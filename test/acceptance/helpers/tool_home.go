@@ -52,8 +52,12 @@ func (e *Env) ToolList() []string {
 // under a fresh per-test directory.
 func ToolCommand(t *testing.T, bin string, args ...string) *exec.Cmd {
 	t.Helper()
+	home := filepath.Join(TempDir(t), "tool-home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatalf("create tool home: %v", err)
+	}
 	cmd := exec.Command(bin, args...) //nolint:gosec // resolved test binary
-	cmd.Env = toolhome.Environ(os.Environ(), filepath.Join(TempDir(t), "tool-home"))
+	cmd.Env = toolhome.Environ(os.Environ(), home)
 	return cmd
 }
 

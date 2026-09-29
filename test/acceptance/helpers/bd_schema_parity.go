@@ -91,6 +91,9 @@ func bdLatestSchemaVersion(bdPath string) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), bdSchemaProbeTimeout)
 	defer cancel()
 
+	if err := os.MkdirAll(filepath.Join(dir, "home"), 0o755); err != nil {
+		return 0, fmt.Errorf("bd schema probe: create tool home: %w", err)
+	}
 	cmd := bdSchemaProbeCommand(ctx, bdPath, dir)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

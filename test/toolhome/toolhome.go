@@ -37,6 +37,18 @@ import (
 // reads an empty value as unset).
 const SharedServerConfigEnv = "BD_DOLT_SHARED_SERVER"
 
+// DisableMetricsEnv turns off bd's usage metrics. A re-homed bd has never shown
+// its one-time metrics notice, so without this every fresh tool home prints it
+// into the output a test parses (and a test run would report usage upstream).
+const DisableMetricsEnv = "BD_DISABLE_METRICS"
+
+// pinnedBeadsVars are the bd switches Environ and WrapperScript set when the
+// caller did not, in a fixed order.
+var pinnedBeadsVars = [][2]string{
+	{SharedServerConfigEnv, "false"},
+	{DisableMetricsEnv, "1"},
+}
+
 // Vars are the variables bd and dolt resolve user-level state through. HOME is
 // always replaced; the XDG directories are replaced unless a caller keeps them.
 var Vars = []string{"HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"}
@@ -71,10 +83,13 @@ func IsBeadsVar(name string) bool {
 // anything from the invoking user's home.
 //
 // HOME and the XDG base directories are pointed under home, every BEADS_* and
-// BD_* variable is dropped, and BD_DOLT_SHARED_SERVER is pinned to "false".
+// BD_* variable is dropped, BD_DOLT_SHARED_SERVER is pinned to "false" and
+// BD_DISABLE_METRICS to "1".
 // Names in keep survive from base untouched — that is how a caller passes a
 // variable deliberately (a BEADS_DIR for the workspace it drives, an
 // XDG_CONFIG_HOME it seeded on purpose) — except HOME, which is never kept.
+//
+// home must exist before the child runs: bd fails on a HOME it cannot stat.
 func Environ(base []string, home string, keep ...string) []string {
 	kept := make(map[string]bool, len(keep))
 	for _, name := range keep {
@@ -98,8 +113,10 @@ func Environ(base []string, home string, keep ...string) []string {
 			out = append(out, name+"="+vals[name])
 		}
 	}
-	if !present[SharedServerConfigEnv] {
-		out = append(out, SharedServerConfigEnv+"=false")
+	for _, pin := range pinnedBeadsVars {
+		if !present[pin[0]] {
+			out = append(out, pin[0]+"="+pin[1])
+		}
 	}
 	return out
 }
@@ -122,7 +139,7 @@ func Explicit(env []string) []string {
 // WrapperScript is the text of a POSIX shell bd that re-homes itself under home
 // and then execs realBD.
 //
-// HOME is always replaced. The XDG directories and BD_DOLT_SHARED_SERVER take
+// HOME is always replaced. The XDG directories and the pinned bd switches take
 // Environ's defaults only when the caller left them unset, so a variable a test
 // passes on purpose still reaches bd. It execs, so the process table, bd's
 // os.Executable() and everything bd launches name the real binary.
@@ -141,18 +158,25 @@ func WrapperScript(home, realBD string) (string, error) {
 	for _, name := range Vars[1:] {
 		fmt.Fprintf(&b, "[ -n \"${%s:-}\" ] || %s=%s\n", name, name, shellQuote(vals[name]))
 	}
-	fmt.Fprintf(&b, "[ -n \"${%s+set}\" ] || %s=false\n", SharedServerConfigEnv, SharedServerConfigEnv)
-	fmt.Fprintf(&b, "export HOME %s %s\n", strings.Join(Vars[1:], " "), SharedServerConfigEnv)
+	exported := append([]string{}, Vars...)
+	for _, pin := range pinnedBeadsVars {
+		fmt.Fprintf(&b, "[ -n \"${%s+set}\" ] || %s=%s\n", pin[0], pin[0], pin[1])
+		exported = append(exported, pin[0])
+	}
+	fmt.Fprintf(&b, "export %s\n", strings.Join(exported, " "))
 	fmt.Fprintf(&b, "exec %s \"$@\"\n", shellQuote(realBD))
 	return b.String(), nil
 }
 
 // WriteWrapper writes WrapperScript(home, realBD) to path as an executable,
-// creating path's directory.
+// creating path's directory and home (bd refuses a HOME that does not exist).
 func WriteWrapper(path, home, realBD string) error {
 	script, err := WrapperScript(home, realBD)
 	if err != nil {
 		return err
+	}
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		return fmt.Errorf("create bd tool home: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create bd tool-home wrapper dir: %w", err)
@@ -164,8 +188,8 @@ func WriteWrapper(path, home, realBD string) error {
 }
 
 // ScrubProcessEnv removes the invoking shell's XDG base directories and every
-// BEADS_*/BD_* variable from the current process, then pins
-// BD_DOLT_SHARED_SERVER=false, so every child a harness builds from
+// BEADS_*/BD_* variable from the current process, then sets the pinned bd
+// switches (BD_DOLT_SHARED_SERVER=false, BD_DISABLE_METRICS=1), so every child a harness builds from
 // os.Environ() starts from explicit values only. HOME is left alone: gc needs
 // the real one (see the package doc); bd gets re-homed by Environ or a wrapper.
 //
@@ -179,8 +203,10 @@ func ScrubProcessEnv() error {
 			}
 		}
 	}
-	if err := os.Setenv(SharedServerConfigEnv, "false"); err != nil {
-		return fmt.Errorf("set %s: %w", SharedServerConfigEnv, err)
+	for _, pin := range pinnedBeadsVars {
+		if err := os.Setenv(pin[0], pin[1]); err != nil {
+			return fmt.Errorf("set %s: %w", pin[0], err)
+		}
 	}
 	return nil
 }

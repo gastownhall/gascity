@@ -23,6 +23,7 @@ func TestEnvironReplacesHomeAndKeepsOnlyExplicitBeadsVars(t *testing.T) {
 		"BD_ALLOW_REMOTE_MIGRATE=1",
 	}, home, "BEADS_DIR", "HOME")
 	want := []string{
+		"BD_DISABLE_METRICS=1",
 		"BD_DOLT_SHARED_SERVER=false",
 		"BEADS_DIR=/work/.beads",
 		"HOME=" + home,
@@ -96,8 +97,8 @@ func TestWrapperScriptReHomesBdAndHonoursExplicitVars(t *testing.T) {
 			t.Errorf("%s = %q, want %q", k, defaulted[k], want)
 		}
 	}
-	if defaulted[SharedServerConfigEnv] != "false" {
-		t.Errorf("%s = %q, want false", SharedServerConfigEnv, defaulted[SharedServerConfigEnv])
+	if defaulted[SharedServerConfigEnv] != "false" || defaulted[DisableMetricsEnv] != "1" {
+		t.Errorf("%s = %q, %s = %q; want false and 1", SharedServerConfigEnv, defaulted[SharedServerConfigEnv], DisableMetricsEnv, defaulted[DisableMetricsEnv])
 	}
 
 	explicit := run("HOME=/home/operator", "XDG_CONFIG_HOME=/seeded", SharedServerConfigEnv+"=", "BEADS_DIR=/work/.beads")
