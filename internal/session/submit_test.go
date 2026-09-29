@@ -2010,3 +2010,95 @@ func TestSubmitDefaultDeferredRestartRequestedKeepsCurrentEpoch(t *testing.T) {
 		t.Fatalf("ContinuationEpoch = %q, want 4 (plain restart keeps the current epoch)", got)
 	}
 }
+
+// TestSubmitInterruptNowRejectsPendingInteraction pins that interrupt_now does
+// not barrel through a pending permission prompt: its interrupt keystroke
+// would dismiss (reject) the prompt as a side effect and the text would
+// follow. The caller must answer the prompt through Respond first (#2892).
+func TestSubmitInterruptNowRejectsPendingInteraction(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "gemini", WorkDir: t.TempDir(), Provider: "gemini", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "tmux-abc",
+		Kind:      "approval",
+		Prompt:    "Bash: rm -rf build",
+	})
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "take this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
+	if !errors.Is(err, ErrPendingInteraction) {
+		t.Fatalf("Submit(interrupt_now) error = %v, want ErrPendingInteraction", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(interrupt_now) unexpectedly queued")
+	}
+	for _, call := range sp.Calls {
+		if call.Name != info.SessionName {
+			continue
+		}
+		switch call.Method {
+		case "SendKeys", "Interrupt", "Nudge", "NudgeNow", "Stop":
+			t.Fatalf("unexpected %s while a permission prompt is pending", call.Method)
+		}
+	}
+}
+
+// TestPendingInteractionErrorNamesThePrompt pins that the refusal says what
+// is pending, so an API or CLI caller can tell the operator what to answer.
+func TestPendingInteractionErrorNamesThePrompt(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "tmux-abc",
+		Kind:      "approval",
+		Prompt:    "Bash: rm -rf build",
+	})
+
+	err = mgr.Send(context.Background(), info.ID, "hello?", "", runtime.Config{})
+	if !errors.Is(err, ErrPendingInteraction) || !errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("Send error = %v, want session and runtime ErrPendingInteraction", err)
+	}
+	for _, want := range []string{"tmux-abc", "Bash: rm -rf build"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Send error = %q, want it to mention %q", err, want)
+		}
+	}
+}
+
+type respondErrorProvider struct {
+	*runtime.Fake
+	err error
+}
+
+func (p *respondErrorProvider) Respond(string, runtime.InteractionResponse) error { return p.err }
+
+// TestRespondReportsUnavailableActionAsMismatch pins that a provider refusing
+// to guess an option (no single menu entry matches the action) surfaces as
+// an interaction mismatch, not an internal error.
+func TestRespondReportsUnavailableActionAsMismatch(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &respondErrorProvider{Fake: runtime.NewFake(), err: fmt.Errorf("%w: 0 menu options match action \"deny\"", runtime.ErrInteractionActionUnavailable)}
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{RequestID: "tmux-abc", Kind: "approval"})
+
+	err = mgr.Respond(info.ID, runtime.InteractionResponse{Action: "deny"})
+	if !errors.Is(err, ErrInteractionMismatch) {
+		t.Fatalf("Respond error = %v, want ErrInteractionMismatch", err)
+	}
+}

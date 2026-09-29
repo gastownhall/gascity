@@ -118,6 +118,13 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 			if !supportsInterruptNowForMetadata(b.Metadata) {
 				return ErrInteractionUnsupported
 			}
+			// The interrupt keystroke would dismiss a pending permission
+			// prompt as a side effect; make the caller answer it explicitly.
+			if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {
+				if err := m.pendingInteractionLocked(sessName); err != nil {
+					return err
+				}
+			}
 			return m.interruptAndSubmitLocked(ctx, id, b, sessName, message, resumeCommand, hints)
 		default:
 			running := m.sp.IsRunning(sessName)

@@ -723,6 +723,9 @@ func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitIn
 		// synchronous message twin) instead of a 500 from humaStoreError.
 		return asyncAcceptedBody{}, humaResolveError(err)
 	}
+	if err := s.rejectPendingInteraction(ctx, store.Store, input.ID); err != nil {
+		return asyncAcceptedBody{}, err
+	}
 
 	intent := input.Body.Intent
 	if intent == "" {
@@ -790,6 +793,9 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 		// helper so they surface as 409 (matching /stop, /respond, and the
 		// synchronous message twin) instead of a 500 from humaStoreError.
 		return asyncAcceptedBody{}, humaResolveError(err)
+	}
+	if err := s.rejectPendingInteraction(ctx, store.Store, input.ID); err != nil {
+		return asyncAcceptedBody{}, err
 	}
 
 	reqID, reqIDErr := newRequestID()

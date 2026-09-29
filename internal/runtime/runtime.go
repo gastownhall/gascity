@@ -32,6 +32,17 @@ var ErrSessionInitializing = errors.New("session is initializing")
 // structured pending/respond interaction capability for the requested session.
 var ErrInteractionUnsupported = errors.New("session interaction is unsupported")
 
+// ErrPendingInteraction reports that a session is showing a blocking
+// interaction (for example a tool permission prompt) that must be answered
+// before any text is delivered to it. Typing into such a prompt can select
+// one of its options, so providers refuse the delivery instead.
+var ErrPendingInteraction = errors.New("session has a pending interaction")
+
+// ErrInteractionActionUnavailable reports that the pending interaction offers
+// no single option matching the requested response action, so the provider
+// sent nothing rather than guess which option to pick.
+var ErrInteractionActionUnavailable = errors.New("pending interaction has no option for the requested action")
+
 // ErrSessionDiedDuringStartup reports that a provider created a session
 // process, but it exited before startup completed successfully.
 var ErrSessionDiedDuringStartup = errors.New("session died during startup")
