@@ -9,9 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
-- **Keep Beads (`bd`) at v1.3.0.** v1.5.0 pins and is tested against bd
-  v1.3.0 (`deps.env` `BD_VERSION` and the go.mod library). Do not move a city
-  to a newer `bd` until a gc release pins it.
+- **Upgrade Beads (`bd`) to v1.3.1-rc.2.** v1.5.0 pins and is tested against
+  bd v1.3.1-rc.2 (`deps.env` `BD_VERSION` and the go.mod library), which keeps
+  bd v1.3.0's schema. Do not move a city to a newer `bd` until a gc release
+  pins it.
 - **`gc storage migrate` is experimental.** The command is new in v1.5.0 and
   still has open correctness issues on split cities (#5987, #6015, #5974,
   #6129, #6242, #6348). Run `gc storage preflight` first, back up every store
@@ -110,30 +111,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Backups use `bd backup`.** `mol-dog-backup` registers
     `<city>/.dolt-backup/<db>` as each scope's `bd backup` destination when it
     has none, then runs `bd backup sync`; the reaper's session-prune backup gate
-    reads `bd backup status`. bd v1.3.0 refuses backup on proxied scopes: those
-    are reported as skipped (an `order.skipped` event) and their session-bead
-    prune waits until a bd with proxied backup support is pinned.
+    reads `bd backup status`. A bd older than v1.3.1 refuses backup on proxied
+    scopes: those are reported as skipped (an `order.skipped` event) and their
+    session-bead prune waits for a backup it can see.
   - **Closed-wisp purge uses `bd purge`.** It needs a bd whose `bd purge`
     selects the whole wisps plane (`--wisps-plane`), keeps closed wisps a live
     wisp depends on, and purges in bounded batches (`--limit`); a backlog is
     cleared across runs within `GC_REAPER_PURGE_BUDGET_SECS` (default 300s).
-    With bd v1.3.0 the purge step is reported as skipped. A run that uses up
-    `GC_REAPER_RUN_BUDGET_SECS` (default 780s, below the 900s order timeout)
-    stops starting new work, reports a partial outcome, and the next run
-    continues.
+    With a bd older than v1.3.1 the purge step is reported as skipped. A run
+    that uses up `GC_REAPER_RUN_BUDGET_SECS` (default 780s, below the 900s
+    order timeout) stops starting new work, reports a partial outcome, and the
+    next run continues.
   - Both orders now run with a 900s timeout.
-
-### Known Issues
-
-- **Proxied cities get no closed-wisp purge, bd backup or `gm-*` session
-  prune until gc's bd pin moves to the beads 1.3.x hotfix.** The `reaper`,
-  `jsonl-export` and `mol-dog-backup` orders now run on bd-owned proxied
-  cities, but with the pinned bd v1.3.0 `bd purge --wisps-plane --limit` and
-  `bd backup` on a proxied scope are not available: those steps are reported
-  as skipped (`order.skipped`) every run instead of running, and the session
-  prune waits for a backup it can see. Stale-wisp, workflow-root, nudge and
-  stale-issue closes and the JSONL archive work today. The bd pin bump
-  removes this entry.
 
 ### Added
 

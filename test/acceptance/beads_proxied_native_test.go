@@ -465,18 +465,17 @@ func TestProxiedNativeLifecycle(t *testing.T) {
 		baseGeneration = c.heal(t, "after the dead-record row")
 	})
 
-	// Both child-crash exits, because they are different endpoint states and
-	// which one a real bd produces is not knowable from the source. Measured
-	// here, twice, on this host:
+	// Both child-crash exits. On the pinned bd both retire the proxy with its
+	// child, so the record it leaves behind names a pid that is gone: the
+	// DEAD-RECORD arm, decided from the process table with no dial, worth
+	// exactly one ping.
 	//
-	//   kill -9   the proxy goes with its child, so the record it left behind
-	//             names a pid that is gone: the DEAD-RECORD arm, decided from the
-	//             process table with no dial, worth exactly one ping.
-	//   kill -TERM the proxy survives its child and its data port accepts and
-	//             never greets: the ZOMBIE ladder, which asks again three times
-	//             across two seconds, then spends one ping, then one recover —
-	//             and a recover is `bd dolt stop` followed by `bd ping`, so it
-	//             shows up as one `dolt stop` and a second ping.
+	//   kill -9    the proxy goes with its child.
+	//   kill -TERM a clean child exit. bd v1.3.0 left the proxy up with a data
+	//              port that accepted and never greeted (the zombie ladder:
+	//              one ping, then one recover); beads 1.3.1 retires the proxy
+	//              when its Dolt backend exits cleanly (gastownhall/beads#6937),
+	//              so this row now takes the dead-record arm too.
 	t.Run("child-kill9", func(t *testing.T) {
 		baseGeneration = c.childCrashRow(t, childCrashExpectation{
 			signal:    syscall.SIGKILL,
@@ -487,13 +486,13 @@ func TestProxiedNativeLifecycle(t *testing.T) {
 		}, baseGeneration)
 	})
 
-	t.Run("child-term-zombie", func(t *testing.T) {
+	t.Run("child-term", func(t *testing.T) {
 		baseGeneration = c.childCrashRow(t, childCrashExpectation{
 			signal:    syscall.SIGTERM,
 			label:     "kill -TERM",
-			pings:     2,
-			doltStops: 1,
-			mechanism: "the proxy survives and its data port accepts without greeting, so the ladder spends one ping and then one recover (`bd dolt stop` plus a ping) — once per generation, ever",
+			pings:     1,
+			doltStops: 0,
+			mechanism: "bd retires the proxy when its Dolt child exits cleanly (beads#6937), so its record names a dead pid and one ping is the whole escalation a dead record is worth",
 		}, baseGeneration)
 	})
 
@@ -662,7 +661,7 @@ type childCrashExpectation struct {
 // record and not something to wave through.
 func (c *proxiedNativeCity) childCrashRow(t *testing.T, want childCrashExpectation, baseGeneration string) string {
 	t.Helper()
-	_, servers := doltFamilyPIDs(t, c.proxyDir)
+	proxies, servers := doltFamilyPIDs(t, c.proxyDir)
 	if len(servers) == 0 {
 		t.Fatalf("no dolt sql-server under %s to kill", c.proxyDir)
 	}
@@ -671,6 +670,11 @@ func (c *proxiedNativeCity) childCrashRow(t *testing.T, want childCrashExpectati
 	}
 	if alive := waitForPIDsGone(t, servers, 30*time.Second); len(alive) > 0 {
 		t.Logf("%s: the dolt child %v is still alive; the row measures whatever the proxy now answers", want.label, alive)
+	}
+	// The proxy retires after its child, not with it; measuring before it has
+	// gone would catch the moment between the two and count a zombie ladder.
+	if alive := waitForPIDsGone(t, proxies, 30*time.Second); len(alive) > 0 {
+		t.Fatalf("%s: the proxy %v outlived its dolt child by 30s; the pinned bd retires it (beads#6937)", want.label, alive)
 	}
 
 	payload, result, census := c.admit(t, "a city whose dolt child took "+want.label)
