@@ -94,9 +94,11 @@ func TestOpenGraphAdoptsExistingRowsInPlace(t *testing.T) {
 	if got.Title != "kept" || len(got.Labels) != 1 || got.Labels[0] != "keep" {
 		t.Fatalf("adopted row changed: %+v", got)
 	}
+	// The first open reserved a whole block of ids (its persisted floor leads
+	// its allocator), so the reopen resumes past that block, never inside it.
 	next := mustCreateGraphBead(t, second.Graph(), beads.Bead{Title: "after reopen"})
-	if next.ID != "gcg-2" {
-		t.Fatalf("id after reopen = %q, want gcg-2 — the allocator must not restart", next.ID)
+	if next.ID != "gcg-1025" {
+		t.Fatalf("id after reopen = %q, want gcg-1025 — the allocator must not restart or reissue the first open's block", next.ID)
 	}
 }
 
@@ -866,8 +868,10 @@ func TestApplyGenesisSequenceFloorSurvivesRollbackToTheDeployedBinary(t *testing
 	for i := 0; i < 3; i++ {
 		mustCreateGraphBead(t, component.Graph(), beads.Bead{Title: "graph row", Type: "task"})
 	}
-	if err := component.ApplyGenesisSequenceFloor(750); err != nil {
-		t.Fatalf("ApplyGenesisSequenceFloor(750): %v", err)
+	// 5000 lies past the block the three mints above reserved, so the applied
+	// value is what graph.seqfloor must hold.
+	if err := component.ApplyGenesisSequenceFloor(5000); err != nil {
+		t.Fatalf("ApplyGenesisSequenceFloor(5000): %v", err)
 	}
 	dir := filepath.Dir(component.Path())
 	if err := component.Close(); err != nil {
@@ -878,8 +882,8 @@ func TestApplyGenesisSequenceFloorSurvivesRollbackToTheDeployedBinary(t *testing
 	if err != nil {
 		t.Fatalf("reading %s: %v", graphSequenceFloorFilename, err)
 	}
-	if string(floorBytes) != "750\n" {
-		t.Fatalf("%s = %q, want the applied 750\\n", graphSequenceFloorFilename, floorBytes)
+	if string(floorBytes) != "5000\n" {
+		t.Fatalf("%s = %q, want the applied 5000\\n", graphSequenceFloorFilename, floorBytes)
 	}
 
 	rolledBack, err := beads.OpenSQLiteStore(dir, beads.WithSQLiteStoreIDPrefix(graphIDPrefix))
@@ -897,8 +901,8 @@ func TestApplyGenesisSequenceFloorSurvivesRollbackToTheDeployedBinary(t *testing
 	if err != nil {
 		t.Fatalf("Create after rollback: %v", err)
 	}
-	if minted.ID != "gcg-751" {
-		t.Fatalf("post-rollback mint = %q, want gcg-751", minted.ID)
+	if minted.ID != "gcg-5001" {
+		t.Fatalf("post-rollback mint = %q, want gcg-5001", minted.ID)
 	}
 }
 
