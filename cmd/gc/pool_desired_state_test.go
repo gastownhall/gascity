@@ -889,6 +889,7 @@ func TestComputePoolDesiredStatesCarriesWorktreeOwnerEvidence(t *testing.T) {
 			},
 		},
 		nil,
+		nil,
 	)
 	if len(result) != 1 || len(result[0].Requests) != 1 {
 		t.Fatalf("result = %+v, want one new request", result)
@@ -1908,6 +1909,7 @@ func TestComputePoolDesiredStates_PostCreateProtectionBindingPreservesScaleDeman
 		demand,
 		now,
 		nil,
+		nil,
 	)
 
 	if len(result) != 1 || len(result[0].Requests) != 2 {
@@ -1942,6 +1944,7 @@ func TestComputePoolDesiredStates_PostCreateProtectionAdvancesDemandIndex(t *tes
 		map[string]int{"claude": 2},
 		demand,
 		now,
+		nil,
 		nil,
 	)
 
@@ -1989,6 +1992,7 @@ func TestComputePoolDesiredStates_PostCreateProtectionAllocatesDemandByTriggerId
 		map[string]int{"claude": 2},
 		demand,
 		now,
+		nil,
 		nil,
 	)
 
@@ -2046,6 +2050,7 @@ func TestComputePoolDesiredStates_PostCreateProtectionRebindsUnmatchedConcreteDe
 				map[string]int{"claude": 2},
 				demand,
 				now,
+				nil,
 				nil,
 			)
 
@@ -2817,7 +2822,7 @@ func TestComputePoolDesiredStates_ZeroDemandRecordsSkipDecision(t *testing.T) {
 			trace := newPoolDesiredStateTestTrace("claude")
 			sessions := sessionInfosFromBeads(tt.sessions)
 
-			result := computePoolDesiredStates(cfg, nil, sessions, tt.scaleCheckCounts, nil, trace)
+			result := computePoolDesiredStates(cfg, nil, sessions, tt.scaleCheckCounts, nil, trace, nil)
 
 			if untraced := ComputePoolDesiredStates(cfg, nil, sessions, tt.scaleCheckCounts); !reflect.DeepEqual(result, untraced) {
 				t.Fatalf("traced result = %#v, want identical to untraced %#v", result, untraced)
