@@ -31,6 +31,7 @@ contrib/agent-observatory/
     contract.py        versioned normalized JSONL contract + strict validation
     canonical.py       canonical JSON, hashing, event/session snapshot identity
     store.py           SQLite schema versioning, transactional import, classifications
+    migrations.py      explicit, backed-up SQLite schema upgrades
     commands.py        conservative, non-executing command categorization
     changes.py         M5 optimization change registry + conservative screen
     exposure.py        M5 commit/fingerprint exposure join + optimization ledger
@@ -166,6 +167,14 @@ the tool executed, and does not prove success. Only a result event with an
   version-2 projection must be rebuilt rather than reused), version 4 added the
   M5 change/exposure registry, and version 5 adds the M7 shadow
   `recommendations` projection.
+- Upgrade a schema-4 projection explicitly with
+  `python3 -m agent_observatory migrate --db /path/to/obs.db`. The command refuses
+  every version except a valid v4 database, writes a timestamped
+  `<db>.v4-pre-schema5-<UTC timestamp>.bak` beside the original first, then adds
+  the schema-5 table/index and updates both version markers in one transaction.
+  It verifies that row counts in `events`, `sessions`, `classifications`, and
+  `classification_answers` match the backup and remain unchanged. Normal store
+  opens never migrate an existing database implicitly.
 - Import is **per-file atomic**: the whole file is parsed and type-checked
   before writing, and all writes happen in one transaction. A malformed or
   truncated line reports `path:line` and commits nothing. Records are split on

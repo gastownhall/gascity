@@ -38,9 +38,10 @@ from .errors import (
     RegistryError,
     SchemaVersionError,
 )
+from .migrations import SCHEMA_VERSION_AFTER, V4_TO_V5_SCHEMA_STATEMENTS
 
-# Bump when the projection schema changes. The database is derived and
-# rebuildable, so an older schema is rejected rather than migrated in place.
+# Bump when the projection schema changes. Normal opens reject older schemas;
+# use the explicit CLI migration for a supported in-place upgrade.
 #
 # Version 3 excludes canonical identity fields from the stored ``payload_hash``
 # (contract.payload_hash), so a version-2 projection would carry stale hashes and
@@ -52,7 +53,7 @@ from .errors import (
 # Version 5 adds the M7 shadow-policy ``recommendations`` projection. Rows are
 # append-only and keyed by the recommendation content hash, so replaying an
 # identical shadow run deduplicates while a changed policy version is retained.
-DB_SCHEMA_VERSION = 5
+DB_SCHEMA_VERSION = SCHEMA_VERSION_AFTER
 
 # Normalized record fields, in table order. ``observed_timestamp`` is not here:
 # it is derived provenance (the raw input string), not part of the payload hash.
@@ -297,34 +298,7 @@ _SCHEMA_STATEMENTS = (
         FOREIGN KEY (change_id) REFERENCES changes(change_id) ON DELETE CASCADE
     )
     """,
-    """
-    CREATE TABLE IF NOT EXISTS recommendations (
-        recommendation_id TEXT PRIMARY KEY,
-        episode_id TEXT NOT NULL,
-        work_item_id TEXT,
-        kind TEXT NOT NULL,
-        decision TEXT NOT NULL,
-        eligibility TEXT NOT NULL,
-        eligibility_reason TEXT NOT NULL,
-        confidence REAL,
-        uncertainty REAL,
-        recommended_candidate TEXT,
-        current_candidate TEXT,
-        fallback_candidate TEXT,
-        fallback_path TEXT,
-        disagreement INTEGER NOT NULL,
-        temporal_leak_free INTEGER NOT NULL,
-        as_of TEXT NOT NULL,
-        catalog_version TEXT NOT NULL,
-        evaluator_version TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-    )
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS recommendations_episode_kind
-        ON recommendations(episode_id, kind)
-    """,
+    *V4_TO_V5_SCHEMA_STATEMENTS,
 )
 
 @dataclass

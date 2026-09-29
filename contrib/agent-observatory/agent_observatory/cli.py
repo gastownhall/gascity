@@ -85,6 +85,7 @@ from .impact import (
     observed_evidence_from_store,
 )
 from .jev import REQUEST_BYTE_CAP, build_request, import_response, persist_request
+from .migrations import migrate_database
 from .policy import (
     DEFAULT_CONFIDENCE_THRESHOLD,
     PolicyConfig,
@@ -224,6 +225,24 @@ def _cmd_import_jsonl(args: argparse.Namespace) -> int:
                 }
             )
         print(json.dumps({"imports": summaries}, indent=2, sort_keys=True))
+    return 0
+
+
+def _cmd_migrate(args: argparse.Namespace) -> int:
+    result = migrate_database(args.db)
+    print(
+        json.dumps(
+            {
+                "database": result.database_path,
+                "backup": result.backup_path,
+                "from_version": result.from_version,
+                "to_version": result.to_version,
+                "preserved_rows": result.preserved_rows,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -1536,6 +1555,14 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser.add_argument("--db", required=True, help="SQLite projection path")
     import_parser.add_argument("files", nargs="+", help="normalized JSONL files (explicit paths only)")
     import_parser.set_defaults(func=_cmd_import_jsonl)
+
+    migrate_parser = subparsers.add_parser(
+        "migrate", help="back up and upgrade a schema-4 projection to schema 5"
+    )
+    migrate_parser.add_argument(
+        "--db", required=True, help="existing schema-4 SQLite projection (a timestamped backup is written first)"
+    )
+    migrate_parser.set_defaults(func=_cmd_migrate)
 
     report_parser = subparsers.add_parser("report", help="emit a deterministic report JSON")
     report_parser.add_argument("--db", required=True, help="SQLite projection path")
