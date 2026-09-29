@@ -610,6 +610,54 @@ scope_backend_is_dolt() {
     esac
 }
 
+# beads_config_value <config.yaml> <section.field> prints a two-part dotted
+# bd config key's value in either spelling bd reads: the flat top-level
+# `section.field: v` gc writes, or the nested `section:` / `  field: v` that
+# bd >= 1.3.1 writes on `bd config set`. The flat spelling wins when both are
+# present, as it does in viper. Trailing comments and surrounding quotes are
+# stripped; an absent file or key prints nothing. Mirrors findConfigValue in
+# internal/beads/contract/files.go.
+beads_config_value() {
+    [ -f "$1" ] || return 0
+    awk -v key="$2" '
+        function clean(v) {
+            sub(/^[[:space:]]+/, "", v)
+            if (v ~ /^#/) v = ""
+            sub(/[[:space:]]+#.*$/, "", v)
+            sub(/[[:space:]]+$/, "", v)
+            if (v ~ /^".*"$/ || v ~ /^\047.*\047$/) v = substr(v, 2, length(v) - 2)
+            return v
+        }
+        BEGIN {
+            dot = index(key, ".")
+            section = substr(key, 1, dot - 1)
+            field = substr(key, dot + 1)
+        }
+        { sub(/\r$/, "") }
+        /^[[:space:]]*(#.*)?$/ { next }
+        /^[^[:space:]]/ {
+            in_section = 0
+            child_indent = -1
+            if (!flat_seen && index($0, key ":") == 1) {
+                flat_seen = 1
+                flat = clean(substr($0, length(key) + 2))
+            }
+            if (index($0, section ":") == 1 && clean(substr($0, length(section) + 2)) == "") in_section = 1
+            next
+        }
+        in_section {
+            match($0, /^[[:space:]]+/)
+            if (child_indent < 0) child_indent = RLENGTH
+            if (RLENGTH == child_indent && nested == "" && index(substr($0, RLENGTH + 1), field ":") == 1)
+                nested = clean(substr($0, RLENGTH + length(field) + 2))
+        }
+        END {
+            if (flat_seen) print flat
+            else if (nested != "") print nested
+        }
+    ' "$1"
+}
+
 scope_is_proxied() {
     # Persisted scope markers are authoritative. Ambient proxy mode is only a
     # fallback for an otherwise-unmarked scope and must not override an
@@ -626,7 +674,7 @@ scope_is_proxied() {
     # dolt.mode of its own, so a "proxied-server" here is drift and must not
     # move a scope onto the proxy path.
     if [ -f "$1/.beads/config.yaml" ]; then
-        config_mode=$(sed -n 's/^[[:space:]]*dolt\.mode:[[:space:]]*//p' "$1/.beads/config.yaml" | head -1)
+        config_mode=$(beads_config_value "$1/.beads/config.yaml" dolt.mode)
         normalized_mode=$(normalize_dolt_mode "$config_mode")
         if [ -n "$normalized_mode" ]; then
             return 1
@@ -4020,19 +4068,23 @@ provider_owned_scope_is_local() {
 
     # Legacy GC-managed direct scopes deliberately disable bd auto-start to
     # prevent a competing server, but GC still owns their local lifecycle.
-    if grep -Eq '^[[:space:]]*gc\.endpoint_origin:[[:space:]]*managed_city[[:space:]]*$' "$config"; then
+    local origin
+    origin=$(beads_config_value "$config" gc.endpoint_origin)
+    if [ "$origin" = "managed_city" ]; then
         return 0
     fi
     # A direct canonical endpoint is local only when bd's own persisted
     # auto-start policy says it owns the process. This keeps transferred local
     # loopback scopes local without treating external loopback endpoints as
     # GC-owned.
-    if grep -Eq '^[[:space:]]*gc\.endpoint_origin:[[:space:]]*city_canonical[[:space:]]*$' "$config"; then
-        grep -Eq '^[[:space:]]*dolt\.auto-start:[[:space:]]*true[[:space:]]*$' "$config"
+    if [ "$origin" = "city_canonical" ]; then
+        [ "$(beads_config_value "$config" dolt.auto-start)" = "true" ]
         return $?
     fi
-    if grep -Eq '^[[:space:]]*gc\.endpoint_origin:[[:space:]]*explicit[[:space:]]*$' "$config" ||
-        grep -Eq '^[[:space:]]*dolt\.(host|port|socket):' "$config"; then
+    if [ "$origin" = "explicit" ] ||
+        [ -n "$(beads_config_value "$config" dolt.host)" ] ||
+        [ -n "$(beads_config_value "$config" dolt.port)" ] ||
+        [ -n "$(beads_config_value "$config" dolt.socket)" ]; then
         return 1
     fi
     return 0

@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
@@ -2719,8 +2720,11 @@ func TestHandleSessionCreateAsync(t *testing.T) {
 	if success.Session.Alias != "sky" {
 		t.Fatalf("Alias = %q, want %q", success.Session.Alias, "sky")
 	}
-	if fs.pokeCount != 1 {
-		t.Fatalf("pokeCount = %d, want 1", fs.pokeCount)
+	// The async create enqueues after emitting its success event, so wait for
+	// the enqueue rather than reading the count immediately.
+	waitForEnqueuedKey(t, fs, reconcilekey.Session(success.Session.ID))
+	if got := fs.enqueueCalls(); got != 1 {
+		t.Fatalf("enqueueCalls = %d, want 1", got)
 	}
 }
 
@@ -3024,8 +3028,8 @@ func TestHandleProviderSessionCreateRejectsAsync(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "async session creation is only supported for configured agent templates") {
 		t.Fatalf("body = %q, want provider async guidance", w.Body.String())
 	}
-	if fs.pokeCount != 0 {
-		t.Fatalf("pokeCount = %d, want 0", fs.pokeCount)
+	if got := fs.enqueueCalls(); got != 0 {
+		t.Fatalf("enqueueCalls = %d, want 0", got)
 	}
 }
 

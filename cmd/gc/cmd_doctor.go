@@ -469,13 +469,24 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// out — the only surviving backup can be weeks stale before anyone notices.
 	register(doctor.NewBdBackupFreshnessCheckForConfig(cityPath, cfg, cfgErr))
 	// Backup coverage on the proxied default. Every per-scope backup check
-	// goes quiet on a bd-owned proxy root — correctly, since neither gc nor
-	// rc.2's bd can register anything there — which leaves a default-topology
-	// city reading as covered while its store is the only copy. One advisory
-	// line per city says so; registered only when the city actually has a
-	// proxied scope, so nothing changes for a direct or external city.
-	if c := doctor.NewProxiedBackupCoverageCheckForConfig(cityPath, cfg, cfgErr); c != nil {
-		register(c)
+	// goes quiet on a bd-owned proxy root — gc can register nothing there —
+	// so one city-level line asks each proxied scope's bd (`bd backup status`)
+	// whether it holds a recent backup, or says the store is the only copy when
+	// that bd refuses proxied backup. Gated like the custom-types checks: only
+	// when the store preflight passed, and never over a suspended rig — bd
+	// 1.3.1's `backup status` starts a stopped scope's proxy and Dolt. The
+	// check itself also skips any scope whose proxy is not already running.
+	// Registered only when the city actually has a proxied scope.
+	if storeOK {
+		coverageCfg := cfg
+		if cfgErr == nil && cfg != nil {
+			coverageCfg = &config.City{Rigs: activeRigs}
+		}
+		if c := doctor.NewProxiedBackupCoverageCheckForConfig(cityPath, coverageCfg, cfgErr, func(scopeRoot string) string {
+			return doctorScopeBdBinary(cityPath, scopeRoot)
+		}); c != nil {
+			register(c)
+		}
 	}
 	// A gc-owned proxied scope whose sidecar does not pin its proxy resident.
 	// bd elides a zero idle_timeout, so an absent key means its provider

@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -1585,6 +1586,7 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 			}
 		}
 		// No running config session — poke controller for immediate wake.
+		// Key-less (allocator): the wake is template demand, not a session.
 		if err := pokeController(cityPath); err != nil {
 			fmt.Fprintf(stderr, "No running sessions for %q; poke failed: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort
 		} else {
@@ -1720,7 +1722,9 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 		maybeStartNudgePoller(target)
 	} else {
 		maybeStartNudgePoller(target)
-		if err := pokeController(cityPath); err != nil {
+		// The asleep target session is known by ID, runtime name, or both;
+		// with neither it degrades to the allocator key.
+		if err := enqueueController(cityPath, reconcilekey.SessionRef(target.sessionID, target.sessionName)); err != nil {
 			fmt.Fprintf(stderr, "Session %q is asleep; poke failed: %v\n", target.agent.QualifiedName(), err) //nolint:errcheck // best-effort
 		} else {
 			fmt.Fprintf(stdout, "Session %q is asleep — poked controller for wake\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort

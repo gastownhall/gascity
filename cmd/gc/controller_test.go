@@ -2033,7 +2033,10 @@ func containsAgentNames(got []string, want ...string) bool {
 	return true
 }
 
+// TestControllerPokeTriggersImmediate also pins that runController wires
+// the API controllerState's wake signals (see wireControllerWakeSignals).
 func TestControllerPokeTriggersImmediate(t *testing.T) {
+	wired := captureWiredControllerStates(t)
 	sp := runtime.NewFake()
 
 	var reconcileCount atomic.Int32
@@ -2084,6 +2087,10 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
+
+	// The socket comes up before the controller state is built.
+	awaitCond(t, func() bool { return len(wired()) > 0 }, "controller state wiring")
+	assertWakeSignalsWired(t, wired())
 
 	// Record count, then poke.
 	before := reconcileCount.Load()

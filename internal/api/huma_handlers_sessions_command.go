@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -195,7 +196,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 			return
 		}
 		if waitForCommandable {
-			s.state.Poke()
+			s.state.Enqueue(reconcilekey.Session(info.ID))
 			waitCtx, cancel := context.WithTimeout(context.Background(), sessionCreateCommandableTimeout)
 			info, createErr = waiter.WaitForSessionCommandable(waitCtx, info.ID)
 			cancel()
@@ -210,7 +211,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 		s.emitSessionCreateSucceeded(reqID, resp)
 		s.persistSessionMeta(store, info.ID, body.ProjectID, nil)
 		if !waitForCommandable {
-			s.state.Poke()
+			s.state.Enqueue(reconcilekey.Session(info.ID))
 		}
 
 		titleProvider := s.resolveTitleProvider()
@@ -654,7 +655,7 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	if _, err := mgr.UpdateTemplateOverrides(id, map[string]string{sessionPermissionModeOptionKey: mode}); err != nil {
 		return nil, humaSessionManagerError(err)
 	}
-	s.state.Poke()
+	s.state.Enqueue(reconcilekey.Session(id))
 
 	info, presponse, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {

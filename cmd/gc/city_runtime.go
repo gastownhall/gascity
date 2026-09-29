@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -161,6 +162,11 @@ type CityRuntime struct {
 	poolDeathHandlers map[string]poolDeathInfo
 	suspendedNames    map[string]bool
 
+	// standaloneCityStore and standaloneRigStores are the runtime's own store
+	// handles when there is no controller state (API disabled). A config reload
+	// swaps them while background lanes read them, so both are written under
+	// serviceStateMu and read through cityBeadStore/rigBeadStores. Only the
+	// controller goroutine writes them.
 	standaloneCityStore beads.Store // non-nil when API disabled; for chat auto-suspend
 	standaloneRigStores map[string]beads.Store
 
@@ -537,12 +543,13 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// Open standalone city bead store when controllerState is unavailable.
 	// When controllerState is present, it manages the cached city store.
 	if cr.cs == nil && cityRoot != "" {
+		cityStore := cr.standaloneCityStore
 		if store, err := openCityStoreAt(cityRoot); err != nil {
 			fmt.Fprintf(cr.stderr, "%s: city bead store: %v (auto-suspend disabled)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		} else {
-			cr.standaloneCityStore = store
+			cityStore = store
 		}
-		cr.standaloneRigStores = buildStandaloneRigStores(cr.cfg, cr.cityPath, cr.stderr)
+		cr.setStandaloneStores(cityStore, buildStandaloneRigStores(cr.cfg, cr.cityPath, cr.stderr))
 	}
 
 	// Record bead store health metric.
@@ -1873,10 +1880,7 @@ func (cr *CityRuntime) handleReloadRequest(req *reloadRequest) {
 			),
 		})
 	}
-	select {
-	case cr.pokeCh <- struct{}{}:
-	default:
-	}
+	legacyEnqueue(cr.pokeCh, nil, reconcilekey.Allocator()) // config reload: allocator
 	req.acceptedCh <- reloadControlReply{
 		Outcome: reloadOutcomeAccepted,
 		Message: "Reload requested.",
@@ -2357,14 +2361,16 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if cr.cs == nil {
 		// Refresh standalone city store for auto-suspend.
 		// Also recovers from nil → non-nil when bd becomes available after startup.
+		// The stores are opened before the swap so readers never wait on an open.
+		cityStore := cr.standaloneCityStore
 		if s, err := openCityStoreAt(cityRoot); err != nil {
-			if cr.standaloneCityStore != nil {
+			if cityStore != nil {
 				appendWarning(fmt.Sprintf("city bead store reload: %v", err))
 			}
 		} else {
-			cr.standaloneCityStore = s
+			cityStore = s
 		}
-		cr.standaloneRigStores = buildStandaloneRigStores(nextCfg, cr.cityPath, cr.stderr)
+		cr.setStandaloneStores(cityStore, buildStandaloneRigStores(nextCfg, cr.cityPath, cr.stderr))
 	}
 
 	// Rebuild convergence scopes against the reloaded config so rigs added,
@@ -3163,10 +3169,8 @@ func (cr *CityRuntime) requestDeferredDrainFollowUpTick() {
 	if !cr.sessionDrains.consumeFollowUpTick() {
 		return
 	}
-	select {
-	case cr.pokeCh <- struct{}{}:
-	default:
-	}
+	// Key-less: the follow-up covers every deferred drain at once.
+	legacyEnqueue(cr.pokeCh, nil, reconcilekey.Allocator())
 }
 
 func (cr *CityRuntime) ensureAsyncStartLimiter() *asyncStartLimiter {
@@ -3185,10 +3189,9 @@ func (cr *CityRuntime) requestAsyncStartFollowUpTick() {
 	}
 	// Async completion can commit, rollback, or reject stale work; each case
 	// should prompt one cheap reconciliation pass to observe the new reality.
-	select {
-	case cr.pokeCh <- struct{}{}:
-	default:
-	}
+	// Key-less: the completion callback does not carry the session, and a
+	// start also changes supply, which the allocator must re-plan.
+	legacyEnqueue(cr.pokeCh, nil, reconcilekey.Allocator())
 }
 
 func (cr *CityRuntime) waitForAsyncStarts() bool {
@@ -3677,6 +3680,8 @@ func (cr *CityRuntime) cityBeadStore() beads.Store {
 	if cr.cs != nil {
 		return cr.cs.CityBeadStore()
 	}
+	cr.serviceStateMu.RLock()
+	defer cr.serviceStateMu.RUnlock()
 	return cr.standaloneCityStore
 }
 
@@ -3686,7 +3691,21 @@ func (cr *CityRuntime) rigBeadStores() map[string]beads.Store {
 		delete(stores, cr.cityName)
 		return stores
 	}
+	cr.serviceStateMu.RLock()
+	defer cr.serviceStateMu.RUnlock()
 	return cr.standaloneRigStores
+}
+
+// setStandaloneStores publishes the standalone store handles under the lock
+// cityBeadStore and rigBeadStores read them with. Background lanes (route
+// recovery, completions, detached orphans) read them off the controller
+// goroutine, so an unlocked swap on reload would race those reads. The rig
+// map is replaced whole, never mutated in place.
+func (cr *CityRuntime) setStandaloneStores(city beads.Store, rigs map[string]beads.Store) {
+	cr.serviceStateMu.Lock()
+	cr.standaloneCityStore = city
+	cr.standaloneRigStores = rigs
+	cr.serviceStateMu.Unlock()
 }
 
 func (cr *CityRuntime) loadSessionBeadSnapshot() *sessionBeadSnapshot {

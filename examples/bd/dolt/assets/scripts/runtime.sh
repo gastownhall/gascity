@@ -48,6 +48,55 @@ is_local_dolt_host() {
   esac
 }
 
+# beads_config_value <config.yaml> <section.field> prints a two-part dotted
+# bd config key's value in either spelling bd reads: the flat top-level
+# `section.field: v` gc writes, or the nested `section:` / `  field: v` that
+# bd >= 1.3.1 writes on `bd config set`. The flat spelling wins when both are
+# present, as it does in viper. Trailing comments and surrounding quotes are
+# stripped; an absent file or key prints nothing. Mirrors findConfigValue in
+# internal/beads/contract/files.go and beads_config_value in the bd pack's
+# gc-beads-bd.sh.
+beads_config_value() {
+  [ -f "$1" ] || return 0
+  awk -v key="$2" '
+    function clean(v) {
+      sub(/^[[:space:]]+/, "", v)
+      if (v ~ /^#/) v = ""
+      sub(/[[:space:]]+#.*$/, "", v)
+      sub(/[[:space:]]+$/, "", v)
+      if (v ~ /^".*"$/ || v ~ /^\047.*\047$/) v = substr(v, 2, length(v) - 2)
+      return v
+    }
+    BEGIN {
+      dot = index(key, ".")
+      section = substr(key, 1, dot - 1)
+      field = substr(key, dot + 1)
+    }
+    { sub(/\r$/, "") }
+    /^[[:space:]]*(#.*)?$/ { next }
+    /^[^[:space:]]/ {
+      in_section = 0
+      child_indent = -1
+      if (!flat_seen && index($0, key ":") == 1) {
+        flat_seen = 1
+        flat = clean(substr($0, length(key) + 2))
+      }
+      if (index($0, section ":") == 1 && clean(substr($0, length(section) + 2)) == "") in_section = 1
+      next
+    }
+    in_section {
+      match($0, /^[[:space:]]+/)
+      if (child_indent < 0) child_indent = RLENGTH
+      if (RLENGTH == child_indent && nested == "" && index(substr($0, RLENGTH + 1), field ":") == 1)
+        nested = clean(substr($0, RLENGTH + length(field) + 2))
+    }
+    END {
+      if (flat_seen) print flat
+      else if (nested != "") print nested
+    }
+  ' "$1"
+}
+
 read_runtime_state_flag() (
   state_file="$1"
   key="$2"

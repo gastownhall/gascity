@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -671,7 +672,9 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 			t.Fatalf("timed out waiting for controller pokes, got %v", gotCommands)
 		}
 	}
-	wantExact := []string{"ping\n", "poke\n", "poke\n"}
+	// The probe poke is key-less; the post-reset enqueue carries the
+	// session key.
+	wantExact := []string{"ping\n", "poke\n", keyedPokeCommand(reconcilekey.Session(bead.ID)) + "\n"}
 	for i, want := range wantExact {
 		if gotCommands[i] != want {
 			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)

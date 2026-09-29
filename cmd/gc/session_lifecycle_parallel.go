@@ -2131,9 +2131,13 @@ func stopStaleAsyncStartRuntime(result startResult, sp runtime.Provider, stderr 
 			return
 		}
 	}
+	agentName := result.prepared.candidate.tp.DisplayName()
 	if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
 		fmt.Fprintf(stderr, "session reconciler: stopping stale async start runtime %s: %v\n", name, err) //nolint:errcheck
+		telemetry.RecordAgentStop(context.Background(), name, agentName, "stale-async-start", err)
+		return
 	}
+	telemetry.RecordAgentStop(context.Background(), name, agentName, "stale-async-start", nil)
 }
 
 // asyncStartSessionStillCurrentInfo decides whether an async start result should
@@ -2219,6 +2223,16 @@ func startPreparedStartCandidate(
 			// create back just recreates the bead next tick against the same
 			// zombie — so recycle it: stop the stale session and fall
 			// through to a fresh start.
+			//
+			// This is the same "pane up, process dead" condition the
+			// steady-state reconciler classifies as a crash (session_reconciler.go's
+			// zombie-capture block), just detected here at start-retry time instead
+			// of on a normal reconcile tick — so it is recorded the same way
+			// (gc.agent.crashes.total), not as a stop: nothing here was
+			// deliberately shut down, gc is discovering and clearing wreckage
+			// left by the agent process's own exit. Like that detector, a
+			// provider rate-limit screen in the pane is not counted as a crash.
+			crashOutput, peekErr := sp.Peek(name, rateLimitPeekLines)
 			recycleBegin := time.Now()
 			stopErr := sp.Stop(name)
 			if phases != nil {
@@ -2226,6 +2240,11 @@ func startPreparedStartCandidate(
 			}
 			if stopErr != nil && !runtime.IsSessionGone(stopErr) {
 				return false, fmt.Errorf("recycling session %q with dead agent process: %w", name, stopErr)
+			}
+			// Recording after a successful Stop bounds this to one datapoint
+			// per recycle even when a failed Stop sends the start back for retry.
+			if peekErr == nil && !runtime.ContainsProviderRateLimitScreen(crashOutput) {
+				telemetry.RecordAgentCrash(context.Background(), item.candidate.tp.DisplayName(), crashOutput)
 			}
 		}
 	}
@@ -2644,6 +2663,12 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
 	fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
+	// Every exit from this function is a failed start attempt, so record it
+	// here once rather than at each arm below — mirrors the single call site
+	// on the success path (commitStartResultTraced) and closes the gap where
+	// a start failure (e.g. a folder-trust-dialog abort on the rollback-pending
+	// arm below) never reached gc.agent.starts.total at all.
+	telemetry.RecordAgentStart(context.Background(), name, tp.DisplayName(), result.err)
 	if reason := runtime.ProviderTerminalErrorReason(result.err.Error()); reason != "" {
 		if result.rollbackPending && !releaseBeadScopedPoolRuntime(info, result.provider, stderr) {
 			// The runtime teardown could not be confirmed, so the row must stay
