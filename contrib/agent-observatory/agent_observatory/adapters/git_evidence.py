@@ -25,12 +25,14 @@ _URL_RE = re.compile(
     r"(?:https?|ssh|git)://[^\s\"'<>]+|(?:[A-Za-z0-9._+-]+@)?[A-Za-z0-9.-]+\.[A-Za-z]{2,}:[^\s\"'<>]+",
     re.IGNORECASE,
 )
-_COMMIT_LINE_RE = re.compile(r"^\s*\[.*\s+([0-9a-fA-F]{7,64})\]\s+", re.MULTILINE)
+_COMMIT_LINE_RE = re.compile(r"^\s*\[.*?\s+([0-9a-fA-F]{7,64})\]\s+", re.MULTILINE)
 _PUSH_RANGE_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{7,64})(\.\.\.?)([0-9a-fA-F]{7,64})(?![0-9a-fA-F])")
 _LOG_SHA_RE = re.compile(r"^\s*(?:(?:\*\s*)|(?:commit\s+))?([0-9a-fA-F]{7,64})(?:\s|$)")
 _HEAD_LINE_RE = re.compile(r"^\s*HEAD\s+([0-9a-fA-F]{7,64})\s*$", re.IGNORECASE)
+# `git worktree list` uses one space for the longest path (and when there is
+# only one worktree); other rows are padded to align their SHA columns.
 _PLAIN_WORKTREE_LINE_RE = re.compile(
-    r"^(?P<path>.+?)\s{2,}(?P<sha>[0-9a-fA-F]{7,64})(?:\s|$)"
+    r"^(?P<path>.+?)\s+(?P<sha>[0-9a-fA-F]{7,64})(?=\s+\[|\s+\(|$)"
 )
 
 
