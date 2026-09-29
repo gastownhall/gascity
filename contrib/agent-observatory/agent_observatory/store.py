@@ -14,6 +14,7 @@ import json
 import os
 import sqlite3
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
@@ -28,6 +29,7 @@ from .canonical import (
 )
 from .contract import (
     USAGE_INT_FIELDS,
+    normalize_timestamp,
     payload_hash,
     record_identity,
     validate_record,
@@ -35,6 +37,8 @@ from .contract import (
 from .errors import (
     ContractError,
     LabelConflictError,
+    ObservatoryError,
+    PricingError,
     RegistryConflictError,
     RegistryError,
     SchemaVersionError,
@@ -348,6 +352,79 @@ def _reject_json_constant(value: str) -> Any:
     raise ValueError(f"non-finite JSON constant {value!r} is not allowed")
 
 
+def _decimal_event_cost_usd(
+    input_tokens: Any,
+    output_tokens: Any,
+    cache_read_tokens: Any,
+    cache_write_tokens: Any,
+    input_usd_per_million: Any,
+    output_usd_per_million: Any,
+    cache_read_usd_per_million: Any,
+    cache_write_usd_per_million: Any,
+) -> str | None:
+    """Calculate a cost as exact decimal USD text for SQLite's cost view."""
+    token_values = (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
+    price_values = (
+        input_usd_per_million,
+        output_usd_per_million,
+        cache_read_usd_per_million,
+        cache_write_usd_per_million,
+    )
+    if all(value is None for value in token_values):
+        return None
+
+    terms: list[tuple[Decimal, Decimal]] = []
+    for tokens, price in zip(token_values, price_values):
+        if tokens is None:
+            continue
+        try:
+            token_amount = Decimal(str(tokens))
+        except InvalidOperation as exc:
+            raise ValueError("event token count is not a decimal number") from exc
+        if not token_amount.is_finite() or token_amount < 0:
+            raise ValueError("event token count must be finite and nonnegative")
+        if token_amount == 0:
+            continue
+        if price is None:
+            return None
+        try:
+            unit_price = Decimal(str(price))
+        except InvalidOperation as exc:
+            raise ValueError("model price is not a decimal number") from exc
+        if not unit_price.is_finite() or unit_price < 0:
+            raise ValueError("model price must be finite and nonnegative")
+        if unit_price != 0:
+            terms.append((token_amount, unit_price))
+
+    if not terms:
+        return "0"
+
+    min_exponent = min(
+        tokens.as_tuple().exponent + price.as_tuple().exponent - 6
+        for tokens, price in terms
+    )
+    max_adjusted = max(
+        len(tokens.as_tuple().digits) + len(price.as_tuple().digits) - 1
+        + tokens.as_tuple().exponent + price.as_tuple().exponent - 6
+        for tokens, price in terms
+    )
+    product_precision = max(
+        len(tokens.as_tuple().digits) + len(price.as_tuple().digits)
+        for tokens, price in terms
+    )
+    with localcontext() as context:
+        context.prec = max(28, product_precision, max_adjusted - min_exponent + 2)
+        total = sum(
+            (tokens * price / Decimal(1_000_000) for tokens, price in terms),
+            Decimal(0),
+        )
+
+    text = format(total, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
 def _split_jsonl_lines(text: str) -> list[str]:
     """Split JSONL on LF only, dropping one trailing CR per line.
 
@@ -373,6 +450,9 @@ class ObservatoryStore:
                 os.makedirs(parent, exist_ok=True)
         self._conn = sqlite3.connect(self.path, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
+        self._conn.create_function(
+            "decimal_event_cost_usd", 8, _decimal_event_cost_usd, deterministic=True
+        )
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._session_snapshot_index: dict[str, set[tuple[str, str, str, str]]] | None = None
         try:
@@ -1049,7 +1129,9 @@ class ObservatoryStore:
         return int(self._conn.execute("SELECT COUNT(*) FROM classifications").fetchone()[0])
 
     def save_model_pricing(self, rows: Iterable[Mapping[str, Any]]) -> int:
-        """Append public model-price rows idempotently; conflicting keys are refused."""
+        """Append exact USD-per-million prices idempotently; conflicting keys are refused."""
+        from .pricing import _decimal_text, _price
+
         columns = (
             "model_id",
             "provider",
@@ -1060,13 +1142,74 @@ class ObservatoryStore:
             "effective_from",
             "source",
         )
+        normalized_rows: list[tuple[Any, ...]] = []
+        for row in rows:
+            model_id = row.get("model_id")
+            provider = row.get("provider")
+            effective_from = row.get("effective_from")
+            source = row.get("source")
+            if (
+                not isinstance(model_id, str)
+                or not model_id.strip()
+                or "provider" not in row
+                or (
+                    provider is not None
+                    and (not isinstance(provider, str) or not provider.strip())
+                )
+                or not isinstance(effective_from, str)
+                or not effective_from
+                or not isinstance(source, str)
+                or not source
+            ):
+                raise ContractError(
+                    "model pricing needs model_id, provider (or null), effective_from and source"
+                )
+            try:
+                effective_from = normalize_timestamp(effective_from)
+            except ContractError as exc:
+                raise PricingError(
+                    "model pricing.effective_from must be timezone-aware ISO-8601"
+                ) from exc
+            price_values = (
+                _price(
+                    row.get("input_usd_per_million"),
+                    "input_usd_per_million",
+                    "model pricing",
+                    required=True,
+                ),
+                _price(
+                    row.get("output_usd_per_million"),
+                    "output_usd_per_million",
+                    "model pricing",
+                    required=True,
+                ),
+                _price(
+                    row.get("cache_read_usd_per_million"),
+                    "cache_read_usd_per_million",
+                    "model pricing",
+                    required=False,
+                ),
+                _price(
+                    row.get("cache_write_usd_per_million"),
+                    "cache_write_usd_per_million",
+                    "model pricing",
+                    required=False,
+                ),
+            )
+            normalized_rows.append(
+                (
+                    model_id.strip(),
+                    provider.strip() if isinstance(provider, str) else None,
+                    *(_decimal_text(value) for value in price_values),
+                    effective_from,
+                    source,
+                )
+            )
+
         inserted = 0
         self._conn.execute("BEGIN IMMEDIATE")
         try:
-            for row in rows:
-                values = tuple(row.get(column) for column in columns)
-                if not all(isinstance(values[index], str) and values[index] for index in (0, 1, 6, 7)):
-                    raise ContractError("model pricing needs model_id, provider, effective_from and source")
+            for values in normalized_rows:
                 cursor = self._conn.execute(
                     "INSERT OR IGNORE INTO model_pricing(" + ", ".join(columns) + ") "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1077,12 +1220,13 @@ class ObservatoryStore:
                     continue
                 existing = self._conn.execute(
                     "SELECT " + ", ".join(columns) + " FROM model_pricing "
-                    "WHERE model_id = ? AND effective_from = ?",
-                    (values[0], values[6]),
+                    "WHERE model_id = ? AND provider IS ? AND effective_from = ?",
+                    (values[0], values[1], values[6]),
                 ).fetchone()
                 if existing is None or tuple(existing) != values:
                     raise ObservatoryError(
-                        f"conflicting model pricing for {values[0]!r} effective {values[6]!r}"
+                        f"conflicting model pricing for {values[0]!r} provider "
+                        f"{values[1]!r} effective {values[6]!r}"
                     )
             self._conn.execute("COMMIT")
             return inserted

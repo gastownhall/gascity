@@ -13,6 +13,7 @@ except ImportError:  # pragma: no cover
     import support
 
 from agent_observatory.canonical import session_text_snapshot_hash
+from agent_observatory.errors import ObservatoryError
 from agent_observatory.jev import build_request, import_response, persist_request
 from agent_observatory.silver import SilverEpisode, predictions_from_store
 from agent_observatory.store import ObservatoryStore
@@ -80,6 +81,43 @@ class ClassificationBindingTest(unittest.TestCase):
             tuple(stored[field] for field in ("city_id", "host_id", "provider", "session_id")),
             self.key,
         )
+
+    def test_replayed_classification_cannot_be_rebound_to_another_session(self):
+        self._import_event("e1")
+        other_key = ("city-a", "host-a", "codex", "session-2")
+        other_path = support.write_jsonl(
+            os.path.join(self.tmp.name, "other-session.jsonl"),
+            [support.make_record(event_id="e2", session_id=other_key[3])],
+        )
+        self.store.import_jsonl(other_path)
+        classification = {
+            "subject_kind": "session",
+            "snapshot_hash": "s" * 64,
+            "taxonomy_version": "1.1.0",
+            "question_hash": "q" * 64,
+            "model_version": "jev-1.13.0",
+            "request_hash": "r" * 64,
+            "response_hash": "h" * 64,
+            "answers": [],
+        }
+        classification_id, _ = self.store.save_classification(
+            **classification,
+            session_key=self.key,
+            binding_method="explicit",
+        )
+
+        with self.assertRaises(ObservatoryError) as caught:
+            self.store.save_classification(
+                **classification,
+                session_key=other_key,
+                binding_method="explicit",
+            )
+        self.assertIn("already bound to a different session", str(caught.exception))
+        self.assertEqual(
+            self.store.classifications_for_session(self.key)[0]["classification_id"],
+            classification_id,
+        )
+        self.assertEqual(self.store.classifications_for_session(other_key), [])
 
     def test_predictions_read_by_binding_after_current_snapshot_changes(self):
         self._import_event("e1")

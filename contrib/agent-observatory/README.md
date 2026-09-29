@@ -187,13 +187,19 @@ the tool executed, and does not prove success. Only a result event with an
   if the session has since grown. The migration matches raw and text-namespaced
   hashes and uses exact `source_path`/`source_sha256` provenance only when it
   identifies one session; ambiguous and unmatched rows remain unbound.
-- `model_pricing` stores effective-dated input/output/cache-read/cache-write
-  USD-per-million rates and a citation URL. New stores and schema-6 migrations
-  load the checked-in public price seed automatically; rerun
+- `model_pricing` stores effective-dated, provider-scoped input/output/cache-read/
+  cache-write rates as exact decimal `TEXT` in **USD per 1,000,000 tokens**;
+  `provider = NULL` is a provider-neutral price and matches only events whose
+  provider is also null. A model/provider/effective-time key permits different
+  providers to price the same model independently. New stores and schema-6
+  migrations load the checked-in public price seed automatically; rerun
   `python3 -m agent_observatory seed-pricing --db /path/to/obs.db` to idempotently
   restore/check it. The `event_usage_cost` view joins token counters to the most
-  recent applicable model price; unknown model prices and cache categories
-  without a rate remain `NULL` rather than being guessed.
+  recent applicable model/provider price and computes `cost_usd` in Python with
+  `Decimal`; the result is canonical exact-decimal USD text, not a binary float.
+  Query the view through an `ObservatoryStore` connection, which registers the
+  Decimal function. Unknown model prices and cache categories without a rate
+  remain `NULL` rather than being guessed.
 - Import is **per-file atomic**: the whole file is parsed and type-checked
   before writing, and all writes happen in one transaction. A malformed or
   truncated line reports `path:line` and commits nothing. Records are split on

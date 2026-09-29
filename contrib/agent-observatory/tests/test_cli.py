@@ -135,6 +135,67 @@ class CliTest(unittest.TestCase):
         self.assertEqual(built.returncode, 0, built.stderr)
         self.assertEqual(json.loads(built.stdout)["model"], "jev-1.13.0")
 
+    def test_negative_seed_price_is_reported_as_cli_error_with_exit_one(self):
+        seed_path = os.path.join(self.tmp.name, "negative-prices.json")
+        with open(seed_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "schema_version": "1.0",
+                    "models": [
+                        {
+                            "model_id": "negative-model",
+                            "provider": "provider-a",
+                            "input_usd_per_million": -0.01,
+                            "output_usd_per_million": 0,
+                            "cache_read_usd_per_million": None,
+                            "cache_write_usd_per_million": None,
+                            "effective_from": "2026-09-21T10:00:00Z",
+                            "source": "https://example.com/pricing",
+                        }
+                    ],
+                },
+                handle,
+            )
+
+        result = run_cli(
+            ["seed-pricing", "--db", self.db, "--input", seed_path]
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(result.stderr.startswith("error:"), result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("input_usd_per_million", result.stderr)
+        self.assertIn("negative prices are invalid", result.stderr)
+
+    def test_conflicting_price_seed_is_reported_as_cli_error_with_exit_one(self):
+        seed_path = os.path.join(self.tmp.name, "conflicting-prices.json")
+        with open(seed_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "schema_version": "1.0",
+                    "models": [
+                        {
+                            "model_id": "gpt-4.1",
+                            "provider": "OpenAI",
+                            "input_usd_per_million": 3,
+                            "output_usd_per_million": 8,
+                            "cache_read_usd_per_million": 0.5,
+                            "cache_write_usd_per_million": None,
+                            "effective_from": "2025-04-14T00:00:00Z",
+                            "source": "https://openai.com/api/pricing/",
+                        }
+                    ],
+                },
+                handle,
+            )
+
+        result = run_cli(
+            ["seed-pricing", "--db", self.db, "--input", seed_path]
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(result.stderr.startswith("error:"), result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("conflicting model pricing", result.stderr)
+
     def test_malformed_file_fails_with_line_context(self):
         bad = os.path.join(self.tmp.name, "bad.jsonl")
         with open(bad, "w", encoding="utf-8") as handle:

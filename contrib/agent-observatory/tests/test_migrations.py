@@ -193,6 +193,24 @@ class MigrationTest(unittest.TestCase):
             self.assertEqual(upgraded.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0], 0)
             self.assertEqual(upgraded.execute("SELECT COUNT(*) FROM classification_sessions").fetchone()[0], 0)
             self.assertEqual(upgraded.execute("SELECT COUNT(*) FROM model_pricing").fetchone()[0], 3)
+            pricing_columns = {
+                row[1]: row for row in upgraded.execute("PRAGMA table_info(model_pricing)")
+            }
+            for field in (
+                "input_usd_per_million",
+                "output_usd_per_million",
+                "cache_read_usd_per_million",
+                "cache_write_usd_per_million",
+            ):
+                self.assertEqual(pricing_columns[field][2].upper(), "TEXT")
+            self.assertEqual(pricing_columns["provider"][3], 0)
+            self.assertEqual(
+                tuple(
+                    pricing_columns[field][5]
+                    for field in ("model_id", "provider", "effective_from")
+                ),
+                (1, 2, 3),
+            )
             self.assertIsNotNone(
                 upgraded.execute(
                     "SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = 'event_usage_cost'"

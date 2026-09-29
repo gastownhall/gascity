@@ -83,19 +83,23 @@ V6_CORE_SCHEMA_STATEMENTS = (
     """
     CREATE TABLE IF NOT EXISTS model_pricing (
         model_id TEXT NOT NULL,
-        provider TEXT NOT NULL,
-        input_usd_per_million REAL NOT NULL CHECK (input_usd_per_million >= 0),
-        output_usd_per_million REAL NOT NULL CHECK (output_usd_per_million >= 0),
-        cache_read_usd_per_million REAL CHECK (
-            cache_read_usd_per_million IS NULL OR cache_read_usd_per_million >= 0
+        provider TEXT CHECK (provider IS NULL OR length(provider) > 0),
+        input_usd_per_million TEXT NOT NULL CHECK (length(input_usd_per_million) > 0),
+        output_usd_per_million TEXT NOT NULL CHECK (length(output_usd_per_million) > 0),
+        cache_read_usd_per_million TEXT CHECK (
+            cache_read_usd_per_million IS NULL OR length(cache_read_usd_per_million) > 0
         ),
-        cache_write_usd_per_million REAL CHECK (
-            cache_write_usd_per_million IS NULL OR cache_write_usd_per_million >= 0
+        cache_write_usd_per_million TEXT CHECK (
+            cache_write_usd_per_million IS NULL OR length(cache_write_usd_per_million) > 0
         ),
         effective_from TEXT NOT NULL,
         source TEXT NOT NULL,
-        PRIMARY KEY (model_id, effective_from)
+        PRIMARY KEY (model_id, provider, effective_from)
     )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS model_pricing_provider_key
+        ON model_pricing(model_id, COALESCE(provider, ''), effective_from)
     """,
     """
     CREATE VIEW IF NOT EXISTS event_usage_cost AS
@@ -130,23 +134,28 @@ V6_CORE_SCHEMA_STATEMENTS = (
               OR (u.cache_read_tokens > 0 AND p.cache_read_usd_per_million IS NULL)
               OR (u.cache_write_tokens > 0 AND p.cache_write_usd_per_million IS NULL)
             THEN NULL
-            ELSE (
-                COALESCE(u.input_tokens, 0) * p.input_usd_per_million
-              + COALESCE(u.output_tokens, 0) * p.output_usd_per_million
-              + COALESCE(u.cache_read_tokens, 0) * COALESCE(p.cache_read_usd_per_million, 0)
-              + COALESCE(u.cache_write_tokens, 0) * COALESCE(p.cache_write_usd_per_million, 0)
-            ) / 1000000.0
+            ELSE decimal_event_cost_usd(
+                u.input_tokens,
+                u.output_tokens,
+                u.cache_read_tokens,
+                u.cache_write_tokens,
+                p.input_usd_per_million,
+                p.output_usd_per_million,
+                p.cache_read_usd_per_million,
+                p.cache_write_usd_per_million
+            )
         END AS cost_usd
     FROM event_usage AS u
     JOIN events AS e
       ON e.city_id = u.city_id AND e.host_id = u.host_id AND e.provider = u.provider
      AND e.session_id = u.session_id AND e.event_id = u.event_id
     LEFT JOIN model_pricing AS p
-      ON p.model_id = e.model
+      ON p.model_id = e.model AND p.provider IS e.provider
      AND p.effective_from = (
          SELECT MAX(p2.effective_from)
            FROM model_pricing AS p2
-          WHERE p2.model_id = e.model AND p2.effective_from <= e.timestamp
+          WHERE p2.model_id = e.model AND p2.provider IS e.provider
+            AND p2.effective_from <= e.timestamp
      )
     """,
 )
@@ -320,6 +329,7 @@ def _validate_v6(connection: sqlite3.Connection, database_path: str) -> None:
     if (
         "recommendations_episode_kind" not in indexes
         or "classification_sessions_session" not in indexes
+        or "model_pricing_provider_key" not in indexes
         or "event_usage_cost" not in views
     ):
         raise ObservatoryError(
@@ -334,6 +344,28 @@ def _validate_v6(connection: sqlite3.Connection, database_path: str) -> None:
         "cache_read_usd_per_million", "cache_write_usd_per_million", "effective_from", "source",
     } <= _column_names(connection, "model_pricing"):
         raise ObservatoryError(f"database {database_path!r} has an incomplete model pricing table")
+    pricing_info = {
+        row[1]: row for row in connection.execute("PRAGMA table_info(model_pricing)")
+    }
+    if any(
+        pricing_info[field][2].upper() != "TEXT"
+        for field in (
+            "input_usd_per_million",
+            "output_usd_per_million",
+            "cache_read_usd_per_million",
+            "cache_write_usd_per_million",
+        )
+    ):
+        raise ObservatoryError(
+            f"database {database_path!r} does not store exact decimal model prices"
+        )
+    if pricing_info["provider"][3] != 0 or {
+        field: pricing_info[field][5]
+        for field in ("model_id", "provider", "effective_from")
+    } != {"model_id": 1, "provider": 2, "effective_from": 3}:
+        raise ObservatoryError(
+            f"database {database_path!r} has an invalid provider-scoped pricing key"
+        )
     if "role" not in _column_names(connection, "sessions"):
         raise ObservatoryError(f"database {database_path!r} is missing sessions.role")
     if not {"city_id", "host_id", "provider", "session_id"} <= _column_names(connection, "jev_requests"):
@@ -675,7 +707,7 @@ def _migrate_v5_to_v6(database_path: Path) -> MigrationResult:
             # The versioned seed is validated before rows are written, so schema
             # upgrades produce a usable price projection without touching a live
             # caller's event database outside this explicit migration.
-            from .pricing import load_pricing_seed
+            from .pricing import _decimal_text, load_pricing_seed
 
             pricing_rows = load_pricing_seed()
             connection.executemany(
@@ -687,10 +719,10 @@ def _migrate_v5_to_v6(database_path: Path) -> MigrationResult:
                     (
                         row["model_id"],
                         row["provider"],
-                        row["input_usd_per_million"],
-                        row["output_usd_per_million"],
-                        row["cache_read_usd_per_million"],
-                        row["cache_write_usd_per_million"],
+                        _decimal_text(row["input_usd_per_million"]),
+                        _decimal_text(row["output_usd_per_million"]),
+                        _decimal_text(row["cache_read_usd_per_million"]),
+                        _decimal_text(row["cache_write_usd_per_million"]),
                         row["effective_from"],
                         row["source"],
                     )

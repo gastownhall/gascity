@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import math
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -37,16 +37,33 @@ def _required_text(row: dict[str, Any], field: str, where: str) -> str:
     return value.strip()
 
 
-def _price(value: Any, field: str, where: str, *, required: bool) -> float | None:
+def _price(value: Any, field: str, where: str, *, required: bool) -> Decimal | None:
     if value is None and not required:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (Decimal, int, float, str)):
         nullable = " or null" if not required else ""
-        raise PricingError(f"{where}.{field} must be a nonnegative number{nullable}")
-    result = float(value)
-    if not math.isfinite(result) or result < 0:
+        raise PricingError(f"{where}.{field} must be a nonnegative decimal{nullable}")
+    try:
+        result = value if isinstance(value, Decimal) else Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise PricingError(f"{where}.{field} must be a valid decimal") from exc
+    if not result.is_finite():
         raise PricingError(f"{where}.{field} must be finite and nonnegative")
+    if result < 0:
+        raise PricingError(f"{where}.{field} must be nonnegative; negative prices are invalid")
     return result
+
+
+def _decimal_text(value: Decimal | None) -> str | None:
+    """Return a canonical, fixed-point decimal suitable for SQLite TEXT storage."""
+    if value is None:
+        return None
+    if value.is_zero():
+        return "0"
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
 
 
 def load_pricing_seed(path: str | Path | None = None) -> list[dict[str, Any]]:
@@ -54,7 +71,9 @@ def load_pricing_seed(path: str | Path | None = None) -> list[dict[str, Any]]:
     seed_path = DEFAULT_PRICING_SEED if path is None else Path(path)
     try:
         raw = json.loads(
-            seed_path.read_text(encoding="utf-8"), parse_constant=_reject_json_constant
+            seed_path.read_text(encoding="utf-8"),
+            parse_constant=_reject_json_constant,
+            parse_float=Decimal,
         )
     except (OSError, ValueError) as exc:
         raise PricingError(f"cannot read pricing seed {seed_path}: {exc}") from exc
@@ -69,7 +88,7 @@ def load_pricing_seed(path: str | Path | None = None) -> list[dict[str, Any]]:
         raise PricingError("pricing seed models must be a list")
 
     normalized: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str | None, str]] = set()
     for index, item in enumerate(models):
         where = f"models[{index}]"
         if not isinstance(item, dict):
@@ -85,7 +104,10 @@ def load_pricing_seed(path: str | Path | None = None) -> list[dict[str, Any]]:
             raise PricingError(f"{where}: " + "; ".join(details))
 
         model_id = _required_text(item, "model_id", where)
-        provider = _required_text(item, "provider", where)
+        raw_provider = item["provider"]
+        provider = (
+            None if raw_provider is None else _required_text(item, "provider", where)
+        )
         source = _required_text(item, "source", where)
         if not source.startswith("https://"):
             raise PricingError(f"{where}.source must be an HTTPS citation URL")
@@ -95,9 +117,9 @@ def load_pricing_seed(path: str | Path | None = None) -> list[dict[str, Any]]:
             raise PricingError(
                 f"{where}.effective_from must be timezone-aware ISO-8601"
             ) from exc
-        key = (model_id, effective_from)
+        key = (model_id, provider, effective_from)
         if key in seen:
-            raise PricingError(f"{where} duplicates model/effective_from {key!r}")
+            raise PricingError(f"{where} duplicates model/provider/effective_from {key!r}")
         seen.add(key)
         normalized.append(
             {
