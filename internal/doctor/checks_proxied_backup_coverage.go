@@ -29,7 +29,7 @@ import (
 // Two bd generations answer differently, and the check follows the answer
 // rather than a version string:
 //
-//   - bd v1.3.0 refuses `backup` on the proxied path (proxy.backup.unsupported).
+//   - bd older than v1.3.1 refuses `backup` on the proxied path (proxy.backup.unsupported).
 //     Nothing — not gc, not bd, not the backup dog — can produce a recovery
 //     point, so the check keeps its original advisory: StatusOK, because there
 //     is no action the operator can take, and one line that names the exposure.

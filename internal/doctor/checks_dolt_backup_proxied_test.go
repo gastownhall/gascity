@@ -14,7 +14,8 @@ import (
 // whose fix hint prescribed a managed-Dolt `dolt backup` invocation against a
 // server gc does not own. Neither signal the check looks for can ever exist on
 // a bd-owned proxy root — gc writes no <city>/.dolt-backup for it, and only bd
-// can back it up (v1.3.0 refuses `bd backup` on the proxied path outright).
+// can back it up (a bd older than v1.3.1 refuses `bd backup` on the proxied
+// path outright).
 func TestDoltBackupCheckReportsNotRequiredOnProxiedRig(t *testing.T) {
 	city := t.TempDir()
 	rig := filepath.Join(city, "rigs", "r1")
@@ -37,14 +38,14 @@ func TestDoltBackupCheckReportsNotRequiredOnProxiedRig(t *testing.T) {
 		t.Errorf("message does not say why the check does not apply: %q", result.Message)
 	}
 	// "not gc's to register" on its own implies somebody else registers it.
-	// Nobody does on v1.3.0, so the message names the refusal and points at
+	// Nobody does on a bd older than v1.3.1, so the message names the refusal and points at
 	// the city-level check that asks bd whether a backup exists.
 	for _, want := range []string{"only bd can back it up", "proxied-backup-coverage"} {
 		if !strings.Contains(result.Message, want) {
 			t.Errorf("message reads as coverage rather than naming the gap (%q): %q", want, result.Message)
 		}
 	}
-	if !strings.Contains(result.Message, "1.3.0") {
+	if !strings.Contains(result.Message, "older than v1.3.1") {
 		t.Errorf("message does not name the bd version that refuses backup: %q", result.Message)
 	}
 }
@@ -132,7 +133,7 @@ func TestProxiedBackupCoverageAdvisoryNamesEveryProxiedScope(t *testing.T) {
 	if result.FixHint != "" {
 		t.Errorf("advisory prescribes a fix that does not exist on v1.3.0: %q", result.FixHint)
 	}
-	for _, want := range []string{"city", filepath.Join("rigs", "r1"), "no backup", "1.3.0"} {
+	for _, want := range []string{"city", filepath.Join("rigs", "r1"), "no backup", "older than v1.3.1"} {
 		if !strings.Contains(result.Message, want) {
 			t.Errorf("message %q does not mention %q", result.Message, want)
 		}
