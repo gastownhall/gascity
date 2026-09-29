@@ -240,6 +240,27 @@ class GitEvidenceAdapterTests(unittest.TestCase):
             evidence["4444444"], f"git_worktree_head:fleet_worktree={dispatch_id}"
         )
 
+    def test_plain_worktree_list_parses_single_worktree_output(self):
+        # Captured from `git worktree list` in a single-worktree repository.
+        result = self._read_claude_calls(
+            [("single-worktree", "git worktree list", "/tmp/r/repo d99b100 [master]\n")]
+        )
+        evidence = {item["value"]: item["evidence"] for item in result.session_fingerprints}
+        self.assertEqual(evidence, {"d99b100": "git_worktree_head"})
+
+    def test_plain_worktree_list_parses_longest_path_output(self):
+        # Real longest-path row from `git worktree list`, with a single-space
+        # delimiter before its abbreviated HEAD.
+        output = (
+            "/home/coolhenrylinux/src/gascity-worktrees/fix-tracking-retention-bounded"
+            " 32b367f83 [fix/order-tracking-retention-bounded]\n"
+        )
+        result = self._read_claude_calls(
+            [("longest-path", "git worktree list", output)]
+        )
+        evidence = {item["value"]: item["evidence"] for item in result.session_fingerprints}
+        self.assertEqual(evidence, {"32b367f83": "git_worktree_head"})
+
     def test_push_without_its_own_fleet_id_does_not_inherit_and_notes_ambiguous_head(self):
         dispatch_id = "0123456789abcdefabcd"
         output = (
@@ -280,6 +301,20 @@ class GitEvidenceAdapterTests(unittest.TestCase):
             [("commit", "git commit -m synthetic", f"[topic/with]bracket {sha}] synthetic commit\n")]
         )
         self.assertIn(sha, {item["value"] for item in result.session_fingerprints})
+
+    def test_commit_output_does_not_take_sha_from_commit_subject(self):
+        result = self._read_claude_calls(
+            [
+                (
+                    "commit",
+                    "git commit -m synthetic",
+                    "[main 1111111] check 2222222] tail\n",
+                )
+            ]
+        )
+        self.assertEqual(
+            {item["value"] for item in result.session_fingerprints}, {"1111111"}
+        )
 
 
 if __name__ == "__main__":
