@@ -206,19 +206,19 @@ class StoreImportTest(unittest.TestCase):
         with ObservatoryStore(self.db_path) as reopened:
             self.assertEqual(reopened.schema_version(), ObservatoryStore.SCHEMA_VERSION)
 
-    def test_session_role_comes_from_gc_session_name_not_message_text(self):
+    def test_session_role_is_not_guessed_from_session_name_or_message_text(self):
         path = self._write(
             "roles.jsonl",
             [
                 support.make_record(
                     event_id="gc-event",
                     session_id="gateway-llm-dell--dsh-luna-1-pool",
-                    text="[city] role=assistant",
+                    text="Synthetic message text mentioning a role",
                 ),
                 support.make_record(
                     event_id="ordinary-event",
                     session_id="session-uuid",
-                    text="[city] gateway-llm/mayor",
+                    text="Synthetic message text mentioning another role",
                 ),
             ],
         )
@@ -228,7 +228,7 @@ class StoreImportTest(unittest.TestCase):
                 row["session_id"]: row["role"]
                 for row in store.conn.execute("SELECT session_id, role FROM sessions")
             }
-        self.assertEqual(roles["gateway-llm-dell--dsh-luna-1-pool"], "dsh-luna pool")
+        self.assertIsNone(roles["gateway-llm-dell--dsh-luna-1-pool"])
         self.assertIsNone(roles["session-uuid"])
 
     def test_events_are_ordered_chronologically_across_offsets_and_fractions(self):

@@ -43,8 +43,12 @@ from .errors import (
     RegistryError,
     SchemaVersionError,
 )
-from .migrations import SCHEMA_VERSION_AFTER, V4_TO_V5_SCHEMA_STATEMENTS, V6_CORE_SCHEMA_STATEMENTS
-from .roles import role_from_session_name
+from .migrations import (
+    SCHEMA_VERSION_AFTER,
+    V4_TO_V5_SCHEMA_STATEMENTS,
+    V6_CORE_SCHEMA_STATEMENTS,
+    V7_CORE_SCHEMA_STATEMENTS,
+)
 
 # Bump when the projection schema changes. Normal opens reject older schemas;
 # use the explicit CLI migration for a supported in-place upgrade.
@@ -60,6 +64,7 @@ from .roles import role_from_session_name
 # append-only and keyed by the recommendation content hash, so replaying an
 # identical shadow run deduplicates while a changed policy version is retained.
 # Version 6 adds classification-to-session bindings, session roles, and pricing.
+# Version 7 adds trusted GC session enrichment as a derived side table and view.
 DB_SCHEMA_VERSION = SCHEMA_VERSION_AFTER
 
 # Normalized record fields, in table order. ``observed_timestamp`` is not here:
@@ -312,6 +317,7 @@ _SCHEMA_STATEMENTS = (
     """,
     *V4_TO_V5_SCHEMA_STATEMENTS,
     *V6_CORE_SCHEMA_STATEMENTS,
+    *V7_CORE_SCHEMA_STATEMENTS,
 )
 
 @dataclass
@@ -502,8 +508,8 @@ class ObservatoryStore:
             )
         if version == 0:
             # Fresh projections start with the checked-in, source-cited price
-            # schedule; existing schema-6 stores can explicitly rerun the
-            # idempotent seed command if they need to refresh it.
+            # schedule; existing stores can explicitly rerun the idempotent
+            # seed command if they need to refresh it.
             from .pricing import seed_model_pricing
 
             seed_model_pricing(self)
@@ -615,7 +621,12 @@ class ObservatoryStore:
                 return "conflict", note
             return "duplicate", None
 
-        role = role_from_session_name(identity[3])
+        trusted_binding = self._conn.execute(
+            "SELECT template FROM session_enrichment WHERE city_id = ? AND host_id = ? "
+            "AND provider = ? AND session_id = ?",
+            identity[:4],
+        ).fetchone()
+        role = trusted_binding["template"] if trusted_binding is not None else None
         self._conn.execute(
             "INSERT OR IGNORE INTO sessions(city_id, host_id, provider, session_id, "
             "parent_session_id, first_timestamp, role) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1478,21 +1489,42 @@ class ObservatoryStore:
         rows = self._conn.execute("SELECT sha, parents_json FROM commit_parents").fetchall()
         return {row["sha"]: json.loads(row["parents_json"]) for row in rows}
 
+    def load_session_enrichments(self) -> dict[tuple[str, str, str, str], dict[str, Any]]:
+        """Return trusted GC template/repository bindings keyed by full session identity."""
+        rows = self._conn.execute(
+            "SELECT city_id, host_id, provider, session_id, template, repo, repo_source "
+            "FROM session_enrichment ORDER BY city_id, host_id, provider, session_id"
+        ).fetchall()
+        return {
+            (row["city_id"], row["host_id"], row["provider"], row["session_id"]): {
+                "template": row["template"],
+                "repo": row["repo"],
+                "repo_source": row["repo_source"],
+            }
+            for row in rows
+        }
+
     def load_session_fingerprints(self) -> list[dict[str, Any]]:
+        enrichments = self.load_session_enrichments()
         rows = self._conn.execute(
             "SELECT session_json, type, value, observed_at, evidence FROM session_fingerprints "
             "ORDER BY session_json, type, value, observed_at"
         ).fetchall()
-        return [
-            {
-                "session": json.loads(row["session_json"]),
-                "type": row["type"],
-                "value": row["value"],
-                "observed_at": row["observed_at"] or None,
-                "evidence": row["evidence"],
-            }
-            for row in rows
-        ]
+        fingerprints = []
+        for row in rows:
+            session = json.loads(row["session_json"])
+            enrichment = enrichments.get(tuple(session), {})
+            fingerprints.append(
+                {
+                    "session": session,
+                    "type": row["type"],
+                    "value": row["value"],
+                    "observed_at": row["observed_at"] or None,
+                    "evidence": row["evidence"],
+                    "repo": enrichment.get("repo"),
+                }
+            )
+        return fingerprints
 
     def replace_exposures(self, rows: Iterable[dict[str, Any]]) -> int:
         """Replace the derived exposure projection in one transaction.

@@ -70,6 +70,7 @@ def session_evidence_from_store(store: Any) -> list[dict[str, Any]]:
     exposure stays ``unknown`` rather than becoming a false ``unexposed``.
     """
     sessions: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    enrichments = store.load_session_enrichments()
     for event in store.iter_events():
         key = (event["city_id"], event["host_id"], event["provider"], event["session_id"])
         entry = sessions.get(key)
@@ -79,6 +80,8 @@ def session_evidence_from_store(store: Any) -> list[dict[str, Any]]:
                 "commit_shas": set(),
                 "models": set(),
                 "repo": None,
+                "_repo_candidates": set(),
+                "_repo_ambiguous": False,
                 "host_id": key[1],
                 "provider": key[2],
                 "first_timestamp": event["timestamp"],
@@ -93,19 +96,28 @@ def session_evidence_from_store(store: Any) -> list[dict[str, Any]]:
             entry["commit_shas"].add(event["commit_sha"])
         if event.get("model"):
             entry["models"].add(event["model"])
-        if entry["repo"] is None and event.get("repo"):
-            entry["repo"] = event["repo"]
+        if event.get("repo"):
+            entry["_repo_candidates"].add(event["repo"])
         if event["timestamp"] < entry["first_timestamp"]:
             entry["first_timestamp"] = event["timestamp"]
         if event["timestamp"] > entry["last_timestamp"]:
             entry["last_timestamp"] = event["timestamp"]
 
+    for key, entry in sessions.items():
+        direct_repos = entry.pop("_repo_candidates")
+        if len(direct_repos) == 1:
+            entry["repo"] = next(iter(direct_repos))
+        elif len(direct_repos) > 1:
+            entry["_repo_ambiguous"] = True
+        else:
+            entry["repo"] = enrichments.get(key, {}).get("repo")
     return [_finalize_session(entry) for entry in sessions.values()]
 
 
 def _finalize_session(entry: dict[str, Any]) -> dict[str, Any]:
     entry["commit_shas"] = sorted(entry["commit_shas"])
     entry["models"] = sorted(entry["models"])
+    entry.pop("_repo_candidates", None)
     return entry
 
 
@@ -130,6 +142,7 @@ def attach_session_fingerprints(
                 "commit_shas": [],
                 "models": [],
                 "repo": None,
+                "_repo_ambiguous": False,
                 "host_id": key[1],
                 "provider": key[2],
                 "first_timestamp": None,
@@ -139,6 +152,13 @@ def attach_session_fingerprints(
                 "derived": False,
             }
             by_key[key] = entry
+        fingerprint_repo = fingerprint.get("repo")
+        if fingerprint_repo and not entry.get("_repo_ambiguous"):
+            if entry["repo"] is None:
+                entry["repo"] = fingerprint_repo
+            elif entry["repo"] != fingerprint_repo:
+                entry["repo"] = None
+                entry["_repo_ambiguous"] = True
         entry["fingerprints"].append(
             {
                 "type": fingerprint["type"],
@@ -151,7 +171,10 @@ def attach_session_fingerprints(
             entry["commit_shas"] = sorted(set(entry["commit_shas"]) | {fingerprint["value"]})
         if fingerprint["type"] == "model":
             entry["models"] = sorted(set(entry["models"]) | {fingerprint["value"]})
-    return list(by_key.values())
+    sessions = list(by_key.values())
+    for entry in sessions:
+        entry.pop("_repo_ambiguous", None)
+    return sessions
 
 
 def _session_in_scope(change: dict[str, Any], session: dict[str, Any]) -> bool:

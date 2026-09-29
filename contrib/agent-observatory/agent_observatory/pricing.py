@@ -151,7 +151,7 @@ def load_pricing_seed(path: str | Path | None = None) -> list[dict[str, Any]]:
 
 
 def seed_model_pricing(store: Any, path: str | Path | None = None) -> int:
-    """Idempotently load the checked-in public prices into a schema-6 store."""
+    """Idempotently load the checked-in public prices into the current store schema."""
     return store.save_model_pricing(load_pricing_seed(path))
 
 
