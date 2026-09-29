@@ -1118,8 +1118,12 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T)
 	}
 }
 
-func TestCityRuntimeTickPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T) {
+// Order dispatch moved off the tick onto the orders lane; the lane pass keeps
+// the tick's ordering: managed-Dolt preflight before any order store read or
+// tracking write.
+func TestOrdersLanePassPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
+	t.Setenv(fsPressureThresholdEnv, "100")
 	t.Setenv("GC_BEADS", "bd")
 
 	cityPath := t.TempDir()
@@ -1161,10 +1165,7 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T
 	cs.cityBeadStore = store
 	cr.setControllerState(cs)
 
-	dirty := &atomic.Bool{}
-	lastProviderName := ""
-	prevPoolRunning := map[string]bool{}
-	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.runOrdersLanePass(context.Background(), cr.cityPath, ordersLaneReasonCadence)
 
 	preflightIndex := orderEvents.index("preflight")
 	orderListIndex := orderEvents.index("order-list")
@@ -1609,36 +1610,6 @@ func (b *blockingOrderDispatcher) drainContextErrors() []error {
 	return append([]error(nil), b.ctxErrs...)
 }
 
-func TestCityRuntimeTickDispatchesOrdersBeforeDemandSnapshot(t *testing.T) {
-	store := beads.NewMemStore()
-	od := &recordingOrderDispatcher{}
-	cr := &CityRuntime{
-		cityName:            "test-city",
-		cityPath:            t.TempDir(),
-		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
-		sp:                  runtime.NewFake(),
-		standaloneCityStore: store,
-		od:                  od,
-		stdout:              io.Discard,
-		stderr:              io.Discard,
-	}
-	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
-		if !od.called.Load() {
-			t.Fatal("order dispatch should happen before demand snapshot build")
-		}
-		return DesiredStateResult{State: map[string]TemplateParams{}}
-	}
-
-	var dirty atomic.Bool
-	var lastProviderName string
-	var prevPoolRunning map[string]bool
-	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
-
-	if !od.called.Load() {
-		t.Fatal("order dispatcher was not called")
-	}
-}
-
 // TestCityRuntimeSweepReconcilesGraphStepClosedWithNoEvent pins the completion
 // lane's two halves against the failure they exist for.
 //
@@ -1756,14 +1727,12 @@ func TestCityRuntimeSweepReconcilesGraphStepClosedWithNoEvent(t *testing.T) {
 
 func TestCityRuntimeTickReturnsBeforeDemandWhenCanceled(t *testing.T) {
 	store := beads.NewMemStore()
-	od := &recordingOrderDispatcher{}
 	cr := &CityRuntime{
 		cityName:            "test-city",
 		cityPath:            t.TempDir(),
 		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
 		sp:                  runtime.NewFake(),
 		standaloneCityStore: store,
-		od:                  od,
 		stdout:              io.Discard,
 		stderr:              io.Discard,
 	}
@@ -1780,41 +1749,10 @@ func TestCityRuntimeTickReturnsBeforeDemandWhenCanceled(t *testing.T) {
 	var prevPoolRunning map[string]bool
 	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
 
-	if od.called.Load() {
-		t.Fatal("order dispatcher should not run after city context is canceled")
-	}
-}
-
-func TestCityRuntimeTickReturnsBeforeDemandWhenCanceledDuringOrderDispatch(t *testing.T) {
-	store := beads.NewMemStore()
-	ctx, cancel := context.WithCancel(context.Background())
-	od := &recordingOrderDispatcher{
-		onDispatch: func(context.Context, string, time.Time) {
-			cancel()
-		},
-	}
-	cr := &CityRuntime{
-		cityName:            "test-city",
-		cityPath:            t.TempDir(),
-		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
-		sp:                  runtime.NewFake(),
-		standaloneCityStore: store,
-		od:                  od,
-		stdout:              io.Discard,
-		stderr:              io.Discard,
-	}
-	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
-		t.Fatal("demand snapshot should not run after order dispatch cancels the city context")
-		return DesiredStateResult{State: map[string]TemplateParams{}}
-	}
-
-	var dirty atomic.Bool
-	var lastProviderName string
-	var prevPoolRunning map[string]bool
-	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
-
-	if !od.called.Load() {
-		t.Fatal("order dispatcher was not called")
+	// The tick no longer dispatches orders itself; a canceled tick must not
+	// hand the orders lane a pass either.
+	if n := len(cr.ordersLaneOf().wakeCh); n != 0 {
+		t.Fatalf("pending orders-lane wakes after a canceled tick = %d, want 0", n)
 	}
 }
 
@@ -1969,7 +1907,7 @@ func TestOrderTrackingSweepWatchdogClosesAllStaleTracking(t *testing.T) {
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingSweepWatchdog(time.Now().Add(orderTrackingSweepWatchdogStaleAfter + time.Second))
+	cr.runOrderTrackingSweepWatchdog(cr.cfg, time.Now().Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
 
 	gotSweep, err := store.Get(sweepTracking.ID)
 	if err != nil {
@@ -2010,7 +1948,7 @@ func TestOrderTrackingSweepWatchdogUsesCloseBudget(t *testing.T) {
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingSweepWatchdog(time.Now().Add(orderTrackingSweepWatchdogStaleAfter + time.Second))
+	cr.runOrderTrackingSweepWatchdog(cr.cfg, time.Now().Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
 
 	closed := 0
 	for _, id := range ids {
@@ -2054,7 +1992,7 @@ func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testi
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingSweepWatchdog(sweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Second))
+	cr.runOrderTrackingSweepWatchdog(cr.cfg, sweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
 
 	if got, err := store.Get(sweepTracking.ID); err != nil {
 		t.Fatalf("Get(sweep): %v", err)
@@ -2155,7 +2093,7 @@ func TestOrderTrackingSweepWatchdogClosesRigStoreSweepTracking(t *testing.T) {
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingSweepWatchdog(rigSweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Millisecond))
+	cr.runOrderTrackingSweepWatchdog(cr.cfg, rigSweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter+time.Millisecond))
 
 	gotRig, err := rigStore.Get(rigSweepTracking.ID)
 	if err != nil {
@@ -2230,7 +2168,7 @@ func TestOrderTrackingSweepWatchdogFallsBackToConfiguredRigStore(t *testing.T) {
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingSweepWatchdog(rigSweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Millisecond))
+	cr.runOrderTrackingSweepWatchdog(cr.cfg, rigSweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter+time.Millisecond))
 
 	gotRig, err := rigStore.Get(rigSweepTracking.ID)
 	if err != nil {
@@ -5521,15 +5459,6 @@ func TestCityRuntimeManualHardReloadRepliesBeforeDispatch(t *testing.T) {
 	sp := runtime.NewFake()
 	var stdout bytes.Buffer
 
-	// recordingOrderDispatcher is a pure in-process fake (no order subprocesses),
-	// so it carries none of the tempdir-cleanup races the real dispatcher would.
-	od := &recordingOrderDispatcher{
-		onDispatch: func(context.Context, string, time.Time) {
-			if len(doneCh) == 0 {
-				t.Error("dispatchOrders ran before the manual hard-reload reply was sent (#3206)")
-			}
-		},
-	}
 	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath:    cityPath,
 		CityName:    "test-city",
@@ -5549,15 +5478,16 @@ func TestCityRuntimeManualHardReloadRepliesBeforeDispatch(t *testing.T) {
 		Stdout: &stdout,
 		Stderr: io.Discard,
 	})
-	cr.od = od
 	cr.activeReload = &reloadRequest{doneCh: doneCh} // hard reload (soft=false)
 	lastProviderName := "fake"
 	var prevPoolRunning map[string]bool
 
 	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke")
 
-	if !od.called.Load() {
-		t.Fatal("order dispatcher was not called")
+	// Order dispatch runs on its own lane, so it cannot delay the reply at
+	// all; the tick only wakes the lane, after it has replied.
+	if n := len(cr.ordersLaneOf().wakeCh); n != 1 {
+		t.Fatalf("pending orders-lane wakes after the tick = %d, want 1", n)
 	}
 	select {
 	case reply := <-doneCh:
@@ -7268,7 +7198,7 @@ func TestOrderTrackingRetentionWatchdog_SkipsWhenIntervalNotElapsed(t *testing.T
 		// Set last to now-1s: interval has not elapsed.
 		orderTrackingRetentionWatchdogLast: now.Add(-time.Second),
 	}
-	cr.runOrderTrackingRetentionWatchdog(now)
+	cr.runOrderTrackingRetentionWatchdog(cr.cfg, now)
 
 	// Bead skip-00 should still exist (watchdog skipped).
 	if _, err := store.Get("skip-00"); err != nil {
@@ -7301,7 +7231,7 @@ func TestOrderTrackingRetentionWatchdog_PrunesEligibleBeads(t *testing.T) {
 		logPrefix:           "gc test",
 		// Zero last: watchdog fires immediately.
 	}
-	cr.runOrderTrackingRetentionWatchdog(now)
+	cr.runOrderTrackingRetentionWatchdog(cr.cfg, now)
 
 	// 2 oldest beads (prune-00, prune-01) should be deleted.
 	for _, id := range []string{"prune-00", "prune-01"} {
@@ -7343,7 +7273,7 @@ func TestOrderTrackingRetentionWatchdog_LogsPrunedCount(t *testing.T) {
 		stderr:              &stderrBuf,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingRetentionWatchdog(now)
+	cr.runOrderTrackingRetentionWatchdog(cr.cfg, now)
 
 	got := stderrBuf.String()
 	if !strings.Contains(got, "pruned") {
@@ -7366,7 +7296,7 @@ func TestOrderTrackingRetentionWatchdog_NilCfgSkipsWithoutPanic(t *testing.T) {
 		logPrefix:           "gc test",
 	}
 	// Must not panic.
-	cr.runOrderTrackingRetentionWatchdog(now)
+	cr.runOrderTrackingRetentionWatchdog(cr.cfg, now)
 }
 
 func TestOrderTrackingRetentionWatchdog_StampsLastAfterFiring(t *testing.T) {
@@ -7380,14 +7310,14 @@ func TestOrderTrackingRetentionWatchdog_StampsLastAfterFiring(t *testing.T) {
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingRetentionWatchdog(now)
+	cr.runOrderTrackingRetentionWatchdog(cr.cfg, now)
 
 	if !cr.orderTrackingRetentionWatchdogLast.Equal(now) {
 		t.Fatalf("orderTrackingRetentionWatchdogLast = %v, want %v", cr.orderTrackingRetentionWatchdogLast, now)
 	}
 	// Second call within the interval must not update the timestamp.
 	later := now.Add(time.Minute)
-	cr.runOrderTrackingRetentionWatchdog(later)
+	cr.runOrderTrackingRetentionWatchdog(cr.cfg, later)
 	if !cr.orderTrackingRetentionWatchdogLast.Equal(now) {
 		t.Fatalf("orderTrackingRetentionWatchdogLast = %v, want unchanged %v", cr.orderTrackingRetentionWatchdogLast, now)
 	}
@@ -7442,7 +7372,7 @@ func TestOrderTrackingRetentionWatchdog_SkipsBulkDeleteWhenBackupStale(t *testin
 	// 48h since the last backup, past the 24h bulkDeleteMaxAge default.
 	cr, store, stderrBuf := seedRetentionWatchdogCity(t, now, 48*time.Hour)
 
-	cr.runOrderTrackingRetentionWatchdog(now)
+	cr.runOrderTrackingRetentionWatchdog(cr.cfg, now)
 
 	// Nothing may be deleted while the recovery point is stale.
 	for i := range minClosedOrderTrackingRetained + 2 {
@@ -7466,7 +7396,7 @@ func TestOrderTrackingRetentionWatchdog_PrunesWhenBackupFresh(t *testing.T) {
 	// 1h since the last backup, well inside the 24h bulkDeleteMaxAge default.
 	cr, store, stderrBuf := seedRetentionWatchdogCity(t, now, time.Hour)
 
-	cr.runOrderTrackingRetentionWatchdog(now)
+	cr.runOrderTrackingRetentionWatchdog(cr.cfg, now)
 
 	if got := stderrBuf.String(); strings.Contains(got, "skipping bulk delete") {
 		t.Fatalf("stderr = %q, want no skip with a fresh backup", got)

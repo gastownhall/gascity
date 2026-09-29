@@ -25,12 +25,12 @@ const pendingScopeInitMessage = "beads scope initialisation pending — rerun gc
 const pendingScopeDetailSuffix = "(still initializing)"
 
 // proxiedBackupRefusal states why a proxied scope has no backup when its bd
-// refuses one. bd v1.3.0 lists `backup*` in its proxied refusal matrix (beads
-// cmd/bd/proxy_capability.go); a bd that supports proxied backup (beads
-// hotfix/1.3.1) does not, and there the city-level proxied-backup-coverage
-// check reads `bd backup status` instead. It is said only after the refusal was
-// observed, or next to the note that it applies to bd v1.3.0.
-const proxiedBackupRefusal = "bd v1.3.0 refuses backup on proxied scopes"
+// refuses one. bd older than v1.3.1 lists `backup*` in its proxied refusal
+// matrix (beads cmd/bd/proxy_capability.go); the pinned bd (v1.3.1) supports
+// proxied backup, and there the city-level proxied-backup-coverage check reads
+// `bd backup status` instead. It is said only after the refusal was observed,
+// or next to the note that it applies to an older bd.
+const proxiedBackupRefusal = "a bd older than v1.3.1 refuses backup on proxied scopes"
 
 // targetIsProviderOwnedProxied reports whether a resolved connection target
 // describes a locally bd-owned proxied topology — proxied-server mode with no
@@ -110,8 +110,8 @@ func bdOwnedStoreNoun(scopeRoot string) string {
 // actually has, which differs by transport.
 //
 // Neither transport's backup is gc's to register. A direct bd-owned scope is
-// backed up through bd. On the proxied path it depends on the bd: v1.3.0 refuses
-// `backup` there, so the store under the proxy root is the only copy, while a
+// backed up through bd. On the proxied path it depends on the bd: one older
+// than v1.3.1 refuses `backup` there, so the store under the proxy root is the only copy, while a
 // bd that supports proxied backup can hold one. This per-scope check runs no bd,
 // so it names both and points at proxied-backup-coverage, which asks bd.
 //

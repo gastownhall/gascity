@@ -94,7 +94,8 @@ const (
 // schema corroborates it, and when a sentinel is missing it clamps the cursor
 // down (beads v1.3.0 internal/storage/schema/schema.go, currentVersion ->
 // cursorRealityFloor, and ignoredSource's sentinelTables/sentinelColumns at
-// :290-311). beads documents both contradicted shapes as real in the field: a
+// :290-311; beads v1.3.1 adds sentinelFlooredTables). beads documents both
+// contradicted shapes as real in the field: a
 // historical ignored-v16 ordinal collision leaves `leases` present without the
 // column 0016 adds, and a database materialized out of band can be missing the
 // wisps tables altogether.
@@ -115,6 +116,31 @@ var ignoredSentinelTables = []string{"wisps", "wisp_dependencies"}
 // caller cannot edit the library's facts.
 func IgnoredSentinelTables() []string {
 	return append([]string(nil), ignoredSentinelTables...)
+}
+
+// IgnoredSentinelFlooredTable is one of the ignored lane's FLOORED sentinel
+// tables (beads v1.3.1 migrationSource.sentinelFlooredTables): a dolt_ignored
+// table a fresh clone can lack while its cursor reads at-latest. Unlike a
+// sentinel TABLE, its absence disbelieves the cursor only back to Floor, the
+// highest ignored version the table's absence still leaves believable.
+type IgnoredSentinelFlooredTable struct {
+	Table string
+	Floor int
+}
+
+// ignoredSentinelFlooredTables are in the library's probing order. events is
+// created by ignored/0019 and bd_events_journal/bd_events_seq by ignored/0022,
+// hence floors 18 and 21.
+var ignoredSentinelFlooredTables = []IgnoredSentinelFlooredTable{
+	{Table: "events", Floor: 18},
+	{Table: "bd_events_journal", Floor: 21},
+	{Table: "bd_events_seq", Floor: 21},
+}
+
+// IgnoredSentinelFlooredTables returns the ignored lane's floored sentinel
+// tables, copied so a caller cannot edit the library's facts.
+func IgnoredSentinelFlooredTables() []IgnoredSentinelFlooredTable {
+	return append([]IgnoredSentinelFlooredTable(nil), ignoredSentinelFlooredTables...)
 }
 
 const (
@@ -278,6 +304,17 @@ func (r CursorReality) EffectiveIgnored(raw int) int {
 		return r.Floor
 	}
 	return raw
+}
+
+// lowered applies one absent FLOORED sentinel (a floored table or the sentinel
+// column) the way the library's cursorRealityFloor does: the first absent one
+// sets the floor, and a later one replaces it only when its floor is strictly
+// lower, so Missing names the first sentinel that reached the lowest floor.
+func (r CursorReality) lowered(floor int, missing string) CursorReality {
+	if r.Limited && floor >= r.Floor {
+		return r
+	}
+	return CursorReality{Limited: true, Floor: floor, Missing: missing}
 }
 
 // String renders the clamp for a message, or "" when nothing was missing.
@@ -774,10 +811,11 @@ func (c *oneSessionConnector) closeUntaken() {
 // it corroborates, over the SAME pinned connection as the cursor reads.
 //
 // The order is the library's: sentinel TABLES first, because they floor at zero
-// and short-circuit — no column probe could lower that answer — and the sentinel
-// COLUMN after. Both are point reads against information_schema, which always
-// succeed, so neither can poison the session's catalog snapshot the way a bare
-// SELECT against an absent table would.
+// and short-circuit — nothing after them could lower that answer — then the
+// FLOORED sentinel tables, then the sentinel COLUMN, the lowest floor of any
+// absent one winning. Every read is a point read against information_schema,
+// which always succeeds, so none can poison the session's catalog snapshot the
+// way a bare SELECT against an absent table would.
 func readIgnoredReality(ctx context.Context, conn *sql.Conn) (CursorReality, error) {
 	for _, table := range ignoredSentinelTables {
 		exists, err := readExistsCount(ctx, conn, cursorExistsQuery, table)
@@ -788,19 +826,25 @@ func readIgnoredReality(ctx context.Context, conn *sql.Conn) (CursorReality, err
 			return CursorReality{Limited: true, Floor: IgnoredSentinelTableFloor, Missing: table}, nil
 		}
 	}
+	var reality CursorReality
+	for _, floored := range ignoredSentinelFlooredTables {
+		exists, err := readExistsCount(ctx, conn, cursorExistsQuery, floored.Table)
+		if err != nil {
+			return CursorReality{}, fmt.Errorf("probing ignored-lane sentinel floored table %s: %w", floored.Table, err)
+		}
+		if exists == 0 {
+			reality = reality.lowered(floored.Floor, floored.Table)
+		}
+	}
 	exists, err := readExistsCount(ctx, conn, columnExistsQuery, IgnoredSentinelColumnTable, IgnoredSentinelColumnName)
 	if err != nil {
 		return CursorReality{}, fmt.Errorf("probing ignored-lane sentinel column %s.%s: %w",
 			IgnoredSentinelColumnTable, IgnoredSentinelColumnName, err)
 	}
 	if exists == 0 {
-		return CursorReality{
-			Limited: true,
-			Floor:   IgnoredSentinelColumnFloor,
-			Missing: IgnoredSentinelColumnTable + "." + IgnoredSentinelColumnName,
-		}, nil
+		reality = reality.lowered(IgnoredSentinelColumnFloor, IgnoredSentinelColumnTable+"."+IgnoredSentinelColumnName)
 	}
-	return CursorReality{}, nil
+	return reality, nil
 }
 
 // readExistsCount runs one information_schema COUNT(*) and returns it.

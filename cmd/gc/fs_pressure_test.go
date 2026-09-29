@@ -347,16 +347,23 @@ func TestCityRuntimeTickSkipsDueOrderDispatchUnderFSPressure(t *testing.T) {
 	if got := buildCalls.Load(); got != 0 {
 		t.Fatalf("build desired calls = %d, want 0 before pressure-skip gate", got)
 	}
+	// Order dispatch runs on the orders lane. The skipped tick must not wake
+	// it, and a lane pass under the same pressure must skip too, so the due
+	// order writes no tracking and starts no exec.
+	if n := len(cr.ordersLaneOf().wakeCh); n != 0 {
+		t.Fatalf("pending orders-lane wakes after a pressure-skipped tick = %d, want 0", n)
+	}
+	cr.runOrdersLanePass(context.Background(), cr.cityPath, ordersLaneReasonCadence)
 	tracking, err := store.ListByLabel("order-run:pressure-due", 0, beads.IncludeClosed)
 	if err != nil {
 		t.Fatalf("list order tracking beads: %v", err)
 	}
 	if len(tracking) != 0 {
-		t.Fatalf("order tracking beads = %#v, want none while FS pressure skips tick", tracking)
+		t.Fatalf("order tracking beads = %#v, want none while FS pressure skips the tick and the lane", tracking)
 	}
 	select {
 	case <-execStarted:
-		t.Fatal("order exec started during pressure-skipped tick")
+		t.Fatal("order exec started during a pressure-skipped tick and lane pass")
 	default:
 	}
 	if !strings.Contains(stderr.String(), "FS pressure high") {

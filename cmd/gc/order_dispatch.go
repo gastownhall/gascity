@@ -293,9 +293,10 @@ type orderSetSnapshot struct {
 //
 // inflightN + inflightDone together track dispatchOne goroutines so
 // drain can select on either completion or ctx.Done without spawning an
-// orphaned waiter goroutine. dispatch is only ever called from the tick
-// goroutine, so addInflight's check-and-create happens-before any
-// concurrent drain call on the same instance.
+// orphaned waiter goroutine. dispatch is only ever called under the
+// orders lane's passMu (orders_lane.go), and every drain of a lane-owned
+// instance runs under that lock too, so addInflight's check-and-create
+// happens-before any drain call on the same instance.
 //
 // dispatchCtx is the parent context for every dispatchOne goroutine. The
 // per-goroutine ctx is derived to cancel when EITHER the caller's tick
@@ -1114,7 +1115,7 @@ func (m *memoryOrderDispatcher) cancel() {
 }
 
 // addInflight increments the in-flight count and lazily creates the done
-// signal. Called synchronously from dispatch on the tick goroutine.
+// signal. Called synchronously from dispatch, under the orders lane's passMu.
 func (m *memoryOrderDispatcher) addInflight() {
 	m.inflightMu.Lock()
 	m.inflightN++
