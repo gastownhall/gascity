@@ -278,6 +278,9 @@ func TestBdStoreMailWispInsertIsolatesHOMEFromSharedServerConfig(t *testing.T) {
 		t.Fatalf("writing polluted HOME config.yaml: %v", err)
 	}
 	env = replaceEnv(env, "HOME", pollutedHome)
+	// Pollute the process HOME too, so the BdStore runner below inherits it
+	// unless its own HOME pin wins.
+	t.Setenv("HOME", pollutedHome)
 
 	rootDir := t.TempDir()
 	doltDataDir := filepath.Join(rootDir, "dolt")
@@ -295,7 +298,11 @@ func TestBdStoreMailWispInsertIsolatesHOMEFromSharedServerConfig(t *testing.T) {
 	runBDInit(t, env, wsDir, "hi", serverPort)
 	configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
 
-	store := beads.NewBdStore(wsDir, pinnedBdStoreCommandRunner())
+	isoHome := parseEnvList(isolateBdHomeEnv(env))["HOME"]
+	if isoHome == pollutedHome {
+		t.Fatalf("isolateBdHomeEnv left HOME at the polluted %s; env has no GC_HOME to isolate to", pollutedHome)
+	}
+	store := beads.NewBdStore(wsDir, pinnedBdStoreCommandRunnerWithEnv(map[string]string{"HOME": isoHome}))
 
 	sent, err := store.Create(beads.Bead{
 		Title:     "home-isolation probe",

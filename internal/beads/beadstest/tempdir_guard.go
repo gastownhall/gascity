@@ -10,7 +10,7 @@ import (
 // checks (inTestMode / shouldSpawnFlusher) to skip launching the detached
 // send-metrics child that otherwise races t.TempDir's RemoveAll for
 // $HOME/.beads/eventsData/eventkit.lock (gastownhall/beads#5032). The
-// currently-installed bd (v1.1.0) predates that fix, so this is included for
+// supported bd releases predate that fix, so this is included for
 // forward compatibility only — the retrying removal below is what actually
 // makes cleanup reliable against today's bd.
 const EnvBeadsTestMode = "BEADS_TEST_MODE"

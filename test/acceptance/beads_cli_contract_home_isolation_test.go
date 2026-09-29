@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
@@ -41,7 +42,7 @@ func TestRunBDIsolatesHOMEFromSharedServerConfig(t *testing.T) {
 	}
 	t.Setenv("HOME", pollutedHome)
 
-	dir := t.TempDir()
+	dir := beadstest.GuardedTempDir(t)
 	requireBD(t, dir, "init", "-p", "ct", "--skip-hooks", "-q")
 	id := createBead(t, dir, "home-isolation probe")
 

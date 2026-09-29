@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/doctor"
 )
 
@@ -69,11 +70,11 @@ var doltPersistenceWorkspaceCounter atomic.Int64
 // divert the bd subprocesses this runner drives.
 func realBdRunner(t testing.TB, envOverrides map[string]string) beads.CommandRunner {
 	t.Helper()
-	overrides := map[string]string{"HOME": t.TempDir()}
+	overrides := map[string]string{"HOME": beadstest.GuardedTempDir(t)}
 	for k, v := range envOverrides {
 		overrides[k] = v
 	}
-	base := beads.ExecCommandRunnerWithEnv(overrides)
+	base := beads.ExecCommandRunnerWithEnv(beadstest.BdSubprocessEnv(overrides))
 	return func(dir, name string, args ...string) ([]byte, error) {
 		displayName := name
 		if name == "bd" && realBDBinary != "" {

@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
@@ -29,7 +30,7 @@ func TestPoolWorkQueryFromWorktree(t *testing.T) {
 	bdPath := helpers.RequireBD(t)
 
 	// Set up a city with a rig.
-	cityDir := t.TempDir()
+	cityDir := beadstest.GuardedTempDir(t)
 	rigDir := filepath.Join(cityDir, "myrig")
 	worktreeDir := filepath.Join(cityDir, ".gc", "worktrees", "myrig", "polecats", "polecat-1")
 
@@ -80,6 +81,9 @@ func bdRunWithEnv(t *testing.T, bdPath, dir string, extraEnv map[string]string, 
 	t.Helper()
 	cmd := helpers.ToolCommand(t, bdPath, args...)
 	cmd.Dir = dir
+	// BEADS_TEST_MODE keeps bd's detached metrics flusher from racing the
+	// TempDir teardown (ga-aik16g).
+	cmd.Env = append(cmd.Env, beadstest.EnvBeadsTestMode+"=1")
 	for k, v := range extraEnv {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -116,7 +120,7 @@ func TestBdRunWithEnvIsolatesHOMEFromSharedServerConfig(t *testing.T) {
 	}
 	t.Setenv("HOME", pollutedHome)
 
-	dir := t.TempDir()
+	dir := beadstest.GuardedTempDir(t)
 	bdRun(t, bdPath, dir, "init")
 	bdRun(t, bdPath, dir, "create", "--title", "home-isolation probe", "--priority=P2")
 

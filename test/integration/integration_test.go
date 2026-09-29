@@ -38,6 +38,7 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -515,6 +516,19 @@ func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
 // Beads module that created the test database.
 func pinnedBdStoreCommandRunner() beads.CommandRunner {
 	runner := beads.ExecCommandRunner()
+	return func(dir, name string, args ...string) ([]byte, error) {
+		if name == "bd" {
+			name = bdBinary
+		}
+		return runner(dir, name, args...)
+	}
+}
+
+// pinnedBdStoreCommandRunnerWithEnv is pinnedBdStoreCommandRunner with
+// overrides (layered over beadstest.BdSubprocessEnv's defaults) applied on
+// top of the inherited process environment of every bd invocation.
+func pinnedBdStoreCommandRunnerWithEnv(overrides map[string]string) beads.CommandRunner {
+	runner := beads.ExecCommandRunnerWithEnv(beadstest.BdSubprocessEnv(overrides))
 	return func(dir, name string, args ...string) ([]byte, error) {
 		if name == "bd" {
 			name = bdBinary
