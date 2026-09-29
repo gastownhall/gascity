@@ -9,10 +9,15 @@ import (
 // EnvBeadsTestMode is the environment variable bd's own metrics/spawn.go
 // checks (inTestMode / shouldSpawnFlusher) to skip launching the detached
 // send-metrics child that otherwise races t.TempDir's RemoveAll for
-// $HOME/.beads/eventsData/eventkit.lock (gastownhall/beads#5032). The
-// supported bd releases predate that fix, so this is included for
-// forward compatibility only — the retrying removal below is what actually
-// makes cleanup reliable against today's bd.
+// $HOME/.beads/eventsData/eventkit.lock (gastownhall/beads#5032). The pinned
+// bd (v1.3.1-rc.2) honors it; the retrying removal below stays as the
+// backstop for a bd that does not.
+//
+// bd's storage layer reads the same flag as a hard guard, so it is not free for
+// a workspace bound to a Dolt server (bd init --server-port): with it set to
+// "1", bd resolves that workspace to the 127.0.0.1:1 sentinel instead of the
+// port the workspace recorded. Runners for such workspaces must override it to
+// "0" (BdSubprocessEnv lets a caller's override win).
 const EnvBeadsTestMode = "BEADS_TEST_MODE"
 
 const (
@@ -96,7 +101,8 @@ func TestOwnedHome(t testing.TB) string {
 // BdSubprocessEnv builds an env map for a real bd subprocess, defaulting
 // EnvBeadsTestMode to "1" while letting any caller-supplied override for that
 // key win — the default is applied first and overrides are layered on top,
-// never the reverse.
+// never the reverse. A runner for a workspace bound to a Dolt server must
+// override the default to "0"; see EnvBeadsTestMode.
 func BdSubprocessEnv(overrides map[string]string) map[string]string {
 	env := map[string]string{EnvBeadsTestMode: "1"}
 	for k, v := range overrides {

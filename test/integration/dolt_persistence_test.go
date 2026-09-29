@@ -67,10 +67,15 @@ var doltPersistenceWorkspaceCounter atomic.Int64
 // fresh, empty per-call temp dir is injected as a baseline here (an explicit
 // caller-supplied HOME in envOverrides still wins, applied after) so a
 // shared-server config.yaml sitting in the real ambient HOME can never
-// divert the bd subprocesses this runner drives.
+// divert the bd subprocesses this runner drives. BEADS_TEST_MODE=0 is injected
+// the same way: these tests run against a Dolt server, and test mode would make
+// bd ignore the port their workspace recorded (see beadstest.EnvBeadsTestMode).
 func realBdRunner(t testing.TB, envOverrides map[string]string) beads.CommandRunner {
 	t.Helper()
-	overrides := map[string]string{"HOME": beadstest.GuardedTempDir(t)}
+	overrides := map[string]string{
+		"HOME":                     beadstest.GuardedTempDir(t),
+		beadstest.EnvBeadsTestMode: "0",
+	}
 	for k, v := range envOverrides {
 		overrides[k] = v
 	}

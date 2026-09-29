@@ -526,9 +526,15 @@ func pinnedBdStoreCommandRunner() beads.CommandRunner {
 
 // pinnedBdStoreCommandRunnerWithEnv is pinnedBdStoreCommandRunner with
 // overrides (layered over beadstest.BdSubprocessEnv's defaults) applied on
-// top of the inherited process environment of every bd invocation.
+// top of the inherited process environment of every bd invocation. Its
+// workspaces are bound to a Dolt server (bd init --server-port), so test mode
+// is off unless an override says otherwise: see beadstest.EnvBeadsTestMode.
 func pinnedBdStoreCommandRunnerWithEnv(overrides map[string]string) beads.CommandRunner {
-	runner := beads.ExecCommandRunnerWithEnv(beadstest.BdSubprocessEnv(overrides))
+	env := map[string]string{beadstest.EnvBeadsTestMode: "0"}
+	for k, v := range overrides {
+		env[k] = v
+	}
+	runner := beads.ExecCommandRunnerWithEnv(beadstest.BdSubprocessEnv(env))
 	return func(dir, name string, args ...string) ([]byte, error) {
 		if name == "bd" {
 			name = bdBinary
