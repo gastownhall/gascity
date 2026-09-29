@@ -1122,6 +1122,15 @@ def _backfill_missing_usage_locked(
             store.conn.execute("ROLLBACK")
             raise
     run.unmapped_sources = len(unmapped_paths)
+    if run.unmapped_sources:
+        run.status = "incomplete"
+        if roots:
+            run.reason = "one or more event source paths could not be mapped to a checkpoint or explicit root"
+        else:
+            run.reason = (
+                "one or more event source paths could not be mapped; no --root was supplied "
+                "to recover missing collector checkpoints"
+            )
     return run
 
 

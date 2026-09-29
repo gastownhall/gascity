@@ -625,6 +625,37 @@ class UsageBackfillTests(CollectorTestCase):
         })
         self.assertEqual(repos, {"hoomji/gascity"})
 
+    def test_backfill_without_root_reports_missing_checkpoint(self):
+        source = os.path.join(self.claude_dir, "missing-checkpoint.jsonl")
+        transcript_record = {
+            "type": "user",
+            "uuid": "missing-checkpoint-event",
+            "sessionId": "missing-checkpoint-session",
+            "timestamp": "2026-09-28T12:00:00.000Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "Synthetic missing-checkpoint event"}],
+            },
+        }
+        with open(source, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(transcript_record) + "\n")
+
+        with ObservatoryStore(self.db) as store:
+            self.collect(store)
+            store.conn.execute("DELETE FROM collector_sources")
+            os.unlink(source)
+            run = backfill_missing_usage(store)
+            self.assertEqual(run.candidate_events, 1)
+            self.assertEqual(run.unmapped_sources, 1)
+            self.assertEqual(run.status, "incomplete")
+            self.assertIn("--root", run.reason)
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = main(["backfill-usage", "--db", self.db])
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(output.getvalue())["status"], "incomplete")
+
 class QueueTests(CollectorTestCase):
     def setUp(self) -> None:
         super().setUp()

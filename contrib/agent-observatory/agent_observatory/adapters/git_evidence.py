@@ -18,15 +18,20 @@ from ..contract import normalize_timestamp
 from .base import AdapterContext, AdapterResult, iso_from_epoch
 
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
-_FLEET_PATH_RE = re.compile(r"(?:^|[/\\])fleet-([A-Za-z0-9][A-Za-z0-9._-]*)(?=[/\\\s]|$)")
+# Gas City's dispatch ids are exactly 20 hexadecimal characters. Refuse to
+# retain arbitrary path components as fleet evidence.
+_FLEET_PATH_RE = re.compile(r"(?:^|[/\\])fleet-([0-9a-fA-F]{20})(?=[/\\\s]|$)")
 _URL_RE = re.compile(
     r"(?:https?|ssh|git)://[^\s\"'<>]+|(?:[A-Za-z0-9._+-]+@)?[A-Za-z0-9.-]+\.[A-Za-z]{2,}:[^\s\"'<>]+",
     re.IGNORECASE,
 )
-_COMMIT_LINE_RE = re.compile(r"^\s*\[[^\]]*\s+([0-9a-fA-F]{7,64})\]\s+", re.MULTILINE)
+_COMMIT_LINE_RE = re.compile(r"^\s*\[.*\s+([0-9a-fA-F]{7,64})\]\s+", re.MULTILINE)
 _PUSH_RANGE_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{7,64})(\.\.\.?)([0-9a-fA-F]{7,64})(?![0-9a-fA-F])")
-_LOG_SHA_RE = re.compile(r"^\s*(?:\*\s*)?([0-9a-fA-F]{7,64})(?:\s|$)")
+_LOG_SHA_RE = re.compile(r"^\s*(?:(?:\*\s*)|(?:commit\s+))?([0-9a-fA-F]{7,64})(?:\s|$)")
 _HEAD_LINE_RE = re.compile(r"^\s*HEAD\s+([0-9a-fA-F]{7,64})\s*$", re.IGNORECASE)
+_PLAIN_WORKTREE_LINE_RE = re.compile(
+    r"^(?P<path>.+?)\s{2,}(?P<sha>[0-9a-fA-F]{7,64})(?:\s|$)"
+)
 
 
 @dataclass(frozen=True)
@@ -56,6 +61,7 @@ class _SessionEvidence:
     head_shas_by_call: dict[str, set[str]] = field(default_factory=dict)
     repos_by_call: dict[str, set[str]] = field(default_factory=dict)
     pushed_fleet_ids: set[str] = field(default_factory=set)
+    multi_ref_push_calls: set[str] = field(default_factory=set)
 
 
 def normalize_repo_identity(value: str | None) -> str | None:
@@ -82,8 +88,10 @@ def normalize_repo_identity(value: str | None) -> str | None:
         if candidate.startswith("/") or re.match(r"^[A-Za-z]:[/\\\\]", candidate):
             return None
         scp = re.match(r"^(?:[^@/]+@)?([^/:]+):(.+)$", candidate)
-        if scp and ("." in scp.group(1) or scp.group(1).lower() == "localhost"):
-            path = scp.group(2)
+        if scp:
+            # SCP remotes have no URL parser to discard their suffixes. Strip
+            # them explicitly, and never let userinfo/host data reach the path.
+            path = scp.group(2).split("?", 1)[0].split("#", 1)[0]
         else:
             path = candidate.split("?", 1)[0].split("#", 1)[0]
             path = path.removeprefix("github.com/").removeprefix("gitlab.com/")
@@ -195,6 +203,8 @@ def attach_git_evidence(
             notes.append("commit_sha:none (no SHA in a paired git commit, push, or rev-parse result)")
         elif any(observed_at is None for _sha, observed_at in state.fingerprints):
             notes.append("commit_sha_timestamp:none (SHA observed without a usable transcript timestamp)")
+        if state.multi_ref_push_calls:
+            notes.append("commit_sha:none (multi-ref push had multiple new heads; no unique commit SHA)")
         if state.fleet_ids and not state.pushed_fleet_ids:
             notes.append("fleet_push_head:none (fleet worktree observed without a pushed head SHA)")
         if notes:
@@ -267,21 +277,25 @@ def _observe_result(
                 _add_fingerprint(state, sha, observed_at, "git_commit_output")
                 _add_head(state, call.call_id, sha)
         elif intent.kind == "push":
-            fleet_id = _call_fleet_id(state, call)
+            fleet_id = _call_fleet_id(call)
+            push_heads: set[str] = set()
             for line in output.splitlines():
                 for match in _PUSH_RANGE_RE.finditer(line):
                     old_sha, _separator, new_sha = match.groups()
                     _add_fingerprint(state, old_sha, observed_at, _fleet_evidence("git_push_previous", fleet_id))
                     _add_fingerprint(state, new_sha, observed_at, _fleet_evidence("git_push_head", fleet_id))
                     _add_head(state, call.call_id, new_sha)
+                    push_heads.add(new_sha.lower())
                     if fleet_id:
                         state.pushed_fleet_ids.add(fleet_id)
+            if call.call_id and len(push_heads) > 1:
+                state.multi_ref_push_calls.add(call.call_id)
         elif intent.kind == "rev_parse":
             for line in output.splitlines():
                 sha = line.strip()
                 if _SHA_RE.fullmatch(sha):
                     evidence = "git_rev_parse_head" if intent.head_query else "git_rev_parse"
-                    _add_fingerprint(state, sha, observed_at, _fleet_evidence(evidence, _call_fleet_id(state, call)))
+                    _add_fingerprint(state, sha, observed_at, _fleet_evidence(evidence, _call_fleet_id(call)))
                     if intent.head_query:
                         _add_head(state, call.call_id, sha)
         elif intent.kind in {"log", "show", "rev_list", "show_ref", "branch"}:
@@ -302,7 +316,7 @@ def _observe_sha_listing(
         "show_ref": "git_show_ref",
         "branch": "git_branch_verbose",
     }[kind]
-    fleet_id = _call_fleet_id(state, call)
+    fleet_id = _call_fleet_id(call)
     for line in output.splitlines():
         sha: str | None = None
         if kind in {"log", "rev_list"}:
@@ -345,11 +359,29 @@ def _observe_worktree_list(
                     state,
                     sha,
                     observed_at,
-                    _fleet_evidence("git_worktree_head", current_fleet_id or _call_fleet_id(state, call)),
+                    _fleet_evidence("git_worktree_head", current_fleet_id),
                 )
                 _add_head(state, call.call_id, sha)
         elif not line.strip():
             current_fleet_id = None
+        else:
+            # Non-porcelain `git worktree list` prints one row per worktree:
+            # path, abbreviated HEAD, then a branch/detached label.
+            match = _PLAIN_WORKTREE_LINE_RE.match(line)
+            if match:
+                path = match.group("path").rstrip()
+                sha = match.group("sha")
+                if path:
+                    _add_path(state, path)
+                    fleet_id = _fleet_id(path)
+                    _add_fingerprint(
+                        state,
+                        sha,
+                        observed_at,
+                        _fleet_evidence("git_worktree_head", fleet_id),
+                    )
+                    _add_head(state, call.call_id, sha)
+                current_fleet_id = None
 
 
 def _add_call_repo(state: _SessionEvidence, call_id: str | None, remote_url: str) -> None:
@@ -386,15 +418,13 @@ def _fleet_evidence(kind: str, fleet_id: str | None) -> str:
     return f"{kind}:fleet_worktree={fleet_id}" if fleet_id else kind
 
 
-def _call_fleet_id(state: _SessionEvidence, call: _ToolCall) -> str | None:
+def _call_fleet_id(call: _ToolCall) -> str | None:
     command_paths = list(call.cwd_paths)
     for intent in call.intents:
         command_paths.extend(intent.cwd_paths)
     call_ids = {fleet_id for path in command_paths if (fleet_id := _fleet_id(path))}
     if len(call_ids) == 1:
         return next(iter(call_ids))
-    if len(state.fleet_ids) == 1:
-        return next(iter(state.fleet_ids))
     return None
 
 
@@ -410,7 +440,7 @@ def _add_path(state: _SessionEvidence, path: str) -> None:
 
 def _fleet_id(path: str) -> str | None:
     match = _FLEET_PATH_RE.search(path)
-    return match.group(1) if match else None
+    return match.group(1).lower() if match else None
 
 
 def _record_timestamp(provider: str, obj: dict[str, Any]) -> str | None:
