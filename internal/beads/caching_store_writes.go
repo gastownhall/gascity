@@ -526,14 +526,20 @@ func (c *CachingStore) Tx(commitMsg string, fn func(Tx) error) error {
 	if fn == nil {
 		return errors.New("beads tx: nil callback")
 	}
-	tx := newCachingStoreTx()
+	var tx *cachingStoreTx
 	if err := c.backing.Tx(commitMsg, func(backingTx Tx) error {
+		// A backing store may re-run the callback after rolling back a failed
+		// attempt (SQLiteStore retries on SQLITE_BUSY), so touched-id tracking
+		// starts fresh each run: only the committed attempt's ids are refreshed.
+		tx = newCachingStoreTx()
 		tx.backing = backingTx
 		return fn(tx)
 	}); err != nil {
 		return err
 	}
-	c.refreshTxTouchedBeads(tx.ids, tx.closed)
+	if tx != nil {
+		c.refreshTxTouchedBeads(tx.ids, tx.closed)
+	}
 	return nil
 }
 

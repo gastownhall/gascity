@@ -17,7 +17,8 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
-	_ "modernc.org/sqlite" // pure-Go SQLite driver, CGO_ENABLED=0 safe
+	sqlite "modernc.org/sqlite" // pure-Go SQLite driver, CGO_ENABLED=0 safe
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 const (
@@ -145,14 +146,27 @@ func WithSQLiteStorePrivateRecovery() SQLiteStoreOption {
 }
 
 // isSQLiteBusy reports whether err is a SQLite write-contention error.
+//
 // The modernc driver returns "database is locked (5) (SQLITE_BUSY)" when the
 // per-connection busy_timeout expires without acquiring the WAL write lock.
+// Extended busy codes carry only the numeric code: SQLITE_BUSY_SNAPSHOT is
+// "database is locked (517)". That one matters most in practice: it is what a
+// deferred transaction gets when it tries to upgrade a read snapshot to a
+// write after another connection (another gc process) committed, and SQLite
+// returns it immediately, without consulting busy_timeout. Every extended
+// busy code shares the primary code in its low byte, so the typed check covers
+// them all; the string checks keep wrapped or flattened errors recognizable.
 func isSQLiteBusy(err error) bool {
 	if err == nil {
 		return false
 	}
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == sqlite3.SQLITE_BUSY {
+		return true
+	}
 	msg := err.Error()
-	return strings.Contains(msg, "SQLITE_BUSY") || strings.Contains(msg, "database is locked")
+	return strings.Contains(msg, "SQLITE_BUSY") ||
+		strings.Contains(msg, "database is locked")
 }
 
 // retryOnBusy retries fn up to sqliteBusyRetryAttempts times when it returns
@@ -254,16 +268,24 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 	// city directory may legitimately contain ?, #, %, or spaces; none may
 	// become a SQLite parameter or fragment while opening a migration source.
 	//
-	// One DSN serves both handles, so every pragma on it is charged
+	// Both handles carry the same pragmas, so every pragma is charged
 	// sqliteStorePerStoreConnections times, not once. sqliteStoreDSNWithMode
-	// keeps that budget honest.
-	dsn := sqliteStoreDSN(dbPath, cfg.readOnly)
-	if cfg.privateRecovery {
-		dsn = sqliteStorePrivateRecoveryDSN(dbPath)
+	// keeps that budget honest. The two DSNs differ only in the driver-level
+	// _txlock parameter (not a pragma, no per-connection allocation): the write
+	// handle begins its transactions IMMEDIATE, the read pool stays deferred.
+	mode := ""
+	switch {
+	case cfg.readOnly:
+		mode = sqliteStoreDSNReadOnlyMode
+	case cfg.privateRecovery:
+		mode = sqliteStoreDSNPrivateRecoveryMode
 	}
+	readDSN := sqliteStoreDSNWithMode(dbPath, mode, false)
+	writeDSN := sqliteStoreDSNWithMode(dbPath, mode, true)
 
-	// Write connection: single connection serializes all mutations.
-	db, err := sql.Open("sqlite", dsn)
+	// Write connection: single connection serializes all mutations within
+	// this process; BEGIN IMMEDIATE serializes them against other processes.
+	db, err := sql.Open("sqlite", writeDSN)
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite store %s: %w", dbPath, err)
 	}
@@ -308,7 +330,7 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 	}
 
 	// Read pool: multiple concurrent read connections.
-	readDB, err := sql.Open("sqlite", dsn)
+	readDB, err := sql.Open("sqlite", readDSN)
 	if err != nil {
 		db.Close() //nolint:errcheck
 		return nil, fmt.Errorf("opening sqlite read pool %s: %w", dbPath, err)
@@ -325,8 +347,12 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 }
 
 // sqliteStoreDSNReadOnlyMode is the mode= value that makes a connection
-// incapable of writing or checkpointing.
-const sqliteStoreDSNReadOnlyMode = "ro"
+// incapable of writing or checkpointing. sqliteStoreDSNPrivateRecoveryMode
+// opens an existing snapshot read-write without permitting creation.
+const (
+	sqliteStoreDSNReadOnlyMode        = "ro"
+	sqliteStoreDSNPrivateRecoveryMode = "rw"
+)
 
 // sqliteReadPoolSize is how many connections the read pool may hand out at
 // once, and sqliteStorePerStoreConnections is that plus the single write
@@ -337,22 +363,42 @@ const (
 	sqliteStorePerStoreConnections = sqliteReadPoolSize + 1
 )
 
-// sqliteStoreDSN returns a file URI whose path and query are encoded
-// independently. In read-only mode SQLite's mode=ro is a hard capability: it
-// cannot take a write lock or checkpoint a source WAL during close.
+// sqliteStoreDSN returns the read-pool file URI, whose path and query are
+// encoded independently. In read-only mode SQLite's mode=ro is a hard
+// capability: it cannot take a write lock or checkpoint a source WAL during
+// close.
 func sqliteStoreDSN(path string, readOnly bool) string {
 	mode := ""
 	if readOnly {
 		mode = sqliteStoreDSNReadOnlyMode
 	}
-	return sqliteStoreDSNWithMode(path, mode)
+	return sqliteStoreDSNWithMode(path, mode, false)
 }
 
 func sqliteStorePrivateRecoveryDSN(path string) string {
-	return sqliteStoreDSNWithMode(path, "rw")
+	return sqliteStoreDSNWithMode(path, sqliteStoreDSNPrivateRecoveryMode, false)
 }
 
-func sqliteStoreDSNWithMode(path, mode string) string {
+// sqliteStoreDSNWithMode builds the store DSN. writer selects the write
+// handle's form, which begins every read-write transaction with BEGIN
+// IMMEDIATE (modernc's _txlock=immediate) instead of a deferred BEGIN.
+//
+// Why: several gc processes (controller, each `gc sling`, agents' `gc bd`)
+// write the same WAL-mode file, and the in-process single write connection
+// serializes none of them against each other. A deferred transaction starts
+// as a reader and upgrades on its first write; if another process committed
+// after this transaction's first read, the upgrade fails with
+// SQLITE_BUSY_SNAPSHOT ("database is locked (517)"). SQLite returns that
+// immediately — busy_timeout cannot help, because waiting cannot make a stale
+// snapshot current. BEGIN IMMEDIATE takes the write lock before the first
+// read, so the snapshot can never go stale, and contention surfaces as plain
+// SQLITE_BUSY at BEGIN, which busy_timeout does wait out.
+//
+// The read pool keeps deferred transactions so readers never contend for the
+// write lock, and a mode=ro handle never gets _txlock: it cannot take a write
+// lock at all. Transactions opened with sql.TxOptions{ReadOnly: true} also
+// begin deferred on the writer (the driver ignores _txlock for them).
+func sqliteStoreDSNWithMode(path, mode string, writer bool) string {
 	query := url.Values{}
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "foreign_keys(1)")
@@ -409,6 +455,9 @@ func sqliteStoreDSNWithMode(path, mode string) string {
 
 	if mode != "" {
 		query.Set("mode", mode)
+	}
+	if writer && mode != sqliteStoreDSNReadOnlyMode {
+		query.Set("_txlock", "immediate")
 	}
 	return (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
 }
@@ -1641,18 +1690,31 @@ func (s *SQLiteStore) Tx(_ string, fn func(tx Tx) error) error {
 		return errors.New("beads tx: nil callback")
 	}
 	ctx := context.Background()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("sqlite tx: begin: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-	if err := fn(&sqliteStoreTx{store: s, ctx: ctx, tx: tx}); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("sqlite tx: commit: %w", err)
-	}
-	return nil
+	// The whole transaction retries on SQLITE_BUSY, like every other write
+	// path. With BEGIN IMMEDIATE (see sqliteStoreDSNWithMode) contention
+	// normally surfaces at BEGIN, before fn has run. When it surfaces later
+	// (commit, or a busy error fn returns), every write of the failed attempt
+	// has been rolled back, so fn is re-run against a fresh transaction. fn
+	// must therefore confine its effects to tx and to captured results it
+	// reassigns on each run; the in-repo callers do. The one store-side effect
+	// that survives a rollback is the in-memory id allocator (s.seq): an
+	// auto-minted id from a rolled-back attempt is never reused, so a retry
+	// mints a fresh id and leaves a harmless gap — the same as the standalone
+	// Create retry.
+	return retryOnBusy(func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("sqlite tx: begin: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		if err := fn(&sqliteStoreTx{store: s, ctx: ctx, tx: tx}); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("sqlite tx: commit: %w", err)
+		}
+		return nil
+	})
 }
 
 // AtomicTx reports that Tx uses a real SQLite transaction and rolls all
