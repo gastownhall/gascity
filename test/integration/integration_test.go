@@ -42,6 +42,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/worker/builtin"
 	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 	"github.com/gastownhall/gascity/test/toolhome"
@@ -1388,6 +1389,26 @@ func filterEnv(env []string, name string) []string {
 	return result
 }
 
+// filterProviderCredentialEnv strips every provider credential env var --
+// each builtin provider's UpstreamAPIKeyEnv/UpstreamAuthTokenEnv, plus the
+// legacy GOOGLE_API_KEY alias some Gemini tooling also honors -- from env.
+// Derived from builtin.BuiltinProviders() rather than a hardcoded list so
+// this can't independently drift from the provider catalog it mirrors
+// (ga-5cokvb.1: a hand-transcribed copy of this same list already drifted
+// once, missing GitHub Copilot's COPILOT_GITHUB_TOKEN).
+func filterProviderCredentialEnv(env []string) []string {
+	env = filterEnv(env, "GOOGLE_API_KEY")
+	for _, spec := range builtin.BuiltinProviders() {
+		if spec.UpstreamAPIKeyEnv != "" {
+			env = filterEnv(env, spec.UpstreamAPIKeyEnv)
+		}
+		if spec.UpstreamAuthTokenEnv != "" {
+			env = filterEnv(env, spec.UpstreamAuthTokenEnv)
+		}
+	}
+	return env
+}
+
 func integrationEnv() []string {
 	return integrationEnvFor(testGCHome, testRuntimeDir, false)
 }
@@ -1442,11 +1463,34 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env = filterEnv(env, integrationGCBinaryEnv)
 	env = filterEnv(env, integrationDoltBinaryEnv)
 	env = filterEnv(env, "BEADS_DOLT_AUTO_START")
+	env = filterEnv(env, "CODEX_HOME")
+	env = filterEnv(env, "CLAUDE_CONFIG_DIR")
+	env = filterProviderCredentialEnv(env)
 	if !useDolt {
 		env = append(env, "GC_DOLT=skip")
 	}
 	env = append(env, "GC_HOME="+gcHome)
 	env = append(env, "XDG_RUNTIME_DIR="+runtimeDir)
+	// Isolated, unauthenticated per-test provider homes (ga-5cokvb.1): every
+	// integration test gets its own empty CODEX_HOME/CLAUDE_CONFIG_DIR under
+	// gcHome rather than inheriting the real host's ~/.codex or ~/.claude, so
+	// a test that launches codex or claude can never read or write the
+	// operator's actual credentials. Left empty by default -- no auth.json
+	// seeded -- callers that need authenticated state opt in explicitly
+	// rather than relying on ambient host credentials. Fails closed (panics,
+	// matching findModuleRoot's convention in this file above) rather than
+	// silently falling through to an unset var, which would let the CLI
+	// default back to the real host directory.
+	codexHome := filepath.Join(gcHome, ".codex")
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		panic("integration: creating isolated CODEX_HOME: " + err.Error())
+	}
+	env = append(env, "CODEX_HOME="+codexHome)
+	claudeConfigDir := filepath.Join(gcHome, ".claude")
+	if err := os.MkdirAll(claudeConfigDir, 0o700); err != nil {
+		panic("integration: creating isolated CLAUDE_CONFIG_DIR: " + err.Error())
+	}
+	env = append(env, "CLAUDE_CONFIG_DIR="+claudeConfigDir)
 	env = append(env, managedDoltTestModeEnv+"=1")
 	env = append(env, managedDoltTestParentEnv+"="+strconv.Itoa(os.Getpid()))
 	env = append(env, integrationRealBDBinaryEnv+"="+realBDBinary)
