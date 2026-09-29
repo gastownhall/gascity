@@ -45,13 +45,6 @@ Two TOML fields, one per scope, describe endpoint ownership:
 | City | `gc.endpoint_origin` | `managed_city`, `city_canonical` |
 | Rig  | `gc.endpoint_origin` | `inherited_city`, `explicit` |
 
-`gc.endpoint_origin` describes endpoint ownership, not JSONL retention. To
-keep a city-root `.beads/issues.jsonl` for JSONL-based sharing, leave the city
-origin as `managed_city` or `city_canonical` and set `export.auto: true` in
-that scope's `.beads/config.yaml`. Gas City preserves that explicit setting
-and skips stale-JSONL cleanup for the scope. Do not use `explicit` at city
-scope; it is a rig-only endpoint origin and fails canonical validation.
-
 - **`managed_city`** — The city owns the Dolt lifecycle. `gc start`
   launches it; `gc stop` shuts it down. This is the default for
   fresh `bd`-backed cities.
@@ -62,6 +55,32 @@ scope; it is a rig-only endpoint origin and fails canonical validation.
   `managed_city` city.
 - **`explicit`** — The rig pins its own external endpoint. Use for
   cross-city rigs or rigs pointing at a shared Dolt cluster.
+
+`gc.endpoint_origin` describes endpoint ownership, not JSONL retention. To
+keep a city-root `.beads/issues.jsonl` on disk, leave the city origin as
+`managed_city` or `city_canonical` and set `export.auto: true` in that
+scope's `.beads/config.yaml`. Gas City preserves that explicit setting and
+skips stale-JSONL cleanup for the scope. Do not use `explicit` at city
+scope; it is a rig-only endpoint origin and fails canonical validation.
+Do not keep the file with bd 1.0.4 (check `bd version`): that release
+re-imports a present `issues.jsonl` on every write, not only into an empty
+database, so it re-applies the retained rows over newer Dolt data and can
+stall for minutes on a large file (`sa-41j3kp`). bd 1.0.5 and later import
+it only into an empty database.
+
+The opt-out buys retention, not freshness. Gas City still forces
+`BD_EXPORT_AUTO=false` on its own `bd` calls — `gc bd`, controllers,
+dispatch, mail — so those writes do not re-export the file, and the retained
+`issues.jsonl` drifts from Dolt with no warning. Refresh it out of band from
+the scope root with `bd export -o .beads/issues.jsonl`, and note that
+`bd export` omits infrastructure beads and memories unless you pass
+`--include-infra`, `--include-memories`, or `--all`. Plain `bd` run in the
+scope, from a shell or an agent session, does not get the
+`BD_EXPORT_AUTO=false` override: it follows `export.auto: true`, so its
+writes can re-export the file too. Use `gc bd` instead if the file should
+change only when you refresh it. Rolling back to a Gas City build from
+before this opt-out existed rewrites `export.auto` back to `false` and reaps
+the file once.
 
 ## What NOT to do
 

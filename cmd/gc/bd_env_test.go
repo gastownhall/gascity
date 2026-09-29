@@ -5168,10 +5168,10 @@ func TestBdRuntimeEnvDisablesAutoExport(t *testing.T) {
 	}
 }
 
-// TestScopeIsGCManagedRecognizesExplicitAutoOff verifies that a config with
+// TestScopeJSONLIsReapableRecognizesExplicitAutoOff verifies that a config with
 // export.auto:false is recognized as gc-managed even when gc.endpoint_origin
 // is absent. This is the steady-state signal post-PR-1965.
-func TestScopeIsGCManagedRecognizesExplicitAutoOff(t *testing.T) {
+func TestScopeJSONLIsReapableRecognizesExplicitAutoOff(t *testing.T) {
 	scope := t.TempDir()
 	beadsDir := filepath.Join(scope, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -5182,17 +5182,17 @@ func TestScopeIsGCManagedRecognizesExplicitAutoOff(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if !scopeIsGCManaged(scope) {
-		t.Fatalf("scopeIsGCManaged = false, want true for explicit export.auto:false")
+	if !scopeJSONLIsReapable(scope) {
+		t.Fatalf("scopeJSONLIsReapable = false, want true for explicit export.auto:false")
 	}
 }
 
-// TestScopeIsGCManagedRecognizesManagedOrigin verifies that a long-lived
+// TestScopeJSONLIsReapableRecognizesManagedOrigin verifies that a long-lived
 // city whose config still pre-dates PR 1965 (export.auto absent) is still
 // recognized as gc-managed because gc.endpoint_origin proves it. This is
 // the transitional signal — without it the jsonl reaper would refuse to
 // clean up samtown-style cities until they hit a canonicalization event.
-func TestScopeIsGCManagedRecognizesManagedOrigin(t *testing.T) {
+func TestScopeJSONLIsReapableRecognizesManagedOrigin(t *testing.T) {
 	scope := t.TempDir()
 	beadsDir := filepath.Join(scope, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -5203,12 +5203,12 @@ func TestScopeIsGCManagedRecognizesManagedOrigin(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if !scopeIsGCManaged(scope) {
-		t.Fatalf("scopeIsGCManaged = false, want true for gc.endpoint_origin: managed_city")
+	if !scopeJSONLIsReapable(scope) {
+		t.Fatalf("scopeJSONLIsReapable = false, want true for gc.endpoint_origin: managed_city")
 	}
 }
 
-func TestScopeIsGCManagedHonorsCityAutoExportOptOut(t *testing.T) {
+func TestScopeJSONLIsReapableHonorsCityAutoExportOptOut(t *testing.T) {
 	scope := t.TempDir()
 	beadsDir := filepath.Join(scope, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -5219,16 +5219,16 @@ func TestScopeIsGCManagedHonorsCityAutoExportOptOut(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if scopeIsGCManaged(scope) {
-		t.Fatalf("scopeIsGCManaged = true, want false for city export.auto:true opt-out")
+	if scopeJSONLIsReapable(scope) {
+		t.Fatalf("scopeJSONLIsReapable = true, want false for city export.auto:true opt-out")
 	}
 }
 
-// TestScopeIsGCManagedDoesNotClaimExplicitOptOut verifies the carve-out
+// TestScopeJSONLIsReapableDoesNotClaimExplicitOptOut verifies the carve-out
 // for rigs that deliberately keep JSONL-based sharing. Per PR 1965 docs,
 // gc.endpoint_origin: explicit is the supported opt-out path; issues.jsonl
-// there is load-bearing, not stale, so scopeIsGCManaged must return false.
-func TestScopeIsGCManagedDoesNotClaimExplicitOptOut(t *testing.T) {
+// there is load-bearing, not stale, so scopeJSONLIsReapable must return false.
+func TestScopeJSONLIsReapableDoesNotClaimExplicitOptOut(t *testing.T) {
 	scope := t.TempDir()
 	beadsDir := filepath.Join(scope, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -5239,19 +5239,19 @@ func TestScopeIsGCManagedDoesNotClaimExplicitOptOut(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if scopeIsGCManaged(scope) {
-		t.Fatalf("scopeIsGCManaged = true, want false for explicit opt-out")
+	if scopeJSONLIsReapable(scope) {
+		t.Fatalf("scopeJSONLIsReapable = true, want false for explicit opt-out")
 	}
 }
 
-// TestScopeIsGCManagedExplicitOptOutBeatsExportAutoFalse verifies the
+// TestScopeJSONLIsReapableExplicitOptOutBeatsExportAutoFalse verifies the
 // precedence contract: when a scope has gc.endpoint_origin: explicit
 // (deliberate opt-out, JSONL is load-bearing) AND also has export.auto:
 // false (left over from a prior canonicalization, or hand-set), the
 // endpoint_origin signal wins. Without this ordering, a stale
 // export.auto value could trick the reaper into deleting issues.jsonl
 // on an opt-out rig.
-func TestScopeIsGCManagedExplicitOptOutBeatsExportAutoFalse(t *testing.T) {
+func TestScopeJSONLIsReapableExplicitOptOutBeatsExportAutoFalse(t *testing.T) {
 	scope := t.TempDir()
 	beadsDir := filepath.Join(scope, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -5262,8 +5262,8 @@ func TestScopeIsGCManagedExplicitOptOutBeatsExportAutoFalse(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if scopeIsGCManaged(scope) {
-		t.Fatalf("scopeIsGCManaged = true, want false for explicit opt-out (export.auto:false must not override endpoint_origin)")
+	if scopeJSONLIsReapable(scope) {
+		t.Fatalf("scopeJSONLIsReapable = true, want false for explicit opt-out (export.auto:false must not override endpoint_origin)")
 	}
 }
 

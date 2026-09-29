@@ -735,10 +735,12 @@ func ensureCanonicalScopeConfigState(fs fsys.FS, dir string, state contract.Conf
 	return nil
 }
 
-// removeStaleBdExportJSONL removes .beads/issues.jsonl if present. Called after
-// EnsureCanonicalConfig writes export.auto:false, since the file is a stale
-// export that bd's auto-import path would otherwise re-load on every write,
-// stalling bd create for the full subprocess timeout on large datasets.
+// removeStaleBdExportJSONL removes .beads/issues.jsonl if present. Called
+// after EnsureCanonicalConfig has canonicalized export.auto to false — that
+// is, for scopes where gc does not observe an explicit export.auto:true —
+// since the file is then a stale export that bd's auto-import path would
+// otherwise re-load on every write, stalling bd create for the full
+// subprocess timeout on large datasets.
 // Best-effort: any error is non-fatal because the env-var BD_EXPORT_AUTO=false
 // path (bdRuntimeEnv) is a second line of defense for gc-initiated calls.
 func removeStaleBdExportJSONL(fs fsys.FS, beadsDir string) {
