@@ -20,18 +20,14 @@ import (
 // enqueue from a background goroutine, possibly after the success event.
 func waitForEnqueuedKey(t *testing.T, fs *fakeState, key reconcilekey.Key) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	waitFor(t, 5*time.Second, "enqueue of "+key.Encode(), func() bool {
 		for _, k := range fs.enqueuedKeys() {
 			if k == key {
-				return
+				return true
 			}
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for enqueue of %v; enqueued %v", key, fs.enqueuedKeys())
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+		return false
+	})
 }
 
 func assertEnqueued(t *testing.T, fs *fakeState, want ...reconcilekey.Key) {

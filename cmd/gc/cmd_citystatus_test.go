@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -741,7 +742,14 @@ func TestControllerStatusLine(t *testing.T) {
 
 func startFakeControllerSocket(t *testing.T, cityPath, response string) <-chan struct{} {
 	t.Helper()
-	sockPath := controllerSocketPath(cityPath)
+	return startFakeUnixSocket(t, controllerSocketPath(cityPath), func(string) string { return response })
+}
+
+// startFakeUnixSocket listens on sockPath and answers each connection's
+// command line with respond(line); an empty reply closes without replying.
+// The returned channel is signaled (non-blocking) on each accept.
+func startFakeUnixSocket(t *testing.T, sockPath string, respond func(line string) string) <-chan struct{} {
+	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -768,9 +776,9 @@ func startFakeControllerSocket(t *testing.T, cityPath, response string) <-chan s
 			go func(conn net.Conn) {
 				defer conn.Close() //nolint:errcheck // test cleanup
 				_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-				_, _ = conn.Read(make([]byte, 64))
+				line, _ := bufio.NewReader(conn).ReadString('\n')
 				_ = conn.SetReadDeadline(time.Time{})
-				_, _ = conn.Write([]byte(response))
+				_, _ = conn.Write([]byte(respond(strings.TrimSuffix(line, "\n"))))
 			}(conn)
 		}
 	}()

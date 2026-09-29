@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -14,11 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
-	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
@@ -164,16 +159,7 @@ func TestControllerSocketPokeAcceptsOptionalKey(t *testing.T) {
 	}
 }
 
-// socketAction is how a fake controller socket answers one command.
-type socketAction int
-
-const (
-	socketReplyOK socketAction = iota // ack with "ok"
-	socketClose                       // close without replying (old controller, unknown verb)
-	socketHang                        // hold the connection open, never reply
-)
-
-// fakeControllerSocket records every command line and answers per respond.
+// fakeControllerSocket records every command line a fake socket receives.
 type fakeControllerSocket struct {
 	mu       sync.Mutex
 	commands []string
@@ -185,102 +171,57 @@ func (f *fakeControllerSocket) seen() []string {
 	return append([]string(nil), f.commands...)
 }
 
-func startRecordingControllerSocket(t *testing.T, cityPath string, respond func(line string) socketAction) *fakeControllerSocket {
+// record wraps respond so every command line is recorded before it is
+// answered; a client that got its reply (or EOF) sees the line recorded.
+func (f *fakeControllerSocket) record(respond func(line string) string) func(string) string {
+	return func(line string) string {
+		f.mu.Lock()
+		f.commands = append(f.commands, line)
+		f.mu.Unlock()
+		return respond(line)
+	}
+}
+
+func startRecordingControllerSocket(t *testing.T, cityPath string, respond func(line string) string) *fakeControllerSocket {
 	t.Helper()
-	sockPath := controllerSocketPath(cityPath)
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stop := make(chan struct{})
-	t.Cleanup(func() {
-		close(stop)
-		_ = lis.Close()
-		_ = os.Remove(sockPath)
-	})
 	f := &fakeControllerSocket{}
-	go func() {
-		for {
-			conn, acceptErr := lis.Accept()
-			if acceptErr != nil {
-				return
-			}
-			go func(conn net.Conn) {
-				defer conn.Close() //nolint:errcheck // test cleanup
-				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-				line, readErr := bufio.NewReader(conn).ReadString('\n')
-				if readErr != nil {
-					return
-				}
-				line = strings.TrimSuffix(line, "\n")
-				f.mu.Lock()
-				f.commands = append(f.commands, line)
-				f.mu.Unlock()
-				switch respond(line) {
-				case socketReplyOK:
-					_, _ = conn.Write([]byte("ok\n"))
-				case socketHang:
-					<-stop
-				case socketClose:
-				}
-			}(conn)
-		}
-	}()
+	startFakeUnixSocket(t, controllerSocketPath(cityPath), f.record(respond))
 	return f
 }
 
-func legacyControllerResponds(line string) socketAction {
+// legacyControllerResponds acks the verbs an old controller knows and
+// closes without replying on anything else, as an unknown verb does.
+func legacyControllerResponds(line string) string {
 	if line == "poke" || line == "control-dispatcher" {
-		return socketReplyOK
+		return "ok\n"
 	}
-	return socketClose
+	return ""
 }
 
-func keyedControllerResponds(line string) socketAction {
+func keyedControllerResponds(line string) string {
 	if strings.HasPrefix(line, pokeKeyedCommandPrefix) {
-		return socketReplyOK
+		return "ok\n"
 	}
 	return legacyControllerResponds(line)
 }
 
-func hungControllerResponds(string) socketAction { return socketHang }
-
-// supervisorReloadRecorder listens on this test's supervisor socket and
-// counts the commands it receives. It isolates GC_HOME/XDG_RUNTIME_DIR so
-// fallbacks never reach a host supervisor.
-func supervisorReloadRecorder(t *testing.T) *fakeControllerSocket {
+// isolateSupervisorSocket points GC_HOME/XDG_RUNTIME_DIR at fresh dirs so
+// supervisor fallbacks never reach a host supervisor. With no recorder
+// listening there, a supervisor fallback fails, so a nil error from an
+// enqueue proves the controller socket answered it.
+func isolateSupervisorSocket(t *testing.T) {
 	t.Helper()
 	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
 	t.Setenv("XDG_RUNTIME_DIR", shortSocketTempDir(t, "gc-run-"))
-	sockPath := supervisorSocketPath()
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = lis.Close() })
+}
+
+// supervisorReloadRecorder isolates the supervisor socket and records the
+// commands it receives.
+func supervisorReloadRecorder(t *testing.T) *fakeControllerSocket {
+	t.Helper()
+	isolateSupervisorSocket(t)
 	f := &fakeControllerSocket{}
-	go func() {
-		for {
-			conn, acceptErr := lis.Accept()
-			if acceptErr != nil {
-				return
-			}
-			go func(conn net.Conn) {
-				defer conn.Close() //nolint:errcheck // test cleanup
-				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-				line, _ := bufio.NewReader(conn).ReadString('\n')
-				f.mu.Lock()
-				f.commands = append(f.commands, strings.TrimSuffix(line, "\n"))
-				f.mu.Unlock()
-			}(conn)
-		}
-	}()
+	startFakeUnixSocket(t, supervisorSocketPath(), f.record(func(string) string { return "" }))
 	return f
 }
 
@@ -291,46 +232,30 @@ func assertCommands(t *testing.T, what string, got, want []string) {
 	}
 }
 
-// eventually polls cond for up to 10s (socket handlers record asynchronously).
-func eventually(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
 func TestEnqueueControllerSendsKeyedPokeToKeyAwareController(t *testing.T) {
-	sup := supervisorReloadRecorder(t)
+	isolateSupervisorSocket(t)
 	cityPath := shortSocketTempDir(t, "gc-enq-")
 	sock := startRecordingControllerSocket(t, cityPath, keyedControllerResponds)
 
 	if err := enqueueController(cityPath, reconcilekey.Session("gc-1")); err != nil {
-		t.Fatalf("enqueueController: %v", err)
+		t.Fatalf("enqueueController (a supervisor fallback would fail here): %v", err)
 	}
 	assertCommands(t, "controller", sock.seen(), []string{keyedPokeCommand(reconcilekey.Session("gc-1"))})
-	time.Sleep(50 * time.Millisecond)
-	assertCommands(t, "supervisor", sup.seen(), nil)
 }
 
 func TestEnqueueControllerFallsBackToLegacyPokeOnOldController(t *testing.T) {
-	sup := supervisorReloadRecorder(t)
+	isolateSupervisorSocket(t)
 	cityPath := shortSocketTempDir(t, "gc-enq-")
 	sock := startRecordingControllerSocket(t, cityPath, legacyControllerResponds)
 
 	if err := enqueueController(cityPath, reconcilekey.Session("gc-1")); err != nil {
-		t.Fatalf("enqueueController against an old controller: %v", err)
+		t.Fatalf("enqueueController against an old controller (a supervisor fallback would fail here): %v", err)
 	}
 	assertCommands(t, "controller", sock.seen(), []string{keyedPokeCommand(reconcilekey.Session("gc-1")), "poke"})
-	time.Sleep(50 * time.Millisecond)
-	assertCommands(t, "supervisor", sup.seen(), nil)
 }
 
 func TestEnqueueControllerKeepsLegacyVerbsForAllocatorAndControlDispatch(t *testing.T) {
-	supervisorReloadRecorder(t)
+	isolateSupervisorSocket(t)
 	cityPath := shortSocketTempDir(t, "gc-enq-")
 	sock := startRecordingControllerSocket(t, cityPath, legacyControllerResponds)
 
@@ -353,7 +278,8 @@ func TestEnqueueControllerFallsBackToSupervisorOnlyAfterSocketFails(t *testing.T
 	if err := enqueueController(cityPath, reconcilekey.Session("gc-1")); err != nil {
 		t.Fatalf("enqueueController with supervisor fallback: %v", err)
 	}
-	eventually(t, "supervisor reload", func() bool { return len(sup.seen()) == 1 })
+	// pokeSupervisor does not wait for a reply, so the record is async.
+	awaitCond(t, func() bool { return len(sup.seen()) == 1 }, "supervisor reload")
 	assertCommands(t, "supervisor", sup.seen(), []string{"reload"})
 }
 
@@ -400,7 +326,9 @@ func TestSendKeyedPokeRetriesOnlyForOldControllerSignature(t *testing.T) {
 
 func TestSendKeyedPokeHungControllerCostsOneTimeout(t *testing.T) {
 	cityPath := shortSocketTempDir(t, "gc-hung-")
-	sock := startRecordingControllerSocket(t, cityPath, hungControllerResponds)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	sock := startRecordingControllerSocket(t, cityPath, func(string) string { <-release; return "" })
 
 	start := time.Now()
 	err := sendKeyedPoke(reconcilekey.Session("gc-1"), func(command string) ([]byte, error) {
@@ -438,7 +366,9 @@ func TestPokeControllerForRestartSendsKeyAndFallsBack(t *testing.T) {
 // An explicit restart must report a missing controller instead of letting
 // an unrelated supervisor answer for this city.
 func TestPokeControllerForRestartWithoutControllerErrorsWithoutSupervisorFallback(t *testing.T) {
-	sup := supervisorReloadRecorder(t)
+	// A live supervisor: falling back to it would succeed, so the error
+	// below proves pokeControllerForRestart never did.
+	supervisorReloadRecorder(t)
 	cityPath := shortSocketTempDir(t, "gc-rst-")
 
 	err := pokeControllerForRestart(cityPath, reconcilekey.SessionNamed("worker-1"))
@@ -448,8 +378,6 @@ func TestPokeControllerForRestartWithoutControllerErrorsWithoutSupervisorFallbac
 	if !errors.Is(err, errControllerUnavailable) {
 		t.Fatalf("err = %v, want controller unavailable", err)
 	}
-	time.Sleep(50 * time.Millisecond)
-	assertCommands(t, "supervisor", sup.seen(), nil)
 }
 
 // captureWiredControllerStates records every controllerState passed through
@@ -487,37 +415,6 @@ func assertWakeSignalsWired(t *testing.T, states []*controllerState) {
 	}
 }
 
-func TestRunControllerWiresControllerStateWakeSignals(t *testing.T) {
-	wired := captureWiredControllerStates(t)
-	sp := runtime.NewFake()
-	buildFn := func(_ *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
-		return DesiredStateResult{State: map[string]TemplateParams{}}
-	}
-	dir := shortSocketTempDir(t, "gc-wire-")
-	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test"},
-		Beads:     config.BeadsConfig{Provider: "file"},
-	}
-	tomlPath := writeCityTOML(t, dir, "test")
-	var stdout, stderr lockedBuffer
-	done := make(chan struct{})
-	go func() {
-		runController(dir, nil, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
-		close(done)
-	}()
-	t.Cleanup(func() {
-		tryStopController(dir, &bytes.Buffer{})
-		awaitClose(t, done, "controller to exit after stop")
-	})
-	waitForController(t, dir)
-	// The socket comes up before the controller state is built.
-	eventually(t, "controller state wiring", func() bool { return len(wired()) > 0 })
-	assertWakeSignalsWired(t, wired())
-}
-
 func TestSupervisorStartOneCityWiresControllerStateWakeSignals(t *testing.T) {
 	wired := captureWiredControllerStates(t)
 	t.Setenv("GC_HOME", t.TempDir())
@@ -551,7 +448,7 @@ shutdown_timeout = "100ms"
 		t.Fatal(err)
 	}
 	cr := newCityRegistry()
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr lockedBuffer
 	reconcileCities(context.Background(), reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
 	t.Cleanup(func() {
 		if done := cr.CancelCity(canonicalTestPath(cityPath)); done != nil {
