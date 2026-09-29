@@ -73,7 +73,7 @@ from .adapters import (
     validated_records,
 )
 from .adapters.redaction import redact_text
-from .canonical import canonical_hash, identity_key, sha256_text
+from .canonical import identity_key, session_text_snapshot_hash, sha256_text
 from .contract import payload_hash
 from .commands import categorize_command
 from .errors import ContractError, ObservatoryError, RequestByteCapExceeded, RequestError
@@ -127,9 +127,6 @@ STATE_MODES = (STATE_MODE_METADATA, STATE_MODE_TEXT)
 # ``REQUEST_BYTE_CAP`` by dropping trailing excerpts; both facts are recorded in
 # the request's ``text_mode`` metadata.
 DEFAULT_TEXT_EXCERPT_BYTES = 1536
-# Namespace mixed into a text-mode subject snapshot so a text classification can
-# never collide with the metadata classification of the same session.
-_TEXT_SNAPSHOT_NAMESPACE = "session-text"
 # Event kinds that carry user/assistant prose; other kinds only contribute their
 # already-structured metadata. Command lines ride on ``tool_call``/``command``.
 _TEXT_EVENT_KINDS = frozenset({"message", "tool_result", "note"})
@@ -1432,7 +1429,7 @@ def _text_snapshot_hash(snapshot_hash: str) -> str:
     two data scopes can never collide in ``classifications``.
     """
 
-    return canonical_hash([_TEXT_SNAPSHOT_NAMESPACE, snapshot_hash])
+    return session_text_snapshot_hash(snapshot_hash)
 
 
 def _fit_text_state(text: dict[str, Any], taxonomy: Taxonomy, snapshot_hash: str) -> tuple[dict[str, Any], Any]:
