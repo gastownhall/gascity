@@ -77,9 +77,9 @@ func (c *DoltBackupCheck) Run(_ *CheckContext) *CheckResult {
 	// one does.
 	//
 	// It must not read as coverage either, and what coverage exists differs by
-	// transport. On the proxied path only bd can back the scope up, and bd
-	// v1.3.0 refuses `bd backup` there outright; this check runs no bd, so
-	// its message says so and defers to ProxiedBackupCoverageCheck, which asks
+	// transport. On the proxied path only bd can back the scope up, and a bd
+	// older than v1.3.1 refuses `bd backup` there outright; this check runs no
+	// bd, so its message says so and defers to ProxiedBackupCoverageCheck, which asks
 	// each proxied scope's bd (`bd backup status`) whether a recent backup
 	// exists. A direct bd-owned scope can be backed up through bd, so its
 	// message claims only that gc does not register it. See
