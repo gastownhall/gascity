@@ -281,10 +281,9 @@ func initBd(t *testing.T, dir string) string {
 // isolateBdHomeEnv returns env with HOME replaced by GC_HOME (already
 // present in env, set by newIsolatedToolEnv/integrationEnvFor to an isolated
 // per-test directory) so a shared-server config.yaml sitting in the real
-// ambient HOME (see CLAUDE.md's gc deploy-point hazard section — a real
-// fleet-host condition, not hypothetical) cannot divert an individual bd
-// invocation toward that shared server instead of the target the caller's
-// explicit flags (or directory-local, no-server config) intend.
+// ambient HOME (a real fleet-host condition, not hypothetical) cannot divert
+// an individual bd invocation toward that shared server instead of the target
+// the caller's explicit flags (or directory-local, no-server config) intend.
 //
 // Unlike standaloneBdEnv, this does not strip GC_DOLT_*/BEADS_DOLT_* vars —
 // callers here are themselves driving an explicit shared Dolt server and

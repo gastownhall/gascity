@@ -117,7 +117,7 @@ func TestRealBdRunnerIsolatesHOMEFromSharedServerConfig(t *testing.T) {
 	}
 	t.Setenv("HOME", pollutedHome)
 
-	wsDir := t.TempDir()
+	wsDir := beadstest.GuardedTempDir(t)
 	gitCmd := exec.Command("git", "init", "--quiet")
 	gitCmd.Dir = wsDir
 	if out, err := gitCmd.CombinedOutput(); err != nil {

@@ -259,11 +259,10 @@ func TestBdStoreMailWispInsert(t *testing.T) {
 // pinRealHomeEnv's doc comment), so t.Setenv("HOME", ...) cannot reach it.
 // This test substitutes a controlled, worst-case stand-in for "whatever the
 // real invoking user's real home happens to contain" (on a fleet host that
-// runs a real shared bd/dolt server out of that real home — this one does,
-// see CLAUDE.md's gc deploy-point hazard section — that's a real
-// shared-server config, not a hypothetical) so the reproduction is
-// deterministic and machine-independent rather than depending on whatever
-// this specific test run's real $HOME happens to hold.
+// runs a real shared bd/dolt server out of that real home — this one does —
+// that's a real shared-server config, not a hypothetical) so the
+// reproduction is deterministic and machine-independent rather than
+// depending on whatever this specific test run's real $HOME happens to hold.
 func TestBdStoreMailWispInsertIsolatesHOMEFromSharedServerConfig(t *testing.T) {
 	requireDoltIntegration(t)
 	env := newIsolatedToolEnv(t, true)
