@@ -101,11 +101,19 @@ func (w workAssignment) ReadyAssignedTo(assignee string, tierMode beads.TierMode
 }
 
 // HasNonSessionWork reports whether any bead in items is non-session WORK
-// (skipping session beads and repairable session beads). Shared filter for the
-// boolean readiness/open probes.
+// (skipping session beads, repairable session beads, and mail message beads).
+// Shared filter for the boolean readiness/open probes.
+//
+// Mail is skipped here as well as at the OpenAssignedTo source because two of
+// the probes feeding this gate read unfiltered enumerators: ReadyAssignedTo
+// (sessionHasReadyAssignedWorkForTier) and the CachedOpenAssignedWisps fast
+// path (sessionHasOpenAssignedWispWork). Both run over the wisp tier, which is
+// where mail lives, so without this a session's own unread mail — a handoff
+// note addressed to the session cycling out — answers "still has work" and
+// keeps a dead session bead from closing.
 func (w workAssignment) HasNonSessionWork(items []beads.Bead) bool {
 	for _, item := range items {
-		if sessionpkg.IsSessionBeadOrRepairable(item) {
+		if sessionpkg.IsSessionBeadOrRepairable(item) || beadmail.IsMessageBead(item) {
 			continue
 		}
 		return true
