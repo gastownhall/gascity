@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -16,7 +17,7 @@ except ImportError:  # pragma: no cover
     import support
 
 from agent_observatory.errors import ObservatoryError, SchemaVersionError
-from agent_observatory.migrations import migrate_database
+from agent_observatory.migrations import _V4_REQUIRED_TABLES, migrate_database
 from agent_observatory.store import ObservatoryStore
 
 
@@ -92,6 +93,14 @@ class MigrationTest(unittest.TestCase):
             connection.close()
 
     @staticmethod
+    def _table_count(db_path, table):
+        connection = sqlite3.connect(db_path)
+        try:
+            return connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+        finally:
+            connection.close()
+
+    @staticmethod
     def _backup_paths(db_path):
         directory = os.path.dirname(db_path)
         prefix = os.path.basename(db_path) + ".v4-pre-schema5-"
@@ -114,10 +123,15 @@ class MigrationTest(unittest.TestCase):
         self.assertEqual(result.from_version, 4)
         self.assertEqual(result.to_version, 5)
         self.assertEqual(result.database_path, os.path.realpath(self.db_path))
-        self.assertEqual(result.preserved_rows, expected_counts)
+        self.assertEqual(set(result.preserved_rows), _V4_REQUIRED_TABLES)
+        self.assertEqual(
+            {table: result.preserved_rows[table] for table in expected_counts}, expected_counts
+        )
+        self.assertEqual(result.preserved_rows["imported_files"], 1)
         self.assertTrue(os.path.isfile(result.backup_path))
         self.assertEqual(self._backup_paths(self.db_path), [result.backup_path])
         self.assertEqual(self._counts(self.db_path), expected_counts)
+        self.assertEqual(self._table_count(self.db_path, "imported_files"), 1)
 
         upgraded = sqlite3.connect(self.db_path)
         try:
@@ -158,6 +172,39 @@ class MigrationTest(unittest.TestCase):
         finally:
             backup.close()
 
+    def test_migrates_database_written_by_v4_era_store(self):
+        # This fixture was created with ObservatoryStore from d812ee146^, when
+        # schema version 4 was current; it is not a downgraded v5 database.
+        fixture_path = os.path.join(
+            os.path.dirname(__file__), "fixtures", "v4-era-schema4.sqlite"
+        )
+        shutil.copyfile(fixture_path, self.db_path)
+
+        original = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(original.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(original.execute("SELECT COUNT(*) FROM events").fetchone()[0], 1)
+            self.assertEqual(
+                original.execute("SELECT COUNT(*) FROM imported_files").fetchone()[0], 1
+            )
+            self.assertIsNone(
+                original.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'recommendations'"
+                ).fetchone()
+            )
+        finally:
+            original.close()
+
+        result = migrate_database(self.db_path)
+
+        self.assertEqual(result.from_version, 4)
+        self.assertEqual(result.to_version, 5)
+        self.assertEqual(set(result.preserved_rows), _V4_REQUIRED_TABLES)
+        self.assertEqual(result.preserved_rows["events"], 1)
+        self.assertEqual(result.preserved_rows["imported_files"], 1)
+        self.assertEqual(self._table_count(self.db_path, "events"), 1)
+        self.assertEqual(self._table_count(self.db_path, "imported_files"), 1)
+
     def test_normal_store_open_does_not_implicitly_migrate_v4(self):
         self._make_v4_fixture()
         with self.assertRaises(SchemaVersionError):
@@ -165,8 +212,8 @@ class MigrationTest(unittest.TestCase):
         self.assertEqual(self._counts(self.db_path)["events"], 2)
         self.assertEqual(self._backup_paths(self.db_path), [])
 
-    def test_rejects_every_non_v4_version_without_writing_a_backup(self):
-        for version in (0, 3, 5, 999):
+    def test_rejects_unsupported_versions_without_writing_a_backup(self):
+        for version in (0, 3, 999):
             with self.subTest(version=version):
                 db_path = os.path.join(self.tmp.name, f"schema-{version}.db")
                 self._make_v4_fixture(db_path)
@@ -186,9 +233,26 @@ class MigrationTest(unittest.TestCase):
                 self.assertEqual(self._backup_paths(db_path), [])
                 connection = sqlite3.connect(db_path)
                 try:
-                    self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], version)
+                    self.assertEqual(
+                        connection.execute("PRAGMA user_version").fetchone()[0], version
+                    )
                 finally:
                     connection.close()
+
+    def test_rejects_schema5_markers_without_schema5_objects(self):
+        self._make_v4_fixture()
+        connection = sqlite3.connect(self.db_path)
+        try:
+            connection.execute("UPDATE schema_meta SET value = '5' WHERE key = 'schema_version'")
+            connection.execute("PRAGMA user_version = 5")
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.assertRaises(ObservatoryError):
+            migrate_database(self.db_path)
+        self.assertEqual(self._backup_paths(self.db_path), [])
+        self.assertEqual(self._table_count(self.db_path, "events"), 2)
 
     def test_refuses_inconsistent_schema_meta_without_backup(self):
         self._make_v4_fixture()
@@ -245,6 +309,51 @@ class MigrationTest(unittest.TestCase):
         self.assertEqual(len(backups), 1)
         self.assertEqual(self._counts(backups[0])["events"], 2)
 
+    def test_failure_rolls_back_imported_file_deletion_during_upgrade(self):
+        self._make_v4_fixture()
+        self.assertEqual(self._table_count(self.db_path, "imported_files"), 1)
+        connection = sqlite3.connect(self.db_path)
+        try:
+            connection.execute(
+                """
+                CREATE TRIGGER delete_imported_files_during_upgrade
+                AFTER UPDATE ON schema_meta
+                BEGIN
+                    DELETE FROM imported_files;
+                END
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.assertRaises(ObservatoryError):
+            migrate_database(self.db_path)
+
+        connection = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(
+                connection.execute(
+                    "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+                ).fetchone()[0],
+                "4",
+            )
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM imported_files").fetchone()[0], 1
+            )
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'recommendations'"
+                ).fetchone()
+            )
+        finally:
+            connection.close()
+
+        backups = self._backup_paths(self.db_path)
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(self._table_count(backups[0], "imported_files"), 1)
+
     def test_cli_migrate_subcommand_reports_backup_and_versions(self):
         self._make_v4_fixture()
         env = dict(os.environ)
@@ -263,6 +372,39 @@ class MigrationTest(unittest.TestCase):
         self.assertEqual(payload["to_version"], 5)
         self.assertTrue(os.path.isfile(payload["backup"]))
         self.assertEqual(payload["preserved_rows"]["events"], 2)
+
+    def test_cli_migrate_is_noop_when_database_is_already_schema5(self):
+        self._make_v4_fixture()
+        migrate_database(self.db_path)
+        with open(self.db_path, "rb") as database:
+            migrated_bytes = database.read()
+        backups_before = self._backup_paths(self.db_path)
+
+        result = migrate_database(self.db_path)
+        self.assertEqual(result.from_version, 5)
+        self.assertEqual(result.to_version, 5)
+        self.assertEqual(result.already_at_version, 5)
+        self.assertIsNone(result.backup_path)
+        with open(self.db_path, "rb") as database:
+            self.assertEqual(database.read(), migrated_bytes)
+        self.assertEqual(self._backup_paths(self.db_path), backups_before)
+
+        env = dict(os.environ)
+        env["PYTHONPATH"] = support.PACKAGE_ROOT + os.pathsep + env.get("PYTHONPATH", "")
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        completed = subprocess.run(
+            [sys.executable, "-m", "agent_observatory", "migrate", "--db", self.db_path],
+            cwd=support.PACKAGE_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), "already at schema 5")
+        self.assertEqual(completed.stderr, "")
+        with open(self.db_path, "rb") as database:
+            self.assertEqual(database.read(), migrated_bytes)
+        self.assertEqual(self._backup_paths(self.db_path), backups_before)
 
     def test_missing_database_is_not_created(self):
         missing_path = os.path.join(self.tmp.name, "missing.db")

@@ -69,20 +69,21 @@ _V4_REQUIRED_TABLES = frozenset(
         "exposures",
     }
 )
-_PRESERVED_TABLES = ("events", "sessions", "classifications", "classification_answers")
+_PRESERVED_TABLES = tuple(sorted(_V4_REQUIRED_TABLES))
 _BACKUP_RETRIES = 100
 _SQLITE_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
 class MigrationResult:
-    """Details of a completed v4-to-v5 upgrade."""
+    """Details of a v4-to-v5 upgrade or a no-op for an already-v5 database."""
 
     database_path: str
-    backup_path: str
+    backup_path: str | None
     from_version: int
     to_version: int
     preserved_rows: dict[str, int]
+    already_at_version: int | None = None
 
 
 def _validate_v4(connection: sqlite3.Connection, database_path: str) -> None:
@@ -130,14 +131,29 @@ def _validate_v4(connection: sqlite3.Connection, database_path: str) -> None:
 
 
 def _validate_v5(connection: sqlite3.Connection, database_path: str) -> None:
+    tables = {
+        row[0]
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    missing_tables = sorted(_V4_REQUIRED_TABLES - tables)
+    if missing_tables:
+        raise ObservatoryError(
+            f"database {database_path!r} is missing required schema tables: "
+            + ", ".join(missing_tables)
+        )
+
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
     metadata = connection.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
-    if version != SCHEMA_VERSION_AFTER or metadata is None or metadata[0] != str(SCHEMA_VERSION_AFTER):
+    if (
+        version != SCHEMA_VERSION_AFTER
+        or metadata is None
+        or metadata[0] != str(SCHEMA_VERSION_AFTER)
+    ):
         raise ObservatoryError(
-            f"migration did not set both schema version markers to {SCHEMA_VERSION_AFTER} "
-            f"for {database_path!r}"
+            f"database {database_path!r} does not have both schema version markers set to "
+            f"{SCHEMA_VERSION_AFTER}"
         )
     table = connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'recommendations'"
@@ -146,7 +162,10 @@ def _validate_v5(connection: sqlite3.Connection, database_path: str) -> None:
         "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'recommendations_episode_kind'"
     ).fetchone()
     if table is None or index is None:
-        raise ObservatoryError("migration did not create the schema-5 recommendations table and index")
+        raise ObservatoryError(
+            f"database {database_path!r} is missing the "
+            "schema-5 recommendations table or index"
+        )
 
 
 def _row_counts(connection: sqlite3.Connection) -> dict[str, int]:
@@ -223,8 +242,8 @@ def migrate_database(db_path: str | os.PathLike[str]) -> MigrationResult:
 
     The backup is written beside the database with a UTC timestamp before the
     migration changes any schema or version metadata. Existing table contents
-    are never rewritten; the four primary evidence tables are counted in both
-    the backup and upgraded database as a preservation check.
+    are never rewritten; every required v4 table is counted in the backup and
+    upgraded database as a preservation check.
     """
     raw_path = os.fspath(db_path)
     if raw_path == ":memory:":
@@ -238,6 +257,18 @@ def migrate_database(db_path: str | os.PathLike[str]) -> MigrationResult:
     )
     backup_path: Path | None = None
     try:
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if version == SCHEMA_VERSION_AFTER:
+            _validate_v5(connection, str(database_path))
+            return MigrationResult(
+                database_path=str(database_path),
+                backup_path=None,
+                from_version=SCHEMA_VERSION_AFTER,
+                to_version=SCHEMA_VERSION_AFTER,
+                preserved_rows={},
+                already_at_version=SCHEMA_VERSION_AFTER,
+            )
+
         _validate_v4(connection, str(database_path))
         connection.execute("BEGIN IMMEDIATE")
         try:
@@ -268,7 +299,7 @@ def migrate_database(db_path: str | os.PathLike[str]) -> MigrationResult:
             after_counts = _row_counts(connection)
             if after_counts != before_counts:
                 raise ObservatoryError(
-                    "schema migration changed rows in a protected evidence table; "
+                    "schema migration changed rows in a required v4 table; "
                     "rolling back"
                 )
             connection.execute("COMMIT")

@@ -230,6 +230,9 @@ def _cmd_import_jsonl(args: argparse.Namespace) -> int:
 
 def _cmd_migrate(args: argparse.Namespace) -> int:
     result = migrate_database(args.db)
+    if result.already_at_version is not None:
+        print(f"already at schema {result.already_at_version}")
+        return 0
     print(
         json.dumps(
             {
