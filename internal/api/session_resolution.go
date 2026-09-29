@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -378,7 +379,16 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 		if err := s.reassignContinuityIneligibleNamedSessionState(ctx, store, retired, info.ID); err != nil {
 			return "", err
 		}
-		s.state.Poke()
+		// The retired rows just handed their work, waits and bindings to
+		// the replacement; their keys ride along so a keyed reconciler
+		// revisits them too. Legacy: one poke.
+		keys := []reconcilekey.Key{reconcilekey.Session(info.ID)}
+		for _, r := range retired {
+			if strings.TrimSpace(r.ID) != "" && r.ID != info.ID {
+				keys = append(keys, reconcilekey.Session(r.ID))
+			}
+		}
+		s.state.Enqueue(keys...)
 		return info.ID, nil
 	}
 	if bead, ok, lookupErr := s.findCanonicalNamedSession(store, spec); lookupErr == nil && ok {

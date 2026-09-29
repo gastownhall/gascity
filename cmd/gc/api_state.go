@@ -38,6 +38,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -95,6 +96,7 @@ type controllerState struct {
 	storeMetadataSignature string
 	ct                     crashTracker  // nil if crash tracking disabled
 	pokeCh                 chan struct{} // nil when poke is not available; triggers immediate reconciler tick
+	controlDispatcherCh    chan struct{} // nil when unavailable; triggers the control-dispatcher-only reconcile
 	configDirty            *atomic.Bool  // optional dirty flag shared with the reconciler reload path
 	services               workspacesvc.Registry
 	extmsgSvc              *extmsg.Services
@@ -820,7 +822,9 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 		}
 	}
 	if !snapshot {
-		cs.Poke()
+		// Key-less for now: mapping evt.Subject to the session or template
+		// it concerns needs the reverse indexes a keyed reconciler brings.
+		cs.Enqueue(reconcilekey.Allocator())
 	}
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
 		rec := events.Discard
@@ -3025,7 +3029,8 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 	if cs.configDirty != nil {
 		cs.configDirty.Store(true)
 	}
-	cs.Poke()
+	// A config mutation re-plans the city: allocator.
+	cs.Enqueue(reconcilekey.Allocator())
 	return nil
 }
 
@@ -3060,16 +3065,15 @@ func (cs *controllerState) loadCurrentConfigSnapshot() (*config.City, string, er
 	return nextCfg, revision, nil
 }
 
-// Poke signals the controller to trigger an immediate reconciler tick.
-// Non-blocking: if a poke is already pending, additional pokes are dropped.
-func (cs *controllerState) Poke() {
-	if cs.pokeCh == nil {
+// Enqueue asks the controller to reconcile keys promptly (see
+// reconcile_enqueue.go). Under the legacy reconciler it is the old Poke:
+// a non-blocking signal dropped when one is already pending, with the
+// control-dispatch key going to the control-dispatcher signal instead.
+func (cs *controllerState) Enqueue(keys ...reconcilekey.Key) {
+	if cs == nil {
 		return
 	}
-	select {
-	case cs.pokeCh <- struct{}{}:
-	default: // poke already pending
-	}
+	legacyEnqueue(cs.pokeCh, cs.controlDispatcherCh, keys...)
 }
 
 // WaitForSessionCommandable waits until the controller has reconciled an async

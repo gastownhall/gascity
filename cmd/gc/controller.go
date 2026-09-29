@@ -30,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -213,30 +214,24 @@ func handleControllerConn(
 			fmt.Fprintf(conn, "%d\n", os.Getpid()) //nolint:errcheck // best-effort
 		case line == controllerIdentityCommand:
 			writeJSONLine(conn, controllerIdentityReply{PID: os.Getpid(), HostingMode: hostingMode})
-		case line == "poke":
-			// Non-blocking send: triggers immediate reconciler tick for
-			// event-driven wake after sling assigns work.
-			select {
-			case pokeCh <- struct{}{}:
-			default: // poke already pending
-			}
+		case line == "poke" || strings.HasPrefix(line, pokeKeyedCommandPrefix):
+			// "poke" or "poke:<json key>" (see reconcile_enqueue.go): a
+			// non-blocking enqueue for event-driven wake, e.g. after sling
+			// assigns work or a session is drained. Key-less = allocator.
+			key, _ := parsePokeSocketCommand(line)
+			legacyEnqueue(pokeCh, controlDispatcherCh, key)
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case line == "reload":
 			if dirty != nil {
 				dirty.Store(true)
 			}
-			select {
-			case pokeCh <- struct{}{}:
-			default:
-			}
+			// Config reload re-plans the whole city: allocator.
+			legacyEnqueue(pokeCh, nil, reconcilekey.Allocator())
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case strings.HasPrefix(line, "reload:"):
 			handleReloadSocketCmd(conn, line[len("reload:"):], reloadReqCh)
 		case line == "control-dispatcher":
-			select {
-			case controlDispatcherCh <- struct{}{}:
-			default:
-			}
+			legacyEnqueue(nil, controlDispatcherCh, reconcilekey.ControlDispatch())
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case strings.HasPrefix(line, sessionCircuitResetCommandPrefix):
 			handleSessionCircuitResetSocketCmd(conn, cityPath, line[len(sessionCircuitResetCommandPrefix):])
@@ -244,17 +239,11 @@ func handleControllerConn(
 			handleConvergeSocketCmd(conn, line[len("converge:"):], convergenceReqCh)
 		case strings.HasPrefix(line, "trace-arm:"):
 			if handleTraceSocketCmd(conn, cityPath, "start", line[len("trace-arm:"):]) {
-				select {
-				case pokeCh <- struct{}{}:
-				default:
-				}
+				legacyEnqueue(pokeCh, nil, reconcilekey.Allocator()) // key-less: trace applies city-wide
 			}
 		case strings.HasPrefix(line, "trace-stop:"):
 			if handleTraceSocketCmd(conn, cityPath, "stop", line[len("trace-stop:"):]) {
-				select {
-				case pokeCh <- struct{}{}:
-				default:
-				}
+				legacyEnqueue(pokeCh, nil, reconcilekey.Allocator()) // key-less: trace applies city-wide
 			}
 		case line == "trace-status":
 			handleTraceStatusSocketCmd(conn, cityPath)
@@ -781,12 +770,8 @@ func watchConfigTargets(targets []config.WatchTarget, dirty *atomic.Bool, pokeCh
 
 	markDirty := func() {
 		dirty.Store(true)
-		if pokeCh != nil {
-			select {
-			case pokeCh <- struct{}{}:
-			default:
-			}
-		}
+		// A config file changed: reload re-plans the city (allocator).
+		legacyEnqueue(pokeCh, nil, reconcilekey.Allocator())
 	}
 
 	done := make(chan struct{})
@@ -1403,7 +1388,7 @@ func runController(
 	// session-bead sync and rig-scoped wake decisions.
 	cs := newControllerStateWithRoutes(ctx, cr.storageRoutes, cfg, sp, eventProv, cityName, cityPath)
 	cs.ct = cr.crashTrack()
-	cs.pokeCh = pokeCh
+	wireControllerWakeSignals(cs, pokeCh, controlDispatcherCh)
 	cs.configDirty = configDirty
 	cs.services = cr.svc
 	cs.emergencyCh = make(chan emergency.Record, 64)

@@ -99,6 +99,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -515,14 +516,14 @@ func queueDrainAckForcedTermination(
 			// removed, on the rows this pass exists to rescue. Best-effort and
 			// deliberately unlogged, for the stderr-race reason documented on
 			// queueDrainAckAsyncStop's poke.
-			_ = poke(cityPath)
+			_ = poke(cityPath, reconcilekey.SessionRef(sessionID, name))
 			return
 		}
 		// The pane outlived the ordinary stop. This is the population the whole
 		// pass exists for, so apply the force the ordinary path does not have.
 		outcome := terminateDrainAckRuntimeByProcessTable(cityPath, sp, sessionID, name, expectedToken, subreaperPID, now, stderr)
 		recordDrainAckEscalation(cfg, info, name, reason, outcome, attempt, rec)
-		_ = poke(cityPath)
+		_ = poke(cityPath, reconcilekey.SessionRef(sessionID, name))
 	}()
 }
 

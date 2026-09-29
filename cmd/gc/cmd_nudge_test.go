@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
@@ -672,12 +673,14 @@ func TestDeliverSessionNudgeWithWorkerManagedNonRunningQueuesWakeForController(t
 	prevManaged := nudgeCityUsesManagedReconciler
 	prevPoke := nudgePokeController
 	pokes := 0
+	var pokeKeys []reconcilekey.Key
 	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
-	nudgePokeController = func(cityPath string) error {
+	nudgePokeController = func(cityPath string, key reconcilekey.Key) error {
 		if cityPath != dir {
 			t.Fatalf("poke cityPath = %q, want %q", cityPath, dir)
 		}
 		pokes++
+		pokeKeys = append(pokeKeys, key)
 		return nil
 	}
 	t.Cleanup(func() {
@@ -705,6 +708,9 @@ func TestDeliverSessionNudgeWithWorkerManagedNonRunningQueuesWakeForController(t
 	}
 	if pokes != 1 {
 		t.Fatalf("pokes = %d, want 1", pokes)
+	}
+	if want := reconcilekey.Session(info.ID); pokeKeys[0] != want {
+		t.Fatalf("poke key = %v, want %v", pokeKeys[0], want)
 	}
 
 	updated, err := store.Get(info.ID)
@@ -757,7 +763,7 @@ func TestDeliverSessionNudgeWithWorkerManagedQueueFailureDoesNotWake(t *testing.
 	prevPoke := nudgePokeController
 	pokes := 0
 	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
-	nudgePokeController = func(string) error {
+	nudgePokeController = func(string, reconcilekey.Key) error {
 		pokes++
 		return nil
 	}
@@ -836,7 +842,7 @@ func TestDeliverSessionNudgeWithWorkerManagedWakeFailureRollsBackQueuedNudge(t *
 	prevObserve := nudgeObserveTarget
 	pokes := 0
 	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
-	nudgePokeController = func(string) error {
+	nudgePokeController = func(string, reconcilekey.Key) error {
 		pokes++
 		return nil
 	}
@@ -921,7 +927,7 @@ func TestDeliverSessionNudgeWithWorkerManagedWaitNudgeWithdrawFailureKeepsQueued
 	pokes := 0
 	withdraws := 0
 	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
-	nudgePokeController = func(string) error {
+	nudgePokeController = func(string, reconcilekey.Key) error {
 		pokes++
 		return nil
 	}
@@ -1031,7 +1037,7 @@ func TestDeliverSessionNudgeWithWorkerManagedObserveErrorDoesNotResumeFromCaller
 	nudgeObserveTarget = func(nudgeTarget, beads.Store, runtime.Provider) (worker.LiveObservation, error) {
 		return worker.LiveObservation{}, observeErr
 	}
-	nudgePokeController = func(string) error {
+	nudgePokeController = func(string, reconcilekey.Key) error {
 		pokes++
 		return nil
 	}
@@ -1581,12 +1587,14 @@ func TestSendMailNotifyWithWorkerManagedNonRunningQueuesWakeForController(t *tes
 	prevManaged := nudgeCityUsesManagedReconciler
 	prevPoke := nudgePokeController
 	pokes := 0
+	var pokeKeys []reconcilekey.Key
 	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
-	nudgePokeController = func(cityPath string) error {
+	nudgePokeController = func(cityPath string, key reconcilekey.Key) error {
 		if cityPath != dir {
 			t.Fatalf("poke cityPath = %q, want %q", cityPath, dir)
 		}
 		pokes++
+		pokeKeys = append(pokeKeys, key)
 		return nil
 	}
 	t.Cleanup(func() {
@@ -1609,6 +1617,9 @@ func TestSendMailNotifyWithWorkerManagedNonRunningQueuesWakeForController(t *tes
 	}
 	if pokes != 1 {
 		t.Fatalf("pokes = %d, want 1", pokes)
+	}
+	if want := reconcilekey.Session(info.ID); pokeKeys[0] != want {
+		t.Fatalf("poke key = %v, want %v", pokeKeys[0], want)
 	}
 
 	updated, err := store.Get(info.ID)
@@ -1715,7 +1726,7 @@ func TestSendMailNotifyWithWorkerManagedQueueFailureDoesNotWake(t *testing.T) {
 	prevPoke := nudgePokeController
 	pokes := 0
 	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
-	nudgePokeController = func(string) error {
+	nudgePokeController = func(string, reconcilekey.Key) error {
 		pokes++
 		return nil
 	}
@@ -1845,7 +1856,7 @@ func TestSendMailNotifyWithWorkerManagedWakeFailureRollsBackQueuedNudge(t *testi
 	prevObserve := nudgeObserveTarget
 	pokes := 0
 	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
-	nudgePokeController = func(string) error {
+	nudgePokeController = func(string, reconcilekey.Key) error {
 		pokes++
 		return nil
 	}
@@ -1926,7 +1937,7 @@ func TestSendMailNotifyWithWorkerManagedWaitNudgeWithdrawFailureKeepsQueuedNudge
 	pokes := 0
 	withdraws := 0
 	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
-	nudgePokeController = func(string) error {
+	nudgePokeController = func(string, reconcilekey.Key) error {
 		pokes++
 		return nil
 	}
@@ -2029,7 +2040,7 @@ func TestSendMailNotifyWithWorkerManagedWakePokeFailureIsNonFatal(t *testing.T) 
 	var warnings bytes.Buffer
 	pokes := 0
 	nudgeCityUsesManagedReconciler = func(cityPath string) bool { return cityPath == dir }
-	nudgePokeController = func(cityPath string) error {
+	nudgePokeController = func(cityPath string, _ reconcilekey.Key) error {
 		if cityPath != dir {
 			t.Fatalf("poke cityPath = %q, want %q", cityPath, dir)
 		}

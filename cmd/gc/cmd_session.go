@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -359,8 +360,8 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			titleDone := maybeAutoTitle(sessionFrontDoor(sessStore), info.ID, title, titleHint, titleProvider, info.WorkDir, stderr)
 			defer func() { <-titleDone }() // ensure title goroutine completes on all exit paths
 
-			// Poke again after bead creation to trigger immediate reconciler tick.
-			_ = pokeController(cityPath)
+			// Enqueue the new session to trigger an immediate reconcile.
+			_ = enqueueController(cityPath, reconcilekey.Session(info.ID))
 
 			if jsonOutput {
 				if err := writeSessionNewJSON(stdout, stderr, sessionNewJSON{
@@ -1739,8 +1740,8 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 				fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			// Poke again to trigger immediate reconciler tick.
-			_ = pokeController(cityPath)
+			// Enqueue the held session to trigger an immediate reconcile.
+			_ = enqueueController(cityPath, reconcilekey.Session(sessionID))
 			if asJSON {
 				if err := writeSessionActionJSON(stdout, sessionActionResult{
 					Action:    "suspend",
@@ -2368,9 +2369,9 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 	return cmd
 }
 
-// sessionKillPokeController is a mutable global test seam over pokeController.
+// sessionKillPokeController is a mutable global test seam over enqueueController.
 // Tests that swap it MUST NOT call t.Parallel().
-var sessionKillPokeController = pokeController
+var sessionKillPokeController = enqueueController
 
 // cmdSessionKill is the CLI entry point for "gc session kill".
 func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
@@ -2514,7 +2515,7 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 	// unconditional: a poke failure (e.g. no controller running) is non-fatal,
 	// and a spurious poke when the asleep sync was skipped is harmless — the
 	// reconciler observes unchanged state and continues.
-	if err := sessionKillPokeController(cityPath); err != nil {
+	if err := sessionKillPokeController(cityPath, reconcilekey.Session(sessionID)); err != nil {
 		fmt.Fprintf(stderr, "gc session kill: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 

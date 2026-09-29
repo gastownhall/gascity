@@ -77,7 +77,7 @@ func TestControllerDiscoversAddedCronOrderWithoutRestart(t *testing.T) {
 		}
 	})
 	waitForController(t, dir)
-	waitForCondition(t, 5*time.Second, func() bool {
+	waitForCondition(t, hangBudget, func() bool {
 		return reconcileCount.Load() > 0
 	}, "initial reconcile")
 
