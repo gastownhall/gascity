@@ -135,9 +135,10 @@ jobs:
           } > .bazelrc.local
 
 
-      - name: Writable test HOME
+      - name: Writable test filesystem roots
         run: |
           mkdir -p /tmp/gc-test-home
+          sudo install -d -m 1777 /tmp/bt
           echo "HOME=/tmp/gc-test-home" >> "$GITHUB_ENV"
           # .bazelrc sets test --test_tmpdir=/tmp/bt and
           # --sandbox_writable_path=/tmp/bt unconditionally (#6525). Nothing
