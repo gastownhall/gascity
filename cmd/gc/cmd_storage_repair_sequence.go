@@ -72,7 +72,7 @@ other store directory (the directory holding beads.sqlite).`,
 			return exitForCode(doStorageRepairSequence(target, prefix, floor, stdout, stderr, logPrefix))
 		},
 	}
-	defaultPrefix, _ := config.ReservedClassPrefix(config.BeadClassGraph)
+	defaultPrefix, _ := config.ReservedClassPrefix(config.BeadClassGraph) // residency:allow — the default mint prefix of the store being repaired; resolves no store
 	cmd.Flags().StringVar(&dir, "dir", "", "store directory holding beads.sqlite (default: this city's SQLite infrastructure binding)")
 	cmd.Flags().StringVar(&prefix, "prefix", defaultPrefix, "auto-id prefix whose sequence to inspect or repair")
 	cmd.Flags().StringVar(&floor, "floor", "", "new floor (int64, may be negative); omit to only report")
