@@ -31,7 +31,7 @@ from .annotations import GoldEpisode, GoldSet
 from .canonical import canonical_hash, canonical_json
 from .contract import normalize_timestamp
 from .errors import EvaluationError
-from .jev import _PROBABILITY_SUM_TOLERANCE
+from .jev import _probability_sum_tolerance
 from .taxonomy import Taxonomy
 
 EVALUATION_REPORT_VERSION = "1"
@@ -508,10 +508,10 @@ def load_predictions(
 
     ``probabilities`` is validated the way the saved-response path validates a
     choice distribution: every value must be a finite number in ``[0, 1]``, every
-    key must be a label of *primary_facet*, and the distribution must sum to ~1.
-    Out-of-range, non-finite, non-numeric or mislabelled values raise
-    :class:`EvaluationError` instead of reaching the Brier score or the canonical
-    serializer.
+    key must be a label of *primary_facet*, and the sum error must fit the same
+    option-count-aware tolerance. Out-of-range, non-finite, non-numeric, or
+    mislabelled values raise :class:`EvaluationError` instead of reaching the
+    Brier score or the canonical serializer.
     """
     prediction_path = Path(path)
     try:
@@ -603,7 +603,8 @@ def load_predictions(
                 normalized_probabilities[label] = float(value)
                 probability_total += float(value)
             _require(
-                abs(probability_total - 1.0) <= _PROBABILITY_SUM_TOLERANCE,
+                abs(probability_total - 1.0)
+                <= _probability_sum_tolerance(len(normalized_probabilities)),
                 f"prediction for {episode_id!r} probabilities sum to "
                 f"{probability_total!r}, not ~1",
             )

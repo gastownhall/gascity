@@ -26,7 +26,21 @@ from .taxonomy import CHOICE, NOUL, Taxonomy
 # Conservative serialized-body cap. See module docstring: byte cap, not tokens.
 REQUEST_BYTE_CAP = 24 * 1024
 
-_PROBABILITY_SUM_TOLERANCE = 1e-6
+# Two-decimal rounding can contribute at most 0.005 drift per option. The
+# epsilon keeps mathematically inclusive boundaries inclusive after binary
+# floating-point summation; the cap prevents broad acceptance for large sets.
+_PROBABILITY_SUM_TOLERANCE_PER_OPTION = 0.005
+_PROBABILITY_SUM_TOLERANCE_EPSILON = 1e-9
+_PROBABILITY_SUM_TOLERANCE_MAX = 0.05
+
+
+def _probability_sum_tolerance(option_count: int) -> float:
+    """Return the inclusive sum-error band for a probability distribution."""
+    return min(
+        _PROBABILITY_SUM_TOLERANCE_PER_OPTION * option_count
+        + _PROBABILITY_SUM_TOLERANCE_EPSILON,
+        _PROBABILITY_SUM_TOLERANCE_MAX,
+    )
 
 
 def _reject_json_constant(value: str) -> Any:
@@ -176,9 +190,9 @@ def validate_response(response: Any, request_body: dict[str, Any]) -> list[dict[
     ``type`` values and carry ``choice``/``noul`` fields (never ``value``).
     Checks the model string, usage counters, question ids and types, choice
     probability distributions (all criteria options present, finite, in [0,1],
-    summing to ~1) with confidence in [0,1], and noul probabilities in [0,1]
-    with no confidence field. Unknown top-level keys are rejected so a
-    server-injected extra field cannot poison replay deduplication.
+    with the option-count-aware sum tolerance) and confidence in [0,1], and noul
+    probabilities in [0,1] with no confidence field. Unknown top-level keys are
+    rejected so a server-injected extra field cannot poison replay deduplication.
     """
     if not isinstance(response, dict):
         raise ResponseError("response must be a JSON object")
@@ -308,7 +322,7 @@ def _validate_choice_answer(question_id: str, question: dict[str, Any], answer: 
         normalized_probabilities[option] = float(probability)
         total += float(probability)
 
-    if abs(total - 1.0) > _PROBABILITY_SUM_TOLERANCE:
+    if abs(total - 1.0) > _probability_sum_tolerance(len(options)):
         raise ResponseError(
             f"answer {question_id!r} probabilities sum to {total!r}, not ~1"
         )
