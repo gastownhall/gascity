@@ -83,8 +83,8 @@ def session_snapshot_hash(
 
 
 # Text-mode classification deliberately occupies a separate snapshot namespace
-# from metadata-mode classification. Keep this helper aligned with the existing
-# collector namespace so stores and migrations can resolve both scopes.
+# from metadata-mode classification. This is the single source of truth for
+# collectors, stores, and migrations resolving both scopes.
 SESSION_TEXT_SNAPSHOT_NAMESPACE = "session-text"
 
 
