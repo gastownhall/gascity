@@ -102,6 +102,9 @@ func bdLatestSchemaVersion(bdPath string) (int, error) {
 		return 0, fmt.Errorf("bd schema probe: create tool home: %w", err)
 	}
 	cmd := bdSchemaProbeCommand(ctx, bdPath, dir)
+	// BEADS_TEST_MODE=1 (beadstest.EnvBeadsTestMode) stops bd spawning the
+	// detached metrics flusher that would race the RemoveAll of dir above.
+	cmd.Env = append(cmd.Env, "BEADS_TEST_MODE=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return 0, fmt.Errorf("bd schema probe: %s migrate schema: %w\n%s", bdPath, err, out)

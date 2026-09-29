@@ -86,7 +86,7 @@ func TestBdStoreConformance(t *testing.T) {
 
 		configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
 
-		return beads.NewBdStore(wsDir, pinnedBdStoreCommandRunner())
+		return beads.NewBdStore(wsDir, pinnedBdStoreCommandRunnerWithEnv(map[string]string{"HOME": parseEnvList(isolateBdHomeEnv(env))["HOME"]}))
 	}
 
 	// Run conformance suite. We skip RunSequentialIDTests because BdStore
@@ -207,7 +207,7 @@ func TestBdStoreMailWispInsert(t *testing.T) {
 	runBDInit(t, env, wsDir, "mc", serverPort)
 	configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
 
-	store := beads.NewBdStore(wsDir, pinnedBdStoreCommandRunner())
+	store := beads.NewBdStore(wsDir, pinnedBdStoreCommandRunnerWithEnv(map[string]string{"HOME": parseEnvList(isolateBdHomeEnv(env))["HOME"]}))
 
 	// Create an ephemeral message bead — exercises bd create --ephemeral →
 	// Dolt SQL INSERT INTO wisps + INSERT INTO wisp_events.
@@ -251,7 +251,7 @@ func TestBdStoreMailWispInsert(t *testing.T) {
 // TestBdStoreMailWispInsertIsolatesHOMEFromSharedServerConfig mirrors
 // TestBdStoreMailWispInsert but deliberately points env's HOME at a
 // shared-server config.yaml before running the exact same
-// runBDInit/configureCustomTypes/pinnedBdStoreCommandRunner chain.
+// runBDInit/configureCustomTypes/pinnedBdStoreCommandRunnerWithEnv chain.
 //
 // newIsolatedToolEnv pins env's own HOME to the REAL passwd-db home (via
 // pinRealHomeEnv/integrationEnvFor), not to any test-scoped directory —

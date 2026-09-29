@@ -17,7 +17,7 @@ Fresh evaluation completed on 2026-09-29. The changed Linux CI workflow complete
 | # | Result | Evidence |
 |---|---|---|
 | 1 | PASS | Review ga-8k07n9 explicitly records PASS for the resolved reviewed source. Single reviewer pass is the active policy; no second-pass verdict is invented. |
-| 2 | PASS | Shared bounded cleanup and test-owned HOME setup cover the CLI/API/doctor/acceptance fixture sites; all 20 changed bodies passed by name. Cleanup ordering, retry exhaustion, subprocess overrides and HOME isolation were exercised. Supported bd has no verified shutdown hook: bounded RemoveAll remains the fallback, and BEADS_TEST_MODE is forward compatible. |
+| 2 | PASS | Shared bounded cleanup and test-owned HOME setup cover the CLI/API/doctor/acceptance fixture sites; all 20 changed bodies passed by name. Cleanup ordering, retry exhaustion, subprocess overrides and HOME isolation were exercised. Supported bd has no verified shutdown hook: bounded RemoveAll remains the fallback, and the pinned bd honours BEADS_TEST_MODE (skips the detached metrics flusher and also enables storage-layer test guards, so server-bound runners override it to 0). |
 | 3 | PASS | Fresh complete 40-job sweep, both acceptance tiers, current/minimum contracts and complete pinned policy/generated checks passed. Linux first-run evidence is complete; Mac 3c is HANDED ON under the specific operator ruling, with a tracked post-merge obligation. See commands/counts below. |
 | 4 | PASS | Exact-source review has no unresolved high-severity finding. |
 | 5 | PASS | Branch was clean before the gate record; only this record is staged. The post-commit clean-tree and final head proof are recorded on the bead before clearance/handoff. |
