@@ -751,8 +751,13 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 			// Archive the SAME messages that were injected: select the same
 			// window formatInjectOutput displays so the archived set matches
 			// (a priority:1 handoff that floats into the window is injected
-			// AND archived, never injected-but-not-archived).
-			archiveInjectedAutoHandoffMessages(mp, selectMailInjectWindow(messages), stderr)
+			// AND archived, never injected-but-not-archived). allShown()
+			// includes the collapsed empty-body auto-handoff group in full
+			// (ga-8gdkfy Rule C: all of them are archived, not just however
+			// many the collapsed line would otherwise imply); the archiver
+			// itself label-checks each ID, so ordinary mail passed through is
+			// a no-op.
+			archiveInjectedAutoHandoffMessages(mp, selectMailInjectWindow(messages).allShown(), stderr)
 		}
 		return 0 // --inject always exits 0
 	}
@@ -806,29 +811,91 @@ func sortMailByPriority(messages []mail.Message) []mail.Message {
 	return sorted
 }
 
-// selectMailInjectWindow returns the at-most mailInjectMaxMessages messages
-// that formatInjectOutput displays. Any caller archiving "the injected
-// messages" (doMailCheckTargetWithFormat, sessionStartAutoHandoffInjection)
-// must select the same window so the archived set never diverges from the
-// displayed set (see the "Archive the SAME messages" comments at both call
-// sites).
+// mailInjectWindow is the render/archive plan selectMailInjectWindow computes
+// for one inject call. collapsed is the ga-8gdkfy Rule C group — every unread
+// empty-body auto-handoff that will be archived on delivery, newest first,
+// included in full regardless of count. rest is the ordinary priority/recency
+// window (formerly selectMailInjectWindow's whole job) over everything else,
+// oldest first.
+type mailInjectWindow struct {
+	collapsed []mail.Message
+	rest      []mail.Message
+}
+
+// allShown returns every message the window renders, collapsed group first.
+// archiveInjectedAutoHandoffMessages archives from this: it label-checks each
+// ID itself, so passing ordinary mail through is a safe no-op.
+func (w mailInjectWindow) allShown() []mail.Message {
+	out := make([]mail.Message, 0, len(w.collapsed)+len(w.rest))
+	out = append(out, w.collapsed...)
+	out = append(out, w.rest...)
+	return out
+}
+
+// isCollapsibleAutoHandoff reports whether m is a ga-8gdkfy Rule C candidate:
+// content-free (no body to lose) and archived on delivery regardless of
+// whether it is ever shown. A body-bearing auto-handoff is still archived on
+// delivery when shown, but keeps its own line under the normal window instead
+// of joining the collapse (its body is content that would otherwise vanish
+// from the rendered block).
+func isCollapsibleAutoHandoff(m mail.Message) bool {
+	return m.ArchivedOnDelivery && m.Body == ""
+}
+
+// selectMailInjectWindow returns the render/archive plan formatInjectOutput
+// and the archive call sites (doMailCheckTargetWithFormat,
+// sessionStartAutoHandoffInjectionWithStore) both build on, so the archived
+// set never diverges from the displayed set (see the "Archive the SAME
+// messages" comments at both call sites).
 //
-// It keeps sortMailByPriority's contract (higher priority first) but, within
-// a priority tier, keeps the NEWEST arrivals rather than the oldest: without
-// this, a backlog of stale same-priority mail permanently fills the
-// mailInjectMaxMessages window and a newly arrived message is never surfaced
-// (gastownhall/gascity ga-18f84o). The returned window is re-sorted ascending
-// by CreatedAt so the rendered block still reads oldest-to-newest.
-func selectMailInjectWindow(messages []mail.Message) []mail.Message {
+// Every unread empty-body auto-handoff collapses into the plan's single
+// "collapsed" group: however many are unread, they cost only one slot of
+// mailInjectMaxMessages (ga-8gdkfy Rule C), so a backlog of them can no
+// longer clamp ordinary mail out of the window the way a full per-message
+// cost once did. Everything else competes for the remaining slots exactly as
+// before: sortMailByPriority's contract (higher priority first) but, within a
+// priority tier, the NEWEST arrivals rather than the oldest — without that, a
+// backlog of stale same-priority mail permanently fills the window and a
+// newly arrived message is never surfaced (gastownhall/gascity ga-18f84o).
+// rest is re-sorted ascending by CreatedAt so the rendered block still reads
+// oldest-to-newest.
+func selectMailInjectWindow(messages []mail.Message) mailInjectWindow {
+	var collapsed, rest []mail.Message
+	for _, m := range messages {
+		if isCollapsibleAutoHandoff(m) {
+			collapsed = append(collapsed, m)
+		} else {
+			rest = append(rest, m)
+		}
+	}
+	sort.SliceStable(collapsed, func(i, j int) bool {
+		return collapsed[i].CreatedAt.After(collapsed[j].CreatedAt) // newest first
+	})
+	budget := mailInjectMaxMessages
+	if len(collapsed) > 0 {
+		budget--
+	}
+	return mailInjectWindow{
+		collapsed: collapsed,
+		rest:      windowMailByPriorityAndRecency(rest, budget),
+	}
+}
+
+// windowMailByPriorityAndRecency clamps messages to at most limit: highest
+// priority first, newest-within-a-tier when the clamp bites, then re-sorted
+// oldest first for display. This is selectMailInjectWindow's pre-Rule-C
+// clamp, parameterized so a collapsed auto-handoff group can shrink the
+// budget left for everything else without changing the tie-break logic.
+func windowMailByPriorityAndRecency(messages []mail.Message, limit int) []mail.Message {
 	windowed := sortMailByPriority(messages)
-	if len(windowed) > mailInjectMaxMessages {
+	if len(windowed) > limit {
 		sort.SliceStable(windowed, func(i, j int) bool {
 			if windowed[i].Priority != windowed[j].Priority {
 				return windowed[i].Priority > windowed[j].Priority
 			}
 			return windowed[i].CreatedAt.After(windowed[j].CreatedAt)
 		})
-		windowed = windowed[:mailInjectMaxMessages]
+		windowed = windowed[:limit]
 	}
 	sort.SliceStable(windowed, func(i, j int) bool {
 		return windowed[i].CreatedAt.Before(windowed[j].CreatedAt)
@@ -841,15 +908,35 @@ func selectMailInjectWindow(messages []mail.Message) []mail.Message {
 // display window via selectMailInjectWindow so both inject render paths
 // (renderMailCheckFromAPI and doMailCheckTargetWithFormat) surface higher-
 // priority, then most-recent, unread mail first.
+//
+// Every rendered line for a message that is archived on delivery says so
+// (ga-8gdkfy Rule A), and once any shown message is archived on delivery, the
+// block stops promising that 'gc mail inbox' will show "all" or "the full
+// list" — the next inbox listing will be missing exactly those messages
+// (Rule B). Without this, an agent is told to trust an inbox listing that can
+// no longer produce what was just shown.
 func formatInjectOutput(messages []mail.Message) string {
-	windowed := selectMailInjectWindow(messages)
+	window := selectMailInjectWindow(messages)
+	shown := window.allShown()
+	archivedCount := 0
+	for _, m := range shown {
+		if m.ArchivedOnDelivery {
+			archivedCount++
+		}
+	}
+	anyArchived := archivedCount > 0
+	remainingUnread := len(messages) - archivedCount
+
 	var sb strings.Builder
 	sb.WriteString("<system-reminder>\n")
 	fmt.Fprintf(&sb, "You have %d unread message(s).\n\n", len(messages))
-	if len(windowed) < len(messages) {
-		fmt.Fprintf(&sb, "Showing the %d most recent message(s) here; run 'gc mail inbox' for the full list.\n\n", len(windowed))
+	switch {
+	case anyArchived:
+		fmt.Fprintf(&sb, "Some of these are archived on delivery below; 'gc mail inbox' will list the %d message(s) still unread afterward.\n\n", remainingUnread)
+	case len(shown) < len(messages):
+		fmt.Fprintf(&sb, "Showing the %d most recent message(s) here; run 'gc mail inbox' for the full list.\n\n", len(shown))
 	}
-	for _, m := range windowed {
+	for _, m := range shown {
 		// Sanitize attacker-controllable fields (sender identity, subject,
 		// body) before interpolating into the <system-reminder> block.
 		// Without this, a sender can inject </system-reminder> sequences
@@ -881,9 +968,16 @@ func formatInjectOutput(messages []mail.Message) string {
 		if bodyTruncated {
 			sb.WriteString(" ... [preview truncated]")
 		}
+		if m.ArchivedOnDelivery {
+			sb.WriteString(" (auto-handoff, archived on delivery; still readable via 'gc mail read <id>')")
+		}
 		sb.WriteByte('\n')
 	}
-	sb.WriteString("\nRun 'gc mail read <id>' for full details, or 'gc mail inbox' to see all.\n")
+	if anyArchived {
+		sb.WriteString("\nRun 'gc mail read <id>' for full details. Archived messages above no longer appear in 'gc mail inbox'.\n")
+	} else {
+		sb.WriteString("\nRun 'gc mail read <id>' for full details, or 'gc mail inbox' to see all.\n")
+	}
 	sb.WriteString("</system-reminder>\n")
 	return sb.String()
 }

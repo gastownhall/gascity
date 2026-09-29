@@ -354,6 +354,68 @@ func TestSessionStartAutoHandoffUsesProvidedStoreWithoutOpeningCity(t *testing.T
 	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 }
 
+// TestSessionStartAutoHandoffInjectionAssertsRulesAAndB is the SessionStart-path
+// (prime_auto_handoff_inject.go) counterpart of
+// TestMailCheckInjectKeepsInboxPromiseForArchivedAutoHandoffs (gm-hd3ank /
+// ga-8gdkfy): the auto-handoff line sessionStartAutoHandoffInjectionWithStore
+// renders must say it is archived on delivery (rule A), and the block must not
+// promise 'gc mail inbox' shows "all" / "the full list" once it has (rule B).
+func TestSessionStartAutoHandoffInjectionAssertsRulesAAndB(t *testing.T) {
+	clearGCEnv(t)
+	store := beads.NewMemStore()
+	sessionInfo, err := store.Create(beads.Bead{
+		Title:  "gastown--worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"agent_name":   "worker",
+			"session_name": "gastown--worker",
+			"state":        "active",
+			"template":     "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	auto, ok := createHandoffMail(store, store, events.Discard, sessionInfo.ID, sessionInfo.ID,
+		[]string{"context cycle", "continue from the provided store"}, "context cycle",
+		[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, io.Discard)
+	if !ok {
+		t.Fatal("createHandoffMail(auto) failed")
+	}
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_SESSION_ID", sessionInfo.ID)
+
+	injection, ids, _ := sessionStartAutoHandoffInjectionWithStore(store, cityDir, io.Discard)
+	if !ids[auto.ID] {
+		t.Fatalf("rendered IDs = %#v, want auto-handoff %q", ids, auto.ID)
+	}
+
+	shown := injectedMailLines(injection.text)
+	line, ok := shown[auto.ID]
+	if !ok {
+		t.Fatalf("SessionStart injection does not show auto handoff %s:\n%s", auto.ID, injection.text)
+	}
+	if !strings.Contains(strings.ToLower(line), "archived") {
+		t.Errorf("SessionStart injection line for %s does not say archived: %q", auto.ID, line)
+	}
+	for _, overPromise := range []string{"to see all", "for the full list"} {
+		if strings.Contains(injection.text, overPromise) {
+			t.Errorf("SessionStart injection says 'gc mail inbox' %s, but %s was archived on delivery", overPromise, auto.ID)
+		}
+	}
+
+	if injection.afterDelivery == nil {
+		t.Fatal("afterDelivery = nil, want archive acknowledgement")
+	}
+	injection.afterDelivery()
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
+}
+
 func TestDoPrimeScopesRigPackFragmentsByCurrentRig(t *testing.T) {
 	clearGCEnv(t)
 

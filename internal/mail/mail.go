@@ -60,6 +60,18 @@ type Message struct {
 	Priority  int       `json:"priority,omitempty"`
 	CC        []string  `json:"cc,omitempty"`
 	Rig       string    `json:"rig,omitempty"`
+
+	// ArchivedOnDelivery reports whether the backend will archive this
+	// message once it has been shown to its recipient (beadmail:
+	// AutoHandoffLabel + ArchiveAfterInjectLabel both present — see
+	// beadmail.ArchiveInjectedAutoHandoffs and beadmail.CheckAutoHandoffs,
+	// whose filter makes every message returned there unconditionally
+	// true here). It is derived from provider-internal labels, not part of
+	// the message's own content, so it is excluded from the wire encoding
+	// (ga-8gdkfy: an inject preview must say "archived" on any line this
+	// is true for, and must stop promising 'gc mail inbox' shows "all"
+	// once any shown line is).
+	ArchivedOnDelivery bool `json:"-"`
 }
 
 // HandoffIntent is the domain-shaped request for handoff mail. It lets the
