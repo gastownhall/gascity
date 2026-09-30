@@ -36,25 +36,48 @@ func gcOwnsProxiedScope(cityPath, scopeRoot string) (bool, error) {
 	} else if transferred {
 		return true, nil
 	}
+	return scopeConfigMarksGCManagedEndpoint(scopeRoot), nil
+}
+
+// scopeConfigMarksGCManagedEndpoint reports whether scopeRoot's config.yaml
+// carries gc's own canonical endpoint marker: the city's managed server, or a
+// rig inheriting it. An unreadable config proves nothing about ownership, so it
+// reads as unmarked and the file is left alone.
+func scopeConfigMarksGCManagedEndpoint(scopeRoot string) bool {
 	state, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(scopeRoot, ".beads", "config.yaml"))
 	if err != nil || !ok {
-		// An unreadable config proves nothing about ownership; leave the file
-		// alone. gc's own bd processes still carry the env opt-out.
-		return false, nil //nolint:nilerr // ownership is unproven, not an error
+		return false
 	}
 	switch state.EndpointOrigin {
 	case contract.EndpointOriginManagedCity, contract.EndpointOriginInheritedCity:
-		return true, nil
+		return true
 	default:
-		return false, nil
+		return false
 	}
 }
 
+// gcOwnsScope reports whether scopeRoot is a scope gc owns, and may therefore
+// pin out of bd's user-level shared-server mode. A proxied scope is owned on the
+// evidence gcOwnsProxiedScope weighs. Any other Dolt scope is gc's managed
+// server-mode store when its config.yaml carries gc's endpoint marker — it has
+// no provider journal or handoff to consult — and only while the store is gc's
+// own Dolt: a doltlite scope, or one bound to an external backend, is not.
+func gcOwnsScope(cityPath, scopeRoot string) (bool, error) {
+	if scopeUsesProxiedDoltMode(cityPath, scopeRoot) {
+		return gcOwnsProxiedScope(cityPath, scopeRoot)
+	}
+	owned := scopeConfigMarksGCManagedEndpoint(scopeRoot) &&
+		!scopeBackendIsDoltlite(cityPath, scopeRoot) &&
+		!scopeStoreIsExternallyBoundBestEffort(cityPath, scopeRoot)
+	return owned, nil
+}
+
 // ensureGCOwnedProxiedScopeSharedServerOff pins dolt.shared-server: false into
-// the config.yaml of a gc-owned proxied scope. It runs after every bd init of
-// such a scope (bd init rewrites config.yaml, so a pin written before init does
-// not survive) and on every `gc start`, which repairs scopes initialized by a
-// build that did not write it.
+// the config.yaml of a scope gc owns (gcOwnsScope): a proxied scope or a managed
+// server-mode one. It runs after every bd init of such a scope (bd init
+// rewrites config.yaml, so a pin written before init does not survive) and on
+// every `gc start`, which repairs scopes initialized by a build that did not
+// write it.
 //
 // The env opt-out (applyProxiedSharedServerOptOut) covers every bd process gc
 // spawns; this pin covers the ones it does not — an agent running `bd` in its
@@ -65,7 +88,7 @@ func gcOwnsProxiedScope(cityPath, scopeRoot string) (bool, error) {
 // Dolt root; the rows it wrote meanwhile are in ~/.beads/shared-server, so say
 // so rather than letting the store look silently emptier.
 func ensureGCOwnedProxiedScopeSharedServerOff(cityPath, scopeRoot string) error {
-	owned, err := gcOwnsProxiedScope(cityPath, scopeRoot)
+	owned, err := gcOwnsScope(cityPath, scopeRoot)
 	if err != nil || !owned {
 		return err
 	}
@@ -87,8 +110,8 @@ func ensureGCOwnedProxiedScopeSharedServerOff(cityPath, scopeRoot string) error 
 		forgetProxiedScopeRuntimeEnv(cityPath)
 	}
 	if previous == contract.SharedServerPinnedOn {
-		log.Printf("gc: %s had %s: true (bound to bd's host-wide shared server, ~/.beads/shared-server); gc-owned proxied scopes keep their own Dolt root, so it is now pinned false. Beads written while it was bound live in the shared server's Dolt root, not in %s",
-			path, contract.SharedServerConfigKey, filepath.Join(scopeRoot, ".beads", "dolt"))
+		log.Printf("gc: %s had %s: true (bound to bd's host-wide shared server, ~/.beads/shared-server); gc-owned scopes keep their own Dolt root, so it is now pinned false. Beads written while it was bound live in the shared server's Dolt root, not in the scope's own",
+			path, contract.SharedServerConfigKey)
 	}
 	return nil
 }
@@ -120,13 +143,13 @@ func gcOwnedProxiedScopeRoots(cityPath string, cfg *config.City) ([]string, []er
 }
 
 // applyGCOwnedScopeSharedServerOptOut adds the shared-server opt-out to a bd
-// env projected for scopeRoot when, and only when, that scope is a gc-owned
-// proxied one. A proxied scope gc merely found keeps the operator's own
-// resolution: pinning gc's bd off while an agent's bd (which reads the scope's
-// unpinned config.yaml) follows the user-level mode would split one store
-// across two Dolt roots.
+// env projected for scopeRoot when, and only when, gc owns that scope
+// (gcOwnsScope). A scope gc merely found keeps the operator's own resolution:
+// pinning gc's bd off while an agent's bd (which reads the scope's unpinned
+// config.yaml) follows the user-level mode would split one store across two
+// Dolt roots.
 func applyGCOwnedScopeSharedServerOptOut(env map[string]string, cityPath, scopeRoot string) error {
-	owned, err := gcOwnsProxiedScope(cityPath, scopeRoot)
+	owned, err := gcOwnsScope(cityPath, scopeRoot)
 	if err != nil {
 		return fmt.Errorf("classifying %s for the bd shared-server opt-out: %w", scopeRoot, err)
 	}
@@ -138,7 +161,7 @@ func applyGCOwnedScopeSharedServerOptOut(env map[string]string, cityPath, scopeR
 
 // applySessionSharedServerOptOut carries the shared-server opt-out into an
 // agent session's environment when the session's scope (the rig, or the city
-// when scopeRoot is empty) is a gc-owned proxied scope. The scope's config.yaml
+// when scopeRoot is empty) is a scope gc owns. The scope's config.yaml
 // pin already covers a `bd` the agent runs in its shell, except against an
 // inherited BEADS_DOLT_SHARED_SERVER=1, which bd reads before any config file.
 // Scopes gc does not own keep whatever the operator's environment says.

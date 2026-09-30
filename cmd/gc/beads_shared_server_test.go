@@ -117,9 +117,10 @@ func TestFoundProxiedScopeGetsNoSharedServerOptOutAnywhere(t *testing.T) {
 	}
 }
 
-// The opt-out is a statement about proxied scopes gc owns. A rig that is not
-// proxied must not inherit it from its proxied city's projection: its bd
-// resolution (and the operator's shared-server choice for it) is unchanged.
+// The opt-out is a statement about scopes gc owns. A rig gc does not own (here,
+// one on an external host) must not inherit it from its proxied city's
+// projection: its bd resolution (and the operator's shared-server choice for
+// it) is unchanged.
 func TestNonProxiedRigDoesNotInheritTheCitySharedServerPin(t *testing.T) {
 	cityPath, _ := proxiedEnvTestCity(t)
 	rig := filepath.Join(cityPath, "rigs", "direct")
