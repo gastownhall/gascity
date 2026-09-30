@@ -557,7 +557,7 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 				return Bead{}, ErrNotFound
 			}
 			c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
-				depsMode:   depsFromFields,
+				depsMode:   depsFromFieldsIfCarried,
 				seqMode:    seqClearBeadSeqOnly,
 				clearDirty: true,
 			})

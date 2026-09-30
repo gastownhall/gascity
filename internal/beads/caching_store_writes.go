@@ -48,7 +48,7 @@ func (c *CachingStore) createWith(create func() (Bead, error)) (Bead, error) {
 	c.mu.Lock()
 	c.noteLocalMutationLocked(created.ID)
 	c.absorbFreshLocked(created.ID, created, time.Now(), absorbOpts{
-		depsMode:   depsFromFields,
+		depsMode:   depsFromFieldsIfCarried,
 		seqMode:    seqKeep,
 		clearDirty: true,
 	})
@@ -101,7 +101,7 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 		if current, ok := c.beads[id]; ok {
 			fresh = applyUpdateOptsToBead(current, opts)
 			c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
-				depsMode:   depsFromFields,
+				depsMode:   depsKeepCached,
 				seqMode:    seqKeep,
 				clearDirty: false,
 			})
@@ -125,7 +125,7 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 	c.mu.Lock()
 	c.noteLocalMutationLocked(id)
 	c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
-		depsMode:   depsFromFields,
+		depsMode:   depsFromFieldsIfCarried,
 		seqMode:    seqKeep,
 		clearDirty: true,
 	})
@@ -159,7 +159,7 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 	c.noteLocalMutationLocked(id)
 	if refreshed {
 		c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
-			depsMode:   depsFromFields,
+			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqKeep,
 			clearDirty: true,
 		})
@@ -270,6 +270,14 @@ func (c *CachingStore) Reopen(id string) error {
 		setBeadStatus(&reopened, "open")
 		found = true
 		refreshed = true
+		// A close may have dropped the cached edges (CloseAll does). A row from
+		// a backing whose rows omit their edges gets them from the backing, as
+		// the overlay does; a complete row already answers.
+		if !beadCarriesDependencyFields(reopened) && !c.backingRowsCarryDependencies() {
+			if deps, depErr := c.backing.DepList(id, "down"); depErr == nil {
+				reopened.Dependencies = deps
+			}
+		}
 	} else if !errors.Is(err, ErrNotFound) {
 		c.recordProblem("refresh bead after reopen", fmt.Errorf("%s: %w", id, err))
 	}
@@ -278,7 +286,7 @@ func (c *CachingStore) Reopen(id string) error {
 	c.noteLocalMutationLocked(id)
 	if refreshed {
 		c.absorbFreshLocked(id, reopened, time.Now(), absorbOpts{
-			depsMode:   depsKeepCached,
+			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqKeep,
 			clearDirty: true,
 		})
@@ -387,7 +395,7 @@ func (c *CachingStore) SetMetadata(id, key, value string) error {
 	c.noteLocalMutationLocked(id)
 	if refreshed {
 		c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
-			depsMode:   depsFromFields,
+			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqKeep,
 			clearDirty: true,
 		})
@@ -449,7 +457,7 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 	c.noteLocalMutationLocked(id)
 	if refreshed {
 		c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
-			depsMode:   depsFromFields,
+			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqKeep,
 			clearDirty: true,
 		})
@@ -649,7 +657,7 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 				statusChanged = true
 			}
 			c.absorbFreshLocked(item.id, fresh, now, absorbOpts{
-				depsMode:   depsFromFields,
+				depsMode:   depsFromFieldsIfCarried,
 				seqMode:    seqKeep,
 				clearDirty: true,
 			})

@@ -1155,7 +1155,11 @@ func (s *SQLiteStore) Get(id string) (Bead, error) {
 	if err != nil {
 		return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
 	}
-	return b, nil
+	items := []Bead{b}
+	if err := hydrateSQLiteDeps(context.Background(), s.readDB, items); err != nil {
+		return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
+	}
+	return items[0], nil
 }
 
 func (s *SQLiteStore) revisionSelectExpr(tableAlias string) string {
@@ -1341,7 +1345,14 @@ func (s *SQLiteStore) getTx(ctx context.Context, tx *sql.Tx, id string) (Bead, e
 	if errors.Is(err, sql.ErrNoRows) {
 		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
 	}
-	return b, err
+	if err != nil {
+		return b, err
+	}
+	items := []Bead{b}
+	if err := hydrateSQLiteDeps(ctx, tx, items); err != nil {
+		return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
+	}
+	return items[0], nil
 }
 
 // Close sets a bead's status to closed.
@@ -1427,6 +1438,9 @@ func (s *SQLiteStore) List(query ListQuery) ([]Bead, error) {
 	sortBeadsForQuery(result, query.Sort)
 	if query.Limit > 0 && len(result) > query.Limit {
 		result = result[:query.Limit]
+	}
+	if err := hydrateSQLiteDeps(context.Background(), s.readDB, result); err != nil {
+		return nil, fmt.Errorf("listing sqlite beads: %w", err)
 	}
 	return result, nil
 }
@@ -1552,10 +1566,7 @@ func (s *SQLiteStore) ListOpen(status ...string) ([]Bead, error) {
 // Ready returns open, unblocked actionable beads from the requested tier in
 // the canonical (priority, created_at, id) ready order.
 func (s *SQLiteStore) Ready(query ...ReadyQuery) ([]Bead, error) {
-	if err := s.ensureOpen(); err != nil {
-		return nil, err
-	}
-	return s.readyRows(context.Background(), readyQueryFromArgs(query))
+	return s.ReadyContext(context.Background(), query...)
 }
 
 // ReadyContext implements ContextReadyReader for the SQLite store. The context
@@ -1574,7 +1585,14 @@ func (s *SQLiteStore) ReadyContext(ctx context.Context, query ...ReadyQuery) ([]
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return s.readyRows(ctx, readyQueryFromArgs(query))
+	rows, err := s.readyRows(ctx, readyQueryFromArgs(query))
+	if err != nil {
+		return rows, err
+	}
+	if err := hydrateSQLiteDeps(ctx, s.readDB, rows); err != nil {
+		return nil, fmt.Errorf("listing sqlite ready beads: %w", err)
+	}
+	return rows, nil
 }
 
 // readyRows is the single ready read shared by Ready and ReadyContext, so both

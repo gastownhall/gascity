@@ -28,7 +28,10 @@ import (
 type CachingStore struct {
 	backing  Store // runtime: usually *BdStore; tests and projections may use any Store
 	idPrefix string
-	epoch    uint64 // names this instance in every CacheRevision it issues
+	// eventPrefixes, when set, are the id namespaces whose bead events this
+	// cache applies, in place of idPrefix (WithEventIDPrefixes).
+	eventPrefixes []string
+	epoch         uint64 // names this instance in every CacheRevision it issues
 
 	mu                  sync.RWMutex
 	beads               map[string]Bead
@@ -154,14 +157,20 @@ func (o CacheObservation) CacheRev() CacheRevision {
 //     install a refresh read before taking the lock, without a writeSeq fence.
 //   - A conflicting event is verified only while the row's beadSeq is present
 //     or its local write is under five seconds old; once a newer scan clears
-//     beadSeq, a late event can apply.
+//     beadSeq, a late event can apply. Events that carry a full edge set (a
+//     class binding's) extend this to edges: a stale explicit empty edge set
+//     delivered after a watcher stall longer than five seconds can roll back a
+//     local DepAdd until the next re-scan (P1.10b).
 //   - A full Prime that replaces the maps wholesale drops every fence.
 //   - Any dirty row refuses the census for the whole store, and there is no
 //     API to drain dirty rows, so a consumer that needs bounded lag cannot
 //     force it today.
 //
-// A store opened without a CachingStore has no watermark at all; its
-// consumers must fall back to per-row markers.
+// A store read without a CachingStore has no watermark at all; its consumers
+// must fall back to per-row markers. The controller reads the work and rig
+// ledgers and, on a split city, each relocated class binding through one, so
+// every leg it censuses has a watermark. A one-shot CLI process's class
+// stores have none.
 type CacheRevision struct {
 	Epoch uint64
 	Seq   uint64
@@ -325,7 +334,7 @@ func computeAutoStagger(agentID string) time.Duration {
 // changed bead's metadata at the record site (see notifyChange); the wiring
 // stamps them onto the recorded event so the redacted export can forward them
 // as typed primitives without ever decoding the payload.
-func NewCachingStore(backing Store, onChange func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage)) *CachingStore {
+func NewCachingStore(backing Store, onChange func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage), opts ...CachingStoreOption) *CachingStore {
 	prefix := ""
 	bdBacking := false
 	nilBdBacking := false
@@ -340,6 +349,9 @@ func NewCachingStore(backing Store, onChange func(eventType, beadID, runID, sess
 		prefix = backing.IDPrefix()
 	}
 	cs := newCachingStore(backing, prefix, onChange)
+	for _, opt := range opts {
+		opt(cs)
+	}
 	switch {
 	case backing == nil:
 		cs.recordProblem("cache backing", errors.New("nil store backing; cache will panic on first use"))
@@ -349,6 +361,27 @@ func NewCachingStore(backing Store, onChange func(eventType, beadID, runID, sess
 		cs.recordProblem("bd cache ownership", errors.New("missing issue prefix; foreign bead event filtering disabled"))
 	}
 	return cs
+}
+
+// CachingStoreOption configures a CachingStore at construction.
+type CachingStoreOption func(*CachingStore)
+
+// WithEventIDPrefixes sets the id namespaces whose bead events the cache
+// applies. By default that is the backing's own mint prefix, which is right for
+// a store that holds only what it mints. A bead engine serving several
+// coordination classes holds rows under every namespace those classes reserve
+// (the nudge queue's records, older per-class prefixes), and a cache filtering
+// on the mint prefix alone would drop the events for all of them. IDPrefix still
+// reports the mint prefix. Prefixes that normalize to nothing are ignored, and
+// with none left the default stands.
+func WithEventIDPrefixes(prefixes ...string) CachingStoreOption {
+	return func(c *CachingStore) {
+		for _, prefix := range prefixes {
+			if normalized := normalizeIDPrefix(prefix); normalized != "" {
+				c.eventPrefixes = append(c.eventPrefixes, normalized)
+			}
+		}
+	}
 }
 
 // NewCachingStoreForTest wraps any Store for testing without production prefix
@@ -373,6 +406,17 @@ func adaptLegacyOnChange(fn func(eventType, beadID string, payload json.RawMessa
 	}
 	return func(eventType, beadID string, _, _, _ string, _ *[]string, payload json.RawMessage) {
 		fn(eventType, beadID, payload)
+	}
+}
+
+// ReconcileNowForTest runs one re-scan synchronously, as the reconcile loop
+// would at its next due tick, and skips it if one is already running. It lets
+// a composition test outside this package drive the re-scan without waiting on
+// the loop's timers. Test-only.
+func (c *CachingStore) ReconcileNowForTest() {
+	if c.reconciling.CompareAndSwap(false, true) {
+		c.runReconciliation()
+		c.reconciling.Store(false)
 	}
 }
 
@@ -423,10 +467,18 @@ func normalizeIDPrefix(prefix string) string {
 }
 
 func (c *CachingStore) ownsBeadID(id string) bool {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if len(c.eventPrefixes) > 0 {
+		for _, prefix := range c.eventPrefixes {
+			if strings.HasPrefix(id, prefix+"-") {
+				return true
+			}
+		}
+		return false
+	}
 	if c.idPrefix == "" {
 		return true
 	}
-	id = strings.ToLower(strings.TrimSpace(id))
 	return strings.HasPrefix(id, c.idPrefix+"-")
 }
 
@@ -486,8 +538,9 @@ const (
 	// (setting a nil entry when the bead carries no dependency fields).
 	depsFromFields
 	// depsFromFieldsIfCarried recomputes deps from the bead's fields only when
-	// the bead carries dependency fields; otherwise the cached deps row is left
-	// untouched.
+	// the bead carries dependency fields, or when the backing declares its rows
+	// complete (then no fields means no edges); otherwise the cached deps row is
+	// left untouched. Use it only for rows read from the backing.
 	depsFromFieldsIfCarried
 	// depsKeepCached leaves the cached deps row untouched.
 	depsKeepCached
@@ -555,6 +608,11 @@ type absorbOpts struct {
 // state. now is the caller's clock read for the whole pass; it is consulted
 // only by seqClearGuarded. Caller must hold c.mu in write mode.
 func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, opts absorbOpts) {
+	// A backing that declares complete rows makes a row without dependency
+	// fields a row without edges: its absence is an answer, not a gap.
+	if opts.depsMode == depsFromFieldsIfCarried && c.backingRowsCarryDependencies() {
+		opts.depsMode = depsFromFields
+	}
 	c.advanceObservationLocked()
 	bead = c.absorbReadyProjectionLocked(id, bead, opts)
 	c.beads[id] = cloneBead(bead)
@@ -1592,6 +1650,13 @@ func (c *CachingStore) applyReadyProjection(op string, items []Bead) ([]Bead, er
 // spending a subprocess, so a cleared flag could never be re-derived.
 func (c *CachingStore) readyReadsMustGoLive() bool {
 	return c.readyProjectionDegraded.Load()
+}
+
+// backingRowsCarryDependencies reports whether the backing declares that every
+// row it returns carries its complete edge set, so a row with none has none.
+func (c *CachingStore) backingRowsCarryDependencies() bool {
+	backing, ok := c.backing.(listDependencyCompletenessStore)
+	return ok && backing.listIncludesCompleteDependencies()
 }
 
 func (c *CachingStore) fetchDepsForBeads(beadMap map[string]Bead) (map[string][]Dep, bool, error) {

@@ -456,22 +456,24 @@ func TestSQLiteEnrichReadyProjectionEqualsReadySQL(t *testing.T) {
 	}
 }
 
-// depListRaceStore lands issue -> blocker on the first DepList(issue): the
-// edge a concurrent writer adds after a cache listed its rows and before it
-// read their deps.
+// depListRaceStore lands issue -> blocker right after the cache's first List
+// returns: the edge a concurrent writer adds after the cache read its rows and
+// their edges (the SQLite engine returns both in one List) and before it takes
+// the ready projection.
 type depListRaceStore struct {
 	*SQLiteStore
 	issue, blocker string
 	armed          atomic.Bool
 }
 
-func (s *depListRaceStore) DepList(id, direction string) ([]Dep, error) {
-	if id == s.issue && s.armed.CompareAndSwap(true, false) {
+func (s *depListRaceStore) List(query ListQuery) ([]Bead, error) {
+	rows, err := s.SQLiteStore.List(query)
+	if err == nil && s.armed.CompareAndSwap(true, false) {
 		if err := s.DepAdd(s.issue, s.blocker, "blocks"); err != nil {
 			return nil, err
 		}
 	}
-	return s.SQLiteStore.DepList(id, direction)
+	return rows, err
 }
 
 // TestCachingStoreProjectsReadinessAfterReadingDeps proves every cache load
@@ -535,7 +537,7 @@ func TestCachingStoreProjectsReadinessAfterReadingDeps(t *testing.T) {
 			cache := NewCachingStoreForTest(race, nil)
 			tc.load(t, cache, race)
 			if race.armed.Load() {
-				t.Fatal("the cache never read the issue's deps; the race was not exercised")
+				t.Fatal("the cache never listed its rows; the race was not exercised")
 			}
 
 			want, err := store.Ready()
