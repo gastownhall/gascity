@@ -305,10 +305,12 @@ assert_eq "city_root.walk_up_finds_ancestor" "$RESOLVED_WALK" "$CITY_WALK"
 SLOTS_FROM_CITY="$(GC_CITY_PATH="$CITY_ENV" GC_CITY="" GC_CITY_ROOT="" push_gate_slots_dir)"
 assert_eq "slots_dir.under_city_root" "$SLOTS_FROM_CITY" "$CITY_ENV/.gc/gate-slots"
 
+# Keep HOME as the fixture's walk-up ceiling: an unrelated HOME lets discovery
+# escape into real city roots above the temporary directory on the host.
 NOCITY="$WORK/no-city-repo"
 mkdir -p "$NOCITY"
 (cd "$NOCITY" && git init -q .) 2>/dev/null || true
-SLOTS_FALLBACK="$(cd "$NOCITY" && GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" HOME="$WORK/unrelated-home" push_gate_slots_dir)"
+SLOTS_FALLBACK="$(cd "$NOCITY" && GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" HOME="$WORK" push_gate_slots_dir)"
 assert_eq "slots_dir.falls_back_to_repo_relative" "$SLOTS_FALLBACK" "$NOCITY/.git/gate-slots"
 
 LINKED_REPO="$WORK/linked-repo"
@@ -324,8 +326,8 @@ git -C "$LINKED_REPO" commit -qm "seed linked worktree fixture"
 git -C "$LINKED_REPO" worktree add -q --detach "$LINKED_A"
 git -C "$LINKED_REPO" worktree add -q --detach "$LINKED_B"
 
-SLOTS_LINKED_A="$(cd "$LINKED_A" && GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" HOME="$WORK/unrelated-home" push_gate_slots_dir)"
-SLOTS_LINKED_B="$(cd "$LINKED_B" && GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" HOME="$WORK/unrelated-home" push_gate_slots_dir)"
+SLOTS_LINKED_A="$(cd "$LINKED_A" && GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" HOME="$WORK" push_gate_slots_dir)"
+SLOTS_LINKED_B="$(cd "$LINKED_B" && GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" HOME="$WORK" push_gate_slots_dir)"
 LINKED_COMMON="$(cd "$LINKED_REPO/.git" && pwd -P)"
 SLOTS_LINKED_A_N="$(cd "$(dirname "$SLOTS_LINKED_A")" && pwd -P)/gate-slots"
 assert_eq "slots_dir.linked_worktree_uses_common_git_dir" "$SLOTS_LINKED_A_N" "$LINKED_COMMON/gate-slots"

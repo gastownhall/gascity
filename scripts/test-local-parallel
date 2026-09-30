@@ -24,6 +24,11 @@ mode="$1"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+# Tests compare canonical store paths with t.TempDir paths. Resolve aliases
+# before creating any fixtures or passing TMPDIR through the env -i allowlist.
+TMPDIR="$(realpath -e "${TMPDIR:-/var/tmp}")"
+export TMPDIR
+
 # One shared seeded gitconfig for every nested test env; resolved once so the
 # env -i block below cannot drift from the Makefile (scripts/test-gitconfig-path).
 # Exported because the xargs fan-out worker (run_fan_out) expands it in a child
@@ -323,7 +328,7 @@ run_fan_out() {
     GIT_CONFIG_NOSYSTEM=1 \
     GIT_CONFIG_GLOBAL="$gc_test_gitconfig" \
     LANG="${LANG:-C.UTF-8}" \
-    TMPDIR="${TMPDIR:-/var/tmp}" \
+    TMPDIR="$TMPDIR" \
     OBSERVABLE_TEST_LOG="${OBSERVABLE_TEST_LOG-}" \
     OBSERVABLE_FAILURE_LINES="${OBSERVABLE_FAILURE_LINES-}" \
     GC_TEST_NO_SLICE="${GC_TEST_NO_SLICE-}" \
