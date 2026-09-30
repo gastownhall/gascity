@@ -694,13 +694,13 @@ func TestRigStoreOpenPolicyDiffersByCaller(t *testing.T) {
 	}
 }
 
-// TestOpenStandaloneRigStoresOpensRigsConcurrently pins that opening N bound
-// rig stores costs about as much as the SLOWEST open, not the sum of every
-// open. Each open runs the store factory's preflight (a `bd context --json`
+// TestOpenStandaloneRigStoresOpensRigsConcurrently pins that every bound rig
+// store is being opened at the same time: each open parks at a rendezvous that
+// only opens once ALL opens are in flight, which a rig-after-rig walk can never
+// satisfy. Each open runs the store factory's preflight (a `bd context --json`
 // subprocess plus a database identity probe), so a sequential walk turns that
 // latency into a sum across every bound rig on `gc ready`'s critical path.
 func TestOpenStandaloneRigStoresOpensRigsConcurrently(t *testing.T) {
-	const perRig = 100 * time.Millisecond
 	const rigCount = 5
 
 	cfg := &config.City{}
@@ -711,28 +711,25 @@ func TestOpenStandaloneRigStoresOpensRigsConcurrently(t *testing.T) {
 		cfg.Rigs = append(cfg.Rigs, config.Rig{Name: name, Path: path})
 		built[path] = splittest.NewWorkStore(t, name)
 	}
+	at := newRendezvous(t, rigCount)
 
-	start := time.Now()
-	stores, failures := openStandaloneRigStores(cfg, "/fake/city", func(rigPath, _ string) (beads.Store, error) {
-		time.Sleep(perRig)
-		return built[rigPath], nil
+	var stores map[string]beads.Store
+	var failures []rigStoreOpenFailure
+	done := inGoroutine(func() {
+		stores, failures = openStandaloneRigStores(cfg, "/fake/city", func(rigPath, _ string) (beads.Store, error) {
+			at.wait()
+			return built[rigPath], nil
+		})
 	})
-	elapsed := time.Since(start)
+	awaitClose(t, at.all, "all rig opens to be in flight at the same time")
+	at.open()
+	awaitClose(t, done, "openStandaloneRigStores to return")
 
 	if len(failures) != 0 {
 		t.Fatalf("unexpected open failures: %v", failures)
 	}
 	if len(stores) != rigCount {
 		t.Fatalf("got %d stores, want %d", len(stores), rigCount)
-	}
-
-	// A sequential opener costs rigCount*perRig (500ms). A concurrent one
-	// costs about one perRig (100ms). The budget sits well under the
-	// sequential floor while leaving generous headroom over the concurrent
-	// floor for scheduler jitter, so this fails on a regression to a
-	// sequential open loop without flaking on a loaded box.
-	if budget := rigCount * perRig / 2; elapsed >= budget {
-		t.Fatalf("openStandaloneRigStores took %v to open %d rigs at %v delay each; want well under %v (the sequential floor is %v) — rigs did not open concurrently", elapsed, rigCount, perRig, budget, rigCount*perRig)
 	}
 }
 
@@ -748,16 +745,25 @@ func TestOpenStandaloneRigStoresReportsFailuresInRigOrder(t *testing.T) {
 	}}
 	good := splittest.NewWorkStore(t, "good")
 
-	stores, failures := openStandaloneRigStores(cfg, "/fake/city", func(rigPath, _ string) (beads.Store, error) {
-		switch rigPath {
-		case "/fake/slow-bad":
-			time.Sleep(60 * time.Millisecond)
-			return nil, errors.New("slow-bad is unmounted")
-		case "/fake/fast-bad":
-			return nil, errors.New("fast-bad is unmounted")
-		}
-		return good, nil
-	})
+	// slow-bad is first in cfg order but is forced to fail LAST: its open blocks
+	// until fast-bad's has finished.
+	fastFirst := newCompletionOrder(t)
+
+	var stores map[string]beads.Store
+	var failures []rigStoreOpenFailure
+	awaitClose(t, inGoroutine(func() {
+		stores, failures = openStandaloneRigStores(cfg, "/fake/city", func(rigPath, _ string) (beads.Store, error) {
+			switch rigPath {
+			case "/fake/slow-bad":
+				<-fastFirst.finished
+				return nil, errors.New("slow-bad is unmounted")
+			case "/fake/fast-bad":
+				defer fastFirst.markFinished()
+				return nil, errors.New("fast-bad is unmounted")
+			}
+			return good, nil
+		})
+	}), "openStandaloneRigStores to return")
 
 	if len(failures) != 2 || failures[0].rig != "slow-bad" || failures[1].rig != "fast-bad" {
 		t.Fatalf("failures = %v, want [slow-bad fast-bad] in cfg order regardless of completion order", failures)
