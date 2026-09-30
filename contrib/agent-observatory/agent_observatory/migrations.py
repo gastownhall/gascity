@@ -22,7 +22,8 @@ SCHEMA_VERSION_BEFORE = 4
 SCHEMA_VERSION_V5 = 5
 SCHEMA_VERSION_V6 = 6
 SCHEMA_VERSION_V7 = 7
-SCHEMA_VERSION_AFTER = 8
+SCHEMA_VERSION_AFTER = 9
+SCHEMA_VERSION_V8 = 8
 
 # Schema 5 adds this append-only recommendation projection to schema 4.
 # Fresh schema-7 stores also reuse these create statements.
@@ -216,6 +217,30 @@ V8_CORE_SCHEMA_STATEMENTS = tuple(
     .replace("'work_dir', 'ambiguous'", "'work_dir', 'ambiguous', 'transcript_cwd', 'transcript_cwd_prefix'")
     for statement in V7_CORE_SCHEMA_STATEMENTS
 )
+
+# Tariffs observed 2026-09-30 at the URLs in the seed (saved research pages
+# pricing-90caa69241fa1c04b051). Applied back to 2026-09-01 by operator decision:
+# historical tariffs are unknown, so these are estimates, not billing receipts.
+# OpenAI uses standard short-context rates; service tier/context are unavailable.
+# DeepSeek UTC weekday windows exclude Chinese public holidays in the published
+# tariff. Without a holiday calendar we approximate all weekdays as workdays.
+_DEEPSEEK_PEAK = """(p.model_id IN ('deepseek-flash', 'deepseek/deepseek-flash')
+    AND normalize_provider_id(p.provider) = 'dsh'
+    AND julianday(p.effective_from) = julianday('2026-09-01T00:00:00Z')
+    AND CAST(strftime('%w', e.timestamp) AS INTEGER) BETWEEN 1 AND 5
+    AND (CAST(strftime('%H', e.timestamp) AS INTEGER) BETWEEN 1 AND 3
+         OR CAST(strftime('%H', e.timestamp) AS INTEGER) BETWEEN 6 AND 9))"""
+_V9_COST_VIEW = V6_CORE_SCHEMA_STATEMENTS[-1]
+for _column, _peak_rate in (
+    ('input_usd_per_million', '0.3'),
+    ('output_usd_per_million', '1.2'),
+    ('cache_read_usd_per_million', '0.006'),
+):
+    _V9_COST_VIEW = _V9_COST_VIEW.replace(
+        f'p.{_column}',
+        f"(CASE WHEN {_DEEPSEEK_PEAK} THEN '{_peak_rate}' ELSE p.{_column} END)",
+    )
+V9_CORE_SCHEMA_STATEMENTS = ('DROP VIEW IF EXISTS event_usage_cost', _V9_COST_VIEW)
 
 V5_TO_V6_SCHEMA_STATEMENTS = (
     "ALTER TABLE sessions ADD COLUMN role TEXT",
@@ -533,8 +558,8 @@ def _validate_version(connection: sqlite3.Connection, database_path: str, versio
         _validate_v5(connection, database_path)
     elif version == SCHEMA_VERSION_V6:
         _validate_v6(connection, database_path)
-    elif version == SCHEMA_VERSION_V7:
-        _validate_v7(connection, database_path)
+    elif version in (SCHEMA_VERSION_V7, SCHEMA_VERSION_V8):
+        _validate_v7(connection, database_path, version)
     else:
         raise SchemaVersionError(f"no backup validator for schema version {version}")
 
@@ -547,6 +572,7 @@ def _create_backup(database_path: Path, version: int) -> tuple[Path, dict[str, i
         SCHEMA_VERSION_V5: _V5_PRESERVED_TABLES,
         SCHEMA_VERSION_V6: _V6_PRESERVED_TABLES,
         SCHEMA_VERSION_V7: (*_V6_PRESERVED_TABLES, "session_enrichment"),
+        SCHEMA_VERSION_V8: (*_V6_PRESERVED_TABLES, "session_enrichment"),
     }[version]
     source: sqlite3.Connection | None = None
     destination: sqlite3.Connection | None = None
@@ -1031,13 +1057,13 @@ def _migrate_through_v7(db_path: str | os.PathLike[str]) -> MigrationResult:
     )
 
 
-def migrate_database(db_path: str | os.PathLike[str]) -> MigrationResult:
+def _migrate_through_v8(db_path: str | os.PathLike[str]) -> MigrationResult:
     """Explicitly upgrade through schema 8, with a verified backup per step."""
     path = Path(db_path).expanduser().resolve(strict=True)
     with closing(sqlite3.connect(str(path))) as probe:
         version = int(probe.execute("PRAGMA user_version").fetchone()[0])
-        if version == SCHEMA_VERSION_AFTER:
-            _validate_v7(probe, str(path), SCHEMA_VERSION_AFTER)
+        if version == SCHEMA_VERSION_V8:
+            _validate_v7(probe, str(path), SCHEMA_VERSION_V8)
             template_column = next(row for row in probe.execute("PRAGMA table_info(session_enrichment)") if row[1] == "template")
             if template_column[3]:
                 raise ObservatoryError("schema-eight template must be nullable")
@@ -1077,3 +1103,57 @@ def migrate_database(db_path: str | os.PathLike[str]) -> MigrationResult:
         raise
     finally:
         connection.close()
+
+
+def migrate_database(db_path: str | os.PathLike[str]) -> MigrationResult:
+    """Upgrade explicitly to schema nine without mutating event evidence."""
+    from .pricing import _decimal_text, load_pricing_seed
+
+    path = Path(db_path).expanduser().resolve(strict=True)
+    with closing(sqlite3.connect(str(path))) as probe:
+        version = int(probe.execute('PRAGMA user_version').fetchone()[0])
+        if version == SCHEMA_VERSION_AFTER:
+            _validate_v7(probe, str(path), SCHEMA_VERSION_AFTER)
+            return MigrationResult(database_path=str(path), backup_path=None,
+                from_version=9, to_version=9, preserved_rows={}, already_at_version=9)
+    previous = _migrate_through_v8(path) if version != 8 else None
+    with closing(sqlite3.connect(str(path), timeout=_SQLITE_TIMEOUT_SECONDS,
+                                 isolation_level=None)) as connection:
+        try:
+            connection.execute('BEGIN IMMEDIATE')
+            _validate_v7(connection, str(path), 8)
+            backup, counts = _create_backup(path, 8)
+            tables = (*_V6_PRESERVED_TABLES, 'session_enrichment')
+            if counts != _row_counts(connection, tables):
+                raise ObservatoryError('schema-eight backup row count mismatch')
+            for statement in V9_CORE_SCHEMA_STATEMENTS:
+                connection.execute(statement)
+            # Seeds add reference data only; all evidence rows remain untouched.
+            for row in load_pricing_seed():
+                connection.execute('''INSERT OR IGNORE INTO model_pricing
+                    (model_id, provider, input_usd_per_million, output_usd_per_million,
+                     cache_read_usd_per_million, cache_write_usd_per_million,
+                     effective_from, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                    (row['model_id'], row['provider'],
+                     _decimal_text(row['input_usd_per_million']),
+                     _decimal_text(row['output_usd_per_million']),
+                     _decimal_text(row['cache_read_usd_per_million']),
+                     _decimal_text(row['cache_write_usd_per_million']),
+                     row['effective_from'], row['source']))
+            evidence = tuple(t for t in tables if t != 'model_pricing')
+            if {t: counts[t] for t in evidence} != _row_counts(connection, evidence):
+                raise ObservatoryError('schema-nine changed evidence counts')
+            connection.execute("UPDATE schema_meta SET value='9' WHERE key='schema_version'")
+            connection.execute('PRAGMA user_version=9')
+            if {t: counts[t] for t in evidence} != _row_counts(connection, evidence):
+                raise ObservatoryError('schema-nine changed evidence counts')
+            connection.execute('COMMIT')
+            return MigrationResult(database_path=str(path), backup_path=str(backup),
+                from_version=previous.from_version if previous else 8, to_version=9,
+                preserved_rows=counts,
+                backup_paths=(previous.backup_paths if previous else ()) + (str(backup),),
+                backfill_summary=previous.backfill_summary if previous else {})
+        except BaseException:
+            if connection.in_transaction:
+                connection.execute('ROLLBACK')
+            raise
