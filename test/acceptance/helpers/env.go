@@ -136,6 +136,14 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	}
 	e.vars["GC_HOME"] = gcHome
 
+	// Bazel's local sandbox — where a fork PR's CI job runs, having no remote
+	// executor — mounts the runner's real HOME read-only, and gc needs that HOME
+	// (above), so the Claude state the tests seed moves under GC_HOME instead. A
+	// CLAUDE_CONFIG_DIR from the host stays: it carries the operator's credentials.
+	if e.vars["CLAUDE_CONFIG_DIR"] == "" && e.vars["HOME"] != "" && !dirWritable(e.vars["HOME"]) {
+		e.vars["CLAUDE_CONFIG_DIR"] = filepath.Join(gcHome, "claude")
+	}
+
 	// gc carries its environment into every bd it forks, including ones that
 	// reach a bd not wrapped by the tool-home wrapper (a raw BD_BIN). Pin bd's
 	// shared-server mode off there too; a test that exercises the user-level
