@@ -209,7 +209,7 @@ func (c *proxiedNativeCity) bd(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	cmd := exec.Command(c.bdPath, args...) //nolint:gosec // resolved test binary
 	cmd.Dir = c.root
-	cmd.Env = c.env.List()
+	cmd.Env = c.env.ToolList()
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

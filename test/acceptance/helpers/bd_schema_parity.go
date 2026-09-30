@@ -91,8 +91,10 @@ func bdLatestSchemaVersion(bdPath string) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), bdSchemaProbeTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, bdPath, "migrate", "schema", "--db", filepath.Join(dir, "probe.db")) //nolint:gosec // caller-supplied test binary
-	cmd.Dir = dir
+	if err := os.MkdirAll(filepath.Join(dir, "home"), 0o755); err != nil {
+		return 0, fmt.Errorf("bd schema probe: create tool home: %w", err)
+	}
+	cmd := bdSchemaProbeCommand(ctx, bdPath, dir)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return 0, fmt.Errorf("bd schema probe: %s migrate schema: %w\n%s", bdPath, err, out)
@@ -102,6 +104,21 @@ func bdLatestSchemaVersion(bdPath string) (int, error) {
 		return 0, fmt.Errorf("bd schema probe: no schema version in %s migrate schema output:\n%s", bdPath, out)
 	}
 	return version, nil
+}
+
+// bdSchemaProbeCommand builds the probe's `bd migrate schema` under dir.
+//
+// TestMain runs it before any Env exists, so it cannot borrow one: it runs with
+// the test process's environment re-homed under dir (IsolatedToolEnv). With the
+// inherited HOME, a host whose user-level bd config says
+// `dolt.shared-server: true` turned this "throwaway SQLite" probe into a dial of
+// the operator's shared Dolt server, plus machine-id and metrics writes under
+// the operator's ~/.beads and ~/.config/bd.
+func bdSchemaProbeCommand(ctx context.Context, bdPath, dir string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, bdPath, "migrate", "schema", "--db", filepath.Join(dir, "probe.db")) //nolint:gosec // caller-supplied test binary
+	cmd.Dir = dir
+	cmd.Env = IsolatedToolEnv(os.Environ(), filepath.Join(dir, "home"))
+	return cmd
 }
 
 // parseBdSchemaVersion returns the highest vN in bd's output, which is the
