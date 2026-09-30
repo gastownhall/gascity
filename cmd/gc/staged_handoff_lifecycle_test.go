@@ -418,7 +418,10 @@ func assertHandoffProvisionalRecord(t *testing.T, message beads.Bead, instanceTo
 	}
 }
 
-func newStagedSuccessorReconcileScenario(t *testing.T, originToken, currentToken string) (*reconcilerTestEnv, beads.Bead, mail.Message) {
+// newHandoffReconcileSession builds a reconciler environment holding one active,
+// restartable "worker" session running under instanceToken, with no staged
+// handoff on it yet.
+func newHandoffReconcileSession(t *testing.T, instanceToken string) (*reconcilerTestEnv, beads.Bead) {
 	t.Helper()
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
@@ -429,17 +432,25 @@ func newStagedSuccessorReconcileScenario(t *testing.T, originToken, currentToken
 	sessionBead := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&sessionBead)
 	env.setSessionMetadata(&sessionBead, map[string]string{
-		"instance_token":                currentToken,
-		"started_config_hash":           runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
-		redHandoffStageCommittedAtKey:   env.clk.Now().Format(time.RFC3339),
-		redHandoffReleaseAttemptedAtKey: "",
+		"instance_token":      instanceToken,
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
 	})
 	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", sessionBead.ID); err != nil {
 		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
 	}
-	if err := env.sp.SetMeta("worker", "GC_INSTANCE_TOKEN", currentToken); err != nil {
+	if err := env.sp.SetMeta("worker", "GC_INSTANCE_TOKEN", instanceToken); err != nil {
 		t.Fatalf("SetMeta(GC_INSTANCE_TOKEN): %v", err)
 	}
+	return env, sessionBead
+}
+
+func newStagedSuccessorReconcileScenario(t *testing.T, originToken, currentToken string) (*reconcilerTestEnv, beads.Bead, mail.Message) {
+	t.Helper()
+	env, sessionBead := newHandoffReconcileSession(t, currentToken)
+	env.setSessionMetadata(&sessionBead, map[string]string{
+		redHandoffStageCommittedAtKey:   env.clk.Now().Format(time.RFC3339),
+		redHandoffReleaseAttemptedAtKey: "",
+	})
 
 	provider := beadmail.New(env.store)
 	message, err := provider.SendHandoff(mail.HandoffIntent{
