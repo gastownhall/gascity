@@ -216,7 +216,7 @@ class MigrationTest(unittest.TestCase):
         self.assertEqual(result.backfill_summary["classification_match_rate"], 0.0)
         self.assertEqual(result.backfill_summary["sessions_total"], 2)
         self.assertEqual(result.backfill_summary["sessions_with_role"], 0)
-        self.assertEqual(result.backfill_summary["pricing_seed_rows"], 9)
+        self.assertEqual(result.backfill_summary["pricing_seed_rows"], 20)
 
         upgraded = sqlite3.connect(self.db_path)
         try:
@@ -229,7 +229,7 @@ class MigrationTest(unittest.TestCase):
             )
             self.assertEqual(upgraded.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0], 0)
             self.assertEqual(upgraded.execute("SELECT COUNT(*) FROM classification_sessions").fetchone()[0], 0)
-            self.assertEqual(upgraded.execute("SELECT COUNT(*) FROM model_pricing").fetchone()[0], 9)
+            self.assertEqual(upgraded.execute("SELECT COUNT(*) FROM model_pricing").fetchone()[0], 20)
             pricing_columns = {
                 row[1]: row for row in upgraded.execute("PRAGMA table_info(model_pricing)")
             }
@@ -432,7 +432,7 @@ class MigrationTest(unittest.TestCase):
         self.assertEqual(summary["requests_total"], 1)
         self.assertEqual(summary["requests_bound"], 1)
         self.assertEqual(summary["request_match_rate"], 1.0)
-        self.assertEqual(summary["pricing_seed_rows"], 9)
+        self.assertEqual(summary["pricing_seed_rows"], 20)
         self.assertEqual(summary["sessions_total"], 4)
         self.assertEqual(summary["sessions_with_role"], 0)
         self.assertEqual(summary["session_role_coverage"], 0.0)

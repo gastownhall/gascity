@@ -222,6 +222,9 @@ V8_CORE_SCHEMA_STATEMENTS = tuple(
 # pricing-90caa69241fa1c04b051). Applied back to 2026-09-01 by operator decision:
 # historical tariffs are unknown, so these are estimates, not billing receipts.
 # OpenAI uses standard short-context rates; service tier/context are unavailable.
+# Anthropic uses base rates and five-minute cache writes; cache TTL, regional
+# multipliers and fast mode are not present in event_usage. Estimates assume
+# those defaults. Exact IDs also occur in saved page hydration/navigation data.
 # DeepSeek UTC weekday windows exclude Chinese public holidays in the published
 # tariff. Without a holiday calendar we approximate all weekdays as workdays.
 _DEEPSEEK_PEAK = """(p.model_id IN ('deepseek-flash', 'deepseek/deepseek-flash')
