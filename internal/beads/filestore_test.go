@@ -181,7 +181,7 @@ func TestFileStore(t *testing.T) {
 }
 
 // TestFileStoreReadyParityConformance runs the cache ready-parity suite under
-// its ledgered waiver (mc-zndi7.14): FileStore serves MemStore's Ready, which
+// its ledgered waiver (ga-gmf8r): FileStore serves MemStore's Ready, which
 // has no ready projection and no canonical ready order yet.
 func TestFileStoreReadyParityConformance(t *testing.T) {
 	beadstest.RunReadyParityConformanceWithOptions(t, "FileStore", beadstest.ReadyParityHarness{

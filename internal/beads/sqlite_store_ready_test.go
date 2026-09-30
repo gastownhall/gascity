@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -295,6 +296,9 @@ func TestSQLiteStoreSatisfiesContextReadyReader(t *testing.T) {
 	}
 }
 
+// readyTestFarFuture defers a row past any date a test will run on.
+var readyTestFarFuture = time.Date(9999, time.January, 1, 0, 0, 0, 0, time.UTC)
+
 // TestSQLiteStoreReadyOrderIsCanonical pins SQLite's ready order to the
 // canonical (priority, created_at, id) order a CachingStore serves (#3208):
 // a nil priority sorts as 2, equal priority and created_at fall back to the
@@ -303,7 +307,7 @@ func TestSQLiteStoreReadyOrderIsCanonical(t *testing.T) {
 	store := newReadySQLiteStore(t)
 	t0 := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 	pri := func(p int) *int { return &p }
-	future := t0.Add(1000 * 24 * time.Hour)
+	future := readyTestFarFuture
 	for _, b := range []Bead{
 		// Inserted so neither creation order nor id order is the answer.
 		{ID: "gc-tie-z", Title: "p2 tie z", Priority: pri(2), CreatedAt: t0},
@@ -449,5 +453,198 @@ func TestSQLiteEnrichReadyProjectionEqualsReadySQL(t *testing.T) {
 	if len(enriched) != len(rows) || len(enriched) <= sqliteReadyProjectionBatch {
 		t.Fatalf("enriched %d of %d rows; want every row, across more than one batch of %d",
 			len(enriched), len(rows), sqliteReadyProjectionBatch)
+	}
+}
+
+// depListRaceStore lands issue -> blocker on the first DepList(issue): the
+// edge a concurrent writer adds after a cache listed its rows and before it
+// read their deps.
+type depListRaceStore struct {
+	*SQLiteStore
+	issue, blocker string
+	armed          atomic.Bool
+}
+
+func (s *depListRaceStore) DepList(id, direction string) ([]Dep, error) {
+	if id == s.issue && s.armed.CompareAndSwap(true, false) {
+		if err := s.DepAdd(s.issue, s.blocker, "blocks"); err != nil {
+			return nil, err
+		}
+	}
+	return s.SQLiteStore.DepList(id, direction)
+}
+
+// TestCachingStoreProjectsReadinessAfterReadingDeps proves every cache load
+// (full prime, active prime, re-scan) takes the ready projection after the
+// deps it installs. Projected first, an edge that lands in between sits open
+// beside IsBlocked=false, which the cache trusts, and it serves a row the
+// store holds back.
+func TestCachingStoreProjectsReadinessAfterReadingDeps(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		load  func(t *testing.T, cache *CachingStore, race *depListRaceStore)
+		ready func(cache *CachingStore) ([]Bead, error)
+	}{
+		{
+			name: "prime",
+			load: func(t *testing.T, cache *CachingStore, race *depListRaceStore) {
+				race.armed.Store(true)
+				if err := cache.Prime(context.Background()); err != nil {
+					t.Fatalf("Prime: %v", err)
+				}
+			},
+		},
+		{
+			name: "prime active",
+			load: func(t *testing.T, cache *CachingStore, race *depListRaceStore) {
+				race.armed.Store(true)
+				if err := cache.PrimeActive(); err != nil {
+					t.Fatalf("PrimeActive: %v", err)
+				}
+			},
+			ready: func(cache *CachingStore) ([]Bead, error) {
+				rows, ok := cache.CachedReady()
+				if !ok {
+					return nil, fmt.Errorf("CachedReady declined")
+				}
+				return rows, nil
+			},
+		},
+		{
+			name: "reconcile",
+			load: func(t *testing.T, cache *CachingStore, race *depListRaceStore) {
+				if err := cache.Prime(context.Background()); err != nil {
+					t.Fatalf("Prime: %v", err)
+				}
+				race.armed.Store(true)
+				cache.runReconciliation()
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newReadySQLiteStore(t)
+			blocker, err := store.Create(Bead{Title: "blocker"})
+			if err != nil {
+				t.Fatalf("Create blocker: %v", err)
+			}
+			issue, err := store.Create(Bead{Title: "issue"})
+			if err != nil {
+				t.Fatalf("Create issue: %v", err)
+			}
+			race := &depListRaceStore{SQLiteStore: store, issue: issue.ID, blocker: blocker.ID}
+			cache := NewCachingStoreForTest(race, nil)
+			tc.load(t, cache, race)
+			if race.armed.Load() {
+				t.Fatal("the cache never read the issue's deps; the race was not exercised")
+			}
+
+			want, err := store.Ready()
+			if err != nil {
+				t.Fatalf("store Ready: %v", err)
+			}
+			read := tc.ready
+			if read == nil {
+				read = func(cache *CachingStore) ([]Bead, error) {
+					return cache.ReadyContext(context.Background())
+				}
+			}
+			got, err := read(cache)
+			if err != nil {
+				t.Fatalf("cache ready: %v", err)
+			}
+			if !slices.Equal(readyBeadIDs(got), readyBeadIDs(want)) {
+				t.Fatalf("cache ready = %v, store Ready = %v; the cache serves %s behind an open blocker",
+					readyBeadIDs(got), readyBeadIDs(want), issue.ID)
+			}
+		})
+	}
+}
+
+// TestSQLiteEnrichReadyProjectionReturnsItemsOnReadError proves a projection
+// read that fails hands back the caller's rows untouched with the error, so
+// the cache records a partial snapshot instead of installing rows that look
+// projected and are not.
+func TestSQLiteEnrichReadyProjectionReturnsItemsOnReadError(t *testing.T) {
+	store := newReadySQLiteStore(t)
+	for i := 0; i < 3; i++ {
+		if _, err := store.Create(Bead{Title: fmt.Sprintf("row-%d", i)}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+	rows, err := store.List(ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if err := store.readDB.Close(); err != nil {
+		t.Fatalf("closing the read pool: %v", err)
+	}
+
+	got, err := store.enrichReadyProjectionForCache(rows)
+	if err == nil {
+		t.Fatal("enrichReadyProjectionForCache succeeded on a closed read pool; want the read error")
+	}
+	if len(got) != len(rows) {
+		t.Fatalf("returned %d rows, want the %d it was given", len(got), len(rows))
+	}
+	for i := range got {
+		if got[i].ID != rows[i].ID || got[i].IsBlocked != nil {
+			t.Fatalf("row %d = %s IsBlocked=%v, want %s untouched", i, got[i].ID, got[i].IsBlocked, rows[i].ID)
+		}
+	}
+}
+
+// TestSQLiteEnrichReadyProjectionLeavesVanishedRowsAlone proves a row deleted
+// between the caller's list and the projection read keeps whatever verdict it
+// carried: the store has no answer for it, and a fabricated false would offer
+// it as ready.
+func TestSQLiteEnrichReadyProjectionLeavesVanishedRowsAlone(t *testing.T) {
+	store := newReadySQLiteStore(t)
+	kept, err := store.Create(Bead{Title: "kept"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	vanished, err := store.Create(Bead{Title: "vanished"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	vanishedBlocked, err := store.Create(Bead{Title: "vanished, was blocked"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	rows, err := store.List(ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	blocked := true
+	for i := range rows {
+		if rows[i].ID == vanishedBlocked.ID {
+			rows[i].IsBlocked = &blocked
+		}
+	}
+	for _, id := range []string{vanished.ID, vanishedBlocked.ID} {
+		if err := store.Delete(id); err != nil {
+			t.Fatalf("Delete(%s): %v", id, err)
+		}
+	}
+
+	got, err := store.enrichReadyProjectionForCache(rows)
+	if err != nil {
+		t.Fatalf("enrichReadyProjectionForCache: %v", err)
+	}
+	for _, b := range got {
+		switch b.ID {
+		case kept.ID:
+			if b.IsBlocked == nil || *b.IsBlocked {
+				t.Fatalf("kept row IsBlocked = %v, want false", b.IsBlocked)
+			}
+		case vanished.ID:
+			if b.IsBlocked != nil {
+				t.Fatalf("vanished row got a fabricated verdict %v", *b.IsBlocked)
+			}
+		case vanishedBlocked.ID:
+			if b.IsBlocked == nil || !*b.IsBlocked {
+				t.Fatalf("vanished row lost its verdict: IsBlocked = %v, want true", b.IsBlocked)
+			}
+		}
 	}
 }

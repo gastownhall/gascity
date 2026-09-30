@@ -30,6 +30,9 @@ type ReadyParityOptions struct {
 	SkipCachedReadyParity bool
 }
 
+// readyParityFarFuture defers a row past any date the suite will run on.
+var readyParityFarFuture = time.Date(9999, time.January, 1, 0, 0, 0, 0, time.UTC)
+
 // readyParitySubtest is the ledger key of the whole parity contract.
 const readyParitySubtest = "CachedReadyParity"
 
@@ -144,7 +147,7 @@ func seedReadyParityCorpus(t *testing.T, s beads.Store) {
 		t.Fatalf("CloseAll(%s): %v", failedBlocker.ID, err)
 	}
 
-	future := t0.Add(1000 * 24 * time.Hour)
+	future := readyParityFarFuture
 	mk(beads.Bead{Title: "deferred", DeferUntil: &future})
 	mk(beads.Bead{Title: "session-labeled", Labels: []string{"gc:session"}})
 	mk(beads.Bead{Title: "message", Type: "message"})

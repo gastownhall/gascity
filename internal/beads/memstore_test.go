@@ -32,7 +32,7 @@ func TestMemStoreCreateUsesSerializableTimestamp(t *testing.T) {
 }
 
 // TestMemStoreReadyParityConformance runs the cache ready-parity suite under
-// its ledgered waiver (mc-zndi7.14): MemStore has no ready projection and no
+// its ledgered waiver (ga-gmf8r): MemStore has no ready projection and no
 // canonical ready order yet.
 func TestMemStoreReadyParityConformance(t *testing.T) {
 	beadstest.RunReadyParityConformanceWithOptions(t, "MemStore", beadstest.ReadyParityHarness{

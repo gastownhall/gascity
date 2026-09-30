@@ -26,6 +26,7 @@ go_library(
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/testpolicy/waiverclock",
     ],
 )
 
@@ -41,6 +42,7 @@ go_test(
     deps = [
         "//internal/beads",
         "//internal/testenv",
+        "//internal/testpolicy/waiverclock",
     ],
 )
 
