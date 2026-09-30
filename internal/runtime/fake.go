@@ -66,11 +66,15 @@ type Fake struct {
 	// NudgeErrors configures Fake.Nudge/Fake.NudgeNow errors per session name;
 	// an absent entry nudges successfully.
 	NudgeErrors map[string]error
+	// ListingUnattested makes Fake.ListRunningComplete report false, modeling
+	// a provider whose ListRunning may omit live sessions.
+	ListingUnattested bool
 }
 
 var (
 	_ ProcessTableScanner = (*Fake)(nil)
 	_ RelaunchProvider    = (*Fake)(nil)
+	_ ListingAttestation  = (*Fake)(nil)
 )
 
 // Call records a single method invocation on [Fake].
@@ -568,6 +572,14 @@ func (f *Fake) ListRunning(prefix string) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// ListRunningComplete implements [ListingAttestation]: the in-memory listing
+// is complete unless ListingUnattested is set.
+func (f *Fake) ListRunningComplete() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return !f.ListingUnattested
 }
 
 // Synthetic pids for the Fake's provider-owned pane root. The parent is a

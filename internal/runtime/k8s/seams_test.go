@@ -293,3 +293,17 @@ func TestSeamsK8sStopSurfacesTransportFailure(t *testing.T) {
 		}
 	})
 }
+
+// Kills: a listing attestation lost behind the seam-backed provider. Per
+// CAPABILITIES A.0 a seam-backed provider has only the optional interfaces its
+// cut-over forwards, and production constructs k8s through NewSeamBacked.
+func TestCutoverForwardsListingAttestation(t *testing.T) {
+	raw := newProviderWithOps(newFakeK8sOps())
+	if !runtime.ListRunningAttested(raw) {
+		t.Fatal("raw k8s provider does not attest its listing")
+	}
+	var sp runtime.Provider = &seamBackedProvider{Provider: runtime.NewProviderFromSeams(raw.Seams()), raw: raw}
+	if !runtime.ListRunningAttested(sp) {
+		t.Fatal("seam-backed k8s provider does not forward its listing attestation")
+	}
+}

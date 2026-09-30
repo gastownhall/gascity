@@ -33,6 +33,11 @@ var (
 	// Relaunch (B2) rides the embedded raw *Provider — it is NOT one of the 18
 	// seam-routed methods, so the warm-box relaunch stays on the real provider.
 	_ runtime.RelaunchProvider = (*seamBackedProvider)(nil)
+	// The listing attestation and the batched inventory also ride the
+	// embedded raw provider; ListRunning routes through the seams to the same
+	// raw listing.
+	_ runtime.ListingAttestation = (*seamBackedProvider)(nil)
+	_ runtime.InventoryProvider  = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBackedWithConfig constructs a tmux provider served through the seams.

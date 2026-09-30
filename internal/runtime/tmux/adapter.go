@@ -45,6 +45,8 @@ var (
 	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
 	_ runtime.SessionRosterProvider         = (*Provider)(nil)
+	_ runtime.ListingAttestation            = (*Provider)(nil)
+	_ runtime.InventoryProvider             = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -673,6 +675,18 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 		}
 	}
 	return matched, nil
+}
+
+// ListRunningComplete implements [runtime.ListingAttestation]. An error-free
+// ListRunning means the server answered list-sessions, which names every
+// session it holds (remain-on-exit corpses included); an absent server is
+// reported as a [runtime.PartialListError], never as an empty list.
+func (p *Provider) ListRunningComplete() bool { return true }
+
+// RuntimeInventory implements [runtime.InventoryProvider] with one
+// batched pane read. Delegates to [Tmux.listRuntimeInventory].
+func (p *Provider) RuntimeInventory(ctx context.Context) (map[string]runtime.InventoryEntry, error) {
+	return p.tm.listRuntimeInventory(ctx)
 }
 
 // GetLastActivity returns the time of the last I/O activity in the named

@@ -72,6 +72,7 @@ go_test(
         "nudge_poke_hidden_test.go",
         "nudge_submit_confirm_test.go",
         "nudge_submit_key_sequence_test.go",
+        "runtime_inventory_test.go",
         "server_probe_test.go",
         "session_env_file_test.go",
         "session_roster_test.go",

@@ -2372,6 +2372,11 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	return names, nil
 }
 
+// ListRunningComplete implements [runtime.ListingAttestation]: ListRunning
+// reports an unavailable snapshot as an error and an uncertain thread as a
+// [runtime.PartialListError], so an error-free listing is complete.
+func (p *Provider) ListRunningComplete() bool { return true }
+
 // Start creates or reuses a T3 thread for the named session and dispatches the
 // startup prompt and any nudge.
 func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) error {

@@ -116,6 +116,43 @@ func MergeBackendListResults(results ...BackendListResult) ([]string, error) {
 	return merged, &PartialListError{Err: errors.Join(failures...)}
 }
 
+// ListingAttestation is an optional provider capability declaring that an
+// error-free [Provider.ListRunning] result is complete: every running session
+// matching the prefix is listed, so a name absent from it is not running.
+// Providers that can silently omit a live session (a missed probe, a remote
+// failure read as zero sessions, an unresolved binding) must not declare it.
+// A composite attests only when every backend does.
+type ListingAttestation interface {
+	ListRunningComplete() bool
+}
+
+// ListRunningAttested reports whether an error-free ListRunning result from sp
+// may be read as proof of absence. A provider that does not implement
+// [ListingAttestation] is unattested.
+func ListRunningAttested(sp Provider) bool {
+	a, ok := sp.(ListingAttestation)
+	return ok && a.ListRunningComplete()
+}
+
+// BackendListingProvider is an optional capability of composite providers
+// that exposes each backend's ListRunning result separately, so callers can
+// judge each backend's listing on its own (its error, its [PartialListError]
+// ServerAbsent flag, its [ListingAttestation]). Merging the results with
+// [MergeBackendListResults] yields what the composite's ListRunning returns.
+type BackendListingProvider interface {
+	ListRunningByBackend(prefix string) []BackendListing
+}
+
+// BackendListing is one backend's ListRunning result inside a composite
+// provider. Provider is the backend itself, so callers can recurse into a
+// nested composite or ask the backend for its own optional capabilities.
+type BackendListing struct {
+	Label    string
+	Provider Provider
+	Names    []string
+	Err      error
+}
+
 // MergeBackendStopErrors standardizes multi-backend Stop semantics.
 // Any successful stop wins. If every backend reports the session as gone,
 // Stop remains idempotent and returns nil.

@@ -19,6 +19,7 @@ var (
 	_ runtime.Provider                  = (*seamBackedProvider)(nil)
 	_ runtime.SleepCapabilityProvider   = (*seamBackedProvider)(nil)
 	_ runtime.LivenessObserverWithError = (*seamBackedProvider)(nil)
+	_ runtime.ListingAttestation        = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs a t3bridge provider served through the seams.
@@ -45,4 +46,10 @@ func (s *seamBackedProvider) ObserveLivenessWithError(name string, processNames 
 // surface cannot distinguish a bridge outage from absence.
 func (s *seamBackedProvider) GetLastActivity(name string) (time.Time, error) {
 	return s.raw.GetLastActivity(name)
+}
+
+// ListRunningComplete passes the underlying provider's listing attestation
+// through; the seams route ListRunning to the same raw listing.
+func (s *seamBackedProvider) ListRunningComplete() bool {
+	return s.raw.ListRunningComplete()
 }

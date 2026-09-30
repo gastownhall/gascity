@@ -684,3 +684,127 @@ func TestSnapshotIdle_FailsClosedWhenRouteCannotSnapshot(t *testing.T) {
 		t.Error("SnapshotIdle = true on an unsupported route; must never report idle it could not observe")
 	}
 }
+
+// scriptedListProvider answers ListRunning with a fixed result and records
+// every prefix it is asked for.
+type scriptedListProvider struct {
+	*runtime.Fake
+	names    []string
+	err      error
+	prefixes []string
+}
+
+func (p *scriptedListProvider) ListRunning(prefix string) ([]string, error) {
+	p.prefixes = append(p.prefixes, prefix)
+	return p.names, p.err
+}
+
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// Kills: per-backend results that diverge from the merged ListRunning (a
+// label swap, a dropped error, dropped names), and a per-backend listing that
+// loses the single-backend ServerAbsent signal the merge deliberately drops.
+func TestAutoListRunningByBackend_MergesToListRunning(t *testing.T) {
+	partial := &runtime.PartialListError{Err: errors.New("one socket unanswered")}
+	absent := &runtime.PartialListError{Err: errors.New("tmux server unreachable"), ServerAbsent: true}
+	cases := []struct {
+		name               string
+		defNames, acpNames []string
+		defErr, acpErr     error
+	}{
+		{name: "both ok", defNames: []string{"gc-a", "gc-b"}, acpNames: []string{"gc-c"}},
+		{name: "acp partial", defNames: []string{"gc-a"}, acpNames: []string{"gc-c"}, acpErr: partial},
+		{name: "default server absent", acpNames: []string{"gc-c"}, defErr: absent},
+		{name: "default failed", acpNames: []string{"gc-c"}, defErr: errors.New("list-sessions timed out")},
+		{name: "both failed", defErr: errors.New("default down"), acpErr: errors.New("acp down")},
+		{name: "both empty", defNames: []string{}, acpNames: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			def := &scriptedListProvider{Fake: runtime.NewFake(), names: tc.defNames, err: tc.defErr}
+			acp := &scriptedListProvider{Fake: runtime.NewFake(), names: tc.acpNames, err: tc.acpErr}
+			p := New(def, acp)
+
+			merged, mergedErr := p.ListRunning("gc-")
+			listings := p.ListRunningByBackend("gc-")
+
+			if len(listings) != 2 {
+				t.Fatalf("ListRunningByBackend() returned %d listings, want 2", len(listings))
+			}
+			want := []struct {
+				label string
+				sp    *scriptedListProvider
+			}{{"default", def}, {"acp", acp}}
+			results := make([]runtime.BackendListResult, 0, len(listings))
+			for i, l := range listings {
+				if l.Label != want[i].label {
+					t.Errorf("listing %d label = %q, want %q", i, l.Label, want[i].label)
+				}
+				if l.Provider != runtime.Provider(want[i].sp) {
+					t.Errorf("listing %d provider = %T, want the %s backend", i, l.Provider, want[i].label)
+				}
+				if !reflect.DeepEqual(l.Names, want[i].sp.names) {
+					t.Errorf("listing %d names = %#v, want %#v", i, l.Names, want[i].sp.names)
+				}
+				if !errors.Is(l.Err, want[i].sp.err) {
+					t.Errorf("listing %d err = %v, want %v", i, l.Err, want[i].sp.err)
+				}
+				results = append(results, runtime.BackendListResult{Label: l.Label, Names: l.Names, Err: l.Err})
+			}
+			if got := runtime.IsRuntimeServerAbsent(listings[0].Err); got != runtime.IsRuntimeServerAbsent(tc.defErr) {
+				t.Errorf("default listing ServerAbsent = %v, want %v", got, runtime.IsRuntimeServerAbsent(tc.defErr))
+			}
+
+			names, err := runtime.MergeBackendListResults(results...)
+			if !reflect.DeepEqual(names, merged) {
+				t.Errorf("merged per-backend names = %#v, ListRunning names = %#v", names, merged)
+			}
+			if errText(err) != errText(mergedErr) {
+				t.Errorf("merged per-backend err = %q, ListRunning err = %q", errText(err), errText(mergedErr))
+			}
+			if runtime.IsPartialListError(err) != runtime.IsPartialListError(mergedErr) {
+				t.Errorf("partial = %v, ListRunning partial = %v", runtime.IsPartialListError(err), runtime.IsPartialListError(mergedErr))
+			}
+			if runtime.IsRuntimeServerAbsent(err) != runtime.IsRuntimeServerAbsent(mergedErr) {
+				t.Errorf("ServerAbsent = %v, ListRunning ServerAbsent = %v", runtime.IsRuntimeServerAbsent(err), runtime.IsRuntimeServerAbsent(mergedErr))
+			}
+			for _, sp := range []*scriptedListProvider{def, acp} {
+				if !reflect.DeepEqual(sp.prefixes, []string{"gc-", "gc-"}) {
+					t.Errorf("backend prefixes = %q, want one gc- call per listing method", sp.prefixes)
+				}
+			}
+		})
+	}
+}
+
+// Kills: a composite attested while one of its backends is not. auto(tmux,
+// acp) must read unattested until acp itself attests.
+func TestListRunningAttested_CompositeRequiresEveryBackend(t *testing.T) {
+	attested := func() runtime.Provider { return runtime.NewFake() }
+	unattested := func() runtime.Provider {
+		f := runtime.NewFake()
+		f.ListingUnattested = true
+		return f
+	}
+	undeclared := func() runtime.Provider { return struct{ runtime.Provider }{runtime.NewFake()} }
+	cases := []struct {
+		name     string
+		def, acp runtime.Provider
+		want     bool
+	}{
+		{name: "both attested", def: attested(), acp: attested(), want: true},
+		{name: "acp unattested", def: attested(), acp: unattested(), want: false},
+		{name: "default unattested", def: unattested(), acp: attested(), want: false},
+		{name: "acp undeclared", def: attested(), acp: undeclared(), want: false},
+	}
+	for _, tc := range cases {
+		if got := runtime.ListRunningAttested(New(tc.def, tc.acp)); got != tc.want {
+			t.Errorf("%s: ListRunningAttested(auto) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

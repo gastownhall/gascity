@@ -639,6 +639,10 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	return names, nil
 }
 
+// ListRunningComplete implements [runtime.ListingAttestation]: the apiserver's
+// Running-pod list either errors or lists every Running gc-agent pod.
+func (p *Provider) ListRunningComplete() bool { return true }
+
 // GetLastActivity returns the time of the last I/O in the tmux session.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	ctx := context.Background()

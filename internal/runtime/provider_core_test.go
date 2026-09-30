@@ -52,3 +52,38 @@ func TestMergeBackendListResultsPreservesNamesWhenAllBackendsAreDegraded(t *test
 		t.Fatalf("MergeBackendListResults() names = %v, want [sess-a sess-b]", names)
 	}
 }
+
+// declaredListingProvider declares a fixed ListRunning attestation.
+type declaredListingProvider struct {
+	*Fake
+	complete bool
+}
+
+func (p declaredListingProvider) ListRunningComplete() bool { return p.complete }
+
+// Kills: defaulting to attested. Only a provider that declares
+// ListingAttestation and answers true may have an absence concluded from its
+// error-free listing; every other shape must read unattested.
+func TestListRunningAttested_UndeclaredProviderIsUnattested(t *testing.T) {
+	t.Parallel()
+
+	unattestedFake := NewFake()
+	unattestedFake.ListingUnattested = true
+	cases := []struct {
+		name string
+		sp   Provider
+		want bool
+	}{
+		{name: "nil provider", sp: nil, want: false},
+		{name: "undeclared wrapper", sp: struct{ Provider }{NewFake()}, want: false},
+		{name: "declared false", sp: declaredListingProvider{Fake: NewFake(), complete: false}, want: false},
+		{name: "declared true", sp: declaredListingProvider{Fake: NewFake(), complete: true}, want: true},
+		{name: "fake default", sp: NewFake(), want: true},
+		{name: "fake unattested knob", sp: unattestedFake, want: false},
+	}
+	for _, tc := range cases {
+		if got := ListRunningAttested(tc.sp); got != tc.want {
+			t.Errorf("%s: ListRunningAttested() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

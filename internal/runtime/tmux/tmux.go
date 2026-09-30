@@ -1367,6 +1367,85 @@ func (t *Tmux) listSessionNames() ([]string, error) {
 	return strings.Split(out, "\n"), nil
 }
 
+// runtimeInventoryFormat is the per-pane line listRuntimeInventory reads:
+// session name, session id, creation time, attached client count,
+// window.pane index, pane_dead and pane pid.
+const runtimeInventoryFormat = "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{window_index}.#{pane_index}\t#{pane_dead}\t#{pane_pid}"
+
+// listRuntimeInventory reads every pane on the server with one untargeted
+// list-panes -a and folds the panes into one entry per session. A live server
+// holding no sessions answers "no current target", which is an empty
+// inventory, as in [tmuxFetcher.FetchState]; an unreachable server
+// (ErrNoServer) is an error. A malformed line is an error rather than a
+// dropped pane: dropping the only live pane would report a live session as
+// all-dead.
+func (t *Tmux) listRuntimeInventory(ctx context.Context) (map[string]runtime.InventoryEntry, error) {
+	out, err := t.runCtx(ctx, "list-panes", "-a", "-F", runtimeInventoryFormat)
+	if err != nil {
+		if errors.Is(err, ErrNoCurrentTarget) {
+			return map[string]runtime.InventoryEntry{}, nil
+		}
+		return nil, err
+	}
+	return parseRuntimeInventory(out)
+}
+
+// inventoryFirstPane tracks a session's lowest window.pane index while
+// parseRuntimeInventory folds its panes.
+type inventoryFirstPane struct {
+	window, pane int
+}
+
+func parseRuntimeInventory(out string) (map[string]runtime.InventoryEntry, error) {
+	entries := make(map[string]runtime.InventoryEntry)
+	first := make(map[string]inventoryFirstPane)
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) != 7 || fields[0] == "" {
+			return nil, fmt.Errorf("tmux list-panes: malformed inventory line %q", line)
+		}
+		name, sessionID, created, attached, index, paneDead, panePID := fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6]
+		windowText, paneText, _ := strings.Cut(index, ".")
+		window, wErr := strconv.Atoi(windowText)
+		pane, pErr := strconv.Atoi(paneText)
+		if wErr != nil || pErr != nil {
+			return nil, fmt.Errorf("tmux list-panes: malformed pane index in inventory line %q", line)
+		}
+
+		entry, seen := entries[name]
+		if !seen {
+			clients, err := strconv.Atoi(attached)
+			entry.AttachedKnown = err == nil && clients >= 0
+			entry.Attached = entry.AttachedKnown && clients > 0
+			entry.DeadKnown, entry.AllPanesDead = true, true
+		}
+		switch paneDead {
+		case "0":
+			entry.AllPanesDead = false
+		case "1":
+		default:
+			entry.DeadKnown = false
+		}
+		if !entry.DeadKnown {
+			entry.AllPanesDead = false
+		}
+
+		incarnation := ""
+		if sessionID != "" && created != "" && panePID != "" {
+			incarnation = sessionID + ":" + created + ":" + panePID
+		}
+		if f, ok := first[name]; !ok || window < f.window || (window == f.window && pane < f.pane) {
+			first[name] = inventoryFirstPane{window: window, pane: pane}
+			entry.Incarnation = incarnation
+		}
+		entries[name] = entry
+	}
+	return entries, nil
+}
+
 // ListSessions returns all session names. An unreachable tmux server is
 // absorbed into an empty result (no server = no sessions) for tmux-internal
 // callers (FindSessionByWorkDir, CleanupOrphanedSessions) that treat "server
