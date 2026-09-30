@@ -735,6 +735,7 @@ go_test(
         "by_id_binding_owner_test.go",
         "by_id_relic_proof_test.go",
         "by_id_store_route_test.go",
+        "cached_children_tier_test.go",
         "capstone_e2e_test.go",
         "census_residency_test.go",
         "charharness_test.go",

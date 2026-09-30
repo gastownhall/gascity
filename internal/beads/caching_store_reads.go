@@ -805,6 +805,7 @@ func (c *CachingStore) Children(parentID string, opts ...QueryOpt) ([]Bead, erro
 		ParentID:      parentID,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedAsc,
+		TierMode:      TierModeFromOpts(opts),
 	})
 }
 
