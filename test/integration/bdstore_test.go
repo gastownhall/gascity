@@ -86,7 +86,7 @@ func TestBdStoreConformance(t *testing.T) {
 
 		configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
 
-		return beads.NewBdStore(wsDir, pinnedBdStoreCommandRunnerWithEnv(map[string]string{"HOME": parseEnvList(isolateBdHomeEnv(env))["HOME"]}))
+		return beads.NewBdStore(wsDir, pinnedBdStoreCommandRunner())
 	}
 
 	// Run conformance suite. We skip RunSequentialIDTests because BdStore
