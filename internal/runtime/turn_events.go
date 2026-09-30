@@ -55,7 +55,10 @@ type TurnUsage struct {
 //
 // Unlike SessionEvent, a TurnEvent is a fact, not a level-triggered hint:
 // each turn produces exactly one started event and, when it ends, exactly
-// one completed event with the same TurnID.
+// one completed event with the same TurnID. Delivery of each event is
+// best-effort (see TurnEventProvider), so a subscriber that falls behind
+// can receive either event of a turn without the other; consumers must
+// tolerate an unpaired started or completed event.
 type TurnEvent struct {
 	// Kind classifies the event.
 	Kind TurnEventKind
