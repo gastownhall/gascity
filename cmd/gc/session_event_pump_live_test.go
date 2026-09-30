@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -23,6 +22,7 @@ import (
 func TestSessionEventPumpLiveHerdr(t *testing.T) {
 	herdrtest.RequireLive(t)
 	usePrivateHerdrConfigRoot(t)
+	useBareHerdrPaneShell(t)
 
 	// Unique per run: herdr persists session state across server restarts, so a
 	// fixed name inherits a prior run's leftovers.
@@ -61,7 +61,8 @@ func TestSessionEventPumpLiveHerdr(t *testing.T) {
 	herdrtest.ReportAgent(t, session, agentName, "working", func() string { return herdrLivePaneID(p, agentName) })
 
 	pokeCh := make(chan struct{}, 1)
-	pump := newSessionEventPump(ctx, newLegacyWake(pokeCh, nil), &bytes.Buffer{}, "live")
+	pumpLog := &lockedBuffer{}
+	pump := newSessionEventPump(ctx, newLegacyWake(pokeCh, nil), pumpLog, "live")
 	// Park resync pokes outside the test window so the only poke observed
 	// below is the attributed process-exit one.
 	pump.resyncDelay = time.Minute
@@ -89,7 +90,14 @@ func TestSessionEventPumpLiveHerdr(t *testing.T) {
 	case <-pokeCh:
 		t.Logf("process exit → reconcile poke in %v", time.Since(start).Round(time.Millisecond))
 	case <-time.After(15 * time.Second):
-		t.Fatal("no reconcile poke after the agent process exited")
+		// The pane screen and the pump's own log are what tell "the agent never
+		// launched" (a shell swallowed the launch line) from "it exited and the
+		// event was lost": without them both read as this one line.
+		screen, err := p.Peek(agentName, 30)
+		if err != nil {
+			screen = fmt.Sprintf("(peek failed: %v)", err)
+		}
+		t.Fatalf("no reconcile poke after the agent process exited\npane screen:\n%s\npump log:\n%s", screen, pumpLog.String())
 	}
 }
 
@@ -124,6 +132,23 @@ func usePrivateHerdrConfigRoot(t *testing.T) {
 		}
 	})
 	t.Setenv("XDG_CONFIG_HOME", root)
+}
+
+// useBareHerdrPaneShell runs herdr's panes under plain sh for the rest of the
+// test. herdr spawns each pane's shell from $SHELL (sh when unset) and Start
+// types the agent's launch line into it. Every repo test runner preserves the
+// invoking user's SHELL, so on a zsh host each pane runs zsh, and under a HOME
+// with none of zsh's startup files (a release gate's fresh private HOME) zsh
+// runs its new-user wizard. The wizard reads one key: it eats the first typed
+// character, "exec" becomes "xec", the agent never starts, and the test can
+// only time out with "no reconcile poke". It is a race: the wizard needs a
+// terminal of at least 72 columns when zsh starts, and herdr shrinks a pane
+// from its 24x80 spawn size moments after creating it, so it hit about one run
+// in forty (ga-sux0ij). This test only needs a shell to exec /bin/sh from, so
+// pin one with no startup ritual.
+func useBareHerdrPaneShell(t *testing.T) {
+	t.Helper()
+	t.Setenv("SHELL", "/bin/sh")
 }
 
 // herdrLivePaneID resolves the pane herdr bound to a gc session by reading the
