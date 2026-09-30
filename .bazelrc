@@ -32,3 +32,7 @@ test --test_env=PATH
 # the RBE step. Command-line flags always win.
 try-import %workspace%/.bazelrc.local
 build:remote-exec --remote_timeout=3600
+# rbe-west accepts action-cache writes from its workers only: upload nothing
+# executed locally (it would be refused, and host-dependent local results must
+# not seed the shared cache anyway).
+build:remote-exec --noremote_upload_local_results
