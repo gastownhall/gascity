@@ -2182,32 +2182,38 @@ func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Wr
 
 // asyncStartPreparedCommandStaleInfo is the async-start command-drift gate: it
 // compares the commit-time persisted command (current.Command) against the
-// enqueue-time persisted command (prepared.candidate.info.Command, the
-// in-lock re-read from prepareStartCandidateForCity). A start is stale only
-// when that value changed DURING startup, and changed to something other
-// than the prepared template command (tp.Command) or a prefix-extension of
-// it (the worker boundary's augmented form, shouldPreserveStoredRuntimeCommand).
-// A difference that already existed at enqueue is not startup drift; nothing
-// on the commit path repairs it, so treating it as stale would discard every
-// wave forever (ga-k88yuh, ga-2ygo4s). It is the sole form (the raw sibling
-// was deleted in WI-6 R4).
+// prepared template command (tp.Command) and, for one row class, against the
+// enqueue-time persisted command (prepared.candidate.info.Command, the in-lock
+// re-read from prepareStartCandidateForCity). It is the sole form (the raw
+// sibling was deleted in WI-6 R4).
+//
+// Two rules keep a start from being discarded:
+//   - R1, every row: a persisted command equal to the prepared command, or a
+//     prefix-extension of it (the worker boundary's augmented form,
+//     shouldPreserveStoredRuntimeCommand), is the same command (ga-2ygo4s).
+//   - R2, a wake of an already-committed row (no pending_create_claim, state
+//     queued or creating): a persisted command unchanged since enqueue is not
+//     a change DURING startup. Nothing on the commit path repairs it, so
+//     discarding would repeat every wave forever (ga-k88yuh).
+//
+// Any other difference is stale. A pending create then reaches
+// asyncStartDriftRollbackEligibleInfo, which rolls it back so it releases its
+// alias; every other row is discarded and retried.
 func asyncStartPreparedCommandStaleInfo(prepared preparedStart, current sessionpkg.Info) bool {
 	preparedCommand := strings.TrimSpace(prepared.candidate.tp.Command)
 	currentCommand := strings.TrimSpace(current.Command)
 	if preparedCommand == "" || currentCommand == "" {
 		return false
 	}
-	// Only a change DURING startup can make this start stale. A persisted
-	// command unchanged since enqueue was already there when the start was
-	// prepared; nothing on the commit path rewrites it, so discarding for it
-	// would discard every wave forever (ga-k88yuh).
-	if currentCommand == strings.TrimSpace(prepared.candidate.info.Command) {
+	if currentCommand == preparedCommand || shouldPreserveStoredRuntimeCommand(currentCommand, preparedCommand) {
 		return false
 	}
-	// A change to the prepared command, or to a prefix-extension of it (the
-	// worker boundary's augmented form), is not a change of desired command
-	// (ga-2ygo4s).
-	return currentCommand != preparedCommand && !shouldPreserveStoredRuntimeCommand(currentCommand, preparedCommand)
+	if !current.PendingCreateClaim &&
+		pendingCreateQueuedOrCreatingState(current.MetadataState) &&
+		currentCommand == strings.TrimSpace(prepared.candidate.info.Command) {
+		return false
+	}
+	return true
 }
 
 // clearPendingStartInFlightLease clears last_woke_at for the session handle so a
