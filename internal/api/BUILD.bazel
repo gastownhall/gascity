@@ -285,6 +285,7 @@ go_test(
         "event_stream_delivery_test.go",
         "fake_state_test.go",
         "genclient_roundtrip_test.go",
+        "global_stream_dynamic_test.go",
         "global_stream_precheck_test.go",
         "grant_e2e_test.go",
         "handler_agent_crud_test.go",
