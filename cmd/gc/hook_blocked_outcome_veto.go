@@ -33,9 +33,9 @@ import (
 // says nothing about where its rows came from.
 
 // hookBlockerReadTimeout bounds the veto's one batched bd read. A healthy read
-// is a single `bd show` (0.4 s measured on a 25k-closed-bead store); the bound
-// only stops a wedged store from holding a hook call past the work query it
-// already survived. On expiry the veto fails open, like any other read failure.
+// is a single `bd show`; the bound only stops a wedged store from holding a hook
+// call past the work query it already survived. On expiry the veto fails open,
+// like any other read failure.
 const hookBlockerReadTimeout = 30 * time.Second
 
 // hookBlockerStoreOpener opens the bd workspace at a fan-out leg's (dir, env),
@@ -217,9 +217,9 @@ func withHookBlockedOutcomeVeto(run hookStoreRunner, blockers beads.ExactBatchGe
 // cannot carry a closed blocker. Every blocker is read with ONE batched
 // GetExactBatch (`bd show --json <ids...>`) keyed by distinct blocker id, and
 // only when some open candidate has a ready-blocking edge. The store-side
-// shape, List{IDs, Status: closed}, would scan the whole closed population on
-// every hook call — 118 MB, 3.3 s and 730 MB RSS on a 25k-closed-bead store,
-// against 80 KB and 0.4 s for the batched read.
+// shape, List{IDs, Status: closed}, reads the whole closed population — tens of
+// thousands of beads in a mature store — on every hook call, which is why it is
+// not used here.
 //
 // Input that is not a JSON array passes through unchanged, and so does every
 // row that fails to decode, as in the sibling filters. When the blocker read

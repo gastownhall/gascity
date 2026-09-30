@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -653,17 +654,23 @@ func TestBestStoreWithWorkVetoesRowsFromAQueryThatIgnoresTheLegsStore(t *testing
 // through, as the internal helpers do, is fine.
 func TestNoHookServeEntryPointBypassesTheBlockedOutcomeVeto(t *testing.T) {
 	runnerArg := map[string]int{"bestStoreWithWork": 3, "claimHookWorkWithRunner": 6}
-	files, err := filepath.Glob("*.go")
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	dir := gcCallerDir(currentFile)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("ReadDir(%q): %v", dir, err)
 	}
 	fset := token.NewFileSet()
 	var entryPoints int
-	for _, name := range files {
-		if strings.HasSuffix(name, "_test.go") {
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		file, err := parser.ParseFile(fset, name, nil, 0)
+		file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
