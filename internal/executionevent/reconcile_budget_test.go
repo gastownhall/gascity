@@ -204,8 +204,8 @@ func TestReconcileCompletedRootsWithNoNamedRootsReadsNothing(t *testing.T) {
 // convergence control for this leg, and the reason the full pass survives.
 //
 // A controller can crash between the durable graph-step close and the
-// best-effort journal append, and graph stores emit no bead.closed at all by
-// design. So a close can exist with NO event naming it: the delta pass is
+// best-effort journal append, and a Tx-shaped close emits no bead.closed at
+// all. So a close can exist with NO event naming it: the delta pass is
 // correct to emit nothing (it cannot know), and the backstop must repair it —
 // exactly once, with the second pass silent.
 func TestReconcileCompletedBackstopHealsAStrandedCloseTheDeltaCannotSee(t *testing.T) {

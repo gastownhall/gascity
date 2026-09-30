@@ -222,6 +222,8 @@ func newControllerStateWithRoutes(
 		ctx = context.Background()
 	}
 	tomlPath := filepath.Join(cityPath, "city.toml")
+	// Captured before any cache primes, the binding's included, so the bead
+	// event watcher replays whatever landed during the prime window.
 	var beadEventStartSeq uint64
 	var beadEventStartSeqOK bool
 	if ep != nil {
@@ -230,6 +232,9 @@ func newControllerStateWithRoutes(
 			beadEventStartSeqOK = true
 		}
 	}
+	// A split city's binding gets the CachingStore its work ledger has, before
+	// the class-routed services below are built over it (class_store_cache.go).
+	routes = routes.withControllerCache(ctx, ep)
 	// Latch the rollout-gate snapshot ONCE from the boot config. A resolve error
 	// (nil cfg or an out-of-enum config value) is warn-and-continue: the zero
 	// Flags is degraded-safe (legacy paths), and this constructor returns no
@@ -290,7 +295,7 @@ func newControllerStateWithRoutes(
 // Suspended rigs pass false: they spawn no agents, so nothing writes locally and
 // a continuously refreshed cache buys nothing; reconciling every suspended rig
 // every cycle is what pegs the supervisor (gastownhall/gascity #1978 follow-up).
-func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider, backgroundRefresh bool) beads.Store {
+func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider, backgroundRefresh bool, opts ...beads.CachingStoreOption) beads.Store {
 	baseStore, policyStore, policyWrapped := unwrapBeadPolicyStore(store)
 	if baseStore == nil {
 		return nil
@@ -316,7 +321,7 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 			})
 		}
 	}
-	cs := beads.NewCachingStore(baseStore, onChange)
+	cs := beads.NewCachingStore(baseStore, onChange, opts...)
 	// Pre-prime active beads synchronously (~1-2s, indexed queries).
 	// Loads open + in_progress beads — enough for the startup path
 	// (adoption, session snapshot, desired state) so the city can
@@ -814,7 +819,12 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	snapshot := evt.Actor == cacheReconcileActor
 	for _, store := range stores {
 		if cached, ok := store.(*beads.CachingStore); ok {
-			if snapshot {
+			// A class binding's out-of-process writers are one-shot CLIs, whose
+			// emitter snapshots the row with its edges. Applied as a bd hook
+			// patch, a snapshot of an edge-less row (no dependencies key, from
+			// a binary that predates the explicit empty array) would drop the
+			// row's edges and mark the whole cache's edge set incomplete.
+			if snapshot || cs.storageRoutes.isBindingCache(cached) {
 				cached.ApplyEventSnapshot(evt.Type, evt.Payload)
 			} else {
 				cached.ApplyEvent(evt.Type, evt.Payload)
@@ -942,15 +952,16 @@ func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Stor
 	for _, rig := range cs.cfg.Rigs {
 		match(rig.EffectivePrefix(), cs.beadStores[rig.Name])
 	}
-	// Relocated classes are candidates under their reserved prefixes; without
+	// Relocated classes are candidates under every prefix they reserve; without
 	// this a "gcg-*" close fell through to the broadcast and autoclose read an
-	// arbitrary work store. Gated on `relocated`, so single-store is unchanged.
+	// arbitrary work store, and a nudge-queue ("gcnq-*") write never reached the
+	// binding's cache. Gated on `relocated`, so single-store is unchanged.
 	for _, class := range infraMigrationClasses {
-		prefix, ok := config.ReservedClassPrefix(string(class)) // residency:allow — extends this scan's configured-prefix table, not a probe
-		if !ok {
+		store, relocated := cs.storageRoutes.storeFor(coordclassFor(string(class)))
+		if !relocated {
 			continue
 		}
-		if store, relocated := cs.storageRoutes.storeFor(coordclassFor(string(class))); relocated {
+		for _, prefix := range config.ReservedClassPrefixesFor(string(class)) { // residency:allow — extends this scan's configured-prefix table, not a probe
 			match(prefix, store)
 		}
 	}
@@ -1696,7 +1707,8 @@ func (cs *controllerState) ScopedStoreLike(ctx context.Context, existing beads.S
 // to CityBeadStore; when [beads.classes.nudges] is relocated it returns the per-class
 // store. cs.eventProv is passed for signature parity with the other accessors and is
 // ignored by resolveNudgesStore; the controller's emission comes from the CachingStore
-// around its work ledger, not from this argument. The result is wrapped in the
+// around each store it serves (class_store_cache.go), not from this argument. The
+// result is wrapped in the
 // strongly-typed beads.NudgesStore so the nudges class is statically visible to callers;
 // the wrapper carries the same underlying store value, so runtime behavior is unchanged.
 func (cs *controllerState) NudgesBeadStore() beads.NudgesStore {
@@ -1724,8 +1736,8 @@ func (cs *controllerState) SessionsBeadStore() beads.SessionStore {
 // when [beads.classes.graph] is relocated it returns the dedicated graph store at the
 // legacy .gc/beads.sqlite location (or the gcg Postgres schema). cs.eventProv is
 // passed for signature parity with the other accessors but is ignored by
-// resolveGraphStore, as it is for every class: a class store carries no emitting
-// layer, and on this side the controller's CachingStore is the emitter. The
+// resolveGraphStore, as it is for every class: on this side the controller's
+// CachingStore over the binding is the emitter (class_store_cache.go). The
 // one-shot CLI's side is covered by class_store_emit.go. The result is wrapped in
 // the strongly-typed beads.GraphStore so the
 // graph class is statically visible to callers; the wrapper carries the same
@@ -1752,10 +1764,10 @@ func (cs *controllerState) OrdersBeadStore() beads.OrdersStore {
 
 // ClassBindingHasLegacyResidents replays the boot census for one binding store.
 //
-// The store values the class accessors above hand out are the routes' own
-// stores — resolveClassStore returns routes.storeFor unwrapped — so the census
-// map the boot keyed by store answers directly here. A store this city never
-// censused, the work store included, keeps its probe.
+// The class accessors above hand out the routes' stores, which on the
+// controller are the CachingStores over the engines the boot census read;
+// hasLegacyResidents looks the engine up under the cache. A store this city
+// never censused, the work store included, keeps its probe.
 func (cs *controllerState) ClassBindingHasLegacyResidents(store beads.Store) bool {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()

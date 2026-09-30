@@ -1373,6 +1373,13 @@ func runController(
 		return 1
 	}
 
+	// Install controller-managed bead stores even when the HTTP API is
+	// disabled. Standalone runtime still needs cached city/rig stores for
+	// session-bead sync and rig-scoped wake decisions. This also puts the
+	// binding's CachingStore into the routes, so it runs before the routes are
+	// published below.
+	cs := newControllerStateWithRoutes(ctx, cr.storageRoutes, cfg, sp, eventProv, cityName, cityPath)
+
 	// This process is the city's controller — the lock above says so — so its
 	// opened binding is the residency answer the assigned-work spine reads.
 	// Registered here rather than inside newCityRuntime because the supervisor
@@ -1382,11 +1389,6 @@ func runController(
 	// statements below, so capturing the store here would capture a nil and the
 	// census would silently fall back to its leading (binding) store.
 	registerResidencyRoutes(cityPath, cr.storageRoutes, cr.cityBeadStore)
-
-	// Install controller-managed bead stores even when the HTTP API is
-	// disabled. Standalone runtime still needs cached city/rig stores for
-	// session-bead sync and rig-scoped wake decisions.
-	cs := newControllerStateWithRoutes(ctx, cr.storageRoutes, cfg, sp, eventProv, cityName, cityPath)
 	cs.ct = cr.crashTrack()
 	wireControllerWakeSignals(cs, pokeCh, controlDispatcherCh)
 	cs.configDirty = configDirty

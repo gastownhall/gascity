@@ -1474,9 +1474,10 @@ func (cr *CityRuntime) tick(
 		cr.beadReconcileTick(ctx, result, sessionBeads, trace, false)
 		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile_tick", phaseStart, traceDesiredStateFields(result))
 	}
-	// Graph stores intentionally do not emit bead.closed, so a step closed
-	// between the durable write and the best-effort journal append would be a
-	// permanent lifecycle gap. The tick repairs only the roots the journal named
+	// A step close and its journal row are two writes, and the row is
+	// best-effort: a crash between them, or a close that emitted nothing (a
+	// Tx-shaped write), leaves a lifecycle gap no event names. The tick repairs
+	// only the roots the journal named
 	// since the last pass; the whole-corpus convergence sweep runs off-tick in
 	// the background lane.
 	//

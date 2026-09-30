@@ -518,7 +518,9 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 			// depends on another), or out from under its own dep-linked
 			// children ("up": rows where another bead depends on this one).
 			// Both reads sit inside the single probe budget charged above.
-			linked, linkErr := hasParentChildDepEdge(store, c.ID)
+			// Live, as the purge's is: a closed row can sit in the controller's
+			// cache while another process adds an edge to it without an event.
+			linked, linkErr := hasParentChildDepEdge(beads.HandlesFor(store).Live, c.ID)
 			if linkErr != nil {
 				collectErr = errors.Join(collectErr, fmt.Errorf("listing parent-child deps for rootless orphan %q: %w", c.ID, linkErr))
 				continue
@@ -530,7 +532,9 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 		} else {
 			cached, ok := rootCollectible[rootID]
 			if !ok {
-				root, getErr := store.Get(rootID)
+				// Live: the root's status gates a delete, and a cached row can
+				// still say terminal after another process reopened it.
+				root, getErr := beads.HandlesFor(store).Live.Get(rootID)
 				switch {
 				case errors.Is(getErr, beads.ErrNotFound):
 					cached = true // root gone
@@ -609,22 +613,27 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 // another engine (a Dolt workspace), or a refused binding — returns nil, which
 // is what keeps the closed session purge off every store the reaper order
 // already governs.
+//
+// The engine is identified under the controller's cache (bindingEngine), and
+// the store handed back is sessionStore itself, so on the controller the purge
+// deletes through that cache: the cache drops the rows and the deletes emit
+// bead.deleted like every other controller write to the binding.
 func relocatedSQLiteSessionLedger(routes *storageRoutes, sessionStore, workStore beads.Store) beads.Store {
 	routed, relocated := routes.storeFor(coordclass.ClassSessions) // residency:allow — asks whether the sessions class is relocated, to gate a purge; resolves no bead
 	if !relocated || routed == nil || sessionStore == nil {
 		return nil
 	}
-	ledger, ok := sessionStore.(*beads.SQLiteStore)
+	ledger, ok := bindingEngine(sessionStore).(*beads.SQLiteStore)
 	if !ok || ledger == nil {
 		return nil
 	}
-	if routedLedger, ok := routed.(*beads.SQLiteStore); !ok || routedLedger != ledger {
+	if routedLedger, ok := bindingEngine(routed).(*beads.SQLiteStore); !ok || routedLedger != ledger {
 		return nil
 	}
-	if work, ok := workStore.(*beads.SQLiteStore); ok && work == ledger {
+	if work, ok := bindingEngine(workStore).(*beads.SQLiteStore); ok && work == ledger {
 		return nil
 	}
-	return ledger
+	return sessionStore
 }
 
 // purgeClosedInfraSessions deletes closed session beads that have been idle
@@ -673,6 +682,10 @@ func purgeClosedInfraSessionsPage(store beads.Store, now time.Time, age time.Dur
 	if err != nil {
 		return 0, cursor, fmt.Errorf("listing closed infra sessions: %w", err)
 	}
+	// The safety reads go past any cache: the controller hands this a cached
+	// ledger, and a reopen or a new edge another process wrote without an event
+	// must still stop the delete.
+	live := beads.HandlesFor(store).Live
 	purged := 0
 	attempted := 0
 	examined := 0
@@ -695,7 +708,7 @@ func purgeClosedInfraSessionsPage(store beads.Store, now time.Time, age time.Dur
 		if len(children) > 0 {
 			continue
 		}
-		linked, linkErr := hasParentChildDepEdge(store, candidate.ID)
+		linked, linkErr := hasParentChildDepEdge(live, candidate.ID)
 		if linkErr != nil {
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("listing parent-child deps for session %q: %w", candidate.ID, linkErr))
 			continue
@@ -705,7 +718,7 @@ func purgeClosedInfraSessionsPage(store beads.Store, now time.Time, age time.Dur
 		}
 		// Re-read right before the delete: the list is a snapshot, and a
 		// configured named session can be reopened in the meantime.
-		current, getErr := store.Get(candidate.ID)
+		current, getErr := live.Get(candidate.ID)
 		if getErr != nil {
 			if !errors.Is(getErr, beads.ErrNotFound) {
 				deleteErr = errors.Join(deleteErr, fmt.Errorf("re-reading session %q: %w", candidate.ID, getErr))
@@ -758,7 +771,10 @@ func closedInfraSessionPastCutoff(b beads.Bead, cutoff time.Time) bool {
 // bead have a dep-linked parent", "up" deps answer "does it have dep-linked
 // children" — either makes it a subtree member rather than a free-standing
 // leaf, so the orphan reaper must leave it to the owning root's closure purge.
-func hasParentChildDepEdge(store beads.Store, id string) (bool, error) {
+func hasParentChildDepEdge(store interface {
+	DepList(id, direction string) ([]beads.Dep, error)
+}, id string,
+) (bool, error) {
 	for _, direction := range []string{"down", "up"} {
 		deps, err := store.DepList(id, direction)
 		if err != nil {
