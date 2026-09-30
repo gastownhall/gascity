@@ -553,6 +553,35 @@ def _fake_classify(outcomes):
 
 
 class UsageBackfillTests(CollectorTestCase):
+    def test_backfill_counts_only_usage_bearing_candidates(self):
+        source = os.path.join(self.claude_dir, "real-shaped.jsonl")
+        rows = [
+            {"type": "assistant", "uuid": "assistant", "sessionId": "session",
+             "timestamp": "2026-09-28T12:00:00Z", "message": {
+                 "role": "assistant", "usage": {"input_tokens": 4, "output_tokens": 2},
+                 "content": [{"type": "text", "text": "Synthetic first"},
+                             {"type": "text", "text": "Synthetic second"},
+                             {"type": "tool_use", "id": "toolu_fixture", "name": "Read", "input": {}}]}},
+            {"type": "user", "uuid": "user", "sessionId": "session",
+             "timestamp": "2026-09-28T12:00:01Z", "message": {
+                 "role": "user", "content": [{"type": "tool_result",
+                     "tool_use_id": "toolu_fixture", "content": "Synthetic result"}]}},
+        ]
+        with open(source, "w", encoding="utf-8") as handle:
+            handle.write("".join(json.dumps(row) + "\n" for row in rows))
+        with ObservatoryStore(self.db) as store:
+            self.collect(store)
+            store.conn.execute("DELETE FROM event_usage")
+            run = backfill_missing_usage(store)
+            self.assertEqual(run.candidate_events, 1)
+            self.assertEqual(run.events_identity_matched, 4)
+            self.assertEqual(run.events_matched, 1)
+            self.assertEqual(run.usage_inserted, 1)
+            self.assertEqual(run.events_unmatched, 0)
+            again = backfill_missing_usage(store)
+            self.assertEqual(again.candidate_events, 0)
+            self.assertEqual(again.events_identity_matched, 3)
+
     def test_backfill_is_resumable_and_idempotent_with_source_size_cap(self):
         source = os.path.join(self.claude_dir, "usage-backfill.jsonl")
         transcript_record = {
@@ -682,6 +711,41 @@ class UsageBackfillTests(CollectorTestCase):
         self.assertEqual(run.events_identity_matched, 1)
         self.assertEqual(run.events_matched, 0)
         self.assertEqual(run.events_stable_field_rejected, 1)
+        self.assertEqual(run.usage_inserted, 0)
+        self.assertEqual(usage_count, 0)
+
+    def test_usage_backfill_rejects_changed_model_no_usage(self):
+        source = os.path.join(self.claude_dir, "changed-model-no-usage.jsonl")
+        transcript_record = {
+            "type": "assistant",
+            "uuid": "e",
+            "sessionId": "s",
+            "timestamp": "2026-09-28T12:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "model": "A",
+                "content": [{"type": "tool_use", "id": "t", "name": "synthetic", "input": {}}],
+                "usage": {"input_tokens": 4, "output_tokens": 2},
+            },
+        }
+        with open(source, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(transcript_record) + "\n")
+
+        with ObservatoryStore(self.db) as store:
+            self.collect(store)
+            store.conn.execute("DELETE FROM event_usage")
+            transcript_record["message"]["model"] = "B"
+            del transcript_record["message"]["usage"]
+            with open(source, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(transcript_record) + "\n")
+            run = backfill_missing_usage(store, roots=(SourceRoot(path=self.root),))
+            usage_count = store.conn.execute("SELECT COUNT(*) FROM event_usage").fetchone()[0]
+
+        self.assertEqual(run.candidate_events, 1)
+        self.assertEqual(run.events_identity_matched, 1)
+        self.assertEqual(run.events_unmatched, 1)
+        self.assertEqual(run.events_stable_field_rejected, 1)
+        self.assertEqual(run.events_matched, 0)
         self.assertEqual(run.usage_inserted, 0)
         self.assertEqual(usage_count, 0)
 
