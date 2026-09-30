@@ -1511,15 +1511,25 @@ func recordWorkflowFinalizeError(store beads.Store, finalizer beads.Bead, err er
 // Each key is added only when the bead actually carries it, so the ordinary
 // never-failed finalize closes with exactly the one-key update it always did.
 func finalizerCompletionMetadata(finalizer beads.Bead) map[string]string {
-	metadata := map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass}
-	for _, key := range []string{
-		workflowFinalizeErrorMetadataKey,
+	return controlCompletionMetadata(finalizer, beadmeta.OutcomePass, workflowFinalizeErrorMetadataKey)
+}
+
+// controlCompletionMetadata is the metadata a control bead carries into its own
+// close: the outcome, plus an empty value for every gc.control_pending_* key
+// (and each of extraKeys) the bead actually carries. A control bead that
+// pended on drift, escalated and then recovered must not close still
+// advertising the stall it recovered from. Keys the bead does not carry are
+// left out so an ordinary close stays a one-key update.
+func controlCompletionMetadata(bead beads.Bead, outcome string, extraKeys ...string) map[string]string {
+	metadata := map[string]string{beadmeta.OutcomeMetadataKey: outcome}
+	keys := append([]string{
 		beadmeta.ControlPendingReasonMetadataKey,
 		beadmeta.ControlPendingCountMetadataKey,
 		beadmeta.ControlPendingFirstSeenMetadataKey,
 		beadmeta.ControlPendingStalledMetadataKey,
-	} {
-		if strings.TrimSpace(finalizer.Metadata[key]) != "" {
+	}, extraKeys...)
+	for _, key := range keys {
+		if strings.TrimSpace(bead.Metadata[key]) != "" {
 			metadata[key] = ""
 		}
 	}
