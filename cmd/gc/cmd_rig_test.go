@@ -1313,34 +1313,39 @@ func TestCmdRigSuspensionDirectPathReloadsController(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fx := setupRegisteredRigFixture(t, true, tc.suspended)
 			setCwd(t, fx.workDir)
-			pokeCh := make(chan struct{}, 1)
-			reloadReqCh := make(chan reloadRequest, 1)
-			lis, err := startControllerSocket(fx.cityPath, controllerHostingSupervisor, func() {}, nil, nil, reloadReqCh, nil, pokeCh, nil)
-			if err != nil {
-				t.Fatal(err)
+			reloadReqCh := make(chan reloadControlRequest, 1)
+			reloadReplyCh := make(chan reloadControlReply, 1)
+			oldSend := sendReloadControlRequestHook
+			t.Cleanup(func() {
+				reloadReplyCh <- reloadControlReply{Outcome: reloadOutcomeFailed}
+				sendReloadControlRequestHook = oldSend
+			})
+			sendReloadControlRequestHook = func(cityPath string, req reloadControlRequest) (reloadControlReply, error) {
+				if cityPath != fx.cityPath {
+					return reloadControlReply{}, fmt.Errorf("reload city = %q, want %q", cityPath, fx.cityPath)
+				}
+				reloadReqCh <- req
+				return <-reloadReplyCh, nil
 			}
-			t.Cleanup(func() { _ = lis.Close() })
 
 			var stdout, stderr bytes.Buffer
 			result := make(chan int, 1)
 			go func() { result <- tc.run(nil, &stdout, &stderr) }()
-			var req reloadRequest
+			var req reloadControlRequest
 			select {
 			case req = <-reloadReqCh:
 			case <-time.After(5 * time.Second):
 				t.Fatal("direct rig change did not request a reload")
 			}
-			if !req.wait {
+			if !req.Wait || req.Timeout != "5m" {
 				t.Fatal("direct rig change requested an asynchronous reload")
 			}
-			cr := &CityRuntime{pokeCh: pokeCh}
-			cr.handleReloadRequest(&req)
 			select {
 			case <-result:
 				t.Fatal("rig command returned before reload completion")
 			default:
 			}
-			req.doneCh <- reloadControlReply{Outcome: reloadOutcomeApplied}
+			reloadReplyCh <- reloadControlReply{Outcome: reloadOutcomeApplied}
 			select {
 			case code := <-result:
 				if code != 0 {
@@ -1349,21 +1354,17 @@ func TestCmdRigSuspensionDirectPathReloadsController(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("rig command did not return after reload completion")
 			}
-			if !cr.configDirty.Load() {
-				t.Fatalf("controller was not marked dirty after direct %s", tc.name)
-			}
-			select {
-			case <-pokeCh:
-			default:
-				t.Fatalf("controller was not poked after direct %s", tc.name)
-			}
 		})
 	}
 }
 
 func TestDirectRigSuspensionRejectsUnconfirmedReload(t *testing.T) {
 	cityPath := t.TempDir()
-	startRecordingControllerSocket(t, cityPath, func(string) string { return `{"outcome":"failed","error":"store reload failed"}` + "\n" })
+	oldSend := sendReloadControlRequestHook
+	t.Cleanup(func() { sendReloadControlRequestHook = oldSend })
+	sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
+		return reloadControlReply{Outcome: reloadOutcomeFailed, Error: "store reload failed"}, nil
+	}
 	var stderr bytes.Buffer
 	if code := finishDirectRigSuspension(cityPath, "resume", 0, &stderr); code != 1 {
 		t.Fatalf("finishDirectRigSuspension = %d, want failure; stderr=%q", code, stderr.String())

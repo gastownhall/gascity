@@ -991,7 +991,7 @@ func finishDirectRigSuspension(cityPath, action string, code int, stderr io.Writ
 	}
 	// A later controller start will read the saved state. A running controller
 	// must finish reloading before new work can use the rig's refreshed store.
-	reply, err := sendReloadControlRequest(cityPath, reloadControlRequest{Wait: true, Timeout: "5m"})
+	reply, err := sendReloadControlRequestHook(cityPath, reloadControlRequest{Wait: true, Timeout: "5m"})
 	if errors.Is(err, os.ErrNotExist) {
 		return 0
 	}
