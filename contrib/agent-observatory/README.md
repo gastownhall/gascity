@@ -1,5 +1,22 @@
 # Agent Observatory (offline foundation slice)
 
+## Repair historical repository bindings
+
+After making a fresh SQLite online backup, audit transcript-derived bindings:
+
+```sh
+PYTHONPATH=contrib/agent-observatory python3 -m agent_observatory.rebind_historical --db /path/to/obs.db
+# Add --apply to atomically apply the reported differences.
+```
+
+The default is read-only. Only `transcript_cwd` and `transcript_cwd_prefix`
+bindings are recomputed using the current resolver and collector source
+checkpoints; explicit and worker-directory bindings are never changed. Missing,
+ambiguous, or unresolvable evidence becomes unknown (repo and provenance cleared).
+Template/role is preserved; binding digests are refreshed. Repeating the repair
+is a no-op after corrections. Save the JSON old/new count table and changes for
+review, then rerun `exposure` to refresh derived exposure rows.
+
 A dependency-free Python 3 CLI and library for **normalized evidence import,
 classification storage, and deterministic reporting** over Gas City agent
 activity. It is the first bounded slice of the Jev-powered historical/live chat
