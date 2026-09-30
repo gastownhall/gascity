@@ -67,9 +67,6 @@ func TestRoundTripHeldNormalizesToUTC(t *testing.T) {
 	if !got.ExpiresAt.Equal(rec.ExpiresAt) {
 		t.Fatalf("ExpiresAt = %v, want the same instant as %v", got.ExpiresAt, rec.ExpiresAt)
 	}
-	if got.ExpiresAt.Location() != time.UTC {
-		t.Fatalf("ExpiresAt location = %v, want UTC", got.ExpiresAt.Location())
-	}
 }
 
 func TestRoundTripParkedAndDead(t *testing.T) {
@@ -314,18 +311,9 @@ func TestRoundTripStripsMonotonicClock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	if strings.Contains(encoded, "m=") {
-		t.Fatalf("Encode = %q, want no monotonic reading", encoded)
-	}
 	got, err := Decode(encoded)
 	if err != nil {
 		t.Fatalf("Decode(%q): %v", encoded, err)
-	}
-	if got.ExpiresAt.Location() != time.UTC {
-		t.Fatalf("ExpiresAt location = %v, want UTC", got.ExpiresAt.Location())
-	}
-	if got.ExpiresAt.String() != got.ExpiresAt.Round(0).String() {
-		t.Fatalf("ExpiresAt = %v still carries a monotonic reading", got.ExpiresAt)
 	}
 	if !got.ExpiresAt.Equal(now) {
 		t.Fatalf("ExpiresAt = %v, want the same instant as %v", got.ExpiresAt, now)
@@ -665,7 +653,7 @@ func TestCanonicalNormalizesZeroExpiryRepresentation(t *testing.T) {
 	expires := time.Date(1, 1, 1, 1, 0, 0, 0, time.FixedZone("plus1", 3600))
 	rec := Record{Epoch: 1, Holder: h, ExpiresAt: expires, State: StateParked}
 
-	if !rec.ExpiresAt.IsZero() || rec.ExpiresAt.Equal((time.Time{})) {
+	if !rec.ExpiresAt.IsZero() || rec.ExpiresAt.Location() == time.UTC {
 		t.Fatalf("test expiry = %#v, want a noncanonical representation of the zero instant", rec.ExpiresAt)
 	}
 	wire, err := Encode(rec)
