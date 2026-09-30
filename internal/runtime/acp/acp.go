@@ -85,6 +85,7 @@ type Provider struct {
 	cfg           Config
 	activityWrite func(path string, data []byte) error                                         // test seam
 	handshakeFunc func(context.Context, *sessionConn, string, []runtime.MCPServerConfig) error // test seam
+	dial          func(network, addr string, timeout time.Duration) (net.Conn, error)          // test seam
 }
 
 // Compile-time check.
@@ -92,6 +93,8 @@ var (
 	_ runtime.Provider                    = (*Provider)(nil)
 	_ runtime.InteractionProvider         = (*Provider)(nil)
 	_ runtime.TransportCapabilityProvider = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError   = (*Provider)(nil)
+	_ runtime.ListingAttestation          = (*Provider)(nil)
 )
 
 // NewProvider returns an ACP [Provider] that stores socket files in
@@ -629,14 +632,26 @@ func (p *Provider) Interrupt(name string) error {
 
 // IsRunning reports whether the named session has a live process.
 func (p *Provider) IsRunning(name string) bool {
+	obs, _ := p.ObserveLivenessWithError(name, nil)
+	return obs.Running
+}
+
+// ObserveLivenessWithError implements [runtime.LivenessObserverWithError]. A
+// session this provider owns answers from its process; any other answers from
+// its control socket (see probeSessionSocket), so a probe that cannot tell
+// returns an error wrapping [runtime.ErrRuntimeUnavailable] instead of
+// absence. Process names are ignored, as in ProcessAlive.
+func (p *Provider) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
 	p.mu.Lock()
 	sc, ok := p.conns[name]
 	p.mu.Unlock()
 
 	if ok {
-		return sc.alive()
+		alive := sc.alive()
+		return runtime.Liveness{Running: alive, Alive: alive}, nil
 	}
-	return p.socketAlive(name)
+	present, err := p.probeSessionSocket(name)
+	return runtime.Liveness{Running: present, Alive: present}, err
 }
 
 // IsAttached always returns false — ACP sessions have no terminal.
@@ -921,7 +936,9 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 }
 
 // ListRunning returns the names of all running sessions whose names
-// match the given prefix, discovered via socket files.
+// match the given prefix, discovered via socket files. A socket that cannot be
+// classified (see probeSessionSocket) leaves its name out, so the names come
+// back with a [runtime.PartialListError] rather than as a complete list.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	entries, err := os.ReadDir(p.dir)
 	if err != nil {
@@ -930,7 +947,10 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 		}
 		return nil, err
 	}
-	var names []string
+	var (
+		names    []string
+		failures []error
+	)
 	for _, e := range entries {
 		n := e.Name()
 		if !strings.HasSuffix(n, ".sock") {
@@ -940,12 +960,25 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 		if !strings.HasPrefix(sn, prefix) {
 			continue
 		}
-		if p.socketAlive(sn) {
+		present, err := p.probeSessionSocket(sn)
+		if err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		if present {
 			names = append(names, sn)
 		}
 	}
+	if len(failures) > 0 {
+		return names, &runtime.PartialListError{Err: errors.Join(failures...)}
+	}
 	return names, nil
 }
+
+// ListRunningComplete implements [runtime.ListingAttestation]: a socket that
+// cannot be classified makes ListRunning partial, so an error-free result
+// lists every running session.
+func (p *Provider) ListRunningComplete() bool { return true }
 
 func (p *Provider) metaPath(name, key string) string {
 	return filepath.Join(p.dir, metaFilePrefix(name)+".meta."+metaFileKey(key))
@@ -1048,19 +1081,55 @@ func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}, stopG
 	}
 }
 
-// socketAlive checks if a session is alive by pinging its control socket.
+// socketAlive reports whether the session's control socket accepts a
+// connection. A socket that cannot be classified reads as not alive.
 func (p *Provider) socketAlive(name string) bool {
+	present, _ := p.probeSessionSocket(name)
+	return present
+}
+
+// socketProbeTimeout bounds one control-socket dial in probeSessionSocket.
+const socketProbeTimeout = 500 * time.Millisecond
+
+// probeSessionSocket classifies the named session's control socket, trying the
+// hashed path and then the legacy name-based one. It is the one answer behind
+// IsRunning, ObserveLivenessWithError and ListRunning:
+//   - (true, nil): a path accepted the connection. The owner closes its
+//     listener when the process exits, so the session is running even when it
+//     is too busy to answer a ping.
+//   - (false, nil): every path is missing, refuses connections, or is too long
+//     to bind (see [runtime.ClassifyControlSocketDial] for what refused means
+//     off Linux).
+//   - (false, err): no path connected and one failed another way (a dial
+//     timeout, EACCES); err wraps [runtime.ErrRuntimeUnavailable].
+func (p *Provider) probeSessionSocket(name string) (bool, error) {
+	var unknown error
 	for _, sp := range []string{p.sockPath(name), p.legacySockPath(name)} {
-		conn, err := net.DialTimeout("unix", sp, 500*time.Millisecond)
-		if err != nil {
+		if runtime.UnixSocketPathTooLong(sp) {
 			continue
 		}
-		_ = conn.Close()
-		if p.sendSocketCommand(name, "ping", 500*time.Millisecond) == nil {
-			return true
+		conn, err := p.dialSocket(sp, socketProbeTimeout)
+		switch runtime.ClassifyControlSocketDial(err) {
+		case runtime.ControlSocketPresent:
+			_ = conn.Close()
+			return true, nil
+		case runtime.ControlSocketUnknown:
+			if unknown == nil {
+				unknown = err
+			}
 		}
 	}
-	return false
+	if unknown != nil {
+		return false, fmt.Errorf("%w: acp control socket for %q: %w", runtime.ErrRuntimeUnavailable, name, unknown)
+	}
+	return false, nil
+}
+
+func (p *Provider) dialSocket(path string, timeout time.Duration) (net.Conn, error) {
+	if p.dial != nil {
+		return p.dial("unix", path, timeout)
+	}
+	return net.DialTimeout("unix", path, timeout)
 }
 
 // sendSocketCommand connects to the session's control socket and sends a command.
@@ -1070,8 +1139,13 @@ func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration
 		firstActionableErr error
 	)
 	for _, sp := range []string{p.sockPath(name), p.legacySockPath(name)} {
+		if runtime.UnixSocketPathTooLong(sp) {
+			// Nothing can be bound here; a dial would fail with EINVAL.
+			lastErr = fmt.Errorf("acp control socket path is too long to bind: %w", os.ErrNotExist)
+			continue
+		}
 		err := func(path string) error {
-			conn, err := net.DialTimeout("unix", path, timeout)
+			conn, err := p.dialSocket(path, timeout)
 			if err != nil {
 				return err
 			}
@@ -1119,9 +1193,7 @@ func (p *Provider) stopBySocket(name string) error {
 }
 
 func isUnavailableSocketError(err error) bool {
-	return errors.Is(err, os.ErrNotExist) ||
-		errors.Is(err, syscall.ENOENT) ||
-		errors.Is(err, syscall.ECONNREFUSED)
+	return err != nil && runtime.ClassifyControlSocketDial(err) == runtime.ControlSocketAbsent
 }
 
 // Capabilities reports ACP provider capabilities. ACP sessions are headless,

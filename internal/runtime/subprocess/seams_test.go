@@ -211,16 +211,21 @@ func TestSeamsTransportShape(t *testing.T) {
 	}
 }
 
-// ListRunning is not complete here: a live session whose 500 ms control-socket
-// ping misses is dropped with no error. An error-free listing is therefore no
-// proof of absence, and the provider must stay unattested until its listing
-// reports that gap.
-// Kills: a listing attestation declared while ListRunning still omits live
-// sessions.
-func TestListRunningIsNotAttested(t *testing.T) {
-	for _, sp := range []any{(*Provider)(nil), (*seamBackedProvider)(nil)} {
-		if _, ok := sp.(runtime.ListingAttestation); ok {
-			t.Errorf("%T declares runtime.ListingAttestation", sp)
-		}
+// ListRunning is complete: a socket that cannot be classified makes the
+// listing partial instead of dropping the name, so an error-free listing is
+// proof of absence.
+// Kills: the attestation missing from the provider, so absence stays
+// unattested for acp and subprocess cities.
+func TestListRunningIsAttested(t *testing.T) {
+	if !runtime.ListRunningAttested(&Provider{}) {
+		t.Error("*Provider does not attest ListRunning")
+	}
+}
+
+// Kills: the attestation lost behind the seam adapter, which production
+// constructs.
+func TestCutoverForwardsListingAttestation(t *testing.T) {
+	if sp := seamBack(&Provider{}); !runtime.ListRunningAttested(sp) {
+		t.Errorf("%T does not forward the listing attestation", sp)
 	}
 }

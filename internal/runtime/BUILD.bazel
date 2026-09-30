@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "beacon.go",
         "carrier.go",
+        "control_socket.go",
         "dialog.go",
         "dialog_midsession.go",
         "envsecret.go",

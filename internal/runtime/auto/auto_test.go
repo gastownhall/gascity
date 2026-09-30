@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -849,5 +850,32 @@ func TestAutoListRunningByBackend_NestedCompositeListsEachLeafOnce(t *testing.T)
 	}
 	if len(acp.prefixes) != 1 {
 		t.Errorf("acp listed %d times, want 1", len(acp.prefixes))
+	}
+}
+
+// partialLister is a backend whose listing is partial: some names plus a
+// [runtime.PartialListError], as acp returns when a socket cannot be classified.
+type partialLister struct {
+	*runtime.Fake
+	names []string
+}
+
+func (p partialLister) ListRunning(string) ([]string, error) {
+	return p.names, &runtime.PartialListError{Err: runtime.ErrRuntimeUnavailable}
+}
+
+// Kills: the composite hiding a backend's partial listing, which would make a
+// name the backend could not classify read as dead in the merged list.
+func TestAutoMergedListIsPartialWhenACPIsPartial(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	_ = defaultSP.Start(context.Background(), "default-1", runtime.Config{})
+	p := New(defaultSP, partialLister{Fake: runtime.NewFake(), names: []string{"acp-1"}})
+
+	names, err := p.ListRunning("")
+	if !runtime.IsPartialListError(err) || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("ListRunning err = %v, want a partial list wrapping the acp failure", err)
+	}
+	if !slices.Equal(names, []string{"default-1", "acp-1"}) {
+		t.Fatalf("ListRunning names = %v, want [default-1 acp-1]", names)
 	}
 }

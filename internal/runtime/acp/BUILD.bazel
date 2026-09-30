@@ -32,6 +32,7 @@ go_test(
         "proctable_linux_test.go",
         "protocol_test.go",
         "seams_test.go",
+        "socket_probe_test.go",
         "startup_test.go",
         "stop_grace_test.go",
         "testenv_import_test.go",
