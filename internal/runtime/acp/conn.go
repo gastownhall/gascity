@@ -2,6 +2,7 @@ package acp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -38,6 +39,11 @@ type sessionConn struct {
 	// before session metadata is removed.
 	activityPublisher       *activityPublisher
 	activityPublisherClosed bool
+
+	// capture records JSON-RPC traffic to the session transcript; nil when
+	// capture is disabled. Set before readLoop starts and closed by the
+	// process monitor after readLoop exits.
+	capture *transcriptCapture
 
 	// stdinMu serializes writes to the agent's stdin pipe. Separate from
 	// mu so that a slow/blocked stdin write cannot prevent dispatch (which
@@ -85,16 +91,23 @@ func (sc *sessionConn) readLoop(r io.Reader) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
+		line := scanner.Bytes()
+		if len(line) == 0 {
 			continue
 		}
 
-		var msg JSONRPCMessage
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			continue // skip non-JSON lines (e.g., startup banners)
+		// Capture before the typed decode: a JSON-RPC line gc cannot decode
+		// (a string request id, for one) is exactly what a transcript is
+		// for. scanner.Bytes is reused by the next Scan; the capture owns a
+		// copy.
+		if sc.capture != nil && isJSONObjectLine(line) {
+			sc.capture.record(captureIn, bytes.Clone(line))
 		}
 
+		var msg JSONRPCMessage
+		if err := json.Unmarshal(line, &msg); err != nil {
+			continue // skip non-JSON lines (e.g., startup banners)
+		}
 		sc.dispatch(msg)
 	}
 
@@ -221,6 +234,14 @@ func (sc *sessionConn) appendLine(line string) {
 // sendRequest encodes a JSON-RPC message to the agent's stdin and registers
 // a response waiter. Returns the response channel.
 func (sc *sessionConn) sendRequest(msg JSONRPCMessage) (chan JSONRPCMessage, error) {
+	return sc.sendRequestRedacted(msg, nil)
+}
+
+// sendRequestRedacted is sendRequest for a message whose params carry
+// credentials: the agent receives msg unchanged, while the capture transcript
+// records msg with its params replaced by captureParams and marked redacted.
+// A nil captureParams captures msg as sent.
+func (sc *sessionConn) sendRequestRedacted(msg JSONRPCMessage, captureParams json.RawMessage) (chan JSONRPCMessage, error) {
 	if msg.ID == nil {
 		return nil, sc.sendNotification(msg)
 	}
@@ -231,6 +252,12 @@ func (sc *sessionConn) sendRequest(msg JSONRPCMessage) (chan JSONRPCMessage, err
 	sc.mu.Unlock()
 
 	data, err := json.Marshal(msg)
+	var captured []byte
+	if err == nil && captureParams != nil {
+		redacted := msg
+		redacted.Params = captureParams
+		captured, err = json.Marshal(redacted)
+	}
 	if err != nil {
 		sc.mu.Lock()
 		delete(sc.pending, *msg.ID)
@@ -238,10 +265,7 @@ func (sc *sessionConn) sendRequest(msg JSONRPCMessage) (chan JSONRPCMessage, err
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 
-	sc.stdinMu.Lock()
-	_, err = fmt.Fprintf(sc.stdin, "%s\n", data)
-	sc.stdinMu.Unlock()
-	if err != nil {
+	if err := sc.writeMessageCapturing(data, captured); err != nil {
 		sc.mu.Lock()
 		delete(sc.pending, *msg.ID)
 		sc.mu.Unlock()
@@ -257,10 +281,38 @@ func (sc *sessionConn) sendNotification(msg JSONRPCMessage) error {
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
+	return sc.writeMessage(data)
+}
+
+// writeMessage writes one encoded JSON-RPC message to the agent's stdin and
+// captures it verbatim. See writeMessageCapturing.
+func (sc *sessionConn) writeMessage(data []byte) error {
+	return sc.writeMessageCapturing(data, nil)
+}
+
+// writeMessageCapturing writes one encoded JSON-RPC message to the agent's
+// stdin. Every stdin write goes through here so each one is captured, and
+// captured in wire order: the out record is queued under stdinMu before the
+// write, so it also precedes any reply the read loop captures. A non-nil
+// redacted replaces data in the capture (marked redacted); the agent always
+// receives data.
+func (sc *sessionConn) writeMessageCapturing(data, redacted []byte) error {
 	sc.stdinMu.Lock()
-	_, err = fmt.Fprintf(sc.stdin, "%s\n", data)
-	sc.stdinMu.Unlock()
+	defer sc.stdinMu.Unlock()
+	if redacted != nil {
+		sc.capture.recordRedacted(captureOut, redacted)
+	} else {
+		sc.capture.record(captureOut, data)
+	}
+	_, err := fmt.Fprintf(sc.stdin, "%s\n", data)
 	return err
+}
+
+// isJSONObjectLine reports whether line is a complete JSON object (the only
+// shape a JSON-RPC message can take on the ACP stdio transport).
+func isJSONObjectLine(line []byte) bool {
+	trimmed := bytes.TrimLeft(line, " \t\r")
+	return len(trimmed) > 0 && trimmed[0] == '{' && json.Valid(line)
 }
 
 // setActivePrompt marks the given request ID as the active prompt.

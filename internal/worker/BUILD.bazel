@@ -36,6 +36,7 @@ go_library(
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/beads/contract",
+        "//internal/citylayout",
         "//internal/events",
         "//internal/pricing",
         "//internal/promptsafe",
@@ -54,6 +55,7 @@ go_library(
 go_test(
     name = "worker_test",
     srcs = [
+        "acp_capture_test.go",
         "activity_memo_test.go",
         "factory_resolved_test.go",
         "factory_test.go",
@@ -93,6 +95,7 @@ go_test(
     embed = [":worker"],
     deps = [
         "//internal/beads",
+        "//internal/citylayout",
         "//internal/events",
         "//internal/pricing",
         "//internal/runtime",

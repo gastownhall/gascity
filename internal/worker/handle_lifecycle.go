@@ -263,6 +263,17 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 		// families keep the history-backed probe, whose tail read is not fenced
 		// to the adapter's search roots.
 		if strings.TrimSpace(info.SessionKey) == "" && !sessionlog.DerivesActivityFromHistory(provider) {
+			// A gc ACP capture records turn state at its tail, so a bounded
+			// backward scan decides activity without parsing the whole
+			// capture, which grows with every streamed chunk.
+			if info.Transport == "acp" {
+				if path, pathErr := h.manager.TranscriptPath(id, h.adapter.SearchPaths); pathErr == nil && sessionlog.IsACPCapturePath(path) {
+					if activity, actErr := h.adapter.TailActivityForProvider(provider, path); actErr == nil && activity == TailActivityInTurn {
+						state.Phase = PhaseBusy
+					}
+					return state, nil
+				}
+			}
 			if history, histErr := h.historyWithRequest(HistoryRequest{TailCompactions: 1}); histErr == nil && history != nil {
 				if history.TailState.Activity == TailActivityInTurn {
 					state.Phase = PhaseBusy

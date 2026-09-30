@@ -95,6 +95,10 @@ func (a SessionLogAdapter) TailMeta(path string) (*sessionlog.TailMeta, error) {
 // full-file parser diagnostics override, and these readers set none, so clearing
 // it removes a false signal rather than a real one.
 func (a SessionLogAdapter) TailMetaForProvider(provider, path string) (*sessionlog.TailMeta, error) {
+	if sessionlog.IsACPCapturePath(path) {
+		// gc's own ACP capture: the format follows the file, not the provider.
+		return a.TailMeta(path)
+	}
 	if sessionlog.ProviderFamily(provider) == "kimi" {
 		return sessionlog.ExtractKimiTailMetaFromSearchPaths(a.SearchPaths, path)
 	}
@@ -154,6 +158,9 @@ func (a SessionLogAdapter) InvocationUsage(provider, path, cursorID string) ([]s
 // tail cannot be read from a trailing record. Whole-file-JSON mirror families
 // need the normalized history; everything else keeps the cheap tail path.
 func (a SessionLogAdapter) TailActivityForProvider(provider, path string) (TailActivity, error) {
+	if sessionlog.IsACPCapturePath(path) {
+		return a.TailActivity(path)
+	}
 	if sessionlog.ProviderFamily(provider) == "kimi" {
 		meta, err := a.TailMetaForProvider(provider, path)
 		return tailActivity(meta), err
@@ -292,6 +299,14 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 	if err != nil {
 		return nil, err
 	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat transcript: %w", err)
+	}
+	// Stat before reading: an append that lands during the read then leaves
+	// the generation older than the content, which only forces a refresh.
+	// The other order could label older content with a newer generation,
+	// and a cached snapshot keyed by it would stay stale until the next write.
 	fullSession, err := sessionlog.ReadProviderFileRaw(req.Provider, path, 0)
 	if err != nil {
 		return nil, err
@@ -303,11 +318,6 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		if err != nil {
 			return nil, err
 		}
-	}
-
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, fmt.Errorf("stat transcript: %w", err)
 	}
 
 	entries := normalizeHistoryEntries(req.Provider, path, session.ID, session.Messages)
@@ -380,7 +390,7 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		},
 		Continuity: continuity,
 		TailState: TailState{
-			Activity:              snapshotTailActivity(req.Provider, tailMeta, entries),
+			Activity:              historyTailActivity(req.Provider, path, tailMeta, entries),
 			LastEntryID:           lastEntryID,
 			OpenToolUseIDs:        openToolUseIDs,
 			PendingInteractionIDs: pendingIDs,
@@ -466,6 +476,9 @@ func normalizeEntry(provider, path, sessionID string, order int, entry *sessionl
 	if normalized.ID != entry.UUID {
 		normalized.Provenance.Derived = true
 	}
+	if entry.Partial {
+		normalized.Status = ResultStatusPartial
+	}
 	if !entry.Timestamp.IsZero() {
 		ts := entry.Timestamp.UTC()
 		normalized.Timestamp = &ts
@@ -501,6 +514,10 @@ func historySystemEventFromSessionLog(event *sessionlog.SystemEvent) *HistorySys
 }
 
 func attachDetachedProviderUsage(provider, path string, entries []HistoryEntry) ([]HistoryEntry, error) {
+	if sessionlog.IsACPCapturePath(path) {
+		// An ACP capture carries its usage on the turn's entries.
+		return entries, nil
+	}
 	family, supported := InvocationUsageFamily(provider)
 	if !supported || family != "codex" {
 		return entries, nil
@@ -938,6 +955,16 @@ func snapshotTailActivity(provider string, meta *sessionlog.TailMeta, entries []
 	return tailActivity(meta)
 }
 
+// historyTailActivity resolves a loaded transcript's tail activity. A gc ACP
+// capture carries its own activity (prompt/response pairing, read by
+// sessionlog.ExtractTailMeta) whatever family the provider belongs to.
+func historyTailActivity(provider, path string, meta *sessionlog.TailMeta, entries []HistoryEntry) TailActivity {
+	if sessionlog.IsACPCapturePath(path) {
+		return tailActivity(meta)
+	}
+	return snapshotTailActivity(provider, meta, entries)
+}
+
 func wholeFileJSONActivity(entries []HistoryEntry) TailActivity {
 	for i := len(entries) - 1; i >= 0; i-- {
 		switch entries[i].Actor {
@@ -966,11 +993,18 @@ func tailActivity(meta *sessionlog.TailMeta) TailActivity {
 
 func historyDiagnostics(session sessionlog.SessionDiagnostics) []HistoryDiagnostic {
 	malformedTail := session.MalformedTail
-	if session.MalformedLineCount == 0 && !malformedTail {
+	if session.MalformedLineCount == 0 && !malformedTail && session.DroppedRecordCount == 0 {
 		return nil
 	}
 
 	var diagnostics []HistoryDiagnostic
+	if session.DroppedRecordCount > 0 {
+		diagnostics = append(diagnostics, HistoryDiagnostic{
+			Code:    "dropped_records",
+			Message: "transcript writer dropped records; normalized history has gaps",
+			Count:   session.DroppedRecordCount,
+		})
+	}
 	if malformedTail {
 		diagnostics = append(diagnostics, HistoryDiagnostic{
 			Code:    "malformed_tail",

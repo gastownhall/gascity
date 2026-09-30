@@ -334,7 +334,7 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 			return false
 		}
 		currentActivity = historySnapshotActivity(snapshot)
-		rawMessages, ids := historySnapshotRawMessages(snapshot)
+		rawMessages, ids := historySnapshotRawMessages(settledHistorySnapshot(snapshot))
 		if len(rawMessages) > 0 {
 			var toSend []json.RawMessage
 			if lastSentID == "" {
@@ -493,7 +493,7 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 		if snapshot == nil {
 			return false
 		}
-		turns, ids := historySnapshotTurns(snapshot)
+		turns, ids := historySnapshotTurns(settledHistorySnapshot(snapshot))
 		if len(turns) > 0 {
 			var toSend []outputTurn
 			if lastSentID == "" {
@@ -1050,7 +1050,7 @@ func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse
 			return false
 		}
 		currentActivity = historySnapshotActivity(snapshot)
-		rawMessages, ids := historySnapshotRawMessages(snapshot)
+		rawMessages, ids := historySnapshotRawMessages(settledHistorySnapshot(snapshot))
 		if len(rawMessages) > 0 {
 			var toSend []json.RawMessage
 			if lastSentID == "" {
@@ -1209,7 +1209,7 @@ func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Se
 		if snapshot == nil {
 			return false
 		}
-		turns, ids := historySnapshotTurns(snapshot)
+		turns, ids := historySnapshotTurns(settledHistorySnapshot(snapshot))
 		if len(turns) > 0 {
 			var toSend []outputTurn
 			if lastSentID == "" {

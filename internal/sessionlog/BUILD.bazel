@@ -4,6 +4,7 @@ go_library(
     name = "sessionlog",
     srcs = [
         "acp_capture_reader.go",
+        "acp_wire_reader.go",
         "agents.go",
         "amp_reader.go",
         "antigravity_reader.go",
@@ -35,6 +36,7 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/sessionlog",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/citylayout",
         "//internal/fsys",
         "//internal/modelwindow",
         "//internal/pathutil",
@@ -45,6 +47,8 @@ go_library(
 go_test(
     name = "sessionlog_test",
     srcs = [
+        "acp_wire_reader_results_test.go",
+        "acp_wire_reader_test.go",
         "agents_test.go",
         "amp_reader_test.go",
         "antigravity_reader_test.go",
@@ -73,9 +77,11 @@ go_test(
         "testenv_import_test.go",
         "zcode_reader_test.go",
     ],
+    data = glob(["testdata/**"]),
     embed = [":sessionlog"],
     deps = [
         "//internal/bootstrap/packs/core",
+        "//internal/citylayout",
         "//internal/modelwindow",
         "//internal/testenv",
     ],
