@@ -137,8 +137,15 @@ func ListRunningAttested(sp Provider) bool {
 // BackendListingProvider is an optional capability of composite providers
 // that exposes each backend's ListRunning result separately, so callers can
 // judge each backend's listing on its own (its error, its [PartialListError]
-// ServerAbsent flag, its [ListingAttestation]). Merging the results with
-// [MergeBackendListResults] yields what the composite's ListRunning returns.
+// ServerAbsent flag, its [ListingAttestation]). [MergeBackendListings] over
+// the result is exactly what the composite's ListRunning returns.
+//
+// The listing does not recurse. A backend may itself be a composite (auto
+// over hybrid); its entry then carries that composite's merged result, from
+// one ListRunning call per leaf backend. A caller that wants the nested
+// breakdown must not also call the nested ListRunningByBackend for the same
+// observation: that lists the nested leaves a second time, at a different
+// instant, and the two answers need not agree.
 type BackendListingProvider interface {
 	ListRunningByBackend(prefix string) []BackendListing
 }
@@ -151,6 +158,16 @@ type BackendListing struct {
 	Provider Provider
 	Names    []string
 	Err      error
+}
+
+// MergeBackendListings merges per-backend listings exactly as
+// [MergeBackendListResults] merges the same labels, names and errors.
+func MergeBackendListings(listings []BackendListing) ([]string, error) {
+	results := make([]BackendListResult, 0, len(listings))
+	for _, l := range listings {
+		results = append(results, BackendListResult{Label: l.Label, Names: l.Names, Err: l.Err})
+	}
+	return MergeBackendListResults(results...)
 }
 
 // MergeBackendStopErrors standardizes multi-backend Stop semantics.

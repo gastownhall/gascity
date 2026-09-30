@@ -393,14 +393,21 @@ type InventoryProvider interface {
 // flag means the attribute could not be read; its value is then meaningless.
 type InventoryEntry struct {
 	// Incarnation identifies this runtime instance of the session. A new
-	// runtime under the same name, or a respawned process inside it, gets a
-	// different value. Empty when the provider cannot report one.
+	// runtime under the same name, or a respawn of the session's first pane,
+	// gets a different value. Empty when the provider cannot report one.
+	//
+	// On tmux it can also change without a restart: swap-pane,
+	// split-window -b, rotate-window, or killing pane 0.0 moves a different
+	// process into the first slot. That is harmless; a changed id only costs
+	// one attribution re-read.
 	Incarnation string
 	// DeadKnown and AllPanesDead report whether every process slot of the
 	// session has exited (a corpse kept visible, for example by tmux
 	// remain-on-exit).
 	DeadKnown, AllPanesDead bool
-	// AttachedKnown and Attached report whether any client is attached.
+	// AttachedKnown and Attached report whether any client is attached. On
+	// tmux the count includes gc's own hidden attach client, so a session gc
+	// is briefly attached to reads attached.
 	AttachedKnown, Attached bool
 }
 

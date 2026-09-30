@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/hybrid"
 )
 
 var _ runtime.Provider = (*Provider)(nil)
@@ -740,7 +741,6 @@ func TestAutoListRunningByBackend_MergesToListRunning(t *testing.T) {
 				label string
 				sp    *scriptedListProvider
 			}{{"default", def}, {"acp", acp}}
-			results := make([]runtime.BackendListResult, 0, len(listings))
 			for i, l := range listings {
 				if l.Label != want[i].label {
 					t.Errorf("listing %d label = %q, want %q", i, l.Label, want[i].label)
@@ -754,18 +754,25 @@ func TestAutoListRunningByBackend_MergesToListRunning(t *testing.T) {
 				if !errors.Is(l.Err, want[i].sp.err) {
 					t.Errorf("listing %d err = %v, want %v", i, l.Err, want[i].sp.err)
 				}
-				results = append(results, runtime.BackendListResult{Label: l.Label, Names: l.Names, Err: l.Err})
 			}
 			if got := runtime.IsRuntimeServerAbsent(listings[0].Err); got != runtime.IsRuntimeServerAbsent(tc.defErr) {
 				t.Errorf("default listing ServerAbsent = %v, want %v", got, runtime.IsRuntimeServerAbsent(tc.defErr))
 			}
 
-			names, err := runtime.MergeBackendListResults(results...)
+			// The flat merge ListRunning computed before it was expressed
+			// over ListRunningByBackend.
+			names, err := runtime.MergeBackendListResults(
+				runtime.BackendListResult{Label: "default", Names: tc.defNames, Err: tc.defErr},
+				runtime.BackendListResult{Label: "acp", Names: tc.acpNames, Err: tc.acpErr},
+			)
+			if relisted, relistedErr := runtime.MergeBackendListings(listings); !reflect.DeepEqual(relisted, names) || errText(relistedErr) != errText(err) {
+				t.Errorf("MergeBackendListings = (%#v, %q), want (%#v, %q)", relisted, errText(relistedErr), names, errText(err))
+			}
 			if !reflect.DeepEqual(names, merged) {
-				t.Errorf("merged per-backend names = %#v, ListRunning names = %#v", names, merged)
+				t.Errorf("flat-merge names = %#v, ListRunning names = %#v", names, merged)
 			}
 			if errText(err) != errText(mergedErr) {
-				t.Errorf("merged per-backend err = %q, ListRunning err = %q", errText(err), errText(mergedErr))
+				t.Errorf("flat-merge err = %q, ListRunning err = %q", errText(err), errText(mergedErr))
 			}
 			if runtime.IsPartialListError(err) != runtime.IsPartialListError(mergedErr) {
 				t.Errorf("partial = %v, ListRunning partial = %v", runtime.IsPartialListError(err), runtime.IsPartialListError(mergedErr))
@@ -806,5 +813,41 @@ func TestListRunningAttested_CompositeRequiresEveryBackend(t *testing.T) {
 		if got := runtime.ListRunningAttested(New(tc.def, tc.acp)); got != tc.want {
 			t.Errorf("%s: ListRunningAttested(auto) = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// A nested composite (auto over hybrid) is listed once per leaf: the default
+// entry carries hybrid's own merged result, and neither ListRunningByBackend
+// nor ListRunning lists a leaf twice. A caller that recurses into the nested
+// composite must use its ListRunningByBackend in place of, not in addition
+// to, the observation it already holds.
+// Kills: a composite listing that recurses into nested composites and lists
+// their leaves twice.
+func TestAutoListRunningByBackend_NestedCompositeListsEachLeafOnce(t *testing.T) {
+	local := &scriptedListProvider{Fake: runtime.NewFake(), names: []string{"gc-a"}}
+	remote := &scriptedListProvider{Fake: runtime.NewFake(), err: errors.New("apiserver timeout")}
+	acp := &scriptedListProvider{Fake: runtime.NewFake(), names: []string{"gc-c"}}
+	nested := hybrid.New(local, remote, func(string) bool { return false })
+	p := New(nested, acp)
+
+	listings := p.ListRunningByBackend("gc-")
+	if len(listings) != 2 || listings[0].Provider != runtime.Provider(nested) {
+		t.Fatalf("listings = %#v, want [hybrid, acp]", listings)
+	}
+	wantNames, wantErr := nested.ListRunning("gc-")
+	if !reflect.DeepEqual(listings[0].Names, wantNames) || errText(listings[0].Err) != errText(wantErr) {
+		t.Errorf("default entry = (%#v, %q), want hybrid's merged (%#v, %q)", listings[0].Names, errText(listings[0].Err), wantNames, errText(wantErr))
+	}
+	if _, ok := listings[0].Provider.(runtime.BackendListingProvider); !ok {
+		t.Error("nested hybrid entry does not expose BackendListingProvider for a recursing caller")
+	}
+	// One ListRunningByBackend plus the direct nested.ListRunning above.
+	for label, sp := range map[string]*scriptedListProvider{"local": local, "remote": remote} {
+		if len(sp.prefixes) != 2 {
+			t.Errorf("%s leaf listed %d times, want once per listing call (2)", label, len(sp.prefixes))
+		}
+	}
+	if len(acp.prefixes) != 1 {
+		t.Errorf("acp listed %d times, want 1", len(acp.prefixes))
 	}
 }

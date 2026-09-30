@@ -306,4 +306,17 @@ func TestCutoverForwardsListingAttestation(t *testing.T) {
 	if !runtime.ListRunningAttested(sp) {
 		t.Fatal("seam-backed k8s provider does not forward its listing attestation")
 	}
+
+	// The attestation promises complete-or-err, so a failed pod list must
+	// surface as an error on both the raw and the seam-backed listing.
+	fake := newFakeK8sOps()
+	fake.listErr = errors.New("apiserver unavailable")
+	raw = newProviderWithOps(fake)
+	sp = &seamBackedProvider{Provider: runtime.NewProviderFromSeams(raw.Seams()), raw: raw}
+	for label, lister := range map[string]runtime.Provider{"raw": raw, "seam-backed": sp} {
+		names, err := lister.ListRunning("")
+		if !errors.Is(err, fake.listErr) {
+			t.Errorf("%s ListRunning on a failed pod list = (%q, %v), want the list error", label, names, err)
+		}
+	}
 }

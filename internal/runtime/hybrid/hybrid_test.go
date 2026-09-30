@@ -517,7 +517,6 @@ func TestHybridListRunningByBackend_MergesToListRunning(t *testing.T) {
 				label string
 				sp    *scriptedListProvider
 			}{{"local", local}, {"remote", remote}}
-			results := make([]runtime.BackendListResult, 0, len(listings))
 			for i, l := range listings {
 				if l.Label != want[i].label {
 					t.Errorf("listing %d label = %q, want %q", i, l.Label, want[i].label)
@@ -531,18 +530,25 @@ func TestHybridListRunningByBackend_MergesToListRunning(t *testing.T) {
 				if !errors.Is(l.Err, want[i].sp.err) {
 					t.Errorf("listing %d err = %v, want %v", i, l.Err, want[i].sp.err)
 				}
-				results = append(results, runtime.BackendListResult{Label: l.Label, Names: l.Names, Err: l.Err})
 			}
 			if got := runtime.IsRuntimeServerAbsent(listings[0].Err); got != runtime.IsRuntimeServerAbsent(tc.localErr) {
 				t.Errorf("local listing ServerAbsent = %v, want %v", got, runtime.IsRuntimeServerAbsent(tc.localErr))
 			}
 
-			names, err := runtime.MergeBackendListResults(results...)
+			// The flat merge ListRunning computed before it was expressed
+			// over ListRunningByBackend.
+			names, err := runtime.MergeBackendListResults(
+				runtime.BackendListResult{Label: "local", Names: tc.localNames, Err: tc.localErr},
+				runtime.BackendListResult{Label: "remote", Names: tc.remoteNames, Err: tc.remoteErr},
+			)
+			if relisted, relistedErr := runtime.MergeBackendListings(listings); !reflect.DeepEqual(relisted, names) || errText(relistedErr) != errText(err) {
+				t.Errorf("MergeBackendListings = (%#v, %q), want (%#v, %q)", relisted, errText(relistedErr), names, errText(err))
+			}
 			if !reflect.DeepEqual(names, merged) {
-				t.Errorf("merged per-backend names = %#v, ListRunning names = %#v", names, merged)
+				t.Errorf("flat-merge names = %#v, ListRunning names = %#v", names, merged)
 			}
 			if errText(err) != errText(mergedErr) {
-				t.Errorf("merged per-backend err = %q, ListRunning err = %q", errText(err), errText(mergedErr))
+				t.Errorf("flat-merge err = %q, ListRunning err = %q", errText(err), errText(mergedErr))
 			}
 			if runtime.IsPartialListError(err) != runtime.IsPartialListError(mergedErr) {
 				t.Errorf("partial = %v, ListRunning partial = %v", runtime.IsPartialListError(err), runtime.IsPartialListError(mergedErr))

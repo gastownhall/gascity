@@ -143,6 +143,69 @@ func TestCutoverForwardsListingAttestation(t *testing.T) {
 	if _, ok := sp.(runtime.EnvironmentBatchProvider); !ok {
 		t.Error("seam-backed tmux provider does not implement EnvironmentBatchProvider")
 	}
+
+	// The attestation promises complete-or-err, so the seam-backed listing
+	// must keep an absent server a ServerAbsent partial with no names, and
+	// keep any other failure a plain error.
+	plain := errors.New("tmux list-sessions: server busy")
+	for _, tc := range []struct {
+		name       string
+		execErr    error
+		wantAbsent bool
+	}{
+		{name: "no server", execErr: ErrNoServer, wantAbsent: true},
+		{name: "plain error", execErr: plain, wantAbsent: false},
+	} {
+		sp := NewSeamBackedWithConfig(Config{})
+		sp.(*seamBackedProvider).tm.exec = &fakeExecutor{err: tc.execErr}
+		names, err := sp.ListRunning("")
+		if err == nil || names != nil {
+			t.Errorf("%s: ListRunning = (%q, %v), want nil names and an error", tc.name, names, err)
+			continue
+		}
+		if got := runtime.IsRuntimeServerAbsent(err); got != tc.wantAbsent {
+			t.Errorf("%s: IsRuntimeServerAbsent(%v) = %v, want %v", tc.name, err, got, tc.wantAbsent)
+		}
+		if !tc.wantAbsent && (!errors.Is(err, plain) || runtime.IsPartialListError(err)) {
+			t.Errorf("%s: ListRunning err = %v, want the plain error unchanged", tc.name, err)
+		}
+	}
+}
+
+type inventoryCtxKey struct{}
+
+// ctxRecordingExecutor records the context each tmux call runs under.
+type ctxRecordingExecutor struct {
+	ctxs []context.Context
+}
+
+func (e *ctxRecordingExecutor) execute(args []string) (string, error) {
+	return e.executeCtx(context.Background(), args)
+}
+
+func (e *ctxRecordingExecutor) executeCtx(ctx context.Context, _ []string) (string, error) {
+	e.ctxs = append(e.ctxs, ctx)
+	return "", ctx.Err()
+}
+
+// Kills: a RuntimeInventory that detaches from its caller's context, so a
+// caller bounding or canceling the batched read cannot stop the tmux call.
+func TestTmuxRuntimeInventory_PropagatesContext(t *testing.T) {
+	rec := &ctxRecordingExecutor{}
+	p := NewProviderWithConfig(Config{})
+	p.tm.exec = rec
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), inventoryCtxKey{}, "caller"))
+	cancel()
+
+	if _, err := p.RuntimeInventory(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RuntimeInventory under a canceled context: err = %v, want context.Canceled", err)
+	}
+	if len(rec.ctxs) != 1 {
+		t.Fatalf("tmux calls = %d, want 1", len(rec.ctxs))
+	}
+	if got := rec.ctxs[0].Value(inventoryCtxKey{}); got != "caller" {
+		t.Fatalf("tmux call context value = %v, want the caller's context", got)
+	}
 }
 
 // inventoryFixturePane is one pane of an inventoryFixtureSession.
