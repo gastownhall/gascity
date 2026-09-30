@@ -14,7 +14,7 @@ const (
 )
 
 func drawHolderPart(rt *rapid.T, label string) string {
-	return rapid.StringMatching(`[^|@#]+`).Draw(rt, label)
+	return rapid.StringMatching(`[^\x00-\x1f\x7f-\x9f|@#]+`).Draw(rt, label)
 }
 
 func drawRecord(rt *rapid.T) Record {
@@ -79,6 +79,9 @@ func TestPropertyEncodeDecodeRoundTrip(t *testing.T) {
 		if err != nil {
 			rt.Fatalf("Lookup: %v", err)
 		}
+		if l.IsOpaque() {
+			rt.Fatalf("Lookup(%q) returned an opaque lease", wire)
+		}
 		found, ok := l.Record()
 		if !ok || found != rec.Canonical() {
 			rt.Fatalf("Lookup = (%+v, %v), want (%+v, true)", found, ok, rec.Canonical())
@@ -109,9 +112,12 @@ func TestPropertyDecodeAcceptsOnlyCanonicalAndFailsClosed(t *testing.T) {
 		if l.IsUnleased() {
 			rt.Fatalf("DecodeLease(%q) reported unleased on error", s)
 		}
+		if !l.IsOpaque() {
+			rt.Fatalf("DecodeLease(%q) did not report opaque on error", s)
+		}
 		got, ok := l.Record()
-		if !ok || got != (Record{}) {
-			rt.Fatalf("DecodeLease(%q) error result = (%+v, %v), want the zero Record and true", s, got, ok)
+		if ok || got != (Record{}) {
+			rt.Fatalf("DecodeLease(%q) error result = (%+v, %v), want the zero Record and false", s, got, ok)
 		}
 	}
 	t.Run("arbitrary", func(t *testing.T) {

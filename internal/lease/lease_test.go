@@ -346,6 +346,40 @@ func TestEncodeRejectsInvalidRecords(t *testing.T) {
 	}
 }
 
+func TestEncodeChecksRFC3339YearRange(t *testing.T) {
+	holder := mustHolder(t, "worker-a", "seat-1", "inst-01")
+	for _, tc := range []struct {
+		name    string
+		expires time.Time
+		wantErr bool
+	}{
+		{"year below range", time.Date(-1, 1, 1, 0, 0, 0, 0, time.UTC), true},
+		{"year zero", time.Date(0, 1, 1, 0, 0, 0, 0, time.UTC), false},
+		{"year above range", time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := Record{Epoch: 1, Holder: holder, ExpiresAt: tc.expires, State: StateHeld}
+			wire, err := Encode(rec)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Encode(%v) = %q, want an error", tc.expires, wire)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Encode(%v): %v", tc.expires, err)
+			}
+			got, err := Decode(wire)
+			if err != nil {
+				t.Fatalf("Decode(%q): %v", wire, err)
+			}
+			if !got.ExpiresAt.Equal(tc.expires) {
+				t.Fatalf("round trip expiry = %v, want %v", got.ExpiresAt, tc.expires)
+			}
+		})
+	}
+}
+
 func TestNewHolderRejectsMalformedParts(t *testing.T) {
 	for _, tc := range []struct{ name, agent, session, token string }{
 		{"empty agent", "", "seat-1", "inst-01"},
@@ -360,6 +394,12 @@ func TestNewHolderRejectsMalformedParts(t *testing.T) {
 		{"token carries the field separator", "worker-a", "seat-1", "inst|01"},
 		{"token carries the session separator", "worker-a", "seat-1", "inst@01"},
 		{"token carries the instance separator", "worker-a", "seat-1", "inst#01"},
+		{"agent carries a newline", "work\ner", "seat-1", "inst-01"},
+		{"session carries a control character", "worker-a", "seat\x001", "inst-01"},
+		{"token carries a control character", "worker-a", "seat-1", "inst\u008501"},
+		{"agent is invalid UTF-8", string([]byte{'w', 0xff}), "seat-1", "inst-01"},
+		{"session is invalid UTF-8", "worker-a", string([]byte{'s', 0xff}), "inst-01"},
+		{"token is invalid UTF-8", "worker-a", "seat-1", string([]byte{'i', 0xff})},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, err := NewHolder(tc.agent, tc.session, tc.token)
@@ -543,6 +583,9 @@ func TestFailedDecodeIsNotUnleased(t *testing.T) {
 	if bad.IsUnleased() {
 		t.Error("DecodeLease error result reported unleased")
 	}
+	if !bad.IsOpaque() {
+		t.Error("DecodeLease error result did not report opaque")
+	}
 
 	invalid, err := Present(Record{State: StateHeld})
 	if err == nil {
@@ -551,10 +594,13 @@ func TestFailedDecodeIsNotUnleased(t *testing.T) {
 	if invalid.IsUnleased() {
 		t.Error("Present error result reported unleased")
 	}
+	if !invalid.IsOpaque() {
+		t.Error("Present error result did not report opaque")
+	}
 
 	rec, ok := invalid.Record()
-	if !ok {
-		t.Fatal("the fail-closed lease reported no record")
+	if ok {
+		t.Fatal("the fail-closed lease reported a record")
 	}
 	if rec != (Record{}) {
 		t.Errorf("the fail-closed lease carried %+v, want the zero Record", rec)
@@ -563,8 +609,8 @@ func TestFailedDecodeIsNotUnleased(t *testing.T) {
 		t.Error("the fail-closed lease compared equal to a real holder")
 	}
 	badRec, ok := bad.Record()
-	if !ok || badRec != (Record{}) {
-		t.Errorf("DecodeLease error result = (%+v, %v), want the zero Record and true", badRec, ok)
+	if ok || badRec != (Record{}) {
+		t.Errorf("DecodeLease error result = (%+v, %v), want the zero Record and false", badRec, ok)
 	}
 }
 

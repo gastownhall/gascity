@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // State is the lifecycle position recorded in a lease.
@@ -57,6 +59,12 @@ func NewHolder(agent, session, instanceToken string) (Holder, error) {
 		if part == "" {
 			return Holder{}, fmt.Errorf("building holder: %s is empty", name)
 		}
+		if !utf8.ValidString(part) {
+			return Holder{}, fmt.Errorf("building holder: %s is not valid UTF-8", name)
+		}
+		if strings.IndexFunc(part, unicode.IsControl) >= 0 {
+			return Holder{}, fmt.Errorf("building holder: %s %q contains a control character", name, part)
+		}
 		if strings.ContainsAny(part, fieldSep+holderSessionSep+holderInstanceSep) {
 			return Holder{}, fmt.Errorf("building holder: %s %q contains a separator", name, part)
 		}
@@ -100,7 +108,7 @@ type Record struct {
 }
 
 // Canonical returns the record with its expiry in the form Decode produces:
-// UTC with any monotonic reading stripped. A zero expiry is left alone.
+// UTC with any monotonic reading stripped and every zero instant normalized.
 func (r Record) Canonical() Record {
 	r.ExpiresAt = r.ExpiresAt.UTC().Round(0)
 	return r
@@ -267,6 +275,7 @@ func checkExpiryRoundTrips(ts time.Time) error {
 // unleased condition.
 type Lease struct {
 	present bool
+	opaque  bool
 	record  Record
 }
 
@@ -276,7 +285,7 @@ func Unleased() Lease {
 }
 
 func opaque() Lease {
-	return Lease{present: true}
+	return Lease{present: true, opaque: true}
 }
 
 // Present wraps a record as a present lease. An invalid record yields the
@@ -294,10 +303,15 @@ func (l Lease) IsUnleased() bool {
 	return !l.present
 }
 
-// Record returns the decoded record and true when a lease is present, and the
-// zero Record and false when the lease is unleased.
+// IsOpaque reports whether a present lease could not be decoded or validated.
+func (l Lease) IsOpaque() bool {
+	return l.opaque
+}
+
+// Record returns the decoded record and true when it is usable, and the zero
+// Record and false when the lease is unleased or opaque.
 func (l Lease) Record() (Record, bool) {
-	if !l.present {
+	if !l.present || l.opaque {
 		return Record{}, false
 	}
 	return l.record, true
@@ -305,8 +319,7 @@ func (l Lease) Record() (Record, bool) {
 
 // DecodeLease turns a raw value plus its presence flag into a Lease. An
 // absent value is the unleased condition. A present value that fails to
-// decode yields a present lease holding the zero Record, whose holder can
-// never equal a real holder, together with the error.
+// decode yields an opaque lease together with the error.
 func DecodeLease(raw string, present bool) (Lease, error) {
 	if !present {
 		return Unleased(), nil
