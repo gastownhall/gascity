@@ -1143,6 +1143,239 @@ func TestComputePoolDesiredStates_OpenAssignedWorkResumes(t *testing.T) {
 	}
 }
 
+// Regression: an open+assigned work bead whose upstream readiness is known
+// and false (e.g. blocked on an unresolved dependency) must NOT resume its
+// session. Without this gate, the resume tier kept a session alive for a
+// bead it could not actually act on yet, because only status ("open") was
+// checked, never readiness (ga-b630bn.1). readyAssigned is index-aligned to
+// the work slice, mirroring how workBeadHasAwakeDemand gates the "open" case
+// on the awake bridge.
+func TestComputePoolDesiredStates_OpenAssignedWorkNotReadyDoesNotResume(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(5), 0)},
+	}
+	work := []beads.Bead{
+		workBead("w1", "claude", "sess-1", "open", 5),
+	}
+	sessions := []beads.Bead{sessionBead("sess-1", "open")}
+
+	result := ComputePoolDesiredStatesWithDemandTracedAt(
+		cfg, work, sessionInfosFromBeads(sessions), nil, nil,
+		[]bool{false}, time.Time{}, nil,
+	)
+
+	// No template ends up with any accepted request (no scale-check demand,
+	// no min-active floor), so applyNestedCaps emits no entry at all —
+	// matching the same zero-demand shape as
+	// TestComputePoolDesiredStates_InFlightDemandRecordsTraceWhenCapsSuppressReuse.
+	if len(result) != 0 {
+		t.Fatalf("result = %#v, want no desired state for not-ready open work", result)
+	}
+}
+
+// Positive control for TestComputePoolDesiredStates_OpenAssignedWorkNotReadyDoesNotResume:
+// the same open+assigned bead resumes once readiness is confirmed true,
+// proving the gate discriminates on the supplied flag rather than always
+// skipping open work when readAssigned data is present.
+func TestComputePoolDesiredStates_OpenAssignedWorkReadyResumes(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(5), 0)},
+	}
+	work := []beads.Bead{
+		workBead("w1", "claude", "sess-1", "open", 5),
+	}
+	sessions := []beads.Bead{sessionBead("sess-1", "open")}
+
+	result := ComputePoolDesiredStatesWithDemandTracedAt(
+		cfg, work, sessionInfosFromBeads(sessions), nil, nil,
+		[]bool{true}, time.Time{}, nil,
+	)
+
+	if len(result) != 1 || len(result[0].Requests) != 1 {
+		t.Fatalf("expected 1 request, got %#v", result)
+	}
+	if result[0].Requests[0].Tier != "resume" {
+		t.Fatalf("tier = %q, want resume", result[0].Requests[0].Tier)
+	}
+	if result[0].Requests[0].SessionBeadID != "sess-1" {
+		t.Fatalf("session = %q, want sess-1", result[0].Requests[0].SessionBeadID)
+	}
+}
+
+// Regression: AssignedWorkBeads can carry the SAME bead ID from independent
+// city and rig stores. Readiness must be resolved per (store ref, bead ID), so
+// a ready city copy never marks a blocked rig copy with the same ID ready — and
+// a blocked rig copy never un-marks the ready city one. Reducing readiness to a
+// plain bead-ID map collapses both directions: the first reintroduces the
+// awake-demand hang this gate exists to close, the second strips the resume
+// request off a live session holding actionable work.
+//
+// This drives the real pool filter so the flags are built the way
+// buildDesiredState builds them — filter the beads and their store refs
+// together, then resolve readiness against the surviving refs — rather than
+// from a hand-written []bool.
+func TestComputePoolDesiredStates_CrossStoreSameIDResumesOnlyReadyCopy(t *testing.T) {
+	cityPath := t.TempDir()
+	// City-scoped agent: cross-store eligible, so both the city and the rig copy
+	// survive the pool-demand filter and the test turns on readiness alone
+	// rather than on reachability.
+	cityAgent := poolAgent("claude", "", intPtr(5), 0)
+	cityAgent.Scope = "city"
+	cfg := &config.City{
+		Agents: []config.Agent{cityAgent},
+		Rigs:   []config.Rig{{Name: "rigb", Path: "/rigb"}},
+	}
+	const sharedID = "ga-shared"
+	work := []beads.Bead{
+		workBead(sharedID, "claude", "sess-city", "open", 5),
+		workBead(sharedID, "claude", "sess-rig", "open", 5),
+	}
+	storeRefs := []string{"", "rigb"}
+	sessions := []beads.Bead{sessionBead("sess-city", "open"), sessionBead("sess-rig", "open")}
+	infos := sessionInfosFromBeads(sessions)
+
+	// Only the city copy is ready; the rig copy is a blocked open bead.
+	readyAssigned := map[storeScopedBeadKey]bool{
+		{StoreRef: "", ID: sharedID}: true,
+	}
+
+	poolWork, poolWorkRefs := filterAssignedWorkBeadsForPoolDemandWithStores(
+		cfg, cityPath, beads.NewMemStore(), infos, work, storeRefs,
+	)
+	if len(poolWork) != 2 || len(poolWorkRefs) != 2 {
+		t.Fatalf("pool filter kept %d beads / %d refs, want 2 and 2 (setup must exercise readiness, not reachability): beads=%#v refs=%#v",
+			len(poolWork), len(poolWorkRefs), poolWork, poolWorkRefs)
+	}
+	flags := readyAssignedFlagsForBeads(readyAssigned, poolWork, poolWorkRefs)
+	if len(flags) != 2 || !flags[0] || flags[1] {
+		t.Fatalf("readyAssignedFlagsForBeads = %#v, want [true false] (city ready, rig blocked despite shared ID)", flags)
+	}
+
+	result := ComputePoolDesiredStatesWithDemandTracedAt(
+		cfg, poolWork, infos, nil, nil, flags, time.Time{}, nil,
+	)
+
+	if len(result) != 1 {
+		t.Fatalf("result = %#v, want exactly one desired state", result)
+	}
+	if len(result[0].Requests) != 1 {
+		t.Fatalf("requests = %#v, want exactly one (only the ready city copy resumes)", result[0].Requests)
+	}
+	if got := result[0].Requests[0].Tier; got != "resume" {
+		t.Fatalf("tier = %q, want resume", got)
+	}
+	if got := result[0].Requests[0].SessionBeadID; got != "sess-city" {
+		t.Fatalf("session = %q, want sess-city (the blocked rig copy must not resume sess-rig)", got)
+	}
+}
+
+// Regression at the buildDesiredState level: the readiness flags the pool
+// demand pass consumes must be built from the store refs that SURVIVED
+// filterAssignedWorkBeadsForPoolDemandWithStores, not from a bead-ID map
+// rebuilt before the filter narrows the slice. Two independent stores hold the
+// same bead ID — the city copy ready, the rig copy blocked on an open
+// dependency. Keying readiness by ID alone leaks the city copy's verdict onto
+// the rig copy, and the blocked rig session is realized as a resume it cannot
+// act on.
+func TestBuildDesiredState_CrossStoreSameIDResumesOnlyReadyCopy(t *testing.T) {
+	beaconTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	decisionTime := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cityPath := t.TempDir()
+	rigPath := t.TempDir()
+	// City-scoped so the agent reaches both stores; min 0 / max 2 so the only
+	// source of pool demand is the resume tier under test.
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "claude",
+			Scope:             "city",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+		}},
+		Rigs: []config.Rig{{Name: "repo", Path: rigPath}},
+	}
+
+	sessCity := poolSessionBeadWithState("mc-city", "asleep", "")
+	sessRig := poolSessionBeadWithState("mc-rig", "asleep", "")
+
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+
+	// Decoy bumps the city sequence so the city work bead shares the rig work
+	// bead's generated ID; closed, it is never collected.
+	decoy, err := cityStore.Create(beads.Bead{Title: "decoy", Type: "task"})
+	if err != nil {
+		t.Fatalf("create city decoy: %v", err)
+	}
+	if err := cityStore.Update(decoy.ID, beads.UpdateOpts{Status: stringPtr("closed")}); err != nil {
+		t.Fatalf("close city decoy: %v", err)
+	}
+	cityWork, err := cityStore.Create(beads.Bead{
+		Title:    "ready city work",
+		Type:     "task",
+		Assignee: sessCity.Metadata["session_name"],
+		Metadata: map[string]string{"gc.routed_to": "claude"},
+	})
+	if err != nil {
+		t.Fatalf("create city work: %v", err)
+	}
+	blocker, err := rigStore.Create(beads.Bead{Title: "blocker", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("create rig blocker: %v", err)
+	}
+	rigWork, err := rigStore.Create(beads.Bead{
+		Title:    "blocked rig work",
+		Type:     "task",
+		Assignee: sessRig.Metadata["session_name"],
+		Needs:    []string{blocker.ID},
+		Metadata: map[string]string{"gc.routed_to": "claude"},
+	})
+	if err != nil {
+		t.Fatalf("create rig work: %v", err)
+	}
+	if cityWork.ID != rigWork.ID {
+		t.Fatalf("test setup expected overlapping city/rig IDs, got city %q rig %q", cityWork.ID, rigWork.ID)
+	}
+	for _, sb := range []beads.Bead{sessCity, sessRig} {
+		if _, err := cityStore.Create(sb); err != nil {
+			t.Fatalf("seed session bead %s: %v", sb.ID, err)
+		}
+	}
+
+	result := buildDesiredStateWithSessionBeadsAt(
+		"test-city",
+		cityPath,
+		beaconTime,
+		decisionTime,
+		cfg,
+		runtime.NewFake(),
+		cityStore,
+		map[string]beads.Store{"repo": rigStore},
+		newSessionBeadSnapshot([]beads.Bead{sessCity, sessRig}),
+		nil,
+		io.Discard,
+	)
+
+	if result.StoreQueryPartial {
+		t.Fatal("StoreQueryPartial = true, want false (a partial read would mask the gate under test)")
+	}
+	if !result.ReadyAssigned[storeScopedBeadKey{StoreRef: "", ID: cityWork.ID}] {
+		t.Fatalf("city copy %q must be store-scoped ready; ReadyAssigned=%#v", cityWork.ID, result.ReadyAssigned)
+	}
+	if result.ReadyAssigned[storeScopedBeadKey{StoreRef: "repo", ID: rigWork.ID}] {
+		t.Fatalf("blocked rig copy %q must NOT be ready; ReadyAssigned=%#v", rigWork.ID, result.ReadyAssigned)
+	}
+
+	if _, ok := result.BaseState[sessCity.Metadata["session_name"]]; !ok {
+		t.Fatalf("ready city work must resume %q; BaseState keys=%v",
+			sessCity.Metadata["session_name"], mapKeys(result.BaseState))
+	}
+	if _, ok := result.BaseState[sessRig.Metadata["session_name"]]; ok {
+		t.Fatalf("blocked rig work must NOT resume %q (ID-keyed readiness leaked the city copy's verdict); BaseState keys=%v",
+			sessRig.Metadata["session_name"], mapKeys(result.BaseState))
+	}
+}
+
 // --- Regression tests: these define the consolidated demand behavior ---
 
 // Regression: resume preserves assigned session even when scale_check is 0.
@@ -1896,6 +2129,7 @@ func TestComputePoolDesiredStates_PostCreateProtectionBindingPreservesScaleDeman
 		sessionInfosFromBeads([]beads.Bead{protected}),
 		map[string]int{"claude": 1},
 		demand,
+		nil,
 		now,
 		nil,
 	)
@@ -1931,6 +2165,7 @@ func TestComputePoolDesiredStates_PostCreateProtectionAdvancesDemandIndex(t *tes
 		sessionInfosFromBeads([]beads.Bead{protected}),
 		map[string]int{"claude": 2},
 		demand,
+		nil,
 		now,
 		nil,
 	)
@@ -1978,6 +2213,7 @@ func TestComputePoolDesiredStates_PostCreateProtectionAllocatesDemandByTriggerId
 		sessionInfosFromBeads([]beads.Bead{protected}),
 		map[string]int{"claude": 2},
 		demand,
+		nil,
 		now,
 		nil,
 	)
@@ -2035,6 +2271,7 @@ func TestComputePoolDesiredStates_PostCreateProtectionRebindsUnmatchedConcreteDe
 				sessionInfosFromBeads([]beads.Bead{protected}),
 				map[string]int{"claude": 2},
 				demand,
+				nil,
 				now,
 				nil,
 			)
