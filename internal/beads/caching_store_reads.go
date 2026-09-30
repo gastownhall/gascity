@@ -368,7 +368,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if c.deletedSeq[item.ID] > startSeq {
 			continue
 		}
-		if c.beadSeq[item.ID] > startSeq || c.writeSeq[item.ID] > startSeq {
+		if c.refetchFencedLocked(item.ID, startSeq) {
 			current, ok := c.beads[item.ID]
 			if ok && query.Matches(current) {
 				refreshed = append(refreshed, cloneBead(current))
@@ -535,6 +535,19 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 			if err != nil {
 				return Bead{}, err
 			}
+			var freshDeps []Dep
+			depsFromBacking := false
+			if !beadCarriesDependencyFields(fresh) && !c.backingRowsCarryDependencies() {
+				deps, depErr := c.backing.DepList(id, "down")
+				if depErr != nil {
+					// The row carries no edges, so installing it would clear
+					// the mark on the cached (possibly pre-write) edge set.
+					// Answer with the backing row and leave the mark.
+					c.recordProblem("refresh deps on dirty get", fmt.Errorf("%s: %w", id, depErr))
+					return fresh, nil
+				}
+				freshDeps, depsFromBacking = deps, true
+			}
 			c.mu.Lock()
 			if c.state != cacheLive && c.state != cachePartial {
 				c.mu.Unlock()
@@ -553,14 +566,20 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 					c.mu.Unlock()
 					return cloneBead(current), nil
 				}
+				// Nothing newer is cached (a full Prime replace can drop the
+				// row): the backing read answers, uninstalled.
 				c.mu.Unlock()
-				return Bead{}, ErrNotFound
+				return fresh, nil
 			}
-			c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
+			opts := absorbOpts{
 				depsMode:   depsFromFieldsIfCarried,
 				seqMode:    seqClearBeadSeqOnly,
 				clearDirty: true,
-			})
+			}
+			if depsFromBacking {
+				opts.depsMode, opts.deps = depsExplicit, freshDeps
+			}
+			c.absorbFreshLocked(id, fresh, time.Now(), opts)
 			c.markFreshLocked(time.Now())
 			c.updateStatsLocked()
 			c.mu.Unlock()
@@ -580,9 +599,10 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 // refetchFencedLocked reports whether a mutation or deletion newer than
 // startSeq touched id, so a backing read begun after startSeq may be older
 // than the cache and must not be installed. writeSeq covers a local write
-// whose beadSeq fence a later refetch already cleared. Caller must hold c.mu.
+// whose beadSeq fence a later refetch already cleared, and the fence floor a
+// full Prime replace that dropped the per-row fences. Caller must hold c.mu.
 func (c *CachingStore) refetchFencedLocked(id string, startSeq uint64) bool {
-	return c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq || c.writeSeq[id] > startSeq
+	return c.beadSeq[id] > startSeq || c.writeFencedLocked(id, startSeq)
 }
 
 // Ready returns open beads whose blocking deps are all closed.

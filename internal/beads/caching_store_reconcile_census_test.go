@@ -19,13 +19,13 @@ import (
 func TestReconcileFenceWritersCensus(t *testing.T) {
 	files := packageGoFiles(t)
 
-	indexAssign := regexp.MustCompile(`c\.(beadSeq|deletedSeq|localBeadAt|writeSeq)\[[^\]]+\]\s*=[^=]`)
-	wholeAssign := regexp.MustCompile(`c\.(beadSeq|deletedSeq|localBeadAt|writeSeq)\s*=[^=]`)
+	indexAssign := regexp.MustCompile(`c\.(beadSeq|deletedSeq|localBeadAt|writeSeq|writeAt)\[[^\]]+\]\s*=[^=]`)
+	wholeAssign := regexp.MustCompile(`c\.(beadSeq|deletedSeq|localBeadAt|writeSeq|writeAt)\s*=[^=]`)
 
 	// Allowed enclosing functions for index-assignments (value minting / setting).
 	allowedIndex := map[string]bool{
 		"noteMutationLocked":      true, // beadSeq
-		"noteLocalMutationLocked": true, // localBeadAt, writeSeq
+		"noteLocalMutationLocked": true, // localBeadAt, writeSeq, writeAt
 		"tombstoneLocked":         true, // deletedSeq
 	}
 	// Allowed enclosing functions for whole-map replacement. Only prime()'s
@@ -87,6 +87,7 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"beads": true, "deps": true, "depsComplete": true, "dirty": true,
 		"beadSeq": true, "localBeadAt": true, "deletedSeq": true, "state": true,
 		"writeSeq":            true, // compared via expectedWriteSeq
+		"writeAt":             true, // compared as mergeEndState.writeAtIDs
 		"readyProjectionLost": true, // compared as mergeEndState.readyLost
 		"lastFreshAt":         true, "mutationSeq": true, "primePartialErr": true,
 		"syncFailures": true, "circuitTripped": true,
@@ -112,6 +113,10 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// depend on it. Its own behavior is pinned by
 		// TestDegradedProjectionSendsReadyToTheLiveBdVerdict.
 		"readyProjectionDegraded": true,
+		// fenceFloor is written only by prime's full replace and never read by
+		// the seam: runReconciliation refuses the whole merge before it when
+		// the scan predates the floor (TestCachingStoreFullPrimeFloorFencesStraddlingInstalls).
+		"fenceFloor": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CachingStore{}), comparedStore, excludedStore)
 

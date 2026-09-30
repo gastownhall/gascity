@@ -29,11 +29,12 @@ type cachingGraphApplyStore struct {
 }
 
 func (s cachingGraphApplyStore) ApplyGraphPlan(ctx context.Context, plan *GraphApplyPlan) (*GraphApplyResult, error) {
+	startSeq := s.cache.currentMutationSeq()
 	result, err := s.applier.ApplyGraphPlan(ctx, plan)
 	if err != nil {
 		return result, err
 	}
-	s.cache.refreshGraphAppliedBeads(result)
+	s.cache.refreshGraphAppliedBeads(result, startSeq)
 	return result, nil
 }
 
@@ -50,15 +51,16 @@ type cachingStorageGraphApplyStore struct {
 }
 
 func (s cachingStorageGraphApplyStore) ApplyGraphPlanWithStorage(ctx context.Context, plan *GraphApplyPlan, storage StorageClass) (*GraphApplyResult, error) {
+	startSeq := s.cache.currentMutationSeq()
 	result, err := s.storageApplier.ApplyGraphPlanWithStorage(ctx, plan, storage)
 	if err != nil {
 		return result, err
 	}
-	s.cache.refreshGraphAppliedBeads(result)
+	s.cache.refreshGraphAppliedBeads(result, startSeq)
 	return result, nil
 }
 
-func (c *CachingStore) refreshGraphAppliedBeads(result *GraphApplyResult) {
+func (c *CachingStore) refreshGraphAppliedBeads(result *GraphApplyResult, startSeq uint64) {
 	if result == nil || len(result.IDs) == 0 {
 		return
 	}
@@ -82,26 +84,32 @@ func (c *CachingStore) refreshGraphAppliedBeads(result *GraphApplyResult) {
 	notifications := make([]cacheNotification, 0, len(refreshed))
 	now := time.Now()
 	c.mu.Lock()
+	raced := c.racedWritesLocked(ids, startSeq)
 	c.noteLocalMutationLocked(ids...)
 	if refreshErr != nil {
 		c.recordProblemLocked("graph apply refresh", refreshErr)
 	}
 	for _, item := range refreshed {
+		_, skip := raced[item.id]
 		if item.found {
 			fresh := cloneBead(item.bead)
-			c.absorbFreshLocked(item.id, item.bead, now, absorbOpts{
-				depsMode:   depsExplicit,
-				deps:       item.bead.Dependencies,
-				seqMode:    seqKeep,
-				clearDirty: true,
-			})
+			if !skip {
+				c.absorbFreshLocked(item.id, item.bead, now, absorbOpts{
+					depsMode:   depsExplicit,
+					deps:       item.bead.Dependencies,
+					seqMode:    seqKeep,
+					clearDirty: true,
+				})
+			}
 			notifications = append(notifications, cacheNotification{
 				eventType: "bead.created",
 				bead:      fresh,
 			})
 			continue
 		}
-		c.markDirtyLocked(item.id)
+		if !skip {
+			c.markDirtyLocked(item.id)
+		}
 	}
 	c.markFreshLocked(now)
 	c.updateStatsLocked()

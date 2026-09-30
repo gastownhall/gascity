@@ -43,9 +43,10 @@ import (
 // wins. Afterwards Get, the dirty-row overlay, reconcile's merge, a Live list,
 // Prime's concurrent-mutation path and PrimeActive fence on the write's
 // writeSeq as well as its beadSeq, so none of them can install a row read
-// before the write. Events are not fenced on writeSeq: a conflicting event is
-// verified only while beadSeq is present or the local write is under five
-// seconds old (see CacheRevision for the remaining known limits).
+// before the write. An event with no cached row to merge onto is fenced on
+// writeSeq and deletedSeq, and a conflicting event is verified against the
+// backing while beadSeq is present or the local write is younger than
+// recentWriteVerifyWindow (see CacheRevision for the remaining known limits).
 // The refetched row feeds the change notification verbatim.
 var (
 	_ ConditionalWriter                = (*CachingStore)(nil)

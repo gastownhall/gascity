@@ -88,6 +88,7 @@ func mountEndState(end mergeEndState, truth *MemStore) *CachingStore {
 		localBeadAt:  cloneTimeMap(end.localBeadAt),
 		deletedSeq:   cloneU64Map(end.deletedSeq),
 		writeSeq:     cloneU64Map(end.writeSeq),
+		writeAt:      writeAtFor(end.writeSeq),
 		state:        cacheLive,
 	}
 	ensureMaps(c)
@@ -304,7 +305,7 @@ func TestReconcileMergeNoInputAliasing(t *testing.T) {
 
 		c, _ := newMergeHarnessStore(st)
 		c.mu.Lock()
-		res := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, in.depMap, in.useFreshDeps, in.startSeq, in.now)
+		res := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, nil, in.depMap, in.useFreshDeps, in.startSeq, in.now)
 		snapshot := captureEndState(c)
 		c.mu.Unlock()
 

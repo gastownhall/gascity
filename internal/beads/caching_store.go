@@ -33,18 +33,25 @@ type CachingStore struct {
 	eventPrefixes []string
 	epoch         uint64 // names this instance in every CacheRevision it issues
 
-	mu                  sync.RWMutex
-	beads               map[string]Bead
-	deps                map[string][]Dep
-	depsComplete        bool
-	dirty               map[string]struct{}
-	beadSeq             map[string]uint64
-	localBeadAt         map[string]time.Time
-	writeSeq            map[string]uint64
-	deletedSeq          map[string]uint64
-	state               cacheState
-	lastFreshAt         time.Time
-	mutationSeq         uint64
+	mu           sync.RWMutex
+	beads        map[string]Bead
+	deps         map[string][]Dep
+	depsComplete bool
+	dirty        map[string]struct{}
+	beadSeq      map[string]uint64
+	localBeadAt  map[string]time.Time
+	writeSeq     map[string]uint64
+	writeAt      map[string]time.Time // when writeSeq was stamped; cleared with it
+	deletedSeq   map[string]uint64
+	state        cacheState
+	lastFreshAt  time.Time
+	mutationSeq  uint64
+	// fenceFloor is the mutationSeq at the last full Prime replace. The
+	// replace drops writeSeq and deletedSeq, so any install whose start
+	// predates it cannot be fenced per row and is refused (writeFencedLocked).
+	// A start equal to it saw no mutation since, so no fence it needed was
+	// dropped.
+	fenceFloor          uint64
 	observationRevision uint64
 	primePartialErr     error
 
@@ -137,8 +144,13 @@ func (o CacheObservation) CacheRev() CacheRevision {
 //     Reopen, SetMetadata, Create and DepAdd errors mark nothing);
 //   - a failed post-write refresh in Update or ReleaseIfCurrent, in
 //     SetMetadata or SetMetadataBatch on a row the cache does not hold, or in
-//     Tx, graph apply or CloseAll (other verbs patch the cached row and leave
-//     it clean);
+//     Tx, graph apply or CloseAll (other verbs patch their own change into the
+//     cached row and leave its dirty mark as it was, since the patch says
+//     nothing about the rest of the row);
+//   - an unconditional write that another local write or deletion of the row
+//     overlapped, or that a full Prime replace overlapped: its own change,
+//     laid over its refresh read or patched into the cached row, could roll
+//     the other write back, so it installs nothing;
 //   - a conditional write's refetch that failed, did not reflect the write,
 //     or was superseded by a newer write racing it;
 //   - an idempotent conditional write whose evicted row was not clean at the
@@ -147,24 +159,54 @@ func (o CacheObservation) CacheRev() CacheRevision {
 //   - a CloseIfMatch on a backing that hides closed rows from Get;
 //   - an ApplyEvent that conflicts with a recent local write and cannot be
 //     verified against the backing, or whose field conflict the backing does
-//     not confirm (gastownhall/gascity#2927).
+//     not confirm (gastownhall/gascity#2927). An event merged onto a cached
+//     row never clears a mark: it is not a backing read;
+//   - an ApplyEvent for a row the cache does not hold that a local write or
+//     deletion of the row overlapped, or whose backing read failed while the
+//     row was already dirty.
 //
 // Known limits (not yet fenced), so a consumer must not trust more than this:
-//   - ApplyEvent's branch for rows the cache does not hold installs a backing
-//     read or the raw patch without checking writeSeq.
-//   - Unconditional writes (Update, ReleaseIfCurrent, Close, Reopen, CloseAll,
-//     SetMetadata, SetMetadataBatch, Tx, DepAdd/DepRemove, graph apply)
-//     install a refresh read before taking the lock, without a writeSeq fence.
-//   - A conflicting event is verified only while the row's beadSeq is present
-//     or its local write is under five seconds old; once a newer scan clears
-//     beadSeq, a late event can apply. Events that carry a full edge set (a
-//     class binding's) extend this to edges: a stale explicit empty edge set
-//     delivered after a watcher stall longer than five seconds can roll back a
-//     local DepAdd until the next re-scan (P1.10b).
-//   - A full Prime that replaces the maps wholesale drops every fence.
+//   - A conflicting event is verified against the backing only while the
+//     row's beadSeq is present or its last local write is younger than
+//     recentWriteVerifyWindow (60s, the contract's cache_lag_bound default).
+//     An older event, edge sets included, applies unverified: until the next
+//     reconcile re-reads the row, a clean census shows it without the write
+//     while covering the write's WriteRev, so it undercounts. C5.15's resync
+//     does not catch this, because the entry has already cleared.
+//   - Every refresh assumes read-after-write: a backing read that lags a
+//     committed delete can install the deleted row, the same exposure Get,
+//     the dirty-row overlay and reconcile already carry.
+//   - A raced write's dirty mark can survive a reconcile that runs within five
+//     seconds of the write (the recency skip keeps the row); the first
+//     reconcile after that, or any Get or overlay read of the row, drains it.
+//   - The atomic conditional closer installs the row its backing returns
+//     when no fence moved between the write's start and its eviction. It
+//     checks only that the row has the right id and is closed, and otherwise
+//     trusts it to be the committed row.
+//   - A dependency write whose refresh failed patches its one edge into the
+//     cached edge set. On a clean row the census then covers the write while
+//     trusting that the rest of the cached edge set was current.
 //   - Any dirty row refuses the census for the whole store, and there is no
 //     API to drain dirty rows, so a consumer that needs bounded lag cannot
-//     force it today.
+//     force it today. Overlapping local writes to one row leave it dirty,
+//     which adds to that.
+//   - A row's fences go when the row leaves the cache: evictLocked, the
+//     reconcile's eviction and orphan sweep, the tombstone sweep and a full
+//     Prime replace drop its writeSeq, writeAt and deletedSeq. An in-flight
+//     write whose refresh read predates a newer write, or a late bead.created
+//     raw patch (the cache's own echo included), can then reinstall a row
+//     that was deleted or closed since, or roll the newer write back, and a
+//     clean census covers it (P1.10c).
+//   - On a backing whose rows omit edges, Reopen's refresh, a Live or Parent
+//     list, and the refresh after a dependency write still install a row
+//     whose DepList read failed or was skipped as clean, with the cached or
+//     field-derived (possibly pre-write) edge set (P1.10c). Get's dirty-row
+//     refresh does not: it answers without installing.
+//   - A verified bead.closed snapshot older than the backing row takes the
+//     backing row, but the order is read from updated_at. A backing whose
+//     updated_at is coarser than a close/reopen cycle can tie a delayed
+//     snapshot from an earlier cycle with the current row, and the snapshot
+//     then merges, rolling back the writes since.
 //
 // A store read without a CachingStore has no watermark at all; its consumers
 // must fall back to per-row markers. The controller reads the work and rig
@@ -438,6 +480,7 @@ func newCachingStore(backing Store, idPrefix string, onChange func(eventType, be
 		beadSeq:             make(map[string]uint64),
 		localBeadAt:         make(map[string]time.Time),
 		writeSeq:            make(map[string]uint64),
+		writeAt:             make(map[string]time.Time),
 		deletedSeq:          make(map[string]uint64),
 		readyProjectionLost: make(map[string]struct{}),
 		problemLog:          make(map[string]cacheProblemLogState),
@@ -524,8 +567,72 @@ func (c *CachingStore) noteLocalMutationLocked(ids ...string) uint64 {
 		}
 		c.localBeadAt[id] = now
 		c.writeSeq[id] = seq
+		c.writeAt[id] = now
 	}
 	return seq
+}
+
+// writeFencedLocked reports whether an install whose start was captured at
+// startSeq must be refused because the row may no longer be the newest local
+// state: a local write or deletion newer than startSeq touched id, or a full
+// Prime replace since startSeq dropped the fences that would say so. It does
+// not look at beadSeq, so a write's own echo event never trips it. Caller must
+// hold c.mu.
+func (c *CachingStore) writeFencedLocked(id string, startSeq uint64) bool {
+	return startSeq < c.fenceFloor || c.writeSeq[id] > startSeq || c.deletedSeq[id] > startSeq
+}
+
+// racedWriteLocked is the install gate for a local write that captured
+// startSeq before its backing write. When writeFencedLocked refuses the
+// install, it stamps the write, marks id dirty so no clean census covers the
+// write before a backing read settles the row, drops the ready verdicts of
+// id's dependents (the write may have changed id's status), and reports true.
+// The caller must then install nothing for id, but still notify: skipping the
+// event would lose it for good. Its echo, like any event merged onto a cached
+// row, leaves the mark in place: merging an event is not a backing read.
+// A tombstoned id gets no dirty mark; the tombstone already keeps readers off
+// it. Otherwise it changes nothing. Caller must hold c.mu in write mode.
+func (c *CachingStore) racedWriteLocked(id string, startSeq uint64) bool {
+	if !c.writeFencedLocked(id, startSeq) {
+		return false
+	}
+	c.noteLocalMutationLocked(id)
+	if _, deleted := c.deletedSeq[id]; !deleted {
+		c.markDirtyLocked(id)
+	}
+	c.clearDependentReadyProjectionsLocked(id)
+	return true
+}
+
+// racedWritesLocked applies racedWriteLocked to each of a multi-row write's
+// ids and returns the ones whose install it refused. Caller must hold c.mu in
+// write mode.
+func (c *CachingStore) racedWritesLocked(ids []string, startSeq uint64) map[string]struct{} {
+	var raced map[string]struct{}
+	for _, id := range ids {
+		if id == "" || !c.racedWriteLocked(id, startSeq) {
+			continue
+		}
+		if raced == nil {
+			raced = make(map[string]struct{})
+		}
+		raced[id] = struct{}{}
+	}
+	return raced
+}
+
+// recentWriteVerifyWindow is how long a local write makes a conflicting event
+// verify against the backing even after the row's beadSeq fence cleared. It
+// matches the contract's cache_lag_bound default (60s): an event older than
+// that is past the lag the watermark consumer tolerates anyway, and the leg
+// resync (C5.15) repairs it.
+const recentWriteVerifyWindow = 60 * time.Second
+
+// recentWriteLocked reports whether id carries a local write stamped within
+// recentWriteVerifyWindow of now. Caller must hold c.mu.
+func (c *CachingStore) recentWriteLocked(id string, now time.Time) bool {
+	at, ok := c.writeAt[id]
+	return ok && now.Sub(at) <= recentWriteVerifyWindow
 }
 
 // absorbDepsMode selects how absorbFreshLocked sources the deps row for a bead.
@@ -791,6 +898,7 @@ func (c *CachingStore) evictLocked(id string) {
 	delete(c.beadSeq, id)
 	delete(c.localBeadAt, id)
 	delete(c.writeSeq, id)
+	delete(c.writeAt, id)
 	delete(c.readyProjectionLost, id)
 }
 
@@ -807,15 +915,6 @@ func (c *CachingStore) tombstoneLocked(id string, seq uint64) {
 func (c *CachingStore) markDirtyLocked(id string) {
 	c.advanceObservationLocked()
 	c.dirty[id] = struct{}{}
-}
-
-// clearStalenessMarksLocked clears the dirty flag and deletion fence for id
-// without touching the cached row or its deps. Used by the deps-overlay
-// fallbacks that trust an in-place dependency mutation. Caller must hold c.mu
-// in write mode.
-func (c *CachingStore) clearStalenessMarksLocked(id string) {
-	delete(c.dirty, id)
-	delete(c.deletedSeq, id)
 }
 
 // dirtyOverlayMaxGets bounds the inline per-ID refresh a cached read will do
@@ -1079,7 +1178,7 @@ func (c *CachingStore) PrimeActive() error {
 	now := time.Now()
 	for _, b := range all {
 		if c.mutationSeq != startSeq {
-			if c.deletedSeq[b.ID] > startSeq || c.writeSeq[b.ID] > startSeq {
+			if c.writeFencedLocked(b.ID, startSeq) {
 				continue
 			}
 			if _, exists := c.beads[b.ID]; exists {
@@ -1245,15 +1344,21 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		for id := range c.writeSeq {
 			if _, kept := nextBeads[id]; !kept {
 				delete(c.writeSeq, id)
+				delete(c.writeAt, id)
 			}
 		}
 		c.readyProjectionLost = nextReadyLost
 		c.deletedSeq = make(map[string]uint64)
+		// The replace dropped the deletion fences and the write fences of
+		// dropped rows. It runs only when no mutation followed startSeq, so
+		// every start below the current seq saw one and is refused wholesale
+		// (writeFencedLocked).
+		c.fenceFloor = c.mutationSeq
 	} else {
 		for id, b := range beadMap {
 			// A local write after the snapshot owns the id: installing the
 			// snapshot row would clear that write's beadSeq fence.
-			if c.deletedSeq[id] > startSeq || c.writeSeq[id] > startSeq {
+			if c.writeFencedLocked(id, startSeq) {
 				continue
 			}
 			if _, exists := c.beads[id]; exists {

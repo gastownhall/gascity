@@ -234,6 +234,7 @@ func buildExpectedNewEnd(st storeState, in snapshotInputs, postPreserveFresh map
 	exp.depsComplete = expectedNextDepsComplete(st, in, postPreserveFresh)
 	exp.readyLost = expectedReadyLost(st, exp.beads)
 	exp.writeSeq = expectedWriteSeq(st, in, exp)
+	exp.writeAtIDs = keySet(exp.writeSeq)
 	return exp
 }
 

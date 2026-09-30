@@ -90,6 +90,7 @@ go_test(
         "caching_store_setequal_internal_test.go",
         "caching_store_sqlite_deps_internal_test.go",
         "caching_store_test.go",
+        "caching_store_watermark_holes_internal_test.go",
         "caching_store_watermark_internal_test.go",
         "caching_store_writes_internal_test.go",
         "class_store_test.go",
