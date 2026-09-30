@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"maps"
 	"path/filepath"
@@ -683,4 +685,157 @@ func parseReadyArgsForTest(t *testing.T, args []string) (readyOpts, []metadataFi
 		t.Fatalf("parsing metadata filters: %v", err)
 	}
 	return opts, metaWant
+}
+
+// ga-vibz91 / ga-id9fqz (ruling ga-mmmczu): an on-demand named session never
+// woke for work whose `blocks` dependency closed with gc.work_outcome=blocked,
+// yet its worker served that same row the moment anything else woke it.
+//
+// The live instance: be-hs42e.5.2 (open, routed and later assigned to beads/pm)
+// blocks on be-hs42e.5.1, which a builder closed gc.work_outcome=blocked
+// ("committed, not merged" — the work-record-close protocol's prescribed
+// outcome). The two sides read DIFFERENT ready sets:
+//
+//   - controller demand reads gc's Store.Ready() — the routed scale check via
+//     controllerDemandReady, the named assigned-work gate via liveReady into
+//     readyAssigned — and every production store applies #6100's
+//     closed-and-blocked veto there;
+//   - the worker's work_query reads `bd ready`, which checks blocker STATUS
+//     only. The hook now applies the same veto to the rows it reads.
+//
+// A row servable but not counted is work no session is ever woken for; a row
+// counted but not servable is a seat spawned to read empty. The rule both sides
+// now share: a blocker closed handed-off does not satisfy the dependency.
+
+const blockedOutcomeIdentity = "gascity/pm"
+
+// blockedOutcomeOutcomes are the three blocker dispositions that matter: a
+// legacy close with no typed outcome, a landed close, and the handed-off close
+// the veto keys on.
+var blockedOutcomeOutcomes = []string{"", beadmeta.WorkOutcomeShipped, beadmeta.WorkOutcomeBlocked}
+
+func outcomeLabel(outcome string) string {
+	if outcome == "" {
+		return "legacy-no-outcome"
+	}
+	return outcome
+}
+
+// blockedOutcomeBdRunner answers like the real bd for the be-hs42e.5.2 shape.
+// `bd ready` checks blocker status only, so it offers the dependent; the row
+// carries its edges inline with dependency_count equal to its `blocks` edges
+// (bd counts type='blocks' only) — the exact live shape captured from
+// `bd ready --json` on 2026-09-27 — so BdStore's inline-deps witness latches as
+// it does in production. The blocker is answered two ways because the two sides
+// read it two ways: the controller's closed-inclusive lookup is a `bd list`
+// that BdStore filters to the blocker IDs in Go (bd list has no --id flag), and
+// the hook's veto is one batched `bd show <ids...>`.
+func blockedOutcomeBdRunner(blockerOutcome string, assigned bool) (beads.CommandRunner, string) {
+	assignee := ""
+	if assigned {
+		assignee = `"assignee":"` + blockedOutcomeIdentity + `",`
+	}
+	readyJSON := `[{"id":"ga-dep","title":"next sibling routed to the on-demand pm","status":"open","issue_type":"task",` +
+		assignee +
+		`"created_at":"2026-09-26T19:00:00Z","metadata":{"gc.routed_to":"` + blockedOutcomeIdentity + `"},` +
+		`"dependency_count":1,"blocked_by":null,` +
+		`"dependencies":[` +
+		`{"issue_id":"ga-dep","depends_on_id":"ga-blocker","type":"blocks","metadata":"{}"},` +
+		`{"issue_id":"ga-dep","depends_on_id":"ga-parent","type":"parent-child","metadata":"{}"}]}]`
+	blockerMeta := ""
+	if blockerOutcome != "" {
+		blockerMeta = `,"metadata":{"gc.work_outcome":"` + blockerOutcome + `"}`
+	}
+	blockerJSON := `[{"id":"ga-blocker","title":"sibling built by a builder","status":"closed","issue_type":"task","created_at":"2026-09-26T18:00:00Z"` + blockerMeta + `}]`
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if len(args) == 0 {
+			return nil, fmt.Errorf("unexpected command: %s", name)
+		}
+		switch args[0] {
+		case "ready":
+			return []byte(readyJSON), nil
+		case "show":
+			return []byte(blockerJSON), nil
+		case "list":
+			if strings.Contains(strings.Join(args, " "), "--status=closed") {
+				return []byte(blockerJSON), nil
+			}
+			return []byte(`[]`), nil
+		case "query":
+			return []byte(`[]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
+	}
+	return runner, readyJSON
+}
+
+func readyRowsContain(rows []beads.Bead, id string) bool {
+	for _, row := range rows {
+		if row.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// blockedOutcomeServed is the worker side of the agreement, end to end: the
+// production discovery door (doHook) over the production leg wrapper, reading
+// `bd ready`'s raw output. It reports whether a worker running a bd-backed
+// work_query ends up holding the row.
+func blockedOutcomeServed(rawReady string, blockers beads.ExactBatchGetter) bool {
+	leg := withHookBlockedOutcomeVeto(
+		func(string, string, []string) (string, error) { return rawReady, nil },
+		func(context.Context, string, []string) beads.ExactBatchGetter { return blockers },
+		io.Discard,
+	)
+	runner := func(command, dir string) (string, error) { return leg(command, dir, nil) }
+	var stdout, stderr bytes.Buffer
+	return doHook("bd ready --json", "/city", false, runner, &stdout, &stderr, hookVisibility{}) == 0
+}
+
+// TestDemandServeAgreement_BlockedOutcomeBlocker pins the shared rule. Both
+// verdicts come from production code over the same bd answer:
+//
+//   - served:  the hook's discovery door over `bd ready`'s raw output;
+//   - counted: the controller's demand readers over a BdStore on that same bd —
+//     the per-assignee live read behind readyAssigned/namedWorkReady for the
+//     assigned row, and the full ready read behind the default scale check for
+//     the routed-only row.
+//
+// The legacy and shipped rows are servable and counted. The handed-off row is
+// neither. The expected verdict is asserted alongside the agreement so the test
+// cannot pass by both sides being wrong the same way.
+func TestDemandServeAgreement_BlockedOutcomeBlocker(t *testing.T) {
+	for _, assigned := range []bool{true, false} {
+		for _, outcome := range blockedOutcomeOutcomes {
+			name := fmt.Sprintf("assigned=%v/blocker=%s", assigned, outcomeLabel(outcome))
+			t.Run(name, func(t *testing.T) {
+				runner, rawReady := blockedOutcomeBdRunner(outcome, assigned)
+				store := beads.NewBdStore("/city", runner)
+
+				served := blockedOutcomeServed(rawReady, store)
+
+				var rows []beads.Bead
+				var err error
+				if assigned {
+					rows, err = liveReadyForControllerDemandQuery(store, beads.ReadyQuery{Assignee: blockedOutcomeIdentity})
+				} else {
+					rows, err = readyForControllerDemand(store)
+				}
+				if err != nil {
+					t.Fatalf("controller demand read: %v", err)
+				}
+				counted := readyRowsContain(rows, "ga-dep")
+
+				if served != counted {
+					t.Fatalf("AGREEMENT VIOLATED: the worker's hook serves ga-dep = %v, the controller's demand read counts it = %v "+
+						"(blocker closed with gc.work_outcome=%q). A row servable but not counted is work no session is ever woken for.",
+						served, counted, outcome)
+				}
+				if want := outcome != beadmeta.WorkOutcomeBlocked; served != want {
+					t.Fatalf("ga-dep servable and counted = %v, want %v for a blocker closed with gc.work_outcome=%q", served, want, outcome)
+				}
+			})
+		}
+	}
 }
