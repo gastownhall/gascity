@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1295,6 +1296,80 @@ func TestDoRigResume(t *testing.T) {
 	}
 	if suspensionstate.EffectiveRigSuspended(st, "frontend", cfg.Rigs[0].SuspendedOnStart) {
 		t.Error("explicit resume in runtime state must beat suspended_on_start=true")
+	}
+}
+
+// A supervisor-managed city has a controller socket but no standalone API
+// port. Both direct state changes must reload the store's refresh gate.
+func TestCmdRigSuspensionDirectPathReloadsController(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		suspended bool
+		run       func([]string, io.Writer, io.Writer) int
+	}{
+		{"resume", true, cmdRigResume},
+		{"suspend", false, cmdRigSuspend},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := setupRegisteredRigFixture(t, true, tc.suspended)
+			setCwd(t, fx.workDir)
+			pokeCh := make(chan struct{}, 1)
+			reloadReqCh := make(chan reloadRequest, 1)
+			lis, err := startControllerSocket(fx.cityPath, controllerHostingSupervisor, func() {}, nil, nil, reloadReqCh, nil, pokeCh, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = lis.Close() })
+
+			var stdout, stderr bytes.Buffer
+			result := make(chan int, 1)
+			go func() { result <- tc.run(nil, &stdout, &stderr) }()
+			var req reloadRequest
+			select {
+			case req = <-reloadReqCh:
+			case <-time.After(5 * time.Second):
+				t.Fatal("direct rig change did not request a reload")
+			}
+			if !req.wait {
+				t.Fatal("direct rig change requested an asynchronous reload")
+			}
+			cr := &CityRuntime{pokeCh: pokeCh}
+			cr.handleReloadRequest(&req)
+			select {
+			case <-result:
+				t.Fatal("rig command returned before reload completion")
+			default:
+			}
+			req.doneCh <- reloadControlReply{Outcome: reloadOutcomeApplied}
+			select {
+			case code := <-result:
+				if code != 0 {
+					t.Fatalf("gc rig %s = %d; stderr=%q", tc.name, code, stderr.String())
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("rig command did not return after reload completion")
+			}
+			if !cr.configDirty.Load() {
+				t.Fatalf("controller was not marked dirty after direct %s", tc.name)
+			}
+			select {
+			case <-pokeCh:
+			default:
+				t.Fatalf("controller was not poked after direct %s", tc.name)
+			}
+		})
+	}
+}
+
+func TestDirectRigSuspensionRejectsUnconfirmedReload(t *testing.T) {
+	cityPath := t.TempDir()
+	startRecordingControllerSocket(t, cityPath, func(string) string { return `{"outcome":"failed","error":"store reload failed"}` + "\n" })
+	var stderr bytes.Buffer
+	if code := finishDirectRigSuspension(cityPath, "resume", 0, &stderr); code != 1 {
+		t.Fatalf("finishDirectRigSuspension = %d, want failure; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "run gc reload") {
+		t.Fatalf("stderr = %q, want recovery instruction", stderr.String())
 	}
 }
 
