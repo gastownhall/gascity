@@ -23,6 +23,11 @@ fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+# Direct shard invocations need the same canonical fixture root as the outer
+# runner; keep ambient runtime variables excluded by run_in_test_env below.
+TMPDIR="$(realpath -e "${TMPDIR:-/var/tmp}")"
+export TMPDIR
+
 # One shared seeded gitconfig for every nested test env; resolved once so the
 # env -i block below cannot drift from the Makefile (scripts/test-gitconfig-path).
 gc_test_gitconfig="$("$repo_root/scripts/test-gitconfig-path")"
@@ -84,7 +89,7 @@ run_in_test_env() {
     GIT_CONFIG_NOSYSTEM=1 \
     GIT_CONFIG_GLOBAL="$gc_test_gitconfig" \
     LANG="${LANG:-C.UTF-8}" \
-    TMPDIR="${TMPDIR:-/var/tmp}" \
+    TMPDIR="$TMPDIR" \
     XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
     GOPATH="${gopath_val}" \
     GOCACHE="${gocache_val}" \
