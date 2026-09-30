@@ -590,3 +590,25 @@ func TestListRunningAttested_CompositeRequiresEveryBackend(t *testing.T) {
 		}
 	}
 }
+
+// Kills: an accessor that lists, and a Backends order or label that disagrees
+// with ListRunningByBackend (see the auto twin).
+func TestHybridBackends_NamesBackendsWithoutListing(t *testing.T) {
+	local := &scriptedListProvider{Fake: runtime.NewFake()}
+	remote := &scriptedListProvider{Fake: runtime.NewFake()}
+	p := New(local, remote, func(string) bool { return false })
+
+	backends := p.Backends()
+	if len(local.prefixes)+len(remote.prefixes) != 0 {
+		t.Fatalf("Backends() listed its backends (local %d, remote %d calls), want none", len(local.prefixes), len(remote.prefixes))
+	}
+	listings := p.ListRunningByBackend("")
+	if len(backends) != len(listings) {
+		t.Fatalf("Backends() = %d entries, ListRunningByBackend = %d", len(backends), len(listings))
+	}
+	for i, b := range backends {
+		if b.Label != listings[i].Label || b.Provider != listings[i].Provider {
+			t.Errorf("backend %d = (%q, %T), listing = (%q, %T)", i, b.Label, b.Provider, listings[i].Label, listings[i].Provider)
+		}
+	}
+}

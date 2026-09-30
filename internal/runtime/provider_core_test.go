@@ -87,3 +87,41 @@ func TestListRunningAttested_UndeclaredProviderIsUnattested(t *testing.T) {
 		}
 	}
 }
+
+// countingListProvider records how often ListRunning is asked for each prefix.
+type countingListProvider struct {
+	*Fake
+	names    []string
+	err      error
+	prefixes []string
+}
+
+func (p *countingListProvider) ListRunning(prefix string) ([]string, error) {
+	p.prefixes = append(p.prefixes, prefix)
+	return p.names, p.err
+}
+
+// Kills: a per-backend listing that skips, repeats or reorders a backend, or
+// mislabels its result.
+func TestListBackends_ListsEachBackendOnceInOrder(t *testing.T) {
+	t.Parallel()
+
+	a := &countingListProvider{Fake: NewFake(), names: []string{"gc-a"}}
+	b := &countingListProvider{Fake: NewFake(), err: errors.New("b down")}
+	listings := ListBackends([]Backend{{Label: "a", Provider: a}, {Label: "b", Provider: b}}, "gc-")
+
+	if len(listings) != 2 {
+		t.Fatalf("ListBackends() returned %d listings, want 2", len(listings))
+	}
+	if listings[0].Label != "a" || listings[0].Provider != Provider(a) || len(listings[0].Names) != 1 || listings[0].Err != nil {
+		t.Errorf("listing 0 = %#v, want a's result", listings[0])
+	}
+	if listings[1].Label != "b" || listings[1].Provider != Provider(b) || listings[1].Err == nil {
+		t.Errorf("listing 1 = %#v, want b's error", listings[1])
+	}
+	for label, sp := range map[string]*countingListProvider{"a": a, "b": b} {
+		if len(sp.prefixes) != 1 || sp.prefixes[0] != "gc-" {
+			t.Errorf("backend %s prefixes = %q, want exactly one gc- call", label, sp.prefixes)
+		}
+	}
+}

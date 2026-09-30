@@ -145,7 +145,8 @@ func ListRunningAttested(sp Provider) bool {
 // one ListRunning call per leaf backend. A caller that wants the nested
 // breakdown must not also call the nested ListRunningByBackend for the same
 // observation: that lists the nested leaves a second time, at a different
-// instant, and the two answers need not agree.
+// instant, and the two answers need not agree. It walks [BackendsProvider]
+// instead and lists each leaf itself.
 type BackendListingProvider interface {
 	ListRunningByBackend(prefix string) []BackendListing
 }
@@ -158,6 +159,34 @@ type BackendListing struct {
 	Provider Provider
 	Names    []string
 	Err      error
+}
+
+// BackendsProvider is an optional capability of composite providers that
+// names their backends without listing them, in the order
+// [BackendListingProvider.ListRunningByBackend] lists them. It lets a caller
+// walk nested composites and list every leaf backend exactly once, which
+// ListRunningByBackend alone cannot: a nested composite's entry there is
+// already that composite's merged listing.
+type BackendsProvider interface {
+	Backends() []Backend
+}
+
+// Backend is one labeled backend of a composite provider.
+type Backend struct {
+	Label    string
+	Provider Provider
+}
+
+// ListBackends calls ListRunning once on each backend, in order. Composites
+// implement ListRunningByBackend with it, so the per-backend listing agrees
+// with [BackendsProvider.Backends] by construction.
+func ListBackends(backends []Backend, prefix string) []BackendListing {
+	listings := make([]BackendListing, 0, len(backends))
+	for _, b := range backends {
+		names, err := b.Provider.ListRunning(prefix)
+		listings = append(listings, BackendListing{Label: b.Label, Provider: b.Provider, Names: names, Err: err})
+	}
+	return listings
 }
 
 // MergeBackendListings merges per-backend listings exactly as

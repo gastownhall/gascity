@@ -29,6 +29,7 @@ var (
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 	_ runtime.SessionEventProvider          = (*Provider)(nil)
 	_ runtime.BackendListingProvider        = (*Provider)(nil)
+	_ runtime.BackendsProvider              = (*Provider)(nil)
 	_ runtime.ListingAttestation            = (*Provider)(nil)
 )
 
@@ -214,12 +215,12 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 // ListRunningByBackend implements [runtime.BackendListingProvider]: one
 // ListRunning call per backend, local first.
 func (p *Provider) ListRunningByBackend(prefix string) []runtime.BackendListing {
-	local, lErr := p.local.ListRunning(prefix)
-	remote, rErr := p.remote.ListRunning(prefix)
-	return []runtime.BackendListing{
-		{Label: "local", Provider: p.local, Names: local, Err: lErr},
-		{Label: "remote", Provider: p.remote, Names: remote, Err: rErr},
-	}
+	return runtime.ListBackends(p.Backends(), prefix)
+}
+
+// Backends implements [runtime.BackendsProvider] without listing.
+func (p *Provider) Backends() []runtime.Backend {
+	return []runtime.Backend{{Label: "local", Provider: p.local}, {Label: "remote", Provider: p.remote}}
 }
 
 // ListRunningComplete implements [runtime.ListingAttestation]: the merged

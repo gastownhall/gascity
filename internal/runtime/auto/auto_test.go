@@ -879,3 +879,28 @@ func TestAutoMergedListIsPartialWhenACPIsPartial(t *testing.T) {
 		t.Fatalf("ListRunning names = %v, want [default-1 acp-1]", names)
 	}
 }
+
+// Backends names each backend without listing it, in the order
+// ListRunningByBackend lists them, so a caller can walk a nested composite and
+// list every leaf exactly once.
+// Kills: an accessor that lists (a second listing per observation), and a
+// Backends order or label that disagrees with ListRunningByBackend.
+func TestAutoBackends_NamesBackendsWithoutListing(t *testing.T) {
+	def := &scriptedListProvider{Fake: runtime.NewFake()}
+	acp := &scriptedListProvider{Fake: runtime.NewFake()}
+	p := New(def, acp)
+
+	backends := p.Backends()
+	if len(def.prefixes)+len(acp.prefixes) != 0 {
+		t.Fatalf("Backends() listed its backends (default %d, acp %d calls), want none", len(def.prefixes), len(acp.prefixes))
+	}
+	listings := p.ListRunningByBackend("")
+	if len(backends) != len(listings) {
+		t.Fatalf("Backends() = %d entries, ListRunningByBackend = %d", len(backends), len(listings))
+	}
+	for i, b := range backends {
+		if b.Label != listings[i].Label || b.Provider != listings[i].Provider {
+			t.Errorf("backend %d = (%q, %T), listing = (%q, %T)", i, b.Label, b.Provider, listings[i].Label, listings[i].Provider)
+		}
+	}
+}
