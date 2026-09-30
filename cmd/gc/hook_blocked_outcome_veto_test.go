@@ -10,6 +10,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // ga-id9fqz (ruling ga-mmmczu, option A): the hook's serve path adopts the veto
@@ -314,35 +316,196 @@ func TestFilterBlockedOutcomeHookCandidatesPreservesSurvivorsAndTheirOrder(t *te
 	}
 }
 
-// legRecorder is a hookBlockerStoreOpener that records which leg it was asked to
-// open, and hands every leg the same fake bd.
-type legRecorder struct {
-	bd        *vetoBd
-	dirs      []string
-	envs      [][]string
+// vetoCity is a city with one rig whose bead ids carry the ga- prefix and a city
+// store (gm-), each a separate bd workspace. ownedStores fakes those workspaces:
+// each answers only for the blockers it owns, so a read that reaches the wrong
+// store is visible as a show call for ids that store does not own.
+type vetoCity struct {
+	path   string
+	rigDir string
+	cfg    *config.City
+}
+
+func newVetoCity(t *testing.T) vetoCity {
+	t.Helper()
+	path := t.TempDir()
+	rigDir := filepath.Join(path, "gascity")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return vetoCity{
+		path:   path,
+		rigDir: rigDir,
+		cfg:    &config.City{Workspace: config.Workspace{Name: "gc"}, Rigs: []config.Rig{{Name: "gascity", Path: rigDir, Prefix: "ga"}}},
+	}
+}
+
+// legs is the fan-out a rig-scoped agent gets: its rig store, its own (also
+// rig-scoped) env, and the city store.
+func (c vetoCity) legs() []hookStore {
+	return []hookStore{
+		{dir: c.rigDir, env: []string{"BEADS_DIR=rig"}},
+		{dir: c.rigDir, env: []string{"BEADS_DIR=own"}},
+		{dir: c.path, env: []string{"BEADS_DIR=city"}},
+	}
+}
+
+type ownedStores struct {
+	byDir     map[string]*vetoBd
+	opened    []string
 	unbounded bool
 }
 
-func (l *legRecorder) open(ctx context.Context, dir string, env []string) beads.ExactBatchGetter {
-	l.dirs = append(l.dirs, dir)
-	l.envs = append(l.envs, env)
+func (o *ownedStores) open(ctx context.Context, dir string, _ []string) beads.ExactBatchGetter {
+	o.opened = append(o.opened, dir)
 	if _, ok := ctx.Deadline(); !ok {
-		l.unbounded = true
+		o.unbounded = true
 	}
-	return l.bd.store()
+	bd, ok := o.byDir[dir]
+	if !ok {
+		bd = &vetoBd{}
+	}
+	return bd.store()
+}
+
+func (o *ownedStores) shows(dir string) [][]string {
+	if bd, ok := o.byDir[dir]; ok {
+		return bd.showedIDs()
+	}
+	return nil
+}
+
+func (c vetoCity) stores(rig, city map[string]vetoBlocker) *ownedStores {
+	return &ownedStores{byDir: map[string]*vetoBd{
+		c.rigDir: {blockers: rig},
+		c.path:   {blockers: city},
+	}}
+}
+
+func TestHookBlockerReaderReadsEachBlockerFromTheStoreThatOwnsIt(t *testing.T) {
+	city := newVetoCity(t)
+	handedOff := vetoBlocker{"closed", beadmeta.WorkOutcomeBlocked}
+	stores := city.stores(
+		map[string]vetoBlocker{"ga-1": handedOff, "ga-2": {"closed", ""}},
+		map[string]vetoBlocker{"gm-9": handedOff},
+	)
+	reader := newHookBlockerReader(city.path, city.cfg, city.legs(), stores.open)
+
+	found, unresolved, err := reader.GetExactBatch([]string{"ga-1", "gm-9", "ga-2"})
+	if err != nil {
+		t.Fatalf("GetExactBatch: %v", err)
+	}
+	if len(unresolved) != 0 || len(found) != 3 {
+		t.Fatalf("found %d unresolved %v, want all three answered", len(found), unresolved)
+	}
+	rigShows, cityShows := stores.shows(city.rigDir), stores.shows(city.path)
+	if len(rigShows) != 1 || !reflect.DeepEqual(sortedCopy(rigShows[0]), []string{"ga-1", "ga-2"}) {
+		t.Fatalf("rig store shows = %v, want one batched read of the ga- blockers", rigShows)
+	}
+	if len(cityShows) != 1 || !reflect.DeepEqual(cityShows[0], []string{"gm-9"}) {
+		t.Fatalf("city store shows = %v, want one read of the gm- blocker", cityShows)
+	}
+}
+
+// The three legs of a rig-scoped agent run the same work query and, when it
+// names its store (`gc bd --rig gascity ready`), return the same rows whatever
+// each leg's own env points at. The blockers must still be read from the store
+// that owns them, once, not once per leg from whichever store the leg names.
+func TestHookBlockerReaderReadsASharedBatchOnceAcrossLegs(t *testing.T) {
+	city := newVetoCity(t)
+	stores := city.stores(map[string]vetoBlocker{"ga-1": {"closed", beadmeta.WorkOutcomeBlocked}}, nil)
+	reader := newHookBlockerReader(city.path, city.cfg, city.legs(), stores.open)
+
+	for i := 0; i < 3; i++ {
+		found, _, err := reader.GetExactBatch([]string{"ga-1"})
+		if err != nil || len(found) != 1 {
+			t.Fatalf("call %d: found %d err %v", i, len(found), err)
+		}
+	}
+	if shows := stores.shows(city.rigDir); len(shows) != 1 {
+		t.Fatalf("rig store shows = %v, want the shared batch read exactly once across three legs", shows)
+	}
+	if shows := stores.shows(city.path); len(shows) != 0 {
+		t.Fatalf("city store was asked for ga- blockers it does not own: %v", shows)
+	}
+}
+
+func TestHookBlockerReaderRemembersAnAbsentBlocker(t *testing.T) {
+	city := newVetoCity(t)
+	stores := city.stores(map[string]vetoBlocker{}, nil)
+	reader := newHookBlockerReader(city.path, city.cfg, city.legs(), stores.open)
+
+	for i := 0; i < 2; i++ {
+		found, unresolved, err := reader.GetExactBatch([]string{"ga-gone"})
+		if err != nil || len(found) != 0 || !reflect.DeepEqual(unresolved, []string{"ga-gone"}) {
+			t.Fatalf("call %d: found %v unresolved %v err %v, want ga-gone unresolved", i, found, unresolved, err)
+		}
+	}
+	if shows := stores.shows(city.rigDir); len(shows) != 1 {
+		t.Fatalf("rig store shows = %v, want the absent blocker read once (a failed lookup costs seconds)", shows)
+	}
+}
+
+func TestHookBlockerReaderDoesNotReadABlockerNoLegOwns(t *testing.T) {
+	city := newVetoCity(t)
+	stores := city.stores(map[string]vetoBlocker{"ga-1": {"closed", ""}}, nil)
+	reader := newHookBlockerReader(city.path, city.cfg, city.legs()[:1], stores.open)
+
+	found, unresolved, err := reader.GetExactBatch([]string{"gm-9"})
+	if err != nil || len(found) != 0 || !reflect.DeepEqual(unresolved, []string{"gm-9"}) {
+		t.Fatalf("found %v unresolved %v err %v, want gm-9 unresolved", found, unresolved, err)
+	}
+	if len(stores.opened) != 0 {
+		t.Fatalf("opened %v for a blocker whose store is not in the fan-out; a wrong-store read is a slow failure with no evidence", stores.opened)
+	}
+}
+
+func TestHookBlockerReaderBoundsEveryReadWithATimeout(t *testing.T) {
+	city := newVetoCity(t)
+	stores := city.stores(map[string]vetoBlocker{"ga-1": {"closed", ""}}, nil)
+	reader := newHookBlockerReader(city.path, city.cfg, city.legs(), stores.open)
+
+	if _, _, err := reader.GetExactBatch([]string{"ga-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if stores.unbounded {
+		t.Fatal("the blocker read ran on an unbounded context; a wedged bd would hang every hook call")
+	}
+}
+
+// A failed read is not an answer: it must not be remembered as "absent", or one
+// transient store error would blind the veto for the rest of the invocation.
+func TestHookBlockerReaderRetriesAfterAFailedRead(t *testing.T) {
+	city := newVetoCity(t)
+	stores := city.stores(map[string]vetoBlocker{"ga-1": {"closed", beadmeta.WorkOutcomeBlocked}}, nil)
+	stores.byDir[city.rigDir].showErr = errors.New("dolt is down")
+	reader := newHookBlockerReader(city.path, city.cfg, city.legs(), stores.open)
+
+	if _, _, err := reader.GetExactBatch([]string{"ga-1"}); err == nil || !strings.Contains(err.Error(), "dolt is down") {
+		t.Fatalf("err = %v, want the store's failure", err)
+	}
+	stores.byDir[city.rigDir].showErr = nil
+	found, _, err := reader.GetExactBatch([]string{"ga-1"})
+	if err != nil || len(found) != 1 {
+		t.Fatalf("after recovery: found %d err %v, want the blocker read", len(found), err)
+	}
+}
+
+func sortedCopy(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
+	return out
 }
 
 func TestWithHookBlockedOutcomeVetoRemovesVetoedRowsFromTheLegsOutput(t *testing.T) {
 	bd := &vetoBd{blockers: map[string]vetoBlocker{"ga-b": {"closed", beadmeta.WorkOutcomeBlocked}}}
-	rec := &legRecorder{bd: bd}
 	raw := vetoRows(
 		vetoRow("ga-drop", "open", 2, vetoEdge{"ga-b", "blocks"}),
 		vetoRow("ga-keep", "open", 2),
 	)
 	base := func(_, _ string, _ []string) (string, error) { return raw, nil }
-	legEnv := []string{"BEADS_DIR=/rig/.beads"}
 
-	out, err := withHookBlockedOutcomeVeto(base, rec.open, io.Discard)("bd ready --json", "/rig", legEnv)
+	out, err := withHookBlockedOutcomeVeto(base, bd.store(), io.Discard)("bd ready --json", "/rig", nil)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -350,20 +513,14 @@ func TestWithHookBlockedOutcomeVetoRemovesVetoedRowsFromTheLegsOutput(t *testing
 	if got := vetoSurvivorIDs(t, out); !reflect.DeepEqual(got, []string{"ga-keep"}) {
 		t.Fatalf("survivors = %v, want [ga-keep]", got)
 	}
-	if !reflect.DeepEqual(rec.dirs, []string{"/rig"}) || !reflect.DeepEqual(rec.envs, [][]string{legEnv}) {
-		t.Fatalf("blockers were read from dirs %v envs %v, want the leg that produced the rows (/rig, %v)", rec.dirs, rec.envs, legEnv)
-	}
-	if rec.unbounded {
-		t.Fatal("the blocker read ran on an unbounded context; a wedged bd would hang every hook call")
-	}
 }
 
 func TestWithHookBlockedOutcomeVetoLeavesAnUnvetoedOutputByteIdentical(t *testing.T) {
 	raw := "  [ {\"id\":\"ga-a\",\"status\":\"open\",\"priority\":1,\"unknown_field\":true} ]\n"
-	rec := &legRecorder{bd: &vetoBd{}}
+	bd := &vetoBd{}
 	base := func(_, _ string, _ []string) (string, error) { return raw, nil }
 
-	out, err := withHookBlockedOutcomeVeto(base, rec.open, io.Discard)("wq", "/rig", nil)
+	out, err := withHookBlockedOutcomeVeto(base, bd.store(), io.Discard)("wq", "/rig", nil)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -374,25 +531,25 @@ func TestWithHookBlockedOutcomeVetoLeavesAnUnvetoedOutputByteIdentical(t *testin
 
 func TestWithHookBlockedOutcomeVetoPropagatesARunnerErrorUntouched(t *testing.T) {
 	boom := errors.New("work query timed out")
-	rec := &legRecorder{bd: &vetoBd{}}
+	bd := &vetoBd{}
 	base := func(_, _ string, _ []string) (string, error) { return "partial", boom }
 
-	out, err := withHookBlockedOutcomeVeto(base, rec.open, io.Discard)("wq", "/rig", nil)
+	out, err := withHookBlockedOutcomeVeto(base, bd.store(), io.Discard)("wq", "/rig", nil)
 	if !errors.Is(err, boom) || out != "partial" {
 		t.Fatalf("got (%q, %v), want (\"partial\", %v)", out, err, boom)
 	}
-	if len(rec.dirs) != 0 {
-		t.Fatalf("opened a blocker store %v for a failed work query", rec.dirs)
+	if len(bd.calls) != 0 {
+		t.Fatalf("read blockers %v for a failed work query", bd.calls)
 	}
 }
 
 func TestWithHookBlockedOutcomeVetoFailsOpenAndReportsOnStderr(t *testing.T) {
-	rec := &legRecorder{bd: &vetoBd{showErr: errors.New("dolt is down")}}
+	bd := &vetoBd{showErr: errors.New("dolt is down")}
 	raw := vetoRows(vetoRow("ga-a", "open", 2, vetoEdge{"ga-b", "blocks"}))
 	base := func(_, _ string, _ []string) (string, error) { return raw, nil }
 	var stderr bytes.Buffer
 
-	out, err := withHookBlockedOutcomeVeto(base, rec.open, &stderr)("wq", "/rig", nil)
+	out, err := withHookBlockedOutcomeVeto(base, bd.store(), &stderr)("wq", "/rig", nil)
 	if err != nil {
 		t.Fatalf("a failed veto read must not fail the work query: %v", err)
 	}
@@ -417,13 +574,12 @@ func TestBestStoreWithWorkSelectsTheLegWithServableWork(t *testing.T) {
 	}
 	base := func(_, dir string, _ []string) (string, error) { return outs[dir], nil }
 	bd := &vetoBd{blockers: map[string]vetoBlocker{"ga-b": {"closed", beadmeta.WorkOutcomeBlocked}}}
-	rec := &legRecorder{bd: bd}
 
 	if _, control, err := bestStoreWithWork("wq", stores, legA, base); err != nil || control.dir != "/leg-a" {
 		t.Fatalf("control: without the veto leg A's more urgent row wins; got (%q, %v)", control.dir, err)
 	}
 
-	out, selected, err := bestStoreWithWork("wq", stores, legA, withHookBlockedOutcomeVeto(base, rec.open, io.Discard))
+	out, selected, err := bestStoreWithWork("wq", stores, legA, withHookBlockedOutcomeVeto(base, bd.store(), io.Discard))
 	if err != nil {
 		t.Fatalf("bestStoreWithWork: %v", err)
 	}
@@ -445,8 +601,7 @@ func TestClaimStoreWithFallbackMovesOffALegWhoseRowsAreAllVetoed(t *testing.T) {
 	}
 	base := func(_, dir string, _ []string) (string, error) { return outs[dir], nil }
 	bd := &vetoBd{blockers: map[string]vetoBlocker{"ga-b": {"closed", beadmeta.WorkOutcomeBlocked}}}
-	rec := &legRecorder{bd: bd}
-	run := withHookBlockedOutcomeVeto(base, rec.open, io.Discard)
+	run := withHookBlockedOutcomeVeto(base, bd.store(), io.Discard)
 
 	_, claimStore, err := claimStoreWithFallback("wq", []hookStore{legA, legB}, legA, legA, outs["/leg-a"], run)
 	if err != nil {
@@ -454,6 +609,40 @@ func TestClaimStoreWithFallbackMovesOffALegWhoseRowsAreAllVetoed(t *testing.T) {
 	}
 	if claimStore.dir != "/leg-b" {
 		t.Fatalf("claim store = %q, want /leg-b: the selected leg's only row is vetoed", claimStore.dir)
+	}
+}
+
+// The live failure a per-leg fake hid. A rig-scoped agent's fan-out is [rig, own,
+// city], and its work_query names the store (`gc bd --rig gascity ready`), so all
+// three legs return the rig's rows whatever each leg's own env points at. Reading
+// blockers through the leg that produced the rows opened the CITY store for ga-
+// ids on the third leg: a multi-second failed read ("no issue found") that reads
+// as "no evidence", so the veto silently did nothing there — and the shared batch
+// was read once per leg. The veto must read from the store that owns the blockers,
+// once.
+func TestBestStoreWithWorkVetoesRowsFromAQueryThatIgnoresTheLegsStore(t *testing.T) {
+	city := newVetoCity(t)
+	legs := city.legs()
+	rows := vetoRows(
+		vetoRow("ga-vetoed", "open", 0, vetoEdge{"ga-b", "blocks"}),
+		vetoRow("ga-servable", "open", 3),
+	)
+	base := func(_, _ string, _ []string) (string, error) { return rows, nil }
+	stores := city.stores(map[string]vetoBlocker{"ga-b": {"closed", beadmeta.WorkOutcomeBlocked}}, nil)
+	reader := newHookBlockerReader(city.path, city.cfg, legs, stores.open)
+
+	out, _, err := bestStoreWithWork("wq", legs, legs[0], withHookBlockedOutcomeVeto(base, reader, io.Discard))
+	if err != nil {
+		t.Fatalf("bestStoreWithWork: %v", err)
+	}
+	if got := vetoSurvivorIDs(t, out); !reflect.DeepEqual(got, []string{"ga-servable"}) {
+		t.Fatalf("selected rows = %v, want [ga-servable]: ga-vetoed's blocker closed handed-off", got)
+	}
+	if shows := stores.shows(city.rigDir); len(shows) != 1 {
+		t.Fatalf("rig store shows = %v, want one batched read shared by all three legs", shows)
+	}
+	if shows := stores.shows(city.path); len(shows) != 0 {
+		t.Fatalf("city store was asked for ga- blockers it does not own: %v", shows)
 	}
 }
 

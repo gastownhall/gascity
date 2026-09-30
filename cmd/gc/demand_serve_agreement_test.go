@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -785,7 +784,7 @@ func readyRowsContain(rows []beads.Bead, id string) bool {
 func blockedOutcomeServed(rawReady string, blockers beads.ExactBatchGetter) bool {
 	leg := withHookBlockedOutcomeVeto(
 		func(string, string, []string) (string, error) { return rawReady, nil },
-		func(context.Context, string, []string) beads.ExactBatchGetter { return blockers },
+		blockers,
 		io.Discard,
 	)
 	runner := func(command, dir string) (string, error) { return leg(command, dir, nil) }

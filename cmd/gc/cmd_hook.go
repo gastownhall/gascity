@@ -463,6 +463,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// `gc ready` does not answer. No-op on a single-store city and for a custom
 	// work_query, where both forms are the same string.
 	stores = scopeFederatedHookStores(stores, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr))
+	blockers := newHookBlockerReader(cityPath, cfg, stores, openHookBlockerStore)
 
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
 	// so the reconciler can escalate instead of silently treating the strand as
@@ -476,7 +477,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			os.Getenv("GC_SESSION_ID"), failureTemplate, command, err)
 	}
 	runner := func(command, _ string) (string, error) {
-		out, _, err := bestStoreWithWork(command, stores, stores[0], hookServeRunner(stderr))
+		out, _, err := bestStoreWithWork(command, stores, stores[0], hookServeRunner(blockers, stderr))
 		emitQueryFailure(command, err)
 		return out, err
 	}
@@ -527,7 +528,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			StrictDrainAck:     drainAckStrictConfig(cfg),
 			RuntimeActor:       strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
 		}
-		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
+		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, blockers, emitQueryFailure, stdout, stderr)
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
@@ -756,7 +757,7 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 // one, so the binding is reached through the ops rather than through a leg. On a
 // city that relocates nothing the route is nil and the ops value is the one this
 // function has always passed.
-func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, blockers beads.ExactBatchGetter, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	// The city relocates a class and its front door could not be projected.
 	// Claiming through the work store anyway would write ownership into a
 	// ledger that does not hold the bead, which is the wrong-answer lane this
@@ -769,7 +770,7 @@ func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, store
 		return 1
 	}
 	ops := classRoutedHookClaimOps(hookClaimOps{}, route)
-	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, hookServeRunner(stderr), emitFailure, stdout, stderr)
+	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, hookServeRunner(blockers, stderr), emitFailure, stdout, stderr)
 }
 
 // claimHookWorkWithRunner is claimHookWork with the work-query runner and claim
