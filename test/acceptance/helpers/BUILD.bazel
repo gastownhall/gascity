@@ -21,6 +21,7 @@ go_library(
     importpath = "github.com/gastownhall/gascity/test/acceptance/helpers",
     visibility = ["//visibility:public"],
     deps = [
+        "//internal/bazeltest",
         "//test/toolhome",
         "@com_github_steveyegge_beads//schema",
         "@org_golang_x_mod//semver",
