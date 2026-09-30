@@ -138,6 +138,13 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
+	// This route defers agent creates to the reconciler (below), which never
+	// starts a demand-only singleton's session on request (#6858).
+	if msg := demandOnlySingletonCreateRefusal(s.state.Config(), createCtx.Agent); msg != "" {
+		s.idem.unreserve(idemKey)
+		writeError(w, http.StatusBadRequest, "invalid", msg)
+		return
+	}
 	alias = createCtx.Alias
 	workDir = createCtx.WorkDir
 

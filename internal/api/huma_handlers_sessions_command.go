@@ -103,6 +103,12 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 		return nil, apierr.Internal.Msg(err.Error())
 	}
 	agentCfg := createCtx.Agent
+	// The controller's reconciler never starts a demand-only singleton's
+	// session on request, so refuse up front instead of returning 202 for a
+	// bead that would sit start-pending forever (#6858).
+	if msg := demandOnlySingletonCreateRefusal(cfg, agentCfg); msg != "" {
+		return nil, apierr.InvalidRequest.Msg(msg)
+	}
 	alias = createCtx.Alias
 	explicitName := createCtx.ExplicitName
 	workDirQualifiedName := createCtx.Identity

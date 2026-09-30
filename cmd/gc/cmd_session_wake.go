@@ -144,6 +144,12 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 		if rigName, suspended := sessionWakeOwningRigSuspended(agent, deps.cfg, deps.cityPath); suspended {
 			fmt.Fprintf(stderr, "gc session wake: rig %q is suspended -- wake dropped; run `gc rig resume %s`\n", rigName, rigName) //nolint:errcheck
 			rejectStuck = true
+		} else if demandOnlySingletonSessionInfo(res.Info, agent, deps.cfg) && !sessionRunningInfo(res.Info) {
+			// Same shape again: the wake is recorded (holds and quarantine are
+			// cleared), but the reconciler starts this session only from pool
+			// demand, so reporting "wake requested" would be false (#6858).
+			fmt.Fprintf(stderr, "gc session wake: wake recorded for session %s, but it will not start: %s\n", id, session.DemandOnlySingletonExplanation(agent.QualifiedName())) //nolint:errcheck
+			rejectStuck = true
 		}
 	}
 	if deps.cityResolved {

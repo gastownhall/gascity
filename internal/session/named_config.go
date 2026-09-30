@@ -76,6 +76,38 @@ func NamedSessionBackingTemplate(spec NamedSessionSpec) string {
 	return ""
 }
 
+// IsDemandOnlySingletonTemplate reports whether agentCfg is a canonical
+// singleton pool template (max_active_sessions = 1, no namepool) that no
+// configured [[named_session]] backs. The controller owns such a template's
+// only session: it starts it while the pool has work for it and drains it when
+// the pool has none. Nothing else can start it or keep it running: not an API
+// create, not pin_awake, not an explicit wake request (#6858). This is the
+// shape `gc config show --validate` warns about.
+func IsDemandOnlySingletonTemplate(cfg *config.City, agentCfg *config.Agent) bool {
+	if cfg == nil || agentCfg == nil || !agentCfg.UsesCanonicalSingletonPoolIdentity() {
+		return false
+	}
+	template := agentCfg.QualifiedName()
+	cityName := cfg.EffectiveCityName()
+	for i := range cfg.NamedSessions {
+		spec, ok := FindNamedSessionSpec(cfg, cityName, cfg.NamedSessions[i].QualifiedName())
+		if ok && NamedSessionBackingTemplate(spec) == template {
+			return false
+		}
+	}
+	return true
+}
+
+// DemandOnlySingletonExplanation says why a session of the demand-only
+// singleton template cannot be started or kept running on request, and what
+// to do instead. API and CLI refusals share it so they read the same.
+func DemandOnlySingletonExplanation(template string) string {
+	return fmt.Sprintf("agent %q is a pool agent with max_active_sessions = 1 and no [[named_session]]: "+
+		"the controller starts its one session only while there is work for it and drains it when there is none; "+
+		"sling work to %q to start it, or declare a [[named_session]] for it to keep a session running",
+		template, template)
+}
+
 // ResolveNamedSessionSpecForConfigTarget resolves a config-facing token to a named session spec when possible.
 func ResolveNamedSessionSpecForConfigTarget(cfg *config.City, cityName, target, rigContext string) (NamedSessionSpec, bool, error) {
 	target = NormalizeNamedSessionTarget(target)
