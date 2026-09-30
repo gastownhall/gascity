@@ -316,7 +316,8 @@ def _removed_worktree_repository(cwd: str) -> str | None:
 
 
 def _transcript_repositories(path: str, provider: str, session_id: str,
-                             remote_cache: dict[str, str | None]) -> set[tuple[str, str]]:
+                             remote_cache: dict[str, str | None], *,
+                             strict: bool = False) -> set[tuple[str, str]]:
     candidates: set[tuple[str, str]] = set()
     # Bound reads, ignore malformed/foreign rows, never execute transcript content.
     try:
@@ -363,6 +364,8 @@ def _transcript_repositories(path: str, provider: str, session_id: str,
                 if repo:
                     candidates.add((repo, provenance))
     except (OSError, UnicodeError):
+        if strict:
+            raise
         return set()
     return candidates
 

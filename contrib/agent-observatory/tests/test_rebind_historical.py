@@ -47,9 +47,35 @@ class RebindTests(unittest.TestCase):
     def test_conflicting_evidence_is_unknown(self, resolver):
         self.assertIsNone(rebind(self.conn)['changes'][0]['new'])
 
-    @patch('agent_observatory.rebind_historical._transcript_repositories', side_effect=OSError('failure'))
+    def test_unavailable_keeps_binding(self):
+        before = tuple(self.conn.execute("SELECT * FROM session_enrichment WHERE session_id='fallback'").fetchone())
+        for apply in (False, True, True):
+            result = rebind(self.conn, apply=apply)
+            self.assertEqual(result['changed'], 0)
+            self.assertEqual(result['skipped_unavailable'], 1)
+            self.assertEqual(tuple(self.conn.execute("SELECT * FROM session_enrichment WHERE session_id='fallback'").fetchone()), before)
+
+    def test_readable_no_match_clears(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl') as source:
+            source.write('{}\n')
+            source.flush()
+            self.conn.execute('UPDATE events SET source_path=?', (source.name,))
+            self.conn.commit()
+            result = rebind(self.conn, apply=True)
+        self.assertEqual(result['changed'], 1)
+        self.assertEqual(result['skipped_unavailable'], 0)
+
+    @patch('agent_observatory.rebind_historical._transcript_repositories',
+           return_value={('old/repo', 'transcript_cwd_prefix')})
+    def test_correct_binding_unchanged(self, resolver):
+        before = tuple(self.conn.execute("SELECT * FROM session_enrichment WHERE session_id='fallback'").fetchone())
+        self.assertEqual(rebind(self.conn, apply=True)['changed'], 0)
+        self.assertEqual(tuple(self.conn.execute("SELECT * FROM session_enrichment WHERE session_id='fallback'").fetchone()), before)
+
+    @patch('agent_observatory.rebind_historical._transcript_repositories', side_effect=RuntimeError('failure'))
     def test_failure_rolls_back(self, resolver):
-        with self.assertRaises(OSError):
+        with self.assertRaises(RuntimeError):
             rebind(self.conn, apply=True)
         self.assertFalse(self.conn.in_transaction)
         self.assertEqual(self.conn.execute("SELECT repo FROM session_enrichment WHERE session_id='fallback'").fetchone()[0], 'old/repo')

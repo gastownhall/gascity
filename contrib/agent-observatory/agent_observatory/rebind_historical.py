@@ -30,18 +30,27 @@ def rebind(conn: sqlite3.Connection, *, apply: bool = False) -> dict:
             'SELECT * FROM session_enrichment WHERE repo_source IN (?, ?) AND repo IS NOT NULL',
             SOURCES).fetchall()
         counts = Counter()
+        skipped_unavailable = 0
         changes = []
         cache = {}
         for row in rows:
             identity = tuple(row[k] for k in ('city_id', 'host_id', 'provider', 'session_id'))
             evidence = set()
             paths = []
+            unavailable = False
             for event in conn.execute(
                 'SELECT DISTINCT source_path FROM events WHERE city_id=? AND host_id=? '
                 'AND provider=? AND session_id=? AND source_path IS NOT NULL', identity):
                 path = checkpoints.get((Path(event[0]).stem, row['provider']), event[0])
                 paths.append(path)
-                evidence.update(_transcript_repositories(path, row['provider'], row['session_id'], cache))
+                try:
+                    evidence.update(_transcript_repositories(
+                        path, row['provider'], row['session_id'], cache, strict=True))
+                except (OSError, UnicodeError):
+                    unavailable = True
+            if unavailable or not paths:
+                skipped_unavailable += 1
+                continue
             repos = {repo for repo, _ in evidence}
             repo = next(iter(repos)) if len(repos) == 1 else None
             counts[(row['repo'], repo)] += 1
@@ -59,6 +68,7 @@ def rebind(conn: sqlite3.Connection, *, apply: bool = False) -> dict:
                     (repo, source, _binding_sha256(identity, row['template'], repo, source), *identity))
         conn.execute('COMMIT' if apply else 'ROLLBACK')
         return {'apply': apply, 'scanned': len(rows), 'changed': len(changes),
+                'skipped_unavailable': skipped_unavailable,
                 'table': [{'old': old, 'new': new, 'count': n}
                           for (old, new), n in counts.items()], 'changes': changes}
     except BaseException:
