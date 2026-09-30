@@ -227,8 +227,12 @@ type InventoryPass struct {
 	Epoch       string
 	Seq         uint64
 	ProviderGen uint64
-	StartedAt   time.Time
-	FinishedAt  time.Time
+	// StartedAt is when the listing started. Every fact the pass observes,
+	// and LastListedAt, is stamped with it: a runtime listed by this pass was
+	// running no later than this instant, which is what a fence comparing
+	// against a later PreWake needs.
+	StartedAt  time.Time
+	FinishedAt time.Time
 	// MergedNames and MergedErr are exactly what Provider.ListRunning("")
 	// returns for the same backend answers.
 	MergedNames []string
@@ -394,11 +398,15 @@ func NewObservationCache(clk clock.Clock, maxAge time.Duration, epoch string) *O
 // number of observations whose facts or owner changed. The lane is its only
 // caller, and the pass and attrs must not be mutated afterwards. Gen advances
 // when anything flipped or a backend's primed state changed.
+//
+// Facts are stamped with the pass's StartedAt; the snapshot's At is its
+// FinishedAt. A name whose backend failed this pass is left exactly as it
+// was: it is neither refreshed nor counted toward pruning, and ages out.
 func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string]InventoryAttrs) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	prev := c.cur.Load()
-	at := pass.FinishedAt
+	at := pass.StartedAt
 	swapped := pass.ProviderGen != prev.Inventory.ProviderGen
 
 	byName := make(map[string]RuntimeObservation, len(prev.ByName))
@@ -410,8 +418,11 @@ func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string
 	listedOn := make(map[string]string)
 	complete := make(map[string]bool)
 	unrefreshed := make(map[string]string)
+	failed := make(map[string]bool)
 	for _, b := range pass.Backends {
 		switch b.Outcome {
+		case OutcomeFailed:
+			failed[b.Label] = true
 		case OutcomeComplete:
 			complete[b.Label] = true
 		case OutcomePartial:
@@ -471,6 +482,9 @@ func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string
 			flips++
 		}
 		byName[name] = obs
+		if failed[obs.Backend] {
+			continue
+		}
 		c.unlisted[name]++
 		if c.unlisted[name] >= observationRetentionPasses {
 			delete(byName, name)
@@ -490,7 +504,7 @@ func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string
 		Gen:       prev.Gen,
 		GenAt:     prev.GenAt,
 		PassSeq:   pass.Seq,
-		At:        at,
+		At:        pass.FinishedAt,
 		Inventory: pass,
 		ByName:    byName,
 		Primed:    primed,

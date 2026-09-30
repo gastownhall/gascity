@@ -272,6 +272,44 @@ func TestObservationCache_AbsenceOnlyFromTheBackendThatListedIt(t *testing.T) {
 	}
 }
 
+// Kills: absence concluded by a backend that no longer holds the name. A
+// name that moved from acp to tmux belongs to tmux: a complete acp pass does
+// not conclude it absent while tmux is ServerAbsent.
+func TestObservationCache_NameMovedBetweenBackendsConcludedOnlyByItsNewBackend(t *testing.T) {
+	c, clk := newTestObservationCache()
+	c.PublishInventory(obsPass(clk, 1, 1, completeBackend("default"), completeBackend("acp", "gc-moved")), nil)
+	clk.Advance(15 * time.Second)
+	c.PublishInventory(obsPass(clk, 2, 1, completeBackend("default", "gc-moved"), completeBackend("acp")), nil)
+	if got := c.Snapshot().ByName["gc-moved"].Backend; got != "default" {
+		t.Fatalf("gc-moved backend = %q after tmux listed it, want default", got)
+	}
+
+	clk.Advance(15 * time.Second)
+	absent := BackendPass{
+		Label: "default", Outcome: OutcomePartial, Attested: true, ServerAbsent: true,
+		Err: &runtime.PartialListError{Err: errors.New("no tmux server"), ServerAbsent: true},
+	}
+	c.PublishInventory(obsPass(clk, 3, 1, absent, completeBackend("acp")), nil)
+	if got := c.Snapshot().ByName["gc-moved"].Listed; got.Value != ObsYes {
+		t.Fatalf("gc-moved Listed = %+v, want Yes kept: only a complete tmux pass may conclude it absent", got)
+	}
+}
+
+// Kills: pruning names whose backend failed. A failed listing observes
+// nothing, so its names are kept (and age out) however long it fails.
+func TestObservationCache_FailedBackendNamesAreNotPruned(t *testing.T) {
+	c, clk := newTestObservationCache()
+	c.PublishInventory(obsPass(clk, 1, 1, completeBackend("default"), completeBackend("acp", "gc-acp")), nil)
+	failedACP := BackendPass{Label: "acp", Outcome: OutcomeFailed, Attested: true, Err: errors.New("acp down")}
+	for seq := uint64(2); seq <= 2+observationRetentionPasses; seq++ {
+		clk.Advance(15 * time.Second)
+		c.PublishInventory(obsPass(clk, seq, 1, completeBackend("default"), failedACP), nil)
+	}
+	if _, ok := c.Snapshot().ByName["gc-acp"]; !ok {
+		t.Fatalf("gc-acp pruned after %d failed acp passes", observationRetentionPasses+1)
+	}
+}
+
 // Kills: a tmux corpse reported Running=Yes. Listed and Running are separate
 // facts, and a listed name with no enrichment has Running Unknown.
 func TestObservationCache_CorpseIsListedNotRunning(t *testing.T) {
