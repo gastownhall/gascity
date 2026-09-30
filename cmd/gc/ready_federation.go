@@ -22,7 +22,7 @@ package main
 //   - Within a leg: whatever order that leg's own Ready reader emits. That is
 //     canonical (priority, created_at, id) for a caching-wrapped work store and
 //     for the canonical relocated binding (beads.SQLiteStore) alike.
-//   - Dedupe: the FIRST leg to return an id wins. The graph leg runs last, so a
+//   - Dedupe: the FIRST leg to return an id wins. The graph leg is merged last, so a
 //     bead co-resident in the work store and the binding — the documented steady
 //     state of a migrated city, where `gc storage migrate` preserves ids and
 //     never deletes back — resolves to the work store's row on both surfaces.
@@ -292,28 +292,81 @@ func federateListBeads(legs []readyLeg, q beads.ListQuery) ([]beads.Bead, error)
 // carry a map it discards. The merge rule is the same one federateBeadLegs
 // applies — first leg to return an id wins — restated here rather than shared,
 // because sharing it would mean threading a per-leg callback through the read
-// closure that federateBeadLegs deliberately keeps store-shaped.
+// closure that federateBeadLegs deliberately keeps store-shaped. The leg reads
+// themselves DO share readLegsConcurrently, since that part carries no such
+// shape constraint.
 func federateListBeadsWithOwner(legs []readyLeg, q beads.ListQuery) ([]beads.Bead, map[string]readyLeg, error) {
+	results := readLegsConcurrently(legs, func(store beads.Store) ([]beads.Bead, error) {
+		return store.List(q)
+	})
+	if err := firstLegError(legs, results); err != nil {
+		return nil, nil, err
+	}
 	var merged []beads.Bead
 	owner := make(map[string]readyLeg)
-	for _, leg := range legs {
-		rows, err := leg.store.List(q)
-		if err != nil {
-			return nil, nil, fmt.Errorf("%s store: %w", leg.label, err)
-		}
-		for _, b := range rows {
+	for i, res := range results {
+		for _, b := range res.rows {
 			if _, seen := owner[b.ID]; seen {
 				continue
 			}
-			owner[b.ID] = leg
+			owner[b.ID] = legs[i]
 			merged = append(merged, b)
 		}
 	}
 	return merged, owner, nil
 }
 
-// federateBeadLegs runs read against every leg in order and merges the results,
-// deduped by id with the FIRST leg to return an id winning.
+// legReadResult is one leg's read outcome, collected at a position-indexed
+// slot so every merge stays ordered by LEG POSITION regardless of which
+// goroutine's read finishes first.
+type legReadResult struct {
+	rows []beads.Bead
+	err  error
+}
+
+// readLegsConcurrently runs read against every leg in PARALLEL, one goroutine
+// per leg, and returns each leg's outcome at that leg's own index.
+//
+// Each leg is typically its own subprocess spawn (bd), and a real split city
+// federates up to 9 legs (the city store plus up to 8 bound rigs), so a
+// sequential reader turns that per-leg cost into a SUM rather than the MAX any
+// one caller actually waits on. Legs are read concurrently rather than pooled
+// or bounded because the leg count is already small and bounded by the city's
+// own topology; see readyFederationLegs.
+//
+// Every leg in a leg list is backed by a DISTINCT store — readyFederationLegs
+// and relocatedGraphLegFrom's store-identity gate see to that — so no two
+// goroutines here ever call into the same store, and each writes only to its
+// own slot of results. The store implementations this reads through already
+// guard their own shared state (a subprocess store scopes each spawn with an
+// explicit exec.Cmd.Dir rather than a process-wide os.Chdir; a caching store's
+// coordinator carries its own locks), so nothing here needs a lock of its own.
+// A panic in a read is re-raised on the caller; see runConcurrently.
+func readLegsConcurrently(legs []readyLeg, read func(beads.Store) ([]beads.Bead, error)) []legReadResult {
+	results := make([]legReadResult, len(legs))
+	runConcurrently(len(legs), func(i int) {
+		rows, err := read(legs[i].store)
+		results[i] = legReadResult{rows: rows, err: err}
+	})
+	return results
+}
+
+// firstLegError returns the first-POSITION leg error among results, or nil.
+// "First position" rather than "first to fail" is deliberate: it is the leg
+// a sequential reader would have hit and stopped at, so the error a caller
+// sees names the same leg whether or not the legs were read concurrently.
+func firstLegError(legs []readyLeg, results []legReadResult) error {
+	for i, res := range results {
+		if res.err != nil {
+			return fmt.Errorf("%s store: %w", legs[i].label, res.err)
+		}
+	}
+	return nil
+}
+
+// federateBeadLegs runs read against every leg CONCURRENTLY and merges the
+// results, deduped by id with the FIRST LEG — by position in legs, not by
+// which goroutine finishes first — to return an id winning.
 //
 // Any leg error — including a partial read, which beads reports as an error
 // carrying rows — aborts the whole federation, ESCALATING the plan's
@@ -321,14 +374,14 @@ func federateListBeadsWithOwner(legs []readyLeg, q beads.ListQuery) ([]beads.Bea
 // nowhere to say "this is short", so a degraded leg here would be served as a
 // short array indistinguishable from "no work".
 func federateBeadLegs(legs []readyLeg, read func(beads.Store) ([]beads.Bead, error)) ([]beads.Bead, error) {
+	results := readLegsConcurrently(legs, read)
+	if err := firstLegError(legs, results); err != nil {
+		return nil, err
+	}
 	var merged []beads.Bead
 	seen := make(map[string]bool)
-	for _, leg := range legs {
-		rows, err := read(leg.store)
-		if err != nil {
-			return nil, fmt.Errorf("%s store: %w", leg.label, err)
-		}
-		for _, b := range rows {
+	for _, res := range results {
+		for _, b := range res.rows {
 			if seen[b.ID] {
 				continue
 			}

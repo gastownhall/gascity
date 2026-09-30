@@ -1,11 +1,10 @@
 package main
 
-// Tests for the concurrency fix to federateBeadLegs and
-// federateListBeadsWithOwner (ga-ntr7gn). Before this fix both ran a plain
-// sequential for loop over the legs, turning a per-leg subprocess-spawn cost
-// (bd, ~750-800ms baseline) into a SUM rather than a MAX across up to 9 legs
-// on a real split city — measured 14266-15716ms wall-clock for `gc ready`
-// there. See ready_federation.go's federateBeadLegs doc comment.
+// Tests for the concurrent leg reads in federateBeadLegs and
+// federateListBeadsWithOwner (ga-ntr7gn). Each leg is typically its own
+// subprocess spawn, so reading legs one after another costs the SUM of the
+// per-leg latencies where a caller only ever waits on the MAX. See
+// ready_federation.go's readLegsConcurrently.
 //
 // cmd_ready_test.go already pins the sequential contracts these tests
 // extend to the concurrent case: TestReadyDedupeIsFirstLegWins (first LEG
@@ -126,6 +125,42 @@ func TestFederateBeadLegsReportsTheFirstFailingLegByPosition(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "city store") || !strings.Contains(err.Error(), "city is locked") {
 		t.Fatalf("error = %v, want the FIRST-position leg (city) named", err)
+	}
+}
+
+// readyPanickingStore panics on every ready read, standing in for a leg whose
+// store hits a latent bug.
+type readyPanickingStore struct {
+	beads.Store
+}
+
+func (readyPanickingStore) Ready(...beads.ReadyQuery) ([]beads.Bead, error) {
+	panic("leg exploded")
+}
+
+// TestFederateBeadLegsPropagatesALegPanicToTheCaller pins that a panic inside
+// a leg's read reaches the CALLER's goroutine, as it did from the sequential
+// loop. Reading legs on worker goroutines must not turn a recoverable panic
+// into a process crash.
+func TestFederateBeadLegsPropagatesALegPanicToTheCaller(t *testing.T) {
+	legs := []readyLeg{
+		readyTestLeg("city", splittest.NewWorkStore(t, "gc")),
+		readyTestLeg("graph", readyPanickingStore{Store: splittest.NewWorkStore(t, "gr")}),
+	}
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		_, _ = federateBeadLegs(legs, func(store beads.Store) ([]beads.Bead, error) {
+			return store.Ready()
+		})
+	}()
+
+	if recovered == nil {
+		t.Fatal("a leg panic was swallowed; it must reach the caller as it did from the sequential loop")
+	}
+	if !strings.Contains(fmt.Sprint(recovered), "leg exploded") {
+		t.Fatalf("recovered %v, want the leg's own panic text preserved", recovered)
 	}
 }
 

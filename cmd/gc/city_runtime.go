@@ -4676,13 +4676,21 @@ type rigStoreOpenFailure struct {
 // operator-visible log to say so. `gc ready` (readyRigLegStores) fails the whole
 // query: its entire output is a JSON array with nowhere to say it is short.
 //
-// open is how each rig store is opened; see rigStoreOpener.
+// open is how each rig store is opened; see rigStoreOpener. The opens run
+// concurrently, one goroutine per bound rig, so open must be safe to call from
+// several goroutines at once. Each open runs the store factory's preflight (a
+// `bd context --json` subprocess plus a database identity probe), so opening
+// the rigs one after another turns that per-rig latency into a SUM across
+// every bound rig where a caller only ever waits on the slowest one. Results
+// land in position-indexed slots and are merged in cfg order, so the output
+// does not depend on which open finishes first. A panic in an open is
+// re-raised on the caller, as it was from the sequential loop, so the
+// controller's tick recovery still sees it; see runConcurrently.
 func openStandaloneRigStores(cfg *config.City, cityPath string, open rigStoreOpener) (map[string]beads.Store, []rigStoreOpenFailure) {
 	if cfg == nil || len(cfg.Rigs) == 0 {
 		return nil, nil
 	}
-	stores := make(map[string]beads.Store, len(cfg.Rigs))
-	var failures []rigStoreOpenFailure
+	bound := make([]config.Rig, 0, len(cfg.Rigs))
 	for _, rig := range cfg.Rigs {
 		// Unbound rigs (declared in city.toml but missing a
 		// .gc/site.toml binding) have an empty rig.Path;
@@ -4692,12 +4700,22 @@ func openStandaloneRigStores(cfg *config.City, cityPath string, open rigStoreOpe
 		if strings.TrimSpace(rig.Path) == "" {
 			continue
 		}
-		store, err := open(rig.Path, cityPath)
-		if err != nil {
-			failures = append(failures, rigStoreOpenFailure{rig: rig.Name, err: err})
+		bound = append(bound, rig)
+	}
+	opened := make([]beads.Store, len(bound))
+	openErrs := make([]error, len(bound))
+	runConcurrently(len(bound), func(i int) {
+		opened[i], openErrs[i] = open(bound[i].Path, cityPath)
+	})
+
+	stores := make(map[string]beads.Store, len(bound))
+	var failures []rigStoreOpenFailure
+	for i, rig := range bound {
+		if openErrs[i] != nil {
+			failures = append(failures, rigStoreOpenFailure{rig: rig.Name, err: openErrs[i]})
 			continue
 		}
-		stores[rig.Name] = store
+		stores[rig.Name] = opened[i]
 	}
 	if len(stores) == 0 {
 		return nil, failures

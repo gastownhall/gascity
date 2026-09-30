@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -695,10 +696,9 @@ func TestRigStoreOpenPolicyDiffersByCaller(t *testing.T) {
 
 // TestOpenStandaloneRigStoresOpensRigsConcurrently pins that opening N bound
 // rig stores costs about as much as the SLOWEST open, not the sum of every
-// open. Each open's real cost is the store factory's preflight (a `bd context
-// --json` subprocess plus a Dolt ping), paid even when the verdict is a
-// foregone "ineligible, fall back to BdStore", so a sequential walk turns it
-// into a sum across every bound rig on `gc ready`'s critical path.
+// open. Each open runs the store factory's preflight (a `bd context --json`
+// subprocess plus a database identity probe), so a sequential walk turns that
+// latency into a sum across every bound rig on `gc ready`'s critical path.
 func TestOpenStandaloneRigStoresOpensRigsConcurrently(t *testing.T) {
 	const perRig = 100 * time.Millisecond
 	const rigCount = 5
@@ -764,6 +764,36 @@ func TestOpenStandaloneRigStoresReportsFailuresInRigOrder(t *testing.T) {
 	}
 	if len(stores) != 1 || stores["good"] == nil {
 		t.Fatalf("stores = %v, want exactly the one rig that opened", stores)
+	}
+}
+
+// TestOpenStandaloneRigStoresPropagatesAnOpenerPanicToTheCaller pins that a
+// panic inside an open reaches the CALLER's goroutine, where the controller's
+// tick recovery (CityRuntime.safeTick) catches it. Opening on worker goroutines
+// must not turn a recoverable tick panic into a process crash.
+func TestOpenStandaloneRigStoresPropagatesAnOpenerPanicToTheCaller(t *testing.T) {
+	cfg := &config.City{Rigs: []config.Rig{
+		{Name: "fine", Path: "/fake/fine"},
+		{Name: "explodes", Path: "/fake/explodes"},
+	}}
+	fine := splittest.NewWorkStore(t, "fine")
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		openStandaloneRigStores(cfg, "/fake/city", func(rigPath, _ string) (beads.Store, error) {
+			if rigPath == "/fake/explodes" {
+				panic("opener exploded")
+			}
+			return fine, nil
+		})
+	}()
+
+	if recovered == nil {
+		t.Fatal("an opener panic was swallowed; it must reach the caller as it did from the sequential loop")
+	}
+	if !strings.Contains(fmt.Sprint(recovered), "opener exploded") {
+		t.Fatalf("recovered %v, want the opener's own panic text preserved", recovered)
 	}
 }
 
