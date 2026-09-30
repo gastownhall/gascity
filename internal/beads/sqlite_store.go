@@ -216,8 +216,8 @@ type SQLiteStore struct {
 	seq                        int64      // last id value issued or skipped, in allocation order
 	sequenceLimit              int64      // last value of this process's reserved block
 	sequenceReserved           bool       // sequenceLimit holds a block this process reserved
-	sequenceWrapped            bool       // an older build wrapped this store; minting refuses
-	sequenceWrappedAt          int64      // highest wrapped (negative) auto id seen
+	sequenceWrapped            bool       // a negative auto id ranks above the floor; minting refuses
+	sequenceWrappedAt          int64      // highest-ranked negative auto id seen above the floor
 	recoveredHighWater         sqliteSequenceHighWater
 	sequenceFloorBeforePersist func() // test-only seam for the serialized floor critical section.
 	closeMu                    sync.Mutex
@@ -723,7 +723,10 @@ func (s *SQLiteStore) normalizeCreate(b Bead) (Bead, error) {
 	} else if n, ok := parseSQLiteAutoIDSuffix(s.prefix, b.ID); ok && n > 0 {
 		// A caller-pinned id in this store's own auto format consumes its
 		// value. Only positive values: a pinned wrapped id must not drag the
-		// allocator into the negative range — the wrapped check handles it.
+		// allocator into the negative range. The wrapped check sees it at the
+		// next row scan (open, or a collision reseed) instead, and minting
+		// refuses until the row is deleted and the store reopened, or the
+		// floor covers it.
 		s.ensureSequenceAtLeast(n)
 	}
 	if b.Status == "" {

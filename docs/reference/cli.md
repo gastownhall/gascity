@@ -4783,7 +4783,16 @@ Inspect or raise the persisted id-sequence floor of a SQLite bead store.
 
 Without --floor this is read-only: it reports the persisted floor and the
 highest auto-minted id the store still holds, and whether minting is refused
-because an older build wrapped the sequence past 9223372036854775807.
+because a negative "&lt;prefix&gt;--&lt;n&gt;" id ranks above the floor.
+
+A negative id above the floor usually means an older build wrapped the
+sequence past 9223372036854775807. It can also come from a copy or import that
+pinned "&lt;prefix&gt;--&lt;n&gt;" ids into a store that never wrapped. If those rows are
+stray duplicates, do not raise the floor: delete every "&lt;prefix&gt;--&lt;n&gt;" row
+above the floor, not only the one the report names, and reopen the store
+(restart the processes serving it), and minting resumes in the positive range.
+Deleting destroys those beads, so if any of them is a real bead, raise the
+floor instead.
 
 With --floor=N it persists N as the floor, so the next auto id is N+1. Pick N
 at or above the highest id EVER issued under the prefix — deleted beads are no
@@ -4794,12 +4803,16 @@ auto id present.
 Ids are ordered 1 &lt; ... &lt; 9223372036854775807 &lt; -9223372036854775808 &lt; ... &lt; -1.
 On a store an older build wrapped, the positive range is spent: pass a NEGATIVE
 floor above every "&lt;prefix&gt;--&lt;n&gt;" id ever issued, and allocation continues
-upward toward -1 without re-entering the positive range. Builds without this
-fix refuse to open a store whose floor is negative.
+upward toward -1 without re-entering the positive range. That cannot be
+undone. Builds without this fix refuse to open a store whose floor is negative.
 
-Stop every process serving the store first when repairing a wrapped store. The
-store defaults to this city's SQLite infrastructure binding; --dir names any
-other store directory (the directory holding beads.sqlite).
+Before repairing a wrapped store, stop every process serving it that runs a
+build without this fix, so none keeps minting wrapped ids past the floor you
+pick. After a floor raise, processes on this build need no restart: one that
+refuses to mint resumes at its next mint once the floor covers the store.
+
+The store defaults to this city's SQLite infrastructure binding; --dir names
+any other store directory (the directory holding beads.sqlite).
 
 ```
 gc storage repair-sequence [flags]

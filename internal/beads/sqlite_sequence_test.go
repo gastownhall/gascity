@@ -673,3 +673,97 @@ func TestSQLitePinnedIDsMoveSequenceOnlyInStrictFormat(t *testing.T) {
 		t.Fatalf("mint after pinned gcg--5000 = %q, want gcg-43", got)
 	}
 }
+
+// TestSQLitePinnedNegativeIDRefusesAtReopenUntilDeleted follows negative ids
+// pinned into a store that never wrapped past the store's next open. The open
+// cannot tell the pins from a wrap, so minting refuses; the refusal must not
+// blame an older build, and must name deleting the rows next to raising the
+// floor, because raising it gives up the rest of the positive range for good.
+// The refusal names only the highest pinned row and deleting just that one
+// leaves the store refusing on the next, so the remedy says to delete them
+// all. Deleting every pinned row and reopening clears the refusal with the
+// floor untouched.
+func TestSQLitePinnedNegativeIDRefusesAtReopenUntilDeleted(t *testing.T) {
+	dir := t.TempDir()
+	store := openSeqStore(t, dir)
+	if got := mustMint(t, store); got != "gcg-1" {
+		t.Fatalf("first mint = %q, want gcg-1", got)
+	}
+	for _, id := range []string{"gcg--5000", "gcg--7000"} {
+		if _, err := store.Create(Bead{ID: id, Title: "copied pin"}); err != nil {
+			t.Fatalf("Create(%s): %v", id, err)
+		}
+	}
+	if got := mustMint(t, store); got != "gcg-2" {
+		t.Fatalf("mint in the pinning process = %q, want gcg-2", got)
+	}
+	if err := store.CloseStore(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := openSeqStore(t, dir)
+	_, err := reopened.Create(Bead{Title: "refused"})
+	if !errors.Is(err, ErrSQLiteSequenceWrapped) {
+		t.Fatalf("Create after reopen err = %v, want ErrSQLiteSequenceWrapped", err)
+	}
+	for _, want := range []string{
+		"gcg--5000", "pinned", "stray duplicates",
+		"delete every one above the floor, not only this one, and reopen the store",
+		"real beads", sqliteSequenceRepairCommand, "irreversible",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not contain %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "wrapped by an older build") {
+		t.Errorf("refusal %q asserts an older build wrapped a store that never wrapped", err)
+	}
+	if err := reopened.Delete("gcg--5000"); err != nil {
+		t.Fatalf("Delete(gcg--5000): %v", err)
+	}
+	if err := reopened.CloseStore(); err != nil {
+		t.Fatal(err)
+	}
+
+	partly := openSeqStore(t, dir)
+	if _, err := partly.Create(Bead{Title: "still refused"}); !errors.Is(err, ErrSQLiteSequenceWrapped) || !strings.Contains(err.Error(), "gcg--7000") {
+		t.Fatalf("Create with gcg--7000 still pinned err = %v, want ErrSQLiteSequenceWrapped naming gcg--7000", err)
+	}
+	if err := partly.Delete("gcg--7000"); err != nil {
+		t.Fatalf("Delete(gcg--7000): %v", err)
+	}
+	if err := partly.CloseStore(); err != nil {
+		t.Fatal(err)
+	}
+
+	healed := openSeqStore(t, dir)
+	if got, want := mustMint(t, healed), "gcg-"+strconv.FormatInt(sqliteSequenceBlockSize+1, 10); got != want {
+		t.Fatalf("mint after deleting every pinned row = %q, want %q (next block, positive range kept)", got, want)
+	}
+}
+
+// TestSQLiteExhaustedStoreResumesAfterRepairWithoutRestart: a process whose
+// allocator reached the end of the positive range picks an operator-raised
+// floor up at its next mint, exactly as a process refusing a wrapped store
+// does, so the exhaustion error's advice works without a restart.
+func TestSQLiteExhaustedStoreResumesAfterRepairWithoutRestart(t *testing.T) {
+	dir := t.TempDir()
+	store := openSeqStore(t, dir)
+	if err := store.SetSequenceFloor(math.MaxInt64 - 1); err != nil {
+		t.Fatalf("SetSequenceFloor: %v", err)
+	}
+	if got := mustMint(t, store); got != "gcg-9223372036854775807" {
+		t.Fatalf("last mint = %q, want gcg-9223372036854775807", got)
+	}
+	if _, err := store.Create(Bead{Title: "one too many"}); !errors.Is(err, ErrSQLiteSequenceExhausted) {
+		t.Fatalf("Create past MaxInt64 err = %v, want ErrSQLiteSequenceExhausted", err)
+	}
+
+	const floor = int64(-9223372036854000000)
+	if _, err := RaiseSQLiteSequenceFloor(dir, "gcg", floor); err != nil {
+		t.Fatalf("RaiseSQLiteSequenceFloor: %v", err)
+	}
+	if got, want := mustMint(t, store), "gcg-"+strconv.FormatInt(floor+1, 10); got != want {
+		t.Fatalf("mint after repairing the exhausted store = %q, want %q", got, want)
+	}
+}

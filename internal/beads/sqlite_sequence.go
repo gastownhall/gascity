@@ -38,11 +38,15 @@ package beads
 // positive range, and nothing ever steps from MaxInt64 into the negative range.
 //
 // Wrapped stores fail closed. A strict negative row whose rank exceeds the
-// persisted floor proves an older build wrapped this store, and the ids it
-// issued above that row and later deleted are recorded nowhere in the store.
-// Minting refuses (ErrSQLiteSequenceWrapped) until an operator sets a floor at
-// or above every negative id ever issued. Reads and caller-pinned creates are
-// unaffected.
+// persisted floor means one of two things the store cannot tell apart: an
+// older build wrapped this store, and the ids it issued above that row and
+// later deleted are recorded nowhere in the store; or a copy or import pinned
+// "<prefix>--<n>" ids into a store that never wrapped. Minting refuses
+// (ErrSQLiteSequenceWrapped) until an operator either deletes every such row
+// above the floor (only stray duplicates: deleting destroys the beads) and
+// reopens the store, or sets a floor at or above every negative id ever
+// issued — irreversible, since allocation never returns from the negative
+// range to the positive one. Reads and caller-pinned creates are unaffected.
 
 import (
 	"context"
@@ -70,15 +74,21 @@ var (
 	// its range (MaxInt64, or -1 in the negative range) and refused to wrap.
 	ErrSQLiteSequenceExhausted = errors.New("sqlite bead id sequence exhausted")
 
-	// ErrSQLiteSequenceWrapped reports a store holding auto ids that an older
-	// build minted after wrapping past MaxInt64, with no persisted floor
-	// covering them. Minting could re-issue a deleted id, so it refuses.
-	ErrSQLiteSequenceWrapped = errors.New("sqlite bead id sequence wrapped by an older build")
+	// ErrSQLiteSequenceWrapped reports a store holding a negative auto id
+	// ("<prefix>--<n>") that its persisted floor does not cover. An older build
+	// that wrapped past MaxInt64 mints such ids, and may have issued and deleted
+	// others above them, so minting could re-issue a deleted id and refuses. A
+	// copy or import that pinned such an id into a store that never wrapped
+	// produces the same state.
+	ErrSQLiteSequenceWrapped = errors.New("sqlite bead id sequence holds a negative auto id above its floor")
 )
 
 // sqliteSequenceFloorFilenameFor returns the per-prefix floor sidecar name. The
 // graph prefix keeps its historical graph.seqfloor name (migration pins that
-// path as a physical fact); every other prefix gets "<prefix>.seqfloor".
+// path as a physical fact); every other prefix gets "<prefix>.seqfloor". The
+// storebinding inspection and snapshot code read and copy only graph.seqfloor
+// as a floor: before any production binding mints under another prefix, teach
+// them that prefix's sidecar, or snapshots and migration will drop its floor.
 func sqliteSequenceFloorFilenameFor(prefix string) string {
 	if prefix == sqliteGraphPrefix {
 		return sqliteGraphSequenceFloorFilename
@@ -248,12 +258,20 @@ func (s *SQLiteStore) sequenceWrappedErrorLocked() error {
 		s.seq = sequenceMax(s.seq, floor)
 		return nil
 	}
-	return fmt.Errorf("%w: auto id %s-%d exceeds the persisted floor %d; ids above it may have been issued and deleted, so set a floor at or above the highest %s id ever issued with %q",
-		ErrSQLiteSequenceWrapped, s.prefix, s.sequenceWrappedAt, floor, s.prefix, sqliteSequenceRepairCommand)
+	return fmt.Errorf("%w: auto id %s-%d ranks above the persisted floor %d; "+
+		"if a copy or import pinned %s--<n> ids into a store that never wrapped and those rows are stray duplicates, "+
+		"delete every one above the floor, not only this one, and reopen the store; "+
+		"otherwise (they are real beads, or an older build wrapped this store and may have issued and deleted ids above them) "+
+		"set a floor at or above the highest %s id ever issued with %q "+
+		"(irreversible: allocation never returns to the positive range)",
+		ErrSQLiteSequenceWrapped, s.prefix, s.sequenceWrappedAt, floor, s.prefix, s.prefix, sqliteSequenceRepairCommand)
 }
 
 // nextID returns the next auto id, reserving a durable block first whenever the
-// next value is not already covered by this process's reservation.
+// next value is not already covered by this process's reservation. At the end
+// of its range the allocator still attempts the reservation: it succeeds only
+// once an operator has raised the persisted floor past that end, and otherwise
+// reports the exhaustion, so a repair needs no restart.
 func (s *SQLiteStore) nextID() (string, error) {
 	s.sequenceFloorMu.Lock()
 	defer s.sequenceFloorMu.Unlock()
@@ -264,10 +282,7 @@ func (s *SQLiteStore) nextID() (string, error) {
 		return "", err
 	}
 	next, err := sequenceNext(s.seq)
-	if err != nil {
-		return "", err
-	}
-	if !s.sequenceReserved || sequenceRankAbove(next, s.sequenceLimit) {
+	if err != nil || !s.sequenceReserved || sequenceRankAbove(next, s.sequenceLimit) {
 		base, limit, err := reserveSQLiteSequenceBlock(s.sequenceFloorPath, s.seq, sqliteSequenceBlockSize)
 		if err != nil {
 			return "", fmt.Errorf("reserving sqlite bead ids: %w", err)
@@ -370,8 +385,9 @@ func InspectSQLiteSequence(dir, prefix string) (SQLiteSequenceState, error) {
 // highest strict auto id the store still holds; both comparisons use
 // allocation order, in which every negative value is above every positive one.
 // Raising to the current floor is a no-op. Processes already running pick the
-// new floor up at their next block reservation, and a process refusing to mint
-// because the store is wrapped resumes as soon as the floor covers it.
+// new floor up at their next block reservation; a process whose allocator
+// reached the end of its range, or that refuses to mint because the store is
+// wrapped, resumes at its next mint once the floor covers it.
 func RaiseSQLiteSequenceFloor(dir, prefix string, floor int64) (before SQLiteSequenceState, returnErr error) {
 	before, err := InspectSQLiteSequence(dir, prefix)
 	if err != nil {

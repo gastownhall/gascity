@@ -47,11 +47,42 @@ func TestStorageRepairSequenceReportsWrappedStore(t *testing.T) {
 	for _, want := range []string{
 		"highest positive: 9223372036854775807",
 		"highest wrapped:  -9223372036854775808",
-		"status:           WRAPPED",
+		"status:           WRAPPED - minting refused: gcg--9223372036854775808 ranks above the persisted floor",
+		"remedy:           if a copy or import pinned gcg--<n> rows into a store that never wrapped and they are stray duplicates, ",
+		"delete every gcg--<n> row above the persisted floor, not only gcg--9223372036854775808, and reopen the store; ",
+		"otherwise (they are real beads, or an older build wrapped this store) raise --floor to at or above every gcg--<n> id ever issued (irreversible)",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("report missing %q:\n%s", want, stdout)
 		}
+	}
+}
+
+// TestStorageRepairSequenceHelpNamesBothWrappedRemedies pins the operator
+// guidance a refusing store points at: stray negative ids pinned into a store
+// that never wrapped are all deleted rather than covered by an irreversible
+// floor raise, real beads are never deleted to avoid that raise, and the help
+// says why the fleet is stopped for a real repair.
+func TestStorageRepairSequenceHelpNamesBothWrappedRemedies(t *testing.T) {
+	stdout, stderr, err := runRepairSequence(t, "--help")
+	if err != nil {
+		t.Fatalf("--help: %v\nstderr: %s", err, stderr)
+	}
+	help := strings.Join(strings.Fields(stdout), " ")
+	for _, want := range []string{
+		`pinned "<prefix>--<n>" ids into a store that never wrapped. If those rows are stray duplicates, do not raise the floor: ` +
+			`delete every "<prefix>--<n>" row above the floor, not only the one the report names, and reopen the store`,
+		"Deleting destroys those beads, so if any of them is a real bead, raise the floor instead.",
+		"That cannot be undone.",
+		"stop every process serving it that runs a build without this fix, so none keeps minting wrapped ids past the floor you pick",
+		"one that refuses to mint resumes at its next mint once the floor covers the store",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help missing %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(help, "because an older build wrapped the sequence") {
+		t.Errorf("help still attributes every refusal to an older build:\n%s", stdout)
 	}
 }
 

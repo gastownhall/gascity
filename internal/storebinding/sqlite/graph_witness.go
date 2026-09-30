@@ -100,6 +100,12 @@ const graphWitnessExternalScheme = "external:"
 // GraphAllocatorFloors carries the two semantic allocator values of the Graph
 // class. They are hashed as logical numbers; the graph.seqfloor file's bytes
 // and identity are envelope facts and are deliberately not in the stream.
+//
+// Both must be nonnegative. A store repaired with beads.RaiseSQLiteSequenceFloor
+// persists a negative floor, which ranks above every positive one; this witness
+// and ApplyGenesisSequenceFloor both refuse a negative value rather than rank
+// it, so a repaired store is out of scope for the witness and for Graph
+// migration.
 type GraphAllocatorFloors struct {
 	// CrossClassMaximum is the global maximum plain gcg-N suffix found by the
 	// genesis census across every class, not only the Graph file.
