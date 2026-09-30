@@ -1055,6 +1055,7 @@ def _backfill_missing_usage_locked(
         )
         matched_usage: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
         identity_matches: set[tuple[str, str, str, str, str]] = set()
+        usage_candidates: set[tuple[str, str, str, str, str]] = set()
         stable_field_rejections: set[tuple[str, str, str, str, str]] = set()
         parse_failed = False
         for city_id, host_id in contexts:
@@ -1072,8 +1073,6 @@ def _backfill_missing_usage_locked(
                     parse_failed = True
                     break
                 for raw_record in result.records:
-                    if raw_record.get("usage") is None:
-                        continue
                     for record in validated_records([raw_record], source_path, result):
                         identity = (
                             record["city_id"],
@@ -1086,6 +1085,9 @@ def _backfill_missing_usage_locked(
                         if target is None:
                             continue
                         identity_matches.add(identity)
+                        if record.get("usage") is None:
+                            continue
+                        usage_candidates.add(identity)
                         if identity in matched_usage:
                             continue
                         if _usage_backfill_matches(target, record):
@@ -1099,10 +1101,15 @@ def _backfill_missing_usage_locked(
             run.events_unmatched += len(source_events)
             continue
 
+        # Kind alone cannot identify usage carriers: Claude attaches usage to
+        # the first text/tool block. Exclude only records proven usage-less by
+        # parsing; unread or unrecognized targets remain unresolved candidates.
+        no_usage = identity_matches - usage_candidates
+        run.candidate_events -= len(no_usage)
         run.events_identity_matched += len(identity_matches)
         run.events_matched += len(matched_usage)
         run.events_stable_field_rejected += len(stable_field_rejections - matched_usage.keys())
-        run.events_unmatched += len(target_by_identity) - len(matched_usage)
+        run.events_unmatched += len(target_by_identity) - len(no_usage) - len(matched_usage)
         if not matched_usage:
             continue
         store.conn.execute("BEGIN IMMEDIATE")
