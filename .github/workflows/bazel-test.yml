@@ -196,6 +196,29 @@ jobs:
         if: always()
         run: python3 tools/bazel/critpath.py /tmp/bazel-profile.json --tier T2 --budget 150 || true
 
+      # Coverage reporting only matters on the main branch — mirrors the go-test
+      # arm's policy (preflight-unit-cover-*). The lcov combined report uploads
+      # under its own flag so Codecov keeps bazel and go-test signals separable;
+      # instrumented builds are a separate bazel configuration, so the first run
+      # on a cold cache compiles the world under coverage (~15-20 min remote).
+      - name: "bazel coverage //... (lcov)"
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          ARGS=(--output_user_root="$RUNNER_TEMP"/bazel-outputs)
+          if [ -f .bazelrc.local ]; then RCEXEC=(--config=remote-exec); else RCEXEC=(); fi
+          bazel "${ARGS[@]}" coverage //... \
+            "${RCEXEC[@]}" --combined_report=lcov \
+            --test_output=errors --keep_going --test_timeout=600
+
+      - name: Upload coverage to Codecov
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('bazel-out/_coverage/_coverage_report.dat') != ''
+        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
+        with:
+          files: bazel-out/_coverage/_coverage_report.dat
+          flags: bazel-unit
+          token: ${{ secrets.CODECOV_TOKEN }}
+          verbose: true
+
       - name: Upload test logs
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
