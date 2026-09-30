@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "cipolicy",
-    srcs = ["policy.go"],
+    srcs = [
+        "critical_path.go",
+        "policy.go",
+    ],
     importpath = "github.com/gastownhall/gascity/scripts/cipolicy",
     visibility = ["//visibility:public"],
     deps = ["@in_gopkg_yaml_v3//:yaml_v3"],
@@ -11,6 +14,7 @@ go_library(
 go_test(
     name = "cipolicy_test",
     srcs = [
+        "critical_path_test.go",
         "policy_test.go",
         "testenv_import_test.go",
     ],
