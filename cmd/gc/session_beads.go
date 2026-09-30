@@ -47,10 +47,11 @@ const (
 	// durable, in RFC3339 UTC. The reconciler's release loop measures the
 	// no-successor timeout from this timestamp.
 	handoffStageCommittedAtKey = "handoff_stage_committed_at"
-	// handoffReleaseAttemptedAtKey records when the reconciler last gave up
-	// waiting for a successor and released the staged message on timeout, so
-	// a repeat reconcile pass does not re-fire session.handoff_failed for the
-	// same staged handoff.
+	// handoffReleaseAttemptedAtKey records when the reconciler wrote a staged
+	// handoff off because no successor started within the timeout, so a repeat
+	// reconcile pass does not re-fire session.handoff_failed for it. A brief
+	// written off this way stays staged and is never released; staging a new
+	// brief clears the key and starts a fresh release lifecycle.
 	handoffReleaseAttemptedAtKey = "handoff_release_attempted_at"
 )
 

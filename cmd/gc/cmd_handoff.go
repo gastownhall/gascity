@@ -547,7 +547,7 @@ func sessionRestartableByController(sessStore beads.Store, sessionName string) (
 
 // outstandingStagedHandoff returns the id of the staged self-handoff the session
 // still points at and nothing has resolved, or "" when there is none. A new
-// staging supersedes the brief returned here, so a session never holds two.
+// staging supersedes the brief returned here, leaving the session with one.
 //
 // A brief that was already released, archived, or whose message no longer
 // exists is resolved, not outstanding, and is left alone.
