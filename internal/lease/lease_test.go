@@ -659,3 +659,24 @@ func TestCanonicalLeavesZeroExpiryAlone(t *testing.T) {
 		}
 	}
 }
+
+func TestCanonicalNormalizesZeroExpiryRepresentation(t *testing.T) {
+	h := mustHolder(t, "worker-a", "seat-1", "inst-01")
+	expires := time.Date(1, 1, 1, 1, 0, 0, 0, time.FixedZone("plus1", 3600))
+	rec := Record{Epoch: 1, Holder: h, ExpiresAt: expires, State: StateParked}
+
+	if !rec.ExpiresAt.IsZero() || rec.ExpiresAt.Equal((time.Time{})) {
+		t.Fatalf("test expiry = %#v, want a noncanonical representation of the zero instant", rec.ExpiresAt)
+	}
+	wire, err := Encode(rec)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	decoded, err := Decode(wire)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got := rec.Canonical(); got != decoded {
+		t.Fatalf("Canonical() = %+v, want decoded record %+v", got, decoded)
+	}
+}

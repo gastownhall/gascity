@@ -102,7 +102,9 @@ type Record struct {
 // Canonical returns the record with its expiry in the form Decode produces:
 // UTC with any monotonic reading stripped. A zero expiry is left alone.
 func (r Record) Canonical() Record {
-	if !r.ExpiresAt.IsZero() {
+	if r.ExpiresAt.IsZero() {
+		r.ExpiresAt = time.Time{}
+	} else {
 		r.ExpiresAt = r.ExpiresAt.UTC().Round(0)
 	}
 	return r
