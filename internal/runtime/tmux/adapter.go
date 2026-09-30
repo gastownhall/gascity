@@ -610,18 +610,22 @@ func (p *Provider) SetMeta(name, key, value string) error {
 }
 
 // GetMeta retrieves a value from the named session's tmux environment.
-// Returns ("", nil) if the key is not set. Propagates session-not-found
-// and no-server errors so callers can distinguish "key absent" from
-// "session gone."
+// Returns ("", nil) only when the session answered that the key is not set.
+// A missing session wraps [runtime.ErrSessionNotFound]; any other failure
+// (no server, timeout, unparsable answer) wraps [runtime.ErrRuntimeUnavailable],
+// so a failed read is never mistaken for "unset".
 func (p *Provider) GetMeta(name, key string) (string, error) {
 	val, err := p.tm.GetEnvironment(name, key)
-	if err != nil {
-		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
-			return "", err
-		}
-		return "", nil // key not set
+	switch {
+	case err == nil:
+		return val, nil
+	case errors.Is(err, errEnvUnset):
+		return "", nil
+	case errors.Is(err, ErrSessionNotFound):
+		return "", fmt.Errorf("reading %s from session %q: %w: %w", key, name, runtime.ErrSessionNotFound, err)
+	default:
+		return "", fmt.Errorf("reading %s from session %q: %w: %w", key, name, runtime.ErrRuntimeUnavailable, err)
 	}
-	return val, nil
 }
 
 // RemoveMeta removes a key from the named session's tmux environment.

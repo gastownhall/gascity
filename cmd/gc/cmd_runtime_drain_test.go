@@ -98,7 +98,7 @@ func TestProviderDrainOpsClearRestartRequestedUsesCityTmuxSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fake tmux args: %v", err)
 	}
-	want := "-u\n-L\n" + socket + "\nset-environment\n-t\nworker\n-u\nGC_RESTART_REQUESTED\n"
+	want := "-u\n-L\n" + socket + "\nset-environment\n-t\n=worker\n-u\nGC_RESTART_REQUESTED\n"
 	if string(got) != want {
 		t.Fatalf("tmux args = %q, want %q", got, want)
 	}
