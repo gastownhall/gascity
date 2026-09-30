@@ -303,6 +303,15 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 	if err != nil {
 		return nil, err
 	}
+	// Identify the transcript's generation before reading it. A write landing
+	// after this point leaves the content newer than its generation, which the
+	// next load corrects. Identifying it after the read would stamp stale
+	// content with the post-write generation, and SessionHandle would serve
+	// that snapshot until the transcript changes again.
+	info, err := a.statFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat transcript: %w", err)
+	}
 	fullSession, err := sessionlog.ReadProviderFileRaw(req.Provider, path, 0)
 	if err != nil {
 		return nil, err
@@ -314,11 +323,6 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		if err != nil {
 			return nil, err
 		}
-	}
-
-	info, err := a.statFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("stat transcript: %w", err)
 	}
 
 	entries := normalizeHistoryEntries(req.Provider, path, session.ID, session.Messages)
