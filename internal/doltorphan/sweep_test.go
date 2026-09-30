@@ -424,3 +424,35 @@ func TestSweep_NoReapMarkerExemptsTopLevelCandidate(t *testing.T) {
 		t.Fatalf("nested store dir %s should survive under the .gc-no-reap marker: %v", storeDir, err)
 	}
 }
+
+// TestSweep_SiblingStoresNeverWidenToContainer pins findDoltStoreDir's
+// behavior when a top-level container holds stores in separate sibling
+// subtrees: the first store in lexical order is removed this pass, and
+// neither the container nor the other store is touched.
+func TestSweep_SiblingStoresNeverWidenToContainer(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+
+	container := filepath.Join(root, "c")
+	storeA := filepath.Join(container, "a")
+	storeB := filepath.Join(container, "b", "x")
+	for _, store := range []string{storeA, storeB} {
+		if err := os.MkdirAll(filepath.Join(store, ".dolt"), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s/.dolt): %v", store, err)
+		}
+	}
+	if err := chtimesRecursive(container, old); err != nil {
+		t.Fatalf("chtimesRecursive(%s): %v", container, err)
+	}
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: noLsofHits})
+
+	if len(result.Removed) != 1 || result.Removed[0] != storeA {
+		t.Fatalf("Removed = %v, want exactly [%s]", result.Removed, storeA)
+	}
+	for _, d := range []string{container, storeB} {
+		if _, err := os.Stat(d); err != nil {
+			t.Fatalf("%s should survive sweeping sibling store %s: %v", d, storeA, err)
+		}
+	}
+}

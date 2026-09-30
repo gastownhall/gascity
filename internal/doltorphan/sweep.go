@@ -109,9 +109,10 @@ type candidate struct {
 // age or marker.
 //
 // Removal targets only the directory that actually owns the .dolt marker,
-// which may be nested below the top-level child — never the top-level
-// child itself — so that unrelated payload the child legitimately holds
-// alongside an abandoned Dolt copy survives the sweep.
+// which may be nested below the top-level child. The top-level child itself
+// is removed only when it directly contains the .dolt marker, i.e. when it
+// is the store — so that unrelated payload a container legitimately holds
+// alongside an abandoned Dolt copy nested within it survives the sweep.
 //
 // If the lsof scan itself fails, Sweep fails closed: nothing is removed
 // this pass (an unverifiable "is this held open" check is treated the
@@ -214,10 +215,12 @@ func hasSentinel(dir string) bool {
 // naive first-match search hits the shallow bookkeeping marker before ever
 // looking inside the sibling that holds the real, deeper store — which
 // makes Sweep delete the whole top-level container instead of just the
-// abandoned store nested within it. To avoid that, this function always
-// prefers the deepest match: it fully explores every subdirectory before
-// falling back to treating dir itself as the store when dir directly
-// contains a marker.
+// abandoned store nested within it. To avoid that, a marker in a nested
+// subdirectory is always preferred over one directly in dir: every
+// subdirectory is explored before falling back to treating dir itself as the
+// store, so an ancestor never becomes the target while a descendant store
+// exists. When stores sit in separate sibling subtrees, the first one found
+// in lexical order is returned; the rest are removed on later passes.
 func findDoltStoreDir(dir string, depth int) (string, bool) {
 	if depth <= 0 {
 		return "", false

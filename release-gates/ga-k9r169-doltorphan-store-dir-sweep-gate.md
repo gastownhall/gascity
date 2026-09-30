@@ -16,6 +16,12 @@
   `docs/PROJECT_MANIFEST.md` is absent from both the repository and reviewed
   source.
 
+Note: PR head commit `b60c70f`, which adds the `.gc-no-reap` keep marker and
+`TestSweep_NoReapMarkerExemptsTopLevelCandidate`, landed after reviewed commit
+`63ce479`. The full-suite evidence below is from `63ce479`; the evidence for
+`b60c70f` is CI at that head plus the focused unit run
+(`go test ./internal/doltorphan/... -count=1`).
+
 The already-merged preflight found no pull request carrying the reviewed
 commit. Criterion 6 passed before the test run, and a final fetch confirmed the
 same base and clean merge result, so no bounded self-rebase was needed.
@@ -23,7 +29,7 @@ same base and clean merge result, so no bounded self-rebase was needed.
 | # | Criterion | Result | Evidence |
 |---|---|---|---|
 | 1 | Review PASS present | **PASS** | Round-two review `ga-k0rl0s` records an unambiguous PASS with no findings for the exact reviewed commit. The earlier integration-test finding in `ga-qxhmrj` was fixed by the final commit and independently re-reviewed. |
-| 2 | Acceptance criteria met | **PASS** | `Sweep` now removes the deepest directory that directly owns a `.dolt` marker, leaving its top-level temporary container and unrelated siblings intact. A literal top-level `.no-orphan-sweep` file exempts the candidate. Age, marker-depth, and fail-closed `lsof` detection remain in place; the held-path check remains keyed to the top-level child, and no name/prefix filter or production call-site change was added. Unit coverage includes the incident-shaped binary/script siblings and sentinel behavior; the real-Dolt SIGKILL integration test confirms the nested store is removed while its enclosing data directory remains. |
+| 2 | Acceptance criteria met | **PASS** | `Sweep` now removes the deepest directory that directly owns a `.dolt` marker, leaving its top-level temporary container and unrelated siblings intact. A literal top-level `.no-orphan-sweep` or `.gc-no-reap` entry exempts the candidate. Age, marker-depth, and fail-closed `lsof` detection remain in place; the held-path check remains keyed to the top-level child, and no name/prefix filter or production call-site change was added. Unit coverage includes the incident-shaped binary/script siblings and sentinel behavior; the real-Dolt SIGKILL integration test confirms the nested store is removed while its enclosing data directory remains. |
 | 3 | Tests pass | **PASS** (four attributed non-diff-owned failures) | `test_cmd: make test-local-full-parallel`; `test_cmd_scope: full-suite`; run through `isolated-test-run.sh` with the rootless Podman socket active and Ryuk disabled. `test_counts: 36 job PASS, 4 attributed raw job FAIL, 0 job SKIP` across all 40 documented jobs. All diff-owned tests passed, including the real Dolt integration test; details and attribution are below. No `TRIPWIRE` occurred. `waiver_ref: none`. |
 | 3a | Pre-existing failures may be attributed | **PASS** | The Herdr live-provider failure maps to predating tracker `ga-iepsvr`; the three fixture-initialization failures caused by shared-server schema migration refusal map to predating tracker `ga-lejnse`. None is diff-owned, none overlaps the three changed paths, and mechanism/import-boundary proof shows the candidate cannot cause either external condition. Each exact sighting was appended to and read back from its tracker. |
 | 3b | Policy/lint lane | **PASS** (attributed full-fallback lint findings) | `policy_lane: make test-ci-policy` PASS (5 runner-policy tests, 15 CI-suite coverage tests, `scripts/cipolicy`, `scripts/prwatchdog`, and focused static-scope policy tests). `make vet`, `make check-hooks`, `git diff --check`, and changed-file formatting all PASS. The CI-equivalent `make lint-affected` widened to the full repository because this older reviewed head lacks a current-main dashboard asset; its 87 non-diff-owned findings include stale deleted-worktree cache entries and unchanged generated/baseline source, attributed to predating trackers `ga-u8z8j6` and `ga-tcdrnz`. A fresh-cache run from the candidate's actual merge base selected `./cmd/gc ./examples/gastown ./internal/doltorphan ./test/dolttest` and reported `0 issues`. |
@@ -107,8 +113,9 @@ TestAdoptPRFormulaCompileAndRun -> ga-lejnse`.
 2. Removal and `SweepResult.Removed` now use that store directory, while
    `lsofHeldChildren` continues to guard the top-level child because its
    one-segment scan cannot safely classify deeper paths.
-3. `hasSentinel` checks only for the literal `.no-orphan-sweep` entry directly
-   inside a top-level candidate. No directory naming heuristic was introduced.
+3. `hasSentinel` checks only for the literal `.no-orphan-sweep` or
+   `.gc-no-reap` entry directly inside a top-level candidate. No directory
+   naming heuristic was introduced.
 4. The production change is confined to `internal/doltorphan/sweep.go`; the
    remaining changes are adjacent unit and integration coverage. No caller,
    API, configuration, workflow, or generated artifact changed.
