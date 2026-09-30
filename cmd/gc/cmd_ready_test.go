@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -692,6 +693,80 @@ func TestRigStoreOpenPolicyDiffersByCaller(t *testing.T) {
 	}
 }
 
+// TestOpenStandaloneRigStoresOpensRigsConcurrently pins that opening N bound
+// rig stores costs about as much as the SLOWEST open, not the sum of every
+// open. Each open's real cost is the store factory's preflight (a `bd context
+// --json` subprocess plus a Dolt ping), paid even when the verdict is a
+// foregone "ineligible, fall back to BdStore", so a sequential walk turns it
+// into a sum across every bound rig on `gc ready`'s critical path.
+func TestOpenStandaloneRigStoresOpensRigsConcurrently(t *testing.T) {
+	const perRig = 100 * time.Millisecond
+	const rigCount = 5
+
+	cfg := &config.City{}
+	built := make(map[string]beads.Store, rigCount)
+	for i := 0; i < rigCount; i++ {
+		name := "rig-" + strconv.Itoa(i)
+		path := "/fake/" + name
+		cfg.Rigs = append(cfg.Rigs, config.Rig{Name: name, Path: path})
+		built[path] = splittest.NewWorkStore(t, name)
+	}
+
+	start := time.Now()
+	stores, failures := openStandaloneRigStores(cfg, "/fake/city", func(rigPath, _ string) (beads.Store, error) {
+		time.Sleep(perRig)
+		return built[rigPath], nil
+	})
+	elapsed := time.Since(start)
+
+	if len(failures) != 0 {
+		t.Fatalf("unexpected open failures: %v", failures)
+	}
+	if len(stores) != rigCount {
+		t.Fatalf("got %d stores, want %d", len(stores), rigCount)
+	}
+
+	// A sequential opener costs rigCount*perRig (500ms). A concurrent one
+	// costs about one perRig (100ms). The budget sits well under the
+	// sequential floor while leaving generous headroom over the concurrent
+	// floor for scheduler jitter, so this fails on a regression to a
+	// sequential open loop without flaking on a loaded box.
+	if budget := rigCount * perRig / 2; elapsed >= budget {
+		t.Fatalf("openStandaloneRigStores took %v to open %d rigs at %v delay each; want well under %v (the sequential floor is %v) — rigs did not open concurrently", elapsed, rigCount, perRig, budget, rigCount*perRig)
+	}
+}
+
+// TestOpenStandaloneRigStoresReportsFailuresInRigOrder pins the merge rule the
+// concurrent opens must keep: failures come back in cfg order whichever open
+// finishes first, and a rig that failed to open never shadows one that did.
+func TestOpenStandaloneRigStoresReportsFailuresInRigOrder(t *testing.T) {
+	cfg := &config.City{Rigs: []config.Rig{
+		{Name: "slow-bad", Path: "/fake/slow-bad"},
+		{Name: "unbound", Path: ""},
+		{Name: "fast-bad", Path: "/fake/fast-bad"},
+		{Name: "good", Path: "/fake/good"},
+	}}
+	good := splittest.NewWorkStore(t, "good")
+
+	stores, failures := openStandaloneRigStores(cfg, "/fake/city", func(rigPath, _ string) (beads.Store, error) {
+		switch rigPath {
+		case "/fake/slow-bad":
+			time.Sleep(60 * time.Millisecond)
+			return nil, errors.New("slow-bad is unmounted")
+		case "/fake/fast-bad":
+			return nil, errors.New("fast-bad is unmounted")
+		}
+		return good, nil
+	})
+
+	if len(failures) != 2 || failures[0].rig != "slow-bad" || failures[1].rig != "fast-bad" {
+		t.Fatalf("failures = %v, want [slow-bad fast-bad] in cfg order regardless of completion order", failures)
+	}
+	if len(stores) != 1 || stores["good"] == nil {
+		t.Fatalf("stores = %v, want exactly the one rig that opened", stores)
+	}
+}
+
 // TestReadyUnboundRigIsSkippedOnBothSurfaces states the decision for the rig
 // declared in city.toml with NO .gc/site.toml binding, which is a different
 // shape from a rig that failed to open and is deliberately NOT promoted to an
@@ -1150,8 +1225,15 @@ func TestGcReadySteerDescribesTheFlagsItActuallyAccepts(t *testing.T) {
 // never stated one. The work legs' bead-policy layer then rewrote the zero value
 // to TierBoth and the unwrapped class leg took it literally, so the merged answer
 // was two different questions and nothing on any path could say so.
+// mu guards the shared readyTiers/listTiers slices, which every leg's copy of
+// this store points at in common (see TestReadyStatesTheSameTierOnEveryLeg).
+// federateBeadLegs and federateListBeadsWithOwner read legs concurrently, one
+// goroutine per leg, so the appends below are a genuine concurrent-writer
+// race without a lock of their own — the fixture needs to be as safe as the
+// production stores it stands in for.
 type readyTierRecordingStore struct {
 	beads.Store
+	mu         *sync.Mutex
 	readyTiers *[]beads.TierMode
 	listTiers  *[]beads.TierMode
 }
@@ -1161,12 +1243,16 @@ func (s readyTierRecordingStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead,
 	if len(query) > 0 {
 		q = query[0]
 	}
+	s.mu.Lock()
 	*s.readyTiers = append(*s.readyTiers, q.TierMode)
+	s.mu.Unlock()
 	return s.Store.Ready(query...)
 }
 
 func (s readyTierRecordingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.mu.Lock()
 	*s.listTiers = append(*s.listTiers, query.TierMode)
+	s.mu.Unlock()
 	return s.Store.List(query)
 }
 
@@ -1180,16 +1266,17 @@ func (s readyTierRecordingStore) List(query beads.ListQuery) ([]beads.Bead, erro
 // neutral default here but a narrower question the policy-wrapped legs silently
 // rewrite. Both arms are covered, because they build different query types.
 func TestReadyStatesTheSameTierOnEveryLeg(t *testing.T) {
+	var mu sync.Mutex
 	var readyTiers, listTiers []beads.TierMode
 	legs := []readyLeg{
 		readyTestLeg("city", readyTierRecordingStore{
-			Store: splittest.NewWorkStore(t, "gc"), readyTiers: &readyTiers, listTiers: &listTiers,
+			Store: splittest.NewWorkStore(t, "gc"), mu: &mu, readyTiers: &readyTiers, listTiers: &listTiers,
 		}),
 		readyTestLeg("rig frontend", readyTierRecordingStore{
-			Store: splittest.NewWorkStore(t, "ra"), readyTiers: &readyTiers, listTiers: &listTiers,
+			Store: splittest.NewWorkStore(t, "ra"), mu: &mu, readyTiers: &readyTiers, listTiers: &listTiers,
 		}),
 		readyTestLeg("graph", readyTierRecordingStore{
-			Store: splittest.NewClassStore(t, config.BeadClassGraph), readyTiers: &readyTiers, listTiers: &listTiers,
+			Store: splittest.NewClassStore(t, config.BeadClassGraph), mu: &mu, readyTiers: &readyTiers, listTiers: &listTiers,
 		}),
 	}
 
