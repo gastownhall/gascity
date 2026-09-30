@@ -251,6 +251,13 @@ type preparedStart struct {
 	// re-derivation from the template (S19 re-eligibility).
 	promptDelivered bool
 	promptHash      string
+	// capacityTicket is the endpoint capacity admission for this attempt,
+	// nil when the endpoint is unguarded. Every path that holds one resolves
+	// it exactly once (resolveStartCapacity / abandonCapacityTicket).
+	capacityTicket *capacityTicket
+	// preWakeUndo is what a capacity refusal needs to undo this attempt's
+	// PreWake (restorePreWakeState). Zero when the start had no persisted row.
+	preWakeUndo preWakeUndo
 }
 
 type startResult struct {
@@ -261,6 +268,16 @@ type startResult struct {
 	finished        time.Time
 	rollbackPending bool
 	rateLimitScreen bool
+	// providerStartCalled reports that the attempt reached provider Start (a
+	// warm reuse does not). Only such a start can prove endpoint capacity.
+	providerStartCalled bool
+	// capacityRefused selects the capacity commit arm: the endpoint refused
+	// the start (runtime.ErrProviderCapacity), a guard admitted it, and the
+	// poison valve did not trip. Set only by resolveStartCapacity.
+	capacityRefused bool
+	// capacityValve reports that the poison valve returned this refused
+	// session to normal failure accounting.
+	capacityValve bool
 	// diedDuringStartup is true when the session started and then died
 	// before it was confirmed alive, detected either of two ways: (1) the
 	// provider/resume layer returns runtime.ErrSessionDiedDuringStartup
@@ -372,6 +389,9 @@ type startExecutionOptions struct {
 	// the reconciler where the cached rig stores are in scope and consumed in
 	// startPreparedStartCandidate's warm-reuse branch. Nil disables the nudge.
 	warmClaimProbe warmClaimTriggerProbe
+	// capacityGuard gates starts per serving endpoint. Nil leaves every
+	// endpoint unguarded (legacy failure accounting).
+	capacityGuard *endpointCapacityGuard
 }
 
 type startExecutionOption func(*startExecutionOptions)
@@ -456,6 +476,14 @@ func resolveStartStabilityWaiter(waiter startStabilityWaiter) startStabilityWait
 func withWarmClaimProbe(probe warmClaimTriggerProbe) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.warmClaimProbe = probe
+	}
+}
+
+// withEndpointCapacityGuard installs the per-endpoint capacity breaker for
+// this reconcile pass. Nil (or the option omitted) leaves endpoints unguarded.
+func withEndpointCapacityGuard(guard *endpointCapacityGuard) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.capacityGuard = guard
 	}
 }
 
@@ -914,6 +942,7 @@ func prepareStartCandidateForCity(
 	stderr io.Writer,
 	workDirResolver taskWorkDirResolver,
 ) (*preparedStart, error) {
+	var undo preWakeUndo
 	if id := strings.TrimSpace(candidate.info.ID); id != "" && store != nil {
 		if err := sessionpkg.WithSessionMutationLock(id, func() error {
 			sessFront := sessionFrontDoor(store)
@@ -926,7 +955,7 @@ func prepareStartCandidateForCity(
 			// a bead that is no longer a session (IsSessionBeadOrRepairable), the
 			// documented front-door-Get delta from the former raw store.Get. This is
 			// the SANCTIONED cross-goroutine freshness re-read, not a per-patch re-Get.
-			current, _, err := sessFront.GetPersistedResponse(id)
+			current, persisted, err := sessFront.GetPersistedResponse(id)
 			if err != nil {
 				return err
 			}
@@ -939,6 +968,7 @@ func prepareStartCandidateForCity(
 			if err != nil {
 				return err
 			}
+			undo = newPreWakeUndo(current, persisted.Metadata, fold)
 			candidate.info = current.ApplyPatch(fold)
 			return nil
 		}); err != nil {
@@ -958,6 +988,10 @@ func prepareStartCandidateForCity(
 	// partial-Info second return is only load-bearing for recoverRunningPendingCreate's
 	// abort residue; here the prepared already carries it, so it is discarded.
 	prepared, _, err := buildPreparedStartWithWorkDirResolver(candidate, cityPath, cfg, store, workDirResolver)
+	if prepared != nil && undo.written != nil {
+		undo.token = prepared.candidate.info.InstanceToken
+		prepared.preWakeUndo = undo
+	}
 	return prepared, err
 }
 
@@ -1725,18 +1759,22 @@ func runPreparedStartCandidate(
 	}
 	finished := time.Now()
 	livenessUnavailable := errors.Is(err, runtime.ErrRuntimeUnavailable)
+	capacityRefused := !livenessUnavailable && runtime.IsProviderCapacity(err)
 	rollbackPending := err != nil && !livenessUnavailable && shouldRollbackPendingCreateInfo(item.candidate.info)
-	rateLimitScreen := err != nil && !livenessUnavailable && startupRateLimitScreenDetected(item, cityPath, sp, store, cfg)
+	// A capacity refusal never peeks for a rate-limit screen: the launcher
+	// exited before the provider drew one, and the peek is a provider call.
+	rateLimitScreen := err != nil && !livenessUnavailable && !capacityRefused && startupRateLimitScreenDetected(item, cityPath, sp, store, cfg)
 	if err != nil && rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp) {
 		return startResult{
-			prepared:          item,
-			err:               nil,
-			outcome:           TraceOutcomeStartErrorConverged,
-			started:           started,
-			finished:          finished,
-			rollbackPending:   false,
-			diedDuringStartup: diedDuringStartup,
-			phases:            phases,
+			prepared:            item,
+			err:                 nil,
+			outcome:             TraceOutcomeStartErrorConverged,
+			started:             started,
+			finished:            finished,
+			rollbackPending:     false,
+			providerStartCalled: startedFresh,
+			diedDuringStartup:   diedDuringStartup,
+			phases:              phases,
 		}
 	}
 	var outcome TraceOutcomeCode
@@ -1747,6 +1785,8 @@ func runPreparedStartCandidate(
 	case livenessUnavailable:
 		outcome = TraceOutcomeDeferred
 		err = nil
+	case capacityRefused:
+		outcome = TraceOutcomeCapacityRefused
 	case startCtxErr == context.DeadlineExceeded:
 		outcome = TraceOutcomeDeadlineExceeded
 		if err == nil {
@@ -1780,16 +1820,17 @@ func runPreparedStartCandidate(
 		rateLimitScreen = false
 	}
 	return startResult{
-		prepared:          item,
-		err:               err,
-		outcome:           outcome,
-		started:           started,
-		finished:          finished,
-		rollbackPending:   rollbackPending,
-		rateLimitScreen:   rateLimitScreen,
-		diedDuringStartup: diedDuringStartup,
-		provider:          sp,
-		phases:            phases,
+		prepared:            item,
+		err:                 err,
+		outcome:             outcome,
+		started:             started,
+		finished:            finished,
+		rollbackPending:     rollbackPending,
+		rateLimitScreen:     rateLimitScreen,
+		providerStartCalled: startedFresh,
+		diedDuringStartup:   diedDuringStartup,
+		provider:            sp,
+		phases:              phases,
 	}
 }
 
@@ -1886,6 +1927,9 @@ func enqueuePreparedStartWaveForCity(
 				defer release()
 			}
 			result := runPreparedStartCandidate(ctx, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, sessionStaleKeyDetectionWaiter, warmClaim)
+			// Resolve before the commit so a stale, refused, or panicking
+			// commit cannot lose the endpoint verdict.
+			result = resolveStartCapacity(result, rec, stderr)
 			commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
 			if asyncFollowUp != nil {
 				asyncFollowUp()
@@ -1999,7 +2043,9 @@ func commitAsyncStartResultWithContext(
 // close a bead and free an alias from. It keeps the lease handling below and
 // retries next tick.
 func settleUncommittedAsyncStart(result startResult, refresh asyncStartRefreshVerdict, sp runtime.Provider, sessFront *sessionpkg.Store, clk clock.Clock, stderr io.Writer) string {
-	deferred := startOutcomeDefersCommit(result.outcome)
+	// A capacity refusal holds its row like a deferral: the endpoint, not
+	// this session, failed.
+	deferred := startOutcomeDefersCommit(result.outcome) || result.capacityRefused
 	switch {
 	case refresh.rollbackPendingCreate && !deferred:
 		// The rollback frees the alias, so it waits until the runtime this
@@ -2019,6 +2065,12 @@ func settleUncommittedAsyncStart(result startResult, refresh asyncStartRefreshVe
 		stopStaleAsyncStartRuntime(result, sp, stderr)
 	}
 	if refresh.releaseInFlight {
+		if result.capacityRefused {
+			// The launch never happened; undo its PreWake rather than only
+			// dropping the lease.
+			restorePreWakeState(result.prepared, sessFront, stderr)
+			return string(TraceOutcomeCapacityRefused)
+		}
 		clearPendingStartInFlightLease(result.prepared.candidate.info.ID, sessFront, stderr)
 		return "async_start_refresh_failed"
 	}
@@ -2498,6 +2550,18 @@ func commitStartResultTraced(
 	info := result.prepared.candidate.info
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
+	// A capacity refusal is checked first, ahead of every failure arm
+	// including the terminal-error classifier: the endpoint refused, so
+	// nothing about this session is terminal or crash-looping.
+	// Gated on err: an async commit can still convert a refused start into
+	// a converged success once a matching runtime is found.
+	if result.err != nil && (result.capacityRefused || result.capacityValve) {
+		recordCapacityRefusedTrace(result, trace)
+	}
+	if result.err != nil && result.capacityRefused {
+		commitCapacityRefusal(result, sessFront, wave, stderr)
+		return startCommitFailed
+	}
 	// Session startup is not yet safe to decide — back off silently without
 	// recording failure. The reconciler will retry on the next patrol tick.
 	if startOutcomeDefersCommit(result.outcome) {
@@ -2651,6 +2715,130 @@ func commitStartResultTraced(
 	}
 	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, nil, result.phases)
 	return startCommitSucceeded
+}
+
+// commitCapacityRefusal commits a start the serving endpoint refused. The
+// launch never happened, so it undoes PreWake (restorePreWakeState): no
+// rollback, no startup-health episode, no wake-failure accrual, and no
+// conversation reset. A pending-create row stays open and keeps its place in
+// the wake order.
+func commitCapacityRefusal(result startResult, sessFront *sessionpkg.Store, wave int, stderr io.Writer) {
+	name := result.prepared.candidate.name()
+	tp := result.prepared.candidate.tp
+	fmt.Fprintf(stderr, "session reconciler: starting %s: endpoint refused (capacity): %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
+	telemetry.RecordAgentStart(context.Background(), name, tp.DisplayName(), result.err)
+	restorePreWakeState(result.prepared, sessFront, stderr)
+	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(TraceOutcomeCapacityRefused), result.started, result.finished, result.err, result.phases)
+}
+
+// preWakeRestoredKeys are the lifecycle keys PreWake overwrites that a
+// capacity refusal restores. continuation_epoch is among them so a refused
+// attempt does not invalidate queued nudges. The incarnation identity
+// (instance_token, generation) stays bumped: the token fences the restore.
+var preWakeRestoredKeys = []string{
+	"state", "sleep_reason", "sleep_intent", "detached_at", "continuation_reset_pending",
+	"continuation_epoch", "wake_request", "wake_requested_at",
+}
+
+// preWakeRestoreAttempts bounds the restore's re-read when another writer
+// lands between its read and its fenced write.
+const preWakeRestoreAttempts = 3
+
+// preWakeUndo records what one attempt's PreWake wrote and what each key held
+// before, so a capacity refusal can put the row back.
+type preWakeUndo struct {
+	// token is the attempt's instance_token; the restore applies only to the
+	// incarnation that made it.
+	token string
+	// written is PreWake's value for each restorable key, restore the value
+	// before it.
+	written, restore sessionpkg.MetadataPatch
+}
+
+// newPreWakeUndo captures, from the row PreWake read and the batch it wrote,
+// how to undo it. The in-flight lease (last_woke_at) goes back to empty. A
+// claimless row's pending_create_started_at is restored too: PreWake stamps it
+// fresh, while a claimed row keeps its episode marker.
+func newPreWakeUndo(current sessionpkg.Info, persisted map[string]string, written sessionpkg.MetadataPatch) preWakeUndo {
+	keys := append([]string{"last_woke_at"}, preWakeRestoredKeys...)
+	if !current.PendingCreateClaim {
+		keys = append(keys, "pending_create_started_at")
+	}
+	undo := preWakeUndo{
+		written: make(sessionpkg.MetadataPatch, len(keys)),
+		restore: make(sessionpkg.MetadataPatch, len(keys)),
+	}
+	for _, key := range keys {
+		value, ok := written[key]
+		if !ok {
+			continue
+		}
+		undo.written[key] = value
+		undo.restore[key] = persisted[key]
+	}
+	undo.restore["last_woke_at"] = ""
+	return undo
+}
+
+// restorePreWakeState undoes a refused start's PreWake, so the reconciler does
+// not later heal a never-launched "creating" row into a conversation reset,
+// reap it as stale, or lose an explicit wake. Under the session mutation lock
+// it re-reads the row and restores each key only while it still holds the
+// value PreWake wrote: anything written since (a suspend, a wait hold, a new
+// wake request, a newer attempt's lease) wins. Nothing is written to a closed
+// row or to another incarnation's row. The restore is one Update fenced on the
+// re-read revision (Store.UpdateMetadataFenced), so an out-of-process writer
+// landing after the re-read is not overwritten; on stores without conditional
+// writes only that read-to-write window stays unfenced.
+func restorePreWakeState(prepared preparedStart, sessFront *sessionpkg.Store, stderr io.Writer) {
+	id := strings.TrimSpace(prepared.candidate.info.ID)
+	undo := prepared.preWakeUndo
+	if id == "" || sessFront == nil || undo.written == nil {
+		return
+	}
+	err := sessionpkg.WithSessionMutationLock(id, func() error {
+		_, err := sessFront.UpdateMetadataFenced(id, preWakeRestoreAttempts, func(current sessionpkg.Info, persisted sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
+			if persisted.Status == "closed" || current.InstanceToken != undo.token {
+				return nil
+			}
+			patch := make(sessionpkg.MetadataPatch, len(undo.restore))
+			for key, value := range undo.restore {
+				if written := undo.written[key]; persisted.Metadata[key] == written && value != written {
+					patch[key] = value
+				}
+			}
+			return patch
+		})
+		return err
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: restoring pre-wake state for %s: %v\n", prepared.candidate.name(), err) //nolint:errcheck
+	}
+}
+
+// recordCapacityRefusedTrace records one refused start with the endpoint's
+// breaker state after the refusal. It is a baseline record so refusals stay
+// visible without a template trace arm.
+func recordCapacityRefusedTrace(result startResult, trace *sessionReconcilerTraceCycle) {
+	ticket := result.prepared.capacityTicket
+	if trace == nil || ticket == nil {
+		return
+	}
+	fields := traceRecordPayload{
+		"template":            result.prepared.candidate.tp.TemplateName,
+		"session_name":        result.prepared.candidate.name(),
+		"endpoint":            string(ticket.key),
+		"probe":               ticket.probe,
+		"breaker_state_after": ticket.stateAfter.String(),
+		"capacity_valve":      result.capacityValve,
+		"error":               formatLifecycleError(result.err),
+	}
+	var capErr *runtime.CapacityError
+	if errors.As(result.err, &capErr) {
+		fields["exit_code"] = capErr.ExitCode
+		fields["source"] = capErr.Source
+	}
+	trace.RecordControllerOperation(TraceSiteLifecycleStartCapacityRefused, TraceReasonStart, TraceOutcomeCapacityRefused, "capacity_refused", result.finished.Sub(result.started), fields)
 }
 
 // commitStartFailure performs the failure-path side effects for a start that
@@ -3404,6 +3592,16 @@ func executePlannedStartsTraced(
 			maxWave = wave
 		}
 	}
+	capacityGuard := startOpts.capacityGuard
+	// admitted holds capacity tickets not yet handed to a start. Every
+	// early return (context cancellation, panic) resolves them so an
+	// abandoned admission cannot wedge its endpoint's probe.
+	var admitted []*capacityTicket
+	defer func() {
+		for _, ticket := range admitted {
+			abandonCapacityTicket(ticket, rec, stderr)
+		}
+	}()
 	wakeCount := 0
 	for wave := 0; wave <= maxWave; wave++ {
 		if ctx != nil && ctx.Err() != nil {
@@ -3443,6 +3641,10 @@ func executePlannedStartsTraced(
 		// every tick. Sorting within the dependency wave is safe: every
 		// candidate here already has its dependencies satisfied.
 		sortCandidatesByWakeFairness(ready)
+		// Probe rotation: among sessions on a refusing endpoint, the ones
+		// refused least this episode go first, so a poisoned oldest session
+		// cannot monopolize the half-open probe.
+		sortCandidatesByProbeRotation(ready, capacityGuard)
 		for offset := 0; offset < len(ready); {
 			if wakeCount >= maxWakes {
 				for _, candidate := range ready[offset:] {
@@ -3481,11 +3683,37 @@ func executePlannedStartsTraced(
 						continue
 					}
 				}
+				// Endpoint capacity admission comes before the identity
+				// breaker's restart accounting and before PreWake, so a
+				// deferred start writes nothing and spends no wake budget.
+				endpoint := resolvedEndpointKey(candidate.tp, candidate.info)
+				ticket, admit := capacityGuard.Admit(endpoint, candidate.info.ID, candidate.logicalTemplate(cfg))
+				if !admit {
+					if release != nil {
+						release()
+					}
+					if done != nil {
+						done()
+					}
+					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), string(TraceOutcomeDeferredByEndpointCapacity), time.Time{}, time.Time{}, nil)
+					if trace != nil {
+						_, st := capacityGuard.Eligible(endpoint)
+						trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonEndpointCapacityOpen, TraceOutcomeDeferredByEndpointCapacity, candidate.tp.TemplateName, candidate.name(), traceRecordPayload{
+							"endpoint": string(endpoint),
+							"state":    st.State.String(),
+						})
+					}
+					continue
+				}
+				if ticket != nil {
+					admitted = append(admitted, ticket)
+				}
 				if cbEnabled {
 					identity := namedSessionIdentityInfo(candidate.info)
 					if identity != "" {
 						cbNow := clk.Now().UTC()
 						if cb.IsOpen(identity, cbNow) {
+							abandonCapacityTicket(ticket, rec, stderr)
 							if release != nil {
 								release()
 							}
@@ -3505,6 +3733,7 @@ func executePlannedStartsTraced(
 						}
 						state, err := recordSessionCircuitBreakerRestart(sessFront, candidate.info.ID, cb, identity, cbNow)
 						if err != nil {
+							abandonCapacityTicket(ticket, rec, stderr)
 							if release != nil {
 								release()
 							}
@@ -3516,6 +3745,7 @@ func executePlannedStartsTraced(
 							continue
 						}
 						if state == circuitOpen {
+							abandonCapacityTicket(ticket, rec, stderr)
 							if release != nil {
 								release()
 							}
@@ -3534,6 +3764,7 @@ func executePlannedStartsTraced(
 				}
 				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver)
 				if err != nil {
+					abandonCapacityTicket(ticket, rec, stderr)
 					clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
 					if release != nil {
 						release()
@@ -3545,6 +3776,7 @@ func executePlannedStartsTraced(
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "failed", time.Time{}, time.Time{}, err)
 					continue
 				}
+				item.capacityTicket = ticket
 				if startOpts.async {
 					asyncPrepared = append(asyncPrepared, asyncPreparedStart{item: *item, release: release, done: done})
 				} else {
@@ -3558,6 +3790,8 @@ func executePlannedStartsTraced(
 			}
 			if startOpts.async {
 				results = enqueuePreparedStartWaveForCity(ctx, asyncPrepared, cityPath, sp, store, cfg, clk, rec, startupTimeout, wave, stdout, stderr, trace, startOpts.asyncFollowUp, stabilityWaiter, sessionStaleKeyDetectionWaiter, startOpts.warmClaimProbe)
+				// The start goroutines own these tickets now.
+				admitted = admitted[:0]
 				if len(results) > 0 && asyncStartBatchNeedsFollowUp(batchCandidates, cfg) {
 					asyncFollowUpRequired = true
 				}
@@ -3577,6 +3811,9 @@ func executePlannedStartsTraced(
 				)
 			}
 			for _, result := range results {
+				if !startOpts.async {
+					result = resolveStartCapacity(result, rec, stderr)
+				}
 				if trace != nil {
 					trace.RecordOperation(TraceSiteLifecycleStartRun, TraceReasonStart, result.outcome, "", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), result.finished.Sub(result.started), traceRecordPayload{
 						"rollback_pending": result.rollbackPending,

@@ -158,6 +158,49 @@ func (s *Store) ApplyPatchIfLifecycleUnchanged(expected Info, patch MetadataPatc
 	}
 }
 
+// UpdateMetadataFenced writes a patch decided from a fresh read of the row. It
+// re-reads the row, asks decide for the patch, and writes it in one Update.
+// Where the store resolves a conditional writer the Update is fenced on the
+// re-read revision; when another writer lands first, the row is re-read and
+// decide runs again, up to attempts times, after which nothing is written.
+// Without a conditional writer the patch is written unfenced right after the
+// re-read, leaving only that window, as ApplyPatchIfLifecycleUnchanged does. A
+// require-mode store that cannot fence returns an error. decide returning an
+// empty patch writes nothing. It reports whether a patch was written.
+func (s *Store) UpdateMetadataFenced(id string, attempts int, decide func(Info, PersistedResponse) MetadataPatch) (bool, error) {
+	writer, _, err := beads.ResolveConditionalWriter(s.store)
+	if err != nil {
+		return false, fmt.Errorf("updating session %q: %w", id, err)
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
+		bead, err := s.validatedBead(id)
+		if err != nil {
+			return false, err
+		}
+		patch := decide(infoFromPersistedBead(bead), PersistedResponseFromBead(bead))
+		if len(patch) == 0 {
+			return false, nil
+		}
+		opts := beads.UpdateOpts{Metadata: map[string]string(patch)}
+		if writer == nil {
+			if err := s.store.Update(id, opts); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		err = writer.UpdateIfMatch(id, bead.Revision, opts)
+		switch {
+		case err == nil:
+			return true, nil
+		case beads.IsPreconditionFailed(err):
+			continue
+		default:
+			return false, fmt.Errorf("updating session %q: %w", id, err)
+		}
+	}
+	return false, nil
+}
+
 // sameLifecycleFacts reports whether a and b agree on every persisted fact the
 // lifecycle projection reads (LifecycleInputFromInfo). Comparing the projected
 // inputs rather than a hand-picked key list keeps this check in step with the

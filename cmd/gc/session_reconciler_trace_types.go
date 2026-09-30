@@ -130,6 +130,8 @@ const (
 	TraceSiteReconcilerBeadReassignCycle         TraceSiteCode = "reconciler.session.bead_reassign_cycle"
 	TraceSiteLifecycleStartTerminalProviderError TraceSiteCode = "reconciler.start.terminal_provider_error"
 	TraceSiteLifecycleStartRateLimitHold         TraceSiteCode = "reconciler.start.rate_limit_hold"
+	TraceSiteLifecycleStartCapacityRefused       TraceSiteCode = "reconciler.start.capacity_refused"
+	TraceSiteEndpointCapacityBreaker             TraceSiteCode = "reconciler.endpoint.capacity_breaker"
 	TraceSiteLifecycleShutdownPreserveSessions   TraceSiteCode = "lifecycle.shutdown.preserve_sessions"
 )
 
@@ -198,6 +200,7 @@ const (
 	TraceReasonQuarantine            TraceReasonCode = "quarantine"
 	TraceReasonPinned                TraceReasonCode = "pinned"
 	TraceReasonAssignedWorkExhausted TraceReasonCode = "assigned_work_exhausted"
+	TraceReasonEndpointCapacityOpen  TraceReasonCode = "endpoint_capacity_open"
 )
 
 type TraceOutcomeCode string
@@ -282,6 +285,17 @@ const (
 	TraceOutcomeDeferredPinned      TraceOutcomeCode = "deferred_pinned"
 	TraceOutcomeDeferredBusy        TraceOutcomeCode = "deferred_busy"
 	TraceOutcomeStopDeferExhausted  TraceOutcomeCode = "stop_defer_exhausted"
+
+	// TraceOutcomeCapacityRefused marks a start the serving endpoint refused
+	// (runtime.ErrProviderCapacity). It is not a session failure.
+	TraceOutcomeCapacityRefused TraceOutcomeCode = "capacity_refused"
+	// TraceOutcomeDeferredByEndpointCapacity marks a start the endpoint
+	// capacity breaker deferred before any write.
+	TraceOutcomeDeferredByEndpointCapacity TraceOutcomeCode = "deferred_by_endpoint_capacity"
+	// TraceOutcomeOpen and TraceOutcomeHalfOpen report an endpoint capacity
+	// breaker's state (TraceOutcomeClosed is the third).
+	TraceOutcomeOpen     TraceOutcomeCode = "open"
+	TraceOutcomeHalfOpen TraceOutcomeCode = "half-open"
 
 	// TraceOutcomeSkippedLivenessError marks absence-derived reconciliation
 	// skipped this tick because the runtime liveness probe returned an

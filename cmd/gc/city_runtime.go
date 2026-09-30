@@ -203,6 +203,11 @@ type CityRuntime struct {
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
 
+	// capacityGuard is the per-endpoint capacity breaker, built on first use
+	// by ensureEndpointCapacityGuard. It is process-local and survives config
+	// reload, like asyncStartLimiter.
+	capacityGuard *endpointCapacityGuard
+
 	// liveSweepMemos carries the live model-usage sweep's per-session memo: the
 	// resolved transcript path, whether discovery definitively found nothing, and
 	// the sweep-interval floor. The worker factory is rebuilt per tick, so this
@@ -763,7 +768,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		}
 		// Reap stale session beads from a previous run before building desired
 		// state, so desired state does not reference already-closed beads (#742).
-		if reapStaleSessionBeads(cr.sessionsBeadStore().Store, cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
+		if cr.reapStaleSessionBeads() > 0 {
 			sessionBeads = cr.loadSessionBeadSnapshot()
 		}
 		result := cr.buildDesiredState(sessionBeads, startupTrace)
@@ -1353,7 +1358,7 @@ func (cr *CityRuntime) tick(
 	}
 	recordPhase(TraceSiteControllerTickPhase, "sweep_process_table_orphans", phaseStart, map[string]any{"reaped": swept})
 	phaseStart = time.Now()
-	reaped := reapStaleSessionBeads(cr.sessionsBeadStore().Store, cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr)
+	reaped := cr.reapStaleSessionBeads()
 	recordPhase(TraceSiteControllerTickPhase, "reap_stale_session_beads", phaseStart, map[string]any{"reaped": reaped})
 	if reaped > 0 {
 		phaseStart = time.Now()
@@ -2831,6 +2836,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		withAsyncDrainAckStopTracker(&cr.asyncStops),
 		withMaxSessionAgeTracker(cr.mat),
 		withAssignedWorkDeferTracker(cr.adt),
+		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
 		// The legs this tick read the surviving assigned work through. The
 		// orphan-close tie-break releases a held claim through its own leg
@@ -3230,6 +3236,22 @@ func (cr *CityRuntime) ensureAsyncStartLimiter() *asyncStartLimiter {
 		cr.asyncStartLimiter.resize(capacity)
 	}
 	return cr.asyncStartLimiter
+}
+
+// reapStaleSessionBeads reaps stale creating session beads, keeping rows the
+// endpoint capacity breaker holds.
+func (cr *CityRuntime) reapStaleSessionBeads() int {
+	return reapStaleSessionBeads(cr.sessionsBeadStore().Store, cr.sp, cr.sessionDrains, endpointHoldForRows(cr.cfg, cr.ensureEndpointCapacityGuard()), clock.Real{}, cr.stderr)
+}
+
+// ensureEndpointCapacityGuard returns the city's endpoint capacity guard,
+// building it on first use. The main and control-dispatcher ticks share it;
+// both run on the controller loop.
+func (cr *CityRuntime) ensureEndpointCapacityGuard() *endpointCapacityGuard {
+	if cr.capacityGuard == nil {
+		cr.capacityGuard = newEndpointCapacityGuard(clock.Real{}.Now)
+	}
+	return cr.capacityGuard
 }
 
 func (cr *CityRuntime) requestAsyncStartFollowUpTick() {
@@ -3647,6 +3669,9 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		cr.cfg.Daemon.DriftDrainTimeoutDuration(),
 		cr.stdout,
 		cr.stderr,
+		// The dispatcher's starts hit the same endpoints; without the guard
+		// this path would bypass the capacity breaker.
+		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
 	)
 	cr.requestDeferredDrainFollowUpTick()
 }

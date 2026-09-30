@@ -2826,6 +2826,7 @@ func reapStaleSessionBeads(
 	store beads.Store,
 	sp runtime.Provider,
 	dt *drainTracker,
+	holdsPendingCreate func(session.Info) bool,
 	clk clock.Clock,
 	stderr io.Writer,
 ) int {
@@ -2892,6 +2893,12 @@ func reapStaleSessionBeads(
 			continue
 		}
 		pendingCreate := info.PendingCreateClaim
+		// A never-started row held by its endpoint's capacity breaker is
+		// queued demand, not a phantom; the breaker's hold outlasts the lease
+		// windows below (endpointCapacityGuard.HoldsPendingCreate).
+		if strings.TrimSpace(info.LastWokeAt) == "" && holdsPendingCreate != nil && holdsPendingCreate(info) {
+			continue
+		}
 		// Never-started pending creates (pending_create_claim=true with no
 		// last_woke_at) have not reached preWakeCommit, so their start may
 		// still be in flight behind a busy pool start queue. Defer entirely to

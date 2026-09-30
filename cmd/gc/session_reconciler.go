@@ -1649,6 +1649,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			apply(&reconcileOpts)
 		}
 	}
+	capacityGuard := reconcileOpts.capacityGuard
 	effectiveStartOptions := startOptions
 	if !storeQueryPartial && reconcileOpts.workDirResolver == nil && len(assignedWorkBeads) > 0 {
 		effectiveStartOptions = append(append([]startExecutionOption(nil), startOptions...), withTaskWorkDirResolver(newAssignedTaskWorkDirResolver(cityPath, assignedWorkBeads)))
@@ -2675,12 +2676,32 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// attempts ("alias already belongs to gm-XXXX") for any session whose
 		// template still has demand. Rolling back closes the dead bead so the
 		// next reconciler tick can allocate a fresh slot under the same alias.
+		// capacityHeld keeps the same tick's heal from undoing the hold: a
+		// held row must stay a claimed pending create.
+		capacityHeld := false
 		if !alive && shouldRollbackPendingCreateInfo(infoPostZombie) {
 			var startupTimeout time.Duration
 			if cfg != nil {
 				startupTimeout = cfg.Session.StartupTimeoutDuration()
 			}
-			if pendingCreateLeaseExpiredForRollbackInfo(infoPostZombie, clk, startupTimeout) {
+			expired := pendingCreateLeaseExpiredForRollbackInfo(infoPostZombie, clk, startupTimeout)
+			// A never-started (or capacity-refused) row waits in the queue
+			// while its endpoint refuses starts, and for a fresh window after
+			// it recovers, instead of rolling back and being recreated.
+			if expired && strings.TrimSpace(infoPostZombie.LastWokeAt) == "" {
+				if endpoint := resolvedEndpointKey(tp, infoPostZombie); capacityGuard.HoldsPendingCreate(endpoint) {
+					expired = false
+					capacityHeld = true
+					if trace != nil {
+						_, st := capacityGuard.Eligible(endpoint)
+						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonEndpointCapacityOpen, TraceOutcomeDeferred, tp.TemplateName, name, traceRecordPayload{
+							"endpoint": string(endpoint),
+							"state":    st.State.String(),
+						})
+					}
+				}
+			}
+			if expired {
 				// infoPostZombie == infoByID[id] here, so the write-returns-Info
 				// result advances the snapshot identically (Step 6d, group 1).
 				rlNext, rateLimitHit, rateLimitErr := checkRateLimitStability(infoPostZombie, cfg, alive, dt, sessFront, clk, peek)
@@ -3121,7 +3142,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		stateBeforeHeal := sessionpkg.State(strings.TrimSpace(infoByID[id].MetadataState))
 		pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
 		lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[id].LastWokeAt)
-		healBatch, healErr := healStateWithRollbackInfo(infoByID[id], alive, true, sessFront, clk, startupTimeout, true)
+		healBatch, healErr := healStateWithRollbackInfo(infoByID[id], alive, true, sessFront, clk, startupTimeout, !capacityHeld)
 		if healErr != nil {
 			fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
 			continue
@@ -4146,6 +4167,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					continue // skip startCandidates; wake budget is NOT consumed
 				}
 			}
+			// Endpoint capacity gate: while the serving endpoint refuses
+			// starts and no probe is due, skip without writing or spending
+			// wake budget. Aggregated into the per-tick endpoint record.
+			endpoint := resolvedEndpointKey(target.tp, target.info)
+			if eligible, _ := capacityGuard.Eligible(endpoint); !eligible {
+				capacityGuard.noteDeferredWake(endpoint)
+				continue
+			}
 
 			if trace != nil {
 				trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeStartCandidate, target.tp.TemplateName, name, traceRecordPayload{
@@ -4474,6 +4503,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		effectiveStartOptions...,
 	)
 	startedThisTick = plannedWakes
+	capacityGuard.recordTick(trace, rec, stderr)
 	recordPhase(TraceSiteSessionReconcileStartExecution, "session_reconcile.execute_planned_starts", phaseStart, map[string]any{
 		"start_candidate_count": len(startCandidates),
 		"planned_wake_count":    plannedWakes,
