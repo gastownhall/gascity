@@ -354,6 +354,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 
 	// Merge child steps: override parent steps by ID (preserving position),
 	// append new child steps at the end.
+	inheritedScope := inheritedScopeRefs(merged.Steps)
 	merged.Steps = mergeSteps(merged.Steps, formula.Steps)
 	merged.Template = mergeSteps(merged.Template, formula.Template)
 
@@ -370,6 +371,9 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 	setFormulaCompilerConstraints(merged, compilerConstraints)
 
 	if err := merged.Validate(); err != nil {
+		return nil, err
+	}
+	if err := validateScopeMembership(merged, inheritedScope); err != nil {
 		return nil, err
 	}
 	if err := validateResolvedGraphV2DescriptionFiles(merged); err != nil {
