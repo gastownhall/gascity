@@ -1549,7 +1549,8 @@ func (s *SQLiteStore) ListOpen(status ...string) ([]Bead, error) {
 	return s.List(query)
 }
 
-// Ready returns open, unblocked actionable beads from the requested tier.
+// Ready returns open, unblocked actionable beads from the requested tier in
+// the canonical (priority, created_at, id) ready order.
 func (s *SQLiteStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
@@ -1617,9 +1618,6 @@ func (s *SQLiteStore) readyRows(ctx context.Context, q ReadyQuery) ([]Bead, erro
 			continue
 		}
 		result = append(result, b)
-		if q.Limit > 0 && len(result) >= q.Limit {
-			break
-		}
 	}
 	if err := rows.Err(); err != nil {
 		if ctxErr := contextErr(); ctxErr != nil {
@@ -1630,32 +1628,27 @@ func (s *SQLiteStore) readyRows(ctx context.Context, q ReadyQuery) ([]Bead, erro
 	if err := contextErr(); err != nil {
 		return nil, err
 	}
+	// Cut the Limit prefix only after the canonical sort, so a bounded read
+	// takes the same rows a cache-served read over this store takes (#3208).
+	if err := sortBeadsReadyOrderContext(ctx, result); err != nil {
+		return nil, err
+	}
+	if q.Limit > 0 && len(result) > q.Limit {
+		result = result[:q.Limit]
+	}
 	return result, nil
 }
 
-// sqliteReadySQL builds the ready projection query for q. Tier and limit
-// filtering is partly residual: wisp-tier reads decide tier membership after
-// decode, so the source-side LIMIT is only safe for the other tier modes.
+// sqliteReadySQL builds the ready projection query for q. It carries no ORDER
+// BY or LIMIT: readyRows filters after decode (wisp-tier membership, deferral,
+// excluded labels) and then sorts into the canonical ready order, so a
+// source-side LIMIT would cut the wrong prefix.
 func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
 	args := []any{}
 	where := []string{
 		"b.status='open'",
 		`b.issue_type NOT IN ('merge-request','gate','molecule','step','message','session','agent','role','rig')`,
-		fmt.Sprintf(`NOT EXISTS (
-			SELECT 1 FROM deps d
-			LEFT JOIN beads blocker ON blocker.id=d.depends_on_id
-			WHERE d.issue_id=b.id
-			  AND d.dep_type IN ('blocks','waits-for','conditional-blocks')
-			  AND (
-			    COALESCE(blocker.status, '') <> 'closed'
-			    OR EXISTS (
-			         SELECT 1 FROM metadata m
-			         WHERE m.bead_id = blocker.id
-			           AND m.meta_key = '%s'
-			           AND m.meta_value = '%s'
-			       )
-			  )
-		  )`, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked),
+		"NOT " + sqliteReadyBlockerExists("b.id"),
 	}
 	switch q.TierMode {
 	case TierWisps:
@@ -1670,11 +1663,31 @@ func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
 		sqlText += " AND b.assignee=?"
 		args = append(args, q.Assignee)
 	}
-	sqlText += " ORDER BY b.created_at ASC, b.id ASC"
-	if q.Limit > 0 && q.TierMode != TierWisps {
-		sqlText += fmt.Sprintf(" LIMIT %d", q.Limit)
-	}
 	return sqlText, args
+}
+
+// sqliteReadyBlockerExists is SQLite's one statement of "blocked": an EXISTS
+// over issueCol's blocks/waits-for/conditional-blocks edges whose target is not
+// closed, or closed with gc.work_outcome=blocked. A target missing from this
+// store (deleted, or another store's id) has no status and so blocks. Ready
+// negates it and enrichReadyProjectionForCache selects it, so the store and a
+// cache over it cannot disagree about which rows are blocked.
+func sqliteReadyBlockerExists(issueCol string) string {
+	return fmt.Sprintf(`EXISTS (
+			SELECT 1 FROM deps d
+			LEFT JOIN beads blocker ON blocker.id=d.depends_on_id
+			WHERE d.issue_id=%s
+			  AND d.dep_type IN ('blocks','waits-for','conditional-blocks')
+			  AND (
+			    COALESCE(blocker.status, '') <> 'closed'
+			    OR EXISTS (
+			         SELECT 1 FROM metadata m
+			         WHERE m.bead_id = blocker.id
+			           AND m.meta_key = '%s'
+			           AND m.meta_value = '%s'
+			       )
+			  )
+		  )`, issueCol, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked)
 }
 
 // Children returns all non-closed beads whose ParentID matches the given ID.

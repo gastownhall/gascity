@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 func newReadySQLiteStore(t *testing.T) *SQLiteStore {
@@ -289,5 +292,162 @@ func TestSQLiteStoreSatisfiesContextReadyReader(t *testing.T) {
 	store := newReadySQLiteStore(t)
 	if _, ok := Store(store).(ContextReadyReader); !ok {
 		t.Fatal("SQLiteStore does not satisfy ContextReadyReader; the beads adapter will veto context-ready reads")
+	}
+}
+
+// TestSQLiteStoreReadyOrderIsCanonical pins SQLite's ready order to the
+// canonical (priority, created_at, id) order a CachingStore serves (#3208):
+// a nil priority sorts as 2, equal priority and created_at fall back to the
+// id, and Limit cuts that order's prefix after the post-decode filters.
+func TestSQLiteStoreReadyOrderIsCanonical(t *testing.T) {
+	store := newReadySQLiteStore(t)
+	t0 := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	pri := func(p int) *int { return &p }
+	future := t0.Add(1000 * 24 * time.Hour)
+	for _, b := range []Bead{
+		// Inserted so neither creation order nor id order is the answer.
+		{ID: "gc-tie-z", Title: "p2 tie z", Priority: pri(2), CreatedAt: t0},
+		{ID: "gc-late", Title: "p0 late", Priority: pri(0), CreatedAt: t0.Add(time.Hour)},
+		{ID: "gc-tie-m", Title: "nil tie m", CreatedAt: t0},
+		{ID: "gc-early", Title: "p2 early", Priority: pri(2), CreatedAt: t0.Add(-time.Hour)},
+		{ID: "gc-p1", Title: "p1", Priority: pri(1), CreatedAt: t0.Add(2 * time.Hour)},
+		{ID: "gc-tie-a", Title: "p2 tie a", Priority: pri(2), CreatedAt: t0},
+		{ID: "gc-p3", Title: "p3", Priority: pri(3), CreatedAt: t0.Add(-2 * time.Hour)},
+		// Survives SQL but not the post-decode filter; a source-side LIMIT
+		// would spend a slot on it.
+		{ID: "gc-deferred", Title: "p0 deferred", Priority: pri(0), CreatedAt: t0.Add(-3 * time.Hour), DeferUntil: &future},
+	} {
+		if _, err := store.Create(b); err != nil {
+			t.Fatalf("Create(%s): %v", b.ID, err)
+		}
+	}
+	want := []string{"gc-late", "gc-p1", "gc-early", "gc-tie-a", "gc-tie-m", "gc-tie-z", "gc-p3"}
+
+	for _, tc := range []struct {
+		name  string
+		query ReadyQuery
+		want  []string
+	}{
+		{name: "default", want: want},
+		{name: "tier both", query: ReadyQuery{TierMode: TierBoth}, want: want},
+		{name: "tier wisps", query: ReadyQuery{TierMode: TierWisps}, want: nil},
+		{name: "limit 1", query: ReadyQuery{Limit: 1}, want: want[:1]},
+		{name: "limit 4", query: ReadyQuery{Limit: 4}, want: want[:4]},
+		{name: "tier both limit 5", query: ReadyQuery{TierMode: TierBoth, Limit: 5}, want: want[:5]},
+		{name: "limit past the end", query: ReadyQuery{Limit: 50}, want: want},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, err := store.Ready(tc.query)
+			if err != nil {
+				t.Fatalf("Ready: %v", err)
+			}
+			if got := readyBeadIDs(rows); !slices.Equal(got, tc.want) {
+				t.Fatalf("Ready(%+v) = %v, want %v", tc.query, got, tc.want)
+			}
+			rows, err = store.ReadyContext(context.Background(), tc.query)
+			if err != nil {
+				t.Fatalf("ReadyContext: %v", err)
+			}
+			if got := readyBeadIDs(rows); !slices.Equal(got, tc.want) {
+				t.Fatalf("ReadyContext(%+v) = %v, want %v", tc.query, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSQLiteEnrichReadyProjectionEqualsReadySQL proves the is_blocked column
+// the store hands a CachingStore is exactly the blocking predicate its own
+// Ready negates: every non-closed row gets a verdict, and a ready candidate is
+// in Ready iff its verdict is false. The corpus spans more than one projection
+// batch and every blocker shape the two readers could disagree on.
+func TestSQLiteEnrichReadyProjectionEqualsReadySQL(t *testing.T) {
+	store := newReadySQLiteStore(t)
+	mk := func(b Bead) Bead {
+		t.Helper()
+		created, err := store.Create(b)
+		if err != nil {
+			t.Fatalf("Create(%q): %v", b.Title, err)
+		}
+		return created
+	}
+	dep := func(issue Bead, target, depType string) {
+		t.Helper()
+		if err := store.DepAdd(issue.ID, target, depType); err != nil {
+			t.Fatalf("DepAdd(%s -> %s): %v", issue.ID, target, err)
+		}
+	}
+	for i := 0; i < sqliteReadyProjectionBatch; i++ {
+		mk(Bead{Title: fmt.Sprintf("filler-%03d", i)})
+	}
+
+	openBlocker := mk(Bead{Title: "open blocker"})
+	// Delete drops the edges onto a row, so the edge onto a missing blocker is
+	// added after the delete.
+	gone := mk(Bead{Title: "deleted blocker"})
+	if err := store.Delete(gone.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	closedBlocker := mk(Bead{Title: "closed blocker"})
+	failedBlocker := mk(Bead{Title: "closed blocked-outcome blocker"})
+	wantBlocked := map[string]bool{}
+	blockedBy := func(title, target, depType string, blocked bool) {
+		t.Helper()
+		b := mk(Bead{Title: title})
+		dep(b, target, depType)
+		wantBlocked[b.ID] = blocked
+	}
+	blockedBy("blocked by open", openBlocker.ID, "blocks", true)
+	blockedBy("waits for open", openBlocker.ID, "waits-for", true)
+	blockedBy("conditionally blocked by open", openBlocker.ID, "conditional-blocks", true)
+	blockedBy("child of open parent", openBlocker.ID, "parent-child", false)
+	blockedBy("blocked by missing", gone.ID, "blocks", true)
+	blockedBy("blocked by foreign", "zzforeign-1", "blocks", true)
+	blockedBy("released by close", closedBlocker.ID, "blocks", false)
+	blockedBy("blocked by blocked outcome", failedBlocker.ID, "blocks", true)
+	inProgress := mk(Bead{Title: "in progress, blocked by foreign", Status: "in_progress"})
+	dep(inProgress, "zzforeign-2", "blocks")
+	wantBlocked[inProgress.ID] = true
+
+	if err := store.Close(closedBlocker.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := store.CloseAll([]string{failedBlocker.ID}, map[string]string{
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+	}); err != nil {
+		t.Fatalf("CloseAll: %v", err)
+	}
+
+	rows, err := store.List(ListQuery{AllowScan: true, TierMode: TierBoth})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	enriched, err := store.enrichReadyProjectionForCache(rows)
+	if err != nil {
+		t.Fatalf("enrichReadyProjectionForCache: %v", err)
+	}
+	ready, err := store.Ready(ReadyQuery{TierMode: TierBoth})
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	inReady := make(map[string]bool, len(ready))
+	for _, b := range ready {
+		inReady[b.ID] = true
+	}
+
+	now := time.Now()
+	for _, b := range enriched {
+		if b.IsBlocked == nil {
+			t.Fatalf("row %s (%q) got no verdict", b.ID, b.Title)
+		}
+		if want, pinned := wantBlocked[b.ID]; pinned && *b.IsBlocked != want {
+			t.Errorf("row %s (%q): IsBlocked = %v, want %v", b.ID, b.Title, *b.IsBlocked, want)
+		}
+		if IsReadyCandidateForTier(b, now, TierBoth) && inReady[b.ID] == *b.IsBlocked {
+			t.Errorf("row %s (%q): IsBlocked = %v but in Ready = %v", b.ID, b.Title, *b.IsBlocked, inReady[b.ID])
+		}
+	}
+	if len(enriched) != len(rows) || len(enriched) <= sqliteReadyProjectionBatch {
+		t.Fatalf("enriched %d of %d rows; want every row, across more than one batch of %d",
+			len(enriched), len(rows), sqliteReadyProjectionBatch)
 	}
 }

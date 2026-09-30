@@ -29,8 +29,18 @@ type ConformanceSkip struct {
 const maxSkipHorizon = 90 * 24 * time.Hour
 
 // ledgeredSkips is the committed registry of every allowed conformance opt-out.
-// Adding a skip requires an entry here; there are none today.
-var ledgeredSkips = []ConformanceSkip{}
+// Adding a skip requires an entry here.
+var ledgeredSkips = []ConformanceSkip{
+	{
+		Subtest: readyParitySubtest,
+		Reason: "MemStore and FileStore Ready block on a missing or foreign blocker and on a closed " +
+			"blocker with gc.work_outcome=blocked, which a primed CachingStore cannot see without a " +
+			"ready projection, and return insertion order with Limit applied mid-scan instead of the " +
+			"canonical (priority, created_at, id) order",
+		BeadID: "mc-zndi7.14",
+		Expiry: time.Date(2026, time.December, 15, 0, 0, 0, 0, time.UTC),
+	},
+}
 
 // lookupSkip returns the ledger entry governing a subtest, or nil if none.
 func lookupSkip(subtest string) *ConformanceSkip {

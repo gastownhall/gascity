@@ -178,6 +178,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Ready work in a SQLite infra ledger is served priority-first.** On a city
+  that relocates classes to a `sqlite-beads` binding, that ledger's ready read
+  returned rows oldest-first (`created_at, id`). It now returns the canonical
+  `(priority, created_at, id)` order that `bd ready` and gc's cached ready
+  reads already use, and a bounded read takes the first rows of that order.
+  When several ready beads in the ledger route to one pool template, a new
+  session is now bound to the highest-priority one first, oldest first within
+  a priority. A bounded read also stops coming back short when deferred or
+  infrastructure rows sort among its first matches.
+
 - **Closed session beads in a SQLite infra ledger are purged after
   `GC_INFRA_SESSION_PURGE_AGE` (default 72h).** This applies only when a city
   relocates sessions to a SQLite infra ledger and `wisp_ttl` is greater than
