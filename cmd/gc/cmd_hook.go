@@ -476,7 +476,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			os.Getenv("GC_SESSION_ID"), failureTemplate, command, err)
 	}
 	runner := func(command, _ string) (string, error) {
-		out, _, err := bestStoreWithWork(command, stores, stores[0], shellWorkQueryWithEnv)
+		out, _, err := bestStoreWithWork(command, stores, stores[0], hookServeRunner(stderr))
 		emitQueryFailure(command, err)
 		return out, err
 	}
@@ -769,7 +769,7 @@ func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, store
 		return 1
 	}
 	ops := classRoutedHookClaimOps(hookClaimOps{}, route)
-	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
+	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, hookServeRunner(stderr), emitFailure, stdout, stderr)
 }
 
 // claimHookWorkWithRunner is claimHookWork with the work-query runner and claim
