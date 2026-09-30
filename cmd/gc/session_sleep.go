@@ -76,24 +76,21 @@ func resolveSleepCapability(sp runtime.Provider, name string) runtime.SessionSle
 			return capability
 		}
 	}
-	caps := sp.Capabilities()
-	switch {
-	case caps.CanReportActivity && caps.CanReportAttachment:
-		return runtime.SessionSleepCapabilityFull
-	case caps.CanReportActivity:
-		return runtime.SessionSleepCapabilityTimedOnly
-	default:
-		return runtime.SessionSleepCapabilityDisabled
-	}
+	return runtime.SleepCapabilityFromCapabilities(sp.Capabilities())
 }
 
+// sessionActivityReportable reads the capabilities of the backend that serves
+// name, not a composite's intersection: under auto the route table is also
+// what GetLastActivity dispatches on, so the answer describes the backend the
+// activity read reaches even before the table is seeded.
 func sessionActivityReportable(sp runtime.Provider, name string) bool {
 	if sp == nil || name == "" {
 		return false
 	}
 	sleepCapability := resolveSleepCapability(sp, name)
+	caps, _ := runtime.CapabilitiesFor(sp, name)
 	return sleepCapability != runtime.SessionSleepCapabilityDisabled &&
-		(sleepCapability != runtime.SessionSleepCapabilityTimedOnly || sp.Capabilities().CanReportActivity)
+		(sleepCapability != runtime.SessionSleepCapabilityTimedOnly || caps.CanReportActivity)
 }
 
 func sessionSleepFingerprint(agent *config.Agent, policy resolvedSessionSleepPolicy) string {

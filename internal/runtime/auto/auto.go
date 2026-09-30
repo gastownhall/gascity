@@ -22,6 +22,9 @@ type Provider struct {
 
 	mu     sync.RWMutex
 	routes map[string]bool // true = ACP
+	// seeded is set once SeedRoutes has loaded the route table from the
+	// session beads, so a session without an ACP route is known to be default.
+	seeded bool
 }
 
 var (
@@ -40,6 +43,7 @@ var (
 	_ runtime.BackendListingProvider        = (*Provider)(nil)
 	_ runtime.BackendsProvider              = (*Provider)(nil)
 	_ runtime.ListingAttestation            = (*Provider)(nil)
+	_ runtime.Router                        = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -68,14 +72,42 @@ func (p *Provider) Unroute(name string) {
 	p.mu.Unlock()
 }
 
-func (p *Provider) route(name string) runtime.Provider {
+// SeedRoutes registers every name as an ACP session and marks the route
+// table seeded: the caller derived names from the complete set of session
+// beads, so any other session routes to the default backend. Routes already
+// registered are kept.
+func (p *Provider) SeedRoutes(names []string) {
+	p.mu.Lock()
+	for _, name := range names {
+		p.routes[name] = true
+	}
+	p.seeded = true
+	p.mu.Unlock()
+}
+
+// RouteFor implements [runtime.Router]. An explicit ACP route is always
+// known; the default route is known only once SeedRoutes has run.
+func (p *Provider) RouteFor(name string) runtime.Route {
 	p.mu.RLock()
 	isACP := p.routes[name]
+	seeded := p.seeded
 	p.mu.RUnlock()
 	if isACP {
-		return p.acpSP
+		return runtime.Route{Backend: p.acpBackend(), Known: true}
 	}
-	return p.defaultSP
+	return runtime.Route{Backend: p.defaultBackend(), Known: seeded}
+}
+
+func (p *Provider) defaultBackend() runtime.Backend {
+	return runtime.Backend{Label: "default", Provider: p.defaultSP}
+}
+
+func (p *Provider) acpBackend() runtime.Backend {
+	return runtime.Backend{Label: "acp", Provider: p.acpSP}
+}
+
+func (p *Provider) route(name string) runtime.Provider {
+	return p.RouteFor(name).Provider
 }
 
 // SupportsTransport reports whether this provider can route the requested
@@ -396,7 +428,7 @@ func (p *Provider) ListRunningByBackend(prefix string) []runtime.BackendListing 
 
 // Backends implements [runtime.BackendsProvider] without listing.
 func (p *Provider) Backends() []runtime.Backend {
-	return []runtime.Backend{{Label: "default", Provider: p.defaultSP}, {Label: "acp", Provider: p.acpSP}}
+	return []runtime.Backend{p.defaultBackend(), p.acpBackend()}
 }
 
 // ListRunningComplete implements [runtime.ListingAttestation]: the merged
@@ -446,12 +478,14 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	}
 }
 
-// SleepCapability reports idle sleep capability for the routed backend.
+// SleepCapability reports idle sleep capability for the routed backend,
+// derived from its capabilities when it does not report one itself.
 func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
-	if scp, ok := p.route(name).(runtime.SleepCapabilityProvider); ok {
+	routed := p.route(name)
+	if scp, ok := routed.(runtime.SleepCapabilityProvider); ok {
 		return scp.SleepCapability(name)
 	}
-	return runtime.SessionSleepCapabilityDisabled
+	return runtime.SleepCapabilityFromCapabilities(routed.Capabilities())
 }
 
 // SubscribeSessionEvents forwards the session-event streams of the backends

@@ -528,6 +528,9 @@ func newTestCityRuntime(t *testing.T, params CityRuntimeParams) *CityRuntime {
 		for _, od := range cr.retiredOrderDispatchers {
 			cancelInflight(od)
 		}
+		// A reload restarts the config watcher; stop it so its debounce
+		// goroutine does not outlive the test.
+		cr.stopConfigWatcher()
 		cr.shutdown()
 	})
 	return cr

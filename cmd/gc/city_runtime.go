@@ -164,6 +164,12 @@ type CityRuntime struct {
 	// tick, the control dispatcher and the orders lane all run.
 	managedDoltPreflightMu sync.Mutex
 
+	// acpRouteSeed is the input of the last seedACPRoutes. The tick and the
+	// control dispatcher reach it through their snapshot loads, both on the
+	// controller loop; the mutex guards a caller off that loop.
+	acpRouteSeedMu sync.Mutex
+	acpRouteSeed   acpRouteSeedKey
+
 	// orderSetScan overrides the order-set scan (tests); nil scans the city.
 	orderSetScan func(cityRoot string, cfg *config.City, cmdName string) (orderSetSnapshot, error)
 	// afterReloadStagesOrders, when set (tests), runs right after a config
@@ -2249,7 +2255,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 		newProviderName = v
 	}
 	if newProviderName != *lastProviderName || packRuntimeDeclarationChanged(cr.cfg, nextCfg, newProviderName) {
-		newSp, spErr := newSessionProviderForCityByName(nextCfg, newProviderName, nextCfg.Session, cr.cityName, cr.cityPath)
+		// Build through the transport resolver, not the bare registry, so a city
+		// that routes some sessions to ACP keeps its auto composition.
+		newSp, spErr := resolveSessionTransportProvider(sessionProviderContextForCity(nextCfg, cr.cityPath, newProviderName), cr.loadSessionBeadSnapshot())
 		if spErr != nil {
 			appendWarning(fmt.Sprintf("new session provider %q: %v (keeping old provider)", newProviderName, spErr))
 		} else {
@@ -3847,6 +3855,7 @@ func (cr *CityRuntime) loadTickSessionBeadSnapshot(trigger string) *sessionBeadS
 	}
 	sessionBeads, err := loadSessionBeadSnapshotLive(store.Store, true)
 	if err == nil {
+		cr.seedACPRoutes(sessionBeads)
 		return sessionBeads
 	}
 	fmt.Fprintf(cr.stderr, "%s: loading session beads live for %s tick: %v (using cached snapshot)\n", cr.logPrefix, trigger, err) //nolint:errcheck
@@ -3865,7 +3874,34 @@ func (cr *CityRuntime) loadSessionBeadSnapshotWithPartial() (*sessionBeadSnapsho
 		fmt.Fprintf(cr.stderr, "%s: loading session beads: %v\n", cr.logPrefix, err) //nolint:errcheck
 		return nil, true
 	}
+	cr.seedACPRoutes(sessionBeads)
 	return sessionBeads, false
+}
+
+// acpRouteSeedKey identifies the inputs of the last ACP route seed.
+// publishRuntimeConfig replaces cfg and sp together, so the config pointer
+// also stands for the provider.
+type acpRouteSeedKey struct {
+	cfg         *config.City
+	fingerprint string
+}
+
+// seedACPRoutes seeds the provider's ACP route table from a loaded session
+// snapshot, so the routes the session beads name are registered after a
+// restart, a provider swap, or an Unroute. Seeding only adds routes; it never
+// removes one the beads no longer name. A snapshot with the same fingerprint
+// under the same config already seeded the table, so a poke does not pay the
+// config walk again.
+func (cr *CityRuntime) seedACPRoutes(snapshot *sessionBeadSnapshot) {
+	cfg, sp := cr.serviceProviderSnapshot()
+	key := acpRouteSeedKey{cfg: cfg, fingerprint: sessionBeadSnapshotFingerprint(snapshot)}
+	cr.acpRouteSeedMu.Lock()
+	defer cr.acpRouteSeedMu.Unlock()
+	if key.fingerprint != "" && key == cr.acpRouteSeed {
+		return
+	}
+	seedACPRoutesFromSnapshot(sp, snapshot, cr.cityName, cfg)
+	cr.acpRouteSeed = key
 }
 
 // filterSessionInfosByName selects the open sessions matched on the RAW

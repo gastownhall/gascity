@@ -32,6 +32,7 @@ var (
 	_ runtime.BackendListingProvider        = (*Provider)(nil)
 	_ runtime.BackendsProvider              = (*Provider)(nil)
 	_ runtime.ListingAttestation            = (*Provider)(nil)
+	_ runtime.Router                        = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -40,11 +41,25 @@ func New(local, remote runtime.Provider, isRemote func(string) bool) *Provider {
 	return &Provider{local: local, remote: remote, isRemote: isRemote}
 }
 
-func (p *Provider) route(name string) runtime.Provider {
+// RouteFor implements [runtime.Router]. The route is a pure function of the
+// session name, so it is always known.
+func (p *Provider) RouteFor(name string) runtime.Route {
 	if p.isRemote(name) {
-		return p.remote
+		return runtime.Route{Backend: p.remoteBackend(), Known: true}
 	}
-	return p.local
+	return runtime.Route{Backend: p.localBackend(), Known: true}
+}
+
+func (p *Provider) localBackend() runtime.Backend {
+	return runtime.Backend{Label: "local", Provider: p.local}
+}
+
+func (p *Provider) remoteBackend() runtime.Backend {
+	return runtime.Backend{Label: "remote", Provider: p.remote}
+}
+
+func (p *Provider) route(name string) runtime.Provider {
+	return p.RouteFor(name).Provider
 }
 
 // Start delegates to the routed backend.
@@ -228,7 +243,7 @@ func (p *Provider) ListRunningByBackend(prefix string) []runtime.BackendListing 
 
 // Backends implements [runtime.BackendsProvider] without listing.
 func (p *Provider) Backends() []runtime.Backend {
-	return []runtime.Backend{{Label: "local", Provider: p.local}, {Label: "remote", Provider: p.remote}}
+	return []runtime.Backend{p.localBackend(), p.remoteBackend()}
 }
 
 // ListRunningComplete implements [runtime.ListingAttestation]: the merged
@@ -278,12 +293,14 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	}
 }
 
-// SleepCapability reports idle sleep capability for the routed backend.
+// SleepCapability reports idle sleep capability for the routed backend,
+// derived from its capabilities when it does not report one itself.
 func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
-	if scp, ok := p.route(name).(runtime.SleepCapabilityProvider); ok {
+	routed := p.route(name)
+	if scp, ok := routed.(runtime.SleepCapabilityProvider); ok {
 		return scp.SleepCapability(name)
 	}
-	return runtime.SessionSleepCapabilityDisabled
+	return runtime.SleepCapabilityFromCapabilities(routed.Capabilities())
 }
 
 // SubscribeSessionEvents forwards the session-event streams of the backends

@@ -651,6 +651,7 @@ go_test(
     name = "gc_test",
     size = "large",
     srcs = [
+        "acp_route_seed_test.go",
         "adoption_barrier_test.go",
         "agent_home_worktree_cleanup_test.go",
         "api_state_cache_reconcile_snapshot_test.go",

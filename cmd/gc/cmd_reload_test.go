@@ -963,6 +963,8 @@ func TestReloadConfigTracedRebuildsProviderWhenPackRuntimeCommandChanges(t *test
 		stderr:     &stderr,
 		logPrefix:  "gc test",
 	}
+	// The reload restarts the config watcher; stop it with the test.
+	t.Cleanup(cr.stopConfigWatcher)
 	lastProviderName := cfg.Session.Provider
 
 	// Same selection name, different declared command. The exec proxy
