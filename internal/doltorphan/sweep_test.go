@@ -393,3 +393,34 @@ func TestSweep_SentinelFileExemptsTopLevelCandidate(t *testing.T) {
 		t.Fatalf("nested store dir %s should survive under sentinel exemption: %v", storeDir, err)
 	}
 }
+
+// TestSweep_NoReapMarkerExemptsTopLevelCandidate covers the ".gc-no-reap"
+// keep marker that packs/actual's vartmp-scratch-reaper already honors
+// (ga-v83niq). Agents on a shared host mark a directory they keep on
+// purpose with that name, so a sweep that honored only ".no-orphan-sweep"
+// deleted a kept Dolt clone that carried it. Same contract as the sentinel
+// above: a marker directly inside a top-level candidate exempts it
+// regardless of age or any nested .dolt marker.
+func TestSweep_NoReapMarkerExemptsTopLevelCandidate(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "kept-clone", 2, old)
+	storeDir := storeDirFor(dir, 2)
+
+	if err := os.WriteFile(filepath.Join(dir, ".gc-no-reap"), nil, 0o644); err != nil {
+		t.Fatalf("WriteFile(.gc-no-reap): %v", err)
+	}
+	// Re-age dir: writing the marker just refreshed its mtime.
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatalf("Chtimes(%s): %v", dir, err)
+	}
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: noLsofHits})
+
+	if len(result.Removed) != 0 {
+		t.Fatalf("Removed = %v, want none (.gc-no-reap marker present)", result.Removed)
+	}
+	if _, err := os.Stat(storeDir); err != nil {
+		t.Fatalf("nested store dir %s should survive under the .gc-no-reap marker: %v", storeDir, err)
+	}
+}
