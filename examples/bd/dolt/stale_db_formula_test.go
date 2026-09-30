@@ -20,6 +20,9 @@ func staleDBFilteredEnv(keys ...string) []string {
 		"GC_ESCALATION_RECIPIENT",
 		"GC_SYSTEM_PACKS_DIR",
 		"GC_MAINTENANCE_DONE_TARGET",
+		// The close actor chain leads with BEADS_ACTOR; never let the host
+		// session's own actor leak into a rendered-script run.
+		"BEADS_ACTOR",
 	)
 	return filteredEnv(keys...)
 }
@@ -405,6 +408,7 @@ esac
 	cmd.Stdin = strings.NewReader(script)
 	cmd.Env = append(staleDBFilteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_APPLY_JSON"),
 		"GC_BEAD_ID=bead-1",
+		"GC_ALIAS=dog-alpha",
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"TMPDIR="+dir,
 		"GC_TEST_LOG="+logPath,
@@ -423,7 +427,131 @@ esac
 	for _, want := range []string{
 		"gc dolt-cleanup --json --probe --force --max-orphan-dbs 20",
 		"gc event emit mol-dog-stale-db.done --message 1200 bytes freed; 0 errors",
-		"bd close bead-1",
+		"bd close bead-1 --actor dog-alpha",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
+		}
+	}
+	if strings.Contains(log, "mol-dog-stale-db.escalate") {
+		t.Fatalf("rendered script escalated at dropped.count == max_orphans_for_sql; want apply because threshold is >\nlog:\n%s\noutput:\n%s", log, out)
+	}
+}
+
+// TestStaleDBFormulaCloseUsesClaimIdentityForUnaliasedPool pins the close
+// actor chain for an unaliased pool dog, the shape every bd-pack dog has. Such
+// a session claims its wisp under its session bead ID (gc hook --claim records
+// alias > GC_SESSION_ID) and exports that same ID as BEADS_ACTOR, while
+// GC_SESSION_NAME stays the runtime name (<template>-<beadID>). bd fences the
+// close on actor == assignee byte for byte, so closing as the session name is
+// rejected and the successful run is left open (the #5716 shape). GC_ALIAS is
+// exported as an empty string rather than left unset, so every tier must use
+// `:-` (empty-or-unset) and not `-`.
+func TestStaleDBFormulaCloseUsesClaimIdentityForUnaliasedPool(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{
+			name: "beads actor",
+			env:  []string{"GC_ALIAS=", "BEADS_ACTOR=gc-dog7", "GC_SESSION_ID=gc-dog7", "GC_SESSION_NAME=dolt__dog-gc-dog7"},
+			want: "bd close bead-1 --actor gc-dog7",
+		},
+		{
+			name: "session id when beads actor absent",
+			env:  []string{"GC_ALIAS=", "GC_SESSION_ID=gc-dog7", "GC_SESSION_NAME=dolt__dog-gc-dog7"},
+			want: "bd close bead-1 --actor gc-dog7",
+		},
+		{
+			name: "session name last",
+			env:  []string{"GC_ALIAS=", "BEADS_ACTOR=", "GC_SESSION_NAME=dog-session-7"},
+			want: "bd close bead-1 --actor dog-session-7",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runStaleDBFormulaCloseActorCase(t, tc.env, tc.want)
+		})
+	}
+}
+
+func runStaleDBFormulaCloseActorCase(t *testing.T, identityEnv []string, wantClose string) {
+	t.Helper()
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not found: %v", err)
+	}
+
+	script := renderStaleDBFormulaShell(t)
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	logPath := filepath.Join(dir, "commands.log")
+	scanPath := filepath.Join(dir, "scan.json")
+	applyPath := filepath.Join(dir, "apply.json")
+	writeTestFile(t, scanPath, `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":20,"failed":[]},"purge":{"bytes_reclaimed":1000},"reaped":{"count":0,"targets":[{"pid":1},{"pid":2}]},"summary":{"bytes_freed_disk":1000,"bytes_freed_rss":200,"errors_total":0}}`)
+	writeTestFile(t, applyPath, `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":20,"failed":[]},"purge":{"bytes_reclaimed":1000},"reaped":{"count":2,"targets":[{"pid":1},{"pid":2}]},"summary":{"bytes_freed_disk":1000,"bytes_freed_rss":200,"errors_total":0}}`)
+	writeTestFile(t, filepath.Join(binDir, "gc"), `#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-} ${2:-}" in
+  "dolt-cleanup "*)
+    echo "gc $*" >> "$GC_TEST_LOG"
+    case " $* " in
+      *" --force "*) cat "$GC_TEST_APPLY_JSON" ;;
+      *) cat "$GC_TEST_SCAN_JSON" ;;
+    esac
+    ;;
+  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+    echo "gc $*" >> "$GC_TEST_LOG"
+    ;;
+  *)
+    echo "unexpected gc command: $*" >&2
+    exit 64
+    ;;
+esac
+`, 0o755)
+	writeTestFile(t, filepath.Join(binDir, "bd"), `#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  update|close)
+    echo "bd $*" >> "$GC_TEST_LOG"
+    ;;
+  *)
+    echo "unexpected bd command: $*" >&2
+    exit 64
+    ;;
+esac
+`, 0o755)
+
+	cmd := exec.Command("bash", "-s")
+	cmd.Stdin = strings.NewReader(script)
+	cmd.Env = append(staleDBFilteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_APPLY_JSON"),
+		"GC_BEAD_ID=bead-1",
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"TMPDIR="+dir,
+		"GC_TEST_LOG="+logPath,
+		"GC_TEST_SCAN_JSON="+scanPath,
+		"GC_TEST_APPLY_JSON="+applyPath,
+	)
+	cmd.Env = append(cmd.Env, identityEnv...)
+	out, err := cmd.CombinedOutput()
+	logData, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(%s): %v\noutput:\n%s", logPath, readErr, out)
+	}
+	log := string(logData)
+	if err != nil {
+		t.Fatalf("rendered script failed: %v\nlog:\n%s\noutput:\n%s", err, log, out)
+	}
+	for _, want := range []string{
+		"gc dolt-cleanup --json --probe --force --max-orphan-dbs 20",
+		"gc event emit mol-dog-stale-db.done --message 1200 bytes freed; 0 errors",
+		wantClose,
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)

@@ -722,6 +722,9 @@ type AgentOverride struct {
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
+	// AutoReclaimStaleClaims overrides Agent.AutoReclaimStaleClaims (see that
+	// field for semantics).
+	AutoReclaimStaleClaims *bool `toml:"auto_reclaim_stale_claims,omitempty"`
 	// InstallAgentHooks overrides the agent's install_agent_hooks list.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
 	// Skills is a tombstone field retained for v0.15.1 backwards
@@ -1758,7 +1761,19 @@ type ACPSessionConfig struct {
 	// OutputBufferLines is the number of output lines to keep in the
 	// circular buffer for Peek. Defaults to 1000.
 	OutputBufferLines int `toml:"output_buffer_lines,omitempty" jsonschema:"default=1000"`
+	// StopGrace is how long stopping an ACP session waits after SIGTERM
+	// before escalating to SIGKILL. Raise it for agents that need longer to
+	// drain in-flight tool calls on shutdown. Duration string (e.g., "5s",
+	// "20s"). Defaults to "5s"; non-positive or unparseable values fall back
+	// to the default. gc stop bounds each session at 30s, so keep stop_grace
+	// comfortably below that.
+	StopGrace string `toml:"stop_grace,omitempty" jsonschema:"default=5s"`
 }
+
+// DefaultACPStopGrace is the ACP SIGTERM-to-SIGKILL grace used when
+// [session.acp] stop_grace is unset or invalid. It matches the grace every
+// managed-process runtime uses.
+const DefaultACPStopGrace = 5 * time.Second
 
 // HandshakeTimeoutDuration returns the handshake timeout as a time.Duration.
 // Defaults to 30s if empty or unparseable.
@@ -1770,6 +1785,15 @@ func (a *ACPSessionConfig) HandshakeTimeoutDuration() time.Duration {
 // Defaults to 60s if empty or unparseable.
 func (a *ACPSessionConfig) NudgeBusyTimeoutDuration() time.Duration {
 	return durationOr(a.NudgeBusyTimeout, 60*time.Second)
+}
+
+// StopGraceDuration returns the ACP stop grace as a time.Duration.
+// Defaults to DefaultACPStopGrace if empty, unparseable, or non-positive.
+func (a *ACPSessionConfig) StopGraceDuration() time.Duration {
+	if d := durationOr(a.StopGrace, DefaultACPStopGrace); d > 0 {
+		return d
+	}
+	return DefaultACPStopGrace
 }
 
 // OutputBufferLinesOrDefault returns the output buffer line count.
@@ -1808,8 +1832,11 @@ type MailConfig struct {
 	// Provider selects the mail backend: "fake", "fail",
 	// "exec:<script>", or "" (default: beadmail).
 	Provider string `toml:"provider,omitempty"`
-	// RetentionTTL is how long read messages are retained before purge. Empty
-	// or "0" disables read-message retention.
+	// RetentionTTL has two consumers: it is how long read messages are
+	// retained before purge, and how long a read mail bead stays open before
+	// the nudge-mail sweep closes it. Empty or "0" disables read-message
+	// purge. The sweep distinguishes the two: empty leaves it at its own
+	// 60-minute default, while "0" disables its mail-close phase.
 	RetentionTTL string `toml:"retention_ttl,omitempty"`
 }
 
@@ -2124,10 +2151,23 @@ type OrdersConfig struct {
 	// BurntSushi's omitempty does not drop a zero int, so a plain int would
 	// emit max_dispatches_per_tick = 0 into every marshaled city.toml.
 
-	// MaxDispatchesPerTick caps how many orders the supervisor dispatches
-	// per tick. Unset keeps the built-in default of 4; set to 1 to drain
-	// overdue cooldown orders one-per-tick at cold start instead of firing
-	// several concurrent goroutines at once.
+	// MaxDispatchesPerTick caps how many clock-driven orders (cooldown, cron
+	// and event triggers) the supervisor dispatches per orders-lane pass, in
+	// a rotation that resumes where the previous pass stopped. The key keeps
+	// its historical name from when order dispatch ran once per controller
+	// tick. Unset keeps the built-in default of 4; set to 1 to drain overdue
+	// cooldown orders one per pass at cold start instead of firing several
+	// concurrent goroutines at once. Condition-triggered orders are outside
+	// this budget: a passing check means work is pending right now, so they
+	// dispatch on the pass that observes it. The open-tracking and open-work
+	// gates still run for them (unless the order sets no_work_gate), but
+	// those gates are keyed per order and only hold back a redispatch of an
+	// order whose previous run is still moving, so they do not bound the pass
+	// as a whole: a pass launches at most this budget plus one dispatch per
+	// condition order whose check passed on that pass. That second term grows
+	// with how many condition orders a city defines, not with this setting,
+	// and at cold start, before any tracking bead exists, neither gate holds
+	// a simultaneously-due set back.
 	MaxDispatchesPerTick *int `toml:"max_dispatches_per_tick,omitempty"`
 	// Overrides apply per-order field overrides after scanning.
 	// Each override targets an order by name and optionally by rig.
@@ -3375,6 +3415,11 @@ type Agent struct {
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle string `toml:"sleep_after_idle,omitempty"`
+	// AutoReclaimStaleClaims opts this agent into gc hook --claim attempting
+	// a scoped stale-lease reclaim (via `bd reclaim --id`) when a
+	// route-matched candidate's only claim blocker is an existing assignee.
+	// Off by default; staleness is decided entirely by bd's own lease TTL.
+	AutoReclaimStaleClaims bool `toml:"auto_reclaim_stale_claims,omitempty"`
 	// InstallAgentHooks overrides workspace-level install_agent_hooks for this agent.
 	// When set, replaces (not adds to) the workspace default.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
@@ -4669,6 +4714,13 @@ func Parse(data []byte) (*City, error) {
 	cfg := City{}
 	md, err := toml.Decode(string(data), &cfg)
 	if err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	// Parse intentionally preserves non-storage legacy authoring surfaces for
+	// the migration reader. The removed Dolt mode is topology authority, never
+	// migration input, so reject it at decode time without broadening that
+	// tolerance.
+	if err := validateDoltModeAuthoringSurface(md); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	if err := validateStorageAuthoringSurface(md); err != nil {

@@ -3,6 +3,8 @@ package exec
 import (
 	"path/filepath"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestSeamBackedCapabilitiesParity(t *testing.T) {
@@ -21,5 +23,19 @@ func TestSeamBackedCapabilitiesParity(t *testing.T) {
 	got := seam.Capabilities()
 	if got != want {
 		t.Fatalf("seam-backed Capabilities = %+v, want parity with raw %+v", got, want)
+	}
+}
+
+// ListRunning is not complete here: an adapter that exits 2 (unknown
+// operation) reads as zero sessions. An error-free listing is therefore no
+// proof of absence, and the provider must stay unattested until its listing
+// reports that gap.
+// Kills: a listing attestation declared while ListRunning still omits live
+// sessions.
+func TestListRunningIsNotAttested(t *testing.T) {
+	for _, sp := range []any{(*Provider)(nil), (*seamBackedProvider)(nil)} {
+		if _, ok := sp.(runtime.ListingAttestation); ok {
+			t.Errorf("%T declares runtime.ListingAttestation", sp)
+		}
 	}
 }

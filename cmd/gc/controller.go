@@ -30,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -213,30 +214,24 @@ func handleControllerConn(
 			fmt.Fprintf(conn, "%d\n", os.Getpid()) //nolint:errcheck // best-effort
 		case line == controllerIdentityCommand:
 			writeJSONLine(conn, controllerIdentityReply{PID: os.Getpid(), HostingMode: hostingMode})
-		case line == "poke":
-			// Non-blocking send: triggers immediate reconciler tick for
-			// event-driven wake after sling assigns work.
-			select {
-			case pokeCh <- struct{}{}:
-			default: // poke already pending
-			}
+		case line == "poke" || strings.HasPrefix(line, pokeKeyedCommandPrefix):
+			// "poke" or "poke:<json key>" (see reconcile_enqueue.go): a
+			// non-blocking enqueue for event-driven wake, e.g. after sling
+			// assigns work or a session is drained. Key-less = allocator.
+			key, _ := parsePokeSocketCommand(line)
+			legacyEnqueue(pokeCh, controlDispatcherCh, key)
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case line == "reload":
 			if dirty != nil {
 				dirty.Store(true)
 			}
-			select {
-			case pokeCh <- struct{}{}:
-			default:
-			}
+			// Config reload re-plans the whole city: allocator.
+			legacyEnqueue(pokeCh, nil, reconcilekey.Allocator())
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case strings.HasPrefix(line, "reload:"):
 			handleReloadSocketCmd(conn, line[len("reload:"):], reloadReqCh)
 		case line == "control-dispatcher":
-			select {
-			case controlDispatcherCh <- struct{}{}:
-			default:
-			}
+			legacyEnqueue(nil, controlDispatcherCh, reconcilekey.ControlDispatch())
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case strings.HasPrefix(line, sessionCircuitResetCommandPrefix):
 			handleSessionCircuitResetSocketCmd(conn, cityPath, line[len(sessionCircuitResetCommandPrefix):])
@@ -244,17 +239,11 @@ func handleControllerConn(
 			handleConvergeSocketCmd(conn, line[len("converge:"):], convergenceReqCh)
 		case strings.HasPrefix(line, "trace-arm:"):
 			if handleTraceSocketCmd(conn, cityPath, "start", line[len("trace-arm:"):]) {
-				select {
-				case pokeCh <- struct{}{}:
-				default:
-				}
+				legacyEnqueue(pokeCh, nil, reconcilekey.Allocator()) // key-less: trace applies city-wide
 			}
 		case strings.HasPrefix(line, "trace-stop:"):
 			if handleTraceSocketCmd(conn, cityPath, "stop", line[len("trace-stop:"):]) {
-				select {
-				case pokeCh <- struct{}{}:
-				default:
-				}
+				legacyEnqueue(pokeCh, nil, reconcilekey.Allocator()) // key-less: trace applies city-wide
 			}
 		case line == "trace-status":
 			handleTraceStatusSocketCmd(conn, cityPath)
@@ -781,12 +770,8 @@ func watchConfigTargets(targets []config.WatchTarget, dirty *atomic.Bool, pokeCh
 
 	markDirty := func() {
 		dirty.Store(true)
-		if pokeCh != nil {
-			select {
-			case pokeCh <- struct{}{}:
-			default:
-			}
-		}
+		// A config file changed: reload re-plans the city (allocator).
+		legacyEnqueue(pokeCh, nil, reconcilekey.Allocator())
 	}
 
 	done := make(chan struct{})
@@ -1274,12 +1259,18 @@ func configReloadSummary(oldAgents, oldRigs, newAgents, newRigs int) string {
 	return strings.Join(parts, ", ")
 }
 
-// runController runs the persistent controller loop. It acquires a lock,
-// opens a control socket, runs the reconciliation loop, and on shutdown
+// runController runs the persistent controller loop. It holds the controller
+// lock, opens a control socket, runs the reconciliation loop, and on shutdown
 // stops all agents. Returns an exit code. initialWatchTargets is the set of
 // paths to watch for config changes (from initial provenance).
+//
+// heldLock is the controller lock when the caller already took it (gc start
+// --foreground does, before it starts the bead-store provider); the caller
+// keeps ownership and releases it after this returns. When heldLock is nil,
+// runController acquires the lock itself and releases it last.
 func runController(
 	cityPath string,
+	heldLock *os.File,
 	tomlPath string,
 	cfg *config.City,
 	configRev string,
@@ -1294,12 +1285,14 @@ func runController(
 	eventProv events.Provider,
 	stdout, stderr io.Writer,
 ) int {
-	lock, err := acquireControllerLock(cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+	if heldLock == nil {
+		lock, err := acquireControllerLock(cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		defer lock.Close() //nolint:errcheck // best-effort cleanup
 	}
-	defer lock.Close() //nolint:errcheck // best-effort cleanup
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1380,6 +1373,13 @@ func runController(
 		return 1
 	}
 
+	// Install controller-managed bead stores even when the HTTP API is
+	// disabled. Standalone runtime still needs cached city/rig stores for
+	// session-bead sync and rig-scoped wake decisions. This also puts the
+	// binding's CachingStore into the routes, so it runs before the routes are
+	// published below.
+	cs := newControllerStateWithRoutes(ctx, cr.storageRoutes, cfg, sp, eventProv, cityName, cityPath)
+
 	// This process is the city's controller — the lock above says so — so its
 	// opened binding is the residency answer the assigned-work spine reads.
 	// Registered here rather than inside newCityRuntime because the supervisor
@@ -1389,13 +1389,8 @@ func runController(
 	// statements below, so capturing the store here would capture a nil and the
 	// census would silently fall back to its leading (binding) store.
 	registerResidencyRoutes(cityPath, cr.storageRoutes, cr.cityBeadStore)
-
-	// Install controller-managed bead stores even when the HTTP API is
-	// disabled. Standalone runtime still needs cached city/rig stores for
-	// session-bead sync and rig-scoped wake decisions.
-	cs := newControllerStateWithRoutes(ctx, cr.storageRoutes, cfg, sp, eventProv, cityName, cityPath)
 	cs.ct = cr.crashTrack()
-	cs.pokeCh = pokeCh
+	wireControllerWakeSignals(cs, pokeCh, controlDispatcherCh)
 	cs.configDirty = configDirty
 	cs.services = cr.svc
 	cs.emergencyCh = make(chan emergency.Record, 64)

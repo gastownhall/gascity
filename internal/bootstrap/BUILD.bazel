@@ -1,0 +1,52 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "bootstrap",
+    srcs = glob(
+        ["*.go"],
+        exclude = ["*_test.go"],
+    ),
+    importpath = "github.com/gastownhall/gascity/internal/bootstrap",
+    visibility = ["//:__subpackages__"],
+    embedsrcs = ["//internal/bootstrap/packs/core:pack_files"],
+    deps = [
+        "//internal/config",
+        "@com_github_burntsushi_toml//:toml",
+    ],
+)
+
+go_test(
+    name = "bootstrap_test",
+    srcs = [
+        "bootstrap_test.go",
+        "collision_test.go",
+        "core_escalation_target_test.go",
+        "core_formula_report_test.go",
+        "home_fallback_test.go",
+        "pack_formula_graphv2_test.go",
+        "testenv_import_test.go",
+    ],
+    data = [
+        "//:go.mod",
+        "//:repo_source_tree",
+    ],
+    embed = [":bootstrap"],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/config",
+        "//internal/formula",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

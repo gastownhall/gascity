@@ -75,6 +75,7 @@ No shell invocation — the script is exec'd directly.
 | 0 | Success |
 | 1 | Failure (stderr contains error message) |
 | 2 | Unknown operation (treated as success — forward compatible) |
+| 75 | `start` only: temporary failure (`EX_TEMPFAIL`). The endpoint the agent launches against is at capacity or unavailable, so the start is retryable and not specific to this session. Gas City still tears the box down. On any other operation 75 is an ordinary failure. |
 
 Exit code 2 is the forward-compatibility mechanism. When Gas City adds new
 operations in the future, old scripts return exit 2 and the provider treats

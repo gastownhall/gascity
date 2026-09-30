@@ -60,7 +60,7 @@ func stubInitDependencyChecks(t *testing.T) {
 	initRunVersion = func(binary string) (string, error) {
 		switch binary {
 		case "bd":
-			return "bd version " + bdMinVersion, nil
+			return "bd version " + bdFreshProviderMinVersion, nil
 		case "dolt":
 			return "dolt version " + doltMinVersion, nil
 		default:
@@ -94,6 +94,9 @@ name = "bright-lights"
 
 [beads]
 provider = "bd"
+
+[providers.claude]
+base = "builtin:claude"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -617,6 +620,182 @@ func TestFinalizeInitReportsConfigLoadErrorDuringProviderPreflight(t *testing.T)
 	}
 	if !strings.Contains(stderr.String(), "loading config for provider readiness") {
 		t.Fatalf("stderr = %q, want config load detail", stderr.String())
+	}
+}
+
+func TestFinalizeInitRecordsProviderOwnershipBeforeReadinessPreflight(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		opts initFinalizeOptions
+		want providerScopeIntent
+	}{
+		{name: "default", opts: initFinalizeOptions{commandName: "gc init"}, want: providerScopeIntent{Transport: "proxied", Target: "local"}},
+		{name: "direct external", opts: initFinalizeOptions{commandName: "gc init", hostedDolt: hostedDoltInitOptions{Host: "127.0.0.1", Port: "3306", Database: "new_city", ProjectID: "new-city", Transport: "direct", Target: "external"}}, want: providerScopeIntent{Transport: "direct", Target: "external"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			configureIsolatedRuntimeEnv(t)
+			t.Setenv("GC_BEADS", "bd")
+			t.Setenv("GC_DOLT", "skip")
+			disableBootstrapForTests(t)
+			stubInitDependencyChecks(t)
+			stubInitDoltAuthorIdentity(t, map[string]string{"user.name": "Test", "user.email": "test@example.test"})
+			stubInitRemoteImports(t)
+
+			cityPath := writeBootstrappedManagedBdCity(t)
+			if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "bright-lights"
+provider = "claude"
+
+[beads]
+provider = "bd"
+
+[providers.claude]
+base = "builtin:claude"
+`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			probeCalled := false
+			oldProbe := initProbeProvidersReadiness
+			initProbeProvidersReadiness = func(context.Context, []string, bool) (map[string]api.ReadinessItem, error) {
+				probeCalled = true
+				return nil, errors.New("provider unavailable")
+			}
+			t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+
+			var stdout, stderr bytes.Buffer
+			if code := finalizeInit(cityPath, &stdout, &stderr, tt.opts); code != 1 {
+				t.Fatalf("finalizeInit = %d, want 1: %s", code, stderr.String())
+			}
+			if !probeCalled || !strings.Contains(stderr.String(), "provider unavailable") {
+				t.Fatalf("readiness preflight did not reach its probe: called=%t stderr=%s", probeCalled, stderr.String())
+			}
+			entry, owned, err := providerScopeOwnership(cityPath, cityPath)
+			if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != tt.want {
+				t.Fatalf("pending ownership = (%+v, %t, %v), want %+v; stderr=%s", entry, owned, err, tt.want, stderr.String())
+			}
+			if _, err := os.Stat(filepath.Join(cityPath, ".beads", "config.yaml")); !os.IsNotExist(err) {
+				t.Fatalf("provider-owned preflight seeded legacy config.yaml: %v", err)
+			}
+		})
+	}
+}
+
+func TestFinalizeInitRecordsProviderOwnershipBeforeDependencyFailure(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	cityPath := writeBootstrappedManagedBdCity(t)
+	oldLookPath := initLookPath
+	initLookPath = func(string) (string, error) { return "", os.ErrNotExist }
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	var stdout, stderr bytes.Buffer
+	if code := finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{commandName: "gc init"}); code != 1 {
+		t.Fatalf("finalizeInit = %d, want dependency failure: %s", code, stderr.String())
+	}
+	entry, owned, err := providerScopeOwnership(cityPath, cityPath)
+	if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != (providerScopeIntent{Transport: "proxied", Target: "local"}) {
+		t.Fatalf("pending ownership after dependency failure = (%+v, %t, %v)", entry, owned, err)
+	}
+}
+
+func TestCheckHardDependenciesRequiresBd13ForPendingProviderScope(t *testing.T) {
+	city := writeBootstrappedManagedBdCity(t)
+	t.Setenv("GC_BEADS", "bd")
+	if err := persistProviderScopeOwnership(city, city, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	oldLookPath := initLookPath
+	initLookPath = func(string) (string, error) { return "/usr/bin/tool", nil }
+	t.Cleanup(func() { initLookPath = oldLookPath })
+	oldVersion := initRunVersion
+	initRunVersion = func(binary string) (string, error) {
+		if binary == "bd" {
+			return "bd version 1.2.1", nil
+		}
+		if binary == "dolt" {
+			return "dolt version " + doltMinVersion, nil
+		}
+		return binary + " version", nil
+	}
+	t.Cleanup(func() { initRunVersion = oldVersion })
+	missing := checkHardDependencies(city)
+	if len(missing) != 1 || !strings.Contains(missing[0].name, bdFreshProviderMinVersion) {
+		t.Fatalf("pending provider dependencies = %#v, want bd %s floor", missing, bdFreshProviderMinVersion)
+	}
+}
+
+func TestCheckHardDependenciesRequiresBd13ForPendingProviderRig(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		pendingRig     bool
+		wantFreshFloor bool
+	}{
+		{name: "ready city retains compatibility floor", wantFreshFloor: false},
+		{name: "ready city with pending rig requires provider floor", pendingRig: true, wantFreshFloor: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city := t.TempDir()
+			rig := filepath.Join(city, "rigs", "fresh")
+			if err := os.MkdirAll(filepath.Join(city, ".gc"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(rig, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"deps\"\n\n[beads]\nprovider = \"bd\"\n\n[[rigs]]\nname = \"fresh\"\npath = \"rigs/fresh\"\nprefix = \"fr\"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := persistProviderScopeOwnership(city, city, providerScopeIntent{Transport: "direct", Target: "local"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := markProviderScopeOwnershipReady(city, city); err != nil {
+				t.Fatal(err)
+			}
+			if tc.pendingRig {
+				if err := persistProviderScopeOwnership(city, rig, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			oldLookPath := initLookPath
+			initLookPath = func(string) (string, error) { return "/usr/bin/tool", nil }
+			t.Cleanup(func() { initLookPath = oldLookPath })
+			oldVersion := initRunVersion
+			initRunVersion = func(binary string) (string, error) {
+				if binary == "bd" {
+					return "bd version 1.2.2", nil
+				}
+				if binary == "dolt" {
+					return "dolt version " + doltMinVersion, nil
+				}
+				return binary + " version", nil
+			}
+			t.Cleanup(func() { initRunVersion = oldVersion })
+			missing := checkHardDependencies(city)
+			gotFreshFloor := false
+			for _, dep := range missing {
+				gotFreshFloor = gotFreshFloor || strings.Contains(dep.name, bdFreshProviderMinVersion)
+			}
+			if gotFreshFloor != tc.wantFreshFloor {
+				t.Fatalf("pending rig=%t dependencies=%#v, fresh floor=%t want %t", tc.pendingRig, missing, gotFreshFloor, tc.wantFreshFloor)
+			}
+		})
+	}
+}
+
+func TestFreshProviderBd13FloorAcceptsReleaseCandidateAndRelease(t *testing.T) {
+	old := initRunVersion
+	t.Cleanup(func() { initRunVersion = old })
+	for _, tt := range []struct {
+		version string
+		want    bool
+	}{{"1.2.2", false}, {"1.3.0-rc.1", true}, {"1.3.0", true}} {
+		t.Run(tt.version, func(t *testing.T) {
+			initRunVersion = func(string) (string, error) { return "bd version " + tt.version, nil }
+			_, got := depMeetsMinVersion("bd", bdFreshProviderMinVersion)
+			if got != tt.want {
+				t.Fatalf("bd %s accepted=%t, want %t", tt.version, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -1296,11 +1475,14 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlock(t *testing
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
 		}
-		if _, err := os.Stat(filepath.Join(cityPath, ".beads", "metadata.json")); err != nil {
-			t.Fatalf("metadata.json missing before readiness block: %v", err)
+		entry, owned, err := providerScopeOwnership(cityPath, cityPath)
+		if err != nil || !owned || entry.State != providerScopeInitializing {
+			t.Fatalf("pending provider ownership before readiness block = (%+v, %t, %v)", entry, owned, err)
 		}
-		if _, err := os.Stat(filepath.Join(cityPath, ".beads", "config.yaml")); err != nil {
-			t.Fatalf("config.yaml missing before readiness block: %v", err)
+		for _, name := range []string{"metadata.json", "config.yaml"} {
+			if _, err := os.Stat(filepath.Join(cityPath, ".beads", name)); !os.IsNotExist(err) {
+				t.Fatalf("provider-owned preflight seeded legacy %s: %v", name, err)
+			}
 		}
 		return map[string]api.ReadinessItem{
 			"claude": {
@@ -1329,11 +1511,14 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlock(t *testing
 	if calledRegister {
 		t.Fatal("registerCityWithSupervisor should not run when provider readiness blocks init")
 	}
-	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "metadata.json")); err != nil {
-		t.Fatalf("metadata.json missing after readiness block: %v", err)
+	entry, owned, err := providerScopeOwnership(cityPath, cityPath)
+	if err != nil || !owned || entry.State != providerScopeInitializing {
+		t.Fatalf("pending provider ownership after readiness block = (%+v, %t, %v)", entry, owned, err)
 	}
-	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "config.yaml")); err != nil {
-		t.Fatalf("config.yaml missing after readiness block: %v", err)
+	for _, name := range []string{"metadata.json", "config.yaml"} {
+		if _, err := os.Stat(filepath.Join(cityPath, ".beads", name)); !os.IsNotExist(err) {
+			t.Fatalf("provider-owned readiness block seeded legacy %s: %v", name, err)
+		}
 	}
 }
 
@@ -1822,11 +2007,14 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockWithoutSkip
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
 		}
-		if _, err := os.Stat(filepath.Join(cityPath, ".beads", "metadata.json")); err != nil {
-			t.Fatalf("metadata.json missing before readiness block: %v", err)
+		entry, owned, err := providerScopeOwnership(cityPath, cityPath)
+		if err != nil || !owned || entry.State != providerScopeInitializing {
+			t.Fatalf("pending provider ownership before readiness block = (%+v, %t, %v)", entry, owned, err)
 		}
-		if _, err := os.Stat(filepath.Join(cityPath, ".beads", "config.yaml")); err != nil {
-			t.Fatalf("config.yaml missing before readiness block: %v", err)
+		for _, name := range []string{"metadata.json", "config.yaml"} {
+			if _, err := os.Stat(filepath.Join(cityPath, ".beads", name)); !os.IsNotExist(err) {
+				t.Fatalf("provider-owned preflight seeded legacy %s: %v", name, err)
+			}
 		}
 		return map[string]api.ReadinessItem{
 			"claude": {
@@ -1844,11 +2032,14 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockWithoutSkip
 	if code != 1 {
 		t.Fatalf("finalizeInit = %d, want 1", code)
 	}
-	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "metadata.json")); err != nil {
-		t.Fatalf("metadata.json missing after readiness block: %v", err)
+	entry, owned, err := providerScopeOwnership(cityPath, cityPath)
+	if err != nil || !owned || entry.State != providerScopeInitializing {
+		t.Fatalf("pending provider ownership after readiness block = (%+v, %t, %v)", entry, owned, err)
 	}
-	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "config.yaml")); err != nil {
-		t.Fatalf("config.yaml missing after readiness block: %v", err)
+	for _, name := range []string{"metadata.json", "config.yaml"} {
+		if _, err := os.Stat(filepath.Join(cityPath, ".beads", name)); !os.IsNotExist(err) {
+			t.Fatalf("provider-owned readiness block seeded legacy %s: %v", name, err)
+		}
 	}
 }
 
@@ -1913,4 +2104,82 @@ func TestFinalizeInitDoesNotRunBdProviderBeforeProviderReadinessBlock(t *testing
 	if data, err := os.ReadFile(callLog); err == nil && strings.TrimSpace(string(data)) != "" {
 		t.Fatalf("gc-beads-bd should not run before provider readiness passes, got:\n%s", data)
 	}
+}
+
+func TestCmdInitResumePreservesPreparedExternalSelector(t *testing.T) {
+	stubInitDependencyChecks(t)
+	stubInitDoltAuthorIdentity(t, map[string]string{"user.name": "test", "user.email": "test@example.com"})
+	stubInitRemoteImports(t)
+	disableBootstrapForTests(t)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "")
+
+	newPendingCity := func(t *testing.T, intent providerScopeIntent) (string, string) {
+		t.Helper()
+		city := filepath.Join(t.TempDir(), "resume-city")
+		var stdout, stderr bytes.Buffer
+		if code := doInit(fsys.OSFS{}, city, wizardConfig{configName: "minimal", provider: "claude"}, "", &stdout, &stderr, false); code != 0 {
+			t.Fatalf("doInit = %d: %s", code, stderr.String())
+		}
+		t.Setenv("GC_BEADS", "") // use the configured test provider for the resumed lifecycle
+		logPath := filepath.Join(city, "provider.log")
+		script := filepath.Join(city, "gc-beads-bd.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s|%s|%s|%s|%s\\n' \"$1\" \"${GC_BEADS_TRANSPORT:-}\" \"${GC_BEADS_TARGET:-}\" \"${GC_DOLT_HOST:-}\" \"${GC_DOLT_PORT:-}\" >> \"$GC_TEST_PROVIDER_LOG\"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"resume-city\"\n[beads]\nprovider = \"exec:"+script+"\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := persistProviderScopeOwnership(city, city, intent); err != nil {
+			t.Fatal(err)
+		}
+		return city, logPath
+	}
+
+	t.Run("matching selector reaches provider", func(t *testing.T) {
+		city, logPath := newPendingCity(t, providerScopeIntent{Transport: "direct", Target: "external"})
+		t.Setenv("GC_TEST_PROVIDER_LOG", logPath)
+		opts := hostedDoltInitOptions{Transport: "direct", Target: "external", Host: "db.retry.example", Port: "4406", Database: "bd_retry", ProjectID: "retry"}
+		var stdout, stderr bytes.Buffer
+		if code := cmdInitWithPreparedWizardInternal([]string{city}, wizardConfig{hostedDolt: opts}, true, "", &stdout, &stderr, true, false, false, true); code != 0 {
+			t.Fatalf("resumed gc init = %d: %s", code, stderr.String())
+		}
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+		if len(lines) < 2 || lines[0] != "init|direct|external|db.retry.example|4406" || lines[1] != "health|direct|external|db.retry.example|4406" {
+			t.Fatalf("provider calls = %q", string(data))
+		}
+	})
+
+	t.Run("absent selector retains pending intent", func(t *testing.T) {
+		city, logPath := newPendingCity(t, providerScopeIntent{Transport: "direct", Target: "external"})
+		t.Setenv("GC_TEST_PROVIDER_LOG", logPath)
+		var stdout, stderr bytes.Buffer
+		if code := cmdInitWithPreparedWizardInternal([]string{city}, wizardConfig{}, false, "", &stdout, &stderr, true, false, false, true); code != 1 || !strings.Contains(stderr.String(), "endpoint is unavailable") {
+			t.Fatalf("selector-free resumed gc init = %d, stderr=%q", code, stderr.String())
+		}
+		entry, owned, err := providerScopeOwnership(city, city)
+		if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != (providerScopeIntent{Transport: "direct", Target: "external"}) {
+			t.Fatalf("pending ownership after selector-free retry = (%+v, %t, %v)", entry, owned, err)
+		}
+		if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+			t.Fatalf("selector-free retry invoked provider: %v", err)
+		}
+	})
+
+	t.Run("conflicting selector refuses before provider", func(t *testing.T) {
+		city, logPath := newPendingCity(t, providerScopeIntent{Transport: "direct", Target: "external"})
+		t.Setenv("GC_TEST_PROVIDER_LOG", logPath)
+		opts := hostedDoltInitOptions{Transport: "proxied", Target: "external", Host: "db.retry.example", Port: "4406", Database: "bd_retry", ProjectID: "retry"}
+		var stdout, stderr bytes.Buffer
+		if code := cmdInitWithPreparedWizardInternal([]string{city}, wizardConfig{hostedDolt: opts}, true, "", &stdout, &stderr, true, false, false, true); code != 1 || !strings.Contains(stderr.String(), "conflicting provider initialization intent") {
+			t.Fatalf("conflicting resumed gc init = %d, stderr=%q", code, stderr.String())
+		}
+		if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+			t.Fatalf("conflicting selector invoked provider: %v", err)
+		}
+	})
 }

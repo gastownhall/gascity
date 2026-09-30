@@ -36,6 +36,8 @@ var (
 	_ runtime.LivenessObserver              = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 	_ runtime.SessionEventProvider          = (*Provider)(nil)
+	_ runtime.BackendListingProvider        = (*Provider)(nil)
+	_ runtime.ListingAttestation            = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -374,12 +376,24 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // ListRunning queries both backends and returns best-effort results plus a
 // partial-list error when one backend fails.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
+	return runtime.MergeBackendListings(p.ListRunningByBackend(prefix))
+}
+
+// ListRunningByBackend implements [runtime.BackendListingProvider]: one
+// ListRunning call per backend, default first.
+func (p *Provider) ListRunningByBackend(prefix string) []runtime.BackendListing {
 	defaultList, dErr := p.defaultSP.ListRunning(prefix)
 	acpList, aErr := p.acpSP.ListRunning(prefix)
-	return runtime.MergeBackendListResults(
-		runtime.BackendListResult{Label: "default", Names: defaultList, Err: dErr},
-		runtime.BackendListResult{Label: "acp", Names: acpList, Err: aErr},
-	)
+	return []runtime.BackendListing{
+		{Label: "default", Provider: p.defaultSP, Names: defaultList, Err: dErr},
+		{Label: "acp", Provider: p.acpSP, Names: acpList, Err: aErr},
+	}
+}
+
+// ListRunningComplete implements [runtime.ListingAttestation]: the merged
+// listing is complete only when both backends attest theirs.
+func (p *Provider) ListRunningComplete() bool {
+	return runtime.ListRunningAttested(p.defaultSP) && runtime.ListRunningAttested(p.acpSP)
 }
 
 // GetLastActivity delegates to the routed backend.
@@ -431,23 +445,17 @@ func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
 	return runtime.SessionSleepCapabilityDisabled
 }
 
-// SubscribeSessionEvents forwards the session-event stream of whichever
-// backend implements runtime.SessionEventProvider. Today only herdr does, so
-// without this method, wrapping an event-capable default backend (e.g.
-// herdr) behind auto for ACP routing would fail the
-// runtime.SessionEventProvider type assertion in cmd/gc's
-// sessionEventPump.restart and silently drop the whole event-driven
-// reconcile poke, falling back to patrol polling with no underlying
-// capability loss to explain it.
+// SubscribeSessionEvents forwards the session-event streams of the backends
+// that implement runtime.SessionEventProvider. Without this method,
+// wrapping an event-capable backend behind auto for ACP routing would fail
+// the runtime.SessionEventProvider type assertion in cmd/gc's
+// sessionEventPump.restart and silently drop the event-driven reconcile
+// poke. When both backends publish events, both streams are merged, so
+// neither backend's session deaths wait for the patrol scan; a nested
+// composite without an event-capable backend is skipped. See
+// runtime.SubscribeSessionEventSources.
 func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
-	dSEP, dok := p.defaultSP.(runtime.SessionEventProvider)
-	aSEP, aok := p.acpSP.(runtime.SessionEventProvider)
-	switch {
-	case dok:
-		return dSEP.SubscribeSessionEvents(ctx)
-	case aok:
-		return aSEP.SubscribeSessionEvents(ctx)
-	default:
-		return nil, fmt.Errorf("neither default nor ACP backend implements SubscribeSessionEvents")
-	}
+	return runtime.SubscribeSessionEventSources(ctx,
+		runtime.SessionEventSource{Name: "default", Provider: p.defaultSP},
+		runtime.SessionEventSource{Name: "ACP", Provider: p.acpSP})
 }

@@ -162,6 +162,7 @@ func buildAwakeInputFromReconcilerWithObservationErrors(
 			ExplicitWake:           lifecycle.HasWakeCause(session.WakeCauseExplicit),
 			DependencyOnly:         info.DependencyOnly,
 			NamedIdentity:          lifecycle.NamedIdentity,
+			Alias:                  stableAssignmentAliasForConfigInfo(info, cfg),
 			ConfiguredNamedSession: isNamedSessionInfo(info),
 			Pinned:                 lifecycle.HasWakeCause(session.WakeCausePinned),
 			Drained:                lifecycle.BaseState == session.BaseStateDrained,
@@ -295,10 +296,12 @@ func awakeSetToWakeEvals(decisions map[string]AwakeDecision, sessionBeads []Awak
 			}
 		}
 		evals[bead.ID] = wakeEvaluation{
-			Reasons:          reasons,
-			Reason:           d.Reason,
-			ConfigSuppressed: d.Reason == "idle-sleep",
-			HasAssignedWork:  d.HasAssignedWork,
+			Reasons:             reasons,
+			Reason:              d.Reason,
+			ConfigSuppressed:    d.Reason == "idle-sleep",
+			HasAssignedWork:     d.HasAssignedWork,
+			AssignedWorkBeadID:  d.AssignedWorkBeadID,
+			AssignedWorkClaimed: d.AssignedWorkClaimed,
 		}
 	}
 	return evals

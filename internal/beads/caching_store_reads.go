@@ -241,7 +241,32 @@ func (c *CachingStore) ObservedList(query ListQuery) ([]Bead, CacheObservation, 
 	if !c.observationAdmissibleLocked() {
 		return nil, CacheObservation{}, false
 	}
-	return c.collectCachedListLocked(query), CacheObservation{owner: c, revision: c.observationRevision}, true
+	return c.collectCachedListLocked(query), CacheObservation{
+		owner:    c,
+		revision: c.observationRevision,
+		cacheRev: CacheRevision{Epoch: c.epoch, Seq: c.mutationSeq},
+	}, true
+}
+
+// WriteRev reports the cache revision of the latest local write to id. Read it
+// after a write made through this CachingStore reports success: every clean
+// census taken after the write returns whose CacheRev covers it reflects that
+// write, within the known limits listed on CacheRevision. It says nothing about
+// writes made around the cache. A later local write to id raises it, and so do
+// failed conditional writes, including a CompareAndSetMetadataKey that lost
+// (false, nil). With no write to id on record — never written here, dropped
+// from the cache since, or a write that short-circuited because the clean
+// cached row already matched — it is the current mutation sequence, which no
+// clean census can precede. Epochs are process-local and restart at 1 in each
+// process.
+func (c *CachingStore) WriteRev(id string) CacheRevision {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	seq, ok := c.writeSeq[id]
+	if !ok {
+		seq = c.mutationSeq
+	}
+	return CacheRevision{Epoch: c.epoch, Seq: seq}
 }
 
 // WithCurrentObservation runs publish while holding the originating cache's
@@ -343,7 +368,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if c.deletedSeq[item.ID] > startSeq {
 			continue
 		}
-		if c.beadSeq[item.ID] > startSeq {
+		if c.beadSeq[item.ID] > startSeq || c.writeSeq[item.ID] > startSeq {
 			current, ok := c.beads[item.ID]
 			if ok && query.Matches(current) {
 				refreshed = append(refreshed, cloneBead(current))
@@ -372,7 +397,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		}
 	}
 	for id, bead := range refreshedParents {
-		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
+		if c.refetchFencedLocked(id, startSeq) {
 			continue
 		}
 		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
@@ -385,7 +410,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		})
 	}
 	for id := range removedParents {
-		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
+		if c.refetchFencedLocked(id, startSeq) {
 			continue
 		}
 		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
@@ -394,7 +419,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		c.evictLocked(id)
 	}
 	for id, bead := range refreshedLiveMissing {
-		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
+		if c.refetchFencedLocked(id, startSeq) {
 			continue
 		}
 		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
@@ -407,7 +432,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		})
 	}
 	for id := range removedLiveMissing {
-		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
+		if c.refetchFencedLocked(id, startSeq) {
 			continue
 		}
 		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
@@ -515,11 +540,11 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 				c.mu.Unlock()
 				return fresh, nil
 			}
-			switch {
-			case c.deletedSeq[id] > startSeq:
-				c.mu.Unlock()
-				return Bead{}, ErrNotFound
-			case c.beadSeq[id] > startSeq:
+			if c.refetchFencedLocked(id, startSeq) {
+				if c.deletedSeq[id] > startSeq {
+					c.mu.Unlock()
+					return Bead{}, ErrNotFound
+				}
 				if _, stillDirty := c.dirty[id]; stillDirty {
 					c.mu.Unlock()
 					return c.backing.Get(id)
@@ -532,7 +557,7 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 				return Bead{}, ErrNotFound
 			}
 			c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
-				depsMode:   depsFromFields,
+				depsMode:   depsFromFieldsIfCarried,
 				seqMode:    seqClearBeadSeqOnly,
 				clearDirty: true,
 			})
@@ -550,6 +575,14 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 	}
 	c.mu.RUnlock()
 	return c.backing.Get(id)
+}
+
+// refetchFencedLocked reports whether a mutation or deletion newer than
+// startSeq touched id, so a backing read begun after startSeq may be older
+// than the cache and must not be installed. writeSeq covers a local write
+// whose beadSeq fence a later refetch already cleared. Caller must hold c.mu.
+func (c *CachingStore) refetchFencedLocked(id string, startSeq uint64) bool {
+	return c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq || c.writeSeq[id] > startSeq
 }
 
 // Ready returns open beads whose blocking deps are all closed.
@@ -772,6 +805,7 @@ func (c *CachingStore) Children(parentID string, opts ...QueryOpt) ([]Bead, erro
 		ParentID:      parentID,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedAsc,
+		TierMode:      TierModeFromOpts(opts),
 	})
 }
 

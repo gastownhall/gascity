@@ -36,6 +36,14 @@ func sanitizedBaseEnv(extra ...string) []string {
 		if strings.HasPrefix(kv, "GC_") || strings.HasPrefix(kv, "BEADS_") {
 			continue
 		}
+		// Re-exec'd helper binaries must not inherit bazel's shard filter:
+		// the go test runner would assign the helper test to a different
+		// shard than the one requesting it and exit with "no tests to run",
+		// surfacing as a readiness-pipe EOF in the parent (#6638).
+		name, _, _ := strings.Cut(kv, "=")
+		if name == "TEST_SHARD_INDEX" || name == "TEST_TOTAL_SHARDS" {
+			continue
+		}
 		filtered = append(filtered, kv)
 	}
 	filtered = append(filtered,

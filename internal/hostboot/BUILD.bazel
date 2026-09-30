@@ -1,0 +1,44 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "hostboot",
+    srcs = [
+        "hostboot.go",
+        "hostboot_darwin.go",
+        "hostboot_linux.go",
+        "hostboot_unsupported.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/hostboot",
+    visibility = ["//:__subpackages__"],
+    deps = select({
+        "@rules_go//go/platform:darwin": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:ios": [
+            "@org_golang_x_sys//unix",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+go_test(
+    name = "hostboot_test",
+    srcs = [
+        "hostboot_linux_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":hostboot"],
+    deps = ["//internal/testenv"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

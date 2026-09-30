@@ -208,6 +208,7 @@ const (
 	RequiredArtifactMetadataKey         = "gc.required_artifact"
 	RequiredArtifactsMetadataKey        = "gc.required_artifacts"
 	ReviewGateMetadataKey               = "gc.review_gate"
+	RetryAttemptMetadataKey             = "gc.retry_attempt" // see attempt.go
 	RetryCountMetadataKey               = "gc.retry_count"
 	RetryFromMetadataKey                = "gc.retry_from"
 	RetrySessionRecycledMetadataKey     = "gc.retry_session_recycled"
@@ -301,6 +302,14 @@ const (
 	WorktreeRepoMetadataKey        = "gc.worktree_repo"
 	WorktreeRootMetadataKey        = "gc.worktree_root"
 	WorkflowIDMetadataKey          = "gc.workflow_id"
+	// WorkflowExpandedMetadataKey marks a graph.v2 workflow root that was
+	// compiled with real child steps beyond the root itself. Its absence
+	// distinguishes a genuinely root-only (#2763-shape) molecule, whose root
+	// IS the unit of work and must remain claimable via the
+	// RunTargetMetadataKey fallback, from a fully-expanded root whose real
+	// children have all closed and is only waiting on workflow-finalize —
+	// see hookClaimMatchesRoute/hookClaimRoute (#5900).
+	WorkflowExpandedMetadataKey = "gc.workflow_expanded"
 )
 
 // Work-record metadata keys (ADR-0009). These bind a work bead to its claim
@@ -538,6 +547,7 @@ var KnownMetadataKeys = []string{
 	RequiredArtifactMetadataKey,
 	RequiredArtifactsMetadataKey,
 	ReviewGateMetadataKey,
+	RetryAttemptMetadataKey,
 	RetryCountMetadataKey,
 	RetryFromMetadataKey,
 	RetrySessionRecycledMetadataKey,
@@ -595,6 +605,7 @@ var KnownMetadataKeys = []string{
 	WorktreeRepoMetadataKey,
 	WorktreeRootMetadataKey,
 	WorkflowIDMetadataKey,
+	WorkflowExpandedMetadataKey,
 }
 
 // KnownMetadataPrefixes lists declared open-world key prefixes. A literal that

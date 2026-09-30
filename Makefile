@@ -103,7 +103,7 @@ endif
 endif
 endif
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-hooks check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-full lint-new lint-changed lint-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-bd-conditional-release-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-hooks check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-full lint-new lint-changed lint-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-beads-topology-matrix test-bd-cli-contract test-bd-conditional-release-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
 .PHONY: check-release-dist-ignore
 
 ## build: compile gc binary with version metadata
@@ -305,6 +305,8 @@ LINT_BASE ?= origin/main
 LINT_CHANGED_REF ?= HEAD
 LINT_CHANGED_SCOPE ?= worktree
 LINT_FLAGS ?=
+LINT_GOMEMLIMIT ?= 6GiB
+LINT_ENV = GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GOMEMLIMIT=$(LINT_GOMEMLIMIT)
 QUALITY_GATE_GOFLAGS = $$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly
 CI_STATIC_SELECT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/ci-static-select
 CI_STATIC_GO ?= go
@@ -314,15 +316,16 @@ lint: lint-full
 
 ## lint-full: run golangci-lint across all packages
 lint-full: $(GOLANGCI_LINT)
-	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(GOLANGCI_LINT) run $(LINT_FLAGS) ./...
+	$(LINT_ENV) $(GOLANGCI_LINT) run $(LINT_FLAGS) ./...
 
 ## lint-new: run golangci-lint for issues introduced since LINT_BASE
 lint-new: $(GOLANGCI_LINT)
-	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(GOLANGCI_LINT) run $(LINT_FLAGS) --new-from-merge-base=$(LINT_BASE) --whole-files ./...
+	$(LINT_ENV) $(GOLANGCI_LINT) run $(LINT_FLAGS) --new-from-merge-base=$(LINT_BASE) --whole-files ./...
 
 ## lint-changed: run golangci-lint only for packages touched by changed Go files
 lint-changed: $(GOLANGCI_LINT)
 	@export GOFLAGS="$(QUALITY_GATE_GOFLAGS)"; \
+	export GOMEMLIMIT="$(LINT_GOMEMLIMIT)"; \
 	case "$(LINT_CHANGED_SCOPE)" in \
 		staged) \
 			files="$$(git diff --cached --name-only --diff-filter=ACMRT -- '*.go')"; \
@@ -364,19 +367,19 @@ lint-changed: $(GOLANGCI_LINT)
 
 ## lint-affected: lint packages affected by changed Go build inputs or embedded files
 lint-affected: $(GOLANGCI_LINT)
-	@GOFLAGS="$(QUALITY_GATE_GOFLAGS)" "$(CI_STATIC_SELECT)" lint-affected "$(GOLANGCI_LINT)" "$(CI_STATIC_GO)" $(LINT_FLAGS)
+	@$(LINT_ENV) "$(CI_STATIC_SELECT)" lint-affected "$(GOLANGCI_LINT)" "$(CI_STATIC_GO)" $(LINT_FLAGS)
 
 ## fmt-check: fail if formatting would change files
 fmt-check: $(GOLANGCI_LINT)
-	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(GOLANGCI_LINT) fmt --diff ./...
+	$(LINT_ENV) $(GOLANGCI_LINT) fmt --diff ./...
 
 ## fmt-check-changed: fail if formatting would change a regular changed Go file
 fmt-check-changed: $(GOLANGCI_LINT)
-	@GOFLAGS="$(QUALITY_GATE_GOFLAGS)" "$(CI_STATIC_SELECT)" fmt-check-changed "$(GOLANGCI_LINT)"
+	@$(LINT_ENV) "$(CI_STATIC_SELECT)" fmt-check-changed "$(GOLANGCI_LINT)"
 
 ## fmt: auto-fix formatting
 fmt: $(GOLANGCI_LINT)
-	$(GOLANGCI_LINT) fmt ./...
+	GOMEMLIMIT=$(LINT_GOMEMLIMIT) $(GOLANGCI_LINT) fmt ./...
 
 ## vet: run go vet
 vet:
@@ -459,6 +462,7 @@ test-ci-policy:
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 ./scripts/cipolicy
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 ./scripts/prwatchdog/...
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns|TestFullStaticLintExplicitlyOwnsConfiguredGolangCIGovet|TestChangedStaticTargetsScopeLintAndFormattingToTheDiff|TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge)$$' ./scripts
+	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestBDVersionPins|TestDoltVersionPins)$$' ./scripts
 
 ## test: run fast unit tests (skip integration-tagged and GC_FAST_UNIT-gated process tests)
 ## The skipped cmd/gc process-backed scenarios remain covered by
@@ -600,9 +604,51 @@ test-worker-inference-phase3: test-worker-inference
 ## test-acceptance: run acceptance tests (Tier A — command-level PR gate).
 ## ACCEPTANCE_TIMEOUT overrides the go-test timeout. The unsharded local/CI
 ## target runs the command-heavy Tier A package serially; RC gate shards it.
+##
+## GC_ACCEPTANCE_BD_BIN selects the bd the beads topology tests drive. Without
+## a bd that has --proxied-server they skip, which is why the default CI run is
+## unaffected. GC_ACCEPTANCE_LEGACY_GC_BIN is a gc built before the ownership
+## journal; only the legacy shape of the topology matrix needs it, and only
+## that shape skips without it. TESTING.md documents both.
 ACCEPTANCE_TIMEOUT ?= 15m
+## ACCEPTANCE_GO_TEST_FLAGS passes extra `go test` flags through, which is how
+## you narrow a run: ACCEPTANCE_GO_TEST_FLAGS='-run TestBeadsInitTopologyMatrix'
+ACCEPTANCE_GO_TEST_FLAGS ?=
+## TEST_ENV is `env -i` with a fixed allowlist, so every variable the acceptance
+## tests read has to be named on the recipe line below or it is dropped and the
+## test binary skips on it. That is how `make test-beads-topology-matrix` came
+## to print `ok` in seconds having stood up zero shapes: the matrix opt-in never
+## reached `go test`. Each of these defaults to the ambient value, so exporting
+## it still works, and a target or the make line can override it.
+ACCEPTANCE_TOPOLOGY_MATRIX ?= $(GC_ACCEPTANCE_TOPOLOGY_MATRIX)
+ACCEPTANCE_REQUIRE_TOOLING ?= $(GC_REQUIRE_ACCEPTANCE_TOOLING)
+ACCEPTANCE_REQUIRE_LEGACY_GC ?= $(GC_REQUIRE_ACCEPTANCE_LEGACY_GC)
+## ACCEPTANCE_PERF turns on the proxied-native wall-clock gate in
+## TestBeadsProxiedDefault (GC_ACCEPTANCE_PERF). Off by default: wall clock on a
+## shared box is a statement about the box. The nightly perf lane sets it.
+ACCEPTANCE_PERF ?= $(GC_ACCEPTANCE_PERF)
 test-acceptance:
-	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off GC_ACCEPTANCE_BEADS_PROVIDER="$${GC_ACCEPTANCE_BEADS_PROVIDER-}" go test -tags acceptance_a -timeout $(ACCEPTANCE_TIMEOUT) ./test/acceptance/...
+	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off GC_ACCEPTANCE_BEADS_PROVIDER="$${GC_ACCEPTANCE_BEADS_PROVIDER-}" GC_ACCEPTANCE_BD_BIN="$${GC_ACCEPTANCE_BD_BIN-}" GC_ACCEPTANCE_LEGACY_GC_BIN="$${GC_ACCEPTANCE_LEGACY_GC_BIN-}" GC_ACCEPTANCE_TOPOLOGY_MATRIX="$(ACCEPTANCE_TOPOLOGY_MATRIX)" GC_ACCEPTANCE_PERF="$(ACCEPTANCE_PERF)" GC_REQUIRE_ACCEPTANCE_TOOLING="$(ACCEPTANCE_REQUIRE_TOOLING)" GC_REQUIRE_ACCEPTANCE_LEGACY_GC="$(ACCEPTANCE_REQUIRE_LEGACY_GC)" go test -tags acceptance_a -timeout $(ACCEPTANCE_TIMEOUT) $(ACCEPTANCE_GO_TEST_FLAGS) ./test/acceptance/...
+
+## test-beads-topology-matrix: run the init topology matrix on its own.
+## Every supported way to initialise a beads scope — proxied-local, direct-local,
+## direct- and proxied-external, the pre-journal GC-managed shape, doltlite, and
+## a deferred GC_DOLT=skip init — walked through the same command list against a
+## real bd and a real dolt. Needs a bd >= 1.3.0 in GC_ACCEPTANCE_BD_BIN and, for
+## the legacy shape, a pre-journal gc in GC_ACCEPTANCE_LEGACY_GC_BIN. Eight
+## shapes of real Dolt lifecycle take about an hour, hence the separate timeout.
+##
+## This target opts itself in to the matrix and turns a missing bd or dolt into
+## a failure: a target that exists only to run the shapes has no honest way to
+## report ok having run none of them. Pass BEADS_TOPOLOGY_MATRIX_REQUIRE_TOOLING=
+## to get the old skip-on-missing-tooling behaviour back.
+BEADS_TOPOLOGY_MATRIX_TIMEOUT ?= 90m
+BEADS_TOPOLOGY_MATRIX_REQUIRE_TOOLING ?= 1
+test-beads-topology-matrix:
+	$(MAKE) test-acceptance ACCEPTANCE_TIMEOUT=$(BEADS_TOPOLOGY_MATRIX_TIMEOUT) \
+		ACCEPTANCE_GO_TEST_FLAGS='-count=1 -run TestBeadsInitTopologyMatrix' \
+		ACCEPTANCE_TOPOLOGY_MATRIX=1 \
+		ACCEPTANCE_REQUIRE_TOOLING='$(BEADS_TOPOLOGY_MATRIX_REQUIRE_TOOLING)'
 
 ## test-bd-cli-contract: run only Gas City's external bd CLI compatibility contract.
 ## Keep this separate from hermetic Tier A so each supported bd version can run
@@ -618,7 +664,7 @@ test-bd-cli-contract:
 ## the one bd contract the installable default could not run -- deps.env
 ## BD_VERSION predated `--if-assignee`/`--if-status`, so the row only had a home
 ## on the source-built BD_CURRENT_REF cell. That is no longer true as of
-## BD_VERSION=v1.3.0-rc.2, which carries the flags, so the row now runs on every
+## BD_VERSION=v1.3.0, which carries the flags, so the row now runs on every
 ## cell rather than skipping on most. Kept separate anyway: it is the only
 ## contract that needs a real CAS-capable bd, and BD_PREV_VERSION (v1.0.4) still
 ## cannot run it. GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's capability
@@ -1093,3 +1139,10 @@ k8s-secret:
 ## help: show this help
 help:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## //' | column -t -s ':'
+
+## bazel-sync: regenerate bazel BUILD files (gazelle) and the hermetic repo
+## source tree used by whole-repo scan guards. Run after adding packages.
+.PHONY: bazel-sync
+bazel-sync:
+	bazel run //:gazelle
+	python3 tools/bazel/repo_tree.py

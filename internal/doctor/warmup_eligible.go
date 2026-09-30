@@ -74,6 +74,10 @@ func (c *DoltJournalSizeCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
+func (c *DoltLogSizeCheck) WarmupEligible() bool { return false }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
 func (c *DoltNomsSizeCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
@@ -146,6 +150,14 @@ func (c *PreStartScriptsCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
+func (c *ProxiedBackupCoverageCheck) WarmupEligible() bool { return false }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
+func (c *ProxiedIdleTimeoutCheck) WarmupEligible() bool { return false }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
 func (c *ProviderParityCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
@@ -179,6 +191,10 @@ func (c *SkillCollisionCheck) WarmupEligible() bool { return false }
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
 func (c *SupervisorHTTPCheck) WarmupEligible() bool { return false }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
+func (c *SupervisorUnitOwnershipCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.

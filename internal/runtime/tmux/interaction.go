@@ -271,7 +271,7 @@ func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error 
 	t.cancelCopyModeIfParked(name)
 
 	// Send the keystroke once.
-	if _, err := t.run("send-keys", "-t", name, "-l", key); err != nil {
+	if _, err := t.run("send-keys", "-t", paneTarget(name), "-l", key); err != nil {
 		if errors.Is(err, ErrSessionNotFound) {
 			return fmt.Errorf("send-keys failed: %w: %w", runtime.ErrSessionNotFound, err)
 		}

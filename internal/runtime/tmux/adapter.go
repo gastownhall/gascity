@@ -45,6 +45,8 @@ var (
 	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
 	_ runtime.SessionRosterProvider         = (*Provider)(nil)
+	_ runtime.ListingAttestation            = (*Provider)(nil)
+	_ runtime.InventoryProvider             = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -610,18 +612,22 @@ func (p *Provider) SetMeta(name, key, value string) error {
 }
 
 // GetMeta retrieves a value from the named session's tmux environment.
-// Returns ("", nil) if the key is not set. Propagates session-not-found
-// and no-server errors so callers can distinguish "key absent" from
-// "session gone."
+// Returns ("", nil) only when the session answered that the key is not set.
+// A missing session wraps [runtime.ErrSessionNotFound]; any other failure
+// (no server, timeout, unparsable answer) wraps [runtime.ErrRuntimeUnavailable],
+// so a failed read is never mistaken for "unset".
 func (p *Provider) GetMeta(name, key string) (string, error) {
 	val, err := p.tm.GetEnvironment(name, key)
-	if err != nil {
-		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
-			return "", err
-		}
-		return "", nil // key not set
+	switch {
+	case err == nil:
+		return val, nil
+	case errors.Is(err, errEnvUnset):
+		return "", nil
+	case errors.Is(err, ErrSessionNotFound):
+		return "", fmt.Errorf("reading %s from session %q: %w: %w", key, name, runtime.ErrSessionNotFound, err)
+	default:
+		return "", fmt.Errorf("reading %s from session %q: %w: %w", key, name, runtime.ErrRuntimeUnavailable, err)
 	}
-	return val, nil
 }
 
 // RemoveMeta removes a key from the named session's tmux environment.
@@ -669,6 +675,18 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 		}
 	}
 	return matched, nil
+}
+
+// ListRunningComplete implements [runtime.ListingAttestation]. An error-free
+// ListRunning means the server answered list-sessions, which names every
+// session it holds (remain-on-exit corpses included); an absent server is
+// reported as a [runtime.PartialListError], never as an empty list.
+func (p *Provider) ListRunningComplete() bool { return true }
+
+// RuntimeInventory implements [runtime.InventoryProvider] with one
+// batched pane read. Delegates to [Tmux.listRuntimeInventory].
+func (p *Provider) RuntimeInventory(ctx context.Context) (map[string]runtime.InventoryEntry, error) {
+	return p.tm.listRuntimeInventory(ctx)
 }
 
 // GetLastActivity returns the time of the last I/O activity in the named
@@ -842,7 +860,8 @@ type startOps interface {
 	waitForReady(ctx context.Context, name string, rc *RuntimeConfig, timeout time.Duration) error
 	hasSession(name string) (bool, error)
 	capturePane(name string, lines int) (string, error)
-	recordStartCrash(name, paneContent string) string
+	paneDeadInfo(name string) (status, signal string)
+	recordStartCrash(name, paneContent, status, signal string) string
 	recordUnconfirmedNudge(name, message string, cause error) string
 	sendKeys(name, text string) error
 	paneBusy(name string) (bool, error)
@@ -989,10 +1008,16 @@ func (o *tmuxStartOps) capturePane(name string, lines int) (string, error) {
 	return runtime.RedactSecrets(content, o.secrets), err
 }
 
+// paneDeadInfo returns the dead pane's exit status and terminating signal.
+func (o *tmuxStartOps) paneDeadInfo(name string) (status, signal string) {
+	return o.tm.PaneDeadInfo(name)
+}
+
 // recordStartCrash persists a per-session start-crash diagnostic so an
 // immediate start-crash leaves a durable on-disk artifact (the transient
 // start error is otherwise lost). It records the dead pane's exit status and
-// terminating signal alongside the captured pane output. Best-effort: a
+// terminating signal (read once by the caller, which also classifies them)
+// alongside the captured pane output. Best-effort: a
 // disabled capture (empty runtimeDir) or any I/O error returns "" without
 // affecting startup. Returns the artifact path when written.
 //
@@ -1001,12 +1026,11 @@ func (o *tmuxStartOps) capturePane(name string, lines int) (string, error) {
 // this is the copy that outlives the session, and a future caller reaching for
 // a durable crash record should not have to know which of its arguments were
 // pre-sanitized.
-func (o *tmuxStartOps) recordStartCrash(name, paneContent string) string {
+func (o *tmuxStartOps) recordStartCrash(name, paneContent, status, signal string) string {
 	if o.runtimeDir == "" {
 		return ""
 	}
 	paneContent = runtime.RedactSecrets(paneContent, o.secrets)
-	status, signal := o.tm.PaneDeadInfo(name)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "session: %s\n", name)
@@ -1323,24 +1347,34 @@ func startupDeadSessionError(ops startOps, name string) error {
 	} else {
 		pane = strings.TrimSpace(pane)
 	}
+	// Read the corpse's exit facts once: the durable record and the capacity
+	// classification below must describe the same observation.
+	status, signal := ops.paneDeadInfo(name)
 	// Persist a durable crash diagnostic (exit status + signal + pane output)
 	// so the immediate-exit reason survives the transient start error. Recorded
 	// even when the pane is empty, so an exit-before-render crash still leaves
 	// the exit status/signal on disk. Best-effort: "" when capture is disabled.
-	diagPath := ops.recordStartCrash(name, pane)
+	diagPath := ops.recordStartCrash(name, pane, status, signal)
+	var died error
 	switch {
 	case pane != "" && diagPath != "":
-		return fmt.Errorf("%w: session %q; diagnostic written to %s; last pane output:\n%s",
+		died = fmt.Errorf("%w: session %q; diagnostic written to %s; last pane output:\n%s",
 			runtime.ErrSessionDiedDuringStartup, name, diagPath, pane)
 	case pane != "":
-		return fmt.Errorf("%w: session %q; last pane output:\n%s",
+		died = fmt.Errorf("%w: session %q; last pane output:\n%s",
 			runtime.ErrSessionDiedDuringStartup, name, pane)
 	case diagPath != "":
-		return fmt.Errorf("%w: session %q; diagnostic written to %s",
+		died = fmt.Errorf("%w: session %q; diagnostic written to %s",
 			runtime.ErrSessionDiedDuringStartup, name, diagPath)
 	default:
-		return startupSessionDiedError(name)
+		died = startupSessionDiedError(name)
 	}
+	// A clean EX_TEMPFAIL exit is the launcher declaring the endpoint refused
+	// the start. Only the exit status classifies; the pane text never does.
+	if signal == "" && status == strconv.Itoa(runtime.ExitCodeTempFail) {
+		return &runtime.CapacityError{ExitCode: runtime.ExitCodeTempFail, Source: runtime.CapacitySourceExitStatus, Err: died}
+	}
+	return died
 }
 
 func startupSessionDiedError(name string) error {
@@ -1470,6 +1504,10 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 	return finishLaunch(ctx, ops, name, cfg, setupTimeout)
 }
 
+// startupDialogWarningOut receives startup-dialog warnings (a var so tests can
+// capture it).
+var startupDialogWarningOut io.Writer = os.Stderr
+
 // launchOrchestration runs the post-agent-launch startup steps against a session
 // whose agent pane has just been created (doStartSession) or respawned (the
 // un-weld relaunch path): wait for the agent command, accept startup dialogs
@@ -1490,7 +1528,9 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	// Always attempted when process names are set, since any Claude-like
 	// agent may show a trust dialog regardless of EmitsPermissionWarning.
 	if runtime.ShouldAcceptStartupDialogs(cfg) {
-		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
+		// Best-effort: a trust dialog left unconfirmed here is retried by
+		// the post-readiness pass below, which reports it if it persists.
+		_ = ops.acceptStartupDialogs(ctx, name)
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -1517,7 +1557,12 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	// ready screen. Re-run dialog acceptance after readiness so late dialogs do
 	// not strand the session in an unusable startup state.
 	if runtime.ShouldAcceptStartupDialogs(cfg) {
-		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
+		// Best-effort, but a trust dialog this last pass still could not
+		// confirm is left on screen with the cursor off the trust row, where
+		// any later Enter would answer it. Say so instead of dropping it.
+		if err := ops.acceptStartupDialogs(ctx, name); errors.Is(err, runtime.ErrWorkspaceTrustUnconfirmed) {
+			_, _ = fmt.Fprintf(startupDialogWarningOut, "warning: session %q: %v\n", name, err)
+		}
 		if err := ctx.Err(); err != nil {
 			return ignoreDeadlineIfSessionAlive(ops, name, err)
 		}

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/logutil"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sdnotify"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -255,9 +257,19 @@ func guardSupervisorSocketDir(dir string) {
 	}
 }
 
+// supervisorSocketPathLimit caps the canonical socket path length below the
+// platform sockaddr_un limit (108 bytes on Linux, 104 on macOS). Matches the
+// controllerSocketPathLimit pattern in controller.go.
+const supervisorSocketPathLimit = 100
+
 func supervisorSocketPathForDir(dir string) string {
 	guardSupervisorSocketDir(dir)
-	return filepath.Join(dir, "supervisor.sock")
+	canonical := filepath.Join(dir, "supervisor.sock")
+	if len(canonical) <= supervisorSocketPathLimit {
+		return canonical
+	}
+	sum := sha256.Sum256([]byte(dir))
+	return filepath.Join("/tmp", "gascity-supervisor", fmt.Sprintf("%x.sock", sum[:16]))
 }
 
 func supervisorSocketPathCandidates() []string {
@@ -1000,6 +1012,13 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 			running, pidSource = true, "api"
 		}
 	}
+	// Unit ownership only makes sense when we have a real live PID to compare
+	// against the unit's MainPID (ga-9pjtoy) -- the service_manager/api
+	// fallback paths above confirm liveness without ever learning a PID.
+	var ownership supervisorUnitOwnershipStatus
+	if pid > 0 {
+		ownership = supervisorDetermineUnitOwnership(pid)
+	}
 	if asJSON {
 		payload := map[string]any{
 			"schema_version": "1",
@@ -1019,6 +1038,12 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 		if delegationErr != nil {
 			payload["config_error"] = delegationErr.Error()
 		}
+		if pid > 0 {
+			payload["supervisor_unit_owned"] = ownership.Status == "owned"
+			if ownership.Unit != "" {
+				payload["supervisor_unit"] = ownership.Unit
+			}
+		}
 		if err := writeCLIJSONLine(stdout, payload); err != nil {
 			return 1
 		}
@@ -1027,6 +1052,16 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 	switch {
 	case pid > 0:
 		fmt.Fprintf(stdout, "Supervisor is running (PID %d)\n", pid) //nolint:errcheck
+		switch ownership.Status {
+		case "owned":
+			fmt.Fprintf(stdout, "Owned by systemd unit %s\n", ownership.Unit) //nolint:errcheck
+		case "outside_unit":
+			if ownership.UnitActive {
+				fmt.Fprintf(stdout, "Warning: running outside systemd unit %s (unit is active but tracking a different process)\n", ownership.Unit) //nolint:errcheck
+			} else {
+				fmt.Fprintf(stdout, "Warning: running outside systemd unit %s (unit is installed but inactive)\n", ownership.Unit) //nolint:errcheck
+			}
+		}
 		return 0
 	case running:
 		fmt.Fprintf(stdout, "Supervisor is running (pid unavailable: control socket unreachable; liveness confirmed via %s)\n", pidSource) //nolint:errcheck
@@ -1650,7 +1685,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			snap := registry.Snapshot()
 			for _, v := range snap.all {
 				if v.Started && v.cs != nil {
-					v.cs.Poke()
+					v.cs.Enqueue(reconcilekey.Allocator()) // reload: re-plan each city
 				}
 			}
 			// Per sd_notify(3) a reload ends with READY=1.
@@ -2308,7 +2343,7 @@ func startOneCity(
 		return
 	}
 	cs.ct = cityRuntime.crashTrack()
-	cs.pokeCh = pokeCh
+	wireControllerWakeSignals(cs, pokeCh, controlDispatcherCh)
 	cs.configDirty = configDirty
 	cs.services = cityRuntime.svc
 	cityRuntime.setControllerState(cs)

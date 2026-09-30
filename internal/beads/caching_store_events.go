@@ -40,6 +40,9 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 // events per minute against a completely idle backing store (ga-yoix1).
 //
 // Callers that know the payload's provenance use this entry point to say so.
+// A snapshot is authoritative for the edges it carries; one with neither key
+// keeps the cached edges rather than clearing them, because a row read from a
+// backing whose rows omit their edges looks the same on the wire.
 func (c *CachingStore) ApplyEventSnapshot(eventType string, payload json.RawMessage) {
 	c.applyEvent(eventType, payload, true)
 }
@@ -164,7 +167,16 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 			return
 		}
 		if verifyErr != nil {
+			// An unverifiable event must not overwrite a recent local write
+			// as a clean row: fence the cached row and let the next read or
+			// reconcile consult the backing. The seq bump keeps a scan that
+			// started before this point from clearing the mark.
 			c.recordProblem(fmt.Sprintf("verify %s event", eventType), verifyErr)
+			c.mu.Lock()
+			c.noteMutationLocked(patch.ID)
+			c.markDirtyLocked(patch.ID)
+			c.mu.Unlock()
+			return
 		}
 	}
 
@@ -253,7 +265,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 				seqMode:    seqKeep,
 				clearDirty: true,
 			})
-			c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking || depsAuthoritative)
+			c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking, depsAuthoritative)
 		}
 		c.updateStatsLocked()
 		mutated = true
@@ -274,7 +286,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 			})
 			mutated = true
 		}
-		if depsMutated := c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking || depsAuthoritative); depsMutated && !mutated {
+		if depsMutated := c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking, depsAuthoritative); depsMutated && !mutated {
 			c.noteMutationLocked(b.ID)
 			mutated = true
 		}
@@ -295,7 +307,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 			seqMode:    seqKeep,
 			clearDirty: true,
 		})
-		c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking || depsAuthoritative)
+		c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking, depsAuthoritative)
 		mutated = true
 		if c.clearDependentReadyProjectionsLocked(b.ID) {
 			mutated = true
@@ -317,7 +329,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 	}
 }
 
-func (c *CachingStore) updateEventDepsLocked(eventType string, b Bead, fields map[string]json.RawMessage, refreshedFromBacking bool) bool {
+func (c *CachingStore) updateEventDepsLocked(eventType string, b Bead, fields map[string]json.RawMessage, refreshedFromBacking, depsAuthoritative bool) bool {
 	if hasCacheEventField(fields, "dependencies") || hasCacheEventField(fields, "needs") {
 		return c.setEventDepsLocked(b.ID, depsFromBeadFields(b))
 	}
@@ -326,7 +338,20 @@ func (c *CachingStore) updateEventDepsLocked(eventType string, b Bead, fields ma
 	}
 	if eventType == "bead.updated" && cacheEventLooksComplete(fields) {
 		if refreshedFromBacking {
+			// b was read from the backing: its fields answer for its edges when
+			// it carries them or the backing declares its rows complete.
+			if !beadCarriesDependencyFields(b) && !c.backingRowsCarryDependencies() {
+				return false
+			}
 			return c.setEventDepsLocked(b.ID, depsFromBeadFields(b))
+		}
+		if depsAuthoritative {
+			// A snapshot is authoritative for the edges it carries; one with no
+			// dependencies key says nothing about them, so the cached edges
+			// stand. Treating it as coverage-unknown (below) would drop them,
+			// clear depsComplete store-wide, and make the next status change
+			// invalidate every ready verdict in the cache.
+			return false
 		}
 		// bd dependency mutations arrive through the same on_update hook as
 		// field changes, and the hook payload omits dependencies after removals.

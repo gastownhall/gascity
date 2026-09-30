@@ -1,0 +1,27 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "fakecmd_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/gastownhall/gascity/internal/worker/fakecmd",
+    visibility = ["//visibility:private"],
+    deps = ["//internal/worker/fake"],
+)
+
+go_binary(
+    name = "fakecmd",
+    embed = [":fakecmd_lib"],
+    visibility = ["//:__subpackages__"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

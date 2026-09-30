@@ -52,6 +52,7 @@ type storeState struct {
 	beadSeq      map[string]uint64
 	localBeadAt  map[string]time.Time
 	deletedSeq   map[string]uint64
+	writeSeq     map[string]uint64
 	mutationSeq  uint64
 	backingIsBd  bool
 }
@@ -82,6 +83,7 @@ type mergeEndState struct {
 	beadSeq      map[string]uint64
 	localBeadAt  map[string]time.Time
 	deletedSeq   map[string]uint64
+	writeSeq     map[string]uint64
 	// readyLost is the set of rows whose is_blocked verdict the merge dropped
 	// without preserving, so readiness declines for them unless their own edges
 	// can reproduce it (ga-cfhgr).
@@ -173,6 +175,7 @@ func cloneStoreState(st storeState) storeState {
 		beadSeq:      cloneU64Map(st.beadSeq),
 		localBeadAt:  cloneTimeMap(st.localBeadAt),
 		deletedSeq:   cloneU64Map(st.deletedSeq),
+		writeSeq:     cloneU64Map(st.writeSeq),
 		mutationSeq:  st.mutationSeq,
 		backingIsBd:  st.backingIsBd,
 	}
@@ -243,6 +246,7 @@ func newMergeHarnessStore(st storeState) (*CachingStore, *countingBacking) {
 		beadSeq:      cloneU64Map(st.beadSeq),
 		localBeadAt:  cloneTimeMap(st.localBeadAt),
 		deletedSeq:   cloneU64Map(st.deletedSeq),
+		writeSeq:     cloneU64Map(st.writeSeq),
 		mutationSeq:  st.mutationSeq,
 		state:        cacheLive,
 
@@ -273,6 +277,9 @@ func ensureMaps(c *CachingStore) {
 	if c.deletedSeq == nil {
 		c.deletedSeq = make(map[string]uint64)
 	}
+	if c.writeSeq == nil {
+		c.writeSeq = make(map[string]uint64)
+	}
 	// The generated states never seed ready-projection marks, so every mark in
 	// a captured end state was produced by the merge under test — which is what
 	// lets buildExpectedNewEnd derive the expected set from the end beads map
@@ -293,6 +300,7 @@ func captureEndState(c *CachingStore) mergeEndState {
 		beadSeq:              cloneU64Map(c.beadSeq),
 		localBeadAt:          cloneTimeMap(c.localBeadAt),
 		deletedSeq:           cloneU64Map(c.deletedSeq),
+		writeSeq:             cloneU64Map(c.writeSeq),
 		readyLost:            cloneDirty(c.readyProjectionLost),
 		state:                c.state,
 		lastFreshAt:          c.lastFreshAt,

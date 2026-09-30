@@ -19,13 +19,13 @@ import (
 func TestReconcileFenceWritersCensus(t *testing.T) {
 	files := packageGoFiles(t)
 
-	indexAssign := regexp.MustCompile(`c\.(beadSeq|deletedSeq|localBeadAt)\[[^\]]+\]\s*=[^=]`)
-	wholeAssign := regexp.MustCompile(`c\.(beadSeq|deletedSeq|localBeadAt)\s*=[^=]`)
+	indexAssign := regexp.MustCompile(`c\.(beadSeq|deletedSeq|localBeadAt|writeSeq)\[[^\]]+\]\s*=[^=]`)
+	wholeAssign := regexp.MustCompile(`c\.(beadSeq|deletedSeq|localBeadAt|writeSeq)\s*=[^=]`)
 
 	// Allowed enclosing functions for index-assignments (value minting / setting).
 	allowedIndex := map[string]bool{
 		"noteMutationLocked":      true, // beadSeq
-		"noteLocalMutationLocked": true, // localBeadAt
+		"noteLocalMutationLocked": true, // localBeadAt, writeSeq
 		"tombstoneLocked":         true, // deletedSeq
 	}
 	// Allowed enclosing functions for whole-map replacement. Only prime()'s
@@ -86,6 +86,7 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 	comparedStore := map[string]bool{
 		"beads": true, "deps": true, "depsComplete": true, "dirty": true,
 		"beadSeq": true, "localBeadAt": true, "deletedSeq": true, "state": true,
+		"writeSeq":            true, // compared via expectedWriteSeq
 		"readyProjectionLost": true, // compared as mergeEndState.readyLost
 		"lastFreshAt":         true, "mutationSeq": true, "primePartialErr": true,
 		"syncFailures": true, "circuitTripped": true,
@@ -96,7 +97,9 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// the merge oracle's durable cache-state comparison.
 		"observationRevision": true,
 		"backing":             true, "idPrefix": true, "mu": true, "reconciling": true,
-		"onChange": true, "problemf": true, "problemLog": true,
+		"eventPrefixes": true, // event-ownership config, fixed at construction
+		"epoch":         true, // instance identity, fixed at construction
+		"onChange":      true, "problemf": true, "problemLog": true,
 		"lastReconcileLogAt": true, "primeMu": true, "primeRunning": true,
 		"primeCycle": true, "lastFullPrimeStartedAt": true, "primeRetryDelay": true,
 		"lifecycleMu": true, "lifecycleWG": true, "cancelFn": true, "stopCh": true,

@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -134,6 +135,15 @@ func (h *RuntimeHandle) Stop(ctx context.Context) (err error) {
 
 	err = h.provider.Stop(h.sessionName)
 	return err
+}
+
+// StopForShutdown is Stop for the city shutdown sweep. A RuntimeHandle has no
+// session bead and therefore no lifecycle state to reject, so the shutdown
+// intent adds nothing here and this is deliberately identical to Stop. It exists
+// so the sweep can express its intent through one interface regardless of which
+// handle kind it holds.
+func (h *RuntimeHandle) StopForShutdown(ctx context.Context) error {
+	return h.Stop(ctx)
 }
 
 // Kill asks the provider to stop the live runtime session immediately.
@@ -295,6 +305,11 @@ func (h *RuntimeHandle) TranscriptPath(context.Context) (string, error) {
 
 // AgentMappings reports unavailable because runtime-only handles have no agent transcripts.
 func (h *RuntimeHandle) AgentMappings(context.Context) ([]AgentMapping, error) {
+	return nil, ErrHistoryUnavailable
+}
+
+// TranscriptRecords reports unavailable because runtime-only handles have no transcript.
+func (h *RuntimeHandle) TranscriptRecords(context.Context) ([]json.RawMessage, error) {
 	return nil, ErrHistoryUnavailable
 }
 

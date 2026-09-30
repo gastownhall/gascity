@@ -170,6 +170,32 @@ func TestExtractCodexTailUsage(t *testing.T) {
 	}
 }
 
+// TestExtractCodexTailUsageCapturesEntryTimestamp verifies Timestamp is
+// parsed from the same line the string-valued EntryUUID already carries.
+func TestExtractCodexTailUsageCapturesEntryTimestamp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-04-16T21-49-29-timestamp.jsonl")
+	writeCodexUsageLines(t, path, []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.4"),
+		codexTokenCountLine("2026-04-16T21:49:38.304Z", 15917, 15562, 10624, 355, 166),
+	})
+
+	usages, err := ExtractCodexTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractCodexTailUsage: %v", err)
+	}
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+	}
+	want, err := time.Parse(time.RFC3339Nano, "2026-04-16T21:49:38.304Z")
+	if err != nil {
+		t.Fatalf("time.Parse: %v", err)
+	}
+	if !usages[0].Timestamp.Equal(want) {
+		t.Errorf("usages[0].Timestamp = %v, want %v", usages[0].Timestamp, want)
+	}
+}
+
 // TestExtractCodexTailUsageDuplicateKeepsFirstModel pins the real codex
 // emission order around a model switch: the CLI re-emits the prior turn's
 // final cumulative snapshot AFTER the new turn's turn_context, so the
@@ -200,6 +226,16 @@ func TestExtractCodexTailUsageDuplicateKeepsFirstModel(t *testing.T) {
 	}
 	if usages[0].EntryUUID != "2026-04-16T21:49:40.470Z" {
 		t.Errorf("first.EntryUUID = %q, want the last duplicate's timestamp (collapse still refreshes the rest)", usages[0].EntryUUID)
+	}
+	// Timestamp, unlike EntryUUID, keeps the first-observed line's time: the
+	// invocation completed at 21:49:38.304Z and was merely replayed at
+	// 21:49:40.470Z, under the next turn_context.
+	wantFirstTime, err := time.Parse(time.RFC3339Nano, "2026-04-16T21:49:38.304Z")
+	if err != nil {
+		t.Fatalf("time.Parse: %v", err)
+	}
+	if !usages[0].Timestamp.Equal(wantFirstTime) {
+		t.Errorf("first.Timestamp = %v, want the original emission %v (not the re-emission)", usages[0].Timestamp, wantFirstTime)
 	}
 	if usages[1].Model != "gpt-5.5" {
 		t.Errorf("second.Model = %q, want gpt-5.5 (new invocation under the new turn_context)", usages[1].Model)

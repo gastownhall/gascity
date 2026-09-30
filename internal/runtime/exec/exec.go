@@ -109,7 +109,7 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 	// observed winner, while os.ErrProcessDone leaves the flag false and
 	// preserves the ordinary exit result because completion was observed first.
 	// Neither result claims physical signal-delivery ordering.
-	if cancellationAccepted.Load() {
+	if cancellationAccepted.Delivered() {
 		return "", p.cancellationError(ctx.Err(), stderr.String(), args)
 	}
 	return "", p.runError(err, stderr.String(), args)
@@ -142,22 +142,42 @@ func (p *Provider) cancellationError(ctxErr error, stderr string, args []string)
 var startCollisionPhrases = []string{"already exists", "already running"}
 
 // runError maps an ordinary (non-cancellation) cmd.Run failure onto the
-// provider's contract: exit code 2 is an unknown operation treated as success
-// (forward compatible, nil error), a start-op name collision maps to
-// [runtime.ErrSessionExists], and everything else wraps the adapter's stderr.
+// provider's contract via [classifyExecExit]. A failure that is not an exit
+// status (the script could not run at all) classifies as no exit code.
 func (p *Provider) runError(runErr error, stderr string, args []string) error {
+	code := -1
 	var exitErr *exec.ExitError
-	if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 2 {
-		return nil
+	if errors.As(runErr, &exitErr) {
+		code = exitErr.ExitCode()
 	}
 	errMsg := strings.TrimSpace(stderr)
 	if errMsg == "" {
 		errMsg = runErr.Error()
 	}
-	if len(args) > 0 && args[0] == "start" && isStartCollision(errMsg) {
-		return fmt.Errorf("%w: exec provider %s %s: %s", runtime.ErrSessionExists, p.script, strings.Join(args, " "), errMsg)
+	op := ""
+	if len(args) > 0 {
+		op = args[0]
 	}
-	return fmt.Errorf("exec provider %s %s: %s", p.script, strings.Join(args, " "), errMsg)
+	return classifyExecExit(op, code, errMsg, fmt.Errorf("exec provider %s %s: %s", p.script, strings.Join(args, " "), errMsg))
+}
+
+// classifyExecExit maps an adapter op's exit code and message onto the
+// provider's contract. base is the formatted adapter error. Exit code 2 is an
+// unknown operation treated as success (forward compatible, nil error); a
+// start-op name collision maps to [runtime.ErrSessionExists]; a start-op
+// [runtime.ExitCodeTempFail] is an endpoint capacity refusal
+// ([runtime.CapacityError]); everything else is base unchanged.
+func classifyExecExit(op string, code int, msg string, base error) error {
+	switch {
+	case code == 2:
+		return nil
+	case op == "start" && isStartCollision(msg):
+		return fmt.Errorf("%w: %w", runtime.ErrSessionExists, base)
+	case op == "start" && code == runtime.ExitCodeTempFail:
+		return &runtime.CapacityError{ExitCode: code, Source: runtime.CapacitySourceExitStatus, Err: base}
+	default:
+		return base
+	}
 }
 
 // isStartCollision reports whether a failed start op's message says the name is
@@ -227,9 +247,10 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 //     startCollisionPhrases recognizes.
 //   - foreignBox — the adapter reported the box already up BEFORE this attempt
 //     ran, which is the same fact established structurally instead of by
-//     reading prose. That distinction stopped being academic when session names
-//     became a function of agent identity: a retry now deliberately re-targets
-//     the name the previous attempt used, so collisions are steady state, and a
+//     reading prose. That distinction matters wherever a session name is a
+//     function of agent identity (named sessions, tmux_alias pools): a retry
+//     deliberately re-targets the name the previous attempt used, so collisions
+//     are steady state, and a
 //     phrasing this package has never seen would otherwise tear down a live
 //     agent's box on an ordinary retry (ga-vcjr9). A pack that cannot answer
 //     `is-running` reports neither occupancy nor vacancy and keeps the previous

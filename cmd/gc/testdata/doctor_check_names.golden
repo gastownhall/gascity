@@ -45,6 +45,7 @@ mcp-config
 mcp-shared-target
 builtin-pack-imports
 packv2-import-state
+gascity-pack-binding
 jsonl-archive
 pack-credentials
 tmux-binary
@@ -55,6 +56,7 @@ lsof-binary
 beads-role
 controller
 supervisor-http-api
+supervisor-unit-ownership
 agent-sessions
 zombie-sessions
 orphan-sessions
@@ -77,6 +79,7 @@ dolt-server
 fork-rate
 dolt-noms-size
 dolt-journal-size
+dolt-log-size
 dolt-config
 dolt-version
 events-log

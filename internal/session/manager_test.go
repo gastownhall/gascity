@@ -2659,6 +2659,48 @@ func TestRename(t *testing.T) {
 	}
 }
 
+// TestUpdatePresentationRefusesBlankTitle guards the bead store's non-empty
+// title rule at the boundary that takes the title from user input. Without it a
+// blank rename either reaches the store and comes back as a storage validation
+// error (bd: "title is required", surfaced as a 500 by the API) or, on stores
+// that do not validate, silently blanks the session title.
+func TestUpdatePresentationRefusesBlankTitle(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(
+		context.Background(), CreateOptions{Alias: "old-alias", ExplicitName: "", Template: "helper", Title: "old title", Command: "echo test", WorkDir: "/tmp", Provider: "test", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, blank := range []string{"", "   ", "\t\n"} {
+		err := mgr.Rename(info.ID, blank)
+		if !errors.Is(err, ErrInvalidSessionTitle) {
+			t.Fatalf("Rename(%q) error = %v, want ErrInvalidSessionTitle", blank, err)
+		}
+		// A blank title must also refuse a combined presentation update, so the
+		// alias half is not applied without the title half.
+		nextAlias := "new-alias"
+		err = mgr.UpdatePresentation(info.ID, &blank, &nextAlias)
+		if !errors.Is(err, ErrInvalidSessionTitle) {
+			t.Fatalf("UpdatePresentation(title=%q, alias) error = %v, want ErrInvalidSessionTitle", blank, err)
+		}
+	}
+
+	bead, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bead.Title != "old title" {
+		t.Fatalf("Title = %q, want the original title untouched", bead.Title)
+	}
+	if bead.Metadata["alias"] != "old-alias" {
+		t.Fatalf("alias = %q, want the original alias untouched", bead.Metadata["alias"])
+	}
+}
+
 func TestUpdatePresentationSyncsRuntimeAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -4682,7 +4724,14 @@ func TestTranscriptPathClassifiedDistinguishesAbsentFromAmbiguous(t *testing.T) 
 	t.Run("ambiguous", func(t *testing.T) {
 		workDir := t.TempDir()
 		searchBase := t.TempDir()
-		mgr, infos := newManagerWithSession(t, workDir, "one", "two")
+		mgr, infos := newManagerWithSession(t, workDir, "one")
+		if err := mgr.Kill(infos[0].ID); err != nil {
+			t.Fatalf("Kill(one): %v", err)
+		}
+		two, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "two", Command: "claude", WorkDir: workDir, Provider: "claude", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatalf("Create two: %v", err)
+		}
 
 		slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
 		if err := os.MkdirAll(slugDir, 0o755); err != nil {
@@ -4692,9 +4741,10 @@ func TestTranscriptPathClassifiedDistinguishesAbsentFromAmbiguous(t *testing.T) 
 			t.Fatalf("WriteFile: %v", err)
 		}
 
-		// Two keyless sessions share the workdir: the refusal is deliberate, not a
-		// missing file — the transcript above exists and is still not resolved.
-		path, lookup, err := mgr.TranscriptPathClassified(infos[1].ID, []string{searchBase})
+		// "one" was killed, not closed, while sharing the workdir with "two": the
+		// refusal is deliberate, not a missing file — the transcript above exists
+		// and is still not resolved.
+		path, lookup, err := mgr.TranscriptPathClassified(two.ID, []string{searchBase})
 		if err != nil {
 			t.Fatalf("TranscriptPathClassified: %v", err)
 		}

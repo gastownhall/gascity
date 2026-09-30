@@ -194,6 +194,18 @@ func (a SessionLogAdapter) AgentMappings(path string) ([]sessionlog.AgentMapping
 	return sessionlog.FindAgentMappings(strings.TrimSpace(path))
 }
 
+// TranscriptRecords returns every raw transcript record in file order,
+// bypassing the active-branch walk. Records without a uuid — notably
+// queue-operation task notifications — are pruned by BuildDag and are
+// therefore invisible to ReadTranscript.
+func (a SessionLogAdapter) TranscriptRecords(path string) ([]json.RawMessage, error) {
+	entries, err := sessionlog.ReadFileRecords(strings.TrimSpace(path))
+	if err != nil {
+		return nil, err
+	}
+	return rawMessagesFromEntries(entries), nil
+}
+
 // ReadAgentTranscript loads a subagent transcript while preserving raw
 // message fidelity for worker-owned API surfaces.
 func (a SessionLogAdapter) ReadAgentTranscript(path, agentID string) (*AgentTranscriptResult, error) {

@@ -14,13 +14,17 @@ import (
 	"testing"
 	"time"
 
+	goruntime "runtime"
+
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -204,6 +208,7 @@ func (m cleanupTestingM) Run() int {
 
 func TestMain(m *testing.M) {
 	maybeRunProductMetricsDirectChildEnvSpy()
+	maybeRunFakeDoltSQLServer()
 
 	// testscript re-executes the test binary as "gc" or "bd" for each txtar
 	// command. On that path we must not create a new temp root — the parent
@@ -2833,6 +2838,9 @@ version = "` + config.PublicGascityPackVersion + `"
 # retention_ttl controls how long read messages are retained before purge.
 # 0 disables retention; use "168h" for 7 days.
 # "7d" is not a valid Go duration.
+# It also sets how long a read mail bead stays open before the nudge-mail
+# sweep closes it: unset keeps that sweep's own 60m default, while "0"
+# disables the close phase too, leaving read mail beads open.
 # retention_ttl = "0"
 `
 	if got != want {
@@ -5885,18 +5893,21 @@ func TestDoStop_UsesDependencyAwareOrdering(t *testing.T) {
 	}
 }
 
-func TestDoStopStopError(t *testing.T) {
-	sp := runtime.NewFailFake() // Stop will fail
+func TestDoStopBrokenRuntimeFailsClosed(t *testing.T) {
+	sp := runtime.NewFailFake() // ListRunning and Stop fail; IsRunning is false
 
 	var stdout, stderr bytes.Buffer
 	code := doStop([]string{"mayor"}, sp, nil, nil, 0, events.Discard, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("doStop = %d, want 0 (errors are non-fatal); stderr: %s", code, stderr.String())
+	// The runtime could not be listed, so gc stop cannot know that nothing is
+	// running: it must not report success.
+	if code != 1 {
+		t.Fatalf("doStop = %d, want 1 for an unlistable runtime; stderr: %s", code, stderr.String())
 	}
-	// FailFake makes IsRunning return false, so no stop attempt.
-	// Should still print "City stopped."
-	if !strings.Contains(stdout.String(), "City stopped.") {
-		t.Errorf("stdout missing 'City stopped.': %q", stdout.String())
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Errorf("stdout reported City stopped. for an unlistable runtime: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "gc stop: listing sessions: session unavailable") {
+		t.Errorf("stderr = %q, want the listing failure", stderr.String())
 	}
 }
 
@@ -7976,4 +7987,30 @@ func TestDoAgentResumeNotFound(t *testing.T) {
 	if !strings.Contains(stderr.String(), "not found") {
 		t.Errorf("stderr = %q, want 'not found'", stderr.String())
 	}
+}
+
+// gcCallerDir resolves the cmd/gc package directory from a runtime.Caller
+// file path. Under `bazel test` the caller path is runfiles-relative, so the
+// real checkout from GC_TEST_REPO_ROOT stands in for the package directory.
+func gcCallerDir(currentFile string) string {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return filepath.Join(root, "cmd", "gc")
+	}
+	return filepath.Dir(currentFile)
+}
+
+// gcRepoRootFromEnv resolves the repository root for source-scanning guards.
+func gcRepoRootFromEnv() string {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
+	_, file, _, _ := goruntime.Caller(0)
+	return filepath.Dir(filepath.Dir(filepath.Dir(file)))
+}
+
+// chdirToRealPackageDir moves the working directory to the cmd/gc package
+// in the real checkout under `bazel test` (see bazeltest.ChdirPackageDir).
+func chdirToRealPackageDir(t *testing.T) {
+	t.Helper()
+	bazeltest.ChdirPackageDir(t, "cmd/gc")
 }

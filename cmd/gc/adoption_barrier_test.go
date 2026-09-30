@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -35,6 +36,10 @@ type fakeAdoptionProvider struct {
 	alive            map[string]bool
 	processNameCalls map[string][]string
 	listErr          error
+	// tokens simulates each running session's real, already-established
+	// GC_INSTANCE_TOKEN (e.g. a runtime that survived a supervisor restart).
+	// A name with no entry has no live token, i.e. GetMeta returns "".
+	tokens map[string]string
 }
 
 type adoptionLockProbeStore struct {
@@ -137,7 +142,12 @@ func (f *fakeAdoptionProvider) ProcessAlive(name string, processNames []string) 
 
 func (f *fakeAdoptionProvider) IsAttached(string) bool { return false }
 
-func (f *fakeAdoptionProvider) GetMeta(string, string) (string, error) { return "", nil }
+func (f *fakeAdoptionProvider) GetMeta(name, key string) (string, error) {
+	if key != "GC_INSTANCE_TOKEN" {
+		return "", nil
+	}
+	return f.tokens[name], nil
+}
 
 func (f *fakeAdoptionProvider) GetLastActivity(string) (time.Time, error) { return time.Time{}, nil }
 
@@ -220,9 +230,190 @@ func TestAdoptionBarrier_AdoptsRunning(t *testing.T) {
 		if b.Metadata["continuation_epoch"] != "1" {
 			t.Errorf("bead %q continuation_epoch = %q, want 1", b.Title, b.Metadata["continuation_epoch"])
 		}
-		if b.Metadata["instance_token"] == "" {
-			t.Errorf("bead %q missing instance_token", b.Title)
-		}
+	}
+}
+
+// TestAdoptionBarrier_PreservesLiveInstanceToken verifies that adopting a
+// running session whose runtime already carries a live GC_INSTANCE_TOKEN
+// (the normal shape of an untracked survivor from before a supervisor
+// restart) records THAT real token on the adopted bead, instead of
+// fabricating an unrelated random one. A fabricated token can never match
+// the token the live runtime process actually carries — it was set at
+// process-launch time and cannot be changed from outside — so recording
+// anything other than the real value permanently poisons the drain-ack
+// token fence in session_reconciler.go (ga-lfr06j).
+func TestAdoptionBarrier_PreservesLiveInstanceToken(t *testing.T) {
+	store := beads.NewMemStore()
+	const liveToken = "440f67722bf9e7382ad684e057191659"
+	sp := &fakeAdoptionProvider{
+		running: []string{"test-city-worker"},
+		tokens:  map[string]string{"test-city-worker": liveToken},
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	var stderr bytes.Buffer
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+
+	result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clk, &stderr, false)
+	if !passed {
+		t.Fatalf("barrier should pass, stderr: %s", stderr.String())
+	}
+	if result.Adopted != 1 {
+		t.Fatalf("Adopted = %d, want 1", result.Adopted)
+	}
+
+	beadList, _ := store.ListByLabel(sessionBeadLabel, 0)
+	if len(beadList) != 1 {
+		t.Fatalf("beads count = %d, want 1", len(beadList))
+	}
+	if got := beadList[0].Metadata["instance_token"]; got != liveToken {
+		t.Errorf("instance_token = %q, want live runtime token %q preserved (not fabricated)", got, liveToken)
+	}
+}
+
+// TestAdoptionBarrier_TokenlessRuntimeAdoptsWithoutFabricatingToken verifies
+// that adopting a running session whose runtime carries NO live
+// GC_INSTANCE_TOKEN leaves the adopted bead's instance_token empty rather
+// than fabricating one. An empty instance_token is the codebase's existing
+// "cannot verify identity" signal (see verifiedStop/verifiedInterrupt in
+// session_wake.go and the drain-ack fence in session_reconciler.go) and
+// deliberately fails open at drain time; a fabricated token would instead
+// fence the runtime from ever being drained, since it could never match.
+func TestAdoptionBarrier_TokenlessRuntimeAdoptsWithoutFabricatingToken(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &fakeAdoptionProvider{running: []string{"test-city-worker"}}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	var stderr bytes.Buffer
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+
+	result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clk, &stderr, false)
+	if !passed {
+		t.Fatalf("barrier should pass, stderr: %s", stderr.String())
+	}
+	if result.Adopted != 1 {
+		t.Fatalf("Adopted = %d, want 1", result.Adopted)
+	}
+
+	beadList, _ := store.ListByLabel(sessionBeadLabel, 0)
+	if len(beadList) != 1 {
+		t.Fatalf("beads count = %d, want 1", len(beadList))
+	}
+	if got := beadList[0].Metadata["instance_token"]; got != "" {
+		t.Errorf("instance_token = %q, want empty (token-less)", got)
+	}
+}
+
+// TestAdoptionBarrier_AdoptedRuntimeCanLaterBeDrained is the end-to-end
+// regression for ga-lfr06j: a runtime adopted at supervisor restart must
+// actually be stoppable by a later drain-ack, not skipped forever as
+// "session was replaced". It reproduces the incident shape (an untracked
+// runtime that survived restart with its own pre-existing instance token)
+// using the richer runtime.Fake, since the drain-ack half needs a real
+// Stop/IsRunning/GetMeta implementation that fakeAdoptionProvider does not
+// provide.
+func TestAdoptionBarrier_AdoptedRuntimeCanLaterBeDrained(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	ctx := context.Background()
+	if err := sp.Start(ctx, "test-city-worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// The runtime survived a supervisor restart untracked: it already
+	// carries its own real instance token from whenever it was originally
+	// launched, which cannot be changed retroactively from outside it.
+	const preRestartToken = "440f67722bf9e7382ad684e057191659"
+	if err := sp.SetMeta("test-city-worker", "GC_INSTANCE_TOKEN", preRestartToken); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	var barrierStderr bytes.Buffer
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+
+	// Supervisor restart: adoption barrier discovers and adopts the
+	// untracked survivor.
+	result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clk, &barrierStderr, false)
+	if !passed || result.Adopted != 1 {
+		t.Fatalf("adoption failed: passed=%v adopted=%d stderr=%s", passed, result.Adopted, barrierStderr.String())
+	}
+
+	beadList, _ := store.ListByLabel(sessionBeadLabel, 0)
+	if len(beadList) != 1 {
+		t.Fatalf("beads count = %d, want 1", len(beadList))
+	}
+	adoptedToken := beadList[0].Metadata["instance_token"]
+
+	// Reconciler later decides to drain the adopted bead. This must
+	// actually stop the still-running pre-restart runtime.
+	tracker := &asyncStartTracker{}
+	var drainStderr synchronizedBuffer
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, beadList[0].ID, "test-city-worker", adoptedToken, nil, tracker, &drainStderr)
+	if !tracker.wait(time.Second) {
+		t.Fatal("async drain-ack stop did not complete")
+	}
+
+	if sp.IsRunning("test-city-worker") {
+		t.Fatal("adopted runtime was never stopped — drain-ack skipped it forever (the ga-lfr06j leak)")
+	}
+	if got := drainStderr.String(); strings.Contains(got, "instance token mismatch") {
+		t.Fatalf("drain stderr = %q, unexpected token mismatch for a correctly-captured adopted token", got)
+	}
+}
+
+// TestAdoptionBarrier_TokenlessAdoptedRuntimeCanLaterBeDrained is the
+// token-less counterpart to TestAdoptionBarrier_AdoptedRuntimeCanLaterBeDrained
+// above (round-2 exit contract on ga-lfr06j / ga-3kfb6y): a runtime adopted
+// with NO live GC_INSTANCE_TOKEN (instance_token left empty, never
+// fabricated — see TestAdoptionBarrier_TokenlessRuntimeAdoptsWithoutFabricatingToken)
+// must still be actually stoppable by a later drain-ack, not skipped forever
+// as an unverifiable mismatch. queueDrainAckAsyncStop treats an empty
+// expected token as "cannot verify" and falls through to the kill
+// (session_reconciler.go), so this proves that fall-through actually drains
+// a token-less adoptee end-to-end rather than merely asserting the fence
+// code reads that way.
+func TestAdoptionBarrier_TokenlessAdoptedRuntimeCanLaterBeDrained(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	ctx := context.Background()
+	if err := sp.Start(ctx, "test-city-worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Deliberately no SetMeta(GC_INSTANCE_TOKEN, ...): the runtime survived a
+	// supervisor restart untracked and carries no instance token at all,
+	// mirroring a pre-instance-token-era survivor.
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	var barrierStderr bytes.Buffer
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+
+	// Supervisor restart: adoption barrier discovers and adopts the
+	// untracked, token-less survivor.
+	result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clk, &barrierStderr, false)
+	if !passed || result.Adopted != 1 {
+		t.Fatalf("adoption failed: passed=%v adopted=%d stderr=%s", passed, result.Adopted, barrierStderr.String())
+	}
+
+	beadList, _ := store.ListByLabel(sessionBeadLabel, 0)
+	if len(beadList) != 1 {
+		t.Fatalf("beads count = %d, want 1", len(beadList))
+	}
+	adoptedToken := beadList[0].Metadata["instance_token"]
+	if adoptedToken != "" {
+		t.Fatalf("adoptedToken = %q, want empty (token-less adoption must not fabricate one)", adoptedToken)
+	}
+
+	// Reconciler later decides to drain the adopted bead. This must actually
+	// stop the still-running token-less runtime, not skip it forever as an
+	// unverifiable mismatch.
+	tracker := &asyncStartTracker{}
+	var drainStderr synchronizedBuffer
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, beadList[0].ID, "test-city-worker", adoptedToken, nil, tracker, &drainStderr)
+	if !tracker.wait(time.Second) {
+		t.Fatal("async drain-ack stop did not complete")
+	}
+
+	if sp.IsRunning("test-city-worker") {
+		t.Fatal("token-less adopted runtime was never stopped — drain-ack skipped it forever (round-2 gap on ga-lfr06j)")
+	}
+	if got := drainStderr.String(); strings.Contains(got, "instance token mismatch") {
+		t.Fatalf("drain stderr = %q, unexpected token mismatch for a token-less adoptee (empty must mean cannot-verify, not skip)", got)
 	}
 }
 

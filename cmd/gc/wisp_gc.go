@@ -7,12 +7,14 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -77,6 +79,48 @@ var wispGCReapOrphanProbeCap = 500
 // unbounded pass. Package var so tests can shrink it.
 var wispGCClosurePurgeBatchCap = 500
 
+// infraSessionPurgeAgeDefault is how long a closed infra session bead is kept.
+// Three days, not the Dolt reaper's 30-day SESSION_PURGE_AGE: these rows are
+// coordination records, and a 30-day tail is what made the graph file large
+// enough for SQLITE_BUSY_SNAPSHOT. Override with GC_INFRA_SESSION_PURGE_AGE.
+const infraSessionPurgeAgeDefault = 72 * time.Hour
+
+// infraSessionPurgeAge is the idle age a closed session bead must reach
+// before purgeClosedInfraSessions deletes it. Tests replace it.
+var infraSessionPurgeAge = defaultInfraSessionPurgeAge
+
+func defaultInfraSessionPurgeAge() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("GC_INFRA_SESSION_PURGE_AGE"))
+	if raw == "" {
+		return infraSessionPurgeAgeDefault
+	}
+	age, err := time.ParseDuration(raw)
+	if err != nil || age <= 0 {
+		infraSessionPurgeAgeWarnOnce.Do(func() {
+			log.Printf("wisp gc: GC_INFRA_SESSION_PURGE_AGE=%q is not a positive Go duration (e.g. 72h; days like 30d are not accepted); using the default %s",
+				raw, infraSessionPurgeAgeDefault)
+		})
+		return infraSessionPurgeAgeDefault
+	}
+	return age
+}
+
+// infraSessionPurgeAgeWarnOnce limits the invalid-override warning to one line
+// per process: the age is re-read every GC tick. Tests reset it.
+var infraSessionPurgeAgeWarnOnce = &sync.Once{}
+
+// wispGCSessionPurgeBatchCap bounds how many closed infra session beads one
+// sweep deletes. The backlog drains across ticks instead of one unbounded pass.
+var wispGCSessionPurgeBatchCap = 500
+
+// wispGCSessionPurgeScanCap bounds how many candidates one sweep examines,
+// kept or deleted. A session that still owns children is kept, and it counts
+// against this budget, so the per-tick Children/DepList/Get probes stay bounded
+// even when the backlog is mostly sessions that cannot be purged. The sweep
+// resumes after the last examined candidate on the next tick (see
+// memoryWispGC.sessionPurgeCursor), so kept sessions do not starve the rest.
+var wispGCSessionPurgeScanCap = 2000
+
 // reapOrphansEnforced reports whether orphaned-closed-wisp reaping should
 // actually delete rows (true) or run dry (false). It is a package var so tests
 // can flip it without touching the process environment. By default it reads
@@ -114,7 +158,13 @@ type wispGC interface {
 	// also covers list failures. The molecule/wisp/workflow purge arm operates on
 	// the graph-class store; the read-message retention arm on the messaging-class
 	// store. Both wrap the same underlying work store until either class relocates.
-	runGC(graphStore beads.GraphStore, mailStore beads.MailStore, now time.Time) (int, error)
+	//
+	// sessionLedger is the sessions-class store ONLY when the city has relocated
+	// that class off its work store onto a SQLite infra ledger (see
+	// relocatedSQLiteSessionLedger); otherwise its Store is nil and the closed
+	// session purge arm does nothing. Sessions on a work store belong to the
+	// reaper order's step 6, with its own pattern, backup and anomaly guards.
+	runGC(graphStore beads.GraphStore, sessionLedger beads.SessionStore, mailStore beads.MailStore, now time.Time) (int, error)
 }
 
 // memoryWispGC is the production implementation of wispGC.
@@ -123,6 +173,11 @@ type memoryWispGC struct {
 	ttl              time.Duration
 	mailRetentionTTL time.Duration
 	lastRun          time.Time
+	// sessionPurgeCursor is where the closed infra session sweep resumes: the
+	// last candidate the previous sweep examined, in (created_at, id) order.
+	// nil starts from the oldest candidate; a sweep that reaches the end of the
+	// candidate list resets it so the next pass starts over.
+	sessionPurgeCursor *beads.SeekBoundary
 }
 
 // newWispGC creates a wisp GC tracker. Returns nil if disabled. The tracker
@@ -154,7 +209,7 @@ func (m *memoryWispGC) shouldRun(now time.Time) bool {
 	return now.Sub(m.lastRun) >= m.interval
 }
 
-func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailStore, now time.Time) (int, error) {
+func (m *memoryWispGC) runGC(graphStore beads.GraphStore, sessionLedger beads.SessionStore, mailStore beads.MailStore, now time.Time) (int, error) {
 	m.lastRun = now
 	// The molecule/wisp/workflow purge arm operates on the graph-class store; the
 	// read-message retention arm on the messaging-class store. Pass the unwrapped
@@ -209,6 +264,27 @@ func (m *memoryWispGC) runGC(graphStore beads.GraphStore, mailStore beads.MailSt
 		orphanReaped, orphanErr := reapOrphanedClosedWisps(store, cutoff, wispGCReapOrphanBatchCap)
 		purged += orphanReaped
 		deleteErr = errors.Join(deleteErr, orphanErr)
+	}
+
+	// Closed agent-session rows (gcg-session-*, gcs-*) in a SQLite infra ledger
+	// are invisible to the reaper order, whose step 6 queries the Dolt work
+	// database, and the root-blind SQLite retention sweeper stays off, so this
+	// arm is what deletes them. It runs only when both hold:
+	//   - the graph-class GC is on (wisp_ttl > 0). A GC enabled only for mail
+	//     retention is a messaging policy and does not opt the city into
+	//     deleting session history;
+	//   - the caller handed over a relocated SQLite sessions ledger. On an
+	//     unsplit city sessions live on the work store, sessionLedger.Store is
+	//     nil, and this arm is a no-op: those rows belong to reaper step 6.
+	// Its clock is infraSessionPurgeAge (GC_INFRA_SESSION_PURGE_AGE, default
+	// 3 days) — neither the 24h wisp TTL nor the Dolt reaper's 30-day
+	// GC_REAPER_SESSION_PURGE_AGE — and it never deletes a non-session bead.
+	if m.ttl > 0 && sessionLedger.Store != nil {
+		sessionPurged, next, sessionErr := purgeClosedInfraSessionsPage(sessionLedger.Store, now, infraSessionPurgeAge(),
+			wispGCSessionPurgeBatchCap, wispGCSessionPurgeScanCap, m.sessionPurgeCursor)
+		m.sessionPurgeCursor = next
+		purged += sessionPurged
+		deleteErr = errors.Join(deleteErr, sessionErr)
 	}
 
 	if m.mailRetentionTTL > 0 && mailStore.Store != nil {
@@ -442,7 +518,9 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 			// depends on another), or out from under its own dep-linked
 			// children ("up": rows where another bead depends on this one).
 			// Both reads sit inside the single probe budget charged above.
-			linked, linkErr := hasParentChildDepEdge(store, c.ID)
+			// Live, as the purge's is: a closed row can sit in the controller's
+			// cache while another process adds an edge to it without an event.
+			linked, linkErr := hasParentChildDepEdge(beads.HandlesFor(store).Live, c.ID)
 			if linkErr != nil {
 				collectErr = errors.Join(collectErr, fmt.Errorf("listing parent-child deps for rootless orphan %q: %w", c.ID, linkErr))
 				continue
@@ -454,7 +532,9 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 		} else {
 			cached, ok := rootCollectible[rootID]
 			if !ok {
-				root, getErr := store.Get(rootID)
+				// Live: the root's status gates a delete, and a cached row can
+				// still say terminal after another process reopened it.
+				root, getErr := beads.HandlesFor(store).Live.Get(rootID)
 				switch {
 				case errors.Is(getErr, beads.ErrNotFound):
 					cached = true // root gone
@@ -482,8 +562,19 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 			continue
 		}
 
+		err := deleteWorkflowBead(store, c.ID)
+		if errors.Is(err, errWorkflowDeleteLiveDescendants) {
+			// A closed orphan can itself be an intermediate step that still
+			// owns open sub-steps; the delete refuses those. That is a skip,
+			// not a sweep failure — it becomes eligible once they finish —
+			// and it is not charged to the batch cap: no delete was
+			// attempted, and an orphan refused on every sweep would otherwise
+			// hold a cap slot on every sweep, starving the reapable orphans
+			// listed behind it.
+			continue
+		}
 		attempted++
-		if err := deleteWorkflowBead(store, c.ID); err != nil {
+		if err != nil {
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("reaping orphaned closed wisp %q: %w", c.ID, err))
 			continue
 		}
@@ -514,6 +605,165 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 	return reaped, errors.Join(collectErr, deleteErr)
 }
 
+// relocatedSQLiteSessionLedger returns sessionStore — the sessions-class store
+// as resolveSessionStore / sessionsBeadStore() resolved it — when, and only
+// when, the storage routes relocate the sessions class off the work store onto
+// a SQLite Beads ledger (the whole-split infra binding). Anything else — no
+// routes, sessions left on the work binding, a relocated binding served by
+// another engine (a Dolt workspace), or a refused binding — returns nil, which
+// is what keeps the closed session purge off every store the reaper order
+// already governs.
+//
+// The engine is identified under the controller's cache (bindingEngine), and
+// the store handed back is sessionStore itself, so on the controller the purge
+// deletes through that cache: the cache drops the rows and the deletes emit
+// bead.deleted like every other controller write to the binding.
+func relocatedSQLiteSessionLedger(routes *storageRoutes, sessionStore, workStore beads.Store) beads.Store {
+	routed, relocated := routes.storeFor(coordclass.ClassSessions) // residency:allow — asks whether the sessions class is relocated, to gate a purge; resolves no bead
+	if !relocated || routed == nil || sessionStore == nil {
+		return nil
+	}
+	ledger, ok := bindingEngine(sessionStore).(*beads.SQLiteStore)
+	if !ok || ledger == nil {
+		return nil
+	}
+	if routedLedger, ok := bindingEngine(routed).(*beads.SQLiteStore); !ok || routedLedger != ledger {
+		return nil
+	}
+	if work, ok := bindingEngine(workStore).(*beads.SQLiteStore); ok && work == ledger {
+		return nil
+	}
+	return sessionStore
+}
+
+// purgeClosedInfraSessions deletes closed session beads that have been idle
+// longer than age, examining candidates from the oldest. It is the one-pass
+// form of purgeClosedInfraSessionsPage with the default scan budget.
+func purgeClosedInfraSessions(store beads.Store, now time.Time, age time.Duration, batchCap int) (int, error) {
+	purged, _, err := purgeClosedInfraSessionsPage(store, now, age, batchCap, wispGCSessionPurgeScanCap, nil)
+	return purged, err
+}
+
+// purgeClosedInfraSessionsPage deletes closed session beads that have been
+// idle longer than age. The store must be the relocated SQLite sessions ledger
+// (relocatedSQLiteSessionLedger), where agent sessions are minted as
+// gcg-session-* or the older gcs-* prefix. The Dolt reaper only sees
+// issue_type=session in a Dolt `issues` table, so this arm is what keeps the
+// sqlite ledger from retaining every closed session forever.
+//
+// It deletes only type=session rows that are closed and old. A closed workflow
+// step, an open session, and a session that still owns a parent-child child
+// stay. Each candidate is re-read immediately before its delete, and skipped
+// unless it is still a closed session past the cutoff, so a session reopened
+// after the list is not deleted. Delete is the store's own delete, so labels,
+// metadata, and deps go with the bead.
+//
+// The sweep is bounded twice: at most batchCap delete attempts and at most
+// scanCap examined candidates, kept ones included. It starts after cursor in
+// (created_at, id) order and returns where the next sweep should resume: the
+// last examined candidate, or nil once the candidate list is exhausted.
+func purgeClosedInfraSessionsPage(store beads.Store, now time.Time, age time.Duration, batchCap, scanCap int, cursor *beads.SeekBoundary) (int, *beads.SeekBoundary, error) {
+	if store == nil || age <= 0 {
+		return 0, nil, nil
+	}
+	cutoff := now.Add(-age)
+	query := beads.ListQuery{
+		Status:        "closed",
+		Type:          "session",
+		UpdatedBefore: cutoff,
+		TierMode:      beads.TierBoth,
+		Sort:          beads.SortCreatedAsc,
+		SeekAfter:     cursor,
+	}
+	if scanCap > 0 {
+		query.Limit = scanCap
+	}
+	candidates, err := store.List(query)
+	if err != nil {
+		return 0, cursor, fmt.Errorf("listing closed infra sessions: %w", err)
+	}
+	// The safety reads go past any cache: the controller hands this a cached
+	// ledger, and a reopen or a new edge another process wrote without an event
+	// must still stop the delete.
+	live := beads.HandlesFor(store).Live
+	purged := 0
+	attempted := 0
+	examined := 0
+	var last *beads.SeekBoundary
+	var deleteErr error
+	for _, candidate := range candidates {
+		if batchCap > 0 && attempted >= batchCap {
+			break
+		}
+		examined++
+		last = &beads.SeekBoundary{CreatedAt: candidate.CreatedAt, ID: candidate.ID}
+		if !closedInfraSessionPastCutoff(candidate, cutoff) {
+			continue
+		}
+		children, childErr := store.Children(candidate.ID, beads.IncludeClosed, beads.WithBothTiers)
+		if childErr != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("listing children for session %q: %w", candidate.ID, childErr))
+			continue
+		}
+		if len(children) > 0 {
+			continue
+		}
+		linked, linkErr := hasParentChildDepEdge(live, candidate.ID)
+		if linkErr != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("listing parent-child deps for session %q: %w", candidate.ID, linkErr))
+			continue
+		}
+		if linked {
+			continue
+		}
+		// Re-read right before the delete: the list is a snapshot, and a
+		// configured named session can be reopened in the meantime.
+		current, getErr := live.Get(candidate.ID)
+		if getErr != nil {
+			if !errors.Is(getErr, beads.ErrNotFound) {
+				deleteErr = errors.Join(deleteErr, fmt.Errorf("re-reading session %q: %w", candidate.ID, getErr))
+			}
+			continue
+		}
+		if !closedInfraSessionPastCutoff(current, cutoff) {
+			continue
+		}
+		attempted++
+		if err := store.Delete(candidate.ID); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("purging closed infra session %q: %w", candidate.ID, err))
+			continue
+		}
+		purged++
+	}
+	next := last
+	if examined == len(candidates) && (scanCap <= 0 || len(candidates) < scanCap) {
+		// Every candidate after the cursor was examined: the next sweep
+		// starts over from the oldest.
+		next = nil
+	}
+	if purged > 0 {
+		log.Printf("wisp gc: purged %d closed infra session bead(s) older than %s", purged, age)
+	}
+	return purged, next, deleteErr
+}
+
+// closedInfraSessionPastCutoff reports whether b is a closed session bead whose
+// last activity (UpdatedAt, falling back to CreatedAt) is before cutoff. A bead
+// with no timestamp at all is never past the cutoff.
+func closedInfraSessionPastCutoff(b beads.Bead, cutoff time.Time) bool {
+	if b.Type != "session" || b.Status != "closed" {
+		return false
+	}
+	activity := b.UpdatedAt
+	if activity.IsZero() {
+		activity = b.CreatedAt
+	}
+	return !activity.IsZero() && activity.Before(cutoff)
+}
+
 // hasParentChildDepEdge reports whether id sits on either end of a parent-child
 // dependency row. The parent_id column is not the only ownership link: some
 // molecule step beads are joined to their parent purely by a dep row (see
@@ -521,7 +771,10 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 // bead have a dep-linked parent", "up" deps answer "does it have dep-linked
 // children" — either makes it a subtree member rather than a free-standing
 // leaf, so the orphan reaper must leave it to the owning root's closure purge.
-func hasParentChildDepEdge(store beads.Store, id string) (bool, error) {
+func hasParentChildDepEdge(store interface {
+	DepList(id, direction string) ([]beads.Dep, error)
+}, id string,
+) (bool, error) {
 	for _, direction := range []string{"down", "up"} {
 		deps, err := store.DepList(id, direction)
 		if err != nil {
@@ -701,7 +954,9 @@ var errBeadNoLongerEligible = errors.New("bead skipped: no longer eligible for d
 // of DELETE ATTEMPTS per call — counting failures, not just successes — so a
 // large backlog or a failing delete backend cannot make one sweep attempt an
 // unbounded amount of deletion work; the remainder drains on later ticks.
-// batchCap <= 0 disables the bound. Entries skipped for age never consume the cap.
+// batchCap <= 0 disables the bound. Entries skipped for age never consume the
+// cap, nor do entries whose delete the strand guard refused
+// (errWorkflowDeleteLiveDescendants): no delete was attempted for those.
 func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time, batchCap int, deleteFn func(beads.Store, string) error) (int, error) {
 	purged := 0
 	attempted := 0
@@ -713,8 +968,19 @@ func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time
 		if entry.CreatedAt.IsZero() || !entry.CreatedAt.Before(cutoff) {
 			continue
 		}
+		err := deleteFn(store, entry.ID)
+		if errors.Is(err, errWorkflowDeleteLiveDescendants) {
+			// The strand guard refused the closure delete: an open descendant
+			// the closure collector did not see still holds the root. That is
+			// a skip, not a sweep failure — the root becomes eligible once the
+			// descendant finishes — and it is not charged to the cap: no
+			// delete was attempted, and a root refused on every sweep would
+			// otherwise hold a cap slot on every sweep, starving the
+			// collectible roots listed behind it.
+			continue
+		}
 		attempted++
-		if err := deleteFn(store, entry.ID); err != nil {
+		if err != nil {
 			if errors.Is(err, errBeadNoLongerEligible) {
 				continue
 			}

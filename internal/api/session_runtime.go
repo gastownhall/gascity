@@ -48,14 +48,25 @@ import (
 // regress per-dispatcher trace files for control-dispatcher sessions
 // restarted through the API. Dispatcher-trace handling stays the
 // responsibility of the caller that knows the qualified agent name.
+//
+// If the merged baseline+workspace+provider env already targets a remote
+// city (GC_CITY_URL or GC_CITY_CONTEXT set), the local city anchors are
+// PINNED EMPTY — withheld, not absent. Seeding them alongside a remote
+// target makes the nested gc binary in that session fail closed with
+// "conflicting targets" (cmd/gc/remote_target.go's local-vs-remote guard),
+// but merely omitting them does not clear them: this env is an overlay on
+// an environment the session already inherits (the tmux server's global env,
+// or os.Environ() on the subprocess path), so an omitted key is an inherited
+// key. An empty value is what the adapters honor as withholding — the tmux
+// adapter turns it into an `env -u KEY` prefix, and the subprocess adapter
+// drops the inherited entry. GC_CITY_ROOT is pinned too even though
+// citylayout.CityIdentityEnvMap never seeds it, because the guard trips on it
+// and nothing else clears an inherited value.
 func cityAnchoredSessionEnv(cityPath string, workspaceEnv, providerEnv map[string]string) map[string]string {
 	baseline := processenv.ProviderProcessPassthroughEnv()
-	anchors := citylayout.CityIdentityEnvMap(cityPath)
 	gcBin, _ := os.Executable()
-	if len(baseline) == 0 && len(workspaceEnv) == 0 && len(providerEnv) == 0 && len(anchors) == 0 && gcBin == "" {
-		return nil
-	}
-	out := make(map[string]string, len(baseline)+len(workspaceEnv)+len(providerEnv)+len(anchors)+1)
+
+	out := make(map[string]string, len(baseline)+len(workspaceEnv)+len(providerEnv)+4)
 	for k, v := range baseline {
 		out[k] = v
 	}
@@ -64,6 +75,20 @@ func cityAnchoredSessionEnv(cityPath string, workspaceEnv, providerEnv map[strin
 	}
 	for k, v := range providerEnv {
 		out[k] = processenv.ExpandSessionEnvValue(v)
+	}
+
+	remoteTargeted := strings.TrimSpace(out["GC_CITY_URL"]) != "" || strings.TrimSpace(out["GC_CITY_CONTEXT"]) != ""
+	anchors := citylayout.CityIdentityEnvMap(cityPath)
+	if remoteTargeted {
+		anchors = map[string]string{
+			"GC_CITY":             "",
+			"GC_CITY_PATH":        "",
+			"GC_CITY_ROOT":        "",
+			"GC_CITY_RUNTIME_DIR": "",
+		}
+	}
+	if len(baseline) == 0 && len(workspaceEnv) == 0 && len(providerEnv) == 0 && len(anchors) == 0 && gcBin == "" {
+		return nil
 	}
 	for k, v := range anchors {
 		out[k] = v
