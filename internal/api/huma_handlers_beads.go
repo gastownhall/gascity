@@ -492,12 +492,10 @@ func readyFederationQuery() beads.ReadyQuery {
 //     relocated graph store. The CLI composite's legs are work-then-infra, the
 //     same relative order, so on a rig-less city the two sequences agree.
 //     GET /v0/beads federates the same legs in the same order.
-//   - Within a leg: whatever order that leg's own Ready reader emits. That is
-//     the canonical (priority ASC, created_at ASC, id ASC) for a work store —
-//     CachingStore.Ready sorts with sortBeadsReadyOrder — but NOT for the graph
-//     leg: the canonical relocated binding is beads.SQLiteStore, whose
-//     sqliteReadySQL orders by (created_at ASC, id ASC) with no priority term at
-//     all. Per-leg order is therefore deterministic, not canonical.
+//   - Within a leg: whatever order that leg's own Ready reader emits. For a
+//     work store (CachingStore.Ready) and for the canonical relocated binding
+//     (beads.SQLiteStore.Ready) alike that is the canonical (priority ASC,
+//     created_at ASC, id ASC) order, so each leg is sorted on its own.
 //   - Dedupe: first leg to return an id wins. The graph leg runs last, so a bead
 //     co-resident in the work store and the binding — the documented steady
 //     state of a migrated city, where the migration preserves ids and never
@@ -506,9 +504,9 @@ func readyFederationQuery() beads.ReadyQuery {
 //     re-sort would change the bytes a multi-rig single-store city already
 //     serves, and the graph leg must be free for such a city. Both sides are
 //     therefore compared after normalizing with beads.SortBeadsReadyOrder. That
-//     normalization is load-bearing rather than cosmetic, precisely because the
-//     graph leg is not priority-ordered; it is well-defined because
-//     SortBeadsReadyOrder is a total order over the merged set.
+//     normalization is load-bearing rather than cosmetic, because a
+//     concatenation of sorted legs is not itself sorted; it is well-defined
+//     because SortBeadsReadyOrder is a total order over the merged set.
 //   - Failure: a rig degrades (Partial 200 + partial_errors); the graph leg
 //     does not (503, carrying any work-leg errors recorded before it). See
 //     graphPlaneUnavailable.

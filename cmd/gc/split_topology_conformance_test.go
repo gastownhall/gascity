@@ -1932,10 +1932,8 @@ func beadIDsOf(list []beads.Bead) []string {
 // executable FEDERATION CONTRACT written for this invariant: legs city → rigs
 // ascending → graph last, per-leg order whatever that leg's reader emits, dedupe
 // first-leg-wins, and — the load-bearing part — BOTH sides compared after
-// normalizing with beads.SortBeadsReadyOrder, because per-leg order is
-// deterministic but not canonical across leg kinds (a caching-wrapped work store
-// emits (priority, created_at, id); the canonical relocated binding emits
-// (created_at, id) with no priority term). So this runs the real API handler and
+// normalizing with beads.SortBeadsReadyOrder, because each leg is sorted but
+// their concatenation is not. So this runs the real API handler and
 // the real CLI reader over the SAME three stores and compares the two answers.
 //
 // The single-store row is not a formality: it is the byte-identity claim. There

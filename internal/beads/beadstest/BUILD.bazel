@@ -18,6 +18,7 @@ go_library(
         "metadata_cas_conformance.go",
         "pinned_id_fence_conformance.go",
         "pinned_module.go",
+        "ready_parity_conformance.go",
         "recording_store.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/beads/beadstest",
@@ -25,6 +26,7 @@ go_library(
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/testpolicy/waiverclock",
     ],
 )
 
@@ -40,6 +42,7 @@ go_test(
     deps = [
         "//internal/beads",
         "//internal/testenv",
+        "//internal/testpolicy/waiverclock",
     ],
 )
 
