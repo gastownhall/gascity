@@ -58,6 +58,11 @@ const (
 	// when a self-handoff message was staged, so only a later, differing
 	// (successor) token may release it.
 	StagedForTokenMetadataKey = "mail.staged_for_token"
+	// SupersededByMetadataKey names, on a staged self-handoff that a later
+	// staging replaced before any successor released it, the message that
+	// replaced it. The superseded message is closed and keeps StagedMetadataKey
+	// "true", so it is terminal and auditable yet never readable.
+	SupersededByMetadataKey = "mail.superseded_by"
 )
 
 // Message represents a mail message between agents or humans.

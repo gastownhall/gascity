@@ -288,8 +288,17 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 	// message is sent immediately instead, matching the pre-staging behavior.
 	staged := restartable && instanceToken != ""
 	stagedForToken := ""
+	supersededID := ""
 	if staged {
 		stagedForToken = instanceToken
+		// A session holds at most one outstanding staged brief, so this staging
+		// replaces it. Look it up before creating anything: a refusal must not
+		// leave a new bead behind.
+		supersededID, err = outstandingStagedHandoff(msgStore, sessStore, sessionID, instanceToken)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
+			return handoffOutcome{code: 1}
+		}
 	}
 
 	b, ok := createHandoffMail(msgStore, sessStore, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", []string{"priority:1"}, stagedForToken, stderr)
@@ -307,12 +316,26 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 	}
 
 	if staged {
+		// Move the session's pointer to the new brief before touching the old
+		// one, so a failure can strand the old brief but never lose the newest.
+		// A new staging also starts a new release lifecycle: the controller skips
+		// any row carrying the release-attempt marker, so one left by an earlier
+		// timeout would leave this brief unreleasable.
 		if err := sessStore.SetMetadataBatch(sessionID, map[string]string{
-			handoffStageCommittedAtKey: time.Now().UTC().Format(time.RFC3339),
-			handoffStagedMessageIDKey:  b.ID,
+			handoffStageCommittedAtKey:   time.Now().UTC().Format(time.RFC3339),
+			handoffStagedMessageIDKey:    b.ID,
+			handoffReleaseAttemptedAtKey: "",
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc handoff: recording durable handoff stage: %v\n", err) //nolint:errcheck // best-effort stderr
 			return handoffOutcome{code: 1}
+		}
+		if supersededID != "" {
+			// Close and stamp in one call. The old brief keeps mail.staged=true on
+			// purpose: that flag is what keeps it unreadable on every mail surface.
+			_, err := msgStore.CloseAll([]string{supersededID}, map[string]string{mail.SupersededByMetadataKey: b.ID})
+			if err != nil && !errors.Is(err, beads.ErrNotFound) {
+				fmt.Fprintf(stderr, "gc handoff: staged brief %s is recorded, but the brief it supersedes, %s, could not be closed and remains an orphan: %v\n", b.ID, supersededID, err) //nolint:errcheck // best-effort stderr
+			}
 		}
 		recordHandoffEvent(rec, events.SessionHandoffStaged, sessionAddress, sessionAddress, events.SessionHandoffStagedPayload{
 			SessionKey: sessionAddress,
@@ -333,7 +356,8 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 	// best-effort backup. A pinned session that cannot persist its restart
 	// must roll the restart request back rather than leave a runtime flag set
 	// with no matching durable marker — the staged brief itself is left
-	// intact either way, so a later retry can still complete the handoff.
+	// intact either way; a later retry stages a fresh brief that supersedes it
+	// and completes the handoff.
 	if pinned {
 		failPinned := func(reason string) handoffOutcome {
 			if err := clearRestartRequest(sessStore, dops, sessionName); err != nil {
@@ -372,7 +396,11 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 			SessionKey: sessionAddress,
 			MessageID:  b.ID,
 		})
-		fmt.Fprintf(stdout, "Handoff: staged brief %s, restart accepted (release deferred until a successor session starts)...\n", b.ID) //nolint:errcheck // best-effort stdout
+		superseding := ""
+		if supersededID != "" {
+			superseding = ", superseding " + supersededID
+		}
+		fmt.Fprintf(stdout, "Handoff: staged brief %s%s, restart accepted (release deferred until a successor session starts)...\n", b.ID, superseding) //nolint:errcheck // best-effort stdout
 		return handoffOutcome{code: 0, restartRequested: true}
 	}
 
@@ -515,6 +543,47 @@ func sessionRestartableByController(sessStore beads.Store, sessionName string) (
 		return true, false, instanceToken, id, nil
 	}
 	return namedSessionMode(b) == "always", strings.TrimSpace(b.Metadata["pin_awake"]) == "true", instanceToken, id, nil
+}
+
+// outstandingStagedHandoff returns the id of the staged self-handoff the session
+// still points at and nothing has resolved, or "" when there is none. A new
+// staging supersedes the brief returned here, so a session never holds two.
+//
+// A brief that was already released, archived, or whose message no longer
+// exists is resolved, not outstanding, and is left alone.
+//
+// It returns an error, and the caller must not stage, when the outstanding
+// brief is already releasable to instanceToken's incarnation and the controller
+// has not written it off: superseding it would discard a brief that incarnation
+// should receive, and only the controller releases. A written-off brief is dead,
+// so it is superseded whatever its token; refusing there would wedge the
+// session behind a brief the controller will never release.
+func outstandingStagedHandoff(msgStore, sessStore beads.Store, sessionID, instanceToken string) (string, error) {
+	session, err := sessStore.Get(sessionID)
+	if err != nil {
+		return "", fmt.Errorf("loading session %q: %w", sessionID, err)
+	}
+	priorID := strings.TrimSpace(session.Metadata[handoffStagedMessageIDKey])
+	if priorID == "" {
+		return "", nil
+	}
+	// Read live: a cached Get can answer not-found from a stale tombstone for a
+	// brief that is still open, which would strand it.
+	prior, err := beads.HandlesFor(msgStore).Live.Get(priorID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return "", nil
+		}
+		return "", fmt.Errorf("loading staged handoff %s: %w", priorID, err)
+	}
+	if prior.Status == "closed" || prior.Metadata[mail.StagedMetadataKey] != "true" {
+		return "", nil
+	}
+	writtenOff := strings.TrimSpace(session.Metadata[handoffReleaseAttemptedAtKey]) != ""
+	if !writtenOff && prior.Metadata[mail.StagedForTokenMetadataKey] != instanceToken {
+		return "", fmt.Errorf("staged handoff %s is still awaiting release to this session incarnation; retry once the controller has delivered it", priorID)
+	}
+	return priorID, nil
 }
 
 func clearRestartRequest(sessStore beads.Store, dops drainOps, sessionName string) error {
