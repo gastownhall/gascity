@@ -1871,7 +1871,8 @@ type ACPSessionConfig struct {
 
 // DefaultACPCancelTimeout is how long an ACP interrupt waits for
 // session/cancel to settle the turn when [session.acp] cancel_timeout is
-// unset or invalid.
+// unset or invalid. It matches acp.DefaultCancelTimeout, the provider's own
+// default for a Config without a CancelTimeout.
 const DefaultACPCancelTimeout = 10 * time.Second
 
 // DefaultACPStopGrace is the ACP SIGTERM-to-SIGKILL grace used when

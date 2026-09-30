@@ -45,3 +45,20 @@
 - The stream is best-effort; the session transcript is the durable record.
   Consumers must tolerate a started event without its completed event, and
   the reverse.
+
+# ACP Interrupt
+
+- Interrupt's session/cancel and fallback SIGINT are keyed to the idle channel
+  of the turn it was called for, never to the current turn. Nudge starts the
+  next turn only after that channel closes, so a closed channel means the turn
+  is over and both are skipped. A cancel guard that re-reads `sc.idleCh` or
+  calls `isBusy()` instead sees the next turn and cancels it.
+  `TestInterruptCancelNeverFollowsTheNextPrompt` covers both a finished and an
+  in-flight next turn.
+- Interrupt must stay bounded when the agent stops reading stdin, so it
+  never takes `stdinMu` itself: its writes run on a goroutine, and
+  session/cancel checks the channel under `stdinMu` together with its write.
+  The SIGINT re-check runs without it
+  (`TestInterruptSendsNoSIGINTAfterTheTurnEnds`). Signal delivery cannot be
+  atomic with that check, so the re-check narrows the window rather than
+  closing it.

@@ -95,6 +95,15 @@ type sessionConn struct {
 	// pending tracks response waiters by request ID.
 	pending map[int64]chan JSONRPCMessage
 	idleCh  chan struct{}
+
+	// beforeTurnCancel, when set, runs in cancelTurn after the permission
+	// replies are written and before session/cancel is. A test seam: it lets
+	// a test end the turn inside that window.
+	beforeTurnCancel func()
+	// beforeTurnSignal, when set, runs in signalTurn before it checks
+	// whether the turn has ended. A test seam: it lets a test end the turn
+	// after a wait has given up on it and before the SIGINT.
+	beforeTurnSignal func()
 }
 
 // newSessionConn creates a sessionConn with the given buffer size.
@@ -335,7 +344,7 @@ func (sc *sessionConn) sendRequestRedacted(msg JSONRPCMessage, captureParams jso
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 
-	if err := sc.writeMessageCapturing(data, captured); err != nil {
+	if err := sc.writeMessageCapturing(nil, data, captured); err != nil {
 		sc.mu.Lock()
 		delete(sc.pending, *msg.ID)
 		sc.mu.Unlock()
@@ -357,7 +366,15 @@ func (sc *sessionConn) sendNotification(msg JSONRPCMessage) error {
 // writeMessage writes one encoded JSON-RPC message to the agent's stdin and
 // captures it verbatim. See writeMessageCapturing.
 func (sc *sessionConn) writeMessage(data []byte) error {
-	return sc.writeMessageCapturing(data, nil)
+	return sc.writeMessageCapturing(nil, data, nil)
+}
+
+// writeMessageUnlessClosed is writeMessage for a message that is stale once
+// closed has closed: it then writes and captures nothing and returns nil.
+// closed is checked with stdinMu held, so no other stdin write can come
+// between that check and this write.
+func (sc *sessionConn) writeMessageUnlessClosed(closed <-chan struct{}, data []byte) error {
+	return sc.writeMessageCapturing(closed, data, nil)
 }
 
 // writeMessageCapturing writes one encoded JSON-RPC message to the agent's
@@ -365,10 +382,16 @@ func (sc *sessionConn) writeMessage(data []byte) error {
 // captured in wire order: the out record is queued under stdinMu before the
 // write, so it also precedes any reply the read loop captures. A non-nil
 // redacted replaces data in the capture (marked redacted); the agent always
-// receives data.
-func (sc *sessionConn) writeMessageCapturing(data, redacted []byte) error {
+// receives data. Once closed has closed, nothing is written or captured and
+// the call returns nil; a nil closed never closes.
+func (sc *sessionConn) writeMessageCapturing(closed <-chan struct{}, data, redacted []byte) error {
 	sc.stdinMu.Lock()
 	defer sc.stdinMu.Unlock()
+	select {
+	case <-closed:
+		return nil
+	default:
+	}
 	if redacted != nil {
 		sc.capture.recordRedacted(captureOut, redacted)
 	} else {
@@ -453,6 +476,11 @@ func (sc *sessionConn) ensureIdleChannelLocked() {
 	}
 }
 
+// markBusyLocked opens the turn for prompt id. It replaces the idle channel
+// only when no turn is open, and Nudge gets here only after the previous
+// turn's channel has closed, so each turn has its own channel, closed when
+// that turn ends. interrupt relies on that to act only on the turn it was
+// called for.
 func (sc *sessionConn) markBusyLocked(id int64) {
 	sc.ensureIdleChannelLocked()
 	if sc.activePromptID == 0 {

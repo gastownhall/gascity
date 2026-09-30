@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionacp "github.com/gastownhall/gascity/internal/runtime/acp"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -441,5 +442,8 @@ func TestRuntimeRegistryACPConfigCarriesCancelTimeout(t *testing.T) {
 	def := acpProviderConfig(config.ACPSessionConfig{})
 	if def.CancelTimeout != config.DefaultACPCancelTimeout {
 		t.Errorf("default acp CancelTimeout = %v, want config.DefaultACPCancelTimeout (%v)", def.CancelTimeout, config.DefaultACPCancelTimeout)
+	}
+	if config.DefaultACPCancelTimeout != sessionacp.DefaultCancelTimeout {
+		t.Errorf("config.DefaultACPCancelTimeout = %v, want sessionacp.DefaultCancelTimeout (%v): the documented default must match the provider's own", config.DefaultACPCancelTimeout, sessionacp.DefaultCancelTimeout)
 	}
 }

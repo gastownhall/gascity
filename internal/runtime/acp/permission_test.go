@@ -75,7 +75,7 @@ for line in sys.stdin:
     elif method == "_test/finish":
         send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "end_turn"}})
     elif method == "session/cancel":
-        send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "cancel" + "led"}})
+        send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "` + acpStopReasonCancelled + `"}})
     elif method == "_test/cancel":
         send({"jsonrpc": "2.0", "method": "$/cancel_request",
               "params": {"requestId": msg["params"]["requestId"]}})

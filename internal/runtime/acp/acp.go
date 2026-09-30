@@ -42,7 +42,8 @@ type Config struct {
 	// SIGKILL. Default runtime.ManagedProcessStopGrace.
 	StopGrace time.Duration
 	// CancelTimeout is how long Interrupt waits for session/cancel to end
-	// the in-flight turn before falling back to SIGINT. Default 10s.
+	// the in-flight turn before falling back to SIGINT. Default
+	// DefaultCancelTimeout.
 	CancelTimeout time.Duration
 }
 
@@ -329,13 +330,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// command runs the owner's Interrupt logic once the connection exists.
 	processDone := make(chan struct{})
 	var owned atomic.Pointer[sessionConn]
-	interrupt := func() error {
-		if sc := owned.Load(); sc != nil {
-			return sc.interrupt(name, p.cfg.cancelTimeout())
-		}
-		return nil
-	}
-	lis, err := p.startControlSocket(name, cmd, processDone, interrupt)
+	lis, err := p.startControlSocket(name, cmd, processDone, p.ownedInterrupt(name, &owned))
 	if err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		_ = cmd.Wait()
@@ -696,9 +691,10 @@ func (p *Provider) Stop(name string) error {
 // wait counts as settled.
 //
 // Best-effort for sessions this provider does not own: it returns nil if the
-// session doesn't exist, and a session owned by another process is
-// interrupted there, through the control socket, without waiting for the
-// result.
+// session doesn't exist. A session owned by another process is interrupted
+// there, through the control socket. The owner acknowledges the command at
+// once and runs the cancel and settle itself, so this call does not wait for
+// the turn to end, does not learn whether it did, and returns nil.
 func (p *Provider) Interrupt(name string) error {
 	p.mu.Lock()
 	sc, ok := p.conns[name]
@@ -786,6 +782,8 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 
 	// Wait for agent to become idle. A turn held open by a permission
 	// request refuses instead, so the answer is not stuck behind this wait.
+	// The next turn starts only after the last one's idle channel has
+	// closed; interrupt's guards depend on that (see markBusyLocked).
 	if err := sc.waitNudgeable(p.cfg.nudgeBusyTimeout()); err != nil {
 		if errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction) {
 			return fmt.Errorf("%w: %s", err, name)
@@ -1137,6 +1135,19 @@ func (p *Provider) socketNameForEntry(key string) string {
 	return name
 }
 
+// ownedInterrupt returns the control socket's interrupt command for session
+// name. The socket starts before the connection exists, so the command runs
+// the owner's interrupt on the connection Start later stores in owned, and
+// does nothing until then: no turn can be in flight before that.
+func (p *Provider) ownedInterrupt(name string, owned *atomic.Pointer[sessionConn]) func() error {
+	return func() error {
+		if sc := owned.Load(); sc != nil {
+			return sc.interrupt(name, p.cfg.cancelTimeout())
+		}
+		return nil
+	}
+}
+
 // startControlSocket creates a unix socket for cross-process commands.
 // interrupt runs the owner's Interrupt logic for the "interrupt" command.
 func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan struct{}, interrupt func() error) (net.Listener, error) {
@@ -1166,8 +1177,8 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan st
 
 // handleControlConn reads a command from the connection and acts on the process.
 // A "stop" escalates from SIGTERM to SIGKILL after stopGrace. An "interrupt"
-// runs interrupt, the owner's session/cancel-and-settle logic, and replies
-// once it returns.
+// is fire-and-forget: it replies at once and runs interrupt, the owner's
+// session/cancel-and-settle logic, in the background.
 func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}, stopGrace time.Duration, interrupt func() error) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
@@ -1180,11 +1191,15 @@ func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}, stopG
 		_ = runtime.TerminateManagedProcess(cmd, done, stopGrace)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "interrupt":
-		if err := interrupt(); err != nil {
-			fmt.Fprintf(os.Stderr, "acp: interrupt via control socket: %v\n", err)
-			fmt.Fprintf(conn, "error: %v\n", err) //nolint:errcheck
-			return
-		}
+		// The settle can take the whole cancel_timeout plus the SIGINT
+		// retries, far longer than the caller's socket deadline, and the
+		// caller does not wait for it. Nobody reads a result, so a turn
+		// that does not settle is only logged here.
+		go func() {
+			if err := interrupt(); err != nil {
+				fmt.Fprintf(os.Stderr, "acp: interrupt via control socket: %v\n", err)
+			}
+		}()
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "ping":
 		conn.Write([]byte("ok\n")) //nolint:errcheck
