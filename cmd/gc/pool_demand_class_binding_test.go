@@ -94,7 +94,7 @@ func TestPoolDemandFilterKeepsABindingRefClaimOnTheReconcilerPlane(t *testing.T)
 	}
 	workBeads := []beads.Bead{routedPoolWorkBead()}
 
-	kept := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, binding, infos, workBeads, []string{bindingRef})
+	kept := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, binding, infos, workBeads, []string{bindingRef}, nil)
 
 	if len(kept) != 1 || kept[0].ID != "gcg-1" {
 		t.Fatalf("filtered work = %#v, want the binding-resident claim kept under %q — the census emits that ref and pool demand must read it", kept, bindingRef)
@@ -109,7 +109,7 @@ func TestPoolDemandFilterKeepsAClaimOnTheClassBindingArm(t *testing.T) {
 	seedSplitRoutes(t, cityPath, binding)
 	workBeads := []beads.Bead{routedPoolWorkBead()}
 
-	kept := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, binding, infos, workBeads, []string{""})
+	kept := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, binding, infos, workBeads, []string{""}, nil)
 
 	if len(kept) != 1 || kept[0].ID != "gcg-1" {
 		t.Fatalf("filtered work = %#v, want the claim on the leading binding arm kept", kept)
@@ -126,7 +126,7 @@ func TestPoolDemandFilterStillDropsWorkResidentInAnotherRigsStore(t *testing.T) 
 	seedSplitRoutes(t, cityPath, binding)
 	workBeads := []beads.Bead{routedPoolWorkBead()}
 
-	kept := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, binding, infos, workBeads, []string{"rigb"})
+	kept := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, binding, infos, workBeads, []string{"rigb"}, nil)
 
 	if len(kept) != 0 {
 		t.Fatalf("filtered work = %#v, want work resident in rigb's store dropped for a riga-scoped agent", kept)
@@ -140,12 +140,12 @@ func TestPoolDemandFilterUnchangedOnASingleStoreCity(t *testing.T) {
 	seedNoRoutes(t, cityPath)
 	workBeads := []beads.Bead{routedPoolWorkBead()}
 
-	kept := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, workBeads, []string{"riga"})
+	kept := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, workBeads, []string{"riga"}, nil)
 	if len(kept) != 1 {
 		t.Fatalf("filtered work = %#v, want a rig-resident bead kept for its own rig's agent", kept)
 	}
 
-	dropped := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, workBeads, []string{"rigb"})
+	dropped := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, workBeads, []string{"rigb"}, nil)
 	if len(dropped) != 0 {
 		t.Fatalf("filtered work = %#v, want a foreign-rig bead still dropped on a single-store city", dropped)
 	}
@@ -155,7 +155,7 @@ func TestPoolDemandFilterUnchangedOnASingleStoreCity(t *testing.T) {
 	// the rig gate vacuous — the exact regression
 	// TestBuildDesiredState_RigPoolIgnoresAssignedWorkInUnreachableStore forbids.
 	// assignedWorkRelocatedClaimRefs answering nil is what keeps it rejected.
-	cityResident := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, workBeads, []string{""})
+	cityResident := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, workBeads, []string{""}, nil)
 	if len(cityResident) != 0 {
 		t.Fatalf("filtered work = %#v, want city-store work still dropped for a rig-scoped agent on a single-store city", cityResident)
 	}
@@ -183,12 +183,12 @@ func TestPoolDemandFilterAcceptsTheWorkRefOnASplitCity(t *testing.T) {
 	seedSplitRoutes(t, cityPath, binding)
 	workBeads := []beads.Bead{routedPoolWorkBead()}
 
-	kept := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, workBeads, []string{""})
+	kept := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, workBeads, []string{""}, nil)
 	if len(kept) != 1 {
 		t.Fatalf("filtered work = %#v, want city-work-store work kept for the rig agent it is routed to on a split city", kept)
 	}
 
-	stillDropped := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, workBeads, []string{"rigb"})
+	stillDropped := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, beads.NewMemStore(), infos, workBeads, []string{"rigb"}, nil)
 	if len(stillDropped) != 0 {
 		t.Fatalf("filtered work = %#v, want rigb's leg still rejected — accepting the work ref must not make the rig gate vacuous", stillDropped)
 	}
