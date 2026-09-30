@@ -5,7 +5,10 @@
 # Blacksmith donates this compute for OSS-repo workflows only. The worker
 # registers with rbe-west's OSS scheduler (clients reach it with
 # --remote_instance_name=oss); developer and agent builds use the default
-# instance and never run here. The OSS and default instances share one cache.
+# instance and never run here. The OSS and default instances share one CAS,
+# but rbe-west splits the action cache: results written here go to the "oss"
+# action cache, which fork PRs read anonymously and the default instance
+# reads through (never writes). So REMOTE_AC must say "oss".
 #
 # Env (from the workflow):
 #   RBE_WORKER_TLS_CERT / RBE_WORKER_TLS_KEY  base64 PEM, CN=rbe-oss-worker
@@ -80,7 +83,7 @@ jq -n --arg host "grpcs://${RBE_WEST_HOST}:443" --arg root "$ROOT" --arg store "
   {
     stores: [
       { name: "REMOTE_CAS", grpc: { instance_name: "", endpoints: [{ address: $host, tls_config: $tls }], store_type: "cas" } },
-      { name: "REMOTE_AC", grpc: { instance_name: "", endpoints: [{ address: $host, tls_config: $tls }], store_type: "ac" } },
+      { name: "REMOTE_AC", grpc: { instance_name: "oss", endpoints: [{ address: $host, tls_config: $tls }], store_type: "ac" } },
       { name: "WFS", fast_slow: {
           fast: { filesystem: { content_path: ($store + "/content"), temp_path: ($store + "/tmp"),
                                 eviction_policy: { max_bytes: 150000000000 } } },

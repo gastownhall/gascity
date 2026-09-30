@@ -2152,21 +2152,22 @@ type OrdersConfig struct {
 	// emit max_dispatches_per_tick = 0 into every marshaled city.toml.
 
 	// MaxDispatchesPerTick caps how many clock-driven orders (cooldown, cron
-	// and event triggers) the supervisor dispatches per tick, in a rotation
-	// that resumes where the previous tick stopped. Unset keeps the built-in
-	// default of 4; set to 1 to drain overdue cooldown orders one-per-tick at
-	// cold start instead of firing several concurrent goroutines at once.
-	// Condition-triggered orders are outside this budget: a passing check
-	// means work is pending right now, so they dispatch on the tick that
-	// observes it. The open-tracking and open-work gates still run for them
-	// (unless the order sets no_work_gate), but those gates are keyed per
-	// order and only hold back a redispatch of an order whose previous run
-	// is still moving, so they do not bound the tick as a whole: a tick
-	// launches at most this budget plus one dispatch per condition order
-	// whose check passed on that tick. That second term grows with how many
-	// condition orders a city defines, not with this setting, and at cold
-	// start, before any tracking bead exists, neither gate holds a
-	// simultaneously-due set back.
+	// and event triggers) the supervisor dispatches per orders-lane pass, in
+	// a rotation that resumes where the previous pass stopped. The key keeps
+	// its historical name from when order dispatch ran once per controller
+	// tick. Unset keeps the built-in default of 4; set to 1 to drain overdue
+	// cooldown orders one per pass at cold start instead of firing several
+	// concurrent goroutines at once. Condition-triggered orders are outside
+	// this budget: a passing check means work is pending right now, so they
+	// dispatch on the pass that observes it. The open-tracking and open-work
+	// gates still run for them (unless the order sets no_work_gate), but
+	// those gates are keyed per order and only hold back a redispatch of an
+	// order whose previous run is still moving, so they do not bound the pass
+	// as a whole: a pass launches at most this budget plus one dispatch per
+	// condition order whose check passed on that pass. That second term grows
+	// with how many condition orders a city defines, not with this setting,
+	// and at cold start, before any tracking bead exists, neither gate holds
+	// a simultaneously-due set back.
 	MaxDispatchesPerTick *int `toml:"max_dispatches_per_tick,omitempty"`
 	// Overrides apply per-order field overrides after scanning.
 	// Each override targets an order by name and optionally by rig.

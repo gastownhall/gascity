@@ -82,7 +82,11 @@ const (
 	// TestBeadsProxiedIgnoresUserLevelSharedServer (-timeout 15m) and its job
 	// cap moves 90 -> 105 minutes to keep the step budget under it. Reviewed
 	// delta: one test step and the cap, no new job, trigger or permission.
-	expectedCIExecutionHash     = "10f31160f31aa60e705a2098ae2722ec82e4fd14dc76895800b8d0acab486416"
+	//
+	// Bumped again for the Beads v1.3.0 -> v1.3.1-rc.2 pin: every job's
+	// BD_VERSION env value moves to the new tag. Reviewed delta: that value
+	// only, no new job, step, trigger or permission.
+	expectedCIExecutionHash     = "00c7da41fd7f67a986f1fec6e8730b14632e725063ea977636bd0da2f6cb5ed0"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -94,8 +98,9 @@ const (
 	// provider selector. Then (v1.5.0 Tier C first-run drain) the tier-c job's
 	// -run selector gained TestFreshInit_SlingSpawnsDefaultPoolWorker and
 	// TestFreshInit_ClaudeUnrestricted, mirroring RC Gate's acceptance C shards;
-	// same job, env, secrets and runner.
-	expectedNightlyExecutionHash = "54aa1f894d2c3167efb3bb5b439b3d76f00dc1c5d5abd92a3247ae4d1bc604bb"
+	// same job, env, secrets and runner. Then the Beads v1.3.0 -> v1.3.1-rc.2
+	// pin: the workflow and job BD_VERSION env values only.
+	expectedNightlyExecutionHash = "95cdfa034e95e92beb2e1d01d29b7a6e4ccd323614caa4e8c2932f3ebe3de243"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 

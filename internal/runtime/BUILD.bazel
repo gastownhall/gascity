@@ -39,6 +39,7 @@ go_test(
     name = "runtime_test",
     srcs = [
         "beacon_test.go",
+        "capacity_test.go",
         "carrier_test.go",
         "dialog_midsession_test.go",
         "dialog_model_switch_test.go",

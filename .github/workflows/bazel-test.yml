@@ -128,32 +128,47 @@ jobs:
             fi
             echo 'build --remote_download_minimal'
             echo 'test --test_env=PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin'
-            echo 'test --test_env=HOME=/tmp/gc-test-home'
             # 2vcpu runners default --jobs to 2, serializing even REMOTE actions.
             # Execution happens on the farm; the client can keep many in flight.
             echo 'build --jobs=64'
           } > .bazelrc.local
 
 
-      - name: Writable test HOME
+      - name: Create Bazel test tmpdir
         run: |
-          mkdir -p /tmp/gc-test-home
-          echo "HOME=/tmp/gc-test-home" >> "$GITHUB_ENV"
           # .bazelrc sets test --test_tmpdir=/tmp/bt and
           # --sandbox_writable_path=/tmp/bt unconditionally (#6525). Nothing
           # else creates that directory on the runner, so every sandboxed
           # action fails on a cold runner without this.
+          # HOME is deliberately NOT overridden or forwarded: remote workers
+          # run as their own user, and a HOME pointing at a nonexistent path
+          # makes git fail there (fail-closed code reads that as dirty-repo);
+          # with HOME unset in the action env, git falls back to the passwd
+          # entry, correct on every machine.
           mkdir -p /tmp/bt
 
-      - name: "bazel test //..."
+      - name: "bazel test //... (+ acceptance)"
         run: |
           ARGS=(--output_user_root="$RUNNER_TEMP"/bazel-outputs)
           PROFILE=(--profile=/tmp/bazel-profile.json)
+          # Unit arm runs in the default configuration so its cache keys stay
+          # stable; tagged suites get their own invocations because
+          # --define=gotags reconfigures every action under it (a full-world
+          # define would double the farm's cache entries). bd/dolt ship as
+          # pinned prebuilt release binaries via MODULE.bazel http_archive
+          # data deps, so workers need no network or system bd.
+          # --test_timeout stays at or below 1100s: the scheduler caps action
+          # timeouts at 1200s and rejects anything larger as NO STATUS.
           if [ -f .bazelrc.local ]; then
-            bazel "${ARGS[@]}" test "${PROFILE[@]}" //... --config=remote-exec --test_output=errors --keep_going
+            RCEXEC=(--config=remote-exec)
           else
-            bazel "${ARGS[@]}" test "${PROFILE[@]}" //... --test_output=errors --keep_going
+            RCEXEC=()
           fi
+          bazel "${ARGS[@]}" test "${PROFILE[@]}" //... \
+            "${RCEXEC[@]}" --test_output=errors --keep_going
+          bazel "${ARGS[@]}" test "${PROFILE[@]}" //test/acceptance:acceptance_test \
+            "${RCEXEC[@]}" --test_output=errors --keep_going \
+            --define=gotags=acceptance_a --test_timeout=1100
 
       - name: Save bazel output base
         if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.bazel-cache.outputs.cache-hit != 'true'
@@ -163,9 +178,46 @@ jobs:
             ${{ runner.temp }}/bazel-outputs
           key: ${{ steps.bazel-cache.outputs.cache-primary-key }}
 
+      # Evidence-only: the integration suite's agent-flow tests are sensitive
+      # to ambient agent-template resolution (they fail under plain `go test`
+      # on developer machines with real GC state; go-test CI passes on
+      # pristine runners). Until template lookup precedence is fixed
+      # product-side, this step reports without gating.
+      - name: "bazel test //test/integration (evidence-only)"
+        if: always()
+        run: |
+          ARGS=(--output_user_root="$RUNNER_TEMP"/bazel-outputs)
+          if [ -f .bazelrc.local ]; then RCEXEC=(--config=remote-exec); else RCEXEC=(); fi
+          bazel "${ARGS[@]}" test //test/integration:integration_test \
+            "${RCEXEC[@]}" --test_output=errors --keep_going \
+            --define=gotags=integration --test_timeout=1100 --flaky_test_attempts=1 || true
+
       - name: Critical-path report + budget (the optimization loop metric)
         if: always()
         run: python3 tools/bazel/critpath.py /tmp/bazel-profile.json --tier T2 --budget 150 || true
+
+      # Coverage reporting only matters on the main branch — mirrors the go-test
+      # arm's policy (preflight-unit-cover-*). The lcov combined report uploads
+      # under its own flag so Codecov keeps bazel and go-test signals separable;
+      # instrumented builds are a separate bazel configuration, so the first run
+      # on a cold cache compiles the world under coverage (~15-20 min remote).
+      - name: "bazel coverage //... (lcov)"
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          ARGS=(--output_user_root="$RUNNER_TEMP"/bazel-outputs)
+          if [ -f .bazelrc.local ]; then RCEXEC=(--config=remote-exec); else RCEXEC=(); fi
+          bazel "${ARGS[@]}" coverage //... \
+            "${RCEXEC[@]}" --combined_report=lcov \
+            --test_output=errors --keep_going --test_timeout=600
+
+      - name: Upload coverage to Codecov
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('bazel-out/_coverage/_coverage_report.dat') != ''
+        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
+        with:
+          files: bazel-out/_coverage/_coverage_report.dat
+          flags: bazel-unit
+          token: ${{ secrets.CODECOV_TOKEN }}
+          verbose: true
 
       - name: Upload test logs
         if: failure()

@@ -164,7 +164,16 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 			return
 		}
 		if verifyErr != nil {
+			// An unverifiable event must not overwrite a recent local write
+			// as a clean row: fence the cached row and let the next read or
+			// reconcile consult the backing. The seq bump keeps a scan that
+			// started before this point from clearing the mark.
 			c.recordProblem(fmt.Sprintf("verify %s event", eventType), verifyErr)
+			c.mu.Lock()
+			c.noteMutationLocked(patch.ID)
+			c.markDirtyLocked(patch.ID)
+			c.mu.Unlock()
+			return
 		}
 	}
 

@@ -314,6 +314,15 @@ beads `cmd/bd/proxy_capability.go`; packs and orders that call those verbs
 against a proxied scope fail typed. The dashboard and doctor use `bd ping`
 rather than `bd doctor --readonly` for exactly this reason.
 
+`gc doctor` never starts a server. On the proxied path any bd read of a stopped
+store starts its proxy and Dolt child (`BEADS_DOLT_AUTO_START` does not apply
+there), and gc-owned scopes keep them up for good. So before the bead-store
+preflight and before any store-reading check, doctor asks gc's own endpoint
+inspection (the proxy record plus the process table, no bd call) whether each
+proxied scope's proxy is running. For a stopped scope every store-reading check,
+and every fix that needs the store, is reported as "not checked: store not
+running". Checks that do not read the store run as usual.
+
 `backup*` is on that list in rc.2 and v1.3.0, and it is the one refusal with a
 data consequence: there, a proxied scope has no backup, by anyone. gc cannot
 register a Dolt backup against a proxy root it does not own, and

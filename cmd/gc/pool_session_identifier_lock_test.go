@@ -165,7 +165,7 @@ func primeGuardedPoolCrossStoreCensus(
 	rigStores map[string]beads.Store,
 ) {
 	t.Helper()
-	infos, err := collectAllOpenSessionInfos(bp.cityPath, bp.city, bp.beadStore, rigStores, nil)
+	infos, err := collectAllOpenSessionInfos(bp.cityPath, bp.city, bp.beadStore, rigStores, nil, nil)
 	if err != nil {
 		t.Fatalf("initial complete session census: %v", err)
 	}
@@ -584,7 +584,7 @@ func TestCreatePoolSessionBeadWithGuardedAlias_LiveRecensusBypassesStaleForeignC
 	// The ordinary controller census deliberately stays cache-served. It misses
 	// the external write until reconciliation, reproducing the production race
 	// that made a non-Live lock-time read insufficient.
-	stale, err := collectAllOpenSessionInfos(cityPath, cfg, primary, rigStores, nil)
+	stale, err := collectAllOpenSessionInfos(cityPath, cfg, primary, rigStores, nil, nil)
 	if err != nil {
 		t.Fatalf("ordinary cached session census: %v", err)
 	}

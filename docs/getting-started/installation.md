@@ -27,7 +27,7 @@ for you; the other methods require manual installation.
 | jq | Yes | — | `brew install jq` | `apt install jq` | JSON processing |
 | git | Yes | — | (built-in) | (built-in) | Version control |
 | dolt | Yes | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) | Beads data plane |
-| bd (Beads CLI) | Yes | 1.0.4 minimum; 1.3.0 tested | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
+| bd (Beads CLI) | Yes | 1.0.4 minimum; 1.3.1-rc.2 tested | [v1.3.1-rc.2 assets](https://github.com/gastownhall/beads/releases/tag/v1.3.1-rc.2) (see below) | [v1.3.1-rc.2 assets](https://github.com/gastownhall/beads/releases/tag/v1.3.1-rc.2) | Issue tracking |
 | flock | Yes | — | `brew install flock` | (built-in via util-linux) | File locking |
 | gh | Optional | — | `brew install gh` | [cli.github.com](https://cli.github.com/) | GitHub gate checks |
 | Go 1.26+ | Source only | 1.26 | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
@@ -41,7 +41,16 @@ under heavy write load.
 
 The exact versions CI pins are in [`deps.env`](https://github.com/gastownhall/gascity/blob/main/deps.env).
 
-Gas City 1.4.2 and main pair the native store with Beads 1.3.0. When upgrading
+The tested bd, v1.3.1-rc.2, is a prerelease: `brew install beads` and beads'
+install scripts still install v1.3.0. Download `bd` for your platform from the
+[v1.3.1-rc.2 release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.1-rc.2)
+and put it on your PATH, or run
+`go install github.com/steveyegge/beads/cmd/bd@v1.3.1-rc.2`. With bd v1.3.0
+Gas City falls back from its native store to the bd CLI, and proxied `bd
+backup` and closed-wisp purge are skipped.
+
+Gas City 1.4.2 pairs the native store with Beads 1.3.0, and main pairs it with
+Beads 1.3.1-rc.2, which keeps the same schema. When upgrading
 an existing shared database from Beads 1.2.2, coordinate the upgrade of all
 clients using that database, then run `bd migrate schema` from the workspace.
 The tested upgrade moves schema 53 to 66 and preserves existing beads. Older

@@ -148,6 +148,7 @@ func TestCityRuntimeReloadRejectsRevisionSupersededDuringPreparation(t *testing.
 	cr, cs, initialCfg := newPublicationTestRuntime(t, cityPath, provider, io.Discard, &stderr)
 
 	oldCfg, oldProvider, oldDops, oldRevision := cr.cfg, cr.sp, cr.dops, cr.configRev
+	oldOD, oldOrderGeneration := cr.od, cr.ordersLaneOf().generation
 	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, tomlPath)
 	// A newer config lands on disk while the reload is still preparing its
 	// candidate (here: during the bead lifecycle step).
@@ -166,6 +167,11 @@ func TestCityRuntimeReloadRejectsRevisionSupersededDuringPreparation(t *testing.
 	}
 	if cs.Config() != initialCfg || cs.SessionProvider() != provider {
 		t.Fatal("superseded reload changed the API-visible runtime generation")
+	}
+	// The orders lane stays on the controller's generation too: nothing is
+	// staged, installed, or bumped for a rejected candidate.
+	if lane := cr.ordersLaneOf(); cr.od != oldOD || lane.hasPending || lane.generation != oldOrderGeneration {
+		t.Fatal("superseded reload staged or installed an order dispatcher")
 	}
 	if cr.configDirty == nil || !cr.configDirty.Load() {
 		t.Fatal("superseded reload did not leave a retry pending")
