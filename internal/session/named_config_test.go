@@ -1340,3 +1340,67 @@ func TestClosedNamedSessionBeadIndexMissesBeadWithNeitherTypeNorLabel(t *testing
 		t.Fatalf("index lookup ok = true, want false (identity=%q) — a bead with neither Type nor Label should stay outside both batched legs", identity)
 	}
 }
+
+// TestIsDemandOnlySingletonTemplate pins the template shape whose only session
+// the controller starts purely from pool demand (#6858): max_active_sessions = 1,
+// no namepool, and no configured [[named_session]] backing it. It is the same
+// shape `gc config show --validate` warns about.
+func TestIsDemandOnlySingletonTemplate(t *testing.T) {
+	one, two, zero := 1, 2, 0
+	tests := []struct {
+		name  string
+		agent config.Agent
+		named []config.NamedSession
+		want  bool
+	}{
+		{
+			name:  "rig pool singleton without named session",
+			agent: config.Agent{Name: "worker", Dir: "demo", MinActiveSessions: &zero, MaxActiveSessions: &one},
+			want:  true,
+		},
+		{
+			name:  "plain singleton without named session",
+			agent: config.Agent{Name: "worker", MaxActiveSessions: &one},
+			want:  true,
+		},
+		{
+			name:  "singleton backed by a named session",
+			agent: config.Agent{Name: "worker", Dir: "demo", MinActiveSessions: &zero, MaxActiveSessions: &one},
+			named: []config.NamedSession{{Template: "worker", Dir: "demo", Mode: "always"}},
+			want:  false,
+		},
+		{
+			name:  "unbounded template",
+			agent: config.Agent{Name: "worker"},
+			want:  false,
+		},
+		{
+			name:  "multi-session pool",
+			agent: config.Agent{Name: "worker", MaxActiveSessions: &two},
+			want:  false,
+		},
+		{
+			name:  "namepool singleton",
+			agent: config.Agent{Name: "worker", MaxActiveSessions: &one, Namepool: "names.txt"},
+			want:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.City{
+				Workspace:     config.Workspace{Name: "test-city"},
+				Agents:        []config.Agent{tt.agent},
+				NamedSessions: tt.named,
+			}
+			if got := IsDemandOnlySingletonTemplate(cfg, &cfg.Agents[0]); got != tt.want {
+				t.Fatalf("IsDemandOnlySingletonTemplate(%s) = %v, want %v", cfg.Agents[0].QualifiedName(), got, tt.want)
+			}
+		})
+	}
+	if IsDemandOnlySingletonTemplate(nil, &config.Agent{Name: "worker", MaxActiveSessions: &one}) {
+		t.Fatal("IsDemandOnlySingletonTemplate(nil cfg) = true, want false")
+	}
+	if IsDemandOnlySingletonTemplate(&config.City{}, nil) {
+		t.Fatal("IsDemandOnlySingletonTemplate(nil agent) = true, want false")
+	}
+}

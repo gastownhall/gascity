@@ -398,6 +398,7 @@ go_test(
         "server_rollout_test.go",
         "server_test.go",
         "session_class_routing_test.go",
+        "session_create_demand_only_test.go",
         "session_frame_types_test.go",
         "session_get_read_test.go",
         "session_materialization_guard_test.go",
