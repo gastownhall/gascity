@@ -77,6 +77,7 @@ type drainTracker struct {
 	zombieCrashes    map[string]bool            // session bead ID -> zombie-process session.crashed event emitted
 	suspendDeferrals map[string]int             // session bead ID -> consecutive ticks a named session has been suspend-drain-eligible with its spec absent (#3630)
 	liveClaimVetoes  map[string]string          // session bead ID -> claimed work bead ID whose live claim last vetoed a demand-class drain (log-once dedupe)
+	drainSkips       map[string]*drainSkipMark  // session bead ID -> last printed drain-skip line (log-on-transition dedupe; session_drain_skip_log.go)
 	idleProbeCursor  int
 }
 

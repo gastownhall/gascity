@@ -608,7 +608,22 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 			if storeErr == nil {
 				guardStore = store
 				guardBeads = make(map[string]beads.Bead, len(writeIDs))
-				for _, id := range writeIDs {
+				// A bulk mutation (e.g. a maintenance order closing a batch of
+				// stale wisps) reads every id in one bd show instead of one or
+				// two bd forks per id. Only ids bd answered exactly are
+				// accepted from the batch; the rest take the exact per-id Get
+				// below, which is what tells a substring collision from an
+				// absent bead.
+				verifyIDs := writeIDs
+				if getter, ok := store.(beads.ExactBatchGetter); ok && len(writeIDs) > 1 {
+					if found, unresolved, batchErr := getter.GetExactBatch(writeIDs); batchErr == nil {
+						for id, bead := range found {
+							guardBeads[id] = bead
+						}
+						verifyIDs = unresolved
+					}
+				}
+				for _, id := range verifyIDs {
 					bead, getErr := store.Get(id)
 					if errors.Is(getErr, beads.ErrIDCollision) {
 						// bd resolved a different bead — block the write to prevent
@@ -779,7 +794,7 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 
 	// valueFlags is the complete set of flags that consume the next argument as
 	// their value for this subcommand, in both long and short form.
-	// Sourced from `bd <sub> --help` (bd 1.3.0-rc.2, 2026-09-10).
+	// Sourced from `bd <sub> --help` (bd 1.3.1-rc.2, 2026-09-29).
 	valueFlags := bdSubcmdValueFlags(sub)
 
 	// boolFlags is the complete set of boolean (no-value) flags. Unknown flags

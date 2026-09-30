@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -195,7 +196,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 			return
 		}
 		if waitForCommandable {
-			s.state.Poke()
+			s.state.Enqueue(reconcilekey.Session(info.ID))
 			waitCtx, cancel := context.WithTimeout(context.Background(), sessionCreateCommandableTimeout)
 			info, createErr = waiter.WaitForSessionCommandable(waitCtx, info.ID)
 			cancel()
@@ -210,7 +211,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 		s.emitSessionCreateSucceeded(reqID, resp)
 		s.persistSessionMeta(store, info.ID, body.ProjectID, nil)
 		if !waitForCommandable {
-			s.state.Poke()
+			s.state.Enqueue(reconcilekey.Session(info.ID))
 		}
 
 		titleProvider := s.resolveTitleProvider()
@@ -520,7 +521,8 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 
 	// Huma has already validated:
 	//  - `additionalProperties: false` → unknown fields (e.g. "template") are 422
-	//  - `minLength:"1"` on Title → non-empty when provided
+	//  - `minLength:"1"` on Title → non-empty when provided (a whitespace-only
+	//    title passes that and is refused by the session manager → 400)
 	// The handler only needs to enforce "at least one field" and the
 	// alias-controller-managed rule below.
 	titlePtr := input.Body.Title
@@ -653,7 +655,7 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	if _, err := mgr.UpdateTemplateOverrides(id, map[string]string{sessionPermissionModeOptionKey: mode}); err != nil {
 		return nil, humaSessionManagerError(err)
 	}
-	s.state.Poke()
+	s.state.Enqueue(reconcilekey.Session(id))
 
 	info, presponse, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
@@ -933,6 +935,38 @@ func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionIDInput)
 	return out, nil
 }
 
+// --- Session Reset ---
+
+// humaHandleSessionReset is the Huma-typed handler for POST /v0/session/{id}/reset.
+// It records a fresh-restart request through the worker boundary (the same
+// path as `gc session reset`) and enqueues the session's reconcile key, which
+// restarts the session on the next continuation epoch.
+func (s *Server) humaHandleSessionReset(ctx context.Context, input *SessionIDInput) (*OKWithIDResponse, error) {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
+		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
+	}
+
+	id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
+	if err != nil {
+		return nil, humaResolveError(err)
+	}
+
+	handle, err := s.workerHandleForSession(store.Store, id)
+	if err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+	if err := handle.Reset(ctx); err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+	s.state.Enqueue(reconcilekey.Session(id))
+
+	out := &OKWithIDResponse{}
+	out.Body.Status = "ok"
+	out.Body.ID = id
+	return out, nil
+}
+
 // --- Session Respond ---
 
 // humaHandleSessionRespond is the Huma-typed handler for POST /v0/session/{id}/respond.
@@ -1121,7 +1155,8 @@ func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRename
 		return nil, humaResolveError(err)
 	}
 
-	// Huma validates Body.Title (minLength:1); no handler guard needed.
+	// Huma validates Body.Title (minLength:1); a whitespace-only title passes
+	// that and is refused by the session manager (ErrInvalidSessionTitle → 400).
 	// Validate through the session front door (mirrors humaHandleSessionPatch):
 	// nothing downstream reads the raw bead — rename operates by id. Present-but-
 	// non-session → the existing "not a session" 400; absent → beads.ErrNotFound

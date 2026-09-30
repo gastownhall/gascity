@@ -180,7 +180,7 @@ func TestControllerShutdown(t *testing.T) {
 	done := make(chan struct{})
 	var exitCode int
 	go func() {
-		exitCode = runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		exitCode = runController(dir, nil, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
 		close(done)
 	}()
 
@@ -1963,7 +1963,7 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 	var stdout, stderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		runController(dir, nil, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -2033,7 +2033,10 @@ func containsAgentNames(got []string, want ...string) bool {
 	return true
 }
 
+// TestControllerPokeTriggersImmediate also pins that runController wires
+// the API controllerState's wake signals (see wireControllerWakeSignals).
 func TestControllerPokeTriggersImmediate(t *testing.T) {
+	wired := captureWiredControllerStates(t)
 	sp := runtime.NewFake()
 
 	var reconcileCount atomic.Int32
@@ -2061,7 +2064,7 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		runController(dir, nil, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
 		close(done)
 	}()
 
@@ -2084,6 +2087,10 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
+
+	// The socket comes up before the controller state is built.
+	awaitCond(t, func() bool { return len(wired()) > 0 }, "controller state wiring")
+	assertWakeSignalsWired(t, wired())
 
 	// Record count, then poke.
 	before := reconcileCount.Load()

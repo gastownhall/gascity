@@ -33,12 +33,35 @@ func TestSQLiteStoreConformance(t *testing.T) {
 	beadstest.RunMetadataTests(t, factory)
 }
 
+// TestSQLiteStoreReadyParityConformance proves a primed CachingStore over the
+// store serves the same ready rows, in the same order, as the store's own
+// Ready. A class binding's cache is the census the controller's demand reads
+// are answered from, so a divergence here offers blocked work or cuts a
+// different Limit prefix on every split city.
+func TestSQLiteStoreReadyParityConformance(t *testing.T) {
+	beadstest.RunReadyParityConformance(t, "SQLiteStore", beadstest.ReadyParityHarness{
+		Open:   func(t *testing.T) beads.Store { return newSQLiteForConformance(t) },
+		Rescan: (*beads.CachingStore).ReconcileForTest,
+	})
+}
+
 // TestSQLiteStoreConditionalWriterConformance runs the shared fenced-write
 // suite against the embedded store. Without the capability the graph plane's
 // control epochs, drain reservations, and attach fences silently degrade to
 // unconditional writes on a routed city.
 func TestSQLiteStoreConditionalWriterConformance(t *testing.T) {
 	beadstest.RunConditionalWriterConformance(t, "SQLiteStore", func(t *testing.T) beads.Store {
+		return newSQLiteForConformance(t)
+	})
+}
+
+// TestSQLiteStoreAtomicCloserConformance runs the shared atomic terminal-close
+// suite against the embedded store. Without the capability a session close on
+// a sqlite-routed city stamps its terminal metadata and closes the row as two
+// writes, and a writer landing between them strands a closed row that still
+// looks live.
+func TestSQLiteStoreAtomicCloserConformance(t *testing.T) {
+	beadstest.RunAtomicConditionalCloserConformance(t, "SQLiteStore", func(t *testing.T) beads.Store {
 		return newSQLiteForConformance(t)
 	})
 }

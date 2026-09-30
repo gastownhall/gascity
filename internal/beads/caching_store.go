@@ -28,6 +28,7 @@ import (
 type CachingStore struct {
 	backing  Store // runtime: usually *BdStore; tests and projections may use any Store
 	idPrefix string
+	epoch    uint64 // names this instance in every CacheRevision it issues
 
 	mu                  sync.RWMutex
 	beads               map[string]Bead
@@ -36,6 +37,7 @@ type CachingStore struct {
 	dirty               map[string]struct{}
 	beadSeq             map[string]uint64
 	localBeadAt         map[string]time.Time
+	writeSeq            map[string]uint64
 	deletedSeq          map[string]uint64
 	state               cacheState
 	lastFreshAt         time.Time
@@ -101,7 +103,73 @@ type CachingStore struct {
 type CacheObservation struct {
 	owner    *CachingStore
 	revision uint64
+	cacheRev CacheRevision
 }
+
+// CacheRev is the cache revision read in the same lock hold as the census,
+// which reflects every write whose WriteRev it covers. A refused census
+// carries the zero value. An admitted census taken before the cache's first
+// mutation has Seq 0, so tell admission by ObservedList's ok, not the value.
+func (o CacheObservation) CacheRev() CacheRevision {
+	return o.cacheRev
+}
+
+// CacheRevision is a point in one CachingStore's mutation order: the watermark
+// that tells a consumer when a clean census reflects its write. A census at r
+// reflects a write at w when w.Epoch == r.Epoch and w.Seq <= r.Seq.
+//
+// Epoch names the CachingStore instance. Rebuilding the cache (a config reload
+// does) restarts Seq under a new epoch, so revisions from different epochs are
+// incomparable and a consumer must treat a mismatch as an unknown revision.
+//
+// A census is admitted only while the whole store's dirty set is empty, so any
+// dirty row withholds a covering census from every consumer. A dirty row is
+// refreshed by its next Get, by a List or Ready that overlays dirty rows, or
+// by the next reconcile. Count and CachedList never refresh one: Count falls
+// back to the backing and CachedList declines. Rows go dirty after:
+//   - a conditional write that failed and evicted (precondition, exhausted
+//     retries, or a lost CAS);
+//   - an ambiguous failure of a conditional write or SetMetadataBatch, whose
+//     write revision the consumer must treat as unknown (Update, Close,
+//     Reopen, SetMetadata, Create and DepAdd errors mark nothing);
+//   - a failed post-write refresh in Update or ReleaseIfCurrent, in
+//     SetMetadata or SetMetadataBatch on a row the cache does not hold, or in
+//     Tx, graph apply or CloseAll (other verbs patch the cached row and leave
+//     it clean);
+//   - a conditional write's refetch that failed, did not reflect the write,
+//     or was superseded by a newer write racing it;
+//   - an idempotent conditional write whose evicted row was not clean at the
+//     expected revision, on a backend that does not re-stamp no-op writes;
+//   - an atomic close whose returned row could not be attributed;
+//   - a CloseIfMatch on a backing that hides closed rows from Get;
+//   - an ApplyEvent that conflicts with a recent local write and cannot be
+//     verified against the backing, or whose field conflict the backing does
+//     not confirm (gastownhall/gascity#2927).
+//
+// Known limits (not yet fenced), so a consumer must not trust more than this:
+//   - ApplyEvent's branch for rows the cache does not hold installs a backing
+//     read or the raw patch without checking writeSeq.
+//   - Unconditional writes (Update, ReleaseIfCurrent, Close, Reopen, CloseAll,
+//     SetMetadata, SetMetadataBatch, Tx, DepAdd/DepRemove, graph apply)
+//     install a refresh read before taking the lock, without a writeSeq fence.
+//   - A conflicting event is verified only while the row's beadSeq is present
+//     or its local write is under five seconds old; once a newer scan clears
+//     beadSeq, a late event can apply.
+//   - A full Prime that replaces the maps wholesale drops every fence.
+//   - Any dirty row refuses the census for the whole store, and there is no
+//     API to drain dirty rows, so a consumer that needs bounded lag cannot
+//     force it today.
+//
+// A store opened without a CachingStore has no watermark at all; its
+// consumers must fall back to per-row markers.
+type CacheRevision struct {
+	Epoch uint64
+	Seq   uint64
+}
+
+// cacheEpochs issues each CachingStore instance its epoch. Zero is reserved
+// for the zero CacheRevision a refused census carries.
+var cacheEpochs atomic.Uint64
 
 var (
 	_ ConditionalAssignmentReleaser = (*CachingStore)(nil)
@@ -319,11 +387,13 @@ func newCachingStore(backing Store, idPrefix string, onChange func(eventType, be
 	return &CachingStore{
 		backing:             backing,
 		idPrefix:            normalizeIDPrefix(idPrefix),
+		epoch:               cacheEpochs.Add(1),
 		beads:               make(map[string]Bead),
 		deps:                make(map[string][]Dep),
 		dirty:               make(map[string]struct{}),
 		beadSeq:             make(map[string]uint64),
 		localBeadAt:         make(map[string]time.Time),
+		writeSeq:            make(map[string]uint64),
 		deletedSeq:          make(map[string]uint64),
 		readyProjectionLost: make(map[string]struct{}),
 		problemLog:          make(map[string]cacheProblemLogState),
@@ -401,6 +471,7 @@ func (c *CachingStore) noteLocalMutationLocked(ids ...string) uint64 {
 			continue
 		}
 		c.localBeadAt[id] = now
+		c.writeSeq[id] = seq
 	}
 	return seq
 }
@@ -650,7 +721,7 @@ func (c *CachingStore) readyProjectionUnknownLocked(id string) bool {
 	return !c.readyPredicateCanAnswerLocked(c.deps[id])
 }
 
-// evictLocked removes every trace of id from the seven per-row maps. It does
+// evictLocked removes every trace of id from the eight per-row maps. It does
 // not touch mutationSeq, depsComplete, state, or stats. Caller must hold c.mu
 // in write mode.
 func (c *CachingStore) evictLocked(id string) {
@@ -661,6 +732,7 @@ func (c *CachingStore) evictLocked(id string) {
 	delete(c.deletedSeq, id)
 	delete(c.beadSeq, id)
 	delete(c.localBeadAt, id)
+	delete(c.writeSeq, id)
 	delete(c.readyProjectionLost, id)
 }
 
@@ -770,7 +842,7 @@ func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppr
 			// Fence discipline (I3): never overwrite a mutation that landed
 			// after the snapshot. A skipped-but-still-dirty row is caught by
 			// the re-check below and handled by the retry-or-fallback.
-			if c.deletedSeq[f.id] > startSeq || c.beadSeq[f.id] > startSeq {
+			if c.refetchFencedLocked(f.id, startSeq) {
 				continue
 			}
 			opts := absorbOpts{
@@ -822,7 +894,7 @@ func (c *CachingStore) retrySuppressedChurnLocked(suppressed map[string]struct{}
 	}
 	var churned []string
 	for id := range suppressed {
-		if c.beadSeq[id] > startSeq || c.deletedSeq[id] > startSeq {
+		if c.refetchFencedLocked(id, startSeq) {
 			churned = append(churned, id)
 			continue
 		}
@@ -928,12 +1000,6 @@ func (c *CachingStore) PrimeActive() error {
 		}
 		all = append(all, beads...)
 	}
-	enriched, enrichErr := c.applyReadyProjection("prime active ready projection", all)
-	all = enriched
-	if enrichErr != nil {
-		partialErr = errors.Join(partialErr, enrichErr)
-	}
-
 	beadMap := make(map[string]Bead, len(all))
 	for _, b := range all {
 		beadMap[b.ID] = cloneBead(b)
@@ -943,13 +1009,19 @@ func (c *CachingStore) PrimeActive() error {
 		partialErr = errors.Join(partialErr, depErr)
 		c.recordProblem("prime active dep cache", depErr)
 	}
+	// Project after the deps read (see applyReadyProjection).
+	enriched, enrichErr := c.applyReadyProjection("prime active ready projection", all)
+	all = enriched
+	if enrichErr != nil {
+		partialErr = errors.Join(partialErr, enrichErr)
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
 	for _, b := range all {
 		if c.mutationSeq != startSeq {
-			if c.deletedSeq[b.ID] > startSeq {
+			if c.deletedSeq[b.ID] > startSeq || c.writeSeq[b.ID] > startSeq {
 				continue
 			}
 			if _, exists := c.beads[b.ID]; exists {
@@ -1044,15 +1116,6 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("prime list: %w", err)
 	}
-	enriched, enrichErr := c.applyReadyProjection("prime ready projection", all)
-	all = enriched
-	if enrichErr != nil {
-		partialErr = errors.Join(partialErr, enrichErr)
-	}
-	if err := c.cacheContextErr(ctx); err != nil {
-		return err
-	}
-
 	beadMap := make(map[string]Bead, len(all))
 	for _, b := range all {
 		beadMap[b.ID] = cloneBead(b)
@@ -1061,6 +1124,17 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	depMap, depsComplete, depErr := c.fetchDepsForBeads(beadMap)
 	if depErr != nil {
 		c.recordProblem("prime dep cache", depErr)
+	}
+	if err := c.cacheContextErr(ctx); err != nil {
+		return err
+	}
+	// Project after the deps read (see applyReadyProjection).
+	enriched, enrichErr := c.applyReadyProjection("prime ready projection", all)
+	if enrichErr != nil {
+		partialErr = errors.Join(partialErr, enrichErr)
+	}
+	for _, b := range enriched {
+		beadMap[b.ID] = cloneBead(b)
 	}
 	if err := c.cacheContextErr(ctx); err != nil {
 		return err
@@ -1110,11 +1184,18 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		c.dirty = nextDirty
 		c.beadSeq = nextBeadSeq
 		c.localBeadAt = nextLocalBeadAt
+		for id := range c.writeSeq {
+			if _, kept := nextBeads[id]; !kept {
+				delete(c.writeSeq, id)
+			}
+		}
 		c.readyProjectionLost = nextReadyLost
 		c.deletedSeq = make(map[string]uint64)
 	} else {
 		for id, b := range beadMap {
-			if c.deletedSeq[id] > startSeq {
+			// A local write after the snapshot owns the id: installing the
+			// snapshot row would clear that write's beadSeq fence.
+			if c.deletedSeq[id] > startSeq || c.writeSeq[id] > startSeq {
 				continue
 			}
 			if _, exists := c.beads[id]; exists {
@@ -1459,6 +1540,13 @@ func (c *CachingStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, erro
 // applyReadyProjection enriches items with the backing store's ready projection
 // and returns the failure that leaves the snapshot INCOMPLETE, having already
 // recorded every failure on the problem log.
+//
+// Callers run it AFTER reading the deps they install beside the rows. A cached
+// verdict is trusted over the cached edges, so the verdict must be at least as
+// fresh as they are: an edge added between an earlier projection and the deps
+// read would sit, open, next to IsBlocked=false, and the cache would offer work
+// the store holds back. Projected last, a racing edge can only leave a verdict
+// stricter than the edges, which the next re-scan corrects.
 //
 // A projection the backing store cannot serve AT ALL costs the snapshot one
 // column, not rows: the cache latches readyProjectionDegraded, its readiness

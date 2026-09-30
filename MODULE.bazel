@@ -45,3 +45,26 @@ go_deps.module_override(
     path = "github.com/steveyegge/beads",
 )
 use_repo(go_deps, "com_github_burntsushi_toml", "com_github_cenkalti_backoff_v4", "com_github_danielgtaylor_huma_v2", "com_github_fsnotify_fsnotify", "com_github_gastownhall_gascity_packs", "com_github_go_jose_go_jose_v4", "com_github_go_sql_driver_mysql", "com_github_golang_jwt_jwt_v5", "com_github_google_shlex", "com_github_google_uuid", "com_github_gorilla_websocket", "com_github_invopop_jsonschema", "com_github_masterminds_semver_v3", "com_github_oapi_codegen_runtime", "com_github_pb33f_libopenapi", "com_github_pb33f_libopenapi_validator", "com_github_rogpeppe_go_internal", "com_github_santhosh_tekuri_jsonschema_v6", "com_github_shirou_gopsutil_v4", "com_github_spf13_cobra", "com_github_spf13_pflag", "com_github_steveyegge_beads", "com_github_stretchr_testify", "in_gopkg_yaml_v3", "io_k8s_api", "io_k8s_apimachinery", "io_k8s_client_go", "io_opentelemetry_go_otel", "io_opentelemetry_go_otel_exporters_otlp_otlplog_otlploghttp", "io_opentelemetry_go_otel_exporters_otlp_otlpmetric_otlpmetrichttp", "io_opentelemetry_go_otel_log", "io_opentelemetry_go_otel_metric", "io_opentelemetry_go_otel_sdk", "io_opentelemetry_go_otel_sdk_log", "io_opentelemetry_go_otel_sdk_metric", "net_pgregory_rapid", "org_golang_x_mod", "org_golang_x_sync", "org_golang_x_sys", "org_golang_x_term", "org_modernc_sqlite")
+
+# Pinned prebuilt test-only binaries for hermetic integration/acceptance tests.
+# Same artifacts the go-test CI installs via .github/scripts/install-bd-archive.sh
+# and install-dolt-archive.sh; shas are release-pinned.
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "bd_bin_v1_3_1_rc_2",
+    urls = ["https://github.com/gastownhall/beads/releases/download/v1.3.1-rc.2/beads_1.3.1-rc.2_linux_amd64.tar.gz"],
+    sha256 = "6d0e89f1c943faffe0809f99b1ebd5d66358ca740a337532bf0bcb0cee47e2c6",
+    build_file_content = """
+exports_files(["bd"])
+""",
+)
+
+http_archive(
+    name = "dolt_bin_v2_1_7",
+    urls = ["https://github.com/dolthub/dolt/releases/download/v2.1.7/dolt-linux-amd64.tar.gz"],
+    sha256 = "15983e811341ed94e5d47fbfc41d2f57d8c7aa65eee511d25a3c3fd5477e28e7",
+    build_file_content = """
+exports_files(["dolt-linux-amd64/bin/dolt"])
+""",
+)

@@ -2239,6 +2239,164 @@ func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bo
 	return false, lastErr
 }
 
+// Staged-draft recovery bounds. The confirm window above totals ~2.4s, and a
+// codex TUI under load can take longer than that to ingest a large pasted
+// prompt (an ~11KB startup nudge). Every submit in the window then lands inside
+// the ingest and is swallowed, and the paste stays staged in the composer as
+// "[Pasted Content N chars]" with the seat idle and its claim held. Recovery
+// re-sends at a slower pace while that draft is visible, up to this bound.
+const (
+	submitDraftRecoverySends   = 8
+	submitDraftRecoveryBackoff = time.Second
+)
+
+// stagedDraftMarker describes how a provider family's TUI shows a pasted draft
+// that is still sitting unsubmitted in its composer.
+type stagedDraftMarker struct {
+	// promptPrefix starts the live composer line (the family's ready prompt).
+	promptPrefix string
+	// marker is the placeholder the composer renders for a staged paste.
+	marker string
+}
+
+// stagedDraftMarkers lists the families whose staged-paste placeholder is
+// known. codex collapses a large paste into "[Pasted Content N chars]" until
+// it is submitted. A family without an entry never gets recovery submits.
+// Every entry must also be submit-verify eligible: recovery runs only on the
+// verified submit path.
+var stagedDraftMarkers = map[string]stagedDraftMarker{
+	"codex": {promptPrefix: "› ", marker: "[Pasted Content "},
+}
+
+func stagedDraftMarkerForFamily(family string) (stagedDraftMarker, bool) {
+	m, ok := stagedDraftMarkers[family]
+	return m, ok
+}
+
+// stagedDraftMarkerFor resolves target's staged-draft marker, identifying the
+// provider family the same way submitVerifyEligible does.
+func (t *Tmux) stagedDraftMarkerFor(target string) (stagedDraftMarker, bool) {
+	if provider := t.providerEnv(target); provider != "" {
+		return stagedDraftMarkerForFamily(sessionlog.ProviderFamily(provider))
+	}
+	for family, m := range stagedDraftMarkers {
+		if t.targetLooksLikeProvider(target, family) {
+			return m, true
+		}
+	}
+	return stagedDraftMarker{}, false
+}
+
+// paneShowsStagedDraft reports whether the live composer holds m's staged-paste
+// placeholder. The live composer is the LAST line starting with the prompt
+// prefix plus the lines below it (wrapped continuation and footer). Earlier
+// prompt lines are transcript, and the marker text anywhere above the composer
+// (an agent printing it, an earlier message) does not count. With no prompt
+// line on screen the composer cannot be read, so this reports false.
+func paneShowsStagedDraft(lines []string, m stagedDraftMarker) bool {
+	composer := -1
+	for i, line := range lines {
+		if matchesPromptPrefix(line, m.promptPrefix) {
+			composer = i
+		}
+	}
+	if composer < 0 {
+		return false
+	}
+	for _, line := range lines[composer:] {
+		if strings.Contains(line, m.marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// paneSubmitObservation is one capture's reading of the pane: whether the agent
+// shows its busy indicator and whether the composer still holds a staged draft.
+type paneSubmitObservation struct {
+	busy    bool
+	drafted bool
+}
+
+// observeSubmit reads busy and staged-draft state from a single capture, so
+// the two can never describe different moments.
+func (t *Tmux) observeSubmit(target string, m stagedDraftMarker) (paneSubmitObservation, error) {
+	lines, err := t.CapturePaneLines(target, promptObservationLines)
+	if err != nil {
+		return paneSubmitObservation{}, err
+	}
+	return paneSubmitObservation{
+		busy:    paneContainsBusyIndicator(lines),
+		drafted: paneShowsStagedDraft(lines, m),
+	}, nil
+}
+
+// stagedDraftOutcome is the result of recoverStagedDraft.
+type stagedDraftOutcome int
+
+const (
+	// stagedDraftUnresolved: recovery proved nothing. No draft was visible,
+	// the pane could not be read, a send failed, or the bound ran out. The
+	// caller keeps its unconfirmed-submit handling.
+	stagedDraftUnresolved stagedDraftOutcome = iota
+	// stagedDraftSubmittedBusy: the pane went busy, so the submit landed.
+	stagedDraftSubmittedBusy
+	// stagedDraftCleared: after a re-send the draft left the composer but no
+	// capture saw the busy indicator. The agent took the message, so this is
+	// delivered-but-unobserved and must not be re-pasted.
+	stagedDraftCleared
+)
+
+func (o stagedDraftOutcome) String() string {
+	switch o {
+	case stagedDraftSubmittedBusy:
+		return "submitted-busy"
+	case stagedDraftCleared:
+		return "cleared-unobserved"
+	default:
+		return "unresolved"
+	}
+}
+
+// recoverStagedDraft runs after submitEnterAndConfirm returned unconfirmed. It
+// re-sends the submit only while one capture shows the composer still holding
+// the staged draft AND the pane idle. That is the one state where another
+// submit is provably safe: the draft is still in the composer, so the earlier
+// submits did not take, and nothing is running that a re-sent Escape could
+// interrupt. It stops as soon as the pane goes busy or the draft clears, and
+// after submitDraftRecoverySends sends at most. It never sends when no draft
+// was seen, so an idle pane with an empty composer (the ambiguous case where
+// the submit may already have landed) keeps the old contract.
+//
+// All side effects are injected so the decision logic is unit-testable without
+// a live tmux server.
+func recoverStagedDraft(sendSubmit func() error, wake func(), observe func() (paneSubmitObservation, error), sleep func(time.Duration)) stagedDraftOutcome {
+	sawDraft := false
+	for sends := 0; ; sends++ {
+		obs, err := observe()
+		switch {
+		case err != nil:
+			return stagedDraftUnresolved
+		case obs.busy:
+			return stagedDraftSubmittedBusy
+		case !obs.drafted:
+			if sawDraft {
+				return stagedDraftCleared
+			}
+			return stagedDraftUnresolved
+		}
+		sawDraft = true
+		if sends >= submitDraftRecoverySends {
+			return stagedDraftUnresolved
+		}
+		if err := sendSubmit(); err != nil {
+			return stagedDraftUnresolved
+		}
+		wake()
+		sleep(submitDraftRecoveryBackoff)
+	}
+}
+
 // paneBusy reports whether the target pane shows an active processing indicator
 // (Claude's live spinner / "esc to interrupt"). Used to confirm a submitted turn.
 func (t *Tmux) paneBusy(target string) (bool, error) {
@@ -2413,6 +2571,19 @@ func (t *Tmux) nudgeSession(
 	// below remains for the submit Enter.
 	t.WakePaneIfDetached(session)
 
+	// 0. Dismiss any blocking mid-session dialog first. The token-ceiling
+	// resume selector, the periodic feedback prompt, and the provider
+	// session-limit chooser all absorb the next text input instead of
+	// passing it to the prompt, so a nudge sent into one is lost. Single
+	// peek, so a mid-turn session costs one capture-pane and no delay. This
+	// step is best-effort and never aborts the nudge on a peek/dismiss error
+	// (see dismissMidSessionDialogBeforeNudge).
+	if t.dismissMidSessionDialogBeforeNudge(target) {
+		// Give the TUI a beat to retire the dialog before pasting, so the
+		// message lands at the prompt rather than in a closing overlay.
+		time.Sleep(midSessionDialogSettleDelay)
+	}
+
 	// 1. Clear any pending input already sitting on the line before pasting,
 	// mirroring SendKeysReplace (send-keys C-u). Without this, an earlier
 	// nudge's undelivered draft — e.g. a lost submit Enter (ga-bwm) — stays in
@@ -2472,8 +2643,11 @@ func (t *Tmux) nudgeSession(
 	// re-sending the sequence only while the pane stays idle. A lost submit
 	// (raced against the paste or a detached-pane wake) is the ga-bwm
 	// "drafted but not submitted" stall; confirming here removes the town's
-	// dependence on an external observer re-kicking the session. Providers
-	// without a reliable indicator keep best-effort delivery.
+	// dependence on an external observer re-kicking the session. When that
+	// window expires with the paste still staged in the composer, families
+	// with a known staged-draft marker get a slower, bounded recovery
+	// (recoverStagedDraft). Providers without a reliable indicator keep
+	// best-effort delivery.
 	submitKeys := submitKeySequence(target)
 	// RE-SEND HAZARD (noted, not redesigned): a submit sequence that leads with
 	// Escape is only safe to repeat while the pane is still idle. If the first
@@ -2495,6 +2669,23 @@ func (t *Tmux) nudgeSession(
 		}
 		delivered = true
 		if !confirmed {
+			// The window may have expired inside a large paste's ingest with
+			// every submit swallowed, leaving the draft staged in the
+			// composer. Where the family's staged-draft marker is known,
+			// re-send while that draft is visible (recoverStagedDraft). Skip
+			// it when a client is attached, for the same reason the C-u
+			// clear above is skipped: a human may be composing, and a
+			// re-sent submit would send their draft.
+			if marker, ok := t.stagedDraftMarkerFor(target); ok && !t.IsSessionAttached(session) {
+				observe := func() (paneSubmitObservation, error) { return t.observeSubmit(target, marker) }
+				switch recoverStagedDraft(sendSubmit, wake, observe, time.Sleep) {
+				case stagedDraftSubmittedBusy:
+					return nil
+				case stagedDraftCleared:
+					return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
+				}
+				// stagedDraftUnresolved falls through to the handling below.
+			}
 			// Do NOT collapse this to nil: a caller that treats nil as "clean
 			// delivery" would ack a queued nudge for a message that may still
 			// be sitting drafted-but-unsubmitted in the pane. Surfacing this
@@ -2732,11 +2923,52 @@ func dismissModelSwitchModal(content string, sendKeys func(keys ...string) error
 	return true, sendKeys("Enter")
 }
 
+// midSessionDialogSettleDelay lets a just-dismissed mid-session dialog retire
+// from the pane before the nudge text is pasted, so the message lands at the
+// prompt rather than in a closing overlay.
+const midSessionDialogSettleDelay = 500 * time.Millisecond
+
+// dismissMidSessionDialogBeforeNudge clears a blocking mid-session dialog (the
+// token-ceiling resume selector, the periodic feedback prompt, or the provider
+// session-limit chooser) on target so an imminent nudge lands at the prompt
+// instead of being absorbed by the dialog. It reports whether a dialog was
+// dismissed so the caller can let the UI settle before delivering text.
+//
+// Best-effort: a capture (peek) failure or a dismissal send-keys failure is
+// swallowed and reported as "no dialog dismissed" so the nudge still proceeds
+// to its own retry-wrapped delivery path. NudgeSession previously did not
+// depend on CapturePane for delivery; gating it on this pre-step would regress
+// load-bearing nudges (health-patrol restarts, mail, sling work delivery) on a
+// transient capture-pane error even though the message could still be
+// delivered. Mirrors DismissModelSwitchModalIfPresent, which swallows the
+// identical errors.
+func (t *Tmux) dismissMidSessionDialogBeforeNudge(target string) bool {
+	dismissed, err := runtime.DismissMidSessionDialogs(
+		context.Background(),
+		func() (string, error) { return t.CaptureVisiblePane(target) },
+		func(keys ...string) error {
+			for _, k := range keys {
+				if _, err := t.run("send-keys", "-t", target, k); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return false
+	}
+	return dismissed
+}
+
 // DismissModelSwitchModalIfPresent clears a mid-session Codex/GPT model-switch
 // modal on the session's agent pane (keeping the current model — no downgrade,
 // no spend change) so a session that would otherwise hang on it can proceed.
 // No-op when the modal is absent. Best-effort: capture/send failures are
-// swallowed (the caller retries on the next wake).
+// swallowed (the caller retries on the next wake). The resume, feedback, and
+// session-limit mid-session dialogs are handled separately by
+// runtime.DismissMidSessionDialogs (see midSessionDialogs) via
+// dismissMidSessionDialogBeforeNudge.
 func (t *Tmux) DismissModelSwitchModalIfPresent(session string) {
 	target := session
 	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
@@ -3403,10 +3635,22 @@ func (t *Tmux) FindSessionByWorkDir(targetDir string, processNames []string) ([]
 	return matches, nil
 }
 
-// CapturePane captures the visible content of a pane.
+// CapturePane captures the visible screen plus the last `lines` rows of
+// scrollback history of a pane.
 func (t *Tmux) CapturePane(session string, lines int) (string, error) {
 	content, err := t.run("capture-pane", "-p", "-t", session, "-S", fmt.Sprintf("-%d", lines))
 	return content, err
+}
+
+// CaptureVisiblePane captures only the current visible screen of a pane, with
+// no scrollback history (no "-S"). The mid-session dialog dismissal
+// (dismissMidSessionDialogBeforeNudge) uses this instead of CapturePane so an
+// already-dismissed dialog sitting in scrollback cannot satisfy the
+// contains-based matchers and inject dismissal keys into a live prompt before
+// the intended nudge. A live blocking dialog occupies the visible footer, so
+// the visible screen is the correct and sufficient window for that check.
+func (t *Tmux) CaptureVisiblePane(session string) (string, error) {
+	return t.run("capture-pane", "-p", "-t", session)
 }
 
 // CapturePaneJoined captures the visible content of a pane with wrapped lines

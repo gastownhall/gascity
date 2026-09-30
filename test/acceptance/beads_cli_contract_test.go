@@ -31,9 +31,9 @@ import (
 func runBD(t *testing.T, dir string, args ...string) (string, error) {
 	t.Helper()
 	bdPath := helpers.RequireBD(t)
-	cmd := exec.Command(bdPath, args...)
+	cmd := helpers.ToolCommand(t, bdPath, args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "BEADS_DIR="+filepath.Join(dir, ".beads"))
+	cmd.Env = append(cmd.Env, "BEADS_DIR="+filepath.Join(dir, ".beads"))
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

@@ -526,11 +526,12 @@ func (s *emittingClassStore) CloseWithMetadataIfMatch(id string, revision int64,
 // this wrapper. TestEmittingClassStoreKeepsEveryEngineCapability forces the
 // wrapper to carry CloseWithMetadataIfMatch structurally for every engine, so a
 // bare type assertion would advertise the capability even over a backing (for
-// example the sqlite CLI engine) that cannot honor it — and that discovery is
-// contractually a hard capability gate, not a rollout seam. Consulted first by
-// AtomicConditionalCloserFor, this answers yes only when the resolved backing
-// truly provides the atomic close, and returns the emitting wrapper (not the
-// raw backing) so the discovered closer still emits bead.closed.
+// example a plain MemStore, or a bd CLI store) that cannot honor it — and that
+// discovery is contractually a hard capability gate, not a rollout seam.
+// Consulted first by AtomicConditionalCloserFor, this answers yes only when the
+// resolved backing truly provides the atomic close, and returns the emitting
+// wrapper (not the raw backing) so the discovered closer still emits
+// bead.closed.
 func (s *emittingClassStore) AtomicConditionalCloserHandle() (beads.AtomicConditionalCloser, bool) {
 	if _, ok := beads.AtomicConditionalCloserFor(s.Store); !ok {
 		return nil, false

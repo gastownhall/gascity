@@ -52,7 +52,7 @@ func TestRecordStartCrashRedactsPaneSecrets(t *testing.T) {
 	tm.exec = &fakeExecutor{}
 	ops := newTmuxStartOps(tm, dir, 0, runtime.Config{Env: map[string]string{"ANTHROPIC_API_KEY": secret}}, true)
 
-	path := ops.recordStartCrash("gc-test-crash", "+ export ANTHROPIC_API_KEY="+secret+"\nboom\n")
+	path := ops.recordStartCrash("gc-test-crash", "+ export ANTHROPIC_API_KEY="+secret+"\nboom\n", "", "")
 	if path == "" {
 		t.Fatal("recordStartCrash returned no artifact path")
 	}
@@ -77,7 +77,7 @@ func TestRecordStartCrashWritesOwnerOnlyArtifact(t *testing.T) {
 	tm.exec = &fakeExecutor{}
 	ops := newTmuxStartOps(tm, dir, 0, runtime.Config{}, true)
 
-	path := ops.recordStartCrash("gc-test-crash", "boom\n")
+	path := ops.recordStartCrash("gc-test-crash", "boom\n", "", "")
 	if path == "" {
 		t.Fatal("recordStartCrash returned no artifact path")
 	}

@@ -41,6 +41,9 @@ func mainExitCode(args []string, stdout, stderr io.Writer) int {
 	// command can handle, not as a signal that kills gc mid-write. The claim
 	// path's delivery unwind depends on surviving that write.
 	ignoreSIGPIPE()
+	// Also before dispatch: every MySQL connection config copies the driver
+	// logger when it is built (mysql_driver_log.go).
+	installMySQLDriverLogger()
 	if handled, code := privateProductMetricsEntrypoint(args); handled {
 		return code
 	}

@@ -401,6 +401,10 @@ var (
 	// ErrPendingInteraction reports that the session is blocked on a pending
 	// approval or question and cannot accept a new user turn.
 	ErrPendingInteraction = errors.New("session has a pending interaction")
+	// ErrSessionKillPending reports that a `gc session kill` is tearing the
+	// session's runtime down (see KillPendingReason). The caller should retry
+	// once the kill completes and the lifecycle rules have taken over again.
+	ErrSessionKillPending = errors.New("session is being killed")
 )
 
 type sessionMutationLockEntry struct {
@@ -524,6 +528,14 @@ func (m *Manager) commitPendingContinuationReset(id string, b beads.Bead) (int, 
 }
 
 func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+	// A kill-fenced row reads asleep while its runtime is still being torn
+	// down. Treating that runtime as live would flip the row back to active
+	// (confirmLiveSessionState) and erase the fence, so once the Stop landed the
+	// row would claim a live runtime that is gone; delivering into it would lose
+	// the input with the process. Starting a replacement would race the kill.
+	if KillPendingMetadata(b.Metadata["state"], b.Metadata["state_reason"], b.Metadata["sleep_reason"], b.Metadata["slept_at"], m.now()) {
+		return fmt.Errorf("%w: %s", ErrSessionKillPending, id)
+	}
 	transport, transportVerified := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {
@@ -587,7 +599,10 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
-		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		// A capacity refusal is also a startup death, but the endpoint refused
+		// the launch: that says nothing about the resume key, so it falls
+		// through to the plain failure below instead of the stale-key recovery.
+		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err) {
 			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
 			if retryErr != nil {
 				return retryErr
@@ -715,7 +730,9 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		switch {
-		case errors.Is(err, runtime.ErrSessionDiedDuringStartup):
+		// A capacity refusal says nothing about the resume key; it takes the
+		// plain failure path, not the stale-key recovery (see ensureRunning).
+		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err):
 			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
 			if retryErr != nil {
 				return retryErr
