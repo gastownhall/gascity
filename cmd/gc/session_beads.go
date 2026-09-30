@@ -2195,7 +2195,10 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			}
 		}
 		needsAliasSync := b.Metadata["alias"] != managedAlias
-		if b.Metadata["pool_slot"] == "" {
+		// Configured named sessions never carry a pool slot (cleared above).
+		// Backfilling here would re-derive one from a numeric name suffix
+		// (deputy-2 -> 2) and flap the bead against that clear every tick.
+		if !isConfiguredNamed && b.Metadata["pool_slot"] == "" {
 			queuePoolSlotMeta := queueMeta
 			if needsAliasSync && isManagedPool && isPoolInstance {
 				queuePoolSlotMeta = queueAliasGuardedMeta
