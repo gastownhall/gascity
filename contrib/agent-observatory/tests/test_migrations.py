@@ -97,7 +97,7 @@ class MigrationTest(unittest.TestCase):
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         finally:
             connection.close()
-        if version in (7, 8):
+        if version in (7, 8, 9):
             MigrationTest._downgrade_schema7_to_v6(db_path)
         connection = sqlite3.connect(db_path)
         try:
@@ -196,14 +196,14 @@ class MigrationTest(unittest.TestCase):
             "classification_answers": 2,
         }
         self.assertEqual(result.from_version, 4)
-        self.assertEqual(result.to_version, 8)
+        self.assertEqual(result.to_version, 9)
         self.assertEqual(result.database_path, os.path.realpath(self.db_path))
         self.assertEqual(set(result.preserved_rows), _V6_REQUIRED_TABLES | {"session_enrichment"})
         self.assertEqual(
             {table: result.preserved_rows[table] for table in expected_counts}, expected_counts
         )
         self.assertEqual(result.preserved_rows["imported_files"], 1)
-        self.assertEqual(len(result.backup_paths), 4)
+        self.assertEqual(len(result.backup_paths), 5)
         self.assertEqual(result.backup_path, result.backup_paths[-1])
         self.assertTrue(all(os.path.isfile(path) for path in result.backup_paths))
         self.assertEqual(self._backup_paths(self.db_path), [result.backup_paths[0]])
@@ -216,20 +216,20 @@ class MigrationTest(unittest.TestCase):
         self.assertEqual(result.backfill_summary["classification_match_rate"], 0.0)
         self.assertEqual(result.backfill_summary["sessions_total"], 2)
         self.assertEqual(result.backfill_summary["sessions_with_role"], 0)
-        self.assertEqual(result.backfill_summary["pricing_seed_rows"], 3)
+        self.assertEqual(result.backfill_summary["pricing_seed_rows"], 20)
 
         upgraded = sqlite3.connect(self.db_path)
         try:
-            self.assertEqual(upgraded.execute("PRAGMA user_version").fetchone()[0], 8)
+            self.assertEqual(upgraded.execute("PRAGMA user_version").fetchone()[0], 9)
             self.assertEqual(
                 upgraded.execute(
                     "SELECT value FROM schema_meta WHERE key = 'schema_version'"
                 ).fetchone()[0],
-                "8",
+                "9",
             )
             self.assertEqual(upgraded.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0], 0)
             self.assertEqual(upgraded.execute("SELECT COUNT(*) FROM classification_sessions").fetchone()[0], 0)
-            self.assertEqual(upgraded.execute("SELECT COUNT(*) FROM model_pricing").fetchone()[0], 3)
+            self.assertEqual(upgraded.execute("SELECT COUNT(*) FROM model_pricing").fetchone()[0], 20)
             pricing_columns = {
                 row[1]: row for row in upgraded.execute("PRAGMA table_info(model_pricing)")
             }
@@ -279,7 +279,7 @@ class MigrationTest(unittest.TestCase):
         finally:
             upgraded.close()
 
-        v4_backup, v5_backup, v6_backup, v7_backup = result.backup_paths
+        v4_backup, v5_backup, v6_backup, v7_backup, v8_backup = result.backup_paths
         backup4 = sqlite3.connect(v4_backup)
         try:
             self.assertEqual(backup4.execute("PRAGMA user_version").fetchone()[0], 4)
@@ -409,8 +409,8 @@ class MigrationTest(unittest.TestCase):
         result = migrate_database(self.db_path)
 
         self.assertEqual(result.from_version, 5)
-        self.assertEqual(result.to_version, 8)
-        self.assertEqual(len(result.backup_paths), 3)
+        self.assertEqual(result.to_version, 9)
+        self.assertEqual(len(result.backup_paths), 4)
         self.assertEqual(result.backup_path, result.backup_paths[-1])
         self.assertEqual(self._backup_paths_v5(self.db_path), [result.backup_paths[0]])
         self.assertEqual(self._backup_paths_v6(self.db_path), [result.backup_paths[1]])
@@ -432,7 +432,7 @@ class MigrationTest(unittest.TestCase):
         self.assertEqual(summary["requests_total"], 1)
         self.assertEqual(summary["requests_bound"], 1)
         self.assertEqual(summary["request_match_rate"], 1.0)
-        self.assertEqual(summary["pricing_seed_rows"], 3)
+        self.assertEqual(summary["pricing_seed_rows"], 20)
         self.assertEqual(summary["sessions_total"], 4)
         self.assertEqual(summary["sessions_with_role"], 0)
         self.assertEqual(summary["session_role_coverage"], 0.0)
@@ -486,7 +486,7 @@ class MigrationTest(unittest.TestCase):
         result = migrate_database(self.db_path)
 
         self.assertEqual(result.from_version, 4)
-        self.assertEqual(result.to_version, 8)
+        self.assertEqual(result.to_version, 9)
         self.assertEqual(set(result.preserved_rows), _V6_REQUIRED_TABLES | {"session_enrichment"})
         self.assertEqual(result.preserved_rows["events"], 1)
         self.assertEqual(result.preserved_rows["imported_files"], 1)
@@ -498,8 +498,8 @@ class MigrationTest(unittest.TestCase):
         result = migrate_database(self.db_path)
 
         self.assertEqual(result.from_version, 6)
-        self.assertEqual(result.to_version, 8)
-        self.assertEqual(len(result.backup_paths), 2)
+        self.assertEqual(result.to_version, 9)
+        self.assertEqual(len(result.backup_paths), 3)
         self.assertEqual(self._backup_paths_v6(self.db_path), [result.backup_paths[0]])
         self.assertEqual(result.backfill_summary["untrusted_role_values_cleared"], 2)
         self.assertEqual(self._table_count(self.db_path, "events"), 2)
@@ -507,7 +507,7 @@ class MigrationTest(unittest.TestCase):
 
         upgraded = sqlite3.connect(self.db_path)
         try:
-            self.assertEqual(upgraded.execute("PRAGMA user_version").fetchone()[0], 8)
+            self.assertEqual(upgraded.execute("PRAGMA user_version").fetchone()[0], 9)
             role_count = upgraded.execute(
                 "SELECT COUNT(*) FROM sessions WHERE role IS NOT NULL"
             ).fetchone()[0]
@@ -891,8 +891,8 @@ class MigrationTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["from_version"], 4)
-        self.assertEqual(payload["to_version"], 8)
-        self.assertEqual(len(payload["backups"]), 4)
+        self.assertEqual(payload["to_version"], 9)
+        self.assertEqual(len(payload["backups"]), 5)
         self.assertTrue(os.path.isfile(payload["backup"]))
         self.assertEqual(payload["preserved_rows"]["events"], 2)
         self.assertEqual(payload["backfill_summary"]["classifications_total"], 1)
@@ -905,9 +905,9 @@ class MigrationTest(unittest.TestCase):
         backups_before = self._backup_paths(self.db_path)
 
         result = migrate_database(self.db_path)
-        self.assertEqual(result.from_version, 8)
-        self.assertEqual(result.to_version, 8)
-        self.assertEqual(result.already_at_version, 8)
+        self.assertEqual(result.from_version, 9)
+        self.assertEqual(result.to_version, 9)
+        self.assertEqual(result.already_at_version, 9)
         self.assertIsNone(result.backup_path)
         with open(self.db_path, "rb") as database:
             self.assertEqual(database.read(), migrated_bytes)
@@ -924,7 +924,7 @@ class MigrationTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(completed.stdout.strip(), "already at schema 8")
+        self.assertEqual(completed.stdout.strip(), "already at schema 9")
         self.assertEqual(completed.stderr, "")
         with open(self.db_path, "rb") as database:
             self.assertEqual(database.read(), migrated_bytes)
@@ -940,7 +940,7 @@ class MigrationTest(unittest.TestCase):
                          "'example/repo', 'explicit', ?)", ('a' * 64,))
             before = conn.execute("SELECT * FROM session_enrichment").fetchall()
         result = migrate_database(self.db_path)
-        self.assertEqual((result.from_version, result.to_version), (7, 8))
+        self.assertEqual((result.from_version, result.to_version), (7, 9))
         with closing(sqlite3.connect(result.backup_path)) as backup:
             self.assertEqual(backup.execute("SELECT * FROM session_enrichment").fetchall(), before)
         with ObservatoryStore(self.db_path) as store:
