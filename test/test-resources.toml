@@ -10,7 +10,7 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 717
+baseline_calls = 723
 baseline_files = 210
 reported_calls = 495
 reported_files = 135
@@ -23,8 +23,8 @@ expires = "2026-10-31"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 490
-baseline_files = 179
+baseline_calls = 489
+baseline_files = 178
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-cp3hwi"
@@ -64,8 +64,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 319
-baseline_files = 122
+baseline_calls = 318
+baseline_files = 121
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-cp3hwi"
@@ -434,8 +434,8 @@ expires = "2026-10-31"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 319
-baseline_files = 122
+baseline_calls = 318
+baseline_files = 121
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-cp3hwi"

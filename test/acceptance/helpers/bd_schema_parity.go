@@ -86,9 +86,10 @@ func bdLatestSchemaVersion(bdPath string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("bd schema probe: create temp dir: %w", err)
 	}
-	// dir is bd's HOME here, so a detached child that bd spawned (the metrics
-	// flusher) may still be writing while this removal runs. A leaked probe dir
-	// must not fail suite setup, but it must not vanish silently either.
+	// bd's HOME (dir/home) lives under dir, so a detached child that bd spawned
+	// (the metrics flusher) may still be writing while this removal runs. A
+	// leaked probe dir must not fail suite setup, but it must not vanish
+	// silently either.
 	defer func() {
 		if rmErr := os.RemoveAll(dir); rmErr != nil {
 			fmt.Fprintf(os.Stderr, "bd schema probe: leaked temp dir %s: %v\n", dir, rmErr)
