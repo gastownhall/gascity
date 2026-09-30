@@ -166,16 +166,17 @@ the tool executed, and does not prove success. Only a result event with an
 
 - Schema version is stored in `PRAGMA user_version` and `schema_meta`. Opening a
   store with an unknown/future version raises `SchemaVersionError`. The current
-  version is **7**; version 3 excluded identity fields from the payload hash (so a
+  version is **8**; version 3 excluded identity fields from the payload hash (so a
   version-2 projection must be rebuilt rather than reused), version 4 added the
   M5 change/exposure registry, version 5 added the M7 shadow `recommendations`
   projection, version 6 adds classification/session bindings, the nullable
   `sessions.role` column, model prices, and `event_usage_cost`. Version 7 adds
-  trusted GC session enrichment and the `events_with_enrichment` view.
-- Upgrade a valid schema-4, schema-5, or schema-6 projection explicitly with
+  trusted GC session enrichment and the `events_with_enrichment` view. Version 8
+  adds nullable templates for repository-only historical enrichment.
+- Upgrade a valid schema-4, schema-5, schema-6, or schema-7 projection explicitly with
   `python3 -m agent_observatory migrate --db /path/to/obs.db`. Each migration step
   first creates a timestamped online backup (`v4-pre-schema5`, `v5-pre-schema6`,
-  and, when applicable, `v6-pre-schema7`), updates both version markers, and rolls
+  and, when applicable, `v6-pre-schema7` and `v7-pre-schema8`), updates both version markers, and rolls
   back atomically on failure. Evidence row counts are preserved. The v6-to-v7
   step clears roles previously guessed from provider session names; role coverage
   remains unknown until authoritative GC metadata is imported. Normal store opens
@@ -230,7 +231,25 @@ the tool executed, and does not prove success. Only a result event with an
 
 ### GC session enrichment
 
-For schema 7, an operator can import a complete local GC session metadata export:
+For schema 8, an operator can import a local GC session metadata export. The
+same command also reads historical Claude/Codex source transcripts referenced by
+the selected city/host's stored events; a live export need not contain those
+sessions. Deleted normalized collector spools are resolved via `collector_sources`
+source-id checkpoints to their native transcript paths. Back up the database beside existing backups before running enrichment.
+`migrate` also creates a verified backup for each forward schema step (including
+schema 7 → 8, which preserves existing bindings and permits a nullable template).
+
+Historical bindings use recorded cwd, not tool commands or inferred roles. A
+local origin remote is preferred. For removed directories only, component-boundary
+prefixes map `projects/Gateway-LLM` to `uniblock-dev/gateway-llm`, `src/gascity`
+and `src/gascity-worktrees` to `hoomji/gascity`, and `src/city-worktrees` or
+`/home/<user>/city` to `city`. Generic fleet paths and conflicting repositories
+remain unbound. Provenance is `transcript_cwd` or `transcript_cwd_prefix`, included
+in the binding hash. Existing repository bindings always win, reruns write no new
+bindings, and repository-only rows never infer or clear a role. Missing or
+unreadable transcripts remain unknown.
+
+Example:
 
 ```bash
 gc session list --state all --json > /tmp/gc-sessions.json

@@ -47,7 +47,7 @@ from .migrations import (
     SCHEMA_VERSION_AFTER,
     V4_TO_V5_SCHEMA_STATEMENTS,
     V6_CORE_SCHEMA_STATEMENTS,
-    V7_CORE_SCHEMA_STATEMENTS,
+    V8_CORE_SCHEMA_STATEMENTS,
 )
 
 # Bump when the projection schema changes. Normal opens reject older schemas;
@@ -317,7 +317,7 @@ _SCHEMA_STATEMENTS = (
     """,
     *V4_TO_V5_SCHEMA_STATEMENTS,
     *V6_CORE_SCHEMA_STATEMENTS,
-    *V7_CORE_SCHEMA_STATEMENTS,
+    *V8_CORE_SCHEMA_STATEMENTS,
 )
 
 @dataclass

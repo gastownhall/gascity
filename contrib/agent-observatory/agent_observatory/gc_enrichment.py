@@ -201,7 +201,7 @@ def enrich_gc_sessions(
                 "WHERE city_id = ? AND host_id = ? AND provider = ? AND session_id = ?",
                 session_identity,
             ).fetchone()
-            if current is not None and current["template"] != binding.template:
+            if current is not None and current["template"] is not None and current["template"] != binding.template:
                 result.conflicts += 1
                 continue
             repo_conflict = False
@@ -280,6 +280,7 @@ def enrich_gc_sessions(
                 )
                 result.role_bindings_written += 1
 
+        _enrich_historical_sessions(store, city_id, host_id, remote_cache, result)
         store.conn.execute("COMMIT")
     except BaseException:
         if store.conn.in_transaction:
@@ -288,9 +289,134 @@ def enrich_gc_sessions(
     return result
 
 
+def _removed_worktree_repository(cwd: str) -> str | None:
+    """Only known, component-boundary prefixes; never guess generic fleet roots."""
+    path = Path(os.path.expanduser(cwd))
+    if not path.is_absolute() or path.exists() or ".." in path.parts:
+        return None
+    parts = path.parts
+    mappings = (
+        (("projects", "Gateway-LLM"), "uniblock-dev/gateway-llm"),
+        (("src", "gascity"), "hoomji/gascity"),
+        (("src", "gascity-worktrees"), "hoomji/gascity"),
+        (("src", "city-worktrees"), "city"),
+    )
+    # Only the repository immediately below /home/<user> is evidence.
+    # Nested src/projects components inside a deleted worktree are not roots.
+    # This also covers the /home/coolhenry alias without resolving symlinks.
+    if len(parts) < 4 or parts[1] != "home":
+        return None
+    mappings += ((("city",), "city"),)
+    candidates = {
+        repo for prefix, repo in mappings
+        if tuple(parts[3:3 + len(prefix)]) == prefix
+    }
+    # Fail closed if overlapping anchored mappings ever disagree.
+    return next(iter(candidates)) if len(candidates) == 1 else None
+
+
+def _transcript_repositories(path: str, provider: str, session_id: str,
+                             remote_cache: dict[str, str | None]) -> set[tuple[str, str]]:
+    candidates: set[tuple[str, str]] = set()
+    # Bound reads, ignore malformed/foreign rows, never execute transcript content.
+    try:
+        with open(path, "r", encoding="utf-8") as source:
+            matching_codex_session = False
+            while True:
+                line = source.readline(4 * 1024 * 1024 + 1)
+                if not line:
+                    break
+                if len(line) > 4 * 1024 * 1024:
+                    while line and not line.endswith("\n"):
+                        line = source.readline(4 * 1024 * 1024 + 1)
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                if provider == "codex":
+                    if row.get("type") not in ("session_meta", "turn_context"):
+                        continue
+                    payload = row.get("payload")
+                    if not isinstance(payload, dict):
+                        continue
+                    if row.get("type") == "session_meta":
+                        matching_codex_session = payload.get("id") == session_id
+                    if not matching_codex_session:
+                        continue
+                    cwd = _nonempty_string(payload.get("cwd"))
+                elif provider == "claude":
+                    if row.get("sessionId") != session_id:
+                        continue
+                    cwd = _nonempty_string(row.get("cwd"))
+                else:
+                    continue
+                if cwd is None:
+                    continue
+                repo = _repository_from_work_dir(cwd, remote_cache)
+                provenance = "transcript_cwd"
+                if repo is None:
+                    repo = _removed_worktree_repository(cwd)
+                    provenance = "transcript_cwd_prefix"
+                if repo:
+                    candidates.add((repo, provenance))
+    except (OSError, UnicodeError):
+        return set()
+    return candidates
+
+
+def _enrich_historical_sessions(store: Any, city_id: str, host_id: str,
+                                remote_cache: dict[str, str | None], result: GCEnrichmentRun) -> None:
+    rows = store.conn.execute(
+        "SELECT DISTINCT provider, session_id, source_path FROM events "
+        "WHERE city_id = ? AND host_id = ? AND source_path IS NOT NULL",
+        (city_id, host_id),
+    ).fetchall()
+    checkpoints: dict[tuple[str, str], str] = {}
+    if store.conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'collector_sources'").fetchone():
+        checkpoints = {(row["source_id"], row["provider"]): row["path"] for row in
+                       store.conn.execute("SELECT source_id, provider, path FROM collector_sources")}
+    candidates: dict[tuple[str, str], set[tuple[str, str]]] = {}
+    for row in rows:
+        key = (row["provider"], row["session_id"])
+        # Collector events reference deleted normalized spools. Resolve their
+        # stable source-id stems through the collector's native-source checkpoint.
+        path = checkpoints.get((Path(row["source_path"]).stem, row["provider"]), row["source_path"])
+        candidates.setdefault(key, set()).update(_transcript_repositories(
+            path, *key, remote_cache))
+    for key, evidence in sorted(candidates.items()):
+        repos = {repo for repo, _source in evidence}
+        if len(repos) > 1:
+            result.repo_ambiguous += 1
+            continue
+        if not repos:
+            continue
+        identity = (city_id, host_id, *key)
+        current = store.conn.execute(
+            "SELECT template, repo FROM session_enrichment WHERE city_id = ? AND host_id = ? "
+            "AND provider = ? AND session_id = ?", identity).fetchone()
+        if current is not None and current["repo"] is not None:
+            continue  # Durable explicit or inferred bindings always win.
+        repo = next(iter(repos))
+        provenance = "transcript_cwd" if (repo, "transcript_cwd") in evidence else "transcript_cwd_prefix"
+        template = current["template"] if current else None
+        digest = _binding_sha256(identity, template, repo, provenance)
+        store.conn.execute(
+            "INSERT INTO session_enrichment(city_id, host_id, provider, session_id, template, "
+            "repo, repo_source, source_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(city_id, host_id, provider, session_id) DO UPDATE SET "
+            "repo = excluded.repo, repo_source = excluded.repo_source, source_sha256 = excluded.source_sha256, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+            (*identity, template, repo, provenance, digest))
+        result.bindings_written += 1
+        result.repo_bindings_written += 1
+
+
 def _binding_sha256(
     identity: tuple[str, str, str, str],
-    template: str,
+    template: str | None,
     repo: str | None,
     repo_source: str | None,
 ) -> str:

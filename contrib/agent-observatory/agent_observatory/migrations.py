@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,7 +21,8 @@ from .errors import ObservatoryError, SchemaVersionError
 SCHEMA_VERSION_BEFORE = 4
 SCHEMA_VERSION_V5 = 5
 SCHEMA_VERSION_V6 = 6
-SCHEMA_VERSION_AFTER = 7
+SCHEMA_VERSION_V7 = 7
+SCHEMA_VERSION_AFTER = 8
 
 # Schema 5 adds this append-only recommendation projection to schema 4.
 # Fresh schema-7 stores also reuse these create statements.
@@ -206,6 +208,13 @@ V7_CORE_SCHEMA_STATEMENTS = (
       ON x.city_id = e.city_id AND x.host_id = e.host_id AND x.provider = e.provider
      AND x.session_id = e.session_id
     """,
+)
+
+V8_CORE_SCHEMA_STATEMENTS = tuple(
+    statement.replace("template TEXT NOT NULL CHECK (length(template) > 0)",
+                      "template TEXT CHECK (template IS NULL OR length(template) > 0)")
+    .replace("'work_dir', 'ambiguous'", "'work_dir', 'ambiguous', 'transcript_cwd', 'transcript_cwd_prefix'")
+    for statement in V7_CORE_SCHEMA_STATEMENTS
 )
 
 V5_TO_V6_SCHEMA_STATEMENTS = (
@@ -442,19 +451,19 @@ def _validate_v6(connection: sqlite3.Connection, database_path: str) -> None:
         )
 
 
-def _validate_v7(connection: sqlite3.Connection, database_path: str) -> None:
+def _validate_v7(connection: sqlite3.Connection, database_path: str, expected_version: int = SCHEMA_VERSION_V7) -> None:
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
     metadata = connection.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
     if (
-        version != SCHEMA_VERSION_AFTER
+        version != expected_version
         or metadata is None
-        or metadata[0] != str(SCHEMA_VERSION_AFTER)
+        or metadata[0] != str(expected_version)
     ):
         raise ObservatoryError(
             f"database {database_path!r} does not have both schema version markers set to "
-            f"{SCHEMA_VERSION_AFTER}"
+            f"{expected_version}"
         )
     _validate_v6_objects(connection, database_path)
     tables = _table_names(connection)
@@ -524,6 +533,8 @@ def _validate_version(connection: sqlite3.Connection, database_path: str, versio
         _validate_v5(connection, database_path)
     elif version == SCHEMA_VERSION_V6:
         _validate_v6(connection, database_path)
+    elif version == SCHEMA_VERSION_V7:
+        _validate_v7(connection, database_path)
     else:
         raise SchemaVersionError(f"no backup validator for schema version {version}")
 
@@ -535,6 +546,7 @@ def _create_backup(database_path: Path, version: int) -> tuple[Path, dict[str, i
         SCHEMA_VERSION_BEFORE: _PRESERVED_TABLES,
         SCHEMA_VERSION_V5: _V5_PRESERVED_TABLES,
         SCHEMA_VERSION_V6: _V6_PRESERVED_TABLES,
+        SCHEMA_VERSION_V7: (*_V6_PRESERVED_TABLES, "session_enrichment"),
     }[version]
     source: sqlite3.Connection | None = None
     destination: sqlite3.Connection | None = None
@@ -918,13 +930,13 @@ def _migrate_v6_to_v7(database_path: Path) -> MigrationResult:
             connection.execute("UPDATE sessions SET role = NULL WHERE role IS NOT NULL")
             updated = connection.execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_version' AND value = ?",
-                (str(SCHEMA_VERSION_AFTER), str(SCHEMA_VERSION_V6)),
+                (str(SCHEMA_VERSION_V7), str(SCHEMA_VERSION_V6)),
             )
             if updated.rowcount != 1:
                 raise SchemaVersionError(
                     f"database {str(database_path)!r} schema_meta changed during migration"
                 )
-            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION_AFTER}")
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION_V7}")
             _validate_v7(connection, str(database_path))
 
             after_counts = _row_counts(connection, _V6_PRESERVED_TABLES)
@@ -941,7 +953,7 @@ def _migrate_v6_to_v7(database_path: Path) -> MigrationResult:
             database_path=str(database_path),
             backup_path=str(backup_path),
             from_version=SCHEMA_VERSION_V6,
-            to_version=SCHEMA_VERSION_AFTER,
+            to_version=SCHEMA_VERSION_V7,
             preserved_rows=after_counts,
             backup_paths=(str(backup_path),),
             backfill_summary={
@@ -953,7 +965,7 @@ def _migrate_v6_to_v7(database_path: Path) -> MigrationResult:
         connection.close()
 
 
-def migrate_database(db_path: str | os.PathLike[str]) -> MigrationResult:
+def _migrate_through_v7(db_path: str | os.PathLike[str]) -> MigrationResult:
     """Back up and upgrade an existing schema-4, schema-5, or schema-6 projection to v7.
 
     Each step writes and validates a timestamped online backup before modifying
@@ -973,15 +985,15 @@ def migrate_database(db_path: str | os.PathLike[str]) -> MigrationResult:
     )
     try:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version == SCHEMA_VERSION_AFTER:
+        if version == SCHEMA_VERSION_V7:
             _validate_v7(connection, str(database_path))
             return MigrationResult(
                 database_path=str(database_path),
                 backup_path=None,
-                from_version=SCHEMA_VERSION_AFTER,
-                to_version=SCHEMA_VERSION_AFTER,
+                from_version=SCHEMA_VERSION_V7,
+                to_version=SCHEMA_VERSION_V7,
                 preserved_rows={},
-                already_at_version=SCHEMA_VERSION_AFTER,
+                already_at_version=SCHEMA_VERSION_V7,
             )
     finally:
         connection.close()
@@ -994,7 +1006,7 @@ def migrate_database(db_path: str | os.PathLike[str]) -> MigrationResult:
             database_path=str(database_path),
             backup_path=v6_result.backup_path,
             from_version=SCHEMA_VERSION_BEFORE,
-            to_version=SCHEMA_VERSION_AFTER,
+            to_version=SCHEMA_VERSION_V7,
             preserved_rows=v6_result.preserved_rows,
             backup_paths=v4_result.backup_paths + v5_result.backup_paths + v6_result.backup_paths,
             backfill_summary={**v5_result.backfill_summary, **v6_result.backfill_summary},
@@ -1006,7 +1018,7 @@ def migrate_database(db_path: str | os.PathLike[str]) -> MigrationResult:
             database_path=str(database_path),
             backup_path=v6_result.backup_path,
             from_version=SCHEMA_VERSION_V5,
-            to_version=SCHEMA_VERSION_AFTER,
+            to_version=SCHEMA_VERSION_V7,
             preserved_rows=v6_result.preserved_rows,
             backup_paths=v5_result.backup_paths + v6_result.backup_paths,
             backfill_summary={**v5_result.backfill_summary, **v6_result.backfill_summary},
@@ -1017,3 +1029,51 @@ def migrate_database(db_path: str | os.PathLike[str]) -> MigrationResult:
         f"database {str(database_path)!r} has schema version {version}; "
         "migrate supports only valid schema versions 4, 5, or 6"
     )
+
+
+def migrate_database(db_path: str | os.PathLike[str]) -> MigrationResult:
+    """Explicitly upgrade through schema 8, with a verified backup per step."""
+    path = Path(db_path).expanduser().resolve(strict=True)
+    with closing(sqlite3.connect(str(path))) as probe:
+        version = int(probe.execute("PRAGMA user_version").fetchone()[0])
+        if version == SCHEMA_VERSION_AFTER:
+            _validate_v7(probe, str(path), SCHEMA_VERSION_AFTER)
+            template_column = next(row for row in probe.execute("PRAGMA table_info(session_enrichment)") if row[1] == "template")
+            if template_column[3]:
+                raise ObservatoryError("schema-eight template must be nullable")
+            return MigrationResult(database_path=str(path), backup_path=None,
+                from_version=8, to_version=8, preserved_rows={}, already_at_version=8)
+    previous = _migrate_through_v7(path) if version != SCHEMA_VERSION_V7 else None
+    connection = sqlite3.connect(str(path), timeout=_SQLITE_TIMEOUT_SECONDS, isolation_level=None)
+    tables = (*_V6_PRESERVED_TABLES, "session_enrichment")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        _validate_v7(connection, str(path))
+        backup, counts = _create_backup(path, SCHEMA_VERSION_V7)
+        if counts != _row_counts(connection, tables):
+            raise ObservatoryError("schema-seven backup row count mismatch")
+        connection.execute("DROP VIEW events_with_enrichment")
+        connection.execute("DROP INDEX session_enrichment_repo")
+        connection.execute("ALTER TABLE session_enrichment RENAME TO session_enrichment_v7")
+        for statement in V8_CORE_SCHEMA_STATEMENTS:
+            connection.execute(statement)
+        connection.execute("INSERT INTO session_enrichment SELECT * FROM session_enrichment_v7")
+        connection.execute("DROP TABLE session_enrichment_v7")
+        if counts != _row_counts(connection, tables):
+            raise ObservatoryError("schema-eight migration changed preserved row counts")
+        connection.execute("UPDATE schema_meta SET value = '8' WHERE key = 'schema_version'")
+        connection.execute("PRAGMA user_version = 8")
+        if counts != _row_counts(connection, tables):
+            raise ObservatoryError("schema-eight migration changed preserved row counts")
+        connection.execute("COMMIT")
+        return MigrationResult(database_path=str(path), backup_path=str(backup),
+            from_version=previous.from_version if previous else 7, to_version=8,
+            preserved_rows=counts,
+            backup_paths=(previous.backup_paths if previous else ()) + (str(backup),),
+            backfill_summary=previous.backfill_summary if previous else {})
+    except BaseException:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+    finally:
+        connection.close()
