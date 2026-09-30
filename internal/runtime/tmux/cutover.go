@@ -38,6 +38,9 @@ var (
 	// raw listing.
 	_ runtime.ListingAttestation = (*seamBackedProvider)(nil)
 	_ runtime.InventoryProvider  = (*seamBackedProvider)(nil)
+	// The error-bearing attachment probe is promoted from the embedded raw
+	// provider; IsAttached (bool) routes through the seams to the same probe.
+	_ runtime.AttachmentObserverWithError = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBackedWithConfig constructs a tmux provider served through the seams.

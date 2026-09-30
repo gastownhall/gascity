@@ -33,6 +33,7 @@ type Fake struct {
 	Zombies                 map[string]bool      // sessions with dead agent processes
 	Attached                map[string]bool      // sessions with attached terminals
 	AttachedSequence        map[string][]bool    // scripted IsAttached results by session
+	AttachedErrors          map[string]error     // per-session IsAttachedWithError errors for testing
 	PeekOutput              map[string]string    // session → canned peek output
 	Activity                map[string]time.Time // session → last activity time
 	StartErrors             map[string]error     // per-session Start errors for testing
@@ -75,6 +76,8 @@ var (
 	_ ProcessTableScanner = (*Fake)(nil)
 	_ RelaunchProvider    = (*Fake)(nil)
 	_ ListingAttestation  = (*Fake)(nil)
+
+	_ AttachmentObserverWithError = (*Fake)(nil)
 )
 
 // Call records a single method invocation on [Fake].
@@ -132,6 +135,7 @@ func NewFake() *Fake {
 		OrphanedRuntimes:        make(map[string]LiveRuntime),
 		Zombies:                 make(map[string]bool),
 		Attached:                make(map[string]bool),
+		AttachedErrors:          make(map[string]error),
 		AttachedSequence:        make(map[string][]bool),
 		StartErrors:             make(map[string]error),
 		StopErrors:              make(map[string]error),
@@ -161,6 +165,7 @@ func NewFailFake() *Fake {
 		OrphanedRuntimes:        make(map[string]LiveRuntime),
 		Zombies:                 make(map[string]bool),
 		Attached:                make(map[string]bool),
+		AttachedErrors:          make(map[string]error),
 		StartErrors:             make(map[string]error),
 		StopErrors:              make(map[string]error),
 		StopLeavesRunning:       make(map[string]bool),
@@ -339,6 +344,24 @@ func (f *Fake) IsAttached(name string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{Method: "IsAttached", Name: name})
+	return f.attachedLocked(name)
+}
+
+// IsAttachedWithError returns the configured AttachedErrors entry for the
+// named session. Without one it answers exactly as [Fake.IsAttached] with a
+// nil error, so tests that never set an error see no difference.
+func (f *Fake) IsAttachedWithError(name string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "IsAttachedWithError", Name: name})
+	if err := f.AttachedErrors[name]; err != nil {
+		return false, err
+	}
+	return f.attachedLocked(name), nil
+}
+
+// attachedLocked is the shared IsAttached answer. The caller holds f.mu.
+func (f *Fake) attachedLocked(name string) bool {
 	if f.broken {
 		return false
 	}

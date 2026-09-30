@@ -47,6 +47,7 @@ var (
 	_ runtime.SessionRosterProvider         = (*Provider)(nil)
 	_ runtime.ListingAttestation            = (*Provider)(nil)
 	_ runtime.InventoryProvider             = (*Provider)(nil)
+	_ runtime.AttachmentObserverWithError   = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -327,6 +328,13 @@ func (p *Provider) IsDeadRuntimeSession(name string) (bool, error) {
 // IsAttached reports whether a user terminal is connected to the named session.
 func (p *Provider) IsAttached(name string) bool {
 	return p.tm.IsSessionAttached(name)
+}
+
+// IsAttachedWithError reports whether a user terminal is connected to the
+// named session, separating "no client" from "could not tell". See
+// [Tmux.SessionAttachedWithError] for the error mapping.
+func (p *Provider) IsAttachedWithError(name string) (bool, error) {
+	return p.tm.SessionAttachedWithError(name)
 }
 
 // ProcessAlive reports whether the named session has a live agent

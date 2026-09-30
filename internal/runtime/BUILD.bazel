@@ -39,6 +39,7 @@ go_library(
 go_test(
     name = "runtime_test",
     srcs = [
+        "attach_observer_test.go",
         "beacon_test.go",
         "capacity_test.go",
         "carrier_test.go",

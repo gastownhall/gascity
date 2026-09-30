@@ -35,6 +35,7 @@ var (
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
+	_ runtime.AttachmentObserverWithError   = (*Provider)(nil)
 	_ runtime.SessionEventProvider          = (*Provider)(nil)
 	_ runtime.BackendListingProvider        = (*Provider)(nil)
 	_ runtime.ListingAttestation            = (*Provider)(nil)
@@ -210,6 +211,13 @@ func providerDeadRuntimeSession(sp runtime.Provider, name string) (bool, error) 
 // IsAttached delegates to the routed backend.
 func (p *Provider) IsAttached(name string) bool {
 	return p.route(name).IsAttached(name)
+}
+
+// IsAttachedWithError forwards the error-bearing attachment probe to the
+// routed backend, so a probe failure is not lost behind the bool. A backend
+// without the capability answers through its IsAttached with a nil error.
+func (p *Provider) IsAttachedWithError(name string) (bool, error) {
+	return runtime.IsAttachedWithError(p.route(name), name)
 }
 
 // Attach delegates to the routed backend. ACP sessions return an error.

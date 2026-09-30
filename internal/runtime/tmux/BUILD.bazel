@@ -56,6 +56,7 @@ go_test(
         "activity_poke_test.go",
         "adapter_unit_test.go",
         "agent_slice_test.go",
+        "attach_probe_test.go",
         "codex_submit_test.go",
         "copymode_cancel_test.go",
         "dialog_feedback_survey_test.go",

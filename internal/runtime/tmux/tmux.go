@@ -1576,12 +1576,12 @@ func (t *Tmux) SessionRoster() (map[string]runtime.SessionRosterEntry, error) {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "|", 2)
-		if len(parts) != 2 {
+		name, count, ok := cutLast(line, "|")
+		if !ok {
 			continue
 		}
-		name := parts[0]
-		attached[name] = parts[1] == "1"
+		clients, err := parseAttachedClients(count)
+		attached[name] = err == nil && clients > 0
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -1759,9 +1759,87 @@ func releaseNudgeLock(session string) {
 }
 
 // IsSessionAttached returns true if the session has any clients attached.
+// A probe that cannot answer reads false; callers that must tell "no client"
+// from "could not tell" use [Tmux.SessionAttachedWithError].
 func (t *Tmux) IsSessionAttached(target string) bool {
-	attached, err := t.run("display-message", "-t", paneTarget(target), "-p", "#{session_attached}")
-	return err == nil && attached == "1"
+	attached, err := t.SessionAttachedWithError(target)
+	return attached && err == nil
+}
+
+// SessionAttachedWithError reports whether one or more clients are attached
+// to the session. The error wraps [runtime.ErrSessionNotFound] when the
+// session does not exist and [runtime.ErrRuntimeUnavailable] when the probe
+// could not answer.
+//
+// The probe echoes #{session_name}: tmux answers a missing exact target with
+// rc 0 and an empty expansion, so an empty echo is the only not-found signal,
+// and an echo naming another session is a probe that answered for the wrong
+// target. The echo is compared only for a bare session name; a pane id or a
+// qualified target names no single session to compare against.
+//
+// A blank target is not-found without a probe: display-message with an empty
+// -t answers for the current or most recent session, not the one asked about.
+func (t *Tmux) SessionAttachedWithError(target string) (bool, error) {
+	if strings.TrimSpace(target) == "" {
+		return false, fmt.Errorf("probing attachment of session %q: %w", target, runtime.ErrSessionNotFound)
+	}
+	out, err := t.run("display-message", "-t", paneTarget(target), "-p", "#{session_name}|#{session_attached}")
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) {
+			return false, fmt.Errorf("probing attachment of session %q: %w: %w", target, runtime.ErrSessionNotFound, err)
+		}
+		if errors.Is(err, ErrNoServer) {
+			// Keep tmux's "no tmux server running" out of the message:
+			// runtime.IsSessionGone matches that text and would read an
+			// unreachable server as a gone session.
+			return false, &quietCauseError{
+				msg:  fmt.Sprintf("probing attachment of session %q: tmux server unreachable or empty: %v", target, runtime.ErrRuntimeUnavailable),
+				errs: []error{runtime.ErrRuntimeUnavailable, err},
+			}
+		}
+		return false, fmt.Errorf("probing attachment of session %q: %w: %w", target, runtime.ErrRuntimeUnavailable, err)
+	}
+	echoed, count, _ := cutLast(strings.TrimSpace(out), "|")
+	if echoed == "" {
+		return false, fmt.Errorf("probing attachment of session %q: %w", target, runtime.ErrSessionNotFound)
+	}
+	if validSessionNameRe.MatchString(target) && echoed != target {
+		return false, fmt.Errorf("probing attachment of session %q: probe answered for session %q: %w", target, echoed, runtime.ErrRuntimeUnavailable)
+	}
+	clients, err := parseAttachedClients(count)
+	if err != nil {
+		return false, fmt.Errorf("probing attachment of session %q: %w: %w", target, runtime.ErrRuntimeUnavailable, err)
+	}
+	return clients > 0, nil
+}
+
+// quietCauseError wraps errs for errors.Is while rendering only msg.
+type quietCauseError struct {
+	msg  string
+	errs []error
+}
+
+func (e *quietCauseError) Error() string   { return e.msg }
+func (e *quietCauseError) Unwrap() []error { return e.errs }
+
+// cutLast is [strings.Cut] around the last sep: a session name may contain
+// sep, the count after it never does.
+func cutLast(s, sep string) (before, after string, found bool) {
+	i := strings.LastIndex(s, sep)
+	if i < 0 {
+		return s, "", false
+	}
+	return s[:i], s[i+len(sep):], true
+}
+
+// parseAttachedClients parses #{session_attached}, which tmux reports as the
+// number of attached clients, not a 0/1 flag: two clients read "2".
+func parseAttachedClients(field string) (uint64, error) {
+	clients, err := strconv.ParseUint(strings.TrimSpace(field), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parsing attached client count %q: %w", field, err)
+	}
+	return clients, nil
 }
 
 // WakePane triggers a SIGWINCH in a pane by resizing it slightly then restoring.
@@ -4618,11 +4696,12 @@ func (t *Tmux) GetSessionInfo(name string) (*SessionInfo, error) {
 		created = time.Unix(createdUnix, 0).Format("2006-01-02 15:04:05")
 	}
 
+	clients, clientsErr := parseAttachedClients(parts[3])
 	info := &SessionInfo{
 		Name:     parts[0],
 		Windows:  windows,
 		Created:  created,
-		Attached: parts[3] == "1",
+		Attached: clientsErr == nil && clients > 0,
 	}
 
 	// Activity and last attached are optional (may not be present in older tmux)

@@ -107,6 +107,35 @@ var ErrRuntimeUnavailable = errors.New("runtime unavailable: liveness observatio
 // support relaunch; the reconciler treats it as "fall back to full Stop+Start".
 var ErrRelaunchUnsupported = errors.New("runtime does not support warm-box relaunch")
 
+// ErrStopRefused reports that the provider deliberately left the session
+// running (policy, not failure). The runtime is still live; callers must not
+// record a stop. Its message, and the message of every error wrapping it, must
+// not match [IsSessionGone], or a refusal would read as an idempotent stop.
+var ErrStopRefused = errors.New("runtime refused to stop the session")
+
+// ErrStopUnsupported reports that the runtime has no stop operation (exec
+// `stop` answered exit 2). It wraps [ErrStopRefused].
+var ErrStopUnsupported = fmt.Errorf("%w: stop not implemented", ErrStopRefused)
+
+// ErrMetaUnsupported reports that the runtime has no session metadata store
+// (exec get-meta/set-meta answered exit 2). A token read that returns it is
+// "absent by construction", never "unverifiable".
+var ErrMetaUnsupported = errors.New("runtime does not implement session metadata")
+
+// ErrListUnsupported reports that the runtime cannot enumerate sessions (exec
+// list-running answered exit 2). It is never a complete empty list.
+var ErrListUnsupported = errors.New("runtime does not implement session listing")
+
+// MetaValue folds [ErrMetaUnsupported] into "unset", for readers whose legacy
+// behavior treated an unimplemented meta op as an empty value. Every other
+// error is returned unchanged.
+func MetaValue(v string, err error) (string, error) {
+	if errors.Is(err, ErrMetaUnsupported) {
+		return "", nil
+	}
+	return v, err
+}
+
 // IsSessionGone reports whether err represents a "the session is not
 // there" condition — either ErrSessionNotFound or the legacy provider
 // phrasings that predate the sentinel (tmux/subprocess providers may
@@ -261,6 +290,36 @@ type Provider interface {
 	// Capabilities reports what this provider can reliably detect.
 	// Used by the reconciler to skip inapplicable wake reasons.
 	Capabilities() ProviderCapabilities
+}
+
+// AttachmentObserverWithError is the optional capability for an attachment
+// probe that separates "no client is attached" from "could not tell".
+type AttachmentObserverWithError interface {
+	IsAttachedWithError(name string) (bool, error)
+}
+
+// IsAttachedWithError reports whether a human terminal is attached to name.
+// A provider without the capability answers through IsAttached with a nil
+// error, so existing providers are unchanged. With the capability:
+//
+//	(true, nil)  one or more clients attached
+//	(false, nil) confirmed: no client
+//	(false, err) err wraps ErrSessionNotFound: the session does not exist
+//	(false, err) err wraps ErrRuntimeUnavailable: the probe could not answer
+//
+// Callers gating a destructive action MUST treat any error other than
+// ErrSessionNotFound as attached, and MUST classify with
+// errors.Is(err, ErrSessionNotFound), never IsSessionGone: its message
+// matching reads text such as "not found" in an unavailable probe as gone.
+// A nil provider or blank name answers (false, nil) without a probe.
+func IsAttachedWithError(sp Provider, name string) (bool, error) {
+	if sp == nil || strings.TrimSpace(name) == "" {
+		return false, nil
+	}
+	if observer, ok := sp.(AttachmentObserverWithError); ok {
+		return observer.IsAttachedWithError(name)
+	}
+	return sp.IsAttached(name), nil
 }
 
 // PendingInteraction describes a blocking interaction raised by a session.

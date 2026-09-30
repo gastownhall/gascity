@@ -39,6 +39,35 @@ func TestProvider_ForwardsLivenessObservationErrorToRoutedBackend(t *testing.T) 
 	}
 }
 
+// TestHybridForwardsIsAttachedWithError proves hybrid forwards the
+// error-bearing attachment probe to the routed backend. Without the forward,
+// the error is lost behind the bool IsAttached and a probe failure reads
+// "not attached".
+func TestHybridForwardsIsAttachedWithError(t *testing.T) {
+	local, remote := runtime.NewFake(), runtime.NewFake()
+	localErr := fmt.Errorf("local probe: %w", runtime.ErrRuntimeUnavailable)
+	remoteErr := fmt.Errorf("remote probe: %w", runtime.ErrRuntimeUnavailable)
+	local.AttachedErrors["local-agent"] = localErr
+	remote.AttachedErrors["remote-agent-1"] = remoteErr
+	remote.SetAttached("remote-agent-2", true)
+	h := New(local, remote, isRemote)
+
+	for _, tc := range []struct {
+		name    string
+		want    bool
+		wantErr error
+	}{
+		{"local-agent", false, localErr},
+		{"remote-agent-1", false, remoteErr},
+		{"remote-agent-2", true, nil},
+	} {
+		got, err := runtime.IsAttachedWithError(h, tc.name)
+		if got != tc.want || !errors.Is(err, tc.wantErr) {
+			t.Errorf("IsAttachedWithError(%q) = (%v, %v), want (%v, %v)", tc.name, got, err, tc.want, tc.wantErr)
+		}
+	}
+}
+
 // Relaunch must reach the routed backend (local vs remote), or the reconciler's
 // RelaunchProvider type-assert would be masked by the hybrid router and fall
 // back to Stop+Start.
