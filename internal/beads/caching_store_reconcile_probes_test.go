@@ -87,6 +87,7 @@ func mountEndState(end mergeEndState, truth *MemStore) *CachingStore {
 		beadSeq:      cloneU64Map(end.beadSeq),
 		localBeadAt:  cloneTimeMap(end.localBeadAt),
 		deletedSeq:   cloneU64Map(end.deletedSeq),
+		writeSeq:     cloneU64Map(end.writeSeq),
 		state:        cacheLive,
 	}
 	ensureMaps(c)
@@ -131,9 +132,18 @@ func TestReconcileMergeReadProjection(t *testing.T) {
 		cRef := mountEndState(ref.end, truthRef)
 		cNew := mountEndState(newRes.end, truthNew)
 
+		// The frozen branches predate writeSeq, so on an id fenced only by
+		// its local write revision they absorb, evict or wipe where NEW
+		// skips, exactly as NEW skips a beadSeq fence. The differential
+		// oracle pins that delta; this probe compares the rest.
+		writeFenced := false
 		ids := rowIDUniverse(st, in)
 		ids = append(ids, "never-seen-id")
 		for _, id := range ids {
+			if writeFencedOnly(st, in, id) {
+				writeFenced = true
+				continue
+			}
 			bRef, eRef := cRef.Get(id)
 			bNew, eNew := cNew.Get(id)
 			if !sameGetResult(bRef, eRef, bNew, eNew) {
@@ -142,6 +152,9 @@ func TestReconcileMergeReadProjection(t *testing.T) {
 			}
 		}
 
+		if writeFenced {
+			continue
+		}
 		rRef, okRef := cRef.CachedReady()
 		rNew, okNew := cNew.CachedReady()
 		switch {

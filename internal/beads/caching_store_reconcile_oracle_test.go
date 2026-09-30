@@ -76,12 +76,23 @@ const (
 	deltaD4RecencyKept            // quiescent absorb recencyKeep: NEW keeps cached deps
 	deltaD5RecentAbsorb           // quiescent absorb, recent, no recencyKeep: NEW keeps fences
 	deltaD1RecentOrphan           // quiescent orphan with recent localAt: NEW keeps everything
+	deltaWriteFenced              // only a local write revision > startSeq fences id: NEW keeps everything
 )
+
+// writeFencedOnly reports whether id is fenced by its local write revision
+// alone. The frozen branches predate writeSeq, so they absorb, evict or wipe
+// such an id while the collapsed seam leaves it untouched.
+func writeFencedOnly(st storeState, in snapshotInputs, id string) bool {
+	return st.writeSeq[id] > in.startSeq && st.deletedSeq[id] <= in.startSeq && st.beadSeq[id] <= in.startSeq
+}
 
 // classifyDelta derives the delta for id from the INPUT (st, in) and the
 // post-preserve fresh view. It is written from the §2 matrix and shares no
 // code with reconcileMergeDecision or mergeSnapshotLocked.
 func classifyDelta(st storeState, in snapshotInputs, postPreserveFresh map[string]Bead, refEnd mergeEndState, id string) deltaKind {
+	if writeFencedOnly(st, in, id) {
+		return deltaWriteFenced
+	}
 	if in.quiescent(st) {
 		freshBead, f := in.freshByID[id]
 		_ = freshBead
@@ -170,6 +181,9 @@ func expectedNewView(st storeState, _ snapshotInputs, refEnd mergeEndState, id s
 	case deltaD1RecentOrphan:
 		// NEW keeps every input orphan entry; B wiped them.
 		return viewOfState(st, id)
+	case deltaWriteFenced:
+		// NEW skips the id in every cell, exactly as for a beadSeq fence.
+		return viewOfState(st, id)
 	default:
 		return base
 	}
@@ -219,7 +233,25 @@ func buildExpectedNewEnd(st storeState, in snapshotInputs, postPreserveFresh map
 	// deps under depsComplete=true.
 	exp.depsComplete = expectedNextDepsComplete(st, in, postPreserveFresh)
 	exp.readyLost = expectedReadyLost(st, exp.beads)
+	exp.writeSeq = expectedWriteSeq(st, in, exp)
 	return exp
+}
+
+// expectedWriteSeq re-derives the write-revision map from the input and the
+// expected end maps. The merge never mints or rewrites a write revision; it
+// drops one only together with the rest of its row, when it evicts the row or
+// collects the orphan's fences, and a revision past the snapshot protects its
+// id. So an input entry survives exactly when it is past the snapshot or its
+// id still has a row or any fence/deps entry at the end. The frozen branches
+// predate writeSeq, so the reference end state cannot supply it.
+func expectedWriteSeq(st storeState, in snapshotInputs, exp mergeEndState) map[string]uint64 {
+	out := map[string]uint64{}
+	for id, seq := range st.writeSeq {
+		if _, ok := exp.beads[id]; ok || stateHasAnyOrphanEntry(exp, id) || seq > in.startSeq {
+			out[id] = seq
+		}
+	}
+	return out
 }
 
 // expectedReadyLost re-derives the rows whose projected verdict the merge
@@ -266,7 +298,7 @@ func expectedNextDepsComplete(st storeState, in snapshotInputs, postPreserveFres
 		}
 		cachedDeps, hasCachedDeps := st.deps[id]
 		switch {
-		case st.deletedSeq[id] > in.startSeq || st.beadSeq[id] > in.startSeq:
+		case st.deletedSeq[id] > in.startSeq || st.beadSeq[id] > in.startSeq || st.writeSeq[id] > in.startSeq:
 			if !hasCachedDeps {
 				complete = false
 			}
@@ -429,12 +461,16 @@ func assertNewEndInvariants(t *testing.T, name string, end mergeEndState, in sna
 	for id := range end.deps {
 		orphanIDs[id] = struct{}{}
 	}
+	for id := range end.writeSeq {
+		orphanIDs[id] = struct{}{}
+	}
 	for id := range orphanIDs {
 		if _, hasBead := end.beads[id]; hasBead {
 			continue
 		}
 		protected := end.deletedSeq[id] > in.startSeq ||
 			end.beadSeq[id] > in.startSeq ||
+			end.writeSeq[id] > in.startSeq ||
 			recentLocalMutation(end.localBeadAt[id], in.now)
 		if !protected {
 			t.Fatalf("%s: INV1 leak — orphan %q retained a fence/deps entry with no protector (deletedSeq=%d beadSeq=%d localAt=%v startSeq=%d)",
@@ -511,20 +547,59 @@ func assertDifferential(t *testing.T, name string, st storeState, in snapshotInp
 		}
 	}
 
-	// Notifications and counters must be EXACTLY equal (no delta by analysis).
-	assertNotificationsEqual(t, name, ref.notifications, newRes.notifications)
+	// Notifications and counters must be EXACTLY equal, except that the
+	// reference's work on write-fenced ids (which NEW skips) is discounted.
+	refNotifications, adjust := discountWriteFenced(st, in, ref)
+	assertNotificationsEqual(t, name, refNotifications, newRes.notifications)
 
 	// Six-map + depsComplete: build the full expected NEW end-state from the
 	// reference and assert exact equality (scalars/counters copied ⇒ asserted
 	// equal; maps transformed per the independent case-oracle).
 	postPreserve := computePostPreserveFresh(st, in)
 	exp := buildExpectedNewEnd(st, in, postPreserve, ref.end)
+	exp.statsAdds -= adjust.adds
+	exp.statsUpdates -= adjust.updates
+	exp.statsRemoves -= adjust.removes
 	if !endStatesEqual(exp, newRes.end) {
 		t.Fatalf("%s: end-state divergence\n%s", name, diffEndStates(exp, newRes.end))
 	}
 
 	// Spec-independent invariants on the NEW end-state alone.
 	assertNewEndInvariants(t, name, newRes.end, in)
+}
+
+// counterAdjust is the reference's counter work on ids NEW skips.
+type counterAdjust struct{ adds, updates, removes int64 }
+
+// discountWriteFenced drops the reference's notifications for write-fenced ids
+// and counts the add/update/remove work it did on them, derived from the input
+// and the reference result alone.
+func discountWriteFenced(st storeState, in snapshotInputs, ref mergeImplResult) ([]cacheNotification, counterAdjust) {
+	var adjust counterAdjust
+	kept := make([]cacheNotification, 0, len(ref.notifications))
+	for _, n := range ref.notifications {
+		if !writeFencedOnly(st, in, n.bead.ID) {
+			kept = append(kept, n)
+			continue
+		}
+		switch n.eventType {
+		case "bead.created":
+			adjust.adds++
+		case "bead.updated":
+			adjust.updates++
+		}
+	}
+	for id := range st.beads {
+		if !writeFencedOnly(st, in, id) {
+			continue
+		}
+		_, inFresh := in.freshByID[id]
+		_, kept := ref.end.beads[id]
+		if !inFresh && !kept {
+			adjust.removes++
+		}
+	}
+	return kept, adjust
 }
 
 func assertSelfDeterministic(t *testing.T, name string, a, b mergeImplResult) {

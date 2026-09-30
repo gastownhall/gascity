@@ -364,14 +364,14 @@ const (
 	mergeAbsorb mergeAction = iota
 	// mergeEvict removes the cached row via evictLocked.
 	mergeEvict
-	// mergeSkipFenced leaves everything for id untouched: a tombstone or
-	// beadSeq fence > startSeq proves local state is newer than the snapshot.
+	// mergeSkipFenced leaves everything for id untouched: a tombstone, beadSeq
+	// or writeSeq fence > startSeq proves local state is newer than the snapshot.
 	mergeSkipFenced
 	// mergeSkipRecentLocal leaves everything for id untouched: the recency
 	// window (5 s) protects an in-flight local write bd may not reflect yet.
 	mergeSkipRecentLocal
 	// mergeGCFences drops every orphan fence/deps entry for id (deletedSeq,
-	// dirty, beadSeq, localBeadAt, deps). Only reachable when id has no row on
+	// dirty, beadSeq, localBeadAt, writeSeq, deps). Only reachable when id has no row on
 	// either side.
 	mergeGCFences
 )
@@ -410,10 +410,17 @@ type mergeRowInput struct {
 	hasCachedDeps bool  // c.deps[id] presence — distinct from nil/empty value
 	deletedAtSeq  uint64
 	beadAtSeq     uint64
+	writeAtSeq    uint64 // c.writeSeq[id]: a local write fences even after its beadSeq cleared
 	startSeq      uint64
 	localAt       time.Time
 	now           time.Time // the single pass-level clock read
 	skipLabels    bool
+}
+
+// fencedAfterSnapshot reports whether a tombstone, mutation or local write
+// newer than the snapshot owns id, so the snapshot must not touch it.
+func (in mergeRowInput) fencedAfterSnapshot() bool {
+	return in.deletedAtSeq > in.startSeq || in.beadAtSeq > in.startSeq || in.writeAtSeq > in.startSeq
 }
 
 // reconcileMergeDecision decides the fate of one id's state transition in the
@@ -425,7 +432,7 @@ type mergeRowInput struct {
 func reconcileMergeDecision(in mergeRowInput) mergeDecision {
 	switch {
 	case in.freshExists: // absorb-loop cell
-		if in.deletedAtSeq > in.startSeq || in.beadAtSeq > in.startSeq {
+		if in.fencedAfterSnapshot() {
 			return mergeDecision{
 				action:              mergeSkipFenced,
 				degradeDepsComplete: in.cachedExists && !in.hasCachedDeps,
@@ -451,7 +458,7 @@ func reconcileMergeDecision(in mergeRowInput) mergeDecision {
 		return mergeDecision{action: mergeAbsorb, notification: n}
 
 	case in.cachedExists: // eviction-loop cell (id absent from snapshot)
-		if in.deletedAtSeq > in.startSeq || in.beadAtSeq > in.startSeq {
+		if in.fencedAfterSnapshot() {
 			return mergeDecision{action: mergeSkipFenced}
 		}
 		if in.cached.Status != "closed" && recentLocalMutation(in.localAt, in.now) {
@@ -464,7 +471,7 @@ func reconcileMergeDecision(in mergeRowInput) mergeDecision {
 		return mergeDecision{action: mergeEvict, notification: n}
 
 	default: // fence-GC cell (no row on either side; orphan fence/deps only)
-		if in.deletedAtSeq > in.startSeq || in.beadAtSeq > in.startSeq {
+		if in.fencedAfterSnapshot() {
 			return mergeDecision{action: mergeSkipFenced}
 		}
 		if recentLocalMutation(in.localAt, in.now) {
@@ -527,6 +534,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 			hasCachedDeps: hasCachedDeps,
 			deletedAtSeq:  c.deletedSeq[id],
 			beadAtSeq:     c.beadSeq[id],
+			writeAtSeq:    c.writeSeq[id],
 			startSeq:      startSeq,
 			localAt:       c.localBeadAt[id],
 			now:           now,
@@ -578,6 +586,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 			cached:       cached,
 			deletedAtSeq: c.deletedSeq[id],
 			beadAtSeq:    c.beadSeq[id],
+			writeAtSeq:   c.writeSeq[id],
 			startSeq:     startSeq,
 			localAt:      c.localBeadAt[id],
 			now:          now,
@@ -611,6 +620,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 			cachedExists: false,
 			deletedAtSeq: c.deletedSeq[id],
 			beadAtSeq:    c.beadSeq[id],
+			writeAtSeq:   c.writeSeq[id],
 			startSeq:     startSeq,
 			localAt:      c.localBeadAt[id],
 			now:          now,
@@ -623,6 +633,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 		delete(c.dirty, id)
 		delete(c.beadSeq, id)
 		delete(c.localBeadAt, id)
+		delete(c.writeSeq, id)
 		delete(c.deps, id)
 	}
 
@@ -664,6 +675,9 @@ func (c *CachingStore) orphanFenceIDsLocked(freshByID map[string]Bead) []string 
 		add(id)
 	}
 	for id := range c.localBeadAt {
+		add(id)
+	}
+	for id := range c.writeSeq {
 		add(id)
 	}
 	for id := range c.deps {
