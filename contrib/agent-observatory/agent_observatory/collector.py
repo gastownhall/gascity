@@ -1086,6 +1086,8 @@ def _backfill_missing_usage_locked(
                             continue
                         identity_matches.add(identity)
                         if record.get("usage") is None:
+                            if not _usage_backfill_matches(target, record):
+                                stable_field_rejections.add(identity)
                             continue
                         usage_candidates.add(identity)
                         if identity in matched_usage:
@@ -1104,7 +1106,7 @@ def _backfill_missing_usage_locked(
         # Kind alone cannot identify usage carriers: Claude attaches usage to
         # the first text/tool block. Exclude only records proven usage-less by
         # parsing; unread or unrecognized targets remain unresolved candidates.
-        no_usage = identity_matches - usage_candidates
+        no_usage = identity_matches - usage_candidates - stable_field_rejections
         run.candidate_events -= len(no_usage)
         run.events_identity_matched += len(identity_matches)
         run.events_matched += len(matched_usage)

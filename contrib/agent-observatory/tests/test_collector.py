@@ -714,6 +714,41 @@ class UsageBackfillTests(CollectorTestCase):
         self.assertEqual(run.usage_inserted, 0)
         self.assertEqual(usage_count, 0)
 
+    def test_usage_backfill_rejects_changed_model_no_usage(self):
+        source = os.path.join(self.claude_dir, "changed-model-no-usage.jsonl")
+        transcript_record = {
+            "type": "assistant",
+            "uuid": "e",
+            "sessionId": "s",
+            "timestamp": "2026-09-28T12:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "model": "A",
+                "content": [{"type": "tool_use", "id": "t", "name": "synthetic", "input": {}}],
+                "usage": {"input_tokens": 4, "output_tokens": 2},
+            },
+        }
+        with open(source, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(transcript_record) + "\n")
+
+        with ObservatoryStore(self.db) as store:
+            self.collect(store)
+            store.conn.execute("DELETE FROM event_usage")
+            transcript_record["message"]["model"] = "B"
+            del transcript_record["message"]["usage"]
+            with open(source, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(transcript_record) + "\n")
+            run = backfill_missing_usage(store, roots=(SourceRoot(path=self.root),))
+            usage_count = store.conn.execute("SELECT COUNT(*) FROM event_usage").fetchone()[0]
+
+        self.assertEqual(run.candidate_events, 1)
+        self.assertEqual(run.events_identity_matched, 1)
+        self.assertEqual(run.events_unmatched, 1)
+        self.assertEqual(run.events_stable_field_rejected, 1)
+        self.assertEqual(run.events_matched, 0)
+        self.assertEqual(run.usage_inserted, 0)
+        self.assertEqual(usage_count, 0)
+
     def test_collector_persists_adapter_session_fingerprints(self):
         source = os.path.join(self.claude_dir, "repo-evidence.jsonl")
         fixture = os.path.join(HERE, "fixtures", "adapters", "claude", "repo-evidence.jsonl")
