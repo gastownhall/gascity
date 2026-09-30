@@ -99,13 +99,15 @@ func bdRunWithEnv(t *testing.T, bdPath, dir string, extraEnv map[string]string, 
 	return string(out)
 }
 
-// TestBdRunWithEnvIsolatesHOMEFromSharedServerConfig proves bdRunWithEnv
-// (and bdRun, which wraps it with a nil extraEnv) do not leak the ambient
-// HOME into the bd subprocess they exec. Both build cmd.Env from
-// os.Environ() with no HOME isolation of their own, so a shared-server
-// config.yaml sitting in the real $HOME (a real fleet-host condition, not a
-// hypothetical — see this bead's notes) can make bd try to route through
-// that shared server instead of dir's own local, non-server bd store.
+// TestBdRunWithEnvIsolatesHOMEFromSharedServerConfig pins that bdRunWithEnv
+// (and bdRun, which wraps it with a nil extraEnv) keep the ambient HOME out
+// of the bd subprocess they exec. Both build their command through
+// helpers.ToolCommand, whose toolhome.Environ re-homes bd under a test-owned
+// home, drops ambient BEADS_*/BD_* variables and pins
+// BD_DOLT_SHARED_SERVER=false. This test is a regression guard on that
+// re-homing: a shared-server config.yaml sitting in the real $HOME (a real
+// fleet-host condition) must not route bd through that shared server
+// instead of dir's own local store.
 func TestBdRunWithEnvIsolatesHOMEFromSharedServerConfig(t *testing.T) {
 	bdPath := helpers.RequireBD(t)
 
