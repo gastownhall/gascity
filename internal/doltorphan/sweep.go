@@ -42,6 +42,13 @@ const maxMarkerDepth = 3
 // detection removed.
 const sentinelFileName = ".no-orphan-sweep"
 
+// noReapMarkerName is the keep marker packs/actual's vartmp-scratch-reaper
+// already honors, and the one agents on a shared host put on a directory
+// they keep on purpose (ga-v83niq). It exempts a top-level candidate exactly
+// as sentinelFileName does; a sweep that ignored it would delete those kept
+// Dolt stores.
+const noReapMarkerName = ".gc-no-reap"
+
 // lsofScanTimeout bounds the real `lsof -w` invocation, mirroring the
 // shell script's `timeout 30 lsof -w`.
 const lsofScanTimeout = 30 * time.Second
@@ -97,8 +104,9 @@ type candidate struct {
 // including directories named by Go's t.TempDir() rather than the
 // bare-mktemp "tmp.*" pattern the heuristic was first observed against.
 //
-// A top-level child containing a file literally named sentinelFileName is
-// exempted entirely, regardless of age or marker.
+// A top-level child containing sentinelFileName or noReapMarkerName (any file
+// type, like the reaper's own -e test) is exempted entirely, regardless of
+// age or marker.
 //
 // Removal targets only the directory that actually owns the .dolt marker,
 // which may be nested below the top-level child — never the top-level
@@ -178,10 +186,15 @@ func Sweep(cfg SweepConfig) SweepResult {
 	return result
 }
 
-// hasSentinel reports whether dir directly contains sentinelFileName.
+// hasSentinel reports whether dir directly contains sentinelFileName or
+// noReapMarkerName.
 func hasSentinel(dir string) bool {
-	_, err := os.Stat(filepath.Join(dir, sentinelFileName))
-	return err == nil
+	for _, name := range []string{sentinelFileName, noReapMarkerName} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // findDoltStoreDir searches for a directory literally named ".dolt" within
