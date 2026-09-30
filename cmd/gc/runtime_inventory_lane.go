@@ -41,6 +41,12 @@ import (
 //     to an empty value, which would cache a live runtime as ownerless);
 //  6. publishes the snapshot, then reports health and traces.
 //
+// A pass whose listing timed out, was still in flight or panicked publishes
+// a failed outcome for every backend (named through Backends(), without
+// listing): facts stay as they were and age out, health keeps moving toward
+// unhealthy, and the failed merged error makes FreshInventory refuse the
+// pass at once.
+//
 // The lane is publish-only: nothing in the legacy reconciler reads the cache.
 type runtimeInventoryLane struct {
 	cache     *ObservationCache
@@ -52,10 +58,13 @@ type runtimeInventoryLane struct {
 	// wakeCh carries wake requests; buffered 1 so a burst is one pass.
 	wakeCh chan struct{}
 
-	// listing is set while a listing call is outstanding (listMu). A pass
-	// that finds it set publishes nothing, and the late result is dropped.
-	listMu  sync.Mutex
-	listing bool
+	// listing is set while a listing call is outstanding, and attributing
+	// while an attribution read is (listMu). A pass that finds listing set
+	// publishes a failed listing, and the late result is dropped; one that
+	// finds attributing set reads no attribution.
+	listMu      sync.Mutex
+	listing     bool
+	attributing bool
 
 	// Pass state, owned by whichever pass holds passMu.
 	passMu        sync.Mutex
@@ -81,11 +90,20 @@ const (
 	inventoryLaneReasonWake    = "wake"
 	inventoryLaneReasonPrime   = "prime"
 
-	// inventoryListingBound caps one listing. It equals the tmux subprocess
-	// timeout, so a stalled tmux answer fails there first.
-	inventoryListingBound = 30 * time.Second
+	// inventoryListingBound caps one listing. It is strictly above the tmux
+	// subprocess timeout (30s), so a stalled tmux fails inside its own call
+	// and the other backends' answers still publish; the bound only catches
+	// a backend with no timeout of its own.
+	inventoryListingBound = 35 * time.Second
 	// inventoryEnrichBound caps the batched inventory reads of one pass.
 	inventoryEnrichBound = 10 * time.Second
+	// inventoryAttributionBound caps the attribution reads of one pass. A
+	// read still outstanding at the bound is abandoned, and the names left
+	// unread are pending until a later pass.
+	inventoryAttributionBound = 5 * time.Second
+	// inventoryMinWakeGap spaces wake-triggered passes at least this far
+	// apart, capping a provider event storm.
+	inventoryMinWakeGap = time.Second
 	// inventoryAttributionBudget caps attribution reads per pass: after a
 	// restart with 150 sessions, attribution completes in three passes.
 	inventoryAttributionBudget = 64
@@ -206,7 +224,7 @@ func (cr *CityRuntime) primeNow(ctx context.Context) {
 // wait out the duty cycle, so passes never run back to back.
 func (cr *CityRuntime) startRuntimeInventoryLane(ctx context.Context) <-chan struct{} {
 	lane := cr.inventoryLane
-	return startPacedLane(ctx, lane.interval, 0, lane.wakeCh, func(wake bool) {
+	return startPacedLane(ctx, lane.interval, inventoryMinWakeGap, lane.wakeCh, func(wake bool) {
 		reason := inventoryLaneReasonCadence
 		if wake {
 			reason = inventoryLaneReasonWake
@@ -218,6 +236,18 @@ func (cr *CityRuntime) startRuntimeInventoryLane(ctx context.Context) <-chan str
 			cr.runInventoryPass(ctx, reason)
 		}, inventoryLaneSafeTickTrigger)
 	})
+}
+
+// runRuntimeInventoryLane starts the lane goroutine under a child of ctx and
+// returns its stop: cancel the lane, then wait for its goroutine, so a pass
+// in progress finishes before the caller (run()'s shutdown) goes on.
+func (cr *CityRuntime) runRuntimeInventoryLane(ctx context.Context) (stop func()) {
+	laneCtx, cancel := context.WithCancel(ctx)
+	done := cr.startRuntimeInventoryLane(laneCtx)
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 // runInventoryPass is one lane pass.
@@ -233,22 +263,26 @@ func (cr *CityRuntime) runInventoryPass(ctx context.Context, reason string) {
 	if sp == nil {
 		return
 	}
-	started := lane.clock.Now()
 	lane.seq++
 	if !sameInventoryProvider(sp, lane.lastProvider) {
 		lane.lastProvider = sp
 		lane.providerGen++
 	}
-	report := inventoryPassReport{seq: lane.seq, providerGen: lane.providerGen, reason: reason}
+	report := inventoryPassReport{seq: lane.seq, providerGen: lane.providerGen, reason: reason, epoch: lane.cache.epoch}
 
+	started := lane.clock.Now()
 	listing, result := lane.listBounded(ctx, sp)
 	report.result = result
 	report.listing = lane.clock.Now().Sub(started)
-	if result == inventoryResultPanicked {
-		fmt.Fprintf(lane.stderr, "%s: runtime inventory listing panicked: %s\n", lane.logPrefix, listing.panicked) //nolint:errcheck // best-effort stderr
-	}
-	if result == inventoryResultPublished {
+	switch result {
+	case inventoryResultPublished:
 		lane.publish(ctx, listing, started, &report)
+	case inventoryResultCanceled:
+	default:
+		if result == inventoryResultPanicked {
+			fmt.Fprintf(lane.stderr, "%s: runtime inventory listing panicked: %s\n", lane.logPrefix, listing.panicked) //nolint:errcheck // best-effort stderr
+		}
+		lane.publishListingFailure(sp, started, result, &report)
 	}
 	finished := lane.clock.Now()
 	report.duration = finished.Sub(started)
@@ -275,7 +309,7 @@ func (l *runtimeInventoryLane) publish(ctx context.Context, listing inventoryLis
 	report.enrichErrors = enrichErrs
 
 	phase = l.clock.Now()
-	report.attributionReads, report.attributionPending = l.attribute(attrs, hosts)
+	report.attributionReads, report.attributionPending = l.attribute(ctx, attrs, hosts)
 	report.attribute = l.clock.Now().Sub(phase)
 
 	pass := InventoryPass{
@@ -288,6 +322,35 @@ func (l *runtimeInventoryLane) publish(ctx context.Context, listing inventoryLis
 		MergedErr:   listing.mergedErr,
 		Backends:    backends,
 	}
+	l.commit(pass, attrs, report)
+}
+
+// publishListingFailure publishes a pass whose listing produced no answer:
+// every backend failed with the same error, so no fact moves, health keeps
+// counting toward unhealthy, and FreshInventory refuses the pass.
+func (l *runtimeInventoryLane) publishListingFailure(sp runtime.Provider, started time.Time, result string, report *inventoryPassReport) {
+	err := fmt.Errorf("runtime inventory listing %s", result)
+	leaves := inventoryLeaves(sp, "")
+	backends := make([]BackendPass, len(leaves))
+	for i, leaf := range leaves {
+		leaf.err = err
+		backends[i] = classifyInventoryBackend(leaf)
+	}
+	pass := InventoryPass{
+		Epoch:       l.cache.epoch,
+		Seq:         l.seq,
+		ProviderGen: l.providerGen,
+		StartedAt:   started,
+		FinishedAt:  l.clock.Now(),
+		MergedErr:   err,
+		Backends:    backends,
+	}
+	l.commit(pass, nil, report)
+}
+
+// commit publishes one pass, prunes attribution to the published names, and
+// reports health.
+func (l *runtimeInventoryLane) commit(pass InventoryPass, attrs map[string]InventoryAttrs, report *inventoryPassReport) {
 	report.flips = l.cache.PublishInventory(pass, attrs)
 	snap := l.cache.Snapshot()
 	for name := range l.attribution {
@@ -366,6 +429,20 @@ func listInventoryBackends(sp runtime.Provider, label string) inventoryListing {
 	}
 	out.mergedNames, out.mergedErr = runtime.MergeBackendListings(listings)
 	return out
+}
+
+// inventoryLeaves names every leaf backend of sp, with its label, without
+// listing anything.
+func inventoryLeaves(sp runtime.Provider, label string) []inventoryBackend {
+	composite, ok := sp.(runtime.BackendsProvider)
+	if !ok {
+		return []inventoryBackend{{label: label, provider: sp}}
+	}
+	var leaves []inventoryBackend
+	for _, b := range composite.Backends() {
+		leaves = append(leaves, inventoryLeaves(b.Provider, joinInventoryLabel(label, b.Label))...)
+	}
+	return leaves
 }
 
 func joinInventoryLabel(parent, label string) string {
@@ -454,12 +531,17 @@ func (l *runtimeInventoryLane) enrich(ctx context.Context, leaves []inventoryBac
 }
 
 // attribute fills attrs' owner fields for every enriched incarnation, reading
-// (GC_SESSION_ID, GC_INSTANCE_TOKEN) at most once per incarnation and at most
-// inventoryAttributionBudget times per pass. A read error leaves the owner
-// Unknown and is retried next pass; a clean read without GC_SESSION_ID is
-// ownerless and is re-read every inventoryOwnerlessRereadPasses passes. It
-// returns the reads made and the incarnations left unread for budget.
-func (l *runtimeInventoryLane) attribute(attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider) (reads, pending int) {
+// (GC_SESSION_ID, GC_INSTANCE_TOKEN) at most once per incarnation, at most
+// inventoryAttributionBudget times per pass, and within
+// inventoryAttributionBound. A read error leaves the owner Unknown and is
+// retried next pass; a clean read without GC_SESSION_ID is ownerless and is
+// re-read every inventoryOwnerlessRereadPasses passes. A name whose
+// incarnation is not read this pass carries no owner at all, never its
+// previous incarnation's. It returns the reads made and the incarnations left
+// unread (budget, bound, cancellation, or a read still outstanding).
+func (l *runtimeInventoryLane) attribute(ctx context.Context, attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider) (reads, pending int) {
+	ctx, cancel := context.WithTimeout(ctx, inventoryAttributionBound)
+	defer cancel()
 	names := make([]string, 0, len(hosts))
 	for name := range hosts {
 		if attrs[name].Incarnation != "" {
@@ -477,11 +559,14 @@ func (l *runtimeInventoryLane) attribute(attrs map[string]InventoryAttrs, hosts 
 		current := have && cached.incarnation == a.Incarnation
 		due := !current || cached.state == OwnerUnknown ||
 			(cached.state == OwnerNone && l.seq-cached.readSeq >= inventoryOwnerlessRereadPasses)
-		if due && reads < inventoryAttributionBudget {
-			reads++
-			cached = readInventoryAttribution(env, name, a.Incarnation, l.seq)
-			l.attribution[name] = cached
-			current = true
+		if due && reads < inventoryAttributionBudget && ctx.Err() == nil {
+			if got, ok := l.readAttribution(ctx, env, name, a.Incarnation); ok {
+				reads++
+				cached, current = got, true
+				l.attribution[name] = got
+			} else if !current {
+				pending++
+			}
 		} else if due && !current {
 			pending++
 		}
@@ -491,6 +576,40 @@ func (l *runtimeInventoryLane) attribute(attrs map[string]InventoryAttrs, hosts 
 		}
 	}
 	return reads, pending
+}
+
+// readAttribution reads one incarnation's attribution on its own goroutine,
+// so a wedged read cannot hold the pass past ctx. It reports false, and reads
+// nothing, while an earlier abandoned read is still outstanding.
+func (l *runtimeInventoryLane) readAttribution(ctx context.Context, env runtime.EnvironmentBatchProvider, name, incarnation string) (inventoryAttribution, bool) {
+	l.listMu.Lock()
+	if l.attributing {
+		l.listMu.Unlock()
+		return inventoryAttribution{}, false
+	}
+	l.attributing = true
+	l.listMu.Unlock()
+
+	seq := l.seq
+	done := make(chan inventoryAttribution, 1)
+	go func() {
+		got := inventoryAttribution{incarnation: incarnation, readSeq: seq}
+		defer func() {
+			// A panicking read is a failed read: the owner stays Unknown.
+			_ = recover()
+			l.listMu.Lock()
+			l.attributing = false
+			l.listMu.Unlock()
+			done <- got
+		}()
+		got = readInventoryAttribution(env, name, incarnation, seq)
+	}()
+	select {
+	case got := <-done:
+		return got, true
+	case <-ctx.Done():
+		return inventoryAttribution{}, false
+	}
 }
 
 func readInventoryAttribution(env runtime.EnvironmentBatchProvider, name, incarnation string, seq uint64) inventoryAttribution {
@@ -567,6 +686,7 @@ func inventoryLabelForTrace(label string) string {
 
 // inventoryPassReport is what one pass traces.
 type inventoryPassReport struct {
+	epoch              string
 	seq                uint64
 	providerGen        uint64
 	reason             string
@@ -640,22 +760,23 @@ func inventoryPassOutcome(r *inventoryPassReport) TraceOutcomeCode {
 // inventoryPassFields are a pass record's trace fields.
 func inventoryPassFields(r *inventoryPassReport) map[string]any {
 	fields := map[string]any{
-		"reason":        r.reason,
-		"result":        r.result,
-		"pass_seq":      r.seq,
-		"provider_gen":  r.providerGen,
-		"listing_ms":    r.listing.Milliseconds(),
-		"enrich_ms":     r.enrich.Milliseconds(),
-		"attribute_ms":  r.attribute.Milliseconds(),
-		"flips":         r.flips,
-		"attr_reads":    r.attributionReads,
-		"attr_pending":  r.attributionPending,
-		"enrich_errors": strings.Join(r.enrichErrors, "; "),
-		"health_alerts": strings.Join(r.alerts, ","),
+		"inventory_epoch":         r.epoch,
+		"inventory_reason":        r.reason,
+		"inventory_result":        r.result,
+		"inventory_pass_seq":      r.seq,
+		"inventory_provider_gen":  r.providerGen,
+		"inventory_listing_ms":    r.listing.Milliseconds(),
+		"inventory_enrich_ms":     r.enrich.Milliseconds(),
+		"inventory_attribute_ms":  r.attribute.Milliseconds(),
+		"inventory_flips":         r.flips,
+		"inventory_attr_reads":    r.attributionReads,
+		"inventory_attr_pending":  r.attributionPending,
+		"inventory_enrich_errors": strings.Join(r.enrichErrors, "; "),
+		"inventory_health_alerts": strings.Join(r.alerts, ","),
 	}
 	if s := r.snapshot; s != nil {
 		addInventorySnapshotFields(fields, s)
-		fields["names"] = len(s.Inventory.MergedNames)
+		fields["inventory_names"] = len(s.Inventory.MergedNames)
 	}
 	return fields
 }
@@ -667,7 +788,7 @@ func (l *runtimeInventoryLane) tickFields(now time.Time) map[string]any {
 	st := l.statusSnapshot()
 	fields := map[string]any{}
 	addBackstopAgeFields(fields, st.at, st.reason, st.ran)
-	fields["inventory_pass_seq"] = st.seq
+	fields["inventory_last_pass_seq"] = st.seq
 	fields["inventory_last_result"] = st.result
 	fields["inventory_last_pass_ms"] = st.duration.Milliseconds()
 	snap := l.cache.Snapshot()
@@ -695,7 +816,8 @@ func addInventorySnapshotFields(fields map[string]any, s *ObservationSnapshot) {
 		}
 	}
 	fields["inventory_gen"] = s.Gen
-	fields["inventory_snapshot_pass_seq"] = s.PassSeq
+	// The pass a decision reading this snapshot would use (spec §4.5).
+	fields["inventory_pass_seq"] = s.PassSeq
 	fields["inventory_backend_outcomes"] = inventoryBackendOutcomes(s.Inventory.Backends)
 	fields["inventory_partial_backends"] = strings.Join(partial, ",")
 	fields["inventory_server_absent_backends"] = strings.Join(absent, ",")

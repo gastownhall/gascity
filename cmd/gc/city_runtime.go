@@ -701,12 +701,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		inventoryPrimeStart := time.Now()
 		cr.primeNow(ctx)
 		logPhaseElapsed("inventory-prime", inventoryPrimeStart)
-		inventoryLaneCtx, stopInventoryLane := context.WithCancel(ctx)
-		inventoryLaneDone := cr.startRuntimeInventoryLane(inventoryLaneCtx)
-		defer func() {
-			stopInventoryLane()
-			<-inventoryLaneDone
-		}()
+		defer cr.runRuntimeInventoryLane(ctx)()
 		if ctx.Err() != nil {
 			return
 		}

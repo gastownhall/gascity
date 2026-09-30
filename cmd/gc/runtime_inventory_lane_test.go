@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -42,7 +44,10 @@ type scriptedInventoryProvider struct {
 	inventory     map[string]runtime.InventoryEntry
 	inventoryErr  error
 	inventoryPanc bool
+	inventoryHook func(ctx context.Context, call int)
+	inventoryN    int
 	env           map[string]map[string]string
+	envGate       chan struct{}
 	envErr        map[string]error
 	envCalls      map[string]int
 }
@@ -88,7 +93,14 @@ func (p *scriptedInventoryProvider) ListRunningComplete() bool {
 	return !p.unattested
 }
 
-func (p *scriptedInventoryProvider) RuntimeInventory(context.Context) (map[string]runtime.InventoryEntry, error) {
+func (p *scriptedInventoryProvider) RuntimeInventory(ctx context.Context) (map[string]runtime.InventoryEntry, error) {
+	p.mu.Lock()
+	p.inventoryN++
+	hook, call := p.inventoryHook, p.inventoryN
+	p.mu.Unlock()
+	if hook != nil {
+		hook(ctx, call)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.inventoryPanc {
@@ -106,6 +118,12 @@ func (p *scriptedInventoryProvider) RuntimeInventory(context.Context) (map[strin
 }
 
 func (p *scriptedInventoryProvider) GetAllEnvironment(name string) (map[string]string, error) {
+	p.mu.Lock()
+	gate := p.envGate
+	p.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.envCalls[name]++
@@ -298,7 +316,7 @@ func TestInventoryLane_HungListingIsSingleFlight(t *testing.T) {
 		sp.mu.Unlock()
 		close(gate)
 		synctest.Wait()
-		if got := lane.cache.Snapshot(); got.PassSeq != 0 || len(got.ByName) != 0 {
+		if got := lane.cache.Snapshot(); got.PassSeq != 2 || len(got.ByName) != 0 {
 			t.Fatalf("the late listing was published: %+v", got)
 		}
 
@@ -330,8 +348,12 @@ func TestInventoryLane_PassEqualsSynchronousListRunning(t *testing.T) {
 		p.listErr = err
 		return p
 	}
+	// acp attests its listing since #6879; an ssh-like backend does not.
 	acp := func(err error, names ...string) *listOnlyProvider {
-		return &listOnlyProvider{Fake: runtime.NewFake(), names: names, err: err, unattested: true}
+		return &listOnlyProvider{Fake: runtime.NewFake(), names: names, err: err}
+	}
+	sshLike := func(names ...string) *listOnlyProvider {
+		return &listOnlyProvider{Fake: runtime.NewFake(), names: names, unattested: true}
 	}
 	cases := []struct {
 		name     string
@@ -341,13 +363,14 @@ func TestInventoryLane_PassEqualsSynchronousListRunning(t *testing.T) {
 		{"single ok", tmux(nil, "gc-a", "gc-b"), "provider=complete"},
 		{"single server absent", tmux(absent), "provider=partial"},
 		{"single failed", tmux(down), "provider=failed"},
-		{"auto ok", sessionauto.New(tmux(nil, "gc-a"), acp(nil, "gc-c")), "default=complete,acp=unattested"},
-		{"auto tmux absent", sessionauto.New(tmux(absent), acp(nil, "gc-c")), "default=partial,acp=unattested"},
+		{"auto ok", sessionauto.New(tmux(nil, "gc-a"), acp(nil, "gc-c")), "default=complete,acp=complete"},
+		{"auto tmux absent", sessionauto.New(tmux(absent), acp(nil, "gc-c")), "default=partial,acp=complete"},
+		{"hybrid with an unattested remote", sessionhybrid.New(tmux(nil, "gc-a"), sshLike("gc-ssh"), func(string) bool { return false }), "local=complete,remote=unattested"},
 		{"auto acp partial", sessionauto.New(tmux(nil, "gc-a"), acp(partial, "gc-c")), "default=complete,acp=partial"},
 		{"auto both failed", sessionauto.New(tmux(down), acp(errors.New("acp down"))), "default=failed,acp=failed"},
 		{"auto over hybrid", sessionauto.New(
 			sessionhybrid.New(tmux(nil, "gc-a"), &listOnlyProvider{Fake: runtime.NewFake(), err: down}, func(string) bool { return false }),
-			acp(nil, "gc-c")), "default/local=complete,default/remote=failed,acp=unattested"},
+			acp(nil, "gc-c")), "default/local=complete,default/remote=failed,acp=complete"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -377,7 +400,7 @@ func TestInventoryLane_PassEqualsSynchronousListRunning(t *testing.T) {
 func TestInventoryLane_NestedCompositeListsEachLeafOnce(t *testing.T) {
 	local := newScriptedInventoryProvider("gc-a")
 	remote := &listOnlyProvider{Fake: runtime.NewFake(), names: []string{"gc-pod"}}
-	acp := &listOnlyProvider{Fake: runtime.NewFake(), names: []string{"gc-c"}, unattested: true}
+	acp := &listOnlyProvider{Fake: runtime.NewFake(), names: []string{"gc-c"}}
 	sp := sessionauto.New(sessionhybrid.New(local, remote, func(string) bool { return false }), acp)
 	cr := inventoryLaneTestRuntime(t, sp, nil)
 
@@ -577,8 +600,10 @@ func TestInventoryLane_HealthStates(t *testing.T) {
 	var stderr bytes.Buffer
 	tmux := newScriptedInventoryProvider()
 	tmux.listErr = &runtime.PartialListError{Err: errors.New("no server"), ServerAbsent: true}
-	acp := &listOnlyProvider{Fake: runtime.NewFake(), err: errors.New("acp down"), unattested: true}
-	cr := inventoryLaneTestRuntime(t, sessionauto.New(tmux, acp), &stderr)
+	// An ssh-like remote never attests, so it is never alerted even while its
+	// listing fails.
+	remote := &listOnlyProvider{Fake: runtime.NewFake(), err: errors.New("ssh exit 255"), unattested: true}
+	cr := inventoryLaneTestRuntime(t, sessionhybrid.New(tmux, remote, func(string) bool { return false }), &stderr)
 	clk := &clock.Fake{Time: obsTestEpoch}
 	useInventoryClock(cr, clk)
 	health := func() map[string]string {
@@ -596,35 +621,35 @@ func TestInventoryLane_HealthStates(t *testing.T) {
 	}
 
 	runTestInventoryPass(cr)
-	want("fresh city, no tmux server", map[string]string{"default": backendHealthIdle, "acp": backendHealthUnattested})
+	want("fresh city, no tmux server", map[string]string{"local": backendHealthIdle, "remote": backendHealthUnattested})
 
 	tmux.mu.Lock()
 	tmux.listErr, tmux.names = nil, []string{"gc-a"}
 	tmux.mu.Unlock()
 	clk.Advance(15 * time.Second)
 	runTestInventoryPass(cr)
-	want("tmux answering", map[string]string{"default": backendHealthHealthy, "acp": backendHealthUnattested})
+	want("tmux answering", map[string]string{"local": backendHealthHealthy, "remote": backendHealthUnattested})
 
 	tmux.mu.Lock()
 	tmux.listErr, tmux.names = errors.New("list-sessions timed out"), nil
 	tmux.mu.Unlock()
 	clk.Advance(15 * time.Second)
 	runTestInventoryPass(cr)
-	want("tmux failing", map[string]string{"default": backendHealthDegraded, "acp": backendHealthUnattested})
+	want("tmux failing", map[string]string{"local": backendHealthDegraded, "remote": backendHealthUnattested})
 	clk.Advance(observationUnhealthyAfter)
 	runTestInventoryPass(cr)
-	want("tmux failing for 5m", map[string]string{"default": backendHealthUnhealthy, "acp": backendHealthUnattested})
+	want("tmux failing for 5m", map[string]string{"local": backendHealthUnhealthy, "remote": backendHealthUnattested})
 	clk.Advance(time.Minute)
 	runTestInventoryPass(cr)
-	if got := strings.Count(stderr.String(), "backend default unhealthy"); got != 1 {
+	if got := strings.Count(stderr.String(), "backend local unhealthy"); got != 1 {
 		t.Fatalf("unhealthy alerts = %d within one episode, want 1:\n%s", got, stderr.String())
 	}
 	clk.Advance(inventoryUnhealthyRealert)
 	runTestInventoryPass(cr)
-	if got := strings.Count(stderr.String(), "backend default unhealthy"); got != 2 {
+	if got := strings.Count(stderr.String(), "backend local unhealthy"); got != 2 {
 		t.Fatalf("unhealthy alerts after %v = %d, want 2", inventoryUnhealthyRealert, got)
 	}
-	if strings.Contains(stderr.String(), "backend acp") {
+	if strings.Contains(stderr.String(), "backend remote") {
 		t.Fatalf("an unattested backend was alerted:\n%s", stderr.String())
 	}
 
@@ -633,7 +658,7 @@ func TestInventoryLane_HealthStates(t *testing.T) {
 	tmux.mu.Unlock()
 	clk.Advance(15 * time.Second)
 	runTestInventoryPass(cr)
-	want("server gone after it held sessions", map[string]string{"default": backendHealthUnhealthy, "acp": backendHealthUnattested})
+	want("server gone after it held sessions", map[string]string{"local": backendHealthUnhealthy, "remote": backendHealthUnattested})
 }
 
 // Kills: lane liveness invisible in `gc trace`. The tick record distinguishes
@@ -641,7 +666,7 @@ func TestInventoryLane_HealthStates(t *testing.T) {
 // the snapshot and generation ages, and each backend's outcome.
 func TestCityRuntimeTick_RecordsInventoryLaneAge(t *testing.T) {
 	tmux := newScriptedInventoryProvider("gc-a")
-	acp := &listOnlyProvider{Fake: runtime.NewFake(), err: &runtime.PartialListError{Err: errors.New("one socket")}, unattested: true}
+	acp := &listOnlyProvider{Fake: runtime.NewFake(), err: &runtime.PartialListError{Err: errors.New("one socket")}}
 	cr := inventoryLaneTestRuntime(t, sessionauto.New(tmux, acp), nil)
 	clk := &clock.Fake{Time: obsTestEpoch}
 	useInventoryClock(cr, clk)
@@ -662,7 +687,9 @@ func TestCityRuntimeTick_RecordsInventoryLaneAge(t *testing.T) {
 	for key, want := range map[string]any{
 		"backstop_ran":                     true,
 		"backstop_last_reason":             "test",
+		"inventory_last_pass_seq":          uint64(2),
 		"inventory_pass_seq":               uint64(2),
+		"inventory_last_pass_ms":           int64(0),
 		"inventory_last_result":            inventoryResultPublished,
 		"inventory_age_ms":                 int64(5000),
 		"inventory_gen_age_ms":             int64(25000),
@@ -679,4 +706,446 @@ func TestCityRuntimeTick_RecordsInventoryLaneAge(t *testing.T) {
 	if fields["inventory_epoch"] == "" {
 		t.Error("tick fields carry no epoch")
 	}
+}
+
+// eventedInventoryProvider adds a session-event stream to the scripted
+// backend; subscribed closes on the first subscription.
+type eventedInventoryProvider struct {
+	*scriptedInventoryProvider
+	events     chan runtime.SessionEvent
+	subscribed chan struct{}
+	once       sync.Once
+}
+
+func (p *eventedInventoryProvider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) { //nolint:unparam // runtime.SessionEventProvider signature
+	out := make(chan runtime.SessionEvent)
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev := <-p.events:
+				select {
+				case out <- ev:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	p.once.Do(func() { close(p.subscribed) })
+	return out, nil
+}
+
+// Kills: health frozen during a hung listing while the trace reads healthy.
+// A listing that times out, and the in-flight passes behind it, publish a
+// failed outcome: facts stay put, FreshInventory refuses the pass at once,
+// the backend turns unhealthy after five minutes, the alert fires, and the
+// pass record shows it.
+func TestInventoryLane_HungListingTurnsBackendUnhealthy(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var stderr bytes.Buffer
+		sp := newScriptedInventoryProvider("gc-a")
+		cr := inventoryLaneTestRuntime(t, sp, &stderr)
+		cr.trace = newSessionReconcilerTraceManager(cr.cityPath, "test-city", io.Discard)
+		lane := cr.inventoryLane
+		runTestInventoryPass(cr)
+		seen := lane.cache.Snapshot().ByName["gc-a"].Listed
+
+		gate := make(chan struct{})
+		sp.mu.Lock()
+		sp.listGate = gate
+		sp.mu.Unlock()
+		runTestInventoryPass(cr)
+		if _, ok := lane.cache.FreshInventory(time.Hour); ok {
+			t.Fatal("FreshInventory served a pass whose listing timed out")
+		}
+		snap := lane.cache.Snapshot()
+		if got := snap.ByName["gc-a"].Listed; got != seen {
+			t.Fatalf("gc-a Listed = %+v after a timed-out listing, want it untouched (%+v)", got, seen)
+		}
+		if got := snap.Health[""].State; got != backendHealthDegraded {
+			t.Fatalf("health after the timeout = %q, want %q", got, backendHealthDegraded)
+		}
+
+		<-time.After(observationUnhealthyAfter)
+		runTestInventoryPass(cr)
+		if got := lane.statusSnapshot().result; got != inventoryResultInFlight {
+			t.Fatalf("pass result = %q, want %q", got, inventoryResultInFlight)
+		}
+		if got := lane.cache.Snapshot().Health[""].State; got != backendHealthUnhealthy {
+			t.Fatalf("health after 5m of hung listing = %q, want %q", got, backendHealthUnhealthy)
+		}
+		if !strings.Contains(stderr.String(), "backend provider unhealthy") {
+			t.Fatalf("stderr = %q, want the unhealthy alert", stderr.String())
+		}
+
+		sp.mu.Lock()
+		sp.listGate = nil
+		sp.mu.Unlock()
+		close(gate)
+		synctest.Wait()
+		if err := cr.trace.Close(); err != nil {
+			t.Fatalf("closing the tracer: %v", err)
+		}
+		records, err := ReadTraceRecords(traceCityRuntimeDir(cr.cityPath), TraceFilter{})
+		if err != nil {
+			t.Fatalf("ReadTraceRecords: %v", err)
+		}
+		found := false
+		for _, r := range records {
+			if r.SiteCode == TraceSiteRuntimeInventoryPass && r.Fields["inventory_result"] == inventoryResultInFlight &&
+				r.Fields["inventory_backend_health"] == "provider=unhealthy" && r.Fields["inventory_health_alerts"] == "provider" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("no runtime_inventory.pass record shows the in-flight pass, the unhealthy backend and its alert")
+		}
+	})
+}
+
+// Kills: a listing bound at or below the tmux subprocess timeout. A tmux
+// listing that fails at its own 30s timeout (plus scheduling slop) fails
+// inside its call, and the ACP backend's answer still publishes.
+func TestInventoryLane_SlowTmuxFailsInsideItsOwnTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tmux := newScriptedInventoryProvider()
+		tmux.listDuration = 30*time.Second + time.Millisecond
+		tmux.listErr = errors.New("tmux list-sessions: timed out")
+		acp := &listOnlyProvider{Fake: runtime.NewFake(), names: []string{"gc-c"}}
+		cr := inventoryLaneTestRuntime(t, sessionauto.New(tmux, acp), nil)
+
+		runTestInventoryPass(cr)
+		if got := cr.inventoryLane.statusSnapshot().result; got != inventoryResultPublished {
+			t.Fatalf("pass result = %q, want %q", got, inventoryResultPublished)
+		}
+		snap := cr.inventoryLane.cache.Snapshot()
+		if got := inventoryBackendOutcomes(snap.Inventory.Backends); got != "default=failed,acp=complete" {
+			t.Fatalf("backend outcomes = %q, want default=failed,acp=complete", got)
+		}
+		if snap.ByName["gc-c"].Listed.Value != ObsYes {
+			t.Fatal("the ACP name was not published")
+		}
+	})
+}
+
+// Kills: a wedged attribution read holding the startup prime or shutdown.
+// The attribution phase is capped at inventoryAttributionBound, and a
+// canceled lane leaves at once.
+func TestInventoryLane_WedgedAttributionDelaysNeitherPrimeNorShutdown(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		gate := make(chan struct{})
+		sp := newScriptedInventoryProvider("gc-a", "gc-b")
+		sp.envGate = gate
+		cr := inventoryLaneTestRuntime(t, sp, nil)
+
+		start := time.Now()
+		cr.primeNow(context.Background())
+		if waited := time.Since(start); waited != inventoryAttributionBound {
+			t.Fatalf("prime took %v with a wedged attribution read, want the %v bound", waited, inventoryAttributionBound)
+		}
+		snap := cr.inventoryLane.cache.Snapshot()
+		if snap.PassSeq != 1 || snap.ByName["gc-a"].OwnerState != OwnerUnknown || snap.ByName["gc-b"].OwnerState != OwnerUnknown {
+			t.Fatalf("prime snapshot = %+v, want pass 1 published with owners Unknown", snap)
+		}
+
+		other := newScriptedInventoryProvider("gc-c")
+		other.envGate = gate
+		cr2 := inventoryLaneTestRuntime(t, other, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		done := cr2.startRuntimeInventoryLane(ctx)
+		cr2.inventoryLane.wake()
+		synctest.Wait() // the pass is now waiting on the wedged read
+		cancel()
+		stopped := time.Now()
+		select {
+		case <-done:
+		case <-time.After(inventoryAttributionBound):
+			t.Fatal("the lane waited out the attribution bound after cancellation")
+		}
+		if waited := time.Since(stopped); waited != 0 {
+			t.Fatalf("shutdown took %v with a wedged attribution read, want none", waited)
+		}
+		close(gate)
+		synctest.Wait()
+	})
+}
+
+// Kills: a name deferred by the attribution budget carrying its previous
+// incarnation's owner and token after a respawn.
+func TestInventoryLane_DeferredRespawnCarriesNoStaleOwner(t *testing.T) {
+	names := make([]string, inventoryAttributionBudget+6)
+	for i := range names {
+		names[i] = fmt.Sprintf("gc-%03d", i)
+	}
+	sp := newScriptedInventoryProvider(names...)
+	for _, n := range names {
+		sp.env[n] = map[string]string{"GC_SESSION_ID": "old-" + n, "GC_INSTANCE_TOKEN": "tok-old"}
+	}
+	cr := inventoryLaneTestRuntime(t, sp, nil)
+	runTestInventoryPass(cr)
+	runTestInventoryPass(cr)
+
+	sp.mu.Lock()
+	for _, n := range names {
+		sp.inventory[n] = runtime.InventoryEntry{Incarnation: n + ":2", DeadKnown: true, AttachedKnown: true}
+		sp.env[n] = map[string]string{"GC_SESSION_ID": "new-" + n, "GC_INSTANCE_TOKEN": "tok-new"}
+	}
+	sp.mu.Unlock()
+	runTestInventoryPass(cr)
+
+	snap := cr.inventoryLane.cache.Snapshot()
+	deferred := 0
+	for _, n := range names {
+		obs := snap.ByName[n]
+		switch {
+		case obs.Owner.SessionID == "new-"+n:
+		case obs.OwnerState == OwnerUnknown && obs.InstanceToken == "" && obs.Owner.SessionID == "":
+			deferred++
+		default:
+			t.Fatalf("%s after a respawn = owner %q token %q (state %v), want the new owner or Unknown", n, obs.Owner.SessionID, obs.InstanceToken, obs.OwnerState)
+		}
+	}
+	if deferred != 6 {
+		t.Fatalf("deferred names = %d, want 6 (the respawns beyond the budget)", deferred)
+	}
+}
+
+// Kills: listing facts stamped when the pass finished. A runtime listed by
+// a pass was running no later than the listing's start, which is what the
+// PR-5 fence compares a PreWake against.
+func TestInventoryLane_FactsStampedAtListingStart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sp := newScriptedInventoryProvider("gc-a")
+		sp.listDuration = 3 * time.Second
+		cr := inventoryLaneTestRuntime(t, sp, nil)
+		start := time.Now()
+		runTestInventoryPass(cr)
+
+		snap := cr.inventoryLane.cache.Snapshot()
+		obs := snap.ByName["gc-a"]
+		if !obs.Listed.ObservedAt.Equal(start) || !obs.LastListedAt.Equal(start) || !obs.Running.ObservedAt.Equal(start) {
+			t.Fatalf("gc-a stamped Listed=%v LastListedAt=%v Running=%v, want the listing start %v",
+				obs.Listed.ObservedAt, obs.LastListedAt, obs.Running.ObservedAt, start)
+		}
+		if want := start.Add(3 * time.Second); !snap.At.Equal(want) {
+			t.Fatalf("snapshot At = %v, want the pass finish %v", snap.At, want)
+		}
+	})
+}
+
+// Kills: a failed batched inventory overwriting enrichment facts. The names
+// stay listed, and Running keeps its last observation to age out.
+func TestInventoryLane_InventoryFailureKeepsFacts(t *testing.T) {
+	sp := newScriptedInventoryProvider("gc-a")
+	cr := inventoryLaneTestRuntime(t, sp, nil)
+	clk := &clock.Fake{Time: obsTestEpoch}
+	useInventoryClock(cr, clk)
+	runTestInventoryPass(cr)
+	seen := cr.inventoryLane.cache.Snapshot().ByName["gc-a"].Running
+
+	sp.mu.Lock()
+	sp.inventoryErr = errors.New("list-panes: server busy")
+	sp.mu.Unlock()
+	clk.Advance(15 * time.Second)
+	runTestInventoryPass(cr)
+	obs := cr.inventoryLane.cache.Snapshot().ByName["gc-a"]
+	if obs.Running != seen {
+		t.Fatalf("Running after a failed inventory = %+v, want the last observation %+v", obs.Running, seen)
+	}
+	if !obs.Listed.ObservedAt.Equal(clk.Now()) {
+		t.Fatalf("Listed.ObservedAt = %v, want the listing refreshed at %v", obs.Listed.ObservedAt, clk.Now())
+	}
+}
+
+// Kills: a provider event storm running inventory passes back to back when
+// passes are cheap. Wake passes are at least inventoryMinWakeGap apart.
+func TestInventoryLane_WakeMinimumSpacing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cr := inventoryLaneTestRuntime(t, newScriptedInventoryProvider("gc-a"), nil)
+		lane := startInventoryLaneInBubble(t, cr)
+		lane.wake()
+		synctest.Wait()
+		advanceInventoryLane(inventoryMinWakeGap / 2)
+		lane.wake()
+		synctest.Wait()
+		wantInventoryPasses(t, lane, 1, 0, "wake inside the minimum gap")
+		advanceInventoryLane(inventoryMinWakeGap/2 - time.Millisecond)
+		wantInventoryPasses(t, lane, 1, 0, "just before the minimum gap")
+		advanceInventoryLane(time.Millisecond)
+		wantInventoryPasses(t, lane, 2, 0, "at the minimum gap")
+	})
+}
+
+// Kills: the tick not recording the lane, and a pass never traced. The tick
+// writes a runtime_inventory_lane phase record carrying the snapshot's pass,
+// and the lane's first pass writes a runtime_inventory.pass record.
+func TestCityRuntimeTick_EmitsInventoryLaneRecord(t *testing.T) {
+	cr := &CityRuntime{
+		cityPath: t.TempDir(),
+		cityName: "test-city",
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Daemon:    config.DaemonConfig{PatrolInterval: inventoryLaneInterval.String()},
+		},
+		sp:                  newScriptedInventoryProvider("gc-a"),
+		standaloneCityStore: beads.NewMemStore(),
+		rec:                 events.Discard,
+		logPrefix:           "test-city",
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		buildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+	}
+	cr.trace = newSessionReconcilerTraceManager(cr.cityPath, "test-city", io.Discard)
+	if cr.initRuntimeInventoryLane() == nil {
+		t.Fatal("no lane")
+	}
+	runTestInventoryPass(cr)
+	var dirty atomic.Bool
+	var lastProviderName string
+	var prevPoolRunning map[string]bool
+	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "test")
+	if err := cr.trace.Close(); err != nil {
+		t.Fatalf("closing the tracer: %v", err)
+	}
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cr.cityPath), TraceFilter{})
+	if err != nil {
+		t.Fatalf("ReadTraceRecords: %v", err)
+	}
+	var tickRecord, passRecord bool
+	for _, r := range records {
+		if r.SiteCode == TraceSiteControllerTickPhase && r.Fields["operation_name"] == "runtime_inventory_lane" &&
+			r.Fields["inventory_pass_seq"] == float64(1) && r.Fields["inventory_backend_outcomes"] == "provider=complete" {
+			tickRecord = true
+		}
+		if r.SiteCode == TraceSiteRuntimeInventoryPass && r.Fields["inventory_result"] == inventoryResultPublished &&
+			r.Fields["inventory_epoch"] == cr.inventoryLane.cache.epoch {
+			passRecord = true
+		}
+	}
+	if !tickRecord {
+		t.Error("the tick wrote no runtime_inventory_lane record carrying the snapshot's pass")
+	}
+	if !passRecord {
+		t.Error("the lane's first pass wrote no runtime_inventory.pass record")
+	}
+}
+
+// Kills: run() wiring regressions. The prime pass is published before the
+// startup reconcile builds desired state, the session-event pump wakes the
+// lane, and run() does not return until the lane goroutine has exited.
+func TestCityRuntimeRun_InventoryLaneLifecycle(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	// No backstop pass inside the test: the only lane pass after the prime is
+	// the one the session-event pump wakes.
+	cfg.Daemon.PatrolInterval = "1h"
+	sp := &eventedInventoryProvider{
+		scriptedInventoryProvider: newScriptedInventoryProvider("gc-stray"),
+		events:                    make(chan runtime.SessionEvent, 1),
+		subscribed:                make(chan struct{}),
+	}
+	// The second inventory read is the first lane pass after the prime.
+	inPass := make(chan struct{})
+	sp.inventoryHook = func(_ context.Context, call int) {
+		if call == 2 {
+			close(inPass)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var cr *CityRuntime
+	var primedAtReconcile atomic.Int64
+	primedAtReconcile.Store(-1)
+	cr, err = newCityRuntime(CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			if lane := cr.inventoryLane; lane != nil {
+				primedAtReconcile.CompareAndSwap(-1, int64(lane.cache.Snapshot().PassSeq))
+			} else {
+				primedAtReconcile.CompareAndSwap(-1, 0)
+			}
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	if err != nil {
+		t.Fatalf("building the city runtime: %v", err)
+	}
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		cr.run(ctx)
+	}()
+	awaitClose(t, sp.subscribed, "the session-event pump subscribing")
+	sp.events <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "gc-stray", Time: time.Now()}
+	awaitClose(t, inPass, "a lane pass woken by the session-event pump")
+	cancel()
+	awaitClose(t, runDone, "run() returning after cancellation")
+
+	if got := primedAtReconcile.Load(); got != 1 {
+		t.Fatalf("snapshot PassSeq at the startup reconcile = %d, want the prime pass (1)", got)
+	}
+	if got := cr.inventoryLane.wakePasses.Load(); got != 1 {
+		t.Fatalf("wake passes = %d, want the one the session-event pump woke", got)
+	}
+}
+
+// Kills: shutdown running while an inventory pass is still in progress. The
+// stop run() defers cancels the lane and returns only once its goroutine has
+// exited; inside the bubble, "stop is still waiting" is an observable fact.
+func TestInventoryLane_StopJoinsTheLane(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sp := newScriptedInventoryProvider("gc-a")
+		release := make(chan struct{})
+		sp.inventoryHook = func(ctx context.Context, _ int) {
+			<-ctx.Done()
+			<-release
+		}
+		cr := inventoryLaneTestRuntime(t, sp, nil)
+		stop := cr.runRuntimeInventoryLane(context.Background())
+		cr.inventoryLane.wake()
+		synctest.Wait() // the pass is inside RuntimeInventory
+
+		stopped := make(chan struct{})
+		go func() {
+			stop()
+			close(stopped)
+		}()
+		synctest.Wait()
+		select {
+		case <-stopped:
+			close(release)
+			t.Fatal("stop returned while the lane pass was still running")
+		default:
+		}
+		close(release)
+		synctest.Wait()
+		select {
+		case <-stopped:
+		default:
+			t.Fatal("stop did not return after the lane pass finished")
+		}
+	})
 }
