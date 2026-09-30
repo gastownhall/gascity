@@ -118,13 +118,16 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	}
 	e.vars["PATH"] = shimDir + ":" + e.vars["PATH"]
 
-	// Pin gc's HOME to the OS user's home directory. Bazel's remote test runner
-	// sets HOME to the per-action TEST_TMPDIR and the platform supervisor
-	// refuses to start when HOME differs from the passwd entry. GC_HOME carries
-	// gc's isolation; bd/dolt never see HOME at all (tool home, above). Fails
-	// open if the lookup fails, mirroring the integration harness.
-	if lu, err := user.LookupId(strconv.Itoa(os.Getuid())); err == nil && strings.TrimSpace(lu.HomeDir) != "" {
-		e.vars["HOME"] = lu.HomeDir
+	// Bazel's remote test runner points HOME at the per-action TEST_TMPDIR, and
+	// the platform supervisor refuses to start when HOME differs from the
+	// passwd entry. Only in exactly that case, swap HOME for the passwd home —
+	// everywhere else the host HOME passes through verbatim (the tool-home
+	// tests assert that contract with a canary). GC_HOME carries gc's
+	// isolation; bd/dolt never see HOME at all (tool home, above).
+	if envHome := e.vars["HOME"]; envHome != "" && envHome == os.Getenv("TEST_TMPDIR") {
+		if lu, err := user.LookupId(strconv.Itoa(os.Getuid())); err == nil && strings.TrimSpace(lu.HomeDir) != "" {
+			e.vars["HOME"] = lu.HomeDir
+		}
 	}
 	if e.vars["HOME"] == "" {
 		if home, err := os.UserHomeDir(); err == nil && home != "" {
