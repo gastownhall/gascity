@@ -218,6 +218,13 @@ func TestRestageLeavesResolvedPriorBriefAlone(t *testing.T) {
 			if err := test.resolve(store, first.ID); err != nil {
 				t.Fatalf("resolve prior brief: %v", err)
 			}
+			// A brief is released only once a successor holds the session, so the
+			// session token now differs from the one the prior brief was staged
+			// for. That is what makes a wrongly-outstanding prior visible: it would
+			// be refused as awaiting release instead of merely skipped.
+			if err := store.SetMetadataBatch(sessionBead.ID, map[string]string{"instance_token": "successor-instance"}); err != nil {
+				t.Fatalf("adopt successor: %v", err)
+			}
 
 			outcome, _, stderr := runSelfHandoff(store, recorder, nil, "second brief")
 			if outcome.code != 0 || !outcome.restartRequested || stderr != "" {
