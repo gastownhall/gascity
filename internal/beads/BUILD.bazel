@@ -56,6 +56,7 @@ go_test(
         "boundary_test.go",
         "caching_store_batch_test.go",
         "caching_store_cadence_internal_test.go",
+        "caching_store_close_event_test.go",
         "caching_store_conditional_internal_test.go",
         "caching_store_conditional_test.go",
         "caching_store_count_test.go",
