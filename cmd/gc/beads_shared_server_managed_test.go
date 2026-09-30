@@ -34,7 +34,9 @@ const (
 )
 
 // managedServerTestCity builds a city whose hq scope is a gc-managed Dolt
-// server-mode store, with one rig inheriting the city's endpoint.
+// server-mode store, with one rig inheriting the city's endpoint. It borrows
+// proxiedEnvTestCity's city directory and exec provider, then replaces the
+// scope's metadata and config.
 func managedServerTestCity(t *testing.T) (cityPath, rig string) {
 	t.Helper()
 	cityPath, _ = proxiedEnvTestCity(t)
@@ -55,7 +57,7 @@ func assertNoSharedServerOptOut(t *testing.T, label string, env map[string]strin
 	}
 }
 
-// AC1: every bd process gc spawns for a managed server-mode scope — the
+// Every bd process gc spawns for a managed server-mode scope — the
 // controller's, `gc bd`'s, orders', hooks' — carries the opt-out. The tail
 // error is ignored on purpose: no Dolt server runs in this fixture, and the
 // projection is returned alongside it either way.
@@ -69,7 +71,7 @@ func TestManagedServerRuntimeEnvPinsBdSharedServerOff(t *testing.T) {
 	assertSharedServerPinnedOff(t, "managed server rig", rigEnv)
 }
 
-// AC1: an agent's shell bd reads BEADS_DOLT_SHARED_SERVER before any config
+// An agent's shell bd reads BEADS_DOLT_SHARED_SERVER before any config
 // file, so the session projection carries the same opt-out.
 func TestManagedServerSessionEnvPinsBdSharedServerOff(t *testing.T) {
 	cityPath, rig := managedServerTestCity(t)
@@ -87,7 +89,7 @@ func TestManagedServerSessionEnvPinsBdSharedServerOff(t *testing.T) {
 	assertSharedServerPinnedOff(t, "managed server rig session", rigEnv)
 }
 
-// AC2: the config.yaml pin is what an agent's shell bd resolves, and what the
+// The config.yaml pin is what an agent's shell bd resolves, and what the
 // native library reads, so it lands in every managed server-mode scope — and a
 // scope an earlier bd init bound ON under the user-level mode is flipped off.
 func TestEnsureGCOwnedScopeSharedServerOffPinsManagedServerScopes(t *testing.T) {
@@ -113,7 +115,7 @@ func TestEnsureGCOwnedScopeSharedServerOffPinsManagedServerScopes(t *testing.T) 
 	}
 }
 
-// AC3: a server-mode scope is gc's only when its config.yaml says so and its
+// A server-mode scope is gc's only when its config.yaml says so and its
 // store is gc's own Dolt. Everything else keeps the operator's resolution:
 // no env opt-out, and a config.yaml gc leaves byte-for-byte alone (the user's
 // `dolt.shared-server: true` in it survives).
@@ -155,7 +157,7 @@ func TestUnownedServerScopesKeepBdSharedServerResolution(t *testing.T) {
 	}
 }
 
-// AC3: the opt-out is a per-scope statement. A rig that points at an external
+// The opt-out is a per-scope statement. A rig that points at an external
 // Dolt must not inherit it from its managed city's projection — the city
 // function projects it first and the rig function has to take it back off.
 func TestExplicitEndpointRigDoesNotInheritManagedCityBdSharedServerPin(t *testing.T) {

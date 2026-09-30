@@ -58,7 +58,7 @@ func scopeConfigMarksGCManagedEndpoint(scopeRoot string) bool {
 
 // gcOwnsScope reports whether scopeRoot is a scope gc owns, and may therefore
 // pin out of bd's user-level shared-server mode. A proxied scope is owned on the
-// evidence gcOwnsProxiedScope weighs. Any other Dolt scope is gc's managed
+// evidence gcOwnsProxiedScope weighs. Any other scope is gc's managed
 // server-mode store when its config.yaml carries gc's endpoint marker — it has
 // no provider journal or handoff to consult — and only while the store is gc's
 // own Dolt: a doltlite scope, or one bound to an external backend, is not.
