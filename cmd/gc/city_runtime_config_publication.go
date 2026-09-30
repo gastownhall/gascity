@@ -30,6 +30,15 @@ func (cr *CityRuntime) publishRuntimeConfig(
 	return true
 }
 
+// serviceProviderSnapshot returns the config and provider a reload last
+// published, read together under serviceStateMu, for lanes that read the
+// provider off the controller goroutine.
+func (cr *CityRuntime) serviceProviderSnapshot() (*config.City, runtime.Provider) {
+	cr.serviceStateMu.RLock()
+	defer cr.serviceStateMu.RUnlock()
+	return cr.cfg, cr.sp
+}
+
 // requestConfigReloadRetry leaves a config reload pending for the next tick.
 // It deliberately does not poke: whoever superseded the candidate (the config
 // watcher or an API mutation) already pokes, and a rejection that repeats on

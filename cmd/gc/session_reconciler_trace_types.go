@@ -68,6 +68,7 @@ const (
 	TraceSiteDesiredStateBuild              TraceSiteCode = "desired_state.build"
 	TraceSiteDemandSnapshot                 TraceSiteCode = "demand_snapshot.load"
 	TraceSiteOrderDispatch                  TraceSiteCode = "orders.dispatch"
+	TraceSiteRuntimeInventoryPass           TraceSiteCode = "runtime_inventory.pass"
 	TraceSitePoolDemandCompute              TraceSiteCode = "pool_desired.compute"
 	TraceSiteSessionSnapshot                TraceSiteCode = "session_snapshot.load"
 	TraceSiteSessionSync                    TraceSiteCode = "session_sync.update_index"

@@ -154,6 +154,12 @@ type CityRuntime struct {
 	ordersLane     *ordersLane
 	ordersLaneOnce sync.Once
 
+	// inventoryLane lists runtimes at patrol cadence and publishes the
+	// observation cache (runtime_inventory_lane.go). run() creates it; it
+	// stays nil with no provider or bead store, and on runtimes constructed
+	// directly.
+	inventoryLane *runtimeInventoryLane
+
 	// managedDoltPreflightMu serializes the managed-Dolt preflight, which the
 	// tick, the control dispatcher and the orders lane all run.
 	managedDoltPreflightMu sync.Mutex
@@ -687,6 +693,25 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		return
 	}
 
+	// The runtime inventory lane starts after the startup reload, which can
+	// swap the provider, with one synchronous pass so startup reconciliation
+	// finds a published inventory. It is publish-only: nothing reads the
+	// cache yet. run() stops it and waits for it on every exit.
+	if cr.initRuntimeInventoryLane() != nil {
+		inventoryPrimeStart := time.Now()
+		cr.primeNow(ctx)
+		logPhaseElapsed("inventory-prime", inventoryPrimeStart)
+		inventoryLaneCtx, stopInventoryLane := context.WithCancel(ctx)
+		inventoryLaneDone := cr.startRuntimeInventoryLane(inventoryLaneCtx)
+		defer func() {
+			stopInventoryLane()
+			<-inventoryLaneDone
+		}()
+		if ctx.Err() != nil {
+			return
+		}
+	}
+
 	// Dispatch due orders before startup session reconciliation. A cold-start
 	// reconcile can take minutes when it has stale or config-drifted sessions;
 	// due event/condition formulas should not wait behind that maintenance work.
@@ -874,6 +899,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// surfacing at the next patrol scan. Config reload re-points the pump
 	// when it swaps the provider.
 	cr.sessionEvents = newSessionEventPump(ctx, cr.pokeCh, cr.stderr, cr.logPrefix)
+	if cr.inventoryLane != nil {
+		cr.sessionEvents.wakeInventory = cr.inventoryLane.wake
+	}
 	cr.sessionEvents.restart(cr.sp)
 
 	// Reload acceptance runs on its own goroutine so that a slow tick
@@ -1298,6 +1326,14 @@ func (cr *CityRuntime) tick(
 	passAt, passReason, passRan := ordersLane.lastPass()
 	addBackstopAgeFields(ordersFields, passAt, passReason, passRan)
 	recordPhase(TraceSiteControllerTickPhase, "wake_orders_lane", phaseStart, ordersFields)
+
+	// The runtime inventory lane also runs on its own goroutine: the tick
+	// records its pass age, its last result and the age of the published
+	// snapshot and generation, per backend.
+	if lane := cr.inventoryLane; lane != nil && trace != nil {
+		phaseStart = time.Now()
+		recordPhase(TraceSiteControllerTickPhase, "runtime_inventory_lane", phaseStart, lane.tickFields(phaseStart))
+	}
 
 	// Re-route ready work whose canonical pool route was lost or never written
 	// (gc.run_target set, gc.routed_to empty), so the autoscaler — which keys on
