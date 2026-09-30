@@ -826,6 +826,7 @@ go_test(
         "beads_scope_ownership_rename_test.go",
         "beads_scope_ownership_test.go",
         "beads_scope_suspension_test.go",
+        "beads_shared_server_managed_test.go",
         "beads_shared_server_test.go",
         "build_desired_state_blocked_demand_test.go",
         "build_desired_state_ga80pen8_test.go",
