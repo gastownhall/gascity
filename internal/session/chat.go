@@ -599,7 +599,10 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
-		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		// A capacity refusal is also a startup death, but the endpoint refused
+		// the launch: that says nothing about the resume key, so it falls
+		// through to the plain failure below instead of the stale-key recovery.
+		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err) {
 			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
 			if retryErr != nil {
 				return retryErr
@@ -727,7 +730,9 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		switch {
-		case errors.Is(err, runtime.ErrSessionDiedDuringStartup):
+		// A capacity refusal says nothing about the resume key; it takes the
+		// plain failure path, not the stale-key recovery (see ensureRunning).
+		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err):
 			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
 			if retryErr != nil {
 				return retryErr
