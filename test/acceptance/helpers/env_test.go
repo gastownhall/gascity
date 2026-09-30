@@ -123,3 +123,70 @@ func TestNewEnvForwardsSeededGitConfig(t *testing.T) {
 		t.Fatalf("NewEnv() GIT_CONFIG_NOSYSTEM = %q, want %q", got, "1")
 	}
 }
+
+// unwritableHomeForTest returns a HOME nothing can be created in, whoever runs
+// the test: its parent is a regular file. Permission bits would not bind root,
+// and only a mount makes a real directory read-only.
+func unwritableHomeForTest(t *testing.T) string {
+	t.Helper()
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatalf("writing %s: %v", blocker, err)
+	}
+	return filepath.Join(blocker, "home")
+}
+
+// Bazel's local sandbox, which is where a fork PR's CI job runs (a fork has no
+// remote executor), mounts the runner's real HOME read-only. gc still needs that
+// HOME — the platform supervisor refuses any other — so it is the Claude state
+// the tests seed that has to move, into a CLAUDE_CONFIG_DIR the Env owns.
+func TestNewCityWithUnwritableHomeSeedsClaudeStateUnderGCHome(t *testing.T) {
+	home := unwritableHomeForTest(t)
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	gcHome := t.TempDir()
+
+	env := NewEnv("", gcHome, t.TempDir())
+	city := NewCity(t, env)
+
+	if got := env.Get("HOME"); got != home {
+		t.Errorf("NewEnv() HOME = %q, want the ambient %q untouched (gc's supervisor refuses any other)", got, home)
+	}
+	configDir := env.Get("CLAUDE_CONFIG_DIR")
+	if !strings.HasPrefix(configDir, gcHome+string(filepath.Separator)) {
+		t.Fatalf("NewEnv() CLAUDE_CONFIG_DIR = %q, want a directory under GC_HOME %q", configDir, gcHome)
+	}
+	assertClaudeProjectTrustedForTest(t, filepath.Join(configDir, ".claude.json"), city.Dir, nil, nil)
+}
+
+// A CLAUDE_CONFIG_DIR from the host carries the operator's credentials, so an
+// unwritable HOME must not replace it.
+func TestNewCityWithUnwritableHomeKeepsInheritedClaudeConfigDir(t *testing.T) {
+	t.Setenv("HOME", unwritableHomeForTest(t))
+	inherited := filepath.Join(t.TempDir(), "claude")
+	t.Setenv("CLAUDE_CONFIG_DIR", inherited)
+
+	env := NewEnv("", t.TempDir(), t.TempDir())
+	city := NewCity(t, env)
+
+	if got := env.Get("CLAUDE_CONFIG_DIR"); got != inherited {
+		t.Fatalf("NewEnv() CLAUDE_CONFIG_DIR = %q, want the inherited %q", got, inherited)
+	}
+	assertClaudeProjectTrustedForTest(t, filepath.Join(inherited, ".claude.json"), city.Dir, nil, nil)
+}
+
+// The fallback is for a HOME that cannot be written and nothing else: the tiers
+// that run a real Claude keep the operator's own state and credentials.
+func TestNewCityWithWritableHomeSeedsClaudeStateUnderHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	env := NewEnv("", t.TempDir(), t.TempDir())
+	city := NewCity(t, env)
+
+	if got := env.Get("CLAUDE_CONFIG_DIR"); got != "" {
+		t.Fatalf("NewEnv() CLAUDE_CONFIG_DIR = %q, want it left unset while HOME is writable", got)
+	}
+	assertClaudeProjectTrustedForTest(t, filepath.Join(home, ".claude.json"), city.Dir, nil, nil)
+}
