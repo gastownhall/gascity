@@ -3901,13 +3901,13 @@ func (cr *CityRuntime) loadDemandSnapshot(
 	readyDemandFingerprint := ""
 	refresh := cr.shouldRefreshDemandSnapshot(trigger, configChanged, sessionFingerprint)
 	if !refresh && trigger == "patrol" && cr.demandSnapshotsEnabled() {
-		readyDemandFingerprint = cr.readyDemandSnapshotFingerprint()
+		readyDemandFingerprint = cr.readyDemandSnapshotFingerprint(trace)
 		refresh = cr.demandSnapshot.readyDemandFingerprint != readyDemandFingerprint
 	}
 	if refresh {
 		if trigger == "patrol" && cr.demandSnapshotsEnabled() {
 			if readyDemandFingerprint == "" {
-				readyDemandFingerprint = cr.readyDemandSnapshotFingerprint()
+				readyDemandFingerprint = cr.readyDemandSnapshotFingerprint(trace)
 			}
 		} else if cr.demandSnapshot != nil {
 			readyDemandFingerprint = cr.demandSnapshot.readyDemandFingerprint
@@ -3917,6 +3917,7 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		if sessionBeads != nil {
 			openSessionInfos = sessionBeads.OpenInfos()
 		}
+		subPhaseStart := trace.demandNow()
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, cr.cityBeadStore(), openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStoreRefs)
 		poolDecisionTime := time.Now()
 		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
@@ -3930,6 +3931,10 @@ func (cr *CityRuntime) loadDemandSnapshot(
 			result.PoolDesiredCounts = make(map[string]int)
 		}
 		mergeNamedSessionDemand(result.PoolDesiredCounts, result.NamedSessionDemand, cr.cfg)
+		recordDemandSubPhase(trace, "demand_snapshot.second_pool_compute", subPhaseStart, map[string]any{
+			"pools":      len(result.PoolDesiredCounts),
+			"work_beads": len(poolWorkBeads),
+		})
 		result.WorkSet = make(map[string]bool)
 		cr.demandSnapshot = &runtimeDemandSnapshot{
 			createdAt:              time.Now(),
@@ -4020,7 +4025,7 @@ func (cr *CityRuntime) demandSnapshotPatrolMaxAge() time.Duration {
 // exactly as a stable read does, or a dark store rebuilds the snapshot every
 // tick forever), so the visit never returns an error and the plan's per-leg
 // policy has nothing to escalate.
-func (cr *CityRuntime) readyDemandSnapshotFingerprint() string {
+func (cr *CityRuntime) readyDemandSnapshotFingerprint(trace *sessionReconcilerTraceCycle) string {
 	h := fnv.New64a()
 	cfg := cr.serviceConfigSnapshot()
 	// The rig map is a constructor INPUT to the topology, not a residency answer
@@ -4050,7 +4055,11 @@ func (cr *CityRuntime) readyDemandSnapshotFingerprint() string {
 			_, _ = io.WriteString(h, "\x00")
 			return false, nil
 		}
+		start := trace.demandNow()
 		ready, err := beads.ReadyLive(leg.Store, beads.ReadyQuery{TierMode: beads.TierBoth})
+		// The record takes the leg's canonical label, not the spelling the hash
+		// and log line use: the hash input must not change.
+		recordDemandStoreRead(trace, demandStoreRead{point: demandReadPointFingerprint, leg: censusRef(cfg, leg.Ref, censusRefScoped), op: "ready", tier: demandReadTierLive}, start, len(ready), err)
 		if err != nil {
 			log.Printf("readyDemandSnapshotFingerprint: store %s: %v", ref, err)
 			_, _ = io.WriteString(h, "error:")
