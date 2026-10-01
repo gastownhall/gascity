@@ -6441,6 +6441,39 @@ func TestCompactScriptBackupSyncSuccessBeforeBareGC(t *testing.T) {
 	}
 }
 
+func TestCompactScriptBareGCPreservesPreFlattenBackupDuringRecovery(t *testing.T) {
+	for _, markerType := range []string{"compact-pending-gc", "compact-pending-push"} {
+		t.Run(markerType, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", markerType, "beads")
+			if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+				t.Fatalf("mkdir marker directory: %v", err)
+			}
+			if err := os.WriteFile(marker, []byte("db=beads\n"), 0o600); err != nil {
+				t.Fatalf("write marker: %v", err)
+			}
+
+			out, err := fixture.run(t, "success",
+				"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
+				"GC_DOLT_COMPACT_BARE_GC=1",
+			)
+			if err != nil {
+				t.Fatalf("bare GC during recovery should succeed: %v\nout=%s", err, out)
+			}
+			logData, readErr := os.ReadFile(fixture.doltLog)
+			if readErr != nil {
+				t.Fatalf("read dolt log: %v", readErr)
+			}
+			if strings.Contains(string(logData), "backup sync") {
+				t.Fatalf("bare GC must preserve the pre-flatten backup while %s exists:\n%s", markerType, logData)
+			}
+			if !strings.Contains(string(logData), "CALL DOLT_GC()") {
+				t.Fatalf("bare GC must still run while %s exists:\n%s", markerType, logData)
+			}
+		})
+	}
+}
+
 func TestCompactScriptBackupSyncFailureBeforeBareGCExitsOne(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "backup_sync_failure_bare_gc",

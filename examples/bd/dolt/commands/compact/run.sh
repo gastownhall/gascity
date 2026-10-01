@@ -3628,7 +3628,9 @@ bare_gc_database() {
     return 1
   fi
 
-  backup_sync_database "$db" || return 1
+  if ! has_compact_marker "$pending_gc_dir" "$db" && ! has_compact_marker "$pending_push_dir" "$db"; then
+    backup_sync_database "$db" || return 1
+  fi
 
   if [ -n "$dry_run" ]; then
     printf 'compact: db=%s — dry-run (would bare GC)\n' "$db"
