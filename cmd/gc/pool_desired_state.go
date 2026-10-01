@@ -804,7 +804,10 @@ func requestWithScaleDemandProvenance(request SessionRequest, demand scaleCheckD
 // session to realize for external work — and they run through the same
 // usage.canAccept/accept cap cascade as any other demand, so genuine
 // resume-tier and wake-known-identity demand (real gc-managed sessions)
-// always wins a contested slot over this accounting fiction.
+// always wins a contested slot over this accounting fiction. Among the
+// external candidates themselves the most urgent bead (highest
+// beadPriorityRank) is admitted first, so a shared cap that cannot hold them
+// all records the more urgent bead's occupancy.
 func seedExternalLiveWorkOccupancy(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
@@ -847,7 +850,7 @@ func seedExternalLiveWorkOccupancy(
 		}
 		candidates = append(candidates, SessionRequest{
 			Template:      template,
-			BeadPriority:  beadPriority(wb),
+			BeadPriority:  beadPriorityRank(beadPriority(wb)),
 			Tier:          "external-live-occupancy",
 			WorkBeadID:    wb.ID,
 			WorkBeadTitle: strings.TrimSpace(wb.Title),
