@@ -1210,6 +1210,7 @@ go_test(
         "pool_desired_state_test.go",
         "pool_desired_state_wake_test.go",
         "pool_detached_orphan_sweep_test.go",
+        "pool_external_live_ownership_test.go",
         "pool_fresh_slot_compat_test.go",
         "pool_hook_processgroup_test.go",
         "pool_on_boot_parallel_test.go",
