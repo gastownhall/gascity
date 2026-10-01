@@ -1612,3 +1612,89 @@ func TestFormulaCookAttachHelpDoesNotClaimParentChild(t *testing.T) {
 		t.Fatalf("gc formula cook --help does not clarify that --attach is not a parent-child relationship; Long=%q", cmd.Long)
 	}
 }
+
+// TestFormulaListRigFlagListsOnlyThatRigsScope pins that `gc formula list
+// --rig` lists the rig's scope (city layers plus the rig's own), the search
+// paths `gc formula show --rig` compiles against, rather than ignoring --rig
+// and listing every rig's formulas. Callers outside the city pass --city
+// and --rig together, so both are set here.
+func TestFormulaListRigFlagListsOnlyThatRigsScope(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `
+[workspace]
+name = "my-city"
+
+[[rigs]]
+name = "alpha"
+path = "alpha"
+formulas_dir = "alpha-formulas"
+
+[[rigs]]
+name = "beta"
+path = "beta"
+formulas_dir = "beta-formulas"
+`)
+	for dir, name := range map[string]string{
+		"formulas":       "city-work",
+		"alpha-formulas": "alpha-work",
+		"beta-formulas":  "beta-work",
+	} {
+		if err := os.MkdirAll(filepath.Join(cityDir, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(cityDir, dir, name+".toml"), fmt.Sprintf("formula = %q\n\n[[steps]]\nid = \"step\"\ntitle = \"Do work\"\n", name))
+	}
+	for _, rig := range []string{"alpha", "beta"} {
+		if err := os.MkdirAll(filepath.Join(cityDir, rig), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	prevCity, prevRig := cityFlag, rigFlag
+	t.Cleanup(func() { cityFlag, rigFlag = prevCity, prevRig })
+	cityFlag = cityDir
+
+	list := func(rig string) ([]string, error) {
+		t.Helper()
+		rigFlag = rig
+		var stdout, stderr bytes.Buffer
+		cmd := newFormulaListCmd(&stdout, &stderr)
+		cmd.SetArgs([]string{"--json"})
+		if err := cmd.Execute(); err != nil {
+			return nil, err
+		}
+		var out formulaListJSON
+		if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+			t.Fatalf("parse list json %q: %v (stderr=%s)", stdout.String(), err, stderr.String())
+		}
+		names := make([]string, 0, len(out.Formulas))
+		for _, row := range out.Formulas {
+			names = append(names, row.Name)
+		}
+		return names, nil
+	}
+
+	got, err := list("alpha")
+	if err != nil {
+		t.Fatalf("formula list --rig alpha: %v", err)
+	}
+	if want := []string{"alpha-work", "city-work"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("--rig alpha formulas = %v, want %v", got, want)
+	}
+
+	got, err = list("")
+	if err != nil {
+		t.Fatalf("formula list: %v", err)
+	}
+	if want := []string{"alpha-work", "beta-work", "city-work"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("formulas without --rig = %v, want every layer %v", got, want)
+	}
+
+	if _, err := list("nope"); err == nil || !strings.Contains(err.Error(), `rig "nope" not found`) {
+		t.Errorf("--rig nope error = %v, want rig not found", err)
+	}
+}
