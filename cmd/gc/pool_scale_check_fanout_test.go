@@ -2,12 +2,19 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // fanOutProbe is a small constructor helper for readable test tables.
@@ -288,5 +295,314 @@ func TestCityScopedFanOutProbesIncludesCityAndNonSuspendedRigsOnly(t *testing.T)
 	}
 	if !foundRigA {
 		t.Fatalf("probes missing non-suspended rig riga: %+v", probes)
+	}
+}
+
+// Per-store demand and Dolt ports for the store-binding fixture below. The
+// counts are distinct powers of two so every subset sum is unique: a probe
+// bound to the wrong store moves the total to a value no correct combination
+// can produce, and a suspended rig that leaks into the fan-out is visible as
+// its own bit.
+const (
+	fanOutCityCount   = 1
+	fanOutRigACount   = 2
+	fanOutRigBCount   = 4
+	fanOutParkedCount = 8
+	fanOutBrokenCount = 16
+
+	fanOutRigAPort   = "4406"
+	fanOutRigBPort   = "4407"
+	fanOutParkedPort = "4408"
+
+	// fanOutBeadsDirCheck is a custom scale_check that reports the demand of
+	// whichever store its probe is bound to, read through BEADS_DIR. The sh -c
+	// wrapper keeps it valid under the GC_DOLT_* assignments prefixShellEnv
+	// puts in front of a command.
+	fanOutBeadsDirCheck = `sh -c 'cat "$BEADS_DIR/count"'`
+)
+
+// fanOutStoreFixture is a managed-bd city whose city store and rig stores each
+// hold a count file in their own .beads directory and answer on their own Dolt
+// endpoint, so a custom scale_check that reads "$BEADS_DIR/count" or
+// "$GC_DOLT_PORT" reports which store a probe was actually bound to. cfg holds
+// one city-scoped agent and three rigs; parked is suspended, so a correct
+// fan-out sums city + riga + rigb only.
+type fanOutStoreFixture struct {
+	cityPath  string
+	cityPort  string
+	cfg       *config.City
+	suspended map[string]bool
+}
+
+func newFanOutStoreFixture(t *testing.T) fanOutStoreFixture {
+	t.Helper()
+	clearGCEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityPath := t.TempDir()
+	writeCanonicalScopeConfig(t, cityPath, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	cityPort := writeReachableManagedDoltState(t, cityPath)
+	writeFanOutCount(t, cityPath, fanOutCityCount)
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(20),
+		}},
+	}
+	for _, rig := range []struct {
+		name, prefix, port string
+		count              int
+		suspended          bool
+	}{
+		{"riga", "ra", fanOutRigAPort, fanOutRigACount, false},
+		{"rigb", "rb", fanOutRigBPort, fanOutRigBCount, false},
+		{"parked", "pk", fanOutParkedPort, fanOutParkedCount, true},
+	} {
+		rigDir := filepath.Join(cityPath, rig.name)
+		writeCanonicalScopeConfig(t, rigDir, contract.ConfigState{
+			IssuePrefix:    rig.prefix,
+			EndpointOrigin: contract.EndpointOriginExplicit,
+			EndpointStatus: contract.EndpointStatusVerified,
+			DoltHost:       "rig-db.example.com",
+			DoltPort:       rig.port,
+			DoltUser:       "rig-user",
+		})
+		writeFanOutCount(t, rigDir, rig.count)
+		cfg.Rigs = append(cfg.Rigs, config.Rig{Name: rig.name, Path: rigDir, Prefix: rig.prefix, SuspendedOnStart: rig.suspended})
+	}
+	return fanOutStoreFixture{
+		cityPath:  cityPath,
+		cityPort:  strconv.Itoa(cityPort),
+		cfg:       cfg,
+		suspended: buildSuspendedRigPathsForCity(cfg, cityPath),
+	}
+}
+
+func writeFanOutCount(t *testing.T, scopeRoot string, count int) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(scopeRoot, ".beads", "count"), []byte(strconv.Itoa(count)), 0o644); err != nil {
+		t.Fatalf("write %s count: %v", scopeRoot, err)
+	}
+}
+
+// fanOutProbes builds the probe list the way the generic-pool call site in
+// buildDesiredStateWithSessionBeads does: the city-scoped agent's own query
+// env is resolved once and handed to cityScopedFanOutProbes.
+func (fx fanOutStoreFixture) fanOutProbes(t *testing.T) []poolStoreProbe {
+	t.Helper()
+	agent := &fx.cfg.Agents[0]
+	ownEnv, err := controllerQueryRuntimeEnv(fx.cityPath, fx.cfg, agent)
+	if err != nil {
+		t.Fatalf("controllerQueryRuntimeEnv(city-scoped agent): %v", err)
+	}
+	return cityScopedFanOutProbes(fx.cityPath, fx.cfg, agent, fx.cityPath, ownEnv, fx.suspended)
+}
+
+// TestCityScopedFanOutProbesBindEachProbeToItsOwnStore is the store-binding
+// half of the deployer gate's criterion-2 failure on ga-i7b6sl: a rig probe
+// reusing the city's env keeps BEADS_DIR=<city>/.beads, and BEADS_DIR beats
+// the working directory, so the probe command changes into the rig but still
+// reads the city store. Each rig probe must carry the six store keys gc hook
+// varies per leg -- BEADS_DIR, GC_STORE_ROOT, GC_STORE_SCOPE, GC_RIG,
+// GC_RIG_ROOT, GC_BEADS_PREFIX -- plus the rig's own Dolt endpoint, exactly as
+// the claim side (appendOneRigHookStore) builds them, so a scale_check leg and
+// a work_query leg for one rig are bound to the same store.
+func TestCityScopedFanOutProbesBindEachProbeToItsOwnStore(t *testing.T) {
+	fx := newFanOutStoreFixture(t)
+
+	probes := fx.fanOutProbes(t)
+
+	wantPort := map[string]string{"city": fx.cityPort, "riga": fanOutRigAPort, "rigb": fanOutRigBPort}
+	if len(probes) != len(wantPort) {
+		t.Fatalf("len(probes) = %d, want %d (city + riga + rigb; parked is suspended): %+v", len(probes), len(wantPort), probes)
+	}
+	for _, p := range probes {
+		if got, want := p.env["GC_DOLT_PORT"], wantPort[p.ref]; got != want {
+			t.Errorf("probe %s: GC_DOLT_PORT = %q, want %q (the probe's own Dolt endpoint)", p.ref, got, want)
+		}
+		if p.ref == "city" {
+			if got, want := p.env["BEADS_DIR"], filepath.Join(fx.cityPath, ".beads"); got != want {
+				t.Errorf("city probe: BEADS_DIR = %q, want %q", got, want)
+			}
+			continue
+		}
+		rigDir := filepath.Join(fx.cityPath, p.ref)
+		var prefix string
+		for i := range fx.cfg.Rigs {
+			if fx.cfg.Rigs[i].Name == p.ref {
+				prefix = fx.cfg.Rigs[i].EffectivePrefix()
+			}
+		}
+		for key, want := range map[string]string{
+			"BEADS_DIR":       filepath.Join(rigDir, ".beads"),
+			"GC_STORE_ROOT":   rigDir,
+			"GC_STORE_SCOPE":  "rig",
+			"GC_RIG":          p.ref,
+			"GC_RIG_ROOT":     rigDir,
+			"GC_BEADS_PREFIX": prefix,
+		} {
+			if got := p.env[key]; got != want {
+				t.Errorf("rig probe %s: %s = %q, want %q (the probe's own store, not the city's)", p.ref, key, got, want)
+			}
+		}
+	}
+}
+
+// TestEvaluatePoolFanOutSumRealRunnerSumsEachStoresOwnCount drives the real
+// shell runner (shellScaleCheck -> runShellCommand, real sh) with distinct
+// per-store counts. runShellCommand only changes the working directory, so
+// which store a probe reads is decided entirely by the BEADS_DIR in its env:
+// two correctly scoped rig probes plus the city must sum to 1+2+4, and the
+// suspended rig's 8 must not appear. A fan-out that hands the city env to every
+// rig reads the city's count three times and returns 3.
+func TestEvaluatePoolFanOutSumRealRunnerSumsEachStoresOwnCount(t *testing.T) {
+	fx := newFanOutStoreFixture(t)
+	probes := fx.fanOutProbes(t)
+	sem := make(chan struct{}, len(probes))
+	sp := scaleParams{Min: 0, Max: 100, Check: fanOutBeadsDirCheck}
+
+	got, errs := evaluatePoolFanOutSum("worker", sp, probes, shellScaleCheck, sem, true)
+
+	if len(errs) != 0 {
+		t.Fatalf("errs = %v, want none", errs)
+	}
+	if want := fanOutCityCount + fanOutRigACount + fanOutRigBCount; got != want {
+		t.Fatalf("fan-out sum = %d, want %d (city %d + riga %d + rigb %d, suspended rig's %d excluded); "+
+			"a sum of %d means every probe read the city store",
+			got, want, fanOutCityCount, fanOutRigACount, fanOutRigBCount, fanOutParkedCount, 3*fanOutCityCount)
+	}
+}
+
+// TestEvaluatePendingPoolsFanOutPrefixesEachProbeWithItsOwnDoltEndpoint is the
+// second city-bound setting the gate's "scope-specific transport settings"
+// names: evaluatePendingPools prefixes the check command with GC_DOLT_HOST and
+// GC_DOLT_PORT from the pool's own env, and a command-line assignment beats
+// the subprocess environment. Applied once from the city env, it re-points
+// every rig probe at the city's Dolt endpoint no matter what its env says. The
+// check reports which endpoint it was prefixed with, so each probe must see its
+// own: 1 (city) + 2 (riga) + 4 (rigb), where one shared city prefix gives 3.
+func TestEvaluatePendingPoolsFanOutPrefixesEachProbeWithItsOwnDoltEndpoint(t *testing.T) {
+	fx := newFanOutStoreFixture(t)
+	agent := &fx.cfg.Agents[0]
+	ownEnv, err := controllerQueryRuntimeEnv(fx.cityPath, fx.cfg, agent)
+	if err != nil {
+		t.Fatalf("controllerQueryRuntimeEnv(city-scoped agent): %v", err)
+	}
+	check := fmt.Sprintf(`sh -c 'case "$GC_DOLT_PORT" in %s) printf %d;; %s) printf %d;; %s) printf %d;; *) printf 0;; esac'`,
+		fx.cityPort, fanOutCityCount, fanOutRigAPort, fanOutRigACount, fanOutRigBPort, fanOutRigBCount)
+	pending := []poolEvalWork{{
+		agentIdx:  0,
+		sp:        scaleParams{Min: 0, Max: 100, Check: check},
+		poolDir:   fx.cityPath,
+		env:       ownEnv,
+		newDemand: true,
+		probes:    cityScopedFanOutProbes(fx.cityPath, fx.cfg, agent, fx.cityPath, ownEnv, fx.suspended),
+	}}
+
+	var stderr strings.Builder
+	counts, partials := evaluatePendingPools(fx.cfg, pending, shellScaleCheck, &stderr, nil)
+
+	if partials[0] {
+		t.Fatalf("pool reported partial; stderr = %q", stderr.String())
+	}
+	if want := fanOutCityCount + fanOutRigACount + fanOutRigBCount; counts[0] != want {
+		t.Fatalf("pool demand = %d, want %d (each probe prefixed with its own GC_DOLT_PORT); "+
+			"a sum of %d means every probe was prefixed with the city's endpoint", counts[0], want, 3*fanOutCityCount)
+	}
+}
+
+// recordingScaleCheckRunner is the real shell runner plus a record of every
+// directory it ran a probe in, so a test can prove a probe never ran at all.
+type recordingScaleCheckRunner struct {
+	mu   sync.Mutex
+	dirs []string
+}
+
+func (r *recordingScaleCheckRunner) run(command, dir string, env map[string]string) (string, error) {
+	r.mu.Lock()
+	r.dirs = append(r.dirs, dir)
+	r.mu.Unlock()
+	return shellScaleCheck(command, dir, env)
+}
+
+// TestCityScopedFanOutRigEnvFailureContributesZeroAndIsNeverRunUnderCityEnv
+// pins the best-effort federation contract for a rig whose own store env
+// cannot be resolved: the probe contributes 0 and its failure is reported, and
+// the check is never executed for it -- in particular not under the city's env,
+// which would read the city store a second time and silently inflate the total.
+func TestCityScopedFanOutRigEnvFailureContributesZeroAndIsNeverRunUnderCityEnv(t *testing.T) {
+	fx := newFanOutStoreFixture(t)
+	brokenDir := filepath.Join(fx.cityPath, "broken")
+	mustMkdirAll(t, filepath.Join(brokenDir, ".beads"))
+	// An explicit endpoint with no host or port is an invalid canonical
+	// config: this rig's store env cannot be resolved.
+	if err := os.WriteFile(filepath.Join(brokenDir, ".beads", "config.yaml"), []byte(`issue_prefix: bk
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeFanOutCount(t, brokenDir, fanOutBrokenCount)
+	fx.cfg.Rigs = append(fx.cfg.Rigs, config.Rig{Name: "broken", Path: brokenDir, Prefix: "bk"})
+
+	// Prove the fixture still errors -- otherwise this test silently stops
+	// exercising the unresolvable-env branch.
+	rigView := fx.cfg.Agents[0]
+	rigView.Dir = "broken"
+	if _, err := controllerQueryRuntimeEnv(fx.cityPath, fx.cfg, &rigView); err == nil {
+		t.Fatal("fixture did not produce a rig env error; the unresolvable-env branch is no longer reachable from this test")
+	}
+
+	probes := fx.fanOutProbes(t)
+	runner := &recordingScaleCheckRunner{}
+	sem := make(chan struct{}, len(probes))
+	sp := scaleParams{Min: 0, Max: 100, Check: fanOutBeadsDirCheck}
+
+	got, errs := evaluatePoolFanOutSum("worker", sp, probes, runner.run, sem, true)
+
+	if want := fanOutCityCount + fanOutRigACount + fanOutRigBCount; got != want {
+		t.Fatalf("fan-out sum = %d, want %d: the broken rig must contribute 0, not another read of "+
+			"the city store (%d) or its own count (%d)", got, want, want+fanOutCityCount, fanOutBrokenCount)
+	}
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "broken") {
+		t.Fatalf("errs = %v, want exactly one error naming the broken rig", errs)
+	}
+	for _, dir := range runner.dirs {
+		if dir == brokenDir {
+			t.Fatalf("the check ran in the broken rig's directory %q; a probe whose store env is unresolvable must not run at all", dir)
+		}
+	}
+}
+
+// TestBuildDesiredState_CityScopedCustomScaleCheckSumsEveryActiveStore is the
+// end-to-end proof through the production flow: buildDesiredState resolves the
+// city-scoped agent's env, builds the fan-out at the generic-pool call site,
+// and evaluatePendingPools runs it through the real shell. The pool's desired
+// slots are the sum of the stores' own counts -- city + riga + rigb, with the
+// suspended rig contributing nothing.
+func TestBuildDesiredState_CityScopedCustomScaleCheckSumsEveryActiveStore(t *testing.T) {
+	fx := newFanOutStoreFixture(t)
+	fx.cfg.Agents[0].ScaleCheck = fanOutBeadsDirCheck
+
+	desired := buildDesiredState("test-city", fx.cityPath, time.Now().UTC(), fx.cfg, runtime.NewFake(), nil, io.Discard)
+
+	slots := 0
+	for _, tp := range desired.State {
+		if tp.TemplateName == "worker" {
+			slots++
+		}
+	}
+	if want := fanOutCityCount + fanOutRigACount + fanOutRigBCount; slots != want {
+		t.Fatalf("worker desired slots = %d, want %d (city + riga + rigb, suspended rig excluded); "+
+			"%d means every rig probe read the city store", slots, want, 3*fanOutCityCount)
 	}
 }
