@@ -71,21 +71,25 @@ func TestDoltCompactStateCheckReportsStaleMarkersWithFixHints(t *testing.T) {
 		markerType string
 		db         string
 		reason     string
+		wantHint   string
 	}{
 		{
 			markerType: "compact-quarantine",
 			db:         "hq",
 			reason:     "post-flatten row count decreased",
+			wantHint:   "gc dolt compact --only-db hq",
 		},
 		{
 			markerType: "compact-pending-gc",
 			db:         "analytics",
 			reason:     "flatten succeeded but full GC failed",
+			wantHint:   "gc dolt compact --only-db analytics",
 		},
 		{
 			markerType: "compact-pending-push",
 			db:         "search",
 			reason:     "remote push failed after full GC",
+			wantHint:   "gc dolt compact --only-db search",
 		},
 	}
 
@@ -107,9 +111,33 @@ func TestDoltCompactStateCheckReportsStaleMarkersWithFixHints(t *testing.T) {
 				markerPath,
 				tc.reason,
 				compactStateOldCreatedAt,
+				tc.wantHint,
 			)
+			if strings.Contains(r.FixHint, "--resume") || strings.Contains(r.FixHint, "gc dolt push") {
+				t.Fatalf("FixHint contains unsupported command: %s", r.FixHint)
+			}
 		})
 	}
+}
+
+func TestDoltCompactStateCheckReportsBackupPushMarkerDatabase(t *testing.T) {
+	dir := newDoltCompactStateTestCity(t)
+	markerPath := writeDoltCompactStateMarker(t, dir, "compact-pending-push-backup", "warehouse.archive", "backup push failed", compactStateOldCreatedAt)
+	content := fmt.Sprintf("db=warehouse\nreason=backup push failed\ncreated_at=%s\n", compactStateOldCreatedAt)
+	if err := os.WriteFile(markerPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newTestDoltCompactStateCheck(dir).Run(&CheckContext{CityPath: dir})
+	if r.Status == StatusOK {
+		t.Fatal("status = OK, want warning for backup push marker")
+	}
+	assertDoltCompactStateMentions(t, r,
+		"compact-pending-push-backup",
+		"db=warehouse",
+		markerPath,
+		"gc dolt compact --only-db warehouse",
+	)
 }
 
 func TestDoltCompactStateCheckSurfacesUnreadableMarker(t *testing.T) {
