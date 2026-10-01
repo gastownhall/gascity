@@ -304,7 +304,12 @@ func evaluatePendingPools(
 		wg.Add(1)
 		sp := pw.sp
 		probeEnv := pw.env
-		sp.Check = prefixShellEnv(controllerQueryPrefixEnv(probeEnv), sp.Check)
+		if len(pw.probes) == 0 {
+			// A fan-out pool prefixes each probe from that probe's own env in
+			// evaluatePoolFanOutSum; one prefix from this pool's env would
+			// re-point every rig probe at the city's Dolt endpoint.
+			sp.Check = prefixShellEnv(controllerQueryPrefixEnv(probeEnv), sp.Check)
+		}
 		template := cfg.Agents[pw.agentIdx].QualifiedName()
 		agentName := cfg.Agents[pw.agentIdx].Name
 		agentIndex := pw.agentIdx
