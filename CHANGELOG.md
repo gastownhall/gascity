@@ -9,17 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
-- **Upgrade Beads (`bd`) to v1.3.1-rc.2.** v1.5.0 pins and is tested against
-  bd v1.3.1-rc.2 (`deps.env` `BD_VERSION` and the go.mod library), which keeps
-  bd v1.3.0's schema. It is a prerelease, so Homebrew (`brew install beads`)
-  and beads' install scripts still install bd v1.3.0: download `bd` from the
-  [v1.3.1-rc.2 release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.1-rc.2)
-  or run `go install github.com/steveyegge/beads/cmd/bd@v1.3.1-rc.2`. A city
+- **Upgrade Beads (`bd`) to v1.3.1.** v1.5.0 pins and is tested against bd
+  v1.3.1 (`deps.env` `BD_VERSION` and the go.mod library), a stable release
+  that keeps bd v1.3.0's schema. Install it with `brew upgrade beads` (or
+  `brew install beads`), from the
+  [v1.3.1 release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.1),
+  or with `go install github.com/steveyegge/beads/cmd/bd@v1.3.1`. A city
   that stays on bd v1.3.0 keeps working through the bd CLI, but gc refuses
   that bd for its native store (it is older than the linked library), and the
   proxied `bd backup` and closed-wisp `bd purge` steps of `mol-dog-backup` and
   `reaper` are reported as skipped. Read beads'
-  [v1.3.1-rc.2 upgrade notes](https://github.com/gastownhall/beads/blob/v1.3.1-rc.2/CHANGELOG.md#131-rc2---2026-09-29)
+  [v1.3.1 upgrade notes](https://github.com/gastownhall/beads/blob/v1.3.1/CHANGELOG.md#131---2026-09-30)
   before upgrading scripts that call bd directly. Do not move a city to a
   newer `bd` until a gc release pins it.
 - **`gc storage migrate` is experimental.** The command is new in v1.5.0 and
