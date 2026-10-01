@@ -10,7 +10,7 @@ import (
 // checks (inTestMode / shouldSpawnFlusher) to skip launching the detached
 // send-metrics child that otherwise races t.TempDir's RemoveAll for
 // $HOME/.beads/eventsData/eventkit.lock (gastownhall/beads#5032). The pinned
-// bd (v1.3.1-rc.2) honors it; the retrying removal below stays as the
+// bd (v1.3.1) honors it; the retrying removal below stays as the
 // backstop for a bd that does not.
 //
 // bd's storage layer reads the same flag as a hard guard, so it is not free for
