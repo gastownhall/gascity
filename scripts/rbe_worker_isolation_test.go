@@ -132,12 +132,17 @@ func TestRBEWorkerScriptIsolationConfig(t *testing.T) {
 		// The launcher refuses actions while this chain is missing: it must name
 		// the table and chain the nft ruleset below creates.
 		"EGRESS_CHAIN": `"inet rbe_action output"`,
-		// The image's world-writable directories, read-only inside actions.
-		"RO_DIRS": `"$ro_dirs"`,
+		// / and every other mount but the action's own are read-only inside
+		// actions, whatever the image leaves world-writable.
+		"ROOT_RO": "1",
 	} {
 		if env[k] != want {
 			t.Errorf("rbe-action.env %s = %q, want %q", k, env[k], want)
 		}
+	}
+	// The launcher refuses RO_DIRS (ROOT_RO=1 replaced it).
+	if _, ok := env["RO_DIRS"]; ok {
+		t.Errorf("rbe-action.env must not set RO_DIRS (the launcher refuses it): %q", env["RO_DIRS"])
 	}
 	// NativeLink kills the launcher at max_action_timeout, which must be the
 	// launcher's backstop, beyond the longest action it allows.
@@ -299,8 +304,6 @@ func TestRBEWorkerScriptGatesNativeLinkOnIsolation(t *testing.T) {
 		`sudo install -m 0755 tools/rbe/rbe-action-launch "$LIB/launch"`,
 		`sudo install -m 0755 tools/rbe/rbe-action-sweep "$LIB/sweep"`,
 		`sudo install -m 0755 tools/rbe/rbe-action-selftest "$LIB/selftest"`,
-		// RO_DIRS is discovered before rbe-action.env is written.
-		`found=$(sudo timeout 300 find / -xdev -path "$MASK_ROOT" -prune -o -type d -perm -0002 -print 2>/dev/null) || rc=$?`,
 		`sudo tee /etc/rbe-west/rbe-action.env >/dev/null <<-EOF`,
 		`sudo chmod 0440 /etc/sudoers.d/rbe-action && sudo visudo -cq`,
 		`sudo "$LIB/selftest"`,
@@ -336,17 +339,19 @@ func TestRBEWorkerScriptGatesNativeLinkOnIsolation(t *testing.T) {
 // Run 36861390718 died without a word right after the script took world write
 // off the image's shared directories: the runner (or Blacksmith's agent)
 // relies on them. Isolation leaves the host's permissions alone (the launcher
-// makes those directories read-only inside each action, RO_DIRS), and logs
-// every phase so a silent death still shows where it happened.
+// makes / and every other mount read-only inside each action, ROOT_RO=1), and
+// logs every phase so a silent death still shows where it happened. The two
+// runs after that died listing world-writable directories one by one (names
+// with spaces in nvm and CodeQL): nothing is listed any more.
 func TestRBEWorkerScriptLeavesHostPermissionsAlone(t *testing.T) {
 	script := readFile(t, repoRoot(t), rbeWorkerScript)
-	for _, bad := range []string{"chmod o-w", "chmod -R", "xargs -r -d '\\n' sudo chmod"} {
+	for _, bad := range []string{"chmod o-w", "chmod -R", "xargs -r -d '\\n' sudo chmod", "-perm -0002", "RO_DIRS"} {
 		if strings.Contains(script, bad) {
-			t.Errorf("%s must not change the image's permissions (%q); RO_DIRS makes them read-only for actions", rbeWorkerScript, bad)
+			t.Errorf("%s must not change or list the image's world-writable directories (%q); ROOT_RO=1 makes them read-only for actions", rbeWorkerScript, bad)
 		}
 	}
 	at := 0
-	for _, phase := range []string{"packages", "users", "compile", "install", "ro-dirs", "sudoers", "nft", "render", "selftest", "probe"} {
+	for _, phase := range []string{"packages", "users", "compile", "install", "env", "sudoers", "nft", "render", "selftest", "probe"} {
 		want := "echo \"isolation: " + phase + "\"\n"
 		i := strings.Index(script[at:], want)
 		if i < 0 {

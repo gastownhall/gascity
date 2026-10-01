@@ -95,9 +95,10 @@ slots=$(($(nproc) / 2)); [ "$slots" -ge 1 ] || slots=1
 # longer take the worker cert, so it cannot write the action cache or register
 # workers. The runner's own sudo (NOPASSWD) runs the root launcher; slot egress
 # is filtered by nftables (NETNS=0). Nothing of the image changes for the
-# runner: its world-writable directories stay so, read-only inside actions
-# (RO_DIRS). Each phase is logged ("isolation: <phase>") so a step that dies
-# without an error still shows where.
+# runner: its world-writable directories stay so; inside an action / and
+# every other mount but the action's own are read-only (ROOT_RO=1). Each
+# phase is logged ("isolation: <phase>") so a step that dies without an error
+# still shows where.
 LIB=/usr/local/libexec/rbe-action
 isolation='{}'
 if [ "$ACTION_ISOLATION" = 1 ]; then
@@ -136,25 +137,14 @@ if [ "$ACTION_ISOLATION" = 1 ]; then
 	sudo install -m 0755 tools/rbe/rbe-action-launch "$LIB/launch"
 	sudo install -m 0755 tools/rbe/rbe-action-sweep "$LIB/sweep"
 	sudo install -m 0755 tools/rbe/rbe-action-selftest "$LIB/selftest"
-	# No directory on / but /tmp and /var/tmp (private per action) and
-	# TMPFS_DIRS may be writable by every action, or one could leave files for
-	# a later one. The image's world-writable directories (tool caches the
-	# runner or Blacksmith's agent may write) stay as they are on the host;
-	# the launcher mounts each read-only inside every action (RO_DIRS, in this
-	# order: parents first). The full selftest checks no action can write one.
-	echo "isolation: ro-dirs"
-	started=$SECONDS rc=0
-	# MASK_ROOT ($HOME) is replaced by an empty tmpfs in every action, so
-	# nothing under it needs RO_DIRS (and it carries odd names, e.g. nvm's
-	# "test/fast/Listing paths").
-	found=$(sudo timeout 300 find / -xdev -path "$MASK_ROOT" -prune -o -type d -perm -0002 -print 2>/dev/null) || rc=$?
-	[ "$rc" != 124 ] || { echo "isolation: find / -xdev took over 300 s" >&2; exit 1; }
-	ro_dirs=$(grep -vxE '/tmp|/var/tmp|/run/lock|/var/crash' <<<"$found" | LC_ALL=C sort || true)
-	# rbe-action.env is shell, and the launcher splits RO_DIRS: plain paths only.
-	odd=$(grep -vxE '/[A-Za-z0-9._+@/-]+' <<<"$ro_dirs" | grep -v '^$' || true)
-	[ -z "$odd" ] || { echo "isolation: world-writable directories with unexpected names: $odd" >&2; exit 1; }
-	ro_dirs=$(paste -sd' ' - <<<"$ro_dirs")
-	echo "isolation: read-only in actions (RO_DIRS, $((SECONDS - started)) s): ${ro_dirs:-none}"
+	# No directory but the action's own (its outputs, /tmp, /var/tmp, HOME,
+	# /dev/shm, TMPFS_DIRS: private per action) may be writable by every
+	# action, or one could leave files for a later one. The image's
+	# world-writable directories (tool caches the runner or Blacksmith's agent
+	# may write, any names) stay as they are on the host; ROOT_RO=1 makes /
+	# and every other mount read-only inside each action, so nothing has to be
+	# listed. The full selftest checks no action can write one.
+	echo "isolation: env"
 	sudo tee /etc/rbe-west/rbe-action.env >/dev/null <<-EOF
 		WORK_ROOT=$WORK_ROOT
 		MASK_ROOT=$MASK_ROOT
@@ -168,7 +158,7 @@ if [ "$ACTION_ISOLATION" = 1 ]; then
 		NETNS=0
 		SHM_SIZE=8g
 		TMPFS_DIRS="/run/lock /var/crash"
-		RO_DIRS="$ro_dirs"
+		ROOT_RO=1
 		EGRESS_CHAIN="inet rbe_action output"
 		PROBE_DENY="169.254.169.254:80"
 		WORKER_JSON=$ROOT/worker.json
@@ -247,7 +237,7 @@ jq -n --arg host "grpcs://${RBE_WEST_HOST}:443" --arg root "$ROOT" --arg store "
 if [ "$ACTION_ISOLATION" = 1 ]; then
 	# Full selftest (a few seconds): it also checks worker.json routes actions
 	# through the entrypoint, the timeout path, and that an action can write
-	# no shared directory (RO_DIRS read-only, TMPFS_DIRS private).
+	# no shared directory on any mount (ROOT_RO=1, TMPFS_DIRS private).
 	echo "isolation: selftest"
 	sudo "$LIB/selftest"
 	LC_ALL=C sudo -l -U rbe-a00 2>&1 | grep -q 'not allowed to run sudo' || { echo "isolation: slot users must have no sudo" >&2; exit 1; }
