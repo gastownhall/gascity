@@ -167,6 +167,15 @@ func (c *CachingStore) probeConditionalWriteCapability() (bool, string) {
 	return false, "backing store does not implement conditional writes"
 }
 
+// conditionalWritesStoreOpen reports whether the backing store is still open:
+// cache and backing are one store instance for liveness, as for capability.
+func (c *CachingStore) conditionalWritesStoreOpen() error {
+	if liveness, ok := c.conditionalBacking().(conditionalWritesLiveness); ok {
+		return liveness.conditionalWritesStoreOpen()
+	}
+	return nil
+}
+
 // UpdateIfMatch forwards the fenced update to the backing store's conditional
 // writer and maintains the cache: on success it evicts the entry and installs
 // the refetched row when that row reflects the write; on failure it acts per

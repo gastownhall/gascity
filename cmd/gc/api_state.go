@@ -1259,6 +1259,11 @@ func (cs *controllerState) preflightConditionalWrites() {
 		probe("rig/"+rigName, store)
 	}
 	probe("city", cs.cityBeadStore)
+	// A split city's relocated classes share one binding engine; probe it
+	// once, not once per class it serves.
+	for _, store := range cs.storageRoutes.distinctEngines() {
+		probe("binding/"+cs.storageRoutes.binding, store)
+	}
 }
 
 // rolloutWarnf routes noteRolloutDrift's transition lines to the injected sink
