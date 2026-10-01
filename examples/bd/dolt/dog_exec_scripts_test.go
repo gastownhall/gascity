@@ -258,6 +258,8 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 		"GC_CITY_RUNTIME_DIR",
 		"GC_DOLT_COMPACT_BACKUP_REMOTE",
 		"GC_DOLT_COMPACT_BACKUP_TIMEOUT_SECS",
+		"GC_DOLT_BACKUP_LOCK_FILE",
+		"GC_DOLT_BACKUP_LOCK_WAIT_SECONDS",
 		"GC_DOLT_COMPACT_MIN_FREE_BYTES",
 		"GC_FAKE_DF_MODE",
 	),
@@ -6534,6 +6536,73 @@ exec "$@"
 	}
 }
 
+func TestCompactScriptBackupRefusesExternalLocalEndpoint(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	externalRoot := filepath.Join(fixture.cityPath, "external-target")
+	if err := os.MkdirAll(filepath.Join(externalRoot, "beads", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir external target: %v", err)
+	}
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_MANAGED_LOCAL=0",
+		"GC_DOLT_HOST=127.0.0.2",
+		"GC_DOLT_DATA_DIR="+externalRoot,
+		"GC_DOLT_STATE_FILE="+filepath.Join(externalRoot, "dolt-state.json"),
+		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+	)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+		t.Fatalf("backup against an external-local endpoint should exit 2: got err=%v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "backup sync is unsupported for an external-local Dolt endpoint") {
+		t.Fatalf("expected external backup refusal:\n%s", out)
+	}
+}
+
+func TestCompactScriptBackupRefusesConcurrentBackupSync(t *testing.T) {
+	flockPath, err := exec.LookPath("flock")
+	if err != nil {
+		t.Skipf("flock not found: %v", err)
+	}
+	fixture := newCompactScriptFixture(t)
+	lockPath := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "backup-sync.lock")
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		t.Fatalf("mkdir lock dir: %v", err)
+	}
+	readyPath := filepath.Join(fixture.binDir, "backup-lock-ready")
+	holder := exec.Command(flockPath, "-n", lockPath, "sh", "-c", `touch "$1"; sleep 20`, "hold", readyPath)
+	if err := holder.Start(); err != nil {
+		t.Fatalf("start backup lock holder: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = holder.Process.Kill()
+		_ = holder.Wait()
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(readyPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("backup lock holder did not become ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
+		"GC_DOLT_BACKUP_LOCK_FILE="+lockPath,
+		"GC_DOLT_BACKUP_LOCK_WAIT_SECONDS=0",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+	)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("concurrent backup sync should exit 1: got err=%v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "backup sync lock is already held") {
+		t.Fatalf("expected backup lock refusal:\n%s", out)
+	}
+}
+
 func TestCompactScriptDiskPreflightSufficientProceedsNormally(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "success")
@@ -6598,6 +6667,29 @@ func TestCompactScriptDiskPreflightSkipsMissingExternalDataDirectory(t *testing.
 	}
 	if strings.Contains(out, "disk pre-flight probe failed") {
 		t.Fatalf("missing external data directory must not fail disk preflight:\n%s", out)
+	}
+}
+
+func TestCompactScriptDiskPreflightSkipsExternalDataDirectory(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	externalRoot := filepath.Join(fixture.cityPath, "external-target")
+	if err := os.MkdirAll(filepath.Join(externalRoot, "beads", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir external target: %v", err)
+	}
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_MANAGED_LOCAL=0",
+		"GC_DOLT_HOST=127.0.0.2",
+		"GC_DOLT_DATA_DIR="+externalRoot,
+		"GC_DOLT_STATE_FILE="+filepath.Join(externalRoot, "dolt-state.json"),
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_DRY_RUN=1",
+		"GC_FAKE_DF_MODE=df_probe_failure",
+	)
+	if err != nil {
+		t.Fatalf("external compact should skip local disk preflight: %v\nout=%s", err, out)
+	}
+	if strings.Contains(out, "disk pre-flight probe failed") {
+		t.Fatalf("external data directory must not run disk preflight:\n%s", out)
 	}
 }
 

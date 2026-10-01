@@ -8,6 +8,8 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
+const shortTempRootMaxLen = 40
+
 // CanonicalPath returns the production path-normalized form used for
 // comparisons. This keeps tests stable on macOS where /tmp and /var can be
 // reported through /private aliases.
@@ -25,12 +27,16 @@ func AssertSamePath(t *testing.T, got, want string) {
 	}
 }
 
-// ShortTempDir returns a test-owned directory under the disk-backed short root.
+// ShortTempDir returns a test-owned directory under a short root.
 func ShortTempDir(t *testing.T, prefix string) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/var/tmp", prefix)
+	root := os.TempDir()
+	if len(root) > shortTempRootMaxLen {
+		root = "/var/tmp"
+	}
+	dir, err := os.MkdirTemp(root, prefix)
 	if err != nil {
-		t.Fatalf("MkdirTemp(/var/tmp, %q): %v", prefix, err)
+		t.Fatalf("MkdirTemp(%q, %q): %v", root, prefix, err)
 	}
 	t.Cleanup(func() {
 		SaveFailureDiagnostics(t, dir)

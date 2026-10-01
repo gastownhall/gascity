@@ -3781,11 +3781,33 @@ backup_sync_database() {
     return 1
   fi
 
+  if ! command -v flock >/dev/null 2>&1; then
+    printf 'compact: db=%s backup sync requires flock; aborting compaction\n' "$db" >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$compact_backup_lock_file")" || {
+    printf 'compact: db=%s unable to create backup sync lock directory; aborting compaction\n' "$db" >&2
+    return 1
+  }
+  if ! exec 8>"$compact_backup_lock_file"; then
+    printf 'compact: db=%s unable to open backup sync lock; aborting compaction\n' "$db" >&2
+    return 1
+  fi
+  if ! flock -w "$compact_backup_lock_wait" 8; then
+    printf 'compact: db=%s backup sync lock is already held; aborting compaction\n' "$db" >&2
+    exec 8>&-
+    return 1
+  fi
+
   local sync_out
   if sync_out=$(cd "$db_dir" && run_bounded "$compact_backup_timeout" dolt backup sync "$remote" 2>&1); then
+    flock -u 8
+    exec 8>&-
     printf 'compact: db=%s backup sync to remote=%s -- ok\n' "$db" "$remote" >&2
     return 0
   else
+    flock -u 8
+    exec 8>&-
     printf 'compact: db=%s backup sync to remote=%s failed; aborting compaction\n' \
       "$db" "$remote" >&2
     [ -n "$sync_out" ] && printf '%s\n' "$sync_out" >&2 || true
@@ -3806,7 +3828,7 @@ disk_preflight() {
       ;;
   esac
 
-  if [ "${GC_DOLT_MANAGED_LOCAL:-}" != "1" ] && [ ! -d "$DOLT_DATA_DIR" ]; then
+  if [ "$explicit_external_local_dolt" = "1" ]; then
     return 0
   fi
 
@@ -3894,8 +3916,6 @@ main() {
     exit 0
   fi
 
-  disk_preflight
-
   compact_backup_remote="${GC_DOLT_COMPACT_BACKUP_REMOTE:-}"
   if [ -n "$compact_backup_remote" ] && ! valid_remote_name "$compact_backup_remote"; then
     printf 'compact: GC_DOLT_COMPACT_BACKUP_REMOTE=%s is invalid\n' \
@@ -3915,6 +3935,18 @@ main() {
       exit 2
       ;;
   esac
+  if [ "$explicit_external_local_dolt" = "1" ] && [ -n "$compact_backup_remote" ]; then
+    printf 'compact: backup sync is unsupported for an external-local Dolt endpoint\n' >&2
+    exit 2
+  fi
+  compact_backup_lock_file="${GC_DOLT_BACKUP_LOCK_FILE:-$GC_CITY_PATH/.gc/runtime/packs/dolt/backup-sync.lock}"
+  compact_backup_lock_wait="${GC_DOLT_BACKUP_LOCK_WAIT_SECONDS:-5}"
+  case "$compact_backup_lock_wait" in
+    ''|*[!0-9]*) compact_backup_lock_wait=5 ;;
+  esac
+
+  disk_preflight
+
   _meta_tmp=$(mktemp)
   metadata_files > "$_meta_tmp"
 
