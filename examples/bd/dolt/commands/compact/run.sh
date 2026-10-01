@@ -2883,6 +2883,11 @@ flatten_database() {
     return 1
   fi
 
+  if [ "$pending_gc_recovery_only" = "1" ]; then
+    printf 'compact: db=%s pending_gc marker disappeared — refusing non-recovery work under critical disk\n' "$db" >&2
+    return 0
+  fi
+
   if has_compact_marker "$pending_push_dir" "$db" && no_sync_database "$db"; then
     # The marker records a push this database must never make. Keeping it would
     # block flatten forever: the retry branch below returns before the flatten

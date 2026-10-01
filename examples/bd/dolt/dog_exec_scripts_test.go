@@ -254,6 +254,7 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 		"GC_FAKE_DOLT_STATE_FILE",
 		"GC_FAKE_DOLT_HASH_STATE_FILE",
 		"GC_FAKE_DOLT_TAG_STATE_FILE",
+		"GC_FAKE_PENDING_GC_MARKER",
 		"GC_PACK_STATE_DIR",
 		"GC_CITY_RUNTIME_DIR",
 		"GC_DOLT_COMPACT_MIN_FREE_BYTES",
@@ -519,6 +520,7 @@ count_file="${GC_FAKE_DOLT_COUNT_FILE:-}"
 state_file="${GC_FAKE_DOLT_STATE_FILE:-}"
 hash_state_file="${GC_FAKE_DOLT_HASH_STATE_FILE:-}"
 tag_state_file="${GC_FAKE_DOLT_TAG_STATE_FILE:-}"
+pending_gc_marker="${GC_FAKE_PENDING_GC_MARKER:-}"
 query=""
 db=""
 while [ "$#" -gt 0 ]; do
@@ -898,6 +900,9 @@ case "$query" in
     exit 0
     ;;
   *"SELECT HASHOF('HEAD')"*)
+    if [ "$mode" = "pending_gc_marker_disappears" ] && [ -n "$pending_gc_marker" ]; then
+      rm -f "$pending_gc_marker"
+    fi
     if [ "$mode" = "second_db_post_flatten_head_empty" ] && [ "$db" = "zed" ]; then
       calls_file="$state_file.$db-head-calls"
       calls=0
@@ -1365,7 +1370,7 @@ case "$query" in
         exit 0
         ;;
     esac
-    if [ "$mode" = "quarantine_autoclear_confined" ]; then
+    if [ "$mode" = "quarantine_autoclear_confined" ] || [ "$mode" = "pending_gc_marker_disappears" ]; then
       case "$query" in
         *"rows_deleted"*|*"rows_modified"*)
           print_cell 0
@@ -6407,6 +6412,87 @@ func TestCompactScriptDiskPreflightAllowsOnlySelectedPendingGCRecovery(t *testin
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("successful pending-GC recovery did not clear marker: %v", err)
+	}
+}
+
+func TestCompactScriptDiskPreflightRejectsMismatchedPendingGCRecovery(t *testing.T) {
+	tests := []struct {
+		name       string
+		markerName string
+		args       []string
+	}{
+		{name: "different database", markerName: "zed", args: []string{"--only-db", "beads"}},
+		{name: "multiple databases", markerName: "beads", args: []string{"--only-db", "beads", "--only-db", "zed"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", tt.markerName)
+			if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+				t.Fatalf("mkdir pending-GC marker directory: %v", err)
+			}
+			if err := os.WriteFile(marker, []byte("db="+tt.markerName+"\nreason=flatten succeeded but full GC failed\n"), 0o600); err != nil {
+				t.Fatalf("write pending-GC marker: %v", err)
+			}
+
+			out, err := fixture.runWithArgs(t, "success", tt.args, "GC_FAKE_DF_MODE=df_critical")
+			if err != nil {
+				t.Fatalf("mismatched recovery selection should stop safely: %v\nout=%s", err, out)
+			}
+			logData, readErr := os.ReadFile(fixture.doltLog)
+			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+				t.Fatalf("read dolt log: %v", readErr)
+			}
+			if strings.Contains(string(logData), "DOLT_RESET") || strings.Contains(string(logData), "DOLT_GC") {
+				t.Fatalf("mismatched recovery selection must not start work:\n%s", logData)
+			}
+		})
+	}
+}
+
+func TestCompactScriptDiskPreflightDoesNotFlattenAfterPendingGCMarkerDisappears(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "same_count_db_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("setup run should create a quarantine marker:\n%s", firstOut)
+	}
+	if err := os.Truncate(fixture.doltLog, 0); err != nil {
+		t.Fatalf("truncate dolt log after setup: %v", err)
+	}
+	for path, value := range map[string]string{
+		fixture.stateFile:     "headcommit\n",
+		fixture.hashStateFile: "hash-before\n",
+		fixture.tagStateFile:  "rootcommit\n",
+	} {
+		if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
+			t.Fatalf("reset fixture state %s: %v", path, err)
+		}
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatalf("mkdir pending-GC marker directory: %v", err)
+	}
+	if err := os.WriteFile(marker, []byte("db=beads\nreason=flatten succeeded but full GC failed\n"), 0o600); err != nil {
+		t.Fatalf("write pending-GC marker: %v", err)
+	}
+
+	out, err := fixture.runWithArgs(t, "pending_gc_marker_disappears", []string{"--only-db", "beads"},
+		"GC_FAKE_DF_MODE=df_critical", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_FAKE_PENDING_GC_MARKER="+marker)
+	if err != nil {
+		t.Fatalf("critical-disk recovery should stop safely after marker removal: %v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "quarantine marker auto-cleared") {
+		t.Fatalf("test did not reach post-preflight marker removal window:\n%s", out)
+	}
+	if !strings.Contains(out, "refusing non-recovery work under critical disk") {
+		t.Fatalf("critical-disk recovery did not stop after marker removal:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(logData), "DOLT_RESET") || strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("critical-disk recovery must not start work after marker removal:\n%s", logData)
 	}
 }
 
