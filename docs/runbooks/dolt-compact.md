@@ -19,17 +19,9 @@ The `mol-dog-compactor` order fires `gc dolt compact` every 2 hours (configurabl
 |---------|---------|---------|
 | `GC_DOLT_COMPACT_THRESHOLD_COMMITS` | `2000` | Skip flatten when the compactable commit count is below this. |
 | `GC_DOLT_COMPACT_MIN_FREE_BYTES` | `5368709120` (5 GiB) | Skip compact if disk free falls below this. Set to `0` to disable. |
-| `GC_DOLT_COMPACT_BACKUP_REMOTE` | _(none)_ | When set, runs `dolt backup sync <remote>` before an eligible database is flattened or bare-GC'd. On failure, compact aborts. |
-| `GC_DOLT_COMPACT_BACKUP_TIMEOUT_SECS` | `300` | Wall-clock timeout for each backup sync call. |
 | `GC_DOLT_COMPACT_CALL_TIMEOUT_SECS` | `1800` | Hard timeout for each SQL CALL (flatten or GC). |
 
-## Optional Safety Features
-
-### Pre-compact backup
-
-Set `GC_DOLT_COMPACT_BACKUP_REMOTE=<remote-name>` to snapshot each eligible database before compaction changes it. If backup fails, compact aborts rather than proceeding without a rollback point. Requires a named dolt backup remote configured in each database directory. Dry-run reports the backup it would sync without invoking `dolt backup sync`.
-
-### Disk preflight
+## Disk Preflight
 
 Before compacting, `gc dolt compact` checks free space on the Dolt data volume. If free bytes fall below `GC_DOLT_COMPACT_MIN_FREE_BYTES` (default 5 GiB) the run is skipped and retried at the next 2-hour interval. This prevents compaction from aggravating a full-disk situation. Set to `0` to disable.
 
@@ -50,7 +42,6 @@ If the post-flatten integrity check detects unexpected data changes, the databas
 | Symptom | Meaning | Action |
 |---------|---------|--------|
 | `compact: disk CRITICAL` in logs | Disk free below `GC_DOLT_COMPACT_MIN_FREE_BYTES`; compact skipped. | Free disk space; compact retries automatically at next interval. |
-| `compact: db=<name> backup sync … failed` | Pre-compact backup failed; compact aborted. | Check backup remote reachability; fix remote and wait for next run. |
 | Database appears in quarantine log | Post-flatten integrity check failed; DB flagged for manual review. | See [Recover from Dolt Bloat](/troubleshooting/dolt-bloat-recovery) for manual GC procedure. |
 
 ## See Also
