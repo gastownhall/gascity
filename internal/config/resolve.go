@@ -16,6 +16,42 @@ var (
 	ErrUnknownOption = errors.New("unknown option")
 )
 
+// ProviderNotInPATHError is the structured form of an ErrProviderNotInPATH
+// failure: it names the provider reference and the command that did not
+// resolve, so callers can act on the two identifiers instead of scraping them
+// back out of a formatted string.
+//
+// The motivating bug (ob-woag): a missing provider binary dropped every
+// session using that provider from the controller's desired state, and the
+// only place the cause survived was this error's *text*, printed to a
+// supervisor log nobody reads. `gc doctor` passed, `gc start` reported
+// success, the reconciler trace computed desired_session_count=0 without the
+// word "provider" appearing anywhere in it, and .gc/events.jsonl had no
+// record. Both new diagnostics — the doctor check and the reconciler's
+// dropped-session report — need the provider name and the command as data,
+// which is why this type exists rather than another fmt.Errorf.
+//
+// Error() reproduces the previous fmt.Errorf layout byte for byte and Unwrap
+// returns ErrProviderNotInPATH, so every existing errors.Is check and every
+// message assertion keeps working.
+type ProviderNotInPATHError struct {
+	// Provider is the provider reference as configured (the [providers.X]
+	// key or a built-in preset name), not the resolved binary.
+	Provider string
+	// Command is the binary that lookPath failed on — pathCheckBinary(),
+	// which is the first word of a multi-word command.
+	Command string
+}
+
+// Error renders the same text the sentinel-wrapping fmt.Errorf produced.
+func (e *ProviderNotInPATHError) Error() string {
+	return fmt.Sprintf("%s: provider %q command %q", ErrProviderNotInPATH.Error(), e.Provider, e.Command)
+}
+
+// Unwrap keeps errors.Is(err, ErrProviderNotInPATH) true for every caller
+// that predates the typed form.
+func (e *ProviderNotInPATHError) Unwrap() error { return ErrProviderNotInPATH }
+
 // LookPathFunc is the signature for exec.LookPath (or a test fake).
 type LookPathFunc func(string) (string, error)
 
@@ -167,7 +203,7 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 		if spec, ok := cityProviders[name]; ok {
 			if spec.Command != "" {
 				if _, err := lookPath(spec.pathCheckBinary()); err != nil {
-					return nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, spec.pathCheckBinary())
+					return nil, &ProviderNotInPATHError{Provider: name, Command: spec.pathCheckBinary()}
 				}
 			}
 			// Phase 2+: if the spec has explicit Base declared,
@@ -188,7 +224,7 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 				merged := resolvedChainToSpec(resolved, spec)
 				if merged.Command != "" {
 					if _, err := lookPath(merged.pathCheckBinary()); err != nil {
-						return nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, merged.pathCheckBinary())
+						return nil, &ProviderNotInPATHError{Provider: name, Command: merged.pathCheckBinary()}
 					}
 				}
 				return &merged, nil
@@ -217,7 +253,7 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 	builtins := BuiltinProviders()
 	if spec, ok := builtins[name]; ok {
 		if _, err := lookPath(spec.pathCheckBinary()); err != nil {
-			return nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, spec.pathCheckBinary())
+			return nil, &ProviderNotInPATHError{Provider: name, Command: spec.pathCheckBinary()}
 		}
 		return &spec, nil
 	}
