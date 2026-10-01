@@ -384,6 +384,17 @@ resource_owner = "the one go run subprocess is confined to TestAddTestenvImportS
 migration_target = "P0.4b"
 expires = "2026-10-31"
 
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestRBEWorkerJSONIsolationOffMatchesPreO1"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the OSS worker rollback-config proof is a checked Medium subprocess owner"
+resource_owner = "the one jq subprocess is confined to TestRBEWorkerJSONIsolationOffMatchesPreO1, which exists to render tools/rbe/blacksmith-worker.sh's own jq program with isolation off and compare it with the pre-O1 worker.json: the program is jq, so only jq can prove the rollback renders the same config"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
 # A reviewed-hermetic-body row is narrower than a Small test declaration. It
 # proves that the exact untagged test body and statically reachable
 # receiverless same-package helpers contain none of the cataloged resources.

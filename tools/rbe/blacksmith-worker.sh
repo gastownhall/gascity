@@ -111,6 +111,11 @@ if [ "$ACTION_ISOLATION" = 1 ]; then
 	done
 	sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y -qq \
 		gcc libc6-dev nftables file util-linux procps >/dev/null
+	# The nft rules cover uids 59000-59063 whatever owns them: anything already
+	# there (an image user or group) would be filtered like a slot, and a slot
+	# sharing its uid or gid would share its files.
+	taken=$(awk -F: '$3 >= 59000 && $3 <= 59063 { print FILENAME ": " $1 " (" $3 ")" }' /etc/passwd /etc/group)
+	[ -z "$taken" ] || { echo "isolation: uids/gids 59000-59063 must be free for the slot users, taken: $taken" >&2; exit 1; }
 	for i in $(seq 0 $((slots - 1))); do
 		u=$(printf 'rbe-a%02d' "$i") id=$((SLOT_UID0 + i))
 		sudo groupadd --system --gid "$id" "$u"
@@ -137,15 +142,32 @@ if [ "$ACTION_ISOLATION" = 1 ]; then
 		NETNS=0
 		SHM_SIZE=8g
 		TMPFS_DIRS="/run/lock /var/crash"
+		EGRESS_CHAIN="inet rbe_action output"
 		PROBE_DENY="169.254.169.254:80"
 		WORKER_JSON=$ROOT/worker.json
 	EOF
 	printf 'Defaults!%s/launch !pam_session, !log_allowed, !use_pty, !lecture\n' "$LIB" |
 		sudo tee /etc/sudoers.d/rbe-action >/dev/null
 	sudo chmod 0440 /etc/sudoers.d/rbe-action && sudo visudo -cq
-	# Slot users never reach link-local (cloud metadata), private/CGNAT ranges or
-	# IPv6 beyond loopback; other destinations are counted for the NETNS=1 decision.
-	sudo nft -f - <<-'EOF'
+	# Slot DNS: a loopback nameserver (systemd-resolved's 127.0.0.53, which
+	# queries upstream as itself) needs nothing. A non-loopback IPv4 one, e.g. a
+	# private VPC resolver, is allowed to slots on port 53 alone; with neither
+	# (IPv6 only), slots could not resolve at all: refuse. No nameserver line:
+	# glibc uses 127.0.0.1.
+	nameservers=$(awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf)
+	dns_v4=$(grep -E '^[0-9]+(\.[0-9]+){3}$' <<<"$nameservers" | grep -v '^127\.' | paste -sd, - | sed 's/,/, /g' || true)
+	dns_allow=
+	if [ -n "$dns_v4" ]; then
+		dns_allow="meta skuid 59000-59063 ip daddr { $dns_v4 } meta l4proto { tcp, udp } th dport 53 accept"
+	elif [ -n "$nameservers" ] && ! grep -qE '^(127\.|::1$)' <<<"$nameservers"; then
+		echo "isolation: no nameserver in /etc/resolv.conf that slot users can reach (loopback or IPv4): $nameservers" >&2
+		exit 1
+	fi
+	# Slot users never reach link-local (cloud metadata), private/CGNAT,
+	# reserved or multicast ranges, or IPv6 beyond loopback (ff00::/8
+	# included), as on the MAIN worker; other destinations are counted for the
+	# NETNS=1 decision. Loopback first: slots' own servers and the local resolver.
+	sudo nft -f - <<-EOF
 		table inet rbe_action
 		delete table inet rbe_action
 		table inet rbe_action {
@@ -153,10 +175,11 @@ if [ "$ACTION_ISOLATION" = 1 ]; then
 			chain output {
 				type filter hook output priority 0; policy accept;
 				oif lo accept
+				$dns_allow
 				meta skuid 59000-59063 meta nfproto ipv6 meta l4proto tcp reject with tcp reset
 				meta skuid 59000-59063 meta nfproto ipv6 reject with icmpx admin-prohibited
-				meta skuid 59000-59063 ip daddr { 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16 } meta l4proto tcp reject with tcp reset
-				meta skuid 59000-59063 ip daddr { 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16 } reject with icmpx admin-prohibited
+				meta skuid 59000-59063 ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/3 } meta l4proto tcp reject with tcp reset
+				meta skuid 59000-59063 ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/3 } reject with icmpx admin-prohibited
 				meta skuid 59000-59063 meta l4proto { tcp, udp } ct state new update @slot_dst { ip daddr . meta l4proto . th dport }
 			}
 		}

@@ -11,7 +11,10 @@
 #                  still marked busy (its launcher was SIGKILLed: NativeLink
 #                  cancel or backstop timeout), kill the slot's processes,
 #                  remove that action directory (NativeLink already failed to)
-#                  and clear the marker. Drop claims of directories that are gone.
+#                  and clear the marker. Remove the directories of orphans/<op>:
+#                  killed launchers whose slot the next action took first (the
+#                  launcher killed their processes and moved the marker there).
+#                  Drop claims of directories that are gone.
 set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 CONF=/etc/rbe-west/rbe-action.env
@@ -44,7 +47,7 @@ if [[ ${1:-} == --boot ]]; then
 		find "$WORK_ROOT" -mindepth 1 -maxdepth 1 -exec rm -rf --one-file-system -- {} +
 	fi
 	rm -rf --one-file-system -- "$RUN"
-	install -d -m 0700 "$RUN" "$RUN/slots" "$RUN/claims" "$RUN/stash"
+	install -d -m 0700 "$RUN" "$RUN/slots" "$RUN/claims" "$RUN/stash" "$RUN/orphans"
 	exit 0
 fi
 
@@ -66,6 +69,15 @@ for ((i = 0; i < SLOT_COUNT; i++)); do
 		rm -f "$busy"
 	fi
 	exec {lk}>&-
+done
+for o in "$RUN"/orphans/*; do
+	[[ -e $o ]] || continue
+	op=${o##*/}
+	if [[ $op =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ && -d $WORK_ROOT/$op && ! -L $WORK_ROOT/$op ]]; then
+		rm -rf --one-file-system -- "${WORK_ROOT:?}/$op"
+		log "removed the action directory $op left by a killed launcher (slot reused)"
+	fi
+	rm -f "$o"
 done
 for c in "$RUN"/claims/*; do
 	[[ -e $c ]] || continue

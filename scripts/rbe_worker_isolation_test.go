@@ -1,10 +1,17 @@
 package scripts_test
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -122,6 +129,9 @@ func TestRBEWorkerScriptIsolationConfig(t *testing.T) {
 		"WORK_ROOT": "$WORK_ROOT", "MASK_ROOT": "$MASK_ROOT", "SLOT_UID0": "$SLOT_UID0", "SLOT_COUNT": "$slots",
 		"BACKSTOP_S": "1260", "MAX_TIMEOUT_S": "1200", "HOME_DIR": "/var/lib/rbe-action/home",
 		"NETNS": "0", "WORKER_JSON": "$ROOT/worker.json",
+		// The launcher refuses actions while this chain is missing: it must name
+		// the table and chain the nft ruleset below creates.
+		"EGRESS_CHAIN": `"inet rbe_action output"`,
 	} {
 		if env[k] != want {
 			t.Errorf("rbe-action.env %s = %q, want %q", k, env[k], want)
@@ -141,22 +151,135 @@ func TestRBEWorkerScriptIsolationConfig(t *testing.T) {
 	}
 }
 
-func TestRBEWorkerScriptSlotEgress(t *testing.T) {
-	script := readFile(t, repoRoot(t), rbeWorkerScript)
-	m := regexp.MustCompile(`(?s)sudo nft -f - <<-'EOF'\n(.*?)\n\tEOF\n`).FindStringSubmatch(script)
+// slotEgressRules returns the nft ruleset blacksmith-worker.sh loads, one
+// trimmed line per element.
+func slotEgressRules(t *testing.T, script string) []string {
+	t.Helper()
+	m := regexp.MustCompile(`(?s)sudo nft -f - <<-EOF\n(.*?)\n\tEOF\n`).FindStringSubmatch(script)
 	if m == nil {
 		t.Fatalf("%s: no nft ruleset", rbeWorkerScript)
 	}
-	rules := m[1]
+	var lines []string
+	for _, l := range strings.Split(m[1], "\n") {
+		lines = append(lines, strings.TrimSpace(l))
+	}
+	return lines
+}
+
+// The refused IPv4 classes, as on the MAIN worker (infra nftables-worker.conf):
+// private, CGNAT/tailnet, link-local (cloud metadata), 0/8 and
+// multicast/reserved. IPv6 is refused whole beyond loopback, ff00::/8 included.
+const rbeSlotRefusedV4 = "{ 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/3 }"
+
+func TestRBEWorkerScriptSlotEgress(t *testing.T) {
+	script := readFile(t, repoRoot(t), rbeWorkerScript)
+	rules := strings.Join(slotEgressRules(t, script), "\n")
 	for _, want := range []string{
+		"table inet rbe_action {",
+		"chain output {",
 		"type filter hook output priority 0; policy accept;",
+		"meta skuid 59000-59063 meta nfproto ipv6 meta l4proto tcp reject with tcp reset",
 		"meta skuid 59000-59063 meta nfproto ipv6 reject with icmpx admin-prohibited",
-		"meta skuid 59000-59063 ip daddr { 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16 } reject with icmpx admin-prohibited",
+		"meta skuid 59000-59063 ip daddr " + rbeSlotRefusedV4 + " meta l4proto tcp reject with tcp reset",
+		"meta skuid 59000-59063 ip daddr " + rbeSlotRefusedV4 + " reject with icmpx admin-prohibited",
 		"update @slot_dst",
 	} {
 		if !strings.Contains(rules, want) {
 			t.Errorf("slot egress rules missing %q", want)
 		}
+	}
+	// A non-loopback IPv4 resolver is opened to slots on port 53 only; no
+	// resolver slots can reach stops the script.
+	for _, want := range []string{
+		`dns_allow="meta skuid 59000-59063 ip daddr { $dns_v4 } meta l4proto { tcp, udp } th dport 53 accept"`,
+		`echo "isolation: no nameserver in /etc/resolv.conf that slot users can reach (loopback or IPv4): $nameservers" >&2`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("%s missing %q", rbeWorkerScript, want)
+		}
+	}
+}
+
+// Rule order is policy: nft takes the first verdict. Loopback (slots' own
+// servers, the local resolver) and the resolver allowance come before every
+// reject, and the inventory comes after them, so it only sees allowed traffic.
+func TestRBEWorkerScriptSlotEgressRuleOrder(t *testing.T) {
+	rules := slotEgressRules(t, readFile(t, repoRoot(t), rbeWorkerScript))
+	order := []string{
+		"type filter hook output priority 0; policy accept;",
+		"oif lo accept",
+		"$dns_allow",
+		"meta skuid 59000-59063 meta nfproto ipv6 meta l4proto tcp reject with tcp reset",
+		"meta skuid 59000-59063 meta nfproto ipv6 reject with icmpx admin-prohibited",
+		"meta skuid 59000-59063 ip daddr " + rbeSlotRefusedV4 + " meta l4proto tcp reject with tcp reset",
+		"meta skuid 59000-59063 ip daddr " + rbeSlotRefusedV4 + " reject with icmpx admin-prohibited",
+		"meta skuid 59000-59063 meta l4proto { tcp, udp } ct state new update @slot_dst { ip daddr . meta l4proto . th dport }",
+	}
+	at := 0
+	for _, want := range order {
+		i := at
+		for i < len(rules) && rules[i] != want {
+			i++
+		}
+		if i == len(rules) {
+			t.Fatalf("slot egress rule %q missing or out of order in:\n%s", want, strings.Join(rules, "\n"))
+		}
+		at = i + 1
+	}
+	// Nothing else in the output chain: no accept or reject slipped in between.
+	var verdicts []string
+	for _, l := range rules {
+		if strings.Contains(l, "accept") || strings.Contains(l, "reject") || l == "$dns_allow" {
+			verdicts = append(verdicts, l)
+		}
+	}
+	if got, want := len(verdicts), 7; got != want {
+		t.Errorf("output chain has %d verdict rules, want %d:\n%s", got, want, strings.Join(verdicts, "\n"))
+	}
+}
+
+// With isolation off (the RBE_ACTION_ISOLATION=0 rollback) the script must
+// render exactly the worker.json it rendered before O1. The golden file is
+// origin/main's jq program before O1 (4d0e45d9eb^) rendered with the same
+// arguments; regenerate it only for an intended worker config change.
+func TestRBEWorkerJSONIsolationOffMatchesPreO1(t *testing.T) {
+	root := repoRoot(t)
+	script := readFile(t, root, rbeWorkerScript)
+	m := regexp.MustCompile(`(?s)--argjson isolation "\$isolation" '\n(.*?)' >"\$ROOT/worker.json"\n`).FindStringSubmatch(script)
+	if m == nil {
+		t.Fatalf("%s: no worker.json jq program", rbeWorkerScript)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "jq", "-n",
+		"--arg", "host", "grpcs://rbe-west.example.invalid:443",
+		"--arg", "root", "/home/runner/work/_temp/nl-worker",
+		"--arg", "store", "/home/runner/work/_temp/nl-worker",
+		"--arg", "name", "pool-worker-1",
+		"--argjson", "slots", "8",
+		"--argjson", "isolation", "{}",
+		m[1])
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("jq (needed by %s itself): %v\n%s", rbeWorkerScript, err, stderr.String())
+	}
+	golden, err := os.ReadFile(filepath.Join(root, "scripts", "testdata", "rbe-worker", "worker-isolation-off.golden.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decode := func(b []byte) any {
+		d := json.NewDecoder(bytes.NewReader(b))
+		d.UseNumber()
+		var v any
+		if err := d.Decode(&v); err != nil {
+			t.Fatalf("decode: %v\n%s", err, b)
+		}
+		return v
+	}
+	if got, want := decode(out), decode(golden); !reflect.DeepEqual(got, want) {
+		t.Errorf("worker.json with isolation='{}' differs from the pre-O1 rendering:\ngot:\n%s\nwant:\n%s", out, golden)
 	}
 }
 
@@ -165,6 +288,10 @@ func TestRBEWorkerScriptGatesNativeLinkOnIsolation(t *testing.T) {
 	script := readFile(t, root, rbeWorkerScript)
 	// Install, prove, then start NativeLink; never the other way round.
 	order := []string{
+		// Slot uids/gids are free before any slot user is created.
+		`taken=$(awk -F: '$3 >= 59000 && $3 <= 59063 { print FILENAME ": " $1 " (" $3 ")" }' /etc/passwd /etc/group)`,
+		`[ -z "$taken" ] || { echo "isolation: uids/gids 59000-59063 must be free for the slot users, taken: $taken" >&2; exit 1; }`,
+		`sudo groupadd --system --gid "$id" "$u"`,
 		`gcc -static -O2 -Wall -Wextra -o "$RUNNER_TEMP/rbe-entry" tools/rbe/rbe-action-entry.c`,
 		`gcc -static -O2 -Wall -Wextra -DRBE_ACTION_EXEC -o "$RUNNER_TEMP/rbe-exec" tools/rbe/rbe-action-entry.c`,
 		`sudo install -m 0755 tools/rbe/rbe-action-launch "$LIB/launch"`,
