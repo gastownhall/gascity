@@ -438,6 +438,12 @@ case "${GC_FAKE_DF_MODE:-}" in
     printf 'df: stat failed\n' >&2
     exit 1
     ;;
+  df_missing_path)
+    [ -d "$2" ] || exit 1
+    printf 'Filesystem\t1024-blocks\tUsed\tAvailable\tCapacity\tMounted on\n'
+    printf 'tmpfs\t104857600\t84457472\t20971520\t81%%%%\t/\n'
+    exit 0
+    ;;
   *)
     printf 'Filesystem\t1024-blocks\tUsed\tAvailable\tCapacity\tMounted on\n'
     printf 'tmpfs\t104857600\t84457472\t20971520\t81%%\t/\n'
@@ -6490,6 +6496,44 @@ func TestCompactScriptBackupNonDoltDirInDataDirSucceeds(t *testing.T) {
 	}
 }
 
+func TestCompactScriptBackupMissingDatabaseDirectoryAbortsBeforeMutation(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
+		"GC_DOLT_COMPACT_ONLY_DBS=missing",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+	)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("missing backup source should exit 1: got err=%v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "cannot back up; aborting compaction") {
+		t.Fatalf("expected missing backup source diagnostic:\n%s", out)
+	}
+	if logData, readErr := os.ReadFile(fixture.doltLog); readErr == nil {
+		log := string(logData)
+		if strings.Contains(log, "DOLT_RESET") || strings.Contains(log, "DOLT_GC") {
+			t.Fatalf("missing backup source must abort before mutation:\n%s", log)
+		}
+	}
+}
+
+func TestCompactScriptBackupUsesBoundedRunner(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	writeExecutable(t, filepath.Join(fixture.binDir, "timeout"), `#!/bin/sh
+[ "$1" = "--kill-after=2" ] || exit 97
+shift 2
+exec "$@"
+`)
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+	)
+	if err != nil {
+		t.Fatalf("backup should use run_bounded: %v\nout=%s", err, out)
+	}
+}
+
 func TestCompactScriptDiskPreflightSufficientProceedsNormally(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "success")
@@ -6533,6 +6577,27 @@ func TestCompactScriptDiskPreflightProbeFailureExitsOne(t *testing.T) {
 	}
 	if logData, readErr := os.ReadFile(fixture.doltLog); readErr == nil && strings.Contains(string(logData), "DOLT_RESET") {
 		t.Fatalf("probe failure must abort before flatten:\n%s", logData)
+	}
+}
+
+func TestCompactScriptDiskPreflightSkipsMissingExternalDataDirectory(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	missingDataDir := filepath.Join(fixture.cityPath, "external-missing")
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_MANAGED_LOCAL=0",
+		"GC_DOLT_HOST=127.0.0.2",
+		"GC_DOLT_DATA_DIR="+missingDataDir,
+		"GC_DOLT_STATE_FILE="+filepath.Join(missingDataDir, "dolt-state.json"),
+		"GC_DOLT_COMPACT_ONLY_DBS=beads",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_COMPACT_DRY_RUN=1",
+		"GC_FAKE_DF_MODE=df_missing_path",
+	)
+	if err != nil {
+		t.Fatalf("external compact should skip an inapplicable disk preflight: %v\nout=%s", err, out)
+	}
+	if strings.Contains(out, "disk pre-flight probe failed") {
+		t.Fatalf("missing external data directory must not fail disk preflight:\n%s", out)
 	}
 }
 
