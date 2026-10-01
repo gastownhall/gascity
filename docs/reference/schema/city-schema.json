@@ -1245,6 +1245,10 @@
           "$ref": "#/$defs/ConvergenceConfig",
           "description": "Convergence configures convergence loop limits."
         },
+        "workflows": {
+          "$ref": "#/$defs/WorkflowsConfig",
+          "description": "Workflows configures how graph workflows treat step outcomes."
+        },
         "doctor": {
           "$ref": "#/$defs/DoctorConfig",
           "description": "Doctor configures gc doctor thresholds and policy toggles\n(worktree size warnings, nested-worktree auto-prune)."
@@ -3417,6 +3421,17 @@
       "additionalProperties": false,
       "type": "object",
       "description": "WebhookVerify declares how an inbound delivery is authenticated."
+    },
+    "WorkflowsConfig": {
+      "properties": {
+        "fail_halts": {
+          "type": "boolean",
+          "description": "FailHalts makes a step's terminal gc.outcome=fail binding on the rest of\nits workflow. A needs edge on a failed step halts the dependent (it closes\nskipped, naming the failed step, instead of running), and a workflow root\ncannot close pass while any step's terminal outcome is fail: it closes\nfail and names the step. For a retried step the terminal outcome is the\nlast attempt's. Finalizers always run. Off by default, which keeps the\nbehaviour where a later step runs past a failed one and finalize grades\nonly its direct blockers and abort_scope members; turn it on once the\nformulas' correct refusals no longer stop the work after them."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "WorkflowsConfig holds graph-workflow outcome policy (the [workflows] table)."
     },
     "Workspace": {
       "properties": {

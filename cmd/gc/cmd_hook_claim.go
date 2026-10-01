@@ -171,6 +171,10 @@ type hookClaimOptions struct {
 	// under a legacy spelling only when this equals Assignee, so the rewrite
 	// always makes the stored assignee match the actor bd will check.
 	RuntimeActor string
+	// FailHalts is [workflows] fail_halts: a claimed workflow step that needs a
+	// step whose terminal outcome halts its dependents is closed skipped
+	// instead of handed to the worker (haltClaimedHookBead).
+	FailHalts bool
 }
 
 // continuationPinAssignee returns the identity a continuation sibling is pinned
@@ -293,6 +297,10 @@ type hookClaimOps struct {
 	// restampHookAdoption). Only a CAS may back it: a lost CAS is how the
 	// caller learns someone else took the bead.
 	RestampAdopted hookClaimRestampFunc
+	// HaltClaimed applies the fail-halts rule to a bead this invocation just
+	// claimed, returning the halting step's ID and whether the bead was
+	// halted. Only consulted when hookClaimOptions.FailHalts is set.
+	HaltClaimed hookHaltClaimedFunc
 }
 
 type (
@@ -578,6 +586,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.EmitHookClaimReclaimedStale == nil {
 		ops.EmitHookClaimReclaimedStale = hookEmitClaimReclaimedStale
 	}
+	if ops.HaltClaimed == nil {
+		ops.HaltClaimed = hookHaltClaimedWithBdStore
+	}
 	if ops.Now == nil {
 		ops.Now = time.Now
 	}
@@ -806,6 +817,9 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		}
 		claimed = restamped
 		claimed = mergeHookClaimCandidateMetadata(candidate, claimed)
+		if haltClaimedHookBead(ctx, claimed, opts, ops, dir, stderr) {
+			continue
+		}
 		result := hookClaimJSONResult{
 			SchemaVersion: "1",
 			OK:            true,
@@ -946,6 +960,9 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			return hookClaimResult{terminal: true, code: 1}
 		}
 		claimed = mergeHookClaimCandidateMetadata(candidate, claimed)
+		if haltClaimedHookBead(ctx, claimed, opts, ops, dir, stderr) {
+			continue
+		}
 		result := hookClaimJSONResult{
 			SchemaVersion: "1",
 			OK:            true,

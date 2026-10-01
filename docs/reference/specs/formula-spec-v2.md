@@ -961,6 +961,33 @@ crash retries finalization), closes generated spec sidecars, and — on pass
 only — propagates closure across the `gc.source_bead_id` chain. Failures
 intentionally leave parent source beads open for investigation.
 
+**Fail halts (`[workflows] fail_halts`).** Off by default. With
+`fail_halts = true` in `city.toml`, a step's terminal outcome binds the
+rest of its workflow:
+
+- A step's terminal outcome is its own `gc.outcome`, except for a retried
+  or checked step, whose terminal outcome is the last attempt's — the one
+  its control records. An attempt that failed and was retried is never
+  terminal.
+- A `needs` edge on a step whose terminal outcome is `fail` halts the
+  dependent: instead of running, it closes `gc.outcome = skipped` with
+  `gc.halted_by` naming the step, and a halted step halts its own
+  dependents in turn. Control beads are halted by the dispatcher; worker steps
+  are halted when a session claims them. Finalizers always run:
+  `workflow-finalize`, scope-checks and teardown are never halted, so a
+  halted workflow still closes.
+- The workflow root cannot close `pass` while any step's terminal outcome
+  is `fail`, of any `gc.failure_class` including an exhausted `transient`
+  retry. Finalize closes it `fail` and stamps `gc.failure_subject` /
+  `gc.failure_reason` / `gc.failure_class` from the failed step onto the
+  root and its source bead.
+
+A step that correctly refuses records `fail` and says why in
+`gc.failure_class`, so with the switch on a refusal stops the work after
+it. Without the switch, a step that records `fail` does not stop the steps
+that need it, and finalize grades only its direct blockers and
+`abort_scope` members.
+
 **Teardown is post-settlement.** Teardown work
 (`gc.scope_role = "teardown"`) is the one part of a workflow that outlives
 settlement: it never blocks `workflow-finalize`, and finalize's terminal

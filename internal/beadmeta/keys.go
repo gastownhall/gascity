@@ -483,6 +483,16 @@ func IsKnownMergeStrategy(s string) bool {
 // key-shape rule only covers the gc. namespace.
 const OptionMetadataPrefix = "opt_"
 
+// Step-outcome halting keys. A needs edge on a step whose terminal outcome is
+// fail blocks its dependents when [workflows] fail_halts is on.
+const (
+	// HaltedByMetadataKey names the closed step whose terminal outcome halted
+	// this bead: it was closed skipped instead of running because a needs edge
+	// pointed at a failed step. A bead halted this way halts its own
+	// dependents in turn.
+	HaltedByMetadataKey = "gc.halted_by"
+)
+
 // KnownMetadataKeys lists every engine-owned bead-metadata key this package
 // declares. The guard test asserts every gc.* metadata literal used in non-test
 // Go resolves to a member of this slice (or a KnownMetadataPrefixes entry).
@@ -567,6 +577,7 @@ var KnownMetadataKeys = []string{
 	FormulaSourceMetadataKey,
 	GCExemptMetadataKey,
 	Graphv2RootKeyMetadataKey,
+	HaltedByMetadataKey,
 	IdempotencyKeyMetadataKey,
 	InputConvoyIDMetadataKey,
 	InstantiatingMetadataKey,
