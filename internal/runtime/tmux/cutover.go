@@ -41,6 +41,9 @@ var (
 	// The error-bearing attachment probe is promoted from the embedded raw
 	// provider; IsAttached (bool) routes through the seams to the same probe.
 	_ runtime.AttachmentObserverWithError = (*seamBackedProvider)(nil)
+	// The error-bearing liveness observation is promoted from the embedded raw
+	// provider; IsRunning and ProcessAlive (bool) route through the seams.
+	_ runtime.LivenessObserverWithError = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBackedWithConfig constructs a tmux provider served through the seams.

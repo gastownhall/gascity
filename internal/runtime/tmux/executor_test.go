@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"slices"
@@ -689,5 +690,27 @@ func TestNewSessionWithCommandAndEnvMarksUnsetKeysRemovedFromSessionEnv(t *testi
 	}
 	if !marked {
 		t.Errorf("new-session never marked GC_CONTROLLER_TOKEN removed from the session env; the first respawn would leak it: %v", exec.calls)
+	}
+}
+
+// TestNewTmuxCommandBoundsPipeWait pins the WaitDelay on every real tmux
+// subprocess. The hang it bounds needs a stopped tmux server holding the
+// client's stdio (passed over SCM_RIGHTS), which the executor seam cannot
+// model: it replaces the exec.Cmd entirely. So this checks the construction
+// both real executor paths share, without starting a process.
+func TestNewTmuxCommandBoundsPipeWait(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := newTmuxCommand(context.Background(), []string{"-u", "list-panes", "-a"}, &stdout, &stderr)
+	if cmd.WaitDelay != tmuxWaitDelay || tmuxWaitDelay <= 0 {
+		t.Fatalf("WaitDelay = %v, want tmuxWaitDelay (%v) > 0", cmd.WaitDelay, tmuxWaitDelay)
+	}
+	if tmuxWaitDelay > fetchTimeout {
+		t.Fatalf("tmuxWaitDelay = %v, want <= fetchTimeout (%v)", tmuxWaitDelay, fetchTimeout)
+	}
+	if cmd.Stdout != &stdout || cmd.Stderr != &stderr {
+		t.Fatal("tmux command does not capture stdout and stderr into the given buffers")
+	}
+	if !slices.Equal(cmd.Args[1:], []string{"-u", "list-panes", "-a"}) {
+		t.Fatalf("args = %q, want the tmux argv unchanged", cmd.Args)
 	}
 }

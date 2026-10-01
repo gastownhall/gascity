@@ -1064,8 +1064,10 @@ func gracefulStopAllWithForceSignal(
 			allExited = len(runningSet) == 0
 		} else {
 			for _, name := range names {
+				// An unknown state is not an exit: keep waiting out the grace
+				// window rather than cutting it short on a failed observation.
 				running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
-				if err == nil && running {
+				if err != nil || running {
 					allExited = false
 					break
 				}
@@ -1090,10 +1092,23 @@ func gracefulStopAllWithForceSignal(
 	runningSet, listed := runningSessionSet(sp, names)
 	for _, name := range names {
 		running := false
+		var observeErr error
 		if listed {
 			running = runningSet[name]
 		} else {
-			running, _ = workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
+			running, observeErr = workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
+		}
+		if observeErr != nil {
+			// The state is unknown, not exited: still stop it, but neither
+			// claim a graceful exit nor record a SessionStopped we cannot
+			// vouch for. A stopped city-stop session is still parked asleep.
+			if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
+				fmt.Fprintf(stderr, "stopping agent '%s' in unknown state: %v\n", name, err) //nolint:errcheck // best-effort stderr
+			} else if target, ok := targetByName[name]; ok && cityStopSessionMarked(store.Store, target.sessionID) {
+				markCityStopSessionAsAsleep(sessionFrontDoor(store.Store), target.sessionID, stderr)
+			}
+			fmt.Fprintf(stdout, "Agent '%s' state unknown (%v); stop requested\n", name, observeErr) //nolint:errcheck // best-effort stdout
+			continue
 		}
 		if !running {
 			if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {

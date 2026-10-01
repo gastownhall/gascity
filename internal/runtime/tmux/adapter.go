@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -30,6 +32,15 @@ type Provider struct {
 	cache    *StateCache
 	mu       sync.Mutex
 	workDirs map[string]string // session name → workDir (for CopyTo)
+
+	// livenessUnknown and livenessServerDead are set once
+	// ObserveLivenessWithError reports unknown or a confirmed-dead server,
+	// and cleared only when the cache answers again, so each episode logs
+	// once even while outcomes differ per session.
+	livenessUnknown    atomic.Bool
+	livenessServerDead atomic.Bool
+	// logf logs liveness episodes. Nil selects log.Printf.
+	logf func(format string, args ...any)
 }
 
 var instanceTokenReader = rand.Reader
@@ -48,6 +59,7 @@ var (
 	_ runtime.ListingAttestation            = (*Provider)(nil)
 	_ runtime.InventoryProvider             = (*Provider)(nil)
 	_ runtime.AttachmentObserverWithError   = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -436,6 +448,87 @@ func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.L
 	return runtime.Liveness{
 		Running: running,
 		Alive:   alive,
+	}
+}
+
+// ObserveLivenessWithError reports pane and agent-process presence like
+// ObserveLiveness, but answers "unknown" (an error wrapping
+// [runtime.ErrRuntimeUnavailable] and the refresh error) instead of "absent"
+// when the state cache cannot vouch for its snapshot. See
+// [classifyCacheObservation] for when it can. The bool paths (IsRunning,
+// ObserveLiveness) keep their staleTTL cliff unchanged.
+func (p *Provider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	if strings.TrimSpace(name) == "" {
+		return runtime.Liveness{}, nil
+	}
+	obs := p.cache.observe()
+	switch classifyCacheObservation(obs, name, p.cache.clock(), p.cache.staleTTL, p.tm.serverConfirmedDead) {
+	case cacheAnswerAbsent:
+		p.noteLivenessEpisode(livenessOutcomeServerDead, nil)
+		return runtime.Liveness{}, nil
+	case cacheAnswerUnknown:
+		// The message omits the refresh error's text: tmux's "no tmux server
+		// running" and exec's "executable file not found" both match
+		// runtime.IsSessionGone, which would read "unknown" as "gone".
+		errs := []error{runtime.ErrRuntimeUnavailable}
+		if obs.lastErr != nil {
+			errs = append(errs, obs.lastErr)
+		}
+		err := &quietCauseError{
+			msg:  fmt.Sprintf("observing tmux session %q: state cache cannot vouch for it: %v", name, runtime.ErrRuntimeUnavailable),
+			errs: errs,
+		}
+		p.noteLivenessEpisode(livenessOutcomeUnknown, obs.lastErr)
+		return runtime.Liveness{}, err
+	}
+	p.noteLivenessEpisode(livenessOutcomeAnswered, nil)
+	session, ok := obs.state.Sessions[name]
+	if !ok || !session.Running {
+		return runtime.Liveness{}, nil
+	}
+	processNames = nonEmptyProcessNames(processNames)
+	if len(processNames) == 0 {
+		processNames = p.sessionProcessNames(name)
+	}
+	if len(processNames) == 0 {
+		return runtime.Liveness{Running: true, Alive: true}, nil
+	}
+	return runtime.Liveness{Running: true, Alive: obs.state.processAlive(name, processNames)}, nil
+}
+
+// livenessOutcome is how one ObserveLivenessWithError call answered, for the
+// episode log.
+type livenessOutcome int
+
+const (
+	livenessOutcomeAnswered livenessOutcome = iota
+	livenessOutcomeUnknown
+	livenessOutcomeServerDead
+)
+
+// noteLivenessEpisode logs once on entering "unknown", once on entering
+// "server confirmed dead", and once when the cache answers again. A wedged
+// server now stops producing actions instead of false deaths, so the episode
+// must be visible without a line per probe.
+func (p *Provider) noteLivenessEpisode(outcome livenessOutcome, cause error) {
+	logf := p.logf
+	if logf == nil {
+		logf = log.Printf
+	}
+	switch outcome {
+	case livenessOutcomeUnknown:
+		if p.livenessUnknown.CompareAndSwap(false, true) {
+			logf("tmux liveness: reporting unknown for sessions the state cache cannot vouch for until a state refresh succeeds: %v", cause)
+		}
+	case livenessOutcomeServerDead:
+		if p.livenessServerDead.CompareAndSwap(false, true) {
+			logf("tmux liveness: server socket confirmed dead; reporting its sessions absent")
+		}
+	default:
+		wasUnknown := p.livenessUnknown.Swap(false)
+		if wasDead := p.livenessServerDead.Swap(false); wasUnknown || wasDead {
+			logf("tmux liveness: state cache answering again")
+		}
 	}
 }
 

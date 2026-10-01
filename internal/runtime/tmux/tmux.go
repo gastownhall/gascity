@@ -326,11 +326,27 @@ type executor interface {
 // realExecutor runs actual tmux subprocesses.
 type realExecutor struct{}
 
+// tmuxWaitDelay bounds how long a tmux subprocess's output pipes may stay
+// open after the client exits (or its context ends). The tmux client hands
+// its stdio to the server over SCM_RIGHTS, so a stopped or wedged server can
+// hold the write end of our pipe forever; without a WaitDelay, Wait then never
+// returns, the StateCache refresh never leaves its singleflight, and every
+// IsRunning and liveness caller blocks behind it.
+const tmuxWaitDelay = 2 * time.Second
+
+// newTmuxCommand builds a tmux subprocess capturing stdout and stderr, with
+// tmuxWaitDelay set.
+func newTmuxCommand(ctx context.Context, args []string, stdout, stderr *bytes.Buffer) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "tmux", args...)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.WaitDelay = tmuxWaitDelay
+	return cmd
+}
+
 func (realExecutor) execute(args []string) (string, error) {
-	cmd := exec.Command("tmux", args...)
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd := newTmuxCommand(context.Background(), args, &stdout, &stderr)
 	err := cmd.Run()
 	if err != nil {
 		return "", wrapError(err, stderr.String(), args)
@@ -339,10 +355,8 @@ func (realExecutor) execute(args []string) (string, error) {
 }
 
 func (realExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
-	cmd := exec.CommandContext(ctx, "tmux", args...)
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd := newTmuxCommand(ctx, args, &stdout, &stderr)
 	err := cmd.Run()
 	if err != nil {
 		return "", wrapError(err, stderr.String(), args)
@@ -370,10 +384,10 @@ type Tmux struct {
 	// GC_AGENT_SLICE is set (see AgentSliceEnv in agent_slice.go).
 	agentSlice agentSliceWrapper
 
-	// serverSocketObserver observes a named socket only after tmux reports
-	// ErrNoServer during the new-session preflight. Nil selects the production
-	// observer; tests inject a deterministic observation without opening a
-	// socket.
+	// serverSocketObserver observes the server socket only after tmux reports
+	// ErrNoServer, during the new-session preflight or a liveness observation
+	// (serverConfirmedDead). Nil selects the production observer; tests inject
+	// a deterministic observation without opening a socket.
 	serverSocketObserver func(context.Context, string) error
 }
 
@@ -517,12 +531,8 @@ func (t *Tmux) probeServerAlive() error {
 		return nil
 	}
 	if errors.Is(err, ErrNoServer) {
-		observer := t.serverSocketObserver
-		if observer == nil {
-			observer = observeNamedSocket
-		}
 		path := namedSocketPath(t.cfg.SocketName)
-		observationErr := observer(ctx, path)
+		observationErr := t.observeServerSocket(ctx, path)
 		if observationErr == nil {
 			return nil
 		}

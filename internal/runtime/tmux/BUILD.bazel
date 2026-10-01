@@ -84,6 +84,7 @@ go_test(
         "startup_oversized_nudge_test.go",
         "startup_test.go",
         "state_cache_empty_server_test.go",
+        "state_cache_observe_test.go",
         "state_cache_snapshot_backoff_test.go",
         "state_cache_superseded_refresh_test.go",
         "state_cache_test.go",
