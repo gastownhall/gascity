@@ -20,6 +20,7 @@ const defaultOutputBufferLines = 1000
 // sessionConn tracks a running ACP agent process and its JSON-RPC connection.
 type sessionConn struct {
 	cmd      *exec.Cmd
+	pgid     int // process group recorded at Setpgid spawn; 0 if none
 	stdin    io.WriteCloser
 	done     chan struct{}      // closed when process exits
 	readDone chan struct{}      // closed after buffered stdout is dispatched
