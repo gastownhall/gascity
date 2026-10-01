@@ -14,6 +14,7 @@ var compactStateMarkerDirs = []string{
 	"compact-quarantine",
 	"compact-pending-gc",
 	"compact-pending-push",
+	"compact-pending-push-backup",
 }
 
 // DoltCompactStateCheck inspects compact lifecycle markers to surface stale
@@ -73,7 +74,9 @@ func (c *DoltCompactStateCheck) scanMarkers() ([]compactStateMarker, []string, e
 				path:       markerPath,
 			}
 			for _, line := range strings.Split(string(data), "\n") {
-				if v, ok := strings.CutPrefix(line, "reason="); ok {
+				if v, ok := strings.CutPrefix(line, "db="); ok && v != "" {
+					m.db = v
+				} else if v, ok := strings.CutPrefix(line, "reason="); ok {
 					m.reason = v
 				} else if v, ok := strings.CutPrefix(line, "created_at="); ok {
 					m.createdAt = v
@@ -140,11 +143,11 @@ func (c *DoltCompactStateCheck) Run(_ *CheckContext) *CheckResult {
 func compactMarkerFixHint(m compactStateMarker) string {
 	switch m.markerType {
 	case "compact-quarantine":
-		return fmt.Sprintf("inspect %s; if safe to clear, run: rm %s", m.path, m.path)
+		return fmt.Sprintf("inspect %s; retry proof-gated recovery with: gc dolt compact --only-db %s", m.path, m.db)
 	case "compact-pending-gc":
-		return fmt.Sprintf("GC incomplete for %s; run: gc dolt compact --resume or inspect %s", m.db, m.path)
-	case "compact-pending-push":
-		return fmt.Sprintf("push pending for %s; run: gc dolt push or inspect %s", m.db, m.path)
+		return fmt.Sprintf("GC incomplete for %s; inspect %s, then run: gc dolt compact --only-db %s", m.db, m.path, m.db)
+	case "compact-pending-push", "compact-pending-push-backup":
+		return fmt.Sprintf("push pending for %s; inspect %s, then run: gc dolt compact --only-db %s", m.db, m.path, m.db)
 	default:
 		return fmt.Sprintf("inspect %s", m.path)
 	}
