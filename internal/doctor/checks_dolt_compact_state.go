@@ -60,7 +60,7 @@ func (c *DoltCompactStateCheck) scanMarkers() ([]compactStateMarker, []string) {
 			continue
 		}
 		for _, e := range entries {
-			if e.Type()&fs.ModeType != 0 || strings.HasPrefix(e.Name(), ".") || strings.Contains(e.Name(), ".tmp.") {
+			if e.Type()&fs.ModeType != 0 || strings.HasPrefix(e.Name(), ".") {
 				continue
 			}
 			markerPath := filepath.Join(dir, e.Name())

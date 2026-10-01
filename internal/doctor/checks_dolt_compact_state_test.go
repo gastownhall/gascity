@@ -177,13 +177,24 @@ func TestDoltCompactStateCheckPreservesMarkersBeforeUnreadableDirectory(t *testi
 	assertDoltCompactStateMentions(t, r, markerPath, unreadablePath)
 }
 
-func TestDoltCompactStateCheckIgnoresMarkerTempFiles(t *testing.T) {
+func TestDoltCompactStateCheckReportsRemoteNamesContainingTempToken(t *testing.T) {
 	dir := newDoltCompactStateTestCity(t)
-	writeDoltCompactStateMarker(t, dir, "compact-quarantine", "beads.tmp.ABC123", "incomplete write", compactStateOldCreatedAt)
+	markerPath := writeDoltCompactStateMarker(t, dir, "compact-pending-push-backup", "beads.prod.tmp.archive", "backup push failed", compactStateOldCreatedAt)
+
+	r := newTestDoltCompactStateCheck(dir).Run(&CheckContext{CityPath: dir})
+	if r.Status == StatusOK {
+		t.Fatalf("status = OK, want warning for real marker; msg = %s", r.Message)
+	}
+	assertDoltCompactStateMentions(t, r, markerPath, "beads.prod.tmp.archive")
+}
+
+func TestDoltCompactStateCheckIgnoresHiddenMarkerTempFiles(t *testing.T) {
+	dir := newDoltCompactStateTestCity(t)
+	writeDoltCompactStateMarker(t, dir, "compact-quarantine", ".beads.tmp.ABC123", "incomplete write", compactStateOldCreatedAt)
 
 	r := newTestDoltCompactStateCheck(dir).Run(&CheckContext{CityPath: dir})
 	if r.Status != StatusOK {
-		t.Fatalf("status = %d, want OK for marker temp file; msg = %s", r.Status, r.Message)
+		t.Fatalf("status = %d, want OK for hidden marker temp file; msg = %s", r.Status, r.Message)
 	}
 }
 
