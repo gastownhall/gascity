@@ -48,12 +48,6 @@ var ledgeredSkips = []ConformanceSkip{
 		BeadID: "ga-gmf8r",
 		Expiry: time.Date(2026, time.December, 15, 0, 0, 0, 0, time.UTC),
 	},
-	{
-		Subtest: "ParentIDNamesARowThisStoreDoesNotHave",
-		Reason:  "BdStore passes ParentID to bd as --parent, which bd resolves unconditionally, so a parent bd cannot see fails the create instead of being kept as a weak reference",
-		BeadID:  "ga-6mfvtl",
-		Expiry:  time.Date(2026, time.December, 15, 0, 0, 0, 0, time.UTC),
-	},
 }
 
 // lookupSkip returns the ledger entry governing a subtest, or nil if none.

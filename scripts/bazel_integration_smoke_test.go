@@ -109,13 +109,18 @@ func splitQuotedList(body string) []string {
 // integration-smoke lane (test/integration/BUILD.bazel
 // integration_smoke_test, a go_variant_test over integration_test whose
 // args filters) runs exactly the tests scripts/test-integration-shard names
-// as its bdstore and rest-smoke shards (bdstore_tests, rest_smoke_tests), so
-// a test added to or dropped from either list cannot silently leave the
-// gating set.
+// as its bdstore-conformance, bdstore and rest-smoke shards
+// (bdstore_conformance_tests, bdstore_tests, rest_smoke_tests), so a test
+// added to or dropped from any list cannot silently leave the gating set. The
+// conformance suite has a shard of its own for the legacy lanes' timeout
+// budgets; the Bazel lane still gates it.
 func TestIntegrationSmokeLaneMatchesShardScript(t *testing.T) {
 	root := repoRoot(t)
 	script := readFile(t, root, "scripts/test-integration-shard")
-	tests := append(shardScriptTests(t, script, "bdstore_tests"), shardScriptTests(t, script, "rest_smoke_tests")...)
+	var tests []string
+	for _, name := range []string{"bdstore_conformance_tests", "bdstore_tests", "rest_smoke_tests"} {
+		tests = append(tests, shardScriptTests(t, script, name)...)
+	}
 	// $$-escaped in the BUILD file (go_variant_test's args is a plain
 	// Starlark string, not a %-format, but this repo writes its go_variant_test
 	// end anchors as $$ for consistency with the generated ones elsewhere).
@@ -140,7 +145,10 @@ func TestIntegrationSmokeLaneMatchesShardScript(t *testing.T) {
 func TestIntegrationSmokeVariantIsFullyPinned(t *testing.T) {
 	root := repoRoot(t)
 	script := readFile(t, root, "scripts/test-integration-shard")
-	tests := append(shardScriptTests(t, script, "bdstore_tests"), shardScriptTests(t, script, "rest_smoke_tests")...)
+	var tests []string
+	for _, name := range []string{"bdstore_conformance_tests", "bdstore_tests", "rest_smoke_tests"} {
+		tests = append(tests, shardScriptTests(t, script, name)...)
+	}
 	wantFilter := "^(" + strings.Join(tests, "|") + ")$$"
 
 	build := readFile(t, root, "test/integration/BUILD.bazel")
