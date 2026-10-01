@@ -3288,7 +3288,7 @@ func admittedExternalWorkBeads(t *testing.T, trace *sessionReconcilerTraceCycle)
 	t.Helper()
 	var admitted []string
 	for _, rec := range trace.records {
-		if rec.RecordType == TraceRecordDecision && rec.SiteCode == TraceSitePoolExternalLiveOccupancy {
+		if rec.RecordType == TraceRecordDecision && rec.SiteCode == TraceSitePoolExternalLiveOccupancy && rec.OutcomeCode == TraceOutcomeAccepted {
 			admitted = append(admitted, poolTraceFieldString(t, rec.Fields, "work_bead"))
 		}
 	}
