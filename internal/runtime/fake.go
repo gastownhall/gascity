@@ -70,6 +70,13 @@ type Fake struct {
 	// ListingUnattested makes Fake.ListRunningComplete report false, modeling
 	// a provider whose ListRunning may omit live sessions.
 	ListingUnattested bool
+	// PendingErrors configures Fake.Pending errors per session name; an absent
+	// entry answers from PendingInteractions. A probe that cannot answer is a
+	// distinct state from a probe that answers "nothing pending", and the two
+	// must not be reachable only through the all-or-nothing broken flag: every
+	// guard built on the probe has to be pinned failing closed on this error
+	// while the rest of the session behaves normally.
+	PendingErrors map[string]error
 }
 
 var (
@@ -152,6 +159,7 @@ func NewFake() *Fake {
 		WaitForIdleGates:        make(map[string]chan struct{}),
 		WaitForIdleStarted:      make(map[string]chan struct{}),
 		RelaunchErrors:          make(map[string]error),
+		PendingErrors:           make(map[string]error),
 	}
 }
 
@@ -181,6 +189,7 @@ func NewFailFake() *Fake {
 		WaitForIdleGates:        make(map[string]chan struct{}),
 		WaitForIdleStarted:      make(map[string]chan struct{}),
 		RelaunchErrors:          make(map[string]error),
+		PendingErrors:           make(map[string]error),
 		broken:                  true,
 	}
 }
@@ -473,6 +482,9 @@ func (f *Fake) Pending(name string) (*PendingInteraction, error) {
 	f.Calls = append(f.Calls, Call{Method: "Pending", Name: name})
 	if f.broken {
 		return nil, fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.PendingErrors[name]; ok {
+		return nil, err
 	}
 	pending := f.PendingInteractions[name]
 	if pending == nil {

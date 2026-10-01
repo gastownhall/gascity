@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -532,4 +533,255 @@ func TestResumeInjectsSSHKeepalive(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A seat sitting at an approval or selection prompt is waiting on a human, not
+// stalled. The wait-idle paths reached that conclusion independently of
+// sendLocked and delivered anyway, typing into the open prompt.
+func TestTryWaitIdleNudgeRefusesPendingInteraction(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude",
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "req-1", Kind: "approval", Prompt: "approve?",
+	})
+
+	if _, err := mgr.TryWaitIdleNudge(context.Background(), info.ID, "mail", "hello", "", runtime.Config{}); !errors.Is(err, ErrPendingInteraction) {
+		t.Fatalf("TryWaitIdleNudge error = %v, want %v", err, ErrPendingInteraction)
+	}
+	for _, call := range sp.Calls {
+		if (call.Method == "Nudge" || call.Method == "NudgeNow") && call.Name == info.SessionName {
+			t.Fatalf("nudged a session awaiting human input: %#v", sp.Calls)
+		}
+	}
+}
+
+func TestTryWaitIdleNudgeLiveOnlyRefusesPendingInteraction(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude",
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if !sp.IsRunning(info.SessionName) {
+		t.Fatalf("precondition: CreateSession should leave the runtime running")
+	}
+	sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "req-1", Kind: "approval", Prompt: "approve?",
+	})
+
+	if _, err := mgr.TryWaitIdleNudgeLiveOnly(context.Background(), info.ID, "mail", "hello"); !errors.Is(err, ErrPendingInteraction) {
+		t.Fatalf("TryWaitIdleNudgeLiveOnly error = %v, want %v", err, ErrPendingInteraction)
+	}
+}
+
+// The guard must sit after ensureRunning, as sendLocked's does. A dormant
+// session has no pane to probe, so checking first turns a managed wake into
+// ErrSessionNotFound and the session is never started.
+func TestTryWaitIdleNudgeStillWakesDormantSession(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude",
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := sp.Stop(info.SessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if sp.IsRunning(info.SessionName) {
+		t.Fatalf("precondition: session must be dormant before the nudge")
+	}
+
+	sp.Calls = nil
+	if _, err := mgr.TryWaitIdleNudge(context.Background(), info.ID, "mail", "hello", "claude --resume", runtime.Config{Command: "claude"}); err != nil {
+		t.Fatalf("TryWaitIdleNudge on a dormant session = %v, want the wake to proceed", err)
+	}
+	if !sp.IsRunning(info.SessionName) {
+		t.Fatalf("dormant session was not started: %#v", sp.Calls)
+	}
+	// Pin the ORDER, not just the outcome. A fake reports no pending
+	// interaction for a session that does not exist, but a real pane probe
+	// returns ErrSessionNotFound, so a guard placed ahead of the start would
+	// refuse the wake in production while this fake still passed.
+	started := -1
+	for i, call := range sp.Calls {
+		if call.Method == "Start" && call.Name == info.SessionName {
+			started = i
+			break
+		}
+	}
+	if started < 0 {
+		t.Fatalf("no Start recorded for the dormant session: %#v", sp.Calls)
+	}
+	for i, call := range sp.Calls {
+		if call.Method == "Pending" && call.Name == info.SessionName && i < started {
+			t.Fatalf("probed for a pending interaction before starting the session: %#v", sp.Calls)
+		}
+	}
+}
+
+// gateWaitForIdle makes WaitForIdle block until the returned release func runs,
+// and reports when the wait has actually begun. Every other test sets the
+// pending interaction BEFORE the call, which cannot tell a pre-wait probe from
+// a pre-delivery one; this reproduces the case that can: the prompt opens
+// during the wait.
+func gateWaitForIdle(sp *runtime.Fake, sessName string) (started <-chan struct{}, release func()) {
+	startedCh := make(chan struct{})
+	gate := make(chan struct{})
+	sp.WaitForIdleErrors[sessName] = nil // the wait succeeds — as it does when a prompt clears the busy indicator
+	sp.WaitForIdleGates[sessName] = gate
+	sp.WaitForIdleStarted[sessName] = startedCh
+	return startedCh, func() { close(gate) }
+}
+
+func assertNoNudge(t *testing.T, sp *runtime.Fake, sessName string) {
+	t.Helper()
+	for _, call := range sp.SnapshotCalls() {
+		if (call.Method == "Nudge" || call.Method == "NudgeNow") && call.Name == sessName {
+			t.Fatalf("nudged a session awaiting human input: %#v", sp.SnapshotCalls())
+		}
+	}
+}
+
+// The pre-wait probe only proves no prompt was open up to waitIdleNudgeTimeout
+// ago. WaitForIdle is liable to return BECAUSE a dialog opened — a seat that
+// raises an approval prompt stops emitting the busy indicator at that moment
+// while the ready-prompt prefix stays on the pane — so the delivery needs a
+// probe adjacent to its keystrokes, which sendLocked gets from the guarded
+// delivery helper and this path, owning its own wait, must run itself.
+func TestTryWaitIdleNudgeRefusesPromptOpenedDuringWait(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude",
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	started, release := gateWaitForIdle(sp, info.SessionName)
+
+	type result struct {
+		delivered bool
+		err       error
+	}
+	done := make(chan result, 1)
+	go func() {
+		delivered, err := mgr.TryWaitIdleNudge(context.Background(), info.ID, "mail", "hello", "", runtime.Config{})
+		done <- result{delivered, err}
+	}()
+
+	<-started // the pre-wait probe has already passed: no prompt was open
+	sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "req-1", Kind: "approval", Prompt: "approve?",
+	})
+	release()
+
+	got := <-done
+	if !errors.Is(got.err, ErrPendingInteraction) {
+		t.Fatalf("TryWaitIdleNudge error = %v, want %v (prompt opened during the wait)", got.err, ErrPendingInteraction)
+	}
+	if got.delivered {
+		t.Fatalf("reported delivery into a prompt that opened during the wait")
+	}
+	assertNoNudge(t, sp, info.SessionName)
+}
+
+func TestTryWaitIdleNudgeLiveOnlyRefusesPromptOpenedDuringWait(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude",
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	started, release := gateWaitForIdle(sp, info.SessionName)
+
+	type result struct {
+		delivered bool
+		err       error
+	}
+	done := make(chan result, 1)
+	go func() {
+		delivered, err := mgr.TryWaitIdleNudgeLiveOnly(context.Background(), info.ID, "mail", "hello")
+		done <- result{delivered, err}
+	}()
+
+	<-started
+	sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "req-1", Kind: "approval", Prompt: "approve?",
+	})
+	release()
+
+	got := <-done
+	if !errors.Is(got.err, ErrPendingInteraction) {
+		t.Fatalf("TryWaitIdleNudgeLiveOnly error = %v, want %v (prompt opened during the wait)", got.err, ErrPendingInteraction)
+	}
+	if got.delivered {
+		t.Fatalf("reported delivery into a prompt that opened during the wait")
+	}
+	assertNoNudge(t, sp, info.SessionName)
+}
+
+// Live-only delivery is where refused wait-idle nudges come back: the mail and
+// sling lanes queue what they could not deliver and the push poller re-delivers
+// it here. Without this guard the refusal only defers the mistype by one
+// quiescence window instead of preventing it.
+func TestSendLiveOnlyRefusesPendingInteraction(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude",
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if !sp.IsRunning(info.SessionName) {
+		t.Fatalf("precondition: CreateSession should leave the runtime running")
+	}
+	sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "req-1", Kind: "approval", Prompt: "approve?",
+	})
+
+	delivered, err := mgr.SendLiveOnly(context.Background(), info.ID, "hello")
+	if !errors.Is(err, ErrPendingInteraction) {
+		t.Fatalf("SendLiveOnly error = %v, want %v", err, ErrPendingInteraction)
+	}
+	if delivered {
+		t.Fatalf("SendLiveOnly reported delivery to a seat awaiting human input")
+	}
+	assertNoNudge(t, sp, info.SessionName)
+
+	// The immediate variant shares sendLiveOnly and must refuse identically.
+	if delivered, err := mgr.SendImmediateLiveOnly(context.Background(), info.ID, "hello"); delivered || !errors.Is(err, ErrPendingInteraction) {
+		t.Fatalf("SendImmediateLiveOnly = (%v, %v), want (false, %v)", delivered, err, ErrPendingInteraction)
+	}
+	assertNoNudge(t, sp, info.SessionName)
 }
