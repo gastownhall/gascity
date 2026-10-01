@@ -252,6 +252,28 @@ demand from a rig it can never actually claim work from, or the reverse,
 staying asleep while claimable work sits in a rig its `scale_check` no
 longer counts.
 
+### Store binding (federated custom `scale_check`)
+
+Agreeing on the *set* of stores is not enough: each fan-out leg must also be
+*bound* to its store. `BEADS_DIR` beats the working directory, so a leg that
+only changes into a rig but inherits the city's env reads the city store once
+per leg and reports a clean, wrong count.
+
+- **Per-rig env.** `cityScopedFanOutProbes` builds each rig leg's env with
+  `controllerWorkQueryEnv` on a per-rig view of the agent (`Dir` set to the rig
+  name) — the same view `appendOneRigHookStore` gives the claim side — so a
+  `scale_check` leg and a `work_query` leg for one rig carry the same six store
+  keys (`BEADS_DIR`, `GC_STORE_ROOT`, `GC_STORE_SCOPE`, `GC_RIG`,
+  `GC_RIG_ROOT`, `GC_BEADS_PREFIX`) and the rig's own Dolt endpoint. The city
+  leg keeps the agent's own env.
+- **Per-leg Dolt prefix.** The `GC_DOLT_HOST`/`GC_DOLT_PORT` command prefix is
+  derived from each leg's own env inside `evaluatePoolFanOutSum`, never once
+  from the city env: a command-line assignment beats the subprocess
+  environment, so one shared prefix re-points every rig leg at the city's Dolt
+  endpoint.
+- **Unresolvable env.** A rig whose env cannot be resolved is reported and
+  contributes 0; its check never runs under the city's env.
+
 ## Invariants
 
 1. **Sling query placeholder is always `{}`.** The `buildSlingCommand`
