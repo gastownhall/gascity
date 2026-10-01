@@ -234,10 +234,9 @@ type State interface {
 	// transport the caller resolved for the launch. Prompt rendering and the
 	// delivery policy live in the controller, not the API, so the hints a worker
 	// factory resumes with cannot drift from the ones the reconciler launches
-	// with. Hints are returned unchanged for a session that has no prompt or is
-	// already running. A non-nil error means the prompt cannot be delivered
-	// (for example it is oversized on a runtime with no fallback) and the launch
-	// must not proceed.
+	// with. Hints are returned unchanged for a session that is closed, has no
+	// prompt, or runs on a runtime that cannot carry a nudge. A non-nil error
+	// means the prompt cannot be delivered and the launch must not proceed.
 	ApplyStartupPrompt(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error)
 }
 

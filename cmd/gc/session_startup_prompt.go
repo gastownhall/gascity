@@ -24,19 +24,25 @@ type startupPromptCity struct {
 // the post-start nudge and the launch env carries GC_STARTUP_PROMPT_DELIVERED,
 // so the SessionStart hook adds context without repeating a prompt it cannot
 // inline past the provider's size cap. It applies the reconciler's promptDelivery
-// policy, including the oversized-prompt hard failure. A session with no agent
-// config, or whose agent has no prompt, is returned unchanged, and so is one
-// whose runtime is already up: the worker factory resolves these hints on every
-// handle it builds, and only a launch consumes them.
+// policy and returns hints unchanged when nothing can or needs to be delivered:
+// a closed session, a session with no agent config or prompt, and a runtime that
+// cannot be confirmed to carry a nudge (subprocess ignores cfg.Nudge, so marking
+// the launch delivered would suppress the hook and lose the prompt).
+//
+// Running sessions are NOT skipped. The worker factory resolves these hints once
+// per handle, and an interrupting submit stops a running session and relaunches
+// it with the same hints (Manager.interruptAndSubmitLocked), so the payload must
+// already be there when a handle is built over a live runtime.
 func (c startupPromptCity) applyTo(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error) {
-	// The factory enriches info with a live runtime probe before it resolves
-	// hints, so StateActive here means the runtime is up and Manager.ensureRunning
-	// returns without launching. Every other state may launch and gets the prompt.
-	if info.State == session.StateActive {
+	if info.Closed {
 		return hints, nil
 	}
 	agent := findAgentByTemplate(c.cfg, info.Template)
 	if agent == nil {
+		return hints, nil
+	}
+	runtimeName := effectiveSessionProvider(agent.Session, c.cfg.Session.Provider)
+	if transport != config.SessionTransportACP && promptDeliverySupportFor(runtimeName, c.cfg.Runtimes) == promptDeliverySupportUnsupported {
 		return hints, nil
 	}
 	prompt := c.promptFor(agent, info)
@@ -51,7 +57,7 @@ func (c startupPromptCity) applyTo(info session.Info, resolved *config.ResolvedP
 		IsACP:            transport == config.SessionTransportACP,
 		ResolvedProvider: resolved,
 		HintNudge:        hints.Nudge,
-		RuntimeName:      effectiveSessionProvider(agent.Session, c.cfg.Session.Provider),
+		RuntimeName:      runtimeName,
 		CityRuntimes:     c.cfg.Runtimes,
 	}, startupPromptResumeLaunch)
 	if err != nil {
@@ -69,8 +75,10 @@ func (c startupPromptCity) applyTo(info session.Info, resolved *config.ResolvedP
 // context is built from the session's own identity, never from the calling
 // process's GC_* environment: a CLI or API resolver runs in an operator's shell
 // or the controller, so ambient identity would render another agent's prompt.
-// Its query topology is the controller-safe one the reconciler renders with, so
-// every launch of a session carries the same prompt.
+// The result is gc prime's rendering, which the hook would otherwise carry: it
+// has no beacon (the hook still emits one) and no assigned-skills appendix, and
+// it uses the controller-safe query topology the reconciler renders with
+// (cityQueryTopology reopens the storage binding, which a controller must not do).
 func (c startupPromptCity) promptFor(a *config.Agent, info session.Info) string {
 	if a.PromptTemplate == "" || suppressStartupPromptForAgent(a) {
 		return ""

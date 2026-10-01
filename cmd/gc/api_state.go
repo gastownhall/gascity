@@ -1499,6 +1499,15 @@ func configDropsBoundRigs(current, next *config.City) bool {
 // layer, returning nil when [maintenance.dolt] is disabled. The
 // concrete *supervisor.StoreMaintenanceLoop satisfies
 // api.MaintenanceProvider directly.
+func (cs *controllerState) MaintenanceLoop() api.MaintenanceProvider {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if cs.maintenanceLoop == nil {
+		return nil
+	}
+	return cs.maintenanceLoop
+}
+
 // ApplyStartupPrompt implements api.State: it returns hints with the startup
 // prompt of the session described by info delivered for a launch that resumes it.
 // The controller renders the prompt and applies the same delivery plan the
@@ -1509,15 +1518,6 @@ func (cs *controllerState) ApplyStartupPrompt(info session.Info, resolved *confi
 		return hints, nil
 	}
 	return startupPromptCity{path: cs.CityPath(), cfg: cfg, stderr: os.Stderr}.applyTo(info, resolved, transport, hints)
-}
-
-func (cs *controllerState) MaintenanceLoop() api.MaintenanceProvider {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	if cs.maintenanceLoop == nil {
-		return nil
-	}
-	return cs.maintenanceLoop
 }
 
 // Config returns the current city config snapshot.

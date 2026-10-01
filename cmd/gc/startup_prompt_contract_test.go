@@ -56,10 +56,10 @@ func newContractCity(t *testing.T, promptBody string) contractCity {
 		if err := os.MkdirAll(filepath.Join(cityPath, "prompts"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(cityPath, "prompts", "worker.md"), []byte(promptBody), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(cityPath, "prompts", "worker.template.md"), []byte(promptBody), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		agent.PromptTemplate = "prompts/worker.md"
+		agent.PromptTemplate = "prompts/worker.template.md"
 	}
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -242,27 +242,33 @@ func TestStartupPromptContractEmptyPromptDeliversNothing(t *testing.T) {
 	}
 }
 
-// TestStartupPromptContractRunningSessionIsLeftAlone pins that a session whose
-// runtime is already up gets no prompt payload: the worker factory resolves
-// launch hints on every handle it builds, including read-only ones, and only a
-// launch consumes them. Every other session state may launch and gets the prompt.
-func TestStartupPromptContractRunningSessionIsLeftAlone(t *testing.T) {
+// TestStartupPromptContractEveryLaunchableStateGetsThePrompt pins that the prompt
+// is delivered whatever state the session is in when the handle is built,
+// including active: an interrupting submit stops a running session and relaunches
+// it with the hints the handle was built with (Manager.interruptAndSubmitLocked),
+// so skipping live sessions would leave exactly that relaunch hook-only. A closed
+// session can never launch and is left alone.
+func TestStartupPromptContractEveryLaunchableStateGetsThePrompt(t *testing.T) {
 	city := newContractCity(t, contractPromptBody)
 	cs := city.controllerState()
 
 	for _, tc := range []struct {
+		name     string
 		state    session.State
+		closed   bool
 		wantSent bool
 	}{
-		{state: session.StateActive, wantSent: false},
-		{state: session.StateAsleep, wantSent: true},
-		{state: session.StateSuspended, wantSent: true},
-		{state: session.StateCreating, wantSent: true},
-		{state: "", wantSent: true},
+		{name: "active", state: session.StateActive, wantSent: true},
+		{name: "asleep", state: session.StateAsleep, wantSent: true},
+		{name: "suspended", state: session.StateSuspended, wantSent: true},
+		{name: "creating", state: session.StateCreating, wantSent: true},
+		{name: "unknown", wantSent: true},
+		{name: "closed", closed: true, wantSent: false},
 	} {
-		t.Run("state="+string(tc.state), func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			info := city.sessionInfo(launchModes[1])
 			info.State = tc.state
+			info.Closed = tc.closed
 			hints := runtime.Config{WorkDir: city.path, Env: map[string]string{"KEEP": "me"}}
 
 			got, err := cs.ApplyStartupPrompt(info, city.resolved, "", hints)
@@ -274,9 +280,82 @@ func TestStartupPromptContractRunningSessionIsLeftAlone(t *testing.T) {
 				t.Errorf("prompt delivered = %v, want %v (Nudge=%q)", sent, tc.wantSent, abbreviate(got.Nudge))
 			}
 			if !tc.wantSent && (got.Nudge != "" || got.Env[startupPromptDeliveredEnv] != "") {
-				t.Errorf("a running session's hints must be returned unchanged, got Nudge=%q Env=%v", abbreviate(got.Nudge), got.Env)
+				t.Errorf("a closed session's hints must be returned unchanged, got Nudge=%q Env=%v", abbreviate(got.Nudge), got.Env)
 			}
 		})
+	}
+}
+
+// TestStartupPromptContractRuntimeThatCannotCarryANudgeIsLeftAlone pins that a
+// runtime promptDelivery cannot confirm carries a nudge gets no payload and no
+// marker: subprocess ignores cfg.Nudge, so a marked launch would suppress the
+// hook and lose the prompt. ACP carries the nudge through its own protocol
+// whatever the runtime, so it is still delivered.
+func TestStartupPromptContractRuntimeThatCannotCarryANudgeIsLeftAlone(t *testing.T) {
+	city := newContractCity(t, contractPromptBody)
+	city.cfg.Session.Provider = "subprocess"
+	cs := city.controllerState()
+	hints := runtime.Config{WorkDir: city.path, Env: map[string]string{"KEEP": "me"}}
+
+	got, err := cs.ApplyStartupPrompt(city.sessionInfo(launchModes[1]), city.resolved, "", hints)
+	if err != nil {
+		t.Fatalf("ApplyStartupPrompt: %v", err)
+	}
+	if got.Nudge != "" || got.PromptSuffix != "" || got.Env[startupPromptDeliveredEnv] != "" {
+		t.Errorf("a runtime that cannot carry a nudge must be left alone, got Nudge=%q PromptSuffix=%q Env=%v", abbreviate(got.Nudge), abbreviate(got.PromptSuffix), got.Env)
+	}
+
+	got, err = cs.ApplyStartupPrompt(city.sessionInfo(launchModes[1]), city.resolved, config.SessionTransportACP, hints)
+	if err != nil {
+		t.Fatalf("ApplyStartupPrompt (acp): %v", err)
+	}
+	if !strings.Contains(got.Nudge, contractPromptBody) || got.Env[startupPromptDeliveredEnv] != "1" {
+		t.Errorf("an ACP launch carries the prompt through its protocol, got Nudge=%q Env=%v", abbreviate(got.Nudge), got.Env)
+	}
+}
+
+// TestStartupPromptContractRendersSessionIdentityNotCallerEnvironment pins that
+// the prompt is rendered for the session being launched. A CLI or API resolver
+// runs in an operator's shell or the controller, whose GC_* variables name some
+// other agent: gc prime reads them because it runs inside the session, a worker
+// resolver must not.
+func TestStartupPromptContractRendersSessionIdentityNotCallerEnvironment(t *testing.T) {
+	t.Setenv("GC_ALIAS", "ambient/alias")
+	t.Setenv("GC_AGENT", "ambient/agent")
+	t.Setenv("GC_DIR", "/ambient/dir")
+	t.Setenv("GC_RIG", "ambient-rig")
+	city := newContractCity(t, "agent={{.AgentName}} dir={{.WorkDir}}")
+	info := city.sessionInfo(launchModes[1])
+	info.AgentName = "test-city/worker-7"
+
+	got, err := city.controllerState().ApplyStartupPrompt(info, city.resolved, "", runtime.Config{WorkDir: city.path})
+	if err != nil {
+		t.Fatalf("ApplyStartupPrompt: %v", err)
+	}
+	if want := "agent=test-city/worker-7 dir=" + city.path; !strings.Contains(got.Nudge, want) {
+		t.Errorf("nudge = %q, want it to contain %q", abbreviate(got.Nudge), want)
+	}
+	if strings.Contains(got.Nudge, "ambient") {
+		t.Errorf("the prompt leaked the caller's environment: %q", abbreviate(got.Nudge))
+	}
+}
+
+// TestStartupPromptContractNothingToDeliverLeavesHintsAlone pins the guards that
+// return the hints unchanged: no loaded config, and a session whose template is
+// not a configured agent (a provider-only or synthetic session).
+func TestStartupPromptContractNothingToDeliverLeavesHintsAlone(t *testing.T) {
+	city := newContractCity(t, contractPromptBody)
+	hints := runtime.Config{WorkDir: city.path, Env: map[string]string{"KEEP": "me"}}
+
+	noConfig := &controllerState{cityPath: city.path}
+	if got, err := noConfig.ApplyStartupPrompt(city.sessionInfo(launchModes[1]), city.resolved, "", hints); err != nil || got.Nudge != "" || got.Env[startupPromptDeliveredEnv] != "" {
+		t.Errorf("no config: got Nudge=%q Env=%v err=%v, want hints unchanged", abbreviate(got.Nudge), got.Env, err)
+	}
+
+	info := city.sessionInfo(launchModes[1])
+	info.Template = "not-a-configured-agent"
+	if got, err := city.controllerState().ApplyStartupPrompt(info, city.resolved, "", hints); err != nil || got.Nudge != "" || got.Env[startupPromptDeliveredEnv] != "" {
+		t.Errorf("unknown template: got Nudge=%q Env=%v err=%v, want hints unchanged", abbreviate(got.Nudge), got.Env, err)
 	}
 }
 
