@@ -15,9 +15,9 @@
 #       unshare (new pid/mount/ipc[/net] namespaces).
 #   launch --ns <op> <slot> <rel> <timeout_s> <side_channel|-> <lock_fd> <n> <env...> <argv...>
 #       inner: pid 1 of those namespaces. Hides the worker's state, gives the
-#       action private /tmp, /var/tmp, HOME, /dev/shm (and TMPFS_DIRS), makes
-#       RO_DIRS read-only, runs it as the slot user without privileges,
-#       enforces its timeout, kills
+#       action private /tmp, /var/tmp, HOME, /dev/shm (and TMPFS_DIRS), with
+#       ROOT_RO=1 makes everything else read-only, runs it as the slot user
+#       without privileges, enforces its timeout, kills
 #       whatever it leaves behind, and gives every file back to the worker user
 #       for upload and cleanup.
 #
@@ -54,7 +54,10 @@ case ${1:-} in --ns | --parent) ;; *) first "$@" ;; esac
 . "$CONF"
 : "${WORK_ROOT:?}" "${MASK_ROOT:?}" "${WORKER_UID:?}" "${WORKER_GID:?}" "${SLOT_UID0:?}" "${SLOT_COUNT:?}"
 : "${MAX_TIMEOUT_S:?}" "${BACKSTOP_S:?}" "${HOME_DIR:?}"
-NETNS=${NETNS:-0} SHM_SIZE=${SHM_SIZE:-8g} TMPFS_DIRS=${TMPFS_DIRS:-/run/lock /var/crash} RO_DIRS=${RO_DIRS:-}
+NETNS=${NETNS:-0} SHM_SIZE=${SHM_SIZE:-8g} TMPFS_DIRS=${TMPFS_DIRS:-/run/lock /var/crash} ROOT_RO=${ROOT_RO:-0}
+[[ $ROOT_RO == [01] ]] || die "ROOT_RO must be 0 or 1"
+# RO_DIRS (a list of read-only directories) is gone: ROOT_RO=1 covers them all.
+[[ -z ${RO_DIRS:-} ]] || die "RO_DIRS is no longer supported: set ROOT_RO=1"
 EGRESS_CHAIN=${EGRESS_CHAIN:-inet filter rbe_action_out}
 
 outer() {
@@ -215,18 +218,39 @@ inner() {
 	for d in $TMPFS_DIRS; do
 		if [[ -d $d ]]; then mount -t tmpfs -o mode=1777,size=16m,nosuid,nodev rbe-tmpfs "$d"; fi
 	done
-	# RO_DIRS: world-writable directories of the host (an image's shared tool
-	# caches) are read-only in here, so no action leaves files in them for a
-	# later one; the host keeps them as they are. Recursive and last: the
-	# mounts above (the mask among them) stay as they are inside a directory
-	# listed here.
-	for d in $RO_DIRS; do
-		if [[ -d $d ]]; then
-			mount --rbind "$d" "$d"
-			mount -o remount,bind,ro,nosuid,nodev "$d"
-		fi
-	done
 	mount -t mqueue -o nosuid,nodev,noexec rbe-mqueue /dev/mqueue
+	# ROOT_RO=1: the action can write only the mounts above. / and every
+	# other mount it can reach (/run, a data disk, ...) are read-only in here,
+	# whatever an image leaves world-writable (a shared tool cache), so no
+	# action leaves files for a later one; the host keeps them as they are
+	# (bind remounts change this namespace's mounts only). /proc, /sys and
+	# /dev keep theirs (device nodes; their writable files are per process or
+	# root's). RUN gets its own mount first: pid 1 still writes there.
+	if [[ $ROOT_RO == 1 ]]; then
+		mount --bind "$RUN" "$RUN"
+		local m o ex
+		local -A own=() opts=()
+		for d in "$op_dir" /tmp /var/tmp "$HOME_DIR" "$RUN" $TMPFS_DIRS; do own[$d]=1; done
+		# Mount points are octal-escaped (\040 for a space); the last line for
+		# a path is its top mount.
+		while read -r _ _ _ _ m o _; do
+			printf -v m '%b' "${m//\\/\\0}"
+			opts[$m]=$o
+		done </proc/self/mountinfo
+		for m in "${!opts[@]}"; do
+			case $m in / | /proc | /proc/* | /sys | /sys/* | /dev | /dev/*) continue ;; esac
+			# Hidden under a mount above (the mask, /tmp, ...): not reachable.
+			if [[ -n ${own[$m]:-} ]] || ! mountpoint -q -- "$m"; then continue; fi
+			ex=
+			if [[ ,${opts[$m]}, == *,noexec,* ]]; then ex=,noexec; fi
+			mount -o "remount,bind,ro,nosuid,nodev$ex" -- "$m"
+		done
+		# nodev on / only with /dev on its own mount (device nodes there).
+		ex=
+		if mountpoint -q /dev; then ex=,nodev; fi
+		if [[ ,${opts[/]}, == *,noexec,* ]]; then ex+=,noexec; fi
+		mount -o "remount,bind,ro,nosuid$ex" /
+	fi
 	cd "$op_dir/work${rel:+/$rel}"
 
 	(
