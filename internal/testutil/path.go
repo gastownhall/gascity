@@ -48,7 +48,8 @@ func shortTempRoot(tempDir, testTempDir string) string {
 	if len(tempDir) <= shortTempRootMaxLen && canonicalRoot != "/tmp" && !strings.HasPrefix(canonicalRoot, "/tmp/") {
 		return tempDir
 	}
-	if testTempDir != "" {
+	canonicalTestRoot := CanonicalPath(testTempDir)
+	if canonicalTestRoot == "/tmp/bt" || strings.HasPrefix(canonicalTestRoot, "/tmp/bt/") {
 		return "/tmp/bt"
 	}
 	return "/var/tmp"

@@ -162,6 +162,31 @@ func TestDoltCompactStateCheckSurfacesUnreadableMarker(t *testing.T) {
 	assertDoltCompactStateMentions(t, r, markerPath)
 }
 
+func TestDoltCompactStateCheckPreservesMarkersBeforeUnreadableDirectory(t *testing.T) {
+	dir := newDoltCompactStateTestCity(t)
+	markerPath := writeDoltCompactStateMarker(t, dir, "compact-quarantine", "beads", "manual review required", compactStateOldCreatedAt)
+	unreadablePath := filepath.Join(doctorDoltPackStateDir(dir), "compact-pending-gc")
+	if err := os.WriteFile(unreadablePath, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newTestDoltCompactStateCheck(dir).Run(&CheckContext{CityPath: dir})
+	if r.Status == StatusOK {
+		t.Fatal("status = OK, want warning")
+	}
+	assertDoltCompactStateMentions(t, r, markerPath, unreadablePath)
+}
+
+func TestDoltCompactStateCheckIgnoresMarkerTempFiles(t *testing.T) {
+	dir := newDoltCompactStateTestCity(t)
+	writeDoltCompactStateMarker(t, dir, "compact-quarantine", "beads.tmp.ABC123", "incomplete write", compactStateOldCreatedAt)
+
+	r := newTestDoltCompactStateCheck(dir).Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK for marker temp file; msg = %s", r.Status, r.Message)
+	}
+}
+
 func TestDoltCompactStateCheckRepresentsKnownPendingPushMarkers(t *testing.T) {
 	dir := newDoltCompactStateTestCity(t)
 	markers := map[string]string{
