@@ -213,14 +213,18 @@ func TestDoltCompactStateCheckPreservesMarkersBeforeUnreadableDirectory(t *testi
 }
 
 func TestDoltCompactStateCheckReportsRemoteNamesContainingTempToken(t *testing.T) {
-	dir := newDoltCompactStateTestCity(t)
-	markerPath := writeDoltCompactStateMarker(t, dir, "compact-pending-push-backup", "beads.prod.tmp.archive", "backup push failed", compactStateOldCreatedAt)
+	for _, name := range []string{"beads.prod.tmp.archive", "beads.tmp.ABC123", "beads.probe.ABC123"} {
+		t.Run(name, func(t *testing.T) {
+			dir := newDoltCompactStateTestCity(t)
+			markerPath := writeDoltCompactStateMarker(t, dir, "compact-pending-push-backup", name, "backup push failed", compactStateOldCreatedAt)
 
-	r := newTestDoltCompactStateCheck(dir).Run(&CheckContext{CityPath: dir})
-	if r.Status == StatusOK {
-		t.Fatalf("status = OK, want warning for real marker; msg = %s", r.Message)
+			r := newTestDoltCompactStateCheck(dir).Run(&CheckContext{CityPath: dir})
+			if r.Status == StatusOK {
+				t.Fatalf("status = OK, want warning for real marker; msg = %s", r.Message)
+			}
+			assertDoltCompactStateMentions(t, r, markerPath, name)
+		})
 	}
-	assertDoltCompactStateMentions(t, r, markerPath, "beads.prod.tmp.archive")
 }
 
 func TestDoltCompactStateCheckIgnoresMarkerTempFiles(t *testing.T) {
