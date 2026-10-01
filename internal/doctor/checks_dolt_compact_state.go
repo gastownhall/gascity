@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -16,6 +17,8 @@ var compactStateMarkerDirs = []string{
 	"compact-pending-push",
 	"compact-pending-push-backup",
 }
+
+var compactStateMarkerTempName = regexp.MustCompile(`^.+\.(?:tmp|probe)\.[[:alnum:]]{6}$`)
 
 // DoltCompactStateCheck inspects compact lifecycle markers to surface stale
 // quarantine or pending-GC/push state on managed Dolt stores.
@@ -60,7 +63,7 @@ func (c *DoltCompactStateCheck) scanMarkers() ([]compactStateMarker, []string) {
 			continue
 		}
 		for _, e := range entries {
-			if e.Type()&fs.ModeType != 0 || strings.HasPrefix(e.Name(), ".") {
+			if e.Type()&fs.ModeType != 0 || strings.HasPrefix(e.Name(), ".") || compactStateMarkerTempName.MatchString(e.Name()) {
 				continue
 			}
 			markerPath := filepath.Join(dir, e.Name())

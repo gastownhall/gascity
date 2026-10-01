@@ -188,13 +188,17 @@ func TestDoltCompactStateCheckReportsRemoteNamesContainingTempToken(t *testing.T
 	assertDoltCompactStateMentions(t, r, markerPath, "beads.prod.tmp.archive")
 }
 
-func TestDoltCompactStateCheckIgnoresHiddenMarkerTempFiles(t *testing.T) {
-	dir := newDoltCompactStateTestCity(t)
-	writeDoltCompactStateMarker(t, dir, "compact-quarantine", ".beads.tmp.ABC123", "incomplete write", compactStateOldCreatedAt)
+func TestDoltCompactStateCheckIgnoresMarkerTempFiles(t *testing.T) {
+	for _, name := range []string{"beads.tmp.ABC123", "beads.probe.ABC123", ".beads.tmp.ABC123"} {
+		t.Run(name, func(t *testing.T) {
+			dir := newDoltCompactStateTestCity(t)
+			writeDoltCompactStateMarker(t, dir, "compact-quarantine", name, "incomplete write", compactStateOldCreatedAt)
 
-	r := newTestDoltCompactStateCheck(dir).Run(&CheckContext{CityPath: dir})
-	if r.Status != StatusOK {
-		t.Fatalf("status = %d, want OK for hidden marker temp file; msg = %s", r.Status, r.Message)
+			r := newTestDoltCompactStateCheck(dir).Run(&CheckContext{CityPath: dir})
+			if r.Status != StatusOK {
+				t.Fatalf("status = %d, want OK for marker temp file %q; msg = %s", r.Status, name, r.Message)
+			}
+		})
 	}
 }
 
