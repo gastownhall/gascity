@@ -1,0 +1,122 @@
+#!/bin/bash
+# rbe-action-selftest: prove action isolation on this worker (README "Action
+# isolation"). Root; installed at /usr/local/libexec/rbe-action/selftest.
+#   selftest [--quick]   --quick: configuration and one probe action (about a
+#                        second; nativelink-worker's ExecStartPre); without it
+#                        also the timeout path and NativeLink's worker config.
+# Runs real actions through the real entrypoint as the worker user, in a
+# throwaway action directory under WORK_ROOT. Prints ok/FAIL lines and
+# "failures: N"; exit 1 on any failure.
+# shellcheck disable=SC2016,SC2317  # probe is the action's script; checks run indirectly
+set -uo pipefail
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+CONF=/etc/rbe-west/rbe-action.env
+LIB=/usr/local/libexec/rbe-action
+fails=0
+ok() { echo "ok    $1"; }
+bad() { echo "FAIL  $1"; fails=$((fails + 1)); }
+check() { if "${@:2}" >/dev/null 2>&1; then ok "$1"; else bad "$1"; fi; }
+[[ $(id -u) == 0 ]] || { echo "selftest: run as root" >&2; exit 2; }
+quick=0; [[ ${1:-} == --quick ]] && quick=1
+# shellcheck source=/dev/null
+. "$CONF" || { echo "selftest: no $CONF" >&2; exit 1; }
+worker=$(id -un "$WORKER_UID")
+TMPFS_DIRS=${TMPFS_DIRS:-/run/lock /var/crash} WORKER_JSON=${WORKER_JSON:-/etc/nativelink-worker.json}
+read -r -a deny <<<"${PROBE_DENY:-}"
+
+echo "# installation"
+for f in entry exec; do
+	check "$LIB/$f: root-owned, 0755, statically linked" \
+		bash -c "[[ \$(stat -c '%U %a' $LIB/$f) == 'root 755' ]] && file -b $LIB/$f | grep -q 'statically linked'"
+done
+for f in launch sweep selftest; do check "$LIB/$f: root 0755" test "$(stat -c '%U %a' "$LIB/$f")" = "root 755"; done
+check "$CONF: root 0644" test "$(stat -c '%U %a' "$CONF")" = "root 644"
+check "/etc/sudoers.d/rbe-action: root 0440, parses" bash -c '[[ $(stat -c "%U %a" /etc/sudoers.d/rbe-action) == "root 440" ]] && visudo -cq'
+slots_ok() {
+	local i u
+	for ((i = 0; i < SLOT_COUNT; i++)); do
+		u=$((SLOT_UID0 + i))
+		[[ $(getent passwd "$u" | cut -d: -f4,6,7) == "$u:$HOME_DIR:/bin/bash" ]] || return 1
+		[[ $(id -G "$u") == "$u" ]] || return 1
+	done
+}
+check "slot users $SLOT_UID0..$((SLOT_UID0 + SLOT_COUNT - 1)): own group only, home $HOME_DIR, /bin/bash" slots_ok
+check "slot users cannot sudo" bash -c "! sudo -l -U $SLOT_UID0 2>/dev/null | grep -q 'may run'"
+check "nft: an egress policy for the slot uids is loaded" bash -c "nft list ruleset | grep -q 'meta skuid $SLOT_UID0-$((SLOT_UID0 + 63))'"
+check "nft: it refuses link-local and the private ranges" bash -c "nft list ruleset | grep -q '169.254.0.0/16' && nft list ruleset | grep -q '10.0.0.0/8'"
+
+if ((!quick)); then
+	echo "# NativeLink worker config"
+	j=$WORKER_JSON
+	check "entrypoint is $LIB/entry" test "$(jq -r '.workers[0].local.entrypoint' "$j")" = "$LIB/entry"
+	check "timeout_handled_externally, max_action_timeout = BACKSTOP_S" \
+		test "$(jq -r '.workers[0].local | "\(.timeout_handled_externally) \(.max_action_timeout // .max_action_timeout_s)"' "$j")" = "true $BACKSTOP_S"
+	check "additional_environment: RBE_X_TIMEOUT_MS, RBE_X_SIDE_CHANNEL" \
+		test "$(jq -c '.workers[0].local.additional_environment' "$j")" = '{"RBE_X_TIMEOUT_MS":"timeout_millis","RBE_X_SIDE_CHANNEL":"side_channel_file"}'
+	check "no use_namespaces, use_mount_namespace, directory_cache" \
+		test "$(jq -c '.workers[0].local | [has("use_namespaces"), has("use_mount_namespace"), has("directory_cache")]' "$j")" = '[false,false,false]'
+fi
+
+echo "# a probe action through the entrypoint, as $worker"
+op=selftest-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+d=$WORK_ROOT/$op
+install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0755 "$d" "$d/work" "$d/work/in" "$d/work/out" "$d/src"
+printf 'pristine\n' >"$d/src/blob" && chown "$WORKER_UID:$WORKER_GID" "$d/src/blob" && chmod 0444 "$d/src/blob"
+ln "$d/src/blob" "$d/work/in/blob"
+# Full run only (walks the root filesystem, seconds): no world-writable
+# directory is shared between actions besides the per-action mounts.
+full_probe=
+if ((!quick)); then
+	full_probe='[ -z "$(find / -xdev -type d -perm -0002 2>/dev/null | grep -vxE "/tmp|/var/tmp|'"${TMPFS_DIRS// /|}"'")" ] && echo "R no-shared-writable-dir"'
+fi
+probe='
+id=$(id -u); [ "$id" -ge '"$SLOT_UID0"' ] && [ "$id" -lt '"$((SLOT_UID0 + SLOT_COUNT))"' ] && echo "R uid-slot"
+grep -q "^CapEff:[[:space:]]*0000000000000000" /proc/self/status && echo "R no-caps"
+grep -q "^NoNewPrivs:[[:space:]]*1" /proc/self/status && echo "R nnp"
+[ "$(env | sort | tr "\n" ";")" = "PATH=/usr/bin:/bin;PROBE=a=b c;PWD=$PWD;SHLVL=1;_=/usr/bin/env;" ] && echo "R env-exact"
+for t in '"${deny[*]}"'; do timeout 3 bash -c "exec 3<>/dev/tcp/${t%:*}/${t##*:}" 2>/dev/null || echo "R deny-$t"; done
+chmod u+w in/blob 2>/dev/null || echo "R input-immutable"
+ls '"$MASK_ROOT"'/content >/dev/null 2>&1 || echo "R worker-cas-hidden"
+[ "$(ls '"$WORK_ROOT"')" = "'"$op"'" ] && echo "R siblings-hidden"
+[ -z "$(ls -A /tmp)" ] && echo "R private-tmp"
+[ "$(ls /proc | grep -c "^[0-9]")" -lt 20 ] && echo "R own-pid-namespace"
+'"$full_probe"'
+[ -w "$(getent passwd "$(id -u)" | cut -d: -f6)" ] && [ -z "$(ls -A ~)" ] && echo "R fresh-home"
+mkdir -m 0700 out/private && echo x >out/private/f && chmod 0400 out/private/f && chmod 0500 out/private
+(setsid sleep 600 >/dev/null 2>&1 &)
+echo "R end"; exit 7'
+out=$(cd "$d/work" && setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --init-groups -- \
+	env -i PATH=/usr/bin:/bin 'PROBE=a=b c' RBE_X_TIMEOUT_MS=60000 "$LIB/entry" /bin/bash -c "$probe" 2>&1)
+rc=$?
+results=(uid-slot no-caps nnp env-exact input-immutable worker-cas-hidden siblings-hidden private-tmp
+	own-pid-namespace fresh-home end)
+for t in "${deny[@]}"; do results+=("deny-$t"); done
+((quick)) || results+=(no-shared-writable-dir)
+for r in "${results[@]}"; do
+	if grep -qx "R $r" <<<"$out"; then ok "action: $r"; else bad "action: $r"; fi
+done
+check "action exit status passed through (7)" test "$rc" = 7
+check "input inode unchanged" test "$(cat "$d/src/blob")" = pristine
+check "every file back with $worker" test -z "$(find "$d" ! -uid "$WORKER_UID" ! -path "$d/rbe-tmp" ! -path "$d/rbe-vartmp" -print -quit)"
+check "$worker can remove the action directory" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --init-groups rm -rf "$d"
+no_slot_procs() { ! pgrep -U "$(seq -s, "$SLOT_UID0" $((SLOT_UID0 + SLOT_COUNT - 1)))" >/dev/null; }
+check "no slot process left" no_slot_procs
+[[ -d $d ]] && rm -rf --one-file-system "$d"
+
+if ((!quick)); then
+	echo "# timeout: enforced by the launcher, reported through the side channel"
+	op=selftest-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+	d=$WORK_ROOT/$op
+	install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0755 "$d" "$d/work"
+	sc=$d/$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+	start=$SECONDS
+	(cd "$d/work" && setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --init-groups -- \
+		env -i PATH=/usr/bin:/bin RBE_X_TIMEOUT_MS=2000 "RBE_X_SIDE_CHANNEL=$sc" "$LIB/entry" /bin/sleep 300) >/dev/null 2>&1
+	rc=$?
+	check "timed out after ~2 s with exit 124" test "$rc:$((SECONDS - start < 10))" = "124:1"
+	check "side channel says timeout" grep -q '"failure":"timeout"' "$sc"
+	rm -rf --one-file-system "$d"
+	check "no slot process left" no_slot_procs
+fi
+echo "failures: $fails"
+exit $((fails > 0))

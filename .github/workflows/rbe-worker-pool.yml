@@ -35,6 +35,9 @@ jobs:
     timeout-minutes: 330
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # No GITHUB_TOKEN in .git/config: remote actions run on this runner (S11.3).
+          persist-credentials: false
       - name: NativeLink worker until idle or max age
         env:
           RBE_WORKER_TLS_CERT: ${{ secrets.RBE_WORKER_TLS_CERT }}
@@ -44,4 +47,9 @@ jobs:
           POOL_IDLE_MINUTES: ${{ inputs.idle_minutes }}
           POOL_MAX_MINUTES: ${{ inputs.max_minutes }}
           WORKER_NAME: gha-pool-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # Actions run as per-action slot users, away from the worker key and
+          # this step's environment (S11.3). Rollback: set the repository
+          # variable RBE_ACTION_ISOLATION to 0; the next dispatch runs actions
+          # as the runner user again.
+          RBE_ACTION_ISOLATION: ${{ vars.RBE_ACTION_ISOLATION || '1' }}
         run: tools/rbe/blacksmith-worker.sh

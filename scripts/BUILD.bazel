@@ -32,6 +32,7 @@ go_test(
         "pr_static_scope_contract_test.go",
         "precommit_contract_test.go",
         "push_ownership_guard_test.go",
+        "rbe_worker_isolation_test.go",
         "rebase_resolve_lib_test.go",
         "release_binary_metadata_test.go",
         "residency_boundary_test.go",
