@@ -89,10 +89,10 @@ func TestBdStoreConformance(t *testing.T) {
 	// Run conformance suite. We skip RunSequentialIDTests because BdStore
 	// uses bd's ID format (prefix-XXXX), not gc-N sequential format.
 	// BdStore hands ParentID to bd as --parent, which bd resolves
-	// unconditionally, so it cannot keep a parent bd does not have; that one
-	// subtest is opted out through the skip ledger, which names the tracking
-	// bead and expires.
-	beadstest.RunStoreTestsWithOptions(t, newStore, beadstest.Options{SkipForeignParentConformance: true})
+	// unconditionally, so it cannot keep a parent bd does not have. The
+	// ParentID row therefore asserts that refusal instead of the weak-reference
+	// contract the other stores meet; it still executes (ga-6mfvtl).
+	beadstest.RunStoreTestsWithOptions(t, newStore, beadstest.Options{RefusesUnresolvableParent: true})
 	beadstest.RunMetadataTests(t, newStore)
 	beadstest.RunCloseReasonTests(t, newStore)
 }
@@ -162,13 +162,16 @@ func startSharedDoltServer(t *testing.T, env []string, dataDir string) string {
 }
 
 // runBDInit initializes beads against the shared Dolt server with a bounded wait.
+// --quiet makes bd return before its success banner and the report-only
+// post-init diagnostics, which this harness never reads: a bd init that
+// finished its work must not be killed by the bound while it runs them.
 func runBDInit(t *testing.T, env []string, dir, prefix, port string) {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
 	defer cancel()
 
-	bdInit := exec.CommandContext(ctx, bdBinary, "init", "--server", "--server-host", "127.0.0.1", "--server-port", port, "-p", prefix, "--skip-hooks", "--skip-agents")
+	bdInit := exec.CommandContext(ctx, bdBinary, "init", "--quiet", "--server", "--server-host", "127.0.0.1", "--server-port", port, "-p", prefix, "--skip-hooks", "--skip-agents")
 	bdInit.Dir = dir
 	bdInit.Env = isolateBdHomeEnv(env)
 	out, err := bdInit.CombinedOutput()

@@ -29,13 +29,18 @@ func shardScriptTests(t *testing.T, script, name string) []string {
 // TestIntegrationSmokeLaneMatchesShardScript: bazel.yml's gating
 // integration-smoke lane (.bazelrc test:integration-smoke over
 // //test/integration:integration_test) runs exactly the tests
-// scripts/test-integration-shard names as its bdstore and rest-smoke shards
-// (bdstore_tests, rest_smoke_tests), so a test added to or dropped from
-// either list cannot silently leave the gating set.
+// scripts/test-integration-shard names as its bdstore-conformance, bdstore and
+// rest-smoke shards (bdstore_conformance_tests, bdstore_tests,
+// rest_smoke_tests), so a test added to or dropped from any list cannot
+// silently leave the gating set. The conformance suite has a shard of its own
+// for the legacy lanes' timeout budgets; the Bazel lane still gates it.
 func TestIntegrationSmokeLaneMatchesShardScript(t *testing.T) {
 	root := repoRoot(t)
 	script := readFile(t, root, "scripts/test-integration-shard")
-	tests := append(shardScriptTests(t, script, "bdstore_tests"), shardScriptTests(t, script, "rest_smoke_tests")...)
+	var tests []string
+	for _, name := range []string{"bdstore_conformance_tests", "bdstore_tests", "rest_smoke_tests"} {
+		tests = append(tests, shardScriptTests(t, script, name)...)
+	}
 	want := "^(" + strings.Join(tests, "|") + ")$"
 	if got := bazelRCFlagValue(readFile(t, root, ".bazelrc"), "test:integration-smoke --test_filter"); got != want {
 		t.Errorf(".bazelrc test:integration-smoke --test_filter\n  %s\nwant (from scripts/test-integration-shard)\n  %s", got, want)

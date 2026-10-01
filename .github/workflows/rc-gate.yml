@@ -297,6 +297,9 @@ jobs:
           - shard_name: bdstore
             timeout_minutes: 15
             command: make test-integration-bdstore
+          - shard_name: bdstore-conformance
+            timeout_minutes: 15
+            command: make test-integration-bdstore-conformance
           - shard_name: rest-smoke-1-of-2
             timeout_minutes: 20
             command: ./scripts/test-integration-shard rest-smoke-1-of-2

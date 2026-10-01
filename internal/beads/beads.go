@@ -143,11 +143,14 @@ type Bead struct {
 	// outright, and one it can see supplies the child's id, so placement follows
 	// the parent's namespace instead of the child's class. That is bd's
 	// contract, not something this package layers over it, and the provider is
-	// left following the tool it drives. CI sees the divergence only as a
-	// ledgered opt-out of the ParentIDNamesARowThisStoreDoesNotHave conformance
-	// subtest (beadstest/conformance_skips.go, ga-6mfvtl) that expires; until
-	// BdStore complies or the opt-out is renewed, a caller pointing a bd-backed
-	// store at a parent in another ledger gets a refusal, not a weak reference.
+	// left following the tool it drives. CI pins the refusal rather than
+	// skipping the row: BdStore's conformance run declares
+	// beadstest.Options.RefusesUnresolvableParent, and the
+	// ParentIDNamesARowThisStoreDoesNotHave subtest then asserts the refusal (an
+	// error containing "not found", no child left behind) and fails the day
+	// BdStore starts accepting a foreign parent. Until BdStore complies
+	// (ga-6mfvtl), a caller pointing a bd-backed store at a parent in another
+	// ledger gets a refusal, not a weak reference.
 	ParentID    string   `json:"parent,omitempty"`
 	Ref         string   `json:"ref,omitempty"`         // formula step ID or formula name
 	Needs       []string `json:"needs,omitempty"`       // dependency step refs

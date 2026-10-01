@@ -28,8 +28,9 @@
 #     (//test:integration_packages, tools/bazel/integration_suite.py) and
 #     gates, in every mode (fork PRs included: no network needed);
 #   - integration-smoke runs //test/integration's bdstore and REST smoke
-#     tests (scripts/test-integration-shard's bdstore_tests and
-#     rest_smoke_tests; .bazelrc test:integration-smoke) and gates, in
+#     tests (scripts/test-integration-shard's bdstore_conformance_tests,
+#     bdstore_tests and rest_smoke_tests; .bazelrc
+#     test:integration-smoke) and gates, in
 #     every mode: they
 #     never failed in 33 main runs of the full suite, which is still flaky;
 #   - integration runs on the nightly schedule and dispatches only,
@@ -176,8 +177,9 @@ jobs:
           # packages-* shards).
           packages='{"lane":"integration-packages","cmd":"test --config=ci --config=integration --keep_going //test:integration_packages"}'
           # Gating. The integration suite's bdstore and REST smoke tests
-          # (scripts/test-integration-shard bdstore_tests + rest_smoke_tests:
-          # .bazelrc test:integration-smoke's --test_filter).
+          # (scripts/test-integration-shard bdstore_conformance_tests +
+          # bdstore_tests + rest_smoke_tests: .bazelrc
+          # test:integration-smoke's --test_filter).
           smoke='{"lane":"integration-smoke","cmd":"test --config=ci --config=integration-smoke --keep_going //test/integration:integration_test"}'
           # Every mode tests: the gate (the required check) fails a run that
           # started no lane. Acceptance and integration-packages run on the

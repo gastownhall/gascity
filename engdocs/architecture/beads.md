@@ -238,10 +238,11 @@ enforced by the conformance suite in `internal/beads/beadstest/conformance.go`.
     `BdStore` does not comply. It passes `--parent` through to bd, which
     resolves the id unconditionally and derives the child's id from it, so a
     cross-store parent is refused and, when it does resolve, placement
-    follows the parent instead of the child's class. CI sees the divergence
-    only as a ledgered opt-out of that conformance row
-    (`beadstest/conformance_skips.go`), which expires. Tracked in ga-6mfvtl
-    (also ga-6od57).
+    follows the parent instead of the child's class. CI pins that refusal
+    instead of skipping the row: BdStore's conformance run declares
+    `beadstest.Options.RefusesUnresolvableParent`, and the row then asserts the
+    refusal (an error containing "not found", no child left behind) and fails
+    the day BdStore accepts a foreign parent. Tracked in ga-6mfvtl.
 
 ## Metadata vocabulary (gc.*)
 

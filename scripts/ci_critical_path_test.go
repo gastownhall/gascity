@@ -788,13 +788,15 @@ func TestPRIntegrationMatrixKeepsHeavyRestCoverageInReleaseGates(t *testing.T) {
 // whole 15-minute budget the bdstore row was sized for while it was skipped, so
 // it runs as a matrix row of its own and keeps the normal budget: a lane that
 // cannot hold it within 15 minutes is split by subtest, never given a longer
-// timeout. TestBdStoreMailWispInsert stays in the original bdstore row. Every
-// workflow that ran the bdstore shard keeps the conformance suite, or dropping
-// the row would silently remove the suite from that workflow.
+// timeout. The other BdStore tests stay in the original bdstore row. Every
+// workflow that runs the bdstore shard in a matrix keeps the conformance suite,
+// or dropping the row would silently remove the suite from that workflow. The
+// gating Bazel lane selects the suite through .bazelrc's integration-smoke
+// filter, which TestIntegrationSmokeLaneMatchesShardScript keeps equal to the
+// shard script.
 func TestBdStoreConformanceGetsItsOwnIntegrationShard(t *testing.T) {
 	const normalBudgetMinutes = 15
 	for _, tt := range []struct{ workflow, job string }{
-		{"ci.yml", "integration-shards"},
 		{"rc-gate.yml", "ubuntu_integration_shards"},
 	} {
 		t.Run(tt.workflow, func(t *testing.T) {

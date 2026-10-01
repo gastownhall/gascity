@@ -486,7 +486,7 @@ jobs:
       - name: Run integration shard
         id: shard
         continue-on-error: true
-        run: make test-integration-bdstore
+        run: make -k test-integration-bdstore test-integration-bdstore-conformance
 
   mac-integration-rest:
     name: Mac / integration rest / ${{ matrix.shard_name }}

@@ -103,6 +103,10 @@ jobs:
           install-claude-cli: "true"
       - name: Install tools
         run: make install-tools
+      # TestBdStoreConformance is not run here: it builds its tool env without
+      # GC_BEADS (integrationEnvFor), so the sqlite selection above cannot change
+      # what it exercises. It has its own bdstore-conformance shard in
+      # rc-gate.yml, and the Bazel integration-smoke lane selects it.
       - name: Integration tests (SQLite coordination store)
         run: make test-integration-bdstore
       - name: Acceptance tests (SQLite coordination store, Tier A)

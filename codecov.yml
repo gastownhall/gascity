@@ -14,6 +14,7 @@ coverage:
           - integration-packages
           - integration-review-formulas
           - integration-bdstore
+          - integration-bdstore-conformance
           - integration-rest-smoke
           - integration-rest-full
 
@@ -40,6 +41,12 @@ flags:
       - test/
     carryforward: true
   integration-bdstore:
+    paths:
+      - cmd/
+      - internal/
+      - test/
+    carryforward: true
+  integration-bdstore-conformance:
     paths:
       - cmd/
       - internal/

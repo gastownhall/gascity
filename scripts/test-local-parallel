@@ -199,6 +199,7 @@ add_integration_jobs() {
   done
   add_job "integration-review-formulas-recovery" "./scripts/test-integration-shard review-formulas-recovery"
   add_job "integration-bdstore" "./scripts/test-integration-shard bdstore"
+  add_job "integration-bdstore-conformance" "./scripts/test-integration-shard bdstore-conformance"
   for i in 1 2; do
     add_job "integration-rest-smoke-${i}-of-2" "./scripts/test-integration-shard rest-smoke-${i}-of-2"
   done
