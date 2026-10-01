@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -101,6 +102,19 @@ func TestDogExecScriptsAreBashSyntaxValid(t *testing.T) {
 				t.Fatalf("bash -n failed: %v\n%s", err, out)
 			}
 		})
+	}
+}
+
+func TestCompactScriptUsesPOSIXFunctionVariables(t *testing.T) {
+	scriptPath := filepath.Join(repoRoot(t), "commands", "compact", "run.sh")
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read compact script: %v", err)
+	}
+	for lineNumber, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "local ") {
+			t.Fatalf("compact script line %d uses non-POSIX local: %s", lineNumber+1, line)
+		}
 	}
 }
 
@@ -1974,6 +1988,7 @@ func TestCompactScriptRetriesPendingPushWithRefspecRemoteBranch(t *testing.T) {
 	firstOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1",
 		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
 		"GC_DOLT_REFSPEC_BEADS=main:gascity-3",
+		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
 	)
 	if err != nil {
 		t.Fatalf("initial compact should leave refspec remote push pending: %v\n%s", err, firstOut)
@@ -1988,7 +2003,7 @@ func TestCompactScriptRetriesPendingPushWithRefspecRemoteBranch(t *testing.T) {
 		t.Fatalf("pending-push marker should preserve refspec branches:\n%s", marker)
 	}
 
-	secondOut, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	secondOut, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup")
 	if err != nil {
 		t.Fatalf("pending-push retry should use marker refspec: %v\n%s", err, secondOut)
 	}
@@ -2002,6 +2017,9 @@ func TestCompactScriptRetriesPendingPushWithRefspecRemoteBranch(t *testing.T) {
 	}
 	if !strings.Contains(string(logData), "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main:gascity-3')") {
 		t.Fatalf("pending-push retry should push stored refspec:\n%s", logData)
+	}
+	if got := strings.Count(string(logData), "backup sync prod-backup"); got != 1 {
+		t.Fatalf("pending-push retry backup sync count = %d, want 1 before flatten only:\n%s", got, logData)
 	}
 	if _, err := os.Stat(pendingPush); !os.IsNotExist(err) {
 		t.Fatalf("successful refspec retry should clear marker, stat err=%v", err)
@@ -3996,7 +4014,7 @@ func TestCompactScriptRetriesFullGCForBelowThresholdPendingMarker(t *testing.T) 
 func TestCompactScriptRetriesPendingGCThenPushesRemote(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 
-	firstOut, err := fixture.run(t, "remote_gc_failure_once", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	firstOut, err := fixture.run(t, "remote_gc_failure_once", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup")
 	if err == nil {
 		t.Fatalf("first compact succeeded despite one-shot DOLT_GC failure:\n%s", firstOut)
 	}
@@ -4012,7 +4030,7 @@ func TestCompactScriptRetriesPendingGCThenPushesRemote(t *testing.T) {
 		t.Fatalf("pending-GC marker should preserve remote push contract:\n%s", marker)
 	}
 
-	secondOut, err := fixture.run(t, "remote_gc_failure_once", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	secondOut, err := fixture.run(t, "remote_gc_failure_once", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup")
 	if err != nil {
 		t.Fatalf("second compact should retry pending-GC path and push remote:\n%s", secondOut)
 	}
@@ -4033,6 +4051,9 @@ func TestCompactScriptRetriesPendingGCThenPushesRemote(t *testing.T) {
 	}
 	if !strings.Contains(log, "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main')") {
 		t.Fatalf("pending-GC retry should push remote-backed compaction:\n%s", log)
+	}
+	if got := strings.Count(log, "backup sync prod-backup"); got != 1 {
+		t.Fatalf("pending-GC retry backup sync count = %d, want 1 before flatten only:\n%s", got, log)
 	}
 	if _, err := os.Stat(pendingGC); !os.IsNotExist(err) {
 		t.Fatalf("successful pending-GC retry should clear marker, stat err=%v", err)
@@ -6471,6 +6492,31 @@ func TestCompactScriptBackupSkippedBelowThreshold(t *testing.T) {
 	}
 }
 
+func TestCompactScriptPendingPushValidatesMarkerBeforeBackup(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatalf("mkdir pending-push marker directory: %v", err)
+	}
+	markerData := "db=beads\nreason=test\ncreated_at=2026-10-01T00:00:00Z\nremote=invalid remote\nexpected_remote_head=headcommit\nexpected_remote_head_verified=1\ncompacted_from_head=headcommit\nlocal_branch=main\nremote_branch=main\n"
+	if err := os.WriteFile(marker, []byte(markerData), 0o600); err != nil {
+		t.Fatalf("write pending-push marker: %v", err)
+	}
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_ALLOW_FEDERATED=1",
+		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
+	)
+	if err == nil {
+		t.Fatalf("invalid pending-push marker should fail:\n%s", out)
+	}
+	if !strings.Contains(out, "pending_push marker has invalid remote=invalid remote") {
+		t.Fatalf("invalid pending-push marker diagnostic missing:\n%s", out)
+	}
+	if logData, readErr := os.ReadFile(fixture.doltLog); readErr == nil && strings.Contains(string(logData), "backup sync") {
+		t.Fatalf("invalid pending-push marker must be rejected before backup sync:\n%s", logData)
+	}
+}
+
 func TestCompactScriptBackupInvalidTimeoutExitsTwo(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "success",
@@ -6522,17 +6568,28 @@ func TestCompactScriptBackupMissingDatabaseDirectoryAbortsBeforeMutation(t *test
 
 func TestCompactScriptBackupUsesBoundedRunner(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
+	timeoutLog := filepath.Join(fixture.binDir, "timeout.log")
 	writeExecutable(t, filepath.Join(fixture.binDir, "timeout"), `#!/bin/sh
-[ "$1" = "--kill-after=2" ] || exit 97
+[ "$#" -ge 6 ] || exit 97
+printf '%s\n' "$*" >> "${GC_FAKE_TIMEOUT_LOG:?}"
 shift 2
 exec "$@"
 `)
 	out, err := fixture.run(t, "success",
 		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
+		"GC_DOLT_COMPACT_BACKUP_TIMEOUT_SECS=17",
 		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_FAKE_TIMEOUT_LOG="+timeoutLog,
 	)
 	if err != nil {
 		t.Fatalf("backup should use run_bounded: %v\nout=%s", err, out)
+	}
+	timeoutData, err := os.ReadFile(timeoutLog)
+	if err != nil {
+		t.Fatalf("read timeout log: %v", err)
+	}
+	if !strings.Contains(string(timeoutData), "--kill-after=2 17 dolt backup sync prod-backup") {
+		t.Fatalf("backup timeout invocation missing exact wrapper and budget:\n%s", timeoutData)
 	}
 }
 
@@ -6560,34 +6617,22 @@ func TestCompactScriptBackupRefusesExternalLocalEndpoint(t *testing.T) {
 }
 
 func TestCompactScriptBackupRefusesConcurrentBackupSync(t *testing.T) {
-	flockPath, err := exec.LookPath("flock")
-	if err != nil {
-		t.Skipf("flock not found: %v", err)
-	}
 	fixture := newCompactScriptFixture(t)
 	lockPath := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "backup-sync.lock")
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
 		t.Fatalf("mkdir lock dir: %v", err)
 	}
-	readyPath := filepath.Join(fixture.binDir, "backup-lock-ready")
-	holder := exec.Command(flockPath, "-n", lockPath, "sh", "-c", `touch "$1"; sleep 20`, "hold", readyPath)
-	if err := holder.Start(); err != nil {
-		t.Fatalf("start backup lock holder: %v", err)
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("open backup lock: %v", err)
+	}
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("hold backup lock: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = holder.Process.Kill()
-		_ = holder.Wait()
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
 	})
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := os.Stat(readyPath); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("backup lock holder did not become ready")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 	out, err := fixture.run(t, "success",
 		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
 		"GC_DOLT_BACKUP_LOCK_FILE="+lockPath,

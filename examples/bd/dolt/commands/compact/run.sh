@@ -2814,14 +2814,15 @@ flatten_database() {
         printf 'compact: db=%s remote probe returned empty name — refusing flatten\n' "$db" >&2
         return 1
       fi
-      backup_sync_database "$db" || return 1
+      if ! has_compact_marker "$pending_gc_dir" "$db" && ! has_compact_marker "$pending_push_dir" "$db"; then
+        backup_sync_database "$db" || return 1
+      fi
       compact_shared_history_database "$db" "$guard_remote_count" "$guard_remote"
       return $?
     fi
   fi
 
   if has_compact_marker "$pending_gc_dir" "$db"; then
-    backup_sync_database "$db" || return 1
     if [ -n "$dry_run" ]; then
       printf 'compact: db=%s pending_gc=present — dry-run (would retry DOLT_GC --full)\n' "$db"
       return 0
@@ -2910,7 +2911,6 @@ flatten_database() {
   fi
 
   if has_compact_marker "$pending_push_dir" "$db"; then
-    backup_sync_database "$db" || return 1
     legacy_pending_push_recovered=0
     pending_remote=$(compact_marker_value "$pending_push_dir" "$db" remote || true)
     pending_expected_remote_head=$(compact_marker_value "$pending_push_dir" "$db" expected_remote_head || true)
@@ -3766,64 +3766,64 @@ clear_stale_lock_dir() {
 }
 
 backup_sync_database() {
-  local db="$1"
-  local remote="$compact_backup_remote"
-  [ -n "$remote" ] || return 0
+  _bs_db="$1"
+  _bs_remote="$compact_backup_remote"
+  [ -n "$_bs_remote" ] || return 0
 
   if [ -n "$dry_run" ]; then
-    printf 'compact: db=%s — dry-run (would sync backup to remote=%s)\n' "$db" "$remote"
+    printf 'compact: db=%s — dry-run (would sync backup to remote=%s)\n' "$_bs_db" "$_bs_remote"
     return 0
   fi
 
-  local db_dir="$DOLT_DATA_DIR/$db"
-  if [ ! -d "$db_dir/.dolt" ]; then
-    printf 'compact: db=%s cannot back up; aborting compaction — no .dolt directory at %s\n' "$db" "$db_dir" >&2
+  _bs_db_dir="$DOLT_DATA_DIR/$_bs_db"
+  if [ ! -d "$_bs_db_dir/.dolt" ]; then
+    printf 'compact: db=%s cannot back up; aborting compaction — no .dolt directory at %s\n' "$_bs_db" "$_bs_db_dir" >&2
     return 1
   fi
 
   if ! command -v flock >/dev/null 2>&1; then
-    printf 'compact: db=%s backup sync requires flock; aborting compaction\n' "$db" >&2
+    printf 'compact: db=%s backup sync requires flock; aborting compaction\n' "$_bs_db" >&2
     return 1
   fi
   mkdir -p "$(dirname "$compact_backup_lock_file")" || {
-    printf 'compact: db=%s unable to create backup sync lock directory; aborting compaction\n' "$db" >&2
+    printf 'compact: db=%s unable to create backup sync lock directory; aborting compaction\n' "$_bs_db" >&2
     return 1
   }
   if ! exec 8>"$compact_backup_lock_file"; then
-    printf 'compact: db=%s unable to open backup sync lock; aborting compaction\n' "$db" >&2
+    printf 'compact: db=%s unable to open backup sync lock; aborting compaction\n' "$_bs_db" >&2
     return 1
   fi
   if ! flock -w "$compact_backup_lock_wait" 8; then
-    printf 'compact: db=%s backup sync lock is already held; aborting compaction\n' "$db" >&2
+    printf 'compact: db=%s backup sync lock is already held; aborting compaction\n' "$_bs_db" >&2
     exec 8>&-
     return 1
   fi
 
-  local sync_out
-  if sync_out=$(cd "$db_dir" && run_bounded "$compact_backup_timeout" dolt backup sync "$remote" 2>&1); then
+  _bs_sync_out=""
+  if _bs_sync_out=$(cd "$_bs_db_dir" && run_bounded "$compact_backup_timeout" dolt backup sync "$_bs_remote" 2>&1); then
     flock -u 8
     exec 8>&-
-    printf 'compact: db=%s backup sync to remote=%s -- ok\n' "$db" "$remote" >&2
+    printf 'compact: db=%s backup sync to remote=%s -- ok\n' "$_bs_db" "$_bs_remote" >&2
     return 0
   else
     flock -u 8
     exec 8>&-
     printf 'compact: db=%s backup sync to remote=%s failed; aborting compaction\n' \
-      "$db" "$remote" >&2
-    [ -n "$sync_out" ] && printf '%s\n' "$sync_out" >&2 || true
+      "$_bs_db" "$_bs_remote" >&2
+    [ -n "$_bs_sync_out" ] && printf '%s\n' "$_bs_sync_out" >&2 || true
     return 1
   fi
 }
 
 disk_preflight() {
-  local min_free="${GC_DOLT_COMPACT_MIN_FREE_BYTES:-5368709120}"
-  case "$min_free" in
+  _dp_min_free="${GC_DOLT_COMPACT_MIN_FREE_BYTES:-5368709120}"
+  case "$_dp_min_free" in
     0)
       return 0
       ;;
     ''|*[!0-9]*)
       printf 'compact: GC_DOLT_COMPACT_MIN_FREE_BYTES=%s is invalid — must be a non-negative integer\n' \
-        "$min_free" >&2
+        "$_dp_min_free" >&2
       exit 2
       ;;
   esac
@@ -3832,22 +3832,24 @@ disk_preflight() {
     return 0
   fi
 
-  local df_out available_kb available_bytes
-  if ! df_out=$(df -Pk "$DOLT_DATA_DIR" 2>/dev/null); then
+  _dp_df_out=""
+  _dp_available_kb=""
+  _dp_available_bytes=""
+  if ! _dp_df_out=$(df -Pk "$DOLT_DATA_DIR" 2>/dev/null); then
     printf 'compact: disk pre-flight probe failed: %s\n' "$DOLT_DATA_DIR" >&2
     return 1
   fi
-  available_kb=$(printf '%s\n' "$df_out" | awk 'NR==2{print $4}')
-  case "${available_kb:-}" in
+  _dp_available_kb=$(printf '%s\n' "$_dp_df_out" | awk 'NR==2{print $4}')
+  case "${_dp_available_kb:-}" in
     ''|*[!0-9]*)
       printf 'compact: disk pre-flight probe failed: %s\n' "$DOLT_DATA_DIR" >&2
       return 1
       ;;
   esac
-  available_bytes=$(( available_kb * 1024 ))
-  if [ "$available_bytes" -lt "$min_free" ]; then
+  _dp_available_bytes=$(( _dp_available_kb * 1024 ))
+  if [ "$_dp_available_bytes" -lt "$_dp_min_free" ]; then
     printf 'compact: disk CRITICAL: free_bytes=%d floor=%d DOLT_DATA_DIR=%s\n' \
-      "$available_bytes" "$min_free" "$DOLT_DATA_DIR" >&2
+      "$_dp_available_bytes" "$_dp_min_free" "$DOLT_DATA_DIR" >&2
     exit 0
   fi
 }
