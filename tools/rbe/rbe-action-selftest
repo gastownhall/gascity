@@ -41,7 +41,8 @@ slots_ok() {
 	done
 }
 check "slot users $SLOT_UID0..$((SLOT_UID0 + SLOT_COUNT - 1)): own group only, home $HOME_DIR, /bin/bash" slots_ok
-check "slot users cannot sudo" bash -c "! sudo -l -U $SLOT_UID0 2>/dev/null | grep -q 'may run'"
+# By name: sudo -l -U takes no numeric uid ("unknown user" would pass).
+check "slot users cannot sudo" bash -c "u=\$(id -un $SLOT_UID0) && sudo -l -U \"\$u\" | grep -q 'is not allowed to run sudo'"
 check "nft: an egress policy for the slot uids is loaded" bash -c "nft list ruleset | grep -q 'meta skuid $SLOT_UID0-$((SLOT_UID0 + 63))'"
 check "nft: it refuses link-local and the private ranges" bash -c "nft list ruleset | grep -q '169.254.0.0/16' && nft list ruleset | grep -q '10.0.0.0/8'"
 
@@ -63,6 +64,20 @@ d=$WORK_ROOT/$op
 install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0755 "$d" "$d/work" "$d/work/in" "$d/work/out" "$d/src"
 printf 'pristine\n' >"$d/src/blob" && chown "$WORKER_UID:$WORKER_GID" "$d/src/blob" && chmod 0444 "$d/src/blob"
 ln "$d/src/blob" "$d/work/in/blob"
+# The worker's CAS directories (every content_path in its config: they must
+# exist, under MASK_ROOT) and a canary next to them must be invisible to the
+# action; a path that does not exist would pass vacuously.
+mapfile -t cas_dirs < <(jq -r '.. | objects | .content_path? // empty' "$WORKER_JSON" 2>/dev/null)
+cas_exist() {
+	local c
+	((${#cas_dirs[@]})) || return 1
+	local m
+	m=$(realpath -e "$MASK_ROOT") || return 1
+	for c in "${cas_dirs[@]}"; do [[ -d $c && $(realpath -e "$c") == "$m"/* ]] || return 1; done
+}
+check "worker CAS (${cas_dirs[*]:-no content_path in $WORKER_JSON}) exists under $MASK_ROOT" cas_exist
+canary=$MASK_ROOT/.rbe-selftest-$op
+printf 'canary\n' >"$canary" && chmod 0444 "$canary"
 # Full run only (walks the root filesystem, seconds): no world-writable
 # directory is shared between actions besides the per-action mounts.
 full_probe=
@@ -76,7 +91,7 @@ grep -q "^NoNewPrivs:[[:space:]]*1" /proc/self/status && echo "R nnp"
 [ "$(env | sort | tr "\n" ";")" = "PATH=/usr/bin:/bin;PROBE=a=b c;PWD=$PWD;SHLVL=1;_=/usr/bin/env;" ] && echo "R env-exact"
 for t in '"${deny[*]}"'; do timeout 3 bash -c "exec 3<>/dev/tcp/${t%:*}/${t##*:}" 2>/dev/null || echo "R deny-$t"; done
 chmod u+w in/blob 2>/dev/null || echo "R input-immutable"
-ls '"$MASK_ROOT"'/content >/dev/null 2>&1 || echo "R worker-cas-hidden"
+h=1; for c in '"${cas_dirs[*]} $canary"'; do [ -e "$c" ] && h=0; done; [ $h = 1 ] && echo "R worker-cas-hidden"
 [ "$(ls '"$WORK_ROOT"')" = "'"$op"'" ] && echo "R siblings-hidden"
 [ -z "$(ls -A /tmp)" ] && echo "R private-tmp"
 [ "$(ls /proc | grep -c "^[0-9]")" -lt 20 ] && echo "R own-pid-namespace"
@@ -88,6 +103,7 @@ echo "R end"; exit 7'
 out=$(cd "$d/work" && setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --init-groups -- \
 	env -i PATH=/usr/bin:/bin 'PROBE=a=b c' RBE_X_TIMEOUT_MS=60000 "$LIB/entry" /bin/bash -c "$probe" 2>&1)
 rc=$?
+rm -f "$canary"
 results=(uid-slot no-caps nnp env-exact input-immutable worker-cas-hidden siblings-hidden private-tmp
 	own-pid-namespace fresh-home end)
 for t in "${deny[@]}"; do results+=("deny-$t"); done
