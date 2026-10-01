@@ -24,6 +24,14 @@ import (
 // still pruning marks left behind by sessions that closed mid-skip.
 const drainSkipAbsentRetention = 24 * time.Hour
 
+// drainSkipKey names one deduplicated line: a session and the kind of standing
+// condition. Drain skips use the empty kind; logStandingCondition names its own,
+// so the two never overwrite each other's mark.
+type drainSkipKey struct {
+	beadID string
+	kind   string
+}
+
 // drainSkipMark records the last drain-skip line printed for one session.
 type drainSkipMark struct {
 	message string
@@ -36,21 +44,25 @@ type drainSkipMark struct {
 // sighting, for a changed message, or when there is no tracker to dedupe
 // against.
 func (dt *drainTracker) noteDrainSkip(beadID, message string, now time.Time) bool {
-	if dt == nil || beadID == "" {
+	return dt.noteSkipLine(drainSkipKey{beadID: beadID}, message, now)
+}
+
+func (dt *drainTracker) noteSkipLine(key drainSkipKey, message string, now time.Time) bool {
+	if dt == nil || key.beadID == "" {
 		return true
 	}
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
 	if dt.drainSkips == nil {
-		dt.drainSkips = make(map[string]*drainSkipMark)
+		dt.drainSkips = make(map[drainSkipKey]*drainSkipMark)
 	}
-	mark, ok := dt.drainSkips[beadID]
+	mark, ok := dt.drainSkips[key]
 	if ok && mark.message == message {
 		mark.notedAt = now
 		mark.noted = true
 		return false
 	}
-	dt.drainSkips[beadID] = &drainSkipMark{message: message, notedAt: now, noted: true}
+	dt.drainSkips[key] = &drainSkipMark{message: message, notedAt: now, noted: true}
 	return true
 }
 
@@ -64,15 +76,15 @@ func (dt *drainTracker) sweepDrainSkips(present map[string]sessionpkg.Info, now 
 	}
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
-	for id, mark := range dt.drainSkips {
-		_, inFeed := present[id]
+	for key, mark := range dt.drainSkips {
+		_, inFeed := present[key.beadID]
 		switch {
 		case mark.noted:
 			mark.noted = false
 		case inFeed:
-			delete(dt.drainSkips, id)
+			delete(dt.drainSkips, key)
 		case now.Sub(mark.notedAt) > drainSkipAbsentRetention:
-			delete(dt.drainSkips, id)
+			delete(dt.drainSkips, key)
 		}
 	}
 }
@@ -82,5 +94,16 @@ func (dt *drainTracker) sweepDrainSkips(present map[string]sessionpkg.Info, now 
 func logDrainSkip(dt *drainTracker, w io.Writer, beadID, message string, now time.Time) {
 	if dt.noteDrainSkip(beadID, message, now) || gcDebugEnabled() {
 		fmt.Fprintln(w, message) //nolint:errcheck // best-effort diagnostics
+	}
+}
+
+// logStandingCondition prints line when a session enters the standing
+// condition kind (pending_unknown, token_unverifiable at one site), on the same
+// transition-only terms as logDrainSkip but under its own mark. The mark is
+// keyed by kind alone, so error text that drifts between ticks is still one
+// episode. GC_DEBUG restores the per-tick line.
+func logStandingCondition(dt *drainTracker, w io.Writer, beadID, kind, line string, now time.Time) {
+	if dt.noteSkipLine(drainSkipKey{beadID: beadID, kind: kind}, kind, now) || gcDebugEnabled() {
+		fmt.Fprintln(w, line) //nolint:errcheck // best-effort diagnostics
 	}
 }

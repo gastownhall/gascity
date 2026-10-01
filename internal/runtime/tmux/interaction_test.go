@@ -208,6 +208,40 @@ func TestProviderPendingMapsTmuxSessionNotFoundToRuntimeSentinel(t *testing.T) {
 	}
 }
 
+// A tmux server that cannot be reached is a failed observation, not an empty
+// pane: Pending must not answer "nothing pending", and its message must not
+// read as gone to runtime.IsSessionGone. A server that answered with no
+// sessions does prove the pane is gone.
+func TestProviderPendingNoServerMapping(t *testing.T) {
+	cases := []struct {
+		name            string
+		err             error
+		wantUnavailable bool
+		wantNotFound    bool
+	}{
+		{name: "no_server", err: ErrNoServer, wantUnavailable: true},
+		{name: "no_current_target", err: ErrNoCurrentTarget, wantNotFound: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &Provider{tm: &Tmux{exec: &fakeExecutor{err: tc.err}}}
+			pending, err := provider.Pending("worker")
+			if pending != nil || err == nil {
+				t.Fatalf("Pending = (%#v, %v), want (nil, error)", pending, err)
+			}
+			if got := errors.Is(err, runtime.ErrRuntimeUnavailable); got != tc.wantUnavailable {
+				t.Fatalf("errors.Is(%v, ErrRuntimeUnavailable) = %v, want %v", err, got, tc.wantUnavailable)
+			}
+			if got := errors.Is(err, runtime.ErrSessionNotFound); got != tc.wantNotFound {
+				t.Fatalf("errors.Is(%v, ErrSessionNotFound) = %v, want %v", err, got, tc.wantNotFound)
+			}
+			if got := runtime.IsSessionGone(err); got != tc.wantNotFound {
+				t.Fatalf("IsSessionGone(%v) = %v, want %v", err, got, tc.wantNotFound)
+			}
+		})
+	}
+}
+
 func TestProviderRespondMapsTmuxSessionNotFoundToRuntimeSentinel(t *testing.T) {
 	provider := &Provider{
 		tm: &Tmux{
