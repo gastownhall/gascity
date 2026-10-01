@@ -3,6 +3,7 @@ package testutil
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/pathutil"
@@ -30,10 +31,7 @@ func AssertSamePath(t *testing.T, got, want string) {
 // ShortTempDir returns a test-owned directory under a short root.
 func ShortTempDir(t *testing.T, prefix string) string {
 	t.Helper()
-	root := os.TempDir()
-	if len(root) > shortTempRootMaxLen {
-		root = "/var/tmp"
-	}
+	root := shortTempRoot(os.TempDir(), os.Getenv("TEST_TMPDIR"))
 	dir, err := os.MkdirTemp(root, prefix)
 	if err != nil {
 		t.Fatalf("MkdirTemp(%q, %q): %v", root, prefix, err)
@@ -43,4 +41,15 @@ func ShortTempDir(t *testing.T, prefix string) string {
 		_ = os.RemoveAll(dir)
 	})
 	return dir
+}
+
+func shortTempRoot(tempDir, testTempDir string) string {
+	canonicalRoot := CanonicalPath(tempDir)
+	if len(tempDir) <= shortTempRootMaxLen && canonicalRoot != "/tmp" && !strings.HasPrefix(canonicalRoot, "/tmp/") {
+		return tempDir
+	}
+	if testTempDir != "" {
+		return "/tmp/bt"
+	}
+	return "/var/tmp"
 }
