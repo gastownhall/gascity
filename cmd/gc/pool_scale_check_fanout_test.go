@@ -319,6 +319,13 @@ const (
 	// wrapper keeps it valid under the GC_DOLT_* assignments prefixShellEnv
 	// puts in front of a command.
 	fanOutBeadsDirCheck = `sh -c 'cat "$BEADS_DIR/count"'`
+
+	// fanOutRigBoundCheck reads the city's count from the working directory,
+	// since a city probe may run without any env of its own, but refuses to
+	// guess for a rig: a probe running in a rig (marked by markFanOutRig) must
+	// be bound to that rig's store through BEADS_DIR, so a rig probe left
+	// without its own env fails instead of quietly reading by working directory.
+	fanOutRigBoundCheck = `sh -c 'if [ -e "$PWD/.beads/rig" ]; then cat "$BEADS_DIR/count"; else cat "$PWD/.beads/count"; fi'`
 )
 
 // fanOutStoreFixture is a managed-bd city whose city store and rig stores each
@@ -376,6 +383,7 @@ func newFanOutStoreFixture(t *testing.T) fanOutStoreFixture {
 			DoltUser:       "rig-user",
 		})
 		writeFanOutCount(t, rigDir, rig.count)
+		markFanOutRig(t, rigDir)
 		cfg.Rigs = append(cfg.Rigs, config.Rig{Name: rig.name, Path: rigDir, Prefix: rig.prefix, SuspendedOnStart: rig.suspended})
 	}
 	return fanOutStoreFixture{
@@ -390,6 +398,15 @@ func writeFanOutCount(t *testing.T, scopeRoot string, count int) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(scopeRoot, ".beads", "count"), []byte(strconv.Itoa(count)), 0o644); err != nil {
 		t.Fatalf("write %s count: %v", scopeRoot, err)
+	}
+}
+
+// markFanOutRig drops a marker into a rig's .beads so fanOutRigBoundCheck can
+// tell from its working directory alone that it is running in a rig.
+func markFanOutRig(t *testing.T, rigDir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "rig"), nil, 0o644); err != nil {
+		t.Fatalf("write %s rig marker: %v", rigDir, err)
 	}
 }
 
@@ -584,25 +601,41 @@ dolt.auto-start: false
 }
 
 // TestBuildDesiredState_CityScopedCustomScaleCheckSumsEveryActiveStore is the
-// end-to-end proof through the production flow: buildDesiredState resolves the
-// city-scoped agent's env, builds the fan-out at the generic-pool call site,
-// and evaluatePendingPools runs it through the real shell. The pool's desired
-// slots are the sum of the stores' own counts -- city + riga + rigb, with the
-// suspended rig contributing nothing.
+// end-to-end proof through the production flow at both fan-out call sites in
+// buildDesiredStateWithSessionBeads: the generic pool, which hands the
+// city-scoped agent's resolved env to the fan-out, and the pool backing a
+// named session, which hands it none. evaluatePendingPools runs the check
+// through the real shell, and the pool's desired slots are the sum of the
+// stores' own counts -- city + riga + rigb, with the suspended rig contributing
+// nothing. fanOutRigBoundCheck makes an unbound rig probe visible at either
+// site: it reads the city's count at the generic site (3 slots) and fails, so
+// contributes nothing, at the named-session site (1 slot).
 func TestBuildDesiredState_CityScopedCustomScaleCheckSumsEveryActiveStore(t *testing.T) {
-	fx := newFanOutStoreFixture(t)
-	fx.cfg.Agents[0].ScaleCheck = fanOutBeadsDirCheck
+	for _, tc := range []struct {
+		name         string
+		namedSession bool
+	}{
+		{"generic pool", false},
+		{"named-session backing pool", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newFanOutStoreFixture(t)
+			fx.cfg.Agents[0].ScaleCheck = fanOutRigBoundCheck
+			if tc.namedSession {
+				fx.cfg.NamedSessions = []config.NamedSession{{Template: "worker", Mode: "on_demand"}}
+			}
 
-	desired := buildDesiredState("test-city", fx.cityPath, time.Now().UTC(), fx.cfg, runtime.NewFake(), nil, io.Discard)
+			desired := buildDesiredState("test-city", fx.cityPath, time.Now().UTC(), fx.cfg, runtime.NewFake(), nil, io.Discard)
 
-	slots := 0
-	for _, tp := range desired.State {
-		if tp.TemplateName == "worker" {
-			slots++
-		}
-	}
-	if want := fanOutCityCount + fanOutRigACount + fanOutRigBCount; slots != want {
-		t.Fatalf("worker desired slots = %d, want %d (city + riga + rigb, suspended rig excluded); "+
-			"%d means every rig probe read the city store", slots, want, 3*fanOutCityCount)
+			slots := 0
+			for _, tp := range desired.State {
+				if tp.TemplateName == "worker" {
+					slots++
+				}
+			}
+			if want := fanOutCityCount + fanOutRigACount + fanOutRigBCount; slots != want {
+				t.Fatalf("worker desired slots = %d, want %d (city + riga + rigb, suspended rig excluded)", slots, want)
+			}
+		})
 	}
 }
