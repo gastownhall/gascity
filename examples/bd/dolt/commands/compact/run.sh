@@ -3777,12 +3777,12 @@ backup_sync_database() {
 
   local db_dir="$DOLT_DATA_DIR/$db"
   if [ ! -d "$db_dir/.dolt" ]; then
-    printf 'compact: db=%s backup sync skipped — no .dolt directory at %s\n' "$db" "$db_dir" >&2
-    return 0
+    printf 'compact: db=%s cannot back up; aborting compaction — no .dolt directory at %s\n' "$db" "$db_dir" >&2
+    return 1
   fi
 
   local sync_out
-  if sync_out=$(cd "$db_dir" && timeout "$compact_backup_timeout" dolt backup sync "$remote" 2>&1); then
+  if sync_out=$(cd "$db_dir" && run_bounded "$compact_backup_timeout" dolt backup sync "$remote" 2>&1); then
     printf 'compact: db=%s backup sync to remote=%s -- ok\n' "$db" "$remote" >&2
     return 0
   else
@@ -3805,6 +3805,10 @@ disk_preflight() {
       exit 2
       ;;
   esac
+
+  if [ "${GC_DOLT_MANAGED_LOCAL:-}" != "1" ] && [ ! -d "$DOLT_DATA_DIR" ]; then
+    return 0
+  fi
 
   local df_out available_kb available_bytes
   if ! df_out=$(df -Pk "$DOLT_DATA_DIR" 2>/dev/null); then

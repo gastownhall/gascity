@@ -18,12 +18,12 @@ go_test(
     name = "testutil_test",
     srcs = [
         "failure_artifacts_test.go",
+        "path_test.go",
         "testenv_import_test.go",
     ],
     embed = [":testutil"],
     deps = ["//internal/testenv"],
 )
-
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(

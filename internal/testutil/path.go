@@ -25,15 +25,12 @@ func AssertSamePath(t *testing.T, got, want string) {
 	}
 }
 
-// ShortTempDir returns a test-owned temporary directory rooted at /tmp so
-// Unix socket paths stay under the 108-byte platform limit. It ignores TMPDIR
-// deliberately: a long TMPDIR (e.g. /home/user/tmp/gascity-ga-XXXXX set by
-// the deployer for test isolation) would push socket paths over the limit.
+// ShortTempDir returns a test-owned directory under the disk-backed short root.
 func ShortTempDir(t *testing.T, prefix string) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", prefix)
+	dir, err := os.MkdirTemp("/var/tmp", prefix)
 	if err != nil {
-		t.Fatalf("MkdirTemp(/tmp, %q): %v", prefix, err)
+		t.Fatalf("MkdirTemp(/var/tmp, %q): %v", prefix, err)
 	}
 	t.Cleanup(func() {
 		SaveFailureDiagnostics(t, dir)
