@@ -512,6 +512,9 @@ pending_push_dir="$PACK_STATE_DIR/compact-pending-push"
 pending_push_backup_dir="$PACK_STATE_DIR/compact-pending-push-backup"
 quarantine_dir="$PACK_STATE_DIR/compact-quarantine"
 notify_state_root="$PACK_STATE_DIR/compact-notify-state"
+backup_proof_remote=""
+backup_proof_head=""
+compact_marker_suppress_notify=""
 
 # DB discovery uses rig metadata.json files first (authoritative), with a
 # filesystem-scan fallback when gc itself is unavailable.
@@ -1670,7 +1673,7 @@ write_compact_marker() {
     printf 'compact: db=%s unable to create marker directory %s\n' "$db" "$dir" >&2
     return 1
   fi
-  tmp=$(mktemp "$dir/$db.tmp.XXXXXX") || {
+  tmp=$(mktemp "$dir/.$db.tmp.XXXXXX") || {
     umask "$old_umask"
     printf 'compact: db=%s unable to create marker in %s\n' "$db" "$dir" >&2
     return 1
@@ -1696,7 +1699,7 @@ write_compact_marker() {
     printf 'compact: db=%s unable to install marker in %s\n' "$db" "$dir" >&2
     return 1
   fi
-  if [ "$dir" = "$quarantine_dir" ]; then
+  if [ "$dir" = "$quarantine_dir" ] && [ -z "$compact_marker_suppress_notify" ]; then
     emit_compact_quarantine_event "$db" "compact-quarantine" "$marker_path" "$reason" "$created_at"
     if marker_should_notify "$quarantine_dir" "$db" "$reason" "$compact_renotify_backstop_secs"; then
       if mail_compact_quarantine_alert "$db" "compact-quarantine" "$marker_path" "$reason" "$created_at"; then
@@ -1970,6 +1973,8 @@ write_pending_push_marker() {
     "expected_remote_head=$expected_remote_head" \
     "expected_remote_head_verified=$expected_remote_head_verified" \
     "compacted_from_head=$compacted_from_head" \
+    "backup_remote=${backup_proof_remote:-}" \
+    "backup_head=${backup_proof_head:-}" \
     "local_branch=$local_branch" \
     "remote_branch=$remote_branch"
 }
@@ -1989,6 +1994,8 @@ write_pending_gc_marker() {
     "expected_remote_head=$_pg_expected_remote_head" \
     "expected_remote_head_verified=$_pg_expected_remote_head_verified" \
     "compacted_from_head=$_pg_compacted_from_head" \
+    "backup_remote=${backup_proof_remote:-}" \
+    "backup_head=${backup_proof_head:-}" \
     "local_branch=$_pg_local_branch" \
     "remote_branch=$_pg_remote_branch"
 }
@@ -2415,6 +2422,12 @@ restore_head_if_current() {
     return 0
   fi
   if [ "$current_head" != "$expected_current" ]; then
+    original_head_in_history=$(commit_exists_in_local_log "$db" "$head" || true)
+    if [ "$original_head_in_history" = "1" ]; then
+      printf 'compact: db=%s preserving writer-advanced HEAD=%s containing pre-flatten HEAD=%s after %s\n' \
+        "$db" "$current_head" "$head" "$reason" >&2
+      return 0
+    fi
     printf 'compact: db=%s current HEAD=%s is neither pre-flatten HEAD=%s nor expected recovery HEAD=%s after %s — refusing hard reset; manual repair required\n' \
       "$db" "${current_head:-<empty>}" "$head" "$expected_current" "$reason" >&2
     return 1
@@ -2495,6 +2508,7 @@ defer_writer_race_after_flatten() {
     return 1
   fi
   preserve_head_after_writer_race_defer "$db" "$flatten_head" || true
+  clear_compact_marker "$quarantine_dir" "$db"
   return 0
 }
 
@@ -2792,6 +2806,15 @@ flatten_database() {
         return 1
         ;;
     esac
+  fi
+
+  if [ -z "$dry_run" ]; then
+    if has_compact_marker "$pending_gc_dir" "$db"; then
+      require_backup_proof_for_marker "$pending_gc_dir" "$db" || return 1
+    fi
+    if has_compact_marker "$pending_push_dir" "$db"; then
+      require_backup_proof_for_marker "$pending_push_dir" "$db" || return 1
+    fi
   fi
 
   # Shared-history guard (#5958; remote guard adapted from #6052). Any
@@ -3230,6 +3253,14 @@ flatten_database() {
   # "unproven" and therefore falls back to the safe quarantine behavior.
   head_before_reset=$(head_commit "$db" || true)
 
+  compact_marker_suppress_notify=1
+  if ! write_quarantine_marker "$db" "flatten mutation in progress"; then
+    compact_marker_suppress_notify=""
+    rm -f "$preflight_tmp"
+    return 1
+  fi
+  compact_marker_suppress_notify=""
+
   # Soft-reset to the watermark + commit-everything is the flatten
   # transaction. Both run in a single dolt sql invocation so the session keeps
   # the USE selection across the two CALLs. History at or before the watermark
@@ -3247,7 +3278,9 @@ flatten_database() {
     emit_error_file "$db" "$reset_err_tmp"
     rm -f "$preflight_tmp"
     rm -f "$reset_err_tmp"
-    if ! restore_head_after_flatten_failure "$db" "$head" "$flatten_base"; then
+    if restore_head_after_flatten_failure "$db" "$head" "$flatten_base"; then
+      clear_compact_marker "$quarantine_dir" "$db"
+    else
       write_quarantine_marker "$db" "flatten failed and pre-flatten HEAD restore failed" || return 1
     fi
     return 1
@@ -3596,6 +3629,7 @@ flatten_database() {
   if run_full_gc "$db" "flatten ok commits=$count->${after_count:-?} but" \
     "commits=$count->${after_count:-?}" "$start"; then
     clear_compact_marker "$pending_gc_dir" "$db"
+    clear_compact_marker "$quarantine_dir" "$db"
     primary_push_rc=0
     push_remote_after_compaction "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "initial" "$compacted_from_head" "$local_branch" "$remote_branch" || primary_push_rc=$?
     if [ -n "$remote" ]; then
@@ -3603,12 +3637,10 @@ flatten_database() {
     fi
     return "$primary_push_rc"
   fi
-  write_compact_marker "$pending_gc_dir" "$db" "flatten succeeded but full GC failed" \
-    "remote=$remote" "expected_remote_head=$expected_remote_head" \
-    "expected_remote_head_verified=$expected_remote_head_verified" \
-    "compacted_from_head=$compacted_from_head" \
-    "local_branch=$local_branch" \
-    "remote_branch=$remote_branch" || return 1
+  write_pending_gc_marker "$db" "flatten succeeded but full GC failed" \
+    "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
+    "$compacted_from_head" "$local_branch" "$remote_branch" || return 1
+  clear_compact_marker "$quarantine_dir" "$db"
   return 1
 }
 
@@ -3628,6 +3660,15 @@ bare_gc_database() {
   if has_compact_marker "$quarantine_dir" "$db"; then
     report_existing_quarantine "$db"
     return 1
+  fi
+
+  if [ -z "$dry_run" ]; then
+    if has_compact_marker "$pending_gc_dir" "$db"; then
+      require_backup_proof_for_marker "$pending_gc_dir" "$db" || return 1
+    fi
+    if has_compact_marker "$pending_push_dir" "$db"; then
+      require_backup_proof_for_marker "$pending_push_dir" "$db" || return 1
+    fi
   fi
 
   if ! has_compact_marker "$pending_gc_dir" "$db" && ! has_compact_marker "$pending_push_dir" "$db"; then
@@ -3805,6 +3846,15 @@ backup_sync_database() {
 
   _bs_sync_out=""
   if _bs_sync_out=$(cd "$_bs_db_dir" && run_bounded "$compact_backup_timeout" dolt backup sync "$_bs_remote" 2>&1); then
+    _bs_head=$(head_commit "$_bs_db" || true)
+    if [ -z "$_bs_head" ]; then
+      flock -u 8
+      exec 8>&-
+      printf 'compact: db=%s backup sync completed but HEAD proof failed; aborting compaction\n' "$_bs_db" >&2
+      return 1
+    fi
+    backup_proof_remote="$_bs_remote"
+    backup_proof_head="$_bs_head"
     flock -u 8
     exec 8>&-
     printf 'compact: db=%s backup sync to remote=%s -- ok\n' "$_bs_db" "$_bs_remote" >&2
@@ -3817,6 +3867,29 @@ backup_sync_database() {
     [ -n "$_bs_sync_out" ] && printf '%s\n' "$_bs_sync_out" >&2 || true
     return 1
   fi
+}
+
+require_backup_proof_for_marker() {
+  _bp_dir="$1"
+  _bp_db="$2"
+  [ -n "$compact_backup_remote" ] || return 0
+  _bp_remote=$(compact_marker_value "$_bp_dir" "$_bp_db" backup_remote || true)
+  _bp_head=$(compact_marker_value "$_bp_dir" "$_bp_db" backup_head || true)
+  case "$_bp_head" in
+    ''|*[!A-Za-z0-9]*)
+      printf 'compact: db=%s recovery marker=%s does not prove configured backup remote=%s — refusing mutation\n' \
+        "$_bp_db" "$(compact_marker_path "$_bp_dir" "$_bp_db")" "$compact_backup_remote" >&2
+      return 1
+      ;;
+  esac
+  if [ "$_bp_remote" != "$compact_backup_remote" ]; then
+    printf 'compact: db=%s recovery marker=%s does not prove configured backup remote=%s — refusing mutation\n' \
+      "$_bp_db" "$(compact_marker_path "$_bp_dir" "$_bp_db")" "$compact_backup_remote" >&2
+    return 1
+  fi
+  backup_proof_remote="$_bp_remote"
+  backup_proof_head="$_bp_head"
+  return 0
 }
 
 decimal_less_than() {

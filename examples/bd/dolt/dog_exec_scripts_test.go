@@ -897,7 +897,7 @@ case "$query" in
     exit 0
     ;;
   *"SELECT COUNT(*) FROM dolt_log WHERE commit_hash = 'headcommit'"*)
-    if [ "$(current_head)" = "headcommit" ]; then
+    if [ "$(current_head)" = "headcommit" ] || [ "$mode" = "flatten_failure_after_writer_advance" ]; then
       print_cell 1
     else
       print_cell 0
@@ -1442,6 +1442,11 @@ case "$query" in
       printf 'reset exploded\n' >&2
       exit 44
     fi
+    if [ "$mode" = "flatten_failure_after_writer_advance" ]; then
+      set_head writercommit
+      printf 'reset rejected after writer advanced HEAD\n' >&2
+      exit 44
+    fi
     if [ "$mode" = "commit_failure_after_reset" ]; then
       set_head rootcommit
       printf 'commit rejected after reset\n' >&2
@@ -1451,6 +1456,10 @@ case "$query" in
       set_head writercommit
       printf 'commit rejected after external writer advanced HEAD\n' >&2
       exit 44
+    fi
+    if [ "$mode" = "require_preflatten_marker" ] && [ ! -f "$GC_CITY_PATH/.gc/runtime/packs/dolt/compact-quarantine/$db" ]; then
+      printf 'pre-flatten recovery marker missing\n' >&2
+      exit 45
     fi
     set_head compactcommit
     if [ "$mode" = "same_row_count_writer" ]; then
@@ -3950,6 +3959,37 @@ func TestCompactScriptRefusesToRestoreOverExternalHeadAdvance(t *testing.T) {
 	}
 }
 
+func TestCompactScriptPreservesWriterDescendantAfterFlattenFailure(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "flatten_failure_after_writer_advance", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite flatten failure after writer advance:\n%s", out)
+	}
+	state, readErr := os.ReadFile(fixture.stateFile)
+	if readErr != nil {
+		t.Fatalf("read fake dolt state: %v", readErr)
+	}
+	if strings.TrimSpace(string(state)) != "writercommit" {
+		t.Fatalf("writer descendant was overwritten, state=%q", state)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("harmless writer descendant left quarantine marker: %v", statErr)
+	}
+}
+
+func TestCompactScriptReservesRecoveryMarkerBeforeFlattenMutation(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "require_preflatten_marker", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("compact should reserve recovery marker before flatten: %v\nout=%s", err, out)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("successful flatten left recovery marker: %v", statErr)
+	}
+}
+
 func TestCompactScriptSurfacesFlattenFailureStderr(t *testing.T) {
 	out, _, err := runCompactScriptCommand(t, "flatten_failure")
 	if err == nil {
@@ -3973,6 +4013,16 @@ func TestCompactScriptSurfacesGCFailureStderr(t *testing.T) {
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("GC failure should write pending-GC marker: %v", err)
 	}
+}
+
+func TestCompactScriptPendingGCRecordsBackupProof(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "gc_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup")
+	if err == nil {
+		t.Fatalf("compact succeeded despite DOLT_GC failure:\n%s", out)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	assertCompactMarkerHasEvidence(t, marker, "backup_remote=prod-backup", "backup_head=headcommit")
 }
 
 func TestCompactScriptRetriesFullGCForBelowThresholdPendingMarker(t *testing.T) {
@@ -6477,7 +6527,7 @@ func TestCompactScriptBareGCPreservesPreFlattenBackupDuringRecovery(t *testing.T
 			if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
 				t.Fatalf("mkdir marker directory: %v", err)
 			}
-			if err := os.WriteFile(marker, []byte("db=beads\n"), 0o600); err != nil {
+			if err := os.WriteFile(marker, []byte("db=beads\nbackup_remote=prod-backup\nbackup_head=headcommit\n"), 0o600); err != nil {
 				t.Fatalf("write marker: %v", err)
 			}
 
@@ -6499,6 +6549,28 @@ func TestCompactScriptBareGCPreservesPreFlattenBackupDuringRecovery(t *testing.T
 				t.Fatalf("bare GC must still run while %s exists:\n%s", markerType, logData)
 			}
 		})
+	}
+}
+
+func TestCompactScriptBareGCRefusesRecoveryWithoutBackupProof(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatalf("mkdir marker directory: %v", err)
+	}
+	if err := os.WriteFile(marker, []byte("db=beads\n"), 0o600); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup", "GC_DOLT_COMPACT_BARE_GC=1")
+	if err == nil {
+		t.Fatalf("bare GC should refuse recovery without backup proof:\n%s", out)
+	}
+	if !strings.Contains(out, "does not prove configured backup remote=prod-backup") {
+		t.Fatalf("missing backup proof refusal:\n%s", out)
+	}
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr == nil && (strings.Contains(string(logData), "backup sync") || strings.Contains(string(logData), "DOLT_GC")) {
+		t.Fatalf("missing backup proof must not mutate backup or database:\n%s", logData)
 	}
 }
 
@@ -6578,7 +6650,7 @@ func TestCompactScriptPendingPushValidatesMarkerBeforeBackup(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
 		t.Fatalf("mkdir pending-push marker directory: %v", err)
 	}
-	markerData := "db=beads\nreason=test\ncreated_at=2026-10-01T00:00:00Z\nremote=invalid remote\nexpected_remote_head=headcommit\nexpected_remote_head_verified=1\ncompacted_from_head=headcommit\nlocal_branch=main\nremote_branch=main\n"
+	markerData := "db=beads\nreason=test\ncreated_at=2026-10-01T00:00:00Z\nremote=invalid remote\nexpected_remote_head=headcommit\nexpected_remote_head_verified=1\ncompacted_from_head=headcommit\nbackup_remote=prod-backup\nbackup_head=headcommit\nlocal_branch=main\nremote_branch=main\n"
 	if err := os.WriteFile(marker, []byte(markerData), 0o600); err != nil {
 		t.Fatalf("write pending-push marker: %v", err)
 	}
