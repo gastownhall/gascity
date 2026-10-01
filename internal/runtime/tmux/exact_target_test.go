@@ -380,6 +380,32 @@ func TestWrapErrorMapsNoSuchSession(t *testing.T) {
 	}
 }
 
+// Session-scoped pane probes target "=name:" (paneTarget), and tmux answers a
+// missing session with "can't find window" for that form. Without the mapping
+// the dead-runtime reaper saw an unclassified error and skipped the corpse
+// every tick (#5436).
+func TestWrapErrorMapsCantFindWindow(t *testing.T) {
+	err := wrapError(errors.New("exit status 1"), "can't find window: =worker-1:", []string{"list-panes"})
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("wrapError(can't find window) = %v, want ErrSessionNotFound", err)
+	}
+}
+
+// The dead-session probe must read a missing session as absent, not as an
+// error the reaper re-logs without ever reaping (#5436).
+func TestIsDeadRuntimeSessionAbsentWindowTargetIsNotAnError(t *testing.T) {
+	p := &Provider{tm: &Tmux{exec: &fakeExecutor{
+		err: wrapError(errors.New("exit status 1"), "can't find window: =worker-1:", []string{"list-panes"}),
+	}}}
+	dead, err := p.IsDeadRuntimeSession("worker-1")
+	if err != nil {
+		t.Fatalf("IsDeadRuntimeSession = (_, %v), want (_, nil)", err)
+	}
+	if dead {
+		t.Fatal("IsDeadRuntimeSession = (true, nil), want (false, nil) for an absent session")
+	}
+}
+
 func TestGetMetaUnsetKeyIsEmpty(t *testing.T) {
 	cases := []struct {
 		name string

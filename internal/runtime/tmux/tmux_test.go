@@ -597,6 +597,11 @@ func TestWrapError(t *testing.T) {
 		{"duplicate session: test", ErrSessionExists},
 		{"session not found: test", ErrSessionNotFound},
 		{"can't find session: test", ErrSessionNotFound},
+		// Session-scoped pane probes target "=name:", and tmux answers a
+		// missing session with "can't find window" for that form. Without
+		// this mapping the dead-runtime reaper saw an unclassified error and
+		// skipped the corpse every tick (#5436).
+		{"can't find window: =test:", ErrSessionNotFound},
 	}
 
 	for _, tt := range tests {

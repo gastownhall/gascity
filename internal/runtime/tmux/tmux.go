@@ -481,7 +481,12 @@ func wrapError(err error, stderr string, args []string) error {
 	if strings.Contains(stderr, "session not found") ||
 		strings.Contains(stderr, "no such session") ||
 		strings.Contains(stderr, "can't find session") ||
-		strings.Contains(stderr, "can't find pane") {
+		strings.Contains(stderr, "can't find pane") ||
+		// Session-scoped pane probes target "=name:" (paneTarget), and tmux
+		// answers a missing session with "can't find window" for that form.
+		// Reading it as not-found lets the dead-runtime reaper reap instead
+		// of re-logging an unclassified error every tick (#5436).
+		strings.Contains(stderr, "can't find window") {
 		return ErrSessionNotFound
 	}
 
