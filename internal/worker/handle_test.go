@@ -1466,6 +1466,47 @@ func TestRuntimeHandleStateStoppedSkipsPendingProbe(t *testing.T) {
 	}
 }
 
+// TestRuntimeHandlePendingStatusKeysOnSentinel pins that interaction support is
+// the provider's answer, not the interface assertion: acp implements
+// InteractionProvider and answers ErrInteractionUnsupported. A probe failure is
+// returned instead of reading as "nothing pending".
+func TestRuntimeHandlePendingStatusKeysOnSentinel(t *testing.T) {
+	errProbe := fmt.Errorf("capture-pane timed out: %w", runtime.ErrRuntimeUnavailable)
+	cases := []struct {
+		name          string
+		pendingErr    error
+		wantSupported bool
+		wantErr       error
+	}{
+		{name: "answers", wantSupported: true},
+		{name: "unsupported_sentinel", pendingErr: fmt.Errorf("acp: %w", runtime.ErrInteractionUnsupported), wantSupported: false},
+		{name: "session_gone", pendingErr: fmt.Errorf("pane: %w", runtime.ErrSessionNotFound), wantSupported: true},
+		{name: "probe_error", pendingErr: errProbe, wantSupported: true, wantErr: errProbe},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if tc.pendingErr != nil {
+				sp.PendingErrors["legacy-worker"] = tc.pendingErr
+			}
+			handle, err := NewRuntimeHandle(RuntimeHandleConfig{Provider: sp, SessionName: "legacy-worker", ProviderName: "stub"})
+			if err != nil {
+				t.Fatalf("NewRuntimeHandle: %v", err)
+			}
+			pending, supported, err := handle.PendingStatus(context.Background())
+			if pending != nil || supported != tc.wantSupported {
+				t.Fatalf("PendingStatus = (%+v, %v, %v), want (nil, %v, _)", pending, supported, err, tc.wantSupported)
+			}
+			if tc.wantErr == nil && err != nil {
+				t.Fatalf("PendingStatus error = %v, want nil", err)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("PendingStatus error = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestRuntimeHandleLiveObservationUsesRuntimeMetadataAndLiveness(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {

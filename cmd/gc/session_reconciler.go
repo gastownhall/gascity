@@ -124,6 +124,8 @@ func timerTraceCodes(dec sessionpkg.TimerDecision) (TraceReasonCode, TraceOutcom
 		reason = TraceReasonPinned
 	case string(TraceReasonPending):
 		reason = TraceReasonPending
+	case string(TraceReasonPendingUnknown):
+		reason = TraceReasonPendingUnknown
 	case string(TraceReasonAssignedWork):
 		reason = TraceReasonAssignedWork
 	case string(TraceReasonAssignedWorkExhausted):
@@ -156,6 +158,27 @@ func timerTraceCodes(dec sessionpkg.TimerDecision) (TraceReasonCode, TraceOutcom
 		outcome = TraceOutcomeCode(dec.TraceOutcome)
 	}
 	return reason, outcome
+}
+
+// pendingHoldTraceReason is the trace reason of a pending-interaction
+// deferral: pending for a real prompt, pending_unknown for a probe that could
+// not answer.
+func pendingHoldTraceReason(hold pendingInteractionAnswer) TraceReasonCode {
+	if hold == pendingInteractionUnknown {
+		return TraceReasonPendingUnknown
+	}
+	return TraceReasonPending
+}
+
+// pendingHoldTimerDecision relabels a lifecycle timer's pending deferral as
+// pending_unknown when the probe could not answer. The ladders take only a
+// yes/no pending fact, so the unknown answer reaches them as yes; the action
+// is unchanged.
+func pendingHoldTimerDecision(dec sessionpkg.TimerDecision, hold pendingInteractionAnswer) sessionpkg.TimerDecision {
+	if hold == pendingInteractionUnknown && dec.Action == sessionpkg.TimerActionDefer && dec.TraceReason == string(TraceReasonPending) {
+		dec.TraceReason = string(TraceReasonPendingUnknown)
+	}
+	return dec
 }
 
 // isDrainAckStopPendingInfo reports whether a session is parked in the drain-ack
@@ -450,7 +473,7 @@ var (
 	drainAckStopConfirmDeadPoll    = 250 * time.Millisecond
 )
 
-func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, tracker *asyncStartTracker, stderr io.Writer) {
+func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, tracker *asyncStartTracker, dt *drainTracker, stderr io.Writer) {
 	name = strings.TrimSpace(name)
 	if name == "" || sp == nil {
 		return
@@ -486,12 +509,19 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 		// NAME and may fire long after it was queued. If the name was reused by
 		// a re-woken replacement in the meantime, its GC_INSTANCE_TOKEN differs
 		// from the one we intended to stop; killing it would take out a live,
-		// working session. Skip on a definite mismatch. An empty expected or
-		// live token means "cannot verify" and falls through to the kill,
-		// matching verifiedStop's conservative posture.
+		// working session. Skip on a definite mismatch, and skip this attempt
+		// when the token cannot be read; the next tick re-queues. An empty
+		// expected token, or a live token confirmed unset, falls through to the
+		// kill, matching verifiedStop's conservative posture.
 		if expectedToken != "" {
-			if actualToken, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); actualToken != "" && actualToken != expectedToken {
+			switch verdict, err := readRuntimeInstanceToken(sp, name, expectedToken); verdict {
+			case runtimeTokenMismatch:
 				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s skipped: instance token mismatch (session was replaced)\n", name) //nolint:errcheck
+				return
+			case runtimeTokenUnverifiable:
+				// Re-queued every tick while it lasts: log the transition only.
+				logStandingCondition(dt, stderr, sessionID, "token_unverifiable.async_stop", fmt.Sprintf(
+					"session reconciler: async drain-ack stop %s skipped: instance token unverifiable (token_unverifiable): %v", name, err), time.Now())
 				return
 			}
 		}
@@ -533,8 +563,8 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 // incarnations, so once the original target dies a re-woken same-name
 // replacement must not be killed. Returns true if confirmed dead — including
 // when a definite token mismatch shows the name now belongs to a replacement —
-// and false if it outlived the deadline (caller proceeds best-effort). Mirrors
-// #4089's confirm-dead contract.
+// and false if it outlived the deadline, or if its token could not be read
+// (caller proceeds best-effort). Mirrors #4089's confirm-dead contract.
 //
 // timeout/poll are passed in rather than read from the package globals so a
 // detached caller can bind them on its own goroutine at queue time; see
@@ -561,12 +591,24 @@ func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.P
 		// loop next observes it. A definite live-token mismatch means our
 		// intended target is already gone and the name now belongs to a live
 		// replacement — treat the original as confirmed dead and stop rather than
-		// killing the replacement. An empty expected or live token means "cannot
-		// verify" and falls through to the re-kill, matching verifiedStop.
+		// killing the replacement. A token that cannot be read is not
+		// confirmation of anything: report not-confirmed and do not re-kill. It
+		// returns at once rather than polling out the confirm window, like the
+		// liveness-error return above: the window bounds re-kills of a
+		// survivor, and with the token unreadable no re-kill is allowed, so
+		// waiting would only hold the async-stop slot while re-reading a failing
+		// store. Not-confirmed is the answer the deadline gives too, and the
+		// stop-pending row re-queues its stop next tick. An empty expected
+		// token, or a live token confirmed unset, falls through to the re-kill,
+		// matching verifiedStop.
 		if expectedToken != "" {
-			if actualToken, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); actualToken != "" && actualToken != expectedToken {
+			switch verdict, err := readRuntimeInstanceToken(sp, name, expectedToken); verdict {
+			case runtimeTokenMismatch:
 				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s confirm-dead skipped re-kill: instance token mismatch (session was replaced)\n", name) //nolint:errcheck
 				return true
+			case runtimeTokenUnverifiable:
+				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s confirm-dead skipped re-kill: instance token unverifiable (token_unverifiable): %v\n", name, err) //nolint:errcheck
+				return false
 			}
 		}
 		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
@@ -928,7 +970,7 @@ func reconcileDrainAckStopPending(
 		// the async tracker, so the snapshot stays coherent — a zero result (applyTo
 		// no-op) matches the unmutated session. The token fence reads the typed
 		// instance_token off the Info snapshot (mirrors verifiedStop).
-		queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, stderr)
+		queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, dt, stderr)
 		return true, drainAckFinalizeResult{}
 	}
 	return true, finalizeDrainAckStoppedSession(
@@ -997,7 +1039,7 @@ func finalizeDrainAckStopPendingSessions(
 			// Observation unavailable, not "still alive". Re-queue the stop and
 			// say nothing to the agent: a reminder is a claim about the row's
 			// state, and this tick has none.
-			queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, processNames, asyncStopTracker, stderr)
+			queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, processNames, asyncStopTracker, dt, stderr)
 			continue
 		}
 		if obs.Running || obs.Alive {
@@ -1015,8 +1057,8 @@ func finalizeDrainAckStopPendingSessions(
 			// Nothing is closed here; a later tick's own liveness observation owns
 			// that. Every gate fails closed, so a false return leaves the historical
 			// behavior untouched. See drain_ack_escalation.go.
-			if !escalateWedgedDrainAckStopPending(cityPath, cfg, sp, store, rigStores, info, name, processNames, asyncStopTracker, clk, rec, stderr) {
-				queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, processNames, asyncStopTracker, stderr)
+			if !escalateWedgedDrainAckStopPending(cityPath, cfg, sp, store, rigStores, info, name, processNames, asyncStopTracker, clk, rec, dt, stderr) {
+				queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, processNames, asyncStopTracker, dt, stderr)
 			}
 			continue
 		}
@@ -1897,7 +1939,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// cannot route around its own name, so the template falls to zero seats
 		// until someone kills the pane by hand. See
 		// retirePoolSlotAtDrainDeadline for the gates.
-		if fold, retired := retirePoolSlotAtDrainDeadline(cityPath, cfg, sp, store, rigStores, info, tp.TemplateName, tp.Hints.ProcessNames, storeQueryPartial, reconcileOpts.deferSessionClosesOnBoot, clk, rec, stderr); retired {
+		if fold, retired := retirePoolSlotAtDrainDeadline(cityPath, cfg, sp, store, rigStores, info, tp.TemplateName, tp.Hints.ProcessNames, storeQueryPartial, reconcileOpts.deferSessionClosesOnBoot, clk, rec, dt, stderr); retired {
 			tick.apply(id, fold)
 			tick.markClosed(id)
 			continue
@@ -2316,7 +2358,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								// Token fence off the typed snapshot: the stop-pending fold
 								// preserves instance_token, so infoByID[id].InstanceToken is the
 								// token we intend to stop (mirrors verifiedStop).
-								queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, stderr)
+								queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, dt, stderr)
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonOrphaned, TraceOutcomeStopPending, template, name, nil)
 								}
@@ -2858,12 +2900,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							continue
 						}
 					}
-					if pendingInteractionKeepsAwakeInfo(infoByID[id], sp, name, clk) &&
-						(cancelReconcilerAckedDrainInfo(infoByID[id], sp, dt) || cancelRecoveredReconcilerAckedDrainInfo(infoByID[id], sp, name)) {
-						if trace != nil {
-							trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonPending, TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, nil)
+					// Only a live runtime can raise an interaction: a dead or zombie
+					// target's failed probe must not cancel the drain it acked.
+					if alive {
+						if hold := pendingInteractionHoldInfo(infoByID[id], sp, name, clk); hold != pendingInteractionNo &&
+							(cancelReconcilerAckedDrainInfo(infoByID[id], sp, dt) || cancelRecoveredReconcilerAckedDrainInfo(infoByID[id], sp, name)) {
+							if trace != nil {
+								trace.RecordDecision(TraceSiteReconcilerDrainAck, pendingHoldTraceReason(hold), TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, nil)
+							}
+							continue
 						}
-						continue
 					}
 					// Min-floor twin of the assigned-work cancel above (sc-j27j0d). This
 					// is the arm the measured refinery loop ran through: reason
@@ -2886,7 +2932,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							clearDrainTrackerForStopPending(id, dt)
 							// Token fence off the typed snapshot (mirrors verifiedStop); the
 							// stop-pending fold preserves instance_token.
-							queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, stderr)
+							queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, dt, stderr)
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonAcknowledged, TraceOutcomeStopPending, tp.TemplateName, name, nil)
 							}
@@ -3434,13 +3480,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// Defer ordinary-session config-drift drain while a
 							// user is attached. Named-session config drift is
 							// deferred when actively in use (see above).
-							if pendingInteractionKeepsAwakeInfo(infoByID[id], sp, name, clk) {
+							if hold := pendingInteractionHoldInfo(infoByID[id], sp, name, clk); hold != pendingInteractionNo {
 								drainCancelled := false
 								if dt != nil {
 									drainCancelled = cancelSessionDrainForPendingInfo(infoByID[id], sp, dt)
 								}
 								if trace != nil {
-									trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonPending, TraceOutcomeDeferredPending, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
+									trace.RecordDecision(TraceSiteReconcilerConfigDrift, pendingHoldTraceReason(hold), TraceOutcomeDeferredPending, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
 										"drain_canceled": drainCancelled,
 									}))
 								}
@@ -3668,10 +3714,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				facts.Blocker = maxSessionAgeBlockerInfo(infoByID[id], clk.Now())
 			}
 			dec := sessionpkg.DecideMaxSessionAge(facts)
+			pendingHold := pendingInteractionNo
 			for dec.Action == sessionpkg.TimerActionGatherPending || dec.Action == sessionpkg.TimerActionGatherAssignedWork {
 				if dec.Action == sessionpkg.TimerActionGatherPending {
 					facts.Pending = sessionpkg.PendingNo
-					if pendingInteractionKeepsAwakeInfo(infoByID[id], sp, name, clk) {
+					pendingHold = pendingInteractionHoldInfo(infoByID[id], sp, name, clk)
+					if pendingHold != pendingInteractionNo {
 						facts.Pending = sessionpkg.PendingYes
 					}
 				} else {
@@ -3690,6 +3738,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				dec = sessionpkg.DecideMaxSessionAge(facts)
 			}
+			dec = pendingHoldTimerDecision(dec, pendingHold)
 			switch dec.Action {
 			case sessionpkg.TimerActionDefer:
 				// Deferrals include lifecycle timer blockers already enforced
@@ -3765,13 +3814,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				facts.Blocker = lifecycleTimerBlockerInfo(infoByID[id], clk.Now())
 			}
 			dec := sessionpkg.DecideIdleTimeout(facts)
+			pendingHold := pendingInteractionNo
 			for dec.Action == sessionpkg.TimerActionGatherPending ||
 				dec.Action == sessionpkg.TimerActionGatherAssignedWork ||
 				dec.Action == sessionpkg.TimerActionGatherMinFloor {
 				switch dec.Action {
 				case sessionpkg.TimerActionGatherPending:
 					facts.Pending = sessionpkg.PendingNo
-					if pendingInteractionKeepsAwakeInfo(infoByID[id], sp, name, clk) {
+					pendingHold = pendingInteractionHoldInfo(infoByID[id], sp, name, clk)
+					if pendingHold != pendingInteractionNo {
 						facts.Pending = sessionpkg.PendingYes
 					}
 				case sessionpkg.TimerActionGatherAssignedWork:
@@ -3801,6 +3852,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				dec = sessionpkg.DecideIdleTimeout(facts)
 			}
+			dec = pendingHoldTimerDecision(dec, pendingHold)
 			// Consecutive same-bead assigned-work defer backstop (ga-nllza6):
 			// DecideIdleTimeout stays a pure decider, so the reconciler tracks
 			// the streak itself, keyed by session name + the session's current
@@ -3957,7 +4009,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			continue
 		}
 		decision := awakeDecisions[name]
-		if decision.ShouldWake && !pendingInteractionReady(sp, name) && info.PinAwake != "true" {
+		// Only a live runtime can raise an interaction, so a dead target never
+		// skips config suppression on a probe that could not answer.
+		if decision.ShouldWake && (!target.alive || !pendingInteractionReady(sp, name)) && info.PinAwake != "true" {
 			configSuppressed, observationErr := configWakeSuppressedInfoWithError(info, policy, sp, clk)
 			if observationErr != nil {
 				runtimeObservationErrors[name] = observationErr
@@ -4023,6 +4077,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		info := infoByID[target.info.ID]
 		name := info.SessionNameMetadata
 		if observationErr, deferred := runtimeObservationErrors[name]; deferred {
+			// A pending probe that cannot answer is a standing condition: say so
+			// once per episode, not once per tick.
+			var pendingErr *pendingInteractionUnknownError
+			if errors.As(observationErr, &pendingErr) {
+				logStandingCondition(dt, stderr, info.ID, string(TraceReasonPendingUnknown), fmt.Sprintf(
+					"session reconciler: deferring lifecycle for %s after runtime observation failure: %v: %v", name, observationErr, pendingErr.cause), clk.Now())
+				continue
+			}
 			fmt.Fprintf(stderr, "session reconciler: deferring lifecycle for %s after runtime observation failure: %v\n", name, observationErr) //nolint:errcheck
 			continue
 		}
@@ -6273,8 +6335,11 @@ func namedSessionActiveUseReasonInfo(info sessionpkg.Info, sp runtime.Provider, 
 		return "", false, nil
 	}
 	// Pending interaction means a user is actively waiting.
-	if pendingInteractionKeepsAwakeInfo(info, sp, name, clk) {
+	switch pendingInteractionHoldInfo(info, sp, name, clk) {
+	case pendingInteractionYes:
 		return "pending_interaction", true, nil
+	case pendingInteractionUnknown:
+		return string(TraceReasonPendingUnknown), true, nil
 	}
 	// Tmux attachment means a user is watching; a probe that cannot tell may
 	// be hiding one.

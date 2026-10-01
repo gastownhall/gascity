@@ -180,6 +180,7 @@ const (
 	TraceReasonConfigDriftAttached           TraceReasonCode = "config_drift_attached"
 	TraceReasonConfigDriftRecentlyAttached   TraceReasonCode = "config_drift_recently_attached"
 	TraceReasonPending                       TraceReasonCode = "pending"
+	TraceReasonPendingUnknown                TraceReasonCode = "pending_unknown"
 	TraceReasonAcknowledged                  TraceReasonCode = "acknowledged"
 	TraceReasonMinFloorIdleWorker            TraceReasonCode = "min_floor_idle_worker"
 	TraceReasonLiveDrift                     TraceReasonCode = "live_drift"
