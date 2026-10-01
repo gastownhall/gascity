@@ -21,9 +21,26 @@ func TestShortTempDirUsesShortConfiguredRoot(t *testing.T) {
 }
 
 func TestShortTempDirUsesDiskBackedShortRoot(t *testing.T) {
+	t.Setenv("TEST_TMPDIR", "")
 	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), strings.Repeat("long-", 30)))
 	dir := ShortTempDir(t, "gc-test-")
 	if !strings.HasPrefix(dir, "/var/tmp/gc-test-") {
 		t.Fatalf("ShortTempDir() = %q, want /var/tmp root", dir)
+	}
+}
+
+func TestShortTempDirAvoidsSharedTmpWhenTMPDIRUnset(t *testing.T) {
+	t.Setenv("TEST_TMPDIR", "")
+	t.Setenv("TMPDIR", "")
+	dir := ShortTempDir(t, "gc-test-")
+	if strings.HasPrefix(dir, "/tmp/") {
+		t.Fatalf("ShortTempDir() = %q, must not use shared /tmp", dir)
+	}
+}
+
+func TestShortTempDirUsesBazelWritableRoot(t *testing.T) {
+	tempDir := "/tmp/bt/bazel-test-sandbox/very/long/per-action/path"
+	if got := shortTempRoot(tempDir, tempDir); got != "/tmp/bt" {
+		t.Fatalf("shortTempRoot() = %q, want Bazel writable root /tmp/bt", got)
 	}
 }
