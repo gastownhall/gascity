@@ -1499,6 +1499,12 @@ func configDropsBoundRigs(current, next *config.City) bool {
 // layer, returning nil when [maintenance.dolt] is disabled. The
 // concrete *supervisor.StoreMaintenanceLoop satisfies
 // api.MaintenanceProvider directly.
+// ApplyStartupPrompt implements api.State: it returns hints with the startup
+// prompt of the session described by info delivered for a launch that resumes it.
+func (cs *controllerState) ApplyStartupPrompt(_ session.Info, _ *config.ResolvedProvider, _ string, hints runtime.Config) (runtime.Config, error) {
+	return hints, nil
+}
+
 func (cs *controllerState) MaintenanceLoop() api.MaintenanceProvider {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()

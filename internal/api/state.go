@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -224,6 +225,20 @@ type State interface {
 	// Handlers treat nil as "feature disabled" and respond with a typed
 	// 503 so the CLI can print a useful message.
 	MaintenanceLoop() MaintenanceProvider
+
+	// ApplyStartupPrompt returns hints with the startup prompt of the session
+	// described by info delivered for a launch that resumes it: the prompt rides
+	// the post-start nudge and the launch env carries the delivered marker, so
+	// the SessionStart hook adds context without repeating a prompt the provider
+	// cannot inline in full. resolved and transport are the provider and
+	// transport the caller resolved for the launch. Prompt rendering and the
+	// delivery policy live in the controller, not the API, so the hints a worker
+	// factory resumes with cannot drift from the ones the reconciler launches
+	// with. Hints are returned unchanged for a session that has no prompt or is
+	// already running. A non-nil error means the prompt cannot be delivered
+	// (for example it is oversized on a runtime with no fallback) and the launch
+	// must not proceed.
+	ApplyStartupPrompt(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error)
 }
 
 // AgentUpdate holds optional fields for a partial agent update. Pointer fields
