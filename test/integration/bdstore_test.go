@@ -205,13 +205,8 @@ func runBDInit(t *testing.T, env []string, dir, prefix, port string) {
 func dropDoltDatabase(t *testing.T, env []string, dir, port, name string) {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
-	defer cancel()
-
-	drop := exec.CommandContext(ctx, doltBinary, "--host", "127.0.0.1", "--port", port, "--user", "root", "--password", "", "--no-tls", "sql", "-q", "DROP DATABASE IF EXISTS "+name)
-	drop.Dir = dir
-	drop.Env = env
-	if out, err := drop.CombinedOutput(); err != nil {
+	out, err := runCommand(dir, env, bdInitTimeout, doltBinary, "--host", "127.0.0.1", "--port", port, "--user", "root", "--password", "", "--no-tls", "sql", "-q", "DROP DATABASE IF EXISTS "+name)
+	if err != nil {
 		t.Logf("dropping dolt database %s: %v: %s", name, err, out)
 	}
 }
