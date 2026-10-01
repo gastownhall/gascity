@@ -222,3 +222,25 @@ func TestLiveExternalWorkDirSet_SkipsRigOnScanErrorContinuesOthers(t *testing.T)
 		t.Fatalf("liveExternalWorkDirSet should still report the healthy rig's live worktree despite the other rig's scan error; got %v", got)
 	}
 }
+
+// TestLiveExternalWorkDirSet_GathersLivenessOncePerCallAcrossRigs pins the
+// ga-1xaqgo.3 contract that capacity accounting reuses one process-table scan
+// per pass, as the reaper does, rather than re-enumerating processes for every
+// rig it covers. A healthy rig and a broken one are both walked here; the scan
+// seam must still be hit exactly once.
+func TestLiveExternalWorkDirSet_GathersLivenessOncePerCallAcrossRigs(t *testing.T) {
+	_, rigRoot := initReapRig(t)
+	scans := injectCountedLiveness(t, liveWorktreeState{scanned: true})
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: reapTestRigName, Path: rigRoot},
+			{Name: "broken", Path: t.TempDir()},
+		},
+	}
+
+	liveExternalWorkDirSet(cfg, nil, io.Discard)
+
+	if *scans != 1 {
+		t.Fatalf("liveExternalWorkDirSet gathered liveness %d time(s) across two rigs, want exactly once per call", *scans)
+	}
+}

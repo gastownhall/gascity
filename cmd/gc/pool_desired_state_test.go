@@ -3281,3 +3281,112 @@ func TestComputePoolDesiredStates_ExternalLiveOccupancyDoesNotAffectUnrelatedTem
 		t.Fatalf("rig/other requests = %+v, want exactly 1 new request, unaffected by rig/claude's external-live occupancy", result[0].Requests)
 	}
 }
+
+// admittedExternalWorkBeads returns the work beads whose external-live
+// occupancy the pool computation admitted, in admission order.
+func admittedExternalWorkBeads(t *testing.T, trace *sessionReconcilerTraceCycle) []string {
+	t.Helper()
+	var admitted []string
+	for _, rec := range trace.records {
+		if rec.RecordType == TraceRecordDecision && rec.SiteCode == TraceSitePoolExternalLiveOccupancy {
+			admitted = append(admitted, poolTraceFieldString(t, rec.Fields, "work_bead"))
+		}
+	}
+	return admitted
+}
+
+// TestComputePoolDesiredStates_ExternalLiveOccupancyAdmitsMostUrgentBeadFirst
+// pins the priority scale seedExternalLiveWorkOccupancy orders its candidates
+// on. SessionRequest.BeadPriority is a descending rank (beadPriorityRank); a
+// raw bd priority, where P0 is the most urgent, would admit a P4 bead's
+// occupancy ahead of a P0 bead's. Two live external worktrees contend for one
+// workspace slot here and the urgent bead must be the one that holds it. The
+// routine bead is listed first so an implementation that skipped the sort
+// cannot pass on input order alone.
+func TestComputePoolDesiredStates_ExternalLiveOccupancyAdmitsMostUrgentBeadFirst(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: intPtr(1)},
+		Agents: []config.Agent{
+			poolAgent("claude", "rig", intPtr(1), 0),
+			poolAgent("other", "rig", intPtr(1), 0),
+		},
+	}
+	urgentDir, routineDir := t.TempDir(), t.TempDir()
+	urgent := workBead("urgent", "rig/claude", "", "in_progress", 0)
+	urgent.Metadata[beadmeta.WorkDirMetadataKey] = urgentDir
+	routine := workBead("routine", "rig/other", "", "in_progress", 4)
+	routine.Metadata[beadmeta.WorkDirMetadataKey] = routineDir
+	liveExternalWorkDirs := map[string]bool{
+		pathutil.NormalizePathForCompare(urgentDir):  true,
+		pathutil.NormalizePathForCompare(routineDir): true,
+	}
+	scaleCheck := map[string]int{"rig/claude": 1, "rig/other": 1}
+	trace := newPoolDesiredStateTestTrace("rig/claude", "rig/other")
+
+	ComputePoolDesiredStatesWithLiveness(cfg, []beads.Bead{routine, urgent}, nil, scaleCheck, nil, trace, liveExternalWorkDirs)
+
+	if got := admittedExternalWorkBeads(t, trace); !reflect.DeepEqual(got, []string{"urgent"}) {
+		t.Fatalf("external-live-occupancy admitted %v, want only [urgent]: the P0 bead must win the single workspace slot over the P4 bead", got)
+	}
+}
+
+// TestComputePoolDesiredStates_ExternalLiveOccupancyConsumesSuppliedLivenessWithoutRescanning
+// pins ga-1xaqgo.3's "consume the cause-A liveness result, do not
+// re-enumerate" contract at the accounting boundary. The supplied path is a
+// bare temp dir -- no registered worktree and no process behind it -- so
+// accounting that derived liveness itself would find nothing live and admit the
+// duplicate spawn; the scan seam is counted as well, so a redundant second scan
+// fails even where it would happen to agree.
+func TestComputePoolDesiredStates_ExternalLiveOccupancyConsumesSuppliedLivenessWithoutRescanning(t *testing.T) {
+	scans := injectCountedLiveness(t, liveWorktreeState{scanned: true})
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(1), 0)},
+	}
+	externalDir := t.TempDir()
+	work := workBead("w1", "rig/claude", "", "in_progress", 5)
+	work.Metadata[beadmeta.WorkDirMetadataKey] = externalDir
+	liveExternalWorkDirs := map[string]bool{pathutil.NormalizePathForCompare(externalDir): true}
+
+	result := ComputePoolDesiredStatesWithLiveness(cfg, []beads.Bead{work}, nil, map[string]int{"rig/claude": 1}, nil, nil, liveExternalWorkDirs)
+
+	if len(result) != 0 {
+		t.Fatalf("result = %+v, want the supplied liveness alone to occupy the sole slot and suppress the duplicate spawn", result)
+	}
+	if *scans != 0 {
+		t.Fatalf("capacity accounting gathered liveness %d time(s); it must consume the supplied liveExternalWorkDirs and never scan worktrees or processes itself", *scans)
+	}
+}
+
+// TestComputePoolDesiredStates_ExternalLiveOccupancyNeverDisplacesRealSession
+// pins the "nothing is killed or auto-terminated" half of ga-1xaqgo.3 at the
+// decision that could cause it: the reconciler stops any session absent from
+// the desired set, so external occupancy that evicted a gc-managed session --
+// or that was realized as a request of its own -- would terminate or duplicate
+// real work. A live session already holds the sole slot here and a MORE urgent
+// bead sits in a live external worktree; the desired set must stay exactly the
+// session's own resume request, with no occupancy admitted on top of the full
+// cap.
+func TestComputePoolDesiredStates_ExternalLiveOccupancyNeverDisplacesRealSession(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(1), 0)},
+	}
+	externalDir := t.TempDir()
+	owned := workBead("w-owned", "rig/claude", "sess-active", "in_progress", 3)
+	external := workBead("w-external", "rig/claude", "", "in_progress", 0)
+	external.Metadata[beadmeta.WorkDirMetadataKey] = externalDir
+	sessions := []beads.Bead{sessionBead("sess-active", "open")}
+	liveExternalWorkDirs := map[string]bool{pathutil.NormalizePathForCompare(externalDir): true}
+	trace := newPoolDesiredStateTestTrace("rig/claude")
+
+	result := ComputePoolDesiredStatesWithLiveness(cfg, []beads.Bead{external, owned}, sessionInfosFromBeads(sessions), map[string]int{"rig/claude": 1}, nil, trace, liveExternalWorkDirs)
+
+	if len(result) != 1 || len(result[0].Requests) != 1 {
+		t.Fatalf("result = %+v, want exactly the one request for the live session", result)
+	}
+	if req := result[0].Requests[0]; req.Tier != "resume" || req.WorkBeadID != "w-owned" {
+		t.Fatalf("request = %+v, want the live session's own resume request for w-owned retained, not displaced or joined by the external work", req)
+	}
+	if got := admittedExternalWorkBeads(t, trace); len(got) != 0 {
+		t.Fatalf("external-live-occupancy admitted %v on top of a full cap; the live session already holds the sole slot", got)
+	}
+}

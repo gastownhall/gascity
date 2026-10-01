@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/graphroute"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
@@ -14368,6 +14369,110 @@ func TestBuildDesiredState_APICreatedAgentSessionBeadStaysDesired(t *testing.T) 
 			if tp.ConfiguredNamedIdentity != "" {
 				t.Fatalf("desired[%q].ConfiguredNamedIdentity = %q, want empty — the ad-hoc bead must not adopt the named session identity",
 					sessionName, tp.ConfiguredNamedIdentity)
+			}
+		})
+	}
+}
+
+// TestBuildDesiredState_LiveExternalWorktreeOccupiesSoleSlotWithoutTeardown is
+// the end-to-end guard for ga-1xaqgo.3: one build pass must gather liveness
+// once and hand that result to capacity accounting, so work live in an
+// externally created worktree occupies the template's sole
+// max_active_sessions slot and the queued work is not given a duplicate
+// session, while nothing is stopped or interrupted. The idle arm is the
+// control: the same bead pointing at a worktree nothing is working in leaves
+// the slot free and the queued work does get its session, so the live arm
+// cannot pass merely because the fixture never produces demand.
+func TestBuildDesiredState_LiveExternalWorktreeOccupiesSoleSlotWithoutTeardown(t *testing.T) {
+	const template = "worker"
+	tests := []struct {
+		name         string
+		live         bool
+		wantSessions int
+	}{
+		{name: "live external worktree occupies the sole slot", live: true, wantSessions: 0},
+		{name: "idle external worktree leaves the slot free", live: false, wantSessions: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, rigRoot := initReapRig(t)
+			externalDir := filepath.Join(t.TempDir(), ".claude", "worktrees", "external-session")
+			if err := os.MkdirAll(filepath.Dir(externalDir), 0o755); err != nil {
+				t.Fatalf("mkdir external worktree parent: %v", err)
+			}
+			mustGit(t, rigRoot, "worktree", "add", "-b", "external-branch", externalDir)
+			liveness := liveWorktreeState{scanned: true}
+			if tt.live {
+				liveness.cwds = []string{pathutil.NormalizePathForCompare(externalDir)}
+			}
+			scans := injectCountedLiveness(t, liveness)
+
+			store := beads.NewMemStore()
+			if _, err := store.Create(beads.Bead{
+				Title:    "queued work",
+				Type:     "task",
+				Status:   "open",
+				Metadata: map[string]string{"gc.routed_to": template},
+			}); err != nil {
+				t.Fatalf("create queued work: %v", err)
+			}
+			if _, err := store.Create(beads.Bead{
+				Title:    "external work",
+				Type:     "task",
+				Status:   "in_progress",
+				Assignee: "external-claude",
+				Metadata: map[string]string{
+					"gc.routed_to":              template,
+					beadmeta.WorkDirMetadataKey: externalDir,
+				},
+			}); err != nil {
+				t.Fatalf("create external work: %v", err)
+			}
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Rigs:      []config.Rig{{Name: reapTestRigName, Path: rigRoot}},
+				Agents: []config.Agent{{
+					Name:              template,
+					StartCommand:      "true",
+					MinActiveSessions: intPtr(0),
+					MaxActiveSessions: intPtr(1),
+				}},
+			}
+			sessionSnapshot, err := loadSessionBeadSnapshot(store)
+			if err != nil {
+				t.Fatalf("load session snapshot: %v", err)
+			}
+			fake := runtime.NewFake()
+			var stderr strings.Builder
+
+			dsResult := buildDesiredStateWithSessionBeads(
+				"test-city", t.TempDir(), time.Now().UTC(), cfg, fake,
+				store, map[string]beads.Store{reapTestRigName: beads.NewMemStore()}, sessionSnapshot, nil, &stderr,
+			)
+
+			desired := 0
+			for _, tp := range dsResult.State {
+				if tp.TemplateName == template {
+					desired++
+				}
+			}
+			if desired != tt.wantSessions {
+				t.Fatalf("%s desired sessions = %d, want %d; stderr:\n%s", template, desired, tt.wantSessions, stderr.String())
+			}
+			sessions, err := store.ListByLabel(sessionBeadLabel, 0)
+			if err != nil {
+				t.Fatalf("list session beads: %v", err)
+			}
+			if len(sessions) != tt.wantSessions {
+				t.Fatalf("stored session beads = %d, want %d: a live external worktree must block duplicate session creation, an idle one must not; stderr:\n%s", len(sessions), tt.wantSessions, stderr.String())
+			}
+			if *scans != 1 {
+				t.Fatalf("build pass gathered liveness %d time(s), want exactly once shared with capacity accounting", *scans)
+			}
+			for _, call := range fake.Calls {
+				if call.Method == "Stop" || call.Method == "Interrupt" {
+					t.Fatalf("build pass issued %s(%q); capacity accounting must never stop or interrupt a session or process", call.Method, call.Name)
+				}
 			}
 		})
 	}
