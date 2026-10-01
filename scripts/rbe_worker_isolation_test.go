@@ -300,7 +300,7 @@ func TestRBEWorkerScriptGatesNativeLinkOnIsolation(t *testing.T) {
 		`sudo install -m 0755 tools/rbe/rbe-action-sweep "$LIB/sweep"`,
 		`sudo install -m 0755 tools/rbe/rbe-action-selftest "$LIB/selftest"`,
 		// RO_DIRS is discovered before rbe-action.env is written.
-		`found=$(sudo timeout 300 find / -xdev -type d -perm -0002 2>/dev/null) || rc=$?`,
+		`found=$(sudo timeout 300 find / -xdev -path "$MASK_ROOT" -prune -o -type d -perm -0002 -print 2>/dev/null) || rc=$?`,
 		`sudo tee /etc/rbe-west/rbe-action.env >/dev/null <<-EOF`,
 		`sudo chmod 0440 /etc/sudoers.d/rbe-action && sudo visudo -cq`,
 		`sudo "$LIB/selftest"`,

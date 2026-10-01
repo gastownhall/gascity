@@ -144,7 +144,10 @@ if [ "$ACTION_ISOLATION" = 1 ]; then
 	# order: parents first). The full selftest checks no action can write one.
 	echo "isolation: ro-dirs"
 	started=$SECONDS rc=0
-	found=$(sudo timeout 300 find / -xdev -type d -perm -0002 2>/dev/null) || rc=$?
+	# MASK_ROOT ($HOME) is replaced by an empty tmpfs in every action, so
+	# nothing under it needs RO_DIRS (and it carries odd names, e.g. nvm's
+	# "test/fast/Listing paths").
+	found=$(sudo timeout 300 find / -xdev -path "$MASK_ROOT" -prune -o -type d -perm -0002 -print 2>/dev/null) || rc=$?
 	[ "$rc" != 124 ] || { echo "isolation: find / -xdev took over 300 s" >&2; exit 1; }
 	ro_dirs=$(grep -vxE '/tmp|/var/tmp|/run/lock|/var/crash' <<<"$found" | LC_ALL=C sort || true)
 	# rbe-action.env is shell, and the launcher splits RO_DIRS: plain paths only.
