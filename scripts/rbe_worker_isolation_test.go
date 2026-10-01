@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -65,6 +67,10 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 			if got, want := step.Env["RBE_ACTION_ISOLATION"], "${{ vars.RBE_ACTION_ISOLATION || '1' }}"; got != want {
 				t.Errorf("worker step RBE_ACTION_ISOLATION = %q, want %q", got, want)
 			}
+			// canary: one run in RBE_ACTION_CANARY_EVERY tries isolation.
+			if got, want := step.Env["RBE_ACTION_CANARY_EVERY"], "${{ vars.RBE_ACTION_CANARY_EVERY || '4' }}"; got != want {
+				t.Errorf("worker step RBE_ACTION_CANARY_EVERY = %q, want %q", got, want)
+			}
 		}
 	}
 	if !checkout || !worker {
@@ -76,8 +82,9 @@ func TestRBEWorkerScriptIsolationSwitch(t *testing.T) {
 	script := readFile(t, repoRoot(t), rbeWorkerScript)
 	for _, want := range []string{
 		"ACTION_ISOLATION=${RBE_ACTION_ISOLATION:-1}",
-		`*) echo "RBE_ACTION_ISOLATION must be 0 or 1" >&2; exit 2 ;;`,
-		"isolation='{}'\nif [ \"$ACTION_ISOLATION\" = 1 ]; then\n",
+		"0 | 1 | canary) ;;\n",
+		`*) echo "RBE_ACTION_ISOLATION must be 0, 1 or canary" >&2; exit 2 ;;`,
+		"plain_slots=$slots\nisolation='{}'\nif [ \"$ACTION_ISOLATION\" = 1 ]; then\n",
 		// The isolation keys are merged into the worker config only when on, so
 		// the rollback renders today's worker.json.
 		`} } + $isolation) } ],`,
@@ -199,7 +206,7 @@ func TestRBEWorkerScriptSlotEgress(t *testing.T) {
 	// resolver slots can reach stops the script.
 	for _, want := range []string{
 		`dns_allow="meta skuid 59000-59063 ip daddr { $dns_v4 } meta l4proto { tcp, udp } th dport 53 accept"`,
-		`echo "isolation: no nameserver in /etc/resolv.conf that slot users can reach (loopback or IPv4): $nameservers" >&2`,
+		`fail "no nameserver in /etc/resolv.conf that slot users can reach (loopback or IPv4): $nameservers"`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("%s missing %q", rbeWorkerScript, want)
@@ -297,7 +304,7 @@ func TestRBEWorkerScriptGatesNativeLinkOnIsolation(t *testing.T) {
 	order := []string{
 		// Slot uids/gids are free before any slot user is created.
 		`taken=$(awk -F: '$3 >= 59000 && $3 <= 59063 { print FILENAME ": " $1 " (" $3 ")" }' /etc/passwd /etc/group)`,
-		`[ -z "$taken" ] || { echo "isolation: uids/gids 59000-59063 must be free for the slot users, taken: $taken" >&2; exit 1; }`,
+		`[ -z "$taken" ] || fail "uids/gids 59000-59063 must be free for the slot users, taken: $taken"`,
 		`sudo groupadd --system --gid "$id" "$u"`,
 		`gcc -static -O2 -Wall -Wextra -o "$RUNNER_TEMP/rbe-entry" tools/rbe/rbe-action-entry.c`,
 		`gcc -static -O2 -Wall -Wextra -DRBE_ACTION_EXEC -o "$RUNNER_TEMP/rbe-exec" tools/rbe/rbe-action-entry.c`,
@@ -306,11 +313,14 @@ func TestRBEWorkerScriptGatesNativeLinkOnIsolation(t *testing.T) {
 		`sudo install -m 0755 tools/rbe/rbe-action-selftest "$LIB/selftest"`,
 		`sudo tee /etc/rbe-west/rbe-action.env >/dev/null <<-EOF`,
 		`sudo chmod 0440 /etc/sudoers.d/rbe-action && sudo visudo -cq`,
+		"render\n",
 		`sudo "$LIB/selftest"`,
 		`LC_ALL=C sudo -l -U rbe-a00 2>&1 | grep -q 'not allowed to run sudo'`,
 		`open_socks=$(sudo find /run /var/run -xdev -maxdepth 3 -type s -perm -o+w`,
 		`probe "$ROOT/pki/worker.key"`,
 		`if ! grep -qE "^uid 590[0-9]{2}$" <<<"$out" || grep -q LEAK <<<"$out"; then`,
+		// Mode 1 runs the checks in this shell: any failure ends the worker.
+		"\telse\n\t\tisolate\n\tfi\n",
 		// NativeLink gets none of the step's environment (secrets included).
 		`env -i PATH="$PATH" HOME="$HOME" "$NL_BIN_DIR/nativelink" "$ROOT/worker.json"`,
 		"nl=$!",
@@ -351,12 +361,181 @@ func TestRBEWorkerScriptLeavesHostPermissionsAlone(t *testing.T) {
 		}
 	}
 	at := 0
-	for _, phase := range []string{"packages", "users", "compile", "install", "env", "sudoers", "nft", "render", "selftest", "probe"} {
-		want := "echo \"isolation: " + phase + "\"\n"
+	for _, phase := range []string{"paths", "packages", "users", "compile", "install", "env", "sudoers", "nft", "render", "selftest", "sudo", "sockets", "probe"} {
+		want := "\tphase " + phase + "\n"
 		i := strings.Index(script[at:], want)
 		if i < 0 {
 			t.Fatalf("%s: phase marker %q missing or out of order", rbeWorkerScript, want)
 		}
 		at += i + len(want)
+	}
+}
+
+// Five pool-wide rollouts of isolation failed on real Blacksmith runners and
+// every worker exited, leaving the OSS pool without workers.
+// RBE_ACTION_ISOLATION=canary lets the workers of one run in
+// RBE_ACTION_CANARY_EVERY try it and fall back to the rollback instead of
+// exiting. This runs blacksmith-worker.sh's own isolation section (LIB= to
+// nl=$!) under bash with a sudo that always fails, so isolation fails in its
+// packages phase, and a stub NativeLink that keeps the config it was started
+// with: a failed canary must start exactly as RBE_ACTION_ISOLATION=0 (the
+// pre-O1 worker.json, same slots), a skipped one too, and mode 1 must still
+// exit before NativeLink starts.
+func TestRBEWorkerIsolationCanary(t *testing.T) {
+	root := repoRoot(t)
+	script := readFile(t, root, rbeWorkerScript)
+	from := strings.Index(script, "\nLIB=/usr/local/libexec/rbe-action\n")
+	to := strings.Index(script, "\nnl=$!\n")
+	if from < 0 || to < from {
+		t.Fatalf("%s: no isolation section from LIB= to nl=$!", rbeWorkerScript)
+	}
+	section := script[from : to+len("\nnl=$!\n")]
+	const goldenRoot = "/home/runner/work/_temp/nl-worker"
+
+	type result struct {
+		code    int
+		out     string
+		started []byte // the stub NativeLink's config, nil if it never started
+		summary string
+	}
+	run := func(t *testing.T, mode string, slots int, runID, every string) result {
+		t.Helper()
+		home := t.TempDir()
+		temp := filepath.Join(home, "temp")
+		nlRoot := filepath.Join(home, "nl-worker")
+		bin := filepath.Join(home, "nl-bin")
+		for _, d := range []string{temp, bin, filepath.Join(nlRoot, "work"), filepath.Join(nlRoot, "pki")} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(bin, "nativelink"), []byte("#!/bin/sh\ncp \"$1\" \"$1.started\"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(bin, "sudo"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		prog := "set -euo pipefail\n" +
+			"ACTION_ISOLATION=$MODE slots=$SLOTS STORE=$ROOT\n" +
+			section + "wait \"$nl\"\n"
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "bash", "-c", prog)
+		cmd.Env = []string{
+			"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"), "HOME=" + home, "RUNNER_TEMP=" + temp, "ROOT=" + nlRoot, "NL_BIN_DIR=" + bin,
+			"RBE_WEST_HOST=rbe-west.example.invalid", "WORKER_NAME=pool-worker-1",
+			"MODE=" + mode, "SLOTS=" + strconv.Itoa(slots), "GITHUB_STEP_SUMMARY=" + filepath.Join(home, "summary.md"),
+		}
+		if runID != "" {
+			cmd.Env = append(cmd.Env, "GITHUB_RUN_ID="+runID)
+		}
+		if every != "" {
+			cmd.Env = append(cmd.Env, "RBE_ACTION_CANARY_EVERY="+every)
+		}
+		out, err := cmd.CombinedOutput()
+		r := result{out: string(out)}
+		if err != nil {
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) {
+				t.Fatalf("bash: %v\n%s", err, out)
+			}
+			r.code = exit.ExitCode()
+		}
+		if b, err := os.ReadFile(filepath.Join(nlRoot, "worker.json.started")); err == nil {
+			r.started = bytes.ReplaceAll(b, []byte(nlRoot), []byte(goldenRoot))
+		}
+		if b, err := os.ReadFile(filepath.Join(home, "summary.md")); err == nil {
+			r.summary = string(b)
+		}
+		return r
+	}
+	golden, err := os.ReadFile(filepath.Join(root, "scripts", "testdata", "rbe-worker", "worker-isolation-off.golden.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameJSON := func(a, b []byte) bool {
+		var x, y any
+		return json.Unmarshal(a, &x) == nil && json.Unmarshal(b, &y) == nil && reflect.DeepEqual(x, y)
+	}
+
+	t.Run("failed canary starts as mode 0", func(t *testing.T) {
+		for _, slots := range []int{8, 96} { // 96: above the 64 isolation allows
+			plain := run(t, "0", slots, "1004", "4")
+			canary := run(t, "canary", slots, "1004", "4")
+			if plain.code != 0 || plain.started == nil {
+				t.Fatalf("mode 0: exit %d, started %v\n%s", plain.code, plain.started != nil, plain.out)
+			}
+			if canary.code != 0 || canary.started == nil {
+				t.Fatalf("failed canary must not exit and must start NativeLink: exit %d, started %v\n%s", canary.code, canary.started != nil, canary.out)
+			}
+			if !bytes.Equal(canary.started, plain.started) {
+				t.Errorf("slots %d: failed canary worker.json differs from mode 0's:\n%s\nwant:\n%s", slots, canary.started, plain.started)
+			}
+			if slots == 8 && !sameJSON(canary.started, golden) {
+				t.Errorf("failed canary worker.json is not the pre-O1 rendering:\n%s", canary.started)
+			}
+			for _, want := range []string{
+				"isolation: packages\n",
+				"::warning title=rbe isolation canary::isolation failed in phase packages: sudo DEBIAN_FRONTEND=noninteractive",
+				"\nRBE_ISOLATION_CANARY=failed phase=packages\n",
+			} {
+				if !strings.Contains(canary.out, want) {
+					t.Errorf("failed canary output missing %q:\n%s", want, canary.out)
+				}
+			}
+			if !strings.Contains(canary.summary, "`RBE_ISOLATION_CANARY=failed phase=packages`") {
+				t.Errorf("job summary = %q", canary.summary)
+			}
+		}
+	})
+
+	t.Run("mode 1 still exits", func(t *testing.T) {
+		r := run(t, "1", 8, "1004", "4")
+		if r.code != 1 || r.started != nil || !strings.Contains(r.out, "isolation: packages\n") || strings.Contains(r.out, "RBE_ISOLATION_CANARY") {
+			t.Errorf("mode 1 with a failing phase: exit %d (want 1), NativeLink started %v (want false)\n%s", r.code, r.started != nil, r.out)
+		}
+	})
+
+	// Selection: GITHUB_RUN_ID % RBE_ACTION_CANARY_EVERY == 0 (default 4, run
+	// ids decimal even with leading zeros); anything unusable skips with a
+	// warning rather than ending the worker.
+	for _, c := range []struct {
+		runID, every string
+		selected     bool
+		warn         bool
+	}{
+		{"1004", "4", true, false},
+		{"1003", "4", false, false},
+		{"1004", "", true, false},
+		{"1002", "", false, false},
+		{"7", "1", true, false},
+		{"36861390718", "2", true, false},
+		{"36861390719", "2", false, false},
+		{"010", "8", false, false}, // 10, not octal 8
+		{"12", "0", false, true},
+		{"12", "x", false, true},
+		{"", "4", false, true},
+	} {
+		t.Run("run "+c.runID+" every "+c.every, func(t *testing.T) {
+			r := run(t, "canary", 8, c.runID, c.every)
+			if r.code != 0 || r.started == nil {
+				t.Fatalf("canary: exit %d, started %v\n%s", r.code, r.started != nil, r.out)
+			}
+			tried := strings.Contains(r.out, "isolation: paths\n")
+			if tried != c.selected {
+				t.Errorf("selected = %v, want %v\n%s", tried, c.selected, r.out)
+			}
+			if !c.selected {
+				if !strings.Contains(r.out, "\nRBE_ISOLATION_CANARY=skipped\n") || !strings.Contains(r.summary, "`RBE_ISOLATION_CANARY=skipped`") {
+					t.Errorf("not selected: want RBE_ISOLATION_CANARY=skipped in output and summary\n%s\nsummary: %q", r.out, r.summary)
+				}
+				if !sameJSON(r.started, golden) {
+					t.Errorf("skipped canary worker.json is not the pre-O1 rendering:\n%s", r.started)
+				}
+			}
+			if got := strings.Contains(r.out, "::warning title=rbe isolation canary::RBE_ACTION_CANARY_EVERY"); got != c.warn {
+				t.Errorf("unusable-setting warning = %v, want %v\n%s", got, c.warn, r.out)
+			}
+		})
 	}
 }

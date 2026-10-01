@@ -50,6 +50,9 @@ jobs:
           # Actions run as per-action slot users, away from the worker key and
           # this step's environment (S11.3). Rollback: set the repository
           # variable RBE_ACTION_ISOLATION to 0; the next dispatch runs actions
-          # as the runner user again.
+          # as the runner user again. canary: the workers of one run in
+          # RBE_ACTION_CANARY_EVERY (by GITHUB_RUN_ID) try isolation and, if it
+          # fails, warn and run as 0 instead of exiting; the others run as 0.
           RBE_ACTION_ISOLATION: ${{ vars.RBE_ACTION_ISOLATION || '1' }}
+          RBE_ACTION_CANARY_EVERY: ${{ vars.RBE_ACTION_CANARY_EVERY || '4' }}
         run: tools/rbe/blacksmith-worker.sh

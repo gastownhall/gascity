@@ -23,6 +23,11 @@
 #   RBE_ACTION_ISOLATION  1 (default): every action runs as a per-action slot
 #                       user in private namespaces (below). 0: the rollback
 #                       switch, actions run as this runner user as before.
+#                       canary: workers of one run in RBE_ACTION_CANARY_EVERY
+#                       (default 4; GITHUB_RUN_ID % N == 0) try isolation and
+#                       fall back to 0 instead of exiting when it fails; the
+#                       others run as 0. Logs RBE_ISOLATION_CANARY=ok,
+#                       failed phase=<phase> or skipped.
 set -euo pipefail
 
 : "${RBE_WORKER_TLS_CERT:?}" "${RBE_WORKER_TLS_KEY:?}" "${RBE_WEST_HOST:?}" "${WORKER_NAME:?}"
@@ -34,8 +39,8 @@ pool) POOL_IDLE_MINUTES=${POOL_IDLE_MINUTES:-15} POOL_MAX_MINUTES=${POOL_MAX_MIN
 esac
 ACTION_ISOLATION=${RBE_ACTION_ISOLATION:-1}
 case "$ACTION_ISOLATION" in
-0 | 1) ;;
-*) echo "RBE_ACTION_ISOLATION must be 0 or 1" >&2; exit 2 ;;
+0 | 1 | canary) ;;
+*) echo "RBE_ACTION_ISOLATION must be 0, 1 or canary" >&2; exit 2 ;;
 esac
 NL_VERSION=1.7.1
 NL_SHA256=a3d7abc2598e976d022fcdabe88a2f8fae46a3ae64f1868698002ca968dd88e9
@@ -100,114 +105,49 @@ slots=$(($(nproc) / 2)); [ "$slots" -ge 1 ] || slots=1
 # phase is logged ("isolation: <phase>") so a step that dies without an error
 # still shows where.
 LIB=/usr/local/libexec/rbe-action
-isolation='{}'
-if [ "$ACTION_ISOLATION" = 1 ]; then
-	# The nft rules below cover uids 59000-59063.
-	[ "$slots" -le 64 ] || slots=64
-	SLOT_UID0=59000
-	# Canonical paths: the launcher compares them with the action's pwd -P.
-	MASK_ROOT=$(cd "$HOME" && pwd -P)
-	WORK_ROOT=$(cd "$ROOT/work" && pwd -P)
-	# The CAS must stay under the mask: a CACHE_DIR (sticky disk) outside $HOME
-	# would be visible to actions, so isolation refuses it.
-	for d in "$WORK_ROOT" "$(cd "$ROOT" && pwd -P)" "$(cd "$STORE" && pwd -P)"; do
-		case "$d" in "$MASK_ROOT"/*) ;; *) echo "isolation: $d must be under $MASK_ROOT (MASK_ROOT, hidden from actions)" >&2; exit 1 ;; esac
-	done
-	echo "isolation: packages"
-	sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y -qq \
-		gcc libc6-dev nftables file util-linux procps >/dev/null
-	echo "isolation: users"
-	# The nft rules cover uids 59000-59063 whatever owns them: anything already
-	# there (an image user or group) would be filtered like a slot, and a slot
-	# sharing its uid or gid would share its files.
-	taken=$(awk -F: '$3 >= 59000 && $3 <= 59063 { print FILENAME ": " $1 " (" $3 ")" }' /etc/passwd /etc/group)
-	[ -z "$taken" ] || { echo "isolation: uids/gids 59000-59063 must be free for the slot users, taken: $taken" >&2; exit 1; }
-	for i in $(seq 0 $((slots - 1))); do
-		u=$(printf 'rbe-a%02d' "$i") id=$((SLOT_UID0 + i))
-		sudo groupadd --system --gid "$id" "$u"
-		sudo useradd --system --uid "$id" --gid "$id" --no-create-home --home-dir /var/lib/rbe-action/home --shell /bin/bash "$u"
-	done
-	echo "isolation: compile"
-	sudo install -d -m 0755 /var/lib/rbe-action /var/lib/rbe-action/home "$LIB" /etc/rbe-west
-	gcc -static -O2 -Wall -Wextra -o "$RUNNER_TEMP/rbe-entry" tools/rbe/rbe-action-entry.c
-	gcc -static -O2 -Wall -Wextra -DRBE_ACTION_EXEC -o "$RUNNER_TEMP/rbe-exec" tools/rbe/rbe-action-entry.c
-	echo "isolation: install"
-	sudo install -m 0755 "$RUNNER_TEMP/rbe-entry" "$LIB/entry"
-	sudo install -m 0755 "$RUNNER_TEMP/rbe-exec" "$LIB/exec"
-	sudo install -m 0755 tools/rbe/rbe-action-launch "$LIB/launch"
-	sudo install -m 0755 tools/rbe/rbe-action-sweep "$LIB/sweep"
-	sudo install -m 0755 tools/rbe/rbe-action-selftest "$LIB/selftest"
-	# No directory but the action's own (its outputs, /tmp, /var/tmp, HOME,
-	# /dev/shm, TMPFS_DIRS: private per action) may be writable by every
-	# action, or one could leave files for a later one. The image's
-	# world-writable directories (tool caches the runner or Blacksmith's agent
-	# may write, any names) stay as they are on the host; ROOT_RO=1 makes /
-	# and every other mount read-only inside each action, so nothing has to be
-	# listed. The full selftest checks no action can write one.
-	echo "isolation: env"
-	sudo tee /etc/rbe-west/rbe-action.env >/dev/null <<-EOF
-		WORK_ROOT=$WORK_ROOT
-		MASK_ROOT=$MASK_ROOT
-		WORKER_UID=$(id -u)
-		WORKER_GID=$(id -g)
-		SLOT_UID0=$SLOT_UID0
-		SLOT_COUNT=$slots
-		BACKSTOP_S=1260
-		MAX_TIMEOUT_S=1200
-		HOME_DIR=/var/lib/rbe-action/home
-		NETNS=0
-		SHM_SIZE=8g
-		TMPFS_DIRS="/run/lock /var/crash"
-		ROOT_RO=1
-		EGRESS_CHAIN="inet rbe_action output"
-		PROBE_DENY="169.254.169.254:80"
-		WORKER_JSON=$ROOT/worker.json
-	EOF
-	echo "isolation: sudoers"
-	printf 'Defaults!%s/launch !pam_session, !log_allowed, !use_pty, !lecture\n' "$LIB" |
-		sudo tee /etc/sudoers.d/rbe-action >/dev/null
-	sudo chmod 0440 /etc/sudoers.d/rbe-action && sudo visudo -cq
-	# Slot DNS: a loopback nameserver (systemd-resolved's 127.0.0.53, which
-	# queries upstream as itself) needs nothing. A non-loopback IPv4 one, e.g. a
-	# private VPC resolver, is allowed to slots on port 53 alone; with neither
-	# (IPv6 only), slots could not resolve at all: refuse. No nameserver line:
-	# glibc uses 127.0.0.1.
-	echo "isolation: nft"
-	nameservers=$(awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf)
-	dns_v4=$(grep -E '^[0-9]+(\.[0-9]+){3}$' <<<"$nameservers" | grep -v '^127\.' | paste -sd, - | sed 's/,/, /g' || true)
-	dns_allow=
-	if [ -n "$dns_v4" ]; then
-		dns_allow="meta skuid 59000-59063 ip daddr { $dns_v4 } meta l4proto { tcp, udp } th dport 53 accept"
-	elif [ -n "$nameservers" ] && ! grep -qE '^(127\.|::1$)' <<<"$nameservers"; then
-		echo "isolation: no nameserver in /etc/resolv.conf that slot users can reach (loopback or IPv4): $nameservers" >&2
-		exit 1
+iso_phase=$RUNNER_TEMP/rbe-isolation-phase iso_reason=$RUNNER_TEMP/rbe-isolation-reason
+phase() { echo "isolation: $1"; echo "$1" >"$iso_phase"; }
+fail() { echo "isolation: $*" >&2; echo "$*" >"$iso_reason"; exit 1; }
+# The canary's ERR trap: the command set -e stops on.
+isolation_err() { local rc=$?; echo "${BASH_COMMAND%%$'\n'*} (exit $rc)" >"$iso_reason"; }
+
+# Canary (RBE_ACTION_ISOLATION=canary): five pool-wide rollouts of isolation
+# each failed on real Blacksmith runners, every worker exited and the OSS pool
+# had none for minutes. A canary worker of a selected run tries isolation; if
+# any phase fails it warns, undoes what could touch plain actions and runs as
+# RBE_ACTION_ISOLATION=0 (same worker.json, same start, same slots). Mode 1
+# stays fail-closed.
+canary=
+if [ "$ACTION_ISOLATION" = canary ]; then
+	every=${RBE_ACTION_CANARY_EVERY:-4}
+	ACTION_ISOLATION=0 canary=skipped
+	if ! [[ $every =~ ^[1-9][0-9]{0,5}$ && ${GITHUB_RUN_ID:-} =~ ^[0-9]{1,18}$ ]]; then
+		echo "::warning title=rbe isolation canary::RBE_ACTION_CANARY_EVERY ($every) or GITHUB_RUN_ID (${GITHUB_RUN_ID:-}) unusable: not selected, actions run without isolation"
+	elif ((10#$GITHUB_RUN_ID % every == 0)); then
+		ACTION_ISOLATION=1 canary=selected
 	fi
-	# Slot users never reach link-local (cloud metadata), private/CGNAT,
-	# reserved or multicast ranges, or IPv6 beyond loopback (ff00::/8
-	# included), as on the MAIN worker; other destinations are counted for the
-	# NETNS=1 decision. Loopback first: slots' own servers and the local resolver.
-	sudo nft -f - <<-EOF
-		table inet rbe_action
-		delete table inet rbe_action
-		table inet rbe_action {
-			set slot_dst { type ipv4_addr . inet_proto . inet_service; size 65536; flags dynamic,timeout; timeout 1d; counter; }
-			chain output {
-				type filter hook output priority 0; policy accept;
-				oif lo accept
-				$dns_allow
-				meta skuid 59000-59063 meta nfproto ipv6 meta l4proto tcp reject with tcp reset
-				meta skuid 59000-59063 meta nfproto ipv6 reject with icmpx admin-prohibited
-				meta skuid 59000-59063 ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/3 } meta l4proto tcp reject with tcp reset
-				meta skuid 59000-59063 ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/3 } reject with icmpx admin-prohibited
-				meta skuid 59000-59063 meta l4proto { tcp, udp } ct state new update @slot_dst { ip daddr . meta l4proto . th dport }
-			}
-		}
-	EOF
-	isolation='{ "entrypoint": "/usr/local/libexec/rbe-action/entry", "timeout_handled_externally": true, "max_action_timeout": 1260,
-		"additional_environment": { "RBE_X_TIMEOUT_MS": "timeout_millis", "RBE_X_SIDE_CHANNEL": "side_channel_file" } }'
-	echo "isolation: render"
+	echo "isolation canary: run ${GITHUB_RUN_ID:-} every $every: $canary"
 fi
-jq -n --arg host "grpcs://${RBE_WEST_HOST}:443" --arg root "$ROOT" --arg store "$STORE" --arg name "$WORKER_NAME" --argjson slots "$slots" --argjson isolation "$isolation" '
+canary_report() { # result [detail]
+	canary=${1%% *}
+	echo "RBE_ISOLATION_CANARY=$1"
+	[ -z "${GITHUB_STEP_SUMMARY:-}" ] ||
+		echo "rbe isolation canary: \`RBE_ISOLATION_CANARY=$1\`${2:+ ($2)}, worker $WORKER_NAME, run ${GITHUB_RUN_ID:-}, every $every" >>"$GITHUB_STEP_SUMMARY" || true
+}
+[ "$canary" != skipped ] || canary_report skipped
+# A failed canary: nothing it set up may touch plain actions. NativeLink has
+# not started, so work/ holds only what the selftest or probe left (pool mode
+# would count it in flight forever). The nft rules match slot uids alone, the
+# slot users, sudoers Defaults and $LIB serve nothing else: the table goes
+# anyway, the rest stays.
+isolation_undo() {
+	sudo nft delete table inet rbe_action 2>/dev/null || true
+	sudo find "$ROOT/work" -mindepth 1 -maxdepth 1 -exec rm -rf --one-file-system {} + 2>/dev/null ||
+		find "$ROOT/work" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+}
+
+render() {
+	jq -n --arg host "grpcs://${RBE_WEST_HOST}:443" --arg root "$ROOT" --arg store "$STORE" --arg name "$WORKER_NAME" --argjson slots "$slots" --argjson isolation "$isolation" '
   { cert_file: ($root + "/pki/worker.pem"), key_file: ($root + "/pki/worker.key"),
     ca_file: "/etc/ssl/certs/ca-certificates.crt" } as $tls |
   {
@@ -233,19 +173,118 @@ jq -n --arg host "grpcs://${RBE_WEST_HOST}:443" --arg root "$ROOT" --arg store "
       } } + $isolation) } ],
     servers: []
   }' >"$ROOT/worker.json"
+}
 
-if [ "$ACTION_ISOLATION" = 1 ]; then
+isolate() {
+	phase paths
+	# Canonical paths: the launcher compares them with the action's pwd -P.
+	MASK_ROOT=$(cd "$HOME" && pwd -P)
+	WORK_ROOT=$(cd "$ROOT/work" && pwd -P)
+	# The CAS must stay under the mask: a CACHE_DIR (sticky disk) outside $HOME
+	# would be visible to actions, so isolation refuses it.
+	for d in "$WORK_ROOT" "$(cd "$ROOT" && pwd -P)" "$(cd "$STORE" && pwd -P)"; do
+		case "$d" in "$MASK_ROOT"/*) ;; *) fail "$d must be under $MASK_ROOT (MASK_ROOT, hidden from actions)" ;; esac
+	done
+	phase packages
+	sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y -qq \
+		gcc libc6-dev nftables file util-linux procps >/dev/null
+	phase users
+	# The nft rules cover uids 59000-59063 whatever owns them: anything already
+	# there (an image user or group) would be filtered like a slot, and a slot
+	# sharing its uid or gid would share its files.
+	taken=$(awk -F: '$3 >= 59000 && $3 <= 59063 { print FILENAME ": " $1 " (" $3 ")" }' /etc/passwd /etc/group)
+	[ -z "$taken" ] || fail "uids/gids 59000-59063 must be free for the slot users, taken: $taken"
+	for i in $(seq 0 $((slots - 1))); do
+		u=$(printf 'rbe-a%02d' "$i") id=$((SLOT_UID0 + i))
+		sudo groupadd --system --gid "$id" "$u"
+		sudo useradd --system --uid "$id" --gid "$id" --no-create-home --home-dir /var/lib/rbe-action/home --shell /bin/bash "$u"
+	done
+	phase compile
+	sudo install -d -m 0755 /var/lib/rbe-action /var/lib/rbe-action/home "$LIB" /etc/rbe-west
+	gcc -static -O2 -Wall -Wextra -o "$RUNNER_TEMP/rbe-entry" tools/rbe/rbe-action-entry.c
+	gcc -static -O2 -Wall -Wextra -DRBE_ACTION_EXEC -o "$RUNNER_TEMP/rbe-exec" tools/rbe/rbe-action-entry.c
+	phase install
+	sudo install -m 0755 "$RUNNER_TEMP/rbe-entry" "$LIB/entry"
+	sudo install -m 0755 "$RUNNER_TEMP/rbe-exec" "$LIB/exec"
+	sudo install -m 0755 tools/rbe/rbe-action-launch "$LIB/launch"
+	sudo install -m 0755 tools/rbe/rbe-action-sweep "$LIB/sweep"
+	sudo install -m 0755 tools/rbe/rbe-action-selftest "$LIB/selftest"
+	# No directory but the action's own (its outputs, /tmp, /var/tmp, HOME,
+	# /dev/shm, TMPFS_DIRS: private per action) may be writable by every
+	# action, or one could leave files for a later one. The image's
+	# world-writable directories (tool caches the runner or Blacksmith's agent
+	# may write, any names) stay as they are on the host; ROOT_RO=1 makes /
+	# and every other mount read-only inside each action, so nothing has to be
+	# listed. The full selftest checks no action can write one.
+	phase env
+	sudo tee /etc/rbe-west/rbe-action.env >/dev/null <<-EOF
+		WORK_ROOT=$WORK_ROOT
+		MASK_ROOT=$MASK_ROOT
+		WORKER_UID=$(id -u)
+		WORKER_GID=$(id -g)
+		SLOT_UID0=$SLOT_UID0
+		SLOT_COUNT=$slots
+		BACKSTOP_S=1260
+		MAX_TIMEOUT_S=1200
+		HOME_DIR=/var/lib/rbe-action/home
+		NETNS=0
+		SHM_SIZE=8g
+		TMPFS_DIRS="/run/lock /var/crash"
+		ROOT_RO=1
+		EGRESS_CHAIN="inet rbe_action output"
+		PROBE_DENY="169.254.169.254:80"
+		WORKER_JSON=$ROOT/worker.json
+	EOF
+	phase sudoers
+	printf 'Defaults!%s/launch !pam_session, !log_allowed, !use_pty, !lecture\n' "$LIB" |
+		sudo tee /etc/sudoers.d/rbe-action >/dev/null
+	sudo chmod 0440 /etc/sudoers.d/rbe-action && sudo visudo -cq
+	# Slot DNS: a loopback nameserver (systemd-resolved's 127.0.0.53, which
+	# queries upstream as itself) needs nothing. A non-loopback IPv4 one, e.g. a
+	# private VPC resolver, is allowed to slots on port 53 alone; with neither
+	# (IPv6 only), slots could not resolve at all: refuse. No nameserver line:
+	# glibc uses 127.0.0.1.
+	phase nft
+	nameservers=$(awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf)
+	dns_v4=$(grep -E '^[0-9]+(\.[0-9]+){3}$' <<<"$nameservers" | grep -v '^127\.' | paste -sd, - | sed 's/,/, /g' || true)
+	dns_allow=
+	if [ -n "$dns_v4" ]; then
+		dns_allow="meta skuid 59000-59063 ip daddr { $dns_v4 } meta l4proto { tcp, udp } th dport 53 accept"
+	elif [ -n "$nameservers" ] && ! grep -qE '^(127\.|::1$)' <<<"$nameservers"; then
+		fail "no nameserver in /etc/resolv.conf that slot users can reach (loopback or IPv4): $nameservers"
+	fi
+	sudo nft -f - <<-EOF
+		table inet rbe_action
+		delete table inet rbe_action
+		table inet rbe_action {
+			set slot_dst { type ipv4_addr . inet_proto . inet_service; size 65536; flags dynamic,timeout; timeout 1d; counter; }
+			chain output {
+				type filter hook output priority 0; policy accept;
+				oif lo accept
+				$dns_allow
+				meta skuid 59000-59063 meta nfproto ipv6 meta l4proto tcp reject with tcp reset
+				meta skuid 59000-59063 meta nfproto ipv6 reject with icmpx admin-prohibited
+				meta skuid 59000-59063 ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/3 } meta l4proto tcp reject with tcp reset
+				meta skuid 59000-59063 ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/3 } reject with icmpx admin-prohibited
+				meta skuid 59000-59063 meta l4proto { tcp, udp } ct state new update @slot_dst { ip daddr . meta l4proto . th dport }
+			}
+		}
+	EOF
+	phase render
+	render
 	# Full selftest (a few seconds): it also checks worker.json routes actions
 	# through the entrypoint, the timeout path, and that an action can write
 	# no shared directory on any mount (ROOT_RO=1, TMPFS_DIRS private).
-	echo "isolation: selftest"
+	phase selftest
 	sudo "$LIB/selftest"
-	LC_ALL=C sudo -l -U rbe-a00 2>&1 | grep -q 'not allowed to run sudo' || { echo "isolation: slot users must have no sudo" >&2; exit 1; }
+	phase sudo
+	LC_ALL=C sudo -l -U rbe-a00 2>&1 | grep -q 'not allowed to run sudo' || fail "slot users must have no sudo"
 	# /run is not masked: a socket a slot user could open there (a 0666
 	# docker.sock) is a way out of the sandbox.
+	phase sockets
 	open_socks=$(sudo find /run /var/run -xdev -maxdepth 3 -type s -perm -o+w 2>/dev/null | grep -vxE '/run/systemd/(notify|journal/.*|private|io\.system\.ManagedOOM)|/run/dbus/system_bus_socket' || true)
-	[ -z "$open_socks" ] || { echo "isolation: world-writable sockets reachable by actions: $open_socks" >&2; exit 1; }
-	echo "isolation: probe"
+	[ -z "$open_socks" ] || fail "world-writable sockets reachable by actions: $(tr '\n' ' ' <<<"$open_socks")"
+	phase probe
 	# What S11.3 is about, on this VM's layout: a probe action through the real
 	# entrypoint must run as a slot user and fail to read the worker key, find
 	# this step's environment in any process, or sudo.
@@ -261,9 +300,50 @@ if [ "$ACTION_ISOLATION" = 1 ]; then
 	rm -rf "$probe"
 	echo "isolation probe: $(tr '\n' ' ' <<<"$out")"
 	if ! grep -qE "^uid 590[0-9]{2}$" <<<"$out" || grep -q LEAK <<<"$out"; then
-		echo "isolation probe failed; RBE_ACTION_ISOLATION=0 (repository variable) is the rollback" >&2
-		exit 1
+		fail "probe failed ($(tr '\n' ' ' <<<"$out")); RBE_ACTION_ISOLATION=0 (repository variable) is the rollback"
 	fi
+}
+
+plain_slots=$slots
+isolation='{}'
+if [ "$ACTION_ISOLATION" = 1 ]; then
+	# The nft rules cover uids 59000-59063.
+	[ "$slots" -le 64 ] || slots=64
+	SLOT_UID0=59000
+	isolation='{ "entrypoint": "/usr/local/libexec/rbe-action/entry", "timeout_handled_externally": true, "max_action_timeout": 1260,
+		"additional_environment": { "RBE_X_TIMEOUT_MS": "timeout_millis", "RBE_X_SIDE_CHANNEL": "side_channel_file" } }'
+	if [ "$canary" = selected ]; then
+		# A subshell: set -e works there (it would not in a condition), and a
+		# failure ends it, not the worker. The phase file says where.
+		rm -f "$iso_phase" "$iso_reason"
+		set +e
+		(
+			set -eE
+			trap isolation_err ERR
+			isolate
+		)
+		rc=$?
+		set -e
+		if [ "$rc" = 0 ]; then
+			canary_report ok
+		else
+			failed=$(cat "$iso_phase" 2>/dev/null || echo start)
+			reason=$(head -c 1000 "$iso_reason" 2>/dev/null | tr -s '\r\n ' ' ' | sed 's/ $//' || true)
+			reason=${reason:-exit $rc}
+			echo "::warning title=rbe isolation canary::isolation failed in phase $failed: ${reason//%/%25}; this worker runs actions without isolation"
+			canary_report "failed phase=$failed" "$reason"
+			isolation_undo
+			ACTION_ISOLATION=0 slots=$plain_slots isolation='{}'
+			render
+		fi
+	else
+		isolate
+	fi
+else
+	render
+fi
+
+if [ "$ACTION_ISOLATION" = 1 ]; then
 	# The cert is in files from here on. NativeLink's persistent-worker spawn
 	# hands its own environment to the action: give it none of this step's.
 	env -i PATH="$PATH" HOME="$HOME" "$NL_BIN_DIR/nativelink" "$ROOT/worker.json" >"$ROOT/worker.log" 2>&1 &
@@ -271,7 +351,7 @@ else
 	"$NL_BIN_DIR/nativelink" "$ROOT/worker.json" >"$ROOT/worker.log" 2>&1 &
 fi
 nl=$!
-echo "worker $WORKER_NAME started (pid $nl, $slots slots, action isolation $ACTION_ISOLATION)"
+echo "worker $WORKER_NAME started (pid $nl, $slots slots, action isolation $ACTION_ISOLATION${canary:+, canary $canary})"
 
 # A launcher NativeLink killed (cancel, backstop timeout) leaves a slot-owned
 # action directory NativeLink cannot remove, which pool mode would count as in
