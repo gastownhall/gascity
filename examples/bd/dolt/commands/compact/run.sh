@@ -591,6 +591,7 @@ valid_table_name() {
 valid_remote_name() {
   remote_candidate="$1"
   case "$remote_candidate" in
+    -*) return 1 ;;
     [A-Za-z0-9_.-]*)
       case "$remote_candidate" in
         *[!A-Za-z0-9_.-]*) return 1 ;;
@@ -2813,12 +2814,14 @@ flatten_database() {
         printf 'compact: db=%s remote probe returned empty name — refusing flatten\n' "$db" >&2
         return 1
       fi
+      backup_sync_database "$db" || return 1
       compact_shared_history_database "$db" "$guard_remote_count" "$guard_remote"
       return $?
     fi
   fi
 
   if has_compact_marker "$pending_gc_dir" "$db"; then
+    backup_sync_database "$db" || return 1
     if [ -n "$dry_run" ]; then
       printf 'compact: db=%s pending_gc=present — dry-run (would retry DOLT_GC --full)\n' "$db"
       return 0
@@ -2907,6 +2910,7 @@ flatten_database() {
   fi
 
   if has_compact_marker "$pending_push_dir" "$db"; then
+    backup_sync_database "$db" || return 1
     legacy_pending_push_recovered=0
     pending_remote=$(compact_marker_value "$pending_push_dir" "$db" remote || true)
     pending_expected_remote_head=$(compact_marker_value "$pending_push_dir" "$db" expected_remote_head || true)
@@ -3033,6 +3037,8 @@ flatten_database() {
       "$db" "$count" "$base_detail" "$threshold_commits"
     return 0
   fi
+
+  backup_sync_database "$db" || return 1
 
   # Runs before the HEAD probe below because it may commit, and every commit
   # hash this run relies on must be captured after it. Skipped under dry-run,
@@ -3622,6 +3628,8 @@ bare_gc_database() {
     return 1
   fi
 
+  backup_sync_database "$db" || return 1
+
   if [ -n "$dry_run" ]; then
     printf 'compact: db=%s — dry-run (would bare GC)\n' "$db"
     return 0
@@ -3801,13 +3809,13 @@ disk_preflight() {
   local df_out available_kb available_bytes
   if ! df_out=$(df -Pk "$DOLT_DATA_DIR" 2>/dev/null); then
     printf 'compact: disk pre-flight probe failed: %s\n' "$DOLT_DATA_DIR" >&2
-    return 0
+    return 1
   fi
   available_kb=$(printf '%s\n' "$df_out" | awk 'NR==2{print $4}')
   case "${available_kb:-}" in
     ''|*[!0-9]*)
       printf 'compact: disk pre-flight probe failed: %s\n' "$DOLT_DATA_DIR" >&2
-      return 0
+      return 1
       ;;
   esac
   available_bytes=$(( available_kb * 1024 ))
@@ -3885,14 +3893,10 @@ main() {
   disk_preflight
 
   compact_backup_remote="${GC_DOLT_COMPACT_BACKUP_REMOTE:-}"
-  if [ -n "$compact_backup_remote" ]; then
-    case "$compact_backup_remote" in
-      *[[:space:]]*)
-        printf 'compact: GC_DOLT_COMPACT_BACKUP_REMOTE=%s is invalid — remote name must not contain whitespace\n' \
-          "$compact_backup_remote" >&2
-        exit 2
-        ;;
-    esac
+  if [ -n "$compact_backup_remote" ] && ! valid_remote_name "$compact_backup_remote"; then
+    printf 'compact: GC_DOLT_COMPACT_BACKUP_REMOTE=%s is invalid\n' \
+      "$compact_backup_remote" >&2
+    exit 2
   fi
 
   compact_backup_timeout="${GC_DOLT_COMPACT_BACKUP_TIMEOUT_SECS:-300}"
@@ -3943,9 +3947,6 @@ main() {
   if [ "$bare_gc" = "1" ]; then
     while IFS= read -r db; do
       [ -n "$db" ] || continue
-      if ! backup_sync_database "$db"; then
-        exit 1
-      fi
       if ! bare_gc_database "$db"; then
         failed_count=$((failed_count + 1))
       fi
@@ -3960,9 +3961,6 @@ main() {
 
   while IFS= read -r db; do
     [ -n "$db" ] || continue
-    if ! backup_sync_database "$db"; then
-      exit 1
-    fi
     if ! flatten_database "$db"; then
       failed_count=$((failed_count + 1))
     fi

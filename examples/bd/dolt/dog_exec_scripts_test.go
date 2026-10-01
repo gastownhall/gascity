@@ -6334,7 +6334,10 @@ func TestCompactScriptBackupUnsetProceedsNormally(t *testing.T) {
 
 func TestCompactScriptBackupSyncSuccessBeforeFlatten(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
-	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup")
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+	)
 	if err != nil {
 		t.Fatalf("compact with successful backup should succeed: %v\nout=%s", err, out)
 	}
@@ -6356,6 +6359,7 @@ func TestCompactScriptBackupSkippedInDryRun(t *testing.T) {
 		t, "success",
 		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
 		"GC_DOLT_COMPACT_DRY_RUN=1",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
 	)
 	if err != nil {
 		t.Fatalf("dry-run with backup remote should succeed: %v\nout=%s", err, out)
@@ -6374,7 +6378,10 @@ func TestCompactScriptBackupSkippedInDryRun(t *testing.T) {
 
 func TestCompactScriptBackupSyncFailureBeforeFlattenExitsOne(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
-	out, err := fixture.run(t, "backup_sync_failure", "GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup")
+	out, err := fixture.run(t, "backup_sync_failure",
+		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+	)
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
 		t.Fatalf("backup sync failure should exit 1: got err=%v\nout=%s", err, out)
@@ -6429,6 +6436,33 @@ func TestCompactScriptBackupInvalidRemoteNameExitsTwo(t *testing.T) {
 	}
 }
 
+func TestCompactScriptBackupOptionLikeRemoteNameExitsTwo(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_BACKUP_REMOTE=--help")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+		t.Fatalf("option-like backup remote should exit 2: got err=%v\nout=%s", err, out)
+	}
+}
+
+func TestCompactScriptBackupSkippedBelowThreshold(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=999999",
+	)
+	if err != nil {
+		t.Fatalf("below-threshold compact should succeed: %v\nout=%s", err, out)
+	}
+	doltLog, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(doltLog), "backup sync") {
+		t.Fatalf("below-threshold database must not trigger backup sync:\n%s", doltLog)
+	}
+}
+
 func TestCompactScriptBackupInvalidTimeoutExitsTwo(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "success",
@@ -6442,9 +6476,6 @@ func TestCompactScriptBackupInvalidTimeoutExitsTwo(t *testing.T) {
 }
 
 func TestCompactScriptBackupNonDoltDirInDataDirSucceeds(t *testing.T) {
-	// DB discovery filters by .dolt presence; a directory without .dolt is
-	// never discovered and never passed to backup_sync_database. The script
-	// must succeed cleanly with no error output for the non-dolt dir.
 	fixture := newCompactScriptFixture(t)
 	nodoltDB := filepath.Join(fixture.dataDir, "nodolt")
 	if err := os.MkdirAll(nodoltDB, 0o755); err != nil {
@@ -6490,17 +6521,18 @@ func TestCompactScriptDiskPreflightCriticalExitsZero(t *testing.T) {
 	}
 }
 
-func TestCompactScriptDiskPreflightProbeFailureProceedsNormally(t *testing.T) {
+func TestCompactScriptDiskPreflightProbeFailureExitsOne(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "success", "GC_FAKE_DF_MODE=df_probe_failure")
-	if err != nil {
-		t.Fatalf("compact should proceed (fail open) on probe failure: %v\nout=%s", err, out)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("disk preflight probe failure should exit 1: got err=%v\nout=%s", err, out)
 	}
 	if !strings.Contains(out, "disk pre-flight probe failed") {
 		t.Fatalf("expected 'disk pre-flight probe failed' in output:\n%s", out)
 	}
-	if strings.Contains(out, "disk CRITICAL") {
-		t.Fatalf("probe failure must not emit CRITICAL:\n%s", out)
+	if logData, readErr := os.ReadFile(fixture.doltLog); readErr == nil && strings.Contains(string(logData), "DOLT_RESET") {
+		t.Fatalf("probe failure must abort before flatten:\n%s", logData)
 	}
 }
 

@@ -77,7 +77,7 @@ func TestDoltCompactStateCheckReportsStaleMarkersWithFixHints(t *testing.T) {
 			markerType: "compact-quarantine",
 			db:         "hq",
 			reason:     "post-flatten row count decreased",
-			wantHint:   "gc dolt compact --only-db hq",
+			wantHint:   "clear the marker only after verifying its recorded evidence",
 		},
 		{
 			markerType: "compact-pending-gc",
@@ -136,8 +136,11 @@ func TestDoltCompactStateCheckReportsBackupPushMarkerDatabase(t *testing.T) {
 		"compact-pending-push-backup",
 		"db=warehouse",
 		markerPath,
-		"gc dolt compact --only-db warehouse",
+		"reconcile the backup remote manually",
 	)
+	if strings.Contains(r.FixHint, "gc dolt compact --only-db") {
+		t.Fatalf("backup pending-push hint promises unsupported automatic recovery: %s", r.FixHint)
+	}
 }
 
 func TestDoltCompactStateCheckSurfacesUnreadableMarker(t *testing.T) {
