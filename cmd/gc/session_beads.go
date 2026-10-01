@@ -1764,7 +1764,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if !ok {
 				continue
 			}
-			if strings.TrimSpace(b.Metadata["session_name"]) == spec.SessionName {
+			if namedSessionRuntimeNameSatisfiesSpec(cfg, spec, b.Metadata["session_name"]) {
 				continue
 			}
 			if !closeSessionBeadIfRuntimeStoppedAndUnassigned(cityPath, store, rigStores, sp, cfg, b, "reconfigured", "reconfigured named session", now, stderr) {
@@ -3326,6 +3326,47 @@ func sweepProcessTableOrphans(
 		reaped++
 	}
 	return reaped
+}
+
+// namedSessionRuntimeNameSatisfiesSpec reports whether sessionName is a runtime
+// name spec's configured named session legitimately runs under.
+//
+// The spec's own SessionName is the obvious one. The second is not obvious and
+// is why this helper exists: a SINGLETON POOL slot whose agent also backs a
+// configured named session deliberately steps aside onto "<name>-pool", exactly
+// so it does not land on the runtime name config reserves for that named
+// session — poolRuntimeSessionName, session_name_lookup.go, first bullet of its
+// doc comment. The phantom-identity collapse
+// (normalizeNonExpandingPoolSessionInfoForSelection) then folds that slot's bead
+// onto the canonical identity and stamps configured_named_session=true, so the
+// bead reaches the reconfigured-named scan wearing the pool name gc itself chose
+// for it.
+//
+// Comparing against spec.SessionName alone therefore read gc's own deliberate
+// step-aside as config drift: the scan closed the bead and
+// closeSessionBeadIfRuntimeStoppedAndUnassigned KILLED the live provider (it
+// stops the runtime, it does not merely observe it stopped). The controller then
+// recreated the slot under the same pool name and the mismatch reappeared, so it
+// never converged. Measured on srvcity (sr-jnvmm): 508 of 611 sessions closed
+// "reconfigured", a hard 181s median lifetime every day the agent ran, and ~40%
+// of routed work never claimed because no generation lived long enough to claim
+// it. Only max_active_sessions=1 agents can reach this state — a max>1 slot is
+// "<name>-1", which never collides with the named "<name>".
+func namedSessionRuntimeNameSatisfiesSpec(cfg *config.City, spec namedSessionSpec, sessionName string) bool {
+	sessionName = strings.TrimSpace(sessionName)
+	if sessionName == "" {
+		return false
+	}
+	if sessionName == strings.TrimSpace(spec.SessionName) {
+		return true
+	}
+	// Only the canonical-singleton pool shape can legitimately wear a different
+	// runtime name while carrying this spec's identity. Anything else really is
+	// drift and must still be recreated.
+	if spec.Agent == nil || !spec.Agent.UsesCanonicalSingletonPoolIdentity() {
+		return false
+	}
+	return sessionName == poolRuntimeSessionName(cfg, spec.Identity, spec.Agent.QualifiedName(), false)
 }
 
 func closeSessionBeadIfRuntimeStoppedAndUnassigned(
