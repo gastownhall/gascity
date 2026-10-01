@@ -66,6 +66,19 @@ func TestDoltCompactStateCheckCleanStateOK(t *testing.T) {
 	}
 }
 
+func TestDoltCompactStateCheckReportsApplicabilitySkipReason(t *testing.T) {
+	dir := newDoltCompactStateTestCity(t)
+
+	r := NewDoltCompactStateCheck(dir, true).Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK for skipped compact state check", r.Status)
+	}
+	want := "skipped (file backend, external dolt endpoint, or GC_DOLT=skip)"
+	if r.Message != want {
+		t.Fatalf("Message = %q, want %q", r.Message, want)
+	}
+}
+
 func TestDoltCompactStateCheckReportsStaleMarkersWithFixHints(t *testing.T) {
 	tests := []struct {
 		markerType string
@@ -194,6 +207,9 @@ func TestDoltCompactStateCheckPreservesMarkersBeforeUnreadableDirectory(t *testi
 		t.Fatal("status = OK, want warning")
 	}
 	assertDoltCompactStateMentions(t, r, markerPath, unreadablePath)
+	if !strings.Contains(r.Message, "1 marker path(s) unreadable") {
+		t.Fatalf("Message = %q, want unreadable marker path count", r.Message)
+	}
 }
 
 func TestDoltCompactStateCheckReportsRemoteNamesContainingTempToken(t *testing.T) {

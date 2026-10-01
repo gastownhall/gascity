@@ -98,7 +98,7 @@ func (c *DoltCompactStateCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	if c.skip {
 		r.Status = StatusOK
-		r.Message = "skipped (managed Dolt not in use or checks disabled)"
+		r.Message = "skipped (file backend, external dolt endpoint, or GC_DOLT=skip)"
 		return r
 	}
 
