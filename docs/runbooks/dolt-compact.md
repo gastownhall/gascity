@@ -27,7 +27,7 @@ The `mol-dog-compactor` order fires `gc dolt compact` every 2 hours (configurabl
 
 ### Pre-compact backup
 
-Set `GC_DOLT_COMPACT_BACKUP_REMOTE=<remote-name>` to snapshot each database before its history is rewritten. If backup fails, compact aborts rather than proceeding without a rollback point. Requires a named dolt backup remote configured in each database directory.
+Set `GC_DOLT_COMPACT_BACKUP_REMOTE=<remote-name>` to snapshot each database before its history is rewritten. If backup fails, compact aborts rather than proceeding without a rollback point. Requires a named dolt backup remote configured in each database directory. Dry-run reports the backup it would sync without invoking `dolt backup sync`.
 
 ### Disk preflight
 
@@ -37,11 +37,11 @@ Before compacting, `gc dolt compact` checks free space on the Dolt data volume. 
 
 ### Quarantine alerts
 
-If the post-flatten integrity check detects unexpected data changes, the database is quarantined and a mail alert is sent to the configured recipient (`GC_DOLT_COMPACT_ALERT_TO`, default: `mayor`). A quarantined database is skipped on future compact runs until the marker is manually cleared. Known false positives (writer-race conditions) are cleared automatically.
+If the post-flatten integrity check detects unexpected data changes, the database is quarantined and a mail alert is sent to the configured recipient (`GC_DOLT_COMPACT_ALERT_TO`, default: `mayor`). A later scheduled run may clear one of the four documented value-hash drift markers only after `DOLT_DIFF_STAT` proves that drift is confined to content-preserved tables. Other markers remain until an operator verifies the recorded evidence and clears the affected database marker.
 
 ### Doctor checks
 
-`gc doctor` includes a `dolt-compact-state` check that surfaces quarantine markers and pending-GC state. The `dolt-noms-size` check warns when a managed database's aggregate on-disk footprint crosses a warning or error byte-size threshold — an absolute size measurement, not a row-count ratio. A healthy compact cadence keeps both green.
+`gc doctor` includes a `dolt-compact-state` check that surfaces quarantine, pending-GC, authoritative pending-push, and backup pending-push markers. Its recovery hints use `gc dolt compact --only-db <database>`, after any required marker inspection or remote reconciliation. The `dolt-noms-size` check warns when a managed database's aggregate on-disk footprint crosses a warning or error byte-size threshold — an absolute size measurement, not a row-count ratio. A healthy compact cadence keeps both green.
 
 ## Troubleshooting Quick Reference
 
