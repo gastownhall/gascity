@@ -9,8 +9,6 @@ import (
 	"strings"
 )
 
-// compactStateMarkerDirs are the subdirectories the compact run.sh writes
-// lifecycle markers into under the pack state directory.
 var compactStateMarkerDirs = []string{
 	"compact-quarantine",
 	"compact-pending-gc",

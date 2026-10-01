@@ -23,7 +23,7 @@ The `mol-dog-compactor` order fires `gc dolt compact` every 2 hours (configurabl
 
 ## Disk Preflight
 
-Before compacting, `gc dolt compact` checks free space on the Dolt data volume. If free bytes fall below `GC_DOLT_COMPACT_MIN_FREE_BYTES` (default 5 GiB) the run is skipped and retried at the next 2-hour interval. This prevents compaction from aggravating a full-disk situation. Set to `0` to disable.
+Before compacting, `gc dolt compact` checks free space on the Dolt data volume. If free bytes fall below `GC_DOLT_COMPACT_MIN_FREE_BYTES` (default 5 GiB), a normal run is skipped and retried at the next 2-hour interval. A targeted `--only-db` retry for an existing pending-GC marker may finish that interrupted GC, but cannot start a new flatten. Set the threshold to `0` to disable the check.
 
 If free-space probing fails, the compactor exits without changing a database. Fix the filesystem probe or set the threshold to `0` only when deliberately disabling this guard.
 
@@ -41,7 +41,7 @@ If the post-flatten integrity check detects unexpected data changes, the databas
 
 | Symptom | Meaning | Action |
 |---------|---------|--------|
-| `compact: disk CRITICAL` in logs | Disk free below `GC_DOLT_COMPACT_MIN_FREE_BYTES`; compact skipped. | Free disk space; compact retries automatically at next interval. |
+| `compact: disk CRITICAL` in logs | Disk free below `GC_DOLT_COMPACT_MIN_FREE_BYTES`; new compaction skipped. | Free disk space; compact retries automatically. For a pending-GC marker, follow the targeted `gc doctor` recovery hint. |
 | Database appears in quarantine log | Post-flatten integrity check failed; DB flagged for manual review. | See [Recover from Dolt Bloat](/troubleshooting/dolt-bloat-recovery) for manual GC procedure. |
 
 ## See Also

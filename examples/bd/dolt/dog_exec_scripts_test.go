@@ -6347,34 +6347,35 @@ func TestCompactScriptDiskPreflightCriticalExitsZero(t *testing.T) {
 	}
 }
 
-func TestCompactScriptDiskPreflightDoesNotBlockReclaimModes(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-		env  []string
-	}{
-		{name: "gc-only", args: []string{"--gc-only"}},
-		{name: "bare-gc", env: []string{"GC_DOLT_COMPACT_BARE_GC=1"}},
+func TestCompactScriptDiskPreflightAllowsOnlySelectedPendingGCRecovery(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatalf("mkdir pending-GC marker directory: %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fixture := newCompactScriptFixture(t)
-			env := append([]string{"GC_FAKE_DF_MODE=df_critical"}, tt.env...)
-			out, err := fixture.runWithArgs(t, "success", tt.args, env...)
-			if err != nil {
-				t.Fatalf("reclaim mode failed under low disk: %v\nout=%s", err, out)
-			}
-			if strings.Contains(out, "disk CRITICAL") {
-				t.Fatalf("reclaim mode was blocked by disk preflight:\n%s", out)
-			}
-			logData, err := os.ReadFile(fixture.doltLog)
-			if err != nil {
-				t.Fatalf("read dolt log: %v", err)
-			}
-			if !strings.Contains(string(logData), "DOLT_GC") {
-				t.Fatalf("reclaim mode did not issue DOLT_GC:\n%s", logData)
-			}
-		})
+	if err := os.WriteFile(marker, []byte("db=beads\nreason=flatten succeeded but full GC failed\n"), 0o600); err != nil {
+		t.Fatalf("write pending-GC marker: %v", err)
+	}
+
+	out, err := fixture.runWithArgs(t, "success", []string{"--only-db", "beads"}, "GC_FAKE_DF_MODE=df_critical")
+	if err != nil {
+		t.Fatalf("pending-GC recovery failed under low disk: %v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "pending_gc=present") || !strings.Contains(out, "retrying DOLT_GC --full") {
+		t.Fatalf("pending-GC recovery did not execute:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if !strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("pending-GC recovery did not issue DOLT_GC:\n%s", logData)
+	}
+	if strings.Contains(string(logData), "DOLT_RESET") {
+		t.Fatalf("low-disk recovery must not start a new flatten:\n%s", logData)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("successful pending-GC recovery did not clear marker: %v", err)
 	}
 }
 
