@@ -3,6 +3,7 @@ package testutil
 
 import (
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -44,6 +45,9 @@ func ShortTempDir(t *testing.T, prefix string) string {
 }
 
 func shortTempRoot(tempDir, testTempDir string) string {
+	if runtime.GOOS == "windows" {
+		return tempDir
+	}
 	canonicalRoot := CanonicalPath(tempDir)
 	if len(tempDir) <= shortTempRootMaxLen && canonicalRoot != "/tmp" && !strings.HasPrefix(canonicalRoot, "/tmp/") {
 		return tempDir
