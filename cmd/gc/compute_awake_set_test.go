@@ -2719,13 +2719,15 @@ func TestAssignedWork_NoRecordedCurrent_FirstMatchAnchors(t *testing.T) {
 // reassignment; being pointed at another workflow or a standalone bead is.
 // ---------------------------------------------------------------------------
 
-func freshCycleInput(recordedBead, recordedRoot string, work []AwakeWorkBead) AwakeInput {
+// All cases anchor on the closed step-1; only the recorded root and the
+// remaining assigned work vary.
+func freshCycleInput(recordedRoot string, work []AwakeWorkBead) AwakeInput {
 	return AwakeInput{
 		Agents: []AwakeAgent{{QualifiedName: "rig/hudson"}},
 		SessionBeads: []AwakeSessionBead{{
 			ID: "gc-1", SessionName: "hudson-gc-1", Template: "rig/hudson",
 			State:                           "active",
-			CurrentlyProcessingBeadID:       recordedBead,
+			CurrentlyProcessingBeadID:       "step-1",
 			CurrentlyProcessingWorkflowRoot: recordedRoot,
 		}},
 		WorkBeads:       work,
@@ -2737,7 +2739,7 @@ func freshCycleInput(recordedBead, recordedRoot string, work []AwakeWorkBead) Aw
 func TestAssignedWork_NextStepOfSameWorkflow_NoFreshCycle(t *testing.T) {
 	// Step 1 (recorded) was closed, so it is no longer among the assigned work;
 	// steps 2 and 3 of the same molecule remain assigned to the session.
-	d := ComputeAwakeSet(freshCycleInput("step-1", "root-A", []AwakeWorkBead{
+	d := ComputeAwakeSet(freshCycleInput("root-A", []AwakeWorkBead{
 		{ID: "step-2", Assignee: "hudson-gc-1", Status: "open", Ready: true, WorkflowRoot: "root-A"},
 		{ID: "step-3", Assignee: "hudson-gc-1", Status: "open", Ready: true, WorkflowRoot: "root-A"},
 	}))["hudson-gc-1"]
@@ -2750,7 +2752,7 @@ func TestAssignedWork_NextStepOfSameWorkflow_NoFreshCycle(t *testing.T) {
 }
 
 func TestAssignedWork_PrefersSiblingStepOverUnrelatedCandidate(t *testing.T) {
-	d := ComputeAwakeSet(freshCycleInput("step-1", "root-A", []AwakeWorkBead{
+	d := ComputeAwakeSet(freshCycleInput("root-A", []AwakeWorkBead{
 		{ID: "other", Assignee: "hudson-gc-1", Status: "in_progress", WorkflowRoot: "root-B"},
 		{ID: "step-2", Assignee: "hudson-gc-1", Status: "open", Ready: true, WorkflowRoot: "root-A"},
 	}))["hudson-gc-1"]
@@ -2763,7 +2765,7 @@ func TestAssignedWork_PrefersSiblingStepOverUnrelatedCandidate(t *testing.T) {
 }
 
 func TestAssignedWork_DifferentWorkflow_EmitsFreshCycle(t *testing.T) {
-	d := ComputeAwakeSet(freshCycleInput("step-1", "root-A", []AwakeWorkBead{
+	d := ComputeAwakeSet(freshCycleInput("root-A", []AwakeWorkBead{
 		{ID: "step-9", Assignee: "hudson-gc-1", Status: "open", Ready: true, WorkflowRoot: "root-B"},
 	}))["hudson-gc-1"]
 	if !d.RequiresFreshCycle || d.AssignedWorkBeadID != "step-9" {
@@ -2773,7 +2775,7 @@ func TestAssignedWork_DifferentWorkflow_EmitsFreshCycle(t *testing.T) {
 
 func TestAssignedWork_StandaloneReassign_EmitsFreshCycle(t *testing.T) {
 	// The #1893 case: an operator points the alive session at a standalone bead.
-	d := ComputeAwakeSet(freshCycleInput("step-1", "root-A", []AwakeWorkBead{
+	d := ComputeAwakeSet(freshCycleInput("root-A", []AwakeWorkBead{
 		{ID: "wb-solo", Assignee: "hudson-gc-1", Status: "in_progress"},
 	}))["hudson-gc-1"]
 	if !d.RequiresFreshCycle || d.AssignedWorkBeadID != "wb-solo" || d.AssignedWorkflowRoot != "" {
@@ -2784,7 +2786,7 @@ func TestAssignedWork_StandaloneReassign_EmitsFreshCycle(t *testing.T) {
 func TestAssignedWork_LegacySessionWithoutRecordedRoot_KeepsIDRule(t *testing.T) {
 	// A session that recorded an anchor before roots existed keeps the id-only
 	// divergence until its next wake stamps a root.
-	d := ComputeAwakeSet(freshCycleInput("step-1", "", []AwakeWorkBead{
+	d := ComputeAwakeSet(freshCycleInput("", []AwakeWorkBead{
 		{ID: "step-2", Assignee: "hudson-gc-1", Status: "open", Ready: true, WorkflowRoot: "root-A"},
 	}))["hudson-gc-1"]
 	if !d.RequiresFreshCycle {
