@@ -241,6 +241,9 @@ inner() {
 			case $m in / | /proc | /proc/* | /sys | /sys/* | /dev | /dev/*) continue ;; esac
 			# Hidden under a mount above (the mask, /tmp, ...): not reachable.
 			if [[ -n ${own[$m]:-} ]] || ! mountpoint -q -- "$m"; then continue; fi
+			# Already read-only (snap squashfs, ...): nothing to write; a remount
+			# of some of them fails (EROFS) and would abort the action.
+			if [[ ,${opts[$m]}, == *,ro,* ]]; then continue; fi
 			ex=
 			if [[ ,${opts[$m]}, == *,noexec,* ]]; then ex=,noexec; fi
 			mount -o "remount,bind,ro,nosuid,nodev$ex" -- "$m"
