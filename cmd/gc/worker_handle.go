@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -710,6 +711,13 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// path does; this resume resolver builds runtime.Config directly and never
 	// routes through resolveTemplate (gc-6bw8o).
 	applyWorkerOverlayHints(&runtimeHints, cfg, cityPath, info.Template, resolved)
+	// Deliver the startup prompt the way the reconciler's resume does: this
+	// resolver builds runtime.Config directly, so without it a resumed launch
+	// leaves the SessionStart hook as the only carrier of the prompt (ga-4k4zfk).
+	runtimeHints, err = startupPromptCity{path: cityPath, cfg: cfg, stderr: os.Stderr}.applyTo(info, resolved, transport, runtimeHints)
+	if err != nil {
+		return nil, err
+	}
 	return &worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    workDir,

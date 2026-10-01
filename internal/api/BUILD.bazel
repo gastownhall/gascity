@@ -411,6 +411,7 @@ go_test(
         "session_resolution_reserved_name_test.go",
         "session_resolved_config_test.go",
         "session_response_wire_test.go",
+        "session_startup_prompt_test.go",
         "session_stream_capability_test.go",
         "session_structured_providers_test.go",
         "session_structured_schema_test.go",

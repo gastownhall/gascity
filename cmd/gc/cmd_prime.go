@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -457,16 +458,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			ctx.InstructionsFile = instructionsFileForAgent(&a, &cfg.Workspace, cfg.Providers)
 		}
 		if a.PromptTemplate != "" {
-			fragments := effectivePromptFragments(
-				cfg.Workspace.GlobalFragments,
-				a.InjectFragments,
-				a.AppendFragments,
-				a.InheritedAppendFragments,
-				cfg.AgentDefaults.AppendFragments,
-			)
-			packDirs := cfg.PackDirsForRig(ctx.RigName)
-			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
-				packDirs, fragments, nil)
+			prompt := renderAgentPromptTemplate(cityPath, cityName, cfg, &a, ctx, stderr)
 			if prompt != "" {
 				var budget *promptBudgetJSON
 				if strictMode {
@@ -523,6 +515,22 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	injection := primeHookContextSuffix(cityPath, sessionStartStore, hookMode, hookContext, stderr, consumeHandoff)
 	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 	return 0, nil
+}
+
+// renderAgentPromptTemplate renders a's prompt_template against ctx with the
+// fragments and pack directories gc prime uses. The worker resume resolvers
+// render through it too, so a prompt delivered at launch is the one the hook
+// would otherwise have carried.
+func renderAgentPromptTemplate(cityPath, cityName string, cfg *config.City, a *config.Agent, ctx PromptContext, stderr io.Writer) string {
+	fragments := effectivePromptFragments(
+		cfg.Workspace.GlobalFragments,
+		a.InjectFragments,
+		a.AppendFragments,
+		a.InheritedAppendFragments,
+		cfg.AgentDefaults.AppendFragments,
+	)
+	return renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
+		cfg.PackDirsForRig(ctx.RigName), fragments, nil)
 }
 
 func primeAgentCandidates(agentName string, hookMode bool, cityPath string) []string {
@@ -726,6 +734,33 @@ func primeHookLiveManagedSessionStore(cityPath string) beads.Store {
 	}
 }
 
+// hookInlinePromptLimit is the size beyond which Claude Code stops inlining
+// SessionStart hook output into the first turn and spills the rest to a file
+// (about 10,000 characters on 2.1.283; ga-4k4zfk).
+const hookInlinePromptLimit = 10_000
+
+// logHookSoleCarrierPrompt records that a SessionStart hook is about to be the
+// only carrier of a startup prompt too large for the provider to inline in full:
+// no launch payload delivered it (GC_STARTUP_PROMPT_DELIVERED is unset), so the
+// agent will see a truncated prompt. Sizes compare in bytes, which never
+// under-reports characters. log is *slog.Logger's Warn method, passed as a value
+// so a test can capture the record; sessionFallback names the record when the
+// session name is not in the environment. The record never carries prompt content.
+func logHookSoleCarrierPrompt(log func(msg string, args ...any), sessionFallback, prompt string) {
+	if len(prompt) <= hookInlinePromptLimit || strings.TrimSpace(os.Getenv(startupPromptDeliveredEnv)) == "1" {
+		return
+	}
+	sessionName := strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
+	if sessionName == "" {
+		sessionName = sessionFallback
+	}
+	log("startup prompt reaches the session only through the SessionStart hook and exceeds the provider's inline limit; it will be truncated",
+		slog.String("session", sessionName),
+		slog.Int("bytes", len(prompt)),
+		slog.Int("limit", hookInlinePromptLimit),
+	)
+}
+
 func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt string, hookMode bool, hookFormat string, suppressPrompt bool, hookContextSuffix string, afterDelivery func()) {
 	if hookMode && suppressPrompt {
 		// Managed sessions receive the rendered startup prompt through the
@@ -733,6 +768,7 @@ func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt st
 		prompt = ""
 	}
 	if hookMode {
+		logHookSoleCarrierPrompt(slog.Default().Warn, agentName, prompt)
 		prompt = prependHookBeacon(cityName, agentName, prompt)
 		// The step reminder is hook-only context, not the startup prompt, so it
 		// survives suppression — managed SessionStart hooks still carry it. Folded
@@ -996,6 +1032,14 @@ func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config
 }
 
 func buildPrimeContextFor(cityPath, cityName string, a *config.Agent, rigs []config.Rig, topo config.QueryTopology, stderr io.Writer) PromptContext {
+	return buildPrimeContextWithEnv(cityPath, cityName, a, rigs, topo, os.Getenv, stderr)
+}
+
+// buildPrimeContextWithEnv is buildPrimeContextFor reading the session identity
+// (GC_ALIAS, GC_AGENT, GC_DIR, GC_RIG, GC_RIG_ROOT, GC_BRANCH) through getenv, so
+// a caller that is not running inside the session can supply that session's own
+// identity instead of its process environment.
+func buildPrimeContextWithEnv(cityPath, cityName string, a *config.Agent, rigs []config.Rig, topo config.QueryTopology, getenv func(string) string, stderr io.Writer) PromptContext {
 	ctx := PromptContext{
 		CityRoot:      cityPath,
 		TemplateName:  a.Name,
@@ -1006,23 +1050,23 @@ func buildPrimeContextFor(cityPath, cityName string, a *config.Agent, rigs []con
 	}
 
 	// Agent identity: prefer GC_ALIAS, then GC_AGENT, else config.
-	if gcAlias := os.Getenv("GC_ALIAS"); gcAlias != "" {
+	if gcAlias := getenv("GC_ALIAS"); gcAlias != "" {
 		ctx.AgentName = gcAlias
-	} else if gcAgent := os.Getenv("GC_AGENT"); gcAgent != "" {
+	} else if gcAgent := getenv("GC_AGENT"); gcAgent != "" {
 		ctx.AgentName = gcAgent
 	} else {
 		ctx.AgentName = a.QualifiedName()
 	}
 
 	// Working directory.
-	if gcDir := os.Getenv("GC_DIR"); gcDir != "" {
+	if gcDir := getenv("GC_DIR"); gcDir != "" {
 		ctx.WorkDir = gcDir
 	}
 
 	// Rig context.
-	if gcRig := os.Getenv("GC_RIG"); gcRig != "" {
+	if gcRig := getenv("GC_RIG"); gcRig != "" {
 		ctx.RigName = gcRig
-		ctx.RigRoot = os.Getenv("GC_RIG_ROOT")
+		ctx.RigRoot = getenv("GC_RIG_ROOT")
 		if ctx.RigRoot == "" {
 			ctx.RigRoot = rigRootForName(gcRig, rigs)
 		}
@@ -1033,7 +1077,7 @@ func buildPrimeContextFor(cityPath, cityName string, a *config.Agent, rigs []con
 		ctx.IssuePrefix = findRigPrefix(rigName, rigs)
 	}
 
-	ctx.Branch = os.Getenv("GC_BRANCH")
+	ctx.Branch = getenv("GC_BRANCH")
 	ctx.DefaultBranch = defaultBranchForRig(ctx.RigName, rigs, ctx.WorkDir)
 	ctx.WorkQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "work_query", a.EffectiveWorkQueryFor(topo), stderr)
 	ctx.AssignedInProgressQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "assigned_in_progress_query", a.EffectiveAssignedInProgressQueryFor(topo), stderr)

@@ -1501,8 +1501,14 @@ func configDropsBoundRigs(current, next *config.City) bool {
 // api.MaintenanceProvider directly.
 // ApplyStartupPrompt implements api.State: it returns hints with the startup
 // prompt of the session described by info delivered for a launch that resumes it.
-func (cs *controllerState) ApplyStartupPrompt(_ session.Info, _ *config.ResolvedProvider, _ string, hints runtime.Config) (runtime.Config, error) {
-	return hints, nil
+// The controller renders the prompt and applies the same delivery plan the
+// reconciler launches with, so an API-resumed session cannot diverge from it.
+func (cs *controllerState) ApplyStartupPrompt(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error) {
+	cfg := cs.Config()
+	if cfg == nil {
+		return hints, nil
+	}
+	return startupPromptCity{path: cs.CityPath(), cfg: cfg, stderr: os.Stderr}.applyTo(info, resolved, transport, hints)
 }
 
 func (cs *controllerState) MaintenanceLoop() api.MaintenanceProvider {
