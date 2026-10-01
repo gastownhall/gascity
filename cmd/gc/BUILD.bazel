@@ -672,6 +672,7 @@ go_test(
         "assigned_work_defer_tracker_test.go",
         "assigned_work_residency_test.go",
         "assigned_work_scope_test.go",
+        "async_start_command_gate_test.go",
         "backend_env_census_test.go",
         "bd_env_backend_registry_test.go",
         "bd_env_credential_probe_snapshot_test.go",
