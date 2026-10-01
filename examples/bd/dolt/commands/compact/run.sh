@@ -347,6 +347,7 @@ compact_renotify_backstop_secs="${GC_DOLT_COMPACT_RENOTIFY_BACKSTOP_SECS:-86400}
 compact_remote="${GC_DOLT_COMPACT_REMOTE:-}"
 dry_run="${GC_DOLT_COMPACT_DRY_RUN:-}"
 only_dbs="${GC_DOLT_COMPACT_ONLY_DBS:-}"
+pending_gc_recovery_only=0
 bare_gc_input="${GC_DOLT_COMPACT_BARE_GC:-}"
 skip_fetch_input="${GC_DOLT_COMPACT_SKIP_FETCH:-}"
 allow_federated_input="${GC_DOLT_COMPACT_ALLOW_FEDERATED:-}"
@@ -2744,6 +2745,11 @@ flatten_database() {
     esac
   fi
 
+  if [ "$pending_gc_recovery_only" = "1" ] && ! has_compact_marker "$pending_gc_dir" "$db"; then
+    printf 'compact: db=%s pending_gc marker disappeared — skipping under critical disk\n' "$db" >&2
+    return 0
+  fi
+
   if has_compact_marker "$quarantine_dir" "$db"; then
     quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
     quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
@@ -3786,6 +3792,17 @@ disk_preflight() {
   if decimal_less_than "$_dp_available_bytes" "$_dp_min_free"; then
     printf 'compact: disk CRITICAL: free_bytes=%s floor=%s DOLT_DATA_DIR=%s\n' \
       "$_dp_available_bytes" "$_dp_min_free" "$DOLT_DATA_DIR" >&2
+    case "$only_dbs" in
+      ''|*,*)
+        ;;
+      *)
+        if valid_database_name "$only_dbs" && has_compact_marker "$pending_gc_dir" "$only_dbs"; then
+          pending_gc_recovery_only=1
+          printf 'compact: db=%s pending_gc=present — proceeding with recovery only under critical disk\n' "$only_dbs" >&2
+          return 0
+        fi
+        ;;
+    esac
     exit 0
   fi
 }
