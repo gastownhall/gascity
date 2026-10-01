@@ -24,7 +24,7 @@ quick=0; [[ ${1:-} == --quick ]] && quick=1
 . "$CONF" || { echo "selftest: no $CONF" >&2; exit 1; }
 worker=$(id -un "$WORKER_UID")
 TMPFS_DIRS=${TMPFS_DIRS:-/run/lock /var/crash} WORKER_JSON=${WORKER_JSON:-/etc/nativelink-worker.json}
-EGRESS_CHAIN=${EGRESS_CHAIN:-inet filter rbe_action_out} NETNS=${NETNS:-0}
+EGRESS_CHAIN=${EGRESS_CHAIN:-inet filter rbe_action_out} NETNS=${NETNS:-0} ROOT_RO=${ROOT_RO:-0}
 # Destinations an action must be refused (host:port, IPv6 in brackets): every
 # refused class plus PROBE_DENY (the farm). Refused means "Connection
 # refused" (nft's TCP reset), not merely failed: a timeout or no route would
@@ -100,19 +100,38 @@ printf 'canary\n' >"$canary" && chmod 0444 "$canary"
 mask_rel=${WORK_ROOT#"$MASK_ROOT"/}
 mask_top=${mask_rel%%/*}
 [[ $mask_rel != "$WORK_ROOT" ]] || mask_top=
-# Full run only (walks the root filesystem, seconds): no directory shared
-# between actions is writable by one, besides the per-action mounts. A
-# world-writable one counts only if the action can write it: access() and a
-# real create (RO_DIRS are read-only mounts in the action, 0777 or not).
+# The action's own mounts, which stay writable with ROOT_RO=1 (its outputs
+# under work, /tmp, /var/tmp, HOME, /dev/shm, TMPFS_DIRS; mqueue holds no
+# files).
+own_mounts="$d /tmp /var/tmp $HOME_DIR /dev/shm /dev/mqueue $TMPFS_DIRS"
+own_writable="$d/work/out /tmp /var/tmp $HOME_DIR /dev/shm $TMPFS_DIRS"
+# Full run only (walks every filesystem the action can reach, seconds): no
+# directory shared between actions is writable by one, besides its own
+# mounts. Every mount in the action is walked (-xdev each: /, /run, a data
+# disk, ...) but /proc and /sys. A world-writable directory counts only if
+# the action can write it: access() and a real create (with ROOT_RO=1 they
+# are on read-only mounts, 0777 or not).
 full_probe=
 if ((!quick)); then
 	full_probe='w=0
-while IFS= read -r d; do
-	f=0; t=$d/.rbe-selftest-w.$$
-	[ -w "$d" ] && f=1
-	mkdir "$t" 2>/dev/null && rmdir "$t" && f=1
-	if [ $f = 1 ]; then echo "W $d"; w=1; fi
-done < <(find / -xdev -type d -perm -0002 2>/dev/null | grep -vxE "/tmp|/var/tmp|'"${TMPFS_DIRS// /|}"'")
+own() { for o in '"$own_mounts"'; do case $1 in "$o" | "$o"/*) return 0 ;; esac; done; return 1; }
+declare -A seen=()
+while read -r _ _ _ _ m _; do
+	printf -v m %b "${m//\\/\\0}"
+	[ -z "${seen[$m]:-}" ] || continue
+	seen[$m]=1
+	case $m in /proc | /proc/* | /sys | /sys/*) continue ;; esac
+	if own "$m" || ! mountpoint -q -- "$m"; then continue; fi
+	while IFS= read -r d; do
+		[ -z "${seen[$d]:-}" ] || continue
+		seen[$d]=1
+		own "$d" && continue
+		f=0; t=$d/.rbe-selftest-w.$$
+		[ -w "$d" ] && f=1
+		mkdir "$t" 2>/dev/null && rmdir "$t" && f=1
+		if [ $f = 1 ]; then echo "W $d"; w=1; fi
+	done < <(find "$m" -xdev -type d -perm -0002 2>/dev/null)
+done </proc/self/mountinfo
 [ $w = 0 ] && echo "R no-shared-writable-dir"'
 fi
 probe='
@@ -134,20 +153,30 @@ m=$(ls -A '"$MASK_ROOT"') && [ -n "$m" ] && [ "$m" = "'"$mask_top"'" ] && echo "
 [ "$(ls /proc | grep -c "^[0-9]")" -lt 20 ] && echo "R own-pid-namespace"
 '"$full_probe"'
 [ -w "$(getent passwd "$(id -u)" | cut -d: -f6)" ] && [ -z "$(ls -A ~)" ] && echo "R fresh-home"
+w=0; for o in '"$own_writable"'; do
+	[ -d "$o" ] || continue
+	{ echo x >"$o/.rbe-selftest-w" && rm -f "$o/.rbe-selftest-w"; } 2>/dev/null || { echo "N $o"; w=1; }
+done; [ $w = 0 ] && echo "R own-mounts-writable"
+case ",$(findmnt -no VFS-OPTIONS /)," in *,ro,*) echo "R root-ro" ;; esac
 mkdir -m 0700 out/private && echo x >out/private/f && chmod 0400 out/private/f && chmod 0500 out/private
 (setsid sleep 600 >/dev/null 2>&1 &)
 echo "R end"; exit 7'
+host_mounts() { findmnt -no VFS-OPTIONS /; findmnt -no VFS-OPTIONS /run; }
+host_before=$(host_mounts 2>&1)
 out=$(cd "$d/work" && setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --init-groups -- \
 	env -i PATH=/usr/bin:/bin 'PROBE=a=b c' RBE_X_TIMEOUT_MS=60000 "$LIB/entry" /bin/bash -c "$probe" 2>&1)
 rc=$?
 rm -f "$canary"
 results=(uid-slot no-caps nnp env-exact input-immutable worker-cas-hidden mask-tmpfs siblings-hidden private-tmp
-	own-pid-namespace fresh-home end)
+	own-pid-namespace fresh-home own-mounts-writable end)
 ((quick)) || results+=(no-shared-writable-dir)
+((ROOT_RO)) && results+=(root-ro)
 for r in "${results[@]}"; do
 	if grep -qx "R $r" <<<"$out"; then ok "action: $r"; else bad "action: $r"; fi
 done
 sed -n 's/^W /      shared directory the action can write: /p' <<<"$out"
+sed -n 's/^N /      own mount the action cannot write: /p' <<<"$out"
+check "ROOT_RO=$ROOT_RO leaves the host's / and /run as they were" test "$(host_mounts 2>&1)" = "$host_before"
 for t in "${deny[@]}"; do
 	got=$(awk -v t="$t" '$1 == "D" && $2 == t { print $3 }' <<<"$out")
 	want=refused
