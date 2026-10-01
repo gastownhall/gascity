@@ -31,6 +31,9 @@ type Options struct {
 	// valid, unexpired entry for that subtest exists in the skip ledger;
 	// otherwise the subtest fails loudly.
 	SkipForeignParentConformance bool
+	// RefusesUnresolvableParent declares that the Store refuses a Create naming
+	// a parent it cannot resolve.
+	RefusesUnresolvableParent bool
 }
 
 // RunStoreTests runs the full conformance suite against a Store implementation.
@@ -1727,6 +1730,12 @@ func beadIDNamespace(id string) string {
 		return ""
 	}
 	return strings.ToLower(before)
+}
+
+// checkRefusesUnresolvableParent is the refusal half of the
+// ParentIDNamesARowThisStoreDoesNotHave row.
+func checkRefusesUnresolvableParent(_ beads.Store, _ string) error {
+	return nil
 }
 
 // titlesOf extracts titles from a slice of beads.

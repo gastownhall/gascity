@@ -225,7 +225,11 @@ func TestProviderOverridesAndSuiteContractsCrossMakeIsolation(t *testing.T) {
 	acceptanceFlags := map[string]string{"-tags": "acceptance_a"}
 	bdstoreFlags := map[string]string{
 		"-tags": "integration",
-		"-run":  "^(TestBdStoreConformance|TestBdStoreDeleteBatchOrphansExternalDependents|TestBdStoreMailWispInsert|TestPinnedBdStoreCommandRunnerReportsSilentFallback|TestPinnedBdStoreCommandRunnerUsesExactEnvironmentAndKeepsStdoutJSON)$",
+		"-run":  "^(TestBdStoreDeleteBatchOrphansExternalDependents|TestBdStoreMailWispInsert|TestPinnedBdStoreCommandRunnerReportsSilentFallback|TestPinnedBdStoreCommandRunnerUsesExactEnvironmentAndKeepsStdoutJSON)$",
+	}
+	bdstoreConformanceFlags := map[string]string{
+		"-tags": "integration",
+		"-run":  "^(TestBdStoreConformance)$",
 	}
 	tests := []struct {
 		name         string
@@ -242,6 +246,9 @@ func TestProviderOverridesAndSuiteContractsCrossMakeIsolation(t *testing.T) {
 		{name: "integration sqlite", target: "test-integration-bdstore", envName: "GC_BEADS", provider: "sqlite", exitCode: 37, wantFlags: bdstoreFlags, wantPackages: []string{"./test/integration"}},
 		{name: "integration file", target: "test-integration-bdstore", envName: "GC_BEADS", provider: "file", exitCode: 23, wantFlags: bdstoreFlags, wantPackages: []string{"./test/integration"}},
 		{name: "integration default", target: "test-integration-bdstore", envName: "GC_BEADS", exitCode: 37, wantFlags: bdstoreFlags, wantPackages: []string{"./test/integration"}},
+		{name: "integration conformance sqlite", target: "test-integration-bdstore-conformance", envName: "GC_BEADS", provider: "sqlite", exitCode: 37, wantFlags: bdstoreConformanceFlags, wantPackages: []string{"./test/integration"}},
+		{name: "integration conformance file", target: "test-integration-bdstore-conformance", envName: "GC_BEADS", provider: "file", exitCode: 23, wantFlags: bdstoreConformanceFlags, wantPackages: []string{"./test/integration"}},
+		{name: "integration conformance default", target: "test-integration-bdstore-conformance", envName: "GC_BEADS", exitCode: 37, wantFlags: bdstoreConformanceFlags, wantPackages: []string{"./test/integration"}},
 	}
 
 	for _, tt := range tests {
@@ -290,7 +297,7 @@ func TestProviderOverridesAndSuiteContractsCrossMakeIsolation(t *testing.T) {
 				}
 			}
 			wantFastUnit := ""
-			if tt.target == "test-integration-bdstore" {
+			if strings.HasPrefix(tt.target, "test-integration-bdstore") {
 				wantFastUnit = "0"
 			}
 			if got := captured["GC_FAST_UNIT"]; got != wantFastUnit {

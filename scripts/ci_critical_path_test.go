@@ -39,8 +39,9 @@ type ciCriticalPathJobMatrix struct {
 }
 
 type ciCriticalPathMatrixEntry struct {
-	ShardName string `yaml:"shard_name"`
-	Command   string `yaml:"command"`
+	ShardName      string `yaml:"shard_name"`
+	Command        string `yaml:"command"`
+	TimeoutMinutes int    `yaml:"timeout_minutes"`
 }
 
 type ciCriticalPathNeeds []string
@@ -779,6 +780,75 @@ func TestPRIntegrationMatrixKeepsHeavyRestCoverageInReleaseGates(t *testing.T) {
 	}
 	if !permitsPRSkip {
 		t.Error("ci-integration must treat the push-only REST job as an expected skip on pull requests")
+	}
+}
+
+// TestBdStoreConformanceGetsItsOwnIntegrationShard guards the lane split ruled
+// on ga-oh86kw. Un-skipped, TestBdStoreConformance costs about as much as the
+// whole 15-minute budget the bdstore row was sized for while it was skipped, so
+// it runs as a matrix row of its own and keeps the normal budget: a lane that
+// cannot hold it within 15 minutes is split by subtest, never given a longer
+// timeout. TestBdStoreMailWispInsert stays in the original bdstore row. Every
+// workflow that ran the bdstore shard keeps the conformance suite, or dropping
+// the row would silently remove the suite from that workflow.
+func TestBdStoreConformanceGetsItsOwnIntegrationShard(t *testing.T) {
+	const normalBudgetMinutes = 15
+	for _, tt := range []struct{ workflow, job string }{
+		{"ci.yml", "integration-shards"},
+		{"rc-gate.yml", "ubuntu_integration_shards"},
+	} {
+		t.Run(tt.workflow, func(t *testing.T) {
+			wf := readCriticalPathWorkflow(t, tt.workflow)
+			rows := map[string][]ciCriticalPathMatrixEntry{}
+			for _, entry := range wf.Jobs[tt.job].Strategy.Matrix.Include {
+				rows[entry.ShardName] = append(rows[entry.ShardName], entry)
+			}
+			for shard, wantCommand := range map[string]string{
+				"bdstore":             "make test-integration-bdstore",
+				"bdstore-conformance": "make test-integration-bdstore-conformance",
+			} {
+				got := rows[shard]
+				if len(got) != 1 {
+					t.Errorf("%s %s matrix has %d %q rows, want exactly one", tt.workflow, tt.job, len(got), shard)
+					continue
+				}
+				if got[0].Command != wantCommand {
+					t.Errorf("%s %q row runs %q, want %q", tt.workflow, shard, got[0].Command, wantCommand)
+				}
+			}
+			if conformance := rows["bdstore-conformance"]; len(conformance) == 1 {
+				if minutes := conformance[0].TimeoutMinutes; minutes < 1 || minutes > normalBudgetMinutes {
+					t.Errorf("%s bdstore-conformance timeout_minutes = %d, want 1..%d: split the lane by subtest instead of raising the budget", tt.workflow, minutes, normalBudgetMinutes)
+				}
+			}
+		})
+	}
+}
+
+// TestMacBdStoreLaneRunsTheConformanceSuite keeps the best-effort Mac BdStore
+// lane running the conformance suite after the shard split. That lane is the
+// only BdStore check on macOS, and it has no row-per-shard matrix: its single
+// shard step must name both Make targets.
+func TestMacBdStoreLaneRunsTheConformanceSuite(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "mac-regression.yml")
+	job, ok := wf.Jobs["mac-integration-bdstore"]
+	if !ok {
+		t.Fatal("mac-regression workflow has no mac-integration-bdstore job")
+	}
+	var shardRuns []string
+	for _, step := range job.Steps {
+		if step.ID == "shard" {
+			shardRuns = append(shardRuns, step.Run)
+		}
+	}
+	if len(shardRuns) != 1 {
+		t.Fatalf("mac-integration-bdstore has %d steps with id shard, want one", len(shardRuns))
+	}
+	words := strings.Fields(shardRuns[0])
+	for _, target := range []string{"test-integration-bdstore", "test-integration-bdstore-conformance"} {
+		if !slices.Contains(words, target) {
+			t.Errorf("mac-integration-bdstore shard step %q does not run make target %s", shardRuns[0], target)
+		}
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"strings"
 	"testing"
 )
 
@@ -19,21 +20,7 @@ import (
 // the default `go test ./...` lane. This test parses its source instead, as
 // TestDoltConfigTimeoutsUseNamedConstants does for dolt_config_test.go.
 func TestBdStoreConformanceSkipIsVersionGated(t *testing.T) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "bdstore_test.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parsing bdstore_test.go: %v", err)
-	}
-
-	var body *ast.BlockStmt
-	for _, decl := range file.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == "TestBdStoreConformance" {
-			body = fn.Body
-		}
-	}
-	if body == nil {
-		t.Fatal("TestBdStoreConformance not found in bdstore_test.go — update this test's scoping")
-	}
+	fset, body := bdStoreConformanceBody(t)
 
 	gated := false
 	for _, stmt := range body.List {
@@ -56,6 +43,73 @@ func TestBdStoreConformanceSkipIsVersionGated(t *testing.T) {
 	if !gated {
 		t.Error("TestBdStoreConformance never calls helpers.RequireBDAtLeast; a bd older than the #3691 empty-DB guard (1.0.4) would run the suite and trip ErrBDSilentFallback instead of skipping")
 	}
+}
+
+// TestBdStoreConformanceRunsTheForeignParentRow guards ga-6mfvtl: bd resolves
+// --parent unconditionally, so BdStore cannot keep a parent bd does not have.
+// Its run declares beadstest.Options.RefusesUnresolvableParent, which makes the
+// ParentIDNamesARowThisStoreDoesNotHave subtest execute and assert that
+// refusal. Opting out of the row instead (any Options field named Skip...)
+// would put a SKIP inside a test whose body this file owns, and a skip there
+// fails the deploy gate with no waiver path.
+func TestBdStoreConformanceRunsTheForeignParentRow(t *testing.T) {
+	fset, body := bdStoreConformanceBody(t)
+
+	var options *ast.CompositeLit
+	ast.Inspect(body, func(n ast.Node) bool {
+		lit, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		if sel, ok := lit.Type.(*ast.SelectorExpr); ok && sel.Sel.Name == "Options" {
+			options = lit
+			return false
+		}
+		return true
+	})
+	if options == nil {
+		t.Fatal("TestBdStoreConformance builds no beadstest.Options; it must declare RefusesUnresolvableParent: true")
+	}
+
+	declared := false
+	for _, elt := range options.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok {
+			continue
+		}
+		value, _ := kv.Value.(*ast.Ident)
+		switch {
+		case key.Name == "RefusesUnresolvableParent":
+			declared = value != nil && value.Name == "true"
+		case strings.HasPrefix(key.Name, "Skip"):
+			t.Errorf("%s: TestBdStoreConformance sets %s; the ParentID row must execute, so BdStore declares RefusesUnresolvableParent instead of skipping it", fset.Position(kv.Pos()), key.Name)
+		}
+	}
+	if !declared {
+		t.Error("TestBdStoreConformance does not set RefusesUnresolvableParent: true; without it the ParentID row demands the full weak-reference contract, which bd's --parent resolution breaks")
+	}
+}
+
+// bdStoreConformanceBody parses bdstore_test.go and returns the body of
+// TestBdStoreConformance with the file set that positions it.
+func bdStoreConformanceBody(t *testing.T) (*token.FileSet, *ast.BlockStmt) {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "bdstore_test.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parsing bdstore_test.go: %v", err)
+	}
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == "TestBdStoreConformance" {
+			return fset, fn.Body
+		}
+	}
+	t.Fatal("TestBdStoreConformance not found in bdstore_test.go — update this test's scoping")
+	return nil, nil
 }
 
 // topLevelCall returns the call expression of a bare `f(...)` statement.
