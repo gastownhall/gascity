@@ -2243,6 +2243,8 @@ func (cr *CityRuntime) reloadConfigTraced(
 	nextSp := cr.sp
 	nextDops := cr.dops
 	providerChanged := false
+	providerSwapStopsSessions := false
+	acpWrapAdded := false
 	providerSwapSummary := ""
 
 	// Detect session provider change. A pack-declared runtime binds its
@@ -2250,12 +2252,29 @@ func (cr *CityRuntime) reloadConfigTraced(
 	// added/removed) declaration behind an unchanged selection name also
 	// requires a rebuild — otherwise session ops keep forking the old
 	// executable until a controller restart.
+	//
+	// A reload must also fire when the config gains sessions the live
+	// provider cannot route to ACP — its first ACP-backed agent (e.g.
+	// provider = "opencode", or session = "acp") behind an unchanged provider
+	// name. Without the auto wrapper, every reconciler tick skips those
+	// agents with "requires ACP transport but the session provider cannot
+	// route ACP sessions" until a restart (#5436). Adding the wrapper is
+	// additive and transparent to running sessions (unregistered names still
+	// route to an equivalent base backend, and route seeding repopulates ACP
+	// routes from the session beads), so unlike a base-runtime swap it must
+	// NOT stop them. The reverse (config drops all ACP targets) keeps the
+	// wrapper: unwrapping would abandon the in-memory state of any live ACP
+	// sessions, and an unused wrapper is harmless.
 	newProviderName := nextCfg.Session.Provider
 	pendingProviderName := *lastProviderName
 	if v := os.Getenv("GC_SESSION"); v != "" {
 		newProviderName = v
 	}
-	if newProviderName != *lastProviderName || packRuntimeDeclarationChanged(cr.cfg, nextCfg, newProviderName) {
+	baseRuntimeChanged := newProviderName != *lastProviderName || packRuntimeDeclarationChanged(cr.cfg, nextCfg, newProviderName)
+	if !baseRuntimeChanged && newProviderName != "acp" && !sessionProviderSupportsACP(cr.sp) {
+		acpWrapAdded = sessionConfigNeedsACPRouting(nextCfg, cr.loadSessionBeadSnapshot(), cr.cityName)
+	}
+	if baseRuntimeChanged || acpWrapAdded {
 		// Build through the transport resolver, not the bare registry, so a city
 		// that routes some sessions to ACP keeps its auto composition.
 		newSp, spErr := resolveSessionTransportProvider(sessionProviderContextForCity(nextCfg, cr.cityPath, newProviderName), cr.loadSessionBeadSnapshot())
@@ -2263,6 +2282,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 			appendWarning(fmt.Sprintf("new session provider %q: %v (keeping old provider)", newProviderName, spErr))
 		} else {
 			providerChanged = true
+			providerSwapStopsSessions = baseRuntimeChanged
 			nextSp = newSp
 			nextDops = newDrainOps(nextSp)
 			pendingProviderName = newProviderName
@@ -2332,31 +2352,40 @@ func (cr *CityRuntime) reloadConfigTraced(
 	}
 
 	if providerChanged {
-		running, lErr := cr.sp.ListRunning("")
-		if lErr != nil {
-			err := fmt.Errorf("config reload: listing sessions failed during provider swap: %w", lErr)
-			if runtime.IsPartialListError(lErr) {
-				err = fmt.Errorf("config reload: listing sessions partially failed during provider swap: %w", lErr)
-			}
-			fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
-			telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
-			if trace != nil {
-				trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
-			}
-			return reloadControlReply{
-				Outcome:  reloadOutcomeFailed,
-				Error:    err.Error(),
-				Warnings: warnings,
-			}
-		}
-		providerSwapSummary = fmt.Sprintf("%s → %s", displayProviderName(*lastProviderName), displayProviderName(pendingProviderName))
-		if pendingProviderName == *lastProviderName {
+		switch {
+		case pendingProviderName != *lastProviderName:
+			providerSwapSummary = fmt.Sprintf("%s → %s", displayProviderName(*lastProviderName), displayProviderName(pendingProviderName))
+		case acpWrapAdded:
+			providerSwapSummary = fmt.Sprintf("%s (ACP session routing added)", displayProviderName(pendingProviderName))
+		default:
 			providerSwapSummary = fmt.Sprintf("%s runtime declaration changed", displayProviderName(pendingProviderName))
 		}
-		if len(running) > 0 {
-			fmt.Fprintf(cr.stdout, "Provider changed (%s), stopping %d agent(s)...\n", //nolint:errcheck
-				providerSwapSummary, len(running))
-			gracefulStopAll(running, cr.sp, nextCfg.Daemon.ShutdownTimeoutDuration(), cr.rec, cr.cfg, cr.sessionsBeadStore(), cr.stdout, cr.stderr)
+		// Only a base-runtime swap strands running sessions; adding the ACP
+		// wrapper leaves them reachable through the new default backend, so
+		// nothing is listed or stopped for it.
+		if providerSwapStopsSessions {
+			running, lErr := cr.sp.ListRunning("")
+			if lErr != nil {
+				err := fmt.Errorf("config reload: listing sessions failed during provider swap: %w", lErr)
+				if runtime.IsPartialListError(lErr) {
+					err = fmt.Errorf("config reload: listing sessions partially failed during provider swap: %w", lErr)
+				}
+				fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+				telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
+				if trace != nil {
+					trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+				}
+				return reloadControlReply{
+					Outcome:  reloadOutcomeFailed,
+					Error:    err.Error(),
+					Warnings: warnings,
+				}
+			}
+			if len(running) > 0 {
+				fmt.Fprintf(cr.stdout, "Provider changed (%s), stopping %d agent(s)...\n", //nolint:errcheck
+					providerSwapSummary, len(running))
+				gracefulStopAll(running, cr.sp, nextCfg.Daemon.ShutdownTimeoutDuration(), cr.rec, cr.cfg, cr.sessionsBeadStore(), cr.stdout, cr.stderr)
+			}
 		}
 	}
 
@@ -2373,7 +2402,11 @@ func (cr *CityRuntime) reloadConfigTraced(
 			Actor:   "gc",
 			Message: providerSwapSummary,
 		})
-		fmt.Fprintf(cr.stdout, "Session provider swapped to %s.\n", displayProviderName(pendingProviderName)) //nolint:errcheck
+		if acpWrapAdded {
+			fmt.Fprintf(cr.stdout, "Session provider updated: %s.\n", providerSwapSummary) //nolint:errcheck
+		} else {
+			fmt.Fprintf(cr.stdout, "Session provider swapped to %s.\n", displayProviderName(pendingProviderName)) //nolint:errcheck
+		}
 		*lastProviderName = pendingProviderName
 	}
 

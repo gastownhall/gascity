@@ -368,6 +368,16 @@ func configuredACPSessionNames(snapshot *sessionBeadSnapshot, cityName, sessionT
 	return names
 }
 
+// sessionConfigNeedsACPRouting reports whether the config — together with
+// the live session beads — contains any session that must route to the ACP
+// backend. This is the same rule resolveSessionTransportProvider uses to
+// decide on the auto wrapper (bead/configured route names ∪ declared
+// ACP-capable provider targets), extracted so the reload path can detect a
+// config that newly needs the wrapper the same way boot builds it.
+func sessionConfigNeedsACPRouting(cfg *config.City, snapshot *sessionBeadSnapshot, cityName string) bool {
+	return len(configuredACPRouteNames(snapshot, cityName, cfg)) > 0 || hasACPProviderTargets(cfg)
+}
+
 func hasACPProviderTargets(cfg *config.City) bool {
 	if cfg == nil {
 		return false

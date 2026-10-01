@@ -111,6 +111,77 @@ func writeACPAgentCityConfig(t *testing.T, tomlPath, provider string) {
 	}
 }
 
+// A reload that newly needs ACP (its first ACP-backed agent, provider name
+// unchanged) must rebuild the session provider through the transport
+// resolver, composing the auto (base+acp) wrapper exactly as a cold boot
+// would. Before this trigger existed, the running city kept its bare base
+// provider and every reconciler tick skipped the agent with 'provider
+// "opencode" requires ACP transport but the session provider cannot route
+// ACP sessions' until a controller restart (#5436).
+//
+// Kills: no rebuild on the ACP-targets trigger (cr.sp stays the bare fake),
+// and a wrap that stops running sessions (adding the wrapper is additive;
+// the base runtime did not change).
+func TestReloadGainsACPTargetsComposesAutoComposition(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	clearInheritedBeadsEnv(t)
+	writeConfig := func(withACP bool) {
+		t.Helper()
+		data := "[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n"
+		if withACP {
+			data += "\n[[agent]]\nname = \"reviewer\"\nsession = \"acp\"\n"
+		}
+		if err := os.WriteFile(tomlPath, []byte(data), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+	writeConfig(false)
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	acp := runtime.NewFake()
+	stubSessionProviderBuilds(t, map[string]runtime.Provider{"acp": acp})
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "test-city--worker", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+	cr.sessionDrains = newDrainTracker()
+
+	// The reload adds the city's first ACP-backed agent; the session-provider
+	// name is unchanged, so only the ACP-targets trigger can fire.
+	writeConfig(true)
+	lastProviderName := "fake"
+	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
+
+	if _, ok := cr.sp.(*sessionauto.Provider); !ok {
+		t.Fatalf("session provider after gaining ACP targets = %T, want the auto composition", cr.sp)
+	}
+	if got := sp.CountCalls("Stop", "test-city--worker"); got != 0 {
+		t.Fatalf("wrap-only provider update stopped the running session %d time(s); want none", got)
+	}
+}
+
 // Construction registers the ACP routes a restart would otherwise lose, and
 // only a loaded session snapshot lets the table vouch for its default routes.
 // Kills: plain RouteACP on a loaded snapshot (the fence could never trust a
