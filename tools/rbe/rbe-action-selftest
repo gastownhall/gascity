@@ -104,7 +104,7 @@ mask_top=${mask_rel%%/*}
 # directory is shared between actions besides the per-action mounts.
 full_probe=
 if ((!quick)); then
-	full_probe='[ -z "$(find / -xdev -type d -perm -0002 2>/dev/null | grep -vxE "/tmp|/var/tmp|'"${TMPFS_DIRS// /|}"'")" ] && echo "R no-shared-writable-dir"'
+	full_probe='w=$(find / -xdev -type d -perm -0002 2>/dev/null | grep -vxE "/tmp|/var/tmp|'"${TMPFS_DIRS// /|}"'"); if [ -z "$w" ]; then echo "R no-shared-writable-dir"; else printf "W %s\n" $w; fi'
 fi
 probe='
 id=$(id -u); [ "$id" -ge '"$SLOT_UID0"' ] && [ "$id" -lt '"$((SLOT_UID0 + SLOT_COUNT))"' ] && echo "R uid-slot"
@@ -138,6 +138,7 @@ results=(uid-slot no-caps nnp env-exact input-immutable worker-cas-hidden mask-t
 for r in "${results[@]}"; do
 	if grep -qx "R $r" <<<"$out"; then ok "action: $r"; else bad "action: $r"; fi
 done
+sed -n 's/^W /      shared world-writable directory: /p' <<<"$out"
 for t in "${deny[@]}"; do
 	got=$(awk -v t="$t" '$1 == "D" && $2 == t { print $3 }' <<<"$out")
 	want=refused

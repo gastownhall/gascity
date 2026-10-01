@@ -215,6 +215,14 @@ jq -n --arg host "grpcs://${RBE_WEST_HOST}:443" --arg root "$ROOT" --arg store "
   }' >"$ROOT/worker.json"
 
 if [ "$ACTION_ISOLATION" = 1 ]; then
+	# This VM is ephemeral and runs only this worker: no directory on / but
+	# /tmp and /var/tmp (private per action) and TMPFS_DIRS may be writable by
+	# every user, or one action could leave files for a later one.
+	shared_dirs=$(sudo find / -xdev -type d -perm -0002 2>/dev/null | grep -vxE '/tmp|/var/tmp|/run/lock|/var/crash' || true)
+	if [ -n "$shared_dirs" ]; then
+		echo "isolation: removing world write from: $(tr '\n' ' ' <<<"$shared_dirs")"
+		xargs -r -d '\n' sudo chmod o-w <<<"$shared_dirs"
+	fi
 	# Full selftest (a few seconds): it also checks worker.json routes actions
 	# through the entrypoint, the timeout path, and that this image has no
 	# shared world-writable directory outside TMPFS_DIRS.
