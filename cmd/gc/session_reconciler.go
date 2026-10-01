@@ -2705,11 +2705,28 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// infoPostZombie stays byte-identical throughout. Guarded by
 		// TestReconcileSessionBeads_ZombieTerminalErrorReflectedOnSnapshot.
 		infoPostZombie := infoByID[id]
-		if alive && shouldRollbackPendingCreateInfo(infoPostZombie) && !runningSessionMatchesPendingCreateInfo(infoPostZombie, name, sp) {
-			// Fold the rollback's mirrored metadata onto the snapshot (Step 6d;
-			// no Closed change — store-only close). STEP6-PREPASS-AUDIT group 2.
-			tick.apply(id, attemptRollbackPendingCreate(infoByID[id], tp.TemplateName, name, "pending_create_rollback", "live runtime belongs to another session", false))
-			continue
+		if alive && shouldRollbackPendingCreateInfo(infoPostZombie) {
+			switch attributePendingCreateRuntime(infoPostZombie, name, sp) {
+			case pendingCreateRuntimeForeign:
+				// Fold the rollback's mirrored metadata onto the snapshot (Step 6d;
+				// no Closed change — store-only close). STEP6-PREPASS-AUDIT group 2.
+				tick.apply(id, attemptRollbackPendingCreate(infoByID[id], tp.TemplateName, name, "pending_create_rollback", "live runtime belongs to another session", false))
+				continue
+			case pendingCreateRuntimeUnknown:
+				// The live runtime may be this create's own, and the rollback
+				// stops a bead-scoped pool runtime by name, so neither roll back
+				// nor adopt it. Once it dies the lease-expired rollback below
+				// applies; while it lives this re-attributes every tick.
+				logStandingCondition(dt, stderr, id, "attribution_unknown.pending_create_rollback", fmt.Sprintf(
+					"session reconciler: pending-create rollback of %s deferred: live runtime identity could not be read (attribution_unknown)", name), clk.Now())
+				if trace != nil {
+					trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRollback, TraceOutcomeDeferred, tp.TemplateName, name, traceRecordPayload{
+						"session_bead_id": id,
+						"attribution":     "unknown",
+					})
+				}
+				continue
+			}
 		}
 		// Desired-branch counterpart to pendingCreateSessionStillLeasedInfo: a
 		// session bead in the desired set with pending_create_claim=true but

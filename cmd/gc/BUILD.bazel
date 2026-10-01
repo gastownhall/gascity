@@ -1203,6 +1203,7 @@ go_test(
         "pack_command_discovery_lock_test.go",
         "pack_import_formula_order_test.go",
         "path_helpers_test.go",
+        "pending_create_attribution_test.go",
         "per_dispatch_model_test.go",
         "phase2_reporting_test.go",
         "polecat_report_formula_test.go",

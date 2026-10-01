@@ -278,6 +278,10 @@ type startResult struct {
 	// capacityValve reports that the poison valve returned this refused
 	// session to normal failure accounting.
 	capacityValve bool
+	// unattributedErr is the start error a deferral on unknown pending-create
+	// attribution set aside (err is nil then). The commit logs it and still
+	// accrues startup health for it.
+	unattributedErr error
 	// diedDuringStartup is true when the session started and then died
 	// before it was confirmed alive, detected either of two ways: (1) the
 	// provider/resume layer returns runtime.ErrSessionDiedDuringStartup
@@ -1297,7 +1301,7 @@ func buildPreparedStartWithWorkDirResolver(
 		if err := sessionFrontDoor(store).SetMarker(candidate.info.ID, "instance_token", instanceToken); err != nil {
 			return nil, candidate.info, err
 		}
-		// Fold the mint onto the typed twin so runningSessionMatchesPendingCreateInfo
+		// Fold the mint onto the typed twin so attributePendingCreateRuntime
 		// (info.InstanceToken) matches persisted state. On the reconciler start-prep path
 		// preWakeCommit already minted the token, so this only fires for the
 		// recoverRunningPendingCreate / direct-call paths where it was empty.
@@ -1775,7 +1779,13 @@ func runPreparedStartCandidate(
 	// A capacity refusal never peeks for a rate-limit screen: the launcher
 	// exited before the provider drew one, and the peek is a provider call.
 	rateLimitScreen := err != nil && !livenessUnavailable && !capacityRefused && startupRateLimitScreenDetected(item, cityPath, sp, store, cfg)
-	if err != nil && rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp) {
+	attribution := pendingCreateRuntimeForeign
+	var identity pendingCreateIdentity
+	if err != nil && rollbackPending && !rateLimitScreen {
+		identity = readPendingCreateIdentity(item.candidate.info, item.candidate.name(), sp)
+		attribution = identity.attribution()
+	}
+	if attribution == pendingCreateRuntimeOurs {
 		return startResult{
 			prepared:            item,
 			err:                 nil,
@@ -1789,6 +1799,7 @@ func runPreparedStartCandidate(
 		}
 	}
 	var outcome TraceOutcomeCode
+	var unattributedErr error
 	switch {
 	case errors.Is(err, runtime.ErrSessionInitializing):
 		outcome = TraceOutcomeSessionInitializing
@@ -1798,6 +1809,16 @@ func runPreparedStartCandidate(
 		err = nil
 	case capacityRefused:
 		outcome = TraceOutcomeCapacityRefused
+	case attribution == pendingCreateRuntimeUnknown:
+		// A runtime may be up under the name and its identity cannot be read,
+		// so neither converge on it nor roll back the create (which stops a
+		// bead-scoped pool runtime by name). The reconciler re-attributes it
+		// next tick, or rolls back once it is gone. This case stays ahead of
+		// the context arms: a timed-out start rolls back too.
+		outcome = TraceOutcomeDeferred
+		unattributedErr = unattributedStartError(err, identity)
+		err = nil
+		rollbackPending = false
 	case startCtxErr == context.DeadlineExceeded:
 		outcome = TraceOutcomeDeadlineExceeded
 		if err == nil {
@@ -1814,10 +1835,6 @@ func runPreparedStartCandidate(
 		switch {
 		case sessionExistsObservationErr != nil || !runtimeObservationLive(sessionExistsObservation):
 			outcome = TraceOutcomeProviderError
-		case rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp):
-			outcome = TraceOutcomeSessionExistsConverged
-			err = nil
-			rollbackPending = false
 		case rollbackPending:
 			outcome = TraceOutcomeSessionExists
 		default:
@@ -1840,6 +1857,7 @@ func runPreparedStartCandidate(
 		rateLimitScreen:     rateLimitScreen,
 		providerStartCalled: startedFresh,
 		diedDuringStartup:   diedDuringStartup,
+		unattributedErr:     unattributedErr,
 		provider:            sp,
 		phases:              phases,
 	}
@@ -2008,10 +2026,24 @@ func commitAsyncStartResultWithContext(
 		logLifecycleOutcome(stderr, "start", wave, name, template, outcome, result.started, time.Now(), nil, refreshed.phases)
 		return false
 	}
-	if refreshed.err != nil && refreshed.rollbackPending && runningSessionMatchesPendingCreateInfo(refreshed.prepared.candidate.info, refreshed.prepared.candidate.name(), sp) {
-		refreshed.err = nil
-		refreshed.outcome = TraceOutcomeSessionExistsConverged
-		refreshed.rollbackPending = false
+	if refreshed.err != nil && refreshed.rollbackPending {
+		identity := readPendingCreateIdentity(refreshed.prepared.candidate.info, refreshed.prepared.candidate.name(), sp)
+		switch identity.attribution() {
+		case pendingCreateRuntimeOurs:
+			refreshed.err = nil
+			refreshed.outcome = TraceOutcomeSessionExistsConverged
+			refreshed.rollbackPending = false
+		case pendingCreateRuntimeUnknown:
+			// Same deferral as runPreparedStartCandidate's: no rollback of a
+			// create whose runtime cannot be attributed. A rate-limit screen
+			// or a capacity refusal keeps its own commit arm, as there.
+			if !refreshed.rateLimitScreen && !refreshed.capacityRefused {
+				refreshed.unattributedErr = unattributedStartError(refreshed.err, identity)
+				refreshed.err = nil
+				refreshed.outcome = TraceOutcomeDeferred
+				refreshed.rollbackPending = false
+			}
+		}
 	}
 	if ctx != nil && ctx.Err() != nil {
 		if startOutcomeDefersCommit(refreshed.outcome) {
@@ -2176,23 +2208,27 @@ func clearPendingStartInFlightLease(handle string, sessFront *sessionpkg.Store, 
 // instance token) so it never stops a box it cannot prove is this attempt's.
 //
 // A pool row with a bead-ID-scoped name is different: the name embeds this
-// row's bead ID, so no other session can own it, and once the row is closed
-// (for example by the lease-expired rollback while this Start was still
-// running) its successor runs under a new name and nothing would ever address
-// this box again (ga-vcjr9). For those rows an UNREADABLE attribution — an
-// exec pack without get-meta, a k8s pod whose tmux is not up yet — still
-// stops by name. Only a runtime that positively reports a different
-// generation of the same bead (a newer instance token) is left alone.
+// row's bead ID, so once the row is closed (for example by the lease-expired
+// rollback while this Start was still running) its successor runs under a new
+// name and nothing would ever address this box again (ga-vcjr9). For those
+// rows an UNSET attribution (a runtime without a metadata store, or keys not
+// yet stamped) still stops by name. A runtime that positively reports a newer
+// instance token of the same bead is left alone, and so is one whose identity
+// cannot be read: it may be that newer incarnation. The deferral is bounded by
+// the box's own GC_SESSION_ID: once it reads again and names the closed row,
+// reapRuntimesBoundToClosedBeads stops it.
 func stopStaleAsyncStartRuntime(result startResult, sp runtime.Provider, stderr io.Writer) {
 	if sp == nil || strings.TrimSpace(result.prepared.candidate.info.ID) == "" {
 		return
 	}
 	name := result.prepared.candidate.name()
 	info := result.prepared.candidate.info
-	if !runningSessionMatchesPendingCreateInfo(info, name, sp) {
-		if !beadScopedPoolRuntimeNotPositivelyForeign(info, name, sp) {
-			return
-		}
+	switch staleAsyncStartRuntimeAttribution(info, name, sp) {
+	case pendingCreateRuntimeForeign:
+		return
+	case pendingCreateRuntimeUnknown:
+		fmt.Fprintf(stderr, "session reconciler: leaving stale async start runtime %s running: its identity could not be read (attribution_unknown)\n", name) //nolint:errcheck
+		return
 	}
 	agentName := result.prepared.candidate.tp.DisplayName()
 	if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
@@ -2260,7 +2296,7 @@ func startPreparedStartCandidate(
 		}
 		if running {
 			if alive {
-				if shouldRollbackPendingCreateInfo(item.candidate.info) && !runningSessionMatchesPendingCreateInfo(item.candidate.info, name, sp) {
+				if shouldRollbackPendingCreateInfo(item.candidate.info) && attributePendingCreateRuntime(item.candidate.info, name, sp) != pendingCreateRuntimeOurs {
 					return false, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
 				}
 				// Warm reuse: the slot is already up, so cold Start's startup nudge
@@ -2577,7 +2613,13 @@ func commitStartResultTraced(
 	// recording failure. The reconciler will retry on the next patrol tick.
 	if startOutcomeDefersCommit(result.outcome) {
 		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
-		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, nil, result.phases)
+		// A deferral on unknown attribution spares the runtime, not the
+		// crash-loop accounting: a provider Start that failed still delays the
+		// next one. A collision with an existing session is not a start failure.
+		if result.unattributedErr != nil && result.providerStartCalled && !errors.Is(result.unattributedErr, runtime.ErrSessionExists) {
+			recordStartupHealthFailure(info, name, result.unattributedErr, sessFront, clk, stderr)
+		}
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.unattributedErr, result.phases)
 		return startCommitFailed
 	}
 	if result.err != nil {
@@ -2947,20 +2989,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 				"error": formatLifecycleError(result.err),
 			})
 		}
-		episodeKey := startupHealthEpisodeKey(info, name)
-		if prior, loadErr := sessFront.LoadStartupHealthEpisode(episodeKey); loadErr != nil {
-			fmt.Fprintf(stderr, "session reconciler: loading startup-health episode for %s: %v\n", name, loadErr) //nolint:errcheck
-		} else {
-			prior.SessionName = episodeKey
-			kind := sessionpkg.FailureKindOther
-			if errors.Is(result.err, context.DeadlineExceeded) {
-				kind = sessionpkg.FailureKindTimeout
-			}
-			episode := sessionpkg.RecordStartupFailure(prior, kind, result.err.Error(), clk.Now(), defaultMaxWakeAttempts, defaultQuarantineDuration)
-			if saveErr := sessFront.SaveStartupHealthEpisode(episode); saveErr != nil {
-				fmt.Fprintf(stderr, "session reconciler: saving startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
-			}
-		}
+		recordStartupHealthFailure(info, name, result.err, sessFront, clk, stderr)
 		if !result.prepared.candidate.configured || result.diedDuringStartup {
 			// A configured named session (declared via [[named_session]]) must
 			// survive a single transient start failure mid pending-create (e.g.
@@ -3002,6 +3031,27 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		})
 	}
 	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
+}
+
+// recordStartupHealthFailure accrues one failed start on the session's
+// startup-health episode, which quarantines the name once it reaches
+// defaultMaxWakeAttempts.
+func recordStartupHealthFailure(info sessionpkg.Info, name string, err error, sessFront *sessionpkg.Store, clk clock.Clock, stderr io.Writer) {
+	episodeKey := startupHealthEpisodeKey(info, name)
+	prior, loadErr := sessFront.LoadStartupHealthEpisode(episodeKey)
+	if loadErr != nil {
+		fmt.Fprintf(stderr, "session reconciler: loading startup-health episode for %s: %v\n", name, loadErr) //nolint:errcheck
+		return
+	}
+	prior.SessionName = episodeKey
+	kind := sessionpkg.FailureKindOther
+	if errors.Is(err, context.DeadlineExceeded) {
+		kind = sessionpkg.FailureKindTimeout
+	}
+	episode := sessionpkg.RecordStartupFailure(prior, kind, err.Error(), clk.Now(), defaultMaxWakeAttempts, defaultQuarantineDuration)
+	if saveErr := sessFront.SaveStartupHealthEpisode(episode); saveErr != nil {
+		fmt.Fprintf(stderr, "session reconciler: saving startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
+	}
 }
 
 // recoverRunningPendingCreate heals an already-active bead whose
@@ -3168,46 +3218,130 @@ func shouldRollbackPendingCreateInfo(i sessionpkg.Info) bool {
 	return i.PendingCreateClaim
 }
 
-// runningSessionMatchesPendingCreateInfo is the form the start-execution decision
-// paths use (runPreparedStartCandidate, startPreparedStartCandidate,
-// commitAsyncStartResultWithContext, stopStaleAsyncStartRuntime). The session
-// reads are the id (Info.ID), instance_token (Info.InstanceToken) and generation
-// (Info.Generation); the provider probes and session name are the runtime edge. It
-// is the sole form (the raw sibling was deleted in WI-6 R4).
-func runningSessionMatchesPendingCreateInfo(info sessionpkg.Info, sessionName string, sp runtime.Provider) bool {
+// pendingCreateAttribution is whether a runtime found under a pending create's
+// session name is that create's own. A destructive caller acts only on a
+// definite answer: a stop or kill needs ours, a rollback that frees the name
+// needs foreign, and both defer on unknown.
+type pendingCreateAttribution int
+
+const (
+	// pendingCreateRuntimeOurs: the runtime is this pending create's
+	// incarnation.
+	pendingCreateRuntimeOurs pendingCreateAttribution = iota
+	// pendingCreateRuntimeForeign: the runtime is not this create's. It
+	// positively carries another session's ID or another incarnation's token,
+	// carries no attribution at all, or is gone (runtime.ErrSessionNotFound).
+	pendingCreateRuntimeForeign
+	// pendingCreateRuntimeUnknown: an identity read failed, and the keys that
+	// could be read do not decide the answer without it.
+	pendingCreateRuntimeUnknown
+)
+
+// pendingCreateIdentity is one read pass over a runtime's per-incarnation
+// identity keys (GC_SESSION_ID, GC_INSTANCE_TOKEN, GC_RUNTIME_EPOCH), each
+// classified against a pending create by classifyRuntimeInstanceToken:
+// runtime.ErrMetaUnsupported reads as unset, runtime.ErrSessionNotFound as gone
+// and any other error as unverifiable. A key the decision does not need is not
+// read and stays runtimeTokenAbsent.
+type pendingCreateIdentity struct {
+	id, token, generation runtimeTokenVerdict
+	// expectsToken reports that the pending create carries an instance token.
+	expectsToken bool
+	// failed names each unverifiable key with its read error.
+	failed []string
+}
+
+// readPendingCreateIdentity reads the identity keys of the runtime under
+// sessionName that attribution needs. The session reads are the id (Info.ID),
+// instance_token (Info.InstanceToken) and generation (Info.Generation). The
+// generation is read only to settle a token that differs or cannot be read.
+func readPendingCreateIdentity(info sessionpkg.Info, sessionName string, sp runtime.Provider) pendingCreateIdentity {
+	r := pendingCreateIdentity{
+		id:           runtimeTokenAbsent,
+		token:        runtimeTokenAbsent,
+		generation:   runtimeTokenAbsent,
+		expectsToken: strings.TrimSpace(info.InstanceToken) != "",
+	}
 	if sp == nil {
-		return false
+		return r
 	}
-	liveID := ""
-	if value, err := sp.GetMeta(sessionName, "GC_SESSION_ID"); err == nil {
-		liveID = strings.TrimSpace(value)
-		if liveID != "" && liveID != info.ID {
-			return false
+	read := func(key, expected string) runtimeTokenVerdict {
+		actual, err := sp.GetMeta(sessionName, key)
+		verdict := classifyRuntimeInstanceToken(actual, err, expected)
+		if verdict == runtimeTokenUnverifiable {
+			r.failed = append(r.failed, fmt.Sprintf("%s: %v", key, err))
 		}
+		return verdict
 	}
-	expectedToken := strings.TrimSpace(info.InstanceToken)
-	liveToken := ""
-	if value, err := sp.GetMeta(sessionName, "GC_INSTANCE_TOKEN"); err == nil {
-		liveToken = value
-		liveToken = strings.TrimSpace(liveToken)
-		if liveToken != "" && liveToken != expectedToken {
-			liveGeneration, _ := sp.GetMeta(sessionName, "GC_RUNTIME_EPOCH")
-			expectedGeneration := strings.TrimSpace(info.Generation)
-			if strings.TrimSpace(liveGeneration) != "" && expectedGeneration != "" && strings.TrimSpace(liveGeneration) != expectedGeneration {
-				return false
-			}
-			if liveID == "" {
-				return false
-			}
+	r.id = read("GC_SESSION_ID", info.ID)
+	if r.id == runtimeTokenMismatch || r.id == runtimeTokenGone {
+		return r
+	}
+	r.token = read("GC_INSTANCE_TOKEN", info.InstanceToken)
+	expectedGeneration := strings.TrimSpace(info.Generation)
+	if expectedGeneration != "" &&
+		(r.token == runtimeTokenMismatch && r.id != runtimeTokenAbsent ||
+			r.token == runtimeTokenUnverifiable && r.id == runtimeTokenMatch) {
+		r.generation = read("GC_RUNTIME_EPOCH", expectedGeneration)
+	}
+	return r
+}
+
+// attribution decides ours / foreign / unknown from the reads. An unverifiable
+// key yields unknown unless the readable keys already decide: another
+// session's ID, a token mismatch with a conflicting generation, a matching
+// token, or a matching ID and generation.
+func (r pendingCreateIdentity) attribution() pendingCreateAttribution {
+	if r.id == runtimeTokenMismatch || r.id == runtimeTokenGone {
+		return pendingCreateRuntimeForeign
+	}
+	switch r.token {
+	case runtimeTokenGone:
+		return pendingCreateRuntimeForeign
+	case runtimeTokenMismatch:
+		// Another token is another incarnation, unless the runtime carries
+		// this session's ID and no conflicting generation.
+		switch {
+		case r.id == runtimeTokenAbsent, r.generation == runtimeTokenMismatch, r.generation == runtimeTokenGone:
+			return pendingCreateRuntimeForeign
+		case r.id == runtimeTokenUnverifiable || r.generation == runtimeTokenUnverifiable:
+			return pendingCreateRuntimeUnknown
 		}
+		return pendingCreateRuntimeOurs
+	case runtimeTokenUnverifiable:
+		switch {
+		case r.id == runtimeTokenMatch && r.generation == runtimeTokenMatch:
+			// preWakeCommit bumps the generation together with the token, so a
+			// re-woken incarnation of this bead carries another generation.
+			return pendingCreateRuntimeOurs
+		case r.id == runtimeTokenAbsent && !r.expectsToken:
+			// Without an ID or an expected token nothing can attribute it.
+			return pendingCreateRuntimeForeign
+		}
+		return pendingCreateRuntimeUnknown
 	}
-	if liveID != "" {
-		return liveID == info.ID
+	switch {
+	case r.id == runtimeTokenMatch || r.token == runtimeTokenMatch:
+		return pendingCreateRuntimeOurs
+	case r.id == runtimeTokenUnverifiable:
+		return pendingCreateRuntimeUnknown
 	}
-	if expectedToken == "" {
-		return false
-	}
-	return expectedToken != "" && liveToken == expectedToken
+	return pendingCreateRuntimeForeign
+}
+
+// attributePendingCreateRuntime is the attribution the start-execution decision
+// paths use (runPreparedStartCandidate, startPreparedStartCandidate,
+// commitAsyncStartResultWithContext, stopStaleAsyncStartRuntime) and the
+// reconciler's alive pending-create rollback; the provider probes and session
+// name are the runtime edge.
+func attributePendingCreateRuntime(info sessionpkg.Info, sessionName string, sp runtime.Provider) pendingCreateAttribution {
+	return readPendingCreateIdentity(info, sessionName, sp).attribution()
+}
+
+// unattributedStartError is the start error a deferral on unknown attribution
+// sets aside, annotated with the identity reads that failed.
+func unattributedStartError(err error, identity pendingCreateIdentity) error {
+	return fmt.Errorf("%w (attribution_unknown: %s)", err, strings.Join(identity.failed, "; "))
 }
 
 // rollbackPendingCreateClears is the pending-create rollback: the failed-create
@@ -3448,27 +3582,26 @@ func releaseBeadScopedPoolRuntime(info sessionpkg.Info, sp runtime.Provider, std
 	return true
 }
 
-// beadScopedPoolRuntimeNotPositivelyForeign reports whether a stale async start
-// of a bead-scoped pool row may stop its runtime by name even though
-// runningSessionMatchesPendingCreateInfo could not attribute it: the row owns a
-// <template>-<beadID> name and the runtime does not positively carry another
-// session's ID or another instance token.
-func beadScopedPoolRuntimeNotPositivelyForeign(info sessionpkg.Info, name string, sp runtime.Provider) bool {
-	if sp == nil || !isPoolManagedSessionInfo(info) || !infoOwnsPoolSessionName(info) ||
-		strings.TrimSpace(info.SessionNameMetadata) != strings.TrimSpace(name) {
-		return false
+// staleAsyncStartRuntimeAttribution decides whether a stale async start may
+// stop the runtime under name. It takes attributePendingCreateRuntime's answer
+// from the same read pass with one override: a bead-scoped pool row whose
+// runtime carries neither an ID nor an instance token (unset keys, or a runtime
+// without a metadata store) counts as ours, because the row owns a
+// <template>-<beadID> name and nothing would address the box again (ga-vcjr9).
+// An unreadable key stays unknown: the same bead rotates its token on every
+// wake, so a runtime whose identity cannot be read may be a newer incarnation
+// under the same name.
+func staleAsyncStartRuntimeAttribution(info sessionpkg.Info, name string, sp runtime.Provider) pendingCreateAttribution {
+	if sp == nil {
+		return pendingCreateRuntimeForeign
 	}
-	if value, err := sp.GetMeta(name, "GC_SESSION_ID"); err == nil {
-		if live := strings.TrimSpace(value); live != "" && live != info.ID {
-			return false
-		}
+	identity := readPendingCreateIdentity(info, name, sp)
+	if identity.id == runtimeTokenAbsent && identity.token == runtimeTokenAbsent &&
+		isPoolManagedSessionInfo(info) && infoOwnsPoolSessionName(info) &&
+		strings.TrimSpace(info.SessionNameMetadata) == strings.TrimSpace(name) {
+		return pendingCreateRuntimeOurs
 	}
-	if value, err := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); err == nil {
-		if live := strings.TrimSpace(value); live != "" && live != strings.TrimSpace(info.InstanceToken) {
-			return false
-		}
-	}
-	return true
+	return identity.attribution()
 }
 
 // rollbackPendingCreate returns the metadata batch it mirrored onto the raw bead
