@@ -185,7 +185,7 @@ func reconcileDetachedAtInfo(
 	}
 	attached, err := workerSessionTargetAttachedWithConfig("", store, sp, nil, info.ID)
 	if errors.Is(err, runtime.ErrRuntimeUnavailable) {
-		return nil, fmt.Errorf("observe attachment for %q: %w", name, err)
+		return nil, err
 	}
 	attached = attached && err == nil
 	if attached {

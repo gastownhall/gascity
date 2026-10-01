@@ -902,8 +902,8 @@ func TestReconcileSessionBeads_DesiredFastPathSkipsAttachmentActivityObservation
 	if woken != 0 {
 		t.Fatalf("woken = %d, want 0", woken)
 	}
-	if got := env.sp.CountCalls("IsAttached", "worker"); got != 0 {
-		t.Fatalf("IsAttached calls = %d, want 0 on desired fast path", got)
+	if got := env.sp.CountCalls("IsAttached", "worker") + env.sp.CountCalls("IsAttachedWithError", "worker"); got != 0 {
+		t.Fatalf("IsAttached/IsAttachedWithError calls = %d, want 0 on desired fast path", got)
 	}
 	if got := env.sp.CountCalls("GetLastActivity", "worker"); got != 0 {
 		t.Fatalf("GetLastActivity calls = %d, want 0 on desired fast path", got)
@@ -10169,6 +10169,38 @@ func TestReconcileSessionBeads_ConfigDriftAttachmentErrorDefersLiveDrift(t *test
 	}
 	if !strings.Contains(env.stderr.String(), "observing config-drift attachment") {
 		t.Fatalf("stderr = %q, want attachment observation diagnostic", env.stderr.String())
+	}
+}
+
+// An attachment probe that cannot tell defers config drift and keeps the
+// false-negative guard stamp fresh, so the first "detached" answer after the
+// probe recovers is still held as a possible flicker.
+func TestReconcileSessionBeads_ConfigDriftAttachUnknownRefreshesGuardStamp(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addRunningWorkerDesiredWithNewConfig()
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
+	env.sp.AttachedErrors["worker"] = fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
+
+	env.reconcile([]beads.Bead{session})
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("attach unknown: expected no drain, got reason=%q", ds.reason)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata[sessionAttachedConfigDriftDeferredAtMetadata] == "" {
+		t.Fatalf("attach unknown did not stamp %s; metadata=%v", sessionAttachedConfigDriftDeferredAtMetadata, got.Metadata)
+	}
+
+	delete(env.sp.AttachedErrors, "worker")
+	env.reconcile([]beads.Bead{got})
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("first detached answer after attach unknown: expected the guard to hold, got drain reason=%q", ds.reason)
 	}
 }
 

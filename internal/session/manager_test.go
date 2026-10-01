@@ -5742,3 +5742,42 @@ func TestTranscriptPathZCodeResolvesEachSeatByBeadID(t *testing.T) {
 		}
 	}
 }
+
+// An attachment probe that cannot tell must reach the observation as an error,
+// never as "not attached", and must not fail the liveness answer it rides on.
+func TestObserveRuntimeForInfoCarriesAttachError(t *testing.T) {
+	probeErr := fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
+	notFoundText := fmt.Errorf("exec: \"tmux\": executable file not found in $PATH: %w", runtime.ErrRuntimeUnavailable)
+	for _, tc := range []struct {
+		name         string
+		attached     bool
+		attachErr    error
+		wantAttached bool
+		wantErr      error
+	}{
+		{name: "probe unavailable", attachErr: probeErr, wantErr: probeErr},
+		{name: "session vanished is not attached", attachErr: fmt.Errorf("gone: %w", runtime.ErrSessionNotFound)},
+		{name: "unavailable text that IsSessionGone matches", attachErr: notFoundText, wantErr: notFoundText},
+		{name: "attached", attached: true, wantAttached: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			sp.SetAttached("runtime-worker", tc.attached)
+			if tc.attachErr != nil {
+				sp.AttachedErrors["runtime-worker"] = tc.attachErr
+			}
+			mgr := NewManagerWithOptions(beads.NewMemStore(), &observationErrorRuntimeProvider{Fake: sp})
+
+			obs, err := mgr.ObserveRuntimeForInfo(Info{SessionName: "runtime-worker"}, nil)
+			if err != nil {
+				t.Fatalf("ObserveRuntimeForInfo: %v, want the attach error carried in the observation", err)
+			}
+			if !obs.Running || !obs.Alive {
+				t.Fatalf("ObserveRuntimeForInfo = %#v, want running+alive unaffected by the attach probe", obs)
+			}
+			if obs.Attached != tc.wantAttached || !errors.Is(obs.AttachedErr, tc.wantErr) || (tc.wantErr == nil) != (obs.AttachedErr == nil) {
+				t.Fatalf("Attached, AttachedErr = %v, %v; want %v, %v", obs.Attached, obs.AttachedErr, tc.wantAttached, tc.wantErr)
+			}
+		})
+	}
+}

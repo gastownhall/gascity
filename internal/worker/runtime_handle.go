@@ -377,7 +377,11 @@ func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, err
 		obs.RuntimeSessionID = strings.TrimSpace(sessionID)
 	}
 	if obs.Running {
-		obs.Attached = h.provider.IsAttached(h.sessionName)
+		attached, err := runtime.IsAttachedWithError(h.provider, h.sessionName)
+		if err != nil && runtime.AttachProbeHolds(attached, err) {
+			obs.AttachedErr = err
+		}
+		obs.Attached = attached && err == nil
 		last, err := h.provider.GetLastActivity(h.sessionName)
 		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
 			return LiveObservation{}, fmt.Errorf("observe last activity for %q: %w", h.sessionName, err)

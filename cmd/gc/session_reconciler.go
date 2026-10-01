@@ -3339,6 +3339,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						attached, attachErr := sessionAttachedForConfigDrift(id, sp, cityPath, store, cfg, name)
 						if attachErr != nil {
 							fmt.Fprintf(stderr, "session reconciler: observing config-drift attachment for %s: %v\n", name, attachErr) //nolint:errcheck
+							if attached {
+								// Attached or attach unknown: keep the false-negative guard
+								// stamp fresh, so a recovered probe that misreads
+								// "detached" once still defers.
+								if err := recordSessionAttachedConfigDriftDeferral(infoByID[id], sessFront, clk, driftKey); err != nil {
+									fmt.Fprintf(stderr, "session reconciler: recording attached config-drift deferral for %s: %v\n", name, err) //nolint:errcheck
+								}
+							}
 							continue
 						}
 						if attached {
@@ -6063,7 +6071,8 @@ func recentlyDeferredSessionAttachedConfigDrift(info sessionpkg.Info, clk clock.
 // sessionAttachedForConfigDrift reports whether a session is currently
 // attached (a user terminal is connected) and should skip config-drift
 // handling. It checks worker-handle observation first and falls back to the
-// provider's direct attachment probe.
+// provider's direct attachment probe. A probe that cannot tell answers
+// attached, with an error wrapping runtime.ErrRuntimeUnavailable.
 func sessionAttachedForConfigDrift(id string, sp runtime.Provider, cityPath string, store beads.Store, cfg *config.City, name string) (bool, error) {
 	if sp == nil {
 		return false, nil
@@ -6083,10 +6092,14 @@ func sessionAttachedForConfigDrift(id string, sp runtime.Provider, cityPath stri
 	} else if attached {
 		return true, nil
 	}
-	if sp.IsAttached(name) {
-		return true, observeErr
+	attached, err := attachmentHolds(sp, name)
+	if err != nil && observeErr != nil {
+		return true, fmt.Errorf("%w; %w", observeErr, err)
 	}
-	return false, observeErr
+	if err != nil {
+		return true, err
+	}
+	return attached, observeErr
 }
 
 func sessionConfigDriftKey(info sessionpkg.Info, cfg *config.City, tp TemplateParams) string {
@@ -6254,7 +6267,7 @@ func applyTemplateOverridesToConfigInfo(agentCfg *runtime.Config, info sessionpk
 // namedSessionActiveUseReason. The only bead read is the pending-interaction
 // deferral, which threads through pendingInteractionKeepsAwakeInfo (wait_hold +
 // held/quarantine timers off Info); every other check is a live runtime probe
-// (sp.IsAttached, sessionActivityReportable, sp.GetLastActivity) and stays raw.
+// (attachmentHolds, sessionActivityReportable, sp.GetLastActivity) and stays raw.
 func namedSessionActiveUseReasonInfo(info sessionpkg.Info, sp runtime.Provider, name string, clk clock.Clock) (string, bool, error) {
 	if sp == nil || name == "" {
 		return "", false, nil
@@ -6263,8 +6276,11 @@ func namedSessionActiveUseReasonInfo(info sessionpkg.Info, sp runtime.Provider, 
 	if pendingInteractionKeepsAwakeInfo(info, sp, name, clk) {
 		return "pending_interaction", true, nil
 	}
-	// Tmux attachment means a user is watching.
-	if sp.IsAttached(name) {
+	// Tmux attachment means a user is watching; a probe that cannot tell may
+	// be hiding one.
+	if attached, err := attachmentHolds(sp, name); err != nil {
+		return "attach_unknown", true, nil
+	} else if attached {
 		return "attached", true, nil
 	}
 	// Providers that cannot report activity for this routed session cannot

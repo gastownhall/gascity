@@ -308,9 +308,7 @@ type AttachmentObserverWithError interface {
 //	(false, err) err wraps ErrRuntimeUnavailable: the probe could not answer
 //
 // Callers gating a destructive action MUST treat any error other than
-// ErrSessionNotFound as attached, and MUST classify with
-// errors.Is(err, ErrSessionNotFound), never IsSessionGone: its message
-// matching reads text such as "not found" in an unavailable probe as gone.
+// ErrSessionNotFound as attached; [AttachProbeHolds] states that rule.
 // A nil provider or blank name answers (false, nil) without a probe.
 func IsAttachedWithError(sp Provider, name string) (bool, error) {
 	if sp == nil || strings.TrimSpace(name) == "" {
@@ -320,6 +318,18 @@ func IsAttachedWithError(sp Provider, name string) (bool, error) {
 		return observer.IsAttachedWithError(name)
 	}
 	return sp.IsAttached(name), nil
+}
+
+// AttachProbeHolds reports whether an [IsAttachedWithError] answer must hold a
+// destructive action: a client is attached, or the probe failed with any error
+// other than ErrSessionNotFound. Only a vanished session counts as not
+// attached. It classifies with errors.Is, never IsSessionGone: that message
+// matching reads text such as "not found" in an unavailable probe as gone.
+func AttachProbeHolds(attached bool, err error) bool {
+	if err != nil {
+		return !errors.Is(err, ErrSessionNotFound)
+	}
+	return attached
 }
 
 // PendingInteraction describes a blocking interaction raised by a session.

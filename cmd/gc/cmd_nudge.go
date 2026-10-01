@@ -1433,6 +1433,7 @@ func workerObserveNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.
 			obs.Running = false
 			obs.Alive = false
 			obs.Attached = false
+			obs.AttachedErr = nil
 			obs.LastActivity = nil
 		}
 		return obs, nil

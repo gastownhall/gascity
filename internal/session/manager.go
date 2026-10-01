@@ -533,6 +533,11 @@ type RuntimeObservation struct {
 	Attached    bool
 	LastActive  time.Time
 	SessionName string
+
+	// AttachedErr is set when the attachment probe could not tell (any error
+	// other than runtime.ErrSessionNotFound); Attached is false then. A caller
+	// gating a destructive action treats it as attached.
+	AttachedErr error
 }
 
 func normalizeInfoState(state State) State {
@@ -1981,7 +1986,11 @@ func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) (Runti
 	obs.Running = liveness.Running
 	obs.Alive = liveness.Alive
 	if obs.Running {
-		obs.Attached = m.sp.IsAttached(info.SessionName)
+		attached, err := runtime.IsAttachedWithError(m.sp, info.SessionName)
+		if err != nil && runtime.AttachProbeHolds(attached, err) {
+			obs.AttachedErr = err
+		}
+		obs.Attached = attached && err == nil
 		lastActive, err := m.sp.GetLastActivity(info.SessionName)
 		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
 			return RuntimeObservation{}, fmt.Errorf("observe last activity for %q: %w", info.SessionName, err)

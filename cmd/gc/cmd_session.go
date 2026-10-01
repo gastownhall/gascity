@@ -1302,6 +1302,16 @@ func (p *attachmentCachingProvider) IsAttached(name string) bool {
 	return p.Provider.IsAttached(name)
 }
 
+// IsAttachedWithError answers a cached attachment with a nil error and
+// forwards anything else, so an uncached probe failure is not read as
+// "not attached".
+func (p *attachmentCachingProvider) IsAttachedWithError(name string) (bool, error) {
+	if v, ok := p.cache[name]; ok {
+		return v, nil
+	}
+	return runtime.IsAttachedWithError(p.Provider, name)
+}
+
 func (p *attachmentCachingProvider) SleepCapability(name string) runtime.SessionSleepCapability {
 	if scp, ok := p.Provider.(runtime.SleepCapabilityProvider); ok {
 		return scp.SleepCapability(name)

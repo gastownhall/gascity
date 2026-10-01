@@ -295,9 +295,12 @@ func recordDrainAckEscalationAttempt(store beads.Store, bead beads.Bead, now tim
 //
 // Unreadable activity HOLDS, matching drainReminderQuietHold's #312 rule that
 // "we cannot tell" is never "idle" — the more so here, where the action is
-// destructive rather than informational.
+// destructive rather than informational. An attachment probe that cannot tell
+// holds for the same reason.
 func drainAckEscalationQuietHold(sp runtime.Provider, name string, now time.Time) (string, bool) {
-	if sp.IsAttached(name) {
+	if attached, err := attachmentHolds(sp, name); err != nil {
+		return "attach_unknown", true
+	} else if attached {
 		return "attached", true
 	}
 	activity, err := sp.GetLastActivity(name)

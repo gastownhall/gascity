@@ -380,8 +380,8 @@ func TestSweepUndesiredPoolSessionBeads_RunningProbeAvoidsFullObservation(t *tes
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0", closed)
 	}
-	if got := sp.CountCalls("IsAttached", "worker-bd-running"); got != 0 {
-		t.Fatalf("IsAttached calls = %d, want 0; sweep only needs running state", got)
+	if got := sp.CountCalls("IsAttached", "worker-bd-running") + sp.CountCalls("IsAttachedWithError", "worker-bd-running"); got != 0 {
+		t.Fatalf("IsAttached/IsAttachedWithError calls = %d, want 0; sweep only needs running state", got)
 	}
 	if got := sp.CountCalls("GetLastActivity", "worker-bd-running"); got != 0 {
 		t.Fatalf("GetLastActivity calls = %d, want 0; sweep only needs running state", got)

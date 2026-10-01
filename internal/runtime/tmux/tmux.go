@@ -2780,10 +2780,11 @@ func (t *Tmux) nudgeSession(
 	// replacing it: stacked injections merge into one draft that Claude's TUI
 	// does not treat as a clean single-line submit (ra-3x46cy finding 2).
 	//
-	// Skip the clear when a client is attached: a human may be mid-keystroke,
-	// and silently wiping their in-progress input is worse than the
-	// concatenation this clear otherwise prevents (#5192).
-	if !t.IsSessionAttached(session) {
+	// Skip the clear when a client is attached, or when the probe cannot
+	// tell: a human may be mid-keystroke, and silently wiping their
+	// in-progress input is worse than the concatenation this clear otherwise
+	// prevents (#5192).
+	if attached, err := t.SessionAttachedWithError(session); err == nil && !attached {
 		if _, err := t.run("send-keys", "-t", paneTarget(target), "C-u"); err != nil {
 			return err
 		}
@@ -2862,18 +2863,20 @@ func (t *Tmux) nudgeSession(
 			// every submit swallowed, leaving the draft staged in the
 			// composer. Where the family's staged-draft marker is known,
 			// re-send while that draft is visible (recoverStagedDraft). Skip
-			// it when a client is attached, for the same reason the C-u
-			// clear above is skipped: a human may be composing, and a
-			// re-sent submit would send their draft.
-			if marker, ok := t.stagedDraftMarkerFor(target); ok && !t.IsSessionAttached(session) {
-				observe := func() (paneSubmitObservation, error) { return t.observeSubmit(target, marker) }
-				switch recoverStagedDraft(sendSubmit, wake, observe, time.Sleep) {
-				case stagedDraftSubmittedBusy:
-					return nil
-				case stagedDraftCleared:
-					return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
+			// it when a client is attached or the probe cannot tell, for the
+			// same reason the C-u clear above is skipped: a human may be
+			// composing, and a re-sent submit would send their draft.
+			if marker, ok := t.stagedDraftMarkerFor(target); ok {
+				if attached, err := t.SessionAttachedWithError(session); err == nil && !attached {
+					observe := func() (paneSubmitObservation, error) { return t.observeSubmit(target, marker) }
+					switch recoverStagedDraft(sendSubmit, wake, observe, time.Sleep) {
+					case stagedDraftSubmittedBusy:
+						return nil
+					case stagedDraftCleared:
+						return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
+					}
+					// stagedDraftUnresolved falls through to the handling below.
 				}
-				// stagedDraftUnresolved falls through to the handling below.
 			}
 			// Do NOT collapse this to nil: a caller that treats nil as "clean
 			// delivery" would ack a queued nudge for a message that may still
