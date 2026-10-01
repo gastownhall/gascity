@@ -909,6 +909,9 @@ func windowMailByPriorityAndRecency(messages []mail.Message, limit int) []mail.M
 // (renderMailCheckFromAPI and doMailCheckTargetWithFormat) surface higher-
 // priority, then most-recent, unread mail first.
 //
+// Empty-body auto-handoffs share ONE line however many are unread (ga-8gdkfy
+// Rule C); every other message gets its own.
+//
 // Every rendered line for a message that is archived on delivery says so
 // (ga-8gdkfy Rule A), and once any shown message is archived on delivery, the
 // block stops promising that 'gc mail inbox' will show "all" or "the full
@@ -936,7 +939,10 @@ func formatInjectOutput(messages []mail.Message) string {
 	case len(shown) < len(messages):
 		fmt.Fprintf(&sb, "Showing the %d most recent message(s) here; run 'gc mail inbox' for the full list.\n\n", len(shown))
 	}
-	for _, m := range shown {
+	if len(window.collapsed) > 0 {
+		sb.WriteString(formatCollapsedAutoHandoffLine(window.collapsed))
+	}
+	for _, m := range window.rest {
 		// Sanitize attacker-controllable fields (sender identity, subject,
 		// body) before interpolating into the <system-reminder> block.
 		// Without this, a sender can inject </system-reminder> sequences
@@ -980,6 +986,20 @@ func formatInjectOutput(messages []mail.Message) string {
 	}
 	sb.WriteString("</system-reminder>\n")
 	return sb.String()
+}
+
+// formatCollapsedAutoHandoffLine renders the ga-8gdkfy Rule C group as the ONE
+// bullet line it occupies in the inject block: every message in it, newest
+// first (the order selectMailInjectWindow leaves collapsed in), marked archived
+// on delivery. The group is content-free (empty bodies), so the IDs are what is
+// worth naming; each stays readable through 'gc mail read <id>' after the
+// archive.
+func formatCollapsedAutoHandoffLine(collapsed []mail.Message) string {
+	ids := make([]string, len(collapsed))
+	for i, m := range collapsed {
+		ids[i] = m.ID
+	}
+	return fmt.Sprintf("- %d auto-handoff message(s), archived on delivery (newest first): %s; each still readable via 'gc mail read <id>'\n", len(ids), strings.Join(ids, ", "))
 }
 
 func mailInjectSubjectPreview(subject string) (string, bool) {
