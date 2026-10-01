@@ -295,6 +295,28 @@ func TestObservationCache_NameMovedBetweenBackendsConcludedOnlyByItsNewBackend(t
 	}
 }
 
+// Kills: a swapped-out backend's names kept Listed forever, and concluded
+// absent while a new backend lists partially. After a swap removes the
+// backend that listed a name, only a pass on which every backend is complete
+// concludes it absent.
+func TestObservationCache_SwappedOutBackendConcludedOnlyByAllCompletePass(t *testing.T) {
+	c, clk := newTestObservationCache()
+	c.PublishInventory(obsPass(clk, 1, 1, completeBackend("", "gc-old")), nil)
+
+	clk.Advance(15 * time.Second)
+	acpPartial := BackendPass{Label: "acp", Outcome: OutcomePartial, Attested: true, Err: &runtime.PartialListError{Err: errors.New("one socket")}}
+	c.PublishInventory(obsPass(clk, 2, 2, completeBackend("default"), acpPartial), nil)
+	if got := c.Snapshot().ByName["gc-old"].Listed; got.Value != ObsYes {
+		t.Fatalf("gc-old Listed = %+v while acp lists partially, want Yes kept", got)
+	}
+
+	clk.Advance(15 * time.Second)
+	c.PublishInventory(obsPass(clk, 3, 2, completeBackend("default"), completeBackend("acp")), nil)
+	if got := c.Snapshot().ByName["gc-old"].Listed; got.Value != ObsNo || !got.ObservedAt.Equal(clk.Now()) {
+		t.Fatalf("gc-old Listed = %+v after an all-complete pass, want No", got)
+	}
+}
+
 // Kills: pruning names whose backend failed. A failed listing observes
 // nothing, so its names are kept (and age out) however long it fails.
 func TestObservationCache_FailedBackendNamesAreNotPruned(t *testing.T) {

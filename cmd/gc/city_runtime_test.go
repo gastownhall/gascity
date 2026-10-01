@@ -4171,7 +4171,6 @@ func TestCityRuntimeTickRunsOnDeathWithCanonicalRigEnv(t *testing.T) {
 		sp:                  runtime.NewFake(),
 		standaloneCityStore: beads.NewMemStore(),
 		sessionDrains:       newDrainTracker(),
-		poolDeathHandlers:   handlers,
 		rec:                 events.Discard,
 		stdout:              io.Discard,
 		stderr:              &stderr,
@@ -4179,6 +4178,7 @@ func TestCityRuntimeTickRunsOnDeathWithCanonicalRigEnv(t *testing.T) {
 			return DesiredStateResult{State: map[string]TemplateParams{}}
 		},
 	}
+	cr.publishPoolDeathHandlers(handlers)
 
 	cr.reconcilePoolDeaths(&prevPoolRunning)
 
@@ -4210,19 +4210,19 @@ func TestCityRuntimeTickSkipsOnDeathWhenSessionListingIsPartial(t *testing.T) {
 		},
 		standaloneCityStore: beads.NewMemStore(),
 		sessionDrains:       newDrainTracker(),
-		poolDeathHandlers: map[string]poolDeathInfo{
-			sessionName: {
-				Command: "printf fired > " + shellQuotePath(outFile),
-				Dir:     cityPath,
-			},
-		},
-		rec:    events.Discard,
-		stdout: io.Discard,
-		stderr: &stderr,
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              &stderr,
 		buildFnWithSessionBeads: func(_ *config.City, _ runtime.Provider, _ beads.Store, _ map[string]beads.Store, _ *sessionBeadSnapshot, _ *sessionReconcilerTraceCycle) DesiredStateResult {
 			return DesiredStateResult{State: map[string]TemplateParams{}}
 		},
 	}
+	cr.publishPoolDeathHandlers(map[string]poolDeathInfo{
+		sessionName: {
+			Command: "printf fired > " + shellQuotePath(outFile),
+			Dir:     cityPath,
+		},
+	})
 
 	cr.reconcilePoolDeaths(&prevPoolRunning)
 

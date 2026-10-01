@@ -1231,7 +1231,6 @@ func controllerLoop(
 		rec:                 rec,
 		cs:                  cs,
 		poolSessions:        poolSessions,
-		poolDeathHandlers:   poolDeathHandlers,
 		suspendedNames:      suspendedNames,
 		pokeCh:              make(chan struct{}, 1),
 		controlDispatcherCh: make(chan struct{}, 1),
@@ -1239,6 +1238,7 @@ func controllerLoop(
 		stdout:              stdout,
 		stderr:              stderr,
 	}
+	cr.publishPoolDeathHandlers(poolDeathHandlers)
 	cr.setControllerState(cs)
 	cr.run(ctx)
 }

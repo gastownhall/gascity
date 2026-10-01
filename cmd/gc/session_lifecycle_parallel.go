@@ -392,6 +392,9 @@ type startExecutionOptions struct {
 	// capacityGuard gates starts per serving endpoint. Nil leaves every
 	// endpoint unguarded (legacy failure accounting).
 	capacityGuard *endpointCapacityGuard
+	// onDeathGate holds names whose on_death hook is queued or running;
+	// their starts wait. Nil holds nothing.
+	onDeathGate *onDeathGate
 }
 
 type startExecutionOption func(*startExecutionOptions)
@@ -484,6 +487,14 @@ func withWarmClaimProbe(probe warmClaimTriggerProbe) startExecutionOption {
 func withEndpointCapacityGuard(guard *endpointCapacityGuard) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.capacityGuard = guard
+	}
+}
+
+// withOnDeathGate installs the on_death start interlock for this reconcile
+// pass. Nil (or the option omitted) defers nothing.
+func withOnDeathGate(gate *onDeathGate) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.onDeathGate = gate
 	}
 }
 
@@ -3663,6 +3674,16 @@ func executePlannedStartsTraced(
 				}
 				if !allDependenciesAliveForTemplateWithClock(candidate.logicalTemplate(cfg), cfg, desiredState, sp, cityName, store, clk) {
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "blocked_on_dependencies", time.Time{}, time.Time{}, nil)
+					continue
+				}
+				// The name's on_death hook runs before its restart, as it did
+				// when hooks ran at tick start: deferred before any slot,
+				// ticket, budget or write.
+				if startOpts.onDeathGate.Pending(candidate.name()) {
+					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), string(TraceOutcomeDeferredByOnDeathHook), time.Time{}, time.Time{}, nil)
+					if trace != nil {
+						trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonOnDeathHookPending, TraceOutcomeDeferredByOnDeathHook, candidate.tp.TemplateName, candidate.name(), nil)
+					}
 					continue
 				}
 				var release func()

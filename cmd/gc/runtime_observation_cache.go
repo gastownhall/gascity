@@ -21,8 +21,9 @@ import (
 //   - A fact older than maxAge reads Unknown, at the reader's clock: a
 //     published snapshot is immutable, so staleness cannot be written into it.
 //   - Absence is concluded only by a complete, attested pass on the backend
-//     that last listed the name. Any other outcome leaves the name's facts
-//     alone to age out.
+//     that last listed the name, or, once a provider swap removed that
+//     backend, by a pass on which every backend is complete. Any other
+//     outcome leaves the name's facts alone to age out.
 //   - Before a backend's first complete pass within the current provider,
 //     every fact about names on it reads Unknown.
 //
@@ -246,6 +247,41 @@ func (p InventoryPass) mergedFailed() bool {
 	return p.MergedErr != nil && !runtime.IsPartialListError(p.MergedErr)
 }
 
+// listedOn maps every name a non-failed backend listed this pass to the
+// first such backend, in backend order.
+func (p InventoryPass) listedOn() map[string]string {
+	on := make(map[string]string)
+	for _, b := range p.Backends {
+		if b.Outcome == OutcomeFailed {
+			continue
+		}
+		for _, name := range b.Names {
+			if _, ok := on[name]; !ok {
+				on[name] = b.Label
+			}
+		}
+	}
+	return on
+}
+
+// concludesAbsent reports whether this pass proves gone a name it did not
+// list, given the backend that last listed it: that backend listed
+// completely, or it is no longer one of the pass's backends (the provider
+// was swapped) and every backend listed completely.
+func (p InventoryPass) concludesAbsent(label string) bool {
+	if len(p.Backends) == 0 {
+		return false
+	}
+	all := true
+	for _, b := range p.Backends {
+		if b.Label == label {
+			return b.Outcome == OutcomeComplete
+		}
+		all = all && b.Outcome == OutcomeComplete
+	}
+	return all
+}
+
 // InventoryAttrs are one listed name's enrichment and attribution. A name
 // with no entry keeps its enrichment facts; an entry whose Known flag is
 // false records that fact as unsupported.
@@ -415,31 +451,21 @@ func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string
 	}
 
 	// A name listed by two backends belongs to the first, in backend order.
-	listedOn := make(map[string]string)
-	complete := make(map[string]bool)
+	listedOn := pass.listedOn()
 	unrefreshed := make(map[string]string)
 	failed := make(map[string]bool)
 	for _, b := range pass.Backends {
 		switch b.Outcome {
 		case OutcomeFailed:
 			failed[b.Label] = true
-		case OutcomeComplete:
-			complete[b.Label] = true
+			continue
 		case OutcomePartial:
 			unrefreshed[b.Label] = obsReasonPartialList
 		case OutcomeUnattested:
 			unrefreshed[b.Label] = obsReasonUnattested
 		}
-		if b.Outcome == OutcomeFailed {
-			continue
-		}
 		if len(b.Names) > 0 {
 			c.everListed[b.Label] = true
-		}
-		for _, name := range b.Names {
-			if _, ok := listedOn[name]; !ok {
-				listedOn[name] = b.Label
-			}
 		}
 	}
 
@@ -473,7 +499,7 @@ func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string
 		}
 		old := obs
 		switch {
-		case complete[obs.Backend]:
+		case pass.concludesAbsent(obs.Backend):
 			obs.Listed, obs.Running, obs.ProcessAlive = absent, absent, absent
 		case unrefreshed[obs.Backend] != "":
 			obs.Listed.Reason = unrefreshed[obs.Backend]

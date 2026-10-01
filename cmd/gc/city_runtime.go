@@ -182,9 +182,14 @@ type CityRuntime struct {
 	cs  *controllerState // nil when controller-managed bead stores are unavailable
 	svc *workspacesvc.Manager
 
-	poolSessions      map[string]time.Duration
-	poolDeathHandlers map[string]poolDeathInfo
-	suspendedNames    map[string]bool
+	poolSessions map[string]time.Duration
+	// poolDeathHandlers is the on_death handler map, read by the tick and the
+	// inventory lane and replaced whole at reload (publishPoolDeathHandlers).
+	poolDeathHandlers atomic.Pointer[map[string]poolDeathInfo]
+	// poolDeathHookRunner runs on_death hooks; nil is shellRunHook (tests
+	// inject a recorder).
+	poolDeathHookRunner poolDeathHookRunner
+	suspendedNames      map[string]bool
 
 	// standaloneCityStore and standaloneRigStores are the runtime's own store
 	// handles when there is no controller state (API disabled). A config reload
@@ -475,7 +480,6 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		rec:                     p.Rec,
 		reapSkips:               newReapSkipTracker(),
 		poolSessions:            p.PoolSessions,
-		poolDeathHandlers:       p.PoolDeathHandlers,
 		forceStopShutdown:       p.ForceStopShutdown,
 		suspendedNames:          suspendedNames,
 		asyncStartLimiter:       newAsyncStartLimiter(maxParallelStartsPerTick(p.Cfg)),
@@ -509,6 +513,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		stdout:            p.Stdout,
 		stderr:            p.Stderr,
 	}
+	cr.publishPoolDeathHandlers(p.PoolDeathHandlers)
 	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
 	if err := cr.svc.Reload(); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: service init: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -695,8 +700,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 
 	// The runtime inventory lane starts after the startup reload, which can
 	// swap the provider, with one synchronous pass so startup reconciliation
-	// finds a published inventory. It is publish-only: nothing reads the
-	// cache yet. run() stops it and waits for it on every exit.
+	// finds a published inventory. From then on it owns on_death detection,
+	// and its worker runs the hooks, off the tick. run() stops both and waits
+	// for them on every exit.
 	if cr.initRuntimeInventoryLane() != nil {
 		inventoryPrimeStart := time.Now()
 		cr.primeNow(ctx)
@@ -1136,7 +1142,8 @@ func convergenceStartupComplete(cr *CityRuntime) bool {
 // reconcilePoolDeaths detects pool instances that stopped since the prior
 // reconciliation and runs their configured death hooks.
 func (cr *CityRuntime) reconcilePoolDeaths(prevPoolRunning *map[string]bool) {
-	if len(cr.poolDeathHandlers) == 0 {
+	handlers := cr.publishedPoolDeathHandlers()
+	if len(handlers) == 0 {
 		return
 	}
 	currentRunning, listErr := cr.sp.ListRunning("")
@@ -1153,24 +1160,14 @@ func (cr *CityRuntime) reconcilePoolDeaths(prevPoolRunning *map[string]bool) {
 		currentSet[name] = true
 	}
 	if *prevPoolRunning != nil {
-		for sn, info := range cr.poolDeathHandlers {
+		for sn, info := range handlers {
 			if (*prevPoolRunning)[sn] && !currentSet[sn] {
-				out, err := shellRunHook(info.Command, info.Dir, info.Env)
-				if err != nil {
-					fmt.Fprintf(cr.stderr, "on_death %s: %v\n", sn, err) //nolint:errcheck // best-effort stderr
-				}
-				// Surface only the DEFAULT hook's gc-recovery diagnostic for
-				// a bd release it could not complete (the loop exits 0 even
-				// when a bd write fails, so this is the only signal). A user
-				// on_death override carries no marker and is left alone.
-				if strings.Contains(out, config.RecoveryHookMarker) {
-					fmt.Fprintf(cr.stderr, "on_death %s: %s\n", sn, strings.TrimSpace(out)) //nolint:errcheck // best-effort stderr
-				}
+				_ = runPoolDeathHook(cr.poolDeathHook(), cr.stderr, sn, info) // reported on stderr
 			}
 		}
 	}
 	*prevPoolRunning = make(map[string]bool)
-	for sn := range cr.poolDeathHandlers {
+	for sn := range handlers {
 		if currentSet[sn] {
 			(*prevPoolRunning)[sn] = true
 		}
@@ -1211,7 +1208,11 @@ func (cr *CityRuntime) tick(
 	}()
 	// Detect pool instance deaths since last tick. Ordered ahead of the config
 	// reload so it compares against the config the deaths happened under.
-	cr.reconcilePoolDeaths(prevPoolRunning)
+	// While the inventory lane runs it owns on_death, off the tick
+	// (runtime_inventory_ondeath.go).
+	if cr.inventoryLane == nil {
+		cr.reconcilePoolDeaths(prevPoolRunning)
+	}
 
 	var manualReload *reloadRequest
 	var manualReply reloadControlReply
@@ -2369,7 +2370,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	}
 
 	cr.poolSessions = computePoolSessions(nextCfg, cr.cityName, cr.cityPath, nextSp)
-	cr.poolDeathHandlers = computePoolDeathHandlers(nextCfg, cr.cityName, cityRoot, nextSp, cr.stderr)
+	cr.publishPoolDeathHandlers(computePoolDeathHandlers(nextCfg, cr.cityName, cityRoot, nextSp, cr.stderr))
 	cr.suspendedNames = computeSuspendedNames(nextCfg, cr.cityName, cr.cityPath)
 
 	// Rebuild crash tracker if config values changed, otherwise clear all
@@ -2869,6 +2870,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		withMaxSessionAgeTracker(cr.mat),
 		withAssignedWorkDeferTracker(cr.adt),
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
+		withOnDeathGate(cr.onDeathGate()),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
 		// The legs this tick read the surviving assigned work through. The
 		// orphan-close tie-break releases a held claim through its own leg
@@ -3704,6 +3706,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		// The dispatcher's starts hit the same endpoints; without the guard
 		// this path would bypass the capacity breaker.
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
+		withOnDeathGate(cr.onDeathGate()),
 	)
 	cr.requestDeferredDrainFollowUpTick()
 }

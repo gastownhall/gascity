@@ -69,6 +69,7 @@ const (
 	TraceSiteDemandSnapshot                 TraceSiteCode = "demand_snapshot.load"
 	TraceSiteOrderDispatch                  TraceSiteCode = "orders.dispatch"
 	TraceSiteRuntimeInventoryPass           TraceSiteCode = "runtime_inventory.pass"
+	TraceSiteRuntimeInventoryOnDeath        TraceSiteCode = "runtime_inventory.on_death"
 	TraceSitePoolDemandCompute              TraceSiteCode = "pool_desired.compute"
 	TraceSiteSessionSnapshot                TraceSiteCode = "session_snapshot.load"
 	TraceSiteSessionSync                    TraceSiteCode = "session_sync.update_index"
@@ -202,6 +203,7 @@ const (
 	TraceReasonPinned                TraceReasonCode = "pinned"
 	TraceReasonAssignedWorkExhausted TraceReasonCode = "assigned_work_exhausted"
 	TraceReasonEndpointCapacityOpen  TraceReasonCode = "endpoint_capacity_open"
+	TraceReasonOnDeathHookPending    TraceReasonCode = "on_death_hook_pending"
 )
 
 type TraceOutcomeCode string
@@ -293,6 +295,12 @@ const (
 	// TraceOutcomeDeferredByEndpointCapacity marks a start the endpoint
 	// capacity breaker deferred before any write.
 	TraceOutcomeDeferredByEndpointCapacity TraceOutcomeCode = "deferred_by_endpoint_capacity"
+	// TraceOutcomeDeferredByOnDeathHook marks a start deferred before any
+	// write because the name's on_death hook is queued or running.
+	TraceOutcomeDeferredByOnDeathHook TraceOutcomeCode = "deferred_by_on_death_hook"
+	// TraceOutcomeSkippedPresent marks an on_death hook skipped because its
+	// name was listed again when the hook was due.
+	TraceOutcomeSkippedPresent TraceOutcomeCode = "skipped_present"
 	// TraceOutcomeOpen and TraceOutcomeHalfOpen report an endpoint capacity
 	// breaker's state (TraceOutcomeClosed is the third).
 	TraceOutcomeOpen     TraceOutcomeCode = "open"

@@ -39,7 +39,9 @@ import (
 //  5. reads attribution once per new incarnation, through
 //     GetAllEnvironment, never GetMeta (tmux GetMeta maps non-session errors
 //     to an empty value, which would cache a live runtime as ownerless);
-//  6. publishes the snapshot, then reports health and traces.
+//  6. publishes the snapshot, then reports health and traces;
+//  7. pokes the reconciler for every name the pass proved gone, and detects
+//     on_death edges for the worker (runtime_inventory_ondeath.go).
 //
 // A pass whose listing timed out, was still in flight or panicked publishes
 // a failed outcome for every backend (named through Backends(), without
@@ -47,7 +49,7 @@ import (
 // unhealthy, and the failed merged error makes FreshInventory refuse the
 // pass at once.
 //
-// The lane is publish-only: nothing in the legacy reconciler reads the cache.
+// on_death is the only legacy consumer: nothing else reads the cache yet.
 type runtimeInventoryLane struct {
 	cache     *ObservationCache
 	clock     clock.Clock
@@ -65,6 +67,8 @@ type runtimeInventoryLane struct {
 	listMu      sync.Mutex
 	listing     bool
 	attributing bool
+	// rechecking is set while an on_death re-check listing is outstanding.
+	rechecking bool
 
 	// Pass state, owned by whichever pass holds passMu.
 	passMu        sync.Mutex
@@ -74,6 +78,16 @@ type runtimeInventoryLane struct {
 	attribution   map[string]inventoryAttribution
 	lastSignature string
 	alerted       map[string]time.Time
+	// poolDeathPrev holds the on_death handler names listed and not yet
+	// proven gone (detectPoolDeathEdges).
+	poolDeathPrev map[string]poolDeathSighting
+
+	// onDeath queues on_death hooks for the worker and holds their names
+	// against restarts.
+	onDeath *onDeathGate
+	// unattestedNoticed records the backends whose unattested listing of a
+	// handler name stderr was told about.
+	unattestedNoticed map[string]bool
 
 	statusMu sync.Mutex
 	status   inventoryLaneStatus
@@ -172,6 +186,9 @@ func newRuntimeInventoryLane(interval time.Duration, stderr io.Writer, logPrefix
 		wakeCh:      make(chan struct{}, 1),
 		attribution: make(map[string]inventoryAttribution),
 		alerted:     make(map[string]time.Time),
+		onDeath:     newOnDeathGate(),
+
+		unattestedNoticed: make(map[string]bool),
 	}
 }
 
@@ -190,6 +207,9 @@ func (cr *CityRuntime) initRuntimeInventoryLane() *runtimeInventoryLane {
 		return nil
 	}
 	cr.inventoryLane = newRuntimeInventoryLane(cfg.Daemon.PatrolIntervalDuration(), cr.stderr, cr.logPrefix)
+	if cr.cs != nil {
+		cr.cs.onDeathGate.Store(cr.inventoryLane.onDeath)
+	}
 	return cr.inventoryLane
 }
 
@@ -218,13 +238,15 @@ func (cr *CityRuntime) primeNow(ctx context.Context) {
 	}, inventoryLaneSafeTickTrigger)
 }
 
-// startRuntimeInventoryLane starts the lane goroutine and returns a channel
-// closed when it exits. It is paced like the orders lane (startPacedLane): a
-// backstop timer one patrol interval after each pass ends, and wakes that
-// wait out the duty cycle, so passes never run back to back.
+// startRuntimeInventoryLane starts the lane goroutine and its on_death worker
+// and returns a channel closed when both exit. The lane is paced like the
+// orders lane (startPacedLane): a backstop timer one patrol interval after
+// each pass ends, and wakes that wait out the duty cycle, so passes never run
+// back to back.
 func (cr *CityRuntime) startRuntimeInventoryLane(ctx context.Context) <-chan struct{} {
 	lane := cr.inventoryLane
-	return startPacedLane(ctx, lane.interval, inventoryMinWakeGap, lane.wakeCh, func(wake bool) {
+	workerDone := cr.startOnDeathWorker(ctx, lane)
+	laneDone := startPacedLane(ctx, lane.interval, inventoryMinWakeGap, lane.wakeCh, func(wake bool) {
 		reason := inventoryLaneReasonCadence
 		if wake {
 			reason = inventoryLaneReasonWake
@@ -236,11 +258,19 @@ func (cr *CityRuntime) startRuntimeInventoryLane(ctx context.Context) <-chan str
 			cr.runInventoryPass(ctx, reason)
 		}, inventoryLaneSafeTickTrigger)
 	})
+	done := make(chan struct{})
+	go func() {
+		<-laneDone
+		<-workerDone
+		close(done)
+	}()
+	return done
 }
 
 // runRuntimeInventoryLane starts the lane goroutine under a child of ctx and
-// returns its stop: cancel the lane, then wait for its goroutine, so a pass
-// in progress finishes before the caller (run()'s shutdown) goes on.
+// returns its stop: cancel the lane, then wait for its goroutines, so a pass
+// or an on_death hook in progress finishes before the caller (run()'s
+// shutdown) goes on.
 func (cr *CityRuntime) runRuntimeInventoryLane(ctx context.Context) (stop func()) {
 	laneCtx, cancel := context.WithCancel(ctx)
 	done := cr.startRuntimeInventoryLane(laneCtx)
@@ -283,6 +313,9 @@ func (cr *CityRuntime) runInventoryPass(ctx context.Context, reason string) {
 			fmt.Fprintf(lane.stderr, "%s: runtime inventory listing panicked: %s\n", lane.logPrefix, listing.panicked) //nolint:errcheck // best-effort stderr
 		}
 		lane.publishListingFailure(sp, started, result, &report)
+	}
+	if report.snapshot != nil {
+		cr.detectPoolDeaths(lane, &report)
 	}
 	finished := lane.clock.Now()
 	report.duration = finished.Sub(started)
@@ -351,8 +384,11 @@ func (l *runtimeInventoryLane) publishListingFailure(sp runtime.Provider, starte
 // commit publishes one pass, prunes attribution to the published names, and
 // reports health.
 func (l *runtimeInventoryLane) commit(pass InventoryPass, attrs map[string]InventoryAttrs, report *inventoryPassReport) {
+	before := l.cache.Snapshot()
 	report.flips = l.cache.PublishInventory(pass, attrs)
 	snap := l.cache.Snapshot()
+	report.attrs = attrs
+	report.gone = inventoryGone(before, snap)
 	for name := range l.attribution {
 		if _, ok := snap.ByName[name]; !ok {
 			delete(l.attribution, name)
@@ -360,6 +396,19 @@ func (l *runtimeInventoryLane) commit(pass InventoryPass, attrs map[string]Inven
 	}
 	report.snapshot = snap
 	report.alerts = l.updateHealth(snap.Health, pass.FinishedAt)
+}
+
+// inventoryGone returns, in name order, the names next proves gone that
+// prev showed listed.
+func inventoryGone(prev, next *ObservationSnapshot) []string {
+	var gone []string
+	for name, obs := range next.ByName {
+		if obs.Listed.Value == ObsNo && prev.ByName[name].Listed.Value == ObsYes {
+			gone = append(gone, name)
+		}
+	}
+	sort.Strings(gone)
+	return gone
 }
 
 // listBounded runs one listing, single-flight and bounded. A listing still
@@ -701,6 +750,9 @@ type inventoryPassReport struct {
 	flips              int
 	alerts             []string
 	snapshot           *ObservationSnapshot
+	// attrs is the pass's enrichment, and gone the names it proved gone.
+	attrs map[string]InventoryAttrs
+	gone  []string
 }
 
 // traceDue reports whether a pass is worth a trace record: a flip, a change
