@@ -6383,6 +6383,24 @@ func TestCompactScriptDiskPreflightDoesNotBlockReclaimModes(t *testing.T) {
 	}
 }
 
+func TestCompactScriptDiskPreflightAllowsScheduledSharedHistoryGC(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "remote_success", "GC_FAKE_DF_MODE=df_critical")
+	if err != nil {
+		t.Fatalf("shared-history GC failed under low disk: %v\nout=%s", err, out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if !strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("shared-history path did not issue DOLT_GC:\n%s", logData)
+	}
+	if strings.Contains(string(logData), "DOLT_RESET") {
+		t.Fatalf("shared-history path must not flatten under low disk:\n%s", logData)
+	}
+}
+
 func TestCompactScriptDiskPreflightAllowsOnlySelectedPendingGCRecovery(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")

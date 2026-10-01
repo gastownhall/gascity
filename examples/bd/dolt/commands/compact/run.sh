@@ -348,6 +348,7 @@ compact_remote="${GC_DOLT_COMPACT_REMOTE:-}"
 dry_run="${GC_DOLT_COMPACT_DRY_RUN:-}"
 only_dbs="${GC_DOLT_COMPACT_ONLY_DBS:-}"
 pending_gc_recovery_only=0
+disk_critical=0
 bare_gc_input="${GC_DOLT_COMPACT_BARE_GC:-}"
 skip_fetch_input="${GC_DOLT_COMPACT_SKIP_FETCH:-}"
 allow_federated_input="${GC_DOLT_COMPACT_ALLOW_FEDERATED:-}"
@@ -2812,6 +2813,11 @@ flatten_database() {
     fi
   fi
 
+  if [ "$disk_critical" = "1" ] && [ "$pending_gc_recovery_only" != "1" ]; then
+    printf 'compact: db=%s skipping history rewrite under critical disk\n' "$db" >&2
+    return 0
+  fi
+
   if has_compact_marker "$pending_gc_dir" "$db"; then
     if [ -n "$dry_run" ]; then
       printf 'compact: db=%s pending_gc=present — dry-run (would retry DOLT_GC --full)\n' "$db"
@@ -3800,6 +3806,7 @@ disk_preflight() {
   esac
   _dp_available_bytes=$(awk -v available_kb="$_dp_available_kb" 'BEGIN { printf "%.0f", available_kb * 1024 }')
   if decimal_less_than "$_dp_available_bytes" "$_dp_min_free"; then
+    disk_critical=1
     printf 'compact: disk CRITICAL: free_bytes=%s floor=%s DOLT_DATA_DIR=%s\n' \
       "$_dp_available_bytes" "$_dp_min_free" "$DOLT_DATA_DIR" >&2
     case "$only_dbs" in
@@ -3813,7 +3820,7 @@ disk_preflight() {
         fi
         ;;
     esac
-    exit 0
+    return 0
   fi
 }
 
