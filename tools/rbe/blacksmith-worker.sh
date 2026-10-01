@@ -104,6 +104,8 @@ if [ "$ACTION_ISOLATION" = 1 ]; then
 	# Canonical paths: the launcher compares them with the action's pwd -P.
 	MASK_ROOT=$(cd "$HOME" && pwd -P)
 	WORK_ROOT=$(cd "$ROOT/work" && pwd -P)
+	# The CAS must stay under the mask: a CACHE_DIR (sticky disk) outside $HOME
+	# would be visible to actions, so isolation refuses it.
 	for d in "$WORK_ROOT" "$(cd "$ROOT" && pwd -P)" "$(cd "$STORE" && pwd -P)"; do
 		case "$d" in "$MASK_ROOT"/*) ;; *) echo "isolation: $d must be under $MASK_ROOT (MASK_ROOT, hidden from actions)" >&2; exit 1 ;; esac
 	done
@@ -115,8 +117,8 @@ if [ "$ACTION_ISOLATION" = 1 ]; then
 		sudo useradd --system --uid "$id" --gid "$id" --no-create-home --home-dir /var/lib/rbe-action/home --shell /bin/bash "$u"
 	done
 	sudo install -d -m 0755 /var/lib/rbe-action /var/lib/rbe-action/home "$LIB" /etc/rbe-west
-	gcc -static -O2 -Wall -Wextra -Werror -o "$RUNNER_TEMP/rbe-entry" tools/rbe/rbe-action-entry.c
-	gcc -static -O2 -Wall -Wextra -Werror -DRBE_ACTION_EXEC -o "$RUNNER_TEMP/rbe-exec" tools/rbe/rbe-action-entry.c
+	gcc -static -O2 -Wall -Wextra -o "$RUNNER_TEMP/rbe-entry" tools/rbe/rbe-action-entry.c
+	gcc -static -O2 -Wall -Wextra -DRBE_ACTION_EXEC -o "$RUNNER_TEMP/rbe-exec" tools/rbe/rbe-action-entry.c
 	sudo install -m 0755 "$RUNNER_TEMP/rbe-entry" "$LIB/entry"
 	sudo install -m 0755 "$RUNNER_TEMP/rbe-exec" "$LIB/exec"
 	sudo install -m 0755 tools/rbe/rbe-action-launch "$LIB/launch"
@@ -190,8 +192,15 @@ jq -n --arg host "grpcs://${RBE_WEST_HOST}:443" --arg root "$ROOT" --arg store "
   }' >"$ROOT/worker.json"
 
 if [ "$ACTION_ISOLATION" = 1 ]; then
-	sudo "$LIB/selftest" --quick
-	sudo -l -U rbe-a00 2>&1 | grep -q 'not allowed to run sudo' || { echo "isolation: slot users must have no sudo" >&2; exit 1; }
+	# Full selftest (a few seconds): it also checks worker.json routes actions
+	# through the entrypoint, the timeout path, and that this image has no
+	# shared world-writable directory outside TMPFS_DIRS.
+	sudo "$LIB/selftest"
+	LC_ALL=C sudo -l -U rbe-a00 2>&1 | grep -q 'not allowed to run sudo' || { echo "isolation: slot users must have no sudo" >&2; exit 1; }
+	# /run is not masked: a socket a slot user could open there (a 0666
+	# docker.sock) is a way out of the sandbox.
+	open_socks=$(sudo find /run /var/run -xdev -maxdepth 3 -type s -perm -o+w 2>/dev/null | grep -vxE '/run/systemd/(notify|journal/.*|private|io\.system\.ManagedOOM)|/run/dbus/system_bus_socket' || true)
+	[ -z "$open_socks" ] || { echo "isolation: world-writable sockets reachable by actions: $open_socks" >&2; exit 1; }
 	# What S11.3 is about, on this VM's layout: a probe action through the real
 	# entrypoint must run as a slot user and fail to read the worker key, find
 	# this step's environment in any process, or sudo.

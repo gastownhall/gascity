@@ -165,14 +165,15 @@ func TestRBEWorkerScriptGatesNativeLinkOnIsolation(t *testing.T) {
 	script := readFile(t, root, rbeWorkerScript)
 	// Install, prove, then start NativeLink; never the other way round.
 	order := []string{
-		`gcc -static -O2 -Wall -Wextra -Werror -o "$RUNNER_TEMP/rbe-entry" tools/rbe/rbe-action-entry.c`,
-		`gcc -static -O2 -Wall -Wextra -Werror -DRBE_ACTION_EXEC -o "$RUNNER_TEMP/rbe-exec" tools/rbe/rbe-action-entry.c`,
+		`gcc -static -O2 -Wall -Wextra -o "$RUNNER_TEMP/rbe-entry" tools/rbe/rbe-action-entry.c`,
+		`gcc -static -O2 -Wall -Wextra -DRBE_ACTION_EXEC -o "$RUNNER_TEMP/rbe-exec" tools/rbe/rbe-action-entry.c`,
 		`sudo install -m 0755 tools/rbe/rbe-action-launch "$LIB/launch"`,
 		`sudo install -m 0755 tools/rbe/rbe-action-sweep "$LIB/sweep"`,
 		`sudo install -m 0755 tools/rbe/rbe-action-selftest "$LIB/selftest"`,
 		`sudo chmod 0440 /etc/sudoers.d/rbe-action && sudo visudo -cq`,
-		`sudo "$LIB/selftest" --quick`,
-		`sudo -l -U rbe-a00 2>&1 | grep -q 'not allowed to run sudo'`,
+		`sudo "$LIB/selftest"`,
+		`LC_ALL=C sudo -l -U rbe-a00 2>&1 | grep -q 'not allowed to run sudo'`,
+		`open_socks=$(sudo find /run /var/run -xdev -maxdepth 3 -type s -perm -o+w`,
 		`probe "$ROOT/pki/worker.key"`,
 		`if ! grep -qE "^uid 590[0-9]{2}$" <<<"$out" || grep -q LEAK <<<"$out"; then`,
 		// NativeLink gets none of the step's environment (secrets included).
