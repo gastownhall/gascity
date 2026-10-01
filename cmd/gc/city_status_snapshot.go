@@ -287,6 +287,7 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 		obs := observations[i]
 		p.row.Agent.Running = obs.Running
 		p.row.Agent.Suspended = p.suspended || obs.Suspended || p.target.suspended
+		p.row.Agent.Partial = statusProviderPartialForName(sp, p.target.runtimeSessionName)
 		snapshot.Agents = append(snapshot.Agents, p.row)
 		snapshot.Summary.TotalAgents++
 		if obs.Running {
@@ -585,7 +586,11 @@ func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.
 			if row.ScaleLabel != "" {
 				fmt.Fprintf(stdout, "  %s%s\n", padStatusName(row.GroupName, statusNameColumnWidth), row.ScaleLabel) //nolint:errcheck // best-effort stdout
 			}
-			status := agentStatusLineWithPartial(row.Agent.Running, dops, row.SessionName, row.Agent.Suspended, snapshot.Partial)
+			// snapshot.Partial is a city-wide degraded-read signal (e.g. a
+			// stalled beads/mail read); row.Agent.Partial is set only when
+			// this specific agent's own runtime probe timed out. Either
+			// condition marks the row "unknown" rather than "stopped".
+			status := agentStatusLineWithPartial(row.Agent.Running, dops, row.SessionName, row.Agent.Suspended, snapshot.Partial || row.Agent.Partial)
 			if row.Expanded {
 				fmt.Fprintf(stdout, "    %s%s\n", padStatusName(row.Agent.QualifiedName, statusNameColumnWidth-2), status) //nolint:errcheck // best-effort stdout
 			} else {
