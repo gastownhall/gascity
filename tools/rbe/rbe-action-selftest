@@ -100,11 +100,20 @@ printf 'canary\n' >"$canary" && chmod 0444 "$canary"
 mask_rel=${WORK_ROOT#"$MASK_ROOT"/}
 mask_top=${mask_rel%%/*}
 [[ $mask_rel != "$WORK_ROOT" ]] || mask_top=
-# Full run only (walks the root filesystem, seconds): no world-writable
-# directory is shared between actions besides the per-action mounts.
+# Full run only (walks the root filesystem, seconds): no directory shared
+# between actions is writable by one, besides the per-action mounts. A
+# world-writable one counts only if the action can write it: access() and a
+# real create (RO_DIRS are read-only mounts in the action, 0777 or not).
 full_probe=
 if ((!quick)); then
-	full_probe='w=$(find / -xdev -type d -perm -0002 2>/dev/null | grep -vxE "/tmp|/var/tmp|'"${TMPFS_DIRS// /|}"'"); if [ -z "$w" ]; then echo "R no-shared-writable-dir"; else printf "W %s\n" $w; fi'
+	full_probe='w=0
+while IFS= read -r d; do
+	f=0; t=$d/.rbe-selftest-w.$$
+	[ -w "$d" ] && f=1
+	mkdir "$t" 2>/dev/null && rmdir "$t" && f=1
+	if [ $f = 1 ]; then echo "W $d"; w=1; fi
+done < <(find / -xdev -type d -perm -0002 2>/dev/null | grep -vxE "/tmp|/var/tmp|'"${TMPFS_DIRS// /|}"'")
+[ $w = 0 ] && echo "R no-shared-writable-dir"'
 fi
 probe='
 id=$(id -u); [ "$id" -ge '"$SLOT_UID0"' ] && [ "$id" -lt '"$((SLOT_UID0 + SLOT_COUNT))"' ] && echo "R uid-slot"
@@ -138,7 +147,7 @@ results=(uid-slot no-caps nnp env-exact input-immutable worker-cas-hidden mask-t
 for r in "${results[@]}"; do
 	if grep -qx "R $r" <<<"$out"; then ok "action: $r"; else bad "action: $r"; fi
 done
-sed -n 's/^W /      shared world-writable directory: /p' <<<"$out"
+sed -n 's/^W /      shared directory the action can write: /p' <<<"$out"
 for t in "${deny[@]}"; do
 	got=$(awk -v t="$t" '$1 == "D" && $2 == t { print $3 }' <<<"$out")
 	want=refused

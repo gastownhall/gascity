@@ -15,8 +15,9 @@
 #       unshare (new pid/mount/ipc[/net] namespaces).
 #   launch --ns <op> <slot> <rel> <timeout_s> <side_channel|-> <lock_fd> <n> <env...> <argv...>
 #       inner: pid 1 of those namespaces. Hides the worker's state, gives the
-#       action private /tmp, /var/tmp, HOME, /dev/shm (and TMPFS_DIRS), runs it
-#       as the slot user without privileges, enforces its timeout, kills
+#       action private /tmp, /var/tmp, HOME, /dev/shm (and TMPFS_DIRS), makes
+#       RO_DIRS read-only, runs it as the slot user without privileges,
+#       enforces its timeout, kills
 #       whatever it leaves behind, and gives every file back to the worker user
 #       for upload and cleanup.
 #
@@ -53,7 +54,7 @@ case ${1:-} in --ns | --parent) ;; *) first "$@" ;; esac
 . "$CONF"
 : "${WORK_ROOT:?}" "${MASK_ROOT:?}" "${WORKER_UID:?}" "${WORKER_GID:?}" "${SLOT_UID0:?}" "${SLOT_COUNT:?}"
 : "${MAX_TIMEOUT_S:?}" "${BACKSTOP_S:?}" "${HOME_DIR:?}"
-NETNS=${NETNS:-0} SHM_SIZE=${SHM_SIZE:-8g} TMPFS_DIRS=${TMPFS_DIRS:-/run/lock /var/crash}
+NETNS=${NETNS:-0} SHM_SIZE=${SHM_SIZE:-8g} TMPFS_DIRS=${TMPFS_DIRS:-/run/lock /var/crash} RO_DIRS=${RO_DIRS:-}
 EGRESS_CHAIN=${EGRESS_CHAIN:-inet filter rbe_action_out}
 
 outer() {
@@ -213,6 +214,17 @@ inner() {
 	local d
 	for d in $TMPFS_DIRS; do
 		if [[ -d $d ]]; then mount -t tmpfs -o mode=1777,size=16m,nosuid,nodev rbe-tmpfs "$d"; fi
+	done
+	# RO_DIRS: world-writable directories of the host (an image's shared tool
+	# caches) are read-only in here, so no action leaves files in them for a
+	# later one; the host keeps them as they are. Recursive and last: the
+	# mounts above (the mask among them) stay as they are inside a directory
+	# listed here.
+	for d in $RO_DIRS; do
+		if [[ -d $d ]]; then
+			mount --rbind "$d" "$d"
+			mount -o remount,bind,ro,nosuid,nodev "$d"
+		fi
 	done
 	mount -t mqueue -o nosuid,nodev,noexec rbe-mqueue /dev/mqueue
 	cd "$op_dir/work${rel:+/$rel}"

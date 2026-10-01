@@ -94,7 +94,10 @@ slots=$(($(nproc) / 2)); [ "$slots" -ge 1 ] || slots=1
 # step's environment (another uid, another pid namespace). An action can no
 # longer take the worker cert, so it cannot write the action cache or register
 # workers. The runner's own sudo (NOPASSWD) runs the root launcher; slot egress
-# is filtered by nftables (NETNS=0).
+# is filtered by nftables (NETNS=0). Nothing of the image changes for the
+# runner: its world-writable directories stay so, read-only inside actions
+# (RO_DIRS). Each phase is logged ("isolation: <phase>") so a step that dies
+# without an error still shows where.
 LIB=/usr/local/libexec/rbe-action
 isolation='{}'
 if [ "$ACTION_ISOLATION" = 1 ]; then
@@ -109,8 +112,10 @@ if [ "$ACTION_ISOLATION" = 1 ]; then
 	for d in "$WORK_ROOT" "$(cd "$ROOT" && pwd -P)" "$(cd "$STORE" && pwd -P)"; do
 		case "$d" in "$MASK_ROOT"/*) ;; *) echo "isolation: $d must be under $MASK_ROOT (MASK_ROOT, hidden from actions)" >&2; exit 1 ;; esac
 	done
+	echo "isolation: packages"
 	sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y -qq \
 		gcc libc6-dev nftables file util-linux procps >/dev/null
+	echo "isolation: users"
 	# The nft rules cover uids 59000-59063 whatever owns them: anything already
 	# there (an image user or group) would be filtered like a slot, and a slot
 	# sharing its uid or gid would share its files.
@@ -121,14 +126,32 @@ if [ "$ACTION_ISOLATION" = 1 ]; then
 		sudo groupadd --system --gid "$id" "$u"
 		sudo useradd --system --uid "$id" --gid "$id" --no-create-home --home-dir /var/lib/rbe-action/home --shell /bin/bash "$u"
 	done
+	echo "isolation: compile"
 	sudo install -d -m 0755 /var/lib/rbe-action /var/lib/rbe-action/home "$LIB" /etc/rbe-west
 	gcc -static -O2 -Wall -Wextra -o "$RUNNER_TEMP/rbe-entry" tools/rbe/rbe-action-entry.c
 	gcc -static -O2 -Wall -Wextra -DRBE_ACTION_EXEC -o "$RUNNER_TEMP/rbe-exec" tools/rbe/rbe-action-entry.c
+	echo "isolation: install"
 	sudo install -m 0755 "$RUNNER_TEMP/rbe-entry" "$LIB/entry"
 	sudo install -m 0755 "$RUNNER_TEMP/rbe-exec" "$LIB/exec"
 	sudo install -m 0755 tools/rbe/rbe-action-launch "$LIB/launch"
 	sudo install -m 0755 tools/rbe/rbe-action-sweep "$LIB/sweep"
 	sudo install -m 0755 tools/rbe/rbe-action-selftest "$LIB/selftest"
+	# No directory on / but /tmp and /var/tmp (private per action) and
+	# TMPFS_DIRS may be writable by every action, or one could leave files for
+	# a later one. The image's world-writable directories (tool caches the
+	# runner or Blacksmith's agent may write) stay as they are on the host;
+	# the launcher mounts each read-only inside every action (RO_DIRS, in this
+	# order: parents first). The full selftest checks no action can write one.
+	echo "isolation: ro-dirs"
+	started=$SECONDS rc=0
+	found=$(sudo timeout 300 find / -xdev -type d -perm -0002 2>/dev/null) || rc=$?
+	[ "$rc" != 124 ] || { echo "isolation: find / -xdev took over 300 s" >&2; exit 1; }
+	ro_dirs=$(grep -vxE '/tmp|/var/tmp|/run/lock|/var/crash' <<<"$found" | LC_ALL=C sort || true)
+	# rbe-action.env is shell, and the launcher splits RO_DIRS: plain paths only.
+	odd=$(grep -vxE '/[A-Za-z0-9._+@/-]+' <<<"$ro_dirs" | grep -v '^$' || true)
+	[ -z "$odd" ] || { echo "isolation: world-writable directories with unexpected names: $odd" >&2; exit 1; }
+	ro_dirs=$(paste -sd' ' - <<<"$ro_dirs")
+	echo "isolation: read-only in actions (RO_DIRS, $((SECONDS - started)) s): ${ro_dirs:-none}"
 	sudo tee /etc/rbe-west/rbe-action.env >/dev/null <<-EOF
 		WORK_ROOT=$WORK_ROOT
 		MASK_ROOT=$MASK_ROOT
@@ -142,10 +165,12 @@ if [ "$ACTION_ISOLATION" = 1 ]; then
 		NETNS=0
 		SHM_SIZE=8g
 		TMPFS_DIRS="/run/lock /var/crash"
+		RO_DIRS="$ro_dirs"
 		EGRESS_CHAIN="inet rbe_action output"
 		PROBE_DENY="169.254.169.254:80"
 		WORKER_JSON=$ROOT/worker.json
 	EOF
+	echo "isolation: sudoers"
 	printf 'Defaults!%s/launch !pam_session, !log_allowed, !use_pty, !lecture\n' "$LIB" |
 		sudo tee /etc/sudoers.d/rbe-action >/dev/null
 	sudo chmod 0440 /etc/sudoers.d/rbe-action && sudo visudo -cq
@@ -154,6 +179,7 @@ if [ "$ACTION_ISOLATION" = 1 ]; then
 	# private VPC resolver, is allowed to slots on port 53 alone; with neither
 	# (IPv6 only), slots could not resolve at all: refuse. No nameserver line:
 	# glibc uses 127.0.0.1.
+	echo "isolation: nft"
 	nameservers=$(awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf)
 	dns_v4=$(grep -E '^[0-9]+(\.[0-9]+){3}$' <<<"$nameservers" | grep -v '^127\.' | paste -sd, - | sed 's/,/, /g' || true)
 	dns_allow=
@@ -186,6 +212,7 @@ if [ "$ACTION_ISOLATION" = 1 ]; then
 	EOF
 	isolation='{ "entrypoint": "/usr/local/libexec/rbe-action/entry", "timeout_handled_externally": true, "max_action_timeout": 1260,
 		"additional_environment": { "RBE_X_TIMEOUT_MS": "timeout_millis", "RBE_X_SIDE_CHANNEL": "side_channel_file" } }'
+	echo "isolation: render"
 fi
 jq -n --arg host "grpcs://${RBE_WEST_HOST}:443" --arg root "$ROOT" --arg store "$STORE" --arg name "$WORKER_NAME" --argjson slots "$slots" --argjson isolation "$isolation" '
   { cert_file: ($root + "/pki/worker.pem"), key_file: ($root + "/pki/worker.key"),
@@ -215,23 +242,17 @@ jq -n --arg host "grpcs://${RBE_WEST_HOST}:443" --arg root "$ROOT" --arg store "
   }' >"$ROOT/worker.json"
 
 if [ "$ACTION_ISOLATION" = 1 ]; then
-	# This VM is ephemeral and runs only this worker: no directory on / but
-	# /tmp and /var/tmp (private per action) and TMPFS_DIRS may be writable by
-	# every user, or one action could leave files for a later one.
-	shared_dirs=$(sudo find / -xdev -type d -perm -0002 2>/dev/null | grep -vxE '/tmp|/var/tmp|/run/lock|/var/crash' || true)
-	if [ -n "$shared_dirs" ]; then
-		echo "isolation: removing world write from: $(tr '\n' ' ' <<<"$shared_dirs")"
-		xargs -r -d '\n' sudo chmod o-w <<<"$shared_dirs"
-	fi
 	# Full selftest (a few seconds): it also checks worker.json routes actions
-	# through the entrypoint, the timeout path, and that this image has no
-	# shared world-writable directory outside TMPFS_DIRS.
+	# through the entrypoint, the timeout path, and that an action can write
+	# no shared directory (RO_DIRS read-only, TMPFS_DIRS private).
+	echo "isolation: selftest"
 	sudo "$LIB/selftest"
 	LC_ALL=C sudo -l -U rbe-a00 2>&1 | grep -q 'not allowed to run sudo' || { echo "isolation: slot users must have no sudo" >&2; exit 1; }
 	# /run is not masked: a socket a slot user could open there (a 0666
 	# docker.sock) is a way out of the sandbox.
 	open_socks=$(sudo find /run /var/run -xdev -maxdepth 3 -type s -perm -o+w 2>/dev/null | grep -vxE '/run/systemd/(notify|journal/.*|private|io\.system\.ManagedOOM)|/run/dbus/system_bus_socket' || true)
 	[ -z "$open_socks" ] || { echo "isolation: world-writable sockets reachable by actions: $open_socks" >&2; exit 1; }
+	echo "isolation: probe"
 	# What S11.3 is about, on this VM's layout: a probe action through the real
 	# entrypoint must run as a slot user and fail to read the worker key, find
 	# this step's environment in any process, or sudo.
