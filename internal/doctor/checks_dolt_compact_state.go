@@ -46,6 +46,7 @@ type compactStateMarker struct {
 	path       string
 	reason     string
 	createdAt  string
+	remote     string
 }
 
 func (c *DoltCompactStateCheck) scanMarkers() ([]compactStateMarker, []string) {
@@ -84,6 +85,8 @@ func (c *DoltCompactStateCheck) scanMarkers() ([]compactStateMarker, []string) {
 					m.reason = v
 				} else if v, ok := strings.CutPrefix(line, "created_at="); ok {
 					m.createdAt = v
+				} else if v, ok := strings.CutPrefix(line, "remote="); ok {
+					m.remote = v
 				}
 			}
 			markers = append(markers, m)
@@ -111,8 +114,8 @@ func (c *DoltCompactStateCheck) Run(_ *CheckContext) *CheckResult {
 
 	details := make([]string, 0, len(markers)+len(readWarnings))
 	for _, m := range markers {
-		details = append(details, fmt.Sprintf("marker: %s db=%s path=%s reason=%s created_at=%s",
-			m.markerType, m.db, m.path, m.reason, m.createdAt))
+		details = append(details, fmt.Sprintf("marker: %s db=%s path=%s reason=%s created_at=%s remote=%s",
+			m.markerType, m.db, m.path, m.reason, m.createdAt, m.remote))
 	}
 	details = append(details, readWarnings...)
 	r.Details = details
@@ -144,8 +147,14 @@ func compactMarkerFixHint(m compactStateMarker) string {
 	case "compact-quarantine":
 		return fmt.Sprintf("inspect %s; clear the marker only after verifying its recorded evidence", m.path)
 	case "compact-pending-gc":
+		if m.remote != "" {
+			return fmt.Sprintf("remote-backed GC incomplete for %s via %s; inspect %s, then reconcile manually or retry with GC_DOLT_COMPACT_ALLOW_FEDERATED=1 only during an announced compaction window", m.db, m.remote, m.path)
+		}
 		return fmt.Sprintf("GC incomplete for %s; inspect %s, then run: gc dolt compact --only-db %s", m.db, m.path, m.db)
 	case "compact-pending-push":
+		if m.remote != "" {
+			return fmt.Sprintf("remote push pending for %s via %s; inspect %s, then reconcile manually or retry with GC_DOLT_COMPACT_ALLOW_FEDERATED=1 only during an announced compaction window", m.db, m.remote, m.path)
+		}
 		return fmt.Sprintf("push pending for %s; inspect %s, then run: gc dolt compact --only-db %s", m.db, m.path, m.db)
 	case "compact-pending-push-backup":
 		return fmt.Sprintf("backup push pending for %s; inspect %s, reconcile the backup remote manually, then remove the marker after verification", m.db, m.path)

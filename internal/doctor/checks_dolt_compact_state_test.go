@@ -120,6 +120,25 @@ func TestDoltCompactStateCheckReportsStaleMarkersWithFixHints(t *testing.T) {
 	}
 }
 
+func TestDoltCompactStateCheckDoesNotSuggestUnannouncedRemoteRecovery(t *testing.T) {
+	for _, markerType := range []string{"compact-pending-gc", "compact-pending-push"} {
+		t.Run(markerType, func(t *testing.T) {
+			dir := newDoltCompactStateTestCity(t)
+			markerPath := writeDoltCompactStateMarker(t, dir, markerType, "analytics", "remote recovery pending", compactStateOldCreatedAt)
+			content := fmt.Sprintf("db=analytics\nreason=remote recovery pending\ncreated_at=%s\nremote=origin\n", compactStateOldCreatedAt)
+			if err := os.WriteFile(markerPath, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			r := newTestDoltCompactStateCheck(dir).Run(&CheckContext{CityPath: dir})
+			assertDoltCompactStateMentions(t, r, "remote=origin", "reconcile manually", "announced compaction window")
+			if strings.Contains(r.FixHint, "then run: gc dolt compact") {
+				t.Fatalf("remote-backed marker suggests an unannounced retry: %s", r.FixHint)
+			}
+		})
+	}
+}
+
 func TestDoltCompactStateCheckReportsBackupPushMarkerDatabase(t *testing.T) {
 	dir := newDoltCompactStateTestCity(t)
 	markerPath := writeDoltCompactStateMarker(t, dir, "compact-pending-push-backup", "warehouse.archive", "backup push failed", compactStateOldCreatedAt)
