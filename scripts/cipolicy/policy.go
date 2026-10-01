@@ -86,7 +86,12 @@ const (
 	// Bumped again for the Beads v1.3.0 -> v1.3.1-rc.2 -> v1.3.1 pins: every job's
 	// BD_VERSION env value moves to the new tag. Reviewed delta: that value
 	// only, no new job, step, trigger or permission.
-	expectedCIExecutionHash     = "6350a6daf42f4baf0b6dec49c08ae43722926ee99f89c04814a052c6a4e00741"
+	//
+	// Bumped again so TestBdStoreConformance runs in a lane of its own
+	// (ga-oh86kw): the integration-shards matrix gains one row, bdstore-conformance
+	// (timeout_minutes 15, make test-integration-bdstore-conformance). Reviewed
+	// delta: that row only, no new job, step, trigger or permission.
+	expectedCIExecutionHash     = "e990c9a50f758490b949e5c0fc61f407452a7251c459d830451a41256081c919"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: $0 <packages|packages-core-N-of-M|packages-cmd-gc-integration|packages-cmd-gc-N-of-M|packages-runtime-tmux-N-of-M|review-formulas|review-formulas-basic[-N-of-M]|review-formulas-retries[-N-of-M]|review-formulas-recovery|bdstore|rest|rest-smoke[-N-of-M]|rest-full[-N-of-M]|all>" >&2
+  echo "usage: $0 <packages|packages-core-N-of-M|packages-cmd-gc-integration|packages-cmd-gc-N-of-M|packages-runtime-tmux-N-of-M|review-formulas|review-formulas-basic[-N-of-M]|review-formulas-retries[-N-of-M]|review-formulas-recovery|bdstore|bdstore-conformance|rest|rest-smoke[-N-of-M]|rest-full[-N-of-M]|all>" >&2
   exit 1
 fi
 
@@ -419,7 +419,10 @@ case "$shard" in
     run_pkg_tests "$pkg" "${review_formulas_recovery_tests[@]}"
     ;;
   bdstore)
-    run_pkg_tests "$pkg" TestBdStoreConformance TestBdStoreMailWispInsert
+    run_pkg_tests "$pkg" TestBdStoreMailWispInsert
+    ;;
+  bdstore-conformance)
+    run_pkg_tests "$pkg" TestBdStoreConformance
     ;;
   rest-smoke)
     run_rest_smoke_shard
@@ -437,6 +440,7 @@ case "$shard" in
     "$0" review-formulas-retries
     "$0" review-formulas-recovery
     "$0" bdstore
+    "$0" bdstore-conformance
     "$0" rest-smoke
     "$0" rest-full
     ;;
