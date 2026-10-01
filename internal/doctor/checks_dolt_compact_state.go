@@ -98,7 +98,7 @@ func (c *DoltCompactStateCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	if c.skip {
 		r.Status = StatusOK
-		r.Message = "skipped (managed dolt check disabled)"
+		r.Message = "skipped (managed Dolt not in use or checks disabled)"
 		return r
 	}
 
@@ -131,7 +131,7 @@ func (c *DoltCompactStateCheck) Run(_ *CheckContext) *CheckResult {
 		msgParts = append(msgParts, fmt.Sprintf("compact lifecycle markers: %s", strings.Join(markerLabels, ", ")))
 	}
 	if len(readWarnings) > 0 {
-		msgParts = append(msgParts, fmt.Sprintf("%d marker file(s) unreadable", len(readWarnings)))
+		msgParts = append(msgParts, fmt.Sprintf("%d marker path(s) unreadable", len(readWarnings)))
 	}
 
 	r.Status = StatusWarning

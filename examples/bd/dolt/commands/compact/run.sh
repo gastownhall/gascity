@@ -2782,6 +2782,11 @@ flatten_database() {
     esac
   fi
 
+  if [ "$pending_gc_recovery_only" = "1" ] && ! has_compact_marker "$pending_gc_dir" "$db"; then
+    printf 'compact: db=%s pending_gc marker disappeared — refusing non-recovery work under critical disk\n' "$db" >&2
+    return 0
+  fi
+
   # Shared-history guard (#5958; remote guard adapted from #6052). Any
   # configured remote means other clones may share this history, and a flatten
   # would have to be force-pushed over it. Checked independently of remote

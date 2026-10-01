@@ -711,7 +711,7 @@ case "$query" in
     ;;
   *"SELECT COUNT(*) FROM dolt_remotes WHERE name = 'origin'"*)
     case "$mode" in
-      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|multiple_remotes_with_origin|backup_remote_reconcile|backup_remote_push_failure|backup_remote_filters_non_file_and_authoritative)
+      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|pending_gc_marker_disappears_remote|multiple_remotes_with_origin|backup_remote_reconcile|backup_remote_push_failure|backup_remote_filters_non_file_and_authoritative)
         print_cell 1
         ;;
       *)
@@ -740,7 +740,7 @@ case "$query" in
       remote_count_invalid)
         print_cell many
         ;;
-      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten)
+      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|pending_gc_marker_disappears_remote)
         print_cell 1
         ;;
       multiple_remotes_with_origin|multiple_remotes_no_origin)
@@ -767,7 +767,7 @@ case "$query" in
         # Real Dolt always names the first remote when any exist.
         print_cell backup
         ;;
-      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|multiple_remotes_with_origin)
+      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|pending_gc_marker_disappears_remote|multiple_remotes_with_origin)
         print_cell origin
         ;;
       explicit_backup_remote)
@@ -900,7 +900,7 @@ case "$query" in
     exit 0
     ;;
   *"SELECT HASHOF('HEAD')"*)
-    if [ "$mode" = "pending_gc_marker_disappears" ] && [ -n "$pending_gc_marker" ]; then
+    if { [ "$mode" = "pending_gc_marker_disappears" ] || [ "$mode" = "pending_gc_marker_disappears_remote" ]; } && [ -n "$pending_gc_marker" ]; then
       rm -f "$pending_gc_marker"
     fi
     if [ "$mode" = "second_db_post_flatten_head_empty" ] && [ "$db" = "zed" ]; then
@@ -1370,7 +1370,7 @@ case "$query" in
         exit 0
         ;;
     esac
-    if [ "$mode" = "quarantine_autoclear_confined" ] || [ "$mode" = "pending_gc_marker_disappears" ]; then
+    if [ "$mode" = "quarantine_autoclear_confined" ] || [ "$mode" = "pending_gc_marker_disappears" ] || [ "$mode" = "pending_gc_marker_disappears_remote" ]; then
       case "$query" in
         *"rows_deleted"*|*"rows_modified"*)
           print_cell 0
@@ -6493,6 +6493,52 @@ func TestCompactScriptDiskPreflightDoesNotFlattenAfterPendingGCMarkerDisappears(
 	}
 	if strings.Contains(string(logData), "DOLT_RESET") || strings.Contains(string(logData), "DOLT_GC") {
 		t.Fatalf("critical-disk recovery must not start work after marker removal:\n%s", logData)
+	}
+}
+
+func TestCompactScriptDiskPreflightDoesNotGCRemoteBackedDBAfterPendingGCMarkerDisappears(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "same_count_db_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("setup run should create a quarantine marker:\n%s", firstOut)
+	}
+	if err := os.Truncate(fixture.doltLog, 0); err != nil {
+		t.Fatalf("truncate dolt log after setup: %v", err)
+	}
+	for path, value := range map[string]string{
+		fixture.stateFile:     "headcommit\n",
+		fixture.hashStateFile: "hash-before\n",
+		fixture.tagStateFile:  "rootcommit\n",
+	} {
+		if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
+			t.Fatalf("reset fixture state %s: %v", path, err)
+		}
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatalf("mkdir pending-GC marker directory: %v", err)
+	}
+	if err := os.WriteFile(marker, []byte("db=beads\nreason=flatten succeeded but full GC failed\n"), 0o600); err != nil {
+		t.Fatalf("write pending-GC marker: %v", err)
+	}
+
+	out, err := fixture.runWithArgs(t, "pending_gc_marker_disappears_remote", []string{"--only-db", "beads"},
+		"GC_FAKE_DF_MODE=df_critical", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_FAKE_PENDING_GC_MARKER="+marker)
+	if err != nil {
+		t.Fatalf("critical-disk recovery should stop safely after marker removal: %v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "quarantine marker auto-cleared") {
+		t.Fatalf("test did not reach post-preflight marker removal window:\n%s", out)
+	}
+	if !strings.Contains(out, "refusing non-recovery work under critical disk") {
+		t.Fatalf("critical-disk recovery did not stop after marker removal:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("critical-disk recovery must not GC a remote-backed db after marker removal:\n%s", logData)
 	}
 }
 
