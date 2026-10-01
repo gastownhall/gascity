@@ -982,3 +982,18 @@ func TestBuildAwakeInputFromReconcilerNamedAlwaysPostChurnRewakes(t *testing.T) 
 		t.Errorf("wake reason = %q, want named-always", got.Reason)
 	}
 }
+
+func TestAwakeWorkflowRoot(t *testing.T) {
+	step := beads.Bead{ID: "s-1", Metadata: map[string]string{"gc.root_bead_id": "root-1", "gc.step_ref": "mol-x.a"}}
+	root := beads.Bead{ID: "root-1", Metadata: map[string]string{"gc.input_convoy_id": "cv-1"}}
+	solo := beads.Bead{ID: "wb-1"}
+	if got := awakeWorkflowRoot(step); got != "root-1" {
+		t.Fatalf("step root = %q, want root-1", got)
+	}
+	if got := awakeWorkflowRoot(root); got != "root-1" {
+		t.Fatalf("workflow root bead root = %q, want its own id", got)
+	}
+	if got := awakeWorkflowRoot(solo); got != "" {
+		t.Fatalf("standalone root = %q, want empty", got)
+	}
+}

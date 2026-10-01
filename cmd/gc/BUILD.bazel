@@ -171,6 +171,7 @@ go_library(
         "completions_lane.go",
         "compute_awake_bridge.go",
         "compute_awake_set.go",
+        "compute_awake_workflow_root.go",
         "config_hash.go",
         "context_inject.go",
         "control_dispatcher_scope_gap_event.go",
