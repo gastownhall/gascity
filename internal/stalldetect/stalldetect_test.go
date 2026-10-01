@@ -223,3 +223,41 @@ func TestPoolForAssignee(t *testing.T) {
 		}
 	}
 }
+
+func TestAnalyze_DeletedBeadNotReported(t *testing.T) {
+	now := time.Now().UTC()
+	es := []events.Event{
+		beadEvent(t, 1, events.BeadCreated, "gcg-1", now.Add(-1*time.Hour), beads.Bead{ID: "gcg-1", Status: "in_progress", Assignee: "polecat-1"}),
+		beadEvent(t, 2, events.BeadDeleted, "gcg-1", now.Add(-30*time.Minute), beads.Bead{ID: "gcg-1", Status: "in_progress", Assignee: "polecat-1"}),
+	}
+	report := Analyze(es, Window{}, now, 15*time.Minute, Filter{})
+	if len(report.Entries) != 0 {
+		t.Errorf("deleted bead should not be reported, got %+v", report.Entries)
+	}
+}
+
+func TestAnalyze_RunIDEventRefreshesRootLastEvent(t *testing.T) {
+	now := time.Now().UTC()
+	stepAt := now.Add(-5 * time.Minute)
+	es := []events.Event{
+		beadEvent(t, 1, events.BeadCreated, "gcg-1", now.Add(-1*time.Hour), beads.Bead{ID: "gcg-1", Status: "in_progress", Assignee: "polecat-1"}),
+		{Seq: 2, Type: events.ExecutionStepStarted, Ts: stepAt, Subject: "gcg-1.s1", RunID: "gcg-1"},
+	}
+	report := Analyze(es, Window{}, now, 15*time.Minute, Filter{})
+	if len(report.Entries) != 1 {
+		t.Fatalf("expected 1 entry (the root), got %+v", report.Entries)
+	}
+	entry := report.Entries[0]
+	if entry.BeadID != "gcg-1" {
+		t.Fatalf("BeadID = %q, want gcg-1", entry.BeadID)
+	}
+	if entry.Stalled {
+		t.Errorf("root with recent step activity should not be stalled: %+v", entry)
+	}
+	if !entry.LastEventAt.Equal(stepAt) {
+		t.Errorf("LastEventAt = %v, want %v", entry.LastEventAt, stepAt)
+	}
+	if entry.LastEventType != events.ExecutionStepStarted {
+		t.Errorf("LastEventType = %q, want %q", entry.LastEventType, events.ExecutionStepStarted)
+	}
+}

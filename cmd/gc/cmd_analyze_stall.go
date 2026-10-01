@@ -19,8 +19,7 @@ const defaultStallThreshold = "15m"
 
 // stallCmdOptions captures the resolved CLI flags for one invocation of
 // `gc analyze stalls`. Extracted so the run logic is testable without
-// faking the cobra binding layer — same split as beadsCmdOptions and
-// reliabilityCmdOptions.
+// faking the cobra binding layer — same split as reliabilityCmdOptions.
 type stallCmdOptions struct {
 	cityPath  string
 	since     string
@@ -38,17 +37,18 @@ func newAnalyzeStallCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Last-event age per in-progress bead / pool — the dispatcher-wedged signature",
 		Long: `Stalls reports every bead last known to be status=in_progress,
 its last-event age (now minus the most recent event carrying that bead
-id as Subject), and whether that age meets or exceeds --threshold — the
-"is the dispatcher wedged" signature: a bead claimed and started with no
-event since. Results are grouped per pool (derived from the bead's
-assignee; a pool-instance identity like "polecat-2" folds into pool
-"polecat", an in-progress bead with no assignee groups under
-"unassigned") as well as listed per bead, sorted oldest-first.
+id as Subject or RunID), and whether that age meets or exceeds
+--threshold — the "is the dispatcher wedged" signature: a bead claimed
+and started with no event since. Results are grouped per pool (derived
+from the bead's assignee; a pool-instance identity like "polecat-2"
+folds into pool "polecat", an in-progress bead with no assignee groups
+under "unassigned") as well as listed per bead, sorted oldest-first.
 
 --since bounds how far back events.jsonl is scanned to establish each
 bead's current status and last-event time; it is not the stall
 threshold. A bead that has been in_progress longer than --since with no
-event in that window will not appear — widen --since to see it.
+event in that window will not appear — widen --since to see it. A bead
+that has been silent for longer than the window is not shown at all.
 
 Read-only: this command never writes events or beads.`,
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -63,7 +63,7 @@ Read-only: this command never writes events or beads.`,
 		},
 	}
 	cmd.Flags().StringVar(&opts.cityPath, "city", "", "city directory (default: discover from cwd)")
-	cmd.Flags().StringVar(&opts.since, "since", "24h",
+	cmd.Flags().StringVar(&opts.since, "since", "7d",
 		"start of the event lookback window — duration (1h, 7d) or RFC3339 timestamp")
 	cmd.Flags().StringVar(&opts.until, "until", "",
 		"end of the event lookback window and evaluation instant — duration (0s = now, 30m = 30 minutes ago) or RFC3339 timestamp")

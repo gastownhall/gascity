@@ -1,16 +1,17 @@
 // Package stalldetect answers the "is the dispatcher wedged" operator
 // question: which beads are sitting at status=in_progress with no event
 // newer than a configurable threshold, and which pool are they parked
-// on. Introduced by issue #5852 as the fourth of four `gc analyze`
-// subcommands reading events.jsonl (the first, bead throughput, shipped
-// in #5865/internal/beadthroughput and set the pattern this package
-// follows).
+// on. Introduced by issue #5852 as a `gc analyze` subcommand reading
+// events.jsonl, following the pattern internal/reliability set.
+//
+// A bead's last event is the most recent event carrying its id as
+// Subject or as RunID, so step events on a molecule count as activity
+// on the workflow root. Only Subject bead snapshots set status.
 //
 // The package is a pure-data layer: it parses events.Event slices into
 // a stall report. The CLI (cmd/gc/cmd_analyze_stall.go) handles IO,
 // filtering, and presentation — the same split reliability
-// (internal/reliability) and beadthroughput (internal/beadthroughput)
-// established.
+// (internal/reliability) established.
 package stalldetect
 
 import (
@@ -34,10 +35,14 @@ const unassignedPool = "unassigned"
 // dispatcher-wedged signature cares about.
 const inProgressStatus = "in_progress"
 
+// deletedStatus marks a bead whose latest snapshot came from bead.deleted.
+// The payload there is the pre-delete snapshot, so its status is ignored.
+const deletedStatus = "deleted"
+
 // Window restricts the events considered to a time range. Zero-valued
-// fields disable the corresponding bound. Mirrors internal/beadthroughput's
-// Window; kept as a separate type so this package has no dependency on
-// sibling analyze packages and each owns its windowing independently.
+// fields disable the corresponding bound. Kept as a package-local type
+// (rather than shared with internal/reliability) so this package has no
+// dependency on sibling analyze packages and owns its windowing.
 type Window struct {
 	Since time.Time
 	Until time.Time
@@ -98,9 +103,9 @@ type Report struct {
 	Pools            []PoolSummary `json:"pools"`
 	TotalInProgress  int           `json:"total_in_progress"`
 	TotalStalled     int           `json:"total_stalled"`
-	// Skipped counts bead.created/bead.updated/bead.closed events whose
-	// payload did not decode to a bead with an id — visible rather than
-	// silently absorbed, matching beadthroughput.Report.Skipped.
+	// Skipped counts bead.created/bead.updated/bead.closed/bead.deleted
+	// events whose payload did not decode to a bead with an id — visible
+	// rather than silently absorbed, as internal/reliability does.
 	Skipped int `json:"skipped"`
 }
 
@@ -119,9 +124,13 @@ type beadState struct {
 // now, and whether that age meets or exceeds threshold. Events outside
 // the window are dropped. Only events carrying a non-empty Subject
 // contribute (Subject is the bead id for every event type this package
-// cares about); bead.created/bead.updated/bead.closed events additionally
-// carry a full bead snapshot used to track status and assignee, and a
-// snapshot payload that fails to decode counts toward Report.Skipped.
+// cares about); a non-empty RunID different from Subject also refreshes
+// that bead's last event, so molecule step activity keeps its workflow
+// root fresh. bead.created/bead.updated/bead.closed/bead.deleted events
+// additionally carry a full bead snapshot used to track status and
+// assignee, and a snapshot payload that fails to decode counts toward
+// Report.Skipped. A deleted bead is never reported, whatever status its
+// pre-delete snapshot carries.
 //
 // now is passed explicitly (not time.Now()) so the analysis is
 // deterministic and testable; the CLI passes the wall-clock time or
@@ -158,8 +167,20 @@ func Analyze(es []events.Event, win Window, now time.Time, threshold time.Durati
 			st.lastEventAt = e.Ts
 			st.lastEventType = e.Type
 		}
+		if runID := strings.TrimSpace(e.RunID); runID != "" && runID != subject {
+			root, ok := states[runID]
+			if !ok {
+				root = &beadState{}
+				states[runID] = root
+			}
+			if !e.Ts.Before(root.lastEventAt) {
+				root.lastEventAt = e.Ts
+				root.lastEventType = e.Type
+			}
+		}
 
-		if e.Type != events.BeadCreated && e.Type != events.BeadUpdated && e.Type != events.BeadClosed {
+		if e.Type != events.BeadCreated && e.Type != events.BeadUpdated &&
+			e.Type != events.BeadClosed && e.Type != events.BeadDeleted {
 			continue
 		}
 		bead, decoded := beads.DecodeBeadEventPayload(e.Payload)
@@ -171,6 +192,10 @@ func Analyze(es []events.Event, win Window, now time.Time, threshold time.Durati
 			st.snapshotAt = e.Ts
 			st.status = bead.Status
 			st.assignee = bead.Assignee
+			if e.Type == events.BeadDeleted {
+				// The payload is the pre-delete snapshot; its status is stale.
+				st.status = deletedStatus
+			}
 		}
 	}
 

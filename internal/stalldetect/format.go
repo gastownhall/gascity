@@ -48,7 +48,7 @@ func FormatTable(w io.Writer, r Report) error {
 		if _, err := fmt.Fprintln(w); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintf(w, "%d bead.created/bead.updated/bead.closed event(s) skipped: payload did not decode to a bead with an id.\n", r.Skipped); err != nil {
+		if _, err := fmt.Fprintf(w, "%d bead.created/bead.updated/bead.closed/bead.deleted event(s) skipped: payload did not decode to a bead with an id.\n", r.Skipped); err != nil {
 			return err
 		}
 	}

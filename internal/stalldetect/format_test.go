@@ -63,7 +63,7 @@ func TestFormatTable_SkippedNoteAppears(t *testing.T) {
 	if err := FormatTable(&buf, r); err != nil {
 		t.Fatalf("FormatTable: %v", err)
 	}
-	if !strings.Contains(buf.String(), "2 bead.created/bead.updated/bead.closed event(s) skipped") {
+	if !strings.Contains(buf.String(), "2 bead.created/bead.updated/bead.closed/bead.deleted event(s) skipped") {
 		t.Errorf("expected skipped note, got:\n%s", buf.String())
 	}
 }
