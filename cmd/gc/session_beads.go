@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -3126,6 +3127,14 @@ func deadRuntimeBelongsToRow(info session.Info, name string, sp runtime.Provider
 	return dead
 }
 
+// cleanupDeadRuntimeSessionCorpses stops visible runtimes whose panes are all
+// dead and closes the open rows that claimed them (#2437); with the runtime
+// server absent it reaps the rows that provably died with a reboot instead.
+//
+// inv, when set, nominates the names to check and skips names its pass saw
+// with a live pane. Every Stop still follows a fresh IsDeadRuntimeSession on
+// that name, and an absent server seen by the lane only sends the pass to a
+// fresh listing, whose own ServerAbsent the pre-boot reap needs.
 func cleanupDeadRuntimeSessionCorpses(
 	store beads.Store,
 	_ map[string]beads.Store,
@@ -3133,6 +3142,7 @@ func cleanupDeadRuntimeSessionCorpses(
 	sessionBeads *sessionBeadSnapshot,
 	dt *drainTracker,
 	sp runtime.Provider,
+	inv *runtimeInventoryView,
 	clk clock.Clock,
 	stderr io.Writer,
 ) int {
@@ -3146,7 +3156,19 @@ func cleanupDeadRuntimeSessionCorpses(
 	if !ok {
 		return 0
 	}
-	visible, err := sp.ListRunning("")
+	var visible []string
+	var err error
+	if inv != nil {
+		visible, err = inv.listing()
+		if runtime.IsRuntimeServerAbsent(err) {
+			inv = nil
+		} else {
+			inv.corpses.source = inventorySourceLane
+		}
+	}
+	if inv == nil {
+		visible, err = sp.ListRunning("")
+	}
 	partialList := runtime.IsPartialListError(err)
 	if err != nil && !partialList {
 		fmt.Fprintf(stderr, "session reconciler: listing runtime sessions for dead cleanup: %v\n", err) //nolint:errcheck
@@ -3192,6 +3214,14 @@ func cleanupDeadRuntimeSessionCorpses(
 			continue
 		}
 		seen[name] = true
+		if inv != nil {
+			inv.corpses.candidates++
+			if inv.livePane(name) {
+				inv.corpses.filtered++
+				continue
+			}
+			inv.corpses.confirms++
+		}
 		dead, err := deadChecker.IsDeadRuntimeSession(name)
 		if err != nil {
 			fmt.Fprintf(stderr, "session reconciler: confirming dead runtime session %s: %v\n", name, err) //nolint:errcheck
@@ -3271,11 +3301,17 @@ func cleanupDeadRuntimeSessionCorpses(
 // confirms is closed. A runtime without a readable GC_SESSION_ID, or one whose
 // bead is still open or cannot be fetched (e.g. another rig, or a transient
 // store error), is left untouched. Active drains are left to the drainTracker.
+//
+// inv, when set, nominates the names to check and skips names whose listed
+// incarnation the lane attributed to a bead the snapshot holds open. Every
+// Stop still follows a fresh GetMeta of that name and a fresh exact-name
+// listing that still shows it.
 func reapRuntimesBoundToClosedBeads(
 	store beads.Store,
 	sessionBeads *sessionBeadSnapshot,
 	dt *drainTracker,
 	sp runtime.Provider,
+	inv *runtimeInventoryView,
 	stderr io.Writer,
 ) int {
 	if store == nil || sp == nil {
@@ -3284,7 +3320,14 @@ func reapRuntimesBoundToClosedBeads(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	visible, err := sp.ListRunning("")
+	var visible []string
+	var err error
+	if inv != nil {
+		inv.closedBound.source = inventorySourceLane
+		visible, err = inv.listing()
+	} else {
+		visible, err = sp.ListRunning("")
+	}
 	partialList := runtime.IsPartialListError(err)
 	if err != nil && !partialList {
 		fmt.Fprintf(stderr, "session reconciler: listing runtime sessions for closed-bead reap: %v\n", err) //nolint:errcheck
@@ -3305,6 +3348,20 @@ func reapRuntimesBoundToClosedBeads(
 			continue
 		}
 		seen[name] = true
+		if inv != nil {
+			inv.closedBound.candidates++
+			// The lane read GC_SESSION_ID once per incarnation. This filter
+			// rests on GC_SESSION_ID never changing within an incarnation:
+			// a runtime rebound to another bead is a new incarnation, which
+			// carries no owner until the lane enriches it.
+			if owner, ok := inv.owner(name); ok {
+				if _, open := sessionBeads.FindInfoByID(owner); open {
+					inv.closedBound.filtered++
+					continue
+				}
+			}
+			inv.closedBound.confirms++
+		}
 
 		// Attribute the runtime to a bead via GC_SESSION_ID. Without it we
 		// cannot tell which bead owns the runtime, so we leave it alone.
@@ -3338,6 +3395,16 @@ func reapRuntimesBoundToClosedBeads(
 		// Teardown ordering for draining beads belongs to the drainTracker.
 		if dt != nil && dt.get(liveID) != nil {
 			continue
+		}
+
+		// A lane-nominated name may be gone by now, and providers whose
+		// GetMeta reads sidecar files (acp, subprocess) answer for a gone
+		// name. Stop only a name a fresh exact-name listing still shows,
+		// as a live listing would have.
+		if inv != nil {
+			if names, _ := sp.ListRunning(name); !slices.Contains(names, name) {
+				continue
+			}
 		}
 
 		if err := sp.Stop(name); err != nil {

@@ -161,6 +161,9 @@ type RuntimeObservation struct {
 	// incarnation; LastListedAt the latest.
 	FirstListedAt time.Time
 	LastListedAt  time.Time
+	// EnrichedAt is the listing start of the last pass that enriched the
+	// name: Incarnation, the owner fields, Running and Attached are from it.
+	EnrichedAt time.Time
 }
 
 func (o *RuntimeObservation) fact(kind FactKind) *RuntimeFact {
@@ -560,7 +563,7 @@ func primedChanged(prev, next map[string]bool) bool {
 func applyInventoryAttrs(obs *RuntimeObservation, a InventoryAttrs, at time.Time) {
 	poller := func(v ObsFact) RuntimeFact { return RuntimeFact{Value: v, ObservedAt: at, Source: SourcePoller} }
 	unsupported := RuntimeFact{Value: ObsUnknown, ObservedAt: at, Source: SourcePoller, Reason: obsReasonUnsupported}
-	obs.Incarnation = a.Incarnation
+	obs.Incarnation, obs.EnrichedAt = a.Incarnation, at
 	obs.Running, obs.ProcessAlive = unsupported, unsupported
 	if a.DeadKnown {
 		obs.Running = poller(obsFactOf(!a.AllPanesDead))
@@ -636,20 +639,30 @@ func (c *ObservationCache) Note(name string, kind FactKind, v ObsFact, at time.T
 	c.store(&next, flipped, at)
 }
 
-// Get returns name's observation with every fact read at the cache's clock:
-// stale facts, and facts about names on unprimed backends, read ObsUnknown.
-func (c *ObservationCache) Get(name string) (RuntimeObservation, bool) {
-	snap := c.cur.Load()
-	obs, ok := snap.ByName[name]
+// Observation returns name's observation read at now: stale facts, and facts
+// about names on unprimed backends, read ObsUnknown. Its Incarnation and owner
+// fields are returned only for the incarnation listed now: Listed must read
+// Yes, and the pass that last listed the name must also have enriched it.
+// Otherwise they are cleared, so a reader never takes a stale, unprimed or
+// previous incarnation's attribution as the current one.
+func (s *ObservationSnapshot) Observation(name string, now time.Time, maxAge time.Duration) (RuntimeObservation, bool) {
+	obs, ok := s.ByName[name]
 	if !ok {
 		return RuntimeObservation{}, false
 	}
-	now := c.clock.Now()
 	for _, kind := range allFactKinds {
 		f := obs.fact(kind)
-		*f = snap.readFact(obs.Backend, *f, now, c.maxAge)
+		*f = s.readFact(obs.Backend, *f, now, maxAge)
+	}
+	if obs.Listed.Value != ObsYes || obs.EnrichedAt.IsZero() || !obs.EnrichedAt.Equal(obs.Listed.ObservedAt) {
+		obs.Incarnation, obs.Owner, obs.OwnerState, obs.InstanceToken = "", reconcilekey.Key{}, OwnerUnknown, ""
 	}
 	return obs, true
+}
+
+// Get returns name's observation read at the cache's clock (Observation).
+func (c *ObservationCache) Get(name string) (RuntimeObservation, bool) {
+	return c.cur.Load().Observation(name, c.clock.Now(), c.maxAge)
 }
 
 // Snapshot returns the current immutable snapshot. Read facts through
@@ -658,14 +671,16 @@ func (c *ObservationCache) Snapshot() *ObservationSnapshot {
 	return c.cur.Load()
 }
 
-// FreshInventory returns the latest pass if it finished within maxAge and its
-// merged listing did not fail. A caller that gets false lists live.
-func (c *ObservationCache) FreshInventory(maxAge time.Duration) (InventoryPass, bool) {
-	pass := c.cur.Load().Inventory
+// FreshSnapshot returns the current snapshot if its pass finished within
+// maxAge and its merged listing did not fail, so a reader gets the pass and
+// the facts it published together. A caller that gets false lists live.
+func (c *ObservationCache) FreshSnapshot(maxAge time.Duration) (*ObservationSnapshot, bool) {
+	snap := c.cur.Load()
+	pass := snap.Inventory
 	if pass.FinishedAt.IsZero() || c.clock.Now().Sub(pass.FinishedAt) > maxAge || pass.mergedFailed() {
-		return InventoryPass{}, false
+		return nil, false
 	}
-	return pass, true
+	return snap, true
 }
 
 // Changed returns a channel that receives after each Gen advance; bursts

@@ -46,10 +46,13 @@ import (
 // A pass whose listing timed out, was still in flight or panicked publishes
 // a failed outcome for every backend (named through Backends(), without
 // listing): facts stay as they were and age out, health keeps moving toward
-// unhealthy, and the failed merged error makes FreshInventory refuse the
+// unhealthy, and the failed merged error makes FreshSnapshot refuse the
 // pass at once.
 //
-// on_death is the only legacy consumer: nothing else reads the cache yet.
+// Its legacy consumers are on_death (runtime_inventory_ondeath.go) and the
+// runtime reapers (runtime_inventory_view.go): for the reapers the lane only
+// nominates and filters candidates, and every Stop and close still follows
+// their own fresh confirmation.
 type runtimeInventoryLane struct {
 	cache     *ObservationCache
 	clock     clock.Clock
@@ -360,7 +363,7 @@ func (l *runtimeInventoryLane) publish(ctx context.Context, listing inventoryLis
 
 // publishListingFailure publishes a pass whose listing produced no answer:
 // every backend failed with the same error, so no fact moves, health keeps
-// counting toward unhealthy, and FreshInventory refuses the pass.
+// counting toward unhealthy, and FreshSnapshot refuses the pass.
 func (l *runtimeInventoryLane) publishListingFailure(sp runtime.Provider, started time.Time, result string, report *inventoryPassReport) {
 	err := fmt.Errorf("runtime inventory listing %s", result)
 	leaves := inventoryLeaves(sp, "")

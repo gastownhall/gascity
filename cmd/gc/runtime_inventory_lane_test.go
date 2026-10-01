@@ -717,6 +717,10 @@ type eventedInventoryProvider struct {
 	once       sync.Once
 }
 
+// IsDeadRuntimeSession makes the provider a death checker, so the startup
+// corpse cleaner runs and reads the lane's view.
+func (p *eventedInventoryProvider) IsDeadRuntimeSession(string) (bool, error) { return false, nil }
+
 func (p *eventedInventoryProvider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) { //nolint:unparam // runtime.SessionEventProvider signature
 	out := make(chan runtime.SessionEvent)
 	go func() {
@@ -740,7 +744,7 @@ func (p *eventedInventoryProvider) SubscribeSessionEvents(ctx context.Context) (
 
 // Kills: health frozen during a hung listing while the trace reads healthy.
 // A listing that times out, and the in-flight passes behind it, publish a
-// failed outcome: facts stay put, FreshInventory refuses the pass at once,
+// failed outcome: facts stay put, FreshSnapshot refuses the pass at once,
 // the backend turns unhealthy after five minutes, the alert fires, and the
 // pass record shows it.
 func TestInventoryLane_HungListingTurnsBackendUnhealthy(t *testing.T) {
@@ -758,8 +762,8 @@ func TestInventoryLane_HungListingTurnsBackendUnhealthy(t *testing.T) {
 		sp.listGate = gate
 		sp.mu.Unlock()
 		runTestInventoryPass(cr)
-		if _, ok := lane.cache.FreshInventory(time.Hour); ok {
-			t.Fatal("FreshInventory served a pass whose listing timed out")
+		if _, ok := lane.cache.FreshSnapshot(time.Hour); ok {
+			t.Fatal("FreshSnapshot served a pass whose listing timed out")
 		}
 		snap := lane.cache.Snapshot()
 		if got := snap.ByName["gc-a"].Listed; got != seen {
@@ -979,9 +983,12 @@ func TestInventoryLane_WakeMinimumSpacing(t *testing.T) {
 	})
 }
 
-// Kills: the tick not recording the lane, and a pass never traced. The tick
-// writes a runtime_inventory_lane phase record carrying the snapshot's pass,
-// and the lane's first pass writes a runtime_inventory.pass record.
+// Kills: the tick not recording the lane, a pass never traced, a reaper phase
+// that hides which observation it used, and the tick not handing the reapers
+// the view (each reaper names the lane only when it took the view's listing).
+// The tick writes a runtime_inventory_lane phase record carrying the
+// snapshot's pass, the two runtime reapers' phase records name that pass, and
+// the lane's first pass writes a runtime_inventory.pass record.
 func TestCityRuntimeTick_EmitsInventoryLaneRecord(t *testing.T) {
 	cr := &CityRuntime{
 		cityPath: t.TempDir(),
@@ -990,7 +997,7 @@ func TestCityRuntimeTick_EmitsInventoryLaneRecord(t *testing.T) {
 			Workspace: config.Workspace{Name: "test-city"},
 			Daemon:    config.DaemonConfig{PatrolInterval: inventoryLaneInterval.String()},
 		},
-		sp:                  newScriptedInventoryProvider("gc-a"),
+		sp:                  newReaperWorld(reaperFixtureState(nil, map[string]reaperRuntime{"gc-a": {incarnation: "gc-a:1"}})),
 		standaloneCityStore: beads.NewMemStore(),
 		rec:                 events.Discard,
 		logPrefix:           "test-city",
@@ -1017,7 +1024,12 @@ func TestCityRuntimeTick_EmitsInventoryLaneRecord(t *testing.T) {
 		t.Fatalf("ReadTraceRecords: %v", err)
 	}
 	var tickRecord, passRecord bool
+	reaperPhases := map[string]bool{}
 	for _, r := range records {
+		if r.SiteCode == TraceSiteControllerTickPhase && r.Fields["inventory_source"] == inventorySourceLane &&
+			r.Fields["inventory_pass_seq"] == float64(1) && r.Fields["inventory_epoch"] == cr.inventoryLane.cache.epoch {
+			reaperPhases[fmt.Sprint(r.Fields["operation_name"])] = true
+		}
 		if r.SiteCode == TraceSiteControllerTickPhase && r.Fields["operation_name"] == "runtime_inventory_lane" &&
 			r.Fields["inventory_pass_seq"] == float64(1) && r.Fields["inventory_backend_outcomes"] == "provider=complete" {
 			tickRecord = true
@@ -1033,11 +1045,18 @@ func TestCityRuntimeTick_EmitsInventoryLaneRecord(t *testing.T) {
 	if !passRecord {
 		t.Error("the lane's first pass wrote no runtime_inventory.pass record")
 	}
+	for _, phase := range []string{"cleanup_dead_runtime_session_corpses", "reap_runtimes_bound_to_closed_beads"} {
+		if !reaperPhases[phase] {
+			t.Errorf("the %s phase record does not name the lane pass it used", phase)
+		}
+	}
 }
 
 // Kills: run() wiring regressions. The prime pass is published before the
-// startup reconcile builds desired state, the session-event pump wakes the
-// lane, and run() does not return until the lane goroutine has exited.
+// startup reconcile builds desired state, the startup runtime reapers read
+// its view (each reaper's phase record names the lane only when it took the
+// view's listing), the session-event pump wakes the lane, and run() does not
+// return until the lane goroutine has exited.
 func TestCityRuntimeRun_InventoryLaneLifecycle(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -1109,6 +1128,31 @@ func TestCityRuntimeRun_InventoryLaneLifecycle(t *testing.T) {
 	}
 	if got := cr.inventoryLane.wakePasses.Load(); got != 1 {
 		t.Fatalf("wake passes = %d, want the one the session-event pump woke", got)
+	}
+	if err := cr.trace.Close(); err != nil {
+		t.Fatalf("closing the tracer: %v", err)
+	}
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cr.cityPath), TraceFilter{})
+	if err != nil {
+		t.Fatalf("ReadTraceRecords: %v", err)
+	}
+	startupTicks := map[string]bool{}
+	for _, r := range records {
+		if r.TickTrigger == TraceTickTriggerStartup {
+			startupTicks[r.TickID] = true
+		}
+	}
+	lanePhases := map[string]bool{}
+	for _, r := range records {
+		if startupTicks[r.TickID] && r.SiteCode == TraceSiteControllerTickPhase &&
+			r.Fields["inventory_source"] == inventorySourceLane && r.Fields["inventory_pass_seq"] == float64(1) {
+			lanePhases[fmt.Sprint(r.Fields["operation_name"])] = true
+		}
+	}
+	for _, phase := range []string{"cleanup_dead_runtime_session_corpses", "reap_runtimes_bound_to_closed_beads"} {
+		if !lanePhases[phase] {
+			t.Errorf("the startup %s phase record does not name the prime pass", phase)
+		}
 	}
 }
 

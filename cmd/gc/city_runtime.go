@@ -706,9 +706,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 
 	// The runtime inventory lane starts after the startup reload, which can
 	// swap the provider, with one synchronous pass so startup reconciliation
-	// finds a published inventory. From then on it owns on_death detection,
-	// and its worker runs the hooks, off the tick. run() stops both and waits
-	// for them on every exit.
+	// finds a published inventory: the runtime reapers take their candidates
+	// from it. From then on it owns on_death detection, and its worker runs
+	// the hooks, off the tick. run() stops both and waits for them on every
+	// exit.
 	if cr.initRuntimeInventoryLane() != nil {
 		inventoryPrimeStart := time.Now()
 		cr.primeNow(ctx)
@@ -790,11 +791,18 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			}
 		}()
 
-		cleanupDeadRuntimeSessionCorpses(cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr)
+		inv := cr.inventoryViewForTick()
+		phaseStart := time.Now()
+		cleanupDeadRuntimeSessionCorpses(cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, inv, clock.Real{}, cr.stderr)
+		startupTrace.RecordControllerOperation(TraceSiteControllerTickPhase, TraceReasonRetained, TraceOutcomeComplete,
+			"cleanup_dead_runtime_session_corpses", time.Since(phaseStart), inv.corpsePhaseFields())
 		// Reap live runtimes still bound to a closed bead (e.g. a named-session
 		// identity re-minted as a pool slot) so the name's current owner can
 		// rebind it and attach lands on the right runtime.
-		reapRuntimesBoundToClosedBeads(cr.sessionsBeadStore().Store, sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
+		phaseStart = time.Now()
+		reapRuntimesBoundToClosedBeads(cr.sessionsBeadStore().Store, sessionBeads, cr.sessionDrains, cr.sp, inv, cr.stderr)
+		startupTrace.RecordControllerOperation(TraceSiteControllerTickPhase, TraceReasonRetained, TraceOutcomeComplete,
+			"reap_runtimes_bound_to_closed_beads", time.Since(phaseStart), inv.closedBoundPhaseFields())
 		if swept := sweepProcessTableOrphans(cr.sp, sessionBeads, cr.sessionsBeadStore().Store, cr.cityPath, cr.stderr); swept > 0 {
 			fmt.Fprintf(cr.stderr, "session reconciler: swept %d process-table orphan runtime(s)\n", swept) //nolint:errcheck
 		}
@@ -1379,16 +1387,19 @@ func (cr *CityRuntime) tick(
 	// corrects bead state, and the pre-reconcile sync is sufficient for
 	// the reconciler to read/write hashes during reconciliation.
 	// Reap open session beads whose tmux session is dead before loading demand
-	// so stale names cannot block desired-state computation (#742).
+	// so stale names cannot block desired-state computation (#742). Both
+	// runtime reapers take their candidates from the inventory lane's last
+	// pass when it is fresh, and list live otherwise.
+	inv := cr.inventoryViewForTick()
 	phaseStart = time.Now()
-	cleanupDeadRuntimeSessionCorpses(cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr)
-	recordPhase(TraceSiteControllerTickPhase, "cleanup_dead_runtime_session_corpses", phaseStart, nil)
+	cleanupDeadRuntimeSessionCorpses(cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, inv, clock.Real{}, cr.stderr)
+	recordPhase(TraceSiteControllerTickPhase, "cleanup_dead_runtime_session_corpses", phaseStart, inv.corpsePhaseFields())
 	// Reap live runtimes still bound to a closed bead (e.g. a named-session
 	// identity re-minted as a pool slot) so the name's current owner can rebind
 	// it and attach lands on the right runtime.
 	phaseStart = time.Now()
-	reapRuntimesBoundToClosedBeads(cr.sessionsBeadStore().Store, sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
-	recordPhase(TraceSiteControllerTickPhase, "reap_runtimes_bound_to_closed_beads", phaseStart, nil)
+	reapRuntimesBoundToClosedBeads(cr.sessionsBeadStore().Store, sessionBeads, cr.sessionDrains, cr.sp, inv, cr.stderr)
+	recordPhase(TraceSiteControllerTickPhase, "reap_runtimes_bound_to_closed_beads", phaseStart, inv.closedBoundPhaseFields())
 	phaseStart = time.Now()
 	swept := sweepProcessTableOrphans(cr.sp, sessionBeads, cr.sessionsBeadStore().Store, cr.cityPath, cr.stderr)
 	if swept > 0 {
