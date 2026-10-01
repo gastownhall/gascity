@@ -3944,6 +3944,10 @@ func TestCompactScriptRefusesToRestoreOverExternalHeadAdvance(t *testing.T) {
 	if strings.Contains(log, "DOLT_GC") {
 		t.Fatalf("flatten failure must not run full GC:\n%s", log)
 	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("restore refusal should quarantine the database: %v", err)
+	}
 }
 
 func TestCompactScriptSurfacesFlattenFailureStderr(t *testing.T) {
@@ -6441,6 +6445,30 @@ func TestCompactScriptBackupSyncSuccessBeforeBareGC(t *testing.T) {
 	}
 }
 
+func TestCompactScriptBackupSyncBeforeSharedHistoryBareGC(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "remote_success",
+		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+	)
+	if err != nil {
+		t.Fatalf("shared-history compact with backup should succeed: %v\nout=%s", err, out)
+	}
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	log := string(logData)
+	backupIndex := strings.Index(log, "backup sync prod-backup")
+	gcIndex := strings.Index(log, "CALL DOLT_GC()")
+	if backupIndex < 0 || gcIndex < 0 || backupIndex > gcIndex {
+		t.Fatalf("backup sync must precede shared-history bare GC:\n%s", log)
+	}
+	if strings.Contains(log, "DOLT_RESET") || strings.Contains(log, "DOLT_PUSH") {
+		t.Fatalf("shared-history guard must not flatten or push:\n%s", log)
+	}
+}
+
 func TestCompactScriptBareGCPreservesPreFlattenBackupDuringRecovery(t *testing.T) {
 	for _, markerType := range []string{"compact-pending-gc", "compact-pending-push"} {
 		t.Run(markerType, func(t *testing.T) {
@@ -6486,6 +6514,25 @@ func TestCompactScriptBackupSyncFailureBeforeBareGCExitsOne(t *testing.T) {
 	}
 	if !strings.Contains(out, "backup sync to remote=prod-backup failed; aborting compaction") {
 		t.Fatalf("expected backup failure log for bare GC path:\n%s", out)
+	}
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("backup failure must abort before bare GC:\n%s", logData)
+	}
+}
+
+func TestCompactScriptBackupZeroPaddedTimeoutExitsTwo(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_BACKUP_REMOTE=prod-backup",
+		"GC_DOLT_COMPACT_BACKUP_TIMEOUT_SECS=000",
+	)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+		t.Fatalf("zero-padded backup timeout should exit 2: got err=%v\nout=%s", err, out)
 	}
 }
 
@@ -6694,7 +6741,7 @@ func TestCompactScriptDiskPreflightSufficientProceedsNormally(t *testing.T) {
 
 func TestCompactScriptDiskPreflightCriticalExitsZero(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
-	out, err := fixture.run(t, "success", "GC_FAKE_DF_MODE=df_critical")
+	out, err := fixture.run(t, "success", "GC_FAKE_DF_MODE=df_critical", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err != nil {
 		t.Fatalf("compact should exit 0 on critical disk (skip not fail): %v\nout=%s", err, out)
 	}
@@ -6709,6 +6756,34 @@ func TestCompactScriptDiskPreflightCriticalExitsZero(t *testing.T) {
 	}
 	if !strings.Contains(out, fixture.dataDir) {
 		t.Fatalf("expected DOLT_DATA_DIR in CRITICAL output:\n%s", out)
+	}
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(logData), "DOLT_RESET") || strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("critical disk must skip flatten and GC:\n%s", logData)
+	}
+}
+
+func TestCompactScriptDiskPreflightOversizedFloorSkipsCompaction(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success",
+		"GC_DOLT_COMPACT_MIN_FREE_BYTES=18446744073709551616",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+	)
+	if err != nil {
+		t.Fatalf("oversized disk floor should safely skip compaction: %v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "disk CRITICAL") {
+		t.Fatalf("expected disk CRITICAL output:\n%s", out)
+	}
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(logData), "DOLT_RESET") || strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("oversized disk floor must skip flatten and GC:\n%s", logData)
 	}
 }
 

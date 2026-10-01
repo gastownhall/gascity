@@ -45,7 +45,7 @@ type compactStateMarker struct {
 	createdAt  string
 }
 
-func (c *DoltCompactStateCheck) scanMarkers() ([]compactStateMarker, []string, error) {
+func (c *DoltCompactStateCheck) scanMarkers() ([]compactStateMarker, []string) {
 	packStateDir := doctorDoltPackStateDir(c.cityPath)
 	var markers []compactStateMarker
 	var readWarnings []string
@@ -56,10 +56,11 @@ func (c *DoltCompactStateCheck) scanMarkers() ([]compactStateMarker, []string, e
 			if os.IsNotExist(err) {
 				continue
 			}
-			return nil, nil, fmt.Errorf("read %s: %w", dir, err)
+			readWarnings = append(readWarnings, fmt.Sprintf("unreadable marker directory %s: %v", dir, err))
+			continue
 		}
 		for _, e := range entries {
-			if e.Type()&fs.ModeType != 0 || strings.HasPrefix(e.Name(), ".") {
+			if e.Type()&fs.ModeType != 0 || strings.HasPrefix(e.Name(), ".") || strings.Contains(e.Name(), ".tmp.") {
 				continue
 			}
 			markerPath := filepath.Join(dir, e.Name())
@@ -85,7 +86,7 @@ func (c *DoltCompactStateCheck) scanMarkers() ([]compactStateMarker, []string, e
 			markers = append(markers, m)
 		}
 	}
-	return markers, readWarnings, nil
+	return markers, readWarnings
 }
 
 // Run scans compact lifecycle markers.
@@ -97,12 +98,7 @@ func (c *DoltCompactStateCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
-	markers, readWarnings, err := c.scanMarkers()
-	if err != nil {
-		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("scan compact markers: %v", err)
-		return r
-	}
+	markers, readWarnings := c.scanMarkers()
 
 	if len(markers) == 0 && len(readWarnings) == 0 {
 		r.Status = StatusOK

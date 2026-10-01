@@ -3247,7 +3247,9 @@ flatten_database() {
     emit_error_file "$db" "$reset_err_tmp"
     rm -f "$preflight_tmp"
     rm -f "$reset_err_tmp"
-    restore_head_after_flatten_failure "$db" "$head" "$flatten_base" || true
+    if ! restore_head_after_flatten_failure "$db" "$head" "$flatten_base"; then
+      write_quarantine_marker "$db" "flatten failed and pre-flatten HEAD restore failed" || return 1
+    fi
     return 1
   fi
   rm -f "$reset_err_tmp"
@@ -3817,6 +3819,16 @@ backup_sync_database() {
   fi
 }
 
+decimal_less_than() {
+  awk -v left="$1" -v right="$2" 'BEGIN {
+    while (length(left) > 1 && substr(left, 1, 1) == "0") left = substr(left, 2)
+    while (length(right) > 1 && substr(right, 1, 1) == "0") right = substr(right, 2)
+    if (length(left) < length(right)) exit 0
+    if (length(left) > length(right)) exit 1
+    exit !("x" left < "x" right)
+  }'
+}
+
 disk_preflight() {
   _dp_min_free="${GC_DOLT_COMPACT_MIN_FREE_BYTES:-5368709120}"
   case "$_dp_min_free" in
@@ -3848,9 +3860,9 @@ disk_preflight() {
       return 1
       ;;
   esac
-  _dp_available_bytes=$(( _dp_available_kb * 1024 ))
-  if [ "$_dp_available_bytes" -lt "$_dp_min_free" ]; then
-    printf 'compact: disk CRITICAL: free_bytes=%d floor=%d DOLT_DATA_DIR=%s\n' \
+  _dp_available_bytes=$(awk -v available_kb="$_dp_available_kb" 'BEGIN { printf "%.0f", available_kb * 1024 }')
+  if decimal_less_than "$_dp_available_bytes" "$_dp_min_free"; then
+    printf 'compact: disk CRITICAL: free_bytes=%s floor=%s DOLT_DATA_DIR=%s\n' \
       "$_dp_available_bytes" "$_dp_min_free" "$DOLT_DATA_DIR" >&2
     exit 0
   fi
@@ -3934,8 +3946,11 @@ main() {
         "$compact_backup_timeout" >&2
       exit 2
       ;;
-    0)
-      printf 'compact: GC_DOLT_COMPACT_BACKUP_TIMEOUT_SECS=0 is invalid — must be a positive integer\n' >&2
+    *[1-9]*)
+      ;;
+    *)
+      printf 'compact: GC_DOLT_COMPACT_BACKUP_TIMEOUT_SECS=%s is invalid — must be a positive integer\n' \
+        "$compact_backup_timeout" >&2
       exit 2
       ;;
   esac
