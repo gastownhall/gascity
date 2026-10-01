@@ -206,9 +206,23 @@ yet settled.
   `usage_compute_emitted_at:<epoch>` marker, then writes the marker. This is
   at-least-once: a crash between the durable sink append and the marker write
   re-emits next tick, and `IdempotencyKey` collapses the duplicate at read time
-  (fix double-count, not under-count). The scan only sees the open set, so a
-  session closed directly from active without first reaching an open terminal
-  state (asleep/drained/archived/suspended/quarantined) is a known under-count.
+  (fix double-count, not under-count). The open-set scan cannot see a session
+  closed directly from active (the drain-ack close and the other reconciler close
+  arms), so two closed-session lanes settle those intervals (#6672). Each tick
+  remembers which open sessions still had an unaccounted interval; one that has
+  left the open set by the next tick is fetched and, if closed, settled from the
+  closed bead: the terminal model sweep bills the trailing usage the live lane
+  had not reached, and the compute fact's wall time ends at `slept_at` or else
+  `closed_at` (never the tick's now). A periodic backstop (first steady-state
+  tick, then every 10 minutes) lists closed session beads and settles any closed
+  within 24h whose interval is still unaccounted, covering a controller restart
+  between close and settle and closes written by another process. A close older
+  than 24h that was never settled stays a known under-count. A closed bead is
+  compute-terminal whatever its state code; failed-create closes carry no
+  `awake_started_at` and emit nothing. Settling at the close write itself
+  (inside `closeBead`) was considered and deferred: it needs the usage sink and
+  worker factory threaded through the free-function close helpers (about 15
+  signatures and 45 production call sites), for at most one tick of latency.
   The single-key marker sidesteps open question 3 (`beads.Tx` validation across
   store impls).
 - **The awake epoch is `awake_started_at` at nanosecond precision**, stamped
