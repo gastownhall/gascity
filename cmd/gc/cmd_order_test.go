@@ -1728,7 +1728,12 @@ func TestOrderTrackingSweepErrorIsFatalForRetentionAllStoreFailure(t *testing.T)
 	}
 }
 
-func TestSweepOrderTrackingCommandIncludeWispsRequiresOrderBeforePruning(t *testing.T) {
+// --include-wisps with no order names is the SCHEDULED recovery path: the
+// shipped order-tracking-sweep order runs it that way, because the one thing
+// an unattended sweep cannot do is know in advance which order is wedged. It
+// used to be refused outright, which is what left an abandoned pour holding
+// its order's open-work gate shut with no gc-level recovery (sr-kjwpz).
+func TestSweepOrderTrackingCommandIncludeWispsRunsUnscoped(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
@@ -1773,23 +1778,79 @@ delete_after_close = "1ns"
 		ids = append(ids, tracking.ID)
 	}
 
-	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Hour, true, false, false, false, nil, &stdout, &stderr)
-	if code == 0 {
-		t.Fatalf("cmdOrderSweepTracking = 0, want failure")
+	// A pour poured just now. The unscoped wisp half must leave it alone even
+	// though --stale-after is hours wide, because unscoped recovery runs on
+	// unscopedOrderWispStaleAfter and not on the tracking bound — that
+	// separation is the whole reason a scheduled sweep can be allowed to force
+	// close anything at all. (Draining an actually-abandoned pour needs
+	// controlled clocks; those assertions live on the sweep itself, in
+	// order_dispatch_unscoped_wisp_sweep_test.go.)
+	fresh, err := store.Create(beads.Bead{
+		Title:    "ticket-intake",
+		Labels:   []string{"order-run:ticket-intake"},
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	if err != nil {
+		t.Fatalf("Create(fresh root): %v", err)
 	}
-	if !strings.Contains(stderr.String(), "include-wisps requires at least one order name") {
-		t.Fatalf("stderr = %q, want include-wisps error", stderr.String())
+	step, err := store.Create(beads.Bead{
+		Title:    "Poll recent_tickets",
+		Metadata: map[string]string{"gc.root_bead_id": fresh.ID},
+	})
+	if err != nil {
+		t.Fatalf("Create(fresh step): %v", err)
+	}
+
+	// The unscoped sweep's whole safety margin is openSubtreeUntouchedSince,
+	// which is worthless if the backing store does not actually populate
+	// UpdatedAt — the predicate would skip every bead and silently degrade to
+	// age-only. The behavioral tests run on MemStore, which stamps it itself,
+	// so assert the plumbing here, where the store is a real on-disk one.
+	assignee := "st--support__intake-poller-pool"
+	if err := store.Update(step.ID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+		t.Fatalf("Update(step claim): %v", err)
+	}
+	claimed, err := store.Get(step.ID)
+	if err != nil {
+		t.Fatalf("Get(step): %v", err)
+	}
+	if claimed.UpdatedAt.IsZero() {
+		t.Fatal("UpdatedAt is zero after a write: openSubtreeUntouchedSince cannot see progress on this store")
+	}
+	if !claimed.UpdatedAt.After(claimed.CreatedAt) {
+		t.Fatalf("UpdatedAt %v not after CreatedAt %v: a claim must move the timestamp the sweep reads",
+			claimed.UpdatedAt, claimed.CreatedAt)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepTrackingWithOptions(unscopedOrderWispStaleAfter+time.Hour, true, false, false, false, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdOrderSweepTracking = %d, want 0 (unscoped --include-wisps is accepted); stderr = %q", code, stderr.String())
 	}
 
 	reopened, err := openStoreAtForCity(cityDir, cityDir)
 	if err != nil {
 		t.Fatalf("openStoreAtForCity(city reopen): %v", err)
 	}
+	for _, id := range []string{fresh.ID, step.ID} {
+		got, err := reopened.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("%s status = %q, want open: --stale-after must not widen the unscoped wisp bound", id, got.Status)
+		}
+	}
+	// The tracking half still ran on --stale-after, so the expired closed
+	// tracking beads past the retention floor are gone.
+	pruned := 0
 	for _, id := range ids {
 		if _, err := reopened.Get(id); err != nil {
-			t.Fatalf("%s should be preserved after invalid command: %v", id, err)
+			pruned++
 		}
+	}
+	if pruned == 0 {
+		t.Fatal("no closed tracking beads pruned: the tracking half did not run")
 	}
 }
 
