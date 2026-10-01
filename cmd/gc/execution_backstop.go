@@ -46,6 +46,13 @@ package main
 // can lose it, and a latch that outlives its drain would otherwise silence the
 // backstop for the rest of the seat's life.
 //
+// # An answer restarts the window
+//
+// The attempts bound a session that never answers. One that shows runtime
+// activity after its last nudge did answer, so its count resets and its grace
+// clock restarts (renew); otherwise any agent waiting on a command longer than
+// the ~10-minute ladder is drained mid-run.
+//
 // # Holds are named
 //
 // Every hold leaves a breadcrumb on the session bead (executionClaimHoldKey), so
@@ -287,6 +294,39 @@ func (p poolExecutionBackstop) state(s beads.Bead, target backstopTarget) (same 
 	same = strings.TrimSpace(s.Metadata[executionClaimNudgeWorkKey]) == target.ID &&
 		strings.TrimSpace(s.Metadata[executionClaimNudgeStoreRefKey]) == target.StoreRef
 	return same, atoiOr0(s.Metadata[executionClaimNudgeCountKey]), parseRFC3339OrZero(s.Metadata[executionClaimNudgeAtKey])
+}
+
+// renew implements activityRenewingBackstop. A session that shows runtime
+// activity after its last nudge answered it: its attempt count goes back to 0
+// and its grace clock restarts, so an agent waiting out a long command and
+// replying to every nudge is never marched to the drain. Before any nudge,
+// last is the observe marker, so a template with no nudge is renewed by
+// activity after observation and otherwise still drains straight after grace.
+//
+// A session that never answers is not renewed: the engine only gets here once
+// resolve has seen the session quiet for the grace window, by which time the
+// tmux provider has discounted gc's own nudge echo (discountPokeActivity).
+// Once the escalation latch is set the drain owns the session, and activity
+// does not unwind it.
+func (p poolExecutionBackstop) renew(store beads.Store, s *beads.Bead, target backstopTarget, sessName string, attempts int, last, now time.Time, stdout io.Writer) bool {
+	if last.IsZero() || strings.TrimSpace(s.Metadata[executionClaimNudgeStalledKey]) != "" {
+		return false
+	}
+	activity, err := p.sp.GetLastActivity(sessName)
+	if err != nil || !activity.After(last) {
+		return false
+	}
+	if !writeExecutionClaimMarker(store, s, target, 0, now, stdout) {
+		return false
+	}
+	since := "its last nudge"
+	if attempts == 0 {
+		since = "it was observed"
+	}
+	fmt.Fprintf(stdout, //nolint:errcheck // best-effort
+		"execution-claim-nudge: %s showed activity since %s for %s; restarting its window (forgiving %d/%d attempts)\n",
+		sessName, since, target.ID, attempts, idleClaimNudgeMaxAttempts)
+	return true
 }
 
 func (p poolExecutionBackstop) content(s beads.Bead) string {
