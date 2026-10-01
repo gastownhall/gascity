@@ -21,11 +21,13 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/resilience"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
@@ -378,8 +380,8 @@ func TestSweepUndesiredPoolSessionBeads_RunningProbeAvoidsFullObservation(t *tes
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0", closed)
 	}
-	if got := sp.CountCalls("IsAttached", "worker-bd-running"); got != 0 {
-		t.Fatalf("IsAttached calls = %d, want 0; sweep only needs running state", got)
+	if got := sp.CountCalls("IsAttached", "worker-bd-running") + sp.CountCalls("IsAttachedWithError", "worker-bd-running"); got != 0 {
+		t.Fatalf("IsAttached/IsAttachedWithError calls = %d, want 0; sweep only needs running state", got)
 	}
 	if got := sp.CountCalls("GetLastActivity", "worker-bd-running"); got != 0 {
 		t.Fatalf("GetLastActivity calls = %d, want 0; sweep only needs running state", got)
@@ -526,6 +528,9 @@ func newTestCityRuntime(t *testing.T, params CityRuntimeParams) *CityRuntime {
 		for _, od := range cr.retiredOrderDispatchers {
 			cancelInflight(od)
 		}
+		// A reload restarts the config watcher; stop it so its debounce
+		// goroutine does not outlive the test.
+		cr.stopConfigWatcher()
 		cr.shutdown()
 	})
 	return cr
@@ -4169,7 +4174,6 @@ func TestCityRuntimeTickRunsOnDeathWithCanonicalRigEnv(t *testing.T) {
 		sp:                  runtime.NewFake(),
 		standaloneCityStore: beads.NewMemStore(),
 		sessionDrains:       newDrainTracker(),
-		poolDeathHandlers:   handlers,
 		rec:                 events.Discard,
 		stdout:              io.Discard,
 		stderr:              &stderr,
@@ -4177,6 +4181,7 @@ func TestCityRuntimeTickRunsOnDeathWithCanonicalRigEnv(t *testing.T) {
 			return DesiredStateResult{State: map[string]TemplateParams{}}
 		},
 	}
+	cr.publishPoolDeathHandlers(handlers)
 
 	cr.reconcilePoolDeaths(&prevPoolRunning)
 
@@ -4208,19 +4213,19 @@ func TestCityRuntimeTickSkipsOnDeathWhenSessionListingIsPartial(t *testing.T) {
 		},
 		standaloneCityStore: beads.NewMemStore(),
 		sessionDrains:       newDrainTracker(),
-		poolDeathHandlers: map[string]poolDeathInfo{
-			sessionName: {
-				Command: "printf fired > " + shellQuotePath(outFile),
-				Dir:     cityPath,
-			},
-		},
-		rec:    events.Discard,
-		stdout: io.Discard,
-		stderr: &stderr,
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              &stderr,
 		buildFnWithSessionBeads: func(_ *config.City, _ runtime.Provider, _ beads.Store, _ map[string]beads.Store, _ *sessionBeadSnapshot, _ *sessionReconcilerTraceCycle) DesiredStateResult {
 			return DesiredStateResult{State: map[string]TemplateParams{}}
 		},
 	}
+	cr.publishPoolDeathHandlers(map[string]poolDeathInfo{
+		sessionName: {
+			Command: "printf fired > " + shellQuotePath(outFile),
+			Dir:     cityPath,
+		},
+	})
 
 	cr.reconcilePoolDeaths(&prevPoolRunning)
 
@@ -7654,5 +7659,153 @@ func TestCityRuntimeWiresSessionEventPumpCallSites(t *testing.T) {
 	}
 	if !repointed {
 		t.Fatal("city_runtime.go no longer calls cr.sessionEvents.restart(nextSp) on provider change: a reload leaves the pump subscribed to the stale provider")
+	}
+}
+
+// capacityRefusingProvider refuses every start with a typed capacity error
+// while refusing is set.
+type capacityRefusingProvider struct {
+	*runtime.Fake
+	refusing bool
+}
+
+func (p *capacityRefusingProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if p.refusing {
+		p.Fake.Start(ctx, name, cfg) //nolint:errcheck // records the call; the refusal below is the result
+		p.Stop(name)                 //nolint:errcheck
+		return capacityRefusal(name, "")
+	}
+	return p.Fake.Start(ctx, name, cfg)
+}
+
+// newCapacityRefusingRuntime builds a city runtime whose only agent (an
+// always-on pool of one) is served by upstream "broker" and whose provider
+// refuses every start with a capacity error. guard may be nil, which leaves
+// the runtime to build its own.
+func newCapacityRefusingRuntime(t *testing.T, agentName, startCommand string, guard *endpointCapacityGuard) (*CityRuntime, *capacityRefusingProvider) {
+	t.Helper()
+	cityPath := t.TempDir()
+	one := 1
+	cfg := &config.City{
+		Upstreams: map[string]config.UpstreamSpec{"broker": {}},
+		Agents: []config.Agent{{
+			Name:              agentName,
+			StartCommand:      startCommand,
+			Upstream:          "broker",
+			MinActiveSessions: &one,
+			MaxActiveSessions: &one,
+		}},
+	}
+	sp := &capacityRefusingProvider{Fake: runtime.NewFake(), refusing: true}
+	cr := &CityRuntime{
+		cityPath:      cityPath,
+		cityName:      "test-city",
+		cfg:           cfg,
+		sp:            sp,
+		dops:          newDrainOps(sp),
+		rec:           events.Discard,
+		sessionDrains: newDrainTracker(),
+		logPrefix:     "gc test",
+		stdout:        io.Discard,
+		stderr:        io.Discard,
+		capacityGuard: guard,
+		// No managed Dolt here: the preflight must not exec the beads script.
+		managedDoltHealth: func(string) error { return nil },
+	}
+	cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cityPath, "test-city", io.Discard)
+	cr.setControllerState(&controllerState{
+		cfg:           cfg,
+		sp:            sp,
+		beadStores:    map[string]beads.Store{},
+		cityBeadStore: beads.NewMemStore(),
+		eventProv:     events.NewFake(),
+		cityName:      "test-city",
+		cityPath:      cityPath,
+	})
+	return cr, sp
+}
+
+func (p *capacityRefusingProvider) startCalls() int {
+	n := 0
+	for _, call := range p.SnapshotCalls() {
+		if call.Method == "Start" {
+			n++
+		}
+	}
+	return n
+}
+
+func requireBrokerOpen(t *testing.T, cr *CityRuntime) {
+	t.Helper()
+	if snap := cr.capacityGuard.Snapshot(); len(snap) != 1 || snap[0].Key != "upstream:broker" || snap[0].State != resilience.StateOpen {
+		t.Fatalf("guard snapshot = %+v, want upstream:broker open after the refused start", snap)
+	}
+}
+
+func TestControlDispatcherTick_UsesEndpointCapacityGuard(t *testing.T) {
+	// A fake clock keeps the second tick inside the backoff regardless of jitter.
+	clk := &clock.Fake{Time: time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)}
+	cr, sp := newCapacityRefusingRuntime(t, config.ControlDispatcherAgentName, config.ControlDispatcherStartCommandFor("{{.Agent}}"), newEndpointCapacityGuard(clk.Now))
+
+	cr.controlDispatcherTick(context.Background())
+	if sp.startCalls() != 1 {
+		t.Fatalf("first dispatcher tick Start calls = %d, want 1", sp.startCalls())
+	}
+	requireBrokerOpen(t, cr)
+
+	sp.refusing = false
+	cr.controlDispatcherTick(context.Background())
+	if sp.startCalls() != 1 {
+		t.Fatalf("Start calls after the second tick = %d, want no new start while the endpoint is open", sp.startCalls())
+	}
+}
+
+// TestCityRuntimeTick_UsesEndpointCapacityGuard proves the main tick builds
+// the runtime's guard and passes it to its starts.
+func TestCityRuntimeTick_UsesEndpointCapacityGuard(t *testing.T) {
+	cr, sp := newCapacityRefusingRuntime(t, "worker", "worker-cmd", nil)
+	dirty := &atomic.Bool{}
+	lastProviderName := ""
+	prevPoolRunning := make(map[string]bool)
+
+	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "poke")
+	if !cr.waitForAsyncStarts() {
+		t.Fatal("async starts did not settle after the main tick")
+	}
+	if sp.startCalls() != 1 {
+		t.Fatalf("main tick Start calls = %d, want 1", sp.startCalls())
+	}
+	requireBrokerOpen(t, cr)
+}
+
+func TestCityRuntimeReapStaleSessionBeads_HonorsEndpointHold(t *testing.T) {
+	cr, _ := newCapacityRefusingRuntime(t, "worker", "worker-cmd", nil)
+	store := cr.sessionsBeadStore().Store
+	// The runtime's reaper runs on the real clock, so the row is 11 minutes
+	// old in real time: past every lease window.
+	old := time.Now().Add(-11 * time.Minute).UTC().Format(time.RFC3339)
+	row, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":              "worker-held",
+			"template":                  "worker",
+			"state":                     "creating",
+			"pending_create_claim":      "true",
+			"pending_create_started_at": old,
+			"generation":                "1",
+			"instance_token":            "tok",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard := cr.ensureEndpointCapacityGuard()
+	ticket, _ := guard.Admit("upstream:broker", row.ID, "worker")
+	ticket.Resolve(verdictCapacity)
+
+	if n := cr.reapStaleSessionBeads(); n != 0 {
+		t.Fatalf("reaped %d rows, want the row held while its endpoint refuses", n)
 	}
 }

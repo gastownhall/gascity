@@ -2826,6 +2826,7 @@ func reapStaleSessionBeads(
 	store beads.Store,
 	sp runtime.Provider,
 	dt *drainTracker,
+	holdsPendingCreate func(session.Info) bool,
 	clk clock.Clock,
 	stderr io.Writer,
 ) int {
@@ -2892,6 +2893,12 @@ func reapStaleSessionBeads(
 			continue
 		}
 		pendingCreate := info.PendingCreateClaim
+		// A never-started row held by its endpoint's capacity breaker is
+		// queued demand, not a phantom; the breaker's hold outlasts the lease
+		// windows below (endpointCapacityGuard.HoldsPendingCreate).
+		if strings.TrimSpace(info.LastWokeAt) == "" && holdsPendingCreate != nil && holdsPendingCreate(info) {
+			continue
+		}
 		// Never-started pending creates (pending_create_claim=true with no
 		// last_woke_at) have not reached preWakeCommit, so their start may
 		// still be in flight behind a busy pool start queue. Defer entirely to
@@ -3317,8 +3324,10 @@ func reapRuntimesBoundToClosedBeads(
 		}
 
 		// The bead is not open. Confirm it is actually closed before reaping —
-		// a missing or unreadable record must not trigger a stop.
-		bead, err := store.Get(liveID)
+		// a missing or unreadable record must not trigger a stop. The read
+		// goes past any cache: a reopen another process wrote without an
+		// event leaves a cached row still saying closed.
+		bead, err := beads.HandlesFor(store).Live.Get(liveID)
 		if err != nil {
 			continue
 		}
@@ -3432,7 +3441,9 @@ func sweepProcessTableOrphans(
 		if cityPath != "" && normalizePathForCompare(strings.TrimSpace(live.City)) != cityPath {
 			continue
 		}
-		bead, err := store.Get(live.SessionID)
+		// The second read must be independent of the snapshot, and a cached
+		// Get is not: it can hold the same stale closed row. Read live.
+		bead, err := beads.HandlesFor(store).Live.Get(live.SessionID)
 		switch {
 		case err == nil && bead.Status != "closed":
 			continue // bead still open — leave the runtime alone

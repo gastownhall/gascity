@@ -2888,6 +2888,9 @@ func TestTryDeliverQueuedNudgesByPollerSkipsStaleSessionGeneration(t *testing.T)
 	}
 	idleSince := time.Now().Add(-10 * time.Second)
 	fake.SetActivity("sess-worker", idleSince)
+	// The new generation's attachment probe failure must not leak into the
+	// stale target's observation.
+	fake.AttachedErrors["sess-worker"] = fmt.Errorf("probe: %w", runtime.ErrRuntimeUnavailable)
 
 	target := nudgeTarget{
 		cityPath:          dir,
@@ -2901,6 +2904,9 @@ func TestTryDeliverQueuedNudgesByPollerSkipsStaleSessionGeneration(t *testing.T)
 	obs, err := workerObserveNudgeTarget(target, store, fake)
 	if err != nil {
 		t.Fatalf("workerObserveNudgeTarget: %v", err)
+	}
+	if obs.AttachedErr != nil {
+		t.Fatalf("obs.AttachedErr = %v, want nil for a generation mismatch", obs.AttachedErr)
 	}
 	if obs.Running {
 		delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)

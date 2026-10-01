@@ -2470,3 +2470,85 @@ func writeGeminiHistoryFixture(t *testing.T, path, sessionID string, messages []
 		t.Fatalf("write gemini transcript %s: %v", path, err)
 	}
 }
+
+// An attachment probe that cannot tell must reach the observation as an error,
+// never as "not attached", and must not fail the liveness answer it rides on.
+func TestRuntimeHandleLiveObservationCarriesAttachError(t *testing.T) {
+	probeErr := fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
+	notFoundText := fmt.Errorf("exec: \"tmux\": executable file not found in $PATH: %w", runtime.ErrRuntimeUnavailable)
+	for _, tc := range []struct {
+		name         string
+		attached     bool
+		attachErr    error
+		wantAttached bool
+		wantErr      error
+	}{
+		{name: "probe unavailable", attachErr: probeErr, wantErr: probeErr},
+		{name: "session vanished is not attached", attachErr: fmt.Errorf("gone: %w", runtime.ErrSessionNotFound)},
+		{name: "unavailable text that IsSessionGone matches", attachErr: notFoundText, wantErr: notFoundText},
+		{name: "attached", attached: true, wantAttached: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "runtime-worker", runtime.Config{}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			sp.SetAttached("runtime-worker", tc.attached)
+			if tc.attachErr != nil {
+				sp.AttachedErrors["runtime-worker"] = tc.attachErr
+			}
+			handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+				Provider:     sp,
+				SessionName:  "runtime-worker",
+				ProviderName: "claude",
+			})
+			if err != nil {
+				t.Fatalf("NewRuntimeHandle: %v", err)
+			}
+
+			obs, err := handle.LiveObservation(context.Background())
+			if err != nil {
+				t.Fatalf("LiveObservation: %v, want the attach error carried in the observation", err)
+			}
+			if !obs.Running || !obs.Alive {
+				t.Fatalf("LiveObservation() = %#v, want running+alive unaffected by the attach probe", obs)
+			}
+			if obs.Attached != tc.wantAttached || !errors.Is(obs.AttachedErr, tc.wantErr) || (tc.wantErr == nil) != (obs.AttachedErr == nil) {
+				t.Fatalf("Attached, AttachedErr = %v, %v; want %v, %v", obs.Attached, obs.AttachedErr, tc.wantAttached, tc.wantErr)
+			}
+		})
+	}
+}
+
+// SessionHandle carries the manager's attachment probe error through to the
+// observation, so a cmd/gc gate reading it holds instead of seeing "detached".
+func TestSessionHandleLiveObservationCarriesAttachError(t *testing.T) {
+	handle, _, sp, mgr := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := mgr.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get(%q): %v", handle.sessionID, err)
+	}
+	probeErr := fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
+	sp.AttachedErrors[info.SessionName] = probeErr
+
+	obs, err := ObserveHandle(context.Background(), handle)
+	if err != nil {
+		t.Fatalf("ObserveHandle: %v, want the attach error carried in the observation", err)
+	}
+	if !obs.Running {
+		t.Fatalf("LiveObservation.Running = false, want running unaffected by the attach probe; obs=%#v", obs)
+	}
+	if obs.Attached || !errors.Is(obs.AttachedErr, probeErr) {
+		t.Fatalf("Attached, AttachedErr = %v, %v; want false, %v", obs.Attached, obs.AttachedErr, probeErr)
+	}
+}

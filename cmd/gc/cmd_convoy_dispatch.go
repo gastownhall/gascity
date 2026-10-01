@@ -372,7 +372,13 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 // returns nil once the bead is quarantined and the (possibly quiet-wrapped)
 // cause when the bead should be retried.
 func handleControlDispatchError(cityPath, storePath string, graphStore beads.Store, bead beads.Bead, beadID string, cause error, stderr io.Writer) error {
+	if errors.Is(cause, dispatch.ErrControlDriftPending) {
+		return handleControlDriftRefusal(cityPath, storePath, graphStore, bead, beadID, cause, stderr)
+	}
 	if errors.Is(cause, dispatch.ErrControlPending) {
+		// Routine "not yet" — a retry waiting for its subject, a drain waiting
+		// for its members. It clears on its own and this is the hottest return
+		// in the control plane, so it stays a zero-write, zero-event path.
 		return cause
 	}
 	var stalled *dispatch.SemanticRetryState
@@ -418,7 +424,7 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 			settleFailure.RootBeadID, settleFailure.FinalizerBeadID, cause)
 	}
 	if stalled != nil {
-		emitControlStalled(cityPath, storePath, graphStore, bead, cause, *stalled, stderr)
+		emitControlStalled(cityPath, storePath, graphStore, bead, cause, *stalled, quarantineControlStall, stderr)
 		_, _ = fmt.Fprintf(stderr,
 			"control dispatch: stalled bead=%s attempts=%d first_seen=%s budget=%s reason=%v\n",
 			beadID, stalled.Attempts, stalled.FirstSeen.UTC().Format(time.RFC3339),
@@ -429,15 +435,89 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 	return nil
 }
 
+// handleControlDriftRefusal is the disposition for a control bead that
+// answered ErrControlDriftPending: it stays OPEN and retries unbounded,
+// because the refusal names a drift a human heals (`gc rig add`, restoring a
+// city name, a store coming back) and the open bead IS the handle the heal
+// completes through.
+//
+// Unbounded retry is the right disposition; unbounded SILENCE is not. Pending
+// bypasses the tier system, so before this it produced no budget, no event and
+// no bead a reconciler could find: a decommissioned rig left its workflow
+// reading as "in-flight" forever, distinguishable from healthy only by a
+// `bd show` nobody runs. That is the same answering-no shape whose three-day,
+// six-city stall is recorded on dispatch.ControllerErrorTier. So the pending
+// budget bounds the quiet, not the retrying: at expiry the bead escalates ONCE
+// on the control.stalled lane and then keeps going.
+//
+// A verbatim repeat is additionally marked quiet so a permanently-pending bead
+// stops resetting the serve loop's idle backoff, mirroring the Tier-B repeat
+// arm in handleControlDispatchError above.
+func handleControlDriftRefusal(cityPath, storePath string, graphStore beads.Store, bead beads.Bead, beadID string, cause error, stderr io.Writer) error {
+	if strings.TrimSpace(bead.Metadata[beadmeta.ControlPendingStalledMetadataKey]) == "true" &&
+		dispatch.PendingControlRefusalRecorded(bead, cause) {
+		// Past the horizon, repeating verbatim: the escalation already fired
+		// (the latch below makes it one-shot) and the count is documented
+		// diagnostics-only, so another record changes nothing observable while
+		// costing a store round-trip plus an event-log row — on every sweep,
+		// forever, because pending retry is deliberately unbounded and the
+		// motivating case is a rig nobody is coming back to re-add. Freeze the
+		// bookkeeping instead. A CHANGED refusal still falls through and
+		// records, so the reason on the bead stays honest, and everything
+		// before the escalation is untouched: the anchor and attempts must
+		// stay truthful right up to the point they decide something.
+		workflowTracef("control-pending-budget bead=%s frozen after escalation (verbatim repeat) err=%v", beadID, cause)
+		return dispatch.MarkQuietControllerRetry(cause)
+	}
+	pending, recordErr := dispatch.RecordPendingControlRetry(
+		graphStore, beadID, cause, workflowTraceNow().UTC(), semanticControlRetryBudget())
+	if recordErr != nil {
+		// Losing the budget write must not change the disposition: pending is
+		// still pending, and escalating on a failed bookkeeping write would
+		// close the bead the refusal exists to keep open.
+		workflowTracef("control-pending-budget bead=%s recording pending refusal failed err=%v", beadID, recordErr)
+		return cause
+	}
+	workflowTracef("control-pending-budget bead=%s attempts=%d first_seen=%s expired=%t repeat=%t err=%v",
+		beadID, pending.Attempts, pending.FirstSeen.UTC().Format(time.RFC3339), pending.Expired, pending.Repeat, cause)
+
+	if pending.Expired && strings.TrimSpace(bead.Metadata[beadmeta.ControlPendingStalledMetadataKey]) != "true" {
+		// Latch BEFORE emitting, matching the quarantine path above: a crash
+		// between the two drops one event, which the persisted
+		// gc.control_pending_* keys still explain, whereas emitting first would
+		// re-announce on every sweep if the latch write failed.
+		if latchErr := graphStore.SetMetadata(beadID, beadmeta.ControlPendingStalledMetadataKey, "true"); latchErr != nil {
+			workflowTracef("control-pending-budget bead=%s latching stalled escalation failed err=%v", beadID, latchErr)
+		} else {
+			emitControlStalled(cityPath, storePath, graphStore, bead, cause, pending, pendingControlStall, stderr)
+			_, _ = fmt.Fprintf(stderr,
+				"control dispatch: pending stalled bead=%s attempts=%d first_seen=%s budget=%s reason=%v\n",
+				beadID, pending.Attempts, pending.FirstSeen.UTC().Format(time.RFC3339),
+				semanticControlRetryBudget(), cause)
+		}
+	}
+	if pending.Repeat {
+		return dispatch.MarkQuietControllerRetry(cause)
+	}
+	return cause
+}
+
 // semanticControlRetryBudget returns how long the control dispatcher keeps
 // retrying a store refusal before quarantining the control bead.
+//
+// The same window now also bounds drift-pending SILENCE: a pending bead is
+// never quarantined, but once this budget elapses it escalates once on the
+// control.stalled lane and then goes on retrying. One knob, two horizons.
 //
 // GC_CONTROL_SEMANTIC_RETRY_BUDGET overrides the default as a Go duration. It
 // is an incident knob, not a tuning parameter: "0s" restores quarantine-on-
 // first-refusal (the pre-#5020 behavior) to clear a wedged fleet immediately,
 // and a negative value restores unbounded retry if a bad classification ever
-// starts quarantining healthy work. An unparseable value falls back to the
-// default rather than failing the dispatcher.
+// starts quarantining healthy work. A negative value therefore also disables
+// the pending escalation, restoring the unbounded silence the horizon exists
+// to close — acceptable for an incident knob, but it is the cost of reaching
+// for it. An unparseable value falls back to the default rather than failing
+// the dispatcher.
 func semanticControlRetryBudget() time.Duration {
 	raw := strings.TrimSpace(os.Getenv("GC_CONTROL_SEMANTIC_RETRY_BUDGET"))
 	if raw == "" {
@@ -450,11 +530,42 @@ func semanticControlRetryBudget() time.Duration {
 	return budget
 }
 
+// controlStallKind describes which disposition ran out of quiet, which is the
+// one thing an operator reading a control.stalled event needs that the bead id
+// alone does not carry.
+type controlStallKind struct {
+	// errorClass fills the payload's error_class. It names the tier for a
+	// quarantine and the disposition for a pending wait.
+	errorClass string
+	// retryNoun names what was counted, for the human-readable message.
+	retryNoun string
+	// ordersFailed reports whether the stall also kills the owning order. Only
+	// quarantine does: it CLOSED the control bead, so nothing will ever advance
+	// that order again. A pending stall must not emit order.failed — the bead
+	// is still open and the order still completes the moment the drift heals,
+	// so stamping it failed would make a healable wait read as terminal on the
+	// exact surface operators triage from.
+	ordersFailed bool
+}
+
+var (
+	quarantineControlStall = controlStallKind{
+		errorClass:   dispatch.TierSemantic.String(),
+		retryNoun:    "semantic retries",
+		ordersFailed: true,
+	}
+	pendingControlStall = controlStallKind{
+		errorClass: "pending",
+		retryNoun:  "pending sweeps",
+	}
+)
+
 // emitControlStalled publishes the control.stalled record for a control bead
-// whose semantic-refusal budget expired, plus order.failed when the workflow
-// root belongs to a scheduled order — so the existing order-health surfaces
-// light up instead of needing a new dashboard to notice a dead control plane.
-func emitControlStalled(cityPath, storePath string, store beads.Store, bead beads.Bead, cause error, state dispatch.SemanticRetryState, stderr io.Writer) {
+// whose budget expired, plus order.failed when the stall killed the order and
+// the workflow root belongs to a scheduled one — so the existing order-health
+// surfaces light up instead of needing a new dashboard to notice a dead control
+// plane.
+func emitControlStalled(cityPath, storePath string, store beads.Store, bead beads.Bead, cause error, state dispatch.SemanticRetryState, kind controlStallKind, stderr io.Writer) {
 	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	orderName := ""
 	if rootID != "" {
@@ -468,7 +579,7 @@ func emitControlStalled(cityPath, storePath string, store beads.Store, bead bead
 		Kind:       strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]),
 		RootBeadID: rootID,
 		StorePath:  storePath,
-		ErrorClass: dispatch.TierSemantic.String(),
+		ErrorClass: kind.errorClass,
 		FirstSeen:  state.FirstSeen.UTC().Format(time.RFC3339),
 		Attempts:   state.Attempts,
 		Error:      controlQuarantineReason(cause, "control_dispatch_error"),
@@ -480,12 +591,12 @@ func emitControlStalled(cityPath, storePath string, store beads.Store, bead bead
 		Type:    events.ControlStalled,
 		Actor:   "controller",
 		Subject: bead.ID,
-		Message: fmt.Sprintf("control bead %s stalled after %d semantic retries since %s: %s",
-			bead.ID, state.Attempts, payload.FirstSeen, payload.Error),
+		Message: fmt.Sprintf("control bead %s stalled after %d %s since %s: %s",
+			bead.ID, state.Attempts, kind.retryNoun, payload.FirstSeen, payload.Error),
 		Payload: events.ControlStalledPayloadJSON(payload),
 		RunID:   rootID,
 	})
-	if orderName != "" {
+	if orderName != "" && kind.ordersFailed {
 		rec.Record(events.Event{
 			Type:    events.OrderFailed,
 			Actor:   "controller",
@@ -728,7 +839,7 @@ func makeStoreRefResolver(cityPath string, cfg *config.City) func(string) (beads
 				// renamed mid-flight leaves in-flight workflows stamped with
 				// the old name, and restoring the name heals the finalize.
 				// Pending, not terminal.
-				return nil, fmt.Errorf("%w: city ref %q does not match this city %q (renamed mid-flight? finalizer retries until the name is restored)", dispatch.ErrControlPending, ref, cityName)
+				return nil, fmt.Errorf("%w: city ref %q does not match this city %q (renamed mid-flight? resolution retries until the name is restored)", dispatch.ErrControlDriftPending, ref, cityName)
 			}
 			return openStoreAtForCity(cityPath, cityPath)
 		case strings.HasPrefix(ref, "rig:"):
@@ -750,14 +861,18 @@ func makeStoreRefResolver(cityPath string, cfg *config.City) func(string) (beads
 			// quarantine catch-all, which terminally closes the finalizer AND
 			// settles the workflow root — stranding the domain parent open
 			// forever with no retry handle, even after the rig is re-added.
-			// Classify as pending instead: the finalizer stays open,
-			// gc.last_finalize_error records the reason, and the next sweep
-			// completes the finalize once the rig is restored via
-			// `gc rig add`. Fail loud, not terminal. Malformed refs (the
+			// Classify as pending instead: the control bead stays open, the
+			// reason is recorded on it, and the next sweep completes the work
+			// once the rig is restored via `gc rig add`. Fail loud, not
+			// terminal — the pending budget escalates once if the rig never
+			// comes back (handleControlDriftRefusal). Malformed refs (the
 			// default arm below) stay hard: no config change can ever make
 			// them resolve, and pending there would be unbounded retry of a
 			// permanent error.
-			return nil, fmt.Errorf("%w: rig %q not found in city config (removed from city.toml? finalizer retries until the rig is restored)", dispatch.ErrControlPending, name)
+			//
+			// This resolver also serves the retry/retry-eval/ralph
+			// required-artifact lane, so neither message names the finalizer.
+			return nil, fmt.Errorf("%w: rig %q not found in city config (removed from city.toml? resolution retries until the rig is restored)", dispatch.ErrControlDriftPending, name)
 		default:
 			return nil, fmt.Errorf("unsupported store ref scheme: %q", ref)
 		}
@@ -809,15 +924,42 @@ func makeSourceWorkflowStoresListerWithOpenStore(cityPath string, cfg *config.Ci
 		}
 		loaded = true
 		views, skips, err := openSourceWorkflowStoresWith(cfg, cityPath, "", openStore)
-		if err != nil {
-			loadErr = err
-			return nil, err
-		}
+		// A non-empty skip set is the classification trigger, NOT the
+		// partial-vs-total split. openSourceWorkflowStoresWith reports the same
+		// unopenable configured store two different ways — as a nil error with
+		// skips when a sibling survived, and as the first open error when none
+		// did — and only the skip set is common to both. Keying on it first is
+		// what makes the two arms classify identically; keying on err first
+		// sent the total-failure arm out bare, onto the quarantine path this
+		// wrap exists to close, and neither lister fixture could see it because
+		// both inject a sibling that opens.
 		if len(skips) > 0 {
 			msg := formatSourceWorkflowStoreSkips(skips)
 			workflowTracef("source-workflow stores warning=%q", msg)
-			loadErr = errors.New(msg)
+			// Fail CLOSED — the doc comment above records why tolerating a skip
+			// here is destructive — but not TERMINALLY. A configured store that
+			// will not open is the path-shaped twin of the name-shaped drift the
+			// resolver arms above classify as pending (a rig whose directory is
+			// gone while its city.toml entry remains), and a bare error lands in
+			// the cmd-layer quarantine catch-all: no typed check and no
+			// transient needle matches this wrapper, so it classifies TierNone,
+			// closes the finalizer AND settles the root, stranding the domain
+			// parent exactly as the removed-rig landmine did. Pending keeps the
+			// finalizer open so the next sweep completes the finalize once the
+			// store returns. msg names every skipped store and its error, so the
+			// total-failure arm loses nothing by reporting skips instead of the
+			// first open error it also returns.
+			loadErr = fmt.Errorf("%w: %s", dispatch.ErrControlDriftPending, msg)
 			return nil, loadErr
+		}
+		if err != nil {
+			// Empty skips with an error means no candidate was ever opened:
+			// the "no source workflow stores available" config-shape error.
+			// It stays terminal on purpose — nothing was unopenable, there was
+			// nothing to open, and no store coming back can change that — so
+			// the drift wrap must not reach it.
+			loadErr = err
+			return nil, err
 		}
 		cityName := loadedCityName(cfg, cityPath)
 		stores = make([]dispatch.SourceWorkflowStore, 0, len(views))

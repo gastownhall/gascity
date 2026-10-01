@@ -1,6 +1,10 @@
 package runtime
 
-import "testing"
+import (
+	"errors"
+	"fmt"
+	"testing"
+)
 
 func TestSyncWorkDirEnvSetsGCDir(t *testing.T) {
 	cfg := SyncWorkDirEnv(Config{WorkDir: "/tmp/work"})
@@ -55,4 +59,46 @@ func TestHasManagedStartupHints(t *testing.T) {
 
 func boolPtr(v bool) *bool {
 	return &v
+}
+
+// A typed refusal that reads as "session gone" is taken by
+// MergeBackendStopErrors and every !IsSessionGone(err) Stop caller as an
+// idempotent success, so the sentinels and their wraps must never match.
+func TestTypedRuntimeSentinelsNeverMatchIsSessionGone(t *testing.T) {
+	for _, sentinel := range []error{ErrStopRefused, ErrStopUnsupported, ErrMetaUnsupported, ErrListUnsupported} {
+		wrapped := fmt.Errorf("exec provider script %q op %q: %w", "/packs/box/runtime.sh", "stop", sentinel)
+		for _, err := range []error{sentinel, wrapped} {
+			if IsSessionGone(err) {
+				t.Errorf("IsSessionGone(%q) = true, want false", err)
+			}
+		}
+	}
+	if !errors.Is(ErrStopUnsupported, ErrStopRefused) {
+		t.Error("ErrStopUnsupported does not wrap ErrStopRefused")
+	}
+}
+
+func TestMetaValueFoldsOnlyMetaUnsupported(t *testing.T) {
+	transport := fmt.Errorf("reading GC_K: %w", ErrRuntimeUnavailable)
+	cases := []struct {
+		name    string
+		v       string
+		err     error
+		want    string
+		wantErr error
+	}{
+		{"value", "tok", nil, "tok", nil},
+		{"unset", "", nil, "", nil},
+		{"meta unsupported", "", fmt.Errorf("exec get-meta: %w", ErrMetaUnsupported), "", nil},
+		{"transport", "", transport, "", transport},
+		{"not found", "", ErrSessionNotFound, "", ErrSessionNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := MetaValue(tc.v, tc.err)
+			if got != tc.want || !errors.Is(err, tc.wantErr) {
+				t.Errorf("MetaValue(%q, %v) = (%q, %v), want (%q, %v)", tc.v, tc.err, got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
 }

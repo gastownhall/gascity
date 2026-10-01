@@ -26,7 +26,8 @@ test --test_env=GC_TEST_REPO_ROOT
 test --test_env=PATH
 
 # Remote execution on the NativeLink farm. The executor endpoint is
-# environment-specific and deliberately NOT hardcoded here: machines put it
+# environment-specific and deliberately NOT hardcoded here (the public,
+# credential-free fork cache below is the one exception): machines put it
 # in the gitignored .bazelrc.local (e.g. a loopback grpc:// endpoint on the
 # cache host, or your team's grpcs:// endpoint with mTLS), and CI passes it via
 # the RBE step. Command-line flags always win.
@@ -36,3 +37,32 @@ build:remote-exec --remote_timeout=3600
 # executed locally (it would be refused, and host-dependent local results must
 # not seed the shared cache anyway).
 build:remote-exec --noremote_upload_local_results
+
+# Read-only anonymous cache for fork PRs: rbe-west's rbe-cache endpoint serves
+# action-cache and CAS reads only (writes and Execute are refused by the farm)
+# and needs no credentials, so it is committed. bazel-test.yml selects it for
+# runs without an executor (fork PRs, rbe=cache dispatches) by writing
+# `build --config=fork-cache` to .bazelrc.local next to the trusted runs'
+# key-affecting lines (scripts/bazel_fork_cache_test.go checks both). Only
+# non-key flags differ from trusted runs, so fork actions hash like the
+# trusted ones and hit what trusted CI executed.
+build:fork-cache --remote_cache=grpcs://rbe-cache.ops.gascity.com:8443
+build:fork-cache --remote_instance_name=oss
+build:fork-cache --remote_accept_cached
+build:fork-cache --noremote_upload_local_results
+build:fork-cache --remote_download_minimal
+# If the farm closes the endpoint (kill switch) GetCapabilities fails, and
+# Bazel 9 then fails every action unless both of these are set.
+build:fork-cache --remote_local_fallback
+build:fork-cache --incompatible_remote_local_fallback_for_remote_cache
+# Lookups are network-bound; local CPU work is still bounded by --local_resources.
+build:fork-cache --jobs=64
+# A slow (not closed) endpoint: each lookup gives up after 15s per attempt,
+# and the failure-rate circuit breaker stops calling the endpoint once too
+# many lookups fail (Bazel's default: 10% within 60s); the rest run locally.
+build:fork-cache --remote_timeout=15
+build:fork-cache --remote_retries=2
+build:fork-cache --experimental_circuit_breaker_strategy=failure
+# The farm admits 16 connections per source IP, and Blacksmith runners share
+# egress IPs, so several concurrent fork jobs split that budget.
+build:fork-cache --remote_max_connections=4

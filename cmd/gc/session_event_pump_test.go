@@ -450,3 +450,34 @@ func TestSessionEventPumpParentCancelDeactivates(t *testing.T) {
 		waitStreaming(t, pump, false)
 	})
 }
+
+// Kills: events not shortening the inventory lane's latency. Every forwarded
+// event (an attributed death now, a resync after its trailing delay) wakes
+// the lane; unattributed pane noise does not.
+func TestSessionEventPump_WakesInventoryOnAttributedDeath(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		pump, pokeCh, cancel := newTestPump(t)
+		defer cancel()
+		pump.resyncDelay = 300 * time.Millisecond
+		wakes := 0
+		pump.wakeInventory = func() { wakes++ }
+		fp := &eventedFake{Fake: runtime.NewFake()}
+		pump.restart(fp)
+
+		fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventExited, Ref: "%42", Time: time.Now()})
+		synctest.Wait()
+		if wakes != 0 {
+			t.Fatalf("an unattributed pane event woke the lane %d times", wakes)
+		}
+		fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "crew-1", Time: time.Now()})
+		waitPoke(t, pokeCh)
+		if wakes != 1 {
+			t.Fatalf("wakes after an attributed exit = %d, want 1", wakes)
+		}
+		fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventResync, Time: time.Now()})
+		waitPoke(t, pokeCh)
+		if wakes != 2 {
+			t.Fatalf("wakes after a resync = %d, want 2", wakes)
+		}
+	})
+}

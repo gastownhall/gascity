@@ -1064,8 +1064,10 @@ func gracefulStopAllWithForceSignal(
 			allExited = len(runningSet) == 0
 		} else {
 			for _, name := range names {
+				// An unknown state is not an exit: keep waiting out the grace
+				// window rather than cutting it short on a failed observation.
 				running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
-				if err == nil && running {
+				if err != nil || running {
 					allExited = false
 					break
 				}
@@ -1090,10 +1092,23 @@ func gracefulStopAllWithForceSignal(
 	runningSet, listed := runningSessionSet(sp, names)
 	for _, name := range names {
 		running := false
+		var observeErr error
 		if listed {
 			running = runningSet[name]
 		} else {
-			running, _ = workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
+			running, observeErr = workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
+		}
+		if observeErr != nil {
+			// The state is unknown, not exited: still stop it, but neither
+			// claim a graceful exit nor record a SessionStopped we cannot
+			// vouch for. A stopped city-stop session is still parked asleep.
+			if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
+				fmt.Fprintf(stderr, "stopping agent '%s' in unknown state: %v\n", name, err) //nolint:errcheck // best-effort stderr
+			} else if target, ok := targetByName[name]; ok && cityStopSessionMarked(store.Store, target.sessionID) {
+				markCityStopSessionAsAsleep(sessionFrontDoor(store.Store), target.sessionID, stderr)
+			}
+			fmt.Fprintf(stdout, "Agent '%s' state unknown (%v); stop requested\n", name, observeErr) //nolint:errcheck // best-effort stdout
+			continue
 		}
 		if !running {
 			if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
@@ -1216,7 +1231,6 @@ func controllerLoop(
 		rec:                 rec,
 		cs:                  cs,
 		poolSessions:        poolSessions,
-		poolDeathHandlers:   poolDeathHandlers,
 		suspendedNames:      suspendedNames,
 		pokeCh:              make(chan struct{}, 1),
 		controlDispatcherCh: make(chan struct{}, 1),
@@ -1224,6 +1238,7 @@ func controllerLoop(
 		stdout:              stdout,
 		stderr:              stderr,
 	}
+	cr.publishPoolDeathHandlers(poolDeathHandlers)
 	cr.setControllerState(cs)
 	cr.run(ctx)
 }
@@ -1373,6 +1388,13 @@ func runController(
 		return 1
 	}
 
+	// Install controller-managed bead stores even when the HTTP API is
+	// disabled. Standalone runtime still needs cached city/rig stores for
+	// session-bead sync and rig-scoped wake decisions. This also puts the
+	// binding's CachingStore into the routes, so it runs before the routes are
+	// published below.
+	cs := newControllerStateWithRoutes(ctx, cr.storageRoutes, cfg, sp, eventProv, cityName, cityPath)
+
 	// This process is the city's controller — the lock above says so — so its
 	// opened binding is the residency answer the assigned-work spine reads.
 	// Registered here rather than inside newCityRuntime because the supervisor
@@ -1382,11 +1404,6 @@ func runController(
 	// statements below, so capturing the store here would capture a nil and the
 	// census would silently fall back to its leading (binding) store.
 	registerResidencyRoutes(cityPath, cr.storageRoutes, cr.cityBeadStore)
-
-	// Install controller-managed bead stores even when the HTTP API is
-	// disabled. Standalone runtime still needs cached city/rig stores for
-	// session-bead sync and rig-scoped wake decisions.
-	cs := newControllerStateWithRoutes(ctx, cr.storageRoutes, cfg, sp, eventProv, cityName, cityPath)
 	cs.ct = cr.crashTrack()
 	wireControllerWakeSignals(cs, pokeCh, controlDispatcherCh)
 	cs.configDirty = configDirty

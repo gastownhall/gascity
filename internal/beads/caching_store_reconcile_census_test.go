@@ -97,8 +97,9 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// the merge oracle's durable cache-state comparison.
 		"observationRevision": true,
 		"backing":             true, "idPrefix": true, "mu": true, "reconciling": true,
-		"epoch":    true, // instance identity, fixed at construction
-		"onChange": true, "problemf": true, "problemLog": true,
+		"eventPrefixes": true, // event-ownership config, fixed at construction
+		"epoch":         true, // instance identity, fixed at construction
+		"onChange":      true, "problemf": true, "problemLog": true,
 		"lastReconcileLogAt": true, "primeMu": true, "primeRunning": true,
 		"primeCycle": true, "lastFullPrimeStartedAt": true, "primeRetryDelay": true,
 		"lifecycleMu": true, "lifecycleWG": true, "cancelFn": true, "stopCh": true,

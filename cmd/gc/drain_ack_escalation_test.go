@@ -997,3 +997,23 @@ func TestEscalationHoldsWhenAnOperatorAttachesAfterTheOrdinaryStop(t *testing.T)
 		t.Errorf("outcome = %q, want held_late so the event stream distinguishes this from a failed kill", evs[0].Message)
 	}
 }
+
+// Invariant 5 — an attachment probe that cannot tell is not "detached". The
+// operator this hold protects is exactly the one a failing probe may hide, so
+// the force-terminate must not proceed on the error.
+func TestDrainAckEscalationQuietHoldHoldsOnAttachProbeError(t *testing.T) {
+	e := newEscalationEnv(t)
+	e.sp.AttachedErrors[e.name] = fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
+
+	if hold, held := drainAckEscalationQuietHold(e.sp, e.name, e.now); !held || hold != "attach_unknown" {
+		t.Fatalf("drainAckEscalationQuietHold = (%q, %v), want (attach_unknown, true)", hold, held)
+	}
+	e.finalize()
+
+	if n := len(e.escalations()); n != 0 {
+		t.Errorf("escalations = %d, want 0 — an attach probe error was read as detached", n)
+	}
+	if e.terminateCalls() != 0 {
+		t.Error("force-terminated a pane whose attachment could not be read")
+	}
+}

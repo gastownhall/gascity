@@ -53,6 +53,10 @@ type sessionEventPump struct {
 	logPrefix      string
 	resyncDelay    time.Duration
 	resyncMaxDefer time.Duration
+	// wakeInventory, when set, wakes the runtime inventory lane on every
+	// poke, so a death reaches the observation cache ahead of the patrol
+	// cadence. Set it before the first restart.
+	wakeInventory func()
 
 	mu     sync.Mutex
 	gen    int64              // subscription generation counter
@@ -209,6 +213,9 @@ func (p *sessionEventPump) forward(ctx context.Context, gen int64, events <-chan
 // poke signals the reconciler without ever blocking; a full channel means a
 // tick is already owed, which covers this event too.
 func (p *sessionEventPump) poke(kind, session string) {
+	if p.wakeInventory != nil {
+		p.wakeInventory()
+	}
 	// Log only when the send lands: a replayed backlog burst fills the
 	// buffer once and stays quiet.
 	if legacyEnqueue(p.pokeCh, nil, reconcilekey.SessionNamed(session)) {

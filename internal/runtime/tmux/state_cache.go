@@ -122,10 +122,36 @@ type StateCache struct {
 	// Entries at or below publishedGeneration can never filter again and are
 	// pruned on publish.
 	evictedAt map[string]uint64
-	ttl       time.Duration
-	staleTTL  time.Duration
-	sf        singleflight.Group
-	fetcher   StateFetcher
+	// primedByNoServer reports that the published snapshot is the empty one
+	// primed by an unprimed no-server failure, not a fleet the server listed.
+	primedByNoServer bool
+	ttl              time.Duration
+	staleTTL         time.Duration
+	sf               singleflight.Group
+	fetcher          StateFetcher
+	// now is the cache clock. Nil selects time.Now; tests inject a fake.
+	now func() time.Time
+}
+
+// cacheObservation is one read of the cache after its refresh trigger ran:
+// the published snapshot plus what is known about how far to trust it.
+type cacheObservation struct {
+	state     runtimeStateSnapshot
+	fetchedAt time.Time
+	// lastErr is the error of the most recent refresh attempt; nil after a
+	// success.
+	lastErr error
+	// dirty reports that an Invalidate or EvictSession landed after the
+	// published fetch began, so the snapshot may predate a known Start or Stop.
+	dirty bool
+	// primedByNoServer reports that the snapshot came from the unprimed
+	// no-server prime rather than from a server's answer.
+	primedByNoServer bool
+}
+
+// primed reports whether the observation holds a published snapshot.
+func (o cacheObservation) primed() bool {
+	return o.state.Sessions != nil && !o.fetchedAt.IsZero()
 }
 
 // NewStateCache creates a new cache with the given fetcher and TTL.
@@ -158,38 +184,109 @@ func (c *StateCache) ProcessAlive(name string, processNames []string) bool {
 }
 
 func (c *StateCache) currentState() runtimeStateSnapshot {
-	c.mu.RLock()
-	state := c.state
-	fetchedAt := c.fetchedAt
-	dirty := c.dirty
-	c.mu.RUnlock()
+	obs, hit := c.observeRefreshing()
+	if hit {
+		return obs.state
+	}
+	// If the cache is older than staleTTL, report all sessions as not running.
+	// Note: fetchedAt is preserved on failure (never zeroed), so this only
+	// triggers after staleTTL of real wall-clock time since last success.
+	if !obs.primed() || c.clock().Sub(obs.fetchedAt) > c.staleTTL {
+		return runtimeStateSnapshot{}
+	}
+	return obs.state
+}
+
+// observe returns the published snapshot with its refresh outcome, running
+// the same refresh trigger as currentState but never applying the staleTTL
+// cliff: the caller decides what a stale or failed observation means.
+func (c *StateCache) observe() cacheObservation {
+	obs, _ := c.observeRefreshing()
+	return obs
+}
+
+// observeRefreshing reads the cache, refreshing it first unless it is a hit,
+// and reports whether it was one.
+func (c *StateCache) observeRefreshing() (cacheObservation, bool) {
+	obs := c.observation()
 
 	// Cache hit: fresh data, not invalidated.
-	if state.Sessions != nil && !fetchedAt.IsZero() && !dirty && time.Since(fetchedAt) < c.ttl {
-		return state
+	if obs.primed() && !obs.dirty && c.clock().Sub(obs.fetchedAt) < c.ttl {
+		return obs, true
 	}
 
 	// Stale, empty, or dirty — trigger refresh.
 	// When dirty, forget any in-flight singleflight so we get a fresh fetch
 	// instead of coalescing with a pre-invalidation call.
-	if dirty {
+	if obs.dirty {
 		c.sf.Forget("refresh")
 	}
 	c.refresh()
 
 	// Read the (potentially updated) cache.
-	c.mu.RLock()
-	state = c.state
-	fetchedAt = c.fetchedAt
-	c.mu.RUnlock()
+	return c.observation(), false
+}
 
-	// If the cache is older than staleTTL, report all sessions as not running.
-	// Note: fetchedAt is preserved on failure (never zeroed), so this only
-	// triggers after staleTTL of real wall-clock time since last success.
-	if state.Sessions == nil || fetchedAt.IsZero() || time.Since(fetchedAt) > c.staleTTL {
-		return runtimeStateSnapshot{}
+func (c *StateCache) observation() cacheObservation {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return cacheObservation{
+		state:            c.state,
+		fetchedAt:        c.fetchedAt,
+		lastErr:          c.lastError,
+		dirty:            c.dirty,
+		primedByNoServer: c.primedByNoServer,
 	}
-	return state
+}
+
+func (c *StateCache) clock() time.Time {
+	if c.now == nil {
+		return time.Now()
+	}
+	return c.now()
+}
+
+// cacheAnswer is how far one cache observation can answer for a session.
+type cacheAnswer int
+
+const (
+	// cacheAnswerSnapshot: answer from the published snapshot.
+	cacheAnswerSnapshot cacheAnswer = iota
+	// cacheAnswerAbsent: confirmed absent whatever the snapshot holds.
+	cacheAnswerAbsent
+	// cacheAnswerUnknown: the snapshot cannot be trusted either way.
+	cacheAnswerUnknown
+)
+
+// classifyCacheObservation decides how far obs can answer for name. It never
+// answers absent while the bool path (IsRunning, which keeps the staleTTL
+// cliff) would still report name running, so the two forms cannot disagree:
+//   - a successful last refresh over a primed snapshot answers from it;
+//   - a failed refresh inside staleTTL over a snapshot a server listed answers
+//     from that snapshot when it is clean (#4082), and is unknown when it is
+//     dirty and still lists name;
+//   - otherwise the snapshot cannot hold name live (past staleTTL, unprimed,
+//     primed only by the no-server fallback, or name not listed). A
+//     no-server failure whose socket serverDead confirms gone is then
+//     absent, since a session cannot outlive its server; anything else is
+//     unknown.
+//
+// serverDead is consulted only for a no-server failure.
+func classifyCacheObservation(obs cacheObservation, name string, now time.Time, staleTTL time.Duration, serverDead func() bool) cacheAnswer {
+	if obs.lastErr == nil && obs.primed() {
+		return cacheAnswerSnapshot
+	}
+	trusted := obs.primed() && !obs.primedByNoServer && now.Sub(obs.fetchedAt) <= staleTTL
+	if trusted && !obs.dirty {
+		return cacheAnswerSnapshot
+	}
+	if trusted && obs.state.Sessions[name].Running {
+		return cacheAnswerUnknown
+	}
+	if isNoServerError(obs.lastErr) && serverDead() {
+		return cacheAnswerAbsent
+	}
+	return cacheAnswerUnknown
 }
 
 // Invalidate marks the cache as dirty, forcing the next IsRunning call
@@ -237,9 +334,9 @@ func (c *StateCache) refresh() {
 		startGeneration := c.generation
 		c.mu.RUnlock()
 
-		start := time.Now()
+		start := c.clock()
 		state, err := c.fetcher.FetchState(ctx)
-		elapsed := time.Since(start)
+		elapsed := c.clock().Sub(start)
 
 		if err != nil {
 			log.Printf("tmux state cache: refresh failed in %v: %v", elapsed, err)
@@ -264,7 +361,8 @@ func (c *StateCache) refresh() {
 			//   — that is #4082's intent.
 			if c.fetchedAt.IsZero() && isNoServerError(err) {
 				c.state = runtimeStateSnapshot{Sessions: make(map[string]sessionRuntimeState)}
-				c.fetchedAt = time.Now()
+				c.fetchedAt = c.clock()
+				c.primedByNoServer = true
 				c.publishedGeneration = startGeneration
 				// Stay dirty if an invalidation (e.g. the Start that brings
 				// the server up) landed mid-fetch, as a successful refresh does.
@@ -305,8 +403,9 @@ func (c *StateCache) refresh() {
 		}
 
 		c.state = state
-		c.fetchedAt = time.Now()
+		c.fetchedAt = c.clock()
 		c.lastError = nil
+		c.primedByNoServer = false
 		c.dirty = superseded
 		c.publishedGeneration = startGeneration
 		for name, generation := range c.evictedAt {

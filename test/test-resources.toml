@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 723
-baseline_files = 210
+baseline_calls = 725
+baseline_files = 212
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -51,8 +51,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 486
-baseline_files = 141
+baseline_calls = 488
+baseline_files = 143
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -384,6 +384,17 @@ resource_owner = "the one go run subprocess is confined to TestAddTestenvImportS
 migration_target = "P0.4b"
 expires = "2026-10-31"
 
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestRBEWorkerJSONIsolationOffMatchesPreO1"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the OSS worker rollback-config proof is a checked Medium subprocess owner"
+resource_owner = "the one jq subprocess is confined to TestRBEWorkerJSONIsolationOffMatchesPreO1, which exists to render tools/rbe/blacksmith-worker.sh's own jq program with isolation off and compare it with the pre-O1 worker.json: the program is jq, so only jq can prove the rollback renders the same config"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
 # A reviewed-hermetic-body row is narrower than a Small test declaration. It
 # proves that the exact untagged test body and statically reachable
 # receiverless same-package helpers contain none of the cataloged resources.
@@ -421,8 +432,8 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 467
-baseline_files = 134
+baseline_calls = 468
+baseline_files = 135
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-cp3hwi"

@@ -19,6 +19,7 @@ package resilience
 import (
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -77,6 +78,19 @@ type Settings struct {
 	// while half-open, so an unresolved probe (crashed caller) cannot
 	// wedge the breaker.
 	HalfOpenInterval time.Duration
+	// Now is the clock. Nil uses time.Now.
+	Now func() time.Time
+	// TripDecay keeps the backoff exponent across a quick recovery: a
+	// success no longer resets trips, and a trip within TripDecay of the
+	// breaker closing doubles the previous cap. Trips reset once the breaker
+	// has stayed closed for TripDecay. Zero keeps the default, where any
+	// success resets trips.
+	TripDecay time.Duration
+	// IgnoreSuccessWhileOpen makes a success recorded while open (a
+	// straggler admitted before the trip) leave the breaker open. Only a
+	// half-open success closes it. False keeps the default, where any
+	// success closes the breaker.
+	IgnoreSuccessWhileOpen bool
 }
 
 // withDefaults returns a copy with zero fields replaced by defaults and
@@ -106,7 +120,10 @@ func DefaultSettings() Settings {
 }
 
 // Transition describes a breaker state change, for event emission and
-// diagnostics. Delivered synchronously from the state-changing call.
+// diagnostics. Delivered synchronously from the state-changing call, while
+// the breaker's lock is held, so deliveries for one breaker are ordered and
+// never concurrent. A callback may call State, Available, Registry.States and
+// Registry.Breaker; it must not call any other Breaker or Registry method.
 type Transition struct {
 	// Scope identifies the store scope (canonical scope root path).
 	Scope string
@@ -139,7 +156,9 @@ type Breaker struct {
 	// onChange receives state transitions; guarded by mu so registry
 	// rewiring is race-free with state changes.
 	onChange func(Transition)
-	state    State
+	// state is written under mu and read without it, so a transition
+	// callback, which runs under mu, can read State (gastownhall/gascity#4839).
+	state atomic.Int32
 	// failures counts consecutive transport-class failures while closed.
 	failures int
 	// trips counts consecutive open episodes without an intervening
@@ -147,21 +166,47 @@ type Breaker struct {
 	trips int
 	// deadline is the earliest probe admission time while open.
 	deadline time.Time
-	// lastProbeAt is when the most recent half-open probe was admitted.
+	// lastProbeAt is when the most recent half-open probe was admitted;
+	// zero once ReleaseProbe resolves it.
 	lastProbeAt time.Time
+	// closedAt is when the breaker last closed after an open episode.
+	closedAt time.Time
+}
+
+// Status is a consistent copy of one breaker's mutable state.
+type Status struct {
+	State    State
+	Failures int
+	// Trips counts consecutive open episodes; it drives the backoff exponent.
+	Trips int
+	// Deadline is the earliest probe admission while open.
+	Deadline time.Time
+	// BackoffCap is the full-jitter cap for the current trip count, zero
+	// when Trips is zero.
+	BackoffCap  time.Duration
+	LastProbeAt time.Time
+	// ClosedAt is when the breaker last closed after an open episode, zero
+	// if it never opened.
+	ClosedAt time.Time
 }
 
 func newBreaker(scope, opClass string, settings Settings, onChange func(Transition)) *Breaker {
+	settings = settings.withDefaults()
+	now := settings.Now
+	if now == nil {
+		now = time.Now
+	}
 	return &Breaker{
 		scope:    scope,
 		opClass:  opClass,
-		settings: settings.withDefaults(),
-		now:      time.Now,
+		settings: settings,
+		now:      now,
 		jitter:   fullJitter,
 		onChange: onChange,
-		state:    StateClosed,
 	}
 }
+
+func (b *Breaker) loadState() State { return State(b.state.Load()) }
 
 // fullJitter draws a wait uniformly from (0, capDur]. Zero or negative caps
 // return zero.
@@ -180,28 +225,50 @@ func fullJitter(capDur time.Duration) time.Duration {
 // Callers admitted while non-closed are probes: their RecordSuccess /
 // RecordFailure resolves the half-open state.
 func (b *Breaker) Allow() bool {
+	allowed, _ := b.AllowProbe()
+	return allowed
+}
+
+// AllowProbe is Allow that also reports whether the admission is the
+// half-open probe, decided under the same lock so exactly one concurrent
+// caller learns it holds the probe.
+func (b *Breaker) AllowProbe() (allowed, probe bool) {
 	if !b.settings.Enabled {
-		return true
+		return true, false
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := b.now()
-	switch b.state {
+	switch b.loadState() {
 	case StateOpen:
 		if now.Before(b.deadline) {
-			return false
+			return false, false
 		}
 		b.transitionLocked(StateHalfOpen, 0, now)
 		b.lastProbeAt = now
-		return true
+		return true, true
 	case StateHalfOpen:
 		if now.Sub(b.lastProbeAt) < b.settings.HalfOpenInterval {
-			return false
+			return false, false
 		}
 		b.lastProbeAt = now
-		return true
+		return true, true
 	default:
-		return true
+		return true, false
+	}
+}
+
+// ReleaseProbe resolves an inconclusive half-open probe so the next Allow
+// admits a new one without waiting out HalfOpenInterval. It is a no-op in
+// any other state.
+func (b *Breaker) ReleaseProbe() {
+	if !b.settings.Enabled {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.loadState() == StateHalfOpen {
+		b.lastProbeAt = time.Time{}
 	}
 }
 
@@ -213,9 +280,7 @@ func (b *Breaker) Available() bool {
 	if !b.settings.Enabled {
 		return true
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.state == StateClosed
+	return b.loadState() == StateClosed
 }
 
 // ProbeDue reports whether a non-closed breaker would currently admit a
@@ -229,7 +294,7 @@ func (b *Breaker) ProbeDue() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := b.now()
-	switch b.state {
+	switch b.loadState() {
 	case StateOpen:
 		return !now.Before(b.deadline)
 	case StateHalfOpen:
@@ -242,17 +307,25 @@ func (b *Breaker) ProbeDue() bool {
 // RecordSuccess records a successful operation. Any success closes the
 // breaker and resets the failure count and backoff — including successes
 // observed while open (a straggling in-flight operation succeeding is
-// direct evidence the store is reachable).
+// direct evidence the store is reachable). IgnoreSuccessWhileOpen and
+// TripDecay narrow this; see Settings.
 func (b *Breaker) RecordSuccess() {
 	if !b.settings.Enabled {
 		return
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	state := b.loadState()
+	if state == StateOpen && b.settings.IgnoreSuccessWhileOpen {
+		return
+	}
+	// trips is kept: closedTripsLocked discards it at the next trip unless
+	// TripDecay keeps the exponent.
 	b.failures = 0
-	b.trips = 0
-	if b.state != StateClosed {
-		b.transitionLocked(StateClosed, 0, b.now())
+	if state != StateClosed {
+		now := b.now()
+		b.closedAt = now
+		b.transitionLocked(StateClosed, 0, now)
 	}
 }
 
@@ -268,7 +341,7 @@ func (b *Breaker) RecordFailure() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := b.now()
-	switch b.state {
+	switch b.loadState() {
 	case StateOpen:
 		// Straggler while open: the episode is already counted.
 		return
@@ -278,7 +351,7 @@ func (b *Breaker) RecordFailure() {
 	default: // closed
 		b.failures++
 		if b.failures >= b.settings.ConsecutiveFailures {
-			b.trips = 1
+			b.trips = b.closedTripsLocked(now) + 1
 			b.openLocked(now)
 		}
 	}
@@ -296,25 +369,61 @@ func (b *Breaker) Trip() {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	switch b.state {
+	now := b.now()
+	switch b.loadState() {
 	case StateOpen:
 		return
 	case StateHalfOpen:
 		b.trips++
 	default: // closed
-		b.trips = 1
+		b.trips = b.closedTripsLocked(now) + 1
 	}
-	b.openLocked(b.now())
+	b.openLocked(now)
 }
 
-// State returns the current breaker state without mutating it.
+// State returns the current breaker state without mutating it. It takes no
+// lock, so it is safe to call from a transition callback.
 func (b *Breaker) State() State {
 	if !b.settings.Enabled {
 		return StateClosed
 	}
+	return b.loadState()
+}
+
+// Status returns a consistent copy of the breaker's state. A disabled
+// breaker reports a zero closed Status. It takes b.mu, so it must not be
+// called from a transition callback.
+func (b *Breaker) Status() Status {
+	if !b.settings.Enabled {
+		return Status{}
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.state
+	st := Status{
+		State:       b.loadState(),
+		Failures:    b.failures,
+		Trips:       b.trips,
+		Deadline:    b.deadline,
+		LastProbeAt: b.lastProbeAt,
+		ClosedAt:    b.closedAt,
+	}
+	if st.State == StateClosed {
+		st.Trips = b.closedTripsLocked(b.now())
+	}
+	if st.Trips > 0 {
+		st.BackoffCap = backoffCap(b.settings, st.Trips)
+	}
+	return st
+}
+
+// closedTripsLocked returns the trip count a closed breaker carries into
+// its next trip: the kept exponent while inside TripDecay of closing,
+// otherwise zero. Caller must hold b.mu.
+func (b *Breaker) closedTripsLocked(now time.Time) int {
+	if b.settings.TripDecay <= 0 || b.closedAt.IsZero() || now.Sub(b.closedAt) >= b.settings.TripDecay {
+		return 0
+	}
+	return b.trips
 }
 
 // openLocked moves to StateOpen with a full-jitter backoff deadline.
@@ -325,30 +434,38 @@ func (b *Breaker) openLocked(now time.Time) {
 	b.transitionLocked(StateOpen, backoff, now)
 }
 
-// backoffCapLocked returns min(OpenMax, OpenBase << (trips-1)) with
-// overflow protection. Caller must hold b.mu.
+// backoffCapLocked returns the backoff cap for the current trip count.
+// Caller must hold b.mu.
 func (b *Breaker) backoffCapLocked() time.Duration {
-	capDur := b.settings.OpenBase
-	for i := 1; i < b.trips; i++ {
+	return backoffCap(b.settings, b.trips)
+}
+
+// backoffCap returns min(OpenMax, OpenBase << (trips-1)) with overflow
+// protection.
+func backoffCap(settings Settings, trips int) time.Duration {
+	capDur := settings.OpenBase
+	for i := 1; i < trips; i++ {
 		capDur *= 2
-		if capDur >= b.settings.OpenMax || capDur <= 0 {
-			return b.settings.OpenMax
+		if capDur >= settings.OpenMax || capDur <= 0 {
+			return settings.OpenMax
 		}
 	}
-	if capDur > b.settings.OpenMax {
-		return b.settings.OpenMax
+	if capDur > settings.OpenMax {
+		return settings.OpenMax
 	}
 	return capDur
 }
 
 // transitionLocked changes state and notifies the callback. Caller must
-// hold b.mu.
+// hold b.mu. The callback runs under b.mu, which keeps deliveries ordered,
+// serialized, and fenced by SetOnStateChange; State takes no lock, so a
+// callback can still read it.
 func (b *Breaker) transitionLocked(to State, backoff time.Duration, now time.Time) {
-	from := b.state
+	from := b.loadState()
 	if from == to {
 		return
 	}
-	b.state = to
+	b.state.Store(int32(to))
 	if b.onChange != nil {
 		b.onChange(Transition{
 			Scope:    b.scope,
@@ -382,5 +499,5 @@ type breakerSnapshot struct {
 func (b *Breaker) snapshot() breakerSnapshot {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return breakerSnapshot{state: b.state, failures: b.failures, trips: b.trips, deadline: b.deadline}
+	return breakerSnapshot{state: b.loadState(), failures: b.failures, trips: b.trips, deadline: b.deadline}
 }

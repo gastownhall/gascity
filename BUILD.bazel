@@ -161,6 +161,7 @@ go_library(
 # Repo-root metadata consumed as runfiles by repo-lint tests (//scripts,
 # //scripts/cipolicy, //scripts/prwatchdog, //test/qualification, ...).
 exports_files([
+    ".bazelrc",
     "Makefile",
     "TESTING.md",
     "go.mod",

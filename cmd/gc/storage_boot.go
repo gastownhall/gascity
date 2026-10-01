@@ -95,6 +95,10 @@ type storageRoutes struct {
 	// its CachingStore stays the only emitter on that side — see
 	// class_store_emit.go for why the two must not both emit.
 	emitCityPath string
+	// caches are the CachingStores the controller put over these routes'
+	// engines (withControllerCache). close stops their background work before
+	// the engines they read go away.
+	caches []*beads.CachingStore
 	// relics records, per binding store, whether the boot-time census found a
 	// bead — open or closed — outside the namespaces that binding declares.
 	//
@@ -104,7 +108,8 @@ type storageRoutes struct {
 	//
 	// Keying a map on beads.Store is safe here for the same confined reason
 	// residencyBindingsFromRoutes gives: every key comes from this struct's own
-	// stores map, which holds what storage boot opened.
+	// stores map, which holds what storage boot opened. The keys are the bare
+	// engines the census read.
 	relics map[beads.Store]bool
 }
 
@@ -116,6 +121,12 @@ type storageRoutes struct {
 func (r *storageRoutes) hasLegacyResidents(store beads.Store) bool {
 	if r == nil {
 		return true
+	}
+	// The controller's class accessors hand out its cache over the engine the
+	// census read, so the lookup goes under it. Only the cache: the one-shot
+	// funnel's emitter is left as it is.
+	if cache, ok := store.(*beads.CachingStore); ok {
+		store = cache.Backing()
 	}
 	verdict, censused := r.relics[store]
 	if !censused {
@@ -184,10 +195,14 @@ func (r *storageRoutes) storeFor(class coordclass.Class) (beads.Store, bool) {
 	return store, ok
 }
 
-// close releases every engine these routes opened, in reverse open order.
+// close releases every engine these routes opened, in reverse open order,
+// after stopping the caches over them.
 func (r *storageRoutes) close() error {
 	if r == nil {
 		return nil
+	}
+	for _, cache := range r.caches {
+		cache.StopReconciler()
 	}
 	var errs []error
 	for i := len(r.closers) - 1; i >= 0; i-- {

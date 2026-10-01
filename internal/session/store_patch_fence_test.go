@@ -342,3 +342,43 @@ func TestApplyPatchIfLifecycleUnchangedRequireModeFailsClosed(t *testing.T) {
 		t.Fatalf("state = %q, want the row untouched", got.Metadata["state"])
 	}
 }
+
+// TestUpdateMetadataFencedRedecidesOverAConcurrentSuspend proves the fenced
+// write re-reads and re-decides when a suspend lands between its read and its
+// write, on stores that can fence; legacy stores keep the unfenced write.
+func TestUpdateMetadataFencedRedecidesOverAConcurrentSuspend(t *testing.T) {
+	for _, backend := range patchFenceBackends() {
+		t.Run(backend.name, func(t *testing.T) {
+			store, backing := backend.open(t)
+			created := seedPatchFenceSession(t, store, "s-fenced")
+			front := NewStore(beads.SessionStore{Store: store})
+			decisions := 0
+
+			written, err := front.UpdateMetadataFenced(created.ID, 3, func(current Info, _ PersistedResponse) MetadataPatch {
+				decisions++
+				if decisions == 1 {
+					if err := backing.SetMetadataBatch(created.ID, suspendPatch); err != nil {
+						t.Fatalf("suspend write: %v", err)
+					}
+				}
+				if current.MetadataState == string(StateSuspended) {
+					return nil
+				}
+				return MetadataPatch{"state": string(StateAwake)}
+			})
+			if err != nil {
+				t.Fatalf("UpdateMetadataFenced: %v", err)
+			}
+			if !backend.fenced {
+				if !written {
+					t.Fatal("legacy store: patch not written")
+				}
+				return
+			}
+			if written {
+				t.Fatal("fenced store: stale patch written over the concurrent suspend")
+			}
+			assertSuspendSurvived(t, backing, created.ID)
+		})
+	}
+}

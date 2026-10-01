@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -349,6 +350,22 @@ func TestRelocatedSQLiteSessionLedgerRequiresSQLite(t *testing.T) {
 	ledger := openSessionPurgeSQLiteStore(t)
 	if got := relocatedSQLiteSessionLedger(wholeSplitRoutes(ledger), ledger, beads.NewMemStore()); got != ledger {
 		t.Fatalf("relocatedSQLiteSessionLedger over the SQLite binding = %v, want the ledger", got)
+	}
+}
+
+// The controller serves the sessions class through its CachingStore over the
+// ledger. Kills: an engine check that type-asserts the cache instead of the
+// engine under it, which returns nil and silently stops the closed session
+// purge on every split city.
+func TestRelocatedSQLiteSessionLedgerSeesThroughTheBindingCache(t *testing.T) {
+	ledger := openSessionPurgeSQLiteStore(t)
+	routes := wholeSplitRoutes(ledger).withControllerCache(context.Background(), nil)
+	sessions := routes.stores[coordclass.ClassSessions]
+	if _, cached := sessions.(*beads.CachingStore); !cached {
+		t.Fatalf("sessions class is %T, want the controller's cache", sessions)
+	}
+	if got := relocatedSQLiteSessionLedger(routes, sessions, beads.NewMemStore()); got != sessions {
+		t.Fatalf("relocatedSQLiteSessionLedger over the cached ledger = %v, want the cache %v", got, sessions)
 	}
 }
 
@@ -2481,3 +2498,114 @@ func assertDeletedIDs(t *testing.T, deleted []string, want ...string) {
 }
 
 var _ beads.Store = (*gcTestStore)(nil)
+
+// closedRowCachedWithEdgeAddedBehind returns a cache over a SQLite ledger in
+// which id is closed through the cache (so the cache holds the closed row and
+// its edge set) and then gains a parent-child edge behind the cache, as a
+// write from another process that emitted nothing would add it.
+func closedRowCachedWithEdgeAddedBehind(t *testing.T, id, typ string, ephemeral bool) *beads.CachingStore {
+	t.Helper()
+	ledger := openSessionPurgeSQLiteStore(t)
+	old := time.Now().Add(-40 * 24 * time.Hour)
+	mustCreateSessionPurgeBead(t, ledger, beads.Bead{ID: id, Title: id, Type: typ, Status: "open", Ephemeral: ephemeral, CreatedAt: old, UpdatedAt: old})
+	mustCreateSessionPurgeBead(t, ledger, beads.Bead{ID: "gcg-owner", Title: "owner", Type: "molecule", Status: "open", CreatedAt: old, UpdatedAt: old})
+	cache := beads.NewCachingStore(ledger, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := cache.Close(id); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := ledger.DepAdd(id, "gcg-owner", "parent-child"); err != nil {
+		t.Fatalf("DepAdd behind the cache: %v", err)
+	}
+	if deps, _ := cache.DepList(id, "down"); len(deps) != 0 {
+		t.Fatalf("precondition: the cache already sees the edge (%v)", deps)
+	}
+	return cache
+}
+
+// Kills (M9): a session purge whose parent-child edge check reads the cache,
+// which deletes a session another process just linked into a live subtree.
+func TestPurgeClosedInfraSessionsChecksEdgesLive(t *testing.T) {
+	cache := closedRowCachedWithEdgeAddedBehind(t, "gcg-session-linked", "session", false)
+	purged, err := purgeClosedInfraSessions(cache, time.Now().Add(60*24*time.Hour), 720*time.Hour, 500)
+	if err != nil {
+		t.Fatalf("purgeClosedInfraSessions: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged %d; a session the store links into a subtree was deleted on the cache's word", purged)
+	}
+}
+
+// Kills (M8): a session purge whose pre-delete re-read reads the cache. The
+// store closed the session behind the cache; the cache still says open, so a
+// cached re-read skips a row the live list already proved purgeable.
+func TestPurgeClosedInfraSessionsReReadsLive(t *testing.T) {
+	ledger := openSessionPurgeSQLiteStore(t)
+	old := time.Now().Add(-40 * 24 * time.Hour)
+	mustCreateSessionPurgeBead(t, ledger, beads.Bead{ID: "gcg-session-done", Title: "done", Type: "session", Status: "open", CreatedAt: old, UpdatedAt: old})
+	cache := beads.NewCachingStore(ledger, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := ledger.Close("gcg-session-done"); err != nil {
+		t.Fatalf("Close behind the cache: %v", err)
+	}
+	purged, err := purgeClosedInfraSessions(cache, time.Now().Add(60*24*time.Hour), 720*time.Hour, 1)
+	if err != nil {
+		t.Fatalf("purgeClosedInfraSessions: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged %d, want 1: the re-read must see the store's closed row, not the cache's open one", purged)
+	}
+}
+
+// Kills: the rootless-orphan reaper's parent-child edge check reading the
+// cache, which deletes a closed wisp another process just linked under a live
+// parent.
+func TestWispGC_ReapChecksRootlessEdgesLive(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	cache := closedRowCachedWithEdgeAddedBehind(t, "gcg-rootless", "task", true)
+	reaped, err := reapOrphanedClosedWisps(cache, time.Now().Add(time.Hour), 500)
+	if err != nil {
+		t.Fatalf("reapOrphanedClosedWisps: %v", err)
+	}
+	if reaped != 0 {
+		t.Fatalf("reaped %d; a wisp the store links under a live parent was deleted on the cache's word", reaped)
+	}
+}
+
+// Kills: the orphan reaper resolving a wisp's root from the cache. The root was
+// closed through the cache and then reopened behind it without an event; a
+// cached Get still says terminal, and the reaper deletes a live root's step.
+func TestWispGC_ReapResolvesRootsLive(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	ledger := openSessionPurgeSQLiteStore(t)
+	old := time.Now().Add(-2 * time.Hour)
+	mustCreateSessionPurgeBead(t, ledger, beads.Bead{ID: "gcg-root", Title: "root", Type: "molecule", Status: "open", CreatedAt: old, UpdatedAt: old})
+	mustCreateSessionPurgeBead(t, ledger, beads.Bead{
+		ID: "gcg-step", Title: "step", Type: "task", Status: "closed", Ephemeral: true, CreatedAt: old, UpdatedAt: old,
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-root"},
+	})
+	cache := beads.NewCachingStore(ledger, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := cache.Close("gcg-root"); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := ledger.Reopen("gcg-root"); err != nil {
+		t.Fatalf("Reopen behind the cache: %v", err)
+	}
+	if got, _ := cache.Get("gcg-root"); got.Status != "closed" {
+		t.Fatalf("precondition: cached root = %q, want the stale closed row", got.Status)
+	}
+	reaped, err := reapOrphanedClosedWisps(cache, time.Now().Add(time.Hour), 500)
+	if err != nil {
+		t.Fatalf("reapOrphanedClosedWisps: %v", err)
+	}
+	if reaped != 0 {
+		t.Fatalf("reaped %d; a step of a root the store has reopened was deleted on the cache's word", reaped)
+	}
+}
