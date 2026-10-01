@@ -54,6 +54,17 @@ func TestUnledgeredSubtestHasNoSkip(t *testing.T) {
 	}
 }
 
+// TestForeignParentRowIsNotSkippable pins that the ParentID row executes on
+// every Store. BdStore cannot keep a parent bd does not have, so its run
+// declares Options.RefusesUnresolvableParent and the row asserts the refusal
+// (ga-6mfvtl); a ledger entry that skipped the row instead would let a Store's
+// divergence pass unexamined.
+func TestForeignParentRowIsNotSkippable(t *testing.T) {
+	if got := lookupSkip("ParentIDNamesARowThisStoreDoesNotHave"); got != nil {
+		t.Fatalf("the ParentID row has a ledgered skip %+v; it must execute, with a Store that refuses unresolvable parents declaring Options.RefusesUnresolvableParent", got)
+	}
+}
+
 // TestSkipClockGraceWarnsBeforeItFails proves a skip's expiry goes through the
 // fleet waiver clock: quiet while far off, a warning from WarnAhead before its
 // date and through the grace window after it, fatal once the grace runs out,
