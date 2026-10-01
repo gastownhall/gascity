@@ -395,13 +395,14 @@ func TestSessionStartAutoHandoffInjectionAssertsRulesAAndB(t *testing.T) {
 		t.Fatalf("rendered IDs = %#v, want auto-handoff %q", ids, auto.ID)
 	}
 
-	shown := injectedMailLines(injection.text)
-	line, ok := shown[auto.ID]
-	if !ok {
+	lines := injectedLinesNaming(injection.text, auto.ID)
+	if len(lines) == 0 {
 		t.Fatalf("SessionStart injection does not show auto handoff %s:\n%s", auto.ID, injection.text)
 	}
-	if !strings.Contains(strings.ToLower(line), "archived") {
-		t.Errorf("SessionStart injection line for %s does not say archived: %q", auto.ID, line)
+	for _, line := range lines {
+		if !strings.Contains(strings.ToLower(line), "archived") {
+			t.Errorf("SessionStart injection line for %s does not say archived: %q", auto.ID, line)
+		}
 	}
 	for _, overPromise := range []string{"to see all", "for the full list"} {
 		if strings.Contains(injection.text, overPromise) {
@@ -414,6 +415,81 @@ func TestSessionStartAutoHandoffInjectionAssertsRulesAAndB(t *testing.T) {
 	}
 	injection.afterDelivery()
 	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
+}
+
+// TestSessionStartAutoHandoffInjectionRendersBacklogAsOneLine is the
+// SessionStart-path counterpart of
+// TestMailCheckInjectRendersAutoHandoffBacklogAsOneLine (ga-8gdkfy Rule C):
+// several empty-body auto-handoffs (the PreCompact "context cycle" shape) render
+// as ONE line naming every one of them, every one is in the rendered-ID set the
+// ordinary-mail block dedups against, and all of them are archived after delivery.
+func TestSessionStartAutoHandoffInjectionRendersBacklogAsOneLine(t *testing.T) {
+	clearGCEnv(t)
+	store := beads.NewMemStore()
+	sessionInfo, err := store.Create(beads.Bead{
+		Title:  "gastown--worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"agent_name":   "worker",
+			"session_name": "gastown--worker",
+			"state":        "active",
+			"template":     "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	const backlog = mailInjectMaxMessages + 2
+	autoIDs := make([]string, 0, backlog)
+	for i := 0; i < backlog; i++ {
+		auto, ok := createHandoffMail(store, store, events.Discard, sessionInfo.ID, sessionInfo.ID,
+			[]string{"context cycle"}, "context cycle",
+			[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, io.Discard)
+		if !ok {
+			t.Fatal("createHandoffMail(auto) failed")
+		}
+		autoIDs = append(autoIDs, auto.ID)
+	}
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_SESSION_ID", sessionInfo.ID)
+
+	injection, ids, _ := sessionStartAutoHandoffInjectionWithStore(store, cityDir, io.Discard)
+	for _, id := range autoIDs {
+		if !ids[id] {
+			t.Errorf("rendered IDs = %#v, want auto-handoff %q", ids, id)
+		}
+	}
+
+	if bullets := injectedBulletLines(injection.text); len(bullets) != 1 {
+		t.Fatalf("SessionStart injection has %d bullet lines, want 1 for all %d auto-handoffs:\n%s", len(bullets), backlog, injection.text)
+	}
+	for _, id := range autoIDs {
+		lines := injectedLinesNaming(injection.text, id)
+		if len(lines) != 1 {
+			t.Fatalf("SessionStart injection names %s on %d lines, want 1:\n%s", id, len(lines), injection.text)
+		}
+		if !strings.Contains(strings.ToLower(lines[0]), "archived") {
+			t.Errorf("SessionStart injection line for %s does not say archived: %q", id, lines[0])
+		}
+	}
+	for _, overPromise := range []string{"to see all", "for the full list"} {
+		if strings.Contains(injection.text, overPromise) {
+			t.Errorf("SessionStart injection says 'gc mail inbox' %s, but the auto-handoffs were archived on delivery", overPromise)
+		}
+	}
+
+	if injection.afterDelivery == nil {
+		t.Fatal("afterDelivery = nil, want archive acknowledgement")
+	}
+	injection.afterDelivery()
+	for _, id := range autoIDs {
+		assertAutoHandoffRetainedAddressable(t, store, id)
+	}
 }
 
 func TestDoPrimeScopesRigPackFragmentsByCurrentRig(t *testing.T) {
