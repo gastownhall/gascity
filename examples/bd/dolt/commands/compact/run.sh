@@ -3855,7 +3855,9 @@ main() {
     exit 0
   fi
 
-  disk_preflight
+  if [ "$gc_only" != "1" ] && [ "$bare_gc" != "1" ]; then
+    disk_preflight
+  fi
 
   _meta_tmp=$(mktemp)
   metadata_files > "$_meta_tmp"

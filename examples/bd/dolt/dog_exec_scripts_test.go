@@ -6347,6 +6347,37 @@ func TestCompactScriptDiskPreflightCriticalExitsZero(t *testing.T) {
 	}
 }
 
+func TestCompactScriptDiskPreflightDoesNotBlockReclaimModes(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		env  []string
+	}{
+		{name: "gc-only", args: []string{"--gc-only"}},
+		{name: "bare-gc", env: []string{"GC_DOLT_COMPACT_BARE_GC=1"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			env := append([]string{"GC_FAKE_DF_MODE=df_critical"}, tt.env...)
+			out, err := fixture.runWithArgs(t, "success", tt.args, env...)
+			if err != nil {
+				t.Fatalf("reclaim mode failed under low disk: %v\nout=%s", err, out)
+			}
+			if strings.Contains(out, "disk CRITICAL") {
+				t.Fatalf("reclaim mode was blocked by disk preflight:\n%s", out)
+			}
+			logData, err := os.ReadFile(fixture.doltLog)
+			if err != nil {
+				t.Fatalf("read dolt log: %v", err)
+			}
+			if !strings.Contains(string(logData), "DOLT_GC") {
+				t.Fatalf("reclaim mode did not issue DOLT_GC:\n%s", logData)
+			}
+		})
+	}
+}
+
 func TestCompactScriptDiskPreflightOversizedFloorSkipsCompaction(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_MIN_FREE_BYTES=18446744073709551616", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
