@@ -29,13 +29,8 @@ import (
 // partial at all.
 func partialFromInjectedProbeTimeout(t *testing.T) bool {
 	t.Helper()
-	origTimeout := statusProviderCallTimeout
 	origWarn := statusProviderTimeoutWarning
-	t.Cleanup(func() {
-		statusProviderCallTimeout = origTimeout
-		statusProviderTimeoutWarning = origWarn
-	})
-	statusProviderCallTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { statusProviderTimeoutWarning = origWarn })
 	statusProviderTimeoutWarning = func() {}
 
 	base := newStatusProbeProvider()
@@ -43,7 +38,7 @@ func partialFromInjectedProbeTimeout(t *testing.T) bool {
 	// the observation is missing, not the agent.
 	base.running.Store(true)
 	base.delay.Store(int64(100 * time.Millisecond))
-	wrapped := newBoundedStatusProvider(base)
+	wrapped := newBoundedStatusProvider(base, 10*time.Millisecond)
 
 	if wrapped.IsRunning("local-core.builder-1") {
 		t.Fatal("IsRunning returned true, want the timeout fallback — the probe was supposed to blow its budget")
