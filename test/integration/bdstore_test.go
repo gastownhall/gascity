@@ -58,11 +58,26 @@ func TestBdStoreConformance(t *testing.T) {
 	workspacesDir := filepath.Join(rootDir, "workspaces")
 	serverPort := startSharedDoltServer(t, env, doltDataDir)
 	var dbCounter atomic.Int64
+	// liveDBs are the databases of the stores handed out and not yet dropped.
+	var liveDBs []string
+	doltClientDir := filepath.Join(rootDir, "dolt-client")
+	if err := os.MkdirAll(doltClientDir, 0o755); err != nil {
+		t.Fatalf("creating dolt client dir: %v", err)
+	}
 
 	// Factory: each call creates a fresh workspace bound to the shared Dolt
 	// server. This avoids the slow startup/shutdown tail from embedded local
 	// server mode and keeps the conformance suite within CI time limits.
+	//
+	// Every store is a database on that server, and both Dolt and bd init get
+	// slower with each database the server holds, so the factory drops every
+	// store but the latest before creating the next one. Subtests run one at a
+	// time and take one store each, so only the latest can still be in use.
 	newStore := func() beads.Store {
+		for len(liveDBs) > 1 {
+			dropDoltDatabase(t, env, doltClientDir, serverPort, liveDBs[0])
+			liveDBs = liveDBs[1:]
+		}
 		n := dbCounter.Add(1)
 		prefix := fmt.Sprintf("ct%d", n)
 
@@ -82,6 +97,7 @@ func TestBdStoreConformance(t *testing.T) {
 		runBDInit(t, env, wsDir, prefix, serverPort)
 
 		configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
+		liveDBs = append(liveDBs, prefix)
 
 		return beads.NewBdStore(wsDir, pinnedBdStoreCommandRunner())
 	}
@@ -162,16 +178,13 @@ func startSharedDoltServer(t *testing.T, env []string, dataDir string) string {
 }
 
 // runBDInit initializes beads against the shared Dolt server with a bounded wait.
-// --quiet makes bd return before its success banner and the report-only
-// post-init diagnostics, which this harness never reads: a bd init that
-// finished its work must not be killed by the bound while it runs them.
 func runBDInit(t *testing.T, env []string, dir, prefix, port string) {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
 	defer cancel()
 
-	bdInit := exec.CommandContext(ctx, bdBinary, "init", "--quiet", "--server", "--server-host", "127.0.0.1", "--server-port", port, "-p", prefix, "--skip-hooks", "--skip-agents")
+	bdInit := exec.CommandContext(ctx, bdBinary, "init", "--server", "--server-host", "127.0.0.1", "--server-port", port, "-p", prefix, "--skip-hooks", "--skip-agents")
 	bdInit.Dir = dir
 	bdInit.Env = isolateBdHomeEnv(env)
 	out, err := bdInit.CombinedOutput()
@@ -180,6 +193,26 @@ func runBDInit(t *testing.T, env []string, dir, prefix, port string) {
 	}
 	if err != nil {
 		t.Fatalf("bd init: %v: %s", err, out)
+	}
+}
+
+// dropDoltDatabase drops a finished store's database from the shared Dolt
+// server. Both Dolt and bd init get slower with every database the server
+// holds (measured: init took 2.7s at one database and 16.8s at twelve), so a
+// conformance run that never dropped them would go quadratic. It runs from dir,
+// an empty directory, because the dolt client reads its working directory. A
+// failed drop only costs speed, so it is logged and the run goes on.
+func dropDoltDatabase(t *testing.T, env []string, dir, port, name string) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
+	defer cancel()
+
+	drop := exec.CommandContext(ctx, doltBinary, "--host", "127.0.0.1", "--port", port, "--user", "root", "--password", "", "--no-tls", "sql", "-q", "DROP DATABASE IF EXISTS "+name)
+	drop.Dir = dir
+	drop.Env = env
+	if out, err := drop.CombinedOutput(); err != nil {
+		t.Logf("dropping dolt database %s: %v: %s", name, err, out)
 	}
 }
 

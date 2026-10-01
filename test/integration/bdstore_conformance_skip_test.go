@@ -94,6 +94,31 @@ func TestBdStoreConformanceRunsTheForeignParentRow(t *testing.T) {
 	}
 }
 
+// TestBdStoreConformanceDropsDeadStoreDatabases guards the root cause of the
+// bd init timeouts the un-skipped suite hit (ga-d4nm46). Every store its
+// factory creates is a database on ONE shared Dolt server, and both Dolt and
+// bd init cost grows with the number of databases the server holds: measured
+// on a quiet host, init took 2.7s at one database and 16.8s at twelve, and the
+// suite's later stores crossed the 60s bdInitTimeout. A store's database is
+// dead once its subtest ends, so the factory must drop it through
+// dropDoltDatabase instead of letting the suite go quadratic.
+func TestBdStoreConformanceDropsDeadStoreDatabases(t *testing.T) {
+	_, body := bdStoreConformanceBody(t)
+
+	dropped := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if fn, ok := call.Fun.(*ast.Ident); ok && fn.Name == "dropDoltDatabase" {
+				dropped = true
+			}
+		}
+		return true
+	})
+	if !dropped {
+		t.Error("TestBdStoreConformance never calls dropDoltDatabase; every store's database would stay on the shared Dolt server and each later bd init would cost more than the last")
+	}
+}
+
 // bdStoreConformanceBody parses bdstore_test.go and returns the body of
 // TestBdStoreConformance with the file set that positions it.
 func bdStoreConformanceBody(t *testing.T) (*token.FileSet, *ast.BlockStmt) {
