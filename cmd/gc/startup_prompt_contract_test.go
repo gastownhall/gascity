@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,7 +8,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
@@ -73,6 +71,13 @@ func newContractCity(t *testing.T, promptBody string) contractCity {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
 	return contractCity{path: cityPath, cfg: cfg, resolved: resolved}
+}
+
+// controllerState returns the controller state the API resolvers ask for the
+// startup prompt. It is a literal on purpose: newControllerState opens the city's
+// bead store, which starts a Dolt server that outlives the test.
+func (c contractCity) controllerState() *controllerState {
+	return &controllerState{cityPath: c.path, cfg: c.cfg}
 }
 
 func (c contractCity) sessionInfo(mode launchMode) session.Info {
@@ -142,7 +147,7 @@ func cliWorkerResumeLaunch(t *testing.T, c contractCity, mode launchMode, _ stri
 
 func apiWorkerResumeLaunch(t *testing.T, c contractCity, mode launchMode, _ string) runtime.Config {
 	t.Helper()
-	cs := newControllerState(context.Background(), c.cfg, runtime.NewFake(), events.NewFake(), "test-city", c.path)
+	cs := c.controllerState()
 	hints := runtime.Config{WorkDir: c.path, Env: map[string]string{"KEEP": "me"}}
 	got, err := cs.ApplyStartupPrompt(c.sessionInfo(mode), c.resolved, "", hints)
 	if err != nil {
@@ -243,7 +248,7 @@ func TestStartupPromptContractEmptyPromptDeliversNothing(t *testing.T) {
 // launch consumes them. Every other session state may launch and gets the prompt.
 func TestStartupPromptContractRunningSessionIsLeftAlone(t *testing.T) {
 	city := newContractCity(t, contractPromptBody)
-	cs := newControllerState(context.Background(), city.cfg, runtime.NewFake(), events.NewFake(), "test-city", city.path)
+	cs := city.controllerState()
 
 	for _, tc := range []struct {
 		state    session.State
@@ -280,7 +285,7 @@ func TestStartupPromptContractRunningSessionIsLeftAlone(t *testing.T) {
 // map to both the worker's session env and its launch hints.
 func TestStartupPromptContractWorkerResumeLeavesCallerEnvUntouched(t *testing.T) {
 	city := newContractCity(t, contractPromptBody)
-	cs := newControllerState(context.Background(), city.cfg, runtime.NewFake(), events.NewFake(), "test-city", city.path)
+	cs := city.controllerState()
 	shared := map[string]string{"KEEP": "me"}
 	hints := runtime.Config{WorkDir: city.path, Env: shared}
 
