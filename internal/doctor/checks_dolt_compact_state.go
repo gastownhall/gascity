@@ -62,7 +62,7 @@ func (c *DoltCompactStateCheck) scanMarkers() ([]compactStateMarker, []string) {
 			continue
 		}
 		for _, e := range entries {
-			if e.Type()&fs.ModeType != 0 || strings.HasPrefix(e.Name(), ".") || compactStateMarkerTempName.MatchString(e.Name()) {
+			if e.Type()&fs.ModeType != 0 || strings.HasPrefix(e.Name(), ".") || markerType != "compact-pending-push-backup" && compactStateMarkerTempName.MatchString(e.Name()) {
 				continue
 			}
 			markerPath := filepath.Join(dir, e.Name())

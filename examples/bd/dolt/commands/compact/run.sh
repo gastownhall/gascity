@@ -1653,7 +1653,7 @@ write_compact_marker() {
     printf 'compact: db=%s unable to create marker directory %s\n' "$db" "$dir" >&2
     return 1
   fi
-  tmp=$(mktemp "$dir/$db.tmp.XXXXXX") || {
+  tmp=$(mktemp "$dir/.$db.tmp.XXXXXX") || {
     umask "$old_umask"
     printf 'compact: db=%s unable to create marker in %s\n' "$db" "$dir" >&2
     return 1
@@ -1907,7 +1907,7 @@ ensure_compact_marker_writable() {
     printf 'compact: db=%s unable to create marker directory %s\n' "$db" "$dir" >&2
     return 1
   fi
-  probe=$(mktemp "$dir/$db.probe.XXXXXX") || {
+  probe=$(mktemp "$dir/.$db.probe.XXXXXX") || {
     umask "$old_umask"
     printf 'compact: db=%s unable to create marker in %s\n' "$db" "$dir" >&2
     return 1
