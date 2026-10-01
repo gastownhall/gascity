@@ -11,15 +11,15 @@ In production cities, `mol-dog-compactor` handles compaction automatically. If y
 
 ## How It Runs
 
-The `mol-dog-compactor` order fires `gc dolt compact` every 2 hours (configurable via the `interval` field in `orders/mol-dog-compactor.toml`). For each database, `gc dolt compact` does two things: it flattens commit history into a single commit, then runs `CALL DOLT_GC('--full')` to reclaim orphaned chunks. If a database has fewer than `GC_DOLT_COMPACT_THRESHOLD_COMMITS` commits (default: 2000), that database is skipped on that run.
+The `mol-dog-compactor` order fires `gc dolt compact` every 2 hours (configurable via the `interval` field in `orders/mol-dog-compactor.toml`). For each eligible database without shared remote history, `gc dolt compact` collapses history after the provenance watermark into one commit, then runs `CALL DOLT_GC('--full')` to reclaim orphaned chunks. Databases with configured remotes default to working-set GC without rewriting shared history. If a database has fewer than `GC_DOLT_COMPACT_THRESHOLD_COMMITS` compactable commits (default: 2000), that database is skipped on that run.
 
 ## Configuration
 
 | Env var | Default | Purpose |
 |---------|---------|---------|
-| `GC_DOLT_COMPACT_THRESHOLD_COMMITS` | `2000` | Skip flatten when commit count is below this. |
+| `GC_DOLT_COMPACT_THRESHOLD_COMMITS` | `2000` | Skip flatten when the compactable commit count is below this. |
 | `GC_DOLT_COMPACT_MIN_FREE_BYTES` | `5368709120` (5 GiB) | Skip compact if disk free falls below this. Set to `0` to disable. |
-| `GC_DOLT_COMPACT_BACKUP_REMOTE` | _(none)_ | When set, runs `dolt backup sync <remote>` for each database before flattening. On failure, compact aborts. |
+| `GC_DOLT_COMPACT_BACKUP_REMOTE` | _(none)_ | When set, runs `dolt backup sync <remote>` before an eligible database is flattened or bare-GC'd. On failure, compact aborts. |
 | `GC_DOLT_COMPACT_BACKUP_TIMEOUT_SECS` | `300` | Wall-clock timeout for each backup sync call. |
 | `GC_DOLT_COMPACT_CALL_TIMEOUT_SECS` | `1800` | Hard timeout for each SQL CALL (flatten or GC). |
 
@@ -27,11 +27,13 @@ The `mol-dog-compactor` order fires `gc dolt compact` every 2 hours (configurabl
 
 ### Pre-compact backup
 
-Set `GC_DOLT_COMPACT_BACKUP_REMOTE=<remote-name>` to snapshot each database before its history is rewritten. If backup fails, compact aborts rather than proceeding without a rollback point. Requires a named dolt backup remote configured in each database directory. Dry-run reports the backup it would sync without invoking `dolt backup sync`.
+Set `GC_DOLT_COMPACT_BACKUP_REMOTE=<remote-name>` to snapshot each eligible database before compaction changes it. If backup fails, compact aborts rather than proceeding without a rollback point. Requires a named dolt backup remote configured in each database directory. Dry-run reports the backup it would sync without invoking `dolt backup sync`.
 
 ### Disk preflight
 
 Before compacting, `gc dolt compact` checks free space on the Dolt data volume. If free bytes fall below `GC_DOLT_COMPACT_MIN_FREE_BYTES` (default 5 GiB) the run is skipped and retried at the next 2-hour interval. This prevents compaction from aggravating a full-disk situation. Set to `0` to disable.
+
+If free-space probing fails, the compactor exits without changing a database. Fix the filesystem probe or set the threshold to `0` only when deliberately disabling this guard.
 
 ## Observability
 

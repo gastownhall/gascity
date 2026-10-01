@@ -143,11 +143,13 @@ func (c *DoltCompactStateCheck) Run(_ *CheckContext) *CheckResult {
 func compactMarkerFixHint(m compactStateMarker) string {
 	switch m.markerType {
 	case "compact-quarantine":
-		return fmt.Sprintf("inspect %s; retry proof-gated recovery with: gc dolt compact --only-db %s", m.path, m.db)
+		return fmt.Sprintf("inspect %s; clear the marker only after verifying its recorded evidence", m.path)
 	case "compact-pending-gc":
 		return fmt.Sprintf("GC incomplete for %s; inspect %s, then run: gc dolt compact --only-db %s", m.db, m.path, m.db)
-	case "compact-pending-push", "compact-pending-push-backup":
+	case "compact-pending-push":
 		return fmt.Sprintf("push pending for %s; inspect %s, then run: gc dolt compact --only-db %s", m.db, m.path, m.db)
+	case "compact-pending-push-backup":
+		return fmt.Sprintf("backup push pending for %s; inspect %s, reconcile the backup remote manually, then remove the marker after verification", m.db, m.path)
 	default:
 		return fmt.Sprintf("inspect %s", m.path)
 	}
