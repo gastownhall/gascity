@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/nudgepoller"
@@ -2924,6 +2925,84 @@ func TestTryDeliverQueuedNudgesByPollerKeepsFreshMailReminder(t *testing.T) {
 	}
 	if len(dead) != 0 {
 		t.Fatalf("dead = %d, want 0 (fresh reminder must not be withdrawn); dead=%#v", len(dead), dead)
+	}
+}
+
+// TestTryDeliverQueuedNudgesByPollerKeepsMailReminderWhenMailStoreRelocated
+// guards the stale-mail check's store routing: when the messaging class is
+// relocated off the nudges store, unread mail lives only in the messaging
+// store, so the check must read through the messaging-class provider. Reading
+// the nudges store instead would see zero unread and withdraw a live reminder
+// as mail-already-read.
+func TestTryDeliverQueuedNudgesByPollerKeepsMailReminderWhenMailStoreRelocated(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	messaging := beads.NewMemStore()
+	seedCLIStorageRoutes(t, dir, &storageRoutes{
+		stores:  map[coordclass.Class]beads.Store{coordclass.ClassMessaging: messaging},
+		binding: "infra",
+	})
+
+	now := time.Now().Add(-1 * time.Minute)
+	const nudgeID = "relocated-mail-reminder-1"
+	if err := enqueueQueuedNudge(dir, newQueuedNudgeWithOptions("worker", "[mail] You have mail from human", "mail", now, queuedNudgeOptions{ID: nudgeID})); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	store := openNudgeBeadStore(dir)
+	if beads.Store(messaging) == store.Store {
+		t.Fatal("premise failed: the nudges store is the messaging store; the fixture does not relocate messaging")
+	}
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+
+	// Unread mail goes ONLY into the relocated messaging store.
+	if _, err := newMailProviderWithSessionStore(messaging, store.Store).Send("human", info.ID, "", "still unread"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if !delivered {
+		t.Fatal("delivered = false, want true (mail is unread in the relocated messaging store, reminder must still fire)")
+	}
+
+	var nudgeCalls []runtime.Call
+	for _, call := range fake.Calls {
+		if call.Method == "Nudge" {
+			nudgeCalls = append(nudgeCalls, call)
+		}
+	}
+	if len(nudgeCalls) != 1 {
+		t.Fatalf("nudge calls = %d, want 1", len(nudgeCalls))
+	}
+
+	shadow, ok, err := nudgeFrontDoor(store).FindIncludingTerminal(nudgeID)
+	if err != nil {
+		t.Fatalf("FindIncludingTerminal: %v", err)
+	}
+	if ok && shadow.TerminalReason == "mail-already-read" {
+		t.Fatalf("shadow.TerminalReason = %q: the reminder was withdrawn although mail is unread in the messaging store", shadow.TerminalReason)
 	}
 }
 

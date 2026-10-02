@@ -1853,7 +1853,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		}
 	}
 	var staleMail []queuedNudge
-	items, staleMail, err = splitStaleMailQueuedNudges(target, deliveryStore, deliverySessStore, items)
+	items, staleMail, err = splitStaleMailQueuedNudges(target, deliveryMailProvider, deliverySessStore, items)
 	if err != nil && nudgeWarningWriter != nil {
 		fmt.Fprintf(nudgeWarningWriter, "gc nudge: warning: checking mail staleness for %s: %v\n", target.agentKey(), err) //nolint:errcheck
 	}
@@ -2198,15 +2198,18 @@ func terminalizeBlockedQueuedNudges(cityPath string, blocked map[string][]queued
 // unread) preserves the TestSendMailNotifyQueuesIndependentRemindersForEachMail
 // guarantee from PR #2968 that independent mail arrivals never get silently
 // dropped -- this only withdraws a reminder when unread count is truly zero.
-func targetHasUnreadMail(target nudgeTarget, msgStore, sessStore beads.Store) (bool, error) {
-	if target.sessionID == "" {
+//
+// mp must read the messaging-class store (cliMailStore), not the nudges
+// store, so unread mail is visible when mail is routed separately. A nil mp
+// counts as unread, so the reminder is kept.
+func targetHasUnreadMail(target nudgeTarget, mp mail.Provider, sessStore beads.Store) (bool, error) {
+	if mp == nil || target.sessionID == "" {
 		return true, nil
 	}
 	resolved, err := resolveMailTargetsWithConfig(target.cityPath, target.cfg, sessStore, target.sessionID)
 	if err != nil {
 		return true, err
 	}
-	mp := newMailProviderWithSessionStore(msgStore, sessStore)
 	messages, err := collectMailMessages(mp.Check, resolved.recipients)
 	if err != nil {
 		return true, err
@@ -2218,7 +2221,7 @@ func targetHasUnreadMail(target nudgeTarget, msgStore, sessStore beads.Store) (b
 // delivered (keep) and mail-sourced ones whose target has since read all
 // mail and so must be withdrawn instead of replayed as a stale reminder
 // (stale). Non-mail items always pass through into keep untouched.
-func splitStaleMailQueuedNudges(target nudgeTarget, msgStore, sessStore beads.Store, items []queuedNudge) (keep, stale []queuedNudge, err error) {
+func splitStaleMailQueuedNudges(target nudgeTarget, mp mail.Provider, sessStore beads.Store, items []queuedNudge) (keep, stale []queuedNudge, err error) {
 	hasMailItem := false
 	for _, item := range items {
 		if item.Source == "mail" {
@@ -2229,7 +2232,7 @@ func splitStaleMailQueuedNudges(target nudgeTarget, msgStore, sessStore beads.St
 	if !hasMailItem {
 		return items, nil, nil
 	}
-	unread, err := targetHasUnreadMail(target, msgStore, sessStore)
+	unread, err := targetHasUnreadMail(target, mp, sessStore)
 	if err != nil {
 		return items, nil, err
 	}
