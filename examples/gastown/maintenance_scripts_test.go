@@ -2631,6 +2631,199 @@ exit 1
 	}
 }
 
+// orphanSweepOverflowFloorBytes is the smallest membership list the large-list
+// tests below use. A list this size cannot fit the 64 KiB pipe buffer, so
+// `printf '%s\n' "$LIST" | grep -Fxq` is still writing when grep exits on an
+// early match. The ga-ngx5gg measurement saw 100 KB fail on every trial of the
+// piped form; 300 KB leaves a 3x margin.
+const orphanSweepOverflowFloorBytes = 300_000
+
+// orphanSweepFillerNames returns distinct names whose newline-terminated sizes
+// add up to at least floor bytes, so a list built from them is above the floor
+// by construction instead of by a hand-picked count.
+func orphanSweepFillerNames(floor int) []string {
+	var names []string
+	for size := 0; size < floor; {
+		name := fmt.Sprintf("orphan-sweep-filler-%06d", len(names))
+		names = append(names, name)
+		size += len(name) + 1
+	}
+	return names
+}
+
+// orphanSweepListSizeCases pairs a small control list with a list above the
+// pipe buffer. Both must preserve the live claim; only the large one fails on
+// the piped membership check, which attributes the failure to list size.
+func orphanSweepListSizeCases() []struct {
+	name   string
+	filler []string
+} {
+	return []struct {
+		name   string
+		filler []string
+	}{
+		{name: "small list", filler: orphanSweepFillerNames(1)},
+		{name: "list above the pipe buffer", filler: orphanSweepFillerNames(orphanSweepOverflowFloorBytes)},
+	}
+}
+
+// assertOrphanSweepKeepsLiveClaim runs orphan-sweep.sh against a fake gc whose
+// `config explain` prints agents and whose `session list --json` reports
+// liveSessions. Two beads are in progress: one claimed by liveAssignee, which
+// only the membership list under test can vouch for (every later probe fails),
+// and one claimed by a genuinely dead agent. The dead bead must be released,
+// which proves the sweep reached its decision logic; the live claim must not.
+//
+// The lists travel as files, not environment variables: a single environment
+// string is capped at 128 KiB (MAX_ARG_STRLEN) and these lists are larger.
+func assertOrphanSweepKeepsLiveClaim(t *testing.T, liveAssignee string, agents, liveSessions []string) {
+	t.Helper()
+	const (
+		liveBeadID = "ga-membership-live"
+		deadBeadID = "ga-membership-dead"
+		deadAgent  = "gastown.longgone"
+	)
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	fixtureDir := t.TempDir()
+	gcLog := filepath.Join(fixtureDir, "gc.log")
+	agentsFile := filepath.Join(fixtureDir, "config-explain.txt")
+	sessionsFile := filepath.Join(fixtureDir, "session-list.json")
+
+	var explain strings.Builder
+	for _, name := range agents {
+		fmt.Fprintf(&explain, "Agent: %s\n  source: pack\n", name)
+	}
+	if err := os.WriteFile(agentsFile, []byte(explain.String()), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", agentsFile, err)
+	}
+	if err := os.WriteFile(sessionsFile, []byte(orphanSweepSessionListJSON(t, liveSessions...)), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", sessionsFile, err)
+	}
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  mail)
+    exit 0
+    ;;
+  config)
+    if [ "$2" = "explain" ]; then
+      cat "$ORPHAN_SWEEP_CONFIG_EXPLAIN_FILE"
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      cat "$ORPHAN_SWEEP_SESSION_LIST_FILE"
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      printf '[{"id":"%s","status":"in_progress","assignee":"%s"},{"id":"%s","status":"in_progress","assignee":"%s"}]\n' \
+        "$ORPHAN_SWEEP_LIVE_BEAD" "$ORPHAN_SWEEP_LIVE_ASSIGNEE" "$ORPHAN_SWEEP_DEAD_BEAD" "$ORPHAN_SWEEP_DEAD_ASSIGNEE"
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "$ORPHAN_SWEEP_LIVE_BEAD" ] && [ "$4" = "--json" ]; then
+      printf '[{"id":"%s","status":"in_progress","assignee":"%s"}]\n' "$ORPHAN_SWEEP_LIVE_BEAD" "$ORPHAN_SWEEP_LIVE_ASSIGNEE"
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "$ORPHAN_SWEEP_DEAD_BEAD" ] && [ "$4" = "--json" ]; then
+      printf '[{"id":"%s","status":"in_progress","assignee":"%s"}]\n' "$ORPHAN_SWEEP_DEAD_BEAD" "$ORPHAN_SWEEP_DEAD_ASSIGNEE"
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":                          cityDir,
+		"GC_CITY_PATH":                     cityDir,
+		"GC_CALL_LOG":                      gcLog,
+		"ORPHAN_SWEEP_CONFIG_EXPLAIN_FILE": agentsFile,
+		"ORPHAN_SWEEP_SESSION_LIST_FILE":   sessionsFile,
+		"ORPHAN_SWEEP_LIVE_BEAD":           liveBeadID,
+		"ORPHAN_SWEEP_LIVE_ASSIGNEE":       liveAssignee,
+		"ORPHAN_SWEEP_DEAD_BEAD":           deadBeadID,
+		"ORPHAN_SWEEP_DEAD_ASSIGNEE":       deadAgent,
+		"PATH":                             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := coreScriptPath("orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "bd release-if-current "+deadBeadID+" "+deadAgent) {
+		t.Fatalf("dead-assigned bead was not released, so the sweep never reached its decision logic:\n%s", orphanSweepFailureContext(out, gcLog))
+	}
+	if strings.Contains(log, "bd release-if-current "+liveBeadID+" ") {
+		t.Fatalf("claim held by %q was released although the membership list names it:\n%s", liveAssignee, orphanSweepFailureContext(out, gcLog))
+	}
+}
+
+// TestOrphanSweepPreservesLiveSessionAssigneeOnLargeSessionList covers
+// gastownhall/gascity#6714. live_session_match tested membership with
+// `printf '%s\n' "$LIVE_SESSION_IDS" | grep -Fxq`; under pipefail, a list
+// larger than the pipe buffer made printf die of SIGPIPE once grep exited on an
+// early match, so a live pool session read as dead and its claim was released.
+// The sweep fetches the session list twice per scope without de-duplicating, so
+// LIVE_SESSION_IDS grows with every rig.
+func TestOrphanSweepPreservesLiveSessionAssigneeOnLargeSessionList(t *testing.T) {
+	// A pool-spawned ephemeral session name: not a configured agent, so only
+	// live_session_match can recognize it.
+	const assignee = "gastown__polekitten-gc-q9j0om"
+	for _, tc := range orphanSweepListSizeCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			// The live session leads the list, so grep -q exits on its first
+			// lines while printf is still writing.
+			sessions := append([]string{assignee}, tc.filler...)
+			assertOrphanSweepKeepsLiveClaim(t, assignee, []string{"deployer"}, sessions)
+		})
+	}
+}
+
+// TestOrphanSweepPreservesConfiguredAgentAssigneeOnLargeAgentList covers
+// gastownhall/gascity#6714 for agent_exists, which tested membership in $AGENTS
+// the same piped way: a configured agent read as unknown once `gc config
+// explain` listed enough agents, and its claim was released.
+func TestOrphanSweepPreservesConfiguredAgentAssigneeOnLargeAgentList(t *testing.T) {
+	// A configured agent with no live session: only agent_exists can
+	// recognize it.
+	const assignee = "deployer"
+	for _, tc := range orphanSweepListSizeCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			// The configured agent leads the list, so grep -q exits on its
+			// first line while printf is still writing.
+			agents := append([]string{assignee}, tc.filler...)
+			assertOrphanSweepKeepsLiveClaim(t, assignee, agents, []string{"orphan-sweep-test-keepalive"})
+		})
+	}
+}
+
 func TestReaperMessageWispsAboveAlertThresholdDoNotTriggerReapFailureAnomaly(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
