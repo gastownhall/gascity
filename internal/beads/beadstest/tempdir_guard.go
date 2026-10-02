@@ -145,8 +145,21 @@ func baitDisturbance(baitDir string) string {
 	return ""
 }
 
-// markGitRoot is where the isolation goes: the dir must become its own git root.
-func markGitRoot(_ testing.TB, _ string) {}
+// markGitRoot makes dir the root of a git repository without running git. bd
+// bounds its workspace walk at the git root it gets from git, and git accepts
+// a HEAD, an objects dir and a refs dir as a repository.
+func markGitRoot(t testing.TB, dir string) {
+	t.Helper()
+	gitDir := filepath.Join(dir, ".git")
+	for _, sub := range []string{"objects", "refs"} {
+		if err := os.MkdirAll(filepath.Join(gitDir, sub), 0o700); err != nil {
+			t.Fatalf("mark %s as a git root: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
+		t.Fatalf("mark %s as a git root: %v", dir, err)
+	}
+}
 
 // GuardedBdWorkspaceDir returns a dir for a real bd subprocess to `bd init`
 // and run in, isolated from every directory above it. Use it, not
