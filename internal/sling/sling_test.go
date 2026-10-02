@@ -5375,3 +5375,98 @@ func TestCheckBeadStateSingleSessionAssignedUnroutedIsIdempotent(t *testing.T) {
 		t.Fatalf("expected no warnings, got %v", result.Warnings)
 	}
 }
+
+// TestDoSlingReroutesClaimedBeadWithoutAttachingFormula covers the re-route of
+// a bead the target already claims while gc.routed_to names another target,
+// on a formula-backed target. The sling must re-stamp the route but must not
+// attach the default formula onto the claimed work: that is the claim guard the
+// idempotent path applies (SkippedForClaim), and the re-route must keep it.
+func TestDoSlingReroutesClaimedBeadWithoutAttachingFormula(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("code-review")}
+
+	store, beadID := assignedSingleSessionBead(t, "mayor", "reviewers")
+	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = store
+
+	result, err := DoSling(testOpts(a, beadID), deps, store)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false (the route must be re-stamped), got %+v", result)
+	}
+	if result.Method != "bead" || result.WispRootID != "" {
+		t.Fatalf("Method = %q, WispRootID = %q; want a plain re-route (\"bead\", no wisp) onto claimed work", result.Method, result.WispRootID)
+	}
+	hasMolecule, err := HasMoleculeChildren(store, beadID, store)
+	if err != nil {
+		t.Fatalf("HasMoleculeChildren: %v", err)
+	}
+	if hasMolecule {
+		t.Fatalf("a molecule was attached to %s, which the target already claims", beadID)
+	}
+	if len(runner.calls) != 1 || !strings.Contains(runner.calls[0], beadID) {
+		t.Fatalf("runner calls = %q, want one routing call for %s", runner.calls, beadID)
+	}
+
+	var rerouted, skipped bool
+	for _, w := range result.BeadWarnings {
+		if strings.Contains(w, "re-routing") {
+			rerouted = true
+		}
+		if strings.Contains(w, "--on code-review was skipped") {
+			skipped = true
+		}
+	}
+	if !rerouted || !skipped {
+		t.Fatalf("BeadWarnings = %v, want the re-routing warning and the skipped-formula warning", result.BeadWarnings)
+	}
+}
+
+// TestDoSlingBatchReroutesClaimedChildWithoutAttachingFormula is the batch
+// form of TestDoSlingReroutesClaimedBeadWithoutAttachingFormula: a child the
+// target already claims, routed elsewhere, is re-routed without a formula.
+func TestDoSlingBatchReroutesClaimedChildWithoutAttachingFormula(t *testing.T) {
+	runner := newFakeRunner()
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+	store := deps.Store
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:    "child",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "mayor",
+		Metadata: map[string]string{"gc.routed_to": "reviewers"},
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := store.DepAdd(convoy.ID, child.ID, "tracks"); err != nil {
+		t.Fatalf("track child: %v", err)
+	}
+
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("code-review")}
+	result, err := DoSlingBatch(SlingOpts{Target: a, BeadOrFormula: convoy.ID}, deps, store)
+	if err != nil {
+		t.Fatalf("DoSlingBatch: %v", err)
+	}
+	if result.Routed != 1 || result.IdempotentCt != 0 {
+		t.Fatalf("Routed = %d, IdempotentCt = %d; want the claimed child re-routed", result.Routed, result.IdempotentCt)
+	}
+	if len(result.Children) != 1 || result.Children[0].WispRootID != "" || result.Children[0].WorkflowID != "" {
+		t.Fatalf("children = %#v, want %s routed with no formula attached", result.Children, child.ID)
+	}
+	hasMolecule, err := HasMoleculeChildren(store, child.ID, store)
+	if err != nil {
+		t.Fatalf("HasMoleculeChildren: %v", err)
+	}
+	if hasMolecule {
+		t.Fatalf("a molecule was attached to %s, which the target already claims", child.ID)
+	}
+}

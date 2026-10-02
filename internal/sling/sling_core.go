@@ -71,6 +71,8 @@ func DoSling(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult, 
 	switch {
 	case opts.IsFormula:
 		return slingFormula(opts, deps)
+	case result.routeOnly:
+		return slingPlainBead(opts, deps, beadID, result)
 	case opts.OnFormula != "":
 		return slingOnFormula(opts, deps, querier, beadID, result)
 	case !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "":
@@ -195,17 +197,17 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 			// onto in-progress work), but say so explicitly: without this
 			// warning the CLI prints only the generic "already routed" message,
 			// giving no signal that the requested --on formula was never
-			// attached or that --force would override the skip. opts.OnFormula
-			// is empty when this was reached via the target's
-			// default_sling_formula rather than an explicit --on, so fall back
-			// to naming that instead of rendering an empty flag value.
-			skippedFormula := opts.OnFormula
-			if skippedFormula == "" {
-				skippedFormula = a.EffectiveDefaultSlingFormula()
-			}
-			result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf(
-				"bead %s is claimed by %s with no molecule attached; --on %s was skipped to avoid re-attaching onto in-progress work — rerun with --force to attach it anyway",
-				opts.BeadOrFormula, decision.Assignee, skippedFormula))
+			// attached or that --force would override the skip.
+			result.BeadWarnings = append(result.BeadWarnings, skippedForClaimWarning(opts, a, decision.Assignee))
+		}
+	}
+	if check.RouteOnly {
+		// The target already claims the bead; only its route is stale. Re-stamp
+		// the route without attaching a formula, under the same claim guard as
+		// the idempotent path above.
+		result.routeOnly = true
+		if decision, probeErr := onFormulaNeedsAttachment(opts, querier, deps); probeErr == nil && decision.SkippedForClaim {
+			result.BeadWarnings = append(result.BeadWarnings, skippedForClaimWarning(opts, a, decision.Assignee))
 		}
 	}
 	if !check.Idempotent {
@@ -227,6 +229,20 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 		result.NudgeAgent = &a
 	}
 	return true
+}
+
+// skippedForClaimWarning reports a formula attach skipped because assignee
+// already claims the bead. opts.OnFormula is empty when the attach came from the
+// target's default_sling_formula rather than an explicit --on, so fall back to
+// naming that instead of rendering an empty flag value.
+func skippedForClaimWarning(opts SlingOpts, a config.Agent, assignee string) string {
+	skippedFormula := opts.OnFormula
+	if skippedFormula == "" {
+		skippedFormula = a.EffectiveDefaultSlingFormula()
+	}
+	return fmt.Sprintf(
+		"bead %s is claimed by %s with no molecule attached; --on %s was skipped to avoid re-attaching onto in-progress work — rerun with --force to attach it anyway",
+		opts.BeadOrFormula, assignee, skippedFormula)
 }
 
 // rigSuspended reports whether the named rig is marked suspended in config.
@@ -1981,6 +1997,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 	for _, child := range open {
 		childResult := SlingChildResult{BeadID: child.ID}
 
+		routeOnly := false
 		if !opts.Force {
 			check := CheckBeadStateWithOptions(querier, child.ID, a, deps, BeadCheckOptions{
 				NoConvoy: opts.NoConvoy,
@@ -1992,6 +2009,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 				continue
 			}
 			batchResult.BeadWarnings = append(batchResult.BeadWarnings, check.Warnings...)
+			routeOnly = check.RouteOnly
 		}
 
 		if shouldValidateBuiltInRouteStoreReachable(opts, deps) {
@@ -2006,7 +2024,9 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 			}
 		}
 
-		if useFormula != "" {
+		// A child the target already claims is only re-routed: never attach a
+		// formula onto claimed work (see BeadCheckResult.RouteOnly).
+		if useFormula != "" && !routeOnly {
 			formulaLabel := "formula"
 			if opts.OnFormula == "" {
 				formulaLabel = "default formula"

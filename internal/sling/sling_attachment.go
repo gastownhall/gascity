@@ -685,7 +685,8 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 				return resolveConvoyRecovery(q, b, deps, opts, beadID)
 			}
 			return BeadCheckResult{
-				Warnings: []string{fmt.Sprintf("warning: bead %s was assigned to %q but routed to %q; re-routing", beadID, target, routedTo)},
+				RouteOnly: true,
+				Warnings:  []string{fmt.Sprintf("warning: bead %s was assigned to %q but routed to %q; re-routing", beadID, target, routedTo)},
 			}
 		}
 		return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
