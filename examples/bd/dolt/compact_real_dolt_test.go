@@ -74,6 +74,36 @@ func TestCompactScriptRealDoltRemotePush(t *testing.T) {
 	}
 }
 
+// doltCallMargin is the part of the test's own deadline a dolt CLI call may not
+// use. A call that really is hung is killed this long before the package
+// timeout, which leaves the test time to report it and t.Cleanup time to stop
+// its sql-server (up to 10s) instead of the whole test binary panicking.
+const doltCallMargin = 30 * time.Second
+
+// doltCallWaitDelay bounds how long a call's Wait may keep blocking on an output
+// pipe after the call has exited or been killed. A child that outlives its
+// parent (the dolt processes run.sh starts) holds the pipe open, and without a
+// delay Wait blocks until that child exits too. It is a var so a test can
+// shorten it.
+var doltCallWaitDelay time.Duration
+
+// testDeadline is the part of *testing.T that bounds a dolt CLI call, so a test
+// can drive the bound with a fake deadline.
+type testDeadline interface {
+	Deadline() (deadline time.Time, ok bool)
+}
+
+// doltCallContext returns the context for one external dolt CLI call. The call
+// may use whatever is left of the test's own deadline less doltCallMargin (at
+// most half of what is left when little remains, so the test can still report);
+// with no test deadline (go test -timeout 0) nothing bounds it. There is
+// deliberately no fixed per-call budget: under suite load a dolt commit that was
+// merely slow was SIGKILLed at a fixed 30s and its test failed with
+// "signal: killed".
+func doltCallContext(_ testDeadline) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 30*time.Second)
+}
+
 func runDoltForCompactTest(t *testing.T, doltPath, dir string, args ...string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
