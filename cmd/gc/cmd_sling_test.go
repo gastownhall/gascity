@@ -7505,6 +7505,45 @@ func TestDoSlingKeepsWorkflowParentIdempotent(t *testing.T) {
 	}
 }
 
+// TestSlingReroutesAssignedSingleSessionBead covers a bead assigned to a
+// single-session agent while gc.routed_to still names another target (here a
+// pool it was handed off from). Slinging it to the assignee must write
+// gc.routed_to = target rather than skip as idempotent, or the agent's routed
+// work query never finds the bead.
+func TestSlingReroutesAssignedSingleSessionBead(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "WF-1", Title: "workflow", Type: "workflow", Status: "in_progress", Metadata: map[string]string{"gc.kind": "workflow"}},
+		{
+			ID:       "BL-42",
+			Title:    "handed-off work",
+			Type:     "task",
+			Status:   "open",
+			ParentID: "WF-1",
+			Assignee: "mayor",
+			Metadata: map[string]string{"gc.routed_to": "reviewers"},
+		},
+	}, nil)
+
+	opts := testOpts(a, "BL-42")
+	code := doSling(opts, deps, deps.Store, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "skipping (idempotent)") {
+		t.Fatalf("stdout = %q, want no idempotent skip", stdout.String())
+	}
+	assertStoreRoutedTo(t, deps.Store, "BL-42", "mayor")
+	if !strings.Contains(stderr.String(), "re-routing") {
+		t.Errorf("stderr = %q, want re-routing warning", stderr.String())
+	}
+}
+
 func TestDoSlingIdempotentForceOverrides(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()

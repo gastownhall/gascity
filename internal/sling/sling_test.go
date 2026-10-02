@@ -5293,3 +5293,85 @@ func TestUndeliverableHandoffWarningRecognizesPoolSessionBeadID(t *testing.T) {
 		t.Fatalf("another pool's session claim was not reported undeliverable")
 	}
 }
+
+// assignedSingleSessionBead seeds an open bead inside a live convoy, assigned
+// to assignee and carrying routedTo as gc.routed_to (unset when empty), so the
+// only thing deciding idempotency is the assignee/route pair.
+func assignedSingleSessionBead(t *testing.T, assignee, routedTo string) (*beads.MemStore, string) {
+	t.Helper()
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	metadata := map[string]string{}
+	if routedTo != "" {
+		metadata["gc.routed_to"] = routedTo
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "assigned work",
+		Type:     "task",
+		Status:   "open",
+		ParentID: convoy.ID,
+		Assignee: assignee,
+		Metadata: metadata,
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+	return store, bead.ID
+}
+
+// TestCheckBeadStateSingleSessionAssignedButRoutedElsewhereIsNotIdempotent
+// covers a bead handed to a single-session agent by assignee while
+// gc.routed_to still names another target. Skipping it as idempotent leaves
+// the route pointing at the old target, so the agent's routed work query never
+// finds it; the sling must re-route.
+func TestCheckBeadStateSingleSessionAssignedButRoutedElsewhereIsNotIdempotent(t *testing.T) {
+	store, beadID := assignedSingleSessionBead(t, "mayor", "reviewers")
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	result := CheckBeadState(store, beadID, a, SlingDeps{Store: store})
+
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false for a bead assigned to the target but routed elsewhere, got %+v", result)
+	}
+	want := fmt.Sprintf("bead %s was assigned to %q but routed to %q; re-routing", beadID, "mayor", "reviewers")
+	found := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, want) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected warning containing %q, got %v", want, result.Warnings)
+	}
+}
+
+func TestCheckBeadStateSingleSessionAssignedAndRoutedIsIdempotent(t *testing.T) {
+	store, beadID := assignedSingleSessionBead(t, "mayor", "mayor")
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	result := CheckBeadState(store, beadID, a, SlingDeps{Store: store})
+
+	if !result.Idempotent {
+		t.Fatalf("expected Idempotent=true for a bead assigned and routed to the target, got %+v", result)
+	}
+	if len(result.Warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", result.Warnings)
+	}
+}
+
+func TestCheckBeadStateSingleSessionAssignedUnroutedIsIdempotent(t *testing.T) {
+	store, beadID := assignedSingleSessionBead(t, "mayor", "")
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	result := CheckBeadState(store, beadID, a, SlingDeps{Store: store})
+
+	if !result.Idempotent {
+		t.Fatalf("expected Idempotent=true for an unrouted bead assigned to the target, got %+v", result)
+	}
+	if len(result.Warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", result.Warnings)
+	}
+}
