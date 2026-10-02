@@ -619,6 +619,19 @@ An optional `command.toml` may override the default command words or script:
 | `description` | string | no | Short help text. |
 | `run` | string | no | Entrypoint path relative to the command directory. Defaults to `run.sh`. |
 
+A command runs with the invoking environment plus these variables:
+
+| Variable | Value |
+|---|---|
+| `GC_BIN` | The `gc` executable that invoked the command. Use it for recursive `gc` calls. |
+| `GC_CITY`, `GC_CITY_PATH` | The city root. |
+| `GC_CITY_NAME` | The city name. |
+| `GC_CITY_RUNTIME_DIR` | The city's runtime state directory. |
+| `GC_PACK_DIR` | The root of the pack that defines the command. |
+| `GC_PACK_NAME` | That pack's name. |
+| `GC_PACK_STATE_DIR` | The pack's state directory for this city. |
+| `GC_SUPERVISOR_URL` | Base URL of the supervisor API serving the city, such as `http://127.0.0.1:8372`. City routes are under `$GC_SUPERVISOR_URL/v0/city/<name>/`, where `<name>` is the name the city is registered under (normally `GC_CITY_NAME`). Set only when the city is registered with a supervisor whose API address is plain `http` on loopback, the address `gc` itself uses; otherwise unset. An inherited value is never passed through. |
+
 > **Compatibility:** Legacy `pack.toml` `[[commands]]` entries remain loader
 > compatibility for existing packs. New packs should use `commands/<path>/`.
 
