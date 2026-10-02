@@ -854,6 +854,47 @@ func TestMacBdStoreLaneRunsTheConformanceSuite(t *testing.T) {
 	}
 }
 
+// TestMakefilePhonyIntegrationTargetsAreDefined keeps the .PHONY declaration of
+// the integration shard targets honest. A declared word with no rule behind it
+// is a lost separator: two neighbors merged into one word, so neither real
+// target is declared and a stray file with either name makes make skip it as
+// up to date. Words are compared whole, because a substring match cannot see a
+// merged word. The conformance targets the bdstore lane added must stay declared.
+func TestMakefilePhonyIntegrationTargetsAreDefined(t *testing.T) {
+	makefile, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	content := string(makefile)
+
+	var phony []string
+	for _, line := range strings.Split(content, "\n") {
+		if declared, ok := strings.CutPrefix(line, ".PHONY:"); ok {
+			phony = append(phony, strings.Fields(declared)...)
+		}
+	}
+
+	rule := regexp.MustCompile(`(?m)^([A-Za-z0-9][^\s:=#]*)[ \t]*:([^=]|$)`)
+	defined := map[string]bool{}
+	for _, m := range rule.FindAllStringSubmatch(content, -1) {
+		defined[m[1]] = true
+	}
+	for _, target := range phony {
+		if strings.HasPrefix(target, "test-integration-") && !defined[target] {
+			t.Errorf(".PHONY declares %q but the Makefile has no rule for it", target)
+		}
+	}
+
+	for _, target := range []string{
+		"test-integration-bdstore-conformance",
+		"test-integration-bdstore-conformance-cover",
+	} {
+		if !slices.Contains(phony, target) {
+			t.Errorf("%s is not declared .PHONY", target)
+		}
+	}
+}
+
 func (n *ciCriticalPathNeeds) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind == yaml.ScalarNode {
 		*n = []string{node.Value}
