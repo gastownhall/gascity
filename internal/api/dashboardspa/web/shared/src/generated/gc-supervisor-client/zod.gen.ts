@@ -1113,6 +1113,11 @@ export const zPendingInteraction = z.object({
     request_id: z.string()
 });
 
+export const zPoolLimits = z.object({
+    max: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    min: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
+});
+
 export const zPoolOverride = z.object({
     Check: z.string().nullable(),
     DrainTimeout: z.string().nullable(),
@@ -1688,6 +1693,7 @@ export const zAgentResponse = z.object({
     pack: z.string().optional(),
     pack_derived: z.boolean(),
     pool: z.string().optional(),
+    pool_limits: zPoolLimits.optional(),
     provider: z.string().optional(),
     rig: z.string().optional(),
     running: z.boolean(),

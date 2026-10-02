@@ -172,7 +172,14 @@ export type AgentResponse = {
     name: string;
     pack?: string;
     pack_derived: boolean;
+    /**
+     * Qualified name of the configured pool this row belongs to. Equals name on the row for an on-demand pool that has no live session.
+     */
     pool?: string;
+    /**
+     * Configured session limits of the agent (or of its pool).
+     */
+    pool_limits?: PoolLimits;
     provider?: string;
     rig?: string;
     running: boolean;
@@ -2333,6 +2340,17 @@ export type PendingInteraction = {
     options?: Array<string> | null;
     prompt?: string;
     request_id: string;
+};
+
+export type PoolLimits = {
+    /**
+     * Maximum concurrent sessions; -1 means unlimited.
+     */
+    max: number;
+    /**
+     * Minimum concurrent sessions kept running.
+     */
+    min: number;
 };
 
 export type PoolOverride = {

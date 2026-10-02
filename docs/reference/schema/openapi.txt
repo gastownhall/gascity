@@ -662,7 +662,12 @@
             "type": "boolean"
           },
           "pool": {
+            "description": "Qualified name of the configured pool this row belongs to. Equals name on the row for an on-demand pool that has no live session.",
             "type": "string"
+          },
+          "pool_limits": {
+            "$ref": "#/components/schemas/PoolLimits",
+            "description": "Configured session limits of the agent (or of its pool)."
           },
           "provider": {
             "type": "string"
@@ -5864,6 +5869,26 @@
         "required": [
           "request_id",
           "kind"
+        ],
+        "type": "object"
+      },
+      "PoolLimits": {
+        "additionalProperties": false,
+        "properties": {
+          "max": {
+            "description": "Maximum concurrent sessions; -1 means unlimited.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "min": {
+            "description": "Minimum concurrent sessions kept running.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "min",
+          "max"
         ],
         "type": "object"
       },

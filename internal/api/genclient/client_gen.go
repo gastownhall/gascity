@@ -1071,19 +1071,22 @@ type AgentPatchSetInputBody struct {
 
 // AgentResponse defines model for AgentResponse.
 type AgentResponse struct {
-	ActiveBead        *string      `json:"active_bead,omitempty"`
-	Activity          *string      `json:"activity,omitempty"`
-	Available         bool         `json:"available"`
-	ContextPct        *int64       `json:"context_pct,omitempty"`
-	ContextWindow     *int64       `json:"context_window,omitempty"`
-	Description       *string      `json:"description,omitempty"`
-	DisplayName       *string      `json:"display_name,omitempty"`
-	LastOutput        *string      `json:"last_output,omitempty"`
-	Model             *string      `json:"model,omitempty"`
-	Name              string       `json:"name"`
-	Pack              *string      `json:"pack,omitempty"`
-	PackDerived       bool         `json:"pack_derived"`
+	ActiveBead    *string `json:"active_bead,omitempty"`
+	Activity      *string `json:"activity,omitempty"`
+	Available     bool    `json:"available"`
+	ContextPct    *int64  `json:"context_pct,omitempty"`
+	ContextWindow *int64  `json:"context_window,omitempty"`
+	Description   *string `json:"description,omitempty"`
+	DisplayName   *string `json:"display_name,omitempty"`
+	LastOutput    *string `json:"last_output,omitempty"`
+	Model         *string `json:"model,omitempty"`
+	Name          string  `json:"name"`
+	Pack          *string `json:"pack,omitempty"`
+	PackDerived   bool    `json:"pack_derived"`
+
+	// Pool Qualified name of the configured pool this row belongs to. Equals name on the row for an on-demand pool that has no live session.
 	Pool              *string      `json:"pool,omitempty"`
+	PoolLimits        *PoolLimits  `json:"pool_limits,omitempty"`
 	Provider          *string      `json:"provider,omitempty"`
 	Rig               *string      `json:"rig,omitempty"`
 	Running           bool         `json:"running"`
@@ -2972,6 +2975,15 @@ type PendingInteraction struct {
 	Options   *[]string          `json:"options,omitempty"`
 	Prompt    *string            `json:"prompt,omitempty"`
 	RequestId string             `json:"request_id"`
+}
+
+// PoolLimits defines model for PoolLimits.
+type PoolLimits struct {
+	// Max Maximum concurrent sessions; -1 means unlimited.
+	Max int64 `json:"max"`
+
+	// Min Minimum concurrent sessions kept running.
+	Min int64 `json:"min"`
 }
 
 // PoolOverride defines model for PoolOverride.
