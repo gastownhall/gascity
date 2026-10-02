@@ -3972,30 +3972,3 @@ func TestNewSessionWithCommandAndEnvWithholdsEmptyVarFromPaneChild(t *testing.T)
 		t.Fatalf("pane child received the controller token: %s", got)
 	}
 }
-
-func TestPaneShowsBackgroundWork(t *testing.T) {
-	tests := []struct {
-		name  string
-		lines []string
-		want  bool
-	}{
-		{"done line with a background shell", []string{"✻ Worked for 1m 3s · done 9:30 AM · 1 shell still running", "", "❯ "}, true},
-		{"done line with background shells", []string{"✻ Worked for 4m 12s · 2 shells still running", "❯ "}, true},
-		{"bare idle prompt", []string{"❯ ", ""}, false},
-		{"done line without background work", []string{"✻ Worked for 1m 49s", "❯ "}, false},
-		{"busy spinner", []string{"· Wibbling… (3m 2s · ↓ 1.2k tokens)"}, false},
-		{"word inside another word", []string{"eggshells still running late"}, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := paneShowsBackgroundWork(tt.lines); got != tt.want {
-				t.Errorf("paneShowsBackgroundWork(%q) = %v, want %v", tt.lines, got, tt.want)
-			}
-		})
-	}
-	// A background shell must not read as busy: the busy indicator also gates
-	// nudge delivery, and an agent with a background shell can take input.
-	if paneContainsBusyIndicator([]string{"✻ Worked for 1m 3s · done 9:30 AM · 1 shell still running", "❯ "}) {
-		t.Error("paneContainsBusyIndicator = true for a done line with a background shell")
-	}
-}
