@@ -28,6 +28,7 @@ var doctorCityStoreDependentNames = []string{
 	"dangling-blocking-edges",
 	"hold-label-routed-to",
 	"pool-idle-routed-work",
+	"stuck-creating-sessions",
 	"v2-demand-migrations",
 	"v2-session-migration",
 	"exec-runtime-identity",
