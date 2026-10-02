@@ -2747,6 +2747,230 @@ func TestBdStoreReadyChecksEphemeralBlockerWorkOutcome(t *testing.T) {
 	}
 }
 
+// blockerLookupCalls records the arg vectors blockerLookupRunner received for
+// the two bd commands a Ready() blocker lookup issues after "bd ready".
+type blockerLookupCalls struct {
+	show  [][]string
+	query [][]string
+}
+
+// blockerLookupRunner stands in for bd across one Ready() call: "bd ready"
+// returns readyRows, and the blocker lookup that follows is answered by show
+// (the batched "bd show") and query (the per-ID wisp-tier "bd query" fallback
+// for an ID bd show did not resolve). Every arg vector is recorded.
+func blockerLookupRunner(readyRows []byte, show, query func(args []string) ([]byte, error)) (beads.CommandRunner, *blockerLookupCalls) {
+	calls := &blockerLookupCalls{}
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if len(args) == 0 {
+			return nil, fmt.Errorf("unexpected command: %s", name)
+		}
+		switch args[0] {
+		case "ready":
+			return readyRows, nil
+		case "show":
+			calls.show = append(calls.show, append([]string(nil), args...))
+			return show(args)
+		case "query":
+			calls.query = append(calls.query, append([]string(nil), args...))
+			return query(args)
+		}
+		return nil, fmt.Errorf("unexpected command: %s %s", name, strings.Join(args, " "))
+	}
+	return runner, calls
+}
+
+// blockedReadyRows renders "bd ready" rows for dependents that each carry one
+// inline blocking edge, with a dependency_count matching it so the
+// inline-projection witness latches and the work-outcome veto path runs.
+// pairs is dependentID, blockerID, dependentID, blockerID, ...
+func blockedReadyRows(t *testing.T, pairs ...string) []byte {
+	t.Helper()
+	if len(pairs)%2 != 0 {
+		t.Fatalf("blockedReadyRows needs dependent/blocker pairs, got %d values", len(pairs))
+	}
+	rows := make([]string, 0, len(pairs)/2)
+	for i := 0; i < len(pairs); i += 2 {
+		rows = append(rows, fmt.Sprintf(`{"id":%q,"title":%q,"status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","dependency_count":1,"dependencies":[{"issue_id":%q,"depends_on_id":%q,"type":"blocks"}]}`,
+			pairs[i], pairs[i], pairs[i], pairs[i+1]))
+	}
+	return []byte("[" + strings.Join(rows, ",") + "]")
+}
+
+// blockerShowMiss is bd show answering that none of the requested IDs exist in
+// the issues table: the same "no issues found" envelope a real all-missing
+// batch emits, with the error text of the one-ID case for bd-blocker.
+func blockerShowMiss([]string) ([]byte, error) {
+	return []byte(`{"error":"no issues found matching the provided IDs","schema_version":1}`),
+		errors.New(`exit status 1: no issue found matching "bd-blocker"`)
+}
+
+// blockerWispAbsent is the wisp tier answering that no ephemeral bead matches:
+// the empty result bd query returns for a miss.
+func blockerWispAbsent([]string) ([]byte, error) { return []byte(`[]`), nil }
+
+// Infrastructure failures whose text happens to say "not found" (a missing bd
+// binary, Dolt's "database not found" mid-restart) say nothing about whether a
+// blocker exists. Reading one as "none of these blockers exist" fails the
+// work-outcome veto open: Ready() would serve a dependent whose blocker closed
+// with gc.work_outcome=blocked. The lookup must fail loudly instead, as an
+// error with no "not found" text at all already does (the last row). The wisp
+// tier answers cleanly here so that only the bd show classification can fail
+// the read: a failing wisp lookup would otherwise mask it, and the fallback
+// must not run at all once bd show itself has failed.
+func TestBdStoreReadyFailsLoudWhenBlockerLookupHitsInfraNotFound(t *testing.T) {
+	for _, msg := range []string{
+		`exec: "bd": executable file not found in $PATH`,
+		"exit status 1: Error: database not found: beads",
+		"exit status 1: Error 1146: table not found: wisps",
+		"exit status 1: beads workspace not found: /city/.beads",
+		"sh: 1: bd: command not found",
+		"exit status 1: Error: connection refused",
+	} {
+		t.Run(msg, func(t *testing.T) {
+			infra := func([]string) ([]byte, error) { return nil, errors.New(msg) }
+			runner, calls := blockerLookupRunner(blockedReadyRows(t, "bd-dependent", "bd-blocker"), infra, blockerWispAbsent)
+			got, err := beads.NewBdStore("/city", runner).Ready()
+			if err == nil {
+				t.Fatalf("Ready() = %+v, nil error: a blocker lookup that failed on infrastructure was served as \"no blockers\"", got)
+			}
+			if len(calls.query) != 0 {
+				t.Errorf("wisp-tier fallback ran after bd show failed on infrastructure: %v", calls.query)
+			}
+		})
+	}
+}
+
+// The wisp-tier lookup is half of the "this blocker is absent" verdict (Get
+// applies the same rule): when it fails for any reason other than a
+// bead-level miss, absence is unproven, so Ready() must fail rather than serve
+// a dependent whose blocker it could not read. The error names the blocker so
+// the operator can tell which lookup failed.
+func TestBdStoreReadyFailsLoudWhenWispFallbackFails(t *testing.T) {
+	for _, tc := range []struct{ name, msg string }{
+		{"query failure", "exit status 1: Error: wisps query failed: storage unavailable"},
+		{"infra not found", "exit status 1: Error: database not found: beads"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fail := func([]string) ([]byte, error) { return nil, errors.New(tc.msg) }
+			runner, calls := blockerLookupRunner(blockedReadyRows(t, "bd-dependent", "bd-blocker"), blockerShowMiss, fail)
+			got, err := beads.NewBdStore("/city", runner).Ready()
+			if err == nil {
+				t.Fatalf("Ready() = %+v, nil error: the wisp-tier blocker lookup failed and was swallowed", got)
+			}
+			if len(calls.query) == 0 {
+				t.Fatal("the wisp-tier fallback never ran, so this case does not exercise it")
+			}
+			if !strings.Contains(err.Error(), "bd-blocker") {
+				t.Errorf("Ready() error = %q, want it to name the blocker whose lookup failed", err)
+			}
+		})
+	}
+}
+
+// Control for the test above: a wisp tier that simply has no such bead is the
+// ordinary way a blocker turns out to be absent everywhere, and it must keep
+// the degrade filterReadyByWorkOutcome documents (no evidence of blocking, so
+// the dependent is served) instead of turning every unresolvable blocker into
+// a failed read.
+func TestBdStoreReadyServesDependentWhenBlockerIsAbsentFromBothTiers(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		query func([]string) ([]byte, error)
+	}{
+		{"empty wisp result", blockerWispAbsent},
+		{"bead-level miss", func([]string) ([]byte, error) {
+			return nil, errors.New(`exit status 1: no issue found matching "bd-blocker"`)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner, calls := blockerLookupRunner(blockedReadyRows(t, "bd-dependent", "bd-blocker"), blockerShowMiss, tc.query)
+			got, err := beads.NewBdStore("/city", runner).Ready()
+			if err != nil {
+				t.Fatalf("Ready() error = %v, want nil: a blocker absent from both tiers is the intended no-evidence degrade", err)
+			}
+			if len(got) != 1 || got[0].ID != "bd-dependent" {
+				t.Fatalf("Ready() = %+v, want [bd-dependent]", got)
+			}
+			if len(calls.query) != 1 {
+				t.Fatalf("wisp-tier fallback ran %d times, want once: %v", len(calls.query), calls.query)
+			}
+		})
+	}
+}
+
+// bd show exits 0 for a batch in which at least one ID resolves and simply
+// leaves the others out, so a lookup that mixes an issues-table blocker with a
+// wisp-tier one must resolve each from its own tier: the issues-table blocker
+// satisfies its dependent, the wisp-tier blocker closed gc.work_outcome=blocked
+// vetoes its own, and only the ID bd show left out is queried as a wisp.
+func TestBdStoreReadyResolvesMixedBlockerBatchAcrossBothTiers(t *testing.T) {
+	issueRow := []byte(`[{"id":"bd-issue-blocker","title":"issue blocker","status":"closed","issue_type":"task","created_at":"2025-01-15T10:00:00Z"}]`)
+	wispRow := []byte(`[{"id":"bd-wisp-blocker","title":"wisp blocker","status":"closed","issue_type":"task","created_at":"2025-01-15T10:00:00Z","metadata":{"gc.work_outcome":"blocked"}}]`)
+	show := func([]string) ([]byte, error) { return issueRow, nil }
+	query := func(args []string) ([]byte, error) {
+		if !strings.Contains(strings.Join(args, " "), "id=bd-wisp-blocker") {
+			return nil, fmt.Errorf("unexpected wisp query for an ID bd show resolved: %v", args)
+		}
+		return wispRow, nil
+	}
+	runner, calls := blockerLookupRunner(
+		blockedReadyRows(t, "bd-dep-issue", "bd-issue-blocker", "bd-dep-wisp", "bd-wisp-blocker"), show, query)
+	got, err := beads.NewBdStore("/city", runner).Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "bd-dep-issue" {
+		t.Fatalf("Ready() = %+v, want only [bd-dep-issue]: the wisp-tier blocker closed gc.work_outcome=blocked must veto bd-dep-wisp while the issues-table blocker satisfies bd-dep-issue", got)
+	}
+	if len(calls.show) != 1 {
+		t.Fatalf("bd show ran %d times, want one batched lookup: %v", len(calls.show), calls.show)
+	}
+	if len(calls.query) != 1 {
+		t.Fatalf("wisp-tier fallback ran %d times, want once for the ID bd show left out: %v", len(calls.query), calls.query)
+	}
+}
+
+// Blocker IDs come from dependency rows that agents can write, and reach bd as
+// positional arguments. One that begins with "-" would be parsed as a flag and
+// fail the whole lookup (and with it every gc ready whose candidates include
+// it), so the IDs must follow a "--" terminator.
+func TestBdStoreReadyPassesBlockerIDsToBdShowAfterDoubleDash(t *testing.T) {
+	runner, calls := blockerLookupRunner(blockedReadyRows(t, "bd-dependent", "-bd-dash-blocker"), blockerShowMiss, blockerWispAbsent)
+	if _, err := beads.NewBdStore("/city", runner).Ready(); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"show", "--json", "--", "-bd-dash-blocker"}
+	if len(calls.show) != 1 || !reflect.DeepEqual(calls.show[0], want) {
+		t.Fatalf("bd show arg vectors = %v, want exactly one: %v", calls.show, want)
+	}
+}
+
+// A bd show that exits 0 but whose output cannot be decoded gives no evidence
+// about the blockers it was asked for. That must fail the read with the
+// lookup's own context, not read as "no blockers": a corrupt row is exactly
+// where a closed gc.work_outcome=blocked record could be hiding.
+func TestBdStoreReadyFailsLoudWhenBlockerShowOutputIsUnparseable(t *testing.T) {
+	for _, tc := range []struct{ name, out string }{
+		{"not json", "None"},
+		{"corrupt row", `[{"id":"bd-blocker","title":"blocker","status":"closed","issue_type":"task","created_at":"not-a-time"}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			show := func([]string) ([]byte, error) { return []byte(tc.out), nil }
+			runner, calls := blockerLookupRunner(blockedReadyRows(t, "bd-dependent", "bd-blocker"), show, blockerWispAbsent)
+			got, err := beads.NewBdStore("/city", runner).Ready()
+			if err == nil {
+				t.Fatalf("Ready() = %+v, nil error: undecodable bd show output was served as \"no blockers\"", got)
+			}
+			if !strings.Contains(err.Error(), "bd show (blockers)") {
+				t.Errorf("Ready() error = %q, want the %q context", err, "bd show (blockers)")
+			}
+			if len(calls.query) != 0 {
+				t.Errorf("wisp-tier fallback ran after an undecodable bd show: %v", calls.query)
+			}
+		})
+	}
+}
+
 func TestBdStoreReadyEmpty(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte
