@@ -15,18 +15,27 @@ const cascadeScriptPath = "assets/scripts/cascade-nudge-on-blocker-close.sh"
 
 // cascadeFakeGC answers the four gc calls the script makes from files under
 // $CASCADE_FIX: events.jsonl for `gc events`, <direction>-<id>.json for
-// `gc bd dep list <id> --direction=<direction>`, and it appends every
+// `gc bd dep list <id> --direction=<direction>` (filtered on
+// dependency_type when --type is given), and it appends every
 // `gc session nudge` to nudges.log.
 const cascadeFakeGC = `#!/bin/sh
 case "$1" in
 rig) echo '{"rigs":[]}' ;;
 events) cat "$CASCADE_FIX/events.jsonl" 2>/dev/null ;;
 bd)
-    id="$4"; dir=""
+    id="$4"; dir=""; typ=""
     for a in "$@"; do
-        case "$a" in --direction=*) dir="${a#--direction=}" ;; esac
+        case "$a" in
+        --direction=*) dir="${a#--direction=}" ;;
+        --type=*) typ="${a#--type=}" ;;
+        esac
     done
-    cat "$CASCADE_FIX/$dir-$id.json" 2>/dev/null || echo '[]'
+    rows="$(cat "$CASCADE_FIX/$dir-$id.json" 2>/dev/null || echo '[]')"
+    if [ -n "$typ" ]; then
+        printf '%s' "$rows" | jq -c --arg t "$typ" '[.[] | select(.dependency_type == $t)]'
+    else
+        printf '%s\n' "$rows"
+    fi
     ;;
 session) printf '%s\n' "$*" >> "$CASCADE_FIX/nudges.log" ;;
 esac
@@ -118,8 +127,8 @@ func (f *cascadeFixture) wantNudges(n int) []string {
 // is nudged.
 func TestCascadeNudgeIncludesInProgressDependent(t *testing.T) {
 	f := newCascadeFixture(t)
-	f.write("up-gc-b1.json", `[{"id":"gc-d1","status":"in_progress","assignee":"worker"}]`)
-	f.write("down-gc-d1.json", `[{"id":"gc-b1","status":"closed"}]`)
+	f.write("up-gc-b1.json", `[{"id":"gc-d1","dependency_type":"blocks","status":"in_progress","assignee":"worker"}]`)
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed"}]`)
 	f.closed("gc-b1")
 
 	f.run()
@@ -136,16 +145,18 @@ func TestCascadeNudgeIncludesInProgressDependent(t *testing.T) {
 // nudges no one, and the second nudges once.
 func TestCascadeNudgeWaitsForLastBlocker(t *testing.T) {
 	f := newCascadeFixture(t)
-	dependent := `[{"id":"gc-d1","status":"open","assignee":"worker"}]`
+	dependent := `[{"id":"gc-d1","dependency_type":"blocks","status":"open","assignee":"worker"}]`
 	f.write("up-gc-b1.json", dependent)
 	f.write("up-gc-b2.json", dependent)
 
-	f.write("down-gc-d1.json", `[{"id":"gc-b1","status":"closed"},{"id":"gc-b2","status":"open"}]`)
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed","closed_at":"T1"},`+
+		`{"id":"gc-b2","dependency_type":"blocks","status":"open"}]`)
 	f.closed("gc-b1")
 	f.run()
 	f.wantNudges(0)
 
-	f.write("down-gc-d1.json", `[{"id":"gc-b1","status":"closed"},{"id":"gc-b2","status":"closed"}]`)
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed","closed_at":"T1"},`+
+		`{"id":"gc-b2","dependency_type":"blocks","status":"closed","closed_at":"T2"}]`)
 	f.closed("gc-b1", "gc-b2")
 	f.run()
 	got := f.wantNudges(1)
@@ -159,10 +170,10 @@ func TestCascadeNudgeWaitsForLastBlocker(t *testing.T) {
 // dependent hears about it once.
 func TestCascadeNudgeLastBlockerNudgesOnceAcrossRuns(t *testing.T) {
 	f := newCascadeFixture(t)
-	dependent := `[{"id":"gc-d1","status":"open","assignee":"worker"}]`
+	dependent := `[{"id":"gc-d1","dependency_type":"blocks","status":"open","assignee":"worker"}]`
 	f.write("up-gc-b1.json", dependent)
 	f.write("up-gc-b2.json", dependent)
-	f.write("down-gc-d1.json", `[{"id":"gc-b1","status":"closed"},{"id":"gc-b2","status":"closed"}]`)
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed"},{"id":"gc-b2","dependency_type":"blocks","status":"closed"}]`)
 	f.closed("gc-b1", "gc-b2")
 
 	f.run()
@@ -175,8 +186,8 @@ func TestCascadeNudgeLastBlockerNudgesOnceAcrossRuns(t *testing.T) {
 // for deferred dependents.
 func TestCascadeNudgeDeferredDependentStillNudged(t *testing.T) {
 	f := newCascadeFixture(t)
-	f.write("up-gc-b1.json", `[{"id":"gc-d1","status":"deferred","assignee":"worker"}]`)
-	f.write("down-gc-d1.json", `[{"id":"gc-b1","status":"closed"}]`)
+	f.write("up-gc-b1.json", `[{"id":"gc-d1","dependency_type":"blocks","status":"deferred","assignee":"worker"}]`)
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed"}]`)
 	f.closed("gc-b1")
 
 	f.run()
@@ -192,9 +203,9 @@ func TestCascadeNudgeDeferredDependentStillNudged(t *testing.T) {
 // beads.DependencySatisfied decides.
 func TestCascadeNudgeOtherBlockerClosedAsBlockedWaits(t *testing.T) {
 	f := newCascadeFixture(t)
-	f.write("up-gc-b1.json", `[{"id":"gc-d1","status":"open","assignee":"worker"}]`)
-	f.write("down-gc-d1.json", `[{"id":"gc-b1","status":"closed"},`+
-		`{"id":"gc-b2","status":"closed","metadata":{"gc.work_outcome":"blocked"}}]`)
+	f.write("up-gc-b1.json", `[{"id":"gc-d1","dependency_type":"blocks","status":"open","assignee":"worker"}]`)
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed"},`+
+		`{"id":"gc-b2","dependency_type":"blocks","status":"closed","metadata":{"gc.work_outcome":"blocked"}}]`)
 	f.closed("gc-b1")
 
 	f.run()
@@ -206,8 +217,8 @@ func TestCascadeNudgeOtherBlockerClosedAsBlockedWaits(t *testing.T) {
 // close with gc.work_outcome=blocked does not nudge its dependent.
 func TestCascadeNudgeBlockerClosedAsBlockedNudgesNoOne(t *testing.T) {
 	f := newCascadeFixture(t)
-	f.write("up-gc-b1.json", `[{"id":"gc-d1","status":"open","assignee":"worker"}]`)
-	f.write("down-gc-d1.json", `[{"id":"gc-b1","status":"closed","metadata":{"gc.work_outcome":"blocked"}}]`)
+	f.write("up-gc-b1.json", `[{"id":"gc-d1","dependency_type":"blocks","status":"open","assignee":"worker"}]`)
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed","metadata":{"gc.work_outcome":"blocked"}}]`)
 	f.closed("gc-b1")
 
 	f.run()
@@ -221,14 +232,93 @@ func TestCascadeNudgeBlockerClosedAsBlockedNudgesNoOne(t *testing.T) {
 // later run sees its close.
 func TestCascadeNudgeBlockerClosedMidRunNudgesOnce(t *testing.T) {
 	f := newCascadeFixture(t)
-	dependent := `[{"id":"gc-d1","status":"open","assignee":"worker"}]`
+	dependent := `[{"id":"gc-d1","dependency_type":"blocks","status":"open","assignee":"worker"}]`
 	f.write("up-gc-b1.json", dependent)
 	f.write("up-gc-b2.json", dependent)
-	f.write("down-gc-d1.json", `[{"id":"gc-b1","status":"closed"},{"id":"gc-b2","status":"closed"}]`)
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed"},{"id":"gc-b2","dependency_type":"blocks","status":"closed"}]`)
 
 	f.closed("gc-b1")
 	f.run()
 	f.closed("gc-b1", "gc-b2")
+	f.run()
+
+	f.wantNudges(1)
+}
+
+// TestCascadeNudgeReopenedBlockerNudgesOnReclose pins that a wait is keyed on
+// the blocker's close: a blocker that closes, is reopened while the other
+// blocker closes, and closes again nudges the dependent it leaves ready.
+func TestCascadeNudgeReopenedBlockerNudgesOnReclose(t *testing.T) {
+	f := newCascadeFixture(t)
+	dependent := `[{"id":"gc-d1","dependency_type":"blocks","status":"in_progress","assignee":"worker"}]`
+	f.write("up-gc-b1.json", dependent)
+	f.write("up-gc-b2.json", dependent)
+
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed","closed_at":"T1"},`+
+		`{"id":"gc-b2","dependency_type":"blocks","status":"open"}]`)
+	f.closed("gc-b1")
+	f.run()
+
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"open"},`+
+		`{"id":"gc-b2","dependency_type":"blocks","status":"closed","closed_at":"T2"}]`)
+	f.closed("gc-b2")
+	f.run()
+	f.wantNudges(0)
+
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed","closed_at":"T3"},`+
+		`{"id":"gc-b2","dependency_type":"blocks","status":"closed","closed_at":"T2"}]`)
+	f.closed("gc-b1")
+	f.run()
+	got := f.wantNudges(1)
+	if !strings.Contains(got[0], "blocker gc-b1 closed") {
+		t.Errorf("the re-close should carry the nudge, got %q", got[0])
+	}
+}
+
+// TestCascadeNudgeBlockerReclosedAfterBlockedOutcomeNudges pins that a blocker
+// closed with gc.work_outcome=blocked, then reopened and closed done, nudges
+// its dependent.
+func TestCascadeNudgeBlockerReclosedAfterBlockedOutcomeNudges(t *testing.T) {
+	f := newCascadeFixture(t)
+	f.write("up-gc-b1.json", `[{"id":"gc-d1","dependency_type":"blocks","status":"open","assignee":"worker"}]`)
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed","closed_at":"T1",`+
+		`"metadata":{"gc.work_outcome":"blocked"}}]`)
+	f.closed("gc-b1")
+	f.run()
+	f.wantNudges(0)
+
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed","closed_at":"T2"}]`)
+	f.run()
+	f.wantNudges(1)
+}
+
+// TestCascadeNudgeOpenWaitsForHoldsDependent pins that the dependent's
+// waits-for and conditional-blocks dependencies hold it as Ready() does.
+func TestCascadeNudgeOpenWaitsForHoldsDependent(t *testing.T) {
+	for _, depType := range []string{"waits-for", "conditional-blocks"} {
+		t.Run(depType, func(t *testing.T) {
+			f := newCascadeFixture(t)
+			f.write("up-gc-b1.json", `[{"id":"gc-d1","dependency_type":"blocks","status":"open","assignee":"worker"}]`)
+			f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed"},`+
+				`{"id":"gc-w1","dependency_type":"`+depType+`","status":"open"}]`)
+			f.closed("gc-b1")
+
+			f.run()
+
+			f.wantNudges(0)
+		})
+	}
+}
+
+// TestCascadeNudgeIgnoresNonGatingDependencies pins that an open dependency
+// of a type Ready() ignores does not hold the dependent.
+func TestCascadeNudgeIgnoresNonGatingDependencies(t *testing.T) {
+	f := newCascadeFixture(t)
+	f.write("up-gc-b1.json", `[{"id":"gc-d1","dependency_type":"blocks","status":"open","assignee":"worker"}]`)
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed"},`+
+		`{"id":"gc-r1","dependency_type":"discovered-from","status":"open"}]`)
+	f.closed("gc-b1")
+
 	f.run()
 
 	f.wantNudges(1)

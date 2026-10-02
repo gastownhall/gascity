@@ -8,11 +8,12 @@
 # This order subscribes to bead.closed events. For each closed bead it
 # resolves the dependents linked by a `blocks` dependency and nudges the
 # assignee of every open, in_progress or deferred dependent once all of
-# that dependent's blockers are satisfied (closed, and not closed with
-# gc.work_outcome=blocked, as beads.DependencySatisfied). Idempotent: a
-# given (blocker, dependent) pair is nudged at most once. Dedup state lives
-# in $GC_PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json, so it is
-# both city- and pack-scoped — multi-city installs never cross-pollinate.
+# that dependent's blocks, waits-for and conditional-blocks dependencies are
+# satisfied (closed, and not closed with gc.work_outcome=blocked, as Ready()
+# decides). Idempotent: a given (blocker, dependent) pair is nudged at most
+# once. Dedup state lives in
+# $GC_PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json, so it is both
+# city- and pack-scoped — multi-city installs never cross-pollinate.
 #
 # Event contract note: the close transition emits `bead.closed`, not
 # `bead.updated` (a closed bead only emits bead.updated on a later
@@ -104,6 +105,8 @@ echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
 
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 NUDGED=0
+# The dependency types that hold a dependent out of Ready().
+GATING='.dependency_type == "blocks" or .dependency_type == "waits-for" or .dependency_type == "conditional-blocks"'
 # A blocker satisfies its dependent as beads.DependencySatisfied decides.
 SATISFIED='.status == "closed" and ((.metadata["gc.work_outcome"]? // "") != "blocked")'
 while IFS= read -r blocker; do
@@ -132,14 +135,21 @@ while IFS= read -r blocker; do
         set_rig_args "$dep_id"
         # A failed lookup records nothing, so the next run retries.
         DOWN="$(gc bd dep list "$dep_id" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
-                --direction=down --type=blocks --json 2>/dev/null)" || continue
+                --direction=down --json 2>/dev/null)" || continue
+        DOWN="$(printf '%s' "$DOWN" | jq -c "[.[] | select($GATING)]" 2>/dev/null)" || continue
+        # A wait is keyed on the blocker's close, so a blocker that is
+        # reopened and closes again is judged afresh.
+        wait_key="$key@$(printf '%s' "$DOWN" \
+            | jq -r --arg b "$blocker" '[.[] | select(.id == $b) | .closed_at // ""][0] // ""' 2>/dev/null)" || continue
+        if echo "$STATE" | jq -e --arg k "$wait_key" 'has($k)' >/dev/null 2>&1; then
+            STATE="$(echo "$STATE" | jq --arg k "$wait_key" --arg now "$NOW" '.[$k] = $now')"
+            continue
+        fi
         UNSATISFIED="$(printf '%s' "$DOWN" \
             | jq -r "[.[] | select(($SATISFIED) | not)] | length" 2>/dev/null)" || continue
         [ -n "$UNSATISFIED" ] || continue
         if [ "$UNSATISFIED" -gt 0 ]; then
-            # Recorded so this pair never nudges; the last satisfied
-            # blocker's close is a different pair.
-            STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
+            STATE="$(echo "$STATE" | jq --arg k "$wait_key" --arg now "$NOW" '.[$k] = $now')"
             continue
         fi
         msg="blocker $blocker closed — your dependent $dep_id has no open blockers now"
