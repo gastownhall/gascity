@@ -1732,6 +1732,42 @@ func TestProviderTerminalErrorReason(t *testing.T) {
 	}
 }
 
+// TestProviderTerminalErrorReasonCreditBalanceTooLow pins that an exhausted
+// API credit balance is a terminal provider error: retrying cannot help until
+// an operator adds credit or fixes the key, exactly like insufficient_quota.
+func TestProviderTerminalErrorReasonCreditBalanceTooLow(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{name: "claude code pane line", content: "> hello\n  ⎿  Credit balance is too low\n"},
+		{name: "api error sentence", content: `API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`},
+		{name: "upper case", content: "CREDIT BALANCE IS TOO LOW"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ProviderTerminalErrorReason(tt.content); got != "quota_exceeded" {
+				t.Errorf("ProviderTerminalErrorReason(%q) = %q, want %q", tt.content, got, "quota_exceeded")
+			}
+		})
+	}
+}
+
+// TestProviderTerminalErrorReasonSpendLimitModalIsNotTerminal pins that
+// Claude's spend-limit modal, which also mentions a credit balance, stays a
+// rate-limit screen with a reset rather than a terminal provider error.
+func TestProviderTerminalErrorReasonSpendLimitModalIsNotTerminal(t *testing.T) {
+	t.Parallel()
+	modal := "What do you want to do?\nUsage credit balance: $573.37\n❯ Adjust monthly spend limit: $1503.19\n  Wait for limit to reset      Resets Jul 12 at 11pm (America/Los_Angeles)\nEnter to confirm · Esc to cancel"
+	if got := ProviderTerminalErrorReason(modal); got != "" {
+		t.Errorf("ProviderTerminalErrorReason(spend-limit modal) = %q, want empty", got)
+	}
+	if !ContainsProviderRateLimitScreen(modal) {
+		t.Error("ContainsProviderRateLimitScreen(spend-limit modal) = false, want true")
+	}
+}
+
 func TestContainsCustomAPIKeyDialog(t *testing.T) {
 	t.Parallel()
 

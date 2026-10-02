@@ -1805,6 +1805,14 @@ func ProviderTerminalErrorReason(content string) string {
 		return "quota_exceeded"
 	case strings.Contains(lower, "quota exceeded") && !strings.Contains(lower, "disk quota"):
 		return "quota_exceeded"
+	case strings.Contains(lower, "credit balance is too low"):
+		// Anthropic's empty-credit error ("Credit balance is too low" in
+		// Claude Code, "Your credit balance is too low to access ..." from the
+		// API) is the same class as insufficient_quota: it needs credit or a
+		// different key, not a retry. Claude's spend-limit modal ("Usage
+		// credit balance: ...") does not contain this phrase and stays a
+		// rate-limit screen.
+		return "quota_exceeded"
 	default:
 		return ""
 	}
