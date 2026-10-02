@@ -23,8 +23,6 @@ type fakeGitProbe struct {
 	hasUncommitted   bool
 	hasUnpushed      bool
 	unpushedErr      error
-	hasStashes       bool
-	stashesErr       error
 	worktreeRemove   func(path string, force bool) error
 	removedPath      string
 	removedForce     bool
@@ -39,7 +37,7 @@ func (f *fakeGitProbe) HasUncommittedWork() bool { return f.hasUncommitted }
 func (f *fakeGitProbe) HasUnpushedCommitsResult() (bool, error) {
 	return f.hasUnpushed, f.unpushedErr
 }
-func (f *fakeGitProbe) HasStashesResult() (bool, error) { return f.hasStashes, f.stashesErr }
+
 func (f *fakeGitProbe) WorktreeRemove(path string, force bool) error {
 	f.removeInvoked = true
 	f.removedPath = path
@@ -308,34 +306,6 @@ func TestPruneAgentHomeWorktreeIfSafe_UnpushedProbeError(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "unpushed probe failed") {
 		t.Errorf("expected unpushed-error log; got %q", stderr.String())
-	}
-	assertNoWorktreeStaleMarker(t, fx.workerDir)
-}
-
-func TestPruneAgentHomeWorktreeIfSafe_HasStashes(t *testing.T) {
-	fx := newPruneFixture(t)
-	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasStashes: true, currentBranch: "builder/ga-ghi789"})
-
-	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
-		t.Fatal("prune returned true with stashes")
-	}
-	if !strings.Contains(stderr.String(), "stashed work") {
-		t.Errorf("expected stashes-reason log; got %q", stderr.String())
-	}
-	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-ghi789", "stashed-work")
-}
-
-func TestPruneAgentHomeWorktreeIfSafe_StashProbeError(t *testing.T) {
-	fx := newPruneFixture(t)
-	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, stashesErr: errors.New("boom")})
-
-	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
-		t.Fatal("prune returned true after stash probe error")
-	}
-	if !strings.Contains(stderr.String(), "stash probe failed") {
-		t.Errorf("expected stash-error log; got %q", stderr.String())
 	}
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
