@@ -30,6 +30,7 @@ go_test(
         "preserve_test.go",
         "testenv_import_test.go",
     ],
+    data = glob(["testdata/**"]),
     embed = [":hooks"],
     deps = [
         "//internal/bootstrap/packs/core",

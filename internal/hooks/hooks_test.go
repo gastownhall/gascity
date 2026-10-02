@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -2034,8 +2035,12 @@ func TestInstallPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
 		`pi.on("before_agent_start"`,
-		"const GC_PI_HOOK_VERSION = 9",
+		"const GC_PI_HOOK_VERSION = 11",
 		"gc hook --inject",
+		`pi.on("agent_end"`,
+		"startIdleDrain(pi, ctx)",
+		`await pi.sendUserMessage(pendingIdleNudges, { deliverAs: "followUp" })`,
+		"pendingIdleNudges",
 		`run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "SessionStart"))`,
 		`run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "PreCompact"))`,
 		"GC_MANAGED_SESSION_HOOK",
@@ -2064,6 +2069,32 @@ func TestInstallPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		if strings.Contains(data, legacy) {
 			t.Errorf("Pi hook still contains legacy API marker %q:\n%s", legacy, data)
 		}
+	}
+}
+
+func TestPiIdleDrainRetriesRejectedFollowUpWithoutRedraining(t *testing.T) {
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; cannot execute the Pi hook")
+	}
+
+	fs := fsys.NewFake()
+	if err := Install(fs, "/city", "/work", []string{"pi"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	plugin := fs.Files["/work/.pi/extensions/gc-hooks.js"]
+	stage := t.TempDir()
+	pluginPath := filepath.Join(stage, "gc-hooks.js")
+	if err := os.WriteFile(pluginPath, plugin, 0o644); err != nil {
+		t.Fatalf("write Pi hook: %v", err)
+	}
+
+	driverPath := filepath.Join("testdata", "pi_idle_drain_driver.mjs")
+	cmd := exec.Command(nodeBin, driverPath, pluginPath)
+	cmd.Env = append(os.Environ(), "GC_SESSION_ID=test-pi-session")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Pi idle-drain runtime: %v\noutput:\n%s", err, out)
 	}
 }
 
@@ -2100,7 +2131,7 @@ func TestPiHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 // gc prime --hook
 // gc hook --inject
 // gc handoff --auto
-const GC_PI_HOOK_VERSION = 9;
+const GC_PI_HOOK_VERSION = 11;
 pendingPrimeContext = run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "SessionStart"));
 run(["hook", "--inject"], ctx.cwd);
 run(["handoff", "--auto", "context cycle"], ctx.cwd);
@@ -2112,8 +2143,8 @@ GC_HOOK_EVENT_NAME;
 stdio: ["ignore", "pipe", "inherit"];
 function providerSessionEnv(ctx) {}
 `)
-	stale := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 9"), []byte("GC_PI_HOOK_VERSION = 8"), 1)
-	future := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 9"), []byte("GC_PI_HOOK_VERSION = 10"), 1)
+	stale := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 11"), []byte("GC_PI_HOOK_VERSION = 10"), 1)
+	future := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 11"), []byte("GC_PI_HOOK_VERSION = 12"), 1)
 	missingStderrForward := bytes.Replace(current, []byte(`stdio: ["ignore", "pipe", "inherit"];
 `), nil, 1)
 	missingManagedHookMarkers := bytes.Replace(current, []byte(`GC_MANAGED_SESSION_HOOK;

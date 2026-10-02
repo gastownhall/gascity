@@ -131,7 +131,11 @@ func TestNudgeOnRouteResolvesPoolMembers(t *testing.T) {
 		t.Fatalf("reading nudge-on-route.sh: %v", err)
 	}
 	body := string(data)
-	for _, want := range []string{"gc session list", "--template"} {
+	for _, want := range []string{
+		"gc session list",
+		"--template",
+		"Run gc hook --claim --drain-ack --json now",
+	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("nudge-on-route.sh must resolve pool members; missing %q", want)
 		}
