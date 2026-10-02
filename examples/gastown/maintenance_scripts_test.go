@@ -2651,17 +2651,17 @@ func orphanSweepFillerNames(floor int) []string {
 	return names
 }
 
+// orphanSweepListSizeCase is one membership-list size the large-list tests run.
+type orphanSweepListSizeCase struct {
+	name   string
+	filler []string
+}
+
 // orphanSweepListSizeCases pairs a small control list with a list above the
 // pipe buffer. Both must preserve the live claim; only the large one fails on
 // the piped membership check, which attributes the failure to list size.
-func orphanSweepListSizeCases() []struct {
-	name   string
-	filler []string
-} {
-	return []struct {
-		name   string
-		filler []string
-	}{
+func orphanSweepListSizeCases() []orphanSweepListSizeCase {
+	return []orphanSweepListSizeCase{
 		{name: "small list", filler: orphanSweepFillerNames(1)},
 		{name: "list above the pipe buffer", filler: orphanSweepFillerNames(orphanSweepOverflowFloorBytes)},
 	}
