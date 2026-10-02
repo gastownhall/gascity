@@ -672,6 +672,8 @@ func TestParseApprovalPrompt_RequestIDStableAcrossPaneWidths(t *testing.T) {
 		{"bash-manual-80x24.txt", "bash-manual-160x50.txt"},
 		{"edit-80x24.txt", "edit-160x50.txt"},
 		{"bash-acceptedits-2.1.287-80x24.txt", "bash-acceptedits-2.1.287-100x30.txt"},
+		{"bash-acceptedits-2.1.288-long-80x30.txt", "bash-acceptedits-2.1.288-long-100x40.txt"},
+		{"bash-acceptedits-2.1.288-multiline-80x30.txt", "bash-acceptedits-2.1.288-multiline-100x40.txt"},
 	} {
 		narrow := parseApprovalPrompt(readApprovalFixture(t, pair[0]))
 		wide := parseApprovalPrompt(readApprovalFixture(t, pair[1]))
@@ -878,6 +880,14 @@ func TestPending_ReportsParsedOptionLabels(t *testing.T) {
 	if pending.Metadata["tool_name"] != "Bash" {
 		t.Fatalf("tool_name = %q, want Bash", pending.Metadata["tool_name"])
 	}
+	// Clients read the command and Claude's description separately, so a
+	// multi-line command is never confused with the description.
+	if got := pending.Metadata["command"]; got != `python3 -c "print(6*7)"` {
+		t.Fatalf("metadata command = %q", got)
+	}
+	if got := pending.Metadata["description"]; got != "Run python3 command to print 6*7" {
+		t.Fatalf("metadata description = %q", got)
+	}
 }
 
 func TestNudgeNow_RefusesToTypeIntoApprovalPrompt(t *testing.T) {
@@ -939,18 +949,27 @@ func TestParseApprovalPrompt_BashInputLeadsWithCommand(t *testing.T) {
 		{"bash-manual-80x24.txt", "date > bash-ran.txt", "Run date command and write output to bash-ran.txt"},
 		{"bash-acceptedits-2.1.287-80x24.txt", `python3 -c "print(6*7)"`, "Run Python command to calculate 6*7"},
 		{"bash-acceptedits-2.1.287-100x30.txt", `python3 -c "print(6*7)"`, "Run Python command to calculate 6*7"},
+		// Claude Code 2.1.288 prefixes the box's lines with "│ ". A line that
+		// ends because the next word didn't fit is a wrap and is rejoined; a
+		// line that ends early is a real newline in the command and is kept.
+		{"bash-acceptedits-2.1.288-long-80x30.txt", `python3 -c 'print(5+6)' > sum.txt && echo "exit=$?" && echo "--- sum.txt contents follow ---" && cat sum.txt && echo "--- end of sum.txt contents ---"`, "Run Python calculation and save to file with status checks"},
+		{"bash-acceptedits-2.1.288-long-100x40.txt", `python3 -c 'print(5+6)' > sum.txt && echo "exit=$?" && echo "--- sum.txt contents follow ---" && cat sum.txt && echo "--- end of sum.txt contents ---"`, "Run Python calculation and save to file with status checks"},
+		{"bash-acceptedits-2.1.288-multiline-80x30.txt", "cd /tmp/gjcapml\n" + `python3 -c 'print(5 + 6)' > sum.txt` + "\nSTATUS=$?\n" + `echo "python3 finished with exit status $STATUS and wrote sum.txt into the demo working directory"`, "Run a four-line script: change to /tmp/gjcapml, run Python to compute 5 + 6 and write to sum.txt, capture exit status, then report completion"},
+		{"bash-acceptedits-2.1.288-multiline-100x40.txt", "cd /tmp/gjcapml\n" + `python3 -c 'print(5 + 6)' > sum.txt` + "\nSTATUS=$?\n" + `echo "python3 finished with exit status $STATUS and wrote sum.txt into the demo working directory"`, "Run a four-line script: change to /tmp/gjcapml, run Python to compute 5 + 6 and write to sum.txt, capture exit status, then report completion"},
 	} {
 		t.Run(tc.fixture, func(t *testing.T) {
 			a := parseApprovalPrompt(readApprovalFixture(t, tc.fixture))
 			if a == nil {
 				t.Fatal("expected an approval prompt, got nil")
 			}
-			lines := strings.Split(a.Input, "\n")
-			if lines[0] != tc.command {
-				t.Errorf("first line of Input = %q, want the command %q (Input = %q)", lines[0], tc.command, a.Input)
+			if a.Command != tc.command {
+				t.Errorf("Command = %q, want %q", a.Command, tc.command)
 			}
-			if !strings.Contains(a.Input, tc.description) {
-				t.Errorf("Input = %q, want it to keep the description %q after the command", a.Input, tc.description)
+			if a.Description != tc.description {
+				t.Errorf("Description = %q, want %q", a.Description, tc.description)
+			}
+			if !strings.HasPrefix(a.Input, tc.command) || !strings.Contains(a.Input, tc.description) {
+				t.Errorf("Input = %q, want the command first and the description after it", a.Input)
 			}
 			if got, want := approvalPromptText(a), "Bash: "+tc.command; !strings.HasPrefix(got, want) {
 				t.Errorf("prompt = %q, want it to start with %q", got, want)

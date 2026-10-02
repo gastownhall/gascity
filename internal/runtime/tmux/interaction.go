@@ -96,6 +96,11 @@ type parsedApproval struct {
 	Input    string
 	Question string
 	Options  []approvalOption
+	// Command and Description are set for Bash prompts: the command exactly as
+	// it would run (newlines kept, pane wraps rejoined) and Claude's
+	// one-line description of it.
+	Command     string
+	Description string
 }
 
 // approvalOption is one numbered entry of the prompt's menu. Wrapped labels
@@ -228,7 +233,20 @@ func describeApprovalTool(approval *parsedApproval, before []string) {
 			if tool, ok := approvalDialogTools[title]; ok {
 				approval.ToolName = tool
 			}
+			if approval.ToolName == "Bash" {
+				if command, description, ok := boxedBashSubject(body[i+1:]); ok {
+					approval.Command, approval.Description = command, description
+					approval.Input = truncateApprovalInput(strings.TrimSuffix(command+"\n"+description, "\n"))
+					return
+				}
+			}
 			approval.Input = dialogSubject(body[i+1:], approval.ToolName)
+			if approval.ToolName == "Bash" && approval.Input != "" {
+				// The older layout: the command's line first, its description after.
+				first, rest, _ := strings.Cut(approval.Input, "\n")
+				approval.Command = first
+				approval.Description = strings.Join(strings.Fields(rest), " ")
+			}
 			return
 		}
 	}
@@ -252,18 +270,11 @@ func isDialogRule(line string) bool {
 }
 
 // dialogSubject extracts what the dialog asks about from the lines between
-// its heading and the question. Bash dialogs show the command (and Claude's
-// description of it) as an indented block, or, from Claude Code 2.1.287, the
-// description on one line followed by the command in a ╌-delimited box; file
+// its heading and the question. Older Bash dialogs show the command (and
+// Claude's description of it) as an indented block, command first; file
 // dialogs show the file path on the first line, above the ╌ diff separator.
-// For Bash the command always comes first, so a client that shows only the
-// first line never presents Claude's description as the command.
-func dialogSubject(lines []string, toolName string) string {
-	if toolName == "Bash" {
-		if subject, ok := boxedBashSubject(lines); ok {
-			return truncateApprovalInput(subject)
-		}
-	}
+// The boxed Bash layout of Claude Code 2.1.287+ is read by boxedBashSubject.
+func dialogSubject(lines []string, _ string) string {
 	var header []string
 	for _, line := range lines {
 		if strings.HasPrefix(strings.TrimSpace(line), "╌") {
@@ -293,10 +304,18 @@ func dialogSubject(lines []string, toolName string) string {
 	return truncateApprovalInput(strings.Join(block, "\n"))
 }
 
-// boxedBashSubject reads the 2.1.287 Bash layout: description lines, then the
-// command between two ╌ separator lines. It returns the command followed by
-// the description, and false when the lines hold no such box.
-func boxedBashSubject(lines []string) (string, bool) {
+// boxedBashSubject reads the Bash layout of Claude Code 2.1.287+: Claude's
+// description, then the command between two ╌ separator lines. It returns the
+// command and the description, and false when the lines hold no such box.
+//
+// From 2.1.288, every line of a box that spans several lines starts with
+// "│ ", whether the line ends at a real newline or where the pane wrapped it,
+// and the description gets the same marker when it wraps. A marked line is a
+// wrap when the next line's first word would not have fit after it; then the
+// two are rejoined with a space. Otherwise the newline is real and kept. So
+// the command reads exactly as it would run, and it doesn't depend on the
+// pane's width.
+func boxedBashSubject(lines []string) (string, string, bool) {
 	isSep := func(line string) bool { return strings.HasPrefix(strings.TrimSpace(line), "╌") }
 	open := -1
 	for i, line := range lines {
@@ -306,29 +325,60 @@ func boxedBashSubject(lines []string) (string, bool) {
 		}
 	}
 	if open < 0 {
-		return "", false
+		return "", "", false
 	}
-	var command []string
+	// The separator spans the pane; marked content wraps 4 columns short of it
+	// (measured on 2.1.288 captures at 80 and 100 columns).
+	width := utf8.RuneCountInString(strings.TrimRight(lines[open], " ")) - 4
+	var box []string
 	closed := false
 	for _, line := range lines[open+1:] {
 		if isSep(line) {
 			closed = true
 			break
 		}
-		if trimmed := strings.TrimSpace(line); trimmed != "" {
-			command = append(command, trimmed)
-		}
+		box = append(box, line)
 	}
+	command := unwrapMarkedLines(box, width)
 	if !closed || len(command) == 0 {
-		return "", false
+		return "", "", false
 	}
-	var description []string
-	for _, line := range lines[:open] {
-		if trimmed := strings.TrimSpace(line); trimmed != "" {
-			description = append(description, trimmed)
+	description := unwrapMarkedLines(lines[:open], width)
+	return strings.Join(command, "\n"), strings.Join(description, " "), true
+}
+
+// unwrapMarkedLines returns the non-blank lines with their "│ " markers removed
+// and pane wraps rejoined (see boxedBashSubject). Unmarked lines are kept as
+// they are, trimmed.
+func unwrapMarkedLines(lines []string, width int) []string {
+	var out []string
+	prevMarked := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			prevMarked = false
+			continue
 		}
+		marked := strings.HasPrefix(trimmed, "│")
+		content := trimmed
+		if marked {
+			content = strings.TrimSpace(strings.TrimPrefix(trimmed, "│"))
+		}
+		if marked && prevMarked && len(out) > 0 {
+			prev := out[len(out)-1]
+			firstWord := content
+			if i := strings.IndexByte(content, ' '); i >= 0 {
+				firstWord = content[:i]
+			}
+			if utf8.RuneCountInString(prev)+1+utf8.RuneCountInString(firstWord) > width {
+				out[len(out)-1] = prev + " " + content
+				continue
+			}
+		}
+		out = append(out, content)
+		prevMarked = marked
 	}
-	return strings.Join(append(command, description...), "\n"), true
+	return out
 }
 
 func truncateApprovalInput(s string) string {
@@ -516,6 +566,12 @@ func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 	metadata := map[string]string{"source": "tmux"}
 	if approval.ToolName != "" {
 		metadata["tool_name"] = approval.ToolName
+	}
+	if approval.Command != "" {
+		metadata["command"] = approval.Command
+	}
+	if approval.Description != "" {
+		metadata["description"] = approval.Description
 	}
 	return &runtime.PendingInteraction{
 		RequestID: requestID,
