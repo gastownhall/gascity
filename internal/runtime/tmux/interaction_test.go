@@ -625,6 +625,18 @@ func TestParseApprovalPrompt_ClaudeCodeFixtures(t *testing.T) {
 			},
 		},
 		{
+			// Claude Code 2.1.287 moved the command into a ╌-delimited box
+			// below Claude's one-line description.
+			fixture: "bash-acceptedits-2.1.287-80x24.txt",
+			tool:    "Bash",
+			input:   `python3 -c "print(6*7)"`,
+			wantLabel: []string{
+				"Yes",
+				"Yes, and don’t ask again for: python3 *",
+				"No",
+			},
+		},
+		{
 			fixture: "write-80x24.txt",
 			tool:    "Write",
 			input:   "hello.txt",
@@ -658,6 +670,7 @@ func TestParseApprovalPrompt_RequestIDStableAcrossPaneWidths(t *testing.T) {
 	for _, pair := range [][2]string{
 		{"bash-manual-80x24.txt", "bash-manual-160x50.txt"},
 		{"edit-80x24.txt", "edit-160x50.txt"},
+		{"bash-acceptedits-2.1.287-80x24.txt", "bash-acceptedits-2.1.287-100x30.txt"},
 	} {
 		narrow := parseApprovalPrompt(readApprovalFixture(t, pair[0]))
 		wide := parseApprovalPrompt(readApprovalFixture(t, pair[1]))
@@ -911,4 +924,35 @@ func containsArg(call []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestParseApprovalPrompt_BashInputLeadsWithCommand pins the contract clients
+// rely on: a Bash prompt's Input starts with the command itself, and Claude's
+// model-written description (if any) follows it. A client that shows or speaks
+// only the first line must never present the description as the command.
+func TestParseApprovalPrompt_BashInputLeadsWithCommand(t *testing.T) {
+	for _, tc := range []struct {
+		fixture, command, description string
+	}{
+		{"bash-manual-80x24.txt", "date > bash-ran.txt", "Run date command and write output to bash-ran.txt"},
+		{"bash-acceptedits-2.1.287-80x24.txt", `python3 -c "print(6*7)"`, "Run Python command to calculate 6*7"},
+		{"bash-acceptedits-2.1.287-100x30.txt", `python3 -c "print(6*7)"`, "Run Python command to calculate 6*7"},
+	} {
+		t.Run(tc.fixture, func(t *testing.T) {
+			a := parseApprovalPrompt(readApprovalFixture(t, tc.fixture))
+			if a == nil {
+				t.Fatal("expected an approval prompt, got nil")
+			}
+			lines := strings.Split(a.Input, "\n")
+			if lines[0] != tc.command {
+				t.Errorf("first line of Input = %q, want the command %q (Input = %q)", lines[0], tc.command, a.Input)
+			}
+			if !strings.Contains(a.Input, tc.description) {
+				t.Errorf("Input = %q, want it to keep the description %q after the command", a.Input, tc.description)
+			}
+			if got, want := approvalPromptText(a), "Bash: "+tc.command; !strings.HasPrefix(got, want) {
+				t.Errorf("prompt = %q, want it to start with %q", got, want)
+			}
+		})
+	}
 }
