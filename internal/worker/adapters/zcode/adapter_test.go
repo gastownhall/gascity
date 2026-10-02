@@ -434,8 +434,23 @@ func (s *session) closeAndWait() (string, int) {
 
 func (s *session) wait() (string, int) {
 	s.t.Helper()
+	exited := make(chan error, 1)
+	go func() { exited <- s.cmd.Wait() }()
+	var err error
+	select {
+	case err = <-exited:
+	case <-time.After(adapterWaitBudget):
+		// An adapter that never exits must fail its own test, not hang the
+		// package until go test's timeout: ga-f4lela surfaced as a 20m
+		// unit-core timeout whose only clue was a goroutine parked here. Take
+		// the process group down so Wait returns, then show the pane.
+		_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
+		<-exited
+		<-s.done
+		s.t.Fatalf("adapter still running %s after it should have exited:\n%s", adapterWaitBudget, s.output())
+	}
 	code := 0
-	if err := s.cmd.Wait(); err != nil {
+	if err != nil {
 		var exitErr *exec.ExitError
 		if !asExitError(err, &exitErr) {
 			s.t.Fatalf("wait adapter: %v", err)
@@ -1200,6 +1215,61 @@ func TestTerminateExitsCleanly(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 }
+
+// TERM must end the session even when it lands after bash's last trap check
+// for the idle read but before read(2) blocks. bash runs a trap only between
+// commands or when a signal interrupts read(2), so that TERM's trap used to wait
+// for the next byte of input, which an idle pane never sends (ga-f4lela:
+// TestTurnHeartbeatExpiresBeforeTheChildCompletes sat out unit-core's whole 20m
+// timeout with the trap still pending). Every test here that signals TERM right
+// after a ready marker aims at that window, but it is microseconds wide, so a
+// BASH_ENV shim puts the TERM inside it on every run instead of on a starved
+// machine only.
+func TestTermBeforeTheIdleReadBlocksStillEndsTheSession(t *testing.T) {
+	t.Parallel()
+
+	for name, onTTY := range map[string]bool{"piped": false, "tty": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newHarness(t, nil)
+			shim := filepath.Join(h.workDir, "bash-env")
+			if err := os.WriteFile(shim, []byte(termBeforeFirstReadShim), 0o644); err != nil {
+				t.Fatalf("write BASH_ENV shim: %v", err)
+			}
+			h.env["BASH_ENV"] = shim
+
+			start := h.start
+			if onTTY {
+				start = h.startOnTTY
+			}
+			// The shim sends the TERM; stdin stays open, so only its trap can end
+			// the session.
+			out, code := start().wait()
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0 from the TERM trap:\n%s", code, out)
+			}
+			if !strings.Contains(out, "zcode-repl ready") {
+				t.Fatalf("adapter exited before it reached the idle read:\n%s", out)
+			}
+		})
+	}
+}
+
+// termBeforeFirstReadShim shadows read with a function. Its first call sends the
+// adapter's shell a TERM from the word expansion of `builtin read`, which runs
+// after that command's trap check, so the trap is still pending when read(2)
+// starts. $$ is the adapter's shell even inside the command substitution, and
+// the substitution expands to no words. Later calls pass straight through.
+const termBeforeFirstReadShim = `read() {
+    if [[ -z ${term_shim_fired-} ]]; then
+        term_shim_fired=1
+        builtin read "$@" $(kill -TERM $$)
+    else
+        builtin read "$@"
+    fi
+}
+`
 
 // Behavior 8: sid persistence across restarts, with the unvalidated gate.
 func TestSidRoundTripsAcrossRestarts(t *testing.T) {

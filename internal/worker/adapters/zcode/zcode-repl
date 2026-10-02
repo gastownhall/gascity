@@ -11,13 +11,15 @@
 # Wire protocol, matching how gc actually delivers a prompt (tmux.go
 # NudgeSession): one literal send-keys of the whole message (embedded newlines
 # included), a short debounce, an Escape, then Enter. So a multi-line prompt
-# lands as N lines with a trailing ESC byte on the last one. We read the first
-# line blocking, drain the rest of the burst on a 1s idle timeout — timed one
-# byte at a time, so the timer can never cut a line in half — strip control
-# bytes, and run ONE turn on the join. The cap is MAX_LINE_BYTES per LINE, not
-# per prompt: a prompt of any size is fine as long as its lines are, but one
-# unbroken line longer than the cap comes back rejoined with a newline the
-# sender never sent, changing that prompt's content and not just its framing.
+# lands as N lines with a trailing ESC byte on the last one. We wait for the
+# burst's first byte in 1s slices, so a TERM is never stranded behind an idle
+# read, then read the rest of that line blocking, drain the rest of the burst on
+# a 1s idle timeout — timed one byte at a time, so neither timer can cut a line
+# in half — strip control bytes, and run ONE turn on the join. The cap is
+# MAX_LINE_BYTES per LINE, not per prompt: a prompt of any size is fine as long
+# as its lines are, but one unbroken line longer than the cap comes back
+# rejoined with a newline the sender never sent, changing that prompt's content
+# and not just its framing.
 #
 # Prints "zcode-repl ready" at startup and after every turn — the provider's
 # ready_prompt_prefix. Turn failures print "zcode-repl error rc=N" and keep
@@ -59,6 +61,14 @@ readonly BUSY="zcode-repl turn in flight (C-c to interrupt)"
 readonly GUARD_TOKEN="zcode-repl "
 readonly MAX_CONSECUTIVE_FAILURES=5
 readonly DRAIN_TIMEOUT=1
+# How long one idle wait for the next prompt blocks before handing control back
+# to the shell, which is what bounds how late a TERM that slipped past the read
+# runs its trap (see the read loop). Whole seconds: bash 3.2's read -t takes no
+# fraction.
+readonly IDLE_SLICE=1
+# The idle wait's variable holds this until a byte arrives. No one-byte read can
+# produce it, so still finding it after the read means nothing arrived.
+readonly NOTHING_READ="(nothing read)"
 # Every read below passes -n, which is what keeps bash on its unbuffered,
 # byte-at-a-time reader for a tty and a pipe alike. Without it bash reads a line
 # through a 128-byte static buffer (zreadc) and pushes the remainder back with
@@ -754,11 +764,37 @@ printf '%s\n' "$MARKER"
 
 while :; do
     interrupted=0
-    # Cleared before every read: bash 3.2 returns from a signal-interrupted
-    # read without touching the variable, so a stale value would be re-run.
-    line=
-    IFS= read -r -n "$MAX_LINE_BYTES" line
+    # Wait for the next prompt one IDLE_SLICE at a time, never in one unbounded
+    # read. bash runs a trap between commands, or when a signal interrupts the
+    # read(2) it is blocked in. A TERM that lands after the read command's last
+    # check but before read(2) blocks gets neither: its trap waits for the next
+    # byte of input, which an idle pane never sends, so the session outlived the
+    # TERM that was meant to end it (ga-f4lela: a test sat out the suite's whole
+    # 20m timeout with the TERM trap still pending). A slice that runs out hands
+    # control back to the shell, and the next command runs the trap.
+    #
+    # The slice reads one byte, so, as in the drain below, a timer that fires
+    # has consumed nothing; once that byte is in hand, the rest of its line
+    # comes from a blocking read that cannot end early.
+    #
+    # A slice that ran out is not end of input, and only the variable tells the
+    # two apart on every shell. bash >= 4 reports a timeout with a status above
+    # 128, but bash 3.2 reports status 1, exactly as for end of input. The
+    # difference is that 3.2 never assigns the variable on a timeout, while end
+    # of input assigns it empty. A trapped signal that ends a 3.2 read leaves it
+    # untouched as well, which is the truth: nothing in hand.
+    line=$NOTHING_READ
+    IFS= read -r -n 1 -t "$IDLE_SLICE" line
     read_rc=$?
+    if (( read_rc > 128 )) || [[ "$line" == "$NOTHING_READ" ]]; then continue; fi
+    if (( read_rc == 0 )) && [[ -n "$line" ]]; then
+        # Cleared before the read: bash 3.2 returns from a signal-interrupted
+        # read without touching the variable, so a stale value would be re-run.
+        rest=
+        IFS= read -r -n "$MAX_LINE_BYTES" rest
+        read_rc=$?
+        line+=$rest
+    fi
     if (( read_rc != 0 )); then
         # An INT is an interrupt, not end of input. A trapped INT reaches a
         # failed read in more than one shape: it can abort the read outright
