@@ -5470,3 +5470,85 @@ func TestDoSlingBatchReroutesClaimedChildWithoutAttachingFormula(t *testing.T) {
 		t.Fatalf("a molecule was attached to %s, which the target already claims", child.ID)
 	}
 }
+
+// TestDoSlingReassignClaimedBeadRoutedElsewhereAttachesFormula covers --reassign
+// on a bead the target already claims while gc.routed_to names another target.
+// --reassign clears the claim, so the bead is no longer claimed work and the
+// re-route-only path must not apply: the default formula attaches as on any
+// unclaimed bead, and no warning says the bead is still claimed.
+func TestDoSlingReassignClaimedBeadRoutedElsewhereAttachesFormula(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("code-review")}
+
+	store, beadID := assignedSingleSessionBead(t, "reviewers")
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = store
+
+	opts := testOpts(a, beadID)
+	opts.Reassign = true
+	result, err := DoSling(opts, deps, store)
+	if err != nil {
+		t.Fatalf("DoSling --reassign: %v", err)
+	}
+	if result.Method == "bead" {
+		t.Fatalf("Method = %q; --reassign cleared the claim, so the default formula must attach", result.Method)
+	}
+	hasMolecule, err := HasMoleculeChildren(store, beadID, store)
+	if err != nil {
+		t.Fatalf("HasMoleculeChildren: %v", err)
+	}
+	if !hasMolecule {
+		t.Fatalf("no molecule attached to %s after --reassign cleared its claim", beadID)
+	}
+	for _, w := range result.BeadWarnings {
+		if strings.Contains(w, "was skipped") {
+			t.Fatalf("BeadWarnings = %v; no skipped-formula warning after --reassign cleared the claim", result.BeadWarnings)
+		}
+	}
+	got, err := store.Get(beadID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", beadID, err)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("Assignee = %q, want empty after --reassign", got.Assignee)
+	}
+}
+
+// TestDoSlingDryRunReroutesClaimedBeadReportsBeadMethod checks that the dry run
+// for a bead the target claims but that is routed elsewhere reports the method
+// the live run uses: a plain re-route ("bead"), not a formula attach.
+func TestDoSlingDryRunReroutesClaimedBeadReportsBeadMethod(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	store, beadID := assignedSingleSessionBead(t, "reviewers")
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = store
+
+	opts := testOpts(a, beadID)
+	opts.OnFormula = "code-review"
+	opts.DryRun = true
+	result, err := DoSling(opts, deps, store)
+	if err != nil {
+		t.Fatalf("DoSling --dry-run: %v", err)
+	}
+	if !result.DryRun || result.Method != "bead" {
+		t.Fatalf("DryRun = %v, Method = %q; want a dry run reporting the live re-route method \"bead\"", result.DryRun, result.Method)
+	}
+
+	// --reassign clears the claim in the live run, so its dry run keeps the
+	// formula method.
+	opts.Reassign = true
+	result, err = DoSling(opts, deps, store)
+	if err != nil {
+		t.Fatalf("DoSling --dry-run --reassign: %v", err)
+	}
+	if result.Method != "on-formula" {
+		t.Fatalf("Method = %q with --reassign; want \"on-formula\"", result.Method)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("dry run executed commands: %v", runner.calls)
+	}
+}

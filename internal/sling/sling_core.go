@@ -148,9 +148,12 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		result.DryRun = true
 		result.BeadID = opts.BeadOrFormula
 		result.Method = "bead"
-		if opts.IsFormula {
+		switch {
+		case opts.IsFormula:
 			result.Method = "formula"
-		} else if opts.OnFormula != "" {
+		case result.routeOnly:
+			// The live run re-routes without attaching a formula.
+		case opts.OnFormula != "":
 			result.Method = "on-formula"
 		}
 		return result, nil
@@ -201,7 +204,11 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 			result.BeadWarnings = append(result.BeadWarnings, skippedForClaimWarning(opts, a, decision.Assignee))
 		}
 	}
-	if check.RouteOnly {
+	// --reassign clears the claim before routing (reopenForReassign), so the
+	// bead is no longer claimed work and takes the ordinary formula path.
+	// opts.Reassign, not shouldReopenForReassign, so a dry run previews what
+	// the live run does.
+	if check.RouteOnly && !opts.Reassign {
 		// The target already claims the bead; only its route is stale. Re-stamp
 		// the route without attaching a formula, under the same claim guard as
 		// the idempotent path above.
