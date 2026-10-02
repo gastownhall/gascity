@@ -212,9 +212,15 @@ mkdir -m 0700 out/private && echo x >out/private/f && chmod 0400 out/private/f &
 echo "R end"; exit 7'
 host_mounts() { findmnt -no VFS-OPTIONS /; findmnt -no VFS-OPTIONS /run; }
 host_before=$(host_mounts 2>&1)
+# 300 s: the full probe walks every reachable mount for shared writable
+# directories, which took ~60 s on Blacksmith's large tool caches (2026-10-02:
+# two of five canaries timed out mid-probe at 60 s).
+probe_started=$SECONDS
 out=$(cd "$d/work" && setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --init-groups -- \
-	env -i PATH=/usr/bin:/bin 'PROBE=a=b c' RBE_X_TIMEOUT_MS=60000 "$LIB/entry" /bin/bash -c "$probe" 2>&1)
+	env -i PATH=/usr/bin:/bin 'PROBE=a=b c' RBE_X_TIMEOUT_MS=300000 "$LIB/entry" /bin/bash -c "$probe" 2>&1)
 rc=$?
+echo "# probe action: exit $rc after $((SECONDS - probe_started)) s"
+if [[ $rc == 124 ]]; then bad "probe action timed out (300 s): later checks have no result"; fi
 rm -f "$canary"
 results=(uid-slot no-caps nnp env-exact input-immutable worker-cas-hidden mask-tmpfs siblings-hidden private-tmp
 	own-pid-namespace fresh-home own-mounts-writable end)
