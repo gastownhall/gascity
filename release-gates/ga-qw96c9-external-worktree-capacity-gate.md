@@ -76,7 +76,6 @@
 | #6928 base delta | `TestControllerStateAppliesHyphenatedPrefixEventsOnlyToOwningCache` | PASS | PASS |
 | #6928 base delta | `TestControllerStateBeadEventsRespectStorePrefixes` | PASS | PASS |
 | #6928 base delta | `TestControllerStateBeadEventsUseScopePrefixWhenConfiguredPrefixDrifts` | PASS | PASS |
-
 | #6929 base delta | `TestRouterSessionBeadEventEnqueuesItsRowAndAllocator` | PASS | PASS |
 | #6929 base delta | `TestRouterReplayRoutesEnqueueOnlyAndNeverWrites` | PASS | PASS |
 | #6929 base delta | `TestRouterWorkReassignmentEnqueuesOldAndNewAssignee` | PASS | PASS |
