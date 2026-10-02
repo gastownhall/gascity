@@ -152,7 +152,7 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	// binding BEFORE the launch. The launch below blocks for seconds (shell
 	// readiness + herdr's TUI detection), and reconcile ticks that fire in
 	// that window read both stores: the pending-create ownership check
-	// (runningSessionMatchesPendingCreateInfo) reads GC_SESSION_ID /
+	// (attributePendingCreateRuntime) reads GC_SESSION_ID /
 	// GC_INSTANCE_TOKEN via GetMeta — with an unseeded sidecar it misreads
 	// the fresh runtime as "live runtime belongs to another session" and
 	// rolls it back mid-boot — and liveness reads the pane binding. tmux gets

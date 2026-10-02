@@ -173,12 +173,9 @@ type Info struct {
 	// RAW priming-marker mirrors (primed_at / priming_attempted_at / prompt_hash),
 	// verbatim. They follow the same raw-mirror house pattern as the canonical
 	// keys: projected by infoFromPersistedBead and folded per-key (verbatim copy)
-	// by ApplyPatch. The S19 Stage 3 shadow harness snapshots the compared keys
-	// off these Info mirrors at tick start/end (the reconciler loop carries no raw
-	// session beads), so every compared key must be a projected Info field.
-	// Additive, internal-only (absent from the HTTP wire). S19 Stage 2 is
-	// WRITE-ONLY: stamped/cleared at start/clear sites but read by no decision
-	// path yet (the harness observes them; Stage 4 acts on them).
+	// by ApplyPatch. Additive, internal-only (absent from the HTTP wire). S19
+	// Stage 2 is WRITE-ONLY: stamped/cleared at start/clear sites but read by no
+	// decision path yet.
 	PrimedAtMetadata           string // primed_at (raw RFC3339)
 	PrimingAttemptedAtMetadata string // priming_attempted_at (raw RFC3339)
 	PromptHashMetadata         string // prompt_hash (raw sha256 hex)
@@ -536,6 +533,11 @@ type RuntimeObservation struct {
 	Attached    bool
 	LastActive  time.Time
 	SessionName string
+
+	// AttachedErr is set when the attachment probe could not tell (any error
+	// other than runtime.ErrSessionNotFound); Attached is false then. A caller
+	// gating a destructive action treats it as attached.
+	AttachedErr error
 }
 
 func normalizeInfoState(state State) State {
@@ -720,7 +722,7 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 // replacement is impossible because it does not exist yet.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	_ = ctx
-	scanner, ok := m.sp.(runtime.ProcessTableScanner)
+	scanner, ok := runtime.AsProcessTableScanner(m.sp)
 	if !ok || sessionID == "" {
 		return nil
 	}
@@ -1670,8 +1672,15 @@ func (m *Manager) Rename(id, title string) error {
 	return m.UpdatePresentation(id, &title, nil)
 }
 
-// UpdatePresentation updates user-facing session attributes.
+// UpdatePresentation updates user-facing session attributes. A blank or
+// whitespace-only title is refused with ErrInvalidSessionTitle before any
+// lock or store work, so neither half of a combined title+alias update lands.
 func (m *Manager) UpdatePresentation(id string, title *string, alias *string) error {
+	if title != nil {
+		if err := ValidateTitle(*title); err != nil {
+			return err
+		}
+	}
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.loadSessionBead(id, true)
 		if err != nil {
@@ -1977,7 +1986,11 @@ func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) (Runti
 	obs.Running = liveness.Running
 	obs.Alive = liveness.Alive
 	if obs.Running {
-		obs.Attached = m.sp.IsAttached(info.SessionName)
+		attached, err := runtime.IsAttachedWithError(m.sp, info.SessionName)
+		if err != nil && runtime.AttachProbeHolds(attached, err) {
+			obs.AttachedErr = err
+		}
+		obs.Attached = attached && err == nil
 		lastActive, err := m.sp.GetLastActivity(info.SessionName)
 		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
 			return RuntimeObservation{}, fmt.Errorf("observe last activity for %q: %w", info.SessionName, err)

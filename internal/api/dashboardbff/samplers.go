@@ -664,13 +664,22 @@ func readDoltMode(beadsPath string) (string, bool) {
 	// for an unmarked legacy direct store.
 	configRaw, configErr := os.ReadFile(filepath.Join(beadsPath, "config.yaml"))
 	if configErr == nil {
+		// gc writes the flat `dolt.mode:` key; bd >= 1.3.1 writes it nested
+		// (`dolt:` / `  mode:`). bd reads either, the flat one first.
 		var config struct {
 			DoltMode string `yaml:"dolt.mode"`
+			Dolt     struct {
+				Mode string `yaml:"mode"`
+			} `yaml:"dolt"`
 		}
 		if err := yaml.Unmarshal(configRaw, &config); err != nil {
 			return "", false
 		}
-		if mode := strings.ToLower(strings.TrimSpace(config.DoltMode)); mode != "" {
+		mode := strings.ToLower(strings.TrimSpace(config.DoltMode))
+		if mode == "" {
+			mode = strings.ToLower(strings.TrimSpace(config.Dolt.Mode))
+		}
+		if mode != "" {
 			return recognizedDoltMode(mode)
 		}
 	} else if !os.IsNotExist(configErr) {

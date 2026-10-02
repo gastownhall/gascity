@@ -77,7 +77,28 @@ const (
 	// internal/bootstrap/packs/core/assets/scripts/** so a reaper.sh-only
 	// change runs the real-Dolt reaper tests. Reviewed delta: one filter path,
 	// no new job, trigger or permission.
-	expectedCIExecutionHash     = "7bf12250c2b6d756458cc48e70fd716b01e517fa4d629f237b542aa8f67cb139"
+	//
+	// Bumped again (F9): beads-topology-acceptance gains one step running
+	// TestBeadsProxiedIgnoresUserLevelSharedServer (-timeout 15m) and its job
+	// cap moves 90 -> 105 minutes to keep the step budget under it. Reviewed
+	// delta: one test step and the cap, no new job, trigger or permission.
+	//
+	// Bumped again for the Beads v1.3.0 -> v1.3.1-rc.2 -> v1.3.1 pins: every job's
+	// BD_VERSION env value moves to the new tag. Reviewed delta: that value
+	// only, no new job, step, trigger or permission.
+	//
+	// Bumped again (ga-nr9epw, restoring ga-1037rg / ga-yoxtux regression
+	// coverage without re-widening test-bd-cli-contract's own -run regex,
+	// which TestAcceptanceTargetsSeparateTierAFromExternalBdContracts pins as
+	// an exact literal substring): one new step, "bd CLI contract HOME
+	// isolation (...)", added immediately after the existing "bd CLI contract
+	// (...)" step in each of contract-acceptance-previous, contract-
+	// acceptance-current and contract-radar-bd-head. Each new step runs `make
+	// test-bd-cli-contract-home-isolation`, a separate Makefile target driving
+	// only TestRunBDIsolatesHOMEFromSharedServerConfig under the same
+	// acceptance_bd_contract tag and bd binary the preceding step already
+	// resolved onto PATH. No new job, trigger or permission.
+	expectedCIExecutionHash     = "5a2eedb5eb5a94b471b9a8d4383ebab75b57006b697479ba359abf1e3c27800e"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -86,8 +107,12 @@ const (
 	// PR jobs' resolve-pin / build-bd-from-BD_CURRENT_REF / verify steps
 	// verbatim, and one `go test -tags acceptance_a -timeout 45m -run
 	// 'TestBeadsProxiedDefault$'` step. No new trigger, no new permission, no
-	// provider selector.
-	expectedNightlyExecutionHash = "04ca67750b129d1e4b52702116e79f0c0547e67d1a1f050932511cf3fed10db2"
+	// provider selector. Then (v1.5.0 Tier C first-run drain) the tier-c job's
+	// -run selector gained TestFreshInit_SlingSpawnsDefaultPoolWorker and
+	// TestFreshInit_ClaudeUnrestricted, mirroring RC Gate's acceptance C shards;
+	// same job, env, secrets and runner. Then the Beads v1.3.0 -> v1.3.1-rc.2
+	// -> v1.3.1 pins: the workflow and job BD_VERSION env values only.
+	expectedNightlyExecutionHash = "183db1faaa748f8bacd7d7de970ddc40ea87a65892bc37083ca40175cc4c2ea1"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 

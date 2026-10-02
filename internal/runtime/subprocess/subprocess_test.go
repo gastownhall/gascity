@@ -86,6 +86,10 @@ func requirePrivateFallbackRejected(t *testing.T, p *Provider, name string) {
 			t.Errorf("%s error = %v, want private socket directory validation", check.name, err)
 		}
 	}
+	// A directory that fails validation cannot tell, so liveness is unknown.
+	if _, err := p.ObserveLivenessWithError(name, nil); !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, errPrivateSocketDirValidation) {
+		t.Errorf("ObserveLivenessWithError error = %v, want ErrRuntimeUnavailable wrapping private socket directory validation", err)
+	}
 }
 
 func TestStartCreatesProcess(t *testing.T) {
@@ -335,7 +339,8 @@ func TestLegacySocketRemainsVisibleWhenPrivateFallbackIsMissing(t *testing.T) {
 	if startCalls != 0 {
 		t.Fatalf("process start calls = %d, want 0", startCalls)
 	}
-	for _, want := range []string{"ping", "ping", "interrupt", "stop", "ping"} {
+	// Liveness probes only connect, so the owner sees just the two commands.
+	for _, want := range []string{"interrupt", "stop"} {
 		select {
 		case got := <-gotCommand:
 			if got != want {

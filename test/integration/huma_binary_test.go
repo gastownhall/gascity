@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/testutil"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
@@ -194,6 +195,18 @@ func waitForCityRegistered(t *testing.T, url, city string, deadline time.Duratio
 // Caching across subtests is unnecessary — one build per test is <1s.
 func buildGCBinary(t *testing.T) string {
 	t.Helper()
+	// Under bazel the pre-built gc binary ships in runfiles (declared as
+	// a data dep); use it instead of shelling out to `go build`, which
+	// requires a toolchain and the source tree on the executing worker.
+	for _, rf := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
+		if rf == "" {
+			continue
+		}
+		bin := filepath.Join(rf, "_main", "cmd", "gc", "gc_", "gc")
+		if _, err := os.Stat(bin); err == nil {
+			return bin
+		}
+	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "gc")
 	cmd := exec.Command("go", "build", "-o", bin, "./cmd/gc")
@@ -209,6 +222,9 @@ func buildGCBinary(t *testing.T) string {
 // so the repo root is two parents up.
 func findRepoRoot(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	dir, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)

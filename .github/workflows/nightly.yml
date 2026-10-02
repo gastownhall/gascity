@@ -10,7 +10,7 @@ permissions:
 
 env:
   DOLT_VERSION: "2.1.7"
-  BD_VERSION: "v1.3.0"
+  BD_VERSION: "v1.3.1"
 
 jobs:
   tier-b:
@@ -77,7 +77,7 @@ jobs:
       - name: Tier C Ollama inference tests
         run: >
           go test -tags acceptance_c -timeout 45m -v ./test/acceptance/tier_c/...
-          -run 'Test(BdCmdSeparatesStdoutAndStderrOnError|BdCmdReturnsPureStdoutOnSuccessfulJSONCommand|Swarm_SlingWorkCoderCommits|Gastown_PolecatLifecycle|Gastown_MayorDispatchPipeline|TierCEnvAuthDoesNotMirrorAuthTokenIntoAPIKey)$'
+          -run 'Test(BdCmdSeparatesStdoutAndStderrOnError|BdCmdReturnsPureStdoutOnSuccessfulJSONCommand|Swarm_SlingWorkCoderCommits|Gastown_PolecatLifecycle|Gastown_MayorDispatchPipeline|TierCEnvAuthDoesNotMirrorAuthTokenIntoAPIKey|FreshInit_SlingSpawnsDefaultPoolWorker|FreshInit_ClaudeUnrestricted)$'
 
   integration-sqlite-coordstore:
     name: Integration / SQLite coordination store
@@ -85,7 +85,7 @@ jobs:
     timeout-minutes: 30
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.3.0"
+      BD_VERSION: "v1.3.1"
       GC_BEADS: sqlite
       GC_ACCEPTANCE_BEADS_PROVIDER: sqlite
     steps:

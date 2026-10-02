@@ -190,12 +190,26 @@ func (c *proxiedNativeCity) laneServesNatively(t *testing.T, label string) (nati
 	return census.Total == 0, census
 }
 
+// admit drives the lane's admission through `gc status --json` (the census
+// counts the bd verbs it spent), then reads the payload of the store it
+// settled on through doctor, which now finds a live proxy.
+func (c *proxiedNativeCity) admit(t *testing.T, label string) (beadsStorePayloadDoc, doctorCheckResult, proxiedForkCensus) {
+	t.Helper()
+	c.reset(t)
+	if out, err := helpers.RunGC(c.lane, c.root, "status", "--json"); err != nil {
+		t.Logf("%s: gc status --json exited non-zero: %v\n%s", label, err, out)
+	}
+	census := c.census(t)
+	payload, result := c.account(t, label)
+	return payload, result, census
+}
+
 // bd runs the pinned bd directly in the city, the way an operator does.
 func (c *proxiedNativeCity) bd(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	cmd := exec.Command(c.bdPath, args...) //nolint:gosec // resolved test binary
 	cmd.Dir = c.root
-	cmd.Env = c.env.List()
+	cmd.Env = c.env.ToolList()
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -390,9 +404,7 @@ func TestProxiedNativeLifecycle(t *testing.T) {
 			t.Fatalf("bd dolt stop left processes behind:\n%s", strings.Join(leaked, "\n"))
 		}
 
-		c.reset(t)
-		payload, result := c.account(t, "a city whose proxy was stopped")
-		census := c.census(t)
+		payload, result, census := c.admit(t, "a city whose proxy was stopped")
 		t.Logf("stop-ping-repin: %s; store=%q %s", census, payload.Store, describeProxiedAccount(payload))
 
 		if payload.Store != "NativeDoltStore" {
@@ -434,9 +446,7 @@ func TestProxiedNativeLifecycle(t *testing.T) {
 			helpers.MissingPrecondition(t, "bd removed its record on SIGKILL (%v), so this host cannot produce the dead-record arm", err)
 		}
 
-		c.reset(t)
-		payload, result := c.account(t, "a city whose proxy was killed")
-		census := c.census(t)
+		payload, result, census := c.admit(t, "a city whose proxy was killed")
 		t.Logf("dead-record-one-ping: %s; store=%q %s", census, payload.Store, describeProxiedAccount(payload))
 
 		if payload.Store != "NativeDoltStore" {
@@ -455,18 +465,17 @@ func TestProxiedNativeLifecycle(t *testing.T) {
 		baseGeneration = c.heal(t, "after the dead-record row")
 	})
 
-	// Both child-crash exits, because they are different endpoint states and
-	// which one a real bd produces is not knowable from the source. Measured
-	// here, twice, on this host:
+	// Both child-crash exits. On the pinned bd both retire the proxy with its
+	// child, so the record it leaves behind names a pid that is gone: the
+	// DEAD-RECORD arm, decided from the process table with no dial, worth
+	// exactly one ping.
 	//
-	//   kill -9   the proxy goes with its child, so the record it left behind
-	//             names a pid that is gone: the DEAD-RECORD arm, decided from the
-	//             process table with no dial, worth exactly one ping.
-	//   kill -TERM the proxy survives its child and its data port accepts and
-	//             never greets: the ZOMBIE ladder, which asks again three times
-	//             across two seconds, then spends one ping, then one recover —
-	//             and a recover is `bd dolt stop` followed by `bd ping`, so it
-	//             shows up as one `dolt stop` and a second ping.
+	//   kill -9    the proxy goes with its child.
+	//   kill -TERM a clean child exit. bd v1.3.0 left the proxy up with a data
+	//              port that accepted and never greeted (the zombie ladder:
+	//              one ping, then one recover); beads 1.3.1 retires the proxy
+	//              when its Dolt backend exits cleanly (gastownhall/beads#6937),
+	//              so this row now takes the dead-record arm too.
 	t.Run("child-kill9", func(t *testing.T) {
 		baseGeneration = c.childCrashRow(t, childCrashExpectation{
 			signal:    syscall.SIGKILL,
@@ -477,13 +486,13 @@ func TestProxiedNativeLifecycle(t *testing.T) {
 		}, baseGeneration)
 	})
 
-	t.Run("child-term-zombie", func(t *testing.T) {
+	t.Run("child-term", func(t *testing.T) {
 		baseGeneration = c.childCrashRow(t, childCrashExpectation{
 			signal:    syscall.SIGTERM,
 			label:     "kill -TERM",
-			pings:     2,
-			doltStops: 1,
-			mechanism: "the proxy survives and its data port accepts without greeting, so the ladder spends one ping and then one recover (`bd dolt stop` plus a ping) — once per generation, ever",
+			pings:     1,
+			doltStops: 0,
+			mechanism: "bd retires the proxy when its Dolt child exits cleanly (beads#6937), so its record names a dead pid and one ping is the whole escalation a dead record is worth",
 		}, baseGeneration)
 	})
 
@@ -652,7 +661,7 @@ type childCrashExpectation struct {
 // record and not something to wave through.
 func (c *proxiedNativeCity) childCrashRow(t *testing.T, want childCrashExpectation, baseGeneration string) string {
 	t.Helper()
-	_, servers := doltFamilyPIDs(t, c.proxyDir)
+	proxies, servers := doltFamilyPIDs(t, c.proxyDir)
 	if len(servers) == 0 {
 		t.Fatalf("no dolt sql-server under %s to kill", c.proxyDir)
 	}
@@ -662,10 +671,13 @@ func (c *proxiedNativeCity) childCrashRow(t *testing.T, want childCrashExpectati
 	if alive := waitForPIDsGone(t, servers, 30*time.Second); len(alive) > 0 {
 		t.Logf("%s: the dolt child %v is still alive; the row measures whatever the proxy now answers", want.label, alive)
 	}
+	// The proxy retires after its child, not with it; measuring before it has
+	// gone would catch the moment between the two and count a zombie ladder.
+	if alive := waitForPIDsGone(t, proxies, 30*time.Second); len(alive) > 0 {
+		t.Fatalf("%s: the proxy %v outlived its dolt child by 30s; the pinned bd retires it (beads#6937)", want.label, alive)
+	}
 
-	c.reset(t)
-	payload, result := c.account(t, "a city whose dolt child took "+want.label)
-	census := c.census(t)
+	payload, result, census := c.admit(t, "a city whose dolt child took "+want.label)
 	t.Logf("%s: %s; store=%q %s", want.label, census, payload.Store, describeProxiedAccount(payload))
 
 	if census.Pings != want.pings || census.DoltStops != want.doltStops {

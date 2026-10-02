@@ -1965,6 +1965,23 @@ func beadStoreForWatcher(workDir string, env map[string]string) *beads.CachingSt
 	return beads.NewCachingStore(bd, nil)
 }
 
+// watchedBeadEvent filters the journal to the bead events the watcher
+// projects and canonicalizes their identity. The cache applies the payload
+// under the snapshot's own ID, so the subject the watcher then reads back must
+// be that same ID; an event whose subject names a different bead is dropped
+// rather than reported as activity on the wrong bead.
+func watchedBeadEvent(ev events.Event) (events.Event, bool) {
+	if ev.Type != events.BeadUpdated && ev.Type != events.BeadClosed && ev.Type != events.BeadCreated {
+		return events.Event{}, false
+	}
+	id, err := beads.BeadEventID(ev.Subject, ev.Payload)
+	if err != nil || id == "" {
+		return events.Event{}, false
+	}
+	ev.Subject = id
+	return ev, true
+}
+
 func beadEventRelevant(ev events.Event, bead beads.Bead, agentName, currentBead string) bool {
 	if ev.Actor == agentName {
 		return true
@@ -2145,7 +2162,8 @@ func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Co
 		if err != nil {
 			return
 		}
-		if ev.Type != events.BeadUpdated && ev.Type != events.BeadClosed && ev.Type != events.BeadCreated {
+		ev, ok := watchedBeadEvent(ev)
+		if !ok {
 			continue
 		}
 		cache.ApplyEvent(ev.Type, ev.Payload)

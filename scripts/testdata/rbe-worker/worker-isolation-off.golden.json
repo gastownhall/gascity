@@ -1,0 +1,96 @@
+{
+  "stores": [
+    {
+      "name": "REMOTE_CAS",
+      "grpc": {
+        "instance_name": "",
+        "endpoints": [
+          {
+            "address": "grpcs://rbe-west.example.invalid:443",
+            "tls_config": {
+              "cert_file": "/home/runner/work/_temp/nl-worker/pki/worker.pem",
+              "key_file": "/home/runner/work/_temp/nl-worker/pki/worker.key",
+              "ca_file": "/etc/ssl/certs/ca-certificates.crt"
+            }
+          }
+        ],
+        "store_type": "cas"
+      }
+    },
+    {
+      "name": "REMOTE_AC",
+      "grpc": {
+        "instance_name": "oss",
+        "endpoints": [
+          {
+            "address": "grpcs://rbe-west.example.invalid:443",
+            "tls_config": {
+              "cert_file": "/home/runner/work/_temp/nl-worker/pki/worker.pem",
+              "key_file": "/home/runner/work/_temp/nl-worker/pki/worker.key",
+              "ca_file": "/etc/ssl/certs/ca-certificates.crt"
+            }
+          }
+        ],
+        "store_type": "ac"
+      }
+    },
+    {
+      "name": "WFS",
+      "fast_slow": {
+        "fast": {
+          "filesystem": {
+            "content_path": "/home/runner/work/_temp/nl-worker/content",
+            "temp_path": "/home/runner/work/_temp/nl-worker/tmp",
+            "eviction_policy": {
+              "max_bytes": 150000000000
+            }
+          }
+        },
+        "slow": {
+          "ref_store": {
+            "name": "REMOTE_CAS"
+          }
+        }
+      }
+    }
+  ],
+  "workers": [
+    {
+      "local": {
+        "name": "pool-worker-1",
+        "worker_api_endpoint": {
+          "uri": "grpcs://rbe-west.example.invalid:443",
+          "tls_config": {
+            "cert_file": "/home/runner/work/_temp/nl-worker/pki/worker.pem",
+            "key_file": "/home/runner/work/_temp/nl-worker/pki/worker.key",
+            "ca_file": "/etc/ssl/certs/ca-certificates.crt"
+          }
+        },
+        "cas_fast_slow_store": "WFS",
+        "upload_action_result": {
+          "ac_store": "REMOTE_AC"
+        },
+        "work_directory": "/home/runner/work/_temp/nl-worker/work",
+        "max_inflight_tasks": 8,
+        "platform_properties": {
+          "OSFamily": {
+            "values": [
+              "linux"
+            ]
+          },
+          "container-image": {
+            "values": [
+              ""
+            ]
+          },
+          "ISA": {
+            "values": [
+              "x86_64"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "servers": []
+}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -897,5 +899,65 @@ func TestRouteRecoveryDeltaCountsCandidatesItCouldNotResolve(t *testing.T) {
 	}
 	if _, present := clean.fields()["dropped"]; present {
 		t.Fatalf("clean delta trace fields = %v, want no dropped key", clean.fields())
+	}
+}
+
+// A standalone runtime (no controller state, API disabled) keeps its own city
+// and rig store handles, and a config reload reopens them. The route-recovery
+// backstop reads those handles on its own goroutine, so the reload's swap must
+// be synchronized with the lane's read. Run under -race: without the guard the
+// detector flags the reload's write against the backstop pass's read.
+func TestRouteRecoveryBackstopConcurrentWithStandaloneStoreReload(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeSoftReloadConfig(t, tomlPath, "5s")
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+	sp := runtime.NewFake()
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		ConfigRev: configRev,
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	if cr.cs != nil {
+		t.Fatal("fixture has controller state; it must exercise the standalone store handles")
+	}
+
+	// A changed config, so the reload is a real one that reopens the handles.
+	writeCityRuntimeSoftReloadConfig(t, tomlPath, "6s")
+	// Backstop passes run back to back for the whole reload, so passes land
+	// both before and after the reload swaps the handles.
+	stop := make(chan struct{})
+	passesDone := make(chan struct{})
+	go func() {
+		defer close(passesDone)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			cr.runRouteRecoveryBackstop(backstopReasonCadence)
+		}
+	}()
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceWatch)
+	close(stop)
+	awaitClose(t, passesDone, "the route-recovery backstop passes")
+
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reload reply = %+v, want applied", reply)
+	}
+	if cr.cityBeadStore() == nil {
+		t.Fatal("the reload did not open the standalone city store")
 	}
 }
