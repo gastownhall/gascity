@@ -247,10 +247,15 @@ func TestCmdGCRealBDTestsUseTestOwnedDoltContext(t *testing.T) {
 
 // pinTestOwnedBDHome delegates to the shared gascity test helper (ga-zq8iwb)
 // that deterministically retries a TempDir removal so it never races a
-// lingering real-bd/eventkit writer. It keeps its original name so this
-// package's existing call sites need no changes.
+// lingering real-bd/eventkit writer, and runs every bd subprocess in bd's test
+// mode so that writer is never launched at all (ga-1f81md). Test mode is safe
+// here because every caller's workspace is an embedded one; a fixture bound to
+// a Dolt server must not use this helper (see beadstest.EnvBeadsTestMode). It
+// keeps its original name so this package's existing call sites need no
+// changes.
 func pinTestOwnedBDHome(t *testing.T) string {
 	t.Helper()
+	t.Setenv(beadstest.EnvBeadsTestMode, "1")
 	return beadstest.TestOwnedHome(t)
 }
 
