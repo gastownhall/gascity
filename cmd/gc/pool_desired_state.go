@@ -566,9 +566,16 @@ func computePoolDesiredStatesAt(
 		req.SessionBeadID = candidates[0].SessionBeadID
 		protectedNewRequests[req.Template] = candidates[1:]
 	}
+	concreteRequests := concreteNestedCapRequests(cfg, resumeRequests, protectedNewRequests, inFlightNewRequests)
 	usage := acceptedNestedCapUsage(limits, resumeRequests)
-	seedExternalLiveWorkOccupancy(cfg, assignedWorkBeads, resumeRequests, liveExternalWorkDirs, limits, &usage, trace)
-	floorUsage := acceptedNestedCapUsage(limits, concreteNestedCapRequests(cfg, resumeRequests, protectedNewRequests, inFlightNewRequests))
+	// External occupancy is admitted against every concrete gc session, not
+	// only the resume tier, so it takes just the room those sessions leave
+	// over. admissionUsage is its own ledger: usage keeps counting the
+	// protected and in-flight sessions once, when the template loop below
+	// accepts them.
+	admissionUsage := acceptedNestedCapUsage(limits, concreteRequests)
+	seedExternalLiveWorkOccupancy(cfg, assignedWorkBeads, resumeRequests, liveExternalWorkDirs, limits, &usage, &admissionUsage, trace)
+	floorUsage := acceptedNestedCapUsage(limits, concreteRequests)
 	floorReservations := newNestedCapFloorReservations(cfg, aliasHeldTemplates, limits, floorUsage)
 	allRequests := append([]SessionRequest(nil), resumeRequests...)
 
@@ -800,12 +807,19 @@ func requestWithScaleDemandProvenance(request SessionRequest, demand scaleCheckD
 // sole configured agent when cfg has exactly one. A bead whose routing
 // resolves to no known pool template contributes no usage.
 //
+// Only in_progress beads are charged: occupancy is work already underway, and
+// a queued bead is demand, not occupancy. This is deliberately not the
+// resume-tier predicate, which answers which assigned work a session should
+// pick up next.
+//
 // Seeded requests are never appended to allRequests — there is no real
-// session to realize for external work — and they run through the same
-// usage.canAccept/accept cap cascade as any other demand, so genuine
-// resume-tier and wake-known-identity demand (real gc-managed sessions)
-// always wins a contested slot over this accounting fiction. Among the
-// external candidates themselves the most urgent bead (highest
+// session to realize for external work. Each candidate is admitted against
+// admissionUsage, which already holds every concrete gc session (resume,
+// wake-known-identity, protected post-create and in-flight pending-create), so
+// external occupancy yields to all of them and takes only the room they leave
+// over; an admitted request is accepted into admissionUsage, so later
+// candidates see that room gone, and into usage, so new demand sees it. Among
+// the external candidates themselves the most urgent bead (highest
 // beadPriorityRank) is admitted first, so a shared cap that cannot hold them
 // all records the more urgent bead's occupancy.
 func seedExternalLiveWorkOccupancy(
@@ -815,6 +829,7 @@ func seedExternalLiveWorkOccupancy(
 	liveExternalWorkDirs map[string]bool,
 	limits nestedCapLimits,
 	usage *nestedCapUsage,
+	admissionUsage *nestedCapUsage,
 	trace *sessionReconcilerTraceCycle,
 ) {
 	if len(liveExternalWorkDirs) == 0 {
@@ -830,7 +845,7 @@ func seedExternalLiveWorkOccupancy(
 	var candidates []SessionRequest
 	workDirByBead := make(map[string]string)
 	for _, wb := range assignedWorkBeads {
-		if wb.Status != "in_progress" && wb.Status != "open" {
+		if wb.Status != "in_progress" {
 			continue
 		}
 		if _, ok := alreadyClaimed[wb.ID]; ok {
@@ -867,9 +882,10 @@ func seedExternalLiveWorkOccupancy(
 		return candidates[i].BeadPriority > candidates[j].BeadPriority
 	})
 	for _, req := range candidates {
-		if !usage.canAccept(req, limits) {
+		if !admissionUsage.canAccept(req, limits) {
 			continue
 		}
+		admissionUsage.accept(req, limits)
 		usage.accept(req, limits)
 		if trace != nil {
 			trace.RecordDecision(TraceSitePoolExternalLiveOccupancy, TraceReasonExternalLiveWorktree, TraceOutcomeAccepted, req.Template, "", traceRecordPayload{

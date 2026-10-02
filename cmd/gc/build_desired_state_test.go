@@ -14416,17 +14416,22 @@ func TestBuildDesiredState_LiveExternalWorktreeOccupiesSoleSlotWithoutTeardown(t
 			}); err != nil {
 				t.Fatalf("create queued work: %v", err)
 			}
-			if _, err := store.Create(beads.Bead{
+			external, err := store.Create(beads.Bead{
 				Title:    "external work",
 				Type:     "task",
-				Status:   "in_progress",
 				Assignee: "external-claude",
 				Metadata: map[string]string{
 					"gc.routed_to":              template,
 					beadmeta.WorkDirMetadataKey: externalDir,
 				},
-			}); err != nil {
+			})
+			if err != nil {
 				t.Fatalf("create external work: %v", err)
+			}
+			// Create always stores a bead open, and only work already underway
+			// occupies capacity, so claim it the way a real worker would.
+			if err := store.Update(external.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+				t.Fatalf("mark external work in_progress: %v", err)
 			}
 			cfg := &config.City{
 				Workspace: config.Workspace{Name: "test-city"},

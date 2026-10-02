@@ -269,6 +269,13 @@ func discoverWorktreeLiveness(rigRoot string, live liveWorktreeState, sessionDir
 // free capacity, or capacity accounting would admit the very duplicate spawn
 // this bead exists to prevent.
 //
+// Only linked worktrees are reported. git lists a repository's main checkout
+// first among its worktrees, and that checkout, like the rig's own path (which
+// may sit below it or be a linked worktree itself), is where gc's agents and
+// the operator work. It is skipped on the live and the fail-closed paths
+// alike; reporting it would charge a capacity slot for as long as anything ran
+// in the rig.
+//
 // A per-rig scan error is logged to stderr and that rig's worktrees are
 // skipped rather than aborting the whole pass, matching
 // reapClosedBeadWorktrees's own posture.
@@ -293,12 +300,13 @@ func liveExternalWorkDirSet(cfg *config.City, snapshot *sessionBeadSnapshot, std
 			}
 			continue
 		}
-		for _, wl := range worktrees {
+		rigCanon := pathutil.NormalizePathForCompare(rigRoot)
+		for n, wl := range worktrees {
+			canon := pathutil.NormalizePathForCompare(wl.Path)
+			if n == 0 || canon == "" || canon == rigCanon {
+				continue
+			}
 			if !live.scanned || wl.Live {
-				canon := pathutil.NormalizePathForCompare(wl.Path)
-				if canon == "" {
-					continue
-				}
 				result[canon] = true
 			}
 		}
