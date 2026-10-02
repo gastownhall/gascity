@@ -25,8 +25,8 @@ type fakeTestDeadline struct {
 func (f fakeTestDeadline) Deadline() (time.Time, bool) { return f.at, f.ok }
 
 // A dolt CLI call is bounded by what is left of the test's own deadline, never
-// by a fixed per-call budget. Under suite load a dolt commit that was merely
-// slow was SIGKILLed at a fixed 30s and its test failed with "signal: killed".
+// by a fixed per-call budget: under suite load a merely slow dolt call outlasts
+// any fixed budget and is SIGKILLed, which fails its test with "signal: killed".
 func TestDoltCallContextIsBoundedByTheTestDeadline(t *testing.T) {
 	t.Run("a far deadline leaves the call everything but the margin", func(t *testing.T) {
 		deadline := time.Now().Add(30 * time.Minute)

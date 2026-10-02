@@ -85,7 +85,7 @@ const doltCallMargin = 30 * time.Second
 // parent (the dolt processes run.sh starts) holds the pipe open, and without a
 // delay Wait blocks until that child exits too. It is a var so a test can
 // shorten it.
-var doltCallWaitDelay time.Duration
+var doltCallWaitDelay = 10 * time.Second
 
 // testDeadline is the part of *testing.T that bounds a dolt CLI call, so a test
 // can drive the bound with a fake deadline.
@@ -94,22 +94,28 @@ type testDeadline interface {
 }
 
 // doltCallContext returns the context for one external dolt CLI call. The call
-// may use whatever is left of the test's own deadline less doltCallMargin (at
-// most half of what is left when little remains, so the test can still report);
-// with no test deadline (go test -timeout 0) nothing bounds it. There is
-// deliberately no fixed per-call budget: under suite load a dolt commit that was
-// merely slow was SIGKILLed at a fixed 30s and its test failed with
-// "signal: killed".
-func doltCallContext(_ testDeadline) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), 30*time.Second)
+// may use whatever is left of the test's own deadline less doltCallMargin; that
+// margin is capped at half of what is left, so a short deadline still gives the
+// call time and the test can still report. With no test deadline
+// (go test -timeout 0) nothing bounds the call. There is deliberately no fixed
+// per-call budget: under suite load a merely slow dolt call outlasts any fixed
+// one and is SIGKILLed, which fails its test with "signal: killed".
+func doltCallContext(t testDeadline) (context.Context, context.CancelFunc) {
+	deadline, ok := t.Deadline()
+	if !ok {
+		return context.WithCancel(context.Background())
+	}
+	held := min(doltCallMargin, max(0, time.Until(deadline))/2)
+	return context.WithDeadline(context.Background(), deadline.Add(-held))
 }
 
 func runDoltForCompactTest(t *testing.T, doltPath, dir string, args ...string) string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := doltCallContext(t)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, doltPath, args...)
 	cmd.Dir = dir
+	cmd.WaitDelay = doltCallWaitDelay
 	// Newer dolt CLIs colorize `dolt log` output even without a TTY; ANSI
 	// escapes would corrupt hash parsing in doltHeadForCompactTest.
 	cmd.Env = append(os.Environ(), "NO_COLOR=1")
@@ -175,6 +181,9 @@ func waitForDoltServerQueryForCompactTest(t *testing.T, doltPath string, port in
 	var lastOut []byte
 	var lastErr error
 	for time.Now().Before(deadline) {
+		// A per-attempt cap, deliberately not the call bound of doltCallContext:
+		// this probe is retried until the readiness window above closes, so an
+		// attempt that outlives it is retried, not fatal.
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		cmd := exec.CommandContext(ctx, doltPath,
 			"--host", "127.0.0.1",
@@ -185,6 +194,7 @@ func waitForDoltServerQueryForCompactTest(t *testing.T, doltPath string, port in
 			"sql", "-q", "SELECT 1",
 		)
 		cmd.Env = append(filteredEnv("DOLT_CLI_PASSWORD"), "DOLT_CLI_PASSWORD=")
+		cmd.WaitDelay = doltCallWaitDelay
 		lastOut, lastErr = cmd.CombinedOutput()
 		cancel()
 		if lastErr == nil {
@@ -218,7 +228,7 @@ func doltServerHeadForCompactTest(t *testing.T, doltPath string, port int) strin
 // test sql-server and returns the CSV rows without the header.
 func doltServerQueryForCompactTest(t *testing.T, doltPath string, port int, query string) []string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := doltCallContext(t)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, doltPath,
 		"--host", "127.0.0.1",
@@ -229,6 +239,7 @@ func doltServerQueryForCompactTest(t *testing.T, doltPath string, port int, quer
 		"sql", "-r", "csv", "-q", query,
 	)
 	cmd.Env = append(filteredEnv("DOLT_CLI_PASSWORD"), "DOLT_CLI_PASSWORD=", "NO_COLOR=1")
+	cmd.WaitDelay = doltCallWaitDelay
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("query server %q: %v\n%s", query, err, out)
@@ -244,9 +255,10 @@ func doltServerQueryForCompactTest(t *testing.T, doltPath string, port int, quer
 // managed-looking Dolt sql-server. extraEnv entries override the defaults.
 func runCompactScriptForRealDoltTest(t *testing.T, doltPath, root, cityPath, dataDir string, port int, args []string, extraEnv ...string) (string, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := doltCallContext(t)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", append([]string{filepath.Join(root, "commands", "compact", "run.sh")}, args...)...)
+	cmd.WaitDelay = doltCallWaitDelay
 	cmd.Env = append(filteredEnv(
 		"PATH",
 		"GC_CITY_PATH",
