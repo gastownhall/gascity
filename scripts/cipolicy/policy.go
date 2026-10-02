@@ -98,7 +98,13 @@ const (
 	// only TestRunBDIsolatesHOMEFromSharedServerConfig under the same
 	// acceptance_bd_contract tag and bd binary the preceding step already
 	// resolved onto PATH. No new job, trigger or permission.
-	expectedCIExecutionHash     = "5a2eedb5eb5a94b471b9a8d4383ebab75b57006b697479ba359abf1e3c27800e"
+	//
+	// Bumped again (ga-rqzwrh): integration-rest-full's job cap moves 15 -> 25
+	// minutes. Its 16 shards split the suite by position, so #6821's three new
+	// tests moved every later one and shard 6 went from 7-9m to 13-15m, canceled
+	// at the old cap on 6 of 11 main pushes. Reviewed delta: that one
+	// timeout-minutes value, no new job, step, trigger or permission.
+	expectedCIExecutionHash     = "04aba8eef324829f44d37608021fa887f49fecd2c012698e795c8fbb6b764db8"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
