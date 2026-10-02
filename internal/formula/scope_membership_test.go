@@ -2,17 +2,22 @@ package formula
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // mergeSteps replaces an overridden step wholesale, so a scope member's
-// gc.scope_ref vanishes from an override unless the child redeclares it. These
-// tests pin the three structural checks that make scope membership survive
-// `extends`: an override may not drop it silently, a sink downstream of a scope
-// may not sit outside it, and every gc.scope_ref must name a scope body.
+// gc.scope_ref vanishes from an override unless the child redeclares it. Three
+// structural checks guard scope membership across `extends`, and Resolve runs
+// one of them: a gc.scope_ref must name a scope body. The override-regression
+// and uncovered-sink checks are pinned by direct tests on constructed steps and
+// are not wired into Resolve, because enforcing them would reject an extender
+// written before its base declared membership (enabling them is ga-prk8k5).
 //
-// Every table case extends scopedBaseFormula, a minimal scoped formula whose
-// only scope body is "body".
+// Every table case that goes through Resolve extends scopedBaseFormula, a
+// minimal scoped formula whose only scope body is "body".
 
 const scopedBaseFormula = `
 formula = "scoped-base"
@@ -39,6 +44,19 @@ metadata = { "gc.kind" = "scope", "gc.scope_name" = "main", "gc.scope_role" = "b
 `
 
 const memberMetadata = `{ "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }`
+
+// templatedMember is a child whose member picks its scope with a variable.
+const templatedMember = `
+[vars.scope]
+description = "Scope the published step joins"
+default = "body"
+
+[[steps]]
+id = "publish"
+title = "Publish"
+needs = ["work"]
+metadata = { "gc.scope_ref" = "{{scope}}", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+`
 
 type scopeMembershipCase struct {
 	name  string
@@ -69,38 +87,25 @@ func requireScopeResolve(t *testing.T, err error, want []string) {
 	}
 }
 
-func TestResolveScopeMembershipAcrossExtends(t *testing.T) {
+// runScopedBaseCases resolves each case's child formula against scopedBaseFormula.
+func runScopedBaseCases(t *testing.T, cases []scopeMembershipCase) {
+	t.Helper()
 	enableV2ForTest(t)
 
-	cases := []scopeMembershipCase{
-		// Override regression: the child's step replaces the parent's wholesale.
-		{
-			name: "override_dropping_inherited_scope_ref_is_rejected",
-			child: `
-[[steps]]
-id = "setup"
-title = "Set up differently"
-`,
-			want: []string{`formula "child"`, `step "setup"`, `drops its gc.scope_ref "body"`},
-		},
-		{
-			name: "override_redeclaring_scope_ref_passes",
-			child: `
-[[steps]]
-id = "setup"
-title = "Set up differently"
-metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "setup", "gc.on_fail" = "abort_scope" }
-`,
-		},
-		{
-			name: "override_with_explicit_empty_scope_ref_opts_out",
-			child: `
-[[steps]]
-id = "setup"
-title = "Set up outside the scope"
-metadata = { "gc.scope_ref" = "" }
-`,
-		},
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeNamedFormula(t, dir, "scoped-base", scopedBaseFormula)
+			writeNamedFormula(t, dir, "child", "\nformula = \"child\"\nextends = [\"scoped-base\"]\n"+tc.child)
+
+			_, err := resolveScopeFixture(t, "child", dir)
+			requireScopeResolve(t, err, tc.want)
+		})
+	}
+}
+
+func TestResolveScopeMembershipAcrossExtends(t *testing.T) {
+	runScopedBaseCases(t, []scopeMembershipCase{
 		{
 			name: "override_repointed_at_a_scope_the_child_declares_passes",
 			child: `
@@ -139,79 +144,22 @@ metadata = { "gc.scope_ref" = "setup", "gc.scope_role" = "member" }
 			want: []string{`formula "child"`, `step "work"`, `is not a scope body`},
 		},
 
-		// Uncovered sink: terminal work downstream of a scope must join it.
+		// Cook substitutes metadata values after Resolve, so a placeholder cannot
+		// be judged here: the formula below cooks today with scope = "body".
 		{
-			name: "new_sink_downstream_of_a_member_without_membership_is_rejected",
-			child: `
+			name:  "templated_scope_ref_is_left_for_cook_to_substitute",
+			child: templatedMember,
+		},
+		{
+			name: "literal_missing_ref_is_still_rejected_beside_a_templated_one",
+			child: templatedMember + `
 [[steps]]
-id = "publish"
-title = "Publish"
+id = "audit"
+title = "Audit"
 needs = ["work"]
+metadata = { "gc.scope_ref" = "missing", "gc.scope_role" = "member" }
 `,
-			want: []string{`formula "child"`, `step "publish"`, `scope "body"`, `is a sink downstream of scope`},
-		},
-		{
-			name: "new_sink_declaring_membership_passes",
-			child: `
-[[steps]]
-id = "publish"
-title = "Publish"
-needs = ["work"]
-metadata = ` + memberMetadata + `
-`,
-		},
-		{
-			name: "new_sink_with_explicit_empty_scope_ref_opts_out",
-			child: `
-[[steps]]
-id = "publish"
-title = "Publish outside the scope"
-needs = ["work"]
-metadata = { "gc.scope_ref" = "" }
-`,
-		},
-		{
-			name: "sink_independent_of_the_scope_passes",
-			child: `
-[[steps]]
-id = "notify"
-title = "Notify"
-`,
-		},
-		{
-			name: "sink_hanging_off_the_scope_body_is_rejected",
-			child: `
-[[steps]]
-id = "after-body"
-title = "After the scope"
-needs = ["body"]
-`,
-			want: []string{`step "after-body"`, `scope "body"`, `is a sink downstream of scope`},
-		},
-		{
-			name: "teardown_after_the_body_passes",
-			child: `
-[[steps]]
-id = "cleanup"
-title = "Tear down"
-needs = ["body"]
-metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown" }
-`,
-		},
-		{
-			name: "unmarked_step_between_members_is_not_a_sink_and_passes",
-			child: `
-[[steps]]
-id = "mid"
-title = "Middle"
-needs = ["work"]
-
-[[steps]]
-id = "publish"
-title = "Publish"
-needs = ["mid"]
-metadata = ` + memberMetadata + `
-`,
+			want: []string{`step "audit"`, `"missing"`},
 		},
 
 		// Reporting: every violation, not only the first.
@@ -220,27 +168,44 @@ metadata = ` + memberMetadata + `
 			child: `
 [[steps]]
 id = "setup"
-title = "Set up differently"
+title = "Set up under nothing"
+metadata = { "gc.scope_ref" = "missing", "gc.scope_role" = "setup" }
 
+[[steps]]
+id = "publish"
+title = "Publish under nothing"
+needs = ["work"]
+metadata = { "gc.scope_ref" = "absent", "gc.scope_role" = "member" }
+`,
+			want: []string{`step "setup"`, `"missing"`, `step "publish"`, `"absent"`},
+		},
+	})
+}
+
+// Resolve runs only the dangling-reference check. A formula the other two
+// checks would reject still resolves, so an extender written before its base
+// declared scope membership keeps cooking. Enabling them is ga-prk8k5, which
+// replaces these cases with rejections.
+func TestResolveScopeMembershipEnforcesOnlyDanglingRefs(t *testing.T) {
+	runScopedBaseCases(t, []scopeMembershipCase{
+		{
+			name: "override_dropping_inherited_scope_ref_is_accepted",
+			child: `
+[[steps]]
+id = "setup"
+title = "Set up differently"
+`,
+		},
+		{
+			name: "unmarked_sink_downstream_of_a_member_is_accepted",
+			child: `
 [[steps]]
 id = "publish"
 title = "Publish"
 needs = ["work"]
 `,
-			want: []string{`step "setup"`, `step "publish"`},
 		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			writeNamedFormula(t, dir, "scoped-base", scopedBaseFormula)
-			writeNamedFormula(t, dir, "child", "\nformula = \"child\"\nextends = [\"scoped-base\"]\n"+tc.child)
-
-			_, err := resolveScopeFixture(t, "child", dir)
-			requireScopeResolve(t, err, tc.want)
-		})
-	}
+	})
 }
 
 // A base whose scope body is missing or named differently is the cross-repo
@@ -273,66 +238,6 @@ title = "Extra"
 	requireErrorContains(t, err, `formula "extender"`)
 	requireErrorContains(t, err, `step "work"`)
 	requireErrorContains(t, err, `declares no scope body named "body"`)
-}
-
-func TestResolveScopeMembershipHoldsThroughAnInheritanceChain(t *testing.T) {
-	enableV2ForTest(t)
-	dir := t.TempDir()
-	writeNamedFormula(t, dir, "scoped-base", scopedBaseFormula)
-	writeNamedFormula(t, dir, "scoped-mid", `
-formula = "scoped-mid"
-extends = ["scoped-base"]
-
-[[steps]]
-id = "report"
-title = "Report"
-needs = ["work"]
-metadata = `+memberMetadata+`
-`)
-	writeNamedFormula(t, dir, "scoped-leaf", `
-formula = "scoped-leaf"
-extends = ["scoped-mid"]
-
-[[steps]]
-id = "work"
-title = "Work differently"
-`)
-
-	// The middle formula only added a covered member: fine on its own.
-	if _, err := resolveScopeFixture(t, "scoped-mid", dir); err != nil {
-		t.Fatalf("scoped-mid Resolve failed, want success: %v", err)
-	}
-	// The leaf overrides a step the middle formula merely inherited.
-	_, err := resolveScopeFixture(t, "scoped-leaf", dir)
-	requireErrorContains(t, err, `formula "scoped-leaf"`)
-	requireErrorContains(t, err, `step "work"`)
-	requireErrorContains(t, err, `drops its gc.scope_ref "body"`)
-}
-
-func TestResolveScopeMembershipSeesEveryParent(t *testing.T) {
-	enableV2ForTest(t)
-	dir := t.TempDir()
-	writeNamedFormula(t, dir, "plain-parent", `
-formula = "plain-parent"
-
-[[steps]]
-id = "plain"
-title = "Plain"
-`)
-	writeNamedFormula(t, dir, "scoped-base", scopedBaseFormula)
-	writeNamedFormula(t, dir, "two-parents", `
-formula = "two-parents"
-extends = ["plain-parent", "scoped-base"]
-
-[[steps]]
-id = "work"
-title = "Work differently"
-needs = ["setup"]
-`)
-
-	_, err := resolveScopeFixture(t, "two-parents", dir)
-	requireErrorContains(t, err, `formula "two-parents"`)
-	requireErrorContains(t, err, `step "work"`)
 }
 
 // A formula that declares no scope must resolve exactly as it did before the
@@ -411,26 +316,6 @@ metadata = ` + memberMetadata + `
 `,
 		},
 		{
-			name: "extension_adding_an_unmarked_terminal_step_is_rejected",
-			child: `
-[[steps]]
-id = "announce"
-title = "Announce"
-needs = ["submit"]
-`,
-			want: []string{`step "announce"`, `scope "body"`, `is a sink downstream of scope`},
-		},
-		{
-			name: "extension_overriding_a_member_without_membership_is_rejected",
-			child: `
-[[steps]]
-id = "implement"
-title = "Implement differently"
-needs = ["preflight-tests"]
-`,
-			want: []string{`step "implement"`, `drops its gc.scope_ref "body"`},
-		},
-		{
 			name: "extension_overriding_a_member_and_redeclaring_it_passes",
 			child: `
 [[steps]]
@@ -449,6 +334,222 @@ metadata = ` + memberMetadata + `
 
 			_, err := resolveScopeFixture(t, "scoped-work-child", core, dir)
 			requireScopeResolve(t, err, tc.want)
+		})
+	}
+}
+
+// The checks below take constructed steps rather than loaded formulas, so each
+// stays pinned whether or not Resolve calls it.
+
+func scopeStep(id string, metadata map[string]string, needs ...string) *Step {
+	return &Step{ID: id, Title: id, Metadata: metadata, Needs: needs}
+}
+
+// memberOf is the metadata of a step that joins the named scope.
+func memberOf(scope string) map[string]string {
+	return map[string]string{
+		beadmeta.ScopeRefMetadataKey:  scope,
+		beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleMember,
+	}
+}
+
+// scopedParent mirrors scopedBaseFormula: setup and work join the scope body.
+func scopedParent() []*Step {
+	return []*Step{
+		scopeStep("setup", memberOf("body")),
+		scopeStep("work", memberOf("body"), "setup"),
+		scopeStep("body", map[string]string{
+			beadmeta.KindMetadataKey:      beadmeta.KindScope,
+			beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleBody,
+		}, "setup", "work"),
+	}
+}
+
+// requireScopeProblems wants exactly len(want) problems, each containing one of
+// the want substrings.
+func requireScopeProblems(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("got %d problems, want %d:\n  - %s", len(got), len(want), strings.Join(got, "\n  - "))
+	}
+	for _, w := range want {
+		found := false
+		for _, g := range got {
+			if strings.Contains(g, w) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("no problem contains %q; got:\n  - %s", w, strings.Join(got, "\n  - "))
+		}
+	}
+}
+
+func TestDroppedScopeRefs(t *testing.T) {
+	cases := []struct {
+		name   string
+		parent []*Step // scopedParent() when nil
+		child  []*Step
+		want   []string
+	}{
+		{
+			name:  "override_dropping_inherited_scope_ref_is_reported",
+			child: []*Step{scopeStep("setup", nil)},
+			want:  []string{`step "setup" overrides an inherited scope member and drops its gc.scope_ref "body"`},
+		},
+		{
+			name:  "override_redeclaring_scope_ref_passes",
+			child: []*Step{scopeStep("setup", memberOf("body"))},
+		},
+		{
+			name:  "override_repointed_at_another_scope_passes",
+			child: []*Step{scopeStep("setup", memberOf("other"))},
+		},
+		{
+			name:  "override_with_explicit_empty_scope_ref_opts_out",
+			child: []*Step{scopeStep("setup", map[string]string{beadmeta.ScopeRefMetadataKey: ""})},
+		},
+		{
+			name:  "untouched_inherited_member_passes",
+			child: []*Step{scopeStep("extra", nil)},
+		},
+		{
+			name:   "override_of_a_step_that_was_never_a_member_passes",
+			parent: append(scopedParent(), scopeStep("notify", nil)),
+			child:  []*Step{scopeStep("notify", nil)},
+		},
+		{
+			name:   "override_of_a_step_that_opted_out_passes",
+			parent: append(scopedParent(), scopeStep("audit", map[string]string{beadmeta.ScopeRefMetadataKey: ""})),
+			child:  []*Step{scopeStep("audit", nil)},
+		},
+		{
+			name:  "every_dropped_member_is_reported",
+			child: []*Step{scopeStep("setup", nil), scopeStep("work", nil, "setup")},
+			want:  []string{`step "setup" overrides`, `step "work" overrides`},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := tc.parent
+			if parent == nil {
+				parent = scopedParent()
+			}
+			got := droppedScopeRefs(mergeSteps(parent, tc.child), inheritedScopeRefs(parent))
+			requireScopeProblems(t, got, tc.want)
+		})
+	}
+}
+
+func TestDanglingScopeRefs(t *testing.T) {
+	cases := []struct {
+		name string
+		ref  string
+		want []string
+	}{
+		{name: "ref_naming_the_scope_body_passes", ref: "body"},
+		{
+			name: "ref_naming_no_scope_body_is_reported",
+			ref:  "missing",
+			want: []string{`step "publish" has gc.scope_ref "missing"`},
+		},
+		{name: "empty_ref_is_the_explicit_opt_out", ref: ""},
+		{name: "placeholder_ref_is_left_for_cook_to_substitute", ref: "{{scope}}"},
+		{name: "placeholder_inside_a_longer_ref_is_left_for_cook_to_substitute", ref: "scope-{{suffix}}"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			steps := append(scopedParent(), scopeStep("publish", memberOf(tc.ref), "work"))
+			requireScopeProblems(t, danglingScopeRefs(steps), tc.want)
+		})
+	}
+}
+
+func TestUncoveredSinks(t *testing.T) {
+	const publishEscapesBody = `step "publish" is a sink downstream of scope "body"`
+
+	cases := []struct {
+		name  string
+		extra []*Step // appended to scopedParent()
+		want  []string
+	}{
+		{name: "scoped_formula_alone_has_only_its_scope_body_as_a_sink"},
+		{
+			name:  "sink_downstream_of_a_member_is_reported",
+			extra: []*Step{scopeStep("publish", nil, "work")},
+			want:  []string{publishEscapesBody},
+		},
+		{
+			name:  "sink_hanging_off_the_body_is_reported",
+			extra: []*Step{scopeStep("after-body", nil, "body")},
+			want:  []string{`step "after-body" is a sink downstream of scope "body"`},
+		},
+		{
+			name: "sink_several_hops_below_a_member_is_reported",
+			extra: []*Step{
+				scopeStep("first", nil, "work"),
+				scopeStep("second", nil, "first"),
+				scopeStep("publish", nil, "second"),
+			},
+			want: []string{publishEscapesBody},
+		},
+		{
+			name: "sink_several_hops_below_the_body_is_reported",
+			extra: []*Step{
+				scopeStep("first", nil, "body"),
+				scopeStep("publish", nil, "first"),
+			},
+			want: []string{publishEscapesBody},
+		},
+		{
+			name:  "sink_depending_through_depends_on_is_reported",
+			extra: []*Step{{ID: "publish", Title: "publish", DependsOn: []string{"work"}}},
+			want:  []string{publishEscapesBody},
+		},
+		{
+			name:  "sink_declaring_membership_passes",
+			extra: []*Step{scopeStep("publish", memberOf("body"), "work")},
+		},
+		{
+			name:  "sink_with_explicit_empty_scope_ref_opts_out",
+			extra: []*Step{scopeStep("publish", map[string]string{beadmeta.ScopeRefMetadataKey: ""}, "work")},
+		},
+		{
+			name:  "sink_independent_of_the_scope_passes",
+			extra: []*Step{scopeStep("notify", nil)},
+		},
+		{
+			name: "teardown_after_the_body_passes",
+			extra: []*Step{scopeStep("cleanup", map[string]string{
+				beadmeta.KindMetadataKey:      beadmeta.KindCleanup,
+				beadmeta.ScopeRefMetadataKey:  "body",
+				beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleTeardown,
+			}, "body")},
+		},
+		{
+			name: "unmarked_step_between_members_is_not_a_sink_and_passes",
+			extra: []*Step{
+				scopeStep("mid", nil, "work"),
+				scopeStep("publish", memberOf("body"), "mid"),
+			},
+		},
+		{
+			name: "every_uncovered_sink_is_reported",
+			extra: []*Step{
+				scopeStep("publish", nil, "work"),
+				scopeStep("after-body", nil, "body"),
+			},
+			want: []string{publishEscapesBody, `step "after-body" is a sink downstream of scope "body"`},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			top := append(scopedParent(), tc.extra...)
+			requireScopeProblems(t, uncoveredSinks(top, collectGraphSteps(top)), tc.want)
 		})
 	}
 }
