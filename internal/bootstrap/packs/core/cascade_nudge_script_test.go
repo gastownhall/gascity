@@ -115,9 +115,7 @@ func (f *cascadeFixture) wantNudges(n int) []string {
 }
 
 // TestCascadeNudgeIncludesInProgressDependent pins that a claimed dependent
-// is nudged. Owners often claim a bead before a blocker is added to it, and
-// when that blocker closes the in_progress owner is exactly who needs to
-// hear about it.
+// is nudged.
 func TestCascadeNudgeIncludesInProgressDependent(t *testing.T) {
 	f := newCascadeFixture(t)
 	f.write("up-gc-b1.json", `[{"id":"gc-d1","status":"in_progress","assignee":"worker"}]`)
@@ -187,4 +185,51 @@ func TestCascadeNudgeDeferredDependentStillNudged(t *testing.T) {
 	if !strings.HasPrefix(got[0], "session nudge worker ") {
 		t.Errorf("nudge = %q, want it addressed to worker", got[0])
 	}
+}
+
+// TestCascadeNudgeOtherBlockerClosedAsBlockedWaits pins that a blocker closed
+// with gc.work_outcome=blocked still holds its dependent, as
+// beads.DependencySatisfied decides.
+func TestCascadeNudgeOtherBlockerClosedAsBlockedWaits(t *testing.T) {
+	f := newCascadeFixture(t)
+	f.write("up-gc-b1.json", `[{"id":"gc-d1","status":"open","assignee":"worker"}]`)
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","status":"closed"},`+
+		`{"id":"gc-b2","status":"closed","metadata":{"gc.work_outcome":"blocked"}}]`)
+	f.closed("gc-b1")
+
+	f.run()
+
+	f.wantNudges(0)
+}
+
+// TestCascadeNudgeBlockerClosedAsBlockedNudgesNoOne pins that a blocker's own
+// close with gc.work_outcome=blocked does not nudge its dependent.
+func TestCascadeNudgeBlockerClosedAsBlockedNudgesNoOne(t *testing.T) {
+	f := newCascadeFixture(t)
+	f.write("up-gc-b1.json", `[{"id":"gc-d1","status":"open","assignee":"worker"}]`)
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","status":"closed","metadata":{"gc.work_outcome":"blocked"}}]`)
+	f.closed("gc-b1")
+
+	f.run()
+
+	f.wantNudges(0)
+}
+
+// TestCascadeNudgeBlockerClosedMidRunNudgesOnce pins that a blocker which
+// closes after a run read its events, but before that run listed the
+// dependent's blockers, does not nudge the dependent a second time when a
+// later run sees its close.
+func TestCascadeNudgeBlockerClosedMidRunNudgesOnce(t *testing.T) {
+	f := newCascadeFixture(t)
+	dependent := `[{"id":"gc-d1","status":"open","assignee":"worker"}]`
+	f.write("up-gc-b1.json", dependent)
+	f.write("up-gc-b2.json", dependent)
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","status":"closed"},{"id":"gc-b2","status":"closed"}]`)
+
+	f.closed("gc-b1")
+	f.run()
+	f.closed("gc-b1", "gc-b2")
+	f.run()
+
+	f.wantNudges(1)
 }

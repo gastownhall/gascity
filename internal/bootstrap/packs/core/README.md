@@ -94,8 +94,10 @@ dependent's own blockers:
 gc bd dep list <dep> --direction=down --type=blocks --json
 ```
 
-If any other blocker is still open, it nudges no one yet. Once the last
-blocker closes, it nudges the assignee:
+A blocker counts as satisfied when it is closed and its `gc.work_outcome` is
+not `blocked`, the rule `Ready()` applies. If any blocker, the closed one
+included, is unsatisfied, it nudges no one yet. Once every blocker is
+satisfied, it nudges the assignee:
 
 ```
 gc session nudge <assignee> "blocker <blocker> closed — your dependent <dep> has no open blockers now"
@@ -107,9 +109,10 @@ blocker chains within a city resolve correctly. Cross-city cascade is out of
 scope.
 
 **Idempotence.** A `(blocker, dependent)` pair is nudged at most once. A pair
-that waits on another open blocker is recorded too; the last blocker's close is
-a different pair, so it still nudges once. A dependent whose blockers close in
-the same window is nudged once.
+that waits on an unsatisfied blocker is recorded too; the last blocker's close
+is a different pair, so it still nudges once. A nudge records the pair of every
+blocker of that dependent, so a dependent whose blockers close together
+is nudged once.
 
 **Dedup state.**
 `$GC_PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json` — a JSON object
