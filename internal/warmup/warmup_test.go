@@ -8,6 +8,7 @@ import (
 	"io"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -52,6 +53,31 @@ func (c stubWarmupCheck) CanFix() bool { return false }
 func (c stubWarmupCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 func (c stubWarmupCheck) WarmupEligible() bool { return c.warmup }
+
+// rendezvousWarmupCheck holds Run open until every check sharing its
+// rendezvous has entered Run, so a set of them can finish only when the runner
+// has all of them in flight at once. A runner that ran them one at a time, or
+// fewer at a time than the set, leaves the early ones blocked past their
+// per-check deadline and reports them as timeouts.
+type rendezvousWarmupCheck struct {
+	name     string
+	arrived  *sync.WaitGroup
+	released <-chan struct{}
+}
+
+func (c rendezvousWarmupCheck) Name() string { return c.name }
+
+func (c rendezvousWarmupCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+	c.arrived.Done()
+	<-c.released
+	return &doctor.CheckResult{Name: c.name, Status: doctor.StatusOK, Message: "ok"}
+}
+
+func (c rendezvousWarmupCheck) CanFix() bool { return false }
+
+func (c rendezvousWarmupCheck) Fix(_ *doctor.CheckContext) error { return nil }
+
+func (c rendezvousWarmupCheck) WarmupEligible() bool { return true }
 
 type recordingWarmupMailer struct {
 	sent    []mail.Message
@@ -143,19 +169,31 @@ func runWarmupTest(t *testing.T, checks []doctor.Check, opts WarmupOpts) (*Warmu
 	return report, mailer, stderr.String()
 }
 
+// The checks prove they ran together by meeting at a rendezvous, not by a
+// wall-clock bound: a loaded host can stall the whole process past any bound
+// while the checks still overlap.
 func TestRunWarmupChecks_ParallelExecution(t *testing.T) {
-	checks := []doctor.Check{
-		stubWarmupCheck{name: "a", warmup: true, runDelay: 200 * time.Millisecond},
-		stubWarmupCheck{name: "b", warmup: true, runDelay: 200 * time.Millisecond},
-		stubWarmupCheck{name: "c", warmup: true, runDelay: 200 * time.Millisecond},
+	names := []string{"a", "b", "c"}
+	var arrived sync.WaitGroup
+	arrived.Add(len(names))
+	released := make(chan struct{})
+	var release sync.Once
+	go func() {
+		arrived.Wait()
+		release.Do(func() { close(released) })
+	}()
+	// A runner that never has every check in flight leaves the waiter above
+	// blocked; free any check still parked at the rendezvous when the test ends.
+	t.Cleanup(func() { release.Do(func() { close(released) }) })
+	var checks []doctor.Check
+	for _, name := range names {
+		checks = append(checks, rendezvousWarmupCheck{name: name, arrived: &arrived, released: released})
 	}
 
-	start := time.Now()
 	report, mailer, stderr := runWarmupTest(t, checks, WarmupOpts{})
-	elapsed := time.Since(start)
 
-	if elapsed >= 400*time.Millisecond {
-		t.Fatalf("RunWarmupChecks elapsed %s, want <400ms", elapsed)
+	if len(report.Failures) != 0 {
+		t.Fatalf("failures = %+v, want none: a check timed out at the rendezvous, so the runner did not run all %d checks at once", report.Failures, len(names))
 	}
 	if report.HighestSeverity != doctor.StatusOK {
 		t.Fatalf("HighestSeverity = %v, want StatusOK", report.HighestSeverity)
