@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -193,6 +194,128 @@ func TestMergeControlReadyGroupsSkipsInstantiatingWithoutMarkingSeen(t *testing.
 	if !stringSlicesEqual(beadIDs(got), wantIDs) {
 		t.Fatalf("mergeControlReadyGroups ids = %#v, want %#v", beadIDs(got), wantIDs)
 	}
+}
+
+// TestMergeControlReadyGroupsSkipsFailedPartialMolecules is the ga-033u0e
+// regression: when instantiation aborts partway it marks every bead it already
+// wrote molecule_failed AND clears their gc.instantiating fence, so the failure
+// path used to promote correctly-hidden steps into the dispatch queue. Those
+// steps cannot make progress — each one fails on missing root metadata and
+// mails an escalation — so a partial pour became an escalation generator.
+func TestMergeControlReadyGroupsSkipsFailedPartialMolecules(t *testing.T) {
+	assigned := []beads.Bead{
+		// The exact end state markFailed leaves behind: fence cleared, failed
+		// mark set. Hiding must key on the failed mark, not the empty fence.
+		{ID: "ga-partial-step", Metadata: map[string]string{
+			beadmeta.MoleculeFailedMetadataKey: "true",
+			beadmeta.InstantiatingMetadataKey:  "",
+		}},
+		{ID: "ga-healthy", Metadata: map[string]string{"gc.kind": "run"}},
+	}
+	routed := []beads.Bead{
+		{ID: "ga-partial-routed", Metadata: map[string]string{beadmeta.MoleculeFailedMetadataKey: "true"}},
+		{ID: "ga-healthy-routed", Metadata: map[string]string{"gc.kind": "scope-check"}},
+	}
+
+	got := mergeControlReadyGroups(assigned, routed)
+	wantIDs := []string{"ga-healthy", "ga-healthy-routed"}
+	if !stringSlicesEqual(beadIDs(got), wantIDs) {
+		t.Fatalf("mergeControlReadyGroups ids = %#v, want %#v", beadIDs(got), wantIDs)
+	}
+}
+
+// TestControlReadyShellReduceDropsFailedPartialMolecules pins the two dispatch
+// surfaces together by EXECUTING the shell one. The readiness scan exists
+// twice — the Go merge above and the jq reduce that dispatch_runtime.go ships
+// to the shell — and a filter that lands on only one leaves the defect live on
+// whichever path the city takes. Naming the metadata keys in the query is not
+// the property: a program can mention a key and still admit the row. So the
+// reduce is sliced out of the generated query exactly as it ships, fed the
+// same groups TestMergeControlReadyGroupsSkipsFailedPartialMolecules uses, and
+// required to return the ids the Go merge returns.
+func TestControlReadyShellReduceDropsFailedPartialMolecules(t *testing.T) {
+	jqPath, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skip("jq not installed; the control-ready shell query merges with jq")
+	}
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
+	program := controlReadyShellReduceProgram(t, query)
+
+	assigned := []beads.Bead{
+		// The exact end state markFailed leaves behind: fence cleared, failed
+		// mark set. Dropping must key on the failed mark, not the empty fence.
+		{ID: "ga-partial-step", Metadata: map[string]string{
+			beadmeta.MoleculeFailedMetadataKey: "true",
+			beadmeta.InstantiatingMetadataKey:  "",
+		}},
+		{ID: "ga-healthy", Metadata: map[string]string{"gc.kind": "run"}},
+		{ID: "ga-instantiating", Metadata: map[string]string{beadmeta.InstantiatingMetadataKey: "true"}},
+	}
+	routed := []beads.Bead{
+		{ID: "ga-partial-routed", Metadata: map[string]string{beadmeta.MoleculeFailedMetadataKey: "true"}},
+		{ID: "ga-healthy-routed", Metadata: map[string]string{"gc.kind": "scope-check"}},
+		// Re-surfaced id: the first occurrence wins on both surfaces.
+		{ID: "ga-healthy", Metadata: map[string]string{"gc.kind": "duplicate"}},
+	}
+
+	// The shell appends each non-empty tier's JSON array as its own line to a
+	// temp file and slurps it (`jq -s "$filter" "$tmp"`); hand the reduce a
+	// file of the same shape through the package's existing external-command
+	// seam rather than a second os/exec call site.
+	var tiers bytes.Buffer
+	for _, group := range [][]beads.Bead{assigned, routed} {
+		encoded, err := json.Marshal(group)
+		if err != nil {
+			t.Fatalf("marshal fixture group: %v", err)
+		}
+		tiers.Write(encoded)
+		tiers.WriteByte('\n')
+	}
+	dir := t.TempDir()
+	fixture := filepath.Join(dir, "ready-tiers.json")
+	if err := os.WriteFile(fixture, tiers.Bytes(), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	out := runExternalOutput(t, dir, jqPath, "-s", program, fixture)
+	var shellMerged []beads.Bead
+	if err := json.Unmarshal(out, &shellMerged); err != nil {
+		t.Fatalf("decode jq output %q: %v", out, err)
+	}
+
+	got := beadIDs(shellMerged)
+	want := beadIDs(mergeControlReadyGroups(assigned, routed))
+	if !stringSlicesEqual(got, want) {
+		t.Fatalf("the shipped jq reduce admits %#v, the Go merge admits %#v — the two dispatch surfaces have drifted", got, want)
+	}
+	for _, id := range got {
+		if strings.HasPrefix(id, "ga-partial") {
+			t.Fatalf("shell reduce served a step of a partially-instantiated workflow: %#v", got)
+		}
+	}
+}
+
+// controlReadyShellReduceProgram slices the jq program out of the generated
+// query as it ships — between `jq -s "` and `" "$tmp"` — and undoes the
+// double-quote escaping workflowServeControlReadyQueryForBeads applies to it,
+// so the test runs the shipped bytes rather than a copy that could drift from
+// them.
+func controlReadyShellReduceProgram(t *testing.T, query string) string {
+	t.Helper()
+	const openMarker, closeMarker = `jq -s "`, `" "$tmp"`
+	start := strings.Index(query, openMarker)
+	if start < 0 {
+		t.Fatalf("generated control-ready query has no jq -s merge:\n%s", query)
+	}
+	rest := query[start+len(openMarker):]
+	end := strings.Index(rest, closeMarker)
+	if end < 0 {
+		t.Fatalf("generated control-ready query's jq program is unterminated:\n%s", query)
+	}
+	program := rest[:end]
+	program = strings.ReplaceAll(program, `\$`, `$`)
+	program = strings.ReplaceAll(program, `\"`, `"`)
+	program = strings.ReplaceAll(program, `\\`, `\`)
+	return program
 }
 
 // TestEvaluateControlReadyMatchesShellQueryPriority ports

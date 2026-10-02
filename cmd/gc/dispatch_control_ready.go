@@ -241,6 +241,22 @@ func filterReadyByRoute(ready []beads.Bead, metadataKey, route string) []beads.B
 // specific quirk: an instantiating-tagged occurrence of an ID is skipped
 // WITHOUT being marked seen, so a later non-instantiating occurrence of the
 // same ID still gets admitted.
+//
+// It also drops the steps of a partially-instantiated workflow
+// (molecule_failed=true; the rule is beadmeta.MoleculeFailed, shared with the
+// hook filter and the demand side). Instantiation marks every bead it already
+// wrote when it aborts partway, and that mark CLEARS the gc.instantiating
+// fence -- so without this filter the failure path took steps that were
+// correctly hidden mid-pour and made them visible, routed, and claimable. A
+// step from a broken pour cannot make progress: it fails on missing root
+// metadata, closes fail, and mails an escalation, so dispatching it produces
+// one escalation per step and zero work (ga-033u0e). Recovery never needs them
+// ready either -- the next cook of the same graph.v2 root key closes the failed
+// subtree outright rather than re-dispatching it.
+//
+// Both dispatch surfaces must agree: the jq fallback in dispatch_runtime.go
+// encodes this same pair of conditions. A filter that lands on only one of them
+// leaves the defect live on whichever path the city happens to take.
 func mergeControlReadyGroups(groups ...[]beads.Bead) []beads.Bead {
 	seen := make(map[string]struct{})
 	var merged []beads.Bead
@@ -250,6 +266,9 @@ func mergeControlReadyGroups(groups ...[]beads.Bead) []beads.Bead {
 				continue
 			}
 			if strings.TrimSpace(b.Metadata[beadmeta.InstantiatingMetadataKey]) != "" {
+				continue
+			}
+			if beadmeta.MoleculeFailed(b.Metadata[beadmeta.MoleculeFailedMetadataKey]) {
 				continue
 			}
 			seen[b.ID] = struct{}{}

@@ -76,3 +76,24 @@ func TestPinnedValues(t *testing.T) {
 		}
 	}
 }
+
+// TestMoleculeFailedIsExactEquality pins the one rule behind every dispatch
+// reader of MoleculeFailedMetadataKey: exact equality with the value
+// markFailed writes. Trimming or case-folding here would let the Go surfaces
+// hide a row the jq twins (the pool-demand count-form, the control-ready scan)
+// still count or serve — the drift the shared helper exists to close.
+func TestMoleculeFailedIsExactEquality(t *testing.T) {
+	cases := map[string]bool{
+		"true":  true,
+		"":      false,
+		"false": false,
+		"TRUE":  false,
+		" true": false,
+		"true ": false,
+	}
+	for value, want := range cases {
+		if got := MoleculeFailed(value); got != want {
+			t.Errorf("MoleculeFailed(%q) = %v, want %v", value, got, want)
+		}
+	}
+}

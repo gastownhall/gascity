@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
@@ -1065,6 +1066,65 @@ metadata = { "gc.routed_to" = "pool/worker", "gc.execution_routed_to" = "pool/wo
 	}
 	if activated.Metadata["gc.execution_routed_to"] != "pool/worker" {
 		t.Fatalf("activated child gc.execution_routed_to = %q, want pool/worker", activated.Metadata["gc.execution_routed_to"])
+	}
+}
+
+// TestConvergenceStore_FindByIdempotencyKeySkipsFailedPartialWisp pins the
+// idempotency lookup to live wisps. A pour that aborts partway leaves its root
+// marked molecule_failed with the iteration key already stamped, and every
+// adopt path — the handler's pour-failure fallback, the reconciler's
+// active_wisp repair, the manual-resume retry — asks this lookup whether a
+// wisp for the key exists. Adopting the corpse re-activates every child of a
+// workflow that cannot progress, and those steps are hidden from every hook,
+// so the loop would wait on a wisp nobody can close (ga-033u0e). Not found is
+// the answer that sends the handler to waiting_manual and the reconciler to a
+// fresh pour; a live root under the same key — that fresh pour — is still
+// found, on both the parent-scoped path and the full-scan fallback.
+func TestConvergenceStore_FindByIdempotencyKeySkipsFailedPartialWisp(t *testing.T) {
+	store := beads.NewMemStore()
+	adapter := newConvergenceStoreAdapter(store, nil, false)
+	parent, err := store.Create(beads.Bead{Title: "root", Type: "convergence"})
+	if err != nil {
+		t.Fatalf("creating parent: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		key  string
+	}{
+		{name: "parent-scoped lookup", key: convergence.IdempotencyKey(parent.ID, 2)},
+		{name: "full-scan fallback", key: "custom:" + parent.ID + ":2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			failed, err := store.Create(beads.Bead{
+				Title: "partial wisp", Type: "task", ParentID: parent.ID,
+				Metadata: map[string]string{
+					"idempotency_key":                  tc.key,
+					beadmeta.MoleculeFailedMetadataKey: "true",
+				},
+			})
+			if err != nil {
+				t.Fatalf("creating failed wisp: %v", err)
+			}
+			if id, found, err := adapter.FindByIdempotencyKey(tc.key); err != nil || found {
+				t.Fatalf("FindByIdempotencyKey(%q) = (%q, %v, %v), want not found: root %s is marked molecule_failed and is not the wisp for its key", tc.key, id, found, err, failed.ID)
+			}
+
+			live, err := store.Create(beads.Bead{
+				Title: "retried wisp", Type: "task", ParentID: parent.ID,
+				Metadata: map[string]string{"idempotency_key": tc.key},
+			})
+			if err != nil {
+				t.Fatalf("creating live wisp: %v", err)
+			}
+			id, found, err := adapter.FindByIdempotencyKey(tc.key)
+			if err != nil {
+				t.Fatalf("FindByIdempotencyKey(%q): %v", tc.key, err)
+			}
+			if !found || id != live.ID {
+				t.Fatalf("FindByIdempotencyKey(%q) = (%q, %v), want the live root %s", tc.key, id, found, live.ID)
+			}
+		})
 	}
 }
 
