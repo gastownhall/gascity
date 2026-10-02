@@ -39,7 +39,7 @@ func newAnalyzeReliabilityCmd(stdout, stderr io.Writer) *cobra.Command {
 the tracked session-lifecycle events:
 
   session.crashed
-  session.quarantined (reserved; current production paths do not emit it)
+  session.quarantined
   session.idle_killed
   session.draining
 

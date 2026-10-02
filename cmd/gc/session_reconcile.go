@@ -722,10 +722,22 @@ func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk cl
 			info = info.ApplyPatch(reset)
 		}
 	}
-	accrual := sessionpkg.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, clk.Now().Add(defaultQuarantineDuration))
+	now := clk.Now()
+	accrual := sessionpkg.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, now.Add(defaultQuarantineDuration))
 	if accrual.Quarantined {
+		// A failure that lands while a quarantine is still active only extends
+		// it; announce the quarantine once, on entry.
+		entering := !metadataTimeInFuture(info.QuarantinedUntil, now)
 		if next, err := sessFront.ApplyPatchInfo(info, accrual.Patch); err == nil {
 			telemetry.RecordAgentQuarantine(context.Background(), agentIdentity)
+			if entering && rec != nil {
+				rec.Record(events.Event{
+					Type:      events.SessionQuarantined,
+					Actor:     "gc",
+					Subject:   agentIdentity,
+					SessionID: info.ID,
+				})
+			}
 			info = next
 		}
 	} else {
