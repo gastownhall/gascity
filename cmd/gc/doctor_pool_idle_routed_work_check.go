@@ -153,30 +153,13 @@ func (c *poolIdleRoutedWorkCheck) collectStoreFindings(store beads.Store, label 
 			continue
 		}
 
-		// Live so bd's raw --status=open filter drops blocked/deferred rows
-		// before mapBdStatus collapses them into "open" and the check reports
-		// work the instance is correct to leave alone (same tradeoff as
-		// listOpenForControllerDemandLive). FederatedReadTier because a
-		// relocated class leg answers at exactly the tier asked.
-		items, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
-			Status:   "open",
-			TierMode: beads.FederatedReadTier,
-			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: template},
-		})
+		beadIDs, err := unclaimedRoutedBeadIDs(store, template)
 		if err != nil {
-			return findings, fmt.Errorf("listing routed work for %s: %w", template, err)
-		}
-		var beadIDs []string
-		for _, b := range items {
-			if strings.TrimSpace(b.Assignee) != "" || b.Status != "open" {
-				continue
-			}
-			beadIDs = append(beadIDs, b.ID)
+			return findings, err
 		}
 		if len(beadIDs) == 0 {
 			continue
 		}
-		sort.Strings(beadIDs)
 		sort.Strings(idle)
 		findings = append(findings, poolIdleRoutedWorkFinding{
 			scope:         label,
@@ -186,4 +169,33 @@ func (c *poolIdleRoutedWorkCheck) collectStoreFindings(store beads.Store, label 
 		})
 	}
 	return findings, nil
+}
+
+// unclaimedRoutedBeadIDs returns the sorted IDs of the open, unassigned beads
+// routed to template through gc.routed_to: the work a live instance of that
+// template could pick up right now. It is the one definition of "unclaimed
+// routed work" for every doctor check that reports it.
+func unclaimedRoutedBeadIDs(store beads.Store, template string) ([]string, error) {
+	// Live so bd's raw --status=open filter drops blocked/deferred rows
+	// before mapBdStatus collapses them into "open" and the check reports
+	// work the instance is correct to leave alone (same tradeoff as
+	// listOpenForControllerDemandLive). FederatedReadTier because a
+	// relocated class leg answers at exactly the tier asked.
+	items, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+		Status:   "open",
+		TierMode: beads.FederatedReadTier,
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: template},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing routed work for %s: %w", template, err)
+	}
+	var ids []string
+	for _, b := range items {
+		if strings.TrimSpace(b.Assignee) != "" || b.Status != "open" {
+			continue
+		}
+		ids = append(ids, b.ID)
+	}
+	sort.Strings(ids)
+	return ids, nil
 }
