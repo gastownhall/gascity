@@ -176,6 +176,10 @@ func excludeMailMessageBeads(items []beads.Bead) []beads.Bead {
 // ReleaseIfCurrent swaps status/assignee itself, so when that tier applies the
 // metadata clear rides a second write — which is also why it does not always
 // apply (see singleWriteRequired below).
+//
+// When conditional_writes resolves a writer, all release fields are applied in
+// one revision-guarded update instead. A stale snapshot never releases a newer
+// incarnation, even when it reuses the same assignee.
 func (w workAssignment) ReleaseWorkBead(item beads.Bead, runTargetFallback string) error {
 	store := w.unwrapped()
 	if store == nil {
@@ -187,6 +191,16 @@ func (w workAssignment) ReleaseWorkBead(item beads.Bead, runTargetFallback strin
 		strings.TrimSpace(item.Metadata[beadmeta.RoutedToMetadataKey]) == ""
 	if stampFallbackRoute {
 		metadata[beadmeta.RunTargetMetadataKey] = runTargetFallback
+	}
+	update := beads.UpdateOpts{
+		Assignee: stringPtr(""),
+		Metadata: metadata,
+	}
+	if item.Status == "in_progress" {
+		update.Status = stringPtr("open")
+	}
+	if _, handled, err := releaseWorkAssignmentIfRevisionMatches(store, item, update); handled {
+		return err
 	}
 	// Tier 1 clears status/assignee atomically but leaves the metadata to a second
 	// write, so it is usable only when that second write is not routing-
@@ -253,16 +267,36 @@ func (w workAssignment) ReleaseWorkBead(item beads.Bead, runTargetFallback strin
 		log.Printf("ReleaseWorkBead: skipping release for %s: assignment changed between snapshot and release write", item.ID)
 		return nil
 	}
-	empty := ""
-	update := beads.UpdateOpts{
-		Assignee: &empty,
-		Metadata: metadata,
-	}
-	if item.Status == "in_progress" {
-		open := "open"
-		update.Status = &open
-	}
 	return store.Update(item.ID, update)
+}
+
+// releaseWorkAssignmentIfRevisionMatches keeps assignment and affinity cleanup
+// in one CAS. A conflict belongs to a later tick's fresh liveness decision, not
+// an immediate retry with a newer revision and the same stale release decision.
+// Return the conflict: the assignee may be unchanged, so callers must not count
+// it as a completed release when deciding whether to close the owning session.
+func releaseWorkAssignmentIfRevisionMatches(store beads.Store, item beads.Bead, update beads.UpdateOpts) (released, handled bool, err error) {
+	writer, diagnostic, err := beads.ResolveConditionalWriter(store)
+	if err != nil {
+		return false, true, fmt.Errorf("conditional release of %q: %w", item.ID, err)
+	}
+	if diagnostic != nil {
+		log.Printf("conditional release of %q: %s: %s", item.ID, diagnostic.PreflightGate, diagnostic.PreflightReason)
+	}
+	if writer == nil {
+		return false, false, nil
+	}
+	if item.Revision == 0 {
+		return false, true, fmt.Errorf("conditional release of %q: snapshot has no revision", item.ID)
+	}
+	if err := writer.UpdateIfMatch(item.ID, item.Revision, update); err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			log.Printf("conditional release of %q: skipping removed bead: %v", item.ID, err)
+			return false, true, nil
+		}
+		return false, true, fmt.Errorf("conditional release of %q: %w", item.ID, err)
+	}
+	return true, true, nil
 }
 
 // releaseWorkAssignmentIfCurrent attempts the store's atomic conditional
