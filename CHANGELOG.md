@@ -876,10 +876,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other live, named session in the city with zero authentication — mail
   would display as coming from a privileged coordinator role even though
   it was actually sent by an unrelated worker. `--from` is now checked
-  against the calling session's own identity; a caller sending as itself,
-  as the reserved `human`/`controller` buckets (the documented pattern for
-  scripted automation), or as an interactive human with no live-session
-  identity of its own still works unchanged.
+  against the calling session's own identity. A live agent session may only
+  send as itself — it can no longer claim another live session, the
+  operator's `human` identity, or `controller`. A caller with no
+  `GC_SESSION_ID`/`GC_ALIAS`/`GC_AGENT` set (an interactive terminal, or an
+  exec order running under the supervisor's environment) may still claim
+  any sender, which keeps scripted `--from controller` automation such as
+  the dolt compact quarantine alert working. A caller whose identity
+  variables are set but resolve to no live session is refused. This is a
+  spoofing guard, not authentication: those variables are caller-controlled.
+
+  **Upgrading:** scripts that pass `--from human` or `--from controller`
+  while running inside an agent session (or under a supervisor that
+  inherited one's `GC_*` session variables) now exit 1 with "does not match
+  this session's own identity".
 
 - **ACP activity is now available across process boundaries.** ACP
   `session/update` timestamps are published through an atomic, coalesced
