@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,6 +55,8 @@ const (
 type StateFetcher interface {
 	// FetchState returns a runtime-state snapshot for live sessions.
 	// Sessions with remain-on-exit corpses (pane_dead=1) are excluded.
+	// The returned snapshot is handed to StateCache, which publishes it to
+	// lock-free readers, so the fetcher must not retain or mutate its maps.
 	FetchState(ctx context.Context) (runtimeStateSnapshot, error)
 }
 
@@ -97,16 +100,58 @@ type runtimeStateSnapshot struct {
 // status check or reconciler pass. Concurrent callers are coalesced via
 // singleflight so at most one tmux/process snapshot refresh runs at a time.
 type StateCache struct {
-	mu         sync.RWMutex
-	state      runtimeStateSnapshot
-	fetchedAt  time.Time
-	lastError  error
-	dirty      bool   // set by Invalidate(); cleared on successful refresh
-	generation uint64 // advanced by invalidation/eviction to reject stale refreshes
-	ttl        time.Duration
-	staleTTL   time.Duration
-	sf         singleflight.Group
-	fetcher    StateFetcher
+	mu sync.RWMutex
+	// state is the published snapshot. It is copy-on-write: readers copy it
+	// under mu and then read its maps after releasing the lock (IsRunning,
+	// ProcessAlive), so once published its maps must never be mutated in
+	// place. Writers replace a map wholesale under mu instead.
+	state     runtimeStateSnapshot
+	fetchedAt time.Time
+	lastError error
+	dirty     bool // set by Invalidate(); cleared by a refresh no invalidation superseded
+	// generation advances on every Invalidate and EvictSession, so a refresh
+	// can tell whether it was superseded while its fetch was in flight.
+	generation uint64
+	// publishedGeneration is the start generation of the fetch that produced
+	// state. A fetch that started earlier than that is older than what readers
+	// already see and is discarded rather than published over it.
+	publishedGeneration uint64
+	// evictedAt records, per evicted session, the generation its eviction
+	// produced. A superseded fetch that started before that generation may
+	// still list the killed session, so it is filtered out before publishing.
+	// Entries at or below publishedGeneration can never filter again and are
+	// pruned on publish.
+	evictedAt map[string]uint64
+	// primedByNoServer reports that the published snapshot is the empty one
+	// primed by an unprimed no-server failure, not a fleet the server listed.
+	primedByNoServer bool
+	ttl              time.Duration
+	staleTTL         time.Duration
+	sf               singleflight.Group
+	fetcher          StateFetcher
+	// now is the cache clock. Nil selects time.Now; tests inject a fake.
+	now func() time.Time
+}
+
+// cacheObservation is one read of the cache after its refresh trigger ran:
+// the published snapshot plus what is known about how far to trust it.
+type cacheObservation struct {
+	state     runtimeStateSnapshot
+	fetchedAt time.Time
+	// lastErr is the error of the most recent refresh attempt; nil after a
+	// success.
+	lastErr error
+	// dirty reports that an Invalidate or EvictSession landed after the
+	// published fetch began, so the snapshot may predate a known Start or Stop.
+	dirty bool
+	// primedByNoServer reports that the snapshot came from the unprimed
+	// no-server prime rather than from a server's answer.
+	primedByNoServer bool
+}
+
+// primed reports whether the observation holds a published snapshot.
+func (o cacheObservation) primed() bool {
+	return o.state.Sessions != nil && !o.fetchedAt.IsZero()
 }
 
 // NewStateCache creates a new cache with the given fetcher and TTL.
@@ -139,38 +184,109 @@ func (c *StateCache) ProcessAlive(name string, processNames []string) bool {
 }
 
 func (c *StateCache) currentState() runtimeStateSnapshot {
-	c.mu.RLock()
-	state := c.state
-	fetchedAt := c.fetchedAt
-	dirty := c.dirty
-	c.mu.RUnlock()
+	obs, hit := c.observeRefreshing()
+	if hit {
+		return obs.state
+	}
+	// If the cache is older than staleTTL, report all sessions as not running.
+	// Note: fetchedAt is preserved on failure (never zeroed), so this only
+	// triggers after staleTTL of real wall-clock time since last success.
+	if !obs.primed() || c.clock().Sub(obs.fetchedAt) > c.staleTTL {
+		return runtimeStateSnapshot{}
+	}
+	return obs.state
+}
+
+// observe returns the published snapshot with its refresh outcome, running
+// the same refresh trigger as currentState but never applying the staleTTL
+// cliff: the caller decides what a stale or failed observation means.
+func (c *StateCache) observe() cacheObservation {
+	obs, _ := c.observeRefreshing()
+	return obs
+}
+
+// observeRefreshing reads the cache, refreshing it first unless it is a hit,
+// and reports whether it was one.
+func (c *StateCache) observeRefreshing() (cacheObservation, bool) {
+	obs := c.observation()
 
 	// Cache hit: fresh data, not invalidated.
-	if state.Sessions != nil && !fetchedAt.IsZero() && !dirty && time.Since(fetchedAt) < c.ttl {
-		return state
+	if obs.primed() && !obs.dirty && c.clock().Sub(obs.fetchedAt) < c.ttl {
+		return obs, true
 	}
 
 	// Stale, empty, or dirty — trigger refresh.
 	// When dirty, forget any in-flight singleflight so we get a fresh fetch
 	// instead of coalescing with a pre-invalidation call.
-	if dirty {
+	if obs.dirty {
 		c.sf.Forget("refresh")
 	}
 	c.refresh()
 
 	// Read the (potentially updated) cache.
-	c.mu.RLock()
-	state = c.state
-	fetchedAt = c.fetchedAt
-	c.mu.RUnlock()
+	return c.observation(), false
+}
 
-	// If the cache is older than staleTTL, report all sessions as not running.
-	// Note: fetchedAt is preserved on failure (never zeroed), so this only
-	// triggers after staleTTL of real wall-clock time since last success.
-	if state.Sessions == nil || fetchedAt.IsZero() || time.Since(fetchedAt) > c.staleTTL {
-		return runtimeStateSnapshot{}
+func (c *StateCache) observation() cacheObservation {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return cacheObservation{
+		state:            c.state,
+		fetchedAt:        c.fetchedAt,
+		lastErr:          c.lastError,
+		dirty:            c.dirty,
+		primedByNoServer: c.primedByNoServer,
 	}
-	return state
+}
+
+func (c *StateCache) clock() time.Time {
+	if c.now == nil {
+		return time.Now()
+	}
+	return c.now()
+}
+
+// cacheAnswer is how far one cache observation can answer for a session.
+type cacheAnswer int
+
+const (
+	// cacheAnswerSnapshot: answer from the published snapshot.
+	cacheAnswerSnapshot cacheAnswer = iota
+	// cacheAnswerAbsent: confirmed absent whatever the snapshot holds.
+	cacheAnswerAbsent
+	// cacheAnswerUnknown: the snapshot cannot be trusted either way.
+	cacheAnswerUnknown
+)
+
+// classifyCacheObservation decides how far obs can answer for name. It never
+// answers absent while the bool path (IsRunning, which keeps the staleTTL
+// cliff) would still report name running, so the two forms cannot disagree:
+//   - a successful last refresh over a primed snapshot answers from it;
+//   - a failed refresh inside staleTTL over a snapshot a server listed answers
+//     from that snapshot when it is clean (#4082), and is unknown when it is
+//     dirty and still lists name;
+//   - otherwise the snapshot cannot hold name live (past staleTTL, unprimed,
+//     primed only by the no-server fallback, or name not listed). A
+//     no-server failure whose socket serverDead confirms gone is then
+//     absent, since a session cannot outlive its server; anything else is
+//     unknown.
+//
+// serverDead is consulted only for a no-server failure.
+func classifyCacheObservation(obs cacheObservation, name string, now time.Time, staleTTL time.Duration, serverDead func() bool) cacheAnswer {
+	if obs.lastErr == nil && obs.primed() {
+		return cacheAnswerSnapshot
+	}
+	trusted := obs.primed() && !obs.primedByNoServer && now.Sub(obs.fetchedAt) <= staleTTL
+	if trusted && !obs.dirty {
+		return cacheAnswerSnapshot
+	}
+	if trusted && obs.state.Sessions[name].Running {
+		return cacheAnswerUnknown
+	}
+	if isNoServerError(obs.lastErr) && serverDead() {
+		return cacheAnswerAbsent
+	}
+	return cacheAnswerUnknown
 }
 
 // Invalidate marks the cache as dirty, forcing the next IsRunning call
@@ -186,11 +302,24 @@ func (c *StateCache) Invalidate() {
 // EvictSession removes a specific session from the cache and marks it dirty.
 // Used by Stop to immediately reflect the killed session without waiting for
 // the next refresh cycle (which may race with singleflight coalescing).
+//
+// The published Sessions map may still be held by readers that dropped the
+// lock, so the eviction publishes a copy rather than deleting in place:
+// an in-place delete is a concurrent map read/write, a fatal runtime error
+// that recover cannot catch.
 func (c *StateCache) EvictSession(name string) {
 	c.mu.Lock()
-	delete(c.state.Sessions, name)
+	if _, ok := c.state.Sessions[name]; ok {
+		sessions := maps.Clone(c.state.Sessions)
+		delete(sessions, name)
+		c.state.Sessions = sessions
+	}
 	c.dirty = true
 	c.generation++
+	if c.evictedAt == nil {
+		c.evictedAt = make(map[string]uint64)
+	}
+	c.evictedAt[name] = c.generation
 	c.mu.Unlock()
 }
 
@@ -205,9 +334,9 @@ func (c *StateCache) refresh() {
 		startGeneration := c.generation
 		c.mu.RUnlock()
 
-		start := time.Now()
+		start := c.clock()
 		state, err := c.fetcher.FetchState(ctx)
-		elapsed := time.Since(start)
+		elapsed := c.clock().Sub(start)
 
 		if err != nil {
 			log.Printf("tmux state cache: refresh failed in %v: %v", elapsed, err)
@@ -232,34 +361,83 @@ func (c *StateCache) refresh() {
 			//   — that is #4082's intent.
 			if c.fetchedAt.IsZero() && isNoServerError(err) {
 				c.state = runtimeStateSnapshot{Sessions: make(map[string]sessionRuntimeState)}
-				c.fetchedAt = time.Now()
-				c.dirty = false
+				c.fetchedAt = c.clock()
+				c.primedByNoServer = true
+				c.publishedGeneration = startGeneration
+				// Stay dirty if an invalidation (e.g. the Start that brings
+				// the server up) landed mid-fetch, as a successful refresh does.
+				c.dirty = c.generation != startGeneration
 			}
 			c.mu.Unlock()
 			return nil, err
 		}
 
+		verbose := os.Getenv("GC_LOG_TMUX_CACHE") == "true"
 		c.mu.Lock()
-		if c.generation != startGeneration {
-			c.mu.Unlock()
-			if os.Getenv("GC_LOG_TMUX_CACHE") == "true" {
-				log.Printf("tmux state cache: discarded refresh from generation %d after %v", startGeneration, elapsed)
+		defer c.mu.Unlock()
+		if startGeneration < c.publishedGeneration {
+			// A dirty read forgot this flight and a newer fetch has already
+			// published; this observation is older than what readers see.
+			if verbose {
+				log.Printf("tmux state cache: discarded refresh from generation %d after %v (generation %d already published)", startGeneration, elapsed, c.publishedGeneration)
 			}
 			return nil, nil
 		}
+		// An Invalidate or EvictSession landed while this fetch was in
+		// flight. Discarding the fetch is not safe: under steady invalidation
+		// every fetch is superseded, nothing is ever published, and once
+		// staleTTL passes currentState reports every session absent even
+		// though tmux answered each fetch. Publish what the server was seen to
+		// hold, minus sessions evicted since the fetch began (Stop kills then
+		// evicts, and an older fetch may still list the killed session), and
+		// leave the cache dirty so the next read observes the change that
+		// superseded this one.
+		superseded := c.generation != startGeneration
+		if superseded {
+			state.Sessions = withoutEvictedSince(state.Sessions, c.evictedAt, startGeneration)
+		}
 		// Successful refresh is noisy on the session loop; opt-in via env var
 		// keeps it available for diagnostics without polluting normal CLI use.
-		if os.Getenv("GC_LOG_TMUX_CACHE") == "true" {
-			log.Printf("tmux state cache: refreshed %d sessions in %v", len(state.Sessions), elapsed)
+		if verbose {
+			log.Printf("tmux state cache: refreshed %d sessions in %v (superseded=%t)", len(state.Sessions), elapsed, superseded)
 		}
 
 		c.state = state
-		c.fetchedAt = time.Now()
+		c.fetchedAt = c.clock()
 		c.lastError = nil
-		c.dirty = false
-		c.mu.Unlock()
+		c.primedByNoServer = false
+		c.dirty = superseded
+		c.publishedGeneration = startGeneration
+		for name, generation := range c.evictedAt {
+			if generation <= startGeneration {
+				delete(c.evictedAt, name)
+			}
+		}
 		return nil, nil
 	})
+}
+
+// withoutEvictedSince returns sessions minus every session whose eviction
+// generation is later than since. It copies before deleting: the fetcher hands
+// its map over, but a map shared with a previously published snapshot must
+// never be mutated in place (see StateCache.state).
+func withoutEvictedSince(sessions map[string]sessionRuntimeState, evictedAt map[string]uint64, since uint64) map[string]sessionRuntimeState {
+	filtered := sessions
+	cloned := false
+	for name, generation := range evictedAt {
+		if generation <= since {
+			continue
+		}
+		if _, ok := filtered[name]; !ok {
+			continue
+		}
+		if !cloned {
+			filtered = maps.Clone(sessions)
+			cloned = true
+		}
+		delete(filtered, name)
+	}
+	return filtered
 }
 
 // tmuxFetcher implements StateFetcher using a real Tmux instance.

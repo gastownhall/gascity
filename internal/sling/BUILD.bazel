@@ -44,6 +44,8 @@ go_test(
         "sling_env_test.go",
         "sling_graph_root_store_test.go",
         "sling_launch_chokepoint_test.go",
+        "sling_launch_status_test.go",
+        "sling_merge_strategy_test.go",
         "sling_on_idempotency_test.go",
         "sling_reassign_reopen_test.go",
         "sling_rootonly_hint_test.go",

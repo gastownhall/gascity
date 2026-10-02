@@ -656,8 +656,9 @@ func (idx *CompletedFactIndex) Invalidate() {
 //
 // It is the delta half of a two-lane doctrine, never a replacement. A close can
 // exist with no event naming it — a controller can crash between the durable step
-// close and the best-effort append, and graph stores emit no bead.closed by
-// design — so the full pass remains the convergence backstop.
+// close and the best-effort append, and a write that emits nothing (a Tx-shaped
+// one) leaves no bead.closed — so the full pass remains the convergence
+// backstop.
 func (idx *CompletedFactIndex) ReconcileRoots(recorder events.Provider, graphStores []beads.GraphStore, rootIDs []string, actor string) int {
 	if recorder == nil || len(rootIDs) == 0 {
 		return 0

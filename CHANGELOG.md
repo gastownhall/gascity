@@ -9,9 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
-- **Keep Beads (`bd`) at v1.3.0.** v1.5.0 pins and is tested against bd
-  v1.3.0 (`deps.env` `BD_VERSION` and the go.mod library). Do not move a city
-  to a newer `bd` until a gc release pins it.
+- **Upgrade Beads (`bd`) to v1.3.1.** v1.5.0 pins and is tested against bd
+  v1.3.1 (`deps.env` `BD_VERSION` and the go.mod library), a stable release
+  that keeps bd v1.3.0's schema. Install it with `brew upgrade beads` (or
+  `brew install beads`), from the
+  [v1.3.1 release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.1),
+  or with `go install github.com/steveyegge/beads/cmd/bd@v1.3.1`. A city
+  that stays on bd v1.3.0 keeps working through the bd CLI, but gc refuses
+  that bd for its native store (it is older than the linked library), and the
+  proxied `bd backup` and closed-wisp `bd purge` steps of `mol-dog-backup` and
+  `reaper` are reported as skipped. Read beads'
+  [v1.3.1 upgrade notes](https://github.com/gastownhall/beads/blob/v1.3.1/CHANGELOG.md#131---2026-09-30)
+  before upgrading scripts that call bd directly. Do not move a city to a
+  newer `bd` until a gc release pins it.
 - **`gc storage migrate` is experimental.** The command is new in v1.5.0 and
   still has open correctness issues on split cities (#5987, #6015, #5974,
   #6129, #6242, #6348). Run `gc storage preflight` first, back up every store
@@ -84,18 +94,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.1.6, whose role prompts run `gc gc claim`, rename the key to `gc`;
   `gc doctor --fix` offers the rename (#6683). Do not add a second `gc` import
   next to the old key: that imports the pack twice (#4508).
-
-### Known Issues
-
-- **Wisp reaping and JSONL export do not run yet on proxied cities.** On
-  cities using the default bd-owned proxied Dolt, the core `reaper` and
-  `jsonl-export` orders now skip with a log line instead of failing on every
-  run. Until a follow-up lands, those cities get no wisp reaping,
-  closed-molecule purge, stale-issue or expired-nudge close, session-bead
-  prune or JSONL export, so they have no off-database JSONL copy;
-  `wisp-compact` and the opt-in Go wisp GC (`wisp_ttl`) still run (#6696).
+- **The first restart after upgrading reaps pre-upgrade ACP agents whose owner
+  is gone.** Any city routing a session to ACP had process-table orphan
+  reaping off — for its ACP sessions, and in a city that mixes ACP with a
+  tmux or subprocess default, for every session including the tmux and
+  subprocess ones. It is on again. An ACP agent started by the previous binary
+  carries no `GC_ACP_CONTROL_SOCKET` marker, and once its supervisor has
+  restarted no connection to it survives, so it reads untracked and the
+  pre-start orphan sweep terminates it. That is the intended verdict — its
+  owner's control socket died with the owner, so the agent could no longer be
+  driven — and it happens once, on the first restart, not on every one
+  (#6543).
+- **The `reaper`, `jsonl-export` and dolt `mol-dog-backup` orders now work
+  through bd on every city topology.** Each bead scope (the city and every
+  rig) is reached with `gc bd`, so bd-owned proxied, gc-managed and mixed
+  cities are all maintained; the orders no longer dial Dolt themselves.
+  - **Unbound databases are no longer maintained.** Databases on a gc-managed
+    Dolt server that no city or rig binds are no longer reaped, exported or
+    backed up. Drop orphaned databases, or bind them to a rig.
+  - **The JSONL archive switches to `bd export` format** (one issue per line,
+    with labels, dependencies and comments), which restores with
+    `bd import <file>`. The first run moves each database's old
+    `{"rows":[...]}` snapshot files into `<db>/legacy/` with `git mv`; nothing
+    is deleted.
+  - **Backups use `bd backup`.** `mol-dog-backup` registers
+    `<city>/.dolt-backup/<db>` as each scope's `bd backup` destination when it
+    has none, then runs `bd backup sync`; the reaper's session-prune backup gate
+    reads `bd backup status`. A bd older than v1.3.1 refuses backup on proxied
+    scopes: those are reported as skipped (an `order.skipped` event) and their
+    session-bead prune waits for a backup it can see.
+  - **Closed-wisp purge uses `bd purge`.** It needs a bd whose `bd purge`
+    selects the whole wisps plane (`--wisps-plane`), keeps closed wisps a live
+    wisp depends on, and purges in bounded batches (`--limit`); a backlog is
+    cleared across runs within `GC_REAPER_PURGE_BUDGET_SECS` (default 300s).
+    With a bd older than v1.3.1 the purge step is reported as skipped. A run
+    that uses up `GC_REAPER_RUN_BUDGET_SECS` (default 780s, below the 900s
+    order timeout) stops starting new work, reports a partial outcome, and the
+    next run continues.
+  - Both orders now run with a 900s timeout.
 
 ### Added
+
+- **`order.skipped` event.** An exec order that exits 0 but could not do all
+  of its work (an unreachable bead scope, a safety gate that held a step back)
+  now says so: the controller records a typed `order.skipped` event, with
+  outcome `skipped` or `partial` and the scopes that did not run, next to
+  `order.completed`. `gc order run` prints the same declaration.
 
 - **`gc doctor` offers to rebind the Gas City pack import as `gc`.** The new
   `gascity-pack-binding` check warns when a city imports the public Gas City
@@ -133,6 +177,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   size is not something the verdict established — not that the copy is empty.
 
 ### Changed
+
+- **Ready work in a SQLite infra ledger is ordered priority-first.** On a city
+  that relocates classes to a `sqlite-beads` binding, that ledger's ready read
+  returned rows oldest-first (`created_at, id`). It now returns the canonical
+  `(priority, created_at, id)` order that `bd ready` and gc's cached ready
+  reads already use. When several ready beads in the ledger route to one pool
+  template, the bead a new session takes its trigger, worktree and pack from is
+  now the highest-priority one, oldest first within a priority; the order in
+  which sessions claim work does not change. `GET /v0/beads/ready` also returns
+  the relocated graph leg's rows in this order: the API concatenates its legs
+  without re-sorting them, so on a split city the graph rows at the end of the
+  response are now priority-ordered.
 
 - **Closed session beads in a SQLite infra ledger are purged after
   `GC_INFRA_SESSION_PURGE_AGE` (default 72h).** This applies only when a city
@@ -203,6 +259,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   minter, which is the premise this change retires (ga-8w5c7).
 
 ### Fixed
+
+- **`passthroughEnv` now honors `GC_SUPERVISOR_ENV` when deciding which
+  non-`GC_`-prefixed variables reach a spawned agent session, not only which
+  ones survive into the persisted service file.** The two allowlists used to
+  be independent: opting a variable into `GC_SUPERVISOR_ENV` widened the
+  systemd/launchd unit's environment, but `passthroughEnv`'s sweep still only
+  forwarded `GC_`-prefixed keys into sessions, so a variable could be fully
+  persisted into the supervisor's own process and still never reach an agent.
+  One opt-in list now governs both, so declaring a variable once is enough.
+  Behavior change: variables already listed in `GC_SUPERVISOR_ENV` will now
+  also be forwarded into agent sessions.
+
+- **The reaper's stale-issue auto-close works again when an open bead
+  depends on a wisp or external bead.** Such a dependency has no
+  `depends_on_issue_id`, and that NULL emptied the active-dependency exclusion,
+  so no stale issue in the store was ever closed.
 
 - **The Dolt compactor no longer rewrites adopted or shared history.** The
   default-on `mol-dog-compactor` (`gc dolt compact`) flattened any managed
@@ -364,6 +436,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reconciler. The reconciler now reads the session's current claim live before
   an orphaned or idle drain, and cancels an in-flight orphaned drain once the
   claim is visible (#6665, #6666).
+
+- **The controller no longer crashes on a tmux state-cache race.** Evicting a
+  stopped session deleted it from the published tmux snapshot in place while
+  status readers could still be reading that map, a fatal concurrent map read
+  and write that `recover()` cannot catch. Eviction now publishes a copy
+  (#6735).
+
+- **A pending create whose command drifted no longer holds its alias
+  forever.** When the command a start was prepared with differed from the
+  persisted one and a retry could not converge, the row stayed in `creating`
+  and retried every tick, so no replacement could be built. It is now rolled
+  back (the bead closes as `failed-create`, releasing its claim and alias) and
+  recreated on the next tick. The stale-create bound no longer renews on each
+  retry, and `gc session reset` rolls back a stuck create that is past its
+  start lease with no running runtime; `--json` now reports
+  `mode: restart|rollback` (#6744).
+
+- **A codex prompt swallowed during a large paste is submitted again.** A busy
+  codex TUI still ingesting a large pasted prompt ate every submit in the
+  confirm window, leaving the draft staged and the seat idle while holding its
+  claim. gc now re-sends the submit, at most 8 times and only while the live
+  composer still shows the staged draft and the pane is idle; it never sends
+  into an attached session (#6739).
+
+- **`gc session kill` no longer races the reconciler.** The kill stopped the
+  runtime before marking the session asleep, so a controller tick in between
+  could treat it as a crash: resetting the conversation instead of resuming
+  it, closing the bead, or reaping it as a `dead-runtime` corpse. The kill now
+  writes a kill-pending marker first; while it is fresh the reconciler and the
+  corpse cleaner leave the row alone, queued nudges stay pending, and
+  attach/send return HTTP 409 (#6749).
+
+- **Killed and dormant sessions are no longer closed as `dead-runtime`.** The
+  corpse cleaner closed any open row whose tmux pane had died, so a session
+  stopped with `gc session kill` (or drained, suspended, quarantined or
+  archived) could never be woken again. Only rows that claim a live runtime
+  are closed now, and only when the dead pane belongs to the row's current
+  incarnation, so a mid-restart row is left alone (#6752).
 
 - **A condition-triggered order whose check passes now dispatches on the tick
   that observes it, instead of queueing behind the per-tick dispatch budget.**

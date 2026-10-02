@@ -464,7 +464,7 @@ func TestSyncSessionBeads_ExistingDesiredUsesSnapshotStateWithoutWorkerLookup(t 
 	}
 	for _, call := range sp.Calls {
 		switch call.Method {
-		case "IsRunning", "ProcessAlive", "IsAttached", "GetLastActivity", "GetMeta":
+		case "IsRunning", "ProcessAlive", "IsAttached", "IsAttachedWithError", "GetLastActivity", "GetMeta":
 			t.Fatalf("sync should trust the session snapshot for existing desired sessions, saw provider call %#v", call)
 		}
 	}
@@ -6921,7 +6921,7 @@ func TestReapStaleSessionBeads(t *testing.T) {
 			}
 
 			var stderr bytes.Buffer
-			got := reapStaleSessionBeads(store, sp, dt, clk, &stderr)
+			got := reapStaleSessionBeads(store, sp, dt, nil, clk, &stderr)
 			if got != tt.wantReaped {
 				t.Errorf("reapStaleSessionBeads() = %d, want %d\nstderr: %s", got, tt.wantReaped, stderr.String())
 			}
@@ -6974,7 +6974,7 @@ func TestReapStaleSessionBeads_HonorsRecentWakeGrace(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	got := reapStaleSessionBeads(store, sp, nil, &clock.Fake{Time: now}, &stderr)
+	got := reapStaleSessionBeads(store, sp, nil, nil, &clock.Fake{Time: now}, &stderr)
 	if got != 0 {
 		t.Fatalf("reapStaleSessionBeads() = %d, want 0\nstderr: %s", got, stderr.String())
 	}
@@ -7017,7 +7017,7 @@ func TestReapStaleSessionBeads_HonorsRecentWakeOnCreatingBead(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	got := reapStaleSessionBeads(store, sp, nil, &clock.Fake{Time: now}, &stderr)
+	got := reapStaleSessionBeads(store, sp, nil, nil, &clock.Fake{Time: now}, &stderr)
 	if got != 0 {
 		t.Fatalf("reapStaleSessionBeads() = %d, want 0 (a recent wake must advance the reap boundary off the 10m-old CreatedAt)\nstderr: %s", got, stderr.String())
 	}
@@ -7051,7 +7051,7 @@ func TestReapStaleSessionBeads_NeverStartedPendingCreateNotReapedInPendingWindow
 	now := created.CreatedAt.Add(7 * time.Minute)
 
 	var stderr bytes.Buffer
-	if got := reapStaleSessionBeads(store, sp, nil, &clock.Fake{Time: now}, &stderr); got != 0 {
+	if got := reapStaleSessionBeads(store, sp, nil, nil, &clock.Fake{Time: now}, &stderr); got != 0 {
 		t.Fatalf("reapStaleSessionBeads() = %d, want 0 (never-started bead within 10m lease must survive)\nstderr: %s", got, stderr.String())
 	}
 	open, err := loadSessionBeads(store)
@@ -7095,7 +7095,7 @@ func TestReapStaleSessionBeads_StartedPendingCreateReapedPastPendingGrace(t *tes
 	}
 
 	var stderr bytes.Buffer
-	if got := reapStaleSessionBeads(store, sp, nil, &clock.Fake{Time: now}, &stderr); got != 1 {
+	if got := reapStaleSessionBeads(store, sp, nil, nil, &clock.Fake{Time: now}, &stderr); got != 1 {
 		t.Fatalf("reapStaleSessionBeads() = %d, want 1 (started bead past 5m pending grace must be reaped)\nstderr: %s", got, stderr.String())
 	}
 	open, err := loadSessionBeads(store)
@@ -7140,7 +7140,7 @@ func TestReapStaleSessionBeads_BeadScopedPoolRowHeldUntilTeardownConfirmed(t *te
 		now := created.CreatedAt.Add(staleCreatingStateTimeout + time.Minute)
 
 		var stderr bytes.Buffer
-		if got := reapStaleSessionBeads(store, sp, nil, &clock.Fake{Time: now}, &stderr); got != 0 {
+		if got := reapStaleSessionBeads(store, sp, nil, nil, &clock.Fake{Time: now}, &stderr); got != 0 {
 			t.Fatalf("reapStaleSessionBeads() = %d, want 0 while the runtime teardown fails\nstderr: %s", got, stderr.String())
 		}
 		if got, _ := store.Get(created.ID); got.Status == "closed" {
@@ -7152,7 +7152,7 @@ func TestReapStaleSessionBeads_BeadScopedPoolRowHeldUntilTeardownConfirmed(t *te
 
 		delete(sp.StopErrors, name)
 		stderr.Reset()
-		if got := reapStaleSessionBeads(store, sp, nil, &clock.Fake{Time: now}, &stderr); got != 1 {
+		if got := reapStaleSessionBeads(store, sp, nil, nil, &clock.Fake{Time: now}, &stderr); got != 1 {
 			t.Fatalf("reapStaleSessionBeads() after recovery = %d, want 1\nstderr: %s", got, stderr.String())
 		}
 		if got, _ := store.Get(created.ID); got.Status != "closed" {
@@ -7180,7 +7180,7 @@ func TestReapStaleSessionBeads_BeadScopedPoolRowHeldUntilTeardownConfirmed(t *te
 		now := created.CreatedAt.Add(staleCreatingStateTimeout + time.Minute)
 
 		var stderr bytes.Buffer
-		if got := reapStaleSessionBeads(store, sp, nil, &clock.Fake{Time: now}, &stderr); got != 1 {
+		if got := reapStaleSessionBeads(store, sp, nil, nil, &clock.Fake{Time: now}, &stderr); got != 1 {
 			t.Fatalf("reapStaleSessionBeads() = %d, want 1 for a non-pool row\nstderr: %s", got, stderr.String())
 		}
 		if got, _ := store.Get(created.ID); got.Status != "closed" {
@@ -7213,7 +7213,7 @@ func TestReapStaleSessionBeads_HonorsRecentCreationCompleteProtection(t *testing
 	}
 
 	var stderr bytes.Buffer
-	got := reapStaleSessionBeads(store, sp, nil, &clock.Fake{Time: now}, &stderr)
+	got := reapStaleSessionBeads(store, sp, nil, nil, &clock.Fake{Time: now}, &stderr)
 	if got != 0 {
 		t.Fatalf("reapStaleSessionBeads() = %d, want 0\nstderr: %s", got, stderr.String())
 	}
@@ -7230,13 +7230,13 @@ func TestReapStaleSessionBeads_NilStoreAndProvider(t *testing.T) {
 	clk := &clock.Fake{Time: time.Now()}
 	var stderr bytes.Buffer
 
-	if got := reapStaleSessionBeads(nil, nil, nil, clk, &stderr); got != 0 {
+	if got := reapStaleSessionBeads(nil, nil, nil, nil, clk, &stderr); got != 0 {
 		t.Errorf("nil store+provider: got %d, want 0", got)
 	}
-	if got := reapStaleSessionBeads(beads.NewMemStore(), nil, nil, clk, &stderr); got != 0 {
+	if got := reapStaleSessionBeads(beads.NewMemStore(), nil, nil, nil, clk, &stderr); got != 0 {
 		t.Errorf("nil provider: got %d, want 0", got)
 	}
-	if got := reapStaleSessionBeads(nil, runtime.NewFake(), nil, clk, &stderr); got != 0 {
+	if got := reapStaleSessionBeads(nil, runtime.NewFake(), nil, nil, clk, &stderr); got != 0 {
 		t.Errorf("nil store: got %d, want 0", got)
 	}
 }
@@ -7277,7 +7277,7 @@ func TestCleanupDeadRuntimeSessionCorpsesStopsVisibleDeadSessions(t *testing.T) 
 	})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -7303,7 +7303,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsLivenessUncertainty(t *testing.T) 
 	}})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
 	if got != 0 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0", got)
 	}
@@ -7328,7 +7328,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsVisibleSessionWhenCheckerReportsLi
 	}})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
 	if got != 0 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0", got)
 	}
@@ -7352,7 +7352,7 @@ func TestCleanupDeadRuntimeSessionCorpsesUsesPartialListResults(t *testing.T) {
 	}})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -7409,7 +7409,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsLifecycleOwnedBeads(t *testing.T) 
 	})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, dt, sp, nil, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, dt, sp, nil, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -7435,7 +7435,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsBlankAndDeduplicatesNames(t *testi
 	})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -7459,7 +7459,7 @@ func TestCleanupDeadRuntimeSessionCorpsesReportsStopErrors(t *testing.T) {
 	}})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
 	if got != 0 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0", got)
 	}
@@ -7500,7 +7500,7 @@ func TestCleanupDeadRuntimeSessionCorpsesStampsCloseAtUsesInjectedClock(t *testi
 	clk := &clock.Fake{Time: frozen}
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, clk, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, clk, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -7550,7 +7550,7 @@ func TestCleanupDeadRuntimeSessionCorpsesReleasesAliasOnBeadClose(t *testing.T) 
 	snapshot := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -7567,6 +7567,329 @@ func TestCleanupDeadRuntimeSessionCorpsesReleasesAliasOnBeadClose(t *testing.T) 
 	// The freed alias must now be available for a successor on the same slot.
 	if err := session.EnsureAliasAvailable(store, "gascity-packs/codex-1", ""); err != nil {
 		t.Fatalf("EnsureAliasAvailable after cleanup = %v, want nil (alias still held by closed corpse)", err)
+	}
+}
+
+// newDeadRuntimeCorpseRow creates one open session bead in a fresh MemStore
+// and returns the store, the persisted bead, and a snapshot holding it, which
+// is the input shape cleanupDeadRuntimeSessionCorpses reads each tick.
+func newDeadRuntimeCorpseRow(t *testing.T, metadata map[string]string) (beads.Store, beads.Bead, *sessionBeadSnapshot) {
+	t.Helper()
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:    "worker",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: metadata,
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	return store, bead, newSessionBeadSnapshot([]beads.Bead{bead})
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesKeepsKilledAsleepRowWakeable pins the
+// `gc session kill` shape. The kill stops the runtime and syncs the bead to
+// asleep (sleep_reason=killed) so a later wake starts a fresh incarnation on
+// the same durable session. The dead pane that remains is the expected residue
+// of that sleep. The pass should reap the pane, which frees the name for the
+// wake, but it must not close the row: a closed row can never be woken again.
+func TestCleanupDeadRuntimeSessionCorpsesKeepsKilledAsleepRowWakeable(t *testing.T) {
+	const name = "worker-adhoc-cf937f30dc"
+	store, bead, snapshot := newDeadRuntimeCorpseRow(t, map[string]string{
+		"session_name":   name,
+		"template":       "worker",
+		"alias":          "rig/worker-adhoc",
+		"state":          string(session.StateAsleep),
+		"sleep_reason":   "killed",
+		"session_origin": "manual",
+		"instance_token": "token-of-the-killed-incarnation",
+	})
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible[name] = true
+	sp.dead[name] = true
+	if err := sp.SetMeta(name, "GC_INSTANCE_TOKEN", "token-of-the-killed-incarnation"); err != nil {
+		t.Fatalf("stamp corpse instance token: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
+	if got != 1 || sp.stopCalls[name] != 1 {
+		t.Fatalf("cleanup = %d (Stop calls = %d), want the corpse reaped once; stderr=%q", got, sp.stopCalls[name], stderr.String())
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("re-fetch bead: %v", err)
+	}
+	if after.Status != "open" || after.Metadata["state"] != string(session.StateAsleep) || after.Metadata["sleep_reason"] != "killed" {
+		t.Fatalf("killed row after corpse cleanup = status %q state %q sleep_reason %q close_reason %q, want an untouched open asleep row",
+			after.Status, after.Metadata["state"], after.Metadata["sleep_reason"], after.Metadata["close_reason"])
+	}
+	if _, err := sessionFrontDoor(store).WakeSession(bead.ID, time.Now().UTC(), session.WakeOpts{RejectClosed: true}); err != nil {
+		t.Fatalf("WakeSession after corpse cleanup = %v, want the killed session to accept a wake", err)
+	}
+	woken, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("re-fetch woken bead: %v", err)
+	}
+	if woken.Metadata["wake_request"] != string(session.WakeCauseExplicit) {
+		t.Fatalf("wake_request after wake = %q, want %q", woken.Metadata["wake_request"], session.WakeCauseExplicit)
+	}
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesKeepsDormantRowsOpen extends the killed
+// case to every dormant spelling the lifecycle projection recognizes. None of
+// them claims a running incarnation, so a dead pane under the name proves
+// nothing about whether the session is over.
+func TestCleanupDeadRuntimeSessionCorpsesKeepsDormantRowsOpen(t *testing.T) {
+	cases := []struct {
+		name  string
+		state session.State
+		sleep string
+	}{
+		{name: "asleep-idle", state: session.StateAsleep, sleep: string(session.SleepReasonIdleTimeout)},
+		{name: "asleep-drained", state: session.StateAsleep, sleep: "drained"},
+		{name: "drained", state: session.StateDrained},
+		{name: "suspended", state: session.StateSuspended},
+		{name: "quarantined", state: session.StateQuarantined},
+		{name: "archived", state: session.StateArchived},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const name = "worker-1"
+			meta := map[string]string{
+				"session_name": name,
+				"template":     "worker",
+				"state":        string(tc.state),
+			}
+			if tc.sleep != "" {
+				meta["sleep_reason"] = tc.sleep
+			}
+			store, bead, snapshot := newDeadRuntimeCorpseRow(t, meta)
+			sp := newDeadRuntimeArtifactProvider()
+			sp.visible[name] = true
+			sp.dead[name] = true
+
+			var stderr bytes.Buffer
+			got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
+			if got != 1 || sp.stopCalls[name] != 1 {
+				t.Fatalf("cleanup = %d (Stop calls = %d), want the corpse reaped once; stderr=%q", got, sp.stopCalls[name], stderr.String())
+			}
+			after, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("re-fetch bead: %v", err)
+			}
+			if after.Status != "open" || after.Metadata["state"] != string(tc.state) {
+				t.Fatalf("dormant row after corpse cleanup = status %q state %q, want an untouched open %q row",
+					after.Status, after.Metadata["state"], tc.state)
+			}
+		})
+	}
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesReapsAStaleCorpseUnderADormantRow keeps
+// the incarnation fence scoped to rows that can be mid-restart. A wake that
+// rotated the token and then failed leaves the row dormant with the previous
+// incarnation's corpse under its name. No start is in flight, so the corpse is
+// still reaped (freeing the name), and the row still stays open.
+func TestCleanupDeadRuntimeSessionCorpsesReapsAStaleCorpseUnderADormantRow(t *testing.T) {
+	const name = "worker-1"
+	store, bead, snapshot := newDeadRuntimeCorpseRow(t, map[string]string{
+		"session_name":   name,
+		"template":       "worker",
+		"state":          string(session.StateAsleep),
+		"sleep_reason":   "killed",
+		"instance_token": "token-of-the-failed-wake",
+	})
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible[name] = true
+	sp.dead[name] = true
+	if err := sp.SetMeta(name, "GC_INSTANCE_TOKEN", "token-of-the-killed-incarnation"); err != nil {
+		t.Fatalf("stamp corpse instance token: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
+	if got != 1 || sp.stopCalls[name] != 1 {
+		t.Fatalf("cleanup = %d (Stop calls = %d), want the stale corpse reaped once; stderr=%q", got, sp.stopCalls[name], stderr.String())
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("re-fetch bead: %v", err)
+	}
+	if after.Status != "open" || after.Metadata["state"] != string(session.StateAsleep) {
+		t.Fatalf("dormant row after corpse cleanup = status %q state %q, want an untouched open asleep row", after.Status, after.Metadata["state"])
+	}
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesClosesRowsClaimingALiveRuntime is the
+// #2437 side of the same predicate. A row that says its runtime is running (in
+// any spelling: active before the status heal, awake after, or mid-start)
+// while that runtime is a corpse still loses the row, so its alias is freed
+// for a successor.
+func TestCleanupDeadRuntimeSessionCorpsesClosesRowsClaimingALiveRuntime(t *testing.T) {
+	for _, state := range []session.State{
+		session.StateActive,
+		session.StateAwake,
+		session.StateCreating,
+		session.StateStartPending,
+		session.StateDraining,
+	} {
+		t.Run(string(state), func(t *testing.T) {
+			const name = "worker-1"
+			store, bead, snapshot := newDeadRuntimeCorpseRow(t, map[string]string{
+				"session_name":   name,
+				"template":       "worker",
+				"state":          string(state),
+				"instance_token": "token-current",
+			})
+			sp := newDeadRuntimeArtifactProvider()
+			sp.visible[name] = true
+			sp.dead[name] = true
+			if err := sp.SetMeta(name, "GC_INSTANCE_TOKEN", "token-current"); err != nil {
+				t.Fatalf("stamp corpse instance token: %v", err)
+			}
+
+			var stderr bytes.Buffer
+			got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
+			if got != 1 || sp.stopCalls[name] != 1 {
+				t.Fatalf("cleanup = %d (Stop calls = %d), want the corpse reaped once; stderr=%q", got, sp.stopCalls[name], stderr.String())
+			}
+			after, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("re-fetch bead: %v", err)
+			}
+			if after.Status != "closed" || after.Metadata["state"] != "dead-runtime" {
+				t.Fatalf("row claiming a live runtime after corpse cleanup = status %q state %q, want a dead-runtime close",
+					after.Status, after.Metadata["state"])
+			}
+		})
+	}
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesLeavesAMidRestartRowAlone pins the
+// incarnation fence. preWakeCommit rotates the row's instance_token and moves
+// it to creating before the provider start runs, so for that window the row
+// claims a live runtime while the name still carries the previous
+// incarnation's dead pane. That corpse is not this row's runtime. The pass must
+// neither stop it (the in-flight start recycles it) nor close the row out from
+// under the start.
+func TestCleanupDeadRuntimeSessionCorpsesLeavesAMidRestartRowAlone(t *testing.T) {
+	const name = "worker-adhoc-2c4fa75693"
+	store, bead, snapshot := newDeadRuntimeCorpseRow(t, map[string]string{
+		"session_name":   name,
+		"template":       "worker",
+		"state":          string(session.StateCreating),
+		"instance_token": "token-after-the-pre-wake-commit",
+	})
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible[name] = true
+	sp.dead[name] = true
+	if err := sp.SetMeta(name, "GC_INSTANCE_TOKEN", "token-of-the-previous-incarnation"); err != nil {
+		t.Fatalf("stamp corpse instance token: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
+	if got != 0 || sp.stopCalls[name] != 0 {
+		t.Fatalf("cleanup = %d (Stop calls = %d), want the previous incarnation's corpse left to the start; stderr=%q", got, sp.stopCalls[name], stderr.String())
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("re-fetch bead: %v", err)
+	}
+	if after.Status != "open" || after.Metadata["state"] != string(session.StateCreating) {
+		t.Fatalf("mid-restart row after corpse cleanup = status %q state %q, want the row left to its start",
+			after.Status, after.Metadata["state"])
+	}
+	if !strings.Contains(stderr.String(), "belongs to another incarnation") {
+		t.Fatalf("stderr = %q, want the incarnation-fence skip logged", stderr.String())
+	}
+}
+
+// recyclingCorpseProvider models the in-flight start winning the race against
+// the pass: by the time the pass reads the runtime's instance token, the start
+// has already replaced the old corpse with the row's new, live incarnation.
+type recyclingCorpseProvider struct {
+	*deadRuntimeArtifactProvider
+	name     string
+	newToken string
+}
+
+func (p *recyclingCorpseProvider) GetMeta(name, key string) (string, error) {
+	if name == p.name && key == "GC_INSTANCE_TOKEN" {
+		p.dead[name] = false
+		p.live[name] = true
+		if err := p.SetMeta(name, key, p.newToken); err != nil {
+			return "", err
+		}
+	}
+	return p.deadRuntimeArtifactProvider.GetMeta(name, key)
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesRechecksDeathAfterTheTokenMatches covers
+// the interleaving the token read alone cannot catch: the pass sees the old
+// corpse dead, the start then recycles the name into the row's new incarnation,
+// and the token read returns the new, matching token. Stopping on that match
+// would kill the live session the start just created.
+func TestCleanupDeadRuntimeSessionCorpsesRechecksDeathAfterTheTokenMatches(t *testing.T) {
+	const name = "worker-adhoc-2c4fa75693"
+	store, bead, snapshot := newDeadRuntimeCorpseRow(t, map[string]string{
+		"session_name":   name,
+		"template":       "worker",
+		"state":          string(session.StateCreating),
+		"instance_token": "token-after-the-pre-wake-commit",
+	})
+	base := newDeadRuntimeArtifactProvider()
+	base.visible[name] = true
+	base.dead[name] = true
+	if err := base.SetMeta(name, "GC_INSTANCE_TOKEN", "token-of-the-previous-incarnation"); err != nil {
+		t.Fatalf("stamp corpse instance token: %v", err)
+	}
+	sp := &recyclingCorpseProvider{deadRuntimeArtifactProvider: base, name: name, newToken: "token-after-the-pre-wake-commit"}
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
+	if got != 0 || base.stopCalls[name] != 0 {
+		t.Fatalf("cleanup = %d (Stop calls = %d), want the freshly started incarnation left running; stderr=%q", got, base.stopCalls[name], stderr.String())
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("re-fetch bead: %v", err)
+	}
+	if after.Status != "open" {
+		t.Fatalf("restarting row after corpse cleanup = status %q, want open", after.Status)
+	}
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesFenceToleratesAnUnstampedRuntime keeps
+// the fence from stranding corpses it cannot judge. A runtime with no
+// GC_INSTANCE_TOKEN does not prove it belongs to another incarnation, matching
+// how the reconciler's other token fences treat an empty runtime token, so the
+// #2437 close still happens.
+func TestCleanupDeadRuntimeSessionCorpsesFenceToleratesAnUnstampedRuntime(t *testing.T) {
+	const name = "worker-1"
+	store, bead, snapshot := newDeadRuntimeCorpseRow(t, map[string]string{
+		"session_name":   name,
+		"template":       "worker",
+		"state":          string(session.StateActive),
+		"instance_token": "token-current",
+	})
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible[name] = true
+	sp.dead[name] = true
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
+	if got != 1 || sp.stopCalls[name] != 1 {
+		t.Fatalf("cleanup = %d (Stop calls = %d), want the unstamped corpse reaped; stderr=%q", got, sp.stopCalls[name], stderr.String())
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("re-fetch bead: %v", err)
+	}
+	if after.Status != "closed" {
+		t.Fatalf("bead status = %q, want closed", after.Status)
 	}
 }
 
@@ -7591,7 +7914,7 @@ func TestCleanupDeadRuntimeSessionCorpsesToleratesNilStore(t *testing.T) {
 	}})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses(nilStore) = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -7647,7 +7970,7 @@ func TestCleanupDeadRuntimeSessionCorpsesClosesBeadWithInProgressWorkAssignedByI
 	snapshot := newSessionBeadSnapshot([]beads.Bead{sessionBead})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1 (runtime-Stop should still run); stderr=%q", got, stderr.String())
 	}
@@ -7706,7 +8029,7 @@ func TestCleanupDeadRuntimeSessionCorpsesClosesBeadWithOpenWorkAssignedBySession
 	snapshot := newSessionBeadSnapshot([]beads.Bead{sessionBead})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -7767,7 +8090,7 @@ func TestCleanupDeadRuntimeSessionCorpsesClosesBeadWithRigStoreWorkAssigned(t *t
 	snapshot := newSessionBeadSnapshot([]beads.Bead{sessionBead})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(store, map[string]beads.Store{"myrig": rigStore}, nil, snapshot, nil, sp, nil, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(store, map[string]beads.Store{"myrig": rigStore}, nil, snapshot, nil, sp, nil, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -7823,7 +8146,7 @@ func TestCleanupDeadRuntimeSessionCorpsesReleasesWorkOnDeadSession(t *testing.T)
 	snapshot := newSessionBeadSnapshot([]beads.Bead{sessionBead})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -7889,7 +8212,7 @@ func TestCleanupDeadRuntimeSessionCorpsesReleasesWorkAssignedBySessionName(t *te
 	snapshot := newSessionBeadSnapshot([]beads.Bead{sessionBead})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -8209,7 +8532,7 @@ func TestReapRuntimesBoundToClosedBeadsStopsLiveRuntime(t *testing.T) {
 	}})
 
 	var stderr bytes.Buffer
-	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, &stderr)
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("reapRuntimesBoundToClosedBeads() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -8240,7 +8563,7 @@ func TestReapRuntimesBoundToClosedBeadsSkipsOpenBeadRuntime(t *testing.T) {
 	}})
 
 	var stderr bytes.Buffer
-	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, &stderr)
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, nil, &stderr)
 	if got != 0 || sp.stopCalls["worker"] != 0 {
 		t.Fatalf("reaped open-bead runtime: got=%d stopCalls=%d stderr=%q", got, sp.stopCalls["worker"], stderr.String())
 	}
@@ -8256,7 +8579,7 @@ func TestReapRuntimesBoundToClosedBeadsSkipsRuntimeWithoutSessionID(t *testing.T
 	snapshot := newSessionBeadSnapshot(nil)
 
 	var stderr bytes.Buffer
-	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, &stderr)
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, nil, &stderr)
 	if got != 0 || sp.stopCalls["mystery"] != 0 {
 		t.Fatalf("reaped unattributable runtime: got=%d stopCalls=%d", got, sp.stopCalls["mystery"])
 	}
@@ -8282,7 +8605,7 @@ func TestReapRuntimesBoundToClosedBeadsSkipsUnknownAndNonClosedBeads(t *testing.
 	snapshot := newSessionBeadSnapshot(nil)
 
 	var stderr bytes.Buffer
-	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, &stderr)
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, nil, &stderr)
 	if got != 0 || sp.stopCalls["foreign"] != 0 || sp.stopCalls["still-open"] != 0 {
 		t.Fatalf("reaped a runtime that was not confirmed-closed: got=%d stderr=%q", got, stderr.String())
 	}
@@ -8304,7 +8627,7 @@ func TestReapRuntimesBoundToClosedBeadsSkipsActiveDrain(t *testing.T) {
 	dt.set("gm-closed", &drainState{reason: "user"})
 
 	var stderr bytes.Buffer
-	got := reapRuntimesBoundToClosedBeads(store, snapshot, dt, sp, &stderr)
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, dt, sp, nil, &stderr)
 	if got != 0 || sp.stopCalls["mayor"] != 0 {
 		t.Fatalf("reaped a draining runtime: got=%d stopCalls=%d", got, sp.stopCalls["mayor"])
 	}
@@ -9550,7 +9873,7 @@ func TestCleanupDeadRuntimeSessionCorpsesReapsPreBootBeadsWhenServerAbsent(t *te
 	})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -9588,7 +9911,7 @@ func TestCleanupDeadRuntimeSessionCorpsesFailSafesOnPartialListingWithLiveServer
 	}})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
 	if got != 0 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0 (fail-safe); stderr=%q", got, stderr.String())
 	}
@@ -9613,7 +9936,7 @@ func TestCleanupDeadRuntimeSessionCorpsesFailSafesWhenBootTimeUnavailable(t *tes
 	}})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, nil, &stderr)
 	if got != 0 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0 when boot time is unknown", got)
 	}
@@ -9685,7 +10008,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsUnreapableStatesAndTransports(t *t
 	})
 
 	var stderr bytes.Buffer
-	if got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr); got != 0 {
+	if got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, nil, &stderr); got != 0 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0; stderr=%q", got, stderr.String())
 	}
 	for _, id := range []string{"s-draining", "s-manual", "s-acp", "s-drained", "s-nostate", "s-city-stop"} {
@@ -9747,7 +10070,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsBeadsWithMalformedStartMarkers(t *
 			})
 
 			var stderr bytes.Buffer
-			if got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr); got != 1 {
+			if got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, nil, &stderr); got != 1 {
 				t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1 (control only); stderr=%q", got, stderr.String())
 			}
 			if b, err := store.Get("s-malformed"); err != nil || b.Status != "open" {
@@ -9757,5 +10080,54 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsBeadsWithMalformedStartMarkers(t *
 				t.Fatalf("control bead with a readable pre-boot %s should be reaped: status=%q err=%v", marker, b.Status, err)
 			}
 		})
+	}
+}
+
+// cachedSessionReopenedBehindTheCache returns a cache over a store holding
+// gm-reopened, closed through the cache and then reopened behind it without an
+// event (a Tx-shaped CLI reopen): the cached row still says closed, the store
+// says open.
+func cachedSessionReopenedBehindTheCache(t *testing.T) beads.Store {
+	t.Helper()
+	backing := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gm-reopened", Status: "open", Type: "session"}}, nil)
+	cache := beads.NewCachingStore(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := cache.Close("gm-reopened"); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := backing.Reopen("gm-reopened"); err != nil {
+		t.Fatalf("Reopen behind the cache: %v", err)
+	}
+	if cached, err := cache.Get("gm-reopened"); err != nil || cached.Status != "closed" {
+		t.Fatalf("precondition: cached row = (%q, %v), want the stale closed row", cached.Status, err)
+	}
+	return cache
+}
+
+// Kills: a closed-bead reap that confirms "closed" from a cached row, which
+// stops a live runtime whose bead another process reopened without an event.
+func TestReapRuntimesBoundToClosedBeadsConfirmsClosedLive(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["worker"] = true
+	if err := sp.SetMeta("worker", "GC_SESSION_ID", "gm-reopened"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	store := cachedSessionReopenedBehindTheCache(t)
+	var stderr bytes.Buffer
+	if got := reapRuntimesBoundToClosedBeads(store, newSessionBeadSnapshot(nil), nil, sp, nil, &stderr); got != 0 || len(sp.stopped) != 0 {
+		t.Fatalf("reaped %d (stopped %v) on a cached closed row the store has reopened; stderr=%q", got, sp.stopped, stderr.String())
+	}
+}
+
+// Kills: a process-table orphan verdict whose "independent" store read is a
+// cached Get that holds the same stale closed row as the snapshot.
+func TestSweepProcessTableOrphansConfirmsClosedLive(t *testing.T) {
+	store := cachedSessionReopenedBehindTheCache(t)
+	sp := newProcessTableSweepProvider(runtime.LiveRuntime{SessionID: "gm-reopened", PID: 501, IsTracked: false})
+	var stderr bytes.Buffer
+	if got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, "", &stderr); got != 0 || len(sp.terminated) != 0 {
+		t.Fatalf("swept %d (terminated %v) on a cached closed row the store has reopened; stderr=%q", got, sp.terminated, stderr.String())
 	}
 }

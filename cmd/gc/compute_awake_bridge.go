@@ -162,6 +162,7 @@ func buildAwakeInputFromReconcilerWithObservationErrors(
 			ExplicitWake:           lifecycle.HasWakeCause(session.WakeCauseExplicit),
 			DependencyOnly:         info.DependencyOnly,
 			NamedIdentity:          lifecycle.NamedIdentity,
+			Alias:                  stableAssignmentAliasForConfigInfo(info, cfg),
 			ConfiguredNamedSession: isNamedSessionInfo(info),
 			Pinned:                 lifecycle.HasWakeCause(session.WakeCausePinned),
 			Drained:                lifecycle.BaseState == session.BaseStateDrained,
@@ -229,8 +230,17 @@ func buildAwakeInputFromReconcilerWithObservationErrors(
 				input.AttachedSessions[name] = true
 			}
 		}
-		if pendingInteractionReady(sp, name) {
+		// Only a live runtime can raise an interaction. Probing dead targets
+		// would let an outage turn asleep sessions into wake candidates.
+		if !target.alive {
+			continue
+		}
+		switch answer, err := pendingInteractionProbe(sp, name); answer {
+		case pendingInteractionYes:
 			input.PendingSessions[name] = true
+		case pendingInteractionUnknown:
+			input.PendingSessions[name] = true
+			observationErrors[name] = err
 		}
 	}
 

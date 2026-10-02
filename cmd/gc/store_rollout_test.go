@@ -279,6 +279,7 @@ func TestConditionalWritesEventStoreKind(t *testing.T) {
 		beads.BeadsStoreNameFileStore:       "file",
 		"MemStore":                          "mem",
 		"CachingStore":                      "caching",
+		"SQLiteStore":                       "sqlite-graph",
 		"*beads.DoltliteReadStore":          "bd",
 		"someFutureStore":                   "someFutureStore",
 	} {

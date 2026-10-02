@@ -138,6 +138,7 @@ func TestMetricsStatusDefaultAndJSONStayRedacted(t *testing.T) {
 	if stdout != wantJSON || strings.Contains(stdout, disclosedMetricsInstallationID) || service.disclosureCalls != 0 {
 		t.Fatalf("JSON status = %q, disclosure calls=%d; want %q", stdout, service.disclosureCalls, wantJSON)
 	}
+	validateJSONResultSchema(t, []string{"metrics", "status"}, []byte(stdout))
 }
 
 func TestMetricsStatusInstallationIDDisclosureIsExplicitTextOnly(t *testing.T) {
@@ -406,6 +407,21 @@ func TestMetricsOffMapsEveryClosedResultWithoutLeakingCauses(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The status schema is published but was never checked against real output,
+// so two payload-invalidating defects sat in it undetected: a
+// "development-build" reason the code never emits (it emits
+// "unofficial-build"), and a privacy_url oneOf whose branches both matched the
+// empty string every shipped build reports. Run the real production service —
+// not a fake — through the schema so the contract is enforced, not asserted.
+func TestMetricsStatusJSONMatchesPublishedSchema(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	stdout, stderr, err := executeMetricsCommand(t, "status", "--json")
+	if err != nil || stderr != "" {
+		t.Fatalf("metrics status --json = err:%v stderr:%q", err, stderr)
+	}
+	validateJSONResultSchema(t, []string{"metrics", "status"}, []byte(stdout))
 }
 
 func withProductMetricsControlService(t *testing.T, service productMetricsControlService) {

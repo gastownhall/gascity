@@ -315,7 +315,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.3.0"
+      BD_VERSION: "v1.3.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -344,7 +344,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.3.0"
+      BD_VERSION: "v1.3.1"
     strategy:
       fail-fast: false
       matrix:
@@ -410,6 +410,8 @@ jobs:
         run: bd version
       - name: bd CLI contract (minimum supported)
         run: make test-bd-cli-contract
+      - name: bd CLI contract HOME isolation (minimum supported)
+        run: make test-bd-cli-contract-home-isolation
 
   # Cross-version contract gate: the "current" cell of the bd matrix. The
   # "prev" cell is contract-acceptance-previous above (the min-supported
@@ -455,6 +457,8 @@ jobs:
         run: bd version
       - name: bd CLI contract (current)
         run: make test-bd-cli-contract
+      - name: bd CLI contract HOME isolation (current)
+        run: make test-bd-cli-contract-home-isolation
       # The conditional-release CAS contract is wired only on this cell, but that
       # is now a choice, not a capability limit: BdStore.ReleaseIfCurrent prefers
       # bd's --if-assignee/--if-status verb (a rejected precondition is exit 13),
@@ -745,6 +749,8 @@ jobs:
         run: bd version
       - name: bd CLI contract (main HEAD)
         run: make test-bd-cli-contract
+      - name: bd CLI contract HOME isolation (main HEAD)
+        run: make test-bd-cli-contract-home-isolation
 
   preflight-generated:
     name: Preflight / generated artifacts
@@ -862,7 +868,7 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.3.0"
+      BD_VERSION: "v1.3.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -1040,7 +1046,7 @@ jobs:
             command: ./scripts/test-integration-shard rest-smoke-2-of-2
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.3.0"
+      BD_VERSION: "v1.3.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -1067,7 +1073,7 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.3.0"
+      BD_VERSION: "v1.3.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu

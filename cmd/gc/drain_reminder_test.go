@@ -611,3 +611,20 @@ func TestFinalizeDrainAckStopPendingRemindsTheLiveWedgeOnly(t *testing.T) {
 		})
 	}
 }
+
+// An attachment probe that cannot tell is not evidence nobody is at the pane,
+// and it records its own reason so an operator can tell it from a real attach.
+func TestDrainReminderQuietHoldHoldsOnAttachProbeError(t *testing.T) {
+	e := newDrainReminderEnv(t)
+	e.sp.AttachedErrors[e.name] = fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
+
+	if got := e.remind(); got != drainReminderHeld {
+		t.Fatalf("outcome = %v, want held", got)
+	}
+	if n := len(e.nudges()); n != 0 {
+		t.Errorf("nudge count = %d, want 0", n)
+	}
+	if got := e.meta(drainReminderHoldKey); got != drainReminderHoldAttachUnknown {
+		t.Errorf("%s = %q, want %q", drainReminderHoldKey, got, drainReminderHoldAttachUnknown)
+	}
+}

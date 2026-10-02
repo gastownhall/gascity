@@ -594,6 +594,14 @@ type Rig struct {
 	// Captured by `gc rig add` from the rig's git config; set manually for
 	// rigs whose mainline isn't reachable via origin/HEAD.
 	DefaultBranch string `toml:"default_branch,omitempty"`
+	// DefaultMergeStrategy is the merge strategy `gc sling` stamps on a bead
+	// routed into this rig when the caller passes no --merge flag. One of
+	// "direct", "mr", or "local"; empty leaves the bead unstamped, which
+	// consumers read as their own implicit default. Set it to "mr" on rigs
+	// that deliver work through a pull request instead of a push to the
+	// target branch, so a bare `gc sling` records the shape the rig actually
+	// uses rather than one every caller has to remember to pass.
+	DefaultMergeStrategy string `toml:"default_merge_strategy,omitempty"`
 	// Suspended is the deprecated pre-runtime-state suspension flag.
 	// Parsed for backwards compatibility and treated as an alias for
 	// SuspendedOnStart by [Rig.EffectiveSuspendedOnStart], so existing
@@ -1196,6 +1204,13 @@ const (
 // (e.g., git symbolic-ref) when this returns "".
 func (r *Rig) EffectiveDefaultBranch() string {
 	return strings.TrimSpace(r.DefaultBranch)
+}
+
+// EffectiveDefaultMergeStrategy returns the rig's recorded default merge
+// strategy, or the empty string if none is set. An empty result means `gc
+// sling` leaves merge_strategy unstamped on beads routed into this rig.
+func (r *Rig) EffectiveDefaultMergeStrategy() string {
+	return strings.TrimSpace(r.DefaultMergeStrategy)
 }
 
 // EffectiveSuspendedOnStart returns the rig's committable startup
@@ -2152,21 +2167,22 @@ type OrdersConfig struct {
 	// emit max_dispatches_per_tick = 0 into every marshaled city.toml.
 
 	// MaxDispatchesPerTick caps how many clock-driven orders (cooldown, cron
-	// and event triggers) the supervisor dispatches per tick, in a rotation
-	// that resumes where the previous tick stopped. Unset keeps the built-in
-	// default of 4; set to 1 to drain overdue cooldown orders one-per-tick at
-	// cold start instead of firing several concurrent goroutines at once.
-	// Condition-triggered orders are outside this budget: a passing check
-	// means work is pending right now, so they dispatch on the tick that
-	// observes it. The open-tracking and open-work gates still run for them
-	// (unless the order sets no_work_gate), but those gates are keyed per
-	// order and only hold back a redispatch of an order whose previous run
-	// is still moving, so they do not bound the tick as a whole: a tick
-	// launches at most this budget plus one dispatch per condition order
-	// whose check passed on that tick. That second term grows with how many
-	// condition orders a city defines, not with this setting, and at cold
-	// start, before any tracking bead exists, neither gate holds a
-	// simultaneously-due set back.
+	// and event triggers) the supervisor dispatches per orders-lane pass, in
+	// a rotation that resumes where the previous pass stopped. The key keeps
+	// its historical name from when order dispatch ran once per controller
+	// tick. Unset keeps the built-in default of 4; set to 1 to drain overdue
+	// cooldown orders one per pass at cold start instead of firing several
+	// concurrent goroutines at once. Condition-triggered orders are outside
+	// this budget: a passing check means work is pending right now, so they
+	// dispatch on the pass that observes it. The open-tracking and open-work
+	// gates still run for them (unless the order sets no_work_gate), but
+	// those gates are keyed per order and only hold back a redispatch of an
+	// order whose previous run is still moving, so they do not bound the pass
+	// as a whole: a pass launches at most this budget plus one dispatch per
+	// condition order whose check passed on that pass. That second term grows
+	// with how many condition orders a city defines, not with this setting,
+	// and at cold start, before any tracking bead exists, neither gate holds
+	// a simultaneously-due set back.
 	MaxDispatchesPerTick *int `toml:"max_dispatches_per_tick,omitempty"`
 	// Overrides apply per-order field overrides after scanning.
 	// Each override targets an order by name and optionally by rig.
@@ -4439,6 +4455,10 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 
 		if branch := r.EffectiveDefaultBranch(); branch != "" && !defaultBranchCharset.MatchString(branch) {
 			return fmt.Errorf("rig %q: default_branch %q contains characters outside [A-Za-z0-9._/@+=-]; the value is interpolated into prompts, formula variables, and pre_start shell commands, so shell-active characters are refused", r.Name, branch)
+		}
+		if strategy := r.EffectiveDefaultMergeStrategy(); strategy != "" && !beadmeta.IsKnownMergeStrategy(strategy) {
+			return fmt.Errorf("rig %q: default_merge_strategy %q is not one of %s",
+				r.Name, strategy, strings.Join(beadmeta.KnownMergeStrategies, ", "))
 		}
 	}
 	return nil

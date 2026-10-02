@@ -63,6 +63,25 @@ func TestLintUsesReadonlyModuleDownloads(t *testing.T) {
 	}
 }
 
+func TestLintAllowsParallelRunners(t *testing.T) {
+	configPath := filepath.Join(repoRoot(t), ".golangci.yml")
+	body, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", configPath, err)
+	}
+	var config struct {
+		Run struct {
+			AllowParallelRunners bool `yaml:"allow-parallel-runners"`
+		} `yaml:"run"`
+	}
+	if err := yaml.Unmarshal(body, &config); err != nil {
+		t.Fatalf("parse %s: %v", configPath, err)
+	}
+	if !config.Run.AllowParallelRunners {
+		t.Fatalf("run.allow-parallel-runners must be true: concurrent lint runs on a shared host otherwise fail with %q before analysis (ga-88dvlm)", "parallel golangci-lint is running")
+	}
+}
+
 func TestQualityGateTargetsUseReadonlyModuleDownloads(t *testing.T) {
 	makefile, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
 	if err != nil {

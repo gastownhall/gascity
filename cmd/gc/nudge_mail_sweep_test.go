@@ -895,7 +895,7 @@ func TestRunNudgeMailSweepWatchdog_UnsetConfigUsesDefaultMailTTL(t *testing.T) {
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runNudgeMailSweepWatchdog(now)
+	cr.runNudgeMailSweepWatchdog(cr.cfg, now)
 
 	got, err := store.Get("mail-stale")
 	if err != nil {
@@ -924,7 +924,7 @@ func TestRunNudgeMailSweepWatchdog_CustomMailRetentionTTLUsed(t *testing.T) {
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runNudgeMailSweepWatchdog(now)
+	cr.runNudgeMailSweepWatchdog(cr.cfg, now)
 
 	got, err := store.Get("mail-15m")
 	if err != nil {
@@ -958,7 +958,7 @@ func TestRunNudgeMailSweepWatchdog_ExplicitZeroDisablesMailSweep(t *testing.T) {
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runNudgeMailSweepWatchdog(now)
+	cr.runNudgeMailSweepWatchdog(cr.cfg, now)
 
 	gotNudge, err := store.Get("nudge-stale")
 	if err != nil {

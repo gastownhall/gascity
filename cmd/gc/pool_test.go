@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -116,7 +117,7 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
 	pinTestOwnedBDHome(t)
 	t.Setenv("PATH", filepath.Dir(bdPath)+":"+filepath.Dir(jqPath)+":"+os.Getenv("PATH"))
 
-	dir := t.TempDir()
+	dir := beadstest.GuardedTempDir(t)
 	registerRealBDServerStop(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -162,7 +163,7 @@ func TestEvaluatePoolDefaultScaleCheckIgnoresRoutedActiveUnassignedWork(t *testi
 	pinTestOwnedBDHome(t)
 	t.Setenv("PATH", filepath.Dir(bdPath)+":"+filepath.Dir(jqPath)+":"+os.Getenv("PATH"))
 
-	dir := t.TempDir()
+	dir := beadstest.GuardedTempDir(t)
 	registerRealBDServerStop(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
@@ -225,7 +226,7 @@ func TestCmdGCRealBDTestsUseTestOwnedDoltContext(t *testing.T) {
 	}
 
 	t.Setenv("PATH", filepath.Dir(bdPath)+string(os.PathListSeparator)+os.Getenv("PATH"))
-	dir := t.TempDir()
+	dir := beadstest.GuardedTempDir(t)
 	registerRealBDServerStop(t, dir)
 	runExternal(t, dir, bdPath, "init", "-p", "ct", "--skip-hooks", "-q")
 
@@ -244,11 +245,13 @@ func TestCmdGCRealBDTestsUseTestOwnedDoltContext(t *testing.T) {
 	}
 }
 
+// pinTestOwnedBDHome delegates to the shared gascity test helper (ga-zq8iwb)
+// that deterministically retries a TempDir removal so it never races a
+// lingering real-bd/eventkit writer. It keeps its original name so this
+// package's existing call sites need no changes.
 func pinTestOwnedBDHome(t *testing.T) string {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	return home
+	return beadstest.TestOwnedHome(t)
 }
 
 func TestEvaluatePoolNewDemandDoesNotApplyMinOrMax(t *testing.T) {

@@ -69,6 +69,7 @@ go_test(
         "spawn_unix_test.go",
         "spool_unix_test.go",
         "state_namespace_unix_test.go",
+        "status_reason_schema_test.go",
         "status_test.go",
         "status_unix_test.go",
         "status_writer_unix_test.go",
@@ -87,6 +88,7 @@ go_test(
     embed = [":productmetrics"],
     shard_count = 2,
     deps = [
+        "//:gascity",
         "//internal/testenv",
     ] + select({
         "@rules_go//go/platform:aix": [

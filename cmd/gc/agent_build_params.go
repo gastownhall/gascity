@@ -95,6 +95,11 @@ type agentBuildParams struct {
 	// does not set it.
 	providerHealthSnapshot *providerHealthSnapshot
 
+	// realizeProbe times and counts pool realization for the realize_pools
+	// trace record. Set by buildDesiredState around its realization loop only;
+	// nil elsewhere, which disables the counters.
+	realizeProbe *poolRealizeProbe
+
 	// beadNames caches qualifiedName → session_name mappings resolved
 	// during this build cycle. Populated lazily by resolveSessionName.
 	beadNames map[string]string
