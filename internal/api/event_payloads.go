@@ -599,6 +599,36 @@ func BeadDeadAssigneeReopenedPayloadJSON(beadID, deadAssignee, routedTo string) 
 	return b
 }
 
+// BeadRedispatchCapHeldPayload is the typed payload for
+// bead.redispatch_cap_held events. Emitted when the dispatch redispatch-cap
+// guard (ra-3y4okc) auto-holds a work bead that accumulated too many
+// consecutive session.drain_acked_with_assigned_work cycles without any
+// dispatch-visible field changing — the escalate-and-drain livelock
+// signature. Mirrors BeadDeadAssigneeReopenedPayload's shape for a sibling
+// auto-repair action.
+type BeadRedispatchCapHeldPayload struct {
+	BeadID    string `json:"bead_id" doc:"ID of the auto-held work bead (also the envelope Subject)."`
+	SessionID string `json:"session_id,omitempty" doc:"Session bead ID whose drain-ack cycle tripped the cap."`
+	RoutedTo  string `json:"routed_to,omitempty" doc:"The gc.routed_to pool BeadID was stuck looping against, when set."`
+	Cycles    int    `json:"cycles" doc:"Number of consecutive drain-acked-with-assigned-work cycles observed inside the window before the cap tripped."`
+}
+
+// IsEventPayload marks BeadRedispatchCapHeldPayload as an events.Payload variant.
+func (BeadRedispatchCapHeldPayload) IsEventPayload() {}
+
+// BeadRedispatchCapHeldPayloadJSON builds the JSON wire form for attachment
+// to an events.Event.Payload field. SessionID and RoutedTo are emitted only
+// when non-empty.
+func BeadRedispatchCapHeldPayloadJSON(beadID, sessionID, routedTo string, cycles int) json.RawMessage {
+	b, _ := json.Marshal(BeadRedispatchCapHeldPayload{
+		BeadID:    beadID,
+		SessionID: sessionID,
+		RoutedTo:  routedTo,
+		Cycles:    cycles,
+	})
+	return b
+}
+
 // SessionUnknownStatePayload carries the machine-readable context for a
 // session.unknown_state event: a session bead whose metadata state the
 // reconciler does not recognize and therefore skips (forward-compatible
@@ -678,6 +708,7 @@ func init() {
 	events.RegisterPayload(events.BeadClosed, BeadEventPayload{})
 	events.RegisterPayload(events.BeadDeleted, BeadEventPayload{})
 	events.RegisterPayload(events.BeadDeadAssigneeReopened, BeadDeadAssigneeReopenedPayload{})
+	events.RegisterPayload(events.BeadRedispatchCapHeld, BeadRedispatchCapHeldPayload{})
 
 	// session.* / convoy.* / controller.* / city.* / order.* /
 	// provider.* — these events carry no structured payload today;

@@ -133,6 +133,13 @@ export const zBeadDeadAssigneeReopenedPayload = z.object({
     routed_to: z.string().optional()
 });
 
+export const zBeadRedispatchCapHeldPayload = z.object({
+    bead_id: z.string(),
+    cycles: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    routed_to: z.string().optional(),
+    session_id: z.string().optional()
+});
+
 export const zBeadUpdateBody = z.object({
     assignee: z.string().optional(),
     description: z.string().optional(),
@@ -3357,6 +3364,7 @@ export const zEventPayload = z.union([
     zBeadClaimReleasedPayload,
     zBeadDeadAssigneeReopenedPayload,
     zBeadEventPayload,
+    zBeadRedispatchCapHeldPayload,
     zBeadWorktreeReapSkippedPayload,
     zBeadWorktreeReapedPayload,
     zBoundEventPayload,
@@ -3624,6 +3632,24 @@ export const zTypedEventStreamEnvelopeBeadDeleted = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('bead.deleted'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedEventStreamEnvelope bead.redispatch_cap_held
+ */
+export const zTypedEventStreamEnvelopeBeadRedispatchCapHeld = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zBeadRedispatchCapHeldPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('bead.redispatch_cap_held'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -5350,6 +5376,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeBeadCreated.extend({ type: z.literal('bead.created') }),
     zTypedEventStreamEnvelopeBeadDeadAssigneeReopened.extend({ type: z.literal('bead.dead_assignee_reopened') }),
     zTypedEventStreamEnvelopeBeadDeleted.extend({ type: z.literal('bead.deleted') }),
+    zTypedEventStreamEnvelopeBeadRedispatchCapHeld.extend({ type: z.literal('bead.redispatch_cap_held') }),
     zTypedEventStreamEnvelopeBeadUpdated.extend({ type: z.literal('bead.updated') }),
     zTypedEventStreamEnvelopeBeadWorktreeReapSkipped.extend({ type: z.literal('bead.worktree.reap_skipped') }),
     zTypedEventStreamEnvelopeBeadWorktreeReaped.extend({ type: z.literal('bead.worktree.reaped') }),
@@ -5585,6 +5612,25 @@ export const zTypedTaggedEventStreamEnvelopeBeadDeleted = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('bead.deleted'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope bead.redispatch_cap_held
+ */
+export const zTypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zBeadRedispatchCapHeldPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('bead.redispatch_cap_held'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -7406,6 +7452,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeBeadCreated.extend({ type: z.literal('bead.created') }),
     zTypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened.extend({ type: z.literal('bead.dead_assignee_reopened') }),
     zTypedTaggedEventStreamEnvelopeBeadDeleted.extend({ type: z.literal('bead.deleted') }),
+    zTypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld.extend({ type: z.literal('bead.redispatch_cap_held') }),
     zTypedTaggedEventStreamEnvelopeBeadUpdated.extend({ type: z.literal('bead.updated') }),
     zTypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped.extend({ type: z.literal('bead.worktree.reap_skipped') }),
     zTypedTaggedEventStreamEnvelopeBeadWorktreeReaped.extend({ type: z.literal('bead.worktree.reaped') }),
