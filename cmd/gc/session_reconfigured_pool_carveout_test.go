@@ -111,8 +111,8 @@ func k88Sync(t *testing.T, store beads.Store, cfg *config.City, sp runtime.Provi
 	return stderr.String()
 }
 
-// RED on main: ask 1. The per-tick sync never refreshes "command" on an
-// adopted -pool named bead that holds assigned work.
+// Ask 1: before the ga-vixyn5.1 carve-out, the per-tick sync never refreshed
+// "command" on an adopted -pool named bead that holds assigned work.
 func TestK88_SyncRefreshesCommandOnAdoptedPoolNamedBeadWithAssignedWork(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := k88Config()
@@ -205,9 +205,10 @@ func TestK88_Observation_AdoptedPoolNamedBeadWithoutWorkIsClosedAsReconfigured(t
 // Artifact: how the fleet beads got this shape. A plain canonical-singleton
 // pool bead (alias == named identity) is found canonical for the named spec by
 // FindCanonicalNamedSessionInfo's alias pass; the sync tick that follows stamps
-// the configured-named metadata onto it. That tick is the LAST sync write: from
-// the next tick on the reconfigured gate blocks the identity. Live evidence:
-// every adopted -pool named bead has synced_at frozen 24-36 min after creation.
+// the configured-named metadata onto it. Before the ga-vixyn5.1 carve-out that
+// tick was the LAST sync write: from the next tick on the reconfigured gate
+// blocked the identity. Live evidence: every adopted -pool named bead had
+// synced_at frozen 24-36 min after creation.
 func TestK88_Artifact_AdoptionTickIsLastSyncWrite(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := k88Config()
@@ -239,5 +240,91 @@ func TestK88_Artifact_AdoptionTickIsLastSyncWrite(t *testing.T) {
 	t.Logf("tick2: command=%q synced_at=%q", tick2.Metadata["command"], tick2.Metadata["synced_at"])
 	if tick2.Metadata["command"] != tp.Command {
 		t.Fatalf("tick2 did not refresh the command: got %q, want %q (the freeze reproduced)", tick2.Metadata["command"], tp.Command)
+	}
+}
+
+// Boundary-length variant: when spec.SessionName+poolRuntimeNameSuffix exceeds
+// session.MaxExplicitSessionNameLen, the pool step-aside name is the hashed
+// boundSessionNameLength form (poolRuntimeSessionName), and the carve-out must
+// recognize that bounded name rather than the raw concatenation.
+func TestK88_SyncRefreshesCommandOnBoundaryLengthAdoptedPoolNamedBead(t *testing.T) {
+	const longName = "deployer-with-a-deliberately-long-name-to-hit-the-cap"
+	const identity = "gascity/" + longName
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: longName, Dir: "gascity", StartCommand: "true", MaxActiveSessions: intPtr(1)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: longName, Dir: "gascity", Mode: "on_demand"},
+		},
+	}
+	sp := runtime.NewFake()
+
+	spec, ok := findNamedSessionSpec(cfg, "test-city", identity)
+	if !ok {
+		t.Fatalf("precondition: named spec for %q not found", identity)
+	}
+	unbounded := spec.SessionName + poolRuntimeNameSuffix
+	if len(spec.SessionName) > session.MaxExplicitSessionNameLen || len(unbounded) <= session.MaxExplicitSessionNameLen {
+		t.Fatalf("precondition: want len(spec.SessionName)=%d <= %d < len(%q)=%d",
+			len(spec.SessionName), session.MaxExplicitSessionNameLen, unbounded, len(unbounded))
+	}
+	poolName := boundSessionNameLength(unbounded)
+	if poolName == unbounded {
+		t.Fatalf("precondition: boundSessionNameLength did not shorten %q", unbounded)
+	}
+
+	b, err := store.Create(beads.Bead{
+		Title:  identity,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               poolName,
+			"alias":                      identity,
+			"template":                   identity,
+			"agent_name":                 identity,
+			"state":                      "asleep",
+			"session_origin":             "named",
+			"wake_mode":                  "fresh",
+			"command":                    k88Stale,
+			"synced_at":                  "2026-09-08T03:44:52Z",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: identity,
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("seeding session bead: %v", err)
+	}
+	w, err := store.Create(beads.Bead{Title: "needs-deploy: something", Type: "task", Assignee: identity})
+	if err != nil {
+		t.Fatalf("seeding work bead: %v", err)
+	}
+	status := "in_progress"
+	if err := store.Update(w.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("claiming work bead: %v", err)
+	}
+
+	ds := k88NamedDesired(poolName)
+	tp := ds[poolName]
+	tp.TemplateName = identity
+	tp.InstanceName = identity
+	tp.Alias = identity
+	tp.ConfiguredNamedIdentity = identity
+	ds[poolName] = tp
+	log := k88Sync(t, store, cfg, sp, ds)
+
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("bead status=%q, want open (it holds assigned work)", got.Status)
+	}
+	if got.Metadata["command"] != k88Fresh {
+		t.Fatalf("sync did not refresh command on boundary-length adopted -pool named bead:\n  stored  = %q\n  desired = %q\n  stderr=%q",
+			got.Metadata["command"], k88Fresh, log)
 	}
 }

@@ -1810,8 +1810,9 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			// bug (TestK88_Observation_AdoptedPoolNamedBeadWithoutWorkIsClosedAsReconfigured).
 			// Only the failure side effect changes: this identity must not
 			// enter blockedReconfiguredNamedIdentities, since it was never a
-			// real reconfiguration conflict to begin with.
-			carveOut := spec.Agent != nil && spec.Agent.UsesCanonicalSingletonPoolIdentity() && beadSessionName == spec.SessionName+poolRuntimeNameSuffix
+			// real reconfiguration conflict to begin with. The step-aside name is
+			// bounded exactly as poolRuntimeSessionName bounds it.
+			carveOut := spec.Agent != nil && spec.Agent.UsesCanonicalSingletonPoolIdentity() && beadSessionName == boundSessionNameLength(spec.SessionName+poolRuntimeNameSuffix)
 			if !closeSessionBeadIfRuntimeStoppedAndUnassigned(cityPath, store, rigStores, sp, cfg, b, "reconfigured", "reconfigured named session", now, stderr) {
 				if !carveOut {
 					blockedReconfiguredNamedIdentities[identity] = true
