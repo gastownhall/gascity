@@ -641,3 +641,34 @@ func TestHybridBackends_NamesBackendsWithoutListing(t *testing.T) {
 		}
 	}
 }
+
+// providerOnly hides every optional interface of the wrapped provider.
+type providerOnly struct{ runtime.Provider }
+
+var _ runtime.BackgroundWorkObserver = (*Provider)(nil)
+
+func TestHasBackgroundWork_RoutesToBackend(t *testing.T) {
+	def, other := runtime.NewFake(), runtime.NewFake()
+	p := New(def, other, isRemote)
+	def.BackgroundWork["plain"] = true
+
+	busy, err := p.HasBackgroundWork("plain")
+	if err != nil || !busy {
+		t.Fatalf("HasBackgroundWork(plain) = %v, %v; want true, nil from the routed backend", busy, err)
+	}
+	if n := other.CountCalls("HasBackgroundWork", "plain"); n != 0 {
+		t.Errorf("other backend HasBackgroundWork calls = %d, want 0", n)
+	}
+	other.BackgroundWorkErrors["remote-agent-1"] = errors.New("capture failed")
+	if _, err := p.HasBackgroundWork("remote-agent-1"); err == nil {
+		t.Error("HasBackgroundWork(remote-agent-1) error = nil, want the routed backend's error")
+	}
+}
+
+func TestHasBackgroundWork_NoneWhenRouteCannotObserve(t *testing.T) {
+	p := New(providerOnly{runtime.NewFake()}, providerOnly{runtime.NewFake()}, isRemote)
+	busy, err := p.HasBackgroundWork("plain")
+	if err != nil || busy {
+		t.Fatalf("HasBackgroundWork = %v, %v; want false, nil when the backend cannot observe background work", busy, err)
+	}
+}

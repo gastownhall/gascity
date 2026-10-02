@@ -4316,7 +4316,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 						}
 					}
-					if ran, fold := cycleAliveSessionForFreshReassign(infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace); ran {
+					// The guards above judge bead state; this one judges the
+					// session. Killing a session mid-turn loses whatever it was
+					// doing (a push, a commit, a comment), so the cycle waits
+					// for an idle prompt. A deferral skips the stamp below so
+					// the divergence survives to the next pass.
+					if !freshCycleAtIdleBoundary(ctx, infoByID[target.info.ID], decision.AssignedWorkBeadID, dt, sp, clk, target.tp.TemplateName, stdout, trace) {
+						continue
+					}
+					deferredFor := dt.takeFreshCycleDeferral(target.info.ID, decision.AssignedWorkBeadID, clk.Now())
+					if ran, fold := cycleAliveSessionForFreshReassign(infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), deferredFor, stdout, stderr, trace); ran {
 						if fold != nil {
 							tick.apply(target.info.ID, fold)
 						}
@@ -4328,6 +4337,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// separate stamp here — fall through to the
 				// recordCurrentBeadIDOnWake backstop below, which re-stamps
 				// currently_processing_bead_id to match.
+			}
+			if dt.dropFreshCycleDeferral(target.info.ID) {
+				// A cycle this session was waiting on for an idle prompt is no
+				// longer wanted (it claimed the new bead itself, or the
+				// divergence went away). Drop the probe it started: no other
+				// path consumes one for an assigned-work named session.
+				dt.clearIdleProbe(target.info.ID)
 			}
 			// Stamp currently_processing_bead_id so the next divergence check has
 			// a baseline. Backfills legacy sessions that were already alive before
@@ -6492,15 +6508,28 @@ func shouldBeginIdleDrainInfo(
 		dt.clearIdleProbe(info.ID)
 		return false, nil
 	}
-	lastActivity, err := workerSessionTargetLastActivityWithConfig("", nil, sp, nil, info.SessionNameMetadata)
-	if errors.Is(err, runtime.ErrRuntimeUnavailable) {
-		return false, fmt.Errorf("observe last activity for %q: %w", info.SessionNameMetadata, err)
+	quiet, err := quietSinceIdleProbe(sp, info.SessionNameMetadata, probe.completedAt)
+	if err != nil {
+		return false, err
 	}
 	dt.clearIdleProbe(info.ID)
+	return quiet, nil
+}
+
+// quietSinceIdleProbe reports whether the session's pane has shown no activity
+// since a successful idle probe completed at completedAt. Activity after the
+// probe means the agent started a new turn, so the probe no longer proves it
+// idle. An observation error reports not quiet; only ErrRuntimeUnavailable is
+// returned, so the caller can keep the probe and re-read it next tick.
+func quietSinceIdleProbe(sp runtime.Provider, sessionName string, completedAt time.Time) (bool, error) {
+	lastActivity, err := workerSessionTargetLastActivityWithConfig("", nil, sp, nil, sessionName)
+	if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		return false, fmt.Errorf("observe last activity for %q: %w", sessionName, err)
+	}
 	if err != nil {
 		return false, nil
 	}
-	return lastActivity.IsZero() || !lastActivity.After(probe.completedAt), nil
+	return lastActivity.IsZero() || !lastActivity.After(completedAt), nil
 }
 
 // idleRespawnDrainReason marks a drain begun on an idle session that is awake
@@ -6744,6 +6773,11 @@ func clearMissingIdleProbes(dt *drainTracker, infoByID map[string]sessionpkg.Inf
 	for id := range dt.liveClaimVetoes {
 		if _, ok := infoByID[id]; !ok {
 			delete(dt.liveClaimVetoes, id)
+		}
+	}
+	for id := range dt.freshDeferrals {
+		if _, ok := infoByID[id]; !ok {
+			delete(dt.freshDeferrals, id)
 		}
 	}
 	dt.mu.Unlock()

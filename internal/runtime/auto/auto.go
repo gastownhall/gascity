@@ -327,6 +327,15 @@ func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Du
 	return runtime.ErrInteractionUnsupported
 }
 
+// HasBackgroundWork delegates to the routed backend when it can observe work
+// an agent left running outside its turn. A backend that cannot reports none.
+func (p *Provider) HasBackgroundWork(name string) (bool, error) {
+	if bw, ok := p.route(name).(runtime.BackgroundWorkObserver); ok {
+		return bw.HasBackgroundWork(name)
+	}
+	return false, nil
+}
+
 // SnapshotIdle delegates to the routed backend when it can take a
 // point-in-time idle observation. Without this the composite would hide a
 // tmux-backed session's SnapshotIdle from every caller as soon as any agent in

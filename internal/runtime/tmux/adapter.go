@@ -583,6 +583,12 @@ func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Du
 	return p.tm.WaitForIdle(ctx, name, timeout)
 }
 
+// HasBackgroundWork reports whether the named session's agent left work running
+// outside its turn. It implements [runtime.BackgroundWorkObserver].
+func (p *Provider) HasBackgroundWork(name string) (bool, error) {
+	return p.tm.HasBackgroundWork(name)
+}
+
 // SnapshotIdle reports, in a single non-blocking observation, whether the named
 // session is at an idle interactive boundary right now. It implements
 // [runtime.IdleSnapshotProvider].

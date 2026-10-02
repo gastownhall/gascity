@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,7 +61,9 @@ func TestReconcileSessionBeads_AliveFreshModeReassignCyclesConversation(t *testi
 	// wb-A is gone (closed/burned), so the reconciler only sees wb-B.
 	workBead := beads.Bead{ID: "wb-B", Title: "next witness wisp", Type: "task", Status: "in_progress", Assignee: "witness"}
 
-	reconcileSessionBeadsWithAssignedWork(env, []beads.Bead{session}, []beads.Bead{workBead})
+	// The runtime cannot wait for an idle prompt, so the idle gate does
+	// not hold the cycle; these rows pin the bead-state guards alone.
+	reconcileSessionBeadsWithProvider(env, noIdleWaitProvider{env.sp}, []beads.Bead{session}, []beads.Bead{workBead})
 
 	if env.sp.IsRunning(sessionName) {
 		t.Fatal("session should have been killed by fresh-cycle")
@@ -325,7 +331,9 @@ func TestReconcileSessionBeads_FreshCycleFires_WhenPreviousBeadClosedWithNoTimin
 
 	workBead := beads.Bead{ID: "wb-new", Title: "next witness wisp", Type: "task", Status: "in_progress", Assignee: "witness"}
 
-	reconcileSessionBeadsWithAssignedWork(env, []beads.Bead{session}, []beads.Bead{workBead})
+	// The runtime cannot wait for an idle prompt, so the idle gate does
+	// not hold the cycle; these rows pin the bead-state guards alone.
+	reconcileSessionBeadsWithProvider(env, noIdleWaitProvider{env.sp}, []beads.Bead{session}, []beads.Bead{workBead})
 
 	if env.sp.IsRunning(sessionName) {
 		t.Fatal("session should have been killed by fresh-cycle — previous bead is closed and no timing signal defers it")
@@ -445,7 +453,9 @@ func TestReconcileSessionBeads_FreshCycleFires_WhenIncarnationPredatesPreviousCl
 
 	workBead := beads.Bead{ID: "wb-new", Title: "next witness wisp", Type: "task", Status: "in_progress", Assignee: "witness"}
 
-	reconcileSessionBeadsWithAssignedWork(env, []beads.Bead{session}, []beads.Bead{workBead})
+	// The runtime cannot wait for an idle prompt, so the idle gate does
+	// not hold the cycle; these rows pin the bead-state guards alone.
+	reconcileSessionBeadsWithProvider(env, noIdleWaitProvider{env.sp}, []beads.Bead{session}, []beads.Bead{workBead})
 
 	if env.sp.IsRunning(sessionName) {
 		t.Fatal("session should have been killed by fresh-cycle — this incarnation predates the previous bead's close")
@@ -574,7 +584,9 @@ func TestReconcileSessionBeads_FreshCycleFires_WhenSelfClaimMismatchesAnchor(t *
 
 	workBead := beads.Bead{ID: "wb-new", Title: "next witness wisp", Type: "task", Status: "in_progress", Assignee: "witness"}
 
-	reconcileSessionBeadsWithAssignedWork(env, []beads.Bead{session}, []beads.Bead{workBead})
+	// The runtime cannot wait for an idle prompt, so the idle gate does
+	// not hold the cycle; these rows pin the bead-state guards alone.
+	reconcileSessionBeadsWithProvider(env, noIdleWaitProvider{env.sp}, []beads.Bead{session}, []beads.Bead{workBead})
 
 	if env.sp.IsRunning(sessionName) {
 		t.Fatal("session should have been killed by fresh-cycle — current_claim_bead_id does not match the anchor")
@@ -712,6 +724,494 @@ func createPrevBead(t *testing.T, env *restartRequestTestEnv, closedAt *time.Tim
 	if closedAt != nil {
 		if _, err := env.store.CloseAll([]string{id}, map[string]string{"closed_at": closedAt.Format(time.RFC3339)}); err != nil {
 			t.Fatalf("closing prev bead %s: %v", id, err)
+		}
+	}
+}
+
+// freshCycleFixture is an alive wake_mode=fresh named session whose recorded
+// bead (wb-prev) closed before this incarnation's timing could prove it fresh,
+// while a second bead is assigned — so #6518's and #6809's guards let the
+// bead-reassign cycle through, and only the idle-prompt gate stands between
+// the session and a kill.
+type freshCycleFixture struct {
+	env         *restartRequestTestEnv
+	sp          runtime.Provider
+	sessionID   string
+	sessionName string
+	work        []beads.Bead
+}
+
+func newFreshCycleFixture(t *testing.T) *freshCycleFixture {
+	t.Helper()
+	env := newRestartRequestTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "witness", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "witness")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "witness",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+	closedAt := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+	createPrevBead(t, env, &closedAt)
+
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "witness",
+		namedSessionModeMetadata:     "on_demand",
+		"template":                   "witness",
+		"state":                      "active",
+		"wake_mode":                  "fresh",
+		"session_key":                "conversation-A",
+		sessionpkg.CurrentBeadIDKey:  "wb-prev",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	return &freshCycleFixture{
+		env:         env,
+		sp:          env.sp,
+		sessionID:   session.ID,
+		sessionName: sessionName,
+		work:        []beads.Bead{{ID: "wb-new", Title: "next witness wisp", Type: "task", Status: "in_progress", Assignee: "witness"}},
+	}
+}
+
+// pass runs one reconciler pass over the session as the store holds it now,
+// then waits for any idle probe the pass launched to settle so the next pass
+// observes its result deterministically.
+func (f *freshCycleFixture) pass(t *testing.T) {
+	t.Helper()
+	session, err := f.env.store.Get(f.sessionID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", f.sessionID, err)
+	}
+	reconcileSessionBeadsWithProvider(f.env, f.sp, []beads.Bead{session}, f.work)
+	waitIdleProbesSettled(t, f.env.dt)
+}
+
+func (f *freshCycleFixture) currentBead(t *testing.T) string {
+	t.Helper()
+	got, err := f.env.store.Get(f.sessionID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", f.sessionID, err)
+	}
+	return got.Metadata[sessionpkg.CurrentBeadIDKey]
+}
+
+// reconcileSessionBeadsWithProvider is reconcileSessionBeadsWithAssignedWork
+// with the runtime provider supplied by the caller, so a test can hide the
+// Fake's optional interfaces behind a narrower wrapper.
+func reconcileSessionBeadsWithProvider(env *restartRequestTestEnv, sp runtime.Provider, sessions []beads.Bead, assignedWork []beads.Bead) {
+	poolDesired := make(map[string]int)
+	for _, tp := range env.desiredState {
+		if tp.TemplateName != "" {
+			poolDesired[tp.TemplateName]++
+		}
+	}
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	_ = reconcileSessionBeads(
+		context.Background(), sessions, env.desiredState, cfgNames, env.cfg, sp, env.store,
+		nil, assignedWork, nil, env.dt, poolDesired, false, nil, "", nil, env.clk, env.rec,
+		0, 0, &env.stdout, &env.stderr,
+	)
+}
+
+// waitIdleProbesSettled blocks until no idle probe is in flight, except probes
+// a test holds open on a WaitForIdleGates channel (the caller passes those
+// session IDs in held).
+func waitIdleProbesSettled(t *testing.T, dt *drainTracker, held ...string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		inFlight := 0
+		dt.mu.Lock()
+		for id, probe := range dt.idleProbes {
+			if probe != nil && !probe.ready && !slices.Contains(held, id) {
+				inFlight++
+			}
+		}
+		dt.mu.Unlock()
+		if inFlight == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d idle probe(s) still in flight after 5s", inFlight)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func idleProbesInFlight(dt *drainTracker) int {
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	n := 0
+	for _, probe := range dt.idleProbes {
+		if probe != nil && !probe.ready {
+			n++
+		}
+	}
+	return n
+}
+
+// noIdleWaitProvider exposes only the runtime.Provider method set, hiding the
+// Fake's IdleWaitProvider and BackgroundWorkObserver implementations.
+type noIdleWaitProvider struct{ runtime.Provider }
+
+var errFreshCycleTestBusy = errors.New("agent busy")
+
+// TestFreshCycleDefersWhileBusy: a fresh session's recorded bead closes while
+// a second bead is assigned to it, and the runtime reports the agent mid-turn.
+// The cycle must wait: no kill, no re-stamp of currently_processing_bead_id,
+// and one deferral line for the (session, new bead) pair, repeated only after
+// the 15-minute log interval.
+func TestFreshCycleDefersWhileBusy(t *testing.T) {
+	f := newFreshCycleFixture(t)
+	f.env.sp.WaitForIdleErrors[f.sessionName] = errFreshCycleTestBusy
+
+	for i := 0; i < 10; i++ {
+		f.pass(t)
+		if !f.env.sp.IsRunning(f.sessionName) {
+			t.Fatalf("pass %d: session killed mid-turn by fresh-cycle; want deferred while busy", i+1)
+		}
+		if got := f.currentBead(t); got != "wb-prev" {
+			t.Fatalf("pass %d: %s = %q, want wb-prev unchanged while deferred", i+1, sessionpkg.CurrentBeadIDKey, got)
+		}
+	}
+	out := f.env.stdout.String()
+	if n := strings.Count(out, "Deferred fresh-mode cycle for '"+f.sessionName+"' (wb-prev → wb-new): session busy"); n != 1 {
+		t.Fatalf("deferral lines = %d, want 1; stdout:\n%s", n, out)
+	}
+	if strings.Contains(out, "Cycled fresh-mode session") {
+		t.Fatalf("stdout reports a cycle while busy:\n%s", out)
+	}
+
+	// Probes alternate between starting (no verdict yet) and reporting busy,
+	// so two passes cover one busy verdict.
+	f.env.clk.Time = f.env.clk.Time.Add(15 * time.Minute)
+	f.pass(t)
+	f.pass(t)
+	if n := strings.Count(f.env.stdout.String(), "Deferred fresh-mode cycle for '"); n != 2 {
+		t.Fatalf("deferral lines after 15m = %d, want 2; stdout:\n%s", n, f.env.stdout.String())
+	}
+}
+
+// TestFreshCycleRunsAtIdlePrompt continues the busy case: once the agent sits
+// at its idle prompt with no activity since the probe, the cycle runs exactly
+// once and stamps the new bead.
+func TestFreshCycleRunsAtIdlePrompt(t *testing.T) {
+	f := newFreshCycleFixture(t)
+	f.env.sp.WaitForIdleErrors[f.sessionName] = errFreshCycleTestBusy
+	for i := 0; i < 3; i++ {
+		f.pass(t)
+	}
+	if !f.env.sp.IsRunning(f.sessionName) {
+		t.Fatal("session killed while busy")
+	}
+
+	f.env.sp.WaitForIdleErrors[f.sessionName] = nil
+	f.env.clk.Time = f.env.clk.Time.Add(2 * time.Minute)
+	// A busy probe may still be settled from the last pass; at most one pass
+	// consumes it, one starts an idle probe, and the next cycles.
+	cycledOn := 0
+	for i := 1; i <= 3 && cycledOn == 0; i++ {
+		f.pass(t)
+		if !f.env.sp.IsRunning(f.sessionName) {
+			cycledOn = i
+		}
+	}
+	if cycledOn == 0 {
+		t.Fatalf("session never cycled at its idle prompt; stdout:\n%s", f.env.stdout.String())
+	}
+	if got := f.currentBead(t); got != "wb-new" {
+		t.Fatalf("%s = %q, want wb-new after the cycle", sessionpkg.CurrentBeadIDKey, got)
+	}
+	out := f.env.stdout.String()
+	if n := strings.Count(out, "Cycled fresh-mode session '"+f.sessionName+"' for bead reassign: wb-prev → wb-new after 2m0s deferred"); n != 1 {
+		t.Fatalf("cycle lines = %d, want exactly 1 with the deferral duration; stdout:\n%s", n, out)
+	}
+}
+
+// TestFreshCycleActivityAfterProbeDefers: the probe saw an idle prompt, but
+// the pane moved after it completed, so the agent started a new turn. No
+// cycle; the next pass starts a new probe.
+func TestFreshCycleActivityAfterProbeDefers(t *testing.T) {
+	f := newFreshCycleFixture(t)
+	f.env.sp.WaitForIdleErrors[f.sessionName] = nil
+
+	f.pass(t) // starts the probe
+	if _, ok := f.env.dt.idleProbe(f.sessionID); !ok {
+		t.Fatal("pass 1 started no idle probe")
+	}
+	f.env.sp.SetActivity(f.sessionName, f.env.clk.Now().Add(time.Second))
+
+	f.pass(t) // consumes the probe, sees later activity
+	if !f.env.sp.IsRunning(f.sessionName) {
+		t.Fatal("session cycled although the pane moved after the idle probe")
+	}
+	if _, ok := f.env.dt.idleProbe(f.sessionID); ok {
+		t.Fatal("probe not cleared after activity was observed")
+	}
+
+	f.pass(t)
+	if _, ok := f.env.dt.idleProbe(f.sessionID); !ok {
+		t.Fatal("pass 3 started no new idle probe")
+	}
+	if n := f.env.sp.CountCalls("WaitForIdle", f.sessionName); n != 2 {
+		t.Fatalf("WaitForIdle calls = %d, want 2", n)
+	}
+	if got := f.currentBead(t); got != "wb-prev" {
+		t.Fatalf("%s = %q, want wb-prev while deferred", sessionpkg.CurrentBeadIDKey, got)
+	}
+}
+
+// TestFreshCycleBackgroundWorkDefers: an idle prompt with shells still
+// running outside the turn is not a safe boundary, and neither is an
+// observation error.
+func TestFreshCycleBackgroundWorkDefers(t *testing.T) {
+	f := newFreshCycleFixture(t)
+	f.env.sp.WaitForIdleErrors[f.sessionName] = nil
+	f.env.sp.BackgroundWork[f.sessionName] = true
+	for i := 0; i < 4; i++ {
+		f.pass(t)
+		if !f.env.sp.IsRunning(f.sessionName) {
+			t.Fatalf("pass %d: session cycled with background work running", i+1)
+		}
+	}
+	if n := f.env.sp.CountCalls("HasBackgroundWork", f.sessionName); n == 0 {
+		t.Fatal("HasBackgroundWork never consulted")
+	}
+
+	f.env.sp.BackgroundWork[f.sessionName] = false
+	f.env.sp.BackgroundWorkErrors[f.sessionName] = errors.New("capture failed")
+	for i := 0; i < 4; i++ {
+		f.pass(t)
+		if !f.env.sp.IsRunning(f.sessionName) {
+			t.Fatalf("pass %d: session cycled on a background-work observation error", i+1)
+		}
+	}
+
+	delete(f.env.sp.BackgroundWorkErrors, f.sessionName)
+	for i := 0; i < 3 && f.env.sp.IsRunning(f.sessionName); i++ {
+		f.pass(t)
+	}
+	if f.env.sp.IsRunning(f.sessionName) {
+		t.Fatal("session never cycled once background work cleared")
+	}
+}
+
+// TestFreshCycleWithoutIdleWaitProviderUnchanged: a runtime that cannot wait
+// for an idle prompt keeps the pre-existing behavior and cycles on pass 1.
+func TestFreshCycleWithoutIdleWaitProviderUnchanged(t *testing.T) {
+	f := newFreshCycleFixture(t)
+	f.sp = noIdleWaitProvider{f.env.sp}
+	f.pass(t)
+	if f.env.sp.IsRunning(f.sessionName) {
+		t.Fatal("session not cycled on pass 1 by a provider without IdleWaitProvider")
+	}
+	if got := f.currentBead(t); got != "wb-new" {
+		t.Fatalf("%s = %q, want wb-new", sessionpkg.CurrentBeadIDKey, got)
+	}
+}
+
+// TestFreshCycleUnsupportedIdleWaitCycles: a composite runtime implements
+// WaitForIdle for every session but answers ErrInteractionUnsupported for a
+// backend that cannot observe a prompt. That answer means "cannot tell", not
+// "busy", so the cycle runs as before once the probe reports it.
+func TestFreshCycleUnsupportedIdleWaitCycles(t *testing.T) {
+	f := newFreshCycleFixture(t)
+	f.env.sp.WaitForIdleErrors[f.sessionName] = runtime.ErrInteractionUnsupported
+	f.pass(t)
+	f.pass(t)
+	if f.env.sp.IsRunning(f.sessionName) {
+		t.Fatalf("session not cycled after an unsupported idle probe; stdout:\n%s", f.env.stdout.String())
+	}
+	if got := f.currentBead(t); got != "wb-new" {
+		t.Fatalf("%s = %q, want wb-new", sessionpkg.CurrentBeadIDKey, got)
+	}
+}
+
+// TestFreshCycleSelfClaimWhileDeferredNeverCycles: while the cycle waits, the
+// agent finishes its turn and claims the new bead itself. The conversation is
+// already on the new bead, so no cycle runs and the stamp catches up.
+func TestFreshCycleSelfClaimWhileDeferredNeverCycles(t *testing.T) {
+	f := newFreshCycleFixture(t)
+	f.env.sp.WaitForIdleErrors[f.sessionName] = errFreshCycleTestBusy
+	f.pass(t)
+	f.pass(t)
+	if !f.env.sp.IsRunning(f.sessionName) {
+		t.Fatal("session killed while busy")
+	}
+
+	if err := f.env.store.SetMetadata(f.sessionID, beadmeta.CurrentClaimBeadIDMetadataKey, "wb-new"); err != nil {
+		t.Fatalf("SetMetadata(current_claim_bead_id): %v", err)
+	}
+	f.env.sp.WaitForIdleErrors[f.sessionName] = nil
+	for i := 0; i < 4; i++ {
+		f.pass(t)
+		if !f.env.sp.IsRunning(f.sessionName) {
+			t.Fatalf("pass %d: session cycled after it self-claimed the new bead", i+1)
+		}
+	}
+	if got := f.currentBead(t); got != "wb-new" {
+		t.Fatalf("%s = %q, want wb-new stamped after the self-claim", sessionpkg.CurrentBeadIDKey, got)
+	}
+	if strings.Contains(f.env.stdout.String(), "Cycled fresh-mode session") {
+		t.Fatalf("stdout reports a cycle:\n%s", f.env.stdout.String())
+	}
+}
+
+// TestFreshCycleGuardsRunBeforeProbe: #6518's open-previous-bead guard defers
+// before the idle gate is reached, so no probe is started for it.
+func TestFreshCycleGuardsRunBeforeProbe(t *testing.T) {
+	env := newRestartRequestTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "witness", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "witness")
+	env.desiredState[sessionName] = TemplateParams{Command: "true", SessionName: sessionName, TemplateName: "witness"}
+	createPrevBead(t, env, nil) // still open
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "witness",
+		namedSessionModeMetadata:     "on_demand",
+		"template":                   "witness",
+		"state":                      "active",
+		"wake_mode":                  "fresh",
+		sessionpkg.CurrentBeadIDKey:  "wb-prev",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	env.sp.WaitForIdleErrors[sessionName] = nil
+	workBead := beads.Bead{ID: "wb-new", Title: "next witness wisp", Type: "task", Status: "in_progress", Assignee: "witness"}
+
+	reconcileSessionBeadsWithAssignedWork(env, []beads.Bead{session}, []beads.Bead{workBead})
+	waitIdleProbesSettled(t, env.dt)
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatal("session killed although its previous bead is still open")
+	}
+	if _, ok := env.dt.idleProbe(session.ID); ok {
+		t.Fatal("idle probe started for a cycle the open-previous-bead guard already deferred")
+	}
+	if n := env.sp.CountCalls("WaitForIdle", sessionName); n != 0 {
+		t.Fatalf("WaitForIdle calls = %d, want 0", n)
+	}
+	if strings.Contains(env.stdout.String(), "Deferred fresh-mode cycle") {
+		t.Fatalf("idle-gate deferral logged for a guard deferral:\n%s", env.stdout.String())
+	}
+}
+
+// TestFreshCycleProbeBudget: five sessions waiting on a fresh cycle share the
+// reconciler's idle-probe budget; never more than maxIdleSleepProbesPerTick
+// probes are in flight at once, and every session is probed in turn.
+func TestFreshCycleProbeBudget(t *testing.T) {
+	const n = 5
+	env := newRestartRequestTestEnv()
+	env.cfg = &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	mem := env.store.(*beads.MemStore)
+	mem.HonorExplicitIDs = true
+	closedAt := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
+	var sessions, work []beads.Bead
+	var names, ids []string
+	for i := 0; i < n; i++ {
+		agent := fmt.Sprintf("witness%d", i)
+		env.cfg.Agents = append(env.cfg.Agents, config.Agent{Name: agent, StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)})
+		env.cfg.NamedSessions = append(env.cfg.NamedSessions, config.NamedSession{Template: agent, Mode: "on_demand"})
+		prev := fmt.Sprintf("wb-prev-%d", i)
+		if _, err := env.store.Create(beads.Bead{ID: prev, Title: "previous", Type: "task", Status: "in_progress", Assignee: agent}); err != nil {
+			t.Fatalf("create %s: %v", prev, err)
+		}
+		if _, err := env.store.CloseAll([]string{prev}, map[string]string{"closed_at": closedAt.Format(time.RFC3339)}); err != nil {
+			t.Fatalf("close %s: %v", prev, err)
+		}
+		work = append(work, beads.Bead{ID: fmt.Sprintf("wb-new-%d", i), Title: "next", Type: "task", Status: "in_progress", Assignee: agent})
+	}
+	for i := 0; i < n; i++ {
+		agent := fmt.Sprintf("witness%d", i)
+		name := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, agent)
+		env.desiredState[name] = TemplateParams{Command: "true", SessionName: name, TemplateName: agent}
+		session := env.createSessionBead(name)
+		env.setSessionMetadata(&session, map[string]string{
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: agent,
+			namedSessionModeMetadata:     "on_demand",
+			"template":                   agent,
+			"state":                      "active",
+			"wake_mode":                  "fresh",
+			sessionpkg.CurrentBeadIDKey:  fmt.Sprintf("wb-prev-%d", i),
+		})
+		if err := env.sp.Start(context.Background(), name, runtime.Config{Command: "true"}); err != nil {
+			t.Fatalf("start %s: %v", name, err)
+		}
+		if err := env.sp.SetMeta(name, "GC_SESSION_ID", session.ID); err != nil {
+			t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+		}
+		env.sp.WaitForIdleErrors[name] = errFreshCycleTestBusy
+		env.sp.WaitForIdleGates[name] = make(chan struct{})
+		sessions = append(sessions, session)
+		names = append(names, name)
+		ids = append(ids, session.ID)
+	}
+	reload := func() []beads.Bead {
+		out := make([]beads.Bead, 0, len(sessions))
+		for _, s := range sessions {
+			b, err := env.store.Get(s.ID)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", s.ID, err)
+			}
+			out = append(out, b)
+		}
+		return out
+	}
+
+	for pass := 1; pass <= 3; pass++ {
+		reconcileSessionBeadsWithProvider(env, env.sp, reload(), work)
+		if got := idleProbesInFlight(env.dt); got != maxIdleSleepProbesPerTick {
+			t.Fatalf("pass %d: %d idle probes in flight, want %d", pass, got, maxIdleSleepProbesPerTick)
+		}
+	}
+	for _, name := range names {
+		if !env.sp.IsRunning(name) {
+			t.Fatalf("%s killed while its probe was outstanding", name)
+		}
+	}
+
+	// Release the held probes (still busy). Every session must be probed
+	// within a few passes, and the budget must hold on each one.
+	for _, name := range names {
+		close(env.sp.WaitForIdleGates[name])
+	}
+	for pass := 1; pass <= 6; pass++ {
+		reconcileSessionBeadsWithProvider(env, env.sp, reload(), work)
+		if got := idleProbesInFlight(env.dt); got > maxIdleSleepProbesPerTick {
+			t.Fatalf("release pass %d: %d idle probes in flight, want <= %d", pass, got, maxIdleSleepProbesPerTick)
+		}
+		waitIdleProbesSettled(t, env.dt)
+	}
+	for i, name := range names {
+		if env.sp.CountCalls("WaitForIdle", name) == 0 {
+			t.Fatalf("%s (%s) was never probed", name, ids[i])
+		}
+		if !env.sp.IsRunning(name) {
+			t.Fatalf("%s cycled while busy", name)
 		}
 	}
 }

@@ -4616,6 +4616,34 @@ func paneContainsBusyIndicator(lines []string) bool {
 	return false
 }
 
+// backgroundWorkRe matches Claude Code's note, printed on a turn's done line,
+// that shells the agent started are still running after the turn ended, e.g.
+// "✻ Worked for 1m 3s · done 9:30 AM · 1 shell still running".
+var backgroundWorkRe = regexp.MustCompile(`\bshells? still running\b`)
+
+// paneShowsBackgroundWork reports whether captured pane lines show work the
+// agent left running outside its turn. It is deliberately separate from
+// paneContainsBusyIndicator: an agent with a background shell is idle for
+// input (a nudge may land), but restarting it would kill that shell.
+func paneShowsBackgroundWork(lines []string) bool {
+	for _, line := range lines {
+		if backgroundWorkRe.MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
+
+// HasBackgroundWork reports whether the session's pane shows work the agent
+// left running outside its turn. It implements [runtime.BackgroundWorkObserver].
+func (t *Tmux) HasBackgroundWork(session string) (bool, error) {
+	lines, err := t.CapturePaneLines(session, promptObservationLines)
+	if err != nil {
+		return false, err
+	}
+	return paneShowsBackgroundWork(lines), nil
+}
+
 // paneShowsDrainedComposer reports whether the pane's live composer -- the
 // LAST captured line matching the ready prompt prefix (DefaultReadyPromptPrefix)
 // -- has drained, meaning the submit Enter actually reached the pane and the

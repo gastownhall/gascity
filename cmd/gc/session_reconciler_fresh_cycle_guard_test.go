@@ -111,7 +111,9 @@ func reproCloseForReal(t *testing.T, s beads.Store, id string) {
 	}
 }
 
-// reconcileFreshCycleRepro mirrors reconcileSessionBeadsWithAssignedWork but
+// reconcileFreshCycleRepro runs with a runtime that cannot wait for an idle
+// prompt, so these rows pin the bead-state guards alone. It mirrors
+// reconcileSessionBeadsWithAssignedWork but
 // threads rig stores through, the way city_runtime.go's production tick does.
 func reconcileFreshCycleRepro(env *restartRequestTestEnv, sessions, assignedWork []beads.Bead, rigStores map[string]beads.Store) {
 	poolDesired := make(map[string]int)
@@ -122,7 +124,7 @@ func reconcileFreshCycleRepro(env *restartRequestTestEnv, sessions, assignedWork
 	}
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 	_ = reconcileSessionBeadsAtPath(
-		context.Background(), "", sessions, env.desiredState, cfgNames, env.cfg, env.sp, env.store,
+		context.Background(), "", sessions, env.desiredState, cfgNames, env.cfg, noIdleWaitProvider{env.sp}, env.store,
 		nil, assignedWork, rigStores, nil, env.dt, poolDesired, false, nil, "", nil,
 		env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)

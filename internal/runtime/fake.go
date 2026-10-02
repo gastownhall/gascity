@@ -45,6 +45,8 @@ type Fake struct {
 	SleepCapabilityValue    SessionSleepCapability
 	WaitForIdleErrors       map[string]error
 	WaitForIdleSequence     map[string][]error
+	BackgroundWork          map[string]bool  // session → HasBackgroundWork result
+	BackgroundWorkErrors    map[string]error // per-session HasBackgroundWork errors for testing
 	DialogErrors            map[string]error
 	ResetTurnErrors         map[string]error
 	InterruptBoundaryErrors map[string]error
@@ -147,6 +149,8 @@ func NewFake() *Fake {
 		SleepCapabilityValue:    SessionSleepCapabilityFull,
 		WaitForIdleErrors:       make(map[string]error),
 		WaitForIdleSequence:     make(map[string][]error),
+		BackgroundWork:          make(map[string]bool),
+		BackgroundWorkErrors:    make(map[string]error),
 		DialogErrors:            make(map[string]error),
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
@@ -178,6 +182,8 @@ func NewFailFake() *Fake {
 		SleepCapabilityValue:    SessionSleepCapabilityFull,
 		WaitForIdleErrors:       make(map[string]error),
 		WaitForIdleSequence:     make(map[string][]error),
+		BackgroundWork:          make(map[string]bool),
+		BackgroundWorkErrors:    make(map[string]error),
 		DialogErrors:            make(map[string]error),
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
@@ -773,6 +779,21 @@ func (f *Fake) WaitForIdle(ctx context.Context, name string, _ time.Duration) er
 		}
 	}
 	return err
+}
+
+// HasBackgroundWork records the call and returns the configured result. It
+// implements [BackgroundWorkObserver].
+func (f *Fake) HasBackgroundWork(name string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "HasBackgroundWork", Name: name})
+	if f.broken {
+		return false, fmt.Errorf("session unavailable")
+	}
+	if err := f.BackgroundWorkErrors[name]; err != nil {
+		return false, err
+	}
+	return f.BackgroundWork[name], nil
 }
 
 // CopyTo records the call and returns nil (or error if broken).

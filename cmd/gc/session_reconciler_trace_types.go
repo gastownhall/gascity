@@ -195,6 +195,7 @@ const (
 	TraceReasonPendingCreateSuperseded       TraceReasonCode = "pending_create_superseded"
 	TraceReasonAssignedWork                  TraceReasonCode = "assigned_work"
 	TraceReasonFreshCycle                    TraceReasonCode = "fresh_cycle"
+	TraceReasonFreshCycleDeferred            TraceReasonCode = "fresh_cycle_deferred"
 	TraceReasonScaleCheck                    TraceReasonCode = "scale_check"
 	TraceReasonStart                         TraceReasonCode = "start"
 

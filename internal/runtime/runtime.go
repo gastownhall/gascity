@@ -368,6 +368,12 @@ type IdleWaitProvider interface {
 	WaitForIdle(ctx context.Context, name string, timeout time.Duration) error
 }
 
+// BackgroundWorkObserver reports whether a session's agent has work running
+// outside its turn that a restart would kill. Optional.
+type BackgroundWorkObserver interface {
+	HasBackgroundWork(name string) (bool, error)
+}
+
 // IdleSnapshotProvider is an optional extension for runtimes that can report,
 // in a single non-blocking observation, whether a session is at an idle
 // interactive boundary right now (a ready prompt with no active-processing

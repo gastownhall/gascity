@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -86,6 +89,102 @@ func prevAssignedBeadStatus(topo storeref.Topology, id string) (open bool, close
 	return false, closedAt, nil
 }
 
+// freshCycleDeferralLogInterval bounds how often a still-deferred fresh-mode
+// cycle repeats its deferral line.
+const freshCycleDeferralLogInterval = 15 * time.Minute
+
+// freshCycleAtIdleBoundary reports whether an alive wake_mode=fresh session
+// whose anchor moved to newBeadID may be cycled now. A cycle kills the
+// session, so it waits until the agent sits at an idle prompt: a completed
+// idle probe, no pane activity since that probe, and no background work the
+// runtime can see. When the runtime cannot wait for idle it returns true (the
+// pre-existing behavior), as it does for a session with no runtime name to
+// probe. Otherwise it starts an idle probe if none is pending,
+// within the reconciler's shared in-flight budget, and returns false until a
+// probe proves the session idle. Each false return records a deferral on dt.
+func freshCycleAtIdleBoundary(
+	ctx context.Context,
+	info sessionpkg.Info,
+	newBeadID string,
+	dt *drainTracker,
+	sp runtime.Provider,
+	clk clock.Clock,
+	template string,
+	stdout io.Writer,
+	trace *sessionReconcilerTraceCycle,
+) bool {
+	wp, ok := sp.(runtime.IdleWaitProvider)
+	name := info.SessionNameMetadata
+	if !ok || dt == nil || name == "" {
+		return true
+	}
+	now := clk.Now()
+	// deferBusy holds the cycle on evidence that the session is busy, and logs
+	// it once per (session, new bead), then at most every interval.
+	deferBusy := func() bool {
+		dt.noteFreshCycleDeferral(info.ID, newBeadID, now)
+		if !dt.freshCycleDeferralLogDue(info.ID, now, freshCycleDeferralLogInterval) {
+			return false
+		}
+		prevBeadID := strings.TrimSpace(info.CurrentlyProcessingBeadID)
+		if stdout != nil {
+			fmt.Fprintf(stdout, "Deferred fresh-mode cycle for '%s' (%s → %s): session busy\n", name, prevBeadID, newBeadID) //nolint:errcheck
+		}
+		if trace != nil {
+			trace.RecordDecision(TraceSiteReconcilerBeadReassignCycle, TraceReasonFreshCycleDeferred, TraceOutcomeDeferredActive, template, name, traceRecordPayload{
+				"previous_bead_id": prevBeadID,
+				"new_bead_id":      newBeadID,
+			})
+		}
+		return false
+	}
+	probe, ok := dt.idleProbe(info.ID)
+	if !ok {
+		dt.noteFreshCycleDeferral(info.ID, newBeadID, now)
+		if started := dt.startIdleProbeWithinBudget(info.ID, maxIdleSleepProbesPerTick); started != nil {
+			go func(beadID string, probe *idleProbeState) {
+				err := wp.WaitForIdle(ctx, name, idleSleepProbeTimeout)
+				if errors.Is(err, runtime.ErrInteractionUnsupported) {
+					dt.markIdleProbeUnsupported(beadID, probe)
+				}
+				dt.finishIdleProbe(beadID, probe, err == nil, clk.Now().UTC())
+			}(info.ID, started)
+		}
+		return false
+	}
+	if !probe.ready {
+		dt.noteFreshCycleDeferral(info.ID, newBeadID, now)
+		return false
+	}
+	if probe.unsupported {
+		// The runtime cannot observe this session's prompt (a composite
+		// provider routing it to a backend without idle detection): cycle as
+		// a provider without IdleWaitProvider would.
+		dt.clearIdleProbe(info.ID)
+		return true
+	}
+	if !probe.success {
+		dt.clearIdleProbe(info.ID)
+		return deferBusy()
+	}
+	quiet, err := quietSinceIdleProbe(sp, name, probe.completedAt)
+	if err != nil {
+		// Runtime unavailable: keep the probe and read it again next pass.
+		dt.noteFreshCycleDeferral(info.ID, newBeadID, now)
+		return false
+	}
+	dt.clearIdleProbe(info.ID)
+	if !quiet {
+		return deferBusy()
+	}
+	if observer, ok := sp.(runtime.BackgroundWorkObserver); ok {
+		if busy, err := observer.HasBackgroundWork(name); err != nil || busy {
+			return deferBusy()
+		}
+	}
+	return true
+}
+
 // cycleAliveSessionForFreshReassign tears down a live wake_mode=fresh
 // session whose assigned bead has changed, then primes the bead so the
 // next reconciler tick wakes the session on a brand-new conversation.
@@ -113,6 +212,7 @@ func cycleAliveSessionForFreshReassign(
 	name string,
 	newBeadID string,
 	now time.Time,
+	deferredFor time.Duration,
 	stdout, stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
 ) (bool, sessionpkg.MetadataPatch) {
@@ -164,7 +264,11 @@ func cycleAliveSessionForFreshReassign(
 		fold[key] = value
 	}
 	if stdout != nil {
-		fmt.Fprintf(stdout, "Cycled fresh-mode session '%s' for bead reassign: %s → %s\n", name, prevBeadID, newBeadID) //nolint:errcheck
+		suffix := ""
+		if deferredFor > 0 {
+			suffix = fmt.Sprintf(" after %s deferred", deferredFor.Round(time.Second))
+		}
+		fmt.Fprintf(stdout, "Cycled fresh-mode session '%s' for bead reassign: %s → %s%s\n", name, prevBeadID, newBeadID, suffix) //nolint:errcheck
 	}
 	if trace != nil {
 		trace.RecordDecision(TraceSiteReconcilerBeadReassignCycle, TraceReasonFreshCycle, TraceOutcomeRestart, tp.TemplateName, name, traceRecordPayload{

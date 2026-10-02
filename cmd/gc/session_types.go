@@ -63,9 +63,21 @@ type drainState struct {
 // idleProbeState tracks an async WaitForIdle probe for interactive idle sleep.
 // It stays in-memory only and is consumed on a later reconciler tick.
 type idleProbeState struct {
-	ready       bool
-	success     bool
+	ready   bool
+	success bool
+	// unsupported is set when the runtime answered that it cannot observe an
+	// idle prompt for this session (runtime.ErrInteractionUnsupported).
+	unsupported bool
 	completedAt time.Time
+}
+
+// freshCycleDeferral records a bead-reassign cycle held back because the
+// session was not at an idle prompt. In-memory only: a controller restart
+// re-derives the divergence from session metadata and starts a new deferral.
+type freshCycleDeferral struct {
+	newBeadID  string
+	since      time.Time // first pass that deferred this (session, new bead)
+	lastLogged time.Time // zero until the deferral line is first printed
 }
 
 // drainTracker manages in-memory drain states for all sessions.
@@ -78,6 +90,7 @@ type drainTracker struct {
 	suspendDeferrals map[string]int                  // session bead ID -> consecutive ticks a named session has been suspend-drain-eligible with its spec absent (#3630)
 	liveClaimVetoes  map[string]string               // session bead ID -> claimed work bead ID whose live claim last vetoed a demand-class drain (log-once dedupe)
 	drainSkips       map[drainSkipKey]*drainSkipMark // session bead ID + condition kind -> last printed line (log-on-transition dedupe; session_drain_skip_log.go)
+	freshDeferrals   map[string]*freshCycleDeferral  // session bead ID -> fresh-mode cycle waiting for an idle prompt
 	idleProbeCursor  int
 }
 
@@ -250,6 +263,113 @@ func (dt *drainTracker) clearIdleProbe(beadID string) {
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
 	delete(dt.idleProbes, beadID)
+}
+
+// startIdleProbeWithinBudget is startIdleProbe bounded by the reconciler's
+// shared in-flight budget: it returns nil when a probe already exists for the
+// session or when limit probes are already in flight.
+func (dt *drainTracker) startIdleProbeWithinBudget(beadID string, limit int) *idleProbeState {
+	if dt == nil {
+		return nil
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	if _, exists := dt.idleProbes[beadID]; exists {
+		return nil
+	}
+	inFlight := 0
+	for _, probe := range dt.idleProbes {
+		if probe != nil && !probe.ready {
+			inFlight++
+		}
+	}
+	if inFlight >= limit {
+		return nil
+	}
+	probe := &idleProbeState{}
+	dt.idleProbes[beadID] = probe
+	return probe
+}
+
+// markIdleProbeUnsupported flags a finished probe whose runtime could not
+// observe an idle prompt. Ignored when the probe has since been replaced.
+func (dt *drainTracker) markIdleProbeUnsupported(beadID string, probe *idleProbeState) {
+	if dt == nil || probe == nil {
+		return
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	if current := dt.idleProbes[beadID]; current == probe {
+		current.unsupported = true
+	}
+}
+
+// noteFreshCycleDeferral records that the fresh-mode cycle of a session onto
+// newBeadID was deferred at now. A different newBeadID starts a new deferral.
+func (dt *drainTracker) noteFreshCycleDeferral(beadID, newBeadID string, now time.Time) {
+	if dt == nil {
+		return
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	if dt.freshDeferrals == nil {
+		dt.freshDeferrals = make(map[string]*freshCycleDeferral)
+	}
+	d := dt.freshDeferrals[beadID]
+	if d == nil || d.newBeadID != newBeadID {
+		d = &freshCycleDeferral{newBeadID: newBeadID, since: now}
+		dt.freshDeferrals[beadID] = d
+	}
+}
+
+// freshCycleDeferralLogDue reports whether the deferral line for the session's
+// current deferral should print now: the first time, then at most once per
+// interval. It records the print when it returns true.
+func (dt *drainTracker) freshCycleDeferralLogDue(beadID string, now time.Time, interval time.Duration) bool {
+	if dt == nil {
+		return false
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	d := dt.freshDeferrals[beadID]
+	if d == nil {
+		return false
+	}
+	if !d.lastLogged.IsZero() && now.Sub(d.lastLogged) < interval {
+		return false
+	}
+	d.lastLogged = now
+	return true
+}
+
+// takeFreshCycleDeferral removes the session's deferral and returns how long
+// the cycle onto newBeadID was held back (zero when it was not deferred, or was
+// deferred for a different bead).
+func (dt *drainTracker) takeFreshCycleDeferral(beadID, newBeadID string, now time.Time) time.Duration {
+	if dt == nil {
+		return 0
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	d := dt.freshDeferrals[beadID]
+	delete(dt.freshDeferrals, beadID)
+	if d == nil || d.newBeadID != newBeadID {
+		return 0
+	}
+	return now.Sub(d.since)
+}
+
+// dropFreshCycleDeferral forgets a deferral whose cycle is no longer wanted and
+// reports whether one existed.
+func (dt *drainTracker) dropFreshCycleDeferral(beadID string) bool {
+	if dt == nil {
+		return false
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	_, ok := dt.freshDeferrals[beadID]
+	delete(dt.freshDeferrals, beadID)
+	return ok
 }
 
 func (dt *drainTracker) markResetStall(beadID string) bool {
