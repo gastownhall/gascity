@@ -24,3 +24,15 @@ func testOwnedHome(t *testing.T) string {
 	t.Helper()
 	return beadstest.TestOwnedHome(t)
 }
+
+// guardedWorkspaceDir returns a dir for the real bd these tests run in,
+// isolated from every directory above it: bd adopts an ancestor workspace that
+// has project files but no database, so a stray one initialized as the
+// ancestor of a custom-types test's own temp dir and then failed every later
+// run (ga-l7otw9). It is guardedTempDir plus that isolation, and a bait
+// ancestor that fails the test in every run if the isolation ever stops
+// holding. Only dirs a real bd runs in need it; the fake-bd tests do not.
+func guardedWorkspaceDir(t *testing.T) string {
+	t.Helper()
+	return beadstest.GuardedBdWorkspaceDir(t)
+}
