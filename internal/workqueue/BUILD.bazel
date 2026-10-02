@@ -18,6 +18,10 @@ go_test(
         "queue_test.go",
         "testenv_import_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
     embed = [":workqueue"],
     deps = ["//internal/testenv"],
 )
