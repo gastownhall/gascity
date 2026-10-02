@@ -566,9 +566,12 @@ func (t *Tmux) checkNoApprovalPrompt(name string) error {
 		runtime.ErrPendingInteraction, name, approvalPromptText(approval), "tmux-"+approvalHash(approval))
 }
 
-const (
-	respondVerifyAttempts = 3
-	respondVerifyMs       = 500
+// Respond's verify polling; variables so tests can shrink them. Under load
+// Claude Code can take seconds to redraw after the answer key, so Respond keeps
+// checking until the deadline rather than for a fixed number of tries.
+var (
+	respondVerifyInterval = 250 * time.Millisecond
+	respondVerifyTimeout  = 10 * time.Second
 )
 
 // Respond sends the appropriate keystroke to the tmux pane to approve or deny
@@ -613,11 +616,12 @@ func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error 
 		return fmt.Errorf("send-keys failed: %w", err)
 	}
 
-	// Poll to verify the prompt cleared. Do NOT re-send the keystroke —
-	// if Claude is slow to process, re-sending would type into whatever
-	// comes next (message input or a subsequent approval).
-	for range respondVerifyAttempts {
-		time.Sleep(time.Duration(respondVerifyMs) * time.Millisecond)
+	// Poll until the deadline to verify the prompt cleared. Do NOT re-send
+	// the keystroke — if Claude is slow to process, re-sending would type into
+	// whatever comes next (message input or a subsequent approval).
+	deadline := time.Now().Add(respondVerifyTimeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(respondVerifyInterval)
 
 		verifyText, verifyErr := t.CapturePane(name, 40)
 		if verifyErr != nil {
@@ -634,5 +638,5 @@ func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error 
 		}
 	}
 
-	return fmt.Errorf("approval prompt did not clear after %d verify attempts", respondVerifyAttempts)
+	return fmt.Errorf("approval prompt did not clear within %s of the answer", respondVerifyTimeout)
 }

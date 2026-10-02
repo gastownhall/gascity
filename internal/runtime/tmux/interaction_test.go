@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/worker/workertest"
@@ -827,7 +828,7 @@ func TestRespond_DenySendsTheNoOptionNotThree(t *testing.T) {
 	}
 	var sent []string
 	for _, call := range fe.calls {
-		if len(call) > 0 && containsArg(call, "send-keys") {
+		if sendsKeys(call) {
 			sent = append(sent, call[len(call)-1])
 		}
 	}
@@ -855,7 +856,7 @@ func TestRespond_UnresolvableMenuSendsNothing(t *testing.T) {
 		t.Fatalf("Respond(deny) error = %v, want runtime.ErrInteractionActionUnavailable", err)
 	}
 	for _, call := range fe.calls {
-		if containsArg(call, "send-keys") {
+		if sendsKeys(call) {
 			t.Fatalf("Respond sent keys despite an unresolvable menu: %v", call)
 		}
 	}
@@ -887,7 +888,7 @@ func TestNudgeNow_RefusesToTypeIntoApprovalPrompt(t *testing.T) {
 		t.Fatalf("NudgeNow error = %v, want runtime.ErrPendingInteraction", err)
 	}
 	for _, call := range fe.calls {
-		if containsArg(call, "send-keys") {
+		if sendsKeys(call) {
 			t.Fatalf("NudgeNow sent keys into a pending approval prompt: %v", call)
 		}
 	}
@@ -917,9 +918,10 @@ func TestSnapshotPaneIdle_ApprovalPromptIsNotIdle(t *testing.T) {
 	}
 }
 
-func containsArg(call []string, want string) bool {
+// sendsKeys reports whether a recorded tmux call is a send-keys.
+func sendsKeys(call []string) bool {
 	for _, arg := range call {
-		if arg == want {
+		if arg == "send-keys" {
 			return true
 		}
 	}
@@ -954,5 +956,55 @@ func TestParseApprovalPrompt_BashInputLeadsWithCommand(t *testing.T) {
 				t.Errorf("prompt = %q, want it to start with %q", got, want)
 			}
 		})
+	}
+}
+
+// withFastRespondVerify shrinks Respond's verify polling for a test.
+func withFastRespondVerify(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	interval, deadline := respondVerifyInterval, respondVerifyTimeout
+	respondVerifyInterval, respondVerifyTimeout = time.Millisecond, timeout
+	t.Cleanup(func() { respondVerifyInterval, respondVerifyTimeout = interval, deadline })
+}
+
+// TestRespond_WaitsForASlowRedrawBeforeReportingFailure: under load Claude Code
+// can take seconds to redraw after the answer key. Respond must keep checking
+// until its deadline instead of reporting a failure for an answer that landed.
+func TestRespond_WaitsForASlowRedrawBeforeReportingFailure(t *testing.T) {
+	withFastRespondVerify(t, 2*time.Second)
+	prompt := readApprovalFixture(t, "bash-automode-option.txt")
+	// pre-verify capture, #{pane_in_mode} probe, send-keys, then six verify
+	// captures that still show the prompt before the idle screen.
+	outs := []string{prompt, "0", ""}
+	for range 6 {
+		outs = append(outs, prompt)
+	}
+	outs = append(outs, readApprovalFixture(t, "idle-after-deny-80x24.txt"))
+	fe := &fakeExecutor{outs: outs}
+	provider := &Provider{tm: &Tmux{exec: fe}}
+	if err := provider.Respond("slow-redraw", runtime.InteractionResponse{Action: "deny"}); err != nil {
+		t.Fatalf("Respond(deny) on a slow redraw: %v", err)
+	}
+	sends := 0
+	for _, call := range fe.calls {
+		if sendsKeys(call) {
+			sends++
+		}
+	}
+	if sends != 1 {
+		t.Fatalf("send-keys calls = %d, want exactly 1 (the answer is never re-sent)", sends)
+	}
+}
+
+// TestRespond_ReportsFailureWhenThePromptNeverClears keeps the honest failure
+// when the answer really didn't take.
+func TestRespond_ReportsFailureWhenThePromptNeverClears(t *testing.T) {
+	withFastRespondVerify(t, 30*time.Millisecond)
+	prompt := readApprovalFixture(t, "bash-automode-option.txt")
+	fe := &fakeExecutor{outs: []string{prompt, "0", ""}, out: prompt}
+	provider := &Provider{tm: &Tmux{exec: fe}}
+	err := provider.Respond("stuck", runtime.InteractionResponse{Action: "deny"})
+	if err == nil || !strings.Contains(err.Error(), "did not clear") {
+		t.Fatalf("Respond(deny) on a prompt that never clears = %v, want a did-not-clear error", err)
 	}
 }
