@@ -254,6 +254,38 @@ func pinTestOwnedBDHome(t *testing.T) string {
 	return beadstest.TestOwnedHome(t)
 }
 
+// TestPinTestOwnedBDHomeRunsBDSubprocessesInTestMode pins the half of the
+// real-bd fixture teardown contract that retrying the TempDir removal cannot
+// provide. Without bd's test mode every bd invocation launches a detached
+// `bd send-metrics` child that outlives the bd that spawned it, and under load
+// the test process too, and keeps writing $HOME/.beads/eventsData while
+// t.TempDir's single-shot RemoveAll runs. The cleanup then fails with
+// "directory not empty" (ga-1f81md). Test mode never launches that child, so
+// there is no writer left to wait for. Both ways these fixtures spawn bd must
+// see it: the direct calls (runExternal) and the production scale_check shell,
+// which makes most of the bd calls.
+func TestPinTestOwnedBDHomeRunsBDSubprocessesInTestMode(t *testing.T) {
+	t.Setenv(beadstest.EnvBeadsTestMode, "")
+	if err := os.Unsetenv(beadstest.EnvBeadsTestMode); err != nil {
+		t.Fatalf("unset %s: %v", beadstest.EnvBeadsTestMode, err)
+	}
+	pinTestOwnedBDHome(t)
+
+	probe := `printf %s "${` + beadstest.EnvBeadsTestMode + `-unset}"`
+	dir := t.TempDir()
+
+	if got := string(runExternalOutput(t, dir, "sh", "-c", probe)); got != "1" {
+		t.Errorf("runExternal subprocess sees %s=%q, want %q", beadstest.EnvBeadsTestMode, got, "1")
+	}
+	got, err := shellScaleCheck(probe, dir, nil)
+	if err != nil {
+		t.Fatalf("shellScaleCheck: %v", err)
+	}
+	if got != "1" {
+		t.Errorf("scale_check shell sees %s=%q, want %q", beadstest.EnvBeadsTestMode, got, "1")
+	}
+}
+
 func TestEvaluatePoolNewDemandDoesNotApplyMinOrMax(t *testing.T) {
 	sp := scaleParams{Min: 2, Max: 3, Check: "ignored"}
 	runner := func(_, _ string, _ map[string]string) (string, error) { return "5\n", nil }
