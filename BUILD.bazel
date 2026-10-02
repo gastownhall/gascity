@@ -384,6 +384,7 @@ filegroup(
         "//internal/worker/fakecmd:bazel_repo_srcs",
         "//internal/worker/transcript:bazel_repo_srcs",
         "//internal/worker/workertest:bazel_repo_srcs",
+        "//internal/workqueue:bazel_repo_srcs",
         "//internal/workrecord:bazel_repo_srcs",
         "//internal/workspacesvc:bazel_repo_srcs",
         "//internal/worktree:bazel_repo_srcs",
