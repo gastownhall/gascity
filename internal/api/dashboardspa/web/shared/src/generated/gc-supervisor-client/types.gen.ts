@@ -921,7 +921,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -3273,6 +3273,62 @@ export type SessionPendingClearedEvent = {
     request_id: string;
 };
 
+export type SessionPendingClearedPayload = {
+    /**
+     * Interaction kind from the matching session.pending.
+     */
+    kind: string;
+    /**
+     * Why it cleared: resolved (answered or withdrawn), replaced (a different interaction is now pending; its session.pending follows), or session_gone (the session is no longer active).
+     */
+    reason: 'resolved' | 'replaced' | 'session_gone';
+    /**
+     * Request ID from the matching session.pending.
+     */
+    request_id: string;
+    /**
+     * Session bead ID from the matching session.pending.
+     */
+    session_id: string;
+};
+
+export type SessionPendingPayload = {
+    /**
+     * Session alias, when set.
+     */
+    alias?: string;
+    /**
+     * Interaction kind (e.g. approval).
+     */
+    kind: string;
+    /**
+     * Provider metadata (e.g. tool_name, source).
+     */
+    metadata?: {
+        [key: string]: string;
+    };
+    /**
+     * Answer options as the session shows them.
+     */
+    options?: Array<string> | null;
+    /**
+     * Human-readable prompt.
+     */
+    prompt?: string;
+    /**
+     * Pending interaction request ID. Pass it to POST .../session/{id}/respond.
+     */
+    request_id: string;
+    /**
+     * Session bead ID awaiting a decision.
+     */
+    session_id: string;
+    /**
+     * Session template, when known.
+     */
+    template?: string;
+};
+
 export type SessionPendingResponse = {
     pending?: PendingInteraction;
     supported: boolean;
@@ -5480,6 +5536,10 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionIdleKilled) | ({
     type: 'session.max_age_killed';
 } & TypedEventStreamEnvelopeSessionMaxAgeKilled) | ({
+    type: 'session.pending';
+} & TypedEventStreamEnvelopeSessionPending) | ({
+    type: 'session.pending_cleared';
+} & TypedEventStreamEnvelopeSessionPendingCleared) | ({
     type: 'session.pool_slot_retired_at_drain_deadline';
 } & TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) | ({
     type: 'session.quarantined';
@@ -6936,6 +6996,42 @@ export type TypedEventStreamEnvelopeSessionMaxAgeKilled = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.pending
+ */
+export type TypedEventStreamEnvelopeSessionPending = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionPendingPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.pending';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope session.pending_cleared
+ */
+export type TypedEventStreamEnvelopeSessionPendingCleared = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionPendingClearedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.pending_cleared';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.pool_slot_retired_at_drain_deadline
  */
 export type TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline = {
@@ -7527,6 +7623,10 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionIdleKilled) | ({
     type: 'session.max_age_killed';
 } & TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled) | ({
+    type: 'session.pending';
+} & TypedTaggedEventStreamEnvelopeSessionPending) | ({
+    type: 'session.pending_cleared';
+} & TypedTaggedEventStreamEnvelopeSessionPendingCleared) | ({
     type: 'session.pool_slot_retired_at_drain_deadline';
 } & TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) | ({
     type: 'session.quarantined';
@@ -9057,6 +9157,44 @@ export type TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled = {
     subject?: string;
     ts: string;
     type: 'session.max_age_killed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.pending
+ */
+export type TypedTaggedEventStreamEnvelopeSessionPending = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionPendingPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.pending';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.pending_cleared
+ */
+export type TypedTaggedEventStreamEnvelopeSessionPendingCleared = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionPendingClearedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.pending_cleared';
     workflow?: WorkflowEventProjection;
 };
 

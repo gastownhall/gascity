@@ -871,6 +871,11 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 		return
 	}
 	defer mw.Close() //nolint:errcheck
+	// Keep each watched city's pending monitor running while this client is
+	// connected, so session.pending transitions reach the city logs.
+	leases := newPendingMonitorLeases()
+	defer leases.releaseAll()
+	sm.syncPendingMonitorLeases(leases)
 	flushSSEHeaders(hctx)
 
 	keepalive := time.NewTicker(sseKeepalive)
@@ -901,6 +906,7 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 		if err != nil {
 			log.Printf("api: supervisor events-stream: syncing city watchers: %v", err)
 		}
+		sm.syncPendingMonitorLeases(leases)
 		// Record each new city's start seq so the composite SSE id carries it
 		// and a reconnect resumes the city from where this stream attached.
 		for city, seq := range started {
