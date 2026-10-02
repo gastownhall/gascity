@@ -340,6 +340,52 @@ func TestStartupPromptContractRendersSessionIdentityNotCallerEnvironment(t *test
 	}
 }
 
+// TestBuildPrimeContextForReadsSessionIdentityFromTheEnvironment pins the
+// environment contract of gc prime, which runs inside the session it renders for:
+// the identity comes from GC_ALIAS, GC_AGENT, GC_DIR, GC_RIG, GC_RIG_ROOT and
+// GC_BRANCH, GC_ALIAS wins over GC_AGENT, and the configured rig fills in for a
+// missing GC_RIG_ROOT. The worker resolvers supply the same identity explicitly,
+// so this is the other half of the contract above.
+func TestBuildPrimeContextForReadsSessionIdentityFromTheEnvironment(t *testing.T) {
+	type identity struct{ agentName, workDir, rigName, rigRoot, branch string }
+	agent := &config.Agent{Name: "polecat", Dir: "demo"}
+	rigs := []config.Rig{{Name: "demo", Path: "/repos/demo", Prefix: "dm", DefaultBranch: "trunk"}}
+
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want identity
+	}{
+		{
+			name: "every variable lands in the context and the alias wins over the agent",
+			env: map[string]string{
+				"GC_ALIAS": "demo/polecat-7", "GC_AGENT": "demo/polecat", "GC_DIR": "/session/workdir",
+				"GC_RIG": "demo", "GC_RIG_ROOT": "/session/rig", "GC_BRANCH": "builder/ga-1",
+			},
+			want: identity{agentName: "demo/polecat-7", workDir: "/session/workdir", rigName: "demo", rigRoot: "/session/rig", branch: "builder/ga-1"},
+		},
+		{
+			name: "the agent names the session without an alias and the configured rig fills in the root",
+			env: map[string]string{
+				"GC_ALIAS": "", "GC_AGENT": "demo/polecat", "GC_DIR": "",
+				"GC_RIG": "demo", "GC_RIG_ROOT": "", "GC_BRANCH": "",
+			},
+			want: identity{agentName: "demo/polecat", rigName: "demo", rigRoot: "/repos/demo"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for key, value := range tc.env {
+				t.Setenv(key, value)
+			}
+			ctx := buildPrimeContextFor(t.TempDir(), "test-city", agent, rigs, config.QueryTopology{}, nil)
+			got := identity{ctx.AgentName, ctx.WorkDir, ctx.RigName, ctx.RigRoot, ctx.Branch}
+			if got != tc.want {
+				t.Errorf("identity = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestStartupPromptContractNothingToDeliverLeavesHintsAlone pins the guards that
 // return the hints unchanged: no loaded config, and a session whose template is
 // not a configured agent (a provider-only or synthetic session).

@@ -1032,14 +1032,38 @@ func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config
 }
 
 func buildPrimeContextFor(cityPath, cityName string, a *config.Agent, rigs []config.Rig, topo config.QueryTopology, stderr io.Writer) PromptContext {
-	return buildPrimeContextWithEnv(cityPath, cityName, a, rigs, topo, os.Getenv, stderr)
+	return buildPrimeContextWithIdentity(cityPath, cityName, a, rigs, topo, primeSessionIdentityFromEnv(), stderr)
 }
 
-// buildPrimeContextWithEnv is buildPrimeContextFor reading the session identity
-// (GC_ALIAS, GC_AGENT, GC_DIR, GC_RIG, GC_RIG_ROOT, GC_BRANCH) through getenv, so
-// a caller that is not running inside the session can supply that session's own
-// identity instead of its process environment.
-func buildPrimeContextWithEnv(cityPath, cityName string, a *config.Agent, rigs []config.Rig, topo config.QueryTopology, getenv func(string) string, stderr io.Writer) PromptContext {
+// primeSessionIdentity names the session a prompt context is built for. gc prime
+// runs inside that session and reads it from the environment; a caller that is
+// not running inside the session supplies the session's own values instead of its
+// process environment.
+type primeSessionIdentity struct {
+	Alias   string // GC_ALIAS
+	Agent   string // GC_AGENT
+	Dir     string // GC_DIR
+	Rig     string // GC_RIG
+	RigRoot string // GC_RIG_ROOT
+	Branch  string // GC_BRANCH
+}
+
+// primeSessionIdentityFromEnv returns the identity of the session this process
+// runs inside.
+func primeSessionIdentityFromEnv() primeSessionIdentity {
+	return primeSessionIdentity{
+		Alias:   os.Getenv("GC_ALIAS"),
+		Agent:   os.Getenv("GC_AGENT"),
+		Dir:     os.Getenv("GC_DIR"),
+		Rig:     os.Getenv("GC_RIG"),
+		RigRoot: os.Getenv("GC_RIG_ROOT"),
+		Branch:  os.Getenv("GC_BRANCH"),
+	}
+}
+
+// buildPrimeContextWithIdentity is buildPrimeContextFor for an explicit session
+// identity.
+func buildPrimeContextWithIdentity(cityPath, cityName string, a *config.Agent, rigs []config.Rig, topo config.QueryTopology, id primeSessionIdentity, stderr io.Writer) PromptContext {
 	ctx := PromptContext{
 		CityRoot:      cityPath,
 		TemplateName:  a.Name,
@@ -1050,34 +1074,35 @@ func buildPrimeContextWithEnv(cityPath, cityName string, a *config.Agent, rigs [
 	}
 
 	// Agent identity: prefer GC_ALIAS, then GC_AGENT, else config.
-	if gcAlias := getenv("GC_ALIAS"); gcAlias != "" {
-		ctx.AgentName = gcAlias
-	} else if gcAgent := getenv("GC_AGENT"); gcAgent != "" {
-		ctx.AgentName = gcAgent
-	} else {
+	switch {
+	case id.Alias != "":
+		ctx.AgentName = id.Alias
+	case id.Agent != "":
+		ctx.AgentName = id.Agent
+	default:
 		ctx.AgentName = a.QualifiedName()
 	}
 
 	// Working directory.
-	if gcDir := getenv("GC_DIR"); gcDir != "" {
-		ctx.WorkDir = gcDir
+	if id.Dir != "" {
+		ctx.WorkDir = id.Dir
 	}
 
 	// Rig context.
-	if gcRig := getenv("GC_RIG"); gcRig != "" {
-		ctx.RigName = gcRig
-		ctx.RigRoot = getenv("GC_RIG_ROOT")
+	if id.Rig != "" {
+		ctx.RigName = id.Rig
+		ctx.RigRoot = id.RigRoot
 		if ctx.RigRoot == "" {
-			ctx.RigRoot = rigRootForName(gcRig, rigs)
+			ctx.RigRoot = rigRootForName(id.Rig, rigs)
 		}
-		ctx.IssuePrefix = findRigPrefix(gcRig, rigs)
+		ctx.IssuePrefix = findRigPrefix(id.Rig, rigs)
 	} else if rigName := configuredRigName(cityPath, a, rigs); rigName != "" {
 		ctx.RigName = rigName
 		ctx.RigRoot = rigRootForName(rigName, rigs)
 		ctx.IssuePrefix = findRigPrefix(rigName, rigs)
 	}
 
-	ctx.Branch = getenv("GC_BRANCH")
+	ctx.Branch = id.Branch
 	ctx.DefaultBranch = defaultBranchForRig(ctx.RigName, rigs, ctx.WorkDir)
 	ctx.WorkQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "work_query", a.EffectiveWorkQueryFor(topo), stderr)
 	ctx.AssignedInProgressQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "assigned_in_progress_query", a.EffectiveAssignedInProgressQueryFor(topo), stderr)
