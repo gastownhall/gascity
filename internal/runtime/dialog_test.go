@@ -1744,6 +1744,8 @@ func TestProviderTerminalErrorReasonCreditBalanceTooLow(t *testing.T) {
 		{name: "claude code pane line", content: "> hello\n  ⎿  Credit balance is too low\n"},
 		{name: "api error sentence", content: `API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`},
 		{name: "upper case", content: "CREDIT BALANCE IS TOO LOW"},
+		{name: "claude code displayed stop after prompt", content: "❯ PROBE keep going\n  ⎿ \u00a0Credit balance too low · Add funds: https://platform.claude.com/settings/billing\n\n✻ Crunched for 23s · done 11:22 AM\n"},
+		{name: "claude code displayed stop alone", content: "  ⎿ \u00a0Credit balance too low\n"},
 		{name: "claude code displayed stop", content: "⏺ Reading the bead list.\n\n  Ran 1 shell command\n  ⎿  Credit balance too low · Add funds: https://platform.claude.com/settings/billing\n\n✻ Brewed for 30s · done 11:05 AM\n"},
 	}
 	for _, tt := range tests {
@@ -1769,6 +1771,7 @@ func TestProviderTerminalErrorReasonCreditBalanceMentionIsNotTerminal(t *testing
 		{name: "scrape report", content: "watch: matched 'credit balance is too low' in worker-2\n"},
 		{name: "prose", content: "  ⎿  The other session failed because its credit balance is too low.\n"},
 		{name: "prose without is", content: "  ⎿  The other session stopped with its credit balance too low.\n"},
+		{name: "wrapped prose without is", content: "⏺ The worker stopped and the pane showed its\n  credit balance too low, so I moved on to the next bead.\n"},
 		{name: "grep command without is", content: `$ grep -c "Credit balance too low" session.log` + "\n0\n"},
 	}
 	for _, tt := range tests {
