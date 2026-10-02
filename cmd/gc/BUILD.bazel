@@ -1233,6 +1233,7 @@ go_test(
         "pool_session_release_binding_owner_test.go",
         "pool_session_release_owner_store_test.go",
         "pool_session_release_session_store_test.go",
+        "pool_session_sweep_lease_test.go",
         "pool_slot_unaliased_test.go",
         "pool_slot_workdir_test.go",
         "pool_test.go",
