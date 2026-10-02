@@ -1754,6 +1754,29 @@ func TestProviderTerminalErrorReasonCreditBalanceTooLow(t *testing.T) {
 	}
 }
 
+// TestProviderTerminalErrorReasonCreditBalanceMentionIsNotTerminal pins that
+// the phrase quoted mid-line in ordinary output (a log scrape, a grep, a chat
+// message) is not a provider error: a session that printed it and then crashed
+// for another reason must count as a crash, not be marked terminal for good.
+func TestProviderTerminalErrorReasonCreditBalanceMentionIsNotTerminal(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{name: "grep command", content: `$ grep -c "Credit balance is too low" session.log` + "\n0\n"},
+		{name: "scrape report", content: "watch: matched 'credit balance is too low' in worker-2\n"},
+		{name: "prose", content: "  ⎿  The other session failed because its credit balance is too low.\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ProviderTerminalErrorReason(tt.content); got != "" {
+				t.Errorf("ProviderTerminalErrorReason(%q) = %q, want empty", tt.content, got)
+			}
+		})
+	}
+}
+
 // TestProviderTerminalErrorReasonSpendLimitModalIsNotTerminal pins that
 // Claude's spend-limit modal, which also mentions a credit balance, stays a
 // rate-limit screen with a reset rather than a terminal provider error.

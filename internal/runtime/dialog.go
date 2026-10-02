@@ -1805,7 +1805,7 @@ func ProviderTerminalErrorReason(content string) string {
 		return "quota_exceeded"
 	case strings.Contains(lower, "quota exceeded") && !strings.Contains(lower, "disk quota"):
 		return "quota_exceeded"
-	case strings.Contains(lower, "credit balance is too low"):
+	case containsCreditBalanceTooLow(lower):
 		// Anthropic's empty-credit error ("Credit balance is too low" in
 		// Claude Code, "Your credit balance is too low to access ..." from the
 		// API) is the same class as insufficient_quota: it needs credit or a
@@ -1816,6 +1816,22 @@ func ProviderTerminalErrorReason(content string) string {
 	default:
 		return ""
 	}
+}
+
+// containsCreditBalanceTooLow reports whether lowercased pane content shows
+// the empty-credit error itself rather than the phrase quoted in ordinary
+// output: either the API's full sentence ("credit balance is too low to
+// access"), or a line that starts with the phrase once Claude Code's leading
+// "⎿" marker and indentation are trimmed.
+func containsCreditBalanceTooLow(lower string) bool {
+	const phrase = "credit balance is too low"
+	for _, line := range strings.Split(lower, "\n") {
+		if strings.Contains(line, phrase+" to access") ||
+			strings.HasPrefix(strings.TrimLeft(line, " \t⎿"), phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 // lineContainsAll reports whether any single line of content contains every
