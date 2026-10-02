@@ -904,6 +904,9 @@
           "assignee": {
             "type": "string"
           },
+          "close_reason": {
+            "type": "string"
+          },
           "created_at": {
             "format": "date-time",
             "type": "string"
@@ -1044,6 +1047,16 @@
           "assignee",
           "reason"
         ],
+        "type": "object"
+      },
+      "BeadCloseBody": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "description": "Why the bead is being closed. Recorded as the bead's close_reason (bd close --reason). Blank means no reason.",
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "BeadCreateInputBody": {
@@ -29731,6 +29744,15 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BeadCloseBody"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {

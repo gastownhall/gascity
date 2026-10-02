@@ -114,6 +114,10 @@ export const zBeadClaimReleasedPayload = z.object({
     reason: z.string()
 });
 
+export const zBeadCloseBody = z.object({
+    reason: z.string().optional()
+});
+
 export const zBeadCreateInputBody = z.object({
     assignee: z.string().optional(),
     defer_until: z.iso.datetime().optional(),
@@ -403,6 +407,7 @@ export const zDep = z.object({
 
 export const zBead = z.object({
     assignee: z.string().optional(),
+    close_reason: z.string().optional(),
     created_at: z.iso.datetime(),
     defer_until: z.iso.datetime().optional(),
     dependencies: z.array(zDep).nullish(),
@@ -7849,6 +7854,8 @@ export const zPostV0CityByCityNameBeadByIdAssignPath = z.object({
  * OK
  */
 export const zPostV0CityByCityNameBeadByIdAssignResponse = z.record(z.string(), z.string());
+
+export const zPostV0CityByCityNameBeadByIdCloseBody = zBeadCloseBody;
 
 export const zPostV0CityByCityNameBeadByIdCloseHeaders = z.object({
     'X-GC-Request': z.string().min(1)

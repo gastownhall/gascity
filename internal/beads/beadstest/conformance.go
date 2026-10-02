@@ -1227,6 +1227,120 @@ func RunMetadataTests(t *testing.T, newStore func() beads.Store) {
 	})
 }
 
+// RunCloseReasonTests pins Bead.CloseReason: a closer stamps
+// metadata.close_reason and closes, and every read of the closed bead says why
+// it was closed; reopening clears the reason. Call it for stores whose close
+// path honors metadata.close_reason (MemStore, FileStore, SQLiteStore,
+// NativeDoltStore, BdStore). The exec protocol's close carries no reason, so
+// script-backed stores only read close_reason from the script's output.
+func RunCloseReasonTests(t *testing.T, newStore func() beads.Store) {
+	t.Helper()
+
+	// bd's validation.on-close=error rejects reasons under 20 characters, so
+	// the reasons here are long enough to pass it on a real bd.
+	const reason = "fixed in commit abc123; tests pass"
+
+	closeWithReason := func(t *testing.T, s beads.Store, title string) beads.Bead {
+		t.Helper()
+		b, err := s.Create(beads.Bead{Title: title})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetMetadata(b.ID, "close_reason", reason); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(b.ID); err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+
+	t.Run("CloseRecordsCloseReasonOnGet", func(t *testing.T) {
+		s := newStore()
+		b := closeWithReason(t, s, "close with a reason")
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("Status = %q, want closed", got.Status)
+		}
+		if got.CloseReason != reason {
+			t.Errorf("CloseReason = %q, want %q", got.CloseReason, reason)
+		}
+	})
+
+	t.Run("CloseRecordsCloseReasonOnList", func(t *testing.T) {
+		s := newStore()
+		b := closeWithReason(t, s, "listed close reason")
+		list, err := s.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, got := range list {
+			if got.ID != b.ID {
+				continue
+			}
+			if got.CloseReason != reason {
+				t.Errorf("List CloseReason = %q, want %q", got.CloseReason, reason)
+			}
+			return
+		}
+		t.Fatalf("List(IncludeClosed) did not return %s", b.ID)
+	})
+
+	t.Run("CloseAllRecordsCloseReason", func(t *testing.T) {
+		s := newStore()
+		b, err := s.Create(beads.Bead{Title: "batch close with a reason"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.CloseAll([]string{b.ID}, map[string]string{"close_reason": reason}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.CloseReason != reason {
+			t.Errorf("CloseReason = %q, want %q", got.CloseReason, reason)
+		}
+	})
+
+	t.Run("OpenBeadHasNoCloseReason", func(t *testing.T) {
+		s := newStore()
+		b, err := s.Create(beads.Bead{Title: "still open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetMetadata(b.ID, "close_reason", reason); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.CloseReason != "" {
+			t.Errorf("CloseReason on an open bead = %q, want empty", got.CloseReason)
+		}
+	})
+
+	t.Run("ReopenClearsCloseReason", func(t *testing.T) {
+		s := newStore()
+		b := closeWithReason(t, s, "reopened after close")
+		if err := s.Reopen(b.ID); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.CloseReason != "" {
+			t.Errorf("CloseReason after Reopen = %q, want empty", got.CloseReason)
+		}
+	})
+}
+
 // RunSequentialIDTests runs tests that assert gc-N sequential IDs. Call this
 // only for Store implementations that use sequential IDs (MemStore, FileStore).
 func RunSequentialIDTests(t *testing.T, newStore func() beads.Store) {

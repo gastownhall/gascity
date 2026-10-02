@@ -281,6 +281,7 @@ export type BackendCredentialResolvedPayload = {
 
 export type Bead = {
     assignee?: string;
+    close_reason?: string;
     created_at: string;
     defer_until?: string;
     dependencies?: Array<Dep> | null;
@@ -321,6 +322,13 @@ export type BeadClaimReleasedPayload = {
     assignee: string;
     bead_id: string;
     reason: string;
+};
+
+export type BeadCloseBody = {
+    /**
+     * Why the bead is being closed. Recorded as the bead's close_reason (bd close --reason). Blank means no reason.
+     */
+    reason?: string;
 };
 
 export type BeadCreateInputBody = {
@@ -11259,7 +11267,7 @@ export type PostV0CityByCityNameBeadByIdAssignResponses = {
 export type PostV0CityByCityNameBeadByIdAssignResponse = PostV0CityByCityNameBeadByIdAssignResponses[keyof PostV0CityByCityNameBeadByIdAssignResponses];
 
 export type PostV0CityByCityNameBeadByIdCloseData = {
-    body?: never;
+    body?: BeadCloseBody;
     headers: {
         /**
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.

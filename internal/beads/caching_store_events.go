@@ -547,6 +547,14 @@ func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) B
 	if hasCacheEventField(fields, "is_blocked") {
 		merged.IsBlocked = cloneBoolPtr(patch.IsBlocked)
 	}
+	// bd omits an empty close_reason, so a reopen event names only the new
+	// status; a row that is not closed keeps no reason either way.
+	if hasCacheEventField(fields, "close_reason") {
+		merged.CloseReason = patch.CloseReason
+	}
+	if merged.Status != "closed" {
+		merged.CloseReason = ""
+	}
 	return merged
 }
 
@@ -595,6 +603,9 @@ func cacheEventConflictsCurrent(current, patch Bead, fields map[string]json.RawM
 		return true
 	}
 	if hasCacheEventField(fields, "is_blocked") && !boolPtrEqual(current.IsBlocked, patch.IsBlocked) {
+		return true
+	}
+	if hasCacheEventField(fields, "close_reason") && current.CloseReason != patch.CloseReason {
 		return true
 	}
 	return false
@@ -838,7 +849,8 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 		old.Ephemeral != fresh.Ephemeral ||
 		old.IndefinitelyDeferred != fresh.IndefinitelyDeferred ||
 		!timePtrEqual(old.DeferUntil, fresh.DeferUntil) ||
-		!boolPtrEqual(old.IsBlocked, fresh.IsBlocked) {
+		!boolPtrEqual(old.IsBlocked, fresh.IsBlocked) ||
+		old.CloseReason != fresh.CloseReason {
 		return true
 	}
 	if !maps.Equal(old.Metadata, fresh.Metadata) {
