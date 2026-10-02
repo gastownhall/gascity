@@ -2294,6 +2294,7 @@ go_test(
         "session_reconciler_trace_torn_write_test.go",
         "session_reconciler_trace_types_test.go",
         "session_reconciler_wi6w6_mirror_test.go",
+        "session_reconfigured_pool_boundary_gate_test.go",
         "session_reconfigured_pool_carveout_test.go",
         "session_recorded_transport_test.go",
         "session_refresh_async_gate_test.go",
