@@ -132,6 +132,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     order timeout) stops starting new work, reports a partial outcome, and the
     next run continues.
   - Both orders now run with a 900s timeout.
+- **`[daemon] session_reconciler` is now a known key.** A city that still sets
+  the gc-enterprise spelling `"off"`, `"auto"` or `"require"` boots on the
+  legacy reconciler with a deprecation warning, including under strict mode;
+  remove the key. `"v2"` is reserved: a controller configured with it refuses
+  to start in this release, and `gc doctor` reports it as an error. An unknown
+  value also refuses controller start. Remove the key before rolling back to an
+  older gc, which rejects it under strict mode.
 
 ### Added
 

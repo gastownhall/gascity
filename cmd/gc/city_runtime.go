@@ -111,6 +111,10 @@ type CityRuntime struct {
 	watchMu      sync.Mutex
 	watchCleanup func()
 
+	// reconcilerDrift holds the boot-latched session reconciler and warns once
+	// per transition when a reload names another one.
+	reconcilerDrift reconcilerModeDrift
+
 	serviceStateMu          sync.RWMutex
 	cfg                     *config.City
 	sp                      runtime.Provider
@@ -334,7 +338,10 @@ type CityRuntimeParams struct {
 	ConfigRev    string
 	ConfigDirty  *atomic.Bool
 
-	Cfg                     *config.City
+	Cfg *config.City
+	// ReconcilerMode is the session reconciler latched at controller start.
+	// The zero value is legacy, which directly-built test runtimes run.
+	ReconcilerMode          reconcilerMode
 	SP                      runtime.Provider
 	Publication             supervisor.PublicationConfig
 	BuildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
@@ -466,6 +473,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		watchTargets:            p.WatchTargets,
 		configRev:               p.ConfigRev,
 		configDirty:             configDirty,
+		reconcilerDrift:         reconcilerModeDrift{running: p.ReconcilerMode},
 		cfg:                     p.Cfg,
 		sp:                      p.SP,
 		publication:             p.Publication,
@@ -2230,6 +2238,12 @@ func (cr *CityRuntime) reloadConfigTraced(
 	oldRigCount := len(cr.cfg.Rigs)
 	nextCfg := result.Cfg
 	applyRuntimeCityIdentity(nextCfg, cr.cityName)
+
+	// session_reconciler is boot-latched, but unlike [storage] the rest of the
+	// config is coherent without a restart, so a changed value only warns.
+	if warning := cr.reconcilerDrift.observe(nextCfg); warning != "" {
+		appendWarning(warning)
+	}
 
 	// [storage] is decided once, at boot, and the engine it selected is open for
 	// the life of the process (storage_boot.go). Applying a config that names a

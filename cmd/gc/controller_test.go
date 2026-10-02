@@ -2185,3 +2185,56 @@ func TestTryReloadConfig_IncludesBuiltinPackOrders(t *testing.T) {
 }
 
 func (osFS) Chmod(name string, mode os.FileMode) error { return os.Chmod(name, mode) }
+
+// TestRunControllerRefusesInadmissibleSessionReconciler pins the latch at the
+// standalone controller entry point: v2 returns 1 synchronously, before the
+// controller touches its socket path. startControllerSocket removes whatever
+// sits at that path, so a sentinel there survives only if no socket opened.
+func TestRunControllerRefusesInadmissibleSessionReconciler(t *testing.T) {
+	dir := shortSocketTempDir(t, "gc-latch-")
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tomlPath := writeCityTOML(t, dir, "test", "mayor")
+	sockPath := controllerSocketPath(dir)
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sockPath, []byte("sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s", SessionReconciler: "v2"},
+	}
+	buildFn := func(*config.City, runtime.Provider, beads.Store) DesiredStateResult { return DesiredStateResult{} }
+	rec := events.NewFake()
+	var stdout, stderr lockedBuffer
+
+	done := make(chan struct{})
+	var code int
+	go func() {
+		code = runController(dir, nil, tomlPath, cfg, "", buildFn, nil, runtime.NewFake(), nil, nil, nil, nil, rec, nil, &stdout, &stderr)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(hangBudget):
+		tryStopController(dir, &bytes.Buffer{})
+		awaitClose(t, done, "runController exit after stop")
+		t.Fatalf("runController with session_reconciler = v2 ran a controller; want a synchronous refusal\nstderr: %s", stderr.String())
+	}
+	if code != 1 {
+		t.Fatalf("runController exit = %d, want 1\nstderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "not available in this build") {
+		t.Errorf("stderr = %q, want the v2 refusal", stderr.String())
+	}
+	if data, err := os.ReadFile(sockPath); err != nil || string(data) != "sentinel" {
+		t.Errorf("controller socket path was touched before the refusal (sentinel read = %q, %v)", data, err)
+	}
+	if len(rec.Events) != 0 {
+		t.Errorf("refused controller recorded events %+v, want none", rec.Events)
+	}
+}

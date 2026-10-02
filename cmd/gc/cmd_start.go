@@ -773,6 +773,13 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	for _, w := range prov.Warnings {
 		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
+	// Refuse an inadmissible session_reconciler before any init, so a refused
+	// start (including --dry-run) starts no bead store and opens no event log.
+	// runController latches again for the mode it runs.
+	if _, err := latchReconcilerMode(cfg); err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	cityName := loadedCityName(cfg, cityPath)
 

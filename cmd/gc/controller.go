@@ -1320,6 +1320,14 @@ func runController(
 		cancel()
 	}()
 
+	// doStartStandalone already refused an inadmissible mode before any init;
+	// this latch is the one whose mode the runtime runs.
+	reconcilerMode, modeErr := latchReconcilerMode(cfg)
+	if modeErr != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", modeErr) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	convergenceReqCh := make(chan convergenceRequest, 16)
 	reloadReqCh := make(chan reloadRequest)
 	pokeCh := make(chan struct{}, 1)
@@ -1367,6 +1375,7 @@ func runController(
 		ConfigRev:               configRev,
 		ConfigDirty:             configDirty,
 		Cfg:                     cfg,
+		ReconcilerMode:          reconcilerMode,
 		SP:                      sp,
 		Publication:             supervisor.PublicationConfig{},
 		BuildFn:                 buildFn,

@@ -2674,6 +2674,13 @@ type DaemonConfig struct {
 	// wake fast path triggered by enqueue, eliminating the per-session bd
 	// shellout storm.
 	NudgeDispatcher string `toml:"nudge_dispatcher,omitempty" jsonschema:"default=legacy,enum=legacy,enum=supervisor"`
+	// SessionReconciler selects the controller's session reconciler. "legacy"
+	// (default) runs the tick reconciler. "v2" is reserved for the keyed
+	// reconciler and is refused in this build: a controller configured with it
+	// does not start. The gc-enterprise values "off", "auto" and "require" are
+	// deprecated aliases for "legacy". Boot-latched: a change applies at the next
+	// controller restart. Leave it unset.
+	SessionReconciler string `toml:"session_reconciler,omitempty" jsonschema:"default=legacy,enum=legacy,enum=v2,enum=off,enum=auto,enum=require"`
 	// AutoRestartOnDrift controls whether `gc start` automatically restarts
 	// the supervisor when it detects the running supervisor's binary or
 	// pack snapshot has drifted from on-disk state. Nil (unset) defaults
@@ -2878,6 +2885,61 @@ func (d *DaemonConfig) NudgeDispatcherMode() string {
 	default:
 		return "legacy"
 	}
+}
+
+// Session reconciler modes returned by SessionReconcilerMode.
+const (
+	SessionReconcilerLegacy = "legacy"
+	SessionReconcilerV2     = "v2"
+)
+
+// SessionReconcilerMode returns the normalized mode ("legacy" or "v2"),
+// whether the spelling was a deprecated alias, and ok=false for an unknown
+// value. Parsing is case- and space-tolerant.
+func (d DaemonConfig) SessionReconcilerMode() (mode string, alias, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(d.SessionReconciler)) {
+	case "", SessionReconcilerLegacy:
+		return SessionReconcilerLegacy, false, true
+	case SessionReconcilerV2:
+		return SessionReconcilerV2, false, true
+	case "off", "auto", "require":
+		return SessionReconcilerLegacy, true, true
+	default:
+		return "", false, false
+	}
+}
+
+// sessionReconcilerAliasMarker ends the warning for a gc-enterprise alias
+// spelling of [daemon] session_reconciler. Matching it as a suffix keeps an
+// unknown value that quotes the marker from passing as an alias. Keep in sync
+// with IsSessionReconcilerAliasWarning.
+const sessionReconcilerAliasMarker = `is a deprecated gc-enterprise alias for "legacy"; remove the key, legacy is the default`
+
+// sessionReconcilerWarnings returns the load warning for one config layer's
+// [daemon] session_reconciler: a non-fatal deprecation for an alias, and a
+// plain (strict-fatal) warning for an unknown value. The controller latch, not
+// the loader, refuses to start on an unknown value or an inadmissible v2.
+func sessionReconcilerWarnings(cfg *City, source string) []string {
+	if cfg == nil {
+		return nil
+	}
+	raw := cfg.Daemon.SessionReconciler
+	_, alias, ok := cfg.Daemon.SessionReconcilerMode()
+	switch {
+	case !ok:
+		return []string{fmt.Sprintf(`%s: [daemon] session_reconciler = %q is not a known value; remove the key to run the legacy reconciler`, source, raw)}
+	case alias:
+		return []string{fmt.Sprintf("%s: [daemon] session_reconciler = %q %s", source, raw, sessionReconcilerAliasMarker)}
+	}
+	return nil
+}
+
+// IsSessionReconcilerAliasWarning reports whether a load warning is the
+// non-fatal deprecation notice for a gc-enterprise session_reconciler alias.
+// Strict mode and the agent warning path use it so a city that still carries
+// "off", "auto" or "require" keeps booting on legacy.
+func IsSessionReconcilerAliasWarning(warning string) bool {
+	return strings.HasSuffix(warning, sessionReconcilerAliasMarker)
 }
 
 // ShutdownTimeoutDuration returns the shutdown timeout as a time.Duration.

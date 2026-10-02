@@ -2174,6 +2174,15 @@ func startOneCity(
 	}
 	applyRuntimeCityIdentity(cfg, cityName)
 
+	// Latch the session reconciler before any init: a refused city must not
+	// start its bead store or open its event log.
+	reconcilerMode, modeErr := latchReconcilerMode(cfg)
+	if modeErr != nil {
+		emitPendingCityCreateFailure(cr, path, cityName, "session_reconciler_refused", modeErr, stderr)
+		recordInitFailure(cityName, modeErr.Error())
+		return
+	}
+
 	// Track initialization progress for the API.
 	cr.BatchUpdate(func(
 		_ map[string]*managedCity,
@@ -2286,6 +2295,7 @@ func startOneCity(
 			ConfigRev:               configRev,
 			ConfigDirty:             configDirty,
 			Cfg:                     cfg,
+			ReconcilerMode:          reconcilerMode,
 			SP:                      sp,
 			Publication:             publication,
 			BuildFn:                 supervisorBuildAgentsFn(path, cityName, stderr),
