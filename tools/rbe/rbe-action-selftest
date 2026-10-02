@@ -25,6 +25,7 @@ quick=0; [[ ${1:-} == --quick ]] && quick=1
 worker=$(id -un "$WORKER_UID")
 TMPFS_DIRS=${TMPFS_DIRS:-/run/lock /var/crash} WORKER_JSON=${WORKER_JSON:-/etc/nativelink-worker.json}
 EGRESS_CHAIN=${EGRESS_CHAIN:-inet filter rbe_action_out} NETNS=${NETNS:-0} ROOT_RO=${ROOT_RO:-0}
+MASK_SOCKETS=${MASK_SOCKETS:-0}
 # Destinations an action must be refused (host:port, IPv6 in brackets): every
 # refused class plus PROBE_DENY (the farm). Refused means "Connection
 # refused" (nft's TCP reset), not merely failed: a timeout or no route would
@@ -105,6 +106,27 @@ mask_top=${mask_rel%%/*}
 # files).
 own_mounts="$d /tmp /var/tmp $HOME_DIR /dev/shm /dev/mqueue $TMPFS_DIRS"
 own_writable="$d/work/out /tmp /var/tmp $HOME_DIR /dev/shm $TMPFS_DIRS"
+# World-writable sockets on /run (as the host sees them, and as the action
+# does) but journald's and the system bus: none may accept the action's
+# connect() (with MASK_SOCKETS=1 the launcher masks each with /dev/null).
+# Tried with python3 (stream, datagram and seqpacket), else socat; without
+# either, any socket node left counts as reachable. find goes by the
+# directory entry: a socket bind-mounted over a file (a docker.sock) is found
+# as a mount point.
+run_socks() {
+	local m s
+	while IFS= read -r -d '' s; do
+		case $s in /run/systemd/journal/* | /run/dbus/system_bus_socket) ;; *) printf '%s\0' "$s" ;; esac
+	done < <(
+		find /run -type s -perm -o+w -print0
+		while read -r _ _ _ _ m _; do
+			printf -v m %b "${m//\\/\\0}"
+			case $m in /run/*) find "$m" -maxdepth 0 -type s -perm -o+w -print0 ;; esac
+		done </proc/self/mountinfo
+	) 2>/dev/null
+}
+host_socks=
+while IFS= read -r -d '' s; do printf -v s '%q ' "$s" && host_socks+=$s; done < <(run_socks)
 # Full run only (walks every filesystem the action can reach, seconds): no
 # directory shared between actions is writable by one, besides its own
 # mounts. Every mount in the action is walked (-xdev each: /, /run, a data
@@ -158,6 +180,33 @@ w=0; for o in '"$own_writable"'; do
 	{ echo x >"$o/.rbe-selftest-w" && rm -f "$o/.rbe-selftest-w"; } 2>/dev/null || { echo "N $o"; w=1; }
 done; [ $w = 0 ] && echo "R own-mounts-writable"
 case ",$(findmnt -no VFS-OPTIONS /)," in *,ro,*) echo "R root-ro" ;; esac
+declare -A sk=(); for s in '"$host_socks"'; do sk[$s]=1; done
+'"$(declare -f run_socks)"'
+while IFS= read -r -d "" s; do sk[$s]=1; done < <(run_socks)
+socks=("${!sk[@]}")
+r=$(if command -v python3 >/dev/null; then
+	echo "C python3"
+	PYTHONIOENCODING=utf-8:surrogateescape python3 -c "
+import socket, sys
+for p in sys.argv[1:]:
+    for t in socket.SOCK_STREAM, socket.SOCK_DGRAM, socket.SOCK_SEQPACKET:
+        with socket.socket(socket.AF_UNIX, t) as c:
+            c.settimeout(2)
+            try:
+                c.connect(p)
+            except OSError:
+                continue
+        print(\"S\", p)
+        break
+" "${socks[@]}" || echo "S (python3 failed)"
+elif command -v socat >/dev/null; then
+	echo "C socat"
+	for s in "${socks[@]}"; do timeout 3 socat -u OPEN:/dev/null "UNIX-CLIENT:$s" 2>/dev/null && echo "S $s"; done
+else
+	echo "C stat"
+	for s in "${socks[@]}"; do [ -S "$s" ] && echo "S $s"; done
+fi)
+echo "$r"; grep -q "^S " <<<"$r" || echo "R no-open-socket"
 mkdir -m 0700 out/private && echo x >out/private/f && chmod 0400 out/private/f && chmod 0500 out/private
 (setsid sleep 600 >/dev/null 2>&1 &)
 echo "R end"; exit 7'
@@ -176,6 +225,15 @@ for r in "${results[@]}"; do
 done
 sed -n 's/^W /      shared directory the action can write: /p' <<<"$out"
 sed -n 's/^N /      own mount the action cannot write: /p' <<<"$out"
+how=$(sed -n 's/^C //p' <<<"$out")
+if grep -qx "R no-open-socket" <<<"$out"; then
+	ok "action: no-open-socket (${how:-?})"
+elif ((MASK_SOCKETS)); then
+	bad "action: no-open-socket (${how:-no result})"
+else
+	echo "warn  action: no-open-socket (${how:-no result}; MASK_SOCKETS=0: reported, not enforced)"
+fi
+sed -n 's/^S /      world-writable socket the action can connect to: /p' <<<"$out"
 check "ROOT_RO=$ROOT_RO leaves the host's / and /run as they were" test "$(host_mounts 2>&1)" = "$host_before"
 for t in "${deny[@]}"; do
 	got=$(awk -v t="$t" '$1 == "D" && $2 == t { print $3 }' <<<"$out")

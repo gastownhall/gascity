@@ -16,7 +16,8 @@
 #   launch --ns <op> <slot> <rel> <timeout_s> <side_channel|-> <lock_fd> <n> <env...> <argv...>
 #       inner: pid 1 of those namespaces. Hides the worker's state, gives the
 #       action private /tmp, /var/tmp, HOME, /dev/shm (and TMPFS_DIRS), with
-#       ROOT_RO=1 makes everything else read-only, runs it as the slot user
+#       ROOT_RO=1 makes everything else read-only, with MASK_SOCKETS=1
+#       world-writable sockets on /run unreachable, runs it as the slot user
 #       without privileges, enforces its timeout, kills
 #       whatever it leaves behind, and gives every file back to the worker user
 #       for upload and cleanup.
@@ -55,7 +56,9 @@ case ${1:-} in --ns | --parent) ;; *) first "$@" ;; esac
 : "${WORK_ROOT:?}" "${MASK_ROOT:?}" "${WORKER_UID:?}" "${WORKER_GID:?}" "${SLOT_UID0:?}" "${SLOT_COUNT:?}"
 : "${MAX_TIMEOUT_S:?}" "${BACKSTOP_S:?}" "${HOME_DIR:?}"
 NETNS=${NETNS:-0} SHM_SIZE=${SHM_SIZE:-8g} TMPFS_DIRS=${TMPFS_DIRS:-/run/lock /var/crash} ROOT_RO=${ROOT_RO:-0}
+MASK_SOCKETS=${MASK_SOCKETS:-0}
 [[ $ROOT_RO == [01] ]] || die "ROOT_RO must be 0 or 1"
+[[ $MASK_SOCKETS == [01] ]] || die "MASK_SOCKETS must be 0 or 1"
 # RO_DIRS (a list of read-only directories) is gone: ROOT_RO=1 covers them all.
 [[ -z ${RO_DIRS:-} ]] || die "RO_DIRS is no longer supported: set ROOT_RO=1"
 EGRESS_CHAIN=${EGRESS_CHAIN:-inet filter rbe_action_out}
@@ -226,10 +229,10 @@ inner() {
 	# (bind remounts change this namespace's mounts only). /proc, /sys and
 	# /dev keep theirs (device nodes; their writable files are per process or
 	# root's). RUN gets its own mount first: pid 1 still writes there.
-	if [[ $ROOT_RO == 1 ]]; then
-		mount --bind "$RUN" "$RUN"
-		local m o ex
-		local -A own=() opts=()
+	local m o ex
+	local -A own=() opts=()
+	if [[ $ROOT_RO == 1 ]]; then mount --bind "$RUN" "$RUN"; fi
+	if [[ $ROOT_RO == 1 || $MASK_SOCKETS == 1 ]]; then
 		for d in "$op_dir" /tmp /var/tmp "$HOME_DIR" "$RUN" $TMPFS_DIRS; do own[$d]=1; done
 		# Mount points are octal-escaped (\040 for a space); the last line for
 		# a path is its top mount.
@@ -237,6 +240,8 @@ inner() {
 			printf -v m '%b' "${m//\\/\\0}"
 			opts[$m]=$o
 		done </proc/self/mountinfo
+	fi
+	if [[ $ROOT_RO == 1 ]]; then
 		for m in "${!opts[@]}"; do
 			case $m in / | /proc | /proc/* | /sys | /sys/* | /dev | /dev/*) continue ;; esac
 			# Hidden under a mount above (the mask, /tmp, ...): not reachable.
@@ -253,6 +258,29 @@ inner() {
 		if mountpoint -q /dev; then ex=,nodev; fi
 		if [[ ,${opts[/]}, == *,noexec,* ]]; then ex+=,noexec; fi
 		mount -o "remount,bind,ro,nosuid$ex" /
+	fi
+	# MASK_SOCKETS=1: connect() works on a read-only mount, so a world-writable
+	# socket on /run (a VM shutdown socket, snapd, uuidd, acpid, systemd's
+	# varlink services) would still let any action use it. Each one, but
+	# journald's (logging) and the system bus (polkit decides), gets /dev/null
+	# bound over it in this namespace only: connect() is refused, the host's
+	# socket stays as it is. One find walks /run and every mount on it but
+	# the action's own, each with -xdev (a socket bind-mounted over a file is
+	# found as a start point only), names NUL-delimited; a hidden mount's path
+	# is gone or is what the action reaches. 2-3 ms per socket (mount).
+	if [[ $MASK_SOCKETS == 1 ]]; then
+		local s walk=(/run)
+		local -A socks=()
+		for m in "${!opts[@]}"; do
+			case $m in /run/*) if [[ -z ${own[$m]:-} ]]; then walk+=("$m"); fi ;; esac
+		done
+		while IFS= read -r -d '' s; do
+			case $s in /run/systemd/journal/* | /run/dbus/system_bus_socket) ;; *) socks[$s]=1 ;; esac
+		done < <(find "${walk[@]}" -xdev -type s -perm -o+w -print0 2>/dev/null)
+		# A socket gone meanwhile needs no mask; any other failure stops here.
+		for s in "${!socks[@]}"; do
+			mount --bind /dev/null "$s" 2>/dev/null || [[ ! -S $s ]] || mount --bind /dev/null "$s"
+		done
 	fi
 	cd "$op_dir/work${rel:+/$rel}"
 

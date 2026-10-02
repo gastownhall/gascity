@@ -101,7 +101,8 @@ slots=$(($(nproc) / 2)); [ "$slots" -ge 1 ] || slots=1
 # workers. The runner's own sudo (NOPASSWD) runs the root launcher; slot egress
 # is filtered by nftables (NETNS=0). Nothing of the image changes for the
 # runner: its world-writable directories stay so; inside an action / and
-# every other mount but the action's own are read-only (ROOT_RO=1). Each
+# every other mount but the action's own are read-only (ROOT_RO=1), and its
+# world-writable sockets on /run are masked (MASK_SOCKETS=1). Each
 # phase is logged ("isolation: <phase>") so a step that dies without an error
 # still shows where.
 LIB=/usr/local/libexec/rbe-action
@@ -231,6 +232,7 @@ isolate() {
 		SHM_SIZE=8g
 		TMPFS_DIRS="/run/lock /var/crash"
 		ROOT_RO=1
+		MASK_SOCKETS=1
 		EGRESS_CHAIN="inet rbe_action output"
 		PROBE_DENY="169.254.169.254:80"
 		WORKER_JSON=$ROOT/worker.json
@@ -274,16 +276,26 @@ isolate() {
 	render
 	# Full selftest (a few seconds): it also checks worker.json routes actions
 	# through the entrypoint, the timeout path, and that an action can write
-	# no shared directory on any mount (ROOT_RO=1, TMPFS_DIRS private).
+	# no shared directory on any mount (ROOT_RO=1, TMPFS_DIRS private), and
+	# no world-writable socket on /run it can connect to (MASK_SOCKETS=1).
 	phase selftest
-	sudo "$LIB/selftest"
+	selftest_out=$RUNNER_TEMP/rbe-selftest.out
+	# shellcheck disable=SC2024 # the runner's file, not root's
+	if ! sudo "$LIB/selftest" >"$selftest_out"; then
+		cat "$selftest_out"
+		fail "selftest: $(grep -E '^(FAIL|      )' "$selftest_out" | sed -E 's/^ +[^:]+: / /' | tr -s '\n ' ' ')"
+	fi
+	cat "$selftest_out"
 	phase sudo
 	LC_ALL=C sudo -l -U rbe-a00 2>&1 | grep -q 'not allowed to run sudo' || fail "slot users must have no sudo"
-	# /run is not masked: a socket a slot user could open there (a 0666
-	# docker.sock) is a way out of the sandbox.
+	# A world-writable socket an action can open (Blacksmith's 0666 VM
+	# shutdown socket, snapd, a docker.sock) is a way out of the sandbox,
+	# read-only mount or not. The host keeps them; what counts is what an
+	# action reaches: the selftest above connected to each from inside one
+	# (MASK_SOCKETS=1 masks them there, journald's and the system bus aside).
 	phase sockets
-	open_socks=$(sudo find /run /var/run -xdev -maxdepth 3 -type s -perm -o+w 2>/dev/null | grep -vxE '/run/systemd/(notify|journal/.*|private|io\.system\.ManagedOOM)|/run/dbus/system_bus_socket' || true)
-	[ -z "$open_socks" ] || fail "world-writable sockets reachable by actions: $(tr '\n' ' ' <<<"$open_socks")"
+	grep -q '^ok    action: no-open-socket' "$selftest_out" ||
+		fail "world-writable sockets reachable by actions: $(sed -n 's/^ *world-writable socket the action can connect to: //p' "$selftest_out" | tr '\n' ' ')"
 	phase probe
 	# What S11.3 is about, on this VM's layout: a probe action through the real
 	# entrypoint must run as a slot user and fail to read the worker key, find

@@ -142,6 +142,10 @@ func TestRBEWorkerScriptIsolationConfig(t *testing.T) {
 		// / and every other mount but the action's own are read-only inside
 		// actions, whatever the image leaves world-writable.
 		"ROOT_RO": "1",
+		// connect() works on a read-only mount: world-writable sockets on
+		// /run (Blacksmith's VM shutdown socket, snapd, ...) are masked inside
+		// actions (run 36956951091 found eight).
+		"MASK_SOCKETS": "1",
 	} {
 		if env[k] != want {
 			t.Errorf("rbe-action.env %s = %q, want %q", k, env[k], want)
@@ -314,9 +318,12 @@ func TestRBEWorkerScriptGatesNativeLinkOnIsolation(t *testing.T) {
 		`sudo tee /etc/rbe-west/rbe-action.env >/dev/null <<-EOF`,
 		`sudo chmod 0440 /etc/sudoers.d/rbe-action && sudo visudo -cq`,
 		"render\n",
-		`sudo "$LIB/selftest"`,
+		`if ! sudo "$LIB/selftest" >"$selftest_out"; then`,
+		`fail "selftest: $(grep -E '^(FAIL|      )' "$selftest_out" | sed -E 's/^ +[^:]+: / /' | tr -s '\n ' ' ')"`,
 		`LC_ALL=C sudo -l -U rbe-a00 2>&1 | grep -q 'not allowed to run sudo'`,
-		`open_socks=$(sudo find /run /var/run -xdev -maxdepth 3 -type s -perm -o+w`,
+		// What an action can connect to (the selftest's in-action check), not
+		// what the host has on /run: the host keeps its sockets.
+		`grep -q '^ok    action: no-open-socket' "$selftest_out" ||`,
 		`probe "$ROOT/pki/worker.key"`,
 		`if ! grep -qE "^uid 590[0-9]{2}$" <<<"$out" || grep -q LEAK <<<"$out"; then`,
 		// Mode 1 runs the checks in this shell: any failure ends the worker.
@@ -342,6 +349,48 @@ func TestRBEWorkerScriptGatesNativeLinkOnIsolation(t *testing.T) {
 		body := readFile(t, root, "tools/rbe/"+f)
 		if !strings.Contains(body, f+": ") || !strings.Contains(body, "/usr/local/libexec/rbe-action/") {
 			t.Errorf("tools/rbe/%s is not infra's rbe-action file", f)
+		}
+	}
+}
+
+// Run 36956951091 (canary): the selftest passed, then eight world-writable
+// sockets on Blacksmith's /run (its VM shutdown socket among them) were found
+// reachable by actions. MASK_SOCKETS=1 masks them inside each action; MAIN
+// keeps the default (0) until it opts in. The sockets phase reads the
+// selftest's line, and the launcher and the selftest keep the same sockets.
+func TestRBEActionMaskSockets(t *testing.T) {
+	root := repoRoot(t)
+	launch := readFile(t, root, "tools/rbe/rbe-action-launch")
+	selftest := readFile(t, root, "tools/rbe/rbe-action-selftest")
+	for _, want := range []string{
+		"MASK_SOCKETS=${MASK_SOCKETS:-0}\n",
+		`[[ $MASK_SOCKETS == [01] ]] || die "MASK_SOCKETS must be 0 or 1"`,
+		`done < <(find "${walk[@]}" -xdev -type s -perm -o+w -print0 2>/dev/null)`,
+		`mount --bind /dev/null "$s" 2>/dev/null || [[ ! -S $s ]] || mount --bind /dev/null "$s"`,
+	} {
+		if !strings.Contains(launch, want) {
+			t.Errorf("rbe-action-launch missing %q", want)
+		}
+	}
+	const keep = "case $s in /run/systemd/journal/* | /run/dbus/system_bus_socket) ;; *)"
+	if n := strings.Count(launch, keep); n != 1 {
+		t.Errorf("rbe-action-launch: %d sockets-kept lists %q, want 1", n, keep)
+	}
+	if n := strings.Count(selftest, keep); n != 1 {
+		t.Errorf("rbe-action-selftest: %d sockets-kept lists %q, want 1 (run_socks, host and action)", n, keep)
+	}
+	// The action runs the host's run_socks: the same list on both sides.
+	if !strings.Contains(selftest, `'"$(declare -f run_socks)"'`) {
+		t.Error("rbe-action-selftest: the probe must run the host's run_socks")
+	}
+	for _, want := range []string{
+		`ok() { echo "ok    $1"; }`,
+		`ok "action: no-open-socket (${how:-?})"`,
+		"elif ((MASK_SOCKETS)); then\n\tbad \"action: no-open-socket",
+		`sed -n 's/^S /      world-writable socket the action can connect to: /p' <<<"$out"`,
+	} {
+		if !strings.Contains(selftest, want) {
+			t.Errorf("rbe-action-selftest missing %q", want)
 		}
 	}
 }
