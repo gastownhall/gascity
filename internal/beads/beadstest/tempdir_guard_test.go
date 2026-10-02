@@ -184,7 +184,7 @@ func TestGuardedBdWorkspaceDirSitsBelowABaitWorkspace(t *testing.T) {
 		bait := filepath.Join(filepath.Dir(GuardedBdWorkspaceDir(t)), ".beads")
 		config, err := os.ReadFile(filepath.Join(bait, "config.yaml"))
 		if err != nil || len(config) == 0 {
-			t.Fatalf("bait config.yaml must exist and be non-empty, bd ignores an empty one: len=%d err=%v", len(config), err)
+			t.Fatalf("bait config.yaml must exist and be non-empty: len=%d err=%v", len(config), err)
 		}
 		raw, err := os.ReadFile(filepath.Join(bait, "metadata.json"))
 		if err != nil {

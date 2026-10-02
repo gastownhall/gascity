@@ -102,11 +102,11 @@ func TestOwnedHome(t testing.TB) string {
 	return home
 }
 
-// baitFiles are the files of the bait workspace GuardedBdWorkspaceDir plants.
-// metadata.json is what makes bd adopt the directory as a workspace, with no
-// database behind it. config.yaml must be non-empty: bd does not treat an
-// empty one as a project file. The bait is only ever read by bd for
-// adoption; nothing in it is valid for use.
+// baitFiles are the files of the bait workspace GuardedBdWorkspaceDir plants:
+// project files and no database. bd adopts a directory like this: `bd init`
+// below it initializes into it, and `bd config` below it runs against it.
+// Nothing in it is valid for use, so a bd that adopts it leaves files beside
+// these, which is the escape the end-of-test check reports.
 var baitFiles = map[string]string{
 	"config.yaml":   "# bait workspace planted by beadstest.GuardedBdWorkspaceDir\n",
 	"metadata.json": `{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"bait","project_id":"11111111-2222-3333-4444-555555555555"}`,
@@ -172,8 +172,8 @@ func markGitRoot(t testing.TB, dir string) {
 // database is adopted: `bd init` in the temp dir exits 0 having initialized
 // the ANCESTOR, and later bd commands there run against it. An ancestor that
 // is a full workspace makes `bd init` abort as already initialized and lets
-// `bd config` succeed through it. The first shape left a stray /var/tmp/.beads
-// that failed every later run on the host (ga-l7otw9).
+// `bd config` succeed through it. Both shapes were seen on one host, where a
+// stray /var/tmp/.beads failed every real-bd test below it (ga-l7otw9).
 //
 // The returned dir is its own git root, which stops the walk at the dir. It is
 // also the child of a bait workspace (project files, no database): bd reaching
