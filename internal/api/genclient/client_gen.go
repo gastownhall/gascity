@@ -3422,15 +3422,25 @@ type RigProvisionProgressPayload struct {
 
 // RigResponse defines model for RigResponse.
 type RigResponse struct {
-	AgentCount    int64      `json:"agent_count"`
-	DefaultBranch *string    `json:"default_branch,omitempty"`
-	Git           *GitStatus `json:"git,omitempty"`
-	LastActivity  *time.Time `json:"last_activity,omitempty"`
-	Name          string     `json:"name"`
-	Path          string     `json:"path"`
-	Prefix        *string    `json:"prefix,omitempty"`
-	RunningCount  int64      `json:"running_count"`
-	Suspended     bool       `json:"suspended"`
+	AgentCount int64 `json:"agent_count"`
+
+	// DefaultBranch Mainline branch (e.g. main, master).
+	DefaultBranch *string `json:"default_branch,omitempty"`
+
+	// DefaultSlingTarget Agent qualified name that targetless gc sling routes this rig's work to.
+	DefaultSlingTarget *string `json:"default_sling_target,omitempty"`
+
+	// DefaultSlingTargets Agents targetless gc sling picks from at random; takes precedence over default_sling_target when set.
+	DefaultSlingTargets *[]string  `json:"default_sling_targets,omitempty"`
+	Git                 *GitStatus `json:"git,omitempty"`
+	LastActivity        *time.Time `json:"last_activity,omitempty"`
+	Name                string     `json:"name"`
+	Path                string     `json:"path"`
+
+	// Prefix Effective bead ID prefix: the configured prefix, or the one derived from the rig name.
+	Prefix       *string `json:"prefix,omitempty"`
+	RunningCount int64   `json:"running_count"`
+	Suspended    bool    `json:"suspended"`
 }
 
 // RigUpdateInputBody defines model for RigUpdateInputBody.
