@@ -1462,6 +1462,8 @@ export const zRigProvisionProgressPayload = z.object({
 export const zRigResponse = z.object({
     agent_count: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     default_branch: z.string().optional(),
+    default_sling_target: z.string().optional(),
+    default_sling_targets: z.array(z.string()).nullish(),
     git: zGitStatus.optional(),
     last_activity: z.iso.datetime().optional(),
     name: z.string(),

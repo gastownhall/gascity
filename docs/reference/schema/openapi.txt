@@ -6990,7 +6990,22 @@
             "type": "integer"
           },
           "default_branch": {
+            "description": "Mainline branch (e.g. main, master).",
             "type": "string"
+          },
+          "default_sling_target": {
+            "description": "Agent qualified name that targetless gc sling routes this rig's work to.",
+            "type": "string"
+          },
+          "default_sling_targets": {
+            "description": "Agents targetless gc sling picks from at random; takes precedence over default_sling_target when set.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "git": {
             "$ref": "#/components/schemas/GitStatus"
@@ -7006,6 +7021,7 @@
             "type": "string"
           },
           "prefix": {
+            "description": "Effective bead ID prefix: the configured prefix, or the one derived from the rig name.",
             "type": "string"
           },
           "running_count": {

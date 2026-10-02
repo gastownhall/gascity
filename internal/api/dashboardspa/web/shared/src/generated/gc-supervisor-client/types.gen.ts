@@ -2842,11 +2842,25 @@ export type RigProvisionProgressPayload = {
 
 export type RigResponse = {
     agent_count: number;
+    /**
+     * Mainline branch (e.g. main, master).
+     */
     default_branch?: string;
+    /**
+     * Agent qualified name that targetless gc sling routes this rig's work to.
+     */
+    default_sling_target?: string;
+    /**
+     * Agents targetless gc sling picks from at random; takes precedence over default_sling_target when set.
+     */
+    default_sling_targets?: Array<string> | null;
     git?: GitStatus;
     last_activity?: string;
     name: string;
     path: string;
+    /**
+     * Effective bead ID prefix: the configured prefix, or the one derived from the rig name.
+     */
     prefix?: string;
     running_count: number;
     suspended: boolean;

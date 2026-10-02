@@ -268,3 +268,75 @@ func TestRigActionUnknown(t *testing.T) {
 		t.Errorf("type = %q, want urn:gascity:error:validation-failed", pd.Type)
 	}
 }
+
+// TestRigListReportsSlingTargetsAndEffectiveConfig pins the rig config that
+// `gc rig list --json` reports so API clients do not need to shell out to it:
+// default_sling_target(s) (where a targetless `gc sling` routes work) and the
+// effective bead prefix (derived from the rig name when city.toml omits it).
+func TestRigListReportsSlingTargetsAndEffectiveConfig(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Rigs = []config.Rig{
+		{Name: "myrig", Path: "/tmp/myrig", DefaultBranch: " main ", DefaultSlingTarget: "myrig/claude"},
+		{Name: "other-rig", Path: "/tmp/other", Prefix: "ot", DefaultSlingTargets: []string{"other-rig/a", "other-rig/b"}},
+	}
+	h := newTestCityHandler(t, state)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/rigs"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("items = %d, want 2", len(resp.Items))
+	}
+	byName := map[string]map[string]any{}
+	for _, item := range resp.Items {
+		byName[item["name"].(string)] = item
+	}
+
+	mine := byName["myrig"]
+	if got := mine["default_sling_target"]; got != "myrig/claude" {
+		t.Errorf("myrig default_sling_target = %v, want myrig/claude", got)
+	}
+	if _, ok := mine["default_sling_targets"]; ok {
+		t.Errorf("myrig default_sling_targets = %v, want omitted", mine["default_sling_targets"])
+	}
+	if got, want := mine["prefix"], config.DeriveBeadsPrefix("myrig"); got != want {
+		t.Errorf("myrig prefix = %v, want derived %q", got, want)
+	}
+	if got := mine["default_branch"]; got != "main" {
+		t.Errorf("myrig default_branch = %q, want %q", got, "main")
+	}
+
+	other := byName["other-rig"]
+	if _, ok := other["default_sling_target"]; ok {
+		t.Errorf("other-rig default_sling_target = %v, want omitted", other["default_sling_target"])
+	}
+	targets, _ := other["default_sling_targets"].([]any)
+	if len(targets) != 2 || targets[0] != "other-rig/a" || targets[1] != "other-rig/b" {
+		t.Errorf("other-rig default_sling_targets = %v, want [other-rig/a other-rig/b]", other["default_sling_targets"])
+	}
+	if got := other["prefix"]; got != "ot" {
+		t.Errorf("other-rig prefix = %v, want ot", got)
+	}
+
+	// The single-rig read reports the same fields.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/rig/myrig"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /rig/myrig status = %d, want 200", rec.Code)
+	}
+	var one map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&one); err != nil {
+		t.Fatalf("decode rig: %v", err)
+	}
+	if got := one["default_sling_target"]; got != "myrig/claude" {
+		t.Errorf("GET /rig/myrig default_sling_target = %v, want myrig/claude", got)
+	}
+}
