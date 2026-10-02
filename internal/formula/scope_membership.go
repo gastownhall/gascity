@@ -9,9 +9,9 @@ import (
 )
 
 // inheritedScopeRefs maps each top-level step that names a scope to the scope
-// it names. Resolve takes it from the merged parents before the child's steps
-// are applied: mergeSteps replaces an overridden step wholesale, so this
-// snapshot is the only record of what an override erased.
+// it names. mergeSteps replaces an overridden step wholesale, so a snapshot of
+// the parent steps taken before the merge is the only record of what an
+// override erased; droppedScopeRefs compares it with the merged steps.
 func inheritedScopeRefs(steps []*Step) map[string]string {
 	refs := make(map[string]string)
 	for _, step := range steps {
@@ -25,20 +25,15 @@ func inheritedScopeRefs(steps []*Step) map[string]string {
 	return refs
 }
 
-// validateScopeMembership rejects a merged formula whose scope membership did
-// not survive `extends`. The checks read metadata and graph shape only, never
-// step content, and report nothing for a formula that names no scope.
+// validateScopeMembership rejects a merged formula in which a step names a
+// scope body that does not exist. The check reads metadata only, never step
+// content, and reports nothing for a formula that names no scope.
 //
-// A step states its membership by mentioning gc.scope_ref; setting it to the
-// empty string is the explicit opt-out, for a step that deliberately sits
-// outside every scope.
-func validateScopeMembership(f *Formula, inherited map[string]string) error {
-	steps := collectGraphSteps(f.Steps)
-
-	var problems []string
-	problems = append(problems, droppedScopeRefs(f.Steps, inherited)...)
-	problems = append(problems, danglingScopeRefs(steps)...)
-	problems = append(problems, uncoveredSinks(f.Steps, steps)...)
+// droppedScopeRefs and uncoveredSinks are deliberately not called. They would
+// reject an extender written before its base declared scope membership, so they
+// wait for the pack that supplies the base to be live (ga-prk8k5).
+func validateScopeMembership(f *Formula) error {
+	problems := danglingScopeRefs(collectGraphSteps(f.Steps))
 	if len(problems) == 0 {
 		return nil
 	}
@@ -67,12 +62,14 @@ func droppedScopeRefs(steps []*Step, inherited map[string]string) []string {
 
 // danglingScopeRefs finds steps whose gc.scope_ref names no scope body. Left
 // alone that only surfaces at run time, when the step's scope-check cannot
-// resolve its body and fails with ErrControlGraphMalformed on every run.
+// resolve its body and fails with ErrControlGraphMalformed on every run. A ref
+// that holds a {{placeholder}} is skipped: cook substitutes it after Resolve,
+// so it cannot be judged here.
 func danglingScopeRefs(steps []*Step) []string {
 	var problems []string
 	for _, step := range steps {
 		ref := step.Metadata[beadmeta.ScopeRefMetadataKey]
-		if ref == "" {
+		if ref == "" || strings.Contains(ref, "{{") {
 			continue
 		}
 		named := namedScopeStep(steps, ref)
@@ -131,6 +128,9 @@ func uncoveredSinks(top, steps []*Step) []string {
 	return problems
 }
 
+// declaresScopeRef reports whether a step states its scope membership by
+// mentioning gc.scope_ref. Setting it to the empty string is the explicit
+// opt-out, for a step that deliberately sits outside every scope.
 func declaresScopeRef(step *Step) bool {
 	_, declared := step.Metadata[beadmeta.ScopeRefMetadataKey]
 	return declared
@@ -141,8 +141,10 @@ func isScopeBody(step *Step) bool {
 		step.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleBody
 }
 
-// namedScopeStep resolves ref the way the runtime does (beadmeta.NodeIsScope),
-// preferring a scope body when more than one step matches.
+// namedScopeStep finds the step a gc.scope_ref names: one whose id, gc.step_ref
+// or gc.step_id equals ref or ends in "."+ref (beadmeta.NodeIsScope). It is a
+// compile-time lookup, not the runtime's. A scope body wins when several steps
+// match.
 func namedScopeStep(steps []*Step, ref string) *Step {
 	var named *Step
 	for _, step := range steps {

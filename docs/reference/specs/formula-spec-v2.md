@@ -1003,25 +1003,27 @@ metadata included. Three rules follow.
    member is rewritten to the scope-check, so a step outside the scope still
    runs after the scope aborts.
 
-When a formula that uses `extends` is resolved, the compiler enforces the
-rules and reports every violation at once:
+The rules are authoring guidance, and the compiler checks only that every
+`gc.scope_ref` resolves. When a formula that uses `extends` is resolved, each
+`gc.scope_ref` must name a step with `gc.kind = "scope"` and
+`gc.scope_role = "body"`, and every step whose reference does not is reported
+at once. A `gc.scope_ref` that holds a `{{variable}}` placeholder is not
+checked, because cook substitutes it after the formula is resolved.
 
-- an overriding step drops the `gc.scope_ref` its parent declared;
-- a graph sink downstream of a scope's members or body carries no
-  `gc.scope_ref`. Teardown steps and scope bodies are not sinks here, and a
-  sink unrelated to every scope is left alone;
-- a `gc.scope_ref` names no step with `gc.kind = "scope"` and
-  `gc.scope_role = "body"`.
+The compiler does not yet check rules 2 and 3. An override that drops its
+parent's `gc.scope_ref` takes that step out of the scope, and a terminal step
+that declares no membership still runs after the scope aborts. Both resolve
+without a diagnostic, so apply the rules above when you override or add steps.
 
 A formula that names no scope is unaffected, and so is one without
-`extends`: the checks guard a merge.
+`extends`: the check guards a merge.
 
 `[requires] formula_compiler` gates compiler capability, not the content of a
 base formula that an extender depends on, and a new `[requires]` axis would
 not help: a scope body is bundle content, not compiler capability. An
-extender whose base lacks the body it names is therefore caught by the third
-check above, not by `[requires]`, and should ship only once the deployed
-bundle provides that body.
+extender whose base lacks the body it names is therefore caught by the
+`gc.scope_ref` check above, not by `[requires]`, and should ship only once the
+deployed bundle provides that body.
 
 The `mol-polecat-*` formulas have the shape these rules exist for. The base
 runs `load-context`, `workspace-setup`, `preflight-tests`, `implement` and
