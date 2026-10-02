@@ -363,8 +363,9 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 			return 1
 		}
 		defer ownership.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
-		// Controller handled the shutdown — still stop the bead store, and
-		// only after waiting for the controller to be gone: a live reader
+		// Controller handled the shutdown — including the pack city-stop hooks,
+		// which run inside its own runtime teardown — still stop the bead store,
+		// and only after waiting for the controller to be gone: a live reader
 		// restarts a provider-owned proxy the moment it is retired. The
 		// controller lock stays held until this returns so a restarted or
 		// second controller cannot come up against a provider being retired.
@@ -438,11 +439,16 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 
 	teardownServerForStop(sp, stderr, "gc stop")
 
+	// Pack-owned services come down after agent sessions and before the bead
+	// store, so a hook can still reach the ledger while it tears down.
+	runPackLifecycleHooks(cityPath, cfg, config.LifecycleEventCityStop, stdout, stderr)
+
 	// Stop the bead store's backing service LAST, and only here. The order
 	// this function runs in is load-bearing for a provider-owned proxied city:
 	//
 	//   controller (agents drain with it) -> sessions -> orphan sessions ->
-	//   runtime server teardown -> bd dolt stop per provider-owned scope
+	//   runtime server teardown -> pack city-stop hooks ->
+	//   bd dolt stop per provider-owned scope
 	//
 	// bd restarts a proxied scope's proxy and Dolt child on ANY read (beads
 	// cmd/bd/main.go:1758 — BEADS_DOLT_AUTO_START does not reach that path),

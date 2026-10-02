@@ -41,6 +41,8 @@ code-review-pack/
 ├── doctor/
 │   └── check-review-tools/
 │       └── run.sh
+├── lifecycle/
+│   └── city-stop.sh
 ├── overlay/
 ├── skills/
 ├── mcp/
@@ -276,6 +278,29 @@ orders/
 
 When multiple packs provide the same formula name, the importing pack wins over
 its imports. Rig-level imports can override city-level formulas for that rig.
+
+## Lifecycle Hooks
+
+A pack that owns a service outside the city — a systemd unit, a container, an
+external daemon — attaches it to the city's lifecycle with a hook script named
+for the event it handles.
+
+```text
+lifecycle/
+├── city-start.sh   # runs after gc start brings the city up
+└── city-stop.sh    # runs during gc stop, after agent sessions stop
+```
+
+```bash
+#!/bin/sh
+# lifecycle/city-stop.sh — take the pack's service down with the city.
+systemctl --user stop review-index.service
+```
+
+Hooks run with the pack directory as their working directory and receive
+`GC_CITY_PATH`, `GC_PACK_DIR`, `GC_PACK_STATE_DIR`, and `GC_LIFECYCLE_EVENT`.
+Each hook gets 30 seconds; one that fails or hangs is reported and skipped
+without failing `gc start` or `gc stop`, so write hooks to be idempotent.
 
 ## Compatibility Notes
 

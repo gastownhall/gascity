@@ -300,6 +300,7 @@ filegroup(
         "//internal/orderdispatch:bazel_repo_srcs",
         "//internal/orders:bazel_repo_srcs",
         "//internal/overlay:bazel_repo_srcs",
+        "//internal/packlifecycle:bazel_repo_srcs",
         "//internal/packman:bazel_repo_srcs",
         "//internal/packregistry:bazel_repo_srcs",
         "//internal/pathdurability:bazel_repo_srcs",
