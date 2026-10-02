@@ -3,6 +3,7 @@ package scripts_test
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -100,8 +101,24 @@ esac
 }
 
 // start launches the shard runner in its own process group so a test can
-// signal the runner alone, exactly as a dying parent chain would.
+// signal the runner alone, exactly as a dying parent chain would. The runner's
+// output goes to a log file, read back through output.
 func (f *reapFixture) start(t *testing.T, extraEnv ...string) *exec.Cmd {
+	t.Helper()
+	f.logPath = filepath.Join(f.tmpDir, "runner.log")
+	logFile, err := os.Create(f.logPath)
+	if err != nil {
+		t.Fatalf("create runner log: %v", err)
+	}
+	t.Cleanup(func() { _ = logFile.Close() })
+	return f.startWithOutput(t, logFile, extraEnv...)
+}
+
+// startWithOutput is start with the runner's stdout and stderr both sent to
+// out, for a test that must observe who still holds that descriptor. out is an
+// *os.File so the runner inherits it directly: os/exec copies through a pipe of
+// its own only for other writers.
+func (f *reapFixture) startWithOutput(t *testing.T, out *os.File, extraEnv ...string) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command(filepath.Join(f.repoRoot, "scripts", "test-go-test-shard"), "./example", "1", "2")
 	cmd.Dir = f.repoRoot
@@ -115,15 +132,8 @@ func (f *reapFixture) start(t *testing.T, extraEnv ...string) *exec.Cmd {
 		"SYS_USR_CGO_FALLBACK=0",
 	}, extraEnv...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	f.logPath = filepath.Join(f.tmpDir, "runner.log")
-	logFile, err := os.Create(f.logPath)
-	if err != nil {
-		t.Fatalf("create runner log: %v", err)
-	}
-	t.Cleanup(func() { _ = logFile.Close() })
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	cmd.Stdout = out
+	cmd.Stderr = out
 
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start test-go-test-shard: %v", err)
@@ -457,5 +467,59 @@ func TestGoTestShardLeavesNothingHoldingTheCallersPipe(t *testing.T) {
 	case <-time.After(60 * time.Second):
 		_ = cmd.Process.Kill()
 		t.Fatal("reading the shard runner's output blocked after the run finished: a descendant outlived the run holding the caller's pipe")
+	}
+}
+
+// TestGoTestShardTerminationLeavesNothingHoldingTheCallersPipe is the
+// signal-path twin of TestGoTestShardLeavesNothingHoldingTheCallersPipe
+// (ga-880tzy). The watchdog lives in a process group of its own, so a runner
+// whose signal trap tears down only the run's group leaves the watchdog and
+// its sleep(1) behind as orphans: they hold the caller's stdout and the run's
+// cwd until the deadline, and on waking signal the run's process-group id,
+// which by then the kernel may have handed to an unrelated group. Reading the
+// runner's stdout to EOF proves every process that inherited it is gone,
+// watchdog included, without having to name any of them.
+func TestGoTestShardTerminationLeavesNothingHoldingTheCallersPipe(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "run.pid")
+	fixture := newReapFixture(t, fmt.Sprintf(`
+    echo $$ > %q
+    sleep %d
+`, pidFile, fixtureLifetimeSeconds))
+
+	stdout, stdoutWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create runner stdout pipe: %v", err)
+	}
+	t.Cleanup(func() { _ = stdout.Close() })
+
+	// The 60s budget outlasts this test's patience by a wide margin, so a
+	// leaked watchdog is still holding the pipe when the test gives up. It is
+	// also short enough that a leaked watchdog wakes long before the kernel
+	// could plausibly recycle the run's dead process-group id; it then finds
+	// no such group and exits without signaling anything.
+	cmd := fixture.startWithOutput(t, stdoutWriter,
+		"GO_TEST_TIMEOUT=30s",
+		"GO_TEST_WATCHDOG_GRACE=30s",
+	)
+	// From here on the runner's tree holds the only write ends.
+	_ = stdoutWriter.Close()
+	waitForPIDFile(t, pidFile, 30*time.Second)
+
+	if err := syscall.Kill(cmd.Process.Pid, syscall.SIGTERM); err != nil {
+		t.Fatalf("signal runner: %v", err)
+	}
+
+	drained := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, stdout)
+		drained <- err
+	}()
+	select {
+	case err := <-drained:
+		if err != nil {
+			t.Fatalf("read runner stdout: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("a process of the terminated runner's tree still holds its stdout 20s later: the runner must take its watchdog down with its run")
 	}
 }
