@@ -63,6 +63,20 @@ func TestDoltCallContextIsBoundedByTheTestDeadline(t *testing.T) {
 		}
 	})
 
+	t.Run("a deadline that has already passed leaves the call no time", func(t *testing.T) {
+		deadline := time.Now().Add(-time.Minute)
+		ctx, cancel := doltCallContext(fakeTestDeadline{at: deadline, ok: true})
+		defer cancel()
+
+		got, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("call context has no deadline, want the test deadline that has already passed")
+		}
+		if got.After(deadline) {
+			t.Fatalf("call deadline %v is after the test deadline %v that has already passed: the call would outlive the test", got, deadline)
+		}
+	})
+
 	t.Run("no test deadline leaves the call unbounded", func(t *testing.T) {
 		ctx, cancel := doltCallContext(fakeTestDeadline{})
 		defer cancel()
