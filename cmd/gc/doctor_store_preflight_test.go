@@ -24,6 +24,7 @@ var doctorCityStoreDependentNames = []string{
 	"route-recovery-quarantine",
 	"hold-label-routed-to",
 	"pool-idle-routed-work",
+	"stuck-creating-sessions",
 	"work-option-metadata-migration",
 	"backlog-depth",
 	"order-tracking-retention",

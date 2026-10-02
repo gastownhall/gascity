@@ -404,6 +404,11 @@ var sessionRelocationRoutedFiles = []string{
 	// class and degrade to a silent no-op — a green result that reads as "no
 	// stranded work" when the check simply looked in the wrong store.
 	"doctor_pool_idle_routed_work_check.go",
+	// The stuck-creating-sessions doctor check enumerates session beads in every
+	// scope. Unrouted, it would find zero sessions under a relocated sessions
+	// class and report "no stuck sessions" when it simply looked in the wrong
+	// store — the one answer this check exists to make impossible.
+	"doctor_stuck_creating_sessions_check.go",
 	// The startup-health-episodes doctor check enumerates session-class episode
 	// beads. Unrouted, it reports "no active startup-health episodes" under a
 	// relocated sessions class — a green result that reads as "no stuck
