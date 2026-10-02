@@ -8,8 +8,12 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // redHandoffSupersededByKey is the marker a superseded staged brief carries,
@@ -264,6 +268,155 @@ func TestRestageIgnoresDanglingStagedPointer(t *testing.T) {
 	}
 	staged := onlyOpenHandoffMessage(t, store)
 	assertSessionStagesHandoff(t, store, sessionBead.ID, staged.ID)
+}
+
+// TestRestageRoutesEachClassToItsOwnStore stages twice with the message beads and
+// the session bead on two different stores, the shape a relocated messaging or
+// sessions class takes. Every other restage test hands one store in as both, and
+// on one store a brief that is looked up or closed through the session store, or
+// a pointer written through the message store, finds the same bead the right
+// store would, so a swap between the two goes unnoticed.
+func TestRestageRoutesEachClassToItsOwnStore(t *testing.T) {
+	msgStore := &beads.MemStore{IDPrefix: "msg"}
+	sessStore := &beads.MemStore{IDPrefix: "ses"}
+	sessionBead := seedRestartableHandoffSession(t, sessStore, "worker", "origin-instance")
+	recorder := events.NewFake()
+
+	stage := func(brief string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		outcome := doHandoffWithOutcome(msgStore, sessStore, recorder, newFakeDrainOps(), nil, "worker", "worker",
+			[]string{"context cycle", brief}, &stdout, &stderr)
+		if outcome.code != 0 || !outcome.restartRequested {
+			t.Fatalf("handoff %q outcome = %#v, want accepted restart; stdout=%q stderr=%q", brief, outcome, stdout.String(), stderr.String())
+		}
+	}
+
+	stage("first brief")
+	first := onlyOpenHandoffMessage(t, msgStore)
+	stage("second brief")
+	second := onlyOpenHandoffMessage(t, msgStore)
+	if second.ID == first.ID {
+		t.Fatalf("second staging reused %q, want a fresh staged brief", first.ID)
+	}
+	assertHandoffProvisionalRecord(t, second, "origin-instance")
+	assertHandoffSuperseded(t, msgStore, first.ID, second.ID)
+	assertSessionStagesHandoff(t, sessStore, sessionBead.ID, second.ID)
+
+	for _, id := range []string{first.ID, second.ID} {
+		if _, err := sessStore.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Errorf("message bead %s reached the session store (err = %v), want it in the message store only", id, err)
+		}
+	}
+	if _, err := msgStore.Get(sessionBead.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("session bead %s reached the message store (err = %v), want it in the session store only", sessionBead.ID, err)
+	}
+	if visible, err := beadmail.NewWithStores(msgStore, sessStore).Check("worker"); err != nil || len(visible) != 0 {
+		t.Fatalf("Check with the classes split = (%#v, %v), want no visible handoff", visible, err)
+	}
+}
+
+// TestHandoffStagedArmLandsInTheBindingOnAMigratedCity drives the staged
+// self-handoff through the real command root on a city whose messaging and
+// sessions classes have moved to a binding, then has the controller release the
+// surviving brief to a successor. It drives cmdHandoffWithForce rather than
+// doHandoffWithOutcome for the reason TestHandoffMailWritesTheBindingOnAMigratedCity
+// does: the defect is at the root, in which stores the command derives, and a
+// test that hands routed stores in would pass unrouted. The restartable arm is
+// the one the --auto, named on-demand and --target rows cannot reach, and it
+// writes session-class state they never do: the staged-brief pointer and the
+// restart marker.
+func TestHandoffStagedArmLandsInTheBindingOnAMigratedCity(t *testing.T) {
+	cityPath, cfg := migratedOneShotCLICity(t)
+	captureCLIStorageStderr(t)
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_SESSION_NAME", "worker")
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return &stagedHandoffStoppedProvider{Fake: runtime.NewFake()}, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+	startFakeControllerSocket(t, cityPath, "ok\n")
+
+	work, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("opening the city work store: %v", err)
+	}
+	t.Cleanup(func() { _ = closeBeadStoreHandle(work) })
+	sessStore := cliSessionStore(work, cfg, cityPath)
+	msgStore := cliMailStore(work, cfg, cityPath).Store
+	sessionBead := seedRestartableHandoffSession(t, sessStore, "worker", "origin-instance")
+
+	handoff := func(brief string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if code := cmdHandoffWithForce([]string{"context cycle", brief}, "", false, "", false, &stdout, &stderr); code != 0 {
+			t.Fatalf("gc handoff %q exited %d; stdout=%q stderr=%q", brief, code, stdout.String(), stderr.String())
+		}
+	}
+	handoff("first brief")
+	first := onlyOpenHandoffMessage(t, msgStore)
+	handoff("second brief")
+	second := onlyOpenHandoffMessage(t, msgStore)
+	assertHandoffProvisionalRecord(t, second, "origin-instance")
+	assertHandoffSuperseded(t, msgStore, first.ID, second.ID)
+	assertSessionStagesHandoff(t, sessStore, sessionBead.ID, second.ID)
+	staged, err := sessStore.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	for _, key := range []string{"restart_requested", "continuation_reset_pending"} {
+		if staged.Metadata[key] != "true" {
+			t.Errorf("session %s = %q, want true: the restart marker belongs to the sessions class", key, staged.Metadata[key])
+		}
+	}
+	if visible, err := beadmail.NewWithStores(msgStore, sessStore).Check("worker"); err != nil || len(visible) != 0 {
+		t.Fatalf("Check before a successor = (%#v, %v), want no visible handoff", visible, err)
+	}
+
+	// A successor incarnation adopts the session; the controller releases the
+	// surviving brief and only that one.
+	if err := sessStore.SetMetadataBatch(sessionBead.ID, map[string]string{"instance_token": "successor-instance"}); err != nil {
+		t.Fatalf("adopt successor: %v", err)
+	}
+	adopted, err := sessStore.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get adopted session: %v", err)
+	}
+	rows := sessionpkg.ReconcileRowsFromBeads([]beads.Bead{adopted})
+	if released, failed := releaseStagedSelfHandoffs(sessStore, rows, cfg, clock.Real{}, events.NewFake()); released != 1 || failed != 0 {
+		t.Fatalf("releaseStagedSelfHandoffs = (released=%d, failed=%d), want (1, 0)", released, failed)
+	}
+	visible, err := beadmail.NewWithStores(msgStore, sessStore).Check("worker")
+	if err != nil || len(visible) != 1 || visible[0].ID != second.ID {
+		t.Fatalf("Check after release = (%#v, %v), want exactly the second brief %q", visible, err, second.ID)
+	}
+
+	// Durable bytes, not the funnel's open handle. Every bead is in the binding
+	// AND absent from the work store the migration retained: "in the binding"
+	// alone passes on a co-resident write.
+	if err := closeCLIStorageRoutes(); err != nil {
+		t.Fatalf("closing the one-shot routes: %v", err)
+	}
+	binding := openMigratedDestination(t, mustResolveInfraTarget(t, cityPath, cfg))
+	retained, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("opening the retained work store: %v", err)
+	}
+	t.Cleanup(func() { _ = closeBeadStoreHandle(retained) })
+	for _, id := range []string{first.ID, second.ID, sessionBead.ID} {
+		if _, err := binding.Get(id); err != nil {
+			t.Errorf("%s did not land in the binding: %v", id, err)
+		}
+		if _, err := retained.Get(id); err == nil {
+			t.Errorf("%s also landed in the work store; a relocated class must be served from its binding only", id)
+		} else if !errors.Is(err, beads.ErrNotFound) {
+			t.Errorf("reading the retained work store for %s: %v", id, err)
+		}
+	}
+	assertHandoffSuperseded(t, binding, first.ID, second.ID)
+	assertHandoffReleased(t, binding, sessionBead.ID, second.ID)
 }
 
 // runSelfHandoff drives one gc handoff for the "worker" session through the
