@@ -4837,18 +4837,39 @@ type SessionWakeRefusedPayload struct {
 	WakeRequest string `json:"wake_request"`
 }
 
+// SlingBatchSummary defines model for SlingBatchSummary.
+type SlingBatchSummary struct {
+	// ContainerType Container bead type, e.g. convoy.
+	ContainerType *string `json:"container_type,omitempty"`
+
+	// Failed Children whose routing failed.
+	Failed int64 `json:"failed"`
+
+	// Idempotent Children skipped because they were already routed to the target.
+	Idempotent int64 `json:"idempotent"`
+
+	// Routed Children routed by this sling.
+	Routed int64 `json:"routed"`
+
+	// Skipped Children skipped: already routed, or not open.
+	Skipped int64 `json:"skipped"`
+
+	// Total Children tracked by the container.
+	Total int64 `json:"total"`
+}
+
 // SlingInputBody defines model for SlingInputBody.
 type SlingInputBody struct {
-	// AttachedBeadId Bead ID to attach a formula to.
+	// AttachedBeadId Bead or convoy ID to attach formula to, in place of bead (gc sling --on).
 	AttachedBeadId *string `json:"attached_bead_id,omitempty"`
 
-	// Bead Bead ID to sling.
+	// Bead Bead or convoy ID to sling, like gc sling <target> <bead>. The target's default formula is cooked onto the bead unless no_formula is set; a convoy's open children are routed one by one.
 	Bead *string `json:"bead,omitempty"`
 
 	// Force Bypass cross-rig guards; for direct bead routes, also bypass missing-bead validation. Formula-backed graph routes may replace existing live workflow roots but still require the source bead to exist.
 	Force *bool `json:"force,omitempty"`
 
-	// Formula Formula name for workflow launch.
+	// Formula Formula name. Alone, it launches the formula standalone (gc sling --formula). With attached_bead_id, it is attached to that bead (gc sling <target> <bead> --on <formula>).
 	Formula *string `json:"formula,omitempty"`
 
 	// Merge Merge strategy: direct, mr, or local.
@@ -4857,7 +4878,7 @@ type SlingInputBody struct {
 	// NoConvoy Do not create an auto-convoy for the routed bead.
 	NoConvoy *bool `json:"no_convoy,omitempty"`
 
-	// NoFormula Suppress the target's default_sling_formula even when configured.
+	// NoFormula Suppress the target's default_sling_formula and route the raw bead (gc sling --no-formula).
 	NoFormula *bool `json:"no_formula,omitempty"`
 
 	// Owned Mark the routed bead as owned by the target.
@@ -4878,28 +4899,35 @@ type SlingInputBody struct {
 	// Target Target agent or pool.
 	Target string `json:"target"`
 
-	// Title Workflow title.
+	// Title Workflow title (gc sling --title), for an explicit or default formula.
 	Title *string `json:"title,omitempty"`
 
-	// Vars Formula variables.
+	// Vars Formula variables (gc sling --var), for an explicit or default formula.
 	Vars *map[string]string `json:"vars,omitempty"`
 }
 
 // SlingResponse defines model for SlingResponse.
 type SlingResponse struct {
-	AttachedBeadId *string `json:"attached_bead_id,omitempty"`
-	Bead           *string `json:"bead,omitempty"`
+	AttachedBeadId *string            `json:"attached_bead_id,omitempty"`
+	Batch          *SlingBatchSummary `json:"batch,omitempty"`
+	Bead           *string            `json:"bead,omitempty"`
+
+	// ConvoyId Auto-convoy tracking the routed bead, when one was created or reused. Matches gc sling --json convoy_id.
+	ConvoyId *string `json:"convoy_id,omitempty"`
 
 	// DashboardUrl Absolute dashboard deep link for the slung work: the run detail view when a graph workflow was launched, otherwise the runs list. Present only when the serving process also hosts the dashboard (the supervisor listener); the standalone controller API omits it.
-	DashboardUrl *string   `json:"dashboard_url,omitempty"`
-	Formula      *string   `json:"formula,omitempty"`
-	Mode         *string   `json:"mode,omitempty"`
-	RootBeadId   *string   `json:"root_bead_id,omitempty"`
-	Run          *RunRef   `json:"run,omitempty"`
-	Status       string    `json:"status"`
-	Target       string    `json:"target"`
-	Warnings     *[]string `json:"warnings,omitempty"`
-	WorkflowId   *string   `json:"workflow_id,omitempty"`
+	DashboardUrl *string `json:"dashboard_url,omitempty"`
+	Formula      *string `json:"formula,omitempty"`
+	Mode         *string `json:"mode,omitempty"`
+
+	// MoleculeId Root of the formula wisp attached to the bead, when a non-graph (v1) formula was attached. Matches gc sling --json molecule_id.
+	MoleculeId *string   `json:"molecule_id,omitempty"`
+	RootBeadId *string   `json:"root_bead_id,omitempty"`
+	Run        *RunRef   `json:"run,omitempty"`
+	Status     string    `json:"status"`
+	Target     string    `json:"target"`
+	Warnings   *[]string `json:"warnings,omitempty"`
+	WorkflowId *string   `json:"workflow_id,omitempty"`
 }
 
 // Status defines model for Status.
