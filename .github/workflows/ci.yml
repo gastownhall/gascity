@@ -407,7 +407,7 @@ jobs:
       - changes
     if: github.event_name == 'push' && needs.changes.outputs.integration == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:

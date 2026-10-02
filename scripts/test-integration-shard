@@ -21,6 +21,9 @@ gc_test_slice_reexec "$repo_root/scripts/test-integration-shard" "$@"
 
 timeout="${GO_TEST_TIMEOUT:-30m}"
 pkg="./test/integration"
+# 1 makes run_pkg_tests pass -v, so go test logs one "--- PASS: Name (1.23s)"
+# line per test. Only the rest-full shards turn it on.
+go_test_verbose=0
 
 gopath_val="$(go env GOPATH)"
 gocache_val="$(go env GOCACHE)"
@@ -164,6 +167,9 @@ run_pkg_tests() {
   regex="^($(join_regex "${tests[@]}"))$"
   echo "Running shard ${shard} against ${test_pkg} (${#tests[@]} tests)"
   go_test_args=(-tags integration -timeout "$timeout")
+  if [[ "$go_test_verbose" == 1 ]]; then
+    go_test_args+=(-v)
+  fi
   if [[ -n "${GO_TEST_COVERPROFILE:-}" ]]; then
     go_test_args+=(-coverpkg=./... -coverprofile "$GO_TEST_COVERPROFILE")
   fi
@@ -368,6 +374,10 @@ run_rest_full_shard_modulo() {
     fi
   done
 
+  # A test's shard is positional, so adding one test reshuffles every later
+  # shard. Per-test durations in the log are what trace a slow shard to the
+  # tests that cost the time (ga-rqzwrh).
+  go_test_verbose=1
   run_pkg_tests_modulo "$pkg" "$shard_index" "$shard_total" "${rest_tests[@]}"
 }
 

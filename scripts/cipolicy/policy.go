@@ -280,7 +280,13 @@ const (
 	// against the PR base commit's spec, which the lane writes with git show
 	// and hands to @openapi_base_spec. Reviewed delta: one job removed; no
 	// new job, trigger, step command or permission.
-	expectedCIExecutionHash     = "0b81b0eead4e815e218330ee63ccec936e8a14b7867b5e784ef0aadbd3cb006b"
+	//
+	// Bumped again (ga-rqzwrh): integration-rest-full's job cap moves 15 -> 25
+	// minutes. Its 16 shards split the suite by position, so #6821's three new
+	// tests moved every later one and shard 6 went from 7-9m to 13-15m, canceled
+	// at the old cap on 6 of 11 main pushes. Reviewed delta: that one
+	// timeout-minutes value, no new job, step, trigger or permission.
+	expectedCIExecutionHash     = "0960fd8cdd477fcce8b50ae86571ac2099d1dece2e9cb8b9323d185e25b0498a"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
