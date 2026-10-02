@@ -99,3 +99,27 @@ is never coming.
 - **`gc bd update --claim`.** Worker-pull, and no shipped prompt uses it to
   acquire work; a test pins that so it cannot silently become load-bearing
   while unfenced.
+
+## Releasing retired and orphaned assignments
+
+The retired-session and orphaned-pool release paths honor
+`[beads].conditional_writes`. With `auto` or `require` on a capable store,
+assignment release and affinity cleanup use one revision-guarded update.
+Fallback routing and detached-probe cleanup, when applicable, are part of that
+same write. A stale snapshot cannot release a newer claim, even if the assignee
+name has been reused.
+
+A revision conflict leaves the assignment unchanged and is reported to the
+caller. It must not count as a completed release: the same session may still
+hold the work. The next tick must make a new liveness decision; the old decision
+is not retried with a fresh revision. Missing
+revisions and backend failures are reported without an unconditional retry.
+`require` also refuses an unsupported store. `auto` logs its degradation on an
+unsupported store, and `off` preserves the legacy release path. Those legacy
+paths fence on the snapshot's status and assignee, not its revision, so they
+cannot tell a newer claim under a reused assignee name from the old one.
+
+This guards the write, not the decision that an owner is dead. A session absent
+from one city's local session store may still be alive in another city. Shared
+work stores need authoritative cross-city liveness before orphan release is
+safe.
