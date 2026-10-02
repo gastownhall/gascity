@@ -504,8 +504,8 @@ func assertCensusAgreesAfterEvent(t *testing.T, cache *CachingStore, truth Store
 func TestCachingStoreApplyEventUncachedDirtyRowKeepsMarkWhenReadFails(t *testing.T) {
 	t.Parallel()
 
-	// bead.created is the one event whose raw payload may stand in for a
-	// failed read, so it is the case the dirty guard alone covers.
+	// No event's raw payload stands in for a failed read, bead.created's
+	// included.
 	for _, eventType := range []string{"bead.updated", "bead.created"} {
 		t.Run(eventType, func(t *testing.T) {
 			t.Parallel()
@@ -1404,7 +1404,7 @@ func TestCachingStoreGetRefreshFetchesOmittedEdges(t *testing.T) {
 }
 
 // dropClosedRowByReconcile closes id through the cache and lets a reconcile
-// past the recency window drop the closed row, write fence and all.
+// past the recency window drop the closed row. Its write fence stays retained.
 func dropClosedRowByReconcile(t *testing.T, cache *CachingStore, id string) {
 	t.Helper()
 	if err := cache.Close(id); err != nil {

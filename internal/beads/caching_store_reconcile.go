@@ -360,7 +360,7 @@ func (c *CachingStore) runReconciliation() {
 		return
 	}
 	now := time.Now()
-	res := c.mergeSnapshotLocked(freshByID, confirmedClosed, deferred, depMap, useFreshDeps, startSeq, now)
+	res := c.mergeSnapshotLocked(freshByID, confirmedClosed, deferred, depMap, useFreshDeps, depErr != nil, startSeq, now)
 	durMs := float64(time.Since(start).Microseconds()) / 1000.0
 	c.stats.LastReconcileMs = durMs
 	c.recordReconcileLatencyLocked(bdLatency)
@@ -389,9 +389,10 @@ const (
 	// mergeSkipRecentLocal leaves everything for id untouched: the recency
 	// window (5 s) protects an in-flight local write bd may not reflect yet.
 	mergeSkipRecentLocal
-	// mergeGCFences drops every orphan fence/deps entry for id (deletedSeq,
-	// dirty, beadSeq, localBeadAt, writeSeq, deps). Only reachable when id has no row on
-	// either side.
+	// mergeGCFences drops id's orphan dirty, beadSeq, localBeadAt and deps
+	// entries. Its write fences (writeSeq, writeAt, deletedSeq) stay, retained
+	// until pruneRetainedFencesLocked collects them. Only reachable when id
+	// has no row on either side.
 	mergeGCFences
 )
 
@@ -519,10 +520,12 @@ type mergeSectionResult struct {
 // pairwise disjoint, so the passes cannot perturb each other. deferred names
 // the freshByID entries recoverMissingFromList filled from the cache because
 // it could not read the backing row: they are held, not absorbed, so their
-// row, mark and fences stay as they were. Caller must hold c.mu (write lock).
+// row, mark and fences stay as they were. depsReadFailed reports that the
+// snapshot's dependency read failed: a row that does not answer for its edges
+// then keeps its mark. Caller must hold c.mu (write lock).
 func (c *CachingStore) mergeSnapshotLocked(
 	freshByID map[string]Bead, confirmedClosed map[string]Bead, deferred map[string]struct{},
-	depMap map[string][]Dep, useFreshDeps bool,
+	depMap map[string][]Dep, useFreshDeps, depsReadFailed bool,
 	startSeq uint64, now time.Time,
 ) mergeSectionResult {
 	// Preserve a cached is_blocked for any row the projection did not return
@@ -595,8 +598,11 @@ func (c *CachingStore) mergeSnapshotLocked(
 			// targets' fresh statuses, which no single-row absorb can see. Its
 			// refusals are the rows whose verdict really may have changed, so
 			// they must land as unanswerable rather than be re-preserved here.
-			readyMode:  readyFromFresh,
-			clearDirty: true,
+			readyMode: readyFromFresh,
+			// With the deps read failed, a row that omits its edges installs
+			// cached or field-derived ones, which may predate a raced
+			// dependency write.
+			clearDirty: !depsReadFailed || c.rowAnswersEdges(freshBead),
 		})
 	}
 
@@ -638,9 +644,12 @@ func (c *CachingStore) mergeSnapshotLocked(
 
 	// 3. Fence/deps-GC sweep — over orphan ids (a fence or deps entry with no
 	//    row on either side). Replaces Branch B's implicit wholesale reset:
-	//    stale orphans are collected, recent ones kept one more cycle. The id
-	//    set is snapshotted before deleting to avoid iterate-while-delete.
+	//    stale orphans are collected, recent ones kept one more cycle, and
+	//    write fences are retained for at least recentWriteVerifyWindow, then
+	//    pruned. The id set is snapshotted before deleting to avoid
+	//    iterate-while-delete.
 	for _, id := range c.orphanFenceIDsLocked(freshByID) {
+		c.retainFencesLocked(id, now)
 		d := reconcileMergeDecision(mergeRowInput{
 			freshExists:  false,
 			cachedExists: false,
@@ -655,14 +664,12 @@ func (c *CachingStore) mergeSnapshotLocked(
 		if d.action != mergeGCFences {
 			continue
 		}
-		delete(c.deletedSeq, id)
 		delete(c.dirty, id)
 		delete(c.beadSeq, id)
 		delete(c.localBeadAt, id)
-		delete(c.writeSeq, id)
-		delete(c.writeAt, id)
 		delete(c.deps, id)
 	}
+	c.pruneRetainedFencesLocked(now)
 
 	// 4. Shared tail (was duplicated per branch).
 	c.syncFailures = 0

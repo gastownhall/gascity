@@ -63,6 +63,7 @@ go_test(
         "caching_store_conditional_internal_test.go",
         "caching_store_conditional_test.go",
         "caching_store_count_test.go",
+        "caching_store_fence_retention_internal_test.go",
         "caching_store_graph_ready_test.go",
         "caching_store_internal_test.go",
         "caching_store_observation_test.go",

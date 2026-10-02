@@ -281,16 +281,21 @@ func (c *CachingStore) Reopen(id string) error {
 
 	// Adopt the successful refresh read with the status written through —
 	// same reasoning as Close.
-	var reopened Bead
+	var reopened, edgesUnread Bead
 	refreshed := false
 	if row, err := c.backing.Get(id); err == nil {
 		reopened, refreshed = row, true
 		// A close may have dropped the cached edges (CloseAll does). A row from
 		// a backing whose rows omit their edges gets them from the backing, as
-		// the overlay does; a complete row already answers.
-		if !beadCarriesDependencyFields(reopened) && !c.backingRowsCarryDependencies() {
+		// the overlay does; a complete row already answers. Without them the
+		// refresh failed: installing the row would clear the mark on the
+		// cached, possibly pre-write, edges.
+		if !c.rowAnswersEdges(reopened) {
 			if deps, depErr := c.backing.DepList(id, "down"); depErr == nil {
 				reopened.Dependencies = deps
+			} else {
+				c.recordProblem("refresh deps after reopen", fmt.Errorf("%s: %w", id, depErr))
+				edgesUnread, reopened, refreshed = reopened, Bead{}, false
 			}
 		}
 	} else if !errors.Is(err, ErrNotFound) {
@@ -334,6 +339,11 @@ func (c *CachingStore) Reopen(id string) error {
 	c.updateStatsLocked()
 	c.mu.Unlock()
 
+	if !found && edgesUnread.ID != "" {
+		// No cached row took the reopen, but the backing read found the row:
+		// it still notifies, as a refresh would have.
+		reopened, found = edgesUnread, true
+	}
 	if found {
 		c.notifyChange("bead.updated", reopened)
 	}
@@ -537,6 +547,9 @@ func (c *CachingStore) refreshBeadAfterWrite(id, op string) (Bead, bool) {
 	return fresh, true
 }
 
+// refreshBeadWithDepsAfterWrite reads id and its edges back after a write. It
+// reports false when either read failed; when only the edges of a row that
+// omits them failed, it still returns the row, which must not be installed.
 func (c *CachingStore) refreshBeadWithDepsAfterWrite(id, op string) (Bead, []Dep, bool) {
 	fresh, ok := c.refreshBeadAfterWrite(id, op)
 	if !ok {
@@ -545,6 +558,11 @@ func (c *CachingStore) refreshBeadWithDepsAfterWrite(id, op string) (Bead, []Dep
 	deps, err := c.backing.DepList(id, "down")
 	if err != nil {
 		c.recordProblem(op+" deps", fmt.Errorf("%s: %w", id, err))
+		if !c.rowAnswersEdges(fresh) {
+			// Field-derived edges would install the row's empty set as
+			// clean. The row still returns, for a caller that notifies it.
+			return fresh, nil, false
+		}
 		fresh.Dependencies = depsFromBeadFields(fresh)
 		return fresh, cloneDeps(fresh.Dependencies), true
 	}

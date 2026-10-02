@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -119,13 +118,17 @@ func ageLocalWrite(cache *CachingStore, id string) {
 }
 
 // ageLocalWriteBy backdates id's local-write stamps, both the five-second
-// recency stamp and the write stamp recentWriteVerifyWindow reads, by age.
+// recency stamp and the write stamp recentWriteVerifyWindow reads, and the
+// retention of its fences once its row left the cache, by age.
 func ageLocalWriteBy(cache *CachingStore, id string, age time.Duration) {
 	cache.mu.Lock()
 	at := time.Now().Add(-age)
 	cache.localBeadAt[id] = at
 	if _, ok := cache.writeAt[id]; ok {
 		cache.writeAt[id] = at
+	}
+	if _, ok := cache.retainedAt[id]; ok {
+		cache.retainedAt[id] = at
 	}
 	cache.mu.Unlock()
 }
@@ -1014,8 +1017,9 @@ func (s *commitOrderStore) CompareAndSetMetadataKey(id, key, expected, next stri
 // unconditional writers with a conditional one on each row, while an injector
 // delivers delayed echo events of backing snapshots the writers overtake, the
 // cache's own notifications come back late through ApplyEventSnapshot as
-// cmd/gc feeds them, a toggler closes and reopens one more row, a reconciler
-// runs reconciles and full Primes, and backing reads fail now and then. It
+// cmd/gc feeds them, a toggler closes and reopens a row they write, a
+// reconciler runs reconciles and full Primes, and backing reads fail now and
+// then. It
 // catches an install that rolls a row back past a covered write: an unfenced
 // refresh or patch (F2), a refresh-failure fallback or an echo merge that
 // clears a fenced write's mark, an uncached event install (F1), or a late
@@ -1054,10 +1058,9 @@ func TestCachingStoreWatermarkUnconditionalWritersEchoesAndReconciles(t *testing
 		ids[i] = b.ID
 		backing.turns[b.ID] = &rowTurn{}
 	}
-	toggled, err := cache.Create(Bead{Title: "toggled"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
+	// The toggler closes and reopens a row the writers contend on, so a
+	// reconcile drops it closed while their writes are in flight.
+	toggled := ids[0]
 
 	feedback := func(done <-chan struct{}) {
 		for {
@@ -1082,17 +1085,17 @@ func TestCachingStoreWatermarkUnconditionalWritersEchoesAndReconciles(t *testing
 			select {
 			case <-done:
 				// End open, so the final census counts the row.
-				if err := cache.Reopen(toggled.ID); err != nil {
+				if err := cache.Reopen(toggled); err != nil {
 					t.Errorf("Reopen: %v", err)
 				}
 				return
 			default:
 			}
-			if err := cache.Close(toggled.ID); err != nil {
+			if err := cache.Close(toggled); err != nil {
 				t.Errorf("Close: %v", err)
 				return
 			}
-			if err := cache.Reopen(toggled.ID); err != nil {
+			if err := cache.Reopen(toggled); err != nil {
 				t.Errorf("Reopen: %v", err)
 				return
 			}
@@ -1157,7 +1160,7 @@ func TestCachingStoreWatermarkUnconditionalWritersEchoesAndReconciles(t *testing
 	// omitted.
 	assignees := &assigneeLog{at: map[string][]*assigneeWrite{}}
 	writes := make([]int, rows*verbs)
-	final := runWatermarkStress(t, cache, append(slices.Clone(ids), toggled.ID), rows*verbs, func(w int) (string, int, bool) {
+	final := runWatermarkStress(t, cache, ids, rows*verbs, func(w int) (string, int, bool) {
 		if writes[w] == rounds {
 			if active.Add(-1) == 0 {
 				backing.failGets.Store(false)
@@ -1526,9 +1529,10 @@ func TestCachingStoreRevisionEpochPerInstance(t *testing.T) {
 	}
 }
 
-// TestCachingStorePrimeDropsWriteRevisionsOfDroppedRows pins that a wholesale
-// prime keeps the write revision of every row it keeps and drops the rest.
-func TestCachingStorePrimeDropsWriteRevisionsOfDroppedRows(t *testing.T) {
+// TestCachingStorePrimeKeepsWriteRevisionsOfDroppedRows pins that a wholesale
+// prime keeps the write revision of every row, the ones it drops included, for
+// the next reconcile to retain.
+func TestCachingStorePrimeKeepsWriteRevisionsOfDroppedRows(t *testing.T) {
 	t.Parallel()
 
 	backing := NewMemStore()
@@ -1552,21 +1556,23 @@ func TestCachingStorePrimeDropsWriteRevisionsOfDroppedRows(t *testing.T) {
 	cache.mu.RLock()
 	_, keptRev := cache.writeSeq[kept.ID]
 	_, droppedRev := cache.writeSeq[dropped.ID]
+	_, droppedAt := cache.writeAt[dropped.ID]
 	_, droppedRow := cache.beads[dropped.ID]
 	cache.mu.RUnlock()
 	if droppedRow {
-		t.Fatal("prime kept the out-of-band closed row; the prune was not exercised")
+		t.Fatal("prime kept the out-of-band closed row; the drop was not exercised")
 	}
-	if !keptRev || droppedRev {
-		t.Fatalf("writeSeq kept=%v dropped=%v after prime, want true and false", keptRev, droppedRev)
+	if !keptRev || !droppedRev || !droppedAt {
+		t.Fatalf("after prime writeSeq kept=%v dropped=%v, writeAt dropped=%v; want all true", keptRev, droppedRev, droppedAt)
 	}
 }
 
-// TestCachingStoreEvictDropsWriteRevision pins that a row leaving the cache
-// through evictLocked takes its write revision along, so the map cannot leak
-// ids the cache no longer holds. WriteRev then falls back to the current
-// sequence.
-func TestCachingStoreEvictDropsWriteRevision(t *testing.T) {
+// TestCachingStoreEvictRetainsWriteRevision pins that a row leaving the cache
+// through evictLocked keeps its write fences until a reconcile prunes them more
+// than recentWriteVerifyWindow later, so the maps cannot leak ids the cache no
+// longer holds. WriteRev reports the write while it is retained, then falls
+// back to the current sequence.
+func TestCachingStoreEvictRetainsWriteRevision(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
@@ -1598,18 +1604,37 @@ func TestCachingStoreEvictDropsWriteRevision(t *testing.T) {
 				t.Fatalf("Create: %v", err)
 			}
 			tc.evict(t, backing, cache, b.ID)
+			w := cache.WriteRev(b.ID)
 			cache.mu.RLock()
 			_, cached := cache.beads[b.ID]
-			_, recorded := cache.writeSeq[b.ID]
+			seq, recorded := cache.writeSeq[b.ID]
 			cache.mu.RUnlock()
 			if cached {
 				t.Fatal("row still cached; the eviction was not exercised")
 			}
-			if recorded {
-				t.Fatalf("writeSeq still holds evicted %s", b.ID)
+			if !recorded || w.Seq != seq {
+				t.Fatalf("WriteRev %+v after eviction with writeSeq %d (recorded %v), want the retained write", w, seq, recorded)
 			}
-			if w := cache.WriteRev(b.ID); w.Seq != cacheMutationSeq(cache) {
-				t.Fatalf("WriteRev %+v after eviction, want the current sequence", w)
+			cache.ReconcileNowForTest()
+			if !isRetained(cache, b.ID) {
+				t.Fatalf("the reconcile did not retain the fences of evicted %s", b.ID)
+			}
+			ageLocalWriteBy(cache, b.ID, recentWriteVerifyWindow+time.Second)
+			cache.ReconcileNowForTest()
+			cache.mu.RLock()
+			_, recorded = cache.writeSeq[b.ID]
+			_, stamped := cache.writeAt[b.ID]
+			_, tombstoned := cache.deletedSeq[b.ID]
+			floor := cache.fenceFloor
+			cache.mu.RUnlock()
+			if recorded || stamped || tombstoned || isRetained(cache, b.ID) {
+				t.Fatalf("fences of %s outlived the window: writeSeq=%v writeAt=%v deletedSeq=%v", b.ID, recorded, stamped, tombstoned)
+			}
+			if floor < w.Seq {
+				t.Fatalf("fence floor %d after pruning write %+v, want it covered", floor, w)
+			}
+			if got := cache.WriteRev(b.ID); got.Seq != cacheMutationSeq(cache) {
+				t.Fatalf("WriteRev %+v after the prune, want the current sequence", got)
 			}
 		})
 	}

@@ -457,7 +457,9 @@ func (c *CachingStore) installAfterConditionalWrite(id string, ev conditionalEvi
 	if (c.state != cacheLive && c.state != cachePartial) || c.refetchFencedLocked(id, ev.seq) {
 		return
 	}
-	opts := absorbOpts{depsMode: depsFromFields, seqMode: seqKeep, clearDirty: true}
+	// A row that omits its edges leaves the evicted, possibly pre-write, edge
+	// set standing, so it does not answer a raced write's mark.
+	opts := absorbOpts{depsMode: depsFromFields, seqMode: seqKeep, clearDirty: !ev.dirty || c.rowAnswersEdges(row)}
 	if ev.hadDeps && !beadCarriesDependencyFields(row) {
 		opts.depsMode = depsExplicit
 		opts.deps = ev.deps

@@ -74,7 +74,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 	}
 	currentDeps = cloneDeps(currentDeps)
 	// readSeq fences what the uncached branch installs below: its backing
-	// read or raw patch predates any local write that lands after this point.
+	// read predates any local write that lands after this point.
 	readSeq := c.mutationSeq
 	seqBase, locallyMutated := c.beadSeq[patch.ID]
 	// A local write keeps a conflicting event under backing verification
@@ -205,7 +205,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 			b = fresh
 			refreshedFromBacking = true
 		} else if errors.Is(err, ErrNotFound) {
-			if eventType != "bead.created" && locallyDeleted {
+			if locallyDeleted {
 				return
 			}
 		} else if !errors.Is(err, ErrNotFound) {
@@ -224,22 +224,15 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 	}
 	_, heldAtLock := c.beads[patch.ID]
 	if !heldAtLock {
-		// With no row to merge onto, the event installs its backing read or
-		// raw patch. A delete event only tombstones, which is always safe.
-		_, tombstoned := c.deletedSeq[patch.ID]
-		rawPatch := !refreshedFromBacking && eventType != "bead.deleted"
-		// A raw patch stands in for a backing read only on a bead.created
-		// event, taken to create the row. Any other uncached row may be one a
-		// reconcile dropped, so a stale event would reinstall it (a closed
-		// row as open) when its backing read fails or misses; the next scan
-		// fills it in. Nor does a raw patch install over a tombstone, so the
-		// cache's own delayed bead.created echo does not reinstall a row it
-		// deleted. Both rules are partial: a bead.created for a row a
-		// reconcile dropped after a close, or for a deleted row whose
-		// tombstone a sweep already collected, still installs its raw patch
-		// (see CacheRevision's known limits). A backing read that finds the
-		// row is the backing's answer.
-		if rawPatch && (eventType != "bead.created" || tombstoned) {
+		// With no row to merge onto, the event installs only its backing
+		// read. A delete event only tombstones, which is always safe. A raw
+		// patch never installs, bead.created included: the uncached row may
+		// be one a reconcile dropped closed or deleted since, the cache's own
+		// delayed echo too, so a stale event would reinstall it when its
+		// backing read fails or misses; the next scan fills in a row that
+		// does exist. A backing read that finds the row is the backing's
+		// answer.
+		if !refreshedFromBacking && eventType != "bead.deleted" {
 			return
 		}
 		// A local write or deletion since readSeq may be newer than what the
@@ -248,14 +241,9 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		// write's own seq already keeps an older scan from clearing the
 		// mark; a tombstone needs no mark.
 		if c.writeFencedLocked(patch.ID, readSeq) {
-			if !tombstoned {
+			if _, tombstoned := c.deletedSeq[patch.ID]; !tombstoned {
 				c.markDirtyLocked(patch.ID)
 			}
-			return
-		}
-		// A dirty row the cache does not hold is waiting on a backing read;
-		// a raw patch is not one.
-		if _, dirty := c.dirty[patch.ID]; dirty && rawPatch {
 			return
 		}
 	}

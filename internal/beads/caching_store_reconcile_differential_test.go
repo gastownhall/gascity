@@ -90,7 +90,13 @@ type mergeEndState struct {
 	// readyLost is the set of rows whose is_blocked verdict the merge dropped
 	// without preserving, so readiness declines for them unless their own edges
 	// can reproduce it (ga-cfhgr).
-	readyLost      map[string]struct{}
+	readyLost map[string]struct{}
+	// retainedIDs is the key set of retainedAt: the orphan ids whose write
+	// fences the sweep retains. Its stamps are the pass clock.
+	retainedIDs map[string]struct{}
+	// fenceFloor rises only when a retention older than the window is
+	// pruned; no seeded state carries one, so it must stay put.
+	fenceFloor     uint64
 	state          cacheState
 	lastFreshAt    time.Time
 	mutationSeq    uint64
@@ -310,6 +316,8 @@ func captureEndState(c *CachingStore) mergeEndState {
 		writeSeq:             cloneU64Map(c.writeSeq),
 		writeAtIDs:           keySet(c.writeAt),
 		readyLost:            cloneDirty(c.readyProjectionLost),
+		retainedIDs:          keySet(c.retainedAt),
+		fenceFloor:           c.fenceFloor,
 		state:                c.state,
 		lastFreshAt:          c.lastFreshAt,
 		mutationSeq:          c.mutationSeq,
@@ -341,7 +349,7 @@ type mergeImplResult struct {
 func runNewMerge(st storeState, in snapshotInputs) mergeImplResult {
 	c, counter := newMergeHarnessStore(st)
 	c.mu.Lock()
-	res := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, nil, in.depMap, in.useFreshDeps, in.startSeq, in.now)
+	res := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, nil, in.depMap, in.useFreshDeps, false, in.startSeq, in.now)
 	c.mu.Unlock()
 	return mergeImplResult{end: captureEndState(c), notifications: res.notifications, backingCalls: counterCalls(counter)}
 }

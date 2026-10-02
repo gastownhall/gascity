@@ -255,10 +255,10 @@ func (c *CachingStore) ObservedList(query ListQuery) ([]Bead, CacheObservation, 
 // writes made around the cache. A later local write to id raises it, and so do
 // failed conditional writes, including a CompareAndSetMetadataKey that lost
 // (false, nil). With no write to id on record — never written here, dropped
-// from the cache since, or a write that short-circuited because the clean
-// cached row already matched — it is the current mutation sequence, which no
-// clean census can precede. Epochs are process-local and restart at 1 in each
-// process.
+// from the cache more than recentWriteVerifyWindow ago, or a write that
+// short-circuited because the clean cached row already matched — it is the
+// current mutation sequence, which no clean census can precede. Epochs are
+// process-local and restart at 1 in each process.
 func (c *CachingStore) WriteRev(id string) CacheRevision {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -387,10 +387,12 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 				continue
 			}
 		}
+		// A list never reads DepList: a row that omits its edges leaves any
+		// mark on the cached ones, as do the refreshes below.
 		c.absorbFreshLocked(item.ID, item, now, absorbOpts{
 			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqClearGuarded,
-			clearDirty: true,
+			clearDirty: c.rowAnswersEdges(item),
 		})
 		if query.Matches(item) {
 			refreshed = append(refreshed, cloneBead(item))
@@ -406,7 +408,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		c.absorbFreshLocked(id, bead, now, absorbOpts{
 			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqClearGuarded,
-			clearDirty: true,
+			clearDirty: c.rowAnswersEdges(bead),
 		})
 	}
 	for id := range removedParents {
@@ -428,7 +430,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		c.absorbFreshLocked(id, bead, now, absorbOpts{
 			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqClearGuarded,
-			clearDirty: true,
+			clearDirty: c.rowAnswersEdges(bead),
 		})
 	}
 	for id := range removedLiveMissing {
@@ -537,7 +539,7 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 			}
 			var freshDeps []Dep
 			depsFromBacking := false
-			if !beadCarriesDependencyFields(fresh) && !c.backingRowsCarryDependencies() {
+			if !c.rowAnswersEdges(fresh) {
 				deps, depErr := c.backing.DepList(id, "down")
 				if depErr != nil {
 					// The row carries no edges, so installing it would clear

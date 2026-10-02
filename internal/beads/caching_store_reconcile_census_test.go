@@ -89,6 +89,8 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"writeSeq":            true, // compared via expectedWriteSeq
 		"writeAt":             true, // compared as mergeEndState.writeAtIDs
 		"readyProjectionLost": true, // compared as mergeEndState.readyLost
+		"retainedAt":          true, // compared as mergeEndState.retainedIDs
+		"fenceFloor":          true, // compared; only a pruned retention raises it
 		"lastFreshAt":         true, "mutationSeq": true, "primePartialErr": true,
 		"syncFailures": true, "circuitTripped": true,
 		"stats": true, // stats compared field-wise below
@@ -113,10 +115,6 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// depend on it. Its own behavior is pinned by
 		// TestDegradedProjectionSendsReadyToTheLiveBdVerdict.
 		"readyProjectionDegraded": true,
-		// fenceFloor is written only by prime's full replace and never read by
-		// the seam: runReconciliation refuses the whole merge before it when
-		// the scan predates the floor (TestCachingStoreFullPrimeFloorFencesStraddlingInstalls).
-		"fenceFloor": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CachingStore{}), comparedStore, excludedStore)
 

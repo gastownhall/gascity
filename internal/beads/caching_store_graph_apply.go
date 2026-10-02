@@ -66,15 +66,23 @@ func (c *CachingStore) refreshGraphAppliedBeads(result *GraphApplyResult, startS
 	}
 	ids := uniqueGraphAppliedIDs(result)
 	refreshed := make([]txTouchedBead, 0, len(ids))
+	// edgesUnread names the rows read back without their edges: they notify
+	// but stay marked rather than install.
+	edgesUnread := make(map[string]struct{})
 	var refreshErr error
 	for _, id := range ids {
 		fresh, deps, ok := c.refreshBeadWithDepsAfterWrite(id, "refresh bead after graph apply")
 		item := txTouchedBead{id: id}
-		if ok {
+		switch {
+		case ok:
 			item.bead = fresh
 			item.bead.Dependencies = cloneDeps(deps)
 			item.found = true
-		} else {
+		case fresh.ID != "":
+			item.bead = fresh
+			item.found = true
+			edgesUnread[id] = struct{}{}
+		default:
 			item.err = ErrNotFound
 			refreshErr = errors.Join(refreshErr, fmt.Errorf("refresh bead after graph apply %s: %w", id, ErrNotFound))
 		}
@@ -93,7 +101,12 @@ func (c *CachingStore) refreshGraphAppliedBeads(result *GraphApplyResult, startS
 		_, skip := raced[item.id]
 		if item.found {
 			fresh := cloneBead(item.bead)
-			if !skip {
+			_, unread := edgesUnread[item.id]
+			switch {
+			case skip:
+			case unread:
+				c.markDirtyLocked(item.id)
+			default:
 				c.absorbFreshLocked(item.id, item.bead, now, absorbOpts{
 					depsMode:   depsExplicit,
 					deps:       item.bead.Dependencies,
