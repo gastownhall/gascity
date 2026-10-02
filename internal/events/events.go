@@ -241,10 +241,22 @@ const (
 	// Emitted by the session reconciler's start-result commit path; the
 	// envelope's Subject carries the session name.
 	SessionColdStartTimeout = "session.cold_start_timeout"
-	ConvoyCreated           = "convoy.created"
-	ConvoyClosed            = "convoy.closed"
-	ControllerStarted       = "controller.started"
-	ControllerStopped       = "controller.stopped"
+	// SessionPending fires when a session gains a pending interaction (an
+	// approval prompt or question the session is blocked on) and
+	// SessionPendingCleared fires when that interaction goes away — answered,
+	// withdrawn, replaced by a different interaction, or the session left the
+	// set GET /v0/city/{cityName}/pending probes. Both carry the same
+	// session_id and request_id, and each fires once per transition, never once
+	// per detection poll. The API server's pending monitor emits them while at
+	// least one event stream is open for the city; see
+	// internal/api/pending_monitor.go for the detection cadence and the
+	// restart/resume contract.
+	SessionPending        = "session.pending"
+	SessionPendingCleared = "session.pending_cleared"
+	ConvoyCreated         = "convoy.created"
+	ConvoyClosed          = "convoy.closed"
+	ControllerStarted     = "controller.started"
+	ControllerStopped     = "controller.stopped"
 	// ControlStalled fires once per disposition whose bounded retry budget
 	// expires: a semantic refusal the control dispatcher then QUARANTINES
 	// (error_class "semantic"), or a drift-pending wait whose loudness horizon
@@ -482,6 +494,7 @@ var KnownEventTypes = []string{
 	SessionDrainFenceUnavailable,
 	SessionDemandClaimDivergence,
 	SessionColdStartTimeout,
+	SessionPending, SessionPendingCleared,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,

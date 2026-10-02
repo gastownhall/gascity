@@ -255,6 +255,27 @@ func (e RunStepStatus) Valid() bool {
 	}
 }
 
+// Defines values for SessionPendingClearedPayloadReason.
+const (
+	Replaced    SessionPendingClearedPayloadReason = "replaced"
+	Resolved    SessionPendingClearedPayloadReason = "resolved"
+	SessionGone SessionPendingClearedPayloadReason = "session_gone"
+)
+
+// Valid indicates whether the value is a known member of the SessionPendingClearedPayloadReason enum.
+func (e SessionPendingClearedPayloadReason) Valid() bool {
+	switch e {
+	case Replaced:
+		return true
+	case Resolved:
+		return true
+	case SessionGone:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SessionStreamStructuredMessageEventOperation.
 const (
 	Reset    SessionStreamStructuredMessageEventOperation = "reset"
@@ -3751,6 +3772,51 @@ type SessionPendingClearedEvent struct {
 	RequestId string `json:"request_id"`
 }
 
+// SessionPendingClearedPayload defines model for SessionPendingClearedPayload.
+type SessionPendingClearedPayload struct {
+	// Kind Interaction kind from the matching session.pending.
+	Kind string `json:"kind"`
+
+	// Reason Why it cleared: resolved (answered or withdrawn), replaced (a different interaction is now pending; its session.pending follows), or session_gone (the session is no longer active).
+	Reason SessionPendingClearedPayloadReason `json:"reason"`
+
+	// RequestId Request ID from the matching session.pending.
+	RequestId string `json:"request_id"`
+
+	// SessionId Session bead ID from the matching session.pending.
+	SessionId string `json:"session_id"`
+}
+
+// SessionPendingClearedPayloadReason Why it cleared: resolved (answered or withdrawn), replaced (a different interaction is now pending; its session.pending follows), or session_gone (the session is no longer active).
+type SessionPendingClearedPayloadReason string
+
+// SessionPendingPayload defines model for SessionPendingPayload.
+type SessionPendingPayload struct {
+	// Alias Session alias, when set.
+	Alias *string `json:"alias,omitempty"`
+
+	// Kind Interaction kind (e.g. approval).
+	Kind string `json:"kind"`
+
+	// Metadata Provider metadata (e.g. tool_name, source).
+	Metadata *map[string]string `json:"metadata,omitempty"`
+
+	// Options Answer options as the session shows them.
+	Options *[]string `json:"options,omitempty"`
+
+	// Prompt Human-readable prompt.
+	Prompt *string `json:"prompt,omitempty"`
+
+	// RequestId Pending interaction request ID. Pass it to POST .../session/{id}/respond.
+	RequestId string `json:"request_id"`
+
+	// SessionId Session bead ID awaiting a decision.
+	SessionId string `json:"session_id"`
+
+	// Template Session template, when known.
+	Template *string `json:"template,omitempty"`
+}
+
 // SessionPendingResponse defines model for SessionPendingResponse.
 type SessionPendingResponse struct {
 	Pending   *PendingInteraction `json:"pending,omitempty"`
@@ -6687,6 +6753,38 @@ type TypedEventStreamEnvelopeSessionMaxAgeKilled struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionPending defines model for TypedEventStreamEnvelopeSessionPending.
+type TypedEventStreamEnvelopeSessionPending struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionPendingPayload    `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionPendingCleared defines model for TypedEventStreamEnvelopeSessionPendingCleared.
+type TypedEventStreamEnvelopeSessionPendingCleared struct {
+	Actor            string                       `json:"actor"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          SessionPendingClearedPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline defines model for TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline.
 type TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline struct {
 	Actor            string                                       `json:"actor"`
@@ -8400,6 +8498,40 @@ type TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionPending defines model for TypedTaggedEventStreamEnvelopeSessionPending.
+type TypedTaggedEventStreamEnvelopeSessionPending struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionPendingPayload    `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionPendingCleared defines model for TypedTaggedEventStreamEnvelopeSessionPendingCleared.
+type TypedTaggedEventStreamEnvelopeSessionPendingCleared struct {
+	Actor            string                       `json:"actor"`
+	City             string                       `json:"city"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          SessionPendingClearedPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline defines model for TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline.
@@ -11413,6 +11545,58 @@ func (t *EventPayload) FromSessionMessageSucceededPayload(v SessionMessageSuccee
 
 // MergeSessionMessageSucceededPayload performs a merge with any union data inside the EventPayload, using the provided SessionMessageSucceededPayload
 func (t *EventPayload) MergeSessionMessageSucceededPayload(v SessionMessageSucceededPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionPendingClearedPayload returns the union data inside the EventPayload as a SessionPendingClearedPayload
+func (t EventPayload) AsSessionPendingClearedPayload() (SessionPendingClearedPayload, error) {
+	var body SessionPendingClearedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionPendingClearedPayload overwrites any union data inside the EventPayload as the provided SessionPendingClearedPayload
+func (t *EventPayload) FromSessionPendingClearedPayload(v SessionPendingClearedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionPendingClearedPayload performs a merge with any union data inside the EventPayload, using the provided SessionPendingClearedPayload
+func (t *EventPayload) MergeSessionPendingClearedPayload(v SessionPendingClearedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionPendingPayload returns the union data inside the EventPayload as a SessionPendingPayload
+func (t EventPayload) AsSessionPendingPayload() (SessionPendingPayload, error) {
+	var body SessionPendingPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionPendingPayload overwrites any union data inside the EventPayload as the provided SessionPendingPayload
+func (t *EventPayload) FromSessionPendingPayload(v SessionPendingPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionPendingPayload performs a merge with any union data inside the EventPayload, using the provided SessionPendingPayload
+func (t *EventPayload) MergeSessionPendingPayload(v SessionPendingPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -15748,6 +15932,62 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionMaxAgeKil
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionPending returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionPending
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionPending() (TypedEventStreamEnvelopeSessionPending, error) {
+	var body TypedEventStreamEnvelopeSessionPending
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionPending overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionPending
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionPending(v TypedEventStreamEnvelopeSessionPending) error {
+	v.Type = "session.pending"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionPending performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionPending
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionPending(v TypedEventStreamEnvelopeSessionPending) error {
+	v.Type = "session.pending"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeSessionPendingCleared returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionPendingCleared
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionPendingCleared() (TypedEventStreamEnvelopeSessionPendingCleared, error) {
+	var body TypedEventStreamEnvelopeSessionPendingCleared
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionPendingCleared overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionPendingCleared
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionPendingCleared(v TypedEventStreamEnvelopeSessionPendingCleared) error {
+	v.Type = "session.pending_cleared"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionPendingCleared performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionPendingCleared
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionPendingCleared(v TypedEventStreamEnvelopeSessionPendingCleared) error {
+	v.Type = "session.pending_cleared"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline() (TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline, error) {
 	var body TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline
@@ -16618,6 +16858,10 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionIdleKilled()
 	case "session.max_age_killed":
 		return t.AsTypedEventStreamEnvelopeSessionMaxAgeKilled()
+	case "session.pending":
+		return t.AsTypedEventStreamEnvelopeSessionPending()
+	case "session.pending_cleared":
+		return t.AsTypedEventStreamEnvelopeSessionPendingCleared()
 	case "session.pool_slot_retired_at_drain_deadline":
 		return t.AsTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline()
 	case "session.quarantined":
@@ -18837,6 +19081,62 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionPending returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionPending
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionPending() (TypedTaggedEventStreamEnvelopeSessionPending, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionPending
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionPending overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionPending
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionPending(v TypedTaggedEventStreamEnvelopeSessionPending) error {
+	v.Type = "session.pending"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionPending performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionPending
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionPending(v TypedTaggedEventStreamEnvelopeSessionPending) error {
+	v.Type = "session.pending"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeSessionPendingCleared returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionPendingCleared
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionPendingCleared() (TypedTaggedEventStreamEnvelopeSessionPendingCleared, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionPendingCleared
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionPendingCleared overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionPendingCleared
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionPendingCleared(v TypedTaggedEventStreamEnvelopeSessionPendingCleared) error {
+	v.Type = "session.pending_cleared"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionPendingCleared performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionPendingCleared
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionPendingCleared(v TypedTaggedEventStreamEnvelopeSessionPendingCleared) error {
+	v.Type = "session.pending_cleared"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline() (TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline
@@ -19707,6 +20007,10 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionIdleKilled()
 	case "session.max_age_killed":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled()
+	case "session.pending":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionPending()
+	case "session.pending_cleared":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionPendingCleared()
 	case "session.pool_slot_retired_at_drain_deadline":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline()
 	case "session.quarantined":

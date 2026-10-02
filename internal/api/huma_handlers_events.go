@@ -356,6 +356,9 @@ func (s *Server) streamEvents(hctx huma.Context, input *EventStreamInput, send s
 		return
 	}
 	defer watcher.Close() //nolint:errcheck
+	// Keep the city's pending monitor running while this client watches, so
+	// session.pending / session.pending_cleared transitions reach the log.
+	defer s.acquirePendingMonitor()()
 	flushSSEHeaders(hctx)
 
 	keepalive := time.NewTicker(sseKeepalive)

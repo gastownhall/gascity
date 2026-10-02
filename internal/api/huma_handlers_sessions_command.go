@@ -1009,6 +1009,8 @@ func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespo
 	if err != nil {
 		return nil, err
 	}
+	// Publish the session.pending_cleared now rather than on the next tick.
+	s.pokePendingMonitor()
 
 	out := &SessionRespondOutput{}
 	out.Body.Status = "accepted"

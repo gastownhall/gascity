@@ -2739,6 +2739,12 @@
             "$ref": "#/components/schemas/SessionMessageSucceededPayload"
           },
           {
+            "$ref": "#/components/schemas/SessionPendingClearedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/SessionPendingPayload"
+          },
+          {
             "$ref": "#/components/schemas/SessionPoolSlotRetiredAtDrainDeadlinePayload"
           },
           {
@@ -7847,6 +7853,91 @@
         ],
         "type": "object"
       },
+      "SessionPendingClearedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "description": "Interaction kind from the matching session.pending.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why it cleared: resolved (answered or withdrawn), replaced (a different interaction is now pending; its session.pending follows), or session_gone (the session is no longer active).",
+            "enum": [
+              "resolved",
+              "replaced",
+              "session_gone"
+            ],
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Request ID from the matching session.pending.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Session bead ID from the matching session.pending.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "request_id",
+          "kind",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "SessionPendingPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "alias": {
+            "description": "Session alias, when set.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Interaction kind (e.g. approval).",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Provider metadata (e.g. tool_name, source).",
+            "type": "object"
+          },
+          "options": {
+            "description": "Answer options as the session shows them.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "prompt": {
+            "description": "Human-readable prompt.",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Pending interaction request ID. Pass it to POST .../session/{id}/respond.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Session bead ID awaiting a decision.",
+            "type": "string"
+          },
+          "template": {
+            "description": "Session template, when known.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "request_id",
+          "kind"
+        ],
+        "type": "object"
+      },
       "SessionPendingResponse": {
         "additionalProperties": false,
         "properties": {
@@ -12620,6 +12711,8 @@
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled",
+            "session.pending": "#/components/schemas/TypedEventStreamEnvelopeSessionPending",
+            "session.pending_cleared": "#/components/schemas/TypedEventStreamEnvelopeSessionPendingCleared",
             "session.pool_slot_retired_at_drain_deadline": "#/components/schemas/TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline",
             "session.quarantined": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined",
             "session.reset_stalled": "#/components/schemas/TypedEventStreamEnvelopeSessionResetStalled",
@@ -12878,6 +12971,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionPending"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionPendingCleared"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline"
@@ -14272,6 +14371,8 @@
                 "session.drain_fence_unavailable",
                 "session.demand_claim_divergence",
                 "session.cold_start_timeout",
+                "session.pending",
+                "session.pending_cleared",
                 "bead.created",
                 "bead.closed",
                 "bead.deleted",
@@ -17505,6 +17606,120 @@
         "title": "TypedEventStreamEnvelope session.max_age_killed",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionPending": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionPendingPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.pending",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.pending",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeSessionPendingCleared": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionPendingClearedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.pending_cleared",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.pending_cleared",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline": {
         "additionalProperties": false,
         "properties": {
@@ -18954,6 +19169,8 @@
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled",
+            "session.pending": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPending",
+            "session.pending_cleared": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPendingCleared",
             "session.pool_slot_retired_at_drain_deadline": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline",
             "session.quarantined": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined",
             "session.reset_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionResetStalled",
@@ -19212,6 +19429,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPending"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPendingCleared"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline"
@@ -20697,6 +20920,8 @@
                 "session.drain_fence_unavailable",
                 "session.demand_claim_divergence",
                 "session.cold_start_timeout",
+                "session.pending",
+                "session.pending_cleared",
                 "bead.created",
                 "bead.closed",
                 "bead.deleted",
@@ -24149,6 +24374,128 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.max_age_killed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionPending": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionPendingPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.pending",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.pending",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionPendingCleared": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionPendingClearedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.pending_cleared",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.pending_cleared",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline": {
