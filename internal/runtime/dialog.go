@@ -1806,12 +1806,12 @@ func ProviderTerminalErrorReason(content string) string {
 	case strings.Contains(lower, "quota exceeded") && !strings.Contains(lower, "disk quota"):
 		return "quota_exceeded"
 	case containsCreditBalanceTooLow(lower):
-		// Anthropic's empty-credit error ("Credit balance is too low" in
-		// Claude Code, "Your credit balance is too low to access ..." from the
-		// API) is the same class as insufficient_quota: it needs credit or a
-		// different key, not a retry. Claude's spend-limit modal ("Usage
-		// credit balance: ...") does not contain this phrase and stays a
-		// rate-limit screen.
+		// Anthropic's empty-credit error ("Credit balance too low · Add
+		// funds: ..." as Claude Code displays it, "Your credit balance is too
+		// low to access ..." from the API) is the same class as
+		// insufficient_quota: it needs credit or a different key, not a
+		// retry. Claude's spend-limit modal ("Usage credit balance: ...")
+		// does not contain either phrase and stays a rate-limit screen.
 		return "quota_exceeded"
 	default:
 		return ""
@@ -1821,13 +1821,16 @@ func ProviderTerminalErrorReason(content string) string {
 // containsCreditBalanceTooLow reports whether lowercased pane content shows
 // the empty-credit error itself rather than the phrase quoted in ordinary
 // output: either the API's full sentence ("credit balance is too low to
-// access"), or a line that starts with the phrase once Claude Code's leading
-// "⎿" marker and indentation are trimmed.
+// access"), or a line that starts with the phrase, with or without "is", once
+// Claude Code's leading "⎿" marker and indentation are trimmed.
 func containsCreditBalanceTooLow(lower string) bool {
-	const phrase = "credit balance is too low"
 	for _, line := range strings.Split(lower, "\n") {
-		if strings.Contains(line, phrase+" to access") ||
-			strings.HasPrefix(strings.TrimLeft(line, " \t⎿"), phrase) {
+		if strings.Contains(line, "credit balance is too low to access") {
+			return true
+		}
+		trimmed := strings.TrimLeft(line, " \t⎿")
+		if strings.HasPrefix(trimmed, "credit balance is too low") ||
+			strings.HasPrefix(trimmed, "credit balance too low") {
 			return true
 		}
 	}
