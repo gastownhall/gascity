@@ -154,8 +154,11 @@ Additional sub-states within "running" are checked in order:
 Agents not running are subject to **crash loop quarantine**: if
 `crashTracker.isQuarantined()` returns true, the agent is skipped
 silently. When repeated wake failures first quarantine a session, the
-reconciler emits `session.quarantined` once, on entry (subject: the agent
-name; session ID: the session bead). Failures inside an active quarantine
+reconciler emits `session.quarantined` once, on entry (session ID: the
+session bead; subject: the agent identity the `gc.agent.*` counters use,
+which is the start's display name on a failed start and, on a rapid exit,
+the bead's agent name, else its pool instance identity, else its
+template). Failures inside an active quarantine
 do not emit it again; `quarantined_until` on the session bead says when the
 quarantine ends.
 

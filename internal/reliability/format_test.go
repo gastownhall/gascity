@@ -116,7 +116,7 @@ func TestFormatTable_InstrumentationNotes(t *testing.T) {
 		WorkerOperations:       3,
 		MissingModel:           2,
 		MissingPromptVersion:   1,
-		QuarantineSignalStatus: quarantineSignalStatusNotEmitted,
+		QuarantineSignalStatus: quarantineSignalStatusNotObserved,
 	}
 	var buf bytes.Buffer
 	if err := FormatTable(&buf, r); err != nil {
@@ -137,7 +137,7 @@ func TestFormatTable_InstrumentationNotes(t *testing.T) {
 // session.quarantined is emitted when a session enters wake-failure
 // quarantine, so a window without one is not an instrumentation gap.
 func TestFormatTable_NoQuarantineNote(t *testing.T) {
-	for _, status := range []string{quarantineSignalStatusNotEmitted, quarantineSignalStatusObserved} {
+	for _, status := range []string{quarantineSignalStatusNotObserved, quarantineSignalStatusObserved} {
 		r := sampleReport()
 		r.Instrumentation.QuarantineSignalStatus = status
 		var buf bytes.Buffer

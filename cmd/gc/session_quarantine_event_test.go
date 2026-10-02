@@ -146,3 +146,51 @@ func TestParallelWakeFailureEmitsQuarantined(t *testing.T) {
 		t.Errorf("SessionID = %q, want b1", got[0].SessionID)
 	}
 }
+
+// TestCheckStabilityRapidExitsEmitQuarantined drives the reconciler's
+// rapid-exit path (checkStability -> recordWakeFailure) to the wake-attempt
+// threshold and checks that the recorder it is handed sees the quarantine.
+// Subject falls back to the template when the bead has no agent_name.
+func TestCheckStabilityRapidExitsEmitQuarantined(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		meta        map[string]string
+		wantSubject string
+	}{
+		{"agent name", map[string]string{"agent_name": "gascity/gc.worker", "template": "gascity/gc.worker-tmpl"}, "gascity/gc.worker"},
+		{"template fallback", map[string]string{"template": "gascity/gc.worker-tmpl"}, "gascity/gc.worker-tmpl"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+			clk := &clock.Fake{Time: now}
+			store := newTestStore()
+			dt := newDrainTracker()
+			rec := events.NewFake()
+			session := makeBead("b1", tc.meta)
+
+			for i := 0; i < defaultMaxWakeAttempts; i++ {
+				// checkStability clears last_woke_at on each rapid exit; every
+				// iteration is a fresh wake that died inside the window.
+				session.Metadata["last_woke_at"] = now.Add(-10 * time.Second).Format(time.RFC3339)
+				if _, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, rec, nil); !stab {
+					t.Fatalf("exit %d: rapid exit should report stability failure", i+1)
+				}
+				syncBeadFromStore(&session, store)
+			}
+
+			if session.Metadata["quarantined_until"] == "" {
+				t.Fatal("fixture must quarantine at max attempts")
+			}
+			got := quarantinedEvents(rec)
+			if len(got) != 1 {
+				t.Fatalf("session.quarantined events = %d, want 1: %+v", len(got), rec.Events)
+			}
+			if got[0].Subject != tc.wantSubject {
+				t.Errorf("Subject = %q, want %q", got[0].Subject, tc.wantSubject)
+			}
+			if got[0].SessionID != "b1" {
+				t.Errorf("SessionID = %q, want b1", got[0].SessionID)
+			}
+		})
+	}
+}

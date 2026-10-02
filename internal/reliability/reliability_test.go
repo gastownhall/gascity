@@ -810,8 +810,8 @@ func TestAnalyzeInstrumentationCountsMissingModelAndPromptVersion(t *testing.T) 
 	if got := r.Instrumentation.MissingPromptVersion; got != 1 {
 		t.Fatalf("missing prompt version = %d, want 1", got)
 	}
-	if got := r.Instrumentation.QuarantineSignalStatus; got != quarantineSignalStatusNotEmitted {
-		t.Fatalf("quarantine signal status = %q, want %q", got, quarantineSignalStatusNotEmitted)
+	if got := r.Instrumentation.QuarantineSignalStatus; got != quarantineSignalStatusNotObserved {
+		t.Fatalf("quarantine signal status = %q, want %q", got, quarantineSignalStatusNotObserved)
 	}
 }
 
