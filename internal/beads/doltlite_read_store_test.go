@@ -117,6 +117,48 @@ func TestDoltliteReadStoreReadyUsesDoltlite(t *testing.T) {
 	}
 }
 
+// bd's issues table carries close_reason (written by `bd close --reason`); the
+// in-process read path must surface it like BdStore does
+// (gastownhall/gascity#2663). Snapshots without the column read as no reason.
+func TestDoltliteReadStoreGetReadsCloseReason(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+
+	legacy, err := store.Get("gc-ready")
+	if err != nil {
+		t.Fatalf("Get without a close_reason column: %v", err)
+	}
+	if legacy.CloseReason != "" {
+		t.Fatalf("CloseReason without the column = %q, want empty", legacy.CloseReason)
+	}
+
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+	for _, stmt := range []string{
+		`ALTER TABLE issues ADD COLUMN close_reason TEXT`,
+		`UPDATE issues SET status = 'closed', close_reason = 'fixed in commit abc123; tests pass' WHERE id = 'gc-ready'`,
+	} {
+		if _, err := writer.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+
+	got, err := store.Get("gc-ready")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.CloseReason != "fixed in commit abc123; tests pass" {
+		t.Fatalf("CloseReason = %q, want %q", got.CloseReason, "fixed in commit abc123; tests pass")
+	}
+	open, err := store.Get("gc-parent")
+	if err != nil {
+		t.Fatalf("Get open bead: %v", err)
+	}
+	if open.CloseReason != "" {
+		t.Fatalf("open bead CloseReason = %q, want empty", open.CloseReason)
+	}
+}
+
 func TestDoltliteReadStoreReadyBlocksWorkflowDependencyTypes(t *testing.T) {
 	store, closeStore := newTestDoltliteReadStore(t)
 	defer closeStore()

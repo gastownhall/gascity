@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -179,6 +180,13 @@ type Bead struct {
 	// means the store did not provide it and cached ready falls back to
 	// dependency-derived readiness for backward compatibility.
 	IsBlocked *bool `json:"is_blocked,omitempty"`
+	// CloseReason says why the bead was closed. It is empty while the bead is
+	// not closed, and when the closer gave no reason. bd-backed stores read
+	// bd's close_reason column (written by `bd close --reason`); stores that
+	// hold the whole row record the trimmed metadata.close_reason a closer
+	// stamped before closing, the same value BdStore and NativeDoltStore
+	// forward to their close. Reopening clears it.
+	CloseReason string `json:"close_reason,omitempty"`
 	// IndefinitelyDeferred preserves bd's status-based indefinite deferral
 	// after richer statuses normalize to Gas City's three-state model. Cache
 	// notifications restore status="deferred" on the event wire so another
@@ -738,10 +746,23 @@ func IsDeferred(b Bead, now time.Time) bool {
 }
 
 // setBeadStatus applies an explicit Gas City status transition. Any such
-// transition supersedes richer source status that was normalized on read.
+// transition supersedes richer source status that was normalized on read. A
+// bead that is not closed has no close reason, so leaving closed drops it, as
+// bd's reopen clears its close_reason column.
 func setBeadStatus(b *Bead, status string) {
 	b.Status = status
 	b.IndefinitelyDeferred = false
+	if status != "closed" {
+		b.CloseReason = ""
+	}
+}
+
+// recordCloseReason stamps CloseReason on a bead a whole-row store (MemStore,
+// FileStore, SQLiteStore) has just moved from not-closed to closed. The reason
+// is the trimmed metadata.close_reason its closer stamped first, which is what
+// BdStore and NativeDoltStore forward to their close as well.
+func recordCloseReason(b *Bead) {
+	b.CloseReason = strings.TrimSpace(b.Metadata["close_reason"])
 }
 
 func isReadyBlockingDependencyType(t string) bool {

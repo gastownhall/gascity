@@ -5487,3 +5487,51 @@ func TestBdStoreReclaimStaleReportsNothingReclaimed(t *testing.T) {
 		t.Fatalf("ReclaimStale reclaimed = true, want false; previousOwner=%q", previousOwner)
 	}
 }
+
+// bd stores the reason given to `bd close --reason` in its close_reason column
+// and returns it from show and list; BdStore must carry it onto Bead
+// (gastownhall/gascity#2663).
+func TestBdStoreGetReadsCloseReason(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json bd-closed`: {
+			out: []byte(`[{"id":"bd-closed","title":"done","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z","close_reason":"fixed in commit abc123; tests pass"}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	b, err := s.Get("bd-closed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.CloseReason != "fixed in commit abc123; tests pass" {
+		t.Errorf("CloseReason = %q, want %q", b.CloseReason, "fixed in commit abc123; tests pass")
+	}
+}
+
+func TestBdStoreListReadsCloseReason(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd list --json --all --include-infra --include-gates --limit 0`: {
+			out: []byte(`[{"id":"bd-open","title":"open","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},{"id":"bd-closed","title":"done","status":"closed","issue_type":"task","created_at":"2025-01-15T10:31:00Z","close_reason":"superseded by bd-open"}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reasons := map[string]string{}
+	for _, b := range got {
+		reasons[b.ID] = b.CloseReason
+	}
+	if reasons["bd-closed"] != "superseded by bd-open" {
+		t.Errorf("bd-closed CloseReason = %q, want %q", reasons["bd-closed"], "superseded by bd-open")
+	}
+	if reasons["bd-open"] != "" {
+		t.Errorf("bd-open CloseReason = %q, want empty", reasons["bd-open"])
+	}
+}

@@ -3006,6 +3006,7 @@ func nativeIssueFromBead(b Bead) (*beadslib.Issue, error) {
 		Ephemeral:   b.Ephemeral,
 		NoHistory:   b.NoHistory,
 		DeferUntil:  cloneTimePtr(b.DeferUntil),
+		CloseReason: b.CloseReason,
 		RowVersion:  b.Revision,
 	}
 	if b.Priority != nil {
@@ -3072,6 +3073,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		Ephemeral:            issue.Ephemeral,
 		NoHistory:            issue.NoHistory,
 		DeferUntil:           cloneTimePtr(issue.DeferUntil),
+		CloseReason:          bdCloseReason(status, issue.CloseReason),
 		IndefinitelyDeferred: indefinitelyDeferred,
 		Revision:             issue.RowVersion,
 	}

@@ -1170,11 +1170,12 @@ func scanSQLiteBead(row sqliteScanner) (Bead, error) {
 // filtered, Metadata merged). Update and UpdateIfMatch share it so the fenced
 // and unfenced paths cannot drift.
 func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
+	wasClosed := b.Status == "closed"
 	if opts.Title != nil {
 		b.Title = *opts.Title
 	}
 	if opts.Status != nil {
-		b.Status = *opts.Status
+		setBeadStatus(&b, *opts.Status)
 	}
 	if opts.Type != nil {
 		b.Type = *opts.Type
@@ -1214,6 +1215,9 @@ func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
 			}
 		}
 		b.Labels = filtered
+	}
+	if !wasClosed && b.Status == "closed" {
+		recordCloseReason(&b)
 	}
 	return b
 }
@@ -1858,7 +1862,8 @@ func (t *sqliteStoreTx) Close(id string) error {
 		return nil
 	}
 	before := b
-	b.Status = "closed"
+	setBeadStatus(&b, "closed")
+	recordCloseReason(&b)
 	b.UpdatedAt = time.Now()
 	if err := t.store.upsertBeadTx(t.ctx, t.tx, b); err != nil {
 		return err

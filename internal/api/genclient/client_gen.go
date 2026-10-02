@@ -1160,6 +1160,7 @@ type BackendCredentialResolvedPayload struct {
 // Bead defines model for Bead.
 type Bead struct {
 	Assignee     *string            `json:"assignee,omitempty"`
+	CloseReason  *string            `json:"close_reason,omitempty"`
 	CreatedAt    time.Time          `json:"created_at"`
 	DeferUntil   *time.Time         `json:"defer_until,omitempty"`
 	Dependencies *[]Dep             `json:"dependencies,omitempty"`
@@ -1199,6 +1200,12 @@ type BeadClaimReleasedPayload struct {
 	Assignee string `json:"assignee"`
 	BeadId   string `json:"bead_id"`
 	Reason   string `json:"reason"`
+}
+
+// BeadCloseBody defines model for BeadCloseBody.
+type BeadCloseBody struct {
+	// Reason Why the bead is being closed. Recorded as the bead's close_reason (bd close --reason). Blank means no reason.
+	Reason *string `json:"reason,omitempty"`
 }
 
 // BeadCreateInputBody defines model for BeadCreateInputBody.
@@ -10262,6 +10269,9 @@ type PatchV0CityByCityNameBeadByIdJSONRequestBody = BeadUpdateBody
 
 // PostV0CityByCityNameBeadByIdAssignJSONRequestBody defines body for PostV0CityByCityNameBeadByIdAssign for application/json ContentType.
 type PostV0CityByCityNameBeadByIdAssignJSONRequestBody = BeadAssignInputBody
+
+// PostV0CityByCityNameBeadByIdCloseJSONRequestBody defines body for PostV0CityByCityNameBeadByIdClose for application/json ContentType.
+type PostV0CityByCityNameBeadByIdCloseJSONRequestBody = BeadCloseBody
 
 // PostV0CityByCityNameBeadByIdUpdateJSONRequestBody defines body for PostV0CityByCityNameBeadByIdUpdate for application/json ContentType.
 type PostV0CityByCityNameBeadByIdUpdateJSONRequestBody = BeadUpdateBody
@@ -19888,8 +19898,10 @@ type ClientInterface interface {
 
 	PostV0CityByCityNameBeadByIdAssign(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// PostV0CityByCityNameBeadByIdClose request
-	PostV0CityByCityNameBeadByIdClose(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// PostV0CityByCityNameBeadByIdCloseWithBody request with any body
+	PostV0CityByCityNameBeadByIdCloseWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostV0CityByCityNameBeadByIdClose(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, body PostV0CityByCityNameBeadByIdCloseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameBeadByIdDeps request
 	GetV0CityByCityNameBeadByIdDeps(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -20747,8 +20759,20 @@ func (c *Client) PostV0CityByCityNameBeadByIdAssign(ctx context.Context, cityNam
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameBeadByIdClose(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameBeadByIdCloseRequest(c.Server, cityName, id, params)
+func (c *Client) PostV0CityByCityNameBeadByIdCloseWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameBeadByIdCloseRequestWithBody(c.Server, cityName, id, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameBeadByIdClose(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, body PostV0CityByCityNameBeadByIdCloseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameBeadByIdCloseRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -24259,8 +24283,19 @@ func NewPostV0CityByCityNameBeadByIdAssignRequestWithBody(server string, cityNam
 	return req, nil
 }
 
-// NewPostV0CityByCityNameBeadByIdCloseRequest generates requests for PostV0CityByCityNameBeadByIdClose
-func NewPostV0CityByCityNameBeadByIdCloseRequest(server string, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams) (*http.Request, error) {
+// NewPostV0CityByCityNameBeadByIdCloseRequest calls the generic PostV0CityByCityNameBeadByIdClose builder with application/json body
+func NewPostV0CityByCityNameBeadByIdCloseRequest(server string, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, body PostV0CityByCityNameBeadByIdCloseJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostV0CityByCityNameBeadByIdCloseRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
+}
+
+// NewPostV0CityByCityNameBeadByIdCloseRequestWithBody generates requests for PostV0CityByCityNameBeadByIdClose with any type of body
+func NewPostV0CityByCityNameBeadByIdCloseRequestWithBody(server string, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -24292,10 +24327,12 @@ func NewPostV0CityByCityNameBeadByIdCloseRequest(server string, cityName string,
 		return nil, err
 	}
 
-	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	req, err := http.NewRequest("POST", queryURL.String(), body)
 	if err != nil {
 		return nil, err
 	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -33540,8 +33577,10 @@ type ClientWithResponsesInterface interface {
 
 	PostV0CityByCityNameBeadByIdAssignWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdAssignResponse, error)
 
-	// PostV0CityByCityNameBeadByIdCloseWithResponse request
-	PostV0CityByCityNameBeadByIdCloseWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdCloseResponse, error)
+	// PostV0CityByCityNameBeadByIdCloseWithBodyWithResponse request with any body
+	PostV0CityByCityNameBeadByIdCloseWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdCloseResponse, error)
+
+	PostV0CityByCityNameBeadByIdCloseWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, body PostV0CityByCityNameBeadByIdCloseJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdCloseResponse, error)
 
 	// GetV0CityByCityNameBeadByIdDepsWithResponse request
 	GetV0CityByCityNameBeadByIdDepsWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdDepsResponse, error)
@@ -38767,9 +38806,17 @@ func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdAssignWithResponse(ctx
 	return ParsePostV0CityByCityNameBeadByIdAssignResponse(rsp)
 }
 
-// PostV0CityByCityNameBeadByIdCloseWithResponse request returning *PostV0CityByCityNameBeadByIdCloseResponse
-func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdCloseWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdCloseResponse, error) {
-	rsp, err := c.PostV0CityByCityNameBeadByIdClose(ctx, cityName, id, params, reqEditors...)
+// PostV0CityByCityNameBeadByIdCloseWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameBeadByIdCloseResponse
+func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdCloseWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdCloseResponse, error) {
+	rsp, err := c.PostV0CityByCityNameBeadByIdCloseWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameBeadByIdCloseResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdCloseWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, body PostV0CityByCityNameBeadByIdCloseJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdCloseResponse, error) {
+	rsp, err := c.PostV0CityByCityNameBeadByIdClose(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
