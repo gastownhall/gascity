@@ -29,7 +29,7 @@ func (m reconcilerMode) String() string {
 // v2ControllersInBuild reports whether this build carries the v2 allocator
 // (P3) and the first session controller group (P4.1). Until both land, v2
 // would start, restart and scale nothing, so selecting it is refused.
-const v2ControllersInBuild = false
+const v2ControllersInBuild = v2SessionControllerReal && v2AllocatorControllerReal
 
 // latchReconcilerMode resolves the boot mode. Unknown values and an
 // inadmissible v2 are errors: the city does not start. An alias latches legacy
