@@ -244,3 +244,82 @@ func TestLiveExternalWorkDirSet_GathersLivenessOncePerCallAcrossRigs(t *testing.
 		t.Fatalf("liveExternalWorkDirSet gathered liveness %d time(s) across two rigs, want exactly once per call", *scans)
 	}
 }
+
+// TestLiveExternalWorkDirSet_ExcludesRigMainCheckout pins that only linked
+// worktrees count as external work. git lists a repository's main checkout
+// among its worktrees, and the rig's own checkout is where gc's agents and the
+// operator routinely sit, so charging it would hold a capacity slot for as long
+// as anything runs in the rig -- including a process in a linked worktree
+// nested beneath it, which worktreeIsLive reads as a live main checkout. The
+// exclusion has to hold on the fail-closed path as well, where an indeterminate
+// scan marks every enumerated worktree live. The last two cases separate the
+// rule's two halves: a rig registered below the main checkout is excluded only
+// by skipping git's first entry, and a rig registered at a linked worktree only
+// by matching the rig path.
+func TestLiveExternalWorkDirSet_ExcludesRigMainCheckout(t *testing.T) {
+	tests := []struct {
+		name    string
+		scanned bool
+		rigAt   func(mainCheckout, linkedX string) string
+		wantX   bool
+	}{
+		{
+			name:    "live scan",
+			scanned: true,
+			rigAt:   func(mainCheckout, _ string) string { return mainCheckout },
+			wantX:   true,
+		},
+		{
+			name:    "indeterminate scan fails closed",
+			scanned: false,
+			rigAt:   func(mainCheckout, _ string) string { return mainCheckout },
+			wantX:   true,
+		},
+		{
+			name:    "rig registered below the main checkout",
+			scanned: true,
+			rigAt:   func(mainCheckout, _ string) string { return filepath.Join(mainCheckout, "services", "api") },
+			wantX:   true,
+		},
+		{
+			name:    "rig registered at a linked worktree",
+			scanned: true,
+			rigAt:   func(_, linkedX string) string { return linkedX },
+			wantX:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, mainCheckout := initReapRig(t)
+			linkedX := filepath.Join(mainCheckout, ".claude", "worktrees", "x")
+			linkedY := filepath.Join(mainCheckout, ".claude", "worktrees", "y")
+			if err := os.MkdirAll(filepath.Dir(linkedX), 0o755); err != nil {
+				t.Fatalf("mkdir linked worktree parent: %v", err)
+			}
+			mustGit(t, mainCheckout, "worktree", "add", "-b", "x-branch", linkedX)
+			mustGit(t, mainCheckout, "worktree", "add", "-b", "y-branch", linkedY)
+			rigPath := tt.rigAt(mainCheckout, linkedX)
+			if err := os.MkdirAll(rigPath, 0o755); err != nil {
+				t.Fatalf("mkdir rig path: %v", err)
+			}
+
+			state := liveWorktreeState{scanned: tt.scanned}
+			if tt.scanned {
+				state.cwds = []string{pathutil.NormalizePathForCompare(linkedX), pathutil.NormalizePathForCompare(linkedY)}
+			}
+			injectLiveness(t, state)
+
+			got := liveExternalWorkDirSet(reapTestConfig(rigPath), nil, io.Discard)
+
+			if !got[pathutil.NormalizePathForCompare(linkedY)] {
+				t.Fatalf("liveExternalWorkDirSet omitted the live linked worktree %s; got %v", linkedY, got)
+			}
+			if gotX := got[pathutil.NormalizePathForCompare(linkedX)]; gotX != tt.wantX {
+				t.Fatalf("liveExternalWorkDirSet reported linked worktree %s = %v, want %v; got %v", linkedX, gotX, tt.wantX, got)
+			}
+			if got[pathutil.NormalizePathForCompare(mainCheckout)] {
+				t.Fatalf("liveExternalWorkDirSet counted the rig's main checkout %s as external live work; got %v", mainCheckout, got)
+			}
+		})
+	}
+}
