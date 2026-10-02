@@ -178,15 +178,17 @@ LIVE_SESSION_IDS=$(jq -r -s '
     | select(. != null and . != "")
 ' "$SESSION_TMP" 2>/dev/null) || exit 0
 
+# Membership uses a here-string, not printf | grep -q: grep exits on the first
+# hit, printf dies of SIGPIPE, and pipefail reads that hit as a miss (#6714).
 agent_exists() {
     local candidate="$1"
-    [ -n "$candidate" ] && printf '%s\n' "$AGENTS" | grep -Fxq -- "$candidate"
+    [ -n "$candidate" ] && grep -Fxq -- "$candidate" <<<"$AGENTS"
 }
 
 live_session_match() {
     local candidate="$1"
     [ -n "$candidate" ] && [ -n "$LIVE_SESSION_IDS" ] \
-        && printf '%s\n' "$LIVE_SESSION_IDS" | grep -Fxq -- "$candidate"
+        && grep -Fxq -- "$candidate" <<<"$LIVE_SESSION_IDS"
 }
 
 CURRENT_BEAD_JSON=""
@@ -332,7 +334,7 @@ reset_orphan_if_current() {
     local reset_state
 
     reset_output=$(gc bd release-if-current "$bead_id" "$expected_assignee" 2>/dev/null) || return 1
-    reset_state=$(printf '%s\n' "$reset_output" | awk 'NF { print $1; exit }')
+    reset_state=$(awk 'NF { print $1; exit }' <<<"$reset_output")
     case "$reset_state" in
         released)
             if ! gc bd update "$bead_id" --append-notes "orphan-sweep: reset from assignee $expected_assignee -- no live session matched" >/dev/null 2>&1; then
