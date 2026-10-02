@@ -86,11 +86,19 @@ unblocks dependents. For each closed bead it resolves dependents via:
 gc bd dep list <blocker> --direction=up --type=blocks --json
 ```
 
-and nudges the `assignee` of every dependent whose status is `open` or
-`deferred`:
+and considers every dependent whose status is `open`, `in_progress` or
+`deferred` and that has an `assignee`. Before nudging, it lists the
+dependent's own blockers:
 
 ```
-gc session nudge <assignee> "blocker <blocker> closed — your dependent <dep> may be unblocked"
+gc bd dep list <dep> --direction=down --type=blocks --json
+```
+
+If any other blocker is still open, it nudges no one yet. Once the last
+blocker closes, it nudges the assignee:
+
+```
+gc session nudge <assignee> "blocker <blocker> closed — your dependent <dep> has no open blockers now"
 ```
 
 **Cross-rig.** A `prefix -> rig` lookup built from `gc rig list` scopes the
@@ -98,7 +106,10 @@ dependency lookup and the nudge to the rig that owns each bead, so cross-rig
 blocker chains within a city resolve correctly. Cross-city cascade is out of
 scope.
 
-**Idempotence.** A `(blocker, dependent)` pair is nudged at most once.
+**Idempotence.** A `(blocker, dependent)` pair is nudged at most once. A pair
+that waits on another open blocker is recorded too; the last blocker's close is
+a different pair, so it still nudges once. A dependent whose blockers close in
+the same window is nudged once.
 
 **Dedup state.**
 `$GC_PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json` — a JSON object

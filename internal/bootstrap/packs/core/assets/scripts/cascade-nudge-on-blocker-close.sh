@@ -7,8 +7,12 @@
 #
 # This order subscribes to bead.closed events. For each closed bead it
 # resolves the dependents linked by a `blocks` dependency and nudges the
-# assignee of every open or deferred dependent. Idempotent: a given
-# (blocker, dependent) pair is nudged at most once. Dedup state lives in
+# assignee of every open, in_progress or deferred dependent once that
+# dependent has no open blocker left. A close that leaves another blocker
+# open nudges no one: the owner would only go back to work that is still
+# blocked. Idempotent: a given (blocker, dependent) pair is nudged at most
+# once, and a dependent whose blockers close together hears once. Dedup
+# state lives in
 # $GC_PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json, so it is
 # both city- and pack-scoped — multi-city installs never cross-pollinate.
 #
@@ -102,6 +106,9 @@ echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
 
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 NUDGED=0
+# Dependents nudged this run, space-delimited (no arrays, for bash 3.2): two
+# blockers of one dependent closing in the same window nudge it once.
+DONE=" "
 while IFS= read -r blocker; do
     [ -n "$blocker" ] || continue
 
@@ -110,10 +117,12 @@ while IFS= read -r blocker; do
             --direction=up --type=blocks --json 2>/dev/null)" || continue
     if [ -z "$DEPS" ] || [ "$DEPS" = "[]" ]; then continue; fi
 
-    # Dependents that are still open/deferred and have an assignee to nudge.
+    # Dependents that are still open, claimed or deferred and have an
+    # assignee to nudge. A claimed (in_progress) dependent is included: an
+    # owner often claims a bead before a blocker is added to it.
     ROWS="$(printf '%s' "$DEPS" \
         | jq -r '.[]
-                 | select((.status == "open" or .status == "deferred")
+                 | select((.status == "open" or .status == "in_progress" or .status == "deferred")
                           and (.assignee != null and .assignee != ""))
                  | [.id, .assignee] | @tsv' 2>/dev/null)" || ROWS=""
     [ -n "$ROWS" ] || continue
@@ -125,10 +134,30 @@ while IFS= read -r blocker; do
             STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
             continue
         fi
+        case "$DONE" in
+            *" $dep_id "*)
+                STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
+                continue
+                ;;
+        esac
         set_rig_args "$dep_id"
-        msg="blocker $blocker closed — your dependent $dep_id may be unblocked"
+        # Nudge only once the dependent's last blocker has closed. A pair that
+        # waits is recorded too: the last blocker's close is a different pair,
+        # so it still nudges once. A failed lookup records nothing, so the
+        # next run retries.
+        OPEN_BLOCKERS="$(gc bd dep list "$dep_id" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
+                --direction=down --type=blocks --json 2>/dev/null \
+            | jq -r --arg b "$blocker" \
+                '[.[] | select(.id != $b and .status != "closed") | .id] | length' 2>/dev/null)" || continue
+        [ -n "$OPEN_BLOCKERS" ] || continue
+        if [ "$OPEN_BLOCKERS" -gt 0 ]; then
+            STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
+            continue
+        fi
+        msg="blocker $blocker closed — your dependent $dep_id has no open blockers now"
         if gc session nudge ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} "$assignee" "$msg" >/dev/null 2>&1; then
             STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
+            DONE="$DONE$dep_id "
             NUDGED=$((NUDGED + 1))
         fi
     done <<EOF
