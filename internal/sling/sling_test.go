@@ -5295,9 +5295,9 @@ func TestUndeliverableHandoffWarningRecognizesPoolSessionBeadID(t *testing.T) {
 }
 
 // assignedSingleSessionBead seeds an open bead inside a live convoy, assigned
-// to assignee and carrying routedTo as gc.routed_to (unset when empty), so the
-// only thing deciding idempotency is the assignee/route pair.
-func assignedSingleSessionBead(t *testing.T, assignee, routedTo string) (*beads.MemStore, string) {
+// to "mayor" and carrying routedTo as gc.routed_to (unset when empty), so the
+// only thing deciding idempotency is the route.
+func assignedSingleSessionBead(t *testing.T, routedTo string) (*beads.MemStore, string) {
 	t.Helper()
 	store := beads.NewMemStore()
 	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy", Status: "open"})
@@ -5313,7 +5313,7 @@ func assignedSingleSessionBead(t *testing.T, assignee, routedTo string) (*beads.
 		Type:     "task",
 		Status:   "open",
 		ParentID: convoy.ID,
-		Assignee: assignee,
+		Assignee: "mayor",
 		Metadata: metadata,
 	})
 	if err != nil {
@@ -5328,7 +5328,7 @@ func assignedSingleSessionBead(t *testing.T, assignee, routedTo string) (*beads.
 // the route pointing at the old target, so the agent's routed work query never
 // finds it; the sling must re-route.
 func TestCheckBeadStateSingleSessionAssignedButRoutedElsewhereIsNotIdempotent(t *testing.T) {
-	store, beadID := assignedSingleSessionBead(t, "mayor", "reviewers")
+	store, beadID := assignedSingleSessionBead(t, "reviewers")
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	result := CheckBeadState(store, beadID, a, SlingDeps{Store: store})
@@ -5349,7 +5349,7 @@ func TestCheckBeadStateSingleSessionAssignedButRoutedElsewhereIsNotIdempotent(t 
 }
 
 func TestCheckBeadStateSingleSessionAssignedAndRoutedIsIdempotent(t *testing.T) {
-	store, beadID := assignedSingleSessionBead(t, "mayor", "mayor")
+	store, beadID := assignedSingleSessionBead(t, "mayor")
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	result := CheckBeadState(store, beadID, a, SlingDeps{Store: store})
@@ -5363,7 +5363,7 @@ func TestCheckBeadStateSingleSessionAssignedAndRoutedIsIdempotent(t *testing.T) 
 }
 
 func TestCheckBeadStateSingleSessionAssignedUnroutedIsIdempotent(t *testing.T) {
-	store, beadID := assignedSingleSessionBead(t, "mayor", "")
+	store, beadID := assignedSingleSessionBead(t, "")
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	result := CheckBeadState(store, beadID, a, SlingDeps{Store: store})
@@ -5387,7 +5387,7 @@ func TestDoSlingReroutesClaimedBeadWithoutAttachingFormula(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("code-review")}
 
-	store, beadID := assignedSingleSessionBead(t, "mayor", "reviewers")
+	store, beadID := assignedSingleSessionBead(t, "reviewers")
 	deps := testDeps(cfg, sp, runner.run)
 	deps.Store = store
 
