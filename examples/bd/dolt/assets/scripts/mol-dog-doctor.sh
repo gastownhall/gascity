@@ -102,6 +102,26 @@ newest_backup_mtime_for_db() {
     printf '%s\n' "$newest_mtime"
 }
 
+# last_write_epoch_for_db prints a database's newest commit on any branch as
+# epoch seconds (UTC, converted without the session time zone), or 0 when the
+# query fails or the name is unsafe to quote. A backup at least that new holds
+# every commit, so its age is not data at risk: an idle rig's
+# `dolt backup sync` is a no-op that rewrites nothing, and judging it by
+# artifact age alone pages forever. Neither file mtimes nor a clean
+# dolt_status can stand in: gc's own probe writes keep an idle database's
+# journal and working set moving without a commit.
+last_write_epoch_for_db() {
+    case "$1" in
+        [A-Za-z0-9_]*) ;;
+        *) printf '0\n'; return 0 ;;
+    esac
+    case "$1" in
+        *[!A-Za-z0-9_-]*) printf '0\n'; return 0 ;;
+    esac
+    last_write=$(dolt_sql -r csv -q "SELECT TIMESTAMPDIFF(SECOND, '1970-01-01 00:00:00', MAX(latest_commit_date)) FROM \`$1\`.dolt_branches" 2>/dev/null | grep -E '^[0-9]+$' | head -1 || true)
+    printf '%s\n' "${last_write:-0}"
+}
+
 append_backup_stale() {
     backup_stale_item="$1"
     if [ -n "$BACKUP_STALE_ITEMS" ]; then
@@ -207,6 +227,10 @@ if [ -n "$BACKUP_ELIGIBLE_DBS" ]; then
             fi
             BACKUP_AGE=$((NOW_S - NEWEST_BACKUP_MTIME))
             if [ "$BACKUP_AGE" -gt "$BACKUP_STALE_S" ]; then
+                LAST_WRITE_S=$(last_write_epoch_for_db "$db")
+                if [ "$LAST_WRITE_S" -gt 0 ] && [ "$LAST_WRITE_S" -le "$NEWEST_BACKUP_MTIME" ]; then
+                    continue  # no writes since the last backup: nothing at risk
+                fi
                 append_backup_stale "$db backup is $((BACKUP_AGE / 3600))h old"
             fi
         done

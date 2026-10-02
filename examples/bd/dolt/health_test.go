@@ -2446,6 +2446,69 @@ func TestHealthAggregateAgeFollowsTheNeverBackedUpDatabase(t *testing.T) {
 	}
 }
 
+// TestHealthDoesNotFlagIdleDatabaseBackupAsStale mirrors the doctor's rule:
+// a backup no older than its database's last commit holds every commit, so its
+// age is not data at risk. An idle rig's no-op sync rewrites no manifest, and
+// reading the manifest alone reports it stale forever.
+func TestHealthDoesNotFlagIdleDatabaseBackupAsStale(t *testing.T) {
+	cityPath := t.TempDir()
+	root := repoRoot(t)
+	backupAt := time.Now().Add(-20 * time.Hour)
+	for _, db := range []string{"idle", "busy"} {
+		manifest := filepath.Join(cityPath, ".dolt-backup", db, "manifest")
+		if err := os.MkdirAll(filepath.Dir(manifest), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(manifest, []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s manifest: %v", db, err)
+		}
+		if err := os.Chtimes(manifest, backupAt, backupAt); err != nil {
+			t.Fatalf("chtimes %s manifest: %v", db, err)
+		}
+	}
+
+	// reachableServerEnv's dolt answers every query with nothing; shadow it
+	// with one that reports each database's last commit.
+	doltBin := t.TempDir()
+	writeExecutable(t, filepath.Join(doltBin, "dolt"), fmt.Sprintf(`#!/bin/sh
+case "$*" in
+  *'`+"`idle`"+`.dolt_branches'*) printf 'epoch\n%%d\n' %d ;;
+  *'`+"`busy`"+`.dolt_branches'*) printf 'epoch\n%%d\n' %d ;;
+esac
+exit 0
+`, backupAt.Add(-time.Hour).Unix(), backupAt.Add(time.Hour).Unix()))
+	env := reachableServerEnv(t, root, cityPath)
+	for i, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") {
+			env[i] = "PATH=" + doltBin + string(os.PathListSeparator) + strings.TrimPrefix(kv, "PATH=")
+		}
+	}
+
+	out, err := newHealthScriptCmd(root, env, "--json").Output()
+	if err != nil {
+		t.Fatalf("health run.sh --json failed: %v\n%s", err, out)
+	}
+	var report struct {
+		Backups backupsReport `json:"backups"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("parse health JSON: %v\n%s", err, out)
+	}
+	byName := map[string]bool{}
+	for _, db := range report.Backups.Databases {
+		byName[db.Name] = db.Stale
+	}
+	if len(byName) != 2 {
+		t.Fatalf("dolt_databases = %v, want idle and busy\n%s", report.Backups.Databases, out)
+	}
+	if byName["idle"] {
+		t.Errorf("idle reported stale with no commits since its backup\n%s", out)
+	}
+	if !byName["busy"] {
+		t.Errorf("busy not reported stale though committed after its 20h-old backup\n%s", out)
+	}
+}
+
 // TestHealthReportsFreshnessForABackupWrittenThisSecond pins that an age of 0
 // seeds the aggregate.
 //
