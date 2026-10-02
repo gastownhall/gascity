@@ -228,7 +228,7 @@ func describeApprovalTool(approval *parsedApproval, before []string) {
 			if tool, ok := approvalDialogTools[title]; ok {
 				approval.ToolName = tool
 			}
-			approval.Input = dialogSubject(body[i+1:])
+			approval.Input = dialogSubject(body[i+1:], approval.ToolName)
 			return
 		}
 	}
@@ -253,9 +253,17 @@ func isDialogRule(line string) bool {
 
 // dialogSubject extracts what the dialog asks about from the lines between
 // its heading and the question. Bash dialogs show the command (and Claude's
-// description of it) as an indented block; file dialogs show the file path
-// on the first line, above the ╌ diff separator.
-func dialogSubject(lines []string) string {
+// description of it) as an indented block, or, from Claude Code 2.1.287, the
+// description on one line followed by the command in a ╌-delimited box; file
+// dialogs show the file path on the first line, above the ╌ diff separator.
+// For Bash the command always comes first, so a client that shows only the
+// first line never presents Claude's description as the command.
+func dialogSubject(lines []string, toolName string) string {
+	if toolName == "Bash" {
+		if subject, ok := boxedBashSubject(lines); ok {
+			return truncateApprovalInput(subject)
+		}
+	}
 	var header []string
 	for _, line := range lines {
 		if strings.HasPrefix(strings.TrimSpace(line), "╌") {
@@ -283,6 +291,44 @@ func dialogSubject(lines []string) string {
 		}
 	}
 	return truncateApprovalInput(strings.Join(block, "\n"))
+}
+
+// boxedBashSubject reads the 2.1.287 Bash layout: description lines, then the
+// command between two ╌ separator lines. It returns the command followed by
+// the description, and false when the lines hold no such box.
+func boxedBashSubject(lines []string) (string, bool) {
+	isSep := func(line string) bool { return strings.HasPrefix(strings.TrimSpace(line), "╌") }
+	open := -1
+	for i, line := range lines {
+		if isSep(line) {
+			open = i
+			break
+		}
+	}
+	if open < 0 {
+		return "", false
+	}
+	var command []string
+	closed := false
+	for _, line := range lines[open+1:] {
+		if isSep(line) {
+			closed = true
+			break
+		}
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			command = append(command, trimmed)
+		}
+	}
+	if !closed || len(command) == 0 {
+		return "", false
+	}
+	var description []string
+	for _, line := range lines[:open] {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			description = append(description, trimmed)
+		}
+	}
+	return strings.Join(append(command, description...), "\n"), true
 }
 
 func truncateApprovalInput(s string) string {
