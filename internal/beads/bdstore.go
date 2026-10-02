@@ -3385,19 +3385,23 @@ func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
 // bd show only queries the issues table, the same gap Get already works
 // around: a blocking dependency can target a wisp/ephemeral-tier bead, which
 // bd show can never see no matter how it's called. Any id bd show didn't
-// return falls back to the same per-id getEphemeralByID query Get uses. A
-// wisp-fallback error is tolerated exactly as Get tolerates it there
-// (treated as "not found" rather than failing this whole lookup): a blocker
-// this check can't see is already the intended no-evidence-of-blocking
-// degrade filterReadyByWorkOutcome documents, and Get's own precedent is
-// that this per-id fallback query is not load-bearing enough to fail a
-// caller over.
+// return falls back to the same per-id getEphemeralByID query Get uses, and
+// the verdict follows Get's: only a bead-level miss (bd saying the bead does
+// not exist, isBdBeadNotFound) counts as absent. A blocker absent from both
+// tiers is the no-evidence-of-blocking degrade filterReadyByWorkOutcome
+// documents. A lookup that failed (bd or its database unreachable, an
+// undecodable reply) proves nothing about the blocker, and serving the
+// dependent on it would fail the gc.work_outcome=blocked veto open, so it
+// fails the whole lookup instead.
+//
+// ids come from dependency rows that agents can write, so they follow "--":
+// one that begins with "-" must reach bd as an argument, not as a flag.
 func (s *BdStore) blockerStatuses(ids []string) (statusByID, workOutcomeByID map[string]string, err error) {
 	statusByID = make(map[string]string, len(ids))
 	workOutcomeByID = make(map[string]string, len(ids))
 	found := make(map[string]bool, len(ids))
 
-	args := append([]string{"show", "--json"}, ids...)
+	args := append([]string{"show", "--json", "--"}, ids...)
 	out, showErr := s.runBDTransientRead(args...)
 	switch {
 	case showErr == nil:
@@ -3411,9 +3415,11 @@ func (s *BdStore) blockerStatuses(ids []string) (statusByID, workOutcomeByID map
 			workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
 			found[b.ID] = true
 		}
-	case isBdNotFound(showErr):
+	case isBdBeadNotFound(showErr):
 		// None of the requested IDs are in the issues table; every one falls
-		// through to the wisp-tier fallback below.
+		// through to the wisp-tier fallback below. An infrastructure failure
+		// whose text merely says "not found" is not this case: it takes the
+		// default arm.
 	default:
 		return nil, nil, fmt.Errorf("bd show (blockers): %w", showErr)
 	}
@@ -3423,8 +3429,8 @@ func (s *BdStore) blockerStatuses(ids []string) (statusByID, workOutcomeByID map
 			continue
 		}
 		wisps, wispErr := s.getEphemeralByID(id)
-		if wispErr != nil {
-			continue
+		if wispErr != nil && !isBdBeadNotFound(wispErr) {
+			return nil, nil, fmt.Errorf("wisp-tier lookup of blocker %q: %w", id, wispErr)
 		}
 		for _, b := range wisps {
 			if b.ID == id {
