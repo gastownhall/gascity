@@ -1400,6 +1400,7 @@ go_test(
         "session_reconciler_trace_test.go",
         "session_reconciler_trace_types_test.go",
         "session_reconciler_wi6w6_mirror_test.go",
+        "session_reconfigured_pool_boundary_gate_test.go",
         "session_refresh_async_gate_test.go",
         "session_resolve_test.go",
         "session_rollback_pending_create_atomic_test.go",
