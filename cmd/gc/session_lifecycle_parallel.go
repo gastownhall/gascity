@@ -2345,6 +2345,14 @@ func startPreparedStartCandidate(
 			if peekErr == nil && !runtime.ContainsProviderRateLimitScreen(crashOutput) {
 				telemetry.RecordAgentCrash(context.Background(), item.candidate.tp.DisplayName(), crashOutput)
 			}
+		} else if confirmedDeadRuntimeSession(sp, name) {
+			// ensureRunningRuntimeOnly treats IsRunning as already-up. A
+			// remain-on-exit corpse can still answer that after the liveness
+			// downgrade, so the start would succeed without replacing it
+			// (gastownhall/gascity#6298). Remove the corpse first.
+			if stopErr := sp.Stop(name); stopErr != nil && !runtime.IsSessionGone(stopErr) {
+				return false, fmt.Errorf("removing retained dead pane %q: %w", name, stopErr)
+			}
 		}
 	}
 	if rigName := strings.TrimSpace(item.candidate.tp.RigName); rigName != "" {
@@ -2398,7 +2406,87 @@ func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNam
 		return false, false, nil
 	}
 	obs, err := runtime.ObserveLivenessWithError(sp, name, processNames)
-	return obs.Running, obs.Alive, err
+	if err != nil {
+		return obs.Running, obs.Alive, err
+	}
+	// A remain-on-exit corpse can still report the session name as running
+	// when the provider has no process hint to separate presence from health
+	// (gastownhall/gascity#6298). Downgrade that reading. An incomplete dead
+	// check must not.
+	if obs.Running && obs.Alive && deadRetainedPaneOverridesPresence(sp, name, processNames) {
+		return false, false, nil
+	}
+	return obs.Running, obs.Alive, nil
+}
+
+// deadRetainedPaneOverridesPresence reports whether a confirmed dead runtime
+// artifact should replace an observation that says the session is alive.
+// ProcessAlive stays on the routed backend: auto.IsDeadRuntimeSession is true
+// when either backend holds a corpse, including a live routed agent that
+// shares its name with a dead tmux pane. A true ProcessAlive answer — a live
+// agent, or the empty-name "no process check" contract — keeps the observation.
+func deadRetainedPaneOverridesPresence(sp runtime.Provider, name string, processNames []string) bool {
+	if !confirmedDeadRuntimeSession(sp, name) {
+		return false
+	}
+	return !sp.ProcessAlive(name, processNames)
+}
+
+// confirmedDeadRuntimeSession reports a positive, error-free dead-artifact
+// answer. A missing checker or a checker error is not confirmation.
+func confirmedDeadRuntimeSession(sp runtime.Provider, name string) bool {
+	checker, ok := sp.(runtime.DeadRuntimeSessionChecker)
+	if !ok || checker == nil {
+		return false
+	}
+	dead, err := checker.IsDeadRuntimeSession(name)
+	return err == nil && dead
+}
+
+// alwaysNamedSessionWasLive reports an always-mode named session whose bead
+// still says it has a live runtime. The asleep projection after a heal is a
+// later tick, so this is the active/awake → confirmed-dead transition.
+func alwaysNamedSessionWasLive(info sessionpkg.Info) bool {
+	if !isNamedSessionInfo(info) || namedSessionModeInfo(info) != "always" {
+		return false
+	}
+	switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
+	case sessionpkg.StateActive, sessionpkg.StateAwake:
+		return true
+	default:
+		return false
+	}
+}
+
+// recordAlwaysNamedDeadPaneCrash emits one session.crashed for an always-mode
+// named session whose runtime is a confirmed dead pane. The reason is distinct
+// from the zombie-process crash (pane up, agent process gone) and from
+// operator wake. Callers gate on !alive so a later asleep tick, where the
+// bead is no longer active, does not emit again.
+func recordAlwaysNamedDeadPaneCrash(rec events.Recorder, sp runtime.Provider, info sessionpkg.Info, tp TemplateParams, name string) {
+	if !confirmedDeadRuntimeSession(sp, name) {
+		return
+	}
+	recordRetainedDeadPaneCrash(rec, info, tp)
+}
+
+// recordRetainedDeadPaneCrash emits session.crashed for an always-mode named
+// session whose bead still says the runtime is live. Callers have already
+// confirmed the pane is dead. The corpse sweep uses this after a successful
+// Stop, once IsDead would no longer answer; the reconciler uses it while the
+// pane is still retained. A nil recorder or a bead that is not active/awake
+// records nothing.
+func recordRetainedDeadPaneCrash(rec events.Recorder, info sessionpkg.Info, tp TemplateParams) {
+	if rec == nil || !alwaysNamedSessionWasLive(info) {
+		return
+	}
+	rec.Record(events.Event{
+		Type:    events.SessionCrashed,
+		Actor:   "gc",
+		Subject: tp.DisplayName(),
+		Message: "retained dead pane",
+		Payload: api.SessionLifecyclePayloadJSON(info.ID, tp.TemplateName, "dead pane"),
+	})
 }
 
 // staleResumeKeyProbe reports whether the keyed transcript a resume would

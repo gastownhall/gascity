@@ -2631,6 +2631,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			fmt.Fprintf(stderr, "session reconciler: skipping lifecycle reconciliation of '%s': liveness observation failed: %v\n", name, livenessErr) //nolint:errcheck
 			continue
 		}
+		// Before heal rewrites active/awake to asleep, so the event is the
+		// transition and precedes the wake arm's session.woke. A zombie
+		// (running && !alive) is not a dead pane and keeps its own event.
+		if !alive {
+			recordAlwaysNamedDeadPaneCrash(rec, sp, infoByID[id], tp, name)
+		}
 		peek := cachedSessionPeek(cityPath, store, sp, cfg, id, tp.Hints.ProcessNames)
 		if running && !alive {
 			// Warm the peek before recordResetStallIfDue may evict the stale

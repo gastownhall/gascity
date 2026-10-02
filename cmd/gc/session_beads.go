@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/hostboot"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -3128,12 +3129,26 @@ func deadRuntimeBelongsToRow(info session.Info, name string, sp runtime.Provider
 
 func cleanupDeadRuntimeSessionCorpses(
 	store beads.Store,
+	rigStores map[string]beads.Store,
+	_ *config.City,
+	sessionBeads *sessionBeadSnapshot,
+	dt *drainTracker,
+	sp runtime.Provider,
+	clk clock.Clock,
+	stderr io.Writer,
+) int {
+	return cleanupDeadRuntimeSessionCorpsesWithRecorder(store, rigStores, nil, sessionBeads, dt, sp, clk, nil, stderr)
+}
+
+func cleanupDeadRuntimeSessionCorpsesWithRecorder(
+	store beads.Store,
 	_ map[string]beads.Store,
 	_ *config.City,
 	sessionBeads *sessionBeadSnapshot,
 	dt *drainTracker,
 	sp runtime.Provider,
 	clk clock.Clock,
+	rec events.Recorder,
 	stderr io.Writer,
 ) int {
 	if sessionBeads == nil || sp == nil {
@@ -3184,7 +3199,11 @@ func cleanupDeadRuntimeSessionCorpses(
 	for _, info := range sessionBeads.OpenInfos() {
 		// A kill-fenced row belongs to the `gc session kill` tearing its runtime
 		// down: the dead pane is the kill in progress, not an abandoned corpse.
-		if info.PendingCreateClaim || (dt != nil && dt.get(info.ID) != nil) || isNamedSessionInfo(info) || session.IsKillPendingInfo(info, clk.Now()) {
+		// Pending-create and in-drain rows own an in-flight lifecycle the same
+		// way. Named sessions are not skipped: a remain-on-exit corpse under
+		// that identity is reaped here, and the close below keeps the row
+		// (gastownhall/gascity#6298).
+		if info.PendingCreateClaim || (dt != nil && dt.get(info.ID) != nil) || session.IsKillPendingInfo(info, clk.Now()) {
 			continue
 		}
 		name := strings.TrimSpace(info.SessionNameMetadata)
@@ -3214,6 +3233,11 @@ func cleanupDeadRuntimeSessionCorpses(
 			fmt.Fprintf(stderr, "session reconciler: cleaning dead runtime session %s: %v\n", name, err) //nolint:errcheck
 			continue
 		}
+		// The pane is gone, so the later reconcile can no longer confirm it
+		// dead. Record the always-mode crash here, before that tick's
+		// session.woke, and only after Stop succeeds so a failed reap leaves
+		// the event to the reconciler (gastownhall/gascity#6298).
+		recordRetainedDeadPaneCrash(rec, info, TemplateParams{TemplateName: strings.TrimSpace(info.Template)})
 		fmt.Fprintf(stderr, "session reconciler: cleaned dead runtime session %s\n", name) //nolint:errcheck
 		// Close the bead so its `alias` metadata (and session_name) is
 		// released. Otherwise the slot stays claimed by a dead session
@@ -3239,7 +3263,12 @@ func cleanupDeadRuntimeSessionCorpses(
 		// the dead pane is that sleep's leftover. Closing it would make the
 		// session impossible to wake. Reaping the pane above is still right: it
 		// frees the name for that wake.
-		if store != nil && claimsLive {
+		//
+		// A named session is the durable identity for that name. Closing it
+		// releases the identity the same way a pool corpse close does
+		// (#2437), so the pane is stopped and the row stays open for the
+		// always-mode fresh start (#6298).
+		if store != nil && claimsLive && !isNamedSessionInfo(info) {
 			fmt.Fprintf(stderr, "session reconciler: closing session bead %s as dead-runtime (session %s, state %q)\n", info.ID, name, strings.TrimSpace(info.MetadataState)) //nolint:errcheck
 			closeBead(store, info.ID, "dead-runtime", clk.Now().UTC(), stderr)
 		}

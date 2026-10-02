@@ -7410,13 +7410,16 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsLifecycleOwnedBeads(t *testing.T) 
 
 	var stderr bytes.Buffer
 	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, dt, sp, nil, &stderr)
-	if got != 1 {
-		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
+	if got != 2 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 2 (ordinary + named corpse); stderr=%q", got, stderr.String())
 	}
 	if sp.stopCalls["ordinary-worker"] != 1 {
 		t.Fatalf("ordinary Stop calls = %d, want 1", sp.stopCalls["ordinary-worker"])
 	}
-	for _, name := range []string{"pending-worker", "draining-worker", "named-worker"} {
+	if sp.stopCalls["named-worker"] != 1 {
+		t.Fatalf("named Stop calls = %d, want 1 (confirmed-dead named corpse is reaped)", sp.stopCalls["named-worker"])
+	}
+	for _, name := range []string{"pending-worker", "draining-worker"} {
 		if sp.stopCalls[name] != 0 {
 			t.Fatalf("Stop(%s) calls = %d, want 0", name, sp.stopCalls[name])
 		}
