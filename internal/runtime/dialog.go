@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 var (
@@ -1821,16 +1822,24 @@ func ProviderTerminalErrorReason(content string) string {
 // containsCreditBalanceTooLow reports whether lowercased pane content shows
 // the empty-credit error itself rather than the phrase quoted in ordinary
 // output: either the API's full sentence ("credit balance is too low to
-// access"), or a line that starts with the phrase, with or without "is", once
-// Claude Code's leading "⎿" marker and indentation are trimmed.
+// access"), or a line that, once Claude Code's leading "⎿" marker and
+// indentation are trimmed, starts with "credit balance is too low" or is
+// Claude Code's displayed stop ("credit balance too low", alone or followed
+// by " · "). The indentation is trimmed as Unicode space because Claude Code
+// pads an error "⎿" with a no-break space. The shorter form without "is"
+// must end there or continue with " · " so that wrapped prose which happens
+// to start a line with the phrase is not mistaken for the stop.
 func containsCreditBalanceTooLow(lower string) bool {
 	for _, line := range strings.Split(lower, "\n") {
 		if strings.Contains(line, "credit balance is too low to access") {
 			return true
 		}
-		trimmed := strings.TrimLeft(line, " \t⎿")
+		trimmed := strings.TrimRightFunc(strings.TrimLeftFunc(line, func(r rune) bool {
+			return unicode.IsSpace(r) || r == '⎿'
+		}), unicode.IsSpace)
 		if strings.HasPrefix(trimmed, "credit balance is too low") ||
-			strings.HasPrefix(trimmed, "credit balance too low") {
+			trimmed == "credit balance too low" ||
+			strings.HasPrefix(trimmed, "credit balance too low · ") {
 			return true
 		}
 	}
