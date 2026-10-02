@@ -208,24 +208,65 @@ func TestCmdSlingRemote_ForwardsMetadataFlags(t *testing.T) {
 	}
 }
 
-// TestCmdSlingRemote_RefusesOn proves --on stays refused for a remote city: its
-// per-child convoy expansion is local-only, so the server would attach the wisp
-// to a convoy container instead of each child (a silent divergence a red-team
-// caught). A clear refusal is safer until the server expands containers.
-func TestCmdSlingRemote_RefusesOn(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		t.Error("server must not be contacted for a refused --on")
-		w.WriteHeader(500)
+// TestCmdSlingRemote_ForwardsOn proves --on forwards to the server as the
+// API's formula + attached_bead_id pair. It was refused while the server
+// attached the wisp to a convoy container instead of each child; POST /sling now
+// goes through the same sling.(*Sling).Dispatch as the local CLI, so a convoy is
+// expanded per child on both sides.
+func TestCmdSlingRemote_ForwardsOn(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"slung","target":"mayor","formula":"review","attached_bead_id":"BL-3","mode":"attached"}`))
 	}))
 	defer srv.Close()
 
 	var out, errb bytes.Buffer
 	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"mayor", "BL-3"},
 		false, false, false, "", nil, "", false, false, false, "review" /*onFormula*/, false, false, false, "", "", false, &out, &errb)
-	if code != 1 {
-		t.Fatalf("exit %d, want 1 (--on refused); stderr=%q", code, errb.String())
+	if code != 0 {
+		t.Fatalf("exit %d; stderr=%q", code, errb.String())
 	}
-	if !strings.Contains(errb.String(), "--on") {
-		t.Fatalf("stderr = %q, want --on refusal", errb.String())
+	for _, want := range []string{`"formula":"review"`, `"attached_bead_id":"BL-3"`} {
+		if !strings.Contains(gotBody, want) {
+			t.Errorf("body %q missing %q", gotBody, want)
+		}
+	}
+	if strings.Contains(gotBody, `"bead":`) {
+		t.Errorf("body %q carries bead alongside attached_bead_id; the API treats them as mutually exclusive", gotBody)
+	}
+}
+
+// TestCmdSlingRemote_JSONCarriesConvoyAndBatch proves the remote --json output
+// carries the convoy_id, molecule_id and batch fields POST /sling now returns,
+// under the same names the local `gc sling --json` uses.
+func TestCmdSlingRemote_JSONCarriesConvoyAndBatch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"slung","target":"mayor","bead":"BL-1","mode":"direct","molecule_id":"BL-m","convoy_id":"BL-c","batch":{"container_type":"convoy","total":3,"routed":2,"failed":0,"skipped":1,"idempotent":1}}`))
+	}))
+	defer srv.Close()
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"mayor", "BL-1"},
+		false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", true /*json*/, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d; stderr=%q", code, errb.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("output not JSON: %v (%q)", err, out.String())
+	}
+	if got["molecule_id"] != "BL-m" || got["convoy_id"] != "BL-c" {
+		t.Errorf("json = %v, want molecule_id BL-m and convoy_id BL-c", got)
+	}
+	batch, ok := got["batch"].(map[string]any)
+	if !ok {
+		t.Fatalf("json batch = %v, want an object", got["batch"])
+	}
+	if batch["container_type"] != "convoy" || batch["total"] != float64(3) || batch["routed"] != float64(2) || batch["skipped"] != float64(1) || batch["idempotent"] != float64(1) {
+		t.Errorf("batch = %v", batch)
 	}
 }
