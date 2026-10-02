@@ -11159,15 +11159,57 @@
         ],
         "type": "object"
       },
+      "SlingBatchSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "container_type": {
+            "description": "Container bead type, e.g. convoy.",
+            "type": "string"
+          },
+          "failed": {
+            "description": "Children whose routing failed.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "idempotent": {
+            "description": "Children skipped because they were already routed to the target.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "routed": {
+            "description": "Children routed by this sling.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "skipped": {
+            "description": "Children skipped: already routed, or not open.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "total": {
+            "description": "Children tracked by the container.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "routed",
+          "failed",
+          "skipped",
+          "idempotent"
+        ],
+        "type": "object"
+      },
       "SlingInputBody": {
         "additionalProperties": false,
         "properties": {
           "attached_bead_id": {
-            "description": "Bead ID to attach a formula to.",
+            "description": "Bead or convoy ID to attach formula to, in place of bead (gc sling --on).",
             "type": "string"
           },
           "bead": {
-            "description": "Bead ID to sling.",
+            "description": "Bead or convoy ID to sling, like gc sling \u003ctarget\u003e \u003cbead\u003e. The target's default formula is cooked onto the bead unless no_formula is set; a convoy's open children are routed one by one.",
             "type": "string"
           },
           "force": {
@@ -11175,7 +11217,7 @@
             "type": "boolean"
           },
           "formula": {
-            "description": "Formula name for workflow launch.",
+            "description": "Formula name. Alone, it launches the formula standalone (gc sling --formula). With attached_bead_id, it is attached to that bead (gc sling \u003ctarget\u003e \u003cbead\u003e --on \u003cformula\u003e).",
             "type": "string"
           },
           "merge": {
@@ -11187,7 +11229,7 @@
             "type": "boolean"
           },
           "no_formula": {
-            "description": "Suppress the target's default_sling_formula even when configured.",
+            "description": "Suppress the target's default_sling_formula and route the raw bead (gc sling --no-formula).",
             "type": "boolean"
           },
           "owned": {
@@ -11216,14 +11258,14 @@
             "type": "string"
           },
           "title": {
-            "description": "Workflow title.",
+            "description": "Workflow title (gc sling --title), for an explicit or default formula.",
             "type": "string"
           },
           "vars": {
             "additionalProperties": {
               "type": "string"
             },
-            "description": "Formula variables.",
+            "description": "Formula variables (gc sling --var), for an explicit or default formula.",
             "type": "object"
           }
         },
@@ -11238,7 +11280,15 @@
           "attached_bead_id": {
             "type": "string"
           },
+          "batch": {
+            "$ref": "#/components/schemas/SlingBatchSummary",
+            "description": "Per-child outcome counts, present only when the bead was a convoy whose open children were routed one by one (as gc sling does). Matches gc sling --json batch."
+          },
           "bead": {
+            "type": "string"
+          },
+          "convoy_id": {
+            "description": "Auto-convoy tracking the routed bead, when one was created or reused. Matches gc sling --json convoy_id.",
             "type": "string"
           },
           "dashboard_url": {
@@ -11249,6 +11299,10 @@
             "type": "string"
           },
           "mode": {
+            "type": "string"
+          },
+          "molecule_id": {
+            "description": "Root of the formula wisp attached to the bead, when a non-graph (v1) formula was attached. Matches gc sling --json molecule_id.",
             "type": "string"
           },
           "root_bead_id": {

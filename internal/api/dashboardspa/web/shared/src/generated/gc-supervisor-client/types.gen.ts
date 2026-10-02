@@ -4594,13 +4594,40 @@ export type SessionWakeRefusedPayload = {
     wake_request: string;
 };
 
+export type SlingBatchSummary = {
+    /**
+     * Container bead type, e.g. convoy.
+     */
+    container_type?: string;
+    /**
+     * Children whose routing failed.
+     */
+    failed: number;
+    /**
+     * Children skipped because they were already routed to the target.
+     */
+    idempotent: number;
+    /**
+     * Children routed by this sling.
+     */
+    routed: number;
+    /**
+     * Children skipped: already routed, or not open.
+     */
+    skipped: number;
+    /**
+     * Children tracked by the container.
+     */
+    total: number;
+};
+
 export type SlingInputBody = {
     /**
-     * Bead ID to attach a formula to.
+     * Bead or convoy ID to attach formula to, in place of bead (gc sling --on).
      */
     attached_bead_id?: string;
     /**
-     * Bead ID to sling.
+     * Bead or convoy ID to sling, like gc sling <target> <bead>. The target's default formula is cooked onto the bead unless no_formula is set; a convoy's open children are routed one by one.
      */
     bead?: string;
     /**
@@ -4608,7 +4635,7 @@ export type SlingInputBody = {
      */
     force?: boolean;
     /**
-     * Formula name for workflow launch.
+     * Formula name. Alone, it launches the formula standalone (gc sling --formula). With attached_bead_id, it is attached to that bead (gc sling <target> <bead> --on <formula>).
      */
     formula?: string;
     /**
@@ -4620,7 +4647,7 @@ export type SlingInputBody = {
      */
     no_convoy?: boolean;
     /**
-     * Suppress the target's default_sling_formula even when configured.
+     * Suppress the target's default_sling_formula and route the raw bead (gc sling --no-formula).
      */
     no_formula?: boolean;
     /**
@@ -4648,11 +4675,11 @@ export type SlingInputBody = {
      */
     target: string;
     /**
-     * Workflow title.
+     * Workflow title (gc sling --title), for an explicit or default formula.
      */
     title?: string;
     /**
-     * Formula variables.
+     * Formula variables (gc sling --var), for an explicit or default formula.
      */
     vars?: {
         [key: string]: string;
@@ -4661,13 +4688,25 @@ export type SlingInputBody = {
 
 export type SlingResponse = {
     attached_bead_id?: string;
+    /**
+     * Per-child outcome counts, present only when the bead was a convoy whose open children were routed one by one (as gc sling does). Matches gc sling --json batch.
+     */
+    batch?: SlingBatchSummary;
     bead?: string;
+    /**
+     * Auto-convoy tracking the routed bead, when one was created or reused. Matches gc sling --json convoy_id.
+     */
+    convoy_id?: string;
     /**
      * Absolute dashboard deep link for the slung work: the run detail view when a graph workflow was launched, otherwise the runs list. Present only when the serving process also hosts the dashboard (the supervisor listener); the standalone controller API omits it.
      */
     dashboard_url?: string;
     formula?: string;
     mode?: string;
+    /**
+     * Root of the formula wisp attached to the bead, when a non-graph (v1) formula was attached. Matches gc sling --json molecule_id.
+     */
+    molecule_id?: string;
     root_bead_id?: string;
     /**
      * Reference to the launched run resource, present only when a graph workflow was launched (the same run the Location header addresses).

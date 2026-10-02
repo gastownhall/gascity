@@ -2798,6 +2798,15 @@ export const zSessionWakeRefusedPayload = z.object({
     wake_request: z.string()
 });
 
+export const zSlingBatchSummary = z.object({
+    container_type: z.string().optional(),
+    failed: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    idempotent: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    routed: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    skipped: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
+});
+
 export const zSlingInputBody = z.object({
     attached_bead_id: z.string().optional(),
     bead: z.string().optional(),
@@ -2818,10 +2827,13 @@ export const zSlingInputBody = z.object({
 
 export const zSlingResponse = z.object({
     attached_bead_id: z.string().optional(),
+    batch: zSlingBatchSummary.optional(),
     bead: z.string().optional(),
+    convoy_id: z.string().optional(),
     dashboard_url: z.string().optional(),
     formula: z.string().optional(),
     mode: z.string().optional(),
+    molecule_id: z.string().optional(),
     root_bead_id: z.string().optional(),
     run: zRunRef.optional(),
     status: z.string(),
