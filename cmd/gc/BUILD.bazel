@@ -1409,6 +1409,7 @@ go_test(
         "startup_health_materialization_test.go",
         "startup_health_reconcile_test.go",
         "status_provider_test.go",
+        "storage_boot_conditional_writes_test.go",
         "storage_boot_outcome_event_test.go",
         "storage_boot_test.go",
         "storage_boot_workspace_test.go",

@@ -201,6 +201,7 @@ func sqliteBusyBackoff(attempt int) time.Duration {
 // Concurrency model: a single write connection serializes mutations; a pool
 // of 8 read connections allows concurrent reads in WAL mode.
 type SQLiteStore struct {
+	condWritesStamp
 	db                         *sql.DB // write connection (MaxOpenConns=1)
 	readDB                     *sql.DB // read pool (MaxOpenConns=8)
 	path                       string
