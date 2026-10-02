@@ -292,22 +292,95 @@ func TestCascadeNudgeBlockerReclosedAfterBlockedOutcomeNudges(t *testing.T) {
 	f.wantNudges(1)
 }
 
-// TestCascadeNudgeOpenWaitsForHoldsDependent pins that the dependent's
-// waits-for and conditional-blocks dependencies hold it as Ready() does.
-func TestCascadeNudgeOpenWaitsForHoldsDependent(t *testing.T) {
-	for _, depType := range []string{"waits-for", "conditional-blocks"} {
-		t.Run(depType, func(t *testing.T) {
-			f := newCascadeFixture(t)
-			f.write("up-gc-b1.json", `[{"id":"gc-d1","dependency_type":"blocks","status":"open","assignee":"worker"}]`)
-			f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed"},`+
-				`{"id":"gc-w1","dependency_type":"`+depType+`","status":"open"}]`)
-			f.closed("gc-b1")
+// TestCascadeNudgeOpenConditionalBlocksHoldsDependent pins that an open
+// conditional-blocks dependency holds the dependent, as an open blocks
+// dependency does.
+func TestCascadeNudgeOpenConditionalBlocksHoldsDependent(t *testing.T) {
+	f := newCascadeFixture(t)
+	f.write("up-gc-b1.json", `[{"id":"gc-d1","dependency_type":"blocks","status":"open","assignee":"worker"}]`)
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed"},`+
+		`{"id":"gc-c1","dependency_type":"conditional-blocks","status":"open"}]`)
+	f.closed("gc-b1")
 
-			f.run()
+	f.run()
 
-			f.wantNudges(0)
-		})
+	f.wantNudges(0)
+}
+
+// TestCascadeNudgeOpenWaitsForDoesNotHoldDependent pins that a waits-for
+// dependency is not judged by its target's status: bd gates waits-for on the
+// target's children, so an open target can leave the dependent ready.
+func TestCascadeNudgeOpenWaitsForDoesNotHoldDependent(t *testing.T) {
+	f := newCascadeFixture(t)
+	f.write("up-gc-b1.json", `[{"id":"gc-d1","dependency_type":"blocks","status":"open","assignee":"worker"}]`)
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed"},`+
+		`{"id":"gc-s1","dependency_type":"waits-for","status":"open"}]`)
+	f.closed("gc-b1")
+
+	f.run()
+
+	f.wantNudges(1)
+}
+
+// TestCascadeNudgeConditionalBlocksClosingLastNudges pins that the close of
+// a conditional-blocks target releases a dependent that waited on it.
+func TestCascadeNudgeConditionalBlocksClosingLastNudges(t *testing.T) {
+	f := newCascadeFixture(t)
+	f.write("up-gc-b1.json", `[{"id":"gc-d1","dependency_type":"blocks","status":"open","assignee":"worker"}]`)
+	f.write("up-gc-c1.json", `[{"id":"gc-d1","dependency_type":"conditional-blocks","status":"open","assignee":"worker"}]`)
+
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed","closed_at":"T1"},`+
+		`{"id":"gc-c1","dependency_type":"conditional-blocks","status":"open"}]`)
+	f.closed("gc-b1")
+	f.run()
+	f.wantNudges(0)
+
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed","closed_at":"T1"},`+
+		`{"id":"gc-c1","dependency_type":"conditional-blocks","status":"closed","closed_at":"T2"}]`)
+	f.closed("gc-b1", "gc-c1")
+	f.run()
+	f.run()
+	got := f.wantNudges(1)
+	if !strings.Contains(got[0], "blocker gc-c1 closed") {
+		t.Errorf("the conditional-blocks close should carry the nudge, got %q", got[0])
 	}
+}
+
+// TestCascadeNudgeReclosedBlockerRenudgesNudgedDependent pins that a nudge is
+// keyed on the blocker's close: a dependent already nudged is nudged again
+// when its blocker is reopened and closes again.
+func TestCascadeNudgeReclosedBlockerRenudgesNudgedDependent(t *testing.T) {
+	f := newCascadeFixture(t)
+	f.write("up-gc-b1.json", `[{"id":"gc-d1","dependency_type":"blocks","status":"open","assignee":"worker"}]`)
+
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed","closed_at":"T1"}]`)
+	f.closed("gc-b1")
+	f.run()
+	f.wantNudges(1)
+
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"open"}]`)
+	f.run()
+	f.wantNudges(1)
+
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"blocks","status":"closed","closed_at":"T2"}]`)
+	f.run()
+	f.run()
+	f.wantNudges(2)
+}
+
+// TestCascadeNudgeIgnoresNonGatingDependents pins that a dependent linked to
+// the closed bead by a type that does not gate on its close is not nudged.
+func TestCascadeNudgeIgnoresNonGatingDependents(t *testing.T) {
+	f := newCascadeFixture(t)
+	f.write("up-gc-b1.json", `[{"id":"gc-d1","dependency_type":"waits-for","status":"open","assignee":"worker"},`+
+		`{"id":"gc-d2","dependency_type":"discovered-from","status":"open","assignee":"worker"}]`)
+	f.write("down-gc-d1.json", `[{"id":"gc-b1","dependency_type":"waits-for","status":"closed"}]`)
+	f.write("down-gc-d2.json", `[{"id":"gc-b1","dependency_type":"discovered-from","status":"closed"}]`)
+	f.closed("gc-b1")
+
+	f.run()
+
+	f.wantNudges(0)
 }
 
 // TestCascadeNudgeIgnoresNonGatingDependencies pins that an open dependency

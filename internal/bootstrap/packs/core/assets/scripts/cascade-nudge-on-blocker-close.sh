@@ -6,12 +6,14 @@
 # work can resume: they poll, get nudged by hand, or miss the unblock.
 #
 # This order subscribes to bead.closed events. For each closed bead it
-# resolves the dependents linked by a `blocks` dependency and nudges the
-# assignee of every open, in_progress or deferred dependent once all of
-# that dependent's blocks, waits-for and conditional-blocks dependencies are
-# satisfied (closed, and not closed with gc.work_outcome=blocked, as Ready()
-# decides). Idempotent: a given (blocker, dependent) pair is nudged at most
-# once. Dedup state lives in
+# resolves the dependents linked by a `blocks` or `conditional-blocks`
+# dependency and nudges the assignee of every open, in_progress or deferred
+# dependent once all of that dependent's blocks and conditional-blocks
+# dependencies are satisfied (closed, and not closed with
+# gc.work_outcome=blocked). waits-for is not judged: bd gates it on the
+# target's children, not on the target, so its target's status says nothing
+# about whether the dependent is ready. Idempotent: a given close of a
+# blocker nudges a dependent at most once. Dedup state lives in
 # $GC_PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json, so it is both
 # city- and pack-scoped — multi-city installs never cross-pollinate.
 #
@@ -99,14 +101,15 @@ BLOCKERS="$(printf '%s\n' "$EVENTS" \
     | jq -r '.payload.bead.id // empty' 2>/dev/null | sort -u)" || BLOCKERS=""
 [ -n "$BLOCKERS" ] || exit 0
 
-# Load dedup state (object mapping "<blocker>|<dependent>" -> ISO timestamp).
+# Load dedup state (object mapping "<blocker>|<dependent>@<blocker closed_at>"
+# -> ISO timestamp).
 STATE="$(cat "$STATE_FILE" 2>/dev/null || true)"
 echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
 
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 NUDGED=0
-# The dependency types that hold a dependent out of Ready().
-GATING='.dependency_type == "blocks" or .dependency_type == "waits-for" or .dependency_type == "conditional-blocks"'
+# The dependency types whose target's close can release a dependent.
+GATING='.dependency_type == "blocks" or .dependency_type == "conditional-blocks"'
 # A blocker satisfies its dependent as beads.DependencySatisfied decides.
 SATISFIED='.status == "closed" and ((.metadata["gc.work_outcome"]? // "") != "blocked")'
 while IFS= read -r blocker; do
@@ -114,12 +117,12 @@ while IFS= read -r blocker; do
 
     set_rig_args "$blocker"
     DEPS="$(gc bd dep list "$blocker" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
-            --direction=up --type=blocks --json 2>/dev/null)" || continue
+            --direction=up --json 2>/dev/null)" || continue
     if [ -z "$DEPS" ] || [ "$DEPS" = "[]" ]; then continue; fi
 
     # Open, in_progress or deferred dependents with an assignee to nudge.
     ROWS="$(printf '%s' "$DEPS" \
-        | jq -r '.[]
+        | jq -r ".[] | select($GATING)"'
                  | select((.status == "open" or .status == "in_progress" or .status == "deferred")
                           and (.assignee != null and .assignee != ""))
                  | [.id, .assignee] | @tsv' 2>/dev/null)" || ROWS=""
@@ -127,37 +130,32 @@ while IFS= read -r blocker; do
 
     while IFS="$(printf '\t')" read -r dep_id assignee; do
         if [ -z "$dep_id" ] || [ -z "$assignee" ]; then continue; fi
-        key="$blocker|$dep_id"
-        if echo "$STATE" | jq -e --arg k "$key" 'has($k)' >/dev/null 2>&1; then
-            STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
-            continue
-        fi
         set_rig_args "$dep_id"
         # A failed lookup records nothing, so the next run retries.
         DOWN="$(gc bd dep list "$dep_id" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
                 --direction=down --json 2>/dev/null)" || continue
         DOWN="$(printf '%s' "$DOWN" | jq -c "[.[] | select($GATING)]" 2>/dev/null)" || continue
-        # A wait is keyed on the blocker's close, so a blocker that is
+        # Every record is keyed on the blocker's close, so a blocker that is
         # reopened and closes again is judged afresh.
-        wait_key="$key@$(printf '%s' "$DOWN" \
+        key="$blocker|$dep_id@$(printf '%s' "$DOWN" \
             | jq -r --arg b "$blocker" '[.[] | select(.id == $b) | .closed_at // ""][0] // ""' 2>/dev/null)" || continue
-        if echo "$STATE" | jq -e --arg k "$wait_key" 'has($k)' >/dev/null 2>&1; then
-            STATE="$(echo "$STATE" | jq --arg k "$wait_key" --arg now "$NOW" '.[$k] = $now')"
+        if echo "$STATE" | jq -e --arg k "$key" 'has($k)' >/dev/null 2>&1; then
+            STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
             continue
         fi
         UNSATISFIED="$(printf '%s' "$DOWN" \
             | jq -r "[.[] | select(($SATISFIED) | not)] | length" 2>/dev/null)" || continue
         [ -n "$UNSATISFIED" ] || continue
         if [ "$UNSATISFIED" -gt 0 ]; then
-            STATE="$(echo "$STATE" | jq --arg k "$wait_key" --arg now "$NOW" '.[$k] = $now')"
+            STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
             continue
         fi
         msg="blocker $blocker closed — your dependent $dep_id has no open blockers now"
         if gc session nudge ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} "$assignee" "$msg" >/dev/null 2>&1; then
-            # Record every blocker of the dependent, so a later run over
-            # another of them does not nudge it again.
+            # Record the close of every blocker of the dependent, so a later
+            # run over another of them does not nudge it again.
             STATE="$(printf '%s' "$DOWN" | jq --argjson s "$STATE" --arg k "$key" --arg d "$dep_id" --arg now "$NOW" \
-                'reduce ([.[] | .id + "|" + $d] + [$k])[] as $p ($s; .[$p] = $now)')"
+                'reduce ([.[] | .id + "|" + $d + "@" + (.closed_at // "")] + [$k])[] as $p ($s; .[$p] = $now)')"
             NUDGED=$((NUDGED + 1))
         fi
     done <<EOF
