@@ -201,6 +201,50 @@ func TestRuntimeTmuxIntegrationShardClearsAmbientManifestOnDynamicFallback(t *te
 	)
 }
 
+// The full REST shards split the suite by position, so adding a test moves
+// every later one onto a different shard, and a shard's wall time can only be
+// traced to its heavy tests if the log carries one duration per test
+// (ga-rqzwrh: #6821 pushed shard 6 from 7-9m to 13-15m, past its job cap). go
+// test prints "--- PASS: Name (1.23s)" only under -v. -v must be the only thing
+// that changes in the invocation, so pass/fail semantics stay exactly the same.
+func TestRestFullShardLogsPerTestDurations(t *testing.T) {
+	fixture := newIntegrationShardFixture(t)
+
+	out, err := fixture.runShard(t, "rest-full-1-of-16")
+	if err != nil {
+		t.Fatalf("rest-full integration shard failed: %v\n%s", err, out)
+	}
+
+	captured, err := os.ReadFile(fixture.capturePath)
+	if err != nil {
+		t.Fatalf("read captured go invocations: %v", err)
+	}
+	encodedInvocations := strings.TrimSuffix(string(captured), "\x00\x00")
+	var invocations [][]string
+	for _, invocation := range strings.Split(encodedInvocations, "\x00\x00") {
+		invocations = append(invocations, strings.Split(invocation, "\x00"))
+	}
+	want := [][]string{
+		{
+			"test",
+			"-tags", "integration",
+			"-list", "^Test",
+			"./test/integration",
+		},
+		{
+			"test",
+			"-tags", "integration",
+			"-timeout", "17s",
+			"-v",
+			"./test/integration",
+			"-run", "^(TestDarwinAlpha)$",
+		},
+	}
+	if !slices.EqualFunc(invocations, want, slices.Equal) {
+		t.Fatalf("rest-full go test invocations = %q, want discovery plus a verbose final shard %q", invocations, want)
+	}
+}
+
 func TestCmdGCIntegrationManifestMatchesTaggedDeclarations(t *testing.T) {
 	repo := repoRoot(t)
 	manifest := parseCmdGCIntegrationManifest(t, filepath.Join(repo, "scripts", "test-integration-shard"))

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -20,6 +21,7 @@ type ciCriticalPathJob struct {
 	Name            string                    `yaml:"name"`
 	If              string                    `yaml:"if"`
 	RunsOn          string                    `yaml:"runs-on"`
+	TimeoutMinutes  string                    `yaml:"timeout-minutes"`
 	Needs           ciCriticalPathNeeds       `yaml:"needs"`
 	Outputs         map[string]string         `yaml:"outputs"`
 	Steps           []ciCriticalPathStep      `yaml:"steps"`
@@ -779,6 +781,28 @@ func TestPRIntegrationMatrixKeepsHeavyRestCoverageInReleaseGates(t *testing.T) {
 	}
 	if !permitsPRSkip {
 		t.Error("ci-integration must treat the push-only REST job as an expected skip on pull requests")
+	}
+}
+
+// restFullMinTimeoutMinutes is the floor for the integration-rest-full job cap.
+// The 16 shards split the suite by position, so #6821's three new tests moved
+// every later one: shard 6 went from 7-9m to 13-15m and 6 of 11 main pushes were
+// canceled at the old 15m cap with no regression behind them (ga-rqzwrh). Lower
+// the cap only with per-test timings from the shard logs in hand.
+const restFullMinTimeoutMinutes = 25
+
+func TestIntegrationRestFullJobCapFitsMeasuredShardRuntime(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "ci.yml")
+	full, ok := wf.Jobs["integration-rest-full"]
+	if !ok {
+		t.Fatal("CI workflow must retain rest-full as a post-merge safety net")
+	}
+	got, err := strconv.Atoi(full.TimeoutMinutes)
+	if err != nil {
+		t.Fatalf("integration-rest-full timeout-minutes = %q, want a literal number of minutes: %v", full.TimeoutMinutes, err)
+	}
+	if got < restFullMinTimeoutMinutes {
+		t.Errorf("integration-rest-full timeout-minutes = %d, want at least %d: the slowest passing shard ran 13-15m, so a lower cap cancels main on a redistribution", got, restFullMinTimeoutMinutes)
 	}
 }
 
