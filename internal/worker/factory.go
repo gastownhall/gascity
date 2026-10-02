@@ -129,6 +129,7 @@ func (f *Factory) UsageSink() usage.Sink {
 func (f *Factory) Session(spec SessionSpec) (*SessionHandle, error) {
 	return NewSessionHandle(SessionHandleConfig{
 		Manager:     f.manager,
+		Store:       f.store,
 		SearchPaths: append([]string(nil), f.searchPaths...),
 		Adapter:     f.Adapter(),
 		Recorder:    f.recorder,

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -283,12 +284,18 @@ type SessionHandleConfig struct {
 	// Pricing estimates per-invocation cost for telemetry. Nil falls back
 	// to the registry built from shipped defaults.
 	Pricing *pricing.Registry
+	// Store is the beads store used to resolve formula names from the run-chain
+	// root bead when the session bead carries a molecule_id or workflow_id. Nil
+	// disables the root-bead lookup (formula name falls back to the session
+	// bead's own gc.formula_name metadata, which is empty in production).
+	Store beads.Store
 }
 
 // SessionHandle is the production worker handle backed by session.Manager.
 type SessionHandle struct {
 	mu             sync.Mutex
 	manager        *sessionpkg.Manager
+	store          beads.Store
 	adapter        SessionLogAdapter
 	recorder       events.Recorder
 	usageSink      usage.Sink

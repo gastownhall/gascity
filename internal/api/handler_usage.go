@@ -45,6 +45,7 @@ type UsageTotals struct {
 type UsageSessionRecent struct {
 	Session             string  `json:"session" doc:"Session (worker) name the facts were attributed to."`
 	SessionID           string  `json:"session_id,omitempty" doc:"Session bead id, when attributed."`
+	FormulaName         string  `json:"formula_name,omitempty" doc:"Formula name from session bead metadata, when attributed."`
 	InputTokens         int     `json:"input_tokens" doc:"Prompt tokens in the window."`
 	OutputTokens        int     `json:"output_tokens" doc:"Completion tokens in the window."`
 	CacheReadTokens     int     `json:"cache_read_tokens" doc:"Prompt-cache read tokens in the window."`
@@ -144,9 +145,10 @@ func buildUsageBody(facts []usage.Fact, report usage.RecentReadReport, now time.
 	}
 
 	type sessionAccum struct {
-		worker    string
-		sessionID string
-		totals    usage.Totals
+		worker      string
+		sessionID   string
+		formulaName string
+		totals      usage.Totals
 	}
 	bySession := make(map[string]*sessionAccum)
 	var today, last24h, recent usage.Totals
@@ -186,7 +188,7 @@ func buildUsageBody(facts []usage.Fact, report usage.RecentReadReport, now time.
 		}
 		acc := bySession[key]
 		if acc == nil {
-			acc = &sessionAccum{worker: worker, sessionID: fact.SessionID}
+			acc = &sessionAccum{worker: worker, sessionID: fact.SessionID, formulaName: fact.FormulaName}
 			bySession[key] = acc
 		}
 		acc.totals.Add(fact)
@@ -206,6 +208,7 @@ func buildUsageBody(facts []usage.Fact, report usage.RecentReadReport, now time.
 		body.RecentBySession = append(body.RecentBySession, UsageSessionRecent{
 			Session:             acc.worker,
 			SessionID:           acc.sessionID,
+			FormulaName:         acc.formulaName,
 			InputTokens:         acc.totals.InputTokens,
 			OutputTokens:        acc.totals.OutputTokens,
 			CacheReadTokens:     acc.totals.CacheReadTokens,

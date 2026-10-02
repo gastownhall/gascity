@@ -68,6 +68,7 @@ func NewSessionHandle(cfg SessionHandleConfig) (*SessionHandle, error) {
 
 	return &SessionHandle{
 		manager:     cfg.Manager,
+		store:       cfg.Store,
 		adapter:     adapter,
 		recorder:    recorder,
 		usageSink:   usageSink,

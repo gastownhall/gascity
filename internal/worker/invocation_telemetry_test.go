@@ -233,7 +233,10 @@ func TestMessageRecordsInvocationTokensAndCost(t *testing.T) {
 		if got := attrs["provider"]; got != "claude" {
 			t.Errorf("%s: provider = %q, want claude", name, got)
 		}
-		if len(attrs) != 3 {
+		if got, ok := attrs["formula_name"]; !ok || got != "" {
+			t.Errorf("%s: formula_name = %q (present=%v), want empty and present", name, got, ok)
+		}
+		if len(attrs) != 4 {
 			t.Errorf("%s: unexpected attribute set %+v", name, attrs)
 		}
 	}

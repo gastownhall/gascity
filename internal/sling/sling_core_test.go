@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -232,5 +233,80 @@ func TestDoSlingDefaultFormulaFallsBackToPlainRouteWhenMoleculeAttachedGraphV2Fo
 	}
 	if convoys[0].Status != "closed" {
 		t.Errorf("synthetic input convoy %s status = %q, want closed (fallback must close it, not leak it)", convoys[0].ID, convoys[0].Status)
+	}
+}
+
+// TestDoStartGraphWorkflowStampsFormulaNameOnSourceBead verifies that
+// doStartGraphWorkflow stamps gc.formula_name on the source bead in the work
+// store, alongside the existing workflow_id stamp. This makes the source bead
+// self-describing — consumers can discover which formula is driving it without
+// querying the graph store.
+func TestDoStartGraphWorkflowStampsFormulaNameOnSourceBead(t *testing.T) {
+	store := beads.NewMemStore()
+	sourceBead, err := store.Create(beads.Bead{Title: "source work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("creating source bead: %v", err)
+	}
+	rootBead, err := store.Create(beads.Bead{Title: "workflow root", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("creating root bead: %v", err)
+	}
+
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Store = store
+
+	const formulaName = "code-review"
+	a := config.Agent{Name: "builder", MaxActiveSessions: intPtr(1)}
+
+	_, err = doStartGraphWorkflow(rootBead.ID, sourceBead.ID, formulaName, a, "on-formula", deps)
+	if err != nil {
+		t.Fatalf("doStartGraphWorkflow: %v", err)
+	}
+
+	got, err := store.Get(sourceBead.ID)
+	if err != nil {
+		t.Fatalf("Get(source bead): %v", err)
+	}
+	if got.Metadata[beadmeta.FormulaNameMetadataKey] != formulaName {
+		t.Errorf("source bead %s = %q, want %q", beadmeta.FormulaNameMetadataKey, got.Metadata[beadmeta.FormulaNameMetadataKey], formulaName)
+	}
+	if got.Metadata["workflow_id"] != rootBead.ID {
+		t.Errorf("source bead workflow_id = %q, want %q", got.Metadata["workflow_id"], rootBead.ID)
+	}
+}
+
+// TestDoStartGraphWorkflowEmptyFormulaNameSkipsStamp verifies that
+// doStartGraphWorkflow does not stamp gc.formula_name on the source bead when
+// formulaName is empty, preserving the existing behavior for callers that pass
+// an empty name.
+func TestDoStartGraphWorkflowEmptyFormulaNameSkipsStamp(t *testing.T) {
+	store := beads.NewMemStore()
+	sourceBead, err := store.Create(beads.Bead{Title: "source work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("creating source bead: %v", err)
+	}
+	rootBead, err := store.Create(beads.Bead{Title: "workflow root", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("creating root bead: %v", err)
+	}
+
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Store = store
+
+	a := config.Agent{Name: "builder", MaxActiveSessions: intPtr(1)}
+
+	_, err = doStartGraphWorkflow(rootBead.ID, sourceBead.ID, "", a, "on-formula", deps)
+	if err != nil {
+		t.Fatalf("doStartGraphWorkflow: %v", err)
+	}
+
+	got, err := store.Get(sourceBead.ID)
+	if err != nil {
+		t.Fatalf("Get(source bead): %v", err)
+	}
+	if v, ok := got.Metadata[beadmeta.FormulaNameMetadataKey]; ok {
+		t.Errorf("source bead %s = %q, want absent (empty formula name must not stamp)", beadmeta.FormulaNameMetadataKey, v)
 	}
 }
