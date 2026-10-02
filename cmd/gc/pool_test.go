@@ -270,10 +270,11 @@ func pinTestOwnedBDHome(t *testing.T) string {
 // see it: the direct calls (runExternal) and the production scale_check shell,
 // which makes most of the bd calls.
 func TestPinTestOwnedBDHomeRunsBDSubprocessesInTestMode(t *testing.T) {
+	// Start from a state that is not test mode whatever the ambient environment
+	// holds, so the assertions below pass only if the helper sets it. t.Setenv
+	// restores the original; os.Unsetenv would grow the untagged cmd/gc
+	// environment census.
 	t.Setenv(beadstest.EnvBeadsTestMode, "")
-	if err := os.Unsetenv(beadstest.EnvBeadsTestMode); err != nil {
-		t.Fatalf("unset %s: %v", beadstest.EnvBeadsTestMode, err)
-	}
 	pinTestOwnedBDHome(t)
 
 	probe := `printf %s "${` + beadstest.EnvBeadsTestMode + `-unset}"`
