@@ -204,6 +204,12 @@ listener:
   # (#5383) while staying under half of write_timeout_millis so #3101's outer
   # deadline still catches a genuine pile-up first (#3626). city.toml [dolt]
   # overrides can raise it further for cities with slower live operations.
+  # CALL DOLT_GC('--full') emits no rows until GC finishes, so this gap
+  # can cancel mid-GC; raise it above expected GC duration (or set
+  # GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS /
+  # GC_DOLT_COMPACT_CALL_TIMEOUT_SECS in the start environment) and
+  # restart managed dolt. Compact's client CALL_TIMEOUT does not extend
+  # this listener deadline on its own.
   max_connections: %d
   back_log: 50
   max_connections_timeout_millis: 5000

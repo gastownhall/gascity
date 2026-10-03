@@ -265,6 +265,11 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 		"GC_DOLT_PASSWORD=",
 		"GC_DOLT_MANAGED_LOCAL=1",
 		fmt.Sprintf("GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=%d", compactScriptCallTimeoutSecs),
+		// The managed listener's default read_timeout_millis ([dolt]
+		// read_timeout_millis, default 120000) comfortably covers the call
+		// timeout, so full-GC paths pass the listener guard. Tests of that
+		// guard override this with a deliberately short value.
+		"GC_DOLT_READ_TIMEOUT_MILLIS=120000",
 		fmt.Sprintf("GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS=%d", compactScriptPushTimeoutSecs),
 		"GC_FAKE_DOLT_COMPACT_MODE="+mode,
 		"GC_FAKE_DOLT_COUNT_FILE="+filepath.Join(f.binDir, "row-count-calls"),
@@ -345,6 +350,32 @@ func assertCompactMarkerHasEvidence(t *testing.T, markerPath string, want ...str
 		}
 	}
 }
+
+func compactLogQueryIndex(log, substr string) int {
+	for i, line := range strings.Split(log, "\n") {
+		if strings.Contains(line, substr) {
+			return i
+		}
+	}
+	return -1
+}
+
+func assertCompactQueryBefore(t *testing.T, log, earlier, later string) {
+	t.Helper()
+	ei := compactLogQueryIndex(log, earlier)
+	li := compactLogQueryIndex(log, later)
+	if ei < 0 {
+		t.Fatalf("dolt log missing %q:\n%s", earlier, log)
+	}
+	if li < 0 {
+		t.Fatalf("dolt log missing %q:\n%s", later, log)
+	}
+	if ei > li {
+		t.Fatalf("want %q before %q (indices %d > %d)\n%s", earlier, later, ei, li, log)
+	}
+}
+
+const compactPreflightEvidenceRefBeads = "__gc_compact_preflight_beads"
 
 func rewriteLegacyPendingPushMarker(t *testing.T, markerPath, createdAt string) {
 	t.Helper()
@@ -1305,6 +1336,13 @@ case "$query" in
       exit 43
     fi
     if [ "$mode" = "absorbed_ws_db_hash_drift" ]; then
+      # Production hq 2026-09-17 (ga-f5n): flatten orphans the preflight
+      # commit, auto-GC collects it, and DOLT_DIFF_STAT fails with
+      # "target commit not found" unless compact pinned that commit first.
+      if [ ! -f "${state_file}.preflight-pin" ]; then
+        printf 'target commit not found\n' >&2
+        exit 1
+      fi
       print_cell beads
       exit 0
     fi
@@ -1371,6 +1409,18 @@ case "$query" in
     printf 'unexpected DOLT_DIFF_STAT query: %%s\n' "$query" >&2
     exit 64
     ;;
+  *"DOLT_BRANCH"*"-D"*)
+    rm -f -- "${state_file}.preflight-pin"
+    exit 0
+    ;;
+  *"DOLT_BRANCH"*)
+    if [ "$mode" = "preflight_pin_failure" ]; then
+      printf 'could not create preflight evidence branch\n' >&2
+      exit 46
+    fi
+    printf 'pinned\n' > "${state_file}.preflight-pin"
+    exit 0
+    ;;
   *"DOLT_RESET"*)
     if [[ "$query" == *"--hard"* ]]; then
       set_head headcommit
@@ -1415,6 +1465,12 @@ case "$query" in
     fi
     if [ "$mode" = "gc_failure" ]; then
       printf 'gc exploded\n' >&2
+      exit 45
+    fi
+    if [ "$mode" = "gc_listener_timeout" ]; then
+      printf 'client connection went away while a query was executing\n' >&2
+      printf 'read tcp 127.0.0.1:19266->127.0.0.1:40354: i/o timeout\n' >&2
+      printf 'Error in SaveHashes call: SaveHashes, error calling getManyCompressed: context canceled\n' >&2
       exit 45
     fi
     rm -rf -- "${GC_DOLT_DATA_DIR:-}/$db/.dolt/noms/oldgen"
@@ -1532,6 +1588,158 @@ func TestCompactScriptFlattensAndVerifies(t *testing.T) {
 		if !strings.Contains(log, want) {
 			t.Fatalf("dolt log missing %s:\n%s", want, log)
 		}
+	}
+}
+
+// Flatten soft-resets to the root commit, which orphans the preflight HEAD.
+// Auto-GC then collects it, so later DOLT_DIFF_STAT(preflight, flatten) fails
+// with "target commit not found" (hq 2026-09-17 / ga-f5n). Compact must pin
+// that commit to a Dolt branch before the mutating reset.
+func TestCompactScriptPinsPreflightHeadBeforeFlatten(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("compact failed: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(data)
+	wantPin := "CALL DOLT_BRANCH('-f', '" + compactPreflightEvidenceRefBeads + "', 'headcommit')"
+	if !strings.Contains(log, wantPin) {
+		t.Fatalf("compact must pin the preflight HEAD before flatten:\n%s", log)
+	}
+	assertCompactQueryBefore(t, log, wantPin, "DOLT_RESET")
+}
+
+func TestCompactScriptDeletesPreflightPinAfterSuccessfulGC(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("compact failed: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(data)
+	wantDelete := "CALL DOLT_BRANCH('-D', '" + compactPreflightEvidenceRefBeads + "')"
+	if !strings.Contains(log, wantDelete) {
+		t.Fatalf("successful flatten+GC must drop the preflight evidence branch:\n%s", log)
+	}
+	assertCompactQueryBefore(t, log, "DOLT_RESET", wantDelete)
+	assertCompactQueryBefore(t, log, wantDelete, "DOLT_GC")
+}
+
+func TestCompactScriptKeepsPreflightPinWhenQuarantining(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "same_table_replacement_with_row_gain", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite same-table row-count gain with value-hash drift:\n%s", out)
+	}
+	data, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(data)
+	wantPin := "CALL DOLT_BRANCH('-f', '" + compactPreflightEvidenceRefBeads + "', 'headcommit')"
+	if !strings.Contains(log, wantPin) {
+		t.Fatalf("quarantine path must still pin preflight evidence:\n%s", log)
+	}
+	if strings.Contains(log, "CALL DOLT_BRANCH('-D'") {
+		t.Fatalf("quarantine must keep the preflight evidence branch for manual DOLT_DIFF_STAT:\n%s", log)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	assertCompactMarkerHasEvidence(t, marker,
+		"flatten_preflight_ref="+compactPreflightEvidenceRefBeads,
+	)
+}
+
+// The quarantine auto-clear proof must DOLT_DIFF_STAT from the pinned
+// evidence branch the marker names, not the raw preflight hash flatten
+// orphaned (ga-f5n), and must drop the pin once preservation is proven. A
+// marker naming any other branch is not trusted: the proof falls back to the
+// recorded preflight hash.
+func TestCompactScriptAutoClearDiffsFromPinnedPreflightRef(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		markerRef    string
+		wantDiffFrom string
+	}{
+		{"pinned_ref", "", compactPreflightEvidenceRefBeads},
+		{"foreign_ref_falls_back_to_hash", "__gc_compact_preflight_other", "headcommit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			firstOut, err := fixture.run(t, "same_count_db_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+			if err == nil {
+				t.Fatalf("cycle 1 should have quarantined, but compact succeeded:\n%s", firstOut)
+			}
+			marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+			if got := compactMarkerValue(t, marker, "flatten_preflight_ref"); got != compactPreflightEvidenceRefBeads {
+				t.Fatalf("marker flatten_preflight_ref = %q, want %q", got, compactPreflightEvidenceRefBeads)
+			}
+			if got := compactMarkerValue(t, marker, "flatten_preflight_head"); got != "headcommit" {
+				t.Fatalf("marker flatten_preflight_head = %q, want headcommit", got)
+			}
+			if tc.markerRef != "" {
+				data, err := os.ReadFile(marker)
+				if err != nil {
+					t.Fatalf("read marker: %v", err)
+				}
+				rewritten := strings.Replace(string(data),
+					"flatten_preflight_ref="+compactPreflightEvidenceRefBeads,
+					"flatten_preflight_ref="+tc.markerRef, 1)
+				if err := os.WriteFile(marker, []byte(rewritten), 0o644); err != nil {
+					t.Fatalf("rewrite marker: %v", err)
+				}
+			}
+			cycleOneLog, err := os.ReadFile(fixture.doltLog)
+			if err != nil {
+				t.Fatalf("read dolt log: %v", err)
+			}
+
+			secondOut, err := fixture.run(t, "quarantine_autoclear_confined", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+			if err != nil {
+				t.Fatalf("cycle 2 should auto-clear: %v\n%s", err, secondOut)
+			}
+			if !strings.Contains(secondOut, "quarantine marker auto-cleared") {
+				t.Fatalf("output missing auto-clear notice:\n%s", secondOut)
+			}
+			data, err := os.ReadFile(fixture.doltLog)
+			if err != nil {
+				t.Fatalf("read dolt log: %v", err)
+			}
+			cycleTwoLog := strings.TrimPrefix(string(data), string(cycleOneLog))
+			wantDiff := "DOLT_DIFF_STAT('" + tc.wantDiffFrom + "', "
+			if !strings.Contains(cycleTwoLog, wantDiff) {
+				t.Fatalf("auto-clear proof must diff from %q:\n%s", tc.wantDiffFrom, cycleTwoLog)
+			}
+			wantDelete := "CALL DOLT_BRANCH('-D', '" + compactPreflightEvidenceRefBeads + "')"
+			wantPin := "CALL DOLT_BRANCH('-f', '" + compactPreflightEvidenceRefBeads + "', "
+			assertCompactQueryBefore(t, cycleTwoLog, wantDiff, wantDelete)
+			assertCompactQueryBefore(t, cycleTwoLog, wantDelete, wantPin)
+		})
+	}
+}
+
+func TestCompactScriptAbortsFlattenWhenPreflightPinFails(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "preflight_pin_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite failing to pin preflight evidence:\n%s", out)
+	}
+	if !strings.Contains(out, "failed to pin preflight HEAD") {
+		t.Fatalf("output missing preflight pin failure:\n%s", out)
+	}
+	data, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(data)
+	if strings.Contains(log, "DOLT_RESET") {
+		t.Fatalf("flatten must not run when the preflight evidence pin fails:\n%s", log)
 	}
 }
 
@@ -2639,35 +2847,29 @@ func TestCompactScriptQuarantinesMixedRowGainAndSameCountHashDriftBeforeFullGC(t
 	}
 }
 
-func TestCompactScriptQuarantinesMixedSignalsDespiteWriterRace(t *testing.T) {
+// A busy database's flatten window sees both concurrent INSERTs (row-count
+// gain + hash drift on one table) and concurrent UPDATEs (same-count hash
+// drift on another). That mixed signature is the production false-positive
+// that quarantined hq (ga-mku / bo-89f4d7): events appended and issues rows
+// updated while writers kept committing. HEAD movement past the flatten
+// commit proves the writer; the mixed INSERT+UPDATE is concurrent-writer
+// data, not corruption, so the run must defer rather than hard-quarantine.
+// Mixed signals without a proven writer still quarantine (see
+// TestCompactScriptQuarantinesMixedRowGainAndSameCountHashDriftBeforeFullGC).
+func TestCompactScriptDefersMixedSignalsWhenWriterRace(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "writer_race_with_mixed_same_count_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err == nil {
-		t.Fatalf("compact succeeded despite proven writer plus same-count hash drift:\n%s", out)
-	}
-	if !strings.Contains(out, "writer race detected") {
-		t.Fatalf("output missing proven writer evidence:\n%s", out)
-	}
 	if !strings.Contains(out, "table=beads gained rows during flatten") ||
 		!strings.Contains(out, "table=notes value hash changed after flatten without row-count increase") {
 		t.Fatalf("output missing mixed integrity signals:\n%s", out)
 	}
-	logData, err := os.ReadFile(fixture.doltLog)
-	if err != nil {
-		t.Fatalf("read dolt log: %v", err)
+	if !strings.Contains(out, "post_verify_HEAD=writercommit") {
+		t.Fatalf("defer message should report HEAD moving past the flatten commit:\n%s", out)
 	}
-	log := string(logData)
-	if strings.Contains(log, "DOLT_GC") {
-		t.Fatalf("mixed hard integrity signals must block full GC despite writer race:\n%s", log)
+	if !strings.Contains(out, "mixed row-count gain+hash drift with same-count hash drift is concurrent-writer INSERT+UPDATE") {
+		t.Fatalf("output missing mixed INSERT+UPDATE defer message:\n%s", out)
 	}
-	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
-	if _, err := os.Stat(quarantine); err != nil {
-		t.Fatalf("mixed hard integrity signals should write quarantine marker: %v", err)
-	}
-	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
-	if _, err := os.Stat(pendingGC); !os.IsNotExist(err) {
-		t.Fatalf("mixed hard integrity signals must not write pending-GC marker; stat=%v", err)
-	}
+	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
 }
 
 // assertCompactWriterRaceDeferred encodes the shared expectations for a proven
@@ -5253,6 +5455,85 @@ func TestCompactScriptGCOnlyFlagSurfacesDoltGCFailure(t *testing.T) {
 		if _, err := os.Stat(marker); !os.IsNotExist(err) {
 			t.Fatalf("gc-only failure must not write %s marker, stat err=%v", dir, err)
 		}
+	}
+}
+
+func TestCompactScriptGCOnlyFlagFailsClosedWhenListenerShorterThanCallTimeout(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "below_threshold", []string{"--gc-only"},
+		"GC_DOLT_READ_TIMEOUT_MILLIS=15000",
+		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=1800")
+	if err == nil {
+		t.Fatalf("gc-only must fail closed when listener read timeout is below CALL_TIMEOUT:\n%s", out)
+	}
+	if !strings.Contains(out, "raise GC_DOLT_READ_TIMEOUT_MILLIS above expected GC duration") {
+		t.Fatalf("gc-only output missing listener-timeout diagnostic:\n%s", out)
+	}
+	if !strings.Contains(out, "1 database(s) failed gc-only reclaim") {
+		t.Fatalf("gc-only output missing per-run failure tally:\n%s", out)
+	}
+	if logData, err := os.ReadFile(fixture.doltLog); err == nil {
+		if strings.Contains(string(logData), "DOLT_GC") {
+			t.Fatalf("gc-only must not issue DOLT_GC when the listener will cancel mid-GC:\n%s", logData)
+		}
+	}
+}
+
+func TestCompactScriptGCOnlyFlagReadsLiveListenerTimeoutFromConfigYaml(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	configPath := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	yaml := "listener:\n  read_timeout_millis: 15000\n"
+	if err := os.WriteFile(configPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write dolt-config.yaml: %v", err)
+	}
+	out, err := fixture.runWithArgs(t, "below_threshold", []string{"--gc-only"},
+		"GC_DOLT_READ_TIMEOUT_MILLIS=1800000",
+		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=1800")
+	if err == nil {
+		t.Fatalf("gc-only must prefer the live listener timeout from dolt-config.yaml:\n%s", out)
+	}
+	if !strings.Contains(out, "raise GC_DOLT_READ_TIMEOUT_MILLIS above expected GC duration") {
+		t.Fatalf("gc-only output missing listener-timeout diagnostic:\n%s", out)
+	}
+	if logData, err := os.ReadFile(fixture.doltLog); err == nil {
+		if strings.Contains(string(logData), "DOLT_GC") {
+			t.Fatalf("gc-only must not issue DOLT_GC against a 15s live listener:\n%s", logData)
+		}
+	}
+}
+
+func TestCompactScriptGCOnlyFlagDedicatedReadTimeoutEnvOverridesCallTimeout(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "below_threshold", []string{"--gc-only"},
+		"GC_DOLT_READ_TIMEOUT_MILLIS=15000",
+		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=5",
+		"GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS=1800")
+	if err == nil {
+		t.Fatalf("gc-only must fail closed when dedicated GC read timeout exceeds the listener:\n%s", out)
+	}
+	if !strings.Contains(out, "raise GC_DOLT_READ_TIMEOUT_MILLIS above expected GC duration") {
+		t.Fatalf("gc-only output missing listener-timeout diagnostic:\n%s", out)
+	}
+	if logData, err := os.ReadFile(fixture.doltLog); err == nil {
+		if strings.Contains(string(logData), "DOLT_GC") {
+			t.Fatalf("gc-only must not issue DOLT_GC when dedicated GC read timeout exceeds the listener:\n%s", logData)
+		}
+	}
+}
+
+func TestCompactScriptGCOnlyFlagNamesListenerTimeoutWhenGCStderrIsIOTimeout(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "gc_listener_timeout", []string{"--gc-only"},
+		"GC_DOLT_READ_TIMEOUT_MILLIS=15000",
+		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=5")
+	if err == nil {
+		t.Fatalf("gc-only must fail when the listener cancels DOLT_GC:\n%s", out)
+	}
+	if !strings.Contains(out, "i/o timeout") {
+		t.Fatalf("gc-only output missing Dolt listener stderr:\n%s", out)
+	}
+	if !strings.Contains(out, "raise GC_DOLT_READ_TIMEOUT_MILLIS above expected GC duration") {
+		t.Fatalf("gc-only output missing listener-timeout diagnostic:\n%s", out)
 	}
 }
 

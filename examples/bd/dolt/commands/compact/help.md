@@ -58,7 +58,15 @@ Compact only rewrites history that this city grew.
   disk space is never reclaimed. Unlike a bare working-set GC, `--full` rewrites
   `oldgen`, so the orphaned history is actually freed. Refuses any database that
   carries an integrity-quarantine marker and prints the marker evidence plus the
-  safe clear/retry requirements.
+  safe clear/retry requirements. Also fail-closes before issuing `DOLT_GC` when
+  the live listener `read_timeout_millis` (default 15s, an inter-row produce
+  gap) is below expected GC duration: `CALL DOLT_GC('--full')` emits no rows
+  until GC finishes, so a 15s listener cancels mid-GC. Raise
+  `[dolt] read_timeout_millis` / `GC_DOLT_READ_TIMEOUT_MILLIS` above expected
+  GC duration and restart managed dolt; `GC_DOLT_COMPACT_CALL_TIMEOUT_SECS`
+  only bounds the client wall-clock unless it (or
+  `GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS`) is in the managed-server start
+  environment.
 
 - `--only-db <name>` — Restrict the run to the named database. Repeatable, and
   augments `GC_DOLT_COMPACT_ONLY_DBS`. Use this to reclaim a single stranded

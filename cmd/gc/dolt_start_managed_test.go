@@ -15,6 +15,7 @@ import (
 	"time"
 
 	bdpack "github.com/gastownhall/gascity/examples/bd"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -1397,6 +1398,79 @@ func TestResolveDoltArchiveLevel(t *testing.T) {
 				t.Errorf("resolveDoltArchiveLevel(%d) = %d, want %d", tt.explicit, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestApplyCompactGCReadTimeoutFloor(t *testing.T) {
+	envOf := func(pairs map[string]string) func(string) string {
+		return func(key string) string { return pairs[key] }
+	}
+	tests := []struct {
+		name       string
+		cfg        config.DoltConfig
+		env        map[string]string
+		wantMillis int
+	}{
+		{
+			name:       "no compact env keeps default",
+			wantMillis: config.DefaultDoltReadTimeoutMillis,
+		},
+		{
+			name:       "dedicated compact GC env floors the listener",
+			env:        map[string]string{"GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS": "1800"},
+			wantMillis: 1800 * 1000,
+		},
+		{
+			name:       "CALL_TIMEOUT floors the listener when dedicated env is unset",
+			env:        map[string]string{"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS": "1200"},
+			wantMillis: 1200 * 1000,
+		},
+		{
+			name: "dedicated compact GC env wins over CALL_TIMEOUT",
+			env: map[string]string{
+				"GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS": "600",
+				"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS":    "1800",
+			},
+			wantMillis: 600 * 1000,
+		},
+		{
+			name:       "higher city.toml read timeout is preserved",
+			cfg:        config.DoltConfig{ReadTimeoutMillis: 2_000_000},
+			env:        map[string]string{"GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS": "1800"},
+			wantMillis: 2_000_000,
+		},
+		{
+			name:       "invalid compact env is ignored",
+			env:        map[string]string{"GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS": "nope"},
+			wantMillis: config.DefaultDoltReadTimeoutMillis,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := applyCompactGCReadTimeoutFloor(tt.cfg, envOf(tt.env))
+			if got.EffectiveReadTimeoutMillis() != tt.wantMillis {
+				t.Fatalf("EffectiveReadTimeoutMillis() = %d, want %d", got.EffectiveReadTimeoutMillis(), tt.wantMillis)
+			}
+		})
+	}
+}
+
+func TestResolveManagedDoltConfigForStartFloorsReadTimeoutFromCompactEnv(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`
+[workspace]
+name = "test"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS", "1800")
+	got, err := resolveManagedDoltConfigForStart(dir, -1)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltConfigForStart: %v", err)
+	}
+	if got.EffectiveReadTimeoutMillis() != 1_800_000 {
+		t.Fatalf("EffectiveReadTimeoutMillis() = %d, want 1800000", got.EffectiveReadTimeoutMillis())
 	}
 }
 

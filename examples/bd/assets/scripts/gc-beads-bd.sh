@@ -1859,6 +1859,26 @@ write_config_yaml() {
             read_timeout_millis=120000
             ;;
     esac
+    # CALL DOLT_GC('--full') emits no rows until GC finishes, so the
+    # listener inter-row gap must cover expected GC duration (ga-ozq).
+    # Compact-script defaults are not start-path defaults: only floor
+    # when the compact env is actually present here.
+    compact_gc_read_timeout_secs=${GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS:-}
+    case "$compact_gc_read_timeout_secs" in
+        ''|*[!0-9]*|0)
+            compact_gc_read_timeout_secs=${GC_DOLT_COMPACT_CALL_TIMEOUT_SECS:-}
+            ;;
+    esac
+    case "$compact_gc_read_timeout_secs" in
+        ''|*[!0-9]*|0)
+            ;;
+        *)
+            compact_gc_read_timeout_millis=$((compact_gc_read_timeout_secs * 1000))
+            if [ "$read_timeout_millis" -lt "$compact_gc_read_timeout_millis" ]; then
+                read_timeout_millis=$compact_gc_read_timeout_millis
+            fi
+            ;;
+    esac
     write_timeout_millis=${GC_DOLT_WRITE_TIMEOUT_MILLIS:-300000}
     case "$write_timeout_millis" in
         ''|*[!0-9]*|0)
