@@ -12,8 +12,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -637,7 +640,17 @@ func isWakeSignalName(name string) bool {
 type scriptedEventProvider struct {
 	events.Provider // unused methods panic
 	watches         []scriptedWatch
-	calls           int
+
+	mu        sync.Mutex // the watcher goroutine calls Watch; the test reads cursors
+	calls     int
+	afterSeqs []uint64 // every Watch call's cursor
+}
+
+// cursors returns every Watch call's cursor so far.
+func (p *scriptedEventProvider) cursors() []uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.afterSeqs)
 }
 
 type scriptedWatch struct {
@@ -645,10 +658,13 @@ type scriptedWatch struct {
 	events []events.Event // then Next fails: the tail broke
 }
 
-func (p *scriptedEventProvider) Watch(ctx context.Context, _ uint64) (events.Watcher, error) {
+func (p *scriptedEventProvider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.afterSeqs = append(p.afterSeqs, afterSeq)
 	if p.calls >= len(p.watches) {
 		return &blockingWatcher{ctx: ctx}, nil
 	}
@@ -682,42 +698,53 @@ func (w *blockingWatcher) Next() (events.Event, error) {
 
 func (*blockingWatcher) Close() error { return nil }
 
-func TestBeadEventWatcherReportsGapOnTailBreak(t *testing.T) {
+// Kills: a broken tail reported as a gap although the re-watch resumed it
+// (every FileRecorder hiccup forced a full resync), the re-watch started from
+// anywhere but the last seq read, or a resume that failed left unreported: a
+// failed Watch, or a watcher that broke before reading past its cursor; and a
+// resume that made no progress re-watching at once (a hot loop on a tail that
+// keeps breaking at its cursor) instead of after the retry delay.
+func TestBeadEventWatcherResumesBrokenTailFromCursor(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		var gaps int
+		var gapCount atomic.Int32
+		gaps := gapCount.Load
 		router := newReconcileRouter("sessions", routerSink{
 			requestResync: func(reason string) {
 				if reason == "bead-event-gap" {
-					gaps++
+					gapCount.Add(1)
 				}
 			},
 		}, io.Discard)
 		other := func(seq uint64) events.Event { return events.Event{Seq: seq, Type: "test.other"} }
 		ep := &scriptedEventProvider{watches: []scriptedWatch{
-			{events: []events.Event{other(5), other(6)}}, // tail breaks after 6
-			{events: []events.Event{other(7), other(4)}}, // seq regresses, then the tail breaks
-			{err: errors.New("watch failed")},
+			{events: []events.Event{other(5), other(6)}}, // the tail breaks after 6: resumed
+			{}, // the resume breaks at its cursor: a gap
+			{events: []events.Event{other(7), other(4)}}, // seq regresses (a gap), then the tail breaks: resumed
+			{err: errors.New("watch failed")},            // the resume fails: a gap
 		}}
-		cs := &controllerState{eventProv: ep, beadEventStartSeqOK: true, wake: &controllerWake{router: router}}
+		cs := &controllerState{eventProv: ep, beadEventStartSeq: 3, beadEventStartSeqOK: true, wake: &controllerWake{router: router}}
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
 		cs.startBeadEventWatcher(ctx)
 		synctest.Wait()
-		// Watch 1: a broken tail. Watch 2: a regression and a broken tail.
-		// Watch 3 fails; the retry delay holds the next watch.
-		if gaps != 4 {
-			t.Fatalf("gaps reported = %d, want 4 (broken tail, regressed seq, broken tail, failed watch)", gaps)
+		if want := []uint64{3, 6}; !slices.Equal(ep.cursors(), want) || gaps() != 1 {
+			t.Fatalf("watch cursors = %v, gaps = %d; want %v, 1 (the resume broke at its cursor and waits to retry)", ep.cursors(), gaps(), want)
+		}
+		<-time.After(beadEventWatcherRetryDelay) // fake time
+		synctest.Wait()
+		if want := []uint64{3, 6, 6, 4}; !slices.Equal(ep.cursors(), want) || gaps() != 3 {
+			t.Fatalf("watch cursors = %v, gaps = %d; want %v, 3 (then a regressed seq, a resume and a failed watch)", ep.cursors(), gaps(), want)
 		}
 		<-time.After(beadEventWatcherRetryDelay) // fake time: the retry watch blocks in Next
 		synctest.Wait()
-		if ep.calls != len(ep.watches) || gaps != 4 {
-			t.Fatalf("after the retry: watches = %d, gaps = %d; want %d, 4", ep.calls, gaps, len(ep.watches))
+		if want := []uint64{3, 6, 6, 4, 4}; !slices.Equal(ep.cursors(), want) || gaps() != 3 {
+			t.Fatalf("after the retry: watch cursors = %v, gaps = %d; want %v, 3", ep.cursors(), gaps(), want)
 		}
 		cancel()
 		synctest.Wait()
-		if gaps != 4 {
-			t.Fatalf("gaps reported = %d after stop, want 4: a stopping watcher is not a gap", gaps)
+		if gaps() != 3 {
+			t.Fatalf("gaps reported = %d after stop, want 3: a stopping watcher is not a gap", gaps())
 		}
 	})
 }
