@@ -240,6 +240,39 @@ func TestRBEForkAllowlistIsIDBased(t *testing.T) {
 	}
 }
 
+// A fork VM runs untrusted actions: user namespaces (the usual first step of a
+// kernel escape from an unprivileged process) are off on it before any action
+// runs, set inside isolate() after the render and before the selftest, so the
+// selftest and the probe run with the limit in place, and the probe action
+// checks it cannot make one. Nothing on the worker needs them: the launcher's
+// unshare runs as root with pid/mount/ipc/net namespaces only.
+func TestRBEWorkerScriptForkNoUserNamespaces(t *testing.T) {
+	root := repoRoot(t)
+	script := readFile(t, root, rbeWorkerScript)
+	at := 0
+	for _, want := range []string{
+		"isolate() {\n",
+		"\tphase render\n\trender\n",
+		"\tif [ \"$WORKER_TIER\" = fork ]; then\n\t\tphase userns\n" +
+			"\t\tsudo sysctl -q -w user.max_user_namespaces=0\n" +
+			"\t\t[ \"$(cat /proc/sys/user/max_user_namespaces)\" = 0 ] || fail \"user.max_user_namespaces is not 0\"\n\tfi\n",
+		"\tphase selftest\n",
+		"\t\t[ \"$2\" = fork ] && unshare --user true >/dev/null 2>&1 && echo \"LEAK userns\"\n",
+		"' probe \"$ROOT/pki/worker.key\" \"$WORKER_TIER\" 2>&1) || true\n",
+	} {
+		i := strings.Index(script[at:], want)
+		if i < 0 {
+			t.Fatalf("%s: %q missing or out of order", rbeWorkerScript, want)
+		}
+		at += i + len(want)
+	}
+	for _, f := range []string{"tools/rbe/rbe-action-launch", "tools/rbe/rbe-action-entry.c", "tools/rbe/rbe-action-selftest", "tools/rbe/rbe-action-sweep"} {
+		if regexp.MustCompile(`unshare[^\n]*(--user|\s-U\b)|CLONE_NEWUSER`).MatchString(readFile(t, root, f)) {
+			t.Errorf("%s creates a user namespace; fork VMs run with user.max_user_namespaces=0", f)
+		}
+	}
+}
+
 // fork-credential.sh is a byte copy of beads' setup-bazel one (keep in sync,
 // like tools/rbe/rbe-action-*). Whatever the mint answers, a build only ever
 // goes to the fork endpoint, with ro on oss-fork or rw on oss, and its key is

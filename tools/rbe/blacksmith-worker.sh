@@ -19,8 +19,9 @@
 #                       instance oss-fork; infra README "rbe-fork"): untrusted fork
 #                       PR actions, nothing cached (no REMOTE_AC, upload strategy
 #                       never), isolation mandatory (RBE_ACTION_ISOLATION must be
-#                       1) and every action in its own network namespace with
-#                       loopback only (NETNS=1). Its certificate
+#                       1), every action in its own network namespace with
+#                       loopback only (NETNS=1), and no user namespaces on the
+#                       VM (user.max_user_namespaces=0). Its certificate
 #                       (CN=rbe-fork-worker,OU=rbe-fork,O=gascity, fork CA) reaches
 #                       nothing but the fork scheduler and the CAS.
 #   WORKER_NAME         unique per worker
@@ -304,6 +305,17 @@ isolate() {
 	EOF
 	phase render
 	render
+	# WORKER_TIER=fork: no user namespaces on this VM before any action runs.
+	# They are the usual first step of a kernel escape from an unprivileged
+	# process, and nothing here needs one: the launcher's unshare runs as root
+	# and creates pid/mount/ipc/net namespaces only (NETNS_ROOT=0: infra's
+	# privileged netns class, the only user-namespace path, is never offered).
+	# The selftest below and the probe then run with the limit in place.
+	if [ "$WORKER_TIER" = fork ]; then
+		phase userns
+		sudo sysctl -q -w user.max_user_namespaces=0
+		[ "$(cat /proc/sys/user/max_user_namespaces)" = 0 ] || fail "user.max_user_namespaces is not 0"
+	fi
 	# Full selftest (a few seconds): it also checks worker.json routes actions
 	# through the entrypoint, the timeout path, and that an action can write
 	# no shared directory on any mount (ROOT_RO=1, TMPFS_DIRS private), and
@@ -338,7 +350,8 @@ isolate() {
 		cat "$1" >/dev/null 2>&1 && echo "LEAK worker.key"
 		grep -qs RBE_WORKER_TLS_KEY /proc/[0-9]*/environ && echo "LEAK step environment"
 		sudo -n true >/dev/null 2>&1 && echo "LEAK sudo"
-		true' probe "$ROOT/pki/worker.key" 2>&1) || true
+		[ "$2" = fork ] && unshare --user true >/dev/null 2>&1 && echo "LEAK userns"
+		true' probe "$ROOT/pki/worker.key" "$WORKER_TIER" 2>&1) || true
 	rm -rf "$probe"
 	echo "isolation probe: $(tr '\n' ' ' <<<"$out")"
 	if ! grep -qE "^uid 590[0-9]{2}$" <<<"$out" || grep -q LEAK <<<"$out"; then
