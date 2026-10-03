@@ -9,7 +9,7 @@ import "testing"
 // `gc bd update <id> --status=blocked --force -a ""` aborted without writing
 // and the bead stayed on its hook.
 func TestBoolFlagsKnowForce(t *testing.T) {
-	for _, sub := range []string{"create", "update", "close", "delete"} {
+	for _, sub := range []string{"create", "update", "close", "delete", "mol burn"} {
 		if !BoolFlags(sub)["--force"] {
 			t.Errorf("BoolFlags(%q) does not know --force, but `bd %s --help` documents it", sub, sub)
 		}
