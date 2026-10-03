@@ -1,9 +1,11 @@
 package main
 
 // Frozen copies of the legacy named-session code P3-6b refactored, taken from
-// main at 28279be3f4 with comment lines removed and functions renamed. They are
-// the "before" side of TestSyncSessionBeadsNamedArmMatchesPreRefactor and go
-// away with the legacy reconciler.
+// main at 28279be3f4 with comment lines removed and functions renamed (the
+// named overrides were inline in buildDesiredStateWithSessionBeadsAt). They
+// are the "before" side of TestSyncSessionBeadsNamedArmMatchesPreRefactor
+// and TestApplyNamedTemplateOverridesMatchesPreRefactor and go away with the
+// legacy reconciler.
 
 import (
 	"fmt"
@@ -207,4 +209,20 @@ func syncCreateMetadataPreRefactor(tp TemplateParams, sn, agentName, liveHash, c
 		}
 	}
 	return meta
+}
+
+func applyNamedTemplateOverridesPreRefactor(tp *TemplateParams, spec namedSessionSpec, identity, boundStepID string) {
+	tp.Alias = identity
+	tp.TemplateName = namedSessionBackingTemplate(spec)
+	tp.InstanceName = identity
+	tp.ConfiguredNamedIdentity = identity
+	tp.ConfiguredNamedMode = spec.Mode
+	tp.BoundStepID = boundStepID
+	if tp.Env == nil {
+		tp.Env = make(map[string]string)
+	}
+	tp.Env["GC_TEMPLATE"] = namedSessionBackingTemplate(spec)
+	tp.Env["GC_ALIAS"] = identity
+	tp.Env["GC_AGENT"] = identity
+	tp.Env["GC_SESSION_ORIGIN"] = "named"
 }

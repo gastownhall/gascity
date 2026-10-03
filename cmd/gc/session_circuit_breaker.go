@@ -632,9 +632,12 @@ func formatCircuitTime(tm time.Time) string {
 // reset_generation, then the latest last_restart, then the newest row
 // (C9.6(c)). Its values are copied raw, except restarts: the union, within
 // cfg.Window of now, of the restart lists of the rows sharing the winner's
-// reset_generation. A row whose state does not parse is skipped, as a
-// restore would reject it. Readers apply C9.4's lazy ResetAfter. Nil when no
-// row carries breaker state.
+// reset_generation, less every restart at or before the last restart of
+// such a row that is open past cfg.ResetAfter: its auto-reset clears them,
+// as the in-memory breaker's does (with ResetAfter below Window they are
+// still inside the window). A row whose state does not parse is skipped, as
+// a restore would reject it. Readers apply C9.4's lazy ResetAfter to the
+// copied state. Nil when no row carries breaker state.
 func mergePriorSessionCircuitState(rows []beads.Bead, cfg sessionCircuitBreakerConfig, now time.Time) map[string]string {
 	type prior struct {
 		state       session.CircuitState
@@ -696,7 +699,15 @@ func mergePriorSessionCircuitState(rows []beads.Bead, cfg sessionCircuitBreakerC
 			out[key] = value
 		}
 	}
-	cutoff := now.Add(-cfg.withDefaults().Window)
+	cfg = cfg.withDefaults()
+	cutoff := now.Add(-cfg.Window)
+	var resetThrough time.Time
+	for _, p := range priors {
+		if p.generation == winner.generation && p.state.State == circuitOpen.String() &&
+			!p.lastRestart.IsZero() && now.Sub(p.lastRestart) >= cfg.ResetAfter && p.lastRestart.After(resetThrough) {
+			resetThrough = p.lastRestart
+		}
+	}
 	seen := make(map[time.Time]bool)
 	var union []time.Time
 	for _, p := range priors {
@@ -705,7 +716,7 @@ func mergePriorSessionCircuitState(rows []beads.Bead, cfg sessionCircuitBreakerC
 		}
 		for _, tm := range p.restarts {
 			tm = tm.UTC()
-			if tm.Before(cutoff) || seen[tm] {
+			if tm.Before(cutoff) || !tm.After(resetThrough) || seen[tm] {
 				continue
 			}
 			seen[tm] = true
