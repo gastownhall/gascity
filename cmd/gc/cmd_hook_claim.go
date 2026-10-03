@@ -252,6 +252,13 @@ type hookClaimOps struct {
 	// PublishRunMap writes best-effort session-to-run correlation without
 	// mutating the session bead after a successful work claim.
 	PublishRunMap hookPublishRunMapFunc
+	// EnqueueContinuationNudge enqueues a hook-claim-continuation nudge for the
+	// claiming session when a pool graph.v2 workflow root was freshly claimed and
+	// has at least one pre-assigned sibling step. This propels the root → step-1
+	// transition without requiring an external gc session nudge. Best-effort.
+	// ACP-transport sessions require daemon.nudge_dispatcher = "supervisor" for
+	// delivery; the legacy per-session poller cannot deliver to ACP sessions.
+	EnqueueContinuationNudge hookEnqueueContinuationNudgeFunc
 	// Release gives back a claim this invocation won but could not deliver. It
 	// is compare-and-swap on the assignee (release-if-current), so a claim that
 	// legitimately changed hands in the meantime is left alone. It reports
@@ -317,6 +324,9 @@ type (
 	// it still carries fromAssignee, reporting whether it now carries
 	// toAssignee.
 	hookClaimRestampFunc func(context.Context, string, []string, string, string, string) (bool, error)
+	// hookEnqueueContinuationNudgeFunc enqueues the claiming session's
+	// hook-claim-continuation nudge, keyed by the claim assignee.
+	hookEnqueueContinuationNudgeFunc func(assignee string)
 )
 
 type hookClaimJSONResult struct {
@@ -550,6 +560,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.PublishRunMap == nil {
 		ops.PublishRunMap = writeRunMap
+	}
+	if ops.EnqueueContinuationNudge == nil {
+		ops.EnqueueContinuationNudge = hookContinuationNudgeEnqueue
 	}
 	if ops.ReadWorkMeta == nil {
 		ops.ReadWorkMeta = hookReadClaimedBeadWithBdStore
@@ -1269,6 +1282,20 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		// because it returns before the stamp.
 		clearHookSessionCurrentClaim(opts, ops, stderr)
 		return unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, cause, bead, opts, ops, dir, stderr)
+	}
+	// Enqueue a per-session continuation nudge when the hook just claimed a
+	// graph.v2 workflow root and pre-assigned at least one continuation sibling.
+	// Only after the result was delivered: an undelivered claim is released
+	// above, and a nudge for a claim this session no longer holds would wake it
+	// for work it does not own.
+	// gc.kind==workflow is the correct predicate here: only formula/compile.go
+	// sets this value (single writer), and preassignHookContinuationGroup only
+	// returns non-empty results for pool-routed graph.v2 beads
+	// (internal/graphroute/graphroute.go), so the two invariants together are
+	// equivalent to the narrower "formula_contract==graph.v2 &&
+	// continuation_group==pool-workflow" check.
+	if len(assigned) > 0 && bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow {
+		ops.EnqueueContinuationNudge(opts.Assignee)
 	}
 	return 0
 }
@@ -2936,6 +2963,47 @@ func hookEmitClaimReclaimedStale(beadID, previousOwner, newAssignee string) {
 	if closer, ok := rec.(io.Closer); ok {
 		_ = closer.Close()
 	}
+}
+
+// hookContinuationNudgeEnqueue is the production EnqueueContinuationNudge
+// implementation. It enqueues a queued nudge for the claiming session so the
+// pool agent re-enters its hook after claiming the workflow root and propels
+// the root → step-1 transition without an external gc session nudge. The city
+// path is resolved from the environment so this call is self-contained — the
+// same pattern as hookEmitClaimRejected / openCityRecorder. Best-effort: any
+// error is swallowed so a nudge-queue failure never blocks the claim.
+// ACP sessions: maybeStartNudgePoller is a no-op for acp transport; configure
+// daemon.nudge_dispatcher = "supervisor" for reliable queued delivery.
+// See writeHookClaimWorkResultForBead for the call site.
+func hookContinuationNudgeEnqueue(assignee string) {
+	cityPath, err := resolveCity()
+	if err != nil {
+		return
+	}
+	// Load cfg so maybeStartNudgePoller can skip the sidecar when the city
+	// uses daemon.nudge_dispatcher = "supervisor". A nil cfg (load error)
+	// falls through to legacy mode with no behavior change.
+	cfg, _ := loadCityConfig(cityPath, io.Discard)
+	target := nudgeTarget{
+		cityPath:    cityPath,
+		sessionName: assignee,
+		cfg:         cfg,
+	}
+	// Apply a session fence so a stale nudge from a prior run of this slot
+	// is rejected at delivery if the slot is recycled before the nudge fires.
+	// Best-effort: if the store is unavailable the nudge enqueues without a
+	// fence (same behavior as before this fix).
+	store := openNudgeBeadStore(cityPath)
+	if store.Store != nil {
+		defer closeBeadStoreHandle(store.Store) //nolint:errcheck
+		target = withNudgeTargetFence(store.Store, target)
+	}
+	item := newQueuedNudgeWithOptions(assignee, "Work slung. Check your hook.", "hook-claim-continuation", time.Now(), queuedNudgeOptionsFromTarget(target))
+	if err := enqueueQueuedNudgeWithStore(cityPath, store, item); err != nil {
+		return
+	}
+	maybeStartNudgePoller(target)
+	_ = pokeController(cityPath)
 }
 
 func hookListContinuationWithBdStore(_ context.Context, dir string, env []string, rootID, group string) ([]beads.Bead, error) {
