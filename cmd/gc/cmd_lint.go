@@ -658,6 +658,15 @@ func newLintDiagnostic(path string, line int, message string) lintDiagnostic {
 	}
 }
 
+func newLintWarning(path string, line int, message string) lintDiagnostic {
+	return lintDiagnostic{
+		Severity: "warning",
+		Path:     path,
+		Line:     line,
+		Message:  strings.TrimSpace(message),
+	}
+}
+
 func lintErrorCount(diagnostics []lintDiagnostic) int {
 	var count int
 	for _, diagnostic := range diagnostics {
@@ -724,10 +733,14 @@ func formatLintDiagnostic(diagnostic lintDiagnostic) string {
 }
 
 // lintClaudeOverlayHookShape walks a pack for .claude/settings.json overlay
-// files and flags any top-level hook entry using the invalid bare shape.
+// files and flags hook entries Claude Code cannot use as written: a top-level
+// entry in the invalid bare shape, and a wrapped entry whose matcher is not a
+// usable regex over tool names.
 // Claude Code requires the wrapped {"matcher": ..., "hooks": [...]} form; a bare
 // {"type": "command", "command": ...} entry projects to a settings file that
-// fails Claude's schema (and `claude doctor`).
+// fails Claude's schema (and `claude doctor`). A matcher in permission-rule
+// syntax such as Bash(*bd mol pour*) matches no tool name, so the guard it was
+// meant to add never fires.
 func lintClaudeOverlayHookShape(packDir string) []lintDiagnostic {
 	var diagnostics []lintDiagnostic
 	_ = filepath.WalkDir(packDir, func(path string, entry iofs.DirEntry, walkErr error) error {
@@ -757,6 +770,18 @@ func lintClaudeOverlayHookShape(packDir string) []lintDiagnostic {
 			diagnostics = append(diagnostics, newLintDiagnostic(path, 0, fmt.Sprintf(
 				"hooks.%s[%d] is a bare hook entry; Claude settings require the wrapped form {\"matcher\": ..., \"hooks\": [...]}",
 				b.Category, b.Index)))
+		}
+		matchers, err := overlay.FindInvalidHookMatchers(data)
+		if err != nil {
+			diagnostics = append(diagnostics, diagnosticFromError(path, err))
+			return nil
+		}
+		for _, m := range matchers {
+			if m.Severity == overlay.SeverityWarning {
+				diagnostics = append(diagnostics, newLintWarning(path, 0, m.Message))
+			} else {
+				diagnostics = append(diagnostics, newLintDiagnostic(path, 0, m.Message))
+			}
 		}
 		return nil
 	})

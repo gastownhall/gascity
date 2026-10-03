@@ -2,7 +2,10 @@ package overlay
 
 import (
 	"encoding/json"
+	"fmt"
+	"regexp"
 	"sort"
+	"strings"
 )
 
 // BareHookEntry locates a top-level hook entry in a Claude settings document
@@ -21,13 +24,34 @@ type BareHookEntry struct {
 // output. A document that isn't a JSON object yields a parse error; a document
 // with no "hooks" object yields no findings.
 func FindBareHookEntries(data []byte) ([]BareHookEntry, error) {
+	var bare []BareHookEntry
+	err := forEachHookEntry(data, func(category string, index int, entry map[string]any) {
+		if _, hasHooks := entry["hooks"]; hasHooks {
+			return
+		}
+		if _, hasMatcher := entry["matcher"]; hasMatcher {
+			return
+		}
+		bare = append(bare, BareHookEntry{Category: category, Index: index})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return bare, nil
+}
+
+// forEachHookEntry calls visit for every top-level hook entry in a Claude
+// settings document that is a JSON object, categories in sorted order so
+// findings are deterministic. A document that isn't a JSON object yields a
+// parse error; a document with no "hooks" object visits nothing.
+func forEachHookEntry(data []byte, visit func(category string, index int, entry map[string]any)) error {
 	var doc map[string]any
 	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, err
+		return err
 	}
 	hooks, ok := doc["hooks"].(map[string]any)
 	if !ok {
-		return nil, nil
+		return nil
 	}
 
 	categories := make([]string, 0, len(hooks))
@@ -36,27 +60,18 @@ func FindBareHookEntries(data []byte) ([]BareHookEntry, error) {
 	}
 	sort.Strings(categories)
 
-	var bare []BareHookEntry
 	for _, category := range categories {
 		arr, ok := hooks[category].([]any)
 		if !ok {
 			continue
 		}
 		for i, entry := range arr {
-			m, ok := entry.(map[string]any)
-			if !ok {
-				continue
+			if m, ok := entry.(map[string]any); ok {
+				visit(category, i, m)
 			}
-			if _, hasHooks := m["hooks"]; hasHooks {
-				continue
-			}
-			if _, hasMatcher := m["matcher"]; hasMatcher {
-				continue
-			}
-			bare = append(bare, BareHookEntry{Category: category, Index: i})
 		}
 	}
-	return bare, nil
+	return nil
 }
 
 // Severity ranks a lint finding: an error fails `gc lint`, a warning is advisory.
@@ -78,8 +93,93 @@ type HookMatcherFinding struct {
 	Message  string
 }
 
+// permissionSyntaxMatcher matches a matcher written as a permission rule,
+// Tool(args), which is not a regular expression over tool names.
+var permissionSyntaxMatcher = regexp.MustCompile(`^[A-Za-z|]+\(`)
+
+// toolMatcherEvents are the hook events whose matcher filters on a tool name.
+// The others match something else (SessionStart: how the session began,
+// PreCompact: manual or auto), so a tool-name check would misfire on them.
+var toolMatcherEvents = map[string]bool{
+	"PreToolUse":         true,
+	"PostToolUse":        true,
+	"PostToolUseFailure": true,
+	"PermissionRequest":  true,
+}
+
+// knownToolNames are the built-in Claude Code tools a hook matcher can name.
+// MCP tools (mcp__server__tool) are defined by their servers and not listed.
+var knownToolNames = []string{
+	"Agent", "AskUserQuestion", "Bash", "CronCreate", "CronDelete", "CronList",
+	"Edit", "EnterPlanMode", "EnterWorktree", "ExitPlanMode", "ExitWorktree",
+	"Glob", "Grep", "ListMcpResourcesTool", "LSP", "Monitor", "NotebookEdit",
+	"PowerShell", "PushNotification", "Read", "ReadMcpResourceTool",
+	"ScheduleWakeup", "SendMessage", "Skill", "Task", "TaskCreate", "TaskGet",
+	"TaskList", "TaskOutput", "TaskStop", "TaskUpdate", "TodoWrite", "WebFetch",
+	"WebSearch", "Write",
+}
+
 // FindInvalidHookMatchers parses a .claude/settings.json document and returns a
-// finding for every wrapped hook entry whose matcher is unusable.
-func FindInvalidHookMatchers(_ []byte) ([]HookMatcherFinding, error) {
-	return nil, nil
+// finding for every wrapped hook entry whose matcher cannot do what its author
+// meant:
+//
+//   - an error when the matcher is permission-rule syntax such as
+//     Bash(*bd mol pour*), which is not a regex over tool names;
+//   - an error when the matcher does not compile as a regular expression;
+//   - a warning, on events that match tool names, when the matcher compiles but
+//     matches no known Claude Code tool.
+//
+// The empty matcher and "*" mean all tools and are always valid. An entry with
+// no matcher is not this function's concern (see FindBareHookEntries). Findings
+// are ordered by category, then index.
+func FindInvalidHookMatchers(data []byte) ([]HookMatcherFinding, error) {
+	var findings []HookMatcherFinding
+	err := forEachHookEntry(data, func(category string, index int, entry map[string]any) {
+		matcher, ok := entry["matcher"].(string)
+		if !ok || matcher == "" || matcher == "*" {
+			return
+		}
+		severity, problem := hookMatcherProblem(category, matcher)
+		if severity == "" {
+			return
+		}
+		findings = append(findings, HookMatcherFinding{
+			Category: category,
+			Index:    index,
+			Severity: severity,
+			Message:  fmt.Sprintf("hooks.%s[%d] matcher %q %s", category, index, matcher, problem),
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return findings, nil
+}
+
+// hookMatcherProblem classifies matcher, found under the given hook event. It
+// returns an empty severity when the matcher is usable. The permission-syntax
+// check runs before compilation because such a matcher usually fails to compile
+// too, and the author needs the specific explanation, not a parse error.
+func hookMatcherProblem(category, matcher string) (Severity, string) {
+	if permissionSyntaxMatcher.MatchString(matcher) {
+		return SeverityError, "is permission-rule syntax (Tool(args)), not a regex; hook matchers are regexes matched against the tool name only. Use e.g. ^Bash$ and filter on tool_input inside the hook."
+	}
+	re, err := regexp.Compile(matcher)
+	if err != nil {
+		return SeverityError, fmt.Sprintf("does not compile as a regular expression: %v", err)
+	}
+	if toolMatcherEvents[category] && !strings.Contains(matcher, "mcp__") && !matchesKnownTool(re) {
+		return SeverityWarning, "compiles but matches no known Claude Code tool name; check for a typo"
+	}
+	return "", ""
+}
+
+// matchesKnownTool reports whether re matches at least one known tool name.
+func matchesKnownTool(re *regexp.Regexp) bool {
+	for _, name := range knownToolNames {
+		if re.MatchString(name) {
+			return true
+		}
+	}
+	return false
 }
