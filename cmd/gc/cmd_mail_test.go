@@ -136,7 +136,7 @@ func TestMailSendJSON(t *testing.T) {
 	recipients := map[string]bool{"human": true, "mayor": true}
 
 	var stdout, stderr bytes.Buffer
-	code := doMailSendJSON(mp, events.Discard, recipients, "human", []string{"mayor", "build is green"}, nil, true, &stdout, &stderr)
+	code := doMailSendJSON(mp, events.Discard, recipients, "human", []string{"mayor", "build is green"}, nil, "", true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doMailSendJSON = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -155,6 +155,93 @@ func TestMailSendJSON(t *testing.T) {
 	}
 	if got.SchemaVersion != "1" || !got.OK || got.Command != "mail.send" || got.Count != 1 || len(got.Messages) != 1 || got.Messages[0].To != "mayor" {
 		t.Fatalf("payload = %+v", got)
+	}
+}
+
+func TestMailSendDedupSuppressesDuplicate(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	recipients := map[string]bool{"human": true, "mayor": true}
+	rec := events.NewFake()
+
+	var stdout, stderr bytes.Buffer
+	args := []string{"mayor", "quarantine: hq", "marker exists"}
+	code := doMailSendJSON(mp, rec, recipients, "human", args, nil, "dolt-compact-quarantine:hq", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("first send = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Sent message") {
+		t.Fatalf("first send stdout = %q, want sent confirmation", stdout.String())
+	}
+
+	stdout.Reset()
+	code = doMailSendJSON(mp, rec, recipients, "human", args, nil, "dolt-compact-quarantine:hq", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("second send = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Suppressed duplicate") {
+		t.Fatalf("second send stdout = %q, want suppression notice", stdout.String())
+	}
+	if got := len(rec.Events); got != 1 {
+		t.Fatalf("recorded %d mail.sent events; want 1 (no event for a suppressed send)", got)
+	}
+	msgs, err := mp.Inbox("mayor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(msgs); got != 1 {
+		t.Fatalf("inbox has %d messages; want 1", got)
+	}
+}
+
+func TestMailSendDedupJSONReportsAlreadyDone(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	recipients := map[string]bool{"human": true, "mayor": true}
+
+	args := []string{"mayor", "quarantine: hq", "marker exists"}
+	var first bytes.Buffer
+	if code := doMailSendJSON(mp, events.Discard, recipients, "human", args, nil, "k1", true, &first, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("first send = %d, want 0", code)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doMailSendJSON(mp, events.Discard, recipients, "human", args, nil, "k1", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("second send = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var got struct {
+		OK          bool   `json:"ok"`
+		Command     string `json:"command"`
+		ID          string `json:"id"`
+		AlreadyDone bool   `json:"already_done"`
+		Count       int    `json:"count"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if !got.OK || got.Command != "mail.send" || !got.AlreadyDone || got.Count != 0 || got.ID == "" {
+		t.Fatalf("payload = %+v; want ok, already_done, count 0, live-copy id", got)
+	}
+}
+
+// TestMailSendDedupFallsBackWithoutCapability proves the fail-open contract:
+// a provider that does not implement mail.DedupSender still delivers the
+// message (a duplicate notification beats a silently dropped one), with a
+// stderr note.
+func TestMailSendDedupFallsBackWithoutCapability(t *testing.T) {
+	mp := mail.NewFake() // fake provider: no SendDeduped
+	recipients := map[string]bool{"human": true, "mayor": true}
+
+	var stdout, stderr bytes.Buffer
+	args := []string{"mayor", "subject", "body"}
+	if code := doMailSendJSON(mp, events.Discard, recipients, "human", args, nil, "k1", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("send = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "does not support --dedup") {
+		t.Fatalf("stderr = %q, want capability note", stderr.String())
+	}
+	if got := len(mp.Messages()); got != 1 {
+		t.Fatalf("provider has %d messages; want 1 (fallback still sends)", got)
 	}
 }
 
@@ -569,9 +656,9 @@ func TestCmdMailSendDefaultSenderFallsBackToGCAliasWhenSessionIDMissing(t *testi
 	_ = os.Unsetenv("GC_AGENT")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"recipient", "hello"}, false, false, "", "", "", "", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"recipient", "hello"}, false, false, "", "", "", "", "", false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	storeAfter, err := openCityStoreAt(cityPath)
 	if err != nil {
@@ -641,9 +728,9 @@ func TestCmdMailSendFromControllerCreatesMessage(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"mayor/"}, false, false, "controller", "", "Dolt health advisory [MEDIUM]", "Latency warning", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"mayor/"}, false, false, "controller", "", "Dolt health advisory [MEDIUM]", "Latency warning", "", false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	storeAfter, err := openCityStoreAt(cityPath)
 	if err != nil {
@@ -713,9 +800,9 @@ func TestCmdMailSendToControllerRecipientIsRejected(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"controller/"}, false, false, "human", "", "Subject", "Body", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"controller/"}, false, false, "human", "", "Subject", "Body", "", false, &stdout, &stderr)
 	if code == 0 {
-		t.Fatalf("cmdMailSend() = 0, want failure; stdout=%s stderr=%s", stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON() = 0, want failure; stdout=%s stderr=%s", stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stderr.String(), `unknown recipient "controller/"`) {
 		t.Fatalf("stderr = %q, want unknown controller recipient", stderr.String())
@@ -762,9 +849,9 @@ func TestCmdMailSendTrailingSlashHumanRecipientResolvesToHuman(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"human/"}, false, false, "controller", "", "ESCALATION: test", "escalation body", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"human/"}, false, false, "controller", "", "ESCALATION: test", "escalation body", "", false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailSend(human/) = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON(human/) = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 
 	store, err := openCityStoreAt(cityPath)
@@ -1123,7 +1210,7 @@ mode = "always"
 	if target.display != "gcw/gas-city-architect" {
 		t.Fatalf("display = %q, want gcw/gas-city-architect", target.display)
 	}
-	want := []string{"gcw/gas-city-architect", "gc-1", "gas-city-architect"}
+	want := []string{"gcw/gas-city-architect", "gcw-1", "gas-city-architect"}
 	if strings.Join(target.recipients, ",") != strings.Join(want, ",") {
 		t.Fatalf("recipients = %#v, want %#v", target.recipients, want)
 	}
@@ -2009,11 +2096,11 @@ func TestCmdMailReply_FallsBackToGCSessionIDWhenAliasMissing(t *testing.T) {
 	t.Setenv("GC_AGENT", "codeprobe-worker")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailReply([]string{"gc-2", "reply body"}, "", "", false, &stdout, &stderr)
+	code := cmdMailReply([]string{"tc-2", "reply body"}, "", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdMailReply() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Replied to gc-2") {
+	if !strings.Contains(stdout.String(), "Replied to tc-2") {
 		t.Fatalf("stdout = %q, want reply confirmation", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "to alice") {
@@ -3688,13 +3775,16 @@ func TestMailCheckInjectLimitsMessageCount(t *testing.T) {
 	}
 
 	out := stdout.String()
-	for _, want := range []string{"4 unread message(s)", "gc-1 from sender-a", "gc-2 from sender-b", "gc-3 from sender-c", "Showing the first 3 message(s)"} {
+	// selectMailInjectWindow keeps the NEWEST arrivals within a priority tier
+	// (ga-18f84o): among 4 equal-priority (all priority-0) messages, the oldest
+	// (first/gc-1) is the one clamped out, not the newest.
+	for _, want := range []string{"4 unread message(s)", "gc-2 from sender-b", "gc-3 from sender-c", "gc-4 from sender-d", "Showing the 3 most recent message(s)"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout missing %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "gc-4") || strings.Contains(out, "fourth") {
-		t.Errorf("stdout should not include the fourth message:\n%s", out)
+	if strings.Contains(out, "gc-1") || strings.Contains(out, "first") {
+		t.Errorf("stdout should not include the first message:\n%s", out)
 	}
 }
 
@@ -3924,11 +4014,12 @@ func TestMailCheckInjectArchivesEphemeralAutoHandoffMessages(t *testing.T) {
 // That test pinned the bug: a priority-tagged restart handoff arriving BEHIND a
 // full window of ordinary mail was clamped out of the injection preview (never
 // surfaced, never archived). With the priority-sort-before-clamp patch (handoff
-// mail tagged priority:1 at the cmd_handoff send sites + sortMailByPriority run
-// before both the display and archive clamps), a priority:1 handoff now floats
-// into the window: it is injected AND archived, while a lower-priority ordinary
-// message is the one clamped out and left open. mail.Message.Priority is
-// otherwise unwritten, so ordinary all-priority-0 mail keeps arrival order.
+// mail tagged priority:1 at the cmd_handoff send sites + selectMailInjectWindow
+// run before both the display and archive clamps), a priority:1 handoff now
+// floats into the window: it is injected AND archived, while a lower-priority
+// ordinary message is the one clamped out and left open. Among the equal-
+// priority ordinary mail, selectMailInjectWindow keeps the NEWEST arrivals
+// (ga-18f84o) and evicts the oldest one, not "arrival order" as before.
 func TestMailCheckInjectFloatsPriorityAutoHandoffIntoWindow(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
@@ -3964,8 +4055,9 @@ func TestMailCheckInjectFloatsPriorityAutoHandoffIntoWindow(t *testing.T) {
 	}
 	// ...and is retired (mark-read+closed, retain-addressable) after injection.
 	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
-	// The lowest-ranked ordinary message is the one clamped out — still open.
-	clampedOut := ordinaryIDs[len(ordinaryIDs)-1]
+	// The oldest ordinary message is the one clamped out (selectMailInjectWindow
+	// keeps the newest arrivals within a priority tier) — still open.
+	clampedOut := ordinaryIDs[0]
 	b, err := store.Get(clampedOut)
 	if err != nil {
 		t.Fatalf("clamped-out ordinary mail should remain: %v", err)
@@ -5022,9 +5114,9 @@ func TestCmdMailSendPositionalBodyHonouredWhenSubjectFlagSet(t *testing.T) {
 	cityPath := mailSendTestCity(t, "mayor")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"mayor/", "positional body"}, false, false, "controller", "", "subject", "", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"mayor/", "positional body"}, false, false, "controller", "", "subject", "", "", false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 
 	msg := mailSendTestFindMessage(t, cityPath)
@@ -5041,9 +5133,9 @@ func TestCmdMailSendFlagBodyWinsOverPositional(t *testing.T) {
 	cityPath := mailSendTestCity(t, "mayor")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"mayor/", "positional body"}, false, false, "controller", "", "subject", "flag body", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"mayor/", "positional body"}, false, false, "controller", "", "subject", "flag body", "", false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 
 	msg := mailSendTestFindMessage(t, cityPath)
@@ -5057,9 +5149,9 @@ func TestCmdMailSendNoBodyStillWorks(t *testing.T) {
 	cityPath := mailSendTestCity(t, "mayor")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"mayor/"}, false, false, "controller", "", "subject", "", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"mayor/"}, false, false, "controller", "", "subject", "", "", false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 
 	msg := mailSendTestFindMessage(t, cityPath)
@@ -5076,7 +5168,7 @@ func TestCmdMailSendAllPositionalBodyHonouredWhenSubjectFlagSet(t *testing.T) {
 	cityPath := mailSendTestCity(t, "worker")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"positional body"}, false, true, "controller", "", "subject", "", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"positional body"}, false, true, "controller", "", "subject", "", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdMailSend --all = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -5095,7 +5187,7 @@ func TestCmdMailSendAllFlagBodyWinsOverPositional(t *testing.T) {
 	cityPath := mailSendTestCity(t, "worker")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"positional body"}, false, true, "controller", "", "subject", "flag body", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"positional body"}, false, true, "controller", "", "subject", "flag body", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdMailSend --all = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}

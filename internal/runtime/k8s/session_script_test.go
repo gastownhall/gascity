@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 func TestSessionScriptStartProjectsManagedPayloadPortToPodAlias(t *testing.T) {
@@ -292,6 +294,9 @@ exit 1
 
 func sessionScriptPath(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return filepath.Join(root, "contrib", "session-scripts", "gc-session-k8s")
+	}
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")

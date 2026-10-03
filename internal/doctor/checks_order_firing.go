@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -444,8 +443,8 @@ func expectedIntervalForOrder(order orders.Order, cronCache map[string]time.Dura
 
 func computeExpectedIntervalForCronSchedule(schedule string) (time.Duration, error) {
 	fields := strings.Fields(schedule)
-	if len(fields) != 5 {
-		return 0, fmt.Errorf("invalid cron schedule: want 5 fields, got %d", len(fields))
+	if len(fields) != orders.CronFieldCount {
+		return 0, fmt.Errorf("invalid cron schedule: want %d fields, got %d", orders.CronFieldCount, len(fields))
 	}
 
 	// Scan minute-by-minute from a fixed base so the result is deterministic
@@ -472,9 +471,9 @@ func computeExpectedIntervalForCronSchedule(schedule string) (time.Duration, err
 		matches := make([]time.Time, 0, 16)
 		for i := 0; i < windowMinutes; i++ {
 			ts := base.Add(time.Duration(i) * time.Minute)
-			matched, err := cronScheduleMatchesAt(fields, ts)
+			matched, err := orders.CronScheduleMatchesAt(fields, ts)
 			if err != nil {
-				return 0, err
+				return 0, fmt.Errorf("invalid cron schedule: %w", err)
 			}
 			if matched {
 				matches = append(matches, ts)
@@ -514,105 +513,6 @@ func computeExpectedIntervalForCronSchedule(schedule string) (time.Duration, err
 		return minGap, nil
 	}
 	return 0, fmt.Errorf("cron schedule %q has no firing minutes in a 366-day window", schedule)
-}
-
-func cronScheduleMatchesAt(fields []string, ts time.Time) (bool, error) {
-	specs := []struct {
-		name     string
-		field    string
-		value    int
-		min, max int
-	}{
-		{name: "minute", field: fields[0], value: ts.Minute(), min: 0, max: 59},
-		{name: "hour", field: fields[1], value: ts.Hour(), min: 0, max: 23},
-		{name: "day-of-month", field: fields[2], value: ts.Day(), min: 1, max: 31},
-		{name: "month", field: fields[3], value: int(ts.Month()), min: 1, max: 12},
-		{name: "day-of-week", field: fields[4], value: int(ts.Weekday()), min: 0, max: 6},
-	}
-	for _, spec := range specs {
-		matched, err := cronFieldMatchesForDoctor(spec.field, spec.value, spec.min, spec.max)
-		if err != nil {
-			return false, fmt.Errorf("invalid cron schedule: cannot parse %s field %q", spec.name, spec.field)
-		}
-		if !matched {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
-func cronFieldMatchesForDoctor(field string, value, lowerBound, upperBound int) (bool, error) {
-	if strings.TrimSpace(field) == "" {
-		return false, fmt.Errorf("empty field")
-	}
-	for _, rawPart := range strings.Split(field, ",") {
-		part := strings.TrimSpace(rawPart)
-		matched, err := cronPartMatchesForDoctor(part, value, lowerBound, upperBound)
-		if err != nil {
-			return false, err
-		}
-		if matched {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func cronPartMatchesForDoctor(part string, value, lowerBound, upperBound int) (bool, error) {
-	if part == "" {
-		return false, fmt.Errorf("empty part")
-	}
-	rangePart, stepPart, hasStep := strings.Cut(part, "/")
-	step := 1
-	if hasStep {
-		parsed, err := strconv.Atoi(strings.TrimSpace(stepPart))
-		if err != nil || parsed <= 0 {
-			return false, fmt.Errorf("invalid step")
-		}
-		step = parsed
-	}
-
-	lo, hi, err := cronRangeForDoctor(strings.TrimSpace(rangePart), lowerBound, upperBound)
-	if err != nil {
-		return false, err
-	}
-	if value < lo || value > hi {
-		return false, nil
-	}
-	return (value-lo)%step == 0, nil
-}
-
-func cronRangeForDoctor(rangePart string, lowerBound, upperBound int) (int, int, error) {
-	switch {
-	case rangePart == "*":
-		return lowerBound, upperBound, nil
-	case strings.Contains(rangePart, "-"):
-		start, end, ok := strings.Cut(rangePart, "-")
-		if !ok {
-			return 0, 0, fmt.Errorf("invalid range")
-		}
-		lo, err := strconv.Atoi(strings.TrimSpace(start))
-		if err != nil {
-			return 0, 0, err
-		}
-		hi, err := strconv.Atoi(strings.TrimSpace(end))
-		if err != nil {
-			return 0, 0, err
-		}
-		if lo < lowerBound || hi > upperBound || lo > hi {
-			return 0, 0, fmt.Errorf("range out of bounds")
-		}
-		return lo, hi, nil
-	default:
-		value, err := strconv.Atoi(rangePart)
-		if err != nil {
-			return 0, 0, err
-		}
-		if value < lowerBound || value > upperBound {
-			return 0, 0, fmt.Errorf("value out of bounds")
-		}
-		return value, value, nil
-	}
 }
 
 // readEventTail reads the tail of the city event log through the check's

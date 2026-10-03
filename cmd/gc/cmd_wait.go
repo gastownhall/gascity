@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -355,7 +356,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 			if err != nil {
 				return nil
 			}
-			return pokeController(resolvedCityPath)
+			return enqueueController(resolvedCityPath, reconcilekey.Session(sessionID))
 		},
 	})
 }

@@ -120,3 +120,21 @@ func TestIsPositiveIntegerStr(t *testing.T) {
 		}
 	}
 }
+
+// attemptFor reports a retry attempt's own counter. Inside a ralph body
+// gc.attempt carries the iteration (the v1.4.2 contract), so the retry counter
+// has to come from gc.retry_attempt; beads minted before that key existed
+// still fall back to gc.attempt.
+func TestAttemptForPrefersRetryAttempt(t *testing.T) {
+	inLoop := runSnapshotBead{id: "b1", metadata: map[string]string{"gc.attempt": "3", "gc.iteration": "3", "gc.retry_attempt": "2"}}
+	if got, ok := attemptFor(inLoop); !ok || got != 2 {
+		t.Errorf("attemptFor(in loop) = (%d, %v), want (2, true)", got, ok)
+	}
+	if got, ok := iterationFor(inLoop); !ok || got != 3 {
+		t.Errorf("iterationFor(in loop) = (%d, %v), want (3, true)", got, ok)
+	}
+	legacy := runSnapshotBead{id: "b2", metadata: map[string]string{"gc.attempt": "2"}}
+	if got, ok := attemptFor(legacy); !ok || got != 2 {
+		t.Errorf("attemptFor(legacy) = (%d, %v), want (2, true)", got, ok)
+	}
+}

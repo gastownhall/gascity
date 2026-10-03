@@ -18,10 +18,18 @@ interface BeadBoardProps {
   columns: Record<BoardColumnId, BeadNode[]>;
   selectedId: string | null;
   attentionSeverity?: (beadId: string) => BadgeSeverity | null;
+  /** Liveness note per bead for in-progress rows (gp-6xd); see BeadBoardRow. */
+  noteOf?: (beadId: string) => string | null;
   onSelect: (beadId: string) => void;
 }
 
-export function BeadBoard({ columns, selectedId, attentionSeverity, onSelect }: BeadBoardProps) {
+export function BeadBoard({
+  columns,
+  selectedId,
+  attentionSeverity,
+  noteOf,
+  onSelect,
+}: BeadBoardProps) {
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-x-8 gap-y-8">
       {BOARD_COLUMNS.map((col) => {
@@ -44,6 +52,7 @@ export function BeadBoard({ columns, selectedId, attentionSeverity, onSelect }: 
                     node={node}
                     selected={node.bead.id === selectedId}
                     attentionSeverity={attentionSeverity?.(node.bead.id) ?? null}
+                    note={noteOf?.(node.bead.id) ?? null}
                     onSelect={onSelect}
                   />
                 ))}

@@ -15,6 +15,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/testpolicy/waiverclock"
 )
 
@@ -1969,8 +1970,8 @@ func TestBootstrapPolicyOwnsListenerHelperDebt(t *testing.T) {
 	t.Parallel()
 
 	audit := findRow(t, bootstrapPolicy.AuditBaseline, ScopeAll, ResourceListenerHelper)
-	if audit.BaselineCalls != 58 || audit.BaselineFiles != 23 || audit.ReportedCalls != 58 || audit.ReportedFiles != 23 {
-		t.Fatalf("all-source listener-helper baseline/reported = %d/%d, %d/%d; want 58/23, 58/23", audit.BaselineCalls, audit.BaselineFiles, audit.ReportedCalls, audit.ReportedFiles)
+	if audit.BaselineCalls != 59 || audit.BaselineFiles != 23 || audit.ReportedCalls != 59 || audit.ReportedFiles != 23 {
+		t.Fatalf("all-source listener-helper baseline/reported = %d/%d, %d/%d; want 59/23, 59/23", audit.BaselineCalls, audit.BaselineFiles, audit.ReportedCalls, audit.ReportedFiles)
 	}
 	if audit.OwnerBead != "ga-cp3hwi" || audit.MigrationTarget != "P0.4c-listener-helper" {
 		t.Fatalf("all-source listener-helper owner = %q/%q, want ga-cp3hwi/P0.4c-listener-helper", audit.OwnerBead, audit.MigrationTarget)
@@ -1978,8 +1979,8 @@ func TestBootstrapPolicyOwnsListenerHelperDebt(t *testing.T) {
 
 	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
 		row := findRow(t, rows, ScopeUntagged, ResourceListenerHelper)
-		if row.BaselineCalls != 38 || row.BaselineFiles != 13 || row.ReportedCalls != 38 || row.ReportedFiles != 13 {
-			t.Fatalf("listener-helper baseline/reported = %d/%d, %d/%d; want 38/13, 38/13", row.BaselineCalls, row.BaselineFiles, row.ReportedCalls, row.ReportedFiles)
+		if row.BaselineCalls != 39 || row.BaselineFiles != 13 || row.ReportedCalls != 39 || row.ReportedFiles != 13 {
+			t.Fatalf("listener-helper baseline/reported = %d/%d, %d/%d; want 39/13, 39/13", row.BaselineCalls, row.BaselineFiles, row.ReportedCalls, row.ReportedFiles)
 		}
 		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c-listener-helper" {
 			t.Fatalf("listener-helper owner = %q/%q, want ga-cp3hwi/P0.4c-listener-helper", row.OwnerBead, row.MigrationTarget)
@@ -1991,12 +1992,12 @@ func TestBootstrapPolicyOwnsNetListenDebtAndExactMediumOwners(t *testing.T) {
 	t.Parallel()
 
 	debt := findRow(t, bootstrapPolicy.Debt, ScopeUntagged, ResourceNetListen)
-	if debt.BaselineCalls != 96 || debt.BaselineFiles != 37 || debt.ReportedCalls != 92 || debt.ReportedFiles != 34 {
-		t.Fatalf("stream-listener source baseline/reported = %d/%d, %d/%d; want 96/37, 92/34", debt.BaselineCalls, debt.BaselineFiles, debt.ReportedCalls, debt.ReportedFiles)
+	if debt.BaselineCalls != 97 || debt.BaselineFiles != 37 || debt.ReportedCalls != 92 || debt.ReportedFiles != 34 {
+		t.Fatalf("stream-listener source baseline/reported = %d/%d, %d/%d; want 97/37, 92/34", debt.BaselineCalls, debt.BaselineFiles, debt.ReportedCalls, debt.ReportedFiles)
 	}
 	smallDebt := findRow(t, bootstrapPolicy.SmallDebt, ScopeUntagged, ResourceNetListen)
-	if smallDebt.BaselineCalls != 94 || smallDebt.BaselineFiles != 36 {
-		t.Fatalf("stream-listener Small baseline = %d/%d, want 94/36", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
+	if smallDebt.BaselineCalls != 95 || smallDebt.BaselineFiles != 36 {
+		t.Fatalf("stream-listener Small baseline = %d/%d, want 95/36", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
 	}
 	for _, row := range []*Baseline{debt, smallDebt} {
 		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c-listener" {
@@ -2523,6 +2524,9 @@ func repositoryRoot(t *testing.T) string {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller did not report census_test.go")
+	}
+	if root := bazeltest.OverrideRoot(); root != "" {
+		file = filepath.Join(root, "internal", "testpolicy", "resourcecensus", "census_test.go")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
 }

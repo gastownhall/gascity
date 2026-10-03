@@ -173,6 +173,18 @@ type conditionalWriteCapabilityProber interface {
 	probeConditionalWriteCapability() (capable bool, reason string)
 }
 
+// conditionalWritesLiveness is implemented by stores that can be closed out
+// from under a stamped handle (the SQLite binding engine, once storage routes
+// close). The seam asks it before the capability probe so a closed store
+// surfaces as ErrStoreClosed rather than as an incapable one: incapable fires
+// the once-latched degrade event under auto and the typed refusal under
+// require, and neither is true of a store that is simply gone. It is separate
+// from the prober so the prober's (capable, reason) answer stays the one
+// other capability readers consume.
+type conditionalWritesLiveness interface {
+	conditionalWritesStoreOpen() error
+}
+
 // ConditionalWritesResolveTargeter is implemented by store WRAPPERS to
 // declare which inner store ResolveConditionalWriter resolves instead of the
 // wrapper itself. Interface-embedding wrappers (the cmd/gc policy store, the
@@ -251,6 +263,9 @@ func IsConditionalWritesRequired(err error) bool {
 //	    is returned on every call, deterministically.
 //	require ∧ incapable               -> (nil, diagnostic, typed refusal):
 //	    fail closed; never fall back to an unconditional write.
+//	auto / require on a closed store  -> (nil, nil, ErrStoreClosed): the
+//	    store is gone, not incapable, so no degrade fires and no typed
+//	    refusal is raised; the caller's write would have failed the same way.
 //
 // The seam never GUESSES at unwrapping: a wrapper participates only by
 // declaring its resolution target via ConditionalWritesResolveTargeter (the
@@ -268,6 +283,11 @@ func ResolveConditionalWriter(store Store) (ConditionalWriter, *BeadsDiagnostic,
 	}
 	if mode == gate.ModeUnset || mode == gate.Off {
 		return nil, nil, nil
+	}
+	if liveness, ok := store.(conditionalWritesLiveness); ok {
+		if err := liveness.conditionalWritesStoreOpen(); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	writer, hasWriter := ConditionalWriterFor(store)
@@ -341,6 +361,8 @@ func conditionalStoreKind(store Store) string {
 		return "MemStore"
 	case *CachingStore:
 		return "CachingStore"
+	case *SQLiteStore:
+		return "SQLiteStore"
 	case *NativeDoltStore:
 		return storeNameNativeDoltStore
 	case nil:

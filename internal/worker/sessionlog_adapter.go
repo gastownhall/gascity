@@ -60,6 +60,17 @@ type SessionLogAdapter struct {
 	// activity memoizes derived tail activity across the per-request handles a
 	// Factory hands out. Nil (the zero adapter) derives on every call.
 	activity *DerivedActivityMemo
+	// statTranscript reads a transcript's on-disk identity. Nil uses os.Stat;
+	// tests replace it to land a write at the moment the generation is captured.
+	statTranscript func(path string) (os.FileInfo, error)
+}
+
+// statFile reads path's on-disk identity through the statTranscript seam.
+func (a SessionLogAdapter) statFile(path string) (os.FileInfo, error) {
+	if a.statTranscript != nil {
+		return a.statTranscript(path)
+	}
+	return os.Stat(path)
 }
 
 // DiscoverTranscript returns the best available transcript path for a worker.
@@ -194,6 +205,18 @@ func (a SessionLogAdapter) AgentMappings(path string) ([]sessionlog.AgentMapping
 	return sessionlog.FindAgentMappings(strings.TrimSpace(path))
 }
 
+// TranscriptRecords returns every raw transcript record in file order,
+// bypassing the active-branch walk. Records without a uuid — notably
+// queue-operation task notifications — are pruned by BuildDag and are
+// therefore invisible to ReadTranscript.
+func (a SessionLogAdapter) TranscriptRecords(path string) ([]json.RawMessage, error) {
+	entries, err := sessionlog.ReadFileRecords(strings.TrimSpace(path))
+	if err != nil {
+		return nil, err
+	}
+	return rawMessagesFromEntries(entries), nil
+}
+
 // ReadAgentTranscript loads a subagent transcript while preserving raw
 // message fidelity for worker-owned API surfaces.
 func (a SessionLogAdapter) ReadAgentTranscript(path, agentID string) (*AgentTranscriptResult, error) {
@@ -280,6 +303,15 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 	if err != nil {
 		return nil, err
 	}
+	// Identify the transcript's generation before reading it. A write landing
+	// after this point leaves the content newer than its generation, which the
+	// next load corrects. Identifying it after the read would stamp stale
+	// content with the post-write generation, and SessionHandle would serve
+	// that snapshot until the transcript changes again.
+	info, err := a.statFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat transcript: %w", err)
+	}
 	fullSession, err := sessionlog.ReadProviderFileRaw(req.Provider, path, 0)
 	if err != nil {
 		return nil, err
@@ -291,11 +323,6 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		if err != nil {
 			return nil, err
 		}
-	}
-
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, fmt.Errorf("stat transcript: %w", err)
 	}
 
 	entries := normalizeHistoryEntries(req.Provider, path, session.ID, session.Messages)

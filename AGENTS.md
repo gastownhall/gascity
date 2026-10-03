@@ -455,6 +455,55 @@ Makefile is insufficient because each nested runner rebuilds the environment
 and would otherwise restore user Git configuration through the preserved
 `HOME`.
 
+## Bazel (side-by-side build)
+
+The repo has a **second, parallel build system: Bazel**. It is side-by-side
+by design — `go build` / `go test` / the Makefile CI remain untouched and
+authoritative. Bazel adds remote caching, remote execution on the shared
+farm, and hermetic test inputs that work identically on any machine.
+
+**Agents should prefer Bazel for repeated build+test cycles.** The first
+`bazel build //...` costs the same as `go build ./...`; every subsequent
+one is a cache hit (seconds). The remote CAS is shared across all
+worktrees, all CI runs, and all developers — a test that passed once on
+CI never re-executes for you locally.
+
+```bash
+bazel test //...                 # full suite, ~0.6s when cached
+bazel test //internal/config     # one package
+bazel build //cmd/gc             # build only
+```
+
+**When to use which:**
+
+| situation | use |
+|---|---|
+| iterating on one package's tests | `bazel test //pkg/...` (remote-cached) |
+| verifying a cross-cutting change | `bazel test //...` |
+| quick syntax check of one file | `go build ./pkg/` (no server startup) |
+| running the existing CI gate | `make test-cover-*` (go test, unchanged) |
+| adding a new dependency | `go get` then `make bazel-sync` |
+
+**After changing imports or adding packages**, run:
+
+```bash
+make bazel-sync    # gazelle + repo tree regeneration; commit the result
+```
+
+The CI gate `BUILD files are in sync` fails if you forget.
+
+**Test sharding:** the heavy suites (cmd/gc, scripts, api, examples) are
+sharded for parallel remote execution. Sharded helpers re-exec the test
+binary; if you add a helper-spawning test, strip `TEST_SHARD_INDEX` /
+`TEST_TOTAL_SHARDS` from the helper's env (see `sanitizedBaseEnv` in
+`cmd/gc/fast_loop_helpers_test.go`).
+
+**Do NOT commit machine-specific endpoints.** `grpc://127.0.0.1:5005x`
+endpoints belong in `.bazelrc.local` (gitignored) for dev machines, or
+in CI secrets. The repo's `.bazelrc` has no executor hardcoded.
+
+**Local cache setup:** see [engdocs/bazel-quickstart.md](engdocs/bazel-quickstart.md).
+
 ## Code quality gates
 
 Before considering any task complete:

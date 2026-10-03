@@ -1,0 +1,24 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "eventstest",
+    srcs = ["conformance.go"],
+    importpath = "github.com/gastownhall/gascity/internal/events/eventstest",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/events",
+        "//internal/testutil",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

@@ -1030,6 +1030,31 @@ happened; C2 is still blocked on the beads lib bump):
   §12.1 local re-resolve remains that path's surface. The §12.5
   doctor-queries-live-API switch is still open.
 
+#### 6.4.4 Relocated binding engines (2026-10-01, P1.9)
+
+Split-city storage brought back a SQLite engine (§6.4.1's last bullet no
+longer holds) and a second production home for the stamp: storage boot opens
+the binding engine through the provider's `EngineOpener`, not the factory.
+
+- `beads.StampOpenedStore` applies `stampedResult`'s rules to a store the
+  factory did not open (unset → off, carrier-less refused under require and
+  degraded loudly under auto). It **refuses a store that already carries a
+  mode**, whatever the new mode: the stamp is latched for the store's lifetime,
+  and a second stamp is the one way a caller could lower a require it did not
+  set. `openStorageRoutes` is its only production caller; the degrade goes to
+  the controller's recorder when it has one and to the lazy city event-log
+  emitter on the CLI. The read-only relic census leaves its engine unstamped.
+- `SQLiteStore` embeds `condWritesStamp`, answers the prober (read-only open
+  or a layout without the revision column is incapable) and the inspector
+  (mirrors the prober; no latch), and reports kind `SQLiteStore`, wire kind
+  `sqlite-graph`. The require preflight and the §12.5 status block carry one
+  `binding/<name>` row for the engine every relocated class shares.
+- A resolve on a **closed** store returns `ErrStoreClosed`, never incapable:
+  incapable would fire the once-latched degrade under auto and the typed
+  refusal under require, and a store that was shut down is neither. The check
+  is a separate liveness method so the prober's `(capable, reason)` answer
+  stays what other capability readers consume.
+
 ### 6.5 What each layer holds
 
 | Layer | Holds | Never holds |

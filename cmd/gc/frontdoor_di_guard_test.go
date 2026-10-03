@@ -56,7 +56,7 @@ func TestFrontDoorStoreFreeFilesStayStoreFree(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	dir := filepath.Dir(currentFile)
+	dir := gcCallerDir(currentFile)
 	for _, name := range frontDoorStoreFreeFiles {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
@@ -120,7 +120,7 @@ func TestSnapshotInfoOnlyFilesStayOnInfoAccessors(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	dir := filepath.Dir(currentFile)
+	dir := gcCallerDir(currentFile)
 	for _, name := range snapshotInfoOnlyFiles {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
@@ -209,7 +209,7 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	dir := filepath.Dir(currentFile)
+	dir := gcCallerDir(currentFile)
 	for _, name := range metadataInfoOnlyFiles {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
@@ -439,7 +439,7 @@ func TestSessionRelocationRootsRouteThroughSessionClassStore(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	dir := filepath.Dir(currentFile)
+	dir := gcCallerDir(currentFile)
 	for _, name := range sessionRelocationRoutedFiles {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
@@ -477,7 +477,7 @@ func TestGraphRelocationRootsRouteThroughGraphClassStore(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	dir := filepath.Dir(currentFile)
+	dir := gcCallerDir(currentFile)
 	for _, name := range graphRelocationRoutedFiles {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)

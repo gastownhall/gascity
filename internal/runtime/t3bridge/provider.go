@@ -1778,9 +1778,25 @@ func (p *Provider) removeWorktreeForThread(thread map[string]interface{}) {
 	_ = p.rpcRemoveWorktree(base, worktreePath)
 }
 
+// clearBridgeMeta erases the drain markers this provider left on a session.
+//
+// The acknowledgement's provenance goes with the acknowledgement. Both keys have
+// exactly its lifetime, and Stop reaches here on the isPersistentAgent branch
+// too — where the session is deliberately LEFT RUNNING: same pane, same
+// instance_token. Left behind, a later drain of that still-live incarnation
+// finds an agent source beside a stamp that still matches the row, reads a dead
+// drain's acknowledgement as current, and declines to remind in total silence —
+// the ga-o6uw0 wedge. Removed, the same re-drain finds an unbound source,
+// classifies it unprovable, and asks again.
+//
+// The key names are spelled out rather than shared with cmd/gc's constants
+// because that package is main and cannot be imported; the eraser census in
+// cmd/gc/drain_reminder_ack_binding_test.go is what holds the two in step.
 func (p *Provider) clearBridgeMeta(name string) {
 	_ = removeMetaValue(name, "GC_DRAIN")
 	_ = removeMetaValue(name, "GC_DRAIN_ACK")
+	_ = removeMetaValue(name, "GC_DRAIN_ACK_SOURCE")
+	_ = removeMetaValue(name, "GC_DRAIN_ACK_REQUESTER_INSTANCE_TOKEN")
 	_ = removeMetaValue(name, "drained")
 }
 
@@ -1947,6 +1963,23 @@ func resolveConfigProviderModel(cfg *execStartConfig) (string, string, bool) {
 func beadStoreForWatcher(workDir string, env map[string]string) *beads.CachingStore {
 	bd := beads.NewBdStore(workDir, beads.ExecCommandRunnerWithEnv(env))
 	return beads.NewCachingStore(bd, nil)
+}
+
+// watchedBeadEvent filters the journal to the bead events the watcher
+// projects and canonicalizes their identity. The cache applies the payload
+// under the snapshot's own ID, so the subject the watcher then reads back must
+// be that same ID; an event whose subject names a different bead is dropped
+// rather than reported as activity on the wrong bead.
+func watchedBeadEvent(ev events.Event) (events.Event, bool) {
+	if ev.Type != events.BeadUpdated && ev.Type != events.BeadClosed && ev.Type != events.BeadCreated {
+		return events.Event{}, false
+	}
+	id, err := beads.BeadEventID(ev.Subject, ev.Payload)
+	if err != nil || id == "" {
+		return events.Event{}, false
+	}
+	ev.Subject = id
+	return ev, true
 }
 
 func beadEventRelevant(ev events.Event, bead beads.Bead, agentName, currentBead string) bool {
@@ -2129,7 +2162,8 @@ func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Co
 		if err != nil {
 			return
 		}
-		if ev.Type != events.BeadUpdated && ev.Type != events.BeadClosed && ev.Type != events.BeadCreated {
+		ev, ok := watchedBeadEvent(ev)
+		if !ok {
 			continue
 		}
 		cache.ApplyEvent(ev.Type, ev.Payload)

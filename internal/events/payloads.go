@@ -92,11 +92,25 @@ type BeadClaimReleasedPayload struct {
 // IsEventPayload marks BeadClaimReleasedPayload as an events.Payload variant.
 func (BeadClaimReleasedPayload) IsEventPayload() {}
 
+// HookClaimReclaimedStalePayload is the typed payload for hook.claim.reclaimed_stale
+// events (ga-7rj87d). Emitted when a scoped `bd reclaim --id BeadID` recovers a
+// candidate from PreviousOwner's stale lease and the retried claim in the same
+// hook cycle wins it for NewAssignee.
+type HookClaimReclaimedStalePayload struct {
+	BeadID        string `json:"bead_id"`
+	PreviousOwner string `json:"previous_owner"`
+	NewAssignee   string `json:"new_assignee"`
+}
+
+// IsEventPayload marks HookClaimReclaimedStalePayload as an events.Payload variant.
+func (HookClaimReclaimedStalePayload) IsEventPayload() {}
+
 func init() {
 	RegisterPayload(BeadWorktreeReaped, BeadWorktreeReapedPayload{})
 	RegisterPayload(BeadWorktreeReapSkipped, BeadWorktreeReapSkippedPayload{})
 	RegisterPayload(BeadClaimRejected, BeadClaimRejectedPayload{})
 	RegisterPayload(BeadClaimReleased, BeadClaimReleasedPayload{})
+	RegisterPayload(HookClaimReclaimedStale, HookClaimReclaimedStalePayload{})
 }
 
 // StoreDiskWarnPayload is the typed payload for gc.store.disk_warn events.

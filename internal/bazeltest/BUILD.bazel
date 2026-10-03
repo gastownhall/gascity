@@ -1,0 +1,24 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "bazeltest",
+    srcs = [
+        "bazeltest.go",
+        "lock_other.go",
+        "lock_unix.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/bazeltest",
+    visibility = ["//:__subpackages__"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

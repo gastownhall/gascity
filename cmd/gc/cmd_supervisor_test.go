@@ -325,6 +325,44 @@ func TestReloadSupervisorFallsBackToDefaultHomeSocket(t *testing.T) {
 	}
 }
 
+func TestSupervisorSocketPathForDirShortDirUnchanged(t *testing.T) {
+	dir := shortTempDir(t, "gc-supervisor-")
+
+	want := filepath.Join(dir, "supervisor.sock")
+	if got := supervisorSocketPathForDir(dir); got != want {
+		t.Fatalf("supervisorSocketPathForDir(%q) = %q, want %q", dir, got, want)
+	}
+}
+
+func TestSupervisorSocketPathForDirLongDirFallsBackToHashedTempPath(t *testing.T) {
+	base := shortTempDir(t, "gc-supervisor-long-")
+
+	longDir := filepath.Join(base, "segment")
+	for len(filepath.Join(longDir, "supervisor.sock")) <= supervisorSocketPathLimit {
+		longDir = filepath.Join(longDir, "segment")
+	}
+	otherLongDir := filepath.Join(base, "other-segment")
+	for len(filepath.Join(otherLongDir, "supervisor.sock")) <= supervisorSocketPathLimit {
+		otherLongDir = filepath.Join(otherLongDir, "segment")
+	}
+
+	got := supervisorSocketPathForDir(longDir)
+	if dir := filepath.Dir(got); dir != filepath.Join("/tmp", "gascity-supervisor") {
+		t.Fatalf("supervisorSocketPathForDir(%q) = %q, want under /tmp/gascity-supervisor", longDir, got)
+	}
+	if len(got) > supervisorSocketPathLimit {
+		t.Fatalf("fallback socket path length = %d, want <= %d: %s", len(got), supervisorSocketPathLimit, got)
+	}
+
+	if again := supervisorSocketPathForDir(longDir); again != got {
+		t.Fatalf("supervisorSocketPathForDir(%q) is not deterministic: %q != %q", longDir, again, got)
+	}
+
+	if other := supervisorSocketPathForDir(otherLongDir); other == got {
+		t.Fatalf("supervisorSocketPathForDir(%q) and supervisorSocketPathForDir(%q) collided on %q", longDir, otherLongDir, got)
+	}
+}
+
 func TestRenderSupervisorLaunchdTemplate(t *testing.T) {
 	data := &supervisorServiceData{
 		GCPath:        "/usr/local/bin/gc",
@@ -764,10 +802,10 @@ func TestBuildSupervisorServiceDataMissingSecretsFileIsNotAnError(t *testing.T) 
 }
 
 // TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully asserts
-// the documented fail-safe: a malformed secrets file does not block service
-// file generation (no error) and contributes no env — the malformed file is
-// ignored rather than partially applied, so the good first line must not leak
-// through.
+// the fix for #5982: a malformed line in the secrets file does not block
+// service file generation (no error) and does not wipe out the entries that
+// parsed cleanly — only the malformed line itself is skipped, the good entry
+// still reaches ExtraEnv.
 func TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
@@ -781,8 +819,60 @@ func TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully(t *tes
 	if err != nil {
 		t.Fatalf("buildSupervisorServiceData with malformed secrets file: %v", err)
 	}
-	if _, ok := supervisorServiceEnvMap(data.ExtraEnv)["ANTHROPIC_AUTH_TOKEN"]; ok {
-		t.Fatalf("ExtraEnv should not include any key from a malformed secrets file")
+	if got := supervisorServiceEnvMap(data.ExtraEnv)["ANTHROPIC_AUTH_TOKEN"]; got != "sk-from-file" {
+		t.Fatalf("ExtraEnv[ANTHROPIC_AUTH_TOKEN] = %q, want %q (a malformed later line must not drop a good earlier entry)",
+			got, "sk-from-file")
+	}
+}
+
+// TestBuildSupervisorServiceDataMultiLineQuotedSecretSkipsBlock is the
+// end-to-end check for #6022 (plus #5982): the issue's multi-line quoted
+// script is skipped as one block, even with both the script key and the
+// continuation-line key opted in via GC_SUPERVISOR_ENV, so neither a truncated
+// GC_NOMAD_AGENT_LAUNCH_SCRIPT nor a stray CODEX_HOME reaches the service env.
+// The valid entry after the block still does, and the stderr diagnostic names
+// the key and line range without echoing any value.
+func TestBuildSupervisorServiceDataMultiLineQuotedSecretSkipsBlock(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("GC_SUPERVISOR_ENV", "GC_NOMAD_AGENT_LAUNCH_SCRIPT CODEX_HOME")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("GC_NOMAD_AGENT_LAUNCH_SCRIPT", "")
+	t.Setenv("CODEX_HOME", "")
+
+	writeSupervisorSecretsEnvFile(t, `GC_NOMAD_AGENT_LAUNCH_SCRIPT="export PATH=/mnt/nomad/gc/bin/current:$PATH
+export CODEX_HOME=$NOMAD_SECRETS_DIR/codex-home"
+ANTHROPIC_AUTH_TOKEN=sk-from-file
+`)
+
+	var (
+		data *supervisorServiceData
+		err  error
+	)
+	stderr := captureSweepStderr(t, func() {
+		data, err = buildSupervisorServiceData()
+	})
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	if got["ANTHROPIC_AUTH_TOKEN"] != "sk-from-file" {
+		t.Fatalf("ExtraEnv[ANTHROPIC_AUTH_TOKEN] = %q, want %q (all env: %#v)", got["ANTHROPIC_AUTH_TOKEN"], "sk-from-file", got)
+	}
+	for _, key := range []string{"GC_NOMAD_AGENT_LAUNCH_SCRIPT", "CODEX_HOME"} {
+		if v, ok := got[key]; ok {
+			t.Errorf("ExtraEnv[%s] = %q, want absent (multi-line quoted block must be skipped)", key, v)
+		}
+	}
+	if !strings.Contains(stderr, "lines 1-2") || !strings.Contains(stderr, "GC_NOMAD_AGENT_LAUNCH_SCRIPT") {
+		t.Errorf("stderr = %q, want a diagnostic naming lines 1-2 and GC_NOMAD_AGENT_LAUNCH_SCRIPT", stderr)
+	}
+	for _, leak := range []string{"/mnt/nomad", "NOMAD_SECRETS_DIR", "sk-from-file"} {
+		if strings.Contains(stderr, leak) {
+			t.Errorf("stderr leaks value material %q: %q", leak, stderr)
+		}
 	}
 }
 
@@ -7405,10 +7495,14 @@ func TestRunSupervisorWarnsOnEphemeralAPIPort(t *testing.T) {
 	if err := os.WriteFile(supervisor.ConfigPath(), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sockPath := filepath.Join(supervisor.RuntimeDir(), "supervisor.sock")
+	sockPath := supervisorSocketPath()
 	if err := os.MkdirAll(sockPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// sockPath may resolve outside t.TempDir() when GC_HOME exceeds
+	// supervisorSocketPathLimit and the fallback triggers, so Go's own
+	// cleanup will not reap it.
+	t.Cleanup(func() { _ = os.RemoveAll(sockPath) })
 	if err := os.WriteFile(filepath.Join(sockPath, "sentinel"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -7433,10 +7527,14 @@ func TestRunSupervisorNoWarningForLowAPIPort(t *testing.T) {
 	if err := os.WriteFile(supervisor.ConfigPath(), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sockPath := filepath.Join(supervisor.RuntimeDir(), "supervisor.sock")
+	sockPath := supervisorSocketPath()
 	if err := os.MkdirAll(sockPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// sockPath may resolve outside t.TempDir() when GC_HOME exceeds
+	// supervisorSocketPathLimit and the fallback triggers, so Go's own
+	// cleanup will not reap it.
+	t.Cleanup(func() { _ = os.RemoveAll(sockPath) })
 	if err := os.WriteFile(filepath.Join(sockPath, "sentinel"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -34,14 +34,14 @@ func seedPoolSessionBead(t *testing.T, store beads.Store, identity poolSessionCr
 // Failing the create closed is only safe if the names that are actually held on
 // a running fleet get released. The live holder on cherry is an OPEN, asleep
 // pool bead (gcg-session-a11f2898) that has no pod, holds the pool alias
-// "bd.dog-1", and — critically — holds the LEGACY bead-ID-scoped session_name
-// this change stops minting. If the identity-derived name collided with that
-// holder, the fail-closed derive would convert a 115-pods/hour leak into a
-// permanently stalled pool on the first tick after deploy: strictly worse,
-// because a leak is visible and a silent stall is not.
+// "bd.dog-1", and holds a bead-ID-scoped session_name. If that settled holder
+// counted as the slot's identity lease, the fail-closed create would convert a
+// 115-pods/hour leak into a permanently stalled pool on the first tick after
+// deploy: strictly worse, because a leak is visible and a silent stall is not.
 //
-// It does not collide, and this pins why: the holder reserves the name it was
-// minted with, and that is a different string from the one identity derives.
+// It does not block, and this pins why: the holder reserves only the name it
+// was minted with, and the identity lease (ensurePoolIdentityNotHeldByOpenRow)
+// deliberately ignores settled (asleep/active) rows.
 func TestPoolSessionCreate_LegacyBeadIDHolderDoesNotStallTheSlot(t *testing.T) {
 	store := beads.NewMemStore()
 	identity := poolChurnIdentity()
@@ -71,8 +71,8 @@ func TestPoolSessionCreate_LegacyBeadIDHolderDoesNotStallTheSlot(t *testing.T) {
 		t.Fatalf("create stalled behind the legacy bead-ID holder %s (session_name %q): %v — a fail-closed derive that cannot get past the names already on a running fleet is a permanent pool outage, not a fix", holder.ID, legacyName, err)
 	}
 	got := strings.TrimSpace(info.SessionNameMetadata)
-	if want := poolIdentitySessionName(identity.AgentName, poolChurnTemplate); got != want {
-		t.Fatalf("session_name = %q, want the identity-derived %q", got, want)
+	if want := PoolSessionName(poolChurnTemplate, info.ID); got != want {
+		t.Fatalf("session_name = %q, want the bead-scoped %q", got, want)
 	}
 	if got == legacyName {
 		t.Fatalf("new create claimed the legacy holder's own name %q", legacyName)
@@ -106,34 +106,9 @@ func TestPoolSessionCreate_SweptSlotReleasesItsNameForTheNextAttempt(t *testing.
 	if err != nil {
 		t.Fatalf("create stalled behind swept slot %s: %v", retired.ID, err)
 	}
-	if got := strings.TrimSpace(info.SessionNameMetadata); got != retiredName {
-		t.Fatalf("replacement session_name = %q, want the slot's own name %q back", got, retiredName)
-	}
-}
-
-// TestPoolSessionCreate_SweptSlotWithoutPoolMarkersStillBlocks is the
-// discriminating control for the test above. The release is not "closed beads
-// let go"; it is specifically the pool_managed + ephemeral carve-out. Strip one
-// of those markers and the same closed bead reserves the name permanently — so
-// the test above genuinely proves the markers are being written, rather than
-// passing because closure alone is enough.
-func TestPoolSessionCreate_SweptSlotWithoutPoolMarkersStillBlocks(t *testing.T) {
-	store := beads.NewMemStore()
-	identity := poolChurnIdentity()
-	front := sessionFrontDoor(store)
-
-	retired := seedPoolSessionBead(t, store, identity, map[string]string{"session_origin": ""})
-	if _, err := front.Close(retired.ID, "orphaned", time.Now().UTC()); err != nil {
-		t.Fatalf("closing retired slot: %v", err)
-	}
-
-	open, err := loadSessionBeads(store)
-	if err != nil {
-		t.Fatalf("loadSessionBeads: %v", err)
-	}
-	_, err = createPoolSessionBeadWithAlias(store, poolChurnTemplate, nil, newSessionBeadSnapshot(open), time.Now().UTC(), identity, "")
-	if !errors.Is(err, errPoolSessionNameUnavailable) {
-		t.Fatalf("create error = %v, want errPoolSessionNameUnavailable — without the pool markers a closed bead reserves its explicit name for good", err)
+	// Bead-scoped names are never reused: the replacement gets its own.
+	if got := strings.TrimSpace(info.SessionNameMetadata); got == retiredName || got != PoolSessionName(poolChurnTemplate, info.ID) {
+		t.Fatalf("replacement session_name = %q, want a fresh bead-scoped name (retired %q)", got, retiredName)
 	}
 }
 
@@ -163,8 +138,11 @@ func TestPoolSessionCreate_FailedCreateHolderReleasesItsName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("retry after a rolled-back attempt: %v", err)
 	}
-	if got := strings.TrimSpace(info.SessionNameMetadata); got != firstName {
-		t.Fatalf("retry session_name = %q, want the same %q — a retry that changes name is a new runtime box", got, firstName)
+	// A new generation gets a new bead-scoped name; what keeps that from
+	// leaking the previous box is releaseBeadScopedPoolRuntime, pinned by
+	// TestPoolSessionCreate_FailedCreatesLeaveAtMostOneLiveRuntime.
+	if got := strings.TrimSpace(info.SessionNameMetadata); got == firstName || got != PoolSessionName(poolChurnTemplate, info.ID) {
+		t.Fatalf("retry session_name = %q, want a fresh bead-scoped name (first %q)", got, firstName)
 	}
 }
 

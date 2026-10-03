@@ -8,8 +8,8 @@
 # Minimum dolt version: 2.1.0. This is the managed bd/Dolt compatibility
 # floor and preserves the original guard for the GC/writer deadlock fixed in
 # dolthub/dolt commit ccf7bde206 (PR #10876). The doctor check
-# (doctor/check-dolt) fails closed; mol-dog-backup preflight records the same
-# failure outcome, and the sync step checks it before running backup sync.
+# (doctor/check-dolt) fails closed, and the sync step checks it before running
+# backup sync. mol-dog-backup runs `bd backup`, so bd owns its Dolt floor.
 
 [pack]
 name = "dolt"

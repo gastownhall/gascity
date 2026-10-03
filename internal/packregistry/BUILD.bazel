@@ -1,0 +1,49 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "packregistry",
+    srcs = [
+        "catalog.go",
+        "config.go",
+        "content_hash.go",
+        "file_lock_unix.go",
+        "file_lock_windows.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/packregistry",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/fsys",
+        "//internal/gchome",
+        "//internal/git",
+        "@com_github_burntsushi_toml//:toml",
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+go_test(
+    name = "packregistry_test",
+    srcs = [
+        "catalog_test.go",
+        "config_test.go",
+        "content_hash_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":packregistry"],
+    deps = ["//internal/testenv"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

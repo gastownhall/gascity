@@ -159,6 +159,59 @@ func newRetryEvalOrderingFixture(t *testing.T, runOutcome map[string]string) (*s
 	return store, logical, eval1
 }
 
+// TestProcessRetryEvalPassClearsPendingBudgetOnClose pins the close side of
+// the drift-pending lifecycle for the retry-eval lane. The store-ref resolver
+// that can answer drift-pending also serves the required-artifact postcondition
+// here, so a retry-eval can pend on a missing rig, escalate once, and then
+// recover. Closing it through a plain outcome stamp would leave the bead
+// advertising gc.control_pending_stalled=true after it passed — the same stale
+// stamp the finalizer's completion metadata already clears.
+func TestProcessRetryEvalPassClearsPendingBudgetOnClose(t *testing.T) {
+	t.Parallel()
+
+	store, logical, eval1 := newRetryEvalOrderingFixture(t, map[string]string{
+		"gc.outcome": "pass",
+	})
+	// Pending, then escalated: the budget a drift-pending sweep records plus
+	// the one-shot stall latch.
+	if err := store.SetMetadataBatch(eval1.ID, map[string]string{
+		beadmeta.ControlPendingReasonMetadataKey:    `rig "ghostrig" not found in city config`,
+		beadmeta.ControlPendingCountMetadataKey:     "7",
+		beadmeta.ControlPendingFirstSeenMetadataKey: "2026-08-11T08:00:47Z",
+		beadmeta.ControlPendingStalledMetadataKey:   "true",
+	}); err != nil {
+		t.Fatalf("seed pending budget: %v", err)
+	}
+	pending := mustGetBead(t, store, eval1.ID)
+
+	// Recovered: the drift healed and the eval resolves with a passing outcome.
+	result, err := ProcessControl(store, pending, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(retry-eval pass after pending): %v", err)
+	}
+	if !result.Processed || result.Action != "pass" {
+		t.Fatalf("result = %+v, want processed pass", result)
+	}
+
+	evalAfter := mustGetBead(t, store, eval1.ID)
+	if evalAfter.Status != "closed" || evalAfter.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Fatalf("eval = status %q outcome %q, want closed/pass", evalAfter.Status, evalAfter.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	for _, key := range []string{
+		beadmeta.ControlPendingReasonMetadataKey,
+		beadmeta.ControlPendingCountMetadataKey,
+		beadmeta.ControlPendingFirstSeenMetadataKey,
+		beadmeta.ControlPendingStalledMetadataKey,
+	} {
+		if got := evalAfter.Metadata[key]; got != "" {
+			t.Fatalf("%s = %q on the closed eval, want cleared — a passed eval must not advertise the stall it recovered from", key, got)
+		}
+	}
+	if logicalAfter := mustGetBead(t, store, logical.ID); logicalAfter.Status != "closed" {
+		t.Fatalf("logical status = %q, want closed", logicalAfter.Status)
+	}
+}
+
 func TestProcessRetryEvalHardFailClosesEvalBeforeLogical(t *testing.T) {
 	t.Parallel()
 

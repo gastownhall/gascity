@@ -40,6 +40,14 @@ const (
 // Backstop pacing. Deliberately slow: this only rescues a pool slot that was
 // handed work but never began it, so a couple of minutes of latency is fine and
 // keeps the backstop nowhere near anything that could read as churn.
+//
+// idleClaimNudgeGrace is also a cross-package floor: a pane-owning adapter that
+// is silent for the whole grace reads as a stalled seat and gets drained, so
+// such adapters redraw their busy line on an interval strictly below it (the
+// zcode adapter beats every 30 s by default, operator-overridable via
+// ZCODE_REPL_HEARTBEAT_SECS; see internal/worker/adapters/zcode/zcode-repl).
+// Keep this grace above every adapter's heartbeat interval — lowering it below
+// one re-introduces the drain regression that heartbeat exists to fix.
 const (
 	idleClaimNudgeGrace       = 90 * time.Second // observe-before-first-nudge; lets a normal claim land
 	idleClaimNudgeBackoff     = 3 * time.Minute  // between retries when a delivered nudge didn't take

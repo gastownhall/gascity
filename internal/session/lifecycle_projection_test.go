@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -1089,6 +1090,9 @@ func lifecycleRepoRoot(t *testing.T) string {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
+	}
+	if root := bazeltest.OverrideRoot(); root != "" {
+		file = filepath.Join(root, "internal", "session", "lifecycle_projection_test.go")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 }

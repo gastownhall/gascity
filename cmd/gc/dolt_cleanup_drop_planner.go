@@ -17,8 +17,14 @@ import "strings"
 //   - beads_vr*: orchestrator mail/router_test.go random prefixes
 //   - beads_t[0-9a-f]*: protocol test random prefixes (t + 8 hex chars)
 //   - beads_test_bench_*: benchmark test fixture databases
+//   - beads_test_*: gc-side test-owned scope override marker (ga-szv0ge) —
+//     tests that must exercise the real finalizeCanonicalBdScopeInit store
+//     open (so cannot be satisfied by a fake executor alone) pass this
+//     prefix as their doltDatabase override so any leaked database is
+//     reapable here even though the process/config-path reaper in
+//     dolt_cleanup_reaper.go never sees it
 var defaultStaleDatabasePrefixes = []string{
-	"testdb_", "test_guard_", "test_federation_", "doctest_", "doctortest_", "beads_pt", "beads_vr", "beads_t", "beads_test_bench_",
+	"testdb_", "test_guard_", "test_federation_", "doctest_", "doctortest_", "beads_pt", "beads_vr", "beads_t", "beads_test_bench_", "beads_test_",
 }
 
 // systemDatabaseNames are the Dolt/MySQL system databases that SHOW

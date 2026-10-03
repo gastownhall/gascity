@@ -435,6 +435,80 @@ func TestCityAnchoredSessionEnvSkipsCityAnchorsWhenCityPathEmpty(t *testing.T) {
 	}
 }
 
+// TestCityAnchoredSessionEnvSkipsLocalAnchorsWhenRemoteTargeted is the
+// RED/GREEN regression for cr-vddb9.1: a nomad-routed remote session whose
+// provider env carries GC_CITY_URL or GC_CITY_CONTEXT must never also
+// receive the local city identity anchors (GC_CITY, GC_CITY_PATH,
+// GC_CITY_ROOT, GC_CITY_RUNTIME_DIR). Seeding both makes the nested gc binary
+// in that session fail closed at cmd/gc/remote_target.go's local-vs-remote
+// conflict guard with "conflicting targets" (matches the D2 failure in wisp
+// gcg--9223372036854774627 / session gcg--9223372036854774630 gating
+// cr-u4plc.1).
+//
+// Withheld means PRESENT AND EMPTY, not absent — the same encoding asserted by
+// TestResolvedSessionConfigForProviderPinsControllerTokenEmpty above. This env
+// is an overlay on an environment the managed session already inherits, so an
+// omitted key is an inherited key: a GC_CITY exported by the controller or
+// living in the tmux server's global env would still reach the nested gc and
+// still trip the guard. Only an explicit empty value is honored as
+// withholding (tmux `env -u`, subprocess entry drop). GC_CITY_ROOT is covered
+// because the guard trips on it and citylayout.CityIdentityEnvMap never seeds
+// it, so nothing else clears an inherited value.
+func TestCityAnchoredSessionEnvSkipsLocalAnchorsWhenRemoteTargeted(t *testing.T) {
+	cityPath := t.TempDir()
+
+	t.Run("remote via GC_CITY_URL", func(t *testing.T) {
+		providerEnv := map[string]string{
+			"GC_CITY_URL":    "https://remote.example.test",
+			"PROVIDER_TOKEN": "ok",
+		}
+		got := cityAnchoredSessionEnv(cityPath, nil, providerEnv)
+		for _, key := range []string{"GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_CITY_RUNTIME_DIR"} {
+			v, ok := got[key]
+			if !ok {
+				t.Errorf("%s absent; want present and empty when GC_CITY_URL targets a remote city (an omitted key is an inherited key)", key)
+			} else if v != "" {
+				t.Errorf("%s = %q, want empty", key, v)
+			}
+		}
+		if got["GC_CITY_URL"] != "https://remote.example.test" {
+			t.Errorf("GC_CITY_URL = %q, want preserved", got["GC_CITY_URL"])
+		}
+		if got["PROVIDER_TOKEN"] != "ok" {
+			t.Errorf("PROVIDER_TOKEN = %q, want ok", got["PROVIDER_TOKEN"])
+		}
+	})
+
+	t.Run("remote via GC_CITY_CONTEXT", func(t *testing.T) {
+		providerEnv := map[string]string{
+			"GC_CITY_CONTEXT": "remote-context",
+		}
+		got := cityAnchoredSessionEnv(cityPath, nil, providerEnv)
+		for _, key := range []string{"GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_CITY_RUNTIME_DIR"} {
+			v, ok := got[key]
+			if !ok {
+				t.Errorf("%s absent; want present and empty when GC_CITY_CONTEXT targets a remote city (an omitted key is an inherited key)", key)
+			} else if v != "" {
+				t.Errorf("%s = %q, want empty", key, v)
+			}
+		}
+	})
+
+	t.Run("local — no remote keys present", func(t *testing.T) {
+		got := cityAnchoredSessionEnv(cityPath, nil, map[string]string{"PROVIDER_TOKEN": "ok"})
+		if got["GC_CITY"] != cityPath {
+			t.Errorf("GC_CITY = %q, want %q (anchors still seeded when no remote target present)", got["GC_CITY"], cityPath)
+		}
+		if got["GC_CITY_PATH"] != cityPath {
+			t.Errorf("GC_CITY_PATH = %q, want %q", got["GC_CITY_PATH"], cityPath)
+		}
+		wantRuntimeDir := filepath.Join(cityPath, ".gc", "runtime")
+		if got["GC_CITY_RUNTIME_DIR"] != wantRuntimeDir {
+			t.Errorf("GC_CITY_RUNTIME_DIR = %q, want %q", got["GC_CITY_RUNTIME_DIR"], wantRuntimeDir)
+		}
+	})
+}
+
 func TestResolvedSessionConfigForProviderSkipsStoredMCPMetadataForTmuxTransport(t *testing.T) {
 	cfg, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
