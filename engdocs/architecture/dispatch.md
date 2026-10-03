@@ -179,6 +179,37 @@ Targets resolve to `Agent.PoolName` when set and
 `Agent.QualifiedName()` otherwise, so pool instances and pool templates
 land on the same routed queue.
 
+Worker probes normally read at most 20 routed rows. If admission removes any
+row from a full window, the probe rereads that route without the reader limit,
+filters again, then returns at most 20 admitted candidates. The legacy route
+fallback uses the same refill rule. This keeps excluded roots from hiding later
+work without making every worker probe an unlimited read.
+
+Both forms also apply one row-level admission stage the reader cannot express
+as a flag: `PoolDemandServeRules.ExcludeWorkflowTopology` keeps formula specs,
+scopes, and workflow topology owned by the graph out of fresh worker demand before any
+candidate cap and before the count. An unassigned workflow root stamped
+`gc.workflow_expanded=true` is therefore dropped. So is a workflow root with
+non-empty native step dependencies, or an ambiguous routed graph.v2 root that
+lacks native topology metadata. These roots can carry `gc.routed_to` and be
+dependency-ready from creation (their finalize edge is `tracks`), but they are
+controller-owned latches whose step beads are the work; serving one hands a
+unit of work to a second seat and then respawns a seat for the root every tick
+(#6461). A canonical root with empty native step dependencies is the #2763
+root-only launch shape and stays admissible. The temporary `gc.run_target`-only
+legacy root also stays admissible unless it is explicitly stamped expanded.
+
+The rule is declared once in `PoolDemandServeRules` and rendered into both
+shell forms. The controller's `demandRowServable` and the hook's final claim
+checks consume the full predicate. The earlier hook readiness filter is
+deliberately narrower: it removes closed, deferred, blocked, held, and
+unassigned explicitly-expanded rows before claim selection, while the final
+claim boundary rejects the remaining workflow topology. A root that already
+carries an assignee is that session's continuation anchor and is untouched by
+the fresh-demand exclusion. Older expanded roots missing both the expansion
+stamp and native topology remain ambiguous and need a one-time metadata
+backfill.
+
 Supported handoff forms are intentionally distinct. Generic pool demand is
 ready work with `assignee=""` and `gc.routed_to=<target>`; assigning the
 pool template itself is not pool demand. Direct named-session delivery is

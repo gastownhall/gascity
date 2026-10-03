@@ -92,6 +92,76 @@ func agreementRows() []agreementRow {
 			wantServable: false,
 		},
 		{
+			// The canonical-route twin of a-13 (#6461): an expanded root on
+			// gc.routed_to is a latch whose children are the work. Neither side
+			// may count or serve it.
+			name: "fully-expanded workflow root routed to the pool",
+			bead: beads.Bead{ID: "a-14", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey:  beadmeta.FormulaContractGraphV2,
+				beadmeta.RoutedToMetadataKey:         agreementTemplate,
+				beadmeta.WorkflowExpandedMetadataKey: "true",
+			}},
+			wantServable: false,
+		},
+		{
+			// The #2763 shape on the canonical route: a root-only root is the
+			// unit of work and stays both counted and servable.
+			name: "root-only workflow root routed to the pool",
+			bead: beads.Bead{ID: "a-15", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:                   beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey:        beadmeta.FormulaContractGraphV2,
+				beadmeta.RoutedToMetadataKey:               agreementTemplate,
+				beadmeta.NativeStepDependenciesMetadataKey: "[]",
+			}},
+			wantServable: true,
+		},
+		{
+			name: "canonical routed root-only workflow with native topology",
+			bead: beads.Bead{ID: "a-16", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:                   beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey:        beadmeta.FormulaContractGraphV2,
+				beadmeta.RoutedToMetadataKey:               agreementTemplate,
+				beadmeta.NativeStepDependenciesMetadataKey: "[]",
+			}},
+			wantServable: true,
+		},
+		{
+			name: "unstamped routed graph workflow latch",
+			bead: beads.Bead{ID: "a-17", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:                   beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey:        beadmeta.FormulaContractGraphV2,
+				beadmeta.RoutedToMetadataKey:               agreementTemplate,
+				beadmeta.NativeStepDependenciesMetadataKey: `["workflow-finalize"]`,
+			}},
+			wantServable: false,
+		},
+		{
+			name: "legacy routed graph workflow latch",
+			bead: beads.Bead{ID: "a-18", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+				beadmeta.RoutedToMetadataKey:        agreementTemplate,
+			}},
+			wantServable: false,
+		},
+		{
+			name: "routed formula spec",
+			bead: beads.Bead{ID: "a-19", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     beadmeta.KindSpec,
+				beadmeta.RoutedToMetadataKey: agreementTemplate,
+			}},
+			wantServable: false,
+		},
+		{
+			name: "routed workflow scope",
+			bead: beads.Bead{ID: "a-20", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     beadmeta.KindScope,
+				beadmeta.RoutedToMetadataKey: agreementTemplate,
+			}},
+			wantServable: false,
+		},
+		{
 			name: "routed epic",
 			bead: beads.Bead{
 				ID: "a-7", Status: "open", Type: "epic",
@@ -244,6 +314,16 @@ func TestTierThreeServeRulesMatchTheGeneratedQuery(t *testing.T) {
 			}
 		}
 	}
+	// The metadata rule has no bd flag, so it rides a jq stage over the
+	// rows: the rule and the rendered stage must agree in both directions.
+	// Match representative clauses rather than merely finding metadata keys.
+	hasStage := strings.Contains(query, `has("`+beadmeta.NativeStepDependenciesMetadataKey+`")`) &&
+		strings.Contains(query, `!= "`+beadmeta.KindScope+`"`) &&
+		strings.Contains(query, `!= "`+beadmeta.KindSpec+`"`)
+	if rules.ExcludeWorkflowTopology != hasStage {
+		t.Errorf("PoolDemandServeRules.ExcludeWorkflowTopology = %v but the generated query carrying the admission stage = %v:\n%s",
+			rules.ExcludeWorkflowTopology, hasStage, query)
+	}
 }
 
 func queryFlagValues(query, flag string) []string {
@@ -395,7 +475,6 @@ func TestGoPredicateAndGeneratedQueryAgreeRowByRow(t *testing.T) {
 
 	opts, metaWant := parseReadyArgsForTest(t, args)
 	legacyOpts, legacyMetaWant := parseReadyArgsForTest(t, tierThreeLegacyReaderArgs(t, query, agreementTemplate))
-	assertLegacyTierFilterUnchanged(t, query)
 
 	for _, row := range append(agreementRows(), holdLabelAgreementRows()...) {
 		t.Run(row.name, func(t *testing.T) {
@@ -416,19 +495,14 @@ func TestGoPredicateAndGeneratedQueryAgreeRowByRow(t *testing.T) {
 }
 
 // legacyWorkflowTierServes evaluates the generated query's LEGACY workflow-root
-// tier: its own reader flags plus the jq post-filter the builder pipes the
-// result through. That filter keeps only rows whose gc.routed_to is empty and
-// which are not already expanded into real child steps — the same two gates the
-// Go side applies in controllerDemandRouteCandidates: run_target is consulted
-// only when there is no canonical route, and only for a root the fallback may
-// still speak for (workflowRunTargetFallbackEligible, #5900). Mirroring those
-// jq clauses here is the single restatement in this conformance, and
-// assertLegacyTierFilterUnchanged is what keeps it honest.
+// tier: its own reader flags plus the shared metadata eligibility contract.
+// Route fallback remains legacy-specific, while workflow topology semantics
+// come from the same descriptor used by hook claim and controller demand.
 func legacyWorkflowTierServes(bead beads.Bead, opts readyOpts, metaWant []metadataFieldFilter) bool {
 	if !workerIsServed(bead, opts, metaWant) {
 		return false
 	}
-	if strings.TrimSpace(bead.Metadata[beadmeta.WorkflowExpandedMetadataKey]) == "true" {
+	if !config.PoolDemandServeRulesForQuery().AllowsMetadata(bead.Metadata) {
 		return false
 	}
 	return strings.TrimSpace(bead.Metadata[beadmeta.RoutedToMetadataKey]) == ""
@@ -441,6 +515,9 @@ func legacyWorkflowTierServes(bead beads.Bead, opts readyOpts, metaWant []metada
 // first would miss every exclusion the hook applies afterwards, which is exactly
 // where the two use different comparisons (see demandRowServable).
 func workerIsServed(bead beads.Bead, opts readyOpts, metaWant []metadataFieldFilter) bool {
+	if !config.PoolDemandServeRulesForQuery().AllowsMetadata(bead.Metadata) {
+		return false
+	}
 	readerServed := filterReadyBeads([]beads.Bead{bead}, opts, metaWant)
 	if len(readerServed) != 1 {
 		return false
@@ -450,33 +527,6 @@ func workerIsServed(bead beads.Bead, opts readyOpts, metaWant []metadataFieldFil
 		return false
 	}
 	return workQueryHasReadyWork(filterUnreadyHookCandidates(string(encoded), time.Now()))
-}
-
-// assertLegacyTierFilterUnchanged pins the jq program legacyWorkflowTierServes
-// mirrors — the WHOLE rendered filter, not one clause inside it.
-//
-// Presence of a clause is not the property that matters. A filter that grows a
-// SECOND stage still contains the clause this used to look for, so the pin would
-// stay green while the Go mirror silently stopped describing what the query
-// does. Pinning the complete program means any added stage, changed limit slice
-// or reordered select fails here, which is the only honest way to hold a
-// restatement in place.
-func assertLegacyTierFilterUnchanged(t *testing.T, query string) {
-	t.Helper()
-	// The exact filter poolDemandMigrationFilterJQ(1) renders into
-	// poolDemandFirstRowFunctionScript, brackets and limit slice included. The
-	// query is compared with the sh -c single-quote escaping undone, so the pin
-	// holds the jq PROGRAM rather than the quoting of the shell wrapper around it.
-	const wantFilter = `jq '[.[] | select(((.metadata["gc.routed_to"] // "") == "") and ((.metadata["gc.workflow_expanded"] // "") != "true"))] | .[:1]'`
-	if !strings.Contains(unescapeShellSingleQuotes(query), wantFilter) {
-		t.Fatalf("the legacy workflow tier's post-filter is no longer exactly\n  %s\nso the Go mirror in legacyWorkflowTierServes is unpinned. Re-derive the mirror against the new filter, then update this pin.\nGenerated query:\n%s", wantFilter, query)
-	}
-}
-
-// unescapeShellSingleQuotes undoes the '\” sequence sh -c quoting produces, so
-// a pin can name the embedded program as it is written in the builder.
-func unescapeShellSingleQuotes(s string) string {
-	return strings.ReplaceAll(s, `'\''`, `'`)
 }
 
 // tierThreeLegacyReaderArgs slices the legacy workflow-root tier's reader
