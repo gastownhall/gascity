@@ -23,6 +23,8 @@ func TestParseSQLiteSequenceFloorRequiresCanonicalInteger(t *testing.T) {
 		// an older build wrapped past MaxInt64 (beads.RaiseSQLiteSequenceFloor).
 		{name: "negative", contents: "-1\n", want: -1},
 		{name: "min int64", contents: "-9223372036854775808\n", want: -9223372036854775808},
+		// The exact floor the deployed hotfix (562924baa4) wrote to a live graph store.
+		{name: "hotfix floor", contents: "-9223372036850990241\n", want: -9223372036850990241},
 		{name: "negative zero", contents: "-0\n", wantErr: true},
 		{name: "negative leading zero", contents: "-01\n", wantErr: true},
 		{name: "plus sign", contents: "+1\n", wantErr: true},

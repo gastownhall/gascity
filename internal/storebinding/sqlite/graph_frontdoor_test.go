@@ -102,6 +102,35 @@ func TestOpenGraphAdoptsExistingRowsInPlace(t *testing.T) {
 	}
 }
 
+// TestOpenGraphOpensTheHotfixNegativeFloor pins that the deployed Graph path
+// opens a store whose graph.seqfloor holds the exact negative floor the hotfix
+// build (562924baa4) wrote to a live graph store, and mints right above it.
+// Before this change the open failed with "invalid nonnegative floor".
+func TestOpenGraphOpensTheHotfixNegativeFloor(t *testing.T) {
+	root := t.TempDir()
+	first := openGraphComponent(t, root)
+	seeded := mustCreateGraphBead(t, first.Graph(), beads.Bead{Title: "before the hotfix floor"})
+	dir := filepath.Dir(first.Path())
+	if err := first.Close(); err != nil {
+		t.Fatalf("closing first Graph component: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, graphSequenceFloorFilename), []byte("-9223372036850990241\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	second := openGraphComponent(t, root)
+	if floor, err := second.SequenceFloor(); err != nil || floor != -9223372036850990241 {
+		t.Fatalf("SequenceFloor = %d, %v; want -9223372036850990241", floor, err)
+	}
+	if _, err := second.Graph().Get(seeded.ID); err != nil {
+		t.Fatalf("existing row %s: %v", seeded.ID, err)
+	}
+	next := mustCreateGraphBead(t, second.Graph(), beads.Bead{Title: "after the hotfix floor"})
+	if next.ID != "gcg--9223372036850990240" {
+		t.Fatalf("id over the hotfix floor = %q, want gcg--9223372036850990240", next.ID)
+	}
+}
+
 func TestOpenGraphRejectsAForeignProvider(t *testing.T) {
 	spec := graphSpec(t, t.TempDir())
 	spec.Provider = storebinding.ProviderID("postgres")

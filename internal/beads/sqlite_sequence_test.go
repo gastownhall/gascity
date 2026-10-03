@@ -767,3 +767,76 @@ func TestSQLiteExhaustedStoreResumesAfterRepairWithoutRestart(t *testing.T) {
 		t.Fatalf("mint after repairing the exhausted store = %q, want %q", got, want)
 	}
 }
+
+// hotfixGraphFloor is the exact graph.seqfloor the deployed hotfix build
+// (562924baa4, a port of this change onto an older base) had written to
+// maintainer-city's graph store: a block limit in the negative range, above
+// the operator repair floor -9223372036853761185. Main rejected it as "invalid
+// nonnegative floor", so no main build could open that store.
+const hotfixGraphFloor = "-9223372036850990241\n"
+
+// TestSQLiteOpensHotfixNegativeFloorAndMintsAboveEveryID is the on-disk state
+// the hotfix leaves behind: its floor bytes verbatim, the last id of its last
+// block equal to the floor, older wrapped rows below it, the near-MaxInt64 and
+// MinInt64 rows the pre-fix allocator minted, and session-hex ids. Opening the
+// store must succeed, and every id minted after it, by one process or two
+// sharing the directory, must rank strictly above every id already present.
+func TestSQLiteOpensHotfixNegativeFloorAndMintsAboveEveryID(t *testing.T) {
+	dir := t.TempDir()
+	seed := openSeqStore(t, dir)
+	existing := []string{
+		"gcg-1", "gcg-98636506", "gcg-9223372036854775806", "gcg-9223372036854775807",
+		"gcg--9223372036854775808", "gcg--9223372036853761184", "gcg--9223372036850990300",
+		"gcg--9223372036850990241",
+	}
+	for _, id := range append(append([]string{}, existing...), sessionHexIDs...) {
+		mustPin(t, seed, id)
+	}
+	if err := seed.CloseStore(); err != nil {
+		t.Fatal(err)
+	}
+	floorPath := filepath.Join(dir, sqliteGraphSequenceFloorFilename)
+	if err := os.WriteFile(floorPath, []byte(hotfixGraphFloor), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := InspectSQLiteSequence(dir, sqliteGraphPrefix)
+	if err != nil {
+		t.Fatalf("InspectSQLiteSequence on the hotfix floor: %v", err)
+	}
+	if state.Floor != -9223372036850990241 || state.Wrapped {
+		t.Fatalf("inspect = floor %d wrapped %v, want floor -9223372036850990241 and not wrapped", state.Floor, state.Wrapped)
+	}
+
+	a := openSeqStore(t, dir)
+	b := openSeqStore(t, dir)
+	if first := mustMint(t, a); first != "gcg--9223372036850990240" {
+		t.Fatalf("first mint over the hotfix floor = %q, want gcg--9223372036850990240", first)
+	}
+	minted := map[string]bool{}
+	for i := 0; i < 8; i++ {
+		for _, store := range []*SQLiteStore{a, b} {
+			id := mustMint(t, store)
+			if minted[id] {
+				t.Fatalf("two stores minted %q twice", id)
+			}
+			minted[id] = true
+			n := autoValue(t, id)
+			for _, prior := range existing {
+				if !sequenceRankAbove(n, autoValue(t, prior)) {
+					t.Fatalf("minted %q does not rank above existing %q", id, prior)
+				}
+			}
+			if n >= 0 {
+				t.Fatalf("minted %q left the negative range", id)
+			}
+		}
+	}
+	floor, err := readSQLiteSequenceFloor(floorPath)
+	if err != nil {
+		t.Fatalf("floor after minting: %v", err)
+	}
+	if floor >= 0 || floor <= -9223372036850990241 {
+		t.Fatalf("floor after minting = %d, want a raised negative floor", floor)
+	}
+}
