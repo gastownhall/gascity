@@ -7051,6 +7051,15 @@ func initEmptyArchiveRemote(t *testing.T, archiveRepo string, prevCount int) str
 	return remoteRepo
 }
 
+func initEmptyArchiveRemoteOnBranch(t *testing.T, archiveRepo string, prevCount int, branch string) string {
+	t.Helper()
+	remoteRepo := initEmptyArchiveRemote(t, archiveRepo, prevCount)
+	if out, err := exec.Command("git", "-C", archiveRepo, "branch", "-m", branch).CombinedOutput(); err != nil {
+		t.Fatalf("git branch -m %s: %v\n%s", branch, err, out)
+	}
+	return remoteRepo
+}
+
 // initSeedArchiveWithUnreachableRemote seeds the archive and adds an `origin`
 // that points at a nonexistent path, so any `git fetch`/`git push` fails.
 // Used by tests that specifically exercise the push-failure recovery paths:
@@ -8153,6 +8162,34 @@ func TestJsonlExportPushBootstrapCreatesRemoteMainWhenMissing(t *testing.T) {
 	}
 	if strings.Contains(string(stateData), `"pending_archive_push":true`) {
 		t.Fatalf("expected pending_archive_push to clear after bootstrap push, got:\n%s", stateData)
+	}
+}
+
+func TestJsonlExportPushUsesExistingArchiveBranch(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+
+	remoteRepo := initEmptyArchiveRemoteOnBranch(t, archiveRepo, 3, "archive")
+	writeMultiRecordDoltStub(t, binDir, 5)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+
+	localHead, err := exec.Command("git", "-C", archiveRepo, "rev-parse", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git rev-parse local HEAD: %v\n%s", err, localHead)
+	}
+	remoteHead, err := exec.Command("git", "--git-dir", remoteRepo, "rev-parse", "refs/heads/archive").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git rev-parse remote archive: %v\n%s", err, remoteHead)
+	}
+	if strings.TrimSpace(string(remoteHead)) != strings.TrimSpace(string(localHead)) {
+		t.Fatalf("remote archive branch = %s, want local HEAD %s", remoteHead, localHead)
 	}
 }
 
