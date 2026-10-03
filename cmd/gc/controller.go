@@ -600,10 +600,11 @@ func probeControllerIdentity(cityPath string) controllerIdentityReply {
 	return controllerIdentityReply{PID: controllerAlive(cityPath)}
 }
 
-// debounceDelay is the coalesce window for filesystem events. Multiple
+// defaultConfigDebounce is the coalesce window for filesystem events. Multiple
 // events within this window (vim atomic saves, git checkouts) produce a
-// single dirty signal. Tests may override this for faster response.
-var debounceDelay = 200 * time.Millisecond
+// single dirty signal. Callers pass a different window to watchConfigTargets
+// (tests use a short one); a zero window selects this default.
+const defaultConfigDebounce = 200 * time.Millisecond
 
 // watchConfigTargets starts an fsnotify watcher on the given config paths and
 // sets dirty to true after a debounce window. Config source directories are
@@ -760,7 +761,10 @@ func isConventionDiscoveryDirName(base string) bool {
 	return false
 }
 
-func watchConfigTargets(targets []config.WatchTarget, dirty *atomic.Bool, pokeCh chan struct{}, stderr io.Writer) func() {
+func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duration, dirty *atomic.Bool, pokeCh chan struct{}, stderr io.Writer) func() {
+	if debounceDelay <= 0 {
+		debounceDelay = defaultConfigDebounce
+	}
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: config watcher: %v (reload on tick only)\n", err) //nolint:errcheck // best-effort stderr
@@ -1185,6 +1189,7 @@ func runningSessionSet(sp runtime.Provider, names []string) (map[string]bool, bo
 func controllerLoop(
 	ctx context.Context,
 	interval time.Duration, // overrides cfg patrol interval when non-zero (used by tests)
+	configDebounce time.Duration, // overrides the config-watch coalesce window when non-zero (used by tests)
 	cfg *config.City,
 	cityName string,
 	tomlPath string,
@@ -1220,6 +1225,7 @@ func controllerLoop(
 		cityName:            cityName,
 		tomlPath:            tomlPath,
 		watchTargets:        watchTargets,
+		configDebounce:      configDebounce,
 		cfg:                 loopCfg,
 		sp:                  sp,
 		buildFn:             buildFn,
@@ -1277,7 +1283,8 @@ func configReloadSummary(oldAgents, oldRigs, newAgents, newRigs int) string {
 // runController runs the persistent controller loop. It holds the controller
 // lock, opens a control socket, runs the reconciliation loop, and on shutdown
 // stops all agents. Returns an exit code. initialWatchTargets is the set of
-// paths to watch for config changes (from initial provenance).
+// paths to watch for config changes (from initial provenance); configDebounce
+// is their coalesce window, zero selecting defaultConfigDebounce.
 //
 // heldLock is the controller lock when the caller already took it (gc start
 // --foreground does, before it starts the bead-store provider); the caller
@@ -1296,6 +1303,7 @@ func runController(
 	poolSessions map[string]time.Duration,
 	poolDeathHandlers map[string]poolDeathInfo,
 	initialWatchTargets []config.WatchTarget,
+	configDebounce time.Duration,
 	rec events.Recorder,
 	eventProv events.Provider,
 	stdout, stderr io.Writer,
@@ -1374,6 +1382,7 @@ func runController(
 		WatchTargets:            initialWatchTargets,
 		ConfigRev:               configRev,
 		ConfigDirty:             configDirty,
+		ConfigDebounce:          configDebounce,
 		Cfg:                     cfg,
 		ReconcilerMode:          reconcilerMode,
 		SP:                      sp,

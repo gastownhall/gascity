@@ -5172,6 +5172,8 @@ func TestCityRuntimeReloadRetainsTimedOutDispatcherForShutdownDrain(t *testing.T
 		stderr:     io.Discard,
 		configName: "test-city",
 	}
+	// The reload restarts the config watcher; stop it with the test.
+	t.Cleanup(cr.stopConfigWatcher)
 
 	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, tomlPath)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -5221,6 +5223,8 @@ func TestCityRuntimeReloadDrainShortCircuitsOnTickContextCancel(t *testing.T) {
 		stderr:     io.Discard,
 		configName: "test-city",
 	}
+	// The reload restarts the config watcher; stop it with the test.
+	t.Cleanup(cr.stopConfigWatcher)
 
 	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, tomlPath)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -5276,6 +5280,8 @@ func TestCityRuntimeReloadDrainBoundedByTimeout(t *testing.T) {
 		stderr:     io.Discard,
 		configName: "test-city",
 	}
+	// The reload restarts the config watcher; stop it with the test.
+	t.Cleanup(cr.stopConfigWatcher)
 
 	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, tomlPath)
 	lastProviderName := "fake"
@@ -5631,10 +5637,6 @@ func TestCityRuntimeSoftReloadAcceptsDriftForAppliedAndNoChange(t *testing.T) {
 }
 
 func TestCityRuntimeReloadRestartsConfigWatcherWithNewPackTargets(t *testing.T) {
-	old := debounceDelay
-	debounceDelay = 5 * time.Millisecond
-	t.Cleanup(func() { debounceDelay = old })
-
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfigWithIncludes(t, tomlPath, nil)
@@ -5658,14 +5660,15 @@ func TestCityRuntimeReloadRestartsConfigWatcherWithNewPackTargets(t *testing.T) 
 	pokeCh := make(chan struct{}, 8)
 	var stdout, stderr bytes.Buffer
 	cr := newTestCityRuntime(t, CityRuntimeParams{
-		CityPath:     cityPath,
-		CityName:     "test-city",
-		TomlPath:     tomlPath,
-		WatchTargets: config.WatchTargets(prov, cfg, cityPath),
-		ConfigRev:    configRev,
-		ConfigDirty:  dirty,
-		Cfg:          cfg,
-		SP:           sp,
+		CityPath:       cityPath,
+		CityName:       "test-city",
+		TomlPath:       tomlPath,
+		WatchTargets:   config.WatchTargets(prov, cfg, cityPath),
+		ConfigRev:      configRev,
+		ConfigDirty:    dirty,
+		ConfigDebounce: testConfigDebounce,
+		Cfg:            cfg,
+		SP:             sp,
 		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
 			return DesiredStateResult{State: map[string]TemplateParams{}}
 		},

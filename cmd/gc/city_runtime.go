@@ -108,8 +108,11 @@ type CityRuntime struct {
 	watchTargets []config.WatchTarget
 	configRev    string
 	configDirty  *atomic.Bool
-	watchMu      sync.Mutex
-	watchCleanup func()
+	// configDebounce is the config watcher's coalesce window; zero selects
+	// defaultConfigDebounce.
+	configDebounce time.Duration
+	watchMu        sync.Mutex
+	watchCleanup   func()
 
 	// reconcilerDrift holds the boot-latched session reconciler and warns once
 	// per transition when a reload names another one.
@@ -337,6 +340,9 @@ type CityRuntimeParams struct {
 	WatchTargets []config.WatchTarget
 	ConfigRev    string
 	ConfigDirty  *atomic.Bool
+	// ConfigDebounce overrides the config watcher's coalesce window when
+	// non-zero (used by tests).
+	ConfigDebounce time.Duration
 
 	Cfg *config.City
 	// ReconcilerMode is the session reconciler latched at controller start.
@@ -473,6 +479,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		watchTargets:            p.WatchTargets,
 		configRev:               p.ConfigRev,
 		configDirty:             configDirty,
+		configDebounce:          p.ConfigDebounce,
 		reconcilerDrift:         reconcilerModeDrift{running: p.ReconcilerMode},
 		cfg:                     p.Cfg,
 		sp:                      p.SP,
@@ -2605,7 +2612,7 @@ func (cr *CityRuntime) restartConfigWatcher() {
 		dirty = &atomic.Bool{}
 		cr.configDirty = dirty
 	}
-	cleanup := watchConfigTargets(cr.configWatcherTargets(), dirty, cr.pokeCh, cr.stderr)
+	cleanup := watchConfigTargets(cr.configWatcherTargets(), cr.configDebounce, dirty, cr.pokeCh, cr.stderr)
 
 	cr.watchMu.Lock()
 	cr.watchCleanup = cleanup

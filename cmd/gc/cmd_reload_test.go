@@ -568,7 +568,7 @@ func TestSendReloadControlRequestNoChange(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, nil, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		runController(dir, nil, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &stdout, &stderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -770,7 +770,7 @@ func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		runController(dir, nil, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		runController(dir, nil, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, 30*time.Second, events.Discard, nil, &stdout, &stderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -784,11 +784,6 @@ func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
 	waitForController(t, dir)
 	awaitCond(t, func() bool { return reconcileCount.Load() >= 1 }, "initial reconcile")
 
-	oldDebounce := debounceDelay
-	debounceDelay = 30 * time.Second
-	t.Cleanup(func() {
-		debounceDelay = oldDebounce
-	})
 	if err := os.WriteFile(tomlPath, []byte("[[[ bad toml"), 0o644); err != nil {
 		t.Fatal(err)
 	}
