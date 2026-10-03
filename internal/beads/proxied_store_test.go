@@ -985,9 +985,11 @@ func (l *bracketLeaf) CloseAll([]string, map[string]string) (int, error) {
 	l.onWrite()
 	return 0, nil
 }
+
 func (l *bracketLeaf) ReleaseIfCurrent(string, string) (bool, error) { l.onWrite(); return true, nil }
 func (l *bracketLeaf) DeleteBatch([]string) error                    { l.onWrite(); return nil }
 func (l *bracketLeaf) CreateWithForeignID(Bead) (Bead, error)        { l.onWrite(); return Bead{}, nil }
+
 func (l *bracketLeaf) CreateWithStorage(Bead, StorageClass) (Bead, error) {
 	l.onWrite()
 	return Bead{}, nil

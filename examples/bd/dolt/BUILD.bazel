@@ -40,6 +40,7 @@ go_library(
         "agents/dog/prompt.template.md",
         "assets/scripts/_notify.sh",
         "assets/scripts/advisory_state.sh",
+        "assets/scripts/backup_receipt.py",
         "assets/scripts/compact-gain-drift-proof.sh",
         "assets/scripts/latency.sh",
         "assets/scripts/mol-dog-backup.sh",

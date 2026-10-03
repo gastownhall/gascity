@@ -33,6 +33,26 @@ else
 fi
 DOLT_PROVIDER_STATE_FILE="$DOLT_STATE_DIR/dolt-provider-state.json"
 
+# Hash a Dolt backup manifest with the platform's available SHA-256 tool.
+backup_manifest_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+  fi
+}
+
+# Bind restore evidence to the canonical local destination, including paths
+# containing spaces. Match Python's SHA-256 of os.fsencode(realpath(path)).
+backup_destination_sha256() {
+  _backup_destination=$(cd "$1" 2>/dev/null && pwd -P) || return 0
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$_backup_destination" | sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$_backup_destination" | shasum -a 256 | awk '{print $1}'
+  fi
+}
+
 GC_BEADS_BD_SCRIPT="$GC_CITY_PATH/.gc/scripts/gc-beads-bd.sh"
 
 # is_local_dolt_host returns 0 (true) when the argument names the local managed

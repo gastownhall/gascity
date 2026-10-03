@@ -32,6 +32,7 @@ LATENCY_WARN_MS="${GC_DOCTOR_LATENCY_WARN_MS:-$(( ${GC_DOCTOR_LATENCY_WARN_S:-1}
 CONN_WARN_PCT="${GC_DOCTOR_CONN_WARN_PCT:-80}"
 BACKUP_STALE_S="${GC_DOCTOR_BACKUP_STALE_S:-43200}"  # 2x 6h backup interval
 BACKUP_ARTIFACT_DIR="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
+BACKUP_RECEIPT_DIR="${GC_DOLT_BACKUP_RECEIPT_DIR:-$DOLT_STATE_DIR/backup-receipts}"
 # Advisory dedup state (#3409): records the signature of the last-sent [MEDIUM]
 # advisory so a persistent condition collapses into one rolling alert instead of
 # a fresh bead every 5-min tick. DOLT_STATE_DIR is set by runtime.sh.
@@ -184,7 +185,7 @@ BACKUP_STALE_ITEMS=""
 for db in $USER_DBS; do
     db_dir="$DOLT_DATA_DIR/$db"
     if [ -d "$db_dir/.dolt" ]; then
-        if (cd "$db_dir" && run_bounded 30 dolt backup 2>/dev/null | awk '{print $1}' | grep -qx "${db}-backup"); then
+        if (cd "$db_dir" && run_bounded 30 dolt backup 2>/dev/null | awk '{print $1}' | grep -qxE "(${db}-backup|default)"); then
             BACKUP_ELIGIBLE_DBS="$BACKUP_ELIGIBLE_DBS $db"
         else
             append_backup_stale "$db backup remote missing"
@@ -200,7 +201,56 @@ if [ -n "$BACKUP_ELIGIBLE_DBS" ]; then
     else
         NOW_S=$(date +%s)
         for db in $BACKUP_ELIGIBLE_DBS; do
-            NEWEST_BACKUP_MTIME=$(newest_backup_mtime_for_db "$db")
+            NEWEST_BACKUP_MTIME=0
+            if [ -f "$BACKUP_RECEIPT_DIR/$db" ]; then
+                receipt_version= receipt_outcome= receipt_time= receipt_mtime= receipt_size= receipt_hash= receipt_head= receipt_backup_head= receipt_destination= receipt_extra=
+                read -r receipt_version receipt_outcome receipt_time receipt_mtime receipt_size receipt_hash receipt_head receipt_backup_head receipt_destination receipt_extra < "$BACKUP_RECEIPT_DIR/$db" || true
+                if [ "$receipt_version" != v3 ]; then
+                    append_backup_stale "$db backup receipt invalid"
+                    continue
+                fi
+                case "$receipt_outcome" in
+                    failure)
+                        append_backup_stale "$db last backup sync failed"
+                        continue
+                        ;;
+                    skipped)
+                        append_backup_stale "$db last backup sync was skipped"
+                        continue
+                        ;;
+                    unverified)
+                        append_backup_stale "$db last backup sync had no manifest"
+                        continue
+                        ;;
+                    success|noop)
+                        case "$receipt_time:$receipt_mtime:$receipt_size" in
+                            *[!0-9:]*|*::*|:*|*:)
+                                append_backup_stale "$db backup receipt invalid"
+                                continue
+                                ;;
+                        esac
+                        if [ "$receipt_time" -gt "$NOW_S" ] || [ -n "$receipt_extra" ] || [ "$receipt_destination" != "$(backup_destination_sha256 "$BACKUP_ARTIFACT_DIR/$db")" ] || [ "$receipt_backup_head" != "$receipt_head" ] || [ "${#receipt_head}" -ne 32 ] || printf '%s' "$receipt_head" | grep -q '[^0-9a-v]'; then
+                            append_backup_stale "$db backup receipt has no source HEAD"
+                            continue
+                        fi
+                        manifest_path="$BACKUP_ARTIFACT_DIR/$db/manifest"
+                        manifest_size=$(stat -c %s "$manifest_path" 2>/dev/null || stat -f %z "$manifest_path" 2>/dev/null || echo -1)
+                        manifest_hash=$(backup_manifest_sha256 "$manifest_path")
+                        if [ "$(file_mtime "$manifest_path")" != "$receipt_mtime" ] || [ "$manifest_size" != "$receipt_size" ] || [ -z "$manifest_hash" ] || [ "$manifest_hash" != "$receipt_hash" ] || [ "$receipt_mtime" -le 0 ]; then
+                            append_backup_stale "$db backup receipt does not match manifest"
+                            continue
+                        fi
+                        NEWEST_BACKUP_MTIME="$receipt_time"
+                        ;;
+                    *)
+                        append_backup_stale "$db backup receipt invalid"
+                        continue
+                        ;;
+                esac
+            else
+                append_backup_stale "$db backup receipt missing"
+                continue
+            fi
             if [ "$NEWEST_BACKUP_MTIME" -le 0 ]; then
                 append_backup_stale "$db backup missing"
                 continue
