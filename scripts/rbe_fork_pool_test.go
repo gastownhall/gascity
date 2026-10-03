@@ -1,6 +1,9 @@
 package scripts_test
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -287,9 +290,138 @@ func TestRBEForkCredentialPins(t *testing.T) {
 		`if [ "$tier" != "$RBE_FORK_TIER" ]; then`,
 		`openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$dir/fork.key"`,
 		`[ "${BAZEL_FORK_REMOTE:-}" = true ] || exit 0`,
+		`--connect-timeout 5 --max-time 60`,
+		`case "$code" in 429 | 502 | 000) ;; *) break ;; esac`,
+		`[ "$attempt" -eq 4 ] || sleep $((attempt * 10))`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("%s missing %q", rbeForkCredential, want)
+		}
+	}
+}
+
+// rbeForkMintCertStub stands in for curl in fork-credential.sh cert: it logs
+// each request's URL and timeouts to $RBE_TEST_MINT_LOG and answers as
+// RBE_TEST_MINT says: ro (a certificate for tier ro), an HTTP status with an
+// error body, 000 (connection refused), or "<first>-then-<rest>" (the first
+// request answers <first>). The certificate is self-signed: the script only
+// prints its subject; beads' scripts/bazel_fork_mode_test.go covers the rest.
+const rbeForkMintCertStub = `#!/usr/bin/env bash
+set -euo pipefail
+out= url= connect= max=
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-o) out=$2; shift 2 ;;
+	--connect-timeout) connect=$2; shift 2 ;;
+	--max-time) max=$2; shift 2 ;;
+	-w | -H | --data) shift 2 ;;
+	-*) shift ;;
+	*) url=$1; shift ;;
+	esac
+done
+echo "curl $url connect=$connect max=$max" >>"$RBE_TEST_MINT_LOG"
+n=$(grep -c '^curl ' "$RBE_TEST_MINT_LOG")
+answer=$RBE_TEST_MINT
+case "$answer" in
+*-then-*) if [ "$n" -eq 1 ]; then answer=${answer%%-then-*}; else answer=${answer#*-then-}; fi ;;
+esac
+case "$answer" in
+ro)
+	openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout /dev/null -days 1 \
+		-subj /O=gascity/OU=rbe-fork/CN=ro.gascity.6969.4242.1.bazel -out mint-cert.pem 2>/dev/null
+	jq -cn --rawfile pem mint-cert.pem \
+		'{tier: "ro", instance: "oss-fork", endpoint: "grpcs://rbe-fork.ops.gascity.com:8444", cert_pem: $pem}' >"$out"
+	printf 200
+	;;
+000) echo "curl: (7) Failed to connect to rbe-mint.ops.gascity.com port 8444" >&2; exit 7 ;;
+*) printf '{"error": "stub answer %s"}' "$answer" >"$out"; printf '%s' "$answer" ;;
+esac
+`
+
+// TestRBEForkCredentialRetries runs fork-credential.sh cert against a
+// stubbed mint: it retries only what may pass on its own (429, 502 and
+// connection failures), backs off 10, 20 and 30 s between its four
+// attempts and never after the last, and gives up connecting after 5 s.
+func TestRBEForkCredentialRetries(t *testing.T) {
+	for _, tool := range []string{"bash", "jq", "openssl"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not on PATH", tool)
+		}
+	}
+	bin := t.TempDir()
+	for name, body := range map[string]string{
+		"curl":  rbeForkMintCertStub,
+		"sleep": "#!/bin/sh\necho \"sleep $*\" >>\"$RBE_TEST_MINT_LOG\"\n",
+	} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The step's $GITHUB_OUTPUT is the helper's .bazelrc.local; result and
+	// error are this wrapper's.
+	step := `if bash "$RBE_TEST_SCRIPT" cert >out.txt 2>&1; then r=ok; else r=failed; fi
+echo "result=$r" >>.bazelrc.local
+echo "error=$(grep -o 'mint refused (HTTP [0-9]*)' out.txt || true)" >>.bazelrc.local
+`
+	for _, c := range []struct {
+		answer, result, err string
+		calls               int
+		sleeps              string
+	}{
+		{"ro", "ok", "", 1, ""},
+		{"429-then-ro", "ok", "", 2, "10"},
+		{"502-then-ro", "ok", "", 2, "10"},
+		{"000-then-ro", "ok", "", 2, "10"},
+		{"429", "failed", "mint refused (HTTP 429)", 4, "10 20 30"},
+		{"502", "failed", "mint refused (HTTP 502)", 4, "10 20 30"},
+		{"000", "failed", "mint refused (HTTP 000)", 4, "10 20 30"},
+		{"403", "failed", "mint refused (HTTP 403)", 1, ""},
+		{"503", "failed", "mint refused (HTTP 503)", 1, ""},
+	} {
+		secret := filepath.Join(t.TempDir(), "secret")
+		if err := os.MkdirAll(secret, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		mintLog := filepath.Join(t.TempDir(), "mint.log")
+		got := runBazelRCConfigStep(t, step, map[string]string{
+			"PATH":                bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"GITHUB_OUTPUT":       ".bazelrc.local",
+			"RBE_TEST_SCRIPT":     filepath.Join(repoRoot(t), rbeForkCredential),
+			"RBE_TEST_MINT":       c.answer,
+			"RBE_TEST_MINT_LOG":   mintLog,
+			"BAZEL_CI_SECRET_DIR": secret,
+			"ARTIFACT_ID":         "99",
+			"RBE_FORK_PR":         "6969",
+			"RBE_FORK_TIER":       "ro",
+			"GITHUB_REPOSITORY":   "gastownhall/gascity",
+			"GITHUB_RUN_ID":       "4242",
+			"GITHUB_RUN_ATTEMPT":  "1",
+			"GITHUB_JOB":          "bazel",
+		})
+		want := []string{"result=" + c.result, "error=" + c.err}
+		if c.result == "ok" {
+			want = append([]string{
+				"cert=" + secret + "/fork.crt", "key=" + secret + "/fork.key",
+				"endpoint=grpcs://rbe-fork.ops.gascity.com:8444", "instance=oss-fork", "tier=ro",
+			}, want...)
+		}
+		if strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Errorf("mint %s: outputs %q, want %q", c.answer, got, want)
+		}
+		b, _ := os.ReadFile(mintLog)
+		var calls int
+		var sleeps []string
+		for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+			if n, ok := strings.CutPrefix(line, "sleep "); ok {
+				sleeps = append(sleeps, n)
+			} else if line != "curl https://rbe-mint.ops.gascity.com:8444/v1/cert connect=5 max=60" {
+				t.Errorf("mint %s: request %q, want POST /v1/cert with --connect-timeout 5 --max-time 60", c.answer, line)
+			} else {
+				calls++
+			}
+		}
+		if calls != c.calls || strings.Join(sleeps, " ") != c.sleeps {
+			t.Errorf("mint %s: %d requests, slept %q; want %d, %q\n%s", c.answer, calls, sleeps, c.calls, c.sleeps, b)
 		}
 	}
 }

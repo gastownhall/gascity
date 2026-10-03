@@ -225,7 +225,8 @@ const (
 
 // bazelTestCurlStub stands in for curl in the rbe-fork status step: it
 // records the URL and prints what rbe-fork-mint's /v1/status would for
-// BAZEL_TEST_MINT (ro, rw: open; closed, rw-closed: open false; canary: a
+// BAZEL_TEST_MINT (ro, rw: open; closed, rw-closed: open false, which
+// today's mint answers as ro instead while rw is off; canary: a
 // 403's body; garbage; evil: open with a tier that is neither); anything
 // else is a refused connection (the gate closed, or no DNS yet).
 const bazelTestCurlStub = `#!/usr/bin/env bash
@@ -387,6 +388,10 @@ func TestBazelRBEForkSteps(t *testing.T) {
 		}
 		if b, _ := os.ReadFile(curlLog); !strings.Contains(string(b), rbeForkStatusURL+"gascity&run=4242&attempt=1&pr=6969") {
 			t.Errorf("mint %s: status step asked %q", answer, b)
+		}
+		// A closed gate drops the connection: each try gives up in 5 s.
+		if b, _ := os.ReadFile(curlLog); !strings.HasPrefix(string(b), "-sS --connect-timeout 5 --max-time 30 ") {
+			t.Errorf("mint %s: status step ran curl %q, want --connect-timeout 5 --max-time 30", answer, b)
 		}
 	}
 }
