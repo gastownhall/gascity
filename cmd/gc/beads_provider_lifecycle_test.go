@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/test/dolttest"
 	"gopkg.in/yaml.v3"
 )
 
@@ -13064,7 +13065,13 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 			run := func(ctx context.Context, args ...string) []byte {
 				t.Helper()
 				cmd := exec.CommandContext(ctx, script, args...)
-				cmd.Env = sanitizedBaseEnv("HOME="+home, "GC_CITY_PATH="+dir, "BEADS_DIR="+filepath.Join(dir, ".beads"), "BD_BIN="+bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT="+transport, "GC_BEADS_TARGET=local")
+				// Every HTTPS request the lifecycle makes goes to a black hole. The
+				// proxied init probes `dolt version`, whose update check is a network
+				// call unless HOME's dolt config disables it; on a healthy network
+				// that call returns in 0.2 s and hides a missing config, so the test
+				// reproduces the slow network deterministically instead of waiting
+				// for one.
+				cmd.Env = sanitizedBaseEnv(append([]string{"HOME=" + home, "GC_CITY_PATH=" + dir, "BEADS_DIR=" + filepath.Join(dir, ".beads"), "BD_BIN=" + bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT=" + transport, "GC_BEADS_TARGET=local"}, dolttest.UnroutableHTTPSProxyEnv()...)...)
 				if out, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("gc-beads-bd %v: %v\n%s", args, err, out)
 				} else {
