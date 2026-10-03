@@ -549,7 +549,7 @@ func (c *builtinImportDoctorCheck) Fix(_ *doctor.CheckContext) error {
 				return fmt.Errorf("ensuring bundled import %q in pack.toml: %w", name, err)
 			}
 		}
-		if !maps.Equal(before, packManifest.Imports) {
+		if !importMapsEqual(before, packManifest.Imports) {
 			if err := writeCityPackManifest(fsys.OSFS{}, c.cityPath, packManifest); err != nil {
 				return fmt.Errorf("writing pack.toml: %w", err)
 			}
@@ -795,6 +795,19 @@ func ensureBundledImportBinding(imports map[string]config.Import, name string, i
 	}
 	imports[config.UniqueLegacyImportBinding(imports, name)] = imp
 	return imports, nil
+}
+
+func importMapsEqual(a, b map[string]config.Import) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for binding, left := range a {
+		right, ok := b[binding]
+		if !ok || !sameImport(left, right) {
+			return false
+		}
+	}
+	return true
 }
 
 // bundledImportForLegacySystemPacksRef maps a legacy reference under the
