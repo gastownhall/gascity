@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -592,6 +593,7 @@ type Manager struct {
 	transportResolver       func(template, provider string) transportResolution
 	clk                     clock.Clock
 	staleKeyDetectionWaiter StaleKeyDetectionWaiter
+	rec                     events.Recorder
 }
 
 // PruneResult reports which sessions were pruned and which queued wait nudges
@@ -842,6 +844,13 @@ func WithClock(clk clock.Clock) ManagerOption {
 	}
 }
 
+// WithEventRecorder lets the Manager emit session-lifecycle events such as
+// SessionCrashed when a provider Start dies during startup. A nil recorder
+// disables emission (the default).
+func WithEventRecorder(rec events.Recorder) ManagerOption {
+	return func(m *Manager) { m.rec = rec }
+}
+
 // NewManagerWithOptions creates a Manager backed by the given bead store and
 // session provider, applying any capability options. It is the canonical
 // constructor; the named NewManager* variants below are one-line presets.
@@ -1046,6 +1055,11 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 					return errors.Join(fmt.Errorf("%w: %q already active in runtime", ErrSessionNameExists, sessName), rbErr)
 				}
 				return fmt.Errorf("%w: %q already active in runtime", ErrSessionNameExists, sessName)
+			}
+			if errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+				// Create rolls the bead back; persistReason is false so we
+				// do not stamp sleep_reason on a bead about to close.
+				m.recordStartupCrash(b.ID, sessName, meta["template"], err, false)
 			}
 			if rbErr := rollbackFailedCreate(); rbErr != nil {
 				return errors.Join(fmt.Errorf("starting session: %w", err), rbErr)

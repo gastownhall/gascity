@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -111,6 +112,50 @@ func TestFactoryThreadsStaleKeyDetectionWaiterToSessionHandles(t *testing.T) {
 		}
 	default:
 		t.Fatal("configured stale-key waiter was not called")
+	}
+}
+
+func TestFactoryThreadsEventRecorderToSessionManager(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	sp.StartErrors["sky"] = fmt.Errorf("%w: session %q; last pane output:\nTrust this folder?", runtime.ErrSessionDiedDuringStartup, "sky")
+	rec := events.NewFake()
+	factory, err := NewFactory(FactoryConfig{
+		Store:    store,
+		Provider: sp,
+		Recorder: rec,
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+	handle, err := factory.Session(SessionSpec{
+		ExplicitName: "sky",
+		Template:     "probe",
+		Command:      "claude",
+		WorkDir:      t.TempDir(),
+		Provider:     "claude",
+	})
+	if err != nil {
+		t.Fatalf("factory.Session: %v", err)
+	}
+	_, err = handle.Create(context.Background(), CreateModeStarted)
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Fatalf("Create error = %v, want ErrSessionDiedDuringStartup", err)
+	}
+	var crashed int
+	for _, e := range rec.Events {
+		if e.Type == events.SessionCrashed {
+			crashed++
+			if e.Subject != "sky" {
+				t.Errorf("Subject = %q, want sky", e.Subject)
+			}
+			if !strings.Contains(e.Message, "Trust this folder?") {
+				t.Errorf("Message %q missing pane snippet", e.Message)
+			}
+		}
+	}
+	if crashed != 1 {
+		t.Fatalf("SessionCrashed events = %d, want 1 (total %d)", crashed, len(rec.Events))
 	}
 }
 
