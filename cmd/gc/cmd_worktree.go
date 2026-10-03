@@ -186,7 +186,7 @@ func runWorktreeEnsure(opts worktreeCmdOpts, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if !opts.DryRun && opts.Agent != "" {
-		materializeWorktreeAgentSkills(opts.Agent, rep.Path, stdout, stderr)
+		materializeWorktreeAgentSkills(opts.Agent, rep.Path, stderr)
 	}
 	return writeWorktreeReport("ensure", rep, opts, stdout, stderr)
 }
@@ -197,8 +197,9 @@ func runWorktreeEnsure(opts worktreeCmdOpts, stdout, stderr io.Writer) int {
 // `gc internal materialize-skills` (see materializeSkillsIntoWorkdir in
 // cmd_internal_materialize_skills.go). A failure at any step is logged to
 // stderr and never returned: worktree existence is ensure's postcondition,
-// not a materialized skill catalog.
-func materializeWorktreeAgentSkills(agentName, path string, stdout, stderr io.Writer) {
+// not a materialized skill catalog. All materializer output goes to stderr
+// so stdout carries only the ensure report (and stays parseable under --json).
+func materializeWorktreeAgentSkills(agentName, path string, stderr io.Writer) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc worktree ensure: skill materialization skipped: city not found: %v\n", err) //nolint:errcheck
@@ -214,8 +215,8 @@ func materializeWorktreeAgentSkills(agentName, path string, stdout, stderr io.Wr
 		fmt.Fprintf(stderr, "gc worktree ensure: skill materialization skipped: unknown agent %q\n", agentName) //nolint:errcheck
 		return
 	}
-	if err := materializeSkillsIntoWorkdir(cfg, &agent, cityPath, path, nil, stdout, stderr); err != nil {
-		fmt.Fprintf(stderr, "gc worktree ensure: skill materialization failed: %v\n", err) //nolint:errcheck
+	if err := materializeSkillsIntoWorkdir(cfg, &agent, cityPath, path, nil, stderr, stderr); err != nil {
+		fmt.Fprintln(stderr, "gc worktree ensure: skill materialization failed (see above)") //nolint:errcheck
 	}
 }
 
