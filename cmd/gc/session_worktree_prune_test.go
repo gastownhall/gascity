@@ -612,6 +612,12 @@ func TestWorktreeStaleGuidance(t *testing.T) {
 			want:   []string{"WHAT HAPPENED", "WHAT TO DO", "NEVER", "some-future-reason"},
 		},
 	}
+	// The prune runs exactly once, when the session bead closes
+	// (session_reconciler.go); nothing re-enters it afterwards. No reason
+	// code's guidance may therefore promise that the reconciler will retry
+	// and remove the worktree once the reader has cleaned up, and every one
+	// must tell the reader the marker is advisory (blocking=no in the header).
+	retryPromises := []string{"retries automatically", "next reconciler pass"}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got := worktreeStaleGuidance(c.reason, c.dirty)
@@ -624,6 +630,14 @@ func TestWorktreeStaleGuidance(t *testing.T) {
 				if strings.Contains(got, mustNot) {
 					t.Errorf("worktreeStaleGuidance(%q) = %q, want NOT to contain %q", c.reason, got, mustNot)
 				}
+			}
+			for _, promise := range retryPromises {
+				if strings.Contains(got, promise) {
+					t.Errorf("worktreeStaleGuidance(%q) = %q, want no retry promise %q (the prune is attempted once, at session close)", c.reason, got, promise)
+				}
+			}
+			if !strings.Contains(got, "advisory") {
+				t.Errorf("worktreeStaleGuidance(%q) = %q, want to tell the reader the marker is advisory", c.reason, got)
 			}
 		})
 	}
