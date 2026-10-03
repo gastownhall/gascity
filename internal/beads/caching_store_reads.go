@@ -851,7 +851,7 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 					continue
 				}
 				statusByID[b.ID] = b.Status
-				workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
+				workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
 				if IsReadyCandidate(b, now) {
 					if c.readyProjectionUnknownLocked(b.ID) {
 						unanswerable = true
@@ -929,7 +929,7 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	now := time.Now().UTC()
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
-		workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
+		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
 		if IsReadyCandidate(b, now) {
 			if c.readyProjectionUnknownLocked(b.ID) {
 				return nil, false

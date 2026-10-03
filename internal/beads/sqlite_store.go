@@ -1653,14 +1653,22 @@ func sqliteReadyBlockerExists(issueCol string) string {
 			  AND d.dep_type IN ('blocks','waits-for','conditional-blocks')
 			  AND (
 			    COALESCE(blocker.status, '') <> 'closed'
-			    OR EXISTS (
-			         SELECT 1 FROM metadata m
-			         WHERE m.bead_id = blocker.id
-			           AND m.meta_key = '%s'
-			           AND m.meta_value = '%s'
+			    OR (
+			         EXISTS (
+			           SELECT 1 FROM metadata m
+			           WHERE m.bead_id = blocker.id
+			             AND m.meta_key = '%s'
+			             AND m.meta_value = '%s'
+			         )
+			         AND NOT EXISTS (
+			           SELECT 1 FROM metadata o
+			           WHERE o.bead_id = blocker.id
+			             AND o.meta_key = '%s'
+			             AND o.meta_value = 'pass'
+			         )
 			       )
 			  )
-		  )`, issueCol, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked)
+		  )`, issueCol, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked, beadmeta.OutcomeMetadataKey)
 }
 
 // Children returns all non-closed beads whose ParentID matches the given ID.
