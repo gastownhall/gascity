@@ -9642,6 +9642,136 @@ func TestReconcileSessionBeads_RollsBackPendingCreatePreservesConfiguredNamedSes
 	}
 }
 
+// TestReconcileSessionBeads_ConfiguredNamedSessionRetriesAfterTransientStartFailure
+// pins the retry the preservation above exists for (ga-vohht8). The failed
+// attempt is over when commitStartFailure preserves the row, so it must not
+// keep the attempt's in-flight start lease (last_woke_at): with the lease
+// left in place, pendingCreateStartInFlightInfo reports start_in_flight on
+// every tick until startup_timeout+7s has passed, and a session whose first
+// start lost a transient race (tmux's new-session preflight, for one) stays
+// down for over a minute while nothing is starting it.
+func TestReconcileSessionBeads_ConfiguredNamedSessionRetriesAfterTransientStartFailure(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "helper",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "helper", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "helper")
+	env.sp.StartErrors = map[string]error{sessionName: errors.New("tmux server degraded: refusing new-session to avoid socket clobber")}
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  sessionName,
+		TemplateName: "helper",
+	}
+
+	session := env.createSessionBead(sessionName, "helper")
+	env.setSessionMetadata(&session, map[string]string{
+		"session_name_explicit":      "true",
+		"pending_create_claim":       "true",
+		"state":                      "creating",
+		"continuation_epoch":         "1",
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "helper",
+		namedSessionModeMetadata:     "always",
+	})
+
+	if woken := env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, nil, nil); woken != 0 {
+		t.Fatalf("first tick woken = %d, want 0 (the start fails)", woken)
+	}
+	failed, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) after failed start: %v", session.ID, err)
+	}
+	if failed.Status != "open" || failed.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("after failed start: status=%q pending_create_claim=%q, want the configured row preserved open with its claim", failed.Status, failed.Metadata["pending_create_claim"])
+	}
+	if got := failed.Metadata["last_woke_at"]; got != "" {
+		t.Errorf("last_woke_at = %q after the start failed, want empty (the attempt is over; its in-flight lease must not outlive it)", got)
+	}
+
+	// The transient cause is gone by the next patrol tick.
+	delete(env.sp.StartErrors, sessionName)
+	env.clk.Advance(time.Second)
+
+	if woken := env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{failed}, nil, nil); woken != 1 {
+		t.Fatalf("second tick woken = %d, want 1 (a preserved named session must be retried, not held as start_in_flight)\nstderr:\n%s", woken, env.stderr.String())
+	}
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q not running after the retry tick", sessionName)
+	}
+}
+
+// TestReconcileSessionBeads_ConfiguredNamedSessionStartFailureLoopQuarantines
+// pins the bound on those prompt retries: with no in-flight lease to wait
+// out, a start that keeps failing is retried each tick only until the
+// startup-health episode reaches defaultMaxWakeAttempts and quarantines the
+// name.
+func TestReconcileSessionBeads_ConfiguredNamedSessionStartFailureLoopQuarantines(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "helper",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "helper", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "helper")
+	env.sp.StartErrors = map[string]error{sessionName: errors.New("start failed")}
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  sessionName,
+		TemplateName: "helper",
+	}
+
+	session := env.createSessionBead(sessionName, "helper")
+	env.setSessionMetadata(&session, map[string]string{
+		"session_name_explicit":      "true",
+		"pending_create_claim":       "true",
+		"state":                      "creating",
+		"continuation_epoch":         "1",
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "helper",
+		namedSessionModeMetadata:     "always",
+	})
+
+	current := session
+	for tick := 0; tick < 2*defaultMaxWakeAttempts; tick++ {
+		if woken := env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{current}, nil, nil); woken != 0 {
+			t.Fatalf("tick %d woken = %d, want 0 (every start fails)", tick, woken)
+		}
+		env.clk.Advance(time.Second)
+		var err error
+		if current, err = env.store.Get(session.ID); err != nil {
+			t.Fatalf("Get(%s) after tick %d: %v", session.ID, tick, err)
+		}
+		if current.Status != "open" {
+			t.Fatalf("status = %q after tick %d, want the configured row preserved open", current.Status, tick)
+		}
+	}
+
+	starts := 0
+	for _, call := range env.sp.Calls {
+		if call.Method == "Start" && call.Name == sessionName {
+			starts++
+		}
+	}
+	if starts != defaultMaxWakeAttempts {
+		t.Fatalf("start attempts = %d over %d ticks, want %d (retried each tick until the startup-health quarantine)", starts, 2*defaultMaxWakeAttempts, defaultMaxWakeAttempts)
+	}
+	episode, err := sessionFrontDoor(env.store).LoadStartupHealthEpisode(sessionName)
+	if err != nil {
+		t.Fatalf("LoadStartupHealthEpisode: %v", err)
+	}
+	if !env.clk.Now().Before(episode.QuarantinedUntil) {
+		t.Fatalf("episode QuarantinedUntil = %v at %v, want an active quarantine after %d consecutive failures", episode.QuarantinedUntil, env.clk.Now(), defaultMaxWakeAttempts)
+	}
+}
+
 // TestReconcileSessionBeads_RollsBackConfiguredNamedSessionThatDiedDuringStartup
 // probes ga-pmafyc (round 4): the flip side of
 // TestReconcileSessionBeads_RollsBackPendingCreatePreservesConfiguredNamedSession
