@@ -27,6 +27,7 @@ func TestResolveInlineBeadAction_ReservedClassIDRefused(t *testing.T) {
 		"gcm--1",
 		"gcg-workflow-finalize", // descriptive multi-dash suffix
 		"gcs-abcdefghijkl",      // single dash, but suffix longer than the heuristic allows
+		"gcnq-abcdef0123456789", // auxiliary nudge-queue namespace, outside the mint-prefix map
 	} {
 		t.Run(id, func(t *testing.T) {
 			// Precondition: this id really does degrade to inline text — that is
@@ -63,7 +64,7 @@ func TestResolveInlineBeadAction_ReservedClassIDRefused(t *testing.T) {
 // inline-text-shaped ids are refused. Neither may return create=true.
 func TestResolveInlineBeadAction_ReservedClassIDNeverMinted(t *testing.T) {
 	cfg := &config.City{}
-	for _, prefix := range config.ReservedClassPrefixes() {
+	for _, prefix := range config.AllReservedClassPrefixes() {
 		for _, suffix := range []string{"-1", "1", "-9223372036854775645", "workflow-finalize", "abcdefghijkl"} {
 			id := prefix + "-" + suffix
 			t.Run(id, func(t *testing.T) {
@@ -126,7 +127,7 @@ func TestResolveInlineBeadAction_OrdinaryInlineTextUnaffected(t *testing.T) {
 }
 
 // TestReservedClassPrefixForID pins the namespace predicate against
-// config.ReservedClassPrefixes, including the double-dash wisp shape whose
+// config.AllReservedClassPrefixes, including the double-dash wisp shape whose
 // negative-int64 suffix the sling.BeadPrefix heuristic is not relied on for.
 func TestReservedClassPrefixForID(t *testing.T) {
 	for _, tc := range []struct {
@@ -136,6 +137,8 @@ func TestReservedClassPrefixForID(t *testing.T) {
 		{"gcg-1", "gcg"},
 		{"gcm-1", "gcm"},
 		{"gcg", "gcg"},
+		{"gcnq-abcdef0123456789", "gcnq"},
+		{"gcnq", "gcnq"},
 		{"gc-1", ""},     // the ordinary work prefix is not reserved
 		{"gcgx-1", ""},   // longer prefix, different namespace
 		{"cr-ahjgr", ""}, // a work-ledger id

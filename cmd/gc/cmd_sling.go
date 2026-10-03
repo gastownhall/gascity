@@ -2231,7 +2231,7 @@ func resolveInlineBeadAction(cfg *config.City, beadOrFormula string, dryRun bool
 		}
 	}
 	// A reserved coordination-class prefix ("gcg-", "gcm-", "gcs-", "gco-",
-	// "gcn-") is minted only by a relocated class binding — workflow steps,
+	// "gcn-", "gcnq-" for the nudge queue) is minted only by a relocated class binding — workflow steps,
 	// mail, sessions, orders, nudges — and is never prose someone meant as a
 	// bead title. Falling through to store.Create() here would mint a task bead
 	// whose TITLE is the id string, silently fabricating a duplicate of whatever
@@ -2256,7 +2256,8 @@ func resolveInlineBeadAction(cfg *config.City, beadOrFormula string, dryRun bool
 
 // reservedClassPrefixForID returns the reserved coordination-class id prefix
 // whose namespace holds id (e.g. "gcg" for "gcg--9223372036854775645"), and
-// whether any does.
+// whether any does. It checks the full namespace union — mint and auxiliary
+// prefixes (e.g. "gcnq") — not just the per-class mint prefix.
 //
 // Membership is storeref.IDInNamespace — the same predicate
 // storeref.ClassCandidates gates the by-id class route on — so this answers for
@@ -2271,7 +2272,7 @@ func resolveInlineBeadAction(cfg *config.City, beadOrFormula string, dryRun bool
 // baseline is shrink-only by design, which makes the line marker the route for a
 // reviewed new site, the way cmd/gc/api_state.go marks its configured-prefix scan.
 func reservedClassPrefixForID(id string) (string, bool) {
-	for _, prefix := range config.ReservedClassPrefixes() { // residency:allow — reads the reserved-prefix table to name a refusal; it enumerates no store and resolves no owner
+	for _, prefix := range config.AllReservedClassPrefixes() { // residency:allow — reads the reserved-prefix namespace union to name a refusal; it enumerates no store and resolves no owner
 		if storeref.IDInNamespace(id, prefix) { // residency:allow — the resolver's own predicate, reused verbatim so this cannot disagree with the class route
 			return prefix, true
 		}
