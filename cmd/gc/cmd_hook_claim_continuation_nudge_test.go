@@ -82,10 +82,10 @@ func buildContinuationNudgeOps(candidates []beads.Bead, siblingIDs []string, enq
 	}
 }
 
-// TestHookClaimContinuationNudge_WorkflowRootEnqueuesNudge verifies that
+// TestHookClaimWorkflowRootEnqueuesContinuationNudge verifies that
 // claiming a workflow root that pre-assigns at least one sibling enqueues a
 // hook-claim-continuation nudge for the claiming session name.
-func TestHookClaimContinuationNudge_WorkflowRootEnqueuesNudge(t *testing.T) {
+func TestHookClaimWorkflowRootEnqueuesContinuationNudge(t *testing.T) {
 	var enqueued []string
 	ops := buildContinuationNudgeOps(workflowRootCandidates(), []string{"sib-1", "sib-2"}, &enqueued)
 
@@ -104,12 +104,12 @@ func TestHookClaimContinuationNudge_WorkflowRootEnqueuesNudge(t *testing.T) {
 	}
 }
 
-// TestHookClaimContinuationNudge_StepBeadNoNudge verifies that claiming a
+// TestHookClaimStepBeadDoesNotEnqueueContinuationNudge verifies that claiming a
 // step bead (gc.kind="task") does NOT enqueue a hook-claim-continuation
 // nudge even when siblings are pre-assigned. The nudge is only needed for
 // self-propelling pool workflow roots; step claims happen while the session
 // is already executing and will naturally poll.
-func TestHookClaimContinuationNudge_StepBeadNoNudge(t *testing.T) {
+func TestHookClaimStepBeadDoesNotEnqueueContinuationNudge(t *testing.T) {
 	var enqueued []string
 	ops := buildContinuationNudgeOps(stepBeadCandidates(), []string{"sib-1"}, &enqueued)
 
@@ -128,11 +128,53 @@ func TestHookClaimContinuationNudge_StepBeadNoNudge(t *testing.T) {
 	}
 }
 
-// TestHookClaimContinuationNudge_NoSiblingsNoNudge verifies that claiming a
+// TestHookClaimExistingAssignmentDoesNotEnqueueContinuationNudge verifies that
+// re-finding a workflow root this session already holds does NOT enqueue a
+// second nudge. The first claim pre-assigned the continuation siblings and
+// nudged once; on the re-find they already carry an assignee, so
+// preassignHookContinuationGroup assigns nothing and the nudge gate stays shut.
+func TestHookClaimExistingAssignmentDoesNotEnqueueContinuationNudge(t *testing.T) {
+	const slot = "gascity/worker/slot-0"
+	var enqueued []string
+	held := workflowRootCandidates()
+	held[0].Status = "in_progress"
+	held[0].Assignee = slot
+	ops := buildContinuationNudgeOps(held, nil, &enqueued)
+	ops.ListContinuation = func(context.Context, string, []string, string, string) ([]beads.Bead, error) {
+		return []beads.Bead{{ID: "sib-1", Status: "open", Assignee: slot, Metadata: held[0].Metadata}}, nil
+	}
+	ops.AssignContinuation = func(_ context.Context, _ string, _ []string, beadID, _ string) error {
+		t.Errorf("a re-find must not re-assign continuation sibling %s", beadID)
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", ".", hookClaimOptions{
+		Assignee:           slot,
+		IdentityCandidates: []string{slot},
+		RouteTargets:       []string{"route-1"},
+		JSON:               true,
+	}, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("stdout is not a JSON claim result: %v\n%s", err, stdout.String())
+	}
+	if result.Reason != "existing_assignment" {
+		t.Fatalf("reason = %q, want existing_assignment: the re-find path was not exercised", result.Reason)
+	}
+	if len(enqueued) != 0 {
+		t.Fatalf("continuation nudge must not be enqueued again on a re-find, got %v", enqueued)
+	}
+}
+
+// TestHookClaimZeroContinuationDoesNotEnqueueContinuationNudge verifies that claiming a
 // workflow root that has NO unassigned siblings does NOT enqueue a nudge.
 // An empty continuation means the session has no further work queued and
 // should not be immediately propelled.
-func TestHookClaimContinuationNudge_NoSiblingsNoNudge(t *testing.T) {
+func TestHookClaimZeroContinuationDoesNotEnqueueContinuationNudge(t *testing.T) {
 	var enqueued []string
 	ops := buildContinuationNudgeOps(workflowRootCandidates(), nil /* no siblings */, &enqueued)
 
