@@ -582,7 +582,9 @@ func (c *client) deliverStartupTurn(ctx context.Context, paneID, text string) er
 	if c.targetHasNoNamedAgent(ctx, paneID, err) {
 		return c.pasteAndSubmit(ctx, paneID, text)
 	}
-	switch herdrErrorCode(err) {
+	// Accept nonzero-exit prompt errors only from a bare error envelope:
+	// diagnostic text quoting a stall code must not authorize a keystroke.
+	switch herdrAnswerCode(err) {
 	case "timeout":
 		return fmt.Errorf("startup submit landed but never reached %v within %dms: %w",
 			startupConfirmStates, startupPromptConfirmTimeoutMS, err)

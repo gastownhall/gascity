@@ -50,6 +50,18 @@ STATE='` + state + `'
 METADIR='` + metaDir + `'
 shift 2
 printf '%s\n' "$*" >> "$STATE/calls.log"
+prompt_error() {
+  if [ -e "$STATE/prompt_error_decorated" ]; then
+    printf 'invalid argument: %s\n' "$1" >&2
+    printf '%s\n' '{"error":{"code":"invalid_args","message":"invalid prompt argument"}}' >&2
+    exit 1
+  fi
+  if [ -e "$STATE/prompt_error_stderr" ]; then
+    printf '%s' "$1" >&2
+    exit 1
+  fi
+  printf '%s' "$1"
+}
 case "$1_$2" in
 agent_get)
   if [ ! -e "$STATE/registered" ]; then
@@ -98,12 +110,12 @@ agent_prompt)
   elif [ -e "$STATE/prompt_stalled" ]; then
     # No state change inside herdr's fixed 5000ms window: the submit CR never
     # reached the TUI and the text sits unsubmitted in an idle input box.
-    printf '%s' '{"error":{"code":"agent_prompt_stalled","message":"no state change observed after submission"}}'
+    prompt_error '{"error":{"code":"agent_prompt_stalled","message":"no state change observed after submission"}}'
   elif [ -e "$STATE/prompt_times_out" ]; then
     # The state-change gate passed (the CR landed) but no --until state was
     # observed before --timeout. herdr only reports this when --timeout
     # exceeds its 5000ms window; a shorter one masks the stall as a timeout.
-    printf '%s' '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}'
+    prompt_error '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}'
   elif [ -e "$STATE/prompt_blocked" ]; then
     # The first turn opened a confirmation dialog. herdr matches only the
     # requested --until states, so this settles iff the caller asked for
