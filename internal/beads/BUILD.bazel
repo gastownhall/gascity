@@ -135,6 +135,7 @@ go_test(
         "runview_roundtrip_test.go",
         "schema_cursor_drift_test.go",
         "sqlite_sequence_floor_lock_test.go",
+        "sqlite_sequence_test.go",
         "sqlite_store_closed_test.go",
         "sqlite_store_conformance_test.go",
         "sqlite_store_dsn_test.go",

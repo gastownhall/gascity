@@ -4695,6 +4695,7 @@ gc storage
 | [gc storage migrate](#gc-storage-migrate) | Migrate this city's infrastructure classes onto their configured binding |
 | [gc storage preflight](#gc-storage-preflight) | Report what the migration would refuse, without migrating (read-only) |
 | [gc storage recover-stranded](#gc-storage-recover-stranded) | Copy stranded infrastructure beads from the retained work store into the converged binding |
+| [gc storage repair-sequence](#gc-storage-repair-sequence) | Inspect or raise a SQLite bead store's id-sequence floor |
 | [gc storage status](#gc-storage-status) | Report this city's storage-class layout (read-only) |
 
 ## gc storage migrate
@@ -4775,6 +4776,53 @@ gc storage recover-stranded [flags]
 | `--dump` | string |  | write every stranded bead and its source dep edges to this JSON file before any write |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--from-work` | bool |  | recover the stranded infrastructure beads out of this city's work store |
+
+## gc storage repair-sequence
+
+Inspect or raise the persisted id-sequence floor of a SQLite bead store.
+
+Without --floor this is read-only: it reports the persisted floor and the
+highest auto-minted id the store still holds, and whether minting is refused
+because a negative "&lt;prefix&gt;--&lt;n&gt;" id ranks above the floor.
+
+A negative id above the floor usually means an older build wrapped the
+sequence past 9223372036854775807. It can also come from a copy or import that
+pinned "&lt;prefix&gt;--&lt;n&gt;" ids into a store that never wrapped. If those rows are
+stray duplicates, do not raise the floor: delete every "&lt;prefix&gt;--&lt;n&gt;" row
+above the floor, not only the one the report names, and reopen the store
+(restart the processes serving it), and minting resumes in the positive range.
+Deleting destroys those beads, so if any of them is a real bead, raise the
+floor instead.
+
+With --floor=N it persists N as the floor, so the next auto id is N+1. Pick N
+at or above the highest id EVER issued under the prefix — deleted beads are no
+longer in the store, so derive it from the event log and dispatcher traces. The
+command refuses to lower the persisted floor and refuses N below the highest
+auto id present.
+
+Ids are ordered 1 &lt; ... &lt; 9223372036854775807 &lt; -9223372036854775808 &lt; ... &lt; -1.
+On a store an older build wrapped, the positive range is spent: pass a NEGATIVE
+floor above every "&lt;prefix&gt;--&lt;n&gt;" id ever issued, and allocation continues
+upward toward -1 without re-entering the positive range. That cannot be
+undone. Builds without this fix refuse to open a store whose floor is negative.
+
+Before repairing a wrapped store, stop every process serving it that runs a
+build without this fix, so none keeps minting wrapped ids past the floor you
+pick. After a floor raise, processes on this build need no restart: one that
+refuses to mint resumes at its next mint once the floor covers the store.
+
+The store defaults to this city's SQLite infrastructure binding; --dir names
+any other store directory (the directory holding beads.sqlite).
+
+```
+gc storage repair-sequence [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dir` | string |  | store directory holding beads.sqlite (default: this city's SQLite infrastructure binding) |
+| `--floor` | string |  | new floor (int64, may be negative); omit to only report |
+| `--prefix` | string | `gcg` | auto-id prefix whose sequence to inspect or repair |
 
 ## gc storage status
 
