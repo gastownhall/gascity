@@ -106,6 +106,9 @@
       "is_blocked": {
         "type": "boolean"
       },
+      "close_reason": {
+        "type": "string"
+      },
       "blocked_by": {
         "type": "array",
         "description": "Blocking dependencies of this row, each carrying the blocker's status. Populated only on the --status in_progress (crash-recovery) arm; absent elsewhere, which consumers read as not-blocked.",
