@@ -75,10 +75,11 @@ func TestPoolDemandCountShellInheritsDispatchHoldLabelExclusion(t *testing.T) {
 }
 
 // bd's native human label parks a bead for a person. It is not a dispatch hold:
-// beadmeta.DispatchHoldLabels names only the two canonical holds, and the hook
-// and doctor paths iterate that list, so the exclusion rides the pool-demand
-// serve rules alone. Every route-scoped query renders from those rules and must
-// carry it; the assignee-scoped probes must stay transparent to it.
+// beadmeta.DispatchHoldLabels names only the two canonical holds, and the hook's
+// held-candidate filter and the in_progress serve gate iterate that list, so the
+// exclusion rides the pool-demand serve rules alone. Every route-scoped query
+// renders from those rules and must carry it; the assignee-scoped probes must
+// stay transparent to it.
 
 func TestPoolDemandServeRulesExcludeHumanLabelWithoutMakingItADispatchHold(t *testing.T) {
 	if rules := PoolDemandServeRulesForQuery(); !slices.Contains(rules.ExcludeLabels, "human") {
