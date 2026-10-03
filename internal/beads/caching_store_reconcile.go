@@ -522,12 +522,14 @@ type mergeSectionResult struct {
 // it could not read the backing row: they are held, not absorbed, so their
 // row, mark and fences stay as they were. depsReadFailed reports that the
 // snapshot's dependency read failed: a row that does not answer for its edges
-// then keeps its mark. Caller must hold c.mu (write lock).
+// then keeps its mark. It bumps scanGen, so a RefreshRow whose read predates
+// the merge installs nothing over it. Caller must hold c.mu (write lock).
 func (c *CachingStore) mergeSnapshotLocked(
 	freshByID map[string]Bead, confirmedClosed map[string]Bead, deferred map[string]struct{},
 	depMap map[string][]Dep, useFreshDeps, depsReadFailed bool,
 	startSeq uint64, now time.Time,
 ) mergeSectionResult {
+	c.scanGen++
 	// Preserve a cached is_blocked for any row the projection did not return
 	// this cycle. Two cases land here: a full projection failure (enrichErr
 	// left every row unenriched) and the narrower race where a row is still

@@ -607,6 +607,139 @@ func (c *CachingStore) refetchFencedLocked(id string, startSeq uint64) bool {
 	return c.beadSeq[id] > startSeq || c.writeFencedLocked(id, startSeq)
 }
 
+// RefreshRow reads id from the backing store and installs what it found,
+// whether the cached copy is clean, dirty or absent: v2 lag repair's targeted
+// live read (CONTRACT C5.15). Unlike Get it never answers from the cache, and
+// it installs an uncached row. A create found by an instance_token lookup is
+// refreshed by the id the lookup returned.
+//
+// On a nil error the returned row is the one now cached, closed or open.
+// Otherwise nothing was installed:
+//   - ErrNotFound: the backing has no row, and a cached copy or dirty mark
+//     was evicted;
+//   - ErrRowRefreshFenced: a write, deletion or event newer than the read
+//     owns the row (refetchFencedLocked), or a reconcile or full Prime merged
+//     since the read began (scanGen); retry;
+//   - ErrCacheUnavailable: the cache is neither live nor partial, or id is
+//     outside the namespaces this cache owns (ownsBeadID);
+//   - any other error: the backing read of the row or its edges failed.
+//
+// A row whose cached state changed, and a not-found eviction, is stamped as
+// an applied event is, so a scan or list read begun before this read cannot
+// roll it back or reinstall it. A changed row notifies as a re-scan would:
+// bead.created for a new open row, bead.updated for a changed open row,
+// bead.closed for a row held open that closed or is gone. A new row, or a
+// held row whose status changed or that is gone, drops its dependents' ready
+// verdicts, as an applied event does. An unchanged row stamps and notifies
+// nothing.
+//
+// It is on *CachingStore only, with no optional interface: the caller needs
+// the leg's cache itself, as it does for ObservedList, and unwraps a policy
+// layer to reach it.
+func (c *CachingStore) RefreshRow(id string) (Bead, error) {
+	if !c.ownsBeadID(id) {
+		return Bead{}, fmt.Errorf("refresh %s: not this cache's id: %w", id, ErrCacheUnavailable)
+	}
+	c.mu.RLock()
+	live := c.state == cacheLive || c.state == cachePartial
+	startSeq, startScan := c.mutationSeq, c.scanGen
+	c.mu.RUnlock()
+	if !live {
+		return Bead{}, fmt.Errorf("refresh %s: %w", id, ErrCacheUnavailable)
+	}
+	fresh, readErr := c.backing.Get(id)
+	if readErr != nil && !errors.Is(readErr, ErrNotFound) {
+		return Bead{}, readErr
+	}
+	found := readErr == nil
+	var freshDeps []Dep
+	depsFromBacking := false
+	if found && !c.rowAnswersEdges(fresh) {
+		deps, err := c.backing.DepList(id, "down")
+		if err != nil {
+			return Bead{}, fmt.Errorf("refresh %s deps: %w", id, err)
+		}
+		freshDeps, depsFromBacking = deps, true
+	}
+
+	c.mu.Lock()
+	if c.state != cacheLive && c.state != cachePartial {
+		c.mu.Unlock()
+		return Bead{}, fmt.Errorf("refresh %s: %w", id, ErrCacheUnavailable)
+	}
+	if c.refetchFencedLocked(id, startSeq) || c.scanGen != startScan {
+		c.mu.Unlock()
+		return Bead{}, fmt.Errorf("refresh %s: %w", id, ErrRowRefreshFenced)
+	}
+	cached, held := c.beads[id]
+	cachedDeps := c.deps[id]
+	var installed Bead
+	evicted := false
+	if found {
+		opts := absorbOpts{depsMode: depsFromFieldsIfCarried, seqMode: seqKeep, clearDirty: true}
+		if depsFromBacking {
+			opts.depsMode, opts.deps = depsExplicit, freshDeps
+		}
+		c.absorbFreshLocked(id, fresh, time.Now(), opts)
+		installed = cloneBead(c.beads[id])
+	} else if _, dirty := c.dirty[id]; held || dirty {
+		c.evictLocked(id)
+		evicted = true
+	}
+	eventType, changed := rowRefreshChange(held, cached, cachedDeps, found, installed, c.deps[id])
+	if changed || evicted {
+		// The eviction dropped the row's beadSeq, a dirty uncached row's
+		// included, so it is stamped anew.
+		c.noteMutationLocked(id)
+		if (found && !held) || (held && (!found || cached.Status != installed.Status)) {
+			c.clearDependentReadyProjectionsLocked(id)
+		}
+		c.markFreshLocked(time.Now())
+		c.updateStatsLocked()
+	}
+	c.mu.Unlock()
+
+	if !found {
+		if eventType != "" {
+			gone := cloneBead(cached)
+			setBeadStatus(&gone, "closed")
+			c.notifyChange(eventType, gone)
+		}
+		return Bead{}, readErr
+	}
+	if eventType != "" {
+		c.notifyChange(eventType, installed)
+	}
+	return installed, nil
+}
+
+// rowRefreshChange decides whether RefreshRow changed id's cached state and
+// which notification a re-scan would emit for it (reconcileMergeDecision):
+// a re-scan holds no closed rows, so a closed row notifies only as the close
+// of a row held open.
+func rowRefreshChange(held bool, cached Bead, cachedDeps []Dep, found bool, installed Bead, installedDeps []Dep) (string, bool) {
+	switch {
+	case !found:
+		if !held {
+			return "", false
+		}
+		if cached.Status == "closed" {
+			return "", true
+		}
+		return "bead.closed", true
+	case held && !beadChanged(cached, installed, true) && !depsChanged(cachedDeps, installedDeps):
+		return "", false
+	case installed.Status == "closed":
+		if held && cached.Status != "closed" {
+			return "bead.closed", true
+		}
+		return "", true
+	case !held:
+		return "bead.created", true
+	}
+	return "bead.updated", true
+}
+
 // Ready returns open beads whose blocking deps are all closed.
 func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if readyQueryFromArgs(query) != (ReadyQuery{}) {
