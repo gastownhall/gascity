@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,33 @@ import (
 // (gas-px0). The bound is far longer than any assertion here waits, so it can
 // never mask a real reap failure, and short enough to self-clear.
 const fixtureLifetimeSeconds = 300
+
+// runHarnessScript is the one bash -c command site shared by the sweep and
+// watchdog unit tests. Output goes to a file so a leaked background process
+// cannot hold an os/exec pipe open after the shell exits.
+func runHarnessScript(t *testing.T, script string, extraEnv ...string) (string, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	logPath := filepath.Join(t.TempDir(), "harness.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		t.Fatalf("create harness log: %v", err)
+	}
+	cmd := exec.CommandContext(ctx, "bash", "-c", script)
+	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd.Stdout, cmd.Stderr = logFile, logFile
+	err = cmd.Run()
+	_ = logFile.Close()
+	out, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("read harness log: %v", readErr)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("harness script exceeded 40s: %v\n%s", ctx.Err(), out)
+	}
+	return string(out), err
+}
 
 // reapFixture builds a repo-shaped environment for driving
 // scripts/test-go-test-shard with a fake `go` whose run phase is scripted by
@@ -140,7 +168,11 @@ func (f *reapFixture) startWithOutput(t *testing.T, out *os.File, extraEnv ...st
 	}
 	t.Cleanup(func() {
 		// Never leave the runner or its tree behind, whatever the assertions did.
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		// Once Wait has reaped the runner, its PID may be reused by a sibling
+		// process group; no cleanup signal may target that reused number.
+		if cmd.ProcessState == nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
 		_ = cmd.Wait()
 	})
 	return cmd
@@ -163,8 +195,9 @@ func waitWithin(t *testing.T, cmd *exec.Cmd, within time.Duration) error {
 
 // waitForPIDFile blocks until the scripted run body has recorded the PID of
 // the descendant it spawned, so the test signals only after the tree exists.
-func waitForPIDFile(t *testing.T, path string, within time.Duration) int {
+func waitForPIDFile(t *testing.T, path string) int {
 	t.Helper()
+	const within = 30 * time.Second
 	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(path)
@@ -218,7 +251,7 @@ exec sleep %d
 `, pidFile, fixtureLifetimeSeconds))
 
 	cmd := fixture.start(t)
-	descendant := waitForPIDFile(t, pidFile, 30*time.Second)
+	descendant := waitForPIDFile(t, pidFile)
 
 	// Kill only the runner, the way a dead driver, a closed session, or a
 	// killed parent chain does. Its descendants must not survive it.
@@ -256,7 +289,7 @@ func TestGoTestShardWatchdogKillsARunThatDefeatsGoTimeout(t *testing.T) {
 		"GO_TEST_TIMEOUT=2s",
 		"GO_TEST_WATCHDOG_GRACE=2s",
 	)
-	wedged := waitForPIDFile(t, pidFile, 30*time.Second)
+	wedged := waitForPIDFile(t, pidFile)
 
 	err := waitWithin(t, cmd, 90*time.Second)
 	elapsed := time.Since(start)
@@ -325,9 +358,7 @@ gc_harness_kill_pid() { printf 'KILLED %%s\n' "$1" >> %q ; }
 gc_harness_sweep_stale_orphans %s
 `, filepath.Join(repoRoot(t), "scripts", "lib", "harness-reap.sh"), killLog, minAge)
 
-	cmd := exec.Command("bash", "-c", script)
-	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	out, err := cmd.CombinedOutput()
+	out, err := runHarnessScript(t, script, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if err != nil {
 		t.Fatalf("sweep failed: %v\n%s", err, out)
 	}
@@ -335,7 +366,7 @@ gc_harness_sweep_stale_orphans %s
 	if readErr != nil && !os.IsNotExist(readErr) {
 		t.Fatalf("read kill log: %v", readErr)
 	}
-	return string(kills) + string(out)
+	return string(kills) + out
 }
 
 // TestHarnessSweepReapsStrandedRunsButSparesLiveOnes pins the sweep's whole
@@ -503,7 +534,7 @@ func TestGoTestShardTerminationLeavesNothingHoldingTheCallersPipe(t *testing.T) 
 	)
 	// From here on the runner's tree holds the only write ends.
 	_ = stdoutWriter.Close()
-	waitForPIDFile(t, pidFile, 30*time.Second)
+	waitForPIDFile(t, pidFile)
 
 	if err := syscall.Kill(cmd.Process.Pid, syscall.SIGTERM); err != nil {
 		t.Fatalf("signal runner: %v", err)

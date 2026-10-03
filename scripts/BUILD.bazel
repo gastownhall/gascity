@@ -25,6 +25,7 @@ go_test(
         "go_test_observable_test.go",
         "gomod_replace_guard_test.go",
         "harness_reap_test.go",
+        "harness_watchdog_identity_test.go",
         "lint_readonly_contract_test.go",
         "makefile_cgo_test.go",
         "makefile_install_test.go",
