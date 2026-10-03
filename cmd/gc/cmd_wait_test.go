@@ -3336,7 +3336,7 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) string {
 
 	homeDir := filepath.Join(shortSocketTempDir(t, "gc-bd-home-"), "home")
 	if err := dolttest.WriteGlobalConfig(homeDir); err != nil {
-		t.Fatalf("WriteDoltGlobalConfig: %v", err)
+		t.Fatalf("dolttest.WriteGlobalConfig: %v", err)
 	}
 	t.Setenv("HOME", homeDir)
 	t.Setenv("DOLT_ROOT_PATH", homeDir)
@@ -3416,7 +3416,7 @@ func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 
 	homeDir := filepath.Join(shortSocketTempDir(t, "gc-bd-home-"), "home")
 	if err := dolttest.WriteGlobalConfig(homeDir); err != nil {
-		t.Fatalf("WriteDoltGlobalConfig: %v", err)
+		t.Fatalf("dolttest.WriteGlobalConfig: %v", err)
 	}
 	t.Setenv("HOME", homeDir)
 	t.Setenv("DOLT_ROOT_PATH", homeDir)

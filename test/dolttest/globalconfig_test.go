@@ -10,11 +10,12 @@ import (
 
 // TestGlobalConfigDisablesNetworkChecks pins what the shared dolt config
 // carries. Without versioncheck.disabled, `dolt version` makes a synchronous
-// HTTPS call for the latest release and waits up to 30 s for it; the pinned bd
-// probes `dolt version` at init with a fixed 10 s timeout and kills it, so a
-// slow network fails an otherwise correct test. Without metrics.disabled, dolt
-// status and sql send metrics from every fresh HOME. dolt takes no environment
-// variable for either, so the config file is the only switch.
+// HTTPS call for the latest release, and that call has no timeout of its own
+// (30 s behind a black-holed proxy, 60 s behind one that accepts and never
+// answers, unbounded after a handshake); the pinned bd probes `dolt version` at
+// init with a fixed 10 s timeout and kills it, so a slow network fails an
+// otherwise correct test. Without metrics.disabled, dolt status and sql send
+// metrics from every fresh HOME.
 func TestGlobalConfigDisablesNetworkChecks(t *testing.T) {
 	var cfg map[string]string
 	if err := json.Unmarshal([]byte(GlobalConfigJSON), &cfg); err != nil {
@@ -32,6 +33,23 @@ func TestGlobalConfigDisablesNetworkChecks(t *testing.T) {
 		if cfg[key] == "" {
 			t.Errorf("GlobalConfigJSON[%q] is empty; dolt refuses to commit without an author identity", key)
 		}
+	}
+}
+
+// TestDisableEventFlushEnvMatchesTheTestProcess pins the switch that keeps dolt
+// from forking a detached `dolt send-metrics` after every command, which
+// metrics.disabled in GlobalConfigJSON does not prevent. dolt tests only for the
+// variable's presence, so its value is cosmetic, but two places name it and must
+// agree: this package, for test code that builds a child environment from
+// scratch, and internal/testenv, which sets it once for every test process so a
+// child that inherits os.Environ() needs nothing more. This binary has run
+// testenv's init, so its own environment is where the two meet.
+func TestDisableEventFlushEnvMatchesTheTestProcess(t *testing.T) {
+	if DisableEventFlushVar != "DOLT_DISABLE_EVENT_FLUSH" {
+		t.Errorf("DisableEventFlushVar = %q, want %q", DisableEventFlushVar, "DOLT_DISABLE_EVENT_FLUSH")
+	}
+	if got := os.Getenv(DisableEventFlushVar); got != DisableEventFlushValue {
+		t.Errorf("%s = %q in the test process, want %q: internal/testenv's init and this package disagree", DisableEventFlushVar, got, DisableEventFlushValue)
 	}
 }
 

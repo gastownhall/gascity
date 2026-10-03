@@ -19,11 +19,11 @@ const doltConfigFileName = "config_global.json"
 // TestOnlyTheSharedHelperWritesDoltGlobalConfig keeps the dolt global config to
 // one source, test/dolttest.WriteGlobalConfig. A test that writes
 // config_global.json itself ships the identity and silently drops
-// versioncheck.disabled and metrics.disabled, which is how every real-dolt test
-// in the tree was exposed to the network until now: `dolt version` waits up to
-// 30 s on a slow network while the pinned bd kills it after 10 s. The guard is
-// syntactic: any os.WriteFile, os.Create or os.OpenFile whose arguments name
-// config_global.json, anywhere outside test/dolttest, fails.
+// versioncheck.disabled and metrics.disabled, which exposes its dolt to the
+// network: `dolt version` has no timeout of its own on a slow network while the
+// pinned bd kills it after 10 s. The guard is syntactic: any os.WriteFile,
+// os.Create or os.OpenFile whose arguments name config_global.json, anywhere
+// outside test/dolttest, fails.
 func TestOnlyTheSharedHelperWritesDoltGlobalConfig(t *testing.T) {
 	root := repoRoot(t)
 	sharedDir := filepath.Join(root, "test", "dolttest") + string(filepath.Separator)

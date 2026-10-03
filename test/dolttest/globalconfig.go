@@ -13,13 +13,30 @@ import (
 // that does.
 //
 // Besides the author identity dolt needs to commit, it switches off the two
-// network calls dolt makes from a fresh HOME. dolt takes no environment
-// variable for either; the config file is the only switch.
+// network calls dolt makes from a fresh HOME:
 //   - versioncheck.disabled: `dolt version` otherwise fetches the latest
-//     release synchronously and waits up to 30 s for it, while the pinned bd
-//     probes `dolt version` at init with a fixed 10 s timeout and kills it.
+//     release synchronously, and that call has no timeout of its own (30 s
+//     behind a black-holed proxy, 60 s behind one that accepts and never
+//     answers, unbounded after a handshake), while the pinned bd probes `dolt
+//     version` at init with a fixed 10 s timeout and kills it.
 //   - metrics.disabled: `dolt status` and `dolt sql` otherwise send metrics.
+//
+// metrics.disabled stops dolt sending metrics, not forking the process that
+// would: see DisableEventFlushVar.
 const GlobalConfigJSON = `{"user.name":"gc-test","user.email":"gc-test@test.local","versioncheck.disabled":"true","metrics.disabled":"true"}`
+
+// DisableEventFlushVar names the environment variable that stops dolt forking a
+// detached `dolt send-metrics` after every command, a fork GlobalConfigJSON's
+// metrics.disabled does not prevent. dolt tests only for its presence, so
+// DisableEventFlushValue is cosmetic.
+//
+// internal/testenv sets it once for every test process, so a child that
+// inherits os.Environ() needs nothing more. A child whose environment is built
+// from scratch must carry it itself.
+const (
+	DisableEventFlushVar   = "DOLT_DISABLE_EVENT_FLUSH"
+	DisableEventFlushValue = "1"
+)
 
 // globalConfigFile is the file dolt reads its global configuration from,
 // beneath <root>/.dolt.

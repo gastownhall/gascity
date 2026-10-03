@@ -165,6 +165,11 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 		panic(fmt.Sprintf("acceptance: seeding dolt global config under %s: %v", gcHome, err))
 	}
 	e.vars["DOLT_ROOT_PATH"] = gcHome
+	// A child gets only the variables listed here, so the process-wide
+	// DOLT_DISABLE_EVENT_FLUSH that internal/testenv sets does not reach it, and
+	// the seeded metrics.disabled stops dolt sending metrics, not forking the
+	// detached send-metrics process that would.
+	e.vars[dolttest.DisableEventFlushVar] = dolttest.DisableEventFlushValue
 
 	// The Makefile points GIT_CONFIG_GLOBAL at scripts/test-gitconfig-path, but a
 	// caller that runs `go test -tags acceptance_a` directly supplies no seed at

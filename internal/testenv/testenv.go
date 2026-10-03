@@ -28,6 +28,16 @@
 // GC_*_HELPER, ...) flow through untouched so opt-in test paths and
 // helper-subprocess trampolines keep working.
 //
+// Process-wide dolt default: dolt forks a detached `dolt send-metrics` after
+// every command unless DOLT_DISABLE_EVENT_FLUSH is present in its environment,
+// whatever metrics.disabled says, and no test has a use for that process.
+// init() sets the variable once for every go-test binary, so a test that runs
+// dolt, directly or through gc or bd, inherits it from the process instead of
+// calling Setenv itself. Test code that builds a child environment from
+// scratch rather than from os.Environ() must carry it too; see
+// test/dolttest.DisableEventFlushVar. Testscript subcommand mode, below, is
+// left alone: testscript owns that child's environment.
+//
 // Passthrough: a parent that intentionally launches a helper subprocess
 // with seeded leak-vector vars (e.g. workspacesvc's proxy_process tests,
 // where proxy_process.go seeds GC_CITY/GC_CITY_PATH/GC_CITY_RUNTIME_DIR/
@@ -165,6 +175,19 @@ const ProdDoltPort = "3307"
 // Dolt-port guard. Set it to "1" for the rare legitimate case where a test
 // process must deliberately target a local Dolt server on ProdDoltPort.
 const ProdDoltPortOptOutVar = "GC_ALLOW_PROD_DOLT_PORT_IN_TESTS"
+
+// doltDisableEventFlushVar is the environment variable dolt checks, by presence
+// alone, before forking a detached `dolt send-metrics` after a command. Its
+// value is cosmetic: empty, 0, false, true and 1 all stop the fork.
+// doltDisableEventFlushValue and the name are kept as a stdlib-only copy of
+// test/dolttest.DisableEventFlushVar and DisableEventFlushValue, for the same
+// reason as isLocalDoltHost: that package links domain code, and this one is
+// blank-imported by every test binary. dolttest's
+// TestDisableEventFlushEnvMatchesTheTestProcess pins the two copies together.
+const (
+	doltDisableEventFlushVar   = "DOLT_DISABLE_EVENT_FLUSH"
+	doltDisableEventFlushValue = "1"
+)
 
 // doltPortVars maps each env var that selects a Dolt server port to the env
 // var that selects the matching Dolt server host. An empty host var name
@@ -346,5 +369,8 @@ func init() {
 		if !keep[name] {
 			_ = os.Unsetenv(name)
 		}
+	}
+	if err := os.Setenv(doltDisableEventFlushVar, doltDisableEventFlushValue); err != nil {
+		panic("testenv: setting " + doltDisableEventFlushVar + ": " + err.Error())
 	}
 }

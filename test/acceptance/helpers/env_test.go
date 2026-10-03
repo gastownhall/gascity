@@ -79,6 +79,19 @@ func TestNewEnvSeedsDoltAuthorIdentity(t *testing.T) {
 	}
 }
 
+// NewEnv hands a child only the variables it lists, so the process-wide
+// DOLT_DISABLE_EVENT_FLUSH that internal/testenv sets never reaches it. Without
+// its own entry every dolt a tier A, B or C test forks leaves a detached
+// `dolt send-metrics` behind, even though the seeded config sets
+// metrics.disabled.
+func TestNewEnvDisablesDoltEventFlush(t *testing.T) {
+	env := NewEnv("", t.TempDir(), t.TempDir())
+
+	if got := env.Get("DOLT_DISABLE_EVENT_FLUSH"); got != "1" {
+		t.Fatalf("NewEnv() DOLT_DISABLE_EVENT_FLUSH = %q, want %q", got, "1")
+	}
+}
+
 // With no seed from the caller — a bare `go test -tags acceptance_a`, which is
 // what the CI topology job runs — NewEnv must supply its own. Without it the
 // child read the runner's real global config and gc doctor errored on

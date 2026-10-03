@@ -119,6 +119,7 @@ func TestClearProcessLiveEnvForTestsUnsetsInheritedState(t *testing.T) {
 		"GC_SUPERVISOR_SYSTEMD_UNIT",
 	}
 	preserved := []string{
+		"DOLT_DISABLE_EVENT_FLUSH",
 		"GC_FAST_UNIT",
 		"GC_HERDR_LIVE_TESTS",
 		"GC_REAL_PROCESS_SIGNAL_TESTS",
@@ -197,6 +198,11 @@ func preserveTestControlEnv(key string) bool {
 		key == managedDoltTestModeEnv ||
 		key == managedDoltTestParentPIDEnv ||
 		key == "GC_DOLT_REAL_BINARY" ||
+		// internal/testenv sets this once per test process. It is a hermeticity
+		// switch, not live city state, but the DOLT_ prefix scan in
+		// liveEnvKeysForTests would unset it before any test ran and blank it in
+		// every clearGCEnv.
+		key == dolttest.DisableEventFlushVar ||
 		// The live herdr tier's opt-in. Without it here the scrub below would
 		// strip the variable before any cmd/gc live journey could read it, so
 		// `make test-herdr-live` could never reach the journeys in this package.
