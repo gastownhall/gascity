@@ -930,6 +930,21 @@ func TestReconcileSessionBeads_RestartRequestSetsAsleepOnlyWhenLiveRuntimeKilled
 		if got.Metadata["session_key"] == "" || got.Metadata["session_key"] == "original-key" {
 			t.Fatalf("session_key = %q, want rotated key", got.Metadata["session_key"])
 		}
+
+		// Next tick: the recorded asleep state plus the reset-pending desire
+		// must wake the on_demand session with no further trigger.
+		env.reconcile([]beads.Bead{got})
+
+		if !env.sp.IsRunning(sessionName) {
+			t.Fatalf("session %q did not wake on the next tick after the restart-requested kill", sessionName)
+		}
+		woke, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("store.Get(%s) after wake: %v", session.ID, err)
+		}
+		if woke.Metadata["last_woke_at"] == "" {
+			t.Fatal("last_woke_at after wake = empty, want a timestamp from a real wake commit")
+		}
 	})
 
 	t.Run("already dead: fall-through unaffected", func(t *testing.T) {
