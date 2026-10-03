@@ -1744,6 +1744,12 @@ func TestProviderTerminalErrorReasonCreditBalanceTooLow(t *testing.T) {
 		{name: "claude code pane line", content: "> hello\n  ⎿  Credit balance is too low\n"},
 		{name: "api error sentence", content: `API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`},
 		{name: "api error sentence after pane marker", content: "> hello\n  ⎿  API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.\"}}\n"},
+		{name: "api error sentence wrapped at 80 columns", content: "> hello\n" +
+			"  ⎿  API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"me\n" +
+			"     ssage\":\"Your credit balance is too low to access the Anthropic API. Please\n" +
+			"     go to Plans & Billing to upgrade or purchase credits.\"}}\n"},
+		{name: "api error sentence wrapped mid-phrase", content: "  ⎿  API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your credit balance is too\n" +
+			"     low to access the Anthropic API.\"}}\n"},
 		{name: "upper case", content: "CREDIT BALANCE IS TOO LOW"},
 		{name: "claude code displayed stop after prompt", content: "❯ PROBE keep going\n  ⎿ \u00a0Credit balance too low · Add funds: https://platform.claude.com/settings/billing\n\n✻ Crunched for 23s · done 11:22 AM\n"},
 		{name: "claude code displayed stop alone", content: "  ⎿ \u00a0Credit balance too low\n"},
@@ -1774,6 +1780,11 @@ func TestProviderTerminalErrorReasonCreditBalanceMentionIsNotTerminal(t *testing
 		{name: "prose without is", content: "  ⎿  The other session stopped with its credit balance too low.\n"},
 		{name: "wrapped prose without is", content: "⏺ The worker stopped and the pane showed its\n  credit balance too low, so I moved on to the next bead.\n"},
 		{name: "grep command without is", content: `$ grep -c "Credit balance too low" session.log` + "\n0\n"},
+		{name: "api error followed by unindented prose", content: "  ⎿  API Error: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}\n" +
+			"⏺ Another worker failed because its credit balance is too low to access the API.\n"},
+		{name: "api error followed by a blank line and indented prose", content: "  ⎿  API Error: 400 {\"type\":\"error\"}\n" +
+			"\n" +
+			"     its credit balance is too low to access the API\n"},
 		{name: "grep hit on the api sentence", content: `$ grep -rn "too low to access" internal/runtime` + "\n" + `internal/runtime/dialog_test.go:1745:		{name: "api error sentence", content: ` + "`API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your credit balance is too low to access the Anthropic API.\"}}`},\n"},
 		{name: "api sentence quoted in prose", content: "  The worker's log said: Your credit balance is too low to access the Anthropic API.\n"},
 	}
