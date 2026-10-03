@@ -4321,7 +4321,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// doing (a push, a commit, a comment), so the cycle waits
 					// for an idle prompt. A deferral skips the stamp below so
 					// the divergence survives to the next pass.
-					if !freshCycleAtIdleBoundary(ctx, infoByID[target.info.ID], decision.AssignedWorkBeadID, dt, sp, clk, target.tp.TemplateName, stdout, trace) {
+					if !freshCycleAtIdleBoundary(ctx, infoByID[target.info.ID], decision.AssignedWorkBeadID, target.tp.ResolvedProvider, dt, sp, clk, target.tp.TemplateName, stdout, trace) {
 						continue
 					}
 					deferredFor := dt.takeFreshCycleDeferral(target.info.ID, decision.AssignedWorkBeadID, clk.Now())

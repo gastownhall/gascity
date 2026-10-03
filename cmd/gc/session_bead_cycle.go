@@ -99,13 +99,16 @@ const freshCycleDeferralLogInterval = 15 * time.Minute
 // idle probe, no pane activity since that probe, and no background work the
 // runtime can see. When the runtime cannot wait for idle it returns true (the
 // pre-existing behavior), as it does for a session with no runtime name to
-// probe. Otherwise it starts an idle probe if none is pending,
+// probe and for a provider with no ready prompt configured: idle detection
+// matches that prompt, so without it every probe would time out and the cycle
+// would never run. Otherwise it starts an idle probe if none is pending,
 // within the reconciler's shared in-flight budget, and returns false until a
 // probe proves the session idle. Each false return records a deferral on dt.
 func freshCycleAtIdleBoundary(
 	ctx context.Context,
 	info sessionpkg.Info,
 	newBeadID string,
+	resolved *config.ResolvedProvider,
 	dt *drainTracker,
 	sp runtime.Provider,
 	clk clock.Clock,
@@ -116,6 +119,9 @@ func freshCycleAtIdleBoundary(
 	wp, ok := sp.(runtime.IdleWaitProvider)
 	name := info.SessionNameMetadata
 	if !ok || dt == nil || name == "" {
+		return true
+	}
+	if resolved == nil || strings.TrimSpace(resolved.ReadyPromptPrefix) == "" {
 		return true
 	}
 	now := clk.Now()

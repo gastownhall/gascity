@@ -755,7 +755,8 @@ func newFreshCycleFixture(t *testing.T) *freshCycleFixture {
 		SessionName:  sessionName,
 		TemplateName: "witness",
 		ResolvedProvider: &config.ResolvedProvider{
-			SessionIDFlag: "--session-id",
+			SessionIDFlag:     "--session-id",
+			ReadyPromptPrefix: "❯ ",
 		},
 	}
 	closedAt := time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC)
@@ -1024,6 +1025,28 @@ func TestFreshCycleWithoutIdleWaitProviderUnchanged(t *testing.T) {
 	}
 }
 
+// TestFreshCycleWithoutReadyPromptUnchanged: idle detection matches the
+// provider's ready prompt, so a provider that configures none could never
+// prove the session idle. It keeps the pre-existing behavior and cycles on
+// pass 1 without starting a probe, even while the runtime would report busy.
+func TestFreshCycleWithoutReadyPromptUnchanged(t *testing.T) {
+	f := newFreshCycleFixture(t)
+	tp := f.env.desiredState[f.sessionName]
+	tp.ResolvedProvider.ReadyPromptPrefix = ""
+	f.env.desiredState[f.sessionName] = tp
+	f.env.sp.WaitForIdleErrors[f.sessionName] = errFreshCycleTestBusy
+	f.pass(t)
+	if f.env.sp.IsRunning(f.sessionName) {
+		t.Fatalf("session not cycled on pass 1 by a provider without a ready prompt; stdout:\n%s", f.env.stdout.String())
+	}
+	if got := f.currentBead(t); got != "wb-new" {
+		t.Fatalf("%s = %q, want wb-new", sessionpkg.CurrentBeadIDKey, got)
+	}
+	if n := f.env.sp.CountCalls("WaitForIdle", f.sessionName); n != 0 {
+		t.Fatalf("WaitForIdle calls = %d, want 0 without a ready prompt", n)
+	}
+}
+
 // TestFreshCycleUnsupportedIdleWaitCycles: a composite runtime implements
 // WaitForIdle for every session but answers ErrInteractionUnsupported for a
 // backend that cannot observe a prompt. That answer means "cannot tell", not
@@ -1081,7 +1104,7 @@ func TestFreshCycleGuardsRunBeforeProbe(t *testing.T) {
 		NamedSessions: []config.NamedSession{{Template: "witness", Mode: "on_demand"}},
 	}
 	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "witness")
-	env.desiredState[sessionName] = TemplateParams{Command: "true", SessionName: sessionName, TemplateName: "witness"}
+	env.desiredState[sessionName] = TemplateParams{Command: "true", SessionName: sessionName, TemplateName: "witness", ResolvedProvider: &config.ResolvedProvider{ReadyPromptPrefix: "❯ "}}
 	createPrevBead(t, env, nil) // still open
 	session := env.createSessionBead(sessionName)
 	env.setSessionMetadata(&session, map[string]string{
@@ -1147,7 +1170,7 @@ func TestFreshCycleProbeBudget(t *testing.T) {
 	for i := 0; i < n; i++ {
 		agent := fmt.Sprintf("witness%d", i)
 		name := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, agent)
-		env.desiredState[name] = TemplateParams{Command: "true", SessionName: name, TemplateName: agent}
+		env.desiredState[name] = TemplateParams{Command: "true", SessionName: name, TemplateName: agent, ResolvedProvider: &config.ResolvedProvider{ReadyPromptPrefix: "❯ "}}
 		session := env.createSessionBead(name)
 		env.setSessionMetadata(&session, map[string]string{
 			namedSessionMetadataKey:      "true",
