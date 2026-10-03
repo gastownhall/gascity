@@ -994,6 +994,42 @@ func TestBuildResumeCommandUsesResolvedProviderCommand(t *testing.T) {
 	}
 }
 
+// TestBuildResumeCommandExpandsProviderEnv covers the resume hints for
+// gastownhall/gascity#6822: provider env must come back $VAR-expanded, matching
+// resolveTemplate, not as literal config text.
+func TestBuildResumeCommandExpandsProviderEnv(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "mayor", Provider: "wrapped"},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"wrapped": {
+				Command:   "aimux",
+				PathCheck: "true", // use /usr/bin/true so LookPath succeeds in CI
+				Env: map[string]string{
+					"CLAUDE_CONFIG_DIR": "$HOME/.claude-agents",
+				},
+			},
+		},
+	}
+
+	info := session.Info{
+		Template: "mayor",
+		Command:  "aimux",
+		Provider: "wrapped",
+		WorkDir:  "/tmp/workdir",
+	}
+
+	_, hints := buildResumeCommand(t.TempDir(), cfg, info, "", nil, io.Discard)
+	if got, want := hints.Env["CLAUDE_CONFIG_DIR"], home+"/.claude-agents"; got != want {
+		t.Fatalf("hints.Env[CLAUDE_CONFIG_DIR] = %q, want %q", got, want)
+	}
+}
+
 func TestBuildResumeCommandIncludesSettingsAndDefaultArgs(t *testing.T) {
 	cityDir := t.TempDir()
 	// Write a .gc/settings.json so settingsArgs finds it.

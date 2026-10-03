@@ -1652,7 +1652,7 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 			ProcessNames:           resolved.ProcessNames,
 			EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 			AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
-			Env:                    resolved.Env,
+			Env:                    expandEnvMap(resolved.Env),
 		}
 	}
 
