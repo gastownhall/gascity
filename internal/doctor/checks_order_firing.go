@@ -188,6 +188,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	// stay visible without converting an advisory error into a blocking gate.
 	var blockingErrors, advisoryErrors int
 	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg, cityPath)
+	patrol := c.patrolInterval()
 
 	// Resolve every order-run lookup the loop below will need up front and in
 	// parallel. The pre-pass shares the cron-interval cache with the loop, so
@@ -223,7 +224,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
-		status, severity, detail := classifyOrderFiring(order, now, expected, lastFired, startedAt)
+		status, severity, detail := classifyOrderFiring(order, now, expected, patrol, lastFired, startedAt)
 		worst = worseStatus(worst, status)
 		result.Details = append(result.Details, detail)
 		if status != StatusOK {
@@ -575,7 +576,7 @@ func (c *OrderFiringCurrentCheck) latestOrderFiredAtUsing(lastRun OrderFiringCur
 	if lastRun == nil {
 		return latest, nil
 	}
-	if !eventEvidenceSuffices(latest, expected, now) {
+	if !eventEvidenceSuffices(latest, expected, c.patrolInterval(), now) {
 		runAt, err := lastRun(order)
 		if err != nil {
 			return time.Time{}, err
@@ -587,12 +588,34 @@ func (c *OrderFiringCurrentCheck) latestOrderFiredAtUsing(lastRun OrderFiringCur
 	return latest, nil
 }
 
+// patrolInterval is the orders lane's backstop: the lane runs a pass at
+// least every patrol interval after the previous one ends, so a healthy
+// order's observed period is its expected interval plus about one patrol
+// interval, and more when a pass outlasts the interval. A check built
+// without a config uses the config default.
+func (c *OrderFiringCurrentCheck) patrolInterval() time.Duration {
+	if c.cfg != nil {
+		return c.cfg.Daemon.PatrolIntervalDuration()
+	}
+	var defaults config.DaemonConfig
+	return defaults.PatrolIntervalDuration()
+}
+
 // eventEvidenceSuffices reports whether the event log alone answers "is this
 // order current". Anything else needs the authoritative order-run lookup: the
 // event log can lag, and a stale event must not be reported as a real outage
 // without confirmation.
-func eventEvidenceSuffices(latest time.Time, expected time.Duration, now time.Time) bool {
-	return !latest.IsZero() && now.Sub(latest) < expected+expected/2
+func eventEvidenceSuffices(latest time.Time, expected, patrol time.Duration, now time.Time) bool {
+	return !latest.IsZero() && now.Sub(latest) < orderOverdueAfter(expected, patrol)
+}
+
+// orderOverdueAfter is the age at which a fired order counts as overdue: 1.5x
+// its effective period, the expected interval plus one patrol interval. The
+// classifier and the event-only shortcut both use it, so the shortcut can
+// never pass an order the classifier would flag.
+func orderOverdueAfter(expected, patrol time.Duration) time.Duration {
+	effective := expected + patrol
+	return effective + effective/2
 }
 
 // pendingLastRunOrders returns the monitored orders the event log cannot
@@ -617,7 +640,7 @@ func (c *OrderFiringCurrentCheck) pendingLastRunOrders(allOrders []orders.Order,
 		if err != nil {
 			continue
 		}
-		if eventEvidenceSuffices(latestOrderFiredAt(firedEvents, order.ScopedName()), expected, now) {
+		if eventEvidenceSuffices(latestOrderFiredAt(firedEvents, order.ScopedName()), expected, c.patrolInterval(), now) {
 			continue
 		}
 		pending = append(pending, order)
@@ -697,7 +720,7 @@ func latestOrderFiredAt(evts []events.Event, subject string) time.Time {
 	return latest
 }
 
-func classifyOrderFiring(order orders.Order, now time.Time, expected time.Duration, lastFired, controllerStarted time.Time) (CheckStatus, CheckSeverity, string) {
+func classifyOrderFiring(order orders.Order, now time.Time, expected, patrol time.Duration, lastFired, controllerStarted time.Time) (CheckStatus, CheckSeverity, string) {
 	name := orderDisplayName(order)
 	if lastFired.IsZero() {
 		if controllerStarted.IsZero() {
@@ -719,9 +742,9 @@ func classifyOrderFiring(order orders.Order, now time.Time, expected time.Durati
 
 	age := nonNegativeDuration(now.Sub(lastFired))
 	switch {
-	case age >= expected*3:
+	case age >= (expected+patrol)*3:
 		return StatusError, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (CRITICAL: stale)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
-	case age >= expected+expected/2:
+	case age >= orderOverdueAfter(expected, patrol):
 		return StatusWarning, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (overdue)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
 	default:
 		return StatusOK, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
@@ -757,10 +780,10 @@ func nonNegativeDuration(d time.Duration) time.Duration {
 }
 
 func formatOrderFiringDuration(d time.Duration) string {
-	d = d.Round(time.Minute)
-	if d == 0 {
-		return "0s"
+	if secs := d.Round(time.Second); secs < 2*time.Minute {
+		return fmt.Sprintf("%ds", int(secs/time.Second))
 	}
+	d = d.Round(time.Minute)
 	if d%time.Hour == 0 {
 		return fmt.Sprintf("%dh", int(d/time.Hour))
 	}
