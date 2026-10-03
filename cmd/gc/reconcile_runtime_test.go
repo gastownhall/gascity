@@ -1205,7 +1205,10 @@ func TestV2MetricsLatencyDepthAndDuty(t *testing.T) {
 
 // v2RuntimeFiles are the v2 production files F2 forbids from touching
 // CityRuntime.
-var v2RuntimeFiles = []string{"reconcile_runtime.go", "reconcile_metrics.go", "reconcile_barrier.go"}
+var v2RuntimeFiles = []string{
+	"reconcile_runtime.go", "reconcile_metrics.go", "reconcile_barrier.go",
+	"allocator_census.go", "allocator_health.go", "allocator_observe.go", "allocator_scalecheck_lane.go",
+}
 
 // Kills: v2 code reaching CityRuntime (F2), or a worker reading the host's
 // config directly instead of the published env. A reload writes CityRuntime

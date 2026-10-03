@@ -426,19 +426,8 @@ func ensurePoolIdentityNotHeldByOpenRow(store beads.Store, cfg *config.City, sna
 	}
 	want := poolIdentitySessionName(agentName, template)
 	holds := func(info sessionpkg.Info) bool {
-		if info.Closed || !isPoolManagedSessionInfo(info) {
-			return false
-		}
-		switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
-		case sessionpkg.StateStartPending, sessionpkg.StateCreating, sessionpkg.StateFailedCreate:
-		default:
-			return false
-		}
-		if strings.TrimSpace(info.AgentName) == "" || poolIdentitySessionName(info.AgentName, template) != want {
-			return false
-		}
-		stored := strings.TrimSpace(info.Template)
-		return stored == "" || storedTemplateMatchesPoolTemplate(stored, template, cfg)
+		lease, ok := poolIdentityLeaseOf(info)
+		return ok && lease == want && poolIdentityLeaseTemplateMatches(info, cfg, template)
 	}
 	if snapshot != nil {
 		for _, info := range snapshot.OpenInfos() {
@@ -462,6 +451,34 @@ func ensurePoolIdentityNotHeldByOpenRow(store beads.Store, cfg *config.City, sna
 		}
 	}
 	return nil
+}
+
+// poolIdentityLeaseOf reports whether info holds a pool identity lease, and
+// on which identity in its tmux-safe encoding: an open pool row that is still
+// an unconfirmed create (start-pending, creating, or failed-create whose
+// teardown is unconfirmed) with a concrete identity. Whether the lease covers a
+// given template is poolIdentityLeaseTemplateMatches.
+func poolIdentityLeaseOf(info sessionpkg.Info) (string, bool) {
+	if info.Closed || !isPoolManagedSessionInfo(info) {
+		return "", false
+	}
+	switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
+	case sessionpkg.StateStartPending, sessionpkg.StateCreating, sessionpkg.StateFailedCreate:
+	default:
+		return "", false
+	}
+	if strings.TrimSpace(info.AgentName) == "" {
+		return "", false
+	}
+	// A non-empty identity encodes without its template.
+	return poolIdentitySessionName(info.AgentName, ""), true
+}
+
+// poolIdentityLeaseTemplateMatches reports whether a lease-holding row counts
+// against template: its stored template is empty or names template.
+func poolIdentityLeaseTemplateMatches(info sessionpkg.Info, cfg *config.City, template string) bool {
+	stored := strings.TrimSpace(info.Template)
+	return stored == "" || storedTemplateMatchesPoolTemplate(stored, template, cfg)
 }
 
 // derivePoolSessionIdentifiers picks every identifier relevant to a fresh pool

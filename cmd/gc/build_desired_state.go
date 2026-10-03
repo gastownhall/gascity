@@ -278,6 +278,7 @@ func (bp *agentBuildParams) releasePoolSessionCreate() {
 func evaluatePendingPools(
 	cfg *config.City,
 	pendingPools []poolEvalWork,
+	runner ScaleCheckRunner,
 	stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
 ) ([]int, []bool) {
@@ -309,9 +310,9 @@ func evaluatePendingPools(
 			var d int
 			var err error
 			if newDemand {
-				d, err = evaluatePoolNewDemand(agentName, sp, dir, probeEnv, shellScaleCheck)
+				d, err = evaluatePoolNewDemand(agentName, sp, dir, probeEnv, runner)
 			} else {
-				d, err = evaluatePool(agentName, sp, dir, probeEnv, shellScaleCheck)
+				d, err = evaluatePool(agentName, sp, dir, probeEnv, runner)
 			}
 			evalResults[idx] = poolEvalResult{desired: d, err: err}
 			if trace != nil {
@@ -360,7 +361,19 @@ func evaluatePendingPoolsMap(
 	stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
 ) (map[string]int, map[string]bool) {
-	counts, partials := evaluatePendingPools(cfg, pendingPools, stderr, trace)
+	return evaluatePendingPoolsMapWith(cfg, pendingPools, shellScaleCheck, stderr, trace)
+}
+
+// evaluatePendingPoolsMapWith is evaluatePendingPoolsMap with the scale_check
+// runner supplied.
+func evaluatePendingPoolsMapWith(
+	cfg *config.City,
+	pendingPools []poolEvalWork,
+	runner ScaleCheckRunner,
+	stderr io.Writer,
+	trace *sessionReconcilerTraceCycle,
+) (map[string]int, map[string]bool) {
+	counts, partials := evaluatePendingPools(cfg, pendingPools, runner, stderr, trace)
 	m := make(map[string]int, len(counts))
 	var partialTemplates map[string]bool
 	for j, pw := range pendingPools {
@@ -512,7 +525,7 @@ func buildDesiredStateWithSessionBeadsAt(
 	}
 
 	desired := make(map[string]TemplateParams)
-	targets := buildDemandTargets(cityName, cityPath, cfg, store, rigStores, suspendedRigPaths, allOpenSessionInfos, stderr)
+	targets := buildDemandTargets(cityName, cityPath, cfg, store, rigStores, suspendedRigPaths, allOpenSessionInfos, controllerQueryRuntimeEnv, stderr)
 
 	// Collect work beads with assignees — used for both pool demand and
 	// named session on_demand wake. Hoisted out of the store block so
@@ -1090,8 +1103,13 @@ type demandTargets struct {
 	namedOnDemandTemplates map[string]bool
 }
 
+// probeEnvFunc builds a custom scale_check pool's probe env
+// (controllerQueryRuntimeEnv).
+type probeEnvFunc func(cityPath string, cfg *config.City, agent *config.Agent) (map[string]string, error)
+
 // buildDemandTargets runs the demand pass's agent loop. allOpenSessionInfos is
-// the cross-store session census; it decides which pools are cold.
+// the cross-store session census; it decides which pools are cold. queryEnv
+// builds each custom scale_check pool's probe env.
 func buildDemandTargets(
 	cityName, cityPath string,
 	cfg *config.City,
@@ -1099,6 +1117,7 @@ func buildDemandTargets(
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
 	allOpenSessionInfos []session.Info,
+	queryEnv probeEnvFunc,
 	stderr io.Writer,
 ) demandTargets {
 	var pendingPools []poolEvalWork
@@ -1357,7 +1376,7 @@ func buildDemandTargets(
 			}
 			coldWakeTemplates[template] = true
 		}
-		env, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[i])
+		env, err := queryEnv(cityPath, cfg, &cfg.Agents[i])
 		if err != nil {
 			fmt.Fprintf(stderr, "scaleCheck: building env for %s: %v\n", cfg.Agents[i].QualifiedName(), err) //nolint:errcheck
 			continue
@@ -1380,6 +1399,15 @@ func buildSuspendedRigPathsForCity(cfg *config.City, cityPath string) map[string
 	var suspState suspensionstate.State
 	if cityPath != "" {
 		suspState, _ = loadSuspensionState(fsys.OSFS{}, cityPath)
+	}
+	return suspendedRigPathsWithState(cfg, suspState)
+}
+
+// suspendedRigPathsWithState is buildSuspendedRigPathsForCity for a runtime
+// suspension state the caller already loaded.
+func suspendedRigPathsWithState(cfg *config.City, suspState suspensionstate.State) map[string]bool {
+	if cfg == nil || len(cfg.Rigs) == 0 {
+		return nil
 	}
 	suspNames := buildEffectiveSuspendedRigNames(cfg, suspState)
 	if len(suspNames) == 0 {

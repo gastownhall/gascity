@@ -147,8 +147,9 @@ type ledgerRow struct {
 	Incarnation   int64 // the row's generation
 	InstanceToken string
 	Endpoint      endpointKey // config-only key (endpointKeyForAgent)
-	// StartLease: last_woke_at is within the start-in-flight lease
-	// (START-043).
+	// StartLease: the row holds its pending-create claim or is creating,
+	// and last_woke_at is within the start-in-flight lease (START-043,
+	// pendingCreateStartInFlightInfo).
 	StartLease bool
 	// PendingCreate: a never-started pending create within its lease
 	// (POOL-028).
