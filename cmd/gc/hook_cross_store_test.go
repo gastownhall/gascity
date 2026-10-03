@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +11,38 @@ import (
 )
 
 var errTestStoreTimeout = errors.New("store timed out")
+
+// TestAppendRigHookStoresExcludesSuspendedRig pins AC3 of the custom
+// scale_check fan-out work (ga-drb140): buildDesiredStateWithSessionBeads'
+// activeStores already excludes a suspended rig's store from scale_check
+// (build_desired_state.go), so the store set backing "gc hook" work_query
+// must exclude it too -- otherwise scale_check and work_query disagree on
+// which stores exist for the same city-scoped agent, and hook can route
+// work into a rig that scale_check will never fan out to (or vice versa).
+func TestAppendRigHookStoresExcludesSuspendedRig(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "riga", Path: filepath.Join(cityPath, "riga")},
+			{Name: "rigb", Path: filepath.Join(cityPath, "rigb"), SuspendedOnStart: true},
+		},
+	}
+	a := &config.Agent{Name: "worker"}
+	base := []hookStore{{dir: "own"}}
+
+	got := appendRigHookStores(base, cityPath, cfg, a, nil)
+
+	if len(got) != len(base)+1 {
+		t.Fatalf("len(got) = %d, want %d: a suspended rig's store must be excluded from the "+
+			"hook work_query store set, the same way activeStores already excludes it from "+
+			"scale_check (got=%+v)", len(got), len(base)+1, got)
+	}
+	for _, s := range got {
+		if strings.Contains(s.dir, "rigb") {
+			t.Fatalf("appendRigHookStores included a store for suspended rig rigb: %+v", got)
+		}
+	}
+}
 
 // TestRigScopedHookRig is the core of the rig-scope hook fix: a rig-scoped agent
 // ("<rig>/<name>") must resolve to its own rig so the hook also queries that
