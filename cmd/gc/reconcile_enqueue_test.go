@@ -110,7 +110,7 @@ func runControllerSocketCommand(t *testing.T, line string, pokeCh, dispatchCh ch
 	defer client.Close() //nolint:errcheck
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, t.TempDir(), controllerHostingStandalone, func() {}, nil, nil, nil, nil, pokeCh, dispatchCh)
+		handleControllerConn(server, t.TempDir(), controllerHostingStandalone, func() {}, nil, nil, nil, nil, newLegacyWake(pokeCh, dispatchCh))
 		close(done)
 	}()
 	if _, err := client.Write([]byte(line + "\n")); err != nil {
@@ -380,37 +380,52 @@ func TestPokeControllerForRestartWithoutControllerErrorsWithoutSupervisorFallbac
 	}
 }
 
-// captureWiredControllerStates records every controllerState passed through
-// wireControllerWakeSignals while the test runs.
-func captureWiredControllerStates(t *testing.T) func() []*controllerState {
+// captureWiredControllerStates records every city runtime whose controller
+// state is installed while the test runs (controllerStateWiredHook).
+func captureWiredControllerStates(t *testing.T) func() []*CityRuntime {
 	t.Helper()
 	var mu sync.Mutex
-	var wired []*controllerState
+	var wired []*CityRuntime
 	prev := controllerStateWiredHook
-	controllerStateWiredHook = func(cs *controllerState) {
+	controllerStateWiredHook = func(cr *CityRuntime) {
 		mu.Lock()
 		defer mu.Unlock()
-		wired = append(wired, cs)
+		wired = append(wired, cr)
 	}
 	t.Cleanup(func() { controllerStateWiredHook = prev })
-	return func() []*controllerState {
+	return func() []*CityRuntime {
 		mu.Lock()
 		defer mu.Unlock()
-		return append([]*controllerState(nil), wired...)
+		return append([]*CityRuntime(nil), wired...)
 	}
 }
 
-func assertWakeSignalsWired(t *testing.T, states []*controllerState) {
+// assertWakeSignalsWired checks each entry point's wiring: the API's wake
+// signals exactly the channels the runtime's run loop selects on.
+func assertWakeSignalsWired(t *testing.T, runtimes []*CityRuntime) {
 	t.Helper()
-	if len(states) == 0 {
+	if len(runtimes) == 0 {
 		t.Fatal("no controllerState was wired")
 	}
-	for _, cs := range states {
-		if cs.pokeCh == nil {
-			t.Fatal("controllerState.pokeCh is nil: API enqueues would be dropped")
+	for _, cr := range runtimes {
+		cs := cr.cs
+		if cs == nil {
+			t.Fatal("the runtime has no controller state")
 		}
-		if cs.controlDispatcherCh == nil {
-			t.Fatal("controllerState.controlDispatcherCh is nil: API control-dispatch enqueues would be dropped")
+		if cs.wake == nil {
+			t.Fatal("controllerState.wake is nil: API enqueues would reach no controller")
+		}
+		if cs.wake.pokeCh == nil {
+			t.Fatal("controllerState.wake.pokeCh is nil: API enqueues would be dropped")
+		}
+		if cs.wake.controlDispatcherCh == nil {
+			t.Fatal("controllerState.wake.controlDispatcherCh is nil: API control-dispatch enqueues would be dropped")
+		}
+		if cr.pokeCh != cs.wake.pokeCh {
+			t.Fatal("the API wake's pokeCh is not the runtime's: API enqueues would wake no tick")
+		}
+		if cr.controlDispatcherCh != cs.wake.controlDispatcherCh {
+			t.Fatal("the API wake's controlDispatcherCh is not the runtime's: API control-dispatch enqueues would wake no dispatcher tick")
 		}
 	}
 }

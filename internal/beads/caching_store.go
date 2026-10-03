@@ -60,7 +60,12 @@ type CachingStore struct {
 	// equal to it saw no newer mutation, so no fence it needed was dropped.
 	fenceFloor          uint64
 	observationRevision uint64
-	primePartialErr     error
+	// scanGen counts full-scan merges: a reconcile's (mergeSnapshotLocked)
+	// and a full Prime's, in either branch. Neither moves mutationSeq or a
+	// per-row fence, so a refresh that must not install over one compares it
+	// with the value captured before its read (RefreshRow).
+	scanGen         uint64
+	primePartialErr error
 
 	// readyProjectionDegraded latches when the backing store reported it cannot
 	// serve the ready projection at all. It is deliberately NOT primePartialErr:
@@ -220,6 +225,19 @@ func (o CacheObservation) CacheRev() CacheRevision {
 //   - An uncached event installs only its backing read, so a new row whose
 //     read fails or lags at event time waits for the next reconcile to
 //     appear.
+//   - A close event for an uncached row can be lost. The event reads the
+//     backing row before it takes the lock; a Live or Parent list refresh or
+//     a RefreshRow that installs an older, open read of the row in between
+//     leaves the event a held row it conflicts with, and it drops the
+//     unverified close. The row stays open until the next reconcile evicts
+//     it (mc-zndi7.37).
+//   - A stale event that arrives late dirties the row. A refresh that
+//     changed a row stamps it, so a delayed event older than the installed
+//     row is verified against the backing, does not match, and marks the row
+//     dirty (gastownhall/gascity#2927) rather than merging. The mark refuses
+//     the census for the whole store until a backing read of the row clears
+//     it, so a row RefreshRow installed is not thereby visible in the next
+//     census.
 //   - A verified bead.closed snapshot older than the backing row takes the
 //     backing row, but the order is read from updated_at. A backing whose
 //     updated_at is coarser than a close/reopen cycle can tie a delayed
@@ -1365,6 +1383,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.scanGen++
 	if c.mutationSeq == startSeq {
 		nextBeads := beadMap
 		nextDeps := depsFromBeads(beadMap, depMap, depsComplete && depErr == nil)

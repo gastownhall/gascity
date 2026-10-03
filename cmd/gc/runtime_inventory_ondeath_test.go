@@ -550,6 +550,7 @@ func TestInventoryOnDeath_DeathPokesController(t *testing.T) {
 	remote := &listOnlyProvider{Fake: runtime.NewFake(), names: []string{"gc-ssh"}, unattested: true}
 	cr := inventoryLaneTestRuntime(t, sessionhybrid.New(local, remote, func(string) bool { return false }), nil)
 	cr.pokeCh = make(chan struct{}, 1)
+	withLegacyWake(cr)
 	poked := func() bool {
 		select {
 		case <-cr.pokeCh:
@@ -635,6 +636,7 @@ func TestInventoryOnDeath_RestartDeferredUntilHookCompletes(t *testing.T) {
 		}
 		cr, hooks, _ := onDeathLaneRuntime(t, e.sp, onDeathHandlers("ant", "sky"))
 		cr.pokeCh = make(chan struct{}, 1)
+		withLegacyWake(cr)
 		hooks.gate = make(chan struct{})
 		e.startOptions = append(e.startOptions, withOnDeathGate(cr.onDeathGate()))
 		startOnDeathWorkerInBubble(t, cr)

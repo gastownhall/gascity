@@ -99,7 +99,12 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// observationRevision is a process-local publication fence, orthogonal to
 		// the merge oracle's durable cache-state comparison.
 		"observationRevision": true,
-		"backing":             true, "idPrefix": true, "mu": true, "reconciling": true,
+		// scanGen is bumped once by every mergeSnapshotLocked call, whatever
+		// the rows, so it carries no merge outcome to compare; the frozen
+		// legacy branches predate it. RefreshRow's fence on it is pinned by
+		// TestCachingStoreRefreshRowFencedByFullScan.
+		"scanGen": true,
+		"backing": true, "idPrefix": true, "mu": true, "reconciling": true,
 		"eventPrefixes": true, // event-ownership config, fixed at construction
 		"epoch":         true, // instance identity, fixed at construction
 		"onChange":      true, "problemf": true, "problemLog": true,

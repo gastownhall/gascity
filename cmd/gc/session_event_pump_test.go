@@ -79,7 +79,7 @@ func newTestPump(t *testing.T) (*sessionEventPump, chan struct{}, context.Cancel
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	pokeCh := make(chan struct{}, 1)
-	pump := newSessionEventPump(ctx, pokeCh, &bytes.Buffer{}, "test")
+	pump := newSessionEventPump(ctx, newLegacyWake(pokeCh, nil), &bytes.Buffer{}, "test")
 	return pump, pokeCh, cancel
 }
 
@@ -138,7 +138,7 @@ func TestSessionEventPumpNonImplementingProviderLogsFallback(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		pokeCh := make(chan struct{}, 1)
-		pump := newSessionEventPump(ctx, pokeCh, &stderr, "test")
+		pump := newSessionEventPump(ctx, newLegacyWake(pokeCh, nil), &stderr, "test")
 		pump.restart(runtime.NewFake()) // plain fake: no SessionEventProvider
 		if pump.streaming() {
 			t.Fatal("streaming() = true for a provider without an event stream")
@@ -163,7 +163,7 @@ func TestSessionEventPumpCompositeWithoutEventBackendLogsFallback(t *testing.T) 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		pokeCh := make(chan struct{}, 1)
-		pump := newSessionEventPump(ctx, pokeCh, &stderr, "test")
+		pump := newSessionEventPump(ctx, newLegacyWake(pokeCh, nil), &stderr, "test")
 		pump.restart(sessionauto.New(runtime.NewFake(), runtime.NewFake()))
 		if pump.streaming() {
 			t.Fatal("streaming() = true for a composite with no event-capable backend")

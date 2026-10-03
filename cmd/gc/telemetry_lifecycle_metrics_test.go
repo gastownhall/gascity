@@ -945,8 +945,7 @@ func TestCmdSessionKill_RecordsAgentStopMetric(t *testing.T) {
 		nil,
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
-		make(chan struct{}, 1),
-		make(chan struct{}, 1),
+		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)

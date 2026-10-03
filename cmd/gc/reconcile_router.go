@@ -69,8 +69,8 @@ const (
 // routerUrgentReasons are the operator intents and the supervisor reload:
 // the reasons amendment A2 lets bypass the backoff gate.
 var routerUrgentReasons = map[string]bool{
-	"api":                 true,
-	"socket":              true,
+	wakeReasonAPI:         true,
+	wakeReasonSocket:      true,
 	routeReasonSupervisor: true,
 }
 

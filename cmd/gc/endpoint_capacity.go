@@ -40,6 +40,33 @@ func resolvedEndpointKey(tp TemplateParams, info sessionpkg.Info) endpointKey {
 	return ""
 }
 
+// endpointKeyForAgent is resolvedEndpointKey from config alone, without
+// resolving TemplateParams. Resolution copies the agent's upstream verbatim
+// and names the provider config.ResolveProvider picks: none for a
+// start_command agent, else the agent's provider, else the workspace's.
+// Session template overrides change schema options only, so the start path
+// resolves the same key.
+func endpointKeyForAgent(cfg *config.City, agent *config.Agent, info sessionpkg.Info) endpointKey {
+	if agent != nil {
+		if u := strings.TrimSpace(agent.Upstream); u != "" {
+			return endpointKey("upstream:" + u)
+		}
+		if agent.StartCommand == "" {
+			name := agent.Provider
+			if name == "" && cfg != nil {
+				name = cfg.Workspace.Provider
+			}
+			if p := strings.TrimSpace(name); p != "" {
+				return endpointKey("provider:" + p)
+			}
+		}
+	}
+	if p := strings.TrimSpace(info.Provider); p != "" {
+		return endpointKey("provider:" + p)
+	}
+	return ""
+}
+
 // capacityBreakerSettings trips on the first refusal and backs off 5s, 10s,
 // 20s, 40s, then 60s (full jitter within each cap). HalfOpenInterval is only a
 // backstop: tickets resolve probes. The values are provisional.
