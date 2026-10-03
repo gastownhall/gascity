@@ -1203,7 +1203,7 @@ func (p *tickPass) softReloadPending() bool {
 // returns true to end the pass early. session marks a step of the legacy
 // session reconciler, which the v2 reconciler owns instead; maintenance names
 // the steps of a session phase that are maintenance and outlive it
-// (maintenanceTickPhases).
+// (maintenancePhases).
 type tickPhase struct {
 	name        string
 	session     bool
@@ -3258,10 +3258,6 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
 }
 
-// recordReconcileTraceInputs records the per-template baseline, the cycle input
-// snapshot, and per-template config snapshots for one reconcile tick. It is a
-// no-op when trace is nil. It is split out of beadReconcileTick so that the hot
-// reconcile path is not dominated by trace bookkeeping.
 // runDetachedHandoffOrphansDelta runs and records the detached handoff
 // orphan delta pass, a maintenance step of beadReconcileTick.
 func (cr *CityRuntime) runDetachedHandoffOrphansDelta(recordPhase func(TraceSiteCode, string, time.Time, map[string]any)) {
@@ -3281,6 +3277,10 @@ func (cr *CityRuntime) runNudgeDispatchTick(ctx context.Context, recordPhase fun
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_dispatch_tick", phaseStart, nil)
 }
 
+// recordReconcileTraceInputs records the per-template baseline, the cycle input
+// snapshot, and per-template config snapshots for one reconcile tick. It is a
+// no-op when trace is nil. It is split out of beadReconcileTick so that the hot
+// reconcile path is not dominated by trace bookkeeping.
 func (cr *CityRuntime) recordReconcileTraceInputs(
 	trace *sessionReconcilerTraceCycle,
 	openInfos []sessionpkg.Info,
