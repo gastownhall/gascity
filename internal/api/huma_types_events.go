@@ -7,6 +7,8 @@ package api
 import (
 	"strconv"
 	"time"
+
+	"github.com/danielgtaylor/huma/v2"
 )
 
 // --- Event types ---
@@ -16,9 +18,44 @@ type EventListInput struct {
 	CityScope
 	BlockingParam
 	PaginationParam
-	Type  string `query:"type" required:"false" doc:"Filter by event type."`
-	Actor string `query:"actor" required:"false" doc:"Filter by actor."`
-	Since string `query:"since" required:"false" doc:"Filter events since duration ago (Go duration string, e.g. 5m)."`
+	Type     string `query:"type" required:"false" doc:"Filter by event type."`
+	Actor    string `query:"actor" required:"false" doc:"Filter by actor."`
+	Since    string `query:"since" required:"false" doc:"Filter events since duration ago (Go duration string, e.g. 5m)."`
+	AfterSeq string `query:"after_seq" required:"false" doc:"Only return events with sequence number greater than this value. Omit to include events from the beginning (0 = no filter)."`
+}
+
+// Resolve validates EventListInput's own query parameters (after_seq) and
+// implements huma.Resolver. A Resolve method declared directly on
+// EventListInput takes over resolution for the whole struct: Huma checks
+// whether the struct itself satisfies Resolver before it recurses into
+// embedded fields, so declaring Resolve here stops it from separately
+// finding and invoking BlockingParam's own promoted Resolve. BlockingParam's
+// validation is therefore run explicitly below so index/wait validation
+// keeps working.
+func (e *EventListInput) Resolve(ctx huma.Context) []error {
+	errs := e.BlockingParam.Resolve(ctx)
+	if e.AfterSeq != "" {
+		if _, err := strconv.ParseUint(e.AfterSeq, 10, 64); err != nil {
+			errs = append(errs, &huma.ErrorDetail{
+				Location: "query.after_seq",
+				Message:  "after_seq must be a non-negative integer",
+				Value:    e.AfterSeq,
+			})
+		}
+	}
+	return errs
+}
+
+// resolveAfterSeq returns the validated after_seq value, or 0 if not
+// provided (0 = no filter, matching events.Filter.AfterSeq's zero value).
+// The value is guaranteed valid because Resolve rejected malformed input
+// before the handler ran.
+func (e *EventListInput) resolveAfterSeq() uint64 {
+	if e.AfterSeq == "" {
+		return 0
+	}
+	n, _ := strconv.ParseUint(e.AfterSeq, 10, 64)
+	return n
 }
 
 // EventEmitRequest is the request body for POST /v0/city/{cityName}/events.
