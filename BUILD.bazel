@@ -314,6 +314,7 @@ filegroup(
         "//internal/promptmeta:bazel_repo_srcs",
         "//internal/promptsafe:bazel_repo_srcs",
         "//internal/reconcilekey:bazel_repo_srcs",
+        "//internal/redstreak:bazel_repo_srcs",
         "//internal/reliability:bazel_repo_srcs",
         "//internal/remotesource:bazel_repo_srcs",
         "//internal/resilience:bazel_repo_srcs",

@@ -1,0 +1,36 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "redstreak",
+    srcs = [
+        "client.go",
+        "history.go",
+        "types.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/redstreak",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/config"],
+)
+
+go_test(
+    name = "redstreak_test",
+    srcs = [
+        "client_contract_test.go",
+        "history_contract_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(["testdata/**"]),
+    embed = [":redstreak"],
+    deps = [
+        "//internal/config",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(["**"], exclude = ["BUILD.bazel"], allow_empty = True),
+    visibility = ["//visibility:public"],
+)
