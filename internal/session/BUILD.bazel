@@ -127,6 +127,7 @@ go_test(
         "sleep_reason_test.go",
         "startup_health_test.go",
         "state_machine_test.go",
+        "stop_input_clear_test.go",
         "store_resolve_test.go",
         "store_test.go",
         "submit_family_test.go",
