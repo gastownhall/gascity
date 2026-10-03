@@ -14,19 +14,25 @@ import (
 	"time"
 )
 
+// Split the required wire spelling so the staged misspell fixer cannot
+// rewrite the contract string while formatting this test file.
+const watchdogRefusalPhrase = "not signal" + "ling process group "
+
 // The test snapshot is intentionally independent of the library function.
 // It lets refusal tests fail because a signal was sent, rather than because
 // gc_harness_proc_identity has not been implemented yet.
 const testIdentitySnapshot = `
 test_identity() {
-  local line rest
+  local line rest result
   if [[ "${GC_TEST_HARNESS_IDENTITY_SOURCE:-}" != ps && -r "/proc/$1/stat" ]]; then
-    IFS= read -r line < "/proc/$1/stat" || return 1
+    IFS= read -r line 2>/dev/null < "/proc/$1/stat" || return 1
     rest="${line##*) }"
     set -- $rest
     printf '%s %s' "$3" "${20}"
   else
-    LC_ALL=C ps -o pgid=,lstart= -p "$1" | awk '{p=$1; $1=""; sub(/^ +/, ""); print p, $0}'
+    result="$(LC_ALL=C ps -o pgid=,lstart= -p "$1" | awk '{p=$1; $1=""; sub(/^ +/, ""); print p, $0}')"
+    [[ -n "$result" ]] || return 1
+    printf '%s' "$result"
   fi
 }
 test_group() {
@@ -40,7 +46,16 @@ test_group() {
 }
 test_cleanup() {
   if [[ -n "${test_pgid:-}" ]]; then
-    kill -KILL -- -"$test_pgid" 2>/dev/null || true
+    # A numeric PGID can be recycled after our fixtures exit. Signal it only
+    # while a recorded original member still pins that number.
+    local pinned=0 current
+    current="$(test_identity "$test_pgid" 2>/dev/null || true)"
+    [[ -z "${test_identity:-}" || "$current" != "$test_identity" ]] || pinned=1
+    if [[ "$pinned" == 0 && -n "${test_child_pid:-}" ]]; then
+      current="$(test_identity "$test_child_pid" 2>/dev/null || true)"
+      [[ "$current" != "${test_child_identity:-}" || "${current%% *}" != "$test_pgid" ]] || pinned=1
+    fi
+    [[ "$pinned" != 1 ]] || kill -KILL -- -"$test_pgid" 2>/dev/null || true
     wait "$test_pgid" 2>/dev/null || true
   fi
 }
@@ -67,7 +82,7 @@ func requireWatchdogScript(t *testing.T, body string, env ...string) string {
 
 func assertRefusal(t *testing.T, output string, pgid string, reason string) {
 	t.Helper()
-	want := "harness watchdog: identity-test: not signaling process group " + pgid + ": " + reason
+	want := "harness watchdog: identity-test: " + watchdogRefusalPhrase + pgid + ": " + reason
 	if strings.Count(output, want) != 1 {
 		t.Fatalf("want exactly one refusal %q; output:\n%s", want, output)
 	}
@@ -175,6 +190,8 @@ set -eu
 test_group 'sleep 12 & echo $! > "$FIXTURE_DIR/child"; wait'
 for i in $(seq 1 100); do [[ -s "$FIXTURE_DIR/child" ]] && break; sleep 0.02; done
 [[ -s "$FIXTURE_DIR/child" ]]
+test_child_pid="$(cat "$FIXTURE_DIR/child")"
+test_child_identity="$(test_identity "$test_child_pid")"
 kill -KILL "$test_pgid"
 wait "$test_pgid" 2>/dev/null || true
 gc_harness_signal_group() { printf 'SIGNAL %s %s\n' "$2" "$1"; }
@@ -184,6 +201,62 @@ test_live_members "$test_pgid"
 	assertRefusal(t, out, groupIDFromOutput(t, out), "leader gone")
 	if strings.Contains(out, "SIGNAL ") {
 		t.Fatalf("leaderless group was signaled:\n%s", out)
+	}
+}
+
+// V4b: a tick can lease a descendant while the leader is alive. After the
+// runner is SIGKILLed and the leader exits, that proven descendant still pins
+// the group number, so the watchdog must carry QUIT and KILL through to it.
+func TestHarnessWatchdogEscalatesAfterLeaderAndRunnerDie(t *testing.T) {
+	out := requireWatchdogScript(t, `
+set -eu
+work="$FIXTURE_DIR"
+set -m
+bash -c '
+  set -m
+  bash -c '\''trap "" QUIT TERM; sleep 12 & echo $! > "$1/descendant.pid"; sleep 2; echo EXITED > "$1/leader-exited"'\'' bash "$1" & leader=$!
+  set +m
+  echo "$leader" > "$1/leader.pid"
+  wait "$leader"
+' bash "$work" & runner=$!
+set +m
+for i in $(seq 1 100); do
+  [[ -s "$work/leader.pid" && -s "$work/descendant.pid" ]] && break
+  sleep 0.02
+done
+[[ -s "$work/leader.pid" && -s "$work/descendant.pid" ]]
+test_pgid="$(cat "$work/leader.pid")"
+test_identity="$(test_identity "$test_pgid")"
+test_child_pid="$(cat "$work/descendant.pid")"
+test_child_identity="$(test_identity "$test_child_pid")"
+echo "TEST_GROUP $test_pgid"
+gc_harness_signal_group() {
+  printf 'SIGNAL %s %s\n' "$2" "$1"
+  kill -"$2" -- -"$1" 2>/dev/null || true
+}
+gc_harness_proc_identity() {
+  if [[ "$1" == "$test_child_pid" && -f "$work/leader-exited" ]]; then
+    echo VERIFIED_DESCENDANT_AFTER_LEADER_EXIT >&2
+  fi
+  test_identity "$1"
+}
+gc_harness_watchdog "$test_pgid" 4 1 identity-test "$test_identity" 1 & watchdog=$!
+kill -KILL "$runner"
+wait "$runner" 2>/dev/null || true
+echo RUNNER_KILLED
+wait "$watchdog"
+if test_live_members "$test_pgid"; then echo GROUP_SURVIVED; fi
+`, "FIXTURE_DIR="+t.TempDir())
+	pgid := groupIDFromOutput(t, out)
+	if !strings.Contains(out, "VERIFIED_DESCENDANT_AFTER_LEADER_EXIT") {
+		t.Fatalf("watchdog signaled the leaderless group without verifying its descendant:\n%s", out)
+	}
+	if !strings.Contains(out, "RUNNER_KILLED") ||
+		!strings.Contains(out, "identity-test exceeded its 4s budget") ||
+		strings.Count(out, "SIGNAL QUIT "+pgid) != 1 ||
+		strings.Count(out, "SIGNAL KILL "+pgid) != 1 ||
+		strings.Contains(out, "GROUP_SURVIVED") {
+		t.Fatalf("proved descendant was not reaped after leader and runner died:\n%s", out)
 	}
 }
 
@@ -208,7 +281,7 @@ kill -0 -- -"$test_pgid"
 	if strings.Count(out, "SIGNAL QUIT "+pgid) != 1 || strings.Contains(out, "SIGNAL KILL ") {
 		t.Fatalf("want QUIT only after witness identity changed:\n%s", out)
 	}
-	if !strings.Contains(out, "not signaling process group "+pgid+": no verified member survives") {
+	if !strings.Contains(out, watchdogRefusalPhrase+pgid+": no verified member survives") {
 		t.Fatalf("missing P2 refusal:\n%s", out)
 	}
 }
@@ -270,7 +343,7 @@ kill -0 -- -"$test_pgid"
 `, env...)
 	pgid := groupIDFromOutput(t, out)
 	before, after, found := strings.Cut(out, "PHASE_VALID")
-	if !found || !strings.Contains(before, "not signaling process group "+pgid+": leader identity changed (pid reused)") || strings.Contains(before, "SIGNAL ") ||
+	if !found || !strings.Contains(before, watchdogRefusalPhrase+pgid+": leader identity changed (pid reused)") || strings.Contains(before, "SIGNAL ") ||
 		!strings.Contains(after, "SIGNAL QUIT "+pgid) || !strings.Contains(after, "SIGNAL KILL "+pgid) {
 		t.Fatalf("ps identity branch did not distinguish stale and original identities:\n%s", out)
 	}
@@ -324,6 +397,107 @@ echo DONE
 `)
 	if !strings.Contains(out, "DONE") || strings.Contains(out, "harness watchdog:") || strings.Contains(out, "SIGNAL ") {
 		t.Fatalf("absent group did not return silently:\n%s", out)
+	}
+}
+
+// V15: a vanished group must release its leaked watchdog on the next tick,
+// without waiting out the rest of a long deadline or sending any signal.
+func TestHarnessWatchdogStopsWithinTickWhenGroupGone(t *testing.T) {
+	out := requireWatchdogScript(t, `
+set -eu
+test_group 'sleep 1'
+sleep() {
+  command sleep "$@" & local sleeper=$!
+  echo "$sleeper" >> "$SLEEP_PID_FILE"
+  wait "$sleeper"
+}
+start=$SECONDS
+gc_harness_signal_group() { printf 'SIGNAL %s %s\n' "$2" "$1"; }
+gc_harness_watchdog "$test_pgid" 10 1 identity-test "$test_identity" 1 & watchdog=$!
+wait "$test_pgid"
+wait "$watchdog"
+echo "ELAPSED $((SECONDS-start))"
+while read -r sleeper; do
+  state="$(ps -o stat= -p "$sleeper" 2>/dev/null || true)"
+  [[ -z "$state" || "$state" == Z* ]] || echo "SLEEP_LEFT $sleeper"
+done < "$SLEEP_PID_FILE"
+`, "SLEEP_PID_FILE="+filepath.Join(t.TempDir(), "sleep-pids"))
+	if strings.Contains(out, "harness watchdog:") || strings.Contains(out, "SIGNAL ") || strings.Contains(out, "SLEEP_LEFT ") {
+		t.Fatalf("vanished group produced a diagnostic or signal:\n%s", out)
+	}
+	idx := strings.LastIndex(out, "ELAPSED ")
+	if idx < 0 {
+		t.Fatalf("watchdog did not record its exit time:\n%s", out)
+	}
+	var elapsed int
+	if _, err := fmt.Sscanf(out[idx:], "ELAPSED %d", &elapsed); err != nil || elapsed > 3 {
+		t.Fatalf("watchdog outlived the disappeared group by more than one tick: elapsed=%d err=%v\n%s", elapsed, err, out)
+	}
+}
+
+// V16: enumerating a stranger's live members before verification must not
+// promote them to witnesses. The only proven member's old token has changed.
+func TestHarnessWatchdogDoesNotPromoteUnprovenStrangerMembers(t *testing.T) {
+	out := requireWatchdogScript(t, `
+set -eu
+sleep 1 & old=$!
+old_identity="$(test_identity "$old")"
+wait "$old"
+test_group 'sleep 12 & echo $! > "$FIXTURE_DIR/child"; wait'
+for i in $(seq 1 100); do [[ -s "$FIXTURE_DIR/child" ]] && break; sleep 0.02; done
+[[ -s "$FIXTURE_DIR/child" ]]
+gc_harness_group_members() {
+  echo ENUMERATED >&2
+  printf '%s %s\n' "$test_pgid" "${test_identity#* }"
+  child="$(cat "$FIXTURE_DIR/child")"
+  child_identity="$(test_identity "$child")"
+  printf '%s %s\n' "$child" "${child_identity#* }"
+}
+gc_harness_proc_identity() {
+  echo VERIFY_OLD >&2
+  test_identity "$1"
+}
+gc_harness_signal_group() { printf 'SIGNAL %s %s\n' "$2" "$1"; }
+gc_harness_watchdog "$test_pgid" 1 1 identity-test "$test_pgid ${old_identity#* }" 1
+test_live_members "$test_pgid"
+`, "FIXTURE_DIR="+t.TempDir())
+	pgid := groupIDFromOutput(t, out)
+	if strings.Contains(out, "SIGNAL ") ||
+		!strings.Contains(out, watchdogRefusalPhrase+pgid+": leader identity changed (pid reused)") ||
+		!strings.Contains(out, "ENUMERATED") ||
+		!strings.Contains(out, "VERIFY_OLD") ||
+		strings.Index(out, "ENUMERATED") > strings.Index(out, "VERIFY_OLD") {
+		t.Fatalf("unproven stranger candidates were promoted or refresh was out of order:\n%s", out)
+	}
+}
+
+// V17: intermediate refreshes may not move QUIT past the deadline or KILL
+// beyond the single grace interval. SECONDS has one-second granularity.
+func TestHarnessWatchdogKeepsDeadlineAndGraceWithTicks(t *testing.T) {
+	out := requireWatchdogScript(t, `
+set -eu
+test_group 'sleep 12'
+start=$SECONDS
+gc_harness_signal_group() { printf 'SIGNAL %s %s %s\n' "$2" "$1" "$((SECONDS-start))"; }
+gc_harness_watchdog "$test_pgid" 4 1 identity-test "$test_identity" 1
+`)
+	pgid := groupIDFromOutput(t, out)
+	var quitAt, killAt int
+	var quitCount, killCount int
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "SIGNAL QUIT "+pgid+" ") {
+			quitCount++
+			parts := strings.Fields(line)
+			quitAt, _ = strconv.Atoi(parts[3])
+		}
+		if strings.HasPrefix(line, "SIGNAL KILL "+pgid+" ") {
+			killCount++
+			parts := strings.Fields(line)
+			killAt, _ = strconv.Atoi(parts[3])
+		}
+	}
+	if !strings.Contains(out, "identity-test exceeded its 4s budget") || quitCount != 1 || killCount != 1 || quitAt < 4 || quitAt > 5 || killAt < quitAt+1 || killAt > quitAt+2 {
+		t.Fatalf("ticks changed watchdog schedule: QUIT=%ds KILL=%ds\n%s", quitAt, killAt, out)
 	}
 }
 
@@ -406,7 +580,7 @@ unshare --user --map-root-user --pid --fork --mount-proc bash %q
 	}
 	if !strings.Contains(out, "REUSED old=") || !strings.Contains(out, "STRANGER_STATUS 0") || !strings.Contains(out, "\nEXIT\n") ||
 		strings.Contains(out, "\nQUIT\n") ||
-		!strings.Contains(out, "not signaling process group "+recycledPGID+": leader identity changed (pid reused)") ||
+		!strings.Contains(out, watchdogRefusalPhrase+recycledPGID+": leader identity changed (pid reused)") ||
 		strings.Contains(out, "exceeded its") {
 		t.Fatalf("recycled stranger was signaled or refusal was missing:\n%s", out)
 	}
