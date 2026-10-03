@@ -95,6 +95,15 @@ type agentBuildParams struct {
 	// does not set it.
 	providerHealthSnapshot *providerHealthSnapshot
 
+	// planOnly makes the pool planner decide without effects: selection skips
+	// singleton identity normalization, trigger metadata skips worktree.Verify
+	// (the create plan carries the spec), and the dependency floor returns a
+	// create plan.
+	// The effect paths (template resolution, overlay staging, hook install,
+	// session-bead creates and trigger binds) refuse with errPlanOnlyEffect.
+	// The v2 allocator sets it; legacy builds never do.
+	planOnly bool
+
 	// realizeProbe times and counts pool realization for the realize_pools
 	// trace record. Set by buildDesiredState around its realization loop only;
 	// nil elsewhere, which disables the counters.

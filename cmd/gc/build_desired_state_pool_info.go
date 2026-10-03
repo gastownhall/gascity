@@ -626,6 +626,12 @@ func normalizeNonExpandingPoolSessionInfoForSelection(
 	cfgAgent *config.Agent,
 	info session.Info,
 ) (session.Info, error) {
+	if bp != nil && bp.planOnly {
+		// The collapse is a write to an existing row, so plan-only selection
+		// skips it and returns the row unchanged. Normalizing before start is
+		// left to the caller (POOL-046).
+		return info, nil
+	}
 	folded, err := normalizeNonExpandingPoolSessionInfo(bp, cfgAgent, info)
 	if err == nil {
 		return folded, nil

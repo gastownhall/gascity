@@ -1232,6 +1232,8 @@ go_test(
         "pool_fresh_slot_compat_test.go",
         "pool_hook_processgroup_test.go",
         "pool_on_boot_parallel_test.go",
+        "pool_pieces_prerefactor_test.go",
+        "pool_pieces_test.go",
         "pool_session_identifier_lock_test.go",
         "pool_session_name_churn_test.go",
         "pool_session_name_holder_test.go",
