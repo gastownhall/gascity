@@ -71,6 +71,16 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 			if got, want := step.Env["RBE_ACTION_CANARY_EVERY"], "${{ vars.RBE_ACTION_CANARY_EVERY || '4' }}"; got != want {
 				t.Errorf("worker step RBE_ACTION_CANARY_EVERY = %q, want %q", got, want)
 			}
+			// The OSS pool keeps the script's defaults (tier oss, :443) and its
+			// own certificate; the fork tier is rbe-fork-pool.yml's alone.
+			for _, k := range []string{"WORKER_TIER", "RBE_WEST_PORT"} {
+				if v, ok := step.Env[k]; ok {
+					t.Errorf("worker step sets %s=%q; the OSS pool runs the defaults", k, v)
+				}
+			}
+			if got, want := step.Env["RBE_WORKER_TLS_KEY"], "${{ secrets.RBE_WORKER_TLS_KEY }}"; got != want {
+				t.Errorf("worker step RBE_WORKER_TLS_KEY = %q, want %q", got, want)
+			}
 		}
 	}
 	if !checkout || !worker {
@@ -135,7 +145,13 @@ func TestRBEWorkerScriptIsolationConfig(t *testing.T) {
 	for k, want := range map[string]string{
 		"WORK_ROOT": "$WORK_ROOT", "MASK_ROOT": "$MASK_ROOT", "SLOT_UID0": "$SLOT_UID0", "SLOT_COUNT": "$slots",
 		"BACKSTOP_S": "1260", "MAX_TIMEOUT_S": "1200", "HOME_DIR": "/var/lib/rbe-action/home",
-		"NETNS": "0", "WORKER_JSON": "$ROOT/worker.json",
+		// Set by WORKER_TIER alone (TestRBEWorkerScriptForkTier): 0 for oss,
+		// 1 (loopback only) for fork.
+		"NETNS": "${NETNS:-0}", "WORKER_JSON": "$ROOT/worker.json",
+		// Never infra's privileged network namespace class (RBE_X_NETNS_ROOT=1,
+		// MAIN only): a no-op for this launcher copy until it is synced, then
+		// the pin.
+		"NETNS_ROOT": "0",
 		// The launcher refuses actions while this chain is missing: it must name
 		// the table and chain the nft ruleset below creates.
 		"EGRESS_CHAIN": `"inet rbe_action output"`,
@@ -260,6 +276,11 @@ func TestRBEWorkerScriptSlotEgressRuleOrder(t *testing.T) {
 // render exactly the worker.json it rendered before O1. The golden file is
 // origin/main's jq program before O1 (4d0e45d9eb^) rendered with the same
 // arguments; regenerate it only for an intended worker config change.
+//
+// The same program renders the fork tier (WORKER_TIER=fork, rbe-fork-pool.yml),
+// always with isolation on: CAS instance oss-fork on :8444, no action cache
+// store, nothing uploaded. Its golden is that rendering with the script's own
+// isolation keys; the checks below hold whatever the golden says.
 func TestRBEWorkerJSONIsolationOffMatchesPreO1(t *testing.T) {
 	root := repoRoot(t)
 	script := readFile(t, root, rbeWorkerScript)
@@ -267,25 +288,9 @@ func TestRBEWorkerJSONIsolationOffMatchesPreO1(t *testing.T) {
 	if m == nil {
 		t.Fatalf("%s: no worker.json jq program", rbeWorkerScript)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "jq", "-n",
-		"--arg", "host", "grpcs://rbe-west.example.invalid:443",
-		"--arg", "root", "/home/runner/work/_temp/nl-worker",
-		"--arg", "store", "/home/runner/work/_temp/nl-worker",
-		"--arg", "name", "pool-worker-1",
-		"--argjson", "slots", "8",
-		"--argjson", "isolation", "{}",
-		m[1])
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("jq (needed by %s itself): %v\n%s", rbeWorkerScript, err, stderr.String())
-	}
-	golden, err := os.ReadFile(filepath.Join(root, "scripts", "testdata", "rbe-worker", "worker-isolation-off.golden.json"))
-	if err != nil {
-		t.Fatal(err)
+	iso := regexp.MustCompile(`(?s)\n\tisolation='(\{.*?\})'\n`).FindStringSubmatch(script)
+	if iso == nil {
+		t.Fatalf("%s: no isolation='{...}' worker config", rbeWorkerScript)
 	}
 	decode := func(b []byte) any {
 		d := json.NewDecoder(bytes.NewReader(b))
@@ -296,9 +301,108 @@ func TestRBEWorkerJSONIsolationOffMatchesPreO1(t *testing.T) {
 		}
 		return v
 	}
-	if got, want := decode(out), decode(golden); !reflect.DeepEqual(got, want) {
-		t.Errorf("worker.json with isolation='{}' differs from the pre-O1 rendering:\ngot:\n%s\nwant:\n%s", out, golden)
+	for _, c := range []struct {
+		tier, host, isolation, golden string
+	}{
+		// The OSS tier, isolation off: the pre-O1 worker.json, byte for byte
+		// in content.
+		{"oss", "grpcs://rbe-west.example.invalid:443", "{}", "worker-isolation-off.golden.json"},
+		{"fork", "grpcs://rbe-fork.example.invalid:8444", iso[1], "worker-fork.golden.json"},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cmd := exec.CommandContext(ctx, "jq", "-n",
+			"--arg", "host", c.host,
+			"--arg", "root", "/home/runner/work/_temp/nl-worker",
+			"--arg", "store", "/home/runner/work/_temp/nl-worker",
+			"--arg", "name", "pool-worker-1",
+			"--argjson", "slots", "8",
+			"--arg", "tier", c.tier,
+			"--argjson", "isolation", c.isolation,
+			m[1])
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		cancel()
+		if err != nil {
+			t.Fatalf("tier %s: jq (needed by %s itself): %v\n%s", c.tier, rbeWorkerScript, err, stderr.String())
+		}
+		golden, err := os.ReadFile(filepath.Join(root, "scripts", "testdata", "rbe-worker", c.golden))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := decode(out), decode(golden); !reflect.DeepEqual(got, want) {
+			t.Errorf("tier %s: worker.json differs from %s:\ngot:\n%s\nwant:\n%s", c.tier, c.golden, out, golden)
+		}
+		if c.tier == "fork" {
+			for _, err := range checkForkWorkerJSON(out, c.host) {
+				t.Errorf("tier fork: %v", err)
+			}
+		}
 	}
+}
+
+// checkForkWorkerJSON checks a fork-tier worker.json: every endpoint is the
+// fork host, the only remote store is the CAS for instance oss-fork, no
+// store is an action cache, results are never uploaded, and actions go
+// through the isolation entrypoint.
+func checkForkWorkerJSON(out []byte, host string) []error {
+	var cfg struct {
+		Stores []struct {
+			Name string `json:"name"`
+			GRPC *struct {
+				InstanceName string `json:"instance_name"`
+				Endpoints    []struct {
+					Address string `json:"address"`
+				} `json:"endpoints"`
+				StoreType string `json:"store_type"`
+			} `json:"grpc"`
+		} `json:"stores"`
+		Workers []struct {
+			Local struct {
+				WorkerAPIEndpoint struct {
+					URI string `json:"uri"`
+				} `json:"worker_api_endpoint"`
+				UploadActionResult map[string]any `json:"upload_action_result"`
+				Entrypoint         string         `json:"entrypoint"`
+			} `json:"local"`
+		} `json:"workers"`
+	}
+	if err := json.Unmarshal(out, &cfg); err != nil {
+		return []error{err}
+	}
+	var errs []error
+	var grpcStores []string
+	for _, s := range cfg.Stores {
+		if s.GRPC == nil {
+			continue
+		}
+		grpcStores = append(grpcStores, s.Name)
+		if s.GRPC.StoreType != "cas" || s.GRPC.InstanceName != "oss-fork" {
+			errs = append(errs, errors.New("store "+s.Name+": "+s.GRPC.StoreType+" instance "+strconv.Quote(s.GRPC.InstanceName)+", want cas instance \"oss-fork\" only"))
+		}
+		for _, e := range s.GRPC.Endpoints {
+			if e.Address != host {
+				errs = append(errs, errors.New("store "+s.Name+" endpoint "+e.Address+", want "+host))
+			}
+		}
+	}
+	if !reflect.DeepEqual(grpcStores, []string{"REMOTE_CAS"}) {
+		errs = append(errs, errors.New("remote stores "+strings.Join(grpcStores, ",")+", want REMOTE_CAS alone"))
+	}
+	if len(cfg.Workers) != 1 {
+		return append(errs, errors.New("want exactly one worker"))
+	}
+	w := cfg.Workers[0].Local
+	if w.WorkerAPIEndpoint.URI != host {
+		errs = append(errs, errors.New("worker API "+w.WorkerAPIEndpoint.URI+", want "+host))
+	}
+	if !reflect.DeepEqual(w.UploadActionResult, map[string]any{"upload_ac_results_strategy": "never"}) {
+		errs = append(errs, errors.New("upload_action_result must be {upload_ac_results_strategy: never} alone"))
+	}
+	if w.Entrypoint != "/usr/local/libexec/rbe-action/entry" {
+		errs = append(errs, errors.New("entrypoint "+strconv.Quote(w.Entrypoint)+": fork actions run isolated only"))
+	}
+	return errs
 }
 
 func TestRBEWorkerScriptGatesNativeLinkOnIsolation(t *testing.T) {

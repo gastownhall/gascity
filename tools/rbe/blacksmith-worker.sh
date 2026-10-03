@@ -13,6 +13,16 @@
 # Env (from the workflow):
 #   RBE_WORKER_TLS_CERT / RBE_WORKER_TLS_KEY  base64 PEM, CN=rbe-oss-worker
 #   RBE_WEST_HOST       e.g. rbe-west.ops.gascity.com (from a secret; not in git)
+#   RBE_WEST_PORT       443 (default); 8444 for WORKER_TIER=fork
+#   WORKER_TIER         oss (default): rbe-west's OSS scheduler, results cached in
+#                       AC_OSS (REMOTE_AC). fork: the fork scheduler (rbe-fork,
+#                       instance oss-fork; infra README "rbe-fork"): untrusted fork
+#                       PR actions, nothing cached (no REMOTE_AC, upload strategy
+#                       never), isolation mandatory (RBE_ACTION_ISOLATION must be
+#                       1) and every action in its own network namespace with
+#                       loopback only (NETNS=1). Its certificate
+#                       (CN=rbe-fork-worker,OU=rbe-fork,O=gascity, fork CA) reaches
+#                       nothing but the fork scheduler and the CAS.
 #   WORKER_NAME         unique per worker
 #   WORKER_MODE         run  (default): serve until BAZEL_JOB_NAME in this run completes
 #                                       (needs GH_TOKEN with actions:read)
@@ -42,6 +52,17 @@ case "$ACTION_ISOLATION" in
 0 | 1 | canary) ;;
 *) echo "RBE_ACTION_ISOLATION must be 0, 1 or canary" >&2; exit 2 ;;
 esac
+WORKER_TIER=${WORKER_TIER:-oss}
+case "$WORKER_TIER" in
+oss) NETNS=0 ;;
+fork)
+	# Untrusted actions never run unisolated, and never with a network.
+	[ "$ACTION_ISOLATION" = 1 ] || { echo "WORKER_TIER=fork needs RBE_ACTION_ISOLATION=1" >&2; exit 2; }
+	NETNS=1
+	;;
+*) echo "WORKER_TIER must be oss or fork" >&2; exit 2 ;;
+esac
+RBE_WEST_PORT=${RBE_WEST_PORT:-443}
 NL_VERSION=1.7.1
 NL_SHA256=a3d7abc2598e976d022fcdabe88a2f8fae46a3ae64f1868698002ca968dd88e9
 GO_VERSION=$(awk '/^go /{print $2; exit}' go.mod)
@@ -99,7 +120,8 @@ slots=$(($(nproc) / 2)); [ "$slots" -ge 1 ] || slots=1
 # step's environment (another uid, another pid namespace). An action can no
 # longer take the worker cert, so it cannot write the action cache or register
 # workers. The runner's own sudo (NOPASSWD) runs the root launcher; slot egress
-# is filtered by nftables (NETNS=0). Nothing of the image changes for the
+# is filtered by nftables (NETNS=0), or there is none (WORKER_TIER=fork,
+# NETNS=1: loopback only). Nothing of the image changes for the
 # runner: its world-writable directories stay so; inside an action / and
 # every other mount but the action's own are read-only (ROOT_RO=1), and its
 # world-writable sockets on /run are masked (MASK_SOCKETS=1). Each
@@ -148,13 +170,14 @@ isolation_undo() {
 }
 
 render() {
-	jq -n --arg host "grpcs://${RBE_WEST_HOST}:443" --arg root "$ROOT" --arg store "$STORE" --arg name "$WORKER_NAME" --argjson slots "$slots" --argjson isolation "$isolation" '
+	jq -n --arg host "grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT:-443}" --arg root "$ROOT" --arg store "$STORE" --arg name "$WORKER_NAME" --argjson slots "$slots" --arg tier "${WORKER_TIER:-oss}" --argjson isolation "$isolation" '
   { cert_file: ($root + "/pki/worker.pem"), key_file: ($root + "/pki/worker.key"),
     ca_file: "/etc/ssl/certs/ca-certificates.crt" } as $tls |
   {
     stores: [
-      { name: "REMOTE_CAS", grpc: { instance_name: "", endpoints: [{ address: $host, tls_config: $tls }], store_type: "cas" } },
-      { name: "REMOTE_AC", grpc: { instance_name: "oss", endpoints: [{ address: $host, tls_config: $tls }], store_type: "ac" } },
+      { name: "REMOTE_CAS", grpc: { instance_name: (if $tier == "fork" then "oss-fork" else "" end), endpoints: [{ address: $host, tls_config: $tls }], store_type: "cas" } },
+      (if $tier == "fork" then empty else
+        { name: "REMOTE_AC", grpc: { instance_name: "oss", endpoints: [{ address: $host, tls_config: $tls }], store_type: "ac" } } end),
       { name: "WFS", fast_slow: {
           fast: { filesystem: { content_path: ($store + "/content"), temp_path: ($store + "/tmp"),
                                 eviction_policy: { max_bytes: 150000000000 } } },
@@ -164,7 +187,9 @@ render() {
       name: $name,
       worker_api_endpoint: { uri: $host, tls_config: $tls },
       cas_fast_slow_store: "WFS",
-      upload_action_result: { ac_store: "REMOTE_AC" },
+      # fork: nothing is cached for anyone (README "rbe-fork"); NativeLink
+      # refuses a strategy other than never without an ac_store.
+      upload_action_result: (if $tier == "fork" then { upload_ac_results_strategy: "never" } else { ac_store: "REMOTE_AC" } end),
       work_directory: ($root + "/work"),
       max_inflight_tasks: $slots,
       platform_properties: {
@@ -217,6 +242,10 @@ isolate() {
 	# may write, any names) stay as they are on the host; ROOT_RO=1 makes /
 	# and every other mount read-only inside each action, so nothing has to be
 	# listed. The full selftest checks no action can write one.
+	# NETNS_ROOT=0: no action may ask for infra's privileged network namespace
+	# class (RBE_X_NETNS_ROOT=1; README "Privileged network namespace": MAIN
+	# only, never a worker that runs untrusted code). This launcher copy does
+	# not offer it yet; the pin holds once it is synced.
 	phase env
 	sudo tee /etc/rbe-west/rbe-action.env >/dev/null <<-EOF
 		WORK_ROOT=$WORK_ROOT
@@ -228,7 +257,8 @@ isolate() {
 		BACKSTOP_S=1260
 		MAX_TIMEOUT_S=1200
 		HOME_DIR=/var/lib/rbe-action/home
-		NETNS=0
+		NETNS=${NETNS:-0}
+		NETNS_ROOT=0
 		SHM_SIZE=8g
 		TMPFS_DIRS="/run/lock /var/crash"
 		ROOT_RO=1
