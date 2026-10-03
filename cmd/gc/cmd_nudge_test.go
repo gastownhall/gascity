@@ -6197,3 +6197,136 @@ func TestResolveNudgePollInterval(t *testing.T) {
 		}
 	})
 }
+
+// approvalPendingFake starts a claude session on a runtime.Fake that is
+// waiting on a permission prompt, the #2892 setup.
+func approvalPendingFake(t *testing.T) (*runtime.Fake, nudgeTarget) {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.WaitForIdleErrors["sess-worker"] = nil
+	fake.SetPendingInteraction("sess-worker", &runtime.PendingInteraction{
+		RequestID: "tmux-abc123",
+		Kind:      "approval",
+		Prompt:    "Bash: date > bash-ran.txt",
+	})
+	return fake, nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		resolved:    &config.ResolvedProvider{Name: "claude"},
+		sessionName: "sess-worker",
+	}
+}
+
+func assertNoTextDelivered(t *testing.T, fake *runtime.Fake) {
+	t.Helper()
+	for _, call := range fake.Calls {
+		switch call.Method {
+		case "Nudge", "NudgeNow", "SendKeys":
+			t.Fatalf("session received %s %q while a permission prompt was pending", call.Method, call.Message)
+		}
+	}
+}
+
+// TestDeliverSessionNudgeWaitIdleQueuesBehindPendingPermissionPrompt pins
+// that a wait-idle nudge never types into a pending permission prompt (whose
+// "❯ 1. Yes" line reads as an idle composer): it is queued for delivery after
+// the prompt is answered, and the output says why (#2892).
+func TestDeliverSessionNudgeWaitIdleQueuesBehindPendingPermissionPrompt(t *testing.T) {
+	fake, target := approvalPendingFake(t)
+	prev := startNudgePoller
+	startNudgePoller = func(string, string, string) error { return nil }
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryWaitIdle, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("deliverSessionNudgeWithProvider = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	assertNoTextDelivered(t, fake)
+	if !strings.Contains(stdout.String(), "Queued nudge for worker") || !strings.Contains(stdout.String(), "permission prompt") {
+		t.Fatalf("stdout = %q, want a queued confirmation that names the permission prompt", stdout.String())
+	}
+	pending, _, _, err := listQueuedNudges(target.cityPath, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("queued nudges = %d, want 1", len(pending))
+	}
+}
+
+// TestDeliverSessionNudgeImmediateRefusesPendingPermissionPrompt pins that an
+// immediate nudge exits non-zero with an explanation instead of typing into a
+// pending permission prompt (#2892).
+func TestDeliverSessionNudgeImmediateRefusesPendingPermissionPrompt(t *testing.T) {
+	fake, target := approvalPendingFake(t)
+
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryImmediate, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("deliverSessionNudgeWithProvider = 0, want non-zero; stdout: %s", stdout.String())
+	}
+	assertNoTextDelivered(t, fake)
+	for _, want := range []string{"permission prompt", "tmux-abc123", "--delivery=queue"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want it to mention %q", stderr.String(), want)
+		}
+	}
+}
+
+// TestTryDeliverQueuedNudgesByPollerKeepsNudgeQueuedBehindPermissionPrompt
+// pins that the queue drain does not spend a delivery attempt (and so cannot
+// dead-letter the nudge) when the runtime refuses to type into a pending
+// permission prompt: the item stays queued for the next pass.
+func TestTryDeliverQueuedNudgesByPollerKeepsNudgeQueuedBehindPermissionPrompt(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", time.Now().Add(-1*time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+	fake.NudgeErrors = map[string]error{info.SessionName: fmt.Errorf("%w: session %q is waiting on a permission prompt", runtime.ErrPendingInteraction, info.SessionName)}
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if delivered {
+		t.Fatal("delivered = true, want false while a permission prompt is pending")
+	}
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending=%d inFlight=%d dead=%d, want the nudge back in pending", len(pending), len(inFlight), len(dead))
+	}
+	if pending[0].Attempts != 0 {
+		t.Fatalf("attempts = %d, want 0: a pending permission prompt is not a delivery failure", pending[0].Attempts)
+	}
+}

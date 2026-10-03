@@ -1,0 +1,24 @@
+
+
+❯ Use the Write tool to create a new file hello.txt containing the word hi. Do
+  not use Bash.
+
+⏺ Write(hello.txt)
+  ⎿  Wrote 1 line to hello.txt
+      1 hi
+
+⏺ Done. I've created hello.txt with the content "hi".
+
+✻ Cogitated for 3s · done 11:38 AM
+
+❯ Use the Bash tool to run exactly this command: python3 -c "print(6*7)"
+
+  Ran 1 shell command
+  ⎿  Interrupted · What should Claude do instead?
+
+✻ Cooked for 1s · done 11:38 AM
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents
