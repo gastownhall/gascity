@@ -1,5 +1,7 @@
 package main
 
+import "fmt"
+
 // The v2 session reconciler owns every session phase of the tick and of the
 // startup step (tickPhase.session); the controller keeps the rest. Nothing
 // runs these lists until the v2 runtime is wired behind the
@@ -58,4 +60,20 @@ func maintenancePhases(phases []tickPhase) []tickPhase {
 		kept = append(kept, phase.maintenance...)
 	}
 	return kept
+}
+
+// legacySessionEntry guards each way into the legacy session reconciler:
+// the session phases of the tick and the startup step, beadReconcileTick and
+// controlDispatcherTick. Under v2 none of them may run, so it refuses the
+// entry, counts it, reports each site once on stderr and returns true. Under
+// legacy it returns false.
+func (cr *CityRuntime) legacySessionEntry(site string) bool {
+	if cr.reconcilerDrift.running != reconcilerV2 {
+		return false
+	}
+	cr.legacySessionEntries.Add(1)
+	if _, logged := cr.legacySessionEntryLogged.LoadOrStore(site, true); !logged {
+		fmt.Fprintf(cr.stderr, "%s: refused legacy session reconciler entry %q: this controller runs session_reconciler=v2\n", cr.logPrefix, site) //nolint:errcheck // best-effort stderr
+	}
+	return true
 }

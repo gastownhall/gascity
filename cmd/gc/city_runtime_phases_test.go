@@ -577,3 +577,48 @@ func TestCityRuntimeStartupV2RunsMaintenancePhasesOnly(t *testing.T) {
 		"emit_due_compute_facts",
 	})
 }
+
+// Kills: the guard removed (a legacy session path runs under v2), or the
+// guard active under legacy. Under v2 every way into the legacy session
+// reconciler is refused and counted, and each site is reported once; under
+// legacy the same calls run and count nothing.
+func TestLegacySessionEntryGuardBlocksAndCountsUnderV2(t *testing.T) {
+	enterEverySite := func(cr *CityRuntime) {
+		p := &tickPass{ctx: context.Background(), dirty: cr.configDirty, trigger: "patrol", prevPoolRunning: new(map[string]bool)}
+		cr.runTickPhases(p, legacyTickPhases)
+		cr.beadReconcileTick(context.Background(), DesiredStateResult{}, nil, nil, false)
+		cr.controlDispatcherTick(context.Background())
+	}
+
+	t.Run("v2", func(t *testing.T) {
+		cr, store := newPhaseFixtureRuntime(t, false, true)
+		cr.reconcilerDrift = reconcilerModeDrift{running: reconcilerV2}
+		var stderr strings.Builder
+		cr.stderr = &stderr
+		enterEverySite(cr)
+		enterEverySite(cr)
+		// Eight session tick phases plus the two direct entries, twice.
+		if got := cr.legacySessionEntries.Load(); got != 20 {
+			t.Errorf("legacySessionEntries = %d, want 20", got)
+		}
+		if writes := storeWrites(store.recorded()); len(writes) != 0 {
+			t.Errorf("a refused legacy session path wrote to the store: %v", writes)
+		}
+		for _, site := range []string{"cleanup_dead_runtime_session_corpses", "demand_desired_state_and_sync", "bead_reconcile_tick", "auto_suspend_chat_sessions", "control_dispatcher_tick"} {
+			if n := strings.Count(stderr.String(), fmt.Sprintf("entry %q", site)); n != 1 {
+				t.Errorf("site %s reported %d times, want once:\n%s", site, n, stderr.String())
+			}
+		}
+	})
+
+	t.Run("legacy", func(t *testing.T) {
+		cr, store := newPhaseFixtureRuntime(t, false, true)
+		enterEverySite(cr)
+		if got := cr.legacySessionEntries.Load(); got != 0 {
+			t.Errorf("legacySessionEntries = %d under legacy, want 0", got)
+		}
+		if writes := storeWrites(store.recorded()); len(writes) == 0 {
+			t.Error("the legacy session phases did not run under legacy")
+		}
+	})
+}

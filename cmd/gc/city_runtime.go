@@ -114,6 +114,11 @@ type CityRuntime struct {
 	// reconcilerDrift holds the boot-latched session reconciler and warns once
 	// per transition when a reload names another one.
 	reconcilerDrift reconcilerModeDrift
+	// legacySessionEntries counts entries into a legacy session-reconciler
+	// path that legacySessionEntry refused because the controller runs v2;
+	// legacySessionEntryLogged holds the sites already reported.
+	legacySessionEntries     atomic.Int64
+	legacySessionEntryLogged sync.Map
 
 	serviceStateMu          sync.RWMutex
 	cfg                     *config.City
@@ -1236,9 +1241,13 @@ var legacyTickPhases = []tickPhase{
 	{name: "convergence_tick", run: (*CityRuntime).tickConvergence},
 }
 
-// runTickPhases runs phases in order and reports whether every one ran.
+// runTickPhases runs phases in order and reports whether the pass reached its
+// end. A session phase is skipped when legacySessionEntry refuses it.
 func (cr *CityRuntime) runTickPhases(p *tickPass, phases []tickPhase) bool {
 	for _, phase := range phases {
+		if phase.session && cr.legacySessionEntry(phase.name) {
+			continue
+		}
 		if phase.run(cr, p) {
 			return false
 		}
@@ -2913,6 +2922,9 @@ func (cr *CityRuntime) newWarmClaimTriggerResolver(servingRigs map[string]beads.
 // per-session file discovery and reads across every awake session at once). The
 // first steady-state tick performs both.
 func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStateResult, sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle, bootReconcile bool) {
+	if cr.legacySessionEntry("bead_reconcile_tick") {
+		return
+	}
 	desiredState := result.State
 	store := cr.cityBeadStore()
 	if store == nil {
@@ -3846,6 +3858,9 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 }
 
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
+	if cr.legacySessionEntry("control_dispatcher_tick") {
+		return
+	}
 	// The control-dispatcher tick threads one city store as two roles at once:
 	// the session-bead store the desired-state build creates and updates session
 	// beads through (sessions — the build-fn's leading store param flows into
