@@ -1240,7 +1240,7 @@ func controllerLoop(
 		stdout:              stdout,
 		stderr:              stderr,
 	}
-	cr.initWake()
+	cr.initWake(nil)
 	cr.publishPoolDeathHandlers(poolDeathHandlers)
 	cr.setControllerState(cs)
 	cr.run(ctx)
@@ -1327,7 +1327,7 @@ func runController(
 
 	// doStartStandalone already refused an inadmissible mode before any init;
 	// this latch is the one whose mode the runtime runs.
-	wiring, wiringErr := newControllerWiring(cfg)
+	wiring, wiringErr := newControllerWiring(cfg, reconcilerModeLookupEnv, stderr)
 	if wiringErr != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", wiringErr) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1366,16 +1366,14 @@ func runController(
 	telemetry.RecordControllerLifecycle(context.Background(), "started")
 	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout
 
-	cr, err := newCityRuntime(CityRuntimeParams{
+	cr, err := newCityRuntime(wiring.runtimeParams(CityRuntimeParams{
 		CityPath:                cityPath,
 		CityName:                cityName,
 		TomlPath:                tomlPath,
 		WatchTargets:            initialWatchTargets,
 		ConfigRev:               configRev,
-		ConfigDirty:             wiring.configDirty,
 		ConfigDebounce:          configDebounce,
 		Cfg:                     cfg,
-		ReconcilerMode:          wiring.mode,
 		SP:                      sp,
 		Publication:             supervisor.PublicationConfig{},
 		BuildFn:                 buildFn,
@@ -1385,13 +1383,9 @@ func runController(
 		PoolSessions:            poolSessions,
 		PoolDeathHandlers:       poolDeathHandlers,
 		ForceStopShutdown:       forceShutdown,
-		ReloadReqCh:             wiring.reloadReqCh,
-		ConvergenceReqCh:        wiring.convergenceReqCh,
-		PokeCh:                  wiring.pokeCh,
-		ControlDispatcherCh:     wiring.controlDispatcherCh,
 		Stdout:                  stdout,
 		Stderr:                  stderr,
-	})
+	}))
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

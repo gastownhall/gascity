@@ -91,7 +91,7 @@ func TestLegacyWakeMatchesLegacyEnqueue(t *testing.T) {
 			t.Error("a nil wake reported a landed enqueue")
 		}
 		w.WakeMaintenance()
-		w.OnBeadEvent(false)
+		w.OnBeadEvent(events.Event{}, false, false)
 		w.OnEventGap()
 	})
 }
@@ -100,11 +100,11 @@ func TestLegacyWakeOnBeadEventPokesOnlyForNonSnapshot(t *testing.T) {
 	pokeCh, dispatchCh := make(chan struct{}, 1), make(chan struct{}, 1)
 	w := newLegacyWake(pokeCh, dispatchCh)
 
-	w.OnBeadEvent(true)
+	w.OnBeadEvent(events.Event{}, true, false)
 	if drainSignal(pokeCh) || drainSignal(dispatchCh) {
 		t.Fatal("a cache-reconcile replay woke the reconciler: every controller write would echo into a tick (ga-yoix1)")
 	}
-	w.OnBeadEvent(false)
+	w.OnBeadEvent(events.Event{}, false, false)
 	if !drainSignal(pokeCh) {
 		t.Fatal("a bead event did not poke the reconciler")
 	}
@@ -118,7 +118,7 @@ func TestLegacyWakeOnBeadEventPokesOnlyForNonSnapshot(t *testing.T) {
 // signals exactly the wiring's channels, which the runtime's run loop selects
 // on (assertWakeSignalsWired checks the runtime half).
 func TestControllerWiringWakesItsOwnSignals(t *testing.T) {
-	w, err := newControllerWiring(&config.City{})
+	w, err := newControllerWiring(&config.City{}, nil, io.Discard)
 	if err != nil {
 		t.Fatalf("newControllerWiring: %v", err)
 	}
@@ -224,14 +224,14 @@ var wakeSources = []wakeSource{
 	},
 	{
 		site:   "api_state.go:applyBeadEventToStores",
-		call:   "OnBeadEvent(snapshot)",
+		call:   "OnBeadEvent(evt, snapshot, appliedToSessions)",
 		inputs: []wakeInput{{snapshot: false}, {snapshot: true}},
 		before: func(p, d chan<- struct{}, in wakeInput) {
 			if !in.snapshot {
 				legacyEnqueue(p, d, allocatorKey...) // was cs.Enqueue(reconcilekey.Allocator())
 			}
 		},
-		after: func(w *controllerWake, in wakeInput) { w.OnBeadEvent(in.snapshot) },
+		after: func(w *controllerWake, in wakeInput) { w.OnBeadEvent(events.Event{}, in.snapshot, false) },
 	},
 	{
 		site:   "api_state.go:mutateAndPoke",
@@ -242,7 +242,7 @@ var wakeSources = []wakeSource{
 	{
 		site:   "api_state.go:startBeadEventWatcher",
 		call:   "OnEventGap()",
-		count:  3,                                          // watch error, regressed seq, broken tail
+		count:  5,                                          // no provider, unresolved cursor, watch error, regressed seq, broken tail
 		before: func(_, _ chan<- struct{}, _ wakeInput) {}, // new: no legacy send
 		after:  func(w *controllerWake, _ wakeInput) { w.OnEventGap() },
 	},
@@ -536,24 +536,24 @@ func parseCmdGCProductionFiles(t *testing.T, fset *token.FileSet) map[string]*as
 // (directly, through an alias, or through a helper), so it fails
 // TestEveryReconcileEnqueueGoesThroughTheWake. Adding a row needs a reason.
 var wakeSignalMentions = map[string]bool{
-	"api_state.go:type controllerState":                   true, // wakeOf's fallback fields
-	"city_runtime.go:type CityRuntime":                    true, // the run loop's signals
-	"city_runtime.go:type CityRuntimeParams":              true, // handed in by the entry points
-	"city_runtime.go:newCityRuntime":                      true, // made when not handed in
-	"city_runtime.go:(*CityRuntime).run":                  true, // the run loop selects on them
-	"cmd_supervisor.go:startOneCity":                      true, // hands the wiring's signals to the runtime
-	"controller.go:runController":                         true, // hands the wiring's signals to the runtime
-	"controller.go:controllerLoop":                        true, // the test shim's runtime makes its own
-	"reconcile_enqueue.go:legacyEnqueue":                  true, // the one fold that signals them
-	"reconcile_wake.go:type controllerWake":               true, // the wake's signals
-	"reconcile_wake.go:newLegacyWake":                     true,
-	"reconcile_wake.go:(*controllerState).wakeOf":         true,
-	"reconcile_wake.go:(*controllerWake).Enqueue":         true,
-	"reconcile_wake.go:(*controllerWake).WakeMaintenance": true,
-	"reconcile_wake.go:(*controllerWake).OnBeadEvent":     true,
-	"reconcile_wake.go:(*CityRuntime).initWake":           true,
-	"reconcile_wiring.go:type controllerWiring":           true,
-	"reconcile_wiring.go:newControllerWiring":             true,
+	"api_state.go:type controllerState":                         true, // wakeOf's fallback fields
+	"city_runtime.go:type CityRuntime":                          true, // the run loop's signals
+	"city_runtime.go:type CityRuntimeParams":                    true, // handed in by the entry points
+	"city_runtime.go:newCityRuntime":                            true, // made when not handed in
+	"city_runtime.go:(*CityRuntime).run":                        true, // the run loop selects on them
+	"city_runtime_v2.go:(*CityRuntime).controlDispatcherSignal": true, // the run loop's control arm, nil under v2
+	"controller.go:controllerLoop":                              true, // the test shim's runtime makes its own
+	"reconcile_enqueue.go:legacyEnqueue":                        true, // the one fold that signals them
+	"reconcile_wake.go:type controllerWake":                     true, // the wake's signals
+	"reconcile_wake.go:newLegacyWake":                           true,
+	"reconcile_wake.go:(*controllerState).wakeOf":               true,
+	"reconcile_wake.go:(*controllerWake).Enqueue":               true,
+	"reconcile_wake.go:(*controllerWake).WakeMaintenance":       true,
+	"reconcile_wake.go:(*controllerWake).OnBeadEvent":           true,
+	"reconcile_wake.go:(*CityRuntime).initWake":                 true,
+	"reconcile_wiring.go:type controllerWiring":                 true,
+	"reconcile_wiring.go:newControllerWiring":                   true,
+	"reconcile_wiring.go:(*controllerWiring).runtimeParams":     true, // hands the wiring's signals to the runtime
 }
 
 // wakeFiles are the only files that may build a controllerWake.
@@ -725,6 +725,6 @@ func TestBeadEventWatcherReportsGapOnTailBreak(t *testing.T) {
 // withLegacyWake gives a directly-constructed runtime the wake newCityRuntime
 // builds over its signals.
 func withLegacyWake(cr *CityRuntime) *CityRuntime {
-	cr.initWake()
+	cr.initWake(nil)
 	return cr
 }

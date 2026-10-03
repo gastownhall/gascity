@@ -2183,7 +2183,7 @@ func startOneCity(
 
 	// Latch the session reconciler before any init: a refused city must not
 	// start its bead store or open its event log.
-	wiring, wiringErr := newControllerWiring(cfg)
+	wiring, wiringErr := newControllerWiring(cfg, reconcilerModeLookupEnv, stderr)
 	if wiringErr != nil {
 		emitPendingCityCreateFailure(cr, path, cityName, "session_reconciler_refused", wiringErr, stderr)
 		recordInitFailure(cityName, wiringErr.Error())
@@ -2288,15 +2288,13 @@ func startOneCity(
 	var cityRuntime *CityRuntime
 	if err := runPostPrepareStep("building_city_runtime", func() error {
 		var runtimeErr error
-		cityRuntime, runtimeErr = newCityRuntime(CityRuntimeParams{
+		cityRuntime, runtimeErr = newCityRuntime(wiring.runtimeParams(CityRuntimeParams{
 			CityPath:                path,
 			CityName:                cityName,
 			TomlPath:                tomlPath,
 			WatchTargets:            watchTargets,
 			ConfigRev:               configRev,
-			ConfigDirty:             wiring.configDirty,
 			Cfg:                     cfg,
-			ReconcilerMode:          wiring.mode,
 			SP:                      sp,
 			Publication:             publication,
 			BuildFn:                 supervisorBuildAgentsFn(path, cityName, stderr),
@@ -2306,10 +2304,6 @@ func startOneCity(
 			PoolSessions:            poolSessions,
 			PoolDeathHandlers:       poolDeathHandlers,
 			ForceStopShutdown:       forceShutdown,
-			ReloadReqCh:             wiring.reloadReqCh,
-			ConvergenceReqCh:        wiring.convergenceReqCh,
-			PokeCh:                  wiring.pokeCh,
-			ControlDispatcherCh:     wiring.controlDispatcherCh,
 			TranscriptMetaEnabled:   transcriptmeta.Enabled(),
 			OnStarted: func() {
 				cr.UpdateCallback(path, func(m *managedCity) {
@@ -2325,7 +2319,7 @@ func startOneCity(
 			LogPrefix: "gc supervisor",
 			Stdout:    stdout,
 			Stderr:    stderr,
-		})
+		}))
 		return runtimeErr
 	}); err != nil {
 		emitPendingCityCreateFailure(cr, path, cityName, "city_runtime_failed", err, stderr)

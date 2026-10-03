@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -1203,11 +1204,46 @@ func TestV2MetricsLatencyDepthAndDuty(t *testing.T) {
 	})
 }
 
-// v2RuntimeFiles are the v2 production files F2 forbids from touching
+// v2CityRuntimeSeams are the reconcile_*.go production files that are the
+// city runtime's side of the switch and so name CityRuntime by design: the
+// controller's maintenance phase list and its guard. Every other
+// reconcile_*.go and allocator_*.go file is v2 code, a new one included, and
+// must reach the city only through v2Host (city_runtime_v2.go builds it).
+var v2CityRuntimeSeams = map[string]bool{"reconcile_maintenance.go": true}
+
+// v2CityRuntimeSeamDecls are the only declarations inside a v2 file that may
+// name CityRuntime: the wake's runtime accessors. The rest of
+// reconcile_wake.go (the wake the router hangs off) is v2 code.
+var v2CityRuntimeSeamDecls = map[string]bool{
+	"reconcile_wake.go:(*CityRuntime).initWake": true,
+	"reconcile_wake.go:(*CityRuntime).wakeOf":   true,
+}
+
+// v2RuntimeFiles returns every v2 production file F2 forbids from touching
 // CityRuntime.
-var v2RuntimeFiles = []string{
-	"reconcile_runtime.go", "reconcile_metrics.go", "reconcile_barrier.go",
-	"allocator_census.go", "allocator_health.go", "allocator_observe.go", "allocator_scalecheck_lane.go",
+func v2RuntimeFiles(t *testing.T) []string {
+	t.Helper()
+	var out []string
+	for _, pattern := range []string{"reconcile_*.go", "allocator_*.go"} {
+		names, err := filepath.Glob(pattern)
+		if err != nil {
+			t.Fatalf("glob %s: %v", pattern, err)
+		}
+		for _, name := range names {
+			if !strings.HasSuffix(name, "_test.go") && !v2CityRuntimeSeams[name] {
+				out = append(out, name)
+			}
+		}
+	}
+	for _, want := range []string{
+		"reconcile_runtime.go", "reconcile_router.go", "reconcile_barrier.go", "reconcile_wiring.go", "reconcile_wake.go",
+		"allocator_census.go", "allocator_health.go", "allocator_observe.go", "allocator_scalecheck_lane.go",
+	} {
+		if !slices.Contains(out, want) {
+			t.Fatalf("v2 files %v miss %s", out, want)
+		}
+	}
+	return out
 }
 
 // Kills: v2 code reaching CityRuntime (F2), or a worker reading the host's
@@ -1217,12 +1253,17 @@ var v2RuntimeFiles = []string{
 func TestV2RuntimeDoesNotReferenceCityRuntime(t *testing.T) {
 	fset := token.NewFileSet()
 	var bad []string
-	for _, name := range v2RuntimeFiles {
+	for _, name := range v2RuntimeFiles(t) {
 		file, err := parser.ParseFile(fset, name, nil, 0)
 		if err != nil {
 			t.Fatalf("parsing %s: %v", name, err)
 		}
+		seams := 0
 		for _, decl := range file.Decls {
+			if v2CityRuntimeSeamDecls[name+":"+topLevelDeclName(decl)] {
+				seams++
+				continue
+			}
 			fn, _ := decl.(*ast.FuncDecl)
 			ast.Inspect(decl, func(n ast.Node) bool {
 				switch n := n.(type) {
@@ -1237,6 +1278,14 @@ func TestV2RuntimeDoesNotReferenceCityRuntime(t *testing.T) {
 				}
 				return true
 			})
+		}
+		for key := range v2CityRuntimeSeamDecls {
+			if strings.HasPrefix(key, name+":") {
+				seams--
+			}
+		}
+		if seams != 0 {
+			bad = append(bad, name+": v2CityRuntimeSeamDecls names a declaration the file no longer has; drop the row")
 		}
 	}
 	if len(bad) > 0 {

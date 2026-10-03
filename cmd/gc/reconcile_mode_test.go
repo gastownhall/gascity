@@ -102,7 +102,7 @@ func TestLatchReconcilerModeRefusesUnknownAndInadmissibleV2(t *testing.T) {
 		{raw: "v3", wantErr: "not a known value"},
 	} {
 		cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: tc.raw}}
-		mode, err := latchReconcilerMode(cfg)
+		mode, err := latchReconcilerMode(cfg, nil)
 		if tc.wantErr != "" {
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("latch(%q) err = %v, want %q", tc.raw, err, tc.wantErr)
@@ -227,7 +227,7 @@ func TestDoctorSessionReconcilerCheck(t *testing.T) {
 		{raw: "v3", want: doctor.StatusError},
 	} {
 		cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: tc.raw}}
-		r := newSessionReconcilerDoctorCheck(cfg).Run(&doctor.CheckContext{})
+		r := newSessionReconcilerDoctorCheck(cfg, nil).Run(&doctor.CheckContext{})
 		if r.Status != tc.want {
 			t.Errorf("session_reconciler = %q: status = %v (%s), want %v", tc.raw, r.Status, r.Message, tc.want)
 		}
@@ -362,20 +362,22 @@ func TestReconcileCitiesRefusesSessionReconcilerBeforeInit(t *testing.T) {
 
 // TestReloadSessionReconcilerDriftFollowsLatchedMode pins that the runtime's
 // drift tracker runs the mode its controller latched, not its zero value. No
-// controller latches v2 in this build, so the test hands the mode in directly.
+// production controller latches v2 in this build, so the test latches it with
+// the developer override.
 func TestReloadSessionReconcilerDriftFollowsLatchedMode(t *testing.T) {
 	cityPath := t.TempDir()
 	writeCityRuntimeConfig(t, filepath.Join(cityPath, "city.toml"), "fake")
 	cfg, rev := loadCityRuntimeControllerConfig(t, cityPath)
 	sp := runtime.NewFake()
-	cr := newTestCityRuntime(t, CityRuntimeParams{
-		CityPath:       cityPath,
-		CityName:       "test-city",
-		TomlPath:       filepath.Join(cityPath, "city.toml"),
-		ConfigRev:      rev,
-		Cfg:            cfg,
-		ReconcilerMode: reconcilerV2,
-		SP:             sp,
+	wiring, _ := newTestV2Wiring(t, cfg, io.Discard)
+	t.Cleanup(wiring.v2.stop)
+	cr := newTestCityRuntime(t, wiring.runtimeParams(CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  filepath.Join(cityPath, "city.toml"),
+		ConfigRev: rev,
+		Cfg:       cfg,
+		SP:        sp,
 		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
 			return DesiredStateResult{State: map[string]TemplateParams{}}
 		},
@@ -383,7 +385,7 @@ func TestReloadSessionReconcilerDriftFollowsLatchedMode(t *testing.T) {
 		Rec:    events.Discard,
 		Stdout: io.Discard,
 		Stderr: io.Discard,
-	})
+	}))
 	got := cr.reconcilerDrift.observe(&config.City{})
 	if !strings.Contains(got, "on disk is legacy; this controller runs v2") {
 		t.Fatalf("drift warning for a legacy candidate = %q, want it measured against the latched v2", got)

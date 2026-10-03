@@ -3,9 +3,9 @@ package main
 import "fmt"
 
 // The v2 session reconciler owns every session phase of the tick and of the
-// startup step (tickPhase.session); the controller keeps the rest. Nothing
-// runs these lists until the v2 runtime is wired behind the
-// [daemon].session_reconciler switch.
+// startup step (tickPhase.session); the controller keeps the rest. A
+// controller that latched v2 runs these lists (v2TickPhases, v2StartupPhases
+// in city_runtime_v2.go).
 
 // beadReconcileMaintenancePhases are the steps of beadReconcileTick that are
 // maintenance, not session reconciliation: they outlive it under v2.
@@ -76,7 +76,7 @@ func maintenancePhases(phases []tickPhase) []tickPhase {
 // entry, counts it, reports each site once on stderr and returns true. Under
 // legacy it returns false.
 func (cr *CityRuntime) legacySessionEntry(site string) bool {
-	if cr.reconcilerDrift.running != reconcilerV2 {
+	if !cr.runsV2() {
 		return false
 	}
 	cr.legacySessionEntries.Add(1)

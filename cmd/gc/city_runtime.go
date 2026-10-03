@@ -122,10 +122,16 @@ type CityRuntime struct {
 	// legacySessionEntryLogged holds the sites already reported.
 	legacySessionEntries     atomic.Int64
 	legacySessionEntryLogged sync.Map
+	// v2 is the v2 session reconciler's runtime when the controller latched
+	// v2 (installV2), else nil: non-nil exactly when runsV2, which is the one
+	// predicate the run loop and the tick branch on. Set before run and never
+	// replaced.
+	v2 *v2Runtime
 
 	serviceStateMu          sync.RWMutex
 	cfg                     *config.City
 	sp                      runtime.Provider
+	publishedRev            string // the config revision published with cfg and sp (serviceEnvSnapshot)
 	publication             supervisor.PublicationConfig
 	buildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
@@ -353,7 +359,19 @@ type CityRuntimeParams struct {
 	Cfg *config.City
 	// ReconcilerMode is the session reconciler latched at controller start.
 	// The zero value is legacy, which directly-built test runtimes run.
-	ReconcilerMode          reconcilerMode
+	ReconcilerMode reconcilerMode
+	// ReconcilerLookupEnv is the environment the mode was latched with, so a
+	// reload's pending-restart warning judges admission the same way; nil has
+	// no developer override.
+	ReconcilerLookupEnv func(string) (string, bool)
+	// Wake is the controller wiring's wake, which the socket and the API
+	// state already use; nil builds a legacy one over PokeCh and
+	// ControlDispatcherCh.
+	Wake *controllerWake
+	// V2 is the controller wiring's unstarted v2 runtime, set exactly under
+	// v2. checkReconcilerWiring refuses params whose mode, wake and runtime
+	// disagree; controllerWiring.runtimeParams fills all three.
+	V2                      *v2Runtime
 	SP                      runtime.Provider
 	Publication             supervisor.PublicationConfig
 	BuildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
@@ -418,6 +436,9 @@ const postCreateProtectionTimeout = 2 * time.Minute
 // decides is storage_boot.go; every caller here does is print the error and
 // stop this one city.
 func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
+	if err := checkReconcilerWiring(p); err != nil {
+		return nil, err
+	}
 	configName := lockedConfigName(p.Cfg, p.CityPath)
 	applyRuntimeCityIdentity(p.Cfg, p.CityName)
 
@@ -486,9 +507,10 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		configRev:               p.ConfigRev,
 		configDirty:             configDirty,
 		configDebounce:          p.ConfigDebounce,
-		reconcilerDrift:         reconcilerModeDrift{running: p.ReconcilerMode},
+		reconcilerDrift:         reconcilerModeDrift{running: p.ReconcilerMode, lookupEnv: p.ReconcilerLookupEnv},
 		cfg:                     p.Cfg,
 		sp:                      p.SP,
+		publishedRev:            p.ConfigRev,
 		publication:             p.Publication,
 		buildFn:                 p.BuildFn,
 		buildFnWithSessionBeads: p.BuildFnWithSessionBeads,
@@ -540,7 +562,10 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		stdout:            p.Stdout,
 		stderr:            p.Stderr,
 	}
-	cr.initWake()
+	if p.ReconcilerMode == reconcilerV2 {
+		cr.installV2(p.V2)
+	}
+	cr.initWake(p.Wake)
 	cr.publishPoolDeathHandlers(p.PoolDeathHandlers)
 	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
 	if err := cr.svc.Reload(); err != nil {
@@ -585,6 +610,11 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// one allowed to tear the provider's shared server down.
 	cr.ownedCity.Store(true)
 	defer cr.shutdown()
+	if cr.runsV2() {
+		// Deferred after shutdown, so it runs first: the v2 workers are
+		// joined before shutdown stops the sessions.
+		defer cr.v2.stop()
+	}
 
 	dirty := cr.configDirty
 	if dirty == nil {
@@ -626,8 +656,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// Record bead store health metric.
 	telemetry.RecordBeadStoreHealth(context.Background(), cr.cityName, cr.cityBeadStore() != nil)
 
-	// Initialize bead-driven drain tracker and provider-health gate when bead store is available.
-	if cr.cityBeadStore() != nil && cr.tomlPath != "" {
+	// Initialize bead-driven drain tracker and provider-health gate when bead
+	// store is available. Under v2 they are never built: every legacy session
+	// path also requires sessionDrains, so this is a second exclusivity guard.
+	if cr.cityBeadStore() != nil && cr.tomlPath != "" && !cr.runsV2() {
 		cr.sessionDrains = newDrainTracker()
 		cr.providerHealthGate = newProviderHealthGate()
 	}
@@ -852,6 +884,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		cr.onStarted()
 	}
 	markReady()
+	if cr.runsV2() {
+		// Armed only after readiness, so FS pressure never delays boot (F8).
+		cr.v2.armFSGate()
+	}
 	fmt.Fprintf(cr.stderr, "%s: startup ready elapsed=%s\n", //nolint:errcheck // best-effort stderr
 		cr.logPrefix, time.Since(startupBegan).Round(time.Millisecond))
 	fmt.Fprintln(cr.stdout, "City started.") //nolint:errcheck // best-effort stdout
@@ -941,11 +977,20 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	ctrlDB := newTickDebouncer()
 	defer pokeDB.cancelPending()
 	defer ctrlDB.cancelPending()
+	// Under v2 the queue's per-key dedupe replaces tick_debounce (MAINT-017),
+	// and the control-dispatcher arm selects on a nil channel.
+	controlDispatcherCh := cr.controlDispatcherSignal()
+	if cr.runsV2() && cr.cfg.Daemon.TickDebounceDuration() > 0 {
+		fmt.Fprintf(cr.stderr, "%s: warning: [daemon] tick_debounce is ignored under session_reconciler=v2; its reconcile queue dedupes per key\n", cr.logPrefix) //nolint:errcheck // best-effort stderr
+	}
 
 	for {
 		// Re-read on every iteration so a hot reload of city.toml takes
 		// effect on the next event without disturbing in-flight timers.
 		debounce := cr.cfg.Daemon.TickDebounceDuration()
+		if cr.runsV2() {
+			debounce = 0
+		}
 		select {
 		case <-ticker.C:
 			// Patrol scans every reconciler state authoritatively, so any
@@ -964,7 +1009,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			cr.safeTick(func() {
 				cr.nudgeDispatchTick(ctx)
 			}, "nudge-wake")
-		case <-cr.controlDispatcherCh:
+		case <-controlDispatcherCh:
 			ctrlDB.arm(debounce)
 		case <-ctrlDB.fired():
 			cr.safeTick(func() {
@@ -1289,6 +1334,9 @@ func (cr *CityRuntime) tick(
 	}
 	traceTrigger := trigger
 	traceDetail := "controller_tick"
+	if cr.runsV2() {
+		traceDetail = "maintenance_tick"
+	}
 	cr.reloadMu.Lock()
 	hasActive := cr.activeReload != nil
 	cr.reloadMu.Unlock()
@@ -1333,7 +1381,7 @@ func (cr *CityRuntime) tick(
 		cr.sendReloadReply(p.manualReload.doneCh, reply)
 		cr.clearActiveReloadIf(p.manualReload)
 	}()
-	if !cr.runTickPhases(p, legacyTickPhases) {
+	if !cr.runTickPhases(p, cr.tickPhases()) {
 		return
 	}
 	cr.completeManualReload(p)
@@ -1372,6 +1420,10 @@ func (cr *CityRuntime) tickConfigReload(p *tickPass) bool {
 			p.manualReload = cr.activeReload
 		}
 		cr.reloadMu.Unlock()
+		if cr.runsV2() {
+			cr.reloadUnderBarrier(p, source)
+			return p.ctx.Err() != nil
+		}
 		p.manualReply = cr.reloadConfigTraced(p.ctx, p.lastProviderName, p.cityRoot, p.trace, source)
 		if p.manualReload != nil {
 			p.manualReloadCompleted = true
@@ -1477,9 +1529,17 @@ func (cr *CityRuntime) tickRecoverUnroutedWorkRoutes(p *tickPass) bool {
 // read, and the inventory view the runtime reapers take their candidates
 // from: the inventory lane's last pass when it is fresh, else nil, and they
 // list live.
+//
+// Under v2 a poke is a maintenance wake, and the snapshot feeds maintenance
+// consumers only, so it is always the cached read: the v2 router, not the
+// tick, picks up another process's session writes.
 func (cr *CityRuntime) tickLoadSessionSnapshot(p *tickPass) bool {
 	phaseStart := time.Now()
-	p.sessionBeads = cr.loadTickSessionBeadSnapshot(p.trigger)
+	if cr.runsV2() {
+		p.sessionBeads = cr.loadSessionBeadSnapshot()
+	} else {
+		p.sessionBeads = cr.loadTickSessionBeadSnapshot(p.trigger)
+	}
 	p.recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.initial", phaseStart, traceSessionSnapshotFields(p.sessionBeads))
 	if p.trace != nil && p.sessionBeads != nil {
 		p.trace.RecordSessionBaseline("", "", traceRecordPayload{
@@ -1778,7 +1838,8 @@ var legacyStartupPhases = []tickPhase{
 
 // startupReconcile runs the startup step, legacyStartupPhases, and reports
 // whether it completed. Its trace cycle begins once the session snapshot is
-// loaded and ends on every exit, panic included.
+// loaded and ends on every exit, panic included. Under v2 it runs the
+// maintenance phases, then boots the v2 runtime on ctx (bootV2).
 func (cr *CityRuntime) startupReconcile(ctx context.Context) bool {
 	p := &tickPass{ctx: ctx}
 	defer func() {
@@ -1790,7 +1851,14 @@ func (cr *CityRuntime) startupReconcile(ctx context.Context) bool {
 			p.trace.end(completion, traceRecordPayload{"phase": "startup"})
 		}
 	}()
-	p.completed = cr.runTickPhases(p, legacyStartupPhases)
+	phases := legacyStartupPhases
+	if cr.runsV2() {
+		phases = v2StartupPhases
+	}
+	p.completed = cr.runTickPhases(p, phases)
+	if p.completed && cr.runsV2() {
+		p.completed = cr.bootV2(ctx)
+	}
 	return p.completed
 }
 
@@ -2731,8 +2799,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 	// path on the next tick.
 	cr.rebuildConvergenceHandler()
 
-	// Ensure drain tracker and provider-health gate are initialized when bead store becomes available.
-	if cr.cityBeadStore() != nil && cr.tomlPath != "" && cr.sessionDrains == nil {
+	// Ensure drain tracker and provider-health gate are initialized when bead
+	// store becomes available; never under v2 (see run).
+	if cr.cityBeadStore() != nil && cr.tomlPath != "" && cr.sessionDrains == nil && !cr.runsV2() {
 		cr.sessionDrains = newDrainTracker()
 		cr.providerHealthGate = newProviderHealthGate()
 	}

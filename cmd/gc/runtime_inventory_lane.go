@@ -95,8 +95,25 @@ type runtimeInventoryLane struct {
 	statusMu sync.Mutex
 	status   inventoryLaneStatus
 
+	// passHook, when set, sees every committed pass: the snapshots before and
+	// after it. The v2 runtime installs its router here (setPassHook).
+	passHook atomic.Pointer[func(prev, next *ObservationSnapshot)]
+
 	cadencePasses atomic.Int64
 	wakePasses    atomic.Int64
+}
+
+// setPassHook installs fn as the per-pass hook; nil removes it. Safe on a nil
+// lane.
+func (l *runtimeInventoryLane) setPassHook(fn func(prev, next *ObservationSnapshot)) {
+	if l == nil {
+		return
+	}
+	if fn == nil {
+		l.passHook.Store(nil)
+		return
+	}
+	l.passHook.Store(&fn)
 }
 
 const (
@@ -399,6 +416,9 @@ func (l *runtimeInventoryLane) commit(pass InventoryPass, attrs map[string]Inven
 	}
 	report.snapshot = snap
 	report.alerts = l.updateHealth(snap.Health, pass.FinishedAt)
+	if hook := l.passHook.Load(); hook != nil {
+		(*hook)(before, snap)
+	}
 }
 
 // inventoryGone returns, in name order, the names next proves gone that

@@ -1,6 +1,12 @@
 package main
 
-import "github.com/gastownhall/gascity/internal/reconcilekey"
+import (
+	"sync/atomic"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
+)
 
 // controllerWake is the single path from every reconcile trigger in the
 // controller to the session reconciler: the API, the socket, the config
@@ -10,15 +16,22 @@ import "github.com/gastownhall/gascity/internal/reconcilekey"
 // (TestEveryReconcileEnqueueGoesThroughTheWake).
 //
 // Under the legacy reconciler every method is exactly the channel fold it
-// replaces (legacyEnqueue). router is the keyed reconciler's seam: when set,
-// keyed enqueues and bead event gaps go to the v2 router instead. Maintenance
-// wakes (config reload) still reach pokeCh, and so does OnBeadEvent until
-// P2-8 widens it to carry what the router needs. Nothing sets router before
-// the switch is wired (P2-8).
+// replaces (legacyEnqueue). Under v2, newControllerWiring sets router before
+// the controller socket can deliver anything, and keyed enqueues, bead events
+// and bead event gaps go to the v2 router instead. Maintenance wakes (config
+// reload) reach pokeCh in both modes: the reload runs on the maintenance tick.
 type controllerWake struct {
 	pokeCh, controlDispatcherCh chan<- struct{}
 	router                      *reconcileRouter
+	// now, when set, is the clock routed enqueues rate-limit their landed
+	// report by; nil is time.Now, whose readings compare on the monotonic
+	// clock, so a wall-clock step neither floods nor silences the report.
+	now        func() time.Time
+	lastLanded atomic.Pointer[time.Time] // the last routed enqueue reported landed
 }
+
+// routedLandedEvery bounds how often a routed enqueue reports that it landed.
+const routedLandedEvery = time.Second
 
 // newLegacyWake returns the legacy wake over the reconciler's two signals.
 // Either may be nil; a nil channel is never signaled.
@@ -36,10 +49,17 @@ func (cs *controllerState) wakeOf() *controllerWake {
 	return newLegacyWake(cs.pokeCh, cs.controlDispatcherCh)
 }
 
-// initWake builds the city runtime's wake once, over the signals its run loop
-// selects on: the controllerWiring's signals when an entry point built the
-// runtime. newCityRuntime calls it; wakeOf never builds one.
-func (cr *CityRuntime) initWake() {
+// initWake installs the city runtime's wake once. An entry point hands in
+// its controllerWiring's wake, which is the wake its socket and API state
+// already use, so the runtime's follow-ups, lanes and event pump reach the
+// same reconciler; a v2 controller always has one (checkReconcilerWiring). A
+// directly-built legacy runtime gets a wake over the signals its run loop
+// selects on. newCityRuntime calls it; wakeOf never builds one.
+func (cr *CityRuntime) initWake(wired *controllerWake) {
+	if wired != nil {
+		cr.wake = wired
+		return
+	}
 	cr.wake = newLegacyWake(cr.pokeCh, cr.controlDispatcherCh)
 }
 
@@ -64,16 +84,38 @@ const (
 
 // Enqueue asks for keys to be reconciled promptly. No keys means the
 // allocator. It reports whether a signal landed, for callers that log only
-// on a landed wake; under the router every enqueue lands.
+// on a landed wake (the provider event pump). Under the router every enqueue
+// lands, so it reports landed at most once per routedLandedEvery: a replayed
+// backlog burst stays as quiet as the legacy fold's full channel keeps it
+// (API-018).
 func (w *controllerWake) Enqueue(reason string, keys ...reconcilekey.Key) bool {
 	if w == nil {
 		return false
 	}
 	if w.router != nil {
 		w.router.Enqueue(reason, keys...)
-		return true
+		return w.reportLanded()
 	}
 	return legacyEnqueue(w.pokeCh, w.controlDispatcherCh, keys...)
+}
+
+func (w *controllerWake) reportLanded() bool {
+	now := time.Now
+	if w.now != nil {
+		now = w.now
+	}
+	t := now()
+	last := w.lastLanded.Load()
+	if last != nil && t.Sub(*last) < routedLandedEvery {
+		return false
+	}
+	return w.lastLanded.CompareAndSwap(last, &t)
+}
+
+// routes reports whether bead events go to the v2 router, which needs to know
+// whether each one landed in the sessions store.
+func (w *controllerWake) routes() bool {
+	return w != nil && w.router != nil
 }
 
 // WakeMaintenance asks for a maintenance pass after a config change. The
@@ -89,11 +131,19 @@ func (w *controllerWake) WakeMaintenance() {
 // OnBeadEvent wakes the reconciler for one bead event after the caches
 // applied it. A cache-reconcile replay (snapshot) never wakes the legacy
 // reconciler: the controller's own writes echo back as replays, and a poke
-// per echo is the ga-yoix1 churn shape. Routing bead events to the v2 router
-// needs the event and whether it landed in the sessions store; the switch
-// adds both when it wires the router.
-func (w *controllerWake) OnBeadEvent(snapshot bool) {
-	if w == nil || snapshot {
+// per echo is the ga-yoix1 churn shape. The v2 router routes replays too,
+// enqueue-only (F1), and never pokes the tick; appliedToSessions says the
+// event's bead lives in the sessions-class store (routes reports when the
+// caller must work it out).
+func (w *controllerWake) OnBeadEvent(evt events.Event, snapshot, appliedToSessions bool) {
+	if w == nil {
+		return
+	}
+	if w.router != nil {
+		w.router.OnBeadEvent(evt, snapshot, appliedToSessions)
+		return
+	}
+	if snapshot {
 		return
 	}
 	legacyEnqueue(w.pokeCh, w.controlDispatcherCh, reconcilekey.Allocator())

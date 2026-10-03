@@ -21,9 +21,9 @@ import (
 // The keyed reconciler's runtime: session workers draining the workqueue, the
 // allocator and the resync pass as paced lanes, a boot pass whose readiness
 // waits for every boot key to be reconciled once, and an immutable
-// per-generation environment the workers read. In this slice the controllers
-// are trace-only and nothing constructs the runtime outside tests; the switch
-// wires it in.
+// per-generation environment the workers read. The controllers are
+// trace-only until P3 and P4; newControllerWiring constructs the runtime when
+// the controller latches v2, and the city runtime binds, boots and stops it.
 //
 // v2 code never reads CityRuntime. A reload writes CityRuntime fields with no
 // lock and may rebuild every store (F2), so everything v2 needs from the city
@@ -64,8 +64,8 @@ var v2IndexOnlyResyncs = map[string]bool{"census-error": true, "rebuild-overflow
 
 var errV2Stopped = errors.New("v2 reconciler: stopped before ready")
 
-// v2Host is the only way v2 code reaches the city (F2). The switch builds it
-// from the city runtime; tests build it from fakes.
+// v2Host is the only way v2 code reaches the city (F2). newV2Host builds it
+// from the city runtime (city_runtime_v2.go); tests build it from fakes.
 type v2Host struct {
 	sessionsLeg string // the sessions-class store's census label (rowKey.Leg)
 	// sessions and censusLegs are the router's census: cached reads of the
@@ -245,6 +245,24 @@ func newV2Runtime(host v2Host, ctrl v2Controllers, metrics *v2Metrics) *v2Runtim
 		ctrl.bind(rt.router.Enqueue)
 	}
 	return rt
+}
+
+// bindHost hands an unstarted runtime the city it reconciles. The controller
+// wiring builds the runtime before the city runtime exists, so its router can
+// take socket keys from the first one; only the sessions leg and stderr are
+// known then. newCityRuntime binds the rest once, before run can start it, so
+// every goroutine that reads the host starts after the bind.
+func (rt *v2Runtime) bindHost(host v2Host) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.started || rt.stopped {
+		panic("v2 reconciler: host bound after start")
+	}
+	host.sessionsLeg = rt.host.sessionsLeg
+	if host.stderr == nil {
+		host.stderr = rt.host.stderr
+	}
+	rt.host = host
 }
 
 // publishEnv publishes the host's current config as the next generation,
