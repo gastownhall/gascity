@@ -611,7 +611,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		// pool never wakes for it.
 		subPhaseStart = trace.demandNow()
 		var unassignedRoutedPartial bool
-		unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, unassignedRoutedPartial = collectOpenUnassignedRoutedWork(cityPath, cfg, store, rigStores, suspendedRigPaths, stderr, pass)
+		unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, unassignedRoutedPartial = collectOpenUnassignedRoutedWork(cityPath, cfg, store, rigStores, suspendedRigPaths, stderr, pass, nil)
 		// Same repair as above, over the open/unassigned collection: a bead
 		// released back to open by a drain is clobbered the same way an
 		// in_progress one is, and never appears in assignedWorkBeads once
@@ -1691,6 +1691,7 @@ func collectAssignedWorkBeadsWithStores(
 	caches ...*readyDemandCache,
 ) ([]beads.Bead, []beads.Store, []string, map[storeScopedBeadKey]bool, bool) {
 	cache := optionalReadyDemandCache(caches)
+	reads := cache.demandReads()
 	pass, point := cache.readTrace()
 	// Work arm of the reconciler frame, over the Plan(Census) leg set: the city
 	// work store under the empty store-ref, the serving rigs under their names,
@@ -1738,7 +1739,7 @@ func collectAssignedWorkBeadsWithStores(
 			// across every store before any ready handoff probes, so already
 			// active work never waits behind unrelated ready scans.
 			start := pass.now()
-			inProgress, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "in_progress"})
+			inProgress, err := reads.Cached(source.store, beads.ListQuery{Status: "in_progress"})
 			pass.read(read("list_in_progress", demandReadTierCached), start, len(inProgress), err)
 			if err == nil {
 				appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, inProgress, seen, source.store, source.ref)
@@ -1757,7 +1758,7 @@ func collectAssignedWorkBeadsWithStores(
 			// the backing store's raw --status=open filter, which excludes it —
 			// see listOpenForControllerDemandLive.
 			start = pass.now()
-			openDemand, err := listOpenForControllerDemandLive(source.store)
+			openDemand, err := reads.RawOpen(source.store)
 			pass.read(read("list_open", demandReadTierLive), start, len(openDemand), err)
 			if err == nil {
 				appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openDemand, seen, source.store, source.ref)
@@ -1789,7 +1790,7 @@ func collectAssignedWorkBeadsWithStores(
 			// skipReadyAssignees note below), and releaseOrphanedPoolAssignments'
 			// own live re-read (liveWorkAssignmentStillReleasable) skips it.
 			start = pass.now()
-			openRouted, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "open"})
+			openRouted, err := reads.Cached(source.store, beads.ListQuery{Status: "open"})
 			pass.read(read("list_open", demandReadTierCached), start, len(openRouted), err)
 			if err == nil {
 				appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
@@ -1835,7 +1836,7 @@ func collectAssignedWorkBeadsWithStores(
 	// suppress the Ready probe for a same-ID assignee in another store.
 	skipReadyAssignees := readyCapturedAssigneeSet(result, resultStoreRefs, readyAssigned)
 	expandSkipAssigneesWithSessionIdentities(skipReadyAssignees, sessionBeads)
-	assignees := readyAssignedWorkAssignees(cfg, cityStore, sessionBeads, skipReadyAssignees, pass, point)
+	assignees := readyAssignedWorkAssignees(cfg, cityStore, sessionBeads, skipReadyAssignees, pass, point, reads)
 	if len(skipReadyAssignees) > 0 && len(assignees) == 0 {
 		return result, resultStores, resultStoreRefs, readyAssigned, partial
 	}
@@ -1851,13 +1852,13 @@ func collectAssignedWorkBeadsWithStores(
 			var err error
 			var errs []error
 			if len(assignees) == 0 {
-				ready, err = cache.liveReady(source.store, label, beads.ReadyQuery{Limit: assignedWorkReadyLimit(cfg)})
+				ready, err = cache.liveReady(source.store, label, beads.ReadyQuery{Limit: reads.ReadyLimit(cfg)})
 				if err != nil {
 					errs = append(errs, fmt.Errorf("Ready(): %w", err))
 				}
 			} else {
 				for _, assignee := range assignees {
-					part, partErr := cache.liveReady(source.store, label, beads.ReadyQuery{Assignee: assignee, Limit: assignedWorkReadyLimit(cfg)})
+					part, partErr := cache.liveReady(source.store, label, beads.ReadyQuery{Assignee: assignee, Limit: reads.ReadyLimit(cfg)})
 					if partErr != nil {
 						errs = append(errs, fmt.Errorf("Ready(assignee=%q): %w", assignee, partErr))
 					}
@@ -1953,7 +1954,7 @@ func expandSkipAssigneesWithSessionIdentities(skip map[string]struct{}, sessionB
 	}
 }
 
-func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}, pass *demandPassTrace, point string) []string {
+func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}, pass *demandPassTrace, point string, reads demandReads) []string {
 	seen := make(map[string]struct{})
 	var result []string
 	add := func(value string) {
@@ -2003,7 +2004,7 @@ func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, session
 			// partial read keeps the rows it did get.
 			start := pass.now()
 			var idxErr error
-			closedIdx, idxErr = session.BuildClosedNamedSessionBeadIndex(cityStore)
+			closedIdx, idxErr = demandReadsOrLegacy(reads).ClosedNamedIndex(cityStore)
 			pass.read(demandStoreRead{point: point, leg: pass.storeLabel(cityStore, "city"), op: "closed_named_index", tier: demandReadTierCached}, start, -1, idxErr)
 		}
 		for i := range cfg.NamedSessions {
@@ -2722,6 +2723,8 @@ type readyDemandCache struct {
 	mu     sync.Mutex
 	live   map[beads.Store]*readyDemandEntry
 	cached map[beads.Store]*readyDemandEntry
+	// reads answers the snapshot fetches; nil is legacyDemandReads.
+	reads demandReads
 	// pass and point label the store reads of the one read point this cache
 	// serves (recordDemandStoreRead). A nil pass records nothing.
 	pass  *demandPassTrace
@@ -2790,7 +2793,7 @@ func (c *readyDemandCache) liveSnapshot(store beads.Store, leg string) ([]beads.
 	e := c.entry(c.live, store)
 	e.once.Do(func() {
 		start := c.pass.now()
-		e.rows, e.err = beads.HandlesFor(store).Live.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+		e.rows, e.err = c.demandReads().ReadyAll(store)
 		c.pass.read(demandStoreRead{point: c.point, leg: leg, op: "ready", tier: demandReadTierLive}, start, len(e.rows), e.err)
 	})
 	return e.rows, e.err
@@ -2803,7 +2806,7 @@ func (c *readyDemandCache) cachedSnapshot(store beads.Store, leg string) ([]bead
 	e := c.entry(c.cached, store)
 	e.once.Do(func() {
 		start := c.pass.now()
-		e.rows, e.err = beads.HandlesFor(store).Cached.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+		e.rows, e.err = c.demandReads().CachedReady(store)
 		c.pass.read(demandStoreRead{point: c.point, leg: leg, op: "ready", tier: demandReadTierCached}, start, len(e.rows), e.err)
 	})
 	return e.rows, e.err
@@ -5877,10 +5880,11 @@ func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []b
 // `gc storage migrate` moving it to the binding, after which this arm sees it on
 // the very next tick; the lost-route half is separately converged off-tick by the
 // route-recovery backstop, which reads every leg (route_recovery_lane.go).
-func collectOpenUnassignedRoutedWork(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool, stderr io.Writer, pass *demandPassTrace) ([]beads.Bead, []beads.Store, []string, bool) {
+func collectOpenUnassignedRoutedWork(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool, stderr io.Writer, pass *demandPassTrace, reads demandReads) ([]beads.Bead, []beads.Store, []string, bool) {
 	if cfg == nil {
 		return nil, nil, nil, false
 	}
+	reads = demandReadsOrLegacy(reads)
 	// Refs are the canonical scoped spelling the rows' gc.root_store_ref is
 	// matched against; a binding keeps its own "class:*" ref, which reads back as
 	// city scope.
@@ -5913,7 +5917,7 @@ func collectOpenUnassignedRoutedWork(cityPath string, cfg *config.City, store be
 			// blocked bead to "open" and let it count as spawn capacity or get its route
 			// re-stamped (EB-42o8/gc-nz5i; extends gc-4zb/#4395). See listOpenForControllerDemandLive.
 			start := pass.now()
-			rows, err := listOpenForControllerDemandLive(source.store)
+			rows, err := reads.RawOpen(source.store)
 			pass.read(demandStoreRead{point: demandReadPointUnassignedRouted, leg: label, op: "list_open", tier: demandReadTierLive}, start, len(rows), err)
 			results[i] = legResult{rows: rows, err: err}
 		}(i, source)

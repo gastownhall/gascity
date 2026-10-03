@@ -830,6 +830,13 @@ func (s *emittingClassStore) SupportsEphemeralGraphApply() bool {
 	return ok && supporter.SupportsEphemeralGraphApply()
 }
 
+// CachedReadExact reports false: a wrapper is never exact. The declaration
+// promises a CachingStore over this store sees the engine's ready projection,
+// and a cache over the emitter cannot reach the projection the engine keeps
+// unexported (beads.CachedReadExact). The method stays so the emitter keeps
+// the engine's method set (TestEmittingClassStoreKeepsEveryEngineCapability).
+func (s *emittingClassStore) CachedReadExact() bool { return false }
+
 // SawRows forwards beads.RowWitness. Collapsing "the wrapped store is not a
 // witness" into false is exact rather than lossy: the capability certifies
 // presence only, so every consumer already treats a missing witness and a

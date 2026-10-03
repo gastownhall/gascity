@@ -187,7 +187,7 @@ func conformanceReadyFederation(t *testing.T, e splitEnv) {
 		t.Fatalf("HQ bead %s classifies as infrastructure; this leg is about the WORK class specifically", hqWork.ID)
 	}
 
-	found, stores, refs, partial := collectOpenUnassignedRoutedWork(e.cityPath, e.cfg, e.sessionsStore(), e.rigStores, nil, os.Stderr, nil)
+	found, stores, refs, partial := collectOpenUnassignedRoutedWork(e.cityPath, e.cfg, e.sessionsStore(), e.rigStores, nil, os.Stderr, nil, nil)
 	if partial {
 		t.Fatal("collectOpenUnassignedRoutedWork reported a partial scan; the demand read must be complete for this invariant to mean anything")
 	}

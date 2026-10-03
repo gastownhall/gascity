@@ -22,6 +22,7 @@ var (
 		"AdvanceSequenceFloor":          "raises the in-memory id allocator only",
 		"AtomicConditionalCloserHandle": "reports a capability from an immutable layout field; the closer it returns guards every call",
 		"AtomicTx":                      "reports a constant capability",
+		"CachedReadExact":               "reports a constant capability",
 		"IDPrefix":                      "returns an immutable field",
 		"StoreHealthPath":               "returns an immutable field",
 	}
