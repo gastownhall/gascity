@@ -643,3 +643,109 @@ func TestApplyGraphControls_FanoutControlScopeRoleIsControl(t *testing.T) {
 		t.Fatalf("fanout control gc.scope_role = %q, want %q", got, beadmeta.ScopeRoleControl)
 	}
 }
+
+// TestApplyGraphControlsGatesDownstreamOnFanout pins the regression fix for
+// graph.v2 on_complete ordering: a downstream step that needs an on_complete
+// source must block on the minted <source>-fanout control (the fanout
+// convergence point), not on the raw source close. Otherwise downstream work
+// races the spawned children. Covered for both unscoped and scoped sources.
+func TestApplyGraphControlsGatesDownstreamOnFanout(t *testing.T) {
+	t.Parallel()
+
+	fanoutSource := func(id string, scoped bool) *Step {
+		step := &Step{
+			ID:    id,
+			Title: id,
+			OnComplete: &OnCompleteSpec{
+				ForEach: "output.items",
+				Bond:    "item-fragment",
+			},
+		}
+		if scoped {
+			step.Metadata = map[string]string{
+				beadmeta.ScopeRefMetadataKey:  "scope-1",
+				beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleMember,
+			}
+		}
+		return step
+	}
+
+	for _, scoped := range []bool{false, true} {
+		name := "unscoped"
+		if scoped {
+			name = "scoped"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			f := &Formula{
+				Formula: "mol-fanout-gate",
+				Steps: []*Step{
+					fanoutSource("A", scoped),
+					{ID: "B", Title: "B", Type: "task", Needs: []string{"A"}},
+				},
+			}
+			ApplyGraphControls(f)
+
+			steps := collectGraphSteps(f.Steps)
+			b := findGraphStepByID(steps, "B")
+			if b == nil {
+				t.Fatal("missing downstream step B")
+			}
+			if !containsString(b.Needs, "A-fanout") {
+				t.Fatalf("B needs = %v, want A-fanout so B waits for fanout convergence", b.Needs)
+			}
+			if containsString(b.Needs, "A") {
+				t.Fatalf("B needs = %v, must not still wait on the raw source A", b.Needs)
+			}
+
+			if scoped {
+				scopeCheck := findGraphStepByID(steps, "A-scope-check")
+				if scopeCheck == nil {
+					t.Fatal("missing A-scope-check")
+				}
+				if !containsString(scopeCheck.Needs, "A") || !containsString(scopeCheck.Needs, "A-fanout") {
+					t.Fatalf("A-scope-check needs = %v, want [A A-fanout] so scope finalization also waits for the children", scopeCheck.Needs)
+				}
+			}
+
+			// A successful flatten proves the rewrite introduced no dependency
+			// cycle (orderGraphRecipeSteps fails on one).
+			recipe, err := toRecipeWithGraph(f, true)
+			if err != nil {
+				t.Fatalf("toRecipeWithGraph: %v", err)
+			}
+			if recipe == nil {
+				t.Fatal("toRecipeWithGraph returned nil recipe")
+			}
+		})
+	}
+}
+
+// TestApplyGraphControlsFanoutControlKeepsNoDownstreamAsSink pins that an
+// on_complete source with no downstream still surfaces its fanout control as
+// the workflow sink, so finalize waits for the spawned children.
+func TestApplyGraphControlsFanoutControlKeepsNoDownstreamAsSink(t *testing.T) {
+	t.Parallel()
+
+	f := &Formula{
+		Formula: "mol-fanout-sink",
+		Steps: []*Step{{
+			ID:    "A",
+			Title: "A",
+			OnComplete: &OnCompleteSpec{
+				ForEach: "output.items",
+				Bond:    "item-fragment",
+			},
+		}},
+	}
+	ApplyGraphControls(f)
+
+	finalizer := findGraphStepByID(collectGraphSteps(f.Steps), "workflow-finalize")
+	if finalizer == nil {
+		t.Fatal("missing workflow-finalize")
+	}
+	if !containsString(finalizer.Needs, "A-fanout") {
+		t.Fatalf("workflow-finalize needs = %v, want A-fanout", finalizer.Needs)
+	}
+}
