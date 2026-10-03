@@ -188,6 +188,16 @@ type CityRuntime struct {
 	nudgeMailSweepWatchdogLast         time.Time
 	wispIndexMigrationApplied          bool
 
+	// retentionSweepMu guards the in-flight background retention prune:
+	// retentionSweepDone is closed when it exits, and retentionSweepCancel
+	// stops it. Both are nil before the first sweep. retentionSweepAfterExit
+	// holds the closes of store handles a store update replaced while the
+	// sweep was running; the sweep runs them once it has exited.
+	retentionSweepMu        sync.Mutex
+	retentionSweepCancel    context.CancelFunc
+	retentionSweepDone      chan struct{}
+	retentionSweepAfterExit []func()
+
 	rec events.Recorder
 	cs  *controllerState // nil when controller-managed bead stores are unavailable
 	svc *workspacesvc.Manager
@@ -546,6 +556,9 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 // accessors read it under RLock.
 func (cr *CityRuntime) setControllerState(cs *controllerState) {
 	cr.cs = cs
+	if cs != nil {
+		cs.setStoreHandOff(cr.handOffOrderTrackingRetentionSweep)
+	}
 }
 
 // crashTracker returns the crash tracker for API server wiring.
@@ -1786,11 +1799,49 @@ func bulkDeleteMaxAge(_ *config.City) time.Duration {
 // most once every orderTrackingRetentionWatchdogInterval. It deletes at most
 // orderTrackingRetentionWatchdogDeleteBudget beads per invocation. The orders
 // lane runs it with its pass's config snapshot.
-func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(cfg *config.City, now time.Time) {
+//
+// The deletes run on a background goroutine, never in the pass: on a large
+// store each graph delete takes seconds, and a budget's worth held the startup
+// pass (and the cold start behind it) and every lane pass for minutes. At most
+// one sweep is in flight; a due pass that finds one running, or finds a
+// controller store update in progress, skips without stamping, and the
+// interval runs from the start of the sweep. ctx cancels the sweep between
+// deletes.
+//
+// The sweep deletes through the controller's own store handles, as the pass
+// did: those are the caching stores whose Delete records the bead.deleted
+// event and evicts the cache entry, and a private handle would do neither. An
+// update replaces those handles and closes the old ones shortly after, so the
+// sweep resolves them under the update lock and an update hands off after it
+// swaps: it cancels the sweep without waiting for it, and the replaced handles
+// close only once the sweep has exited (setControllerState installs the hook).
+// A graph delete in progress, rollback included, so finishes on open handles,
+// and the update — an API mutation on an HTTP goroutine, or a reload — is not
+// held behind it. The orders binding is not the controller's to replace:
+// routes own it for the runtime's life, and shutdown() joins the sweep before
+// closing it. Lock order: the lane's passMu, then cs.updateMu, then
+// retentionSweepMu; the sweep goroutine takes only retentionSweepMu, as it
+// exits.
+func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(ctx context.Context, cfg *config.City, now time.Time) {
 	if !cr.orderTrackingRetentionWatchdogLast.IsZero() &&
 		now.Sub(cr.orderTrackingRetentionWatchdogLast) < orderTrackingRetentionWatchdogInterval {
 		return
 	}
+	if cr.orderTrackingRetentionSweepInFlight() {
+		return
+	}
+	if cr.cs == nil {
+		// Standalone handles are never closed on replacement.
+		cr.beginOrderTrackingRetentionSweep(ctx, cfg, now)
+		return
+	}
+	cr.cs.tryHoldStoreHandles(func() { cr.beginOrderTrackingRetentionSweep(ctx, cfg, now) })
+}
+
+// beginOrderTrackingRetentionSweep stamps the watchdog, applies the
+// backup-age guard, resolves the sweep's stores and starts the sweep. With a
+// controller state it runs under tryHoldStoreHandles.
+func (cr *CityRuntime) beginOrderTrackingRetentionSweep(ctx context.Context, cfg *config.City, now time.Time) {
 	cr.orderTrackingRetentionWatchdogLast = now
 
 	// The cityPath guard is a test affordance: real controllers always set it,
@@ -1805,23 +1856,128 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(cfg *config.City, now t
 	}
 
 	stores, _, closeOpened, storeErr := cr.orderTrackingSweepStores(cfg)
-	defer closeOpened()
 	if len(stores) == 0 {
+		closeOpened()
 		if storeErr != nil && cr.stderr != nil {
 			fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: %v\n", cr.logPrefix, storeErr) //nolint:errcheck // best-effort stderr
 		}
 		return
 	}
-
 	policy := orderTrackingRetentionPolicyForConfig(cfg)
-	deleted, sweepErr := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
-		stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget)
-	if err := errors.Join(storeErr, sweepErr); err != nil && cr.stderr != nil {
-		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+	cr.startOrderTrackingRetentionSweep(ctx, func(sweepCtx context.Context) {
+		defer closeOpened()
+		deleted, sweepErr := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
+			sweepCtx, stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget)
+		// Cancellation ends the sweep with no error of its own, so every error
+		// here is a real one, whether or not a cancel followed it.
+		if err := errors.Join(storeErr, sweepErr); err != nil && cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		}
+		if cr.stderr == nil {
+			return
+		}
+		// A sweep cut short reports only the canceled line, which carries its
+		// count, so no sweep is reported twice.
+		switch {
+		case sweepCtx.Err() != nil:
+			fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: canceled after %d delete(s)\n", cr.logPrefix, deleted) //nolint:errcheck // best-effort stderr
+		case deleted > 0:
+			fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: pruned %d closed bead(s)\n", cr.logPrefix, deleted) //nolint:errcheck // best-effort stderr
+		}
+	})
+}
+
+// orderTrackingRetentionSweepInFlight reports whether a background retention
+// sweep is still running.
+func (cr *CityRuntime) orderTrackingRetentionSweepInFlight() bool {
+	cr.retentionSweepMu.Lock()
+	defer cr.retentionSweepMu.Unlock()
+	if cr.retentionSweepDone == nil {
+		return false
 	}
-	if deleted > 0 && cr.stderr != nil {
-		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: pruned %d closed bead(s)\n", cr.logPrefix, deleted) //nolint:errcheck // best-effort stderr
+	select {
+	case <-cr.retentionSweepDone:
+		return false
+	default:
+		return true
 	}
+}
+
+// startOrderTrackingRetentionSweep runs sweep on its own goroutine under a
+// context derived from ctx and records it as the in-flight sweep. Callers
+// check orderTrackingRetentionSweepInFlight first; passes are serialized, so
+// no second sweep can start between that check and this one.
+func (cr *CityRuntime) startOrderTrackingRetentionSweep(ctx context.Context, sweep func(context.Context)) {
+	sweepCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	cr.retentionSweepMu.Lock()
+	cr.retentionSweepCancel, cr.retentionSweepDone = cancel, done
+	cr.retentionSweepMu.Unlock()
+	go func() {
+		defer cr.finishOrderTrackingRetentionSweep(done)
+		defer cancel()
+		cr.safeTick(func() { sweep(sweepCtx) }, "order-tracking-retention")
+	}()
+}
+
+// finishOrderTrackingRetentionSweep marks the sweep that owns done as exited
+// and then runs the store-handle closes handed to it while it ran.
+func (cr *CityRuntime) finishOrderTrackingRetentionSweep(done chan struct{}) {
+	cr.retentionSweepMu.Lock()
+	close(done)
+	afterExit := cr.retentionSweepAfterExit
+	cr.retentionSweepAfterExit = nil
+	cr.retentionSweepMu.Unlock()
+	for _, fn := range afterExit {
+		fn()
+	}
+}
+
+// handOffOrderTrackingRetentionSweep is the controller state's store hand-off.
+// With a sweep in flight it cancels the sweep and leaves closeReplaced for the
+// sweep to run as it exits, so the handles the sweep resolved stay open for
+// any graph delete it has begun; otherwise it runs closeReplaced at once. It
+// never waits. If the sweep never exits, the replaced handles are never closed.
+func (cr *CityRuntime) handOffOrderTrackingRetentionSweep(closeReplaced func()) {
+	cr.retentionSweepMu.Lock()
+	if done := cr.retentionSweepDone; done != nil {
+		select {
+		case <-done:
+		default:
+			cr.retentionSweepCancel()
+			cr.retentionSweepAfterExit = append(cr.retentionSweepAfterExit, closeReplaced)
+			cr.retentionSweepMu.Unlock()
+			return
+		}
+	}
+	cr.retentionSweepMu.Unlock()
+	closeReplaced()
+}
+
+// waitOrderTrackingRetentionSweep blocks until the in-flight retention sweep,
+// if any, has exited.
+func (cr *CityRuntime) waitOrderTrackingRetentionSweep() {
+	cr.retentionSweepMu.Lock()
+	done := cr.retentionSweepDone
+	cr.retentionSweepMu.Unlock()
+	if done != nil {
+		<-done
+	}
+}
+
+// stopOrderTrackingRetentionSweep cancels the in-flight retention sweep, if
+// any, and waits for it to exit. A graph delete already in progress completes
+// or rolls back. The wait is unbounded by design: beads.Store calls take no
+// context, and the handles the sweep deletes through are not the sweep's to
+// abandon — shutdown() closes the storage binding right after this returns.
+func (cr *CityRuntime) stopOrderTrackingRetentionSweep() {
+	cr.retentionSweepMu.Lock()
+	cancel := cr.retentionSweepCancel
+	cr.retentionSweepMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	cr.waitOrderTrackingRetentionSweep()
 }
 
 const (
@@ -4469,6 +4625,16 @@ func (cr *CityRuntime) shutdown() {
 		// process that exits holding it leaves the successor's open racing this
 		// one's.
 		defer func() {
+			// The one join of the retention sweep, on every exit of run() and on
+			// a forced shutdown: the sweep may be deleting through this binding.
+			// A lane pass overlapping a forced shutdown may start a sweep after
+			// this join; its context is already canceled, so it touches no store.
+			// The join is unbounded by design: store calls take no context, and
+			// closing the binding under a graph delete is the defect it
+			// prevents. Under the supervisor, runCityShutdownBounded bounds its
+			// own wait for this; the standalone controller, which calls run()
+			// directly, waits for the in-flight store call to return.
+			cr.stopOrderTrackingRetentionSweep()
 			// Stop naming these routes before closing them: a sweep that
 			// resolved its bindings from a closed handle would answer every leg
 			// with an error instead of falling back to the one-shot funnel.

@@ -106,6 +106,7 @@ type controllerState struct {
 	adapterReg             *extmsg.AdapterRegistry
 	maintenanceLoop        *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
 	updateMu               sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
+	handOffReplacedStores  func(closeReplaced func())       // guarded by updateMu; update passes it the close of the store handles it just replaced
 	beadEventStartSeq      uint64
 	beadEventStartSeqOK    bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
 
@@ -1032,10 +1033,38 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	}
 	// Keep prior non-nil store/provider if reopen fails.
 	cs.mu.Unlock()
-	if cityStore != nil && oldCityStore != nil && oldCityStore != cityStore {
-		scheduleCloseBeadStoreHandle("city bead store", oldCityStore)
+	closeReplaced := func() {
+		if cityStore != nil && oldCityStore != nil && oldCityStore != cityStore {
+			scheduleCloseBeadStoreHandle("city bead store", oldCityStore)
+		}
+		scheduleCloseReplacedBeadStoreHandles(oldRigStores, stores)
 	}
-	scheduleCloseReplacedBeadStoreHandles(oldRigStores, stores)
+	// Hand-off: a holder still working through the replaced handles is told to
+	// stop and closes them once it has; update never waits for it.
+	if cs.handOffReplacedStores != nil {
+		cs.handOffReplacedStores(closeReplaced)
+		return
+	}
+	closeReplaced()
+}
+
+// setStoreHandOff installs the hook update runs, under updateMu, once it has
+// replaced the store handles. The hook must run closeReplaced, now or after
+// whatever still uses the replaced handles has finished, and must not block.
+func (cs *controllerState) setStoreHandOff(hook func(closeReplaced func())) {
+	cs.updateMu.Lock()
+	cs.handOffReplacedStores = hook
+	cs.updateMu.Unlock()
+}
+
+// tryHoldStoreHandles runs fn while no update can replace the store handles.
+// When an update is in progress it returns at once without running fn.
+func (cs *controllerState) tryHoldStoreHandles(fn func()) {
+	if !cs.updateMu.TryLock() {
+		return
+	}
+	defer cs.updateMu.Unlock()
+	fn()
 }
 
 func scheduleCloseBeadStoreHandle(label string, store beads.Store) {

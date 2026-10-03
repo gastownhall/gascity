@@ -1205,6 +1205,7 @@ go_test(
         "order_outcome_test.go",
         "order_scan_contract_test.go",
         "order_store_concurrency_test.go",
+        "order_tracking_retention_offtick_test.go",
         "orders_lane_cadence_test.go",
         "orders_lane_fs_pressure_test.go",
         "orders_lane_test.go",

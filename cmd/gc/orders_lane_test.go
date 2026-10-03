@@ -185,7 +185,7 @@ func ordersLaneTestRuntime(t *testing.T, od orderDispatcher, patrol string, stde
 		stderr = io.Discard
 	}
 	sp := runtime.NewFake()
-	return &CityRuntime{
+	cr := &CityRuntime{
 		cityName: "test-city",
 		cityPath: t.TempDir(),
 		cfg: &config.City{
@@ -200,6 +200,10 @@ func ordersLaneTestRuntime(t *testing.T, od orderDispatcher, patrol string, stde
 		stdout:              io.Discard,
 		stderr:              stderr,
 	}
+	// A pass may start a background retention sweep; join it so no sweep
+	// goroutine outlives the test.
+	t.Cleanup(cr.stopOrderTrackingRetentionSweep)
+	return cr
 }
 
 // startOrdersLaneForTest starts the lane and registers a cleanup that stops it

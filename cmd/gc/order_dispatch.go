@@ -3255,9 +3255,9 @@ func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now tim
 // sweepClosedOrderTrackingRetentionAcrossStoresBounded is the watchdog variant
 // of sweepClosedOrderTrackingRetentionAcrossStores. It stops once the total
 // deletion count across all stores reaches limit, returning the partial deleted
-// count with a nil error on budget exhaustion. Store errors are returned as
-// normal; deletion errors within budget are propagated.
-func sweepClosedOrderTrackingRetentionAcrossStoresBounded(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) { //nolint:unparam // onlyOrders is nil at all current call sites; preserved for API parity with the unbounded variant
+// count with a nil error on budget exhaustion or once ctx is done. Store errors
+// are returned as normal; deletion errors within budget are propagated.
+func sweepClosedOrderTrackingRetentionAcrossStoresBounded(ctx context.Context, stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) { //nolint:unparam // onlyOrders is nil at all current call sites; preserved for API parity with the unbounded variant
 	if limit <= 0 {
 		return 0, nil
 	}
@@ -3268,12 +3268,12 @@ func sweepClosedOrderTrackingRetentionAcrossStoresBounded(stores []beads.Store, 
 			continue
 		}
 		remaining := limit - deleted
-		if remaining <= 0 {
+		if remaining <= 0 || ctx.Err() != nil {
 			break
 		}
 		// Enforce the global budget by passing the remaining allowance to the
 		// per-store bounded sweep, which stops deleting once it is spent.
-		n, err := sweepClosedOrderTrackingRetentionBounded(store, now, policy, onlyOrders, remaining)
+		n, err := sweepClosedOrderTrackingRetentionBounded(ctx, store, now, policy, onlyOrders, remaining)
 		deleted += n
 		if err != nil {
 			errs = append(errs, fmt.Errorf("pruning closed order-tracking %s: %w", orderTrackingSweepStoreLabel(store, i), err))
@@ -3354,9 +3354,9 @@ func logRetainedForLiveDescendants(ids []string) {
 
 // sweepClosedOrderTrackingRetentionBounded is the per-store bounded variant of
 // sweepClosedOrderTrackingRetention. It stops deleting once limit deletions have
-// occurred within this store call. On budget exhaustion it returns the partial
-// count with a nil error; delete errors are still propagated.
-func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) {
+// occurred within this store call, or once ctx is done. Either way it returns
+// the partial count with a nil error; delete errors are still propagated.
+func sweepClosedOrderTrackingRetentionBounded(ctx context.Context, store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) {
 	if store == nil {
 		return 0, fmt.Errorf("bead store unavailable")
 	}
@@ -3378,7 +3378,7 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 	var retained []string
 	var deleteErr error
 	for _, runs := range byOrder {
-		if deleted >= limit {
+		if deleted >= limit || ctx.Err() != nil {
 			break
 		}
 		sort.Slice(runs, func(i, j int) bool {
@@ -3393,7 +3393,7 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 			continue
 		}
 		for _, run := range runs[policy.retainLast:] {
-			if deleted >= limit {
+			if deleted >= limit || ctx.Err() != nil {
 				break
 			}
 			if !orderTrackingClosedReferenceTime(run).Before(cutoff) {
