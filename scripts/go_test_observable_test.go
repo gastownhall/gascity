@@ -1,6 +1,8 @@
 package scripts_test
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,7 +12,9 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 type observableTimingArtifact struct {
@@ -418,4 +422,605 @@ func goEnvValue(t *testing.T, key string) string {
 		t.Fatalf("go env %s: %v", key, err)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// observableLogFixture runs the public wrapper with a fake go binary. Each
+// fixture has its own TMPDIR, so retention checks cannot touch live run logs.
+type observableLogFixture struct {
+	root, bin, events string
+	env               []string
+}
+
+func newObservableLogFixture(t *testing.T, events string, productStatus int) observableLogFixture {
+	t.Helper()
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := observableLogFixture{root: root, bin: bin, events: filepath.Join(root, "events.jsonl")}
+	f.setGo(t, events, productStatus)
+	f.env = replaceScriptEnv(goTestScriptEnv(t, root), "PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	f.env = replaceScriptEnv(f.env, "GC_TEST_NO_SLICE", "1")
+	return f
+}
+
+func (f observableLogFixture) setGo(t *testing.T, events string, productStatus int) {
+	t.Helper()
+	if err := os.WriteFile(f.events, []byte(events), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "list" ]; then printf 'github.com/gastownhall/gascity\n'; exit 0; fi
+if [ "$1" = "test" ] && [ "$2" = "-json" ]; then cat %q; exit %d; fi
+exit 99
+`, f.events, productStatus)
+	if err := os.WriteFile(filepath.Join(f.bin, "go"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f observableLogFixture) command(t *testing.T, extra map[string]string) *exec.Cmd {
+	t.Helper()
+	cmd := scriptCommand(repoRoot(t), "go-test-observable", "retention-test", "--", "./internal/example")
+	cmd.Dir = repoRoot(t)
+	cmd.Env = append([]string(nil), f.env...)
+	for key, value := range extra {
+		cmd.Env = replaceScriptEnv(cmd.Env, key, value)
+	}
+	return cmd
+}
+
+func (f observableLogFixture) run(t *testing.T, extra map[string]string, wantStatus int) (string, string) {
+	t.Helper()
+	cmd := f.command(t, extra)
+	out, err := cmd.CombinedOutput()
+	status := 0
+	if err != nil {
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) {
+			t.Fatalf("run wrapper: %v\n%s", err, out)
+		}
+		status = exit.ExitCode()
+	}
+	if status != wantStatus {
+		t.Fatalf("wrapper exit = %d, want product status %d:\n%s", status, wantStatus, out)
+	}
+	return observableLogPath(t, string(out)), string(out)
+}
+
+func observableLogPath(t *testing.T, output string) string {
+	t.Helper()
+	matches := regexp.MustCompile(`(?m)^observable go test: log=(.+)$`).FindAllStringSubmatch(output, -1)
+	if len(matches) != 1 {
+		t.Fatalf("want one log= line, got %d:\n%s", len(matches), output)
+	}
+	return matches[0][1]
+}
+
+func observableOwnedDir(root string) string {
+	return filepath.Join(root, fmt.Sprintf("gascity-observable-logs-%d", os.Getuid()))
+}
+
+func ageObservableFile(t *testing.T, path string, minutes int) {
+	t.Helper()
+	when := time.Now().Add(-time.Duration(minutes) * time.Minute)
+	if err := os.Chtimes(path, when, when); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGoTestObservableDefaultLogOwnershipAndEvidence(t *testing.T) { // T1
+	events := `{"Action":"pass","Package":"example","Test":"TestEvidence","Elapsed":0.1}` + "\n"
+	f := newObservableLogFixture(t, events, 0)
+	path, output := f.run(t, nil, 0)
+	if filepath.Dir(path) != observableOwnedDir(f.root) {
+		t.Errorf("default log parent = %q, want owned directory %q", filepath.Dir(path), observableOwnedDir(f.root))
+	}
+	dirInfo, err := os.Lstat(observableOwnedDir(f.root))
+	if err != nil {
+		t.Fatalf("owned directory missing: %v", err)
+	}
+	if !dirInfo.IsDir() || dirInfo.Mode().Perm() != 0o700 {
+		t.Errorf("owned directory mode = %v, want directory 0700", dirInfo.Mode())
+	}
+	if stat, ok := dirInfo.Sys().(*syscall.Stat_t); ok && stat.Uid != uint32(os.Getuid()) {
+		t.Errorf("owned directory uid = %d, want %d", stat.Uid, os.Getuid())
+	}
+	if !regexp.MustCompile(`^gascity-[A-Za-z0-9._-]+\.jsonl\.[A-Za-z0-9]{6}$`).MatchString(filepath.Base(path)) {
+		t.Errorf("default log basename = %q", filepath.Base(path))
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("PASS evidence missing: %v\n%s", err, output)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("default log mode = %v, want 0600", info.Mode())
+	}
+	wider := newObservableLogFixture(t, "", 0)
+	if err := os.Mkdir(observableOwnedDir(wider.root), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wider.run(t, nil, 0)
+	if info, err := os.Stat(observableOwnedDir(wider.root)); err != nil || info.Mode().Perm() != 0o700 {
+		t.Errorf("pre-existing owned directory was not tightened: %v, %v", info, err)
+	}
+}
+
+func TestGoTestObservableRetainsPassingAndFailingEvidence(t *testing.T) { // T3, T4
+	events := `{"Action":"pass","Package":"example","Test":"TestEvidence","Elapsed":0.1}` + "\n"
+	f := newObservableLogFixture(t, events, 0)
+	path, output := f.run(t, nil, 0)
+	if data, err := os.ReadFile(path); err != nil || string(data) != events {
+		t.Errorf("PASS evidence bytes = %q, err %v, want %q", data, err, events)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(output), "observable go test: PASS log="+path) {
+		t.Errorf("PASS line is not terminal or points elsewhere:\n%s", output)
+	}
+
+	failureEvents := `{"Action":"fail","Package":"example","Test":"TestBroken","Elapsed":0.1}` + "\n"
+	f.setGo(t, failureEvents, 17)
+	failurePath, failure := f.run(t, nil, 17)
+	if data, err := os.ReadFile(failurePath); err != nil || string(data) != failureEvents {
+		t.Errorf("FAIL evidence bytes = %q, err %v, want %q", data, err, failureEvents)
+	}
+	failLine := "observable go test: FAIL status=17 log=" + failurePath
+	if !strings.Contains(failure, failLine) || !strings.Contains(failure, "observable go test: failure details from "+failurePath) || strings.Index(failure, failLine) > strings.Index(failure, "observable go test: failure details from ") {
+		t.Errorf("FAIL line or detail ordering changed:\n%s", failure)
+	}
+}
+
+func TestGoTestObservablePrunesOnlyExpiredOwnedRegularFiles(t *testing.T) { // T5
+	for _, expiredCount := range []int{1, 3, 0} {
+		t.Run(fmt.Sprintf("expired-%d", expiredCount), func(t *testing.T) {
+			f := newObservableLogFixture(t, "", 0)
+			d := observableOwnedDir(f.root)
+			if err := os.Mkdir(d, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < expiredCount; i++ {
+				path := filepath.Join(d, fmt.Sprintf("expired-%d.jsonl", i))
+				if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				ageObservableFile(t, path, 4321)
+			}
+			for _, minutes := range []int{4319, 0} {
+				path := filepath.Join(d, fmt.Sprintf("young-%d.jsonl", minutes))
+				if err := os.WriteFile(path, []byte("keep"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				ageObservableFile(t, path, minutes)
+			}
+			_, output := f.run(t, nil, 0)
+			for i := 0; i < expiredCount; i++ {
+				path := filepath.Join(d, fmt.Sprintf("expired-%d.jsonl", i))
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Errorf("expired file %q remains: %v", path, err)
+				}
+			}
+			for _, path := range []string{filepath.Join(d, "young-4319.jsonl"), filepath.Join(d, "young-0.jsonl")} {
+				if _, err := os.Lstat(path); err != nil {
+					t.Errorf("protected path %q lost: %v", path, err)
+				}
+			}
+			pruneLines := regexp.MustCompile(`(?m)^observable go test: pruned \d+ expired log\(s\) older than 72h from .+$`).FindAllString(output, -1)
+			if expiredCount == 0 && len(pruneLines) != 0 {
+				t.Errorf("unexpected prune line: %q", pruneLines)
+			}
+			if expiredCount > 0 && (len(pruneLines) != 1 || pruneLines[0] != fmt.Sprintf("observable go test: pruned %d expired log(s) older than 72h from %s", expiredCount, d)) {
+				t.Errorf("prune lines = %q, want count %d in %s:\n%s", pruneLines, expiredCount, d, output)
+			}
+		})
+	}
+}
+
+func TestGoTestObservableNeverTouchesOtherPaths(t *testing.T) { // T6, T7
+	f := newObservableLogFixture(t, "", 0)
+	d := observableOwnedDir(f.root)
+	if err := os.Mkdir(d, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(f.root, "gascity-test.jsonl.AAAAAA")
+	unrelated := filepath.Join(f.root, "unrelated")
+	victim := filepath.Join(f.root, "victim")
+	for _, path := range []string{legacy, unrelated, victim} {
+		if err := os.WriteFile(path, []byte("keep"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ageObservableFile(t, path, 30*24*60)
+	}
+	rootLink := filepath.Join(f.root, "gascity-x.jsonl.BBBBBB")
+	if err := os.Symlink(victim, rootLink); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(d, "nested")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nestedOld := filepath.Join(nested, "old.jsonl")
+	if err := os.WriteFile(nestedOld, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ageObservableFile(t, nestedOld, 4321)
+	ownedLink := filepath.Join(d, "link.jsonl")
+	if err := os.Symlink(victim, ownedLink); err != nil {
+		t.Fatal(err)
+	}
+	f.run(t, nil, 0)
+	for _, path := range []string{legacy, unrelated, victim, rootLink, nestedOld, ownedLink} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Errorf("protected path %q lost: %v", path, err)
+		}
+	}
+	if data, err := os.ReadFile(victim); err != nil || string(data) != "keep" {
+		t.Errorf("victim changed: %q, %v", data, err)
+	}
+}
+
+func TestGoTestObservableExplicitLogIsCallerOwned(t *testing.T) { // T8
+	for _, productStatus := range []int{0, 17} {
+		t.Run(fmt.Sprintf("status-%d", productStatus), func(t *testing.T) {
+			events := `{"Action":"pass","Package":"example","Elapsed":0.1}` + "\n"
+			f := newObservableLogFixture(t, events, productStatus)
+			explicit := filepath.Join(f.root, "caller.jsonl")
+			path, output := f.run(t, map[string]string{"OBSERVABLE_TEST_LOG": explicit}, productStatus)
+			if path != explicit {
+				t.Errorf("log path = %q, want explicit %q", path, explicit)
+			}
+			if data, err := os.ReadFile(explicit); err != nil || string(data) != events {
+				t.Errorf("explicit log = %q, %v", data, err)
+			}
+			if _, err := os.Lstat(observableOwnedDir(f.root)); !os.IsNotExist(err) {
+				t.Errorf("explicit run created owned directory: %v", err)
+			}
+			if got := strings.Count(output, "observable go test: log-retention: caller-owned, never removed by the wrapper"); got != 1 {
+				t.Errorf("caller-owned line count = %d:\n%s", got, output)
+			}
+			d := observableOwnedDir(f.root)
+			if err := os.Mkdir(d, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			old := filepath.Join(d, "old.jsonl")
+			if err := os.WriteFile(old, []byte("old"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ageObservableFile(t, old, 4321)
+			f.run(t, map[string]string{"OBSERVABLE_TEST_LOG": explicit}, productStatus)
+			if _, err := os.Stat(old); !os.IsNotExist(err) {
+				t.Errorf("expired owned file remains on explicit run: %v", err)
+			}
+			if data, err := os.ReadFile(explicit); err != nil || string(data) != events {
+				t.Errorf("explicit log changed after prune: %q, %v", data, err)
+			}
+		})
+	}
+}
+
+func TestGoTestObservableReplacesStaleExplicitLog(t *testing.T) { // T9
+	events := `{"Action":"pass","Package":"example","Elapsed":0.1}` + "\n"
+	f := newObservableLogFixture(t, events, 0)
+	explicit := filepath.Join(f.root, "caller.jsonl")
+	if err := os.WriteFile(explicit, []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path, _ := f.run(t, map[string]string{"OBSERVABLE_TEST_LOG": explicit}, 0)
+	if path != explicit {
+		t.Errorf("log path = %q, want %q", path, explicit)
+	}
+	if data, err := os.ReadFile(explicit); err != nil || string(data) != events {
+		t.Errorf("explicit log = %q, %v", data, err)
+	}
+}
+
+func TestGoTestObservablePruneDoesNotChangeTiming(t *testing.T) { // T10
+	events := `{"Action":"pass","Package":"github.com/gastownhall/gascity/internal/example","Test":"TestAlpha","Elapsed":0.3}` + "\n"
+	var artifacts [2][]byte
+	for i := range artifacts {
+		f := newObservableLogFixture(t, events, 0)
+		timing := filepath.Join(f.root, "timing.json")
+		if i == 1 {
+			d := observableOwnedDir(f.root)
+			if err := os.Mkdir(d, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			old := filepath.Join(d, "old.jsonl")
+			if err := os.WriteFile(old, []byte("old"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ageObservableFile(t, old, 4321)
+		}
+		f.run(t, map[string]string{"OBSERVABLE_TIMING_FILE": timing, "OBSERVABLE_RUNNER_CPU_COUNT": "1"}, 0)
+		var err error
+		artifacts[i], err = os.ReadFile(timing)
+		if err != nil {
+			t.Fatalf("timing artifact: %v", err)
+		}
+	}
+	if !bytes.Equal(artifacts[0], artifacts[1]) {
+		t.Errorf("pruning changed timing artifact:\n%s\n%s", artifacts[0], artifacts[1])
+	}
+}
+
+func TestGoTestObservableHousekeepingFailureKeepsProductResult(t *testing.T) { // T11
+	for _, productStatus := range []int{0, 17} {
+		t.Run(fmt.Sprintf("status-%d", productStatus), func(t *testing.T) {
+			f := newObservableLogFixture(t, `{"Action":"pass","Package":"example","Elapsed":0.1}`+"\n", productStatus)
+			find := filepath.Join(f.bin, "find")
+			if err := os.WriteFile(find, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			path, output := f.run(t, nil, productStatus)
+			if filepath.Dir(path) != observableOwnedDir(f.root) {
+				t.Errorf("housekeeping failure log = %q", path)
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Errorf("fake product did not write log: %v", err)
+			}
+			if got := strings.Count(output, "observable go test: warning: log housekeeping failed"); got != 1 {
+				t.Errorf("housekeeping warning count = %d:\n%s", got, output)
+			}
+		})
+	}
+}
+
+func TestGoTestObservableRejectsUnownedDirectory(t *testing.T) { // T12
+	for _, kind := range []string{"regular-file", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newObservableLogFixture(t, "", 0)
+			d := observableOwnedDir(f.root)
+			target := filepath.Join(f.root, "target")
+			if err := os.WriteFile(target, []byte("victim"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "regular-file" {
+				if err := os.WriteFile(d, []byte("occupier"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Symlink(target, d); err != nil {
+				t.Fatal(err)
+			}
+			path, output := f.run(t, nil, 0)
+			if filepath.Dir(path) != f.root {
+				t.Errorf("fallback log = %q, want scratch root %q", path, f.root)
+			}
+			if !regexp.MustCompile(`^gascity-[A-Za-z0-9._-]+\.jsonl\.[A-Za-z0-9]{6}$`).MatchString(filepath.Base(path)) {
+				t.Errorf("fallback basename = %q", filepath.Base(path))
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Errorf("fallback log missing: %v", err)
+			}
+			if got := strings.Count(output, "observable go test: warning: cannot establish log directory"); got != 1 {
+				t.Errorf("directory warning count = %d:\n%s", got, output)
+			}
+			if data, err := os.ReadFile(target); err != nil || string(data) != "victim" {
+				t.Errorf("symlink target changed: %q, %v", data, err)
+			}
+			if kind == "regular-file" {
+				if data, err := os.ReadFile(d); err != nil || string(data) != "occupier" {
+					t.Errorf("directory occupier changed: %q, %v", data, err)
+				}
+			} else if info, err := os.Lstat(d); err != nil || info.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("directory symlink changed: %v, %v", info, err)
+			}
+		})
+	}
+}
+
+func TestGoTestObservableInterruptedLogCanBePruned(t *testing.T) { // T13
+	f := newObservableLogFixture(t, "", 0)
+	blockingGo := `#!/bin/sh
+if [ "$1" = "list" ]; then printf 'github.com/gastownhall/gascity\n'; exit 0; fi
+if [ "$1" = "test" ]; then
+  printf '{"Action":"run","Package":"example","Test":"TestInterrupted"}\n'
+  printf 'FAKE_GO_BLOCKED\n' >&2
+  exec sleep 60
+fi
+exit 99
+`
+	if err := os.WriteFile(filepath.Join(f.bin, "go"), []byte(blockingGo), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := f.command(t, nil)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	pipe, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	running := true
+	t.Cleanup(func() {
+		if running {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = cmd.Wait()
+		}
+	})
+	lines := make(chan string, 32)
+	go func() {
+		scanner := bufio.NewScanner(pipe)
+		for scanner.Scan() {
+			lines <- scanner.Text()
+		}
+		close(lines)
+	}()
+	var path string
+	ready := false
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	for !ready {
+		select {
+		case line, ok := <-lines:
+			if !ok {
+				t.Fatalf("wrapper closed stderr before fake go blocked; stdout=%s", stdout.String())
+			}
+			if strings.HasPrefix(line, "observable go test: log=") {
+				path = strings.TrimPrefix(line, "observable go test: log=")
+			}
+			if line == "FAKE_GO_BLOCKED" {
+				ready = true
+			}
+		case <-deadline.C:
+			t.Fatal("fake go never reached blocking point")
+		}
+	}
+	if path == "" {
+		t.Fatal("wrapper did not announce log before product began")
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err == nil {
+		t.Error("interrupted wrapper unexpectedly succeeded")
+	}
+	running = false
+	data, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(data), "TestInterrupted") {
+		t.Errorf("partial evidence missing: %q, %v", data, err)
+	}
+	if filepath.Dir(path) != observableOwnedDir(f.root) {
+		t.Errorf("interrupted log = %q", path)
+	}
+	ageObservableFile(t, path, 4321)
+	f.setGo(t, "", 0)
+	f.run(t, nil, 0)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expired interrupted log remains: %v", err)
+	}
+}
+
+func TestGoTestObservableConcurrentRunsKeepDistinctLogs(t *testing.T) { // T14
+	f := newObservableLogFixture(t, `{"Action":"pass","Package":"example","Elapsed":0.1}`+"\n", 0)
+	d := observableOwnedDir(f.root)
+	if err := os.Mkdir(d, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(d, "expired.jsonl")
+	if err := os.WriteFile(old, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ageObservableFile(t, old, 4321)
+	var cmds [4]*exec.Cmd
+	var outputs [4]bytes.Buffer
+	for i := range cmds {
+		cmds[i] = f.command(t, nil)
+		cmds[i].Stdout = &outputs[i]
+		cmds[i].Stderr = &outputs[i]
+		if err := cmds[i].Start(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths := make(map[string]bool)
+	for i, cmd := range cmds {
+		if err := cmd.Wait(); err != nil {
+			t.Errorf("wrapper %d: %v\n%s", i, err, outputs[i].String())
+			continue
+		}
+		output := outputs[i].String()
+		if strings.Contains(output, "No such file") {
+			t.Errorf("wrapper %d raced on prune:\n%s", i, output)
+		}
+		path := observableLogPath(t, output)
+		if paths[path] {
+			t.Errorf("duplicate concurrent log %q", path)
+		}
+		paths[path] = true
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("concurrent log %q missing: %v", path, err)
+		}
+	}
+	if len(paths) != 4 {
+		t.Errorf("distinct logs = %d, want 4", len(paths))
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("expired file remains: %v", err)
+	}
+}
+
+type observableFileState struct {
+	name  string
+	size  int64
+	mtime int64
+}
+
+func observableDirSnapshot(t *testing.T, dir string) []observableFileState {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var files []observableFileState
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, observableFileState{entry.Name(), info.Size(), info.ModTime().UnixNano()})
+	}
+	return files
+}
+
+func TestGoTestObservableLeavesNoDetachedHousekeeping(t *testing.T) { // T15
+	f := newObservableLogFixture(t, "", 0)
+	d := observableOwnedDir(f.root)
+	if err := os.Mkdir(d, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.run(t, nil, 0)
+	before := observableDirSnapshot(t, d)
+	timer := time.NewTimer(500 * time.Millisecond)
+	defer timer.Stop()
+	<-timer.C
+	after := observableDirSnapshot(t, d)
+	if !slices.Equal(before, after) {
+		t.Errorf("owned directory changed after wrapper exit: before=%v after=%v", before, after)
+	}
+}
+
+func TestGoTestObservableRetentionOutputGrammar(t *testing.T) { // T16
+	f := newObservableLogFixture(t, `{"Action":"run","Package":"example","Test":"TestProgress"}`+"\n", 0)
+	cmd := f.command(t, nil)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("wrapper: %v\n%s", err, stderr.String())
+	}
+	path := observableLogPath(t, stderr.String())
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	logIndex := -1
+	for i, line := range lines {
+		if line == "observable go test: log="+path {
+			logIndex = i
+		}
+	}
+	retention := "observable go test: log-retention: wrapper-owned, pruned after 72h (set OBSERVABLE_TEST_LOG to keep a log)"
+	if logIndex < 0 || logIndex+1 >= len(lines) || lines[logIndex+1] != retention || strings.Count(stderr.String(), "observable go test: log-retention:") != 1 {
+		t.Errorf("retention line not immediately after unique log line:\n%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "observable go test: command=go test -json ./internal/example") || !strings.HasSuffix(strings.TrimSpace(stderr.String()), "observable go test: PASS log="+path) {
+		t.Errorf("command or terminal PASS grammar changed:\n%s", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "log-retention") || strings.Contains(stdout.String(), "pruned") {
+		t.Errorf("housekeeping leaked to stdout:\n%s", stdout.String())
+	}
+}
+
+func TestGoTestObservableRetentionSourceGuard(t *testing.T) { // T17
+	source, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "go-test-observable"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	if got := strings.Count(text, "4320"); got != 1 {
+		t.Errorf("retention window occurrences = %d, want one named constant", got)
+	}
+	if !regexp.MustCompile(`(?m)^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=4320([[:space:]]*(#.*)?)?$`).MatchString(text) {
+		t.Error("retention window must be a named shell constant")
+	}
+	if !regexp.MustCompile(`-maxdepth[[:space:]]+1[[:space:]]+-type[[:space:]]+f[[:space:]]+-mmin`).MatchString(text) {
+		t.Error("prune must select only direct regular files by modification age")
+	}
 }
