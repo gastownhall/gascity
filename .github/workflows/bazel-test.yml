@@ -261,6 +261,7 @@ jobs:
       - name: "bazel test //... (+ acceptance)"
         env:
           RBE_FORK_CERT: ${{ steps.fork-cert.outputs.cert }}
+          RBE_FORK_INSTANCE: ${{ steps.fork-cert.outputs.instance }}
         run: |
           ARGS=(--output_user_root="$RUNNER_TEMP"/bazel-outputs)
           PROFILE=(--profile=/tmp/bazel-profile.json)
@@ -282,9 +283,19 @@ jobs:
           fi
           bazel "${ARGS[@]}" test "${PROFILE[@]}" //... \
             "${RCEXEC[@]}" --test_output=errors --keep_going
-          bazel "${ARGS[@]}" test "${PROFILE[@]}" //test/acceptance:acceptance_test \
-            "${RCEXEC[@]}" --test_output=errors --keep_going \
-            --define=gotags=acceptance_a --test_timeout=1100
+          # The fork pool (instance oss-fork) runs every action with loopback
+          # only (NETNS=1), and the acceptance tier's `gc init` clones
+          # gascity-packs from github.com (the gascity/roles default rig
+          # import, ga-73eoo), so it cannot pass there. Skipped for those
+          # runs until that is fixed; trusted runs, allowlisted forks (oss)
+          # and the read-only-cache fallback (local, with network) still run it.
+          if [ -n "$RBE_FORK_CERT" ] && [ "$RBE_FORK_INSTANCE" = oss-fork ]; then
+            echo "::notice title=acceptance skipped on the fork pool:://test/acceptance:acceptance_test needs github.com (ga-73eoo); the fork pool has no network"
+          else
+            bazel "${ARGS[@]}" test "${PROFILE[@]}" //test/acceptance:acceptance_test \
+              "${RCEXEC[@]}" --test_output=errors --keep_going \
+              --define=gotags=acceptance_a --test_timeout=1100
+          fi
 
       - name: Save bazel output base
         if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.bazel-cache.outputs.cache-hit != 'true'
