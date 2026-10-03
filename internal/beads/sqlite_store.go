@@ -1515,14 +1515,22 @@ func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
 			  AND d.dep_type IN ('blocks','waits-for','conditional-blocks')
 			  AND (
 			    COALESCE(blocker.status, '') <> 'closed'
-			    OR EXISTS (
-			         SELECT 1 FROM metadata m
-			         WHERE m.bead_id = blocker.id
-			           AND m.meta_key = '%s'
-			           AND m.meta_value = '%s'
+			    OR (
+			         EXISTS (
+			           SELECT 1 FROM metadata m
+			           WHERE m.bead_id = blocker.id
+			             AND m.meta_key = '%s'
+			             AND m.meta_value = '%s'
+			         )
+			         AND NOT EXISTS (
+			           SELECT 1 FROM metadata o
+			           WHERE o.bead_id = blocker.id
+			             AND o.meta_key = '%s'
+			             AND o.meta_value = 'pass'
+			         )
 			       )
 			  )
-		  )`, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked),
+		  )`, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked, beadmeta.OutcomeMetadataKey),
 	}
 	switch q.TierMode {
 	case TierWisps:
