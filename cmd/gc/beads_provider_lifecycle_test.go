@@ -473,6 +473,41 @@ func TestEnsureCanonicalScopeConfigStateReapsManagedJSONL(t *testing.T) {
 	}
 }
 
+func TestEnsureCanonicalScopeConfigStatePreservesManagedCityAutoExportJSONL(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"id":"gc-1"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: gc\nexport.auto: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("ensureCanonicalScopeConfigState: %v", err)
+	}
+
+	if _, err := os.Stat(jsonlPath); err != nil {
+		t.Fatalf("issues.jsonl removed despite export.auto:true: %v", err)
+	}
+	configData, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(configData), "export.auto: true") {
+		t.Fatalf("canonicalization did not preserve export.auto:true:\n%s", configData)
+	}
+}
+
 func TestProviderLifecycleProcessEnvProjectsResolvedGCBin(t *testing.T) {
 	cityPath := t.TempDir()
 	t.Setenv("GC_BIN", "/tmp/wrong-gc")

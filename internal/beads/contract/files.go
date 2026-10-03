@@ -589,11 +589,16 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 	}
 	changed = setNestedBool(root, "dolt", "disable-event-flush", *doltConfig.DisableEventFlush) || changed
 	changed = deleteKeys(root, "dolt.disable-event-flush", "dolt.disable_event_flush") || changed
-	// Managed beads are Dolt-backed; issues.jsonl auto-export is redundant and
-	// triggers a re-import cycle that stalls bd writes for minutes on large
-	// datasets. BD_EXPORT_AUTO env-var suppression only covers gc's own calls,
-	// so bake it into the on-disk config too.
-	changed = setConfigBool(root, "export.auto", false) || changed
+	// Managed beads default to disabling issues.jsonl auto-export because a
+	// stale export can trigger bd's expensive import-on-write path. Preserve an
+	// explicitly configured true, however: some cities intentionally commit
+	// issues.jsonl for JSONL-based sharing. Absence and malformed values still
+	// converge to the safe managed default.
+	exportAuto := false
+	if raw, ok := configStringValue(root, "export.auto"); ok {
+		exportAuto, _ = strconv.ParseBool(raw)
+	}
+	changed = setConfigBool(root, "export.auto", exportAuto) || changed
 	// Managed scopes back up through mol-dog-backup; bd's PersistentPostRun
 	// auto-backup (the "backup_export" Dolt remote) is redundant and, when its
 	// remote state breaks, stuck-loops and saturates the commit path — the
@@ -757,9 +762,13 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 		}
 	}
 
+	exportAuto := false
+	if raw, ok := scanConfigLineValueFromData(data, "export.auto:"); ok {
+		exportAuto, _ = strconv.ParseBool(raw)
+	}
 	replacements := map[string]string{
 		"dolt.auto-start": "dolt.auto-start: false",
-		"export.auto":     "export.auto: false",
+		"export.auto":     "export.auto: " + strconv.FormatBool(exportAuto),
 		"backup.enabled":  "backup.enabled: false",
 	}
 	if prefix != "" {

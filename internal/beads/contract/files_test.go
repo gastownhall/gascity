@@ -292,12 +292,13 @@ func TestEnsureCanonicalConfigCollapsesDuplicateManagedKeys(t *testing.T) {
 	}
 }
 
-func TestEnsureCanonicalConfigForcesAutoExportOff(t *testing.T) {
+func TestEnsureCanonicalConfigDefaultsAutoExportOff(t *testing.T) {
 	// bd's export.auto defaults to true and triggers a full-file import-then-export
-	// cycle on every write. Managed cities never consume issues.jsonl (Dolt is the
-	// source of truth), so this must be forced off at config time — not just via
+	// cycle on every write. Managed cities that never consume issues.jsonl (Dolt is
+	// the source of truth) get it forced off at config time — not just via
 	// BD_EXPORT_AUTO env-var suppression, which leaks when bd is invoked outside
-	// the gc wrapper (agents, humans, bd setup).
+	// the gc wrapper (agents, humans, bd setup). A scope that explicitly sets
+	// export.auto: true keeps it: that is the supported JSONL-retention opt-out.
 	t.Run("sets false when key is absent", func(t *testing.T) {
 		fs := fsys.OSFS{}
 		dir := t.TempDir()
@@ -328,7 +329,7 @@ func TestEnsureCanonicalConfigForcesAutoExportOff(t *testing.T) {
 		}
 	})
 
-	t.Run("overrides explicit true", func(t *testing.T) {
+	t.Run("preserves explicit true", func(t *testing.T) {
 		fs := fsys.OSFS{}
 		dir := t.TempDir()
 		path := filepath.Join(dir, "config.yaml")
@@ -354,11 +355,89 @@ func TestEnsureCanonicalConfigForcesAutoExportOff(t *testing.T) {
 			t.Fatal(err)
 		}
 		text := string(data)
-		if strings.Contains(text, "export.auto: true") {
-			t.Fatalf("config should scrub export.auto: true:\n%s", text)
+		if !strings.Contains(text, "export.auto: true") {
+			t.Fatalf("config should preserve explicit export.auto: true:\n%s", text)
 		}
-		if !strings.Contains(text, "export.auto: false") {
-			t.Fatalf("config should force export.auto: false:\n%s", text)
+	})
+
+	// bd >= 1.3.1 writes the nested spelling on `bd config set`, so the
+	// opt-in an operator gets from bd itself must survive canonicalization
+	// too. The rewritten file carries gc's flat spelling.
+	t.Run("preserves explicit true in the nested spelling", func(t *testing.T) {
+		fs := fsys.OSFS{}
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		input := strings.Join([]string{
+			"issue-prefix: gc",
+			"export:",
+			"  auto: true",
+			"",
+		}, "\n")
+		if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+			IssuePrefix:    "gc",
+			EndpointOrigin: EndpointOriginManagedCity,
+			EndpointStatus: EndpointStatusVerified,
+		}); err != nil {
+			t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+		}
+
+		data, err := fs.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		if !strings.Contains(text, "export.auto: true") {
+			t.Fatalf("config should preserve nested export.auto: true:\n%s", text)
+		}
+		if strings.Contains(text, "export.auto: false") {
+			t.Fatalf("config should not scrub nested export.auto: true to false:\n%s", text)
+		}
+	})
+
+	// The malformed-config path is the one an operator following
+	// docs/runbooks/managed-city-endpoints.md is most likely to hit: they
+	// hand-edit config.yaml to add the opt-in, and a hand-edited file is
+	// exactly the population readConfigDoc rejects. The `: not yaml` line is
+	// the same parse-error shape the other fallback tests here use.
+	t.Run("preserves explicit true through the malformed-config fallback", func(t *testing.T) {
+		fs := fsys.OSFS{}
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		input := strings.Join([]string{
+			"issue-prefix: gc",
+			"export.auto: true",
+			": not yaml",
+			"",
+		}, "\n")
+		if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+			IssuePrefix:    "gc",
+			EndpointOrigin: EndpointOriginManagedCity,
+			EndpointStatus: EndpointStatusVerified,
+		}); err != nil {
+			t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+		}
+
+		data, err := fs.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		if !strings.Contains(text, ": not yaml") {
+			t.Fatalf("test no longer exercises the fallback path:\n%s", text)
+		}
+		if !strings.Contains(text, "export.auto: true") {
+			t.Fatalf("fallback should preserve explicit export.auto: true:\n%s", text)
+		}
+		if strings.Contains(text, "export.auto: false") {
+			t.Fatalf("fallback should not scrub explicit export.auto: true to false:\n%s", text)
 		}
 	})
 }
