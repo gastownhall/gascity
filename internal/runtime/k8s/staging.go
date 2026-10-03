@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -202,16 +203,84 @@ func copyDirToPod(ctx context.Context, ops k8sOps, podName, container, srcDir, d
 	_, _ = ops.execInPod(ctx, podName, container,
 		[]string{"mkdir", "-p", dstDir}, nil)
 
-	// Build tar archive of the source directory.
-	var buf bytes.Buffer
-	if err := tarDir(srcDir, &buf); err != nil {
-		return fmt.Errorf("creating tar of %s: %w", srcDir, err)
+	// Stream the tar archive of the source directory straight into the pod's
+	// tar extractor so the archive is never held in memory.
+	err = streamArchive(
+		func(w io.Writer, entriesComplete func()) error {
+			if err := tarDirWithWalkComplete(srcDir, w, entriesComplete); err != nil {
+				return fmt.Errorf("creating tar of %s: %w", srcDir, err)
+			}
+			return nil
+		},
+		func(r io.Reader) error {
+			output, execErr := ops.execInPod(ctx, podName, container, tarExtractCommand(dstDir), r)
+			if execErr != nil {
+				return execErr
+			}
+			if strings.TrimSpace(output) != archiveExtractAck {
+				return errors.New("pod tar extraction did not acknowledge completion")
+			}
+			return nil
+		})
+	if err != nil {
+		return fmt.Errorf("copying directory %s to pod %s:%s: %w", srcDir, podName, dstDir, err)
 	}
+	return nil
+}
 
-	// Extract in the pod.
-	_, err = ops.execInPod(ctx, podName, container,
-		[]string{"tar", "xf", "-", "-C", dstDir}, &buf)
-	return err
+var (
+	// errArchiveConsumerDone is delivered to the producer once the consumer
+	// returns, so a producer still writing unblocks and stops.
+	errArchiveConsumerDone = errors.New("archive consumer finished")
+	errArchiveIncomplete   = errors.New("tar archive upload incomplete")
+)
+
+const archiveExtractAck = "gc-stage-ok"
+
+func tarExtractCommand(dstDir string) []string {
+	return []string{"sh", "-c", `tar xf - -C "$1" && printf '%s\n' "$2"`, "sh", dstDir, archiveExtractAck}
+}
+
+// streamArchive pipes what produce writes into consume without buffering the
+// whole archive. Memory stays bounded because the pipe is unbuffered: produce
+// blocks until consume reads. Once consume returns, it closes the pipe and
+// waits for the producer. The pod transport itself may still block before
+// consume returns if the remote side stops reading.
+//
+// A producer failure is returned in preference to the consumer's error, which
+// may be caused by the truncated stream. If the consumer returns success before
+// the producer finishes the entries, the upload is incomplete. A tar extractor
+// may stop reading after the first zero trailer block, so completing the walk
+// (rather than writing every trailer byte) is the success boundary.
+func streamArchive(produce func(io.Writer, func()) error, consume func(io.Reader) error) error {
+	pr, pw := io.Pipe()
+	type producerResult struct {
+		err             error
+		entriesComplete bool
+	}
+	produced := make(chan producerResult, 1)
+	go func() {
+		entriesComplete := false
+		err := produce(pw, func() { entriesComplete = true })
+		_ = pw.CloseWithError(err) // nil closes with io.EOF
+		produced <- producerResult{err: err, entriesComplete: entriesComplete}
+	}()
+
+	defer pr.CloseWithError(errArchiveConsumerDone) // also release the producer if consume panics
+	consumeErr := consume(pr)
+	_ = pr.CloseWithError(errArchiveConsumerDone)
+	result := <-produced
+
+	if result.err != nil && !errors.Is(result.err, errArchiveConsumerDone) {
+		return result.err
+	}
+	if consumeErr != nil {
+		return consumeErr
+	}
+	if !result.entriesComplete {
+		return errArchiveIncomplete
+	}
+	return nil
 }
 
 // copyToPod copies a single file or directory to the pod.
@@ -240,10 +309,25 @@ func copyToPod(ctx context.Context, ops k8sOps, podName, container, src, dst str
 }
 
 // tarDir creates a tar archive of a directory's contents.
+//
+// The end-of-archive trailer is written only on success. Some tar extractors
+// also accept a stream with no trailer, so callers must check the producer error.
 func tarDir(dir string, w io.Writer) error {
-	tw := tar.NewWriter(w)
-	defer func() { _ = tw.Close() }()
+	return tarDirWithWalkComplete(dir, w, nil)
+}
 
+func tarDirWithWalkComplete(dir string, w io.Writer, onComplete func()) error {
+	tw := tar.NewWriter(w)
+	if err := walkTar(dir, tw); err != nil {
+		return err
+	}
+	if onComplete != nil {
+		onComplete()
+	}
+	return tw.Close()
+}
+
+func walkTar(dir string, tw *tar.Writer) error {
 	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
