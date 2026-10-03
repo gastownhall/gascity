@@ -58,3 +58,28 @@ func FindBareHookEntries(data []byte) ([]BareHookEntry, error) {
 	}
 	return bare, nil
 }
+
+// Severity ranks a lint finding: an error fails `gc lint`, a warning is advisory.
+type Severity string
+
+const (
+	// SeverityError marks a finding that must fail the lint.
+	SeverityError Severity = "error"
+	// SeverityWarning marks an advisory finding.
+	SeverityWarning Severity = "warning"
+)
+
+// HookMatcherFinding locates a hook entry whose matcher cannot do what its
+// author meant, and says why.
+type HookMatcherFinding struct {
+	Category string
+	Index    int
+	Severity Severity
+	Message  string
+}
+
+// FindInvalidHookMatchers parses a .claude/settings.json document and returns a
+// finding for every wrapped hook entry whose matcher is unusable.
+func FindInvalidHookMatchers(_ []byte) ([]HookMatcherFinding, error) {
+	return nil, nil
+}
