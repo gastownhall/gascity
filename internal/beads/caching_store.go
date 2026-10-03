@@ -60,11 +60,16 @@ type CachingStore struct {
 	// equal to it saw no newer mutation, so no fence it needed was dropped.
 	fenceFloor          uint64
 	observationRevision uint64
-	// scanGen counts full-scan merges: a reconcile's (mergeSnapshotLocked)
-	// and a full Prime's, in either branch. Neither moves mutationSeq or a
-	// per-row fence, so a refresh that must not install over one compares it
-	// with the value captured before its read (RefreshRow).
-	scanGen         uint64
+	// scanGen counts scan merges: a reconcile's (mergeSnapshotLocked), a
+	// full Prime's in either branch, and a PrimeActive's. None moves
+	// mutationSeq or a per-row fence, so a refetch captures it with its
+	// startSeq and installs nothing if it moved (scanRacedLocked).
+	scanGen uint64
+	// fullScanGen is the scanGen of the latest reconcile or full Prime
+	// merge. A reconcile, Prime or PrimeActive whose listing started before
+	// it skips its merge: the full scan is at least as complete and may be
+	// newer.
+	fullScanGen     uint64
 	primePartialErr error
 
 	// readyProjectionDegraded latches when the backing store reported it cannot
@@ -174,7 +179,14 @@ func (o CacheObservation) CacheRev() CacheRevision {
 //     not confirm (gastownhall/gascity#2927). An event merged onto a cached
 //     row never clears a mark: it is not a backing read;
 //   - an ApplyEvent for a row the cache does not hold that a local write or
-//     deletion of the row overlapped.
+//     deletion of the row overlapped;
+//   - a refetch (Get, the overlay, a Live or Parent list, a conditional
+//     write's install) that a reconcile, full Prime or PrimeActive merge
+//     overlapped, when its read disagrees with what the cache then holds, or
+//     an uncached ApplyEvent whose backing read disagrees with a row a
+//     refresh installed after it. The two reads cannot be ordered, so the
+//     refetch installs nothing and the mark sends the next read to the
+//     backing.
 //
 // A row's write fences (writeSeq, writeAt, deletedSeq) outlive the row: when
 // it leaves the cache, the next reconcile retains them, and a later one prunes
@@ -217,20 +229,15 @@ func (o CacheObservation) CacheRev() CacheRevision {
 //     over a BdStore, whose dependency read failed installs the field-derived
 //     set, empty on such a backing, so until a later scan reads the edges a
 //     census can show a row without an edge a settled dependency write added.
-//   - An eviction drops a row's beadSeq, so an event fence goes with the row.
-//     A dirty row's Get refetch that read the row before an external close
-//     whose event applied and whose row a reconcile then evicted installs the
-//     pre-close row clean. It covers no local write (not a C5.4 breach) and
-//     lasts until the next reconcile evicts the row again.
+//   - A scan can roll a refetch back. Get, the overlay and a Live or Parent
+//     list clear or skip a row's beadSeq when they install it (RefreshRow
+//     stamps a changed row), so a reconcile whose listing predates the
+//     install, or a full Prime replace or PrimeActive that no mutation
+//     followed, installs its older row over it. It covers no local write
+//     (not a C5.4 breach) and lasts until the next scan.
 //   - An uncached event installs only its backing read, so a new row whose
 //     read fails or lags at event time waits for the next reconcile to
 //     appear.
-//   - A close event for an uncached row can be lost. The event reads the
-//     backing row before it takes the lock; a Live or Parent list refresh or
-//     a RefreshRow that installs an older, open read of the row in between
-//     leaves the event a held row it conflicts with, and it drops the
-//     unverified close. The row stays open until the next reconcile evicts
-//     it (mc-zndi7.37).
 //   - A stale event that arrives late dirties the row. A refresh that
 //     changed a row stamps it, so a delayed event older than the installed
 //     row is verified against the backing, does not match, and marks the row
@@ -1046,7 +1053,7 @@ func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppr
 			c.mu.RUnlock()
 			return errDirtyOverlayFallback
 		}
-		startSeq := c.mutationSeq
+		startSeq, startScan := c.mutationSeq, c.scanGen
 		todo := c.dirtyToRefreshLocked(suppressed)
 		if len(todo) == 0 {
 			// Cache is clean, or every remaining dirty row is a confirmed
@@ -1081,8 +1088,9 @@ func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppr
 		for _, f := range fetched {
 			// Fence discipline (I3): never overwrite a mutation that landed
 			// after the snapshot. A skipped-but-still-dirty row is caught by
-			// the re-check below and handled by the retry-or-fallback.
-			if c.refetchFencedLocked(f.id, startSeq) {
+			// the re-check below and handled by the retry-or-fallback, as is
+			// one a scan merge left disagreeing with the fetch.
+			if c.refetchFencedLocked(f.id, startSeq) || c.scanRacedLocked(f.id, startScan, f.bead, true) {
 				continue
 			}
 			opts := absorbOpts{
@@ -1224,7 +1232,7 @@ func (c *CachingStore) fetchDirtyOverlay(todo []string, suppressed map[string]st
 // beads, while closed-bead queries still delegate to the backing store.
 func (c *CachingStore) PrimeActive() error {
 	c.mu.RLock()
-	startSeq := c.mutationSeq
+	startSeq, startScan := c.mutationSeq, c.scanGen
 	c.mu.RUnlock()
 
 	var all []Bead
@@ -1258,10 +1266,22 @@ func (c *CachingStore) PrimeActive() error {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.fullScanGen > startScan {
+		// A reconcile or full Prime merged after this listing started. Its
+		// scan covers these statuses, and may be newer, so this merges
+		// nothing, as prime() skips after a newer reconcile.
+		return nil
+	}
+	// Every row is installed only when no mutation or merge followed the
+	// listing. Otherwise a row the cache holds, or one a refetch fence
+	// (writes, deletions, events, RefreshRow and list evictions) claims, is
+	// newer than the listing and kept.
+	guarded := c.mutationSeq != startSeq || c.scanGen != startScan
+	c.scanGen++
 	now := time.Now()
 	for _, b := range all {
-		if c.mutationSeq != startSeq {
-			if c.writeFencedLocked(b.ID, startSeq) {
+		if guarded {
+			if c.refetchFencedLocked(b.ID, startSeq) {
 				continue
 			}
 			if _, exists := c.beads[b.ID]; exists {
@@ -1323,7 +1343,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	}
 
 	c.mu.RLock()
-	startSeq := c.mutationSeq
+	startSeq, startScan := c.mutationSeq, c.scanGen
 	c.mu.RUnlock()
 
 	var all []Bead
@@ -1383,8 +1403,19 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.fullScanGen > startScan {
+		// A reconcile merged after this listing started (full Primes do not
+		// overlap). It is as complete and may be newer, and it promoted the
+		// cache live, so this merges nothing, including the store-wide flags,
+		// as a reconcile skips after a newer full Prime.
+		return nil
+	}
+	// The replace runs only when no mutation or merge followed the listing:
+	// a PrimeActive's rows, like a write's, may be newer than it.
+	replace := c.mutationSeq == startSeq && c.scanGen == startScan
 	c.scanGen++
-	if c.mutationSeq == startSeq {
+	c.fullScanGen = c.scanGen
+	if replace {
 		nextBeads := beadMap
 		nextDeps := depsFromBeads(beadMap, depMap, depsComplete && depErr == nil)
 		nextDirty := make(map[string]struct{})
@@ -1445,9 +1476,9 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		c.fenceFloor = c.mutationSeq
 	} else {
 		for id, b := range beadMap {
-			// A local write after the snapshot owns the id: installing the
-			// snapshot row would clear that write's beadSeq fence.
-			if c.writeFencedLocked(id, startSeq) {
+			// A write, deletion, event or eviction after the snapshot owns the
+			// id: installing the snapshot row would undo it or clear its fence.
+			if c.refetchFencedLocked(id, startSeq) {
 				continue
 			}
 			if _, exists := c.beads[id]; exists {

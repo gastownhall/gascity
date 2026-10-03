@@ -291,7 +291,7 @@ func (c *CachingStore) runReconciliation() {
 	start := time.Now()
 
 	c.mu.RLock()
-	startSeq := c.mutationSeq
+	startSeq, startScan := c.mutationSeq, c.scanGen
 	c.mu.RUnlock()
 
 	bdStart := time.Now()
@@ -349,11 +349,12 @@ func (c *CachingStore) runReconciliation() {
 	}
 
 	c.mu.Lock()
-	if startSeq < c.fenceFloor {
-		// A full Prime replaced the maps after this scan started and dropped
-		// the per-row fences its merge would need. The replace is at least as
-		// complete, so the pass merges nothing, including the shared tail's
-		// store-wide flags; only its latency still counts.
+	if startSeq < c.fenceFloor || c.fullScanGen > startScan {
+		// A full Prime merged after this scan started: a replace dropped the
+		// per-row fences its merge would need, and either branch may hold
+		// rows newer than this scan's (reconciles do not overlap). The Prime
+		// is at least as complete, so the pass merges nothing, including the
+		// shared tail's store-wide flags; only its latency still counts.
 		c.recordReconcileLatencyLocked(bdLatency)
 		c.recomputeCadenceLocked()
 		c.mu.Unlock()
@@ -522,14 +523,16 @@ type mergeSectionResult struct {
 // it could not read the backing row: they are held, not absorbed, so their
 // row, mark and fences stay as they were. depsReadFailed reports that the
 // snapshot's dependency read failed: a row that does not answer for its edges
-// then keeps its mark. It bumps scanGen, so a RefreshRow whose read predates
-// the merge installs nothing over it. Caller must hold c.mu (write lock).
+// then keeps its mark. It bumps scanGen and fullScanGen, so a refetch whose
+// read predates the merge installs nothing over it, and a Prime whose listing
+// predates it skips its merge. Caller must hold c.mu (write lock).
 func (c *CachingStore) mergeSnapshotLocked(
 	freshByID map[string]Bead, confirmedClosed map[string]Bead, deferred map[string]struct{},
 	depMap map[string][]Dep, useFreshDeps, depsReadFailed bool,
 	startSeq uint64, now time.Time,
 ) mergeSectionResult {
 	c.scanGen++
+	c.fullScanGen = c.scanGen
 	// Preserve a cached is_blocked for any row the projection did not return
 	// this cycle. Two cases land here: a full projection failure (enrichErr
 	// left every row unenriched) and the narrower race where a row is still

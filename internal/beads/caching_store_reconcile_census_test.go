@@ -104,7 +104,12 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// legacy branches predate it. RefreshRow's fence on it is pinned by
 		// TestCachingStoreRefreshRowFencedByFullScan.
 		"scanGen": true,
-		"backing": true, "idPrefix": true, "mu": true, "reconciling": true,
+		// fullScanGen is set to the bumped scanGen by every
+		// mergeSnapshotLocked call, so it too carries no merge outcome. The
+		// Prime skip it drives is pinned by
+		// TestCachingStorePrimeSkipsAfterNewerReconcile.
+		"fullScanGen": true,
+		"backing":     true, "idPrefix": true, "mu": true, "reconciling": true,
 		"eventPrefixes": true, // event-ownership config, fixed at construction
 		"epoch":         true, // instance identity, fixed at construction
 		"onChange":      true, "problemf": true, "problemLog": true,

@@ -246,6 +246,15 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 			}
 			return
 		}
+	} else if !cached && refreshedFromBacking && eventType != "bead.deleted" &&
+		!c.writeFencedLocked(patch.ID, readSeq) && c.rowReadDisagreesLocked(patch.ID, b, true) {
+		// A refresh (a Live or Parent list, RefreshRow, another event)
+		// installed the row after this event read it uncached. The two backing
+		// reads are unordered, so neither may drop or overwrite the other: a
+		// close would otherwise meet a held open row and be dropped unverified.
+		// The row goes dirty for a backing read to settle.
+		c.settleUnorderedReadLocked(patch.ID, b, true)
+		return
 	}
 	if current, ok := c.beads[patch.ID]; ok {
 		currentDeps, depsKnown := c.deps[patch.ID]
