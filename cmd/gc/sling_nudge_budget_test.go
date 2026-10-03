@@ -19,6 +19,10 @@ const (
 	// pruneDeadQueuedNudgesWithClock, gastownhall/gascity#5278), so there is no
 	// second FindIncludingTerminal call to account for here.
 	advancingNudgeStoreDeadItemOps = 3
+	// advancingNudgeStoreTerminalizeOps is the store-op cost of terminalizing
+	// one queued nudge during enqueue-time supersession: Terminalize does
+	// SetMetadataBatch + Close (see nudgequeue.Store.Terminalize).
+	advancingNudgeStoreTerminalizeOps = 2
 )
 
 type advancingNudgeStore struct {
@@ -200,7 +204,16 @@ func TestSlingNudgeEnqueueBudgetPreservesQueuedItems(t *testing.T) {
 		t.Fatalf("advancing store ops = %d, want at most %d to prove the maintenance budget cut in", ops, maxOps)
 	}
 
-	processed := deadBacklogProcessed(deadBacklog, latency)
+	// Supersession runs before the housekeeping sweep, so the dead-prune pass
+	// does not get a fresh budget: the 4 matched pending/in-flight items each
+	// cost one Terminalize (SetMetadataBatch + Close) first. The prune loop
+	// checks the deadline before each item, so the processed count is the
+	// number of 3-op items that fit in what supersession left.
+	supersededCost := 4 * (advancingNudgeStoreTerminalizeOps * latency)
+	processed := int((nudgeEnqueueMaintenanceBudget-supersededCost)/(advancingNudgeStoreDeadItemOps*latency)) + 1
+	if processed > deadBacklog {
+		processed = deadBacklog
+	}
 	survivors := deadBacklog - processed
 	buckets := nudgeQueueBucketsByID(t, cityPath)
 	if got, want := len(buckets), survivors+4+1; got != want {
@@ -219,14 +232,18 @@ func TestSlingNudgeEnqueueBudgetPreservesQueuedItems(t *testing.T) {
 			t.Fatalf("surviving dead nudge %q (i=%d) bucket = %q, want %q; buckets=%v", id, i, bucket, seededBuckets[id], buckets)
 		}
 	}
+	// Supersession runs before the budgeted housekeeping, so the matching
+	// pending and in-flight items are dead-lettered as superseded — preserved
+	// in the dead bucket, never dropped — even though the dead backlog alone
+	// would exhaust the budget.
 	for i := 0; i < 2; i++ {
 		id := fmt.Sprintf("nudge-pending-preserve-%d", i)
-		if bucket := buckets[id]; bucket != "pending" {
-			t.Fatalf("%s bucket = %q, want pending because supersede budget was already exhausted", id, bucket)
+		if bucket := buckets[id]; bucket != "dead" {
+			t.Fatalf("%s bucket = %q, want dead (superseded before housekeeping spent the budget)", id, bucket)
 		}
 		id = fmt.Sprintf("nudge-in-flight-preserve-%d", i)
-		if bucket := buckets[id]; bucket != "in-flight" {
-			t.Fatalf("%s bucket = %q, want in-flight because supersede budget was already exhausted", id, bucket)
+		if bucket := buckets[id]; bucket != "dead" {
+			t.Fatalf("%s bucket = %q, want dead (superseded before housekeeping spent the budget)", id, bucket)
 		}
 	}
 	if bucket := buckets[item.ID]; bucket != "pending" {
