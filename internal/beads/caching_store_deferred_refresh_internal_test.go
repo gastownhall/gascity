@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestLiveListRefreshConvergesOnIndefinitelyDeferredBead pins the convergence
@@ -115,6 +116,144 @@ func TestLiveListRefreshConvergesOnIndefinitelyDeferredBead(t *testing.T) {
 		t.Fatalf("live-list refresh never converges: 3 further identical live lists issued %d more bd show calls for %s (cached Status=%q IndefinitelyDeferred=%v). "+
 			"Every indefinitely-deferred bead in the cache is re-Got on every live list.",
 			extra, beadID, cached.Status, cached.IndefinitelyDeferred)
+	}
+}
+
+// getCountingStore counts backing Gets per id. It does not implement
+// StatusListOmitsDeferred, so it models a store whose status-filtered List
+// returns deferred rows (native Dolt).
+type getCountingStore struct {
+	Store
+	mu   sync.Mutex
+	gets map[string]int
+}
+
+func (g *getCountingStore) Get(id string) (Bead, error) {
+	g.mu.Lock()
+	g.gets[id]++
+	g.mu.Unlock()
+	return g.Store.Get(id)
+}
+
+// TestLiveListRefreshStillRefreshesDeferredRowWhenBackingListsDeferred pins
+// that the deferred skip is scoped to backing stores whose status filter omits
+// deferred rows. A store that lists them only drops one after a real status
+// change, so its absence must still be refreshed.
+func TestLiveListRefreshStillRefreshesDeferredRowWhenBackingListsDeferred(t *testing.T) {
+	mem := NewMemStore()
+	created, err := mem.Create(Bead{Title: "deferred work", IndefinitelyDeferred: true})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	backing := &getCountingStore{Store: mem, gets: map[string]int{}}
+	cache := NewCachingStore(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if cached, ok := cache.beads[created.ID]; !ok || !cached.IndefinitelyDeferred {
+		t.Fatalf("prime did not cache %s as indefinitely deferred (cached=%+v ok=%v)", created.ID, cached, ok)
+	}
+
+	// Another process closes it, bypassing the cache.
+	if err := mem.Close(created.ID); err != nil {
+		t.Fatalf("backing Close: %v", err)
+	}
+	backing.mu.Lock()
+	backing.gets = map[string]int{}
+	backing.mu.Unlock()
+
+	if _, err := cache.List(ListQuery{Status: "open", Live: true, TierMode: TierBoth}); err != nil {
+		t.Fatalf("live List: %v", err)
+	}
+
+	backing.mu.Lock()
+	gets := backing.gets[created.ID]
+	backing.mu.Unlock()
+	if gets == 0 {
+		t.Fatalf("live List did not refresh %s after it left the backing open list; a store that lists deferred rows dropped it for a real status change", created.ID)
+	}
+	cache.mu.RLock()
+	cached, stillCached := cache.beads[created.ID]
+	cache.mu.RUnlock()
+	if stillCached && cached.Status != "closed" {
+		t.Fatalf("cached %s Status = %q after refresh, want closed or evicted", created.ID, cached.Status)
+	}
+}
+
+// TestLiveListRefreshStillRefreshesTimeDeferredBdRow pins that the skip covers
+// only bd's indefinite "deferred" status. A bd row that is "open" with a future
+// defer_until still appears in `bd list --status=open`, so its absence means a
+// real change and must be refreshed.
+func TestLiveListRefreshStillRefreshesTimeDeferredBdRow(t *testing.T) {
+	const beadID = "ga-timedefer1"
+	deferUntil := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+
+	var mu sync.Mutex
+	closedNow := false
+	showCalls := 0
+
+	issue := func(status string) []byte {
+		return []byte(`[{"id":"` + beadID + `","title":"time-deferred work","status":"` + status +
+			`","issue_type":"task","assignee":"gascity/builder","defer_until":"` + deferUntil + `"}]`)
+	}
+
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("command name = %q, want bd", name)
+		}
+		if len(args) == 0 {
+			return []byte(`[]`), nil
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		switch args[0] {
+		case "version":
+			return []byte("bd version 1.3.0\n"), nil
+		case "list":
+			if !closedNow {
+				return issue("open"), nil
+			}
+			if hasArgPrefix(args, "--status=open") {
+				return []byte(`[]`), nil
+			}
+			return issue("closed"), nil
+		case "show":
+			showCalls++
+			if closedNow {
+				return issue("closed"), nil
+			}
+			return issue("open"), nil
+		}
+		return []byte(`[]`), nil
+	}
+
+	cache := NewCachingStore(NewBdStore("/city", runner), nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	cached, ok := cache.beads[beadID]
+	if !ok {
+		t.Fatalf("prime did not cache %s; cache holds %d beads", beadID, len(cache.beads))
+	}
+	if cached.IndefinitelyDeferred || cached.DeferUntil == nil {
+		t.Fatalf("fixture cached %s with IndefinitelyDeferred=%v DeferUntil=%v, want a time-bound deferral only",
+			beadID, cached.IndefinitelyDeferred, cached.DeferUntil)
+	}
+
+	// Someone closes it. bd list --status=open no longer returns it.
+	mu.Lock()
+	closedNow = true
+	showCalls = 0
+	mu.Unlock()
+
+	if _, err := cache.List(ListQuery{Status: "open", Live: true, TierMode: TierBoth}); err != nil {
+		t.Fatalf("live List: %v", err)
+	}
+	mu.Lock()
+	shows := showCalls
+	mu.Unlock()
+	if shows == 0 {
+		t.Fatalf("live List issued no bd show for time-deferred %s after it left the open list; only bd's indefinite deferred status is omitted by construction", beadID)
 	}
 }
 

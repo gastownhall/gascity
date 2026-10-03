@@ -476,6 +476,10 @@ func (c *CachingStore) staleParentCacheIDs(parentID string, fresh []Bead) []stri
 	return stale
 }
 
+// deferredOmittingLister is implemented by backing stores whose
+// status-filtered List omits indefinitely deferred rows by construction.
+type deferredOmittingLister interface{ StatusListOmitsDeferred() bool }
+
 func (c *CachingStore) staleLiveCacheIDs(query ListQuery, fresh []Bead) []string {
 	if !query.Live || query.Limit > 0 || query.IncludesClosed() {
 		return nil
@@ -486,7 +490,10 @@ func (c *CachingStore) staleLiveCacheIDs(query ListQuery, fresh []Bead) []string
 		freshIDs[item.ID] = struct{}{}
 	}
 
-	now := time.Now()
+	omitsDeferred := false
+	if l, ok := c.backing.(deferredOmittingLister); ok {
+		omitsDeferred = l.StatusListOmitsDeferred()
+	}
 
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -502,7 +509,7 @@ func (c *CachingStore) staleLiveCacheIDs(query ListQuery, fresh []Bead) []string
 		if !query.Matches(bead) {
 			continue
 		}
-		if query.Status != "" && IsDeferred(bead, now) {
+		if omitsDeferred && query.Status != "" && bead.IndefinitelyDeferred {
 			// A deferred row is absent from a status-filtered backing list by
 			// construction, not by staleness: bd filters on its own richer
 			// status vocabulary, where the row is "deferred", while
@@ -517,6 +524,11 @@ func (c *CachingStore) staleLiveCacheIDs(query ListQuery, fresh []Bead) []string
 			// deferral already explains the absence. A deferral that later
 			// closes is still reconciled by recoverMissingFromList, which
 			// verifies missing rows on the reconciliation cadence.
+			//
+			// The skip applies only when the backing store's status filter
+			// omits deferred rows: a store that returns them (native Dolt) only
+			// drops one after a real status change, which must still be
+			// refreshed.
 			continue
 		}
 		stale = append(stale, id)
