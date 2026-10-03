@@ -118,9 +118,7 @@ func TestJsonlArchiveDoctorCheck_LocalPathOriginStillWarns(t *testing.T) {
 			cityDir := t.TempDir()
 			archiveDir := filepath.Join(cityDir, "archive")
 			initBareArchiveRepo(t, archiveDir, false)
-			if out, err := exec.Command("git", "-C", archiveDir, "remote", "add", "origin", remote).CombinedOutput(); err != nil {
-				t.Fatalf("git remote add: %v\n%s", err, out)
-			}
+			runGit(t, archiveDir, "remote", "add", "origin", remote)
 
 			result := runJsonlArchiveCheck(t, cityDir, map[string]string{
 				"GC_JSONL_ARCHIVE_REPO": archiveDir,
