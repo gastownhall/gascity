@@ -5,11 +5,25 @@ package proctable
 import (
 	"errors"
 	"fmt"
+	"log"
 	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+)
+
+// KillByPID's dependencies are indirected so a test can prove the
+// infrastructure refusal below is wired into KillByPID itself, not merely that
+// the classifier works in isolation. That distinction is the lesson of
+// gastownhall/gascity#5837: the first guard for that class was correct, tested,
+// and installed on a different kill family than the one that fired. The vars
+// are test-only injection points, unsynchronized; the package's tests do not
+// run in parallel, and stubKillByPIDDeps restores every one of them.
+var (
+	killByPIDInfrastructureTarget = IsCityInfrastructureRoot
+	killByPIDSignal               = syscall.Kill
+	killByPIDLiveness             = killLivenessFuncsForPID
 )
 
 // KillByPID terminates pid with SIGTERM, then SIGKILL after
@@ -18,8 +32,30 @@ import (
 // or a zombie — before returning. Already-gone processes are success. A process
 // that survives its own SIGKILL past the reap grace (e.g. wedged in D-state
 // under I/O) yields an error so callers can refuse to start a name-reused
-// replacement that would race it for the same work.
+// replacement that would race it for the same work. A target classified as
+// city infrastructure by IsCityInfrastructureRoot (a tmux server or client,
+// the managed Dolt scope watchdog, bd's db-proxy-child) is never signaled: the
+// call logs the refusal and returns nil, since such a process cannot race an
+// agent replacement and an error would block every gated start behind it.
 func KillByPID(pid int) error {
+	// Never signal city infrastructure. signalPIDWith signals the process
+	// group first, which for a tmux server is the server itself — one socket
+	// is one server is every session in the city. The scanner has excluded
+	// tmux from the agent-root set since gastownhall/gascity#5837, and the
+	// orphan sweep and pre-start kill fence the Dolt watchdog and bd proxy at
+	// their own call sites, so no live caller hands infrastructure in today;
+	// this is defense in depth at the kill family itself, which two providers
+	// reach with whatever PID they hold. It classifies the target at this
+	// instant, which narrows, not closes, the window for a PID recycled before
+	// the signal (gastownhall/gascity#6172). Refusing is success, not an
+	// error: infrastructure cannot race a replacement for an agent's work, so
+	// there is no orphan to refuse a Start over, and an error here would
+	// propagate through every gated start. The refusal logs because it should
+	// fire approximately never.
+	if killByPIDInfrastructureTarget(pid) {
+		log.Printf("proctable: refusing to kill PID %d: city infrastructure, not an agent runtime; signaling its process group would take the city down with it (gastownhall/gascity#6172)", pid)
+		return nil
+	}
 	// Capture the target's start-time identity BEFORE signaling. During the
 	// post-SIGKILL reap wait the PID can be reaped and recycled to an unrelated
 	// process; without this, a recycled PID reads as "still alive" and we would
@@ -28,10 +64,10 @@ func KillByPID(pid int) error {
 	// exists and falls back to ps elsewhere, so it is empty only when neither
 	// mechanism can answer, in which case runLive falls back to plain liveness
 	// — current behavior preserved.
-	termLive, runLive := killLivenessFuncsForPID(pid)
+	termLive, runLive := killByPIDLiveness(pid)
 	return killByPID(
 		pid,
-		syscall.Kill,
+		killByPIDSignal,
 		termLive,
 		runLive,
 		runtime.ManagedProcessStopGrace,
