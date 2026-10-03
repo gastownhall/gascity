@@ -102,6 +102,13 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		if err := validateExistingBead(opts.BeadOrFormula, deps); err != nil {
 			return result, err
 		}
+		// Runs ahead of every mutation below (the reassign reopen, the
+		// attach path's input convoy) so a refusal leaves the store untouched.
+		if usesFormulaBackedRoute(opts) {
+			if err := refuseExpandedWorkflowRootSource(opts.BeadOrFormula, deps); err != nil {
+				return result, err
+			}
+		}
 	}
 	if shouldGuardCrossRig(opts) {
 		if err := CrossRigRouteError(opts.BeadOrFormula, a, deps.Cfg); err != nil {
@@ -352,6 +359,28 @@ func validateExistingBead(beadID string, deps SlingDeps) error {
 		querier = deps.Store
 	}
 	return validateExistingBeadInQuerier(beadID, deps.StoreRef, querier)
+}
+
+// refuseExpandedWorkflowRootSource returns an *ExpandedWorkflowRootError when
+// the source bead of a formula-backed route is an expanded workflow root.
+// Attaching a formula to such a root wraps a second workflow around the first.
+// Preflight calls it only for a formula-backed route (--on, or the target's
+// default formula), where the source bead is always validated, with --force
+// and under dry-run too; a plain route of the root is not refused. It reads
+// the bead from the store validateExistingBead found it in.
+func refuseExpandedWorkflowRootSource(beadID string, deps SlingDeps) error {
+	querier := deps.ValidationQuerier
+	if querier == nil {
+		querier = deps.Store
+	}
+	source, err := querier.Get(beadID)
+	if err != nil {
+		return &BeadLookupError{BeadID: beadID, StoreRef: deps.StoreRef, Err: err}
+	}
+	if beadmeta.IsExpandedWorkflow(source.Metadata) {
+		return &ExpandedWorkflowRootError{BeadID: beadID}
+	}
+	return nil
 }
 
 func validateExistingBeadInQuerier(beadID, storeRef string, querier BeadQuerier) error {

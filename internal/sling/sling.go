@@ -766,6 +766,23 @@ func (e *CrossStoreRouteError) Error() string {
 		e.BeadID, source, e.Target, reachable, reachable, source)
 }
 
+// ExpandedWorkflowRootError reports that the source bead of a formula-backed
+// route is an expanded workflow root (beadmeta.IsExpandedWorkflow): a
+// container whose child steps are the work. Attaching a formula to it would
+// wrap a second workflow around the first.
+type ExpandedWorkflowRootError struct {
+	BeadID string
+}
+
+// Error returns the expanded-workflow-root routing diagnostic.
+func (e *ExpandedWorkflowRootError) Error() string {
+	return fmt.Sprintf("gc sling: refusing to attach a formula to an expanded "+
+		"workflow root: bead %s is the root of a workflow whose steps are the "+
+		"work; nothing was routed. Sling one of its steps, or relaunch the "+
+		"workflow.",
+		e.BeadID)
+}
+
 func routeStoreLabel(storeRef string) string {
 	if strings.TrimSpace(storeRef) == "" {
 		return "<unclassified store>"
