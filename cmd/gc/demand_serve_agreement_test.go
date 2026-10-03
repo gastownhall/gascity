@@ -125,6 +125,22 @@ func agreementRows() []agreementRow {
 			wantServable: false,
 		},
 		{
+			// The discriminating row for a label the worker's query excludes that is
+			// NOT a dispatch hold: bd's native human label, a bead parked for a
+			// person. beadmeta.DispatchHoldLabels names only the two canonical
+			// holds, so the generated hold rows below cannot reach it. Without its
+			// own row demand would keep counting a bead no worker is ever served:
+			// the seat spawns, its hook reads empty, it drains, and the row is
+			// counted again.
+			name: "routed bead flagged for a human",
+			bead: beads.Bead{
+				ID: "a-14", Status: "open", Type: "task",
+				Labels:   []string{"human"},
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+			},
+			wantServable: false,
+		},
+		{
 			// Collapse x hold: the route form is fixed by the pass, and the row
 			// is still not demand — the two dimensions are independent, and the
 			// rewrite must happen even for a row nobody may claim yet (the hold
