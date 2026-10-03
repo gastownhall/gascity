@@ -857,8 +857,18 @@ func (m *memoryOrderDispatcher) openWorkGateShut(ctx context.Context, cand *orde
 	if a.NoWorkGate {
 		return false
 	}
+	// An open root-only wisp holds the gate only while it is claimed or younger
+	// than this order's root bound; past it the root is abandoned and the order
+	// may pour again (see orderRunRootInFlightBound).
+	rootBound := orderRunRootInFlightBound(a)
+	wispHasOpenWork := func(store beads.Store, root beads.Bead) (bool, error) {
+		return m.wispRootHasOpenWork(store, root, now, rootBound)
+	}
+	strictFallback := func(store beads.Store, name string) (bool, error) {
+		return m.hasOpenWorkStrictBounded(store, name, now, rootBound)
+	}
 	hasOpenWork, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
-		return trackingIndex.hasOpenWork(cand.gateStores, cand.gateStoreKeys, scoped, m.wispRootHasOpenWork, m.hasOpenWorkStrict)
+		return trackingIndex.hasOpenWork(cand.gateStores, cand.gateStoreKeys, scoped, wispHasOpenWork, strictFallback)
 	})
 	if err != nil {
 		if m.gateFailClosed(ctx, a, scoped, err) {
@@ -2520,7 +2530,20 @@ func (m *memoryOrderDispatcher) rigSuspendedByName(rigName string) bool {
 // cooldown gate from pouring duplicate wisps when the pool stalls
 // (tr-kds01, where 24h-interval digest wisps accumulated because the
 // pool never picked them up).
+//
+// A root-only wisp (no step beads; the root is the work) counts only while it
+// is in_progress or younger than the order's root bound (see
+// orderRunRootInFlightBound). Without that bound an unclaimed root-only wisp
+// left open by a stalled or restarted pool held the gate shut forever.
+// hasOpenWorkStrict applies the floor bound at the current time; the dispatch
+// gate uses hasOpenWorkStrictBounded with the order's own bound.
 func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName string) (bool, error) {
+	return m.hasOpenWorkStrictBounded(store, scopedName, time.Now(), orderRunRootInFlightFloor)
+}
+
+// hasOpenWorkStrictBounded is hasOpenWorkStrict with an explicit clock and
+// root-only wisp bound.
+func (m *memoryOrderDispatcher) hasOpenWorkStrictBounded(store beads.Store, scopedName string, now time.Time, rootBound time.Duration) (bool, error) {
 	// The order-run:<scoped> single-flight list is a MIXED orders+graph read:
 	// the label rides both order-tracking beads (orders class) and wisp/molecule
 	// roots (graph class). Route it through the two-class edge so a graph-store
@@ -2531,21 +2554,57 @@ func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName 
 		beads.OrdersStore{Store: store},
 		beads.GraphStore{Store: store},
 	)
-	return front.HasOpenWork(scopedName, m.wispRootHasOpenWork)
+	return front.HasOpenWork(scopedName, func(s beads.Store, b beads.Bead) (bool, error) {
+		return m.wispRootHasOpenWork(s, b, now, rootBound)
+	})
+}
+
+// orderRunRootInFlightFloor is the minimum age bound for an open root-only
+// order wisp: younger than this it is in flight even for orders whose
+// interval is short or absent (cron, condition, event).
+const orderRunRootInFlightFloor = 30 * time.Minute
+
+// orderRunRootInFlightBound returns how long an unclaimed open root-only wisp
+// of order a counts as in flight: max(2 x the order's interval, 30m). Past
+// it, the root is treated as abandoned (the pool never claimed it, or the
+// city restarted under it) and the order may pour again.
+func orderRunRootInFlightBound(a orders.Order) time.Duration {
+	bound := orderRunRootInFlightFloor
+	if iv := strings.TrimSpace(a.Interval); iv != "" {
+		if d, err := time.ParseDuration(iv); err == nil && 2*d > bound {
+			bound = 2 * d
+		}
+	}
+	return bound
+}
+
+// orderRootOnlyWispInFlight reports whether an open root-only wisp still
+// counts as in-flight order work: it is claimed (in_progress), or it is
+// younger than bound. A non-positive bound or an unknown creation time keeps
+// the conservative answer (in flight).
+func orderRootOnlyWispInFlight(b beads.Bead, now time.Time, bound time.Duration) bool {
+	if b.Status == "in_progress" {
+		return true
+	}
+	if bound <= 0 || b.CreatedAt.IsZero() {
+		return true
+	}
+	return now.Sub(b.CreatedAt) < bound
 }
 
 // wispRootHasOpenWork is the graph-owned half of the single-flight gate: given an
 // open order-run:<scoped> bead that is NOT an order-tracking bead, it decides
 // whether the wisp/molecule root still has open work. A root-only wisp counts as
-// in-flight; a molecule root counts only if its subtree still has open
-// descendants. It stays in the controller because the subtree walk is graph
-// residual (molecule membership + graph traversal).
-func (m *memoryOrderDispatcher) wispRootHasOpenWork(store beads.Store, b beads.Bead) (bool, error) {
+// in-flight while it is in_progress or younger than rootBound
+// (orderRootOnlyWispInFlight); a molecule root counts only if its subtree still
+// has open descendants. It stays in the controller because the subtree walk is
+// graph residual (molecule membership + graph traversal).
+func (m *memoryOrderDispatcher) wispRootHasOpenWork(store beads.Store, b beads.Bead, now time.Time, rootBound time.Duration) (bool, error) {
 	if !isOrderWispRootCandidate(b) {
 		return false, nil
 	}
 	if isOrderRootOnlyWispCandidate(b) {
-		return true, nil
+		return orderRootOnlyWispInFlight(b, now, rootBound), nil
 	}
 	hasOpenDescendants, err := storeHasOpenDescendants(store, b.ID, isTransientNotificationBead)
 	if err != nil {
