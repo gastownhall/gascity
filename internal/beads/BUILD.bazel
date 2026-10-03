@@ -66,6 +66,7 @@ go_test(
         "caching_store_overlay_test.go",
         "caching_store_partial_list_internal_test.go",
         "caching_store_primitives_test.go",
+        "caching_store_ready_outcome_test.go",
         "caching_store_ready_projection_internal_test.go",
         "caching_store_ready_staleness_internal_test.go",
         "caching_store_reconcile_census_test.go",

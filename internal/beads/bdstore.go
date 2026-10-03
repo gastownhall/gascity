@@ -3359,7 +3359,7 @@ func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
 	workOutcomeByID := make(map[string]string, len(blockers))
 	for _, b := range blockers {
 		statusByID[b.ID] = b.Status
-		workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
+		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
 	}
 	result := make([]Bead, 0, len(candidates))
 	for _, c := range candidates {

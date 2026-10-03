@@ -157,6 +157,31 @@ func TestIsReadyCandidate(t *testing.T) {
 // satisfies unless it was explicitly closed as gc.work_outcome=blocked. A
 // closed dependency carrying no work_outcome at all (the legacy/pre-ADR-0009
 // case) must still satisfy — that's the backward-compat guarantee.
+func TestReadinessWorkOutcomeDefersToAPassedStep(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		want     string
+	}{
+		{"no metadata", nil, ""},
+		{"work outcome alone", map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"passed step ignores blocked work outcome", map[string]string{beadmeta.OutcomeMetadataKey: "pass", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		{"failed step keeps blocked work outcome", map[string]string{beadmeta.OutcomeMetadataKey: "fail", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"skipped step keeps blocked work outcome", map[string]string{beadmeta.OutcomeMetadataKey: "skipped", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"passed step with shipped outcome", map[string]string{beadmeta.OutcomeMetadataKey: "pass", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ReadinessWorkOutcome(tt.metadata); got != tt.want {
+				t.Fatalf("ReadinessWorkOutcome(%v) = %q, want %q", tt.metadata, got, tt.want)
+			}
+			if tt.metadata[beadmeta.OutcomeMetadataKey] == "pass" && !DependencySatisfied("closed", ReadinessWorkOutcome(tt.metadata)) {
+				t.Fatalf("a closed dependency whose step passed must satisfy its dependents (%v)", tt.metadata)
+			}
+		})
+	}
+}
+
 func TestDependencySatisfied(t *testing.T) {
 	tests := []struct {
 		name           string
