@@ -7054,9 +7054,7 @@ func initEmptyArchiveRemote(t *testing.T, archiveRepo string, prevCount int) str
 func initEmptyArchiveRemoteOnBranch(t *testing.T, archiveRepo string, prevCount int, branch string) string {
 	t.Helper()
 	remoteRepo := initEmptyArchiveRemote(t, archiveRepo, prevCount)
-	if out, err := exec.Command("git", "-C", archiveRepo, "branch", "-m", branch).CombinedOutput(); err != nil {
-		t.Fatalf("git branch -m %s: %v\n%s", branch, err, out)
-	}
+	runGit(t, archiveRepo, "branch", "-m", branch)
 	return remoteRepo
 }
 
@@ -8180,15 +8178,9 @@ func TestJsonlExportPushUsesExistingArchiveBranch(t *testing.T) {
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 	runScript(t, coreScriptPath("jsonl-export.sh"), env)
 
-	localHead, err := exec.Command("git", "-C", archiveRepo, "rev-parse", "HEAD").CombinedOutput()
-	if err != nil {
-		t.Fatalf("git rev-parse local HEAD: %v\n%s", err, localHead)
-	}
-	remoteHead, err := exec.Command("git", "--git-dir", remoteRepo, "rev-parse", "refs/heads/archive").CombinedOutput()
-	if err != nil {
-		t.Fatalf("git rev-parse remote archive: %v\n%s", err, remoteHead)
-	}
-	if strings.TrimSpace(string(remoteHead)) != strings.TrimSpace(string(localHead)) {
+	localHead := runGitOut(t, archiveRepo, "rev-parse", "HEAD")
+	remoteHead := runGitOut(t, remoteRepo, "rev-parse", "refs/heads/archive")
+	if remoteHead != localHead {
 		t.Fatalf("remote archive branch = %s, want local HEAD %s", remoteHead, localHead)
 	}
 }
