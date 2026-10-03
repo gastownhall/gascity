@@ -648,14 +648,28 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 // that if this process later ends up running under the systemd unit, a
 // `systemctl restart` still preserves agent sessions on SIGTERM, matching
 // the systemd-managed path's contract.
+//
+// Provider-credential vars (ANTHROPIC_API_KEY and friends) are dropped when
+// GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1, matching the service-file path
+// (shouldPersistSupervisorEnv) so an operator who asked to keep ambient
+// credentials out of every agent session gets that whether the supervisor
+// ends up running under the installed service or this fork (GH#6966). This
+// is narrower than shouldPersistSupervisorEnv's full allowlist on purpose:
+// the fork needs the rest of the parent's environment (PATH, HOME, etc.) to
+// run at all, unlike a service file's small static env block.
 func supervisorForkEnv(parent []string) []string {
+	omitProviderCreds := os.Getenv(supervisorOmitProviderCredsEnv) == "1"
 	env := make([]string, 0, len(parent)+1)
 	preserveSet := false
 	for _, kv := range parent {
-		if strings.HasPrefix(kv, "GC_SESSION_ID=") {
+		key, _, _ := strings.Cut(kv, "=")
+		if key == "GC_SESSION_ID" {
 			continue
 		}
-		if strings.HasPrefix(kv, supervisorPreserveSessionsOnSignalEnv+"=") {
+		if omitProviderCreds && isProviderCredentialEnv(key) {
+			continue
+		}
+		if key == supervisorPreserveSessionsOnSignalEnv {
 			env = append(env, supervisorPreserveSessionsOnSignalEnv+"=1")
 			preserveSet = true
 			continue
