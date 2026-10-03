@@ -90,6 +90,40 @@ func TestSupervisorForkEnv(t *testing.T) {
 	}
 }
 
+// TestSupervisorForkEnvOmitsProviderCredsWhenRequested pins GH#6966: the
+// fork path must drop provider-credential vars the same way the
+// service-file path does (shouldPersistSupervisorEnv) when the operator set
+// GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1, so an ambient credential in the
+// launching shell does not reach every agent session via the forked
+// supervisor.
+func TestSupervisorForkEnvOmitsProviderCredsWhenRequested(t *testing.T) {
+	t.Setenv(supervisorOmitProviderCredsEnv, "1")
+	parent := []string{"PATH=/bin", "ANTHROPIC_API_KEY=sk-ambient", "HOME=/home/x"}
+	got := supervisorForkEnv(parent)
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") {
+			t.Fatalf("supervisorForkEnv result %v still carries ANTHROPIC_API_KEY with %s=1", got, supervisorOmitProviderCredsEnv)
+		}
+	}
+	if !containsExactly(got, "PATH=/bin") || !containsExactly(got, "HOME=/home/x") {
+		t.Fatalf("supervisorForkEnv result %v dropped an unrelated var alongside the credential", got)
+	}
+}
+
+// TestSupervisorForkEnvKeepsProviderCredsByDefault pins the other half of
+// GH#6966: without the opt-out set, the fork keeps inheriting the parent's
+// provider credentials exactly as before this fix, since most operators run
+// the supervisor from a shell that already carries the credential every
+// agent session needs.
+func TestSupervisorForkEnvKeepsProviderCredsByDefault(t *testing.T) {
+	t.Setenv(supervisorOmitProviderCredsEnv, "")
+	parent := []string{"PATH=/bin", "ANTHROPIC_API_KEY=sk-ambient"}
+	got := supervisorForkEnv(parent)
+	if !containsExactly(got, "ANTHROPIC_API_KEY=sk-ambient") {
+		t.Fatalf("supervisorForkEnv result %v dropped ANTHROPIC_API_KEY without the opt-out set", got)
+	}
+}
+
 func containsExactly(env []string, want string) bool {
 	for _, kv := range env {
 		if kv == want {
