@@ -321,10 +321,19 @@ func templateNameFor(cfgAgent *config.Agent, qualifiedName string) string {
 // template is empty. Template errors fail closed so pool reconciliation does
 // not silently spawn sessions under unintended fallback names.
 func (p *agentBuildParams) resolveTmuxAliasForAgent(agent *config.Agent) (string, error) {
-	if p == nil || agent == nil {
+	if p == nil {
 		return "", nil
 	}
-	resolved, err := workdirutil.ResolveTmuxAlias(p.cityPath, p.cityName, *agent, p.rigs)
+	return resolveTmuxAliasForAgentIn(p.cityPath, p.cityName, p.rigs, agent)
+}
+
+// resolveTmuxAliasForAgentIn is resolveTmuxAliasForAgent for callers without
+// build params, such as the v2 allocator's create effect.
+func resolveTmuxAliasForAgentIn(cityPath, cityName string, rigs []config.Rig, agent *config.Agent) (string, error) {
+	if agent == nil {
+		return "", nil
+	}
+	resolved, err := workdirutil.ResolveTmuxAlias(cityPath, cityName, *agent, rigs)
 	if err != nil {
 		return "", fmt.Errorf("resolving tmux_alias for %q: %w", agent.QualifiedName(), err)
 	}

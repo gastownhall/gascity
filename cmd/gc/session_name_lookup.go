@@ -50,7 +50,26 @@ type poolSessionCreateIdentity struct {
 	// signature change so the many zero-value create-path callers are
 	// unaffected.
 	TransientSlot bool
+	// InstanceToken is the token the new row carries; empty mints one. The v2
+	// allocator mints it at plan time: it is the create's ledger marker.
+	InstanceToken string
+	// BeforeWrite, when set, runs just before the row write with the row ID
+	// the store pre-mints (empty when it mints none).
+	BeforeWrite func(rowID string)
 }
+
+// poolCreateWriteError marks a create error from the row write itself, or
+// from after it: the row may exist (rowID, when known, names it). The v2
+// create effect settles such an error as ambiguous, with its token as the
+// marker, so lag repair decides (C5.4). The message is the cause's, so legacy
+// output is unchanged.
+type poolCreateWriteError struct {
+	err   error
+	rowID string
+}
+
+func (e poolCreateWriteError) Error() string { return e.err.Error() }
+func (e poolCreateWriteError) Unwrap() error { return e.err }
 
 // poolSessionIdentifiers is the pure identity derivation needed before a pool
 // create can enter its reservation fence. sessionName is the runtime handle
@@ -324,7 +343,10 @@ func createPoolSessionBeadWithIdentifiers(
 			return sessionpkg.Info{}, err
 		}
 	}
-	instanceToken := sessionpkg.NewInstanceToken()
+	instanceToken := identity.InstanceToken
+	if instanceToken == "" {
+		instanceToken = sessionpkg.NewInstanceToken()
+	}
 	title := targetBasename(template)
 	if providedAgentName != "" {
 		title = agentName
@@ -377,6 +399,9 @@ func createPoolSessionBeadWithIdentifiers(
 	if identity.Slot > 0 {
 		meta[sessionpkg.CanonicalPoolSlotMetadata] = strconv.Itoa(identity.Slot)
 	}
+	if identity.BeforeWrite != nil {
+		identity.BeforeWrite(explicitID)
+	}
 	// CreateSessionInfo projects the just-created bead (no post-create store.Get).
 	// The session_name is already final in meta, so there is no second write.
 	info, err := sessionFrontDoor(store).CreateSessionInfo(sessionpkg.CreateSpec{
@@ -386,7 +411,7 @@ func createPoolSessionBeadWithIdentifiers(
 		Metadata:  meta,
 	})
 	if err != nil {
-		return sessionpkg.Info{}, err
+		return sessionpkg.Info{}, poolCreateWriteError{err: err, rowID: explicitID}
 	}
 	if identifiers.beadScoped {
 		if want := PoolSessionName(template, info.ID); info.SessionNameMetadata != want {
@@ -394,7 +419,7 @@ func createPoolSessionBeadWithIdentifiers(
 				// Nothing was started under the placeholder; closing as
 				// failed_create releases the identity lease for the next tick.
 				closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, io.Discard)
-				return sessionpkg.Info{}, err
+				return sessionpkg.Info{}, poolCreateWriteError{err: err, rowID: info.ID}
 			}
 			info = info.ApplyPatch(sessionpkg.MetadataPatch{"session_name": want})
 		}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"sort"
 	"sync"
 	"time"
@@ -32,10 +33,20 @@ const (
 	// ledgerCacheLagBound is how long a landed effect's marker may stay out
 	// of the census before lag repair reads the row (C5.15 as amended).
 	ledgerCacheLagBound = 60 * time.Second
-	// ledgerVetoBase and ledgerVetoMax bound a key's veto backoff (C5.11).
+	// ledgerVetoBase and ledgerVetoMax bound a key's veto backoff (C5.11),
+	// and a create identity's (AM-N8).
 	ledgerVetoBase = 10 * time.Second
 	ledgerVetoMax  = 5 * time.Minute
 )
+
+// vetoBackoff is C5.11's backoff for the nth consecutive refusal: 10s
+// doubling, capped at 5m.
+func vetoBackoff(n int) time.Duration {
+	if n > 6 { // 10s × 2^5 = 320s already exceeds the cap
+		return ledgerVetoMax
+	}
+	return min(ledgerVetoBase<<(max(n, 1)-1), ledgerVetoMax)
+}
 
 type ledgerKind uint8
 
@@ -156,6 +167,38 @@ type ledgerRow struct {
 	PendingCreate bool
 }
 
+// createIdentity is the identity a create plan materializes. Create vetoes
+// key on it (AM-N8): a row key does not exist until the create lands.
+type createIdentity struct {
+	Template          string
+	QualifiedInstance string
+	// Slot is the plan's pool slot. It is not part of the key; pruning reads
+	// it to re-derive the identity from config.
+	Slot int
+}
+
+func (c createIdentity) key() string { return c.Template + "/" + c.QualifiedInstance }
+
+// createVeto is a create identity's refusal (AM-N8, C5.11's backoff keyed by
+// the plan identity): a create effect for it failed without writing, for a
+// cause the census may never show (a closed row that owns a name, a lock or
+// store error, a transport the provider cannot carry). The planner skips the
+// identity while the veto is live and publishes
+// ineligible:create-refused:<Cause>. The veto clears at Until, but its count
+// stays, so the next refusal backs off further; a create that commits for the
+// identity, or a ConfigRev change, resets it.
+type createVeto struct {
+	Identity createIdentity
+	// ConfigRev is the config the refused create was reserved under.
+	ConfigRev   string
+	Until       time.Time
+	Consecutive int
+	Cause       string
+}
+
+// live reports whether v still refuses its identity at now.
+func (v createVeto) live(now time.Time) bool { return v.Until.After(now) }
+
 // intentLedger is shared by the allocator and the session keys. It holds
 // tens of entries, bounded by the in-flight cap plus vetoes.
 type intentLedger struct {
@@ -167,10 +210,17 @@ type intentLedger struct {
 	// start. It outlives the veto entries, which clear at Until.
 	vetoes  map[rowKey]int
 	vetoSeq uint64
+	// createVetoes is the create veto of each refused create identity, by
+	// createIdentity.key. It is its own key space: ForgetClosed and Issue,
+	// which manage row vetoes, never touch it.
+	createVetoes map[string]createVeto
 }
 
 func newIntentLedger(now func() time.Time) *intentLedger {
-	return &intentLedger{now: now, entries: make(map[string]*ledgerEntry), vetoes: make(map[rowKey]int)}
+	return &intentLedger{
+		now: now, entries: make(map[string]*ledgerEntry), vetoes: make(map[rowKey]int),
+		createVetoes: make(map[string]createVeto),
+	}
 }
 
 // Reserve records a create or grant the allocator admitted, debited by the
@@ -232,6 +282,21 @@ func (l *intentLedger) Issue(grantID string, k rowKey) bool {
 	return ok
 }
 
+// IssueCreate is the create executor's commitment point: reserved → issued
+// for create entry id. It returns the entry's pre-minted instance token,
+// which the effect writes on the row. If it fails (the allocator released
+// the entry first, or id is not a create), the effect performs nothing.
+func (l *intentLedger) IssueCreate(id string) (token string, ok bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	ok = l.transitionLocked(id, ledgerReserved, ledgerIssued, isCreateEntry, func(e *ledgerEntry) {
+		token = e.Marker.InstanceToken
+	})
+	return token, ok
+}
+
+func isCreateEntry(e *ledgerEntry) bool { return e.Kind == kindCreate }
+
 // MarkProviderCalled records, before provider Start, that the start's
 // token is spent whatever the outcome (C5.6, #45).
 func (l *intentLedger) MarkProviderCalled(id string) {
@@ -255,11 +320,71 @@ func (l *intentLedger) Fail(id string, wroteRow bool, m ledgerMarker) bool {
 	return l.settle(id, ledgerFailed, wroteRow, m)
 }
 
+// CommitCreate records that create id wrote its row: issued → committed,
+// with the row and token as its marker. The create proved identity c
+// creatable, so it resets c's create veto.
+func (l *intentLedger) CommitCreate(id string, c createIdentity, m ledgerMarker) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.settleLocked(id, ledgerCommitted, true, m, isCreateEntry) {
+		return false
+	}
+	delete(l.createVetoes, c.key())
+	return true
+}
+
+// FailCreate records that create id failed without writing: issued →
+// failed, and, under the same lock, a create veto for identity c with cause
+// (AM-N8). No pass sees the failed entry, whose clear refunds its token,
+// without the veto that keeps the planner from re-planning c at pass rate.
+// While c's veto is live, another refusal keeps the count and extends Until;
+// a refusal under another ConfigRev starts the count afresh.
+func (l *intentLedger) FailCreate(id string, c createIdentity, cause string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.settleLocked(id, ledgerFailed, false, ledgerMarker{}, isCreateEntry) {
+		return false
+	}
+	now, rev := l.now(), l.entries[id].ConfigRev
+	v, ok := l.createVetoes[c.key()]
+	if ok && v.ConfigRev != rev {
+		v, ok = createVeto{}, false
+	}
+	if !ok || !v.live(now) {
+		v.Consecutive++
+	}
+	if until := now.Add(vetoBackoff(v.Consecutive)); until.After(v.Until) {
+		v.Until = until
+	}
+	v.Identity, v.ConfigRev, v.Cause = c, rev, cause
+	l.createVetoes[c.key()] = v
+	return true
+}
+
+// PruneCreateVetoes drops every create veto recorded under a ConfigRev other
+// than configRev (a config change may cure the refusal, and AM-N8 resets on
+// it) and every veto whose identity configured no longer holds, so the veto
+// memory stays bounded by the configured identities. The allocator calls it
+// at each pass start.
+func (l *intentLedger) PruneCreateVetoes(configRev string, configured func(createIdentity) bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for k, v := range l.createVetoes {
+		if v.ConfigRev != configRev || !configured(v.Identity) {
+			delete(l.createVetoes, k)
+		}
+	}
+}
+
 func (l *intentLedger) settle(id string, to ledgerState, wroteRow bool, m ledgerMarker) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.settleLocked(id, to, wroteRow, m, nil)
+}
+
+func (l *intentLedger) settleLocked(id string, to ledgerState, wroteRow bool, m ledgerMarker, allow func(*ledgerEntry) bool) bool {
 	now := l.now()
-	return l.transitionLocked(id, ledgerIssued, to, nil, func(e *ledgerEntry) {
+	return l.transitionLocked(id, ledgerIssued, to, allow, func(e *ledgerEntry) {
 		e.WroteRow, e.SettledAt = wroteRow, now
 		e.Marker.RowID = firstNonEmpty(m.RowID, e.Marker.RowID)
 		e.Marker.InstanceToken = firstNonEmpty(m.InstanceToken, e.Marker.InstanceToken)
@@ -297,11 +422,7 @@ func (l *intentLedger) Veto(k rowKey, until time.Time, reason string) {
 		l.vetoes[k]++
 	}
 	n := l.vetoes[k]
-	backoff := ledgerVetoMax
-	if n <= 6 { // 10s × 2^5 = 320s already exceeds the cap
-		backoff = min(ledgerVetoBase<<(n-1), ledgerVetoMax)
-	}
-	if b := now.Add(backoff); b.After(until) {
+	if b := now.Add(vetoBackoff(n)); b.After(until) {
 		until = b
 	}
 	if live != nil {
@@ -369,10 +490,24 @@ func (l *intentLedger) ForgetClosed(c ledgerCensus) {
 	}
 }
 
-// View returns a copy of every entry, ordered by ID, for one pass.
+// View returns a copy of every entry, ordered by ID.
 func (l *intentLedger) View() []ledgerEntry {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.viewLocked()
+}
+
+// Snapshot is View plus a copy of the create vetoes, by createIdentity.key,
+// read under one lock: what one pass reads. A pass that read them apart
+// could see a failed create without the veto FailCreate recorded with it.
+// The pass skips an identity whose veto is live at its DecisionAt.
+func (l *intentLedger) Snapshot() ([]ledgerEntry, map[string]createVeto) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.viewLocked(), maps.Clone(l.createVetoes)
+}
+
+func (l *intentLedger) viewLocked() []ledgerEntry {
 	out := make([]ledgerEntry, 0, len(l.entries))
 	for _, e := range l.entries {
 		out = append(out, *e)

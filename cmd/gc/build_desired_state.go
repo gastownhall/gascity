@@ -4967,31 +4967,28 @@ func freshPoolOccupancyInfos(bp *agentBuildParams) []session.Info {
 
 // freshPoolAvailabilityInfos re-reads every configured session-census leg
 // while the caller holds all derived identifier locks, then conservatively
-// unions that current view with the build's original complete census and the
-// mutable primary snapshot. A holder that disappeared after planning therefore
-// cannot open a name during the same build, while a holder created in any
-// foreign leg after planning is visible before mutation.
+// unions that current view with the original complete census the create was
+// planned against and the mutable primary snapshot. A holder that disappeared
+// after planning therefore cannot open a name during the same build, while a
+// holder created in any foreign leg after planning is visible before mutation.
 //
 // Exact duplicate projections are folded, but two projections of the same
 // stable bead ID with different alias/name/identity fields are deliberately
 // retained: either spelling may still be observed by a concurrent runtime and
 // must continue to reserve its namespace for this build.
-func freshPoolAvailabilityInfos(bp *agentBuildParams) ([]session.Info, error) {
-	if bp == nil {
-		return nil, fmt.Errorf("refreshing pool session availability: build params unavailable")
-	}
+func freshPoolAvailabilityInfos(v poolCreateView) ([]session.Info, error) {
 	fresh, err := collectAllOpenSessionAvailabilityInfos(
-		bp.cityPath,
-		bp.city,
-		bp.beadStore,
-		bp.sessionCensusRigStores,
-		bp.sessionCensusSuspendedRigPaths,
+		v.cityPath,
+		v.city,
+		v.store,
+		v.rigStores,
+		v.suspendedRigPaths,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("refreshing complete pool session availability: %w", err)
 	}
-	primary := bp.sessionBeads.OpenInfos()
-	infos := make([]session.Info, 0, len(fresh)+len(bp.sessionOccupancyInfos)+len(primary))
+	primary := v.primary.OpenInfos()
+	infos := make([]session.Info, 0, len(fresh)+len(v.planning)+len(primary))
 	seen := make(map[string]bool, cap(infos))
 	appendInfo := func(info session.Info) {
 		key := strings.Join([]string{
@@ -5009,7 +5006,7 @@ func freshPoolAvailabilityInfos(bp *agentBuildParams) ([]session.Info, error) {
 	for _, info := range fresh {
 		appendInfo(info)
 	}
-	for _, info := range bp.sessionOccupancyInfos {
+	for _, info := range v.planning {
 		appendInfo(info)
 	}
 	for _, info := range primary {
@@ -5214,8 +5211,11 @@ func createPoolSessionBeadWithGuardedAlias(
 	if bp != nil && bp.planOnly {
 		return session.Info{}, errPlanOnlyEffect
 	}
+	if bp == nil {
+		return session.Info{}, fmt.Errorf("creating pool session for %q: build params unavailable", template)
+	}
 	return createPoolSessionBeadWithGuardedAliasUsingLock(
-		bp,
+		poolCreateViewOf(bp),
 		cfgAgent,
 		template,
 		qualifiedInstance,
@@ -5225,8 +5225,65 @@ func createPoolSessionBeadWithGuardedAlias(
 	)
 }
 
+// poolCreateView is what a guarded pool create reads: the effect-local view
+// that replaces agentBuildParams, so the v2 allocator's create effect
+// (allocator_create.go) runs the same fenced create from its plan and host.
+// Legacy builds it from its build params (poolCreateViewOf).
+type poolCreateView struct {
+	cityPath string
+	city     *config.City
+	// store receives the new row. With rigStores and suspendedRigPaths it
+	// names the census legs the locked re-census reads live.
+	store             beads.Store
+	rigStores         map[string]beads.Store
+	suspendedRigPaths map[string]bool
+	// planning is the complete census the create was planned against.
+	// primary is the mutable snapshot that receives the new row, so later
+	// creates of the same build see it; nil writes nothing back.
+	planning []session.Info
+	primary  *sessionBeadSnapshot
+	// validateTransport and tmuxAlias resolve the agent's session transport
+	// and tmux alias.
+	validateTransport func(cfgAgent *config.Agent, qualifiedName string) error
+	tmuxAlias         func(cfgAgent *config.Agent) (string, error)
+	// runtimeOccupied is legacy's canonical-singleton provider probe. The
+	// allocator leaves it nil: it decided singleton occupancy at plan time
+	// from the observation cache (C7.3, POOL-052).
+	runtimeOccupied func(sessionName string) bool
+	startedAt       func() time.Time
+	// instanceToken is the token the new row carries; empty mints one. The
+	// allocator mints it at plan time as its ledger marker.
+	instanceToken string
+	// beforeWrite, when set, runs just before the row write with the row ID
+	// the store pre-mints (empty when it mints none). The allocator's effect
+	// uses it to tell a panic before the write from one after it.
+	beforeWrite func(rowID string)
+}
+
+// poolCreateViewOf is legacy's view: its build params, unchanged.
+func poolCreateViewOf(bp *agentBuildParams) poolCreateView {
+	v := poolCreateView{
+		cityPath:          bp.cityPath,
+		city:              bp.city,
+		store:             bp.beadStore,
+		rigStores:         bp.sessionCensusRigStores,
+		suspendedRigPaths: bp.sessionCensusSuspendedRigPaths,
+		planning:          bp.sessionOccupancyInfos,
+		primary:           bp.sessionBeads,
+		validateTransport: func(cfgAgent *config.Agent, qualifiedName string) error {
+			return validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedName)
+		},
+		tmuxAlias: bp.resolveTmuxAliasForAgent,
+		startedAt: func() time.Time { return poolSessionCreateStartedAt(bp) },
+	}
+	if bp.sp != nil {
+		v.runtimeOccupied = bp.sp.IsRunning
+	}
+	return v
+}
+
 func createPoolSessionBeadWithGuardedAliasUsingLock(
-	bp *agentBuildParams,
+	v poolCreateView,
 	cfgAgent *config.Agent,
 	template string,
 	qualifiedInstance string,
@@ -5234,16 +5291,13 @@ func createPoolSessionBeadWithGuardedAliasUsingLock(
 	metadata map[string]string,
 	withLocks poolSessionIdentifierLockFunc,
 ) (session.Info, error) {
-	if bp == nil {
-		return session.Info{}, fmt.Errorf("creating pool session for %q: build params unavailable", template)
-	}
 	if withLocks == nil {
 		return session.Info{}, fmt.Errorf("creating pool session for %q: identifier locker unavailable", template)
 	}
-	if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedInstance); err != nil {
+	if err := v.validateTransport(cfgAgent, qualifiedInstance); err != nil {
 		return session.Info{}, err
 	}
-	resolvedTmuxAlias, err := bp.resolveTmuxAliasForAgent(cfgAgent)
+	resolvedTmuxAlias, err := v.tmuxAlias(cfgAgent)
 	if err != nil {
 		return session.Info{}, err
 	}
@@ -5266,6 +5320,8 @@ func createPoolSessionBeadWithGuardedAliasUsingLock(
 		Slot:          slot,
 		Metadata:      metadata,
 		TransientSlot: transientSlot,
+		InstanceToken: v.instanceToken,
+		BeforeWrite:   v.beforeWrite,
 	}
 	// A transient slot is never reserved as an alias: it is not an identity, so
 	// there is nothing to guard against collision and nothing to persist. The
@@ -5282,7 +5338,7 @@ func createPoolSessionBeadWithGuardedAliasUsingLock(
 	if transientSlot {
 		persistAlias = ""
 	}
-	identifiers, err := derivePoolSessionIdentifiers(bp.city, template, identity, resolvedTmuxAlias)
+	identifiers, err := derivePoolSessionIdentifiers(v.city, template, identity, resolvedTmuxAlias)
 	if err != nil {
 		return session.Info{}, err
 	}
@@ -5299,22 +5355,22 @@ func createPoolSessionBeadWithGuardedAliasUsingLock(
 	// identifier spelling. Probing under those locks would stall every other
 	// creator of the same identifiers behind it. Do not close the
 	// probe-to-create window by widening the lock over this call.
-	if cfgAgent != nil && cfgAgent.UsesCanonicalSingletonPoolIdentity() && bp.sp != nil && bp.sp.IsRunning(identifiers.sessionName) {
+	if cfgAgent != nil && cfgAgent.UsesCanonicalSingletonPoolIdentity() && v.runtimeOccupied != nil && v.runtimeOccupied(identifiers.sessionName) {
 		return session.Info{}, fmt.Errorf("%w: runtime %q still occupies singleton template %q", errPoolSessionNameUnavailable, identifiers.sessionName, template)
 	}
-	if bp.beadStore == nil {
-		return createPoolSessionBeadWithIdentifiers(bp.beadStore, template, bp.city, bp.sessionBeads, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, identifiers)
+	if v.store == nil {
+		return createPoolSessionBeadWithIdentifiers(v.store, template, v.city, v.primary, v.primary, v.startedAt(), identity, identifiers)
 	}
 	lockIDs := poolSessionCreateLockIdentifiers(identifiers, alias, resolvedTmuxAlias)
 
 	var info session.Info
-	lockErr := withLocks(bp.cityPath, lockIDs, func() error {
+	lockErr := withLocks(v.cityPath, lockIDs, func() error {
 		createIdentity := identity
 		// The exact identifier locks fence compliant creators across every store,
 		// but the pre-lock planning census is not current enough to prove absence.
 		// Re-read the full session topology under the lock. Any partial leg makes
 		// both alias and runtime-name answers unprovable, so fail before mutation.
-		availabilityInfos, availabilityErr := freshPoolAvailabilityInfos(bp)
+		availabilityInfos, availabilityErr := freshPoolAvailabilityInfos(v)
 		if availabilityErr != nil {
 			return fmt.Errorf("checking locked pool availability for template %q: %w", template, availabilityErr)
 		}
@@ -5323,7 +5379,7 @@ func createPoolSessionBeadWithGuardedAliasUsingLock(
 			// the pool bead is created without a public alias and sync records
 			// pool_alias_conflict. An unanswerable reservation query is different:
 			// it is not proof of a collision and must fail the entire create closed.
-			aliasErr := session.EnsureAliasAvailableWithConfig(bp.beadStore, bp.city, alias, "")
+			aliasErr := session.EnsureAliasAvailableWithConfig(v.store, v.city, alias, "")
 			if aliasErr == nil {
 				aliasErr = poolAliasCollisionFromInfos(availabilityInfos, alias)
 			}
@@ -5340,12 +5396,12 @@ func createPoolSessionBeadWithGuardedAliasUsingLock(
 		// Only the primary snapshot receives the successful-create writeback.
 		availabilitySnapshot := newSessionBeadSnapshotFromInfos(availabilityInfos)
 		info, createErr = createPoolSessionBeadWithIdentifiers(
-			bp.beadStore,
+			v.store,
 			template,
-			bp.city,
+			v.city,
 			availabilitySnapshot,
-			bp.sessionBeads,
-			poolSessionCreateStartedAt(bp),
+			v.primary,
+			v.startedAt(),
 			createIdentity,
 			identifiers,
 		)
@@ -6878,25 +6934,41 @@ func resolveTemplatePrepared(bp *agentBuildParams, cfgAgent *config.Agent, quali
 }
 
 func validateAgentSessionTransportForBuild(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string) error {
-	if bp == nil || cfgAgent == nil {
+	if bp == nil {
 		return nil
 	}
-	if bp.lookPath == nil {
+	return validateAgentSessionTransport(bp.workspace, bp.providers, bp.lookPath, bp.sp, cfgAgent, qualifiedName)
+}
+
+// validateAgentSessionTransport checks that sp can carry the session
+// transport cfgAgent's provider resolves to. It reads sp's transport
+// capabilities only; it never probes a runtime.
+func validateAgentSessionTransport(
+	workspace *config.Workspace,
+	providers map[string]config.ProviderSpec,
+	lookPath config.LookPathFunc,
+	sp runtime.Provider,
+	cfgAgent *config.Agent,
+	qualifiedName string,
+) error {
+	if cfgAgent == nil {
+		return nil
+	}
+	if lookPath == nil {
 		// Legacy unit tests construct minimal build params without provider
 		// lookup plumbing. Production controller paths always install lookPath;
 		// coverage below exercises that production-shaped validation path.
 		return nil
 	}
-	workspace := bp.workspace
 	if workspace == nil {
 		workspace = &config.Workspace{}
 	}
-	resolved, err := config.ResolveProvider(cfgAgent, workspace, bp.providers, bp.lookPath)
+	resolved, err := config.ResolveProvider(cfgAgent, workspace, providers, lookPath)
 	if err != nil {
 		return fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
 	transport := config.ResolveSessionCreateTransport(cfgAgent.Session, resolved)
-	if err := validateResolvedSessionTransport(resolved, transport, bp.sp); err != nil {
+	if err := validateResolvedSessionTransport(resolved, transport, sp); err != nil {
 		return fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
 	return nil
