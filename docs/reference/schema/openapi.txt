@@ -1199,6 +1199,33 @@
         ],
         "type": "object"
       },
+      "BeadRedispatchCapHeldPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bead_id": {
+            "description": "ID of the auto-held work bead (also the envelope Subject).",
+            "type": "string"
+          },
+          "cycles": {
+            "description": "Number of consecutive drain-acked-with-assigned-work cycles observed inside the window before the cap tripped.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "routed_to": {
+            "description": "The gc.routed_to pool BeadID was stuck looping against, when set.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Session bead ID whose drain-ack cycle tripped the cap.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "cycles"
+        ],
+        "type": "object"
+      },
       "BeadUpdateBody": {
         "additionalProperties": false,
         "properties": {
@@ -2625,6 +2652,9 @@
           },
           {
             "$ref": "#/components/schemas/BeadEventPayload"
+          },
+          {
+            "$ref": "#/components/schemas/BeadRedispatchCapHeldPayload"
           },
           {
             "$ref": "#/components/schemas/BeadWorktreeReapSkippedPayload"
@@ -12483,6 +12513,7 @@
             "bead.created": "#/components/schemas/TypedEventStreamEnvelopeBeadCreated",
             "bead.dead_assignee_reopened": "#/components/schemas/TypedEventStreamEnvelopeBeadDeadAssigneeReopened",
             "bead.deleted": "#/components/schemas/TypedEventStreamEnvelopeBeadDeleted",
+            "bead.redispatch_cap_held": "#/components/schemas/TypedEventStreamEnvelopeBeadRedispatchCapHeld",
             "bead.updated": "#/components/schemas/TypedEventStreamEnvelopeBeadUpdated",
             "bead.worktree.reap_skipped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReapSkipped",
             "bead.worktree.reaped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReaped",
@@ -12601,6 +12632,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadDeleted"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadRedispatchCapHeld"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadUpdated"
@@ -13287,6 +13321,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope bead.deleted",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeBeadRedispatchCapHeld": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadRedispatchCapHeldPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.redispatch_cap_held",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope bead.redispatch_cap_held",
         "type": "object"
       },
       "TypedEventStreamEnvelopeBeadUpdated": {
@@ -14198,6 +14289,7 @@
                 "session.drain_stop_escalated",
                 "session.stranded",
                 "session.pool_slot_retired_at_drain_deadline",
+                "bead.redispatch_cap_held",
                 "session.unknown_state",
                 "session.wake_refused",
                 "session.reset_stalled",
@@ -18817,6 +18909,7 @@
             "bead.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadCreated",
             "bead.dead_assignee_reopened": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened",
             "bead.deleted": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeleted",
+            "bead.redispatch_cap_held": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld",
             "bead.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadUpdated",
             "bead.worktree.reap_skipped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped",
             "bead.worktree.reaped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReaped",
@@ -18935,6 +19028,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeleted"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadUpdated"
@@ -19649,6 +19745,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope bead.deleted",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadRedispatchCapHeldPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.redispatch_cap_held",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope bead.redispatch_cap_held",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeBeadUpdated": {
@@ -20623,6 +20780,7 @@
                 "session.drain_stop_escalated",
                 "session.stranded",
                 "session.pool_slot_retired_at_drain_deadline",
+                "bead.redispatch_cap_held",
                 "session.unknown_state",
                 "session.wake_refused",
                 "session.reset_stalled",
