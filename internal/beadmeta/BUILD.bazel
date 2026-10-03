@@ -13,6 +13,7 @@ go_library(
         "reserved_prefixes.go",
         "runid.go",
         "values.go",
+        "workflow_root.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/beadmeta",
     visibility = ["//:__subpackages__"],
@@ -34,6 +35,7 @@ go_test(
         "runid_test.go",
         "testenv_import_test.go",
         "values_test.go",
+        "workflow_root_test.go",
     ],
     data = glob(
         ["**"],

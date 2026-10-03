@@ -65,8 +65,9 @@ func demandServableForTemplates(cfg *config.City, b beads.Bead, templates map[st
 }
 
 // demandRowServable applies the route-independent half of the Tier-3 serving
-// rules to one row: the exclusions a worker's query enforces regardless of which
-// template it is asking for.
+// rules to one row: the exclusions that decide whether a worker is served the
+// row — those the query enforces and the one the hook's filter applies —
+// regardless of which template it is asking for.
 func demandRowServable(b beads.Bead) bool {
 	rules := config.PoolDemandServeRulesForQuery()
 	if rules.RequireUnassigned && strings.TrimSpace(b.Assignee) != "" {
@@ -102,6 +103,15 @@ func demandRowServable(b beads.Bead) bool {
 				return false
 			}
 		}
+	}
+	// EXPANDED WORKFLOW ROOT: trimmed, kind AND marker
+	// (beadmeta.IsExpandedWorkflowRoot). This one is not a rule of the query at
+	// all: the reader serves an open, unassigned expanded root, and the hook
+	// strips it in Go with this same predicate
+	// (isUnassignedExpandedWorkflowRootHookCandidate) before serving a
+	// candidate. The worker never sees it, so it is not capacity demand.
+	if beadmeta.IsExpandedWorkflowRoot(b.Metadata) {
+		return false
 	}
 	return true
 }

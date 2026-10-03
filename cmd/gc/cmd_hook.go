@@ -1151,6 +1151,8 @@ func workQueryHasReadyWork(output string) bool {
 // canonical dispatch hold label. The work_query is expected to gate these, but
 // defensive filtering here prevents a single broken query from cascading into
 // agent action on a bead it cannot progress.
+// It also strips an unassigned expanded workflow root, which is a container
+// rather than work and which the generated gc.routed_to tier does not gate.
 // Pure function over JSON; takes time.Time so tests stay deterministic.
 func filterUnreadyHookCandidates(output string, now time.Time) string {
 	if output == "" {
@@ -1184,6 +1186,9 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 			continue
 		}
 		if isHeldHookCandidate(obj) {
+			continue
+		}
+		if isUnassignedExpandedWorkflowRootHookCandidate(obj) {
 			continue
 		}
 		filtered = append(filtered, obj)
@@ -1362,6 +1367,27 @@ func isHeldHookCandidate(item map[string]any) bool {
 		}
 	}
 	return false
+}
+
+// isUnassignedExpandedWorkflowRootHookCandidate reports whether item is an
+// expanded workflow root (beadmeta.IsExpandedWorkflowRoot) that no session
+// holds. Such a root is a container whose child steps are the work, so serving
+// it hands a worker a workflow in place of a step.
+//
+// The generated gc.routed_to tier does not drop these rows, so this filter is
+// where a worker stops being served one. The controller's demand predicate
+// (demandRowServable) applies the same predicate, so a row stripped here is
+// not counted as demand either.
+//
+// The assignee condition keeps an expanded root a session already holds: that
+// root is the session's anchor and must reach the existing-assignment path. A
+// row that does not decode as a bead is not classified and is kept.
+func isUnassignedExpandedWorkflowRootHookCandidate(item map[string]any) bool {
+	candidate, ok := decodeHookCandidateBead(item)
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(candidate.Assignee) == "" && beadmeta.IsExpandedWorkflowRoot(candidate.Metadata)
 }
 
 // isClosedHookCandidate reports whether item is a closed bead. Defense-in-depth
