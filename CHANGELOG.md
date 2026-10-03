@@ -132,6 +132,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   queues behind the prompt, and the runtime refuses to type into it on every
   other delivery path (#2892).
 
+- **A message sent after stopping a Claude turn early is no longer merged
+  into the stopped prompt.** When `POST .../stop` (or `interrupt_now`) lands
+  before Claude's first response chunk, Claude Code puts the interrupted
+  prompt back into its input box. gc cleared the input box with one Ctrl-U,
+  which on Claude Code 2.1.288 deletes only one wrapped row, so the next
+  message was pasted behind the rest of the old prompt and both went out as
+  one. gc now presses Ctrl-U until the input box reads empty (and fails the
+  delivery if it will not empty), and `stop` waits briefly for the restored
+  prompt and clears it, so a stop leaves the input box empty. A submit whose
+  input box still holds any text is no longer reported as delivered.
+
 - **Work hidden by beads migration 0059 is dispatched again.** On the first
   start under a new bd version, `gc start` (and the supervisor, and
   `gc rig add` for the rig it adds) runs `bd recompute-blocked` once over each

@@ -1253,7 +1253,7 @@ func TestSubmitInterruptNowUsesInterruptAndIdleWaitForClaude(t *testing.T) {
 		if call.Method == "WaitForIdle" && call.Name == info.SessionName {
 			sawWaitForIdle = true
 		}
-		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "C-u" {
+		if call.Method == "ClearInput" && call.Name == info.SessionName {
 			sawClear = true
 			clearIdx = i
 		}
@@ -1266,10 +1266,10 @@ func TestSubmitInterruptNowUsesInterruptAndIdleWaitForClaude(t *testing.T) {
 		}
 	}
 	if !sawInterrupt || !sawWaitForIdle || !sawClear || !sawNudge {
-		t.Fatalf("calls = %#v, want interrupt + WaitForIdle + SendKeys(C-u) + nudge", sp.Calls)
+		t.Fatalf("calls = %#v, want interrupt + WaitForIdle + ClearInput + nudge", sp.Calls)
 	}
 	if clearIdx < 0 || nudgeIdx < 0 || clearIdx > nudgeIdx {
-		t.Fatalf("calls = %#v, want SendKeys(C-u) before nudge", sp.Calls)
+		t.Fatalf("calls = %#v, want ClearInput before nudge", sp.Calls)
 	}
 	if sawStop {
 		t.Fatalf("calls = %#v, did not want Stop for claude interrupt_now", sp.Calls)

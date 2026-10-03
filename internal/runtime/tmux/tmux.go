@@ -2780,15 +2780,18 @@ func (t *Tmux) nudgeSession(
 	// replacing it: stacked injections merge into one draft that Claude's TUI
 	// does not treat as a clean single-line submit (ra-3x46cy finding 2).
 	//
+	// For Claude the whole draft is cleared and verified: one Ctrl-U removes
+	// only one wrapped row there, and a prompt Claude restored after an early
+	// interrupt is usually several rows (see clearInputBeforePaste).
+	//
 	// Skip the clear when a client is attached, or when the probe cannot
 	// tell: a human may be mid-keystroke, and silently wiping their
 	// in-progress input is worse than the concatenation this clear otherwise
 	// prevents (#5192).
 	if attached, err := t.SessionAttachedWithError(session); err == nil && !attached {
-		if _, err := t.run("send-keys", "-t", paneTarget(target), "C-u"); err != nil {
+		if err := t.clearInputBeforePaste(target); err != nil {
 			return err
 		}
-		time.Sleep(50 * time.Millisecond)
 	}
 
 	// 1.5. Dismiss Claude Code's post-turn feedback survey if it is parked on
@@ -2888,7 +2891,7 @@ func (t *Tmux) nudgeSession(
 			// evidence the Enter reached the pane and the agent consumed it —
 			// only the busy-state OBSERVATION missed it — so that case must be
 			// reported as proven delivery, not requeued as a failure.
-			if lines, capErr := t.CapturePaneLines(target, promptObservationLines); capErr == nil && paneShowsDrainedComposer(lines, message) {
+			if lines, capErr := t.captureInputLines(target); capErr == nil && paneShowsDrainedComposer(lines) {
 				return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
 			}
 			return fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, session)
@@ -4691,25 +4694,25 @@ func paneContainsBusyIndicator(lines []string) bool {
 // agent consumed it. Earlier lines that also start with the prompt prefix are
 // scrollback transcript entries, not the live composer, and are ignored.
 //
-// It returns false when the composer still holds sent: the first non-empty
-// line of sent (compared on its first 40 runes, trimmed) is still present in
-// what remains after stripping the prompt prefix. That is the ga-bwm case --
-// the message is sitting drafted-but-unsubmitted -- and callers must keep
-// treating it as unconfirmed and retry. It returns true otherwise: the
-// composer is bare (or holds different, newer text), so the prior submit
-// drained it and only the busy-state OBSERVATION failed. When no line
-// matches the prompt prefix at all, the composer cannot be observed, so this
-// conservatively returns false rather than claiming delivery is proven.
-func paneShowsDrainedComposer(lines []string, sent string) bool {
+// It returns true only when the composer is bare: the prior submit drained it
+// and only the busy-state OBSERVATION failed. Any text left in the composer
+// means the submit is in doubt, and callers must keep treating it as
+// unconfirmed and retry. That covers the sent message sitting
+// drafted-but-unsubmitted (ga-bwm), and a merged draft that starts with
+// something else: when Claude restores an interrupted prompt and the message
+// is pasted behind it, the composer starts with the OLD prompt, so looking for
+// the sent text there reported an unsent draft as delivered. Where Claude
+// Code's framed input box is on screen, its wrapped rows count too. Dim text
+// (Claude's placeholder) must already be removed (see captureInputLines).
+// When no line matches the prompt prefix at all, the composer cannot be
+// observed, so this conservatively returns false rather than claiming
+// delivery is proven.
+func paneShowsDrainedComposer(lines []string) bool {
+	if in, ok := readClaudeInput(lines); ok {
+		return in.empty()
+	}
 	remainder, observed := lastComposerRemainder(lines, DefaultReadyPromptPrefix)
-	if !observed {
-		return false
-	}
-	draft := firstNRunes(strings.TrimSpace(firstNonEmptyLine(sent)), 40)
-	if draft != "" && strings.Contains(remainder, draft) {
-		return false
-	}
-	return true
+	return observed && strings.TrimSpace(remainder) == ""
 }
 
 // lastComposerRemainder returns the text after the ready-prompt prefix on the
@@ -4738,17 +4741,6 @@ func lastComposerRemainder(lines []string, readyPromptPrefix string) (string, bo
 		}
 	}
 	return remainder, observed
-}
-
-// firstNonEmptyLine returns the first line of s (split on "\n") that is not
-// blank after trimming, or "" if every line is blank.
-func firstNonEmptyLine(s string) string {
-	for _, line := range strings.Split(s, "\n") {
-		if trimmed := strings.TrimSpace(line); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
 }
 
 // firstNRunes returns the first n runes of s, or all of s when it has n

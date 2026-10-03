@@ -1117,12 +1117,16 @@ func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, mess
 // StopTurn issues a provider-appropriate interrupt for the currently running
 // turn. For providers that need post-interrupt idle settlement (e.g. Claude),
 // it waits for the session to return to an idle prompt before returning.
+// Claude Code puts a prompt interrupted before its first response chunk back
+// into its input box, so for Claude StopTurn also clears the input box, and
+// a stop leaves it empty.
 func (m *Manager) StopTurn(id string) error {
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
+		running := State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName)
 		interruptStartedAt := time.Now()
 		if err := m.stopTurnLocked(b, sessName); err != nil {
 			return err
@@ -1132,6 +1136,11 @@ func (m *Manager) StopTurn(id string) error {
 		}
 		if err := m.waitForInterruptBoundaryLocked(context.Background(), b, sessName, interruptStartedAt); err != nil {
 			return fmt.Errorf("waiting for stopped session interrupt boundary: %w", err)
+		}
+		if running && restoresInterruptedInput(b) {
+			if _, err := m.clearRestoredInputLocked(context.Background(), sessName); err != nil {
+				return fmt.Errorf("stopped the turn but %w", err)
+			}
 		}
 		return nil
 	})

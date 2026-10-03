@@ -754,12 +754,14 @@ func TestSessionHandleMessageInterruptNowUsesWorkerBoundary(t *testing.T) {
 	for _, call := range calls {
 		methods = append(methods, call.Method)
 	}
-	want := []string{"IsRunning", "Interrupt", "WaitForIdle", "SendKeys", "Pending", "NudgeNow"}
+	// Claude's interrupted prompt is cleared with the verified ClearInput,
+	// not a single Ctrl-U (one Ctrl-U removes only one wrapped row).
+	want := []string{"IsRunning", "Interrupt", "WaitForIdle", "ClearInput", "Pending", "NudgeNow"}
 	if !containsSubsequence(methods, want) {
 		t.Fatalf("methods = %v, want subsequence %v", methods, want)
 	}
-	if !hasCall(calls, "SendKeys", "C-u") {
-		t.Fatalf("calls = %#v, want SendKeys C-u", calls)
+	if hasCall(calls, "SendKeys", "C-u") {
+		t.Fatalf("methods = %v, want no single SendKeys C-u", methods)
 	}
 }
 

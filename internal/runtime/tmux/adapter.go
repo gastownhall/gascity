@@ -53,6 +53,7 @@ var (
 	_ runtime.ImmediateNudgeProvider        = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
+	_ runtime.InputClearProvider            = (*Provider)(nil)
 	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
 	_ runtime.SessionRosterProvider         = (*Provider)(nil)
@@ -594,6 +595,17 @@ func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Du
 // [runtime.IdleSnapshotProvider].
 func (p *Provider) SnapshotIdle(name string) (bool, error) {
 	return p.tm.SnapshotIdle(name)
+}
+
+// ClearInput empties a Claude Code session's input box, waiting up to
+// restoreWindow for Claude to restore an interrupted prompt into it. It
+// implements [runtime.InputClearProvider].
+func (p *Provider) ClearInput(ctx context.Context, name string, restoreWindow time.Duration) error {
+	err := p.tm.ClearInput(ctx, name, restoreWindow)
+	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+		return nil
+	}
+	return err
 }
 
 // WaitForInterruptBoundary waits for a provider-native interrupt acknowledgement

@@ -34,6 +34,7 @@ var (
 	_ runtime.IdleSnapshotProvider          = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
+	_ runtime.InputClearProvider            = (*Provider)(nil)
 	_ runtime.TransportCapabilityProvider   = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
@@ -353,6 +354,15 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error {
 	if rp, ok := p.route(name).(runtime.InterruptedTurnResetProvider); ok {
 		return rp.ResetInterruptedTurn(ctx, name)
+	}
+	return runtime.ErrInteractionUnsupported
+}
+
+// ClearInput delegates to the routed backend when it can empty a session's
+// input box and confirm it is empty.
+func (p *Provider) ClearInput(ctx context.Context, name string, restoreWindow time.Duration) error {
+	if cp, ok := p.route(name).(runtime.InputClearProvider); ok {
+		return cp.ClearInput(ctx, name, restoreWindow)
 	}
 	return runtime.ErrInteractionUnsupported
 }

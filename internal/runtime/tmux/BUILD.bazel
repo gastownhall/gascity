@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "adapter.go",
         "agent_slice.go",
+        "composer_clear.go",
         "cutover.go",
         "interaction.go",
         "process_group_unix.go",
@@ -58,6 +59,7 @@ go_test(
         "agent_slice_test.go",
         "attach_probe_test.go",
         "codex_submit_test.go",
+        "composer_clear_test.go",
         "copymode_cancel_test.go",
         "dialog_feedback_survey_test.go",
         "dialog_model_switch_test.go",

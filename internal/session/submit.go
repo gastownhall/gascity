@@ -217,7 +217,7 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 		return err
 	}
 	if shouldClearInterruptedInputBeforeSubmit(b) {
-		if err := m.clearInterruptedInputLocked(ctx, sessName); err != nil {
+		if err := m.clearInterruptedInputLocked(ctx, b, sessName); err != nil {
 			return err
 		}
 	}
@@ -436,7 +436,45 @@ func (m *Manager) resetInterruptedTurnLocked(ctx context.Context, b beads.Bead, 
 	return nil
 }
 
-func (m *Manager) clearInterruptedInputLocked(ctx context.Context, sessName string) error {
+// claudeInputRestoreWindow is how long StopTurn and interrupt_now give Claude
+// Code to put an interrupted prompt back into its input box before clearing
+// it. In the lost-turn repro (Claude Code 2.1.288) the prompt reappeared
+// within about 0.3 s of the idle prompt.
+const claudeInputRestoreWindow = 2 * time.Second
+
+// restoresInterruptedInput reports whether the provider puts a prompt that was
+// interrupted before its first response chunk back into its input box. Claude
+// Code does: the next message is appended to it unless the input box is
+// cleared first.
+func restoresInterruptedInput(b beads.Bead) bool {
+	return transportFromMetadata(b) != "acp" && providerKind(b) == "claude"
+}
+
+// clearRestoredInputLocked waits briefly for Claude to restore an interrupted
+// prompt, then clears the input box and verifies it is empty. handled is false
+// when the runtime cannot do a verified clear.
+func (m *Manager) clearRestoredInputLocked(ctx context.Context, sessName string) (handled bool, err error) {
+	clearer, ok := m.sp.(runtime.InputClearProvider)
+	if !ok {
+		return false, nil
+	}
+	err = clearer.ClearInput(ctx, sessName, claudeInputRestoreWindow)
+	if errors.Is(err, runtime.ErrInteractionUnsupported) {
+		return false, nil
+	}
+	if err != nil {
+		return true, fmt.Errorf("clearing the interrupted prompt from the input box: %w", err)
+	}
+	return true, nil
+}
+
+func (m *Manager) clearInterruptedInputLocked(ctx context.Context, b beads.Bead, sessName string) error {
+	if restoresInterruptedInput(b) {
+		handled, err := m.clearRestoredInputLocked(ctx, sessName)
+		if err != nil || handled {
+			return err
+		}
+	}
 	if err := m.sp.SendKeys(sessName, "C-u"); err != nil {
 		return fmt.Errorf("clearing interrupted input: %w", err)
 	}

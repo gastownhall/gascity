@@ -524,6 +524,20 @@ type InterruptedTurnResetProvider interface {
 	ResetInterruptedTurn(ctx context.Context, name string) error
 }
 
+// InputClearProvider is an optional extension for runtimes that can empty a
+// session's input box and confirm it is empty.
+//
+// Claude Code puts a prompt that was interrupted before its first response
+// back into the input box, sometimes after the interrupt has settled. Left
+// there, the next submitted message is appended to it and both go out as one.
+// ClearInput waits up to restoreWindow for such a draft to appear, clears it,
+// and confirms the input box reads empty. It sends no keys when the input box
+// stays empty, and returns an error when a draft is visible but cannot be
+// cleared.
+type InputClearProvider interface {
+	ClearInput(ctx context.Context, name string, restoreWindow time.Duration) error
+}
+
 // InterruptBoundaryWaitProvider is an optional extension for runtimes that can
 // confirm a provider-native interrupt boundary before the next user turn is
 // injected.
