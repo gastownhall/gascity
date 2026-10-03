@@ -241,10 +241,20 @@ const (
 	// Emitted by the session reconciler's start-result commit path; the
 	// envelope's Subject carries the session name.
 	SessionColdStartTimeout = "session.cold_start_timeout"
-	ConvoyCreated           = "convoy.created"
-	ConvoyClosed            = "convoy.closed"
-	ControllerStarted       = "controller.started"
-	ControllerStopped       = "controller.stopped"
+	// PoolSpawnChurnCoolingDown fires when the pool spawn-churn breaker
+	// (ra-co9epr, recordPoolSpawnChurn) suppresses further blind ("new" tier,
+	// no identified candidate work bead) spawns for a template after
+	// consecutive pool sessions spawned for scale_check-only demand closed
+	// having claimed no work. Measured overnight: 46 real sessions in 18.5
+	// minutes on the novices pool, 0% useful. Bound ("new" tier with an
+	// identified WorkBeadID) requests are unaffected — the breaker only
+	// withholds spawns that were never verified against actual claimable
+	// demand.
+	PoolSpawnChurnCoolingDown = "session.pool_spawn_churn_cooling_down"
+	ConvoyCreated             = "convoy.created"
+	ConvoyClosed              = "convoy.closed"
+	ControllerStarted         = "controller.started"
+	ControllerStopped         = "controller.stopped"
 	// ControlStalled fires once per disposition whose bounded retry budget
 	// expires: a semantic refusal the control dispatcher then QUARANTINES
 	// (error_class "semantic"), or a drift-pending wait whose loudness horizon
@@ -482,6 +492,7 @@ var KnownEventTypes = []string{
 	SessionDrainFenceUnavailable,
 	SessionDemandClaimDivergence,
 	SessionColdStartTimeout,
+	PoolSpawnChurnCoolingDown,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,

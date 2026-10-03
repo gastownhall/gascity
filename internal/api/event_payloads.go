@@ -599,6 +599,32 @@ func BeadDeadAssigneeReopenedPayloadJSON(beadID, deadAssignee, routedTo string) 
 	return b
 }
 
+// PoolSpawnChurnCoolingDownPayload is the typed payload for
+// session.pool_spawn_churn_cooling_down events. Emitted when the pool
+// spawn-churn breaker (ra-co9epr) suppresses further blind spawns for a
+// template after consecutive pool sessions spawned for scale_check-only
+// demand closed having claimed no work — the "46 sessions in 18 minutes, 0%
+// useful" signature.
+type PoolSpawnChurnCoolingDownPayload struct {
+	Template      string `json:"template" doc:"Agent template whose blind spawns are being suppressed (also the envelope Subject)."`
+	Consecutive   int    `json:"consecutive" doc:"Number of consecutive blind-spawned sessions observed to claim no work before the breaker tripped."`
+	CooldownUntil string `json:"cooldown_until" doc:"RFC3339 timestamp until which blind (unverified) spawns are suppressed for this template."`
+}
+
+// IsEventPayload marks PoolSpawnChurnCoolingDownPayload as an events.Payload variant.
+func (PoolSpawnChurnCoolingDownPayload) IsEventPayload() {}
+
+// PoolSpawnChurnCoolingDownPayloadJSON builds the JSON wire form for
+// attachment to an events.Event.Payload field.
+func PoolSpawnChurnCoolingDownPayloadJSON(template string, consecutive int, cooldownUntil time.Time) json.RawMessage {
+	b, _ := json.Marshal(PoolSpawnChurnCoolingDownPayload{
+		Template:      template,
+		Consecutive:   consecutive,
+		CooldownUntil: cooldownUntil.UTC().Format(time.RFC3339),
+	})
+	return b
+}
+
 // SessionUnknownStatePayload carries the machine-readable context for a
 // session.unknown_state event: a session bead whose metadata state the
 // reconciler does not recognize and therefore skips (forward-compatible
@@ -678,6 +704,7 @@ func init() {
 	events.RegisterPayload(events.BeadClosed, BeadEventPayload{})
 	events.RegisterPayload(events.BeadDeleted, BeadEventPayload{})
 	events.RegisterPayload(events.BeadDeadAssigneeReopened, BeadDeadAssigneeReopenedPayload{})
+	events.RegisterPayload(events.PoolSpawnChurnCoolingDown, PoolSpawnChurnCoolingDownPayload{})
 
 	// session.* / convoy.* / controller.* / city.* / order.* /
 	// provider.* — these events carry no structured payload today;

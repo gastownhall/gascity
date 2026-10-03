@@ -2963,6 +2963,18 @@ type PoolOverride struct {
 	OnDeath      *string `json:"OnDeath"`
 }
 
+// PoolSpawnChurnCoolingDownPayload defines model for PoolSpawnChurnCoolingDownPayload.
+type PoolSpawnChurnCoolingDownPayload struct {
+	// Consecutive Number of consecutive blind-spawned sessions observed to claim no work before the breaker tripped.
+	Consecutive int64 `json:"consecutive"`
+
+	// CooldownUntil RFC3339 timestamp until which blind (unverified) spawns are suppressed for this template.
+	CooldownUntil string `json:"cooldown_until"`
+
+	// Template Agent template whose blind spawns are being suppressed (also the envelope Subject).
+	Template string `json:"template"`
+}
+
 // ProjectIdentityStampedPayload defines model for ProjectIdentityStampedPayload.
 type ProjectIdentityStampedPayload struct {
 	Layer     string  `json:"layer"`
@@ -6668,6 +6680,22 @@ type TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline struct {
 	Workflow         *WorkflowEventProjection                     `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown defines model for TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown.
+type TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown struct {
+	Actor            string                           `json:"actor"`
+	DependsOnStepIds *[]string                        `json:"depends_on_step_ids,omitempty"`
+	Message          *string                          `json:"message,omitempty"`
+	Payload          PoolSpawnChurnCoolingDownPayload `json:"payload"`
+	RunId            *string                          `json:"run_id,omitempty"`
+	Seq              int64                            `json:"seq"`
+	SessionId        *string                          `json:"session_id,omitempty"`
+	StepId           *string                          `json:"step_id,omitempty"`
+	Subject          *string                          `json:"subject,omitempty"`
+	Ts               time.Time                        `json:"ts"`
+	Type             string                           `json:"type"`
+	Workflow         *WorkflowEventProjection         `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionQuarantined defines model for TypedEventStreamEnvelopeSessionQuarantined.
 type TypedEventStreamEnvelopeSessionQuarantined struct {
 	Actor            string                   `json:"actor"`
@@ -8382,6 +8410,23 @@ type TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline struct 
 	Ts               time.Time                                    `json:"ts"`
 	Type             string                                       `json:"type"`
 	Workflow         *WorkflowEventProjection                     `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown defines model for TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown.
+type TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown struct {
+	Actor            string                           `json:"actor"`
+	City             string                           `json:"city"`
+	DependsOnStepIds *[]string                        `json:"depends_on_step_ids,omitempty"`
+	Message          *string                          `json:"message,omitempty"`
+	Payload          PoolSpawnChurnCoolingDownPayload `json:"payload"`
+	RunId            *string                          `json:"run_id,omitempty"`
+	Seq              int64                            `json:"seq"`
+	SessionId        *string                          `json:"session_id,omitempty"`
+	StepId           *string                          `json:"step_id,omitempty"`
+	Subject          *string                          `json:"subject,omitempty"`
+	Ts               time.Time                        `json:"ts"`
+	Type             string                           `json:"type"`
+	Workflow         *WorkflowEventProjection         `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionQuarantined defines model for TypedTaggedEventStreamEnvelopeSessionQuarantined.
@@ -11089,6 +11134,32 @@ func (t *EventPayload) FromOutboundEventPayload(v OutboundEventPayload) error {
 
 // MergeOutboundEventPayload performs a merge with any union data inside the EventPayload, using the provided OutboundEventPayload
 func (t *EventPayload) MergeOutboundEventPayload(v OutboundEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsPoolSpawnChurnCoolingDownPayload returns the union data inside the EventPayload as a PoolSpawnChurnCoolingDownPayload
+func (t EventPayload) AsPoolSpawnChurnCoolingDownPayload() (PoolSpawnChurnCoolingDownPayload, error) {
+	var body PoolSpawnChurnCoolingDownPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromPoolSpawnChurnCoolingDownPayload overwrites any union data inside the EventPayload as the provided PoolSpawnChurnCoolingDownPayload
+func (t *EventPayload) FromPoolSpawnChurnCoolingDownPayload(v PoolSpawnChurnCoolingDownPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergePoolSpawnChurnCoolingDownPayload performs a merge with any union data inside the EventPayload, using the provided PoolSpawnChurnCoolingDownPayload
+func (t *EventPayload) MergePoolSpawnChurnCoolingDownPayload(v PoolSpawnChurnCoolingDownPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -15738,6 +15809,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionPoolSlotR
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown() (TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown, error) {
+	var body TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown(v TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown) error {
+	v.Type = "session.pool_spawn_churn_cooling_down"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown(v TypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown) error {
+	v.Type = "session.pool_spawn_churn_cooling_down"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionQuarantined returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionQuarantined
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionQuarantined() (TypedEventStreamEnvelopeSessionQuarantined, error) {
 	var body TypedEventStreamEnvelopeSessionQuarantined
@@ -16582,6 +16681,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionMaxAgeKilled()
 	case "session.pool_slot_retired_at_drain_deadline":
 		return t.AsTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline()
+	case "session.pool_spawn_churn_cooling_down":
+		return t.AsTypedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown()
 	case "session.quarantined":
 		return t.AsTypedEventStreamEnvelopeSessionQuarantined()
 	case "session.reset_stalled":
@@ -18827,6 +18928,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown() (TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown(v TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown) error {
+	v.Type = "session.pool_spawn_churn_cooling_down"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown(v TypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown) error {
+	v.Type = "session.pool_spawn_churn_cooling_down"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionQuarantined returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionQuarantined
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionQuarantined() (TypedTaggedEventStreamEnvelopeSessionQuarantined, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionQuarantined
@@ -19671,6 +19800,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled()
 	case "session.pool_slot_retired_at_drain_deadline":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline()
+	case "session.pool_spawn_churn_cooling_down":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionPoolSpawnChurnCoolingDown()
 	case "session.quarantined":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionQuarantined()
 	case "session.reset_stalled":
