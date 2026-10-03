@@ -198,6 +198,44 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveAssigneeStaysAssigned(t *testin
 	}
 }
 
+// The canonical human assignee is an operator action item, not a session
+// identity. Keep the Go controller's release sweep aligned with the shell
+// orphan sweep: absence of a session named "human" is not evidence that the
+// assignment is orphaned.
+func TestReleaseOrphanedPoolAssignments_SkipsHumanAssignee(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "operator handoff",
+		Assignee: "human",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create work: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("set in_progress: %v", err)
+	}
+	work, _ = store.Get(work.ID)
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		beads.SessionStore{Store: store},
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		"",
+		nil,
+		[]beads.Bead{work},
+		nil, nil, nil, nil, nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("human assignee must not be released, got %v", released)
+	}
+	got, _ := store.Get(work.ID)
+	if got.Status != "in_progress" || got.Assignee != "human" {
+		t.Fatalf("operator handoff changed to status=%q assignee=%q", got.Status, got.Assignee)
+	}
+}
+
 // releaseOrphanedPoolAssignments takes the session-class store separately from
 // the work store, and falls back to the work store when the caller passes nil.
 // That fallback is the whole safety margin for a caller that has not been
