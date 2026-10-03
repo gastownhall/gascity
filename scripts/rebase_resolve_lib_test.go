@@ -107,27 +107,41 @@ func TestRebaseResolveLibDefinesOwnershipGuardAcrossShellsAndCwds(t *testing.T) 
 		{"unrelated-git-repo", unrelated},
 	}
 
-	for _, shell := range []string{"bash", "zsh"} {
+	// The zsh argzero variants make $0 the shell name rather than the sourced
+	// file, so any $0-based self-location falls through to whatever fallback
+	// exists — the path that once cross-sourced the decoy guard.
+	shells := []struct {
+		name    string
+		bin     string
+		prelude string
+	}{
+		{"bash", "bash", ""},
+		{"zsh", "zsh", ""},
+		{"zsh-posix-argzero", "zsh", "setopt POSIX_ARGZERO;"},
+		{"zsh-emulate-sh", "zsh", "emulate sh;"},
+	}
+
+	for _, shell := range shells {
 		for _, cwd := range cwds {
-			t.Run(shell+"/"+cwd.name, func(t *testing.T) {
-				if _, err := exec.LookPath(shell); err != nil {
-					if shell == "zsh" {
+			t.Run(shell.name+"/"+cwd.name, func(t *testing.T) {
+				if _, err := exec.LookPath(shell.bin); err != nil {
+					if shell.bin == "zsh" {
 						t.Skip("zsh not installed")
 					}
-					t.Fatalf("%s not installed: %v", shell, err)
+					t.Fatalf("%s not installed: %v", shell.bin, err)
 				}
 
-				cmd := exec.Command(shell, "-c", ownershipGuardProbe)
+				cmd := exec.Command(shell.bin, "-c", shell.prelude+ownershipGuardProbe)
 				cmd.Dir = cwd.dir
 				cmd.Env = append(os.Environ(), "REBASE_LIB="+lib)
 
 				out, err := cmd.CombinedOutput()
 				if err != nil {
 					t.Fatalf("sourcing rebase-resolve-lib.sh under %s from %s did not load this tree's push-ownership-guard.sh: %v\n%s",
-						shell, cwd.name, err, out)
+						shell.name, cwd.name, err, out)
 				}
 				if !strings.Contains(string(out), "GUARD_OK") {
-					t.Fatalf("expected GUARD_OK under %s from %s, got: %s", shell, cwd.name, out)
+					t.Fatalf("expected GUARD_OK under %s from %s, got: %s", shell.name, cwd.name, out)
 				}
 			})
 		}

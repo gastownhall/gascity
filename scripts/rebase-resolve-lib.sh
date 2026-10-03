@@ -62,24 +62,33 @@
 # script's real directory whenever the sourcing shell's cwd isn't literally
 # scripts/ (ga-ql4bmm).
 #
-# Self-locate instead. "${BASH_SOURCE[0]:-$0}" resolves to this file's own path
-# under BOTH bash and zsh, and unlike a git-toplevel anchor it does not depend
-# on the caller's cwd — sourcing from outside the repo, or from a DIFFERENT
-# repo, must not silently skip (or worse, cross-source from another worktree)
-# the ownership guard that gates force-pushes. A git rev-parse anchor is kept
-# only as a fallback for the exotic case where $0 is unusable (e.g. zsh's
-# POSIX_ARGZERO), and is validated before use. Self-location also keeps the
-# byte-identical pack copy at packs/*/scripts/ working, where a
+# Self-locate instead: zsh's %x prompt escape expands to the file being
+# sourced, and bash's BASH_SOURCE[0] does the same. Unlike $0, %x is immune to
+# zsh's POSIX_ARGZERO and `emulate sh`, and unlike a git-toplevel anchor
+# neither depends on the caller's cwd — sourcing from outside the repo, or
+# from a DIFFERENT repo, must not silently skip (or worse, cross-source from
+# another worktree) the ownership guard that gates force-pushes. There is no
+# cwd-derived fallback: if the sibling guard cannot be found next to this
+# file, loading fails closed. Self-location also keeps the byte-identical
+# pack copy at packs/*/scripts/ working, where a
 # "$(git rev-parse --show-toplevel)/scripts" anchor points at the wrong dir.
-# shellcheck source=./push-ownership-guard.sh disable=SC1091
-_rrl_self="${BASH_SOURCE[0]:-$0}"
-_rrl_dir="$(cd "$(dirname "$_rrl_self")" 2>/dev/null && pwd)" || _rrl_dir=""
-if [[ -z "$_rrl_dir" || ! -f "$_rrl_dir/push-ownership-guard.sh" ]]; then
-    _rrl_root="$(git rev-parse --show-toplevel 2>/dev/null)" || _rrl_root=""
-    _rrl_dir="${_rrl_root:+$_rrl_root/scripts}"
+if [ -n "${ZSH_VERSION:-}" ]; then
+    # %x = the file being sourced; immune to POSIX_ARGZERO / emulate sh.
+    # eval keeps bash from parsing the zsh-only ${(%)...} flag syntax.
+    eval '_rrl_self=${(%):-%x}'
+else
+    _rrl_self="${BASH_SOURCE[0]}"
 fi
+_rrl_dir="$(cd "$(dirname "$_rrl_self")" 2>/dev/null && pwd)" || _rrl_dir=""
+if [ -z "$_rrl_dir" ] || [ ! -f "$_rrl_dir/push-ownership-guard.sh" ]; then
+    echo "rebase-resolve-lib.sh: cannot locate sibling push-ownership-guard.sh; refusing to load" >&2
+    unset _rrl_self _rrl_dir
+    # shellcheck disable=SC2317 # exit is reached only when executed, not sourced
+    return 1 2>/dev/null || exit 1
+fi
+# shellcheck source=./push-ownership-guard.sh disable=SC1091
 . "$_rrl_dir/push-ownership-guard.sh"
-unset _rrl_self _rrl_dir _rrl_root
+unset _rrl_self _rrl_dir
 
 # is_additive_keepboth_path <path>
 #
