@@ -4621,14 +4621,25 @@ func paneContainsBusyIndicator(lines []string) bool {
 // "✻ Worked for 1m 3s · done 9:30 AM · 1 shell still running".
 var backgroundWorkRe = regexp.MustCompile(`\bshells? still running\b`)
 
+// turnSummaryRe matches Claude Code's done line, which closes every turn: a
+// glyph, a past-tense verb and the turn's duration, e.g. "✻ Worked for 5s" or
+// "✻ Cogitated for 1m 3s · done 9:30 AM".
+var turnSummaryRe = regexp.MustCompile(`^\s*[^\p{L}\p{N}\s]\s+\p{L}+ for [0-9]+[hms]\b`)
+
 // paneShowsBackgroundWork reports whether captured pane lines show work the
-// agent left running outside its turn. It is deliberately separate from
-// paneContainsBusyIndicator: an agent with a background shell is idle for
-// input (a nudge may land), but restarting it would kill that shell.
+// agent left running outside its turn. Only the most recent turn's done line
+// counts: an earlier turn's "shell still running" note stays in scrollback
+// after that shell exits, so the scan runs bottom-up and stops at the first
+// done line. It is deliberately separate from paneContainsBusyIndicator: an
+// agent with a background shell is idle for input (a nudge may land), but
+// restarting it would kill that shell.
 func paneShowsBackgroundWork(lines []string) bool {
-	for _, line := range lines {
-		if backgroundWorkRe.MatchString(line) {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if backgroundWorkRe.MatchString(lines[i]) {
 			return true
+		}
+		if turnSummaryRe.MatchString(lines[i]) {
+			return false
 		}
 	}
 	return false

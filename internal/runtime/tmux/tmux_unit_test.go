@@ -1092,6 +1092,23 @@ func TestPaneShowsBackgroundWork(t *testing.T) {
 		{"done line without background work", []string{"✻ Worked for 1m 49s", "❯ "}, false},
 		{"busy spinner", []string{"· Wibbling… (3m 2s · ↓ 1.2k tokens)"}, false},
 		{"word inside another word", []string{"eggshells still running late"}, false},
+		{"stale background note above a later done line", []string{
+			"✻ Worked for 1m 3s · done 9:30 AM · 1 shell still running",
+			"",
+			"❯ close the bead",
+			"⏺ Bash(bd close wb-1)",
+			"  ⎿  closed wb-1",
+			"",
+			"✻ Worked for 5s · done 9:41 AM",
+			"",
+			"❯ ",
+		}, false},
+		{"background note on the latest of two done lines", []string{
+			"✻ Worked for 2m 10s · done 9:20 AM",
+			"❯ start the build",
+			"✻ Cogitated for 12s · done 9:30 AM · 1 shell still running",
+			"❯ ",
+		}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
