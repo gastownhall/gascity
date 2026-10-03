@@ -791,6 +791,7 @@ go_test(
         "cmd_bd_show_watch_test.go",
         "cmd_bd_store_bridge_test.go",
         "cmd_bd_test.go",
+        "cmd_bd_update_force_test.go",
         "cmd_beads_blocked_visibility_test.go",
         "cmd_beads_city_migrate_proxied_datadir_test.go",
         "cmd_beads_city_migrate_proxied_ordering_test.go",
