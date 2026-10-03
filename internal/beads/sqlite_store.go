@@ -408,15 +408,7 @@ func sqliteStoreDSN(path string, readOnly bool) string {
 // It is a begin mode, not a pragma, so it does not ride the per-connection
 // pragma budget, and it is deliberately off the read pool and read-only DSN.
 func sqliteStoreWriterDSN(path string) string {
-	dsn := sqliteStoreDSNWithMode(path, "")
-	parsed, err := url.Parse(dsn)
-	if err != nil {
-		return dsn
-	}
-	query := parsed.Query()
-	query.Set("_txlock", "immediate")
-	parsed.RawQuery = query.Encode()
-	return parsed.String()
+	return sqliteStoreDSNWithOptions(path, "", "immediate")
 }
 
 func sqliteStorePrivateRecoveryDSN(path string) string {
@@ -424,6 +416,12 @@ func sqliteStorePrivateRecoveryDSN(path string) string {
 }
 
 func sqliteStoreDSNWithMode(path, mode string) string {
+	return sqliteStoreDSNWithOptions(path, mode, "")
+}
+
+// sqliteStoreDSNWithOptions is the one DSN builder. txlock, when set, is the
+// modernc _txlock begin mode ("immediate" for the write connection only).
+func sqliteStoreDSNWithOptions(path, mode, txlock string) string {
 	query := url.Values{}
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "foreign_keys(1)")
@@ -480,6 +478,9 @@ func sqliteStoreDSNWithMode(path, mode string) string {
 
 	if mode != "" {
 		query.Set("mode", mode)
+	}
+	if txlock != "" {
+		query.Set("_txlock", txlock)
 	}
 	return (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
 }
@@ -575,12 +576,19 @@ func (s *SQLiteStore) maxSequenceFromRows(rows *sql.Rows) (int64, error) {
 // so the whole remainder parses as an int64; that is what keeps the "-N" of a
 // legacy wrapped id ("gcg--9223372036854775808") from reading as the positive
 // N. Any other id (a foreign prefix, or a non-numeric own-prefix id) counts
-// its trailing digit run, as numericIDSuffix always did, but only when the
+// its trailing digit run, as the old numericIDSuffix did, but only when the
 // run parses as an int64: numericIDSuffix discarded strconv.Atoi's range error
 // and clamped an overlong run to math.MaxInt64.
 func (s *SQLiteStore) sequenceOfID(id string) (int64, bool) {
+	return allocatableSequenceOfID(s.prefix, id)
+}
+
+// allocatableSequenceOfID is SQLiteStore.sequenceOfID for an explicit
+// namespace prefix; MemStore shares it so the two allocators agree on which
+// pinned ids consume a sequence value.
+func allocatableSequenceOfID(prefix, id string) (int64, bool) {
 	n, ok := int64(0), false
-	if rest, own := strings.CutPrefix(id, s.prefix+"-"); own && rest != "" && rest[0] != '+' {
+	if rest, own := strings.CutPrefix(id, prefix+"-"); own && rest != "" && rest[0] != '+' {
 		if parsed, err := strconv.ParseInt(rest, 10, 64); err == nil {
 			n, ok = parsed, true
 		}
@@ -826,16 +834,25 @@ func (s *SQLiteStore) SetSequenceFloor(n int64) error {
 	if n < 0 {
 		return fmt.Errorf("setting sqlite sequence floor: negative value %d", n)
 	}
+	// A floor above the allocator ceiling cannot be honored: the allocator
+	// never reaches it, so persisting it would only make every later floor
+	// write re-persist the unusable value and skip the in-memory lift.
+	if n > sqliteSequenceCeiling {
+		return fmt.Errorf("setting sqlite sequence floor: %d is above the id allocator ceiling %d", n, sqliteSequenceCeiling)
+	}
 	s.sequenceFloorMu.Lock()
 	defer s.sequenceFloorMu.Unlock()
 	current, err := s.SequenceFloor()
 	if err != nil {
 		return err
 	}
+	if current > sqliteSequenceCeiling {
+		return fmt.Errorf("setting sqlite sequence floor: persisted floor %d in %s is above the id allocator ceiling %d; repair the sidecar", current, s.sequenceFloorPath, sqliteSequenceCeiling)
+	}
 	if current > n {
 		n = current
 	}
-	if allocated := s.seq.Load(); allocated > n {
+	if allocated := s.seq.Load(); allocated > n && allocated <= sqliteSequenceCeiling {
 		n = allocated
 	}
 	if s.sequenceFloorBeforePersist != nil {
@@ -2153,20 +2170,4 @@ func (s *SQLiteStore) purgeTerminal(ctx context.Context, olderThan time.Duration
 
 func ptrTo(v string) *string {
 	return &v
-}
-
-// numericIDSuffix parses the trailing numeric portion of a bead ID like
-// "gc-42" and returns 42. Returns 0 if the ID has no numeric suffix.
-func numericIDSuffix(id string) int {
-	for i := len(id) - 1; i >= 0; i-- {
-		if id[i] < '0' || id[i] > '9' {
-			if i == len(id)-1 {
-				return 0
-			}
-			n, _ := strconv.Atoi(id[i+1:])
-			return n
-		}
-	}
-	n, _ := strconv.Atoi(id)
-	return n
 }

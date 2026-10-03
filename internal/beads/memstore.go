@@ -129,8 +129,12 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 		// Honoring a pinned "<prefix>-<n>" consumes that suffix, exactly as
 		// SQLiteStore.normalizeCreate's ensureSequenceAtLeast does: without it
 		// the very next store-minted id re-issues the pinned one.
-		if n := numericIDSuffix(explicit); n > m.seq {
-			m.seq = n
+		prefix := m.IDPrefix
+		if prefix == "" {
+			prefix = "gc"
+		}
+		if n, ok := allocatableSequenceOfID(prefix, explicit); ok && n > int64(m.seq) {
+			m.seq = int(n)
 		}
 		b.ID = explicit
 	} else {

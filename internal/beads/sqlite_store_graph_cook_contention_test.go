@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net/url"
@@ -15,10 +16,11 @@ import (
 	"time"
 )
 
-// seedSQLiteGraphIDs writes one minimal bead per id in a single transaction on
-// the store's write handle. It bypasses Create on purpose: the point is to
-// reproduce an on-disk id population (including ids another process minted),
-// not to exercise the allocator while seeding it.
+// seedSQLiteGraphIDs writes one minimal bead row per id in a single
+// transaction on the store's write handle. It bypasses Create on purpose: the
+// point is to reproduce an on-disk id population (including ids another
+// process minted), not to exercise the allocator while seeding it. One
+// prepared insert per row keeps a large seed cheap under -race.
 func seedSQLiteGraphIDs(t *testing.T, s *SQLiteStore, ids []string) {
 	t.Helper()
 	ctx := context.Background()
@@ -27,14 +29,41 @@ func seedSQLiteGraphIDs(t *testing.T, s *SQLiteStore, ids []string) {
 		t.Fatalf("seed begin: %v", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO beads(id,tier,title,status,issue_type,created_at,updated_at,bead_json)
+		VALUES(?,'main','seed','open','task',?,?,?)`)
+	if err != nil {
+		t.Fatalf("seed prepare: %v", err)
+	}
+	defer stmt.Close() //nolint:errcheck
 	now := time.Now()
 	for _, id := range ids {
-		if err := s.upsertBeadTx(ctx, tx, Bead{ID: id, Title: "seed", Status: "open", Type: "task", CreatedAt: now, UpdatedAt: now}); err != nil {
+		payload, err := json.Marshal(Bead{ID: id, Title: "seed", Status: "open", Type: "task", CreatedAt: now, UpdatedAt: now})
+		if err != nil {
+			t.Fatalf("seed marshal %s: %v", id, err)
+		}
+		if _, err := stmt.ExecContext(ctx, id, now.UnixNano(), now.UnixNano(), string(payload)); err != nil {
 			t.Fatalf("seed %s: %v", id, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("seed commit: %v", err)
+	}
+}
+
+// seedSQLiteGraphIDRange inserts gcg-<first> .. gcg-<first+count-1> in one
+// statement. A recursive CTE keeps the row loop inside SQLite, so a large seed
+// stays cheap under -race, where per-row driver round trips dominate.
+func seedSQLiteGraphIDRange(t *testing.T, s *SQLiteStore, first int64, count int) {
+	t.Helper()
+	now := time.Now().UnixNano()
+	if _, err := s.db.ExecContext(context.Background(), `
+		WITH RECURSIVE n(i, k) AS (SELECT ?, 1 UNION ALL SELECT i+1, k+1 FROM n WHERE k < ?)
+		INSERT INTO beads(id,tier,title,status,issue_type,created_at,updated_at,bead_json)
+		SELECT 'gcg-'||i, 'main', 'seed', 'open', 'task', ?, ?,
+			json_object('id', 'gcg-'||i, 'title', 'seed', 'status', 'open', 'issue_type', 'task')
+		FROM n`, first, count, now, now); err != nil {
+		t.Fatalf("seed range gcg-%d x%d: %v", first, count, err)
 	}
 }
 
@@ -237,7 +266,7 @@ func TestSQLiteStoreWriteTxTakesWriteLockAtBegin(t *testing.T) {
 }
 
 // TestSQLiteStoreGraphCookUnderConcurrentWriter reproduces the maintainer-city
-// cook failure end to end: a large graph store holding an id at
+// cook failure end to end: a graph store holding an id at
 // math.MaxInt64-1 and a block of ids from the overflowed old allocator,
 // a fresh CLI process cooking a multi-node workflow, and a controller
 // committing continuously. Before the fix the cook reseeded next to
@@ -254,13 +283,9 @@ func TestSQLiteStoreGraphCookUnderConcurrentWriter(t *testing.T) {
 
 	dir := t.TempDir()
 	controller := newSQLiteGraphApplyStore(t, dir, WithSQLiteStoreIDPrefix(sqliteGraphPrefix))
-	ids := make([]string, 0, 25000)
-	for i := 1; i <= 20000; i++ {
-		ids = append(ids, "gcg-"+strconv.Itoa(i))
-	}
-	ids = append(ids, nearMaxGraphIDs()...)
-	ids = append(ids, wrappedGraphIDs(2000)...)
-	seedSQLiteGraphIDs(t, controller, ids)
+	seedSQLiteGraphIDRange(t, controller, 1, 5000)
+	seedSQLiteGraphIDRange(t, controller, math.MinInt64, 2000)
+	seedSQLiteGraphIDs(t, controller, nearMaxGraphIDs())
 	hot, err := controller.Create(Bead{Title: "controller-hot"})
 	if err != nil {
 		t.Fatalf("controller Create: %v", err)
@@ -320,8 +345,8 @@ func TestSQLiteStoreGraphCookUnderConcurrentWriter(t *testing.T) {
 	}
 	for _, id := range result.IDs {
 		n, err := strconv.ParseInt(strings.TrimPrefix(id, "gcg-"), 10, 64)
-		if err != nil || n <= 20000 || n > 20000+int64(len(plan.Nodes))+1 {
-			t.Fatalf("cook minted %s, want the ids right after gcg-20000 (and the controller's one)", id)
+		if err != nil || n <= 5000 || n > 5000+int64(len(plan.Nodes))+1 {
+			t.Fatalf("cook minted %s, want the ids right after gcg-5000 (and the controller's one)", id)
 		}
 	}
 }
@@ -415,5 +440,58 @@ func TestSQLiteStoreWriterDSNBeginsImmediate(t *testing.T) {
 		if got := parsed.Query().Get("_txlock"); got != "" {
 			t.Fatalf("shared/read DSN %s carries _txlock=%s; the read pool must stay deferred", dsn, got)
 		}
+	}
+}
+
+// TestSQLiteStoreSequenceFloorRefusesValuesAboveCeiling: a floor the allocator
+// can never reach must not be persisted, because every later floor write would
+// re-persist it (the sidecar only grows) and the in-memory lift of the
+// legitimate value would be skipped; and an existing sidecar above the ceiling
+// is reported rather than silently disabling the floor.
+func TestSQLiteStoreSequenceFloorRefusesValuesAboveCeiling(t *testing.T) {
+	dir := t.TempDir()
+	s := newSQLiteGraphApplyStore(t, dir, WithSQLiteStoreIDPrefix(sqliteGraphPrefix))
+	if err := s.SetSequenceFloor(int64(math.MaxInt64) - 1); err == nil {
+		t.Fatal("SetSequenceFloor above the ceiling succeeded, want an error")
+	}
+	if floor, err := s.SequenceFloor(); err != nil || floor != 0 {
+		t.Fatalf("SequenceFloor = %d, %v; want 0 (nothing persisted)", floor, err)
+	}
+	if err := s.SetSequenceFloor(30000); err != nil {
+		t.Fatalf("SetSequenceFloor(30000): %v", err)
+	}
+	if got := s.seq.Load(); got != 30000 {
+		t.Fatalf("sequence = %d, want 30000", got)
+	}
+
+	if err := writeSQLiteSequenceFloor(s.sequenceFloorPath, int64(math.MaxInt64)-1); err != nil {
+		t.Fatalf("writing legacy sidecar: %v", err)
+	}
+	if err := s.SetSequenceFloor(40000); err == nil || !strings.Contains(err.Error(), "above the id allocator ceiling") {
+		t.Fatalf("SetSequenceFloor over a legacy above-ceiling sidecar: %v, want a ceiling error", err)
+	}
+}
+
+// TestMemStorePinnedIDSequenceMatchesSQLite: MemStore stands in for a class
+// database, so a pinned near-max or overflowed id must not drag its sequence
+// to math.MaxInt64 (and the next mint into negative ids) either.
+func TestMemStorePinnedIDSequenceMatchesSQLite(t *testing.T) {
+	m := NewMemStore()
+	m.IDPrefix = sqliteGraphPrefix
+	m.HonorExplicitIDs = true
+	for _, id := range append(nearMaxGraphIDs(), wrappedGraphIDs(3)...) {
+		if _, err := m.Create(Bead{ID: id, Title: "pinned"}); err != nil {
+			t.Fatalf("Create pinned %s: %v", id, err)
+		}
+	}
+	if _, err := m.Create(Bead{ID: "gcg-41", Title: "pinned"}); err != nil {
+		t.Fatalf("Create pinned gcg-41: %v", err)
+	}
+	minted, err := m.Create(Bead{Title: "minted"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if minted.ID != "gcg-42" {
+		t.Fatalf("MemStore minted %q, want gcg-42", minted.ID)
 	}
 }
