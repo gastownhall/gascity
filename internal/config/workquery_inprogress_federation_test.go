@@ -15,7 +15,7 @@ import (
 func TestAssignedInProgressTierFederatesOnSplitTopology(t *testing.T) {
 	for _, shellVar := range []string{"id", "cand"} {
 		got := assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true})
-		want := `r=$(gc ready --status in_progress --assignee="$` + shellVar + `" --json --limit=1) || exit $?; `
+		want := `r=$(gc ready --status in_progress --assignee="$` + shellVar + `" --exclude-type=message --json --limit=1) || exit $?; `
 		if got != want {
 			t.Errorf("federated tier-0 for $%s =\n  %q\nwant\n  %q", shellVar, got, want)
 		}
@@ -37,19 +37,15 @@ func TestAssignedInProgressTierFederatesOnSplitTopology(t *testing.T) {
 	}
 }
 
-// TestAssignedInProgressTierIsByteIdenticalOnSingleStore is the zero-risk
-// control: every city that relocates nothing runs character-identical bytes.
-//
-// This is the whole reason the swap is topology-keyed rather than unconditional.
-// The crash-recovery tier is on the hot path of every worker in every deployed
-// city, and a change to its shell that was not required by the bug is a change
-// that can only lose.
-func TestAssignedInProgressTierIsByteIdenticalOnSingleStore(t *testing.T) {
+// TestAssignedInProgressTierUsesBdListOnSingleStore is the topology control:
+// a city that relocates nothing continues to use the single-store `bd list`
+// reader, with the deliberate message exclusion applied at that reader.
+func TestAssignedInProgressTierUsesBdListOnSingleStore(t *testing.T) {
 	for _, shellVar := range []string{"id", "cand"} {
 		got := assignedInProgressTierCommand(shellVar, QueryTopology{})
-		want := `r=$(bd list --status in_progress --assignee="$` + shellVar + `" --json --limit=1 2>/dev/null); `
+		want := `r=$(bd list --status in_progress --assignee="$` + shellVar + `" --exclude-type=message --json --limit=1 2>/dev/null); `
 		if got != want {
-			t.Errorf("single-store tier-0 for $%s =\n  %q\nwant the pre-swap bytes\n  %q", shellVar, got, want)
+			t.Errorf("single-store tier-0 for $%s =\n  %q\nwant the bd-list reader with message exclusion\n  %q", shellVar, got, want)
 		}
 	}
 	// The single-store enrichment must not grow the presence key either: its

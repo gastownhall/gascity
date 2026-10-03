@@ -68,7 +68,7 @@ func runJQFilter(t *testing.T, filter, payload string, args ...string) string {
 // Repro for ga-qjozkw: a reviewer landed on the 'security' step while
 // 'intake' and 'style' were still open and unclaimed.
 func TestEphemeralReadyProbeWithholdsBlockedStep(t *testing.T) {
-	filter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
+	filter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false, true)
 	payload := strings.ReplaceAll(ephemeralQueryFixture, "%s", "open")
 
 	got := runJQFilter(t, filter, payload, "--arg", "id", "tincan-iris/reviewer")

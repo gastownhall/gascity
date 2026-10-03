@@ -203,7 +203,9 @@ func TestDemandCountsExactlyTheClaimableRows(t *testing.T) {
 // forms.
 func TestTierThreeServeRulesMatchTheGeneratedQuery(t *testing.T) {
 	agent := config.Agent{Name: "worker", Dir: "rig"}
-	query := agent.EffectiveWorkQueryFor(config.QueryTopology{})
+	// Assigned Tier 1/2 reads have their own message exclusion; these rules
+	// describe only the routed Tier-3 query.
+	query := agent.EffectiveRoutedPoolQuery()
 	rules := config.PoolDemandServeRulesForQuery()
 
 	if rules.RequireUnassigned && !strings.Contains(query, "--unassigned") {

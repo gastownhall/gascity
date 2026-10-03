@@ -966,7 +966,7 @@ func TestResolveTemplateAssignedReadyQueryUsesBD105Compatibility(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveTemplate: %v", err)
 	}
-	if !strings.Contains(tp.Prompt, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
+	if !strings.Contains(tp.Prompt, `bd ready --include-ephemeral --assignee="$id" --exclude-type=message --json --limit=1`) {
 		t.Fatalf("Prompt missing bd-1.0.5 assigned ready query: %q", tp.Prompt)
 	}
 }

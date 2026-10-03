@@ -1917,7 +1917,7 @@ func TestEffectiveWorkQueryBD105CompatibilityOptIn(t *testing.T) {
 	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --limit=20`) {
 		t.Errorf("EffectiveWorkQueryForBeads(bd-1.0.5) missing include-ephemeral routed probe: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
+	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --exclude-type=message --json --limit=1`) {
 		t.Errorf("EffectiveWorkQueryForBeads(bd-1.0.5) missing include-ephemeral assigned probe: %q", got)
 	}
 }
@@ -2008,7 +2008,7 @@ func TestEffectiveAssignedReadyQueryDefault(t *testing.T) {
 	if strings.Contains(got, `--include-ephemeral`) {
 		t.Fatalf("EffectiveAssignedReadyQuery() default must be bd 1.0.4-compatible without --include-ephemeral: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --assignee="$id" --json --limit=1`) {
+	if !strings.Contains(got, `bd ready --assignee="$id" --exclude-type=message --json --limit=1`) {
 		t.Fatalf("EffectiveAssignedReadyQuery() missing assigned-ready tier: %q", got)
 	}
 	if strings.Contains(got, "gc.routed_to") {
@@ -2020,7 +2020,7 @@ func TestEffectiveAssignedReadyQueryDefault(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --assignee=worker-session --json --limit=1") printf '[{"id":"assigned-ready"}]' ;;
+  "ready --assignee=worker-session --exclude-type=message --json --limit=1") printf '[{"id":"assigned-ready"}]' ;;
   *) printf '[]' ;;
 esac
 `)
@@ -2032,7 +2032,7 @@ esac
 func TestEffectiveAssignedReadyQueryForBeadsBD105Compatibility(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	got := a.EffectiveAssignedReadyQueryFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}})
-	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
+	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --exclude-type=message --json --limit=1`) {
 		t.Fatalf("EffectiveAssignedReadyQueryForBeads(bd-1.0.5) missing include-ephemeral assigned-ready tier: %q", got)
 	}
 }
@@ -2042,7 +2042,7 @@ func TestEffectiveAssignedInProgressQueryDefault(t *testing.T) {
 	got := a.EffectiveAssignedInProgressQuery()
 	for _, want := range []string{
 		`"$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`,
-		`bd list --status in_progress --assignee="$id" --json --limit=1`,
+		`bd list --status in_progress --assignee="$id" --exclude-type=message --json --limit=1`,
 		`ephemeral=true AND status=in_progress`,
 	} {
 		if !strings.Contains(got, want) {
@@ -2058,7 +2058,7 @@ func TestEffectiveAssignedInProgressQueryDefault(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "list --status in_progress --assignee=worker-bead --json --limit=1") printf '[{"id":"assigned-in-progress","ephemeral":true}]' ;;
+  "list --status in_progress --assignee=worker-bead --exclude-type=message --json --limit=1") printf '[{"id":"assigned-in-progress","ephemeral":true}]' ;;
   *) printf '[]' ;;
 esac
 `)
@@ -2145,12 +2145,12 @@ func TestEffectiveAssignedReadyQueryControlDispatcherClaimsLegacyAssignedWork(t 
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --assignee=gascity--control-dispatcher --json --limit=1"|\
-  "ready --assignee=gascity/control-dispatcher --json --limit=1")
+  "ready --assignee=gascity--control-dispatcher --exclude-type=message --json --limit=1"|\
+  "ready --assignee=gascity/control-dispatcher --exclude-type=message --json --limit=1")
     printf '[]'
     ;;
-  "ready --assignee=gascity--workflow-control --json --limit=1"|\
-  "ready --assignee=gascity/workflow-control --json --limit=1")
+  "ready --assignee=gascity--workflow-control --exclude-type=message --json --limit=1"|\
+  "ready --assignee=gascity/workflow-control --exclude-type=message --json --limit=1")
     printf '[{"id":"ga-legacy-ready"}]'
     ;;
   *)
@@ -2274,14 +2274,14 @@ func TestEffectiveWorkQueryControlDispatcherClaimsLegacyAssignedWork(t *testing.
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "list --status in_progress --assignee=gascity--control-dispatcher --json --limit=1"|\
-  "list --status in_progress --assignee=gascity/control-dispatcher --json --limit=1"|\
-  "list --status in_progress --assignee=gascity--workflow-control --json --limit=1"|\
-  "list --status in_progress --assignee=gascity/workflow-control --json --limit=1")
+  "list --status in_progress --assignee=gascity--control-dispatcher --exclude-type=message --json --limit=1"|\
+  "list --status in_progress --assignee=gascity/control-dispatcher --exclude-type=message --json --limit=1"|\
+  "list --status in_progress --assignee=gascity--workflow-control --exclude-type=message --json --limit=1"|\
+  "list --status in_progress --assignee=gascity/workflow-control --exclude-type=message --json --limit=1")
     printf '[]'
     ;;
-  "ready --assignee=gascity--workflow-control --json --limit=1"|\
-  "ready --assignee=gascity/workflow-control --json --limit=1")
+  "ready --assignee=gascity--workflow-control --exclude-type=message --json --limit=1"|\
+  "ready --assignee=gascity/workflow-control --exclude-type=message --json --limit=1")
     printf '[{"id":"ga-legacy-ready"}]'
     ;;
   *)
@@ -2461,14 +2461,15 @@ func TestEffectiveWorkQueryExcludesEpics(t *testing.T) {
 	got := a.EffectiveWorkQuery()
 	// The routed (pool) tier excludes parent epics (gc-udx): an unassigned
 	// routed epic has no executable spec, so a pool worker grabbing one does
-	// undefined work. The assigned tiers do NOT exclude epics — an agent must
-	// resume its own assigned ephemeral epic wisp (the patrol-loop pattern).
+	// undefined work. Assigned tiers also exclude mail messages, but do NOT
+	// exclude epics — an agent must resume its own assigned ephemeral epic wisp
+	// (the patrol-loop pattern).
 	wantPresent := []string{
-		// routed/pool tier still excludes epics (gc-udx guard)
+		// routed/pool tier excludes parent epics (gc-udx guard)
 		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json`,
-		// assigned tiers carry NO epic exclusion
-		`bd list --status in_progress --assignee="$id" --json`,
-		`bd ready --assignee="$id" --json`,
+		// assigned tiers exclude mail messages but carry NO epic exclusion
+		`bd list --status in_progress --assignee="$id" --exclude-type=message --json`,
+		`bd ready --assignee="$id" --exclude-type=message --json`,
 		`-- hello-world/worker`,
 	}
 	for _, want := range wantPresent {
@@ -2485,15 +2486,15 @@ func TestEffectiveWorkQueryExcludesEpics(t *testing.T) {
 
 // TestEffectiveWorkQueryExcludesEpicsControlDispatcher verifies the
 // control-dispatcher path (which has an extra legacy workflow-control
-// route) excludes epics on the routed (pool) tier but not the assigned
-// tiers — same scoping as the standard path.
+// route) excludes epics on the routed (pool) tier, while assigned tiers
+// exclude mail messages but preserve assigned epic wisps.
 func TestEffectiveWorkQueryExcludesEpicsControlDispatcher(t *testing.T) {
 	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
 	got := a.EffectiveWorkQuery()
 	wantPresent := []string{
 		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json`,
-		`bd list --status in_progress --assignee="$cand" --json`,
-		`bd ready --assignee="$cand" --json`,
+		`bd list --status in_progress --assignee="$cand" --exclude-type=message --json`,
+		`bd ready --assignee="$cand" --exclude-type=message --json`,
 		`-- gascity/control-dispatcher gascity/workflow-control`,
 	}
 	for _, want := range wantPresent {

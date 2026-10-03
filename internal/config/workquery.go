@@ -285,18 +285,28 @@ func ephemeralStatusSnapshotShell(shellVar, status string) string {
 }
 
 // ephemeralReadyBaseSelectorJQ composes the selector clauses shared by every
-// ephemeral ready-tier filter: the caller's own assignee/routing selector,
-// plus the epic exclusion and optional hold-label exclusion every variant
-// applies alike. Dependency gating is layered on top by each caller, since
-// `bd query --json` exposes only a `dependency_count` scalar — never a
+// ephemeral ready-tier filter: the caller's own assignee/routing selector and
+// epic exclusion, plus optional message and hold-label exclusions. Assigned
+// work-query variants exclude messages; pool-demand variants retain their
+// existing type contract. Dependency gating is layered on top by each caller,
+// since `bd query --json` exposes only a `dependency_count` scalar — never a
 // `dependencies` array — which is precise enough to prove "definitely no
 // dependencies" but not to resolve whether a nonzero count is still open.
-func ephemeralReadyBaseSelectorJQ(selector string, excludeHoldLabels bool) string {
+func ephemeralReadyBaseSelectorJQ(selector string, excludeHoldLabels, excludeMessages bool) string {
 	body := selector + ` | select(((.issue_type // .type // "") != "epic"))`
+	if excludeMessages {
+		body += excludeMessageIssueTypeJQClause()
+	}
 	if excludeHoldLabels {
 		body += excludeHoldLabelsJQClause()
 	}
 	return body
+}
+
+// excludeMessageIssueTypeJQClause drops mail records from generated work-query
+// candidates. It accepts both JSON field spellings returned by bd readers.
+func excludeMessageIssueTypeJQClause() string {
+	return ` | select(((.issue_type // .type // "") != "message"))`
 }
 
 // legacyEphemeralReadyFilterJQ is the fast path: it withholds any candidate
@@ -306,8 +316,8 @@ func ephemeralReadyBaseSelectorJQ(selector string, excludeHoldLabels bool) strin
 // pairs it with ephemeralReadyDependencyCandidateFilterJQ's real bd show
 // enrichment for the dependency_count > 0 case, so a step whose dependencies
 // have since all closed is still reachable instead of withheld forever.
-func legacyEphemeralReadyFilterJQ(selector string, limit int, excludeHoldLabels bool) string {
-	body := ephemeralReadyBaseSelectorJQ(selector, excludeHoldLabels) +
+func legacyEphemeralReadyFilterJQ(selector string, limit int, excludeHoldLabels, excludeMessages bool) string {
+	body := ephemeralReadyBaseSelectorJQ(selector, excludeHoldLabels, excludeMessages) +
 		` | select(((.dependency_count // 0) == 0))`
 	filter := `[.[] | ` + body + `]` + ` | sort_by(.created_at // "", .id // "")`
 	if limit > 0 {
@@ -321,8 +331,8 @@ func legacyEphemeralReadyFilterJQ(selector string, limit int, excludeHoldLabels 
 // withheld (dependency_count > 0) so the caller can enrich them with a real
 // bd show --json call via inProgressBlockedByEnrichmentScript and decide
 // readiness precisely, instead of leaving them permanently unservable.
-func ephemeralReadyDependencyCandidateFilterJQ(selector string, limit int, excludeHoldLabels bool) string {
-	body := ephemeralReadyBaseSelectorJQ(selector, excludeHoldLabels) +
+func ephemeralReadyDependencyCandidateFilterJQ(selector string, limit int, excludeHoldLabels, excludeMessages bool) string {
+	body := ephemeralReadyBaseSelectorJQ(selector, excludeHoldLabels, excludeMessages) +
 		` | select(((.dependency_count // 0) > 0))`
 	filter := `[.[] | ` + body + `]` + ` | sort_by(.created_at // "", .id // "")`
 	if limit > 0 {
@@ -340,6 +350,7 @@ func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) s
 			` | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $target) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $target) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`")))`,
 		limit,
 		true,
+		false,
 	)
 	query := bdQueryEphemeralStatusShell("open")
 	if quiet {
@@ -512,7 +523,7 @@ func assignedInProgressTierCommandWithLimit(shellVar string, topo QueryTopology,
 	if fed {
 		reader = gcReadyCommand + ` --status in_progress`
 	}
-	return `r=$(` + reader + ` --assignee="$` + shellVar + `" --json --limit=` + strconv.Itoa(limit) +
+	return `r=$(` + reader + ` --assignee="$` + shellVar + `" --exclude-type=message --json --limit=` + strconv.Itoa(limit) +
 		readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; `
 }
 
@@ -685,7 +696,7 @@ func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHol
 func assignedReadyTierCommand(shellVar string, topo QueryTopology) string {
 	fed := topo.FederatedReady
 	return `r=$(` + readyReaderCommand(fed) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) +
-		` --assignee="$` + shellVar + `" --json --limit=1` + readyReaderStderrSink(fed) + `)` +
+		` --assignee="$` + shellVar + `" --exclude-type=message --json --limit=1` + readyReaderStderrSink(fed) + `)` +
 		readyReaderFailurePropagation(fed) + `; `
 }
 
@@ -775,7 +786,7 @@ func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
 // re-served on every hook tick (ga-qjozkw).
 func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology) string {
 	_ = topo
-	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `] | .[:1]`
+	filter := `[.[] | select((.assignee // "") == $id)` + excludeMessageIssueTypeJQClause() + excludeHoldLabelsJQClause() + `] | .[:1]`
 	// federated=false: this row comes from `bd query`, which never carries a
 	// resolved blocked_by, so the carried-lookup branch would only ever fall
 	// through to bd show — skip straight to it. checkHold=false: the filter
@@ -791,7 +802,7 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 
 func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string, topo QueryTopology) string {
 	_ = topo
-	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `]`
+	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeMessageIssueTypeJQClause() + excludeHoldLabelsJQClause() + `]`
 	return ephemeralStatusSnapshotShell("gc_open_ephemeral_in_progress", "in_progress") +
 		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:1]`) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
@@ -824,8 +835,8 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 	if topo.includeEphemeralReady() {
 		return ""
 	}
-	fastFilter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
-	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(`select((.assignee // "") == $id)`, 1, false)
+	fastFilter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false, true)
+	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(`select((.assignee // "") == $id)`, 1, false, true)
 	return ephemeralStatusSnapshotShell("open_ephemeral", "open") +
 		`r=$(printf "%s" "$open_ephemeral" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(fastFilter) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
@@ -1001,6 +1012,11 @@ func (a *Agent) effectiveQuery(kind queryKind, topo QueryTopology) string {
 // output). Roles that need different behavior still opt in via an explicit
 // work_query in their agent config; that custom query is returned unchanged
 // above.
+//
+// Mail messages (issue_type=message) are excluded from assigned ready and
+// in-progress recovery reads, including their ephemeral candidates. They are
+// inbox state, not executable work; otherwise an assigned message can preempt
+// routed ready work even though the claim hook will refuse the message.
 //
 // When the reconciler runs the query for demand detection (no session
 // context), all identity vars are empty → assignee tiers skip → only
