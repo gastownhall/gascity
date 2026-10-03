@@ -2599,7 +2599,9 @@ func (t *Tmux) nudgeSession(
 	// busy indicator, composer prefix still matches), so this cannot be
 	// gated on an idle-wait failure the way DismissModelSwitchModalIfPresent
 	// is in Provider.Nudge -- it must run unconditionally, here.
-	t.DismissFeedbackSurveyModalIfPresent(session)
+	if err := t.DismissFeedbackSurveyModalIfPresent(session); err != nil {
+		return fmt.Errorf("dismissing the feedback survey before the nudge: %w", err)
+	}
 
 	// 2. Send text in literal mode with retry on transient errors
 	if err := sendText(target, message, t.cfg.NudgeReadyTimeout); err != nil {
@@ -2941,6 +2943,20 @@ func (t *Tmux) DismissModelSwitchModalIfPresent(session string) {
 // composer before Enter confirms it, so Enter does not race the digit.
 const feedbackSurveyDismissConfirmDelay = 150 * time.Millisecond
 
+// The survey needs a moment to redraw after the dismiss pair: on Claude Code
+// 2.1.285 a capture taken right after Enter still shows it, and it is gone
+// within a few hundred milliseconds (#6859). Poll the visible screen for up to
+// feedbackSurveyDismissSettlePolls * feedbackSurveyDismissPollInterval before
+// deciding the pair was lost.
+const (
+	feedbackSurveyDismissPollInterval = 50 * time.Millisecond
+	feedbackSurveyDismissSettlePolls  = 30
+	// feedbackSurveyDismissAttempts bounds how many dismiss pairs one call
+	// sends: the first, and one retry when the survey is verifiably still on
+	// screen after the settle window.
+	feedbackSurveyDismissAttempts = 2
+)
+
 // dismissFeedbackSurveyModal dismisses Claude Code's post-turn feedback
 // survey (ga-zg7fjq) by sending "0" (Dismiss) then Enter. Enter resolves to
 // the bundle's chat:submit action, which fires the survey's onDigit handler
@@ -2961,15 +2977,56 @@ func dismissFeedbackSurveyModal(content string, sendKeys func(keys ...string) er
 	return true, sendKeys("Enter")
 }
 
+// dismissFeedbackSurveyOnScreen dismisses the feedback survey when capture
+// (a visible-screen capture) shows it, and returns only once the survey has
+// left the screen.
+//
+// It must never send a second dismiss pair while the first one is still
+// taking effect (#6859). The survey consumes the first "0" + Enter, but the
+// pane keeps showing it until the TUI redraws; a pair sent into that stale
+// frame lands in the live composer, and its Enter submits "0" as a prompt,
+// costing a model turn. So after each pair this waits for the survey to
+// leave the screen, and sends another pair only when the survey is still
+// showing after the full settle window, which means the first pair never
+// reached it. Returns an error when capturing or sending fails, or when the
+// survey is still on screen after every attempt.
+func dismissFeedbackSurveyOnScreen(capture func() (string, error), sendKeys func(keys ...string) error, sleep func(time.Duration)) error {
+	content, err := capture()
+	if err != nil {
+		return fmt.Errorf("capturing the pane to look for the feedback survey: %w", err)
+	}
+	for attempt := 1; attempt <= feedbackSurveyDismissAttempts; attempt++ {
+		present, err := dismissFeedbackSurveyModal(content, sendKeys, sleep)
+		if err != nil {
+			return fmt.Errorf("sending the feedback survey dismiss keys: %w", err)
+		}
+		if !present {
+			return nil
+		}
+		for poll := 0; poll < feedbackSurveyDismissSettlePolls; poll++ {
+			sleep(feedbackSurveyDismissPollInterval)
+			if content, err = capture(); err != nil {
+				return fmt.Errorf("capturing the pane to confirm the feedback survey closed: %w", err)
+			}
+			if !runtime.ContainsFeedbackSurveyModal(content) {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("feedback survey still on screen after %d dismiss attempts", feedbackSurveyDismissAttempts)
+}
+
 // DismissFeedbackSurveyModalIfPresent clears Claude Code's post-turn
 // feedback survey (ga-zg7fjq) on the session's agent pane so a pending nudge
 // is not corrupted by, or silently swallowed into, the survey's
 // single-digit input handler. No-op when the survey is absent. A parked
 // survey reads idle to WaitForIdle, so callers must not gate this on an
 // idle-wait failure branch -- see the unconditional call from NudgeSession.
-// Best-effort: capture/send failures are swallowed (the caller retries on
-// the next wake).
-func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) {
+//
+// It looks only at the visible screen: the live survey sits just above the
+// composer, and a survey row left in scrollback is not a survey anyone can
+// dismiss (#6844).
+func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) error {
 	target := session
 	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
 		target = agentPane
@@ -2982,24 +3039,8 @@ func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) {
 		}
 		return nil
 	}
-
-	content, err := t.CapturePane(target, promptObservationLines)
-	if err != nil {
-		return
-	}
-	present, _ := dismissFeedbackSurveyModal(content, sendKeys, time.Sleep)
-	if !present {
-		return
-	}
-
-	// The survey can occasionally eat the first digit (e.g. a keystroke lost
-	// to a slow-to-wake detached pane); re-check and retry the dismiss pair
-	// once before giving up for this call.
-	content, err = t.CapturePane(target, promptObservationLines)
-	if err != nil {
-		return
-	}
-	_, _ = dismissFeedbackSurveyModal(content, sendKeys, time.Sleep)
+	capture := func() (string, error) { return t.CaptureVisiblePane(target) }
+	return dismissFeedbackSurveyOnScreen(capture, sendKeys, time.Sleep)
 }
 
 // GetPaneCommand returns the current command running in a pane.
@@ -3585,6 +3626,14 @@ func (t *Tmux) FindSessionByWorkDir(targetDir string, processNames []string) ([]
 func (t *Tmux) CapturePane(session string, lines int) (string, error) {
 	content, err := t.run("capture-pane", "-p", "-t", session, "-S", fmt.Sprintf("-%d", lines))
 	return content, err
+}
+
+// CaptureVisiblePane captures only the current visible screen of a pane, with
+// no scrollback history (no "-S"). Modal checks that send keys use it so a
+// dialog already dismissed and left in scrollback cannot match and inject
+// keys into a live prompt.
+func (t *Tmux) CaptureVisiblePane(session string) (string, error) {
+	return t.run("capture-pane", "-p", "-t", session)
 }
 
 // CapturePaneJoined captures the visible content of a pane with wrapped lines

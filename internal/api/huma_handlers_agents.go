@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -71,11 +72,28 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	envBatch, _ := sp.(runtime.EnvironmentBatchProvider)
 
 	var agents []agentResponse
+	var partialErrors []string
 	for _, a := range cfg.Agents {
 		// Provenance is a property of the declared agent, shared by every
 		// pool-expanded instance, so compute it once per source agent.
 		pack, packDerived := agentPackProvenance(a, rawCfg, cfg)
-		expanded := expandAgent(a, cityName, sessTmpl, sp)
+		expanded, expandErr := expandAgentChecked(a, cityName, sessTmpl, sp)
+		// A runtime server that is not running at all (tmux before its first
+		// session) has no sessions; that is a complete answer, not a failure.
+		if runtime.IsRuntimeServerAbsent(expandErr) {
+			expandErr = nil
+		}
+		switch {
+		case expandErr != nil:
+			// Say the pool's sessions are unknown rather than listing it as
+			// stopped or dropping it silently.
+			partialErrors = append(partialErrors, fmt.Sprintf("agent %s: listing pool sessions: %v", a.QualifiedName(), expandErr))
+		case len(expanded) == 0 && isMultiSessionAgent(a):
+			// An on-demand pool with no live session is still a configured
+			// agent: list it under its own name, like an idle singleton.
+			expanded = []expandedAgent{configuredPoolRow(a)}
+		}
+		limits := agentPoolLimits(a)
 		for _, ea := range expanded {
 			if input.Rig != "" && ea.rig != input.Rig {
 				continue
@@ -157,6 +175,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				UnavailableReason: unavailableReason,
 				PackDerived:       packDerived,
 				Pack:              pack,
+				PoolLimits:        limits,
 			}
 
 			var lastActivity *time.Time
@@ -220,8 +239,15 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		agents = []agentResponse{}
 	}
 
-	body := ListBody[agentResponse]{Items: agents, Total: len(agents)}
-	if cacheKey != "" {
+	body := ListBody[agentResponse]{
+		Items:         agents,
+		Total:         len(agents),
+		Partial:       len(partialErrors) > 0,
+		PartialErrors: partialErrors,
+	}
+	// A partial list reflects a transient backend failure; don't serve it
+	// from cache once the backend recovers.
+	if cacheKey != "" && !body.Partial {
 		s.storeResponse(cacheKey, index, body)
 	}
 
@@ -305,6 +331,7 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 		UnavailableReason: unavailableReason,
 		PackDerived:       packDerived,
 		Pack:              pack,
+		PoolLimits:        agentPoolLimits(agentCfg),
 	}
 	if isMultiSessionAgent(agentCfg) {
 		resp.Pool = agentCfg.QualifiedName()

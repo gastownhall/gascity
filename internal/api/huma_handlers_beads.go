@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
@@ -752,14 +753,36 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 }
 
 // humaHandleBeadClose is the Huma-typed handler for POST /v0/bead/{id}/close.
+//
+// An optional {"reason": "..."} body records why the bead was closed. The
+// reason is stamped as metadata.close_reason before the close, the convention
+// every store's close honors: BdStore and NativeDoltStore forward it as the
+// close reason (bd close --reason), and the whole-row stores record it, so it
+// comes back as the bead's close_reason on GET and on bead.closed.
 func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput) (*OKResponse, error) {
 	id := input.ID
 	store, current, err := s.resolveBeadOwner(id)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.gateWorkRecordClose(ctx, id, store, current, nil); err != nil {
+	var submitted map[string]string
+	reason := ""
+	if input.Body != nil {
+		reason = strings.TrimSpace(input.Body.Reason)
+	}
+	if reason != "" {
+		submitted = map[string]string{"close_reason": reason}
+	}
+	if err := s.gateWorkRecordClose(ctx, id, store, current, submitted); err != nil {
 		return nil, err
+	}
+	if reason != "" {
+		if err := store.SetMetadata(id, "close_reason", reason); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
+			}
+			return nil, apierr.Internal.Msg(err.Error())
+		}
 	}
 	if err := store.Close(id); err != nil {
 		if errors.Is(err, beads.ErrNotFound) {

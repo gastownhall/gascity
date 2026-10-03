@@ -8,8 +8,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // MemStore is an in-memory Store implementation backed by a slice. It is
@@ -276,6 +274,9 @@ func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
 		}
 		m.beads[i].Labels = filtered
 	}
+	if oldStatus != "closed" && m.beads[i].Status == "closed" {
+		recordCloseReason(&m.beads[i])
+	}
 	m.beads[i].UpdatedAt = time.Now()
 	m.beads[i].Revision++
 	if isOwnershipTransition(oldStatus, oldAssignee, opts) {
@@ -329,6 +330,7 @@ func (m *MemStore) Close(id string) error {
 				return nil
 			}
 			setBeadStatus(&m.beads[i], "closed")
+			recordCloseReason(&m.beads[i])
 			m.beads[i].UpdatedAt = time.Now()
 			m.beads[i].Revision++
 			return nil
@@ -385,6 +387,7 @@ func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, erro
 		for k, v := range metadata {
 			m.beads[i].Metadata[k] = v
 		}
+		recordCloseReason(&m.beads[i])
 		closed++
 	}
 	return closed, nil
@@ -470,7 +473,7 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 			return nil, err
 		}
 		statusByID[bead.ID] = bead.Status
-		workOutcomeByID[bead.ID] = bead.Metadata[beadmeta.WorkOutcomeMetadataKey]
+		workOutcomeByID[bead.ID] = ReadinessWorkOutcome(bead.Metadata)
 	}
 
 	var result []Bead

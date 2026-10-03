@@ -69,9 +69,16 @@ type BeadCreateInput struct {
 }
 
 // BeadCloseInput is the Huma input for POST /v0/city/{cityName}/bead/{id}/close.
+// The body is optional (a pointer), so clients that send none keep working.
 type BeadCloseInput struct {
 	CityScope
-	ID string `path:"id" doc:"Bead ID."`
+	ID   string `path:"id" doc:"Bead ID."`
+	Body *beadCloseBody
+}
+
+// beadCloseBody is the optional request body for the bead close endpoint.
+type beadCloseBody struct {
+	Reason string `json:"reason,omitempty" doc:"Why the bead is being closed. Recorded as the bead's close_reason (bd close --reason). Blank means no reason."`
 }
 
 // BeadReopenInput is the Huma input for POST /v0/city/{cityName}/bead/{id}/reopen.

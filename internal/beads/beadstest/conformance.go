@@ -858,6 +858,42 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
+	t.Run("ReadyIncludesDependentWhenBlockerPassedDespiteWorkOutcomeBlocked", func(t *testing.T) {
+		s := newStore()
+		blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dependent, err := s.Create(beads.Bead{Title: "dependent", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DepAdd(dependent.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(blocker.ID); err != nil {
+			t.Fatal(err)
+		}
+		// A workflow step that passed (gc.outcome=pass, which dispatch advances
+		// on) while its worker recorded gc.work_outcome=blocked: a plan review
+		// that found required changes but whose step contract always passes.
+		// Dispatch has already moved past it, so its dependent must be ready or
+		// the workflow waits forever on work no worker is ever offered.
+		if err := s.SetMetadataBatch(blocker.ID, map[string]string{
+			beadmeta.OutcomeMetadataKey:     "pass",
+			beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Ready()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].Title != "dependent" {
+			t.Fatalf("Ready() = %v, want [dependent]: a blocker whose step passed must satisfy its dependent whatever its gc.work_outcome", titlesOf(got))
+		}
+	})
+
 	t.Run("ReadyIncludesDependentWhenBlockerClosedWithNoWorkOutcome", func(t *testing.T) {
 		s := newStore()
 		blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})
@@ -1223,6 +1259,120 @@ func RunMetadataTests(t *testing.T, newStore func() beads.Store) {
 		_, ok = got.Metadata["nonexistent"]
 		if ok {
 			t.Error("Metadata[\"nonexistent\"] present, want absent")
+		}
+	})
+}
+
+// RunCloseReasonTests pins Bead.CloseReason: a closer stamps
+// metadata.close_reason and closes, and every read of the closed bead says why
+// it was closed; reopening clears the reason. Call it for stores whose close
+// path honors metadata.close_reason (MemStore, FileStore, SQLiteStore,
+// NativeDoltStore, BdStore). The exec protocol's close carries no reason, so
+// script-backed stores only read close_reason from the script's output.
+func RunCloseReasonTests(t *testing.T, newStore func() beads.Store) {
+	t.Helper()
+
+	// bd's validation.on-close=error rejects reasons under 20 characters, so
+	// the reasons here are long enough to pass it on a real bd.
+	const reason = "fixed in commit abc123; tests pass"
+
+	closeWithReason := func(t *testing.T, s beads.Store, title string) beads.Bead {
+		t.Helper()
+		b, err := s.Create(beads.Bead{Title: title})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetMetadata(b.ID, "close_reason", reason); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(b.ID); err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+
+	t.Run("CloseRecordsCloseReasonOnGet", func(t *testing.T) {
+		s := newStore()
+		b := closeWithReason(t, s, "close with a reason")
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("Status = %q, want closed", got.Status)
+		}
+		if got.CloseReason != reason {
+			t.Errorf("CloseReason = %q, want %q", got.CloseReason, reason)
+		}
+	})
+
+	t.Run("CloseRecordsCloseReasonOnList", func(t *testing.T) {
+		s := newStore()
+		b := closeWithReason(t, s, "listed close reason")
+		list, err := s.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, got := range list {
+			if got.ID != b.ID {
+				continue
+			}
+			if got.CloseReason != reason {
+				t.Errorf("List CloseReason = %q, want %q", got.CloseReason, reason)
+			}
+			return
+		}
+		t.Fatalf("List(IncludeClosed) did not return %s", b.ID)
+	})
+
+	t.Run("CloseAllRecordsCloseReason", func(t *testing.T) {
+		s := newStore()
+		b, err := s.Create(beads.Bead{Title: "batch close with a reason"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.CloseAll([]string{b.ID}, map[string]string{"close_reason": reason}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.CloseReason != reason {
+			t.Errorf("CloseReason = %q, want %q", got.CloseReason, reason)
+		}
+	})
+
+	t.Run("OpenBeadHasNoCloseReason", func(t *testing.T) {
+		s := newStore()
+		b, err := s.Create(beads.Bead{Title: "still open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetMetadata(b.ID, "close_reason", reason); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.CloseReason != "" {
+			t.Errorf("CloseReason on an open bead = %q, want empty", got.CloseReason)
+		}
+	})
+
+	t.Run("ReopenClearsCloseReason", func(t *testing.T) {
+		s := newStore()
+		b := closeWithReason(t, s, "reopened after close")
+		if err := s.Reopen(b.ID); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.CloseReason != "" {
+			t.Errorf("CloseReason after Reopen = %q, want empty", got.CloseReason)
 		}
 	})
 }

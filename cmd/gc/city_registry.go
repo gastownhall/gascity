@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -68,6 +69,21 @@ type cityRegistry struct {
 	supervisorRecorder   events.Recorder                     // supervisor-level event recorder for city lifecycle events
 
 	gen uint64 // monotonic generation counter
+
+	// changed is closed and replaced whenever a snapshot rebuild changes the
+	// city membership (see cityMembership); CityChanges hands it out.
+	changed    atomic.Pointer[chan struct{}]
+	membership map[string]cityMembership // by path; co-protected by citiesMu
+}
+
+// cityMembership is the part of a cityView that decides which event providers
+// the supervisor-scope stream merges. Rebuilds that change only progress or
+// status text leave it unchanged and do not wake CityChanges waiters.
+type cityMembership struct {
+	name       string
+	started    bool
+	tombstoned bool
+	hasState   bool
 }
 
 type recentlyUnregisteredCity struct {
@@ -94,7 +110,16 @@ func newCityRegistry() *cityRegistry {
 		gen:     0,
 		builtAt: time.Now(),
 	})
+	changed := make(chan struct{})
+	r.changed.Store(&changed)
 	return r
+}
+
+// CityChanges implements api.CityChangeNotifier. The returned channel is
+// closed the next time a city is added, starts, stops, is tombstoned, or is
+// removed. Lock-free.
+func (r *cityRegistry) CityChanges() <-chan struct{} {
+	return *r.changed.Load()
 }
 
 // StorePendingRequestID stores a request_id for async correlation.
@@ -538,6 +563,28 @@ func (r *cityRegistry) rebuildSnapshotLocked() {
 	}
 
 	r.snap.Store(snap)
+	r.signalMembershipChangeLocked(snap)
+}
+
+// signalMembershipChangeLocked wakes CityChanges waiters when snap's city
+// membership differs from the previous snapshot's.
+// PRECONDITION: caller holds citiesMu.
+func (r *cityRegistry) signalMembershipChangeLocked(snap *citySnapshot) {
+	membership := make(map[string]cityMembership, len(snap.all))
+	for _, v := range snap.all {
+		membership[v.Path] = cityMembership{
+			name:       v.Name,
+			started:    v.Started,
+			tombstoned: v.Tombstoned,
+			hasState:   v.cs != nil,
+		}
+	}
+	if maps.Equal(membership, r.membership) {
+		return
+	}
+	r.membership = membership
+	next := make(chan struct{})
+	close(*r.changed.Swap(&next))
 }
 
 // toCityView deep-copies a managedCity into an immutable cityView.

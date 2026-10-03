@@ -1094,11 +1094,12 @@ func scanSQLiteBead(row sqliteScanner) (Bead, error) {
 // filtered, Metadata merged). Update and UpdateIfMatch share it so the fenced
 // and unfenced paths cannot drift.
 func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
+	wasClosed := b.Status == "closed"
 	if opts.Title != nil {
 		b.Title = *opts.Title
 	}
 	if opts.Status != nil {
-		b.Status = *opts.Status
+		setBeadStatus(&b, *opts.Status)
 	}
 	if opts.Type != nil {
 		b.Type = *opts.Type
@@ -1138,6 +1139,9 @@ func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
 			}
 		}
 		b.Labels = filtered
+	}
+	if !wasClosed && b.Status == "closed" {
+		recordCloseReason(&b)
 	}
 	return b
 }
@@ -1511,14 +1515,22 @@ func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
 			  AND d.dep_type IN ('blocks','waits-for','conditional-blocks')
 			  AND (
 			    COALESCE(blocker.status, '') <> 'closed'
-			    OR EXISTS (
-			         SELECT 1 FROM metadata m
-			         WHERE m.bead_id = blocker.id
-			           AND m.meta_key = '%s'
-			           AND m.meta_value = '%s'
+			    OR (
+			         EXISTS (
+			           SELECT 1 FROM metadata m
+			           WHERE m.bead_id = blocker.id
+			             AND m.meta_key = '%s'
+			             AND m.meta_value = '%s'
+			         )
+			         AND NOT EXISTS (
+			           SELECT 1 FROM metadata o
+			           WHERE o.bead_id = blocker.id
+			             AND o.meta_key = '%s'
+			             AND o.meta_value = 'pass'
+			         )
 			       )
 			  )
-		  )`, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked),
+		  )`, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked, beadmeta.OutcomeMetadataKey),
 	}
 	switch q.TierMode {
 	case TierWisps:
@@ -1736,7 +1748,8 @@ func (t *sqliteStoreTx) Close(id string) error {
 		return nil
 	}
 	before := b
-	b.Status = "closed"
+	setBeadStatus(&b, "closed")
+	recordCloseReason(&b)
 	b.UpdatedAt = time.Now()
 	if err := t.store.upsertBeadTx(t.ctx, t.tx, b); err != nil {
 		return err

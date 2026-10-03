@@ -144,6 +144,78 @@ func TestCoreFormulasNeverReplaceWorkBeadNotes(t *testing.T) {
 	}
 }
 
+var (
+	workBeadClosePattern = regexp.MustCompile(`bd close "?\$\{?WORK_BEAD_ID\}?"?(\s|$)`)
+	statusClosedPattern  = regexp.MustCompile(`(^|\s)(--status|-s)(=|\s+)closed(\s|$)`)
+	closeReasonPattern   = regexp.MustCompile(`(^|\s)(--reason|-r|--reason-file)(\s|=)`)
+)
+
+// TestCoreFormulasCloseWorkBeadWithReason guards against core formula steps
+// closing the work bead without a close reason. bd records only the reason
+// given to `bd close --reason` as the bead's close_reason, which the supervisor
+// API returns from GET /bead/{id} and the bead.closed event; `bd update` has no
+// reason flag, so a work bead closed with `--status=closed` (or a bare
+// `bd close`) reaches API clients with no account of how the work ended.
+func TestCoreFormulasCloseWorkBeadWithReason(t *testing.T) {
+	dir := coreFormulaSearchPaths(t)[0]
+	paths, err := filepath.Glob(filepath.Join(dir, "*.toml"))
+	if err != nil {
+		t.Fatalf("glob core formulas: %v", err)
+	}
+	if len(paths) == 0 {
+		t.Fatalf("no core formulas found in %s", dir)
+	}
+	checked := 0
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, cmd := range joinShellContinuations(string(data)) {
+			if workBeadUpdatePattern.MatchString(cmd) && statusClosedPattern.MatchString(cmd) {
+				t.Errorf("%s: close the work bead with `gc bd close \"$WORK_BEAD_ID\" --reason ...`, not `bd update --status=closed` (bd update records no close reason):\n%s",
+					filepath.Base(path), cmd)
+				continue
+			}
+			if !workBeadClosePattern.MatchString(cmd) {
+				continue
+			}
+			checked++
+			if !closeReasonPattern.MatchString(cmd) {
+				t.Errorf("%s: work-bead close must carry --reason (the API's close_reason):\n%s",
+					filepath.Base(path), cmd)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal(`found no 'bd close "$WORK_BEAD_ID"' commands in core formulas; guard pattern is stale`)
+	}
+}
+
+// TestCorePoolWorkerPromptClosesWorkBeadWithReason is the prompt-side twin of
+// TestCoreFormulasCloseWorkBeadWithReason: the pool worker closes the bead it
+// claimed itself, so its instructions must give the close a reason.
+func TestCorePoolWorkerPromptClosesWorkBeadWithReason(t *testing.T) {
+	path := filepath.Join(filepath.Dir(coreFormulaSearchPaths(t)[0]), "assets", "prompts", "pool-worker.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	checked := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.Contains(line, "gc bd close <id>") {
+			continue
+		}
+		checked++
+		if !closeReasonPattern.MatchString(line) {
+			t.Errorf("pool-worker.template.md: work-bead close must carry --reason:\n%s", line)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("found no 'gc bd close <id>' instructions in pool-worker.template.md; guard pattern is stale")
+	}
+}
+
 // joinShellContinuations folds backslash-continued lines into one logical
 // command line so multi-line bd invocations are checked as a whole.
 func joinShellContinuations(text string) []string {

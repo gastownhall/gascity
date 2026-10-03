@@ -100,10 +100,12 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 		}
 		if current, ok := c.beads[id]; ok {
 			fresh = applyUpdateOptsToBead(current, opts)
+			eventType := updateEventType(current, true, fresh, opts)
 			c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
-				depsMode:   depsFromFields,
-				seqMode:    seqKeep,
-				clearDirty: false,
+				depsMode:       depsFromFields,
+				seqMode:        seqKeep,
+				clearDirty:     false,
+				closeAnnounced: eventType == "bead.closed",
 			})
 			if opts.Status != nil {
 				c.clearDependentReadyProjectionsLocked(id)
@@ -112,7 +114,7 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 			c.updateStatsLocked()
 			c.mu.Unlock()
 			c.recordProblem("refresh bead after update", fmt.Errorf("%s: %w", id, err))
-			c.notifyChange("bead.updated", fresh)
+			c.notifyChange(eventType, fresh)
 			return nil
 		}
 		c.markDirtyLocked(id)
@@ -124,10 +126,13 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 
 	c.mu.Lock()
 	c.noteLocalMutationLocked(id)
+	previous, hadPrevious := c.beads[id]
+	eventType := updateEventType(previous, hadPrevious, fresh, opts)
 	c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
-		depsMode:   depsFromFields,
-		seqMode:    seqKeep,
-		clearDirty: true,
+		depsMode:       depsFromFields,
+		seqMode:        seqKeep,
+		clearDirty:     true,
+		closeAnnounced: eventType == "bead.closed",
 	})
 	if opts.Status != nil {
 		c.clearDependentReadyProjectionsLocked(id)
@@ -136,8 +141,31 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 	c.updateStatsLocked()
 	c.mu.Unlock()
 
-	c.notifyChange("bead.updated", fresh)
+	c.notifyChange(eventType, fresh)
 	return nil
+}
+
+// updateEventType names the event an Update announces for the row it installs.
+// An update that leaves the bead closed when it was not closed before is a
+// close, whatever spelling asked for it, so it is announced as bead.closed just
+// as Close announces it. Announcing it as bead.updated hid it from every
+// bead.closed consumer, and the reconcile pass later evicted the closed row
+// without an event (gastownhall/gascity#6860). With no cached row to compare,
+// the update's own status=closed is the evidence.
+func updateEventType(previous Bead, hadPrevious bool, installed Bead, opts UpdateOpts) string {
+	if installed.Status != "closed" {
+		return "bead.updated"
+	}
+	if hadPrevious {
+		if previous.Status != "closed" {
+			return "bead.closed"
+		}
+		return "bead.updated"
+	}
+	if opts.Status != nil && *opts.Status == "closed" {
+		return "bead.closed"
+	}
+	return "bead.updated"
 }
 
 // ReleaseIfCurrent clears an in-progress assignment through the backing store
@@ -227,16 +255,18 @@ func (c *CachingStore) Close(id string) error {
 	c.noteLocalMutationLocked(id)
 	if refreshed {
 		c.absorbFreshLocked(id, closed, time.Now(), absorbOpts{
-			depsMode:   depsKeepCached,
-			seqMode:    seqKeep,
-			clearDirty: true,
+			depsMode:       depsKeepCached,
+			seqMode:        seqKeep,
+			clearDirty:     true,
+			closeAnnounced: true,
 		})
 	} else if b, ok := c.beads[id]; ok {
 		setBeadStatus(&b, "closed")
 		c.absorbFreshLocked(id, b, time.Now(), absorbOpts{
-			depsMode:   depsKeepCached,
-			seqMode:    seqKeep,
-			clearDirty: true,
+			depsMode:       depsKeepCached,
+			seqMode:        seqKeep,
+			clearDirty:     true,
+			closeAnnounced: true,
 		})
 		closed = cloneBead(b)
 		found = true
@@ -343,6 +373,8 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 		opts := absorbOpts{depsMode: depsKeepCached, seqMode: seqKeep, clearDirty: true}
 		if item.bead.Status == "closed" {
 			opts.depsMode = depsDrop
+			// Announced below whenever this absorb is a transition.
+			opts.closeAnnounced = true
 		}
 		c.absorbFreshLocked(item.id, item.bead, time.Now(), opts)
 		if item.bead.Status == "closed" {
@@ -652,6 +684,8 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 				depsMode:   depsFromFields,
 				seqMode:    seqKeep,
 				clearDirty: true,
+				// Every closed row here is announced as bead.closed below.
+				closeAnnounced: fresh.Status == "closed",
 			})
 			if statusChanged {
 				c.clearDependentReadyProjectionsLocked(item.id)
@@ -672,9 +706,10 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 			if b, ok := c.beads[item.id]; ok {
 				setBeadStatus(&b, "closed")
 				c.absorbFreshLocked(item.id, b, now, absorbOpts{
-					depsMode:   depsKeepCached,
-					seqMode:    seqKeep,
-					clearDirty: true,
+					depsMode:       depsKeepCached,
+					seqMode:        seqKeep,
+					clearDirty:     true,
+					closeAnnounced: true,
 				})
 				c.clearDependentReadyProjectionsLocked(item.id)
 				notifications = append(notifications, cacheNotification{

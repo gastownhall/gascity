@@ -17,10 +17,12 @@ import (
 // dismiss key ("0" then Enter) -- mirroring the bundle-verified onDigit
 // contract from ga-zg7fjq: an option only fires once inputValue is exactly
 // one digit, and Enter confirms immediately without waiting out the
-// debounce. Once dismissed it behaves like a normal composer: it echoes
-// stdin back and prints an "esc to interrupt" busy footer on Enter (the same
-// signal paneContainsBusyIndicator checks for), so a test can prove a nudge
-// message survived the survey instead of being swallowed by it.
+// debounce. Dismissing clears the screen, so the survey leaves the visible
+// pane the way the real one does. Once dismissed it behaves like a normal
+// composer: it echoes stdin back and prints an "esc to interrupt" busy footer
+// on Enter (the same signal paneContainsBusyIndicator checks for), so a test
+// can prove a nudge message survived the survey instead of being swallowed by
+// it.
 func buildFeedbackSurveyAgent(t *testing.T, dir, name string) string {
 	t.Helper()
 	bin := dir + "/" + name
@@ -53,7 +55,9 @@ func main(){
 			case '\r', '\n':
 				if pendingZero {
 					dismissed = true
-					fmt.Println()
+					// Redraw without the survey, as Claude Code does once
+					// the survey closes.
+					fmt.Print("\033[2J\033[H")
 					fmt.Println("SURVEY_DISMISSED")
 				}
 				pendingZero = false
