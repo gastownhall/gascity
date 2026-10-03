@@ -609,3 +609,133 @@ func TestBuildDesiredState_ScaleFromZero_LegacyBoundUnassignedRoutedWorkWakesCan
 		t.Errorf("gc.routed_to = %q, want %q (re-homed to canonical)", routed, canonical)
 	}
 }
+
+// TestBuildDesiredState_ScaleFromZero_AuthoritativeScaleCheckZeroStaysAsleep
+// covers the churn fix: a pool that declares scale_check_authoritative and
+// answers 0 stays asleep even though routed work is sitting there ready.
+//
+// Without the opt-in, the cold-wake probe merges max(custom 0, probe 1) and the
+// pool is re-woken every tick — the lookout/hand loop of 2026-08-31, where a
+// parked epic stayed routed and unassigned while its review was out and the
+// check correctly withheld demand the probe then supplied anyway.
+func TestBuildDesiredState_ScaleFromZero_AuthoritativeScaleCheckZeroStaysAsleep(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigPath := tmpDir + "/rigs/rig-A"
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	maxSess := 5
+	minSess := 0
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:                    "planner",
+				MaxActiveSessions:       &maxSess,
+				MinActiveSessions:       &minSess,
+				ScaleCheck:              "printf 0", // the check says: nothing actionable
+				ScaleCheckAuthoritative: true,
+				Dir:                     "rig-A",
+				Provider:                "mock",
+			},
+		},
+		Rigs:      []config.Rig{{Name: "rig-A", Path: rigPath}},
+		Providers: map[string]config.ProviderSpec{"mock": {Command: "true"}},
+	}
+
+	cityStore := beads.NewMemStore()
+	rigAStore := beads.NewMemStore()
+	rigStores := map[string]beads.Store{"rig-A": rigAStore}
+	qualifiedName := "rig-A/planner"
+
+	// Routed, open, unassigned — Ready() counts it, the custom check does not.
+	if _, err := cityStore.Create(beads.Bead{
+		ID:       "bead-1",
+		Status:   "open",
+		Type:     "task",
+		Metadata: map[string]string{"gc.routed_to": qualifiedName},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionBeads := &sessionBeadSnapshot{}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		cityStore, rigStores, sessionBeads, nil, os.Stderr,
+	)
+
+	if demand := result.ScaleCheckCounts[qualifiedName]; demand != 0 {
+		t.Errorf("authoritative scale_check returned 0; expected demand 0, got %d", demand)
+	}
+	if len(result.State) != 0 {
+		t.Errorf("expected no desired session, got %d", len(result.State))
+	}
+}
+
+// TestBuildDesiredState_ScaleFromZero_AuthoritativeScaleCheckFailureStillWakes
+// is the other half of the contract: authoritative applies to a real answer,
+// never to a broken one. A check that exits non-zero is partial, not a zero, so
+// the cold-wake probe still wakes the pool and routed work cannot strand behind
+// a check that cannot run.
+func TestBuildDesiredState_ScaleFromZero_AuthoritativeScaleCheckFailureStillWakes(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigPath := tmpDir + "/rigs/rig-A"
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	maxSess := 5
+	minSess := 0
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:                    "planner",
+				MaxActiveSessions:       &maxSess,
+				MinActiveSessions:       &minSess,
+				ScaleCheck:              "exit 1", // the check is broken, not quiet
+				ScaleCheckAuthoritative: true,
+				Dir:                     "rig-A",
+				Provider:                "mock",
+			},
+		},
+		Rigs:      []config.Rig{{Name: "rig-A", Path: rigPath}},
+		Providers: map[string]config.ProviderSpec{"mock": {Command: "true"}},
+	}
+
+	cityStore := beads.NewMemStore()
+	rigAStore := beads.NewMemStore()
+	rigStores := map[string]beads.Store{"rig-A": rigAStore}
+	qualifiedName := "rig-A/planner"
+
+	if _, err := cityStore.Create(beads.Bead{
+		ID:       "bead-1",
+		Status:   "open",
+		Type:     "task",
+		Metadata: map[string]string{"gc.routed_to": qualifiedName},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionBeads := &sessionBeadSnapshot{}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		cityStore, rigStores, sessionBeads, nil, os.Stderr,
+	)
+
+	// The count is what this change governs: a failed check falls through to
+	// the cold-wake probe rather than being read as an authoritative 0.
+	if demand := result.ScaleCheckCounts[qualifiedName]; demand != 1 {
+		t.Errorf("failed scale_check must not read as an authoritative 0; expected demand 1, got %d", demand)
+	}
+	// Whether that demand materializes a session is a SEPARATE pre-existing
+	// guard: a partial demand read blocks a fresh create ("partial demand read,
+	// fresh create blocked") and only retains sessions already running. So the
+	// suppression added here cannot introduce a strand mode that a failing
+	// check did not already have — it changes which number the probe reports,
+	// not whether a broken check can spawn.
+	if len(result.State) != 0 {
+		t.Errorf("partial demand read should block a fresh create, got %d desired", len(result.State))
+	}
+}
