@@ -707,14 +707,10 @@ func TestRunDoltCleanup_DryRunAllowsProcessTempRootTestConfig(t *testing.T) {
 	}
 }
 
-// TestRunDoltCleanup_ProtectedRollupByKind covers ga-xkc9mo: a 100%-protected
-// population (zero reap targets) must still surface in .summary instead of
-// collapsing into orphans:0. Three protected processes exercise the three
-// kinds the fix spec requires at minimum: active-rig, container:<runtime>,
-// and unreapable-config, derived from the existing Reason/ContainerRuntime
-// fields rather than a second classifier.
-func TestRunDoltCleanup_ProtectedRollupByKind(t *testing.T) {
-	procs := []DoltProcInfo{
+// protectedRollupProcs is the 100%-protected population shared by the
+// protected-rollup tests.
+func protectedRollupProcs() []DoltProcInfo {
+	return []DoltProcInfo{
 		// Active rig: LiveResolve (below) resolves the managed city dolt to
 		// port 28231 via fakeLiveResolve, which protectedDoltPortsForReap
 		// records as rigPortByPort[28231]="managed city dolt" independent of
@@ -731,17 +727,36 @@ func TestRunDoltCleanup_ProtectedRollupByKind(t *testing.T) {
 		{PID: 502, Argv: []string{"dolt", "sql-server", "-H", "127.0.0.1"}, ContainerRuntime: "podman"},
 		// Non-allowlisted --config: protected, kill-manually reason.
 		{PID: 503, Argv: []string{"dolt", "sql-server", "--config", "/home/u/.dolt-real/config.yaml"}},
+		// Containerized active rig server: the rig-port match wins, so it
+		// stays in the active-rig baseline rather than container:docker.
+		{PID: 504, Ports: []int{28231}, Argv: []string{"dolt", "sql-server"}, ContainerRuntime: "docker"},
 	}
+}
 
-	var stdout, stderr bytes.Buffer
-	opts := cleanupOptions{
+// protectedRollupOptions wires protectedRollupProcs with a live-resolved
+// managed city dolt on port 28231.
+func protectedRollupOptions(jsonOut bool) cleanupOptions {
+	procs := protectedRollupProcs()
+	return cleanupOptions{
 		Rigs:              []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
 		FS:                fsys.NewFake(),
-		JSON:              true,
+		JSON:              jsonOut,
 		HomeDir:           "/home/u",
 		LiveResolve:       fakeLiveResolve(),
 		DiscoverProcesses: func() ([]DoltProcInfo, error) { return procs, nil },
 	}
+}
+
+// TestRunDoltCleanup_ProtectedRollupByKind covers ga-xkc9mo: a 100%-protected
+// population (zero reap targets) must still surface in .summary instead of
+// collapsing into orphans:0. Four protected processes exercise the three
+// kinds the fix spec requires at minimum: active-rig, container:<runtime>,
+// and unreapable-config, derived from the existing Reason/ContainerRuntime
+// fields rather than a second classifier. A containerized active rig server
+// must still count as active-rig.
+func TestRunDoltCleanup_ProtectedRollupByKind(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	opts := protectedRollupOptions(true)
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
@@ -754,11 +769,14 @@ func TestRunDoltCleanup_ProtectedRollupByKind(t *testing.T) {
 	if len(r.Reaped.Targets) != 0 {
 		t.Fatalf("Reaped.Targets = %v, want none (100%%-protected population)", r.Reaped.Targets)
 	}
-	if r.Summary.ProtectedTotal != 3 {
-		t.Errorf("Summary.ProtectedTotal = %d, want 3", r.Summary.ProtectedTotal)
+	if r.Summary.ProtectedTotal != 4 {
+		t.Errorf("Summary.ProtectedTotal = %d, want 4", r.Summary.ProtectedTotal)
+	}
+	if got, ok := r.Summary.ProtectedByKind["container:docker"]; ok {
+		t.Errorf("Summary.ProtectedByKind[\"container:docker\"] = %d, want absent (containerized active rig is active-rig)", got)
 	}
 	wantByKind := map[string]int{
-		"active-rig":        1,
+		"active-rig":        2,
 		"container:podman":  1,
 		"unreapable-config": 1,
 	}
@@ -769,6 +787,20 @@ func TestRunDoltCleanup_ProtectedRollupByKind(t *testing.T) {
 		if got := r.Summary.ProtectedByKind[kind]; got != want {
 			t.Errorf("Summary.ProtectedByKind[%q] = %d, want %d (full: %v)", kind, got, want, r.Summary.ProtectedByKind)
 		}
+	}
+}
+
+// TestRunDoltCleanup_ProtectedRollupTextSummary pins the human summary line
+// to the same rollup the JSON report carries (ga-xkc9mo).
+func TestRunDoltCleanup_ProtectedRollupTextSummary(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runDoltCleanup(protectedRollupOptions(false), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	want := "protected: 4 [active-rig:2, container:podman:1, unreapable-config:1]"
+	if !strings.Contains(stdout.String(), want) {
+		t.Errorf("stdout missing %q\nstdout:\n%s", want, stdout.String())
 	}
 }
 

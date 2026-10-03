@@ -549,17 +549,20 @@ func rollupProtected(report *CleanupReport) {
 // protectedKind buckets a protected PID by why it was protected, deriving
 // the key from the existing Reason/ContainerRuntime fields the classifier
 // already set rather than adding a second classification pass.
-// Container-managed servers are keyed by runtime (e.g. "container:podman");
-// active rig servers get their own bucket; everything else (bd-owned
-// proxies, active test roots, unidentified or non-allowlisted configs,
+// Active rig servers get their own bucket, checked first because the
+// classifier's rig-port match comes first and planOrphanReap copies
+// ContainerRuntime onto every protected PID — a containerized rig server is
+// still the active-rig baseline. Other container-managed servers are keyed
+// by runtime (e.g. "container:podman"); everything else (bd-owned proxies,
+// active test roots, unidentified or non-allowlisted configs,
 // missing-config-but-live-cwd) falls into the catch-all "unreapable-config"
 // bucket.
 func protectedKind(p CleanupProtectedPID) string {
-	if p.ContainerRuntime != "" {
-		return "container:" + p.ContainerRuntime
-	}
 	if strings.HasPrefix(p.Reason, "active rig dolt server") {
 		return "active-rig"
+	}
+	if p.ContainerRuntime != "" {
+		return "container:" + p.ContainerRuntime
 	}
 	return "unreapable-config"
 }
