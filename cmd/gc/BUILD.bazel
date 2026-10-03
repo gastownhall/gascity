@@ -1410,6 +1410,7 @@ go_test(
         "session_reconciler_named_collapse_test.go",
         "session_reconciler_observation_regression_test.go",
         "session_reconciler_pool_replacement_test.go",
+        "session_reconciler_progress_idle_rewake_test.go",
         "session_reconciler_progress_test.go",
         "session_reconciler_read_after_write_test.go",
         "session_reconciler_relaunch_preparedstart_test.go",
