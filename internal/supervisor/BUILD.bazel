@@ -52,6 +52,7 @@ go_test(
         "//internal/mail",
         "//internal/testenv",
         "//internal/testutil",
+        "//test/dolttest",
     ],
 )
 

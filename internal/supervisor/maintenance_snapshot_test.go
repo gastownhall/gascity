@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/test/dolttest"
 )
 
 // fakeDoltBackupRunner is a scripted DoltBackupRunner for runSnapshot
@@ -445,12 +446,8 @@ func TestRunSnapshot_Integration_RealDoltRoundTrip(t *testing.T) {
 	// Isolate dolt's global config under a temp DOLT_ROOT_PATH so the
 	// test does not depend on or pollute the developer's identity.
 	doltRoot := tempDirWithRetryCleanup(t, "gc-snapshot-dolt-root-*")
-	if err := os.MkdirAll(filepath.Join(doltRoot, ".dolt"), 0o755); err != nil {
-		t.Fatalf("mkdir dolt root: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(doltRoot, ".dolt", "config_global.json"),
-		[]byte(`{"user.name":"gc-test","user.email":"gc-test@test.local"}`), 0o644); err != nil {
-		t.Fatalf("seed dolt identity: %v", err)
+	if err := dolttest.WriteGlobalConfig(doltRoot); err != nil {
+		t.Fatalf("seed dolt global config: %v", err)
 	}
 	// t.Setenv so exec.CommandContext inside runSnapshot inherits the
 	// isolated root without needing a separate env-plumbing API.

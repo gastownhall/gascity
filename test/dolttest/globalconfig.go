@@ -19,7 +19,7 @@ import (
 //     release synchronously and waits up to 30 s for it, while the pinned bd
 //     probes `dolt version` at init with a fixed 10 s timeout and kills it.
 //   - metrics.disabled: `dolt status` and `dolt sql` otherwise send metrics.
-const GlobalConfigJSON = `{"user.name":"gc-test","user.email":"gc-test@test.local"}`
+const GlobalConfigJSON = `{"user.name":"gc-test","user.email":"gc-test@test.local","versioncheck.disabled":"true","metrics.disabled":"true"}`
 
 // globalConfigFile is the file dolt reads its global configuration from,
 // beneath <root>/.dolt.

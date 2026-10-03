@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/gastownhall/gascity/test/dolttest"
 )
 
 // acceptanceGitConfig mirrors scripts/test-gitconfig-path. beads.role is the
@@ -159,13 +161,8 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	// fresh CI runner. Seed under GC_HOME rather than the real home so a run
 	// never writes host Dolt state -- the same pattern tier_c, tutorial_goldens
 	// and test/integration already use.
-	doltRoot := filepath.Join(gcHome, ".dolt")
-	if err := os.MkdirAll(doltRoot, 0o755); err != nil {
-		panic(fmt.Sprintf("acceptance: creating dolt root under %s: %v", gcHome, err))
-	}
-	doltCfg := `{"user.name":"gc-test","user.email":"gc-test@test.local"}`
-	if err := os.WriteFile(filepath.Join(doltRoot, "config_global.json"), []byte(doltCfg), 0o644); err != nil {
-		panic(fmt.Sprintf("acceptance: seeding dolt identity under %s: %v", doltRoot, err))
+	if err := dolttest.WriteGlobalConfig(gcHome); err != nil {
+		panic(fmt.Sprintf("acceptance: seeding dolt global config under %s: %v", gcHome, err))
 	}
 	e.vars["DOLT_ROOT_PATH"] = gcHome
 

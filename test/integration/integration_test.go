@@ -1584,14 +1584,14 @@ func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {
 func seedDoltIdentityForRoot(gcHome string) error {
 	switch mode := doltIdentityMode(); mode {
 	case doltIdentityModeIsolated:
-		return seedIsolatedDoltConfig(gcHome)
+		return dolttest.WriteGlobalConfig(gcHome)
 	case doltIdentityModeSkip:
 		return nil
 	case doltIdentityModeGlobal:
 		if err := ensureGlobalDoltIdentity(); err != nil {
 			return err
 		}
-		return seedIsolatedDoltConfig(gcHome)
+		return dolttest.WriteGlobalConfig(gcHome)
 	default:
 		return fmt.Errorf("%s=%q is invalid", integrationDoltIdentityEnv, mode)
 	}
@@ -1643,15 +1643,6 @@ func trimmedCommandOutput(binary string, args ...string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
-}
-
-func seedIsolatedDoltConfig(gcHome string) error {
-	doltDir := filepath.Join(gcHome, ".dolt")
-	if err := os.MkdirAll(doltDir, 0o755); err != nil {
-		return err
-	}
-	doltCfg := `{"user.name":"gc-test","user.email":"gc-test@test.local"}`
-	return os.WriteFile(filepath.Join(doltDir, "config_global.json"), []byte(doltCfg), 0o644)
 }
 
 func registerCityCommandEnv(cityDir string, env []string) {

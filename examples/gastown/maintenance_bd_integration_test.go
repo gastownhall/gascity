@@ -85,6 +85,9 @@ func newBdTopologyCity(t *testing.T, bd string) *bdTopologyCity {
 			t.Fatal(err)
 		}
 	}
+	if err := dolttest.WriteGlobalConfig(home); err != nil {
+		t.Fatal(err)
+	}
 	for _, entry := range os.Environ() {
 		key := entry[:strings.IndexByte(entry, '=')]
 		if strings.HasPrefix(key, "BEADS_") || strings.HasPrefix(key, "BD_") || strings.HasPrefix(key, "GC_") ||

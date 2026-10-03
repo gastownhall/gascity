@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
+	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/toolhome"
 	"golang.org/x/mod/semver"
 )
@@ -910,14 +911,6 @@ func TestReadyWaitSetForList_ReturnsSetAndCapError(t *testing.T) {
 	}
 }
 
-func writeWaitTestDoltIdentity(homeDir string) error {
-	if err := os.MkdirAll(filepath.Join(homeDir, ".dolt"), 0o755); err != nil {
-		return err
-	}
-	doltConfig := `{"user.name":"gc-test","user.email":"gc-test@example.com"}`
-	return os.WriteFile(filepath.Join(homeDir, ".dolt", "config_global.json"), []byte(doltConfig), 0o644)
-}
-
 func writeManagedBdWaitTestCityScaffold(cityPath string) (string, error) {
 	rigPath := filepath.Join(cityPath, "frontend")
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -979,8 +972,8 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 			managedBdWaitTemplateErr = fmt.Errorf("MkdirTemp(template home): %w", err)
 			return
 		}
-		if err := writeWaitTestDoltIdentity(homeDir); err != nil {
-			managedBdWaitTemplateErr = fmt.Errorf("write template dolt identity: %w", err)
+		if err := dolttest.WriteGlobalConfig(homeDir); err != nil {
+			managedBdWaitTemplateErr = fmt.Errorf("write template dolt global config: %w", err)
 			return
 		}
 		env := waitTestEnv(map[string]string{
@@ -3342,8 +3335,8 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) string {
 	t.Setenv("GC_DOLT", "")
 
 	homeDir := filepath.Join(shortSocketTempDir(t, "gc-bd-home-"), "home")
-	if err := writeWaitTestDoltIdentity(homeDir); err != nil {
-		t.Fatalf("writeWaitTestDoltIdentity: %v", err)
+	if err := dolttest.WriteGlobalConfig(homeDir); err != nil {
+		t.Fatalf("WriteDoltGlobalConfig: %v", err)
 	}
 	t.Setenv("HOME", homeDir)
 	t.Setenv("DOLT_ROOT_PATH", homeDir)
@@ -3422,8 +3415,8 @@ func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 	t.Setenv("GC_DOLT", "")
 
 	homeDir := filepath.Join(shortSocketTempDir(t, "gc-bd-home-"), "home")
-	if err := writeWaitTestDoltIdentity(homeDir); err != nil {
-		t.Fatalf("writeWaitTestDoltIdentity: %v", err)
+	if err := dolttest.WriteGlobalConfig(homeDir); err != nil {
+		t.Fatalf("WriteDoltGlobalConfig: %v", err)
 	}
 	t.Setenv("HOME", homeDir)
 	t.Setenv("DOLT_ROOT_PATH", homeDir)

@@ -360,6 +360,9 @@ func TestGcBeadsBdProviderOwnedRealInitIgnoresAncestorBeadsWorkspace(t *testing.
 			if err := os.MkdirAll(home, 0o755); err != nil {
 				t.Fatal(err)
 			}
+			if err := dolttest.WriteGlobalConfig(home); err != nil {
+				t.Fatal(err)
+			}
 			testutil.RunGit(t, parent, "init", "-q")
 			// The ancestor workspace, in the on-disk shape of an ordinary
 			// embedded bd project (the pinned test bd is built without the

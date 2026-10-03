@@ -178,12 +178,8 @@ func newTutorialEnv(t *testing.T) *tutorialEnv {
 	if err := helpers.WriteSupervisorConfig(home); err != nil {
 		t.Fatalf("writing supervisor config: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(home, ".dolt"), 0o755); err != nil {
-		t.Fatalf("creating dolt dir: %v", err)
-	}
-	doltCfg := `{"user.name":"gc-test","user.email":"gc-test@test.local"}`
-	if err := os.WriteFile(filepath.Join(home, ".dolt", "config_global.json"), []byte(doltCfg), 0o644); err != nil {
-		t.Fatalf("writing dolt config: %v", err)
+	if err := dolttest.WriteGlobalConfig(home); err != nil {
+		t.Fatalf("writing dolt global config: %v", err)
 	}
 	if err := stageClaudeAuth(home); err != nil {
 		t.Fatalf("staging Claude auth: %v", err)
