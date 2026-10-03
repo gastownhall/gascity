@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -72,13 +73,29 @@ type v2Host struct {
 	sessions   func() ([]session.Info, error)
 	censusLegs func() ([]classStoreCandidate, error)
 	// snapshotEnv returns the config, provider and config revision a reload
-	// last published. Only publishEnv calls it.
+	// last published. Only publishEnv calls it, on the maintenance goroutine.
 	snapshotEnv func() (*config.City, runtime.Provider, string)
 	// setInventoryHook installs fn as the inventory lane's per-pass hook.
 	// Optional.
 	setInventoryHook func(fn func(prev, next *ObservationSnapshot))
-	safeTick         func(fn func(), trigger string) (panicked bool)
-	stderr           io.Writer
+	// cityStore and rigStores return the city bead store and the rig bead
+	// stores by rig name (cityBeadStore, rigBeadStores); the reload barrier
+	// compares them across a reload to spot a store rebuild. Required.
+	cityStore func() beads.Store
+	rigStores func() map[string]beads.Store
+	// retryReload leaves a config reload pending for the next tick without
+	// poking (requestConfigReloadRetry). The barrier calls it when a reload
+	// aborts or is deferred. Required.
+	retryReload func()
+	// beginTrace opens a trace cycle for a v2 decision, or returns nil.
+	// Required. The worker FS gate calls it from its own goroutine, so it
+	// must be built like beginOrdersLaneTrace (orders_lane.go): read the
+	// config from the locked snapshot (serviceConfigSnapshot), never the
+	// unlocked cr.cfg, and leave out the config revision, which the
+	// controller goroutine writes unlocked.
+	beginTrace func(trigger string) *sessionReconcilerTraceCycle
+	safeTick   func(fn func(), trigger string) (panicked bool)
+	stderr     io.Writer
 }
 
 // reconcileEnv is immutable once published: a reload publishes a new one at
@@ -162,6 +179,10 @@ type v2Runtime struct {
 	sessions *workqueue.Queue[rowKey]
 	alloc    *allocatorLane
 	resyncCh chan struct{}
+	// allocGate and resyncGate hold the allocator and resync passes while
+	// the session queue is held (reloadBarrier, workerFSGate).
+	allocGate  *laneGate
+	resyncGate *laneGate
 	// resyncFull says a pending resync needs the enqueue-all, not only a
 	// rebuild (v2IndexOnlyResyncs).
 	resyncFull atomic.Bool
@@ -170,6 +191,9 @@ type v2Runtime struct {
 	bootCov    atomic.Pointer[workqueue.Coverage[rowKey]] // set once the boot pass has run
 	bootOnce   sync.Once                                  // records the first boot's duration
 	sweep      atomic.Pointer[resyncSweep]
+	ready      atomic.Bool // boot has returned ready
+	barrier    *reloadBarrier
+	fs         *workerFSGate
 	metrics    *v2Metrics
 	workers    int
 	rand       func() float64 // jitter for the queue and the lanes
@@ -182,6 +206,7 @@ type v2Runtime struct {
 	started   bool
 	stopped   bool
 	stopCh    chan struct{} // closed by stop
+	fsArmed   bool
 	workersWG sync.WaitGroup
 	lanes     []<-chan struct{}
 }
@@ -202,9 +227,13 @@ func newV2Runtime(host v2Host, ctrl v2Controllers, metrics *v2Metrics) *v2Runtim
 		workers:  v2SessionWorkers,
 		rand:     rand.Float64,
 	}
+	rt.barrier = &reloadBarrier{rt: rt, deadline: reloadReconcileDeadline}
+	rt.fs = &workerFSGate{sample: func() (fsPressureStatus, bool) { return currentFSPressureStatus(host.stderr) }}
 	jitter := func() float64 { return rt.rand() }
 	rt.sessions = workqueue.New(workqueue.Config[rowKey]{Jitter: v2Jitter, Rand: jitter})
 	rt.alloc = newAllocatorLane(jitter)
+	rt.allocGate = newLaneGate(rt.alloc.signal)
+	rt.resyncGate = newLaneGate(rt.signalResync)
 	rt.router = newReconcileRouter(host.sessionsLeg, routerSink{
 		addSession: func(k rowKey, r routeReason) {
 			rt.sessions.Add(k, workqueue.LaneHot, workqueue.Reason(r))
@@ -218,17 +247,23 @@ func newV2Runtime(host v2Host, ctrl v2Controllers, metrics *v2Metrics) *v2Runtim
 	return rt
 }
 
-// publishEnv publishes the host's current config as the next generation and
-// returns it. Boot publishes Gen 1; the reload barrier publishes after every
-// applied reload.
+// publishEnv publishes the host's current config as the next generation,
+// unless the current env already holds the same config, provider and
+// revision, and returns the current env. Boot publishes Gen 1; the reload
+// barrier calls it after every reload, so the env follows what the host
+// serves rather than what apply reported.
 func (rt *v2Runtime) publishEnv() *reconcileEnv {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	// Read under mu, so concurrent publishes take generations in the order
 	// they read the config.
 	cfg, sp, rev := rt.host.snapshotEnv()
+	old := rt.env.Load()
+	if old != nil && old.Cfg == cfg && old.SP == sp && old.ConfigRev == rev {
+		return old
+	}
 	e := &reconcileEnv{Gen: 1, Cfg: cfg, SP: sp, ConfigRev: rev}
-	if old := rt.env.Load(); old != nil {
+	if old != nil {
 		e.Gen = old.Gen + 1
 	}
 	rt.env.Store(e)
@@ -241,6 +276,10 @@ func (rt *v2Runtime) requestResync(reason string) {
 	if !v2IndexOnlyResyncs[reason] {
 		rt.resyncFull.Store(true)
 	}
+	rt.signalResync()
+}
+
+func (rt *v2Runtime) signalResync() {
 	select {
 	case rt.resyncCh <- struct{}{}:
 	default:
@@ -284,6 +323,7 @@ func (rt *v2Runtime) boot(ctx context.Context) error {
 		}
 	}
 	rt.bootOnce.Do(func() { rt.metrics.recordBoot(time.Since(started)) })
+	rt.ready.Store(true)
 	return nil
 }
 
@@ -349,8 +389,8 @@ func (rt *v2Runtime) start(parent context.Context) (context.Context, bool) {
 	}
 	rt.metrics.startAllocator(time.Now())
 	rt.lanes = append(rt.lanes,
-		startPacedLane(ctx, rt.env.Load().patrol(), v2AllocatorMinGap, rt.alloc.wakeCh, func(bool) { rt.allocatorPass(ctx) }),
-		startPacedLane(ctx, v2ResyncInterval, v2ResyncMinGap, rt.resyncCh, rt.resyncLanePass),
+		startGatedPacedLane(ctx, rt.env.Load().patrol(), v2AllocatorMinGap, rt.alloc.wakeCh, func(bool) bool { return rt.allocatorPass(ctx) }),
+		startGatedPacedLane(ctx, v2ResyncInterval, v2ResyncMinGap, rt.resyncCh, rt.resyncLanePass),
 	)
 	return ctx, true
 }
@@ -503,8 +543,16 @@ func (rt *v2Runtime) resyncPass(kind string) (*workqueue.Coverage[rowKey], error
 
 // resyncLanePass runs one resync lane pass: the enqueue-all for the backstop
 // and for any folded reason that needs it, else a rebuild alone. A full pass
-// that fails or panics leaves the enqueue-all pending for the next pass.
-func (rt *v2Runtime) resyncLanePass(wake bool) {
+// that fails or panics, or a held backstop, leaves the enqueue-all pending
+// for the next pass. It reports false when held.
+func (rt *v2Runtime) resyncLanePass(wake bool) bool {
+	if !rt.resyncGate.enter() {
+		if !wake {
+			rt.resyncFull.Store(true)
+		}
+		return false
+	}
+	defer rt.resyncGate.exit()
 	full := rt.resyncFull.Swap(false) || !wake
 	ok := false
 	rt.host.safeTick(func() {
@@ -523,14 +571,22 @@ func (rt *v2Runtime) resyncLanePass(wake bool) {
 	if full && !ok {
 		rt.resyncFull.Store(true)
 	}
+	return true
 }
 
 // allocatorPass runs one allocator pass over the reasons the lane collected,
-// unless its backoff gate is closed and nothing urgent is waiting.
-func (rt *v2Runtime) allocatorPass(ctx context.Context) {
+// unless the lane is held or its backoff gate is closed and nothing urgent is
+// waiting. A held pass keeps its reasons for the pass the release wakes. It
+// reports false only when held, so a held pass does not count toward the
+// lane's pacing.
+func (rt *v2Runtime) allocatorPass(ctx context.Context) bool {
+	if !rt.allocGate.enter() {
+		return false
+	}
+	defer rt.allocGate.exit()
 	reasons, ok := rt.alloc.take()
 	if !ok {
-		return
+		return true
 	}
 	env := rt.env.Load()
 	started := time.Now()
@@ -545,6 +601,7 @@ func (rt *v2Runtime) allocatorPass(ctx context.Context) {
 		rt.alloc.succeed()
 	}
 	rt.metrics.recordAllocatorPass(time.Now(), time.Since(started), panicked || err != nil)
+	return true
 }
 
 // allocatorLane collects allocator wakes for the paced lane and owns the

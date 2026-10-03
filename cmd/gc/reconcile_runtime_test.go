@@ -129,9 +129,11 @@ func (rec *v2Recorder) allocatorPasses() [][]string {
 
 // v2Harness is a runtime over a fake host.
 type v2Harness struct {
+	t     *testing.T
 	rt    *v2Runtime
 	rec   *v2Recorder
 	store beads.Store
+	rigs  map[string]beads.Store
 
 	mu        sync.Mutex
 	rev       string
@@ -143,6 +145,7 @@ type v2Harness struct {
 	hookDelay time.Duration // how long setInventoryHook takes to install
 	triggers  []string      // safeTick triggers that panicked
 	panics    atomic.Int64
+	retries   int // host.retryReload calls
 }
 
 func v2TestRow(id string) beads.Bead {
@@ -153,7 +156,7 @@ func v2TestRow(id string) beads.Bead {
 // controllers; otherwise h.rec records.
 func newV2Harness(t *testing.T, store beads.Store, ctrl func(*v2Metrics) v2Controllers) *v2Harness {
 	t.Helper()
-	h := &v2Harness{rec: &v2Recorder{}, store: store, rev: "rev-1"}
+	h := &v2Harness{t: t, rec: &v2Recorder{}, store: store, rev: "rev-1"}
 	cfg := &config.City{Daemon: config.DaemonConfig{PatrolInterval: "10s"}}
 	sp := runtime.NewFake()
 	census := memSessionCensus(store)
@@ -198,6 +201,22 @@ func newV2Harness(t *testing.T, store beads.Store, ctrl func(*v2Metrics) v2Contr
 			defer h.mu.Unlock()
 			h.hook = fn
 		},
+		cityStore: func() beads.Store {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			return h.store
+		},
+		rigStores: func() map[string]beads.Store {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			return h.rigs
+		},
+		retryReload: func() {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			h.retries++
+		},
+		beginTrace: func(string) *sessionReconcilerTraceCycle { return nil },
 		safeTick: func(fn func(), trigger string) (panicked bool) {
 			defer func() {
 				if recover() != nil {
@@ -1186,7 +1205,7 @@ func TestV2MetricsLatencyDepthAndDuty(t *testing.T) {
 
 // v2RuntimeFiles are the v2 production files F2 forbids from touching
 // CityRuntime.
-var v2RuntimeFiles = []string{"reconcile_runtime.go", "reconcile_metrics.go"}
+var v2RuntimeFiles = []string{"reconcile_runtime.go", "reconcile_metrics.go", "reconcile_barrier.go"}
 
 // Kills: v2 code reaching CityRuntime (F2), or a worker reading the host's
 // config directly instead of the published env. A reload writes CityRuntime

@@ -3810,7 +3810,11 @@ func isStaleCreating(bead beads.Bead) bool {
 
 // isStaleCreatingInfo is the session.Info mirror of isStaleCreating.
 func isStaleCreatingInfo(i sessionpkg.Info) bool {
-	now := time.Now()
+	return isStaleCreatingInfoAt(i, time.Now())
+}
+
+// isStaleCreatingInfoAt is isStaleCreatingInfo at now.
+func isStaleCreatingInfoAt(i sessionpkg.Info, now time.Time) bool {
 	if started, ok := parseRFC3339Metadata(i.PendingCreateStartedAt); ok {
 		return !now.Before(started.Add(staleCreatingStateTimeout))
 	}
