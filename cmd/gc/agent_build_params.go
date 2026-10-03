@@ -104,6 +104,12 @@ type agentBuildParams struct {
 	// The v2 allocator sets it; legacy builds never do.
 	planOnly bool
 
+	// readOnly makes resolveTemplate a pure read for the v2 allocator's
+	// named create (AM-N3): the work dir is resolved without mkdir, Claude
+	// settings are validated and pointed at, never projected, and skill
+	// snapshots are not written. Start and adopt resolve side-effecting.
+	readOnly bool
+
 	// realizeProbe times and counts pool realization for the realize_pools
 	// trace record. Set by buildDesiredState around its realization loop only;
 	// nil elsewhere, which disables the counters.
@@ -163,29 +169,7 @@ func (p *agentBuildParams) hasCompleteSessionSnapshot() bool {
 
 // newAgentBuildParams constructs agentBuildParams from the common startup values.
 func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime.Provider, beaconTime time.Time, store beads.Store, stderr io.Writer) *agentBuildParams {
-	params := &agentBuildParams{
-		city:            cfg,
-		cityName:        cityName,
-		cityPath:        cityPath,
-		workspace:       &cfg.Workspace,
-		agents:          append([]config.Agent(nil), cfg.Agents...),
-		providers:       cfg.Providers,
-		lookPath:        exec.LookPath,
-		fs:              fsys.OSFS{},
-		sp:              sp,
-		rigs:            cfg.Rigs,
-		sessionTemplate: cfg.Workspace.SessionTemplate,
-		beaconTime:      beaconTime,
-		packDirs:        cfg.PackDirs,
-		packOverlayDirs: cfg.PackOverlayDirs,
-		rigOverlayDirs:  cfg.RigOverlayDirs,
-		globalFragments: cfg.Workspace.GlobalFragments,
-		appendFragments: mergeFragmentLists(cfg.AgentDefaults.AppendFragments, cfg.AgentsDefaults.AppendFragments),
-		beadStore:       store,
-		beadNames:       make(map[string]string),
-		stderr:          stderr,
-		sessionProvider: cfg.Session.Provider,
-	}
+	params := baseAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
 	if store != nil {
 		params.poolSessionCreateBudget = poolplan.NewCreateBudget(cfg.Daemon.MaxWakesPerTickOrDefault())
 	}
@@ -264,6 +248,47 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 		}
 	}
 	return params
+}
+
+// baseAgentBuildParams is agentBuildParams from config alone: no skill
+// catalogs and no create budget.
+func baseAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime.Provider, beaconTime time.Time, store beads.Store, stderr io.Writer) *agentBuildParams {
+	return &agentBuildParams{
+		city:            cfg,
+		cityName:        cityName,
+		cityPath:        cityPath,
+		workspace:       &cfg.Workspace,
+		agents:          append([]config.Agent(nil), cfg.Agents...),
+		providers:       cfg.Providers,
+		lookPath:        exec.LookPath,
+		fs:              fsys.OSFS{},
+		sp:              sp,
+		rigs:            cfg.Rigs,
+		sessionTemplate: cfg.Workspace.SessionTemplate,
+		beaconTime:      beaconTime,
+		packDirs:        cfg.PackDirs,
+		packOverlayDirs: cfg.PackOverlayDirs,
+		rigOverlayDirs:  cfg.RigOverlayDirs,
+		globalFragments: cfg.Workspace.GlobalFragments,
+		appendFragments: mergeFragmentLists(cfg.AgentDefaults.AppendFragments, cfg.AgentsDefaults.AppendFragments),
+		beadStore:       store,
+		beadNames:       make(map[string]string),
+		stderr:          stderr,
+		sessionProvider: cfg.Session.Provider,
+	}
+}
+
+// newReadOnlyAgentBuildParams is the build params of a read-only template
+// resolution (readOnly): no store, so no session-name lookup or repair, and
+// no skill catalogs, which feed fingerprints and the prompt, never create
+// metadata. lookPath nil keeps exec.LookPath.
+func newReadOnlyAgentBuildParams(cityName, cityPath string, cfg *config.City, lookPath config.LookPathFunc, beaconTime time.Time, stderr io.Writer) *agentBuildParams {
+	p := baseAgentBuildParams(cityName, cityPath, cfg, nil, beaconTime, nil, stderr)
+	p.readOnly = true
+	if lookPath != nil {
+		p.lookPath = lookPath
+	}
+	return p
 }
 
 func (p *agentBuildParams) sharedSkillCatalogForAgent(agent *config.Agent) *materialize.CityCatalog {

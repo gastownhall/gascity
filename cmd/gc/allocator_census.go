@@ -99,6 +99,9 @@ type censusRow struct {
 	// PendingCreate is a never-started pending create (no last_woke_at)
 	// within its lease (POOL-028, poolSessionWithinPendingCreateLease).
 	PendingCreate bool
+	// Prepaid is C5.8's prepaid row as amended by AM-N7: never PreWaked since
+	// its create or reopen (grantPrepaid). Its first grant costs 0.
+	Prepaid bool
 	// UnknownState is a state main does not know, other than drain-ack
 	// stop-pending (F9, SESS-044). The row still occupies its slot.
 	UnknownState bool
@@ -202,6 +205,7 @@ func (r *censusReader) read(now time.Time, cfg *config.City, legs []classStoreCa
 				canonicalLeg[id] = leg.Ref
 				row.StartLease = pendingCreateStartInFlightInfo(info, clk, startupTimeout)
 				row.PendingCreate = strings.TrimSpace(info.LastWokeAt) == "" && poolSessionWithinPendingCreateLease(info, cfg, now)
+				row.Prepaid = grantPrepaid(info)
 				c.canonical = append(c.canonical, k)
 			}
 			c.Rows[k] = row
@@ -408,4 +412,12 @@ func (c *sessionCensus) Ledger(cfg *config.City) ledgerCensus {
 		}
 	}
 	return ledgerCensus{Rows: rows, Legs: c.CompleteLegs()}
+}
+
+// grantPrepaid reports C5.8's prepaid row as amended by AM-N7: it holds its
+// pending-create claim and has never been PreWaked (no last_woke_at). A fresh
+// create and a reopened named row (stopped, its old generation kept) both
+// qualify, so each create or reopen prepays exactly one start.
+func grantPrepaid(info session.Info) bool {
+	return info.PendingCreateClaim && strings.TrimSpace(info.LastWokeAt) == ""
 }
