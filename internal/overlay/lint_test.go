@@ -105,6 +105,7 @@ func TestFindInvalidHookMatchers_Classification(t *testing.T) {
 		// Compiles, but names nothing Claude Code has.
 		{"unknown tool", "PreToolUse", "^Frobnicate$", SeverityWarning, "no known Claude Code tool"},
 		{"typo of a real tool", "PostToolUse", "^Bahs$", SeverityWarning, "no known Claude Code tool"},
+		{"truncated name is an exact name, not a prefix", "PreToolUse", "Bas", SeverityWarning, "no known Claude Code tool"},
 		{"unknown tool on PostToolUseFailure", "PostToolUseFailure", "Frobnicate", SeverityWarning, "no known Claude Code tool"},
 		{"unknown tools on PermissionRequest", "PermissionRequest", "Frobnicate|Quux", SeverityWarning, "no known Claude Code tool"},
 
@@ -116,7 +117,10 @@ func TestFindInvalidHookMatchers_Classification(t *testing.T) {
 		{"anchored Bash is shipped prior art", "PreToolUse", "^Bash$", "", ""},
 		{"bare Bash is a valid exact name", "PreToolUse", "Bash", "", ""},
 		{"pipe list of exact names", "PreToolUse", "Edit|Write", "", ""},
+		{"comma list of exact names", "PreToolUse", "Edit, Write", "", ""},
+		{"exact list with one real tool", "PreToolUse", "Edit|Frobnicate", "", ""},
 		{"prefix regex", "PreToolUse", "Notebook.*", "", ""},
+		{"regex is searched, not anchored", "PreToolUse", "Bas.*", "", ""},
 		{"grouped anchored alternation", "PreToolUse", "^(Read|Glob|Grep)$", "", ""},
 		{"MCP tool regex", "PreToolUse", "mcp__memory__.*", "", ""},
 		{"exact MCP tool name", "PostToolUse", "mcp__memory__create_entities", "", ""},

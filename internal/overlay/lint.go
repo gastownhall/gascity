@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -97,6 +98,15 @@ type HookMatcherFinding struct {
 // Tool(args), which is not a regular expression over tool names.
 var permissionSyntaxMatcher = regexp.MustCompile(`^[A-Za-z|]+\(`)
 
+// exactNameMatcher matches a matcher Claude Code reads as a list of exact tool
+// names instead of a regex: only letters, digits, underscores, hyphens, spaces,
+// commas and pipes.
+var exactNameMatcher = regexp.MustCompile(`^[A-Za-z0-9_\- ,|]+$`)
+
+// mcpToolPrefix starts the name of every MCP tool. Those names are defined by
+// their servers, so the linter cannot know them.
+const mcpToolPrefix = "mcp__"
+
 // toolMatcherEvents are the hook events whose matcher filters on a tool name.
 // The others match something else (SessionStart: how the session began,
 // PreCompact: manual or auto), so a tool-name check would misfire on them.
@@ -108,7 +118,6 @@ var toolMatcherEvents = map[string]bool{
 }
 
 // knownToolNames are the built-in Claude Code tools a hook matcher can name.
-// MCP tools (mcp__server__tool) are defined by their servers and not listed.
 var knownToolNames = []string{
 	"Agent", "AskUserQuestion", "Bash", "CronCreate", "CronDelete", "CronList",
 	"Edit", "EnterPlanMode", "EnterWorktree", "ExitPlanMode", "ExitWorktree",
@@ -162,24 +171,26 @@ func FindInvalidHookMatchers(data []byte) ([]HookMatcherFinding, error) {
 // too, and the author needs the specific explanation, not a parse error.
 func hookMatcherProblem(category, matcher string) (Severity, string) {
 	if permissionSyntaxMatcher.MatchString(matcher) {
-		return SeverityError, "is permission-rule syntax (Tool(args)), not a regex; hook matchers are regexes matched against the tool name only. Use e.g. ^Bash$ and filter on tool_input inside the hook."
+		return SeverityError, "is permission-rule syntax (Tool(args)), not a regex; hook matchers are regexes matched against the tool name only. Use e.g. ^Bash$ and filter on tool_input inside the hook"
 	}
 	re, err := regexp.Compile(matcher)
 	if err != nil {
 		return SeverityError, fmt.Sprintf("does not compile as a regular expression: %v", err)
 	}
-	if toolMatcherEvents[category] && !strings.Contains(matcher, "mcp__") && !matchesKnownTool(re) {
+	if toolMatcherEvents[category] && !strings.Contains(matcher, mcpToolPrefix) && !selectsKnownTool(matcher, re) {
 		return SeverityWarning, "compiles but matches no known Claude Code tool name; check for a typo"
 	}
 	return "", ""
 }
 
-// matchesKnownTool reports whether re matches at least one known tool name.
-func matchesKnownTool(re *regexp.Regexp) bool {
-	for _, name := range knownToolNames {
-		if re.MatchString(name) {
-			return true
-		}
+// selectsKnownTool reports whether matcher selects at least one known tool,
+// reading it the way Claude Code does: a matcher made only of name characters
+// is a list of exact names, and anything else is an unanchored regex searched
+// in each name.
+func selectsKnownTool(matcher string, re *regexp.Regexp) bool {
+	if exactNameMatcher.MatchString(matcher) {
+		names := strings.FieldsFunc(matcher, func(r rune) bool { return r == '|' || r == ',' || r == ' ' })
+		return slices.ContainsFunc(names, func(name string) bool { return slices.Contains(knownToolNames, name) })
 	}
-	return false
+	return slices.ContainsFunc(knownToolNames, re.MatchString)
 }
