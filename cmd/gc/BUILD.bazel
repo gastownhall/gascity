@@ -1434,6 +1434,7 @@ go_test(
         "session_reconciler_wi6w6_mirror_test.go",
         "session_reconfigured_pool_carveout_test.go",
         "session_refresh_async_gate_test.go",
+        "session_resolve_retired_pool_slot_test.go",
         "session_resolve_test.go",
         "session_rollback_pending_create_atomic_test.go",
         "session_scaffold_staging_test.go",
