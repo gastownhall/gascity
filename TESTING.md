@@ -63,6 +63,12 @@ Then put that assertion at the smallest layer that can fail for the intended
 reason. A higher layer may prove wiring across a boundary, but it must not
 repeat the lower layer's branch matrix.
 
+Unit tests must assert behavior: observable return values, errors, state
+changes, and externally visible effects promised by the unit's contract.
+Avoid assertions tied to private helpers, internal data structures, or
+incidental call order unless that detail is itself part of the contract.
+A refactor that preserves behavior should preserve passing tests.
+
 Classify the observable promise first:
 
 1. **Behavior promised by a provider interface?** Add the case once to its
