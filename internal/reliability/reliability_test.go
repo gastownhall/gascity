@@ -196,7 +196,9 @@ func TestAnalyzeBasicCorrelation(t *testing.T) {
 		workerOp(t, 2, now, "sess-B", "claude-sonnet-4-6", "v3", "rigA/worker-2"),
 		workerOp(t, 3, now, "sess-C", "claude-opus-4-7", "v2", "rigB/worker-1"),
 		lifecycle(4, events.SessionCrashed, "sess-A", now),
-		lifecycle(5, events.SessionQuarantined, "sess-A", now),
+		// session.quarantined as the wake-failure path emits it: the agent's
+		// display name as Subject, the bead ID as SessionID, no payload.
+		{Seq: 5, Type: events.SessionQuarantined, Ts: now, Actor: "gc", Subject: "rigA/worker-1", SessionID: "sess-A"},
 		lifecycle(6, events.SessionCrashed, "sess-C", now),
 	}
 	r := Analyze(es, Window{}, Filter{})
@@ -808,8 +810,8 @@ func TestAnalyzeInstrumentationCountsMissingModelAndPromptVersion(t *testing.T) 
 	if got := r.Instrumentation.MissingPromptVersion; got != 1 {
 		t.Fatalf("missing prompt version = %d, want 1", got)
 	}
-	if got := r.Instrumentation.QuarantineSignalStatus; got != quarantineSignalStatusNotEmitted {
-		t.Fatalf("quarantine signal status = %q, want %q", got, quarantineSignalStatusNotEmitted)
+	if got := r.Instrumentation.QuarantineSignalStatus; got != quarantineSignalStatusNotObserved {
+		t.Fatalf("quarantine signal status = %q, want %q", got, quarantineSignalStatusNotObserved)
 	}
 }
 

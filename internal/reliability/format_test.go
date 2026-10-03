@@ -116,7 +116,7 @@ func TestFormatTable_InstrumentationNotes(t *testing.T) {
 		WorkerOperations:       3,
 		MissingModel:           2,
 		MissingPromptVersion:   1,
-		QuarantineSignalStatus: quarantineSignalStatusNotEmitted,
+		QuarantineSignalStatus: quarantineSignalStatusNotObserved,
 	}
 	var buf bytes.Buffer
 	if err := FormatTable(&buf, r); err != nil {
@@ -127,7 +127,6 @@ func TestFormatTable_InstrumentationNotes(t *testing.T) {
 		"model/prompt_version instrumentation incomplete",
 		"model missing on 2/3 worker.operation event(s)",
 		"event counts, not session counts",
-		"session.quarantined is not emitted by current production paths",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("instrumentation note missing %q\n%s", want, out)
@@ -135,15 +134,19 @@ func TestFormatTable_InstrumentationNotes(t *testing.T) {
 	}
 }
 
-func TestFormatTable_NoQuarantineNoteWhenObserved(t *testing.T) {
-	r := sampleReport()
-	r.Instrumentation.QuarantineSignalStatus = quarantineSignalStatusObserved
-	var buf bytes.Buffer
-	if err := FormatTable(&buf, r); err != nil {
-		t.Fatalf("FormatTable: %v", err)
-	}
-	if strings.Contains(buf.String(), "session.quarantined is not emitted") {
-		t.Errorf("observed quarantine signal should suppress not-emitted note:\n%s", buf.String())
+// session.quarantined is emitted when a session enters wake-failure
+// quarantine, so a window without one is not an instrumentation gap.
+func TestFormatTable_NoQuarantineNote(t *testing.T) {
+	for _, status := range []string{quarantineSignalStatusNotObserved, quarantineSignalStatusObserved} {
+		r := sampleReport()
+		r.Instrumentation.QuarantineSignalStatus = status
+		var buf bytes.Buffer
+		if err := FormatTable(&buf, r); err != nil {
+			t.Fatalf("FormatTable: %v", err)
+		}
+		if strings.Contains(buf.String(), "session.quarantined") {
+			t.Errorf("status %q: table should carry no session.quarantined note:\n%s", status, buf.String())
+		}
 	}
 }
 
