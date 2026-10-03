@@ -3148,7 +3148,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				if runtimeRunning {
 					// Only when this branch actually killed something: the
-					// already-dead fall-through below (:3076) deliberately
+					// already-dead fall-through below (the "Runtime was
+					// already dead — no kill happened" block) deliberately
 					// leaves state untouched so the wake decision below can
 					// fire on this same tick (#2345) — forcing "asleep" here
 					// would fight that same-tick start. When we did kill a

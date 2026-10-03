@@ -143,8 +143,9 @@ func cycleAliveSessionForFreshReassign(
 	if hasCapability && newSessionKey == "" {
 		batch["session_key"] = ""
 	}
-	// The kill above already succeeded (we returned early at :109 otherwise),
-	// so the runtime this bead's metadata describes is now definitely gone.
+	// The kill above already succeeded (the workerKillSessionTargetWithConfig
+	// error path above returns early otherwise), so the runtime this bead's
+	// metadata describes is now definitely gone.
 	// Record that unconditionally in the same patch as the mint: a phantom
 	// key nothing ever launches on is worse than a session that looks asleep
 	// for one extra tick, and ComputeAwakeSet's reset-pending desire (gated

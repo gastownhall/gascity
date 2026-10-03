@@ -998,5 +998,8 @@ func TestReconcileSessionBeads_RestartRequestSetsAsleepOnlyWhenLiveRuntimeKilled
 		if got.Metadata["state"] == "asleep" {
 			t.Fatalf("state = %q, want NOT asleep — runtime was already dead, the restart-requested block must not have touched state on this branch", got.Metadata["state"])
 		}
+		if got.Metadata["last_woke_at"] == "" {
+			t.Fatal("last_woke_at empty, want same-tick wake commit")
+		}
 	})
 }
