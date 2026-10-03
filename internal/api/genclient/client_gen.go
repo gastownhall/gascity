@@ -2815,10 +2815,14 @@ type OrderSkippedScope struct {
 
 // OrderSuppressedPayload defines model for OrderSuppressedPayload.
 type OrderSuppressedPayload struct {
-	Consecutive     int64  `json:"consecutive"`
-	FirstSuppressed string `json:"first_suppressed"`
-	OrderName       string `json:"order_name"`
-	SuppressedForMs int64  `json:"suppressed_for_ms"`
+	BlockerAgeMs    *int64  `json:"blocker_age_ms,omitempty"`
+	BlockerId       *string `json:"blocker_id,omitempty"`
+	BlockerKind     *string `json:"blocker_kind,omitempty"`
+	BlockerTitle    *string `json:"blocker_title,omitempty"`
+	Consecutive     int64   `json:"consecutive"`
+	FirstSuppressed string  `json:"first_suppressed"`
+	OrderName       string  `json:"order_name"`
+	SuppressedForMs int64   `json:"suppressed_for_ms"`
 }
 
 // OrdersFeedBody defines model for OrdersFeedBody.

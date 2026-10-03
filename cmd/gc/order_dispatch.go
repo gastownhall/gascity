@@ -878,12 +878,29 @@ func (m *memoryOrderDispatcher) openWorkGateShut(ctx context.Context, cand *orde
 		// streak and reporting it past a threshold makes that visible
 		// without changing what the gate decides (ga-a6zy9).
 		if payload, alert := m.noteOpenWorkSuppressed(scoped, now); alert {
+			// Name the blocker. The streak says how long; only this says
+			// what to act on, and closing that bead is what reopens the
+			// gate. Resolved HERE rather than in the gate because the
+			// gate runs every tick and this runs at most once per
+			// orderOpenWorkSuppressionRepeat per order, so a walk the
+			// hot path cannot afford is free at this cadence.
+			// Best-effort by contract: a failed or empty lookup leaves
+			// the event exactly as informative as it was before, and
+			// never withholds it.
+			blocker, found := m.openWorkBlockerForAlert(ctx, cand.gateStores, scoped)
+			if found {
+				payload.BlockerID = blocker.ID
+				payload.BlockerKind = blocker.Kind
+				payload.BlockerTitle = blocker.Title
+				if !blocker.CreatedAt.IsZero() {
+					payload.BlockerAgeMS = now.Sub(blocker.CreatedAt).Milliseconds()
+				}
+			}
 			m.rec.Record(events.Event{
 				Type:    events.OrderSuppressed,
 				Actor:   "controller",
 				Subject: scoped,
-				Message: fmt.Sprintf("open-work gate has suppressed this order for %d consecutive dispatch checks since %s",
-					payload.Consecutive, payload.FirstSuppressed),
+				Message: orderSuppressedMessage(payload),
 				Payload: events.OrderSuppressedPayloadJSON(payload),
 			})
 		}
@@ -1617,6 +1634,88 @@ func (m *memoryOrderDispatcher) noteOpenWorkSuppressed(scoped string, now time.T
 		FirstSuppressed: state.since.UTC().Format(time.RFC3339),
 		SuppressedForMS: now.Sub(state.since).Milliseconds(),
 	}, alert
+}
+
+// orderSuppressedMessage renders the human-readable half of an order.suppressed
+// event. The blocker clause is appended only when the lookup resolved one, so
+// the message degrades to exactly the text it had before blocker resolution
+// existed rather than to a sentence with a hole in it.
+func orderSuppressedMessage(p events.OrderSuppressedPayload) string {
+	msg := fmt.Sprintf("open-work gate has suppressed this order for %d consecutive dispatch checks since %s",
+		p.Consecutive, p.FirstSuppressed)
+	if p.BlockerID == "" {
+		return msg
+	}
+	blocker := fmt.Sprintf("; blocked by %s (%s)", p.BlockerID, p.BlockerKind)
+	if p.BlockerAgeMS > 0 {
+		blocker += fmt.Sprintf(", open for %s", (time.Duration(p.BlockerAgeMS) * time.Millisecond).Round(time.Second))
+	}
+	return msg + blocker + " — the gate reopens when that bead closes"
+}
+
+// openWorkBlockerForAlert resolves the oldest bead holding this order's
+// open-work gate shut, for attachment to an order.suppressed event.
+//
+// Bounded on the same budget as the gate itself: this runs on the dispatch tick
+// goroutine, and the store it is about to read is by hypothesis the store that
+// is misbehaving — an unbounded read here would let a wedged blocker stall every
+// LATER order's dispatch, converting a telemetry improvement into an outage.
+// On timeout, cancellation, or any store error it reports nothing and the caller
+// emits the event without blocker fields; the alert itself is never withheld,
+// which is the whole point of the event.
+//
+// A separate read rather than a value threaded out of the gate: HasOpenWork's
+// contract is that only its boolean escapes the edge, its index/fallback/hole
+// paths do not all have a bead in hand to return, and it short-circuits on the
+// first blocker while this wants the oldest. Reading once per alert keeps all
+// three paths reporting identically.
+func (m *memoryOrderDispatcher) openWorkBlockerForAlert(ctx context.Context, stores []beads.Store, scoped string) (orders.WorkBlocker, bool) {
+	type lookupResult struct {
+		blocker orders.WorkBlocker
+		found   bool
+		err     error
+	}
+	done := make(chan lookupResult, 1)
+	go func() {
+		var oldest orders.WorkBlocker
+		found := false
+		for _, store := range stores {
+			if store == nil {
+				continue
+			}
+			front := orders.NewStoreWithGraph(
+				beads.OrdersStore{Store: store},
+				beads.GraphStore{Store: store},
+			)
+			blocker, ok, err := front.OpenWorkBlocker(scoped, m.wispRootHasOpenWork)
+			if err != nil {
+				done <- lookupResult{err: err}
+				return
+			}
+			if !ok {
+				continue
+			}
+			if !found || blocker.CreatedAt.Before(oldest.CreatedAt) {
+				oldest = blocker
+				found = true
+			}
+		}
+		done <- lookupResult{blocker: oldest, found: found}
+	}()
+	timer := time.NewTimer(orderGateTimeout)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		if r.err != nil {
+			logDispatchError(m.stderr, "gc: order dispatch: resolving open-work blocker for %s: %v", scoped, r.err)
+			return orders.WorkBlocker{}, false
+		}
+		return r.blocker, r.found
+	case <-timer.C:
+		return orders.WorkBlocker{}, false
+	case <-ctx.Done():
+		return orders.WorkBlocker{}, false
+	}
 }
 
 // clearOpenWorkSuppression drops the named order's suppression streak. Called
