@@ -36,7 +36,8 @@ import (
 // cacheLagBound bounds how long an exact leg's read may be served from its
 // last good answer (P3 spec §4.2 rule 4). An older answer is refused, so the
 // leg reads partial. It is the one last-good bound of the allocator's reads:
-// P3-3's census (censusLastGoodBound) adopts it when it lands.
+// the session census and its episode reader use it too, and it caps the
+// pass-time term of a backstop recording's expiry.
 const cacheLagBound = 60 * time.Second
 
 var (
@@ -355,8 +356,8 @@ func projectControlDispatcherRoutes(cfg *config.City, rows []beads.Bead, refs []
 	if cfg == nil || len(rows) == 0 {
 		return rows, nil
 	}
+	// With no store the repair defers every route it would rewrite.
 	repair := newControlDispatcherRouteRepair(cfg, nil)
-	repair.writesRemaining = 0
 	// A misaligned input suppresses every control route and reports no gap,
 	// as legacy does.
 	aligned := len(rows) == len(refs)

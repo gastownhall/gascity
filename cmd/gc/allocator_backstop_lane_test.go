@@ -284,29 +284,47 @@ func (s writeLogStore) Update(id string, opts beads.UpdateOpts) error {
 	return s.Store.Update(id, opts)
 }
 
-// Kills: any repair dropped from the sequence or run out of legacy order
-// (M15-M20). One fixture gives every repair a row to write: the clobbered
-// run (work-dir repair, then the stamp), work assigned to a legacy bound
-// identity, an unassigned clobbered row, an unassigned route to a legacy
-// bound identity, a slot-suffixed route, and a rig-owned control row routed
-// to the city dispatcher. A second rig with no dispatcher is a scope gap:
-// no write, one gap, published with the next recording.
-func TestBackstopDemandRepairsWriteLogGoldenInLegacyOrder(t *testing.T) {
-	const (
-		legacyPlanner    = "rig-A/gc.planner"
-		canonicalPlanner = "rig-A/planner"
-	)
-	cityPath := t.TempDir()
+// repairGoldenFixture gives every demand-pass repair a row to write: the
+// clobbered run (work-dir repair, then the stamp), a workflow step whose
+// non-pool session stamps its root (gc.root_bead_id) while the root, open
+// and routed, carries a clobbered pool-slot work dir, work assigned to a
+// legacy bound identity, an unassigned clobbered row, an unassigned route to
+// a legacy bound identity, a slot-suffixed route, and a rig-owned control
+// row routed to the city dispatcher. A second rig with no dispatcher is a
+// scope gap: no write, one gap. Every write goes to log.
+type repairGoldenFixture struct {
+	env      backstopEnv
+	log      *writeLog
+	rigRoute string
+}
+
+const (
+	goldenLegacyPlanner    = "rig-A/gc.planner"
+	goldenCanonicalPlanner = "rig-A/planner"
+	// goldenStepSession is the non-pool session the workflow step is
+	// assigned to; goldenStepWorkDir is its work dir.
+	goldenStepSession = "mayor-session"
+	goldenStepWorkDir = "/home/ds/gascity-worktrees/ga-mayor"
+)
+
+func newRepairGoldenFixture(t *testing.T) repairGoldenFixture {
+	t.Helper()
 	cfg := classBindingDispatcherFixtureConfig(t)
 	cfg.Workspace.Prefix = "ga"
 	cfg.Rigs = append(cfg.Rigs, config.Rig{Name: "nodisp", Path: t.TempDir()})
 	cfg.Agents = append(cfg.Agents, poolAgent("planner", "rig-A", intPtr(5), 0))
 	cityRoute := cfg.Agents[0].QualifiedName()
-	rigRoute := cfg.Agents[1].QualifiedName()
 
-	routedClobbered := workBead("ga-rclob", canonicalPlanner, "", "open", 5)
+	routedClobbered := workBead("ga-rclob", goldenCanonicalPlanner, "", "open", 5)
 	routedClobbered.Metadata[beadmeta.WorkDirMetadataKey] = clobberPoolSlot
 	routedClobbered.Metadata[beadmeta.LegacyWorkDirMetadataKey] = clobberStaleLegacy
+	// The root's legacy work dir is not the step session's, so a routed-side
+	// work-dir repair over a snapshot taken before the stamp would revert the
+	// stamp to it (M19).
+	root := workBead("ga-root", goldenCanonicalPlanner, "", "open", 5)
+	root.Metadata[beadmeta.KindMetadataKey] = beadmeta.KindWorkflow
+	root.Metadata[beadmeta.WorkDirMetadataKey] = clobberPoolSlot
+	root.Metadata[beadmeta.LegacyWorkDirMetadataKey] = clobberStaleLegacy
 	control := func(id, rig string) beads.Bead {
 		return beads.Bead{ID: id, Title: id, Type: "task", Status: "open", Metadata: map[string]string{
 			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
@@ -317,19 +335,46 @@ func TestBackstopDemandRepairsWriteLogGoldenInLegacyOrder(t *testing.T) {
 	log := &writeLog{}
 	city := writeLogStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "ga-run", Type: "task", Status: "in_progress", Assignee: clobberSessionName, Metadata: clobberedWorkDir()},
-		workBead("ga-asg", legacyPlanner, legacyPlanner, "in_progress", 5),
+		{ID: "ga-step", Type: "task", Status: "in_progress", Assignee: goldenStepSession, Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "ga-root"}},
+		root,
+		workBead("ga-asg", goldenLegacyPlanner, goldenLegacyPlanner, "in_progress", 5),
 		routedClobbered,
-		workBead("ga-rlegacy", legacyPlanner, "", "open", 5),
-		workBead("ga-slot", canonicalPlanner+"-2", "", "open", 5),
+		workBead("ga-rlegacy", goldenLegacyPlanner, "", "open", 5),
+		workBead("ga-slot", goldenCanonicalPlanner+"-2", "", "open", 5),
 	}, nil), log: log}
 	rigs := map[string]beads.Store{
 		"fixture": writeLogStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{control("fx-ctl", "fixture")}, nil), log: log},
 		"nodisp":  writeLogStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{control("nd-ctl", "nodisp")}, nil), log: log},
 	}
-	lane, _ := newTestBackstopLane(backstopEnv{
-		CityPath: cityPath, Cfg: cfg, CityStore: city, RigStores: rigs,
-		Sessions: newSessionBeadSnapshot([]beads.Bead{stampTestSession(clobberSessionName, clobberLiveWorkDir)}),
-	})
+	return repairGoldenFixture{
+		env: backstopEnv{
+			CityPath: t.TempDir(), Cfg: cfg, CityStore: city, RigStores: rigs,
+			Sessions: newSessionBeadSnapshot([]beads.Bead{
+				stampTestSession(clobberSessionName, clobberLiveWorkDir),
+				stampTestSession(goldenStepSession, goldenStepWorkDir),
+			}),
+		},
+		log:      log,
+		rigRoute: cfg.Agents[1].QualifiedName(),
+	}
+}
+
+func (f repairGoldenFixture) workDir(t *testing.T, id string) string {
+	t.Helper()
+	b, err := f.env.CityStore.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	return b.Metadata[beadmeta.WorkDirMetadataKey]
+}
+
+// Kills: any repair dropped from the sequence or run out of legacy order
+// (M15-M20), including the routed collection read before the assigned
+// repairs (M19): its stale snapshot of the root would revert the root stamp
+// to the legacy work dir. Scope gaps are published with the next recording.
+func TestBackstopDemandRepairsWriteLogGoldenInLegacyOrder(t *testing.T) {
+	f := newRepairGoldenFixture(t)
+	lane, _ := newTestBackstopLane(f.env)
 
 	if !lane.repair(context.Background()) {
 		t.Fatal("repair declined")
@@ -338,14 +383,19 @@ func TestBackstopDemandRepairsWriteLogGoldenInLegacyOrder(t *testing.T) {
 	want := []string{
 		"SetMetadataBatch ga-run " + beadmeta.WorkDirMetadataKey + "=" + clobberStaleLegacy,
 		"SetMetadataBatch ga-run gc.session_name=" + clobberSessionName + " " + beadmeta.WorkDirMetadataKey + "=" + clobberLiveWorkDir,
-		"Update ga-asg assignee=" + canonicalPlanner + " " + beadmeta.RoutedToMetadataKey + "=" + canonicalPlanner,
+		"SetMetadataBatch ga-step gc.session_name=" + goldenStepSession + " " + beadmeta.WorkDirMetadataKey + "=" + goldenStepWorkDir,
+		"SetMetadataBatch ga-root gc.session_name=" + goldenStepSession + " " + beadmeta.WorkDirMetadataKey + "=" + goldenStepWorkDir,
+		"Update ga-asg assignee=" + goldenCanonicalPlanner + " " + beadmeta.RoutedToMetadataKey + "=" + goldenCanonicalPlanner,
 		"SetMetadataBatch ga-rclob " + beadmeta.WorkDirMetadataKey + "=" + clobberStaleLegacy,
-		"Update ga-rlegacy assignee=- " + beadmeta.RoutedToMetadataKey + "=" + canonicalPlanner,
-		"Update ga-slot assignee=- " + beadmeta.RoutedToMetadataKey + "=" + canonicalPlanner,
-		"Update fx-ctl assignee=- " + beadmeta.RoutedToMetadataKey + "=" + rigRoute,
+		"Update ga-rlegacy assignee=- " + beadmeta.RoutedToMetadataKey + "=" + goldenCanonicalPlanner,
+		"Update ga-slot assignee=- " + beadmeta.RoutedToMetadataKey + "=" + goldenCanonicalPlanner,
+		"Update fx-ctl assignee=- " + beadmeta.RoutedToMetadataKey + "=" + f.rigRoute,
 	}
-	if !slices.Equal(log.ops, want) {
-		t.Errorf("repair writes\n got  %q\n want %q", log.ops, want)
+	if !slices.Equal(f.log.ops, want) {
+		t.Errorf("repair writes\n got  %q\n want %q", f.log.ops, want)
+	}
+	if got := f.workDir(t, "ga-root"); got != goldenStepWorkDir {
+		t.Errorf("root gc.work_dir = %q, want the step session's %q", got, goldenStepWorkDir)
 	}
 
 	if !at(lane, time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)).pass(context.Background()) {
@@ -355,6 +405,53 @@ func TestBackstopDemandRepairsWriteLogGoldenInLegacyOrder(t *testing.T) {
 	if len(gaps) != 1 || gaps[0].RigContext != "nodisp" || gaps[0].SuppressedCount != 1 || gaps[0].SampleBeadID != "nd-ctl" {
 		t.Errorf("recording scope gaps = %+v, want one for rig nodisp with nd-ctl", gaps)
 	}
+}
+
+// Kills: scope gaps carried only by the first recording after a repair run
+// (R38), and a repair-run number that moves without a new run, so a consumer
+// would emit one run's gap events again (or never). Every recording carries
+// the latest run's gaps under that run's RepairSeq; only a repair run that
+// ran advances it.
+func TestBackstopRecordingCarriesRepairRunGapsAndSeq(t *testing.T) {
+	f := newRepairGoldenFixture(t)
+	lane, _ := newTestBackstopLane(f.env)
+	ctx := context.Background()
+	clock := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	pass := func() *backstopRecording {
+		t.Helper()
+		clock = clock.Add(backstopTestInterval)
+		if !at(lane, clock).pass(ctx) {
+			t.Fatal("pass declined")
+		}
+		return lane.recording()
+	}
+	check := func(when string, rec *backstopRecording, seq uint64, gaps int) {
+		t.Helper()
+		if rec.RepairSeq != seq || len(rec.ScopeGaps) != gaps {
+			t.Fatalf("%s: RepairSeq=%d gaps=%+v, want RepairSeq=%d with %d gap(s)", when, rec.RepairSeq, rec.ScopeGaps, seq, gaps)
+		}
+	}
+
+	check("before any repair run", pass(), 0, 0)
+	if !lane.repair(ctx) {
+		t.Fatal("repair declined")
+	}
+	for i := range 3 {
+		check(fmt.Sprintf("recording %d after the first run", i+1), pass(), 1, 1)
+	}
+
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if lane.repair(canceled) {
+		t.Fatal("repair ran after shutdown")
+	}
+	check("after a declined run", pass(), 1, 1)
+
+	if !lane.repair(ctx) {
+		t.Fatal("second repair declined")
+	}
+	check("after the second run", pass(), 2, 1)
+	check("next recording", pass(), 2, 1)
 }
 
 // writeSuspension writes the city's runtime suspension file; an empty body
@@ -441,8 +538,21 @@ func TestBackstopLaneSkipsReadsAndRepairsWhileCitySuspended(t *testing.T) {
 	}
 }
 
-// Kills: reads or repairs after shutdown began. A pass and a repair under a
-// canceled context do nothing.
+// cancelOnListStore cancels a context on every List.
+type cancelOnListStore struct {
+	beads.Store
+	cancel context.CancelFunc
+}
+
+func (s *cancelOnListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.cancel()
+	return s.Store.List(q)
+}
+
+// Kills: reads or repairs after shutdown began, and a recording published
+// (with its allocator wake) by a pass that shutdown overtook mid-read (R3).
+// A pass and a repair under a canceled context do nothing; a pass whose reads
+// see shutdown begin publishes nothing.
 func TestBackstopLaneNoPassOrRepairAfterShutdown(t *testing.T) {
 	f := newClobberedRunFixture()
 	lane, wakes := newTestBackstopLane(backstopEnv{Cfg: gaConfig(), CityStore: f.mem, Sessions: f.sessions})
@@ -454,6 +564,58 @@ func TestBackstopLaneNoPassOrRepairAfterShutdown(t *testing.T) {
 	if lane.recording() != nil || wakes.Load() != 0 || f.workDir(t) != clobberPoolSlot {
 		t.Errorf("after shutdown: recording=%v wakes=%d work dir=%q, want nothing", lane.recording(), wakes.Load(), f.workDir(t))
 	}
+
+	ctx, cancel = context.WithCancel(context.Background())
+	lane, wakes = newTestBackstopLane(backstopEnv{Cfg: demandReadsTestConfig(), CityStore: &cancelOnListStore{Store: beads.NewMemStore(), cancel: cancel}})
+	if lane.pass(ctx) {
+		t.Error("a pass overtaken by shutdown reported that it ran")
+	}
+	if ctx.Err() == nil || lane.recording() != nil || wakes.Load() != 0 {
+		t.Errorf("pass overtaken by shutdown: canceled=%t recording=%v wakes=%d, want no publish and no wake", ctx.Err() != nil, lane.recording(), wakes.Load())
+	}
+}
+
+// Kills: repairs over a city with no city store (R29). Legacy's demand pass
+// runs its repairs only under a store; the lane declines the run and the
+// repair-run number stays put.
+func TestBackstopLaneNoRepairWithoutCityStore(t *testing.T) {
+	f := newClobberedRunFixture()
+	lane, _ := newTestBackstopLane(backstopEnv{Cfg: gaConfig(), RigStores: map[string]beads.Store{"rig": f.mem}, Sessions: f.sessions})
+	if lane.repair(context.Background()) {
+		t.Error("repair ran with no city store")
+	}
+	if !at(lane, time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)).pass(context.Background()) {
+		t.Fatal("pass declined")
+	}
+	if got := lane.recording().RepairSeq; got != 0 {
+		t.Errorf("RepairSeq = %d after a declined run, want 0", got)
+	}
+}
+
+// Kills: a declined pass counted toward the lane's pacing (R1). After a pass
+// skipped while the city was suspended, the resume's wake runs a pass at once
+// instead of waiting out a duty cycle the skipped pass never used.
+func TestBackstopLaneSkippedPassDoesNotPaceTheNextWake(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		lane, _ := newTestBackstopLane(backstopEnv{CityPath: t.TempDir(), Cfg: demandReadsTestConfig(), CityStore: beads.NewMemStore()})
+		startBackstopLaneInBubble(t, lane)
+		advanceBackstop(backstopTestInterval)
+		if got := backstopSeq(lane); got != 2 {
+			t.Fatalf("before suspending: %d passes, want 2", got)
+		}
+		t.Setenv("GC_SUSPENDED", "1")
+		advanceBackstop(backstopTestInterval)
+		if got := backstopSeq(lane); got != 2 {
+			t.Fatalf("suspended: %d passes, want the backstop's pass skipped", got)
+		}
+		advanceBackstop(backstopLaneMinGap / 2)
+		t.Setenv("GC_SUSPENDED", "")
+		lane.wake()
+		synctest.Wait()
+		if got := backstopSeq(lane); got != 3 {
+			t.Errorf("resume wake %v after a skipped pass: %d passes, want one at once", backstopLaneMinGap/2, got)
+		}
+	})
 }
 
 // slowLiveStore makes every live List and every Ready take d of bubble time.
@@ -475,36 +637,107 @@ func (s slowLiveStore) Ready(q ...beads.ReadyQuery) ([]beads.Bead, error) {
 }
 
 // Kills: a recording stamped when its reads began, a fixed freshness bound
-// slow reads outrun, and repairs on the recording's cadence. With bd-like
-// 7.4s reads (a pass of about 15s) the recording, once published, is fresh
-// at every sample over ten minutes.
+// slow reads outrun, and repairs on the recording's cadence. At bd-like read
+// latencies (7.4s reads make a pass of about 15s) the recording, once
+// published, is fresh at every sample over ten minutes.
 func TestBackstopLaneRecordingNeverStaleInSteadyState(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		store := slowLiveStore{Store: beads.NewMemStore(), d: 7400 * time.Millisecond}
-		if _, err := store.Create(routedDemandBead("")); err != nil {
-			t.Fatal(err)
+	for _, d := range []time.Duration{2 * time.Second, 3600 * time.Millisecond, 7400 * time.Millisecond, 12 * time.Second} {
+		t.Run(d.String(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				store := slowLiveStore{Store: beads.NewMemStore(), d: d}
+				if _, err := store.Create(routedDemandBead("")); err != nil {
+					t.Fatal(err)
+				}
+				lane, _ := newTestBackstopLane(backstopEnv{Cfg: demandReadsTestConfig(), CityStore: store, Sessions: newClobberedRunFixture().sessions})
+				startBackstopLaneInBubble(t, lane)
+				var samples, stale int
+				var maxAge time.Duration
+				for end := time.Now().Add(10 * time.Minute); time.Now().Before(end); {
+					<-time.After(250 * time.Millisecond)
+					rec := lane.recording()
+					if rec == nil {
+						continue
+					}
+					samples++
+					maxAge = max(maxAge, time.Since(rec.At))
+					if !rec.fresh(time.Now()) {
+						stale++
+					}
+				}
+				if samples == 0 || stale > 0 {
+					t.Errorf("stale at %d of %d samples (max age %v)", stale, samples, maxAge)
+				}
+				if d >= 7400*time.Millisecond && maxAge <= backstopTestInterval {
+					t.Errorf("max recording age %v: the reads were not slow enough to test the bound", maxAge)
+				}
+			})
+		})
+	}
+}
+
+// hangableStore delays every live List by delay; once hang is set, a live
+// List blocks until release is closed.
+type hangableStore struct {
+	beads.Store
+	delay   *atomic.Int64
+	hang    *atomic.Bool
+	release chan struct{}
+}
+
+func (s hangableStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Live {
+		if s.hang.Load() {
+			<-s.release
 		}
+		<-time.After(time.Duration(s.delay.Load()))
+	}
+	return s.Store.List(q)
+}
+
+// Kills: an expiry whose pass-time term is uncapped, so one slow pass keeps
+// a dead lane's recordings fresh for that pass's length (finding 2 of the
+// P3-2 re-review). After one 5-minute pass the lane hangs for good; its last
+// recording goes stale 2 intervals plus cacheLagBound after its reads ended,
+// and the allocator then reads the leg partial.
+func TestBackstopLaneSlowPassThenHangGoesStaleByCappedBound(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		delay := &atomic.Int64{}
+		delay.Store(int64(time.Second))
+		hang := &atomic.Bool{}
+		release := make(chan struct{})
+		store := hangableStore{Store: beads.NewMemStore(), delay: delay, hang: hang, release: release}
 		lane, _ := newTestBackstopLane(backstopEnv{Cfg: demandReadsTestConfig(), CityStore: store})
 		startBackstopLaneInBubble(t, lane)
-		var samples, stale int
-		var maxAge time.Duration
-		for end := time.Now().Add(10 * time.Minute); time.Now().Before(end); {
-			<-time.After(250 * time.Millisecond)
-			rec := lane.recording()
-			if rec == nil {
-				continue
-			}
-			samples++
-			maxAge = max(maxAge, time.Since(rec.At))
-			if !rec.fresh(time.Now()) {
-				stale++
-			}
+		defer func() {
+			delay.Store(int64(time.Second))
+			close(release)
+		}()
+		for backstopSeq(lane) < 3 {
+			advanceBackstop(time.Second)
 		}
-		if samples == 0 || stale > 0 {
-			t.Errorf("stale at %d of %d samples (max age %v)", stale, samples, maxAge)
+		steady := backstopSeq(lane)
+		delay.Store(int64(5 * time.Minute))
+		for backstopSeq(lane) == steady {
+			advanceBackstop(time.Second)
 		}
-		if maxAge <= backstopTestInterval {
-			t.Errorf("max recording age %v: the reads were not slow enough to test the bound", maxAge)
+		// The next pass starts an interval after the slow one ended; it
+		// hangs.
+		hang.Store(true)
+		slow := lane.recording()
+		if want := slow.At.Add(2*backstopTestInterval + cacheLagBound); !slow.Expires.Equal(want) {
+			t.Fatalf("after a 5m pass: Expires = At + %v, want At + %v", slow.Expires.Sub(slow.At), want.Sub(slow.At))
+		}
+		<-time.After(time.Until(slow.Expires))
+		synctest.Wait()
+		if lane.recording() != slow || !slow.fresh(time.Now()) {
+			t.Fatalf("at Expires: recording replaced=%t fresh=%t, want the slow pass's, still fresh", lane.recording() != slow, slow.fresh(time.Now()))
+		}
+		advanceBackstop(time.Nanosecond)
+		if lane.recording() != slow || slow.fresh(time.Now()) {
+			t.Fatalf("past Expires: recording replaced=%t fresh=%t, want the slow pass's, stale", lane.recording() != slow, slow.fresh(time.Now()))
+		}
+		if _, err := newV2DemandReads(time.Now(), lane.recording(), nil).RawOpen(store); !errors.Is(err, errDemandRecordingStale) {
+			t.Errorf("v2 RawOpen past the capped expiry: err = %v, want the stale recording", err)
 		}
 	})
 }
@@ -567,6 +800,30 @@ func TestBackstopLaneWakesOnStaleToFreshPublish(t *testing.T) {
 	at(lane, expired).pass(context.Background())
 	if got := wakes.Load(); got != 2 {
 		t.Errorf("unchanged pass replacing an expired recording: wakes = %d, want 2", got)
+	}
+}
+
+// Kills: the stale-to-fresh wake judged when the reads began (R6). The
+// previous recording is fresh when the pass starts and expired when its
+// reads end; the allocator read the legs partial in between, so the
+// unchanged recording must still wake it.
+func TestBackstopLaneJudgesStaleToFreshWakeAtEndOfReads(t *testing.T) {
+	lane, wakes := newTestBackstopLane(backstopEnv{Cfg: demandReadsTestConfig(), CityStore: beads.NewMemStore()})
+	at(lane, time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)).pass(context.Background())
+	expires := lane.recording().Expires
+	calls := 0
+	lane.now = func() time.Time {
+		calls++
+		if calls == 1 {
+			return expires.Add(-time.Second)
+		}
+		return expires.Add(time.Second)
+	}
+	if !lane.pass(context.Background()) {
+		t.Fatal("pass declined")
+	}
+	if got := wakes.Load(); got != 2 {
+		t.Errorf("recording expired during the reads: wakes = %d, want 2", got)
 	}
 }
 
@@ -683,6 +940,67 @@ func TestBackstopLaneRecordsAndServesThroughPolicyFrontDoor(t *testing.T) {
 	}
 }
 
+// Kills: the closed named-session index recorded under the policy front
+// door (R8) or looked up without unwrapping it (R9). The lane is handed the
+// front door; v2 asked through the front door serves the recorded index.
+func TestBackstopLaneClosedNamedIndexThroughPolicyFrontDoor(t *testing.T) {
+	cfg := demandReadsTestConfig()
+	cfg.NamedSessions = []config.NamedSession{{Name: "mayor", Template: "worker", Mode: "on_demand"}}
+	cache, _ := newDemandCache(t, false, closedNamedSessionBead("gc-closed", "mayor"))
+	front := wrapStoreWithBeadPolicies(cache, cfg)
+	if front == beads.Store(cache) {
+		t.Fatal("the policy front door did not wrap the cache; the test needs distinct stores")
+	}
+	lane, _ := newTestBackstopLane(backstopEnv{Cfg: cfg, CityStore: front})
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	at(lane, now).pass(context.Background())
+	for name, store := range map[string]beads.Store{"front door": front, "cache": cache} {
+		idx, err := newV2DemandReads(now, lane.recording(), nil).ClosedNamedIndex(store)
+		if _, found := idx.Find("mayor"); err != nil || !found {
+			t.Errorf("%s: v2 closed index found mayor=%t err=%v, want the recorded index", name, found, err)
+		}
+	}
+}
+
+// Kills: a census feed whose recorded leg does not match the census's leg
+// keys (backstopRecording.sessionLeg is the feed's recorded function, so
+// both key by the store behind the policy front door), and a census that
+// ages the lane's leg on anything but the recording's Expires. The census
+// reads the lane's recording through the front door and the bare cache.
+func TestCensusReadsBackstopSessionLegThroughPolicyFrontDoor(t *testing.T) {
+	cfg := demandReadsTestConfig()
+	cache, _ := newDemandCache(t, false, backstopSessionBead("gc-s1", "worker-1"))
+	front := wrapStoreWithBeadPolicies(cache, cfg)
+	if front == beads.Store(cache) {
+		t.Fatal("the policy front door did not wrap the cache; the test needs distinct stores")
+	}
+	lane, _ := newTestBackstopLane(backstopEnv{Cfg: cfg, CityStore: front})
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	at(lane, now).pass(context.Background())
+	rec := lane.recording()
+	feed := censusLegFeed{
+		exact:    func(s beads.Store) bool { _, exact := demandLegCache(s); return exact },
+		recorded: rec.sessionLeg,
+	}
+	for name, store := range map[string]beads.Store{"front door": front, "cache": cache} {
+		r := newCensusReader(feed)
+		legs := []classStoreCandidate{{store: store, ref: "class:sessions"}}
+		c, err := r.read(rec.Expires, cfg, legs)
+		if err != nil {
+			t.Fatalf("%s: census read: %v", name, err)
+		}
+		if leg := c.Legs[0]; leg.State != legRead || !leg.ReadAt.Equal(rec.At) {
+			t.Errorf("%s: leg %+v, want read at the recording's At", name, leg)
+		}
+		if _, ok := c.Rows[rowKey{Leg: "class:sessions", ID: "gc-s1"}]; !ok {
+			t.Errorf("%s: recorded session row missing from the census", name)
+		}
+		if c, err = r.read(rec.Expires.Add(time.Nanosecond), cfg, legs); err != nil || c.Legs[0].State != legStale {
+			t.Errorf("%s: past the recording's Expires: err=%v leg=%+v, want stale", name, err, c.Legs)
+		}
+	}
+}
+
 // Kills: one panicking leg read killing the process from the lane's
 // goroutine (mc-zndi7.40), and a nil allocator wake. The leg is recorded with
 // the panic as its error and the pass completes.
@@ -794,6 +1112,44 @@ func TestBackstopLaneRecordsClosedNamedIndexOnEveryLeg(t *testing.T) {
 	}
 }
 
+// Kills: a content comparison that ignores the Ready rows (R13). An
+// in_progress blocker closes: the dependent's open row is unchanged and only
+// the Ready read changes, which must wake the allocator.
+func TestBackstopLaneWakesOnReadyOnlyChange(t *testing.T) {
+	mem := beads.NewMemStore()
+	blocker, err := mem.Create(beads.Bead{Title: "blocker", Type: "task", Assignee: "someone"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inProgress := "in_progress"
+	if err := mem.Update(blocker.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatal(err)
+	}
+	dep, err := mem.Create(routedDemandBead(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.DepAdd(dep.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	lane, wakes := newTestBackstopLane(backstopEnv{Cfg: demandReadsTestConfig(), CityStore: mem})
+	t0 := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	at(lane, t0).pass(context.Background())
+	before, _ := lane.recording().leg(mem)
+	if err := mem.Close(blocker.ID); err != nil {
+		t.Fatal(err)
+	}
+	at(lane, t0.Add(backstopTestInterval)).pass(context.Background())
+	after, _ := lane.recording().leg(mem)
+	if !slices.Equal(ids(before.RawOpen), ids(after.RawOpen)) || slices.Contains(ids(before.ReadyAll), dep.ID) || !slices.Contains(ids(after.ReadyAll), dep.ID) {
+		t.Fatalf("fixture: open %v -> %v, ready %v -> %v; want the open rows unchanged and %s newly ready",
+			ids(before.RawOpen), ids(after.RawOpen), ids(before.ReadyAll), ids(after.ReadyAll), dep.ID)
+	}
+	if got := wakes.Load(); got != 2 {
+		t.Errorf("Ready-only change: wakes = %d, want 2", got)
+	}
+}
+
 // Kills: a content comparison that ignores errors or the closed index (M12,
 // M12b), or that counts the stamps or the scope gaps as content.
 func TestBackstopRecordingSameContentComparesRowsErrorsAndIndexes(t *testing.T) {
@@ -841,14 +1197,51 @@ func TestBackstopRecordingSameContentComparesRowsErrorsAndIndexes(t *testing.T) 
 
 // Kills: a race between the lane's recording passes, its repairs, and
 // allocator passes reading the recording, the cache and the last good
-// answers, while an out-of-process writer adds rows (run under -race).
+// answers, while an out-of-process writer adds rows (run under -race). The
+// env is rich: rigs, an on_demand named session (the closed index), a scope
+// gap, probe stores, a session snapshot, and rows every repair writes,
+// re-clobbered between runs so the repairs keep writing; the allocator side
+// runs every collector, the control-dispatcher projection and the assignees.
 func TestBackstopLaneConcurrentWithAllocatorPasses(t *testing.T) {
-	const rounds = 40
-	cfg := demandReadsTestConfig()
-	cache, backing := newDemandCache(t, false, routedDemandBead("gc-r1"), assignedDemandBead("gc-p1", "in_progress"), backstopSessionBead("gc-s1", "worker-1"))
+	const rounds = 30
+	cityPath := t.TempDir()
+	cfg := classBindingDispatcherFixtureConfig(t)
+	cfg.Workspace.Prefix = "ga"
+	cfg.Rigs = append(cfg.Rigs, config.Rig{Name: "nodisp", Path: t.TempDir()})
+	cfg.Agents = append(cfg.Agents, poolAgent("planner", "rig-A", intPtr(5), 0))
+	cfg.NamedSessions = []config.NamedSession{{Name: "mayor", Template: "planner", Dir: "rig-A", Mode: "on_demand"}}
+	cityRoute := cfg.Agents[0].QualifiedName()
+	control := func(id, rig string) beads.Bead {
+		return beads.Bead{ID: id, Title: id, Type: "task", Status: "open", Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     cityRoute,
+			beadmeta.RootStoreRefMetadataKey: "rig:" + rig,
+		}}
+	}
+	routedClobbered := workBead("ga-rclob", goldenCanonicalPlanner, "", "open", 5)
+	routedClobbered.Metadata[beadmeta.WorkDirMetadataKey] = clobberPoolSlot
+	routedClobbered.Metadata[beadmeta.LegacyWorkDirMetadataKey] = clobberStaleLegacy
+	cityCache, cityBacking := newDemandCache(t, false,
+		beads.Bead{ID: "ga-run", Type: "task", Status: "in_progress", Assignee: clobberSessionName, Metadata: clobberedWorkDir()},
+		workBead("ga-asg", goldenLegacyPlanner, goldenLegacyPlanner, "in_progress", 5),
+		routedClobbered,
+		workBead("ga-rlegacy", goldenLegacyPlanner, "", "open", 5),
+		workBead("ga-slot", goldenCanonicalPlanner+"-2", "", "open", 5),
+		backstopSessionBead("gc-s1", "worker-1"),
+		closedNamedSessionBead("gc-closed", "rig-A/mayor"),
+	)
+	rigFixture := beads.NewMemStoreFrom(0, []beads.Bead{control("fx-ctl", "fixture")}, nil)
+	rigs := map[string]beads.Store{
+		"fixture": rigFixture,
+		"nodisp":  beads.NewMemStoreFrom(0, []beads.Bead{control("nd-ctl", "nodisp")}, nil),
+	}
+	probe := beads.NewMemStoreFrom(0, []beads.Bead{routedDemandBead("gc-p1")}, nil)
+	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(clobberSessionName, clobberLiveWorkDir)})
+	front := wrapStoreWithBeadPolicies(cityCache, cfg)
+	suspended := map[string]bool{}
 	var wakes atomic.Int64
 	lane := newBackstopLane(backstopTestInterval, func() (backstopEnv, error) {
-		return backstopEnv{Cfg: cfg, CityStore: cache, Sessions: newSessionBeadSnapshot(nil)}, nil
+		return backstopEnv{CityPath: cityPath, Cfg: cfg, CityStore: front, RigStores: rigs, SuspendedRigPaths: suspended, ProbeStores: []beads.Store{probe, rigFixture}, Sessions: sessions}, nil
 	}, func() { wakes.Add(1) }, func(fn func(), _ string) bool { fn(); return false }, io.Discard)
 	ctx := context.Background()
 	lastGood := newDemandLastGood()
@@ -859,31 +1252,42 @@ func TestBackstopLaneConcurrentWithAllocatorPasses(t *testing.T) {
 		}
 	})
 	wg.Go(func() {
-		for range rounds / 8 {
+		for range rounds / 3 {
 			lane.repair(ctx)
+			_ = cityBacking.SetMetadataBatch("ga-run", clobberedWorkDir())
 		}
 	})
 	wg.Go(func() {
 		for range rounds {
-			_, _ = backing.Create(routedDemandBead(""))
+			_, _ = cityBacking.Create(routedDemandBead(""))
 		}
 	})
 	for range 4 {
 		wg.Go(func() {
 			for range rounds {
-				reads := newV2DemandReads(time.Now(), lane.recording(), lastGood)
-				_ = runDemandCollectors(cfg, cache, func() *readyDemandCache { return newReadyDemandCacheWithReads(reads) }, reads)
-				if rec := lane.recording(); rec != nil {
-					_, _ = rec.sessionLeg(cache)
+				rec := lane.recording()
+				reads := newV2DemandReads(time.Now(), rec, lastGood)
+				_ = runDemandCollectors(cfg, front, func() *readyDemandCache { return newReadyDemandCacheWithReads(reads) }, reads)
+				rows, _, refs, _ := collectOpenUnassignedRoutedWork(cityPath, cfg, front, rigs, suspended, io.Discard, nil, reads)
+				projected, _ := projectControlDispatcherRoutes(cfg, rows, refs)
+				_ = openControlDispatcherDemand(cfg, projected)
+				_ = readyAssignedWorkAssignees(cfg, front, sessions, nil, nil, "", reads)
+				if rec != nil {
+					_, _ = rec.sessionLeg(front)
+					_ = rec.ScopeGaps
 				}
 			}
 		})
 	}
 	wg.Wait()
 	lane.pass(ctx)
-	leg, _ := lane.recording().leg(cache)
-	if backstopSeq(lane) != rounds+1 || wakes.Load() < 1 || len(leg.RawOpen) < rounds+1 {
-		t.Errorf("lane seq=%d wakes=%d open rows=%d, want %d passes, a wake, and every written row", backstopSeq(lane), wakes.Load(), len(leg.RawOpen), rounds+1)
+	rec := lane.recording()
+	leg, _ := rec.leg(front)
+	if rec.Seq != rounds+1 || wakes.Load() < 1 || len(leg.RawOpen) < rounds {
+		t.Errorf("lane seq=%d wakes=%d open rows=%d, want %d passes, a wake, and every written row", rec.Seq, wakes.Load(), len(leg.RawOpen), rounds+1)
+	}
+	if _, ok := rec.closedNamed(front); !ok || rec.RepairSeq != rounds/3 || len(rec.ScopeGaps) != 1 {
+		t.Errorf("closed index recorded=%t RepairSeq=%d gaps=%+v, want recorded, %d runs and the nodisp gap", ok, rec.RepairSeq, rec.ScopeGaps, rounds/3)
 	}
 }
 

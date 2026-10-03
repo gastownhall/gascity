@@ -117,7 +117,7 @@ func TestCensusSessionsBindingLeadsAndDuplicatesAreNone(t *testing.T) {
 	// leg first, then bead ID.
 	work := censusStore(censusSession("gc-1", relic), censusSession("gc-0", map[string]string{"state": "active"}))
 	feed := &fakeCensusFeed{}
-	c := readCensus(t, newCensusReader(feed.feed(), time.Minute), censusNow, &config.City{},
+	c := readCensus(t, newCensusReader(feed.feed()), censusNow, &config.City{},
 		censusLegs("class:sessions", binding, "city:mc", work))
 
 	canonical := c.Canonical()
@@ -148,15 +148,15 @@ func TestCensusSessionsLegErrorFailsPassOtherLegErrorIsPartial(t *testing.T) {
 	feed := &fakeCensusFeed{}
 	ok := censusStore(censusSession("gc-1", map[string]string{"state": "active"}))
 
-	if _, err := newCensusReader(feed.feed(), time.Minute).read(censusNow, &config.City{},
+	if _, err := newCensusReader(feed.feed()).read(censusNow, &config.City{},
 		censusLegs("class:sessions", censusErrStore{beads.NewMemStore(), down}, "rig:a", ok)); !errors.Is(err, down) {
 		t.Fatalf("sessions-leg failure: err = %v, want the leg's error", err)
 	}
-	if c, err := newCensusReader(feed.feed(), time.Minute).read(censusNow, &config.City{}, nil); err == nil {
+	if c, err := newCensusReader(feed.feed()).read(censusNow, &config.City{}, nil); err == nil {
 		t.Fatalf("no legs: census %+v, want an error", c)
 	}
 
-	c := readCensus(t, newCensusReader(feed.feed(), time.Minute), censusNow, &config.City{},
+	c := readCensus(t, newCensusReader(feed.feed()), censusNow, &config.City{},
 		censusLegs("class:sessions", ok, "rig:a", censusErrStore{beads.NewMemStore(), down}))
 	if !c.Incomplete() {
 		t.Fatal("rig-leg failure: census complete, want incomplete (no fresh create)")
@@ -172,12 +172,12 @@ func TestCensusSessionsLegErrorFailsPassOtherLegErrorIsPartial(t *testing.T) {
 	// stays incomplete. On the sessions leg too: only a hard error with
 	// nothing to serve fails the pass.
 	partial := censusErrStore{censusStore(censusSession("rg-1", map[string]string{"state": "active"})), &beads.PartialResultError{Op: "list", Err: down}}
-	c = readCensus(t, newCensusReader(feed.feed(), time.Minute), censusNow, &config.City{},
+	c = readCensus(t, newCensusReader(feed.feed()), censusNow, &config.City{},
 		censusLegs("class:sessions", ok, "rig:a", partial))
 	if _, kept := c.Rows[rowKey{"rig:a", "rg-1"}]; !kept || !c.Incomplete() || c.CompleteLegs()["rig:a"] {
 		t.Fatalf("partial rig read: row kept=%v incomplete=%v complete=%v, want the row, incomplete, not complete", kept, c.Incomplete(), c.CompleteLegs()["rig:a"])
 	}
-	c = readCensus(t, newCensusReader(feed.feed(), time.Minute), censusNow, &config.City{},
+	c = readCensus(t, newCensusReader(feed.feed()), censusNow, &config.City{},
 		censusLegs("class:sessions", partial, "rig:a", ok))
 	if _, kept := c.Rows[rowKey{"class:sessions", "rg-1"}]; !kept || !c.Incomplete() || c.CompleteLegs()["class:sessions"] {
 		t.Fatalf("partial sessions read: row kept=%v incomplete=%v, want the row kept and the census incomplete", kept, c.Incomplete())
@@ -188,7 +188,7 @@ func TestCensusSessionsLegErrorFailsPassOtherLegErrorIsPartial(t *testing.T) {
 	feed = &fakeCensusFeed{nonExact: map[beads.Store]bool{rig: true}, recordings: map[beads.Store]censusRecording{
 		rig: {At: censusNow, Err: down, Rows: censusInfos(t, censusSession("rg-2", map[string]string{"state": "active"}))},
 	}}
-	c = readCensus(t, newCensusReader(feed.feed(), time.Minute), censusNow, &config.City{}, censusLegs("class:sessions", ok, "rig:a", rig))
+	c = readCensus(t, newCensusReader(feed.feed()), censusNow, &config.City{}, censusLegs("class:sessions", ok, "rig:a", rig))
 	if _, kept := c.Rows[rowKey{"rig:a", "rg-2"}]; kept || !c.Incomplete() {
 		t.Fatalf("hard rig error: row kept=%v incomplete=%v, want no rows and incomplete", kept, c.Incomplete())
 	}
@@ -201,7 +201,7 @@ func TestCensusSessionsLegLastGoodServesThenStaleIsIncomplete(t *testing.T) {
 	feed := &fakeCensusFeed{}
 	backing := censusStore(censusSession("gc-1", map[string]string{"state": "active"}))
 	broken := censusErrStore{backing, errors.New("cache closed")}
-	r := newCensusReader(feed.feed(), time.Minute)
+	r := newCensusReader(feed.feed())
 	readCensus(t, r, censusNow, &config.City{}, censusLegs("class:sessions", backing))
 
 	steps := []struct {
@@ -209,8 +209,8 @@ func TestCensusSessionsLegLastGoodServesThenStaleIsIncomplete(t *testing.T) {
 		state      censusLegState
 		incomplete bool
 	}{
-		{at: censusLastGoodBound, state: legLastGood},
-		{at: censusLastGoodBound + time.Second, state: legStale, incomplete: true},
+		{at: cacheLagBound, state: legLastGood},
+		{at: cacheLagBound + time.Second, state: legStale, incomplete: true},
 	}
 	for _, s := range steps {
 		c, err := r.read(censusNow.Add(s.at), &config.City{}, censusLegs("class:sessions", broken))
@@ -229,14 +229,14 @@ func TestCensusSessionsLegLastGoodServesThenStaleIsIncomplete(t *testing.T) {
 // Kills: unbounded stale reads. A failed read serves the leg's last good rows
 // whole until the bound, then the leg is stale: rows kept (Keep), out of the
 // complete legs (a missing row no longer proves a close), and reported. A
-// backstop recording ages on its own clock, the lane's read time.
+// backstop recording's rows expire at the Expires it was published with.
 func TestCensusNonExactLegLastGoodAgesIntoPartialAfterBound(t *testing.T) {
 	sessions := censusStore()
 	rig := censusUntouchable{name: "rig"}
 	feed := &fakeCensusFeed{nonExact: map[beads.Store]bool{rig: true}, recordings: map[beads.Store]censusRecording{
-		rig: {Rows: censusInfos(t, censusSession("rg-1", map[string]string{"state": "asleep"})), At: censusNow},
+		rig: {Rows: censusInfos(t, censusSession("rg-1", map[string]string{"state": "asleep"})), At: censusNow, Expires: censusNow.Add(30 * time.Second)},
 	}}
-	r := newCensusReader(feed.feed(), 30*time.Second)
+	r := newCensusReader(feed.feed())
 	legs := censusLegs("class:sessions", sessions, "rig:a", rig)
 
 	steps := []struct {
@@ -271,16 +271,50 @@ func TestCensusNonExactLegLastGoodAgesIntoPartialAfterBound(t *testing.T) {
 		}
 	}
 
-	// An exact leg ages the same way, on censusLastGoodBound.
+	// An exact leg ages the same way, on cacheLagBound.
 	exactRig := censusStore(censusSession("rg-2", nil))
-	r = newCensusReader(feed.feed(), 30*time.Second)
+	r = newCensusReader(feed.feed())
 	readCensus(t, r, censusNow, &config.City{}, censusLegs("class:sessions", sessions, "rig:b", exactRig))
 	broken := censusLegs("class:sessions", sessions, "rig:b", censusErrStore{exactRig, errors.New("closed")})
-	if leg := censusLegNamed(t, readCensus(t, r, censusNow.Add(censusLastGoodBound), &config.City{}, broken), "rig:b"); leg.State != legLastGood {
+	if leg := censusLegNamed(t, readCensus(t, r, censusNow.Add(cacheLagBound), &config.City{}, broken), "rig:b"); leg.State != legLastGood {
 		t.Fatalf("exact leg at the bound = %v, want last-good", leg.State)
 	}
-	if leg := censusLegNamed(t, readCensus(t, r, censusNow.Add(censusLastGoodBound+time.Second), &config.City{}, broken), "rig:b"); leg.State != legStale {
+	if leg := censusLegNamed(t, readCensus(t, r, censusNow.Add(cacheLagBound+time.Second), &config.City{}, broken), "rig:b"); leg.State != legStale {
 		t.Fatalf("exact leg past the bound = %v, want stale", leg.State)
+	}
+}
+
+// Kills: a non-exact leg aged on any clock but its recording's published
+// Expires (a fixed bound after At, such as P3-3's former 2 × patrol), and
+// last good rows that take a failed recording's later expiry. The lane
+// derives Expires from its cadence, so the census must take it as published.
+func TestCensusNonExactLegFreshThroughRecordingsExpires(t *testing.T) {
+	rig := censusUntouchable{name: "rig"}
+	rows := censusInfos(t, censusSession("rg-1", map[string]string{"state": "asleep"}))
+	feed := &fakeCensusFeed{nonExact: map[beads.Store]bool{rig: true}, recordings: map[beads.Store]censusRecording{
+		rig: {Rows: rows, At: censusNow, Expires: censusNow.Add(3 * time.Minute)},
+	}}
+	r := newCensusReader(feed.feed())
+	legs := censusLegs("class:sessions", censusStore(), "rig:a", rig)
+	state := func(at time.Duration) censusLegState {
+		t.Helper()
+		return censusLegNamed(t, readCensus(t, r, censusNow.Add(at), &config.City{}, legs), "rig:a").State
+	}
+	if got := state(3 * time.Minute); got != legRead {
+		t.Fatalf("at Expires: leg %v, want read", got)
+	}
+	if got := state(3*time.Minute + time.Second); got != legStale {
+		t.Fatalf("past Expires: leg %v, want stale", got)
+	}
+
+	// A failed recording published later serves the last good rows only
+	// until their own recording's expiry.
+	feed.recordings[rig] = censusRecording{At: censusNow.Add(time.Minute), Expires: censusNow.Add(10 * time.Minute), Err: errors.New("bd timeout")}
+	if got := state(2 * time.Minute); got != legLastGood {
+		t.Fatalf("failed recording before the good rows expire: leg %v, want last-good", got)
+	}
+	if got := state(3*time.Minute + time.Second); got != legStale {
+		t.Fatalf("failed recording past the good rows' expiry: leg %v, want stale", got)
 	}
 }
 
@@ -293,12 +327,12 @@ func TestCensusNeverDoesBackingIOOnNonExactLegs(t *testing.T) {
 	closed := censusSession("rg-closed", nil)
 	closed.Status = "closed"
 	feed := &fakeCensusFeed{nonExact: map[beads.Store]bool{rig: true, other: true}, recordings: map[beads.Store]censusRecording{
-		rig:   {At: censusNow, Rows: censusInfos(t, censusSession("rg-1", map[string]string{"state": "active"}), closed)},
-		other: {At: censusNow, Rows: censusInfos(t, censusSession("ot-1", map[string]string{"state": "active"}))},
+		rig:   {At: censusNow, Expires: censusNow.Add(time.Minute), Rows: censusInfos(t, censusSession("rg-1", map[string]string{"state": "active"}), closed)},
+		other: {At: censusNow, Expires: censusNow.Add(time.Minute), Rows: censusInfos(t, censusSession("ot-1", map[string]string{"state": "active"}))},
 	}}
 	legs := censusLegs("class:sessions", censusStore(), "rig:a", rig, "rig:b", other)
 
-	c := readCensus(t, newCensusReader(feed.feed(), time.Minute), censusNow, &config.City{}, legs)
+	c := readCensus(t, newCensusReader(feed.feed()), censusNow, &config.City{}, legs)
 	if len(c.Rows) != 2 {
 		t.Fatalf("rows = %v, want the open session row from each recording", c.Rows)
 	}
@@ -310,7 +344,7 @@ func TestCensusNeverDoesBackingIOOnNonExactLegs(t *testing.T) {
 	}
 
 	delete(feed.recordings, rig)
-	c = readCensus(t, newCensusReader(feed.feed(), time.Minute), censusNow, &config.City{}, legs)
+	c = readCensus(t, newCensusReader(feed.feed()), censusNow, &config.City{}, legs)
 	if leg := censusLegNamed(t, c, "rig:a"); leg.State != legMissing || !c.Incomplete() {
 		t.Fatalf("no recording: leg = %+v incomplete=%v, want missing and incomplete", leg, c.Incomplete())
 	}
@@ -339,7 +373,7 @@ func TestCensusExactLegReadsDirtyRowsThroughCacheOverlay(t *testing.T) {
 	}
 
 	feed := &fakeCensusFeed{}
-	c := readCensus(t, newCensusReader(feed.feed(), time.Minute), censusNow, &config.City{}, censusLegs("class:sessions", cache))
+	c := readCensus(t, newCensusReader(feed.feed()), censusNow, &config.City{}, censusLegs("class:sessions", cache))
 	if leg := c.Legs[0]; leg.State != legRead {
 		t.Fatalf("sessions leg = %+v, want read this pass", leg)
 	}
@@ -363,7 +397,7 @@ func TestCensusKeysRowsThatShareANameByBeadID(t *testing.T) {
 		rows = append(rows, censusSession(id, map[string]string{"session_name": "rig--worker-2-pool", "state": "creating"}))
 	}
 	feed := &fakeCensusFeed{}
-	c := readCensus(t, newCensusReader(feed.feed(), time.Minute), censusNow, &config.City{}, censusLegs("class:sessions", censusStore(rows...)))
+	c := readCensus(t, newCensusReader(feed.feed()), censusNow, &config.City{}, censusLegs("class:sessions", censusStore(rows...)))
 	canonical := c.Canonical()
 	if len(canonical) != 3 || canonical[0].Key.ID != "gc-1" || canonical[2].Key.ID != "gc-3" {
 		t.Fatalf("canonical = %+v, want three rows by bead ID", canonical)
@@ -374,7 +408,7 @@ func TestCensusKeysRowsThatShareANameByBeadID(t *testing.T) {
 
 	// A row with no session_name is indexed under the runtime name it
 	// derives from its ID, which is the name the inventory lists.
-	c = readCensus(t, newCensusReader(feed.feed(), time.Minute), censusNow, &config.City{}, censusLegs("class:sessions", censusStore(censusSession("gc-7", map[string]string{"state": "asleep"}))))
+	c = readCensus(t, newCensusReader(feed.feed()), censusNow, &config.City{}, censusLegs("class:sessions", censusStore(censusSession("gc-7", map[string]string{"state": "asleep"}))))
 	k := rowKey{"class:sessions", "gc-7"}
 	if name := c.Rows[k].Info.SessionName; name == "" || len(c.RowsNamed(name)) != 1 || c.RowsNamed(name)[0] != k {
 		t.Fatalf("derived name %q: RowsNamed = %v, want gc-7", name, c.RowsNamed(name))
@@ -415,7 +449,7 @@ func TestCensusLedgerFactsStartLeaseNeedsClaimOrCreating(t *testing.T) {
 		rows = append(rows, b)
 	}
 	feed := &fakeCensusFeed{}
-	c := readCensus(t, newCensusReader(feed.feed(), time.Minute), censusNow, &config.City{}, censusLegs("class:sessions", censusStore(rows...)))
+	c := readCensus(t, newCensusReader(feed.feed()), censusNow, &config.City{}, censusLegs("class:sessions", censusStore(rows...)))
 	for _, tc := range cases {
 		row := c.Rows[rowKey{"class:sessions", tc.name}]
 		if row.StartLease != tc.startLease || row.PendingCreate != tc.pendingC {
@@ -426,7 +460,7 @@ func TestCensusLedgerFactsStartLeaseNeedsClaimOrCreating(t *testing.T) {
 	// The lease follows the configured startup timeout, not the default.
 	slow := &config.City{Session: config.SessionConfig{StartupTimeout: "5m"}}
 	threeMin := censusSession("gc-slow", map[string]string{"state": "creating", "last_woke_at": censusNow.Add(-3 * time.Minute).Format(time.RFC3339)})
-	c = readCensus(t, newCensusReader(feed.feed(), time.Minute), censusNow, slow, censusLegs("class:sessions", censusStore(threeMin)))
+	c = readCensus(t, newCensusReader(feed.feed()), censusNow, slow, censusLegs("class:sessions", censusStore(threeMin)))
 	if !c.Rows[rowKey{"class:sessions", "gc-slow"}].StartLease {
 		t.Error("startup_timeout 5m, woke 3m ago: no start lease, want one")
 	}
@@ -450,7 +484,7 @@ func TestCensusIdentityLeaseHolderMatchesLegacyCheck(t *testing.T) {
 		censusSession("gc-6", map[string]string{"state": "creating", "agent_name": "rig/worker-6", "template": "rig/worker", "session_origin": "manual"}),
 	}
 	feed := &fakeCensusFeed{}
-	c := readCensus(t, newCensusReader(feed.feed(), time.Minute), censusNow, cfg, censusLegs("class:sessions", censusStore(rows...)))
+	c := readCensus(t, newCensusReader(feed.feed()), censusNow, cfg, censusLegs("class:sessions", censusStore(rows...)))
 	snapshot := newSessionBeadSnapshot(rows)
 
 	cases := []struct {
@@ -489,7 +523,7 @@ func TestCensusIdentityLeaseHolderCountsEveryCopy(t *testing.T) {
 	canonical := censusSession("gc-1", map[string]string{"state": "asleep", "agent_name": "rig/worker-2", "template": "rig/worker", poolManagedMetadataKey: "true"})
 	relic := censusSession("gc-1", map[string]string{"state": "creating", "agent_name": "rig/worker-7", "template": "rig/worker", poolManagedMetadataKey: "true"})
 	feed := &fakeCensusFeed{}
-	c := readCensus(t, newCensusReader(feed.feed(), time.Minute), censusNow, cfg,
+	c := readCensus(t, newCensusReader(feed.feed()), censusNow, cfg,
 		censusLegs("class:sessions", censusStore(canonical), "city:mc", censusStore(relic)))
 
 	k, held := c.IdentityLeaseHolder(cfg, "rig/worker", "rig/worker-7")
@@ -531,7 +565,7 @@ func TestCensusIdentityLeaseDedupesCopiesByIDNameAliasAndAgent(t *testing.T) {
 	} {
 		first, later := lease("rig/other", tc.first), lease("rig/worker", tc.later)
 		feed := &fakeCensusFeed{}
-		c := readCensus(t, newCensusReader(feed.feed(), time.Minute), censusNow, cfg,
+		c := readCensus(t, newCensusReader(feed.feed()), censusNow, cfg,
 			censusLegs("class:sessions", censusStore(first), "city:mc", censusStore(later)))
 		k, held := c.IdentityLeaseHolder(cfg, "rig/worker", "rig/worker-7")
 		if held != tc.held || (held && k != (rowKey{"city:mc", "gc-1"})) {
@@ -558,7 +592,7 @@ func TestCensusLedgerViewCarriesEndpointsAndCompleteLegs(t *testing.T) {
 	work := censusStore(censusSession("gc-1", map[string]string{"state": "creating", "template": "rig/worker"}))
 	feed := &fakeCensusFeed{}
 	legs := censusLegs("class:sessions", sessions, "city:mc", work, "rig:a", censusErrStore{beads.NewMemStore(), errors.New("down")})
-	view := readCensus(t, newCensusReader(feed.feed(), time.Minute), censusNow, cfg, legs).Ledger(cfg)
+	view := readCensus(t, newCensusReader(feed.feed()), censusNow, cfg, legs).Ledger(cfg)
 
 	want := map[rowKey]ledgerRow{
 		{"class:sessions", "gc-1"}: {Incarnation: 4, InstanceToken: "tok-1", Endpoint: "provider:p1", StartLease: true},
@@ -592,7 +626,7 @@ func TestCensusUnknownStatesCountedPerTemplate(t *testing.T) {
 		censusSession("gc-4", map[string]string{"state": "asleep", "template": "rig/worker"}),
 	}
 	feed := &fakeCensusFeed{}
-	c := readCensus(t, newCensusReader(feed.feed(), time.Minute), censusNow, cfg, censusLegs("class:sessions", censusStore(rows...)))
+	c := readCensus(t, newCensusReader(feed.feed()), censusNow, cfg, censusLegs("class:sessions", censusStore(rows...)))
 	var unknown []string
 	for _, row := range c.Canonical() {
 		if row.UnknownState {

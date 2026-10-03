@@ -171,7 +171,7 @@ func (b *cacheBackingCounter) Get(id string) (beads.Bead, error) {
 // any dirty row, and an unbounded last good. On an exact leg episodes come
 // from the cache through its dirty-row overlay, so a dirty episode reads
 // current without a backing list; another leg reads strict from memory. A
-// failed read serves the last good within censusLastGoodBound, and a store
+// failed read serves the last good within cacheLagBound, and a store
 // with no cache, or a last good past the bound, is an error rather than "no
 // episodes".
 func TestStartupHealthEpisodesReadFromSessionsCache(t *testing.T) {
@@ -221,10 +221,10 @@ func TestStartupHealthEpisodesReadFromSessionsCache(t *testing.T) {
 		t.Fatalf("UpdateIfMatch = %v, want a precondition failure", err)
 	}
 	backing.failing.Store(true)
-	if episodes, at, err = r.read(cache, true, later.Add(censusLastGoodBound)); err != nil || !at.Equal(later) || episodes["worker-1"].ConsecutiveCount != 5 {
+	if episodes, at, err = r.read(cache, true, later.Add(cacheLagBound)); err != nil || !at.Equal(later) || episodes["worker-1"].ConsecutiveCount != 5 {
 		t.Fatalf("failed read within the bound: %+v at %v, %v, want the last good", episodes, at, err)
 	}
-	if _, _, err := r.read(cache, true, later.Add(censusLastGoodBound+time.Second)); !errors.Is(err, errEpisodesUncached) {
+	if _, _, err := r.read(cache, true, later.Add(cacheLagBound+time.Second)); !errors.Is(err, errEpisodesUncached) {
 		t.Fatalf("failed read past the bound: err = %v, want errEpisodesUncached", err)
 	}
 

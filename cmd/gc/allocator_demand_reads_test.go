@@ -678,21 +678,26 @@ func TestClosedNamedIndexLegacyIsDirectCallV2ServesRecording(t *testing.T) {
 
 	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 	rec := &backstopRecording{At: now, Expires: now.Add(time.Minute), ClosedNamed: map[beads.Store]closedNamedRecording{backing: {Index: direct}}}
+	// A partial read keeps the rows it got and its error, as legacy's does.
+	partial := &beads.PartialResultError{Op: "closed index", Err: errors.New("one leg down")}
+	partialRec := &backstopRecording{At: now, Expires: now.Add(time.Minute), ClosedNamed: map[beads.Store]closedNamedRecording{backing: {Index: direct, Err: partial}}}
 	for _, tc := range []struct {
 		name    string
 		now     time.Time
 		rec     *backstopRecording
 		wantErr error
+		found   bool
 	}{
-		{"fresh", now.Add(time.Minute), rec, nil},
-		{"no recording", now, nil, errDemandRecordingMissing},
-		{"store not recorded", now, &backstopRecording{At: now, Expires: now.Add(time.Minute)}, errDemandRecordingMissing},
-		{"expired", now.Add(time.Minute + time.Nanosecond), rec, errDemandRecordingStale},
+		{"fresh", now.Add(time.Minute), rec, nil, true},
+		{"recorded partial read", now, partialRec, partial, true},
+		{"no recording", now, nil, errDemandRecordingMissing, false},
+		{"store not recorded", now, &backstopRecording{At: now, Expires: now.Add(time.Minute)}, errDemandRecordingMissing, false},
+		{"expired", now.Add(time.Minute + time.Nanosecond), rec, errDemandRecordingStale, false},
 	} {
 		idx, err := newV2DemandReads(tc.now, tc.rec, nil).ClosedNamedIndex(backing)
 		_, found := idx.Find("mayor")
-		if !errors.Is(err, tc.wantErr) || (err == nil) != found {
-			t.Errorf("%s: ClosedNamedIndex found mayor=%t err=%v, want err %v and found only without one", tc.name, found, err, tc.wantErr)
+		if !errors.Is(err, tc.wantErr) || found != tc.found {
+			t.Errorf("%s: ClosedNamedIndex found mayor=%t err=%v, want found=%t err %v", tc.name, found, err, tc.found, tc.wantErr)
 		}
 	}
 	if ops := backing.readLog(); len(ops) > 0 {

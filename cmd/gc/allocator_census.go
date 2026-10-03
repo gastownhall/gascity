@@ -21,8 +21,9 @@ import (
 // native Dolt, Postgres) from the backstop lane's last recording of legacy's
 // own live read. A pass never reads a non-exact leg's store.
 //
-// A leg whose read fails is served whole from its last good rows while they
-// are within the leg's bound; past it the leg is stale (its rows Keep). A
+// A leg whose read fails is served whole from its last good rows until they
+// expire: cacheLagBound after an exact leg's read, the recording's published
+// Expires for a non-exact leg. Past that the leg is stale (its rows Keep). A
 // stale leg, or one with nothing to serve but a partial read's rows, leaves
 // the census incomplete (no fresh create anywhere, POOL-047). A hard failure
 // of the sessions leg with nothing to serve fails the pass: an error is not an
@@ -36,10 +37,6 @@ import (
 // Unwired in this slice: P3-7 reads it once per allocator pass, P3-5a decides
 // over it, and the ledger (P3-4) clears entries against its unfolded rows.
 
-// censusLastGoodBound is how long an exact leg may be served from its last
-// good rows before it is partial (P3 spec §4.2 rule 4, cacheLagBound).
-const censusLastGoodBound = 60 * time.Second
-
 // censusLegState is how one leg's rows reached this pass.
 type censusLegState uint8
 
@@ -48,13 +45,13 @@ const (
 	// census is incomplete; the leg holds no rows, or only a partial read's.
 	legMissing censusLegState = iota
 	// legRead: read this pass (an exact leg) or recorded by the backstop lane
-	// within its bound (a non-exact leg).
+	// and not yet expired (a non-exact leg).
 	legRead
 	// legLastGood: this pass's read failed; the leg is served whole from its
-	// last good rows, within the bound.
+	// last good rows, which have not expired.
 	legLastGood
-	// legStale: served from rows older than the bound. The leg is partial and
-	// the census incomplete.
+	// legStale: served from expired rows. The leg is partial and the census
+	// incomplete.
 	legStale
 )
 
@@ -80,8 +77,8 @@ type censusLeg struct {
 	Err    error     // this pass's read error, if any
 }
 
-// complete reports whether the leg's rows are a whole read within its bound,
-// so a row missing from it proves the row closed.
+// complete reports whether the leg's rows are a whole read that has not
+// expired, so a row missing from it proves the row closed.
 func (l censusLeg) complete() bool { return l.State == legRead || l.State == legLastGood }
 
 // censusRow is one open session row on one leg.
@@ -108,14 +105,16 @@ type censusRow struct {
 }
 
 // censusRecording is the backstop lane's last recording of one non-exact
-// session census leg (P3-2): the session front door's live ListAll of the
-// leg, when it was read, and the error the read returned. Rows are what
-// legacy's census keeps: all of a clean read, what a partial read returned,
-// nothing of a hard failure.
+// session census leg (backstopRecording.sessionLeg): the session front
+// door's live ListAll of the leg, when the lane's reads ended, the
+// recording's published expiry, and the error the read returned. Rows are
+// what legacy's census keeps: all of a clean read, what a partial read
+// returned, nothing of a hard failure.
 type censusRecording struct {
-	Rows []session.Info
-	At   time.Time
-	Err  error
+	Rows    []session.Info
+	At      time.Time
+	Expires time.Time
+	Err     error
 }
 
 // censusLegFeed is the census's seam to P3-2's demand reads, which own leg
@@ -145,24 +144,22 @@ type sessionCensus struct {
 	leases map[string][]rowKey
 }
 
-// censusLegRows is one leg's last good read.
+// censusLegRows is one leg's last good read and when it expires.
 type censusLegRows struct {
-	infos []session.Info
-	at    time.Time
+	infos   []session.Info
+	at      time.Time
+	expires time.Time
 }
 
 // censusReader reads the census pass after pass. It keeps each leg's last
 // good rows, so it is owned by one goroutine (the allocator lane).
 type censusReader struct {
-	feed censusLegFeed
-	// recordingMaxAge bounds a backstop recording's age (2 × patrol, P3 spec
-	// §4.3); an older recording serves its leg as stale.
-	recordingMaxAge time.Duration
-	lastGood        map[string]censusLegRows
+	feed     censusLegFeed
+	lastGood map[string]censusLegRows
 }
 
-func newCensusReader(feed censusLegFeed, recordingMaxAge time.Duration) *censusReader {
-	return &censusReader{feed: feed, recordingMaxAge: recordingMaxAge, lastGood: make(map[string]censusLegRows)}
+func newCensusReader(feed censusLegFeed) *censusReader {
+	return &censusReader{feed: feed, lastGood: make(map[string]censusLegRows)}
 }
 
 // read takes one census over legs, which sessionCensusStoreCandidates
@@ -217,14 +214,12 @@ func (r *censusReader) read(now time.Time, cfg *config.City, legs []classStoreCa
 // readLeg reads one leg and applies the last-good rule.
 func (r *censusReader) readLeg(now time.Time, source classStoreCandidate) (censusLeg, []session.Info) {
 	leg := censusLeg{Ref: source.ref, Exact: r.feed.exact(source.store)}
-	bound := censusLastGoodBound
 	var infos []session.Info
-	var at time.Time
+	var at, expires time.Time
 	if leg.Exact {
 		infos, leg.Err = sessionFrontDoor(source.store).ListAll(session.ListAllOptions{})
-		at = now
+		at, expires = now, now.Add(cacheLagBound)
 	} else {
-		bound = r.recordingMaxAge
 		rec, ok := r.feed.recorded(source.store)
 		switch {
 		case !ok:
@@ -232,14 +227,14 @@ func (r *censusReader) readLeg(now time.Time, source classStoreCandidate) (censu
 		default:
 			leg.Err = rec.Err
 			infos = rec.Rows
-			at = rec.At
+			at, expires = rec.At, rec.Expires
 		}
 	}
 	if leg.Err == nil {
-		r.lastGood[leg.Ref] = censusLegRows{infos: infos, at: at}
+		r.lastGood[leg.Ref] = censusLegRows{infos: infos, at: at, expires: expires}
 		leg.State, leg.ReadAt = legRead, at
 	} else if good, ok := r.lastGood[leg.Ref]; ok {
-		infos = good.infos
+		infos, expires = good.infos, good.expires
 		leg.State, leg.ReadAt = legLastGood, good.at
 	} else {
 		// A partial read's rows still occupy their slots and names (legacy's
@@ -249,7 +244,7 @@ func (r *censusReader) readLeg(now time.Time, source classStoreCandidate) (censu
 		}
 		return leg, infos
 	}
-	if now.Sub(leg.ReadAt) > bound {
+	if now.After(expires) {
 		leg.State = legStale
 	}
 	return leg, infos
@@ -311,8 +306,8 @@ func (c *sessionCensus) Canonical() []censusRow {
 	return out
 }
 
-// CompleteLegs names the legs whose rows are a whole read within their bound
-// (ledgerCensus.Legs): only there does a missing row prove a close.
+// CompleteLegs names the legs whose rows are a whole read that has not
+// expired (ledgerCensus.Legs): only there does a missing row prove a close.
 func (c *sessionCensus) CompleteLegs() map[string]bool {
 	out := make(map[string]bool, len(c.Legs))
 	for _, l := range c.Legs {
@@ -323,8 +318,8 @@ func (c *sessionCensus) CompleteLegs() map[string]bool {
 	return out
 }
 
-// Incomplete reports whether some leg has no whole read within its bound to
-// serve (missing or stale): no fresh create may be planned anywhere from that
+// Incomplete reports whether some leg has no unexpired whole read to serve
+// (missing or stale): no fresh create may be planned anywhere from that
 // view (POOL-047), as legacy blocks every create on a partial census (owner
 // decision 2026-10-03 at P3-3 review).
 func (c *sessionCensus) Incomplete() bool {
@@ -336,7 +331,7 @@ func (c *sessionCensus) Incomplete() bool {
 	return false
 }
 
-// StaleLegs names the legs served past their bound: their rows Keep.
+// StaleLegs names the legs served past their expiry: their rows Keep.
 func (c *sessionCensus) StaleLegs() map[string]bool {
 	var out map[string]bool
 	for _, l := range c.Legs {

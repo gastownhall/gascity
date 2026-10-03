@@ -32,13 +32,17 @@ import (
 // named-session index on any leg, since no cache holds closed history. It
 // publishes the recording, stamped when its reads ended and fresh until an
 // expiry derived from the lane's cadence, and wakes the allocator when its
-// content changed or it replaces an expired recording.
+// content changed or it replaces an expired recording. The allocator's
+// session census serves those legs through sessionLeg, and so takes the same
+// expiry.
 //
 // Legacy's demand-pass repair writes (POOL-019/020) run on their own paced
 // goroutine, at most once per backstopRepairInterval, in legacy order over
 // every leg, so they never delay a recording. Those writes run only under
 // v2; legacy keeps them in its tick, so the two never both run. The lane
-// writes work beads through those repairs and nothing else.
+// writes work beads through those repairs and nothing else. Every recording
+// carries the scope gaps of the latest repair run with that run's sequence
+// number, so a consumer emits each run's gaps once.
 //
 // While the city is suspended neither goroutine reads or writes, as legacy's
 // demand pass returns before any of it (POOL-001); the last recording stays
@@ -58,7 +62,9 @@ const (
 	// backstopRepairInterval is the least idle time between two repair runs.
 	backstopRepairInterval = time.Minute
 	// backstopPassWindow is how many recent pass durations a recording's
-	// expiry takes its maximum over.
+	// expiry takes its maximum over. The maximum is capped at cacheLagBound,
+	// so one slow pass cannot keep a dead lane's recordings fresh for its
+	// own length.
 	backstopPassWindow = 8
 	// backstopSafeTickTrigger and backstopRepairSafeTickTrigger name the
 	// lane's goroutines in safeTick panic lines.
@@ -73,17 +79,21 @@ const (
 type backstopRecording struct {
 	Seq uint64
 	// At is when the pass's reads ended. The recording is fresh through
-	// Expires: At plus twice the lane interval plus the longest recent pass,
-	// so a lane keeping its cadence never serves a stale recording.
+	// Expires: At plus twice the lane interval plus the longest recent pass
+	// (at most cacheLagBound), so a lane keeping its cadence never serves a
+	// stale recording.
 	At      time.Time
 	Expires time.Time
 
 	Legs        map[beads.Store]legRecording
 	Sessions    map[beads.Store]sessionLegRecording
 	ClosedNamed map[beads.Store]closedNamedRecording
-	// ScopeGaps are the control-dispatcher scope gaps the last repair run
-	// found, for P3-7 to emit. They are not content: no demand reads them.
+	// ScopeGaps are the control-dispatcher scope gaps the latest repair run
+	// found, for P3-7 to emit, and RepairSeq numbers that run (0 before the
+	// first). Successive recordings repeat a run's gaps under the same
+	// RepairSeq. Neither is content: no demand reads them.
 	ScopeGaps []ControlDispatcherScopeGap
+	RepairSeq uint64
 }
 
 // legRecording is one leg's legacy live reads, each with its own error so a
@@ -110,15 +120,10 @@ type closedNamedRecording struct {
 	Err   error
 }
 
-// backstopSessionLeg is one recorded session census leg as the census reads
-// it. A non-nil Err makes the leg partial: a beads.PartialResultError when
-// Rows holds what a partial read returned, any other error when Rows is
-// empty. The leg is fresh through Expires.
-type backstopSessionLeg struct {
-	Rows    []session.Info
-	At      time.Time
-	Expires time.Time
-	Err     error
+// backstopRepairRun is one repair run's scope gaps and its sequence number.
+type backstopRepairRun struct {
+	seq  uint64
+	gaps []ControlDispatcherScopeGap
 }
 
 // fresh reports whether the recording may be served at now. A nil recording
@@ -127,18 +132,20 @@ func (r *backstopRecording) fresh(now time.Time) bool {
 	return r != nil && !now.After(r.Expires)
 }
 
-// sessionLeg returns store's recorded session census read. ok is false for a
-// leg the recording does not hold: an exact leg, or any leg before the first
-// pass.
-func (r *backstopRecording) sessionLeg(store beads.Store) (backstopSessionLeg, bool) {
+// sessionLeg returns store's recorded session census read, as the census
+// reads it (censusLegFeed.recorded). A non-nil Err makes the leg partial: a
+// beads.PartialResultError when Rows holds what a partial read returned, any
+// other error when Rows is empty. ok is false for a leg the recording does
+// not hold: an exact leg, or any leg before the first pass.
+func (r *backstopRecording) sessionLeg(store beads.Store) (censusRecording, bool) {
 	if r == nil {
-		return backstopSessionLeg{}, false
+		return censusRecording{}, false
 	}
 	l, ok := r.Sessions[demandLabelKey(store)]
 	if !ok {
-		return backstopSessionLeg{}, false
+		return censusRecording{}, false
 	}
-	return backstopSessionLeg{Rows: l.Rows, At: r.At, Expires: r.Expires, Err: l.Err}, true
+	return censusRecording{Rows: l.Rows, At: r.At, Expires: r.Expires, Err: l.Err}, true
 }
 
 // leg returns store's recorded demand reads. A nil recording holds no leg.
@@ -160,7 +167,7 @@ func (r *backstopRecording) closedNamed(store beads.Store) (closedNamedRecording
 }
 
 // sameContent reports whether r and o recorded the same legs, rows, indexes
-// and errors. Seq, At, Expires and ScopeGaps are not content.
+// and errors. Seq, At, Expires, ScopeGaps and RepairSeq are not content.
 func (r *backstopRecording) sameContent(o *backstopRecording) bool {
 	if r == nil || o == nil {
 		return r == o
@@ -225,7 +232,7 @@ type backstopLane struct {
 	now      func() time.Time
 	wakeCh   chan struct{}
 	rec      atomic.Pointer[backstopRecording]
-	gaps     atomic.Pointer[[]ControlDispatcherScopeGap]
+	repairs  atomic.Pointer[backstopRepairRun]
 
 	// seq and passTimes belong to the recording goroutine.
 	seq       uint64
@@ -265,6 +272,10 @@ func (l *backstopLane) start(ctx context.Context) <-chan struct{} {
 		panicked := l.safeTick(func() { ran = l.pass(ctx) }, backstopSafeTickTrigger)
 		return ran || panicked
 	})
+	// The repairs' only wake today is this first one, so a declined run
+	// pacing the next wake would change nothing yet. The gated shape is for
+	// P3-7: a gate release re-runs a skipped repair through a wake, which a
+	// skipped run must not pace.
 	repairWake := make(chan struct{}, 1)
 	repairWake <- struct{}{}
 	repairs := startGatedPacedLane(ctx, backstopRepairInterval, backstopRepairInterval, repairWake, func(bool) bool {
@@ -297,9 +308,9 @@ func (l *backstopLane) pass(ctx context.Context) bool {
 	}
 	l.passTimes[l.seq%backstopPassWindow] = end.Sub(start)
 	l.seq++
-	next.Seq, next.At, next.Expires = l.seq, end, end.Add(2*l.interval+slices.Max(l.passTimes[:]))
-	if gaps := l.gaps.Load(); gaps != nil {
-		next.ScopeGaps = *gaps
+	next.Seq, next.At, next.Expires = l.seq, end, end.Add(2*l.interval+min(slices.Max(l.passTimes[:]), cacheLagBound))
+	if run := l.repairs.Load(); run != nil {
+		next.ScopeGaps, next.RepairSeq = run.gaps, run.seq
 	}
 	if prev := l.rec.Swap(next); !prev.sameContent(next) || !prev.fresh(end) {
 		l.onChange()
@@ -308,14 +319,18 @@ func (l *backstopLane) pass(ctx context.Context) bool {
 }
 
 // repair runs legacy's demand-pass repairs once and keeps the scope gaps
-// they found for the next recording. It reports whether it ran.
+// they found, numbered by the run, for the next recordings. It reports
+// whether it ran.
 func (l *backstopLane) repair(ctx context.Context) bool {
 	env, ok := l.passEnv(ctx)
 	if !ok || env.CityStore == nil {
 		return false
 	}
-	gaps := runBackstopDemandRepairs(ctx, env, l.stderr)
-	l.gaps.Store(&gaps)
+	run := &backstopRepairRun{seq: 1, gaps: runBackstopDemandRepairs(ctx, env, l.stderr)}
+	if prev := l.repairs.Load(); prev != nil {
+		run.seq = prev.seq + 1
+	}
+	l.repairs.Store(run)
 	return true
 }
 
