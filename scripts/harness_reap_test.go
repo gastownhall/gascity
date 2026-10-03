@@ -36,6 +36,33 @@ const fixtureLifetimeSeconds = 300
 // varies).
 const pidFileWait = 30 * time.Second
 
+// runHarnessScript runs script under harnessBash, the one bash -c command site
+// shared by the sweep and watchdog unit tests. Output goes to a file so a
+// leaked background process cannot hold an os/exec pipe open after the shell
+// exits.
+func runHarnessScript(t *testing.T, script string, extraEnv ...string) (string, error) {
+	t.Helper()
+	logPath := filepath.Join(t.TempDir(), "harness.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		t.Fatalf("create harness log: %v", err)
+	}
+	cmd := harnessBash(script)
+	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd.Stdout, cmd.Stderr = logFile, logFile
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		t.Fatalf("start harness script: %v", err)
+	}
+	err = waitWithin(t, cmd, 40*time.Second)
+	_ = logFile.Close()
+	out, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("read harness log: %v", readErr)
+	}
+	return string(out), err
+}
+
 // reapFixture builds a repo-shaped environment for driving
 // scripts/test-go-test-shard with a fake `go` whose run phase is scripted by
 // the caller. It mirrors newGoTestShardFixture's shape (fake bin dir ahead of
@@ -153,7 +180,11 @@ func (f *reapFixture) startWithOutput(t *testing.T, out *os.File, extraEnv ...st
 	}
 	t.Cleanup(func() {
 		// Never leave the runner or its tree behind, whatever the assertions did.
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		// Once Wait has reaped the runner, its PID may be reused by a sibling
+		// process group; no cleanup signal may target that reused number.
+		if cmd.ProcessState == nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
 		_ = cmd.Wait()
 	})
 	return cmd
@@ -526,9 +557,7 @@ gc_harness_kill_pid() { printf 'KILLED %%s\n' "$1" >> %q ; }
 gc_harness_sweep_stale_orphans %s
 `, filepath.Join(repoRoot(t), "scripts", "lib", "harness-reap.sh"), killLog, minAge)
 
-	cmd := harnessBash(script)
-	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	out, err := cmd.CombinedOutput()
+	out, err := runHarnessScript(t, script, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if err != nil {
 		t.Fatalf("sweep failed: %v\n%s", err, out)
 	}
@@ -536,7 +565,7 @@ gc_harness_sweep_stale_orphans %s
 	if readErr != nil && !os.IsNotExist(readErr) {
 		t.Fatalf("read kill log: %v", readErr)
 	}
-	return string(kills) + string(out)
+	return string(kills) + out
 }
 
 // TestHarnessSweepReapsStrandedRunsButSparesLiveOnes pins the sweep's whole
