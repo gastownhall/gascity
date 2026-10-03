@@ -3070,6 +3070,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// only, same as the min-floor exemption above: a seat with any
 				// demand is still recycled and re-woken exactly as today.
 				onDemandIdleExempt := false
+				exemptReason := TraceReasonOnDemandIdleNoDemand
 				if !exempt && !floorExempt && !holdsClaim && namedSessionModeInfo(infoByID[id]) == "on_demand" {
 					identity := namedSessionIdentityInfo(infoByID[id])
 					demand := namedSessionDemand[identity] || namedRoutedDemand[identity] ||
@@ -3084,12 +3085,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// is idle.
 							fmt.Fprintf(stderr, "session reconciler: checking open assigned work before progress-stall recycle for %s: %v\n", name, openErr) //nolint:errcheck
 							onDemandIdleExempt = true
+							exemptReason = TraceReasonOpenWorkCheckError
 						} else {
 							onDemandIdleExempt = !hasOpen
 						}
 					}
 					if onDemandIdleExempt && trace != nil {
-						trace.RecordDecision(TraceSiteReconcilerProgressStallExempt, TraceReasonOnDemandIdleNoDemand, TraceOutcomeExempt, tp.TemplateName, name, nil)
+						trace.RecordDecision(TraceSiteReconcilerProgressStallExempt, exemptReason, TraceOutcomeExempt, tp.TemplateName, name, nil)
 					}
 				}
 				if sessionProgressStalled(claimlessThreshold, holdsClaim, providerHealthy, exempt || floorExempt || onDemandIdleExempt, lastActivity, clk.Now()) {
