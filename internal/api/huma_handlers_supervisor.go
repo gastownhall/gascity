@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -712,7 +713,7 @@ func (sm *SupervisorMux) humaHandleEventList(_ context.Context, input *Superviso
 }
 
 func supervisorEventListFilterIsEmpty(filter events.Filter) bool {
-	return filter == (events.Filter{})
+	return reflect.DeepEqual(filter, events.Filter{})
 }
 
 func (sm *SupervisorMux) currentSupervisorEventTotal() int {
