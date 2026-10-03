@@ -923,6 +923,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		TmuxAlias:                    "worker--{{.CityName}}",
 		Implicit:                     true,
 		DrainTimeout:                 "10m",
+		TerminalCreateCooldown:       "10m",
 		OnBoot:                       "echo boot",
 		OnDeath:                      "echo death",
 		Namepool:                     "names.txt",

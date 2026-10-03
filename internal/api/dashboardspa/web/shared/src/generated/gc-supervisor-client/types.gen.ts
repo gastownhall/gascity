@@ -112,6 +112,7 @@ export type AgentPatch = {
     SleepAfterIdle: string | null;
     StartCommand: string | null;
     Suspended: boolean | null;
+    TerminalCreateCooldown: string | null;
     TmuxAlias: string | null;
     Upstream: string | null;
     WakeMode: string | null;

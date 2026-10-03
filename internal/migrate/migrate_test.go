@@ -1135,6 +1135,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		MinActiveSessions:      intPtr(1),
 		ScaleCheck:             "echo 3",
 		DrainTimeout:           "10m",
+		TerminalCreateCooldown: "10m",
 		OnBoot:                 "echo boot",
 		OnDeath:                "echo death",
 		Namepool:               "names.txt",

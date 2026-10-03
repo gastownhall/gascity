@@ -394,6 +394,7 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		copy(dst.NamepoolNames, src.NamepoolNames)
 	}
 	dst.DrainTimeout = src.DrainTimeout
+	dst.TerminalCreateCooldown = src.TerminalCreateCooldown
 	dst.OnBoot = src.OnBoot
 	dst.OnDeath = src.OnDeath
 	dst.Namepool = src.Namepool

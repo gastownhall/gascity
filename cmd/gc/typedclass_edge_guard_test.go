@@ -169,6 +169,20 @@ var typedClassCodecCensus = map[string]map[string]int{
 		// typing is a separate out-of-budget W-sync wave (see tickfeed-design §3
 		// W-unexport).
 		"cmd/gc/session_beads.go": 1,
+		// build_desired_state.go 0→1 (ga-yq48qr.2.3 terminal-create-cooldown gate):
+		// poolTerminalCreateCooldownActive needs an IncludeClosed history query
+		// Metadata-filtered on template+session_origin, the same shape
+		// session.HasOpenSessionNamed documents as "the one ListAll consumer with a
+		// Metadata filter that does not fit ListAllOptions" — ListAllOptions has no
+		// Metadata field. Worse, the per-row facts the gate reads (provider_terminal_error,
+		// provider_terminal_error_at, and the resolved work dir via
+		// contract.WorkerDirFromMetadata) are cmd/gc's own reconciler metadata contract
+		// (constants live in cmd/gc/session_reconcile.go), not general session.Info
+		// domain fields — projecting them onto Info would leak cmd/gc-local reconciler
+		// vocabulary into the shared session package for a single caller. Routing through
+		// the front door would mean widening Info/ListAllOptions for a concept the
+		// session package has no business knowing; the raw call is the honest fit.
+		"cmd/gc/build_desired_state.go": 1,
 	},
 	// ResolveSessionBeadByExactID( is now all-zero in the interior: the
 	// worker-boundary resolve+construct site moved to ResolveSessionRecordByExactID

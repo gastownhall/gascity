@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
@@ -228,9 +229,10 @@ type scaleCheckDemand struct {
 }
 
 var (
-	errPoolSessionCreateBudgetExhausted = errors.New("pool session create budget exhausted")
-	errPoolSessionCreatePartial         = errors.New("pool session create skipped: demand read partial")
-	errPoolSessionCreateProviderRed     = errors.New("pool session create skipped: provider red")
+	errPoolSessionCreateBudgetExhausted  = errors.New("pool session create budget exhausted")
+	errPoolSessionCreatePartial          = errors.New("pool session create skipped: demand read partial")
+	errPoolSessionCreateProviderRed      = errors.New("pool session create skipped: provider red")
+	errPoolSessionCreateTerminalCooldown = errors.New("pool session create skipped: terminal cooldown active")
 )
 
 // poolSessionCreateFairShareCounter rotates scarce create tokens across
@@ -3597,6 +3599,9 @@ func realizePoolDesiredSessionsAt(
 					// the error because a stalled slot is only diagnosable if
 					// the operator can see who is sitting on the name.
 					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (slot stalled on its own runtime name; retrying next tick)\n", qualifiedName, err) //nolint:errcheck
+				case errors.Is(err, errPoolSessionCreateTerminalCooldown):
+					// debug-level: fires every tick while the cooldown window is active; not operator noise
+					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (fresh create blocked)\n", qualifiedName, err) //nolint:errcheck
 				default:
 					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
 				}
@@ -4857,6 +4862,15 @@ func selectOrPlanPoolSessionBead(
 		return session.Info{}, 0, nil, errPoolSessionCreateProviderRed
 	}
 
+	// Terminal-create cooldown gate: refuse a fresh create when a recent
+	// terminal provider error was recorded for this exact (template,
+	// resolved work dir) identity, so a persistent failure doesn't flood
+	// the ledger with a fresh failed-create bead on every tick.
+	if poolTerminalCreateCooldownActive(bp, cfgAgent, template, qualifiedInstance) {
+		delete(usedSlots, slot)
+		return session.Info{}, 0, nil, errPoolSessionCreateTerminalCooldown
+	}
+
 	if !bp.tryClaimPoolSessionCreate(template) {
 		delete(usedSlots, slot)
 		return session.Info{}, 0, nil, errPoolSessionCreateBudgetExhausted
@@ -5071,6 +5085,69 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 		return slot, nil
 	}
 	return 0, fmt.Errorf("%w: pool template %q has no free concrete slot", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
+}
+
+// poolTerminalCreateCooldownActive reports whether a fresh ephemeral create
+// for template at qualifiedInstance's resolved work directory should be
+// throttled because a recent terminal provider error was recorded for the
+// same (template, resolved work dir) identity. This bounds the failed-create
+// bead flood that a persistent terminal provider error would otherwise
+// produce on every reconciler tick.
+//
+// A non-positive window disables the gate. It fails open (returns false,
+// allowing the create) whenever it cannot establish a clear, current match:
+// the build is plan-only (that mode makes no store reads, so there is no
+// history to consult), the prospective work dir can't be resolved, the
+// history query itself errors (logged to bp.stderr), or a candidate history
+// row is missing its terminal-error reason or timestamp, has an unparseable
+// timestamp, or resolves to a different work dir. Only an unambiguous match
+// within the configured cooldown window suppresses the create.
+func poolTerminalCreateCooldownActive(bp *agentBuildParams, cfgAgent *config.Agent, template, qualifiedInstance string) bool {
+	cooldown := cfgAgent.TerminalCreateCooldownDuration()
+	if cooldown <= 0 || bp.planOnly {
+		return false
+	}
+
+	workDir, err := resolveConfiguredWorkDir(bp.cityPath, bp.cityName, qualifiedInstance, cfgAgent, bp.rigs)
+	if err != nil || strings.TrimSpace(workDir) == "" {
+		return false
+	}
+
+	rows, err := session.ListAllSessionBeads(bp.beadStore, beads.ListQuery{
+		IncludeClosed: true,
+		Metadata: map[string]string{
+			"template":       template,
+			"session_origin": "ephemeral",
+		},
+	})
+	if err != nil {
+		fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q: terminal-cooldown history query failed: %v (fail-open, fresh create allowed)\n", qualifiedInstance, err) //nolint:errcheck
+		return false
+	}
+
+	var mostRecent time.Time
+	var found bool
+	for _, row := range rows {
+		if strings.TrimSpace(row.Metadata[sessionProviderTerminalErrorMetadataKey]) == "" {
+			continue
+		}
+		if contract.WorkerDirFromMetadata(row.Metadata) != workDir {
+			continue
+		}
+		failedAt, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(row.Metadata[sessionProviderTerminalErrorAtKey]))
+		if parseErr != nil {
+			continue
+		}
+		if !found || failedAt.After(mostRecent) {
+			mostRecent = failedAt
+			found = true
+		}
+	}
+	if !found {
+		return false
+	}
+
+	return bp.beaconTime.Sub(mostRecent) < cooldown
 }
 
 func poolTriggerMetadata(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) (map[string]string, error) {

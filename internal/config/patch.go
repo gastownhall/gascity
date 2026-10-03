@@ -75,6 +75,11 @@ type AgentPatch struct {
 	MaxSessionAge *string `toml:"max_session_age,omitempty"`
 	// MaxSessionAgeJitter overrides the max session age jitter. Duration string (e.g., "15m").
 	MaxSessionAgeJitter *string `toml:"max_session_age_jitter,omitempty"`
+	// TerminalCreateCooldown overrides the minimum time to wait after a
+	// terminal ephemeral session-create failure before attempting another
+	// fresh create at the same resolved worker directory. Duration string
+	// (e.g., "5m", "30m", "1h"). Set to "0s" to disable the throttle.
+	TerminalCreateCooldown *string `toml:"terminal_create_cooldown,omitempty"`
 	// AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that
 	// field for semantics).
 	AssignedWorkDeferLimit *int `toml:"assigned_work_defer_limit,omitempty"`
@@ -578,6 +583,9 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	}
 	if p.MaxSessionAgeJitter != nil {
 		a.MaxSessionAgeJitter = *p.MaxSessionAgeJitter
+	}
+	if p.TerminalCreateCooldown != nil {
+		a.TerminalCreateCooldown = *p.TerminalCreateCooldown
 	}
 	if p.AssignedWorkDeferLimit != nil {
 		a.AssignedWorkDeferLimit = p.AssignedWorkDeferLimit

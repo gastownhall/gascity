@@ -83,6 +83,7 @@ type agentFile struct {
 	MinActiveSessions      *int                    `toml:"min_active_sessions,omitempty"`
 	ScaleCheck             string                  `toml:"scale_check,omitempty"`
 	DrainTimeout           string                  `toml:"drain_timeout,omitempty"`
+	TerminalCreateCooldown string                  `toml:"terminal_create_cooldown,omitempty"`
 	OnBoot                 string                  `toml:"on_boot,omitempty"`
 	OnDeath                string                  `toml:"on_death,omitempty"`
 	WorkQuery              string                  `toml:"work_query,omitempty"`
@@ -941,6 +942,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		MinActiveSessions:      agent.MinActiveSessions,
 		ScaleCheck:             agent.ScaleCheck,
 		DrainTimeout:           agent.DrainTimeout,
+		TerminalCreateCooldown: agent.TerminalCreateCooldown,
 		OnBoot:                 agent.OnBoot,
 		OnDeath:                agent.OnDeath,
 		WorkQuery:              agent.WorkQuery,

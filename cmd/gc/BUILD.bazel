@@ -1251,6 +1251,7 @@ go_test(
         "pool_session_release_session_store_test.go",
         "pool_slot_unaliased_test.go",
         "pool_slot_workdir_test.go",
+        "pool_terminal_create_cooldown_test.go",
         "pool_test.go",
         "pool_trigger_workdir_purity_test.go",
         "pool_trigger_worktree_owner_test.go",

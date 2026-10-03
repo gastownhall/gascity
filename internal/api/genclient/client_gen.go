@@ -1012,6 +1012,7 @@ type AgentPatch struct {
 	SleepAfterIdle          *string           `json:"SleepAfterIdle"`
 	StartCommand            *string           `json:"StartCommand"`
 	Suspended               *bool             `json:"Suspended"`
+	TerminalCreateCooldown  *string           `json:"TerminalCreateCooldown"`
 	TmuxAlias               *string           `json:"TmuxAlias"`
 	Upstream                *string           `json:"Upstream"`
 	WakeMode                *string           `json:"WakeMode"`

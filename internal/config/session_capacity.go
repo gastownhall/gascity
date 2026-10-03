@@ -18,6 +18,14 @@ func (a *Agent) DrainTimeoutDuration() time.Duration {
 	return dur
 }
 
+// TerminalCreateCooldownDuration returns the minimum time to wait after a
+// terminal ephemeral session-create failure before attempting another fresh
+// create for this agent at the same resolved worker directory. Defaults to 5m
+// if empty or unparseable. An explicit "0s" disables the throttle.
+func (a *Agent) TerminalCreateCooldownDuration() time.Duration {
+	return durationOr(a.TerminalCreateCooldown, 5*time.Minute)
+}
+
 // EffectiveMaxActiveSessions returns the agent's max active sessions.
 // Priority: agent.MaxActiveSessions > pool.Max > nil (unlimited).
 func (a *Agent) EffectiveMaxActiveSessions() *int {

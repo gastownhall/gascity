@@ -220,6 +220,11 @@
           "description": "DrainTimeout is the maximum time to wait for a session to finish its\ncurrent work before force-killing it during scale-down. Duration string\n(e.g., \"5m\", \"30m\", \"1h\"). Defaults to \"5m\".",
           "default": "5m"
         },
+        "terminal_create_cooldown": {
+          "type": "string",
+          "description": "TerminalCreateCooldown is the minimum time to wait after a terminal\n(non-retryable) ephemeral session-create failure for this agent before\nattempting another fresh create at the same resolved worker directory.\nDuration string (e.g., \"5m\", \"30m\", \"1h\"). Defaults to \"5m\". Set to \"0s\"\nto disable the throttle.",
+          "default": "5m"
+        },
         "on_boot": {
           "type": "string",
           "description": "OnBoot is a shell command template run once at controller startup for\nthis agent. If it contains Go template placeholders, gc expands them\nusing the same PathContext fields as work_dir and session_setup\n(Agent, AgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch)\nbefore running the command."
@@ -547,6 +552,10 @@
           "type": "string",
           "description": "MaxSessionAgeJitter overrides the jitter added on top of MaxSessionAge.\nDuration string (e.g., \"15m\"). Empty disables jitter."
         },
+        "terminal_create_cooldown": {
+          "type": "string",
+          "description": "TerminalCreateCooldown overrides the minimum time to wait after a\nterminal ephemeral session-create failure before attempting another\nfresh create at the same resolved worker directory. Duration string\n(e.g., \"5m\", \"30m\", \"1h\"). Set to \"0s\" to disable the throttle."
+        },
         "assigned_work_defer_limit": {
           "type": "integer",
           "description": "AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that\nfield for semantics)."
@@ -843,6 +852,10 @@
         "max_session_age_jitter": {
           "type": "string",
           "description": "MaxSessionAgeJitter overrides the max session age jitter. Duration string (e.g., \"15m\")."
+        },
+        "terminal_create_cooldown": {
+          "type": "string",
+          "description": "TerminalCreateCooldown overrides the minimum time to wait after a\nterminal ephemeral session-create failure before attempting another\nfresh create at the same resolved worker directory. Duration string\n(e.g., \"5m\", \"30m\", \"1h\"). Set to \"0s\" to disable the throttle."
         },
         "assigned_work_defer_limit": {
           "type": "integer",
