@@ -5453,6 +5453,78 @@ exit 0
 	}
 }
 
+// TestDoctorScriptDoesNotFlagIdleDatabaseBackupAsStale pins that backup age
+// only matters when the database has commits the backup lacks. An idle rig's
+// `dolt backup sync` is a no-op that rewrites nothing, so its artifacts age
+// forever while holding every commit; the doctor paged on that every tick. A
+// database committed to after its last backup must still be flagged, and so
+// must one whose last commit cannot be read: the guard fails closed.
+func TestDoctorScriptDoesNotFlagIdleDatabaseBackupAsStale(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatalf("mkdir artifact dir: %v", err)
+	}
+	backupAt := time.Now().Add(-2 * time.Hour)
+	for _, db := range []string{"idle", "busy", "unread"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", db, err)
+		}
+		backup := filepath.Join(artifactDir, db+".backup")
+		writeTestFile(t, backup, "backup")
+		if err := os.Chtimes(backup, backupAt, backupAt); err != nil {
+			t.Fatalf("chtimes %s backup: %v", db, err)
+		}
+	}
+	idleCommit := backupAt.Add(-time.Hour).Unix()
+	busyCommit := backupAt.Add(time.Hour).Unix()
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  backup)
+    printf '%%s-backup\n' "$(basename "$PWD")"
+    exit 0
+    ;;
+esac
+case "$*" in
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\n1\n'
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nidle\nbusy\nunread\n'
+    exit 0
+    ;;
+  *'`+"`idle`"+`.dolt_branches'*) printf 'epoch\n%%d\n' %d; exit 0 ;;
+  *'`+"`busy`"+`.dolt_branches'*) printf 'epoch\n%%d\n' %d; exit 0 ;;
+  *'`+"`unread`"+`.dolt_branches'*) exit 1 ;;
+esac
+exit 0
+`, idleCommit, busyCommit))
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("unexpected doctor output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if strings.Contains(string(gcLog), "idle backup is") {
+		t.Fatalf("idle database with no commits since its backup should not be reported stale, log:\n%s", gcLog)
+	}
+	if !strings.Contains(string(gcLog), "busy backup is") {
+		t.Fatalf("doctor did not report busy database committed after its backup, log:\n%s", gcLog)
+	}
+	if !strings.Contains(string(gcLog), "unread backup is") {
+		t.Fatalf("doctor must keep reporting a stale backup whose last commit is unreadable, log:\n%s", gcLog)
+	}
+}
+
 func TestDoctorScriptIgnoresDocumentedSystemSchemasForBackupFreshness(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")
