@@ -82,10 +82,11 @@ func (x *createEffects) createNamed(pass *createPass, p createPlan, token string
 }
 
 // resolveNamed resolves the plan's template read-only, as legacy's desired
-// state resolves it for a named session.
+// state resolves it for a named session. With no store, the session name
+// derives from config alone: the spec's runtime name, which the spec check
+// matched against the plan's.
 func (x *createEffects) resolveNamed(cfg *config.City, spec namedSessionSpec, plan *namedCreatePlan) (TemplateParams, error) {
 	bp := newReadOnlyAgentBuildParams(x.host.cityName, x.host.cityPath, cfg, x.host.lookPath, x.host.now(), x.host.stderr)
-	bp.beadNames[plan.Identity] = plan.SessionName
 	tp, err := func() (TemplateParams, error) {
 		templateResolveMu.Lock()
 		defer templateResolveMu.Unlock()
@@ -95,7 +96,6 @@ func (x *createEffects) resolveNamed(cfg *config.City, spec namedSessionSpec, pl
 		return TemplateParams{}, err
 	}
 	applyNamedTemplateOverrides(&tp, spec, plan.Identity, plan.BoundStepID)
-	tp.SessionName = plan.SessionName
 	return tp, nil
 }
 
@@ -138,13 +138,18 @@ func (x *createEffects) writeNamed(pass *createPass, p createPlan, tp TemplatePa
 // reopenNamed reopens closed, the identity's closed canonical row, with
 // legacy's reopen batch in one write: conditional on the revision the
 // fenced read saw where the store resolves a conditional writer, else
-// legacy's transaction (last writer wins, design §4a N3). A lost fence, or a
-// writer that refuses the condition, writes nothing.
+// legacy's transaction (last writer wins, design §4a N3). The entry names
+// the row, and the revision read, before anything is checked or written;
+// settle reads a refused write (a lost fence, a writer that cannot fence)
+// as no write.
 func (x *createEffects) reopenNamed(store beads.Store, live beads.Store, cfg *config.City, p createPlan, closed beads.Bead, now time.Time, prog *createProgress) (session.Info, error) {
 	plan := p.Named
 	writer, _, err := beads.ResolveConditionalWriter(store)
 	if err != nil {
 		return session.Info{}, fmt.Errorf("reopening configured named session %q: %w", plan.Identity, err)
+	}
+	if !x.host.ledger.Retarget(p.EntryID, closed.ID, closed.Revision) {
+		return session.Info{}, fmt.Errorf("reopening configured named session %q: create entry %s is no longer issued", plan.Identity, p.EntryID)
 	}
 	state := "stopped"
 	if plan.AdoptLive {
@@ -155,7 +160,6 @@ func (x *createEffects) reopenNamed(store beads.Store, live beads.Store, cfg *co
 	open := "open"
 	opts := beads.UpdateOpts{Status: &open, Metadata: batch}
 	reopened, err := reopenClosedConfiguredNamedSessionBeadLocked(live, cfg, plan.Identity, plan.SessionName, closed, batch, func() error {
-		x.host.ledger.Retarget(p.EntryID, closed.ID)
 		prog.writing, prog.rowID = true, closed.ID
 		if writer != nil {
 			return writer.UpdateIfMatch(closed.ID, closed.Revision, opts)
@@ -169,9 +173,6 @@ func (x *createEffects) reopenNamed(store beads.Store, live beads.Store, cfg *co
 	case err == nil:
 		return session.Info{ID: reopened.ID}, nil
 	case !errors.As(err, &written):
-		return session.Info{}, err
-	case beads.IsPreconditionFailed(err), beads.IsConditionalWriteUnsupported(err):
-		prog.writing = false // refused before anything was written
 		return session.Info{}, err
 	}
 	return session.Info{}, poolCreateWriteError{err: err, rowID: closed.ID}

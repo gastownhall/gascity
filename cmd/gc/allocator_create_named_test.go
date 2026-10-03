@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -570,39 +571,55 @@ func TestCreateEffect_NamedReopenRetargetsBeforeWriteAndClearsByRowID(t *testing
 	}
 }
 
-// Kills: a token leaked on a reopen that never landed, and a marker that
-// never clears (P3-6b T6). An ambiguous reopen commits with the row as its
-// marker; lag repair reads the row still closed as not written (refund),
-// and open as installed.
+// Kills: a token leaked on a reopen that never landed, a token refunded for
+// a reopen that landed and closed again, and a marker that never clears
+// (P3-6b T6). An ambiguous reopen commits with the row and the revision it
+// read; lag repair reads the row still closed at that revision as not
+// written (refund), closed at a later one as written and closed (no
+// refund), and open as installed.
 func TestCreateEffect_NamedAmbiguousReopenLagRepairClosedIsUnwritten(t *testing.T) {
 	cfg := mayorCity()
-	mem := beads.NewMemStore()
-	closed := seedClosedNamedRow(t, mem, cfg, nil)
-	h := newNamedHarness(t, t.TempDir(), nil)
-	h.reserve(t, "c1")
-	h.runAll(t, &createPass{cfg: cfg, store: &namedHookStore{Store: mem, failTx: errors.New("connection reset during reopen")}}, namedPlan(t, cfg, "c1", "mayor"))
+	for _, tc := range []struct {
+		name   string
+		bump   int64 // the lag read's revision over the one the effect read
+		open   bool
+		want   lagOutcome
+		refund int
+	}{
+		{name: "closed at the revision read", want: lagNoMarker, refund: 1},
+		{name: "closed at a later revision", bump: 2, want: lagClosed, refund: 0},
+		{name: "open", bump: 1, open: true, want: lagInstalled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			closed := seedClosedNamedRow(t, mem, cfg, nil)
+			h := newNamedHarness(t, t.TempDir(), nil)
+			h.reserve(t, "c1")
+			h.runAll(t, &createPass{cfg: cfg, store: &namedHookStore{Store: mem, failTx: errors.New("connection reset during reopen")}}, namedPlan(t, cfg, "c1", "mayor"))
 
-	e := h.entry(t)
-	if e.State != ledgerCommitted || !e.WroteRow || !e.Reopen || e.Marker.RowID != closed.ID {
-		t.Fatalf("entry = %+v, want an ambiguous committed reopen of %s", e, closed.ID)
-	}
-	h.assertNoCreateVeto(t)
-	k := rowKey{Leg: "sessions", ID: closed.ID}
-	if !e.lagging(ledgerCensusOf(nil, "sessions"), e.SettledAt.Add(ledgerCacheLagBound)) {
-		t.Fatal("an ambiguous reopen is not handed to lag repair after the bound")
-	}
-	if got := e.lagOutcomeOf(k, ledgerRow{}, true, false); got != lagNoMarker {
-		t.Fatalf("lag outcome for the row still closed = %d, want lagNoMarker", got)
-	}
-	if got := e.lagOutcomeOf(k, ledgerRow{}, true, true); got != lagInstalled {
-		t.Fatalf("lag outcome for the row open = %d, want lagInstalled", got)
-	}
-	if !h.ledger.ResolveLag("c1", e.lagOutcomeOf(k, ledgerRow{}, true, false)) {
-		t.Fatal("ResolveLag refused")
-	}
-	e = h.entry(t)
-	if clears, refund := e.clearVerdict(ledgerCensusOf(nil, "sessions"), namedEffectNow); !clears || refund != 1 {
-		t.Fatalf("clear verdict after the closed read = (%v, %d), want cleared with the token refunded", clears, refund)
+			e := h.entry(t)
+			if e.State != ledgerCommitted || !e.WroteRow || !e.Reopen || e.Marker.RowID != closed.ID || e.ReopenRevision != closed.Revision || closed.Revision == 0 {
+				t.Fatalf("entry = %+v, want an ambiguous committed reopen of %s read at revision %d", e, closed.ID, closed.Revision)
+			}
+			h.assertNoCreateVeto(t)
+			if !e.lagging(ledgerCensusOf(nil, "sessions"), e.SettledAt.Add(ledgerCacheLagBound)) {
+				t.Fatal("an ambiguous reopen is not handed to lag repair after the bound")
+			}
+			k, row := rowKey{Leg: "sessions", ID: closed.ID}, ledgerRow{Revision: closed.Revision + tc.bump}
+			got := e.lagOutcomeOf(k, row, true, tc.open)
+			if got != tc.want {
+				t.Fatalf("lag outcome = %d, want %d", got, tc.want)
+			}
+			if tc.open {
+				return
+			}
+			if !h.ledger.ResolveLag("c1", got) {
+				t.Fatal("ResolveLag refused")
+			}
+			if clears, refund := h.entry(t).clearVerdict(ledgerCensusOf(nil, "sessions"), namedEffectNow); !clears || refund != tc.refund {
+				t.Fatalf("clear verdict = (%v, %d), want cleared with refund %d", clears, refund, tc.refund)
+			}
+		})
 	}
 }
 
@@ -734,42 +751,82 @@ func (s namedFenceProbeStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 }
 
 // Kills: cached fence reads and the closed-row lookup outside the lock
-// (P3-6b T9). An open canonical row written behind a stale cache refuses
-// the create, and every fenced read is live and locked.
+// (P3-6b T9). A row written behind a stale cache refuses the create (an open
+// canonical row) and the reopen (an alias holder, read by the reopen's own
+// availability checks), and every fenced read is live and locked.
 func TestCreateEffect_NamedFenceReadsLiveInsideLock(t *testing.T) {
 	cfg := mayorCity()
-	backing := beads.NewMemStore()
-	cache := beads.NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatal(err)
-	}
 	spec, _ := findNamedSessionSpec(cfg, "test-city", "mayor")
-	if _, err := backing.Create(beads.Bead{Title: "mayor", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
-		"session_name": spec.SessionName, "alias": "mayor", "state": "active",
-		namedSessionMetadataKey: "true", namedSessionIdentityMetadata: "mayor", namedSessionModeMetadata: "always",
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	if rows, err := cache.List(beads.ListQuery{Metadata: map[string]string{"alias": "mayor"}}); err != nil || len(rows) != 0 {
-		t.Fatalf("cached alias read = %v, %v; the fixture needs a cache that misses the row", rows, err)
-	}
-	locked := false
-	h := newNamedHarness(t, t.TempDir(), func(host *createEffectHost) {
-		host.withLocks = func(_ string, _ []string, fn func() error) error {
-			locked = true
-			defer func() { locked = false }()
-			return fn()
-		}
-	})
-	h.reserve(t, "c1")
-	plan := namedPlan(t, cfg, "c1", "mayor")
-	h.runAll(t, &createPass{cfg: cfg, store: namedFenceProbeStore{Store: cache, locked: &locked, t: t}}, plan)
+	for _, tc := range []struct {
+		name string
+		// seed writes before the cache primes; behind writes to the backing
+		// only, after it.
+		seed, behind func(t *testing.T, backing beads.Store)
+	}{
+		{name: "create refused by an open canonical row", behind: func(t *testing.T, backing beads.Store) {
+			if _, err := backing.Create(beads.Bead{Title: "mayor", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+				"session_name": spec.SessionName, "alias": "mayor", "state": "active",
+				namedSessionMetadataKey: "true", namedSessionIdentityMetadata: "mayor", namedSessionModeMetadata: "always",
+			}}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "reopen refused by an alias holder", seed: func(t *testing.T, backing beads.Store) {
+			seedClosedNamedRow(t, backing, cfg, nil)
+		}, behind: func(t *testing.T, backing beads.Store) {
+			aliasSquatter(t, backing, "mayor")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backing := beads.NewMemStore()
+			if tc.seed != nil {
+				tc.seed(t, backing)
+			}
+			before := namedComparableRows(t, backing)
+			cache := beads.NewCachingStoreForTest(backing, nil)
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			tc.behind(t, backing)
+			if rows, err := cache.List(beads.ListQuery{Metadata: map[string]string{"alias": "mayor"}}); err != nil || len(rows) != 0 {
+				t.Fatalf("cached alias read = %v, %v; the fixture needs a cache that misses the row", rows, err)
+			}
+			locked := false
+			h := newNamedHarness(t, t.TempDir(), func(host *createEffectHost) {
+				host.withLocks = func(_ string, _ []string, fn func() error) error {
+					locked = true
+					defer func() { locked = false }()
+					return fn()
+				}
+			})
+			h.reserve(t, "c1")
+			plan := namedPlan(t, cfg, "c1", "mayor")
+			h.runAll(t, &createPass{cfg: cfg, store: namedFenceProbeStore{Store: cache, locked: &locked, t: t}}, plan)
 
-	assertFailedNoWrite(t, h)
-	h.assertCreateVeto(t, plan, createStageFence)
-	if rows := sessionRows(t, backing); len(rows) != 1 {
-		t.Fatalf("rows = %d, want only the open canonical row", len(rows))
+			assertFailedNoWrite(t, h)
+			h.assertCreateVeto(t, plan, createStageFence)
+			after := namedComparableRows(t, backing)
+			if len(after) != len(before)+1 {
+				t.Fatalf("rows = %+v, want the seeded rows and the one written behind the cache", after)
+			}
+			for _, b := range before {
+				if !namedRowsContain(after, b) {
+					t.Fatalf("seeded row %+v changed: %+v", b, after)
+				}
+			}
+		})
 	}
+}
+
+// namedRowsContain reports whether rows holds want, compared as
+// namedComparableRows blanks them.
+func namedRowsContain(rows []beads.Bead, want beads.Bead) bool {
+	for _, r := range rows {
+		if reflect.DeepEqual(r, want) {
+			return true
+		}
+	}
+	return false
 }
 
 // namedGuardedStore panics on a write to any row but target, and on any
@@ -831,38 +888,72 @@ func namedTreeSnapshot(t *testing.T, dir string) []string {
 }
 
 // Kills: the S2 side effects (a settings projection, a work-dir mkdir, a
-// skill snapshot, a RepairEmptyType write on another row) and any provider
-// probe, including SyncRuntimeAlias on an adopt (P3-6b T11).
+// skill snapshot written or removed, a RepairEmptyType write on another row)
+// and any provider probe, including SyncRuntimeAlias on an adopt (P3-6b
+// T11). The agent works in a worktree dir and has a skill on a stage-2
+// session provider, so legacy's resolution would create the dir, or rewrite
+// the snapshot its earlier resolution left there. (City skills feed the
+// snapshot only through the catalogs read-only resolution does not load;
+// the agent-local skill reaches the snapshot step without them.)
 func TestCreateEffect_NamedNeverProbesNorWritesFiles(t *testing.T) {
-	for _, reopen := range []bool{false, true} {
-		dir := t.TempDir()
-		cfg := namedTestCity(config.Agent{Name: "mayor", Provider: "claude"}, config.NamedSession{Template: "mayor", Mode: "always"},
-			map[string]config.ProviderSpec{"claude": {}})
-		// A legacy session-name lookup would find, and repair, this
-		// type-less row of the same template.
-		mem := beads.NewMemStoreFrom(100, []beads.Bead{{
-			ID: "gc-bait", Title: "bait", Status: "open", Labels: []string{sessionBeadLabel},
-			Metadata: map[string]string{"template": "mayor", "session_name": "bait"},
-		}}, nil)
-		target := ""
-		if reopen {
-			target = seedClosedNamedRow(t, mem, cfg, nil).ID
-		}
-		before := namedTreeSnapshot(t, dir)
-		h := newNamedHarness(t, dir, func(host *createEffectHost) {
-			host.lookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
-		})
-		h.reserve(t, "c1")
-		plan := namedPlan(t, cfg, "c1", "mayor")
-		plan.Named.AdoptLive = true
-		h.runAll(t, &createPass{cfg: cfg, sp: probePanicProvider{}, store: namedGuardedStore{Store: mem, target: target}}, plan)
+	for _, tc := range []struct {
+		name string
+		// reopen seeds an eligible closed row; primed seeds the work dir
+		// with the skill snapshot a legacy resolution leaves behind.
+		reopen, primed bool
+	}{
+		{name: "create"},
+		{name: "reopen", reopen: true},
+		{name: "create in a primed work dir", primed: true},
+		{name: "reopen in a primed work dir", reopen: true, primed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			skills := filepath.Join(dir, "agents", "mayor", "skills")
+			writeNamedFixtureFile(t, filepath.Join(skills, "plan", "SKILL.md"), "---\nname: plan\ndescription: test\n---\nbody\n")
+			cfg := namedTestCity(config.Agent{Name: "mayor", Provider: "claude", WorkDir: ".gc/worktrees/mayor", SkillsDir: skills},
+				config.NamedSession{Template: "mayor", Mode: "always"}, map[string]config.ProviderSpec{"claude": {}})
+			cfg.Session.Provider = "tmux"
+			workDir := filepath.Join(dir, ".gc", "worktrees", "mayor")
+			if tc.primed {
+				writeNamedFixtureFile(t, skillSnapshotFilePath(workDir, "mayor"), "c25hcHNob3Q=")
+			}
+			// A legacy session-name lookup would find, and repair, this
+			// type-less row of the same template.
+			mem := beads.NewMemStoreFrom(100, []beads.Bead{{
+				ID: "gc-bait", Title: "bait", Status: "open", Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{"template": "mayor", "session_name": "bait"},
+			}}, nil)
+			target := ""
+			if tc.reopen {
+				target = seedClosedNamedRow(t, mem, cfg, nil).ID
+			}
+			before := namedTreeSnapshot(t, dir)
+			h := newNamedHarness(t, dir, func(host *createEffectHost) {
+				host.lookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+			})
+			h.reserve(t, "c1")
+			plan := namedPlan(t, cfg, "c1", "mayor")
+			plan.Named.AdoptLive = true
+			h.runAll(t, &createPass{cfg: cfg, sp: probePanicProvider{}, store: namedGuardedStore{Store: mem, target: target}}, plan)
 
-		if e := h.entry(t); e.State != ledgerCommitted {
-			t.Fatalf("reopen=%v: entry = %+v, want committed", reopen, e)
-		}
-		if after := namedTreeSnapshot(t, dir); !reflect.DeepEqual(after, before) {
-			t.Fatalf("reopen=%v: city dir changed:\nbefore %v\nafter  %v", reopen, before, after)
-		}
+			e := h.entry(t)
+			if e.State != ledgerCommitted {
+				t.Fatalf("entry = %+v, want committed", e)
+			}
+			if after := namedTreeSnapshot(t, dir); !reflect.DeepEqual(after, before) {
+				t.Fatalf("city dir changed:\nbefore %v\nafter  %v", before, after)
+			}
+			if !tc.reopen {
+				row, err := mem.Get(e.Marker.RowID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := row.Metadata["work_dir"]; got != workDir {
+					t.Fatalf("work_dir = %q, want the worktree dir %q resolved without creating it", got, workDir)
+				}
+			}
+		})
 	}
 }
 
@@ -953,23 +1044,35 @@ func TestCreateEffect_NamedBreakerMergedOnlyWhenEnabled(t *testing.T) {
 			t.Fatalf("circuit keys = %v, want only the reset floor %v", got, want)
 		}
 	})
-	t.Run("a reopen keeps its own cluster", func(t *testing.T) {
-		cfg := breakerCity(true)
-		store := beads.NewMemStore()
-		priors(cfg)(store)
-		own := map[string]string{sessionCircuitStateMetadata: "CIRCUIT_CLOSED", sessionCircuitRestartsMetadata: list(time.Minute), sessionCircuitLastRestartMetadata: at(time.Minute)}
-		closed := seedClosedNamedRow(t, store, cfg, own)
-		h := newNamedHarness(t, t.TempDir(), nil)
-		h.reserve(t, "c1")
-		h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, "c1", "mayor"))
-		row, err := store.Get(closed.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if row.Status != "open" || !reflect.DeepEqual(circuit(row.Metadata), own) {
-			t.Fatalf("reopened row %s circuit = %v, want its own %v", row.Status, circuit(row.Metadata), own)
-		}
-	})
+	// A reopen keeps its own cluster, even beside a prior row that would win
+	// the merge (a higher reset generation, or a later restart): the reopened
+	// row is the identity's latest life on every path P3-6b §2.3 reaches.
+	for name, rival := range map[string]map[string]string{
+		"newest":                     nil,
+		"beside a higher generation": {sessionCircuitResetGenerationMetadata: "5", sessionCircuitStateMetadata: "CIRCUIT_OPEN", sessionCircuitLastRestartMetadata: at(30 * time.Second)},
+		"beside a later restart":     {sessionCircuitStateMetadata: "CIRCUIT_OPEN", sessionCircuitLastRestartMetadata: at(30 * time.Second), sessionCircuitRestartsMetadata: list(30 * time.Second)},
+	} {
+		t.Run("a reopen keeps its own cluster "+name, func(t *testing.T) {
+			cfg := breakerCity(true)
+			store := beads.NewMemStore()
+			priors(cfg)(store)
+			if rival != nil {
+				seedClosedNamedRow(t, store, cfg, failed(rival))
+			}
+			own := map[string]string{sessionCircuitStateMetadata: "CIRCUIT_CLOSED", sessionCircuitRestartsMetadata: list(time.Minute), sessionCircuitLastRestartMetadata: at(time.Minute)}
+			closed := seedClosedNamedRow(t, store, cfg, own)
+			h := newNamedHarness(t, t.TempDir(), nil)
+			h.reserve(t, "c1")
+			h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, "c1", "mayor"))
+			row, err := store.Get(closed.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if row.Status != "open" || !reflect.DeepEqual(circuit(row.Metadata), own) {
+				t.Fatalf("reopened row %s circuit = %v, want its own %v", row.Status, circuit(row.Metadata), own)
+			}
+		})
+	}
 }
 
 // Kills: the S4 pass-rate loop for named creates (P3-6b T15, AM-N8). A
@@ -1179,7 +1282,6 @@ func TestReadOnlyResolveMatchesResolveTemplateMetadata(t *testing.T) {
 		var bp *agentBuildParams
 		if readOnly {
 			bp = newReadOnlyAgentBuildParams("test-city", dir, cfg, nil, namedEffectNow, io.Discard)
-			bp.beadNames[identity] = spec.SessionName
 		} else {
 			bp = newAgentBuildParams("test-city", dir, cfg, nil, namedEffectNow, nil, io.Discard)
 		}
@@ -1321,8 +1423,9 @@ func TestGrants_ReopenedNeverStartedNamedRowIsPrepaid(t *testing.T) {
 	}
 }
 
-// Kills: a retarget of an entry that is not an issued create, and a reopen
-// lag outcome that reads a closed row as written (AM-N2).
+// Kills: a retarget of an entry that is not an issued create, a reopen lag
+// outcome that reads a closed row it never wrote as written, and one that
+// reads a row written and closed again as unwritten (AM-N2).
 func TestLedgerRetargetMarksIssuedCreatesOnly(t *testing.T) {
 	l := newIntentLedger(func() time.Time { return namedEffectNow })
 	create := ledgerEntry{ID: "c1", Kind: kindCreate, Key: rowKey{Leg: "sessions"}, Cost: 1, Marker: ledgerMarker{InstanceToken: "tok"}}
@@ -1330,29 +1433,35 @@ func TestLedgerRetargetMarksIssuedCreatesOnly(t *testing.T) {
 	if !l.Reserve(create) || !l.Reserve(grant) {
 		t.Fatal("reserve refused")
 	}
-	if l.Retarget("c1", "gc-9") {
+	if l.Retarget("c1", "gc-9", 7) {
 		t.Fatal("retargeted a reserved create")
 	}
 	if _, ok := l.IssueCreate("c1"); !ok || !l.Issue("g1", grant.Key) {
 		t.Fatal("issue refused")
 	}
-	if l.Retarget("g1", "gc-9") || l.Retarget("c1", "") || l.Retarget("missing", "gc-9") {
+	if l.Retarget("g1", "gc-9", 7) || l.Retarget("c1", "", 7) || l.Retarget("missing", "gc-9", 7) {
 		t.Fatal("retargeted a grant, an empty row or a missing entry")
 	}
-	if !l.Retarget("c1", "gc-9") {
+	if !l.Retarget("c1", "gc-9", 7) {
 		t.Fatal("issued create not retargeted")
 	}
 	e, _ := ledgerEntryOf(l, "c1")
-	if e.Key != (rowKey{Leg: "sessions", ID: "gc-9"}) || e.Marker != (ledgerMarker{RowID: "gc-9", InstanceToken: "tok"}) || !e.Reopen {
+	if e.Key != (rowKey{Leg: "sessions", ID: "gc-9"}) || e.Marker != (ledgerMarker{RowID: "gc-9", InstanceToken: "tok"}) || !e.Reopen || e.ReopenRevision != 7 {
 		t.Fatalf("retargeted entry = %+v", e)
 	}
 	l.Commit("c1", ledgerMarker{RowID: "gc-9", InstanceToken: "tok"})
-	if l.Retarget("c1", "gc-8") {
+	if l.Retarget("c1", "gc-8", 9) {
 		t.Fatal("retargeted a committed create")
 	}
 	e, _ = ledgerEntryOf(l, "c1")
-	if got := e.lagOutcomeOf(e.Key, ledgerRow{}, true, false); got != lagNoMarker {
-		t.Fatalf("closed reopen target = %d, want lagNoMarker", got)
+	if e.ReopenRevision != 7 {
+		t.Fatalf("commit dropped the revision read: %+v", e)
+	}
+	if got := e.lagOutcomeOf(e.Key, ledgerRow{Revision: 7}, true, false); got != lagNoMarker {
+		t.Fatalf("reopen target closed at the revision read = %d, want lagNoMarker", got)
+	}
+	if got := e.lagOutcomeOf(e.Key, ledgerRow{Revision: 8}, true, false); got != lagClosed {
+		t.Fatalf("reopen target closed at a later revision = %d, want lagClosed", got)
 	}
 	plain := ledgerEntry{Kind: kindCreate, Marker: ledgerMarker{RowID: "gc-9"}}
 	if got := plain.lagOutcomeOf(e.Key, ledgerRow{}, true, false); got != lagClosed {
@@ -1385,6 +1494,49 @@ func TestMergePriorSessionCircuitStateRule(t *testing.T) {
 	}
 	if got := mergePriorSessionCircuitState([]beads.Bead{row(0, map[string]string{"state": "asleep"})}, cfg, namedEffectNow); got != nil {
 		t.Fatalf("no breaker state merged to %v, want nil", got)
+	}
+
+	// ResetAfter below Window: an open row past ResetAfter auto-resets on
+	// its next restore, clearing every restart up to its last one, as the
+	// in-memory breaker clears them; they must not come back through the
+	// union while they are still inside the window. With ResetAfter at or
+	// above Window the same row has not reset, and they all count.
+	list := func(ds ...time.Duration) string {
+		var out []string
+		for _, d := range ds {
+			out = append(out, `"`+at(d)+`"`)
+		}
+		return "[" + strings.Join(out, ",") + "]"
+	}
+	tripped := []beads.Bead{
+		row(3*time.Hour, map[string]string{sessionCircuitStateMetadata: "CIRCUIT_CLOSED", sessionCircuitRestartsMetadata: list(28 * time.Minute), sessionCircuitLastRestartMetadata: at(28 * time.Minute)}),
+		row(2*time.Hour, map[string]string{
+			sessionCircuitStateMetadata: "CIRCUIT_OPEN", sessionCircuitRestartsMetadata: list(25*time.Minute, 22*time.Minute, 20*time.Minute),
+			sessionCircuitLastRestartMetadata: at(20 * time.Minute), sessionCircuitOpenedAtMetadata: at(20 * time.Minute),
+		}),
+		row(time.Hour, map[string]string{sessionCircuitStateMetadata: "CIRCUIT_CLOSED", sessionCircuitRestartsMetadata: list(10 * time.Minute), sessionCircuitLastRestartMetadata: at(10 * time.Minute)}),
+	}
+	for _, tc := range []struct {
+		resetAfter time.Duration
+		want       string
+	}{
+		{10 * time.Minute, list(10 * time.Minute)},
+		{30 * time.Minute, list(28*time.Minute, 25*time.Minute, 22*time.Minute, 20*time.Minute, 10*time.Minute)},
+	} {
+		got := mergePriorSessionCircuitState(tripped, sessionCircuitBreakerConfig{Window: 30 * time.Minute, ResetAfter: tc.resetAfter}, namedEffectNow)
+		if got[sessionCircuitRestartsMetadata] != tc.want || got[sessionCircuitStateMetadata] != "CIRCUIT_CLOSED" {
+			t.Fatalf("ResetAfter %v: merged %v, want the latest row's closed state with restarts %s", tc.resetAfter, got, tc.want)
+		}
+	}
+
+	// last_progress is the winner's, as the rest of its cluster (C9.6(c)):
+	// a later progress on a row that lost the tie-break is not carried. The
+	// in-memory breaker keeps the identity's latest progress; this is a
+	// recorded difference (P3-ALLOCATOR-SPEC, obligations from P3-6b, P4.1).
+	progressed := row(2*time.Hour, map[string]string{sessionCircuitStateMetadata: "CIRCUIT_CLOSED", sessionCircuitLastRestartMetadata: at(20 * time.Minute), sessionCircuitLastProgressMetadata: at(time.Minute)})
+	latest := row(time.Hour, map[string]string{sessionCircuitStateMetadata: "CIRCUIT_CLOSED", sessionCircuitLastRestartMetadata: at(10 * time.Minute)})
+	if got := mergePriorSessionCircuitState([]beads.Bead{progressed, latest}, cfg, namedEffectNow); got[sessionCircuitLastProgressMetadata] != "" {
+		t.Fatalf("last_progress = %q, want the winner's (none)", got[sessionCircuitLastProgressMetadata])
 	}
 }
 
@@ -1558,5 +1710,380 @@ func TestCreateEffect_NamedLockFailureFailsClosed(t *testing.T) {
 		if after := namedComparableRows(t, store); !reflect.DeepEqual(after, before) {
 			t.Fatalf("reopen=%v: rows changed without the lock: %+v", reopen, after)
 		}
+	}
+}
+
+// namedCondStore is a fenced MemStore (conditional writes on) that records
+// every write. err, when set, refuses its create and its conditional update
+// without writing; panics makes either panic before writing.
+type namedCondStore struct {
+	*beads.MemStore
+	mu     sync.Mutex
+	writes []string
+	err    error
+	panics bool
+}
+
+func newNamedCondStore(t *testing.T) *namedCondStore {
+	t.Helper()
+	mem := beads.NewMemStore()
+	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	return &namedCondStore{MemStore: mem}
+}
+
+func (s *namedCondStore) note(op string) error {
+	s.mu.Lock()
+	s.writes = append(s.writes, op)
+	s.mu.Unlock()
+	if s.panics {
+		panic("store driver crashed during " + op)
+	}
+	return s.err
+}
+
+func (s *namedCondStore) Create(b beads.Bead) (beads.Bead, error) {
+	if err := s.note("create"); err != nil {
+		return beads.Bead{}, err
+	}
+	return s.MemStore.Create(b)
+}
+
+func (s *namedCondStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	if err := s.note("update-if-match " + id); err != nil {
+		return err
+	}
+	return s.MemStore.UpdateIfMatch(id, rev, opts)
+}
+
+func (s *namedCondStore) Update(id string, opts beads.UpdateOpts) error {
+	_ = s.note("update " + id)
+	return s.MemStore.Update(id, opts)
+}
+
+func (s *namedCondStore) SetMetadata(id, key, value string) error {
+	_ = s.note("set " + id)
+	return s.MemStore.SetMetadata(id, key, value)
+}
+
+func (s *namedCondStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	_ = s.note("set-batch " + id)
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+func (s *namedCondStore) Tx(msg string, fn func(beads.Tx) error) error {
+	_ = s.note("tx " + msg)
+	return s.MemStore.Tx(msg, fn)
+}
+
+func (s *namedCondStore) recorded() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.writes...)
+}
+
+// Kills: a conditional reopen that drops the open status, or fences on a
+// revision other than the one it read, so it never lands (AM-N4). On a
+// fenced store with no rival, the reopen is one conditional update that
+// opens the row with legacy's reopen batch and the kickoff keys.
+func TestCreateEffect_NamedConditionalReopenWritesOnceAndOpensTheRow(t *testing.T) {
+	cfg := mayorCity()
+	store := newNamedCondStore(t)
+	closed := seedClosedNamedRow(t, store.MemStore, cfg, nil)
+	h := newNamedHarness(t, t.TempDir(), nil)
+	h.reserve(t, "c1")
+	plan := namedPlan(t, cfg, "c1", "mayor")
+	plan.Named.BoundStepID = "gc-step"
+	h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
+
+	if got, want := store.recorded(), []string{"update-if-match " + closed.ID}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("writes = %v, want %v", got, want)
+	}
+	row, err := store.Get(closed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := reopenNamedSessionBatch("stopped", "idle", namedEffectNow)
+	maps.Copy(want, startupKickoffReopenMetadata("gc-step", namedEffectNow))
+	for k, v := range want {
+		if row.Metadata[k] != v {
+			t.Errorf("reopened %s = %q, want %q", k, row.Metadata[k], v)
+		}
+	}
+	if row.Status != "open" || row.Revision == closed.Revision {
+		t.Fatalf("row = %s at revision %d (read at %d), want open and written", row.Status, row.Revision, closed.Revision)
+	}
+	if e := h.entry(t); e.State != ledgerCommitted || !e.Reopen || e.Marker.RowID != closed.ID {
+		t.Fatalf("entry = %+v, want a committed reopen of %s", e, closed.ID)
+	}
+	h.assertNoCreateVeto(t)
+}
+
+// Kills: a refused write settled as ambiguous, which leaks the token until
+// lag repair and skips the create veto, and a panic in the write settled as
+// no write, which refunds a row that may exist (E6-E8, latent 1). A store
+// that cannot fence, a gate refusal, a code-less not-found and a lost fence
+// prove nothing was written, for the create and the reopen alike; a panic
+// or a connection error during the write is ambiguous.
+func TestCreateEffect_NamedRefusedWriteIsNoWriteAndPanicIsAmbiguous(t *testing.T) {
+	cfg := mayorCity()
+	refused := map[string]error{
+		"conditional writes unsupported": beads.ErrConditionalWriteUnsupported,
+		"gate refusal":                   &beads.GateRefusalError{Verb: "update", Code: "close_authority"},
+		"code-less not found":            fmt.Errorf("conditional update: %w", beads.ErrNotFound),
+		"precondition failed":            &beads.PreconditionFailedError{Expected: 1, Current: 2},
+	}
+	for _, reopen := range []bool{false, true} {
+		kind := map[bool]string{false: "create", true: "reopen"}[reopen]
+		run := func(t *testing.T, store *namedCondStore) (*createHarness, createPlan, string) {
+			t.Helper()
+			closedID := ""
+			if reopen {
+				closedID = seedClosedNamedRow(t, store.MemStore, cfg, nil).ID
+			}
+			h := newNamedHarness(t, t.TempDir(), nil)
+			h.reserve(t, "c1")
+			plan := namedPlan(t, cfg, "c1", "mayor")
+			h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
+			if got := store.recorded(); len(got) != 1 {
+				t.Fatalf("writes = %v, want the one attempted write", got)
+			}
+			return h, plan, closedID
+		}
+		for name, err := range refused {
+			t.Run(kind+" "+name, func(t *testing.T) {
+				store := newNamedCondStore(t)
+				store.err = err
+				h, plan, _ := run(t, store)
+				assertFailedNoWrite(t, h)
+				h.assertCreateVeto(t, plan, createStageFence)
+			})
+		}
+		for name, edit := range map[string]func(*namedCondStore){
+			"panic":            func(s *namedCondStore) { s.panics = true },
+			"connection error": func(s *namedCondStore) { s.err = errors.New("connection reset by peer") },
+		} {
+			t.Run(kind+" "+name, func(t *testing.T) {
+				store := newNamedCondStore(t)
+				edit(store)
+				h, _, closedID := run(t, store)
+				e := h.entry(t)
+				if e.State != ledgerCommitted || !e.WroteRow || e.Marker.RowID != closedID {
+					t.Fatalf("entry = %+v, want an ambiguous commit marked with row %q", e, closedID)
+				}
+				h.assertNoCreateVeto(t)
+			})
+		}
+	}
+}
+
+// Kills: a named create that skips the transport capability gate, minting a
+// row its provider cannot start (POOL-042 parity with the pool kind).
+func TestCreateEffect_NamedValidatesTransport(t *testing.T) {
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city", Provider: "opencode"},
+		Session:       config.SessionConfig{Provider: config.SessionTransportACP},
+		Providers:     map[string]config.ProviderSpec{"opencode": {Command: "echo", ACPCommand: "echo", PromptMode: "none", SupportsACP: boolPtr(true)}},
+		Agents:        []config.Agent{{Name: "mayor", Provider: "opencode", Session: config.SessionTransportTmux}},
+		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
+	}
+	store := beads.NewMemStore()
+	h := newNamedHarness(t, t.TempDir(), func(host *createEffectHost) {
+		host.lookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	})
+	h.reserve(t, "c1")
+	plan := namedPlan(t, cfg, "c1", "mayor")
+	h.runAll(t, &createPass{cfg: cfg, sp: &acpOnlyDesiredStateProvider{Fake: runtime.NewFake()}, store: store}, plan)
+	assertFailedNoWrite(t, h)
+	h.assertCreateVeto(t, plan, createStagePrepare)
+	if rows := sessionRows(t, store); len(rows) != 0 {
+		t.Fatalf("rows = %+v, want none for an unsupported transport", rows)
+	}
+}
+
+// Kills: a resolution failure that does not gate the reopen (P3-6b §3.2
+// step 4): legacy skips the spec, so it neither creates nor reopens. An
+// eligible closed row stays closed, and the identity backs off.
+func TestCreateEffect_NamedResolutionFailureGatesTheReopen(t *testing.T) {
+	cfg := namedTestCity(config.Agent{Name: "mayor", Provider: "claude"}, config.NamedSession{Template: "mayor", Mode: "always"},
+		map[string]config.ProviderSpec{"claude": {}})
+	dir := t.TempDir()
+	writeNamedFixtureFile(t, filepath.Join(dir, ".claude", "settings.json"), "{not json")
+	store := beads.NewMemStore()
+	closed := seedClosedNamedRow(t, store, cfg, nil)
+	h := newNamedHarness(t, dir, nil)
+	h.reserve(t, "c1")
+	plan := namedPlan(t, cfg, "c1", "mayor")
+	h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
+
+	assertFailedNoWrite(t, h)
+	h.assertCreateVeto(t, plan, createStageResolve)
+	after, err := store.Get(closed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != "closed" || !reflect.DeepEqual(after.Metadata, closed.Metadata) {
+		t.Fatalf("closed row = %s %v, want untouched", after.Status, after.Metadata)
+	}
+}
+
+// Kills: the shared named overrides drifting from the inline block legacy's
+// desired state ran before the extraction, notably the env a named runtime
+// reads its identity from (GC_SESSION_ORIGIN, GC_AGENT), which no create
+// metadata key records.
+func TestApplyNamedTemplateOverridesMatchesPreRefactor(t *testing.T) {
+	cfg := namedTestCity(config.Agent{Name: "mayor", StartCommand: "true"}, config.NamedSession{Name: "boss", Template: "mayor", Mode: "on_demand"}, nil)
+	spec, ok := findNamedSessionSpec(cfg, "test-city", "boss")
+	if !ok {
+		t.Fatal("no spec for boss")
+	}
+	for name, base := range map[string]TemplateParams{
+		"nil env":      {TemplateName: "mayor", InstanceName: "mayor"},
+		"existing env": {TemplateName: "mayor", Env: map[string]string{"GC_AGENT": "mayor", "GC_SESSION_ORIGIN": "manual", "KEEP": "1"}},
+	} {
+		for _, bound := range []string{"", "gc-9"} {
+			clone := func() TemplateParams {
+				tp := base
+				tp.Env = maps.Clone(base.Env)
+				return tp
+			}
+			got, want := clone(), clone()
+			applyNamedTemplateOverrides(&got, spec, "boss", bound)
+			applyNamedTemplateOverridesPreRefactor(&want, spec, "boss", bound)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("%s, bound %q: overrides = %+v, frozen %+v", name, bound, got, want)
+			}
+			for k, v := range map[string]string{"GC_SESSION_ORIGIN": "named", "GC_AGENT": "boss", "GC_ALIAS": "boss", "GC_TEMPLATE": "mayor"} {
+				if got.Env[k] != v {
+					t.Fatalf("%s, bound %q: env %s = %q, want %q", name, bound, k, got.Env[k], v)
+				}
+			}
+		}
+	}
+}
+
+// Kills: the read-only resolver drifting from legacy's side-effecting
+// resolution in the full create metadata over a city with a skill, a
+// projected Claude override, a templated prompt, an overlay, scripts, an MCP
+// server, a rig and worktree work dirs, in either order (a side effect of
+// one run must not change the other's answer).
+func TestReadOnlyResolveMatchesLegacyCreateMetadataRichCity(t *testing.T) {
+	for _, legacyFirst := range []bool{false, true} {
+		city := t.TempDir()
+		writeNamedFixtureFile(t, filepath.Join(city, "city.toml"), "[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n")
+		writeNamedFixtureFile(t, filepath.Join(city, "pack.toml"), "[pack]\nname = \"rv\"\nversion = \"0.1.0\"\nschema = 2\n")
+		writeNamedFixtureFile(t, filepath.Join(city, "skills", "plan", "SKILL.md"), "---\nname: plan\ndescription: test\n---\nbody\n")
+		writeNamedFixtureFile(t, filepath.Join(city, ".claude", "settings.json"), `{"permissions":{"allow":["Bash"]}}`)
+		writeNamedFixtureFile(t, filepath.Join(city, "prompts", "mayor.template.md"), "hi {{ session \"mayor\" }} on {{ .DefaultBranch }} in {{ .WorkDir }}\n")
+		writeNamedFixtureFile(t, filepath.Join(city, "overlays", "mayor", "CLAUDE.md"), "overlay\n")
+		writeNamedFixtureFile(t, filepath.Join(city, ".gc", "scripts", "x.sh"), "#!/bin/sh\n")
+		writeNamedFixtureFile(t, filepath.Join(city, "mcp", "notes.toml"), "name = \"notes\"\ncommand = \"uvx\"\nargs = [\"notes-mcp\"]\n")
+		rig := filepath.Join(city, "demo")
+		if err := os.MkdirAll(rig, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city", SessionTemplate: "{{.City}}-{{.Agent}}"},
+			Providers: map[string]config.ProviderSpec{"claude": {}, "codex": {}, "gemini": {}},
+			Rigs:      []config.Rig{{Name: "demo", Path: rig}},
+			Agents: []config.Agent{
+				{
+					Name: "mayor", Provider: "claude", PromptTemplate: "prompts/mayor.template.md", WorkDir: ".gc/worktrees/mayor", OverlayDir: "overlays/mayor",
+					SessionLive: []string{"tmux set -t {{.Session}} @x {{.DefaultBranch}} {{.WorkDir}} {{.Rig}} {{.ConfigDir}}"},
+				},
+				{Name: "coder", Provider: "codex", WakeMode: "fresh", SessionLive: []string{"x {{.Session}} {{.DefaultBranch}}"}},
+				{
+					Name: "witness", Dir: "demo", Provider: "gemini", PromptTemplate: "prompts/mayor.template.md", WorkDir: ".gc/worktrees/witness",
+					SessionLive: []string{"y {{.Session}} {{.DefaultBranch}} {{.RigRoot}}"},
+				},
+			},
+			NamedSessions: []config.NamedSession{
+				{Template: "mayor", Mode: "always"},
+				{Template: "coder", Mode: "on_demand"},
+				{Template: "witness", Dir: "demo", Mode: "always"},
+			},
+			PackMCPDir: filepath.Join(city, "mcp"),
+		}
+		for _, id := range []string{"mayor", "coder", "demo/witness"} {
+			spec, ok := findNamedSessionSpec(cfg, "test-city", id)
+			if !ok {
+				t.Fatalf("no spec %q", id)
+			}
+			readOnly := func() (TemplateParams, error) {
+				bp := newReadOnlyAgentBuildParams("test-city", city, cfg, stubLookPath, namedEffectNow, io.Discard)
+				return resolveTemplate(bp, spec.Agent, id, buildFingerprintExtra(spec.Agent))
+			}
+			legacy := func() (TemplateParams, error) {
+				bp := newAgentBuildParams("test-city", city, cfg, nil, namedEffectNow, nil, io.Discard)
+				bp.lookPath = stubLookPath
+				return resolveTemplatePrepared(bp, spec.Agent, id, buildFingerprintExtra(spec.Agent))
+			}
+			var ro, lg TemplateParams
+			var roErr, lgErr error
+			if legacyFirst {
+				lg, lgErr = legacy()
+				ro, roErr = readOnly()
+			} else {
+				ro, roErr = readOnly()
+				lg, lgErr = legacy()
+			}
+			if roErr != nil || lgErr != nil {
+				t.Fatalf("legacyFirst=%v %s: read-only err %v, legacy err %v", legacyFirst, id, roErr, lgErr)
+			}
+			metadata := func(tp TemplateParams) map[string]string {
+				applyNamedTemplateOverrides(&tp, spec, id, "gc-9")
+				m := syncCreateMetadata(tp, spec.SessionName, id, runtime.LiveFingerprint(templateParamsToConfig(tp)), "start-pending", "tok", 0, namedEffectNow)
+				if m["session_key"] != "" {
+					m["session_key"] = "<key>"
+				}
+				return m
+			}
+			if got, want := metadata(ro), metadata(lg); !reflect.DeepEqual(got, want) {
+				t.Fatalf("legacyFirst=%v %s: read-only metadata differs:\nread-only: %v\nlegacy:    %v", legacyFirst, id, got, want)
+			}
+		}
+	}
+}
+
+// namedSettleOnReadStore runs settle when the effect's fenced read lists the
+// identity's rows, as P3-7's watchdog settles an effect stuck past its
+// deadline.
+type namedSettleOnReadStore struct {
+	*namedCondStore
+	settle func()
+}
+
+func (s *namedSettleOnReadStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if _, identity := q.Metadata[namedSessionIdentityMetadata]; identity && s.settle != nil {
+		s.settle()
+		s.settle = nil
+	}
+	return s.namedCondStore.List(q)
+}
+
+// Kills: a reopen that writes after its entry was settled under it (the
+// watchdog's ambiguous commit), which the ledger can no longer attribute to
+// the entry: Retarget refuses an entry that is not issued, and the effect
+// then writes nothing.
+func TestCreateEffect_NamedReopenWritesNothingOnceItsEntryIsSettled(t *testing.T) {
+	cfg := mayorCity()
+	inner := newNamedCondStore(t)
+	closed := seedClosedNamedRow(t, inner.MemStore, cfg, nil)
+	h := newNamedHarness(t, t.TempDir(), nil)
+	token := h.reserve(t, "c1")
+	store := &namedSettleOnReadStore{namedCondStore: inner, settle: func() {
+		h.ledger.Commit("c1", ledgerMarker{InstanceToken: token})
+	}}
+	h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, "c1", "mayor"))
+
+	if got := inner.recorded(); len(got) != 0 {
+		t.Fatalf("writes = %v, want none after the entry settled", got)
+	}
+	if after, err := inner.Get(closed.ID); err != nil || after.Status != "closed" {
+		t.Fatalf("row = %+v, %v; want it still closed", after, err)
+	}
+	if e := h.entry(t); e.Reopen || e.Key.ID != "" {
+		t.Fatalf("entry = %+v, want the watchdog's commit, never retargeted", e)
 	}
 }

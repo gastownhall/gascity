@@ -74,8 +74,8 @@ func (p createPlan) identity() createIdentity {
 func (c createIdentity) agentIn(cfg *config.City) (*config.Agent, error) {
 	if c.Named {
 		spec, ok := findNamedSessionSpec(cfg, "", c.QualifiedInstance)
-		if !ok || namedSessionBackingTemplate(spec) != c.Template {
-			return nil, fmt.Errorf("named session %q backed by %q is not configured", c.QualifiedInstance, c.Template)
+		if !ok {
+			return nil, fmt.Errorf("named session %q is not configured", c.QualifiedInstance)
 		}
 		return spec.Agent, nil
 	}
@@ -384,9 +384,9 @@ func (x *createEffects) view(pass *createPass, token string) poolCreateView {
 // exist: it commits with the token (and the row ID, when known) as its
 // marker, and lag repair decides (C5.4, C5.15); an ambiguous named reopen
 // also wakes its row's session key, since a Tx reopen raises no event on the
-// binding. Any other error wrote
-// nothing: the entry fails, its clear refunds, and its identity gets a
-// create veto (AM-N8), except for failed worktree evidence, which the
+// binding. A write the store refused (createWriteRefused), and any other
+// error, wrote nothing: the entry fails, its clear refunds, and its identity
+// gets a create veto (AM-N8), except for failed worktree evidence, which the
 // verdict cache throttles per work item rather than per slot.
 //
 // The ledger moves first. A panic after it (a wake or log sink) is
@@ -406,7 +406,7 @@ func (x *createEffects) settle(p createPlan, token, stage string, info session.I
 		x.host.ledger.CommitCreate(p.EntryID, p.identity(), ledgerMarker{RowID: info.ID, InstanceToken: token})
 		x.wake(reconcilekey.Session(info.ID))
 		return
-	case errors.As(err, &written):
+	case errors.As(err, &written) && !createWriteRefused(err):
 		x.host.ledger.Commit(p.EntryID, ledgerMarker{RowID: written.rowID, InstanceToken: token})
 		if p.Named != nil && written.rowID != "" {
 			keys = append(keys, reconcilekey.Session(written.rowID))
@@ -422,6 +422,16 @@ func (x *createEffects) settle(p createPlan, token, stage string, info session.I
 	}
 	x.logf("allocator: create %s for %q: %v\n", p.EntryID, subject, err)
 	x.wake(keys...)
+}
+
+// createWriteRefused reports a write error that proves the store wrote
+// nothing: a lost revision fence, a store that cannot fence, a backend gate
+// refusal, or a not-found (bd's classification of a code-less not-found,
+// bdstore_conditional.go). The connection class, where the write may have
+// committed, is none of these.
+func createWriteRefused(err error) bool {
+	return beads.IsPreconditionFailed(err) || beads.IsConditionalWriteUnsupported(err) ||
+		beads.IsGateRefusal(err) || errors.Is(err, beads.ErrNotFound)
 }
 
 // logf reports to stderr. A panicking writer is ignored: it must not kill a

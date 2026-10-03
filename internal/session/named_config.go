@@ -854,8 +854,10 @@ func FindClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessi
 }
 
 // NamedSessionIdentityRows lists every bead, open or closed, that records
-// identity as its configured named session identity, newest first.
-func NamedSessionIdentityRows(store beads.LiveReader, identity string) ([]beads.Bead, error) {
+// identity as its configured named session identity, newest first. It reads
+// store as given: a cached store answers from its cache, so a caller that
+// must see another process's writes passes a live view.
+func NamedSessionIdentityRows(store beads.Store, identity string) ([]beads.Bead, error) {
 	identity = NormalizeNamedSessionTarget(identity)
 	rows, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{
