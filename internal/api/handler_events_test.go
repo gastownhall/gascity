@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -105,6 +106,187 @@ func TestEventListRejectsInvalidSince(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "invalid since duration") {
 		t.Fatalf("body = %q, want invalid since duration", rec.Body.String())
+	}
+}
+
+func TestEventListRejectsInvalidAfterSeq(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/events?after_seq=notanumber"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "after_seq must be a non-negative integer") {
+		t.Fatalf("body = %q, want after_seq validation message", rec.Body.String())
+	}
+}
+
+func TestEventListRejectsNegativeAfterSeq(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/events?after_seq=-1"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "after_seq must be a non-negative integer") {
+		t.Fatalf("body = %q, want after_seq validation message", rec.Body.String())
+	}
+}
+
+// TestEventListStillRejectsInvalidIndex guards the BlockingParam re-delegation
+// inside EventListInput.Resolve. Declaring Resolve on EventListInput takes over
+// resolution for the whole struct, so BlockingParam's promoted Resolve is no
+// longer discovered and invoked on its own -- the explicit
+// e.BlockingParam.Resolve(ctx) call is now the only thing keeping index/wait
+// validation alive on this endpoint. If that call is ever dropped, ?index=
+// garbage silently degrades to "absent" instead of 422; this test fails
+// instead of letting it pass unnoticed.
+func TestEventListStillRejectsInvalidIndex(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/events?index=notanumber"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "index must be a non-negative integer") {
+		t.Fatalf("body = %q, want index validation message", rec.Body.String())
+	}
+}
+
+// TestEventListAfterSeqSkipsArchive proves the after_seq skip-fast path
+// (archiveOverlapsFilter in internal/events/rotation_archive.go) is actually
+// reached from the HTTP layer, not just internally. It corrupts an archive's
+// on-disk bytes so opening it always errors, then shows a request whose
+// after_seq excludes that archive still succeeds (never opened) while a
+// request that doesn't exclude it fails (the gunzip error surfaces as a
+// 500). Divergent status codes are a deterministic proxy for "was this
+// archive opened" -- a corrupted archive can only yield 200 if it was
+// genuinely skipped, which is a stronger proof than counting calls.
+func TestEventListAfterSeqSkipsArchive(t *testing.T) {
+	state := newFakeState(t)
+	var stderr strings.Builder
+	rec, err := events.NewFileRecorder(filepath.Join(t.TempDir(), "events.jsonl"), &stderr)
+	if err != nil {
+		t.Fatalf("NewFileRecorder: %v", err)
+	}
+	t.Cleanup(func() { _ = rec.Close() })
+
+	// Archive: seq 1-3.
+	rec.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "a1"})
+	rec.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "a2"})
+	rec.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "a3"})
+	result, err := rec.ForceRotate()
+	if err != nil {
+		t.Fatalf("ForceRotate: %v", err)
+	}
+	if !result.Rotated || result.ArchivePath == "" {
+		t.Fatalf("ForceRotate result = %+v, want rotated with archive path", result)
+	}
+	rec.WaitForRotations()
+	if result.LastSeq != 3 {
+		t.Fatalf("archive LastSeq = %d, want 3", result.LastSeq)
+	}
+
+	// Active file now holds the rotation anchor (seq 4) plus two more events
+	// (seq 5, 6) -- 3 events total, well under limit+1 below, so
+	// fetchEventPageAscending's ListTail fast path can never be trusted and
+	// every request below falls through to the archive-aware full scan.
+	rec.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "b1"})
+	rec.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "b2"})
+
+	// Corrupt the archive on disk: any attempt to gzip.NewReader it errors.
+	if err := os.WriteFile(result.ArchivePath, []byte("not a gzip file"), 0o644); err != nil {
+		t.Fatalf("corrupting archive: %v", err)
+	}
+
+	state.eventProv = rec
+	h := newTestCityHandler(t, state)
+
+	// after_seq=3 excludes the archive (LastSeq=3 <= 3): must skip it and
+	// succeed even though its bytes are garbage.
+	skipReq := httptest.NewRequest("GET", cityURL(state, "/events?after_seq=3&limit=100"), nil)
+	skipRec := httptest.NewRecorder()
+	h.ServeHTTP(skipRec, skipReq)
+	if skipRec.Code != http.StatusOK {
+		t.Fatalf("after_seq=3 status = %d, want %d (archive should have been skipped); body: %s",
+			skipRec.Code, http.StatusOK, skipRec.Body.String())
+	}
+
+	// after_seq makes the read a filtered one, so total is the count of
+	// events matching the filter -- not a count of all retained history.
+	// Pin that contract here so no client later reads total as a history
+	// size and silently mis-paginates once archives are skipped.
+	skipItems, skipTotal, _ := decodeEventList(t, skipRec)
+	if skipTotal != len(skipItems) {
+		t.Fatalf("after_seq=3 total = %d, want %d (filtered reads report the filtered count)",
+			skipTotal, len(skipItems))
+	}
+
+	// No after_seq: the archive is in range and must be opened, so the
+	// corruption surfaces as a 500 -- proving the skip above was a real
+	// skip, not an artifact of some other short-circuit.
+	controlReq := httptest.NewRequest("GET", cityURL(state, "/events?limit=100"), nil)
+	controlRec := httptest.NewRecorder()
+	h.ServeHTTP(controlRec, controlReq)
+	if controlRec.Code != http.StatusInternalServerError {
+		t.Fatalf("no after_seq status = %d, want %d (archive should have been opened and failed to gunzip); body: %s",
+			controlRec.Code, http.StatusInternalServerError, controlRec.Body.String())
+	}
+}
+
+// TestEventListOmittedAfterSeqIncludesArchive is the positive-data-flow
+// companion to TestEventListAfterSeqSkipsArchive: confirms that omitting
+// after_seq is unchanged -- archived events still flow into the response
+// with a correct total, not just "doesn't error".
+func TestEventListOmittedAfterSeqIncludesArchive(t *testing.T) {
+	state := newFakeState(t)
+	var stderr strings.Builder
+	rec, err := events.NewFileRecorder(filepath.Join(t.TempDir(), "events.jsonl"), &stderr)
+	if err != nil {
+		t.Fatalf("NewFileRecorder: %v", err)
+	}
+	t.Cleanup(func() { _ = rec.Close() })
+
+	rec.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "archived-1"})
+	rec.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "archived-2"})
+	if _, err := rec.ForceRotate(); err != nil {
+		t.Fatalf("ForceRotate: %v", err)
+	}
+	rec.WaitForRotations()
+	rec.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "active-1"})
+
+	state.eventProv = rec
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/events?limit=100"), nil)
+	respRec := httptest.NewRecorder()
+	h.ServeHTTP(respRec, req)
+	if respRec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", respRec.Code, http.StatusOK, respRec.Body.String())
+	}
+
+	items, total, _ := decodeEventList(t, respRec)
+	// 2 archived + 1 rotation anchor + 1 active = 4 events total.
+	if total != 4 {
+		t.Fatalf("total = %d, want 4", total)
+	}
+	if len(items) != 4 {
+		t.Fatalf("items len = %d, want 4", len(items))
+	}
+	if items[len(items)-1].Subject != "archived-1" {
+		t.Fatalf("oldest item subject = %q, want archived-1 (archive data must reach the response)", items[len(items)-1].Subject)
 	}
 }
 
