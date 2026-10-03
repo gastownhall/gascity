@@ -2897,6 +2897,64 @@ path = "scripts/verify.sh"
 	}
 }
 
+func TestParseTOML_CheckUnsupportedOuterKeyRejected(t *testing.T) {
+	tomlData := `
+formula = "mol-check-unsupported-outer"
+version = 2
+
+[[steps]]
+id = "verify"
+title = "Verify output"
+
+[steps.check]
+max_attempts = 1
+command = "/bin/true"
+
+[steps.check.check]
+mode = "exec"
+path = "/bin/true"
+timeout = "1m"
+`
+
+	p := NewParser()
+	_, err := p.ParseTOML([]byte(tomlData))
+	if err == nil {
+		t.Fatal("ParseTOML succeeded, want unsupported outer check key rejection")
+	}
+	if !strings.Contains(err.Error(), `step.check: unsupported key "command" (expected max_attempts or check)`) {
+		t.Fatalf("ParseTOML error = %v, want unsupported outer check key rejection", err)
+	}
+}
+
+func TestParseTOML_CheckUnsupportedNestedKeyRejected(t *testing.T) {
+	tomlData := `
+formula = "mol-check-unsupported-nested"
+version = 2
+
+[[steps]]
+id = "verify"
+title = "Verify output"
+
+[steps.check]
+max_attempts = 1
+
+[steps.check.check]
+mode = "exec"
+path = "/bin/true"
+args = ["--must-not-be-silently-dropped"]
+timeout = "1m"
+`
+
+	p := NewParser()
+	_, err := p.ParseTOML([]byte(tomlData))
+	if err == nil {
+		t.Fatal("ParseTOML succeeded, want unsupported nested check key rejection")
+	}
+	if !strings.Contains(err.Error(), `step.check.check: unsupported key "args" (expected mode, path, or timeout)`) {
+		t.Fatalf("ParseTOML error = %v, want unsupported nested check key rejection", err)
+	}
+}
+
 func TestValidateRalphUsesCheckTerminology(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-check",
