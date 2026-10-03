@@ -1472,6 +1472,7 @@ go_test(
         "sling_on_cold_pool_demand_test.go",
         "sling_order_handoff_test.go",
         "sling_remote_test.go",
+        "sling_reserved_class_test.go",
         "sling_seam_test.go",
         "sling_source_workflow_binding_test.go",
         "soft_reload_test.go",
