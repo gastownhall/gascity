@@ -21,6 +21,8 @@ import (
 // including the session currently bound to that slot. If a future change makes
 // the guards enumerate slot aliases, a rebind would let a fresh session shield
 // (or inherit) a dead session's claim — the ambiguity this design rejects.
+// Stable aliases (namepool members, canonical singletons) are the opposite case
+// and ARE assignment identities; see pool_alias_assignment_test.go.
 
 // legacyAliasedPoolSessionBead is a pre-fix pool session bead: it still carries
 // the slot in metadata["alias"], the shape in-flight beads have at deploy time.
@@ -128,7 +130,7 @@ func TestAssignmentGuardsIgnoreTransientPoolSlotAliases(t *testing.T) {
 		t.Fatal("the drain-ack close gate honored a transient pool slot alias")
 	}
 
-	if sessionBeadHasAssignedWorkInfo([]beads.Bead{{ID: "wb", Status: "in_progress", Assignee: "gascity/gc.run-operator-1"}}, info) {
+	if sessionBeadHasAssignedWorkInfo([]beads.Bead{{ID: "wb", Status: "in_progress", Assignee: "gascity/gc.run-operator-1"}}, info, aliasGuardConfig()) {
 		t.Fatal("the pool reuse predicate honored a transient pool slot alias")
 	}
 }

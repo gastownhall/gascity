@@ -1140,7 +1140,7 @@ func migratedThenCollectedCity(t *testing.T) (cityPath string, cfg *config.City,
 	}
 	// Past the TTL for every seeded row, so this sweep is the first post-cutover
 	// GC a real city would run rather than a no-op.
-	purged, err := gc.runGC(beads.GraphStore{Store: binding}, beads.MailStore{Store: binding}, time.Now().Add(72*time.Hour))
+	purged, err := gc.runGC(beads.GraphStore{Store: binding}, beads.SessionStore{}, beads.MailStore{Store: binding}, time.Now().Add(72*time.Hour))
 	if err != nil {
 		t.Fatalf("wisp gc: %v", err)
 	}

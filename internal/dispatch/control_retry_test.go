@@ -253,6 +253,88 @@ func TestRecordSemanticControlRetryStampsTheDeadlineOnce(t *testing.T) {
 	}
 }
 
+// TestRecordPendingControlRetryKeepsItsOwnBudget pins the reason the pending
+// disposition does not reuse the gc.controller_* keys. Sharing one anchor would
+// hand a later Tier-B refusal a deadline that a long pending wait had already
+// burned through, quarantining on its FIRST refusal — settling the root and
+// stranding the domain parent, which is the exact outcome the pending
+// classification exists to prevent.
+func TestRecordPendingControlRetryKeepsItsOwnBudget(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	bead := newSemanticControlBead(t, store)
+	budget := 15 * time.Minute
+	start := time.Date(2026, 8, 11, 8, 0, 0, 0, time.UTC)
+	pendingCause := errors.New(`rig "ghostrig" not found in city config`)
+
+	first, err := RecordPendingControlRetry(store, bead.ID, pendingCause, start, budget)
+	if err != nil {
+		t.Fatalf("first RecordPendingControlRetry: %v", err)
+	}
+	if first.Expired || first.Repeat || first.Attempts != 1 || !first.FirstSeen.Equal(start) {
+		t.Fatalf("first pending state = %#v, want Attempts=1 anchored at %s with no expiry or repeat", first, start)
+	}
+
+	repeat, err := RecordPendingControlRetry(store, bead.ID, pendingCause, start.Add(time.Minute), budget)
+	if err != nil {
+		t.Fatalf("repeat RecordPendingControlRetry: %v", err)
+	}
+	if !repeat.Repeat {
+		t.Fatal("verbatim pending repeat reported Repeat=false; it would keep resetting the serve loop's idle backoff")
+	}
+	if !repeat.FirstSeen.Equal(start) {
+		t.Fatalf("repeat.FirstSeen = %s, want the original anchor %s", repeat.FirstSeen, start)
+	}
+
+	expired, err := RecordPendingControlRetry(store, bead.ID, pendingCause, start.Add(budget+time.Second), budget)
+	if err != nil {
+		t.Fatalf("post-budget RecordPendingControlRetry: %v", err)
+	}
+	if !expired.Expired {
+		t.Fatalf("pending refusal at +%s inside a %s budget reported Expired=false", budget+time.Second, budget)
+	}
+
+	// Three pending sweeps spanning more than the whole budget wrote nothing
+	// the semantic tier reads.
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("get control bead: %v", err)
+	}
+	for _, key := range []string{
+		beadmeta.ControllerRetryFirstSeenMetadataKey,
+		beadmeta.ControllerRetryCountMetadataKey,
+		beadmeta.ControllerErrorMetadataKey,
+		beadmeta.ControllerErrorClassMetadataKey,
+		beadmeta.ControllerRetryableMetadataKey,
+	} {
+		if got := after.Metadata[key]; got != "" {
+			t.Fatalf("%s = %q after pending sweeps only, want empty — pending must not touch the Tier-B budget", key, got)
+		}
+	}
+	if got := after.Metadata[beadmeta.ControlPendingFirstSeenMetadataKey]; got != start.Format(time.RFC3339) {
+		t.Fatalf("%s = %q, want %q", beadmeta.ControlPendingFirstSeenMetadataKey, got, start.Format(time.RFC3339))
+	}
+	if got := after.Metadata[beadmeta.ControlPendingCountMetadataKey]; got != strconv.Itoa(expired.Attempts) {
+		t.Fatalf("%s = %q, want %q", beadmeta.ControlPendingCountMetadataKey, got, strconv.Itoa(expired.Attempts))
+	}
+	if got := after.Metadata[beadmeta.ControlPendingReasonMetadataKey]; got != pendingCause.Error() {
+		t.Fatalf("%s = %q, want the pending reason", beadmeta.ControlPendingReasonMetadataKey, got)
+	}
+
+	// The semantic budget the bead has never used is still whole.
+	semantic, err := RecordSemanticControlRetry(store, bead.ID, closeBlockedErr("pl-pujtf", "pl-mmneh"), start.Add(budget+time.Second), budget)
+	if err != nil {
+		t.Fatalf("RecordSemanticControlRetry after a long pending wait: %v", err)
+	}
+	if semantic.Expired {
+		t.Fatal("first semantic refusal reported Expired after a long pending wait; the pending anchor leaked into the Tier-B budget")
+	}
+	if !semantic.FirstSeen.Equal(start.Add(budget + time.Second)) {
+		t.Fatalf("semantic.FirstSeen = %s, want its own fresh anchor", semantic.FirstSeen)
+	}
+}
+
 // TestRecordSemanticControlRetryDoesNotReanchorOnChangedRefusal closes the back
 // door into unbounded retry: the blocker list inside the refusal text shifts as
 // unrelated siblings close, so re-anchoring on a changed message would let a
@@ -437,6 +519,13 @@ func TestClearControllerSpawnErrorMetadataClearsTheBudgetAnchor(t *testing.T) {
 		beadmeta.ControllerRetryableMetadataKey:      "true",
 		beadmeta.ControllerRetryFirstSeenMetadataKey: "2026-08-11T08:00:47Z",
 		beadmeta.ControllerRetryCountMetadataKey:     "6712",
+		// The pending budget rides along. gc.control_pending_stalled is a
+		// one-shot latch, so a bead carrying it into a later life would stay
+		// silent through a second never-healing pending wait.
+		beadmeta.ControlPendingReasonMetadataKey:    `rig "ghostrig" not found in city config`,
+		beadmeta.ControlPendingCountMetadataKey:     "412",
+		beadmeta.ControlPendingFirstSeenMetadataKey: "2026-08-11T08:00:47Z",
+		beadmeta.ControlPendingStalledMetadataKey:   "true",
 	}
 	clearControllerSpawnErrorMetadata(metadata)
 
@@ -446,6 +535,10 @@ func TestClearControllerSpawnErrorMetadataClearsTheBudgetAnchor(t *testing.T) {
 		beadmeta.ControllerRetryableMetadataKey,
 		beadmeta.ControllerRetryFirstSeenMetadataKey,
 		beadmeta.ControllerRetryCountMetadataKey,
+		beadmeta.ControlPendingReasonMetadataKey,
+		beadmeta.ControlPendingCountMetadataKey,
+		beadmeta.ControlPendingFirstSeenMetadataKey,
+		beadmeta.ControlPendingStalledMetadataKey,
 	} {
 		if got := metadata[key]; got != "" {
 			t.Fatalf("%s = %q after clearing, want empty", key, got)

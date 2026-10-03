@@ -643,7 +643,7 @@ func bdCmd(env *helpers.Env, dir string, args ...string) (string, error) {
 	}
 	cmd := exec.Command(bdPath, args...)
 	cmd.Dir = dir
-	cmd.Env = env.List()
+	cmd.Env = env.ToolList()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

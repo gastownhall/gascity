@@ -388,10 +388,6 @@ func createPoolSessionBeadWithIdentifiers(
 	if err != nil {
 		return sessionpkg.Info{}, err
 	}
-	// S19 Stage 3 shadow: record the legacy canonical-identity stamp on the
-	// pool-create path now that the bead ID exists (no-op unless the shadow
-	// harness is enabled).
-	recordLegacyCompareWrites(info.ID, "poolSessionCreate", meta)
 	if identifiers.beadScoped {
 		if want := PoolSessionName(template, info.ID); info.SessionNameMetadata != want {
 			if err := sessionFrontDoor(store).SetMarker(info.ID, "session_name", want); err != nil {

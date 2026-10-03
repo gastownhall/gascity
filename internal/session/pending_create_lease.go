@@ -51,7 +51,7 @@ const (
 	// current session.
 	LeaseCommit LeaseCommitVerdict = iota
 	// LeaseDiscardStopRuntime means the result is stale — discard it and (subject
-	// to the separate runningSessionMatchesPendingCreate runtime probe) stop
+	// to the separate attributePendingCreateRuntime runtime probe) stop
 	// the spawned runtime.
 	LeaseDiscardStopRuntime
 )

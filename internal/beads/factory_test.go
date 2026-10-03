@@ -760,6 +760,70 @@ func TestOpenStoreAtForCityStampsConditionalWritesMode(t *testing.T) {
 	})
 }
 
+// TestStampOpenedStoreRequireRefusesCarrierless pins StampOpenedStore to the
+// factory's cell contract for stores the factory did not open (a relocated
+// class binding's engine): a carrier lands the mode, and a carrier-less store
+// is refused under require and degraded loudly under auto, never silently
+// believed stamped.
+func TestStampOpenedStoreRequireRefusesCarrierless(t *testing.T) {
+	t.Run("carrier lands the mode", func(t *testing.T) {
+		store := NewMemStore()
+		if err := StampOpenedStore(store, "MemStore", gate.Require, nil, nil); err != nil {
+			t.Fatalf("StampOpenedStore: %v", err)
+		}
+		if mode, defaulted := store.conditionalWritesMode(); mode != gate.Require || defaulted {
+			t.Fatalf("stamp = (%q, %v), want (require, false)", mode, defaulted)
+		}
+	})
+
+	t.Run("unset maps to off and marks the default", func(t *testing.T) {
+		store := NewMemStore()
+		if err := StampOpenedStore(store, "MemStore", gate.ModeUnset, nil, nil); err != nil {
+			t.Fatalf("StampOpenedStore: %v", err)
+		}
+		if mode, defaulted := store.conditionalWritesMode(); mode != gate.Off || !defaulted {
+			t.Fatalf("stamp = (%q, %v), want (off, true)", mode, defaulted)
+		}
+	})
+
+	t.Run("require refuses a carrier-less store", func(t *testing.T) {
+		bare := &struct{ Store }{Store: NewMemStore()}
+		err := StampOpenedStore(bare, "EngineStore", gate.Require, nil, nil)
+		if !IsConditionalWritesRequired(err) {
+			t.Fatalf("err = %v, want the typed require refusal", err)
+		}
+		if got, want := err.Error(), "opening EngineStore: "; !strings.HasPrefix(got, want) {
+			t.Fatalf("err = %q, want it to name the store as %q with no empty scope", got, want)
+		}
+	})
+
+	t.Run("a stamped store refuses a second stamp", func(t *testing.T) {
+		store := NewMemStore()
+		if err := StampOpenedStore(store, "MemStore", gate.Require, nil, nil); err != nil {
+			t.Fatalf("StampOpenedStore: %v", err)
+		}
+		for _, mode := range []gate.Mode{gate.ModeUnset, gate.Off, gate.Auto, gate.Require} {
+			if err := StampOpenedStore(store, "MemStore", mode, nil, nil); err == nil {
+				t.Fatalf("re-stamping require with %q succeeded", mode)
+			}
+		}
+		if mode, defaulted := store.conditionalWritesMode(); mode != gate.Require || defaulted {
+			t.Fatalf("stamp after refused re-stamps = (%q, %v), want (require, false)", mode, defaulted)
+		}
+	})
+
+	t.Run("auto degrades a carrier-less store loudly", func(t *testing.T) {
+		bare := &struct{ Store }{Store: NewMemStore()}
+		var degraded []ConditionalWritesDegrade
+		if err := StampOpenedStore(bare, "EngineStore", gate.Auto, func(d ConditionalWritesDegrade) { degraded = append(degraded, d) }, nil); err != nil {
+			t.Fatalf("StampOpenedStore: %v", err)
+		}
+		if len(degraded) != 1 || degraded[0].StoreKind != "EngineStore" || degraded[0].Mode != "auto" {
+			t.Fatalf("degrade notifications = %+v, want exactly one auto degrade naming the store", degraded)
+		}
+	})
+}
+
 // TestOpenStoreAtForCityNilPreflightCheckerFallsBackToBd pins the control-
 // plane routing contract: a caller that supplies no PreflightChecker can
 // never be given the native store — the factory treats the missing checker

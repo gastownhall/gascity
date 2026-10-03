@@ -161,6 +161,7 @@ go_library(
 # Repo-root metadata consumed as runfiles by repo-lint tests (//scripts,
 # //scripts/cipolicy, //scripts/prwatchdog, //test/qualification, ...).
 exports_files([
+    ".bazelrc",
     "Makefile",
     "TESTING.md",
     "go.mod",
@@ -312,6 +313,7 @@ filegroup(
         "//internal/productmetrics:bazel_repo_srcs",
         "//internal/promptmeta:bazel_repo_srcs",
         "//internal/promptsafe:bazel_repo_srcs",
+        "//internal/reconcilekey:bazel_repo_srcs",
         "//internal/reliability:bazel_repo_srcs",
         "//internal/remotesource:bazel_repo_srcs",
         "//internal/resilience:bazel_repo_srcs",
@@ -382,6 +384,7 @@ filegroup(
         "//internal/worker/fakecmd:bazel_repo_srcs",
         "//internal/worker/transcript:bazel_repo_srcs",
         "//internal/worker/workertest:bazel_repo_srcs",
+        "//internal/workqueue:bazel_repo_srcs",
         "//internal/workrecord:bazel_repo_srcs",
         "//internal/workspacesvc:bazel_repo_srcs",
         "//internal/worktree:bazel_repo_srcs",
@@ -408,6 +411,7 @@ filegroup(
         "//test/packlint:bazel_repo_srcs",
         "//test/qualification:bazel_repo_srcs",
         "//test/tmuxtest:bazel_repo_srcs",
+        "//test/toolhome:bazel_repo_srcs",
         "//test/workflows:bazel_repo_srcs",
         ":go.mod",
         ":Makefile",

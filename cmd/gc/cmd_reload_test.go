@@ -568,7 +568,7 @@ func TestSendReloadControlRequestNoChange(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		runController(dir, nil, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -770,7 +770,7 @@ func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		runController(dir, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		runController(dir, nil, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -963,6 +963,8 @@ func TestReloadConfigTracedRebuildsProviderWhenPackRuntimeCommandChanges(t *test
 		stderr:     &stderr,
 		logPrefix:  "gc test",
 	}
+	// The reload restarts the config watcher; stop it with the test.
+	t.Cleanup(cr.stopConfigWatcher)
 	lastProviderName := cfg.Session.Provider
 
 	// Same selection name, different declared command. The exec proxy

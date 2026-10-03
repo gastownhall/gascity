@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
@@ -884,7 +885,7 @@ func TestBuildAttachmentCache_UsesSessionInfoForActiveSessions(t *testing.T) {
 	sleepingRunningCalls := 0
 	for _, call := range sp.Calls {
 		switch call.Method {
-		case "IsAttached":
+		case "IsAttached", "IsAttachedWithError":
 			switch call.Name {
 			case "active":
 				activeCalls++
@@ -2450,14 +2451,15 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 			t.Fatalf("timed out waiting for controller pokes, got %v", gotCommands)
 		}
 	}
-	wantCommands := []string{"ping\n", "poke\n", "poke\n"}
+	b := onlySessionBead(t, cityDir)
+	// The probe poke is key-less; the post-create enqueue carries the new
+	// session's key.
+	wantCommands := []string{"ping\n", "poke\n", keyedPokeCommand(reconcilekey.Session(b.ID)) + "\n"}
 	for i, want := range wantCommands {
 		if gotCommands[i] != want {
 			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)
 		}
 	}
-
-	b := onlySessionBead(t, cityDir)
 	if got := b.Metadata["alias"]; got != "mayor" {
 		t.Fatalf("alias = %q, want mayor", got)
 	}
