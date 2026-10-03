@@ -83,10 +83,10 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 // including one this function doesn't recognize — must produce guidance
 // rather than leave the reader with nothing. Commands are written bare
 // (no "git -C"), since the reader is standing in the worktree the marker
-// lives in. Unlike the shell writer's markers, none of these three
-// conditions require the reader to `rm .worktree-stale` by hand: the
-// session reconciler retries the prune automatically on its next pass
-// once the blocking condition clears.
+// lives in. The prune that writes these markers is attempted once, when the
+// session bead closes, and nothing re-enters it afterwards, so the guidance
+// must not promise an automatic retry: it states what was found, how to
+// resolve it, and that the marker is advisory (blocking=no).
 func worktreeStaleGuidance(reason, dirtyPaths string) string {
 	switch reason {
 	case worktreeStaleReasonUncommittedWork:
@@ -103,7 +103,8 @@ func worktreeStaleGuidance(reason, dirtyPaths string) string {
 		}
 		return fmt.Sprintf(`WHAT HAPPENED
   This worktree still has uncommitted changes, so the session reconciler
-  left it in place instead of removing it. Nothing was discarded.
+  left it in place instead of removing it. Nothing was discarded. This
+  marker is advisory (blocking=no): it does not stop you working here.
 %s
 WHAT TO DO
   1. Inspect what's dirty:
@@ -112,8 +113,6 @@ WHAT TO DO
        git add -A && git commit -m "..."
      or
        git restore .
-  3. No further action needed after that: the next reconciler pass
-     retries automatically and removes this worktree once it's clean.
 
 NEVER
   Do not delete this worktree by hand with rm -rf. That destroys
@@ -124,15 +123,14 @@ NEVER
 		return `WHAT HAPPENED
   This worktree has commits that haven't been pushed to origin, so the
   session reconciler left it in place instead of removing it. Nothing
-  was discarded.
+  was discarded. This marker is advisory (blocking=no): it does not stop
+  you working here.
 
 WHAT TO DO
   1. See what hasn't been pushed:
        git log HEAD --oneline --not --remotes
   2. Push the branch so the commits are safe on the remote:
        git push -u origin HEAD
-  3. No further action needed after that: the next reconciler pass
-     retries automatically and removes this worktree once it's pushed.
 
 NEVER
   Do not delete this worktree by hand with rm -rf. That destroys commits
@@ -142,7 +140,8 @@ NEVER
 	case worktreeStaleReasonStashedWork:
 		return `WHAT HAPPENED
   This worktree has stashed changes, so the session reconciler left it
-  in place instead of removing it. Nothing was discarded.
+  in place instead of removing it. Nothing was discarded. This marker is
+  advisory (blocking=no): it does not stop you working here.
 
 WHAT TO DO
   1. See what's stashed:
@@ -151,9 +150,6 @@ WHAT TO DO
        git stash pop
      or drop it if you don't:
        git stash drop
-  3. No further action needed after that: the next reconciler pass
-     retries automatically and removes this worktree once the stash is
-     gone.
 
 NEVER
   Do not delete this worktree by hand with rm -rf. That destroys stashed
@@ -164,15 +160,14 @@ NEVER
 		return fmt.Sprintf(`WHAT HAPPENED
   The session reconciler left this worktree marked as needing attention,
   with reason=%s. Nothing was discarded -- these markers never remove
-  work on their own.
+  work on their own. This marker is advisory (blocking=no): it does not
+  stop you working here.
 
 WHAT TO DO
   1. Inspect the state before changing anything:
        git status
        git log --oneline -5
-  2. Once you understand what's blocking cleanup, resolve it. The next
-     reconciler pass retries automatically and removes this worktree
-     once nothing is blocking it.
+  2. Once you understand what's blocking cleanup, resolve it.
 
 NEVER
   Do not delete this worktree by hand with rm -rf, and do not run
