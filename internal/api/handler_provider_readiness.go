@@ -807,8 +807,15 @@ func probeCommandEnv(homeDir string) []string {
 	return env
 }
 
+// claudeProbeCommandEnv forwards the variables that decide how Claude Code
+// authenticates. ANTHROPIC_BASE_URL with ANTHROPIC_AUTH_TOKEN is a gateway
+// login: the city's sessions inherit both from the supervisor's environment,
+// so the probe must see them too, or it reports "not logged in" for a city
+// whose agents can reach Claude. Claude reports that route as
+// oauth_token/firstParty, which the probe already accepts; API-key setups stay
+// unsupported because ANTHROPIC_API_KEY is not forwarded.
 func claudeProbeCommandEnv() []string {
-	return probeEnvVars("CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN")
+	return probeEnvVars("CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN")
 }
 
 func gitHubCLIProbeCommandEnv() []string {
