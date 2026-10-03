@@ -5500,6 +5500,19 @@
       "OrderSuppressedPayload": {
         "additionalProperties": false,
         "properties": {
+          "blocker_age_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "blocker_id": {
+            "type": "string"
+          },
+          "blocker_kind": {
+            "type": "string"
+          },
+          "blocker_title": {
+            "type": "string"
+          },
           "consecutive": {
             "format": "int64",
             "type": "integer"
