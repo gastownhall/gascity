@@ -43,7 +43,7 @@ func TestWatchConfigTargets_CloseReturnsFDsToBaseline(t *testing.T) {
 	var stderr bytes.Buffer
 
 	baseline := countProcessFDs(t)
-	cleanup := watchConfigTargets(targets, &dirty, pokeCh, &stderr)
+	cleanup := watchConfigTargets(targets, 0, &dirty, pokeCh, &stderr)
 	afterAdd := countProcessFDs(t)
 	held := afterAdd - baseline
 	if held < nDirs/2 {
@@ -62,7 +62,7 @@ func TestWatchConfigTargets_CloseReturnsFDsToBaseline(t *testing.T) {
 	// Supervisor reload path: Close then NewWatcher. Generation 2 must not
 	// inherit leaked FDs from generation 1.
 	restartBaseline := countProcessFDs(t)
-	cleanup2 := watchConfigTargets(targets, &dirty, pokeCh, &stderr)
+	cleanup2 := watchConfigTargets(targets, 0, &dirty, pokeCh, &stderr)
 	afterAdd2 := countProcessFDs(t)
 	held2 := afterAdd2 - restartBaseline
 	if held2 < nDirs/2 {

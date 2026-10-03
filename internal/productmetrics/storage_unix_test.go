@@ -24,6 +24,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestValidateAncestorDirectoryAcceptsNamespaceOverflowOnlyAtRoot(t *testing.T) {
+	metadata := storageMetadata{
+		uid:   namespaceOverflowUID,
+		mode:  unix.S_IFDIR | 0o755,
+		nlink: 1,
+	}
+	if err := validateAncestorDirectory(metadata, "/", 1000); err != nil {
+		t.Fatalf("overflow-owned filesystem root rejected: %v", err)
+	}
+	if err := validateAncestorDirectory(metadata, "/tmp", 1000); err == nil {
+		t.Fatal("overflow-owned descendant accepted")
+	}
+}
+
 func inspectStorageTestHome(t *testing.T, createRoot bool) gchome.ProductUsageHome {
 	t.Helper()
 	// The shared workspace lives below a deliberately group-writable /data.
@@ -3830,6 +3844,10 @@ func TestStorageAdvisoryLockRejectsHardlinkAndSymlink(t *testing.T) {
 func TestStorageAdvisoryLockIsReleasedWhenProcessDies(t *testing.T) {
 	inspection := inspectStorageTestHome(t, true)
 	cmd := exec.Command(os.Args[0], "-test.run=^TestStorageLockHolderHelper$", "--", "--productmetrics-lock-holder", inspection.Home().Path())
+	// Re-exec'd helpers must not inherit bazel's shard filter: the go test
+	// runner would assign the helper to a different shard and exit "PASS"
+	// without running it (#6638).
+	cmd.Env = shardFreeEnv()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -3958,4 +3976,19 @@ func TestParseStorageLockHolderArgsRequiresExactSuffix(t *testing.T) {
 			}
 		})
 	}
+}
+
+// shardFreeEnv returns the current environment without bazel's test-shard
+// filter variables, for re-exec'd helper binaries that select work via
+// -test.run instead of shard assignment.
+func shardFreeEnv() []string {
+	out := make([]string, 0, len(os.Environ()))
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if name == "TEST_SHARD_INDEX" || name == "TEST_TOTAL_SHARDS" {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }

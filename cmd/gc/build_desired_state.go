@@ -94,21 +94,6 @@ type DesiredStateResult struct {
 	// ReadyUnassignedRoutedWorkStoreRefs is index-aligned with
 	// ReadyUnassignedRoutedWorkBeads and uses canonical city:/rig: refs.
 	ReadyUnassignedRoutedWorkStoreRefs []string
-	// OpenRoutedWorkBeads is the BROAD open/unassigned/routed snapshot, before
-	// ReadyUnassignedRoutedWorkBeads narrows it to the rows the default pool
-	// demand probes selected. The seat-claim backstop reads this one because it
-	// settles readiness itself, from each row's own dependency edges rather than
-	// from pool-demand selection: a named seat's routed work is not pool demand,
-	// so the narrowed view can be silent on exactly the rows that lane exists
-	// for. OpenRoutedWorkStores and OpenRoutedWorkStoreRefs are index-aligned
-	// with it, the same contract AssignedWorkStores/StoreRefs carry.
-	OpenRoutedWorkBeads     []beads.Bead
-	OpenRoutedWorkStores    []beads.Store
-	OpenRoutedWorkStoreRefs []string
-	// OpenRoutedWorkQueryPartial is true when the open-routed read above was
-	// incomplete. A missing row makes a seat's own work look absent, so
-	// consumers that act on ABSENCE must disable themselves for that tick.
-	OpenRoutedWorkQueryPartial bool
 	// NamedSessionDemand records which named-session identities have active
 	// direct assignee demand (Assignee == identity). The reconciler merges this
 	// into poolDesired so that on-demand named sessions remain config-eligible.
@@ -452,7 +437,7 @@ func buildDesiredState(
 // RecordControllerOperation is nil-receiver-safe, so callers without an
 // active trace (e.g. buildDesiredState outside the tick) cost one branch.
 func recordDemandSubPhase(trace *sessionReconcilerTraceCycle, name string, start time.Time, fields map[string]any) {
-	trace.RecordControllerOperation(TraceSiteDemandSnapshot, TraceReasonRetained, TraceOutcomeComplete, name, time.Since(start), fields)
+	trace.RecordControllerOperation(TraceSiteDemandSnapshot, TraceReasonRetained, TraceOutcomeComplete, name, trace.demandSince(start), fields)
 }
 
 func buildDesiredStateWithSessionBeads(
@@ -511,8 +496,11 @@ func buildDesiredStateWithSessionBeadsAt(
 	// running sessions for each pool. A partial/failed collection is logged,
 	// not swallowed: undercounting running sessions can misclassify a pool as
 	// cold and trigger a spurious scale-from-zero probe.
-	subPhaseStart := time.Now()
-	allOpenSessionInfos, openSessionBeadsErr := collectAllOpenSessionInfos(cityPath, cfg, store, rigStores, suspendedRigPaths)
+	// pass labels every store the pass reads by the census leg that serves it;
+	// it is nil, and records nothing, without a trace.
+	pass := newDemandPassTrace(trace, cfg)
+	subPhaseStart := trace.demandNow()
+	allOpenSessionInfos, openSessionBeadsErr := collectAllOpenSessionInfos(cityPath, cfg, store, rigStores, suspendedRigPaths, pass)
 	bp.sessionOccupancyInfos = allOpenSessionInfos
 	recordDemandSubPhase(trace, "demand_snapshot.collect_open_session_beads", subPhaseStart, map[string]any{
 		"beads":   len(allOpenSessionInfos),
@@ -805,7 +793,6 @@ func buildDesiredStateWithSessionBeadsAt(
 	var unassignedRoutedBeads []beads.Bead
 	var unassignedRoutedStores []beads.Store
 	var unassignedRoutedStoreRefs []string
-	var unassignedRoutedPartial bool
 	var controlDispatcherScopeGaps []ControlDispatcherScopeGap
 	var readyUnassignedRoutedWorkBeads []beads.Bead
 	var readyUnassignedRoutedWorkStoreRefs []string
@@ -825,9 +812,9 @@ func buildDesiredStateWithSessionBeadsAt(
 	// rewrites gc.routed_to on open ready work, so it uses its own cache; the
 	// scale-check and named-session probes read after those writes and share a
 	// second cache created below. See readyDemandCache.
-	assignedReadyCache := newReadyDemandCache()
+	assignedReadyCache := newTracedReadyDemandCache(pass, demandReadPointAssigned)
 	if store != nil {
-		subPhaseStart = time.Now()
+		subPhaseStart = trace.demandNow()
 		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned, storePartial = collectAssignedWorkBeadsWithStores(cityPath, cfg, store, rigStores, suspendedRigPaths, sessionBeads, assignedReadyCache)
 		recordDemandSubPhase(trace, "demand_snapshot.collect_assigned_work", subPhaseStart, map[string]any{
 			"beads":   len(assignedWorkBeads),
@@ -836,14 +823,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		if storePartial {
 			fmt.Fprintf(stderr, "assignedWorkBeads: PARTIAL — store query failed, drain decisions suppressed\n") //nolint:errcheck
 		}
-		if len(assignedWorkBeads) > 0 {
-			fmt.Fprintf(stderr, "assignedWorkBeads: %d beads found\n", len(assignedWorkBeads)) //nolint:errcheck
-			for _, wb := range assignedWorkBeads {
-				fmt.Fprintf(stderr, "  %s assignee=%s routed=%s status=%s\n", wb.ID, wb.Assignee, wb.Metadata[beadmeta.RoutedToMetadataKey], wb.Status) //nolint:errcheck
-			}
-		} else {
-			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
-		}
+		logAssignedWorkBeads(stderr, assignedWorkBeads, len(rigStores))
 		// One-shot repair for beads a prior reconciler tick already clobbered
 		// (ga-3c5isi / #5193): restores gc.work_dir from the still-intact
 		// legacy work_dir when the canonical value was overwritten with a
@@ -854,7 +834,9 @@ func buildDesiredStateWithSessionBeadsAt(
 		// it would read pre-stamp metadata and could undo a legitimate fresh
 		// stamp. Repair reads the snapshot it was collected with; the live
 		// stamp gets the last word.
+		repairsStart := trace.demandNow()
 		repairPoolSlotWorkDirClobber(cfg, assignedWorkBeads, assignedWorkStores, stderr)
+		repairDone := trace.demandNow()
 		// Durably record which session is executing each in-progress work
 		// bead. The Assignee link is transient (cleared on close), so without
 		// this a completed run carries no session/worktree reference. See
@@ -863,11 +845,20 @@ func buildDesiredStateWithSessionBeadsAt(
 		// correct, and any bead missed by a partial query simply gets stamped
 		// on a later tick.
 		stampRunSessionIdentity(cfg, assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
+		stampDone := trace.demandNow()
 		// Re-home work pre-assigned to a legacy template identity onto the
 		// configured canonical identity, so the canonical session the awake/scale
 		// accounting wakes for it can actually surface and claim it (the
 		// agent-side work_query/claim path matches identities by raw string).
 		canonicalizeLegacyBoundAssignedWork(cfg, assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
+		// The demand pass's own writes over the assigned snapshot, between the
+		// collect_assigned_work and collect_unassigned_routed records.
+		recordDemandSubPhase(trace, "demand_snapshot.assigned_repairs", repairsStart, map[string]any{
+			"beads":           len(assignedWorkBeads),
+			"repair_ms":       repairDone.Sub(repairsStart).Milliseconds(),
+			"stamp_ms":        stampDone.Sub(repairDone).Milliseconds(),
+			"canonicalize_ms": trace.demandSince(stampDone).Milliseconds(),
+		})
 		// Re-home open, unassigned work still routed to a legacy template identity.
 		// This is the demand/claim half of the migration: empty-assignee open work
 		// never enters the assigned-work collection above, and the canonical
@@ -875,16 +866,20 @@ func buildDesiredStateWithSessionBeadsAt(
 		// work_query/claim path match gc.routed_to canonically by raw string, so
 		// the route must be canonicalized before demand is counted or the cold
 		// pool never wakes for it.
-		subPhaseStart = time.Now()
-		unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, unassignedRoutedPartial = collectOpenUnassignedRoutedWork(cityPath, cfg, store, rigStores, suspendedRigPaths, stderr)
+		subPhaseStart = trace.demandNow()
+		var unassignedRoutedPartial bool
+		unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, unassignedRoutedPartial = collectOpenUnassignedRoutedWork(cityPath, cfg, store, rigStores, suspendedRigPaths, stderr, pass)
 		// Same repair as above, over the open/unassigned collection: a bead
 		// released back to open by a drain is clobbered the same way an
 		// in_progress one is, and never appears in assignedWorkBeads once
 		// reopened. Ordered first here for the same reason as the assigned
 		// site: the sweep reads the snapshot it was collected with, before any
 		// later pass writes through the store behind it.
+		repairsStart = trace.demandNow()
 		repairPoolSlotWorkDirClobber(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
+		repairDone = trace.demandNow()
 		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
+		canonicalizeDone := trace.demandNow()
 		// Same pass, same reason, different legacy form: a route stamped at a
 		// live slot ("<base>-N") is a load-balancing HINT that every raw reader
 		// — the generated query's --metadata-field, the claim's string compare —
@@ -892,7 +887,17 @@ func buildDesiredStateWithSessionBeadsAt(
 		// demand is counted below, is what makes the row both countable and
 		// claimable in the same tick instead of neither.
 		collapseSlotSuffixedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
+		collapseDone := trace.demandNow()
 		controlDispatcherScopeGaps = repairControlDispatcherRoutesForStoreScope(cityPath, cfg, unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, stderr)
+		// Nested inside collect_unassigned_routed, which keeps its boundaries:
+		// the two records overlap and must not be summed.
+		recordDemandSubPhase(trace, "demand_snapshot.unassigned_repairs", repairsStart, map[string]any{
+			"beads":                len(unassignedRoutedBeads),
+			"repair_ms":            repairDone.Sub(repairsStart).Milliseconds(),
+			"canonicalize_ms":      canonicalizeDone.Sub(repairDone).Milliseconds(),
+			"collapse_ms":          collapseDone.Sub(canonicalizeDone).Milliseconds(),
+			"dispatcher_repair_ms": trace.demandSince(collapseDone).Milliseconds(),
+		})
 		// canonicalizeLegacyBound* above rewrote gc.routed_to on open ready
 		// work, so the assigned-work snapshot is now stale for demand
 		// bucketing. Read the post-rewrite state from a fresh per-store
@@ -900,18 +905,18 @@ func buildDesiredStateWithSessionBeadsAt(
 		// pre-rewrite legacy routes and miss the canonical cold pool, because
 		// an explicit-handle CachingStore returns its memoized pre-write live
 		// snapshot as the authoritative demand read.
-		demandReadyCache := newReadyDemandCache()
+		demandReadyCache := newTracedReadyDemandCache(pass, demandReadPointDemand)
 		controlDispatcherOpenDemand := openControlDispatcherDemand(cfg, unassignedRoutedBeads)
 		recordDemandSubPhase(trace, "demand_snapshot.collect_unassigned_routed", subPhaseStart, map[string]any{
 			"beads": len(unassignedRoutedBeads),
 		})
-		subPhaseStart = time.Now()
+		subPhaseStart = trace.demandNow()
 		scaleCheckCounts, poolScaleCheckPartialTemplates = evaluatePendingPoolsMap(cfg, pendingPools, stderr, trace)
 		recordDemandSubPhase(trace, "demand_snapshot.evaluate_pending_pools", subPhaseStart, map[string]any{
 			"pools": len(pendingPools),
 		})
 		if len(defaultScaleTargets) > 0 {
-			subPhaseStart = time.Now()
+			subPhaseStart = trace.demandNow()
 			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(cfg, defaultScaleTargets, demandReadyCache)
 			recordDemandSubPhase(trace, "demand_snapshot.default_scale_demand", subPhaseStart, map[string]any{
 				"targets": len(defaultScaleTargets),
@@ -977,7 +982,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		if len(defaultNamedScaleTargets) > 0 {
 			var namedErrs []error
 			var partialTemplates map[string]bool
-			subPhaseStart = time.Now()
+			subPhaseStart = trace.demandNow()
 			namedDefaultDemand, partialTemplates, namedErrs = defaultNamedSessionDemand(defaultNamedScaleTargets, cfg, cityName, demandReadyCache)
 			recordDemandSubPhase(trace, "demand_snapshot.named_session_demand", subPhaseStart, map[string]any{
 				"targets": len(defaultNamedScaleTargets),
@@ -992,6 +997,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		if len(scaleCheckPartialTemplates) > 0 {
 			fmt.Fprintf(stderr, "scaleCheck: PARTIAL — scale_check failed for %s, retaining affected sessions\n", strings.Join(sortedBoolMapKeys(scaleCheckPartialTemplates), ",")) //nolint:errcheck
 		}
+		subPhaseStart = trace.demandNow()
 		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
 		bp.assignedWorkBeads = poolWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
@@ -1006,6 +1012,16 @@ func buildDesiredStateWithSessionBeadsAt(
 			trace,
 		)
 		bp.configurePoolSessionCreateFairShare(poolDesiredStates)
+		recordDemandSubPhase(trace, "demand_snapshot.compute_pool_desired", subPhaseStart, map[string]any{
+			"pools":      len(poolDesiredStates),
+			"work_beads": len(poolWorkBeads),
+		})
+		// Realization is where the demand pass writes: fresh pool session-bead
+		// creates, trigger-bead bindings, and template resolution per request.
+		subPhaseStart = trace.demandNow()
+		var realized poolRealizeStats
+		probe := &poolRealizeProbe{now: trace.demandNow}
+		bp.realizeProbe = probe
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
 			if cfgAgent == nil {
@@ -1015,8 +1031,25 @@ func buildDesiredStateWithSessionBeadsAt(
 			if agentInSuspendedRig(cityPath, cfgAgent, cfg.Rigs, suspendedRigPaths) {
 				continue
 			}
-			realizePoolDesiredSessionsAt(bp, cfgAgent, poolState, poolDecisionTime, desired, stderr)
+			realized.add(realizePoolDesiredSessionsAt(bp, cfgAgent, poolState, poolDecisionTime, desired, stderr))
 		}
+		bp.realizeProbe = nil
+		recordDemandSubPhase(trace, "demand_snapshot.realize_pools", subPhaseStart, map[string]any{
+			"pools":             len(poolDesiredStates),
+			"requests":          realized.requests,
+			"creates":           realized.creates,
+			"create_errors":     realized.createErrors,
+			"bind_attempts":     realized.bindAttempts,
+			"bind_writes":       probe.bindWrites.Load(),
+			"bind_errors":       realized.bindErrors,
+			"worktree_verifies": probe.worktreeVerifies.Load(),
+			"realized":          realized.realized,
+			"plan_ms":           realized.plan.Milliseconds(),
+			"create_ms":         realized.create.Milliseconds(),
+			"bind_ms":           realized.bind.Milliseconds(),
+			"resolve_ms":        realized.resolve.Milliseconds(),
+			"side_effects_ms":   realized.sideEffects.Milliseconds(),
+		})
 	} else {
 		// No store — use scale_check counts directly.
 		scaleCheckCounts, _ = evaluatePendingPoolsMap(cfg, pendingPools, stderr, trace)
@@ -1048,6 +1081,8 @@ func buildDesiredStateWithSessionBeadsAt(
 	// entries. "always" mode sessions are unconditionally materialized;
 	// "on_demand" sessions are materialized only when they already have a
 	// canonical bead or direct assigned work.
+	subPhaseStart = trace.demandNow()
+	namedMaterialized := 0
 	namedSpecs := make(map[string]namedSessionSpec)
 	for i := range cfg.NamedSessions {
 		identity := cfg.NamedSessions[i].QualifiedName()
@@ -1201,15 +1236,26 @@ func buildDesiredStateWithSessionBeadsAt(
 		}
 		installAgentSideEffects(bp, spec.Agent, tp, stderr)
 		desired[tp.SessionName] = tp
+		namedMaterialized++
 	}
+	recordDemandSubPhase(trace, "demand_snapshot.named_session_materialize", subPhaseStart, map[string]any{
+		"specs":        len(namedSpecs),
+		"materialized": namedMaterialized,
+	})
 
 	baseDesired := cloneDesiredState(desired)
 
 	// Phase 2: discover session beads created outside config iteration
 	// (e.g., by "gc session new"). Include them in desired state if they
 	// have a valid template and are not held/closed.
+	subPhaseStart = trace.demandNow()
 	applySessionBeadDesiredOverlay(bp, cfg, desired, suspendedRigPaths, poolPartialRetentionTemplates, namedScaleCheckPartialTemplates, stderr)
+	recordDemandSubPhase(trace, "demand_snapshot.session_overlay", subPhaseStart, map[string]any{
+		"base":    len(baseDesired),
+		"desired": len(desired),
+	})
 
+	subPhaseStart = trace.demandNow()
 	var continuationClaimCandidates []ContinuationClaimCandidate
 	continuationClaimQueryPartial := storePartial
 	if !storePartial {
@@ -1221,6 +1267,10 @@ func buildDesiredStateWithSessionBeadsAt(
 			readyAssigned,
 		)
 	}
+	recordDemandSubPhase(trace, "demand_snapshot.continuation_candidates", subPhaseStart, map[string]any{
+		"candidates": len(continuationClaimCandidates),
+		"partial":    continuationClaimQueryPartial,
+	})
 
 	sessionSnapshotComplete := bp.hasCompleteSessionSnapshot()
 	sessionOccupancyInfos := make([]session.Info, len(allOpenSessionInfos))
@@ -1238,10 +1288,6 @@ func buildDesiredStateWithSessionBeadsAt(
 		AssignedWorkStoreRefs:              assignedWorkStoreRefs,
 		ReadyUnassignedRoutedWorkBeads:     readyUnassignedRoutedWorkBeads,
 		ReadyUnassignedRoutedWorkStoreRefs: readyUnassignedRoutedWorkStoreRefs,
-		OpenRoutedWorkBeads:                unassignedRoutedBeads,
-		OpenRoutedWorkStores:               unassignedRoutedStores,
-		OpenRoutedWorkStoreRefs:            unassignedRoutedStoreRefs,
-		OpenRoutedWorkQueryPartial:         unassignedRoutedPartial,
 		ReadyAssigned:                      readyAssigned,
 		ContinuationClaimCandidates:        continuationClaimCandidates,
 		ContinuationClaimQueryPartial:      continuationClaimQueryPartial,
@@ -1296,8 +1342,9 @@ func collectAllOpenSessionInfos(
 	cityStore beads.Store,
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
+	pass *demandPassTrace,
 ) ([]session.Info, error) {
-	return collectOpenSessionInfos(cityPath, cfg, cityStore, rigStores, suspendedRigPaths, true, false)
+	return collectOpenSessionInfos(cityPath, cfg, cityStore, rigStores, suspendedRigPaths, true, false, pass)
 }
 
 // collectAllOpenSessionAvailabilityInfos preserves distinct identifier
@@ -1315,7 +1362,7 @@ func collectAllOpenSessionAvailabilityInfos(
 	// This read runs only inside the complete identifier lock set. Live bypasses
 	// production CachingStore snapshots so an external store mutation committed
 	// after the planning census participates in the lock-time proof.
-	return collectOpenSessionInfos(cityPath, cfg, cityStore, rigStores, suspendedRigPaths, false, true)
+	return collectOpenSessionInfos(cityPath, cfg, cityStore, rigStores, suspendedRigPaths, false, true, nil)
 }
 
 func collectOpenSessionInfos(
@@ -1326,6 +1373,7 @@ func collectOpenSessionInfos(
 	suspendedRigPaths map[string]bool,
 	firstLegWins bool,
 	live bool,
+	pass *demandPassTrace,
 ) ([]session.Info, error) {
 	// Sessions arm of the reconciler frame, over the Plan(Session) leg set: the
 	// sessions binding, the city work store, then the serving rigs.
@@ -1343,9 +1391,14 @@ func collectOpenSessionInfos(
 		ref   string
 	}
 	results := make([]storeResult, len(stores))
+	tier := demandReadTierCached
+	if live {
+		tier = demandReadTierLive
+	}
 	var wg sync.WaitGroup
 	for idx, source := range stores {
 		idx, source := idx, source
+		label := pass.leg(source.store, source.ref)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -1353,7 +1406,9 @@ func collectOpenSessionInfos(
 			// store, CachingStore-wrapped when available) — same tier as the prior
 			// raw ListAllSessionBeads, projected to Info. Partial-result rows are
 			// still returned alongside the error, so the fold below preserves them.
+			start := pass.now()
 			infos, err := sessionFrontDoor(source.store).ListAll(session.ListAllOptions{Live: live})
+			pass.read(demandStoreRead{point: demandReadPointSessionCensus, leg: label, op: "list_sessions", tier: tier}, start, len(infos), err)
 			results[idx] = storeResult{infos: infos, err: err, ref: source.ref}
 		}()
 	}
@@ -1537,6 +1592,7 @@ func collectAssignedWorkBeadsWithStores(
 	caches ...*readyDemandCache,
 ) ([]beads.Bead, []beads.Store, []string, map[storeScopedBeadKey]bool, bool) {
 	cache := optionalReadyDemandCache(caches)
+	pass, point := cache.readTrace()
 	// Work arm of the reconciler frame, over the Plan(Census) leg set: the city
 	// work store under the empty store-ref, the serving rigs under their names,
 	// then every relocated class binding under its own "class:*" ref. The refs
@@ -1565,6 +1621,7 @@ func collectAssignedWorkBeadsWithStores(
 	var wg sync.WaitGroup
 	for idx, source := range stores {
 		idx, source := idx, source
+		label := pass.leg(source.store, source.ref)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -1574,11 +1631,17 @@ func collectAssignedWorkBeadsWithStores(
 			var errs []error
 			readyIDs := make(map[string]bool)
 			seen := make(map[string]struct{})
+			read := func(op, tier string) demandStoreRead {
+				return demandStoreRead{point: point, leg: label, op: op, tier: tier}
+			}
 			// In-progress beads with an assignee (active work), plus stranded
 			// unassigned pool work that needs to be reopened. This pass runs
 			// across every store before any ready handoff probes, so already
 			// active work never waits behind unrelated ready scans.
-			if inProgress, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "in_progress"}); err == nil {
+			start := pass.now()
+			inProgress, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "in_progress"})
+			pass.read(read("list_in_progress", demandReadTierCached), start, len(inProgress), err)
+			if err == nil {
 				appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, inProgress, seen, source.store, source.ref)
 			} else {
 				errs = append(errs, fmt.Errorf("List(in_progress): %w", err))
@@ -1594,7 +1657,10 @@ func collectAssignedWorkBeadsWithStores(
 			// demand (EB-42o8/gc-nz5i; extends gc-4zb/#4395). A Live read reaches
 			// the backing store's raw --status=open filter, which excludes it —
 			// see listOpenForControllerDemandLive.
-			if openDemand, err := listOpenForControllerDemandLive(source.store); err == nil {
+			start = pass.now()
+			openDemand, err := listOpenForControllerDemandLive(source.store)
+			pass.read(read("list_open", demandReadTierLive), start, len(openDemand), err)
+			if err == nil {
 				appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openDemand, seen, source.store, source.ref)
 			} else {
 				errs = append(errs, fmt.Errorf("List(open, live demand): %w", err))
@@ -1623,7 +1689,10 @@ func collectAssignedWorkBeadsWithStores(
 			// appendOpenRoutedWorkUnique never markReadyAssigned (see the
 			// skipReadyAssignees note below), and releaseOrphanedPoolAssignments'
 			// own live re-read (liveWorkAssignmentStillReleasable) skips it.
-			if openRouted, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "open"}); err == nil {
+			start = pass.now()
+			openRouted, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "open"})
+			pass.read(read("list_open", demandReadTierCached), start, len(openRouted), err)
+			if err == nil {
 				appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
 			} else {
 				errs = append(errs, fmt.Errorf("List(open): %w", err))
@@ -1667,7 +1736,7 @@ func collectAssignedWorkBeadsWithStores(
 	// suppress the Ready probe for a same-ID assignee in another store.
 	skipReadyAssignees := readyCapturedAssigneeSet(result, resultStoreRefs, readyAssigned)
 	expandSkipAssigneesWithSessionIdentities(skipReadyAssignees, sessionBeads)
-	assignees := readyAssignedWorkAssignees(cfg, cityStore, sessionBeads, skipReadyAssignees)
+	assignees := readyAssignedWorkAssignees(cfg, cityStore, sessionBeads, skipReadyAssignees, pass, point)
 	if len(skipReadyAssignees) > 0 && len(assignees) == 0 {
 		return result, resultStores, resultStoreRefs, readyAssigned, partial
 	}
@@ -1675,6 +1744,7 @@ func collectAssignedWorkBeadsWithStores(
 	readyResults := make([]storeAssignedWorkResult, len(stores))
 	for idx, source := range stores {
 		idx, source := idx, source
+		label := pass.leg(source.store, source.ref)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -1682,13 +1752,13 @@ func collectAssignedWorkBeadsWithStores(
 			var err error
 			var errs []error
 			if len(assignees) == 0 {
-				ready, err = cache.liveReady(source.store, beads.ReadyQuery{Limit: assignedWorkReadyLimit(cfg)})
+				ready, err = cache.liveReady(source.store, label, beads.ReadyQuery{Limit: assignedWorkReadyLimit(cfg)})
 				if err != nil {
 					errs = append(errs, fmt.Errorf("Ready(): %w", err))
 				}
 			} else {
 				for _, assignee := range assignees {
-					part, partErr := cache.liveReady(source.store, beads.ReadyQuery{Assignee: assignee, Limit: assignedWorkReadyLimit(cfg)})
+					part, partErr := cache.liveReady(source.store, label, beads.ReadyQuery{Assignee: assignee, Limit: assignedWorkReadyLimit(cfg)})
 					if partErr != nil {
 						errs = append(errs, fmt.Errorf("Ready(assignee=%q): %w", assignee, partErr))
 					}
@@ -1784,7 +1854,7 @@ func expandSkipAssigneesWithSessionIdentities(skip map[string]struct{}, sessionB
 	}
 }
 
-func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}) []string {
+func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}, pass *demandPassTrace, point string) []string {
 	seen := make(map[string]struct{})
 	var result []string
 	add := func(value string) {
@@ -1828,7 +1898,14 @@ func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, session
 		// this store read at all (ga-bequ8d).
 		var closedIdx session.ClosedNamedSessionBeadIndex
 		if hasOnDemand {
-			closedIdx = buildClosedNamedSessionBeadIndex(cityStore)
+			// The error feeds only the trace record. A hard failure leaves the
+			// index empty, so every Find below reports no match and each
+			// on_demand identity is still probed under its qualified name; a
+			// partial read keeps the rows it did get.
+			start := pass.now()
+			var idxErr error
+			closedIdx, idxErr = session.BuildClosedNamedSessionBeadIndex(cityStore)
+			pass.read(demandStoreRead{point: point, leg: pass.storeLabel(cityStore, "city"), op: "closed_named_index", tier: demandReadTierCached}, start, -1, idxErr)
 		}
 		for i := range cfg.NamedSessions {
 			if cfg.NamedSessions[i].Mode != "on_demand" {
@@ -2029,7 +2106,7 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		// should wake pools must create an actionable root, such as a
 		// vapor/root-only wisp. Molecule containers and formula step
 		// beads remain hidden by readyExcludeTypes.
-		ready, readyErr := cache.controllerDemandReady(group.store)
+		ready, readyErr := cache.controllerDemandReady(group.store, cache.storeLabel(group.store, key))
 		if readyErr != nil {
 			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), readyErr))
 			partialTemplates = markScaleCheckPartialSet(partialTemplates, group.templates)
@@ -2220,7 +2297,7 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 	// when a default demand query is inconclusive, so existing named-session
 	// beads are retained instead of swept on a store/query failure.
 	for key, group := range groups {
-		_, err := cache.controllerDemandReady(group.store)
+		_, err := cache.controllerDemandReady(group.store, cache.storeLabel(group.store, key))
 		if err != nil {
 			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), err))
 			partialTemplates = markScaleCheckPartialSet(partialTemplates, group.templates)
@@ -2546,6 +2623,10 @@ type readyDemandCache struct {
 	mu     sync.Mutex
 	live   map[beads.Store]*readyDemandEntry
 	cached map[beads.Store]*readyDemandEntry
+	// pass and point label the store reads of the one read point this cache
+	// serves (recordDemandStoreRead). A nil pass records nothing.
+	pass  *demandPassTrace
+	point string
 }
 
 type readyDemandEntry struct {
@@ -2554,11 +2635,37 @@ type readyDemandEntry struct {
 	err  error
 }
 
+// It is the untraced form, for callers outside the controller's demand pass;
+// buildDesiredStateWithSessionBeadsAt uses newTracedReadyDemandCache.
 func newReadyDemandCache() *readyDemandCache {
+	return newTracedReadyDemandCache(nil, "")
+}
+
+// newTracedReadyDemandCache is newReadyDemandCache for a traced demand pass:
+// each fetched snapshot, and each other store read of the pass the cache is
+// handed to, records under point.
+func newTracedReadyDemandCache(pass *demandPassTrace, point string) *readyDemandCache {
 	return &readyDemandCache{
 		live:   make(map[beads.Store]*readyDemandEntry),
 		cached: make(map[beads.Store]*readyDemandEntry),
+		pass:   pass,
+		point:  point,
 	}
+}
+
+// storeLabel labels a role-keyed read (a demand group) by the store it reads.
+func (c *readyDemandCache) storeLabel(store beads.Store, role string) string {
+	pass, _ := c.readTrace()
+	return pass.storeLabel(store, role)
+}
+
+// readTrace returns the pass trace and read point the cache's pass records
+// its store reads under.
+func (c *readyDemandCache) readTrace() (*demandPassTrace, string) {
+	if c == nil {
+		return nil, ""
+	}
+	return c.pass, c.point
 }
 
 // entry returns the per-store memo slot for m, creating it under the cache lock.
@@ -2578,11 +2685,14 @@ func (c *readyDemandCache) entry(m map[beads.Store]*readyDemandEntry, store bead
 
 // liveSnapshot returns the memoized full live ready set (TierBoth, unfiltered)
 // for store, fetching it once. Mirrors the read liveReadyForControllerDemandQuery
-// performs before its own assignee/limit filtering.
-func (c *readyDemandCache) liveSnapshot(store beads.Store) ([]beads.Bead, error) {
+// performs before its own assignee/limit filtering. leg is the store's label in
+// the fetch's trace record only; the memo is keyed by store.
+func (c *readyDemandCache) liveSnapshot(store beads.Store, leg string) ([]beads.Bead, error) {
 	e := c.entry(c.live, store)
 	e.once.Do(func() {
+		start := c.pass.now()
 		e.rows, e.err = beads.HandlesFor(store).Live.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+		c.pass.read(demandStoreRead{point: c.point, leg: leg, op: "ready", tier: demandReadTierLive}, start, len(e.rows), e.err)
 	})
 	return e.rows, e.err
 }
@@ -2590,21 +2700,23 @@ func (c *readyDemandCache) liveSnapshot(store beads.Store) ([]beads.Bead, error)
 // cachedSnapshot returns the memoized full cached ready set (TierBoth,
 // unfiltered) for store, fetching it once. Mirrors the read
 // readyForControllerDemandQuery performs against the cached tier.
-func (c *readyDemandCache) cachedSnapshot(store beads.Store) ([]beads.Bead, error) {
+func (c *readyDemandCache) cachedSnapshot(store beads.Store, leg string) ([]beads.Bead, error) {
 	e := c.entry(c.cached, store)
 	e.once.Do(func() {
+		start := c.pass.now()
 		e.rows, e.err = beads.HandlesFor(store).Cached.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+		c.pass.read(demandStoreRead{point: c.point, leg: leg, op: "ready", tier: demandReadTierCached}, start, len(e.rows), e.err)
 	})
 	return e.rows, e.err
 }
 
 // liveReady reproduces liveReadyForControllerDemandQuery from the shared live
 // snapshot. A nil cache reads directly (pre-cache behavior).
-func (c *readyDemandCache) liveReady(store beads.Store, query beads.ReadyQuery) ([]beads.Bead, error) {
+func (c *readyDemandCache) liveReady(store beads.Store, leg string, query beads.ReadyQuery) ([]beads.Bead, error) {
 	if c == nil {
 		return liveReadyForControllerDemandQuery(store, query)
 	}
-	rows, err := c.liveSnapshot(store)
+	rows, err := c.liveSnapshot(store, leg)
 	return filterReadySnapshot(rows, query), err
 }
 
@@ -2615,13 +2727,13 @@ func (c *readyDemandCache) liveReady(store beads.Store, query beads.ReadyQuery) 
 // cache reads directly (pre-cache behavior). The returned slice may alias the
 // shared per-pass snapshot (the live path returns the memo directly), so callers
 // must treat it as read-only.
-func (c *readyDemandCache) controllerDemandReady(store beads.Store) ([]beads.Bead, error) {
+func (c *readyDemandCache) controllerDemandReady(store beads.Store, leg string) ([]beads.Bead, error) {
 	if c == nil {
 		return readyForControllerDemand(store)
 	}
-	rows, err := c.cachedSnapshot(store)
+	rows, err := c.cachedSnapshot(store, leg)
 	if errors.Is(err, beads.ErrCacheUnavailable) {
-		return c.liveSnapshot(store)
+		return c.liveSnapshot(store, leg)
 	}
 	if _, hasExplicitHandles := store.(interface {
 		Handles() beads.StoreHandles
@@ -2631,7 +2743,7 @@ func (c *readyDemandCache) controllerDemandReady(store beads.Store) ([]beads.Bea
 	if err != nil && !beads.IsPartialResult(err) {
 		rows = nil
 	}
-	liveRows, liveErr := c.liveSnapshot(store)
+	liveRows, liveErr := c.liveSnapshot(store, leg)
 	if liveErr == nil {
 		return liveRows, nil
 	}
@@ -3247,6 +3359,53 @@ func desiredHasCanonicalNonExpandingPoolSession(desired map[string]TemplateParam
 // gastownhall/gascity#2319.
 const poolRealizeParallelism = 8
 
+// poolRealizeStats counts and times what realizePoolDesiredSessionsAt did,
+// for the demand_snapshot.realize_pools trace record. The durations split the
+// realization pipeline by segment: Phase A selection and planning (plan),
+// Phase B's parallel creates as wall time (create), and Phase C's trigger
+// binding, template resolution and hook installation (bind, resolve,
+// sideEffects).
+type poolRealizeStats struct {
+	requests     int // pool requests considered
+	creates      int // fresh session-bead creates attempted
+	createErrors int
+	bindAttempts int // trigger-bead binding calls, including no-op ones
+	bindErrors   int
+	realized     int // sessions placed in desired state
+
+	plan, create, bind, resolve, sideEffects time.Duration
+}
+
+func (s *poolRealizeStats) add(o poolRealizeStats) {
+	s.requests += o.requests
+	s.creates += o.creates
+	s.createErrors += o.createErrors
+	s.bindAttempts += o.bindAttempts
+	s.bindErrors += o.bindErrors
+	s.realized += o.realized
+	s.plan += o.plan
+	s.create += o.create
+	s.bind += o.bind
+	s.resolve += o.resolve
+	s.sideEffects += o.sideEffects
+}
+
+// poolRealizeProbe is the clock and the counters realization shares with the
+// helpers it calls, which run on Phase B's workers as well as serially.
+type poolRealizeProbe struct {
+	now              func() time.Time
+	worktreeVerifies atomic.Int64 // worktree.Verify calls
+	bindWrites       atomic.Int64 // trigger bindings with a non-empty patch
+}
+
+// realizeNow is the clock realization segments are timed with.
+func (bp *agentBuildParams) realizeNow() time.Time {
+	if bp == nil || bp.realizeProbe == nil || bp.realizeProbe.now == nil {
+		return time.Now()
+	}
+	return bp.realizeProbe.now()
+}
+
 // poolRealizeWorkItem holds the per-request state threaded across the
 // three-phase realizePoolDesiredSessions pipeline. Phase A (serial) populates
 // either sessionInfo+slot (reuse path) or plan+slot (create path); Phase B
@@ -3280,12 +3439,14 @@ func realizePoolDesiredSessionsAt(
 	poolDecisionTime time.Time,
 	desired map[string]TemplateParams,
 	stderr io.Writer,
-) {
+) poolRealizeStats {
+	stats := poolRealizeStats{requests: len(poolState.Requests)}
 	qualifiedName := cfgAgent.QualifiedName()
 	if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedName); err != nil {
 		fmt.Fprintf(stderr, "buildDesiredState: pool %q: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
-		return
+		return stats
 	}
+	segmentStart := bp.realizeNow()
 	used := make(map[string]bool)
 	usedSlots := make(map[int]bool)
 
@@ -3353,6 +3514,7 @@ func realizePoolDesiredSessionsAt(
 		}
 		items = append(items, planItem())
 	}
+	stats.plan = bp.realizeNow().Sub(segmentStart)
 
 	// Phase B (parallel, bounded): materialize planned creates. Per-identity
 	// session locks serialize calls that share either the public alias or the
@@ -3365,6 +3527,8 @@ func realizePoolDesiredSessionsAt(
 			pending = append(pending, idx)
 		}
 	}
+	stats.creates = len(pending)
+	segmentStart = bp.realizeNow()
 	if len(pending) > 0 {
 		workerCount := poolRealizeParallelism
 		if workerCount > len(pending) {
@@ -3393,6 +3557,7 @@ func realizePoolDesiredSessionsAt(
 		close(jobs)
 		wg.Wait()
 	}
+	stats.create = bp.realizeNow().Sub(segmentStart)
 
 	// Phase C (serial, fast): finalize results in original request order.
 	// Failed creates release their reserved slot here, at end-of-cycle —
@@ -3411,6 +3576,7 @@ func realizePoolDesiredSessionsAt(
 		}
 		if item.plan != nil {
 			if item.createErr != nil {
+				stats.createErrors++
 				fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, item.createErr) //nolint:errcheck
 				delete(usedSlots, item.plan.slot)
 				continue
@@ -3444,7 +3610,12 @@ func realizePoolDesiredSessionsAt(
 		// cfgAgent (not resolveAgent) matches the Phase A create-time call
 		// (poolTriggerMetadata via selectOrPlanPoolSessionBead), which also
 		// resolves the work dir off the base agent plus the per-slot name.
-		if bound, err := bindPoolSessionTriggerBead(bp, cfgAgent, qualifiedInstance, sbInfo, item.request); err != nil {
+		stats.bindAttempts++
+		segmentStart = bp.realizeNow()
+		bound, err := bindPoolSessionTriggerBead(bp, cfgAgent, qualifiedInstance, sbInfo, item.request)
+		stats.bind += bp.realizeNow().Sub(segmentStart)
+		if err != nil {
+			stats.bindErrors++
 			if errors.Is(err, errPoolTriggerWorktreeEvidence) {
 				// Unusable ownership evidence is not a partial bind: a reused
 				// session left in desired would restart against its previous
@@ -3456,8 +3627,10 @@ func realizePoolDesiredSessionsAt(
 		} else {
 			sbInfo = bound
 		}
+		segmentStart = bp.realizeNow()
 		fpExtra := buildFingerprintExtra(resolveAgent)
 		tp, err := resolveTemplateForSessionBeadInfo(bp, resolveAgent, qualifiedInstance, fpExtra, sbInfo)
+		stats.resolve += bp.realizeNow().Sub(segmentStart)
 		if err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s: %v (skipping)\n", qualifiedName, sbInfo.ID, err) //nolint:errcheck
 			continue
@@ -3485,9 +3658,13 @@ func realizePoolDesiredSessionsAt(
 				setPoolTemplateRuntimeIdentityInfo(&tp, qualifiedInstance, sbInfo)
 			}
 		}
+		segmentStart = bp.realizeNow()
 		installAgentSideEffects(bp, resolveAgent, tp, stderr)
+		stats.sideEffects += bp.realizeNow().Sub(segmentStart)
 		desired[tp.SessionName] = tp
+		stats.realized++
 	}
+	return stats
 }
 
 // computePoolTriggerBindingPatch is the pure key-diff at the heart of
@@ -3600,6 +3777,9 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	patch := computePoolTriggerBindingPatch(info, request, workDir)
 	if len(patch) == 0 {
 		return info, nil
+	}
+	if bp != nil && bp.realizeProbe != nil {
+		bp.realizeProbe.bindWrites.Add(1)
 	}
 	if bp == nil || bp.beadStore == nil {
 		return info.ApplyPatch(patch), nil
@@ -3725,6 +3905,9 @@ func verifiedPoolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	storeRef := strings.TrimSpace(request.WorkStoreRef)
 	if storeRef != "" && canonicalEvidenceStoreRef(spec.StoreRef) != canonicalEvidenceStoreRef(storeRef) {
 		return "", fmt.Errorf("%w: store %q does not match request store %q", errPoolTriggerWorktreeEvidence, spec.StoreRef, storeRef)
+	}
+	if bp != nil && bp.realizeProbe != nil {
+		bp.realizeProbe.worktreeVerifies.Add(1)
 	}
 	report, err := worktree.Verify(spec)
 	if err != nil {
@@ -4946,6 +5129,22 @@ func createPoolSessionBeadWithGuardedAliasUsingLock(
 	if err != nil {
 		return session.Info{}, err
 	}
+	// A retired bead can leave its runtime occupying the canonical singleton
+	// name. Do not mint a fresh bead on every demand tick while it remains.
+	// Existing-bead reuse happens before this create path; this is not adoption
+	// or permission to stop an unknown owner. Start still fences later races.
+	//
+	// The probe is deliberately outside the withLocks section below, which is
+	// why Start and not this probe is the authoritative fence. A provider
+	// liveness call blocks on I/O — the ACP provider dials the session control
+	// socket and pings it, each with its own sub-second timeout, per candidate
+	// path — while withLocks takes a cross-process city lock file per
+	// identifier spelling. Probing under those locks would stall every other
+	// creator of the same identifiers behind it. Do not close the
+	// probe-to-create window by widening the lock over this call.
+	if cfgAgent != nil && cfgAgent.UsesCanonicalSingletonPoolIdentity() && bp.sp != nil && bp.sp.IsRunning(identifiers.sessionName) {
+		return session.Info{}, fmt.Errorf("%w: runtime %q still occupies singleton template %q", errPoolSessionNameUnavailable, identifiers.sessionName, template)
+	}
 	if bp.beadStore == nil {
 		return createPoolSessionBeadWithIdentifiers(bp.beadStore, template, bp.city, bp.sessionBeads, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, identifiers)
 	}
@@ -5010,23 +5209,28 @@ func isFailedCreateSessionInfo(i session.Info) bool {
 }
 
 // sessionBeadHasAssignedWorkInfo reports whether any open/in-progress work bead is
-// assigned to the session: the SESSION side reads typed Info fields (ID,
-// SessionNameMetadata, ConfiguredNamedIdentity) while the WORK bead slice stays raw
-// (ClassWork — Bead is the domain object). It is the production reuse predicate the
-// pool selection path calls; its behavior is pinned by TestSessionBeadHasAssignedWorkInfo
-// (WI-7 W-delete retired the raw sessionBeadHasAssignedWork equivalence reference along
-// with the rest of the raw pool cluster and re-pointed the pin to a golden).
-func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) bool {
+// assigned to the session: the SESSION side reads typed Info fields through
+// sessionAssignmentIdentifiersForConfigInfo (ID, SessionNameMetadata,
+// ConfiguredNamedIdentity, the stable alias, and the configured named-session
+// fallback) while the WORK bead slice stays raw (ClassWork — Bead is the domain
+// object). It is the production reuse predicate the pool selection path calls, so
+// it must recognize the same identities as the drain guards and the awake set: a
+// namepool member claims under its alias, and missing that claim lets pool
+// selection reuse a seat that is still working. Its behavior is pinned by
+// TestSessionBeadHasAssignedWorkInfo (WI-7 W-delete retired the raw
+// sessionBeadHasAssignedWork equivalence reference along with the rest of the raw
+// pool cluster and re-pointed the pin to a golden).
+func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info, cfg *config.City) bool {
+	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
 	for _, wb := range workBeads {
 		assignee := strings.TrimSpace(wb.Assignee)
 		if assignee == "" || (wb.Status != "open" && wb.Status != "in_progress") {
 			continue
 		}
-		if assignee == info.ID || assignee == strings.TrimSpace(info.SessionNameMetadata) {
-			return true
-		}
-		if namedIdentity := strings.TrimSpace(info.ConfiguredNamedIdentity); namedIdentity != "" && assignee == namedIdentity {
-			return true
+		for _, identifier := range identifiers {
+			if assignee == identifier {
+				return true
+			}
 		}
 	}
 	return false
@@ -5036,11 +5240,11 @@ func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) b
 // sessionBeadHasAssignedWorkInfo: it matches an open/in-progress work bead's
 // Assignee against every current identity of the session (ID,
 // SessionNameMetadata, ConfiguredNamedIdentity, Alias, AliasHistory — see
-// session.AssigneeIdentities), not just the narrower ID/SessionNameMetadata/
-// ConfiguredNamedIdentity trio sessionBeadHasAssignedWorkInfo pins. Work
-// claimed by an agent is commonly assigned under its actor alias (GC_ALIAS /
-// BEADS_ACTOR, see session.AssigneeIdentifier), which the narrower check
-// does not consider, so it can miss live assigned work entirely.
+// session.AssigneeIdentities), not just the current-identity set
+// sessionBeadHasAssignedWorkInfo matches. The narrower check honors a stable
+// alias but deliberately ignores a rebinding pool-slot alias and every prior
+// alias in alias_history, so it can miss work a one_shot exit left assigned
+// under one of those forms.
 //
 // It exists as a separate function (not a change to the pinned
 // sessionBeadHasAssignedWorkInfo) so its wider match is opt-in for callers
@@ -5460,7 +5664,7 @@ func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []b
 // `gc storage migrate` moving it to the binding, after which this arm sees it on
 // the very next tick; the lost-route half is separately converged off-tick by the
 // route-recovery backstop, which reads every leg (route_recovery_lane.go).
-func collectOpenUnassignedRoutedWork(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool, stderr io.Writer) ([]beads.Bead, []beads.Store, []string, bool) {
+func collectOpenUnassignedRoutedWork(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool, stderr io.Writer, pass *demandPassTrace) ([]beads.Bead, []beads.Store, []string, bool) {
 	if cfg == nil {
 		return nil, nil, nil, false
 	}
@@ -5486,6 +5690,7 @@ func collectOpenUnassignedRoutedWork(cityPath string, cfg *config.City, store be
 		if source.store == nil {
 			continue
 		}
+		label := pass.leg(source.store, source.ref)
 		wg.Add(1)
 		go func(i int, source classStoreCandidate) {
 			defer wg.Done()
@@ -5494,7 +5699,9 @@ func collectOpenUnassignedRoutedWork(cityPath string, cfg *config.City, store be
 			// and the route-repair passes, and mapBdStatus would otherwise collapse a
 			// blocked bead to "open" and let it count as spawn capacity or get its route
 			// re-stamped (EB-42o8/gc-nz5i; extends gc-4zb/#4395). See listOpenForControllerDemandLive.
+			start := pass.now()
 			rows, err := listOpenForControllerDemandLive(source.store)
+			pass.read(demandStoreRead{point: demandReadPointUnassignedRouted, leg: label, op: "list_open", tier: demandReadTierLive}, start, len(rows), err)
 			results[i] = legResult{rows: rows, err: err}
 		}(i, source)
 	}

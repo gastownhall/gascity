@@ -1,6 +1,8 @@
 package doctor
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -230,5 +232,55 @@ func TestPendingScopeInitialization_OtherScopeDoesNotLeak(t *testing.T) {
 	}
 	if !scopeInitializationPending(cityDir, rigDir) {
 		t.Fatal("pending rig not reported for the rig scope")
+	}
+}
+
+// TestBeadsStoreCheck_PingFailureKeepsTheProxiedPayload is council B-F2's
+// doctor half.
+//
+// The check returned StatusError on a ping failure BEFORE the payload was
+// built, so the operator lost the entire proxied diagnostic block — the
+// generation gc pinned, the verdict if it refused, whether the handle has since
+// stood down — on precisely the failure that block exists to explain. What was
+// left was one line of driver text.
+//
+// The ping is still an error. It now arrives with the evidence attached.
+func TestBeadsStoreCheck_PingFailureKeepsTheProxiedPayload(t *testing.T) {
+	dir := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"file\"\n")
+	spy := &spyPingStore{pingFunc: func() error {
+		return errors.New("proxied native refused: verdict=proxy_gone terminal=false")
+	}}
+	c := NewBeadsStoreCheck(dir, func(_ string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{
+			Store: spy,
+			Diagnostic: beads.BeadsDiagnostic{
+				Store:           beads.BeadsStoreNameNativeDoltStore,
+				PreflightGate:   beads.BeadsGateProxiedProvider,
+				PreflightReason: "proxied-server mode is owned by the bd provider",
+				Proxied: &beads.ProxiedDiagnostic{
+					Endpoint: beads.ProxiedEndpointStamp{Port: 44561, PID: 6001, Generation: "6001:abcd"},
+					Evidence: "argv+birth",
+				},
+			},
+		}, nil
+	})
+
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error: a failed ping is still a failure", r.Status)
+	}
+	if !strings.Contains(r.Message, "store ping failed") {
+		t.Errorf("message = %q, want it to name the ping failure", r.Message)
+	}
+	if r.Payload == nil {
+		t.Fatal("the check dropped its whole payload on a ping error, which is the one failure the " +
+			"proxied diagnostic block exists to explain")
+	}
+	rendered, err := json.Marshal(r.Payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if !strings.Contains(string(rendered), "6001:abcd") {
+		t.Errorf("the payload does not carry the pinned generation: %s", rendered)
 	}
 }

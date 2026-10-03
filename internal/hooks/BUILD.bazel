@@ -26,6 +26,7 @@ go_test(
     srcs = [
         "hooks_family_test.go",
         "hooks_test.go",
+        "overlay_provider_hook_path_shape_test.go",
         "preserve_test.go",
         "testenv_import_test.go",
     ],

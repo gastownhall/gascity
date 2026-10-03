@@ -719,26 +719,78 @@ func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("store open failed: %v", err)
 		return r
 	}
-	if err := result.Store.Ping(); err != nil {
-		r.Status = StatusError
-		r.Message = fmt.Sprintf("store ping failed: %v", err)
-		return r
-	}
+	pingErr := result.Store.Ping()
 	// The structured half of the answer, for the consumers that must not parse
 	// the message below. On a proxied scope it carries gc's read-only account
 	// of bd's proxy — the record, the liveness verdict and its evidence, the
 	// idle policy and both schema cursors — which is what the native-over-proxy
 	// work has to be able to observe before it may use any of it.
+	//
+	// On the proxied-native lane it ALSO carries the store open's own account of
+	// bd's proxy — the generation it pinned, the verdict if it refused, whether
+	// the handle has since dropped to bd — projected from the same diagnostic the
+	// message below is built from, and sitting beside the independent endpoint
+	// account so a disagreement between the two is visible rather than averaged.
+	//
+	// It is the account the handle gives NOW, not only the one the open gave.
+	// The store doctor holds has been through wrapStoreWithBeadPolicies, which
+	// embeds the Store interface and therefore strips the wrapper's own methods;
+	// beads.LiveProxiedDiagnostic asks through the unwrap seam that wrapper
+	// participates in, and falls back to the open-time account for every store
+	// that carries no split store — which is every store on every other lane, so
+	// their payload is byte-identical to today's.
+	//
+	// The difference is the whole point: a handle that stood down after the open
+	// (a migration under a controller store, a proxy that went away) reports
+	// itself native forever if the payload is only ever the open's account, and
+	// a demoted city reading as healthy is the one thing `gc doctor` must not
+	// say.
+	proxied := beads.LiveProxiedDiagnostic(result.Store, result.Diagnostic.Proxied)
 	r.Payload = newBeadsStorePayload(c.cityPath, target, beadsStoreDiagnostic{
 		Store:           result.Diagnostic.Store,
 		PreflightGate:   result.Diagnostic.PreflightGate,
 		PreflightReason: result.Diagnostic.PreflightReason,
+		Proxied:         proxied,
 	})
+	// The ping is reported AFTER the payload is built, not instead of it
+	// (council B-F2). Returning on the ping error dropped the whole proxied
+	// diagnostic block — the generation, the verdict, whether the handle has
+	// stood down — on precisely the failure it exists to explain, and left an
+	// operator with one line of driver text. The failure is still an error; it
+	// now arrives with the evidence attached.
+	//
+	// It is read after LiveProxiedDiagnostic as well as after newStore, because
+	// on the proxied lane a failing Ping is itself a demotion trigger: it runs
+	// through withReadRetry, so its verdict stands the native leaf down, and the
+	// diagnostic must be the account the handle gives once that has happened.
+	if pingErr != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("store ping failed: %v", pingErr)
+		return r
+	}
+	if result.Diagnostic.Store == beads.BeadsStoreNameNativeDoltStore && proxied != nil {
+		// The proxied-native lane. The store name is NativeDoltStore because that
+		// is what serves the reads (design 5.3); the message is what tells an
+		// operator that this native store is reading through somebody else's
+		// proxy and writing through somebody else's CLI.
+		//
+		// A handle that has since stood down gets its own line: the open took the
+		// lane and the handle lost it, which is a different fact from a scope that
+		// never took it, and "native reads over bd proxy" would be a false
+		// statement about a store that is forking for every read.
+		r.Status = StatusOK
+		if proxied.Demoted {
+			r.Message = proxiedDemotedStoreMessage(proxied)
+			return r
+		}
+		r.Message = proxiedNativeStoreMessage(proxied)
+		return r
+	}
 	if result.Diagnostic.Store == beads.BeadsStoreNameBdStore && result.Diagnostic.PreflightGate == beads.BeadsGateProxiedProvider {
 		// Not a degraded fallback: bd owns the Dolt topology for proxied
 		// scopes and the CLI front door is the only supported store.
 		r.Status = StatusOK
-		r.Message = proxiedProviderStoreMessage
+		r.Message = proxiedFallbackStoreMessage(proxied)
 		return r
 	}
 	if result.Diagnostic.Store == beads.BeadsStoreNameBdStore {
@@ -1624,7 +1676,12 @@ func (c *RigBeadsCheck) Run(_ *CheckContext) *CheckResult {
 	r.Status = StatusOK
 	r.Message = "store accessible"
 	if proxied {
-		r.Message = proxiedProviderStoreMessage
+		// The rig lane has no store-open diagnostic to project: NewRigBeadsCheck
+		// takes a factory that returns a bare beads.Store, and rig diagnostics are
+		// not retained anywhere today (the city's are, via CityBeadsDiagnostic).
+		// So the lane is read off the store itself, which is the one piece of
+		// evidence this check does hold.
+		r.Message = rigProxiedStoreMessage(store)
 	}
 	return r
 }
@@ -1890,7 +1947,7 @@ func validPublishedManagedDoltDoctorState(cityPath string, state managedDoltDoct
 		return false
 	}
 	_ = conn.Close()
-	holderPID := managedDoltDoctorPortHolderPID(state.Port)
+	holderPID := managedDoltDoctorPortHolderPID(state.Port, state.PID)
 	if holderPID > 0 {
 		return holderPID == state.PID
 	}
@@ -1925,76 +1982,17 @@ func managedDoltDoctorProcCmdline(pid int) string {
 	return strings.TrimSpace(string(out))
 }
 
-func managedDoltDoctorPortHolderPID(port int) int {
+// managedDoltDoctorPortHolderPID returns the PID listening on port, checking
+// candidate first. Linux reads /proc (see pidutil.ListenerPID); hosts without
+// /proc/net fall back to lsof.
+func managedDoltDoctorPortHolderPID(port, candidate int) int {
 	if port <= 0 {
 		return 0
 	}
-	if pid, checked := managedDoltDoctorPortHolderFromProc(uint16(port)); checked {
+	if pid, checked := pidutil.ListenerPID(port, candidate); checked {
 		return pid
 	}
 	return managedDoltDoctorPortHolderFromLsof(port)
-}
-
-func managedDoltDoctorPortHolderFromProc(port uint16) (int, bool) {
-	inodes := map[string]struct{}{}
-	checked := false
-	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		checked = true
-		for _, line := range strings.Split(string(data), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) < 10 || fields[3] != "0A" {
-				continue
-			}
-			_, portHex, ok := strings.Cut(fields[1], ":")
-			if !ok {
-				continue
-			}
-			gotPort, err := strconv.ParseUint(portHex, 16, 16)
-			if err != nil || uint16(gotPort) != port {
-				continue
-			}
-			inodes[fields[9]] = struct{}{}
-		}
-	}
-	if !checked {
-		return 0, false
-	}
-	if len(inodes) == 0 {
-		return 0, true
-	}
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return 0, true
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || !pidutil.Alive(pid) {
-			continue
-		}
-		fdDir := filepath.Join("/proc", entry.Name(), "fd")
-		fds, err := os.ReadDir(fdDir)
-		if err != nil {
-			continue
-		}
-		for _, fd := range fds {
-			target, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
-			if err != nil || !strings.HasPrefix(target, "socket:[") || !strings.HasSuffix(target, "]") {
-				continue
-			}
-			inode := strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")
-			if _, ok := inodes[inode]; ok {
-				return pid, true
-			}
-		}
-	}
-	return 0, true
 }
 
 func managedDoltDoctorPortHolderFromLsof(port int) int {

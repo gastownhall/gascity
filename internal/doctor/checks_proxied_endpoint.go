@@ -29,6 +29,22 @@ type BeadsStorePayload struct {
 	// native one.
 	PreflightGate   string `json:"preflight_gate,omitempty"`
 	PreflightReason string `json:"preflight_reason,omitempty"`
+	// Proxied is the STORE OPEN's own account of the proxied-native lane: the
+	// generation it pinned, the evidence it pinned it on, the idle policy and the
+	// cursors it gated against, the verdict if it refused, and whether the handle
+	// has since dropped to the bd leaf.
+	//
+	// It sits BESIDE Endpoint rather than replacing it, and the two are gathered
+	// independently: this one is what gc decided AT OPEN, Endpoint is what the
+	// endpoint looks like NOW. An operator debugging a proxied city needs both,
+	// because "the proxy changed under us" and "gc read it wrong" produce the same
+	// single-account picture and different two-account ones.
+	//
+	// It is the beads type rather than a projection of it, so the two can never
+	// drift into two vocabularies for one fact. Nil on every lane but this one,
+	// and `omitempty`, so a flag-off proxied scope serializes byte-identically to
+	// what it serializes today.
+	Proxied *beads.ProxiedDiagnostic `json:"proxied,omitempty"`
 	// Endpoint is present only for a bd-owned proxied scope: it is what gc
 	// could establish about bd's proxy without starting, stopping or writing
 	// anything.
@@ -83,6 +99,8 @@ type beadsStoreDiagnostic struct {
 	Store           string
 	PreflightGate   string
 	PreflightReason string
+	// Proxied is the proxied-native lane's account, nil on every other lane.
+	Proxied *beads.ProxiedDiagnostic
 }
 
 // proxiedEndpointProcessTable and probeProxiedEndpoint are the two pieces of
@@ -105,11 +123,104 @@ func newBeadsStorePayload(scopeRoot string, target contract.DoltConnectionTarget
 		Store:           diag.Store,
 		PreflightGate:   diag.PreflightGate,
 		PreflightReason: diag.PreflightReason,
+		Proxied:         diag.Proxied,
 	}
 	if targetIsProviderOwnedProxied(target) || scopeBindingIsProviderOwnedProxied(scopeRoot) {
 		payload.Endpoint = inspectProxiedEndpoint(scopeRoot, target.Database)
 	}
 	return payload
+}
+
+// proxiedNativeStoreMessage is the operator's line for a scope gc is serving
+// natively over bd's proxy.
+//
+// It names the GENERATION rather than the port, because a port is not an
+// identity: bd allocates a fresh one on most respawns, and a sidecar that pins
+// --proxied-server-port hands the same one to a different process over a
+// different Dolt child. The generation is what tells an operator whether the
+// handle they are looking at is the one they were looking at a minute ago.
+//
+// It also says where writes go, unprompted. "native" on a line about a bead
+// store reads as "gc talks to Dolt", and the whole safety argument of this lane
+// is that it does not — every mutation is still bd's.
+func proxiedNativeStoreMessage(proxied *beads.ProxiedDiagnostic) string {
+	generation := "unknown"
+	if proxied != nil && proxied.Endpoint.Generation != "" {
+		generation = proxied.Endpoint.Generation
+	}
+	return fmt.Sprintf("native reads over bd proxy (gen %s, writes via bd CLI)", generation)
+}
+
+// rigProxiedStoreMessage is the rig lane's line for a bd-owned proxied scope.
+//
+// Rigs have no retained store-open diagnostic — NewRigBeadsCheck takes a factory
+// returning a bare beads.Store, and unlike the city's (api_state.go's
+// CityBeadsDiagnostic) a rig's is discarded after the open. So the lane is read
+// off the store gc is actually holding, which is the one piece of evidence this
+// check has — through the unwrap seam, so a policy- or cache-wrapped rig store
+// still answers instead of reading as the bd front door by default.
+func rigProxiedStoreMessage(store beads.Store) string {
+	if proxied, ok := beads.ProxiedStoreFrom(store); ok {
+		report := proxied.Report()
+		if !report.Demoted {
+			return proxiedNativeStoreMessage(&beads.ProxiedDiagnostic{
+				Endpoint: report.Endpoint,
+				Evidence: report.Evidence,
+			})
+		}
+		if verdict := proxied.Verdict(); verdict != nil {
+			return proxiedFallbackStoreMessage(&beads.ProxiedDiagnostic{Verdict: verdict.Verdict})
+		}
+	}
+	return proxiedProviderStoreMessage
+}
+
+// proxiedDemotedStoreMessage is the line for a handle that WAS serving natively
+// and has since stood down.
+//
+// It is a distinct message from the healthy fallback because the two are
+// different facts: a fallback never opened the lane, and a demotion opened it and
+// lost it. An operator debugging "why is this city forking again" needs to know
+// which, and the verdict names the cause. The status stays OK — the bd front door
+// is a supported store for a proxied scope, and the lane is a performance
+// property, not an availability one.
+func proxiedDemotedStoreMessage(proxied *beads.ProxiedDiagnostic) string {
+	verdict := beads.ProxiedVerdictNone
+	generation := "unknown"
+	if proxied != nil {
+		verdict = proxied.Verdict
+		if proxied.Endpoint.Generation != "" {
+			generation = proxied.Endpoint.Generation
+		}
+	}
+	if verdict == beads.ProxiedVerdictNone {
+		return fmt.Sprintf("native reads over bd proxy stood down (gen %s); reads and writes via bd CLI", generation)
+	}
+	return fmt.Sprintf("native reads over bd proxy stood down (gen %s, verdict=%s); reads and writes via bd CLI",
+		generation, verdict)
+}
+
+// proxiedFallbackStoreMessage is the healthy-fallback line: the message a
+// proxied scope has today, plus the verdict when the proxied-native lane
+// produced one.
+//
+// The base message is UNCHANGED on purpose. A fallback to the bd front door is
+// the designed outcome for a proxied scope, not a degradation, and doctor's
+// matcher plus the topology matrix both key on it. The verdict is appended
+// rather than substituted so an operator learns WHY the lane declined without
+// anything that reads the message losing its anchor.
+func proxiedFallbackStoreMessage(proxied *beads.ProxiedDiagnostic) string {
+	if proxied == nil || proxied.Verdict == beads.ProxiedVerdictNone {
+		return proxiedProviderStoreMessage
+	}
+	message := fmt.Sprintf("%s; verdict=%s", proxiedProviderStoreMessage, proxied.Verdict)
+	if proxied.Verdict == beads.ProxiedVerdictSchemaSkew && proxied.Cursors != (proxyendpoint.Cursors{}) {
+		// The one verdict whose qualifier an operator cannot infer: which lane
+		// drifted and in which direction is the difference between "the database
+		// would be migrated on open" and "this binary would issue old-shape SQL".
+		message += fmt.Sprintf(" (database %s, this binary expects %s)", proxied.Cursors, expectedCursors())
+	}
+	return message
 }
 
 // inspectProxiedEndpoint reads and classifies a proxied scope's endpoint, and

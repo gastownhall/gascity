@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/spf13/cobra"
 )
@@ -549,7 +550,7 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 			return 1
 		}
 		dops := newDrainOps(sp)
-		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, jsonOutput, stdout, stderr)
+		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, target.sessionID, jsonOutput, stdout, stderr)
 	}
 
 	current, err := currentSessionRuntimeTarget()
@@ -563,7 +564,8 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 		return 1
 	}
 	dops := newDrainOps(sp)
-	return doRuntimeDrainAck(dops, current.cityPath, current.display, current.sessionName, jsonOutput, stdout, stderr)
+	// Name-only key: the env-derived GC_SESSION_ID can be stale.
+	return doRuntimeDrainAck(dops, current.cityPath, current.display, current.sessionName, "", jsonOutput, stdout, stderr)
 }
 
 // ---------------------------------------------------------------------------
@@ -708,7 +710,8 @@ func doRuntimeRequestRestart(dops drainOps, persistRestart func() error, pinned 
 		Message: "restart requested by session",
 	})
 
-	if err := pokeControllerForRestart(cityPath); err != nil {
+	// Name-only key: sn is authoritative here, while GC_SESSION_ID can be stale.
+	if err := pokeControllerForRestart(cityPath, reconcilekey.SessionNamed(sn)); err != nil {
 		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -761,27 +764,9 @@ func waitForControllerRestart(ctx context.Context, dops drainOps, sp runtime.Pro
 	}
 }
 
-// pokeControllerForRestart signals the controller to run an immediate
-// reconcile tick instead of waiting for the next periodic patrol. It does not
-// wait for the controller to act: the restart-requested flag is durable, so a
-// signal failure just means the next periodic tick picks up the request
-// instead of an immediate one.
-//
-// This calls sendControllerCommandWithTimeouts directly rather than going
-// through pokeController: pokeController silently falls back to the
-// city-agnostic global supervisor socket on any send failure, which would
-// make an explicit-restart request for one city spuriously report success
-// via an unrelated supervisor.
-func pokeControllerForRestart(cityPath string) error {
-	if _, err := sendControllerCommandWithTimeouts(cityPath, "poke", 2*time.Second, 2*time.Second, 5*time.Second); err != nil {
-		return fmt.Errorf("signaling controller: %w (restart request remains durably set for the next reconcile tick)", err)
-	}
-	return nil
-}
-
-// drainAckPokeController is a mutable global test seam over pokeController.
+// drainAckPokeController is a mutable global test seam over enqueueController.
 // Tests that swap it MUST NOT call t.Parallel().
-var drainAckPokeController = pokeController
+var drainAckPokeController = enqueueController
 
 // drainAckReleaseHeldClaims is a mutable global test seam over
 // releaseUnexecutedClaimsForSession, matching drainAckPokeController above.
@@ -822,16 +807,20 @@ func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.W
 		}
 		return
 	}
-	store, err := openCityStoreAt(cityPath)
+	// One load serves every open below: drain-ack is a one-shot command, so
+	// the config it just read is current. The saving applies only when this
+	// load succeeds: a failed load leaves cfg nil, the city open then loads
+	// again on its own, and the rig legs are skipped as before.
+	cfg, _ := loadCityConfig(cityPath, io.Discard)
+	store, err := openCityStoreAtWithConfig(cityPath, cfg)
 	if err != nil || store == nil {
 		return
 	}
-	cfg, _ := loadCityConfig(cityPath, io.Discard)
 	rigStores := func() map[string]beads.Store {
 		if cfg == nil {
 			return nil
 		}
-		return buildStandaloneRigStores(cfg, cityPath, io.Discard)
+		return buildStandaloneRigStoresWithConfig(cfg, cityPath, io.Discard)
 	}
 	releaseUnexecutedClaimsForSessionStore(cityPath, cfg, store, rigStores, sessionName, drainAckReleaseBudget, stderr)
 }
@@ -895,13 +884,13 @@ const drainAckReleaseBudget = 15 * time.Second
 // tells the controller it may stop this session, so acknowledging first opens a
 // window in which the session dies still holding exactly the claim this release
 // exists to clear.
-func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
+func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer) int {
 	drainAckReleaseHeldClaims(cityPath, sn, stderr)
 	if err := dops.setDrainAck(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := drainAckPokeController(cityPath); err != nil {
+	if err := drainAckPokeController(cityPath, reconcilekey.SessionRef(sessionID, sn)); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	if jsonOutput {

@@ -130,20 +130,15 @@ func bundledPackDirForTest(t testing.TB, packName string) string {
 
 func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 	doltSystemNeedle := "information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe"
-	maintenanceScratchNeedle := "benchdb|testdb_*|beads_pt*|beads_vr*|beads_test_bench_*|doctest_*|doctortest_*"
-	maintenanceTempNeedle := "beads_t[0-9a-f]"
 	for _, tt := range []struct {
 		pack     string
 		rel      string
 		needle   string
 		minCount int
 	}{
-		{"core", "assets/scripts/jsonl-export.sh", doltSystemNeedle, 1},
-		{"core", "assets/scripts/jsonl-export.sh", maintenanceScratchNeedle, 1},
-		{"core", "assets/scripts/jsonl-export.sh", maintenanceTempNeedle, 1},
-		{"core", "assets/scripts/reaper.sh", doltSystemNeedle, 1},
-		{"core", "assets/scripts/reaper.sh", maintenanceScratchNeedle, 1},
-		{"core", "assets/scripts/reaper.sh", maintenanceTempNeedle, 1},
+		// The core reaper and jsonl-export no longer enumerate server
+		// databases: they visit bound bead scopes through `gc bd`, so neither
+		// the probe database nor test scratch databases can reach them.
 		{"core", "assets/scripts/reaper.sh", "expires_at", 1},
 		{"dolt", "commands/list/run.sh", doltSystemNeedle, 1},
 		{"dolt", "commands/cleanup/run.sh", doltSystemNeedle, 1},

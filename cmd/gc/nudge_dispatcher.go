@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // pingNudgeWakeSocketDialTimeout bounds how long a producer waits to dial
@@ -212,6 +213,14 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 			// skip reasons below at a glance.
 			skipCounts["not-matched"]++
 			logNudgeDispatchSkip(debugOut, "not-matched", target.agentKey(), target.sessionName, "")
+			continue
+		}
+		if sessionpkg.IsKillPendingInfo(info, now) {
+			// A `gc session kill` is tearing this runtime down. Delivering now
+			// would type into a process that is about to die and ack the item
+			// as delivered; leave it queued for the next incarnation.
+			skipCounts["kill-pending"]++
+			logNudgeDispatchSkip(debugOut, "kill-pending", target.agentKey(), target.sessionName, "")
 			continue
 		}
 		obs, err := workerObserveNudgeTarget(target, sessStore, sp)

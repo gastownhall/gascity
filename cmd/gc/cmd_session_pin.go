@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -128,7 +129,7 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 			return 1
 		}
 	}
-	pokeSessionPinController(cityErr, cityPath)
+	pokeSessionPinController(cityErr, cityPath, id)
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
@@ -150,9 +151,9 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 	return 0
 }
 
-func pokeSessionPinController(cityErr error, cityPath string) {
+func pokeSessionPinController(cityErr error, cityPath, sessionID string) {
 	if cityErr != nil || !cityUsesManagedReconciler(cityPath) {
 		return
 	}
-	_ = pokeController(cityPath)
+	_ = enqueueController(cityPath, reconcilekey.Session(sessionID))
 }

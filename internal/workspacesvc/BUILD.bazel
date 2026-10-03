@@ -32,6 +32,7 @@ go_test(
     srcs = [
         "manager_test.go",
         "orphan_reap_test.go",
+        "proxy_process_ready_test.go",
         "proxy_process_test.go",
         "publication_test.go",
         "testenv_import_test.go",

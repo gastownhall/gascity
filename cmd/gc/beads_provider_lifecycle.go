@@ -257,6 +257,13 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	}
 	if cityProviderOwned {
 		if cityState.State == providerScopeReady {
+			// The provider script pins a ready scope out of bd's shared-server
+			// mode by reading this pin, so it has to be in place before the
+			// start op runs bd (a city initialized by a build that did not
+			// write it is repaired here).
+			if err := ensureGCOwnedProxiedScopeSharedServerOff(cityPath, cityPath); err != nil {
+				return err
+			}
 			if err := ensureBeadsProvider(cityPath); err != nil {
 				return fmt.Errorf("provider-owned bead store: %w", err)
 			}
@@ -610,43 +617,61 @@ func desiredScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.
 // It lives here rather than in gc-beads-bd.sh on purpose: ga-5mym bans
 // `bd config set` from that script because it runs inside the provider op
 // timeout, where bd's auto-migrate can cost tens of seconds on a populated
-// store. This runs once, after init, outside that budget, against a store bd
-// has just created and is therefore empty.
+// store. This runs after the provider's init op on every start, outside that
+// budget; on a store that is already registered it costs two bd reads and no
+// write.
 //
-// Only an unset value is written. A scope that already carries types is an
-// operator's extension or a retried init, and narrowing that list would delete
-// types whose beads exist; `gc doctor --fix` owns reconciling a partial one.
+// Existing registrations are merged, never narrowed: the value written is the
+// config row ∪ what `bd types --json` reports (the custom_types table bd's
+// validator reads) ∪ doctor.RequiredCustomTypes, and it is written only when a
+// required type is missing from the row or the table. A scope migrated from a
+// legacy city, or any scope an older gc registered, already carries a list
+// without the newer required types (startup-health-episode, #6495); skipping
+// it because the row was non-empty left those types unregistered. Reading the
+// table as well matters twice: bd validates against it whenever it is
+// non-empty, and `bd config set` replaces it wholesale, so a table-only extra
+// must be in the merged value or the write would delete it.
 //
-// Best-effort by design. The canonical config gc just wrote is what bd
-// validates bead types against, so a scope whose table sync did not happen
-// still works; `gc doctor` reports the drift and `--fix` reconciles it with
-// this same call. Failing the whole init over a cache that doctor owns would
-// destroy a city that is otherwise complete.
+// Best-effort by design. A read failure writes nothing — a list that cannot be
+// proven a superset must not replace the table — and every failure logs the
+// `gc doctor --fix` hint instead of failing init: doctor's custom-types check
+// reports the same drift and --fix performs the same merge. Failing the whole
+// init over it would destroy a city that is otherwise complete.
 func registerProviderOwnedScopeCustomTypes(cityPath, dir string) {
+	const hint = "; run `gc doctor --fix`"
 	env, err := providerOwnedScopeCustomTypesEnv(cityPath, dir)
 	if err != nil {
-		log.Printf("gc: custom bead types not registered for %s: %v", dir, err)
+		log.Printf("gc: custom bead types not registered for %s: %v%s", dir, err, hint)
 		return
 	}
 	run := beads.ExecCommandRunnerWithEnv(env)
 
 	out, err := run(dir, "bd", "config", "get", "--json", "types.custom")
 	if err != nil {
-		log.Printf("gc: custom bead types not registered for %s: read: %v", dir, err)
+		log.Printf("gc: custom bead types not registered for %s: read types.custom: %v%s", dir, err, hint)
 		return
 	}
-	var current struct {
-		Value string `json:"value"`
-	}
-	if err := json.Unmarshal(out, &current); err != nil {
-		log.Printf("gc: custom bead types not registered for %s: parse: %v", dir, err)
+	row, err := doctor.ParseCustomTypesConfigJSON(out)
+	if err != nil {
+		log.Printf("gc: custom bead types not registered for %s: %v%s", dir, err, hint)
 		return
 	}
-	if strings.TrimSpace(current.Value) != "" {
+	out, err = run(dir, "bd", "types", "--json")
+	if err != nil {
+		log.Printf("gc: custom bead types not registered for %s: read custom_types: %v%s", dir, err, hint)
 		return
 	}
-	if _, err := run(dir, "bd", "config", "set", "types.custom", strings.Join(doctor.RequiredCustomTypes, ",")); err != nil {
-		log.Printf("gc: custom bead types not registered for %s: %v; run `gc doctor --fix`", dir, err)
+	table, err := doctor.ParseRegisteredTypesJSON(out)
+	if err != nil {
+		log.Printf("gc: custom bead types not registered for %s: %v%s", dir, err, hint)
+		return
+	}
+	if !doctor.CustomTypesNeedRegistration(row, table) {
+		return
+	}
+	merged := doctor.MergeRequiredCustomTypes(row, table)
+	if _, err := run(dir, "bd", "config", "set", "types.custom", strings.Join(merged, ",")); err != nil {
+		log.Printf("gc: custom bead types not registered for %s: %v%s", dir, err, hint)
 	}
 }
 
@@ -837,8 +862,19 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		if !strings.HasPrefix(provider, "exec:") {
 			return fmt.Errorf("provider-owned scope %q requires an exec beads provider", dir)
 		}
+		// A ready scope's init op is the provider `start` (a bd ping), and the
+		// script pins bd's shared-server mode off from this pin: write it first
+		// so a scope initialized by a build that wrote none is never pinged
+		// unpinned. No-op for an unmaterialized scope; re-applied after init,
+		// which rewrites config.yaml.
+		if err := ensureGCOwnedProxiedScopeSharedServerOff(cityPath, dir); err != nil {
+			return err
+		}
 		pending, err := runProviderOwnedScopeInit(cityPath, dir, prefix, strings.TrimPrefix(provider, "exec:"))
 		if err != nil {
+			return err
+		}
+		if err := ensureGCOwnedProxiedScopeSharedServerOff(cityPath, dir); err != nil {
 			return err
 		}
 		registerProviderOwnedScopeCustomTypes(cityPath, dir)
@@ -869,6 +905,9 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		return err
 	}
 	if err := normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase); err != nil {
+		return err
+	}
+	if err := ensureGCOwnedProxiedScopeSharedServerOff(cityPath, dir); err != nil {
 		return err
 	}
 	if cityUsesBdStoreContract(cityPath) && currentResolvableManagedDoltPort(cityPath) != "" {
@@ -1168,6 +1207,20 @@ func runProviderOwnedLifecycleOpContext(parent context.Context, cityPath, op str
 }
 
 func runProviderOwnedScopeLifecycleOpContext(parent context.Context, cityPath, scopeRoot, op string) error {
+	return runProviderOwnedScopeLifecycleOpGuarded(parent, cityPath, scopeRoot, op, nil)
+}
+
+// runProviderOwnedScopeLifecycleOpGuarded is runProviderOwnedScopeLifecycleOpContext
+// with a precondition checked while the per-city lifecycle slot is HELD, after
+// any wait for it and before the provider script runs. A non-nil error from it
+// is returned as-is and nothing is run.
+//
+// It exists for a verb aimed at a particular state that another holder of the
+// slot may change while this one queues: the proxied admission recover, whose
+// target generation the health loop's own recover of the same zombie may have
+// replaced with a healthy proxy by the time the slot is granted (round4
+// review F3).
+func runProviderOwnedScopeLifecycleOpGuarded(parent context.Context, cityPath, scopeRoot, op string, precondition func() error) error {
 	provider := beadsProvider(cityPath)
 	if !strings.HasPrefix(provider, "exec:") {
 		return fmt.Errorf("provider-owned scope requires an exec beads provider")
@@ -1193,6 +1246,11 @@ func runProviderOwnedScopeLifecycleOpContext(parent context.Context, cityPath, s
 		return err
 	}
 	defer release()
+	if precondition != nil {
+		if err := precondition(); err != nil {
+			return err
+		}
+	}
 	env, err := providerLifecycleProcessEnvForScopeInitWithError(cityPath, scopeRoot, provider)
 	if err != nil {
 		return err
@@ -1578,10 +1636,31 @@ func runProviderOwnedOpStrict(parent context.Context, timeout time.Duration, scr
 		if msg == "" {
 			msg = err.Error()
 		}
-		return fmt.Errorf("provider-owned beads %s: %s", op, msg)
+		text := fmt.Sprintf("provider-owned beads %s: %s", op, msg)
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return &providerOpExitError{text: text, exit: exitErr}
+		}
+		return errors.New(text)
 	}
 	return nil
 }
+
+// providerOpExitError is a provider-owned op whose script RAN and exited
+// non-zero before gc's deadline: the text runProviderOwnedOpStrict has always
+// returned, now with the child's exit status as its cause instead of dropped.
+//
+// The proxied lane needs that cause to tell bd's own answer from gc's
+// contention (see markProviderReportedFailure). Everything else reads the text
+// alone, which is unchanged.
+type providerOpExitError struct {
+	text string
+	exit *exec.ExitError
+}
+
+func (e *providerOpExitError) Error() string { return e.text }
+
+func (e *providerOpExitError) Unwrap() error { return e.exit }
 
 func ensureBeadsProvider(cityPath string) error {
 	if owned, err := cityScopeProviderOwned(cityPath); err != nil {
@@ -1942,6 +2021,10 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 	args := []string{"init", "-p", prefix, "--skip-hooks"}
 	if scopeInitUsesProxiedDoltMode(cityPath, dir) {
 		env["BEADS_DOLT_PROXIED_SERVER"] = "1"
+		// bd init under a user-level dolt.shared-server: true would root the
+		// new proxy in ~/.beads/shared-server and persist that choice into the
+		// scope's config.yaml. See applyProxiedSharedServerOptOut.
+		applyProxiedSharedServerOptOut(env)
 		// Idle-never is not an optimization, it is D3: without it bd retires
 		// the proxy and its Dolt child after 30s quiet and every later command
 		// pays a cold start. It also has to be passed for bd to write the
@@ -1993,7 +2076,7 @@ func finalizeCanonicalBdScopeInit(cityPath, dir, prefix, doltDatabase string) er
 	// that path can run direct SQL preflight and would either fail before the
 	// proxy is ready or accidentally create a second managed server.
 	if scopeInitUsesProxiedDoltMode(cityPath, dir) {
-		return nil
+		return ensureGCOwnedProxiedScopeSharedServerOff(cityPath, dir)
 	}
 	store, err := openStoreAtForCity(dir, cityPath)
 	if err != nil {
@@ -2482,7 +2565,7 @@ func validDoltRuntimeStateIdentity(state doltRuntimeState, cityPath string) (man
 }
 
 func managedDoltRuntimeProcessOwned(state doltRuntimeState, layout managedDoltRuntimeLayout) bool {
-	holderPID := findPortHolderPID(strconv.Itoa(state.Port))
+	holderPID := findPortHolderPID(strconv.Itoa(state.Port), state.PID)
 	if holderPID > 0 && holderPID != state.PID {
 		return false
 	}
@@ -3468,6 +3551,8 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		}
 		if entry.Intent.Transport == "proxied" {
 			applyProxiedDoltEnv(envMap)
+			// A journaled, initializing scope is gc-owned by construction.
+			applyProxiedSharedServerOptOut(envMap)
 		}
 		return mergeRuntimeEnv(nil, envMap), nil
 	}

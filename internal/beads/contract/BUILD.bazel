@@ -13,6 +13,7 @@ go_library(
         "mode.go",
         "preflight.go",
         "preflight_checker.go",
+        "shared_server.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/beads/contract",
     visibility = ["//:__subpackages__"],
@@ -37,6 +38,7 @@ go_test(
         "connection_dolt_mode_precedence_test.go",
         "connection_test.go",
         "files_atomic_write_test.go",
+        "files_bd_nested_config_test.go",
         "files_custom_types_test.go",
         "files_test.go",
         "identity_test.go",
@@ -44,8 +46,10 @@ go_test(
         "metadata_test.go",
         "migrate_journal_test.go",
         "mode_test.go",
+        "preflight_bdcontext_skip_test.go",
         "preflight_checker_test.go",
         "preflight_test.go",
+        "shared_server_test.go",
         "testenv_import_test.go",
     ],
     data = glob(
@@ -60,6 +64,7 @@ go_test(
         "//internal/bazeltest",
         "//internal/fsys",
         "//internal/testenv",
+        "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
 

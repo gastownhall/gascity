@@ -3374,3 +3374,54 @@ func writeGcBdProbeScript(t *testing.T, path, identity string) {
 		t.Fatal(err)
 	}
 }
+
+// TestGcBdPassthroughIgnoresStaleAmbientBdBin pins ga-weekw end to end: a
+// stale absolute BD_BIN inherited from a long-lived shell must not take
+// `gc bd` offline for a managed city with no workspace pin. The passthrough
+// runs the PATH bd, and the operator sees one warning naming the ignored value.
+func TestGcBdPassthroughIgnoresStaleAmbientBdBin(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	warnings := captureAmbientBdBinWarnings(t)
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	defer func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	}()
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setCwd(t, cityDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeBuiltinImportsFixture(t, cityDir, "core", "bd")
+
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(`#!/bin/sh
+set -eu
+printf '{"id":"gc-1","status":"in_progress"}\n'
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY_PATH", cityDir)
+	stale := "/nonexistent/beads/bd-rc2"
+	t.Setenv("BD_BIN", stale)
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"update", "gc-1", "--claim", "--json"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd() = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"id":"gc-1"`) {
+		t.Fatalf("stdout = %q, want PATH bd output", stdout.String())
+	}
+	if msg := warnings.String(); strings.Count(msg, "\n") != 1 || !strings.Contains(msg, stale) {
+		t.Fatalf("warning = %q, want one line naming ignored BD_BIN %q", msg, stale)
+	}
+}

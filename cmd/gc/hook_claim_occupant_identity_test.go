@@ -294,3 +294,47 @@ func TestPoolWorkerClaimIdentityDistinguishesOccupantsOfOneSlot(t *testing.T) {
 		seen[assignee] = beadID
 	}
 }
+
+// TestPoolWorkerClaimAndCloseIdentity is the full-pipeline regression for the
+// BEADS_ACTOR/claim mismatch: AssigneeIdentifier (and therefore
+// RuntimeEnvWithSessionContext's BEADS_ACTOR) used to fall back to the
+// reusable pool session_name for an unaliased pool worker, even though
+// hookClaimAssigneeIdentity's own precedence claims work under the session
+// bead id. Every bd command a live session runs -- including the close that
+// releases a claim -- is actored by BEADS_ACTOR, not a separately threaded
+// session id, so a claim recorded under the bead id but closed under
+// BEADS_ACTOR=session_name never satisfies bd's actor==assignee check and the
+// close silently fails to release ownership.
+//
+// This proves the whole chain agrees: the runtime projection's BEADS_ACTOR
+// (the close actor), the hook claim's computed assignee, and the unique
+// session bead id are all the same string.
+func TestPoolWorkerClaimAndCloseIdentity(t *testing.T) {
+	const beadID = "gcg-session-pool-worker"
+	info := sessiontest.SeedBead(t, beads.Bead{
+		ID:     beadID,
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:rig/claude-1"},
+		Metadata: map[string]string{
+			"template":             "rig/claude",
+			"agent_name":           "rig/claude-1",
+			"session_name":         "rig--claude-1-pool",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+
+	env := sessionpkg.RuntimeEnvWithSessionContext(info, 1, 1, "tok")
+	if env["GC_ALIAS"] != "" {
+		t.Fatalf("GC_ALIAS = %q, want empty for an unaliased pool slot", env["GC_ALIAS"])
+	}
+
+	assignee := hookClaimAssigneeIdentity(env["GC_ALIAS"], env["GC_SESSION_ID"], env["GC_AGENT"], "", env["GC_SESSION_NAME"])
+	if assignee != beadID {
+		t.Fatalf("hookClaimAssigneeIdentity = %q, want the session bead id %q", assignee, beadID)
+	}
+	if assignee != env["BEADS_ACTOR"] {
+		t.Fatalf("claim assignee %q != runtime BEADS_ACTOR %q -- the close actor must match what the claim was recorded under", assignee, env["BEADS_ACTOR"])
+	}
+}

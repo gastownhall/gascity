@@ -1,0 +1,6 @@
+{
+  "code": "proxy.backup.unsupported",
+  "error": "backup status is not supported in proxied-server mode",
+  "mutates": false,
+  "schema_version": 1
+}
