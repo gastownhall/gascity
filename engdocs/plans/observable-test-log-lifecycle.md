@@ -16,30 +16,36 @@ belong to active gates or are cited as evidence.
 
 ## Work packages
 
-| Order | Bead | Route | Acceptance outcome |
+| Stage | Bead | Route | Acceptance outcome |
 | --- | --- | --- | --- |
 | 1 | ga-4oym3q | architect (`needs-architecture`) | Decide and record a bounded retention and ownership contract for default and explicit logs, failure diagnostics, gate consumers, and legacy eligibility. |
 | 2 | ga-rqq0vq | validator (`needs-tests`) | Write isolated failing tests for that contract, including named PASS evidence, failures, timing artifacts, concurrency, and abnormal exits. |
 | 3 | ga-kjxikg | builder (`ready-to-build`) | Make passing runs follow the contract without changing test results or losing reviewer/deployer evidence; demonstrate that repeated runs stop growing unmanaged shared scratch files. |
-| 4 | ga-5w6zfy | builder (`ready-to-build`) | Deliver a dry-run inventory and narrowly scoped reclaim procedure for the old backlog. A live cleanup follows only the approved policy and mayor's disk-pressure trigger. |
+| After 1, parallel with 2–3 | ga-5w6zfy | builder (`ready-to-build`) | Deliver a dry-run inventory and narrowly scoped reclaim procedure for the old backlog. Live compression follows only the approved policy and mayor's disk-pressure trigger. |
 
-Dependency graph: ga-4oym3q → ga-rqq0vq → ga-kjxikg → ga-5w6zfy.
-The legacy-log package also depends directly on ga-4oym3q. Every package has a
-`discovered-from:ga-kpq7ib` edge so its admission origin stays visible.
+Dependency graph: ga-4oym3q → ga-rqq0vq → ga-kjxikg, and ga-4oym3q →
+ga-5w6zfy. The architect ruled that the legacy reclaim procedure is independent
+of the wrapper change, so PM removed its ga-kjxikg blocker on October 3. The
+reclaim package can proceed in parallel with tests and implementation. Every
+package has a `discovered-from:ga-kpq7ib` edge so its admission origin stays
+visible.
 
 ## Decision boundary and risks
 
-The architect chooses whether a passing log is compressed, placed in a caller
-owned directory, retained only for an explicit consumer, or handled another
-way. PM acceptance criteria state the observable result, not the storage
-mechanism. The design must account for the runner's current `OBSERVABLE_TEST_LOG`
-path and for the reviewer/deployer recipes that inspect PASS actions by name.
+Architect decision ga-4oym3q sets the implementation contract: default logs
+are wrapper-owned in a dedicated 0700 directory under the scratch root, stay
+readable for at least 72 hours after their last write, and are age-pruned by
+later wrapper runs. An explicit `OBSERVABLE_TEST_LOG` remains caller-owned.
+Legacy files use a separate dry-run-first, fail-closed, compress-only procedure;
+the disabled scratch cleaner stays untouched. See the decision bead for the
+complete safety guards and test cases.
 
 Two failures would make a nominal disk fix unsafe: deleting logs before gate
 consumers finish, and reclaiming a legacy file that still belongs to an active
-run or a cited gate. The separate last package and its direct dependency on the
-architecture decision keep those risks explicit. No package re-enables the
-disabled fleet scratch cleaner as a shortcut.
+run or a cited gate. The separate legacy package and its direct dependency on
+the architecture decision keep those risks explicit. At the October 3 recheck,
+`/` had 58 GB free, above the mayor's under-30-GB trigger for live relief. No
+package re-enables the disabled fleet scratch cleaner as a shortcut.
 
 ## Source checks
 
