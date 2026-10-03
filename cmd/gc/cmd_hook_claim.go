@@ -1262,17 +1262,6 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		return 1
 	}
 	result.ContinuationAssigned = assigned
-	// Enqueue a per-session continuation nudge when the hook just claimed a
-	// graph.v2 workflow root and pre-assigned at least one continuation sibling.
-	// gc.kind==workflow is the correct predicate here: only formula/compile.go
-	// sets this value (single writer), and preassignHookContinuationGroup only
-	// returns non-empty results for pool-routed graph.v2 beads
-	// (internal/graphroute/graphroute.go), so the two invariants together are
-	// equivalent to the narrower "formula_contract==graph.v2 &&
-	// continuation_group==pool-workflow" check.
-	if len(assigned) > 0 && bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow {
-		ops.EnqueueContinuationNudge(opts.Assignee)
-	}
 	if writeErr := writeHookClaimResultLine(result, opts.JSON, stdout); writeErr != nil {
 		// F-C. The claim is won but its result never left the process — the
 		// orphaned tool call's signature is EPIPE on a stdout whose reader the
@@ -1293,6 +1282,20 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		// because it returns before the stamp.
 		clearHookSessionCurrentClaim(opts, ops, stderr)
 		return unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, cause, bead, opts, ops, dir, stderr)
+	}
+	// Enqueue a per-session continuation nudge when the hook just claimed a
+	// graph.v2 workflow root and pre-assigned at least one continuation sibling.
+	// Only after the result was delivered: an undelivered claim is released
+	// above, and a nudge for a claim this session no longer holds would wake it
+	// for work it does not own.
+	// gc.kind==workflow is the correct predicate here: only formula/compile.go
+	// sets this value (single writer), and preassignHookContinuationGroup only
+	// returns non-empty results for pool-routed graph.v2 beads
+	// (internal/graphroute/graphroute.go), so the two invariants together are
+	// equivalent to the narrower "formula_contract==graph.v2 &&
+	// continuation_group==pool-workflow" check.
+	if len(assigned) > 0 && bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow {
+		ops.EnqueueContinuationNudge(opts.Assignee)
 	}
 	return 0
 }
