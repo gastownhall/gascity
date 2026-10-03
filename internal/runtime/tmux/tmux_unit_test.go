@@ -1088,6 +1088,9 @@ func TestPaneShowsBackgroundWork(t *testing.T) {
 	}{
 		{"done line with a background shell", []string{"✻ Worked for 1m 3s · done 9:30 AM · 1 shell still running", "", "❯ "}, true},
 		{"done line with background shells", []string{"✻ Worked for 4m 12s · 2 shells still running", "❯ "}, true},
+		{"done line with a shell and a monitor", []string{"✻ Worked for 22s · done 5:50 PM · 1 shell, 1 monitor still running", "❯ "}, true},
+		{"done line with shells and a monitor", []string{"✻ Worked for 22s · done 5:50 PM · 2 shells, 1 monitor still running", "❯ "}, true},
+		{"done line with a monitor listed before a shell", []string{"✻ Worked for 22s · done 5:50 PM · 1 monitor, 1 shell still running", "❯ "}, true},
 		{"bare idle prompt", []string{"❯ ", ""}, false},
 		{"done line without background work", []string{"✻ Worked for 1m 49s", "❯ "}, false},
 		{"busy spinner", []string{"· Wibbling… (3m 2s · ↓ 1.2k tokens)"}, false},

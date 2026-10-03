@@ -4618,8 +4618,11 @@ func paneContainsBusyIndicator(lines []string) bool {
 
 // backgroundWorkRe matches Claude Code's note, printed on a turn's done line,
 // that shells the agent started are still running after the turn ended, e.g.
-// "✻ Worked for 1m 3s · done 9:30 AM · 1 shell still running".
-var backgroundWorkRe = regexp.MustCompile(`\bshells? still running\b`)
+// "✻ Worked for 1m 3s · done 9:30 AM · 1 shell still running". The note lists
+// every kind of background task in one clause ("1 shell, 1 monitor still
+// running"), so a shell count anywhere in the clause counts; [^·] keeps the
+// match inside that one "·"-separated clause.
+var backgroundWorkRe = regexp.MustCompile(`\b\d+ shells?\b[^·]*\bstill running\b`)
 
 // turnSummaryRe matches Claude Code's done line, which closes every turn: a
 // glyph, a past-tense verb and the turn's duration, e.g. "✻ Worked for 5s" or
