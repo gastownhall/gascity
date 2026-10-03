@@ -22,22 +22,14 @@ var beadReconcileMaintenancePhases = []tickPhase{
 		}
 		return false
 	}},
-	{name: "sweep_detached_handoff_orphans", run: func(cr *CityRuntime, p *tickPass) bool {
-		if cr.cityBeadStore() != nil {
-			cr.runDetachedHandoffOrphansDelta(p.recordPhase)
-		}
-		return false
-	}},
-	{name: "nudge_dispatch_tick", run: func(cr *CityRuntime, p *tickPass) bool {
-		if cr.cityBeadStore() != nil {
-			cr.runNudgeDispatchTick(p.ctx, p.recordPhase)
-		}
-		return false
-	}},
+	sweepDetachedHandoffOrphansPhase,
+	nudgeDispatchTickPhase,
 }
 
-// bootBeadReconcileMaintenancePhases is the boot pass's share: it emits only
-// the marker-gated terminal usage facts, as the legacy boot reconcile does.
+// bootBeadReconcileMaintenancePhases is the boot pass's share, as the legacy
+// boot reconcile runs it: only the marker-gated terminal usage facts, no
+// historical transcript pass, then the detached-orphan delta and the nudge
+// fallback.
 var bootBeadReconcileMaintenancePhases = []tickPhase{
 	{name: "emit_due_compute_facts", run: func(cr *CityRuntime, p *tickPass) bool {
 		if cr.cityBeadStore() != nil {
@@ -45,7 +37,23 @@ var bootBeadReconcileMaintenancePhases = []tickPhase{
 		}
 		return false
 	}},
+	sweepDetachedHandoffOrphansPhase,
+	nudgeDispatchTickPhase,
 }
+
+var sweepDetachedHandoffOrphansPhase = tickPhase{name: "sweep_detached_handoff_orphans", run: func(cr *CityRuntime, p *tickPass) bool {
+	if cr.cityBeadStore() != nil {
+		cr.runDetachedHandoffOrphansDelta(p.recordPhase)
+	}
+	return false
+}}
+
+var nudgeDispatchTickPhase = tickPhase{name: "nudge_dispatch_tick", run: func(cr *CityRuntime, p *tickPass) bool {
+	if cr.cityBeadStore() != nil {
+		cr.runNudgeDispatchTick(p.ctx, p.recordPhase)
+	}
+	return false
+}}
 
 // maintenancePhases is phases without its session phases, each replaced by
 // its maintenance steps, in order: what the v2 reconciler leaves the
