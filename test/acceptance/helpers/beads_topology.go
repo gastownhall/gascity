@@ -7,10 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/mod/semver"
 )
 
 // The init topology matrix.
@@ -272,7 +275,7 @@ func StartExternalDolt(t *testing.T, env *Env, dataDir, database string) *Extern
 
 	cmd := exec.Command("dolt", "sql-server", "-H", "127.0.0.1", "-P", strconv.Itoa(port), "--data-dir", dataDir) //nolint:gosec // fixed argv, resolved through the test PATH
 	cmd.Dir = dataDir
-	cmd.Env = env.List()
+	cmd.Env = env.ToolList()
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
@@ -311,12 +314,7 @@ func (e *ExternalDolt) ProvisionBeadsDatabase(t *testing.T, env *Env, bdPath, wo
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		t.Fatalf("create provisioning workspace: %v", err)
 	}
-	cmd := exec.Command(bdPath, "init", "--server", //nolint:gosec // resolved test binary
-		"--server-host", e.Host, "--server-port", e.Port,
-		"--database", e.Database, "-p", prefix,
-		"--skip-hooks", "--skip-agents", "--quiet", "--non-interactive", workspace)
-	cmd.Dir = workspace
-	cmd.Env = append(env.List(), "BEADS_DIR="+filepath.Join(workspace, ".beads"))
+	cmd := e.provisionCommand(env, bdPath, workspace, prefix)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("provision beads database %q on %s: %v\n%s", e.Database, e.Addr(), err, out)
 	}
@@ -334,6 +332,23 @@ func (e *ExternalDolt) ProvisionBeadsDatabase(t *testing.T, env *Env, bdPath, wo
 		t.Fatalf("provisioned database has no project_id:\n%s", data)
 	}
 	e.ProjectID = identity.ProjectID
+}
+
+// provisionCommand is ProvisionBeadsDatabase's `bd init --server`.
+//
+// It runs under the Env's tool home, never the real HOME. This is the command
+// that started the operator's own shared Dolt server on 2026-09-29: bd init in
+// shared-server mode (a user-level `dolt.shared-server: true`) ignores the
+// explicit --server-host/--server-port and starts the host-wide server under
+// ~/.beads/shared-server with whatever dolt is on PATH — here, this run's.
+func (e *ExternalDolt) provisionCommand(env *Env, bdPath, workspace, prefix string) *exec.Cmd {
+	cmd := exec.Command(bdPath, "init", "--server", //nolint:gosec // resolved test binary
+		"--server-host", e.Host, "--server-port", e.Port,
+		"--database", e.Database, "-p", prefix,
+		"--skip-hooks", "--skip-agents", "--quiet", "--non-interactive", workspace)
+	cmd.Dir = workspace
+	cmd.Env = env.Clone().With("BEADS_DIR", filepath.Join(workspace, ".beads")).ToolList()
+	return cmd
 }
 
 // BeadsTopologies returns the matrix in the order AC-M lists it.
@@ -601,7 +616,7 @@ func RequireTopologyTooling(t *testing.T) (bdPath, doltPath string) {
 	if bdPath == "" {
 		MissingTooling(t, "bd is not available; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0")
 	}
-	out, err := exec.Command(bdPath, "init", "--help").CombinedOutput() //nolint:gosec // resolved test binary
+	out, err := ToolCommand(t, bdPath, "init", "--help").CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "--proxied-server") {
 		MissingTooling(t, "bd at %s has no proxied-server support; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0", bdPath)
 	}
@@ -610,6 +625,29 @@ func RequireTopologyTooling(t *testing.T) (bdPath, doltPath string) {
 		MissingTooling(t, "dolt is not installed")
 	}
 	return bdPath, doltPath
+}
+
+var bdVersionPattern = regexp.MustCompile(`bd version (\d+\.\d+\.\d+[0-9A-Za-z.+-]*)`)
+
+// RequireBDAtLeast skips the test, cheaply and before any fixture is built,
+// when bdPath reports a version below minVersion (a semver string such as
+// "v1.3.1-0", which admits that release's candidates). feature names what
+// the older bd lacks, for the skip message.
+func RequireBDAtLeast(t *testing.T, bdPath, minVersion, feature string) {
+	t.Helper()
+	out, err := ToolCommand(t, bdPath, "version").CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s version: %v\n%s", bdPath, err, out)
+	}
+	m := bdVersionPattern.FindStringSubmatch(string(out))
+	if m == nil {
+		t.Fatalf("cannot parse a bd version from %q", out)
+	}
+	if semver.Compare("v"+m[1], minVersion) < 0 {
+		// A skip, not MissingTooling: an older bd is a supported pin, not
+		// absent tooling, and must not fail a lane that requires tooling.
+		t.Skipf("bd %s at %s predates %s (needs %s); set GC_ACCEPTANCE_BD_BIN to a newer bd", m[1], bdPath, feature, minVersion)
+	}
 }
 
 // LegacyGCBinary returns the pre-journal gc binary, or "" when unset.
@@ -689,14 +727,7 @@ func LegacyInitEnv(env *Env) *Env {
 func TopologyEnv(t *testing.T, base *Env, root, bdPath, doltPath string) *Env {
 	t.Helper()
 	linkDir := filepath.Join(root, "bin")
-	if err := os.MkdirAll(linkDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for name, target := range map[string]string{"bd": bdPath, "dolt": doltPath} {
-		if err := os.Symlink(target, filepath.Join(linkDir, name)); err != nil && !os.IsExist(err) {
-			t.Fatal(err)
-		}
-	}
+	LinkBeadsTooling(t, base, linkDir, bdPath, doltPath)
 	env := base.Clone()
 	entries := filepath.SplitList(env.Get("PATH"))
 	path := append([]string{entries[0], linkDir}, entries[1:]...)
@@ -976,6 +1007,21 @@ func WaitForNoDoltProcesses(t *testing.T, root string, timeout time.Duration) []
 		last := DoltProcessesUnder(t, root)
 		if len(last) == 0 || time.Now().After(deadline) {
 			return last
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// WaitForDoltProcesses polls for up to within and returns the bd proxy and
+// dolt sql-server processes under root as soon as any appear, or nil. It is
+// the absence check for a command that must not start one: a leaked proxy
+// stays up, so a short window is enough to see it.
+func WaitForDoltProcesses(t *testing.T, root string, within time.Duration) []string {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		if found := DoltProcessesUnder(t, root); len(found) != 0 || time.Now().After(deadline) {
+			return found
 		}
 		time.Sleep(250 * time.Millisecond)
 	}

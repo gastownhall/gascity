@@ -97,7 +97,7 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 		}); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: marking logical pass: %w", logicalID, err)
 		}
-		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass); err != nil {
+		if err := updateMetadataAndClose(store, bead.ID, controlCompletionMetadata(bead, beadmeta.OutcomePass)); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed eval: %w", bead.ID, err)
 		}
 		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomePass); err != nil {
@@ -115,7 +115,7 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 		}); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: marking logical hard failure: %w", logicalID, err)
 		}
-		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
+		if err := updateMetadataAndClose(store, bead.ID, controlCompletionMetadata(bead, beadmeta.OutcomeFail)); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing hard-failed eval: %w", bead.ID, err)
 		}
 		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {
@@ -129,7 +129,7 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 		// attempt. The cancellation gate normally closes retry-eval beads before
 		// they reach here; this is the defensive terminal path when an eval does
 		// classify a canceled subject.
-		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeCanceled); err != nil {
+		if err := updateMetadataAndClose(store, bead.ID, controlCompletionMetadata(bead, beadmeta.OutcomeCanceled)); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing canceled eval: %w", bead.ID, err)
 		}
 		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeCanceled); err != nil {
@@ -149,7 +149,7 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 				}); err != nil {
 					return ControlResult{}, fmt.Errorf("%s: marking logical soft-fail: %w", logicalID, err)
 				}
-				if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
+				if err := updateMetadataAndClose(store, bead.ID, controlCompletionMetadata(bead, beadmeta.OutcomeFail)); err != nil {
 					return ControlResult{}, fmt.Errorf("%s: closing exhausted eval: %w", bead.ID, err)
 				}
 				if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomePass); err != nil {
@@ -166,7 +166,7 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 			}); err != nil {
 				return ControlResult{}, fmt.Errorf("%s: marking exhausted logical failure: %w", logicalID, err)
 			}
-			if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
+			if err := updateMetadataAndClose(store, bead.ID, controlCompletionMetadata(bead, beadmeta.OutcomeFail)); err != nil {
 				return ControlResult{}, fmt.Errorf("%s: closing exhausted eval: %w", bead.ID, err)
 			}
 			if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {

@@ -548,6 +548,16 @@ func TestProbeRigOnlyPersistedServerModeAuthorizesTCPProbe(t *testing.T) {
 			wantEndpoint: true,
 		},
 		{
+			// bd >= 1.3.1 writes `bd config set dolt.mode` nested.
+			name:         "nested server config without metadata",
+			config:       "dolt:\n    mode: server\n",
+			wantEndpoint: true,
+		},
+		{
+			name:   "flat config mode wins over nested",
+			config: "dolt:\n    mode: server\ndolt.mode: embedded\n",
+		},
+		{
 			name:     "malformed metadata overrides server config",
 			metadata: "{not-json",
 			config:   "dolt.mode: server\n",

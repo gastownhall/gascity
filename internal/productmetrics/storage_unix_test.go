@@ -24,6 +24,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestValidateAncestorDirectoryAcceptsNamespaceOverflowOnlyAtRoot(t *testing.T) {
+	metadata := storageMetadata{
+		uid:   namespaceOverflowUID,
+		mode:  unix.S_IFDIR | 0o755,
+		nlink: 1,
+	}
+	if err := validateAncestorDirectory(metadata, "/", 1000); err != nil {
+		t.Fatalf("overflow-owned filesystem root rejected: %v", err)
+	}
+	if err := validateAncestorDirectory(metadata, "/tmp", 1000); err == nil {
+		t.Fatal("overflow-owned descendant accepted")
+	}
+}
+
 func inspectStorageTestHome(t *testing.T, createRoot bool) gchome.ProductUsageHome {
 	t.Helper()
 	// The shared workspace lives below a deliberately group-writable /data.

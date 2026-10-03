@@ -242,7 +242,7 @@ Rig-scoped requirements are validated while loading the pack for a rig.
 Pack imports are named dependencies.
 
 ```toml
-[imports.gascity]
+[imports.gc]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 version = "^1"
 ```
