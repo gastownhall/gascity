@@ -233,7 +233,7 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, configDirty, nil, convergenceReqCh, newLegacyWake(pokeCh, controlDispatcherCh))
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestHandleControllerConnIdentifiesSupervisorHosting(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, cityPath, controllerHostingSupervisor, func() {}, nil, nil, nil, nil, nil, nil)
+		handleControllerConn(server, cityPath, controllerHostingSupervisor, func() {}, nil, nil, nil, nil, nil)
 		close(done)
 	}()
 
@@ -749,7 +749,7 @@ func TestWatchConfigDirs_DetectsFileChangeAndSetsDirty(t *testing.T) {
 	var dirty atomic.Bool
 	pokeCh := make(chan struct{}, 1)
 	var stderr bytes.Buffer
-	cleanup := watchConfigTargets([]config.WatchTarget{{Path: dir, DiscoverConventions: true}}, testConfigDebounce, &dirty, pokeCh, &stderr)
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: dir, DiscoverConventions: true}}, testConfigDebounce, &dirty, newLegacyWake(pokeCh, nil), &stderr)
 	defer cleanup()
 
 	// Rewrite city.toml — fsnotify watches the dir, so the write fires
@@ -814,7 +814,7 @@ func TestWatchConfigDirs_FileSeedStillWatchesFile(t *testing.T) {
 	var dirty atomic.Bool
 	pokeCh := make(chan struct{}, 1)
 	var stderr bytes.Buffer
-	cleanup := watchConfigTargets([]config.WatchTarget{{Path: tomlPath}}, testConfigDebounce, &dirty, pokeCh, &stderr)
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: tomlPath}}, testConfigDebounce, &dirty, newLegacyWake(pokeCh, nil), &stderr)
 	defer cleanup()
 
 	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test-v2\"\n"), 0o644); err != nil {
@@ -841,7 +841,7 @@ func TestWatchConfigDirs_CityRootDoesNotWatchUnrelatedNestedSubdir(t *testing.T)
 	var dirty atomic.Bool
 	pokeCh := make(chan struct{}, 1)
 	var stderr bytes.Buffer
-	cleanup := watchConfigTargets([]config.WatchTarget{{Path: dir, DiscoverConventions: true}}, testConfigDebounce, &dirty, pokeCh, &stderr)
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: dir, DiscoverConventions: true}}, testConfigDebounce, &dirty, newLegacyWake(pokeCh, nil), &stderr)
 	defer cleanup()
 
 	select {
@@ -887,7 +887,7 @@ func TestWatchConfigDirs_CityRootIgnoresRuntimeTraceWrites(t *testing.T) {
 	var dirty atomic.Bool
 	pokeCh := make(chan struct{}, 1)
 	var stderr bytes.Buffer
-	cleanup := watchConfigTargets([]config.WatchTarget{{Path: dir, DiscoverConventions: true}}, testConfigDebounce, &dirty, pokeCh, &stderr)
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: dir, DiscoverConventions: true}}, testConfigDebounce, &dirty, newLegacyWake(pokeCh, nil), &stderr)
 	defer cleanup()
 
 	select {
@@ -942,7 +942,7 @@ func TestWatchConfigDirs_SymlinkSeedDirWatchesNestedPreExistingDir(t *testing.T)
 	var dirty atomic.Bool
 	pokeCh := make(chan struct{}, 1)
 	var stderr bytes.Buffer
-	cleanup := watchConfigTargets([]config.WatchTarget{{Path: linkDir, Recursive: true}}, testConfigDebounce, &dirty, pokeCh, &stderr)
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: linkDir, Recursive: true}}, testConfigDebounce, &dirty, newLegacyWake(pokeCh, nil), &stderr)
 	defer cleanup()
 
 	if err := os.WriteFile(promptPath, []byte("edited\n"), 0o644); err != nil {
@@ -970,7 +970,7 @@ func TestWatchConfigDirs_RecreatedRecursiveSubdirStillWatched(t *testing.T) {
 	var dirty atomic.Bool
 	pokeCh := make(chan struct{}, 1)
 	var stderr bytes.Buffer
-	cleanup := watchConfigTargets([]config.WatchTarget{{Path: agentsDir, Recursive: true}}, testConfigDebounce, &dirty, pokeCh, &stderr)
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: agentsDir, Recursive: true}}, testConfigDebounce, &dirty, newLegacyWake(pokeCh, nil), &stderr)
 	defer cleanup()
 
 	if err := os.RemoveAll(agentDir); err != nil {
@@ -1035,7 +1035,7 @@ func TestWatchConfigDirs_Regression780_DetectsEditInPreExistingNestedSubdir(t *t
 	cleanup := watchConfigTargets([]config.WatchTarget{
 		{Path: dir, DiscoverConventions: true},
 		{Path: agentsDir, Recursive: true},
-	}, testConfigDebounce, &dirty, pokeCh, &stderr)
+	}, testConfigDebounce, &dirty, newLegacyWake(pokeCh, nil), &stderr)
 	defer cleanup()
 
 	// Drain any startup poke.
@@ -1244,7 +1244,7 @@ func TestHandleControllerConnControlDispatcher(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, cityPath, controllerHostingStandalone, func() {}, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+		handleControllerConn(server, cityPath, controllerHostingStandalone, func() {}, nil, nil, nil, convergenceReqCh, newLegacyWake(pokeCh, controlDispatcherCh))
 		close(done)
 	}()
 

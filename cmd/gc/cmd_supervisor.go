@@ -1684,9 +1684,16 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			// their agents (e.g. after a child process was killed).
 			snap := registry.Snapshot()
 			for _, v := range snap.all {
-				if v.Started && v.cs != nil {
-					v.cs.Enqueue(reconcilekey.Allocator()) // reload: re-plan each city
+				if !v.Started || v.cs == nil {
+					continue
 				}
+				// A view's state is always its runtime's *controllerState.
+				cs, ok := v.cs.(*controllerState)
+				if !ok || cs == nil {
+					fmt.Fprintf(stderr, "gc supervisor: reload: city '%s': state %T has no controller wake; not poked\n", v.Name, v.cs) //nolint:errcheck // best-effort stderr
+					continue
+				}
+				cs.wakeOf().Enqueue(routeReasonSupervisor, reconcilekey.Allocator()) // reload: re-plan each city
 			}
 			// Per sd_notify(3) a reload ends with READY=1.
 			notifySdState(stderr, sdnotify.Ready)
@@ -2176,10 +2183,10 @@ func startOneCity(
 
 	// Latch the session reconciler before any init: a refused city must not
 	// start its bead store or open its event log.
-	reconcilerMode, modeErr := latchReconcilerMode(cfg)
-	if modeErr != nil {
-		emitPendingCityCreateFailure(cr, path, cityName, "session_reconciler_refused", modeErr, stderr)
-		recordInitFailure(cityName, modeErr.Error())
+	wiring, wiringErr := newControllerWiring(cfg)
+	if wiringErr != nil {
+		emitPendingCityCreateFailure(cr, path, cityName, "session_reconciler_refused", wiringErr, stderr)
+		recordInitFailure(cityName, wiringErr.Error())
 		return
 	}
 
@@ -2273,16 +2280,10 @@ func startOneCity(
 	poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, path, sp, stderr)
 	watchTargets := config.WatchTargets(prov, cfg, path)
 	configRev := config.Revision(fsys.OSFS{}, prov, cfg, path)
-	pokeCh := make(chan struct{}, 1)
-	configDirty := &atomic.Bool{}
 	forceShutdown := &atomic.Bool{}
-	reloadReqCh := make(chan reloadRequest)
 	cityCtx, cityCancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	mc := &managedCity{name: cityName, cancel: cityCancel, done: done, closer: fr}
-
-	convergenceReqCh := make(chan convergenceRequest, 16)
-	controlDispatcherCh := make(chan struct{}, 1)
 
 	var cityRuntime *CityRuntime
 	if err := runPostPrepareStep("building_city_runtime", func() error {
@@ -2293,9 +2294,9 @@ func startOneCity(
 			TomlPath:                tomlPath,
 			WatchTargets:            watchTargets,
 			ConfigRev:               configRev,
-			ConfigDirty:             configDirty,
+			ConfigDirty:             wiring.configDirty,
 			Cfg:                     cfg,
-			ReconcilerMode:          reconcilerMode,
+			ReconcilerMode:          wiring.mode,
 			SP:                      sp,
 			Publication:             publication,
 			BuildFn:                 supervisorBuildAgentsFn(path, cityName, stderr),
@@ -2305,10 +2306,10 @@ func startOneCity(
 			PoolSessions:            poolSessions,
 			PoolDeathHandlers:       poolDeathHandlers,
 			ForceStopShutdown:       forceShutdown,
-			ReloadReqCh:             reloadReqCh,
-			ConvergenceReqCh:        convergenceReqCh,
-			PokeCh:                  pokeCh,
-			ControlDispatcherCh:     controlDispatcherCh,
+			ReloadReqCh:             wiring.reloadReqCh,
+			ConvergenceReqCh:        wiring.convergenceReqCh,
+			PokeCh:                  wiring.pokeCh,
+			ControlDispatcherCh:     wiring.controlDispatcherCh,
 			TranscriptMetaEnabled:   transcriptmeta.Enabled(),
 			OnStarted: func() {
 				cr.UpdateCallback(path, func(m *managedCity) {
@@ -2353,8 +2354,8 @@ func startOneCity(
 		return
 	}
 	cs.ct = cityRuntime.crashTrack()
-	wireControllerWakeSignals(cs, pokeCh, controlDispatcherCh)
-	cs.configDirty = configDirty
+	wireControllerWakeSignals(cs, wiring.wake)
+	cs.configDirty = wiring.configDirty
 	cs.services = cityRuntime.svc
 	cityRuntime.setControllerState(cs)
 
@@ -2465,7 +2466,7 @@ func startOneCity(
 	// Start controller socket AFTER the alreadyRunning check so we
 	// never destroy a live city's socket or leak a listener.
 	sockPath := controllerSocketPath(path)
-	lis, lisErr := startControllerSocket(path, controllerHostingSupervisor, cityCancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, lisErr := startControllerSocket(path, controllerHostingSupervisor, cityCancel, forceShutdown, wiring.configDirty, wiring.reloadReqCh, wiring.convergenceReqCh, wiring.wake)
 	if lisErr != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck
 		lock.Close()                                                                               //nolint:errcheck // no socket to race with

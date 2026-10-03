@@ -330,7 +330,7 @@ func (cr *CityRuntime) detectPoolDeaths(lane *runtimeInventoryLane, r *inventory
 		for i, name := range r.gone {
 			keys[i] = reconcilekey.SessionNamed(name)
 		}
-		legacyEnqueue(cr.pokeCh, nil, keys...)
+		cr.wakeOf().Enqueue(wakeReasonLaneGone, keys...)
 	}
 }
 
@@ -380,7 +380,7 @@ func (cr *CityRuntime) startOnDeathWorker(ctx context.Context, lane *runtimeInve
 				if retry {
 					gate.retry(e)
 				} else if gate.finish(e) {
-					legacyEnqueue(cr.pokeCh, nil, reconcilekey.SessionNamed(e.name))
+					cr.wakeOf().Enqueue(wakeReasonOnDeath, reconcilekey.SessionNamed(e.name))
 				}
 			}
 		}

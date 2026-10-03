@@ -97,10 +97,11 @@ type controllerState struct {
 	version                string
 	startedAt              time.Time
 	storeMetadataSignature string
-	ct                     crashTracker  // nil if crash tracking disabled
-	pokeCh                 chan struct{} // nil when poke is not available; triggers immediate reconciler tick
-	controlDispatcherCh    chan struct{} // nil when unavailable; triggers the control-dispatcher-only reconcile
-	configDirty            *atomic.Bool  // optional dirty flag shared with the reconciler reload path
+	ct                     crashTracker    // nil if crash tracking disabled
+	wake                   *controllerWake // the controller's wake; nil when not wired (see wakeOf)
+	pokeCh                 chan struct{}   // wakeOf's fallback when no wake is wired; triggers immediate reconciler tick
+	controlDispatcherCh    chan struct{}   // wakeOf's fallback when no wake is wired; triggers the control-dispatcher-only reconcile
+	configDirty            *atomic.Bool    // optional dirty flag shared with the reconciler reload path
 	services               workspacesvc.Registry
 	extmsgSvc              *extmsg.Services
 	adapterReg             *extmsg.AdapterRegistry
@@ -520,6 +521,8 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 // startBeadEventWatcher subscribes to the event bus and feeds bead events
 // to all CachingStore instances for sub-second cache freshness on agent-
 // initiated bd mutations (bd hooks → gc event emit → this watcher → ApplyEvent).
+// A failed Watch, a broken tail and a sequence that goes backwards are
+// reported to the controller wake as event gaps: events may be missing.
 func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 	ep := cs.EventProvider()
 	if ep == nil {
@@ -559,6 +562,7 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 					return
 				}
 				fmt.Fprintf(os.Stderr, "api: bead event watcher: watch from seq %d: %v\n", seq, err)
+				cs.wakeOf().OnEventGap()
 				select {
 				case <-ctx.Done():
 					return
@@ -572,6 +576,9 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 					_ = watcher.Close()
 					break
 				}
+				if evt.Seq < seq {
+					cs.wakeOf().OnEventGap() // the log went backwards
+				}
 				seq = evt.Seq
 				switch evt.Type {
 				case events.BeadCreated, events.BeadUpdated, events.BeadClosed, events.BeadDeleted:
@@ -581,6 +588,7 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
+			cs.wakeOf().OnEventGap() // the tail broke
 		}
 	}()
 }
@@ -834,11 +842,7 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 			}
 		}
 	}
-	if !snapshot {
-		// Key-less for now: mapping evt.Subject to the session or template
-		// it concerns needs the reverse indexes a keyed reconciler brings.
-		cs.Enqueue(reconcilekey.Allocator())
-	}
+	cs.wakeOf().OnBeadEvent(snapshot)
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
 		rec := events.Discard
 		cs.mu.RLock()
@@ -3057,8 +3061,7 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 	if cs.configDirty != nil {
 		cs.configDirty.Store(true)
 	}
-	// A config mutation re-plans the city: allocator.
-	cs.Enqueue(reconcilekey.Allocator())
+	cs.wakeOf().WakeMaintenance()
 	return nil
 }
 
@@ -3093,15 +3096,15 @@ func (cs *controllerState) loadCurrentConfigSnapshot() (*config.City, string, er
 	return nextCfg, revision, nil
 }
 
-// Enqueue asks the controller to reconcile keys promptly (see
-// reconcile_enqueue.go). Under the legacy reconciler it is the old Poke:
-// a non-blocking signal dropped when one is already pending, with the
+// Enqueue asks the controller to reconcile keys promptly, through the
+// controller wake. Under the legacy reconciler it is the old Poke: a
+// non-blocking signal dropped when one is already pending, with the
 // control-dispatch key going to the control-dispatcher signal instead.
 func (cs *controllerState) Enqueue(keys ...reconcilekey.Key) {
 	if cs == nil {
 		return
 	}
-	legacyEnqueue(cs.pokeCh, cs.controlDispatcherCh, keys...)
+	cs.wakeOf().Enqueue(wakeReasonAPI, keys...)
 }
 
 // WaitForSessionCommandable waits until the controller has reconciled an async

@@ -266,8 +266,9 @@ type CityRuntime struct {
 	convergenceReqCh    chan convergenceRequest      // receives CLI commands from controller.sock
 	reloadReqCh         chan reloadRequest           // receives structured reload requests from controller.sock
 	pokeCh              chan struct{}                // non-blocking signal to trigger immediate reconciler tick
-	sessionEvents       *sessionEventPump            // provider event stream → pokeCh bridge; wired by run()
+	sessionEvents       *sessionEventPump            // provider event stream → wake bridge; wired by run()
 	controlDispatcherCh chan struct{}                // non-blocking signal for control-dispatcher-only reconcile
+	wake                *controllerWake              // the wake over pokeCh and controlDispatcherCh; built once by initWake
 	nudgeWakeCh         chan struct{}                // signal to dispatch queued nudges; fed by wake socket listener
 	reloadMu            sync.Mutex                   // guards activeReload
 	activeReload        *reloadRequest
@@ -539,6 +540,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		stdout:            p.Stdout,
 		stderr:            p.Stderr,
 	}
+	cr.initWake()
 	cr.publishPoolDeathHandlers(p.PoolDeathHandlers)
 	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
 	if err := cr.svc.Reload(); err != nil {
@@ -558,7 +560,16 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 // accessors read it under RLock.
 func (cr *CityRuntime) setControllerState(cs *controllerState) {
 	cr.cs = cs
+	if hook := controllerStateWiredHook; hook != nil {
+		hook(cr)
+	}
 }
+
+// controllerStateWiredHook, when set by a test, observes each city runtime
+// right after setControllerState, which both entry points call once the
+// controller state's wake is wired. Tests that set it MUST NOT call
+// t.Parallel().
+var controllerStateWiredHook func(*CityRuntime)
 
 // crashTracker returns the crash tracker for API server wiring.
 func (cr *CityRuntime) crashTrack() crashTracker {
@@ -887,10 +898,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	}
 
 	// Bridge the provider's push session-event stream (if it has one) into
-	// pokeCh: a session death pokes the reconciler within seconds instead of
-	// surfacing at the next patrol scan. Config reload re-points the pump
+	// the wake: a session death pokes the reconciler within seconds instead
+	// of surfacing at the next patrol scan. Config reload re-points the pump
 	// when it swaps the provider.
-	cr.sessionEvents = newSessionEventPump(ctx, cr.pokeCh, cr.stderr, cr.logPrefix)
+	cr.sessionEvents = newSessionEventPump(ctx, cr.wakeOf(), cr.stderr, cr.logPrefix)
 	if cr.inventoryLane != nil {
 		cr.sessionEvents.wakeInventory = cr.inventoryLane.wake
 	}
@@ -2213,7 +2224,7 @@ func (cr *CityRuntime) handleReloadRequest(req *reloadRequest) {
 			),
 		})
 	}
-	legacyEnqueue(cr.pokeCh, nil, reconcilekey.Allocator()) // config reload: allocator
+	cr.wakeOf().WakeMaintenance()
 	req.acceptedCh <- reloadControlReply{
 		Outcome: reloadOutcomeAccepted,
 		Message: "Reload requested.",
@@ -2826,7 +2837,7 @@ func (cr *CityRuntime) restartConfigWatcher() {
 		dirty = &atomic.Bool{}
 		cr.configDirty = dirty
 	}
-	cleanup := watchConfigTargets(cr.configWatcherTargets(), cr.configDebounce, dirty, cr.pokeCh, cr.stderr)
+	cleanup := watchConfigTargets(cr.configWatcherTargets(), cr.configDebounce, dirty, cr.wakeOf(), cr.stderr)
 
 	cr.watchMu.Lock()
 	cr.watchCleanup = cleanup
@@ -3528,7 +3539,7 @@ func (cr *CityRuntime) requestDeferredDrainFollowUpTick() {
 		return
 	}
 	// Key-less: the follow-up covers every deferred drain at once.
-	legacyEnqueue(cr.pokeCh, nil, reconcilekey.Allocator())
+	cr.wakeOf().Enqueue(wakeReasonFollowUp, reconcilekey.Allocator())
 }
 
 func (cr *CityRuntime) ensureAsyncStartLimiter() *asyncStartLimiter {
@@ -3565,7 +3576,7 @@ func (cr *CityRuntime) requestAsyncStartFollowUpTick() {
 	// should prompt one cheap reconciliation pass to observe the new reality.
 	// Key-less: the completion callback does not carry the session, and a
 	// start also changes supply, which the allocator must re-plan.
-	legacyEnqueue(cr.pokeCh, nil, reconcilekey.Allocator())
+	cr.wakeOf().Enqueue(wakeReasonFollowUp, reconcilekey.Allocator())
 }
 
 func (cr *CityRuntime) waitForAsyncStarts() bool {

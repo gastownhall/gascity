@@ -148,8 +148,7 @@ func startControllerSocket(
 	dirty *atomic.Bool,
 	reloadReqCh chan reloadRequest,
 	convergenceReqCh chan convergenceRequest,
-	pokeCh chan struct{},
-	controlDispatcherCh chan struct{},
+	wake *controllerWake,
 ) (net.Listener, error) {
 	if !hostingMode.known() {
 		return nil, fmt.Errorf("starting controller socket: invalid hosting mode %q", hostingMode)
@@ -170,7 +169,7 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+			go handleControllerConn(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, wake)
 		}
 	}()
 	return lis, nil
@@ -190,8 +189,7 @@ func handleControllerConn(
 	dirty *atomic.Bool,
 	reloadReqCh chan reloadRequest,
 	convergenceReqCh chan convergenceRequest,
-	pokeCh chan struct{},
-	controlDispatcherCh chan struct{},
+	wake *controllerWake,
 ) {
 	defer conn.Close()                                 //nolint:errcheck // best-effort cleanup
 	conn.SetDeadline(time.Now().Add(95 * time.Second)) //nolint:errcheck // symmetric read+write deadline; 5s margin over 30s enqueue + 60s reply
@@ -219,19 +217,18 @@ func handleControllerConn(
 			// non-blocking enqueue for event-driven wake, e.g. after sling
 			// assigns work or a session is drained. Key-less = allocator.
 			key, _ := parsePokeSocketCommand(line)
-			legacyEnqueue(pokeCh, controlDispatcherCh, key)
+			wake.Enqueue(wakeReasonSocket, key)
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case line == "reload":
 			if dirty != nil {
 				dirty.Store(true)
 			}
-			// Config reload re-plans the whole city: allocator.
-			legacyEnqueue(pokeCh, nil, reconcilekey.Allocator())
+			wake.WakeMaintenance()
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case strings.HasPrefix(line, "reload:"):
 			handleReloadSocketCmd(conn, line[len("reload:"):], reloadReqCh)
 		case line == "control-dispatcher":
-			legacyEnqueue(nil, controlDispatcherCh, reconcilekey.ControlDispatch())
+			wake.Enqueue(wakeReasonSocket, reconcilekey.ControlDispatch())
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case strings.HasPrefix(line, sessionCircuitResetCommandPrefix):
 			handleSessionCircuitResetSocketCmd(conn, cityPath, line[len(sessionCircuitResetCommandPrefix):])
@@ -239,11 +236,11 @@ func handleControllerConn(
 			handleConvergeSocketCmd(conn, line[len("converge:"):], convergenceReqCh)
 		case strings.HasPrefix(line, "trace-arm:"):
 			if handleTraceSocketCmd(conn, cityPath, "start", line[len("trace-arm:"):]) {
-				legacyEnqueue(pokeCh, nil, reconcilekey.Allocator()) // key-less: trace applies city-wide
+				wake.Enqueue(wakeReasonTrace, reconcilekey.Allocator()) // key-less: trace applies city-wide
 			}
 		case strings.HasPrefix(line, "trace-stop:"):
 			if handleTraceSocketCmd(conn, cityPath, "stop", line[len("trace-stop:"):]) {
-				legacyEnqueue(pokeCh, nil, reconcilekey.Allocator()) // key-less: trace applies city-wide
+				wake.Enqueue(wakeReasonTrace, reconcilekey.Allocator()) // key-less: trace applies city-wide
 			}
 		case line == "trace-status":
 			handleTraceStatusSocketCmd(conn, cityPath)
@@ -761,7 +758,7 @@ func isConventionDiscoveryDirName(base string) bool {
 	return false
 }
 
-func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duration, dirty *atomic.Bool, pokeCh chan struct{}, stderr io.Writer) func() {
+func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duration, dirty *atomic.Bool, wake *controllerWake, stderr io.Writer) func() {
 	if debounceDelay <= 0 {
 		debounceDelay = defaultConfigDebounce
 	}
@@ -774,8 +771,7 @@ func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duratio
 
 	markDirty := func() {
 		dirty.Store(true)
-		// A config file changed: reload re-plans the city (allocator).
-		legacyEnqueue(pokeCh, nil, reconcilekey.Allocator())
+		wake.WakeMaintenance()
 	}
 
 	done := make(chan struct{})
@@ -1244,6 +1240,7 @@ func controllerLoop(
 		stdout:              stdout,
 		stderr:              stderr,
 	}
+	cr.initWake()
 	cr.publishPoolDeathHandlers(poolDeathHandlers)
 	cr.setControllerState(cs)
 	cr.run(ctx)
@@ -1330,21 +1327,15 @@ func runController(
 
 	// doStartStandalone already refused an inadmissible mode before any init;
 	// this latch is the one whose mode the runtime runs.
-	reconcilerMode, modeErr := latchReconcilerMode(cfg)
-	if modeErr != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", modeErr) //nolint:errcheck // best-effort stderr
+	wiring, wiringErr := newControllerWiring(cfg)
+	if wiringErr != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", wiringErr) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	convergenceReqCh := make(chan convergenceRequest, 16)
-	reloadReqCh := make(chan reloadRequest)
-	pokeCh := make(chan struct{}, 1)
-	controlDispatcherCh := make(chan struct{}, 1)
-	configDirty := &atomic.Bool{}
-
 	sockPath := controllerSocketPath(cityPath)
 	forceShutdown := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, forceShutdown, wiring.configDirty, wiring.reloadReqCh, wiring.convergenceReqCh, wiring.wake)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1381,10 +1372,10 @@ func runController(
 		TomlPath:                tomlPath,
 		WatchTargets:            initialWatchTargets,
 		ConfigRev:               configRev,
-		ConfigDirty:             configDirty,
+		ConfigDirty:             wiring.configDirty,
 		ConfigDebounce:          configDebounce,
 		Cfg:                     cfg,
-		ReconcilerMode:          reconcilerMode,
+		ReconcilerMode:          wiring.mode,
 		SP:                      sp,
 		Publication:             supervisor.PublicationConfig{},
 		BuildFn:                 buildFn,
@@ -1394,10 +1385,10 @@ func runController(
 		PoolSessions:            poolSessions,
 		PoolDeathHandlers:       poolDeathHandlers,
 		ForceStopShutdown:       forceShutdown,
-		ReloadReqCh:             reloadReqCh,
-		ConvergenceReqCh:        convergenceReqCh,
-		PokeCh:                  pokeCh,
-		ControlDispatcherCh:     controlDispatcherCh,
+		ReloadReqCh:             wiring.reloadReqCh,
+		ConvergenceReqCh:        wiring.convergenceReqCh,
+		PokeCh:                  wiring.pokeCh,
+		ControlDispatcherCh:     wiring.controlDispatcherCh,
 		Stdout:                  stdout,
 		Stderr:                  stderr,
 	})
@@ -1423,8 +1414,8 @@ func runController(
 	// census would silently fall back to its leading (binding) store.
 	registerResidencyRoutes(cityPath, cr.storageRoutes, cr.cityBeadStore)
 	cs.ct = cr.crashTrack()
-	wireControllerWakeSignals(cs, pokeCh, controlDispatcherCh)
-	cs.configDirty = configDirty
+	wireControllerWakeSignals(cs, wiring.wake)
+	cs.configDirty = wiring.configDirty
 	cs.services = cr.svc
 	cs.emergencyCh = make(chan emergency.Record, 64)
 	cr.setControllerState(cs)
