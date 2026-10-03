@@ -477,8 +477,14 @@ func (s *BdStore) fetchReadyProjection(door readyProjectionDoor, ids []string) (
 	return result, nil
 }
 
+// readyProjectionSQL wraps the UNION ALL in a derived table on purpose. Dolt
+// (go-mysql-server) plans a top-level UNION ALL as Table+Filter on both legs —
+// a full scan of every issue ever filed, growing with closed rows — while the
+// identical union inside `(...) t` plans IndexedTableAccess on the status
+// index for both legs, the same way fingerprintSQL already does. Measured on a
+// 15k-row issues table with ~1.2k open (gastownhall/gascity#6155).
 func readyProjectionSQL() string {
-	return "select id,is_blocked from issues where status <> 'closed' union all select id,is_blocked from wisps where status <> 'closed'"
+	return "select id,is_blocked from (select id,is_blocked from issues where status <> 'closed' union all select id,is_blocked from wisps where status <> 'closed') t"
 }
 
 // projectViaBlockedDoor runs the blocked door and classifies its failure the
