@@ -22,12 +22,18 @@ import (
 // remote-exec's 3600s timeout.
 
 const (
-	bazelTestWorkflow      = ".github/workflows/bazel-test.yml"
-	bazelRCConfigStep      = "Configure remote execution or the read-only fork cache"
-	bazelRCConfigStepIf    = "env.BAZEL_REMOTE_EXECUTOR != '' || env.BAZEL_FORK_CACHE == 'true'"
-	bazelForkCacheLine     = "build --config=fork-cache"
-	bazelRCExecAssignment  = "RCEXEC=(--config=remote-exec)"
-	bazelRCExecGuard       = `if [ -n "$BAZEL_REMOTE_EXECUTOR" ]; then`
+	bazelTestWorkflow     = ".github/workflows/bazel-test.yml"
+	bazelRCConfigStep     = "Configure remote execution or the read-only fork cache"
+	bazelRCConfigStepIf   = "env.BAZEL_REMOTE_EXECUTOR != '' || env.BAZEL_FORK_CACHE == 'true'"
+	bazelForkCacheLine    = "build --config=fork-cache"
+	bazelRCExecAssignment = "RCEXEC=(--config=remote-exec)"
+	bazelRCExecGuard      = `if [ -n "$BAZEL_REMOTE_EXECUTOR" ]; then`
+	// rbe-fork (fork and Dependabot PRs with a certificate from rbe-west's
+	// mint) passes --config=remote-exec too: its .bazelrc.local carries the
+	// mint's endpoint, instance and certificate under build:remote-exec and
+	// no fork-cache. RBE_FORK_CERT must then be the fork-cert step's output.
+	bazelRCExecForkGuard   = `if [ -n "$BAZEL_REMOTE_EXECUTOR" ] || [ -n "$RBE_FORK_CERT" ]; then`
+	bazelRCForkCertEnv     = "${{ steps.fork-cert.outputs.cert }}"
 	bazelRCExecSteps       = 3
 	forkCacheMaxTimeoutSec = 15
 	// The farm admits 16 connections per source IP and Blacksmith runners
@@ -42,9 +48,15 @@ type bazelTestWorkflowFile struct {
 }
 
 type bazelTestWorkflowStep struct {
-	Name string `yaml:"name"`
-	If   string `yaml:"if"`
-	Run  string `yaml:"run"`
+	Name string            `yaml:"name"`
+	ID   string            `yaml:"id"`
+	If   string            `yaml:"if"`
+	Run  string            `yaml:"run"`
+	Uses string            `yaml:"uses"`
+	Env  map[string]string `yaml:"env"`
+	With map[string]string `yaml:"with"`
+	// continue-on-error: the rbe-fork steps fall back to the fork cache.
+	ContinueOnError bool `yaml:"continue-on-error"`
 }
 
 func bazelTestWorkflowSteps(t *testing.T, root string) []bazelTestWorkflowStep {
@@ -150,10 +162,16 @@ func TestBazelForkCacheRCLocal(t *testing.T) {
 	want = append(want, bazelForkCacheLine)
 
 	// A fork (no secrets) and an rbe=cache dispatch (secrets present, executor
-	// emptied) must write the same lines.
+	// emptied) must write the same lines; so must a fork whose rbe-fork steps
+	// produced no certificate (the mint closed, refused or unreachable: every
+	// RBE_FORK_* empty, or a partial set).
 	for name, env := range map[string]map[string]string{
 		"fork":     {"BAZEL_REMOTE_EXECUTOR": "", "BAZEL_FORK_CACHE": "true"},
 		"dispatch": {"BAZEL_REMOTE_EXECUTOR": "", "BAZEL_FORK_CACHE": "true", "RBE_INSTANCE": "oss", "RBE_TLS_CERT": pem, "RBE_TLS_KEY": pem, "RBE_TLS_CA": pem},
+		"fork, rbe-fork closed": {
+			"BAZEL_REMOTE_EXECUTOR": "", "BAZEL_FORK_CACHE": "true",
+			"RBE_FORK_ENDPOINT": "", "RBE_FORK_INSTANCE": "", "RBE_FORK_CERT_FILE": "", "RBE_FORK_KEY_FILE": "",
+		},
 	} {
 		got := runBazelRCConfigStep(t, config.Run, env)
 		if strings.Join(got, "\n") != strings.Join(want, "\n") {
@@ -161,12 +179,229 @@ func TestBazelForkCacheRCLocal(t *testing.T) {
 				name, strings.Join(got, "\n"), bazelForkCacheLine, strings.Join(want, "\n"))
 		}
 	}
+
+	// rbe-fork (a fork with a minted certificate): the trusted shared lines,
+	// so actions hash alike, plus build:remote-exec for the mint's endpoint,
+	// instance and certificate; no fork cache, and never the CI secrets even
+	// if a run could read them.
+	shared := want[:len(want)-1]
+	for _, instance := range []string{"oss-fork", "oss"} {
+		fork := map[string]string{
+			"BAZEL_REMOTE_EXECUTOR": "", "BAZEL_FORK_CACHE": "true",
+			"RBE_FORK_ENDPOINT": rbeForkEndpoint, "RBE_FORK_INSTANCE": instance,
+			"RBE_FORK_CERT_FILE": "/runner/rbe-fork/fork.crt", "RBE_FORK_KEY_FILE": "/runner/rbe-fork/fork.key",
+			"RBE_TLS_CERT": pem, "RBE_TLS_KEY": pem, "RBE_INSTANCE": "oss",
+		}
+		got := runBazelRCConfigStep(t, config.Run, fork)
+		var gotShared, gotRemote []string
+		for _, line := range got {
+			if strings.HasPrefix(line, "build:remote-exec ") {
+				gotRemote = append(gotRemote, line)
+			} else {
+				gotShared = append(gotShared, line)
+			}
+		}
+		wantRemote := []string{
+			"build:remote-exec --remote_executor=" + rbeForkEndpoint,
+			"build:remote-exec --remote_instance_name=" + instance,
+			"build:remote-exec --tls_client_certificate=/runner/rbe-fork/fork.crt",
+			"build:remote-exec --tls_client_key=/runner/rbe-fork/fork.key",
+			"build:remote-exec --remote_max_connections=8",
+		}
+		if strings.Join(gotShared, "\n") != strings.Join(shared, "\n") || strings.Join(gotRemote, "\n") != strings.Join(wantRemote, "\n") {
+			t.Errorf("rbe-fork %s .bazelrc.local:\n%s\nwant the trusted shared lines:\n%s\nand:\n%s",
+				instance, strings.Join(got, "\n"), strings.Join(shared, "\n"), strings.Join(wantRemote, "\n"))
+		}
+	}
+}
+
+const (
+	rbeForkEndpoint  = "grpcs://rbe-fork.ops.gascity.com:8444"
+	rbeForkStatusURL = "https://rbe-mint.ops.gascity.com:8444/v1/status?repo="
+	// bazel-test.yml's BAZEL_FORK_REMOTE: fork and Dependabot pull_request
+	// runs (no secrets) ask rbe-fork.
+	bazelForkRemoteEnv = "${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]') && 'true' || '' }}"
+)
+
+// bazelTestCurlStub stands in for curl in the rbe-fork status step: it
+// records the URL and prints what rbe-fork-mint's /v1/status would for
+// BAZEL_TEST_MINT (ro, rw: open; closed, rw-closed: open false, which
+// today's mint answers as ro instead while rw is off; canary: a
+// 403's body; garbage; evil: open with a tier that is neither); anything
+// else is a refused connection (the gate closed, or no DNS yet).
+const bazelTestCurlStub = `#!/usr/bin/env bash
+echo "$*" >>"$BAZEL_TEST_CURL_LOG"
+case "${BAZEL_TEST_MINT:-}" in
+ro) echo '{"open": true, "tier": "ro", "instance": "oss-fork", "endpoint": "grpcs://rbe-fork.ops.gascity.com:8444", "reason": "eligible"}' ;;
+rw) echo '{"open": true, "tier": "rw", "instance": "oss", "endpoint": "grpcs://rbe-fork.ops.gascity.com:8444", "reason": "eligible"}' ;;
+closed) echo '{"open": false, "tier": "ro", "instance": "oss-fork", "endpoint": "grpcs://rbe-fork.ops.gascity.com:8444", "reason": "rbe-fork is closed"}' ;;
+rw-closed) echo '{"open": false, "tier": "rw", "instance": "oss", "endpoint": "grpcs://rbe-fork.ops.gascity.com:8444", "reason": "the rw tier is closed"}' ;;
+canary) echo '{"error": "rbe-fork canary: this PR is not enabled yet"}' ;;
+garbage) echo '<html>bad gateway</html>' ;;
+evil) echo '{"open": true, "tier": "admin", "instance": "", "endpoint": "grpcs://elsewhere:1"}' ;;
+*) echo "curl: (7) Failed to connect to rbe-mint.ops.gascity.com port 8444" >&2; exit 7 ;;
+esac
+`
+
+// TestBazelRBEForkSteps: fork and Dependabot PRs try rbe-fork before the
+// read-only fork cache, and every failure on the way falls back to it. The
+// four rbe-fork steps (status, key and CSR, CSR artifact, certificate) are
+// continue-on-error and each runs only on the previous one's output; the
+// rc step and the test steps read only the certificate step's outputs, so
+// no certificate means exactly today's fork-cache run. The status step is
+// run against a stubbed mint: only an open ro or rw answer yields a tier.
+func TestBazelRBEForkSteps(t *testing.T) {
+	root := repoRoot(t)
+	var wf struct {
+		Jobs map[string]struct {
+			Env   map[string]string       `yaml:"env"`
+			Steps []bazelTestWorkflowStep `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal([]byte(readFile(t, root, bazelTestWorkflow)), &wf); err != nil {
+		t.Fatal(err)
+	}
+	job := wf.Jobs["bazel"]
+	if job.Env["BAZEL_FORK_REMOTE"] != bazelForkRemoteEnv {
+		t.Errorf("BAZEL_FORK_REMOTE = %q, want %q", job.Env["BAZEL_FORK_REMOTE"], bazelForkRemoteEnv)
+	}
+	byID := map[string]bazelTestWorkflowStep{}
+	order := map[string]int{}
+	for i, s := range job.Steps {
+		if s.ID != "" {
+			byID[s.ID] = s
+			order[s.ID] = i
+		}
+		if s.Name == bazelRCConfigStep {
+			order["config"] = i
+		}
+	}
+	type want struct {
+		ifExpr string
+		env    map[string]string
+	}
+	for id, w := range map[string]want{
+		"fork-status": {
+			"env.BAZEL_REMOTE_EXECUTOR == '' && env.BAZEL_FORK_REMOTE == 'true'",
+			map[string]string{"PR_NUMBER": "${{ github.event.pull_request.number }}"},
+		},
+		"fork-key": {
+			"steps.fork-status.outputs.tier != ''",
+			map[string]string{"BAZEL_CI_SECRET_DIR": "${{ runner.temp }}/rbe-fork"},
+		},
+		"fork-csr": {"steps.fork-key.outputs.csr != ''", nil},
+		"fork-cert": {"steps.fork-csr.outputs.artifact-id != ''", map[string]string{
+			"BAZEL_CI_SECRET_DIR": "${{ runner.temp }}/rbe-fork",
+			"ARTIFACT_ID":         "${{ steps.fork-csr.outputs.artifact-id }}",
+			"RBE_FORK_PR":         "${{ github.event.pull_request.number }}",
+			"RBE_FORK_TIER":       "${{ steps.fork-status.outputs.tier }}",
+		}},
+	} {
+		s, ok := byID[id]
+		if !ok {
+			t.Errorf("%s has no step %s", bazelTestWorkflow, id)
+			continue
+		}
+		if s.If != w.ifExpr || !s.ContinueOnError || len(s.Env) != len(w.env) {
+			t.Errorf("step %s: if %q, continue-on-error %v, env %v; want if %q, continue-on-error, env %v", id, s.If, s.ContinueOnError, s.Env, w.ifExpr, w.env)
+		}
+		for k, v := range w.env {
+			if s.Env[k] != v {
+				t.Errorf("step %s env %s = %q, want %q", id, k, s.Env[k], v)
+			}
+		}
+		if order[id] > order["config"] {
+			t.Errorf("step %s runs after %q", id, bazelRCConfigStep)
+		}
+	}
+	if order["fork-status"] > order["fork-key"] || order["fork-key"] > order["fork-csr"] || order["fork-csr"] > order["fork-cert"] {
+		t.Errorf("rbe-fork steps out of order: %v", order)
+	}
+	if got := byID["fork-key"].Run; strings.TrimSpace(got) != "bash tools/rbe/fork-credential.sh key" {
+		t.Errorf("fork-key runs %q", got)
+	}
+	if got := byID["fork-cert"].Run; strings.TrimSpace(got) != "bash tools/rbe/fork-credential.sh cert" {
+		t.Errorf("fork-cert runs %q", got)
+	}
+	csr := byID["fork-csr"]
+	if csr.Uses != "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2" && csr.Uses != "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" ||
+		csr.With["name"] != "${{ steps.fork-key.outputs.artifact-name }}" || csr.With["path"] != "${{ steps.fork-key.outputs.csr }}" ||
+		csr.With["compression-level"] != "0" || csr.With["if-no-files-found"] != "error" {
+		t.Errorf("fork-csr: uses %q with %v; want the pinned upload-artifact of fork-key's csr under its artifact name, stored", csr.Uses, csr.With)
+	}
+	// The rc step and every --config=remote-exec step read the certificate
+	// step's outputs, nothing else of rbe-fork's.
+	var config bazelTestWorkflowStep
+	for _, s := range job.Steps {
+		if s.Name == bazelRCConfigStep {
+			config = s
+		}
+	}
+	for k, v := range map[string]string{
+		"RBE_FORK_ENDPOINT":  "${{ steps.fork-cert.outputs.endpoint }}",
+		"RBE_FORK_INSTANCE":  "${{ steps.fork-cert.outputs.instance }}",
+		"RBE_FORK_CERT_FILE": "${{ steps.fork-cert.outputs.cert }}",
+		"RBE_FORK_KEY_FILE":  "${{ steps.fork-cert.outputs.key }}",
+	} {
+		if config.Env[k] != v {
+			t.Errorf("%q env %s = %q, want %q", bazelRCConfigStep, k, config.Env[k], v)
+		}
+	}
+	for _, s := range job.Steps {
+		for k, v := range s.Env {
+			if strings.Contains(v, "steps.fork-") && s.ID != "fork-key" && s.ID != "fork-cert" && s.Name != bazelRCConfigStep && v != bazelRCForkCertEnv {
+				t.Errorf("step %q env %s reads %q; only the rc step and the remote-exec guards read rbe-fork's outputs", s.Name, k, v)
+			}
+		}
+		if strings.Contains(s.If, "fork-cert") && s.If != "env.BAZEL_REMOTE_EXECUTOR == '' && env.BAZEL_FORK_CACHE == 'true' && steps.fork-cert.outputs.cert == ''" {
+			t.Errorf("step %q if %q", s.Name, s.If)
+		}
+	}
+
+	// The status step, against the stub, in a scratch dir (its
+	// $GITHUB_OUTPUT is the helper's .bazelrc.local).
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "curl"), []byte(bazelTestCurlStub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	status := byID["fork-status"].Run
+	for answer, wantTier := range map[string]string{
+		"ro": "ro", "rw": "rw", "closed": "", "rw-closed": "", "canary": "", "garbage": "", "evil": "", "unreachable": "",
+	} {
+		curlLog := filepath.Join(dir, answer+".log")
+		got := runBazelRCConfigStep(t, status, map[string]string{
+			"PATH":                bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"GITHUB_OUTPUT":       ".bazelrc.local",
+			"GITHUB_REPOSITORY":   "gastownhall/gascity",
+			"GITHUB_RUN_ID":       "4242",
+			"GITHUB_RUN_ATTEMPT":  "1",
+			"PR_NUMBER":           "6969",
+			"BAZEL_TEST_MINT":     answer,
+			"BAZEL_TEST_CURL_LOG": curlLog,
+		})
+		if strings.Join(got, "\n") != "tier="+wantTier {
+			t.Errorf("mint %s: status step outputs %q, want tier=%s", answer, got, wantTier)
+		}
+		if b, _ := os.ReadFile(curlLog); !strings.Contains(string(b), rbeForkStatusURL+"gascity&run=4242&attempt=1&pr=6969") {
+			t.Errorf("mint %s: status step asked %q", answer, b)
+		}
+		// A closed gate drops the connection: each try gives up in 5 s.
+		if b, _ := os.ReadFile(curlLog); !strings.HasPrefix(string(b), "-sS --connect-timeout 5 --max-time 30 ") {
+			t.Errorf("mint %s: status step ran curl %q, want --connect-timeout 5 --max-time 30", answer, b)
+		}
+	}
 }
 
 // checkBazelRCExecGuards requires every step that passes
-// --config=remote-exec to do so only behind a $BAZEL_REMOTE_EXECUTOR guard:
-// .bazelrc.local exists in fork-cache mode too, and remote-exec's
-// --remote_timeout=3600 would override fork-cache's.
+// --config=remote-exec to do so only behind a $BAZEL_REMOTE_EXECUTOR guard
+// (or that guard or $RBE_FORK_CERT, the minted rbe-fork certificate, which
+// the step must take from the fork-cert step): .bazelrc.local exists in
+// fork-cache mode too, and remote-exec's --remote_timeout=3600 would
+// override fork-cache's.
 func checkBazelRCExecGuards(steps []bazelTestWorkflowStep) []error {
 	var errs []error
 	guarded := 0
@@ -188,9 +423,17 @@ func checkBazelRCExecGuards(steps []bazelTestWorkflowStep) []error {
 			if line == "" {
 				continue
 			}
-			if strings.Contains(line, bazelRCExecAssignment) &&
-				!strings.HasPrefix(line, bazelRCExecGuard) && prev != bazelRCExecGuard {
-				errs = append(errs, errors.New("step "+strconv.Quote(s.Name)+" sets "+bazelRCExecAssignment+" without "+bazelRCExecGuard))
+			if strings.Contains(line, bazelRCExecAssignment) {
+				switch {
+				case strings.HasPrefix(line, bazelRCExecGuard) || prev == bazelRCExecGuard:
+				case strings.HasPrefix(line, bazelRCExecForkGuard) || prev == bazelRCExecForkGuard:
+					if s.Env["RBE_FORK_CERT"] != bazelRCForkCertEnv {
+						errs = append(errs, errors.New("step "+strconv.Quote(s.Name)+" guards on $RBE_FORK_CERT, which is "+
+							strconv.Quote(s.Env["RBE_FORK_CERT"])+", not "+bazelRCForkCertEnv))
+					}
+				default:
+					errs = append(errs, errors.New("step "+strconv.Quote(s.Name)+" sets "+bazelRCExecAssignment+" without "+bazelRCExecGuard+" or "+bazelRCExecForkGuard))
+				}
 			}
 			prev = line
 		}
@@ -222,6 +465,25 @@ func TestBazelForkCacheRCExecGuards(t *testing.T) {
 	good := []bazelTestWorkflowStep{{Name: "a", Run: block}, {Name: "b", Run: inline}, {Name: "c", Run: inline}, {Name: "d", Run: "echo hi\n"}}
 	if errs := checkBazelRCExecGuards(good); len(errs) != 0 {
 		t.Errorf("good fixture: %v", errs)
+	}
+	forkEnv := map[string]string{"RBE_FORK_CERT": bazelRCForkCertEnv}
+	forkInline := strings.Replace(inline, bazelRCExecGuard, bazelRCExecForkGuard, 1)
+	forkBlock := strings.Replace(block, bazelRCExecGuard, bazelRCExecForkGuard, 1)
+	goodFork := append([]bazelTestWorkflowStep(nil), good...)
+	goodFork[0] = bazelTestWorkflowStep{Name: "a", Run: forkBlock, Env: forkEnv}
+	goodFork[1] = bazelTestWorkflowStep{Name: "b", Run: forkInline, Env: forkEnv}
+	if errs := checkBazelRCExecGuards(goodFork); len(errs) != 0 {
+		t.Errorf("good rbe-fork fixture: %v", errs)
+	}
+	for name, steps := range map[string][]bazelTestWorkflowStep{
+		"fork guard, no env":         {goodFork[0], {Name: "b", Run: forkInline}, good[2], good[3]},
+		"fork guard, other env":      {goodFork[0], {Name: "b", Run: forkInline, Env: map[string]string{"RBE_FORK_CERT": "${{ secrets.RBE_TLS_CERT }}"}}, good[2], good[3]},
+		"fork guard, other variable": {goodFork[0], {Name: "b", Run: strings.Replace(forkInline, "$RBE_FORK_CERT", "$RBE_FORK_KEY", 1), Env: forkEnv}, good[2], good[3]},
+		"fork guard alone":           {goodFork[0], {Name: "b", Run: strings.Replace(inline, "$BAZEL_REMOTE_EXECUTOR", "$RBE_FORK_CERT", 1), Env: forkEnv}, good[2], good[3]},
+	} {
+		if len(checkBazelRCExecGuards(steps)) == 0 {
+			t.Errorf("%s: expected an error", name)
+		}
 	}
 	with := func(i int, run string) []bazelTestWorkflowStep {
 		out := append([]bazelTestWorkflowStep(nil), good...)

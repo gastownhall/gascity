@@ -3770,6 +3770,7 @@ func TestCmdInitProviderAcceptsAntigravity(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	stubInitRemoteImports(t)
 
 	cityPath := filepath.Join(t.TempDir(), "antigravity-city")
 	var stdout, stderr bytes.Buffer

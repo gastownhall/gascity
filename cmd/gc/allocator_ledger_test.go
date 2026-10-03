@@ -818,3 +818,121 @@ func TestLedgerViewIsSortedCopy(t *testing.T) {
 		t.Fatal("editing the view edited the ledger")
 	}
 }
+
+var (
+	createIdentityA = createIdentity{Template: "worker", QualifiedInstance: "worker-1", Slot: 1}
+	createIdentityB = createIdentity{Template: "worker", QualifiedInstance: "worker-2", Slot: 2}
+)
+
+// failCreate reserves and issues create id under rev, then fails it for c.
+func failCreate(t *testing.T, l *intentLedger, id, rev string, c createIdentity) createVeto {
+	t.Helper()
+	e := ledgerCreate(id, "tok-"+id)
+	e.ConfigRev = rev
+	if !l.Reserve(e) {
+		t.Fatalf("reserve %s refused", id)
+	}
+	if token, ok := l.IssueCreate(id); !ok || token != "tok-"+id {
+		t.Fatalf("issue %s = (%q, %v)", id, token, ok)
+	}
+	if !l.FailCreate(id, c, "fence") {
+		t.Fatalf("fail %s refused", id)
+	}
+	entries, vetoes := l.Snapshot()
+	for _, e := range entries {
+		if e.ID == id && (e.State != ledgerFailed || e.WroteRow) {
+			t.Fatalf("entry %+v, want failed without a row", e)
+		}
+	}
+	return vetoes[c.key()]
+}
+
+// Kills (AM-N8): create vetoes kept with the row vetoes, so a row's issued
+// start or close resets a create identity's backoff; a create veto shown to
+// the pass as a ledger entry; one identity's veto moving another's.
+func TestLedgerCreateVetoIsItsOwnKeySpace(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		l := newIntentLedger(time.Now)
+		failCreate(t, l, "c1", "r", createIdentityA)
+		advance(ledgerVetoBase)
+		before := failCreate(t, l, "c2", "r", createIdentityA)
+		l.Reserve(ledgerGrant("g", ledgerRowA, 1))
+		l.Issue("g", ledgerRowA)
+		l.ForgetClosed(ledgerCensusOf(nil, "sessions"))
+		_, vetoes := l.Snapshot()
+		if vetoes[createIdentityA.key()] != before || before.Consecutive != 2 {
+			t.Fatalf("create veto %+v after Issue and ForgetClosed, want %+v (consecutive 2)", vetoes[createIdentityA.key()], before)
+		}
+		if _, ok := vetoes[createIdentityB.key()]; ok || len(vetoesOf(l, ledgerRowA)) != 0 {
+			t.Fatal("a create veto leaked into another identity or into the row vetoes")
+		}
+		for _, e := range l.View() {
+			if e.Kind == kindVeto {
+				t.Fatalf("create veto shown as ledger entry %+v", e)
+			}
+		}
+	})
+}
+
+// Kills: a create veto that escalates within one refusal, survives a
+// commit or a ConfigRev change, or outlives its identity in config.
+func TestLedgerCreateVetoResetsOnCommitAndConfigRevAndPrunes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		l := newIntentLedger(time.Now)
+		failCreate(t, l, "c1", "r1", createIdentityA)
+		advance(time.Second)
+		if v := failCreate(t, l, "c2", "r1", createIdentityA); v.Consecutive != 1 || time.Until(v.Until) != ledgerVetoBase {
+			t.Fatalf("refusal while live: %+v, want consecutive 1 extended to now+10s", v)
+		}
+		advance(ledgerVetoBase)
+		if v := failCreate(t, l, "c3", "r1", createIdentityA); v.Consecutive != 2 {
+			t.Fatalf("refusal after expiry: %+v, want consecutive 2", v)
+		}
+		advance(2 * ledgerVetoBase)
+		if v := failCreate(t, l, "c4", "r2", createIdentityA); v.Consecutive != 1 || v.ConfigRev != "r2" || time.Until(v.Until) != ledgerVetoBase {
+			t.Fatalf("refusal under a new ConfigRev: %+v, want a fresh count", v)
+		}
+
+		e := ledgerCreate("ok", "tok-ok")
+		l.Reserve(e)
+		l.IssueCreate("ok")
+		if !l.CommitCreate("ok", createIdentityA, ledgerMarker{RowID: "gc-1"}) {
+			t.Fatal("commit refused")
+		}
+		if _, vetoes := l.Snapshot(); len(vetoes) != 0 {
+			t.Fatalf("vetoes after a commit = %+v, want none", vetoes)
+		}
+
+		failCreate(t, l, "a", "r2", createIdentityA)
+		failCreate(t, l, "b", "r2", createIdentityB)
+		l.PruneCreateVetoes("r2", func(c createIdentity) bool { return c != createIdentityB })
+		if _, vetoes := l.Snapshot(); len(vetoes) != 1 || vetoes[createIdentityA.key()].Consecutive != 1 {
+			t.Fatalf("after pruning B: %+v, want only A", vetoes)
+		}
+		l.PruneCreateVetoes("r3", func(createIdentity) bool { return true })
+		if _, vetoes := l.Snapshot(); len(vetoes) != 0 {
+			t.Fatalf("after a ConfigRev change: %+v, want none", vetoes)
+		}
+	})
+}
+
+// Kills: the create executor issuing or settling a grant, or vetoing on an
+// entry it never issued.
+func TestLedgerCreateMovesRefuseOtherKindsAndStates(t *testing.T) {
+	l := newIntentLedger(time.Now)
+	l.Reserve(ledgerGrant("g", ledgerRowA, 1))
+	if _, ok := l.IssueCreate("g"); ok {
+		t.Fatal("IssueCreate issued a grant")
+	}
+	l.Issue("g", ledgerRowA)
+	if l.FailCreate("g", createIdentityA, "fence") || l.CommitCreate("g", createIdentityA, ledgerMarker{}) {
+		t.Fatal("a create move settled a grant")
+	}
+	l.Reserve(ledgerCreate("c", "tok"))
+	if l.FailCreate("c", createIdentityA, "fence") {
+		t.Fatal("FailCreate settled a reserved create")
+	}
+	if _, vetoes := l.Snapshot(); len(vetoes) != 0 {
+		t.Fatalf("vetoes = %+v, want none from refused moves", vetoes)
+	}
+}

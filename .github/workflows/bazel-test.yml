@@ -11,6 +11,18 @@
 #                 client certificate for mTLS endpoints (optional, base64).
 #   RBE_INSTANCE  RE instance name (optional, default empty).
 #
+# Fork and Dependabot PRs (no secrets, no OIDC, no vars) first ask rbe-west's
+# certificate mint (rbe-fork, infra nativelink-cas/west README "rbe-fork";
+# rbe-mint.ops.gascity.com:8444): while it is open for this run, the job
+# proves itself with a CSR uploaded as an artifact of the run, gets a
+# short-lived certificate (tools/rbe/fork-credential.sh, a byte copy of
+# beads' setup-bazel one) and executes remotely on
+# rbe-fork.ops.gascity.com:8444, instance oss-fork (the fork pool, nothing
+# cached) or, for allowlisted authors (.github/rbe-fork-allowlist.txt), oss.
+# Anything else (closed, refused, unreachable, a failed step) leaves the job
+# on the read-only fork cache exactly as before: the rbe-fork steps are
+# continue-on-error and nothing below reads them but the certificate.
+#
 # rbe-west (farm v2, opt-in with repo variable RBE_WEST_WORKERS=true):
 #   RBE_WEST_EXECUTOR  grpcs:// endpoint of the Phoenix core (secret; not in git).
 #   RBE_WORKER_TLS_CERT / RBE_WORKER_TLS_KEY  base64 PEM, CN=rbe-oss-worker.
@@ -58,6 +70,11 @@ jobs:
       RBE_INSTANCE_OVERRIDE: ${{ (vars.RBE_WEST_WORKERS == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && 'oss' || '' }}
       # Without an executor: rbe-west's anonymous read-only cache, unless rbe=off.
       BAZEL_FORK_CACHE: ${{ inputs.rbe != 'off' && 'true' || '' }}
+      # Fork and Dependabot PRs: remote execution on rbe-fork with a
+      # short-lived certificate from rbe-west's mint (infra README "rbe-fork";
+      # tools/rbe/fork-credential.sh). If the mint is closed or refuses, the
+      # job falls back to the read-only fork cache as before.
+      BAZEL_FORK_REMOTE: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]') && 'true' || '' }}
     steps:
       # Best effort: a worker boots (~30 s) while this job checks out and
       # analyzes. The rbe-west scaler covers anything beyond one worker.
@@ -116,6 +133,52 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # rbe-fork (fork and Dependabot PRs): the mint's status decides; on
+      # "open" a key and CSR, the CSR as an artifact of this run (the mint's
+      # proof), then the certificate. Any failure here leaves the job on the
+      # read-only fork cache (the steps below key on steps.fork-cert).
+      - name: rbe-fork status
+        id: fork-status
+        if: env.BAZEL_REMOTE_EXECUTOR == '' && env.BAZEL_FORK_REMOTE == 'true'
+        continue-on-error: true
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          st=$(curl -sS --connect-timeout 5 --max-time 30 --retry 3 --retry-all-errors \
+            "https://rbe-mint.ops.gascity.com:8444/v1/status?repo=${GITHUB_REPOSITORY#*/}&run=$GITHUB_RUN_ID&attempt=$GITHUB_RUN_ATTEMPT&pr=$PR_NUMBER" || echo '{}')
+          tier=$(jq -r 'if .open == true then .tier else "" end' <<<"$st" 2>/dev/null || true)
+          case "$tier" in ro|rw) ;; *) tier= ;; esac
+          echo "tier=$tier" >> "$GITHUB_OUTPUT"
+          [ -n "$tier" ] || echo "::warning title=rbe-fork closed for this run::$(jq -r '.reason // .error // "unreachable"' <<<"$st" 2>/dev/null || echo unreachable); read-only fork cache instead"
+      - name: rbe-fork key and CSR
+        id: fork-key
+        if: steps.fork-status.outputs.tier != ''
+        continue-on-error: true
+        env:
+          BAZEL_CI_SECRET_DIR: ${{ runner.temp }}/rbe-fork
+        run: bash tools/rbe/fork-credential.sh key
+      - name: rbe-fork CSR artifact (proof of this run)
+        id: fork-csr
+        if: steps.fork-key.outputs.csr != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.fork-key.outputs.artifact-name }}
+          path: ${{ steps.fork-key.outputs.csr }}
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
+      - name: rbe-fork certificate (rbe-fork-mint)
+        id: fork-cert
+        if: steps.fork-csr.outputs.artifact-id != ''
+        continue-on-error: true
+        env:
+          BAZEL_CI_SECRET_DIR: ${{ runner.temp }}/rbe-fork
+          ARTIFACT_ID: ${{ steps.fork-csr.outputs.artifact-id }}
+          RBE_FORK_PR: ${{ github.event.pull_request.number }}
+          RBE_FORK_TIER: ${{ steps.fork-status.outputs.tier }}
+        run: bash tools/rbe/fork-credential.sh cert
+
       # One .bazelrc.local for both remote modes. With an executor (secrets):
       # build:remote-exec (endpoint, instance, mTLS) plus the shared lines.
       # Without one (forks, no secrets; rbe=cache dispatches): the same
@@ -128,6 +191,10 @@ jobs:
       - name: Configure remote execution or the read-only fork cache
         if: env.BAZEL_REMOTE_EXECUTOR != '' || env.BAZEL_FORK_CACHE == 'true'
         env:
+          RBE_FORK_ENDPOINT: ${{ steps.fork-cert.outputs.endpoint }}
+          RBE_FORK_INSTANCE: ${{ steps.fork-cert.outputs.instance }}
+          RBE_FORK_CERT_FILE: ${{ steps.fork-cert.outputs.cert }}
+          RBE_FORK_KEY_FILE: ${{ steps.fork-cert.outputs.key }}
           RBE_TLS_CERT: ${{ secrets.RBE_TLS_CERT }}
           RBE_TLS_KEY: ${{ secrets.RBE_TLS_KEY }}
           RBE_TLS_CA: ${{ secrets.RBE_TLS_CA }}
@@ -153,7 +220,16 @@ jobs:
             # 2vcpu runners default --jobs to 2, serializing even REMOTE actions.
             # Execution happens on the farm; the client can keep many in flight.
             echo 'build --jobs=64'
-            if [ -z "$BAZEL_REMOTE_EXECUTOR" ]; then
+            if [ -n "$RBE_FORK_CERT_FILE" ]; then
+              # rbe-fork: the same key-affecting lines as trusted runs, the
+              # mint's endpoint, instance (oss-fork, or oss for allowlisted
+              # authors) and short-lived certificate.
+              echo "build:remote-exec --remote_executor=$RBE_FORK_ENDPOINT"
+              echo "build:remote-exec --remote_instance_name=$RBE_FORK_INSTANCE"
+              echo "build:remote-exec --tls_client_certificate=$RBE_FORK_CERT_FILE"
+              echo "build:remote-exec --tls_client_key=$RBE_FORK_KEY_FILE"
+              echo 'build:remote-exec --remote_max_connections=8'
+            elif [ -z "$BAZEL_REMOTE_EXECUTOR" ]; then
               echo 'build --config=fork-cache'
             fi
           } > .bazelrc.local
@@ -161,7 +237,7 @@ jobs:
       # Fork-cache tests run locally with the PATH above, so give them the Go
       # the remote workers have at /usr/local/go.
       - name: Provide /usr/local/go for locally run tests (fork cache)
-        if: env.BAZEL_REMOTE_EXECUTOR == '' && env.BAZEL_FORK_CACHE == 'true'
+        if: env.BAZEL_REMOTE_EXECUTOR == '' && env.BAZEL_FORK_CACHE == 'true' && steps.fork-cert.outputs.cert == ''
         run: |
           if [ ! -e /usr/local/go ]; then
             sudo ln -s "$(go env GOROOT)" /usr/local/go
@@ -183,6 +259,8 @@ jobs:
           mkdir -p /tmp/bt
 
       - name: "bazel test //... (+ acceptance)"
+        env:
+          RBE_FORK_CERT: ${{ steps.fork-cert.outputs.cert }}
         run: |
           ARGS=(--output_user_root="$RUNNER_TEMP"/bazel-outputs)
           PROFILE=(--profile=/tmp/bazel-profile.json)
@@ -197,7 +275,7 @@ jobs:
           # --config=remote-exec only with an executor: its --remote_timeout=3600
           # would otherwise override fork-cache's 15s (.bazelrc.local applies
           # fork-cache for forks).
-          if [ -n "$BAZEL_REMOTE_EXECUTOR" ]; then
+          if [ -n "$BAZEL_REMOTE_EXECUTOR" ] || [ -n "$RBE_FORK_CERT" ]; then
             RCEXEC=(--config=remote-exec)
           else
             RCEXEC=()
@@ -223,9 +301,11 @@ jobs:
       # product-side, this step reports without gating.
       - name: "bazel test //test/integration (evidence-only)"
         if: always()
+        env:
+          RBE_FORK_CERT: ${{ steps.fork-cert.outputs.cert }}
         run: |
           ARGS=(--output_user_root="$RUNNER_TEMP"/bazel-outputs)
-          if [ -n "$BAZEL_REMOTE_EXECUTOR" ]; then RCEXEC=(--config=remote-exec); else RCEXEC=(); fi
+          if [ -n "$BAZEL_REMOTE_EXECUTOR" ] || [ -n "$RBE_FORK_CERT" ]; then RCEXEC=(--config=remote-exec); else RCEXEC=(); fi
           bazel "${ARGS[@]}" test //test/integration:integration_test \
             "${RCEXEC[@]}" --test_output=errors --keep_going \
             --define=gotags=integration --test_timeout=1100 --flaky_test_attempts=1 || true

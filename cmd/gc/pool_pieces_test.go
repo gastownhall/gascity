@@ -878,7 +878,7 @@ func TestBuildDemandTargetsGoldenAgainstInlineLoop(t *testing.T) {
 	for seed := uint64(0); seed < poolPiecesSeeds; seed++ {
 		f := randDemandFixture(t, rand.New(rand.NewPCG(seed, 3)))
 		var gotErr, wantErr bytes.Buffer
-		got := buildDemandTargets("city", f.cityPath, f.cfg, f.store, f.rigStores, f.suspendedRigPaths, f.sessions, &gotErr)
+		got := buildDemandTargets("city", f.cityPath, f.cfg, f.store, f.rigStores, f.suspendedRigPaths, f.sessions, controllerQueryRuntimeEnv, &gotErr)
 		want := buildDemandTargetsPreRefactor("city", f.cityPath, f.cfg, f.store, f.rigStores, f.suspendedRigPaths, f.sessions, &wantErr)
 		if !reflect.DeepEqual(got, want) || gotErr.String() != wantErr.String() {
 			t.Fatalf("seed %d: buildDemandTargets differs from the inline loop:\n got=%+v\nwant=%+v\nstderr got=%q want=%q", seed, got, want, gotErr.String(), wantErr.String())
