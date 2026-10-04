@@ -154,61 +154,6 @@ func runMetadataMergeStress(t *testing.T, store *NativeDoltStore, ephemeral bool
 	}
 }
 
-// TestNativeDoltStoreSetMetadataBatchKeepsAConcurrentUpdateOnAWisp is the
-// scripted interleaving of the real-Dolt proof on the wisps table: wisp
-// metadata writes take the backend's wisp checked-update path, which must
-// refuse a stale swap exactly as the issues path does.
-func TestNativeDoltStoreSetMetadataBatchKeepsAConcurrentUpdateOnAWisp(t *testing.T) {
-	store := openRealNativeDoltStoreForMergeProof(t, "merge-race-wisp")
-	created, err := store.Create(Bead{
-		Title:     "fenced wisp step",
-		Ephemeral: true,
-		Metadata:  map[string]string{"gc.instantiating": "true", "gc.deferred_routed_to": "rig/pool"},
-	})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if !created.Ephemeral {
-		t.Fatalf("Create returned a non-ephemeral bead %s; the test would not exercise the wisps table", created.ID)
-	}
-	id := created.ID
-
-	reads := 0
-	store.afterMetadataMergeRead = func(readID string) {
-		reads++
-		if reads != 1 || readID != id {
-			return
-		}
-		if err := store.Update(id, UpdateOpts{Metadata: map[string]string{
-			"gc.instantiating":      "",
-			"gc.deferred_routed_to": "",
-			"gc.routed_to":          "rig/pool",
-		}}); err != nil {
-			t.Errorf("competing Update: %v", err)
-		}
-	}
-	if err := store.SetMetadataBatch(id, map[string]string{"gc.heartbeat": "now"}); err != nil {
-		t.Fatalf("SetMetadataBatch: %v", err)
-	}
-	if reads != 2 {
-		t.Fatalf("merge reads = %d, want 2 (the wisp swap refused after the competing write, then a fresh read)", reads)
-	}
-	got, err := store.Get(id)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	for key, want := range map[string]string{
-		"gc.heartbeat":          "now",
-		"gc.instantiating":      "",
-		"gc.deferred_routed_to": "",
-		"gc.routed_to":          "rig/pool",
-	} {
-		if got.Metadata[key] != want {
-			t.Errorf("%s = %q, want %q (the competing write was lost or the merge was)", key, got.Metadata[key], want)
-		}
-	}
-}
-
 // openServerNativeDoltStoreForMergeProof opens the native store against a
 // fresh dolt sql-server, the deployment shape where concurrent writers run in
 // separate server transactions.

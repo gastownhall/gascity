@@ -109,8 +109,10 @@ func TestNativeDoltStoreCloseReplayShortCircuitsWhenAnotherActorClosedTheBead(t 
 	if got := atomic.LoadInt32(&spy.mutates); got != 1 {
 		t.Fatalf("CloseIssue attempts = %d, want 1 (the replay must not re-close)", got)
 	}
-	if got := atomic.LoadInt32(&spy.gets); got != 2 {
-		t.Fatalf("GetIssue reads = %d, want 2 (the replay must re-read, not reuse the first snapshot)", got)
+	// Three reads, not two: closeOnce reads once per attempt and the facade's
+	// own Close reads again on the attempt that reaches it.
+	if got := atomic.LoadInt32(&spy.gets); got != 3 {
+		t.Fatalf("GetIssue reads = %d, want 3 (the replay must re-read, not reuse the first snapshot)", got)
 	}
 }
 
@@ -183,7 +185,7 @@ func TestNativeDoltStoreCloseAllRecoversWhenTheCloseConflictsAfterMetadataLanded
 			}
 			return out, nil
 		},
-		updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
+		updateIssue: func(context.Context, string, map[string]interface{}, string) error {
 			atomic.AddInt32(&metadata, 1)
 			return nil
 		},
