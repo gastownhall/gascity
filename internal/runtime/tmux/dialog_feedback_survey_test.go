@@ -244,10 +244,7 @@ func TestDismissFeedbackSurveyModalIgnoresSurveyOnlyInScrollback(t *testing.T) {
 }
 
 func TestDismissFeedbackSurveyModalSendsOneDigitWhileSurveyPersists(t *testing.T) {
-	executor := &scriptedTargetExecutor{
-		captures: []string{feedbackSurveySessionFixture, feedbackSurveySessionFixture},
-		capture:  strings.Replace(feedbackSurveySessionFixture, "│ ❯   ", "│ ❯ 0 ", 1),
-	}
+	executor := &scriptedTargetExecutor{capture: feedbackSurveySessionFixture}
 	tm := &Tmux{cfg: DefaultConfig(), exec: executor}
 
 	tm.DismissFeedbackSurveyModalIfPresent("agent-pane")
@@ -258,7 +255,7 @@ func TestDismissFeedbackSurveyModalSendsOneDigitWhileSurveyPersists(t *testing.T
 			sent = append(sent, call[len(call)-1])
 		}
 	}
-	if got := strings.Join(sent, ","); got != "0,C-u" {
-		t.Fatalf("send-keys = %q, want one dismiss digit then a clear, with no second digit", got)
+	if got := strings.Join(sent, ","); got != "0" {
+		t.Fatalf("send-keys = %q, want one dismiss digit and no second attempt while the survey persists", got)
 	}
 }
