@@ -9,7 +9,8 @@ import (
 
 // TestBeadHasUnmetPlainBlocksDepDefersToAPassedStep keeps the drain-ack and
 // divergence classifiers in agreement with Ready(): a blocker closed with
-// gc.work_outcome=blocked still blocks, unless its control-plane step passed.
+// gc.work_outcome=blocked still blocks, unless it is a formula step whose
+// control-plane step passed.
 func TestBeadHasUnmetPlainBlocksDepDefersToAPassedStep(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -19,8 +20,13 @@ func TestBeadHasUnmetPlainBlocksDepDefersToAPassedStep(t *testing.T) {
 		{"blocked work outcome is unmet", map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, true},
 		{
 			"passed step is met despite a blocked work outcome",
-			map[string]string{beadmeta.OutcomeMetadataKey: "pass", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
 			false,
+		},
+		{
+			"passed work bead without a step ref is unmet",
+			map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

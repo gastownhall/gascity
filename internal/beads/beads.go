@@ -633,8 +633,14 @@ func DependencySatisfied(depStatus, depWorkOutcome string) bool {
 // past by dispatch, so letting gc.work_outcome=blocked veto its dependents
 // strands them: the graph waits on work that readiness never offers to any
 // worker. When the step passed, its work outcome does not gate readiness.
+//
+// The override applies only to formula step beads (those carrying
+// gc.step_ref). A plain work bead can also carry gc.outcome=pass — the core
+// mol-do-work formula stamps it on the work bead it closes, blocked or not —
+// and there gc.outcome is not a dispatch verdict, so its blocked work outcome
+// keeps withholding dependents.
 func ReadinessWorkOutcome(metadata map[string]string) string {
-	if metadata[beadmeta.OutcomeMetadataKey] == "pass" {
+	if metadata[beadmeta.StepRefMetadataKey] != "" && metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomePass {
 		return ""
 	}
 	return metadata[beadmeta.WorkOutcomeMetadataKey]

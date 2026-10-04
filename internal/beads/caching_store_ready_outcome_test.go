@@ -25,8 +25,13 @@ func TestCachingStoreReadyDefersToAPassedStep(t *testing.T) {
 		},
 		{
 			"passed step releases the dependent despite a blocked work outcome",
-			map[string]string{beadmeta.OutcomeMetadataKey: "pass", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
 			true,
+		},
+		{
+			"passed work bead without a step ref still withholds the dependent",
+			map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+			false,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
