@@ -13,7 +13,6 @@ import {
 import {
   selectBeadsNeedingAttention,
   type BeadAttentionReason,
-  type BeadAttentionSession,
 } from './beadsNeedingAttention';
 import { elapsedSince, formatElapsed } from './elapsed';
 import { runDetailHref } from '../supervisor/runHref';
@@ -102,12 +101,6 @@ export interface BeadsAttentionFacts {
    * shape as `decisions`.
    */
   escalations?: readonly Bead[];
-  /**
-   * City sessions for the stalled-in-progress check (gp-6xd). Omitted when the
-   * session read failed — the selector then skips session-dependent stall
-   * checks instead of painting every in-progress bead stalled.
-   */
-  sessions?: readonly BeadAttentionSession[];
   nowMs?: number;
   partial?: boolean;
   error?: string;
@@ -425,21 +418,20 @@ function deriveBeadsAttention(facts: BeadsAttentionFacts | undefined): readonly 
     items.push(mayorDecisionAttention(decision));
   }
   const nowMs = facts.nowMs ?? Date.now();
-  // gascity-dashboard-2j8e.3: the Beads badge counts exactly the ready-unclaimed
-  // + abnormally-blocked (escalated / help-requested) set — plain
-  // dependency-blocked is excluded (bd `blocked` = "blocked by a dependency",
-  // working-as-intended queuing). Ready-unclaimed comes from the general list;
-  // escalations from the dedicated gc:escalation queue (the general list drops
-  // gc:-labelled beads). Marker beads surface via the decision queue above, so
-  // skip them in the general list (no double-surfacing). selectBeadsNeedingAttention
-  // is the membership SSOT the /beads page also reads, so the nav badge count
-  // and the page count cannot disagree.
+  // gascity-dashboard-2j8e.3: the Beads badge counts work that needs a HUMAN —
+  // general beads explicitly assigned to `human`, open escalation queue
+  // entries, and beads parked on a named human checkpoint. Machine-
+  // operable work (unassigned ready beads, stalled in-progress beads, plain
+  // dependency-blocked beads) is excluded. Marker beads surface via the
+  // decision queue above, so skip them in the general list (no
+  // double-surfacing). selectBeadsNeedingAttention is the membership SSOT the
+  // /beads page also reads, so the nav badge count and the page count cannot
+  // disagree.
   const generic = (facts.items ?? []).filter((bead) => !isMayorDecision(bead, facts.decisionLabel));
   for (const row of selectBeadsNeedingAttention(
     {
       beads: generic,
       escalations: facts.escalations ?? [],
-      ...(facts.sessions === undefined ? {} : { sessions: facts.sessions }),
     },
     nowMs,
   )) {
@@ -466,8 +458,8 @@ function beadAttentionWord(reason: BeadAttentionReason): string {
       return 'stalled';
     case 'waiting-human':
       return 'waiting';
-    case 'ready-unclaimed':
-      return 'unclaimed';
+    case 'human-assigned':
+      return 'assigned to human';
   }
 }
 
