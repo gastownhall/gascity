@@ -59,7 +59,7 @@ endpoints, credentials, timeouts, download and parallelism policy.
 | tier | how | executes | writes the shared cache |
 |---|---|---|---|
 | contributor (default) | `--config=fork-cache` | locally, on cache misses | never |
-| maintainer (opt-in) | `--config=remote-exec` + a client certificate | rbe-west (default or `oss` instance) | only rbe-west's own workers |
+| maintainer (opt-in, allowlisted) | `--config=remote-exec` + a client certificate | rbe-west, `oss` instance | only rbe-west's own workers |
 | CI (`bazel-test.yml`) | `--config=remote-exec` + CI secrets | rbe-west, `oss` instance | only rbe-west's own workers |
 
 - **Contributor.** `fork-cache` reads rbe-west's anonymous, read-only cache
@@ -86,18 +86,16 @@ endpoints, credentials, timeouts, download and parallelism policy.
 
   ```
   build:remote-exec --remote_executor=grpcs://<rbe-west endpoint>
+  build:remote-exec --remote_instance_name=oss
   build:remote-exec --tls_client_certificate=/home/<you>/.config/gascity-rbe/client.crt
   build:remote-exec --tls_client_key=/home/<you>/.config/gascity-rbe/client.key
   ```
 
-  The instance decides which results you share. Unset (the default
-  instance) runs on rbe-west's own workers and reads through to the `oss`
-  action cache, so CI's results are hits, but what your pushes compute stays
-  in the default instance's action cache, which CI does not read. With
-  `build:remote-exec --remote_instance_name=oss` your actions run on the
-  Blacksmith-donated OSS pool (gastownhall code only) and land in the `oss`
-  action cache that CI and contributors read, so a pre-push result is a PR
-  hit; the operators must authorize your certificate for the OSS scheduler.
+  Allowlisted maintainers working on this OSS project run on the
+  Blacksmith-donated OSS pool (`--remote_instance_name=oss`; OSS code only).
+  Their actions land in the `oss` action cache that CI and contributors
+  read, so a pre-push result is a PR and main hit. The operators authorize
+  each certificate for the OSS scheduler when they issue it.
 - **CI.** `bazel-test.yml` is the trusted writer: its actions execute on
   rbe-west's `oss` workers, which alone write the `oss` action cache that
   contributors and fork PRs read. Fork PRs get the read-only cache, or
