@@ -183,8 +183,8 @@ func TestDismissFeedbackSurveyModalAgainstDebouncedSurvey(t *testing.T) {
 			keys = append(keys, sent...)
 			return nil
 		}, func(time.Duration) {})
-		if err != nil {
-			t.Fatalf("dismissFeedbackSurveyModal error = %v", err)
+		if !errors.Is(err, errFeedbackSurveyDigitUnresolved) {
+			t.Fatalf("dismissFeedbackSurveyModal error = %v, want %v so the nudge does not submit onto the draft", err, errFeedbackSurveyDigitUnresolved)
 		}
 		if !present {
 			t.Fatal("dismissFeedbackSurveyModal reported no survey")
@@ -303,8 +303,8 @@ func TestDismissFeedbackSurveyModalSendsOneDigitWhileSurveyPersists(t *testing.T
 			sent = append(sent, call[len(call)-1])
 		}
 	}
-	if got := strings.Join(sent, ","); got != "0" {
-		t.Fatalf("send-keys = %q, want one dismiss digit and no second attempt while the survey persists", got)
+	if got := strings.Join(sent, ","); got != "0,C-u" {
+		t.Fatalf("send-keys = %q, want one dismiss digit then a clear of the possibly unread digit while the survey persists", got)
 	}
 }
 

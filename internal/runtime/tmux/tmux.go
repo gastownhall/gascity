@@ -3185,7 +3185,7 @@ const (
 	feedbackSurveyDigitDeadline     = time.Second
 )
 
-var errFeedbackSurveyDigitUnresolved = errors.New("feedback survey dismiss digit sent but the composer never became readable")
+var errFeedbackSurveyDigitUnresolved = errors.New("feedback survey dismiss digit sent but the composer was left unreadable or holding other input")
 
 func dismissFeedbackSurveyModal(content string, capture func() (string, error), sendKeys func(keys ...string) error, sleep func(time.Duration)) (bool, error) {
 	if !runtime.ContainsFeedbackSurveyModal(content) {
@@ -3202,34 +3202,37 @@ func dismissFeedbackSurveyModal(content string, capture func() (string, error), 
 	if err := sendKeys("0"); err != nil {
 		return true, err
 	}
-	composer, err := awaitFeedbackSurveyDigit(capture, sleep)
-	if err != nil {
+	composer, surveyGone, err := awaitFeedbackSurveyDigit(capture, sleep)
+	switch {
+	case err != nil:
 		return true, err
-	}
-	if composer == "0" {
+	case composer == "0", composer == "" && !surveyGone:
 		return true, sendKeys("C-u")
+	case composer != "":
+		return true, errFeedbackSurveyDigitUnresolved
 	}
 	return true, nil
 }
 
-func awaitFeedbackSurveyDigit(capture func() (string, error), sleep func(time.Duration)) (string, error) {
+func awaitFeedbackSurveyDigit(capture func() (string, error), sleep func(time.Duration)) (string, bool, error) {
 	var composer string
-	var observed bool
+	var observed, surveyGone bool
 	for waited := time.Duration(0); waited < feedbackSurveyDigitDeadline; waited += feedbackSurveyDigitPollInterval {
 		sleep(feedbackSurveyDigitPollInterval)
 		content, err := capture()
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 		composer, observed = feedbackSurveyComposer(content)
-		if observed && !runtime.ContainsFeedbackSurveyModal(content) {
+		surveyGone = !runtime.ContainsFeedbackSurveyModal(content)
+		if observed && surveyGone {
 			break
 		}
 	}
 	if !observed {
-		return "", errFeedbackSurveyDigitUnresolved
+		return "", false, errFeedbackSurveyDigitUnresolved
 	}
-	return composer, nil
+	return composer, surveyGone, nil
 }
 
 func feedbackSurveyComposer(content string) (string, bool) {
