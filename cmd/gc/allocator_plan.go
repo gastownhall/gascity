@@ -160,7 +160,7 @@ func (p *decidePass) computePoolDesired() {
 	rows := make([]session.Info, 0, len(p.decidable)+len(p.in.Reservations))
 	for _, info := range p.decidable {
 		if b := p.stickyBinding(p.byID[info.ID]); b != nil {
-			info.TriggerBeadID, info.TriggerBeadStoreRef = b.WorkBeadID, b.WorkStoreRef
+			info.TriggerBeadID = b.WorkBeadID
 		}
 		rows = append(rows, info)
 	}
@@ -197,9 +197,7 @@ func (p *decidePass) computePoolDesired() {
 func (p *decidePass) inFlightStandIns() []session.Info {
 	entries := make(map[string]ledgerEntry)
 	for _, e := range p.in.Ledger {
-		if e.Kind == kindCreate {
-			entries[e.ID] = e
-		}
+		entries[e.ID] = e
 	}
 	var lc ledgerCensus
 	if len(entries) > 0 {
@@ -229,13 +227,8 @@ func (p *decidePass) inFlightStandIns() []session.Info {
 			PendingCreateStartedAt: at.UTC().Format(time.RFC3339Nano),
 			CreatedAt:              at,
 			TriggerBeadID:          r.WorkBeadID,
-			TriggerBeadStoreRef:    r.WorkStoreRef,
-			DependencyOnly:         r.DependencyOnly,
 		}
-		if r.Slot > 0 {
-			info.PoolSlot = strconv.Itoa(r.Slot)
-		}
-		p.standIns[info.ID] = true
+		p.standIns[info.ID] = r.Template
 		out = append(out, info)
 	}
 	return out
@@ -340,8 +333,8 @@ func (p *decidePass) reserve(r planReservation) {
 // work C6.6 binds to a reusable row, paired with that row, then the rest in
 // order. A reused row is selected with its config ref and its binding
 // candidate; a fresh plan must pass the plan-time gates, and a refusal
-// scoped to its identity (a create veto, a held lease, a quarantine) moves
-// the request to the next free slot rather than starving the template.
+// specific to its name (a create backoff from the fence, or an identity
+// lease a dead or absent row holds) moves the request to the next free slot.
 func (p *decidePass) realizePools() {
 	for _, state := range p.poolStates {
 		cfgAgent := findAgentByTemplate(p.cfg, state.Template)
@@ -368,7 +361,7 @@ func (p *decidePass) realizePools() {
 			if request.SessionBeadID == "" {
 				continue
 			}
-			if p.standIns[request.SessionBeadID] {
+			if p.standIns[request.SessionBeadID] != "" {
 				done[i] = true
 				continue
 			}
@@ -386,12 +379,15 @@ func (p *decidePass) realizePools() {
 		}
 		for i, request := range state.Requests {
 			holder := p.bound[strings.TrimSpace(request.WorkBeadID)]
-			if done[i] || holder == "" || used[holder] {
+			if done[i] || holder == "" {
 				continue
 			}
 			for _, candidate := range reusablePoolSessionInfosForRequest(p.bp, cfgAgent, qualifiedName, request, p.in.Now, used) {
 				if candidate.ID == holder {
+					// A pairing that refuses (unusable worktree evidence, a
+					// claimed slot) falls through to fresh realization.
 					realize(i, &candidate)
+					done[i] = p.selected[p.byID[holder]] != nil
 					break
 				}
 			}
@@ -404,9 +400,10 @@ func (p *decidePass) realizePools() {
 	}
 }
 
-// realizeRequest selects or plans one request. An identity-scoped refusal
-// keeps its slot used and plans the next free one; the identities that can
-// refuse are finite, so the slots tried are too.
+// realizeRequest selects or plans one request. A refusal specific to the
+// planned name keeps its slot used and plans the next free one; the names
+// that can refuse are finite, so the slots tried are too. Any other refusal
+// stalls the request, as legacy's does (build_desired_state.go:5180).
 func (p *decidePass) realizeRequest(cfgAgent *config.Agent, qualifiedName string, prefer *session.Info, request SessionRequest, used map[string]bool, usedSlots map[int]bool) {
 	for {
 		info, slot, plan, err := selectOrPlanPoolSessionBead(p.bp, cfgAgent, qualifiedName, prefer, request, p.in.Now, used, usedSlots)
@@ -424,7 +421,6 @@ func (p *decidePass) realizeRequest(cfgAgent *config.Agent, qualifiedName string
 		if ok, retry := p.admitPoolPlan(createPool, cfgAgent, *plan, request); ok || !retry || cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 			return
 		}
-		prefer = nil
 	}
 }
 
@@ -456,10 +452,9 @@ func (p *decidePass) selectPoolRow(cfgAgent *config.Agent, info session.Info, sl
 		}
 	}
 	sel := &selection{
-		ref:    ref,
-		resume: request.Tier == "resume" && request.SessionBeadID == info.ID,
-		normalize: cfgAgent.UsesCanonicalSingletonPoolIdentity() && ref.ResolveKind != resolveManual && !isNamedSessionInfo(info) &&
-			!nonExpandingPoolIdentityPatchInfo(cfgAgent, info).empty(),
+		ref:       ref,
+		resume:    request.Tier == "resume" && request.SessionBeadID == info.ID,
+		normalize: needsNormalize(cfgAgent, info),
 	}
 	// Only a start candidate is bound (AM2): the binding is computed as
 	// legacy's bind computes it, from the plan-only work dir (worktree.Verify
@@ -491,9 +486,11 @@ func (p *decidePass) selectPoolRow(cfgAgent *config.Agent, info session.Info, sl
 // admitPoolPlan runs the plan-time gates on a fresh pool or dependency plan
 // and records it, with its reservation and desired-state membership, when
 // they pass (POOL-047/048/050/052, C7.3, F8). It reports whether the plan
-// was admitted and, if not, whether the refusal is scoped to the plan's
-// identity, so another slot may pass.
-func (p *decidePass) admitPoolPlan(kind createKind, cfgAgent *config.Agent, plan poolSessionCreatePlan, request SessionRequest) (admitted, identityRefused bool) {
+// was admitted and, if not, whether the refusal is specific to the plan's
+// name, so another slot may pass: a create backoff whose cause is the fence
+// (the name was taken), or an identity lease a dead or absent row holds.
+// A template-wide create failure and a #46 quarantine refuse the request.
+func (p *decidePass) admitPoolPlan(kind createKind, cfgAgent *config.Agent, plan poolSessionCreatePlan, request SessionRequest) (admitted, nameRefused bool) {
 	template := cfgAgent.QualifiedName()
 	refuse := func(cause string, identity bool) (bool, bool) {
 		p.refuse(template, plan.qualifiedInstance, rowKey{}, cause)
@@ -513,16 +510,19 @@ func (p *decidePass) admitPoolPlan(kind createKind, cfgAgent *config.Agent, plan
 	case p.endpointShut(ap.Endpoint):
 		return refuse(gateEndpointShut, false)
 	case p.createRefused(ap) != "":
-		return refuse(gateCreateRefused+p.createRefused(ap), true)
+		return refuse(gateCreateRefused+p.createRefused(ap), p.createRefused(ap) == createStageFence)
 	}
 	identifiers, err := p.planIdentifiers(cfgAgent, template, plan)
 	if err != nil {
 		return refuse(gateNoSlot, false)
 	}
-	agentName := firstNonEmpty(strings.TrimSpace(plan.qualifiedInstance), template)
+	agentName := plan.qualifiedInstance
 	if identifiers.beadScoped {
-		if _, held := p.in.Census.IdentityLeaseHolder(p.cfg, template, agentName); held {
-			return refuse(gateIdentityLease, true)
+		if holder, held := p.in.Census.IdentityLeaseHolder(p.cfg, template, agentName); held {
+			if dup := p.in.Census.Rows[holder].DuplicateOf; dup != "" {
+				holder.Leg = dup // the bead's runtime is observed on its canonical copy
+			}
+			return refuse(gateIdentityLease, p.obs[holder].Liveness.startCandidate())
 		}
 	}
 	if cfgAgent.UsesCanonicalSingletonPoolIdentity() {
@@ -538,7 +538,7 @@ func (p *decidePass) admitPoolPlan(kind createKind, cfgAgent *config.Agent, plan
 		episodeKey = boundSessionNameLength(poolIdentitySessionName(agentName, template) + poolRuntimeNameSuffix)
 	}
 	if p.quarantined(episodeKey) {
-		return refuse(gateQuarantine, true)
+		return refuse(gateQuarantine, false)
 	}
 	// The plan takes no planning reservation in the pass: within a template
 	// the planner's used slots keep its plans apart, and a dependency floor
@@ -566,7 +566,7 @@ func (p *decidePass) planIdentifiers(cfgAgent *config.Agent, template string, pl
 		return poolSessionIdentifiers{}, err
 	}
 	identity := poolSessionCreateIdentity{
-		AgentName:     firstNonEmpty(strings.TrimSpace(plan.qualifiedInstance), template),
+		AgentName:     plan.qualifiedInstance,
 		Slot:          plan.slot,
 		TransientSlot: usesTransientPoolSlotIdentity(cfgAgent),
 	}
@@ -766,13 +766,16 @@ func (p *decidePass) overlayAndFloors() {
 }
 
 // dependencyFloor is ensureDependencyOnlyTemplate in planOnly mode: a
-// dependency template with nothing desired gets a reusable dependency-only
-// row, or a dependency plan (P3-5b admits it in the priority lane). Its
-// fresh slot is claimed against the pass's reservations, so it never names
-// a slot a pool plan of the same pass took (P3-1 obligation).
+// dependency template with nothing desired and no create in flight gets a
+// reusable dependency-only row, or a dependency plan (P3-5b admits it with
+// the pool plans). An uncleared create of the template, floor or pool, will
+// be a row of it, so a second plan would duplicate it across passes (F1).
+// Its fresh slot is claimed against the pass's reservations, so it never
+// names a slot a pool plan of the same pass took (P3-1 obligation).
 func (p *decidePass) dependencyFloor(cfgAgent *config.Agent) {
 	template := cfgAgent.QualifiedName()
-	if !cfgAgent.SupportsGenericEphemeralSessions() || desiredHasTemplate(p.desired, template) {
+	if !cfgAgent.SupportsGenericEphemeralSessions() || desiredHasTemplate(p.desired, template) ||
+		slices.Contains(slices.Collect(maps.Values(p.standIns)), template) {
 		return
 	}
 	if why := p.in.TransportRefused[template]; why != "" {
@@ -789,7 +792,7 @@ func (p *decidePass) dependencyFloor(cfgAgent *config.Agent) {
 		return
 	}
 	k, ok := p.byID[info.ID]
-	if !ok || p.selected[k] != nil {
+	if !ok {
 		return
 	}
 	resolveAgent, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(cfgAgent, slot)
@@ -798,11 +801,19 @@ func (p *decidePass) dependencyFloor(cfgAgent *config.Agent) {
 		QualifiedInstance: qualifiedInstance, PoolSlot: poolSlot, InstanceName: info.SessionNameMetadata,
 		DependencyOnly: true, TransientSlot: usesTransientPoolSlotIdentity(cfgAgent),
 	}
-	p.selected[k] = &selection{ref: ref}
+	p.selected[k] = &selection{ref: ref, normalize: needsNormalize(cfgAgent, info)}
 	p.desired[info.SessionNameMetadata] = TemplateParams{
 		TemplateName: templateNameFor(resolveAgent, qualifiedInstance),
 		InstanceName: info.SessionNameMetadata, DependencyOnly: true,
 	}
+}
+
+// needsNormalize reports a canonical singleton row whose stored identity is
+// a phantom slot spelling (POOL-046): the session key collapses it before
+// start.
+func needsNormalize(cfgAgent *config.Agent, info session.Info) bool {
+	return cfgAgent.UsesCanonicalSingletonPoolIdentity() && !isManualSessionInfoForAgent(info, cfgAgent) &&
+		!isNamedSessionInfo(info) && !nonExpandingPoolIdentityPatchInfo(cfgAgent, info).empty()
 }
 
 // bindings is step 14 (C6.1 as amended by AM2): a selected start candidate
@@ -810,16 +821,24 @@ func (p *decidePass) dependencyFloor(cfgAgent *config.Agent) {
 // whose liveness is unknown, never is. A binding the previous snapshot
 // published for a row still selected keeps its work and its ID while the
 // work is still unclaimed demand, whichever request the row realized this
-// pass, so a row's binding never flips between passes. Within a pass a work
+// pass, so a row's binding never flips between passes; claimed work and work
+// a resume request names end the pairing (F2). Within a pass a work
 // item is bound at most once; work the previous snapshot bound to a row
 // still selected, or that a selected live row already carries as its
 // trigger, is consumed (C6.3, C6.6). Binding IDs carry the epoch and the
 // generation that first published them (C6.1).
 func (p *decidePass) bindings() {
+	// A sticky pairing holds only on unclaimed work: work a row claimed is
+	// no longer the bound row's, and resume-tier requests name only assigned
+	// work.
+	claimed := make(map[string]bool)
+	for _, w := range p.in.Demand.AssignedWork {
+		claimed[w.ID] = true
+	}
 	demand := make(map[string]bool)
 	for _, state := range p.poolStates {
 		for _, r := range state.Requests {
-			if id := strings.TrimSpace(r.WorkBeadID); id != "" {
+			if id := strings.TrimSpace(r.WorkBeadID); id != "" && !claimed[id] {
 				demand[id] = true
 			}
 		}

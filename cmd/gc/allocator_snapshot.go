@@ -267,7 +267,7 @@ func (k createKind) String() string {
 }
 
 // allocPlan is one fresh row the pass would create. It is data only: P3-5b
-// admits plans in fair-share order (dependency and named plans first),
+// admits plans in fair-share order (named plans first),
 // reserves their create entries and hands P3-6 the pool and dependency kinds
 // as createPlanOf(entryID, Template, Plan); the named kind waits for P3-6b.
 type allocPlan struct {
@@ -303,12 +303,10 @@ type planReservation struct {
 	Template          string
 	QualifiedInstance string
 	Slot              int
-	// WorkBeadID and WorkStoreRef are the plan's trigger work (its
-	// request's), ReservedAt when its entry was reserved.
-	WorkBeadID     string
-	WorkStoreRef   string
-	ReservedAt     time.Time
-	DependencyOnly bool
+	// WorkBeadID is the plan's trigger work (its request's), ReservedAt
+	// when its entry was reserved.
+	WorkBeadID string
+	ReservedAt time.Time
 	// NamedIdentity and SessionName are set for a named create.
 	NamedIdentity string
 	SessionName   string

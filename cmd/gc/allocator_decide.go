@@ -178,10 +178,10 @@ type decidePass struct {
 	poolStates  []PoolDesiredState
 	poolDesired map[string]int
 	poolWork    []beads.Bead
-	// standIns are the pending-create rows uncleared creates stand in for
-	// in pool demand, by stand-in ID; bound maps work C6.6 counts as
-	// consumed to the row holding it.
-	standIns map[string]bool
+	// standIns are the templates of the pending-create rows uncleared
+	// creates stand in for in pool demand, by stand-in ID; bound maps work
+	// C6.6 counts as consumed to the row holding it.
+	standIns map[string]string
 	bound    map[string]string
 
 	bp       *agentBuildParams
@@ -237,7 +237,7 @@ func newDecidePass(in allocInputs) *decidePass {
 		none:     make(map[rowKey]string),
 		byID:     make(map[string]rowKey),
 		losers:   make(map[rowKey]bool),
-		standIns: make(map[string]bool),
+		standIns: make(map[string]string),
 		bound:    make(map[string]string),
 		desired:  make(map[string]TemplateParams),
 		selected: make(map[rowKey]*selection),
@@ -281,9 +281,10 @@ func (p *decidePass) finish() allocDecision {
 // allocator does not manage are set aside with legacy's predicates. They
 // keep the slots and names legacy gives them (fail-closed): every one stays
 // in occupancy. A pending or stale create is a rollback candidate only when
-// its own runtime is not alive: absent, or a name another row holds, as
-// legacy rolls back only what is not running; unknown and dead keep it. Any
-// other row whose name another bead's runtime holds is None (C11).
+// its own runtime is absent, absent-unconfirmed or a name another row
+// holds. Unknown liveness keeps it managed, and so does a dead pane: legacy's
+// IsRunning reads a corpse as not running, but v2's start path recycles it.
+// Any other row whose name another bead's runtime holds is None (C11).
 func (p *decidePass) classifyRows() {
 	c := p.in.Census
 	var startupTimeout time.Duration

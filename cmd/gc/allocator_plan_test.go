@@ -87,8 +87,7 @@ func reserveAll(f *allocFixture, d allocDecision, at time.Time) {
 		})
 		f.in.Reservations = append(f.in.Reservations, planReservation{
 			EntryID: id, Template: p.Template, QualifiedInstance: p.Plan.qualifiedInstance, Slot: p.Plan.poolSlot,
-			WorkBeadID: p.Request.WorkBeadID, WorkStoreRef: p.Request.WorkStoreRef, ReservedAt: at,
-			DependencyOnly: p.Kind == createDependency,
+			WorkBeadID: p.Request.WorkBeadID, ReservedAt: at,
 		})
 	}
 }
@@ -219,7 +218,7 @@ func TestAllocator_FreshSlot_LowestFreeAcrossAllLegs(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 4)}}
 	d := newAllocFixture(t, cfg).
 		sessions(poolRow("gc-1", "worker", 1, "asleep")).
-		leg("rig:a", poolRow("rg-2", "worker", 2, "active")).
+		rigLeg(poolRow("rg-2", "worker", 2, "active")).
 		demand("worker", "w-1").decide()
 	if got := planSlots(d, "worker"); fmt.Sprint(got) != "[3]" {
 		t.Fatalf("plan slots = %v, want [3] (1 and 2 are held on two legs); trace %v", got, d.Trace)
@@ -268,6 +267,75 @@ func TestAllocator_RefusedIdentityDoesNotStarveTemplate(t *testing.T) {
 	}
 	if !traceHas(d, gateCreateRefused+"fence") {
 		t.Fatalf("the vetoed identity must be traced: %v", d.Trace)
+	}
+}
+
+// Kills: a refusal that is not specific to the planned name moving the
+// request to the next slot (F3): one template-wide create failure, or one
+// quarantined start, would spread across every slot pass after pass and
+// defeat per-identity backoff. As legacy stalls (build_desired_state.go
+// 5180), a template-wide create backoff (prepare, lock) and a #46
+// quarantine plan nothing past the refused slot; a fence refusal (the name
+// was taken) advances one slot per pass, within the cap.
+func TestAllocator_RefusedIdentityStallsUnlessNameSpecific(t *testing.T) {
+	for _, cause := range []string{"prepare", "lock", "quarantine", createStageFence} {
+		for label, agent := range map[string]config.Agent{"max-5": allocPoolAgent("worker", 5), "unlimited": {Name: "worker", MaxActiveSessions: intPtr(-1)}} {
+			cfg := &config.City{Agents: []config.Agent{agent}}
+			vetoes := map[string]createVeto{}
+			episodes := map[string]session.StartupHealthEpisode{}
+			var slots []int
+			for pass := 0; pass < 7; pass++ {
+				f := newAllocFixture(t, cfg).demand("worker", "w-1")
+				f.in.CreateVetoes, f.in.Episodes = vetoes, episodes
+				d := f.decide()
+				if len(d.Plans) == 0 {
+					slots = append(slots, 0)
+					continue
+				}
+				p := d.Plans[0]
+				slots = append(slots, p.Plan.poolSlot)
+				if cause == "quarantine" {
+					key := boundSessionNameLength(poolIdentitySessionName(p.Plan.qualifiedInstance, "worker") + poolRuntimeNameSuffix)
+					episodes[key] = session.StartupHealthEpisode{QuarantinedUntil: allocNow.Add(5 * time.Minute)}
+					continue
+				}
+				vetoes[p.identity()] = createVeto{Until: allocNow.Add(10 * time.Second), Cause: cause}
+			}
+			want := "[1 0 0 0 0 0 0]"
+			switch {
+			case cause == createStageFence && label == "max-5":
+				want = "[1 2 3 4 5 0 0]"
+			case cause == createStageFence:
+				want = "[1 2 3 4 5 6 7]"
+			}
+			if got := fmt.Sprint(slots); got != want {
+				t.Errorf("%s, %s pool: slot planned per pass %s, want %s", cause, label, got, want)
+			}
+		}
+	}
+}
+
+// Kills: an identity lease treated as name-specific whatever its holder
+// (F3). A lease a dead or absent row holds frees nothing soon but blocks
+// only that name, so the request moves to the next slot; one a live row
+// holds stalls the request, as legacy does.
+func TestAllocator_IdentityLeaseAdvancesOnlyPastANotLiveHolder(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
+	started := ago(time.Minute)
+	canonical := poolRow("gc-1", "worker", 1, "start-pending", "pending_create_claim", "true", "pending_create_started_at", started)
+	stale := poolRow("gc-1", "worker", 1, "start-pending", "pending_create_claim", "true", "pending_create_started_at", started,
+		"agent_name", "worker-2", "pool_slot", "")
+	for _, alive := range []bool{false, true} {
+		f := newAllocFixture(t, cfg).sessions(canonical).rigLeg(stale).demand("worker", "w-1", "w-2")
+		want := "[3]"
+		if alive {
+			f.alive("s-gc-1", InventoryAttrs{AttachedKnown: true})
+			want = "[]"
+		}
+		d := f.decide()
+		if got := fmt.Sprint(planSlots(d, "worker")); got != want || !traceHas(d, gateIdentityLease) {
+			t.Errorf("holder alive=%v: plans %s trace %v, want %s", alive, got, d.Trace, want)
+		}
 	}
 }
 
@@ -338,7 +406,7 @@ func TestAllocator_IdentityLeaseHeldPlansNoCreate(t *testing.T) {
 	canonical := poolRow("gc-1", "worker", 1, "start-pending", "pending_create_claim", "true", "pending_create_started_at", started)
 	stale := poolRow("gc-1", "worker", 1, "start-pending", "pending_create_claim", "true", "pending_create_started_at", started,
 		"agent_name", "worker-2", "pool_slot", "")
-	d := newAllocFixture(t, cfg).sessions(canonical).leg("rig:a", stale).demand("worker", "w-1", "w-2").decide()
+	d := newAllocFixture(t, cfg).sessions(canonical).rigLeg(stale).demand("worker", "w-1", "w-2").decide()
 	for _, p := range d.Plans {
 		if p.Plan.qualifiedInstance == "worker-2" {
 			t.Fatalf("planned a create for the leased identity worker-2: %+v", d.Plans)
@@ -1062,17 +1130,18 @@ func TestAllocator_IdentityLeaseAskedOnlyForBeadScopedIdentities(t *testing.T) {
 }
 
 // Kills: a create veto ignored (AM-N8, P3-6 obligation) and a refused
-// worktree's work bound or created (#34): the vetoed identity is skipped
-// and traced; the throttled work item takes no slot, while a verdict on
-// other evidence for the same bead refuses nothing.
+// worktree's work bound or created (#34): the vetoed identity is refused
+// and traced, and a template-wide cause plans no other slot; the throttled
+// work item takes no slot, while a verdict on other evidence for the same
+// bead refuses nothing.
 func TestAllocator_CreateVetoAndWorktreeVerdictRefusePlans(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
 	f := newAllocFixture(t, cfg).demand("worker", "w-1")
 	key := createIdentity{Template: "worker", QualifiedInstance: "worker-1", Slot: 1}.key()
 	f.in.CreateVetoes = map[string]createVeto{key: {Until: allocNow.Add(time.Minute), Cause: "lock"}}
 	d := f.decide()
-	if fmt.Sprint(planSlots(d, "worker")) != "[2]" || !traceHas(d, gateCreateRefused+"lock") {
-		t.Fatalf("vetoed identity: plans %v trace %v, want worker-1 refused and slot 2 planned", planSlots(d, "worker"), d.Trace)
+	if len(d.Plans) != 0 || !traceHas(d, gateCreateRefused+"lock") {
+		t.Fatalf("vetoed identity: plans %v trace %v, want worker-1 refused and nothing planned", planSlots(d, "worker"), d.Trace)
 	}
 	f.in.CreateVetoes = map[string]createVeto{key: {Until: allocNow, Cause: "lock"}}
 	if d = f.decide(); fmt.Sprint(planSlots(d, "worker")) != "[1]" {
@@ -1116,10 +1185,11 @@ func TestAllocator_PlanningCensusHoldsCensusRowsOnly(t *testing.T) {
 	}
 }
 
-// Kills: dependency floors that collide with the pass's own pool plans or a
-// reservation (P3-1 obligation), never plan (POOL-058), or plan for a
-// suspended dependency. A root's dependency gets one floor plan; a pool plan
-// for it in the same pass satisfies the floor.
+// Kills: dependency floors that collide with the pass's own pool plans or an
+// uncleared create (P3-1 obligation, F1), never plan (POOL-058), or plan for
+// a suspended dependency. A root's dependency gets one floor plan; a pool
+// plan for it in the same pass, or a create of it in flight, satisfies the
+// floor.
 func TestAllocator_DependencyFloorNeverCollidesWithAPassPlan(t *testing.T) {
 	db := allocPoolAgent("db", 3)
 	app := allocPoolAgent("app", 3)
@@ -1140,18 +1210,129 @@ func TestAllocator_DependencyFloorNeverCollidesWithAPassPlan(t *testing.T) {
 		t.Fatalf("db plans = %v, want [1]: the pool plan satisfies the floor", got)
 	}
 	f := newAllocFixture(t, cfg).demand("app", "w-1")
-	f.in.Reservations = []planReservation{{EntryID: "create-1", Template: "db", QualifiedInstance: "db-1", Slot: 1, DependencyOnly: true}}
-	d = f.decide()
-	for _, p := range d.Plans {
-		if p.Template == "db" && p.Plan.poolSlot == 1 {
-			t.Fatalf("a db plan named the reserved slot 1: %+v", d.Plans)
-		}
+	f.in.Reservations = []planReservation{{EntryID: "create-1", Template: "db", QualifiedInstance: "db-1", Slot: 1}}
+	if got := planSlots(f.decide(), "db"); len(got) != 0 {
+		t.Fatalf("db plans = %v while a create of db is in flight", got)
 	}
 	suspended := db
 	suspended.Suspended = true
 	d = newAllocFixture(t, &config.City{Agents: []config.Agent{suspended, app}}).demand("app", "w-1").decide()
 	if got := planSlots(d, "db"); len(got) != 0 {
 		t.Fatalf("a suspended dependency got a floor plan: %v", got)
+	}
+}
+
+// Kills: a dependency floor planned again on every pass while its create is
+// in flight (F1, R21): the root (app) is a live row the overlay selects, so
+// pass 1 plans the db floor; once P3-5b reserves it, pass 2 plans nothing
+// for db until the row lands. An in-flight pool create of db holds the
+// floor the same way.
+func TestAllocator_DependencyFloorInFlightNotReplanned(t *testing.T) {
+	db := allocPoolAgent("db", 3)
+	app := allocPoolAgent("app", 3)
+	app.DependsOn = []string{"db"}
+	cfg := &config.City{Agents: []config.Agent{db, app}}
+	f := newAllocFixture(t, cfg).sessions(poolRow("gc-a", "app", 1, "active", "gc.trigger_bead_id", "w-1")).
+		alive("s-gc-a", InventoryAttrs{AttachedKnown: true}).demand("app", "w-1")
+	d1 := f.decide()
+	if len(d1.Plans) != 1 || d1.Plans[0].Kind != createDependency || d1.Plans[0].Template != "db" {
+		t.Fatalf("pass 1 plans %+v, want one db dependency floor for the live root", d1.Plans)
+	}
+	reserveAll(f, d1, allocNow)
+	if d2 := f.decide(); len(d2.Plans) != 0 {
+		t.Fatalf("pass 2 plans %+v while the db floor create is in flight", d2.Plans)
+	}
+
+	f = newAllocFixture(t, cfg).sessions(poolRow("gc-a", "app", 1, "active", "gc.trigger_bead_id", "w-1")).
+		alive("s-gc-a", InventoryAttrs{AttachedKnown: true}).demand("app", "w-1").demand("db", "w-9")
+	d1 = f.decide()
+	if got := planSlots(d1, "db"); fmt.Sprint(got) != "[1]" || d1.Plans[0].Kind != createPool {
+		t.Fatalf("pass 1 plans %+v, want one db pool plan", d1.Plans)
+	}
+	reserveAll(f, d1, allocNow)
+	f.demand("db")
+	if d2 := f.decide(); len(d2.Plans) != 0 {
+		t.Fatalf("pass 2 plans %+v while a db pool create is in flight", d2.Plans)
+	}
+}
+
+// Kills: a sticky binding kept on work another row claimed or a resume
+// request names (F2). Pass 1 binds the reusable X to W; Y then claims W.
+// Whether Y is alive or a start candidate resuming W, X's pairing ends and X
+// takes the new work W2 rather than a fresh plan carrying it.
+func TestAllocator_StickyBindingYieldsToClaimAndResume(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
+	x, y := poolRow("gc-x", "worker", 1, "active"), poolRow("gc-y", "worker", 2, "active")
+	d1 := newAllocFixture(t, cfg).sessions(x).demand("worker", "W").decide()
+	if b := entryOf(t, d1, "gc-x").Binding; b == nil || b.WorkBeadID != "W" {
+		t.Fatalf("pass 1: X binding %+v, want W", b)
+	}
+	for _, yAlive := range []bool{true, false} {
+		f := newAllocFixture(t, cfg).sessions(x, y).demand("worker", "W2")
+		if yAlive {
+			f.alive("s-gc-y", InventoryAttrs{AttachedKnown: true})
+		}
+		f.in.Demand.AssignedWork = []beads.Bead{{ID: "W", Status: "in_progress", Assignee: "gc-y", Metadata: map[string]string{"gc.routed_to": "worker"}}}
+		f.in.Demand.AssignedStoreRefs = []string{""}
+		f.in.Prev, f.in.SelGen = d1.Snapshot, 2
+		d := f.decide()
+		ex, ey := entryOf(t, d, "gc-x"), entryOf(t, d, "gc-y")
+		if ex.Binding == nil || ex.Binding.WorkBeadID != "W2" || len(d.Plans) != 0 {
+			t.Errorf("y alive=%v: X binding %+v, plans %v; want X on W2 and no plan", yAlive, ex.Binding, planWork(d))
+		}
+		if !yAlive && (ey.Binding == nil || ey.Binding.WorkBeadID != "W") {
+			t.Errorf("Y resuming W: binding %+v, want W", ey.Binding)
+		}
+	}
+}
+
+// Kills: a sticky binding kept on work that closed (F2): with no demand
+// left, neither an in-flight nor a reusable X stays bound to W.
+func TestAllocator_StickyBindingEndsWhenWorkCloses(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
+	for label, x := range map[string]beads.Bead{
+		"in-flight": poolRow("gc-x", "worker", 1, "creating", "pending_create_claim", "true", "pending_create_started_at", ago(10*time.Second)),
+		"reusable":  poolRow("gc-x", "worker", 1, "active"),
+	} {
+		d1 := newAllocFixture(t, cfg).sessions(x).demand("worker", "W").decide()
+		if b := entryOf(t, d1, "gc-x").Binding; b == nil || b.WorkBeadID != "W" {
+			t.Fatalf("%s: pass 1 binding %+v, want W", label, b)
+		}
+		f := newAllocFixture(t, cfg).sessions(x)
+		f.in.Prev, f.in.SelGen = d1.Snapshot, 2
+		if b := entryOf(t, f.decide(), "gc-x").Binding; b != nil {
+			t.Errorf("%s: pass 2 binding %+v after W closed, want none", label, b)
+		}
+	}
+}
+
+// Kills: a refused phase-2 pairing dropping its request (F7b). X is bound
+// to W from the last pass, but W's worktree evidence is now refused, so X
+// cannot take it; the request falls through to fresh realization, which
+// selects the live row Z (a live row needs no worktree check).
+func TestAllocator_RefusedPairingFallsThroughToFreshRealization(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
+	spec := worktree.Spec{BeadID: "W", StoreRef: "city", Path: "/wt/W"}
+	withSpec := func(f *allocFixture) *allocFixture {
+		d := f.in.Demand.Collected.DefaultDemand["worker"]
+		d.WorktreeSpecs = map[string]*worktree.Spec{"W": &spec}
+		f.in.Demand.Collected.DefaultDemand["worker"] = d
+		return f
+	}
+	x := poolRow("gc-x", "worker", 1, "active")
+	d1 := withSpec(newAllocFixture(t, cfg).sessions(x).demand("worker", "W")).decide()
+	if b := entryOf(t, d1, "gc-x").Binding; b == nil || b.WorkBeadID != "W" {
+		t.Fatalf("pass 1: X binding %+v, want W", b)
+	}
+	f := withSpec(newAllocFixture(t, cfg).sessions(x, poolRow("gc-z", "worker", 2, "active")).
+		alive("s-gc-z", InventoryAttrs{AttachedKnown: true}).demand("worker", "W"))
+	f.in.WorktreeRefused = map[string]worktree.Spec{"W": spec}
+	f.in.Prev, f.in.SelGen = d1.Snapshot, 2
+	d := f.decide()
+	// Z is realized for the request (pool identity), not only kept by the
+	// overlay, which also includes live rows.
+	if ez := entryOf(t, d, "gc-z"); !ez.InDesired || ez.Config == nil || ez.Config.PoolSlot != 2 {
+		t.Fatalf("Z = %s/%s config %+v; want the refused pairing's request realized on Z; trace %v", ez.Desired, ez.Reason, ez.Config, d.Trace)
 	}
 }
 
@@ -1179,9 +1360,9 @@ func TestAllocator_ControlDispatcherRetentionPartialDoesNotBlockCreate(t *testin
 	}
 }
 
-// POOL-048, C5.10: provider red, an open endpoint and a refused transport
-// refuse every fresh plan of the template; a #46 quarantine refuses its
-// identity only, so the request moves to the next slot. Each is traced and
+// POOL-048, C5.10: provider red, an open endpoint, a refused transport and
+// a #46 quarantine of the planned identity each refuse the request; the
+// quarantine does not move it to the next slot (F3). Each is traced and
 // consumes nothing.
 func TestAllocator_PlanGatesRedQuarantineEndpointTransport(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}, Workspace: config.Workspace{Provider: "claude"}}
@@ -1195,7 +1376,7 @@ func TestAllocator_PlanGatesRedQuarantineEndpointTransport(t *testing.T) {
 		{gateProviderRed, "[]", func(f *allocFixture) {
 			f.in.ProviderHealth = &providerHealthSnapshot{present: true, entries: map[string]bool{"claude": false}}
 		}},
-		{gateQuarantine, "[2]", func(f *allocFixture) {
+		{gateQuarantine, "[]", func(f *allocFixture) {
 			key := boundSessionNameLength(poolIdentitySessionName("worker-1", "worker") + poolRuntimeNameSuffix)
 			f.in.Episodes = map[string]session.StartupHealthEpisode{key: {QuarantinedUntil: allocNow.Add(time.Minute)}}
 		}},
@@ -1247,6 +1428,26 @@ func TestAllocator_SingletonReuseMarksNormalizeOnlyForAWrongIdentity(t *testing.
 		e := entryOf(t, d, "gc-1")
 		if !e.InDesired || e.Config == nil || e.Config.ResolveKind != resolveBase || e.Normalize != (label == "phantom") {
 			t.Errorf("%s singleton reuse = indesired=%v normalize=%v cfg=%+v", label, e.InDesired, e.Normalize, e.Config)
+		}
+	}
+}
+
+// Kills: a reused dependency-floor row started under a phantom identity
+// (F7c, POOL-046): a canonical singleton dependency's floor row whose stored
+// identity is a slot spelling is marked for the session key to normalize.
+func TestAllocator_DependencyFloorReuseMarksNormalize(t *testing.T) {
+	app := allocPoolAgent("app", 3)
+	app.DependsOn = []string{"db"}
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("db", 1), app}}
+	for label, row := range map[string]beads.Bead{
+		"phantom":   poolRow("gc-d", "db", 3, "asleep", "agent_name", "db-3", "dependency_only", "true"),
+		"canonical": poolRow("gc-d", "db", 0, "asleep", "agent_name", "db", "pool_slot", "", "dependency_only", "true"),
+	} {
+		d := newAllocFixture(t, cfg).sessions(poolRow("gc-a", "app", 1, "active", "gc.trigger_bead_id", "w-1"), row).
+			alive("s-gc-a", InventoryAttrs{AttachedKnown: true}).demand("app", "w-1").decide()
+		e := entryOf(t, d, "gc-d")
+		if !e.InDesired || e.Config == nil || !e.Config.DependencyOnly || e.Normalize != (label == "phantom") || len(d.Plans) != 0 {
+			t.Errorf("%s floor reuse = indesired=%v normalize=%v cfg=%+v plans %d", label, e.InDesired, e.Normalize, e.Config, len(d.Plans))
 		}
 	}
 }
