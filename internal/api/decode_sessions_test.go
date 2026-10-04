@@ -8,6 +8,7 @@ import (
 
 func TestSessionsFromGenList_Valid(t *testing.T) {
 	alias := "mayor"
+	agentName := "mayor"
 	lastActive := "2026-04-23T12:00:00Z"
 	reason := "config"
 	workDir := "/tmp/gc/workspaces/mayor"
@@ -22,6 +23,7 @@ func TestSessionsFromGenList_Valid(t *testing.T) {
 			Attached:    true,
 			Running:     true,
 			Alias:       &alias,
+			AgentName:   &agentName,
 			LastActive:  &lastActive,
 			Reason:      &reason,
 			WorkDir:     &workDir,
@@ -49,6 +51,7 @@ func TestSessionsFromGenList_Valid(t *testing.T) {
 		Reason:      "config",
 		Title:       "Overseer",
 		Alias:       "mayor",
+		AgentName:   "mayor",
 		SessionName: "mayor",
 		WorkDir:     "/tmp/gc/workspaces/mayor",
 		CreatedAt:   "2026-04-23T10:00:00Z",

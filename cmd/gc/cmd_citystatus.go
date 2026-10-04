@@ -255,13 +255,16 @@ func cmdCityStatusLocalFallback(cfg *config.City, cityPath string, jsonOutput bo
 // specific fallback reason without spinning up a real controller.
 //
 // Uses the shared supervisorFallthroughAPIClient helper (gascity ga-tp7,
-// ra-r9hm6v) rather than plain apiClient: a supervisor-managed city with no
-// standalone [api] port in city.toml — the common case — otherwise falls
-// straight to nil here even though the supervisor is reachable, and
-// `gc status`'s local fallback re-opens the full local bead/dolt store and
-// rescans event archives to rebuild store health, which measured ~9.5s of
-// CPU on a 26-agent/1.2GB city versus ~0.35s for the supervisor's cached
-// response. Status has a local fallback (unlike maintenance), so this
+// ra-r9hm6v) rather than plain apiClient: when the live controller does not
+// report supervisor hosting (explicit standalone, or an unknown mode such as
+// a controller predating the identity command) and city.toml has no usable
+// standalone [api] port, plain apiClient falls straight to nil here even when
+// the supervisor is reachable. That includes a supervisor-managed city with no
+// [api] port — the common case — whose controller predates the identity
+// command. `gc status`'s local fallback re-opens the full local bead/dolt
+// store and rescans event archives to rebuild store health, which measured
+// ~9.5s of CPU on a 26-agent/1.2GB city versus ~0.35s for the supervisor's
+// cached response. Status has a local fallback (unlike maintenance), so this
 // change only affects the ROUTE picked, not the correctness of either path.
 var cityStatusAPIClient = supervisorFallthroughAPIClient
 

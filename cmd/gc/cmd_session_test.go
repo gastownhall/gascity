@@ -2054,6 +2054,7 @@ func TestRenderSessionListFromAPIJSONUsesSnakeCaseSessionFields(t *testing.T) {
 				Reason:      "assigned",
 				Title:       "Worker session",
 				Alias:       "worker-1",
+				AgentName:   "worker-2",
 				SessionName: "worker-gc-abc",
 				WorkDir:     "/tmp/gc/workspaces/worker",
 				CreatedAt:   "2026-04-23T10:00:00Z",
@@ -2068,12 +2069,12 @@ func TestRenderSessionListFromAPIJSONUsesSnakeCaseSessionFields(t *testing.T) {
 		t.Fatalf("renderSessionListFromAPI(--json) = %d, want 0", code)
 	}
 	out := stdout.String()
-	for _, want := range []string{`"id"`, `"session_name"`, `"work_dir"`, `"created_at"`, `"last_active"`, `"last_output"`} {
+	for _, want := range []string{`"id"`, `"agent_name"`, `"session_name"`, `"work_dir"`, `"created_at"`, `"last_active"`, `"last_output"`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("API JSON output missing %s:\n%s", want, out)
 		}
 	}
-	for _, oldName := range []string{`"ID"`, `"SessionName"`, `"CreatedAt"`, `"LastActive"`, `"LastOutput"`} {
+	for _, oldName := range []string{`"ID"`, `"AgentName"`, `"SessionName"`, `"CreatedAt"`, `"LastActive"`, `"LastOutput"`} {
 		if strings.Contains(out, oldName) {
 			t.Fatalf("API JSON output contains Go field name %s:\n%s", oldName, out)
 		}
@@ -2093,6 +2094,11 @@ func TestRenderSessionListFromAPIJSONUsesSnakeCaseSessionFields(t *testing.T) {
 	}
 	if got.Sessions[0]["work_dir"] != "/tmp/gc/workspaces/worker" {
 		t.Fatalf("work_dir = %#v, want /tmp/gc/workspaces/worker; row=%#v", got.Sessions[0]["work_dir"], got.Sessions[0])
+	}
+	// agent_name is the pool slot the local-fallback rows also carry; scripts
+	// map a slot to its session through it, so the API path must keep it.
+	if got.Sessions[0]["agent_name"] != "worker-2" {
+		t.Fatalf("agent_name = %#v, want worker-2; row=%#v", got.Sessions[0]["agent_name"], got.Sessions[0])
 	}
 }
 

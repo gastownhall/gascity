@@ -20,8 +20,8 @@ func writeCityTOMLForRoute(t *testing.T, dir, body string) string {
 // withAPIRouteHooks pins every seam the routing ladder consults so a subtest is
 // hermetic no matter which one the implementation reads: the controller
 // identity probe (hosting mode plus the liveness PID), the legacy liveness
-// hook that maintenanceAPIClient still uses, and the supervisor client builder.
-// A pid of 0 means no controller is answering the socket.
+// hook that supervisorFallthroughAPIClient still uses, and the supervisor
+// client builder. A pid of 0 means no controller is answering the socket.
 func withAPIRouteHooks(t *testing.T, pid int, mode controllerHostingMode, supervisor *api.Client) {
 	t.Helper()
 	withControllerHosting(t, pid, mode)
@@ -230,8 +230,8 @@ func TestMaintenanceAPIClientRoutesToSupervisor(t *testing.T) {
 
 // TestCityStatusAPIClientRoutesToSupervisor is the ra-r9hm6v regression test.
 // Before this fix, `gc status` resolved its client through plain apiClient,
-// which returns nil whenever the per-city controller socket is alive but the
-// city has no standalone [api] port — exactly the shape of a supervisor-
+// which returned nil whenever the per-city controller socket was alive but the
+// city had no standalone [api] port — exactly the shape of a supervisor-
 // managed city like a default `gc init`'d city (no [api] section in
 // city.toml). That nil forced every `gc status` invocation onto the local
 // fallback (open the bead/dolt store, rescan event archives to rebuild store
@@ -239,6 +239,12 @@ func TestMaintenanceAPIClientRoutesToSupervisor(t *testing.T) {
 // for the supervisor's already-cached response. cityStatusAPIClient now
 // shares supervisorFallthroughAPIClient with maintenanceAPIClient, so it
 // must resolve the supervisor client in that same shape instead of nil.
+// Each case pins the controller's hosting mode to unknown (a controller
+// predating the identity command), the managed-city shape that still needs
+// the fall-through: apiClient routes a controller that reports supervisor
+// hosting itself (see TestAPIClientRouting), and an unpinned probe finds no
+// socket and takes apiClient's controller-down branch, so either would bypass
+// the fall-through this test guards.
 func TestCityStatusAPIClientRoutesToSupervisor(t *testing.T) {
 	sentinel := api.NewClient("http://supervisor.sentinel:1")
 	origAlive, origSup := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
@@ -247,8 +253,9 @@ func TestCityStatusAPIClientRoutesToSupervisor(t *testing.T) {
 		apiRouteSupervisorClientHook = origSup
 	})
 
-	t.Run("alive-no-api-port-routes-to-supervisor", func(t *testing.T) {
+	t.Run("alive-unknown-hosting-no-api-port-routes-to-supervisor", func(t *testing.T) {
 		t.Setenv("GC_NO_API", "")
+		withControllerHosting(t, 4242, controllerHostingUnknown)
 		apiRouteControllerAliveHook = func(string) int { return 4242 }
 		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
 		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
@@ -263,6 +270,7 @@ func TestCityStatusAPIClientRoutesToSupervisor(t *testing.T) {
 
 	t.Run("escape-hatch-skips-supervisor", func(t *testing.T) {
 		t.Setenv("GC_NO_API", "1")
+		withControllerHosting(t, 4242, controllerHostingUnknown)
 		apiRouteControllerAliveHook = func(string) int { return 4242 }
 		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
 		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
@@ -280,6 +288,7 @@ func TestCityStatusAPIClientRoutesToSupervisor(t *testing.T) {
 		// genuine "nothing is running" case, where the local fallback remains
 		// correct and necessary — the fix must not paper over it.
 		t.Setenv("GC_NO_API", "")
+		withControllerHosting(t, 0, controllerHostingUnknown)
 		apiRouteControllerAliveHook = func(string) int { return 0 }
 		apiRouteSupervisorClientHook = func(string) *api.Client { return nil }
 		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")

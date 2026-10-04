@@ -90,11 +90,15 @@ func cmdMaintenanceDoltGC(wait, jsonOut bool, stdout, stderr io.Writer) int {
 // a real controller.
 //
 // Maintenance has no local fallback, so it uses the shared
-// supervisorFallthroughAPIClient helper (gascity ga-tp7): a supervisor-managed
-// city omits a standalone [api] port (the supervisor serves the API on its
-// own port via city-scoped routes), so apiClient alone returns nil even
-// though the controller socket is alive; route to the supervisor-managed
-// client directly rather than reporting controller-down.
+// supervisorFallthroughAPIClient helper (gascity ga-tp7): when the controller
+// socket is alive, the city has no usable standalone [api] port, and the
+// controller does not report supervisor hosting (explicit standalone, or an
+// unknown mode such as a controller predating the identity command), apiClient
+// alone returns nil, so route to the supervisor-managed client directly rather
+// than reporting controller-down. A supervisor-managed city usually omits a
+// standalone [api] port (the supervisor serves the API on its own port via
+// city-scoped routes), so it takes this path when its controller predates the
+// identity command.
 var maintenanceAPIClient = supervisorFallthroughAPIClient
 
 // routeMaintenanceStatus dispatches `gc maintenance status` to the

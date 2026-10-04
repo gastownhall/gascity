@@ -1184,9 +1184,13 @@ func TestCmdCityStatus_SupervisorManagedNoAPIPortUsesSupervisorAPI(t *testing.T)
 		openCityStoreAtForStatus = origOpen
 	})
 	// Simulates a live per-city controller socket (the supervisor hosts the
-	// controller in-process) answering the "alive" ping, paired with a
-	// supervisor-managed API client — the exact combination apiClient alone
-	// cannot route because city.toml has no [api] port.
+	// controller in-process) answering the "alive" ping without reporting a
+	// hosting mode (a controller predating the identity command), paired with
+	// a supervisor-managed API client — the exact combination apiClient alone
+	// cannot route because city.toml has no [api] port. A controller that
+	// reports supervisor hosting is routed by apiClient itself, bypassing the
+	// supervisorFallthroughAPIClient path this test guards.
+	withControllerHosting(t, 4242, controllerHostingUnknown)
 	apiRouteControllerAliveHook = func(string) int { return 4242 }
 	apiRouteSupervisorClientHook = func(cp string) *api.Client {
 		if cp != cityPath {

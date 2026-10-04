@@ -8368,6 +8368,23 @@ func TestSessionToResponse_ProjectsLastNudgeDeliveredAt(t *testing.T) {
 	}
 }
 
+// An expanding-pool member's agent_name is its slot ("myrig/worker-2"), not its
+// alias. `gc session list --json` callers map a slot to the session holding it
+// through this field, so the API response must carry it as the local list does.
+func TestSessionToResponse_ProjectsAgentName(t *testing.T) {
+	resp := sessionToResponse(session.Info{
+		ID:        "sess-1",
+		Template:  "myrig/worker",
+		Provider:  "codex",
+		AgentName: "myrig/worker-2",
+		CreatedAt: time.Date(2026, 5, 13, 3, 45, 0, 0, time.UTC),
+	}, nil)
+
+	if resp.AgentName != "myrig/worker-2" {
+		t.Fatalf("AgentName = %q, want %q", resp.AgentName, "myrig/worker-2")
+	}
+}
+
 func TestHandleSessionStopReturnsOKWithID(t *testing.T) {
 	fs := newSessionFakeState(t)
 	h := newTestCityHandler(t, fs)
