@@ -29,8 +29,6 @@ import (
 //     conditional on the revision it read (AM-N4), or a create;
 //   - a reopen retargets its ledger entry to the row before the write
 //     (AM-N2) and keeps the row's instance_token and generation;
-//   - a create copies breaker state from the identity's prior rows only when
-//     the breaker is enabled (AM-N5);
 //   - the row's state comes from the plan, decided from the observation cache
 //     (AM-N6): the effect never probes the provider and writes no file.
 
@@ -124,9 +122,6 @@ func (x *createEffects) writeNamed(pass *createPass, p createPlan, tp TemplatePa
 	liveHash := runtime.LiveFingerprint(templateParamsToConfig(tp))
 	meta := syncCreateMetadata(tp, plan.SessionName, plan.Identity, liveHash, state, token, 0, now)
 	meta["alias"] = plan.Identity
-	if cbCfg, enabled := sessionCircuitBreakerConfigFromCity(cfg); enabled {
-		maps.Copy(meta, mergePriorSessionCircuitState(rows, cbCfg, now))
-	}
 	prog.writing = true
 	info, err := sessionFrontDoor(store).CreateSessionInfo(session.CreateSpec{Title: plan.Identity, AgentName: plan.Identity, Metadata: meta})
 	if err != nil {

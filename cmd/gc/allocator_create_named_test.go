@@ -206,17 +206,6 @@ type transportFake struct{ *runtime.Fake }
 
 func (transportFake) SupportsTransport(string) bool { return true }
 
-// stripCircuitKeys removes session_circuit_* metadata, the one sanctioned
-// difference (C9.6b as amended by AM-N5).
-func stripCircuitKeys(rows []beads.Bead) []beads.Bead {
-	for _, r := range rows {
-		for _, key := range sessionCircuitMetadataKeys {
-			delete(r.Metadata, key)
-		}
-	}
-	return rows
-}
-
 // runNamedCreateBeside runs the effect for fx's plan on a fresh store, then
 // legacy's build and sync on another, in the same city directory, and returns
 // both stores' comparable rows. adopt sets the plan's AdoptLive and runs
@@ -269,11 +258,12 @@ func TestCreateEffect_NamedMetadataByteIdenticalToLegacySyncCreate(t *testing.T)
 	}
 }
 
-// Kills: a difference from legacy other than the sanctioned one: with the
-// breaker on, a fresh named row differs from legacy's only by the
-// session_circuit_* keys it merges from the identity's prior rows (C9.6b as
-// amended by AM-N5; P3-6b T1 and T13).
-func TestCreateEffect_NamedBreakerKeysAreTheOnlyDifferenceFromLegacy(t *testing.T) {
+// Kills: breaker state copied onto a fresh named row (P3-6b T1; C7.2
+// amended per SIMPLIFICATION-CHECKPOINT C5): with the breaker configured and
+// a prior row carrying session_circuit_* state, the effect's rows are still
+// byte-identical to legacy's sync create, and the fresh row has no
+// session_circuit_* key.
+func TestCreateEffect_NamedMetadataByteIdenticalWithBreakerConfigured(t *testing.T) {
 	dir := t.TempDir()
 	cfg := mayorCity()
 	cfg.Daemon.SessionCircuitBreaker = true
@@ -291,11 +281,18 @@ func TestCreateEffect_NamedBreakerKeysAreTheOnlyDifferenceFromLegacy(t *testing.
 	legacyNamedSync(t, dir, cfg, legacyStore, transportFake{runtime.NewFake()})
 
 	effect, legacy := namedComparableRows(t, effectStore), namedComparableRows(t, legacyStore)
-	if len(effect) != 2 || reflect.DeepEqual(effect, legacy) {
-		t.Fatalf("rows = %d, equal to legacy %v: want the fresh row to carry the merged breaker state", len(effect), reflect.DeepEqual(effect, legacy))
+	if len(effect) != 2 || !reflect.DeepEqual(effect, legacy) {
+		t.Fatalf("effect rows differ from legacy's sync create:\neffect: %+v\nlegacy: %+v", effect, legacy)
 	}
-	if effect, legacy := stripCircuitKeys(effect), stripCircuitKeys(legacy); !reflect.DeepEqual(effect, legacy) {
-		t.Fatalf("rows differ beyond session_circuit_*:\neffect: %+v\nlegacy: %+v", effect, legacy)
+	for _, row := range effect {
+		if row.Status == "closed" {
+			continue
+		}
+		for _, key := range sessionCircuitMetadataKeys {
+			if v, ok := row.Metadata[key]; ok {
+				t.Fatalf("fresh row carries %s = %q, want no session_circuit_* key", key, v)
+			}
+		}
 	}
 }
 
@@ -957,124 +954,6 @@ func TestCreateEffect_NamedNeverProbesNorWritesFiles(t *testing.T) {
 	}
 }
 
-// Kills: copying breaker state with the breaker off (legacy drift), the
-// wrong merge, and a reopen's own state overwritten (P3-6b T13, AM-N5).
-func TestCreateEffect_NamedBreakerMergedOnlyWhenEnabled(t *testing.T) {
-	at := func(d time.Duration) string { return namedEffectNow.Add(-d).Format(time.RFC3339Nano) }
-	list := func(ds ...time.Duration) string {
-		var out []string
-		for _, d := range ds {
-			out = append(out, `"`+at(d)+`"`)
-		}
-		return "[" + strings.Join(out, ",") + "]"
-	}
-	failed := func(meta map[string]string) map[string]string {
-		meta["state"], meta["close_reason"] = string(session.StateFailedCreate), string(session.StateFailedCreate)
-		return meta
-	}
-	breakerCity := func(on bool) *config.City {
-		cfg := mayorCity()
-		cfg.Daemon.SessionCircuitBreaker = on
-		cfg.Daemon.SessionCircuitBreakerMaxRestarts = intPtr(2)
-		cfg.Daemon.SessionCircuitBreakerWindow = "30m"
-		return cfg
-	}
-	created := func(t *testing.T, cfg *config.City, seed func(beads.Store)) map[string]string {
-		t.Helper()
-		store := beads.NewMemStore()
-		seed(store)
-		h := newNamedHarness(t, t.TempDir(), nil)
-		h.reserve(t, "c1")
-		h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, "c1", "mayor"))
-		e := h.entry(t)
-		row, err := store.Get(e.Marker.RowID)
-		if err != nil {
-			t.Fatalf("entry %+v: %v", e, err)
-		}
-		return row.Metadata
-	}
-	circuit := func(meta map[string]string) map[string]string {
-		out := map[string]string{}
-		for _, k := range sessionCircuitMetadataKeys {
-			if meta[k] != "" {
-				out[k] = meta[k]
-			}
-		}
-		return out
-	}
-	priors := func(cfg *config.City) func(beads.Store) {
-		return func(store beads.Store) {
-			seedClosedNamedRow(t, store, cfg, failed(map[string]string{
-				sessionCircuitStateMetadata: "CIRCUIT_CLOSED", sessionCircuitRestartsMetadata: list(40*time.Minute, 10*time.Minute),
-				sessionCircuitLastRestartMetadata: at(10 * time.Minute),
-			}))
-			seedClosedNamedRow(t, store, cfg, failed(map[string]string{
-				sessionCircuitStateMetadata: "CIRCUIT_OPEN", sessionCircuitRestartsMetadata: list(10*time.Minute, 5*time.Minute),
-				sessionCircuitLastRestartMetadata: at(5 * time.Minute), sessionCircuitOpenedAtMetadata: at(5 * time.Minute),
-				sessionCircuitOpenRestartCountMetadata: "3",
-			}))
-			seedClosedNamedRow(t, store, cfg, failed(map[string]string{}))
-		}
-	}
-
-	t.Run("disabled copies nothing", func(t *testing.T) {
-		cfg := breakerCity(false)
-		if got := circuit(created(t, cfg, priors(cfg))); len(got) != 0 {
-			t.Fatalf("circuit keys = %v, want none with the breaker off", got)
-		}
-	})
-	t.Run("enabled merges the latest cluster and the windowed union", func(t *testing.T) {
-		cfg := breakerCity(true)
-		want := map[string]string{
-			sessionCircuitStateMetadata: "CIRCUIT_OPEN", sessionCircuitRestartsMetadata: list(10*time.Minute, 5*time.Minute),
-			sessionCircuitLastRestartMetadata: at(5 * time.Minute), sessionCircuitOpenedAtMetadata: at(5 * time.Minute),
-			sessionCircuitOpenRestartCountMetadata: "3",
-		}
-		if got := circuit(created(t, cfg, priors(cfg))); !reflect.DeepEqual(got, want) {
-			t.Fatalf("circuit keys = %v, want %v", got, want)
-		}
-	})
-	t.Run("a higher reset generation wins", func(t *testing.T) {
-		cfg := breakerCity(true)
-		got := circuit(created(t, cfg, func(store beads.Store) {
-			priors(cfg)(store)
-			seedClosedNamedRow(t, store, cfg, failed(map[string]string{sessionCircuitResetGenerationMetadata: "2"}))
-		}))
-		if want := map[string]string{sessionCircuitResetGenerationMetadata: "2"}; !reflect.DeepEqual(got, want) {
-			t.Fatalf("circuit keys = %v, want only the reset floor %v", got, want)
-		}
-	})
-	// A reopen keeps its own cluster, even beside a prior row that would win
-	// the merge (a higher reset generation, or a later restart): the reopened
-	// row is the identity's latest life on every path P3-6b §2.3 reaches.
-	for name, rival := range map[string]map[string]string{
-		"newest":                     nil,
-		"beside a higher generation": {sessionCircuitResetGenerationMetadata: "5", sessionCircuitStateMetadata: "CIRCUIT_OPEN", sessionCircuitLastRestartMetadata: at(30 * time.Second)},
-		"beside a later restart":     {sessionCircuitStateMetadata: "CIRCUIT_OPEN", sessionCircuitLastRestartMetadata: at(30 * time.Second), sessionCircuitRestartsMetadata: list(30 * time.Second)},
-	} {
-		t.Run("a reopen keeps its own cluster "+name, func(t *testing.T) {
-			cfg := breakerCity(true)
-			store := beads.NewMemStore()
-			priors(cfg)(store)
-			if rival != nil {
-				seedClosedNamedRow(t, store, cfg, failed(rival))
-			}
-			own := map[string]string{sessionCircuitStateMetadata: "CIRCUIT_CLOSED", sessionCircuitRestartsMetadata: list(time.Minute), sessionCircuitLastRestartMetadata: at(time.Minute)}
-			closed := seedClosedNamedRow(t, store, cfg, own)
-			h := newNamedHarness(t, t.TempDir(), nil)
-			h.reserve(t, "c1")
-			h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, "c1", "mayor"))
-			row, err := store.Get(closed.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if row.Status != "open" || !reflect.DeepEqual(circuit(row.Metadata), own) {
-				t.Fatalf("reopened row %s circuit = %v, want its own %v", row.Status, circuit(row.Metadata), own)
-			}
-		})
-	}
-}
-
 // Kills: the S4 pass-rate loop for named creates (P3-6b T15, AM-N8). A
 // malformed Claude settings override fails every resolution, a refusal the
 // census never shows; the identity's veto backs off 10s doubling to 5m, and
@@ -1327,102 +1206,6 @@ func TestReadOnlyResolveMatchesResolveTemplateMetadata(t *testing.T) {
 	})
 }
 
-// Kills: C9.6b dropped, the wendy/seth loop (P3-6b T14). With the breaker on
-// (max 2), a fake session key records each start on the row it starts, fails
-// it, and rolls it back to failed-create; every recreate inherits the merged
-// state, so the third failed start opens the breaker and the next row
-// carries it open. The allocator's ineligible:identity-breaker-open is
-// P3-5a/5b's.
-func TestNamedFailedCreateLoopTripsBreakerAcrossRecreates(t *testing.T) {
-	cfg := mayorCity()
-	cfg.Daemon.SessionCircuitBreaker = true
-	cfg.Daemon.SessionCircuitBreakerMaxRestarts = intPtr(2)
-	cfg.Daemon.SessionCircuitBreakerWindow = "30m"
-	cbCfg, ok := sessionCircuitBreakerConfigFromCity(cfg)
-	if !ok {
-		t.Fatal("breaker not enabled")
-	}
-	store := beads.NewMemStore()
-	front := sessionFrontDoor(store)
-	now := namedEffectNow
-	h := newCreateHarness(t, func(host *createEffectHost) { host.now = func() time.Time { return now } })
-	create := func(i int) beads.Bead {
-		t.Helper()
-		id := fmt.Sprintf("c%d", i)
-		h.reserve(t, id)
-		h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, id, "mayor"))
-		e, _ := ledgerEntryOf(h.ledger, id)
-		row, err := store.Get(e.Marker.RowID)
-		if err != nil {
-			t.Fatalf("create %d: entry %+v: %v", i, e, err)
-		}
-		return row
-	}
-	breakerOf := func(row beads.Bead) *sessionCircuitBreaker {
-		cb := newSessionCircuitBreaker(cbCfg)
-		if _, err := cb.restoreFromMetadata("mayor", session.CircuitStateFromMetadata(row.Metadata), now); err != nil {
-			t.Fatal(err)
-		}
-		return cb
-	}
-	for i := 1; i <= 3; i++ {
-		row := create(i)
-		if breakerOf(row).IsOpen("mayor", now) {
-			t.Fatalf("row %d was created with an open breaker", i)
-		}
-		state, err := recordSessionCircuitBreakerRestart(front, row.ID, breakerOf(row), "mayor", now)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if want := circuitClosed; i == 3 {
-			want = circuitOpen
-			if state != want {
-				t.Fatalf("start %d: breaker %v, want open after %d restarts", i, state, i)
-			}
-		} else if state != want {
-			t.Fatalf("start %d: breaker %v, want closed", i, state)
-		}
-		if !closeFailedCreateBead(front, row.ID, now, io.Discard) {
-			t.Fatalf("rollback of row %d failed", i)
-		}
-		now = now.Add(time.Minute)
-	}
-	if row := create(4); !breakerOf(row).IsOpen("mayor", now) {
-		t.Fatalf("row after the trip = %v, want it to carry the open breaker", row.Metadata)
-	}
-}
-
-// Kills: the S8 double charge (AM-N7): a reopened, never-started named row
-// is prepaid like a fresh create, and an adopted or PreWaked row is not.
-func TestGrants_ReopenedNeverStartedNamedRowIsPrepaid(t *testing.T) {
-	cfg := mayorCity()
-	store := beads.NewMemStore()
-	reopened := seedClosedNamedRow(t, store, cfg, nil)
-	h := newNamedHarness(t, t.TempDir(), nil)
-	h.reserve(t, "c1")
-	h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, "c1", "mayor"))
-	if e := h.entry(t); !e.Reopen {
-		t.Fatalf("entry = %+v, want a reopen", e)
-	}
-	fresh := censusSession("gc-fresh", map[string]string{"state": "start-pending", "pending_create_claim": "true"})
-	adopted := censusSession("gc-adopted", map[string]string{"state": "active", "generation": "4"})
-	woken := censusSession("gc-woken", map[string]string{"state": "start-pending", "pending_create_claim": "true", "last_woke_at": namedEffectNow.Format(time.RFC3339)})
-	c := readCensus(t, newCensusReader((&fakeCensusFeed{}).feed()), namedEffectNow, cfg,
-		censusLegs("class:sessions", store, "class:work", censusStore(fresh, adopted, woken)))
-	for k, want := range map[rowKey]bool{
-		{"class:sessions", reopened.ID}: true, {"class:work", "gc-fresh"}: true,
-		{"class:work", "gc-adopted"}: false, {"class:work", "gc-woken"}: false,
-	} {
-		row, ok := c.Rows[k]
-		if !ok || row.Prepaid != want {
-			t.Errorf("row %v prepaid = %v (present %v), want %v", k, row.Prepaid, ok, want)
-		}
-	}
-	if row := c.Rows[rowKey{"class:sessions", reopened.ID}]; row.PendingCreate || row.Incarnation != 4 {
-		t.Errorf("reopened row = %+v, want its old generation and no pending-create lease: only the prepaid predicate sees it", row)
-	}
-}
-
 // Kills: a retarget of an entry that is not an issued create, a reopen lag
 // outcome that reads a closed row it never wrote as written, and one that
 // reads a row written and closed again as unwritten (AM-N2).
@@ -1466,77 +1249,6 @@ func TestLedgerRetargetMarksIssuedCreatesOnly(t *testing.T) {
 	plain := ledgerEntry{Kind: kindCreate, Marker: ledgerMarker{RowID: "gc-9"}}
 	if got := plain.lagOutcomeOf(e.Key, ledgerRow{}, true, false); got != lagClosed {
 		t.Fatalf("closed fresh create = %d, want lagClosed", got)
-	}
-}
-
-// Kills: a merge that breaks C9.6(c)'s ties wrongly, trusts unparseable
-// state, or keeps restarts outside the window (AM-N5).
-func TestMergePriorSessionCircuitStateRule(t *testing.T) {
-	cfg := sessionCircuitBreakerConfig{Window: 30 * time.Minute}
-	at := func(d time.Duration) string { return namedEffectNow.Add(-d).Format(time.RFC3339Nano) }
-	row := func(created time.Duration, meta map[string]string) beads.Bead {
-		return beads.Bead{CreatedAt: namedEffectNow.Add(-created), Metadata: meta}
-	}
-	older := row(2*time.Hour, map[string]string{sessionCircuitStateMetadata: "CIRCUIT_CLOSED", sessionCircuitLastRestartMetadata: at(time.Minute), sessionCircuitProgressSignatureMetadata: "older"})
-	newer := row(time.Hour, map[string]string{sessionCircuitStateMetadata: "CIRCUIT_CLOSED", sessionCircuitLastRestartMetadata: at(time.Minute), sessionCircuitProgressSignatureMetadata: "newer"})
-	for _, rows := range [][]beads.Bead{{older, newer}, {newer, older}} {
-		if got := mergePriorSessionCircuitState(rows, cfg, namedEffectNow)[sessionCircuitProgressSignatureMetadata]; got != "newer" {
-			t.Fatalf("tie on generation and last restart picked %q, want the newer row", got)
-		}
-	}
-	bad := row(0, map[string]string{sessionCircuitResetGenerationMetadata: "x", sessionCircuitStateMetadata: "CIRCUIT_OPEN"})
-	if got := mergePriorSessionCircuitState([]beads.Bead{bad, older}, cfg, namedEffectNow)[sessionCircuitStateMetadata]; got != "CIRCUIT_CLOSED" {
-		t.Fatalf("unparseable row merged: state %q", got)
-	}
-	edge := row(0, map[string]string{sessionCircuitRestartsMetadata: `["` + at(30*time.Minute) + `","` + at(30*time.Minute+time.Nanosecond) + `"]`})
-	if got := mergePriorSessionCircuitState([]beads.Bead{edge}, cfg, namedEffectNow)[sessionCircuitRestartsMetadata]; got != `["`+at(30*time.Minute)+`"]` {
-		t.Fatalf("windowed restarts = %s, want only the one at the window's edge", got)
-	}
-	if got := mergePriorSessionCircuitState([]beads.Bead{row(0, map[string]string{"state": "asleep"})}, cfg, namedEffectNow); got != nil {
-		t.Fatalf("no breaker state merged to %v, want nil", got)
-	}
-
-	// ResetAfter below Window: an open row past ResetAfter auto-resets on
-	// its next restore, clearing every restart up to its last one, as the
-	// in-memory breaker clears them; they must not come back through the
-	// union while they are still inside the window. With ResetAfter at or
-	// above Window the same row has not reset, and they all count.
-	list := func(ds ...time.Duration) string {
-		var out []string
-		for _, d := range ds {
-			out = append(out, `"`+at(d)+`"`)
-		}
-		return "[" + strings.Join(out, ",") + "]"
-	}
-	tripped := []beads.Bead{
-		row(3*time.Hour, map[string]string{sessionCircuitStateMetadata: "CIRCUIT_CLOSED", sessionCircuitRestartsMetadata: list(28 * time.Minute), sessionCircuitLastRestartMetadata: at(28 * time.Minute)}),
-		row(2*time.Hour, map[string]string{
-			sessionCircuitStateMetadata: "CIRCUIT_OPEN", sessionCircuitRestartsMetadata: list(25*time.Minute, 22*time.Minute, 20*time.Minute),
-			sessionCircuitLastRestartMetadata: at(20 * time.Minute), sessionCircuitOpenedAtMetadata: at(20 * time.Minute),
-		}),
-		row(time.Hour, map[string]string{sessionCircuitStateMetadata: "CIRCUIT_CLOSED", sessionCircuitRestartsMetadata: list(10 * time.Minute), sessionCircuitLastRestartMetadata: at(10 * time.Minute)}),
-	}
-	for _, tc := range []struct {
-		resetAfter time.Duration
-		want       string
-	}{
-		{10 * time.Minute, list(10 * time.Minute)},
-		{30 * time.Minute, list(28*time.Minute, 25*time.Minute, 22*time.Minute, 20*time.Minute, 10*time.Minute)},
-	} {
-		got := mergePriorSessionCircuitState(tripped, sessionCircuitBreakerConfig{Window: 30 * time.Minute, ResetAfter: tc.resetAfter}, namedEffectNow)
-		if got[sessionCircuitRestartsMetadata] != tc.want || got[sessionCircuitStateMetadata] != "CIRCUIT_CLOSED" {
-			t.Fatalf("ResetAfter %v: merged %v, want the latest row's closed state with restarts %s", tc.resetAfter, got, tc.want)
-		}
-	}
-
-	// last_progress is the winner's, as the rest of its cluster (C9.6(c)):
-	// a later progress on a row that lost the tie-break is not carried. The
-	// in-memory breaker keeps the identity's latest progress; this is a
-	// recorded difference (P3-ALLOCATOR-SPEC, obligations from P3-6b, P4.1).
-	progressed := row(2*time.Hour, map[string]string{sessionCircuitStateMetadata: "CIRCUIT_CLOSED", sessionCircuitLastRestartMetadata: at(20 * time.Minute), sessionCircuitLastProgressMetadata: at(time.Minute)})
-	latest := row(time.Hour, map[string]string{sessionCircuitStateMetadata: "CIRCUIT_CLOSED", sessionCircuitLastRestartMetadata: at(10 * time.Minute)})
-	if got := mergePriorSessionCircuitState([]beads.Bead{progressed, latest}, cfg, namedEffectNow); got[sessionCircuitLastProgressMetadata] != "" {
-		t.Fatalf("last_progress = %q, want the winner's (none)", got[sessionCircuitLastProgressMetadata])
 	}
 }
 
