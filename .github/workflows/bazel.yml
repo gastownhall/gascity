@@ -23,7 +23,9 @@
 #   - a fork run mints at most 2 rbe-fork certificates, one per lane:
 #     unit and acceptance in fork-rw, unit alone in fork-ro;
 #   - coverage uploads lcov as an artifact; bazel-test.yml keeps the Codecov
-#     upload (flag bazel-unit) so the flag is not reported twice.
+#     upload (flag bazel-unit) so the flag is not reported twice;
+#   - bep-summary reports cached vs executed test targets per lane from the
+#     lanes' BEP files and gates nothing.
 name: bazel
 
 on:
@@ -314,6 +316,16 @@ jobs:
           [ -f "$RUNNER_TEMP/bazel-profile.json" ] || exit 0
           python3 tools/bazel/critpath.py "$RUNNER_TEMP/bazel-profile.json" --tier T2 --budget 150 || true
 
+      # The bep-summary job reports every lane's BEP file in one table.
+      - name: Upload BEP file
+        if: always() && steps.test.outcome != 'skipped'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bazel-bep-${{ matrix.lane }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bazel-bep.json
+          retention-days: 1
+          if-no-files-found: ignore
+
       - name: Upload test logs
         if: failure() && steps.test.outcome == 'failure'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -333,6 +345,64 @@ jobs:
         with:
           path: ${{ runner.temp }}/bazel-ci-cache
           key: bazel-repo-v3-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}
+
+  # Cross-phase test skipping, measured: one report over every lane's BEP file
+  # (scripts/bazel-bep-summary.go, internal/testpolicy/bepsummary), one phase
+  # per lane: cached (local / remote / disk) vs executed (remote / local)
+  # test targets, failures, flakes and action-level runner counts. A lane
+  # this run did not start, or one that wrote no BEP file, shows as "no BEP
+  # file". Reporting only: not in the gate's needs, and a parse failure marks
+  # the report step, never the job.
+  bep-summary:
+    name: bazel / test cache report
+    needs: [rbe, lane]
+    if: always() && needs.rbe.result == 'success' && needs.rbe.outputs.lanes != '[]'
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      # Lanes that failed before bazel ran upload nothing; the report shows
+      # them as "no BEP file".
+      - name: Download lane BEP files
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: bazel-bep-*-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bazel-bep
+      - name: Bazel test cache report (BEP)
+        continue-on-error: true
+        env:
+          MODE: ${{ needs.rbe.outputs.mode }}
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          case "$GITHUB_EVENT_NAME/$GITHUB_REF" in
+            pull_request/*) context="pr" ;;
+            push/refs/heads/main) context="main" ;;
+            *) context="$GITHUB_EVENT_NAME" ;;
+          esac
+          dir="$RUNNER_TEMP/bazel-bep"
+          mkdir -p "$dir"
+          go run ./scripts/bazel-bep-summary.go --context "$context/$MODE" --allow-missing \
+            --json-out "$dir/summary.json" \
+            unit="$dir/bazel-bep-unit-$ATTEMPT/bazel-bep.json" \
+            acceptance="$dir/bazel-bep-acceptance-$ATTEMPT/bazel-bep.json" \
+            integration="$dir/bazel-bep-integration-$ATTEMPT/bazel-bep.json" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload bazel test cache report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bazel-yml-bep-summary-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bazel-bep/summary.json
+          retention-days: 30
+          if-no-files-found: warn
 
   # Push to main only: instrumented builds are their own configuration, so
   # this is a separate lane; with bazel-test.yml's identical invocation it is

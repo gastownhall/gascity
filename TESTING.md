@@ -67,9 +67,12 @@ absent file as "no BEP file" instead of failing, and `--top N` sizes the
 slowest list. `bazel-test.yml` runs it after every `bazel test` step
 (unit, acceptance, integration) into the job summary and uploads the JSON
 as the `bazel-bep-summary-<attempt>` artifact, so hit rates can be
-compared across pre-push, PR, and main runs.
+compared across pre-push, PR, and main runs. `bazel.yml` does the same per
+lane: each lane uploads its BEP file, and the `bazel / test cache report`
+job reports them in one table (one phase per lane, context
+`<event>/<mode>`) and uploads `bazel-yml-bep-summary-<attempt>`.
 `scripts/bazel_bep_summary_workflow_test.go` fails if a `bazel test`
-invocation stops writing a BEP file the report reads.
+invocation or a `bazel.yml` lane stops writing a BEP file the report reads.
 
 ## The outcome: protected PR feedback in under five minutes
 
