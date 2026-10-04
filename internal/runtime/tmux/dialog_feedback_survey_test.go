@@ -143,6 +143,7 @@ func TestDismissFeedbackSurveyModalAgainstDebouncedSurvey(t *testing.T) {
 		{"sends nothing once the survey is gone", claudeSurveyModel{}, "", false, ""},
 		{"clears digit the survey ignored", claudeSurveyModel{visible: true, mountedAt: -time.Minute, ignoreDigits: true}, "0,C-u", true, ""},
 		{"leaves a human draft untouched", claudeSurveyModel{visible: true, mountedAt: -time.Minute, input: "draft"}, "", true, "draft"},
+		{"leaves a multiline draft with a blank first row untouched", claudeSurveyModel{visible: true, mountedAt: -time.Minute, input: "\n│ draft"}, "", true, "\n│ draft"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -166,6 +167,32 @@ func TestDismissFeedbackSurveyModalAgainstDebouncedSurvey(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("leaves a multiline draft typed after the dismissal digit untouched", func(t *testing.T) {
+		var keys []string
+		captures := 0
+		multilineDraft := strings.Replace(feedbackSurveySessionFixture, "│ ❯                                                        │", "│ ❯ 0                                                      │\n│ draft                                                    │", 1)
+		capture := func() (string, error) {
+			captures++
+			if captures == 1 {
+				return feedbackSurveySessionFixture, nil
+			}
+			return multilineDraft, nil
+		}
+		present, err := dismissFeedbackSurveyModal(feedbackSurveySessionFixture, capture, func(sent ...string) error {
+			keys = append(keys, sent...)
+			return nil
+		}, func(time.Duration) {})
+		if err != nil {
+			t.Fatalf("dismissFeedbackSurveyModal error = %v", err)
+		}
+		if !present {
+			t.Fatal("dismissFeedbackSurveyModal reported no survey")
+		}
+		if got := strings.Join(keys, ","); got != "0" {
+			t.Fatalf("keys = %q, want %q when a continuation row contains a draft", got, "0")
+		}
+	})
 }
 
 func TestDismissFeedbackSurveyModalRecaptureFailure(t *testing.T) {
@@ -174,14 +201,27 @@ func TestDismissFeedbackSurveyModalRecaptureFailure(t *testing.T) {
 		name               string
 		successfulCaptures int
 		wantKeys           string
+		typeDraft          bool
 	}{
-		{"before the digit sends nothing", 0, ""},
-		{"after the digit clears it", 1, "0,C-u"},
+		{"before the digit sends nothing", 0, "", false},
+		{"after the digit preserves uncertain input", 1, "0", false},
+		{"after the digit preserves an attached user's draft", 1, "0", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var keys []string
+			var composer string
 			sendKeys := func(sent ...string) error {
 				keys = append(keys, sent...)
+				for _, key := range sent {
+					if key == "C-u" {
+						composer = ""
+					} else {
+						composer += key
+					}
+				}
+				if test.typeDraft && slices.Contains(sent, "0") {
+					composer += "draft"
+				}
 				return nil
 			}
 			captures := 0
@@ -202,6 +242,9 @@ func TestDismissFeedbackSurveyModalRecaptureFailure(t *testing.T) {
 			}
 			if got := strings.Join(keys, ","); got != test.wantKeys {
 				t.Fatalf("keys = %q, want %q", got, test.wantKeys)
+			}
+			if test.typeDraft && !strings.Contains(composer, "draft") {
+				t.Fatalf("composer = %q, want attached user's draft preserved after the capture failure", composer)
 			}
 		})
 	}

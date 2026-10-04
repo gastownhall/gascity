@@ -3206,7 +3206,7 @@ func dismissFeedbackSurveyModal(content string, capture func() (string, error), 
 	}
 	content, err = awaitFeedbackSurveyDigit(capture, sleep)
 	if err != nil {
-		return true, errors.Join(err, sendKeys("C-u"))
+		return true, err
 	}
 	if composer, observed := feedbackSurveyComposer(content); observed && composer == "0" {
 		return true, sendKeys("C-u")
@@ -3231,8 +3231,32 @@ func awaitFeedbackSurveyDigit(capture func() (string, error), sleep func(time.Du
 }
 
 func feedbackSurveyComposer(content string) (string, bool) {
-	remainder, observed := lastComposerRemainder(strings.Split(content, "\n"), DefaultReadyPromptPrefix)
-	return strings.TrimSpace(strings.TrimRight(strings.TrimSpace(remainder), "│┃")), observed
+	lines := strings.Split(content, "\n")
+	remainder, observed := lastComposerRemainder(lines, DefaultReadyPromptPrefix)
+	composer := strings.TrimSpace(strings.TrimRight(strings.TrimSpace(remainder), "│┃"))
+	if !observed {
+		return "", false
+	}
+	promptRow := -1
+	for i, line := range lines {
+		if matchesPromptPrefix(line, DefaultReadyPromptPrefix) {
+			promptRow = i
+		}
+	}
+	for _, line := range lines[promptRow+1:] {
+		trimmed := strings.TrimSpace(strings.ReplaceAll(line, "\u00a0", " "))
+		if trimmed == "" {
+			continue
+		}
+		if !strings.HasPrefix(trimmed, "│") && !strings.HasPrefix(trimmed, "┃") {
+			break
+		}
+		continuation := strings.TrimSpace(strings.Trim(trimmed, "│┃"))
+		if continuation != "" {
+			return strings.TrimSpace(composer + "\n" + continuation), true
+		}
+	}
+	return composer, true
 }
 
 // DismissFeedbackSurveyModalIfPresent clears Claude Code's post-turn
