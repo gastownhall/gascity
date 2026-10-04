@@ -2260,8 +2260,13 @@ func doConvoyAutocloseWith(store beads.Store, rec events.Recorder, beadID string
 	}
 }
 
+// convoyStillAutocloses is autoclose's premise about the convoy row itself.
+func convoyStillAutocloses(convoy beads.Bead) bool {
+	return convoy.Type == "convoy" && !convoycore.IsTerminalStatus(convoy.Status) && !hasLabel(convoy.Labels, "owned")
+}
+
 func autocloseConvoyIfComplete(store beads.Store, rec events.Recorder, convoy beads.Bead, stdout io.Writer) {
-	if convoy.Type != "convoy" || convoycore.IsTerminalStatus(convoy.Status) || hasLabel(convoy.Labels, "owned") {
+	if !convoyStillAutocloses(convoy) {
 		return
 	}
 
@@ -2275,7 +2280,10 @@ func autocloseConvoyIfComplete(store beads.Store, rec events.Recorder, convoy be
 		}
 	}
 
-	if err := closeConvoyWithReason(store, convoy.ID, convoyAutocloseReason); err != nil {
+	closed, err := autocloseCloseIfStill(store, convoy.ID, convoyAutocloseReason, convoyStillAutocloses, func() error {
+		return closeConvoyWithReason(store, convoy.ID, convoyAutocloseReason)
+	})
+	if err != nil || !closed {
 		return
 	}
 

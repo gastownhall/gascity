@@ -248,13 +248,19 @@ func subtreeTerminalExcludingRoot(store beads.Store, rootID string) (terminal bo
 
 // announceClosedMolecule closes mol with the given close_reason, records a
 // BeadClosed event, and prints the auto-close announcement to stdout. Shared
-// by the step-terminal and source-bead-close triggers. Best-effort: a close
-// failure aborts silently without recording or announcing.
+// by the step-terminal and source-bead-close triggers. The close is fenced
+// (autocloseCloseIfStill). Best-effort: a refused or failed close aborts
+// silently without recording or announcing.
 func announceClosedMolecule(store beads.Store, rec events.Recorder, mol beads.Bead, reason string, stdout io.Writer) bool {
 	// Capture the pre-close status before closeMoleculeWithReason transitions
 	// the root to closed — it is the from_status of the resolution record.
 	fromStatus := mol.Status
-	if err := closeMoleculeWithReason(store, mol.ID, reason); err != nil {
+	closed, err := autocloseCloseIfStill(store, mol.ID, reason, func(b beads.Bead) bool {
+		return !convoycore.IsTerminalStatus(b.Status)
+	}, func() error {
+		return closeMoleculeWithReason(store, mol.ID, reason)
+	})
+	if err != nil || !closed {
 		return false
 	}
 
