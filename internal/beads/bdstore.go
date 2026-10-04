@@ -997,6 +997,10 @@ func IsPartialResult(err error) bool {
 //     isTransientGraphApplyError (internal/molecule/graph_apply.go) — both gate
 //     on an operation marker before matching needles, which bounds the text
 //     they can misread. This function has no such gate.
+//     isTransientGraphApplyError additionally checks a typed exclusion first,
+//     errors.Is(err, ErrGraphApplyBudgetExhausted): a graph apply that spent
+//     its own derived budget is not replayed automatically however its text
+//     reads, so that case never reaches the needles below.
 func IsTimeoutError(err error) bool {
 	if err == nil {
 		return false
