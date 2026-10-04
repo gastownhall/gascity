@@ -29,6 +29,10 @@
 #                                       (needs GH_TOKEN with actions:read)
 #                       pool: serve the shared OSS queue; retire after POOL_IDLE_MINUTES
 #                             with nothing in flight, or at POOL_MAX_MINUTES
+#                       measure: provision and measure this host, check it against
+#                             the pin (tools/rbe/worker-env-drift check) and exit;
+#                             no certificate, no worker (the canary, and the
+#                             bazel job for changes to the worker host)
 #   CACHE_DIR           optional (Blacksmith sticky disk): keeps the worker's local
 #                       CAS warm across runs
 #   RBE_ACTION_ISOLATION  1 (default): every action runs as a per-action slot
@@ -41,12 +45,13 @@
 #                       failed phase=<phase> or skipped.
 set -euo pipefail
 
-: "${RBE_WORKER_TLS_CERT:?}" "${RBE_WORKER_TLS_KEY:?}" "${RBE_WEST_HOST:?}" "${WORKER_NAME:?}"
 WORKER_MODE=${WORKER_MODE:-run}
+[ "$WORKER_MODE" = measure ] || : "${RBE_WORKER_TLS_CERT:?}" "${RBE_WORKER_TLS_KEY:?}" "${RBE_WEST_HOST:?}" "${WORKER_NAME:?}"
 case "$WORKER_MODE" in
 run) : "${BAZEL_JOB_NAME:?}" ;;
 pool) POOL_IDLE_MINUTES=${POOL_IDLE_MINUTES:-15} POOL_MAX_MINUTES=${POOL_MAX_MINUTES:-300} ;;
-*) echo "WORKER_MODE must be run or pool" >&2; exit 2 ;;
+measure) ;;
+*) echo "WORKER_MODE must be run, pool or measure" >&2; exit 2 ;;
 esac
 ACTION_ISOLATION=${RBE_ACTION_ISOLATION:-1}
 case "$ACTION_ISOLATION" in
@@ -104,17 +109,18 @@ fi
 # host's environment manifest. rbe-west's schedulers match it exactly against
 # the worker-env CI's actions request (//platforms:rbe_worker: the sha256 of
 # the committed tools/rbe/worker-env.txt), so an action runs only on the host
-# its key names and its cached result is never one another host produced. A
-# worker on any other host (a new Blacksmith image, a package or Go upgrade)
-# advertises its own value and serves no CI action until the pin moves: commit
-# its manifest (printed below) as tools/rbe/worker-env.txt and its sha256 in
-# platforms/BUILD.bazel.
+# its key names and its cached result is never one another host produced.
 tools/rbe/worker-env "${WORKER_TOOLSET[@]}" >"$RUNNER_TEMP/worker-env.txt"
 WORKER_ENV=sha256:$(sha256sum <"$RUNNER_TEMP/worker-env.txt" | cut -d' ' -f1)
 echo "worker-env: $WORKER_ENV"
-if ! diff -u tools/rbe/worker-env.txt "$RUNNER_TEMP/worker-env.txt"; then
-	echo "::warning title=rbe worker-env drift::this host is not the pinned one (diff above): worker-env=$WORKER_ENV serves no CI action until tools/rbe/worker-env.txt is this manifest and platforms/BUILD.bazel pins its sha256"
-fi
+# A worker on any other host (a new Blacksmith image, a package, Go or dolt
+# change) could serve no CI action: it would only idle while the pool scaler
+# dispatches more like it. So it never registers. The check prints the diff
+# and the manifest and pin to commit (log and step summary) and leaves them in
+# $RUNNER_TEMP/worker-env-drift, which the pool workflow turns into the pin's
+# drift issue; while that is open, the pool boots no worker.
+tools/rbe/worker-env-drift check "$RUNNER_TEMP/worker-env.txt" || exit 3
+[ "$WORKER_MODE" != measure ] || exit 0
 curl -fsSL -o "$RUNNER_TEMP/nl.tgz" "https://github.com/TraceMachina/nativelink/releases/download/v${NL_VERSION}/nativelink-${NL_VERSION}-x86_64-unknown-linux-musl.tar.gz"
 echo "${NL_SHA256}  $RUNNER_TEMP/nl.tgz" | sha256sum -c -
 mkdir -p "$NL_BIN_DIR" && tar -C "$NL_BIN_DIR" -xzf "$RUNNER_TEMP/nl.tgz" nativelink

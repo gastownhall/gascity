@@ -204,16 +204,12 @@ esac
 		t.Fatal(err)
 	}
 	run := func(path string, args ...string) (string, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "bash", append([]string{filepath.Join(root, rbeWorkerEnvScript)}, args...)...)
-		cmd.Env = []string{"WORKER_ENV_PATH=" + path, "WORKER_ENV_OS_RELEASE=" + osRelease, "GOTOOLCHAIN=auto"}
-		out, err := cmd.Output()
-		ee := &exec.ExitError{}
-		if errors.As(err, &ee) {
-			return string(out) + string(ee.Stderr), err
+		out, stderr, err := runRBEScript("", []string{"WORKER_ENV_PATH=" + path, "WORKER_ENV_OS_RELEASE=" + osRelease, "GOTOOLCHAIN=auto"},
+			filepath.Join(root, rbeWorkerEnvScript), args...)
+		if err != nil {
+			return out + stderr, err
 		}
-		return string(out), err
+		return out, nil
 	}
 	path := stubs + string(os.PathListSeparator) + "/usr/bin" + string(os.PathListSeparator) + "/bin"
 	got, err := run(path, "tmux", "nosuch", "libfoo", "bash", "zlib1g-dev")
@@ -256,6 +252,20 @@ pkg zlib1g-dev 1.0-zlib1g-dev
 	if out, err := run(noDolt+string(os.PathListSeparator)+"/usr/bin"+string(os.PathListSeparator)+"/bin", "tmux"); err == nil {
 		t.Errorf("worker-env without dolt succeeded:\n%s", out)
 	}
+}
+
+// runRBEScript runs a tools/rbe script with bash in dir (the test's cwd if
+// empty) and exactly env, and returns its stdout and stderr.
+func runRBEScript(dir string, env []string, script string, args ...string) (stdout, stderr string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", append([]string{script}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = env
+	var out, errOut strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &errOut
+	err = cmd.Run()
+	return out.String(), errOut.String(), err
 }
 
 // TestRBEWorkerScriptAdvertisesWorkerEnv: blacksmith-worker.sh installs its

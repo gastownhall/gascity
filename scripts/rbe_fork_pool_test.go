@@ -119,9 +119,11 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 		t.Errorf("permissions %v, want contents: read only", wf.Permissions)
 	}
 
+	// The worker-env gate and drift report jobs around it are
+	// TestRBEPoolWorkflowsGateAndReportDrift's.
 	job, ok := wf.Jobs["worker"]
-	if !ok || len(wf.Jobs) != 1 {
-		t.Fatalf("%s: jobs %v, want worker alone", rbeForkPoolWorkflow, rbeSortedKeys(wf.Jobs))
+	if !ok || len(wf.Jobs) != 3 {
+		t.Fatalf("%s: jobs %v, want gate, worker and report-drift", rbeForkPoolWorkflow, rbeSortedKeys(wf.Jobs))
 	}
 	// Blacksmith donates this compute for our OSS repos' workflows; the
 	// default branch only, as rbe-worker-pool.yml.
