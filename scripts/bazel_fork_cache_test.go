@@ -75,15 +75,13 @@ func bazelTestWorkflowSteps(t *testing.T, root string) []bazelTestWorkflowStep {
 	return job.Steps
 }
 
-// runBazelRCConfigStep runs the step's script as Actions does (bash -eo
-// pipefail) in a scratch directory with env, its /tmp/ paths redirected
-// there, and returns the .bazelrc.local lines it writes with those paths
-// mapped back.
-func runBazelRCConfigStep(t *testing.T, script string, env map[string]string) []string {
+// runWorkflowStepScript runs a workflow step's script as Actions does (bash
+// --noprofile --norc -eo pipefail) in dir, with this process's PATH and env
+// (env's PATH, if set, replaces it), and returns its combined output.
+func runWorkflowStepScript(t *testing.T, dir, script string, env map[string]string) (string, error) {
 	t.Helper()
-	dir := t.TempDir()
 	path := filepath.Join(dir, "step.sh")
-	if err := os.WriteFile(path, []byte(strings.ReplaceAll(script, "/tmp/", dir+"/")), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("bash", "--noprofile", "--norc", "-eo", "pipefail", path)
@@ -92,7 +90,18 @@ func runBazelRCConfigStep(t *testing.T, script string, env map[string]string) []
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// runBazelRCConfigStep runs the step's script as Actions does (bash -eo
+// pipefail) in a scratch directory with env, its /tmp/ paths redirected
+// there, and returns the .bazelrc.local lines it writes with those paths
+// mapped back.
+func runBazelRCConfigStep(t *testing.T, script string, env map[string]string) []string {
+	t.Helper()
+	dir := t.TempDir()
+	if out, err := runWorkflowStepScript(t, dir, strings.ReplaceAll(script, "/tmp/", dir+"/"), env); err != nil {
 		t.Fatalf("step script with %v: %v\n%s", env, err, out)
 	}
 	rc, err := os.ReadFile(filepath.Join(dir, ".bazelrc.local"))

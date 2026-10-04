@@ -61,6 +61,7 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:.bazelrc",
+        "//:.bazelversion",
         "//:Makefile",
         "//:go.mod",
         "//:repo_meta",

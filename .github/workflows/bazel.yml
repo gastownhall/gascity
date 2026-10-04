@@ -15,10 +15,13 @@
 #     values, so both workflows' actions share the remote cache and the
 #     second run of a commit is mostly cache hits;
 #   - no lane passes --config=sole-run (per lane from G0 on);
+#   - the rbe job's lane list (event and mode) decides which lanes start;
 #   - integration runs on pushes and dispatches only, evidence-only, until G3;
 #   - pull_request runs in mode cache (fork and Dependabot PRs while
 #     rbe-west's mint does not yet serve bazel.yml) run no lanes:
 #     bazel-test.yml covers them; rbe=cache dispatches still run them;
+#   - a fork run mints at most 2 rbe-fork certificates, one per lane:
+#     unit and acceptance in fork-rw, unit alone in fork-ro;
 #   - coverage uploads lcov as an artifact; bazel-test.yml keeps the Codecov
 #     upload (flag bazel-unit) so the flag is not reported twice.
 name: bazel
@@ -53,9 +56,11 @@ on:
 # event (push to main, dispatch, call) gets its own group (the run id), so it
 # is never cancelled or queued behind another run: main runs save the runner
 # cache and report coverage. (A shared group without cancel-in-progress
-# would still replace a pending run with the next one.)
+# would still replace a pending run with the next one.) The prefix is a
+# literal: under workflow_call github.workflow is the caller's name, and the
+# group would collide with the caller's own; bazel-test.yml's is bazel-test-.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  group: bazel-yml-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -73,6 +78,7 @@ jobs:
       mode: ${{ steps.decide.outputs.mode }}
       enabled: ${{ steps.decide.outputs.enabled }}
       tier: ${{ steps.decide.outputs.tier }}
+      lanes: ${{ steps.lanes.outputs.lanes }}
       base-sha: ${{ steps.base.outputs.base-sha }}
     steps:
       - name: Decide remote execution
@@ -116,11 +122,44 @@ jobs:
           case "$mode" in remote|fork-ro|fork-rw) enabled=true ;; esac
           { echo "mode=$mode"; echo "enabled=$enabled"; echo "tier=$tier"; } >> "$GITHUB_OUTPUT"
           echo "Bazel execution mode: **$mode**" >> "$GITHUB_STEP_SUMMARY"
-          if [ "$PULL_REQUEST" = true ] && [ "$mode" = cache ]; then
+
+      # The lane job's matrix, as JSON: a lane left out never starts a runner
+      # (nor mints an rbe-fork certificate, so a fork run mints at most 2).
+      # A matrix's exclude cannot do this: GitHub applies include after
+      # exclude, and an include entry keyed on the lane adds it back.
+      - name: Lanes
+        id: lanes
+        env:
+          EVENT: ${{ github.event_name }}
+          MODE: ${{ steps.decide.outputs.mode }}
+        run: |
+          set -euo pipefail
+          case "$MODE" in remote|fork-ro|fork-rw|cache|local|skip) ;; *) echo "::error::mode '$MODE'"; exit 1 ;; esac
+          unit='{"lane":"unit","cmd":"test --config=ci --keep_going //..."}'
+          acceptance='{"lane":"acceptance","cmd":"test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test"}'
+          # Evidence-only until G3: agent-flow tests depend on ambient
+          # agent-template resolution (product-side fix, D13).
+          integration='{"lane":"integration","cmd":"test --config=ci --config=integration --keep_going //test/integration:integration_test","evidence-only":true}'
+          lanes=
+          if [ "$MODE" = skip ]; then
+            echo "No lanes: rbe-west is off (vars.RBE_WEST_WORKERS)." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$EVENT" = pull_request ] && [ "$MODE" = cache ]; then
             echo "No lanes: pull_request runs in mode cache wait for rbe-west's mint to serve bazel.yml; bazel-test.yml covers this PR." >> "$GITHUB_STEP_SUMMARY"
-          elif [ "$mode" = fork-ro ]; then
-            echo "No acceptance lane: the fork pool has no network and \`gc init\` clones from github.com (ga-73eoo)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            lanes=$unit
+            # The fork pool (mode fork-ro, instance oss-fork) runs every
+            # action with loopback only, and `gc init` clones gascity-packs
+            # from github.com (ga-73eoo).
+            if [ "$MODE" = fork-ro ]; then
+              echo "No acceptance lane: the fork pool has no network and \`gc init\` clones from github.com (ga-73eoo)." >> "$GITHUB_STEP_SUMMARY"
+            else
+              lanes+=",$acceptance"
+            fi
+            # Pushes and dispatches only until G3 (evidence-only on pull
+            # requests would only spend the pool).
+            case "$EVENT" in push|workflow_dispatch) lanes+=",$integration" ;; esac
           fi
+          echo "lanes=[$lanes]" >> "$GITHUB_OUTPUT"
 
       - name: Resolve the base branch commit (fresh-merge)
         id: base
@@ -129,9 +168,22 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
-          sha="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}" "refs/heads/${BASE_REF}" | cut -f1)"
-          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cannot resolve ${BASE_REF}"; exit 1; }
-          echo "base-sha=$sha" >> "$GITHUB_OUTPUT"
+          url="https://github.com/${GITHUB_REPOSITORY}"
+          ref="refs/heads/${BASE_REF}"
+          # Three attempts, 5 s then 10 s apart.
+          for delay in 5 10 0; do
+            if heads="$(git ls-remote --heads "$url" "$ref")"; then
+              break
+            fi
+            [ "$delay" -gt 0 ] || { echo "::error::git ls-remote $url failed 3 times"; exit 1; }
+            sleep "$delay"
+          done
+          # ls-remote matches the pattern as a ref name's tail
+          # (refs/heads/x/refs/heads/main too): exactly one head named $ref.
+          mapfile -t shas < <(awk -F '\t' -v ref="$ref" '$2 == ref { print $1 }' <<<"$heads")
+          [ "${#shas[@]}" -eq 1 ] || { echo "::error::${#shas[@]} heads named $ref"; exit 1; }
+          [[ "${shas[0]}" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cannot resolve ${BASE_REF}: '${shas[0]}'"; exit 1; }
+          echo "base-sha=${shas[0]}" >> "$GITHUB_OUTPUT"
 
       # Best effort: a worker boots (~30 s) while the lanes check out and
       # analyze. The rbe-west scaler covers anything beyond one worker.
@@ -153,11 +205,12 @@ jobs:
   lane:
     name: bazel / ${{ matrix.lane }}
     needs: rbe
-    # No lanes for a pull_request run in mode cache until rbe-west's mint
-    # serves bazel.yml (it mints for bazel-test.yml today): fork and
-    # Dependabot PRs would run every lane locally beside bazel-test.yml's
-    # run. rbe=cache dispatches (workflow_dispatch) still run them.
-    if: needs.rbe.outputs.mode != 'skip' && !(github.event_name == 'pull_request' && needs.rbe.outputs.mode == 'cache')
+    # The rbe job's lane list is empty in mode skip and for a pull_request
+    # run in mode cache, until rbe-west's mint serves bazel.yml (it mints for
+    # bazel-test.yml today): fork and Dependabot PRs would run every lane
+    # locally beside bazel-test.yml's run. rbe=cache dispatches still run
+    # them. An empty matrix is an error, so the job is skipped instead.
+    if: needs.rbe.outputs.lanes != '[]'
     # Remote modes: the runner is only a Bazel client. Local modes (cache,
     # local: rbe-fork closed or a dispatch) execute here, so they get 4 vCPU.
     runs-on: ${{ (needs.rbe.outputs.mode == 'cache' || needs.rbe.outputs.mode == 'local') && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-2vcpu-ubuntu-2404' }}
@@ -166,28 +219,9 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
+      # Entries {lane, cmd, evidence-only?} from the rbe job's Lanes step.
       matrix:
-        lane: [unit, acceptance, integration]
-        include:
-          - lane: unit
-            cmd: test --config=ci --keep_going //...
-          - lane: acceptance
-            cmd: test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test
-          # Evidence-only until G3: agent-flow tests depend on ambient
-          # agent-template resolution (product-side fix, D13).
-          - lane: integration
-            cmd: test --config=ci --config=integration --keep_going //test/integration:integration_test
-            evidence-only: true
-        # A lane left out never starts a runner (nor mints an rbe-fork
-        # certificate). "none" matches no lane.
-        exclude:
-          # Pushes and dispatches only until G3 (evidence-only on pull
-          # requests would only spend the pool).
-          - lane: ${{ github.event_name == 'pull_request' && 'integration' || 'none' }}
-          # The fork pool (mode fork-ro, instance oss-fork) runs every action
-          # with loopback only, and `gc init` clones gascity-packs from
-          # github.com (ga-73eoo).
-          - lane: ${{ needs.rbe.outputs.mode == 'fork-ro' && 'acceptance' || 'none' }}
+        include: ${{ fromJSON(needs.rbe.outputs.lanes) }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -382,6 +416,13 @@ jobs:
   # Preview gate. At the cutover it takes the required name "bazel test
   # (side-by-side)" and bazel-test.yml is deleted; branch protection and the
   # ruleset need no edit.
+  #
+  # Cutover hazard: this gate passes with zero lanes (an empty lane list:
+  # mode skip, or a pull_request run in mode cache). Under a required name
+  # that would merge fork and Dependabot PRs nothing tested. The cutover
+  # must first make a cache-mode PR run lanes (rbe-west's mint serves
+  # bazel.yml) or fail here; TestBazelMultiLaneGateUnderRequiredNameRunsLanes
+  # fails while both hold.
   gate:
     name: bazel lanes (preview)
     needs: [rbe, lane, sync-check]
@@ -389,12 +430,13 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
-      # Lanes may be skipped only where the lane job's if skips them: mode
-      # skip, and a pull_request run in mode cache.
+      # Lanes may be skipped only where the lane job's if skips them: an
+      # empty lane list.
       - name: Evaluate
         env:
           EVENT: ${{ github.event_name }}
           MODE: ${{ needs.rbe.outputs.mode }}
+          LANE_LIST: ${{ needs.rbe.outputs.lanes }}
           RBE: ${{ needs.rbe.result }}
           LANES: ${{ needs.lane.result }}
           SYNC: ${{ needs.sync-check.result }}
@@ -402,8 +444,7 @@ jobs:
           echo "event=$EVENT mode=$MODE rbe=$RBE lanes=$LANES sync=$SYNC"
           [ "$RBE" = success ] || exit 1
           [ "$SYNC" = success ] || exit 1
-          [ "$MODE" = skip ] && exit 0
-          if [ "$EVENT" = pull_request ] && [ "$MODE" = cache ]; then
+          if [ "$LANE_LIST" = '[]' ]; then
             [ "$LANES" = skipped ]
             exit $?
           fi
