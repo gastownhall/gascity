@@ -10,9 +10,15 @@ import (
 	"github.com/steveyegge/beads/issueops"
 )
 
-// CloseAll's metadata-then-close pair is gc's one write chain that needs a
-// value an earlier write in the same chain produced: gc stamps close_reason
-// into the metadata, and the close carries that reason.
+// CloseAll's PER-BEAD route, which is what a backing with no batch applier
+// takes. The route CloseAll takes when one is available is one request per
+// chunk and is pinned next door, in native_dolt_store_batch_close_test.go;
+// closeChainStorage below refuses the applier so this file keeps measuring the
+// loop rather than silently becoming a second test of the batch.
+//
+// The metadata-then-close pair is gc's one write chain that needs a value an
+// earlier write in the same chain produced: gc stamps close_reason into the
+// metadata, and the close carries that reason.
 //
 // It used to recover the reason with a follow-up read — Close's own GetIssue,
 // dialed on top of the status read the loop already makes. The lifecycle role
@@ -128,6 +134,12 @@ func (s *closeChainStorage) IssueLifecycle() (issueops.Lifecycle, error) {
 	return s.lifecycle, nil
 }
 
+// BatchApplier refuses the way a backend without one does, which is what routes
+// every case in this file down the per-bead loop it was written to measure.
+func (s *closeChainStorage) BatchApplier() (issueops.BatchApplier, error) {
+	return nil, &beadslib.ErrUnsupported{Op: "BatchApplier", Backend: "close-chain-double"}
+}
+
 func (s *closeChainStorage) IssueReader() (issueops.Reader, error) { return closeChainReader{s}, nil }
 
 type closeChainReader struct{ storage *closeChainStorage }
@@ -151,7 +163,7 @@ func (r closeChainReader) Ready(context.Context, issueops.ReadyRequest) (issueop
 
 // The chain reads the status once through the reader role and never dials the
 // raw read-back: the reason it closes with is the one the update answered with.
-func TestCloseAllTakesTheCloseReasonOffTheUpdateResult(t *testing.T) {
+func TestCloseAllPerBeadRouteTakesTheCloseReasonOffTheUpdateResult(t *testing.T) {
 	storage := newCloseChainStorage(map[string]string{"close_reason": "STALE row value"})
 	store := newNativeDoltStoreForTest(storage)
 
@@ -194,7 +206,7 @@ func TestCloseAllTakesTheCloseReasonOffTheUpdateResult(t *testing.T) {
 // SECOND accessor resolution is the re-entry, deterministically and with no
 // timing. The path exists precisely for the misbehaving backend, and hanging is
 // a worse answer than the one it was written to give.
-func TestCloseAllFallsBackWhenTheUpdateAnswersNoPostState(t *testing.T) {
+func TestCloseAllPerBeadRouteFallsBackWhenTheUpdateAnswersNoPostState(t *testing.T) {
 	storage := newCloseChainStorage(nil)
 	storage.lifecycle.hydrate = false
 	store := newNativeDoltStoreForTest(storage)
@@ -217,7 +229,7 @@ func TestCloseAllFallsBackWhenTheUpdateAnswersNoPostState(t *testing.T) {
 // re-read is ErrNotFound, which is what Close answers for the same row. Closing
 // it with an empty reason instead would record a retirement for a bead nothing
 // can show, and it is the shape the fallback falls into if it stops asking.
-func TestCloseAllFallbackReportsABeadThatVanishedMidChain(t *testing.T) {
+func TestCloseAllPerBeadRouteReportsABeadThatVanishedMidChain(t *testing.T) {
 	storage := newCloseChainStorage(nil)
 	storage.lifecycle.hydrate = false
 	store := newNativeDoltStoreForTest(storage)
@@ -234,7 +246,7 @@ func TestCloseAllFallbackReportsABeadThatVanishedMidChain(t *testing.T) {
 
 // With no metadata to stamp there is no chain: nothing in this call wrote a
 // reason, so the close's own read is the only one it makes and it stays.
-func TestCloseAllWithoutMetadataKeepsTheCloseDoorsOwnRead(t *testing.T) {
+func TestCloseAllPerBeadRouteWithoutMetadataKeepsTheCloseDoorsOwnRead(t *testing.T) {
 	storage := newCloseChainStorage(map[string]string{"close_reason": "the reason the row already held"})
 	store := newNativeDoltStoreForTest(storage)
 

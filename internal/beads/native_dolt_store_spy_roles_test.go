@@ -267,16 +267,32 @@ func (s *nativeDoltMemStorage) Releaser() (issueops.Releaser, error) {
 // dialed a partial batch.
 type rawBatchApplier struct{ storage beadslib.Storage }
 
+// ApplyBatch applies each item and answers ONE ItemResult per item, in request
+// order, carrying the Changed the underlying operation reported.
+//
+// The per-item outcomes are not decoration: a caller that composes a batch and
+// counts what it changed — CloseAll does exactly that — reads its answer off
+// them, and a double that returned none would report every batch as having
+// changed nothing while the rows moved. Changed is taken from the operation
+// rather than assumed true for the same reason in the other direction: a double
+// that over-reported it would let a caller count rows nothing changed.
+//
+// ItemResult.Issue stays NIL, matching what the served applier answers rather
+// than what the in-process role could. The http client's result carries no
+// post-item snapshot at all (ledger row L-apply-snapshot: hooks never fire on
+// that surface and a hundred hydrated issues would dwarf the request), so a
+// double that hydrated it would let a caller depend on a member the wire never
+// sends — the oracle drift this file exists to avoid.
 func (a rawBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBatchRequest) (issueops.ApplyBatchResult, error) {
 	lifecycle, err := a.storage.IssueLifecycle()
 	if err != nil {
 		return issueops.ApplyBatchResult{}, err
 	}
-	result := issueops.ApplyBatchResult{Keys: map[string]string{}}
+	result := issueops.ApplyBatchResult{Keys: map[string]string{}, Items: make([]issueops.ItemResult, 0, len(req.Items))}
 	for _, item := range req.Items {
 		switch item.Kind {
 		case issueops.ItemUpdate:
-			if _, err := lifecycle.Update(ctx, issueops.UpdateRequest{
+			updated, err := lifecycle.Update(ctx, issueops.UpdateRequest{
 				Actor:                 req.Actor,
 				IssueID:               item.Update.Target.ID,
 				Patch:                 item.Update.Patch,
@@ -285,28 +301,43 @@ func (a rawBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBatch
 				ExpectedVersion:       item.Update.ExpectedVersion,
 				ExpectedAssignee:      item.Update.ExpectedAssignee,
 				ExpectedStatus:        item.Update.ExpectedStatus,
-			}); err != nil {
+			})
+			if err != nil {
 				return issueops.ApplyBatchResult{}, err
 			}
+			result.Items = append(result.Items, issueops.ItemResult{
+				Kind: item.Kind, IssueID: item.Update.Target.ID, Changed: updated.Changed,
+			})
 		case issueops.ItemClose:
-			if _, err := lifecycle.Close(ctx, issueops.CloseRequest{
+			closed, err := lifecycle.Close(ctx, issueops.CloseRequest{
 				Actor:           req.Actor,
 				IssueID:         item.Close.Target.ID,
 				Reason:          item.Close.Reason,
 				Session:         item.Close.Session,
 				Force:           item.Close.Force,
 				ExpectedVersion: item.Close.ExpectedVersion,
-			}); err != nil {
+			})
+			if err != nil {
 				return issueops.ApplyBatchResult{}, err
 			}
+			result.Items = append(result.Items, issueops.ItemResult{
+				Kind: item.Kind, IssueID: item.Close.Target.ID, Changed: closed.Changed,
+			})
 		case issueops.ItemCreate:
 			created, err := lifecycle.Create(ctx, issueops.CreateRequest{Actor: req.Actor, Issue: item.Create.Issue})
 			if err != nil {
 				return issueops.ApplyBatchResult{}, err
 			}
-			if item.Create.Key != "" && created.Issue != nil {
-				result.Keys[item.Create.Key] = created.Issue.ID
+			id := ""
+			if created.Issue != nil {
+				id = created.Issue.ID
 			}
+			if item.Create.Key != "" && id != "" {
+				result.Keys[item.Create.Key] = id
+			}
+			result.Items = append(result.Items, issueops.ItemResult{
+				Kind: item.Kind, IssueID: id, Changed: true,
+			})
 		default:
 			return issueops.ApplyBatchResult{}, fmt.Errorf("rawBatchApplier: unsupported item kind %q", item.Kind)
 		}

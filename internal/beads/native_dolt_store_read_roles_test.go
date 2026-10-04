@@ -462,6 +462,40 @@ func TestNativeDoltStoreReadyAlwaysStatesTheLimitExplicitly(t *testing.T) {
 	}
 }
 
+// The assignee is one of the few predicates that pushes DOWN, so it has to
+// reach the role rather than being re-filtered Go-side over a full ready page.
+// The empty arm is the control: gc spells "anyone" as the zero value, and a
+// blank assignee sent as a real predicate would select the rows nobody owns
+// instead of all of them.
+func TestNativeDoltStoreReadyPushesTheAssigneeDown(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		query []ReadyQuery
+		want  string
+	}{
+		{name: "named assignee travels", query: []ReadyQuery{{Assignee: "probe-me"}}, want: "probe-me"},
+		{name: "no assignee stays unset", query: nil, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured issueops.ReadyRequest
+			storage := &nativeDoltReaderSpy{
+				ready: func(_ context.Context, req issueops.ReadyRequest) (issueops.IssuePage, error) {
+					captured = req
+					return issueops.IssuePage{}, nil
+				},
+			}
+			store := newNativeDoltStoreForTest(storage)
+
+			if _, err := store.Ready(tc.query...); err != nil {
+				t.Fatalf("Ready: %v", err)
+			}
+			if captured.Assignee != tc.want {
+				t.Fatalf("Assignee = %q, want %q", captured.Assignee, tc.want)
+			}
+		})
+	}
+}
+
 // The sort POLICY decides which rows a truncation keeps, so it is sent as the
 // concrete value the raw filter resolved to rather than left for whichever
 // default the route on the other end happens to apply.

@@ -3083,6 +3083,17 @@ func (s *nativeDoltCloseCapturingStorage) CloseIssue(ctx context.Context, id str
 	return s.nativeDoltMemStorage.CloseIssue(ctx, id, reason, actor, session)
 }
 
+// The capturing double gets its own batch applier for the reason embedding
+// exists to make awkward, the same one nativeDoltFailingLabelStorage names: the
+// promoted BatchApplier would build rawBatchApplier from the EMBEDDED mem
+// storage, whose lifecycle reaches the inner CloseIssue rather than this
+// double's capturing override — turning a test of the forwarded reason into a
+// test of nothing. CloseAll routes through the batch applier, so this is the
+// door its closes now come out of.
+func (s *nativeDoltCloseCapturingStorage) BatchApplier() (issueops.BatchApplier, error) {
+	return rawBatchApplier{storage: s}, nil
+}
+
 func (s *nativeDoltMemStorage) issueForDependency(id string) *beadslib.Issue {
 	bead, err := s.store.Get(id)
 	if err != nil {
