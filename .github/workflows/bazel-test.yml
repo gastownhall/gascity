@@ -135,6 +135,16 @@ jobs:
       # changes and every run pays a lost-inputs build restart. Rotate daily.
       # Only pushes to main save (~880MB): per-PR saves would churn the repo's
       # 10GB cache and evict main's entry. PRs restore main's latest.
+      # The path list keeps everything under --output_user_root except the
+      # repository cache's download store (cache/repos/v1/content_addressable),
+      # which holds raw archives by sha256: the ~1.9GB LLVM tarball alone would
+      # take the entry from ~880MB to ~3.7GB. Extracted repositories stay
+      # cached in cache/repos/v1/contents (repo contents cache), so a warm run
+      # downloads nothing. actions/cache tars each matched directory
+      # recursively, so a lone `!` exclusion under a listed parent is ignored:
+      # every ancestor of the excluded directory is expanded one level instead.
+      # Restore and save must list the same paths (they are part of the cache
+      # version). scripts/bazel_output_cache_test.go pins this.
       - name: Bazel cache day
         id: bazel-cache-day
         run: echo "day=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
@@ -143,7 +153,14 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
-            ${{ runner.temp }}/bazel-outputs
+            ${{ runner.temp }}/bazel-outputs/*
+            !${{ runner.temp }}/bazel-outputs/cache
+            ${{ runner.temp }}/bazel-outputs/cache/*
+            !${{ runner.temp }}/bazel-outputs/cache/repos
+            ${{ runner.temp }}/bazel-outputs/cache/repos/*
+            !${{ runner.temp }}/bazel-outputs/cache/repos/v1
+            ${{ runner.temp }}/bazel-outputs/cache/repos/v1/*
+            !${{ runner.temp }}/bazel-outputs/cache/repos/v1/content_addressable
           key: bazel-v2-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock') }}-${{ steps.bazel-cache-day.outputs.day }}
           restore-keys: |
             bazel-v2-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock') }}-
@@ -322,7 +339,14 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
-            ${{ runner.temp }}/bazel-outputs
+            ${{ runner.temp }}/bazel-outputs/*
+            !${{ runner.temp }}/bazel-outputs/cache
+            ${{ runner.temp }}/bazel-outputs/cache/*
+            !${{ runner.temp }}/bazel-outputs/cache/repos
+            ${{ runner.temp }}/bazel-outputs/cache/repos/*
+            !${{ runner.temp }}/bazel-outputs/cache/repos/v1
+            ${{ runner.temp }}/bazel-outputs/cache/repos/v1/*
+            !${{ runner.temp }}/bazel-outputs/cache/repos/v1/content_addressable
           key: ${{ steps.bazel-cache.outputs.cache-primary-key }}
 
       # Evidence-only: the integration suite's agent-flow tests are sensitive
