@@ -1,0 +1,65 @@
+name: macOS Release Smoke
+
+# Validates RELEASED gc artifacts on darwin — Homebrew core (bottled) plus
+# store interop. The existing homebrew-tap-smoke.yml covers the first-party
+# tap; this catches the class of regression that shipped in v1.4.1, where
+# the bottled gc embedded an older bd than the formula's beads dependency
+# and every native store path (gc mail count, nudge, session wake) failed
+# against a current store while `gc version` alone passed.
+# References: gastownhall/gascity#6393, gastownhall/gascity#6416
+
+on:
+  schedule:
+    - cron: "40 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-release-smoke-${{ github.ref || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  brew-core-smoke:
+    name: Homebrew core install + store interop
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - name: Show what we are about to install
+        run: |
+          # current core tap, so the smoke tests today's bottled pairing (not the runner image's stale index)
+          brew update --quiet   # current core tap, so the smoke tests today's bottled pairing
+          brew info gascity | sed -n '1,6p'
+          brew info beads | sed -n '1,4p'
+
+      - name: Install released gc from Homebrew core
+        run: |
+          brew uninstall --force gascity beads 2>/dev/null || true
+          brew install gascity
+
+      - name: Binary sanity
+        run: gc version
+
+      # The floor the tap smoke misses: prove the bottled gc's embedded bd
+      # can read a store created by the current bottled bd CLI. Schema-version
+      # skew here is exactly the v1.4.1 failure mode — fail loudly, do not ship.
+      - name: Store interop sanity
+        id: interop
+        run: |
+          GC_SMOKE_DIR="$RUNNER_TEMP/gc-smoke-$GITHUB_RUN_ID" && mkdir -p "$GC_SMOKE_DIR" && cd "$GC_SMOKE_DIR"
+          bd init
+          gc bd list
+          gc mail count
+          echo "store interop OK: bottled gc reads current bd CLI store"
+
+      - name: Report interop failure details
+        if: failure() && steps.interop.outcome == 'failure'
+        run: |
+          echo "::error::Released gc (Homebrew core) cannot read a store created by the current bottled bd."
+          echo "::error::Likely cause: bottled gc embeds an older bd than the formula's beads dependency (v1.4.1 class, #6393/#6416)."
+          echo "gc version: $(gc version 2>&1 || true)"
+          echo "bd version: $(bd version 2>&1 || true)"
+          exit 1
