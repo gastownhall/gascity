@@ -165,17 +165,22 @@ func TestReadinessWorkOutcomeDefersToAPassedStep(t *testing.T) {
 	}{
 		{"no metadata", nil, ""},
 		{"work outcome alone", map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
-		{"passed step ignores blocked work outcome", map[string]string{beadmeta.OutcomeMetadataKey: "pass", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
-		{"failed step keeps blocked work outcome", map[string]string{beadmeta.OutcomeMetadataKey: "fail", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
-		{"skipped step keeps blocked work outcome", map[string]string{beadmeta.OutcomeMetadataKey: "skipped", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
-		{"passed step with shipped outcome", map[string]string{beadmeta.OutcomeMetadataKey: "pass", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}, ""},
+		{"passed step ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		{"failed step keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"skipped step keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"passed step with shipped outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}, ""},
+		// A plain work bead (no gc.step_ref) is not a control-plane step: the
+		// core mol-do-work formula stamps gc.outcome=pass on the work bead
+		// itself, including blocked/abandoned closes, so gc.outcome must not
+		// mask its blocked work outcome.
+		{"work bead with pass keeps blocked work outcome", map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := ReadinessWorkOutcome(tt.metadata); got != tt.want {
 				t.Fatalf("ReadinessWorkOutcome(%v) = %q, want %q", tt.metadata, got, tt.want)
 			}
-			if tt.metadata[beadmeta.OutcomeMetadataKey] == "pass" && !DependencySatisfied("closed", ReadinessWorkOutcome(tt.metadata)) {
+			if tt.want == "" && !DependencySatisfied("closed", ReadinessWorkOutcome(tt.metadata)) {
 				t.Fatalf("a closed dependency whose step passed must satisfy its dependents (%v)", tt.metadata)
 			}
 		})
