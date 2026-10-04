@@ -3183,7 +3183,10 @@ func (t *Tmux) DismissModelSwitchModalIfPresent(session string) {
 	)
 }
 
-const feedbackSurveyDismissConfirmDelay = 150 * time.Millisecond
+const (
+	feedbackSurveyDigitPollInterval = 100 * time.Millisecond
+	feedbackSurveyDigitDeadline     = time.Second
+)
 
 func dismissFeedbackSurveyModal(content string, capture func() (string, error), sendKeys func(keys ...string) error, sleep func(time.Duration)) (bool, error) {
 	if !runtime.ContainsFeedbackSurveyModal(content) {
@@ -3192,10 +3195,17 @@ func dismissFeedbackSurveyModal(content string, capture func() (string, error), 
 	if err := sendKeys("0"); err != nil {
 		return true, err
 	}
-	sleep(feedbackSurveyDismissConfirmDelay)
-	content, err := capture()
-	if err != nil {
-		return true, errors.Join(err, sendKeys("C-u"))
+	for waited := time.Duration(0); waited < feedbackSurveyDigitDeadline; {
+		sleep(feedbackSurveyDigitPollInterval)
+		waited += feedbackSurveyDigitPollInterval
+		var err error
+		content, err = capture()
+		if err != nil {
+			return true, errors.Join(err, sendKeys("C-u"))
+		}
+		if !runtime.ContainsFeedbackSurveyModal(content) {
+			break
+		}
 	}
 	remainder, observed := lastComposerRemainder(strings.Split(content, "\n"), DefaultReadyPromptPrefix)
 	composer := strings.TrimSpace(strings.TrimRight(strings.TrimSpace(remainder), "│┃"))
