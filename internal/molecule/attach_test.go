@@ -278,6 +278,137 @@ func TestAttachFallsBackToSelfWhenRunChainRootIsClosed(t *testing.T) {
 	assertAllBeadsHaveRootID(t, store, result.IDMapping, content.ID)
 }
 
+// TestAttachFallsBackToSelfWhenMoleculeIDPointsAtUnrelatedOpenMolecule is the
+// regression for gm-qzxkf5: molecule_id is a durable "last molecule this bead
+// was ever poured under" tag that ordinary lifecycle never clears (unlike
+// workflow_id, which sling actively rolls back on launch failure and clears
+// on legitimate detach -- internal/sling/sling_attachment.go). A dormant
+// molecule that merely happens to share attachBeadID's molecule_id value --
+// with no dependency edge proving THIS bead was ever actually poured under it
+// -- must not be honored as the run root just because it is still open.
+// Unlike TestAttachFallsBackToSelfWhenRunChainRootIsClosed (a closed dead
+// pointer), this dormant root is OPEN; the fallback must fire anyway, keyed
+// on the missing structural proof, not on status.
+func TestAttachFallsBackToSelfWhenMoleculeIDPointsAtUnrelatedOpenMolecule(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// A dormant, pre-provisioned molecule for entirely different work. It is
+	// open, so the closed-root check alone would wrongly honor it.
+	dormant, err := store.Create(beads.Bead{
+		Title: "unrelated dormant molecule",
+		Type:  "task",
+	})
+	if err != nil {
+		t.Fatalf("create dormant molecule: %v", err)
+	}
+
+	// The content bead's molecule_id points at the dormant molecule, but no
+	// Attach ever actually poured it from this bead -- no blocking dep exists
+	// between them, exactly the shape a copied-over or leftover pointer
+	// leaves behind.
+	content, err := store.Create(beads.Bead{
+		Title: "content bead with a stale molecule_id pointer",
+		Type:  "bug",
+		Metadata: map[string]string{
+			"molecule_id": dormant.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create content bead: %v", err)
+	}
+
+	recipe := makeWorkflowRecipe("sub-work", "run", "eval")
+
+	result, err := Attach(context.Background(), store, recipe, content.ID, AttachOptions{})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	if result.WorkflowRootID != content.ID {
+		t.Errorf("WorkflowRootID = %q, want %q (self-root; %q is an open but structurally unrelated molecule, not a live chain)", result.WorkflowRootID, content.ID, dormant.ID)
+	}
+	assertAllBeadsHaveRootID(t, store, result.IDMapping, content.ID)
+}
+
+// TestAttachHonorsOpenMoleculeIDRootWithPriorBlockingDep proves the
+// gm-qzxkf5 fix above is not a blanket distrust of molecule_id. A content
+// bead that was actually poured under an open molecule root by a PRIOR
+// Attach call carries durable structural proof beyond the metadata pointer:
+// that earlier call's own DepAdd wired a "blocks" edge from the content bead
+// to that root. Re-attach (e.g. a follow-up recipe on the same bead, still
+// under the same open umbrella) must keep honoring that root, exactly like
+// the workflow_id case in TestAttachResolvesRootFromRunChainNotOwnID.
+func TestAttachHonorsOpenMoleculeIDRootWithPriorBlockingDep(t *testing.T) {
+	store := beads.NewMemStore()
+
+	priorRoot, err := store.Create(beads.Bead{
+		Title: "prior molecule (still open)",
+		Type:  "task",
+	})
+	if err != nil {
+		t.Fatalf("create prior root: %v", err)
+	}
+
+	content, err := store.Create(beads.Bead{
+		Title: "content bead genuinely poured under priorRoot",
+		Type:  "bug",
+		Metadata: map[string]string{
+			"molecule_id": priorRoot.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create content bead: %v", err)
+	}
+
+	// The durable proof a real prior Attach/pour leaves behind: the content
+	// bead already blocks on priorRoot.
+	if err := store.DepAdd(content.ID, priorRoot.ID, "blocks"); err != nil {
+		t.Fatalf("seed prior blocking dep: %v", err)
+	}
+
+	recipe := makeWorkflowRecipe("sub-work", "run", "eval")
+
+	result, err := Attach(context.Background(), store, recipe, content.ID, AttachOptions{})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	if result.WorkflowRootID != priorRoot.ID {
+		t.Errorf("WorkflowRootID = %q, want %q (open root with genuine prior blocking dep must be honored)", result.WorkflowRootID, priorRoot.ID)
+	}
+	assertAllBeadsHaveRootID(t, store, result.IDMapping, priorRoot.ID)
+}
+
+// TestAttachStampsFormulaVarIssue is the regression for gm-5ckjy0: the
+// legacy `gc sling` path has always auto-stamped gc.var.issue on every step
+// (BuildSlingFormulaVars, internal/sling/sling.go) so step templates can
+// resolve {{issue}} / re-fetch the attach target via `bd show` regardless of
+// how the bead was routed. cook --attach (this Attach function) was the one
+// path that never wrote it, silently leaving every {{issue}}-dependent step
+// template with nothing to resolve.
+func TestAttachStampsFormulaVarIssue(t *testing.T) {
+	store := beads.NewMemStore()
+	root := setupWorkflow(t, store)
+	leaf := setupWorkflowChild(t, store, root.ID, "Leaf bead")
+
+	recipe := makeWorkflowRecipe("sub-work", "run", "eval")
+
+	result, err := Attach(context.Background(), store, recipe, leaf.ID, AttachOptions{})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	for stepID, beadID := range result.IDMapping {
+		b, err := store.Get(beadID)
+		if err != nil {
+			t.Fatalf("Get(%s) for step %s: %v", beadID, stepID, err)
+		}
+		if got := b.Metadata["gc.var.issue"]; got != leaf.ID {
+			t.Errorf("step %s (bead %s): gc.var.issue = %q, want %q (the attach target)", stepID, beadID, got, leaf.ID)
+		}
+	}
+}
+
 // Test 3: Blocking dep prevents premature unblock
 func TestAttachBlockingDepPreventsClose(t *testing.T) {
 	store := beads.NewMemStore()
