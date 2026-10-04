@@ -270,6 +270,70 @@ func TestRetryLifecycleTransientThenPass(t *testing.T) {
 	}
 }
 
+func TestRetryLifecycleClosedWorkflowRootEvaluatesSecondAttemptOnce(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	spec := &formula.Step{
+		ID:    "review",
+		Title: "Review",
+		Type:  "task",
+		Retry: &formula.RetrySpec{MaxAttempts: 3},
+	}
+	root, control := makeRetryControl(t, store, "mol-test.review", spec, 3)
+	attempt1 := makeAttemptBead(t, store, root.ID, "mol-test.review.attempt.1", 1, map[string]string{
+		beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
+		beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassTransient,
+		beadmeta.FailureReasonMetadataKey: "rate_limited",
+	})
+	mustDep(t, store, control.ID, attempt1.ID, "blocks")
+	mustClose(t, store, root.ID)
+
+	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl attempt 1: %v", err)
+	}
+	if result.Action != "retry" || result.Created != 1 {
+		t.Fatalf("attempt 1 result = %+v, want one retry", result)
+	}
+
+	attempt2 := findAttemptByRef(t, store, control.ID, "mol-test.review.attempt.2")
+	if attempt2.ID == "" {
+		t.Fatal("attempt 2 was not created under the retry control")
+	}
+	if err := store.SetMetadataBatch(attempt2.ID, map[string]string{
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass,
+	}); err != nil {
+		t.Fatalf("set attempt 2 outcome: %v", err)
+	}
+	mustClose(t, store, attempt2.ID)
+
+	result, err = processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl attempt 2: %v", err)
+	}
+	if result.Action != "pass" {
+		t.Fatalf("closed workflow root retried attempt 2 instead of evaluating it: result=%+v", result)
+	}
+
+	control = mustGet(t, store, control.ID)
+	if err := spawnNextAttempt(t.Context(), store, control, 2, ProcessOptions{}); err != nil {
+		t.Fatalf("replay spawnNextAttempt attempt 2: %v", err)
+	}
+	all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("list attempts: %v", err)
+	}
+	count := 0
+	for _, candidate := range all {
+		if candidate.Metadata[beadmeta.StepRefMetadataKey] == "mol-test.review.attempt.2" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("duplicate attempt 2 after closed-root replay: got %d copies, want 1", count)
+	}
+}
+
 // TestRetryLifecycleAttachedAttemptExemptFromFalseScopeAbort reproduces
 // gc-yydp6f end to end: an Attach-spawned retry attempt that bare-closes with
 // a typed deliverable disposition (no flat gc.outcome) must carry

@@ -487,7 +487,8 @@ func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, a
 			beadmeta.IdempotencyKeyMetadataKey: key,
 			beadmeta.RootBeadIDMetadataKey:     rootBeadID,
 		},
-		TierMode: beads.TierBoth,
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err
@@ -771,8 +772,9 @@ func existingAttachIDMapping(store beads.Store, recipe *formula.Recipe, rootBead
 		return idMapping, nil
 	}
 	all, err := store.List(beads.ListQuery{
-		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootBeadID},
-		TierMode: beads.TierBoth,
+		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootBeadID},
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err
