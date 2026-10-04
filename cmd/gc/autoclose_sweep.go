@@ -273,7 +273,10 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 
 	var res autocloseSweepResult
 	for _, id := range sweep.due(now) {
-		stores, storeRef := cs.autocloseTargets(id)
+		cs.mu.RLock()
+		stores := cs.beadEventStoresLocked(id)
+		storeRef := cs.autocloseStoreRefLocked(id)
+		cs.mu.RUnlock()
 		if len(stores) == 0 {
 			continue
 		}
@@ -304,20 +307,12 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 	return res
 }
 
-// autocloseTargets returns the stores and storeRef a close of id resolves to,
-// as applyBeadEventToStores resolves them.
-func (cs *controllerState) autocloseTargets(id string) ([]beads.Store, string) {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	return cs.beadEventStoresLocked(id), cs.autocloseStoreRefLocked(id)
-}
-
 // sweepCaches returns the distinct CachingStores the bead event watcher feeds.
 func (cs *controllerState) sweepCaches() []*beads.CachingStore {
 	cs.mu.RLock()
 	stores := cs.beadEventStoresLocked("")
 	for _, class := range infraMigrationClasses {
-		if store, relocated := cs.storageRoutes.storeFor(coordclassFor(string(class))); relocated {
+		if store, relocated := cs.storageRoutes.storeFor(coordclassFor(string(class))); relocated { // residency:allow — censuses the caches the bead event watcher feeds; resolves no bead
 			stores = append(stores, store)
 		}
 	}
