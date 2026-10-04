@@ -3187,13 +3187,19 @@ const (
 
 var errFeedbackSurveyDigitUnresolved = errors.New("feedback survey dismiss digit sent but the composer was left unreadable or holding other input")
 
-func dismissFeedbackSurveyModal(capture func() (string, error), sendKeys func(keys ...string) error, sleep func(time.Duration)) error {
+func dismissFeedbackSurveyModal(capture func() (string, error), attached func() bool, sendKeys func(keys ...string) error, sleep func(time.Duration)) error {
+	if attached() {
+		return nil
+	}
 	sleep(feedbackSurveyMountGuard)
 	content, err := capture()
 	if err != nil || !runtime.ContainsFeedbackSurveyModal(content) {
 		return nil
 	}
 	if composer, observed := feedbackSurveyComposer(content); !observed || composer != "" {
+		return nil
+	}
+	if attached() {
 		return nil
 	}
 	if err := sendKeys("0"); err != nil {
@@ -3204,6 +3210,9 @@ func dismissFeedbackSurveyModal(capture func() (string, error), sendKeys func(ke
 	case err != nil:
 		return err
 	case composer == "0", composer == "" && !surveyGone:
+		if attached() {
+			return errFeedbackSurveyDigitUnresolved
+		}
 		return sendKeys("C-u")
 	case composer != "":
 		return errFeedbackSurveyDigitUnresolved
@@ -3261,9 +3270,10 @@ func feedbackSurveyComposer(content string) (string, bool) {
 // DismissFeedbackSurveyModalIfPresent clears Claude Code's post-turn
 // feedback survey (ga-zg7fjq) on the session's agent pane so a pending nudge
 // is not corrupted by, or silently swallowed into, the survey's
-// single-digit input handler. No-op when the survey is absent, and when a
-// client is attached or attachment cannot be determined, since the dismiss
-// digit and its cleanup would land in a human's composer. A parked survey
+// single-digit input handler. No-op when the survey is absent. It stops
+// keying as soon as a client is attached or attachment cannot be determined,
+// checked before each keystroke, since the dismiss digit and its cleanup
+// would land in a human's composer. A parked survey
 // reads idle to WaitForIdle, so callers must not gate this on an idle-wait
 // failure branch -- see the unconditional call from NudgeSession. When the
 // survey is present it blocks for the survey's mount window plus up to a
@@ -3289,14 +3299,15 @@ func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) error {
 	capture := func() (string, error) {
 		return t.CaptureVisiblePane(target)
 	}
+	attached := func() bool {
+		attached, err := t.SessionAttachedWithError(session)
+		return err != nil || attached
+	}
 	content, err := capture()
 	if err != nil || !runtime.ContainsFeedbackSurveyModal(content) {
 		return nil
 	}
-	if attached, err := t.SessionAttachedWithError(session); err != nil || attached {
-		return nil
-	}
-	return dismissFeedbackSurveyModal(capture, sendKeys, time.Sleep)
+	return dismissFeedbackSurveyModal(capture, attached, sendKeys, time.Sleep)
 }
 
 // GetPaneCommand returns the current command running in a pane.

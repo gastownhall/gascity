@@ -130,6 +130,37 @@ func (m *claudeSurveyModel) sleep(d time.Duration) {
 	}
 }
 
+func detached() bool { return false }
+
+func TestDismissFeedbackSurveyModalStopsWhenHumanAttachesMidDismissal(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		attachAt  time.Duration
+		wantKeys  string
+		wantErr   error
+		wantInput string
+	}{
+		{"during the mount window sends nothing", feedbackSurveyMountGuard / 2, "", nil, ""},
+		{"after the digit leaves it for the human instead of clearing", feedbackSurveyMountGuard + feedbackSurveyDigitPollInterval, "0", errFeedbackSurveyDigitUnresolved, "0"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model := claudeSurveyModel{visible: true, mountedAt: -time.Minute, ignoreDigits: true}
+			attached := func() bool { return model.now >= test.attachAt }
+
+			err := dismissFeedbackSurveyModal(model.capture, attached, model.sendKeys, model.sleep)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("dismissFeedbackSurveyModal error = %v, want %v", err, test.wantErr)
+			}
+			if got := strings.Join(model.keys, ","); got != test.wantKeys {
+				t.Fatalf("keys = %q, want %q once a human attached", got, test.wantKeys)
+			}
+			if model.input != test.wantInput {
+				t.Fatalf("composer = %q, want %q", model.input, test.wantInput)
+			}
+		})
+	}
+}
+
 func TestDismissFeedbackSurveyModalAgainstDebouncedSurvey(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -149,7 +180,7 @@ func TestDismissFeedbackSurveyModalAgainstDebouncedSurvey(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			model := test.model
 
-			if err := dismissFeedbackSurveyModal(model.capture, model.sendKeys, model.sleep); err != nil {
+			if err := dismissFeedbackSurveyModal(model.capture, detached, model.sendKeys, model.sleep); err != nil {
 				t.Fatalf("dismissFeedbackSurveyModal error = %v", err)
 			}
 			if got := strings.Join(model.keys, ","); got != test.wantKeys {
@@ -175,7 +206,7 @@ func TestDismissFeedbackSurveyModalAgainstDebouncedSurvey(t *testing.T) {
 			}
 			return multilineDraft, nil
 		}
-		err := dismissFeedbackSurveyModal(capture, func(sent ...string) error {
+		err := dismissFeedbackSurveyModal(capture, detached, func(sent ...string) error {
 			keys = append(keys, sent...)
 			return nil
 		}, func(time.Duration) {})
@@ -227,7 +258,7 @@ func TestDismissFeedbackSurveyModalRecaptureFailure(t *testing.T) {
 				return feedbackSurveySessionFixture, nil
 			}
 
-			if err := dismissFeedbackSurveyModal(capture, sendKeys, func(time.Duration) {}); !errors.Is(err, test.wantErr) {
+			if err := dismissFeedbackSurveyModal(capture, detached, sendKeys, func(time.Duration) {}); !errors.Is(err, test.wantErr) {
 				t.Fatalf("dismissFeedbackSurveyModal error = %v, want %v", err, test.wantErr)
 			}
 			if got := strings.Join(keys, ","); got != test.wantKeys {
@@ -370,7 +401,7 @@ func TestDismissFeedbackSurveyModalReportsUnreadableComposerAfterDigit(t *testin
 		}
 		return "⏺ Done — pushed the branch and replied on the PR.", nil
 	}
-	err := dismissFeedbackSurveyModal(capture, func(sent ...string) error {
+	err := dismissFeedbackSurveyModal(capture, detached, func(sent ...string) error {
 		keys = append(keys, sent...)
 		return nil
 	}, func(time.Duration) {})
