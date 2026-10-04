@@ -63,10 +63,8 @@ func TestCmdSlingRemote_RefusesUnsupportedModes(t *testing.T) {
 			var out, errb bytes.Buffer
 			return cmdSlingRemote(base(), remoteTestTarget(srv.URL), []string{"mayor"}, false, false, false, "", nil, "", false, false, false, "", false, true /*stdin*/, false, "", "", false, &out, &errb)
 		}, "stdin"},
-		{"dry-run", func() int {
-			var out, errb bytes.Buffer
-			return cmdSlingRemote(base(), remoteTestTarget(srv.URL), []string{"mayor", "BL-1"}, false, false, false, "", nil, "", false, false, false, "", false, false, true /*dryRun*/, "", "", false, &out, &errb)
-		}, "dry-run"},
+		// --dry-run is no longer a refused mode: it is answered as a read-only
+		// pre-flight (see TestCmdSlingRemote_DryRun* in remote_sling_test.go).
 		{"nudge", func() int {
 			var out, errb bytes.Buffer
 			return cmdSlingRemote(base(), remoteTestTarget(srv.URL), []string{"mayor", "BL-1"}, false, true /*nudge*/, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, &out, &errb)
