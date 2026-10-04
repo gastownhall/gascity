@@ -5,6 +5,9 @@ go_test(
     srcs = [
         "acceptance_run_selection_test.go",
         "add_testenv_import_test.go",
+        "bazel_fork_cache_test.go",
+        "bazel_fresh_merge_test.go",
+        "bazel_test_tmp_bt_test.go",
         "bd_version_pin_test.go",
         "build_provenance_test.go",
         "check_core_boundary_test.go",
@@ -30,6 +33,8 @@ go_test(
         "pr_static_scope_contract_test.go",
         "precommit_contract_test.go",
         "push_ownership_guard_test.go",
+        "rbe_fork_pool_test.go",
+        "rbe_worker_isolation_test.go",
         "rebase_resolve_lib_test.go",
         "release_binary_metadata_test.go",
         "residency_boundary_test.go",
@@ -54,6 +59,7 @@ go_test(
         ["**"],
         exclude = ["BUILD.bazel"],
     ) + [
+        "//:.bazelrc",
         "//:Makefile",
         "//:go.mod",
         "//:repo_meta",

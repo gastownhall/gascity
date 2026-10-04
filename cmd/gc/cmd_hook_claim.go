@@ -262,6 +262,9 @@ type hookClaimOps struct {
 	EmitClaimWindowExpired func(hookClaimWindowExpiry)
 	EmitClaimReleased      func(hookClaimReleaseRecord)
 	Now                    func() time.Time
+	// Sleep paces the claim-read retry loop (selectStoreWithWorkRetrying). It is
+	// a seam so tests can drive the loop against a fake clock that Now reads.
+	Sleep func(time.Duration)
 	// InvokedAt is when this `gc hook --claim` invocation began, and ClaimWindow
 	// is how long after it a claim mutation may still run. Together they are the
 	// turn-binding fence: a claim reaching a CAS past InvokedAt+ClaimWindow has
@@ -578,6 +581,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.Now == nil {
 		ops.Now = time.Now
 	}
+	if ops.Sleep == nil {
+		ops.Sleep = time.Sleep
+	}
 	// Stamped once per invocation and never refreshed: every federated leg the
 	// claim loop tries shares the window the FIRST one opened, which is what
 	// makes the fence bound the whole command rather than each attempt.
@@ -592,6 +598,30 @@ func (ops *hookClaimOps) applyDefaults() {
 // claimWindowSpent reports whether this invocation's claim window has elapsed.
 func (ops *hookClaimOps) claimWindowSpent() bool {
 	return ops.invocationAge() > ops.claimWindowOrDefault()
+}
+
+// claimWindowSpentAfter reports whether the claim window will be spent, or
+// closes exactly then, once a further wait of d has elapsed. A retry or backoff
+// loop consults it BEFORE sleeping, so it stops at the window rather than
+// discovering the window has passed only after sleeping through it. The boundary
+// counts as spent: work started at the last instant of the window cannot finish
+// inside it. Like claimWindowSpent, it never fires for a caller that opened no
+// invocation window (zero InvokedAt).
+func (ops *hookClaimOps) claimWindowSpentAfter(d time.Duration) bool {
+	if ops.InvokedAt.IsZero() {
+		return false
+	}
+	return ops.invocationAge()+d >= ops.claimWindowOrDefault()
+}
+
+// sleepOrWallClock is ops.Sleep with its production default applied inline, for
+// the same reason nowOrWallClock exists.
+func (ops *hookClaimOps) sleepOrWallClock(d time.Duration) {
+	if ops.Sleep != nil {
+		ops.Sleep(d)
+		return
+	}
+	time.Sleep(d)
 }
 
 // invocationAge is how long this `gc hook --claim` invocation has been running.

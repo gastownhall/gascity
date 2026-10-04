@@ -252,7 +252,7 @@ func runAdoptionBarrier(
 		alreadyHadBead := false
 		createSessionBead := func() error {
 			meta["synced_at"] = clk.Now().UTC().Format("2006-01-02T15:04:05Z07:00")
-			beadID, err := sessFront.CreateSession(sessionpkg.CreateSpec{
+			_, err := sessFront.CreateSession(sessionpkg.CreateSpec{
 				Title:     detail.AgentName,
 				AgentName: detail.AgentName,
 				Metadata:  meta,
@@ -260,10 +260,6 @@ func runAdoptionBarrier(
 			if err != nil {
 				return fmt.Errorf("creating session bead for %q: %w", sessionName, err)
 			}
-			// S19 Stage 3 shadow: record the legacy canonical-identity stamp built
-			// by desiredSessionIdentity for this adopted bead (no-op unless the
-			// shadow harness is enabled).
-			recordLegacyCompareWrites(beadID, "adoptionBarrier.create", meta)
 			return nil
 		}
 		createErr := sessionpkg.WithCitySessionIdentifierLocks(cityPath, []string{sessionName, detail.AgentName}, func() error {

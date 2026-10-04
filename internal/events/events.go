@@ -245,13 +245,19 @@ const (
 	ConvoyClosed            = "convoy.closed"
 	ControllerStarted       = "controller.started"
 	ControllerStopped       = "controller.stopped"
-	// ControlStalled fires once, when a control bead's bounded semantic-refusal
-	// retry budget expires and the control dispatcher quarantines it. Before
-	// this event the control plane had no control.* vocabulary at all, so a
-	// city whose dispatcher spent 95% of its throughput re-asking a question
-	// the store had already refused was, by construction, invisible on the
-	// event bus: no event, no metric, every health surface green. It is
-	// edge-triggered on the quarantine, not level-triggered on the retry — one
+	// ControlStalled fires once per disposition whose bounded retry budget
+	// expires: a semantic refusal the control dispatcher then QUARANTINES
+	// (error_class "semantic"), or a drift-pending wait whose loudness horizon
+	// elapsed (error_class "pending"). The two are not interchangeable — a
+	// quarantined bead is CLOSED and its order is dead, while a pending one
+	// stays OPEN and keeps retrying, and completes the moment a human heals the
+	// drift. Only the quarantine emits the paired order.failed; treating a
+	// pending stall as terminal misreads a healable wait as a dead workflow.
+	// Before this event the control plane had no control.* vocabulary at all,
+	// so a city whose dispatcher spent 95% of its throughput re-asking a
+	// question the store had already refused was, by construction, invisible on
+	// the event bus: no event, no metric, every health surface green. It is
+	// edge-triggered on the expiry, not level-triggered on the retry — one
 	// emission per stalled bead under the intended single-control-dispatcher-
 	// per-city topology, never one per attempt. Control beads carry no
 	// claim/lease, so a misconfigured second dispatcher over the same store
@@ -331,7 +337,12 @@ const (
 	// growing is an order that has stopped running with nothing else to say so.
 	// Rate-bounded at the emit site (see cmd/gc/order_dispatch.go) — a
 	// permanently wedged order cannot turn this into a per-tick stream.
-	OrderSuppressed                 = "order.suppressed"
+	OrderSuppressed = "order.suppressed"
+	// OrderSkipped reports that an exec order finished (exit 0) but declared
+	// that some or all of its work did not run: a bead scope it could not
+	// reach, or a safety gate that held a step back. It accompanies the run's
+	// order.completed so a skip is never read as a clean completion.
+	OrderSkipped                    = "order.skipped"
 	ProviderSwapped                 = "provider.swapped"
 	WorkerOperation                 = "worker.operation"
 	ProjectIdentityStamped          = "project.identity.stamped"
@@ -492,7 +503,7 @@ var KnownEventTypes = []string{
 	RequestResultSessionSubmit, RequestResultRigCreate, RequestFailed,
 	RigProvisionProgress,
 	CityCreated, CityUnregisterRequested,
-	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed,
+	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed, OrderSkipped,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
 	MoleculeResolved,
 	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,

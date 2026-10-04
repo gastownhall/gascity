@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -186,7 +187,8 @@ func cmdHandoffWithForce(args []string, target string, auto bool, hookFormat str
 		return 0
 	}
 
-	if err := pokeControllerForRestart(current.cityPath); err != nil {
+	// Name-only key: the env-derived GC_SESSION_ID can be stale.
+	if err := pokeControllerForRestart(current.cityPath, reconcilekey.SessionNamed(current.sessionName)); err != nil {
 		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

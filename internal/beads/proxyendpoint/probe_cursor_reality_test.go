@@ -78,6 +78,58 @@ func TestProbeSessionReadsTheIgnoredLanesCursorReality(t *testing.T) {
 			wantEffective: 0,
 		},
 		{
+			// beads v1.3.1 sentinelFlooredTables: events is created by
+			// ignored/0019, so its absence leaves 18 believable.
+			name:          "a missing floored sentinel table floors the lane at its own replay floor",
+			absentTables:  map[string]bool{"events": true},
+			ignored:       rawIgnored,
+			wantLimited:   true,
+			wantFloor:     18,
+			wantMissing:   "events",
+			wantEffective: 18,
+		},
+		{
+			name:          "the lowest floor of the absent floored tables wins",
+			absentTables:  map[string]bool{"bd_events_seq": true, "events": true},
+			ignored:       rawIgnored,
+			wantLimited:   true,
+			wantFloor:     18,
+			wantMissing:   "events",
+			wantEffective: 18,
+		},
+		{
+			// Equal floors keep the first absent table the library probed.
+			name:          "an equal floor keeps the first absent floored table",
+			absentTables:  map[string]bool{"bd_events_journal": true, "bd_events_seq": true},
+			ignored:       rawIgnored,
+			wantLimited:   true,
+			wantFloor:     21,
+			wantMissing:   "bd_events_journal",
+			wantEffective: 21,
+		},
+		{
+			// Floored tables do not short-circuit: the column is still read,
+			// and its lower floor wins.
+			name:          "a missing sentinel column lowers a floored table's floor",
+			absentTables:  map[string]bool{"bd_events_journal": true},
+			absentColumns: map[string]bool{"leases.granted_node": true},
+			ignored:       rawIgnored,
+			wantLimited:   true,
+			wantFloor:     11,
+			wantMissing:   "leases.granted_node",
+			wantEffective: 11,
+		},
+		{
+			// A floor at or above the raw cursor clamps nothing.
+			name:          "a floored table's absence does not raise a lower cursor",
+			absentTables:  map[string]bool{"bd_events_seq": true},
+			ignored:       15,
+			wantLimited:   true,
+			wantFloor:     21,
+			wantMissing:   "bd_events_seq",
+			wantEffective: 15,
+		},
+		{
 			// A cursor of zero has nothing to contradict, so the library
 			// returns before it consults the floor — and so does the probe,
 			// which keeps the sentinel reads off the path of a database that
@@ -137,7 +189,7 @@ func TestProbeSessionReadsTheIgnoredLanesCursorReality(t *testing.T) {
 					probedColumn = true
 				}
 			}
-			wantColumnProbe := tc.ignored > 0 && len(tc.absentTables) == 0
+			wantColumnProbe := tc.ignored > 0 && !tc.absentTables["wisps"] && !tc.absentTables["wisp_dependencies"]
 			if probedColumn != wantColumnProbe {
 				t.Fatalf("the session probed the sentinel column = %v, want %v; statements: %v",
 					probedColumn, wantColumnProbe, fake.statements())
@@ -181,10 +233,10 @@ func TestProbeSessionReadsHeadOnItsFirstStatement(t *testing.T) {
 		t.Fatalf("the session asked for HEAD in %d statement(s), want exactly 1: %v", headReads, statements)
 	}
 	// A healthy database at 66/26 with every sentinel present: two cursor
-	// existence checks, two MAX reads, two sentinel tables, one sentinel column.
-	// That is what a session issued before the HEAD observation existed.
-	if len(statements) != 7 {
-		t.Fatalf("the session issued %d statements, want the 7 it issued before HEAD was observed: %v", len(statements), statements)
+	// existence checks, two MAX reads, two sentinel tables, three floored
+	// sentinel tables, one sentinel column. HEAD adds none of them.
+	if want := 4 + len(ignoredSentinelTables) + len(ignoredSentinelFlooredTables) + 1; len(statements) != want {
+		t.Fatalf("the session issued %d statements, want the %d it issues without a HEAD read of its own: %v", len(statements), want, statements)
 	}
 	if opened := fake.opened.Load(); opened != 1 {
 		t.Fatalf("the session opened %d connection(s), want 1", opened)

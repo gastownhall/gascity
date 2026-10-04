@@ -106,3 +106,31 @@ func TestRequireBdSchemaParityAcceptsAMatchedPair(t *testing.T) {
 		t.Fatalf("a matched bd failed parity: %v", err)
 	}
 }
+
+// TestBdLatestSchemaVersionIsolatesHOMEFromSharedServerConfig pins a
+// synthetic HOME whose .beads/config.yaml declares dolt.shared-server: true
+// — the shape ga-1037rg named as the gate host's ambient config — and proves
+// the probe still migrates its own throwaway --db cleanly. Before HOME was
+// pinned in the probe's subprocess env, it inherited this polluted ambient
+// HOME unfiltered: bd resolved the migration against whatever database the
+// shared-server config named instead of the probe's own throwaway file,
+// surfacing that database's real state instead of a clean migration
+// (ga-wapfnm).
+func TestBdLatestSchemaVersionIsolatesHOMEFromSharedServerConfig(t *testing.T) {
+	bdPath := RequireBD(t)
+
+	pollutedHome := t.TempDir()
+	beadsDir := filepath.Join(pollutedHome, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("creating polluted HOME .beads dir: %v", err)
+	}
+	cfg := "no-db: true\ndolt:\n    shared-server: true\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("writing polluted HOME config.yaml: %v", err)
+	}
+	t.Setenv("HOME", pollutedHome)
+
+	if _, err := bdLatestSchemaVersion(bdPath); err != nil {
+		t.Fatalf("bdLatestSchemaVersion under a shared-server HOME: %v", err)
+	}
+}

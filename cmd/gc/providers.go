@@ -216,6 +216,24 @@ func registerStatusProviderACPRoutes(sp runtime.Provider, snapshot *sessionBeadS
 	}
 }
 
+// seedACPRoutesFromSnapshot rebuilds a composite provider's ACP route table
+// from a loaded session snapshot, by the same rule construction uses, so the
+// routes follow the session beads rather than start history. A snapshot that
+// failed to load seeds nothing.
+func seedACPRoutesFromSnapshot(sp runtime.Provider, snapshot *sessionBeadSnapshot, cityName string, cfg *config.City) {
+	seeder, ok := sp.(interface{ SeedRoutes([]string) })
+	if !ok || !sessionBeadSnapshotLoaded(snapshot) {
+		return
+	}
+	seeder.SeedRoutes(configuredACPRouteNames(snapshot, cityName, cfg))
+}
+
+// sessionBeadSnapshotLoaded reports whether snapshot is a complete read of the
+// session beads, which is what lets a route table be marked seeded.
+func sessionBeadSnapshotLoaded(snapshot *sessionBeadSnapshot) bool {
+	return snapshot != nil && snapshot.LoadError() == nil
+}
+
 func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapshot {
 	if ctx.cityPath == "" || ctx.providerName == "acp" {
 		return nil
@@ -259,9 +277,11 @@ func withSessionProviderConstructionContext(sp runtime.Provider, err error) (run
 // → resolveWorkerSpec) and — when the base is not acp but some agents select the
 // acp transport — composes an auto.Provider that routes those sessions to an acp
 // backend. Per-session transport is the auto router's job; this is where the
-// composition is owned (construction time). Dynamically-created sessions are
-// routed at start via the same auto.Provider (build_desired_state RouteACP).
-// Behavior is identical to the prior inline composition.
+// composition is owned (construction time). A loaded session snapshot seeds
+// the route table; without one the configured names are routed but the table
+// stays unseeded. The controller reseeds it from each session snapshot
+// (seedACPRoutesFromSnapshot), and dynamically-created sessions are also routed
+// at start via the same auto.Provider (build_desired_state RouteACP).
 func resolveSessionTransportProvider(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
 	base, err := buildSessionProviderByName(ctx.cfg, ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
 	if err != nil {
@@ -286,8 +306,12 @@ func resolveSessionTransportProvider(ctx sessionProviderContext, sessionBeads *s
 			return base, nil
 		}
 		autoSP := sessionauto.New(base, acpSP)
-		for _, sessName := range acpRouteNames {
-			autoSP.RouteACP(sessName)
+		if sessionBeadSnapshotLoaded(sessionBeads) {
+			autoSP.SeedRoutes(acpRouteNames)
+		} else {
+			for _, sessName := range acpRouteNames {
+				autoSP.RouteACP(sessName)
+			}
 		}
 		return autoSP, nil
 	}

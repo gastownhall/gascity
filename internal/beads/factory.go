@@ -460,6 +460,26 @@ func (opts StoreOpenOptions) stampedResult(result StoreOpenResult, err error) (S
 	return result, nil
 }
 
+// StampOpenedStore stamps the conditional-writes mode onto a store the factory
+// did not open, such as a relocated class binding's engine, by the factory's
+// own rules: ModeUnset defaults to off, and a store that cannot carry the mode
+// is refused under require and degraded loudly under auto. kind names the
+// store in the diagnostic and log vocabulary.
+//
+// A store that already carries a mode is refused, whatever the new mode: the
+// stamp is latched for the store's lifetime (§6.3), and a second stamp is the
+// one way a caller could lower a require it did not set.
+func StampOpenedStore(store Store, kind string, mode gate.Mode, onDegrade func(ConditionalWritesDegrade), logger *slog.Logger) error {
+	if carrier, ok := store.(conditionalWritesModeCarrier); ok {
+		if stamped, _ := carrier.conditionalWritesMode(); stamped != gate.ModeUnset {
+			return fmt.Errorf("stamping %s: conditional_writes mode is already %q and stays latched for the store's lifetime", kind, stamped)
+		}
+	}
+	opts := StoreOpenOptions{ConditionalWrites: mode, OnConditionalWritesDegraded: onDegrade, Logger: logger}
+	_, err := opts.stampedResult(StoreOpenResult{Store: store, Diagnostic: BeadsDiagnostic{Store: kind}}, nil)
+	return err
+}
+
 // unstampableResult resolves an open whose store cannot carry the
 // conditional-writes mode. The outcome follows the gate's own cell contract
 // instead of silently succeeding (the pre-review behavior): under require the
@@ -471,9 +491,11 @@ func (opts StoreOpenOptions) stampedResult(result StoreOpenResult, err error) (S
 func (opts StoreOpenOptions) unstampableResult(result StoreOpenResult, mode gate.Mode, reason string) (StoreOpenResult, error) {
 	switch mode {
 	case gate.Require:
-		return StoreOpenResult{}, fmt.Errorf("opening %s at %s: %w",
-			result.Diagnostic.Store, opts.ScopeRoot,
-			&ConditionalWritesRequiredError{StoreKind: result.Diagnostic.Store, Reason: reason})
+		refusal := &ConditionalWritesRequiredError{StoreKind: result.Diagnostic.Store, Reason: reason}
+		if opts.ScopeRoot == "" {
+			return StoreOpenResult{}, fmt.Errorf("opening %s: %w", result.Diagnostic.Store, refusal)
+		}
+		return StoreOpenResult{}, fmt.Errorf("opening %s at %s: %w", result.Diagnostic.Store, opts.ScopeRoot, refusal)
 	case gate.Auto:
 		if opts.Logger != nil {
 			opts.Logger.Warn("conditional_writes degraded at open",

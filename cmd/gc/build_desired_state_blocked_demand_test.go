@@ -36,7 +36,7 @@ func TestCollectOpenUnassignedRoutedWorkExcludesBlocked(t *testing.T) {
 	}
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 
-	work, _, _, partial := collectOpenUnassignedRoutedWork("", cfg, store, nil, nil, io.Discard)
+	work, _, _, partial := collectOpenUnassignedRoutedWork("", cfg, store, nil, nil, io.Discard, nil, nil)
 	if partial {
 		t.Errorf("collectOpenUnassignedRoutedWork reported partial on a healthy live read")
 	}
@@ -79,7 +79,7 @@ func TestCollectOpenUnassignedRoutedWorkReportsPartialOnLiveOutage(t *testing.T)
 	store := liveOpenListErrorStore{Store: beads.NewMemStore(), err: errors.New("live open list outage")}
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 
-	work, _, _, partial := collectOpenUnassignedRoutedWork("", cfg, store, nil, nil, io.Discard)
+	work, _, _, partial := collectOpenUnassignedRoutedWork("", cfg, store, nil, nil, io.Discard, nil, nil)
 
 	if !partial {
 		t.Errorf("collectOpenUnassignedRoutedWork did not report partial on a live List outage (fail-open-to-zero, gc-ft31x)")

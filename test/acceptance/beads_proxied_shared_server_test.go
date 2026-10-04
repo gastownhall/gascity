@@ -10,11 +10,13 @@
 // in ~/.beads/shared-server — silently, and shared by every city on the host, so
 // two cities' `hq` stores became one database.
 //
-// The harness keeps the real HOME (the platform supervisor refuses an override),
-// so the user-level config is supplied through XDG_CONFIG_HOME — bd's
-// os.UserConfigDir() layer — and BEADS_SHARED_SERVER_DIR points the shared
-// server at a test directory, so a regression lands there and never in the
-// operator's ~/.beads/shared-server.
+// bd never sees the real HOME here (the harness re-homes every bd under the
+// Env's tool home), so the user-level config is supplied through
+// XDG_CONFIG_HOME — bd's os.UserConfigDir() layer — and BEADS_SHARED_SERVER_DIR
+// points the shared server at a test directory, so a regression lands there
+// and never in the operator's ~/.beads/shared-server. The harness also pins
+// BD_DOLT_SHARED_SERVER=false by default; this test clears it to "" (which bd
+// reads as unset) so the user-level layer is what decides.
 package acceptance_test
 
 import (
@@ -42,7 +44,8 @@ func TestBeadsProxiedIgnoresUserLevelSharedServer(t *testing.T) {
 	}
 	env := proxiedEnv(t, bdPath, doltPath).
 		With("XDG_CONFIG_HOME", xdgConfig).
-		With("BEADS_SHARED_SERVER_DIR", sharedDir)
+		With("BEADS_SHARED_SERVER_DIR", sharedDir).
+		With("BD_DOLT_SHARED_SERVER", "")
 
 	city := helpers.NewCity(t, env)
 	cityRoot := city.Dir
@@ -87,7 +90,7 @@ func TestBeadsProxiedIgnoresUserLevelSharedServer(t *testing.T) {
 		// the scope and the user-level config — still reads the scope's store.
 		raw := exec.Command(bdPath, "list", "--json") //nolint:gosec // resolved test binary
 		raw.Dir = scope.root
-		raw.Env = append(env.List(), "BEADS_DIR="+filepath.Join(scope.root, ".beads"))
+		raw.Env = env.Clone().With("BEADS_DIR", filepath.Join(scope.root, ".beads")).ToolList()
 		out, err := raw.CombinedOutput()
 		if err != nil {
 			t.Fatalf("raw bd list in %s: %v\n%s", scope.label, err, out)

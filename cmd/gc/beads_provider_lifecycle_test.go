@@ -12959,7 +12959,7 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 		}
 		return filepath.Clean(root), true, nil
 	}
-	publishedPIDs := func(ctx context.Context, dir, transport string) ([]int, error) {
+	publishedPIDs := func(ctx context.Context, dir, home, transport string) ([]int, error) {
 		if transport == "direct" {
 			if _, err := os.Stat(filepath.Join(dir, ".beads", "metadata.json")); errors.Is(err, os.ErrNotExist) {
 				return nil, nil
@@ -12968,7 +12968,7 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 			}
 			cmd := exec.CommandContext(ctx, bdPath, "dolt", "status", "--json")
 			cmd.Dir = dir
-			cmd.Env = sanitizedBaseEnv("BEADS_DIR=" + filepath.Join(dir, ".beads"))
+			cmd.Env = sanitizedBaseEnv("HOME="+home, "BEADS_DIR="+filepath.Join(dir, ".beads"))
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				return nil, fmt.Errorf("read direct bd lifecycle status: %w\n%s", err, out)
@@ -13052,6 +13052,9 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				t.Fatal(err)
 			}
+			if err := os.MkdirAll(home, 0o755); err != nil {
+				t.Fatal(err)
+			}
 			for _, args := range [][]string{{"init", "-q"}, {"config", "user.name", "Test"}, {"config", "user.email", "test@example.invalid"}} {
 				if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
 					t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -13077,7 +13080,7 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 				// Stop is safe before a successful init and is required even if the
 				// operation that launched a child failed before we captured its ID.
 				_ = runLifecycleCommand(ctx, dir, home, transport, "stop")
-				remaining, err := publishedPIDs(ctx, dir, transport)
+				remaining, err := publishedPIDs(ctx, dir, home, transport)
 				if err != nil {
 					t.Errorf("inspect provider-owned lifecycle processes after stop: %v", err)
 				}
@@ -13112,7 +13115,7 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 				}
 			}
 			var inspectErr error
-			pids, inspectErr = publishedPIDs(ctx, dir, transport)
+			pids, inspectErr = publishedPIDs(ctx, dir, home, transport)
 			if inspectErr != nil {
 				t.Fatal(inspectErr)
 			}

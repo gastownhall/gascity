@@ -1,0 +1,55 @@
+name: fresh-merge
+description: >
+  pull_request runs only (a no-op on every other event): replace the
+  checkout of refs/pull/N/merge, which GitHub computed when the event fired
+  and reuses for reopens, approval-delayed first-time runs and re-runs, with
+  the PR head merged onto the base branch's tip as fetched here, so the tree
+  has the base branch's current fixes. Each job (and each re-run of it)
+  merges onto the tip it fetches. Port of beads' fresh-merge, which merges
+  onto one base commit resolved once per run instead. The calling checkout
+  must have history (fetch-depth 0; blobless is enough). A conflict fails
+  the job; a workflow change on the base branch since the event is a
+  warning (this run uses the event's workflow).
+runs:
+  using: composite
+  steps:
+    - name: Merge the PR head onto the base branch's current tip
+      if: github.event_name == 'pull_request'
+      shell: bash
+      env:
+        BASE_REF: ${{ github.base_ref }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        set -euo pipefail
+        # Three attempts, 5 s then 10 s apart: a transient fetch failure
+        # must not fail the job.
+        for attempt in 1 2 3; do
+          if git fetch --no-tags --filter=blob:none origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"; then
+            break
+          fi
+          if [ "$attempt" -eq 3 ]; then
+            echo "::error title=fresh-merge cannot fetch ${BASE_REF}::git fetch of ${BASE_REF} failed 3 times"
+            exit 1
+          fi
+          sleep $((attempt * 5))
+        done
+        base_sha="$(git rev-parse "origin/${BASE_REF}")"
+        git checkout --quiet --detach "$HEAD_SHA"
+        # Fixed identity and dates (the base commit's committer date): the
+        # same head and base always give the same merge commit.
+        base_date="$(git log -1 --format=%cd --date=raw "$base_sha")"
+        if ! GIT_AUTHOR_DATE="$base_date" GIT_COMMITTER_DATE="$base_date" \
+          git -c user.name=ci -c user.email=ci@invalid merge --quiet --no-edit --no-ff "$base_sha"; then
+          echo "::error title=PR does not merge onto ${BASE_REF}::the PR head ${HEAD_SHA} conflicts with ${BASE_REF} at ${base_sha}; rebase or merge ${BASE_REF}"
+          exit 1
+        fi
+        # This run uses the workflow files of the event's merge ref; if the
+        # base branch changed them since, the tested tree has newer ones.
+        skew=0
+        git diff --quiet "$GITHUB_SHA" HEAD -- .github/ || skew=$?
+        if [ "$skew" -eq 1 ]; then
+          echo "::warning title=Workflow changed on ${BASE_REF} since this event::the tested tree's .github/ (merged onto ${BASE_REF} ${base_sha}) differs from the event merge ref ${GITHUB_SHA}'s, whose workflow this run uses. A push to the PR refreshes it."
+        elif [ "$skew" -ne 0 ]; then
+          echo "::warning title=fresh-merge cannot compare workflows::git diff ${GITHUB_SHA} HEAD -- .github/ exited ${skew}"
+        fi
+        echo "Tested tree: PR head \`${HEAD_SHA}\` merged onto ${BASE_REF} \`${base_sha}\` (event merge ref \`${GITHUB_SHA}\`)" >> "$GITHUB_STEP_SUMMARY"
