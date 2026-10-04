@@ -319,7 +319,7 @@ jobs:
           if [ -n "$BAZEL_REMOTE_EXECUTOR" ] || [ -n "$RBE_FORK_CERT" ]; then RCEXEC=(--config=remote-exec); else RCEXEC=(); fi
           bazel "${ARGS[@]}" test //test/integration:integration_test \
             "${RCEXEC[@]}" --test_output=errors --keep_going \
-            --define=gotags=integration --test_timeout=1100 --flaky_test_attempts=1 || true
+            --define=gotags=integration --test_timeout=1100 || true
 
       - name: Critical-path report + budget (the optimization loop metric)
         if: always()
