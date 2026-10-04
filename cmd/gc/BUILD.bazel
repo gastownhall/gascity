@@ -671,6 +671,24 @@ go_binary(
     visibility = ["//visibility:public"],
 )
 
+# Start-drift fixtures: gc stamped with the fixed main.commit values that
+# test/integration/start_drift_test.go fakes a binary upgrade with, prebuilt so
+# the test never compiles at run time. One per commit ID in driftGCVariants
+# (test/integration/start_drift_binaries_test.go).
+go_binary(
+    name = "gc_drift_old",  # keep
+    embed = [":gc_lib"],
+    visibility = ["//test/integration:__pkg__"],
+    x_defs = {"main.commit": "deadbeefcafe1111"},
+)
+
+go_binary(
+    name = "gc_drift_new",  # keep
+    embed = [":gc_lib"],
+    visibility = ["//test/integration:__pkg__"],
+    x_defs = {"main.commit": "facefeed02222222"},
+)
+
 go_test(
     name = "gc_test",
     size = "large",

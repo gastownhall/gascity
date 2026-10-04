@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -27,12 +28,15 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
@@ -346,9 +350,9 @@ func TestStartDrift_RestartLoopGuard_RefusesFourthInWindow(t *testing.T) {
 			commit = driftHappyOldCommit
 			expectedPrev = driftHappyNewCommit
 		}
-		// Build the binary that gc start will run as (mimicking
+		// Install the binary that gc start will run as (mimicking
 		// `go install` overwriting the on-disk gc).
-		buildGCBinaryWithCommit(t, tc.newBinary, commit)
+		installDriftGCBinary(t, tc.newBinary, commit)
 
 		out, exitCode, _ := runDriftCommand(t, tc.newBinary, tc.env, tc.cityDir,
 			"start", tc.cityDir)
@@ -427,7 +431,7 @@ type driftScenario struct {
 	supervisorPID  int
 }
 
-// setupDriftDirectScenario builds an old gc binary, starts it as a
+// setupDriftDirectScenario installs an old gc binary, starts it as a
 // direct (non-systemd) supervisor, bootstraps a city, and overlays a
 // new gc binary at the same path with a different commit. The caller
 // receives a fully-armed scenario where running `<newBinary> start
@@ -447,7 +451,7 @@ func setupDriftDirectScenario(t *testing.T) *driftScenario {
 	// LIFO): the per-PID stops get their chance first, then this sweeps up
 	// any supervisor the drift restart replaced them with.
 	t.Cleanup(func() { reapDriftSupervisors(binaryPath) })
-	buildGCBinaryWithCommit(t, binaryPath, driftHappyOldCommit)
+	installDriftGCBinary(t, binaryPath, driftHappyOldCommit)
 
 	pid := launchDirectSupervisor(t, binaryPath, env, gcHome)
 	pollHealthBuildID(t, port, driftHappyOldCommit, driftReadyTimeout)
@@ -458,7 +462,7 @@ func setupDriftDirectScenario(t *testing.T) *driftScenario {
 	// new build. The kernel keeps the running process tied to the old
 	// inode; /proc/<pid>/exe still resolves to binaryPath, which now
 	// points to the new bytes.
-	buildGCBinaryWithCommit(t, binaryPath, driftHappyNewCommit)
+	installDriftGCBinary(t, binaryPath, driftHappyNewCommit)
 
 	_ = runtimeDir
 	return &driftScenario{
@@ -499,7 +503,7 @@ func setupDriftSystemdScenario(t *testing.T) *driftScenario {
 		t.Fatalf("creating drift binary dir: %v", err)
 	}
 	binaryPath := filepath.Join(binaryDir, "gc-drift-systemd")
-	buildGCBinaryWithCommit(t, binaryPath, driftHappyOldCommit)
+	installDriftGCBinary(t, binaryPath, driftHappyOldCommit)
 
 	unit := writeSystemdUserUnit(t, binaryPath, gcHome, runtimeDir)
 	// Registered before daemon-reload/start: a t.Fatalf in either skips any
@@ -517,7 +521,7 @@ func setupDriftSystemdScenario(t *testing.T) *driftScenario {
 	cityDir := bootstrapDriftCity(t, binaryPath, env, gcHome)
 
 	// Overwrite binary on disk with the new build.
-	buildGCBinaryWithCommit(t, binaryPath, driftHappyNewCommit)
+	installDriftGCBinary(t, binaryPath, driftHappyNewCommit)
 
 	return &driftScenario{
 		gcHome:         gcHome,
@@ -564,14 +568,14 @@ func setupDriftDirectScenarioAsUID(t *testing.T, uid uint32) *driftScenario {
 	cityDir := bootstrapDriftCity(t, tc.binaryPath, tc.env, tc.gcHome)
 	tc.cityDir = cityDir
 
-	buildGCBinaryWithCommit(t, tc.binaryPath, driftHappyNewCommit)
+	installDriftGCBinary(t, tc.binaryPath, driftHappyNewCommit)
 	tc.supervisorPID = pid
 	return tc
 }
 
 // setupDriftDirectScenarioWithoutLaunch is the prefix shared by
 // setupDriftDirectScenario and setupDriftDirectScenarioAsUID. It
-// builds the old binary and reserves the env but does NOT start the
+// installs the old binary and reserves the env but does NOT start the
 // supervisor — the caller does that under whatever credentials it
 // needs.
 func setupDriftDirectScenarioWithoutLaunch(t *testing.T) *driftScenario {
@@ -588,7 +592,7 @@ func setupDriftDirectScenarioWithoutLaunch(t *testing.T) *driftScenario {
 	// parent dir.
 	binaryPath := filepath.Join(binaryDir, "gc-drift")
 	t.Cleanup(func() { reapDriftSupervisors(binaryPath) })
-	buildGCBinaryWithCommit(t, binaryPath, driftHappyOldCommit)
+	installDriftGCBinary(t, binaryPath, driftHappyOldCommit)
 	if err := os.Chmod(binaryPath, 0o755); err != nil {
 		t.Fatalf("chmod binary: %v", err)
 	}
@@ -609,12 +613,89 @@ func newDriftIsolatedEnvRoot(t *testing.T) (string, string, []string) {
 	return gcHome, runtimeDir, env
 }
 
-// buildGCBinaryWithCommit compiles the gc binary at outPath with
-// `-X main.commit=commitID` so the supervisor's /health reports
-// build_id=commitID. Used to fabricate drift between the running
-// supervisor and the on-disk binary.
-func buildGCBinaryWithCommit(t *testing.T, outPath, commitID string) {
+// driftGCVariants maps every main.commit value the start-drift suite stamps
+// to the runfiles path of its prebuilt x_defs variant of //cmd/gc. Adding a
+// commit ID means adding a go_binary in cmd/gc/BUILD.bazel and listing it in
+// this package's data in test/integration/BUILD.bazel.
+var driftGCVariants = map[string]string{
+	driftHappyOldCommit: "cmd/gc/gc_drift_old_/gc_drift_old",
+	driftHappyNewCommit: "cmd/gc/gc_drift_new_/gc_drift_new",
+}
+
+// driftGCBuild memoizes one plain-go-test build of a commit-stamped gc.
+type driftGCBuild struct {
+	once sync.Once
+	path string
+	err  error
+}
+
+var (
+	driftGCBuildsMu sync.Mutex
+	driftGCBuilds   = map[string]*driftGCBuild{}
+)
+
+// driftCommitIDs returns the commit IDs that have a gc variant, sorted.
+func driftCommitIDs() []string {
+	ids := make([]string, 0, len(driftGCVariants))
+	for id := range driftGCVariants {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// installDriftGCBinary places a gc binary stamped with main.commit=commitID
+// at outPath, mimicking `go install` overwriting the on-disk gc: the bytes
+// land in a temp file beside outPath and are renamed over it, so a running
+// supervisor keeps its old inode while the path resolves to the new build.
+// The result is mode 0o755.
+func installDriftGCBinary(t *testing.T, outPath, commitID string) {
 	t.Helper()
+	src := driftGCSource(t, commitID)
+	if err := copyExecutableAtomic(src, outPath); err != nil {
+		t.Fatalf("installing gc with commit=%s at %s: %v", commitID, outPath, err)
+	}
+}
+
+// driftGCSource returns a gc binary stamped with commitID, to be copied, never
+// executed in place. Under bazel it is the prebuilt variant from runfiles (no
+// compilation at test time); under plain go test each commit is built at most
+// once per process into the suite temp dir.
+func driftGCSource(t *testing.T, commitID string) string {
+	t.Helper()
+	rel, ok := driftGCVariants[commitID]
+	if !ok {
+		t.Fatalf("no gc drift variant for commit %q; add it to driftGCVariants and cmd/gc/BUILD.bazel", commitID)
+	}
+	if bazeltest.IsBazel() {
+		bin := runfilesBinary(rel)
+		if bin == "" {
+			t.Fatalf("prebuilt gc drift variant %s missing from runfiles; declare it in //test/integration:integration_test data", rel)
+		}
+		return bin
+	}
+
+	driftGCBuildsMu.Lock()
+	b := driftGCBuilds[commitID]
+	if b == nil {
+		b = &driftGCBuild{}
+		driftGCBuilds[commitID] = b
+	}
+	driftGCBuildsMu.Unlock()
+	b.once.Do(func() { b.path, b.err = buildDriftGCBinary(commitID) })
+	if b.err != nil {
+		t.Fatalf("building gc with commit=%s: %v", commitID, b.err)
+	}
+	return b.path
+}
+
+// buildDriftGCBinary compiles gc with `-X main.commit=commitID` into the
+// suite temp dir that TestMain removes on exit.
+func buildDriftGCBinary(commitID string) (string, error) {
+	if integrationToolBinDir == "" {
+		return "", fmt.Errorf("integration tool bin dir unset; TestMain did not run")
+	}
+	outPath := filepath.Join(filepath.Dir(integrationToolBinDir), "drift-gc", commitID, "gc")
 	cmd := exec.Command("go", "build",
 		"-buildvcs=false",
 		"-ldflags", "-X main.commit="+commitID,
@@ -624,8 +705,40 @@ func buildGCBinaryWithCommit(t *testing.T, outPath, commitID string) {
 	cmd.Dir = findModuleRoot()
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("building gc with commit=%s: %v\n%s", commitID, err, string(out))
+		return "", fmt.Errorf("%w\n%s", err, out)
 	}
+	return outPath, nil
+}
+
+// copyExecutableAtomic copies src to a temp file in dst's directory, makes it
+// 0o755, and renames it over dst.
+func copyExecutableAtomic(src, dst string) (err error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close() //nolint:errcheck // read-only
+
+	tmp, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+	if _, err = io.Copy(tmp, in); err != nil {
+		return fmt.Errorf("copying %s: %w", src, err)
+	}
+	if err = tmp.Chmod(0o755); err != nil {
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), dst)
 }
 
 // launchDirectSupervisor spawns `binary supervisor run` in the
@@ -650,7 +763,7 @@ func launchDirectSupervisor(t *testing.T, binary string, env []string, gcHome st
 	}
 	pid := cmd.Process.Pid
 	// Register the stop BEFORE returning. Callers do fatal-capable setup
-	// work (health polls, `gc init`, a second `go build`) between this call
+	// work (health polls, `gc init`, a second binary install) between this call
 	// and any cleanup they register themselves; a t.Fatalf in there runs the
 	// cleanups already registered and skips the rest, so a stop registered by
 	// the caller afterwards never exists and this supervisor survives the run

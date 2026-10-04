@@ -48,6 +48,7 @@ go_test(
         "review_formula_test.go",
         "session_k8s_test.go",
         "skill_lifecycle_test.go",
+        "start_drift_binaries_test.go",
         "start_drift_test.go",
         "testenv_import_test.go",
         "tool_home_test.go",
@@ -59,6 +60,9 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//cmd/gc",
+        # Prebuilt main.commit-stamped gc variants for start_drift_test.go.
+        "//cmd/gc:gc_drift_new",
+        "//cmd/gc:gc_drift_old",
         "//examples/bd",
         "//test/integration/filebdshim",
         "//:go.mod",
