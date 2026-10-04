@@ -49,7 +49,12 @@ set -eu
 [ ! -e /dev/fd/9 ] || { echo 'delivery lock leaked to a child process' >&2; exit 2; }
 printf '%s\n' "$*" >> "$FIXTURE/calls"
 case "$1 $2" in
-  'events --seq') jq -s 'map(.seq) | max // 0' "$FIXTURE/events" ;;
+  'events --seq')
+    if [ -p "$FIXTURE/blocked-seq" ]; then
+      echo entered > "$FIXTURE/seq-entered"
+      read -r release < "$FIXTURE/blocked-seq"
+    fi
+    jq -s 'map(.seq) | max // 0' "$FIXTURE/events" ;;
   events*)
     [ ! -f "$FIXTURE/fail-read" ] || exit 1
     after=0
@@ -187,6 +192,70 @@ func TestRouteNotificationCreationTriggersDelivery(t *testing.T) {
 	}
 }
 
+// A killed probe must hand recovery to exec on the next pass, even if the
+// event service remains slow and no additional event arrives.
+func TestRouteNotificationInterruptedCheckSchedulesRecovery(t *testing.T) {
+	f := newRouteScriptFixture(t)
+	f.bus.Record(events.Event{Type: "city.started"})
+	f.write("state/nudge-on-route-delivery.json", `{"version":1,"cursor":1,"pending":{},"notified":{},"retry":{}}`, 0o600)
+	f.seed("bead.created", true)
+	for _, name := range []string{"blocked-seq", "seq-entered"} {
+		if err := unix.Mkfifo(filepath.Join(f.dir, name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entered, err := os.OpenFile(filepath.Join(f.dir, "seq-entered"), os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer entered.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	results := make(chan orders.TriggerResult, 1)
+	go func() {
+		results <- orders.CheckTriggerWithOptions(f.order, time.Now(), nil, f.bus, nil, orders.TriggerOptions{
+			ConditionCtx: ctx, ConditionDir: f.dir, ConditionEnv: f.env, ConditionTimeout: 30 * time.Second,
+		})
+	}()
+	ready := make(chan error, 1)
+	go func() { _, err := bufio.NewReader(entered).ReadString('\n'); ready <- err }()
+	select {
+	case err := <-ready:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("condition never reached the event probe")
+	}
+	cancel() // same process-group cancellation path as the check deadline
+	if result := <-results; result.Due {
+		t.Fatalf("interrupted probe result = %+v, want not due", result)
+	}
+	before, err := os.ReadFile(filepath.Join(f.dir, "calls"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.due() {
+		t.Fatal("interrupted probe did not schedule recovery without another API read")
+	}
+	after, err := os.ReadFile(filepath.Join(f.dir, "calls"))
+	if err != nil || string(before) != string(after) {
+		t.Fatalf("recovery check repeated remote reads: before=%s after=%s err=%v", before, after, err)
+	}
+	if err := os.Remove(filepath.Join(f.dir, "blocked-seq")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.nudges(); got != "worker\n" {
+		t.Fatalf("recovery nudges = %q", got)
+	}
+	if f.due() {
+		t.Fatal("successful recovery left a continuously due probe")
+	}
+}
+
 func TestRouteNotificationRetriesWithoutNewEvents(t *testing.T) {
 	f := newRouteScriptFixture(t)
 	f.seed("bead.updated", true)
@@ -209,6 +278,21 @@ func TestRouteNotificationRetriesWithoutNewEvents(t *testing.T) {
 	}
 	if got := f.nudges(); got != "worker\n" {
 		t.Fatalf("retry nudges = %q", got)
+	}
+}
+
+func TestRouteNotificationIncompleteSnapshotUsesLiveWork(t *testing.T) {
+	f := newRouteScriptFixture(t)
+	f.bus.Record(events.Event{Type: "city.started"})
+	f.write("state/nudge-on-route-delivery.json", `{"version":1,"cursor":1,"pending":{"test-work":"worker"},"notified":{},"retry":{}}`, 0o600)
+	f.write("beads", `[{"id":"test-work","status":"open","metadata":{"gc.routed_to":"worker"}}]`, 0o600)
+	f.bus.Record(events.Event{Type: "bead.updated", Subject: "test-work", Payload: json.RawMessage(`{"id":"test-work"}`)})
+	f.syncEvents()
+	if err := f.run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.nudges(); got != "worker\n" {
+		t.Fatalf("incomplete event discarded pending live work: %q", got)
 	}
 }
 

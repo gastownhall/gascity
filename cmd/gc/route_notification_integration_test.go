@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -129,7 +130,12 @@ func TestRouteNotificationDispatchToIdleNamedClaim(t *testing.T) {
 			head, _ := bus.LatestSeq()
 			_, _ = fmt.Fprintf(w, "%d\n", head)
 		case "/events":
-			rows, _ := bus.List(events.Filter{})
+			after, err := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
+			if err != nil || after != 1 {
+				http.Error(w, "expected replay after seeded cursor 1", 400)
+				return
+			}
+			rows, _ := bus.List(events.Filter{AfterSeq: after})
 			for _, event := range rows {
 				if event.Seq > 1 {
 					_ = json.NewEncoder(w).Encode(event)
@@ -186,9 +192,12 @@ func TestRouteNotificationDispatchToIdleNamedClaim(t *testing.T) {
 	}
 	adapter := `#!/usr/bin/env bash
 set -eu
+printf '%s\n' "$*" >> "$ROUTE_TEST_CALLS"
 case "$1 $2" in
   'events --seq') curl -fsS "$ROUTE_TEST_URL/head" ;;
-  'events --watch') curl -fsS "$ROUTE_TEST_URL/events" ;;
+  'events --watch')
+    [ "$3" = --after ]
+    curl -fsS --get --data-urlencode "after=$4" "$ROUTE_TEST_URL/events" ;;
   'rig list') echo '{"rigs":[]}' ;;
   ready*) curl -fsS "$ROUTE_TEST_URL/work" ;;
   'session list') echo '{"sessions":[]}' ;;
@@ -201,6 +210,7 @@ esac
 	}
 	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 	t.Setenv("ROUTE_TEST_URL", server.URL)
+	t.Setenv("ROUTE_TEST_CALLS", filepath.Join(dir, "calls"))
 	data, err := fs.ReadFile(corepack.PackFS, "orders/nudge-on-route.toml")
 	if err != nil {
 		t.Fatal(err)
@@ -217,6 +227,18 @@ esac
 	defer cancel()
 	if !dispatcher.drain(ctx) {
 		t.Fatal("order did not finish")
+	}
+	stateBytes, err := os.ReadFile(filepath.Join(stateDir, "nudge-on-route-delivery.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state struct{ Cursor uint64 }
+	if err := json.Unmarshal(stateBytes, &state); err != nil || state.Cursor < 2 {
+		t.Fatalf("pack-scoped cursor did not advance: %s, %v", stateBytes, err)
+	}
+	calls, err := os.ReadFile(filepath.Join(dir, "calls"))
+	if err != nil || !strings.Contains(string(calls), "events --watch --after 1") {
+		t.Fatalf("dispatcher did not replay the seeded cursor: %s, %v", calls, err)
 	}
 	before, err := work.Get(request.ID)
 	if err != nil {

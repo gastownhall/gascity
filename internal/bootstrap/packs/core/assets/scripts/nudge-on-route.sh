@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The condition is read-only. Exec owns one atomic cursor/outbox, protected
+# Exec owns one atomic cursor/outbox, protected
 # against concurrent manual runs as well as controller dispatch. A crash after
 # nudge acceptance but before saving success may repeat a delivery.
 set -euo pipefail
@@ -8,7 +8,10 @@ command -v jq >/dev/null || { echo "nudge-on-route: jq is required" >&2; exit 1;
 CITY="${GC_CITY:-.}"
 PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/core}"
 STATE_FILE="$PACK_STATE_DIR/nudge-on-route-delivery.json"
-NUDGE_MESSAGE="${GC_NUDGE_ON_ROUTE_MESSAGE:-Routed work is available. When idle, run gc hook --claim --json and execute any claimed work.}"
+# An interrupted condition must schedule exec recovery on the next pass.
+# This records an unfinished probe, not process liveness or lock ownership.
+CHECK_PENDING="$PACK_STATE_DIR/nudge-on-route-check-pending"
+NUDGE_MESSAGE="${GC_NUDGE_ON_ROUTE_MESSAGE:-Routed work is available. When idle, run gc hook --claim --json, execute the claimed work, and repeat until no work remains.}"
 MODE="${1:-exec}"
 case "$MODE" in exec|--check) ;; *) echo "usage: nudge-on-route.sh [--check]" >&2; exit 1 ;; esac
 
@@ -28,6 +31,7 @@ if [ "$MODE" = exec ]; then
         echo "nudge-on-route: flock or shlock is required" >&2
         exit 1
     fi
+    rm -f "$CHECK_PENDING"
 fi
 
 STATE='{"version":1,"cursor":0,"pending":{},"notified":{},"retry":{},"observed":{}}'
@@ -80,6 +84,14 @@ if [ "$MODE" = --check ]; then
     printf '%s\n' "$STATE" | jq -e '(.read_failures // 0) > 0' >/dev/null && exit 0
     has_due_delivery "$STATE" && exit 0
     [ -f "$STATE_FILE" ] || exit 0
+    # The controller treats a timed-out condition as not due. Leave a recovery
+    # intent before network I/O so repeated slow probes cannot starve exec.
+    # Exec has the longer deadline and persists normal read-failure backoff.
+    [ ! -f "$CHECK_PENDING" ] || exit 0
+    mkdir -p "$PACK_STATE_DIR"
+    : > "$CHECK_PENDING"
+    trap 'exit 143' TERM INT HUP
+    trap 'rc=$?; if [ "$rc" -lt 128 ]; then rm -f "$CHECK_PENDING"; fi' EXIT
 fi
 
 HEAD_SEQ="$(gc events --seq)" || read_failed
@@ -101,11 +113,11 @@ scan_routes() {
         {seq:$seq, type:"bead.updated", payload:.}')" || return 1
     # Only a complete authoritative snapshot may retire missing work.
     STATE="$(printf '%s\n%s\n' "$STATE" "$OPEN" | jq -s --argjson head "$HEAD_SEQ" '
-        (.[1] | map(.id)) as $ids | .[0] | .cursor = $head |
-        .notified |= with_entries(select(.key as $id | $ids | index($id))) |
-        .pending |= with_entries(select(.key as $id | $ids | index($id))) |
-        .retry |= with_entries(select(.key as $id | $ids | index($id))) |
-        .observed = ((.observed // {}) | with_entries(select(.key as $id | $ids | index($id))))')"
+        (.[1] | reduce .[] as $b ({}; .[$b.id] = true)) as $ids | .[0] | .cursor = $head |
+        .notified |= with_entries(select($ids[.key] != null)) |
+        .pending |= with_entries(select($ids[.key] != null)) |
+        .retry |= with_entries(select($ids[.key] != null)) |
+        .observed = ((.observed // {}) | with_entries(select($ids[.key] != null)))')"
 }
 
 if [ "$MODE" = --check ]; then
@@ -137,6 +149,16 @@ elif [ "$HEAD_SEQ" -gt "$LAST_SEQ" ]; then
         [ "$MODE" != --check ] || exit 0
         scan_routes || read_failed
     fi
+fi
+
+# An incomplete create/update snapshot cannot prove that pending work became
+# ineligible. Recover from the live ledger rather than deleting it on nulls.
+if ! printf '%s\n' "$EVENTS" | jq -se '
+    all(.[] | select(.type == "bead.created" or .type == "bead.updated");
+        (.payload.bead // .payload) | (.id | type == "string" and length > 0)
+        and (.status | type == "string" and length > 0))' >/dev/null; then
+    [ "$MODE" != --check ] || exit 0
+    scan_routes || read_failed
 fi
 
 # Event observations can lag the live route used for delivery. Track them
@@ -237,8 +259,8 @@ while IFS= read -r id; do
         fi
         STATE="$(printf '%s\n' "$STATE" | jq --arg id "$id" 'del(.pending[$id], .retry[$id], .notified[$id], .observed[$id])')"
     else
-        # Each routing gets its own notification. Marking several beads done
-        # after one claim turn could leave the unclaimed siblings invisible.
+        # Each routing gets its own request. The queue may combine requests
+        # into one turn, so the default message asks the worker to drain work.
         if ! printf '%s\n' "$STATE" | jq -e --arg id "$id" --arg route "$route" '.notified[$id] == $route' >/dev/null; then
             # A live reroute invalidates the old success before the new attempt.
             # A -> failed B -> A must notify A again, including after a crash.
