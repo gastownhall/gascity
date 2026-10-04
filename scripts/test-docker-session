@@ -15,6 +15,36 @@ SESSION="gc-docker-test"
 TEST_IMAGE="gc-test-agent"
 TEST_IMAGE_NOTMUX="gc-test-agent-notmux"
 
+# Buildx's docker-container driver — what the docker CLI selects when DOCKER_HOST
+# points at a Podman socket — leaves a build result in the build cache unless an
+# output is requested. The images built below would then be invisible to the
+# image-inspect and run checks that follow, so `make test-docker` fails before it
+# exercises the session protocol at all. `--load` imports the result into the
+# engine's image store.
+#
+# The flag is buildx-only: the legacy builder (DOCKER_BUILDKIT=0) rejects it. Add
+# it only when a buildx builder is reachable AND reports a driver other than
+# `docker`, which already stores its results in the engine. An unreachable builder
+# yields an empty driver (the `|| true` keeps `errexit` from aborting here) and
+# therefore the un-flagged, pre-existing behavior. `DOCKER_BUILDKIT=0` forces the
+# legacy builder regardless of what buildx reports, so it is excluded explicitly.
+BUILDX_DRIVER="$(docker buildx inspect 2>/dev/null | sed -n 's/^Driver:[[:space:]]*//p' | head -n1 || true)"
+if [ -n "$BUILDX_DRIVER" ] && [ "$BUILDX_DRIVER" != "docker" ] && [ "${DOCKER_BUILDKIT:-1}" != "0" ]; then
+    BUILD_LOAD_FLAG="--load"
+else
+    BUILD_LOAD_FLAG=""
+fi
+
+# build_test_image builds a test image, importing it into the engine's image store
+# when the active buildx driver would otherwise leave it in the build cache.
+build_test_image() {
+    if [ -n "$BUILD_LOAD_FLAG" ]; then
+        docker build "$BUILD_LOAD_FLAG" "$@"
+    else
+        docker build "$@"
+    fi
+}
+
 pass=0
 fail=0
 
@@ -120,7 +150,7 @@ COPY scroll-entrypoint.sh /scroll-entrypoint.sh
 CMD ["/entrypoint.sh"]
 DOCKERFILE
 
-docker build -t "$TEST_IMAGE" "$BUILD_CTX"
+build_test_image -t "$TEST_IMAGE" "$BUILD_CTX"
 echo "  OK: built $TEST_IMAGE (with tmux)"
 
 # Secondary image: no tmux (for requirement check test).
@@ -130,7 +160,7 @@ RUN apk add --no-cache procps
 CMD ["sleep", "300"]
 DOCKERFILE
 
-docker build -t "$TEST_IMAGE_NOTMUX" -f "$BUILD_CTX/Dockerfile.notmux" "$BUILD_CTX"
+build_test_image -t "$TEST_IMAGE_NOTMUX" -f "$BUILD_CTX/Dockerfile.notmux" "$BUILD_CTX"
 echo "  OK: built $TEST_IMAGE_NOTMUX (without tmux)"
 echo ""
 
