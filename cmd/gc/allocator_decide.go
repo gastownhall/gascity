@@ -64,8 +64,6 @@ type allocInputs struct {
 	// resolves it. A row without one is never config-suppressed.
 	SleepPolicies map[string]resolvedSessionSleepPolicy
 	ReadyWaits    map[string]bool // I10; nil until P4.3
-	// Ledger is a copy of the uncleared entries (intentLedger.View).
-	Ledger []ledgerEntry
 }
 
 // demandView is the demand collectors' output for one pass (P3 spec §4.3),
@@ -116,11 +114,8 @@ type decidePass struct {
 	managed []session.Info
 	byID    map[string]rowKey
 	// decidable are the managed rows the pass decides from: without identity
-	// losers and stale siblings of a live owner (rows whose runtime name
-	// another bead's runtime holds). Keyed by bead ID, work assigned by
-	// session name would otherwise resume, reuse or wake every row carrying
-	// the name, and a named session would resolve to whichever claimant
-	// sorts first (P3-1 obligations, POOL-082).
+	// losers, so a named session never resolves to whichever claimant sorts
+	// first (P3-1 obligation).
 	decidable []session.Info
 	// occupancy is every canonical census row, on every leg and in every
 	// class: what holds a slot or a name (C7.1).
@@ -210,7 +205,8 @@ func (p *decidePass) finish() allocDecision {
 // keep the slots and names legacy gives them (fail-closed): every one stays
 // in occupancy. A pending or stale create is a rollback candidate only when
 // its own runtime is not alive: absent, or a name another row holds, as
-// legacy rolls back only what is not running; unknown and dead keep it.
+// legacy rolls back only what is not running; unknown and dead keep it. Any
+// other row whose name another bead's runtime holds is None (C11).
 func (p *decidePass) classifyRows() {
 	c := p.in.Census
 	var startupTimeout time.Duration
@@ -245,6 +241,9 @@ func (p *decidePass) classifyRows() {
 		p.occupancy = append(p.occupancy, row.Info)
 		info := row.Info
 		notRunning := observed && (o.Liveness == livenessAbsent || o.Liveness == livenessAbsentUnconfirmed || o.Liveness == livenessOccupied)
+		// A guarded endpoint the pass has no view of holds (fail closed).
+		ep, viewed := p.in.Endpoints[e.Endpoint]
+		endpointHolds := e.Endpoint != "" && (!viewed || ep.HoldsPendingCreate)
 		switch {
 		case k.Leg != p.sessionsLeg:
 			p.none[k] = reasonCensusOnly
@@ -253,10 +252,12 @@ func (p *decidePass) classifyRows() {
 		case isFailedCreateSessionInfo(info):
 			p.none[k] = reasonFailedCreate
 		case notRunning && info.PendingCreateClaim && pendingCreateLeaseExpiredForRollbackInfo(info, clk, startupTimeout) &&
-			!p.in.Endpoints[e.Endpoint].HoldsPendingCreate:
+			!endpointHolds:
 			p.none[k] = reasonRollbackCandidate
 		case notRunning && !info.PendingCreateClaim && staleCreatingStateInfo(info, clk) && !pendingCreateStartInFlightInfo(info, clk, startupTimeout):
 			p.none[k] = reasonRollbackCandidate
+		case o.Liveness == livenessOccupied:
+			p.none[k] = reasonNameOccupied
 		default:
 			p.managed = append(p.managed, info)
 			p.byID[info.ID] = k
@@ -283,7 +284,7 @@ func (p *decidePass) identityVerdicts() {
 		}
 		byIdentity[identity] = append(byIdentity[identity], info)
 	}
-	retire := !p.censusIncomplete() && !p.in.Demand.StorePartial && len(p.flaggedLegs()) == 0
+	retire := !p.censusIncomplete() && !p.in.Demand.StorePartial
 	for _, identity := range slices.Sorted(maps.Keys(byIdentity)) {
 		rows := byIdentity[identity]
 		spec, _ := findNamedSessionSpec(p.cfg, p.in.CityName, identity)
@@ -324,17 +325,17 @@ func (p *decidePass) identityVerdicts() {
 func (p *decidePass) selectDecidable() {
 	for _, info := range p.managed {
 		k := p.byID[info.ID]
-		if p.losers[k] || p.obs[k].Liveness == livenessOccupied {
+		if p.losers[k] {
 			continue
 		}
 		p.decidable = append(p.decidable, info)
 	}
 }
 
-// partials is step 3: the global and leg causes, each with legacy's effect,
-// and the templates a lagging leg blocks. A global cause makes the snapshot
-// partial (retain everything); census incompleteness also refuses every
-// fresh create. The demand's template causes join in step 4.
+// partials is step 3: the global and leg causes, each with legacy's effect.
+// A global cause makes the snapshot partial (retain everything); census
+// incompleteness also refuses every fresh create. A stale leg keeps its
+// rows. The demand's template causes join in step 4.
 func (p *decidePass) partials() {
 	ps := &p.snap.Partial
 	if p.censusIncomplete() {
@@ -346,29 +347,11 @@ func (p *decidePass) partials() {
 	if len(ps.Global) > 0 {
 		p.snap.Mode = modePartial
 	}
-	flagged := p.flaggedLegs()
-	for leg, causes := range flagged {
+	for leg := range p.in.Census.StaleLegs() {
 		if ps.Legs == nil {
 			ps.Legs = make(map[string][]string)
 		}
-		ps.Legs[leg] = causes
-	}
-	// A lagging leg's templates may not create until lag repair resolves
-	// (C5.15): the leg may hold a row the census does not show yet. That is
-	// every template with a row on the leg, and every template with an
-	// uncleared entry there: the lagging create's own template may have no
-	// row yet. Rows keep through the leg cause; the templates only block
-	// creates.
-	lagging := func(leg string) bool { return slices.Contains(flagged[leg], causeLegLagging) }
-	for k, e := range p.snap.Entries {
-		if lagging(k.Leg) && e.Template != "" {
-			p.markTemplate(e.Template, false, true, causeLegLagging)
-		}
-	}
-	for _, e := range p.in.Ledger {
-		if e.Kind != kindVeto && lagging(e.Key.Leg) && strings.TrimSpace(e.Template) != "" {
-			p.markTemplate(normalizeAgentTemplateIdentity(p.cfg, strings.TrimSpace(e.Template)), false, true, causeLegLagging)
-		}
+		ps.Legs[leg] = []string{causeLegStale}
 	}
 }
 
@@ -377,8 +360,8 @@ func (p *decidePass) partials() {
 // row, which stays InDesired and sleeps. Nothing legacy's suspend drain
 // leaves alone is shrunk (session_reconciler.go:2414-2436, owner decision
 // at P3-5a review): a partial read, an uncertain observation, a pending
-// create within its lease and open assigned work each keep the row, and the
-// row carries its assigned work.
+// create legacy still leases (pendingCreateSessionStillLeasedInfo) and open
+// assigned work each keep the row, and the row carries its assigned work.
 func (p *decidePass) suspended() {
 	p.snap.Mode = modeSuspended
 	for k, e := range p.snap.Entries {
@@ -390,10 +373,6 @@ func (p *decidePass) suspended() {
 			e.Desired, e.Reason = desireNone, reasonIdentityLoser
 			continue
 		}
-		if e.Liveness == livenessOccupied {
-			e.Desired, e.Reason = desireKeep, reasonNameOccupied
-			continue
-		}
 		info := p.in.Census.Rows[k].Info
 		e.Reason, e.DrainReason = reasonSuspendedCity, drainSuspended
 		e.AssignedWork = p.openAssignedWork(info)
@@ -403,7 +382,7 @@ func (p *decidePass) suspended() {
 		default:
 			e.Desired = desireDrain
 		}
-		if reason := p.keepReason(k, e, info); reason != "" {
+		if reason := p.keepReason(e, info); reason != "" {
 			e.Desired, e.Reason = desireKeep, reason
 		}
 	}
@@ -426,22 +405,22 @@ func (p *decidePass) openAssignedWork(info session.Info) *assignedWorkView {
 }
 
 // keepReason is the Keep conversion of a Sleep or Drain (POOL-035, P-3,
-// C2.9), or "": a partial read (a global cause, a cause on the row's leg,
+// C2.9), or "": a partial read (a global cause, which a stale leg implies,
 // or its template retained), then an uncertain observation. In a suspended
-// city a pending create within its lease and a row with open assigned work
-// keep too.
-func (p *decidePass) keepReason(k rowKey, e *selectionEntry, info session.Info) string {
+// city a pending create legacy still leases and a row with open assigned
+// work keep too.
+func (p *decidePass) keepReason(e *selectionEntry, info session.Info) string {
 	if e.Desired != desireSleep && e.Desired != desireDrain {
 		return ""
 	}
 	switch {
-	case len(p.snap.Partial.Global) > 0 || len(p.snap.Partial.Legs[k.Leg]) > 0 || p.retains(e.Template, info):
+	case len(p.snap.Partial.Global) > 0 || p.retains(e.Template, info):
 		return reasonPartialRetain
 	case e.ObservationUncertain:
 		return reasonObservationUncertain
 	case !p.in.CitySuspended:
 		return ""
-	case p.in.Census.Rows[k].PendingCreate || p.in.Census.Rows[k].StartLease:
+	case pendingCreateSessionStillLeasedInfo(info, p.cfg, &clock.Fake{Time: p.in.Now}):
 		return reasonPendingCreate
 	case e.AssignedWork != nil:
 		return reasonAssignedWork
@@ -526,10 +505,9 @@ func (p *decidePass) configSleepSuppressed(info session.Info, o rowObservation, 
 }
 
 // classify is step 12 (CONTRACT §2.2): InDesired ∧ ShouldWake is Wake,
-// InDesired ∧ ¬ShouldWake is Sleep, ¬InDesired is Drain, the set-aside
-// rows None, and a stale sibling of a live owner Keep; then a partial read
-// or an uncertain observation turns a Sleep or Drain into Keep (POOL-035,
-// P-3, C2.9).
+// InDesired ∧ ¬ShouldWake is Sleep, ¬InDesired is Drain, and the set-aside
+// rows None; then a partial read or an uncertain observation turns a Sleep
+// or a Drain into Keep (POOL-035, P-3, C2.9).
 func (p *decidePass) classify(decisions map[string]AwakeDecision) {
 	for k, e := range p.snap.Entries {
 		if reason, ok := p.none[k]; ok {
@@ -538,10 +516,6 @@ func (p *decidePass) classify(decisions map[string]AwakeDecision) {
 		}
 		if p.losers[k] {
 			e.Desired, e.Reason = desireNone, reasonIdentityLoser
-			continue
-		}
-		if e.Liveness == livenessOccupied {
-			e.Desired, e.Reason = desireKeep, reasonNameOccupied
 			continue
 		}
 		info := p.in.Census.Rows[k].Info
@@ -577,7 +551,7 @@ func (p *decidePass) classify(decisions map[string]AwakeDecision) {
 				e.DrainReason = drainSuspended
 			}
 		}
-		if reason := p.keepReason(k, e, info); reason != "" {
+		if reason := p.keepReason(e, info); reason != "" {
 			e.Desired, e.Reason = desireKeep, reason
 		}
 	}
@@ -631,26 +605,6 @@ func (p *decidePass) decision() allocDecision {
 // within its bound (POOL-047).
 func (p *decidePass) censusIncomplete() bool {
 	return p.noCensus || p.in.Census.Incomplete()
-}
-
-// flaggedLegs returns the legs whose rows Keep: served past their bound, or
-// holding a landed effect whose marker stays out of the census past
-// cacheLagBound (C5.15 as amended).
-func (p *decidePass) flaggedLegs() map[string][]string {
-	out := make(map[string][]string)
-	for leg := range p.in.Census.StaleLegs() {
-		out[leg] = append(out[leg], causeLegStale)
-	}
-	if len(p.in.Ledger) == 0 {
-		return out
-	}
-	lc := p.in.Census.Ledger(p.cfg)
-	for _, e := range p.in.Ledger {
-		if e.lagging(lc, p.in.Now) && e.Key.Leg != "" && !slices.Contains(out[e.Key.Leg], causeLegLagging) {
-			out[e.Key.Leg] = append(out[e.Key.Leg], causeLegLagging)
-		}
-	}
-	return out
 }
 
 // markTemplate records a template partial cause.

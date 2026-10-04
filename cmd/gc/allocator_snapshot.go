@@ -67,12 +67,11 @@ func (d desire) String() string {
 	}
 }
 
-// Global and leg partial causes (C2.8, C5.15, POOL-018/047).
+// Global and leg partial causes (C2.8, POOL-018/047).
 const (
 	causeCensusIncomplete  = "census-incomplete"
 	causeStoreQueryPartial = "store-query-partial"
 	causeLegStale          = "leg-stale"
-	causeLegLagging        = "leg-lagging"
 )
 
 // Allocator reason codes (C2.2) and None classes (AM11, C2.11, C2.13).
@@ -88,9 +87,8 @@ const (
 	reasonDuplicate            = "duplicate"
 	reasonCensusOnly           = "census-only"
 	reasonIdentityLoser        = "identity-loser"
-	// reasonNameOccupied: another row owns the runtime name (a stale
-	// sibling of a live owner). The row keeps: it is neither a start
-	// candidate nor drained (owner decision, P3-5a review).
+	// reasonNameOccupied: another bead's runtime holds the row's runtime
+	// name. None: no grant, no drain, no close (C11).
 	reasonNameOccupied = "name-occupied"
 	// reasonPendingCreate and reasonAssignedWork keep a row in a suspended
 	// city that legacy's suspend drain leaves alone: a pending create within

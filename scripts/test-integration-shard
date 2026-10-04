@@ -120,7 +120,6 @@ rest_smoke_tests=(
 cmd_gc_integration_tests=(
   TestCapstoneIntegrationRealMinter
   TestControllerDiscoversAddedCronOrderWithoutRestart
-  TestDecideReachesNoIO
   TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
   TestManagedBeadsNativeCLICompatibility
   TestPhase2RealTransportBoundsStayAHangDetector

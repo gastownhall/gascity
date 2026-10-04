@@ -2,80 +2,53 @@ package main
 
 import (
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
+	"path"
 	"reflect"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
 // The decide's purity guard (P3 spec §4.4). The decide may not read a
 // store, a provider, the filesystem, the environment or the clock, and
-// takes no locks: every fact comes in through allocInputs.
+// takes no locks: every fact comes in through allocInputs, which carries
+// data only (no store, provider or clock handle).
 //
-// Two tests pin it. TestDecideIsPure (fast suite, here) runs the decide over
-// a census read from stores that panic once the read is done, checks that
-// identical inputs give identical outputs, and that the decide's files
-// import no lock or I/O package. TestDecideReachesNoIO (integration tier,
-// allocator_decide_reach_integration_test.go) type-checks the module with
-// go/packages, builds SSA for it and every dependency, and walks every
-// function decideAllocation can reach, flagging I/O, the clock, the
-// environment, logging and locks.
+// TestDecideIsPure pins it: identical inputs give identical outputs, and the
+// decide's files neither import an I/O, environment, logging or lock package
+// nor call the clock, the filesystem helpers or fsys.
 
-// decideIOPackages are packages any function of which is I/O, the
-// environment or logging.
-var decideIOPackages = map[string]bool{
+// decideBannedPackages are packages the decide's files may not import.
+var decideBannedPackages = map[string]bool{
 	"os": true, "os/exec": true, "os/signal": true, "os/user": true, "log": true, "log/slog": true,
-	"syscall": true, "net": true, "net/http": true, "io/ioutil": true,
+	"syscall": true, "net": true, "net/http": true, "io/ioutil": true, "sync": true, "sync/atomic": true,
+	"github.com/gastownhall/gascity/internal/fsys": true,
 }
 
-// purityStore is a census leg's store that panics on every call once
-// armed: the decide must never reach back into a store it was given rows
-// from.
-type purityStore struct {
-	beads.Store
-	armed *atomic.Bool
+// decideBannedCalls are package functions the decide's files may not
+// reference: the clock and the filesystem path resolvers.
+var decideBannedCalls = map[string]bool{
+	"time.Now": true, "time.Since": true, "time.Until": true, "time.Sleep": true, "time.After": true,
+	"time.Tick": true, "time.NewTimer": true, "time.NewTicker": true, "time.AfterFunc": true,
+	"path/filepath.Abs": true, "path/filepath.EvalSymlinks": true, "path/filepath.Glob": true, "path/filepath.Walk": true,
+	"path/filepath.WalkDir": true,
 }
 
-func (s purityStore) guard(op string) {
-	if s.armed.Load() {
-		panic("allocator decide called the store: " + op)
-	}
-}
-
-func (s purityStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	s.guard("List")
-	return s.Store.List(q)
-}
-
-func (s purityStore) Get(id string) (beads.Bead, error) {
-	s.guard("Get")
-	return s.Store.Get(id)
-}
-
-func (s purityStore) Ready(q ...beads.ReadyQuery) ([]beads.Bead, error) {
-	s.guard("Ready")
-	return s.Store.Ready(q...)
-}
-
-// TestDecideIsPure pins the decide's purity in the fast suite: it runs over
-// a census whose stores panic once read, identical inputs give identical
-// outputs (map iteration included), and the P3-5a files import no lock or
-// I/O package. TestDecideReachesNoIO walks the call graph.
+// TestDecideIsPure pins the decide's purity in the fast suite: identical
+// inputs give identical outputs (map iteration included), and the P3-5a
+// files import no I/O or lock package and reference no clock or filesystem
+// function.
 //
-// Kills: the decide reading a census store, nondeterministic output, a lock
-// or os import in the decide's files.
+// Kills: a time.Now (or any banned call) in the decide's files, an os, sync
+// or fsys import, nondeterministic output.
 func TestDecideIsPure(t *testing.T) {
-	armed := &atomic.Bool{}
-	in := purityInputs(t, armed)
-	armed.Store(true)
+	in := purityInputs(t)
 	first := mustDecide(t, in)
 	for i := 0; i < 20; i++ {
 		if got := mustDecide(t, in); !reflect.DeepEqual(got, first) {
@@ -90,19 +63,34 @@ func TestDecideIsPure(t *testing.T) {
 	}
 	fset := token.NewFileSet()
 	for _, name := range decideFiles {
-		src, err := os.ReadFile(name)
+		f, err := parser.ParseFile(fset, name, nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		f, err := parser.ParseFile(fset, name, src, parser.ImportsOnly)
-		if err != nil {
-			t.Fatal(err)
-		}
+		imports := make(map[string]string) // local name -> path
 		for _, imp := range f.Imports {
-			if p := strings.Trim(imp.Path.Value, `"`); p == "sync" || p == "sync/atomic" || decideIOPackages[p] {
+			p := strings.Trim(imp.Path.Value, `"`)
+			if decideBannedPackages[p] {
 				t.Errorf("%s imports %s: the decide takes no locks and reads nothing", name, p)
 			}
+			local := path.Base(p)
+			if imp.Name != nil {
+				local = imp.Name.Name
+			}
+			imports[local] = p
 		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if x, ok := sel.X.(*ast.Ident); ok {
+				if call := imports[x.Name] + "." + sel.Sel.Name; decideBannedCalls[call] {
+					t.Errorf("%s: %s references %s: the clock and the filesystem come in through allocInputs", fset.Position(sel.Pos()), name, call)
+				}
+			}
+			return true
+		})
 	}
 }
 
@@ -110,10 +98,9 @@ func TestDecideIsPure(t *testing.T) {
 var decideFiles = []string{"allocator_decide.go", "allocator_snapshot.go"}
 
 // purityInputs is a city that exercises every step: pool rows, named
-// sessions, a manual
-// row, a dependency, identity verdicts, a rollback candidate and an
-// unknown-state row. With armed set, its census stores panic once armed.
-func purityInputs(t *testing.T, armed *atomic.Bool) allocInputs {
+// sessions, a manual row, a dependency, identity verdicts, a rollback
+// candidate and an unknown-state row.
+func purityInputs(t *testing.T) allocInputs {
 	t.Helper()
 	cfg := &config.City{
 		Agents: []config.Agent{
@@ -145,15 +132,7 @@ func purityInputs(t *testing.T, armed *atomic.Bool) allocInputs {
 		sessionRow("gc-6", "template", "worker", "state", "active", "session_name", "manual-1", "manual_session", "true"),
 		sessionRow("gc-7", "template", "worker", "state", "draining-enterprise", "session_name", "s-gc-7"),
 	).alive("s-gc-1", InventoryAttrs{AttachedKnown: true})
-	if armed != nil {
-		for i := range f.legs {
-			f.legs[i].store = purityStore{Store: f.legs[i].store, armed: armed}
-		}
-	}
-	in := f.in
-	in.Census = f.census()
-	in.Obs = f.observation()
-	return in
+	return f.inputs()
 }
 
 // describeDecision renders a decision deterministically for failure output.

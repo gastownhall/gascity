@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -352,11 +353,12 @@ func TestAllocator_NormalPassDrainsUndesiredRowsWithWork(t *testing.T) {
 	}
 }
 
-// Kills: a stale sibling of a live owner drained (owner decision at P3-5a
-// review), woken or started (POOL-082, #8). Work assigned by session name
-// would match it too; it stays out of the awake input and keeps, in a
-// normal and in a suspended city.
-func TestAllocatorWake_KeyedByBeadIDNotSessionName(t *testing.T) {
+// Kills: a row whose runtime name another bead's runtime holds drained,
+// closed, woken or started (C11, POOL-082, #8). Work assigned by session
+// name would match it too; it stays out of the awake input and is
+// None(name-occupied), in a normal and in a suspended city, while the owner
+// wakes for the work.
+func TestAllocator_OccupiedNameIsNoneNeverGrantedOrDrained(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
 	for _, suspended := range []bool{false, true} {
 		for _, ids := range [][2]string{{"gc-a", "gc-b"}, {"gc-b", "gc-a"}} {
@@ -372,8 +374,8 @@ func TestAllocatorWake_KeyedByBeadIDNotSessionName(t *testing.T) {
 			if e := entryOf(t, d, owner); !suspended && (e.Desired != desireWake || e.Reason != "assigned-work" || e.AssignedWork == nil) {
 				t.Errorf("owner %s = %s/%s, want an assigned-work wake", owner, e.Desired, e.Reason)
 			}
-			if e := entryOf(t, d, sibling); e.Desired != desireKeep || e.Reason != reasonNameOccupied || e.AssignedWork != nil || e.Liveness != livenessOccupied {
-				t.Errorf("suspended=%v stale sibling %s = %s/%s %+v, want keep name-occupied, no assigned work", suspended, sibling, e.Desired, e.Reason, e.AssignedWork)
+			if e := entryOf(t, d, sibling); e.Desired != desireNone || e.Reason != reasonNameOccupied || e.InDesired || e.AssignedWork != nil || e.Liveness != livenessOccupied {
+				t.Errorf("suspended=%v occupied row %s = %s/%s in-desired=%v %+v, want none name-occupied, no assigned work", suspended, sibling, e.Desired, e.Reason, e.InDesired, e.AssignedWork)
 			}
 		}
 	}
@@ -434,6 +436,71 @@ func TestAllocator_RollbackCandidatesRequireNotRunning(t *testing.T) {
 	}
 }
 
+// Kills: a rollback that fails open when the pass has no view of the row's
+// guarded endpoint (F6): an absent, non-empty endpoint key holds the
+// pending create; only a view that does not hold it frees it, and a row on
+// no endpoint is unguarded.
+func TestAllocator_MissingEndpointViewHoldsPendingCreate(t *testing.T) {
+	expired := poolRow("gc-1", "worker", 1, "start-pending", "pending_create_claim", "true", "pending_create_started_at", ago(30*time.Minute))
+	guarded := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}, Workspace: config.Workspace{Provider: "claude"}}
+	unguarded := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
+	for _, tc := range []struct {
+		label     string
+		cfg       *config.City
+		endpoints map[endpointKey]endpointView
+		rollback  bool
+	}{
+		{"no view", guarded, nil, false},
+		{"other endpoint's view only", guarded, map[endpointKey]endpointView{"provider:codex": {Gate: gateClosed}}, false},
+		{"view does not hold", guarded, map[endpointKey]endpointView{"provider:claude": {Gate: gateClosed}}, true},
+		{"no endpoint", unguarded, nil, true},
+	} {
+		f := newAllocFixture(t, tc.cfg).sessions(expired)
+		f.in.Endpoints = tc.endpoints
+		e := entryOf(t, f.decide(), "gc-1")
+		if got := e.Desired == desireNone && e.Reason == reasonRollbackCandidate; got != tc.rollback {
+			t.Errorf("%s: %s/%s, rollback candidate %v, want %v", tc.label, e.Desired, e.Reason, got, tc.rollback)
+		}
+	}
+}
+
+// Kills: a suspended city draining a pending create legacy's suspend drain
+// leaves alone (F4; session_reconciler.go:2252 keeps whatever
+// pendingCreateSessionStillLeasedInfo leases): an explicit start request,
+// a young creating row, a claim whose attempt is recent though its start is
+// no longer in flight, and a claim left on an alive active row. A claim
+// past its lease drains, as legacy's does.
+func TestAllocator_SuspendedPendingCreateMatchesLegacyLease(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 9)}}
+	created := func(b beads.Bead, at time.Time) beads.Bead { b.CreatedAt = at; return b }
+	f := newAllocFixture(t, cfg).sessions(
+		poolRow("gc-sp", "worker", 1, "start-pending"),
+		created(poolRow("gc-cr", "worker", 2, "creating"), allocNow.Add(-20*time.Second)),
+		poolRow("gc-att", "worker", 3, "creating", "pending_create_claim", "true",
+			"last_woke_at", ago(3*time.Minute), "pending_create_started_at", ago(30*time.Second)),
+		poolRow("gc-act", "worker", 4, "active", "pending_create_claim", "true", "pending_create_started_at", ago(2*time.Minute)),
+		poolRow("gc-old", "worker", 5, "start-pending", "pending_create_claim", "true", "pending_create_started_at", ago(30*time.Minute)),
+	).alive("s-gc-act", InventoryAttrs{AttachedKnown: true}).alive("s-gc-old", InventoryAttrs{AttachedKnown: true})
+	f.in.CitySuspended = true
+	in := f.inputs()
+	d := mustDecide(t, in)
+	clk := &clock.Fake{Time: allocNow}
+	for id, keeps := range map[string]bool{"gc-sp": true, "gc-cr": true, "gc-att": true, "gc-act": true, "gc-old": false} {
+		k := rowKey{Leg: allocSessionsLeg, ID: id}
+		if legacy := pendingCreateSessionStillLeasedInfo(in.Census.Rows[k].Info, cfg, clk); legacy != keeps {
+			t.Fatalf("%s: legacy keeps %v, fixture expects %v", id, legacy, keeps)
+		}
+		e := d.Snapshot.Entries[k]
+		want := desireDrain
+		if keeps {
+			want = desireKeep
+		}
+		if e.Desired != want || (keeps && e.Reason != reasonPendingCreate) {
+			t.Errorf("%s (%s) = %s/%s, want %s as legacy", id, e.Liveness, e.Desired, e.Reason, want)
+		}
+	}
+}
+
 // R-43: 43 stale creates share one runtime name with a live owner. Each
 // gets its own entry; the stale ones are rollback candidates; the owner
 // keeps its decision.
@@ -460,8 +527,8 @@ func TestAllocator_FortyThreeRowsShareANameStaleOnesRollBack(t *testing.T) {
 	}
 }
 
-// Kills: starting both duplicates, and retiring under a partial read or a
-// flagged leg (C2.13). The loser is None with a verdict.
+// Kills: starting both duplicates, and retiring under a partial read
+// (C2.13). The loser is None with a verdict.
 func TestAllocator_IdentityVerdictsLosersNoneNoneUnderPartial(t *testing.T) {
 	rows := []beads.Bead{chatRow("gc-1", "1"), chatRow("gc-2", "3")}
 	d := newAllocFixture(t, chatCity("always")).sessions(rows...).decide()
@@ -475,14 +542,8 @@ func TestAllocator_IdentityVerdictsLosersNoneNoneUnderPartial(t *testing.T) {
 	if e := entryOf(t, d, "gc-2"); e.Desired == desireNone || !e.Identity.Canonical {
 		t.Fatalf("winner = %s %+v, want the canonical row managed", e.Desired, e.Identity)
 	}
-	lagging := []ledgerEntry{{
-		ID: "c-1", Kind: kindCreate, Key: rowKey{Leg: allocSessionsLeg}, Template: "worker",
-		State: ledgerCommitted, WroteRow: true, SettledAt: allocNow.Add(-2 * ledgerCacheLagBound),
-		Marker: ledgerMarker{RowID: "gc-9", InstanceToken: "tok-9"},
-	}}
 	for label, setup := range map[string]func(*allocFixture){
 		"store-partial": func(f *allocFixture) { f.in.Demand.StorePartial = true },
-		"lagging-leg":   func(f *allocFixture) { f.in.Ledger = lagging },
 	} {
 		f := newAllocFixture(t, chatCity("always")).sessions(rows...)
 		setup(f)
@@ -498,7 +559,7 @@ func TestAllocator_IdentityVerdictsLosersNoneNoneUnderPartial(t *testing.T) {
 
 // Kills: count-based floors (C2.6). The floor is the min_active_sessions
 // warm pool members with the lowest bead IDs; asleep, named, manual and
-// dependency-only rows, and a stale sibling of a live owner, never hold a
+// dependency-only rows, and a row whose name another bead holds, never hold a
 // floor rank.
 func TestAllocator_FloorsLowestBeadIDWarmOnly(t *testing.T) {
 	agent := allocPoolAgent("worker", 9)
@@ -713,40 +774,17 @@ func TestAllocator_StoreQueryPartialRetains(t *testing.T) {
 	}
 }
 
-// Kills: rows on a migrated duplicate leg counted or managed (C2.11), and a
-// lagging leg's templates creating before lag repair resolves (C5.15): a
-// template with a row on the leg, and the lagging create's own template,
-// which has no row there yet.
-func TestAllocator_DuplicatesNoneAndLaggingLegBlocksItsTemplates(t *testing.T) {
-	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3), allocPoolAgent("other", 3)}}
+// Kills: rows on a migrated duplicate leg counted or managed (C2.11).
+func TestAllocator_DuplicatesNone(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("other", 3)}}
 	row := poolRow("gc-1", "other", 1, "asleep")
-	f := newAllocFixture(t, cfg).sessions(row).leg("rig:a", row)
-	f.in.Ledger = []ledgerEntry{
-		{
-			ID: "c-1", Kind: kindCreate, Key: rowKey{Leg: allocSessionsLeg}, Template: "worker",
-			State: ledgerCommitted, WroteRow: true, SettledAt: allocNow.Add(-2 * ledgerCacheLagBound),
-			Marker: ledgerMarker{RowID: "gc-9", InstanceToken: "tok-9"},
-		},
-		{ID: "v-1", Kind: kindVeto, Key: rowKey{Leg: allocSessionsLeg, ID: "gc-1"}, Template: "vetoed", Until: allocNow.Add(time.Minute)},
-	}
-	d := f.decide()
+	d := newAllocFixture(t, cfg).sessions(row).leg("rig:a", row).decide()
 	dup := d.Snapshot.Entries[rowKey{"rig:a", "gc-1"}]
 	if dup == nil || dup.Desired != desireNone || dup.Reason != reasonDuplicate || dup.Identity == nil || dup.Identity.DuplicateOf != allocSessionsLeg {
 		t.Fatalf("duplicate copy = %+v", dup)
 	}
-	if !slices.Contains(d.Snapshot.Partial.Legs[allocSessionsLeg], causeLegLagging) {
-		t.Fatalf("lagging leg not flagged: %+v", d.Snapshot.Partial)
-	}
-	for _, template := range []string{"worker", "other"} {
-		if tp := d.Snapshot.Partial.Templates[template]; !tp.BlockCreate || tp.Retain {
-			t.Errorf("%s: partial %+v, want block-create only", template, tp)
-		}
-	}
-	if _, marked := d.Snapshot.Partial.Templates["vetoed"]; marked {
-		t.Errorf("a veto entry blocked its template: %+v", d.Snapshot.Partial.Templates)
-	}
-	if e := d.Snapshot.Entries[rowKey{allocSessionsLeg, "gc-1"}]; e == nil || e.Desired != desireKeep {
-		t.Fatalf("row on a lagging leg = %+v, want keep", e)
+	if e := d.Snapshot.Entries[rowKey{allocSessionsLeg, "gc-1"}]; e == nil || e.Desired == desireNone {
+		t.Fatalf("canonical copy = %+v, want managed", e)
 	}
 }
 
@@ -810,7 +848,7 @@ func TestAllocator_UndesiredSuspendedAgentDrainsAsSuspended(t *testing.T) {
 // metadata and the observation included.
 func TestAllocator_DecideNeverEditsItsInputs(t *testing.T) {
 	build := func() allocInputs {
-		in := purityInputs(t, nil)
+		in := purityInputs(t)
 		in.Demand.AssignedWork = []beads.Bead{{ID: "w-1", Status: "in_progress", Assignee: "s-gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}}}
 		in.Demand.AssignedStoreRefs = []string{""}
 		in.Demand.ReadyAssigned = map[storeScopedBeadKey]bool{{ID: "w-1"}: true}
