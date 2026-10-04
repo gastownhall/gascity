@@ -363,6 +363,17 @@ func planCityRigEndpointUpdates(cityPath string, rigs []config.Rig, currentCityS
 			plans = append(plans, plan)
 			continue
 		}
+		// An embedded rig has no server to inherit, and its recorded mode is
+		// authoritative (ga-p9iuv): sweeping the city endpoint into its
+		// config.yaml would contradict the metadata.json beside it.
+		embedded, err := scopeMetadataRecordsEmbeddedDolt(fsys.OSFS{}, rigs[i].Path)
+		if err != nil {
+			return nil, fmt.Errorf("classifying rig %q storage mode: %w", rigs[i].Name, err)
+		}
+		if embedded {
+			plans = append(plans, plan)
+			continue
+		}
 
 		plan.Current = inheritedRigDoltConfigState(rigs[i].Path, rigs[i].EffectivePrefix(), currentCityState)
 		plan.Target = inheritedRigDoltConfigState(rigs[i].Path, rigs[i].EffectivePrefix(), targetCityState)

@@ -3763,7 +3763,9 @@ will no longer track the managed city Dolt.
 
 This command owns the rig's canonical .beads/config.yaml topology state. It
 refuses a rig whose store the beads provider owns: that rig's endpoint lives in
-bd's own files and is bd's to change.
+bd's own files and is bd's to change. It also refuses a rig whose
+.beads/metadata.json records embedded Dolt: that rig's beads live in its own
+.beads/embeddeddolt and it has no server endpoint to set.
 
 ```
 gc rig set-endpoint <rig> [flags]

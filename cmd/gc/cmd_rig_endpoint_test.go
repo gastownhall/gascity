@@ -1912,3 +1912,78 @@ func TestSnapshotRigEndpointFilesRestoresSymlinkedCityToml(t *testing.T) {
 		t.Fatalf("repo city.toml = %q, want restored original %q", restored, original)
 	}
 }
+
+// An embedded rig has no server endpoint: its store is the rig's own
+// .beads/embeddeddolt, and its recorded mode is authoritative (ga-p9iuv). Every
+// set-endpoint mode would write server topology beside metadata.json that says
+// otherwise, so each one — dry-run included — refuses and leaves every file as
+// it found it.
+func TestDoRigSetEndpointRefusesEmbeddedRig(t *testing.T) {
+	cases := map[string]rigEndpointOptions{
+		"inherit":           {Inherit: true},
+		"external":          {External: true, Host: "db.example.com", Port: "3307"},
+		"external-unverify": {External: true, Host: "db.example.com", Port: "3307", AdoptUnverified: true},
+		"self":              {Self: true, Port: "28232", Force: true},
+		"inherit-dry-run":   {Inherit: true, DryRun: true},
+	}
+	for name, opts := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "bd")
+
+			cityDir := t.TempDir()
+			rigDir := filepath.Join(t.TempDir(), "frontend")
+			writeRigEndpointCityConfig(t, cityDir, rigDir)
+			writeRigEndpointMetadata(t, cityDir, "hq")
+			writeRigEndpointRuntimeState(t, cityDir, 3311)
+			if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(rigDir, ".beads", "metadata.json"), contract.MetadataState{
+				Database:     "dolt",
+				Backend:      "dolt",
+				DoltMode:     "embedded",
+				DoltDatabase: "fe",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte("issue-prefix: fe\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			watched := []string{
+				filepath.Join(rigDir, ".beads", "config.yaml"),
+				filepath.Join(rigDir, ".beads", "metadata.json"),
+				filepath.Join(cityDir, "city.toml"),
+			}
+			before := make(map[string]string, len(watched))
+			for _, path := range watched {
+				before[path] = string(mustReadFile(t, path))
+			}
+
+			origVerify := verifyRigExternalEndpoint
+			t.Cleanup(func() { verifyRigExternalEndpoint = origVerify })
+			verifyRigExternalEndpoint = func(contract.ConfigState, string, string) error {
+				t.Error("verifyRigExternalEndpoint ran for an embedded rig")
+				return nil
+			}
+
+			var stdout, stderr bytes.Buffer
+			if code := doRigSetEndpoint(fsys.OSFS{}, cityDir, "frontend", opts, &stdout, &stderr); code != 1 {
+				t.Fatalf("doRigSetEndpoint() = %d, want 1; stdout = %s, stderr = %s", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "embedded") {
+				t.Fatalf("stderr = %q, want it to name the embedded storage mode", stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want no plan or result for a refused change", stdout.String())
+			}
+			for _, path := range watched {
+				if got := string(mustReadFile(t, path)); got != before[path] {
+					t.Fatalf("%s changed:\nbefore:\n%s\nafter:\n%s", path, before[path], got)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(rigDir, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
+				t.Fatalf("dolt-server.port stat err = %v, want not-exist", err)
+			}
+		})
+	}
+}

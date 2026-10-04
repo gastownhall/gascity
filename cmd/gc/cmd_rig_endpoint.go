@@ -74,6 +74,33 @@ func refuseProviderOwnedEndpointScope(cityPath, scopeRoot string) error {
 	return nil
 }
 
+// errEmbeddedEndpointScope reports that set-endpoint was pointed at a rig whose
+// metadata.json records embedded Dolt storage.
+//
+// An embedded rig's beads live in its own .beads/embeddeddolt, opened in
+// process; there is no server whose endpoint could be set. Its recorded mode is
+// authoritative (ga-p9iuv), so the metadata canonicalizer keeps it embedded —
+// and every mode of this command would then write server topology into
+// config.yaml, the city.toml compat fields and the port mirror beside a
+// metadata.json that still says embedded, and report success. Converting the
+// store is not a gc operation: nothing moves rows between the embedded and
+// server databases.
+var errEmbeddedEndpointScope = errors.New("rig stores its beads in embedded Dolt")
+
+// refuseEmbeddedEndpointScope refuses set-endpoint for an embedded rig. A
+// classification error refuses too, for the same reason
+// refuseProviderOwnedEndpointScope does.
+func refuseEmbeddedEndpointScope(fs fsys.FS, rigName, scopeRoot string) error {
+	embedded, err := scopeMetadataRecordsEmbeddedDolt(fs, scopeRoot)
+	if err != nil {
+		return fmt.Errorf("classify rig %q storage mode: %w", rigName, err)
+	}
+	if embedded {
+		return fmt.Errorf("%w: rig %q records dolt_mode=embedded in %s, so it has no server endpoint to set. gc keeps an embedded rig embedded and does not move its beads into a server database; see \"Storage-mode drift\" in docs/runbooks/managed-city-endpoints.md", errEmbeddedEndpointScope, rigName, scopeMetadataJSONPath(scopeRoot))
+	}
+	return nil
+}
+
 func newRigSetEndpointCmd(stdout, stderr io.Writer) *cobra.Command {
 	var opts rigEndpointOptions
 	var jsonOutput bool
@@ -91,7 +118,9 @@ will no longer track the managed city Dolt.
 
 This command owns the rig's canonical .beads/config.yaml topology state. It
 refuses a rig whose store the beads provider owns: that rig's endpoint lives in
-bd's own files and is bd's to change.`,
+bd's own files and is bd's to change. It also refuses a rig whose
+.beads/metadata.json records embedded Dolt: that rig's beads live in its own
+.beads/embeddeddolt and it has no server endpoint to set.`,
 		Example: `  gc rig set-endpoint frontend --inherit
   gc rig set-endpoint frontend --external --host db.example.com --port 3307
   gc rig set-endpoint frontend --external --host db.example.com --port 3307 --user agent --adopt-unverified
@@ -179,6 +208,10 @@ func doRigSetEndpoint(fs fsys.FS, cityPath, rigName string, opts rigEndpointOpti
 	// Before --dry-run, too: a plan for a change the command will never make is
 	// worse than no plan.
 	if err := refuseProviderOwnedEndpointScope(cityPath, rig.Path); err != nil {
+		fmt.Fprintf(stderr, "gc rig set-endpoint: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := refuseEmbeddedEndpointScope(fs, rig.Name, rig.Path); err != nil {
 		fmt.Fprintf(stderr, "gc rig set-endpoint: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

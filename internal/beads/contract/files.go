@@ -667,6 +667,59 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 	return true, fsys.WriteFileAtomic(fs, path, encoded, canonicalScopeFilePerm(fs, path))
 }
 
+// ScrubEmbeddedScopeConfig removes gc's own endpoint claims from config.yaml
+// for a scope whose metadata.json records embedded Dolt storage, and writes
+// nothing else.
+//
+// Such a scope is authoritative and not gc-managed (ga-p9iuv), and its
+// config.yaml is bd's git-tracked file. bd answers the scope's vocabulary from
+// the store, not from this file: the issue prefix from the config table, the
+// custom types from the custom_types table ahead of the config row, with YAML
+// only as the last fallback. So gc adds nothing here — no prefix (bd create
+// reads YAML issue-prefix ahead of the store's, so a stamped prefix would
+// override the store), no types.custom (never read while the store's table is
+// populated; doctor's custom-types check registers missing types through
+// `bd config set`), and none of EnsureCanonicalConfig's endpoint, topology or
+// policy keys. A missing file stays missing.
+//
+// What it does remove are the claims an earlier gc pass stamped and gc
+// provably owns: the gc.endpoint_* namespace, a dolt.mode that contradicts the
+// embedded metadata, and the dolt.host/port/socket/user mirror when gc's
+// endpoint marker shows gc wrote that block. Policy keys (dolt.auto-start,
+// dolt.disable-event-flush, export.auto, backup.enabled) and any prefix or
+// types line are left exactly as found: gc cannot tell a value it wrote from
+// an operator's. A clean file is therefore never rewritten.
+//
+// A file that does not parse is left untouched rather than repaired.
+func ScrubEmbeddedScopeConfig(fs fsys.FS, path string) (bool, error) {
+	doc, err := readConfigDoc(fs, path)
+	if err != nil {
+		if isConfigParseError(err) || os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	root := mappingRoot(doc)
+	changed := false
+	if _, gcStampedEndpoint := configStringValue(root, "gc.endpoint_origin"); gcStampedEndpoint {
+		changed = deleteKeys(root, "dolt.host", "dolt.port", "dolt.socket", "dolt.user") || changed
+	}
+	changed = deleteKeys(root, "gc.endpoint_origin", "gc.endpoint_status") || changed
+	if mode, ok := configStringValue(root, "dolt.mode"); ok && !strings.EqualFold(mode, "embedded") {
+		changed = deleteKeys(root, "dolt.mode") || changed
+	}
+	if !changed {
+		return false, nil
+	}
+
+	encoded, err := marshalConfigDoc(doc)
+	if err != nil {
+		return false, err
+	}
+	return true, fsys.WriteFileAtomic(fs, path, encoded, canonicalScopeFilePerm(fs, path))
+}
+
 // EnsureCanonicalMetadata rewrites metadata.json into canonical GC-managed form.
 func EnsureCanonicalMetadata(fs fsys.FS, path string, state MetadataState) (bool, error) {
 	meta := map[string]any{}
