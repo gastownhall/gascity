@@ -66,3 +66,28 @@ build:fork-cache --experimental_circuit_breaker_strategy=failure
 # The farm admits 16 connections per source IP, and Blacksmith runners share
 # egress IPs, so several concurrent fork jobs split that budget.
 build:fork-cache --remote_max_connections=4
+
+# --config=ci: what bazel.yml's lanes pass. The first three are the lines
+# bazel-test.yml writes to .bazelrc.local, with byte-identical values so
+# actions hash the same in both workflows and share the remote cache (the
+# explicit test PATH is the key input; the bare --test_env=PATH above would
+# forward the runner's). scripts/bazel_multilane_test.go keeps them equal.
+test:ci --test_env=PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin
+build:ci --remote_download_minimal
+# 2 vCPU runners default --jobs to 2, serializing even remote actions.
+build:ci --jobs=64
+# G0: a retried pass never stands in for a run (overrides the
+# --flaky_test_attempts=2 above for CI lanes).
+test:ci --flaky_test_attempts=1
+# Lanes that are the only pre-merge run: every test executes, and a remote
+# cache eviction fails the action rather than silently re-running it.
+test:sole-run --nocache_test_results
+test:sole-run --experimental_remote_cache_eviction_retries=0
+
+# The tagged suites, as bazel-test.yml runs them (byte-identical values:
+# --define and --test_timeout are key inputs). --test_timeout stays at or
+# below 1100s: the scheduler caps action timeouts at 1200s.
+test:acceptance --define=gotags=acceptance_a
+test:acceptance --test_timeout=1100
+test:integration --define=gotags=integration
+test:integration --test_timeout=1100

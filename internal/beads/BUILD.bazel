@@ -63,6 +63,7 @@ go_test(
         "caching_store_batch_test.go",
         "caching_store_binding_test.go",
         "caching_store_cadence_internal_test.go",
+        "caching_store_change_source_test.go",
         "caching_store_conditional_internal_test.go",
         "caching_store_conditional_test.go",
         "caching_store_count_test.go",

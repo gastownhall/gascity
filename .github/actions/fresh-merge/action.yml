@@ -5,35 +5,58 @@ description: >
   and reuses for reopens, approval-delayed first-time runs and re-runs, with
   the PR head merged onto the base branch's tip as fetched here, so the tree
   has the base branch's current fixes. Each job (and each re-run of it)
-  merges onto the tip it fetches. Port of beads' fresh-merge, which merges
-  onto one base commit resolved once per run instead. The calling checkout
-  must have history (fetch-depth 0; blobless is enough). A conflict fails
-  the job; a workflow change on the base branch since the event is a
-  warning (this run uses the event's workflow).
+  merges onto the tip it fetches, unless the caller passes base-sha: then
+  every job merges onto that one commit (bazel.yml's rbe job resolves it
+  once per run, as beads' fresh-merge does, so all lanes test one tree).
+  The calling checkout must have history (fetch-depth 0; blobless is
+  enough). A conflict fails the job; a workflow change on the base branch
+  since the event is a warning (this run uses the event's workflow).
+inputs:
+  base-sha:
+    description: >
+      Base branch commit to merge onto (40 hex digits). Empty: the base
+      branch's tip, fetched by this step.
+    required: false
+    default: ""
 runs:
   using: composite
   steps:
-    - name: Merge the PR head onto the base branch's current tip
+    - name: Merge the PR head onto the base branch's current tip (or base-sha)
       if: github.event_name == 'pull_request'
       shell: bash
       env:
         BASE_REF: ${{ github.base_ref }}
+        BASE_SHA: ${{ inputs.base-sha }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
         set -euo pipefail
+        # The commit to merge onto: base-sha when given, else the base
+        # branch's tip.
+        if [ -n "$BASE_SHA" ]; then
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error title=fresh-merge base-sha::base-sha is '${BASE_SHA}', not a 40-digit commit id"; exit 1; }
+          fetch=("$BASE_SHA")
+          what="${BASE_REF} commit ${BASE_SHA}"
+        else
+          fetch=("+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}")
+          what="${BASE_REF}"
+        fi
         # Three attempts, 5 s then 10 s apart: a transient fetch failure
         # must not fail the job.
         for attempt in 1 2 3; do
-          if git fetch --no-tags --filter=blob:none origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"; then
+          if git fetch --no-tags --filter=blob:none origin "${fetch[@]}"; then
             break
           fi
           if [ "$attempt" -eq 3 ]; then
-            echo "::error title=fresh-merge cannot fetch ${BASE_REF}::git fetch of ${BASE_REF} failed 3 times"
+            echo "::error title=fresh-merge cannot fetch ${what}::git fetch of ${what} failed 3 times"
             exit 1
           fi
           sleep $((attempt * 5))
         done
-        base_sha="$(git rev-parse "origin/${BASE_REF}")"
+        if [ -n "$BASE_SHA" ]; then
+          base_sha="$BASE_SHA"
+        else
+          base_sha="$(git rev-parse "origin/${BASE_REF}")"
+        fi
         git checkout --quiet --detach "$HEAD_SHA"
         # Fixed identity and dates (the base commit's committer date): the
         # same head and base always give the same merge commit.

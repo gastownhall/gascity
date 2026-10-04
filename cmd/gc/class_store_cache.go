@@ -18,10 +18,10 @@ package main
 // is also the one layer that can see a bead engine's ready projection, which it
 // finds by type-asserting its backing, so any wrapper between the two turns the
 // projection off. Cache over engine, emitting through the cache's own onChange,
-// satisfies both. The rows carry the cache-reconcile actor, the one the work
-// ledger's cache stamps on the identical write on a city that relocates
-// nothing, so a split city's events poke, enqueue and fold exactly as a
-// single-store city's do.
+// satisfies both. The rows carry the cache actors (cache-local for a write,
+// cache-reconcile for what a scan infers), the ones the work ledger's cache
+// stamps on the identical write on a city that relocates nothing, so a split
+// city's events poke, enqueue and fold exactly as a single-store city's do.
 //
 // # Freshness
 //
