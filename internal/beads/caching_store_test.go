@@ -1735,18 +1735,24 @@ func TestCachingStoreCachedReadyIgnoresStaleDependencyEventsAfterEventMutation(t
 
 func TestCachingStoreCachedReadyUsesCompleteCreatedEventDependencies(t *testing.T) {
 	t.Parallel()
-	cache := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+	backing := beads.NewMemStore()
+	cache := beads.NewCachingStoreForTest(backing, nil)
 	if err := cache.PrimeActive(); err != nil {
 		t.Fatalf("PrimeActive: %v", err)
 	}
+	// The row lands out of band, so only its event brings it into the cache.
+	created, err := backing.Create(beads.Bead{Title: "Event task", Status: "open", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
 
-	cache.ApplyEvent("bead.created", []byte(`{"id":"gc-1","title":"Event task","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z"}`))
+	cache.ApplyEvent("bead.created", []byte(`{"id":"`+created.ID+`","title":"Event task","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z"}`))
 
 	ready, ok := cache.CachedReady()
 	if !ok {
 		t.Fatal("CachedReady reported cache unavailable")
 	}
-	if len(ready) != 1 || ready[0].ID != "gc-1" {
+	if len(ready) != 1 || ready[0].ID != created.ID {
 		t.Fatalf("CachedReady = %#v, want event-created bead", ready)
 	}
 }
@@ -1788,12 +1794,18 @@ func TestCachingStoreCachedReadyUsesCompleteUpdatedEventDependencies(t *testing.
 
 func TestCachingStoreCachedReadyUnavailableForPartialEventDependencies(t *testing.T) {
 	t.Parallel()
-	cache := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+	backing := beads.NewMemStore()
+	cache := beads.NewCachingStoreForTest(backing, nil)
 	if err := cache.PrimeActive(); err != nil {
 		t.Fatalf("PrimeActive: %v", err)
 	}
+	// The row lands out of band, so only its event brings it into the cache.
+	created, err := backing.Create(beads.Bead{Title: "Event task", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
 
-	cache.ApplyEvent("bead.created", []byte(`{"id":"gc-1","status":"open"}`))
+	cache.ApplyEvent("bead.created", []byte(`{"id":"`+created.ID+`","status":"open"}`))
 
 	if ready, ok := cache.CachedReady(); ok {
 		t.Fatalf("CachedReady ok with unknown event dependency coverage, ready=%v", ready)

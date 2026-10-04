@@ -229,6 +229,7 @@ func TestOddballRootJSONInitFromFileRun(t *testing.T) {
 
 func TestOddballRootJSONInitDefaultSkipsTTYWizard(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
+	stubInitRemoteImports(t)
 	oldIsTerminal := isTerminalFunc
 	isTerminalFunc = func(*os.File) bool { return true }
 	t.Cleanup(func() { isTerminalFunc = oldIsTerminal })

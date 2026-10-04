@@ -748,15 +748,11 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 				fmt.Fprintf(stderr, "gc mail check: writing hook output: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 0
 			}
-			// Archive the SAME messages that were injected: priority-sort
-			// before the clamp so the archived set matches formatInjectOutput's
-			// displayed set (a priority:1 handoff that floats into the window is
-			// injected AND archived, never injected-but-not-archived).
-			injectedMessages := sortMailByPriority(messages)
-			if len(injectedMessages) > mailInjectMaxMessages {
-				injectedMessages = injectedMessages[:mailInjectMaxMessages]
-			}
-			archiveInjectedAutoHandoffMessages(mp, injectedMessages, stderr)
+			// Archive the SAME messages that were injected: select the same
+			// window formatInjectOutput displays so the archived set matches
+			// (a priority:1 handoff that floats into the window is injected
+			// AND archived, never injected-but-not-archived).
+			archiveInjectedAutoHandoffMessages(mp, selectMailInjectWindow(messages), stderr)
 		}
 		return 0 // --inject always exits 0
 	}
@@ -810,22 +806,50 @@ func sortMailByPriority(messages []mail.Message) []mail.Message {
 	return sorted
 }
 
+// selectMailInjectWindow returns the at-most mailInjectMaxMessages messages
+// that formatInjectOutput displays. Any caller archiving "the injected
+// messages" (doMailCheckTargetWithFormat, sessionStartAutoHandoffInjection)
+// must select the same window so the archived set never diverges from the
+// displayed set (see the "Archive the SAME messages" comments at both call
+// sites).
+//
+// It keeps sortMailByPriority's contract (higher priority first) but, within
+// a priority tier, keeps the NEWEST arrivals rather than the oldest: without
+// this, a backlog of stale same-priority mail permanently fills the
+// mailInjectMaxMessages window and a newly arrived message is never surfaced
+// (gastownhall/gascity ga-18f84o). The returned window is re-sorted ascending
+// by CreatedAt so the rendered block still reads oldest-to-newest.
+func selectMailInjectWindow(messages []mail.Message) []mail.Message {
+	windowed := sortMailByPriority(messages)
+	if len(windowed) > mailInjectMaxMessages {
+		sort.SliceStable(windowed, func(i, j int) bool {
+			if windowed[i].Priority != windowed[j].Priority {
+				return windowed[i].Priority > windowed[j].Priority
+			}
+			return windowed[i].CreatedAt.After(windowed[j].CreatedAt)
+		})
+		windowed = windowed[:mailInjectMaxMessages]
+	}
+	sort.SliceStable(windowed, func(i, j int) bool {
+		return windowed[i].CreatedAt.Before(windowed[j].CreatedAt)
+	})
+	return windowed
+}
+
 // formatInjectOutput formats messages as a <system-reminder> block for
-// injection into an agent's prompt via a UserPromptSubmit hook. It priority-
-// sorts before the display clamp so both inject render paths
+// injection into an agent's prompt via a UserPromptSubmit hook. It selects the
+// display window via selectMailInjectWindow so both inject render paths
 // (renderMailCheckFromAPI and doMailCheckTargetWithFormat) surface higher-
-// priority unread first.
+// priority, then most-recent, unread mail first.
 func formatInjectOutput(messages []mail.Message) string {
-	messages = sortMailByPriority(messages)
+	windowed := selectMailInjectWindow(messages)
 	var sb strings.Builder
 	sb.WriteString("<system-reminder>\n")
 	fmt.Fprintf(&sb, "You have %d unread message(s).\n\n", len(messages))
-	limit := len(messages)
-	if limit > mailInjectMaxMessages {
-		limit = mailInjectMaxMessages
-		fmt.Fprintf(&sb, "Showing the first %d message(s) here; run 'gc mail inbox' for the full list.\n\n", limit)
+	if len(windowed) < len(messages) {
+		fmt.Fprintf(&sb, "Showing the %d most recent message(s) here; run 'gc mail inbox' for the full list.\n\n", len(windowed))
 	}
-	for _, m := range messages[:limit] {
+	for _, m := range windowed {
 		// Sanitize attacker-controllable fields (sender identity, subject,
 		// body) before interpolating into the <system-reminder> block.
 		// Without this, a sender can inject </system-reminder> sequences
@@ -1477,6 +1501,7 @@ func newMailSendCmd(stdout, stderr io.Writer) *cobra.Command {
 	var subject string
 	var message string
 	var jsonOut bool
+	var dedupKey string
 	cmd := &cobra.Command{
 		Use:   "send [<to>] [<body>]",
 		Short: "Send a message to a session alias or human",
@@ -1489,22 +1514,28 @@ a non-running recipient. Unread mail alone does not request a wake.
 Use --from to override the sender identity.
 Use --to as an alternative to the positional <to> argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
-Use --all to broadcast to all live sessions (excluding sender and "human").`,
+Use --all to broadcast to all live sessions (excluding sender and "human").
+
+Use --dedup <key> for repeating notifications (patrol and cooldown orders
+that re-detect the same condition every run): the send is suppressed while
+a previous message with the same key is still live (un-archived) in the same
+mailbox, and an alias and the session behind it count as one mailbox.
+Suppression exits 0. Once the recipient archives the message the stream may
+alert again; senders that want a longer re-alert cadence keep their own
+last-sent state. Dedup needs a provider that can query its own message
+history. The built-in provider can; one that cannot sends normally and says
+so on stderr, because a duplicate notification beats a dropped one.`,
 		Example: `  gc mail send mayor "Build is green"
   gc mail send mayor -s "Build is green"
-  gc mail send myrig/witness -s "Need investigation" -m "Attach logs from the last failed run"
+  gc mail send myrig/reviewer -s "Need investigation" -m "Attach logs from the last failed run"
   gc mail send --to mayor "Build is green"
   gc mail send human "Review needed for PR #42"
-  gc mail send polecat "Priority task" --notify
-  gc mail send --all "Status update: tests passing"`,
+  gc mail send worker "Priority task" --notify
+  gc mail send --all "Status update: tests passing"
+  gc mail send worker -s "disk warning" --dedup "disk-warn:hq"`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			code := 0
-			if jsonOut {
-				code = cmdMailSendJSON(args, notify, all, from, to, subject, message, true, stdout, stderr)
-			} else {
-				code = cmdMailSend(args, notify, all, from, to, subject, message, stdout, stderr)
-			}
+			code := cmdMailSendJSON(args, notify, all, from, to, subject, message, dedupKey, jsonOut, stdout, stderr)
 			if code != 0 {
 				return errExit
 			}
@@ -1520,7 +1551,9 @@ Use --all to broadcast to all live sessions (excluding sender and "human").`,
 	cmd.Flags().StringVarP(&subject, "subject", "s", "", "message subject line")
 	cmd.Flags().StringVarP(&message, "message", "m", "", "message body text")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL result")
+	cmd.Flags().StringVar(&dedupKey, "dedup", "", "suppress the send while a live message with this dedup key is in the same mailbox (provider permitting)")
 	cmd.MarkFlagsMutuallyExclusive("to", "all")
+	cmd.MarkFlagsMutuallyExclusive("dedup", "all")
 	return cmd
 }
 
@@ -1740,10 +1773,14 @@ The recipient defaults to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human".`,
 // resolves session mailbox identities, and delegates to doMailSend.
 // The to parameter is the --to flag value (empty if not set).
 func cmdMailSend(args []string, notify bool, all bool, from string, to string, subject string, message string, stdout, stderr io.Writer) int {
-	return cmdMailSendJSON(args, notify, all, from, to, subject, message, false, stdout, stderr)
+	return cmdMailSendJSON(args, notify, all, from, to, subject, message, "", false, stdout, stderr)
 }
 
-func cmdMailSendJSON(args []string, notify bool, all bool, from string, to string, subject string, message string, jsonOut bool, stdout, stderr io.Writer) int {
+// cmdMailSendJSON is cmdMailSend with the dedup key and JSON-output controls
+// exposed. A non-empty dedupKey routes the send through the provider's
+// [mail.DedupSender] capability so a repeating notifier keeps at most one live
+// copy; an empty dedupKey sends unconditionally.
+func cmdMailSendJSON(args []string, notify bool, all bool, from string, to string, subject string, message string, dedupKey string, jsonOut bool, stdout, stderr io.Writer) int {
 	mp, code := openCityMailProvider(stderr, "gc mail send")
 	if mp == nil {
 		return code
@@ -1852,17 +1889,21 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 	}
 
 	rec := openCityRecorder(stderr)
-	return doMailSendJSON(mp, rec, validRecipients, sender, args, nf, jsonOut, stdout, stderr)
+	return doMailSendJSON(mp, rec, validRecipients, sender, args, nf, dedupKey, jsonOut, stdout, stderr)
 }
 
 // doMailSend creates a message addressed to a recipient. args is [to, subject, body]
 // or [to, body] (subject="" if no -s flag). When nudgeFn is non-nil, the
 // recipient is nudged after message creation (skipped for "human").
 func doMailSend(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, stdout, stderr io.Writer) int {
-	return doMailSendJSON(mp, rec, validRecipients, sender, args, nudgeFn, false, stdout, stderr)
+	return doMailSendJSON(mp, rec, validRecipients, sender, args, nudgeFn, "", false, stdout, stderr)
 }
 
-func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, jsonOut bool, stdout, stderr io.Writer) int {
+// doMailSendJSON is doMailSend with the JSON-output and dedup controls exposed.
+// A non-empty dedupKey routes through the provider's [mail.DedupSender]
+// capability; providers without it fall back to a plain send (fail-open, since
+// a duplicate notification beats a silently dropped one).
+func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, dedupKey string, jsonOut bool, stdout, stderr io.Writer) int {
 	if len(args) < 2 {
 		fmt.Fprintln(stderr, "gc mail send: usage: gc mail send <to> <body>  OR  gc mail send <to> -s <subject> [-m <body>]") //nolint:errcheck // best-effort stderr
 		return 1
@@ -1884,11 +1925,35 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 		return 1
 	}
 
-	m, err := mp.Send(sender, to, subject, body)
+	var (
+		m          mail.Message
+		suppressed bool
+		err        error
+	)
+	if dedupKey != "" {
+		if ds, ok := mp.(mail.DedupSender); ok {
+			m, suppressed, err = ds.SendDeduped(sender, to, subject, body, dedupKey)
+		} else {
+			fmt.Fprintln(stderr, "gc mail send: mail provider does not support --dedup; sending without dedup") //nolint:errcheck // best-effort stderr
+			m, err = mp.Send(sender, to, subject, body)
+		}
+	} else {
+		m, err = mp.Send(sender, to, subject, body)
+	}
 	telemetry.RecordMailOp(context.Background(), "send", err)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc mail send: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if suppressed {
+		// Nothing was created: no mail.sent event, no nudge — the point of
+		// dedup is that the recipient was already notified by m.
+		if jsonOut {
+			summary := summarizeMailMessage(m)
+			return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", ID: m.ID, Message: &summary, AlreadyDone: true, Count: intRef(0)})
+		}
+		fmt.Fprintf(stdout, "Suppressed duplicate of %s to %s (dedup key %q)\n", m.ID, to, dedupKey) //nolint:errcheck // best-effort stdout
+		return 0
 	}
 	rec.Record(events.Event{
 		Type:    events.MailSent,

@@ -1,0 +1,42 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "genclient",
+    srcs = [
+        "client_gen.go",
+        "doc.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/api/genclient",
+    visibility = ["//:__subpackages__"],
+    deps = ["@com_github_oapi_codegen_runtime//:runtime"],
+)
+
+go_test(
+    name = "genclient_test",
+    srcs = [
+        "genclient_test.go",
+        "testenv_import_test.go",
+    ],
+    data = [
+        "//:go.mod",
+        "//:repo_source_tree",
+        "//cmd/gen-client",
+    ],
+    deps = [
+        ":genclient",
+        "//internal/bazeltest",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

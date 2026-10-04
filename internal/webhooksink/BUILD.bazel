@@ -1,0 +1,40 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "webhooksink",
+    srcs = ["sink.go"],
+    importpath = "github.com/gastownhall/gascity/internal/webhooksink",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/orderdispatch",
+        "//internal/orders",
+        "//internal/webhookmatch",
+    ],
+)
+
+go_test(
+    name = "webhooksink_test",
+    srcs = [
+        "sink_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":webhooksink"],
+    deps = [
+        "//internal/orderdispatch",
+        "//internal/orders",
+        "//internal/testenv",
+        "//internal/webhookmatch",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

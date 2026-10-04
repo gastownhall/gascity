@@ -1,0 +1,46 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "agentutil",
+    srcs = [
+        "pool.go",
+        "resolve.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/agentutil",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/agent",
+        "//internal/beadmeta",
+        "//internal/beads",
+        "//internal/config",
+        "//internal/workdir",
+    ],
+)
+
+go_test(
+    name = "agentutil_test",
+    srcs = [
+        "pool_test.go",
+        "resolve_test.go",
+        "routed_to_boundary_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":agentutil"],
+    deps = [
+        "//internal/config",
+        "//internal/runtime",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

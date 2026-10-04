@@ -888,3 +888,70 @@ func TestProvider_AttachArgsQuotesRemoteCommand(t *testing.T) {
 		t.Error("attach must force a PTY with -t")
 	}
 }
+
+// TestProvider_SetMetaKeepsSecretValueOutOfArgv: a secret-classified meta value
+// is staged on the box over stdin and applied with source-file; it reaches no
+// command line on either end.
+func TestProvider_SetMetaKeepsSecretValueOutOfArgv(t *testing.T) {
+	const secret = "instance-token-not-a-real-credential"
+	f := &fakeRunner{respond: answerStaging(nil)}
+	if err := providerWith(f).SetMeta("s", "GC_INSTANCE_TOKEN", secret); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	for _, c := range f.calls {
+		for _, a := range c {
+			if strings.Contains(a, secret) {
+				t.Fatalf("secret meta value reached remote argv: %v", c)
+			}
+		}
+	}
+	if firstCall(f, isTmux("set-environment")) != nil {
+		t.Error("set-environment must not be issued as argv for a secret value")
+	}
+	got := firstCall(f, isTmux("source-file"))
+	want := []string{"tmux", "source-file", stagedDir + "/session.tmux"}
+	if !slices.Equal(got, want) {
+		t.Errorf("apply argv =\n  %v\nwant\n  %v", got, want)
+	}
+	if !strings.Contains(stdinFor(f, isStagingScript), secret) {
+		t.Error("secret value was not delivered on the staging script's stdin")
+	}
+	if firstCall(f, func(argv []string) bool { return len(argv) == 3 && argv[0] == "rm" && argv[2] == stagedDir }) == nil {
+		t.Error("staged directory was not removed after SetMeta")
+	}
+}
+
+// TestProvider_SetMetaSkipsWhenStagingFails: best-effort must never mean
+// falling back to argv.
+func TestProvider_SetMetaSkipsWhenStagingFails(t *testing.T) {
+	const secret = "instance-token-not-a-real-credential"
+	f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
+		if isStagingScript(argv) {
+			return nil, 1, nil
+		}
+		return nil, 0, nil
+	}}
+	_ = providerWith(f).SetMeta("s", "GC_INSTANCE_TOKEN", secret)
+	for _, c := range f.calls {
+		for _, a := range c {
+			if strings.Contains(a, secret) {
+				t.Fatalf("secret meta value reached remote argv after staging failed: %v", c)
+			}
+		}
+	}
+}
+
+// TestProvider_SetMetaInertValueStaysOnArgv keeps the common path file-free.
+func TestProvider_SetMetaInertValueStaysOnArgv(t *testing.T) {
+	f := &fakeRunner{}
+	if err := providerWith(f).SetMeta("s", "GC_SESSION_ID", "gc-1"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	want := []string{"tmux", "set-environment", "-t", "s", "GC_SESSION_ID", "gc-1"}
+	if got := firstCall(f, isTmux("set-environment")); !slices.Equal(got, want) {
+		t.Errorf("set-environment argv = %v, want %v", got, want)
+	}
+	if firstCall(f, isStagingScript) != nil {
+		t.Error("an inert meta value must not stage a file on the box")
+	}
+}

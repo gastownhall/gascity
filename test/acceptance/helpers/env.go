@@ -6,16 +6,33 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
+
+// acceptanceGitConfig mirrors scripts/test-gitconfig-path. beads.role is the
+// load-bearing key: gc doctor errors without it and gc-beads-bd's
+// ensure_beads_role otherwise tries to write it to the host.
+const acceptanceGitConfig = `[user]
+	name = gc-test
+	email = gc-test@test.local
+[beads]
+	role = maintainer
+[safe]
+	directory = *
+`
 
 // Env builds an isolated environment for acceptance tests.
 // It filters the host environment to a safe allowlist, then layers
 // test-specific overrides on top.
 type Env struct {
 	vars map[string]string
+	// toolHome is the HOME every bd and dolt child of this Env gets in place
+	// of the real one. See tool_home.go.
+	toolHome string
 }
 
 // NewEnv creates an isolated environment with the minimum inherited
@@ -24,12 +41,19 @@ type Env struct {
 func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	e := &Env{vars: make(map[string]string)}
 
-	// Inherit minimum from host. Keep the real HOME: the platform
-	// supervisor path now validates that HOME matches the OS user home
-	// and acceptance isolation should flow through GC_HOME instead.
+	// Inherit minimum from host. Keep the real HOME for gc: the platform
+	// supervisor path validates that HOME matches the OS user home and
+	// acceptance isolation for gc flows through GC_HOME instead. bd and dolt
+	// never see it — they get the tool home below (see tool_home.go).
 	for _, key := range []string{
 		"PATH", "TMPDIR", "LANG", "LC_ALL", "USER", "HOME",
 		"SHELL", "SSH_AUTH_SOCK", "TERM",
+		// The Makefile's TEST_ENV points these at scripts/test-gitconfig-path, a
+		// seeded writable global gitconfig carrying user.name, user.email and
+		// beads.role=maintainer. Dropping them sent the child's reads at the
+		// runner's real global config, which has no beads.role, so `gc doctor`
+		// failed its beads-role check on any host that had never opted in.
+		"GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM",
 		"CLAUDE_CONFIG_DIR", // Claude Code reads OAuth credentials from here
 		"ANTHROPIC_AUTH_TOKEN",
 		"ANTHROPIC_API_KEY",
@@ -55,6 +79,23 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 		}
 	}
 
+	// bd and dolt children never see HOME; they resolve user-level state under
+	// this tool home instead (see tool_home.go).
+	e.toolHome = filepath.Join(gcHome, "tool-home")
+	if err := os.MkdirAll(e.toolHome, 0o755); err != nil {
+		panic(fmt.Sprintf("acceptance: creating bd/dolt tool home under %s: %v", gcHome, err))
+	}
+	// Any bd gc resolves through PATH comes from here first: the configured bd
+	// behind the tool-home wrapper, ahead of every host copy. Suites that stage
+	// their own bd (TopologyEnv, proxiedEnv, BD_BIN pins) put it earlier still.
+	if bdPath := FindBD(); bdPath != "" {
+		bdDir := filepath.Join(gcHome, "beads-bin")
+		if _, err := InstallBeadsTooling(e, bdDir, bdPath, ""); err != nil {
+			panic(fmt.Sprintf("acceptance: staging bd under %s: %v", gcHome, err))
+		}
+		e.vars["PATH"] = bdDir + ":" + e.vars["PATH"]
+	}
+
 	// Prepend gc binary dir to PATH.
 	if gcBinary != "" {
 		e.vars["GC_ACCEPTANCE_GC_BIN"] = gcBinary
@@ -77,12 +118,72 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	}
 	e.vars["PATH"] = shimDir + ":" + e.vars["PATH"]
 
+	// Bazel's remote test runner points HOME at the per-action TEST_TMPDIR, and
+	// the platform supervisor refuses to start when HOME differs from the
+	// passwd entry. Only in exactly that case, swap HOME for the passwd home —
+	// everywhere else the host HOME passes through verbatim (the tool-home
+	// tests assert that contract with a canary). GC_HOME carries gc's
+	// isolation; bd/dolt never see HOME at all (tool home, above).
+	if envHome := e.vars["HOME"]; envHome != "" && envHome == os.Getenv("TEST_TMPDIR") {
+		if lu, err := user.LookupId(strconv.Itoa(os.Getuid())); err == nil && strings.TrimSpace(lu.HomeDir) != "" {
+			e.vars["HOME"] = lu.HomeDir
+		}
+	}
 	if e.vars["HOME"] == "" {
 		if home, err := os.UserHomeDir(); err == nil && home != "" {
 			e.vars["HOME"] = home
 		}
 	}
 	e.vars["GC_HOME"] = gcHome
+
+	// Bazel's local sandbox — where a fork PR's CI job runs, having no remote
+	// executor — mounts the runner's real HOME read-only, and gc needs that HOME
+	// (above), so the Claude state the tests seed moves under GC_HOME instead. A
+	// CLAUDE_CONFIG_DIR from the host stays: it carries the operator's credentials.
+	if e.vars["CLAUDE_CONFIG_DIR"] == "" && e.vars["HOME"] != "" && !dirWritable(e.vars["HOME"]) {
+		e.vars["CLAUDE_CONFIG_DIR"] = filepath.Join(gcHome, "claude")
+	}
+
+	// gc carries its environment into every bd it forks, including ones that
+	// reach a bd not wrapped by the tool-home wrapper (a raw BD_BIN). Pin bd's
+	// shared-server mode off there too; a test that exercises the user-level
+	// layer on purpose sets it to "".
+	e.vars[bdSharedServerConfigEnv] = "false"
+
+	// Dolt reads its global config from $DOLT_ROOT_PATH/.dolt/config_global.json,
+	// falling back to $HOME. gc's init preflight (checkDoltAuthorIdentity) probes
+	// it with `dolt config --global --get` and has no fallback to any other
+	// config source, so a shape that drops GC_DOLT=skip refuses to init on a
+	// machine whose home never ran `dolt config --global`. Leaning on the host's
+	// ambient identity made that a coin flip: green on a developer box, red on a
+	// fresh CI runner. Seed under GC_HOME rather than the real home so a run
+	// never writes host Dolt state -- the same pattern tier_c, tutorial_goldens
+	// and test/integration already use.
+	doltRoot := filepath.Join(gcHome, ".dolt")
+	if err := os.MkdirAll(doltRoot, 0o755); err != nil {
+		panic(fmt.Sprintf("acceptance: creating dolt root under %s: %v", gcHome, err))
+	}
+	doltCfg := `{"user.name":"gc-test","user.email":"gc-test@test.local"}`
+	if err := os.WriteFile(filepath.Join(doltRoot, "config_global.json"), []byte(doltCfg), 0o644); err != nil {
+		panic(fmt.Sprintf("acceptance: seeding dolt identity under %s: %v", doltRoot, err))
+	}
+	e.vars["DOLT_ROOT_PATH"] = gcHome
+
+	// The Makefile points GIT_CONFIG_GLOBAL at scripts/test-gitconfig-path, but a
+	// caller that runs `go test -tags acceptance_a` directly supplies no seed at
+	// all, and the child then reads the host's real global config. That is how
+	// gc doctor's beads-role check failed on a CI runner that had never opted in
+	// — and it is also how gc-beads-bd's ensure_beads_role could write into a
+	// developer's own global config. Seed one under GC_HOME instead.
+	if e.vars["GIT_CONFIG_GLOBAL"] == "" {
+		gitConfig := filepath.Join(gcHome, "gitconfig")
+		if err := os.WriteFile(gitConfig, []byte(acceptanceGitConfig), 0o644); err != nil {
+			panic(fmt.Sprintf("acceptance: seeding global git config at %s: %v", gitConfig, err))
+		}
+		e.vars["GIT_CONFIG_GLOBAL"] = gitConfig
+		e.vars["GIT_CONFIG_NOSYSTEM"] = "1"
+	}
+
 	e.vars["XDG_RUNTIME_DIR"] = runtimeDir
 	tmuxTmpDir := filepath.Join(runtimeDir, "tmux")
 	if err := os.MkdirAll(tmuxTmpDir, 0o700); err != nil {
@@ -120,6 +221,17 @@ func installServiceManagerShims(gcHome string) (string, error) {
 		}
 	}
 	return shimDir, nil
+}
+
+// Clone returns an independent copy. Tier A shares one Env across the whole
+// package, and With mutates in place, so a test that needs its own PATH or
+// provider selection must take a copy rather than reach into the shared one.
+func (e *Env) Clone() *Env {
+	clone := &Env{vars: make(map[string]string, len(e.vars)), toolHome: e.toolHome}
+	for k, v := range e.vars {
+		clone.vars[k] = v
+	}
+	return clone
 }
 
 // With sets a variable, returning the Env for chaining.

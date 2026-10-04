@@ -1,0 +1,30 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "poolplan",
+    srcs = ["create_budget.go"],
+    importpath = "github.com/gastownhall/gascity/internal/poolplan",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "poolplan_test",
+    srcs = [
+        "create_budget_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":poolplan"],
+    deps = ["//internal/testenv"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

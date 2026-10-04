@@ -1,0 +1,44 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "qualification_test",
+    srcs = [
+        "q1_default_classes_test.go",
+        "q1_default_config_test.go",
+        "q1_default_plan_test.go",
+        "q1_support_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_source_tree",
+    ],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/beads",
+        "//internal/config",
+        "//internal/coordclass",
+        "//internal/fsys",
+        "//internal/mail",
+        "//internal/nudgequeue",
+        "//internal/orders",
+        "//internal/session",
+        "//internal/storebinding",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

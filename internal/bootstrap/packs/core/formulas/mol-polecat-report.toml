@@ -163,7 +163,7 @@ REPORT="$(cat <<'ENDREPORT'
 <unresolved items, caveats>
 ENDREPORT
 )"
-gc bd update "$WORK_BEAD_ID" --notes "$REPORT"
+gc bd update "$WORK_BEAD_ID" --append-notes "$REPORT"
 ```
 
 **2. Close the bead:**

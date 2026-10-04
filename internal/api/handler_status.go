@@ -1092,10 +1092,10 @@ func statusSessionStateInfo(info session.Info) session.State {
 // actually runs under.
 //
 // The canonical derivation (agent.SessionNameFor) is not the only name a
-// session may legitimately hold. A pool instance's runtime name is minted by
-// poolRuntimeSessionName (cmd/gc/session_name_lookup.go), which deliberately
-// steps aside onto a "-pool" suffixed name when a configured named session
-// reserves the bare one. That step-aside is recorded on the session bead and
+// session may legitimately hold. An unaliased pool instance runs under a
+// bead-scoped name (<template>-<beadID>, PoolSessionName), and rows minted by
+// pre-release builds may carry a "-pool" step-aside name (poolRuntimeSessionName
+// in cmd/gc/session_name_lookup.go). Both are recorded on the session bead and
 // cannot be re-derived from the agent identity, so a status path that only
 // derives the canonical name reports a live seat as not running.
 //

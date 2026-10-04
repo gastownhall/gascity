@@ -20,6 +20,9 @@ var (
 // transaction, but only while the exact opaque row version still matches.
 // It returns the final in-transaction row only after the transaction commits.
 func (s *NativeDoltStore) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error) {
+	if err := s.readOnlyGuard(); err != nil {
+		return Bead{}, err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return Bead{}, err
@@ -101,6 +104,9 @@ func (s *NativeDoltStore) probeConditionalWriteCapability() (bool, string) {
 // UpdateIfMatch applies row-backed opts only while id still has
 // expectedRevision.
 func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	if err := validateConditionalUpdateOpts(opts); err != nil {
 		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
@@ -134,6 +140,9 @@ func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts 
 
 // CloseIfMatch closes id only while it still has expectedRevision.
 func (s *NativeDoltStore) CloseIfMatch(id string, expectedRevision int64) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -165,6 +174,9 @@ func (s *NativeDoltStore) CloseIfMatch(id string, expectedRevision int64) error 
 
 // DeleteIfMatch deletes id only while it still has expectedRevision.
 func (s *NativeDoltStore) DeleteIfMatch(id string, expectedRevision int64) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -252,6 +264,9 @@ func (s *NativeDoltStore) conditionalWriteError(
 // objects, and arrays. The transaction compares through that public string
 // view, then replaces only the selected raw JSON member with a JSON string.
 func (s *NativeDoltStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	if err := s.readOnlyGuard(); err != nil {
+		return false, err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return false, err

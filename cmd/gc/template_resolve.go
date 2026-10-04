@@ -59,6 +59,13 @@ type TemplateParams struct {
 	Prompt string
 	// Env is the merged environment (passthrough + provider + agent + passthrough vars).
 	Env map[string]string
+	// OperatorEnv carries only the operator-authored environment layers —
+	// workspace.Env, the resolved provider's Env, and agent.Env — a subset
+	// of Env that excludes passthrough and generated agentEnv plumbing.
+	// Carried to runtime.Config.OperatorEnv (launch-tier fingerprint) so a
+	// resolved config env change drives a warm-box relaunch instead of a
+	// no-op.
+	OperatorEnv map[string]string
 	// Upstream is the selected model-serving endpoint name (a key in [upstreams],
 	// Phase C). Carried to runtime.Config.Upstream (launch-half fingerprint) so a
 	// switch relaunches the warm box; the resolved serving env is already merged
@@ -370,6 +377,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if p.city != nil {
 		packDirs = p.city.PackDirsForRig(rigName)
 	}
+	// renderPrompt returns "" for an empty template path before it reads the
+	// context, so the default-branch probe — up to three git subprocesses when
+	// the rig records no default_branch — is only worth running when there is a
+	// prompt template to render.
+	defaultBranch := ""
+	if cfgAgent.PromptTemplate != "" {
+		defaultBranch = defaultBranchForRig(rigName, p.rigs, workDir)
+	}
 	topo := config.QueryTopology{}
 	if p.city != nil {
 		topo.Beads = p.city.Beads
@@ -393,7 +408,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		RigRoot:                 rigRoot,
 		WorkDir:                 workDir,
 		IssuePrefix:             findRigPrefix(rigName, p.rigs),
-		DefaultBranch:           defaultBranchForRig(rigName, p.rigs, workDir),
+		DefaultBranch:           defaultBranch,
 		AssignedInProgressQuery: expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_in_progress_query", cfgAgent.EffectiveAssignedInProgressQueryFor(topo), p.stderr),
 		AssignedReadyQuery:      expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_ready_query", cfgAgent.EffectiveAssignedReadyQueryFor(topo), p.stderr),
 		RoutedPoolQuery:         expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "routed_pool_query", cfgAgent.EffectiveRoutedPoolQueryFor(topo), p.stderr),
@@ -481,6 +496,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	env := mergeEnv(passthroughEnv(), expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
 	processenv.PrependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
+
+	// OperatorEnv carries only the operator-authored layers (workspace,
+	// resolved provider, agent) — excluding passthrough and the generated
+	// agentEnv plumbing — so a resolved config env change fingerprints as
+	// Launch-tier identity instead of a no-op.
+	operatorEnv := mergeEnv(expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env))
+	operatorEnv = convergence.ScrubTokenEnv(operatorEnv)
 
 	// Step 10b: Upstream axis (Phase C). Inject the selected upstream's serving
 	// env LAST so it is authoritative for the model-serving keys, and after
@@ -725,6 +747,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		Command:          command,
 		Prompt:           prompt,
 		Env:              env,
+		OperatorEnv:      operatorEnv,
 		Upstream:         cfgAgent.Upstream,
 		Hints:            hints,
 		WorkDir:          workDir,
@@ -818,6 +841,7 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 	// Explicit empty values let tmux unset stale Dolt vars inherited from
 	// the server environment when the current city/rig does not use them.
 	setProjectedDoltEnvEmpty(env)
+	applySessionSharedServerOptOut(env, cityPath, rigRoot)
 
 	// Session env projection must not trigger provider recovery. Session setup
 	// only publishes the currently resolved target; store operations use the
@@ -932,6 +956,7 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	cfg.PromptSuffix = promptSuffix
 	cfg.PromptFlag = promptFlag
 	cfg.Env = env
+	cfg.OperatorEnv = maps.Clone(tp.OperatorEnv)
 	if tp.IsACP {
 		cfg.MCPServers = tp.MCPServers
 	}

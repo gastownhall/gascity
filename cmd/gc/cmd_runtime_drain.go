@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/spf13/cobra"
 )
@@ -66,6 +69,10 @@ func (o *providerDrainOps) clearDrain(sessionName string) error {
 	return errors.Join(
 		o.sp.RemoveMeta(sessionName, "GC_DRAIN_ACK"),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckSourceKey),
+		// The incarnation stamp has exactly the acknowledgement's lifetime. Left
+		// behind, it outlives every drain it described and waits on the pane to be
+		// paired with some later ack's source.
+		o.sp.RemoveMeta(sessionName, drainAckRequesterInstanceTokenKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey),
 		o.sp.RemoveMeta(sessionName, "GC_DRAIN"),
@@ -96,12 +103,76 @@ func (o *providerDrainOps) drainStartTime(sessionName string) (time.Time, error)
 }
 
 func (o *providerDrainOps) setDrainAck(sessionName string) error {
+	// The acknowledging agent records which incarnation it was. Readers bind
+	// against this rather than trusting a bare source value that a recycled
+	// chair carries over from whoever sat there last.
+	//
+	// The stamp lands BEFORE the source, and that order is load-bearing. The one
+	// reader of this pairing (drainReminderAckPin) admits an acknowledgement on
+	// the source alone, then reads the stamp in a SECOND provider round-trip.
+	// Source-first, a reader landing between the two writes sees this ack's fresh
+	// source beside the PREVIOUS occupant's stamp and mints agentAckBindingStale
+	// — positive proof of residue about an acknowledgement that landed
+	// microseconds ago, which is the one verdict that must never be minted by
+	// accident. Stamp-first, the only stamp state a source-keyed reader can
+	// observe is this ack's own: its digest, or empty and therefore unprovable.
+	requesterInstanceToken := drainAckRequesterInstanceToken(sessionName)
 	return joinDrainAckMutationErrors(
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey),
+		o.sp.SetMeta(sessionName, drainAckRequesterInstanceTokenKey, requesterInstanceToken),
 		o.sp.SetMeta(sessionName, reconcilerDrainAckSourceKey, drainAckSourceAgentValue),
 		o.sp.SetMeta(sessionName, "GC_DRAIN_ACK", "1"),
 	)
+}
+
+// drainAckRequesterInstanceToken returns the binding stamp for the acking pane's
+// own incarnation, and ONLY when this pane is the session being acked. `gc
+// runtime drain-ack <other>` is a cross-session ack: the caller's token is
+// evidence about the CALLER, not about the target, and stamping it on the
+// target's row reads back as agentAckBindingStale — positive proof of residue
+// for an acknowledgement that landed seconds ago. An empty stamp degrades to
+// agentAckBindingUnprovable instead, which is the direction this reader is
+// meant to fail in.
+//
+// The identity comparison is deliberately made against the pane's own
+// environment rather than through currentSessionRuntimeTarget: that resolver
+// also demands a city path, so it errors for reasons that have nothing to do
+// with WHO is acking, and a legitimate self-ack would silently degrade to
+// unprovable whenever the city context was unresolvable.
+func drainAckRequesterInstanceToken(sessionName string) string {
+	target := strings.TrimSpace(sessionName)
+	self := strings.TrimSpace(os.Getenv("GC_TMUX_SESSION"))
+	if self == "" {
+		self = strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
+	}
+	if target == "" || self == "" || self != target {
+		return ""
+	}
+	return drainAckInstanceTokenDigest(os.Getenv("GC_INSTANCE_TOKEN"))
+}
+
+// drainAckInstanceTokenDigest maps an incarnation token onto the value that is
+// safe to leave on a pane. GC_INSTANCE_TOKEN is a capability rather than an
+// identifier — it fences drain and stop against stale incarnations — and this
+// codebase keeps that value class off every command line for it: envArgvSafe
+// excludes the key, and session start stages it through a private 0600 file
+// instead of argv. A provider SetMeta is an argv channel on tmux
+// (`set-environment -t <name> <key> <value>`), whose argument vector is
+// world-readable in /proc/<pid>/cmdline, so stamping the token itself would
+// reopen that exposure on every self-ack.
+//
+// The binding only ever needs an equality compare, which a digest answers
+// without carrying the capability: equal tokens digest equal, and the digest
+// grants nothing. Empty stays empty, so a degraded pane that has no token stamps
+// nothing rather than the digest of "" — the unprovable arm is unchanged.
+func drainAckInstanceTokenDigest(token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 func (o *providerDrainOps) isDrainAcked(sessionName string) (bool, error) {
@@ -479,7 +550,7 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 			return 1
 		}
 		dops := newDrainOps(sp)
-		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, jsonOutput, stdout, stderr)
+		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, target.sessionID, jsonOutput, stdout, stderr)
 	}
 
 	current, err := currentSessionRuntimeTarget()
@@ -493,7 +564,8 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 		return 1
 	}
 	dops := newDrainOps(sp)
-	return doRuntimeDrainAck(dops, current.cityPath, current.display, current.sessionName, jsonOutput, stdout, stderr)
+	// Name-only key: the env-derived GC_SESSION_ID can be stale.
+	return doRuntimeDrainAck(dops, current.cityPath, current.display, current.sessionName, "", jsonOutput, stdout, stderr)
 }
 
 // ---------------------------------------------------------------------------
@@ -638,7 +710,8 @@ func doRuntimeRequestRestart(dops drainOps, persistRestart func() error, pinned 
 		Message: "restart requested by session",
 	})
 
-	if err := pokeControllerForRestart(cityPath); err != nil {
+	// Name-only key: sn is authoritative here, while GC_SESSION_ID can be stale.
+	if err := pokeControllerForRestart(cityPath, reconcilekey.SessionNamed(sn)); err != nil {
 		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -691,27 +764,9 @@ func waitForControllerRestart(ctx context.Context, dops drainOps, sp runtime.Pro
 	}
 }
 
-// pokeControllerForRestart signals the controller to run an immediate
-// reconcile tick instead of waiting for the next periodic patrol. It does not
-// wait for the controller to act: the restart-requested flag is durable, so a
-// signal failure just means the next periodic tick picks up the request
-// instead of an immediate one.
-//
-// This calls sendControllerCommandWithTimeouts directly rather than going
-// through pokeController: pokeController silently falls back to the
-// city-agnostic global supervisor socket on any send failure, which would
-// make an explicit-restart request for one city spuriously report success
-// via an unrelated supervisor.
-func pokeControllerForRestart(cityPath string) error {
-	if _, err := sendControllerCommandWithTimeouts(cityPath, "poke", 2*time.Second, 2*time.Second, 5*time.Second); err != nil {
-		return fmt.Errorf("signaling controller: %w (restart request remains durably set for the next reconcile tick)", err)
-	}
-	return nil
-}
-
-// drainAckPokeController is a mutable global test seam over pokeController.
+// drainAckPokeController is a mutable global test seam over enqueueController.
 // Tests that swap it MUST NOT call t.Parallel().
-var drainAckPokeController = pokeController
+var drainAckPokeController = enqueueController
 
 // drainAckReleaseHeldClaims is a mutable global test seam over
 // releaseUnexecutedClaimsForSession, matching drainAckPokeController above.
@@ -752,16 +807,20 @@ func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.W
 		}
 		return
 	}
-	store, err := openCityStoreAt(cityPath)
+	// One load serves every open below: drain-ack is a one-shot command, so
+	// the config it just read is current. The saving applies only when this
+	// load succeeds: a failed load leaves cfg nil, the city open then loads
+	// again on its own, and the rig legs are skipped as before.
+	cfg, _ := loadCityConfig(cityPath, io.Discard)
+	store, err := openCityStoreAtWithConfig(cityPath, cfg)
 	if err != nil || store == nil {
 		return
 	}
-	cfg, _ := loadCityConfig(cityPath, io.Discard)
 	rigStores := func() map[string]beads.Store {
 		if cfg == nil {
 			return nil
 		}
-		return buildStandaloneRigStores(cfg, cityPath, io.Discard)
+		return buildStandaloneRigStoresWithConfig(cfg, cityPath, io.Discard)
 	}
 	releaseUnexecutedClaimsForSessionStore(cityPath, cfg, store, rigStores, sessionName, drainAckReleaseBudget, stderr)
 }
@@ -825,13 +884,13 @@ const drainAckReleaseBudget = 15 * time.Second
 // tells the controller it may stop this session, so acknowledging first opens a
 // window in which the session dies still holding exactly the claim this release
 // exists to clear.
-func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
+func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer) int {
 	drainAckReleaseHeldClaims(cityPath, sn, stderr)
 	if err := dops.setDrainAck(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := drainAckPokeController(cityPath); err != nil {
+	if err := drainAckPokeController(cityPath, reconcilekey.SessionRef(sessionID, sn)); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	if jsonOutput {

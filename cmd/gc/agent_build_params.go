@@ -95,6 +95,20 @@ type agentBuildParams struct {
 	// does not set it.
 	providerHealthSnapshot *providerHealthSnapshot
 
+	// planOnly makes the pool planner decide without effects: selection skips
+	// singleton identity normalization, trigger metadata skips worktree.Verify
+	// (the create plan carries the spec), and the dependency floor returns a
+	// create plan.
+	// The effect paths (template resolution, overlay staging, hook install,
+	// session-bead creates and trigger binds) refuse with errPlanOnlyEffect.
+	// The v2 allocator sets it; legacy builds never do.
+	planOnly bool
+
+	// realizeProbe times and counts pool realization for the realize_pools
+	// trace record. Set by buildDesiredState around its realization loop only;
+	// nil elsewhere, which disables the counters.
+	realizeProbe *poolRealizeProbe
+
 	// beadNames caches qualifiedName → session_name mappings resolved
 	// during this build cycle. Populated lazily by resolveSessionName.
 	beadNames map[string]string
@@ -307,10 +321,19 @@ func templateNameFor(cfgAgent *config.Agent, qualifiedName string) string {
 // template is empty. Template errors fail closed so pool reconciliation does
 // not silently spawn sessions under unintended fallback names.
 func (p *agentBuildParams) resolveTmuxAliasForAgent(agent *config.Agent) (string, error) {
-	if p == nil || agent == nil {
+	if p == nil {
 		return "", nil
 	}
-	resolved, err := workdirutil.ResolveTmuxAlias(p.cityPath, p.cityName, *agent, p.rigs)
+	return resolveTmuxAliasForAgentIn(p.cityPath, p.cityName, p.rigs, agent)
+}
+
+// resolveTmuxAliasForAgentIn is resolveTmuxAliasForAgent for callers without
+// build params, such as the v2 allocator's create effect.
+func resolveTmuxAliasForAgentIn(cityPath, cityName string, rigs []config.Rig, agent *config.Agent) (string, error) {
+	if agent == nil {
+		return "", nil
+	}
+	resolved, err := workdirutil.ResolveTmuxAlias(cityPath, cityName, *agent, rigs)
 	if err != nil {
 		return "", fmt.Errorf("resolving tmux_alias for %q: %w", agent.QualifiedName(), err)
 	}

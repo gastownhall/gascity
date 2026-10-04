@@ -31,6 +31,7 @@ type initFinalizeOptions struct {
 	showProgress          bool
 	commandName           string
 	noStart               bool
+	hostedDolt            hostedDoltInitOptions
 }
 
 type initProviderTarget struct {
@@ -41,6 +42,14 @@ type initProviderTarget struct {
 
 func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOptions) int {
 	EnsureBuiltinRuntimeAssets(cityPath, os.Stderr) //nolint:errcheck // best-effort; needed before dependency and provider checks
+	// Record the selected provider owner before any dependency or readiness
+	// work. Either path can fail after the scaffold exists; a later gc start
+	// must therefore see the same pending topology rather than seed a legacy
+	// managed store.
+	if err := persistFreshProviderOwnership(cityPath, opts.hostedDolt); err != nil {
+		fmt.Fprintf(stderr, "%s: recording provider-owned beads scope: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// Check hard binary dependencies before handing off to the supervisor.
 	// Without this, missing deps (tmux, git, dolt, bd) cause the supervisor
@@ -97,6 +106,10 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: loading config for prefix resolution: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := opts.hostedDolt.registerSelectorEndpointForInit(cityPath); err != nil {
+		fmt.Fprintf(stderr, "%s: configuring selector endpoint: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !opts.skipProviderReadiness && hasRemoteImports {
@@ -344,7 +357,9 @@ func seedDeferredManagedBeadsBeforeProviderReadiness(cityPath string, cfg *confi
 	if !workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
 		return nil
 	}
-	if scopeUsesManagedBdStoreContract(cityPath, cityPath) {
+	if owned, err := scopeProviderOwned(cityPath, cityPath); err != nil {
+		return err
+	} else if !owned && scopeUsesManagedBdStoreContract(cityPath, cityPath) {
 		if err := seedDeferredManagedBeadsErr(cityPath, cityPath, config.EffectiveHQPrefix(cfg), ""); err != nil {
 			return err
 		}
@@ -353,8 +368,14 @@ func seedDeferredManagedBeadsBeforeProviderReadiness(cityPath string, cfg *confi
 		if strings.TrimSpace(rig.Path) == "" || !rigUsesManagedBdStoreContract(cityPath, rig) {
 			continue
 		}
-		if err := seedDeferredManagedBeadsErr(cityPath, rig.Path, rig.EffectivePrefix(), ""); err != nil {
-			return fmt.Errorf("rig %q: %w", rig.Name, err)
+		owned, err := scopeProviderOwned(cityPath, rig.Path)
+		if err != nil {
+			return fmt.Errorf("rig %q ownership: %w", rig.Name, err)
+		}
+		if !owned {
+			if err := seedDeferredManagedBeadsErr(cityPath, rig.Path, rig.EffectivePrefix(), ""); err != nil {
+				return fmt.Errorf("rig %q: %w", rig.Name, err)
+			}
 		}
 	}
 	return nil
@@ -570,6 +591,10 @@ var initRunVersion = func(binary string) (string, error) {
 const (
 	doltMinVersion = doltversion.ManagedMin // sql-server features used by gc-beads-bd
 	bdMinVersion   = "1.0.4"                // BdStore shell-out interface, including bd create --id
+	// Fresh provider-owned scopes use bd's persisted ownership and transport
+	// contract, introduced with the 1.3 release candidate. Existing ready
+	// stores retain the established compatibility floor.
+	bdFreshProviderMinVersion = "1.3.0"
 )
 
 // checkHardDependencies verifies that all required binaries are available
@@ -587,6 +612,13 @@ func checkHardDependencies(cityPath string) []missingDep {
 	}
 
 	needsBd := initNeedsBdTooling(cityPath)
+	bdRequiredVersion := bdMinVersion
+	if pending, err := providerScopeOwnershipHasInitializingEntry(cityPath); err != nil || pending {
+		// A corrupt journal must not silently lower the dependency floor to
+		// legacy compatibility. Normal ownership admission will surface the
+		// journal error before lifecycle work begins.
+		bdRequiredVersion = bdFreshProviderMinVersion
+	}
 
 	deps := []dep{
 		{
@@ -610,7 +642,7 @@ func checkHardDependencies(cityPath string) []missingDep {
 		{
 			name:        "bd",
 			installHint: "https://github.com/gastownhall/beads/releases",
-			minVersion:  bdMinVersion,
+			minVersion:  bdRequiredVersion,
 			condition:   func() bool { return needsBd },
 		},
 		{

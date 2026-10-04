@@ -347,16 +347,23 @@ func TestCityRuntimeTickSkipsDueOrderDispatchUnderFSPressure(t *testing.T) {
 	if got := buildCalls.Load(); got != 0 {
 		t.Fatalf("build desired calls = %d, want 0 before pressure-skip gate", got)
 	}
+	// Order dispatch runs on the orders lane. The skipped tick must not wake
+	// it, and a lane pass under the same pressure must skip too, so the due
+	// order writes no tracking and starts no exec.
+	if n := len(cr.ordersLaneOf().wakeCh); n != 0 {
+		t.Fatalf("pending orders-lane wakes after a pressure-skipped tick = %d, want 0", n)
+	}
+	cr.runOrdersLanePass(context.Background(), cr.cityPath, ordersLaneReasonCadence)
 	tracking, err := store.ListByLabel("order-run:pressure-due", 0, beads.IncludeClosed)
 	if err != nil {
 		t.Fatalf("list order tracking beads: %v", err)
 	}
 	if len(tracking) != 0 {
-		t.Fatalf("order tracking beads = %#v, want none while FS pressure skips tick", tracking)
+		t.Fatalf("order tracking beads = %#v, want none while FS pressure skips the tick and the lane", tracking)
 	}
 	select {
 	case <-execStarted:
-		t.Fatal("order exec started during pressure-skipped tick")
+		t.Fatal("order exec started during a pressure-skipped tick and lane pass")
 	default:
 	}
 	if !strings.Contains(stderr.String(), "FS pressure high") {
@@ -601,5 +608,35 @@ func TestCityRuntimeManualReloadBypassesFSPressureSkipUntilDemandRefresh(t *test
 	}
 	if len(evts) != 0 {
 		t.Fatalf("FS pressure skip events = %#v, want none for manual reload refresh tick", evts)
+	}
+}
+
+// Kills: the FS-pressure gate's p.completed = true dropped (a deliberately
+// skipped tick traced aborted), or its convergence drain dropped (a queued
+// CLI convergence command waits out the whole pressure episode). The skipped
+// tick replies to the queued command, records no phase after the gate, and
+// traces completed.
+func TestCityRuntimeTickFSPressureSkipCompletesAndDrainsConvergence(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, false)
+	withFakePressureFile(t, []byte(samplePressureHigh), nil)
+	t.Setenv(fsPressureThresholdEnv, "")
+	cr.convScopes = map[string]*convergenceScope{}
+	cr.convergenceReqCh = make(chan convergenceRequest, 1)
+	replyCh := make(chan convergenceReply, 1)
+	cr.convergenceReqCh <- convergenceRequest{Command: "stop", BeadID: "gc-missing", replyCh: replyCh}
+
+	runFixtureTick(cr, "patrol")
+
+	select {
+	case <-replyCh:
+	default:
+		t.Error("the FS-pressure-skipped tick did not drain the queued convergence request")
+	}
+	records := closeTrace(t, cr)
+	if ops := operationRecords(records); len(ops) != 0 {
+		t.Errorf("the FS-pressure-skipped tick ran phases past the gate: %v", ops)
+	}
+	if got := passCompletion(records, "tick"); got != TraceCompletionCompleted {
+		t.Errorf("FS-pressure-skipped tick trace completion = %q, want %q", got, TraceCompletionCompleted)
 	}
 }

@@ -41,6 +41,12 @@ var ErrMetadataParse = errors.New("bead metadata parse")
 // cannot answer without consulting the backing store.
 var ErrCacheUnavailable = errors.New("bead cache unavailable")
 
+// ErrRowRefreshFenced is returned by CachingStore.RefreshRow when a local
+// write, deletion or applied event newer than its backing read owns the row,
+// or a reconcile or full Prime merged since the read began, so the read
+// installed nothing. The caller may retry.
+var ErrRowRefreshFenced = errors.New("bead cache row refresh fenced by newer state")
+
 // ErrReadyContextUnsupported reports that a store cannot guarantee a Ready
 // projection stops when the caller's context is canceled.
 var ErrReadyContextUnsupported = errors.New("context-aware ready unsupported")

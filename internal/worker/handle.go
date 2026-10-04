@@ -36,6 +36,11 @@ type LifecycleHandle interface {
 	Create(context.Context, CreateMode) (sessionpkg.Info, error)
 	Reset(context.Context) error
 	Stop(context.Context) error
+	// StopForShutdown is Stop with CITY-SHUTDOWN intent, for the `gc stop` /
+	// `gc restart` sweep only. It carries latitude on lifecycle states that have
+	// no live turn to suspend (notably draining), which a targeted operator Stop
+	// must keep rejecting.
+	StopForShutdown(context.Context) error
 	Kill(context.Context) error
 	Close(context.Context) error
 	CloseDetailed(context.Context) (sessionpkg.CloseResult, error)

@@ -292,9 +292,20 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-All arguments after "gc bd" are forwarded to bd unchanged. "heartbeat
+All arguments after "gc bd" are forwarded to bd unchanged, with one
+exception: a "list" that filters on the wisps (ephemeral) tier —
+"--type=molecule", "--type=wisp", "--mol-type", "--wisp-type" — also gets
+"--include-infra". bd skips that tier on any list without the flag, so those
+filters would otherwise return [] and exit 0 on a ledger full of live
+molecules. Every other list is forwarded as written. "heartbeat
 &lt;issue-id&gt;" forwards to bd's native heartbeat, which refreshes the claim's
-lease and fails loudly when the caller no longer owns it. gc adds one
+lease and fails loudly when the caller no longer owns it. "show &lt;id&gt;
+--watch" (or "show --current --watch", or the "view" alias) on a scope that
+uses bd's proxied-server transport (the default for a new city), where bd
+refuses watch mode, is served by gc instead: it re-runs "bd show" every 2
+seconds and redraws when the bead's status or update time changes, until
+Ctrl+C. Like bd's own watch, it renders the plain form and ignores show's
+display flags (--json, --short, --long, --refs, --children). gc adds one
 subcommand of its own: "release-if-current &lt;issue-id&gt; &lt;assignee&gt;", which
 conditionally resets an in-progress assignment only when the bead still has
 that assignee.
@@ -344,7 +355,15 @@ gc beads
 Manage the canonical city endpoint topology for bd-backed beads stores.
 
 Use use-managed to make the city GC-managed again. Use use-external to pin the
-city to an external Dolt endpoint and rewrite inherited rig mirrors.
+city to an external Dolt endpoint and rewrite inherited rig mirrors. Use
+migrate-proxied to move a legacy GC-managed city onto bd's proxied-server
+topology.
+
+use-managed and use-external manage gc-owned endpoint topology only. They refuse
+a city whose store the beads provider owns — one journaled in
+.gc/scope-ownership.json, one transferred by the ownership handoff, or one bd's
+metadata binds to the proxied-server path — because that endpoint lives in bd's
+own files and is bd's to change.
 
 ```
 gc beads city
@@ -352,8 +371,37 @@ gc beads city
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc beads city migrate-proxied](#gc-beads-city-migrate-proxied) | Migrate a legacy GC-managed city to bd's proxied-server topology |
 | [gc beads city use-external](#gc-beads-city-use-external) | Set the city endpoint to an external Dolt server |
 | [gc beads city use-managed](#gc-beads-city-use-managed) | Set the city endpoint to GC-managed |
+
+## gc beads city migrate-proxied
+
+Migrate a legacy GC-managed city, and the rigs that share its Dolt data
+directory, onto bd's proxied-server topology.
+
+The city's gc-managed `dolt sql-server` must already be stopped: run gc stop
+first. bd cannot see a server gc started (it looks only for its own pid file),
+so migrating against a live one commits the mode flip and leaves the scope
+unusable until the server dies.
+
+Each scope is migrated with bd's own `bd migrate from-server-to-proxied-server`,
+city first. The command is idempotent — an already-proxied scope reports
+"already migrated" — so a partially failed run can simply be rerun. It also
+retires gc's own runtime publication for the city it just handed over.
+
+On bd v1.3.0 this is the only supported migration for a legacy GC-managed city.
+Procedure, refusals and recovery: engdocs/runbooks/beads-migrate-proxied.md.
+
+```
+gc beads city migrate-proxied [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | report the plan without migrating anything |
+| `--json` | bool |  | emit the per-scope report as JSON |
+| `--rig` | stringArray |  | migrate only this rig (repeatable; default is every rig in city.toml) |
 
 ## gc beads city use-external
 
@@ -2284,6 +2332,8 @@ gc init --template gascity --default-provider claude \
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--beads-target` | string |  | beads target selector: local or external (or GC_BEADS_TARGET); give with --beads-transport. Default local. external requires --dolt-host, --dolt-port and --dolt-database (or GC_DOLT_HOST/GC_DOLT_PORT/GC_DOLT_DATABASE); bd resolves the project_id itself, so --dolt-project-id is not needed with a selector |
+| `--beads-transport` | string |  | beads transport selector: direct or proxied (or GC_BEADS_TRANSPORT); give with --beads-target. Default proxied: bd owns the Dolt process, any bd read restarts it, and gc stop stops it. direct is the escape hatch and is also bd-owned (bd init --server), not the legacy gc-managed server. Every fresh provider-owned init requires bd &gt;= 1.3.0, selector or not; only the legacy --dolt-host alias given without a selector stays on the 1.0.4 floor |
 | `--bootstrap-profile` | string |  | bootstrap profile to apply for hosted/container defaults |
 | `--default-provider` | string |  | default readiness-aware provider to select from --providers |
 | `--dolt-database` | string |  | hosted beads project database, e.g. bd_prj_… (or GC_DOLT_DATABASE); required with --dolt-host |
@@ -2569,6 +2619,16 @@ Use --to as an alternative to the positional &lt;to&gt; argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
 Use --all to broadcast to all live sessions (excluding sender and "human").
 
+Use --dedup &lt;key&gt; for repeating notifications (patrol and cooldown orders
+that re-detect the same condition every run): the send is suppressed while
+a previous message with the same key is still live (un-archived) in the same
+mailbox, and an alias and the session behind it count as one mailbox.
+Suppression exits 0. Once the recipient archives the message the stream may
+alert again; senders that want a longer re-alert cadence keep their own
+last-sent state. Dedup needs a provider that can query its own message
+history. The built-in provider can; one that cannot sends normally and says
+so on stderr, because a duplicate notification beats a dropped one.
+
 ```
 gc mail send [<to>] [<body>] [flags]
 ```
@@ -2578,16 +2638,18 @@ gc mail send [<to>] [<body>] [flags]
 ```
 gc mail send mayor "Build is green"
 gc mail send mayor -s "Build is green"
-gc mail send myrig/witness -s "Need investigation" -m "Attach logs from the last failed run"
+gc mail send myrig/reviewer -s "Need investigation" -m "Attach logs from the last failed run"
 gc mail send --to mayor "Build is green"
 gc mail send human "Review needed for PR #42"
-gc mail send polecat "Priority task" --notify
+gc mail send worker "Priority task" --notify
 gc mail send --all "Status update: tests passing"
+gc mail send worker -s "disk warning" --dedup "disk-warn:hq"
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--all` | bool |  | broadcast to all live sessions (excludes sender and human) |
+| `--dedup` | string |  | suppress the send while a live message with this dedup key is in the same mailbox (provider permitting) |
 | `--from` | string |  | sender identity (default: $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human") |
 | `--json` | bool |  | emit JSONL result |
 | `-m`, `--message` | string |  | message body text |
@@ -2747,7 +2809,30 @@ gc nudge
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc nudge drop](#gc-nudge-drop) | Dead-letter one or more pending or in-flight nudges |
 | [gc nudge status](#gc-nudge-status) | Show queued and dead-letter nudges for a session |
+
+## gc nudge drop
+
+Dead-letter one or more pending or in-flight nudges by ID.
+
+Each dropped nudge is terminalized through the same dead-letter path a
+failed delivery attempt uses, so it lands in "gc nudge status" as dead
+rather than disappearing silently. Find IDs with "gc nudge status".
+
+Dropping an in-flight nudge dead-letters it even if it was already
+injected into the session but not yet acked.
+
+This only accepts explicit nudge IDs; it does not do bulk or age-based
+selection.
+
+```
+gc nudge drop <id>... [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | Output as JSON |
 
 ## gc nudge status
 
@@ -2898,7 +2983,7 @@ gc order sweep-nudge-mail [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--dry-run` | bool |  | log what would be closed; make no changes |
-| `--mail-ttl` | duration | `1h0m0s` | min age before a read mail bead is GC'd |
+| `--mail-ttl` | duration | `1h0m0s` | min age before a read mail bead is GC'd; 0 disables the mail-close phase (default: cfg.Mail.RetentionTTL when set, else 1h0m0s) |
 | `--nudge-ttl` | duration | `10m0s` | min age before a delivered nudge bead is GC'd |
 | `--quiet` | bool |  | suppress success output |
 
@@ -3676,7 +3761,9 @@ Use --self to mark the rig as running its own local Dolt server on
 command requires --force because the rig's .beads/dolt-server.port mirror
 will no longer track the managed city Dolt.
 
-This command owns the rig's canonical .beads/config.yaml topology state.
+This command owns the rig's canonical .beads/config.yaml topology state. It
+refuses a rig whose store the beads provider owns: that rig's endpoint lives in
+bd's own files and is bd's to change.
 
 ```
 gc rig set-endpoint <rig> [flags]
@@ -4257,6 +4344,13 @@ work remain attached to the existing session bead. For named sessions, reset
 also clears any tripped named-session respawn circuit breaker before requesting
 the fresh restart.
 
+One case is not an in-place restart. A session whose create never completed,
+is past its start lease, and has no running runtime cannot be restarted in
+place, because its unfinished create is what blocks it. Reset rolls that
+session back instead: it closes the bead as a failed create and releases the
+alias so the controller can create a replacement. A create that is still
+starting, or whose runtime is running, is never rolled back.
+
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
 ```
@@ -4560,6 +4654,13 @@ will not be found by name or auto-started again until it is re-registered
 with "gc register". Use "gc unregister" directly to remove a registration
 without stopping sessions.
 
+gc stop reports "City stopped." only when it could confirm that every
+session stopped. If it could not list the runtime's sessions completely,
+or could not check whether a session is still running, it names what it
+could not verify, still stops every session it did see, and exits
+non-zero; a supervisor registration is restored. Resolve the reported
+error and run gc stop again.
+
 Use --timeout=DURATION to cap the wall-clock time gc stop will spend
 before giving up; the default budgets configured session interrupt and
 stop waves, the configured shutdown grace wait, and a second orphan
@@ -4594,6 +4695,7 @@ gc storage
 | [gc storage migrate](#gc-storage-migrate) | Migrate this city's infrastructure classes onto their configured binding |
 | [gc storage preflight](#gc-storage-preflight) | Report what the migration would refuse, without migrating (read-only) |
 | [gc storage recover-stranded](#gc-storage-recover-stranded) | Copy stranded infrastructure beads from the retained work store into the converged binding |
+| [gc storage repair-sequence](#gc-storage-repair-sequence) | Inspect or raise a SQLite bead store's id-sequence floor |
 | [gc storage status](#gc-storage-status) | Report this city's storage-class layout (read-only) |
 
 ## gc storage migrate
@@ -4674,6 +4776,53 @@ gc storage recover-stranded [flags]
 | `--dump` | string |  | write every stranded bead and its source dep edges to this JSON file before any write |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--from-work` | bool |  | recover the stranded infrastructure beads out of this city's work store |
+
+## gc storage repair-sequence
+
+Inspect or raise the persisted id-sequence floor of a SQLite bead store.
+
+Without --floor this is read-only: it reports the persisted floor and the
+highest auto-minted id the store still holds, and whether minting is refused
+because a negative "&lt;prefix&gt;--&lt;n&gt;" id ranks above the floor.
+
+A negative id above the floor usually means an older build wrapped the
+sequence past 9223372036854775807. It can also come from a copy or import that
+pinned "&lt;prefix&gt;--&lt;n&gt;" ids into a store that never wrapped. If those rows are
+stray duplicates, do not raise the floor: delete every "&lt;prefix&gt;--&lt;n&gt;" row
+above the floor, not only the one the report names, and reopen the store
+(restart the processes serving it), and minting resumes in the positive range.
+Deleting destroys those beads, so if any of them is a real bead, raise the
+floor instead.
+
+With --floor=N it persists N as the floor, so the next auto id is N+1. Pick N
+at or above the highest id EVER issued under the prefix — deleted beads are no
+longer in the store, so derive it from the event log and dispatcher traces. The
+command refuses to lower the persisted floor and refuses N below the highest
+auto id present.
+
+Ids are ordered 1 &lt; ... &lt; 9223372036854775807 &lt; -9223372036854775808 &lt; ... &lt; -1.
+On a store an older build wrapped, the positive range is spent: pass a NEGATIVE
+floor above every "&lt;prefix&gt;--&lt;n&gt;" id ever issued, and allocation continues
+upward toward -1 without re-entering the positive range. That cannot be
+undone. Builds without this fix refuse to open a store whose floor is negative.
+
+Before repairing a wrapped store, stop every process serving it that runs a
+build without this fix, so none keeps minting wrapped ids past the floor you
+pick. After a floor raise, processes on this build need no restart: one that
+refuses to mint resumes at its next mint once the floor covers the store.
+
+The store defaults to this city's SQLite infrastructure binding; --dir names
+any other store directory (the directory holding beads.sqlite).
+
+```
+gc storage repair-sequence [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dir` | string |  | store directory holding beads.sqlite (default: this city's SQLite infrastructure binding) |
+| `--floor` | string |  | new floor (int64, may be negative); omit to only report |
+| `--prefix` | string | `gcg` | auto-id prefix whose sequence to inspect or repair |
 
 ## gc storage status
 
@@ -5179,6 +5328,7 @@ gc worktree ensure [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--agent` | string |  | qualified agent identity to best-effort materialize skills for after creation |
 | `--base` | string |  | exact base ref used for this worktree (required) |
 | `--base-sha` | string |  | recorded base SHA to verify when reusing a worktree |
 | `--bead` | string |  | work bead bound to this worktree (required) |
