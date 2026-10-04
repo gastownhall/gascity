@@ -739,6 +739,34 @@ func TestAllocator_StaleLegRowsKeep(t *testing.T) {
 	}
 }
 
+// Kills: retiring an identity loser under an incomplete census (C2.13,
+// M22). A stale leg may hold the winner, so the verdict retires nothing.
+func TestAllocator_StaleLegRetiresNoIdentityLoser(t *testing.T) {
+	cfg := chatCity("always")
+	feed := &fakeCensusFeed{nonExact: map[beads.Store]bool{}, recordings: map[beads.Store]censusRecording{}}
+	rig := censusStore()
+	feed.nonExact[rig] = true
+	feed.recordings[rig] = censusRecording{At: allocNow.Add(-10 * time.Minute), Expires: allocNow.Add(-9 * time.Minute)}
+	f := newAllocFixture(t, cfg).sessions(chatRow("gc-1", "1"), chatRow("gc-2", "3"))
+	f.legs = append(f.legs, classStoreCandidate{ref: "rig:a", store: rig})
+	in := f.in
+	c, err := newCensusReader(feed.feed()).read(allocNow, cfg, f.legs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Incomplete() {
+		t.Fatal("stale leg: census complete, want incomplete")
+	}
+	in.Census, in.Obs = c, f.observation()
+	d := mustDecide(t, in)
+	if v := d.Snapshot.Identities["chat"]; len(v.Losers) != 0 {
+		t.Fatalf("stale leg: losers %v retired under an incomplete census", v.Losers)
+	}
+	if e := entryOf(t, d, "gc-1"); e.Desired == desireNone {
+		t.Fatalf("stale leg: a duplicate retired: %s/%s", e.Desired, e.Reason)
+	}
+}
+
 // Kills: a missing census read as an empty city (§4.2 census errors): with
 // no census the pass is partial and keeps.
 func TestAllocator_NoCensusIsPartialNotEmpty(t *testing.T) {
