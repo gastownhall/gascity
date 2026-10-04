@@ -112,8 +112,9 @@ code changes.
 
 **If you discover a code fix is required,** do NOT attempt it here: stop the
 workflow so the operator can re-pour with mol-polecat-commit or
-mol-polecat-pr. Close this step failed before the ack, or `gc runtime
-drain-ack` hands it back to the pool and a fresh session runs it again:
+mol-polecat-pr. Close this step failed before the ack, or
+`gc runtime drain-ack` hands it back to the pool and a fresh session runs it
+again:
 ```bash
 CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
 WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
@@ -159,8 +160,8 @@ modifications, STOP — do not run a broad `git checkout`. This is a shared,
 non-isolated checkout, so a blanket discard can wipe unrelated local work.
 Stop the workflow so the operator can inspect, closing this step failed before
 the ack so `gc runtime drain-ack` does not hand it back to the pool. Only revert
-files you are certain you touched, by explicit path (e.g. `git checkout --
-path/to/file`).
+files you are certain you touched, by explicit path (e.g.
+`git checkout -- path/to/file`).
 ```bash
 CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
 WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
