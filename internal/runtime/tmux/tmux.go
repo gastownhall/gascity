@@ -3183,20 +3183,9 @@ func (t *Tmux) DismissModelSwitchModalIfPresent(session string) {
 	)
 }
 
-// feedbackSurveyDismissConfirmDelay lets the "0" keystroke register in the
-// composer before Enter confirms it, so Enter does not race the digit.
 const feedbackSurveyDismissConfirmDelay = 150 * time.Millisecond
 
-// dismissFeedbackSurveyModal dismisses Claude Code's post-turn feedback
-// survey (ga-zg7fjq) by sending "0" (Dismiss) then Enter. Enter resolves to
-// the bundle's chat:submit action, which fires the survey's onDigit handler
-// immediately instead of waiting out its 400ms debounce -- see
-// runtime.ContainsFeedbackSurveyModal for the bundle-verified mechanism this
-// mirrors. It is a no-op unless the matcher fires, so it never sends stray
-// keystrokes into ordinary working panes. Side effects are injected so the
-// decision is unit-testable without a live tmux server. Returns whether the
-// modal was present (i.e. a dismiss was attempted).
-func dismissFeedbackSurveyModal(content string, sendKeys func(keys ...string) error, sleep func(time.Duration)) (bool, error) {
+func dismissFeedbackSurveyModal(content string, capture func() (string, error), sendKeys func(keys ...string) error, sleep func(time.Duration)) (bool, error) {
 	if !runtime.ContainsFeedbackSurveyModal(content) {
 		return false, nil
 	}
@@ -3204,7 +3193,16 @@ func dismissFeedbackSurveyModal(content string, sendKeys func(keys ...string) er
 		return true, err
 	}
 	sleep(feedbackSurveyDismissConfirmDelay)
-	return true, sendKeys("Enter")
+	content, err := capture()
+	if err != nil {
+		return true, errors.Join(err, sendKeys("C-u"))
+	}
+	remainder, observed := lastComposerRemainder(strings.Split(content, "\n"), DefaultReadyPromptPrefix)
+	composer := strings.TrimSpace(strings.TrimRight(strings.TrimSpace(remainder), "│┃"))
+	if observed && composer == "0" {
+		return true, sendKeys("C-u")
+	}
+	return true, nil
 }
 
 // DismissFeedbackSurveyModalIfPresent clears Claude Code's post-turn
@@ -3229,23 +3227,14 @@ func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) {
 		return nil
 	}
 
-	content, err := t.CapturePane(target, promptObservationLines)
+	capture := func() (string, error) {
+		return t.CaptureVisiblePane(target)
+	}
+	content, err := capture()
 	if err != nil {
 		return
 	}
-	present, _ := dismissFeedbackSurveyModal(content, sendKeys, time.Sleep)
-	if !present {
-		return
-	}
-
-	// The survey can occasionally eat the first digit (e.g. a keystroke lost
-	// to a slow-to-wake detached pane); re-check and retry the dismiss pair
-	// once before giving up for this call.
-	content, err = t.CapturePane(target, promptObservationLines)
-	if err != nil {
-		return
-	}
-	_, _ = dismissFeedbackSurveyModal(content, sendKeys, time.Sleep)
+	_, _ = dismissFeedbackSurveyModal(content, capture, sendKeys, time.Sleep)
 }
 
 // GetPaneCommand returns the current command running in a pane.

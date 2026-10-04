@@ -1,8 +1,12 @@
 package tmux
 
 import (
+	"context"
+	"errors"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // feedbackSurveySessionFixture and feedbackSurveyMemoryFixture are
@@ -67,5 +71,99 @@ func TestFeedbackSurveyParkedPaneReadsIdle(t *testing.T) {
 				t.Fatalf("no line matched the ready-prompt prefix %q; want the boxed composer line to match so the pane reads idle:\n%s", DefaultReadyPromptPrefix, tt.content)
 			}
 		})
+	}
+}
+
+func TestDismissFeedbackSurveyModalKeySafety(t *testing.T) {
+	captureErr := errors.New("capture failed")
+	tests := []struct {
+		name           string
+		captured       string
+		captureErr     error
+		wantKeys       string
+		wantCaptureErr bool
+	}{
+		{"clears stray digit when survey vanishes", "╭───╮\n│ ❯ 0 │\n╰───╯", nil, "0,C-u", false},
+		{"sends only dismiss digit while survey remains", feedbackSurveySessionFixture, nil, "0", false},
+		{"clears digit when recapture fails", "", captureErr, "0,C-u", true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var keys []string
+			capture := func() (string, error) {
+				return test.captured, test.captureErr
+			}
+			sendKeys := func(sent ...string) error {
+				keys = append(keys, sent...)
+				return nil
+			}
+
+			present, err := dismissFeedbackSurveyModal(feedbackSurveySessionFixture, capture, sendKeys, func(time.Duration) {})
+			if test.wantCaptureErr != errors.Is(err, captureErr) {
+				t.Fatalf("dismissFeedbackSurveyModal error = %v, wantCaptureErr %t", err, test.wantCaptureErr)
+			}
+			if !present {
+				t.Fatal("dismissFeedbackSurveyModal reported no survey")
+			}
+			if got := strings.Join(keys, ","); got != test.wantKeys {
+				t.Fatalf("keys = %q, want %q", got, test.wantKeys)
+			}
+		})
+	}
+}
+
+type staleSurveyScrollbackExecutor struct {
+	calls [][]string
+}
+
+func (s *staleSurveyScrollbackExecutor) execute(args []string) (string, error) {
+	s.calls = append(s.calls, slices.Clone(args))
+	if slices.Contains(args, "capture-pane") {
+		if slices.Contains(args, "-S") {
+			return feedbackSurveySessionFixture, nil
+		}
+		return "❯ ", nil
+	}
+	return "", nil
+}
+
+func (s *staleSurveyScrollbackExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return s.execute(args)
+}
+
+func TestDismissFeedbackSurveyModalIgnoresSurveyOnlyInScrollback(t *testing.T) {
+	executor := &staleSurveyScrollbackExecutor{}
+	tm := &Tmux{cfg: DefaultConfig(), exec: executor}
+
+	tm.DismissFeedbackSurveyModalIfPresent("agent-pane")
+
+	for _, call := range executor.calls {
+		if slices.Contains(call, "send-keys") {
+			t.Fatalf("stale survey scrollback sent stray keys: %v", executor.calls)
+		}
+	}
+	wantCapture := []string{"-u", "capture-pane", "-p", "-t", "=agent-pane:"}
+	if len(executor.calls) != 2 || !slices.Equal(executor.calls[1], wantCapture) {
+		t.Fatalf("calls = %v, want pane lookup then visible capture %v", executor.calls, wantCapture)
+	}
+}
+
+func TestDismissFeedbackSurveyModalDoesNotRetryAfterSurveyVanishes(t *testing.T) {
+	executor := &scriptedTargetExecutor{captures: []string{
+		feedbackSurveySessionFixture,
+		"❯ ",
+	}}
+	tm := &Tmux{cfg: DefaultConfig(), exec: executor}
+
+	tm.DismissFeedbackSurveyModalIfPresent("agent-pane")
+
+	var sent [][]string
+	for _, call := range executor.calls {
+		if slices.Contains(call, "send-keys") {
+			sent = append(sent, call)
+		}
+	}
+	if len(sent) != 1 || sent[0][len(sent[0])-1] != "0" {
+		t.Fatalf("send-keys calls = %v, want one dismiss digit and no retry", sent)
 	}
 }

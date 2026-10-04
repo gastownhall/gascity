@@ -12,15 +12,6 @@ import (
 	"time"
 )
 
-// buildFeedbackSurveyAgent compiles a fake agent TUI that renders Claude
-// Code's post-turn feedback survey and holds it until it receives the
-// dismiss key ("0" then Enter) -- mirroring the bundle-verified onDigit
-// contract from ga-zg7fjq: an option only fires once inputValue is exactly
-// one digit, and Enter confirms immediately without waiting out the
-// debounce. Once dismissed it behaves like a normal composer: it echoes
-// stdin back and prints an "esc to interrupt" busy footer on Enter (the same
-// signal paneContainsBusyIndicator checks for), so a test can prove a nudge
-// message survived the survey instead of being swallowed by it.
 func buildFeedbackSurveyAgent(t *testing.T, dir, name string) string {
 	t.Helper()
 	bin := dir + "/" + name
@@ -39,7 +30,6 @@ func main(){
 	fmt.Println("  ⏵⏵ bypass permissions on (shift+tab to cycle)")
 
 	dismissed := false
-	pendingZero := false
 	r := bufio.NewReader(os.Stdin)
 	for {
 		b, err := r.ReadByte()
@@ -49,14 +39,9 @@ func main(){
 		if !dismissed {
 			switch b {
 			case '0':
-				pendingZero = true
-			case '\r', '\n':
-				if pendingZero {
-					dismissed = true
-					fmt.Println()
-					fmt.Println("SURVEY_DISMISSED")
-				}
-				pendingZero = false
+				dismissed = true
+				fmt.Print("\x1b[2J\x1b[H")
+				fmt.Println("SURVEY_DISMISSED")
 			}
 			continue
 		}
