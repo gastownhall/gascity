@@ -237,22 +237,23 @@ func (f *Factory) HandleForTarget(target string, processNames []string) (Handle,
 	if liveProvider, err := f.provider.GetMeta(target, "GC_PROVIDER"); err == nil && strings.TrimSpace(liveProvider) != "" {
 		providerName = strings.TrimSpace(liveProvider)
 	}
-	return f.RuntimeHandle(target, providerName, "", processNames)
+	return f.RuntimeHandle(target, providerName, providerName, "", processNames)
 }
 
 // RuntimeHandle constructs a runtime-only worker handle using the factory's
 // configured provider and recorder.
-func (f *Factory) RuntimeHandle(sessionName, providerName, transport string, processNames []string) (Handle, error) {
+func (f *Factory) RuntimeHandle(sessionName, providerName, providerFamily, transport string, processNames []string) (Handle, error) {
 	if f.provider == nil {
 		return nil, sessionpkg.ErrSessionNotFound
 	}
 	return NewRuntimeHandle(RuntimeHandleConfig{
-		Provider:     f.provider,
-		SessionName:  sessionName,
-		ProviderName: providerName,
-		Transport:    transport,
-		ProcessNames: append([]string(nil), processNames...),
-		Recorder:     f.recorder,
+		Provider:       f.provider,
+		SessionName:    sessionName,
+		ProviderName:   providerName,
+		ProviderFamily: providerFamily,
+		Transport:      transport,
+		ProcessNames:   append([]string(nil), processNames...),
+		Recorder:       f.recorder,
 	})
 }
 

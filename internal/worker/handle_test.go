@@ -1764,9 +1764,10 @@ func TestRuntimeHandleNudgeWaitIdleClaudeWrapsReminder(t *testing.T) {
 	sp.WaitForIdleErrors["legacy-worker"] = nil
 
 	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
-		Provider:     sp,
-		SessionName:  "legacy-worker",
-		ProviderName: "claude",
+		Provider:       sp,
+		SessionName:    "legacy-worker",
+		ProviderName:   "claude",
+		ProviderFamily: "claude",
 	})
 	if err != nil {
 		t.Fatalf("NewRuntimeHandle: %v", err)
@@ -1809,6 +1810,52 @@ func TestRuntimeHandleNudgeWaitIdleClaudeWrapsReminder(t *testing.T) {
 	}
 }
 
+func TestRuntimeHandleNudgeWaitIdleDerivedClaudeWrapsReminder(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.WaitForIdleErrors["legacy-worker"] = nil
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:       sp,
+		SessionName:    "legacy-worker",
+		ProviderName:   "claude-omni",
+		ProviderFamily: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	result, err := handle.Nudge(context.Background(), NudgeRequest{
+		Text:     "check deploy status",
+		Delivery: NudgeDeliveryWaitIdle,
+		Source:   "mail",
+	})
+	if err != nil {
+		t.Fatalf("Nudge(wait_idle): %v", err)
+	}
+	if !result.Delivered {
+		t.Fatal("Nudge(wait_idle) Delivered = false, want true for claude-omni (claude family)")
+	}
+
+	var waitCalls, nudgeNow int
+	for _, call := range sp.Calls {
+		switch call.Method {
+		case "WaitForIdle":
+			waitCalls++
+		case "NudgeNow":
+			nudgeNow++
+		}
+	}
+	if waitCalls != 1 {
+		t.Fatalf("claude-omni WaitForIdle calls = %d, want 1", waitCalls)
+	}
+	if nudgeNow != 1 {
+		t.Fatalf("claude-omni NudgeNow calls = %d, want 1", nudgeNow)
+	}
+}
+
 func TestRuntimeHandleNudgeWaitIdleHonorsCallerContext(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
@@ -1821,9 +1868,10 @@ func TestRuntimeHandleNudgeWaitIdleHonorsCallerContext(t *testing.T) {
 	sp.WaitForIdleStarted["legacy-worker"] = started
 
 	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
-		Provider:     sp,
-		SessionName:  "legacy-worker",
-		ProviderName: "claude",
+		Provider:       sp,
+		SessionName:    "legacy-worker",
+		ProviderName:   "claude",
+		ProviderFamily: "claude",
 	})
 	if err != nil {
 		t.Fatalf("NewRuntimeHandle: %v", err)
@@ -1862,9 +1910,10 @@ func TestRuntimeHandleNudgeWaitIdleInternalTimeoutReturnsUndeliveredWithoutError
 	sp.WaitForIdleErrors["legacy-worker"] = context.DeadlineExceeded
 
 	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
-		Provider:     sp,
-		SessionName:  "legacy-worker",
-		ProviderName: "claude",
+		Provider:       sp,
+		SessionName:    "legacy-worker",
+		ProviderName:   "claude",
+		ProviderFamily: "claude",
 	})
 	if err != nil {
 		t.Fatalf("NewRuntimeHandle: %v", err)
@@ -1895,9 +1944,10 @@ func TestRuntimeHandleNudgeWaitIdleUnsupportedProviderReturnsUndelivered(t *test
 	}
 
 	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
-		Provider:     sp,
-		SessionName:  "legacy-worker",
-		ProviderName: "codex",
+		Provider:       sp,
+		SessionName:    "legacy-worker",
+		ProviderName:   "codex-omni",
+		ProviderFamily: "codex",
 	})
 	if err != nil {
 		t.Fatalf("NewRuntimeHandle: %v", err)
@@ -1911,7 +1961,7 @@ func TestRuntimeHandleNudgeWaitIdleUnsupportedProviderReturnsUndelivered(t *test
 		t.Fatalf("Nudge(wait_idle): %v", err)
 	}
 	if result.Delivered {
-		t.Fatal("Nudge(wait_idle) Delivered = true, want false for unsupported provider")
+		t.Fatal("Nudge(wait_idle) Delivered = true, want false for codex-omni (codex family)")
 	}
 	for _, call := range sp.Calls {
 		if call.Method == "WaitForIdle" || call.Method == "Nudge" || call.Method == "NudgeNow" {
