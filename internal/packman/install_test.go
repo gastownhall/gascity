@@ -1023,7 +1023,7 @@ func TestEnsureBundledPacksCurrentSkipsNonCanonicalBundledPin(t *testing.T) {
 	}
 
 	prev := runGit
-	runGit = func(dir string, args ...string) (string, error) {
+	runGit = func(_ string, args ...string) (string, error) {
 		return "", fmt.Errorf("unexpected git invocation for non-canonical bundled pin: %v", args)
 	}
 	t.Cleanup(func() { runGit = prev })
