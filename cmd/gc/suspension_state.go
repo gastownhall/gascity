@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
@@ -79,4 +81,38 @@ func buildEffectiveSuspendedRigNames(cfg *config.City, st suspensionstate.State)
 		}
 	}
 	return names
+}
+
+// pruneRemovedRigSuspensionOverrides drops runtime suspend/resume overrides
+// for rigs the live config no longer declares, so a rig deregistered by
+// hand-editing city.toml cannot pin a later rig of the same name against its
+// suspended_on_start.
+//
+// It only trusts a config the runtime has fully loaded and is running: a
+// failed reload keeps the old config, and a config change observed during
+// the reload means the view may already be stale (the dirty flag triggers a
+// fresh reload that prunes instead). Rigs lacking a site.toml path binding
+// stay in cfg.Rigs with an empty path, so they count as declared.
+func (cr *CityRuntime) pruneRemovedRigSuspensionOverrides(reply reloadControlReply) {
+	if reply.Outcome != reloadOutcomeApplied && reply.Outcome != reloadOutcomeNoChange {
+		return
+	}
+	if cr.cfg == nil || cr.cityPath == "" {
+		return
+	}
+	if cr.configDirty != nil && cr.configDirty.Load() {
+		return
+	}
+	declared := make(map[string]bool, len(cr.cfg.Rigs))
+	for _, r := range cr.cfg.Rigs {
+		declared[r.Name] = true
+	}
+	pruned, err := suspensionstate.PruneRigsNotIn(fsys.OSFS{}, cr.cityPath, declared)
+	if err != nil {
+		fmt.Fprintf(cr.stderr, "%s: pruning runtime suspension state: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	for _, name := range pruned {
+		fmt.Fprintf(cr.stderr, "%s: cleared runtime suspension override for rig %q (no longer declared in config)\n", cr.logPrefix, name) //nolint:errcheck // best-effort stderr
+	}
 }

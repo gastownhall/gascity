@@ -502,3 +502,78 @@ func TestSuspendedRigNames(t *testing.T) {
 		t.Error("delta should not be in suspended names (no preference)")
 	}
 }
+
+func TestPruneRigsNotIn_DropsOnlyUndeclaredRigs(t *testing.T) {
+	dir := t.TempDir()
+	st := State{
+		City: Override{Suspended: boolPtr(true)},
+		Rigs: map[string]Override{
+			"kept":    {Suspended: boolPtr(true)},
+			"gone-a":  {Suspended: boolPtr(false)},
+			"gone-b":  {Suspended: boolPtr(true)},
+			"another": {Suspended: boolPtr(false)},
+		},
+	}
+	if err := Save(fsys.OSFS{}, dir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	pruned, err := PruneRigsNotIn(fsys.OSFS{}, dir, map[string]bool{"kept": true, "another": true})
+	if err != nil {
+		t.Fatalf("PruneRigsNotIn: %v", err)
+	}
+	if got, want := strings.Join(pruned, ","), "gone-a,gone-b"; got != want {
+		t.Fatalf("pruned = %q, want %q (sorted)", got, want)
+	}
+	got, err := Load(fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Rigs) != 2 || !IsRigSuspended(got, "kept") {
+		t.Fatalf("declared rigs not preserved: %+v", got.Rigs)
+	}
+	if v, ok := ExplicitRig(got, "another"); !ok || v {
+		t.Fatalf("declared rig explicit resume not preserved: (%v, %v)", v, ok)
+	}
+	if !IsCitySuspended(got) {
+		t.Fatal("city override must be untouched")
+	}
+}
+
+func TestPruneRigsNotIn_NoWriteWhenNothingToPrune(t *testing.T) {
+	dir := t.TempDir()
+	if err := Save(fsys.OSFS{}, dir, State{Rigs: map[string]Override{"kept": {Suspended: boolPtr(true)}}}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(citylayout.SuspensionStateFile(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+
+	pruned, err := PruneRigsNotIn(fsys.OSFS{}, dir, map[string]bool{"kept": true})
+	if err != nil {
+		t.Fatalf("PruneRigsNotIn: %v", err)
+	}
+	if len(pruned) != 0 {
+		t.Fatalf("pruned = %v, want none", pruned)
+	}
+	after, err := os.ReadFile(citylayout.SuspensionStateFile(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("state file rewritten although nothing was pruned")
+	}
+}
+
+func TestPruneRigsNotIn_MissingFileIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	pruned, err := PruneRigsNotIn(fsys.OSFS{}, dir, nil)
+	if err != nil || len(pruned) != 0 {
+		t.Fatalf("PruneRigsNotIn on fresh city = (%v, %v), want (nil, nil)", pruned, err)
+	}
+	if _, err := os.Stat(citylayout.SuspensionStateFile(dir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("state file created on no-op prune: %v", err)
+	}
+}

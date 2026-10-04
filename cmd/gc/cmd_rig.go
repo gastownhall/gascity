@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
 
@@ -1246,6 +1247,12 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 	if err := config.WriteCityAndRigSiteBindingsForEditRemovingRigs(fsys.OSFS{}, tomlPath, cfg, rigName); err != nil {
 		fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+
+	// Drop the removed rig's runtime suspend/resume override so a rig later
+	// registered under the same name starts from its own suspended_on_start.
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityPath, rigName, nil); err != nil {
+		fmt.Fprintf(stderr, "gc rig remove: warning: clearing runtime suspension state: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 
 	// Regenerate routes.

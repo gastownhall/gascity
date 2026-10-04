@@ -1261,7 +1261,15 @@ func (e *Editor) DeleteRig(name string) error {
 		return err
 	}
 
-	return e.writeRemovingRigs(cfg, name)
+	if err := e.writeRemovingRigs(cfg, name); err != nil {
+		return err
+	}
+	// Drop the removed rig's runtime suspend/resume override so a rig later
+	// registered under the same name starts from its own suspended_on_start.
+	if err := suspensionstate.SetRigSuspended(e.fs, filepath.Dir(e.tomlPath), name, nil); err != nil {
+		return fmt.Errorf("clearing runtime suspension state for rig %q: %w", name, err)
+	}
+	return nil
 }
 
 // ProviderUpdate holds optional fields for a partial provider update.

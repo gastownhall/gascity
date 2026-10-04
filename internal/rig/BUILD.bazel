@@ -23,6 +23,7 @@ go_library(
         "//internal/packregistry",
         "//internal/pathdurability",
         "//internal/remotesource",
+        "//internal/suspensionstate",
     ],
 )
 
@@ -33,6 +34,7 @@ go_test(
         "imports_test.go",
         "path_durability_test.go",
         "provision_branch_source_test.go",
+        "provision_suspension_test.go",
         "rig_test.go",
         "rollback_beads_store_test.go",
         "rollback_provision_test.go",
@@ -46,6 +48,7 @@ go_test(
         "//internal/fsys",
         "//internal/git",
         "//internal/pathdurability",
+        "//internal/suspensionstate",
         "//internal/testenv",
     ],
 )
