@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"testing"
 )
 
 // FailureArtifactDirEnv names the directory a failing test copies its Dolt and
@@ -27,6 +26,8 @@ var failureArtifactNames = map[string]bool{
 	"server.log":       true, // bd db-proxy-child stderr + the dolt sql-server it spawns
 	"proxy.log":        true, // bd proxy listener
 	"dolt.log":         true, // gc-managed dolt sql-server
+	"dolt-server.log":  true, // scope-local dolt sql-server under <scope>/.beads
+	"supervisor.log":   true, // gc supervisor and the city controllers it runs
 	"config.yaml":      true, // the config bd generated for its child
 	"dolt-config.yaml": true, // the config gc-beads-bd generated for the managed server
 	"metadata.json":    true, // dolt_mode / dolt_database the scope actually got
@@ -34,22 +35,41 @@ var failureArtifactNames = map[string]bool{
 
 // maxFailureArtifactBytes caps each copied file. A proxy child that retries
 // dolt init writes its whole usage block per attempt, so server.log reaches
-// hundreds of KB while only the first and last few lines carry the error.
+// hundreds of KB while only the first and last few lines carry the error;
+// a longer file keeps its first quarter and its last three quarters.
 const maxFailureArtifactBytes = 256 << 10
 
-// saveFailureDiagnostics copies the allowlisted diagnostics under dir into the
-// directory named by FailureArtifactDirEnv. It is best-effort by design: this
-// runs while a test is already failing, and a collection error must never
-// replace the real failure.
-func saveFailureDiagnostics(t *testing.T, dir string) {
+// truncatedArtifactMarker separates the head and tail of a capped copy.
+const truncatedArtifactMarker = "\n... [truncated by testutil: middle of file omitted] ...\n"
+
+// FailureReporter is the part of testing.TB that diagnostics collection reads.
+type FailureReporter interface {
+	Name() string
+	Failed() bool
+}
+
+// SaveFailureDiagnostics copies the allowlisted diagnostics under dir into
+// $GC_TEST_FAILURE_ARTIFACT_DIR/<test name>/<base of dir> when t has failed.
+// Call it from a t.Cleanup registered before the one that removes dir. It is
+// best-effort by design: this runs while a test is already failing, and a
+// collection error must never replace the real failure.
+func SaveFailureDiagnostics(t FailureReporter, dir string) {
 	if !t.Failed() {
 		return
 	}
+	SaveDiagnostics(t.Name(), dir)
+}
+
+// SaveDiagnostics copies the allowlisted diagnostics under dir into
+// $GC_TEST_FAILURE_ARTIFACT_DIR/<name>/<base of dir> unconditionally. It is
+// for state that outlives a single test, such as a TestMain's shared GC_HOME
+// after a failed run. A no-op when the variable is unset.
+func SaveDiagnostics(name, dir string) {
 	dest := strings.TrimSpace(os.Getenv(FailureArtifactDirEnv))
 	if dest == "" {
 		return
 	}
-	dest = filepath.Join(dest, sanitizeArtifactPathSegment(t.Name()), filepath.Base(dir))
+	dest = filepath.Join(dest, sanitizeArtifactPathSegment(name), filepath.Base(dir))
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return
 	}
@@ -87,18 +107,39 @@ func writeFailureEnvSnapshot(dest, dir string) {
 	_ = os.WriteFile(filepath.Join(dest, "env.txt"), []byte(b.String()), 0o644)
 }
 
+// copyBoundedFile copies src to dst, keeping the head and the tail of a file
+// larger than maxFailureArtifactBytes: a server's startup lines and its last
+// lines before it died are the ones a diagnosis needs.
 func copyBoundedFile(src, dst string) {
 	in, err := os.Open(src) //nolint:gosec // G304: src comes from walking the test's own temp dir
 	if err != nil {
 		return
 	}
 	defer func() { _ = in.Close() }()
+	info, err := in.Stat()
+	if err != nil {
+		return
+	}
 	out, err := os.Create(dst) //nolint:gosec // G304: dst is under the workflow-provided artifact dir
 	if err != nil {
 		return
 	}
 	defer func() { _ = out.Close() }()
-	_, _ = io.Copy(out, io.LimitReader(in, maxFailureArtifactBytes))
+	if info.Size() <= maxFailureArtifactBytes {
+		_, _ = io.Copy(out, in)
+		return
+	}
+	const head = maxFailureArtifactBytes / 4
+	if _, err := io.CopyN(out, in, head); err != nil {
+		return
+	}
+	if _, err := io.WriteString(out, truncatedArtifactMarker); err != nil {
+		return
+	}
+	if _, err := in.Seek(-(maxFailureArtifactBytes - head), io.SeekEnd); err != nil {
+		return
+	}
+	_, _ = io.Copy(out, in)
 }
 
 // sanitizeArtifactPathSegment flattens a relative path or test name into one
