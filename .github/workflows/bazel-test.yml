@@ -235,7 +235,7 @@ jobs:
                 fi
               fi
             fi
-              if [ -n "$RBE_FORK_CERT_FILE" ]; then
+            if [ -n "$RBE_FORK_CERT_FILE" ]; then
               # rbe-fork: the mint's endpoint, instance (oss-fork, or oss for
               # allowlisted authors) and short-lived certificate.
               echo "build:remote-exec --remote_executor=$RBE_FORK_ENDPOINT"

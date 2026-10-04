@@ -11,8 +11,10 @@
 # job names deliberately differ from the required checks ("bazel test
 # (side-by-side)", "BUILD files in sync"), which bazel-test.yml keeps until
 # the cutover renames this gate and deletes bazel-test.yml. Until then:
-#   - --config=ci holds bazel-test.yml's generated lines with byte-identical
-#     values, so both workflows' actions share the remote cache and the
+#   - every key-affecting flag is committed unconditionally in .bazelrc, and
+#     --config=ci, setup-bazel's rc and bazel-test.yml's .bazelrc.local carry
+#     transport and result policy only (scripts/bazel_key_parity_test.go), so
+#     these lanes, bazel-test.yml and pre-push hash actions alike and the
 #     second run of a commit is mostly cache hits;
 #   - no lane passes --config=sole-run (per lane from G0 on);
 #   - the rbe job's lane list (event and mode) decides which lanes start;
@@ -238,8 +240,8 @@ jobs:
         with:
           base-sha: ${{ needs.rbe.outputs.base-sha }}
 
-      # Local modes run tests here with --config=ci's PATH, so give them the
-      # Go the remote workers have at /usr/local/go.
+      # Local modes run tests here with .bazelrc's pinned test PATH, so give
+      # them the Go the remote workers have at /usr/local/go.
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         if: needs.rbe.outputs.mode == 'cache' || needs.rbe.outputs.mode == 'local'
         with:
