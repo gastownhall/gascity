@@ -71,9 +71,6 @@
         },
         "additionalProperties": true
       }
-    },
-    "error": {
-      "type": "string"
     }
   },
   "additionalProperties": true

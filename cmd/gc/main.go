@@ -241,7 +241,7 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 		code := commandExitCode(executeErr)
 		if bufferJSONExecution {
 			if len(bytes.TrimSpace(jsonStdout.Bytes())) > 0 {
-				if _, copyErr := io.Copy(stdout, &jsonStdout); copyErr != nil {
+				if copyErr := flushBufferedJSON(stdout, stderr, &jsonStdout); copyErr != nil {
 					return 1
 				}
 			} else {
@@ -253,11 +253,22 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 		return code
 	}
 	if bufferJSONExecution {
-		if _, err := io.Copy(stdout, &jsonStdout); err != nil {
+		if err := flushBufferedJSON(stdout, stderr, &jsonStdout); err != nil {
 			return 1
 		}
 	}
 	return 0
+}
+
+// flushBufferedJSON copies a buffered --json result to stdout. The copy is the
+// only write a full disk or closed descriptor can fail, so a failure is named
+// on stderr rather than leaving the caller an empty file and a bare exit 1.
+func flushBufferedJSON(stdout, stderr io.Writer, buffered *bytes.Buffer) error {
+	if _, err := io.Copy(stdout, buffered); err != nil {
+		fmt.Fprintf(stderr, "gc: writing JSON output: %v\n", err) //nolint:errcheck // best-effort stderr
+		return err
+	}
+	return nil
 }
 
 func commandFailureMessage(err error) string {

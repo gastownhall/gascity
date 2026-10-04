@@ -687,10 +687,19 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	}
 
 	if report.BlockingFailed > 0 {
-		return 1
+		return doctorBlockingFailureExitCode
 	}
 	return 0
 }
+
+// doctorBlockingFailureExitCode is the exit code gc doctor returns when any
+// blocking check fails. The --json failure record carries it as
+// error.exit_code, so the record and the process agree.
+const doctorBlockingFailureExitCode = 1
+
+// doctorBlockingChecksFailedErrorCode is the --json error code for a run in
+// which at least one blocking check failed.
+const doctorBlockingChecksFailedErrorCode = "blocking_checks_failed"
 
 // maxDoctorCheckSuggestions bounds the "did you mean" list so one typo cannot
 // print most of the registry inline. The full list still follows in text mode.
@@ -975,7 +984,18 @@ type doctorJSONReport struct {
 	BlockingFailed int                `json:"blocking_failed"`
 	Fixed          int                `json:"fixed"`
 	Results        []doctorJSONResult `json:"results"`
-	Error          string             `json:"error,omitempty"`
+}
+
+// doctorJSONFailureReport is the --json record for a run that exits non-zero
+// because a blocking check failed. It is the shared failure envelope
+// (schemas/failure.schema.json: ok:false plus an error whose exit_code is the
+// process exit code) with the full report alongside under the schema's
+// additionalProperties, because a failing run is when the caller most needs
+// the per-check results. Without it the report would take ok:true from
+// withDefaultSuccessOK and read clean to a caller checking only that field.
+type doctorJSONFailureReport struct {
+	jsonSchemaErrorPayload
+	doctorJSONReport
 }
 
 func doctorStatusString(s doctor.CheckStatus) string {
@@ -1022,6 +1042,20 @@ func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
 			Fixed:        r.Fixed,
 			TimedOut:     r.TimedOut,
 			Payload:      r.Payload,
+		})
+	}
+	if report.BlockingFailed > 0 {
+		return writeCLIJSONLine(w, doctorJSONFailureReport{
+			jsonSchemaErrorPayload: jsonSchemaErrorPayload{
+				SchemaVersion: "1",
+				OK:            false,
+				Error: jsonSchemaErrorDetail{
+					Code:     doctorBlockingChecksFailedErrorCode,
+					Message:  fmt.Sprintf("%d blocking check(s) failed", report.BlockingFailed),
+					ExitCode: doctorBlockingFailureExitCode,
+				},
+			},
+			doctorJSONReport: out,
 		})
 	}
 	return writeCLIJSONLine(w, out)

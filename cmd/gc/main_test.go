@@ -8015,3 +8015,18 @@ func chdirToRealPackageDir(t *testing.T) {
 	t.Helper()
 	bazeltest.ChdirPackageDir(t, "cmd/gc")
 }
+
+// A buffered --json result that cannot be copied to stdout must say so on
+// stderr. The copy is the only write a full disk or closed descriptor can
+// fail; exiting 1 without a word leaves the caller an empty or truncated file
+// and nothing to diagnose it with.
+func TestRunBufferedJSONStdoutWriteFailureIsReportedOnStderr(t *testing.T) {
+	var stderr bytes.Buffer
+	code := run([]string{"version", "--json"}, errWriter{}, &stderr)
+	if code == 0 {
+		t.Fatalf("exit = 0 with an unwritable stdout, want non-zero; stderr=%q", stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "writing JSON output") || !strings.Contains(got, "write failed") {
+		t.Fatalf("stderr = %q, want the stdout write error named", got)
+	}
+}
