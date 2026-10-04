@@ -254,7 +254,7 @@ func newV2HarnessWithRows(t *testing.T, ids ...string) *v2Harness {
 
 func (h *v2Harness) boot(t *testing.T) {
 	t.Helper()
-	if err := h.rt.boot(context.Background()); err != nil {
+	if err := h.rt.boot(context.Background(), nil); err != nil {
 		t.Fatalf("boot: %v", err)
 	}
 	synctest.Wait()
@@ -263,7 +263,7 @@ func (h *v2Harness) boot(t *testing.T) {
 // bootAsync boots in the background; the channel yields boot's result.
 func (h *v2Harness) bootAsync() <-chan error {
 	done := make(chan error, 1)
-	go func() { done <- h.rt.boot(context.Background()) }()
+	go func() { done <- h.rt.boot(context.Background(), nil) }()
 	return done
 }
 
@@ -1145,8 +1145,8 @@ func TestV2TraceOnlyControllersWriteNothing(t *testing.T) {
 			m.SessionReasons[routeReasonInventory] != 1 || m.SessionReasons[v2ReasonResync] != 2 {
 			t.Fatalf("traced session reasons = %v, want boot 2, replay 1, socket 1, inventory 1, resync 2", m.SessionReasons)
 		}
-		if m.AllocatorReasons[v2ReasonBoot] != 1 {
-			t.Fatalf("traced allocator reasons = %v, want the boot pass", m.AllocatorReasons)
+		if m.AllocatorWakes[v2ReasonBoot] != 1 {
+			t.Fatalf("allocator wakes = %v, want the boot pass", m.AllocatorWakes)
 		}
 	})
 }
@@ -1155,9 +1155,9 @@ func TestV2TraceOnlyControllersWriteNothing(t *testing.T) {
 func TestV2MetricsLatencyDepthAndDuty(t *testing.T) {
 	m := newV2Metrics()
 	for i := 1; i <= 100; i++ {
-		m.recordReconcile(time.Duration(i)*time.Millisecond, true, time.Duration(101-i)*time.Second, v2Succeeded)
+		m.recordReconcile(time.Duration(i)*time.Millisecond, true, false, time.Duration(101-i)*time.Second, v2Succeeded)
 	}
-	m.recordReconcile(0, true, 0, v2Failed)
+	m.recordReconcile(0, true, false, 0, v2Failed)
 	t0 := time.Unix(1000, 0)
 	m.startAllocator(t0)
 	m.recordAllocatorPass(t0.Add(time.Second), time.Second, false)
@@ -1291,4 +1291,324 @@ func TestV2RuntimeDoesNotReferenceCityRuntime(t *testing.T) {
 	if len(bad) > 0 {
 		t.Fatalf("v2 runtime code must reach the city only through v2Host and the published env (F2):\n  %s", strings.Join(bad, "\n  "))
 	}
+}
+
+// Kills: no stuck-reconcile alert, one at the reload deadline instead of
+// twice it, one on every tick while the same reconcile stays stuck, or none
+// for a later reconcile that sticks too. The record reports the longest
+// reconcile in flight either way.
+func TestV2QueueRecordAlertsOnceOnAReconcileStuckPastTwiceTheReloadDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newV2HarnessWithRows(t)
+		stderr := &synchronizedBuffer{}
+		h.rt.host.stderr = stderr
+		var mu sync.Mutex
+		release := map[string]chan struct{}{"stuck-1": make(chan struct{}), "stuck-2": make(chan struct{})}
+		t.Cleanup(func() {
+			for _, ch := range release {
+				select {
+				case <-ch:
+				default:
+					close(ch)
+				}
+			}
+		})
+		h.rec.setSession(func(it workqueue.Item[rowKey], _ *reconcileEnv) (time.Duration, error) {
+			mu.Lock()
+			ch := release[it.Key.ID]
+			mu.Unlock()
+			if ch != nil {
+				<-ch
+			}
+			return 0, nil
+		})
+		h.boot(t)
+		const stuckAfter = 2 * reloadReconcileDeadline // pinned here, not read from the code under test
+		alerts := func() int { return strings.Count(stderr.String(), "session reconcile has been running") }
+		record := func() map[string]any { return h.rt.queueRecord(time.Now(), 0) }
+
+		h.add("stuck-1", workqueue.Reason{Kind: "api"})
+		synctest.Wait()
+		advance(stuckAfter - time.Second)
+		if got := record()["longest_in_flight_ms"]; got != (stuckAfter-time.Second).Milliseconds() || alerts() != 0 {
+			t.Fatalf("at %s in flight: longest_in_flight_ms = %v, alerts = %d; want %d, none", stuckAfter-time.Second, got, alerts(), (stuckAfter - time.Second).Milliseconds())
+		}
+		advance(time.Second)
+		record()
+		advance(time.Minute)
+		record()
+		if alerts() != 1 {
+			t.Fatalf("alerts = %d over two records of one stuck reconcile, want 1:\n%s", alerts(), stderr.String())
+		}
+		close(release["stuck-1"])
+		synctest.Wait()
+		if got := record()["longest_in_flight_ms"]; got != int64(0) {
+			t.Fatalf("longest_in_flight_ms = %v with nothing in flight, want 0", got)
+		}
+		h.add("stuck-2", workqueue.Reason{Kind: "api"})
+		synctest.Wait()
+		advance(stuckAfter)
+		record()
+		if alerts() != 2 {
+			t.Fatalf("alerts = %d after a second reconcile stuck, want 2", alerts())
+		}
+		close(release["stuck-2"])
+		synctest.Wait()
+	})
+}
+
+// Kills: the record not saying what boot waits on: the census (not read
+// yet, or failing), a boot key's first reconcile, or the allocator's first
+// successful pass.
+func TestV2QueueRecordReportsWhatBootWaitsOn(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newV2HarnessWithRows(t, "s-a")
+		boot := func() any { return h.rt.queueRecord(time.Now(), 0)["boot"] }
+		if got := boot(); got != v2BootCensus {
+			t.Fatalf("boot before boot = %v, want %s", got, v2BootCensus)
+		}
+		h.censusErr = []error{errors.New("store down")}
+		release := make(chan struct{})
+		releaseOnce := sync.OnceFunc(func() { close(release) })
+		t.Cleanup(releaseOnce)
+		h.rec.setSession(func(workqueue.Item[rowKey], *reconcileEnv) (time.Duration, error) {
+			<-release
+			return 0, nil
+		})
+		var allocCalls atomic.Int32
+		h.rec.setAllocator(func() error {
+			if allocCalls.Add(1) == 1 {
+				return errors.New("not yet")
+			}
+			return nil
+		})
+		done := h.bootAsync()
+		synctest.Wait()
+		if got := boot(); got != v2BootCensus {
+			t.Fatalf("boot on a failing census = %v, want %s", got, v2BootCensus)
+		}
+		advance(time.Second) // the census retry reads; s-a's boot reconcile blocks; the allocator fails once
+		if got := boot(); got != v2BootCoverage {
+			t.Fatalf("boot with s-a reconciling = %v, want %s", got, v2BootCoverage)
+		}
+		releaseOnce()
+		synctest.Wait()
+		if got := boot(); got != v2BootAllocator {
+			t.Fatalf("boot with every key reconciled and the allocator failing = %v, want %s", got, v2BootAllocator)
+		}
+		advance(time.Second) // the allocator's retry succeeds
+		if ok, err := ready(done); !ok || err != nil {
+			t.Fatalf("boot: ready=%v err=%v, want ready", ok, err)
+		}
+		if got := boot(); got != v2BootReady {
+			t.Fatalf("boot after ready = %v, want %s", got, v2BootReady)
+		}
+	})
+}
+
+// Kills: a reconcile_queue field read from the wrong source: the router's
+// panics, keys out or counters, a lane's depth or age, dirty for deferred,
+// failures for panics, the allocator duty, the boot duration, adds that are
+// not since the last record, resync requests by reason, holds and the FS gate;
+// and the bead-event latency sampling a replay-only row (E1) or the retry of
+// a failed item a bead event queued (E3), or every reconcile.
+//
+// The timeline (fake time, from the bubble's start):
+//
+//	0s  boot: s-a's boot reconcile takes 2s, the allocator's first pass 1s
+//	2s  f-1's bead event: f-1 starts and blocks; a second event makes it dirty
+//	    hold; e-1's bead event
+//	3s  r-1's replay, p-1's api add, q-1 on the resync lane, a router panic
+//	    (boom), two undecodable events
+//	4s  release: e-1, r-1, p-1 and q-1 start; p-1 panics; f-1 fails
+//	9s  every retry has run
+func TestV2QueueRecordFieldsComeFromTheirSources(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newV2HarnessWithRows(t, "s-a")
+		addSession := h.rt.router.sink.addSession
+		h.rt.router.sink.addSession = func(k rowKey, r routeReason) {
+			if k.ID == "boom" {
+				panic("mapping exploded")
+			}
+			addSession(k, r)
+		}
+		unblock := make(chan struct{})
+		unblockOnce := sync.OnceFunc(func() { close(unblock) })
+		t.Cleanup(unblockOnce)
+		var sa, f1, p1, allocs atomic.Int32
+		h.rec.setSession(func(it workqueue.Item[rowKey], _ *reconcileEnv) (time.Duration, error) {
+			switch it.Key.ID {
+			case "s-a":
+				if sa.Add(1) == 1 {
+					<-time.After(2 * time.Second)
+				}
+			case "f-1":
+				if f1.Add(1) == 1 {
+					<-unblock
+					return 0, errors.New("failed")
+				}
+			case "p-1":
+				if p1.Add(1) <= 2 {
+					panic("reconcile exploded")
+				}
+			}
+			return 0, nil
+		})
+		h.rec.setAllocator(func() error {
+			if allocs.Add(1) == 1 {
+				<-time.After(time.Second)
+			}
+			return nil
+		})
+		record := func() map[string]any { return h.rt.queueRecord(time.Now(), 0) }
+		event := func(id string, replay bool) {
+			h.rt.router.OnBeadEvent(beadEvent(t, events.BeadUpdated, v2TestRow(id)), replay, true)
+		}
+
+		done := h.bootAsync()
+		advance(2 * time.Second)
+		if ok, err := ready(done); !ok || err != nil {
+			t.Fatalf("boot: ready=%v err=%v, want ready", ok, err)
+		}
+		record() // the boot's adds
+
+		event("f-1", false)
+		synctest.Wait()
+		event("f-1", false)
+		synctest.Wait()
+		busy := record()
+
+		h.rt.hold("test")
+		event("e-1", false)
+		advance(time.Second)
+		event("r-1", true)
+		h.add("p-1", workqueue.Reason{Kind: wakeReasonAPI})
+		h.rt.sessions.Add(rowKey{Leg: routerTestLeg, ID: "q-1"}, workqueue.LaneResync, workqueue.Reason{Kind: v2ReasonResync})
+		event("boom", false)
+		for range 2 {
+			h.rt.router.OnBeadEvent(events.Event{Type: events.BeadUpdated, Payload: []byte("{")}, false, true)
+		}
+		advance(time.Second)
+		held := record()
+
+		h.rt.release("test")
+		synctest.Wait()
+		unblockOnce()
+		advance(5 * time.Second)
+		final := record()
+
+		for _, c := range []struct {
+			name   string
+			record map[string]any
+			field  string
+			want   any
+		}{
+			{"busy", busy, "processing", 1},
+			{"busy", busy, "dirty", 1},
+			{"busy", busy, "deferred", 0},
+			{"busy", busy, "adds", map[string]uint64{routeReasonEvent: 2}},
+			{"held", held, "depth_hot", 3},
+			{"held", held, "depth_resync", 1},
+			{"held", held, "oldest_hot_ms", int64(2000)},
+			{"held", held, "oldest_resync_ms", int64(1000)},
+			{"held", held, "longest_in_flight_ms", int64(2000)},
+			{"held", held, "adds", map[string]uint64{routeReasonEvent: 1, routeReasonReplay: 1, wakeReasonAPI: 1, v2ReasonResync: 1}},
+			{"held", held, "holds", []string{"test"}},
+			{"held", held, "fs_gate", "unarmed"},
+			{"final", final, "boot", v2BootReady},
+			{"final", final, "boot_ms", int64(2000)},
+			{"final", final, "reconcile_failures", uint64(1)},
+			{"final", final, "reconcile_panics", uint64(2)},
+			{"final", final, "bead_event_latency_p50_ms", int64(0)},    // f-1's first attempt
+			{"final", final, "bead_event_latency_p99_ms", int64(2000)}, // e-1, held 2s
+			{"final", final, "latency_p99_ms", int64(2000)},
+			{"final", final, "work_p99_ms", int64(2000)},
+			{"final", final, "allocator_duty", float64(time.Second) / float64(9*time.Second)},
+			{"final", final, "allocator_last_pass_ms", int64(0)},
+			{"final", final, "router_events", uint64(6)}, // f-1 twice, e-1, boom and the undecodable two
+			{"final", final, "router_replays", uint64(1)},
+			{"final", final, "router_undecodable", uint64(2)},
+			{"final", final, "router_panics", uint64(1)},
+			{"final", final, "router_unresolved", uint64(0)},
+			{"final", final, "router_keys_out", uint64(11)}, // a row and the allocator per decoded event, boom's row, an allocator per undecodable one
+			{"final", final, "resync_requests", map[string]uint64{"router-panic": 1}},
+			{"final", final, "holds", []string{}},
+			{"final", final, "deferred", 0},
+		} {
+			if got := c.record[c.field]; !reflect.DeepEqual(got, c.want) {
+				t.Errorf("%s record %s = %#v, want %#v", c.name, c.field, got, c.want)
+			}
+		}
+	})
+}
+
+// Kills: the bead-event latency sampling a retry (E3). In the runtime a
+// retry's first reason is never a bead event (AddRateLimited puts the retry
+// reason first), so recordReconcile's own contract is pinned: the bead-event
+// window samples only what the overall window samples.
+func TestV2MetricsSamplesBeadEventLatencyOnlyOnFirstAttempts(t *testing.T) {
+	m := newV2Metrics()
+	m.recordReconcile(time.Second, true, true, 0, v2Succeeded)
+	m.recordReconcile(5*time.Second, false, true, 0, v2Succeeded) // a retry
+	m.recordReconcile(3*time.Second, true, false, 0, v2Succeeded) // not a bead event
+	s := m.snapshot(time.Unix(0, 0))
+	if s.BeadEventP99 != time.Second || s.LatencyP99 != 3*time.Second {
+		t.Fatalf("bead-event p99 = %s, overall p99 = %s; want 1s (the first attempt only), 3s", s.BeadEventP99, s.LatencyP99)
+	}
+}
+
+// Kills: the bead-event latency timing a reconcile from an older add of
+// another kind. A key queued for a resync waits 10s, then a bead event
+// merges into it, and it starts 0.5s later: the item's wait is 10.5s, and
+// none of it is bead-event latency.
+func TestV2BeadEventLatencyIgnoresAnEventMergedIntoAnOlderAdd(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newV2HarnessWithRows(t)
+		h.boot(t)
+		h.rt.hold("test")
+		h.rt.sessions.Add(rowKey{Leg: routerTestLeg, ID: "s-1"}, workqueue.LaneResync, workqueue.Reason{Kind: v2ReasonResync})
+		advance(10 * time.Second)
+		h.rt.router.OnBeadEvent(beadEvent(t, events.BeadUpdated, v2TestRow("s-1")), false, true)
+		advance(500 * time.Millisecond)
+		h.rt.release("test")
+		synctest.Wait()
+		got := h.rt.queueRecord(time.Now(), 0)
+		if got["latency_p99_ms"] != int64(10500) || got["bead_event_latency_p99_ms"] != int64(0) {
+			t.Fatalf("latency p99 = %v, bead-event latency p99 = %v; want 10500, 0 (the event did not queue the item)",
+				got["latency_p99_ms"], got["bead_event_latency_p99_ms"])
+		}
+	})
+}
+
+// Kills: the record's FS gate state wrong once the gate is armed: open read
+// as unarmed (F1), or open and held swapped (F2), or another hold read as
+// FS pressure.
+func TestV2QueueRecordReportsTheArmedFSGate(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newV2HarnessWithRows(t)
+		p := newFSScript()
+		p.set(false, true)
+		h.rt.fs.sample = p.sample
+		h.boot(t)
+		if !h.rt.armFSGate() {
+			t.Fatal("armFSGate after boot = false")
+		}
+		gate := func() any { return h.rt.queueRecord(time.Now(), 0)["fs_gate"] }
+		advance(v2FSGateInterval)
+		h.rt.hold("test")
+		if got := gate(); got != "open" {
+			t.Fatalf("fs_gate under low pressure and another hold = %v, want open", got)
+		}
+		h.rt.release("test")
+		p.set(true, true)
+		advance(v2FSGateInterval)
+		if got := gate(); got != "held" {
+			t.Fatalf("fs_gate under high pressure = %v, want held", got)
+		}
+		p.set(false, true)
+		advance(v2FSGateInterval)
+		if got := gate(); got != "open" {
+			t.Fatalf("fs_gate after the pressure passed = %v, want open", got)
+		}
+	})
 }
