@@ -573,6 +573,50 @@ set_hash() {
   [ -n "$hash_state_file" ] || return 0
   printf '%%s\n' "$1" > "$hash_state_file"
 }
+# pin_no_false_quarantine_concurrent_writer: a writer commits after
+# flatten_head (this fixture's flatten commit is always compactcommit).
+# Pinned post-flatten reads must still return the preflight baseline so
+# compact succeeds; the same queries without the pin return drifted
+# values as a regression trap if a future change drops the pin.
+if [ "$mode" = "pin_no_false_quarantine_concurrent_writer" ] && [ "$(current_head)" = "compactcommit" ]; then
+  case "$query" in
+    *"SELECT COUNT(*) FROM"*"AS OF 'compactcommit'"*)
+      print_cell 10
+      exit 0
+      ;;
+    *"beads/compactcommit"*"SELECT DOLT_HASHOF_TABLE('beads')"*)
+      print_cell hash-beads-before
+      exit 0
+      ;;
+    *"beads/compactcommit"*"SELECT DOLT_HASHOF_DB('HEAD')"*)
+      print_cell hash-before
+      exit 0
+      ;;
+    *"SELECT COUNT(*) FROM"*"beads"*)
+      print_cell 11
+      exit 0
+      ;;
+    *"DOLT_HASHOF_TABLE('beads')"*)
+      print_cell hash-beads-after-writer
+      exit 0
+      ;;
+    *"DOLT_HASHOF_DB"*)
+      print_cell hash-after-writer
+      exit 0
+      ;;
+  esac
+fi
+# pin_real_drift_at_flatten_head_quarantines: genuine same-row-count
+# hash drift inside the flatten's own committed revision. Pinning must
+# not mask it; row count falls through to the default 10.
+if [ "$mode" = "pin_real_drift_at_flatten_head_quarantines" ] && [ "$(current_head)" = "compactcommit" ]; then
+  case "$query" in
+    *"beads/compactcommit"*"SELECT DOLT_HASHOF_TABLE('beads')"*)
+      print_cell hash-beads-genuinely-drifted
+      exit 0
+      ;;
+  esac
+fi
 case "$query" in
   *"FROM dolt_log ORDER BY date DESC LIMIT 1"*)
     # Legacy date-ordered "HEAD" probe. A future-dated (clock-skewed) commit

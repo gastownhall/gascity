@@ -912,30 +912,64 @@ version_dirty_dolt_ignore() {
   return 0
 }
 
-# row_count — COUNT(*) for one table. Returns "" on error.
+# row_count — COUNT(*) for one table. Returns "" on error. An optional
+# revision pins the read to that immutable commit (measured Dolt 2.3.1:
+# `AS OF '<rev>'` works directly), so a writer that commits after the
+# revision was captured cannot change the answer. Callers with no revision
+# (preflight, which reads the live pre-flatten state on purpose) omit it.
 row_count() {
   db="$1"
   table="$2"
-  query_single_cell "$db" "row count probe failed for table=$table" \
-    "SELECT COUNT(*) FROM \`$table\`"
+  rev="${3:-}"
+  if [ -n "$rev" ]; then
+    query_single_cell "$db" "row count probe failed for table=$table at revision=$rev" \
+      "SELECT COUNT(*) FROM \`$table\` AS OF '$rev'"
+  else
+    query_single_cell "$db" "row count probe failed for table=$table" \
+      "SELECT COUNT(*) FROM \`$table\`"
+  fi
 }
 
+# table_value_hash — DOLT_HASHOF_TABLE for one table, optionally pinned to a
+# revision. Measured Dolt 2.3.1: the two-argument form
+# (DOLT_HASHOF_TABLE('t', '<rev>')) fails, so the pin is applied by switching
+# the session's database to "$db/$rev" first and calling the one-argument
+# form in that same `dolt sql -q` invocation (session state, including USE,
+# persists across `;`-separated statements in one call).
 table_value_hash() {
   db="$1"
   table="$2"
-  query_single_cell "$db" "table value hash probe failed for table=$table" \
-    "SELECT DOLT_HASHOF_TABLE('$table')"
+  rev="${3:-}"
+  if [ -n "$rev" ]; then
+    query_single_cell "$db" "table value hash probe failed for table=$table at revision=$rev" \
+      "USE \`$db/$rev\`; SELECT DOLT_HASHOF_TABLE('$table')"
+  else
+    query_single_cell "$db" "table value hash probe failed for table=$table" \
+      "SELECT DOLT_HASHOF_TABLE('$table')"
+  fi
 }
 
 db_value_hash() {
   db="$1"
+  rev="${2:-}"
   # Pinned to the committed root: the bare working-set hash also covers
   # dolt_ignore'd tables, whose concurrent churn drifts it with no HEAD
   # movement — a guaranteed false quarantine on a busy db. The flatten only
   # rewrites committed history, so the committed root is the surface whose
   # preservation this hash must prove.
-  query_single_cell "$db" "database value hash probe failed" \
-    "SELECT DOLT_HASHOF_DB('HEAD')"
+  #
+  # An optional revision pins the read the same way table_value_hash does.
+  # Measured Dolt 2.3.1: DOLT_HASHOF_DB('<commit>') is an invalid ref, so the
+  # pin is applied via USE "$db/$rev" and DOLT_HASHOF_DB('HEAD') is called in
+  # that same session — HEAD there means "$db/$rev"'s own head, not the live
+  # branch.
+  if [ -n "$rev" ]; then
+    query_single_cell "$db" "database value hash probe failed at revision=$rev" \
+      "USE \`$db/$rev\`; SELECT DOLT_HASHOF_DB('HEAD')"
+  else
+    query_single_cell "$db" "database value hash probe failed" \
+      "SELECT DOLT_HASHOF_DB('HEAD')"
+  fi
 }
 
 remote_count() {
@@ -1230,9 +1264,19 @@ preflight_counts() {
 # drift is quarantined before full GC because row-count gain alone cannot prove
 # pre-flight rows remain reachable. Sets category flags plus
 # verify_counts_failure_reason and verify_counts_failure_guidance for callers.
+#
+# revision, when given, pins every read below (row counts, table value
+# hashes, and the post-flatten table list) to that one immutable commit —
+# the flatten's own flatten_head, captured by the caller immediately after
+# the flatten. Without this, each read below is a separate query against
+# live/mutable state, so a normal writer that commits between two of these
+# sequential reads mixes that later commit's rows into one table's count and
+# an earlier commit's content into another table's hash, producing
+# mixed-revision "drift" that never existed at any single commit (sc-odynev).
 verify_counts() {
   db="$1"
   preflight="$2"
+  revision="${3:-}"
   fail=0
   verify_counts_saw_gain=0
   verify_counts_saw_gain_hash_drift=0
@@ -1254,7 +1298,7 @@ verify_counts() {
     rest=${line#* }
     expected=${rest%% *}
     expected_hash=${rest#* }
-    if ! actual=$(row_count "$db" "$t"); then
+    if ! actual=$(row_count "$db" "$t" "$revision"); then
       printf 'compact: db=%s post-flatten row count failed for table=%s\n' "$db" "$t" >&2
       verify_counts_saw_probe_failure=1
       if [ "$fail" -eq 0 ]; then
@@ -1276,7 +1320,7 @@ verify_counts() {
         continue
         ;;
     esac
-    if ! actual_hash=$(table_value_hash "$db" "$t"); then
+    if ! actual_hash=$(table_value_hash "$db" "$t" "$revision"); then
       printf 'compact: db=%s post-flatten table value hash failed for table=%s\n' "$db" "$t" >&2
       verify_counts_saw_probe_failure=1
       if [ "$fail" -eq 0 ]; then
@@ -1349,7 +1393,18 @@ verify_counts() {
     fi
   done < "$preflight"
   post_tables_tmp=$(mktemp)
-  if ! user_tables "$db" > "$post_tables_tmp"; then
+  # Pinned to the same revision as the per-table reads above: an unpinned
+  # information_schema.tables read (user_tables) reflects whatever a
+  # concurrent writer most recently committed, which would report that
+  # writer's new table as "appeared after pre-flight snapshot". committed_tables
+  # at $revision reads the flatten's own committed root instead.
+  post_tables_rc=0
+  if [ -n "$revision" ]; then
+    committed_tables "$db" "$revision" > "$post_tables_tmp" || post_tables_rc=1
+  else
+    user_tables "$db" > "$post_tables_tmp" || post_tables_rc=1
+  fi
+  if [ "$post_tables_rc" -ne 0 ]; then
     verify_counts_saw_probe_failure=1
     if [ "$fail" -eq 0 ]; then
       fail=2
@@ -3242,7 +3297,7 @@ flatten_database() {
   fi
 
   verify_counts_rc=0
-  verify_counts "$db" "$preflight_tmp" || verify_counts_rc=$?
+  verify_counts "$db" "$preflight_tmp" "$flatten_head" || verify_counts_rc=$?
 
   # Writer-race gate (local-verify HEAD-stability). A normal MVCC writer (the
   # beads/mail workload) can commit to this db inside the flatten window, which
@@ -3402,7 +3457,7 @@ flatten_database() {
     return 1
   fi
   pre_db_hash_head=$(head_commit "$db" || true)
-  if ! postflight_hash=$(db_value_hash "$db"); then
+  if ! postflight_hash=$(db_value_hash "$db" "$flatten_head"); then
     printf 'compact: db=%s post-flatten value hash probe failed — quarantine and investigate before GC\n' \
       "$db" >&2
     write_quarantine_marker "$db" "post-flatten value hash probe failed" || {
