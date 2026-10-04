@@ -43,7 +43,7 @@ var (
 	workflowServeList               = nextWorkflowServeBeads
 	controlDispatcherServe          = runControlDispatcherInStore
 	workflowServeOpenEventsProvider = func(stderr io.Writer) (events.Provider, error) {
-		ep, code := openCityEventsProvider(stderr, "gc convoy control --serve")
+		ep, code := openCityEventsReader(stderr, "gc convoy control --serve")
 		if ep == nil {
 			return nil, fmt.Errorf("opening events provider (exit %d)", code)
 		}

@@ -127,7 +127,7 @@ func (c *CachingStore) refreshGraphAppliedBeads(result *GraphApplyResult, startS
 	c.markFreshLocked(now)
 	c.updateStatsLocked()
 	c.mu.Unlock()
-	c.notifyChanges(notifications)
+	c.notifyChanges(ChangeLocal, notifications)
 }
 
 func uniqueGraphAppliedIDs(result *GraphApplyResult) []string {

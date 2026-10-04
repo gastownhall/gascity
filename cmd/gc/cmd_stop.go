@@ -413,11 +413,7 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 			}
 		}
 	}
-	recorder := events.Discard
-	if fr, err := newFileEventsRecorder(
-		filepath.Join(cityPath, ".gc", "events.jsonl"), cfg.Events, stderr); err == nil {
-		recorder = fr
-	}
+	recorder := openCityRecorderAt(cityPath, stderr)
 
 	graceTimeout := cfg.Daemon.ShutdownTimeoutDuration()
 	if force {

@@ -894,3 +894,105 @@ func TestBazelTestWorkerEnvPreflight(t *testing.T) {
 		t.Errorf("the host measurement (step %d) runs before a bazel run (step %d): its toolset install would re-key the client's actions", measAt, lastBazel)
 	}
 }
+
+// TestBazelMultiLaneWorkerEnvPreflight: bazel.yml's remote jobs ask the
+// worker-env preflight as bazel-test.yml's bazel job does. The lane job asks
+// before setup-bazel (no rbe-fork certificate for a run that would only
+// queue), counts as remote in exactly the modes setup-bazel attaches a
+// remote executor, skips Bazel when the change moves the pin, and its unit
+// lane (in every non-empty lane list) measures its own Blacksmith host last,
+// after every bazel command. The coverage job (remote only) asks too.
+func TestBazelMultiLaneWorkerEnvPreflight(t *testing.T) {
+	const (
+		skip      = "steps.worker-env.outputs.pin-moved != 'true'"
+		preflight = rbeWorkerEnvDrift + ` preflight "$RUNNER_TEMP/worker-env-base.bazel" "$RUNNER_TEMP/worker-env-changed"`
+	)
+	bazelRun := regexp.MustCompile(`(?m)^\s*bazel ("\$\{args\[@\]\}"|coverage )`)
+	wf := parseWorkflow(t, bazelMultiLaneWorkflow)
+	for _, id := range []string{"lane", "coverage"} {
+		t.Run(id, func(t *testing.T) {
+			job := wf.Jobs[id]
+			if job.Permissions["issues"] != "read" {
+				t.Errorf("%s job permissions %v, want issues: read (drift issues)", id, job.Permissions)
+			}
+			preAt, pre := findStep(job, func(s ghStep) bool { return s.ID == "worker-env" })
+			setupAt, setup := findStep(job, func(s ghStep) bool { return s.Uses == "./.github/actions/setup-bazel" })
+			if pre == nil || setup == nil || preAt > setupAt {
+				t.Fatalf("%s job: no worker-env preflight step before setup-bazel", id)
+			}
+			if !strings.Contains(pre.Run, preflight) {
+				t.Errorf("%s preflight step does not run %s:\n%s", id, preflight, pre.Run)
+			}
+			for k, v := range map[string]string{
+				"GH_TOKEN":       "${{ github.token }}",
+				"DEFAULT_BRANCH": "${{ github.event.repository.default_branch }}",
+			} {
+				if pre.Env[k] != v {
+					t.Errorf("%s preflight env %s = %q, want %q", id, k, pre.Env[k], v)
+				}
+			}
+			if setup.If != skip {
+				t.Errorf("%s setup-bazel if %q, want %q (no certificate or cache restore for a moved pin)", id, setup.If, skip)
+			}
+			bazelSteps := 0
+			for i, s := range job.Steps {
+				if !bazelRun.MatchString(s.Run) {
+					continue
+				}
+				bazelSteps++
+				if i < preAt {
+					t.Errorf("%s step %q runs bazel before the worker-env preflight", id, s.Name)
+				}
+				if s.If != skip {
+					t.Errorf("%s step %q if %q: a moved pin must skip it (%s)", id, s.Name, s.If, skip)
+				}
+			}
+			if bazelSteps == 0 {
+				t.Fatalf("%s job: no bazel test or coverage step", id)
+			}
+		})
+	}
+
+	lane := wf.Jobs["lane"]
+	_, pre := findStep(lane, func(s ghStep) bool { return s.ID == "worker-env" })
+	if pre == nil {
+		t.Fatal("lane job: no worker-env preflight step")
+	}
+	// setup-bazel attaches an executor in mode remote and fork-* (the lane
+	// job's Set up Bazel env), and in no other mode.
+	if pre.Env["MODE"] != "${{ needs.rbe.outputs.mode }}" ||
+		!strings.Contains(pre.Run, `case "$MODE" in remote|fork-ro|fork-rw) export WORKER_ENV_REMOTE=true ;; esac`) {
+		t.Errorf("lane preflight does not set WORKER_ENV_REMOTE in modes remote, fork-ro and fork-rw:\n%s", pre.Run)
+	}
+	// The checkout is full blobless history for fresh-merge; a --depth fetch
+	// would make it shallow.
+	if strings.Contains(pre.Run, "--depth") {
+		t.Errorf("lane preflight fetches with --depth into a full-history checkout:\n%s", pre.Run)
+	}
+	// The unit lane measures: it leads every non-empty lane list
+	// (TestBazelMultiLaneLaneList runs the Lanes step against wantMultiLanes).
+	for _, event := range multiLaneEvents {
+		for _, mode := range multiLaneModes {
+			if l := wantMultiLanes(event, mode); len(l) > 0 && l[0] != "unit" {
+				t.Errorf("event %s, mode %s: lanes %v start without unit, which measures the host", event, mode, l)
+			}
+		}
+	}
+	measAt, meas := findStep(lane, runs(rbeWorkerScript))
+	if meas == nil || meas.If != "always() && matrix.lane == 'unit' && steps.worker-env.outputs.measure == 'true'" ||
+		len(meas.Env) != 1 || meas.Env["WORKER_MODE"] != "measure" {
+		t.Fatalf("lane job: no unit-lane host measurement step (if measure, WORKER_MODE=measure): %+v", meas)
+	}
+	if measAt != len(lane.Steps)-1 {
+		t.Errorf("the host measurement is step %d of %d; it must be last, after every bazel command (its toolset install would re-key the client's actions)", measAt, len(lane.Steps))
+	}
+
+	coverage := wf.Jobs["coverage"]
+	_, cpre := findStep(coverage, func(s ghStep) bool { return s.ID == "worker-env" })
+	if cpre == nil || cpre.Env["WORKER_ENV_REMOTE"] != "true" {
+		t.Errorf("coverage preflight must set WORKER_ENV_REMOTE=true (the job runs in mode remote only): %+v", cpre)
+	}
+	if _, m := findStep(coverage, runs(rbeWorkerScript)); m != nil {
+		t.Errorf("coverage job measures the host; the unit lane does")
+	}
+}

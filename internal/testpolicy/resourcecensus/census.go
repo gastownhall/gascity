@@ -125,8 +125,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   725,
-			BaselineFiles:   213,
+			BaselineCalls:   727,
+			BaselineFiles:   214,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-cp3hwi",
@@ -166,8 +166,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   490,
-			BaselineFiles:   144,
+			BaselineCalls:   492,
+			BaselineFiles:   145,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-cp3hwi",
@@ -508,6 +508,17 @@ var bootstrapPolicy = Ledger{
 			MigrationTarget: "P0.4b",
 			Expires:         "2026-10-31",
 		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestFreshMergeActionBehaviour",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the fresh-merge composite action's behavior proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the git and bash subprocesses are confined to TestFreshMergeActionBehaviour, which exists to run .github/actions/fresh-merge's own bash script against a scratch git origin (clean merge, workflow skew, conflict, head already containing the tip, unfetchable base): the script is git plumbing, so only real git can prove what it merges and when it fails",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
 	},
 	ReviewedHermeticBody: []ReviewedHermeticBody{
 		{
@@ -543,7 +554,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   470,
+			BaselineCalls:   471,
 			BaselineFiles:   137,
 			ReportedCalls:   394,
 			ReportedFiles:   105,

@@ -390,6 +390,15 @@ func TestBazelExecutesOnWorkerPlatform(t *testing.T) {
 			}
 		}
 	}
+	// bazel.yml's lanes: setup-bazel's generated rc stays off platforms too
+	// (.bazelrc's build:ci lines are checked above with every other config).
+	for _, line := range strings.Split(readFile(t, root, ".github/actions/setup-bazel/write-bazelrc.sh"), "\n") {
+		for _, flag := range strings.Fields(line) {
+			if strings.HasPrefix(flag, "--") && platformFlag(flag) {
+				t.Errorf("setup-bazel's write-bazelrc.sh writes %q; platform flags are key-affecting and belong in .bazelrc", line)
+			}
+		}
+	}
 	m := regexp.MustCompile(`(?m)^PATH=\$\{WORKER_ENV_PATH:-([^}]*)\}$`).FindStringSubmatch(readFile(t, root, rbeWorkerEnvScript))
 	if m == nil || testPath == "" || m[1] != testPath {
 		t.Errorf("CI tests' PATH %q, worker-env measures %v: they must be the same", testPath, m)

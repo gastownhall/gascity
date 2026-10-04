@@ -1086,6 +1086,9 @@ func (cr *CityRuntime) startupReadinessWatchdog(ctx context.Context, ready <-cha
 		return
 	case <-timer.C:
 	}
+	if cr.runsV2() {
+		fmt.Fprintf(cr.stderr, "%s: startup watchdog: session reconciler v2: %s\n", cr.logPrefix, cr.v2.bootStatus(time.Now())) //nolint:errcheck // best-effort stderr
+	}
 	buf := make([]byte, 1<<20)
 	n := goruntime.Stack(buf, true)
 	fmt.Fprintf(cr.stderr, //nolint:errcheck // best-effort stderr
@@ -1362,6 +1365,12 @@ func (cr *CityRuntime) tick(
 				completion = TraceCompletionCompleted
 			}
 			p.trace.end(completion, traceRecordPayload{"phase": "tick", "trigger": traceTrigger})
+		}
+	}()
+	// Under v2 every maintenance tick, however it ends, records the queue.
+	defer func() {
+		if cr.runsV2() {
+			cr.recordV2Queue(p.trace)
 		}
 	}()
 	defer func() {
@@ -1857,7 +1866,7 @@ func (cr *CityRuntime) startupReconcile(ctx context.Context) bool {
 	}
 	p.completed = cr.runTickPhases(p, phases)
 	if p.completed && cr.runsV2() {
-		p.completed = cr.bootV2(ctx)
+		p.completed = cr.bootV2(ctx, p.trace)
 	}
 	return p.completed
 }
