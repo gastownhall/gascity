@@ -374,3 +374,69 @@ type partialGraph struct {
 }
 
 func (g partialGraph) List(beads.ListQuery) ([]beads.Bead, error) { return g.items, g.err }
+
+// claimCapableStore wraps beads.NewMemStore() with a minimal two-argument
+// Claim so beadsGraphAdapter.Claim's forwarding can be exercised without a
+// live NativeDoltStore.
+type claimCapableStore struct {
+	beads.Store
+	claimCalls int
+}
+
+func (c *claimCapableStore) Claim(id, assignee string) (beads.Bead, bool, error) {
+	c.claimCalls++
+	current, err := c.Get(id)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	if current.Assignee != "" && current.Assignee != assignee {
+		return beads.Bead{}, false, nil
+	}
+	status := "in_progress"
+	if err := c.Update(id, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		return beads.Bead{}, false, err
+	}
+	claimed, err := c.Get(id)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	return claimed, true, nil
+}
+
+// TestBeadsGraphAdapterClaimRefusesAnUnsupportedStore pins the pre-S5b-4
+// behavior: a resolved store without the two-argument Claim capability
+// (e.g. a plain beads.Store) is refused as an unavailable capability of the
+// store, before any server is asked -- this is still true today for every
+// class whose remote binding does not resolve to NativeDoltStore.
+func TestBeadsGraphAdapterClaimRefusesAnUnsupportedStore(t *testing.T) {
+	graph := &beadsGraphAdapter{store: beads.NewMemStore()}
+	if _, claimed, err := graph.Claim("gc-1", "worker-1"); claimed || err == nil {
+		t.Fatalf("Claim over an unsupported store = (claimed=%v, err=%v), want a capability refusal", claimed, err)
+	}
+}
+
+// TestBeadsGraphAdapterClaimForwardsToAClaimCapableStore pins the exact
+// mechanism S5b-DESIGN.md cites at beads_adapter.go:493-505: once the
+// resolved store implements the two-argument Claim (as NativeDoltStore now
+// does over IssueClaimer), beadsGraphAdapter.Claim succeeds via plain Go
+// structural typing -- no change to this file was needed to fix the graph
+// binding's claim route.
+func TestBeadsGraphAdapterClaimForwardsToAClaimCapableStore(t *testing.T) {
+	leaf := &claimCapableStore{Store: beads.NewMemStore()}
+	bead, err := leaf.Create(beads.Bead{Title: "claimable"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	graph := &beadsGraphAdapter{store: leaf}
+
+	claimed, ok, err := graph.Claim(bead.ID, "worker-1")
+	if err != nil || !ok {
+		t.Fatalf("Claim = (claimed=%v, ok=%v, err=%v), want a landed claim", claimed, ok, err)
+	}
+	if claimed.Assignee != "worker-1" {
+		t.Fatalf("claimed bead assignee = %q, want worker-1", claimed.Assignee)
+	}
+	if leaf.claimCalls != 1 {
+		t.Fatalf("backing Claim calls = %d, want 1", leaf.claimCalls)
+	}
+}

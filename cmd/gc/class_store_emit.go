@@ -639,7 +639,7 @@ func (s *emittingClassStore) Claim(id, assignee string) (beads.Bead, bool, error
 		Claim(string, string) (beads.Bead, bool, error)
 	})
 	if !ok {
-		return beads.Bead{}, false, beads.ErrConditionalWriteUnsupported
+		return beads.Bead{}, false, beads.ErrClaimUnsupported
 	}
 	bead, claimed, err := claimer.Claim(id, assignee)
 	if err == nil && claimed {
