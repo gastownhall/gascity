@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	beadslib "github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/issueops"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 )
@@ -125,6 +126,66 @@ func TestNativeDoltStoreCreateRollsBackAMissingSamePrefixTarget(t *testing.T) {
 	for _, bead := range all {
 		if bead.Title == "orphan" {
 			t.Fatalf("refused create left a durable bead: %+v", bead)
+		}
+	}
+}
+
+// TestNativeDoltStoreCreateRefusesASelfDependencyThroughFacade is the
+// gc-enterprise review item's "invalid dependency" case the deleted
+// validateCreatedDependencies prevalidation helper never checked at all: an
+// edge naming the new bead as its own target. The facade's own request
+// validation (ValidatePublicCreateRequest, independent of any backend) refuses
+// it before a transaction ever opens, which is stricter than the storage-layer
+// create this replaced.
+func TestNativeDoltStoreCreateRefusesASelfDependencyThroughFacade(t *testing.T) {
+	store := openRealNativeDoltStoreForFacade(t, "facade-test")
+	_, err := store.Create(Bead{ID: "gc-selfdep", Title: "self", Needs: []string{"blocks:gc-selfdep"}})
+	if err == nil {
+		t.Fatal("Create error = nil, want a self-dependency refusal")
+	}
+	if !errors.Is(err, issueops.ErrValidation) || !errors.Is(err, issueops.ErrSelfDependency) {
+		t.Fatalf("Create error = %v, want issueops.ErrValidation wrapping issueops.ErrSelfDependency", err)
+	}
+}
+
+// TestNativeDoltStoreCreateRefusesADependencyCycleThroughFacade is the second
+// review-item case: a create whose own dependency edges, combined with an edge
+// that already exists, would close a cycle. gc's deleted validation never
+// looked past a single missing-target check, so this refusal is new strength
+// the facade brings, not a regression to guard. The graph after this create
+// would otherwise be closer -> mid -> blocker -> closer; the facade's
+// CheckDependencyCycleInTx refuses it and rolls back the whole create.
+func TestNativeDoltStoreCreateRefusesADependencyCycleThroughFacade(t *testing.T) {
+	store := openRealNativeDoltStoreForFacade(t, "facade-test")
+	blocker, err := store.Create(Bead{Title: "blocker"})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	mid, err := store.Create(Bead{Title: "mid", Dependencies: []Dep{{DependsOnID: blocker.ID, Type: "blocks"}}})
+	if err != nil {
+		t.Fatalf("Create mid: %v", err)
+	}
+	_, err = store.Create(Bead{
+		ID:    "gc-closer",
+		Title: "closer",
+		Dependencies: []Dep{
+			{DependsOnID: mid.ID, Type: "blocks"},
+			{IssueID: blocker.ID, DependsOnID: "gc-closer", Type: "blocks"},
+		},
+	})
+	if err == nil {
+		t.Fatal("Create error = nil, want a dependency-cycle refusal")
+	}
+	if !errors.Is(err, issueops.ErrDependencyCycle) {
+		t.Fatalf("Create error = %v, want issueops.ErrDependencyCycle", err)
+	}
+	all, err := store.List(ListQuery{AllowScan: true, IncludeClosed: true, TierMode: TierBoth})
+	if err != nil {
+		t.Fatalf("List after refused create: %v", err)
+	}
+	for _, bead := range all {
+		if bead.ID == "gc-closer" {
+			t.Fatalf("refused cyclic create left a durable bead: %+v", bead)
 		}
 	}
 }
