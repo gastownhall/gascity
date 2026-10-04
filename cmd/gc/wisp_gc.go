@@ -730,8 +730,8 @@ func purgeClosedInfraSessionsPage(store beads.Store, now time.Time, age time.Dur
 			continue
 		}
 		attempted++
-		if err := store.Delete(candidate.ID); err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
+		if err := deleteClosedInfraSessionIfMatch(store, current); err != nil {
+			if errors.Is(err, beads.ErrNotFound) || beads.IsPreconditionFailed(err) {
 				continue
 			}
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("purging closed infra session %q: %w", candidate.ID, err))
@@ -749,6 +749,23 @@ func purgeClosedInfraSessionsPage(store beads.Store, now time.Time, age time.Dur
 		log.Printf("wisp gc: purged %d closed infra session bead(s) older than %s", purged, age)
 	}
 	return purged, next, deleteErr
+}
+
+// deleteClosedInfraSessionIfMatch deletes current, the session the purge's
+// live re-read proved purgeable, only while the row still has that read's
+// revision. A write that lands after the re-read (a configured named session
+// reopened) fails the fence, and the row is kept for the next sweep to judge.
+// A store that cannot fence (BdStore without --if-revision, a legacy SQLite
+// layout) keeps the plain delete after the re-read, which leaves the window
+// between that read and the delete.
+func deleteClosedInfraSessionIfMatch(store beads.Store, current beads.Bead) error {
+	if writer, ok := beads.ConditionalWriterForTarget(store); ok {
+		err := writer.DeleteIfMatch(current.ID, current.Revision)
+		if !beads.IsConditionalWriteUnsupported(err) {
+			return err
+		}
+	}
+	return store.Delete(current.ID)
 }
 
 // closedInfraSessionPastCutoff reports whether b is a closed session bead whose

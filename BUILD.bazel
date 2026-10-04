@@ -162,6 +162,7 @@ go_library(
 # //scripts/cipolicy, //scripts/prwatchdog, //test/qualification, ...).
 exports_files([
     ".bazelrc",
+    ".bazelversion",
     "Makefile",
     "TESTING.md",
     "go.mod",
