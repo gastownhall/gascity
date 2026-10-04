@@ -210,20 +210,32 @@ func (s *NativeDoltStore) closeAllAsBatch(ids []string, metadata map[string]stri
 	return closed, nil
 }
 
-// applyCloseChunk dials one chunk under its OWN operation budget.
+// applyCloseChunk dials one chunk under its OWN operation budget, retrying the
+// whole chunk when it loses a serialization race.
 //
 // The budget is per chunk because a chunk is one request and one transaction —
 // the unit the per-operation timeout was written for. One deadline spanning
 // every chunk would leave each further chunk less of it, so a large CloseAll
 // would fail on its size rather than on any request being slow.
+//
+// The chunk is also the retry unit, for the same reason it is the budget unit:
+// a conflicted transaction commits nothing, so the stamp and the close it pairs
+// replay together. Retrying a leg of it would be the incoherent choice — that
+// asymmetry is what the per-bead route this replaced had to guard against.
 func (s *NativeDoltStore) applyCloseChunk(applier issueops.BatchApplier, items []issueops.ApplyItem) (issueops.ApplyBatchResult, error) {
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-	return applier.ApplyBatch(ctx, issueops.ApplyBatchRequest{
-		Actor:      s.actor,
-		Items:      items,
-		Provenance: nativeCloseAllProvenance,
+	var result issueops.ApplyBatchResult
+	err := retryOnNativeDoltSerializationConflict(func() error {
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		defer cancel()
+		var attemptErr error
+		result, attemptErr = applier.ApplyBatch(ctx, issueops.ApplyBatchRequest{
+			Actor:      s.actor,
+			Items:      items,
+			Provenance: nativeCloseAllProvenance,
+		})
+		return attemptErr
 	})
+	return result, err
 }
 
 // nativeCloseAllItemsPerBead is how many apply items one bead costs: the close,
