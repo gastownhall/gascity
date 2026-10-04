@@ -3,6 +3,7 @@ package scripts_test
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,12 +18,15 @@ import (
 // scaler keeps dispatching Blacksmith workers that cannot take it. These tests
 // pin the guards (tools/rbe/worker-env-drift) that make that loud and early:
 //
-//   - a worker whose host is not the pinned one fails its run before
-//     NativeLink starts (never registers), with the diff and the manifest and
-//     pin to commit in its step summary, and opens or updates the pin's drift
-//     issue;
-//   - while that issue is open, the pool workflows boot no worker VM and
-//     remote CI on that pin fails at once instead of queueing;
+//   - a worker whose host is not the pinned one still registers, advertising
+//     what it measured: the pools are shared with beads, whose actions send
+//     no worker-env and still run there, while gascity's never match it;
+//   - its run's measurement step fails with the diff and the manifest and pin
+//     to commit in the step summary, and a job beside the worker opens or
+//     updates the pin's drift issue while the worker serves (the farm caps
+//     the pools while that issue is open);
+//   - while that issue is open, remote CI on that pin fails at once instead
+//     of queueing;
 //   - a scheduled canary measures the Blacksmith image against the pin;
 //   - a change that moves the pin, or touches the worker host's definition,
 //     is measured on the Blacksmith image inside the required bazel job, and
@@ -40,9 +44,10 @@ const (
 
 // ghStub is a gh for worker-env-drift: issue list answers with
 // $GH_ISSUES (a JSON array of {title,url}) through the --jq it is given, api
-// answers commits with $GH_COMMITS and contents?ref=SHA with $GH_FILES/SHA,
-// issue view with $GH_VIEW. Every call is logged to $GH_LOG, one per line.
-// GH_FAIL=1 fails every call.
+// answers commits with $GH_COMMITS, contents?ref=SHA with $GH_FILES/SHA and
+// a run attempt's jobs with $GH_JOBS through the --jq, issue view with
+// $GH_VIEW. Every call is logged to $GH_LOG, one per line. GH_FAIL=1 fails
+// every call.
 const ghStub = `#!/bin/sh
 printf '%s\n' "$*" >>"$GH_LOG"
 [ "${GH_FAIL:-}" != 1 ] || { echo "gh: HTTP 502" >&2; exit 1; }
@@ -60,6 +65,7 @@ api*)
 		case "$a" in
 		*commits\?*) cat "$GH_COMMITS" ;;
 		*contents/*ref=*) cat "$GH_FILES/${a##*ref=}" ;;
+		*/jobs\?*) jq -r "$jq" "$GH_JOBS" ;;
 		esac
 	done
 	;;
@@ -201,7 +207,7 @@ func TestRBEWorkerEnvDriftCheck(t *testing.T) {
 	if err == nil {
 		t.Fatalf("check of a drifted host succeeded:\n%s", out)
 	}
-	if !strings.Contains(out, "::error title=rbe worker-env drift::this host measures worker-env="+got+", CI requests "+e.pin) {
+	if !strings.Contains(out, "::error title=rbe worker-env drift::this host measures worker-env="+got+", gascity requests "+e.pin) {
 		t.Errorf("check output has no ::error naming both hashes:\n%s", out)
 	}
 	summary := e.read(e.summary)
@@ -228,30 +234,63 @@ func TestRBEWorkerEnvDriftCheck(t *testing.T) {
 	}
 }
 
-// TestRBEWorkerEnvDriftGate: the pool boots no worker while its pin has an
-// open drift issue, does for any other pin's issue, and fails open when
-// GitHub cannot be asked (a GitHub outage must not stop the pools).
-func TestRBEWorkerEnvDriftGate(t *testing.T) {
+// TestRBEWorkerEnvDriftAwait: the watch beside a serving worker reports
+// drift once the worker's drift upload ran, nothing if it was skipped (the
+// host matched) or the worker job ended without it, and gives up with a
+// warning at its deadline; a GitHub error is a retry, never a failure.
+func TestRBEWorkerEnvDriftAwait(t *testing.T) {
+	const job, step = "rbe pool worker (X)", "Upload the worker-env drift"
 	e := newDriftEnv(t, "a\n")
-	other := sha256Pin("b\n")
-	e.setIssues(driftTitle(other), "https://x/issues/1")
-	if out, err := e.run("gate"); err != nil {
-		t.Errorf("gate with another pin's issue failed: %v\n%s", err, out)
-	}
-	e.setIssues(driftTitle(other), "https://x/issues/1", driftTitle(e.pin), "https://x/issues/2")
-	out, err := e.run("gate")
-	if err == nil || !strings.Contains(out, "::error title=rbe worker-env drift::https://x/issues/2") {
-		t.Errorf("gate with this pin's issue: %v\n%s", err, out)
-	}
-	if s := e.read(e.summary); !strings.Contains(s, "https://x/issues/2") {
-		t.Errorf("gate summary %q does not link the issue", s)
-	}
-	if log := e.read(e.ghLog); !strings.Contains(log, "issue list -R acme/repo --label "+rbeWorkerEnvLabel+" --state open") {
-		t.Errorf("gate did not list the open %s issues:\n%s", rbeWorkerEnvLabel, log)
-	}
-	e.extra = []string{"GH_FAIL=1"}
-	if out, err := e.run("gate"); err != nil || !strings.Contains(out, "::warning") {
-		t.Errorf("gate with GitHub down: %v (want success with a warning)\n%s", err, out)
+	jobs := filepath.Join(e.dir, "jobs.json")
+	for _, tc := range []struct {
+		name, jobs, drift, say string
+		extra                  []string
+	}{
+		{
+			name: "uploaded", drift: "true", say: "completed (success)",
+			jobs: `{"jobs":[{"name":"other","status":"completed","steps":[]},{"name":"` + job + `","status":"in_progress","steps":[{"name":"Measure","status":"completed","conclusion":"failure"},{"name":"` + step + `","status":"completed","conclusion":"success"}]}]}`,
+		},
+		{
+			name: "host matched", drift: "false", say: "completed (skipped)",
+			jobs: `{"jobs":[{"name":"` + job + `","status":"in_progress","steps":[{"name":"` + step + `","status":"completed","conclusion":"skipped"}]}]}`,
+		},
+		{
+			name: "worker job ended first", drift: "false", say: "completed without",
+			jobs: `{"jobs":[{"name":"` + job + `","status":"completed","steps":[{"name":"Set up job","status":"completed","conclusion":"failure"}]}]}`,
+		},
+		{
+			name: "still provisioning at the deadline", drift: "false", say: "::warning title=rbe worker-env await::",
+			jobs:  `{"jobs":[{"name":"` + job + `","status":"in_progress","steps":[{"name":"` + step + `","status":"pending","conclusion":null}]}]}`,
+			extra: []string{"WORKER_ENV_AWAIT_SECONDS=0"},
+		},
+		{
+			name: "worker job not listed yet", drift: "false", say: "::warning title=rbe worker-env await::",
+			jobs: `{"jobs":[]}`, extra: []string{"WORKER_ENV_AWAIT_SECONDS=0"},
+		},
+		{
+			name: "GitHub down", drift: "false", say: "::warning title=rbe worker-env await::",
+			jobs: `{"jobs":[]}`, extra: []string{"WORKER_ENV_AWAIT_SECONDS=0", "GH_FAIL=1"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeDriftFile(t, jobs, tc.jobs)
+			_ = os.Remove(e.output)
+			_ = os.Remove(e.ghLog)
+			e.extra = append([]string{"GH_JOBS=" + jobs, "GITHUB_RUN_ATTEMPT=3"}, tc.extra...)
+			out, err := e.run("await", job, step)
+			if err != nil {
+				t.Fatalf("await: %v\n%s", err, out)
+			}
+			if got := strings.TrimSpace(e.read(e.output)); got != "drift="+tc.drift {
+				t.Errorf("await output %q, want drift=%s\n%s", got, tc.drift, out)
+			}
+			if !strings.Contains(out, tc.say) {
+				t.Errorf("await says %q, want %q", out, tc.say)
+			}
+			if log := e.read(e.ghLog); !strings.Contains(log, "api repos/acme/repo/actions/runs/42/attempts/3/jobs?per_page=100") {
+				t.Errorf("await did not ask for this run attempt's jobs:\n%s", log)
+			}
+		})
 	}
 }
 
@@ -415,11 +454,10 @@ func TestRBEWorkerEnvDriftResolve(t *testing.T) {
 	}
 }
 
-// TestRBEWorkerScriptRefusesDrift: the worker checks its measurement before
-// NativeLink is even downloaded and exits on drift (it never registers a
-// hash no client sends). measure mode provisions and checks without a
-// certificate, then exits.
-func TestRBEWorkerScriptRefusesDrift(t *testing.T) {
+// TestRBEWorkerScriptMeasureMode: measure mode needs no certificate and
+// stops after the check, failing on drift; the other modes go on to
+// NativeLink whatever the check says.
+func TestRBEWorkerScriptMeasureMode(t *testing.T) {
 	script := readFile(t, repoRoot(t), rbeWorkerScript)
 	at := 0
 	for _, want := range []string{
@@ -428,8 +466,8 @@ func TestRBEWorkerScriptRefusesDrift(t *testing.T) {
 		"measure) ;;\n",
 		`*) echo "WORKER_MODE must be run, pool or measure" >&2; exit 2 ;;`,
 		"\ntools/rbe/worker-env \"${WORKER_TOOLSET[@]}\" >\"$RUNNER_TEMP/worker-env.txt\"\n",
-		"\ntools/rbe/worker-env-drift check \"$RUNNER_TEMP/worker-env.txt\" || exit 3\n",
-		"[ \"$WORKER_MODE\" != measure ] || exit 0\n",
+		"\nif ! tools/rbe/worker-env-drift check \"$RUNNER_TEMP/worker-env.txt\"; then\n\t[ \"$WORKER_MODE\" != measure ] || exit 3\n",
+		"\n[ \"$WORKER_MODE\" != measure ] || exit 0\n",
 		"/nativelink-${NL_VERSION}-x86_64-unknown-linux-musl.tar.gz",
 	} {
 		i := strings.Index(script[at:], want)
@@ -438,9 +476,145 @@ func TestRBEWorkerScriptRefusesDrift(t *testing.T) {
 		}
 		at += i + len(want)
 	}
-	if strings.Contains(script, "::warning title=rbe worker-env drift") {
-		t.Errorf("%s still only warns on drift", rbeWorkerScript)
+}
+
+// workerStubs is a host for blacksmith-worker.sh with nothing real behind
+// it: sudo and apt-get do nothing, downloads are empty files whose checksums
+// pass, the NativeLink archive unpacks to $NL_STUB, sleep returns once
+// NativeLink has started, and dolt, go, uname and dpkg-query describe a host
+// that is not the pinned one.
+var workerStubs = map[string]string{
+	"sudo": "echo \"sudo $*\" >>\"$STUB_LOG\"\n",
+	"curl": `out=
+prev=
+for a; do [ "$prev" = -o ] && out=$a; prev=$a; done
+if [ -n "$out" ]; then echo stub >"$out"; else echo '[]'; fi
+`,
+	"sha256sum": `if [ "${1:-}" = -c ]; then cat >/dev/null; exit 0; fi
+for p in /usr/bin/sha256sum /bin/sha256sum; do [ -x "$p" ] && exec "$p" "$@"; done
+exit 127
+`,
+	"tar": `dir=
+prev=
+for a; do [ "$prev" = -C ] && dir=$a; prev=$a; done
+for a; do
+	case "$a" in *nl.tgz) cp "$NL_STUB" "$dir/nativelink"; chmod +x "$dir/nativelink"; exit 0 ;; esac
+done
+for p in /usr/bin/tar /bin/tar; do [ -x "$p" ] && exec "$p" "$@"; done
+exit 127
+`,
+	"sleep": `i=0
+while [ ! -e "$NL_CAPTURE" ] && [ $i -lt 200 ]; do
+	for p in /usr/bin/sleep /bin/sleep; do [ -x "$p" ] && { "$p" 0.05; break; }; done
+	i=$((i + 1))
+done
+`,
+	"uname":      "echo x86_64\n",
+	"dolt":       "echo 'dolt version 2.1.8'\n",
+	"go":         "echo 'go version go0.0.0-drifted linux/amd64'\n",
+	"dpkg-query": "for p; do :; done\nprintf 'installed 9.9-drifted-%s\\n' \"$p\"\n",
+}
+
+// TestRBEWorkerRegistersOnDrift runs blacksmith-worker.sh on a host whose
+// measurement is not the pin. In pool mode it still starts NativeLink, with
+// worker.json advertising the measured hash (so actions without worker-env,
+// beads', run on it and gascity's, which carry the pin, never do), and
+// leaves the drift report. In measure mode the same host fails (exit 3) and
+// starts nothing.
+func TestRBEWorkerRegistersOnDrift(t *testing.T) {
+	root := repoRoot(t)
+	dir := t.TempDir()
+	stubs := filepath.Join(dir, "bin")
+	for name, body := range workerStubs {
+		writeDriftFile(t, filepath.Join(stubs, name), "#!/bin/sh\n"+body)
+		if err := os.Chmod(filepath.Join(stubs, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
+	nlStub := filepath.Join(dir, "nativelink-stub")
+	writeDriftFile(t, nlStub, "#!/bin/sh\ncp \"$1\" \"$NL_CAPTURE.tmp\" && mv -f \"$NL_CAPTURE.tmp\" \"$NL_CAPTURE\"\n")
+	osRelease := filepath.Join(dir, "os-release")
+	writeDriftFile(t, osRelease, "ID=ubuntu\nVERSION_ID=\"24.04\"\n")
+	path := stubs + string(os.PathListSeparator) + "/usr/bin" + string(os.PathListSeparator) + "/bin"
+
+	run := func(mode string) (tmp, capture, out string, err error) {
+		tmp = filepath.Join(dir, mode)
+		capture = filepath.Join(tmp, "nativelink-started-with.json")
+		if err := os.MkdirAll(tmp, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		env := []string{
+			"PATH=" + path, "WORKER_ENV_PATH=" + path, "WORKER_ENV_OS_RELEASE=" + osRelease,
+			"HOME=" + tmp, "GOTOOLCHAIN=local", "RUNNER_TEMP=" + tmp, "RUNNER_NAME=runner-1", "GITHUB_REPOSITORY=acme/repo", "GITHUB_RUN_ID=42",
+			"GITHUB_STEP_SUMMARY=" + filepath.Join(tmp, "summary.md"),
+			"STUB_LOG=" + filepath.Join(tmp, "stub.log"), "NL_STUB=" + nlStub, "NL_CAPTURE=" + capture,
+			"WORKER_MODE=" + mode, "POOL_IDLE_MINUTES=1", "RBE_ACTION_ISOLATION=0",
+			"RBE_WORKER_TLS_CERT=eA==", "RBE_WORKER_TLS_KEY=eA==", "RBE_WEST_HOST=rbe.invalid", "WORKER_NAME=w-1",
+		}
+		stdout, stderr, err := runRBEScript(root, env, filepath.Join(root, rbeWorkerScript))
+		return tmp, capture, stdout + stderr, err
+	}
+
+	tmp, capture, out, err := run("pool")
+	if err != nil {
+		t.Fatalf("pool worker on a drifted host: %v\n%s", err, out)
+	}
+	measured, err := os.ReadFile(filepath.Join(tmp, "worker-env.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := sha256Pin(string(measured))
+	pin := rbeWorkerPlatformExecProperties(t, readFile(t, root, rbeWorkerPlatformBuild))[rbeWorkerEnvProperty]
+	if got == pin {
+		t.Fatalf("the stub host measures the pin %s; the test needs a drifted one", pin)
+	}
+	if !strings.Contains(out, "worker-env: registering anyway with worker-env="+got) {
+		t.Errorf("pool worker does not say it registers with the measured hash:\n%s", out)
+	}
+	started, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatalf("NativeLink never started on the drifted host: %v\n%s", err, out)
+	}
+	if err := checkWorkerJSONAdvertises(started, got); err != nil {
+		t.Errorf("NativeLink's worker.json: %v\n%s", err, started)
+	}
+	if m := regexp.MustCompile(`"OSFamily"|"ISA"`).FindAllString(string(started), -1); len(m) != 2 {
+		t.Errorf("worker.json lost its other platform properties: %s", started)
+	}
+	if b := readDriftOut(t, filepath.Join(tmp, "worker-env-drift", "measured-pin")); b != got+"\n" {
+		t.Errorf("drift report measured-pin %q, want %s", b, got)
+	}
+	if s := readDriftOut(t, filepath.Join(tmp, "summary.md")); !strings.Contains(s, "### rbe worker-env drift") {
+		t.Errorf("no drift report in the step summary:\n%s", s)
+	}
+
+	_, capture, out, err = run("measure")
+	if code := exitCode(err); code != 3 {
+		t.Errorf("measure on a drifted host: exit %d (%v), want 3\n%s", code, err, out)
+	}
+	if _, err := os.Stat(capture); !os.IsNotExist(err) {
+		t.Errorf("measure mode started NativeLink (%v)", err)
+	}
+}
+
+func readDriftOut(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func exitCode(err error) int {
+	var ee interface{ ExitCode() int }
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	if err != nil {
+		return -1
+	}
+	return 0
 }
 
 type ghWorkflow struct {
@@ -456,6 +630,7 @@ type ghJob struct {
 	RunsOn      string            `yaml:"runs-on"`
 	Permissions map[string]string `yaml:"permissions"`
 	Concurrency map[string]any    `yaml:"concurrency"`
+	Outputs     map[string]string `yaml:"outputs"`
 	Steps       []ghStep          `yaml:"steps"`
 }
 
@@ -538,20 +713,30 @@ func checkDriftReportJob(t *testing.T, path string, job ghJob, needs string) {
 
 // checkDriftUpload: after the measuring step fails, its drift directory goes
 // up as the artifact the report job reads.
-func checkDriftUpload(t *testing.T, path string, job ghJob, measure int) {
+func checkDriftUpload(t *testing.T, path string, job ghJob, measure int, ifExpr string) int {
 	t.Helper()
 	i, up := findStep(job, func(s ghStep) bool {
 		return strings.HasPrefix(s.Uses, "actions/upload-artifact@") && s.With["name"] == rbeWorkerEnvDriftName
 	})
-	if up == nil || i < measure || up.If != "failure()" || up.With["name"] != rbeWorkerEnvDriftName ||
+	if up == nil || i < measure || up.If != ifExpr || up.With["name"] != rbeWorkerEnvDriftName ||
 		up.With["path"] != rbeWorkerEnvDriftDir || up.With["if-no-files-found"] != "ignore" {
-		t.Errorf("%s: no drift upload (if failure(), name %s, path %s, if-no-files-found ignore) after the measurement: %+v", path, rbeWorkerEnvDriftName, rbeWorkerEnvDriftDir, up)
+		t.Errorf("%s: no drift upload (if %s, name %s, path %s, if-no-files-found ignore) after the measurement: %+v", path, ifExpr, rbeWorkerEnvDriftName, rbeWorkerEnvDriftDir, up)
 	}
+	return i
 }
 
-// TestRBEPoolWorkflowsGateAndReportDrift: both pool workflows ask the gate
-// before a worker VM boots, and report a drifted worker as the pin's issue.
-func TestRBEPoolWorkflowsGateAndReportDrift(t *testing.T) {
+// isMeasureStep: a blacksmith-worker.sh step in measure mode.
+func isMeasureStep(s ghStep) bool {
+	return strings.TrimSpace(s.Run) == rbeWorkerScript && s.Env["WORKER_MODE"] == "measure"
+}
+
+// TestRBEPoolWorkflowsReportDriftWhileServing: both pool workflows boot their
+// worker unconditionally (beads shares the pools, and a skipped worker job
+// would conclude success and have the scaler re-dispatch at once). The worker
+// job measures its host in a step of its own that may fail without stopping
+// the job, uploads the drift, and then serves; a job beside it waits for that
+// upload and reports the pin's drift issue while the worker serves.
+func TestRBEPoolWorkflowsReportDriftWhileServing(t *testing.T) {
 	const defaultBranch = "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
 	for _, path := range []string{rbeWorkerWorkflow, rbeForkPoolWorkflow} {
 		t.Run(filepath.Base(path), func(t *testing.T) {
@@ -560,36 +745,52 @@ func TestRBEPoolWorkflowsGateAndReportDrift(t *testing.T) {
 			if len(wf.Permissions) != 1 || wf.Permissions["contents"] != "read" {
 				t.Errorf("permissions %v, want contents: read (jobs widen their own)", wf.Permissions)
 			}
-			if got := rbeSortedKeys(wf.Jobs); strings.Join(got, ",") != "gate,report-drift,worker" {
-				t.Fatalf("jobs %v, want gate, worker, report-drift", got)
-			}
-			gate := wf.Jobs["gate"]
-			if gate.If != defaultBranch || gate.RunsOn != "ubuntu-latest" {
-				t.Errorf("gate if %q runs-on %q, want the default branch on ubuntu-latest", gate.If, gate.RunsOn)
-			}
-			if len(gate.Permissions) != 2 || gate.Permissions["contents"] != "read" || gate.Permissions["issues"] != "read" {
-				t.Errorf("gate permissions %v, want contents: read, issues: read", gate.Permissions)
-			}
-			if _, s := findStep(gate, runs(rbeWorkerEnvDrift+" gate")); s == nil || s.Env["GH_TOKEN"] != "${{ github.token }}" {
-				t.Errorf("gate has no %s gate step with GH_TOKEN", rbeWorkerEnvDrift)
+			if got := rbeSortedKeys(wf.Jobs); strings.Join(got, ",") != "await-drift,report-drift,worker" {
+				t.Fatalf("jobs %v, want worker, await-drift, report-drift (no gate)", got)
 			}
 			worker := wf.Jobs["worker"]
-			if n, _ := worker.Needs.(string); n != "gate" || worker.If != defaultBranch {
-				t.Errorf("worker needs %v if %q, want gate and the default branch", worker.Needs, worker.If)
+			if worker.Needs != nil || worker.If != defaultBranch {
+				t.Errorf("worker needs %v if %q, want nothing but the default branch", worker.Needs, worker.If)
 			}
 			if len(worker.Permissions) != 0 {
 				t.Errorf("worker permissions %v: the worker VM gets no token beyond contents: read", worker.Permissions)
 			}
-			i, _ := findStep(worker, runs(rbeWorkerScript))
-			if i < 0 {
-				t.Fatalf("worker job does not run %s", rbeWorkerScript)
+			measureAt, measure := findStep(worker, isMeasureStep)
+			if measure == nil || measure.ID != "worker-env" || !measure.ContinueOnError || len(measure.Env) != 1 {
+				t.Fatalf("worker job: no continue-on-error measure step (id worker-env, WORKER_MODE=measure alone): %+v", measure)
 			}
-			checkDriftUpload(t, path, worker, i)
+			upAt := checkDriftUpload(t, path, worker, measureAt, "steps.worker-env.outcome == 'failure'")
+			serveAt, _ := findStep(worker, func(s ghStep) bool {
+				return strings.TrimSpace(s.Run) == rbeWorkerScript && s.Env["WORKER_MODE"] == "pool"
+			})
+			if serveAt < upAt {
+				t.Errorf("the pool worker step (%d) must come after the drift upload (%d)", serveAt, upAt)
+			}
+			if serve := worker.Steps[serveAt]; serve.If != "" || serve.ContinueOnError {
+				t.Errorf("the pool worker step runs if %q, continue-on-error %v; it must run whatever the measurement said", serve.If, serve.ContinueOnError)
+			}
+			upload := worker.Steps[upAt].Name
+
+			await := wf.Jobs["await-drift"]
+			if await.Needs != nil || await.If != defaultBranch || await.RunsOn != "ubuntu-latest" {
+				t.Errorf("await-drift needs %v if %q runs-on %q, want beside the worker on ubuntu-latest", await.Needs, await.If, await.RunsOn)
+			}
+			if len(await.Permissions) != 2 || await.Permissions["contents"] != "read" || await.Permissions["actions"] != "read" {
+				t.Errorf("await-drift permissions %v, want contents: read, actions: read", await.Permissions)
+			}
+			_, wait := findStep(await, runs(rbeWorkerEnvDrift+" await "))
+			if wait == nil || wait.ID != "await" || wait.Env["GH_TOKEN"] != "${{ github.token }}" ||
+				!strings.Contains(wait.Run, ` await "`+worker.Name+`" "`+upload+`"`) {
+				t.Errorf("await-drift does not wait for %q / %q: %+v", worker.Name, upload, wait)
+			}
+			if await.Outputs["drift"] != "${{ steps.await.outputs.drift }}" {
+				t.Errorf("await-drift outputs %v, want drift from the await step", await.Outputs)
+			}
 			report := wf.Jobs["report-drift"]
-			if report.If != "failure() && needs.worker.result == 'failure'" {
+			if report.If != "needs.await-drift.outputs.drift == 'true'" {
 				t.Errorf("report-drift if %q", report.If)
 			}
-			checkDriftReportJob(t, path, report, "worker")
+			checkDriftReportJob(t, path, report, "await-drift")
 		})
 	}
 }
@@ -627,7 +828,7 @@ func TestRBEWorkerEnvCanaryWorkflow(t *testing.T) {
 	if s == nil || len(s.Env) != 1 || s.Env["WORKER_MODE"] != "measure" {
 		t.Fatalf("measure job: no %s step with WORKER_MODE=measure alone: %+v", rbeWorkerScript, s)
 	}
-	checkDriftUpload(t, rbeWorkerEnvCanary, measure, i)
+	checkDriftUpload(t, rbeWorkerEnvCanary, measure, i, "failure()")
 	report := wf.Jobs["report"]
 	if report.If != "!cancelled() && needs.measure.result != 'skipped'" { //nolint:misspell // GitHub Actions spells it cancelled()
 		t.Errorf("report if %q", report.If)

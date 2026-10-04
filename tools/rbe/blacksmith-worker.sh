@@ -114,12 +114,18 @@ tools/rbe/worker-env "${WORKER_TOOLSET[@]}" >"$RUNNER_TEMP/worker-env.txt"
 WORKER_ENV=sha256:$(sha256sum <"$RUNNER_TEMP/worker-env.txt" | cut -d' ' -f1)
 echo "worker-env: $WORKER_ENV"
 # A worker on any other host (a new Blacksmith image, a package, Go or dolt
-# change) could serve no CI action: it would only idle while the pool scaler
-# dispatches more like it. So it never registers. The check prints the diff
-# and the manifest and pin to commit (log and step summary) and leaves them in
-# $RUNNER_TEMP/worker-env-drift, which the pool workflow turns into the pin's
-# drift issue; while that is open, the pool boots no worker.
-tools/rbe/worker-env-drift check "$RUNNER_TEMP/worker-env.txt" || exit 3
+# change) can serve no gascity action. It registers anyway, advertising what
+# it measured: the pools are shared, and actions that send no worker-env
+# (beads') still run on it. The check prints the diff and the manifest and pin
+# to commit (log and step summary) and leaves them in
+# $RUNNER_TEMP/worker-env-drift. The pool workflows measure in a step of their
+# own first (WORKER_MODE=measure) and turn that into the pin's drift issue,
+# which also caps the farm's pools while it is open. measure: drift is the
+# result, so it fails.
+if ! tools/rbe/worker-env-drift check "$RUNNER_TEMP/worker-env.txt"; then
+	[ "$WORKER_MODE" != measure ] || exit 3
+	echo "worker-env: registering anyway with worker-env=$WORKER_ENV (actions without worker-env only)"
+fi
 [ "$WORKER_MODE" != measure ] || exit 0
 curl -fsSL -o "$RUNNER_TEMP/nl.tgz" "https://github.com/TraceMachina/nativelink/releases/download/v${NL_VERSION}/nativelink-${NL_VERSION}-x86_64-unknown-linux-musl.tar.gz"
 echo "${NL_SHA256}  $RUNNER_TEMP/nl.tgz" | sha256sum -c -

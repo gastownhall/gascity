@@ -60,7 +60,8 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 				t.Errorf("checkout must set persist-credentials: false, got %v", step.With["persist-credentials"])
 			}
 		}
-		if strings.Contains(step.Run, rbeWorkerScript) {
+		// The worker-env measure step runs the script too, without a worker.
+		if strings.Contains(step.Run, rbeWorkerScript) && step.Env["WORKER_MODE"] != "measure" {
 			worker = true
 			// Default on; the repository variable RBE_ACTION_ISOLATION=0 is the
 			// rollback without a code change.

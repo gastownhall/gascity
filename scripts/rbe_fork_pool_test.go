@@ -119,11 +119,11 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 		t.Errorf("permissions %v, want contents: read only", wf.Permissions)
 	}
 
-	// The worker-env gate and drift report jobs around it are
-	// TestRBEPoolWorkflowsGateAndReportDrift's.
+	// The worker-env drift jobs beside it, and its measure step, are
+	// TestRBEPoolWorkflowsReportDriftWhileServing's.
 	job, ok := wf.Jobs["worker"]
 	if !ok || len(wf.Jobs) != 3 {
-		t.Fatalf("%s: jobs %v, want gate, worker and report-drift", rbeForkPoolWorkflow, rbeSortedKeys(wf.Jobs))
+		t.Fatalf("%s: jobs %v, want worker, await-drift and report-drift", rbeForkPoolWorkflow, rbeSortedKeys(wf.Jobs))
 	}
 	// Blacksmith donates this compute for our OSS repos' workflows; the
 	// default branch only, as rbe-worker-pool.yml.
@@ -147,7 +147,7 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 				t.Errorf("checkout must set persist-credentials: false, got %v", step.With["persist-credentials"])
 			}
 		}
-		if strings.TrimSpace(step.Run) != rbeWorkerScript {
+		if strings.TrimSpace(step.Run) != rbeWorkerScript || step.Env["WORKER_MODE"] == "measure" {
 			continue
 		}
 		worker = true
