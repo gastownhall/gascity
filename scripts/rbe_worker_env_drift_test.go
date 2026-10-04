@@ -549,7 +549,11 @@ func TestRBEWorkerRegistersOnDrift(t *testing.T) {
 			"GITHUB_STEP_SUMMARY=" + filepath.Join(tmp, "summary.md"),
 			"STUB_LOG=" + filepath.Join(tmp, "stub.log"), "NL_STUB=" + nlStub, "NL_CAPTURE=" + capture,
 			"WORKER_MODE=" + mode, "POOL_IDLE_MINUTES=1", "RBE_ACTION_ISOLATION=0",
-			"RBE_WORKER_TLS_CERT=eA==", "RBE_WORKER_TLS_KEY=eA==", "RBE_WEST_HOST=rbe.invalid", "WORKER_NAME=w-1",
+		}
+		// Measure mode runs with WORKER_MODE alone (the canary, the bazel
+		// jobs): no certificate, no farm host, no worker name.
+		if mode != "measure" {
+			env = append(env, "RBE_WORKER_TLS_CERT=eA==", "RBE_WORKER_TLS_KEY=eA==", "RBE_WEST_HOST=rbe.invalid", "WORKER_NAME=w-1")
 		}
 		stdout, stderr, err := runRBEScript(root, env, filepath.Join(root, rbeWorkerScript))
 		return tmp, capture, stdout + stderr, err
