@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 
 	beadslib "github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/issueops"
@@ -73,84 +72,48 @@ import (
 // lists with IncludeClosed and hands the whole match here, so a bead that
 // already closed with its own outcome now has gc.outcome and close_reason
 // rewritten to the skip. Its call site says the same thing.
+//
+// WHY THE CHUNK IS NOT FURTHER SPLIT TO RECOVER MAIN'S EXACT PREFIX, now that
+// this has been asked (ga-opus-g12 review, 2026-10): a bad id anywhere in a
+// chunk of up to issueops.MaxApplyBatchItems now costs the whole chunk, where
+// main's per-item loop only ever cost the ids from the bad one onward. Closing
+// that gap with a per-item retry-on-failure fallback was tried and reverted,
+// because the fallback has to read every bead in the chunk to find out where
+// the "prefix" ends, and that read is the EXACT cost this file exists to
+// remove — TestCloseAllDoesNotFallBackOnceAChunkHasLanded and
+// closeBatchSpy (both in this package's tests) already pin ZERO per-bead reads
+// on the batch route's error arm, for the same reason CloseAll's own
+// batchRouteUnavailable fallback is gated on `closed == 0`: re-walking a
+// backing that already committed part of the input is the one thing a caller
+// counting on this route's cost cannot have happen silently. A caller that
+// needs the lost prefix back today has two ways to get it at the SAME cost
+// main paid: a smaller caller-chosen chunk size (trading round trips for
+// precision, which is the caller's call to make, not this route's), or a
+// retry over just the ids CloseAll did not report as closed. Shrinking the
+// built-in chunk size itself remains open if a real workload needs it; no
+// caller measured against this one has, so the chunk stays at the cap.
 
 // nativeCloseAllProvenance labels the history entry the batch records, the way
 // the per-bead route's writes were labeled by the operations themselves.
 const nativeCloseAllProvenance = "gc: close all"
 
-// batchRouteRefusals are the extra refusal shapes a DISTRIBUTION has taught
-// this package to read as "this backing cannot apply a batch".
-var batchRouteRefusals struct {
-	mu    sync.RWMutex
-	match []func(error) bool
-}
-
-// RegisterBatchUnavailableRefusal teaches this package one more refusal shape
-// that means a backing cannot apply a batch at all.
-//
-// WHY THIS IS A SEAM AND NOT A SECOND errors.As ARM. The portable refusal is
-// *beadslib.ErrUnsupported and is classified below with no help. A backend may
-// answer in its OWN shape instead, and the one this fork routes infrastructure
-// over does: the http backend consults the server's advertised capability list
-// before it dials, so an operation the server does not publish comes back as
-// the client's typed capability refusal, which unwraps to a sentinel of its own
-// and matches no portable arm. That sentinel lives in a package this one cannot
-// import — it exists in the private fork of the beads module and not in the
-// public one, so an open-source assembly that named it here would not build.
-//
-// The distribution wiring that REGISTERS a backend is the same place that knows
-// how that backend refuses, and it is already the one file allowed to name it
-// (cmd/gc/beads_backend_registry_enterprise.go, whose own comment gives the
-// rule: registration is a property of the distribution being built, not of the
-// import graph). So the knowledge is registered from there, beside the backend
-// it describes.
-//
-// Registration is additive and process-global, like the backend registry it
-// sits next to. A classifier must answer only for a refusal raised BEFORE any
-// write — the fallback re-runs the whole input — which every capability refusal
-// is by construction.
-func RegisterBatchUnavailableRefusal(match func(error) bool) {
-	if match == nil {
-		return
-	}
-	batchRouteRefusals.mu.Lock()
-	defer batchRouteRefusals.mu.Unlock()
-	batchRouteRefusals.match = append(batchRouteRefusals.match, match)
-}
-
 // batchRouteUnavailable reports a refusal that means the BACKING cannot apply a
 // batch, as opposed to one that means this batch failed.
 //
 // It is the whole of the route decision, so what it misses is a CloseAll that
-// hard-fails where the per-bead loop would have worked. Two shapes answer true:
-// the portable *beadslib.ErrUnsupported, and whatever a distribution registered
-// above.
-//
-// ONE AMBIGUITY IT CANNOT RESOLVE, and it is the wire's rather than this
-// function's: the http client answers from a handshake snapshot taken when the
-// store was opened, so a server DOWNGRADED mid-run still reads as advertising
-// the operation. The dial then goes out blind and an unrouted path answers a
-// bare 404, which the problem mapper reads as not_found — indistinguishable
-// from a bead that does not exist. That is the pre-existing limitation the
-// capability list exists to keep out of the common case, not something a
-// classifier here can tell apart, and closing it means the backend serving a
-// down-level leg rather than this fence guessing.
+// hard-fails where the per-bead loop would have worked. The one shape that
+// answers true is the portable *beadslib.ErrUnsupported: every backend this
+// package can build against on gascity main answers that way, so there is no
+// embedder-registered second shape to classify here. (A served backend that
+// answers in its own wire-specific refusal shape instead is a capability a
+// private distribution would have to teach this function about from outside
+// the package; none does on this tree.)
 func batchRouteUnavailable(err error) bool {
 	if err == nil {
 		return false
 	}
 	var unsupported *beadslib.ErrUnsupported
-	if errors.As(err, &unsupported) {
-		return true
-	}
-	batchRouteRefusals.mu.RLock()
-	defer batchRouteRefusals.mu.RUnlock()
-	for _, match := range batchRouteRefusals.match {
-		if match(err) {
-			return true
-		}
-	}
-	return false
+	return errors.As(err, &unsupported)
 }
 
 // closeAllAsBatch closes ids in as few requests as the applier's item cap

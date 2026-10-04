@@ -12,17 +12,16 @@
 // processes, graph-apply), and a counter only the fencer maintains fences
 // nothing.
 //
-// WHAT IS NO LONGER TRUE, on the bd-enterprise link this branch rides: the
+// WHAT IS NO LONGER TRUE, on the issueops facade this store now rides: the
 // premise used to read "types.Issue carries no revision field, so Get().Revision
-// is 0 and never advances". Both halves of the token now exist there. The READ
-// half arrived with the detail-view re-point — issueops.IssueDetails.Revision
-// lands on Bead.Revision (native_dolt_store_read_roles.go Get), and it is a real
-// row_lock rather than a fabricated zero. The POST-WRITE half arrived with the
-// pin this comment sits on: update, close and reopen each answer with the token
-// they minted, on issueops.{Update,Close,Reopen}Result.Issue.RowVersion
-// (bd-enterprise ga-b8ddd.33).
+// is 0 and never advances". Both halves of the token now exist. The READ half
+// arrived with the detail-view re-point — issueops.IssueDetails.Revision lands
+// on Bead.Revision (native_dolt_store_read_roles.go Get), and it is a real
+// row_lock rather than a fabricated zero. The POST-WRITE half is the same
+// facade: update, close and reopen each answer with the token they minted, on
+// issueops.{Update,Close,Reopen}Result.Issue.RowVersion.
 //
-// The trio is therefore EXPRESSIBLE against this link and is still not
+// The trio is therefore EXPRESSIBLE against this facade and is still not
 // implemented, which is a scope statement and not a fact about the schema.
 // Implementing it means declaring ConditionalWriter, which is exactly the
 // declaration the paragraph below says must not be made casually — it decides

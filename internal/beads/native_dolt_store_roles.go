@@ -268,8 +268,7 @@ func (s *NativeDoltStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 // three target spellings, so an unresolved or bare-slug target crosses as
 // stored — and hand the rows to the same scanner. A store reached over the wire
 // therefore answers the same rows the embedded backend does, and this front
-// door needs no capability fork. (bd-enterprise ga-b8ddd.30 measured it as a
-// dual run; before that flip the served leg refused the read outright.)
+// door needs no capability fork between the two.
 //
 // ABSENCE IS ABSENCE ON THREE COUNTS — the anchor is not there, the anchor
 // holds no such edge, or the edge exists and carried no payload — and all three
