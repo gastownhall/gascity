@@ -75,7 +75,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		// Provenance is a property of the declared agent, shared by every
 		// pool-expanded instance, so compute it once per source agent.
 		pack, packDerived := agentPackProvenance(a, rawCfg, cfg)
-		expanded := expandAgent(a, cityName, sessTmpl, sp)
+		expanded := expandAgent(a, cityName, sessTmpl, sp, cfg.NamedSessions)
 		for _, ea := range expanded {
 			if input.Rig != "" && ea.rig != input.Rig {
 				continue

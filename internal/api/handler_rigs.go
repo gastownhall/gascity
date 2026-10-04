@@ -46,7 +46,7 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 			continue
 		}
 		processNames := config.AgentProcessNames(cfg, a, exec.LookPath)
-		expanded := expandAgent(a, cityName, tmpl, sp)
+		expanded := expandAgent(a, cityName, tmpl, sp, cfg.NamedSessions)
 		for _, ea := range expanded {
 			agentCount++
 			sessionName := agent.SessionNameFor(cityName, ea.qualifiedName, tmpl)
@@ -94,7 +94,7 @@ func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provi
 			continue
 		}
 		processNames := config.AgentProcessNames(cfg, a, exec.LookPath)
-		expanded := expandAgent(a, cityName, tmpl, sp)
+		expanded := expandAgent(a, cityName, tmpl, sp, cfg.NamedSessions)
 		for _, ea := range expanded {
 			agentCount++
 			sessionName := agent.SessionNameFor(cityName, ea.qualifiedName, tmpl)
