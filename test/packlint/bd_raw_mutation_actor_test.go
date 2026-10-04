@@ -300,6 +300,18 @@ func TestBdActorGuardExemptOrderCheck(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "checked file with alias-after-id order is NOT exempt",
+			rel:  checkedFile,
+			line: `bd close "$WORK_BEAD" --actor "${GC_SESSION_ID:-${GC_ALIAS:-${GC_SESSION_NAME:-}}}"`,
+			want: false,
+		},
+		{
+			name: "checked file with alias-after-name order is NOT exempt",
+			rel:  checkedFile,
+			line: `bd close "$WORK_BEAD" --actor "${GC_SESSION_NAME:-${GC_ALIAS:-}}"`,
+			want: false,
+		},
+		{
 			name: "unlisted file with the same wrong order is exempt on presence alone",
 			rel:  "packs/actual/deployer/formulas/mol-deployer-gate.formula.toml",
 			line: `bd close "$WORK_BEAD" --actor "${GC_ALIAS:-${GC_SESSION_NAME:-${GC_SESSION_ID:-}}}"`,
