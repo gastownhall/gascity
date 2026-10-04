@@ -445,6 +445,31 @@ Apply the change by regenerating the service file:
 gc service restart     # restarts the launchd/systemd service
 ```
 
+### Keeping a credential out of the service file (macOS Keychain)
+
+Both routes above write the credential's value into the plist in plaintext.
+On macOS you can keep it in the login Keychain instead, by setting
+`GC_SUPERVISOR_KEYCHAIN_ENV` to `KEY=SERVICE` pairs (comma or space separated)
+in the shell that runs `gc start` or `gc supervisor install`:
+
+```bash
+# store the secret once (account = your login name)
+security add-generic-password -a "$USER" -s claude-bedrock-token -w '<token>' -T /usr/bin/security -U
+
+# ~/.zshenv
+export GC_SUPERVISOR_KEYCHAIN_ENV="AWS_BEARER_TOKEN_BEDROCK=claude-bedrock-token"
+```
+
+The service file then records only the mapping. Each mapped key is left out of
+the service file, even if it's exported in the shell or listed in `secrets.env`.
+When `gc supervisor run` starts, it reads each value with `security
+find-generic-password -a "$USER" -s SERVICE -w` and sets it in its own
+environment, so agent sessions inherit it. A key that already has a value in
+the supervisor's environment is left as it is. A failed lookup, for example a
+missing item or a locked Keychain, is logged to the supervisor log (`gc
+supervisor logs`) and leaves that key unset. Regenerate the service file after
+changing the mapping.
+
 ## A Custom Environment Variable Doesn't Reach Agent Sessions
 
 Symptom: a non-`GC_`-prefixed variable you've exported and confirmed is set
