@@ -432,10 +432,27 @@ func (s *session) closeAndWait() (string, int) {
 	return s.wait()
 }
 
+// wait reaps the adapter. Like every other lifecycle wait in this suite it is
+// bounded by adapterWaitBudget: an adapter that never exits used to block here
+// until the package's go-test timeout (observed once as a 20-minute hang on a
+// host at load ~337), with no record of what the adapter was doing. Now the
+// adapter's group is killed and the test fails with its output.
 func (s *session) wait() (string, int) {
 	s.t.Helper()
+	waited := make(chan error, 1)
+	go func() { waited <- s.cmd.Wait() }()
+	var waitErr error
+	select {
+	case waitErr = <-waited:
+	case <-time.After(adapterWaitBudget):
+		_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
+		<-waited
+		<-s.done
+		s.t.Fatalf("adapter did not exit within %s; killed its process group.\nstdout:\n%s\nstderr:\n%s",
+			adapterWaitBudget, s.output(), s.errOut.String())
+	}
 	code := 0
-	if err := s.cmd.Wait(); err != nil {
+	if err := waitErr; err != nil {
 		var exitErr *exec.ExitError
 		if !asExitError(err, &exitErr) {
 			s.t.Fatalf("wait adapter: %v", err)
