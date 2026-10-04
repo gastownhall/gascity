@@ -2426,6 +2426,54 @@ func TestRouteConvoyStatus_StaleBannerOver30s(t *testing.T) {
 	}
 }
 
+// TestConvoyStatusJSONIncludesCacheAge covers the API rendering path, which is
+// where a CachedRead's age reaches the payload. It is driven through
+// renderConvoyStatusFromAPI rather than a live listener: the untagged
+// http_test_server census ratchet (TESTING.md) cannot grow, and
+// internal/api/client_test.go already covers the response header.
+func TestConvoyStatusJSONIncludesCacheAge(t *testing.T) {
+	cr := api.CachedRead[api.ConvoyStatusView]{
+		Body: api.ConvoyStatusView{
+			Convoy:   beads.Bead{ID: "gc-1", Title: "old", Status: "open", Type: "convoy"},
+			Progress: api.ConvoyProgressView{Total: 2, Closed: 1},
+		},
+		AgeSeconds: 45,
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := renderConvoyStatusFromAPI(cr, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if age, ok := result["_cache_age_s"].(float64); !ok || age != 45 {
+		t.Fatalf("_cache_age_s = %v, want 45: %s", result["_cache_age_s"], stdout.String())
+	}
+}
+
+// TestConvoyStatusJSONOmitsCacheAgeOnLocalPath covers the fallback rendering
+// path, which has no cached read and must not claim an age it cannot name.
+func TestConvoyStatusJSONOmitsCacheAgeOnLocalPath(t *testing.T) {
+	convoy := beads.Bead{ID: "gc-1", Title: "old", Status: "open", Type: "convoy"}
+
+	var stdout, stderr bytes.Buffer
+	code := writeConvoyStatusJSON(convoy, nil, convoyProgressJSON{Total: 2, Closed: 1}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if _, ok := result["_cache_age_s"]; ok {
+		t.Fatalf("_cache_age_s present without a cached read: %s", stdout.String())
+	}
+}
+
 func TestRouteConvoyStatus_WorkflowConvoyFallsBack(t *testing.T) {
 	// Graph/workflow convoys produce an empty Convoy.ID in the API response;
 	// the router must fall back to the local path so workflow-aware

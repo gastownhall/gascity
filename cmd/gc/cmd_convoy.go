@@ -981,6 +981,7 @@ type convoyStatusResultJSON struct {
 	Convoy        convoyDetailJSON   `json:"convoy"`
 	Progress      convoyProgressJSON `json:"progress"`
 	Children      []convoyChildJSON  `json:"children"`
+	CacheAgeS     *float64           `json:"_cache_age_s,omitempty"`
 }
 
 func collectOpenConvoys(stores []convoyStoreView) ([]convoyWithStore, error) {
@@ -1224,7 +1225,7 @@ func renderConvoyStatusFromAPI(cr api.CachedRead[api.ConvoyStatusView], jsonOut 
 		return writeConvoyStatusJSON(convoy, children, convoyProgressFromAPI(api.ConvoyCheckView{
 			Closed: progress.Closed,
 			Total:  progress.Total,
-		}), stdout, stderr)
+		}), &cr.AgeSeconds, stdout, stderr)
 	}
 
 	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
@@ -1307,7 +1308,7 @@ func doConvoyStatusWithJSON(store beads.Store, args []string, jsonOut bool, stdo
 	progress := convoyProgressFromChildren(children)
 
 	if jsonOut {
-		return writeConvoyStatusJSON(convoy, children, progress, stdout, stderr)
+		return writeConvoyStatusJSON(convoy, children, progress, nil, stdout, stderr)
 	}
 
 	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
@@ -1348,7 +1349,7 @@ func doConvoyStatusWithJSON(store beads.Store, args []string, jsonOut bool, stdo
 	return 0
 }
 
-func writeConvoyStatusJSON(convoy beads.Bead, children []beads.Bead, progress convoyProgressJSON, stdout, stderr io.Writer) int {
+func writeConvoyStatusJSON(convoy beads.Bead, children []beads.Bead, progress convoyProgressJSON, cacheAgeS *float64, stdout, stderr io.Writer) int {
 	childItems := make([]convoyChildJSON, 0, len(children))
 	for _, ch := range children {
 		childItems = append(childItems, convoyChildJSON{
@@ -1370,8 +1371,9 @@ func writeConvoyStatusJSON(convoy beads.Bead, children []beads.Bead, progress co
 			Fields: convoyFieldsFromBead(convoy),
 			Labels: convoy.Labels,
 		},
-		Progress: progress,
-		Children: childItems,
+		Progress:  progress,
+		Children:  childItems,
+		CacheAgeS: cacheAgeS,
 	}); err != nil {
 		fmt.Fprintf(stderr, "gc convoy status: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
