@@ -28,6 +28,30 @@ func findNamedSessionSpec(cfg *config.City, cityName, identity string) (namedSes
 	return session.FindNamedSessionSpec(cfg, cityName, identity)
 }
 
+// configuredNamedSessionSpecForRuntimeName returns the configured named-session
+// owner for an exact runtime session name. A unique exact name is durable
+// ownership evidence even if a transient desired-state classification omits
+// configured-named fields.
+func configuredNamedSessionSpecForRuntimeName(cfg *config.City, cityName, sessionName string) (namedSessionSpec, bool) {
+	sessionName = strings.TrimSpace(sessionName)
+	if cfg == nil || sessionName == "" {
+		return namedSessionSpec{}, false
+	}
+
+	var matched namedSessionSpec
+	for i := range cfg.NamedSessions {
+		spec, ok := findNamedSessionSpec(cfg, cityName, cfg.NamedSessions[i].QualifiedName())
+		if !ok || strings.TrimSpace(spec.SessionName) != sessionName {
+			continue
+		}
+		if matched.Identity != "" && matched.Identity != spec.Identity {
+			return namedSessionSpec{}, false
+		}
+		matched = spec
+	}
+	return matched, matched.Identity != ""
+}
+
 func namedSessionBackingTemplate(spec namedSessionSpec) string {
 	return session.NamedSessionBackingTemplate(spec)
 }
