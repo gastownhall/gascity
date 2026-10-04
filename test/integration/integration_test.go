@@ -42,6 +42,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 	"github.com/gastownhall/gascity/test/toolhome"
@@ -1654,12 +1655,7 @@ func trimmedCommandOutput(binary string, args ...string) (string, error) {
 }
 
 func seedIsolatedDoltConfig(gcHome string) error {
-	doltDir := filepath.Join(gcHome, ".dolt")
-	if err := os.MkdirAll(doltDir, 0o755); err != nil {
-		return err
-	}
-	doltCfg := `{"user.name":"gc-test","user.email":"gc-test@test.local"}`
-	return os.WriteFile(filepath.Join(doltDir, "config_global.json"), []byte(doltCfg), 0o644)
+	return testutil.SeedDoltGlobalConfig(gcHome)
 }
 
 func registerCityCommandEnv(cityDir string, env []string) {
@@ -2508,6 +2504,9 @@ func TestNewIsolatedToolEnvSeedsLocalDoltIdentity(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"user.email":"gc-test@test.local"`) {
 		t.Fatalf("isolated dolt config missing user.email: %s", string(data))
+	}
+	if !strings.Contains(string(data), `"metrics.disabled":"true"`) {
+		t.Fatalf("isolated dolt config leaves dolt usage metrics on (egress to eventsapi.dolthub.com): %s", string(data))
 	}
 }
 
