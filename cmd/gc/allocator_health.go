@@ -123,7 +123,7 @@ func (r *suspensionReader) state() (suspensionstate.State, error) {
 }
 
 // errEpisodesUncached reports a sessions store whose cache could not answer
-// the episode read, with no last good within censusLastGoodBound. Consumers
+// the episode read, with no last good within cacheLagBound. Consumers
 // fail open on it (no episode), as legacy does on a load error
 // (session_reconciler.go, LoadStartupHealthEpisode).
 var errEpisodesUncached = errors.New("startup-health episodes: sessions cache unavailable")
@@ -132,7 +132,7 @@ var errEpisodesUncached = errors.New("startup-health episodes: sessions cache un
 // leg's CachingStore. An exact leg is read as the census reads it, through the
 // cache's bounded dirty-row overlay; any other leg strict from memory, never
 // from its backing store. A failed read serves the last good for
-// censusLastGoodBound. It is owned by one goroutine.
+// cacheLagBound. It is owned by one goroutine.
 type episodeReader struct {
 	last map[string]session.StartupHealthEpisode
 	at   time.Time
@@ -171,7 +171,7 @@ func (r *episodeReader) read(store beads.Store, exact bool, now time.Time) (map[
 			r.last, r.at, r.ok = episodes, now, true
 		}
 	}
-	if !r.ok || now.Sub(r.at) > censusLastGoodBound {
+	if !r.ok || now.Sub(r.at) > cacheLagBound {
 		return nil, time.Time{}, errEpisodesUncached
 	}
 	return r.last, r.at, nil

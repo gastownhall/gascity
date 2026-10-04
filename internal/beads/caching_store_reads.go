@@ -21,11 +21,11 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	}
 	if query.Live || query.ParentID != "" {
 		c.mu.RLock()
-		startSeq := c.mutationSeq
+		startSeq, startScan := c.mutationSeq, c.scanGen
 		c.mu.RUnlock()
 		items, err := c.backing.List(query)
 		if err == nil {
-			items = c.refreshCachedBeads(query, startSeq, items)
+			items = c.refreshCachedBeads(query, startSeq, startScan, items)
 		}
 		return items, err
 	}
@@ -326,7 +326,7 @@ func (c *CachingStore) cacheServableForListQueryLocked(query ListQuery) bool {
 	return slices.Contains(partialPrimeStatuses, query.Status)
 }
 
-func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, items []Bead) []Bead {
+func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq, startScan uint64, items []Bead) []Bead {
 	refreshedParents := make(map[string]Bead)
 	removedParents := make(map[string]struct{})
 	refreshedLiveMissing := make(map[string]Bead)
@@ -375,6 +375,13 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 			}
 			continue
 		}
+		if c.scanRacedLocked(item.ID, startScan, item, true) {
+			// The list's row answers, uninstalled.
+			if query.Matches(item) {
+				refreshed = append(refreshed, cloneBead(item))
+			}
+			continue
+		}
 		if current, keep := c.recentLocalBeadConflictLocked(item.ID, item, now, false); keep {
 			if query.Matches(current) {
 				refreshed = append(refreshed, current)
@@ -399,7 +406,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		}
 	}
 	for id, bead := range refreshedParents {
-		if c.refetchFencedLocked(id, startSeq) {
+		if c.refetchFencedLocked(id, startSeq) || c.scanRacedLocked(id, startScan, bead, true) {
 			continue
 		}
 		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
@@ -412,16 +419,16 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		})
 	}
 	for id := range removedParents {
-		if c.refetchFencedLocked(id, startSeq) {
+		if c.refetchFencedLocked(id, startSeq) || c.scanRacedLocked(id, startScan, Bead{}, false) {
 			continue
 		}
 		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
 			continue
 		}
-		c.evictLocked(id)
+		c.evictListedGoneLocked(id)
 	}
 	for id, bead := range refreshedLiveMissing {
-		if c.refetchFencedLocked(id, startSeq) {
+		if c.refetchFencedLocked(id, startSeq) || c.scanRacedLocked(id, startScan, bead, true) {
 			continue
 		}
 		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
@@ -434,17 +441,26 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		})
 	}
 	for id := range removedLiveMissing {
-		if c.refetchFencedLocked(id, startSeq) {
+		if c.refetchFencedLocked(id, startSeq) || c.scanRacedLocked(id, startScan, Bead{}, false) {
 			continue
 		}
 		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
 			continue
 		}
-		c.evictLocked(id)
+		c.evictListedGoneLocked(id)
 	}
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
 	return refreshed
+}
+
+// evictListedGoneLocked evicts id, which a list refresh's point read found
+// gone, and stamps it as RefreshRow's not-found eviction does, so a scan or
+// Prime whose listing predates the read cannot reinstall the row. Caller must
+// hold c.mu in write mode.
+func (c *CachingStore) evictListedGoneLocked(id string) {
+	c.evictLocked(id)
+	c.noteMutationLocked(id)
 }
 
 func (c *CachingStore) staleParentCacheIDs(parentID string, fresh []Bead) []string {
@@ -531,7 +547,7 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 	}
 	if c.state == cacheLive || c.state == cachePartial {
 		if _, ok := c.dirty[id]; ok {
-			startSeq := c.mutationSeq
+			startSeq, startScan := c.mutationSeq, c.scanGen
 			c.mu.RUnlock()
 			fresh, err := c.backing.Get(id)
 			if err != nil {
@@ -573,6 +589,12 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 				c.mu.Unlock()
 				return fresh, nil
 			}
+			if c.scanRacedLocked(id, startScan, fresh, true) {
+				// The backing read answers, uninstalled; a mark it left
+				// sends the next Get back to the backing.
+				c.mu.Unlock()
+				return fresh, nil
+			}
 			opts := absorbOpts{
 				depsMode:   depsFromFieldsIfCarried,
 				seqMode:    seqClearBeadSeqOnly,
@@ -607,6 +629,64 @@ func (c *CachingStore) refetchFencedLocked(id string, startSeq uint64) bool {
 	return c.beadSeq[id] > startSeq || c.writeFencedLocked(id, startSeq)
 }
 
+// scanRacedLocked is the install gate a refetch applies after
+// refetchFencedLocked: startScan is the scanGen it captured with its
+// startSeq, fresh its backing read of id, and found false when that read
+// found no row. It reports false when no scan merged since, and the caller
+// installs as usual. Otherwise a scan may have installed or evicted id
+// unfenced, or seen it change and kept it for a recent local write, so the
+// caller installs nothing. The scan's read and the refetch's are unordered,
+// so either may be the newer: when the refetch's disagrees with what the
+// cache holds, settleUnorderedReadLocked marks id dirty, and the next refetch
+// no scan overlaps settles it. When they agree, the cache already holds what
+// the refetch read. Caller must hold c.mu in write mode.
+func (c *CachingStore) scanRacedLocked(id string, startScan uint64, fresh Bead, found bool) bool {
+	if c.scanGen == startScan {
+		return false
+	}
+	c.settleUnorderedReadLocked(id, fresh, found)
+	return true
+}
+
+// settleUnorderedReadLocked handles a backing read of id (fresh, or no row
+// when found is false) that it cannot order against the read that installed
+// or evicted id's cached state. If the two disagree, it marks id dirty, so no
+// clean census serves either, and stamps id, so no scan that started before
+// the mark can clear it with a read older still. A tombstoned id needs no
+// mark. Caller must hold c.mu in write mode.
+func (c *CachingStore) settleUnorderedReadLocked(id string, fresh Bead, found bool) {
+	if !c.rowReadDisagreesLocked(id, fresh, found) {
+		return
+	}
+	if _, deleted := c.deletedSeq[id]; deleted {
+		return
+	}
+	c.noteMutationLocked(id)
+	c.markDirtyLocked(id)
+}
+
+// rowReadDisagreesLocked reports whether a backing read of id disagrees with
+// what the cache holds for it. A scan holds no closed row, so an uncached id
+// agrees with a closed read or none. The ready verdict, labels and edge
+// fields are not compared on the row, since a list row and a point read carry
+// them differently; edges are compared with the cached set when the read
+// carries them. Caller must hold c.mu.
+func (c *CachingStore) rowReadDisagreesLocked(id string, fresh Bead, found bool) bool {
+	cached, held := c.beads[id]
+	switch {
+	case !held:
+		return found && fresh.Status != "closed"
+	case !found:
+		return true
+	}
+	if beadCarriesDependencyFields(fresh) && depsChanged(c.deps[id], depsFromBeadFields(fresh)) {
+		return true
+	}
+	fresh.IsBlocked = cached.IsBlocked
+	fresh.Needs, fresh.Dependencies = cached.Needs, cached.Dependencies
+	return beadChanged(cached, fresh, true)
+}
+
 // RefreshRow reads id from the backing store and installs what it found,
 // whether the cached copy is clean, dirty or absent: v2 lag repair's targeted
 // live read (CONTRACT C5.15). Unlike Get it never answers from the cache, and
@@ -618,8 +698,8 @@ func (c *CachingStore) refetchFencedLocked(id string, startSeq uint64) bool {
 //   - ErrNotFound: the backing has no row, and a cached copy or dirty mark
 //     was evicted;
 //   - ErrRowRefreshFenced: a write, deletion or event newer than the read
-//     owns the row (refetchFencedLocked), or a reconcile or full Prime merged
-//     since the read began (scanGen); retry;
+//     owns the row (refetchFencedLocked), or a reconcile, full Prime or
+//     PrimeActive merged since the read began (scanGen); retry;
 //   - ErrCacheUnavailable: the cache is neither live nor partial, or id is
 //     outside the namespaces this cache owns (ownsBeadID);
 //   - any other error: the backing read of the row or its edges failed.

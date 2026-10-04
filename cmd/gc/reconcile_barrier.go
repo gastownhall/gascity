@@ -17,8 +17,9 @@ import (
 // reconcile while a config reload applies, and the worker FS-pressure gate
 // (MAINT-026), which pauses them under sustained IO pressure. Both hold the
 // session queue, the allocator lane and the resync lane under their own name;
-// holds are a set, so neither releases the other's. Nothing calls either in
-// this slice; the switch wires them.
+// holds are a set, so neither releases the other's. The tick runs a v2
+// controller's config reload under the barrier (reloadUnderBarrier), and run
+// arms the FS gate once the city is ready.
 
 const (
 	reloadReconcileDeadline = 30 * time.Second // C4.4 step 2

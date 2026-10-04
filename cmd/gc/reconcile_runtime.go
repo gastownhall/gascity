@@ -21,9 +21,9 @@ import (
 // The keyed reconciler's runtime: session workers draining the workqueue, the
 // allocator and the resync pass as paced lanes, a boot pass whose readiness
 // waits for every boot key to be reconciled once, and an immutable
-// per-generation environment the workers read. In this slice the controllers
-// are trace-only and nothing constructs the runtime outside tests; the switch
-// wires it in.
+// per-generation environment the workers read. The controllers are
+// trace-only until P3 and P4; newControllerWiring constructs the runtime when
+// the controller latches v2, and the city runtime binds, boots and stops it.
 //
 // v2 code never reads CityRuntime. A reload writes CityRuntime fields with no
 // lock and may rebuild every store (F2), so everything v2 needs from the city
@@ -64,8 +64,8 @@ var v2IndexOnlyResyncs = map[string]bool{"census-error": true, "rebuild-overflow
 
 var errV2Stopped = errors.New("v2 reconciler: stopped before ready")
 
-// v2Host is the only way v2 code reaches the city (F2). The switch builds it
-// from the city runtime; tests build it from fakes.
+// v2Host is the only way v2 code reaches the city (F2). newV2Host builds it
+// from the city runtime (city_runtime_v2.go); tests build it from fakes.
 type v2Host struct {
 	sessionsLeg string // the sessions-class store's census label (rowKey.Leg)
 	// sessions and censusLegs are the router's census: cached reads of the
@@ -154,18 +154,16 @@ type v2Controllers struct {
 func (c v2Controllers) complete() bool { return !c.traceOnly.session && !c.traceOnly.allocator }
 
 // defaultV2Controllers returns this build's controllers. In P2 both are the
-// skeleton: functions that record what they were asked to do and return.
-// Neither writes, probes or starts anything.
+// skeleton: the session controller records the reason kinds it was handed,
+// and both return. Neither writes, probes or starts anything. (The allocator
+// lane counts its own wake reasons, whatever the controller.)
 func defaultV2Controllers(m *v2Metrics) v2Controllers {
 	c := v2Controllers{
 		session: func(_ context.Context, _ *reconcileEnv, it workqueue.Item[rowKey]) (time.Duration, error) {
 			m.recordTrace(&m.sessionReasons, it.Reasons)
 			return 0, nil
 		},
-		allocator: func(_ context.Context, _ *reconcileEnv, reasons []workqueue.Reason) error {
-			m.recordTrace(&m.allocatorReasons, reasons)
-			return nil
-		},
+		allocator: func(context.Context, *reconcileEnv, []workqueue.Reason) error { return nil },
 	}
 	c.traceOnly.session, c.traceOnly.allocator = !v2SessionControllerReal, !v2AllocatorControllerReal
 	return c
@@ -192,9 +190,11 @@ type v2Runtime struct {
 	bootOnce   sync.Once                                  // records the first boot's duration
 	sweep      atomic.Pointer[resyncSweep]
 	ready      atomic.Bool // boot has returned ready
+	noStore    atomic.Bool // the city has no bead store, so boot never runs (MAINT-003)
 	barrier    *reloadBarrier
 	fs         *workerFSGate
 	metrics    *v2Metrics
+	report     v2QueueReport
 	workers    int
 	rand       func() float64 // jitter for the queue and the lanes
 
@@ -247,6 +247,24 @@ func newV2Runtime(host v2Host, ctrl v2Controllers, metrics *v2Metrics) *v2Runtim
 	return rt
 }
 
+// bindHost hands an unstarted runtime the city it reconciles. The controller
+// wiring builds the runtime before the city runtime exists, so its router can
+// take socket keys from the first one; only the sessions leg and stderr are
+// known then. newCityRuntime binds the rest once, before run can start it, so
+// every goroutine that reads the host starts after the bind.
+func (rt *v2Runtime) bindHost(host v2Host) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.started || rt.stopped {
+		panic("v2 reconciler: host bound after start")
+	}
+	host.sessionsLeg = rt.host.sessionsLeg
+	if host.stderr == nil {
+		host.stderr = rt.host.stderr
+	}
+	rt.host = host
+}
+
 // publishEnv publishes the host's current config as the next generation,
 // unless the current env already holds the same config, provider and
 // revision, and returns the current env. Boot publishes Gen 1; the reload
@@ -273,6 +291,7 @@ func (rt *v2Runtime) publishEnv() *reconcileEnv {
 // requestResync wakes the resync lane. Wakes fold into the lane's next pass,
 // which runs the enqueue-all if any folded reason needs it.
 func (rt *v2Runtime) requestResync(reason string) {
+	rt.metrics.recordResyncRequest(reason)
 	if !v2IndexOnlyResyncs[reason] {
 		rt.resyncFull.Store(true)
 	}
@@ -300,12 +319,22 @@ func (rt *v2Runtime) signalResync() {
 //     boot pass's allocator wake is buffered, so the lane's first pass runs
 //     at once.
 //  4. Wait for the boot coverage and the allocator's first pass.
-func (rt *v2Runtime) boot(ctx context.Context) error {
+//
+// While it waits, a non-nil patrol runs at every patrol interval: the caller
+// records what boot still waits on, and the stuck-reconcile check, which
+// otherwise run only on maintenance ticks, after readiness.
+func (rt *v2Runtime) boot(ctx context.Context, patrol func()) error {
 	started := time.Now()
 	if rt.env.Load() == nil {
 		rt.publishEnv()
 	}
-	cov, err := rt.bootPass(ctx)
+	var tick <-chan time.Time
+	if patrol != nil {
+		t := time.NewTicker(rt.env.Load().patrol())
+		defer t.Stop()
+		tick = t.C
+	}
+	cov, err := rt.bootPass(ctx, tick, patrol)
 	if err != nil {
 		return err
 	}
@@ -314,12 +343,18 @@ func (rt *v2Runtime) boot(ctx context.Context) error {
 		return errV2Stopped
 	}
 	for _, ready := range []<-chan struct{}{cov.Done(), rt.alloc.primed} {
-		select {
-		case <-ready:
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-runCtx.Done():
-			return errV2Stopped
+	wait:
+		for {
+			select {
+			case <-ready:
+				break wait
+			case <-tick:
+				patrol()
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-runCtx.Done():
+				return errV2Stopped
+			}
 		}
 	}
 	rt.bootOnce.Do(func() { rt.metrics.recordBoot(time.Since(started)) })
@@ -328,8 +363,9 @@ func (rt *v2Runtime) boot(ctx context.Context) error {
 }
 
 // bootPass runs the boot resync pass once, retrying a failed sessions census
-// with backoff, and returns its coverage.
-func (rt *v2Runtime) bootPass(ctx context.Context) (*workqueue.Coverage[rowKey], error) {
+// with backoff, and returns its coverage. patrol runs on every tick while it
+// waits to retry.
+func (rt *v2Runtime) bootPass(ctx context.Context, tick <-chan time.Time, patrol func()) (*workqueue.Coverage[rowKey], error) {
 	cov := rt.bootCov.Load()
 	for failures := 0; cov == nil; {
 		// This pass satisfies every resync requested before it, including
@@ -347,14 +383,20 @@ func (rt *v2Runtime) bootPass(ctx context.Context) (*workqueue.Coverage[rowKey],
 		d := laneBackoff(failures, rt.rand)
 		fmt.Fprintf(rt.host.stderr, "v2 reconciler: boot census failed (retry in %s): %v\n", d.Round(time.Millisecond), err) //nolint:errcheck // best-effort stderr
 		t := time.NewTimer(d)
-		select {
-		case <-t.C:
-		case <-ctx.Done():
-			t.Stop()
-			return nil, ctx.Err()
-		case <-rt.stopCh:
-			t.Stop()
-			return nil, errV2Stopped
+	retry:
+		for {
+			select {
+			case <-t.C:
+				break retry
+			case <-tick:
+				patrol()
+			case <-ctx.Done():
+				t.Stop()
+				return nil, ctx.Err()
+			case <-rt.stopCh:
+				t.Stop()
+				return nil, errV2Stopped
+			}
 		}
 	}
 	rt.bootCov.Store(cov)
@@ -446,7 +488,7 @@ func (rt *v2Runtime) work(ctx context.Context) {
 		outcome := rt.reconcile(ctx, it)
 		// A retry's wait includes its backoff, so only a first attempt
 		// samples enqueue-to-start latency.
-		rt.metrics.recordReconcile(started.Sub(it.AddedAt), it.Failures == 0, time.Since(started), outcome)
+		rt.metrics.recordReconcile(started.Sub(it.AddedAt), it.Failures == 0, v2BeadEventWoke(it.Reasons), time.Since(started), outcome)
 		rt.observe(it)
 	}
 }
@@ -588,6 +630,7 @@ func (rt *v2Runtime) allocatorPass(ctx context.Context) bool {
 	if !ok {
 		return true
 	}
+	rt.metrics.recordTrace(&rt.metrics.allocatorWakes, reasons)
 	env := rt.env.Load()
 	started := time.Now()
 	var err error

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -521,11 +522,30 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 // startBeadEventWatcher subscribes to the event bus and feeds bead events
 // to all CachingStore instances for sub-second cache freshness on agent-
 // initiated bd mutations (bd hooks → gc event emit → this watcher → ApplyEvent).
-// A failed Watch, a broken tail and a sequence that goes backwards are
-// reported to the controller wake as event gaps: events may be missing.
+// A failed Watch and a sequence that goes backwards are reported to the
+// controller wake as event gaps: events may be missing. A broken tail is
+// not: the watcher re-watches from the last seq it read, and the provider
+// replays every retained event after it. Only a re-watch that fails, or a
+// watcher that breaks before reading past its cursor, is a gap; both wait
+// beadEventWatcherRetryDelay before the next watch.
+//
+// A log reset is not seen here. FileRecorder's watcher drops every event at
+// or below the highest seq it has delivered (stepTail), so after a reset it
+// delivers nothing until the new log passes the old head, and a re-watch from
+// the cursor does the same. No gap is reported; a v2 router's indexes are
+// refreshed only by the resync lane's backstop (v2ResyncInterval, 5m) until
+// P3-7 adds provider-level reset detection.
+//
+// A city whose watcher does not start (no event provider, or a start cursor
+// that will not resolve) gets no event feed at all. It reports one gap, so a
+// v2 router resyncs once; after that only the resync lane's backstop
+// (v2ResyncInterval, 5m) refreshes its indexes until P3-7 adds a
+// patrol-cadence resync for a feedless city or refuses one. The legacy
+// reconciler ignores the gap.
 func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 	ep := cs.EventProvider()
 	if ep == nil {
+		cs.wakeOf().OnEventGap() // no feed
 		return
 	}
 	// The crash-window gap this watcher cannot see — a durable bead.closed whose
@@ -550,6 +570,7 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 		latest, err := ep.LatestSeq()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "api: bead event watcher: start cursor unresolved (%v); skipping watcher\n", err)
+			cs.wakeOf().OnEventGap() // no feed
 			return
 		}
 		seq = latest
@@ -570,12 +591,14 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 					continue
 				}
 			}
+			advanced := false // read past the cursor it watched from
 			for {
 				evt, err := watcher.Next()
 				if err != nil {
 					_ = watcher.Close()
 					break
 				}
+				advanced = true
 				if evt.Seq < seq {
 					cs.wakeOf().OnEventGap() // the log went backwards
 				}
@@ -588,7 +611,14 @@ func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			cs.wakeOf().OnEventGap() // the tail broke
+			if !advanced {
+				cs.wakeOf().OnEventGap() // the tail broke at its cursor
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(beadEventWatcherRetryDelay):
+				}
+			}
 		}
 	}()
 }
@@ -813,12 +843,15 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 		return
 	}
 	evt.Subject = id
+	wake := cs.wakeOf()
 	cs.mu.RLock()
 	stores := cs.beadEventStoresLocked(id)
 	var storeRef string
 	if evt.Type == events.BeadClosed {
 		storeRef = cs.autocloseStoreRefLocked(evt.Subject)
 	}
+	// Only the v2 router asks whether the event landed in the sessions store.
+	appliedToSessions := wake.routes() && slices.Contains(stores, resolveSessionStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv))
 	cs.mu.RUnlock()
 
 	// A cache-reconcile event carries a CachingStore's own post-absorb snapshot,
@@ -842,7 +875,7 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 			}
 		}
 	}
-	cs.wakeOf().OnBeadEvent(snapshot)
+	wake.OnBeadEvent(evt, snapshot, appliedToSessions)
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
 		rec := events.Discard
 		cs.mu.RLock()

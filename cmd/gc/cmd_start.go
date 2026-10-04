@@ -775,9 +775,21 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	}
 	// Refuse an inadmissible session_reconciler before any init, so a refused
 	// start (including --dry-run) starts no bead store and opens no event log.
-	// runController latches again for the mode it runs.
-	if _, err := latchReconcilerMode(cfg); err != nil {
+	// runController latches again (newControllerWiring) for the mode it runs.
+	// The two cannot disagree: both read only cfg's session_reconciler, which
+	// nothing below rewrites, and reconcilerModeLookupEnv's override, which no
+	// gc code sets.
+	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv)
+	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	// The one-shot reconcile below calls the legacy session reconciler
+	// directly, behind no legacySessionEntry guard, so v2 refuses it rather
+	// than run legacy session work under a v2 latch. Production never reaches
+	// it (A6, F11); --dry-run reconciles nothing.
+	if mode == reconcilerV2 && !controllerMode && !dryRunMode {
+		fmt.Fprintln(stderr, "gc start: session_reconciler = \"v2\" has no one-shot reconcile; run the controller (gc start --foreground) or remove the key") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -1271,6 +1283,23 @@ func ensureClaudeSettingsArgs(fs fsys.FS, cityPath, providerName string, stderr 
 	return settingsArgs(cityPath, providerName), nil
 }
 
+// claudeSettingsArgsReadOnly is ensureClaudeSettingsArgs without the
+// projection, for a read-only resolution (AM-N3): it validates the settings
+// Install would project and returns the arg a successful projection yields,
+// which always points at <city>/.gc/settings.json.
+func claudeSettingsArgsReadOnly(fs fsys.FS, cityPath, providerName string) (string, error) {
+	if providerName != "claude" || cityPath == "" {
+		return "", nil
+	}
+	if fs == nil {
+		fs = fsys.OSFS{}
+	}
+	if err := hooks.ValidateClaudeSettings(fs, cityPath); err != nil {
+		return "", fmt.Errorf("validating Claude settings: %w", err)
+	}
+	return fmt.Sprintf("--settings %q", filepath.Join(cityPath, ".gc", "settings.json")), nil
+}
+
 func claudeSettingsSource(cityPath string) (src, rel string) {
 	candidates := []struct {
 		src string
@@ -1462,6 +1491,18 @@ func sessionSetupContextForAgent(cityPath, cityName, qualifiedName string, a *co
 // filesystem (gc-r9fx). Session-start paths that need the directory to exist
 // use resolveConfiguredWorkDir.
 func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
+	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, true)
+}
+
+// resolveConfiguredWorkDirPathUnvalidated is resolveConfiguredWorkDirPath
+// without the stale-ancestor worktree check, which reads the filesystem: a
+// pure path computation for a plan whose effect runs the check before it
+// writes the path.
+func resolveConfiguredWorkDirPathUnvalidated(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
+	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, false)
+}
+
+func configuredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig, validate bool) (string, error) {
 	if a == nil {
 		return resolveAgentDirPath(cityPath, ""), nil
 	}
@@ -1477,8 +1518,10 @@ func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *c
 	// so the operator sees the broken ancestor instead of a structurally
 	// orphaned spawn. workDir is already absolute (ResolveWorkDirPathStrict
 	// returns through ResolveDirPath), so no further resolution is needed.
-	if err := workdirutil.ValidateAncestorWorktreesNotStale(workDir); err != nil {
-		return "", err
+	if validate {
+		if err := workdirutil.ValidateAncestorWorktreesNotStale(workDir); err != nil {
+			return "", err
+		}
 	}
 	return resolveAgentDirPath(cityPath, workDir), nil
 }

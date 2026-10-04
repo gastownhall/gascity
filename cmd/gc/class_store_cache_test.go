@@ -120,6 +120,10 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 	"AdvanceSequenceFloor": nil,
 	"StoreHealthPath":      nil,
 	"ReadOnly":             nil,
+	// A declaration about what a cache over the engine holds: the v2
+	// demand reads ask the cache's backing (demandLegCache), and a cache
+	// carrying it would advertise exactness over a bd backing.
+	"CachedReadExact": nil,
 }
 
 // TestControllerBindingCacheForwardsEveryEngineCapability holds the cache to

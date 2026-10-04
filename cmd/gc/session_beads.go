@@ -463,64 +463,7 @@ func reopenClosedConfiguredNamedSessionBead(
 	}
 	var reopened beads.Bead
 	err = session.WithCitySessionIdentifierLocks(cityPath, []string{identity, sessionName}, func() error {
-		if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, identity, bead.ID, identity); err != nil {
-			fmt.Fprintf(stderr, "session beads: alias %q for %s unavailable during reopen: %v\n", identity, identity, err) //nolint:errcheck
-			return nil
-		}
-		if err := session.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, sessionName, bead.ID, identity); err != nil {
-			fmt.Fprintf(stderr, "session beads: session_name %q for %s unavailable during reopen: %v\n", sessionName, identity, err) //nolint:errcheck
-			return nil
-		}
-		pendingCreateClaim := ""
-		if state != "active" {
-			pendingCreateClaim = "true"
-		}
-		batch := map[string]string{
-			"state":                state,
-			"state_reason":         "",
-			"close_reason":         "",
-			"closed_at":            "",
-			"pending_create_claim": pendingCreateClaim,
-			"synced_at":            now.Format("2006-01-02T15:04:05Z07:00"),
-		}
-		// Reset the pending-create stale clock to NOW. The bead row's
-		// CreatedAt reflects when it was first minted (potentially
-		// long ago); this reopen is a fresh spawn attempt, so the
-		// staleCreatingState window must start counting from here,
-		// not from CreatedAt.
-		if pendingCreateClaim == "true" {
-			batch["pending_create_started_at"] = pendingCreateStartedAtNow(now)
-			batch["creation_complete_at"] = ""
-			batch["last_woke_at"] = ""
-			batch["started_config_hash"] = ""
-			batch["started_live_hash"] = ""
-			batch["live_hash"] = ""
-			batch["startup_dialog_verified"] = ""
-			// Priming markers share started_config_hash's lifetime (S19 Stage 2):
-			// re-claiming for a fresh spawn re-primes.
-			batch[session.PrimedAtMetadataKey] = ""
-			batch[session.PrimingAttemptedAtMetadataKey] = ""
-			batch[session.PromptHashMetadataKey] = ""
-			// A fresh spawn must clear the same advisory wake blockers and
-			// crash-accrual counters the canonical wake patches reset -- a
-			// stale hold/quarantine, sleep_intent, or wake/churn counter would
-			// otherwise keep gating wake or re-quarantine the reopened runtime
-			// on its first failure. Compose ClearWakeBlockersPatch so this path
-			// tracks that full set (including sleep_intent, wake_attempts, and
-			// churn_count) by construction instead of hand-listing a subset
-			// that drifts from the canonical contract.
-			blockers := session.ClearWakeBlockersPatch(session.State(state), bead.Metadata["sleep_reason"], now)
-			delete(blockers, "state")    // the reopen owns the target state set above.
-			delete(blockers, "slept_at") // a respawn is a wake, not a sleep.
-			for k, v := range blockers {
-				batch[k] = v
-			}
-			// ClearWakeBlockersPatch only drops sleep_reason for its recognized
-			// reasons; a fresh spawn always clears it, matching RequestWakePatch.
-			batch["sleep_reason"] = ""
-		} else {
-			batch["pending_create_started_at"] = ""
-		}
+		batch := reopenNamedSessionBatch(state, bead.Metadata["sleep_reason"], now)
 		for k, v := range extraMeta {
 			batch[k] = v
 		}
@@ -533,21 +476,15 @@ func reopenClosedConfiguredNamedSessionBead(
 		// whose Tx executes callbacks sequentially without rollback
 		// (ga-igcny0.1.1). The Tx wrapper is kept only for the labeled commit.
 		open := "open"
-		txErr := store.Tx("gc: reopen configured named session "+bead.ID, func(tx beads.Tx) error {
-			return tx.Update(bead.ID, beads.UpdateOpts{Status: &open, Metadata: batch})
+		var lockedErr error
+		reopened, lockedErr = reopenClosedConfiguredNamedSessionBeadLocked(store, cfg, identity, sessionName, bead, batch, func() error {
+			return store.Tx("gc: reopen configured named session "+bead.ID, func(tx beads.Tx) error {
+				return tx.Update(bead.ID, beads.UpdateOpts{Status: &open, Metadata: batch})
+			})
 		})
-		if txErr != nil {
-			fmt.Fprintf(stderr, "session beads: reopening configured named session %q: %v\n", identity, txErr) //nolint:errcheck
-			return nil
+		if lockedErr != nil {
+			fmt.Fprintf(stderr, "session beads: %v\n", lockedErr) //nolint:errcheck
 		}
-		bead.Status = "open"
-		if bead.Metadata == nil {
-			bead.Metadata = make(map[string]string, len(batch))
-		}
-		for k, v := range batch {
-			bead.Metadata[k] = v
-		}
-		reopened = bead
 		return nil
 	})
 	if err != nil {
@@ -564,6 +501,107 @@ func reopenClosedConfiguredNamedSessionBead(
 	// a typed string lets the caller (session_template_start) drop its
 	// InfoFromPersistedBead read while still holding the raw bead for snapshot.add.
 	return reopened, strings.TrimSpace(reopened.Metadata["session_name"]), true
+}
+
+// reopenClosedConfiguredNamedSessionBeadLocked is the reopen's locked body:
+// the caller holds the city identifier locks over {identity, sessionName} and
+// found bead, the closed canonical row to reopen. It re-checks that the alias
+// and session_name are still available to bead, then runs write, which must
+// commit bead's open status and batch in one store write, and returns bead
+// with batch folded in. It takes no lock: city flocks belong to the open file
+// description, so a second acquisition from the same process blocks forever
+// behind the first. An availability error writes nothing; a write error is a
+// reopenWriteError, since the write may have landed.
+func reopenClosedConfiguredNamedSessionBeadLocked(
+	store beads.Store,
+	cfg *config.City,
+	identity string,
+	sessionName string,
+	bead beads.Bead,
+	batch map[string]string,
+	write func() error,
+) (beads.Bead, error) {
+	if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, identity, bead.ID, identity); err != nil {
+		return beads.Bead{}, fmt.Errorf("alias %q for %s unavailable during reopen: %w", identity, identity, err)
+	}
+	if err := session.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, sessionName, bead.ID, identity); err != nil {
+		return beads.Bead{}, fmt.Errorf("session_name %q for %s unavailable during reopen: %w", sessionName, identity, err)
+	}
+	if err := write(); err != nil {
+		return beads.Bead{}, reopenWriteError{err: fmt.Errorf("reopening configured named session %q: %w", identity, err)}
+	}
+	bead.Status = "open"
+	if bead.Metadata == nil {
+		bead.Metadata = make(map[string]string, len(batch))
+	}
+	for k, v := range batch {
+		bead.Metadata[k] = v
+	}
+	return bead, nil
+}
+
+// reopenWriteError is a reopen whose write failed: it may have landed.
+type reopenWriteError struct{ err error }
+
+func (e reopenWriteError) Error() string { return e.err.Error() }
+func (e reopenWriteError) Unwrap() error { return e.err }
+
+// reopenNamedSessionBatch is the metadata a reopen of a closed configured
+// named session writes with its open status, for the target state: active
+// when its runtime runs, else stopped with a pending-create claim. A caller
+// merges any extra keys over it.
+func reopenNamedSessionBatch(state, sleepReason string, now time.Time) map[string]string {
+	pendingCreateClaim := ""
+	if state != "active" {
+		pendingCreateClaim = "true"
+	}
+	batch := map[string]string{
+		"state":                state,
+		"state_reason":         "",
+		"close_reason":         "",
+		"closed_at":            "",
+		"pending_create_claim": pendingCreateClaim,
+		"synced_at":            now.Format("2006-01-02T15:04:05Z07:00"),
+	}
+	// Reset the pending-create stale clock to NOW. The bead row's
+	// CreatedAt reflects when it was first minted (potentially
+	// long ago); this reopen is a fresh spawn attempt, so the
+	// staleCreatingState window must start counting from here,
+	// not from CreatedAt.
+	if pendingCreateClaim == "true" {
+		batch["pending_create_started_at"] = pendingCreateStartedAtNow(now)
+		batch["creation_complete_at"] = ""
+		batch["last_woke_at"] = ""
+		batch["started_config_hash"] = ""
+		batch["started_live_hash"] = ""
+		batch["live_hash"] = ""
+		batch["startup_dialog_verified"] = ""
+		// Priming markers share started_config_hash's lifetime (S19 Stage 2):
+		// re-claiming for a fresh spawn re-primes.
+		batch[session.PrimedAtMetadataKey] = ""
+		batch[session.PrimingAttemptedAtMetadataKey] = ""
+		batch[session.PromptHashMetadataKey] = ""
+		// A fresh spawn must clear the same advisory wake blockers and
+		// crash-accrual counters the canonical wake patches reset -- a
+		// stale hold/quarantine, sleep_intent, or wake/churn counter would
+		// otherwise keep gating wake or re-quarantine the reopened runtime
+		// on its first failure. Compose ClearWakeBlockersPatch so this path
+		// tracks that full set (including sleep_intent, wake_attempts, and
+		// churn_count) by construction instead of hand-listing a subset
+		// that drifts from the canonical contract.
+		blockers := session.ClearWakeBlockersPatch(session.State(state), sleepReason, now)
+		delete(blockers, "state")    // the reopen owns the target state set above.
+		delete(blockers, "slept_at") // a respawn is a wake, not a sleep.
+		for k, v := range blockers {
+			batch[k] = v
+		}
+		// ClearWakeBlockersPatch only drops sleep_reason for its recognized
+		// reasons; a fresh spawn always clears it, matching RequestWakePatch.
+		batch["sleep_reason"] = ""
+	} else {
+		batch["pending_create_started_at"] = ""
+	}
+	return batch
 }
 
 // startupKickoffReopenMetadata builds the extraMeta batch that
@@ -1960,94 +1998,8 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				createState = string(session.StateStartPending)
 			}
 			instanceToken := session.NewInstanceToken()
-			meta := desiredSessionIdentity(sessionIdentityInputs{
-				AgentName:         agentName,
-				State:             createState,
-				Generation:        session.DefaultGeneration,
-				ContinuationEpoch: session.DefaultContinuationEpoch,
-				InstanceToken:     instanceToken,
-				PoolSlot:          poolSlot,
-				// syncSessionBeads iterates configured agents, so agentName is
-				// always a config-resolved identity — stamp the canonical record.
-				ConfigResolved: true,
-			})
-			meta["live_hash"] = liveHash
-			meta["session_origin"] = origin
-			meta["synced_at"] = now.Format("2006-01-02T15:04:05Z07:00")
-			if !isPoolInstance {
-				meta["session_name"] = sn
-			}
-			if createState != "active" {
-				meta["pending_create_claim"] = "true"
-				meta["pending_create_started_at"] = pendingCreateStartedAtNow(now)
-			}
-			if tp.DependencyOnly {
-				meta["dependency_only"] = boolMetadata(true)
-			}
-			if isManagedPool {
-				meta[poolManagedMetadataKey] = boolMetadata(true)
-			}
-			// Generate session_key for providers that support --session-id.
-			// Without this, transcript lookup falls back to workdir-based
-			// matching which is ambiguous when multiple sessions share a dir.
-			if tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
-				if key, err := session.GenerateSessionKey(); err == nil {
-					meta["session_key"] = key
-				}
-			}
-			if tp.WorkDir != "" {
-				meta["work_dir"] = tp.WorkDir
-			}
-			if tp.WakeMode != "" {
-				meta["wake_mode"] = tp.WakeMode
-			}
-			if isConfiguredNamed {
-				meta[namedSessionMetadataKey] = boolMetadata(true)
-				meta[namedSessionIdentityMetadata] = tp.ConfiguredNamedIdentity
-				meta[namedSessionModeMetadata] = tp.ConfiguredNamedMode
-				// Only seed the kickoff backstop's state when we have a
-				// concrete bound step to track progress against (AC4): an
-				// always-mode session awake on default demand alone has no
-				// per-turn signal yet, so it stays out of scope for v1.
-				if tp.BoundStepID != "" {
-					meta[beadmeta.BoundStepIDMetadataKey] = tp.BoundStepID
-					meta[startupKickoffStateKey] = startupKickoffStatePending
-					meta[startupKickoffStartedAtKey] = now.UTC().Format(time.RFC3339)
-					meta[startupKickoffAttemptsKey] = "0"
-				}
-			}
-			// Store the qualified template name so the API can derive the
-			// rig from it (e.g., "tower-of-hanoi/polecat" not just "polecat").
-			qualifiedTemplate := tp.TemplateName
-			if tp.RigName != "" && !strings.Contains(tp.TemplateName, "/") {
-				qualifiedTemplate = tp.RigName + "/" + tp.TemplateName
-			}
-			meta["template"] = qualifiedTemplate
-			if poolSlot > 0 {
-				// pool_slot is emitted by desiredSessionIdentity above (PoolSlot
-				// passed in); only the pending pool session_name is hand-stamped.
-				meta["session_name"] = pendingPoolSessionName(qualifiedTemplate, instanceToken)
-			}
-			// Store command and resume fields so gc session attach can
-			// reconstruct the resume command from bead metadata alone.
-			if tp.Command != "" {
-				meta["command"] = tp.Command
-			}
-			if tp.ResolvedProvider != nil {
-				stampResolvedProviderSessionMetadata(meta, tp.ResolvedProvider)
-				if tp.ResolvedProvider.ResumeFlag != "" {
-					meta["resume_flag"] = tp.ResolvedProvider.ResumeFlag
-				}
-				if tp.ResolvedProvider.ResumeStyle != "" {
-					meta["resume_style"] = tp.ResolvedProvider.ResumeStyle
-				}
-				if tp.ResolvedProvider.ResumeCommand != "" {
-					meta["resume_command"] = tp.ResolvedProvider.ResumeCommand
-				}
-				if tp.ResolvedProvider.SessionIDFlag != "" {
-					meta["session_id_flag"] = tp.ResolvedProvider.SessionIDFlag
-				}
-			}
+			meta := syncCreateMetadata(tp, sn, agentName, liveHash, createState, instanceToken, poolSlot, now)
+			qualifiedTemplate := syncQualifiedTemplate(tp)
 			createBead := func() (beads.Bead, error) {
 				beadID, err := sessionFrontDoor(store).CreateSession(session.CreateSpec{
 					Title:     agentName,
@@ -2573,6 +2525,112 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		snap = newSessionBeadSnapshotFromReconcileRows(session.ReconcileRowsFromBeads(openBeads))
 	}
 	return openIndex, snap
+}
+
+// syncCreateMetadata is the metadata of a new session row from the sync
+// create arm: tp's resolved fields, sn as the desired session_name (a pool
+// instance's pending name derives from its token instead), createState,
+// and the pre-minted instanceToken. The allocator's named create writes the
+// same metadata (AM7).
+func syncCreateMetadata(tp TemplateParams, sn, agentName, liveHash, createState, instanceToken string, poolSlot int, now time.Time) map[string]string {
+	origin := templateParamsSessionOrigin(tp)
+	isConfiguredNamed := strings.TrimSpace(tp.ConfiguredNamedIdentity) != ""
+	isManagedPool := origin == "ephemeral"
+	isPoolInstance := poolSlot > 0
+	meta := desiredSessionIdentity(sessionIdentityInputs{
+		AgentName:         agentName,
+		State:             createState,
+		Generation:        session.DefaultGeneration,
+		ContinuationEpoch: session.DefaultContinuationEpoch,
+		InstanceToken:     instanceToken,
+		PoolSlot:          poolSlot,
+		// syncSessionBeads iterates configured agents, so agentName is
+		// always a config-resolved identity — stamp the canonical record.
+		ConfigResolved: true,
+	})
+	meta["live_hash"] = liveHash
+	meta["session_origin"] = origin
+	meta["synced_at"] = now.Format("2006-01-02T15:04:05Z07:00")
+	if !isPoolInstance {
+		meta["session_name"] = sn
+	}
+	if createState != "active" {
+		meta["pending_create_claim"] = "true"
+		meta["pending_create_started_at"] = pendingCreateStartedAtNow(now)
+	}
+	if tp.DependencyOnly {
+		meta["dependency_only"] = boolMetadata(true)
+	}
+	if isManagedPool {
+		meta[poolManagedMetadataKey] = boolMetadata(true)
+	}
+	// Generate session_key for providers that support --session-id.
+	// Without this, transcript lookup falls back to workdir-based
+	// matching which is ambiguous when multiple sessions share a dir.
+	if tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
+		if key, err := session.GenerateSessionKey(); err == nil {
+			meta["session_key"] = key
+		}
+	}
+	if tp.WorkDir != "" {
+		meta["work_dir"] = tp.WorkDir
+	}
+	if tp.WakeMode != "" {
+		meta["wake_mode"] = tp.WakeMode
+	}
+	if isConfiguredNamed {
+		meta[namedSessionMetadataKey] = boolMetadata(true)
+		meta[namedSessionIdentityMetadata] = tp.ConfiguredNamedIdentity
+		meta[namedSessionModeMetadata] = tp.ConfiguredNamedMode
+		// Only seed the kickoff backstop's state when we have a
+		// concrete bound step to track progress against (AC4): an
+		// always-mode session awake on default demand alone has no
+		// per-turn signal yet, so it stays out of scope for v1.
+		if tp.BoundStepID != "" {
+			meta[beadmeta.BoundStepIDMetadataKey] = tp.BoundStepID
+			meta[startupKickoffStateKey] = startupKickoffStatePending
+			meta[startupKickoffStartedAtKey] = now.UTC().Format(time.RFC3339)
+			meta[startupKickoffAttemptsKey] = "0"
+		}
+	}
+	// Store the qualified template name so the API can derive the
+	// rig from it (e.g., "tower-of-hanoi/polecat" not just "polecat").
+	qualifiedTemplate := syncQualifiedTemplate(tp)
+	meta["template"] = qualifiedTemplate
+	if poolSlot > 0 {
+		// pool_slot is emitted by desiredSessionIdentity above (PoolSlot
+		// passed in); only the pending pool session_name is hand-stamped.
+		meta["session_name"] = pendingPoolSessionName(qualifiedTemplate, instanceToken)
+	}
+	// Store command and resume fields so gc session attach can
+	// reconstruct the resume command from bead metadata alone.
+	if tp.Command != "" {
+		meta["command"] = tp.Command
+	}
+	if tp.ResolvedProvider != nil {
+		stampResolvedProviderSessionMetadata(meta, tp.ResolvedProvider)
+		if tp.ResolvedProvider.ResumeFlag != "" {
+			meta["resume_flag"] = tp.ResolvedProvider.ResumeFlag
+		}
+		if tp.ResolvedProvider.ResumeStyle != "" {
+			meta["resume_style"] = tp.ResolvedProvider.ResumeStyle
+		}
+		if tp.ResolvedProvider.ResumeCommand != "" {
+			meta["resume_command"] = tp.ResolvedProvider.ResumeCommand
+		}
+		if tp.ResolvedProvider.SessionIDFlag != "" {
+			meta["session_id_flag"] = tp.ResolvedProvider.SessionIDFlag
+		}
+	}
+	return meta
+}
+
+// syncQualifiedTemplate qualifies tp's template with its rig.
+func syncQualifiedTemplate(tp TemplateParams) string {
+	if tp.RigName != "" && !strings.Contains(tp.TemplateName, "/") {
+		return tp.RigName + "/" + tp.TemplateName
+	}
+	return tp.TemplateName
 }
 
 // queueAliasChangeDriftRebaseline moves a started pool session's config-drift

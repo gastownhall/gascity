@@ -19,12 +19,46 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"strings"
 	"testing"
 )
 
 // IsBazel reports whether the test binary runs under bazel test.
 func IsBazel() bool {
 	return os.Getenv("TEST_SRCDIR") != ""
+}
+
+// testRunnerEnv lists the variables through which Bazel's test runner drives
+// a rules_go test binary. The generated test main reads them at every start,
+// so a child that inherits them is not a plain helper process: it applies the
+// parent's shard filter (TEST_TOTAL_SHARDS, TEST_SHARD_INDEX) and may run no
+// test at all, and under `bazel coverage` it writes the parent's coverage
+// profile (COVERAGE_OUTPUT_FILE, COVERAGE_DIR).
+var testRunnerEnv = map[string]bool{
+	"TEST_TOTAL_SHARDS":      true,
+	"TEST_SHARD_INDEX":       true,
+	"TEST_SHARD_STATUS_FILE": true,
+	"COVERAGE_OUTPUT_FILE":   true,
+	"COVERAGE_DIR":           true,
+}
+
+// HelperProcessEnv returns env without Bazel's test-runner variables, for a
+// test that re-executes its own binary as a helper process
+// (os.Args[0] -test.run=^TestHelper$). Concurrent helpers that inherit the
+// coverage variables all write the parent's profile; the corrupted profile
+// fails the helper with "error generating coverage report" and exit status 2
+// (TestSQLiteSequenceProcessesNeverMintSameID under bazel coverage). Outside
+// Bazel the variables are unset and env is returned unchanged.
+func HelperProcessEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		if testRunnerEnv[name] {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // envRoot returns the explicit override when present, validated to carry a
