@@ -958,8 +958,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	recorder := events.Discard
 	var eventProv events.Provider // nil when events disabled or FileRecorder fails
-	if fr, err := newFileEventsRecorder(
-		filepath.Join(cityPath, ".gc", "events.jsonl"), cfg.Events, stderr); err == nil {
+	fr, frErr := openStandaloneCityEventsRecorder(cityPath, cfg.Events, controllerLock != nil, stderr)
+	if frErr == nil {
 		recorder = fr
 		eventProv = fr
 	}
@@ -1281,6 +1281,23 @@ func ensureClaudeSettingsArgs(fs fsys.FS, cityPath, providerName string, stderr 
 		return "", fmt.Errorf("projecting Claude settings: %w", err)
 	}
 	return settingsArgs(cityPath, providerName), nil
+}
+
+// claudeSettingsArgsReadOnly is ensureClaudeSettingsArgs without the
+// projection, for a read-only resolution (AM-N3): it validates the settings
+// Install would project and returns the arg a successful projection yields,
+// which always points at <city>/.gc/settings.json.
+func claudeSettingsArgsReadOnly(fs fsys.FS, cityPath, providerName string) (string, error) {
+	if providerName != "claude" || cityPath == "" {
+		return "", nil
+	}
+	if fs == nil {
+		fs = fsys.OSFS{}
+	}
+	if err := hooks.ValidateClaudeSettings(fs, cityPath); err != nil {
+		return "", fmt.Errorf("validating Claude settings: %w", err)
+	}
+	return fmt.Sprintf("--settings %q", filepath.Join(cityPath, ".gc", "settings.json")), nil
 }
 
 func claudeSettingsSource(cityPath string) (src, rel string) {

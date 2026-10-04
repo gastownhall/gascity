@@ -10,11 +10,15 @@ go_library(
         "allocator_bucket.go",
         "allocator_census.go",
         "allocator_create.go",
+        "allocator_create_named.go",
+        "allocator_decide.go",
         "allocator_demand_reads.go",
         "allocator_health.go",
         "allocator_ledger.go",
         "allocator_observe.go",
+        "allocator_plan.go",
         "allocator_scalecheck_lane.go",
+        "allocator_snapshot.go",
         "api_state.go",
         "api_state_conditional_writes.go",
         "api_state_emergency_relay.go",
@@ -23,6 +27,8 @@ go_library(
         "assigned_work_residency.go",
         "assigned_work_scope.go",
         "attachment_metadata.go",
+        "autoclose_fence.go",
+        "autoclose_sweep.go",
         "bd_env.go",
         "bd_env_proxied.go",
         "bd_env_proxied_native.go",
@@ -48,6 +54,7 @@ go_library(
         "by_id_relic_proof.go",
         "by_id_residency.go",
         "by_id_store_route.go",
+        "cache_notification.go",
         "census_residency.go",
         "chat_autosuspend.go",
         "city_arg_resolve.go",
@@ -223,6 +230,7 @@ go_library(
         "doctor_store_gate.go",
         "doctor_store_preflight.go",
         "doctor_v2_checks.go",
+        "doctor_v2_demand_migrations.go",
         "doctor_warmup_eligible.go",
         "doctor_work_option_metadata.go",
         "dolt_auth.go",
@@ -670,6 +678,35 @@ go_binary(
     visibility = ["//visibility:public"],
 )
 
+# Two gc links that differ only in their stamped build commit (what the
+# release build's -ldflags "-X main.commit=..." sets), for the supervisor
+# binary-drift tests in //test/integration (start_drift_test.go). Those tests
+# used to `go build ./cmd/gc` inside the test action, which needs go.sum and a
+# module download that remote workers cannot do (and the fork pool has no
+# network). Keep the commits equal to driftHappyOldCommit /
+# driftHappyNewCommit.
+# keep
+go_binary(
+    name = "gc_drift_old",
+    testonly = True,
+    embed = [":gc_lib"],
+    # Built only as data of //test/integration:integration_test, never by //...
+    tags = ["manual"],
+    visibility = ["//test/integration:__pkg__"],
+    x_defs = {"main.commit": "deadbeefcafe1111"},
+)
+
+# keep
+go_binary(
+    name = "gc_drift_new",
+    testonly = True,
+    embed = [":gc_lib"],
+    # Built only as data of //test/integration:integration_test, never by //...
+    tags = ["manual"],
+    visibility = ["//test/integration:__pkg__"],
+    x_defs = {"main.commit": "facefeed02222222"},
+)
+
 go_test(
     name = "gc_test",
     size = "large",
@@ -680,12 +717,18 @@ go_test(
         "allocator_backstop_lane_test.go",
         "allocator_bucket_test.go",
         "allocator_census_test.go",
+        "allocator_create_named_prerefactor_test.go",
+        "allocator_create_named_test.go",
         "allocator_create_prerefactor_test.go",
         "allocator_create_test.go",
+        "allocator_decide_purity_test.go",
+        "allocator_decide_smoke_test.go",
+        "allocator_decide_test.go",
         "allocator_demand_reads_test.go",
         "allocator_health_test.go",
         "allocator_ledger_test.go",
         "allocator_observe_test.go",
+        "allocator_plan_test.go",
         "allocator_scalecheck_lane_test.go",
         "allocator_seams_prerefactor_test.go",
         "allocator_seams_test.go",
@@ -705,6 +748,8 @@ go_test(
         "assigned_work_residency_test.go",
         "assigned_work_scope_test.go",
         "async_start_command_gate_test.go",
+        "autoclose_fence_test.go",
+        "autoclose_sweep_test.go",
         "backend_env_census_test.go",
         "bd_env_backend_registry_test.go",
         "bd_env_credential_probe_snapshot_test.go",
@@ -776,6 +821,7 @@ go_test(
         "by_id_binding_owner_test.go",
         "by_id_relic_proof_test.go",
         "by_id_store_route_test.go",
+        "cache_notification_test.go",
         "cached_children_tier_test.go",
         "capstone_e2e_test.go",
         "census_residency_test.go",
@@ -1016,6 +1062,7 @@ go_test(
         "converge_scope_store_test.go",
         "convergence_integration_test.go",
         "convoy_chargolden_test.go",
+        "core_formula_drain_ack_test.go",
         "crash_tracker_test.go",
         "cross_store_parent_contract_test.go",
         "cross_store_pipeline_test.go",
@@ -1060,6 +1107,7 @@ go_test(
         "doctor_store_gate_test.go",
         "doctor_store_preflight_test.go",
         "doctor_v2_checks_test.go",
+        "doctor_v2_demand_migrations_test.go",
         "doctor_warmup_test.go",
         "doctor_work_option_metadata_test.go",
         "dolt_bind_localhost_test.go",
@@ -1259,6 +1307,7 @@ go_test(
         "pool_on_boot_parallel_test.go",
         "pool_pieces_prerefactor_test.go",
         "pool_pieces_test.go",
+        "pool_release_bd_guard_test.go",
         "pool_session_identifier_lock_test.go",
         "pool_session_name_churn_test.go",
         "pool_session_name_holder_test.go",
@@ -1299,6 +1348,7 @@ go_test(
         "provider_health_gate_test.go",
         "provider_store_resolution_test.go",
         "providers_cli_recorder_test.go",
+        "providers_events_roles_test.go",
         "providers_events_rotation_test.go",
         "providers_test.go",
         "quality_gate_fallback_test.go",
@@ -1430,6 +1480,7 @@ go_test(
         "session_reconciler_named_collapse_test.go",
         "session_reconciler_observation_regression_test.go",
         "session_reconciler_pool_replacement_test.go",
+        "session_reconciler_progress_idle_rewake_test.go",
         "session_reconciler_progress_test.go",
         "session_reconciler_read_after_write_test.go",
         "session_reconciler_relaunch_preparedstart_test.go",
@@ -1545,6 +1596,7 @@ go_test(
         "warm_bind_nudge_test.go",
         "wisp_autoclose_test.go",
         "wisp_gc_batch_test.go",
+        "wisp_gc_fenced_delete_test.go",
         "wisp_gc_test.go",
         "wisp_step_inject_prewake_test.go",
         "wisp_step_inject_test.go",

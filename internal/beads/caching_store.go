@@ -17,11 +17,13 @@ import (
 // Reads are served from memory when the cache is live. Writes pass
 // through to the backing store and update the cache on success.
 //
-// External writes (agents running bd directly) are picked up via the
-// bd hook -> gc event emit -> event bus path. Call ApplyEvent when the
-// event bus delivers bead.created/updated/closed events. The background
-// reconciler acts as a watchdog and only performs a full scan once the
-// cache has gone stale or degraded.
+// Writes that emit no gc event (agents running bd directly, humans, raw SQL)
+// reach the cache only when the background reconciler's scan notices them,
+// collapsed to the latest state; the bd hook -> gc event emit path that once
+// delivered them is gone (cmd/gc/hooks.go). ApplyEvent installs bead events
+// from the event bus, which carries gc's own writes. The cache is therefore
+// always potentially stale: a caller whose decision leads to a write must
+// fence that write at the store, never trust the cached row.
 //
 // BdStore-backed caches can filter hook events by issue prefix. Other Store
 // implementations are valid backings, but run without foreign-event filtering.
@@ -90,7 +92,7 @@ type CachingStore struct {
 	syncFailures   int
 	circuitTripped bool
 	stats          CacheStats
-	onChange       func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage)
+	onChange       func(source ChangeSource, eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage)
 	problemf       func(string)
 	problemLog     map[string]cacheProblemLogState
 
@@ -267,6 +269,7 @@ var cacheEpochs atomic.Uint64
 
 var (
 	_ ConditionalAssignmentReleaser = (*CachingStore)(nil)
+	_ AssignmentGuardedUpdater      = (*CachingStore)(nil)
 	_ AtomicTxStore                 = (*CachingStore)(nil)
 )
 
@@ -410,7 +413,7 @@ func computeAutoStagger(agentID string) time.Duration {
 // NewCachingStore wraps a Store with an in-memory read cache.
 // Call Prime() before serving reads, then StartReconciler() for
 // watchdog reconciliation. The onChange callback (optional) is called for
-// each detected external change with event type and bead JSON.
+// each change with its source (see ChangeSource), event type and bead JSON.
 //
 // BdStore-backed caches filter hook events by issue prefix. Other Store
 // implementations are valid backings, but run without foreign-event filtering.
@@ -419,7 +422,7 @@ func computeAutoStagger(agentID string) time.Duration {
 // changed bead's metadata at the record site (see notifyChange); the wiring
 // stamps them onto the recorded event so the redacted export can forward them
 // as typed primitives without ever decoding the payload.
-func NewCachingStore(backing Store, onChange func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage), opts ...CachingStoreOption) *CachingStore {
+func NewCachingStore(backing Store, onChange func(source ChangeSource, eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage), opts ...CachingStoreOption) *CachingStore {
 	prefix := ""
 	bdBacking := false
 	nilBdBacking := false
@@ -483,13 +486,13 @@ func NewCachingStoreForTestWithPrefix(backing Store, idPrefix string, onChange f
 }
 
 // adaptLegacyOnChange bridges the legacy 3-param onChange used by the test
-// constructors to the production 5-param form, dropping the run/session ids the
-// tests do not exercise. Nil-safe.
-func adaptLegacyOnChange(fn func(eventType, beadID string, payload json.RawMessage)) func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage) {
+// constructors to the production form, dropping the source and the run/session
+// ids the tests do not exercise. Nil-safe.
+func adaptLegacyOnChange(fn func(eventType, beadID string, payload json.RawMessage)) func(source ChangeSource, eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage) {
 	if fn == nil {
 		return nil
 	}
-	return func(eventType, beadID string, _, _, _ string, _ *[]string, payload json.RawMessage) {
+	return func(_ ChangeSource, eventType, beadID string, _, _, _ string, _ *[]string, payload json.RawMessage) {
 		fn(eventType, beadID, payload)
 	}
 }
@@ -512,7 +515,7 @@ func (c *CachingStore) SetPrimeRetryDelayForTest(fn func(attempt int) time.Durat
 	c.primeRetryDelay = fn
 }
 
-func newCachingStore(backing Store, idPrefix string, onChange func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage)) *CachingStore {
+func newCachingStore(backing Store, idPrefix string, onChange func(source ChangeSource, eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage)) *CachingStore {
 	return &CachingStore{
 		backing:             backing,
 		idPrefix:            normalizeIDPrefix(idPrefix),

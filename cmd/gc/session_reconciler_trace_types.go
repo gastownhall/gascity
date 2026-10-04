@@ -184,6 +184,8 @@ const (
 	TraceReasonPendingUnknown                TraceReasonCode = "pending_unknown"
 	TraceReasonAcknowledged                  TraceReasonCode = "acknowledged"
 	TraceReasonMinFloorIdleWorker            TraceReasonCode = "min_floor_idle_worker"
+	TraceReasonOnDemandIdleNoDemand          TraceReasonCode = "on_demand_idle_no_demand"
+	TraceReasonOpenWorkCheckError            TraceReasonCode = "open_work_check_error"
 	TraceReasonLiveDrift                     TraceReasonCode = "live_drift"
 	TraceReasonCircuitOpen                   TraceReasonCode = "circuit_open"
 	TraceReasonCircuitTrip                   TraceReasonCode = "circuit_trip"

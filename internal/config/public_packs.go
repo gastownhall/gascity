@@ -26,6 +26,11 @@ const (
 	// PublicGascityPackSource and is pinned to the same release commit
 	// (PublicGascityPackVersion), so a fresh gascity city's formulas and the
 	// rig roles they coordinate always come from one matching release.
+	//
+	// It is a bundled subpack of the gascity pack (builtinpacks
+	// bundledSubpacks): at PublicGascityPackVersion it resolves offline from
+	// the gascity pack's embedded tree, in the same synthetic cache directory,
+	// so gc init and gc rig add never clone gascity-packs for it (ga-73eoo).
 	PublicGascityRolesPackSource = "https://github.com/gastownhall/gascity-packs/tree/main/gascity/roles"
 
 	// BundledPackImportVersion pins the [imports.core]/[imports.bd] entries

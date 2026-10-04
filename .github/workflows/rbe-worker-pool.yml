@@ -55,4 +55,11 @@ jobs:
           # fails, warn and run as 0 instead of exiting; the others run as 0.
           RBE_ACTION_ISOLATION: ${{ vars.RBE_ACTION_ISOLATION || '1' }}
           RBE_ACTION_CANARY_EVERY: ${{ vars.RBE_ACTION_CANARY_EVERY || '4' }}
+          # REAPI compressed-blobs (zstd) fetches for blobs of 64 KiB or more:
+          # about a quarter of the bytes on the wire for test binaries and
+          # archives. Uploads stay identity. Only after rbe-west's :443 route
+          # sends this certificate's ByteStream.Read to its read-only zstd
+          # process. Rollback: the repository variable RBE_WIRE_ZSTD=0; the
+          # next dispatch fetches identity again.
+          RBE_WIRE_ZSTD: ${{ vars.RBE_WIRE_ZSTD || '0' }}
         run: tools/rbe/blacksmith-worker.sh

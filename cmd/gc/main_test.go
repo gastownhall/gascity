@@ -303,6 +303,10 @@ func TestMain(m *testing.M) {
 	}
 	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
+	// In-process init stays off the network by default. Testscript "gc"
+	// children above keep the real installer: their scripts run follow-on
+	// commands that need the installed imports.
+	configureInitRemoteImportsForTests()
 	var testRunner testscript.TestingM = newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
 	// The tmux leak guard wraps outside the dolt guard and inside
 	// cleanupTestingM: it must observe and kill leaked tmux servers while the
