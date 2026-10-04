@@ -247,6 +247,35 @@ type UpdateOpts struct {
 // ConditionalAssignmentReleaser is implemented by stores that can release an
 // in-progress assignment only when the current status and assignee still match
 // the expected snapshot.
+//
+// FAMILY DIVERGENCE LEDGER (not pinned by any conformance suite today). The
+// implementations do not agree on two edges, and both became visible when
+// NativeDoltStore moved onto issueops.Releaser (ga-8tiw9). They are recorded
+// rather than reconciled because deciding WHICH answer is right is a contract
+// question with callers on both sides:
+//
+//   - RELEASABLE STATUS. MemStore, SQLiteStore and the pre-role NativeDoltStore
+//     release only from in_progress; a row that is open but still carries an
+//     assignee is a no-op for them. issueops.Releaser's transition is defined
+//     over open ∪ in_progress, so the role-backed NativeDoltStore releases that
+//     row. The role's answer is arguably the useful one — an open row bearing
+//     an assignee is precisely the orphaned claim gc's reconcilers exist to
+//     clear — but it is a widening, and no case in
+//     storebindingtest's graph suite distinguishes the two.
+//   - AN EMPTY EXPECTED HOLDER over an in_progress row whose assignee is empty.
+//     MemStore and the pre-role NativeDoltStore report true (they compare "" to
+//     "" and release). The role-backed NativeDoltStore reports (false, nil)
+//     without dialing: the role refuses a non-nil expectation of "" as
+//     ErrValidation, and a nil one would select the unconditional path whose
+//     ownership fence's subject is the ACTOR — which for gc is the city, never
+//     the holder. "Release a row nobody holds" describes no release, so the
+//     role's own model calls this ErrNotClaimed.
+//
+// FOLLOW-UP QUESTION for the conformance suite, deliberately left open here:
+// should RunConditionalWriterConformance (or storebindingtest's graph suite)
+// pin one semantic for each? Both edges are currently reachable only by tests
+// that target a single store, so a family that changes its answer changes it
+// silently.
 type ConditionalAssignmentReleaser interface {
 	ReleaseIfCurrent(id, expectedAssignee string) (bool, error)
 }

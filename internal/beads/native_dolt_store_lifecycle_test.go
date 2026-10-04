@@ -153,7 +153,8 @@ func (l nativeDoltLifecycleForTest) Update(ctx context.Context, request issueops
 // patch names, refusing a target that does not exist.
 func nativeDoltLifecycleReparentForTest(ctx context.Context, tx beadslib.Transaction, request issueops.UpdateRequest) error {
 	parentID := strings.TrimSpace(request.Patch.ParentID.Value)
-	if parentID != "" && !nativeDoltMemTargetIsExternalForTest(parentID) {
+	namespace, _ := tx.GetConfig(ctx, "issue_prefix")
+	if parentID != "" && !nativeDoltTargetIsExternalForTest(namespace, parentID) {
 		parent, err := tx.GetIssue(ctx, parentID)
 		if err != nil {
 			return err

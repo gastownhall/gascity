@@ -49,6 +49,7 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"SetLocalString":   nativeStoreMutation,
 	"Tx":               nativeStoreMutation,
 	"Delete":           nativeStoreMutation,
+	"DeleteBatch":      nativeStoreMutation,
 	"DepAdd":           nativeStoreMutation,
 	"DepRemove":        nativeStoreMutation,
 
