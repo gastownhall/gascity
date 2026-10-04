@@ -2053,11 +2053,20 @@ func (s *NativeDoltStore) stampAndClose(id string, metadata map[string]string) e
 	}
 	// Force keeps the storage-layer close's policy-free semantics, exactly as
 	// Close does: a molecule root routinely closes with children still open.
-	if _, err := ops.Close(ctx, issueops.CloseRequest{
-		Actor:   s.actor,
-		IssueID: id,
-		Reason:  nativeCloseReasonFromIssue(closing),
-		Force:   true,
+	//
+	// Only the close retries. The stamp above it already committed, so replaying
+	// the pair would re-run a write that won its race to recover one that lost.
+	reason := nativeCloseReasonFromIssue(closing)
+	if err := retryOnNativeDoltSerializationConflict(func() error {
+		attemptCtx, attemptCancel := nativeDoltOperationContext(context.TODO())
+		defer attemptCancel()
+		_, err := ops.Close(attemptCtx, issueops.CloseRequest{
+			Actor:   s.actor,
+			IssueID: id,
+			Reason:  reason,
+			Force:   true,
+		})
+		return err
 	}); err != nil {
 		return nativeStoreError(id, err)
 	}

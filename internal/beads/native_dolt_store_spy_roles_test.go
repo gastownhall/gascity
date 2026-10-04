@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	beadslib "github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/issueops"
@@ -212,8 +213,23 @@ func (s *nativeDoltStorageSpy) MetadataCAS() (issueops.MetadataCAS, error) {
 	return rawMetadataCAS{raw: s}, nil
 }
 
+// The mem double serves the CAS under the same lock it gives RunInTransaction.
+// issueops.CompareAndSetMetadataKeyInTx runs its whole read-compare-write inside
+// one transaction, so a double that left the pair unisolated would let every
+// racer in the contention suite read the same expected value and win.
 func (s *nativeDoltMemStorage) MetadataCAS() (issueops.MetadataCAS, error) {
-	return rawMetadataCAS{raw: s}, nil
+	return lockedMetadataCAS{inner: rawMetadataCAS{raw: s}, mu: &s.txMu}, nil
+}
+
+type lockedMetadataCAS struct {
+	inner rawMetadataCAS
+	mu    *sync.Mutex
+}
+
+func (c lockedMetadataCAS) CompareAndSetKey(ctx context.Context, req issueops.CompareAndSetKeyRequest) (issueops.CompareAndSetKeyResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.inner.CompareAndSetKey(ctx, req)
 }
 
 // rawReleaser reproduces issueops.Releaser over the doubles' read-modify-write

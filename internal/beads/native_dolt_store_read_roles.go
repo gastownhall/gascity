@@ -536,10 +536,11 @@ func beadFromNativeIssueDetails(details *issueops.IssueDetails) (Bead, error) {
 
 // beadFromNativeIssueRow converts one row of a listing or a ready page.
 //
-// Bead.Revision is deliberately NOT set: the page publishes no token, and
-// stamping the row's RowVersion — which is zero on every served row, because it
-// never crosses the wire — would fence a guarded write against a value that
-// means "absent" while reading as the real revision 0.
+// Bead.Revision is cleared, not merely left alone: the page publishes no token,
+// and the row's RowVersion — zero on every served row, because it never crosses
+// the wire — would fence a guarded write against a value that means "absent"
+// while reading as the real revision 0. beadFromNativeIssue stamps it for the
+// detail view, so the row path has to undo that rather than rely on a zero.
 //
 // The computed parent beside the row is preferred over the edge scan when the
 // row carries one: a page hydrates it with a dedicated join, and a projection
@@ -552,6 +553,7 @@ func beadFromNativeIssueRow(row *issueops.IssueWithCounts) (Bead, error) {
 	if err != nil {
 		return Bead{}, err
 	}
+	bead.Revision = 0
 	if row.Parent != nil && *row.Parent != "" {
 		bead.ParentID = *row.Parent
 	}
