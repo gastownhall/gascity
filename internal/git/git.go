@@ -193,6 +193,17 @@ func (g *Git) HasUncommittedWork() bool {
 	return strings.TrimSpace(out) != ""
 }
 
+// ShowAtHead returns the committed bytes of a repo-relative path at HEAD.
+// A path absent from HEAD yields an error, which lets callers tell "modified
+// since the commit" apart from "never committed".
+func (g *Git) ShowAtHead(rel string) ([]byte, error) {
+	out, err := g.run("show", "HEAD:"+rel)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s at HEAD: %w", rel, err)
+	}
+	return []byte(out), nil
+}
+
 // HasUnpushedCommits reports whether HEAD has commits not reachable from
 // any remote tracking branch. Used as a safety check before removing a
 // worktree — unpushed commits represent completed work that would be lost.
@@ -327,6 +338,21 @@ func (g *Git) PullRebase(remote, branch string) error {
 // Each non-empty line represents one changed/untracked file.
 func (g *Git) StatusPorcelain() (string, error) {
 	return g.StatusPorcelainCtx(context.Background())
+}
+
+// StatusPorcelainUntrimmed returns porcelain status output verbatim.
+//
+// Porcelain v1 is a fixed-width format: two status characters, a space, then
+// the path. StatusPorcelain trims the whole output, which strips the leading
+// space of an unstaged first record (" M f" becomes "M f") and shifts that
+// one line out of alignment. Callers that parse the status column must use
+// this instead; callers that only test for emptiness can use either.
+func (g *Git) StatusPorcelainUntrimmed() (string, error) {
+	out, err := g.run("status", "--porcelain")
+	if err != nil {
+		return "", fmt.Errorf("getting status: %w", err)
+	}
+	return out, nil
 }
 
 // StatusPorcelainCtx is like StatusPorcelain but accepts a context.
