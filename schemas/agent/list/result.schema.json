@@ -29,6 +29,7 @@
           "name",
           "qualified_name",
           "suspended",
+          "routes_to_pool",
           "work_query",
           "sling_query"
         ],
@@ -72,6 +73,10 @@
               }
             },
             "additionalProperties": true
+          },
+          "routes_to_pool": {
+            "type": "boolean",
+            "description": "Whether this agent's route target is pool demand rather than a configured named session."
           },
           "work_query": {
             "type": "string"

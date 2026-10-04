@@ -199,6 +199,7 @@ case "$1 $2" in
     [ "$3" = --after ]
     curl -fsS --get --data-urlencode "after=$4" "$ROUTE_TEST_URL/events" ;;
   'rig list') echo '{"rigs":[]}' ;;
+  'agent list') echo '{"agents":[{"qualified_name":"worker","pool":{"min":0,"max":1},"routes_to_pool":false}]}' ;;
   ready*) curl -fsS "$ROUTE_TEST_URL/work" ;;
   'session list') echo '{"sessions":[]}' ;;
   'session nudge') curl -fsS --get --data-urlencode "target=$3" --data-urlencode "message=$4" "$ROUTE_TEST_URL/nudge" ;;

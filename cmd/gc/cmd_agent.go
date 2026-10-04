@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
@@ -535,19 +536,22 @@ type AgentListJSON struct {
 
 // AgentListItem is one configured agent in "gc agent list --json".
 type AgentListItem struct {
-	Name                 string    `json:"name"`
-	QualifiedName        string    `json:"qualified_name"`
-	Dir                  string    `json:"dir,omitempty"`
-	Scope                string    `json:"scope,omitempty"`
-	WorkDir              string    `json:"work_dir,omitempty"`
-	Provider             string    `json:"provider,omitempty"`
-	Session              string    `json:"session,omitempty"`
-	Suspended            bool      `json:"suspended"`
-	Pool                 *PoolJSON `json:"pool,omitempty"`
-	WorkQuery            string    `json:"work_query"`
-	SlingQuery           string    `json:"sling_query"`
-	ConfiguredWorkQuery  string    `json:"configured_work_query,omitempty"`
-	ConfiguredSlingQuery string    `json:"configured_sling_query,omitempty"`
+	Name          string    `json:"name"`
+	QualifiedName string    `json:"qualified_name"`
+	Dir           string    `json:"dir,omitempty"`
+	Scope         string    `json:"scope,omitempty"`
+	WorkDir       string    `json:"work_dir,omitempty"`
+	Provider      string    `json:"provider,omitempty"`
+	Session       string    `json:"session,omitempty"`
+	Suspended     bool      `json:"suspended"`
+	Pool          *PoolJSON `json:"pool,omitempty"`
+	// RoutesToPool distinguishes pool-base demand from a named-session target.
+	// Pool contains capacity information even for non-pool agents.
+	RoutesToPool         bool   `json:"routes_to_pool"`
+	WorkQuery            string `json:"work_query"`
+	SlingQuery           string `json:"sling_query"`
+	ConfiguredWorkQuery  string `json:"configured_work_query,omitempty"`
+	ConfiguredSlingQuery string `json:"configured_sling_query,omitempty"`
 }
 
 func cmdAgentList(jsonOutput bool, stdout, stderr io.Writer) int {
@@ -617,6 +621,12 @@ func agentListItems(cfg *config.City, topo config.QueryTopology, cityPath string
 			ConfiguredSlingQuery: a.SlingQuery,
 		}
 		sp := scaleParamsFor(&a)
+		if agentutil.IsMultiSessionAgent(&a) {
+			_, named, err := session.FindNamedSessionSpecForTarget(cfg, cfg.EffectiveCityName(), agentutil.RoutedToIdentity(&a), "")
+			// Ambiguous named targets must go through normal target resolution,
+			// which reports the ambiguity, rather than silently deferring them.
+			item.RoutesToPool = err == nil && !named
+		}
 		if sp.Min != 0 || sp.Max != 1 || strings.TrimSpace(sp.Check) != "" || a.SupportsInstanceExpansion() {
 			item.Pool = &PoolJSON{Min: sp.Min, Max: sp.Max}
 		}

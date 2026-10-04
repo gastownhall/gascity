@@ -75,7 +75,12 @@ case "$1 $2" in
     esac
     jq '[.[] | select(.status == "open" and (.assignee // "") == "" and (.metadata."gc.routed_to" // "") != "")]' "$FIXTURE/beads"
     ;;
-  'session list') cat "$FIXTURE/sessions" ;;
+  'agent list')
+    [ ! -f "$FIXTURE/fail-agent-list" ] || exit 1
+    cat "$FIXTURE/agents" ;;
+  'session list')
+    [ ! -f "$FIXTURE/fail-session-list" ] || exit 1
+    cat "$FIXTURE/sessions" ;;
   'session nudge')
     [ ! -f "$FIXTURE/fail-nudge" ] || exit 1
     if [ -p "$FIXTURE/entered" ]; then
@@ -90,6 +95,7 @@ esac
 	f.write("events", "", 0o600)
 	f.write("beads", "[]", 0o600)
 	f.write("sessions", `{"sessions":[]}`, 0o600)
+	f.write("agents", `{"agents":[{"qualified_name":"worker","pool":{"min":0,"max":1},"routes_to_pool":false}]}`, 0o600)
 	f.env = append(os.Environ(), "PATH="+filepath.Join(dir, "bin")+":"+os.Getenv("PATH"), "FIXTURE="+dir,
 		"PACK_DIR="+dir, "GC_CITY="+dir, "GC_PACK_STATE_DIR="+filepath.Join(dir, "state"))
 	return f
@@ -697,6 +703,84 @@ func TestRouteNotificationMultiplePoolMembersDeferred(t *testing.T) {
 	f.expireRetry()
 	if f.due() {
 		t.Fatal("work handed to the pool backstop remained pending for notification")
+	}
+}
+
+func TestRouteNotificationPoolOwnershipIgnoresActiveCount(t *testing.T) {
+	for _, sessions := range []string{`{"sessions":[]}`, `{"sessions":[{"name":"worker-1"}]}`} {
+		t.Run(sessions, func(t *testing.T) {
+			f := newRouteScriptFixture(t)
+			f.seed("bead.created", true)
+			f.write("agents", `{"agents":[{"qualified_name":"worker","pool":{"min":0,"max":3},"routes_to_pool":true}]}`, 0o600)
+			f.write("sessions", sessions, 0o600)
+			if err := f.run(); err != nil {
+				t.Fatal(err)
+			}
+			if got := f.nudges(); got != "" {
+				t.Fatalf("pool got direct notification: %q", got)
+			}
+			if f.due() {
+				t.Fatal("pool handoff remained pending")
+			}
+		})
+	}
+}
+
+func TestRouteNotificationLookupFailureRetries(t *testing.T) {
+	for _, failure := range []string{"fail-agent-list", "fail-session-list", "malformed-session-list"} {
+		t.Run(failure, func(t *testing.T) {
+			f := newRouteScriptFixture(t)
+			f.seed("bead.created", true)
+			if failure == "malformed-session-list" {
+				f.write("sessions", `{}`, 0o600)
+			} else {
+				f.write(failure, "", 0o600)
+			}
+			if err := f.run(); err == nil {
+				t.Fatal("lookup failure reported success")
+			}
+			if got := f.nudges(); got != "" {
+				t.Fatalf("lookup failure fell through to nudge: %q", got)
+			}
+			if failure == "malformed-session-list" {
+				f.write("sessions", `{"sessions":[]}`, 0o600)
+			} else if err := os.Remove(filepath.Join(f.dir, failure)); err != nil {
+				t.Fatal(err)
+			}
+			f.expireRetry()
+			if !f.due() {
+				t.Fatal("lookup failure lost its retry")
+			}
+			if err := f.run(); err != nil {
+				t.Fatal(err)
+			}
+			if got := f.nudges(); got != "worker\n" {
+				t.Fatalf("lookup retry = %q", got)
+			}
+		})
+	}
+}
+
+func TestRouteNotificationRequiresRoutingOwnershipField(t *testing.T) {
+	f := newRouteScriptFixture(t)
+	f.seed("bead.created", true)
+	f.write("agents", `{"agents":[{"qualified_name":"worker","pool":{"min":0,"max":1}}]}`, 0o600)
+	if err := f.run(); err == nil {
+		t.Fatal("older CLI output reported successful ownership transfer")
+	}
+	if got := f.nudges(); got != "" {
+		t.Fatalf("older CLI output guessed a target: %q", got)
+	}
+	f.expireRetry()
+	if !f.due() {
+		t.Fatal("older CLI output lost pending work")
+	}
+	f.write("agents", `{"agents":[{"qualified_name":"worker","pool":{"min":0,"max":1},"routes_to_pool":false}]}`, 0o600)
+	if err := f.run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.nudges(); got != "worker\n" {
+		t.Fatalf("upgrade retry = %q", got)
 	}
 }
 
