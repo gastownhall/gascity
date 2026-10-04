@@ -670,6 +670,35 @@ go_binary(
     visibility = ["//visibility:public"],
 )
 
+# Two gc links that differ only in their stamped build commit (what the
+# release build's -ldflags "-X main.commit=..." sets), for the supervisor
+# binary-drift tests in //test/integration (start_drift_test.go). Those tests
+# used to `go build ./cmd/gc` inside the test action, which needs go.sum and a
+# module download that remote workers cannot do (and the fork pool has no
+# network). Keep the commits equal to driftHappyOldCommit /
+# driftHappyNewCommit.
+# keep
+go_binary(
+    name = "gc_drift_old",
+    testonly = True,
+    embed = [":gc_lib"],
+    # Built only as data of //test/integration:integration_test, never by //...
+    tags = ["manual"],
+    visibility = ["//test/integration:__pkg__"],
+    x_defs = {"main.commit": "deadbeefcafe1111"},
+)
+
+# keep
+go_binary(
+    name = "gc_drift_new",
+    testonly = True,
+    embed = [":gc_lib"],
+    # Built only as data of //test/integration:integration_test, never by //...
+    tags = ["manual"],
+    visibility = ["//test/integration:__pkg__"],
+    x_defs = {"main.commit": "facefeed02222222"},
+)
+
 go_test(
     name = "gc_test",
     size = "large",

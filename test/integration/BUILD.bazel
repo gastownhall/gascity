@@ -58,17 +58,28 @@ go_test(
         ["**"],
         exclude = ["BUILD.bazel"],
     ) + [
-        "//cmd/gc",
-        "//examples/bd",
-        "//test/integration/filebdshim",
         "//:go.mod",
         "//:repo_source_tree",
-        # Pinned prebuilt release binaries (see MODULE.bazel): hermetic bd and
-        # dolt for the dolt-backed integration shapes, same versions the
-        # go-test CI installs via install-bd-archive.sh / install-dolt-archive.sh.
-        "@bd_bin_v1_3_1//:bd",
-        "@dolt_bin_v2_1_7//:dolt-linux-amd64/bin/dolt",
-    ],
+    ] + select({
+        # Only the integration-tagged tests exec these. The untagged tests that
+        # also build in the default configuration (bead_id_test.go,
+        # dolt_config_timeout_test.go) read sources only, so `bazel test //...`
+        # neither links nor stages them; the gc links are 207 MB each.
+        ":gotags_integration": [
+            "//cmd/gc",
+            "//cmd/gc:gc_drift_new",
+            "//cmd/gc:gc_drift_old",
+            "//examples/bd",
+            "//test/integration/filebdshim",
+            # Pinned prebuilt release binaries (see MODULE.bazel): hermetic bd
+            # and dolt for the dolt-backed integration shapes, same versions the
+            # go-test CI installs via install-bd-archive.sh /
+            # install-dolt-archive.sh.
+            "@bd_bin_v1_3_1//:bd",
+            "@dolt_bin_v2_1_7//:dolt-linux-amd64/bin/dolt",
+        ],
+        "//conditions:default": [],
+    }),
     shard_count = 4,
     deps = [
         "//internal/bazeltest",
@@ -100,6 +111,12 @@ go_test(
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],
+)
+
+# The integration lane builds with --define=gotags=integration (bazel-test.yml).
+config_setting(
+    name = "gotags_integration",
+    define_values = {"gotags": "integration"},
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
