@@ -30,10 +30,14 @@ var corePolecatVariants = []struct{ formula, terminal string }{
 }
 
 // corePolecatMembers are the steps of a polecat workflow that belong to the
-// abort scope. load-context is the only step left out: it runs ahead of every
-// step that can stop the workflow, so there is nothing for an abort to skip.
+// abort scope: the steps with an exit that stops the workflow, and the variant's
+// terminal. load-context and preflight-tests stay out. Neither has such an exit,
+// and once the scope has aborted, workflow-finalize skips whatever is still open.
+//
+// The set is a contract across repos: a formula that overrides a member must
+// repeat its scope metadata, so changing it is a deliberate decision.
 func corePolecatMembers(terminal string) []string {
-	return []string{"workspace-setup", "preflight-tests", "implement", "self-review", terminal}
+	return []string{"workspace-setup", "implement", "self-review", terminal}
 }
 
 // corePolecatSteps compiles a core formula and returns its steps.
@@ -73,15 +77,11 @@ func TestCorePolecatFormulasDeclareTheAbortScope(t *testing.T) {
 
 	for _, v := range corePolecatVariants {
 		t.Run(v.formula, func(t *testing.T) {
-			var bodies, members []string
-			var notAbortScope, loadContextRef []string
+			var bodies, members, notAbortScope []string
 			for _, step := range corePolecatSteps(t, v.formula) {
 				id := strings.TrimPrefix(step.ID, v.formula+".")
 				if step.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindScope && step.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleBody {
 					bodies = append(bodies, id)
-				}
-				if id == "load-context" && step.Metadata[beadmeta.ScopeRefMetadataKey] != "" {
-					loadContextRef = append(loadContextRef, step.Metadata[beadmeta.ScopeRefMetadataKey])
 				}
 				if step.Metadata[beadmeta.ScopeRefMetadataKey] != corePolecatScope || step.Metadata[beadmeta.ScopeRoleMetadataKey] != beadmeta.ScopeRoleMember {
 					continue
@@ -103,9 +103,6 @@ func TestCorePolecatFormulasDeclareTheAbortScope(t *testing.T) {
 			}
 			if len(notAbortScope) != 0 {
 				t.Errorf("%s members without gc.on_fail=%s: %v", v.formula, corePolecatOnFail, notAbortScope)
-			}
-			if len(loadContextRef) != 0 {
-				t.Errorf("%s load-context joined scope %v; it runs ahead of every exit that can stop the workflow", v.formula, loadContextRef)
 			}
 		})
 	}

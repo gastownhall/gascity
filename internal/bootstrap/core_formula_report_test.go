@@ -57,13 +57,14 @@ func TestCoreMolPolecatReportCompilesWriteReportTerminalStep(t *testing.T) {
 		t.Fatal("recipe missing mol-polecat-report.write-report step")
 	}
 
-	// write-report must be terminal: only the synthetic graph.v2
-	// workflow-finalize step may depend on it.
+	// write-report must be terminal: only graph controls may depend on it, the
+	// synthetic graph.v2 workflow-finalize step and its own scope-check (it is a
+	// member of the abort scope declared in mol-polecat-base).
 	for _, dep := range recipe.Deps {
 		if dep.DependsOnID != writeReport.ID || dep.Type != "blocks" {
 			continue
 		}
-		if dep.StepID == "mol-polecat-report.workflow-finalize" {
+		if dep.StepID == "mol-polecat-report.workflow-finalize" || dep.StepID == "mol-polecat-report.write-report-scope-check" {
 			continue
 		}
 		t.Fatalf("write-report should be terminal, but %s depends on it", dep.StepID)

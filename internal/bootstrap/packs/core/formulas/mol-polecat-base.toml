@@ -26,7 +26,25 @@ bead re-derives it from the input convoy:
 ```bash
 CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
 WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
-```"""
+```
+
+## Stopping The Workflow Early
+
+`workspace-setup`, `implement`, `self-review` and the variant's final step are
+the members of one scope, `body`, declared at the end of this formula. One of
+them that cannot continue stops the whole workflow by closing itself failed:
+
+```bash
+gc bd update <step-id> --set-metadata gc.outcome=fail --set-metadata gc.failure_class=hard --set-metadata gc.failure_reason=<reason> --status=closed
+```
+
+The scope then skips every step that has not run and the workflow finalizes
+FAILED for the escalation target. Never `gc runtime drain-ack` with your step
+still open: drain-ack gives back every claim the session holds, so the step
+returns to the pool and a fresh session runs it again.
+
+A step that succeeded closes with `gc.outcome=pass`. A scope member closed with
+no `gc.outcome` counts as failed."""
 formula = "mol-polecat-base"
 
 [requires]
@@ -135,7 +153,9 @@ description = """
 Override this step in variant formulas to define the workspace strategy.
 
 Variants should set up an isolated worktree and working context appropriate
-for their merge strategy (feature branch, direct commit, etc)."""
+for their merge strategy (feature branch, direct commit, etc). An override
+must repeat this step's scope metadata."""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 
 [[steps]]
 id = "preflight-tests"
@@ -370,7 +390,11 @@ gc runtime request-restart
 This blocks until the controller kills your session. The next session
 resumes from context (re-reads formula steps, checks git/bead state).
 
-**Exit criteria:** Implementation complete, all changes committed."""
+**Exit criteria:** Implementation complete, all changes committed.
+
+**Close this step:** `gc bd update <step-id> --set-metadata gc.outcome=pass --status closed`
+(a bare close counts as a failure)."""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 
 [[steps]]
 id = "self-review"
@@ -443,4 +467,22 @@ BODY
 
 NEVER discard implementation changes with `git checkout -- .`
 
-**Exit criteria:** All checks pass, all changes committed, working tree clean."""
+**Exit criteria:** All checks pass, all changes committed, working tree clean.
+
+**Close this step:** `gc bd update <step-id> --set-metadata gc.outcome=pass --status closed`
+(a bare close counts as a failure)."""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[[steps]]
+id = "body"
+title = "Polecat workflow scope"
+needs = ["workspace-setup", "implement", "self-review"]
+description = """
+Scope latch for the polecat workflow. No worker runs it: the scope-check
+controls close it pass once every member has passed, or fail when a member
+hard-fails and the members still open are skipped.
+
+A variant adds its own terminal step after self-review. That step, and each
+member step the variant overrides, must declare this scope's member metadata,
+or an abort does not reach it."""
+metadata = { "gc.kind" = "scope", "gc.scope_name" = "polecat", "gc.scope_role" = "body" }

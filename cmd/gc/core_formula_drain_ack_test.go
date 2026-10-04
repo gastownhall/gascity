@@ -112,7 +112,9 @@ func coreDrainAckSteps(t *testing.T) map[string][]string {
 			t.Fatalf("compiling %s: %v", name, err)
 		}
 		for _, step := range recipe.Steps {
-			if strings.Contains(step.Description, "gc runtime drain-ack") {
+			// The root's description is the formula's own prose, which no worker
+			// runs; only a step's description is an instruction.
+			if !step.IsRoot && strings.Contains(step.Description, "gc runtime drain-ack") {
 				steps[name] = append(steps[name], step.ID)
 			}
 		}

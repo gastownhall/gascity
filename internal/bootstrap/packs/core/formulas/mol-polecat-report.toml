@@ -21,8 +21,8 @@ to `git push` or `gh pr create`.
 
 | Situation | Action |
 |-----------|--------|
-| Investigation blocked | Mail the escalation target, mark yourself stuck |
-| Blocked on external | Mail the escalation target, mark yourself stuck |
+| Investigation blocked | Mail the escalation target, close your own step `gc.outcome=fail`, then `gc runtime drain-ack` (see Stopping The Workflow Early in mol-polecat-base) |
+| Blocked on external | Same as investigation blocked |
 | Context filling | `gc runtime request-restart` (blocks until controller kills you) |
 | Unsure what to do | Mail the escalation target, don't guess |"""
 formula = "mol-polecat-report"
@@ -41,8 +41,24 @@ verify the investigation environment is ready.
 
 **No git checkout, no isolated worktree.** You investigate with existing
 sources in place. If you discover the issue requires a code fix, do NOT
-attempt it here — mail `{{escalation_target}}` and drain-ack so the operator can
-re-pour with `mol-polecat-commit` or `mol-polecat-pr`.
+attempt it here: stop the workflow so the operator can re-pour with
+`mol-polecat-commit` or `mol-polecat-pr`. `gc runtime drain-ack` gives back
+every claim this session still holds, so close this step failed before the ack:
+acking with it open hands it back to the pool and a fresh session runs it
+again. Closed failed, it skips every later step and the workflow finalizes
+FAILED for `{{escalation_target}}`.
+```bash
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+gc mail send {{escalation_target}} -s "HELP: $WORK_BEAD_ID needs a code fix" \
+  -m "Issue: $WORK_BEAD_ID. This report-only workflow makes no code changes; re-pour with mol-polecat-commit or mol-polecat-pr."
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+STEP_BEAD=$(gc bd show "$STEP_BEAD_ID" --json) || exit 1
+printf '%s' "$STEP_BEAD" | jq -e '(if type == "array" then .[0] else . end) | .status == "in_progress" and ((.metadata["gc.step_ref"] // "") | endswith(".workspace-setup"))' >/dev/null || { echo "workspace-setup: current claim $STEP_BEAD_ID is not this in-progress step; not acknowledging drain" >&2; exit 1; }
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=fail --set-metadata gc.failure_class=hard --set-metadata gc.failure_reason=needs_code_change --status=closed || exit 1
+gc runtime drain-ack
+exit 1
+```
 
 **1. Confirm scope:**
 
@@ -64,7 +80,11 @@ gc prime
 gc bd prime
 ```
 
-**Exit criteria:** Scope confirmed as investigation/analysis only."""
+**Exit criteria:** Scope confirmed as investigation/analysis only.
+
+**Close this step:** `gc bd update <step-id> --set-metadata gc.outcome=pass --status closed`
+(a bare close counts as a failure)."""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 
 [[steps]]
 id = "preflight-tests"
@@ -88,11 +108,30 @@ code changes.
 - Read the relevant sources, traces, logs, and configuration in place.
 - Gather concrete evidence: file paths, line numbers, command output.
 - Identify the root cause, or state clearly that it is unknown.
-- Do NOT edit, create, or delete any files. If you discover a code fix is
-  required, do NOT attempt it here — mail `{{escalation_target}}` and drain-ack so the
-  operator can re-pour with mol-polecat-commit or mol-polecat-pr.
+- Do NOT edit, create, or delete any files.
 
-**Exit criteria:** Investigation complete, evidence gathered, no files modified."""
+**If you discover a code fix is required,** do NOT attempt it here: stop the
+workflow so the operator can re-pour with mol-polecat-commit or
+mol-polecat-pr. Close this step failed before the ack, or `gc runtime
+drain-ack` hands it back to the pool and a fresh session runs it again:
+```bash
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+gc mail send {{escalation_target}} -s "HELP: $WORK_BEAD_ID needs a code fix" \
+  -m "Issue: $WORK_BEAD_ID. This report-only workflow makes no code changes; re-pour with mol-polecat-commit or mol-polecat-pr."
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+STEP_BEAD=$(gc bd show "$STEP_BEAD_ID" --json) || exit 1
+printf '%s' "$STEP_BEAD" | jq -e '(if type == "array" then .[0] else . end) | .status == "in_progress" and ((.metadata["gc.step_ref"] // "") | endswith(".implement"))' >/dev/null || { echo "implement: current claim $STEP_BEAD_ID is not this in-progress step; not acknowledging drain" >&2; exit 1; }
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=fail --set-metadata gc.failure_class=hard --set-metadata gc.failure_reason=needs_code_change --status=closed || exit 1
+gc runtime drain-ack
+exit 1
+```
+
+**Exit criteria:** Investigation complete, evidence gathered, no files modified.
+
+**Close this step:** `gc bd update <step-id> --set-metadata gc.outcome=pass --status closed`
+(a bare close counts as a failure)."""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 
 [[steps]]
 id = "self-review"
@@ -118,13 +157,30 @@ git status
 There must be NO uncommitted code changes. If `git status` shows any
 modifications, STOP — do not run a broad `git checkout`. This is a shared,
 non-isolated checkout, so a blanket discard can wipe unrelated local work.
-Mail `{{escalation_target}}`, note the unexpected dirty state, and drain-ack so the
-operator can inspect. Only revert files you are certain you touched, by
-explicit path (e.g. `git checkout -- path/to/file`).
+Stop the workflow so the operator can inspect, closing this step failed before
+the ack so `gc runtime drain-ack` does not hand it back to the pool. Only revert
+files you are certain you touched, by explicit path (e.g. `git checkout --
+path/to/file`).
+```bash
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+gc mail send {{escalation_target}} -s "HELP: $WORK_BEAD_ID has an unexpected dirty checkout" \
+  -m "Issue: $WORK_BEAD_ID. git status shows modifications in the shared checkout; nothing was reverted. Inspect before anything is discarded."
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+STEP_BEAD=$(gc bd show "$STEP_BEAD_ID" --json) || exit 1
+printf '%s' "$STEP_BEAD" | jq -e '(if type == "array" then .[0] else . end) | .status == "in_progress" and ((.metadata["gc.step_ref"] // "") | endswith(".self-review"))' >/dev/null || { echo "self-review: current claim $STEP_BEAD_ID is not this in-progress step; not acknowledging drain" >&2; exit 1; }
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=fail --set-metadata gc.failure_class=hard --set-metadata gc.failure_reason=dirty_checkout --status=closed || exit 1
+gc runtime drain-ack
+exit 1
+```
 
 This formula produces ZERO code changes. All output is bead notes.
 
-**Exit criteria:** Findings complete, git status clean."""
+**Exit criteria:** Findings complete, git status clean.
+
+**Close this step:** `gc bd update <step-id> --set-metadata gc.outcome=pass --status closed`
+(a bare close counts as a failure)."""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 
 [[steps]]
 id = "write-report"
@@ -192,3 +248,4 @@ You are GONE. Done means gone. There is no idle state.
 
 **Exit criteria:** Report written to bead notes, bead closed, this step
 closed, session exited."""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }

@@ -21,8 +21,8 @@ Push conflicts are handled by fetch + rebase + retry (up to 3 times).
 | Situation | Action |
 |-----------|--------|
 | Tests fail | Fix them. Do not proceed with failures. |
-| Push conflict (3 retries exhausted) | Mail the escalation target, mark yourself stuck |
-| Blocked on external | Mail the escalation target, mark yourself stuck |
+| Push conflict (3 retries exhausted) | `commit-and-push` mails the escalation target and closes itself failed |
+| Blocked on external | Mail the escalation target, close your own step `gc.outcome=fail`, then `gc runtime drain-ack` (see Stopping The Workflow Early in mol-polecat-base) |
 | Context filling | `gc runtime request-restart` (blocks until controller kills you) |
 | Unsure what to do | Mail the escalation target, don't guess |"""
 formula = "mol-polecat-commit"
@@ -90,7 +90,11 @@ git status                  # Should be clean
 Empty setup_command → skip.
 
 **Exit criteria:** In your worktree, at base_branch HEAD, deps installed,
-worktree recorded on the bead."""
+worktree recorded on the bead.
+
+**Close this step:** `gc bd update <step-id> --set-metadata gc.outcome=pass --status closed`
+(a bare close counts as a failure)."""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 
 [[steps]]
 id = "commit-and-push"
@@ -195,3 +199,4 @@ You are GONE. Done means gone. There is no idle state.
 
 **Exit criteria:** Changes pushed to {{base_branch}}, worktree cleaned up,
 bead closed, this step closed, session exited."""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
