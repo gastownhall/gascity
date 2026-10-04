@@ -65,9 +65,11 @@ type SessionCreateInput struct {
 
 // asyncAcceptedBody is the response body for all async session 202 responses.
 type asyncAcceptedBody struct {
-	Status      string `json:"status" doc:"Async request status." example:"accepted"`
-	RequestID   string `json:"request_id" doc:"Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id."`
-	EventCursor string `json:"event_cursor" doc:"City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty."`
+	Status          string `json:"status" doc:"Async request status." example:"accepted"`
+	RequestID       string `json:"request_id" doc:"Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id."`
+	EventCursor     string `json:"event_cursor" doc:"City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty."`
+	TurnID          string `json:"turn_id,omitempty" doc:"Unique identifier for this conversation turn, used for correlating requests with transcript entries."`
+	ClientMessageID string `json:"client_message_id,omitempty" doc:"Echoed client-generated message ID for idempotent request correlation."`
 }
 
 // SessionCreateOutput is the Huma output for POST /v0/sessions.
@@ -156,8 +158,9 @@ type SessionSubmitInput struct {
 	ID             string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
 	Body           struct {
-		Message string               `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to submit."`
-		Intent  session.SubmitIntent `json:"intent,omitempty" enum:"default,follow_up,interrupt_now" doc:"Submit intent; empty defaults to \"default\"."`
+		Message         string               `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to submit."`
+		Intent          session.SubmitIntent `json:"intent,omitempty" enum:"default,follow_up,interrupt_now" doc:"Submit intent; empty defaults to \"default\"."`
+		ClientMessageID string               `json:"client_message_id,omitempty" maxLength:"128" pattern:"^[a-zA-Z0-9_-]{1,128}$" doc:"Client-generated unique ID for idempotent request correlation."`
 	}
 }
 
