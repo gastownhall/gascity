@@ -104,7 +104,8 @@ const (
 	// matching runner_policy.py, which now selects Blacksmith for every event
 	// and author. Reviewed delta: that one runs-on value, no new job, step,
 	// trigger or permission.
-	expectedCIExecutionHash     = "63317c9e54304db88ef66aa35a70b9b09a7e0a34c5002ecab567b51ccc8c3026"
+	// Route-notification script/order edits also select their integration proof.
+	expectedCIExecutionHash     = "45769d3f33442a3d02d3278efeacc9574b8d63f30a7b75bdf6f21884c98ad5b8"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -213,6 +214,8 @@ var requiredFilterPaths = map[string][]string{
 		".github/workflows/**",
 		"Makefile",
 		"**/*.go",
+		"internal/bootstrap/packs/core/assets/scripts/nudge-on-route.sh",
+		"internal/bootstrap/packs/core/orders/nudge-on-route.toml",
 		"scripts/test-integration-shard",
 		"scripts/test-go-test-shard",
 		"scripts/runtime-tmux-tests.manifest",

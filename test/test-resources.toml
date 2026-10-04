@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 727
-baseline_files = 213
+baseline_calls = 728
+baseline_files = 214
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
