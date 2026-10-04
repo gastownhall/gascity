@@ -28,7 +28,8 @@ func registryFake(t *testing.T, registered []string, rejection string) (bin, tra
 		if n, p, ok := strings.Cut(entry, "="); ok {
 			name, pane = n, p
 		}
-		entries = append(entries, fmt.Sprintf(`{"agent":"%s","pane_id":"%s","agent_status":"working"}`, name, pane))
+		// herdr's schema: "name" is the registered name, "agent" the detected kind.
+		entries = append(entries, fmt.Sprintf(`{"agent":"claude","name":"%s","pane_id":"%s","agent_status":"working"}`, name, pane))
 	}
 	list := `{"result":{"agents":[` + strings.Join(entries, ",") + `]}}`
 	if registered == nil {

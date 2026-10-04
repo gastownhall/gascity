@@ -276,11 +276,23 @@ func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...
 	return env.Result, nil
 }
 
-// agentInfo mirrors herdr's agent object. Verified live against herdr 0.7.3:
-// the per-entry name field is emitted under the JSON key "agent", not "name"
-// (`herdr agent list` → {"agents":[{"agent":"act-a","agent_status":"idle",...}]}).
+// agentInfo mirrors herdr's agent object, which carries two different
+// identifiers. "name" is the registered agent name: the one `agent start
+// <name>` sets and `agent get <name>` resolves, and the only one gc session
+// identity may be matched against. "agent" is the agent kind herdr detected
+// in the pane (claude, opencode, pi, ...), shared by every pane running that
+// kind. Both fields have had these meanings since herdr's schema introduced
+// them (0.7.0; AgentInfo in src/api/schema/agents.rs, filled from
+// terminal.agent_name and the pane's detected agent), confirmed live on 0.9.1:
+// {"agent":"opencode","name":"mayor","pane_id":"wX:p1",...}.
+//
+// A detected agent with no registered name omits "name", so Name is empty.
+// Callers must treat that as unnamed and never substitute Kind: matching a
+// kind as a name resolves a session named after a kind to another session's
+// pane.
 type agentInfo struct {
-	Name        string `json:"agent"`
+	Name        string `json:"name"`
+	Kind        string `json:"agent"`
 	PaneID      string `json:"pane_id"`
 	WorkspaceID string `json:"workspace_id"`
 	TabID       string `json:"tab_id"`
@@ -713,12 +725,14 @@ func (c *client) closePane(ctx context.Context, paneID string) error {
 
 // getAgent fetches one agent by target — an agent name or the pane id hosting
 // it: (info, true, nil) if present, (zero, false, nil) if herdr reports it
-// absent, (_, false, err) on failure. Verified live on herdr 0.7.3: `agent
-// get <target>` only resolves a pane id — passing an agent name returns
-// agent_not_found even though `agent list` lists that same agent under that
-// name — so a name-shaped target that `agent get` rejects as not-found falls
-// back to a listAgents scan, which does resolve by name.
+// absent, (_, false, err) on failure. A target that `agent get` rejects as
+// not-found falls back to a listAgents scan by registered name, so resolution
+// does not depend on `agent get` accepting a name. The scan matches Name only:
+// an agent kind is not a registered name, and an empty target matches nothing.
 func (c *client) getAgent(ctx context.Context, target string) (agentInfo, bool, error) {
+	if target == "" {
+		return agentInfo{}, false, nil
+	}
 	res, err := c.run(ctx, "agent", "get", target)
 	if err == nil {
 		var wrap struct {
