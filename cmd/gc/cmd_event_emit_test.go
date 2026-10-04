@@ -368,3 +368,49 @@ func TestEventEmitMissingType(t *testing.T) {
 		t.Errorf("gc event emit = %d, want 1 (missing type arg)", code)
 	}
 }
+
+func TestEventBeadPayloadScopeRoot(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "BEADS_DIR absolute resolves to its parent",
+			env:  map[string]string{"BEADS_DIR": "/city/root/.beads"},
+			want: "/city/root",
+		},
+		{
+			// S5b-7 review FINAL item 7: filepath.Dir on a trailing-slash
+			// path does not strip the final element the way a shell's
+			// dirname would, so an unclean BEADS_DIR must not silently
+			// resolve to itself instead of its parent.
+			name: "BEADS_DIR absolute with a trailing slash still resolves to its parent",
+			env:  map[string]string{"BEADS_DIR": "/city/root/.beads/"},
+			want: "/city/root",
+		},
+		{
+			name: "GC_RIG_ROOT used when BEADS_DIR is unset",
+			env:  map[string]string{"GC_RIG_ROOT": "/rig/root"},
+			want: "/rig/root",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, k := range []string{"BEADS_DIR", "GC_RIG_ROOT"} {
+				t.Setenv(k, "")
+				_ = os.Unsetenv(k)
+			}
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			got, err := eventBeadPayloadScopeRoot()
+			if err != nil {
+				t.Fatalf("eventBeadPayloadScopeRoot() error = %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("eventBeadPayloadScopeRoot() with env %v = %q, want %q", tc.env, got, tc.want)
+			}
+		})
+	}
+}
