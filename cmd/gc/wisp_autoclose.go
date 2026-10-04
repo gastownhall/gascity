@@ -71,7 +71,8 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 // attachments are preferred, with child traversal as a fallback for legacy
 // data. Called from
 // the bd on_close hook to ensure attached wisps don't outlive their parent work
-// bead. All errors are silently swallowed — this is best-effort infrastructure.
+// bead. All errors are swallowed — this is best-effort infrastructure — but a
+// failed read is reported in the returned run so the controller can retry.
 // Parent lookup and child traversal both read through the Live handle: the
 // hook fires for closed and ephemeral-tier beads that cached or tier-narrow
 // raw reads can miss, and an attachment missed here outlives its parent — the
@@ -83,7 +84,8 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 // parked-checkpoint guard, subtree close, and spec-sidecar close all run on the
 // graph store. It is required rather than variadic: as a variadic with a
 // collapse-to-store default, both hook-path callers silently omitted it.
-func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, graphClassStore beads.GraphStore) {
+func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, graphClassStore beads.GraphStore) autocloseRun {
+	var run autocloseRun
 	// Unwrapped for internal use: the helpers below assert optional store
 	// capabilities, which do not promote through the class wrapper.
 	graphStore := graphClassStore.Store
@@ -94,9 +96,11 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 	// An open parent's attachments are its live work, finished or not: a
 	// spurious bead.closed (a false scan close, a replay) must not close them.
 	if err != nil || parent.Status != "closed" {
-		return
+		run.note(err)
+		return run
 	}
 	attachments, err := collectAttachedBeads(parent, graphStore, beads.HandlesFor(graphStore).Live)
+	run.note(err)
 	seen := make(map[string]bool, len(attachments))
 	for _, attached := range attachments {
 		seen[attached.ID] = true
@@ -104,7 +108,9 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 	attachments = append(attachments, collectInputConvoyWorkflowRoots(store, graphStore, parent, seen)...)
 	if err == nil || len(attachments) > 0 {
 		for _, attached := range attachments {
-			if attachedMoleculeIsParked(graphStore, attached) {
+			parked, err := attachedMoleculeIsParked(graphStore, attached)
+			run.note(err)
+			if parked {
 				continue
 			}
 			// A subtree close has no conditional form, so re-check both rows
@@ -112,11 +118,18 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 			// terminal not reopened since (that would need the parked check
 			// again). Nothing finer is compared: the decided row may come
 			// through a cache that lags, and a refusal here leaks the
-			// attachment.
-			if !autocloseStill(store, parent.ID, func(b beads.Bead) bool { return b.Status == "closed" }) ||
-				!autocloseStill(graphStore, attached.ID, func(b beads.Bead) bool {
-					return !convoycore.IsTerminalStatus(attached.Status) || convoycore.IsTerminalStatus(b.Status)
-				}) {
+			// attachment. A failed re-check read is a refusal, reported so
+			// the run is retried.
+			parentStill, err := autocloseStill(store, parent.ID, func(b beads.Bead) bool { return b.Status == "closed" })
+			run.note(err)
+			if !parentStill {
+				continue
+			}
+			rootStill, err := autocloseStill(graphStore, attached.ID, func(b beads.Bead) bool {
+				return !convoycore.IsTerminalStatus(attached.Status) || convoycore.IsTerminalStatus(b.Status)
+			})
+			run.note(err)
+			if !rootStill {
 				continue
 			}
 			closed, err := closeAttachedWispSubtree(graphStore, attached)
@@ -127,13 +140,14 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 		}
 	}
 	if !sourceworkflow.IsWorkflowRoot(parent) {
-		return
+		return run
 	}
 	closed, err := sourceworkflow.CloseSpecSidecarsForRoot(graphStore, parent.ID, "")
 	if err != nil || closed == 0 {
-		return
+		return run
 	}
 	fmt.Fprintf(stdout, "Auto-closed %d generated spec bead(s) on %s\n", closed, beadID) //nolint:errcheck // best-effort stdout
+	return run
 }
 
 // attachedMoleculeIsParked reports whether the attached root is a live molecule
@@ -156,13 +170,14 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 // sibling's fail-safe `if !terminal { return }`: force-closing a possibly
 // human-pending subtree because a transient store read failed is the very
 // destructive behavior #3474 removes, and a genuinely complete wisp left open
-// on a read error is still reaped by the redundant later close paths.
-func attachedMoleculeIsParked(store beads.Store, attached beads.Bead) bool {
+// on a read error is still reaped: the walk error is returned too, and the
+// controller's autoclose run reports it so the sweep retries.
+func attachedMoleculeIsParked(store beads.Store, attached beads.Bead) (bool, error) {
 	if convoycore.IsTerminalStatus(attached.Status) {
-		return false
+		return false, nil
 	}
-	terminal, _ := subtreeTerminalExcludingRoot(store, attached.ID)
-	return !terminal
+	terminal, _, err := subtreeTerminalOrErr(store, attached.ID)
+	return !terminal, err
 }
 
 // collectInputConvoyWorkflowRoots finds open graph.v2 workflow roots that were

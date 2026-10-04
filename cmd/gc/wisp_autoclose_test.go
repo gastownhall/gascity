@@ -206,8 +206,12 @@ func TestAttachedMoleculeIsParkedPreservesOnWalkError(t *testing.T) {
 	}
 	store := &walkFailingStore{Store: base, failID: root.ID}
 
-	if !attachedMoleculeIsParked(store, root) {
+	parked, err := attachedMoleculeIsParked(store, root)
+	if !parked {
 		t.Fatal("attachedMoleculeIsParked = false on subtree walk error, want true (fail-safe preserve)")
+	}
+	if err == nil {
+		t.Fatal("attachedMoleculeIsParked hid the walk error; the autoclose run must see it to retry")
 	}
 }
 

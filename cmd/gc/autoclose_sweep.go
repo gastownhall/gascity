@@ -9,23 +9,33 @@ package main
 // the event log can drop the notification (CACHE-LAYERING-REVIEW F2). An
 // unconfirmable scan-derived close (applyInferredClose) is deferred here too.
 //
-// The sweep diffs each live cache's active census against the previous pass.
-// A row that left the census was closed or deleted, notified or not. After one
-// pass of grace, so the event path normally gets there first, the sweep re-reads
-// the row live and acts only if it is closed: the completion fact (deduplicated
-// against the journal) and autoclose. Autoclose recomputes
-// from store state (a convoy with every member terminal, a closed parent's open
-// attachments, a molecule with every step terminal), so running it twice for
-// one close is safe; the ran set only saves the reads.
+// The sweep diffs each live cache's active census (open and in-progress rows,
+// both tiers) against the previous pass. A row that left the census was closed
+// or deleted, notified or not. After one pass of grace, so the event path
+// normally gets there first, the sweep re-reads the row live and acts only if
+// it is closed: the completion fact (deduplicated against the journal) and
+// autoclose. Autoclose recomputes from store state (a convoy with every member
+// terminal, a closed parent's open attachments, a molecule with every step
+// terminal), so running it twice for one close is safe; the ran set only saves
+// the reads. The event path marks a close ran only once its autoclose finished
+// (autocloseSweep.settle); a run a read error or a refused close left
+// undecided is owed a check here instead.
 //
-// Known limit: the first census of a cache only seeds it, so a close made while
-// the controller was down, or a row opened and closed between two passes whose
-// notification was also lost, is not swept. Deriving autoclose from journal ops
-// (CACHE-LAYERING-REVIEW step 5) removes both.
+// The confirming read goes to the store whose configured prefix owns the id,
+// or on the unconfigured fallback to the first store that holds the row
+// (liveReadOwner).
+//
+// Known limits: the first census of a cache only seeds it, so a close made
+// while the controller was down, or a row opened and closed between two
+// passes whose notification was also lost, is not swept. Deriving autoclose
+// from journal ops (CACHE-LAYERING-REVIEW step 5) removes both. Autoclose's
+// cross-row premises (every member terminal, a parent closed) are read-based;
+// only the row it closes is fenced.
 
 import (
 	"context"
 	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -56,8 +66,8 @@ type autocloseSweep struct {
 	census map[*beads.CachingStore]map[string]struct{}
 	// pending maps an id owed a check to when it is due.
 	pending map[string]time.Time
-	// ran holds ids the event path ran autoclose for since they last arrived
-	// in a census.
+	// ran holds ids the event path ran autoclose to the end for since they
+	// last arrived in a census.
 	ran map[string]struct{}
 
 	batch, pendingCap, ranCap int
@@ -75,14 +85,33 @@ func newAutocloseSweep() *autocloseSweep {
 	}
 }
 
-// noteRan records that the event path ran autoclose for id.
+// noteRan records that the event path ran autoclose for id to the end.
 func (s *autocloseSweep) noteRan(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.noteRanLocked(id)
+}
+
+func (s *autocloseSweep) noteRanLocked(id string) {
 	if len(s.ran) >= s.ranCap {
 		s.ran = map[string]struct{}{}
 	}
 	s.ran[id] = struct{}{}
+}
+
+// settle records how an event-path autoclose run for id ended. A finished run
+// marks id handled, so its departure costs the sweep no read. An unfinished
+// one (a read failed, or a fenced close stayed refused) is unmarked and owed
+// a check at due, so the sweep re-decides it.
+func (s *autocloseSweep) settle(id string, finished bool, due time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if finished {
+		s.noteRanLocked(id)
+		return
+	}
+	delete(s.ran, id)
+	s.deferLocked(id, due)
 }
 
 // deferID owes id a check at due.
@@ -192,10 +221,24 @@ func (cs *controllerState) startAutocloseSweep(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case now := <-ticker.C:
-				cs.runAutocloseSweepPass(now)
+				cs.safeAutocloseSweepPass(now)
 			}
 		}
 	}()
+}
+
+// safeAutocloseSweepPass runs one pass and recovers a panic, as the safeTick
+// lanes do, so one bad row cannot end the backstop for the controller's life.
+// The ids that pass had already popped are lost; the log names the bug.
+func (cs *controllerState) safeAutocloseSweepPass(now time.Time) (panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
+			log.Printf("autoclose-sweep: pass panicked: %v (type=%T)\n%s", r, r, debug.Stack())
+		}
+	}()
+	cs.runAutocloseSweepPass(now)
+	return false
 }
 
 // autocloseSweepActor stamps the completion facts the sweep records for a
@@ -208,13 +251,15 @@ type autocloseSweepResult struct {
 
 // runAutocloseSweepPass takes every live cache's census, then checks the ids
 // due by now: a row read closed gets its completion fact (once) and autoclose,
-// an open or gone row is dropped, and an unreadable one is retried next pass.
+// an open or gone row is dropped, and an unreadable one, or one whose
+// autoclose did not finish, is retried next pass.
 func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepResult {
 	sweep := cs.autocloseSweepOf()
 	keep := map[*beads.CachingStore]struct{}{}
 	for _, cache := range cs.sweepCaches() {
 		keep[cache] = struct{}{}
-		rows, ok := cache.CachedList(beads.ListQuery{AllowScan: true})
+		// Both tiers: a wisp molecule's steps are ephemeral rows.
+		rows, ok := cache.CachedList(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth})
 		if !ok {
 			continue // not servable this pass; keep the last census
 		}
@@ -228,19 +273,20 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 
 	var res autocloseSweepResult
 	for _, id := range sweep.due(now) {
-		cs.mu.RLock()
-		stores := cs.beadEventStoresLocked(id)
-		storeRef := cs.autocloseStoreRefLocked(id)
-		cs.mu.RUnlock()
+		stores, storeRef := cs.autocloseTargets(id)
 		if len(stores) == 0 {
 			continue
 		}
-		live, err := beads.HandlesFor(stores[0]).Live.Get(id)
+		store, live, err := liveReadOwner(stores, id)
 		switch confirmInferredClose(live, err) {
 		case closeConfirmed:
-			res.Ran++
 			cs.emitCompletedFact(live, autocloseSweepActor)
-			cs.beadCloseAutoclose(id, stores[0], storeRef)()
+			if cs.beadCloseAutoclose(id, store, storeRef)() {
+				res.Ran++
+			} else {
+				res.Retried++
+				sweep.deferID(id, now.Add(autocloseSweepInterval))
+			}
 		case closeRefuted:
 			res.Refuted++
 		default:
@@ -256,6 +302,14 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 		log.Printf("autoclose-sweep: ran=%d refuted=%d retried=%d dropped=%d", res.Ran, res.Refuted, res.Retried, dropped)
 	}
 	return res
+}
+
+// autocloseTargets returns the stores and storeRef a close of id resolves to,
+// as applyBeadEventToStores resolves them.
+func (cs *controllerState) autocloseTargets(id string) ([]beads.Store, string) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.beadEventStoresLocked(id), cs.autocloseStoreRefLocked(id)
 }
 
 // sweepCaches returns the distinct CachingStores the bead event watcher feeds.

@@ -100,6 +100,12 @@ func TestEmitCompletedSkipsAJournaledFactAndKeepsTheIndexCold(t *testing.T) {
 	if idx.loaded {
 		t.Fatal("the close path marked a cold index loaded")
 	}
+	// Record is best-effort, so the emit is not proof the journal holds the
+	// fact: the key must stay unconfirmed until a journal read returns it, or
+	// a dropped emit would witness convergence forever.
+	if present, confirmed := idx.lookup(completedFactKeyFor(rec.Events[0])); !present || confirmed {
+		t.Fatalf("emitted key present=%v confirmed=%v, want present and unconfirmed", present, confirmed)
+	}
 
 	journaled := events.NewFake()
 	journaled.Record(rec.Events[0])

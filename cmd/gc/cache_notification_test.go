@@ -106,20 +106,124 @@ func TestCacheChangeRecorderSuppressesRepeatedUpdates(t *testing.T) {
 
 func TestBeadUpdateDedupIsBounded(t *testing.T) {
 	d := newBeadUpdateDedup(4)
+	ep := events.NewFake()
+	update := func(id string) {
+		d.record(ep, events.Event{Type: events.BeadUpdated, Subject: id, Payload: json.RawMessage(`"` + id + `"`)})
+	}
 	for i := range 10 {
 		id := fmt.Sprintf("gc-%d", i)
-		if d.suppress(events.BeadUpdated, id, []byte(id)) {
+		update(id)
+		if len(ep.Events) != i+1 {
 			t.Fatalf("first update of %s suppressed", id)
 		}
 		if n := d.size(); n > 4 {
 			t.Fatalf("dedup holds %d ids, cap 4", n)
 		}
 	}
-	if !d.suppress(events.BeadUpdated, "gc-9", []byte("gc-9")) {
+	update("gc-9")
+	if len(ep.Events) != 10 {
 		t.Fatal("the newest id was forgotten")
 	}
 	if got := d.suppressed.Load(); got != 1 {
 		t.Fatalf("suppressed counter = %d, want 1", got)
+	}
+}
+
+// droppingAckRecorder drops (and reports dropping) its first drop appends.
+type droppingAckRecorder struct {
+	*events.Fake
+	drop int
+}
+
+func (r *droppingAckRecorder) RecordAck(e events.Event) error {
+	if r.drop > 0 {
+		r.drop--
+		return errors.New("append dropped")
+	}
+	return r.Fake.RecordAck(e)
+}
+
+// droppingRecorder is a plain best-effort Recorder that silently drops its
+// first drop events: it cannot say whether an append landed.
+type droppingRecorder struct {
+	events.Recorder
+	drop int
+	got  []events.Event
+}
+
+func (r *droppingRecorder) Record(e events.Event) {
+	if r.drop > 0 {
+		r.drop--
+		return
+	}
+	r.got = append(r.got, e)
+}
+
+// TestCacheChangeRecorderRemembersOnlyAcknowledgedPayloads is the review's
+// dedup probe: remembering a payload the recorder dropped would suppress
+// every repeat, so the bus would never see the state until the bead changed.
+func TestCacheChangeRecorderRemembersOnlyAcknowledgedPayloads(t *testing.T) {
+	p := json.RawMessage(`{"id":"gc-1","v":1}`)
+	t.Run("acknowledging recorder drops one append", func(t *testing.T) {
+		rec := &droppingAckRecorder{Fake: events.NewFake(), drop: 1}
+		notify := cacheChangeRecorder(rec)
+		for range 3 {
+			notify(beads.ChangeScan, events.BeadUpdated, "gc-1", "", "", "", nil, p)
+		}
+		if len(rec.Events) != 1 {
+			t.Fatalf("recorded %d copies, want the one after the drop and no repeats", len(rec.Events))
+		}
+	})
+	t.Run("recorder that cannot acknowledge", func(t *testing.T) {
+		rec := &droppingRecorder{Recorder: events.Discard, drop: 1}
+		notify := cacheChangeRecorder(rec)
+		for range 5 {
+			notify(beads.ChangeScan, events.BeadUpdated, "gc-1", "", "", "", nil, p)
+		}
+		if len(rec.got) == 0 {
+			t.Fatal("the first record was dropped and every repeat was suppressed: the bus never sees gc-1's state")
+		}
+	})
+}
+
+// TestBeadUpdateDedupExpires: a remembered payload suppresses its repeats for
+// beadUpdateDedupTTL only, so a consumer that missed the recorded copy sees
+// the state again within that age.
+func TestBeadUpdateDedupExpires(t *testing.T) {
+	d := newBeadUpdateDedup(beadUpdateDedupCap)
+	clock := sweepEpoch
+	d.now = func() time.Time { return clock }
+	ep := events.NewFake()
+	update := func() {
+		d.record(ep, events.Event{Type: events.BeadUpdated, Subject: "gc-1", Payload: json.RawMessage(`{"v":1}`)})
+	}
+	update()
+	clock = clock.Add(beadUpdateDedupTTL - time.Second)
+	update()
+	if len(ep.Events) != 1 {
+		t.Fatalf("recorded %d copies inside the TTL, want 1", len(ep.Events))
+	}
+	clock = clock.Add(time.Second)
+	update()
+	if len(ep.Events) != 2 {
+		t.Fatalf("recorded %d copies at the TTL, want the repeat", len(ep.Events))
+	}
+	clock = clock.Add(time.Second)
+	update()
+	if len(ep.Events) != 2 {
+		t.Fatalf("the re-recorded copy did not restart the TTL: %d copies", len(ep.Events))
+	}
+}
+
+// TestCacheChangeRecorderDedupIsPerCache: each cache's recorder keeps its
+// own record, so the same row seen through two caches is recorded by each.
+func TestCacheChangeRecorderDedupIsPerCache(t *testing.T) {
+	ep := events.NewFake()
+	p := json.RawMessage(`{"id":"gc-1"}`)
+	cacheChangeRecorder(ep)(beads.ChangeScan, events.BeadUpdated, "gc-1", "", "", "", nil, p)
+	cacheChangeRecorder(ep)(beads.ChangeScan, events.BeadUpdated, "gc-1", "", "", "", nil, p)
+	if len(ep.Events) != 2 {
+		t.Fatalf("recorded %d, want one per cache", len(ep.Events))
 	}
 }
 
@@ -285,6 +389,86 @@ func TestApplyBeadEventToStoresDefersAnUnconfirmableClose(t *testing.T) {
 	cs.applyBeadEventToStores(scanClose)
 	if got := completedFor(rec, step.ID); got != 1 {
 		t.Fatalf("completion facts = %d after a replay, want 1", got)
+	}
+}
+
+// TestApplyInferredCloseTakesTheFactFromTheLiveRead: the inferred payload is
+// a stale snapshot; the completion fact carries what the confirming read
+// returned.
+func TestApplyInferredCloseTakesTheFactFromTheLiveRead(t *testing.T) {
+	prev := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(fn func()) { fn() }
+	t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
+
+	mem := beads.NewMemStore()
+	mem.HonorExplicitIDs = true
+	step, _, payload := graphStepFixture(t, mem)
+	if err := mem.SetMetadata(step.ID, "gc.session_id", "gcs-live"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.Close(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	rec := events.NewFake()
+	cs := &controllerState{cityBeadStore: mem, eventProv: rec}
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: cacheReconcileActor, Subject: step.ID, Payload: payload})
+
+	var sessions []string
+	for _, evt := range rec.Events {
+		if evt.Type == events.ExecutionStepCompleted {
+			sessions = append(sessions, evt.SessionID)
+		}
+	}
+	if fmt.Sprint(sessions) != "[gcs-live]" {
+		t.Fatalf("completion facts carry sessions %v, want [gcs-live] from the live read", sessions)
+	}
+}
+
+// deleteOnUpdateStore deletes a row right after updating it: a delete that
+// lands between Update's write and its refetch.
+type deleteOnUpdateStore struct{ beads.Store }
+
+func (s deleteOnUpdateStore) Update(id string, opts beads.UpdateOpts) error {
+	if err := s.Store.Update(id, opts); err != nil {
+		return err
+	}
+	return s.Delete(id)
+}
+
+// TestUpdateOfADeletedStepRecordsNoCompletion is mc-zndi7.60: Update found
+// the step gone and notified bead.closed. That is an inference, recorded as
+// cache-reconcile, so the live re-read finds no row and no completion fact is
+// recorded for a step that was deleted, not completed.
+func TestUpdateOfADeletedStepRecordsNoCompletion(t *testing.T) {
+	prev := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(fn func()) { fn() }
+	t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
+
+	mem := beads.NewMemStore()
+	mem.HonorExplicitIDs = true
+	step, _, _ := graphStepFixture(t, mem)
+	rec := events.NewFake()
+	cache := beads.NewCachingStore(deleteOnUpdateStore{mem}, cacheChangeRecorder(rec))
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cs := &controllerState{cityBeadStore: cache, eventProv: rec}
+	title := "renamed"
+	if err := cache.Update(step.ID, beads.UpdateOpts{Title: &title}); err != nil {
+		t.Fatal(err)
+	}
+	var closes []events.Event
+	for _, evt := range rec.Events {
+		if evt.Type == events.BeadClosed && evt.Subject == step.ID {
+			closes = append(closes, evt)
+		}
+	}
+	if len(closes) != 1 || closes[0].Actor != cacheReconcileActor {
+		t.Fatalf("bead.closed notifications = %+v, want one under %s", closes, cacheReconcileActor)
+	}
+	cs.applyBeadEventToStores(closes[0])
+	if got := completedFor(rec, step.ID); got != 0 {
+		t.Fatalf("completion facts = %d for a deleted step", got)
 	}
 }
 

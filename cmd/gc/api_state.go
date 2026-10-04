@@ -118,9 +118,13 @@ type controllerState struct {
 	beadEventStartSeq      uint64
 	beadEventStartSeqOK    bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
 
-	// completionsDeltaIndex is the tick delta pass's warm completion-fact
-	// idempotency record: loaded from the journal once, then kept current by the
-	// same journal feed that names the lane's roots. The off-tick convergence
+	// completionsDeltaIndex is the controller's warm completion-fact
+	// idempotency record, shared by the tick delta pass and the close path
+	// (emitCompletedFact: a bead.closed, a confirmed inferred close, the
+	// autoclose sweep), so one close is one fact whichever path records it.
+	// It is loaded from the journal once, then kept current by the same
+	// journal feed that names the lane's roots; the close path's own keys stay
+	// unconfirmed until that feed reads them back. The off-tick convergence
 	// sweep holds its own inside its CompletionBackstop.
 	completionsDeltaIndex executionevent.CompletedFactIndex
 
@@ -875,7 +879,7 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	wake.OnBeadEvent(evt, snapshot, appliedToSessions)
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
 		if evt.Actor == cacheReconcileActor {
-			beadCloseAutocloseDispatch(func() { cs.applyInferredClose(evt, stores[0], storeRef) })
+			beadCloseAutocloseDispatch(func() { cs.applyInferredClose(evt, stores, storeRef) })
 			return
 		}
 		// A local close, or a writer's own bead.closed, is a committed close.
@@ -892,16 +896,31 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 // not from the inferred payload. A row that is open or gone gets nothing. An
 // unreadable row gets nothing yet: the autoclose sweep re-reads it, and the
 // completions sweep backstops its fact.
-func (cs *controllerState) applyInferredClose(evt events.Event, store beads.Store, storeRef string) {
-	live, err := beads.HandlesFor(store).Live.Get(evt.Subject)
+func (cs *controllerState) applyInferredClose(evt events.Event, stores []beads.Store, storeRef string) {
+	store, live, err := liveReadOwner(stores, evt.Subject)
 	switch confirmInferredClose(live, err) {
 	case closeConfirmed:
 		cs.emitCompletedFact(live, evt.Actor)
-		cs.autocloseSweepOf().noteRan(evt.Subject)
-		cs.beadCloseAutoclose(evt.Subject, store, storeRef)()
+		finished := cs.beadCloseAutoclose(evt.Subject, store, storeRef)()
+		cs.autocloseSweepOf().settle(evt.Subject, finished, time.Now())
 	case closeUnconfirmed:
 		cs.autocloseSweepOf().deferID(evt.Subject, time.Now())
 	}
+}
+
+// liveReadOwner reads id live from the store that holds it. stores is
+// beadEventStoresLocked's answer: exactly the store whose configured prefix
+// owns id, or, on the unconfigured fallback, every store, where the first
+// that does not answer ErrNotFound holds the row. stores must be non-empty.
+func liveReadOwner(stores []beads.Store, id string) (beads.Store, beads.Bead, error) {
+	var err error
+	for _, store := range stores {
+		var b beads.Bead
+		if b, err = beads.HandlesFor(store).Live.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			return store, b, err
+		}
+	}
+	return stores[0], beads.Bead{}, err
 }
 
 // emitCompletedFact records step's execution.step_completed once per fact,
@@ -947,15 +966,24 @@ func (cs *controllerState) autocloseStoreRefLocked(beadID string) string {
 
 // runBeadCloseAutoclose dispatches convoy/wisp/molecule autoclose for a closed
 // bead via the controller's store. Replaces the shell on_close hook chain that
-// spawned gc subprocesses per bead write (gastownhall/gascity#3248).
+// spawned gc subprocesses per bead write (gastownhall/gascity#3248). The bead
+// is marked handled only once the run has finished its reads (settle).
 func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Store, storeRef string) {
-	cs.autocloseSweepOf().noteRan(beadID)
-	beadCloseAutocloseDispatch(cs.beadCloseAutoclose(beadID, store, storeRef))
+	run := cs.beadCloseAutoclose(beadID, store, storeRef)
+	beadCloseAutocloseDispatch(func() { cs.autocloseSweepOf().settle(beadID, run(), time.Now()) })
 }
 
+// autocloseRefusalAttempts bounds the runs one trigger makes while a fenced
+// close keeps being refused. Each refusal is a write that landed between the
+// re-read and the close; past the bound the trigger is left to the sweep.
+const autocloseRefusalAttempts = 3
+
 // beadCloseAutoclose returns the convoy/wisp/molecule autoclose for a closed
-// bead, for the caller to run or dispatch.
-func (cs *controllerState) beadCloseAutoclose(beadID string, store beads.Store, storeRef string) func() {
+// bead, for the caller to run or dispatch. The func reports whether the run
+// finished: every read answered and no fenced close stayed refused. A refused
+// close re-runs the whole decision (re-read, re-check, retry the conditional
+// close), since the write that refused it may have changed the answer.
+func (cs *controllerState) beadCloseAutoclose(beadID string, store beads.Store, storeRef string) func() bool {
 	rec := events.Discard
 	if cs.eventProv != nil {
 		rec = cs.eventProv
@@ -966,10 +994,15 @@ func (cs *controllerState) beadCloseAutoclose(beadID string, store beads.Store, 
 	// co-residence with the closed bead. On a single-store city GraphBeadStore()
 	// returns the same store, so this is identity today.
 	graphStore := cs.GraphBeadStore()
-	return func() {
-		doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
-		doWispAutocloseWith(store, beadID, os.Stderr, graphStore)
-		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore)
+	return func() bool {
+		for attempt := 1; ; attempt++ {
+			run := doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
+			run.merge(doWispAutocloseWith(store, beadID, os.Stderr, graphStore))
+			run.merge(doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore))
+			if !run.refused || attempt >= autocloseRefusalAttempts {
+				return run.finished()
+			}
+		}
 	}
 }
 

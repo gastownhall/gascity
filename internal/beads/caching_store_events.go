@@ -820,7 +820,9 @@ const (
 	// ChangeScan is the reconcile scan's diff, including its synthetic close of
 	// a cached open row the scan did not list.
 	ChangeScan
-	// ChangeRefresh is a RefreshRow point read.
+	// ChangeRefresh is a point read: RefreshRow, and Update's refetch that
+	// found the row gone after the write (its bead.closed is the read's
+	// inference, not a close this process made).
 	ChangeRefresh
 )
 

@@ -131,8 +131,11 @@ func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq uint64)
 		}
 		c.updateStatsLocked()
 		c.mu.Unlock()
+		// The write succeeded but the row is gone: this process closed
+		// nothing, it read the row's absence. That is an inference, so a
+		// consumer re-reads before treating it as a completion (mc-zndi7.60).
 		if notifyClosed {
-			c.notifyChange(ChangeLocal, "bead.closed", closed)
+			c.notifyChange(ChangeRefresh, "bead.closed", closed)
 		}
 		return
 	}

@@ -7,6 +7,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
@@ -34,10 +35,10 @@ func isCacheActor(actor string) bool {
 func cacheChangeRecorder(recorder events.Recorder) func(source beads.ChangeSource, eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage) {
 	dedup := newBeadUpdateDedup(beadUpdateDedupCap)
 	return func(source beads.ChangeSource, eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage) {
-		if recorder == nil || dedup.suppress(eventType, beadID, payload) {
+		if recorder == nil {
 			return
 		}
-		recorder.Record(events.Event{
+		dedup.record(recorder, events.Event{
 			Type:             eventType,
 			Actor:            cacheNotificationActor(source),
 			Subject:          beadID,
@@ -50,51 +51,83 @@ func cacheChangeRecorder(recorder events.Recorder) func(source beads.ChangeSourc
 	}
 }
 
-// beadUpdateDedupCap bounds the ids one cache's dedup remembers; a close or a
-// delete forgets its id. Overflow forgets them all, which costs one repeat
-// per id.
-const beadUpdateDedupCap = 1 << 16
+const (
+	// beadUpdateDedupCap bounds the ids one cache's dedup remembers; a close
+	// or a delete forgets its id. Overflow forgets them all, which costs one
+	// repeat per id.
+	beadUpdateDedupCap = 1 << 16
+	// beadUpdateDedupTTL bounds how long a remembered payload suppresses its
+	// repeats. A consumer that missed the one recorded copy (a dropped
+	// append, a watcher that started late) sees the state again within this
+	// age, the heal-by-repeat the duplicates used to give, at one repeat per
+	// changed bead per 20 minutes instead of one per scan.
+	beadUpdateDedupTTL = 20 * time.Minute
+)
 
 // beadUpdateDedup remembers the payload hash of the last created or updated
-// notification per bead id.
+// notification recorded per bead id, and when it was recorded.
 type beadUpdateDedup struct {
 	mu   sync.Mutex
-	last map[string][sha256.Size]byte
+	last map[string]dedupEntry
 	cap  int
+	ttl  time.Duration
+	now  func() time.Time
 	// suppressed counts dropped repeats, logged so the flapping field behind
 	// mc-zndi7.12 can still be chased.
 	suppressed atomic.Uint64
 }
 
-func newBeadUpdateDedup(capacity int) *beadUpdateDedup {
-	return &beadUpdateDedup{last: map[string][sha256.Size]byte{}, cap: capacity}
+type dedupEntry struct {
+	sum [sha256.Size]byte
+	at  time.Time
 }
 
-// suppress reports whether a notification repeats the last one recorded for
-// beadID, and remembers it otherwise. Only bead.updated is ever suppressed.
-func (d *beadUpdateDedup) suppress(eventType, beadID string, payload []byte) bool {
+func newBeadUpdateDedup(capacity int) *beadUpdateDedup {
+	return &beadUpdateDedup{last: map[string]dedupEntry{}, cap: capacity, ttl: beadUpdateDedupTTL, now: time.Now}
+}
+
+// record records e unless it is a bead.updated repeating the payload last
+// recorded for its bead within the TTL. Only bead.updated is ever suppressed;
+// a close or a delete forgets the id. A payload is remembered only once the
+// recorder acknowledged it (events.AckRecorder): a recorder that cannot
+// acknowledge, or a dropped append, leaves nothing to suppress the next copy.
+// The check, the record and the remember share the lock, so one bead's
+// notifications reach the recorder in order.
+func (d *beadUpdateDedup) record(recorder events.Recorder, e events.Event) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	switch eventType {
+	switch e.Type {
 	case events.BeadClosed, events.BeadDeleted:
-		delete(d.last, beadID)
-		return false
+		delete(d.last, e.Subject)
+		recorder.Record(e)
+		return
 	case events.BeadCreated, events.BeadUpdated:
 	default:
-		return false
+		recorder.Record(e)
+		return
 	}
-	sum := sha256.Sum256(payload)
-	if prev, ok := d.last[beadID]; ok && prev == sum && eventType == events.BeadUpdated {
+	sum := sha256.Sum256(e.Payload)
+	now := d.now()
+	if prev, ok := d.last[e.Subject]; ok && prev.sum == sum && now.Sub(prev.at) < d.ttl && e.Type == events.BeadUpdated {
 		if n := d.suppressed.Add(1); n == 1 || n%10000 == 0 {
-			log.Printf("caching-store: suppressed %d repeated bead.updated notification(s), latest %s", n, beadID)
+			log.Printf("caching-store: suppressed %d repeated bead.updated notification(s), latest %s", n, e.Subject)
 		}
-		return true
+		return
 	}
-	if _, ok := d.last[beadID]; !ok && len(d.last) >= d.cap {
-		d.last = map[string][sha256.Size]byte{}
+	acker, ok := recorder.(events.AckRecorder)
+	if !ok {
+		delete(d.last, e.Subject)
+		recorder.Record(e)
+		return
 	}
-	d.last[beadID] = sum
-	return false
+	if err := acker.RecordAck(e); err != nil {
+		delete(d.last, e.Subject)
+		return
+	}
+	if _, ok := d.last[e.Subject]; !ok && len(d.last) >= d.cap {
+		d.last = map[string]dedupEntry{}
+	}
+	d.last[e.Subject] = dedupEntry{sum: sum, at: now}
 }
 
 func (d *beadUpdateDedup) size() int {
