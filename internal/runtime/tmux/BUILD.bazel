@@ -91,6 +91,7 @@ go_test(
         "testenv_import_test.go",
         "theme_test.go",
         "tmux_unit_test.go",
+        "zz_gm55kp2u_repro_test.go",
     ],
     data = glob(
         ["**"],
