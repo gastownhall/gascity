@@ -549,13 +549,8 @@ func validateEventsSince(sinceFlag string) error {
 
 func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch map[string][]string, stdout, stderr io.Writer) int {
 	if scope.localOnly {
-		fallback, _, fallbackErr := readLocalCityEvents(scope, stoppedCityLocalFallbackError(scope), typeFilter, sinceFlag, stderr)
-		if fallbackErr != nil {
-			fmt.Fprintf(stderr, "gc events: %v\n", fallbackErr) //nolint:errcheck
-			return 1
-		}
-		fallback = filterCityEvents(fallback, 0, typeFilter, payloadMatch)
-		return printJSONLines(fallback, stdout, stderr)
+		code, _ := printLocalCityEvents(scope, stoppedCityLocalFallbackError(scope), typeFilter, sinceFlag, payloadMatch, stdout, stderr)
+		return code
 	}
 
 	client, err := scope.client()
@@ -585,13 +580,8 @@ func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch m
 
 	items, err := fetchCityEvents(ctx, client, scope.cityName, typeFilter, sinceFlag, stderr)
 	if err != nil {
-		if fallback, ok, fallbackErr := readLocalCityEvents(scope, err, typeFilter, sinceFlag, stderr); ok {
-			if fallbackErr != nil {
-				fmt.Fprintf(stderr, "gc events: %v\n", fallbackErr) //nolint:errcheck
-				return 1
-			}
-			fallback = filterCityEvents(fallback, 0, typeFilter, payloadMatch)
-			return printJSONLines(fallback, stdout, stderr)
+		if code, ok := printLocalCityEvents(scope, err, typeFilter, sinceFlag, payloadMatch, stdout, stderr); ok {
+			return code
 		}
 		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
 		return 1
@@ -651,12 +641,53 @@ func doEventsSeq(scope eventsAPIScope, stdout, stderr io.Writer) int {
 }
 
 func readLocalCityEvents(scope eventsAPIScope, apiErr error, typeFilter, sinceFlag string, warningWriter io.Writer) ([]cliWireEvent, bool, error) {
+	items := []cliWireEvent{}
+	ok, err := eachLocalCityEvent(scope, apiErr, typeFilter, sinceFlag, warningWriter, func(item cliWireEvent) error {
+		items = append(items, item)
+		return nil
+	})
+	if !ok || err != nil {
+		return nil, ok, err
+	}
+	return items, true, nil
+}
+
+// printLocalCityEvents prints the local fallback's events, filtered as the API
+// path filters them, as eachLocalCityEvent reads them. handled is false when
+// the fallback does not apply.
+func printLocalCityEvents(scope eventsAPIScope, apiErr error, typeFilter, sinceFlag string, payloadMatch map[string][]string, stdout, stderr io.Writer) (code int, handled bool) {
+	var writeErr error
+	ok, err := eachLocalCityEvent(scope, apiErr, typeFilter, sinceFlag, stderr, func(item cliWireEvent) error {
+		if len(filterCityEvents([]cliWireEvent{item}, 0, typeFilter, payloadMatch)) == 0 {
+			return nil
+		}
+		writeErr = writeJSONLValue(stdout, item)
+		return writeErr
+	})
+	switch {
+	case !ok:
+		return 0, false
+	case writeErr != nil:
+		fmt.Fprintf(stderr, "gc events: marshal: %v\n", writeErr) //nolint:errcheck
+		return 1, true
+	case err != nil:
+		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		return 1, true
+	}
+	return 0, true
+}
+
+// eachLocalCityEvent is readLocalCityEvents for a caller that takes each event
+// as it is read. A --since window is streamed from the log, oldest first,
+// instead of being collected, so its size does not bound memory. It returns
+// fn's first error as is.
+func eachLocalCityEvent(scope eventsAPIScope, apiErr error, typeFilter, sinceFlag string, warningWriter io.Writer, fn func(cliWireEvent) error) (bool, error) {
 	if !shouldUseLocalCityEventsFallback(scope, apiErr) {
-		return nil, false, nil
+		return false, nil
 	}
 	filter := events.Filter{Type: strings.TrimSpace(typeFilter)}
 	if cutoff, err := eventsSinceCutoff(sinceFlag); err != nil {
-		return nil, true, err
+		return true, err
 	} else if !cutoff.IsZero() {
 		filter.Since = cutoff
 	}
@@ -679,19 +710,31 @@ func readLocalCityEvents(scope eventsAPIScope, apiErr error, typeFilter, sinceFl
 	if filter.Since.IsZero() {
 		all, err := events.ReadFilteredTail(path, filter, int(cityEventsPageLimit))
 		if err != nil {
-			return nil, true, fmt.Errorf("reading local city events: %w", err)
+			return true, fmt.Errorf("reading local city events: %w", err)
 		}
 		if localCityEventsHaveOlderMatches(path, filter, all) {
 			fmt.Fprintf(warningWriter, "gc events: showing the newest %d events; older matching events were omitted. Use --since <duration> to fetch a full time window.\n", len(all)) //nolint:errcheck
 		}
-		return localWireEvents(all, warningWriter), true, nil
+		for _, item := range localWireEvents(all, warningWriter) {
+			if err := fn(item); err != nil {
+				return true, err
+			}
+		}
+		return true, nil
 	}
 
-	all, err := events.ReadFiltered(path, filter)
-	if err != nil {
-		return nil, true, fmt.Errorf("reading local city events: %w", err)
+	var fnErr error
+	err := events.ReadFilteredEach(context.Background(), path, filter, func(e events.Event) error {
+		fnErr = fn(localWireEvent(e, warningWriter))
+		return fnErr
+	})
+	if fnErr != nil {
+		return true, fnErr
 	}
-	return localWireEvents(all, warningWriter), true, nil
+	if err != nil {
+		return true, fmt.Errorf("reading local city events: %w", err)
+	}
+	return true, nil
 }
 
 // localCityEventsHaveOlderMatches reports whether matching events older than
