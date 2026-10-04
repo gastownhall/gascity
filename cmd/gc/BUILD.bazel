@@ -951,6 +951,7 @@ go_test(
         "converge_scope_store_test.go",
         "convergence_integration_test.go",
         "convoy_chargolden_test.go",
+        "core_formula_drain_ack_test.go",
         "crash_tracker_test.go",
         "cross_store_parent_contract_test.go",
         "cross_store_pipeline_test.go",
