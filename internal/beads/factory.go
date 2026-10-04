@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
@@ -331,10 +332,7 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 			PreflightReason:     nativeForceFallbackEnv + "=1",
 		}
 		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
-		if opts.Logger != nil {
-			opts.Logger.Warn(nativeForceFallbackEnv+" is deprecated; set beads.native_transport = \"off\" in city.toml instead",
-				slog.String("env", nativeForceFallbackEnv))
-		}
+		warnNativeForceFallbackDeprecatedOnce(opts.Logger)
 		return opts.openBdFallback(provider, diag)
 	}
 
@@ -688,6 +686,37 @@ func isGCStampedHook(content []byte) bool {
 func forceNativeFallback() bool {
 	value := strings.TrimSpace(os.Getenv(nativeForceFallbackEnv))
 	return value == "1" || strings.EqualFold(value, "true")
+}
+
+// ForceNativeFallbackActive reports whether the deprecated process-wide
+// GC_BEADS_FORCE_FALLBACK alias is set, for composition roots that open a
+// bead engine OUTSIDE OpenStoreAtForCity — today, the storebinding
+// EngineOpener seam (cmd/gc's native-transport-provider refusal). Without
+// this, "process-wide off" was only true for the OpenStoreAtForCity path:
+// GC_BEADS_FORCE_FALLBACK would stop every bd-contract city's native store
+// but leave a beads-workspace binding opening natively regardless, which is
+// not what an operator reaching for the process-wide kill switch expects.
+func ForceNativeFallbackActive() bool {
+	return forceNativeFallback()
+}
+
+// nativeForceFallbackDeprecationWarnOnce ensures the GC_BEADS_FORCE_FALLBACK
+// deprecation warning is logged at most once per process, however many
+// stores it causes to fall back — a long-lived controller can open dozens of
+// rig stores under the env, and a warning per open would bury the one
+// actionable line (set beads.native_transport="off" instead) in noise.
+var nativeForceFallbackDeprecationWarnOnce sync.Once
+
+// warnNativeForceFallbackDeprecatedOnce logs the GC_BEADS_FORCE_FALLBACK
+// deprecation warning the first time any caller reaches it in this process.
+func warnNativeForceFallbackDeprecatedOnce(logger *slog.Logger) {
+	if logger == nil {
+		return
+	}
+	nativeForceFallbackDeprecationWarnOnce.Do(func() {
+		logger.Warn(nativeForceFallbackEnv+" is deprecated; set beads.native_transport = \"off\" in city.toml instead",
+			slog.String("env", nativeForceFallbackEnv))
+	})
 }
 
 func logNativeUnavailable(logger *slog.Logger, scope, gateName, reason string) {

@@ -203,6 +203,181 @@ func TestOpenRigStoreThreadsConditionalWrites(t *testing.T) {
 	}
 }
 
+// TestResolvedNativeTransportMode mirrors TestResolvedConditionalWritesMode
+// for beads.native_transport.
+func TestResolvedNativeTransportMode(t *testing.T) {
+	t.Run("nil config is unset", func(t *testing.T) {
+		if got := resolvedNativeTransportMode(nil); got != beads.NativeTransportUnset {
+			t.Fatalf("mode = %q, want unset", got)
+		}
+	})
+	t.Run("resolved config value threads through, normalized", func(t *testing.T) {
+		cfg, err := config.Parse([]byte("[workspace]\nname = \"t\"\n\n[beads]\nnative_transport = \"off\"\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := resolvedNativeTransportMode(cfg); got != beads.NativeTransportOff {
+			t.Fatalf("mode = %q, want off", got)
+		}
+	})
+	t.Run("mixed case and whitespace normalize too", func(t *testing.T) {
+		cfg := &config.City{Beads: config.BeadsConfig{NativeTransport: " OFF "}}
+		if got := resolvedNativeTransportMode(cfg); got != beads.NativeTransportOff {
+			t.Fatalf("mode = %q, want off: NormalizedNativeTransport did not fold case/whitespace before the cast to beads.NativeTransportMode", got)
+		}
+	})
+}
+
+// TestOpenStoreAtForCityThreadsNativeTransportFromLoadedConfig drives the
+// shared, nil-cfg open path every hook-claim / convoy / order-dispatch / sweep
+// call site uses (openStoreAtForCity -> ... -> openStoreResultAtForCityScoped,
+// which loads cfg from disk itself because none of those callers has one in
+// hand). A mutation that made openStoreResultAtForCityScoped ignore the cfg it
+// just loaded — e.g. resolving native transport from a zero-value config
+// instead — would leave beads.native_transport="off" unenforced on this exact
+// path, silently, with no caller able to tell.
+func TestOpenStoreAtForCityThreadsNativeTransportFromLoadedConfig(t *testing.T) {
+	cityDir := t.TempDir()
+	toml := "[workspace]\nname = \"t\"\n\n[beads]\nnative_transport = \"off\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var captured beads.StoreOpenOptions
+	restore := openStoreFactoryForCity
+	openStoreFactoryForCity = func(_ context.Context, opts beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+		captured = opts
+		return beads.StoreOpenResult{Store: beads.NewMemStore()}, nil
+	}
+	t.Cleanup(func() { openStoreFactoryForCity = restore })
+
+	if _, err := openStoreAtForCity(cityDir, cityDir); err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	if captured.NativeTransport != beads.NativeTransportOff {
+		t.Fatalf("StoreOpenOptions.NativeTransport = %q, want %q: beads.native_transport=\"off\" on disk did not reach the factory via the nil-cfg call path",
+			captured.NativeTransport, beads.NativeTransportOff)
+	}
+}
+
+// TestOpenStoreAtForCityFailsLoudlyOnConfigLoadError proves Finding 7: a
+// city.toml that exists but fails to load (here, an out-of-enum
+// native_transport value, which config.Parse rejects at load time) must not
+// be silently swallowed into a nil cfg and an "auto" default — this is a
+// native-transport kill switch, and defaulting to native on a config this
+// process could not actually read is exactly the failure mode the switch
+// cannot survive. The open must fail loudly instead, naming the underlying
+// load error.
+func TestOpenStoreAtForCityFailsLoudlyOnConfigLoadError(t *testing.T) {
+	cityDir := t.TempDir()
+	toml := "[workspace]\nname = \"t\"\n\n[beads]\nnative_transport = \"bogus\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := openStoreFactoryForCity
+	openStoreFactoryForCity = func(_ context.Context, _ beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+		t.Fatal("the store factory must not be reached when the city config failed to load")
+		return beads.StoreOpenResult{}, nil
+	}
+	t.Cleanup(func() { openStoreFactoryForCity = restore })
+
+	if _, err := openStoreAtForCity(cityDir, cityDir); err == nil {
+		t.Fatal("openStoreAtForCity: want an error for an unloadable city.toml, got nil")
+	}
+}
+
+// TestOpenStoreAtForCityToleratesNoCityTOMLAtAll proves the Finding 7 fix is
+// scoped to real load errors, not to "there is no city.toml here at all" —
+// the vast majority of this shared open body's callers (ad hoc store paths,
+// rig/scope stores outside any city) pass a path with no city.toml, and that
+// must keep resolving to the nil-cfg best-effort default it always has,
+// matching missingRootCityTOML's existing use elsewhere in this file.
+func TestOpenStoreAtForCityToleratesNoCityTOMLAtAll(t *testing.T) {
+	storeDir := t.TempDir() // deliberately no city.toml anywhere above this.
+
+	var captured beads.StoreOpenOptions
+	restore := openStoreFactoryForCity
+	openStoreFactoryForCity = func(_ context.Context, opts beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+		captured = opts
+		return beads.StoreOpenResult{Store: beads.NewMemStore()}, nil
+	}
+	t.Cleanup(func() { openStoreFactoryForCity = restore })
+
+	if _, err := openStoreAtForCity(storeDir, storeDir); err != nil {
+		t.Fatalf("openStoreAtForCity: want no-city.toml to stay non-fatal, got: %v", err)
+	}
+	if captured.NativeTransport != beads.NativeTransportUnset {
+		t.Fatalf("NativeTransport = %q, want unset (no config to resolve from)", captured.NativeTransport)
+	}
+}
+
+// TestOpenRigStoreThreadsNativeTransport proves the controller's per-rig open
+// (api_state.go's openRigStore) threads the boot-latched native_transport
+// value into StoreOpenOptions, the way TestOpenRigStoreThreadsConditionalWrites
+// proves it for conditional_writes. A mutation that dropped the
+// NativeTransport field from that call would leave every rig in an "off" city
+// still eligible to open natively.
+func TestOpenRigStoreThreadsNativeTransport(t *testing.T) {
+	prevOpen := controllerStateOpenRigStoreAtForCity
+	t.Cleanup(func() { controllerStateOpenRigStoreAtForCity = prevOpen })
+
+	cityDir := t.TempDir()
+	cfg := &config.City{Workspace: config.Workspace{Name: "t"}}
+	// A directly-built controllerState, not newControllerState: the
+	// constructor's own best-effort city-store open spawns a real managed
+	// dolt process when unstubbed (~10s), which this test has no need to pay
+	// — it exercises openRigStore in isolation, exactly like
+	// TestControllerStateBuildStoresRoutesBdRigThroughStoreFactory does.
+	cs := &controllerState{cityPath: cityDir, cfg: cfg, nativeTransport: beads.NativeTransportOff}
+
+	rigPath := filepath.Join(cityDir, "rigs", "r1")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var captured beads.StoreOpenOptions
+	controllerStateOpenRigStoreAtForCity = func(_ context.Context, opts beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+		captured = opts
+		return beads.StoreOpenResult{Store: beads.NewMemStore()}, nil
+	}
+
+	cs.openRigStore("bd", "r1", rigPath, "ga", cfg)
+	if captured.NativeTransport != beads.NativeTransportOff {
+		t.Fatalf("openRigStore StoreOpenOptions.NativeTransport = %q, want %q", captured.NativeTransport, beads.NativeTransportOff)
+	}
+}
+
+// TestNewControllerStateOpenCityStoreThreadsTheLatchedNativeTransport proves
+// the DEFAULT newControllerStateOpenCityStore closure — not a test stub of
+// it — passes its nativeTransport parameter (the boot latch) through to the
+// store-open options, by exercising the real var directly and capturing what
+// reaches the factory. api_state_rollout_test.go's
+// TestControllerStateNativeTransportDoesNotFlipOnReload stubs this var
+// entirely, which proves newControllerState calls it with the right argument
+// but can never catch a bug inside the default implementation itself — such
+// as passing nil instead of &nativeTransport.
+func TestNewControllerStateOpenCityStoreThreadsTheLatchedNativeTransport(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+
+	var captured beads.StoreOpenOptions
+	restore := openStoreFactoryForCity
+	openStoreFactoryForCity = func(_ context.Context, opts beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+		captured = opts
+		return beads.StoreOpenResult{Store: beads.NewMemStore()}, nil
+	}
+	t.Cleanup(func() { openStoreFactoryForCity = restore })
+
+	if _, err := newControllerStateOpenCityStore(cityDir, gate.ModeUnset, beads.NativeTransportOff); err != nil {
+		t.Fatalf("newControllerStateOpenCityStore: %v", err)
+	}
+	if captured.NativeTransport != beads.NativeTransportOff {
+		t.Fatalf("NativeTransport = %q, want %q: the default newControllerStateOpenCityStore did not thread its parameter through",
+			captured.NativeTransport, beads.NativeTransportOff)
+	}
+}
+
 // TestOpenControlBdStoreThroughFactoryStamps pins the control-dispatcher
 // routing: the raw control-plane bd store must come back factory-stamped
 // (and raw — control paths are deliberately unwrapped), with native

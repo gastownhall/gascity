@@ -62,6 +62,21 @@ func resolvedNativeTransportMode(cfg *config.City) beads.NativeTransportMode {
 	return beads.NativeTransportMode(cfg.Beads.NormalizedNativeTransport())
 }
 
+// nativeTransportRefused reports whether a native-transport provider (e.g.
+// beads-workspace) must refuse to open for this city: either the per-city
+// beads.native_transport="off" switch, OR the deprecated process-wide
+// GC_BEADS_FORCE_FALLBACK alias. The env alias deliberately applies even when
+// cfg is nil (the read-only census path has no loaded city config to check),
+// because it is process-wide by definition — an operator reaching for
+// GC_BEADS_FORCE_FALLBACK to force every city off native expects that to hold
+// everywhere a native engine could otherwise open, not just the
+// OpenStoreAtForCity call sites. This is the single place both EngineOpener
+// callers (openStorageRoutes' pre-open refusal) and the OpenStoreAtForCity
+// family consult the two kill switches, so they never drift apart.
+func nativeTransportRefused(cfg *config.City) bool {
+	return resolvedNativeTransportMode(cfg) == beads.NativeTransportOff || beads.ForceNativeFallbackActive()
+}
+
 // lazyConditionalWritesDegradeEmitter builds the factory degrade callback for
 // open paths that have no live event provider in hand (the shared CLI open
 // helper and the control dispatcher). The recorder is constructed INSIDE the

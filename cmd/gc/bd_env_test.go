@@ -5952,7 +5952,7 @@ func TestBdStoreForCityWithConfigSkipsLoad(t *testing.T) {
 	}
 
 	before = loadCityConfigCalls.Load()
-	if _, err := openOneShotBdStoreAtWithConfig(cityDir, cityDir, cfg); err != nil {
+	if _, err := openOneShotBdStoreAtWithConfig(cityDir, cityDir, cfg, beads.NativeTransportUnset); err != nil {
 		t.Fatalf("openOneShotBdStoreAtWithConfig(cfg): %v", err)
 	}
 	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
@@ -5962,7 +5962,7 @@ func TestBdStoreForCityWithConfigSkipsLoad(t *testing.T) {
 	// The shared path must ignore even an empty stand-in cfg (what the order
 	// dispatcher substitutes for nil) and read the prefix from disk.
 	before = loadCityConfigCalls.Load()
-	shared, err := openBdStoreAtWithConfig(cityDir, cityDir, &config.City{})
+	shared, err := openBdStoreAtWithConfig(cityDir, cityDir, &config.City{}, beads.NativeTransportUnset)
 	if err != nil {
 		t.Fatalf("openBdStoreAtWithConfig(empty cfg): %v", err)
 	}

@@ -5,10 +5,24 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 )
+
+// resetNativeForceFallbackDeprecationWarnOnceForTest resets the package-level
+// sync.Once guarding the GC_BEADS_FORCE_FALLBACK deprecation warning. Go runs
+// one test binary (one process) per package, so the Once instance otherwise
+// persists across every test in this file; without this reset, whichever of
+// these tests happens to run first "uses up" the single warning and every
+// later test that asserts on the warning's presence would fail depending on
+// -run filtering / test order. Production has no equivalent reset: the point
+// of the Once there is exactly that it fires once per real process boot.
+func resetNativeForceFallbackDeprecationWarnOnceForTest(t *testing.T) {
+	t.Helper()
+	nativeForceFallbackDeprecationWarnOnce = sync.Once{}
+}
 
 // TestOpenStoreAtForCityNativeTransportOffPicksBdStore proves the per-city
 // kill switch: beads.native_transport="off" always picks BdStore, even for a
@@ -97,6 +111,7 @@ func TestOpenStoreAtForCityNativeTransportAutoPicksNativeWhenEligible(t *testing
 // deprecation warning naming the replacement.
 func TestOpenStoreAtForCityForceFallbackEnvForcesOffAndWarns(t *testing.T) {
 	t.Setenv(nativeForceFallbackEnv, "1")
+	resetNativeForceFallbackDeprecationWarnOnceForTest(t)
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
@@ -121,6 +136,45 @@ func TestOpenStoreAtForCityForceFallbackEnvForcesOffAndWarns(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "deprecated") || !strings.Contains(buf.String(), nativeForceFallbackEnv) {
 		t.Fatalf("expected a deprecation warning naming %s, got log: %q", nativeForceFallbackEnv, buf.String())
+	}
+}
+
+// TestOpenStoreAtForCityForceFallbackDeprecationWarnsOnlyOncePerProcess
+// proves Finding 5's fix: two separate opens that both hit the
+// GC_BEADS_FORCE_FALLBACK path only log the deprecation warning once between
+// them (sync.Once), rather than once per open — the latter would flood logs
+// in a long-lived process that opens many city stores with the legacy env
+// var set.
+func TestOpenStoreAtForCityForceFallbackDeprecationWarnsOnlyOncePerProcess(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "1")
+	resetNativeForceFallbackDeprecationWarnOnceForTest(t)
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	open := func() {
+		t.Helper()
+		if _, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+			ScopeRoot:       "/city",
+			Provider:        "bd",
+			NativeTransport: NativeTransportAuto,
+			Logger:          logger,
+			OpenBdStore: func() (Store, error) {
+				return NewMemStore(), nil
+			},
+			OpenNativeStore: func() (Store, error) {
+				t.Fatal("OpenNativeStore called while GC_BEADS_FORCE_FALLBACK=1")
+				return nil, nil
+			},
+		}); err != nil {
+			t.Fatalf("OpenStoreAtForCity() error = %v", err)
+		}
+	}
+
+	open()
+	open()
+
+	if got := strings.Count(buf.String(), "deprecated"); got != 1 {
+		t.Fatalf("deprecation warning logged %d times across two opens, want exactly 1: %q", got, buf.String())
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/storebinding"
+	"github.com/gastownhall/gascity/internal/storebinding/beadsworkspace"
 	sqlitebinding "github.com/gastownhall/gascity/internal/storebinding/sqlite"
 )
 
@@ -199,11 +201,19 @@ func TestOpenStorageRoutesRefusesACarrierlessEngineUnderRequire(t *testing.T) {
 
 // TestOpenStorageRoutesRefusesEngineOpenUnderNativeTransportOff proves the
 // per-city beads.native_transport="off" kill switch reaches the storebinding
-// open path, not only the beads factory: a binding served through the
-// EngineOpener seam has no BdStore fallback of its own (see EngineOpener's
-// doc), so letting it open while "off" would silently break the switch's
-// promise that this city's stores never open natively. "auto" (today's
-// behavior) must still open the binding engine normally.
+// open path, not only the beads factory, for a NATIVE-TRANSPORT provider
+// (beads-workspace / native Dolt): such a binding has no BdStore fallback of
+// its own (see EngineOpener's doc), so letting it open while "off" would
+// silently break the switch's promise that this city's stores never open
+// natively.
+//
+// It deliberately uses workspaceSplitConfig with NO real workspace directory
+// on disk: the refusal this test proves fires in openStorageRoutes BEFORE
+// opener.OpenEngine is ever called, so it must not depend on — or touch — a
+// workspace that does not exist. "auto" (today's behavior) still reaches
+// OpenEngine and fails for the workspace-not-there reason instead
+// (beadsworkspace.ErrWorkspaceUnavailable), proving the native_transport gate
+// let it through rather than refusing it too.
 func TestOpenStorageRoutesRefusesEngineOpenUnderNativeTransportOff(t *testing.T) {
 	for _, tc := range []struct {
 		mode    string
@@ -215,13 +225,17 @@ func TestOpenStorageRoutesRefusesEngineOpenUnderNativeTransportOff(t *testing.T)
 	} {
 		t.Run("native_transport="+tc.mode, func(t *testing.T) {
 			root := t.TempDir()
-			cfg := infraSplitConfig(filepath.Join(root, "store"))
+			cfg := workspaceSplitConfig("infra")
 			cfg.Beads.NativeTransport = tc.mode
 			plan, err := resolveCityStoragePlan(root, cfg)
 			if err != nil {
 				t.Fatalf("resolving the storage plan: %v", err)
 			}
-			routes, err := openStorageRoutes(plan, mustResolveInfraTarget(t, root, cfg), cfg, root, nil)
+			// infraBindingTarget{Binding: "infra"} directly, not
+			// mustResolveInfraTarget: that helper resolves the sqlite-beads
+			// migration destination specifically and does not recognize a
+			// beads-workspace binding at all.
+			routes, err := openStorageRoutes(plan, infraBindingTarget{Binding: "infra"}, cfg, root, nil)
 			if tc.refused {
 				if err == nil {
 					_ = routes.close()
@@ -230,10 +244,80 @@ func TestOpenStorageRoutesRefusesEngineOpenUnderNativeTransportOff(t *testing.T)
 				if !strings.Contains(err.Error(), "native_transport") || !strings.Contains(err.Error(), `"off"`) {
 					t.Fatalf("err = %v, want it to name native_transport and off", err)
 				}
+				if errors.Is(err, beadsworkspace.ErrWorkspaceUnavailable) {
+					t.Fatalf("err = %v, refused for the wrong reason (workspace-not-there instead of native_transport)", err)
+				}
 				return
 			}
+			// Not refused by native_transport: the provider's own open still
+			// runs and fails because no real workspace directory exists here.
+			// That is the proof the native_transport gate let it through — a
+			// workspace that refused for ANY other reason, or that opened the
+			// routes it fails to close, would both hide a native_transport
+			// refusal that silently stopped firing.
+			if err == nil {
+				_ = routes.close()
+				t.Fatalf("openStorageRoutes (native_transport=%q) served a workspace that was never created", tc.mode)
+			}
+			if !errors.Is(err, beadsworkspace.ErrWorkspaceUnavailable) {
+				t.Fatalf("openStorageRoutes (native_transport=%q) error = %v, want %v (proves native_transport did not refuse it)",
+					tc.mode, err, beadsworkspace.ErrWorkspaceUnavailable)
+			}
+			if strings.Contains(err.Error(), "native_transport") {
+				t.Fatalf("openStorageRoutes (native_transport=%q) error names native_transport: %v", tc.mode, err)
+			}
+		})
+	}
+}
+
+// TestOpenStorageRoutesRefusesEngineOpenUnderForceFallbackEnv proves Finding
+// 4's fix: the deprecated process-wide GC_BEADS_FORCE_FALLBACK alias also
+// refuses a native-transport (beads-workspace) EngineOpener bind, even though
+// the per-city beads.native_transport value is "auto". Before this fix,
+// "process-wide off" was only true for the OpenStoreAtForCity family — a
+// beads-workspace binding opened natively regardless of the env var, which is
+// not what an operator reaching for the legacy kill switch expects.
+func TestOpenStorageRoutesRefusesEngineOpenUnderForceFallbackEnv(t *testing.T) {
+	t.Setenv("GC_BEADS_FORCE_FALLBACK", "1")
+	root := t.TempDir()
+	cfg := workspaceSplitConfig("infra")
+	cfg.Beads.NativeTransport = "auto"
+	plan, err := resolveCityStoragePlan(root, cfg)
+	if err != nil {
+		t.Fatalf("resolving the storage plan: %v", err)
+	}
+	routes, err := openStorageRoutes(plan, infraBindingTarget{Binding: "infra"}, cfg, root, nil)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("GC_BEADS_FORCE_FALLBACK=1 served a binding engine that only opens natively")
+	}
+	if !strings.Contains(err.Error(), "native_transport") || !strings.Contains(err.Error(), `"off"`) {
+		t.Fatalf("err = %v, want it to name native_transport and off", err)
+	}
+	if errors.Is(err, beadsworkspace.ErrWorkspaceUnavailable) {
+		t.Fatalf("err = %v, refused for the wrong reason (workspace-not-there instead of the force-fallback refusal)", err)
+	}
+}
+
+// TestOpenStorageRoutesDoesNotRefuseSQLiteBeadsUnderNativeTransportOff proves
+// the EngineOpener refusal is scoped to native-transport providers, not to
+// "implements EngineOpener" in general: sqlite-beads also implements
+// EngineOpener (how else would it bind classes?) but it is not native
+// transport, so beads.native_transport="off" must never stop a city with a
+// sqlite infra binding from booting.
+func TestOpenStorageRoutesDoesNotRefuseSQLiteBeadsUnderNativeTransportOff(t *testing.T) {
+	for _, mode := range []string{"", "auto", "off"} {
+		t.Run("native_transport="+mode, func(t *testing.T) {
+			root := t.TempDir()
+			cfg := infraSplitConfig(filepath.Join(root, "store"))
+			cfg.Beads.NativeTransport = mode
+			plan, err := resolveCityStoragePlan(root, cfg)
 			if err != nil {
-				t.Fatalf("openStorageRoutes (native_transport=%q): %v", tc.mode, err)
+				t.Fatalf("resolving the storage plan: %v", err)
+			}
+			routes, err := openStorageRoutes(plan, mustResolveInfraTarget(t, root, cfg), cfg, root, nil)
+			if err != nil {
+				t.Fatalf("openStorageRoutes (native_transport=%q): sqlite-beads binding refused to open: %v", mode, err)
 			}
 			t.Cleanup(func() { _ = routes.close() })
 		})

@@ -856,6 +856,29 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 	}
 
+	// Parse validates these three [beads] enum fields on a single layer, but
+	// this composed-root path never calls Parse on the final merged config —
+	// it decodes the root layer with parseWithMeta and merges fragments
+	// in-place (mergeCityFragment overwrites base.Beads wholesale whenever a
+	// fragment defines [beads], so even a root layer that validated cleanly
+	// could end up with a fragment-supplied out-of-enum value). Without this,
+	// a real city.toml like beads.native_transport = "bogus" loaded via `gc`
+	// silently decodes with no error at all: NormalizedNativeTransport then
+	// normalizes "bogus" to itself, every consumer's `== NativeTransportOff`
+	// check fails, and the city silently goes native regardless of operator
+	// intent. Validate once here, over the fully composed root, so every
+	// real load path (not just direct config.Parse callers, mostly tests)
+	// gets the same enum enforcement.
+	if err := validateConditionalWrites(root.Beads.ConditionalWrites); err != nil {
+		return nil, nil, err
+	}
+	if err := validateGuardedRelease(root.Beads.GuardedRelease); err != nil {
+		return nil, nil, err
+	}
+	if err := validateNativeTransport(root.Beads.NativeTransport); err != nil {
+		return nil, nil, err
+	}
+
 	// Capture revision inputs after all config and pack discovery so callers
 	// can compare the loaded snapshot to future reloads without re-reading
 	// mutable files from disk. Callers that never compute a Revision opt out

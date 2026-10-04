@@ -1456,9 +1456,7 @@ type BeadsConfig struct {
 	// NativeTransport selects whether this city's bead stores may open the
 	// native Dolt store at all: "off" (this city's stores never open
 	// natively; always BdStore, the bd CLI subprocess — logged once at boot)
-	// or "auto" (default: native when preflight-eligible, today's behavior;
-	// for a remote backend, native is required and a failed open is a
-	// terminal typed error naming this field's "off" escape hatch — see G6).
+	// or "auto" (default: native when preflight-eligible, today's behavior).
 	// Empty defaults to "auto". Any other value (including "require", which
 	// belongs to conditional_writes/guarded_release, not this switch) fails
 	// config load. Boot-latched: a change applies at the next restart.
@@ -1532,11 +1530,26 @@ func (b BeadsConfig) NormalizedGuardedRelease() string {
 // Like the other two, an unknown non-empty value passes through verbatim
 // rather than collapsing to the default, because a typo must never silently
 // pick a mode: it is rejected upstream by validateNativeTransport on load.
+//
+// Unlike ConditionalWrites/GuardedRelease — whose raw config string is always
+// re-parsed through gate.ParseMode (case- and space-tolerant) before any
+// consumer compares it — NativeTransport's only runtime consumer
+// (resolvedNativeTransportMode) compares this string against the
+// beads.NativeTransportOff constant with a literal, case-sensitive ==. So this
+// method, not a downstream parser, is the single place that must fold case and
+// whitespace: every consumer MUST call NormalizedNativeTransport rather than
+// read the NativeTransport field directly, or "OFF"/"Off"/" off " would pass
+// validateNativeTransport (which does use gate.ParseMode) but then fail the
+// literal comparison and silently resolve to native/auto. Trimming+lowercasing
+// here (rather than in validateNativeTransport) keeps that invariant true for
+// every caller, present and future, without relying on each call site to
+// remember to normalize.
 func (b BeadsConfig) NormalizedNativeTransport() string {
-	if b.NativeTransport == "" {
+	raw := strings.ToLower(strings.TrimSpace(b.NativeTransport))
+	if raw == "" {
 		return "auto"
 	}
-	return b.NativeTransport
+	return raw
 }
 
 // UsesBD105CLISemantics reports whether bd-backed code may rely on bd 1.0.5
@@ -4925,11 +4938,13 @@ func validateNativeTransport(raw string) error {
 	if strings.TrimSpace(raw) == "" {
 		return nil
 	}
+	// Deliberately do not wrap gate.ParseMode's own error: it advertises all
+	// three gate.Mode spellings ("want one of off, auto, require"), but
+	// native_transport is a two-valued field, so every rejection here —
+	// whether the spelling isn't a gate.Mode at all, or it is but is
+	// "require" — must report the same, field-correct allowed set.
 	mode, err := gate.ParseMode(raw)
-	if err != nil {
-		return fmt.Errorf("beads.native_transport: %w", err)
-	}
-	if mode == gate.Require {
+	if err != nil || mode == gate.Require {
 		return fmt.Errorf("beads.native_transport: invalid mode %q: want one of off, auto", raw)
 	}
 	return nil

@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -98,6 +99,59 @@ func TestRefusedCityDeniesTheRelicItsLiveCensusProves(t *testing.T) {
 
 	if _, ok, err := cliByIDBindingOwner(control, relic.ID); err != nil || ok {
 		t.Errorf("the same refusal over a city whose binding holds no relic resolved to ok=%v err=%v, want a clean fall-through; a census that found nothing proves nothing, and denying there takes work-bead reads away from every unconverged city", ok, err)
+	}
+}
+
+// TestCensusRefusedCityBindingPassesTheRealCfgNotNil proves Finding 3: the
+// census path's call to openStorageRoutes (through the openStorageRoutesForCensus
+// seam) carries the SAME cfg censusRefusedCityBinding already loaded, not nil.
+// Before this fix, a nil cfg here let resolvedNativeTransportMode(nil) resolve
+// to NativeTransportUnset instead of the city's real "off", so a
+// native-transport binding on an "off" city could still open natively on this
+// read-only, once-per-refused-city path. openStorageRoutes's own refusal logic
+// for native_transport="off" is covered separately by
+// TestOpenStorageRoutesRefusesEngineOpenUnderNativeTransportOff; this row pins
+// only that the real cfg reaches the call at all.
+func TestCensusRefusedCityBindingPassesTheRealCfgNotNil(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	relic, _ := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "carried across by the migration")
+	refuseTheseCities(t, theRefusalARefusedCityCarries(), cityPath)
+
+	// Mark the city distinctly so a nil cfg at the census call site cannot be
+	// mistaken for the real one.
+	cityTOML := filepath.Join(cityPath, "city.toml")
+	body, err := os.ReadFile(cityTOML)
+	if err != nil {
+		t.Fatalf("reading the fixture city.toml: %v", err)
+	}
+	body = append(body, []byte("\n[beads]\nnative_transport = \"off\"\n")...)
+	if err := os.WriteFile(cityTOML, body, 0o644); err != nil {
+		t.Fatalf("marking the fixture city native_transport=off: %v", err)
+	}
+
+	var sawCall bool
+	var captured *config.City
+	prevOpen := openStorageRoutesForCensus
+	openStorageRoutesForCensus = func(plan *storebinding.StoragePlan, target infraBindingTarget, cfg *config.City, cityPath string, rec events.Recorder) (*storageRoutes, error) {
+		sawCall = true
+		captured = cfg
+		return prevOpen(plan, target, cfg, cityPath, rec)
+	}
+	t.Cleanup(func() { openStorageRoutesForCensus = prevOpen })
+
+	// The return value is not the point of this row (that is every other row
+	// in this file); only what reached the seam matters here.
+	_, _, _ = cliByIDBindingOwner(cityPath, relic.ID)
+
+	if !sawCall {
+		t.Fatal("censusRefusedCityBinding never reached openStorageRoutesForCensus; this fixture no longer exercises the call this test pins")
+	}
+	if captured == nil {
+		t.Fatal("censusRefusedCityBinding passed a nil cfg to openStorageRoutesForCensus; beads.native_transport is silently unenforceable on this read-only census path")
+	}
+	if captured.Beads.NativeTransport != "off" {
+		t.Fatalf("captured cfg.Beads.NativeTransport = %q, want %q: the census path is not passing the city's real, freshly-loaded cfg",
+			captured.Beads.NativeTransport, "off")
 	}
 }
 

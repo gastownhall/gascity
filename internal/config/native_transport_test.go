@@ -1,6 +1,12 @@
 package config
 
-import "testing"
+import (
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/fsys"
+)
 
 // TestNativeTransportParseAndDefault covers decode and the accessor default
 // for beads.native_transport, mirroring TestConditionalWritesParseAndDefault
@@ -50,9 +56,20 @@ func TestNativeTransportRejectsOutOfEnum(t *testing.T) {
 		t.Run(raw, func(t *testing.T) {
 			switch raw {
 			case "Off ", " AUTO":
-				// case/space-tolerant valid spellings must still decode.
-				if _, err := Parse([]byte("[beads]\nnative_transport = \"" + raw + "\"\n")); err != nil {
+				// case/space-tolerant valid spellings must still decode, AND
+				// NormalizedNativeTransport must fold them to the canonical
+				// lowercase form — not just gate.ParseMode's validation at
+				// load time. A consumer that compares the raw string (as
+				// resolvedNativeTransportMode does) against the lowercase
+				// beads.NativeTransportOff constant would otherwise silently
+				// treat "Off " as native-eligible.
+				out, err := Parse([]byte("[beads]\nnative_transport = \"" + raw + "\"\n"))
+				if err != nil {
 					t.Fatalf("Parse(%q): unexpected error: %v", raw, err)
+				}
+				want := strings.ToLower(strings.TrimSpace(raw))
+				if got := out.Beads.NormalizedNativeTransport(); got != want {
+					t.Fatalf("NormalizedNativeTransport() for raw %q = %q, want %q", raw, got, want)
 				}
 				return
 			}
@@ -60,6 +77,82 @@ func TestNativeTransportRejectsOutOfEnum(t *testing.T) {
 				t.Fatalf("expected an error for an out-of-enum native_transport value %q", raw)
 			}
 		})
+	}
+}
+
+// TestNativeTransportNormalizesCaseAndWhitespace proves every mixed-case and
+// whitespace-padded spelling gate.ParseMode accepts at load time also
+// resolves, through NormalizedNativeTransport, to the exact lowercase
+// constant every runtime consumer compares against
+// (resolvedNativeTransportMode casts this string straight to
+// beads.NativeTransportMode with no further parsing). Before this test
+// (and the fix it pins), "OFF"/"Off"/" off " all passed validateNativeTransport
+// but NormalizedNativeTransport returned them verbatim, so the city went
+// native instead of honoring the kill switch.
+func TestNativeTransportNormalizesCaseAndWhitespace(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want string
+		// viaTOML is false for a raw value TOML's own grammar cannot carry
+		// through a quoted basic string (a literal tab/newline is a TOML
+		// syntax error, not a native_transport concern) — those cases only
+		// exercise the direct accessor, which a caller could still reach by
+		// building a BeadsConfig without going through Parse.
+		viaTOML bool
+	}{
+		{raw: "off", want: "off", viaTOML: true},
+		{raw: "OFF", want: "off", viaTOML: true},
+		{raw: "Off", want: "off", viaTOML: true},
+		{raw: " off ", want: "off", viaTOML: true},
+		{raw: "\toff\n", want: "off", viaTOML: false},
+		{raw: "auto", want: "auto", viaTOML: true},
+		{raw: "AUTO", want: "auto", viaTOML: true},
+		{raw: "Auto", want: "auto", viaTOML: true},
+		{raw: " auto ", want: "auto", viaTOML: true},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			if tc.viaTOML {
+				out, err := Parse([]byte("[beads]\nnative_transport = \"" + tc.raw + "\"\n"))
+				if err != nil {
+					t.Fatalf("Parse(%q): unexpected error: %v", tc.raw, err)
+				}
+				if got := out.Beads.NormalizedNativeTransport(); got != tc.want {
+					t.Fatalf("NormalizedNativeTransport() for raw %q = %q, want %q", tc.raw, got, tc.want)
+				}
+			}
+			// The direct accessor (not Parse's decode path) must normalize
+			// identically, since every caller — including one that builds a
+			// BeadsConfig without going through Parse (e.g. a test fixture) —
+			// uses this method, never the raw field.
+			if got := (BeadsConfig{NativeTransport: tc.raw}).NormalizedNativeTransport(); got != tc.want {
+				t.Fatalf("BeadsConfig{NativeTransport: %q}.NormalizedNativeTransport() = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNativeTransportRejectedOnTheRealComposedLoadPath proves the enum
+// validation Parse applies also applies to LoadWithIncludesOptions — the
+// composed-root path every real `gc` invocation actually uses (loadCityConfig
+// -> loadCityConfigFS -> LoadWithIncludesOptions). Before this test (and the
+// fix it pins), LoadWithIncludesOptions decoded the root layer with
+// parseWithMeta directly and never called validateNativeTransport /
+// validateConditionalWrites / validateGuardedRelease on the result: a real
+// city.toml with an out-of-enum beads.native_transport value loaded with no
+// error at all, so the kill switch's validation existed only for
+// config.Parse's direct callers (mostly tests), not for cities loaded for
+// real.
+func TestNativeTransportRejectedOnTheRealComposedLoadPath(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "city.toml", `[workspace]
+name = "t"
+
+[beads]
+native_transport = "bogus"
+`)
+	cityPath := filepath.Join(dir, "city.toml")
+	if _, _, err := LoadWithIncludesOptions(fsys.OSFS{}, cityPath, LoadOptions{}); err == nil {
+		t.Fatal("LoadWithIncludesOptions: want an error for an out-of-enum native_transport, got nil")
 	}
 }
 
