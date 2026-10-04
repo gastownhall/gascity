@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -450,6 +452,21 @@ func TestRunManagedDoltScopeWatchdogUsage(t *testing.T) {
 	}
 	if code := runManagedDoltScopeWatchdog([]string{" ", "log", "city"}, devnull, devnull); code != 2 {
 		t.Errorf("blank config exit = %d, want 2", code)
+	}
+}
+
+func TestFinishManagedDoltScopeWatchdogTerminationReturnsOnError(t *testing.T) {
+	done := make(chan error)
+	var log bytes.Buffer
+	start := time.Now()
+	if code := finishManagedDoltScopeWatchdogTermination(done, errors.New("lock ownership unavailable"), &log, 4242); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("termination error blocked waiting for a child that may never exit")
+	}
+	if got := log.String(); !strings.Contains(got, "lock ownership unavailable") || !strings.Contains(got, "4242") {
+		t.Fatalf("log = %q, want pid and termination error", got)
 	}
 }
 
