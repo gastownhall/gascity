@@ -8,7 +8,11 @@
 # instance and never run here. The OSS and default instances share one CAS,
 # but rbe-west splits the action cache: results written here go to the "oss"
 # action cache, which fork PRs read anonymously and the default instance
-# reads through (never writes). So REMOTE_AC must say "oss".
+# reads through (never writes). So REMOTE_AC must say "oss", and so must the
+# CAS stores: rbe-west's :443 confines this certificate to listeners that
+# know instance "oss" alone (infra README "OSS worker certificate confined",
+# FU2), where "" is 'instance_name' not configured. The fork tier says
+# oss-fork, never "".
 #
 # Env (from the workflow):
 #   RBE_WORKER_TLS_CERT / RBE_WORKER_TLS_KEY  base64 PEM, CN=rbe-oss-worker
@@ -259,7 +263,7 @@ render() {
 	jq -n --arg host "grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT:-443}" --arg root "$ROOT" --arg store "$STORE" --arg name "$WORKER_NAME" --argjson slots "$slots" --arg tier "${WORKER_TIER:-oss}" --argjson zstd "${wire_zstd:-false}" --arg read "${ZSTD_READ_URL:-grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT:-443}}" --argjson casmax "${CAS_MAX_BYTES:-150000000000}" --arg work "${WORK:-$ROOT/work}" --argjson isolation "$isolation" '
   { cert_file: ($root + "/pki/worker.pem"), key_file: ($root + "/pki/worker.key"),
     ca_file: "/etc/ssl/certs/ca-certificates.crt" } as $tls |
-  (if $tier == "fork" then "oss-fork" else "" end) as $cas_instance |
+  (if $tier == "fork" then "oss-fork" else "oss" end) as $cas_instance |
   {
     stores: [
       (if ($ARGS.named.zstd // false) then
