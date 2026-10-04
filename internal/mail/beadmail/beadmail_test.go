@@ -2488,34 +2488,34 @@ func TestCheckAutoHandoffsReturnsOnlyUnreadDeliveryMarkedMail(t *testing.T) {
 	if _, err := p.Send("human", "worker", "ordinary", "leave this for normal mail injection"); err != nil {
 		t.Fatalf("Send ordinary: %v", err)
 	}
-	missingArchiveMarker, err := p.SendHandoff(mail.HandoffIntent{
+	missingArchiveMarker, _, err := p.SendHandoff(mail.HandoffIntent{
 		From:        "worker",
 		To:          "worker",
 		Subject:     "not deliverable",
 		ThreadID:    "thread-missing-marker",
 		ExtraLabels: []string{mail.AutoHandoffLabel},
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("SendHandoff missing archive marker: %v", err)
 	}
-	auto, err := p.SendHandoff(mail.HandoffIntent{
+	auto, _, err := p.SendHandoff(mail.HandoffIntent{
 		From:        "worker",
 		To:          "worker",
 		Subject:     "context cycle",
 		Body:        "continue durable work",
 		ThreadID:    "thread-auto",
 		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("SendHandoff auto: %v", err)
 	}
-	readAuto, err := p.SendHandoff(mail.HandoffIntent{
+	readAuto, _, err := p.SendHandoff(mail.HandoffIntent{
 		From:        "worker",
 		To:          "worker",
 		Subject:     "already delivered",
 		ThreadID:    "thread-read-auto",
 		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("SendHandoff read auto: %v", err)
 	}
