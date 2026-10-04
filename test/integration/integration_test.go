@@ -537,21 +537,19 @@ func pinnedBdStoreCommandRunner() beads.CommandRunner {
 // reach bd from a process that exports it, as this fleet's sessions do, and
 // misdirect the store onto an unrelated database. The exact-env runner replaces
 // the child environment and keeps the production result handling
-// (ErrBDSilentFallback, bd timeouts, process-tree kill). The workspaces are
-// bound to a Dolt server, so BEADS_TEST_MODE defaults to 0 unless env sets it:
-// see beadstest.EnvBeadsTestMode.
+// (ErrBDSilentFallback, the BD_BACKUP_ENABLED opt-out, bd timeouts,
+// process-tree kill). That handling is keyed on the command name bd, so the
+// pinned binary is passed as BD_BIN and callers keep passing bd; substituting
+// the path for the name would skip all of it. The workspaces are bound to a
+// Dolt server, so BEADS_TEST_MODE defaults to 0 unless env sets it: see
+// beadstest.EnvBeadsTestMode.
 func isolatedBdStoreCommandRunner(env []string) beads.CommandRunner {
 	bdEnv := map[string]string{beadstest.EnvBeadsTestMode: "0"}
 	for k, v := range parseEnvList(isolateBdHomeEnv(env)) {
 		bdEnv[k] = v
 	}
-	runner := beads.ExecCommandRunnerWithExactEnvContext(context.Background(), bdEnv)
-	return func(dir, name string, args ...string) ([]byte, error) {
-		if name == "bd" {
-			name = bdBinary
-		}
-		return runner(dir, name, args...)
-	}
+	bdEnv["BD_BIN"] = bdBinary
+	return beads.ExecCommandRunnerWithExactEnvContext(context.Background(), bdEnv)
 }
 
 // pinnedBdStoreCommandRunnerWithEnv keeps direct BdStore integration tests on
