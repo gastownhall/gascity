@@ -1,0 +1,89 @@
+# worker-env canary (tools/rbe/worker-env-drift). rbe-west's oss and oss-fork
+# schedulers match the worker-env platform property exactly, so when the
+# Blacksmith image under the pool workers stops being the pinned host
+# (tools/rbe/worker-env.txt), no CI action can run until someone re-pins.
+# Every six hours, and whenever the default branch changes the worker host or
+# its pin, a small Blacksmith runner of the pool's image family provisions and
+# measures itself exactly as a pool worker does (blacksmith-worker.sh
+# WORKER_MODE=measure). Drift fails this run and opens or updates the pin's
+# drift issue, with the manifest and pin to commit, before CI runs into it.
+# A match closes the drift issues of superseded pins.
+name: rbe-worker-env-canary
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - platforms/BUILD.bazel
+      - tools/rbe/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    name: measure the Blacksmith worker host
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    # The pool runs on blacksmith-32vcpu-ubuntu-2404; the 2-vCPU runner of the
+    # same image measured byte-identically (#6995) at a sixteenth of the cost.
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Provision and measure this host as a pool worker does
+        env:
+          WORKER_MODE: measure
+        run: tools/rbe/blacksmith-worker.sh
+      - name: Upload the worker-env drift
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: worker-env-drift
+          path: ${{ runner.temp }}/worker-env-drift
+          if-no-files-found: ignore
+          retention-days: 7
+
+  report:
+    name: worker-env drift report
+    needs: measure
+    if: "!cancelled() && needs.measure.result != 'skipped'"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: rbe-worker-env-drift-report
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Download the worker-env drift
+        id: drift
+        if: needs.measure.result == 'failure'
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: worker-env-drift
+          path: ${{ runner.temp }}/worker-env-drift
+      - name: Open or update the drift issue
+        if: steps.drift.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: tools/rbe/worker-env-drift report "$RUNNER_TEMP/worker-env-drift"
+      - name: Close the drift issues of superseded pins
+        if: needs.measure.result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: tools/rbe/worker-env-drift resolve

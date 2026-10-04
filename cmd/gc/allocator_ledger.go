@@ -107,6 +107,13 @@ type ledgerEntry struct {
 	// WroteRow is set when the effect wrote a row: PreWake landed, or the
 	// create committed.
 	WroteRow bool
+	// Reopen marks a create that reopens the closed row Key.ID instead of
+	// writing a new one (P3-6b, AM-N2). Its marker is the row ID: the reopen
+	// never writes the token. ReopenRevision is the row's revision the effect
+	// read before its write: lag repair finds the row still closed at it when
+	// the reopen never landed.
+	Reopen         bool
+	ReopenRevision int64
 	// ProviderCalled is C5.6's start_called, set before provider Start.
 	ProviderCalled bool
 	// SettledAt is when the entry was committed or failed, or when lag
@@ -136,7 +143,8 @@ const (
 	// the leg's cache, so the next census clears the entry by marker.
 	lagInstalled lagOutcome = iota + 1
 	// lagNoMarker: the row is open without the marker (a grant's row below
-	// the incarnation PreWake would have written): the write never landed.
+	// the incarnation PreWake would have written), or a reopen's row is still
+	// closed at the revision the effect read: the write never landed.
 	lagNoMarker
 	// lagClosed: the row is closed. Its start, if any, is over.
 	lagClosed
@@ -165,6 +173,9 @@ type ledgerRow struct {
 	// PendingCreate: a never-started pending create within its lease
 	// (POOL-028).
 	PendingCreate bool
+	// Revision is the row's store revision as lag repair's live read found
+	// it; the census leaves it zero. Only a reopen's lag outcome reads it.
+	Revision int64
 }
 
 // createIdentity is the identity a create plan materializes. Create vetoes
@@ -175,9 +186,17 @@ type createIdentity struct {
 	// Slot is the plan's pool slot. It is not part of the key; pruning reads
 	// it to re-derive the identity from config.
 	Slot int
+	// Named marks a configured named session's create: QualifiedInstance is
+	// its identity, and Template its backing template.
+	Named bool
 }
 
-func (c createIdentity) key() string { return c.Template + "/" + c.QualifiedInstance }
+func (c createIdentity) key() string {
+	if c.Named {
+		return "named:" + c.QualifiedInstance
+	}
+	return c.Template + "/" + c.QualifiedInstance
+}
 
 // createVeto is a create identity's refusal (AM-N8, C5.11's backoff keyed by
 // the plan identity): a create effect for it failed without writing, for a
@@ -358,6 +377,24 @@ func (l *intentLedger) FailCreate(id string, c createIdentity, cause string) boo
 	}
 	v.Identity, v.ConfigRev, v.Cause = c, rev, cause
 	l.createVetoes[c.key()] = v
+	return true
+}
+
+// Retarget records, before the write, that issued create id reopens the
+// closed row rowID, read at revision, rather than writing a new one
+// (AM-N2). From then on the entry's key and marker name the row, so a
+// census that shows the reopened row before the entry settles counts the
+// two as one effect (C5.13) and C5.10's in-flight cause blocks a grant for
+// it; the reopen never writes the token the entry was reserved with. It
+// refuses an entry that is not an issued create.
+func (l *intentLedger) Retarget(id, rowID string, revision int64) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e := l.entries[id]
+	if e == nil || e.Kind != kindCreate || e.State != ledgerIssued || rowID == "" {
+		return false
+	}
+	e.Key.ID, e.Marker.RowID, e.Reopen, e.ReopenRevision = rowID, rowID, true, revision
 	return true
 }
 
@@ -587,12 +624,17 @@ func (e ledgerEntry) lagging(c ledgerCensus, now time.Time) bool {
 
 // lagOutcomeOf classifies lag repair's live read of e's row: found says the
 // read found row r at k (by row ID, or a create's by instance token), open
-// that the row is open. The caller reports lagInstalled only after the read
-// installed the row in the leg's cache.
+// that the row is open. A reopen's row still closed at the revision the
+// effect read is a reopen that never landed (AM-N2); closed at another
+// revision, it was written and closed again, as any closed row. The caller
+// reports lagInstalled only after the read installed the row in the leg's
+// cache.
 func (e ledgerEntry) lagOutcomeOf(k rowKey, r ledgerRow, found, open bool) lagOutcome {
 	switch {
 	case !found:
 		return lagNotFound
+	case !open && e.Reopen && r.Revision == e.ReopenRevision:
+		return lagNoMarker
 	case !open:
 		return lagClosed
 	case e.markerVisible(ledgerCensus{Rows: map[rowKey]ledgerRow{k: r}}):

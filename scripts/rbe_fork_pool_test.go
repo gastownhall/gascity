@@ -119,9 +119,11 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 		t.Errorf("permissions %v, want contents: read only", wf.Permissions)
 	}
 
+	// The worker-env drift jobs beside it, and its measure step, are
+	// TestRBEPoolWorkflowsReportDriftWhileServing's.
 	job, ok := wf.Jobs["worker"]
-	if !ok || len(wf.Jobs) != 1 {
-		t.Fatalf("%s: jobs %v, want worker alone", rbeForkPoolWorkflow, rbeSortedKeys(wf.Jobs))
+	if !ok || len(wf.Jobs) != 3 {
+		t.Fatalf("%s: jobs %v, want worker, await-drift and report-drift", rbeForkPoolWorkflow, rbeSortedKeys(wf.Jobs))
 	}
 	// Blacksmith donates this compute for our OSS repos' workflows; the
 	// default branch only, as rbe-worker-pool.yml.
@@ -145,7 +147,7 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 				t.Errorf("checkout must set persist-credentials: false, got %v", step.With["persist-credentials"])
 			}
 		}
-		if strings.TrimSpace(step.Run) != rbeWorkerScript {
+		if strings.TrimSpace(step.Run) != rbeWorkerScript || step.Env["WORKER_MODE"] == "measure" {
 			continue
 		}
 		worker = true
@@ -164,6 +166,10 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 			"POOL_MAX_MINUTES":     "${{ inputs.max_minutes }}",
 			"WORKER_NAME":          "gha-fork-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}",
 			"RBE_ACTION_ISOLATION": "1",
+			// zstd fetches only (blacksmith-worker.sh keeps uploads identity),
+			// off unless the repository variable says 1: merging changes
+			// nothing, and rollback is the variable.
+			"RBE_WIRE_ZSTD": "${{ vars.RBE_FORK_WIRE_ZSTD || '0' }}",
 		}
 		for k, v := range want {
 			if step.Env[k] != v {
@@ -181,8 +187,8 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	}
 
 	// No secret but the fork worker certificate (never the OSS worker's, which
-	// writes AC_OSS), and no repository variable that could turn isolation
-	// down.
+	// writes AC_OSS), and no repository variable but RBE_FORK_WIRE_ZSTD
+	// (pinned above as RBE_WIRE_ZSTD alone): none can turn isolation down.
 	secrets := map[string]bool{}
 	for _, m := range regexp.MustCompile(`secrets\.([A-Za-z0-9_]+)`).FindAllStringSubmatch(text, -1) {
 		secrets[m[1]] = true
@@ -190,8 +196,8 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	if got := rbeSortedKeys(secrets); strings.Join(got, ",") != "RBE_FORK_WORKER_TLS_CERT,RBE_FORK_WORKER_TLS_KEY" {
 		t.Errorf("%s uses secrets %v, want RBE_FORK_WORKER_TLS_CERT and RBE_FORK_WORKER_TLS_KEY only", rbeForkPoolWorkflow, got)
 	}
-	if strings.Contains(text, "vars.") {
-		t.Errorf("%s must not read repository variables", rbeForkPoolWorkflow)
+	if n := strings.Count(text, "vars."); n != 1 || !strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD ") {
+		t.Errorf("%s reads repository variables %d times; want vars.RBE_FORK_WIRE_ZSTD once, nothing else", rbeForkPoolWorkflow, n)
 	}
 }
 
