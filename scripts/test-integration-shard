@@ -105,6 +105,7 @@ bdstore_tests=(
   TestBdStoreConformance
   TestBdStoreDeleteBatchOrphansExternalDependents
   TestBdStoreMailWispInsert
+  TestPinnedBdStoreCommandRunnerReportsSilentFallback
   TestPinnedBdStoreCommandRunnerUsesExactEnvironmentAndKeepsStdoutJSON
 )
 

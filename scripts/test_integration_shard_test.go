@@ -47,7 +47,7 @@ func TestCmdGCIntegrationShardRunsOnlyIntegrationManifest(t *testing.T) {
 	}
 }
 
-func TestBdStoreIntegrationShardOwnsRunnerIsolationAndAllCallSites(t *testing.T) {
+func TestBdStoreIntegrationShardRunsOnlyBdStoreTests(t *testing.T) {
 	fixture := newIntegrationShardFixture(t)
 
 	out, err := fixture.runShard(t, "bdstore")
@@ -64,6 +64,7 @@ func TestBdStoreIntegrationShardOwnsRunnerIsolationAndAllCallSites(t *testing.T)
 		"TestBdStoreConformance",
 		"TestBdStoreDeleteBatchOrphansExternalDependents",
 		"TestBdStoreMailWispInsert",
+		"TestPinnedBdStoreCommandRunnerReportsSilentFallback",
 		"TestPinnedBdStoreCommandRunnerUsesExactEnvironmentAndKeepsStdoutJSON",
 	}
 	want := []string{
