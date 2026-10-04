@@ -1452,6 +1452,19 @@ type BeadsConfig struct {
 	// Overridden per rig by beads_proxied_idle_timeout and by the
 	// GC_BEADS_PROXIED_IDLE_TIMEOUT environment variable.
 	ProxiedIdleTimeout string `toml:"proxied_idle_timeout,omitempty" jsonschema:"default=30m"`
+
+	// NativeTransport selects whether this city's bead stores may open the
+	// native Dolt store at all: "off" (this city's stores never open
+	// natively; always BdStore, the bd CLI subprocess — logged once at boot)
+	// or "auto" (default: native when preflight-eligible, today's behavior;
+	// for a remote backend, native is required and a failed open is a
+	// terminal typed error naming this field's "off" escape hatch — see G6).
+	// Empty defaults to "auto". Any other value (including "require", which
+	// belongs to conditional_writes/guarded_release, not this switch) fails
+	// config load. Boot-latched: a change applies at the next restart.
+	// GC_BEADS_FORCE_FALLBACK remains a deprecated process-wide alias for
+	// "off" that overrides every city's value for one release.
+	NativeTransport string `toml:"native_transport,omitempty" jsonschema:"default=auto,enum=auto,enum=off"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -1510,6 +1523,20 @@ func (b BeadsConfig) NormalizedGuardedRelease() string {
 		return "off"
 	}
 	return b.GuardedRelease
+}
+
+// NormalizedNativeTransport returns the configured native-transport value,
+// mapping ONLY the empty string to the built-in default "auto" — unlike
+// ConditionalWrites/GuardedRelease, whose unset default is "off", this
+// switch's unset default is "auto" (today's eligibility-gated behavior).
+// Like the other two, an unknown non-empty value passes through verbatim
+// rather than collapsing to the default, because a typo must never silently
+// pick a mode: it is rejected upstream by validateNativeTransport on load.
+func (b BeadsConfig) NormalizedNativeTransport() string {
+	if b.NativeTransport == "" {
+		return "auto"
+	}
+	return b.NativeTransport
 }
 
 // UsesBD105CLISemantics reports whether bd-backed code may rely on bd 1.0.5
@@ -4842,6 +4869,9 @@ func Parse(data []byte) (*City, error) {
 	if err := validateGuardedRelease(cfg.Beads.GuardedRelease); err != nil {
 		return nil, err
 	}
+	if err := validateNativeTransport(cfg.Beads.NativeTransport); err != nil {
+		return nil, err
+	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class
 	// completeness, binding resolution) are checked on the composed root in
 	// LoadWithIncludesOptions, because a fragment may supply either half.
@@ -4878,6 +4908,29 @@ func validateGuardedRelease(raw string) error {
 	}
 	if _, err := gate.ParseMode(raw); err != nil {
 		return fmt.Errorf("beads.guarded_release: %w", err)
+	}
+	return nil
+}
+
+// validateNativeTransport rejects an out-of-enum beads.native_transport
+// value at load time. This switch selects between the bd CLI subprocess and
+// the native store, not a correctness discipline, but the same rule applies:
+// a typo must never silently pick a mode, so the config fails to load
+// instead. Unlike conditional_writes/guarded_release, the grammar here is
+// two-valued (off|auto) — gate.ParseMode's third spelling, "require", parses
+// cleanly as a Mode but does not belong to this field, so it is rejected
+// explicitly rather than let through. The empty string (unset) is valid and
+// defaults to auto.
+func validateNativeTransport(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	mode, err := gate.ParseMode(raw)
+	if err != nil {
+		return fmt.Errorf("beads.native_transport: %w", err)
+	}
+	if mode == gate.Require {
+		return fmt.Errorf("beads.native_transport: invalid mode %q: want one of off, auto", raw)
 	}
 	return nil
 }

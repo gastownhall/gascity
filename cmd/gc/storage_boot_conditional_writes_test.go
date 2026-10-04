@@ -197,6 +197,49 @@ func TestOpenStorageRoutesRefusesACarrierlessEngineUnderRequire(t *testing.T) {
 	}
 }
 
+// TestOpenStorageRoutesRefusesEngineOpenUnderNativeTransportOff proves the
+// per-city beads.native_transport="off" kill switch reaches the storebinding
+// open path, not only the beads factory: a binding served through the
+// EngineOpener seam has no BdStore fallback of its own (see EngineOpener's
+// doc), so letting it open while "off" would silently break the switch's
+// promise that this city's stores never open natively. "auto" (today's
+// behavior) must still open the binding engine normally.
+func TestOpenStorageRoutesRefusesEngineOpenUnderNativeTransportOff(t *testing.T) {
+	for _, tc := range []struct {
+		mode    string
+		refused bool
+	}{
+		{mode: "", refused: false},
+		{mode: "auto", refused: false},
+		{mode: "off", refused: true},
+	} {
+		t.Run("native_transport="+tc.mode, func(t *testing.T) {
+			root := t.TempDir()
+			cfg := infraSplitConfig(filepath.Join(root, "store"))
+			cfg.Beads.NativeTransport = tc.mode
+			plan, err := resolveCityStoragePlan(root, cfg)
+			if err != nil {
+				t.Fatalf("resolving the storage plan: %v", err)
+			}
+			routes, err := openStorageRoutes(plan, mustResolveInfraTarget(t, root, cfg), cfg, root, nil)
+			if tc.refused {
+				if err == nil {
+					_ = routes.close()
+					t.Fatal("native_transport=\"off\" served a binding engine that only opens natively")
+				}
+				if !strings.Contains(err.Error(), "native_transport") || !strings.Contains(err.Error(), `"off"`) {
+					t.Fatalf("err = %v, want it to name native_transport and off", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("openStorageRoutes (native_transport=%q): %v", tc.mode, err)
+			}
+			t.Cleanup(func() { _ = routes.close() })
+		})
+	}
+}
+
 // TestConditionalWritesStatusReportsTheBindingEngine proves gc status sees a
 // split city's binding engine. Without its row, require over a legacy binding
 // (no revision column, so every fenced session write refuses) reported active.

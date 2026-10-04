@@ -1619,7 +1619,7 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 // builtin-cache readiness and pack expansion included — again inside the open.
 // A nil config keeps the loading behavior, matching nativeDoltOpenEnvForScope.
 func openStoreAtForCityWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
-	result, err := openStoreResultAtForCityWithConfig(storePath, cityPath, cfg, gate.ModeUnset, false, false, false)
+	result, err := openStoreResultAtForCityWithConfig(storePath, cityPath, cfg, gate.ModeUnset, false, false, false, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1631,7 +1631,7 @@ func openAuthoritativeStoreAtForCity(storePath, cityPath string) (beads.Store, e
 }
 
 func openStoreAtForCityWithAuthority(storePath, cityPath string, authoritative bool) (beads.Store, error) {
-	result, err := openStoreResultAtForCityWithAuthority(storePath, cityPath, gate.ModeUnset, false, authoritative, false)
+	result, err := openStoreResultAtForCityWithAuthority(storePath, cityPath, gate.ModeUnset, false, authoritative, false, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1639,7 +1639,7 @@ func openStoreAtForCityWithAuthority(storePath, cityPath string, authoritative b
 }
 
 func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityWithMode(storePath, cityPath, gate.ModeUnset, false, false)
+	return openStoreResultAtForCityWithMode(storePath, cityPath, gate.ModeUnset, false, false, nil)
 }
 
 // openStoreResultAtForCityWithMode is openStoreResultAtForCity with the
@@ -1648,12 +1648,18 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 // boot-latched mode: re-resolving from disk on a reload would flip the city
 // store's write discipline mid-process while rig stores keep the boot mode —
 // exactly the mixed-writer state the process latch exists to prevent.
-func openStoreResultAtForCityWithMode(storePath, cityPath string, modeOverride gate.Mode, haveMode, longLived bool) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityWithAuthority(storePath, cityPath, modeOverride, haveMode, false, longLived)
+//
+// nativeOverride is the analogous boot latch for beads.native_transport: nil
+// means "resolve from cfg" (the default, best-effort behavior every other
+// caller gets); a non-nil value is the controller's frozen boot-time value,
+// carried the same way modeOverride is, for the same reopen-must-not-flip
+// reason.
+func openStoreResultAtForCityWithMode(storePath, cityPath string, modeOverride gate.Mode, haveMode, longLived bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithAuthority(storePath, cityPath, modeOverride, haveMode, false, longLived, nativeOverride)
 }
 
-func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverride gate.Mode, haveMode, authoritative, longLived bool) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityWithConfig(storePath, cityPath, nil, modeOverride, haveMode, authoritative, longLived)
+func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverride gate.Mode, haveMode, authoritative, longLived bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithConfig(storePath, cityPath, nil, modeOverride, haveMode, authoritative, longLived, nativeOverride)
 }
 
 // openStoreResultAtForCityWithConfig is openStoreResultAtForCityWithAuthority
@@ -1674,8 +1680,8 @@ func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverr
 // variable is never reassigned in production.
 var openStoreFactoryForCity = beads.OpenStoreAtForCity
 
-func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived bool) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityScoped(storePath, cityPath, cfg, modeOverride, haveMode, authoritative, longLived, false)
+func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityScoped(storePath, cityPath, cfg, modeOverride, haveMode, authoritative, longLived, false, nativeOverride)
 }
 
 // openOneShotStoreAtForCityWithConfig is openStoreAtForCityWithConfig for a
@@ -1693,7 +1699,7 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 // Nothing enforces that cfg is fresh; the one-shot entry points
 // (openCityStoreAtWithConfig, oneShotRigStoreOpener) are the only callers.
 func openOneShotStoreAtForCityWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
-	result, err := openStoreResultAtForCityScoped(storePath, cityPath, cfg, gate.ModeUnset, false, false, false, true)
+	result, err := openStoreResultAtForCityScoped(storePath, cityPath, cfg, gate.ModeUnset, false, false, false, true, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1703,7 +1709,7 @@ func openOneShotStoreAtForCityWithConfig(storePath, cityPath string, cfg *config
 // openStoreResultAtForCityScoped is the shared open body. oneShotConfig
 // reports that cfg is this one-shot invocation's own fresh load, which lets
 // the bd city-scope open reuse it; see openOneShotStoreAtForCityWithConfig.
-func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived, oneShotConfig bool) (beads.StoreOpenResult, error) {
+func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived, oneShotConfig bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
@@ -1732,6 +1738,10 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 	if haveMode {
 		mode = modeOverride
 	}
+	nativeTransport := resolvedNativeTransportMode(cfg)
+	if nativeOverride != nil {
+		nativeTransport = *nativeOverride
+	}
 	// One bd opener, used twice: as the factory's fallback store and as the
 	// WRITE leaf of the proxied split store. They must be the same store, or a
 	// demotion would silently change which store is doing the writing.
@@ -1751,6 +1761,7 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 		PreflightChecker:  newBeadsPreflightChecker(runtimeCityPath, provider),
 		Logger:            slog.Default(),
 		ConditionalWrites: mode,
+		NativeTransport:   nativeTransport,
 		LongLived:         longLived,
 		OnConditionalWritesDegraded: func() func(beads.ConditionalWritesDegrade) {
 			flags, resolved := resolvedConditionalWritesFlags(cfg)

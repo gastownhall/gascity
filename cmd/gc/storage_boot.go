@@ -789,6 +789,19 @@ func openStorageRoutes(plan *storebinding.StoragePlan, target infraBindingTarget
 		return nil, fmt.Errorf("storage routing: binding %q is served by provider %q, which does not open a bead engine, so the classes assigned to it cannot be served; %s",
 			target.Binding, planned.ProviderID, contract.BackendNotOpenedGuarantee)
 	}
+	// An EngineOpener-served binding has no BdStore fallback of its own (see
+	// EngineOpener's doc: a provider that cannot serve is a refusal, never a
+	// fall-through to the work store), so it only ever opens natively.
+	// beads.native_transport="off" promises this city's stores never open
+	// natively; honor that promise here as a refusal naming the binding and
+	// the switch, rather than silently opening native anyway. A nil cfg (the
+	// read-only census path) resolves to NativeTransportUnset and is not
+	// refused, matching the conditional_writes nil-cfg tolerance above.
+	if resolvedNativeTransportMode(cfg) == beads.NativeTransportOff {
+		return nil, fmt.Errorf(
+			"storage routing: binding %q is served by provider %q, which only opens its bead engine natively; refused because beads.native_transport=\"off\" for this city (set native_transport to \"auto\", or remove this binding, to proceed)",
+			target.Binding, planned.ProviderID)
+	}
 	store, closer, err := opener.OpenEngine(planned.Spec, planned.AssignedClasses)
 	if err != nil {
 		return nil, fmt.Errorf("storage routing: opening binding %q: %w", target.Binding, err)
