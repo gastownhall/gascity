@@ -487,6 +487,377 @@ func TestProcessRetryControlHardFail(t *testing.T) {
 	}
 }
 
+func TestProcessRetryControlHardFailSkipsUnscopedDownstream(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "requirements",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.requirements",
+			"gc.step_id":          "requirements",
+			"gc.max_attempts":     "1",
+			"gc.on_exhausted":     "hard_fail",
+			"gc.source_step_spec": `{"id":"requirements","title":"Requirements","type":"task","retry":{"max_attempts":1}}`,
+		},
+	})
+	attempt := mustCreate(t, store, beads.Bead{
+		Title: "requirements attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id":   root.ID,
+			"gc.step_ref":       "mol-test.requirements.attempt.1",
+			"gc.attempt":        "1",
+			"gc.outcome":        "fail",
+			"gc.failure_class":  "hard",
+			"gc.failure_reason": "invalid_spec",
+		},
+	})
+	downstream := mustCreate(t, store, beads.Bead{
+		Title: "plan",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.plan",
+		},
+	})
+	finalizer := mustCreate(t, store, beads.Bead{
+		Title: "finalize",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.workflow-finalize",
+		},
+	})
+	mustClose(t, store, attempt.ID)
+	mustDep(t, store, control.ID, attempt.ID, "blocks")
+	mustDep(t, store, downstream.ID, control.ID, "blocks")
+	mustDep(t, store, finalizer.ID, downstream.ID, "blocks")
+	mustDep(t, store, root.ID, finalizer.ID, "blocks")
+
+	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl: %v", err)
+	}
+	if result.Action != "hard-fail" || result.Skipped != 1 {
+		t.Fatalf("result = %+v, want hard-fail with one skipped downstream bead", result)
+	}
+	gotDownstream := mustGet(t, store, downstream.ID)
+	if gotDownstream.Status != "closed" || gotDownstream.Metadata["gc.outcome"] != "skipped" {
+		t.Fatalf("downstream = status %q outcome %q, want closed/skipped", gotDownstream.Status, gotDownstream.Metadata["gc.outcome"])
+	}
+	if mustReadyContains(t, store, downstream.ID) {
+		t.Fatal("ordinary downstream work is ready after hard failure")
+	}
+	if !mustReadyContains(t, store, finalizer.ID) {
+		t.Fatal("workflow finalizer is not ready after downstream skip")
+	}
+
+	finalizeResult, err := ProcessControl(store, mustGet(t, store, finalizer.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if finalizeResult.Action != "workflow-fail" {
+		t.Fatalf("finalize result = %+v, want workflow-fail", finalizeResult)
+	}
+	gotRoot := mustGet(t, store, root.ID)
+	if gotRoot.Status != "closed" || gotRoot.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("root = status %q outcome %q, want closed/fail", gotRoot.Status, gotRoot.Metadata["gc.outcome"])
+	}
+	gotFinalizer := mustGet(t, store, finalizer.ID)
+	if gotFinalizer.Status != "closed" || gotFinalizer.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("finalizer = status %q outcome %q, want closed/pass", gotFinalizer.Status, gotFinalizer.Metadata["gc.outcome"])
+	}
+}
+
+func TestProcessRetryControlHardFailAbortsDownstreamScope(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{Title: "workflow", Metadata: map[string]string{
+		beadmeta.KindMetadataKey: beadmeta.KindWorkflow,
+	}})
+	control := mustCreate(t, store, beads.Bead{Title: "requirements", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:           beadmeta.KindRetry,
+		beadmeta.RootBeadIDMetadataKey:     root.ID,
+		beadmeta.StepRefMetadataKey:        "mol-test.requirements",
+		beadmeta.StepIDMetadataKey:         "requirements",
+		beadmeta.MaxAttemptsMetadataKey:    "1",
+		beadmeta.OnExhaustedMetadataKey:    "hard_fail",
+		beadmeta.SourceStepSpecMetadataKey: `{"id":"requirements","title":"Requirements","type":"task","retry":{"max_attempts":1}}`,
+	}})
+	attempt := mustCreate(t, store, beads.Bead{Title: "requirements attempt 1", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey:    root.ID,
+		beadmeta.StepRefMetadataKey:       "mol-test.requirements.attempt.1",
+		beadmeta.AttemptMetadataKey:       "1",
+		beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
+		beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassHard,
+		beadmeta.FailureReasonMetadataKey: "invalid_spec",
+	}})
+	body := mustCreate(t, store, beads.Bead{Title: "scoped work", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:       beadmeta.KindScope,
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.ScopeRefMetadataKey:   "mol-test.scoped-work",
+		beadmeta.ScopeRoleMetadataKey:  beadmeta.ScopeRoleBody,
+	}})
+	member := mustCreate(t, store, beads.Bead{Title: "scope member", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.ScopeRefMetadataKey:   "mol-test.scoped-work",
+		beadmeta.ScopeRoleMetadataKey:  beadmeta.ScopeRoleMember,
+	}})
+	drain := mustCreate(t, store, beads.Bead{Title: "scope drain", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:       beadmeta.KindDrain,
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.ScopeRefMetadataKey:   "mol-test.scoped-work",
+		beadmeta.ScopeRoleMetadataKey:  beadmeta.ScopeRoleMember,
+	}})
+	finalizer := mustCreate(t, store, beads.Bead{Title: "finalize", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:       beadmeta.KindWorkflowFinalize,
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+	}})
+	mustClose(t, store, attempt.ID)
+	mustDep(t, store, control.ID, attempt.ID, "blocks")
+	mustDep(t, store, member.ID, control.ID, "blocks")
+	mustDep(t, store, drain.ID, member.ID, "blocks")
+	mustDep(t, store, body.ID, drain.ID, "blocks")
+	mustDep(t, store, finalizer.ID, body.ID, "blocks")
+
+	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl: %v", err)
+	}
+	if result.Action != "hard-fail" {
+		t.Fatalf("result = %+v, want hard-fail", result)
+	}
+	gotBody := mustGet(t, store, body.ID)
+	if gotBody.Status != "closed" || gotBody.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+		t.Fatalf("scope body = status %q outcome %q, want closed/fail", gotBody.Status, gotBody.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	for _, id := range []string{member.ID, drain.ID} {
+		got := mustGet(t, store, id)
+		if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped {
+			t.Fatalf("scope member %s = status %q outcome %q, want closed/skipped", id, got.Status, got.Metadata[beadmeta.OutcomeMetadataKey])
+		}
+	}
+	if mustReadyContains(t, store, body.ID) {
+		t.Fatal("scope body became ready instead of being failed by scope abort")
+	}
+	if !mustReadyContains(t, store, finalizer.ID) {
+		t.Fatal("workflow finalizer is not ready after downstream scope abort")
+	}
+}
+
+func TestProcessRetryControlHardFailSkipsDownstreamRetryControl(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	root := mustCreate(t, store, beads.Bead{Title: "workflow", Metadata: map[string]string{
+		beadmeta.KindMetadataKey: beadmeta.KindWorkflow,
+	}})
+	upstream := mustCreate(t, store, beads.Bead{Title: "requirements", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:           beadmeta.KindRetry,
+		beadmeta.RootBeadIDMetadataKey:     root.ID,
+		beadmeta.StepRefMetadataKey:        "mol-test.requirements",
+		beadmeta.MaxAttemptsMetadataKey:    "1",
+		beadmeta.OnExhaustedMetadataKey:    "hard_fail",
+		beadmeta.SourceStepSpecMetadataKey: `{"id":"requirements","title":"Requirements","type":"task","retry":{"max_attempts":1}}`,
+	}})
+	upstreamAttempt := mustCreate(t, store, beads.Bead{Title: "requirements attempt 1", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey:    root.ID,
+		beadmeta.StepRefMetadataKey:       "mol-test.requirements.attempt.1",
+		beadmeta.AttemptMetadataKey:       "1",
+		beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
+		beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassHard,
+		beadmeta.FailureReasonMetadataKey: "invalid_spec",
+	}})
+	downstream := mustCreate(t, store, beads.Bead{Title: "implementation", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:           beadmeta.KindRetry,
+		beadmeta.RootBeadIDMetadataKey:     root.ID,
+		beadmeta.StepRefMetadataKey:        "mol-test.implementation",
+		beadmeta.MaxAttemptsMetadataKey:    "3",
+		beadmeta.OnExhaustedMetadataKey:    "hard_fail",
+		beadmeta.SourceStepSpecMetadataKey: `{"id":"implementation","title":"Implementation","type":"task","retry":{"max_attempts":3}}`,
+	}})
+	downstreamAttempt := mustCreate(t, store, beads.Bead{Title: "implementation attempt 1", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.StepRefMetadataKey:    "mol-test.implementation.attempt.1",
+		beadmeta.AttemptMetadataKey:    "1",
+	}})
+	mustClose(t, store, upstreamAttempt.ID)
+	mustDep(t, store, upstream.ID, upstreamAttempt.ID, "blocks")
+	mustDep(t, store, downstream.ID, upstream.ID, "blocks")
+	mustDep(t, store, downstream.ID, downstreamAttempt.ID, "blocks")
+	mustDep(t, store, downstreamAttempt.ID, upstream.ID, "blocks")
+
+	if _, err := processRetryControl(store, mustGet(t, store, upstream.ID), ProcessOptions{}); err != nil {
+		t.Fatalf("processRetryControl: %v", err)
+	}
+	for _, id := range []string{downstream.ID, downstreamAttempt.ID} {
+		got := mustGet(t, store, id)
+		if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped {
+			t.Fatalf("downstream retry bead %s = status %q outcome %q, want closed/skipped", id, got.Status, got.Metadata[beadmeta.OutcomeMetadataKey])
+		}
+	}
+	all, err := beads.DirectMembers(store, root.ID)
+	if err != nil {
+		t.Fatalf("list workflow members: %v", err)
+	}
+	for _, bead := range all {
+		if bead.Metadata[beadmeta.StepRefMetadataKey] == "mol-test.implementation.attempt.2" {
+			t.Fatalf("downstream retry spawned attempt 2 after upstream hard failure: %s", bead.ID)
+		}
+	}
+}
+
+func TestProcessRetryControlSkippedAttemptDoesNotRetry(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	root := mustCreate(t, store, beads.Bead{Title: "workflow", Metadata: map[string]string{
+		beadmeta.KindMetadataKey: beadmeta.KindWorkflow,
+	}})
+	control := mustCreate(t, store, beads.Bead{Title: "implementation", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:           beadmeta.KindRetry,
+		beadmeta.RootBeadIDMetadataKey:     root.ID,
+		beadmeta.StepRefMetadataKey:        "mol-test.implementation",
+		beadmeta.MaxAttemptsMetadataKey:    "3",
+		beadmeta.OnExhaustedMetadataKey:    "hard_fail",
+		beadmeta.SourceStepSpecMetadataKey: `{"id":"implementation","title":"Implementation","type":"task","retry":{"max_attempts":3}}`,
+	}})
+	attempt := mustCreate(t, store, beads.Bead{Title: "implementation attempt 1", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.StepRefMetadataKey:    "mol-test.implementation.attempt.1",
+		beadmeta.AttemptMetadataKey:    "1",
+		beadmeta.OutcomeMetadataKey:    beadmeta.OutcomeSkipped,
+	}})
+	mustClose(t, store, attempt.ID)
+	mustDep(t, store, control.ID, attempt.ID, "blocks")
+
+	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl: %v", err)
+	}
+	if result.Action != "canceled" {
+		t.Fatalf("result = %+v, want canceled", result)
+	}
+	after := mustGet(t, store, control.ID)
+	if after.Status != "closed" || after.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeCanceled {
+		t.Fatalf("control = status %q outcome %q, want closed/canceled", after.Status, after.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	all, err := beads.DirectMembers(store, root.ID)
+	if err != nil {
+		t.Fatalf("list workflow members: %v", err)
+	}
+	for _, bead := range all {
+		if bead.Metadata[beadmeta.StepRefMetadataKey] == "mol-test.implementation.attempt.2" {
+			t.Fatalf("skipped attempt spawned retry attempt 2: %s", bead.ID)
+		}
+	}
+}
+
+func TestProcessRetryControlSkipFailureLeavesControlBlockingRemainingWork(t *testing.T) {
+	t.Parallel()
+	base := beads.NewMemStore()
+
+	root := mustCreate(t, base, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, base, beads.Bead{
+		Title: "requirements",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.requirements",
+			"gc.step_id":          "requirements",
+			"gc.max_attempts":     "1",
+			"gc.on_exhausted":     "hard_fail",
+			"gc.source_step_spec": `{"id":"requirements","title":"Requirements","type":"task","retry":{"max_attempts":1}}`,
+		},
+	})
+	attempt := mustCreate(t, base, beads.Bead{
+		Title: "requirements attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id":   root.ID,
+			"gc.step_ref":       "mol-test.requirements.attempt.1",
+			"gc.attempt":        "1",
+			"gc.outcome":        "fail",
+			"gc.failure_class":  "hard",
+			"gc.failure_reason": "invalid_spec",
+		},
+	})
+	first := mustCreate(t, base, beads.Bead{
+		Title:    "first downstream",
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+	remaining := mustCreate(t, base, beads.Bead{
+		Title:    "remaining downstream",
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+	mustClose(t, base, attempt.ID)
+	mustDep(t, base, control.ID, attempt.ID, "blocks")
+	mustDep(t, base, first.ID, control.ID, "blocks")
+	mustDep(t, base, remaining.ID, control.ID, "blocks")
+
+	store := &failCloseForBeadStore{
+		Store:  base,
+		beadID: remaining.ID,
+		err:    errors.New("injected downstream close failure"),
+	}
+	if _, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{}); err == nil {
+		t.Fatal("processRetryControl unexpectedly succeeded")
+	}
+
+	gotControl := mustGet(t, store, control.ID)
+	if gotControl.Status == "closed" {
+		t.Fatal("control closed after a partial downstream skip failure")
+	}
+	gotFirst := mustGet(t, store, first.ID)
+	if gotFirst.Status != "closed" || gotFirst.Metadata["gc.outcome"] != "skipped" {
+		t.Fatalf("first downstream = status %q outcome %q, want closed/skipped", gotFirst.Status, gotFirst.Metadata["gc.outcome"])
+	}
+	gotRemaining := mustGet(t, store, remaining.ID)
+	if gotRemaining.Status != "open" {
+		t.Fatalf("remaining downstream status = %q, want open", gotRemaining.Status)
+	}
+	if mustReadyContains(t, store, remaining.ID) {
+		t.Fatal("remaining downstream became ready while failed control stayed open")
+	}
+}
+
+func TestMarkControllerSpawnErrorPreservesDiagnosticsWhenDownstreamSkipFails(t *testing.T) {
+	t.Parallel()
+	base := beads.NewMemStore()
+	root := mustCreate(t, base, beads.Bead{Title: "workflow", Metadata: map[string]string{
+		beadmeta.KindMetadataKey: beadmeta.KindWorkflow,
+	}})
+	control := mustCreate(t, base, beads.Bead{Title: "control", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:       beadmeta.KindRetry,
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+	}})
+	downstream := mustCreate(t, base, beads.Bead{Title: "downstream", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: root.ID,
+	}})
+	mustDep(t, base, downstream.ID, control.ID, "blocks")
+	store := &failCloseForBeadStore{Store: base, beadID: downstream.ID, err: errors.New("injected close failure")}
+
+	if retryable := markControllerSpawnError(store, control.ID, errors.New("invalid frozen spec"), ProcessOptions{}); retryable {
+		t.Fatal("hard controller error marked retryable")
+	}
+	after := mustGet(t, store, control.ID)
+	if after.Status == "closed" {
+		t.Fatal("control closed despite downstream skip failure")
+	}
+	if after.Metadata[beadmeta.ControllerErrorMetadataKey] != "invalid frozen spec" {
+		t.Fatalf("controller error = %q, want preserved root cause", after.Metadata[beadmeta.ControllerErrorMetadataKey])
+	}
+	if after.Metadata[beadmeta.FinalDispositionMetadataKey] != beadmeta.DispositionControllerError {
+		t.Fatalf("final disposition = %q, want controller_error", after.Metadata[beadmeta.FinalDispositionMetadataKey])
+	}
+}
+
 func TestProcessRetryControlTransientRetry(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()
@@ -2997,6 +3368,27 @@ func mustDep(t *testing.T, store beads.Store, from, to, depType string) { //noli
 type listFailStore struct {
 	beads.Store
 	err error
+}
+
+type failCloseForBeadStore struct {
+	beads.Store
+	beadID string
+	err    error
+}
+
+func (s *failCloseForBeadStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	closed := 0
+	for _, id := range ids {
+		if id == s.beadID {
+			return closed, s.err
+		}
+		n, err := s.Store.CloseAll([]string{id}, metadata)
+		closed += n
+		if err != nil {
+			return closed, err
+		}
+	}
+	return closed, nil
 }
 
 func (s *listFailStore) List(beads.ListQuery) ([]beads.Bead, error) {
