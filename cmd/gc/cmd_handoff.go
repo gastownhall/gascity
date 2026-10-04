@@ -377,7 +377,8 @@ func createHandoffMailWithDedup(msgStore, sessStore beads.Store, rec events.Reco
 		Body:        message,
 		ThreadID:    handoffThreadID(),
 		ExtraLabels: extraLabels,
-	}, dedupKey)
+		DedupKey:    dedupKey,
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: creating mail: %v\n", err) //nolint:errcheck // best-effort stderr
 		return mail.Message{}, false, false

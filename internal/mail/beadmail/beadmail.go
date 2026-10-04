@@ -255,11 +255,11 @@ func (p *Provider) findLiveDuplicate(to, key string) (mail.Message, bool, error)
 // stable thread label, and the handoff-specific extra labels to this
 // implementation. Sender-route metadata is resolved exactly as [Provider.Send]
 // does, so handoff mail replies route correctly.
-func (p *Provider) SendHandoff(intent mail.HandoffIntent, dedupKey string) (mail.Message, bool, error) {
+func (p *Provider) SendHandoff(intent mail.HandoffIntent) (mail.Message, bool, error) {
 	if intent.To == "" {
 		return mail.Message{}, false, fmt.Errorf("beadmail handoff: recipient is required")
 	}
-	dedupKey = strings.TrimSpace(dedupKey)
+	dedupKey := strings.TrimSpace(intent.DedupKey)
 	if dedupKey != "" {
 		existing, suppressed, err := p.findLiveDuplicate(intent.To, dedupKey)
 		if err != nil {

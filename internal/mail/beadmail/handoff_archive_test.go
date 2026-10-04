@@ -24,7 +24,7 @@ func sendInjectableAutoHandoff(t *testing.T, p *Provider, subject string) mail.M
 			mail.AutoHandoffLabel,
 			mail.ArchiveAfterInjectLabel,
 		},
-	}, "")
+	})
 	if err != nil {
 		t.Fatalf("SendHandoff(%s): %v", subject, err)
 	}

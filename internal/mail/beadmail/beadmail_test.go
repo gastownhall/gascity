@@ -2494,7 +2494,7 @@ func TestCheckAutoHandoffsReturnsOnlyUnreadDeliveryMarkedMail(t *testing.T) {
 		Subject:     "not deliverable",
 		ThreadID:    "thread-missing-marker",
 		ExtraLabels: []string{mail.AutoHandoffLabel},
-	}, "")
+	})
 	if err != nil {
 		t.Fatalf("SendHandoff missing archive marker: %v", err)
 	}
@@ -2505,7 +2505,7 @@ func TestCheckAutoHandoffsReturnsOnlyUnreadDeliveryMarkedMail(t *testing.T) {
 		Body:        "continue durable work",
 		ThreadID:    "thread-auto",
 		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
-	}, "")
+	})
 	if err != nil {
 		t.Fatalf("SendHandoff auto: %v", err)
 	}
@@ -2515,7 +2515,7 @@ func TestCheckAutoHandoffsReturnsOnlyUnreadDeliveryMarkedMail(t *testing.T) {
 		Subject:     "already delivered",
 		ThreadID:    "thread-read-auto",
 		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
-	}, "")
+	})
 	if err != nil {
 		t.Fatalf("SendHandoff read auto: %v", err)
 	}

@@ -27,7 +27,7 @@ func TestSendHandoffConfinesBeadSerialization(t *testing.T) {
 			mail.AutoHandoffLabel,
 			mail.ArchiveAfterInjectLabel,
 		},
-	}, "")
+	})
 	if err != nil {
 		t.Fatalf("SendHandoff: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestSendHandoffResolvesSenderRoute(t *testing.T) {
 		To:       "human",
 		Subject:  "HANDOFF: context cycle",
 		ThreadID: "thread-cafe",
-	}, "")
+	})
 	if err != nil {
 		t.Fatalf("SendHandoff: %v", err)
 	}
