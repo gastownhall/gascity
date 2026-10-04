@@ -1039,6 +1039,10 @@ func standaloneBDEnvForDir(dir string) []string {
 		"LC_ALL",
 		"TZ",
 		"DOLT_ROOT_PATH",
+		// internal/testenv sets this process-wide; this allowlist rebuilds the
+		// child env from scratch, so carry it or every standalone bd/dolt
+		// command forks a detached `dolt send-metrics`.
+		dolttest.DisableEventFlushVar,
 		integrationRealBDBinaryEnv,
 		integrationGCBinaryEnv,
 		integrationDoltBinaryEnv,
@@ -2203,6 +2207,9 @@ func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
 	}
 	if got["XDG_RUNTIME_DIR"] != dir {
 		t.Fatalf("XDG_RUNTIME_DIR = %q, want %q", got["XDG_RUNTIME_DIR"], dir)
+	}
+	if got[dolttest.DisableEventFlushVar] != dolttest.DisableEventFlushValue {
+		t.Fatalf("%s = %q, want %q carried into standalone bd env", dolttest.DisableEventFlushVar, got[dolttest.DisableEventFlushVar], dolttest.DisableEventFlushValue)
 	}
 	for _, key := range []string{
 		"GC_DOLT",
