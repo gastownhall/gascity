@@ -75,20 +75,32 @@ endpoints, credentials, timeouts, download and parallelism policy.
   `tools/rbe/fork-credential.sh` certifies only in-progress PR runs):
 
   ```bash
-  install -d -m 0700 ~/.config/gascity-rbe && cd ~/.config/gascity-rbe
+  install -d -m 0700 ~/.config/rbe
   # PKCS#8 EC key: Bazel's Netty TLS refuses a SEC1 "EC PRIVATE KEY".
-  openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out client.key
-  openssl req -new -key client.key -subj "/CN=<your-github-login>" -out client.csr
+  openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out ~/.config/rbe/rbe-maint.key
+  chmod 600 ~/.config/rbe/rbe-maint.key
+  # Exactly these two RDNs: CN = your GitHub login, O = gascity-maintainers.
+  openssl req -new -key ~/.config/rbe/rbe-maint.key \
+    -subj "/CN=<your-github-login>/O=gascity-maintainers" -out rbe-maint.csr
   ```
 
-  With the certificate and the executor endpoint the operators return, add
-  to `.bazelrc.local` (absolute paths; nothing else belongs there):
+  A CSR is public, so send it to a rbe-west operator over any channel. Your
+  GitHub login must be on the allowlist that the fork mint uses for
+  read/write PR runs. You get back `rbe-maint.crt`: client-auth only, valid
+  for 90 days, and its fingerprint is pinned on the farm. An operator revokes
+  it by removing that pin, effective immediately. To renew, send a new CSR
+  (preferably for a new key) before it expires. Maintainer certificates use
+  their own CA and a dedicated endpoint that reaches only the `oss`
+  instance. Results are still written only by the workers.
+
+  With the certificate and the endpoint the operators return, add to
+  `.bazelrc.local` (absolute paths; nothing else belongs there):
 
   ```
-  build:remote-exec --remote_executor=grpcs://<rbe-west endpoint>
+  build:remote-exec --remote_executor=grpcs://<maintainer endpoint>
   build:remote-exec --remote_instance_name=oss
-  build:remote-exec --tls_client_certificate=/home/<you>/.config/gascity-rbe/client.crt
-  build:remote-exec --tls_client_key=/home/<you>/.config/gascity-rbe/client.key
+  build:remote-exec --tls_client_certificate=/home/<you>/.config/rbe/rbe-maint.crt
+  build:remote-exec --tls_client_key=/home/<you>/.config/rbe/rbe-maint.key
   ```
 
   Allowlisted maintainers working on this OSS project run on the
