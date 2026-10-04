@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"strconv"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	beadslib "github.com/steveyegge/beads"
@@ -375,12 +376,35 @@ func (s *NativeDoltStore) CompareAndSetMetadataKey(id, key, expected, next strin
 	}
 
 	if expected != "" {
-		raw, err := nativeMetadataCASValue(expected)
+		stringExpected, err := nativeMetadataCASValue(expected)
 		if err != nil {
 			return false, fmt.Errorf("compare-and-set metadata on %q: %w", id, err)
 		}
-		request.Expected = raw
+		request.Expected = stringExpected
 		result, err := cas.CompareAndSetKey(ctx, request)
+		if err != nil {
+			return false, nativeStoreError(id, err)
+		}
+		if result.Swapped {
+			return true, nil
+		}
+		// Arm two, dialed only when the refusal's Current is a non-string JSON
+		// scalar whose own text equals expected -- a stored value this store's
+		// writers never produce (they only ever write strings) but that a
+		// caller still names by its plain text, the way metadataMapFromNative's
+		// map[string]string rendering does (a non-string value renders as its
+		// own JSON text). Retrying with the stored bytes verbatim is the one
+		// extra call that lets the comparison reach them. Anything else -- a
+		// live different value, or a JSON string (whose text is quoted and so
+		// never equals the unquoted expected, already covered by arm one) -- is
+		// a genuine mismatch, and retrying against it would turn a lost race
+		// into a steal.
+		raw, ok := nativeMetadataCASNonStringTextMatch(result.Current, expected)
+		if !ok {
+			return false, nil
+		}
+		request.Expected = raw
+		result, err = cas.CompareAndSetKey(ctx, request)
 		if err != nil {
 			return false, nativeStoreError(id, err)
 		}
@@ -423,6 +447,33 @@ func nativeMetadataCASValue(value string) (*json.RawMessage, error) {
 	}
 	raw := json.RawMessage(encoded)
 	return &raw, nil
+}
+
+// nativeMetadataCASNonStringTextMatch reports whether current is a stored raw
+// JSON value that is NOT itself a JSON string but whose text equals expected
+// once surrounding whitespace is trimmed -- production carries beads with a
+// non-string metadata value written by some other path (an integer
+// gc.control_epoch, among others), and this is the one comparison that still
+// reaches them without a pre-read: the role's own refusal already carries the
+// stored value in Current, so there is nothing to fetch separately.
+//
+// A JSON string's text is quoted and so never equals the unquoted expected --
+// that shape is already handled by arm one's plain string encoding, and
+// double-matching it here would risk a false positive against a string that
+// happens to equal its own quoted form.
+func nativeMetadataCASNonStringTextMatch(current *json.RawMessage, expected string) (*json.RawMessage, bool) {
+	if current == nil {
+		return nil, false
+	}
+	var asString string
+	if err := json.Unmarshal(*current, &asString); err == nil {
+		return nil, false
+	}
+	if strings.TrimSpace(string(*current)) != expected {
+		return nil, false
+	}
+	raw := append(json.RawMessage(nil), *current...)
+	return &raw, true
 }
 
 // nativeMetadataCASIsEmptyString reports the one Current value that makes the

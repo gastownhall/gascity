@@ -118,10 +118,83 @@ func (s *NativeDoltStore) Get(id string) (Bead, error) {
 		if err != nil {
 			return err
 		}
+		if bead.ParentID == "" && nativeDetailDependencyWasDropped(details) {
+			parentID, err := s.nativeDetailParentFallback(ctx, storage, id)
+			if err != nil {
+				return err
+			}
+			bead.ParentID = parentID
+		}
 		out = bead
 		return nil
 	})
 	return out, err
+}
+
+// nativeDetailDependencyWasDropped reports whether the detail view's
+// RESOLVED Dependencies list is shorter than the backend's own raw edge
+// count -- the one cheap, already-fetched signal that distinguishes "this
+// bead really has no outgoing edges" from "the detail view's target-join
+// silently dropped one or more it could not resolve" (see
+// nativeDetailParentFallback).
+//
+// DependencyCount is a plain `COUNT(*) FROM dependencies WHERE issue_id = ?`
+// (embeddeddolt's counts.go), unfiltered by whether the target resolves, so
+// it never drops what Dependencies() drops. A backend that leaves
+// DependencyCount nil -- every lightweight Storage double in this package's
+// own tests, none of which populate it -- is treated as "nothing to recover"
+// rather than as license to call EdgeReader, which is what keeps this gate
+// from forcing every such double to implement a role it has no other reason
+// to carry.
+func nativeDetailDependencyWasDropped(details *issueops.IssueDetails) bool {
+	if details == nil || details.DependencyCount == nil {
+		return false
+	}
+	return *details.DependencyCount > int64(len(details.Dependencies))
+}
+
+// nativeDetailParentFallback recovers a parent-child edge that the detail
+// view's target-RESOLVING Dependencies() dropped, because the far end is not
+// a row the detail view's own join can resolve to an issue -- a cross-ledger
+// molecule parent, most often, where nothing reconciles the two ledgers and
+// this store never minted the row. beadFromNativeIssueDetails's doc comment
+// explains why the detail view alone cannot answer this: its dependency list
+// is the far-end ISSUES, not the edge rows, so an unresolvable target is not
+// represented there at all, parent or not.
+//
+// EdgeReader answers from the EDGE instead, through issueops.DepTargetExpr,
+// which COALESCEs the three target spellings (an issue id, a wisp id, or
+// depends_on_external) -- so a genuinely foreign or unresolvable target
+// crosses here exactly as a resolvable one does. It is the same door DepList's
+// DOWN leg and DepMetadata already ride for this reason.
+//
+// Only called when the detail view produced no ParentID at all: a bead that
+// legitimately has none pays one extra lookup confirming that, rather than
+// Get silently trusting an empty field that might mean "dropped".
+func (s *NativeDoltStore) nativeDetailParentFallback(ctx context.Context, storage beadslib.Storage, id string) (string, error) {
+	reader, err := storage.EdgeReader()
+	if err != nil {
+		return "", nativeStoreError(id, err)
+	}
+	result, err := reader.ReadEdges(ctx, issueops.EdgeReadRequest{
+		IDs:   []string{id},
+		Types: []issueops.DependencyType{issueops.DepParentChild},
+	})
+	if err != nil {
+		return "", nativeStoreError(id, err)
+	}
+	for _, anchor := range result.Anchors {
+		if anchor.ID != id || anchor.Missing {
+			continue
+		}
+		for _, edge := range anchor.Edges {
+			if edge == nil {
+				continue
+			}
+			return edge.DependsOnID, nil
+		}
+	}
+	return "", nil
 }
 
 // List returns beads matching the query, through the reader role's listing.
