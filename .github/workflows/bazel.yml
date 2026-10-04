@@ -15,7 +15,10 @@
 #     values, so both workflows' actions share the remote cache and the
 #     second run of a commit is mostly cache hits;
 #   - no lane passes --config=sole-run (per lane from G0 on);
-#   - integration is evidence-only (|| true) until G3;
+#   - integration runs on pushes and dispatches only, evidence-only, until G3;
+#   - pull_request runs in mode cache (fork and Dependabot PRs while
+#     rbe-west's mint does not yet serve bazel.yml) run no lanes:
+#     bazel-test.yml covers them; rbe=cache dispatches still run them;
 #   - coverage uploads lcov as an artifact; bazel-test.yml keeps the Codecov
 #     upload (flag bazel-unit) so the flag is not reported twice.
 name: bazel
@@ -46,10 +49,13 @@ on:
       RBE_TLS_KEY:
         required: false
 
-# PR runs supersede each other; main runs always finish (they save the
-# runner cache and report coverage), so a push never cancels the previous one.
+# A PR's runs share one group and a newer one cancels the older. Every other
+# event (push to main, dispatch, call) gets its own group (the run id), so it
+# is never cancelled or queued behind another run: main runs save the runner
+# cache and report coverage. (A shared group without cancel-in-progress
+# would still replace a pending run with the next one.)
 concurrency:
-  group: bazel-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -110,6 +116,11 @@ jobs:
           case "$mode" in remote|fork-ro|fork-rw) enabled=true ;; esac
           { echo "mode=$mode"; echo "enabled=$enabled"; echo "tier=$tier"; } >> "$GITHUB_OUTPUT"
           echo "Bazel execution mode: **$mode**" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$PULL_REQUEST" = true ] && [ "$mode" = cache ]; then
+            echo "No lanes: pull_request runs in mode cache wait for rbe-west's mint to serve bazel.yml; bazel-test.yml covers this PR." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$mode" = fork-ro ]; then
+            echo "No acceptance lane: the fork pool has no network and \`gc init\` clones from github.com (ga-73eoo)." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Resolve the base branch commit (fresh-merge)
         id: base
@@ -142,7 +153,11 @@ jobs:
   lane:
     name: bazel / ${{ matrix.lane }}
     needs: rbe
-    if: needs.rbe.outputs.mode != 'skip'
+    # No lanes for a pull_request run in mode cache until rbe-west's mint
+    # serves bazel.yml (it mints for bazel-test.yml today): fork and
+    # Dependabot PRs would run every lane locally beside bazel-test.yml's
+    # run. rbe=cache dispatches (workflow_dispatch) still run them.
+    if: needs.rbe.outputs.mode != 'skip' && !(github.event_name == 'pull_request' && needs.rbe.outputs.mode == 'cache')
     # Remote modes: the runner is only a Bazel client. Local modes (cache,
     # local: rbe-fork closed or a dispatch) execute here, so they get 4 vCPU.
     runs-on: ${{ (needs.rbe.outputs.mode == 'cache' || needs.rbe.outputs.mode == 'local') && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-2vcpu-ubuntu-2404' }}
@@ -152,20 +167,27 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        lane: [unit, acceptance, integration]
         include:
           - lane: unit
             cmd: test --config=ci --keep_going //...
-          # The fork pool (mode fork-ro, instance oss-fork) runs every action
-          # with loopback only, and `gc init` clones gascity-packs from
-          # github.com (ga-73eoo), so this lane skips there.
           - lane: acceptance
             cmd: test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test
-            needs-network: true
           # Evidence-only until G3: agent-flow tests depend on ambient
           # agent-template resolution (product-side fix, D13).
           - lane: integration
             cmd: test --config=ci --config=integration --keep_going //test/integration:integration_test
             evidence-only: true
+        # A lane left out never starts a runner (nor mints an rbe-fork
+        # certificate). "none" matches no lane.
+        exclude:
+          # Pushes and dispatches only until G3 (evidence-only on pull
+          # requests would only spend the pool).
+          - lane: ${{ github.event_name == 'pull_request' && 'integration' || 'none' }}
+          # The fork pool (mode fork-ro, instance oss-fork) runs every action
+          # with loopback only, and `gc init` clones gascity-packs from
+          # github.com (ga-73eoo).
+          - lane: ${{ needs.rbe.outputs.mode == 'fork-ro' && 'acceptance' || 'none' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -221,14 +243,9 @@ jobs:
           CMD: ${{ matrix.cmd }}
           MODE: ${{ needs.rbe.outputs.mode }}
           LANE: ${{ matrix.lane }}
-          NEEDS_NETWORK: ${{ matrix.needs-network == true }}
           EVIDENCE_ONLY: ${{ matrix.evidence-only == true }}
         run: |
           set -o pipefail
-          if [ "$NEEDS_NETWORK" = true ] && [ "$MODE" = fork-ro ]; then
-            echo "::notice title=$LANE skipped on the fork pool::this lane needs github.com (ga-73eoo); the fork pool has no network"
-            exit 0
-          fi
           read -r -a args <<<"$CMD"
           rc=0
           start=$(date +%s)
@@ -243,14 +260,19 @@ jobs:
           exit "$rc"
 
       # R4: the client heap (setup-bazel sets -Xmx4g). Two weeks of these
-      # numbers size any lane that needs a 4 vCPU (16 GB) runner instead.
+      # numbers size any lane that needs a 4 vCPU (16 GB) runner instead; a
+      # peak above 3.5 GB warns (the lane is near an OOM).
       - name: Bazel client heap
         if: always() && steps.bazel.outcome == 'success'
         env:
           LANE: ${{ matrix.lane }}
         run: |
-          heap=$(bazel info peak-heap-size used-heap-size-after-gc max-heap-size 2>/dev/null | tr '\n' ' ' || true)
-          echo "bazel / $LANE heap: ${heap:-unavailable}" | tee -a "$GITHUB_STEP_SUMMARY"
+          info=$(bazel info peak-heap-size used-heap-size-after-gc max-heap-size 2>/dev/null || true)
+          echo "bazel / $LANE heap: $(tr '\n' ' ' <<<"${info:-unavailable}")" | tee -a "$GITHUB_STEP_SUMMARY"
+          peak=$(sed -n 's/^peak-heap-size: \([0-9][0-9]*\)MB$/\1/p' <<<"$info")
+          if [ -n "$peak" ] && [ "$peak" -gt 3584 ]; then
+            echo "::warning title=bazel / $LANE client heap near its limit::peak heap ${peak}MB, above 3.5 GB of the 4 GB -Xmx4g (R4)"
+          fi
 
       - name: Critical-path report
         if: always() && steps.test.outcome != 'skipped' && hashFiles('tools/bazel/critpath.py') != ''
@@ -309,9 +331,15 @@ jobs:
             --keep_going --test_timeout=600
       - name: Bazel client heap
         if: always() && steps.bazel.outcome == 'success'
+        env:
+          LANE: coverage
         run: |
-          heap=$(bazel info peak-heap-size used-heap-size-after-gc max-heap-size 2>/dev/null | tr '\n' ' ' || true)
-          echo "bazel / coverage heap: ${heap:-unavailable}" | tee -a "$GITHUB_STEP_SUMMARY"
+          info=$(bazel info peak-heap-size used-heap-size-after-gc max-heap-size 2>/dev/null || true)
+          echo "bazel / $LANE heap: $(tr '\n' ' ' <<<"${info:-unavailable}")" | tee -a "$GITHUB_STEP_SUMMARY"
+          peak=$(sed -n 's/^peak-heap-size: \([0-9][0-9]*\)MB$/\1/p' <<<"$info")
+          if [ -n "$peak" ] && [ "$peak" -gt 3584 ]; then
+            echo "::warning title=bazel / $LANE client heap near its limit::peak heap ${peak}MB, above 3.5 GB of the 4 GB -Xmx4g (R4)"
+          fi
       - name: Upload lcov report
         if: hashFiles('bazel-out/_coverage/_coverage_report.dat') != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -361,15 +389,22 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
+      # Lanes may be skipped only where the lane job's if skips them: mode
+      # skip, and a pull_request run in mode cache.
       - name: Evaluate
         env:
+          EVENT: ${{ github.event_name }}
           MODE: ${{ needs.rbe.outputs.mode }}
           RBE: ${{ needs.rbe.result }}
           LANES: ${{ needs.lane.result }}
           SYNC: ${{ needs.sync-check.result }}
         run: |
-          echo "mode=$MODE rbe=$RBE lanes=$LANES sync=$SYNC"
+          echo "event=$EVENT mode=$MODE rbe=$RBE lanes=$LANES sync=$SYNC"
           [ "$RBE" = success ] || exit 1
           [ "$SYNC" = success ] || exit 1
           [ "$MODE" = skip ] && exit 0
+          if [ "$EVENT" = pull_request ] && [ "$MODE" = cache ]; then
+            [ "$LANES" = skipped ]
+            exit $?
+          fi
           [ "$LANES" = success ]
