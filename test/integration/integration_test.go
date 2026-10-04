@@ -1442,10 +1442,18 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env = filterEnv(env, integrationGCBinaryEnv)
 	env = filterEnv(env, integrationDoltBinaryEnv)
 	env = filterEnv(env, "BEADS_DOLT_AUTO_START")
+	env = filterEnv(env, "GC_DOLT_INIT_LOCK_DIR")
 	if !useDolt {
 		env = append(env, "GC_DOLT=skip")
 	}
 	env = append(env, "GC_HOME="+gcHome)
+	// gc-beads-bd.sh serializes forced reinits on a per-database flock under
+	// $TMPDIR by default, shared by every process on the host. Every test city
+	// initializes the same "hq" database on its own Dolt server, so concurrent
+	// test actions on one worker would queue on one lock (and fail after its
+	// 60s budget under load). Cities that share a Dolt server share a GC_HOME,
+	// so a lock directory under it keeps the serialization the lock exists for.
+	env = append(env, "GC_DOLT_INIT_LOCK_DIR="+filepath.Join(gcHome, "dolt-init-locks"))
 	env = append(env, "XDG_RUNTIME_DIR="+runtimeDir)
 	env = append(env, managedDoltTestModeEnv+"=1")
 	env = append(env, managedDoltTestParentEnv+"="+strconv.Itoa(os.Getpid()))

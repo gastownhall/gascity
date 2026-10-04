@@ -197,10 +197,6 @@ filegroup(
 filegroup(
     name = "repo_source_tree",
     srcs = [
-        ":Makefile",
-        ":TESTING.md",
-        ":go.mod",
-        ":root_extras",
         "//cmd:bazel_repo_srcs",
         "//cmd/gc:bazel_repo_srcs",
         "//cmd/gc-write-mint:bazel_repo_srcs",
@@ -418,6 +414,10 @@ filegroup(
         "//test/tmuxtest:bazel_repo_srcs",
         "//test/toolhome:bazel_repo_srcs",
         "//test/workflows:bazel_repo_srcs",
+        ":go.mod",
+        ":Makefile",
+        ":TESTING.md",
+        ":root_extras",
     ],
     visibility = ["//visibility:public"],
 )

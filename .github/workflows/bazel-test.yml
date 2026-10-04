@@ -47,9 +47,14 @@ on:
         default: "on"
         options: ["on", "cache", "off"]
 
+# A PR's runs share one group and a newer one cancels the older. Every other
+# event (push to main, dispatch) gets its own group (the run id), so it is
+# never cancelled or queued behind another run: main runs save the runner
+# cache and upload coverage. (A shared group without cancel-in-progress
+# would still replace a pending run with the next one.)
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -94,6 +99,21 @@ jobs:
           fi
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # History for the merge below (blobless: commits and trees only).
+          fetch-depth: 0
+          filter: blob:none
+
+      # A pull_request run checks out refs/pull/N/merge as GitHub computed it
+      # when the event fired. A reopen, an approval-delayed first-time run or
+      # "Re-run jobs" reuses that commit, so it can predate fixes on main
+      # (2026-10-03: #6956 was closed and reopened at 21:24Z and its run tested
+      # a merge onto 28279be, before #6974's no-network test stubs). Test the PR
+      # head merged onto main's current tip instead; a conflict fails here
+      # (pull_request only; .github/actions/fresh-merge).
+      - name: Merge the PR head onto the base branch's current tip
+        id: fresh-merge
+        uses: ./.github/actions/fresh-merge
 
       - name: Install bazel via bazelisk
         run: |
@@ -309,9 +329,10 @@ jobs:
       # to ambient agent-template resolution (they fail under plain `go test`
       # on developer machines with real GC state; go-test CI passes on
       # pristine runners). Until template lookup precedence is fixed
-      # product-side, this step reports without gating.
+      # product-side, this step reports without gating. Never on a failed
+      # fresh merge: the checkout is then a half-merged PR head.
       - name: "bazel test //test/integration (evidence-only)"
-        if: always()
+        if: always() && steps.fresh-merge.outcome != 'failure'
         env:
           RBE_FORK_CERT: ${{ steps.fork-cert.outputs.cert }}
         run: |
@@ -363,6 +384,15 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          # History for the merge below (blobless: commits and trees only).
+          fetch-depth: 0
+          filter: blob:none
+      # The same fresh merge as the bazel job: the sync check runs on the
+      # PR head merged onto main's current tip (pull_request only).
+      - name: Merge the PR head onto the base branch's current tip
+        id: fresh-merge
+        uses: ./.github/actions/fresh-merge
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod

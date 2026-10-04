@@ -10,11 +10,15 @@ go_library(
         "allocator_bucket.go",
         "allocator_census.go",
         "allocator_create.go",
+        "allocator_create_named.go",
+        "allocator_decide.go",
         "allocator_demand_reads.go",
         "allocator_health.go",
         "allocator_ledger.go",
         "allocator_observe.go",
+        "allocator_plan.go",
         "allocator_scalecheck_lane.go",
+        "allocator_snapshot.go",
         "api_state.go",
         "api_state_conditional_writes.go",
         "api_state_emergency_relay.go",
@@ -670,6 +674,35 @@ go_binary(
     visibility = ["//visibility:public"],
 )
 
+# Two gc links that differ only in their stamped build commit (what the
+# release build's -ldflags "-X main.commit=..." sets), for the supervisor
+# binary-drift tests in //test/integration (start_drift_test.go). Those tests
+# used to `go build ./cmd/gc` inside the test action, which needs go.sum and a
+# module download that remote workers cannot do (and the fork pool has no
+# network). Keep the commits equal to driftHappyOldCommit /
+# driftHappyNewCommit.
+# keep
+go_binary(
+    name = "gc_drift_old",
+    testonly = True,
+    embed = [":gc_lib"],
+    # Built only as data of //test/integration:integration_test, never by //...
+    tags = ["manual"],
+    visibility = ["//test/integration:__pkg__"],
+    x_defs = {"main.commit": "deadbeefcafe1111"},
+)
+
+# keep
+go_binary(
+    name = "gc_drift_new",
+    testonly = True,
+    embed = [":gc_lib"],
+    # Built only as data of //test/integration:integration_test, never by //...
+    tags = ["manual"],
+    visibility = ["//test/integration:__pkg__"],
+    x_defs = {"main.commit": "facefeed02222222"},
+)
+
 go_test(
     name = "gc_test",
     size = "large",
@@ -680,12 +713,18 @@ go_test(
         "allocator_backstop_lane_test.go",
         "allocator_bucket_test.go",
         "allocator_census_test.go",
+        "allocator_create_named_prerefactor_test.go",
+        "allocator_create_named_test.go",
         "allocator_create_prerefactor_test.go",
         "allocator_create_test.go",
+        "allocator_decide_purity_test.go",
+        "allocator_decide_smoke_test.go",
+        "allocator_decide_test.go",
         "allocator_demand_reads_test.go",
         "allocator_health_test.go",
         "allocator_ledger_test.go",
         "allocator_observe_test.go",
+        "allocator_plan_test.go",
         "allocator_scalecheck_lane_test.go",
         "allocator_seams_prerefactor_test.go",
         "allocator_seams_test.go",
@@ -1016,6 +1055,7 @@ go_test(
         "converge_scope_store_test.go",
         "convergence_integration_test.go",
         "convoy_chargolden_test.go",
+        "core_formula_drain_ack_test.go",
         "crash_tracker_test.go",
         "cross_store_parent_contract_test.go",
         "cross_store_pipeline_test.go",
@@ -1430,6 +1470,7 @@ go_test(
         "session_reconciler_named_collapse_test.go",
         "session_reconciler_observation_regression_test.go",
         "session_reconciler_pool_replacement_test.go",
+        "session_reconciler_progress_idle_rewake_test.go",
         "session_reconciler_progress_test.go",
         "session_reconciler_read_after_write_test.go",
         "session_reconciler_relaunch_preparedstart_test.go",

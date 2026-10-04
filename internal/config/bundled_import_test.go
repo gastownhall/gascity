@@ -625,3 +625,66 @@ func TestSupersededBundledPinErrorsRecommendDoctorFix(t *testing.T) {
 		}
 	})
 }
+
+// TestGascityRolesSubpackSharesGascityPinAndCache pins ga-73eoo's config side:
+// the gascity template's default rig import (gascity/roles) is a bundled
+// subpack of the gascity pack. It carries the gascity pin, is served from
+// embedded content only at that pin, shares the gascity pack's synthetic
+// cache directory (no second materialization), and moves with the gascity pin
+// when the packv2-import-state doctor fix re-pins a superseded canonical one.
+func TestGascityRolesSubpackSharesGascityPinAndCache(t *testing.T) {
+	roles := PublicGascityRolesPackSource
+	if got := BundledSourcePinnedVersion(roles); got != PublicGascityPackVersion {
+		t.Fatalf("BundledSourcePinnedVersion(roles) = %q, want the gascity pin %q", got, PublicGascityPackVersion)
+	}
+	commit := strings.TrimPrefix(PublicGascityPackVersion, "sha:")
+	if !IsBundledSourceAtCanonicalPin(roles, commit) {
+		t.Fatalf("roles at the gascity pin must be served from embedded content")
+	}
+	const other = "0123456789abcdef0123456789abcdef01234567"
+	if IsBundledSourceAtCanonicalPin(roles, other) {
+		t.Fatalf("roles at a non-canonical commit must stay an ordinary remote import")
+	}
+	if a, b := RepoCacheKey(roles, commit), RepoCacheKey(PublicGascityPackSource, commit); a != b {
+		t.Fatalf("roles cache key %s != gascity cache key %s; the subpack must share its parent's synthetic cache", a, b)
+	}
+	if RepoCacheKey(roles, other) == RepoCacheKey(roles, commit) {
+		t.Fatalf("a non-canonical roles pin must not key into the synthetic cache")
+	}
+	for _, old := range SupersededPublicGascityPackVersions {
+		current, ok := SupersededBundledPinTarget(roles, old)
+		if !ok || current != PublicGascityPackVersion {
+			t.Fatalf("SupersededBundledPinTarget(roles, %s) = (%q, %v), want (%q, true): roles must move with the gascity pin", old, current, ok, PublicGascityPackVersion)
+		}
+	}
+	if _, ok := SupersededBundledPinTarget(roles, "sha:"+other); ok {
+		t.Fatalf("a deliberate non-canonical roles pin must not be rewritten")
+	}
+}
+
+// TestResolveGascityRolesWithoutLockIsOffline pins the ga-73eoo user-facing
+// fix: with no packs.lock (a fresh gc init before install) the roles import
+// resolves from the binary's embedded gascity tree, and the resolved pack
+// root holds the roles pack.toml. No git runs: the cache is synthetic.
+func TestResolveGascityRolesWithoutLockIsOffline(t *testing.T) {
+	home, cityDir := setupBundledImportTest(t)
+	roles := PublicGascityRolesPackSource
+	commit := canonicalBundledCommit(roles)
+
+	got, err := resolveInstalledRemoteImport(roles, PublicGascityPackVersion, cityDir, false)
+	if err != nil {
+		t.Fatalf("resolveInstalledRemoteImport(roles) without lock: %v", err)
+	}
+	if want := bundledRepoCacheDir(home, PublicGascityPackSource, commit); got != want {
+		t.Fatalf("cacheDir = %q, want the gascity pack's synthetic cache %q", got, want)
+	}
+	if err := builtinpacks.ValidateSyntheticRepo(got, builtinpacks.PublicRepository, commit); err != nil {
+		t.Fatalf("roles fallback did not hydrate a valid synthetic cache: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(got, "gascity", "roles", "pack.toml")); err != nil {
+		t.Fatalf("roles pack root missing from the synthetic cache: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(got, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("synthetic roles cache must not be a git checkout (stat .git err = %v)", err)
+	}
+}

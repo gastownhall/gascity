@@ -4,7 +4,8 @@
 test/bazel-hermeticity.toml lists the go_test packages whose results must
 never be served from the cache (tests that read the network, the calendar,
 or other state a Bazel action key does not cover). This script makes each
-listed package's go_test carry exactly the ledger's managed tags, and strips
+listed package's go_test rules (every one: the ledger, like the static
+scan, is per package) carry exactly the ledger's managed tags, and strips
 managed tags from every other go_test, so BUILD.bazel cannot drift from the
 ledger and gazelle regeneration cannot lose them. Tags outside MANAGED_TAGS
 are left alone.
@@ -89,9 +90,6 @@ def main(argv: list[str]) -> int:
         wanted = wanted_by_pkg.get(rel, [])
         if rel in wanted_by_pkg:
             seen.add(rel)
-            if len(blocks) != 1:
-                print(f"{path}: ledger package needs exactly one go_test, found {len(blocks)}", file=sys.stderr)
-                return 1
         out = src
         for block in reversed(blocks):
             new = retag(block.group(0), wanted)
