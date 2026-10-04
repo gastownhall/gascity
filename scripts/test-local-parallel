@@ -322,7 +322,8 @@ run_fan_out() {
     SHELL="${SHELL:-/bin/sh}" \
     GIT_CONFIG_NOSYSTEM=1 \
     GIT_CONFIG_GLOBAL="$gc_test_gitconfig" \
-    LANG="${LANG:-C.UTF-8}" \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
     TMPDIR="${TMPDIR:-/var/tmp}" \
     OBSERVABLE_TEST_LOG="${OBSERVABLE_TEST_LOG-}" \
     OBSERVABLE_FAILURE_LINES="${OBSERVABLE_FAILURE_LINES-}" \
