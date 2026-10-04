@@ -118,8 +118,10 @@ func integrationSrcs(t *testing.T, build string) []string {
 	if start < 0 {
 		t.Fatalf("%s: integration_test has no srcs list", integrationBuild)
 	}
-	body := rule[start+len("srcs = ["):]
-	body = body[:strings.Index(body, "]")]
+	body, _, ok := strings.Cut(rule[start+len("srcs = ["):], "]")
+	if !ok {
+		t.Fatalf("%s: integration_test srcs list is not closed", integrationBuild)
+	}
 	var srcs []string
 	for _, m := range regexp.MustCompile(`"([^"]+\.go)"`).FindAllStringSubmatch(body, -1) {
 		srcs = append(srcs, m[1])
