@@ -140,7 +140,7 @@ func (s *SQLiteStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
-	return s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, _ Bead) error {
+	if err := s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, _ Bead) error {
 		if _, err := tx.Exec(`DELETE FROM beads WHERE id=?`, id); err != nil {
 			return fmt.Errorf("deleting bead %q: %w", id, err)
 		}
@@ -154,7 +154,13 @@ func (s *SQLiteStore) DeleteIfMatch(id string, expectedRevision int64) error {
 			return err
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	if err := s.localStrings.DeleteBead(id); err != nil {
+		return fmt.Errorf("deleting bead %q: cleaning up local strings: %w", id, err)
+	}
+	return nil
 }
 
 // CompareAndSetMetadataKey swaps metadata[key] iff its current value equals

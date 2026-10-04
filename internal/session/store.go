@@ -49,24 +49,65 @@ func (s *Store) ApplyPatch(id string, patch MetadataPatch) error {
 	return s.store.SetMetadataBatch(id, map[string]string(patch))
 }
 
-// CommitStartedIfCurrent fences start completion against pending-create rollback
-// and incarnation allocation in this process. The lease is re-read under the
-// same mutation lock as those writers, not before acquiring it.
+// startCommitMaxAttempts bounds how many times CommitStartedIfCurrent re-reads
+// and re-decides when another writer keeps winning its revision fence.
+const startCommitMaxAttempts = 3
+
+// CommitStartedIfCurrent commits a start result only while the row still
+// passes PendingCreateLease.CommitVerdict against expected, the row the start
+// was prepared from. The lease is re-read under the mutation lock shared with
+// pending-create rollback and incarnation allocation, which fences those
+// writers in this process only.
+//
+// Writers in other processes (a `gc session kill` CLI, a successor
+// controller), and a cached re-read that has not seen them, are fenced by the
+// store. Where it resolves a conditional writer (beads.ResolveConditionalWriter)
+// the patch is written with UpdateIfMatch on the re-read revision. If another
+// writer lands first, the row is re-read and the verdict runs again, up to
+// startCommitMaxAttempts, so the patch lands only on a row that still passes.
+// A row that no longer passes reports (false, nil) with nothing written. A
+// writer that keeps winning leaves nothing written and returns the
+// precondition error, which the caller handles like any failed commit.
+//
+// Without a conditional writer (conditional writes off, or auto on a store
+// that cannot fence) the patch is written unconditionally after the re-read,
+// as before, which leaves the window between that read and the write. A
+// require-mode store that cannot fence, and a store that reports
+// beads.ErrConditionalWriteUnsupported at call time, return an error.
 func (s *Store) CommitStartedIfCurrent(expected Info, patch MetadataPatch) (bool, error) {
+	writer, _, err := beads.ResolveConditionalWriter(s.store)
+	if err != nil {
+		return false, fmt.Errorf("committing start of session %q: %w", expected.ID, err)
+	}
 	applied := false
-	err := WithSessionMutationLock(expected.ID, func() error {
-		current, _, err := s.GetPersistedResponse(expected.ID)
-		if err != nil {
-			return err
+	err = WithSessionMutationLock(expected.ID, func() error {
+		var conflict error
+		for attempt := 0; attempt < startCommitMaxAttempts; attempt++ {
+			bead, err := s.validatedBead(expected.ID)
+			if err != nil {
+				return err
+			}
+			if LeaseFromInfo(expected).CommitVerdict(LeaseFromInfo(infoFromPersistedBead(bead))) != LeaseCommit {
+				return nil
+			}
+			if writer == nil || len(patch) == 0 {
+				if err := s.ApplyPatch(expected.ID, patch); err != nil {
+					return err
+				}
+				applied = true
+				return nil
+			}
+			err = writer.UpdateIfMatch(expected.ID, bead.Revision, beads.UpdateOpts{Metadata: map[string]string(patch)})
+			switch {
+			case err == nil:
+				applied = true
+				return nil
+			case !beads.IsPreconditionFailed(err):
+				return fmt.Errorf("committing start of session %q: %w", expected.ID, err)
+			}
+			conflict = err
 		}
-		if LeaseFromInfo(expected).CommitVerdict(LeaseFromInfo(current)) != LeaseCommit {
-			return nil
-		}
-		if err := s.ApplyPatch(expected.ID, patch); err != nil {
-			return err
-		}
-		applied = true
-		return nil
+		return fmt.Errorf("committing start of session %q: lost the revision fence %d times: %w", expected.ID, startCommitMaxAttempts, conflict)
 	})
 	return applied, err
 }
@@ -506,12 +547,16 @@ const terminalCloseMaxAttempts = 3
 // SQLite with a revision column, FileStore, and a CachingStore over any of
 // them), the metadata and the closed status commit as ONE write fenced on the
 // revision Close observed. No reader can see, and no writer can land between,
-// a closed row and its terminal metadata. If a concurrent writer wins the fence
-// (for example a wake stamping state=awake), the atomic close writes nothing,
-// and Close re-reads and retries, up to terminalCloseMaxAttempts. If the row
-// was closed by someone else meanwhile, Close reports false; if the writer
-// keeps winning, Close returns the precondition error with the row still open,
-// and the caller's next pass retries.
+// a closed row and its terminal metadata. If a concurrent writer wins the
+// fence, the atomic close writes nothing and Close re-reads. It retries, up to
+// terminalCloseMaxAttempts, only while the re-read row still carries the facts
+// the close was decided on (closePremiseHolds). A writer that changed them,
+// such as a wake stamping state=awake, makes Close return
+// ErrSessionCloseSuperseded with nothing written, so the caller's next pass
+// decides again. If the row was closed by someone else meanwhile, Close
+// reports false. If a writer keeps winning without touching those facts,
+// Close returns the precondition error with the row still open, and the
+// caller's next pass retries.
 //
 // Stores WITHOUT the capability (BdStore, the exec store, plain MemStore, a
 // legacy SQLite layout, or a store whose conditional writes are disabled) keep
@@ -536,7 +581,13 @@ func (s *Store) Close(id, stateCode string, now time.Time) (bool, error) {
 	}
 	patch := ClosePatch(now, stateCode)
 	if closer, ok := beads.AtomicConditionalCloserFor(s.store); ok {
-		closed, err := s.closeAtomically(closer, bead, patch, nil)
+		decided := infoFromPersistedBead(bead)
+		closed, err := s.closeAtomically(closer, bead, patch, func(open beads.Bead) error {
+			if !closePremiseHolds(decided, infoFromPersistedBead(open)) {
+				return fmt.Errorf("closing session %q: %w", id, ErrSessionCloseSuperseded)
+			}
+			return nil
+		})
 		if !beads.IsConditionalWriteUnsupported(err) {
 			return closed, err
 		}
@@ -548,6 +599,26 @@ func (s *Store) Close(id, stateCode string, now time.Time) (bool, error) {
 		return false, fmt.Errorf("closing session %q: %w", id, err)
 	}
 	return true, nil
+}
+
+// ErrSessionCloseSuperseded reports that a terminal close lost its revision
+// fence to a writer that changed the facts the close was decided on (see
+// closePremiseHolds), so it wrote nothing. The row is still open, and the
+// caller's next pass decides again from a fresh read.
+var ErrSessionCloseSuperseded = errors.New("session changed since the close was decided")
+
+// closePremiseHolds reports whether open, a row a terminal close re-read after
+// losing its revision fence, still carries the facts of decided, the row the
+// close was decided on: the lifecycle facts (sameLifecycleFacts: state, sleep
+// reason, holds, the pending-create lease, wake request, pin, ...) and the
+// incarnation (generation and instance token). A `gc session kill` fence moves
+// state and sleep_reason, so it fails this check too. The caller decided to
+// close from those facts, so a retry may close only while they hold; a writer
+// that moved one of them, such as a wake, owns the next decision.
+func closePremiseHolds(decided, open Info) bool {
+	return sameLifecycleFacts(decided, open) &&
+		decided.Generation == open.Generation &&
+		decided.InstanceToken == open.InstanceToken
 }
 
 // closeAtomically runs Close's fenced single-write arm, starting from the
@@ -603,12 +674,15 @@ func (s *Store) closeAtomically(closer beads.AtomicConditionalCloser, bead beads
 // terminalCloseMaxAttempts, and never degrades to a split write. It reports
 // false, having written nothing, when the row is already closed, whether it
 // was closed before the first read or by a concurrent closer that won the
-// fence. It also yields to a fresh `gc session kill` fence (IsKillPendingInfo
-// at now) on any row it reads, returning ErrSessionKillPending with nothing
-// written: the kill owns that row, and lifecycle passes must not close it. The
-// caller decided to close on an older read, and without this check a lost
-// fence would re-read the kill fence and then close over it. The caller's next
-// pass decides again once the kill completes.
+// fence. It returns ErrSessionCloseSuperseded with nothing written when the
+// writer that won the fence changed the facts the close was decided on
+// (closePremiseHolds): a wake, a wake request, or a new incarnation. It also
+// yields to a fresh `gc session kill` fence (IsKillPendingInfo at now) on any
+// row it reads, returning ErrSessionKillPending with nothing written: the kill
+// owns that row, and lifecycle passes must not close it. The caller decided to
+// close on an older read, and without these checks a lost fence would re-read
+// the wake or the kill fence and then close over it. The caller's next pass
+// decides again.
 //
 // Stores without the capability (BdStore, the exec store, plain MemStore, a
 // legacy SQLite layout, or conditional writes disabled), and a store that
@@ -631,9 +705,14 @@ func (s *Store) CloseWithTerminalPatch(id string, patch MetadataPatch, commitMsg
 		if bead.Status == "closed" {
 			return false, nil
 		}
+		decided := infoFromPersistedBead(bead)
 		closed, err := s.closeAtomically(closer, bead, patch, func(open beads.Bead) error {
-			if IsKillPendingInfo(infoFromPersistedBead(open), now) {
+			reread := infoFromPersistedBead(open)
+			if IsKillPendingInfo(reread, now) {
 				return fmt.Errorf("closing session %q: %w", id, ErrSessionKillPending)
+			}
+			if !closePremiseHolds(decided, reread) {
+				return fmt.Errorf("closing session %q: %w", id, ErrSessionCloseSuperseded)
 			}
 			return nil
 		})

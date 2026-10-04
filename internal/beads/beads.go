@@ -407,6 +407,23 @@ func ConditionalWriterFor(store Store) (ConditionalWriter, bool) {
 	return nil, false
 }
 
+// ConditionalWriterForTarget is ConditionalWriterFor on the store a wrapper
+// declares as its conditional-writes resolution target
+// (ConditionalWritesResolveTargeter), which is how MetadataCASWriterFor and
+// AtomicConditionalCloserFor find their capabilities through the cmd/gc
+// policy store and the typed class wrappers. Like them it applies no rollout
+// mode: it serves effects that must fence whenever the store can, such as a
+// destructive delete or an ownership release. A writer it returns can still
+// answer ErrConditionalWriteUnsupported at call time (BdStore without
+// --if-revision, a legacy SQLite layout), and the caller decides what that
+// means.
+func ConditionalWriterForTarget(store Store) (ConditionalWriter, bool) {
+	if store == nil {
+		return nil, false
+	}
+	return ConditionalWriterFor(followConditionalWritesResolveTarget(store))
+}
+
 // PreconditionFailedError reports that a conditional write was rejected because
 // the bead's revision moved (bd exit 9 / the store's WHERE clause matched no
 // row). Expected/Current come from the backend's machine JSON when parseable and

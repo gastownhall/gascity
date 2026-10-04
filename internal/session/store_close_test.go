@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -63,6 +64,23 @@ func staleAwakeOnce(store beads.Store) func(string) error {
 	}
 }
 
+// unrelatedKey is a metadata key the lifecycle projection does not read.
+const unrelatedKey = "last_nudge_delivered_at"
+
+// unrelatedWriteOnce returns an interference that writes unrelatedKey exactly
+// once. It moves the revision without touching any fact a close is decided
+// on, so a fenced close must retry and still close.
+func unrelatedWriteOnce(store beads.Store) func(string) error {
+	fired := false
+	return func(id string) error {
+		if fired {
+			return nil
+		}
+		fired = true
+		return store.SetMetadata(id, unrelatedKey, "2026-09-28T01:02:03Z")
+	}
+}
+
 func seedOpenSession(t *testing.T, store beads.Store, name string) beads.Bead {
 	t.Helper()
 	created, err := store.Create(sessionBeadFixture(name, "open", map[string]string{"state": string(StateSuspended)}))
@@ -75,13 +93,15 @@ func seedOpenSession(t *testing.T, store beads.Store, name string) beads.Bead {
 var closeTestNow = time.Date(2026, 9, 28, 1, 2, 3, 0, time.UTC)
 
 // TestCloseFencesAStaleAwakeWriterOutOfTheTerminalRow is the regression for
-// the closed-but-awake strand. A wake stamps state=awake after Close has read
-// the row. Before the fix, Close wrote ClosePatch and then closed the row as
-// two writes, so the awake stamp landed between them and the row came to rest
-// status=closed state=awake. The reconciler and `gc session list` read that as
-// a live session. With a store that provides the atomic close, the stale write
-// loses nothing it should keep: the fence refuses the first attempt, Close
-// re-reads, and the retry publishes closed and drained in one write.
+// the closed-but-awake strand and for closing over a wake. A wake stamps
+// state=awake after Close has read the row. Before the atomic close, Close
+// wrote ClosePatch and then closed the row as two writes, so the awake stamp
+// landed between them and the row came to rest status=closed state=awake.
+// With the atomic close, the fence refused the first attempt, but the retry
+// re-read only the revision and closed the woken session anyway. The wake
+// changed the facts the close was decided on, so Close must now write nothing
+// and return ErrSessionCloseSuperseded, leaving the woken row open for the
+// next pass to decide.
 func TestCloseFencesAStaleAwakeWriterOutOfTheTerminalRow(t *testing.T) {
 	backing := beads.NewAtomicCloseMemStore()
 	created := seedOpenSession(t, backing, "s-race")
@@ -90,21 +110,42 @@ func TestCloseFencesAStaleAwakeWriterOutOfTheTerminalRow(t *testing.T) {
 	front := NewStore(beads.SessionStore{Store: tracing})
 
 	closed, err := front.Close(created.ID, string(StateDrained), closeTestNow)
-	if err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if !closed {
-		t.Fatal("Close reported not-closed for an open session")
+	if !errors.Is(err, ErrSessionCloseSuperseded) || closed {
+		t.Fatalf("Close = (%v, %v), want (false, ErrSessionCloseSuperseded) after a wake won the fence", closed, err)
 	}
 	got, err := backing.Get(created.ID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Status != "closed" || got.Metadata["state"] != string(StateDrained) {
-		t.Fatalf("terminal row = status %q state %q, want closed/%s", got.Status, got.Metadata["state"], StateDrained)
+	if got.Status != "open" || got.Metadata["state"] != string(StateAwake) || got.Metadata["close_reason"] != "" {
+		t.Fatalf("row = status %q state %q close_reason %q, want the wake's open/awake row untouched", got.Status, got.Metadata["state"], got.Metadata["close_reason"])
 	}
-	if got.Metadata["close_reason"] != CanonicalCloseReason(string(StateDrained)) {
-		t.Fatalf("close_reason = %q, want the ClosePatch reason", got.Metadata["close_reason"])
+	if tracing.atomicCalls != 1 || tracing.plainCloseCalls != 0 {
+		t.Fatalf("atomic/plain close calls = %d/%d, want 1/0 (one lost fence, no retry, no split write)", tracing.atomicCalls, tracing.plainCloseCalls)
+	}
+}
+
+// TestCloseRetriesPastAWriteOutsideItsPremise proves the retry still serves
+// its purpose: a writer that moves the revision without touching a lifecycle
+// fact (a nudge stamp) wins the fence once, and the retry closes the row in
+// one write, keeping that writer's key.
+func TestCloseRetriesPastAWriteOutsideItsPremise(t *testing.T) {
+	backing := beads.NewAtomicCloseMemStore()
+	created := seedOpenSession(t, backing, "s-unrelated")
+	tracing := &closeInterferenceStore{Store: backing}
+	tracing.interfere = unrelatedWriteOnce(backing)
+	front := NewStore(beads.SessionStore{Store: tracing})
+
+	closed, err := front.Close(created.ID, string(StateDrained), closeTestNow)
+	if err != nil || !closed {
+		t.Fatalf("Close = (%v, %v), want (true, nil)", closed, err)
+	}
+	got, err := backing.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "closed" || got.Metadata["state"] != string(StateDrained) || got.Metadata[unrelatedKey] == "" {
+		t.Fatalf("row = status %q state %q %s %q, want closed/%s with the unrelated write kept", got.Status, got.Metadata["state"], unrelatedKey, got.Metadata[unrelatedKey], StateDrained)
 	}
 	if tracing.atomicCalls != 2 || tracing.plainCloseCalls != 0 {
 		t.Fatalf("atomic/plain close calls = %d/%d, want 2/0 (one lost fence, one retry, no split write)", tracing.atomicCalls, tracing.plainCloseCalls)
@@ -119,7 +160,11 @@ func TestCloseBoundsRepeatedAtomicRevisionConflicts(t *testing.T) {
 	backing := beads.NewAtomicCloseMemStore()
 	created := seedOpenSession(t, backing, "s-hot")
 	tracing := &closeInterferenceStore{Store: backing}
-	tracing.interfere = func(id string) error { return backing.SetMetadata(id, "state", string(StateAwake)) }
+	writes := 0
+	tracing.interfere = func(id string) error {
+		writes++
+		return backing.SetMetadata(id, unrelatedKey, strconv.Itoa(writes))
+	}
 	front := NewStore(beads.SessionStore{Store: tracing})
 
 	closed, err := front.Close(created.ID, string(StateDrained), closeTestNow)

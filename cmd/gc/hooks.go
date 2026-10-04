@@ -9,8 +9,10 @@ import (
 
 // beadEventHookNames lists the gc-installed bd event-forwarding hook names
 // removed by installBeadHooks. These hooks previously spawned a gc subprocess
-// per bead write; the controller's CachingStore now emits the same events
-// in-process and runs convoy/wisp/molecule autoclose natively.
+// per bead write. The controller's CachingStore emits events for gc's own
+// writes in-process, but a write that emits no gc event (an agent's `bd
+// close`, a human, raw SQL) now reaches it only through a cache reconcile
+// scan, late and collapsed to the latest state.
 var beadEventHookNames = []string{"on_create", "on_update", "on_close"}
 
 // hookStampLine returns the version-stamp comment embedded in gc-managed hook
@@ -52,8 +54,10 @@ func parseHookStampDate(content []byte) string {
 // installBeadHooks removes any gc-installed bead event-forwarding hooks from
 // dir/.beads/hooks/. The hook subprocess chain (gc event emit + gc convoy
 // autoclose + gc wisp autoclose + gc molecule autoclose) is replaced by the
-// controller's in-process CachingStore event path, which emits the same events
-// via its onChange callback and runs autoclose in runBeadCloseAutoclose.
+// controller's in-process CachingStore event path, which emits events via its
+// onChange callback and runs autoclose in runBeadCloseAutoclose. That path
+// covers gc's own writes; a write that emits no gc event (an agent's `bd
+// close`) reaches it only when a cache reconcile scan notices the change.
 //
 // Only hooks that carry a gc-hook-stamp are removed; user-authored hooks with
 // the same filename are left untouched. This function is idempotent: it is

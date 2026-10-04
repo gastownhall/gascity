@@ -102,6 +102,7 @@ go_test(
         "conditional_writes_inspect_test.go",
         "conditional_writes_resolve_internal_test.go",
         "corpus_decoder_test.go",
+        "delete_if_match_local_strings_internal_test.go",
         "dep_metadata_test.go",
         "event_payload_contract_test.go",
         "event_payload_test.go",

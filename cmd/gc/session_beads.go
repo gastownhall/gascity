@@ -2869,11 +2869,12 @@ func closeFailedCreateBead(sessFront *session.Store, id string, now time.Time, s
 	// SQLite, FileStore, or a cache over one) they commit as ONE write fenced on
 	// the revision the front door read, so no writer can land between them and
 	// no reader sees a closed row without its failed-create state. A row that
-	// is already closed is left as it is, and a row under a fresh `gc session
-	// kill` fence is left to the kill (#6749). Every other store keeps the single
-	// Tx with the metadata ordered first: there the claim/marker clears still
-	// land even if the Close then fails, because a stale claim on a still-open
-	// bead would ping-pong the reconciler
+	// is already closed is left as it is, a row under a fresh `gc session
+	// kill` fence is left to the kill (#6749), and a row a wake or a new
+	// incarnation changed after the read is left to that writer. Every other
+	// store keeps the single Tx with the metadata ordered first: there the
+	// claim/marker clears still land even if the Close then fails, because a
+	// stale claim on a still-open bead would ping-pong the reconciler
 	// (TestCloseBeadClearsPendingCreateClaimEvenWhenCloseFails). A failure
 	// reports false either way, so the reconciler re-runs the close.
 	if _, err := sessFront.CloseWithTerminalPatch(id, failedCreateClosePatch(now), "gc: close failed-create session "+id, now); err != nil {
@@ -3850,15 +3851,18 @@ func closeBeadPreservingAssignees(store beads.Store, id, reason string, preserve
 	// a cache over one) they commit as ONE write fenced on the revision the
 	// front door read. A concurrent writer, such as a wake stamping
 	// state=awake, can then never leave the row closed with live-looking
-	// metadata: it wins the fence, and the close re-reads and retries. If a
-	// concurrent closer wins instead, this call reports false and leaves the
-	// release cascade to that closer. If the row it reads carries a fresh
-	// `gc session kill` fence (#6749), the kill owns the row: the close writes
-	// nothing and reports false, and the next tick decides again. Every other
-	// store keeps the single Tx
-	// with the metadata ordered first. There the metadata may land while the
-	// Close fails; the helper then reports failure and the reconciler re-runs
-	// the close next tick, so no bead is durably left half-closed.
+	// metadata: it wins the fence, and the close re-reads. The close retries
+	// only while the row still carries the facts this close was decided on; a
+	// wake, wake request, or new incarnation makes it write nothing and report
+	// false (session.ErrSessionCloseSuperseded), and the next tick decides
+	// again. If a concurrent closer wins instead, this call reports false and
+	// leaves the release cascade to that closer. If the row it reads carries a
+	// fresh `gc session kill` fence (#6749), the kill owns the row: the close
+	// writes nothing and reports false, and the next tick decides again. Every
+	// other store keeps the single Tx with the metadata ordered first. There
+	// the metadata may land while the Close fails; the helper then reports
+	// failure and the reconciler re-runs the close next tick, so no bead is
+	// durably left half-closed.
 	closed, err := sessionFrontDoor(store).CloseWithTerminalPatch(id, session.ClosePatch(now, reason), "gc: close session "+id, now)
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: closing %s: %v\n", id, err) //nolint:errcheck
