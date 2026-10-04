@@ -1947,6 +1947,110 @@ func TestReleaseOrphanedPoolAssignments_ReopensStaleDirectAssigneeForNamedBacked
 	}
 }
 
+// TestReleaseOrphanedPoolAssignments_SkipsWhenReplacementSessionReportsCurrentlyProcessing
+// is the gascity#6362 regression: a replacement session (new session bead,
+// new identity — no alias/session_name/named-identity in common with the
+// predecessor) adopts a predecessor's assigned work without going through a
+// fresh gc hook --claim, so the work bead's own Assignee is still stamped
+// with the drained predecessor's raw session ID. No identity form recognizes
+// the replacement as the owner, so without the currently_processing_bead_id
+// escape hatch this sweep would reopen/reclaim work the replacement is
+// actively executing.
+func TestReleaseOrphanedPoolAssignments_SkipsWhenReplacementSessionReportsCurrentlyProcessing(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "adopted work",
+		Assignee: "th-mw3l9", // the drained predecessor's raw session ID
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	replacement := beads.Bead{
+		ID:     "th-ryrfv",
+		Title:  "replacement session",
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":           "th-ryrfv",
+			"template":               "worker",
+			session.CurrentBeadIDKey: work.ID,
+		},
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(store, cfg, "", []beads.Bead{replacement}, []beads.Bead{work}, nil, nil, nil)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none — replacement session reports actively processing this bead", released)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("status = %q, want in_progress", got.Status)
+	}
+	if got.Assignee != "th-mw3l9" {
+		t.Fatalf("assignee = %q, want th-mw3l9 (unchanged — this test only checks release is skipped)", got.Assignee)
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_ReleasesWhenOpenSessionReportsDifferentCurrentBead
+// proves the new currently_processing_bead_id check does not over-protect: an
+// open session that is actively processing a DIFFERENT bead must not shield
+// an unrelated stale assignment from release.
+func TestReleaseOrphanedPoolAssignments_ReleasesWhenOpenSessionReportsDifferentCurrentBead(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "stale work",
+		Assignee: "th-mw3l9",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	unrelatedSession := beads.Bead{
+		ID:     "th-other",
+		Title:  "unrelated live session",
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":           "th-other",
+			"template":               "worker",
+			session.CurrentBeadIDKey: "some-other-bead",
+		},
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(store, cfg, "", []beads.Bead{unrelatedSession}, []beads.Bead{work}, nil, nil, nil)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %v, want [%s] — no live session reports processing this bead", released, work.ID)
+	}
+}
+
 func TestReleaseOrphanedPoolAssignments_PreservesCanonicalNamedIdentity(t *testing.T) {
 	store := beads.NewMemStore()
 	work, err := store.Create(beads.Bead{
