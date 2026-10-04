@@ -278,7 +278,7 @@ func TestAllocator_RefusedIdentityDoesNotStarveTemplate(t *testing.T) {
 // quarantine plan nothing past the refused slot; a fence refusal (the name
 // was taken) advances one slot per pass, within the cap.
 func TestAllocator_RefusedIdentityStallsUnlessNameSpecific(t *testing.T) {
-	for _, cause := range []string{"prepare", "lock", "quarantine", createStageFence} {
+	for _, cause := range []string{"prepare", "lock", createStageFenceRead, "quarantine", createStageFence} {
 		for label, agent := range map[string]config.Agent{"max-5": allocPoolAgent("worker", 5), "unlimited": {Name: "worker", MaxActiveSessions: intPtr(-1)}} {
 			cfg := &config.City{Agents: []config.Agent{agent}}
 			vetoes := map[string]createVeto{}
@@ -315,26 +315,70 @@ func TestAllocator_RefusedIdentityStallsUnlessNameSpecific(t *testing.T) {
 	}
 }
 
+// Kills: a template-wide gate misread as name-specific (R17, R18): it would
+// spread across every slot, and loop over an unlimited pool's. A shut
+// endpoint and an unresolvable tmux_alias refuse every slot alike, so the
+// request stalls on its first plan, in a capped pool and in an unlimited
+// one whose fence veto elsewhere allows more than one try. However a
+// refusal is classified, the slots tried are bounded.
+func TestAllocator_TemplateWideRefusalStallsAnUnlimitedPool(t *testing.T) {
+	for cause, setup := range map[string]func(*config.Agent, *allocFixture){
+		gateEndpointShut: func(_ *config.Agent, f *allocFixture) {
+			f.in.Endpoints = map[endpointKey]endpointView{"provider:claude": {Gate: gateShut}}
+		},
+		gateNoSlot: func(a *config.Agent, _ *allocFixture) { a.TmuxAlias = "{{.Unclosed" },
+	} {
+		for _, limit := range []int{5, -1} {
+			agent := config.Agent{Name: "worker", MaxActiveSessions: intPtr(limit)}
+			f := newAllocFixture(t, nil).demand("worker", "w-1")
+			f.in.Endpoints = map[endpointKey]endpointView{"provider:claude": {Gate: gateClosed}}
+			f.in.CreateVetoes = map[string]createVeto{
+				"worker/worker-9": {Identity: createIdentity{Template: "worker", QualifiedInstance: "worker-9", Slot: 9}, Until: allocNow.Add(time.Minute), Cause: createStageFence},
+			}
+			setup(&agent, f)
+			f.in.Cfg = &config.City{Agents: []config.Agent{agent}, Workspace: config.Workspace{Provider: "claude"}}
+			done := make(chan allocDecision, 1)
+			go func() { done <- f.decide() }()
+			select {
+			case d := <-done:
+				refusals := 0
+				for _, r := range d.Trace {
+					if strings.Contains(r.Reason, cause) {
+						refusals++
+					}
+				}
+				if len(d.Plans) != 0 || refusals != 1 {
+					t.Errorf("%s, max %d: plans %v, %d refusals; want no plan and one refused slot: trace %v", cause, limit, planSlots(d, "worker"), refusals, d.Trace)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatalf("%s, max %d: the pass did not terminate", cause, limit)
+			}
+		}
+	}
+}
+
 // Kills: an identity lease treated as name-specific whatever its holder
-// (F3). A lease a dead or absent row holds frees nothing soon but blocks
-// only that name, so the request moves to the next slot; one a live row
-// holds stalls the request, as legacy does.
+// (F3, M13). A lease a dead or absent row holds frees nothing soon but
+// blocks only that name, so the request moves to the next slot; one a live
+// row holds, or a row whose liveness is unknown, stalls the request, as
+// legacy does.
 func TestAllocator_IdentityLeaseAdvancesOnlyPastANotLiveHolder(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
 	started := ago(time.Minute)
 	canonical := poolRow("gc-1", "worker", 1, "start-pending", "pending_create_claim", "true", "pending_create_started_at", started)
 	stale := poolRow("gc-1", "worker", 1, "start-pending", "pending_create_claim", "true", "pending_create_started_at", started,
 		"agent_name", "worker-2", "pool_slot", "")
-	for _, alive := range []bool{false, true} {
+	for holder, want := range map[string]string{"absent": "[3]", "alive": "[]", "unknown": "[]"} {
 		f := newAllocFixture(t, cfg).sessions(canonical).rigLeg(stale).demand("worker", "w-1", "w-2")
-		want := "[3]"
-		if alive {
+		switch holder {
+		case "alive":
 			f.alive("s-gc-1", InventoryAttrs{AttachedKnown: true})
-			want = "[]"
+		case "unknown":
+			f.noInventory = true
 		}
 		d := f.decide()
 		if got := fmt.Sprint(planSlots(d, "worker")); got != want || !traceHas(d, gateIdentityLease) {
-			t.Errorf("holder alive=%v: plans %s trace %v, want %s", alive, got, d.Trace, want)
+			t.Errorf("holder %s: plans %s trace %v, want %s", holder, got, d.Trace, want)
 		}
 	}
 }
@@ -1256,10 +1300,57 @@ func TestAllocator_DependencyFloorInFlightNotReplanned(t *testing.T) {
 	}
 }
 
+// Kills: a landed dependency floor row planned again (F1). Pass 1 plans the
+// db floor; the real create effect writes its row; once the census shows
+// the row, the entry clears and its reservation goes. The row is
+// dependency-only from its create, so the next pass reuses it as the floor
+// rather than planning a second one.
+func TestAllocator_DependencyFloorLandedRowNotReplanned(t *testing.T) {
+	db := config.Agent{Name: "db", StartCommand: "true", MaxActiveSessions: intPtr(3)}
+	app := config.Agent{Name: "app", StartCommand: "true", MaxActiveSessions: intPtr(3), DependsOn: []string{"db"}}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{db, app}}
+	appRow := poolRow("gc-a", "app", 1, "active", "gc.trigger_bead_id", "w-1")
+	d1 := newAllocFixture(t, cfg).sessions(appRow).alive("s-gc-a", InventoryAttrs{AttachedKnown: true}).demand("app", "w-1").decide()
+	if len(d1.Plans) != 1 || d1.Plans[0].Kind != createDependency {
+		t.Fatalf("pass 1 plans %+v, want one db floor", d1.Plans)
+	}
+	p := d1.Plans[0]
+	store := beads.NewMemStore()
+	h := newCreateHarness(t, nil)
+	h.reserve(t, "c1")
+	h.runAll(t, &createPass{cfg: cfg, store: store}, createPlanOf("c1", p.Template, p.Plan))
+	e := h.entry(t)
+	all, err := store.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var landed []beads.Bead
+	for _, b := range all {
+		if b.ID == e.Marker.RowID {
+			b.CreatedAt = allocNow.Add(-5 * time.Second)
+			landed = append(landed, b)
+		}
+	}
+	if len(landed) != 1 {
+		t.Fatalf("landed rows %+v (entry %+v), want the floor row", landed, e)
+	}
+	d2 := newAllocFixture(t, cfg).sessions(appRow, landed[0]).alive("s-gc-a", InventoryAttrs{AttachedKnown: true}).demand("app", "w-1").decide()
+	if got := planSlots(d2, "db"); len(got) != 0 {
+		le := entryOf(t, d2, landed[0].ID)
+		t.Fatalf("pass 2 plans a second db floor %v while the floor row %s is open (%s/%s)", got, landed[0].ID, le.Desired, le.Reason)
+	}
+	if le := entryOf(t, d2, landed[0].ID); !le.InDesired || le.Config == nil || !le.Config.DependencyOnly || landed[0].Metadata["dependency_only"] != "true" {
+		t.Fatalf("landed floor row = %s/%s config %+v, want it dependency-only and selected as the floor", le.Desired, le.Reason, le.Config)
+	}
+}
+
 // Kills: a sticky binding kept on work another row claimed or a resume
-// request names (F2). Pass 1 binds the reusable X to W; Y then claims W.
-// Whether Y is alive or a start candidate resuming W, X's pairing ends and X
-// takes the new work W2 rather than a fresh plan carrying it.
+// request names (F2), and assigned-but-open work read as unclaimed (M19).
+// Pass 1 binds the reusable X to W; Y then claims W. Whether Y is alive or a
+// start candidate resuming W, X's pairing ends and X takes the new work W2
+// rather than a fresh plan carrying it. When the demand read raced the
+// claim, so W is still demand, assigned work is claimed whether in progress
+// or still open.
 func TestAllocator_StickyBindingYieldsToClaimAndResume(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
 	x, y := poolRow("gc-x", "worker", 1, "active"), poolRow("gc-y", "worker", 2, "active")
@@ -1267,21 +1358,30 @@ func TestAllocator_StickyBindingYieldsToClaimAndResume(t *testing.T) {
 	if b := entryOf(t, d1, "gc-x").Binding; b == nil || b.WorkBeadID != "W" {
 		t.Fatalf("pass 1: X binding %+v, want W", b)
 	}
+	claimedBy := func(f *allocFixture, status string) *allocFixture {
+		f.in.Demand.AssignedWork = []beads.Bead{{ID: "W", Status: status, Assignee: "gc-y", Metadata: map[string]string{"gc.routed_to": "worker"}}}
+		f.in.Demand.AssignedStoreRefs = []string{""}
+		f.in.Prev, f.in.SelGen = d1.Snapshot, 2
+		return f
+	}
 	for _, yAlive := range []bool{true, false} {
 		f := newAllocFixture(t, cfg).sessions(x, y).demand("worker", "W2")
 		if yAlive {
 			f.alive("s-gc-y", InventoryAttrs{AttachedKnown: true})
 		}
-		f.in.Demand.AssignedWork = []beads.Bead{{ID: "W", Status: "in_progress", Assignee: "gc-y", Metadata: map[string]string{"gc.routed_to": "worker"}}}
-		f.in.Demand.AssignedStoreRefs = []string{""}
-		f.in.Prev, f.in.SelGen = d1.Snapshot, 2
-		d := f.decide()
+		d := claimedBy(f, "in_progress").decide()
 		ex, ey := entryOf(t, d, "gc-x"), entryOf(t, d, "gc-y")
 		if ex.Binding == nil || ex.Binding.WorkBeadID != "W2" || len(d.Plans) != 0 {
 			t.Errorf("y alive=%v: X binding %+v, plans %v; want X on W2 and no plan", yAlive, ex.Binding, planWork(d))
 		}
 		if !yAlive && (ey.Binding == nil || ey.Binding.WorkBeadID != "W") {
 			t.Errorf("Y resuming W: binding %+v, want W", ey.Binding)
+		}
+	}
+	for _, status := range []string{"in_progress", "open"} {
+		f := newAllocFixture(t, cfg).sessions(x, y).alive("s-gc-y", InventoryAttrs{AttachedKnown: true}).demand("worker", "W2", "W")
+		if b := entryOf(t, claimedBy(f, status).decide(), "gc-x").Binding; b == nil || b.WorkBeadID != "W2" {
+			t.Errorf("W %s and still demand: X binding %+v, want W2", status, b)
 		}
 	}
 }
@@ -1303,6 +1403,59 @@ func TestAllocator_StickyBindingEndsWhenWorkCloses(t *testing.T) {
 		if b := entryOf(t, f.decide(), "gc-x").Binding; b != nil {
 			t.Errorf("%s: pass 2 binding %+v after W closed, want none", label, b)
 		}
+	}
+}
+
+// Kills: a sticky binding that outlives its work's demand (F2, finding 4).
+// Pass 1 binds the in-flight X to W. W then closes, and the template's only
+// demand W2 is another in-flight row Y's trigger: pass after pass, X is not
+// held on W, whose demand is gone.
+func TestAllocator_StickyBindingNeedsUnclaimedDemand(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 5)}}
+	x := poolRow("gc-x", "worker", 1, "start-pending", "pending_create_claim", "true", "pending_create_started_at", ago(10*time.Second))
+	d := newAllocFixture(t, cfg).sessions(x).demand("worker", "W").decide()
+	if b := entryOf(t, d, "gc-x").Binding; b == nil || b.WorkBeadID != "W" {
+		t.Fatalf("pass 1: X binding %+v, want W", b)
+	}
+	y := poolRow("gc-y", "worker", 2, "start-pending", "pending_create_claim", "true", "pending_create_started_at", ago(10*time.Second),
+		"gc.trigger_bead_id", "W2")
+	for pass := 2; pass <= 4; pass++ {
+		f := newAllocFixture(t, cfg).sessions(x, y).demand("worker", "W2")
+		f.in.Prev, f.in.SelGen = d.Snapshot, uint64(pass)
+		d = f.decide()
+		if b := entryOf(t, d, "gc-x").Binding; b != nil && b.WorkBeadID == "W" {
+			t.Errorf("pass %d: X stays bound to the closed work W (%s)", pass, b.ID)
+		}
+	}
+}
+
+// Kills: a binding ID minted afresh each pass for the same (row, work) pair
+// (C6.1, finding 5): a start whose binding ID changed is abandoned. A
+// wake_mode=fresh pool's asleep row Y holds assigned work W; its
+// wake-known-identity request goes to the reusable X with a binding, which
+// keeps its ID across passes.
+func TestAllocator_BindingIDStableForTheSamePair(t *testing.T) {
+	agent := allocPoolAgent("worker", 5)
+	agent.WakeMode = "fresh"
+	cfg := &config.City{Agents: []config.Agent{agent}}
+	x, y := poolRow("gc-x", "worker", 1, "active"), poolRow("gc-y", "worker", 2, "asleep")
+	work := []beads.Bead{{ID: "W", Status: "in_progress", Assignee: "s-gc-y", Metadata: map[string]string{"gc.routed_to": "worker"}}}
+	var prev *selectionSnapshot
+	var ids []string
+	for pass := 1; pass <= 3; pass++ {
+		f := newAllocFixture(t, cfg).sessions(x, y)
+		f.in.Demand.AssignedWork, f.in.Demand.AssignedStoreRefs = work, []string{""}
+		f.in.Prev, f.in.SelGen = prev, uint64(pass)
+		d := f.decide()
+		b := entryOf(t, d, "gc-x").Binding
+		if b == nil || b.WorkBeadID != "W" {
+			t.Fatalf("pass %d: X binding %+v, want W", pass, b)
+		}
+		ids = append(ids, b.ID)
+		prev = d.Snapshot
+	}
+	if ids[0] != ids[1] || ids[1] != ids[2] {
+		t.Fatalf("binding IDs per pass %q, want one ID for the same (row, work) pair", ids)
 	}
 }
 

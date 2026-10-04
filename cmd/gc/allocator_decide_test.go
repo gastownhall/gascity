@@ -383,6 +383,20 @@ func TestAllocator_OccupiedNameIsNoneNeverGrantedOrDrained(t *testing.T) {
 	}
 }
 
+// Kills: C11 skipped for a configured named row (M14). The named session's
+// only canonical row has its runtime name held by a closed bead's runtime:
+// it is None(name-occupied), and no named plan replaces it.
+func TestAllocator_OccupiedNamedRowIsNone(t *testing.T) {
+	d := newAllocFixture(t, chatCity("always")).sessions(chatRow("gc-1", "3", "session_name", "chat", "state", "asleep")).
+		alive("chat", InventoryAttrs{OwnerState: OwnerSession, OwnerID: "gc-0"}).decide()
+	if e := entryOf(t, d, "gc-1"); e.Desired != desireNone || e.Reason != reasonNameOccupied || e.InDesired {
+		t.Fatalf("occupied named row = %s/%s in-desired=%v, want none name-occupied", e.Desired, e.Reason, e.InDesired)
+	}
+	if hasNamedPlan(d) {
+		t.Fatalf("plans %+v, want no named plan for an occupied identity", d.Plans)
+	}
+}
+
 // Kills: a slot or a start for an unknown-state row (F9): it is None, and
 // keeps its place in occupancy.
 func TestAllocator_UnknownStateRowNoneButOccupiesSlot(t *testing.T) {

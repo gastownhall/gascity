@@ -89,6 +89,18 @@ func (p *decidePass) demand() {
 	collected.DefaultCounts, collected.DefaultDemand = withoutSuppressedRoutes(collected, projected)
 	collected.UnassignedRouted = projected
 	p.merged = mergeCollectedDemand(p.cfg, collected)
+	claimed := make(map[string]bool, len(p.in.Demand.AssignedWork))
+	for _, w := range p.in.Demand.AssignedWork {
+		claimed[w.ID] = true
+	}
+	p.unclaimed = make(map[string]bool)
+	for _, d := range p.merged.ScaleCheckDemand {
+		for _, id := range d.WorkBeadIDs {
+			if id = strings.TrimSpace(id); id != "" && !claimed[id] {
+				p.unclaimed[id] = true
+			}
+		}
+	}
 	for template := range p.merged.PoolScaleCheckPartial {
 		p.markTemplate(template, true, true, "pool-scale-check-partial")
 	}
@@ -255,16 +267,26 @@ func (p *decidePass) boundWork() {
 }
 
 // stickyBinding is the binding the previous snapshot published for k, when
-// k is still a start candidate (only those carry bindings), or nil.
+// k is still a start candidate (only those carry bindings) and its work is
+// still unclaimed demand, or nil. Work a row claimed is no longer the bound
+// row's, and closed work is no longer demand (F2).
 func (p *decidePass) stickyBinding(k rowKey) *bindingTarget {
-	if p.in.Prev == nil || p.in.Prev.Entries[k] == nil || !p.snap.Entries[k].Liveness.startCandidate() {
+	if !p.snap.Entries[k].Liveness.startCandidate() {
 		return nil
 	}
-	b := p.in.Prev.Entries[k].Binding
-	if b == nil || strings.TrimSpace(b.WorkBeadID) == "" {
+	b := p.prevBinding(k)
+	if b == nil || !p.unclaimed[strings.TrimSpace(b.WorkBeadID)] {
 		return nil
 	}
 	return b
+}
+
+// prevBinding is the binding the previous snapshot published for k, or nil.
+func (p *decidePass) prevBinding(k rowKey) *bindingTarget {
+	if p.in.Prev == nil || p.in.Prev.Entries[k] == nil {
+		return nil
+	}
+	return p.in.Prev.Entries[k].Binding
 }
 
 // newPlanParams builds the planner's plan-only build params from the census:
@@ -401,11 +423,17 @@ func (p *decidePass) realizePools() {
 }
 
 // realizeRequest selects or plans one request. A refusal specific to the
-// planned name keeps its slot used and plans the next free one; the names
-// that can refuse are finite, so the slots tried are too. Any other refusal
-// stalls the request, as legacy's does (build_desired_state.go:5180).
+// planned name keeps its slot used and plans the next free one. Any other
+// refusal stalls the request, as legacy's does (build_desired_state.go:5180).
+// The plans tried are bounded by the slot range, and for an unlimited pool by
+// the names that can refuse (a fence veto or an identity lease names one), so
+// a refusal misread as name-specific cannot loop.
 func (p *decidePass) realizeRequest(cfgAgent *config.Agent, qualifiedName string, prefer *session.Info, request SessionRequest, used map[string]bool, usedSlots map[int]bool) {
-	for {
+	tries, unlimited, _, _ := freshPoolSlotUpperBound(cfgAgent)
+	if unlimited {
+		tries = len(p.in.CreateVetoes) + len(p.in.Census.Rows) + 1
+	}
+	for ; ; tries-- {
 		info, slot, plan, err := selectOrPlanPoolSessionBead(p.bp, cfgAgent, qualifiedName, prefer, request, p.in.Now, used, usedSlots)
 		if err != nil {
 			p.refuse(qualifiedName, "", rowKey{}, planErrorCause(err))
@@ -418,7 +446,7 @@ func (p *decidePass) realizeRequest(cfgAgent *config.Agent, qualifiedName string
 			}
 			return
 		}
-		if ok, retry := p.admitPoolPlan(createPool, cfgAgent, *plan, request); ok || !retry || cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		if ok, retry := p.admitPoolPlan(createPool, cfgAgent, *plan, request); ok || !retry || tries <= 1 || cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 			return
 		}
 	}
@@ -788,6 +816,9 @@ func (p *decidePass) dependencyFloor(cfgAgent *config.Agent) {
 		return
 	}
 	if plan != nil {
+		// The floor row is dependency-only from its create, as legacy's
+		// same-tick sync stamps it, so the next pass reuses it.
+		plan.metadata = map[string]string{"dependency_only": boolMetadata(true)}
 		p.admitPoolPlan(createDependency, cfgAgent, *plan, SessionRequest{Template: template})
 		return
 	}
@@ -828,17 +859,13 @@ func needsNormalize(cfgAgent *config.Agent, info session.Info) bool {
 // trigger, is consumed (C6.3, C6.6). Binding IDs carry the epoch and the
 // generation that first published them (C6.1).
 func (p *decidePass) bindings() {
-	// A sticky pairing holds only on unclaimed work: work a row claimed is
-	// no longer the bound row's, and resume-tier requests name only assigned
-	// work.
-	claimed := make(map[string]bool)
-	for _, w := range p.in.Demand.AssignedWork {
-		claimed[w.ID] = true
-	}
+	// A sticky pairing holds only on unclaimed work (stickyBinding) that a
+	// request of the pass still names; resume-tier requests name only
+	// assigned work.
 	demand := make(map[string]bool)
 	for _, state := range p.poolStates {
 		for _, r := range state.Requests {
-			if id := strings.TrimSpace(r.WorkBeadID); id != "" && !claimed[id] {
+			if id := strings.TrimSpace(r.WorkBeadID); id != "" {
 				demand[id] = true
 			}
 		}
@@ -885,7 +912,13 @@ func (p *decidePass) bindings() {
 			}
 			consumed[b.WorkBeadID] = k
 		}
-		b.ID = fmt.Sprintf("bind:%s:%s/%s:%s@%d", p.in.Epoch, k.Leg, k.ID, b.WorkBeadID, p.in.SelGen)
+		// The same (row, work) pair keeps its ID (C6.1): a start whose
+		// binding ID changed is abandoned.
+		if prev := p.prevBinding(k); prev != nil && prev.WorkBeadID == b.WorkBeadID {
+			b.ID = prev.ID
+		} else {
+			b.ID = fmt.Sprintf("bind:%s:%s/%s:%s@%d", p.in.Epoch, k.Leg, k.ID, b.WorkBeadID, p.in.SelGen)
+		}
 		e.Binding = &b
 	}
 }

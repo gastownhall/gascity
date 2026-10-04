@@ -178,6 +178,9 @@ type decidePass struct {
 	poolStates  []PoolDesiredState
 	poolDesired map[string]int
 	poolWork    []beads.Bead
+	// unclaimed is the merged demand's work that no row claimed: the only
+	// work a sticky binding holds (F2).
+	unclaimed map[string]bool
 	// standIns are the templates of the pending-create rows uncleared
 	// creates stand in for in pool demand, by stand-in ID; bound maps work
 	// C6.6 counts as consumed to the row holding it.
