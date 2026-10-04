@@ -35,6 +35,11 @@ def watchdog_issue_body(sha):
     )
 
 
+def listed_issue(number, body):
+    """One entry of `gh issue list --json url,body` output."""
+    return {"url": f"https://github.com/o/r/issues/{number}", "body": body}
+
+
 def calls_to(fake, *argv_prefix):
     """The recorded gh/git invocations whose argv starts with argv_prefix."""
     return [c for c in fake.calls if c[: len(argv_prefix)] == list(argv_prefix)]
@@ -119,9 +124,7 @@ class FindOpenEscalationIssueTests(unittest.TestCase):
         fake = FakeRun()
         fake.queue(
             ["gh", "issue", "list"],
-            stdout=json.dumps(
-                [{"url": "https://github.com/o/r/issues/42", "body": watchdog_issue_body("aaaa1111")}]
-            ),
+            stdout=json.dumps([listed_issue(42, watchdog_issue_body("aaaa1111"))]),
         )
         result = escalate_script.find_open_escalation_issue(run=fake)
         self.assertEqual(result, "https://github.com/o/r/issues/42")
@@ -132,8 +135,8 @@ class FindOpenEscalationIssueTests(unittest.TestCase):
             ["gh", "issue", "list"],
             stdout=json.dumps(
                 [
-                    {"url": "https://github.com/o/r/issues/7", "body": "Scheduler stalls under load."},
-                    {"url": "https://github.com/o/r/issues/42", "body": watchdog_issue_body("aaaa1111")},
+                    listed_issue(7, "Scheduler stalls under load."),
+                    listed_issue(42, watchdog_issue_body("aaaa1111")),
                 ]
             ),
         )
@@ -144,9 +147,7 @@ class FindOpenEscalationIssueTests(unittest.TestCase):
         fake = FakeRun()
         fake.queue(
             ["gh", "issue", "list"],
-            stdout=json.dumps(
-                [{"url": "https://github.com/o/r/issues/7", "body": "Scheduler stalls under load."}]
-            ),
+            stdout=json.dumps([listed_issue(7, "Scheduler stalls under load.")]),
         )
         self.assertIsNone(escalate_script.find_open_escalation_issue(run=fake))
 
@@ -192,12 +193,12 @@ class FindOpenEscalationIssueTests(unittest.TestCase):
 
 class CommentOnIssueTests(unittest.TestCase):
     def test_comments_on_the_issue_by_url(self):
+        issue_url = "https://github.com/o/r/issues/42"
         fake = FakeRun()
         fake.queue(["gh", "issue", "comment"])
-        escalate_script.comment_on_issue("https://github.com/o/r/issues/42", "still broken", run=fake)
+        escalate_script.comment_on_issue(issue_url, "still broken", run=fake)
         self.assertEqual(
-            fake.calls,
-            [["gh", "issue", "comment", "https://github.com/o/r/issues/42", "--body", "still broken"]],
+            fake.calls, [["gh", "issue", "comment", issue_url, "--body", "still broken"]]
         )
 
     def test_raises_when_gh_fails(self):
@@ -271,9 +272,7 @@ class EscalateTests(unittest.TestCase):
         fake = FakeRun()
         fake.queue(
             ["gh", "issue", "list"],
-            stdout=json.dumps(
-                [{"url": "https://github.com/o/r/issues/40", "body": watchdog_issue_body("aaaa1111")}]
-            ),
+            stdout=json.dumps([listed_issue(40, watchdog_issue_body("aaaa1111"))]),
         )
         fake.queue(["git", "log", "-1", "--format=%an <%ae>"], stdout="Sam Dev <sam@example.com>")
         fake.queue(["git", "log", "-1", "--format=%B"], stdout="fix: unrelated")
