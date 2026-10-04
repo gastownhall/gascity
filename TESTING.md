@@ -289,9 +289,10 @@ change as any other waiver.
 
 ## Waiver expiry clocks
 
-Two checked ledgers carry dated waivers: the runtime provider ledger
-(`internal/testutil/providerledger`) and the resource census
-(`internal/testpolicy/resourcecensus`). Both are untagged, both land in the
+Three checked ledgers carry dated waivers: the runtime provider ledger
+(`internal/testutil/providerledger`), the resource census
+(`internal/testpolicy/resourcecensus`), and the beads conformance skips
+(`internal/beads/beadstest`). The date check runs untagged, lands in the
 unit-core job, and that job runs in `.githooks/pre-push`. A date passing is
 therefore enough on its own to turn every Go-touching push in the fleet red with
 no code change involved. That happened on 2026-08-12 and again on 2026-08-26,
@@ -302,6 +303,17 @@ the waiver's owner.
 never reads `time.Now()` itself. A ledger that computes its own answer is a
 second policy, and a shared expiry date drifting between two ledgers is what two
 policies look like from the outside.
+
+**One date check, never cached.** Today is an input no build cache can key on:
+a cached PASS from before an expiry stays green after it. So the ledgers' own
+tests check structure only and never read the clock, which keeps their cached
+results true on every later day. Each ledger exports its dates
+(`providerledger.Expiries`, `resourcecensus.PolicyExpiries`,
+`beadstest.SkipExpiries`), and `internal/testpolicy/waiverexpiry` is the only
+test that compares them with today. Its Bazel target is tagged `external`, so
+it re-runs on every `bazel test`. It reads no repository files, so the re-run
+costs almost nothing. A new dated ledger exports its dates to that test rather
+than reading the clock itself.
 
 **Structural defects are not on the clock.** A missing owner, a malformed or
 absent date, an expiry parked past the horizon ceiling — none of these can
@@ -1540,7 +1552,7 @@ This table is rendered from `internal/testutil/providerledger` and checked by `g
 
 | Provider path | Roles | Reusable type | Port | Constructor | Discovery | Contract | Status |
 |---|---|---|---|---|---|---|---|
-| `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBacked` | runtime.builtin/exact:acp | `runtime.Provider` | waived by ga-80po0c.3 through 2026-10-08: TestACPDefaultDirConformance (internal/runtime/acp/conformance_test.go) calls NewSeamBacked directly through runtimetest.RunProviderTests with no dir injection, reusing the fakeacp fixture; verified clean on Linux (single run, -count=3 repeated, -race, and two concurrent OS-process runs against the shared default euid-scoped directory). The one remaining proof capability is a clean Darwin-lane run: ga-csh74h (Mac CI fleet-wide broken — setup-gascity-macos's go-version default is stale against go.mod's `go 1.26.6` requirement, failing mac-quality and skipping every downstream job including the packages-core shard this test would run in) currently blocks that evidence. Promote to proved once ga-csh74h is fixed and a clean Darwin run of TestACPDefaultDirConformance is recorded. |
+| `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBacked` | runtime.builtin/exact:acp | `runtime.Provider` | proved by internal/runtime/acp/conformance_test.go#TestACPDefaultDirConformance |
 | `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBackedWithDir` | runtime.builtin/exact:acp | `runtime.Provider` | proved by internal/runtime/acp/conformance_test.go#TestACPConformance |
 | `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/exec.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | proved by internal/runtime/exec/exec_test.go#TestExecConformance |
 | `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-05: the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract |
@@ -1558,8 +1570,8 @@ This table is rendered from `internal/testutil/providerledger` and checked by `g
 <!-- END CHECKED RUNTIME PROVIDER LEDGER -->
 
 Rows reading `waived by <bead> through <date>` are governed by "Waiver expiry
-clocks" above: the date is enforced through `internal/testpolicy/waiverclock`,
-it warns for 14 days on either side, and past that it is fatal in every mode.
+clocks" above: the date is enforced through `internal/testpolicy/waiverclock`
+by the never-cached `internal/testpolicy/waiverexpiry` check, it warns for 14 days on either side, and past that it is fatal in every mode.
 
 Conformance tests verify the behavioral contract (create/read/update/delete,
 error handling, concurrency). They deliberately don't test lifecycle ordering
