@@ -149,6 +149,21 @@ trace_bd_argv() {
         >>"$GC_BD_TRACE" 2>/dev/null || true
 }
 
+# require_executable_gc_bin fails closed when GC_BIN names a gc that can no
+# longer be executed. GC_BIN is the executable of the gc process that spawned
+# this script, usually the long-running supervisor. When that binary is removed
+# or replaced on disk (package upgrade, `brew unlink`, rebuilt checkout), the
+# supervisor keeps running from its deleted inode and keeps exporting the old
+# path. There is deliberately no PATH fallback: a gc of a different version
+# than the running supervisor must not rewrite managed Dolt config or state.
+require_executable_gc_bin() {
+    [ -n "${GC_BIN:-}" ] || return 0
+    if [ -f "$GC_BIN" ] && [ -x "$GC_BIN" ]; then
+        return 0
+    fi
+    die "gc-beads-bd: GC_BIN=$GC_BIN is not an executable file. The gc process that launched this helper (usually the supervisor) was started from a gc binary that has since been removed or upgraded, so it is still running an old build. Restart the supervisor from the current gc: run 'gc supervisor stop --wait', then 'gc supervisor install' (or 'gc supervisor start' if it does not run as a platform service). 'gc doctor' reports this as supervisor-binary."
+}
+
 resolve_gc_helper_bin() {
     if [ -n "${GC_BIN:-}" ]; then
         printf '%s\n' "$GC_BIN"
@@ -4453,6 +4468,10 @@ shift || true
 if [ -z "$GC_CITY_PATH" ]; then
     die "GC_CITY_PATH not set"
 fi
+
+# Refuse a stale GC_BIN before any helper call can fall back to legacy
+# behavior or touch city state.
+require_executable_gc_bin
 
 # A fresh scope which GC has explicitly delegated to bd must never reach the
 # historical GC-managed Dolt lifecycle below. The adapter supplies this marker

@@ -183,6 +183,7 @@ type buildDoctorChecksOpts struct {
 	SupervisorRunning       bool
 	SupervisorPID           int
 	SupervisorUnitOwnership doctor.SupervisorUnitOwnership
+	SupervisorBinary        doctor.SupervisorBinary
 	SkipCityDoltCheck       bool
 	SkipManagedDoltCheck    bool
 	SkipRigDoltChecks       bool
@@ -368,6 +369,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(doctor.NewControllerCheck(cityPath, controllerRunning))
 	register(doctor.NewSupervisorHTTPCheck(opts.SupervisorRunning))
 	register(doctor.NewSupervisorUnitOwnershipCheck(opts.SupervisorRunning, opts.SupervisorPID, opts.SupervisorUnitOwnership))
+	register(doctor.NewSupervisorBinaryCheck(opts.SupervisorRunning, opts.SupervisorPID, opts.SupervisorBinary))
 
 	if cfgErr == nil && cfg != nil {
 		cityName := loadedCityName(cfg, cityPath)
@@ -632,7 +634,9 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	supervisorPID := supervisorAliveHook()
 	supervisorRunning := supervisorPID != 0
 	var supervisorUnitOwnership doctor.SupervisorUnitOwnership
+	var supervisorBinary doctor.SupervisorBinary
 	if supervisorPID != 0 {
+		supervisorBinary = gatherSupervisorBinary(supervisorPID)
 		raw := supervisorDetermineUnitOwnership(supervisorPID)
 		supervisorUnitOwnership = doctor.SupervisorUnitOwnership{
 			Status:     raw.Status,
@@ -660,6 +664,7 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 		SupervisorRunning:       supervisorRunning,
 		SupervisorPID:           supervisorPID,
 		SupervisorUnitOwnership: supervisorUnitOwnership,
+		SupervisorBinary:        supervisorBinary,
 		SkipCityDoltCheck:       skipCityDoltCheck,
 		SkipManagedDoltCheck:    skipManagedDoltCheck,
 		SkipRigDoltChecks:       skipRigDoltChecks,
