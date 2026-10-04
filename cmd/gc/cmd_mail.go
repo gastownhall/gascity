@@ -1818,6 +1818,8 @@ The recipient defaults to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human".`,
 // cmdMailSend is the CLI entry point for sending mail. It opens the provider,
 // resolves session mailbox identities, and delegates to doMailSend.
 // The to parameter is the --to flag value (empty if not set).
+//
+//nolint:unparam // test-only CLI shim; notify/all are exercised via cmdMailSendJSON from the cobra command
 func cmdMailSend(args []string, notify bool, all bool, from string, to string, subject string, message string, stdout, stderr io.Writer) int {
 	return cmdMailSendJSON(args, notify, all, from, to, subject, message, "", false, stdout, stderr)
 }
