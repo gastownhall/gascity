@@ -252,7 +252,18 @@ func (q ListQuery) Matches(b Bead) bool {
 		return false
 	}
 	if q.Status != "" {
-		if b.Status != q.Status {
+		// Status:"open" selects the open SET, not the literal string: the
+		// native store translates it to ExcludeStatus{closed, in_progress}
+		// and has always returned bd's blocked rows, and mapBdStatus now
+		// preserves blocked instead of rewriting it to "open" (sc-bpn7w).
+		// Exact equality here would silently drop every blocked bead from
+		// each Status:"open" list and change demand, claim, and mail
+		// behavior. Any other status still matches exactly.
+		if q.Status == "open" {
+			if !IsOpenStatus(b.Status) {
+				return false
+			}
+		} else if b.Status != q.Status {
 			return false
 		}
 	} else if !q.IncludeClosed && b.Status == "closed" {

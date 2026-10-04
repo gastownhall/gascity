@@ -114,7 +114,7 @@ func buildAwakeInputFromReconcilerWithObservationErrors(
 	for i := range assignedWorkBeads {
 		wb := assignedWorkBeads[i]
 		a := strings.TrimSpace(wb.Assignee)
-		if a != "" && (wb.Status == "open" || wb.Status == "in_progress") {
+		if a != "" && (beads.IsOpenStatus(wb.Status) || wb.Status == "in_progress") {
 			ready := i < len(readyAssignedFlags) && readyAssignedFlags[i]
 			// Blocked mirrors #4726's hook-side fix on the wake side: an
 			// in_progress bead's IsBlocked projection (bd's denormalized
