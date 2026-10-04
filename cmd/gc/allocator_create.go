@@ -267,6 +267,7 @@ const (
 	createStagePrepare   = "prepare"    // transport, tmux alias, identifiers
 	createStageLock      = "lock"       // the city identifier locks
 	createStageFence     = "fence"      // the locked re-census and availability checks
+	createStageFenceRead = "fence-read" // a pool create's locked failure that proves no name taken
 	createStagePanic     = "panic"      // a panic before the write
 	createStageResolve   = "resolve"    // a named create's read-only template resolution
 )
@@ -387,7 +388,11 @@ func (x *createEffects) view(pass *createPass, token string) poolCreateView {
 // binding. A write the store refused (createWriteRefused), and any other
 // error, wrote nothing: the entry fails, its clear refunds, and its identity
 // gets a create veto (AM-N8), except for failed worktree evidence, which the
-// verdict cache throttles per work item rather than per slot.
+// verdict cache throttles per work item rather than per slot. A pool create's
+// veto is "fence" only when the locked checks proved its name taken; any
+// other failure under the locks (a failed live re-census or alias query, a
+// refused write) is "fence-read", which stalls the request where "fence"
+// moves it to the next slot (F3).
 //
 // The ledger moves first. A panic after it (a wake or log sink) is
 // recovered: the entry is settled, and the worker lives on.
@@ -414,6 +419,9 @@ func (x *createEffects) settle(p createPlan, token, stage string, info session.I
 	case stage == createStageWorktree:
 		x.host.ledger.Fail(p.EntryID, false, ledgerMarker{})
 	default:
+		if stage == createStageFence && p.Named == nil && !errors.Is(err, errPoolSessionNameUnavailable) {
+			stage = createStageFenceRead
+		}
 		x.host.ledger.FailCreate(p.EntryID, p.identity(), stage)
 	}
 	subject := p.Template

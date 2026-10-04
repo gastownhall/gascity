@@ -1568,7 +1568,7 @@ func repairStrandedPoolWorkerBead(
 		fmt.Fprintf(stderr, "session beads: stranded-repair for %s deferred: %d of %d unassign(s) failed; leaving session bead open for retry\n", info.ID, res.Failed, res.Failed+res.Released) //nolint:errcheck
 		return false
 	}
-	return closeBead(store, info.ID, strandedRepairCloseReason, now, stderr)
+	return closeBead(store, info, strandedRepairCloseReason, now, stderr)
 }
 
 func reassignStateAssignedToRetiredSessionBead(store beads.Store, oldSessionID, newSessionID string, now time.Time, stderr io.Writer) {
@@ -1742,7 +1742,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		if b.Status == "closed" || !isNamedSessionBead(b) || !isFailedCreateSessionBead(b) {
 			continue
 		}
-		if closeFailedCreateBead(sessFront, b.ID, now, stderr) {
+		if closeFailedCreateBead(sessFront, sessionInfoFromBead(b), now, stderr) {
 			openBeads[i].Status = "closed"
 		}
 	}
@@ -2032,7 +2032,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 					if err := sessFront.SetMarker(newBead.ID, "session_name", createdSessionName); err != nil {
 						finalizeErr = err
 						fmt.Fprintf(stderr, "session beads: setting pool session_name for %s: %v\n", agentName, err) //nolint:errcheck
-						closeFailedCreateBead(sessFront, newBead.ID, now, stderr)
+						closeFailedCreateBead(sessFront, sessionInfoFromBead(newBead), now, stderr)
 						return
 					}
 					if newBead.Metadata == nil {
@@ -2830,6 +2830,12 @@ func sessionFrontDoor(store beads.Store) *session.Store {
 	return session.NewStore(beads.SessionStore{Store: store})
 }
 
+// sessionInfoFromBead projects a session bead a caller decided to close into
+// the Info the terminal close fences on (session.Store.CloseWithTerminalPatch).
+func sessionInfoFromBead(b beads.Bead) session.Info {
+	return session.ReconcileRowsFromBeads([]beads.Bead{b})[0].Info
+}
+
 func setMetaBatch(sessFront *session.Store, id string, batch map[string]string, stderr io.Writer) error {
 	if len(batch) == 0 {
 		return nil
@@ -2863,20 +2869,26 @@ func failedCreateClosePatch(now time.Time) session.MetadataPatch {
 	return patch
 }
 
-func closeFailedCreateBead(sessFront *session.Store, id string, now time.Time, stderr io.Writer) bool {
+// closeFailedCreateBead closes the session expected describes as failed-create.
+// expected is the row the caller decided to close on.
+func closeFailedCreateBead(sessFront *session.Store, expected session.Info, now time.Time, stderr io.Writer) bool {
+	id := expected.ID
 	// The failed-create terminal metadata and the Close land together
 	// (ga-igcny0.1.1). On a store with the atomic terminal close (native Dolt,
 	// SQLite, FileStore, or a cache over one) they commit as ONE write fenced on
 	// the revision the front door read, so no writer can land between them and
 	// no reader sees a closed row without its failed-create state. A row that
-	// is already closed is left as it is, and a row under a fresh `gc session
-	// kill` fence is left to the kill (#6749). Every other store keeps the single
-	// Tx with the metadata ordered first: there the claim/marker clears still
-	// land even if the Close then fails, because a stale claim on a still-open
-	// bead would ping-pong the reconciler
+	// is already closed is left as it is, a row under a fresh `gc session
+	// kill` fence is left to the kill (#6749), and a row whose lifecycle facts
+	// or incarnation no longer match expected (a wake or a new incarnation that
+	// landed after the caller's decision) is left to that writer. Every other
+	// store keeps the single Tx with the metadata ordered first, and does not
+	// compare the row with expected: there the claim/marker clears still land
+	// even if the Close then fails, because a stale claim on a still-open bead
+	// would ping-pong the reconciler
 	// (TestCloseBeadClearsPendingCreateClaimEvenWhenCloseFails). A failure
 	// reports false either way, so the reconciler re-runs the close.
-	if _, err := sessFront.CloseWithTerminalPatch(id, failedCreateClosePatch(now), "gc: close failed-create session "+id, now); err != nil {
+	if _, err := sessFront.CloseWithTerminalPatch(expected, failedCreateClosePatch(now), "gc: close failed-create session "+id, now); err != nil {
 		fmt.Fprintf(stderr, "session beads: closing failed-create bead %s: %v\n", id, err) //nolint:errcheck
 		return false
 	}
@@ -3019,7 +3031,7 @@ func reapStaleSessionBeads(
 		if !releaseBeadScopedPoolRuntime(info, sp, stderr) {
 			continue
 		}
-		if closeBead(store, info.ID, "stale-session", now.UTC(), stderr) {
+		if closeBead(store, info, "stale-session", now.UTC(), stderr) {
 			fmt.Fprintf(stderr, "WARN: reconciler: reaped stuck-creating session bead %s — tmux session %q not found\n", info.ID, sn) //nolint:errcheck
 			reaped++
 		}
@@ -3152,7 +3164,7 @@ func reapPreBootSessionBeads(
 		if store == nil {
 			continue
 		}
-		if closeBead(store, info.ID, "stale-session", clk.Now().UTC(), stderr) {
+		if closeBead(store, info, "stale-session", clk.Now().UTC(), stderr) {
 			fmt.Fprintf(stderr, "session reconciler: reaped pre-boot session bead %s (session %q last started %s, host booted %s) — runtime server absent\n", //nolint:errcheck
 				info.ID, strings.TrimSpace(info.SessionNameMetadata), startedAt.UTC().Format(time.RFC3339), boot.UTC().Format(time.RFC3339))
 			reaped++
@@ -3355,7 +3367,7 @@ func cleanupDeadRuntimeSessionCorpses(
 		// frees the name for that wake.
 		if store != nil && claimsLive {
 			fmt.Fprintf(stderr, "session reconciler: closing session bead %s as dead-runtime (session %s, state %q)\n", info.ID, name, strings.TrimSpace(info.MetadataState)) //nolint:errcheck
-			closeBead(store, info.ID, "dead-runtime", clk.Now().UTC(), stderr)
+			closeBead(store, info, "dead-runtime", clk.Now().UTC(), stderr)
 		}
 		cleaned++
 	}
@@ -3680,9 +3692,9 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 		return false
 	}
 	if isFailedCreateSessionBead(b) {
-		return closeFailedCreateBead(sessionFrontDoor(store), b.ID, now, stderr)
+		return closeFailedCreateBead(sessionFrontDoor(store), sessionInfoFromBead(b), now, stderr)
 	}
-	return closeBead(store, b.ID, closeReason, now, stderr)
+	return closeBead(store, sessionInfoFromBead(b), closeReason, now, stderr)
 }
 
 func stopRuntimeBeforeSessionBeadMutation(
@@ -3801,8 +3813,8 @@ func staleReapStartBoundaryInfo(i session.Info) (time.Time, bool) {
 // have their assignee cleared and their status reset to "open" so the
 // pool reconciler can re-pick them. Without this, work orphaned by a
 // reap stays orphaned until someone clears the assignee by hand.
-func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Writer) bool {
-	return closeBeadPreservingAssignees(store, id, reason, nil, now, stderr)
+func closeBead(store beads.Store, expected session.Info, reason string, now time.Time, stderr io.Writer) bool {
+	return closeBeadPreservingAssignees(store, expected, reason, nil, now, stderr)
 }
 
 // closeBeadPreservingAssignees is closeBead with an opt-in exception list: any
@@ -3819,7 +3831,8 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 //
 // With a nil or empty preserve set this behaves exactly like closeBead, which
 // is the contract every other caller relies on.
-func closeBeadPreservingAssignees(store beads.Store, id, reason string, preserve []string, now time.Time, stderr io.Writer) bool {
+func closeBeadPreservingAssignees(store beads.Store, expected session.Info, reason string, preserve []string, now time.Time, stderr io.Writer) bool {
+	id := expected.ID
 	if stderr == nil {
 		stderr = io.Discard
 	}
@@ -3843,23 +3856,27 @@ func closeBeadPreservingAssignees(store beads.Store, id, reason string, preserve
 		return false
 	}
 	if reason == string(session.StateFailedCreate) {
-		return closeFailedCreateBead(sessionFrontDoor(store), id, now, stderr)
+		return closeFailedCreateBead(sessionFrontDoor(store), expected, now, stderr)
 	}
 	// The terminal metadata and the Close land together (ga-igcny0.1.1). On a
 	// store with the atomic terminal close (native Dolt, SQLite, FileStore, or
 	// a cache over one) they commit as ONE write fenced on the revision the
 	// front door read. A concurrent writer, such as a wake stamping
 	// state=awake, can then never leave the row closed with live-looking
-	// metadata: it wins the fence, and the close re-reads and retries. If a
-	// concurrent closer wins instead, this call reports false and leaves the
-	// release cascade to that closer. If the row it reads carries a fresh
-	// `gc session kill` fence (#6749), the kill owns the row: the close writes
-	// nothing and reports false, and the next tick decides again. Every other
-	// store keeps the single Tx
-	// with the metadata ordered first. There the metadata may land while the
-	// Close fails; the helper then reports failure and the reconciler re-runs
-	// the close next tick, so no bead is durably left half-closed.
-	closed, err := sessionFrontDoor(store).CloseWithTerminalPatch(id, session.ClosePatch(now, reason), "gc: close session "+id, now)
+	// metadata: it wins the fence, and the close re-reads. Every row the close
+	// reads, the first included, must still carry the lifecycle facts and
+	// incarnation of expected, the row the caller decided on. A wake, wake
+	// request, or new incarnation that landed after that decision makes it
+	// write nothing and report false (session.ErrSessionCloseSuperseded), and
+	// the next tick decides again. If a concurrent closer wins instead, this call reports false and
+	// leaves the release cascade to that closer. If the row it reads carries a
+	// fresh `gc session kill` fence (#6749), the kill owns the row: the close
+	// writes nothing and reports false, and the next tick decides again. Every
+	// other store keeps the single Tx with the metadata ordered first. There
+	// the metadata may land while the Close fails; the helper then reports
+	// failure and the reconciler re-runs the close next tick, so no bead is
+	// durably left half-closed.
+	closed, err := sessionFrontDoor(store).CloseWithTerminalPatch(expected, session.ClosePatch(now, reason), "gc: close session "+id, now)
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: closing %s: %v\n", id, err) //nolint:errcheck
 		return false

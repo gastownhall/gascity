@@ -140,6 +140,13 @@ func EnsureBundledPacksCurrent(cityRoot string) error {
 		if pack.Commit == "" {
 			continue
 		}
+		if !config.IsBundledSourceAtCanonicalPin(source, pack.Commit) {
+			// Pinned off the canonical commit: this is an ordinary remote
+			// import that gc import install owns fetching. The running
+			// binary never serves embedded content for it, so there is no
+			// synthetic cache to repair here.
+			continue
+		}
 		cachePath, err := RepoCachePath(source, pack.Commit)
 		if err != nil {
 			return err
