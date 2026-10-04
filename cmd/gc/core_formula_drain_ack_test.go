@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -119,6 +120,14 @@ func coreDrainAckSteps(t *testing.T) map[string][]string {
 	return steps
 }
 
+// coreDrainAckIsWorkStep reports whether b is a step a pool worker claims: not
+// a control bead the dispatcher serves, and not a topology bead (scope body,
+// spec) that routing never lands on.
+func coreDrainAckIsWorkStep(b beads.Bead) bool {
+	kind := b.Metadata[beadmeta.KindMetadataKey]
+	return !beadmeta.IsControlKind(kind) && !graphroute.IsWorkflowTopologyKind(kind)
+}
+
 // coreDrainAckRun is one core workflow cooked into a store and walked by a
 // pool worker up to, and including the claim of, its drain-ack step.
 type coreDrainAckRun struct {
@@ -127,8 +136,9 @@ type coreDrainAckRun struct {
 	terminal beads.Bead
 	work     beads.Bead
 	session  beads.Bead
-	// sink reports that workflow-finalize blocks directly on terminal, so the
-	// workflow must finalize once terminal closes.
+	// sink reports that workflow-finalize waits on terminal — directly, or
+	// through the scope-check control that finalizes it as a scope member — so
+	// the workflow must finalize once terminal closes.
 	sink bool
 }
 
@@ -152,7 +162,7 @@ func startCoreDrainAckRun(t *testing.T, formulaName, stepRef string) coreDrainAc
 		if m.Metadata[beadmeta.KindMetadataKey] == "workflow-finalize" {
 			finalizeID = m.ID
 		}
-		if m.ID == result.RootID || beadmeta.IsControlKind(m.Metadata[beadmeta.KindMetadataKey]) {
+		if m.ID == result.RootID || !coreDrainAckIsWorkStep(m) {
 			continue
 		}
 		if err := store.SetMetadata(m.ID, beadmeta.RoutedToMetadataKey, coreDrainAckPool); err != nil {
@@ -169,7 +179,25 @@ func startCoreDrainAckRun(t *testing.T, formulaName, stepRef string) coreDrainAc
 	if err != nil {
 		t.Fatalf("reading %s workflow-finalize deps: %v", formulaName, err)
 	}
-	run.sink = slices.ContainsFunc(finalizeDeps, func(d beads.Dep) bool { return d.Type == "blocks" && d.DependsOnID == run.terminal.ID })
+	finalizeBlockers := make(map[string]bool)
+	for _, d := range finalizeDeps {
+		if d.Type == "blocks" {
+			finalizeBlockers[d.DependsOnID] = true
+		}
+	}
+	run.sink = finalizeBlockers[run.terminal.ID]
+	for _, m := range members {
+		if m.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScopeCheck || !finalizeBlockers[m.ID] {
+			continue
+		}
+		deps, err := store.DepList(m.ID, "down")
+		if err != nil {
+			t.Fatalf("reading %s deps: %v", m.ID, err)
+		}
+		if slices.ContainsFunc(deps, func(d beads.Dep) bool { return d.Type == "blocks" && d.DependsOnID == run.terminal.ID }) {
+			run.sink = true
+		}
+	}
 	run.session, err = store.Create(beads.Bead{
 		Title:    coreDrainAckSession,
 		Type:     session.BeadType,
@@ -195,6 +223,7 @@ func startCoreDrainAckRun(t *testing.T, formulaName, stepRef string) coreDrainAc
 			return run
 		}
 		run.closeStep(t, step.ID, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass})
+		run.serveControls(t)
 	}
 }
 
@@ -206,7 +235,7 @@ func (r coreDrainAckRun) nextReadyStep(t *testing.T) (beads.Bead, bool) {
 	}
 	slices.SortFunc(ready, func(a, b beads.Bead) int { return strings.Compare(a.ID, b.ID) })
 	for _, b := range ready {
-		if b.Metadata[beadmeta.RootBeadIDMetadataKey] == r.rootID && b.Assignee == "" && !beadmeta.IsControlKind(b.Metadata[beadmeta.KindMetadataKey]) {
+		if b.Metadata[beadmeta.RootBeadIDMetadataKey] == r.rootID && b.Assignee == "" && coreDrainAckIsWorkStep(b) {
 			return b, true
 		}
 	}
@@ -230,6 +259,15 @@ func (r coreDrainAckRun) drainAck(t *testing.T) {
 	t.Helper()
 	var stderr bytes.Buffer
 	releaseUnexecutedClaimsOnDrainAck("", nil, r.store, nil, r.session, drainAckReleaseBudget, &stderr)
+	r.serveControls(t)
+}
+
+// serveControls is the control dispatcher: it serves every ready control bead
+// of the workflow — scope-checks, workflow-finalize — until nothing more
+// progresses. A worker's close unblocks its successor only once the scope-check
+// that finalizes it has run, so the walk serves controls after every close.
+func (r coreDrainAckRun) serveControls(t *testing.T) {
+	t.Helper()
 	for round := 0; round < 10; round++ {
 		ready, err := r.store.Ready()
 		if err != nil {
