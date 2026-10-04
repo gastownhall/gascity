@@ -1429,6 +1429,21 @@ title = "Do work for {{convoy_id}}"
 	if len(roots) != 2 {
 		t.Fatalf("graph roots = %+v, want two independent roots", roots)
 	}
+	owned, err := store.Get(source.ID)
+	if err != nil || owned.Assignee == "" {
+		t.Fatalf("cooked graphs left input available to a direct claim: %+v, %v", owned, err)
+	}
+	claimed, err := store.Create(beads.Bead{Title: "direct work", Type: "task", Assignee: "direct-session", Status: "in_progress"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	cmd = newFormulaCookCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"graph-a", "--attach", claimed.ID, "--json"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("formula cook launched over a direct execution owner")
+	}
 }
 
 func TestFormulaCookAttachGraphV2RejectsLiveLegacySourceWorkflow(t *testing.T) {

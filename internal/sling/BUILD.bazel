@@ -4,6 +4,7 @@ go_library(
     name = "sling",
     srcs = [
         "cycle.go",
+        "execution_ownership.go",
         "sling.go",
         "sling_attachment.go",
         "sling_core.go",
@@ -37,6 +38,7 @@ go_test(
     name = "sling_test",
     srcs = [
         "cycle_test.go",
+        "execution_ownership_test.go",
         "sling_attached_hint_test.go",
         "sling_attachment_test.go",
         "sling_convoy_reuse_test.go",

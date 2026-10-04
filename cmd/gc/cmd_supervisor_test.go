@@ -5166,9 +5166,9 @@ func (hangingListProvider) ListRunning(string) ([]string, error) {
 
 func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 	cityPath := t.TempDir()
-	logFile := filepath.Join(t.TempDir(), "ops.log")
-	script := writeSpyScript(t, logFile)
-	t.Setenv("GC_BEADS", "exec:"+script)
+	// Measure the shutdown timer contract without external provider teardown
+	// overhead; provider lifecycle ordering is covered by the lifecycle tests.
+	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
 	closer := &closerSpy{}

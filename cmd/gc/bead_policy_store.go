@@ -50,6 +50,12 @@ var (
 // *beadPolicyStore.
 func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
 
+// ConditionalWriterHandle preserves hard ownership fences through the policy
+// wrapper, independently of the optional conditional-writes rollout mode.
+func (s *beadPolicyStore) ConditionalWriterHandle() (beads.ConditionalWriter, bool) {
+	return beads.ConditionalWriterFor(s.Store)
+}
+
 var (
 	_ beads.BatchDeleter      = (*beadPolicyStore)(nil)
 	_ beads.BatchDeleter      = (*beadPolicyGraphStore)(nil)

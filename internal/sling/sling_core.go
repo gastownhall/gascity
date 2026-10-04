@@ -614,7 +614,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 				if rollbackErr := rollbackGraphV2ReplacementLaunch(deps.graphStore(), mResult.RootID, replacedSnapshot); rollbackErr != nil {
 					return wfResult, errors.Join(wfErr, rollbackErr)
 				}
-				return wfResult, wfErr
+				return wfResult, errors.Join(wfErr, inputOwnership(deps, a).ReleaseTerminal(context.Background(), graphInv.InputConvoy))
 			}
 			// The convoy-first branch deliberately passes an empty
 			// sourceBeadID (the source is tracked through the input convoy,
@@ -726,6 +726,15 @@ func slingPlainBead(opts SlingOpts, deps SlingDeps, beadID string, result SlingR
 // finalize executes the sling command, records telemetry, sets merge
 // metadata, creates auto-convoy, pokes the controller, and signals nudge.
 func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result SlingResult) (SlingResult, error) {
+	err := inputOwnership(deps, opts.Target).WithDirect(context.Background(), beadID, func() error {
+		var innerErr error
+		result, innerErr = finalizeWithInputLock(opts, deps, beadID, method, result)
+		return innerErr
+	})
+	return result, err
+}
+
+func finalizeWithInputLock(opts SlingOpts, deps SlingDeps, beadID, method string, result SlingResult) (SlingResult, error) {
 	a := opts.Target
 
 	// Execute routing -- prefer typed Router, fall back to shell Runner.
@@ -745,7 +754,7 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 		}
 		if err := deps.Router.Route(context.Background(), req); err != nil {
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
-			return result, fmt.Errorf("%w", err)
+			return result, err
 		}
 	} else {
 		slingCmd, slingWarn := BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), beadID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs)
@@ -754,7 +763,7 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 		}
 		if _, err := deps.Runner(rigDir, slingCmd, slingEnv); err != nil {
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
-			return result, fmt.Errorf("%w", err)
+			return result, err
 		}
 	}
 	telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, nil)
@@ -2035,46 +2044,35 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 
 		childEnv := ResolveSlingEnvForBead(a, deps, child)
 		rigDir := SlingDirForBead(deps.Cfg, deps.CityPath, child.ID)
-		if deps.Router != nil {
-			if err := validateBuiltInRouteStoreReachable(deps, child.ID, a); err != nil {
-				childResult.Failed = true
-				childResult.FailReason = err.Error()
-				batchResult.Children = append(batchResult.Children, childResult)
-				childErrors = append(childErrors, err)
-				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
-				failed++
-				continue
+		routeErr := inputOwnership(deps, a).WithDirect(context.Background(), child.ID, func() error {
+			if deps.Router != nil {
+				if err := validateBuiltInRouteStoreReachable(deps, child.ID, a); err != nil {
+					return err
+				}
+				req := RouteRequest{
+					BeadID:  child.ID,
+					Target:  a.QualifiedName(),
+					WorkDir: rigDir,
+					Env:     childEnv,
+					Force:   opts.Force,
+				}
+				return deps.Router.Route(context.Background(), req)
 			}
-			req := RouteRequest{
-				BeadID:  child.ID,
-				Target:  a.QualifiedName(),
-				WorkDir: rigDir,
-				Env:     childEnv,
-				Force:   opts.Force,
-			}
-			if err := deps.Router.Route(context.Background(), req); err != nil {
-				childResult.Failed = true
-				childResult.FailReason = err.Error()
-				batchResult.Children = append(batchResult.Children, childResult)
-				childErrors = append(childErrors, err)
-				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
-				failed++
-				continue
-			}
-		} else {
 			slingCmd, slingWarn := BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), child.ID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs)
 			if slingWarn != "" {
 				depsTracef(deps, "sling-core: %s", slingWarn)
 			}
-			if _, err := deps.Runner(rigDir, slingCmd, childEnv); err != nil {
-				childResult.Failed = true
-				childResult.FailReason = err.Error()
-				batchResult.Children = append(batchResult.Children, childResult)
-				childErrors = append(childErrors, err)
-				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
-				failed++
-				continue
-			}
+			_, err := deps.Runner(rigDir, slingCmd, childEnv)
+			return err
+		})
+		if routeErr != nil {
+			childResult.Failed = true
+			childResult.FailReason = routeErr.Error()
+			batchResult.Children = append(batchResult.Children, childResult)
+			childErrors = append(childErrors, routeErr)
+			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, routeErr)
+			failed++
+			continue
 		}
 
 		telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, nil)
@@ -2136,9 +2134,9 @@ func selectedStoreContainer(opts SlingOpts, deps SlingDeps) (beads.Bead, bool) {
 // SlingOpts.Reassign, #1007, #3408 (assignee), and #3231 (status).
 func reopenForReassign(beadID string, deps SlingDeps) error {
 	if deps.Store != nil {
-		b, err := deps.Store.Get(beadID)
+		_, err := deps.Store.Get(beadID)
 		if err == nil {
-			return reopenForReassignInStore(deps.Store, beadID, b)
+			return reopenOwnedInputForReassign(deps, beadID)
 		}
 		if !errors.Is(err, beads.ErrNotFound) {
 			return fmt.Errorf("reading %s from primary store to reopen for reassign: %w", beadID, err)
@@ -2162,16 +2160,28 @@ func reopenForReassign(beadID string, deps SlingDeps) error {
 		if info.Store == nil {
 			continue
 		}
-		b, err := info.Store.Get(beadID)
+		_, err := info.Store.Get(beadID)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
 			return fmt.Errorf("reading %s from store %q to reopen for reassign: %w", beadID, strings.TrimSpace(info.StoreRef), err)
 		}
-		return reopenForReassignInStore(info.Store, beadID, b)
+		selected := deps
+		selected.Store, selected.StoreRef = info.Store, info.StoreRef
+		return reopenOwnedInputForReassign(selected, beadID)
 	}
 	return nil
+}
+
+func reopenOwnedInputForReassign(deps SlingDeps, beadID string) error {
+	return inputOwnership(deps, config.Agent{}).WithReassign(context.Background(), beadID, func() error {
+		b, err := beads.HandlesFor(deps.Store).Live.Get(beadID)
+		if err != nil {
+			return err
+		}
+		return reopenForReassignInStore(deps.Store, beadID, b)
+	})
 }
 
 // reopenForReassignInStore clears b's assignee and resets an in_progress

@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "sourceworkflow",
-    srcs = ["sourceworkflow.go"],
+    srcs = [
+        "input_ownership.go",
+        "sourceworkflow.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/sourceworkflow",
     visibility = ["//:__subpackages__"],
     deps = [
@@ -10,6 +13,7 @@ go_library(
         "//internal/beads",
         "//internal/beads/closeorder",
         "//internal/citylayout",
+        "//internal/convoy",
         "//internal/pathutil",
     ],
 )
@@ -17,12 +21,15 @@ go_library(
 go_test(
     name = "sourceworkflow_test",
     srcs = [
+        "input_ownership_test.go",
         "sourceworkflow_test.go",
         "testenv_import_test.go",
     ],
     embed = [":sourceworkflow"],
     deps = [
+        "//internal/beadmeta",
         "//internal/beads",
+        "//internal/convoy",
         "//internal/testenv",
         "//internal/testutil",
     ],
