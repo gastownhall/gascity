@@ -2127,6 +2127,38 @@ func TestPrintMissingBeadErrorFormulaBackedDoesNotSuggestForce(t *testing.T) {
 	}
 }
 
+// A refused blocked sling must name every blocker on its own line, with the
+// blocker's status and title. Handing the operator "check the dependencies"
+// and nothing else is what turned a one-line dependency fix into a four-hour
+// stall in the original incident.
+func TestPrintBlockedErrorListsEveryBlocker(t *testing.T) {
+	var stderr bytes.Buffer
+	printBlockedError(&stderr, &sling.BlockedError{
+		BeadID: "FE-work1",
+		Target: "frontend/worker",
+		Blockers: []sling.Blocker{
+			{ID: "FE-dep1", Status: "open", Title: "invert the dependency edge"},
+			{ID: "FE-dep2", Status: "in_progress", Title: "land the parser fix"},
+			{ID: "FE-ghost"},
+		},
+	})
+
+	got := stderr.String()
+	for _, want := range []string{
+		"REFUSED",
+		"FE-work1",
+		"frontend/worker",
+		"--force",
+		"blocked by FE-dep1 (open) invert the dependency edge",
+		"blocked by FE-dep2 (in_progress) land the parser fix",
+		"blocked by FE-ghost (not found in store)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("stderr = %q, missing %q", got, want)
+		}
+	}
+}
+
 func TestCmdSlingDryRunRefusesMissingBead(t *testing.T) {
 	setupCmdSlingBeadExistsFixture(t)
 
