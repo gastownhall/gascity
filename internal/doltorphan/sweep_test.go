@@ -41,6 +41,20 @@ func chtimesRecursive(dir string, mtime time.Time) error {
 	})
 }
 
+// storeDirFor mirrors mkStoreDir's own "level"-per-depth-step layout to
+// compute the directory that actually owns the .dolt marker it creates —
+// i.e. the removal target a fixed Sweep must use, as opposed to the
+// top-level candidate dir mkStoreDir returns directly. For markerDepth 1
+// the store dir is the top-level dir itself; for markerDepth 2 or 3 it is
+// one or two "level" segments below it.
+func storeDirFor(dir string, markerDepth int) string {
+	store := dir
+	for i := 1; i < markerDepth; i++ {
+		store = filepath.Join(store, "level")
+	}
+	return store
+}
+
 func noLsofHits(context.Context) ([]byte, error) { return nil, nil }
 
 func TestSweep_RemovesOldMarkedUnheldDir(t *testing.T) {
@@ -97,14 +111,20 @@ func TestSweep_FindsMarkerAtEachAllowedDepth(t *testing.T) {
 			root := t.TempDir()
 			old := time.Now().Add(-2 * time.Hour)
 			dir := mkStoreDir(t, root, "orphan", depth, old)
+			storeDir := storeDirFor(dir, depth)
 
 			result := Sweep(SweepConfig{Root: root, RunLsof: noLsofHits})
 
 			if len(result.Removed) != 1 {
 				t.Fatalf("depth %d: Removed = %v, want exactly one removal", depth, result.Removed)
 			}
-			if result.Removed[0] != dir {
-				t.Fatalf("depth %d: Removed = %v, want [%s]", depth, result.Removed, dir)
+			if result.Removed[0] != storeDir {
+				t.Fatalf("depth %d: Removed = %v, want [%s] (the marker-owning store dir, not the top-level candidate)", depth, result.Removed, storeDir)
+			}
+			if depth > 1 {
+				if _, err := os.Stat(dir); err != nil {
+					t.Fatalf("depth %d: top-level candidate %s should survive; only the nested store dir is removed: %v", depth, dir, err)
+				}
 			}
 		})
 	}
@@ -261,6 +281,7 @@ func TestSweep_MultipleCandidatesMixedOutcomes(t *testing.T) {
 	recent := time.Now().Add(-time.Minute)
 
 	removeMe := mkStoreDir(t, root, "remove-me", 2, old)
+	removeMeStore := storeDirFor(removeMe, 2)
 	tooYoung := mkStoreDir(t, root, "too-young", 2, recent)
 	noMarker := mkStoreDir(t, root, "no-marker", 0, old)
 
@@ -271,12 +292,167 @@ func TestSweep_MultipleCandidatesMixedOutcomes(t *testing.T) {
 
 	result := Sweep(SweepConfig{Root: root, RunLsof: held})
 
-	if len(result.Removed) != 1 || result.Removed[0] != removeMe {
-		t.Fatalf("Removed = %v, want exactly [%s]", result.Removed, removeMe)
+	if len(result.Removed) != 1 || result.Removed[0] != removeMeStore {
+		t.Fatalf("Removed = %v, want exactly [%s]", result.Removed, removeMeStore)
+	}
+	if _, err := os.Stat(removeMe); err != nil {
+		t.Fatalf("top-level container %s should survive; only its nested store dir is removed: %v", removeMe, err)
 	}
 	for _, d := range []string{tooYoung, noMarker, heldDir} {
 		if _, err := os.Stat(d); err != nil {
 			t.Fatalf("dir %s should still exist: %v", d, err)
+		}
+	}
+}
+
+// buildContainerWithNestedStoreAndSiblings recreates the ga-zuzfel incident
+// shape (see the ga-txnhdk architect ruling and the repro test on
+// repro/ga-zuzfel-vartmp-sweep): a top-level container that legitimately
+// owns unrelated payload (a binary, a script) and also happens to hold a
+// Dolt database copy three levels down, exactly at maxMarkerDepth. Before
+// this fix, Sweep treated the whole container as the removal candidate
+// once it found the nested marker; the fix must remove only the store dir
+// that owns the marker and leave the container and its unrelated payload
+// untouched.
+func buildContainerWithNestedStoreAndSiblings(t *testing.T, root string, mtime time.Time) (container, storeDir, binary, script string) {
+	t.Helper()
+
+	container = filepath.Join(root, "container")
+	storeDir = filepath.Join(container, "dropped-db", "shared")
+	if err := os.MkdirAll(filepath.Join(storeDir, ".dolt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.dolt): %v", err)
+	}
+
+	binary = filepath.Join(container, "rollback-binary")
+	if err := os.WriteFile(binary, []byte("binary payload"), 0o755); err != nil {
+		t.Fatalf("WriteFile(binary): %v", err)
+	}
+	script = filepath.Join(container, "cleanup.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(script): %v", err)
+	}
+
+	// Age everything last: writing any child refreshes the parent's
+	// mtime, which is the field Sweep reads for the top-level candidate.
+	if err := chtimesRecursive(container, mtime); err != nil {
+		t.Fatalf("chtimesRecursive(%s): %v", container, err)
+	}
+	return container, storeDir, binary, script
+}
+
+func TestSweep_IncidentShape_RemovesOnlyNestedStoreLeavesSiblingsIntact(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	container, storeDir, binary, script := buildContainerWithNestedStoreAndSiblings(t, root, old)
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: noLsofHits})
+
+	if len(result.Removed) != 1 || result.Removed[0] != storeDir {
+		t.Fatalf("Removed = %v, want exactly [%s]", result.Removed, storeDir)
+	}
+	if _, err := os.Stat(storeDir); !os.IsNotExist(err) {
+		t.Fatalf("store dir %s should have been removed, stat err = %v", storeDir, err)
+	}
+	if _, err := os.Stat(container); err != nil {
+		t.Fatalf("top-level container %s should survive: %v", container, err)
+	}
+	if _, err := os.Stat(binary); err != nil {
+		t.Fatalf("unrelated binary %s should survive sweep of its container: %v", binary, err)
+	}
+	if _, err := os.Stat(script); err != nil {
+		t.Fatalf("unrelated script %s should survive sweep of its container: %v", script, err)
+	}
+}
+
+// TestSweep_SentinelFileExemptsTopLevelCandidate covers the additive
+// opt-out from the ga-txnhdk architect ruling: a literal ".no-orphan-sweep"
+// file directly inside a top-level candidate exempts it entirely,
+// regardless of age or any nested .dolt marker. This is a per-directory
+// marker the owner places deliberately, not a name/prefix filter on the
+// sweep candidate itself (that approach was rejected by the ruling).
+func TestSweep_SentinelFileExemptsTopLevelCandidate(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "protected", 2, old)
+	storeDir := storeDirFor(dir, 2)
+
+	if err := os.WriteFile(filepath.Join(dir, ".no-orphan-sweep"), nil, 0o644); err != nil {
+		t.Fatalf("WriteFile(sentinel): %v", err)
+	}
+	// Re-age dir: writing the sentinel just refreshed its mtime.
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatalf("Chtimes(%s): %v", dir, err)
+	}
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: noLsofHits})
+
+	if len(result.Removed) != 0 {
+		t.Fatalf("Removed = %v, want none (sentinel file present)", result.Removed)
+	}
+	if _, err := os.Stat(storeDir); err != nil {
+		t.Fatalf("nested store dir %s should survive under sentinel exemption: %v", storeDir, err)
+	}
+}
+
+// TestSweep_NoReapMarkerExemptsTopLevelCandidate covers the ".gc-no-reap"
+// keep marker that packs/actual's vartmp-scratch-reaper already honors
+// (ga-v83niq). Agents on a shared host mark a directory they keep on
+// purpose with that name, so a sweep that honored only ".no-orphan-sweep"
+// deleted a kept Dolt clone that carried it. Same contract as the sentinel
+// above: a marker directly inside a top-level candidate exempts it
+// regardless of age or any nested .dolt marker.
+func TestSweep_NoReapMarkerExemptsTopLevelCandidate(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "kept-clone", 2, old)
+	storeDir := storeDirFor(dir, 2)
+
+	if err := os.WriteFile(filepath.Join(dir, ".gc-no-reap"), nil, 0o644); err != nil {
+		t.Fatalf("WriteFile(.gc-no-reap): %v", err)
+	}
+	// Re-age dir: writing the marker just refreshed its mtime.
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatalf("Chtimes(%s): %v", dir, err)
+	}
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: noLsofHits})
+
+	if len(result.Removed) != 0 {
+		t.Fatalf("Removed = %v, want none (.gc-no-reap marker present)", result.Removed)
+	}
+	if _, err := os.Stat(storeDir); err != nil {
+		t.Fatalf("nested store dir %s should survive under the .gc-no-reap marker: %v", storeDir, err)
+	}
+}
+
+// TestSweep_SiblingStoresNeverWidenToContainer pins findDoltStoreDir's
+// behavior when a top-level container holds stores in separate sibling
+// subtrees: the first store in lexical order is removed this pass, and
+// neither the container nor the other store is touched.
+func TestSweep_SiblingStoresNeverWidenToContainer(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+
+	container := filepath.Join(root, "c")
+	storeA := filepath.Join(container, "a")
+	storeB := filepath.Join(container, "b", "x")
+	for _, store := range []string{storeA, storeB} {
+		if err := os.MkdirAll(filepath.Join(store, ".dolt"), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s/.dolt): %v", store, err)
+		}
+	}
+	if err := chtimesRecursive(container, old); err != nil {
+		t.Fatalf("chtimesRecursive(%s): %v", container, err)
+	}
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: noLsofHits})
+
+	if len(result.Removed) != 1 || result.Removed[0] != storeA {
+		t.Fatalf("Removed = %v, want exactly [%s]", result.Removed, storeA)
+	}
+	for _, d := range []string{container, storeB} {
+		if _, err := os.Stat(d); err != nil {
+			t.Fatalf("%s should survive sweeping sibling store %s: %v", d, storeA, err)
 		}
 	}
 }
