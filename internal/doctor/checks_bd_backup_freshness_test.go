@@ -10,6 +10,10 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+// testScopeDoltDatabase is the Dolt database the freshness tests' scope names in
+// metadata.json, and therefore the directory its managed backup lands in.
+const testScopeDoltDatabase = "alpha_db"
+
 func TestBulkDeleteSafe(t *testing.T) {
 	now := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
 	maxAge := 24 * time.Hour
@@ -63,6 +67,43 @@ func TestBulkDeleteSafe(t *testing.T) {
 		}
 		if reason != "" {
 			t.Fatalf("no backup config: want empty reason, got %q", reason)
+		}
+	})
+
+	// A scope whose live pipeline is the city's managed Dolt destination has no
+	// per-scope registration file: mol-dog-backup syncs <city>/.dolt-backup/<db>
+	// and never writes .beads/dolt-backup.json. Judging it on the legacy file
+	// blocks every bulk delete forever, because migrating froze that file and no
+	// backup action can advance it again.
+	t.Run("scope backed up by the city's managed dolt destination → safe despite a frozen legacy file", func(t *testing.T) {
+		city := t.TempDir()
+		scope := filepath.Join(city, "rigs", "alpha")
+		writeScopeDoltDatabase(t, scope)
+		writeBackupStateForFreshness(t, scope, now.Add(-168*time.Hour).Format(time.RFC3339))
+		writeManagedDoltBackupArtifacts(t, city, now.Add(-2*time.Hour))
+
+		cfg := &config.City{Rigs: []config.Rig{{Name: "alpha", Path: scope}}}
+		safe, reason := BulkDeleteSafe(city, cfg, maxAge, now)
+		if !safe {
+			t.Fatalf("managed dolt destination synced 2h ago: want safe=true, got safe=false, reason=%q", reason)
+		}
+	})
+
+	// The managed destination must still be able to go stale, or the gate would
+	// fail open on a city whose backup dog has stopped running.
+	t.Run("stale managed dolt destination → unsafe", func(t *testing.T) {
+		city := t.TempDir()
+		scope := filepath.Join(city, "rigs", "alpha")
+		writeScopeDoltDatabase(t, scope)
+		writeManagedDoltBackupArtifacts(t, city, now.Add(-72*time.Hour))
+
+		cfg := &config.City{Rigs: []config.Rig{{Name: "alpha", Path: scope}}}
+		safe, reason := BulkDeleteSafe(city, cfg, maxAge, now)
+		if safe {
+			t.Fatalf("managed dolt destination 72h stale: want safe=false, got safe=true")
+		}
+		if !strings.Contains(reason, "ago") {
+			t.Fatalf("reason should describe the stale age, got %q", reason)
 		}
 	})
 
@@ -126,6 +167,42 @@ func writeDoltBackupRegistration(t *testing.T, scopeRoot string) {
 	body := `{"backup_url":"file:///tmp/backup-dest","backup_name":"default"}`
 	if err := os.WriteFile(filepath.Join(dir, "dolt-backup.json"), []byte(body), 0o644); err != nil {
 		t.Fatalf("write dolt-backup.json: %v", err)
+	}
+}
+
+// writeManagedDoltBackupArtifacts populates <city>/.dolt-backup/<db> the way a
+// mol-dog-backup sync does, and dates its contents so freshness is derived from
+// the artifacts themselves. This destination carries no state file — the synced
+// contents ARE the record of the last sync, which is also how DoltBackupCheck
+// reads it.
+func writeManagedDoltBackupArtifacts(t *testing.T, cityPath string, syncedAt time.Time) {
+	t.Helper()
+	dir := filepath.Join(cityPath, ".dolt-backup", testScopeDoltDatabase)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir managed dolt backup dir: %v", err)
+	}
+	for _, name := range []string{"manifest", "vt6h1k9qpc0m3s8dnb2gafr7lx4jwe5y.darc"} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("backup artifact"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		if err := os.Chtimes(path, syncedAt, syncedAt); err != nil {
+			t.Fatalf("chtimes %s: %v", name, err)
+		}
+	}
+}
+
+// writeScopeDoltDatabase names the scope's Dolt database, which is what maps a
+// scope root onto its directory under <city>/.dolt-backup.
+func writeScopeDoltDatabase(t *testing.T, scopeRoot string) {
+	t.Helper()
+	dir := filepath.Join(scopeRoot, ".beads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	body := `{"backend":"dolt","dolt_mode":"server","dolt_database":"` + testScopeDoltDatabase + `"}`
+	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write metadata.json: %v", err)
 	}
 }
 
@@ -211,6 +288,78 @@ func TestBdBackupFreshnessCheck(t *testing.T) {
 		r := NewBdBackupFreshnessCheckForScopeRoots("", []string{fresh, stale}, maxAge, clock).Run(nil)
 		if r.Status != StatusWarning {
 			t.Fatalf("mixed: want StatusWarning, got %v (%s)", r.Status, r.Message)
+		}
+	})
+
+	// The city's managed destination is the pipeline a gc-managed rig actually
+	// has, and it leaves no per-scope registration file behind. Reading the
+	// frozen legacy file for such a scope warns forever and, through
+	// BulkDeleteSafe, permanently blocks order-tracking retention.
+	t.Run("managed dolt destination is OK and names the store it read", func(t *testing.T) {
+		city := t.TempDir()
+		scope := filepath.Join(city, "rigs", "alpha")
+		writeScopeDoltDatabase(t, scope)
+		writeBackupStateForFreshness(t, scope, now.Add(-168*time.Hour).Format(time.RFC3339Nano))
+		writeManagedDoltBackupArtifacts(t, city, now.Add(-3*time.Hour))
+
+		r := NewBdBackupFreshnessCheckForScopeRoots(city, []string{scope}, maxAge, clock).Run(nil)
+		if r.Status != StatusOK {
+			t.Fatalf("managed dolt destination synced 3h ago: want StatusOK, got %v (%s)", r.Status, r.Message)
+		}
+	})
+
+	t.Run("stale managed dolt destination warns and names the store", func(t *testing.T) {
+		city := t.TempDir()
+		scope := filepath.Join(city, "rigs", "alpha")
+		writeScopeDoltDatabase(t, scope)
+		writeManagedDoltBackupArtifacts(t, city, now.Add(-96*time.Hour))
+
+		r := NewBdBackupFreshnessCheckForScopeRoots(city, []string{scope}, maxAge, clock).Run(nil)
+		if r.Status != StatusWarning {
+			t.Fatalf("stale managed destination: want StatusWarning, got %v (%s)", r.Status, r.Message)
+		}
+		if !strings.Contains(r.Message, "managed dolt backup") {
+			t.Fatalf("message should name the managed dolt backup store, got %q", r.Message)
+		}
+	})
+
+	// An empty destination dir is not evidence of a sync — DoltBackupCheck
+	// requires contents too — so such a scope must keep falling back to whatever
+	// legacy state it has rather than reading as freshly backed up.
+	t.Run("empty managed destination dir falls back to the legacy state", func(t *testing.T) {
+		city := t.TempDir()
+		scope := filepath.Join(city, "rigs", "alpha")
+		writeScopeDoltDatabase(t, scope)
+		writeBackupStateForFreshness(t, scope, now.Add(-168*time.Hour).Format(time.RFC3339Nano))
+		if err := os.MkdirAll(filepath.Join(city, ".dolt-backup", testScopeDoltDatabase), 0o755); err != nil {
+			t.Fatalf("mkdir empty managed dir: %v", err)
+		}
+
+		r := NewBdBackupFreshnessCheckForScopeRoots(city, []string{scope}, maxAge, clock).Run(nil)
+		if r.Status != StatusWarning {
+			t.Fatalf("empty managed dir: want StatusWarning from the legacy file, got %v (%s)", r.Status, r.Message)
+		}
+		if !strings.Contains(r.Message, "embedded-store backup") {
+			t.Fatalf("message should name the legacy store it fell back to, got %q", r.Message)
+		}
+	})
+
+	// An explicit per-scope registration keeps precedence: it names a destination
+	// the operator chose, and bd stamps its own state file on every sync.
+	t.Run("explicit dolt-backup.json outranks the city's managed destination", func(t *testing.T) {
+		city := t.TempDir()
+		scope := filepath.Join(city, "rigs", "alpha")
+		writeScopeDoltDatabase(t, scope)
+		writeDoltBackupRegistration(t, scope)
+		writeDoltBackupState(t, scope, now.Add(-96*time.Hour).Format(time.RFC3339Nano))
+		writeManagedDoltBackupArtifacts(t, city, now.Add(-1*time.Hour))
+
+		r := NewBdBackupFreshnessCheckForScopeRoots(city, []string{scope}, maxAge, clock).Run(nil)
+		if r.Status != StatusWarning {
+			t.Fatalf("registered destination 96h stale: want StatusWarning, got %v (%s)", r.Status, r.Message)
+		}
+		if !strings.Contains(r.Message, "dolt-backup-state.json") && !strings.Contains(r.Message, "dolt backup") {
+			t.Fatalf("message should describe the registered dolt backup, got %q", r.Message)
 		}
 	})
 

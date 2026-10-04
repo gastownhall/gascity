@@ -87,7 +87,7 @@ func (c *BdBackupFreshnessCheck) Run(_ *CheckContext) *CheckResult {
 
 	var findings []string
 	for _, target := range c.freshnessScanTargets() {
-		if finding, ok := scanBackupFreshness(target.Label, target.BeadsDir, now, c.maxAge); ok {
+		if finding, ok := scanBackupFreshness(c.cityPath, target.Label, target.BeadsDir, now, c.maxAge); ok {
 			findings = append(findings, finding)
 		}
 	}
@@ -105,7 +105,10 @@ func (c *BdBackupFreshnessCheck) Run(_ *CheckContext) *CheckResult {
 		"(bd backup sync; verify backup.enabled and BD_BACKUP_ENABLED), then confirm " +
 		"bd backup status shows a recent sync for the store named in the finding — " +
 		"a 'dolt backup' finding clears via the Dolt Backup: Last sync field, not " +
-		"the legacy Backup: block, which stays frozen after migration"
+		"the legacy Backup: block, which stays frozen after migration; a 'managed " +
+		"dolt backup' finding is the city's own destination under .dolt-backup and " +
+		"clears when the mol-dog-backup order next syncs it, so check that order is " +
+		"enabled and firing (gc order check)"
 	return r
 }
 
@@ -175,7 +178,7 @@ func BulkDeleteSafe(cityPath string, cfg *config.City, maxAge time.Duration, now
 		check = NewBdBackupFreshnessCheckForScopeRoots(cityPath, managedDoltScopeRoots(cityPath), maxAge, nil)
 	}
 	for _, target := range check.freshnessScanTargets() {
-		if finding, ok := scanBackupFreshness(target.Label, target.BeadsDir, now, maxAge); ok {
+		if finding, ok := scanBackupFreshness(cityPath, target.Label, target.BeadsDir, now, maxAge); ok {
 			return false, finding
 		}
 	}
@@ -223,16 +226,116 @@ func BulkDeleteSafe(cityPath string, cfg *config.City, maxAge time.Duration, now
 // incident responder restoring from that pointer recovers a pre-migration
 // snapshot while believing the scope is current.
 //
+// There is a THIRD pipeline, and it is the one a gc-managed rig normally has:
+// mol-dog-backup syncs the city's own destination at <city>/.dolt-backup/<db>.
+// It writes neither state file — not .beads/dolt-backup.json (so the migration
+// test above does not see it) and not .beads/backup/backup_state.json (so the
+// legacy reading of such a scope is frozen at whatever the embedded pipeline
+// last recorded, which for a rig adopted into server mode is the moment it
+// migrated). That is the same unclearable-warning shape described above, with
+// the same correctness stake, reached by a different route — and because
+// BulkDeleteSafe shares this function, it also permanently blocks the
+// order-tracking retention watchdog on a city whose backups are in fact current.
+//
+// DoltBackupCheck already treats that directory as first-class evidence, and
+// reads it the only way it can be read: the destination has no state file, so
+// its synced CONTENTS are the record of the last sync. This check derives
+// freshness from the newest artifact mtime for the same reason.
+//
 // So: prefer the Dolt backup state whenever a Dolt destination is registered,
-// and fall back to the legacy file only for scopes that never migrated. Each
-// finding names the store it describes, so the reader is never left guessing
-// which of the two a message is about. A scope with neither file returns
-// ("", false) — "no backup at all" is DoltBackupCheck's job, not this one's.
-func scanBackupFreshness(label, beadsDir string, now time.Time, maxAge time.Duration) (string, bool) {
+// then the city's managed destination when it holds synced artifacts, and fall
+// back to the legacy file only for scopes with neither. Registration keeps
+// precedence over the managed directory because it names a destination the
+// operator chose explicitly and bd stamps its state on every sync. Each finding
+// names the store it describes, so the reader is never left guessing which of
+// the three a message is about. A scope with none returns ("", false) — "no
+// backup at all" is DoltBackupCheck's job, not this one's.
+func scanBackupFreshness(cityPath, label, beadsDir string, now time.Time, maxAge time.Duration) (string, bool) {
 	if _, err := os.Stat(filepath.Join(beadsDir, "dolt-backup.json")); err == nil {
 		return scanDoltBackupFreshness(label, beadsDir, now, maxAge)
 	}
+	if finding, isFinding, applies := scanManagedDoltBackupFreshness(cityPath, label, beadsDir, now, maxAge); applies {
+		return finding, isFinding
+	}
 	return scanLegacyBackupFreshness(label, beadsDir, now, maxAge)
+}
+
+// scanManagedDoltBackupFreshness judges a scope on the city's managed Dolt
+// backup destination, <city>/.dolt-backup/<db>. The third return value reports
+// whether that destination applies at all; when it is false the caller falls
+// back to the legacy state file and the other two returns are meaningless.
+//
+// It applies only when the city path is known, the scope names its Dolt database
+// in metadata.json, and the destination directory holds at least one artifact.
+// An empty or absent directory is not evidence of a sync — the same bar
+// DoltBackupCheck sets — and an unnamed database is left alone rather than
+// guessed at, since a wrong guess would read some other scope's backup.
+func scanManagedDoltBackupFreshness(cityPath, label, beadsDir string, now time.Time, maxAge time.Duration) (string, bool, bool) {
+	const store = "managed dolt backup"
+	if strings.TrimSpace(cityPath) == "" {
+		return "", false, false
+	}
+	dbName := scopeDoltDatabaseName(beadsDir)
+	if dbName == "" {
+		return "", false, false
+	}
+	dir := filepath.Join(cityPath, ".dolt-backup", dbName)
+	synced, ok, err := newestEntryModTime(dir)
+	if err != nil {
+		return fmt.Sprintf("%s: %s: read %s: %v", label, store, dir, err), true, true
+	}
+	if !ok {
+		return "", false, false
+	}
+	if age := now.Sub(synced); age > maxAge {
+		return staleBackupFinding(label, store, age, maxAge), true, true
+	}
+	return "", false, true
+}
+
+// scopeDoltDatabaseName returns the Dolt database a scope's metadata.json names,
+// or "" when the file is absent, unparseable, or carries no name.
+func scopeDoltDatabaseName(beadsDir string) string {
+	data, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
+	if err != nil {
+		return ""
+	}
+	var meta struct {
+		DoltDatabase string `json:"dolt_database"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(meta.DoltDatabase)
+}
+
+// newestEntryModTime returns the most recent mtime among a directory's entries.
+// ok is false when the directory is absent or empty, which is the "no sync has
+// landed here" case rather than an error.
+func newestEntryModTime(dir string) (time.Time, bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return time.Time{}, false, nil
+		}
+		return time.Time{}, false, err
+	}
+	var newest time.Time
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			// A file that vanished mid-scan (Dolt rewrites artifacts on sync)
+			// is not evidence about freshness either way; skip it.
+			continue
+		}
+		if info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+	}
+	if newest.IsZero() {
+		return time.Time{}, false, nil
+	}
+	return newest, true, nil
 }
 
 // scanDoltBackupFreshness reads <beadsDir>/dolt-backup-state.json, the file a
@@ -291,8 +394,14 @@ func freshnessFinding(label, store, file, field, raw string, now time.Time, maxA
 		return fmt.Sprintf("%s: %s: %s %s %q is unparseable: %v", label, store, file, field, ts, err), true
 	}
 	if age := now.Sub(synced); age > maxAge {
-		return fmt.Sprintf("%s: %s: last sync was %s ago (> %s) — backup pipeline may be disabled or broken",
-			label, store, age.Round(time.Minute), maxAge), true
+		return staleBackupFinding(label, store, age, maxAge), true
 	}
 	return "", false
+}
+
+// staleBackupFinding is the one wording for "this pipeline stopped syncing",
+// shared by every store so a reader compares ages rather than phrasings.
+func staleBackupFinding(label, store string, age, maxAge time.Duration) string {
+	return fmt.Sprintf("%s: %s: last sync was %s ago (> %s) — backup pipeline may be disabled or broken",
+		label, store, age.Round(time.Minute), maxAge)
 }
