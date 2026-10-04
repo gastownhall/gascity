@@ -1431,8 +1431,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	// Track managed cities via atomic-snapshot registry. API reads are
 	// lock-free (atomic pointer load); mutations go through citiesMu.
 	registry := newCityRegistry()
-	supEvPath := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
-	if supFR, supErr := newFileEventsRecorder(supEvPath, config.EventsConfig{}, stderr); supErr == nil {
+	if supFR, supErr := openSupervisorEventsRecorder(supervisor.RuntimeDir(), stderr); supErr == nil {
 		registry.SetSupervisorRecorder(supFR)
 		defer supFR.Close() //nolint:errcheck
 	}
@@ -2268,8 +2267,7 @@ func startOneCity(
 
 	rec := events.Discard
 	var eventProv events.Provider
-	evPath := filepath.Join(path, ".gc", "events.jsonl")
-	fr, frErr := newFileEventsRecorder(evPath, cfg.Events, stderr)
+	fr, frErr := openSupervisorCityEventsRecorder(path, cfg.Events, stderr)
 	if frErr == nil {
 		rec = fr
 		eventProv = fr

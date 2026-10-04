@@ -4,7 +4,6 @@ go_library(
     name = "bazeltest",
     srcs = [
         "bazeltest.go",
-        "helper_env.go",
         "lock_other.go",
         "lock_unix.go",
     ],
@@ -27,7 +26,7 @@ filegroup(
 go_test(
     name = "bazeltest_test",
     srcs = [
-        "helper_env_test.go",
+        "bazeltest_test.go",
         "testenv_import_test.go",
     ],
     embed = [":bazeltest"],

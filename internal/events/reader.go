@@ -674,6 +674,32 @@ func ReadLatestSeq(path string) (uint64, error) {
 	return seq, nil
 }
 
+// latestLiveSeq returns the seq the next append continues past: the active
+// log's last seq or, when the active log holds none, the highest window an
+// archive or in-flight rotating file covers. The fallback matters when a
+// rotation renamed the log and crashed, or failed to reopen it, before writing
+// its anchor: the fresh active log is empty, and every writer must still
+// continue past the rotated window instead of reissuing its seqs.
+func latestLiveSeq(path string) (uint64, error) {
+	seq, err := readLatestActiveSeq(path)
+	if err != nil || seq > 0 {
+		return seq, err
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		return 0, fmt.Errorf("reading event log directory: %w", err)
+	}
+	for _, entry := range entries {
+		if info, err := parseArchiveBasename(entry.Name()); err == nil && info.LastSeq > seq {
+			seq = info.LastSeq
+		}
+		if _, _, last, ok := parseRotatingBasename(entry.Name()); ok && last > seq {
+			seq = last
+		}
+	}
+	return seq, nil
+}
+
 func readLatestActiveSeq(path string) (uint64, error) {
 	f, err := os.Open(path)
 	if err != nil {

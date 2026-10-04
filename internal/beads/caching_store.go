@@ -17,11 +17,13 @@ import (
 // Reads are served from memory when the cache is live. Writes pass
 // through to the backing store and update the cache on success.
 //
-// External writes (agents running bd directly) are picked up via the
-// bd hook -> gc event emit -> event bus path. Call ApplyEvent when the
-// event bus delivers bead.created/updated/closed events. The background
-// reconciler acts as a watchdog and only performs a full scan once the
-// cache has gone stale or degraded.
+// Writes that emit no gc event (agents running bd directly, humans, raw SQL)
+// reach the cache only when the background reconciler's scan notices them,
+// collapsed to the latest state; the bd hook -> gc event emit path that once
+// delivered them is gone (cmd/gc/hooks.go). ApplyEvent installs bead events
+// from the event bus, which carries gc's own writes. The cache is therefore
+// always potentially stale: a caller whose decision leads to a write must
+// fence that write at the store, never trust the cached row.
 //
 // BdStore-backed caches can filter hook events by issue prefix. Other Store
 // implementations are valid backings, but run without foreign-event filtering.
@@ -267,6 +269,7 @@ var cacheEpochs atomic.Uint64
 
 var (
 	_ ConditionalAssignmentReleaser = (*CachingStore)(nil)
+	_ AssignmentGuardedUpdater      = (*CachingStore)(nil)
 	_ AtomicTxStore                 = (*CachingStore)(nil)
 )
 

@@ -13,10 +13,10 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
-// ApplyEvent updates the cache from a bd hook event. Call this when the
+// ApplyEvent updates the cache from a bead event. Call this when the
 // event bus delivers a bead.created, bead.updated, bead.closed, or bead.deleted event
-// with the full bead JSON payload. This keeps the cache fresh without
-// waiting for reconciliation.
+// with the full bead JSON payload. This keeps the cache fresher without
+// waiting for reconciliation; it does not make it exact (see CachingStore).
 func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 	c.applyEvent(eventType, payload, false)
 }

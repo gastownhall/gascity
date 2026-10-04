@@ -21,7 +21,6 @@ func TestHelperProcessEnvDropsParentOwnedTestRunnerState(t *testing.T) {
 	got := HelperProcessEnv(in)
 	want := []string{
 		"PATH=/usr/bin",
-		"COVERAGE_DIR=/out/cov",
 		"TEST_TMPDIR=/tmp/bt/x",
 		"GC_CHILD=1",
 	}
