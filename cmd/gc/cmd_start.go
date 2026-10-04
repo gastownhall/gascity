@@ -1474,6 +1474,18 @@ func sessionSetupContextForAgent(cityPath, cityName, qualifiedName string, a *co
 // filesystem (gc-r9fx). Session-start paths that need the directory to exist
 // use resolveConfiguredWorkDir.
 func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
+	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, true)
+}
+
+// resolveConfiguredWorkDirPathUnvalidated is resolveConfiguredWorkDirPath
+// without the stale-ancestor worktree check, which reads the filesystem: a
+// pure path computation for a plan whose effect runs the check before it
+// writes the path.
+func resolveConfiguredWorkDirPathUnvalidated(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
+	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, false)
+}
+
+func configuredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig, validate bool) (string, error) {
 	if a == nil {
 		return resolveAgentDirPath(cityPath, ""), nil
 	}
@@ -1489,8 +1501,10 @@ func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *c
 	// so the operator sees the broken ancestor instead of a structurally
 	// orphaned spawn. workDir is already absolute (ResolveWorkDirPathStrict
 	// returns through ResolveDirPath), so no further resolution is needed.
-	if err := workdirutil.ValidateAncestorWorktreesNotStale(workDir); err != nil {
-		return "", err
+	if validate {
+		if err := workdirutil.ValidateAncestorWorktreesNotStale(workDir); err != nil {
+			return "", err
+		}
 	}
 	return resolveAgentDirPath(cityPath, workDir), nil
 }

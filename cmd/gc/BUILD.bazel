@@ -687,6 +687,8 @@ go_test(
         "allocator_ledger_test.go",
         "allocator_observe_test.go",
         "allocator_scalecheck_lane_test.go",
+        "allocator_seams_prerefactor_test.go",
+        "allocator_seams_test.go",
         "api_state_cache_reconcile_snapshot_test.go",
         "api_state_dolt_drop_port_test.go",
         "api_state_event_identity_test.go",
