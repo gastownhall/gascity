@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import unittest
 
@@ -11,19 +13,31 @@ class FakeRun:
         self.calls = []
         self._results = []
 
-    def queue(self, argv_prefix, returncode=0, stdout=""):
-        self._results.append((argv_prefix, returncode, stdout))
+    def queue(self, argv_prefix, returncode=0, stdout="", stderr=""):
+        self._results.append((argv_prefix, returncode, stdout, stderr))
 
     def __call__(self, argv, **kwargs):
         self.calls.append(argv)
-        for prefix, returncode, stdout in self._results:
+        for prefix, returncode, stdout, stderr in self._results:
             if argv[: len(prefix)] == prefix:
                 if kwargs.get("check") and returncode != 0:
                     raise escalate_script.subprocess.CalledProcessError(returncode, argv)
                 return escalate_script.subprocess.CompletedProcess(
-                    argv, returncode, stdout=stdout, stderr=""
+                    argv, returncode, stdout=stdout, stderr=stderr
                 )
         raise AssertionError(f"FakeRun: no queued result for {argv!r}")
+
+
+def watchdog_issue_body(sha):
+    """The body the watchdog itself files for a broken-main SHA."""
+    return escalate_script.build_issue_body(
+        sha=sha, author="Jane Dev", pr_number="", run_url="https://example/runs/1"
+    )
+
+
+def calls_to(fake, *argv_prefix):
+    """The recorded gh/git invocations whose argv starts with argv_prefix."""
+    return [c for c in fake.calls if c[: len(argv_prefix)] == list(argv_prefix)]
 
 
 class ParsePrNumberTests(unittest.TestCase):
@@ -79,35 +93,118 @@ class BuildIssueBodyTests(unittest.TestCase):
         self.assertIn("nothing has been reverted", body.lower())
 
 
-class FindExistingIssueTests(unittest.TestCase):
-    def test_returns_url_when_gh_reports_a_match(self):
+class BuildCommentBodyTests(unittest.TestCase):
+    def test_includes_sha_author_pr_and_run_url(self):
+        body = escalate_script.build_comment_body(
+            sha="bbbb2222",
+            author="Sam Dev <sam@example.com>",
+            pr_number="5051",
+            run_url="https://github.com/gastownhall/gc-management/actions/runs/124",
+        )
+        self.assertIn("bbbb2222", body)
+        self.assertIn("Sam Dev <sam@example.com>", body)
+        self.assertIn("#5051", body)
+        self.assertIn("https://github.com/gastownhall/gc-management/actions/runs/124", body)
+
+    def test_omits_pr_line_when_no_pr_associated(self):
+        body = escalate_script.build_comment_body(
+            sha="bbbb2222", author="Sam Dev", pr_number="", run_url="https://example/runs/2"
+        )
+        self.assertNotIn("PR:", body)
+
+
+class FindOpenEscalationIssueTests(unittest.TestCase):
+    def test_returns_url_of_the_open_issue_the_watchdog_filed(self):
+        # Round trip: the finder must recognise exactly what build_issue_body writes.
         fake = FakeRun()
         fake.queue(
             ["gh", "issue", "list"],
-            stdout=json.dumps([{"url": "https://github.com/o/r/issues/42"}]),
+            stdout=json.dumps(
+                [{"url": "https://github.com/o/r/issues/42", "body": watchdog_issue_body("aaaa1111")}]
+            ),
         )
-        result = escalate_script.find_existing_issue("cc036a76e", run=fake)
+        result = escalate_script.find_open_escalation_issue(run=fake)
         self.assertEqual(result, "https://github.com/o/r/issues/42")
 
-    def test_returns_none_when_gh_reports_no_matches(self):
+    def test_skips_open_p0_issues_the_watchdog_did_not_file(self):
+        fake = FakeRun()
+        fake.queue(
+            ["gh", "issue", "list"],
+            stdout=json.dumps(
+                [
+                    {"url": "https://github.com/o/r/issues/7", "body": "Scheduler stalls under load."},
+                    {"url": "https://github.com/o/r/issues/42", "body": watchdog_issue_body("aaaa1111")},
+                ]
+            ),
+        )
+        result = escalate_script.find_open_escalation_issue(run=fake)
+        self.assertEqual(result, "https://github.com/o/r/issues/42")
+
+    def test_returns_none_when_no_open_issue_is_the_watchdogs(self):
+        fake = FakeRun()
+        fake.queue(
+            ["gh", "issue", "list"],
+            stdout=json.dumps(
+                [{"url": "https://github.com/o/r/issues/7", "body": "Scheduler stalls under load."}]
+            ),
+        )
+        self.assertIsNone(escalate_script.find_open_escalation_issue(run=fake))
+
+    def test_returns_none_when_there_are_no_open_p0_issues(self):
         fake = FakeRun()
         fake.queue(["gh", "issue", "list"], stdout="[]")
-        result = escalate_script.find_existing_issue("cc036a76e", run=fake)
-        self.assertIsNone(result)
+        self.assertIsNone(escalate_script.find_open_escalation_issue(run=fake))
 
-    def test_returns_none_when_gh_command_fails(self):
-        fake = FakeRun()
-        fake.queue(["gh", "issue", "list"], returncode=1, stdout="")
-        result = escalate_script.find_existing_issue("cc036a76e", run=fake)
-        self.assertIsNone(result)
-
-    def test_search_scopes_to_this_shas_marker(self):
+    def test_lists_only_open_issues_carrying_the_p0_label(self):
+        # An issue a human already closed must not suppress a new escalation, and the
+        # label scope keeps the lookup off the repo's ordinary issue backlog.
         fake = FakeRun()
         fake.queue(["gh", "issue", "list"], stdout="[]")
-        escalate_script.find_existing_issue("cc036a76e", run=fake)
+        escalate_script.find_open_escalation_issue(run=fake)
         (call,) = fake.calls
-        search_value = call[call.index("--search") + 1]
-        self.assertIn(f"{escalate_script.ESCALATION_MARKER}:cc036a76e", search_value)
+        self.assertEqual(call[call.index("--state") + 1], "open")
+        self.assertEqual(call[call.index("--label") + 1], escalate_script.P0_LABEL)
+        json_fields = call[call.index("--json") + 1].split(",")
+        self.assertIn("url", json_fields)
+        self.assertIn("body", json_fields)
+
+    def test_warns_on_stderr_and_returns_none_when_gh_fails(self):
+        # Alerting must not be lost to a lookup failure, but the failure must not be
+        # silent either: it lands in the workflow log so a possible duplicate is explicable.
+        fake = FakeRun()
+        fake.queue(["gh", "issue", "list"], returncode=1, stderr="HTTP 502: bad gateway")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result = escalate_script.find_open_escalation_issue(run=fake)
+        self.assertIsNone(result)
+        self.assertIn("could not list open escalation issues", stderr.getvalue())
+        self.assertIn("HTTP 502: bad gateway", stderr.getvalue())
+
+    def test_warns_on_stderr_and_returns_none_when_gh_output_is_not_json(self):
+        fake = FakeRun()
+        fake.queue(["gh", "issue", "list"], stdout="<html>rate limited</html>")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result = escalate_script.find_open_escalation_issue(run=fake)
+        self.assertIsNone(result)
+        self.assertIn("could not list open escalation issues", stderr.getvalue())
+
+
+class CommentOnIssueTests(unittest.TestCase):
+    def test_comments_on_the_issue_by_url(self):
+        fake = FakeRun()
+        fake.queue(["gh", "issue", "comment"])
+        escalate_script.comment_on_issue("https://github.com/o/r/issues/42", "still broken", run=fake)
+        self.assertEqual(
+            fake.calls,
+            [["gh", "issue", "comment", "https://github.com/o/r/issues/42", "--body", "still broken"]],
+        )
+
+    def test_raises_when_gh_fails(self):
+        fake = FakeRun()
+        fake.queue(["gh", "issue", "comment"], returncode=1)
+        with self.assertRaises(escalate_script.subprocess.CalledProcessError):
+            escalate_script.comment_on_issue("https://github.com/o/r/issues/42", "body", run=fake)
 
 
 class CreateIssueTests(unittest.TestCase):
@@ -143,21 +240,49 @@ class EscalateTests(unittest.TestCase):
         url = escalate_script.escalate(sha="cc036a76e", run_url="https://example/runs/9", run=fake)
 
         self.assertEqual(url, "https://github.com/o/r/issues/44")
-        create_calls = [c for c in fake.calls if c[:2] == ["gh", "issue"] and "create" in c]
-        self.assertEqual(len(create_calls), 1)
+        self.assertEqual(len(calls_to(fake, "gh", "issue", "create")), 1)
+        self.assertEqual(calls_to(fake, "gh", "issue", "comment"), [])
 
-    def test_does_not_create_a_duplicate_when_an_issue_already_exists(self):
+    def test_later_failing_push_comments_on_the_open_issue_instead_of_filing_another(self):
+        # main is still broken, now at a different commit than the one the open issue
+        # was filed for: that is the same failure, so it gets a comment, not a new P0.
+        open_issue = "https://github.com/o/r/issues/40"
         fake = FakeRun()
         fake.queue(
             ["gh", "issue", "list"],
-            stdout=json.dumps([{"url": "https://github.com/o/r/issues/40"}]),
+            stdout=json.dumps([{"url": open_issue, "body": watchdog_issue_body("aaaa1111")}]),
         )
+        fake.queue(["git", "log", "-1", "--format=%an <%ae>"], stdout="Sam Dev <sam@example.com>")
+        fake.queue(["git", "log", "-1", "--format=%B"], stdout="Merge pull request #5051 from x/y")
+        fake.queue(["gh", "issue", "comment"])
 
-        url = escalate_script.escalate(sha="cc036a76e", run_url="https://example/runs/9", run=fake)
+        url = escalate_script.escalate(sha="bbbb2222", run_url="https://example/runs/9", run=fake)
 
-        self.assertEqual(url, "https://github.com/o/r/issues/40")
-        create_calls = [c for c in fake.calls if c[:2] == ["gh", "issue"] and "create" in c]
-        self.assertEqual(create_calls, [])
+        self.assertEqual(url, open_issue)
+        self.assertEqual(calls_to(fake, "gh", "issue", "create"), [])
+        (comment,) = calls_to(fake, "gh", "issue", "comment")
+        self.assertEqual(comment[3], open_issue)
+        body = comment[comment.index("--body") + 1]
+        self.assertIn("bbbb2222", body)
+        self.assertIn("#5051", body)
+        self.assertIn("https://example/runs/9", body)
+
+    def test_comment_failure_is_not_papered_over_by_filing_a_duplicate(self):
+        fake = FakeRun()
+        fake.queue(
+            ["gh", "issue", "list"],
+            stdout=json.dumps(
+                [{"url": "https://github.com/o/r/issues/40", "body": watchdog_issue_body("aaaa1111")}]
+            ),
+        )
+        fake.queue(["git", "log", "-1", "--format=%an <%ae>"], stdout="Sam Dev <sam@example.com>")
+        fake.queue(["git", "log", "-1", "--format=%B"], stdout="fix: unrelated")
+        fake.queue(["gh", "issue", "comment"], returncode=1)
+
+        with self.assertRaises(escalate_script.subprocess.CalledProcessError):
+            escalate_script.escalate(sha="bbbb2222", run_url="https://example/runs/9", run=fake)
+
+        self.assertEqual(calls_to(fake, "gh", "issue", "create"), [])
 
 
 class GatherContextTests(unittest.TestCase):
