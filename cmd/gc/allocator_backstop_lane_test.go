@@ -742,9 +742,11 @@ func TestBackstopLaneSlowPassThenHangGoesStaleByCappedBound(t *testing.T) {
 	})
 }
 
-// Kills: At stamped at the start of the reads, an expiry not derived from
-// the cadence, and a window that keeps one slow pass forever. A 7s pass
-// publishes At at the end and Expires two intervals plus 7s later; shorter
+// Kills: At stamped at the start of the reads, or StartedAt at their end
+// (an ambiguous create would resolve against a read that began before it
+// settled, C5.4(3)); an expiry not derived from the cadence, and a window
+// that keeps one slow pass forever. A 7s pass publishes StartedAt at the
+// start, At at the end and Expires two intervals plus 7s later; shorter
 // passes keep the 7s in the bound until it leaves the window.
 func TestBackstopLaneStampsAtWhenReadsEndWithDerivedExpiry(t *testing.T) {
 	lane, _ := newTestBackstopLane(backstopEnv{Cfg: demandReadsTestConfig(), CityStore: beads.NewMemStore()})
@@ -767,8 +769,8 @@ func TestBackstopLaneStampsAtWhenReadsEndWithDerivedExpiry(t *testing.T) {
 	}
 	start := clock
 	rec := passFor(7 * time.Second)
-	if want := start.Add(7 * time.Second); !rec.At.Equal(want) {
-		t.Errorf("At = %v, want the end of the reads %v", rec.At, want)
+	if want := start.Add(7 * time.Second); !rec.At.Equal(want) || !rec.StartedAt.Equal(start) {
+		t.Errorf("StartedAt, At = %v, %v, want the start and the end of the reads %v, %v", rec.StartedAt, rec.At, start, want)
 	}
 	if want := rec.At.Add(2*backstopTestInterval + 7*time.Second); !rec.Expires.Equal(want) {
 		t.Errorf("Expires = %v, want %v", rec.Expires, want)
@@ -839,7 +841,8 @@ func TestBackstopLaneRecordsOutOfProcessSessionWriteOnNonExactLeg(t *testing.T) 
 	at(lane, t0).pass(context.Background())
 	first := lane.recording()
 	leg, ok := first.sessionLeg(cache)
-	if !ok || leg.Err != nil || !leg.At.Equal(t0) || !leg.Expires.Equal(first.Expires) || !slices.Equal(sessionInfoIDs(leg.Rows), []string{"gc-s1"}) {
+	if !ok || leg.Err != nil || !leg.At.Equal(t0) || !leg.StartedAt.Equal(first.StartedAt) || first.StartedAt.IsZero() ||
+		!leg.Expires.Equal(first.Expires) || !slices.Equal(sessionInfoIDs(leg.Rows), []string{"gc-s1"}) {
 		t.Fatalf("first pass: session leg recorded=%t %+v, want gc-s1 at %v", ok, leg, t0)
 	}
 

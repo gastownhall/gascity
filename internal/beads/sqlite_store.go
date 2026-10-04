@@ -172,14 +172,28 @@ func isSQLiteBusy(err error) bool {
 // a SQLITE_BUSY error, backing off by sqliteBusyBackoff between attempts.
 // The busy_timeout PRAGMA already retries at the C layer for 5 s per call, so
 // each application-level retry is an additional 5 s+ window for the lock.
+// fn must be one transaction: a busy error that outlasts the retries is
+// marked ErrSQLiteBusyExhausted, a write that committed nothing.
 func retryOnBusy(fn func() error) error {
 	err := fn()
 	for attempt := 0; attempt < sqliteBusyRetryAttempts && isSQLiteBusy(err); attempt++ {
 		sqliteBusySleep(sqliteBusyBackoff(attempt))
 		err = fn()
 	}
+	if isSQLiteBusy(err) {
+		return sqliteBusyExhaustedError{err: err}
+	}
 	return err
 }
+
+// sqliteBusyExhaustedError is a busy error that outlasted retryOnBusy. It
+// keeps the driver's message, unwraps to it, and matches
+// ErrSQLiteBusyExhausted.
+type sqliteBusyExhaustedError struct{ err error }
+
+func (e sqliteBusyExhaustedError) Error() string        { return e.err.Error() }
+func (e sqliteBusyExhaustedError) Unwrap() error        { return e.err }
+func (e sqliteBusyExhaustedError) Is(target error) bool { return target == ErrSQLiteBusyExhausted }
 
 // sqliteBusyBackoff is the jittered exponential delay before busy retry
 // number attempt (0-based): uniformly in [d/2, d] for

@@ -55,6 +55,12 @@ var ErrReadyContextUnsupported = errors.New("context-aware ready unsupported")
 // handle has been closed.
 var ErrStoreClosed = errors.New("bead store closed")
 
+// ErrSQLiteBusyExhausted marks a SQLiteStore write whose every attempt failed
+// with SQLITE_BUSY, so it committed nothing: each attempt is one transaction,
+// and SQLite applies no statement, and commits no transaction, that reports
+// BUSY. The error's message stays the driver's.
+var ErrSQLiteBusyExhausted = errors.New("sqlite busy retries exhausted")
+
 // ErrParentProjectionSuperseded reports that a parent update was overtaken by a
 // concurrent reparent before the caller's projection wait could converge.
 var ErrParentProjectionSuperseded = errors.New("parent projection superseded by concurrent update")
