@@ -86,7 +86,7 @@ func TestBdStoreConformance(t *testing.T) {
 
 		configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
 
-		return beads.NewBdStore(wsDir, pinnedBdStoreCommandRunner())
+		return beads.NewBdStore(wsDir, pinnedBdStoreCommandRunner(env))
 	}
 
 	// Run conformance suite. We skip RunSequentialIDTests because BdStore
@@ -207,7 +207,7 @@ func TestBdStoreMailWispInsert(t *testing.T) {
 	runBDInit(t, env, wsDir, "mc", serverPort)
 	configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
 
-	store := beads.NewBdStore(wsDir, pinnedBdStoreCommandRunnerWithEnv(map[string]string{"HOME": parseEnvList(isolateBdHomeEnv(env))["HOME"]}))
+	store := beads.NewBdStore(wsDir, pinnedBdStoreCommandRunner(env))
 
 	// Create an ephemeral message bead — exercises bd create --ephemeral →
 	// Dolt SQL INSERT INTO wisps + INSERT INTO wisp_events.

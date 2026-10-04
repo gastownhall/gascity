@@ -514,8 +514,24 @@ func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
 // ambient process PATH before its per-command environment applies, so using it
 // directly could select a host bd whose schema knowledge predates the pinned
 // Beads module that created the test database.
-func pinnedBdStoreCommandRunner() beads.CommandRunner {
-	runner := beads.ExecCommandRunner()
+//
+// It also runs every bd invocation in the same isolated environment as those
+// setup commands: env with HOME moved to GC_HOME (isolateBdHomeEnv), and
+// nothing from the test process. ExecCommandRunnerWithEnv only overlays its
+// overrides on the process environment, so a variable integrationEnvFor strips
+// (BEADS_DIR, BEADS_DOLT_SERVER_HOST/PORT, GC_DOLT_HOST/PORT, BEADS_ACTOR, ...)
+// would still reach bd from a process that exports it, as this fleet's
+// sessions do, and misdirect the store onto an unrelated database. The
+// exact-env runner replaces the child environment and keeps the production
+// result handling (ErrBDSilentFallback, bd timeouts, process-tree kill). The
+// workspaces are bound to a Dolt server, so BEADS_TEST_MODE defaults to 0
+// unless env sets it: see beadstest.EnvBeadsTestMode.
+func pinnedBdStoreCommandRunner(env []string) beads.CommandRunner {
+	bdEnv := map[string]string{beadstest.EnvBeadsTestMode: "0"}
+	for k, v := range parseEnvList(isolateBdHomeEnv(env)) {
+		bdEnv[k] = v
+	}
+	runner := beads.ExecCommandRunnerWithExactEnvContext(context.Background(), bdEnv)
 	return func(dir, name string, args ...string) ([]byte, error) {
 		if name == "bd" {
 			name = bdBinary
