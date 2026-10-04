@@ -25,6 +25,11 @@ jobs:
     needs: build-check
     if: failure()
     runs-on: ubuntu-latest
+    # One escalation at a time: two pushes failing together must not both miss
+    # the other's issue and file twice.
+    concurrency:
+      group: main-health-escalate
+      cancel-in-progress: false
     permissions:
       contents: read
       issues: write
