@@ -240,7 +240,7 @@ func TestNativeDoltStoreMapsUpstreamStatusesToGasCityContract(t *testing.T) {
 		{beadslib.StatusOpen, "open", false},
 		{beadslib.StatusInProgress, "in_progress", false},
 		{beadslib.StatusClosed, "closed", false},
-		{beadslib.Status("blocked"), "open", false},
+		{beadslib.Status("blocked"), "blocked", false},
 		{beadslib.Status("deferred"), "open", true},
 		{beadslib.Status("pinned"), "open", false},
 		{beadslib.Status("hooked"), "open", false},
@@ -301,8 +301,8 @@ func TestNativeDoltStoreListStatusOpenMatchesOpenNormalizedUpstreamStatuses(t *t
 		if !wantIDs[bead.ID] {
 			t.Fatalf("List(Status: open) returned unexpected bead %q from %+v", bead.ID, got)
 		}
-		if bead.Status != "open" {
-			t.Fatalf("List(Status: open) bead %q status = %q, want normalized open", bead.ID, bead.Status)
+		if !IsOpenStatus(bead.Status) {
+			t.Fatalf("List(Status: open) bead %q status = %q, want a member of the open set", bead.ID, bead.Status)
 		}
 	}
 }

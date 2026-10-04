@@ -2751,7 +2751,7 @@ func TestBdStoreStatusMapping(t *testing.T) {
 	}{
 		{"open", "open", false},
 		{"in_progress", "in_progress", false},
-		{"blocked", "open", false},
+		{"blocked", "blocked", false},
 		{"deferred", "open", true},
 		{"review", "open", false},
 		{"testing", "open", false},

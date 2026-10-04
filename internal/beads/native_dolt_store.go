@@ -28,9 +28,10 @@ const nativeDoltStoreActor = "gascity"
 // blocked/hooked are bd's "wip" category and pinned is "frozen" — bd's own
 // ready semantics already exclude them, and Gas City has no analogous
 // re-check for them the way it does for deferred, so querying for them let
-// dependency-blocked beads erase their status to "open" via mapBdStatus and
-// pass IsReadyCandidateForTier's status gate. See ga-3mv5d3 bead notes for
-// the full investigation.
+// parked beads pass IsReadyCandidateForTier's status gate — back when
+// mapBdStatus erased blocked to "open" they were not even distinguishable.
+// The gate now compares the status exactly, so blocked can never be Ready.
+// See ga-3mv5d3 bead notes for the full investigation.
 var nativeDoltOpenReadyStatuses = []beadslib.Status{
 	beadslib.StatusOpen,
 	beadslib.StatusDeferred,

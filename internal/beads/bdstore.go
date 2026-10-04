@@ -1228,15 +1228,30 @@ func isBdClaimConflictMessage(msg string) bool {
 		strings.Contains(msg, "claim conflict")
 }
 
-// mapBdStatus maps bd's statuses to Gas City's 3. bd uses: open,
+// mapBdStatus maps bd's statuses to Gas City's 4. bd uses: open,
 // in_progress, blocked, review, testing, closed. Gas City uses:
-// open, in_progress, closed.
+// open, in_progress, blocked, closed.
+//
+// blocked survives because the collapse made the read model lie: the
+// supervisor bead API reported every bd-blocked bead as open, so the
+// dashboard counted finished-but-blocked work as needing a human
+// (sc-bpn7w). review and testing still collapse to open: no Gas City
+// consumer distinguishes them, so widening them would add states nothing
+// reads.
+//
+// blocked is a member of the open SET, not a third terminal state. Every
+// consumer that means "not closed and not in progress" must ask
+// IsOpenStatus rather than compare to "open", which is also what
+// ListQuery{Status:"open"} matches and what the native store's
+// ExcludeStatus{closed, in_progress} filter has always returned.
 func mapBdStatus(s string) string {
 	switch s {
 	case "closed":
 		return "closed"
 	case "in_progress":
 		return "in_progress"
+	case "blocked":
+		return "blocked"
 	default:
 		return "open"
 	}

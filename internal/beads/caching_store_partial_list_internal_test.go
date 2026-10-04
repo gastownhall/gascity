@@ -54,7 +54,53 @@ func TestCachingStorePartialPrimeDoesNotClaimCompleteNonclosedList(t *testing.T)
 	assertAllNonclosedStatuses(t, "Cached.List", cached)
 }
 
+// TestCachingStorePartialPrimeRefusesUnknownDependencyStatus pins the refusal
+// that keeps a partial cache honest: a closed dependency never enters the
+// PrimeActive snapshot, so the cache cannot tell "closed, not blocking" from
+// "absent", and it must send the ready read live.
+//
+// A blocked dependency is NOT that case. It rides the open query into the
+// snapshot, which is what a bd-backed store always did (its Status:"open"
+// filter is ExcludeStatus{closed, in_progress}); mapBdStatus used to hide
+// that by rewriting blocked to "open" (sc-bpn7w), and MemStore was the only
+// store that dropped the row. TestCachingStorePartialPrimeKnowsBlockedDependency
+// pins the answer the cache now gives.
 func TestCachingStorePartialPrimeRefusesUnknownDependencyStatus(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	blocker, err := backing.Create(Bead{Title: "blocker"})
+	if err != nil {
+		t.Fatalf("Create(blocker): %v", err)
+	}
+	if err := backing.Close(blocker.ID); err != nil {
+		t.Fatalf("Close(blocker): %v", err)
+	}
+	candidate, err := backing.Create(Bead{Title: "candidate"})
+	if err != nil {
+		t.Fatalf("Create(candidate): %v", err)
+	}
+	if err := backing.DepAdd(candidate.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	if rows, ok := cache.CachedReady(); ok {
+		t.Fatalf("CachedReady = %#v, true; want refusal when a dependency status is outside the partial snapshot", rows)
+	}
+	if _, err := cache.cachedReadyOnly(ReadyQuery{}); !errors.Is(err, ErrCacheUnavailable) {
+		t.Fatalf("cachedReadyOnly error = %v, want ErrCacheUnavailable", err)
+	}
+}
+
+// TestCachingStorePartialPrimeKnowsBlockedDependency pins that a blocked
+// dependency is inside the partial snapshot and blocks its dependent: the
+// cache answers from memory instead of refusing, and the candidate is not
+// ready while its blocker stays open.
+func TestCachingStorePartialPrimeKnowsBlockedDependency(t *testing.T) {
 	t.Parallel()
 
 	backing := NewMemStore()
@@ -78,20 +124,16 @@ func TestCachingStorePartialPrimeRefusesUnknownDependencyStatus(t *testing.T) {
 	if err := cache.PrimeActive(); err != nil {
 		t.Fatalf("PrimeActive: %v", err)
 	}
-	if rows, ok := cache.CachedReady(); ok {
-		t.Fatalf("CachedReady = %#v, true; want refusal when a dependency status is outside the partial snapshot", rows)
+	rows, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady refused; a blocked dependency is inside the primed snapshot")
 	}
-	if _, err := cache.cachedReadyOnly(ReadyQuery{}); !errors.Is(err, ErrCacheUnavailable) {
-		t.Fatalf("cachedReadyOnly error = %v, want ErrCacheUnavailable", err)
-	}
-
-	ready, err := cache.Handles().Cached.Ready()
-	if err != nil {
-		t.Fatalf("Cached.Ready: %v", err)
-	}
-	for _, bead := range ready {
+	for _, bead := range rows {
 		if bead.ID == candidate.ID {
-			t.Fatalf("Cached.Ready included %s despite live blocking dependency; ready=%v", candidate.ID, ready)
+			t.Fatalf("CachedReady included %s despite its blocked dependency; ready=%v", candidate.ID, rows)
+		}
+		if bead.ID == blocker.ID {
+			t.Fatalf("CachedReady included blocked bead %s; bd's ready semantics exclude blocked", blocker.ID)
 		}
 	}
 }

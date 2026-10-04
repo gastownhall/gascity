@@ -278,8 +278,8 @@ func (s *workflowProjectionStore) List(query beads.ListQuery) ([]beads.Bead, err
 // collapsedStatusProjectionStore models the production read path for the
 // workflow projection. A non-Live read (the raw scan, or any cached read)
 // returns blocked and deferred beads indistinguishable from ready work:
-// mapBdStatus folds bd's blocked/deferred/review/testing into Gas City's
-// "open", and CachingStore.List matches on that already-collapsed status. Only
+// blocked stays in the open SET and deferred/review/testing still collapse to
+// "open", and CachingStore.List matches that whole set. Only
 // the backing store filters on the raw status, by passing --status to bd, and
 // only a Live query reaches it.
 type collapsedStatusProjectionStore struct {
