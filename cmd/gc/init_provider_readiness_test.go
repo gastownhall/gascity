@@ -27,20 +27,40 @@ func disableBootstrapForTests(t *testing.T) {
 	t.Cleanup(func() { bootstrap.BootstrapPacks = old })
 }
 
-// stubInitRemoteImports makes finalizeInit's remote-import install hermetic.
+// configureInitRemoteImportsForTests makes finalizeInit's remote-import
+// install a no-op for every test in this package. TestMain calls it, so a
+// test that runs a real init stays hermetic without opting in.
 //
 // A full init clones gascity-packs over the network: the nested bundled source
 // gascity/roles is not recognized as bundled, so it misses the synthetic cache
 // and takes the real clone path (ga-73eoo). That single clone is most of the
 // runtime of every test that runs a real init, and packman performs it while
 // holding the machine-wide repo-cache write lock — so one wedged remote stalls
-// the whole suite and the pre-push hook with it (ga-r0epd).
+// the whole suite and the pre-push hook with it (ga-r0epd). It also fails
+// outright on executors without network, such as rbe-west's fork pool.
 //
-// Use this only in tests whose subject is something other than import
-// installation. Tests that assert on the install itself must stub
+// Tests whose subject is import installation must opt back in with
+// useRealInitRemoteImports, against a local file:// remote, or stub
 // ensureInitRemoteImportsInstalled directly with the behavior they mean to
-// exercise, the way TestFinalizeInitReportsRemoteImportInstallFailure does;
-// routing those through this helper would assert against a no-op.
+// exercise, the way TestFinalizeInitReportsRemoteImportInstallFailure does.
+func configureInitRemoteImportsForTests() {
+	ensureInitRemoteImportsInstalled = func(string) error { return nil }
+}
+
+// useRealInitRemoteImports opts a test back in to the production
+// remote-import installer for the rest of the test. Only use it with remotes
+// the test owns (file:// fixtures); a github.com source would clone over the
+// network.
+func useRealInitRemoteImports(t *testing.T) {
+	t.Helper()
+	prev := ensureInitRemoteImportsInstalled
+	t.Cleanup(func() { ensureInitRemoteImportsInstalled = prev })
+	ensureInitRemoteImportsInstalled = installInitRemoteImports
+}
+
+// stubInitRemoteImports makes finalizeInit's remote-import install a no-op for
+// the rest of the test. configureInitRemoteImportsForTests already does this
+// package-wide; the explicit call remains valid and documents intent.
 func stubInitRemoteImports(t *testing.T) {
 	t.Helper()
 	prev := ensureInitRemoteImportsInstalled
@@ -350,6 +370,8 @@ func TestFinalizeInitChecksRemoteImportProvidersAfterInstall(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	disableBootstrapForTests(t)
 	stubInitDependencyChecks(t)
+	// The subject is the real install of a local file:// import.
+	useRealInitRemoteImports(t)
 
 	remote := initImportBarePackRepo(t, "remote-pack", "", strings.Join([]string{
 		"[pack]",
