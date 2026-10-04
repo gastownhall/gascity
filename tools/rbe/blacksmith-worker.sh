@@ -30,7 +30,26 @@
 #                       pool: serve the shared OSS queue; retire after POOL_IDLE_MINUTES
 #                             with nothing in flight, or at POOL_MAX_MINUTES
 #   CACHE_DIR           optional (Blacksmith sticky disk): keeps the worker's local
-#                       CAS warm across runs
+#                       CAS warm across runs. Another VM wrote it, so every blob is
+#                       re-hashed against its name before NativeLink loads it
+#                       (scrub_cas), and the CAS is capped at CAS_MAX_BYTES.
+#   CAS_MAX_BYTES       local CAS cap (default 150 GB; 60 GB on a sticky disk)
+#   RBE_WIRE_ZSTD       1: fetches of blobs of 64 KiB or more travel as REAPI
+#                       compressed-blobs/zstd (NativeLink 1.7.1 GrpcStore
+#                       experimental_remote_cache_compression), for both tiers;
+#                       uploads stay identity (no writable rbe-west listener
+#                       accepts zstd). The remote CAS is split: REMOTE_READ
+#                       (zstd, RBE_WIRE_ZSTD_READ_URL) and REMOTE_WRITE
+#                       (identity, the worker's own endpoint). Needs rbe-west's
+#                       read-only zstd route for this tier first, else every
+#                       such fetch fails with InvalidArgument. 0 (default):
+#                       identity through one REMOTE_CAS, as before.
+#   RBE_WIRE_ZSTD_READ_URL  where REMOTE_READ fetches (default: the worker's
+#                       own grpcs://RBE_WEST_HOST:RBE_WEST_PORT). rbe-west's
+#                       edge sends this certificate's ByteStream.Read there to
+#                       the read-only zstd process (fork: Caddyfile.fork :8444;
+#                       oss: the :443 route); everything else goes where it
+#                       always did.
 #   RBE_ACTION_ISOLATION  1 (default): every action runs as a per-action slot
 #                       user in private namespaces (below). 0: the rollback
 #                       switch, actions run as this runner user as before.
@@ -53,6 +72,11 @@ case "$ACTION_ISOLATION" in
 0 | 1 | canary) ;;
 *) echo "RBE_ACTION_ISOLATION must be 0, 1 or canary" >&2; exit 2 ;;
 esac
+case "${RBE_WIRE_ZSTD:-0}" in
+1) wire_zstd=true ;;
+0) wire_zstd=false ;;
+*) echo "RBE_WIRE_ZSTD must be 0 or 1" >&2; exit 2 ;;
+esac
 WORKER_TIER=${WORKER_TIER:-oss}
 case "$WORKER_TIER" in
 oss) NETNS=0 ;;
@@ -64,6 +88,8 @@ fork)
 *) echo "WORKER_TIER must be oss or fork" >&2; exit 2 ;;
 esac
 RBE_WEST_PORT=${RBE_WEST_PORT:-443}
+ZSTD_READ_URL=${RBE_WIRE_ZSTD_READ_URL:-grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT}}
+[[ $ZSTD_READ_URL =~ ^grpcs://[A-Za-z0-9.-]+:[0-9]{1,5}$ ]] || { echo "RBE_WIRE_ZSTD_READ_URL must be grpcs://host:port" >&2; exit 2; }
 NL_VERSION=1.7.1
 NL_SHA256=a3d7abc2598e976d022fcdabe88a2f8fae46a3ae64f1868698002ca968dd88e9
 GO_VERSION=$(awk '/^go /{print $2; exit}' go.mod)
@@ -103,7 +129,64 @@ mkdir -p "$NL_BIN_DIR" && tar -C "$NL_BIN_DIR" -xzf "$RUNNER_TEMP/nl.tgz" native
 # lives on the sticky disk when one is mounted. content.exec sits next to
 # content and is wiped by NativeLink at startup.
 STORE=${CACHE_DIR:-$ROOT}
-mkdir -p "$ROOT"/{work,pki} "$STORE"/{content,tmp}
+# work/ must share the CAS's filesystem: NativeLink 1.7.1 hardlinks every input
+# from the CAS into the action directory (fs::hard_link_many, no copy
+# fallback), so a CAS on a sticky disk with work/ on the root filesystem fails
+# every action with EXDEV. On a sticky disk work/ is scratch: emptied before
+# NativeLink starts and before the disk is committed.
+WORK=$STORE/work
+CAS_MAX_BYTES=${CAS_MAX_BYTES:-$([ -n "${CACHE_DIR:-}" ] && echo 60000000000 || echo 150000000000)}
+[[ $CAS_MAX_BYTES =~ ^[1-9][0-9]{9,12}$ ]] || { echo "CAS_MAX_BYTES must be bytes (1e9..1e13)" >&2; exit 2; }
+
+# A sticky-disk CAS is untrusted input: any VM that mounted the same key wrote
+# it. NativeLink 1.7.1's filesystem store names each blob
+# d2/<sha256>-<size>-<generation> and never re-hashes it on read, so before
+# NativeLink loads the directory every file must be a regular file whose
+# SHA-256 and size match its name, owned by this user and not writable by
+# anyone else (a slot user must never get a writable inode of an input).
+# Everything else is deleted: a poisoned or garbage disk costs a cold cache,
+# never a wrong input.
+scrub_cas() { # STORE
+	local c=$1/content bad kept
+	sudo rm -rf --one-file-system "$1/tmp" "$1/work" "$c.exec"
+	mkdir -p "$1/tmp" "$1/work" "$c/d2"
+	find "$c" -mindepth 1 -maxdepth 1 ! -name d2 -exec rm -rf --one-file-system {} +
+	find "$c/d2" -mindepth 1 \( ! -type f -o -links +1 \) -exec rm -rf --one-file-system {} + 2>/dev/null || true
+	sudo chown -R --no-dereference "$(id -u):$(id -g)" "$1"
+	find "$1" -perm /022 -exec chmod go-w {} +
+	# -regextype is positional and must come before -regex: after the ! it
+	# negated an always-true option and the filter deleted nothing. -delete
+	# takes any name, so once it ran every name left is [0-9a-f-] only.
+	find "$c/d2" -regextype posix-extended -type f ! -regex '.*/[0-9a-f]{64}-[0-9]{1,15}-[0-9]{1,20}' -delete
+	# Size and SHA-256 against the name, run inside d2 so that neither
+	# CACHE_DIR's own path nor sha256sum's escaping reaches awk.
+	bad=$RUNNER_TEMP/cas-scrub.bad
+	(
+		cd "$c/d2"
+		find . -type f -printf '%s %f\n' | awk '{ split($2, a, "-"); if (a[2] != $1) print $2 }'
+		find . -type f -print0 | xargs -0 -r -n 256 -P "$(nproc)" sha256sum |
+			awk '{ n = $2; sub(".*/", "", n); if (substr(n, 1, 64) != $1) print n }'
+	) | sort -u >"$bad"
+	(cd "$c/d2" && tr '\n' '\0' <"$bad" | xargs -0 -r rm -f --)
+	kept=$(find "$c/d2" -type f | wc -l)
+	echo "cas scrub: $(wc -l <"$bad") blobs removed, $kept kept ($(du -sh "$c/d2" | cut -f1))"
+}
+if [ -n "${CACHE_DIR:-}" ]; then
+	# A subshell outside any condition, so set -e holds inside it (it would
+	# not in one), and a failed scrub costs the cache, never the worker.
+	set +e
+	(
+		set -e
+		scrub_cas "$STORE"
+	)
+	scrub_rc=$?
+	set -e
+	if [ "$scrub_rc" != 0 ]; then
+		echo "::warning title=rbe cas scrub::scrub failed (exit $scrub_rc); this worker starts with an empty CAS"
+		sudo rm -rf --one-file-system "$STORE/content" "$STORE/content.exec" "$STORE/tmp" "$STORE/work"
+	fi
+fi
+mkdir -p "$ROOT/pki" "$WORK" "$STORE"/{content,tmp}
 umask 077
 printf '%s' "$RBE_WORKER_TLS_CERT" | base64 -d >"$ROOT/pki/worker.pem"
 printf '%s' "$RBE_WORKER_TLS_KEY" | base64 -d >"$ROOT/pki/worker.key"
@@ -166,22 +249,40 @@ canary_report() { # result [detail]
 # anyway, the rest stays.
 isolation_undo() {
 	sudo nft delete table inet rbe_action 2>/dev/null || true
-	sudo find "$ROOT/work" -mindepth 1 -maxdepth 1 -exec rm -rf --one-file-system {} + 2>/dev/null ||
-		find "$ROOT/work" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+	sudo find "${WORK:-$ROOT/work}" -mindepth 1 -maxdepth 1 -exec rm -rf --one-file-system {} + 2>/dev/null ||
+		find "${WORK:-$ROOT/work}" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
 }
 
 render() {
-	jq -n --arg host "grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT:-443}" --arg root "$ROOT" --arg store "$STORE" --arg name "$WORKER_NAME" --argjson slots "$slots" --arg tier "${WORKER_TIER:-oss}" --argjson isolation "$isolation" '
+	# zstd, read, casmax and work are read as $ARGS.named with today's values as
+	# defaults, so worker.json is byte-identical to before unless they change.
+	jq -n --arg host "grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT:-443}" --arg root "$ROOT" --arg store "$STORE" --arg name "$WORKER_NAME" --argjson slots "$slots" --arg tier "${WORKER_TIER:-oss}" --argjson zstd "${wire_zstd:-false}" --arg read "${ZSTD_READ_URL:-grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT:-443}}" --argjson casmax "${CAS_MAX_BYTES:-150000000000}" --arg work "${WORK:-$ROOT/work}" --argjson isolation "$isolation" '
   { cert_file: ($root + "/pki/worker.pem"), key_file: ($root + "/pki/worker.key"),
     ca_file: "/etc/ssl/certs/ca-certificates.crt" } as $tls |
+  (if $tier == "fork" then "oss-fork" else "" end) as $cas_instance |
   {
     stores: [
-      { name: "REMOTE_CAS", grpc: { instance_name: (if $tier == "fork" then "oss-fork" else "" end), endpoints: [{ address: $host, tls_config: $tls }], store_type: "cas" } },
+      (if ($ARGS.named.zstd // false) then
+        # Both tiers: inputs come compressed, uploads stay identity. rbe-west
+        # sends ByteStream.Read from this worker certificate to its read-only
+        # zstd process (fork: Caddyfile.fork; oss: the :443 route), and no
+        # writable listener accepts zstd. fast_direction read_only: reads try
+        # REMOTE_READ, writes go to REMOTE_WRITE alone, which says false
+        # explicitly so a NativeLink default can never compress an upload.
+        { name: "REMOTE_READ", grpc: { instance_name: $cas_instance, endpoints: [{ address: ($ARGS.named.read // $host), tls_config: $tls }], store_type: "cas",
+            experimental_remote_cache_compression: true } },
+        { name: "REMOTE_WRITE", grpc: { instance_name: $cas_instance, endpoints: [{ address: $host, tls_config: $tls }], store_type: "cas",
+            experimental_remote_cache_compression: false } },
+        { name: "REMOTE_CAS", fast_slow: { fast: { ref_store: { name: "REMOTE_READ" } }, fast_direction: "read_only",
+            slow: { ref_store: { name: "REMOTE_WRITE" } } } }
+      else
+        { name: "REMOTE_CAS", grpc: { instance_name: $cas_instance, endpoints: [{ address: $host, tls_config: $tls }], store_type: "cas" } }
+      end),
       (if $tier == "fork" then empty else
         { name: "REMOTE_AC", grpc: { instance_name: "oss", endpoints: [{ address: $host, tls_config: $tls }], store_type: "ac" } } end),
       { name: "WFS", fast_slow: {
           fast: { filesystem: { content_path: ($store + "/content"), temp_path: ($store + "/tmp"),
-                                eviction_policy: { max_bytes: 150000000000 } } },
+                                eviction_policy: { max_bytes: ($ARGS.named.casmax // 150000000000) } } },
           slow: { ref_store: { name: "REMOTE_CAS" } } } }
     ],
     workers: [ { local: ({
@@ -191,7 +292,7 @@ render() {
       # fork: nothing is cached for anyone (README "rbe-fork"); NativeLink
       # refuses a strategy other than never without an ac_store.
       upload_action_result: (if $tier == "fork" then { upload_ac_results_strategy: "never" } else { ac_store: "REMOTE_AC" } end),
-      work_directory: ($root + "/work"),
+      work_directory: ($ARGS.named.work // ($root + "/work")),
       max_inflight_tasks: $slots,
       platform_properties: {
         OSFamily: { values: ["linux"] },
@@ -206,7 +307,7 @@ isolate() {
 	phase paths
 	# Canonical paths: the launcher compares them with the action's pwd -P.
 	MASK_ROOT=$(cd "$HOME" && pwd -P)
-	WORK_ROOT=$(cd "$ROOT/work" && pwd -P)
+	WORK_ROOT=$(cd "${WORK:-$ROOT/work}" && pwd -P)
 	# The CAS must stay under the mask: a CACHE_DIR (sticky disk) outside $HOME
 	# would be visible to actions, so isolation refuses it.
 	for d in "$WORK_ROOT" "$(cd "$ROOT" && pwd -P)" "$(cd "$STORE" && pwd -P)"; do
@@ -429,7 +530,7 @@ else
 	started=$SECONDS idle=0
 	while kill -0 "$nl" 2>/dev/null; do
 		sweep
-		inflight=$(find "$ROOT/work" -mindepth 1 -maxdepth 1 -type d | wc -l)
+		inflight=$(find "${WORK:-$ROOT/work}" -mindepth 1 -maxdepth 1 -type d | wc -l)
 		if [ "$inflight" -eq 0 ]; then idle=$((idle + 30)); else idle=0; fi
 		[ "$idle" -ge $((POOL_IDLE_MINUTES * 60)) ] && { echo "idle ${POOL_IDLE_MINUTES}m, retiring"; break; }
 		[ $((SECONDS - started)) -ge $((POOL_MAX_MINUTES * 60)) ] && { echo "max age ${POOL_MAX_MINUTES}m, retiring"; break; }
@@ -441,6 +542,14 @@ if kill -0 "$nl" 2>/dev/null; then
 	timeout 300 tail --pid="$nl" -f /dev/null || kill -KILL "$nl"
 fi
 grep -E 'registered|GoingAway|ERROR' "$ROOT/worker.log" | tail -20 || true
+# A sticky disk is committed after this step: leave no action scratch on it.
+[ -z "${CACHE_DIR:-}" ] || sudo find "$WORK" -mindepth 1 -maxdepth 1 -exec rm -rf --one-file-system {} + 2>/dev/null || true
+# P5: what this VM cost rbe-west (bytes received on the default route since boot,
+# the local CAS size) and how many compressed reads fell back or failed.
+dev=$(ip route show default | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1); exit }')
+echo "rbe-pull: tier=$WORKER_TIER zstd=$wire_zstd rx_bytes=$(cat "/sys/class/net/$dev/statistics/rx_bytes" 2>/dev/null || echo ?)" \
+	"cas_bytes=$(du -sb "$STORE/content" | cut -f1) zstd_fallbacks=$(grep -c 'falling back to identity' "$ROOT/worker.log" || true)" \
+	"zstd_refused=$(grep -c 'refusing identity fallback' "$ROOT/worker.log" || true)"
 if [ "$ACTION_ISOLATION" = 1 ]; then
 	echo "slot egress (destination . protocol . port, packets): for the NETNS=1 decision"
 	sudo nft list set inet rbe_action slot_dst | sed -n '/elements/,/}/p' || true

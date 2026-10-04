@@ -39,6 +39,14 @@ needs its own import. The `gastown` and `gascity` packs are also bundled but
 never required -- they arrive via the templates that use them (`gc init`
 gastown/gascity options) or an explicit import.
 
+The gascity template also writes a default rig import of the gascity pack's
+role agents (`gc-roles`, source `.../gascity-packs/tree/main/gascity/roles`),
+pinned to the same commit as `[imports.gc]`. That subpack ships inside the
+bundled gascity pack, so at that pin it resolves offline from the same
+embedded copy; `gc init` and `gc rig add` never clone gascity-packs for it.
+`gc doctor --fix` re-pins it together with `[imports.gc]` when a newer `gc`
+moves the gascity pin.
+
 ## Core Pack
 
 The bundled `core` pack contributes the baseline behavior that helps agents

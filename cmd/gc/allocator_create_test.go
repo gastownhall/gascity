@@ -627,11 +627,49 @@ type refusingCreateStore struct {
 
 func (s refusingCreateStore) Create(beads.Bead) (beads.Bead, error) { return beads.Bead{}, s.err }
 
+// firstListFailStore fails the first List: the locked live re-census of
+// the leg (a transient leg read failure, a Dolt outage or a bd timeout).
+type firstListFailStore struct {
+	beads.Store
+	failed bool
+}
+
+func (s *firstListFailStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if !s.failed {
+		s.failed = true
+		return nil, errors.New("leg unavailable")
+	}
+	return s.Store.List(q)
+}
+
+// Kills: a read failure under the locks vetoed as fence (F3). Only a taken
+// name is fence, which moves the planner's request to the next slot; a
+// failed live re-census or alias query proves nothing about the name and is
+// fence-read, which stalls it. A taken name stays fence
+// (TestCreateEffect_NoWriteFailureVetoesIdentityWithBackoff).
+func TestCreateEffect_LockedReadFailureVetoesFenceRead(t *testing.T) {
+	cfg := workerCity(60)
+	for name, store := range map[string]beads.Store{
+		"re-census read error": &firstListFailStore{Store: beads.NewMemStore()},
+		"alias query error":    &aliasQueryFailStore{Store: beads.NewMemStore()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newCreateHarness(t, nil)
+			h.reserve(t, "c1")
+			plan := workerPlan(cfg, "c1", 1)
+			h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
+			assertFailedNoWrite(t, h)
+			h.assertCreateVeto(t, plan, createStageFenceRead)
+		})
+	}
+}
+
 // Kills: a create the store provably refused settled as ambiguous (latent 1
 // from the P3-6b review): it would hold the token until lag repair and skip
 // the create veto, so the planner re-plans the identity at pass rate. A gate
 // refusal, a code-less not-found, a lost fence and a store that cannot fence
-// fail the entry with no row and veto the identity.
+// fail the entry with no row and veto the identity, as fence-read: none
+// proves the name taken (F3).
 func TestCreateEffect_RefusedWriteFailsNoWriteAndVetoes(t *testing.T) {
 	cfg := workerCity(2)
 	for name, err := range map[string]error{
@@ -647,7 +685,7 @@ func TestCreateEffect_RefusedWriteFailsNoWriteAndVetoes(t *testing.T) {
 			plan := workerPlan(cfg, "c1", 1)
 			h.runAll(t, &createPass{cfg: cfg, store: refusingCreateStore{Store: mem, err: err}}, plan)
 			assertFailedNoWrite(t, h)
-			h.assertCreateVeto(t, plan, createStageFence)
+			h.assertCreateVeto(t, plan, createStageFenceRead)
 			if rows := sessionRows(t, mem); len(rows) != 0 {
 				t.Fatalf("rows = %+v, want none", rows)
 			}
