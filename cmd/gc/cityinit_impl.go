@@ -133,10 +133,16 @@ func cityInitDoInit(_ context.Context, req cityinit.InitRequest) error {
 
 func cityInitFinalize(_ context.Context, req cityinit.InitRequest) error {
 	var stdout, stderr bytes.Buffer
+	// The commandName deliberately differs from the CLI's "gc init": only the
+	// exact CLI command names gate interactively on cross-city supervisor
+	// impact (and, non-interactively, refuse without --yes). This path IS the
+	// supervisor acting on an operator's create-city API request — cycling
+	// itself is the requested operation, so it warns for the audit trail and
+	// proceeds.
 	if code := finalizeInit(req.Dir, &stdout, &stderr, initFinalizeOptions{
 		skipProviderReadiness: req.SkipProviderReadiness,
 		showProgress:          false,
-		commandName:           "gc init",
+		commandName:           "gc init (supervisor API)",
 	}); code != 0 {
 		detail := strings.TrimSpace(stderr.String())
 		if detail == "" {
