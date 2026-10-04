@@ -253,7 +253,7 @@ func TestBazelMultiLaneWorkflowTriggersAndPermissions(t *testing.T) {
 		t.Errorf("%s on: %v, want exactly %v", bazelMultiLaneWorkflow, on, want)
 	}
 	// A PR's runs share a group and cancel each other; every other event has
-	// a group of its own (the run id): a push to main is never cancelled, nor
+	// a group of its own (the run id): a push to main is never canceled, nor
 	// replaced while pending by the next push. The prefix is a literal, apart
 	// from bazel-test.yml's (its github.workflow is its name).
 	wantConcurrency := map[string]string{
@@ -588,7 +588,7 @@ func TestBazelMultiLaneGate(t *testing.T) {
 	}{
 		{someLanes, "success", "success", "success", true},
 		{someLanes, "success", "failure", "success", false},
-		{someLanes, "success", "cancelled", "success", false},
+		{someLanes, "success", "cancelled", "success", false}, //nolint:misspell // GitHub Actions job result value
 		{someLanes, "success", "skipped", "success", false},
 		{someLanes, "success", "success", "failure", false},
 		{someLanes, "failure", "success", "success", false},
