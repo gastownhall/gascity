@@ -802,7 +802,49 @@ func decodeCacheEvent(payload json.RawMessage) (Bead, map[string]json.RawMessage
 	return b, fields, nil
 }
 
-func (c *CachingStore) notifyChange(eventType string, b Bead) {
+// ChangeSource names the path that produced a change notification. A local
+// write is a fact this process made durable; every other source is inferred
+// from a read of the backing, which out-of-process writes and scan races can
+// make stale (mc-zndi7.43, .56). Treat an inferred notification as a hint and
+// re-read the store before acting on it durably.
+//
+// ApplyEvent and the list/Get refetch installs notify nothing, so they have no
+// source (mc-zndi7.55).
+type ChangeSource uint8
+
+const (
+	// ChangeLocal is a write made through this cache: Create, Update, Close,
+	// Reopen, metadata and dependency writes, deletes, Tx, conditional writes
+	// and graph apply.
+	ChangeLocal ChangeSource = iota + 1
+	// ChangeScan is the reconcile scan's diff, including its synthetic close of
+	// a cached open row the scan did not list.
+	ChangeScan
+	// ChangeRefresh is a point read: RefreshRow, and Update's refetch that
+	// found the row gone after the write (its bead.closed is the read's
+	// inference, not a close this process made).
+	ChangeRefresh
+)
+
+// Inferred reports whether the notification was inferred from a read rather
+// than written by this process. An unknown source counts as inferred, so a
+// consumer that re-validates inferred closes fails toward the extra read.
+func (s ChangeSource) Inferred() bool { return s != ChangeLocal }
+
+func (s ChangeSource) String() string {
+	switch s {
+	case ChangeLocal:
+		return "local"
+	case ChangeScan:
+		return "scan"
+	case ChangeRefresh:
+		return "refresh"
+	default:
+		return "unknown"
+	}
+}
+
+func (c *CachingStore) notifyChange(source ChangeSource, eventType string, b Bead) {
 	if c.onChange == nil {
 		return
 	}
@@ -823,7 +865,7 @@ func (c *CachingStore) notifyChange(eventType string, b Bead) {
 	// step_id is the semantic native execution step carried explicitly by the
 	// lifecycle bead. Non-work beads (sessions, mail, …) carry none → omitted.
 	stepID := b.Metadata[beadmeta.StepIDMetadataKey]
-	c.onChange(eventType, b.ID, runID, sessionID, stepID, NativeStepDependencies(b.Metadata, stepID), payload)
+	c.onChange(source, eventType, b.ID, runID, sessionID, stepID, NativeStepDependencies(b.Metadata, stepID), payload)
 }
 
 // NativeStepDependencies returns the explicit, canonical native topology fact.
@@ -864,9 +906,9 @@ type cacheNotification struct {
 	bead      Bead
 }
 
-func (c *CachingStore) notifyChanges(notifications []cacheNotification) {
+func (c *CachingStore) notifyChanges(source ChangeSource, notifications []cacheNotification) {
 	for _, notification := range notifications {
-		c.notifyChange(notification.eventType, notification.bead)
+		c.notifyChange(source, notification.eventType, notification.bead)
 	}
 }
 

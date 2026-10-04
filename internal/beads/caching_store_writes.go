@@ -52,7 +52,7 @@ func (c *CachingStore) createWith(create func() (Bead, error)) (Bead, error) {
 		// A local write to the new row landed after the refresh read.
 		c.updateStatsLocked()
 		c.mu.Unlock()
-		c.notifyChange("bead.created", created)
+		c.notifyChange(ChangeLocal, "bead.created", created)
 		return created, nil
 	}
 	c.noteLocalMutationLocked(created.ID)
@@ -65,7 +65,7 @@ func (c *CachingStore) createWith(create func() (Bead, error)) (Bead, error) {
 	c.updateStatsLocked()
 	c.mu.Unlock()
 
-	c.notifyChange("bead.created", created)
+	c.notifyChange(ChangeLocal, "bead.created", created)
 	return created, nil
 }
 
@@ -131,8 +131,11 @@ func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq uint64)
 		}
 		c.updateStatsLocked()
 		c.mu.Unlock()
+		// The write succeeded but the row is gone: this process closed
+		// nothing, it read the row's absence. That is an inference, so a
+		// consumer re-reads before treating it as a completion (mc-zndi7.60).
 		if notifyClosed {
-			c.notifyChange("bead.closed", closed)
+			c.notifyChange(ChangeRefresh, "bead.closed", closed)
 		}
 		return
 	}
@@ -156,7 +159,7 @@ func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq uint64)
 		c.mu.Unlock()
 		c.recordProblem("refresh bead after update", fmt.Errorf("%s: %w", id, err))
 		if found {
-			c.notifyChange("bead.updated", patched)
+			c.notifyChange(ChangeLocal, "bead.updated", patched)
 		}
 		return
 	}
@@ -164,7 +167,7 @@ func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq uint64)
 		// Notify with the backing's row, not the write laid over it.
 		c.updateStatsLocked()
 		c.mu.Unlock()
-		c.notifyChange("bead.updated", fresh)
+		c.notifyChange(ChangeLocal, "bead.updated", fresh)
 		return
 	}
 	fresh = applyUpdateOptsToBead(fresh, opts)
@@ -181,7 +184,7 @@ func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq uint64)
 	c.updateStatsLocked()
 	c.mu.Unlock()
 
-	c.notifyChange("bead.updated", fresh)
+	c.notifyChange(ChangeLocal, "bead.updated", fresh)
 }
 
 // ReleaseIfCurrent clears an in-progress assignment through the backing store
@@ -233,7 +236,7 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	if found {
-		c.notifyChange("bead.updated", row)
+		c.notifyChange(ChangeLocal, "bead.updated", row)
 	}
 	return true, nil
 }
@@ -295,7 +298,7 @@ func (c *CachingStore) Close(id string) error {
 	c.mu.Unlock()
 
 	if found {
-		c.notifyChange("bead.closed", closed)
+		c.notifyChange(ChangeLocal, "bead.closed", closed)
 	}
 	return nil
 }
@@ -373,7 +376,7 @@ func (c *CachingStore) Reopen(id string) error {
 		reopened, found = edgesUnread, true
 	}
 	if found {
-		c.notifyChange("bead.updated", reopened)
+		c.notifyChange(ChangeLocal, "bead.updated", reopened)
 	}
 	return nil
 }
@@ -435,7 +438,7 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
 	c.mu.Unlock()
-	c.notifyChanges(notifications)
+	c.notifyChanges(ChangeLocal, notifications)
 	return n, errors.Join(err, refreshErr)
 }
 
@@ -533,7 +536,7 @@ func (c *CachingStore) finishMetadataWrite(id string, kvs map[string]string, sta
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	if found {
-		c.notifyChange("bead.updated", row)
+		c.notifyChange(ChangeLocal, "bead.updated", row)
 	}
 }
 
@@ -778,7 +781,7 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 	c.updateStatsLocked()
 	c.mu.Unlock()
 
-	c.notifyChanges(notifications)
+	c.notifyChanges(ChangeLocal, notifications)
 }
 
 // updateMatchesCached returns true when every non-nil field in opts already
@@ -955,7 +958,7 @@ func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 		c.updateStatsLocked()
 		c.mu.Unlock()
 		if refreshed {
-			c.notifyChange("bead.updated", fresh)
+			c.notifyChange(ChangeLocal, "bead.updated", fresh)
 		}
 		return nil
 	}
@@ -971,7 +974,7 @@ func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 		c.markFreshLocked(time.Now())
 		c.updateStatsLocked()
 		c.mu.Unlock()
-		c.notifyChange("bead.updated", fresh)
+		c.notifyChange(ChangeLocal, "bead.updated", fresh)
 		return nil
 	}
 	if !c.depsComplete {
@@ -1015,7 +1018,7 @@ func (c *CachingStore) DepRemove(issueID, dependsOnID string) error {
 		c.updateStatsLocked()
 		c.mu.Unlock()
 		if refreshed {
-			c.notifyChange("bead.updated", fresh)
+			c.notifyChange(ChangeLocal, "bead.updated", fresh)
 		}
 		return nil
 	}
@@ -1031,7 +1034,7 @@ func (c *CachingStore) DepRemove(issueID, dependsOnID string) error {
 		c.markFreshLocked(time.Now())
 		c.updateStatsLocked()
 		c.mu.Unlock()
-		c.notifyChange("bead.updated", fresh)
+		c.notifyChange(ChangeLocal, "bead.updated", fresh)
 		return nil
 	}
 	if !c.depsComplete {
@@ -1071,7 +1074,7 @@ func (c *CachingStore) Delete(id string) error {
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	if haveDeleted {
-		c.notifyChange("bead.deleted", deleted)
+		c.notifyChange(ChangeLocal, "bead.deleted", deleted)
 	}
 	return nil
 }
@@ -1135,7 +1138,7 @@ func (c *CachingStore) DeleteBatch(ids []string) error {
 	c.mu.Unlock()
 
 	for _, b := range events {
-		c.notifyChange("bead.deleted", b)
+		c.notifyChange(ChangeLocal, "bead.deleted", b)
 	}
 	return nil
 }
@@ -1183,7 +1186,7 @@ func (c *CachingStore) reconcilePartialBatchDelete(err error, events []Bead) err
 	c.mu.Unlock()
 	for _, b := range events {
 		if _, ok := committed[b.ID]; ok {
-			c.notifyChange("bead.deleted", b)
+			c.notifyChange(ChangeLocal, "bead.deleted", b)
 		}
 	}
 	return err
