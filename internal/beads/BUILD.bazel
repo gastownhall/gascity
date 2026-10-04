@@ -130,6 +130,7 @@ go_test(
         "native_dolt_events_journal_test.go",
         "native_dolt_proxied_open_test.go",
         "native_dolt_readonly_test.go",
+        "native_dolt_store_batch_close_test.go",
         "native_dolt_store_batch_tx_test.go",
         "native_dolt_store_close_chain_test.go",
         "native_dolt_store_close_retry_test.go",

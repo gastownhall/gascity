@@ -1883,7 +1883,44 @@ func (s *NativeDoltStore) reopenOnce(ctx context.Context, storage beadslib.Stora
 	return nativeStoreError(id, err)
 }
 
-// CloseAll closes multiple beads and sets metadata on each newly closed bead.
+// CloseAll closes multiple beads and sets metadata on each bead it is given.
+//
+// The batch route is the one it takes; see native_dolt_store_batch_close.go for
+// what it costs and what it preserves — including that the metadata stamp
+// reaches a bead that is ALREADY CLOSED, which the per-bead loop skipped after
+// reading its status. Callers that hand this method closed beads on purpose
+// (the workflow skip and delete paths list with IncludeClosed) are asking for
+// their stamp to land on every id they named.
+//
+// The per-bead route below it is the fallback for a backing that cannot apply a
+// batch, and the route is decided by ASKING rather than by a capability
+// handshake, exactly as Tx decides its own: such a backend says so and writes
+// nothing. batchRouteUnavailable is what recognizes that answer, in the two
+// shapes it comes in — see its own doc.
+//
+// `closed > 0` is that fallback's safety fence, the `entered` of Tx's. A
+// refusal is a fact about the backing, so it arrives on the first chunk or not
+// at all; a refusal raised AFTER a chunk has landed is something else, and
+// re-walking the whole input under the loop would report only what the
+// remaining chunks closed.
+func (s *NativeDoltStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	if err := s.readOnlyGuard(); err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	closed, err := s.closeAllAsBatch(ids, metadata)
+	if err == nil {
+		return closed, nil
+	}
+	if closed > 0 || !batchRouteUnavailable(err) {
+		return closed, err
+	}
+	return s.closeAllOneAtATime(ids, metadata)
+}
+
+// closeAllOneAtATime closes each bead with its own read and its own writes.
 //
 // The metadata stamp and the close are a CHAIN: gc puts close_reason into that
 // metadata and the close carries the reason. So the second write needs a value
@@ -1901,10 +1938,7 @@ func (s *NativeDoltStore) reopenOnce(ctx context.Context, storage beadslib.Stora
 // The no-metadata arm keeps Close's own read, because there is no chain in it:
 // nothing in the call wrote a reason, so the row is the only place one can come
 // from and that read is the only one Close makes.
-func (s *NativeDoltStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
-	if err := s.readOnlyGuard(); err != nil {
-		return 0, err
-	}
+func (s *NativeDoltStore) closeAllOneAtATime(ids []string, metadata map[string]string) (int, error) {
 	closed := 0
 	for _, id := range ids {
 		current, err := s.Get(id)

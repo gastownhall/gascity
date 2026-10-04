@@ -2,6 +2,7 @@ package beads
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	beadslib "github.com/steveyegge/beads"
@@ -51,6 +52,18 @@ var _ readyProjectionEnrichmentStore = (*NativeDoltStore)(nil)
 // takes the backing's own Ready. Slower, and correct. The core beadslib.Storage
 // interface does not declare IsBlockedBatch (only DoltStorage composes
 // DependencyQueryStore), so this is a real branch, not a defensive one.
+//
+// IT IS ALSO NOT THE ONLY BRANCH, because the interface probe can say yes and
+// the method still refuse. A generated stub satisfies BlockedQuerier and then
+// answers *beadslib.ErrUnsupported from a client-side backstop, which is
+// exactly what the http backend does — AsBlockedQuerier succeeds, no request is
+// issued, and the refusal arrives at CALL time instead of at the probe. Both
+// arms describe the same fact about the backing, so both report the same
+// sentinel; classifying only the probe left the call-time refusal as an
+// ordinary error, which applyReadyProjection folds into primePartialErr, and
+// THAT declines every cache-only read for the life of the cache rather than
+// readiness alone (ga-2ltro.20). The classification is errors.As on the typed
+// refusal, the same way Tx routes itself to its batch fallback.
 func (s *NativeDoltStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
 	if len(items) == 0 {
 		return items, nil
@@ -84,6 +97,10 @@ func (s *NativeDoltStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, e
 		}
 		blocked, err := querier.IsBlockedBatch(ctx, ids)
 		if err != nil {
+			var unsupported *beadslib.ErrUnsupported
+			if errors.As(err, &unsupported) {
+				return fmt.Errorf("native ready projection: %w: %w", ErrReadyProjectionUnsupported, err)
+			}
 			return fmt.Errorf("native ready projection: %w", err)
 		}
 		projection = blocked
