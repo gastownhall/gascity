@@ -4861,7 +4861,12 @@ func (s depListFailStore) DepList(id, direction string) ([]beads.Dep, error) {
 	return s.Store.DepList(id, direction)
 }
 
-func TestSweepStaleOrderTrackingWithWispsRequiresOrderFilter(t *testing.T) {
+// An empty order filter used to be a hard error: wisp recovery refused to run
+// without a name, which is why the shipped order-tracking-sweep order could
+// never reach an abandoned pour and the pour's order stayed gated forever
+// (sr-kjwpz). It is now the unattended sweep's normal mode, so it must be
+// accepted — and on a store with nothing to recover it must close nothing.
+func TestSweepStaleOrderTrackingWithWispsAcceptsEmptyOrderFilter(t *testing.T) {
 	store := beads.NewMemStore()
 
 	result, err := sweepStaleOrderTrackingWithOptions(
@@ -4870,14 +4875,11 @@ func TestSweepStaleOrderTrackingWithWispsRequiresOrderFilter(t *testing.T) {
 		nil,
 		true,
 	)
-	if err == nil {
-		t.Fatal("sweepStaleOrderTrackingWithOptions err = nil, want order-filter error")
-	}
-	if !strings.Contains(err.Error(), "requires at least one order name") {
-		t.Fatalf("err = %q, want order-filter context", err)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingWithOptions: %v", err)
 	}
 	if result.trackingClosed != 0 || result.wispClosed != 0 {
-		t.Fatalf("result = %+v, want no partial closes", result)
+		t.Fatalf("result = %+v, want nothing closed on an empty store", result)
 	}
 }
 

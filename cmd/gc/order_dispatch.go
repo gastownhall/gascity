@@ -77,6 +77,24 @@ const (
 	staleOrderTrackingCloseReason = "order-tracking sweep: stale tracking bead exceeded retention window"
 	staleOrderWispCloseReason     = "order-tracking sweep: stale order wisp subtree exceeded retention window"
 
+	// unscopedOrderWispStaleAfter bounds the age of a wisp subtree the sweep
+	// will force-close when it was given NO order names — the scheduled,
+	// unattended recovery path. It is deliberately neither --stale-after nor
+	// configurable.
+	//
+	// --stale-after is the TRACKING half's bound, and the shipped sweep order
+	// runs it at 10m — shorter than a healthy pour's lifetime. On a live city a
+	// ticket-intake pour that completed perfectly normally lived 11m31s from
+	// pour to close; reusing 10m here would have force-closed it mid-flight
+	// while its agent held the poll step. The named path keeps using
+	// --stale-after because an operator who names the order has already decided
+	// that order is wedged. The unattended path has decided nothing.
+	//
+	// A constant rather than a flag because the dangerous setting is the LOW
+	// one, and lowering it is a flag's only real use. Operators who want a
+	// different bound name the order and get --stale-after.
+	unscopedOrderWispStaleAfter = 6 * time.Hour
+
 	completedOrderTrackingCloseReason = "order dispatch completed: tracking bead lifecycle finished"
 
 	// orderTrackingHistoryIndexLimit bounds the per-tick cooldown-history
@@ -3092,9 +3110,6 @@ func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStor
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
 	}
-	if includeWispSubtrees && len(onlyOrders) == 0 {
-		return orderTrackingSweepResult{}, fmt.Errorf("include-wisps requires at least one order name")
-	}
 	perStoreWisps := includeWispSubtrees
 	result := orderTrackingSweepResult{}
 	var errs []error
@@ -3125,7 +3140,7 @@ func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStor
 		}
 	}
 	if includeWispSubtrees && wispStore != nil && !sweepStoreListContains(stores, wispStore) {
-		n, err := sweepStaleOrderWispSubtreesMode(wispStore, now.Add(-staleAfter), onlyOrders, initiator, dryRun)
+		n, err := sweepStaleOrderWispSubtreesMode(wispStore, orderWispSweepCutoff(now, staleAfter, onlyOrders), onlyOrders, initiator, dryRun)
 		result.wispClosed += n
 		if err != nil {
 			errs = append(errs, fmt.Errorf("sweeping order wisp subtrees in the graph binding: %w", err))
@@ -3170,9 +3185,6 @@ func sweepStaleOrderTrackingWithOptionsLimitDryRun(store beads.Store, now time.T
 func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
-	}
-	if includeWispSubtrees && len(onlyOrders) == 0 {
-		return orderTrackingSweepResult{}, fmt.Errorf("include-wisps requires at least one order name")
 	}
 	cutoff := now.Add(-staleAfter)
 	// StaleOpenRuns is the typed read half: OPEN tracking runs at or before the
@@ -3225,13 +3237,30 @@ func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Tim
 	}
 
 	if includeWispSubtrees {
-		n, err := sweepStaleOrderWispSubtreesMode(store, cutoff, onlyOrders, initiator, dryRun)
+		n, err := sweepStaleOrderWispSubtreesMode(store, orderWispSweepCutoff(now, staleAfter, onlyOrders), onlyOrders, initiator, dryRun)
 		result.wispClosed = n
 		if err != nil {
 			return result, err
 		}
 	}
 	return result, nil
+}
+
+// orderWispSweepCutoff is the age bound the wisp half of the sweep runs at.
+//
+// Named orders get the caller's --stale-after: an operator who names an order
+// has already judged it wedged, and the shipped recovery command
+// (`gc order sweep-tracking <order> --include-wisps`) must keep behaving
+// exactly as it did before unscoped sweeps existed.
+//
+// An unscoped sweep has judged nothing, so it gets unscopedOrderWispStaleAfter
+// instead — see that constant for why reusing the tracking bound would
+// force-close healthy in-flight pours.
+func orderWispSweepCutoff(now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}) time.Time {
+	if len(onlyOrders) == 0 {
+		return now.Add(-unscopedOrderWispStaleAfter)
+	}
+	return now.Add(-staleAfter)
 }
 
 func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (orderTrackingRetentionSweepResult, error) {
@@ -3547,7 +3576,7 @@ func sweepStaleOrderWispSubtreesMode(store beads.Store, cutoff time.Time, onlyOr
 		if err != nil {
 			return 0, fmt.Errorf("collecting stale wisp subtree %s: %w", root.ID, err)
 		}
-		if !openSubtreeOlderThan(subtree, cutoff) {
+		if !orderWispSubtreeSweepable(subtree, cutoff, onlyOrders) {
 			continue
 		}
 		for _, id := range staleOrderWispSubtreeCloseIDs(subtree) {
@@ -3595,9 +3624,6 @@ func closeStaleOrderWispIDs(store beads.Store, ids []string, initiator string) (
 }
 
 func staleOrderWispSubtreeBatchCloseIDs(store beads.Store, cutoff time.Time, onlyOrders map[string]struct{}) ([]string, bool, error) {
-	if len(onlyOrders) == 0 {
-		return nil, false, fmt.Errorf("include-wisps requires at least one order name")
-	}
 	all, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 		// The batch sweep deliberately scans every bead once and groups
 		// candidate roots with their descendants in memory, instead of issuing
@@ -3655,8 +3681,14 @@ func staleOrderWispSubtreeBatchCloseIDs(store beads.Store, cutoff time.Time, onl
 		if !ok {
 			continue
 		}
-		if _, ok := onlyOrders[name]; !ok {
-			continue
+		// An empty filter is the unscoped sweep: every order-run root is a
+		// candidate, which is the whole point — it recovers the order nobody
+		// has been bitten by yet. The extra safety that buys back is the
+		// untouched check below.
+		if len(onlyOrders) > 0 {
+			if _, ok := onlyOrders[name]; !ok {
+				continue
+			}
 		}
 		if root.CreatedAt.IsZero() || !root.CreatedAt.Before(cutoff) {
 			continue
@@ -3674,7 +3706,7 @@ func staleOrderWispSubtreeBatchCloseIDs(store beads.Store, cutoff time.Time, onl
 		subtree = append(subtree, root)
 		subtree = append(subtree, descendants...)
 		subtree = appendParentChainDescendants(subtree, childrenByParent)
-		if !openSubtreeOlderThan(subtree, cutoff) {
+		if !orderWispSubtreeSweepable(subtree, cutoff, onlyOrders) {
 			continue
 		}
 		for _, id := range staleOrderWispSubtreeCloseIDs(subtree) {
@@ -3727,8 +3759,29 @@ func appendParentChainDescendants(subtree []beads.Bead, childrenByParent map[str
 }
 
 func staleOrderWispRoots(store beads.Store, cutoff time.Time, onlyOrders map[string]struct{}) ([]beads.Bead, error) {
+	// Unscoped: there is no label-pattern query (ListQuery has Label, not a
+	// glob), so the roots come from one bounded scan filtered in memory by the
+	// same order-run:<name> predicate the per-name branch pushes down. The
+	// batch path above already scans the whole store, so this fallback — which
+	// only runs for legacy graph-v2 shapes the batch path declines — adds no
+	// new class of read.
 	if len(onlyOrders) == 0 {
-		return nil, fmt.Errorf("include-wisps requires at least one order name")
+		matches, err := store.List(beads.ListQuery{
+			AllowScan:     true,
+			CreatedBefore: cutoff,
+			TierMode:      beads.TierBoth,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("listing stale order wisps: %w", err)
+		}
+		roots := make([]beads.Bead, 0, len(matches))
+		for _, match := range matches {
+			if _, ok := orders.NameFromOrderRunLabel(match); !ok {
+				continue
+			}
+			roots = append(roots, match)
+		}
+		return roots, nil
 	}
 	var roots []beads.Bead
 	for orderName := range onlyOrders {
@@ -3868,6 +3921,60 @@ func openSubtreeOlderThan(subtree []beads.Bead, cutoff time.Time) bool {
 			continue
 		}
 		if b.CreatedAt.IsZero() || !b.CreatedAt.Before(cutoff) {
+			return false
+		}
+	}
+	return true
+}
+
+// orderWispSubtreeSweepable decides whether the sweep may force-close this
+// subtree, and it asks a STRICTER question when the sweep was given no order
+// names.
+//
+// Age alone is the right test for a named sweep: the operator named the order
+// because they established it is wedged, and age is only there to stop them
+// shooting the pour that is running right now.
+//
+// It is the wrong test for the unscoped, scheduled sweep. openSubtreeOlderThan
+// reads CreatedAt, so it cannot tell a pour that died at birth from one an
+// agent has been working for hours — and the second is the common case for any
+// order whose formula does real work. So the unscoped path additionally
+// requires that nothing in the subtree has MOVED since the cutoff. That is
+// exactly the signature the production incident had, and the healthy pour did
+// not: the abandoned one sat at updated_at == created_at for 2d17h, while its
+// replacement was claimed 10 minutes in.
+//
+// The guarantee is bounded, and worth stating exactly rather than as "live
+// work is never swept": a subtree is spared when any of its open beads was
+// WRITTEN inside the cutoff window. Work that runs longer than
+// unscopedOrderWispStaleAfter while touching none of its beads is, to this
+// predicate, identical to an abandoned pour, and will be closed. Widening the
+// window is the lever for that; there is no signal here that distinguishes
+// them.
+func orderWispSubtreeSweepable(subtree []beads.Bead, cutoff time.Time, onlyOrders map[string]struct{}) bool {
+	if !openSubtreeOlderThan(subtree, cutoff) {
+		return false
+	}
+	if len(onlyOrders) > 0 {
+		return true
+	}
+	return openSubtreeUntouchedSince(subtree, cutoff)
+}
+
+// openSubtreeUntouchedSince reports whether every OPEN bead in the subtree has
+// been inert since the cutoff. A zero UpdatedAt is read as "never updated
+// since creation", which is how MemStore and bd both stamp a fresh bead, so a
+// legacy row missing the column is treated as untouched rather than as
+// permanently live.
+func openSubtreeUntouchedSince(subtree []beads.Bead, cutoff time.Time) bool {
+	for _, b := range subtree {
+		if b.Status == "closed" {
+			continue
+		}
+		if b.UpdatedAt.IsZero() {
+			continue
+		}
+		if !b.UpdatedAt.Before(cutoff) {
 			return false
 		}
 	}

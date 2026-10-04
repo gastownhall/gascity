@@ -299,10 +299,24 @@ always retaining at least the latest 10 closed tracking beads per order.
 The manual command runs to completion; controller startup and watchdog sweeps
 use bounded cleanup to avoid spending an unbounded tick on stale work.
 
-Use --include-wisps for operator recovery of abandoned order-run wisp
-subtrees whose open descendants are also older than --stale-after. Pass one
-or more scoped order names when --include-wisps is set; wisp recovery is
-order-scoped to avoid scanning unrelated beads.
+Use --include-wisps to recover abandoned order-run wisp subtrees — a pour
+whose root and members were left open holds its order's open-work gate shut
+on every dispatch tick until something closes them.
+
+Naming one or more scoped orders is the operator form: those orders' subtrees
+are force-closed once every open bead in them is older than --stale-after.
+Naming none is the unattended form the shipped order-tracking-sweep order
+uses, and it is deliberately more cautious, because nobody has judged any
+order to be wedged. It considers every order-run subtree, but closes one only
+when every open bead in it was both created AND last written more than 6h
+ago. --stale-after does not widen that bound.
+
+So a pour is spared whenever any of its open beads has been written to within
+the last 6h — a claim, a status change, a metadata stamp. Note what that does
+and does not promise: work that runs longer than 6h WITHOUT touching any of
+its beads is indistinguishable from an abandoned pour and will be swept. If
+you have an order whose steps legitimately run silent for longer than that,
+have it touch its bead, or give that store no unscoped sweep.
 
 When the number of eligible closed-bead deletions exceeds
 GC_BULK_DELETE_CONFIRM_THRESHOLD (default 20), --confirm is required to
@@ -1846,10 +1860,6 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 		return 1
 	}
 	onlyOrders := orderNameFilter(orderNames)
-	if includeWisps && len(onlyOrders) == 0 {
-		fmt.Fprintln(stderr, "gc order sweep-tracking: include-wisps requires at least one order name") //nolint:errcheck // best-effort stderr
-		return 1
-	}
 	requiredTargets, err := orderTrackingSweepRequiredTargetKeysForOrders(cityPath, cfg, onlyOrders)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
