@@ -1436,19 +1436,17 @@ func isHeldHookCandidate(item map[string]any) bool {
 	if !ok {
 		return false
 	}
+	labels := make([]string, 0, len(raw))
 	for _, entry := range raw {
-		label, ok := entry.(string)
-		if !ok {
-			continue
-		}
-		label = strings.TrimSpace(label)
-		for _, hold := range beadmeta.DispatchHoldLabels {
-			if strings.EqualFold(label, hold) {
-				return true
-			}
+		if label, ok := entry.(string); ok {
+			labels = append(labels, label)
 		}
 	}
-	return false
+	// One predicate for "held": the controller's wake-demand and drain-ack
+	// claimability gates (assignedOpenWorkHeld, classifyDemandRowClaimability)
+	// answer with the same function, so they cannot drift from what the hook
+	// actually refuses to serve.
+	return beadmeta.HasDispatchHold(labels)
 }
 
 // isClosedHookCandidate reports whether item is a closed bead. Defense-in-depth

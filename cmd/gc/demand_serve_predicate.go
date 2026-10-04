@@ -171,6 +171,13 @@ const (
 	// (beads.IsDeferred). Both are FRESH bead-local fields — never stale — so this
 	// is proof that no worker could have claimed the row.
 	demandRowDeferred demandRowClaimability = "deferred"
+	// demandRowHeld: the row carries a canonical dispatch hold
+	// (beadmeta.HasDispatchHold). The hook never serves a held row to anyone
+	// (isHeldHookCandidate), so this is PROOF of non-claimability, read off a
+	// fresh bead-local field exactly like a deferral. A seat that drained past
+	// held assigned work drained correctly; reporting it as a strand is what
+	// accompanied the hold-label wake/drain loop.
+	demandRowHeld demandRowClaimability = "held"
 	// demandRowBlockednessUnproven: the bead alone cannot settle whether the row is
 	// blocked, so each consumer re-derives it from live dependencies
 	// (beadHasUnmetPlainBlocksDep). Two readings land here, and neither is proof:
@@ -189,8 +196,8 @@ const (
 )
 
 // classifyDemandRowClaimability answers the claimability question for one row.
-// Deferral is checked first: it is the cause that is proof, so a row that is both
-// deferred and flagged blocked classifies as deferred.
+// Deferral and a dispatch hold are checked first: they are the causes that are
+// proof, so a row that is also flagged blocked classifies by the proof.
 //
 // An ABSENT is_blocked projection is not evidence of unblockedness, and this
 // predicate does not read it as any. bd's `list --json` / `show --json` payloads
@@ -216,6 +223,9 @@ const (
 func classifyDemandRowClaimability(b beads.Bead, now time.Time) demandRowClaimability {
 	if beads.IsDeferred(b, now) {
 		return demandRowDeferred
+	}
+	if beadmeta.HasDispatchHold(b.Labels) {
+		return demandRowHeld
 	}
 	if b.IsBlocked == nil || *b.IsBlocked {
 		return demandRowBlockednessUnproven

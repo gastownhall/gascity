@@ -3223,8 +3223,19 @@ func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Sto
 // by the assigned-work passes that establish real readiness (in-progress,
 // store-Ready()/deps, and assigned molecule roots) — never by the open-routed
 // orphan-release pass, whose beads have not passed any readiness gate.
+//
+// OPEN work parked on a dispatch hold is never marked: bd's Ready() is
+// hold-transparent, but the session's own hook refuses to serve a held row
+// (isHeldHookCandidate), so counting it as wake demand woke an on-demand named
+// session that drain-acked no_work and was re-woken every tick. The bead stays
+// in the assigned-work snapshot — orphan release, pool accounting and crash
+// recovery still see the assignment (ga-5736js) — it just carries no wake
+// readiness. assignedOpenWorkHeld is the shared predicate.
 func markReadyAssigned(readyIDs map[string]bool, b beads.Bead) {
 	if readyIDs == nil {
+		return
+	}
+	if assignedOpenWorkHeld(b) {
 		return
 	}
 	readyIDs[b.ID] = true

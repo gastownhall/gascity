@@ -861,6 +861,7 @@ go_test(
         "apiroute_test.go",
         "assigned_work_class_binding_test.go",
         "assigned_work_defer_tracker_test.go",
+        "assigned_work_hold_wake_test.go",
         "assigned_work_residency_test.go",
         "assigned_work_scope_test.go",
         "async_start_command_gate_test.go",
