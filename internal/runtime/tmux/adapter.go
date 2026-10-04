@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -30,6 +32,15 @@ type Provider struct {
 	cache    *StateCache
 	mu       sync.Mutex
 	workDirs map[string]string // session name → workDir (for CopyTo)
+
+	// livenessUnknown and livenessServerDead are set once
+	// ObserveLivenessWithError reports unknown or a confirmed-dead server,
+	// and cleared only when the cache answers again, so each episode logs
+	// once even while outcomes differ per session.
+	livenessUnknown    atomic.Bool
+	livenessServerDead atomic.Bool
+	// logf logs liveness episodes. Nil selects log.Printf.
+	logf func(format string, args ...any)
 }
 
 var instanceTokenReader = rand.Reader
@@ -45,6 +56,10 @@ var (
 	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
 	_ runtime.SessionRosterProvider         = (*Provider)(nil)
+	_ runtime.ListingAttestation            = (*Provider)(nil)
+	_ runtime.InventoryProvider             = (*Provider)(nil)
+	_ runtime.AttachmentObserverWithError   = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -323,8 +338,29 @@ func (p *Provider) IsDeadRuntimeSession(name string) (bool, error) {
 }
 
 // IsAttached reports whether a user terminal is connected to the named session.
+//
+// Served from the same short-lived fleet snapshot as IsRunning (one
+// `tmux list-panes -a`), not a `display-message` fork per session: a reconcile
+// pass probes attachment for every session it tracks, so the per-session form
+// cost one tmux process per session per pass. A session missing from the
+// snapshot falls back to the direct read.
+//
+// Only this boolean read is served from the snapshot. [Provider.IsAttachedWithError],
+// the error-aware probe that destructive-action gates use, deliberately keeps
+// its direct per-session `display-message` so those gates never act on a
+// cached answer.
 func (p *Provider) IsAttached(name string) bool {
+	if attached, ok := p.cache.SessionAttached(name); ok {
+		return attached
+	}
 	return p.tm.IsSessionAttached(name)
+}
+
+// IsAttachedWithError reports whether a user terminal is connected to the
+// named session, separating "no client" from "could not tell". See
+// [Tmux.SessionAttachedWithError] for the error mapping.
+func (p *Provider) IsAttachedWithError(name string) (bool, error) {
+	return p.tm.SessionAttachedWithError(name)
 }
 
 // ProcessAlive reports whether the named session has a live agent
@@ -426,6 +462,87 @@ func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.L
 	return runtime.Liveness{
 		Running: running,
 		Alive:   alive,
+	}
+}
+
+// ObserveLivenessWithError reports pane and agent-process presence like
+// ObserveLiveness, but answers "unknown" (an error wrapping
+// [runtime.ErrRuntimeUnavailable] and the refresh error) instead of "absent"
+// when the state cache cannot vouch for its snapshot. See
+// [classifyCacheObservation] for when it can. The bool paths (IsRunning,
+// ObserveLiveness) keep their staleTTL cliff unchanged.
+func (p *Provider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	if strings.TrimSpace(name) == "" {
+		return runtime.Liveness{}, nil
+	}
+	obs := p.cache.observe()
+	switch classifyCacheObservation(obs, name, p.cache.clock(), p.cache.staleTTL, p.tm.serverConfirmedDead) {
+	case cacheAnswerAbsent:
+		p.noteLivenessEpisode(livenessOutcomeServerDead, nil)
+		return runtime.Liveness{}, nil
+	case cacheAnswerUnknown:
+		// The message omits the refresh error's text: tmux's "no tmux server
+		// running" and exec's "executable file not found" both match
+		// runtime.IsSessionGone, which would read "unknown" as "gone".
+		errs := []error{runtime.ErrRuntimeUnavailable}
+		if obs.lastErr != nil {
+			errs = append(errs, obs.lastErr)
+		}
+		err := &quietCauseError{
+			msg:  fmt.Sprintf("observing tmux session %q: state cache cannot vouch for it: %v", name, runtime.ErrRuntimeUnavailable),
+			errs: errs,
+		}
+		p.noteLivenessEpisode(livenessOutcomeUnknown, obs.lastErr)
+		return runtime.Liveness{}, err
+	}
+	p.noteLivenessEpisode(livenessOutcomeAnswered, nil)
+	session, ok := obs.state.Sessions[name]
+	if !ok || !session.Running {
+		return runtime.Liveness{}, nil
+	}
+	processNames = nonEmptyProcessNames(processNames)
+	if len(processNames) == 0 {
+		processNames = p.sessionProcessNames(name)
+	}
+	if len(processNames) == 0 {
+		return runtime.Liveness{Running: true, Alive: true}, nil
+	}
+	return runtime.Liveness{Running: true, Alive: obs.state.processAlive(name, processNames)}, nil
+}
+
+// livenessOutcome is how one ObserveLivenessWithError call answered, for the
+// episode log.
+type livenessOutcome int
+
+const (
+	livenessOutcomeAnswered livenessOutcome = iota
+	livenessOutcomeUnknown
+	livenessOutcomeServerDead
+)
+
+// noteLivenessEpisode logs once on entering "unknown", once on entering
+// "server confirmed dead", and once when the cache answers again. A wedged
+// server now stops producing actions instead of false deaths, so the episode
+// must be visible without a line per probe.
+func (p *Provider) noteLivenessEpisode(outcome livenessOutcome, cause error) {
+	logf := p.logf
+	if logf == nil {
+		logf = log.Printf
+	}
+	switch outcome {
+	case livenessOutcomeUnknown:
+		if p.livenessUnknown.CompareAndSwap(false, true) {
+			logf("tmux liveness: reporting unknown for sessions the state cache cannot vouch for until a state refresh succeeds: %v", cause)
+		}
+	case livenessOutcomeServerDead:
+		if p.livenessServerDead.CompareAndSwap(false, true) {
+			logf("tmux liveness: server socket confirmed dead; reporting its sessions absent")
+		}
+	default:
+		wasUnknown := p.livenessUnknown.Swap(false)
+		if wasDead := p.livenessServerDead.Swap(false); wasUnknown || wasDead {
+			logf("tmux liveness: state cache answering again")
+		}
 	}
 }
 
@@ -610,18 +727,22 @@ func (p *Provider) SetMeta(name, key, value string) error {
 }
 
 // GetMeta retrieves a value from the named session's tmux environment.
-// Returns ("", nil) if the key is not set. Propagates session-not-found
-// and no-server errors so callers can distinguish "key absent" from
-// "session gone."
+// Returns ("", nil) only when the session answered that the key is not set.
+// A missing session wraps [runtime.ErrSessionNotFound]; any other failure
+// (no server, timeout, unparsable answer) wraps [runtime.ErrRuntimeUnavailable],
+// so a failed read is never mistaken for "unset".
 func (p *Provider) GetMeta(name, key string) (string, error) {
 	val, err := p.tm.GetEnvironment(name, key)
-	if err != nil {
-		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
-			return "", err
-		}
-		return "", nil // key not set
+	switch {
+	case err == nil:
+		return val, nil
+	case errors.Is(err, errEnvUnset):
+		return "", nil
+	case errors.Is(err, ErrSessionNotFound):
+		return "", fmt.Errorf("reading %s from session %q: %w: %w", key, name, runtime.ErrSessionNotFound, err)
+	default:
+		return "", fmt.Errorf("reading %s from session %q: %w: %w", key, name, runtime.ErrRuntimeUnavailable, err)
 	}
-	return val, nil
 }
 
 // RemoveMeta removes a key from the named session's tmux environment.
@@ -671,9 +792,31 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	return matched, nil
 }
 
+// ListRunningComplete implements [runtime.ListingAttestation]. An error-free
+// ListRunning means the server answered list-sessions, which names every
+// session it holds (remain-on-exit corpses included); an absent server is
+// reported as a [runtime.PartialListError], never as an empty list.
+func (p *Provider) ListRunningComplete() bool { return true }
+
+// RuntimeInventory implements [runtime.InventoryProvider] with one
+// batched pane read. Delegates to [Tmux.listRuntimeInventory].
+func (p *Provider) RuntimeInventory(ctx context.Context) (map[string]runtime.InventoryEntry, error) {
+	return p.tm.listRuntimeInventory(ctx)
+}
+
 // GetLastActivity returns the time of the last I/O activity in the named
-// session. Delegates to [Tmux.GetSessionActivity].
+// session.
+//
+// The raw timestamp comes from the same fleet snapshot as IsRunning rather than
+// a `list-windows` fork per session, and the poke discount
+// ([Tmux.discountedActivity]) is applied to it exactly as
+// [Tmux.GetSessionActivity] would. The snapshot carries max(#{window_activity})
+// per session — NOT #{session_activity}, which does not advance on detached
+// pane I/O. A session missing from the snapshot falls back to the direct read.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
+	if activity, ok := p.cache.SessionActivity(name); ok {
+		return p.tm.discountedActivity(name, activity), nil
+	}
 	return p.tm.GetSessionActivity(name)
 }
 
@@ -842,7 +985,8 @@ type startOps interface {
 	waitForReady(ctx context.Context, name string, rc *RuntimeConfig, timeout time.Duration) error
 	hasSession(name string) (bool, error)
 	capturePane(name string, lines int) (string, error)
-	recordStartCrash(name, paneContent string) string
+	paneDeadInfo(name string) (status, signal string)
+	recordStartCrash(name, paneContent, status, signal string) string
 	recordUnconfirmedNudge(name, message string, cause error) string
 	sendKeys(name, text string) error
 	paneBusy(name string) (bool, error)
@@ -989,10 +1133,16 @@ func (o *tmuxStartOps) capturePane(name string, lines int) (string, error) {
 	return runtime.RedactSecrets(content, o.secrets), err
 }
 
+// paneDeadInfo returns the dead pane's exit status and terminating signal.
+func (o *tmuxStartOps) paneDeadInfo(name string) (status, signal string) {
+	return o.tm.PaneDeadInfo(name)
+}
+
 // recordStartCrash persists a per-session start-crash diagnostic so an
 // immediate start-crash leaves a durable on-disk artifact (the transient
 // start error is otherwise lost). It records the dead pane's exit status and
-// terminating signal alongside the captured pane output. Best-effort: a
+// terminating signal (read once by the caller, which also classifies them)
+// alongside the captured pane output. Best-effort: a
 // disabled capture (empty runtimeDir) or any I/O error returns "" without
 // affecting startup. Returns the artifact path when written.
 //
@@ -1001,12 +1151,11 @@ func (o *tmuxStartOps) capturePane(name string, lines int) (string, error) {
 // this is the copy that outlives the session, and a future caller reaching for
 // a durable crash record should not have to know which of its arguments were
 // pre-sanitized.
-func (o *tmuxStartOps) recordStartCrash(name, paneContent string) string {
+func (o *tmuxStartOps) recordStartCrash(name, paneContent, status, signal string) string {
 	if o.runtimeDir == "" {
 		return ""
 	}
 	paneContent = runtime.RedactSecrets(paneContent, o.secrets)
-	status, signal := o.tm.PaneDeadInfo(name)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "session: %s\n", name)
@@ -1323,24 +1472,34 @@ func startupDeadSessionError(ops startOps, name string) error {
 	} else {
 		pane = strings.TrimSpace(pane)
 	}
+	// Read the corpse's exit facts once: the durable record and the capacity
+	// classification below must describe the same observation.
+	status, signal := ops.paneDeadInfo(name)
 	// Persist a durable crash diagnostic (exit status + signal + pane output)
 	// so the immediate-exit reason survives the transient start error. Recorded
 	// even when the pane is empty, so an exit-before-render crash still leaves
 	// the exit status/signal on disk. Best-effort: "" when capture is disabled.
-	diagPath := ops.recordStartCrash(name, pane)
+	diagPath := ops.recordStartCrash(name, pane, status, signal)
+	var died error
 	switch {
 	case pane != "" && diagPath != "":
-		return fmt.Errorf("%w: session %q; diagnostic written to %s; last pane output:\n%s",
+		died = fmt.Errorf("%w: session %q; diagnostic written to %s; last pane output:\n%s",
 			runtime.ErrSessionDiedDuringStartup, name, diagPath, pane)
 	case pane != "":
-		return fmt.Errorf("%w: session %q; last pane output:\n%s",
+		died = fmt.Errorf("%w: session %q; last pane output:\n%s",
 			runtime.ErrSessionDiedDuringStartup, name, pane)
 	case diagPath != "":
-		return fmt.Errorf("%w: session %q; diagnostic written to %s",
+		died = fmt.Errorf("%w: session %q; diagnostic written to %s",
 			runtime.ErrSessionDiedDuringStartup, name, diagPath)
 	default:
-		return startupSessionDiedError(name)
+		died = startupSessionDiedError(name)
 	}
+	// A clean EX_TEMPFAIL exit is the launcher declaring the endpoint refused
+	// the start. Only the exit status classifies; the pane text never does.
+	if signal == "" && status == strconv.Itoa(runtime.ExitCodeTempFail) {
+		return &runtime.CapacityError{ExitCode: runtime.ExitCodeTempFail, Source: runtime.CapacitySourceExitStatus, Err: died}
+	}
+	return died
 }
 
 func startupSessionDiedError(name string) error {

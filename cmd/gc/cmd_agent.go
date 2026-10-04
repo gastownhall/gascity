@@ -181,6 +181,9 @@ func isNonFatalLoadConfigWarning(warning string) bool {
 	if config.IsRetiredKeyWarning(warning) {
 		return true
 	}
+	if config.IsSessionReconcilerAliasWarning(warning) {
+		return true
+	}
 	if config.IsLegacyV1SurfaceWarning(warning) {
 		return true
 	}

@@ -373,7 +373,7 @@ type transientCityEventProvider struct {
 }
 
 func (p transientCityEventProvider) Record(e events.Event) {
-	recorder, err := events.NewFileRecorder(p.path, io.Discard)
+	recorder, err := newSecondaryFileEventsRecorder(p.path, io.Discard)
 	if err != nil {
 		return
 	}
@@ -390,16 +390,7 @@ func (p transientCityEventProvider) LatestSeq() (uint64, error) {
 }
 
 func (p transientCityEventProvider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
-	recorder, err := events.NewFileRecorder(p.path, io.Discard)
-	if err != nil {
-		return nil, err
-	}
-	watcher, err := recorder.Watch(ctx, afterSeq)
-	recorder.Close() //nolint:errcheck // watcher only needs the path
-	if err != nil {
-		return nil, err
-	}
-	return watcher, nil
+	return events.NewReadOnlyFileProvider(p.path, io.Discard).Watch(ctx, afterSeq)
 }
 
 func (transientCityEventProvider) Close() error {
@@ -546,7 +537,7 @@ func (r *cityRegistry) toCityView(path string, mc *managedCity) *cityView {
 	// SAFETY: cs is a pointer to controllerState, which has its own internal
 	// RWMutex protecting all field access. API handlers that receive this pointer
 	// call methods like Config(), SessionProvider(), etc. which acquire cs.mu.RLock().
-	// The Poke() method only does a non-blocking channel send — no managedCity access.
+	// The Enqueue() method only does non-blocking channel sends — no managedCity access.
 	var cs api.State
 	if mc.cr != nil {
 		cs = mc.cr.cs

@@ -36,6 +36,12 @@ var contractCoverage = map[string]classification{
 	"Stop_Idempotent_AlreadyStopped": {Code: ReqLifecycleStopIdempotent},
 	"IsRunning_UnknownSession":       {Code: ReqLifecycleUnknownNotRunning},
 
+	// --- Optional error-bearing capabilities (deferred: in-process provider
+	// interfaces that the exec provider does not implement over the wire) ---
+	"ObserveLivenessWithError_StoppedIsAbsent": {Deferred: "optional capability; no error-bearing liveness op on the wire yet"},
+	"IsAttachedWithError_UnattachedSession":    {Deferred: "optional capability; no error-bearing attachment op on the wire"},
+	"IsAttachedWithError_MissingSession":       {Deferred: "optional capability; no error-bearing attachment op on the wire"},
+
 	// --- Concurrency (deferred: a cross-cutting property, ported once the
 	// single-session behaviors of each group are gated) ---
 	"Start_ConcurrentDistinctSessions":        {Deferred: "concurrency group not yet ported"},

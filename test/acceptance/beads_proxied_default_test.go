@@ -67,6 +67,9 @@ type doctorCheckResult struct {
 	Name    string `json:"name"`
 	Status  string `json:"status"`
 	Message string `json:"message"`
+	// Details are the check's supporting lines; proxied-backup-coverage
+	// lists each scope it found backed up here.
+	Details []string `json:"details,omitempty"`
 	// Payload is the check's structured findings, decoded lazily: only
 	// beads-store sets one this test reads, and decoding it eagerly into a
 	// typed field would make every other check's payload a parse this file has
@@ -122,7 +125,7 @@ func requireProxiedTooling(t *testing.T) (string, string) {
 	if bdPath == "" {
 		helpers.MissingTooling(t, "bd is not available; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0")
 	}
-	out, err := exec.Command(bdPath, "init", "--help").CombinedOutput() //nolint:gosec // resolved test binary
+	out, err := helpers.ToolCommand(t, bdPath, "init", "--help").CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "--proxied-server") {
 		helpers.MissingTooling(t, "bd at %s has no proxied-server support; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0", bdPath)
 	}
@@ -147,22 +150,24 @@ func requireProxiedTooling(t *testing.T) (string, string) {
 // proxiedNativeLaneEnv.
 func proxiedEnv(t *testing.T, bdPath, doltPath string) *helpers.Env {
 	t.Helper()
+	env, _ := proxiedEnvWithBD(t, bdPath, doltPath)
+	return env
+}
+
+// proxiedEnvWithBD is proxiedEnv plus the bd it put on PATH: the tool-home
+// wrapper around bdPath (helpers.LinkBeadsTooling), which is the bd anything
+// standing in for BD_BIN must exec so the operator's HOME never reaches bd.
+func proxiedEnvWithBD(t *testing.T, bdPath, doltPath string) (*helpers.Env, string) {
+	t.Helper()
 	linkDir := filepath.Join(helpers.TempDir(t), "bin")
-	if err := os.MkdirAll(linkDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for name, target := range map[string]string{"bd": bdPath, "dolt": doltPath} {
-		if err := os.Symlink(target, filepath.Join(linkDir, name)); err != nil {
-			t.Fatal(err)
-		}
-	}
+	wrappedBD := helpers.LinkBeadsTooling(t, testEnv, linkDir, bdPath, doltPath)
 	env := testEnv.Clone()
 	entries := filepath.SplitList(env.Get("PATH"))
 	path := append([]string{entries[0], linkDir}, entries[1:]...)
 	return env.With("PATH", strings.Join(path, string(os.PathListSeparator))).
 		With("GC_BEADS", "bd").
 		Without("GC_DOLT").
-		Without(proxiedNativeFlagEnv)
+		Without(proxiedNativeFlagEnv), wrappedBD
 }
 
 // proxiedNativeFlagEnv is PR2's rollout flag: native reads over bd's proxy,
@@ -192,8 +197,9 @@ func proxiedNativeLaneEnv(env *helpers.Env) *helpers.Env {
 // added.
 func proxiedEnvRecordingBD(t *testing.T, bdPath, doltPath string) (*helpers.Env, *helpers.RecordingBD) {
 	t.Helper()
-	recorder := helpers.NewRecordingBD(t, bdPath)
-	return proxiedEnv(t, bdPath, doltPath).With("BD_BIN", recorder.Path), recorder
+	env, wrappedBD := proxiedEnvWithBD(t, bdPath, doltPath)
+	recorder := helpers.NewRecordingBD(t, wrappedBD)
+	return env.With("BD_BIN", recorder.Path), recorder
 }
 
 // doltProcessesUnder returns the command lines of every live bd proxy or dolt
@@ -351,15 +357,21 @@ func assertDoctorGreen(t *testing.T, city *helpers.City, label string) {
 // line through the real `gc doctor --json` front door.
 //
 // It is the one place doctor says out loud that a bd-owned proxied scope has no
-// backup at all — v1.3.0 refuses `bd backup` on that path, gc registers nothing
-// against a proxy root it does not own, and the per-scope checks correctly go
-// quiet, which between them made a default city read as covered. The advisory
-// is deliberately StatusOK (R3: a proxied city is a healthy city, and a warning
-// no operator can clear is a line nobody reads), so assertDoctorGreen cannot
-// see it and a unit test cannot prove it is registered on a real city. Both
-// directions are asserted: present with the scopes named for a proxied city,
-// absent for a city with no proxied scope, so the registration gate is real
-// rather than an unconditional line.
+// backup — gc registers nothing against a proxy root it does not own, and the
+// per-scope checks correctly go quiet, which between them made a default city
+// read as covered. assertDoctorGreen does not count the line, and a unit test
+// cannot prove it is registered on a real city. Both directions are asserted:
+// present with the scopes named for a proxied city, absent for a city with no
+// proxied scope, so the registration gate is real rather than an
+// unconditional line.
+//
+// The line follows the bd, as the check does. bd v1.3.0 refuses `bd backup` on
+// the proxied path, so nothing can produce a recovery point and the advisory
+// is StatusOK (R3: a warning no operator can clear is a line nobody reads). A
+// bd with proxied backup (beads 1.3.1) makes the gap closable, so a scope with
+// no destination is an advisory warning, a scope mol-dog-backup has already
+// registered and synced is listed as backed up in the details, and a scope
+// whose proxy is not running is named as not checked.
 // assertDoctorReportsBdOwnedProxiedStore pins WHICH store a real `gc init`
 // proxied city opens, which assertDoctorGreen cannot see: internal/doctor
 // reports ok both for BdStore behind the proxied_provider gate and for a
@@ -531,15 +543,43 @@ func assertProxiedBackupAdvisory(t *testing.T, city *helpers.City, label string,
 	if found == nil {
 		t.Fatalf("%s has no proxied-backup-coverage advisory; doctor reported %d checks", label, len(report.Results))
 	}
-	if found.Status != "ok" {
-		t.Errorf("proxied-backup-coverage = %s on %s, want ok (it must not gate a healthy city): %s",
-			found.Status, label, found.Message)
+	var wantStatus string
+	switch {
+	case strings.Contains(found.Message, "refuses backup on proxied scopes"):
+		// bd v1.3.0: nothing can be done, so it must not gate a healthy city.
+		wantStatus = "ok"
+	case strings.Contains(found.Message, "no bd backup destination is configured"):
+		wantStatus = "warning"
+	case strings.Contains(found.Message, "backed up through bd"),
+		strings.Contains(found.Message, "not checked: store not running"):
+		// Every scope is covered, or its proxy is stopped and doctor never
+		// starts one to ask.
+		wantStatus = "ok"
+	default:
+		t.Fatalf("proxied-backup-coverage on %s names neither a refusal, a missing destination, a backup nor a stopped store: %s",
+			label, found.Message)
 	}
-	for _, want := range append([]string{"no backup"}, wantScopes...) {
-		if !strings.Contains(found.Message, want) {
-			t.Errorf("proxied-backup-coverage on %s does not mention %q: %s", label, want, found.Message)
+	if found.Status != wantStatus {
+		t.Errorf("proxied-backup-coverage = %s on %s, want %s: %s", found.Status, label, wantStatus, found.Message)
+	}
+	for _, want := range wantScopes {
+		if !strings.Contains(found.Message, want) && !proxiedScopeBackedUp(found.Details, want) {
+			t.Errorf("proxied-backup-coverage on %s neither names scope %q nor reports it backed up: %s %q",
+				label, want, found.Message, found.Details)
 		}
 	}
+}
+
+// proxiedScopeBackedUp reports whether proxied-backup-coverage's details list
+// scope as backed up through bd ("<scope>: bd backup <url>, last sync <t>").
+func proxiedScopeBackedUp(details []string, scope string) bool {
+	for _, line := range details {
+		label, rest, ok := strings.Cut(line, ": bd backup ")
+		if ok && strings.Contains(label, scope) && strings.Contains(rest, "last sync") {
+			return true
+		}
+	}
+	return false
 }
 
 // makeCityLookLegacyManaged rewrites a freshly initialised proxied city into
@@ -559,7 +599,7 @@ func makeCityLookLegacyManaged(t *testing.T, env *helpers.Env, bdPath, cityRoot 
 
 	stop := exec.Command(bdPath, "dolt", "stop") //nolint:gosec // resolved test binary
 	stop.Dir = cityRoot
-	stop.Env = env.List()
+	stop.Env = env.ToolList()
 	if out, err := stop.CombinedOutput(); err != nil {
 		t.Fatalf("bd dolt stop on the fixture city: %v\n%s", err, out)
 	}
@@ -925,7 +965,7 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		initCmd := exec.Command(bdPath, "init", "--proxied-server", "--proxied-server-idle-timeout", "0", //nolint:gosec // resolved test binary
 			"-p", "adopt", "--quiet", "--skip-hooks", "--skip-agents", "--non-interactive", adopted)
 		initCmd.Dir = adopted
-		initCmd.Env = env.List()
+		initCmd.Env = env.ToolList()
 		if out, err := initCmd.CombinedOutput(); err != nil {
 			t.Fatalf("bd init --proxied-server: %v\n%s", err, out)
 		}
@@ -935,7 +975,7 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		t.Cleanup(func() {
 			stop := exec.Command(bdPath, "dolt", "stop") //nolint:gosec // resolved test binary
 			stop.Dir = adopted
-			stop.Env = env.List()
+			stop.Env = env.ToolList()
 			stop.Run() //nolint:errcheck // best effort
 		})
 

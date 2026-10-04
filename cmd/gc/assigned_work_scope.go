@@ -184,6 +184,28 @@ func filterAssignedWorkBeadsForPoolDemand(
 		return assignedWorkBeads
 	}
 	claimRefs := assignedWorkRelocatedClaimRefs(cityPath, cfg, leading)
+	return filterAssignedWorkBeadsForPoolDemandAt(cfg, cityPath, claimRefs, sessionInfos, assignedWorkBeads, assignedWorkStoreRefs, time.Now().UTC())
+}
+
+// filterAssignedWorkBeadsForPoolDemandAt is filterAssignedWorkBeadsForPoolDemand
+// with the claim refs (assignedWorkRelocatedClaimRefs) resolved and the clock
+// read by the caller, so it does no I/O: the v2 allocator calls it inside its
+// pure pass.
+func filterAssignedWorkBeadsForPoolDemandAt(
+	cfg *config.City,
+	cityPath string,
+	claimRefs []string,
+	sessionInfos []sessionpkg.Info,
+	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
+	now time.Time,
+) []beads.Bead {
+	if len(assignedWorkBeads) == 0 || len(assignedWorkStoreRefs) == 0 {
+		return assignedWorkBeads
+	}
+	if cfg == nil {
+		return assignedWorkBeads
+	}
 	assigneeToSessionBeadID := make(map[string]string)
 	sessionBeadTemplate := make(map[string]string)
 	for _, sb := range sessionInfos {
@@ -201,7 +223,6 @@ func filterAssignedWorkBeadsForPoolDemand(
 			assigneeToSessionBeadID[id] = sb.ID
 		}
 	}
-	now := time.Now().UTC()
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
 	for i, wb := range assignedWorkBeads {
 		// A deferred bead is deliberately parked (future defer_until) and is
@@ -299,6 +320,35 @@ func filterAssignedWorkBeadsForSessionWakeWithStores(
 		return assignedWorkBeads, assignedWorkStoreRefs, assignedWorkStores
 	}
 	claimRefs := assignedWorkClaimRefs(cityPath, cfg, leading)
+	return filterAssignedWorkBeadsForSessionWakeOn(cfg, cityPath, claimRefs, sessionInfos, assignedWorkBeads, assignedWorkStoreRefs, assignedWorkStores)
+}
+
+// filterAssignedWorkBeadsForSessionWakeOn is
+// filterAssignedWorkBeadsForSessionWakeWithStores with the claim refs
+// (assignedWorkClaimRefs) resolved by the caller, so it does no I/O: the v2
+// allocator calls it inside its pure pass.
+//
+// residency:allow — the caller's own snapshot, projected, exactly as in
+// filterAssignedWorkBeadsForSessionWakeWithStores: the stores it returns are a
+// subsequence of the slice it was handed.
+func filterAssignedWorkBeadsForSessionWakeOn(
+	cfg *config.City,
+	cityPath string,
+	claimRefs []string,
+	sessionInfos []sessionpkg.Info,
+	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
+	assignedWorkStores []beads.Store,
+) ([]beads.Bead, []string, []beads.Store) {
+	if len(assignedWorkStores) != len(assignedWorkBeads) {
+		assignedWorkStores = nil
+	}
+	if len(assignedWorkBeads) == 0 || len(assignedWorkStoreRefs) == 0 {
+		return assignedWorkBeads, assignedWorkStoreRefs, assignedWorkStores
+	}
+	if cfg == nil {
+		return assignedWorkBeads, assignedWorkStoreRefs, assignedWorkStores
+	}
 	reachableRefsByAssignee := make(map[string]map[string]struct{})
 	// crossStore identities belong to city-scoped (cross-store-eligible) agents
 	// and are reachable from ANY store (vp-kvp). They bypass the per-ref match.

@@ -798,7 +798,7 @@ func TestStorageRoutesRefuseAProviderThatOpensNoEngine(t *testing.T) {
 		t.Fatal("the binding in the resolved plan still offers an engine opener")
 	}
 
-	routes, err := openStorageRoutes(plan, target)
+	routes, err := openStorageRoutes(plan, target, cfg, root, nil)
 	if err == nil {
 		_ = routes.close()
 		t.Fatal("routes opened for a binding whose provider opens no bead engine; the classes assigned to it would have fallen through to the work store")

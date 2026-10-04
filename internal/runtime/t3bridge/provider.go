@@ -1965,6 +1965,23 @@ func beadStoreForWatcher(workDir string, env map[string]string) *beads.CachingSt
 	return beads.NewCachingStore(bd, nil)
 }
 
+// watchedBeadEvent filters the journal to the bead events the watcher
+// projects and canonicalizes their identity. The cache applies the payload
+// under the snapshot's own ID, so the subject the watcher then reads back must
+// be that same ID; an event whose subject names a different bead is dropped
+// rather than reported as activity on the wrong bead.
+func watchedBeadEvent(ev events.Event) (events.Event, bool) {
+	if ev.Type != events.BeadUpdated && ev.Type != events.BeadClosed && ev.Type != events.BeadCreated {
+		return events.Event{}, false
+	}
+	id, err := beads.BeadEventID(ev.Subject, ev.Payload)
+	if err != nil || id == "" {
+		return events.Event{}, false
+	}
+	ev.Subject = id
+	return ev, true
+}
+
 func beadEventRelevant(ev events.Event, bead beads.Bead, agentName, currentBead string) bool {
 	if ev.Actor == agentName {
 		return true
@@ -2100,6 +2117,13 @@ func latestSeqWithBackoff(ctx context.Context, latest func() (uint64, error)) (u
 	return 0, lastErr
 }
 
+// openWatcherEvents opens the city's event log for the event watcher. It is
+// read-only: the watcher never records, so it holds no write handle that would
+// pin a rotated-away log on disk.
+func openWatcherEvents(cityPath string) *events.FileRecorder {
+	return events.NewReadOnlyFileProvider(filepath.Join(cityPath, ".gc", "events.jsonl"), io.Discard)
+}
+
 func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Config, binding threadBinding, envelope StartupEnvelope, providerName string) {
 	cityPath := cfg.Env["GC_CITY_PATH"]
 	if cityPath == "" {
@@ -2109,11 +2133,7 @@ func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Co
 		return
 	}
 
-	eventPath := filepath.Join(cityPath, ".gc", "events.jsonl")
-	recorder, err := events.NewFileRecorder(eventPath, io.Discard)
-	if err != nil {
-		return
-	}
+	recorder := openWatcherEvents(cityPath)
 	defer func() { _ = recorder.Close() }()
 
 	cache := beadStoreForWatcher(cfg.WorkDir, cfg.Env)
@@ -2145,7 +2165,8 @@ func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Co
 		if err != nil {
 			return
 		}
-		if ev.Type != events.BeadUpdated && ev.Type != events.BeadClosed && ev.Type != events.BeadCreated {
+		ev, ok := watchedBeadEvent(ev)
+		if !ok {
 			continue
 		}
 		cache.ApplyEvent(ev.Type, ev.Payload)

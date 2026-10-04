@@ -6,8 +6,10 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -28,6 +30,9 @@ const acceptanceGitConfig = `[user]
 // test-specific overrides on top.
 type Env struct {
 	vars map[string]string
+	// toolHome is the HOME every bd and dolt child of this Env gets in place
+	// of the real one. See tool_home.go.
+	toolHome string
 }
 
 // NewEnv creates an isolated environment with the minimum inherited
@@ -36,9 +41,10 @@ type Env struct {
 func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	e := &Env{vars: make(map[string]string)}
 
-	// Inherit minimum from host. Keep the real HOME: the platform
-	// supervisor path now validates that HOME matches the OS user home
-	// and acceptance isolation should flow through GC_HOME instead.
+	// Inherit minimum from host. Keep the real HOME for gc: the platform
+	// supervisor path validates that HOME matches the OS user home and
+	// acceptance isolation for gc flows through GC_HOME instead. bd and dolt
+	// never see it — they get the tool home below (see tool_home.go).
 	for _, key := range []string{
 		"PATH", "TMPDIR", "LANG", "LC_ALL", "USER", "HOME",
 		"SHELL", "SSH_AUTH_SOCK", "TERM",
@@ -73,6 +79,23 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 		}
 	}
 
+	// bd and dolt children never see HOME; they resolve user-level state under
+	// this tool home instead (see tool_home.go).
+	e.toolHome = filepath.Join(gcHome, "tool-home")
+	if err := os.MkdirAll(e.toolHome, 0o755); err != nil {
+		panic(fmt.Sprintf("acceptance: creating bd/dolt tool home under %s: %v", gcHome, err))
+	}
+	// Any bd gc resolves through PATH comes from here first: the configured bd
+	// behind the tool-home wrapper, ahead of every host copy. Suites that stage
+	// their own bd (TopologyEnv, proxiedEnv, BD_BIN pins) put it earlier still.
+	if bdPath := FindBD(); bdPath != "" {
+		bdDir := filepath.Join(gcHome, "beads-bin")
+		if _, err := InstallBeadsTooling(e, bdDir, bdPath, ""); err != nil {
+			panic(fmt.Sprintf("acceptance: staging bd under %s: %v", gcHome, err))
+		}
+		e.vars["PATH"] = bdDir + ":" + e.vars["PATH"]
+	}
+
 	// Prepend gc binary dir to PATH.
 	if gcBinary != "" {
 		e.vars["GC_ACCEPTANCE_GC_BIN"] = gcBinary
@@ -95,12 +118,37 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	}
 	e.vars["PATH"] = shimDir + ":" + e.vars["PATH"]
 
+	// Bazel's remote test runner points HOME at the per-action TEST_TMPDIR, and
+	// the platform supervisor refuses to start when HOME differs from the
+	// passwd entry. Only in exactly that case, swap HOME for the passwd home —
+	// everywhere else the host HOME passes through verbatim (the tool-home
+	// tests assert that contract with a canary). GC_HOME carries gc's
+	// isolation; bd/dolt never see HOME at all (tool home, above).
+	if envHome := e.vars["HOME"]; envHome != "" && envHome == os.Getenv("TEST_TMPDIR") {
+		if lu, err := user.LookupId(strconv.Itoa(os.Getuid())); err == nil && strings.TrimSpace(lu.HomeDir) != "" {
+			e.vars["HOME"] = lu.HomeDir
+		}
+	}
 	if e.vars["HOME"] == "" {
 		if home, err := os.UserHomeDir(); err == nil && home != "" {
 			e.vars["HOME"] = home
 		}
 	}
 	e.vars["GC_HOME"] = gcHome
+
+	// Bazel's local sandbox — where a fork PR's CI job runs, having no remote
+	// executor — mounts the runner's real HOME read-only, and gc needs that HOME
+	// (above), so the Claude state the tests seed moves under GC_HOME instead. A
+	// CLAUDE_CONFIG_DIR from the host stays: it carries the operator's credentials.
+	if e.vars["CLAUDE_CONFIG_DIR"] == "" && e.vars["HOME"] != "" && !dirWritable(e.vars["HOME"]) {
+		e.vars["CLAUDE_CONFIG_DIR"] = filepath.Join(gcHome, "claude")
+	}
+
+	// gc carries its environment into every bd it forks, including ones that
+	// reach a bd not wrapped by the tool-home wrapper (a raw BD_BIN). Pin bd's
+	// shared-server mode off there too; a test that exercises the user-level
+	// layer on purpose sets it to "".
+	e.vars[bdSharedServerConfigEnv] = "false"
 
 	// Dolt reads its global config from $DOLT_ROOT_PATH/.dolt/config_global.json,
 	// falling back to $HOME. gc's init preflight (checkDoltAuthorIdentity) probes
@@ -179,7 +227,7 @@ func installServiceManagerShims(gcHome string) (string, error) {
 // package, and With mutates in place, so a test that needs its own PATH or
 // provider selection must take a copy rather than reach into the shared one.
 func (e *Env) Clone() *Env {
-	clone := &Env{vars: make(map[string]string, len(e.vars))}
+	clone := &Env{vars: make(map[string]string, len(e.vars)), toolHome: e.toolHome}
 	for k, v := range e.vars {
 		clone.vars[k] = v
 	}

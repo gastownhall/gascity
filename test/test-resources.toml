@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 706
-baseline_files = 207
+baseline_calls = 727
+baseline_files = 214
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -24,7 +24,7 @@ expires = "2026-10-31"
 scope = "all"
 resource = "fixed_sleep"
 baseline_calls = 489
-baseline_files = 177
+baseline_files = 178
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-cp3hwi"
@@ -36,9 +36,9 @@ expires = "2026-10-31"
 [[audit_baseline]]
 scope = "all"
 resource = "listener_helper"
-baseline_calls = 58
+baseline_calls = 59
 baseline_files = 23
-reported_calls = 58
+reported_calls = 59
 reported_files = 23
 owner_bead = "ga-cp3hwi"
 invariant = "all-source listener-helper call/file totals cannot drift without an explicit checked policy update"
@@ -51,8 +51,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 475
-baseline_files = 136
+baseline_calls = 491
+baseline_files = 144
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -64,7 +64,7 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 319
+baseline_calls = 318
 baseline_files = 121
 reported_calls = 295
 reported_files = 114
@@ -129,9 +129,9 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "listener_helper"
-baseline_calls = 38
+baseline_calls = 39
 baseline_files = 13
-reported_calls = 38
+reported_calls = 39
 reported_files = 13
 owner_bead = "ga-cp3hwi"
 invariant = "untagged listener-helper call/file totals cannot grow; reductions must lower this baseline"
@@ -142,8 +142,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 98
-baseline_files = 38
+baseline_calls = 97
+baseline_files = 37
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-cp3hwi"
@@ -384,6 +384,28 @@ resource_owner = "the one go run subprocess is confined to TestAddTestenvImportS
 migration_target = "P0.4b"
 expires = "2026-10-31"
 
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestRBEWorkerJSONIsolationOffMatchesPreO1"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the OSS worker rollback-config and fork-tier worker-config proof is a checked Medium subprocess owner"
+resource_owner = "the one jq subprocess is confined to TestRBEWorkerJSONIsolationOffMatchesPreO1, which exists to render tools/rbe/blacksmith-worker.sh's own jq program for the OSS tier with isolation off, compared with the pre-O1 worker.json, and for the fork tier, compared with its golden: the program is jq, so only jq can prove the rollback renders the same config and the fork tier caches nothing"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestFreshMergeActionBehaviour"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the fresh-merge composite action's behavior proof is a checked Medium subprocess owner"
+resource_owner = "the git and bash subprocesses are confined to TestFreshMergeActionBehaviour, which exists to run .github/actions/fresh-merge's own bash script against a scratch git origin (clean merge, workflow skew, conflict, head already containing the tip, unfetchable base): the script is git plumbing, so only real git can prove what it merges and when it fails"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
 # A reviewed-hermetic-body row is narrower than a Small test declaration. It
 # proves that the exact untagged test body and statically reachable
 # receiverless same-package helpers contain none of the cataloged resources.
@@ -421,8 +443,8 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 456
-baseline_files = 129
+baseline_calls = 470
+baseline_files = 136
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-cp3hwi"
@@ -434,7 +456,7 @@ expires = "2026-10-31"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 319
+baseline_calls = 318
 baseline_files = 121
 reported_calls = 287
 reported_files = 113
@@ -499,9 +521,9 @@ expires = "2026-10-31"
 [[small_debt]]
 scope = "untagged"
 resource = "listener_helper"
-baseline_calls = 38
+baseline_calls = 39
 baseline_files = 13
-reported_calls = 38
+reported_calls = 39
 reported_files = 13
 owner_bead = "ga-cp3hwi"
 invariant = "untagged Small listener-helper call/file totals cannot grow; reductions must lower this baseline"
@@ -512,8 +534,8 @@ expires = "2026-10-31"
 [[small_debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 96
-baseline_files = 37
+baseline_calls = 95
+baseline_files = 36
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-cp3hwi"

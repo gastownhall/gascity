@@ -41,6 +41,9 @@ func mainExitCode(args []string, stdout, stderr io.Writer) int {
 	// command can handle, not as a signal that kills gc mid-write. The claim
 	// path's delivery unwind depends on surviving that write.
 	ignoreSIGPIPE()
+	// Also before dispatch: every MySQL connection config copies the driver
+	// logger when it is built (mysql_driver_log.go).
+	installMySQLDriverLogger()
 	if handled, code := privateProductMetricsEntrypoint(args); handled {
 		return code
 	}
@@ -1402,13 +1405,11 @@ func openCityRecorder(stderr io.Writer) events.Recorder {
 	return openCityRecorderAt(cityPath, stderr)
 }
 
+// openCityRecorderAt is openCityRecorder for an already-resolved city. The
+// recorder is a secondary writer that never rotates: the city's controller
+// owns rotation (see newSecondaryFileEventsRecorder).
 func openCityRecorderAt(cityPath string, stderr io.Writer) events.Recorder {
-	eventsCfg := config.EventsConfig{}
-	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
-		eventsCfg = cfg.Events
-	}
-	rec, err := newFileEventsRecorder(
-		filepath.Join(cityPath, ".gc", "events.jsonl"), eventsCfg, stderr)
+	rec, err := openCityEventsLog(cityPath, stderr)
 	if err != nil {
 		return events.Discard
 	}

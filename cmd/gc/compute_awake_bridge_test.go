@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -980,5 +982,73 @@ func TestBuildAwakeInputFromReconcilerNamedAlwaysPostChurnRewakes(t *testing.T) 
 	}
 	if got.Reason != "named-always" {
 		t.Errorf("wake reason = %q, want named-always", got.Reason)
+	}
+}
+
+func pendingProbeAwakeBead() beads.Bead {
+	return beads.Bead{
+		ID:     "mc-session-1",
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"state":        "asleep",
+			"session_name": "s-worker",
+			"template":     "worker",
+		},
+	}
+}
+
+// Only a live runtime can raise an interaction. Probing a dead target lets an
+// outage (a failing probe reads as "unknown", which counts as pending) turn an
+// asleep session into a wake candidate.
+func TestAwakeInputSkipsPendingProbeForNonAliveTargets(t *testing.T) {
+	sp := runtime.NewFake()
+	sp.PendingErrors["s-worker"] = fmt.Errorf("capture-pane timed out: %w", runtime.ErrRuntimeUnavailable)
+	sessionBead := pendingProbeAwakeBead()
+
+	input, observationErrors := buildAwakeInputFromReconcilerWithObservationErrors(
+		&config.City{Agents: []config.Agent{{Name: "worker"}}},
+		"",
+		[]session.Info{sessiontest.SeedBead(t, sessionBead)},
+		nil, nil, nil, nil, nil, nil, nil,
+		[]wakeTarget{{info: sessiontest.SeedBead(t, sessionBead), alive: false}},
+		sp,
+		time.Now().UTC(),
+	)
+
+	if input.PendingSessions["s-worker"] {
+		t.Fatal("PendingSessions[s-worker] = true for a dead target, want false")
+	}
+	if err, ok := observationErrors["s-worker"]; ok {
+		t.Fatalf("observationErrors[s-worker] = %v for a dead target, want none", err)
+	}
+	if n := sp.CountCalls("Pending", "s-worker"); n != 0 {
+		t.Fatalf("Pending probed %d times for a dead target, want 0", n)
+	}
+}
+
+// An unknown pending answer on a live target marks the session pending and
+// records an observation error, so its lifecycle is deferred this tick.
+func TestAwakeInputDefersLifecycleOnPendingUnknown(t *testing.T) {
+	sp := runtime.NewFake()
+	sp.PendingErrors["s-worker"] = errors.New("capture-pane: fork failed")
+	sessionBead := pendingProbeAwakeBead()
+	sessionBead.Metadata["state"] = "active"
+
+	input, observationErrors := buildAwakeInputFromReconcilerWithObservationErrors(
+		&config.City{Agents: []config.Agent{{Name: "worker"}}},
+		"",
+		[]session.Info{sessiontest.SeedBead(t, sessionBead)},
+		nil, nil, nil, nil, nil, nil, nil,
+		[]wakeTarget{{info: sessiontest.SeedBead(t, sessionBead), alive: true}},
+		sp,
+		time.Now().UTC(),
+	)
+
+	if !input.PendingSessions["s-worker"] {
+		t.Fatal("PendingSessions[s-worker] = false on an unknown pending answer, want true")
+	}
+	if err := observationErrors["s-worker"]; !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("observationErrors[s-worker] = %v, want an error wrapping ErrRuntimeUnavailable", err)
 	}
 }

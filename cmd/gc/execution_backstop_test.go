@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,10 @@ type executionBackstopFixture struct {
 	now      time.Time
 	stdout   bytes.Buffer
 	sessName string
+
+	// workStore, when set, is the store handle the assigned-work snapshot
+	// carries for each claim (and so the one revalidate reads through).
+	workStore beads.Store
 }
 
 func newExecutionBackstopFixture(t *testing.T) *executionBackstopFixture {
@@ -106,6 +111,9 @@ func (f *executionBackstopFixture) tick(t *testing.T) {
 	refs := make([]string, len(work))
 	for i := range work {
 		stores[i] = f.store
+		if f.workStore != nil {
+			stores[i] = f.workStore
+		}
 	}
 	nudgeStalledPoolExecution(f.sp, f.cfg, f.store, sessions, work, stores, refs, false, f.now, f.rec,
 		func(sessionBead beads.Bead) error {
@@ -361,5 +369,286 @@ func TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured(t *testing.T
 	}
 	if stalled != 1 {
 		t.Fatalf("execution.step_stalled events = %d, want exactly 1", stalled)
+	}
+}
+
+// driveToEscalation spends the attempt budget on the fixture's claim and
+// confirms the escalation drained the session exactly once.
+func driveToEscalation(t *testing.T, f *executionBackstopFixture) {
+	t.Helper()
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	f.now = f.now.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 1 {
+		t.Fatalf("escalation precondition: drain requests = %v, want exactly 1; stdout=%s", f.drained, f.stdout.String())
+	}
+}
+
+func (f *executionBackstopFixture) setInstanceToken(t *testing.T, token string) {
+	t.Helper()
+	if err := f.store.SetMetadata(f.session.ID, "instance_token", token); err != nil {
+		t.Fatalf("setting instance_token: %v", err)
+	}
+}
+
+func (f *executionBackstopFixture) stalledEvents() int {
+	n := 0
+	for _, e := range f.rec.Events {
+		if e.Type == events.ExecutionStepStalled {
+			n++
+		}
+	}
+	return n
+}
+
+// TestExecutionBackstopReEscalatesForANewIncarnation: the stalled latch
+// belongs to the incarnation it escalated. The latched drain stopped the
+// runtime, but the supervisor restarted before the bead closed and released
+// the claim, so boot woke the same row as a NEW incarnation still holding the
+// same claim. A latch that ignores the incarnation keeps the backstop silent
+// for the whole remaining life of that seat.
+func TestExecutionBackstopReEscalatesForANewIncarnation(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.setInstanceToken(t, "incarnation-1")
+	driveToEscalation(t, f)
+	if got := f.sessionMeta(t, executionClaimNudgeStalledTokenKey); got != "incarnation-1" {
+		t.Fatalf("latch token = %q, want the escalated incarnation", got)
+	}
+
+	f.setInstanceToken(t, "incarnation-2")
+	f.now = f.now.Add(2 * time.Minute)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+
+	if len(f.drained) != 2 {
+		t.Fatalf("drain requests after a new incarnation idles on the same claim = %v, want a second escalation", f.drained)
+	}
+	if got := f.stalledEvents(); got != 2 {
+		t.Fatalf("execution.step_stalled events = %d, want one per escalated incarnation", got)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeStalledTokenKey); got != "incarnation-2" {
+		t.Fatalf("latch token after re-escalation = %q, want the new incarnation", got)
+	}
+
+	// The re-stamped latch holds for the new incarnation exactly as the first
+	// one did for the old.
+	for i := 0; i < 3; i++ {
+		f.now = f.now.Add(idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	if len(f.drained) != 2 {
+		t.Fatalf("drain requests after further ticks on the new incarnation = %v, want still 2", f.drained)
+	}
+}
+
+// TestExecutionBackstopReEscalatesWhenARestartLostTheLatchedDrain: the drain
+// tracker is in-memory, so a supervisor restart between the escalation and the
+// drain landing loses the drain while the runtime (and so the incarnation)
+// survives, and boot re-adopts the row holding the same claim. The same
+// incarnation stays latched inside the retry window, so an in-flight drain is
+// never re-requested tick after tick, but a latch that outlives the window
+// with the claim still held means the drain is gone: escalate again.
+func TestExecutionBackstopReEscalatesWhenARestartLostTheLatchedDrain(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.setInstanceToken(t, "incarnation-1")
+	driveToEscalation(t, f)
+	latchedAt := f.now
+
+	// Same incarnation, inside the window: latched on every tick.
+	for f.now.Add(idleClaimNudgeBackoff).Before(latchedAt.Add(executionStalledLatchRetryAfter)) {
+		f.now = f.now.Add(idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	if len(f.drained) != 1 {
+		t.Fatalf("drain requests inside the latch window = %v, want exactly 1", f.drained)
+	}
+
+	// The window has passed with the claim still held: the drain was lost.
+	f.now = latchedAt.Add(executionStalledLatchRetryAfter)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 2 {
+		t.Fatalf("drain requests once the latch outlived its window = %v, want a second escalation", f.drained)
+	}
+	if got := f.stalledEvents(); got != 2 {
+		t.Fatalf("execution.step_stalled events = %d, want 2", got)
+	}
+
+	// The re-written latch restarts the window.
+	f.now = f.now.Add(2 * time.Minute)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 2 {
+		t.Fatalf("drain requests right after re-latching = %v, want still 2", f.drained)
+	}
+}
+
+// TestExecutionBackstopClearsTheLatchTokenWithTheClaim: the incarnation stamp
+// is part of the latch, so it must not outlive the claim it latched.
+func TestExecutionBackstopClearsTheLatchTokenWithTheClaim(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.setInstanceToken(t, "incarnation-1")
+	driveToEscalation(t, f)
+
+	closed := "closed"
+	if err := f.store.Update(f.work.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("closing the claim: %v", err)
+	}
+	f.now = f.now.Add(time.Minute)
+	f.tick(t)
+
+	for _, key := range []string{executionClaimNudgeStalledKey, executionClaimNudgeStalledTokenKey} {
+		if got := f.sessionMeta(t, key); got != "" {
+			t.Fatalf("%s after the claim completed = %q, want cleared", key, got)
+		}
+	}
+}
+
+// TestExecutionBackstopRecordsWhichGateHeld: a hold leaves a durable
+// breadcrumb naming its gate, so an operator can tell a backstop that is
+// holding from one that is broken. Writes happen on transition only, and the
+// breadcrumb clears once the backstop can act again.
+func TestExecutionBackstopRecordsWhichGateHeld(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+
+	// Recent activity: the quiet gate holds.
+	f.idleFor(t, time.Second)
+	f.tick(t)
+	first := f.sessionMeta(t, executionClaimHoldKey)
+	if !strings.HasPrefix(first, executionHoldNotQuiet+" ") {
+		t.Fatalf("hold breadcrumb for an active agent = %q, want %s", first, executionHoldNotQuiet)
+	}
+	// A standing hold is not rewritten every tick.
+	f.now = f.now.Add(time.Minute)
+	f.idleFor(t, time.Second)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimHoldKey); got != first {
+		t.Fatalf("hold breadcrumb on a repeated hold = %q, want the original %q", got, first)
+	}
+
+	// Quiet long enough: the backstop acts and the breadcrumb clears.
+	f.now = f.now.Add(time.Minute)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimHoldKey); got != "" {
+		t.Fatalf("hold breadcrumb after the backstop acted = %q, want cleared", got)
+	}
+
+	// The runtime is gone while the claim is still held.
+	if err := f.sp.Stop(f.sessName); err != nil {
+		t.Fatalf("stopping the fake session: %v", err)
+	}
+	f.now = f.now.Add(time.Minute)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, backstopHoldRuntimeNotRunning+" ") {
+		t.Fatalf("hold breadcrumb for a stopped claim holder = %q, want %s", got, backstopHoldRuntimeNotRunning)
+	}
+
+	// Once the claim is gone, a stopped runtime is not a hold at all.
+	closed := "closed"
+	if err := f.store.Update(f.work.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("closing the claim: %v", err)
+	}
+	f.now = f.now.Add(time.Minute)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimHoldKey); got != "" {
+		t.Fatalf("hold breadcrumb for a stopped session with no claim = %q, want cleared", got)
+	}
+}
+
+// TestExecutionBackstopRecordsAMultiClaimHold: a session holding several
+// claims is held (the pacing state names one bead), and says so.
+func TestExecutionBackstopRecordsAMultiClaimHold(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	second, err := f.store.Create(beads.Bead{Title: "second claimed step", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the second work bead: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := f.store.Update(second.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &f.sessName}); err != nil {
+		t.Fatalf("claiming the second work bead: %v", err)
+	}
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldMultiClaim+" ") {
+		t.Fatalf("hold breadcrumb for a multi-claim session = %q, want %s", got, executionHoldMultiClaim)
+	}
+}
+
+// TestExecutionBackstopLeavesUnclaimedStoppedSessionsUntouched: a pool
+// session that is simply asleep with no claim is not a backstop hold, and
+// recording one would cost a session-bead write per sleep for every slot.
+func TestExecutionBackstopLeavesUnclaimedStoppedSessionsUntouched(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	closed := "closed"
+	if err := f.store.Update(f.work.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("closing the claim: %v", err)
+	}
+	if err := f.sp.Stop(f.sessName); err != nil {
+		t.Fatalf("stopping the fake session: %v", err)
+	}
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimHoldKey); got != "" {
+		t.Fatalf("hold breadcrumb for an unclaimed asleep session = %q, want none", got)
+	}
+}
+
+// unreadableStore fails every point read, the way a store whose live handle is
+// unreachable does. Revalidation must hold on it, not clear.
+type unreadableStore struct {
+	beads.Store
+}
+
+func (unreadableStore) Get(string) (beads.Bead, error) {
+	return beads.Bead{}, errors.New("live read unavailable")
+}
+
+// TestExecutionBackstopRecordsARevalidateHoldWithoutFlapping: when the live
+// re-read before delivery cannot confirm the claim, the hold is named, and a
+// standing hold is written once rather than cleared and rewritten every tick.
+func TestExecutionBackstopRecordsARevalidateHoldWithoutFlapping(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.workStore = unreadableStore{Store: f.store}
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t) // observe
+	f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	first := f.sessionMeta(t, executionClaimHoldKey)
+	if !strings.HasPrefix(first, backstopHoldRevalidate+" ") {
+		t.Fatalf("hold breadcrumb when revalidation cannot read the claim = %q, want %s", first, backstopHoldRevalidate)
+	}
+	if got := f.nudgeCount(); got != 0 {
+		t.Fatalf("nudges under a revalidate hold = %d, want 0", got)
+	}
+
+	for i := 0; i < 3; i++ {
+		f.now = f.now.Add(time.Minute)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+		if got := f.sessionMeta(t, executionClaimHoldKey); got != first {
+			t.Fatalf("hold breadcrumb on tick %d of a standing revalidate hold = %q, want the original %q", i, got, first)
+		}
+	}
+
+	// The live read recovers: the backstop delivers and the breadcrumb clears.
+	f.workStore = nil
+	f.now = f.now.Add(time.Minute)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.nudgeCount(); got != 1 {
+		t.Fatalf("nudges once revalidation recovers = %d, want 1; stdout=%s", got, f.stdout.String())
+	}
+	if got := f.sessionMeta(t, executionClaimHoldKey); got != "" {
+		t.Fatalf("hold breadcrumb after delivery = %q, want cleared", got)
 	}
 }

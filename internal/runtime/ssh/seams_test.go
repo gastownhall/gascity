@@ -250,3 +250,16 @@ func TestSeamsSshStageAndTeardown(t *testing.T) {
 		t.Fatal("Teardown should issue tmux kill-session")
 	}
 }
+
+// ListRunning is not complete here: a remote non-zero exit reads as zero
+// sessions. An error-free listing is therefore no proof of absence, and the
+// provider must stay unattested until its listing reports that gap.
+// Kills: a listing attestation declared while ListRunning still omits live
+// sessions.
+func TestListRunningIsNotAttested(t *testing.T) {
+	for _, sp := range []any{(*Provider)(nil), (*seamBackedProvider)(nil)} {
+		if _, ok := sp.(runtime.ListingAttestation); ok {
+			t.Errorf("%T declares runtime.ListingAttestation", sp)
+		}
+	}
+}

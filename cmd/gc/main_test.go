@@ -303,6 +303,10 @@ func TestMain(m *testing.M) {
 	}
 	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
+	// In-process init stays off the network by default. Testscript "gc"
+	// children above keep the real installer: their scripts run follow-on
+	// commands that need the installed imports.
+	configureInitRemoteImportsForTests()
 	var testRunner testscript.TestingM = newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
 	// The tmux leak guard wraps outside the dolt guard and inside
 	// cleanupTestingM: it must observe and kill leaked tmux servers while the
@@ -3770,6 +3774,7 @@ func TestCmdInitProviderAcceptsAntigravity(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	stubInitRemoteImports(t)
 
 	cityPath := filepath.Join(t.TempDir(), "antigravity-city")
 	var stdout, stderr bytes.Buffer
@@ -5893,18 +5898,21 @@ func TestDoStop_UsesDependencyAwareOrdering(t *testing.T) {
 	}
 }
 
-func TestDoStopStopError(t *testing.T) {
-	sp := runtime.NewFailFake() // Stop will fail
+func TestDoStopBrokenRuntimeFailsClosed(t *testing.T) {
+	sp := runtime.NewFailFake() // ListRunning and Stop fail; IsRunning is false
 
 	var stdout, stderr bytes.Buffer
 	code := doStop([]string{"mayor"}, sp, nil, nil, 0, events.Discard, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("doStop = %d, want 0 (errors are non-fatal); stderr: %s", code, stderr.String())
+	// The runtime could not be listed, so gc stop cannot know that nothing is
+	// running: it must not report success.
+	if code != 1 {
+		t.Fatalf("doStop = %d, want 1 for an unlistable runtime; stderr: %s", code, stderr.String())
 	}
-	// FailFake makes IsRunning return false, so no stop attempt.
-	// Should still print "City stopped."
-	if !strings.Contains(stdout.String(), "City stopped.") {
-		t.Errorf("stdout missing 'City stopped.': %q", stdout.String())
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Errorf("stdout reported City stopped. for an unlistable runtime: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "gc stop: listing sessions: session unavailable") {
+		t.Errorf("stderr = %q, want the listing failure", stderr.String())
 	}
 }
 

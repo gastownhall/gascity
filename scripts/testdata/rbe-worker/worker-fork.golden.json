@@ -1,0 +1,86 @@
+{
+  "stores": [
+    {
+      "name": "REMOTE_CAS",
+      "grpc": {
+        "instance_name": "oss-fork",
+        "endpoints": [
+          {
+            "address": "grpcs://rbe-fork.example.invalid:8444",
+            "tls_config": {
+              "cert_file": "/home/runner/work/_temp/nl-worker/pki/worker.pem",
+              "key_file": "/home/runner/work/_temp/nl-worker/pki/worker.key",
+              "ca_file": "/etc/ssl/certs/ca-certificates.crt"
+            }
+          }
+        ],
+        "store_type": "cas"
+      }
+    },
+    {
+      "name": "WFS",
+      "fast_slow": {
+        "fast": {
+          "filesystem": {
+            "content_path": "/home/runner/work/_temp/nl-worker/content",
+            "temp_path": "/home/runner/work/_temp/nl-worker/tmp",
+            "eviction_policy": {
+              "max_bytes": 150000000000
+            }
+          }
+        },
+        "slow": {
+          "ref_store": {
+            "name": "REMOTE_CAS"
+          }
+        }
+      }
+    }
+  ],
+  "workers": [
+    {
+      "local": {
+        "name": "pool-worker-1",
+        "worker_api_endpoint": {
+          "uri": "grpcs://rbe-fork.example.invalid:8444",
+          "tls_config": {
+            "cert_file": "/home/runner/work/_temp/nl-worker/pki/worker.pem",
+            "key_file": "/home/runner/work/_temp/nl-worker/pki/worker.key",
+            "ca_file": "/etc/ssl/certs/ca-certificates.crt"
+          }
+        },
+        "cas_fast_slow_store": "WFS",
+        "upload_action_result": {
+          "upload_ac_results_strategy": "never"
+        },
+        "work_directory": "/home/runner/work/_temp/nl-worker/work",
+        "max_inflight_tasks": 8,
+        "platform_properties": {
+          "OSFamily": {
+            "values": [
+              "linux"
+            ]
+          },
+          "container-image": {
+            "values": [
+              ""
+            ]
+          },
+          "ISA": {
+            "values": [
+              "x86_64"
+            ]
+          }
+        },
+        "entrypoint": "/usr/local/libexec/rbe-action/entry",
+        "timeout_handled_externally": true,
+        "max_action_timeout": 1260,
+        "additional_environment": {
+          "RBE_X_TIMEOUT_MS": "timeout_millis",
+          "RBE_X_SIDE_CHANNEL": "side_channel_file"
+        }
+      }
+    }
+  ],
+  "servers": []
+}

@@ -1,0 +1,314 @@
+#!/bin/bash
+# rbe-action-selftest: prove action isolation on this worker (README "Action
+# isolation"). Root; installed at /usr/local/libexec/rbe-action/selftest.
+#   selftest [--quick]   --quick: configuration and one probe action (about a
+#                        second; nativelink-worker's ExecStartPre); without it
+#                        also the timeout path, a killed launcher and
+#                        NativeLink's worker config.
+# Runs real actions through the real entrypoint as the worker user, in a
+# throwaway action directory under WORK_ROOT. Prints ok/FAIL lines and
+# "failures: N"; exit 1 on any failure.
+# shellcheck disable=SC2016,SC2317  # probe is the action's script; checks run indirectly
+set -uo pipefail
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+CONF=/etc/rbe-west/rbe-action.env
+LIB=/usr/local/libexec/rbe-action
+RUN=/run/rbe-action
+fails=0
+ok() { echo "ok    $1"; }
+bad() { echo "FAIL  $1"; fails=$((fails + 1)); }
+check() { if "${@:2}" >/dev/null 2>&1; then ok "$1"; else bad "$1"; fi; }
+[[ $(id -u) == 0 ]] || { echo "selftest: run as root" >&2; exit 2; }
+quick=0; [[ ${1:-} == --quick ]] && quick=1
+# shellcheck source=/dev/null
+. "$CONF" || { echo "selftest: no $CONF" >&2; exit 1; }
+worker=$(id -un "$WORKER_UID")
+TMPFS_DIRS=${TMPFS_DIRS:-/run/lock /var/crash} WORKER_JSON=${WORKER_JSON:-/etc/nativelink-worker.json}
+EGRESS_CHAIN=${EGRESS_CHAIN:-inet filter rbe_action_out} NETNS=${NETNS:-0} ROOT_RO=${ROOT_RO:-0}
+MASK_SOCKETS=${MASK_SOCKETS:-0}
+# Destinations an action must be refused (host:port, IPv6 in brackets): every
+# refused class plus PROBE_DENY (the farm). Refused means "Connection
+# refused" (nft's TCP reset), not merely failed: a timeout or no route would
+# pass without any filter. With NETNS=1, and for IPv6 without a route, "Network
+# is unreachable" is the refusal.
+declare -A seen=()
+deny=()
+for t in 10.255.255.254:9 172.31.255.254:9 192.168.255.254:9 100.127.255.254:9 169.254.169.254:80 \
+	'[2001:4860:4860::8888]:443' ${PROBE_DENY:-}; do
+	[[ -n ${seen[$t]:-} ]] || deny+=("$t")
+	seen[$t]=1
+done
+
+echo "# installation"
+for f in entry exec; do
+	check "$LIB/$f: root-owned, 0755, statically linked" \
+		bash -c "[[ \$(stat -c '%U %a' $LIB/$f) == 'root 755' ]] && file -b $LIB/$f | grep -q 'statically linked'"
+done
+for f in launch sweep selftest; do check "$LIB/$f: root 0755" test "$(stat -c '%U %a' "$LIB/$f")" = "root 755"; done
+check "$CONF: root 0644" test "$(stat -c '%U %a' "$CONF")" = "root 644"
+check "/etc/sudoers.d/rbe-action: root 0440, parses" bash -c '[[ $(stat -c "%U %a" /etc/sudoers.d/rbe-action) == "root 440" ]] && visudo -cq'
+slots_ok() {
+	local i u
+	for ((i = 0; i < SLOT_COUNT; i++)); do
+		u=$((SLOT_UID0 + i))
+		[[ $(getent passwd "$u" | cut -d: -f4,6,7) == "$u:$HOME_DIR:/bin/bash" ]] || return 1
+		[[ $(id -G "$u") == "$u" ]] || return 1
+	done
+}
+check "slot users $SLOT_UID0..$((SLOT_UID0 + SLOT_COUNT - 1)): own group only, home $HOME_DIR, /bin/bash" slots_ok
+# By name: sudo -l -U takes no numeric uid ("unknown user" would pass).
+check "slot users cannot sudo" bash -c "u=\$(id -un $SLOT_UID0) && sudo -l -U \"\$u\" | grep -q 'is not allowed to run sudo'"
+check "nft: an egress policy for the slot uids is loaded" bash -c "nft list ruleset | grep -q 'meta skuid $SLOT_UID0-$((SLOT_UID0 + 63))'"
+check "nft: it refuses link-local and the private ranges" bash -c "nft list ruleset | grep -q '169.254.0.0/16' && nft list ruleset | grep -q '10.0.0.0/8'"
+read -r -a chain <<<"$EGRESS_CHAIN"
+check "nft: chain $EGRESS_CHAIN loaded (the launcher refuses actions without it)" nft list chain "${chain[@]}"
+
+if ((!quick)); then
+	echo "# NativeLink worker config"
+	j=$WORKER_JSON
+	check "entrypoint is $LIB/entry" test "$(jq -r '.workers[0].local.entrypoint' "$j")" = "$LIB/entry"
+	check "timeout_handled_externally, max_action_timeout = BACKSTOP_S" \
+		test "$(jq -r '.workers[0].local | "\(.timeout_handled_externally) \(.max_action_timeout // .max_action_timeout_s)"' "$j")" = "true $BACKSTOP_S"
+	check "additional_environment: RBE_X_TIMEOUT_MS, RBE_X_SIDE_CHANNEL" \
+		test "$(jq -c '.workers[0].local.additional_environment' "$j")" = '{"RBE_X_TIMEOUT_MS":"timeout_millis","RBE_X_SIDE_CHANNEL":"side_channel_file"}'
+	check "no use_namespaces, use_mount_namespace, directory_cache" \
+		test "$(jq -c '.workers[0].local | [has("use_namespaces"), has("use_mount_namespace"), has("directory_cache")]' "$j")" = '[false,false,false]'
+fi
+
+echo "# a probe action through the entrypoint, as $worker"
+op=selftest-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+d=$WORK_ROOT/$op
+install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0755 "$d" "$d/work" "$d/work/in" "$d/work/out" "$d/src"
+printf 'pristine\n' >"$d/src/blob" && chown "$WORKER_UID:$WORKER_GID" "$d/src/blob" && chmod 0444 "$d/src/blob"
+ln "$d/src/blob" "$d/work/in/blob"
+# The worker's CAS directories (every content_path in its config: they must
+# exist, under MASK_ROOT) and a canary next to them must be invisible to the
+# action; a path that does not exist would pass vacuously.
+mapfile -t cas_dirs < <(jq -r '.. | objects | .content_path? // empty' "$WORKER_JSON" 2>/dev/null)
+cas_exist() {
+	local c
+	((${#cas_dirs[@]})) || return 1
+	local m
+	m=$(realpath -e "$MASK_ROOT") || return 1
+	for c in "${cas_dirs[@]}"; do [[ -d $c && $(realpath -e "$c") == "$m"/* ]] || return 1; done
+}
+check "worker CAS (${cas_dirs[*]:-no content_path in $WORKER_JSON}) exists under $MASK_ROOT" cas_exist
+canary=$MASK_ROOT/.rbe-selftest-$op
+printf 'canary\n' >"$canary" && chmod 0444 "$canary"
+# Inside the action MASK_ROOT is the launcher's tmpfs: listable, holding only
+# the way down to WORK_ROOT. (A MASK_ROOT the slot cannot list, e.g. a 0750
+# HOME, would hide the CAS without any mask.)
+mask_rel=${WORK_ROOT#"$MASK_ROOT"/}
+mask_top=${mask_rel%%/*}
+[[ $mask_rel != "$WORK_ROOT" ]] || mask_top=
+# The action's own mounts, which stay writable with ROOT_RO=1 (its outputs
+# under work, /tmp, /var/tmp, HOME, /dev/shm, TMPFS_DIRS; mqueue holds no
+# files).
+own_mounts="$d /tmp /var/tmp $HOME_DIR /dev/shm /dev/mqueue $TMPFS_DIRS"
+own_writable="$d/work/out /tmp /var/tmp $HOME_DIR /dev/shm $TMPFS_DIRS"
+# World-writable sockets on /run (as the host sees them, and as the action
+# does) but journald's and the system bus: none may accept the action's
+# connect() (with MASK_SOCKETS=1 the launcher masks each with /dev/null).
+# Tried with python3 (stream, datagram and seqpacket), else socat; without
+# either, any socket node left counts as reachable. find goes by the
+# directory entry: a socket bind-mounted over a file (a docker.sock) is found
+# as a mount point.
+run_socks() {
+	local m s
+	while IFS= read -r -d '' s; do
+		case $s in /run/systemd/journal/* | /run/dbus/system_bus_socket) ;; *) printf '%s\0' "$s" ;; esac
+	done < <(
+		find /run -type s -perm -o+w -print0
+		while read -r _ _ _ _ m _; do
+			printf -v m %b "${m//\\/\\0}"
+			case $m in /run/*) find "$m" -maxdepth 0 -type s -perm -o+w -print0 ;; esac
+		done </proc/self/mountinfo
+	) 2>/dev/null
+}
+host_socks=
+while IFS= read -r -d '' s; do printf -v s '%q ' "$s" && host_socks+=$s; done < <(run_socks)
+# Full run only (walks every filesystem the action can reach, seconds): no
+# directory shared between actions is writable by one, besides its own
+# mounts. Every mount in the action is walked (-xdev each: /, /run, a data
+# disk, ...) but /proc and /sys. A world-writable directory counts only if
+# the action can write it: access() and a real create (with ROOT_RO=1 they
+# are on read-only mounts, 0777 or not).
+full_probe=
+if ((!quick)); then
+	full_probe='w=0
+own() { for o in '"$own_mounts"'; do case $1 in "$o" | "$o"/*) return 0 ;; esac; done; return 1; }
+declare -A seen=()
+while read -r _ _ _ _ m _; do
+	printf -v m %b "${m//\\/\\0}"
+	[ -z "${seen[$m]:-}" ] || continue
+	seen[$m]=1
+	case $m in /proc | /proc/* | /sys | /sys/*) continue ;; esac
+	if own "$m" || ! mountpoint -q -- "$m"; then continue; fi
+	while IFS= read -r d; do
+		[ -z "${seen[$d]:-}" ] || continue
+		seen[$d]=1
+		own "$d" && continue
+		f=0; t=$d/.rbe-selftest-w.$$
+		[ -w "$d" ] && f=1
+		mkdir "$t" 2>/dev/null && rmdir "$t" && f=1
+		if [ $f = 1 ]; then echo "W $d"; w=1; fi
+	done < <(find "$m" -xdev -type d -perm -0002 2>/dev/null)
+done </proc/self/mountinfo
+[ $w = 0 ] && echo "R no-shared-writable-dir"'
+fi
+probe='
+id=$(id -u); [ "$id" -ge '"$SLOT_UID0"' ] && [ "$id" -lt '"$((SLOT_UID0 + SLOT_COUNT))"' ] && echo "R uid-slot"
+grep -q "^CapEff:[[:space:]]*0000000000000000" /proc/self/status && echo "R no-caps"
+grep -q "^NoNewPrivs:[[:space:]]*1" /proc/self/status && echo "R nnp"
+[ "$(env | sort | tr "\n" ";")" = "PATH=/usr/bin:/bin;PROBE=a=b c;PWD=$PWD;SHLVL=1;_=/usr/bin/env;" ] && echo "R env-exact"
+for t in '"${deny[*]}"'; do
+	h=${t%:*} h=${h#[} h=${h%]}
+	e=$(timeout 3 bash -c "exec 3<>/dev/tcp/$h/${t##*:}" 2>&1) && e=connected
+	case $e in *"Connection refused"*) e=refused ;; *"Network is unreachable"*) e=unreachable ;; *) e=other ;; esac
+	echo "D $t $e"
+done
+chmod u+w in/blob 2>/dev/null || echo "R input-immutable"
+h=1; for c in '"${cas_dirs[*]} $canary"'; do [ -e "$c" ] && h=0; done; [ $h = 1 ] && echo "R worker-cas-hidden"
+m=$(ls -A '"$MASK_ROOT"') && [ -n "$m" ] && [ "$m" = "'"$mask_top"'" ] && echo "R mask-tmpfs"
+[ "$(ls '"$WORK_ROOT"')" = "'"$op"'" ] && echo "R siblings-hidden"
+[ -z "$(ls -A /tmp)" ] && echo "R private-tmp"
+[ "$(ls /proc | grep -c "^[0-9]")" -lt 20 ] && echo "R own-pid-namespace"
+'"$full_probe"'
+[ -w "$(getent passwd "$(id -u)" | cut -d: -f6)" ] && [ -z "$(ls -A ~)" ] && echo "R fresh-home"
+w=0; for o in '"$own_writable"'; do
+	[ -d "$o" ] || continue
+	{ echo x >"$o/.rbe-selftest-w" && rm -f "$o/.rbe-selftest-w"; } 2>/dev/null || { echo "N $o"; w=1; }
+done; [ $w = 0 ] && echo "R own-mounts-writable"
+case ",$(findmnt -no VFS-OPTIONS /)," in *,ro,*) echo "R root-ro" ;; esac
+declare -A sk=(); for s in '"$host_socks"'; do sk[$s]=1; done
+'"$(declare -f run_socks)"'
+while IFS= read -r -d "" s; do sk[$s]=1; done < <(run_socks)
+socks=("${!sk[@]}")
+r=$(if command -v python3 >/dev/null; then
+	echo "C python3"
+	PYTHONIOENCODING=utf-8:surrogateescape python3 -c "
+import socket, sys
+for p in sys.argv[1:]:
+    for t in socket.SOCK_STREAM, socket.SOCK_DGRAM, socket.SOCK_SEQPACKET:
+        with socket.socket(socket.AF_UNIX, t) as c:
+            c.settimeout(2)
+            try:
+                c.connect(p)
+            except OSError:
+                continue
+        print(\"S\", p)
+        break
+" "${socks[@]}" || echo "S (python3 failed)"
+elif command -v socat >/dev/null; then
+	echo "C socat"
+	for s in "${socks[@]}"; do timeout 3 socat -u OPEN:/dev/null "UNIX-CLIENT:$s" 2>/dev/null && echo "S $s"; done
+else
+	echo "C stat"
+	for s in "${socks[@]}"; do [ -S "$s" ] && echo "S $s"; done
+fi)
+echo "$r"; grep -q "^S " <<<"$r" || echo "R no-open-socket"
+mkdir -m 0700 out/private && echo x >out/private/f && chmod 0400 out/private/f && chmod 0500 out/private
+(setsid sleep 600 >/dev/null 2>&1 &)
+echo "R end"; exit 7'
+host_mounts() { findmnt -no VFS-OPTIONS /; findmnt -no VFS-OPTIONS /run; }
+host_before=$(host_mounts 2>&1)
+# 300 s: the full probe walks every reachable mount for shared writable
+# directories, which took ~60 s on Blacksmith's large tool caches (2026-10-02:
+# two of five canaries timed out mid-probe at 60 s).
+probe_started=$SECONDS
+out=$(cd "$d/work" && setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --init-groups -- \
+	env -i PATH=/usr/bin:/bin 'PROBE=a=b c' RBE_X_TIMEOUT_MS=300000 "$LIB/entry" /bin/bash -c "$probe" 2>&1)
+rc=$?
+echo "# probe action: exit $rc after $((SECONDS - probe_started)) s"
+if [[ $rc == 124 ]]; then bad "probe action timed out (300 s): later checks have no result"; fi
+rm -f "$canary"
+results=(uid-slot no-caps nnp env-exact input-immutable worker-cas-hidden mask-tmpfs siblings-hidden private-tmp
+	own-pid-namespace fresh-home own-mounts-writable end)
+((quick)) || results+=(no-shared-writable-dir)
+((ROOT_RO)) && results+=(root-ro)
+for r in "${results[@]}"; do
+	if grep -qx "R $r" <<<"$out"; then ok "action: $r"; else bad "action: $r"; fi
+done
+sed -n 's/^W /      shared directory the action can write: /p' <<<"$out"
+sed -n 's/^N /      own mount the action cannot write: /p' <<<"$out"
+how=$(sed -n 's/^C //p' <<<"$out")
+if grep -qx "R no-open-socket" <<<"$out"; then
+	ok "action: no-open-socket (${how:-?})"
+elif ((MASK_SOCKETS)); then
+	bad "action: no-open-socket (${how:-no result})"
+else
+	echo "warn  action: no-open-socket (${how:-no result}; MASK_SOCKETS=0: reported, not enforced)"
+fi
+sed -n 's/^S /      world-writable socket the action can connect to: /p' <<<"$out"
+check "ROOT_RO=$ROOT_RO leaves the host's / and /run as they were" test "$(host_mounts 2>&1)" = "$host_before"
+for t in "${deny[@]}"; do
+	got=$(awk -v t="$t" '$1 == "D" && $2 == t { print $3 }' <<<"$out")
+	want=refused
+	if [[ $NETNS == 1 || $t == \[* ]]; then want="refused|unreachable"; fi
+	if [[ $got =~ ^($want)$ ]]; then ok "action: $t refused ($got)"; else bad "action: $t refused (${got:-no result}, want $want)"; fi
+done
+check "action exit status passed through (7)" test "$rc" = 7
+check "input inode unchanged" test "$(cat "$d/src/blob")" = pristine
+check "every file back with $worker" test -z "$(find "$d" ! -uid "$WORKER_UID" ! -path "$d/rbe-tmp" ! -path "$d/rbe-vartmp" -print -quit)"
+check "$worker can remove the action directory" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --init-groups rm -rf "$d"
+no_slot_procs() { ! pgrep -U "$(seq -s, "$SLOT_UID0" $((SLOT_UID0 + SLOT_COUNT - 1)))" >/dev/null; }
+check "no slot process left" no_slot_procs
+[[ -d $d ]] && rm -rf --one-file-system "$d"
+
+if ((!quick)); then
+	echo "# timeout: enforced by the launcher, reported through the side channel"
+	op=selftest-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+	d=$WORK_ROOT/$op
+	install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0755 "$d" "$d/work"
+	sc=$d/$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+	start=$SECONDS
+	(cd "$d/work" && setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --init-groups -- \
+		env -i PATH=/usr/bin:/bin RBE_X_TIMEOUT_MS=2000 "RBE_X_SIDE_CHANNEL=$sc" "$LIB/entry" /bin/sleep 300) >/dev/null 2>&1
+	rc=$?
+	check "timed out after ~2 s with exit 124" test "$rc:$((SECONDS - start < 10))" = "124:1"
+	check "side channel says timeout" grep -q '"failure":"timeout"' "$sc"
+	rm -rf --one-file-system "$d"
+	check "no slot process left" no_slot_procs
+
+	echo "# a killed launcher (NativeLink cancel, backstop): its action dies with sudo; the next action on its slot leaves its directory to the sweep"
+	run_as_worker() { # dir, env and argv: one action through the entrypoint, as the worker
+		local dir=$1
+		shift
+		cd "$dir" && exec setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --init-groups -- env -i PATH=/usr/bin:/bin "$@"
+	}
+	op1=selftest-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n') op2=selftest-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+	d1=$WORK_ROOT/$op1 d2=$WORK_ROOT/$op2
+	install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0755 "$d1" "$d1/work" "$d2" "$d2/work"
+	(run_as_worker "$d1/work" RBE_X_TIMEOUT_MS=60000 "$LIB/entry" /bin/sleep 300) >/dev/null 2>&1 &
+	sudo_pid=$! slot1=
+	for i in $(seq 100); do
+		for b in "$RUN"/slots/*.busy; do
+			[[ -e $b && $(cat "$b" 2>/dev/null) == "$op1" ]] && slot1=${b##*/} slot1=${slot1%.busy}
+		done
+		[[ -n $slot1 ]] && pgrep -x -U $((SLOT_UID0 + slot1)) sleep >/dev/null && break
+		sleep 0.1
+	done
+	check "the action runs (slot ${slot1:-none})" test -n "$slot1"
+	slot1=${slot1:-0} uid1=$((SLOT_UID0 + ${slot1:-0}))
+	kill -KILL "$sudo_pid" 2>/dev/null
+	wait "$sudo_pid" 2>/dev/null
+	gone() { local i; for i in $(seq 50); do ! pgrep -U "$1" >/dev/null && flock -n "$RUN/slots/$slot1" true && return 0; sleep 0.1; done; return 1; }
+	check "SIGKILL to sudo: no process of uid $uid1 survives, slot $slot1 free" gone "$uid1"
+	check "its directory is left slot-owned, marked busy" test "$(stat -c %u "$d1/work"):$(cat "$RUN/slots/$slot1.busy" 2>/dev/null)" = "$uid1:$op1"
+	# The next action takes slot1: hold every free slot below it meanwhile.
+	held=()
+	for ((s = 0; s < slot1; s++)); do
+		exec {fd}>"$RUN/slots/$s"
+		if flock -n "$fd"; then held+=("$fd"); else exec {fd}>&-; fi
+	done
+	out=$(run_as_worker "$d2/work" RBE_X_TIMEOUT_MS=60000 "$LIB/entry" /usr/bin/id -u 2>&1)
+	for fd in "${held[@]}"; do exec {fd}>&-; done
+	check "the next action ran on slot $slot1 (uid $out)" test "$out" = "$uid1"
+	check "its launcher moved the marker to orphans/$op1" test -e "$RUN/orphans/$op1"
+	"$LIB/sweep" >/dev/null 2>&1
+	check "rbe-action-sweep removed $op1 and the orphan marker" test ! -e "$d1" -a ! -e "$RUN/orphans/$op1"
+	rm -rf --one-file-system "$d1" "$d2"
+	check "no slot process left" no_slot_procs
+fi
+echo "failures: $fails"
+exit $((fails > 0))
