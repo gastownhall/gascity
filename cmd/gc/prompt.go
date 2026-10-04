@@ -18,8 +18,16 @@ import (
 )
 
 const (
-	canonicalPromptTemplateSuffix = ".template.md"
-	legacyPromptTemplateSuffix    = ".md.tmpl"
+	canonicalPromptTemplateSuffix   = ".template.md"
+	legacyPromptTemplateSuffix      = ".md.tmpl"
+	filesystemSearchGuidanceHeading = "**Never use wide filesystem searches when a CLI command exists.**"
+	filesystemSearchGuidance        = filesystemSearchGuidanceHeading + ` Wide
+traversals (` + "`find /`" + `, ` + "`find ~`" + `, ` + "`find /Users`" + `, ` + "`find $HOME`" + `) walk
+TCC-protected directories on macOS — Documents, Desktop, Downloads,
+Music, removable volumes, and network mounts — and trigger permission
+prompts that block work. Use a Gas City or project CLI command instead.
+If a filesystem search is necessary, scope it to the current city, rig,
+or worktree root.`
 )
 
 // PromptContext holds template data for prompt rendering.
@@ -230,6 +238,19 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 		Version: fm.Version,
 		SHA:     promptmeta.SHA(rendered),
 	}
+}
+
+func appendFilesystemSearchGuidance(prompt string) string {
+	if prompt == "" || strings.Contains(prompt, filesystemSearchGuidanceHeading) {
+		return prompt
+	}
+	separator := "\n\n"
+	if strings.HasSuffix(prompt, "\n\n") {
+		separator = ""
+	} else if strings.HasSuffix(prompt, "\n") {
+		separator = "\n"
+	}
+	return prompt + separator + filesystemSearchGuidance
 }
 
 func promptTemplateSourcePath(cityPath, templatePath string) string {

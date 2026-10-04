@@ -60,6 +60,28 @@ session = "tmux"
 prompt_template = "prompts/worker.md"
 `
 
+// deliveredPrompt is what gc prime actually writes to stdout for a rendered
+// template: the filesystem-search guidance is appended before the strict
+// budget is computed, so every expectation below is stated against the
+// delivered form rather than the raw template.
+func deliveredPrompt(raw string) string {
+	return appendFilesystemSearchGuidance(raw)
+}
+
+// promptDeliveringExactly builds a template of repeated unit whose delivered
+// form is exactly n bytes, so the threshold fixtures below still sit on the
+// exact boundary they name rather than drifting past it by the guidance
+// length.
+func promptDeliveringExactly(t *testing.T, unit string, n int) string {
+	t.Helper()
+	overhead := len(appendFilesystemSearchGuidance(unit)) - len(unit)
+	raw := repeatToBytes(unit, n-overhead)
+	if got := len(deliveredPrompt(raw)); got != n {
+		t.Fatalf("fixture invalid: delivered prompt is %d bytes, want exactly %d", got, n)
+	}
+	return raw
+}
+
 // 1. below-threshold argv delivery.
 func TestPrimePromptBudgetBelowThresholdArgvDelivery(t *testing.T) {
 	const prompt = "small prompt content for scenario one"
@@ -73,9 +95,10 @@ func TestPrimePromptBudgetBelowThresholdArgvDelivery(t *testing.T) {
 	if !strings.Contains(stdout.String(), prompt) {
 		t.Errorf("stdout = %q, want to contain rendered prompt %q", stdout.String(), prompt)
 	}
-	quoted := shellquote.Quote(prompt)
+	delivered := deliveredPrompt(prompt)
+	quoted := shellquote.Quote(delivered)
 	wantSubstrings := []string{
-		"raw_bytes=" + strconv.Itoa(len(prompt)),
+		"raw_bytes=" + strconv.Itoa(len(delivered)),
 		"raw_limit=100000",
 		"argv_bytes=" + strconv.Itoa(len(quoted)),
 		"argv_limit=128000",
@@ -96,7 +119,7 @@ func TestPrimePromptBudgetBelowThresholdArgvDelivery(t *testing.T) {
 // guard even though this is well below the byte count anyone would call
 // "huge" — the guard is a hard threshold, not a heuristic.
 func TestPrimePromptBudgetExactThresholdFallback(t *testing.T) {
-	prompt := repeatToBytes("a", maxPromptSuffixRawBytes)
+	prompt := promptDeliveringExactly(t, "a", maxPromptSuffixRawBytes)
 	writePromptBudgetCity(t, promptBudgetBareTOML, prompt)
 
 	var stdout, stderr bytes.Buffer
@@ -104,8 +127,8 @@ func TestPrimePromptBudgetExactThresholdFallback(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doPrimeWithMode(strict) = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if stdout.Len() != len(prompt) {
-		t.Errorf("stdout len = %d, want %d (rendered prompt must still reach stdout on a nudge-fallback)", stdout.Len(), len(prompt))
+	if stdout.Len() != maxPromptSuffixRawBytes {
+		t.Errorf("stdout len = %d, want %d (rendered prompt must still reach stdout on a nudge-fallback)", stdout.Len(), maxPromptSuffixRawBytes)
 	}
 	wantSubstrings := []string{
 		"raw_bytes=" + strconv.Itoa(maxPromptSuffixRawBytes),
@@ -145,7 +168,7 @@ supports_acp = true
 acp_command = "/bin/echo"
 acp_args = ["acp"]
 `
-	prompt := repeatToBytes("a", maxPromptSuffixRawBytes*2)
+	prompt := promptDeliveringExactly(t, "a", maxPromptSuffixRawBytes*2)
 	writePromptBudgetCity(t, toml, prompt)
 
 	var stdout, stderr bytes.Buffer
@@ -227,7 +250,7 @@ prompt_mode = "none"
 		t.Fatalf("doPrimeWithMode(strict) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	wantSubstrings := []string{
-		"raw_bytes=" + strconv.Itoa(len(prompt)),
+		"raw_bytes=" + strconv.Itoa(len(deliveredPrompt(prompt))),
 		"configured_mode=none",
 		"effective_mode=nudge",
 		"runtime=tmux",
@@ -246,9 +269,10 @@ prompt_mode = "none"
 // argv threshold -- the guard must trip on the quoted count, not just raw.
 func TestPrimePromptBudgetQuoteInflatedArgvBytes(t *testing.T) {
 	prompt := repeatToBytes("'", maxPromptSuffixRawBytes/2)
-	quoted := shellquote.Quote(prompt)
-	if len(prompt) >= maxPromptSuffixRawBytes {
-		t.Fatalf("fixture invalid: raw len %d already at/above raw threshold", len(prompt))
+	delivered := deliveredPrompt(prompt)
+	quoted := shellquote.Quote(delivered)
+	if len(delivered) >= maxPromptSuffixRawBytes {
+		t.Fatalf("fixture invalid: raw len %d already at/above raw threshold", len(delivered))
 	}
 	if len(quoted) < maxPromptSuffixQuotedBytes {
 		t.Fatalf("fixture invalid: quoted len %d below quoted threshold", len(quoted))
@@ -261,7 +285,7 @@ func TestPrimePromptBudgetQuoteInflatedArgvBytes(t *testing.T) {
 		t.Fatalf("doPrimeWithMode(strict) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	wantSubstrings := []string{
-		"raw_bytes=" + strconv.Itoa(len(prompt)),
+		"raw_bytes=" + strconv.Itoa(len(delivered)),
 		"argv_bytes=" + strconv.Itoa(len(quoted)),
 		"configured_mode=arg",
 		"effective_mode=nudge-fallback",
@@ -290,8 +314,9 @@ func TestPrimePromptBudgetUnicodeByteCounts(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doPrimeWithMode(strict) = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "raw_bytes="+strconv.Itoa(len(prompt))) {
-		t.Errorf("stderr must report raw_bytes=%d (byte length)", len(prompt))
+	delivered := deliveredPrompt(prompt)
+	if !strings.Contains(stderr.String(), "raw_bytes="+strconv.Itoa(len(delivered))) {
+		t.Errorf("stderr must report raw_bytes=%d (byte length)", len(delivered))
 	}
 	if strings.Contains(stderr.String(), "raw_bytes=25001") {
 		t.Errorf("stderr reports raw_bytes=25001 (rune count), want byte count %d", len(prompt))
@@ -313,8 +338,8 @@ func TestPrimePromptBudgetStderrVsStdoutSeparation(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doPrimeWithMode(strict) = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if stdout.String() != prompt {
-		t.Errorf("stdout = %q, want exactly the rendered prompt %q (no diagnostic text mixed in)", stdout.String(), prompt)
+	if want := deliveredPrompt(prompt); stdout.String() != want {
+		t.Errorf("stdout = %q, want exactly the rendered prompt %q (no diagnostic text mixed in)", stdout.String(), want)
 	}
 	for _, leaked := range []string{"raw_bytes=", "argv_bytes=", "configured_mode=", "effective_mode="} {
 		if strings.Contains(stdout.String(), leaked) {
@@ -350,9 +375,10 @@ func TestPrimePromptBudgetTypedJSONFields(t *testing.T) {
 	if got.PromptBudget == nil {
 		t.Fatalf("primeJSONResult.PromptBudget = nil, want a populated budget")
 	}
-	quoted := shellquote.Quote(prompt)
+	delivered := deliveredPrompt(prompt)
+	quoted := shellquote.Quote(delivered)
 	want := promptBudgetJSON{
-		RawBytes:          len(prompt),
+		RawBytes:          len(delivered),
 		RawLimit:          maxPromptSuffixRawBytes,
 		ArgvBytes:         len(quoted),
 		ArgvLimit:         maxPromptSuffixQuotedBytes,
