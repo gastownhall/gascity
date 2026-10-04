@@ -1,0 +1,32 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "bepsummary",
+    srcs = [
+        "bep.go",
+        "render.go",
+        "run.go",
+        "summary.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/testpolicy/bepsummary",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "bepsummary_test",
+    srcs = [
+        "summary_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(["testdata/**"]),
+    embed = [":bepsummary"],
+    deps = ["//internal/testenv"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(["**"], exclude = ["BUILD.bazel"], allow_empty = True),
+    visibility = ["//visibility:public"],
+)

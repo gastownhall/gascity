@@ -265,6 +265,9 @@ jobs:
         run: |
           ARGS=(--output_user_root="$RUNNER_TEMP"/bazel-outputs)
           PROFILE=(--profile=/tmp/bazel-profile.json)
+          # Build Event Protocol per invocation: the cache report step below
+          # counts cached vs executed test targets from these.
+          mkdir -p /tmp/bazel-bep
           # Unit arm runs in the default configuration so its cache keys stay
           # stable; tagged suites get their own invocations because
           # --define=gotags reconfigures every action under it (a full-world
@@ -282,6 +285,7 @@ jobs:
             RCEXEC=()
           fi
           bazel "${ARGS[@]}" test "${PROFILE[@]}" //... \
+            --build_event_json_file=/tmp/bazel-bep/unit.json \
             "${RCEXEC[@]}" --test_output=errors --keep_going
           # The fork pool (instance oss-fork) runs every action with loopback
           # only (NETNS=1), and the acceptance tier's `gc init` clones
@@ -293,6 +297,7 @@ jobs:
             echo "::notice title=acceptance skipped on the fork pool:://test/acceptance:acceptance_test needs github.com (ga-73eoo); the fork pool has no network"
           else
             bazel "${ARGS[@]}" test "${PROFILE[@]}" //test/acceptance:acceptance_test \
+              --build_event_json_file=/tmp/bazel-bep/acceptance.json \
               "${RCEXEC[@]}" --test_output=errors --keep_going \
               --define=gotags=acceptance_a --test_timeout=1100
           fi
@@ -317,13 +322,46 @@ jobs:
         run: |
           ARGS=(--output_user_root="$RUNNER_TEMP"/bazel-outputs)
           if [ -n "$BAZEL_REMOTE_EXECUTOR" ] || [ -n "$RBE_FORK_CERT" ]; then RCEXEC=(--config=remote-exec); else RCEXEC=(); fi
+          mkdir -p /tmp/bazel-bep
           bazel "${ARGS[@]}" test //test/integration:integration_test \
+            --build_event_json_file=/tmp/bazel-bep/integration.json \
             "${RCEXEC[@]}" --test_output=errors --keep_going \
             --define=gotags=integration --test_timeout=1100 --flaky_test_attempts=1 || true
 
       - name: Critical-path report + budget (the optimization loop metric)
         if: always()
         run: python3 tools/bazel/critpath.py /tmp/bazel-profile.json --tier T2 --budget 150 || true
+
+      # Cross-phase test skipping, measured: per invocation, how many test
+      # targets were cache hits (local / remote / disk) vs executed (remote /
+      # local), plus failures, flakes and action-level runner counts, from the
+      # BEP files above (internal/testpolicy/bepsummary). Phases a run skipped
+      # (acceptance on the fork pool) show as "no BEP file". Reporting only:
+      # a parse failure marks this step, never the job.
+      - name: Bazel test cache report (BEP)
+        if: always()
+        continue-on-error: true
+        run: |
+          case "$GITHUB_EVENT_NAME/$GITHUB_REF" in
+            pull_request/*) context="pr" ;;
+            push/refs/heads/main) context="main" ;;
+            *) context="$GITHUB_EVENT_NAME" ;;
+          esac
+          mkdir -p /tmp/bazel-bep
+          go run ./scripts/bazel-bep-summary.go --context "$context" --allow-missing \
+            --json-out /tmp/bazel-bep/summary.json \
+            unit=/tmp/bazel-bep/unit.json \
+            acceptance=/tmp/bazel-bep/acceptance.json \
+            integration=/tmp/bazel-bep/integration.json >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload bazel test cache report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bazel-bep-summary-${{ github.run_attempt }}
+          path: /tmp/bazel-bep/summary.json
+          retention-days: 30
+          if-no-files-found: warn
 
       # Coverage reporting only matters on the main branch — mirrors the go-test
       # arm's policy (preflight-unit-cover-*). The lcov combined report uploads
