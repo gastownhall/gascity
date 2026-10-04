@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	sqlite "modernc.org/sqlite"
 )
@@ -114,6 +115,31 @@ func TestDoltliteReadStoreReadyUsesDoltlite(t *testing.T) {
 	}
 	if hasTestBead(rows, "gc-blocked") {
 		t.Fatalf("Ready included blocked bead: %#v", rows)
+	}
+}
+
+func TestDoltliteReadStoreReadyPreservesHoldLabelsForDemandFiltering(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+	insertTestDoltliteIssue(t, writer, "issues", "labels", "dependencies", testDoltliteIssue{
+		ID:        "gc-held-ready",
+		Title:     "held ready",
+		Status:    "open",
+		IssueType: "task",
+		CreatedAt: time.Now().UTC().Add(time.Minute),
+		Labels:    []string{beadmeta.HoldExternalLabel},
+		Metadata:  map[string]string{beadmeta.RoutedToMetadataKey: "rig/polecat"},
+	})
+
+	rows, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	held := findTestBead(t, rows, "gc-held-ready")
+	if !slices.Contains(held.Labels, beadmeta.HoldExternalLabel) {
+		t.Fatalf("held ready labels = %v, want %q preserved for controller demand filtering", held.Labels, beadmeta.HoldExternalLabel)
 	}
 }
 

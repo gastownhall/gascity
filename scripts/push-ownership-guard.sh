@@ -116,6 +116,88 @@ _pog_read_with_retry() {
     return 1
 }
 
+_pog_local_bead_prefix() {
+    if [[ -n "${POG_LOCAL_BEAD_PREFIX:-}" ]]; then
+        printf '%s' "$POG_LOCAL_BEAD_PREFIX"
+        return 0
+    fi
+    command -v bd >/dev/null 2>&1 || return 1
+    bd config get issue_prefix 2>/dev/null | tail -1
+}
+
+_pog_bead_prefix_pattern() {
+    local raw="${POG_BEAD_PREFIXES:-}"
+    local city="${GC_CITY:-${GC_CITY_PATH:-}}"
+    if [[ -z "$raw" && -n "$city" && -r "$city/.beads/routes.jsonl" ]] && command -v jq >/dev/null 2>&1; then
+        raw="$(jq -s -r '[.[] | (.prefix // empty) | select(test("^[a-z][a-z0-9]*$"))] | unique | join(",")' \
+            "$city/.beads/routes.jsonl" 2>/dev/null || true)"
+    fi
+
+    local local_prefix=""
+    local_prefix="$(_pog_local_bead_prefix 2>/dev/null || true)"
+    [[ -n "$local_prefix" ]] && raw="${raw:+$raw,}$local_prefix"
+
+    local pattern="" prefix=""
+    while IFS= read -r prefix; do
+        [[ "$prefix" =~ ^[a-z][a-z0-9]*$ ]] || continue
+        case "|$pattern|" in
+            *"|$prefix|"*) continue ;;
+        esac
+        pattern="${pattern:+$pattern|}$prefix"
+    done < <(printf '%s' "$raw" | tr ',| ' '\n')
+    printf '%s' "$pattern"
+}
+
+_pog_use_routed_show() {
+    local id="$1"
+    [[ "${POG_SHOW_COMMAND:-}" == "gc" ]] && return 0
+    [[ "${POG_SHOW_COMMAND:-}" == "bd" ]] && return 1
+    command -v gc >/dev/null 2>&1 || return 1
+    local local_prefix=""
+    local_prefix="$(_pog_local_bead_prefix 2>/dev/null || true)"
+    [[ -n "$local_prefix" && "${id%%-*}" != "$local_prefix" ]]
+}
+
+_pog_show_once() {
+    local id="$1"
+    if _pog_use_routed_show "$id"; then
+        _pog_timeout "$POG_TIMEOUT_SECONDS" gc bd show "$id" --json 2>/dev/null
+    else
+        _pog_timeout "$POG_TIMEOUT_SECONDS" bd show "$id" --json 2>/dev/null
+    fi
+}
+
+_pog_show_with_retry() {
+    local id="$1"
+    if _pog_use_routed_show "$id"; then
+        _pog_read_with_retry gc bd show "$id" --json
+    else
+        _pog_read_with_retry bd show "$id" --json
+    fi
+}
+
+# Prints the id and returns 0 when a branch token names a real bead, returns 1
+# for a clean not-found response, and returns 2 when the lookup is ambiguous.
+_pog_probe_branch_candidate() {
+    local id="$1" attempt=1 out=""
+    while (( attempt <= POG_READ_ATTEMPTS )); do
+        if out="$(_pog_show_once "$id")"; then
+            if jq -e --arg id "$id" 'type == "array" and .[0].id == $id' <<<"$out" >/dev/null 2>&1; then
+                printf '%s' "$id"
+                return 0
+            fi
+        elif jq -e 'type == "object" and ((.error // "") | test("no issue(s)? found"; "i"))' \
+            <<<"$out" >/dev/null 2>&1; then
+            return 1
+        fi
+        if (( attempt < POG_READ_ATTEMPTS )); then
+            sleep "$attempt"
+        fi
+        attempt=$((attempt + 1))
+    done
+    return 2
+}
+
 # _pog_branch_id_bead_inactive <id>: true (rc 0) only if a FRESH bd show
 # confirms <id>'s status is neither in_progress nor open -- i.e. the branch-
 # derived bead is no longer the live claim. Fails safe: any read/parse
@@ -126,7 +208,7 @@ _pog_read_with_retry() {
 _pog_branch_id_bead_inactive() {
     local id="$1"
     local json
-    json="$(_pog_read_with_retry bd show "$id" --json)" || return 1
+    json="$(_pog_show_with_retry "$id")" || return 1
     [[ -n "$json" ]] || return 1
     jq -e '.' <<<"$json" >/dev/null 2>&1 || return 1
     local st
@@ -198,8 +280,8 @@ _pog_ownership_violation() {
 
 # _pog_resolve_bead_id: prints the bead id this push should be checked
 # against; prints nothing if none can be resolved. Resolution order:
-#   1. The current branch name, matched against ga-[0-9a-z]{6}(\.[0-9]+)* —
-#      the bead's own id format, extended with zero or more repeated
+#   1. The current branch name, matched against the configured city/local
+#      bead prefixes and [0-9a-z]+(\.[0-9]+)* id form, extended with zero or more repeated
 #      sub-bead suffixes because this repo's real branch convention is
 #      builder/<bead-id>-<slug> and sub-beads are routine at any nesting
 #      depth: a single-level sub-bead (e.g. ga-fip9ps.1) as well as a
@@ -277,7 +359,41 @@ _pog_resolve_bead_id() {
 
     local branch_id=""
     if [[ -n "$branch" ]]; then
-        branch_id="$(grep -oE 'ga-[0-9a-z]{6}(\.[0-9]+)*' <<<"$branch" | head -1 || true)"
+        local prefix_pattern="" local_prefix="" candidate="" candidate_prefix="" candidate_body="" probe_rc=0
+        prefix_pattern="$(_pog_bead_prefix_pattern)"
+        local_prefix="$(_pog_local_bead_prefix 2>/dev/null || true)"
+        if [[ -n "$prefix_pattern" ]]; then
+            while IFS= read -r candidate; do
+                candidate="${candidate#/}"
+                candidate="${candidate#-}"
+                candidate_prefix="${candidate%%-*}"
+                candidate_body="${candidate#*-}"
+                candidate_body="${candidate_body%%.*}"
+
+                # Preserve the established local six-character branch form
+                # without an extra read. New cross-rig/variable-length forms
+                # must prove the token is a real routed bead before it can
+                # turn an ordinary branch name into a blocking ownership gate.
+                if [[ "$candidate_prefix" == "$local_prefix" && ${#candidate_body} -eq 6 ]]; then
+                    branch_id="$candidate"
+                    break
+                fi
+                if branch_id="$(_pog_probe_branch_candidate "$candidate")"; then
+                    break
+                else
+                    probe_rc=$?
+                    branch_id=""
+                    if [[ $probe_rc -eq 2 ]]; then
+                        branch_id="$POG_AMBIGUOUS_SENTINEL"
+                        break
+                    fi
+                fi
+            done < <(grep -oE "(^|/|-)($prefix_pattern)-[0-9a-z]+(\.[0-9]+)*" <<<"$branch" || true)
+        fi
+    fi
+    if [[ "$branch_id" == "$POG_AMBIGUOUS_SENTINEL" ]]; then
+        printf '%s' "$branch_id"
+        return 0
     fi
 
     # assignee_read_failed distinguishes "the read failed" (ambiguity) from
@@ -385,7 +501,7 @@ _pog_resolve_bead_id() {
             undeclared_id="$(jq -r '.[0].id // empty' <<<"${list_json:-[]}" 2>/dev/null || true)"
             if [[ -n "$undeclared_id" && "$undeclared_id" != "$branch_id" ]] && _pog_branch_id_bead_inactive "$branch_id"; then
                 local undeclared_json
-                if undeclared_json="$(_pog_read_with_retry bd show "$undeclared_id" --json)" \
+                if undeclared_json="$(_pog_show_with_retry "$undeclared_id")" \
                     && [[ -n "$undeclared_json" ]] \
                     && jq -e '.' <<<"$undeclared_json" >/dev/null 2>&1 \
                     && _pog_ownership_violation "$undeclared_json" >/dev/null 2>&1; then
@@ -418,20 +534,20 @@ assert_bead_still_claimed() {
     local id
     id="$(_pog_resolve_bead_id)"
     if [[ "$id" == "$POG_AMBIGUOUS_SENTINEL" ]]; then
-        echo "push-ownership-guard: BLOCKED — deploy-gate branch: could not read this session's in-progress assignment (bd unreachable or not on PATH), so ownership cannot be verified; re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
+        echo "push-ownership-guard: BLOCKED — could not resolve a branch bead candidate or this session's in-progress assignment because bd was unreachable, so ownership cannot be verified; re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
         return 1
     fi
     if [[ -z "$id" ]]; then
         return 0  # nothing to check
     fi
 
-    if ! command -v bd >/dev/null 2>&1; then
-        echo "push-ownership-guard: BLOCKED — bd is not on PATH, cannot verify $id is still claimed. Bypass with: git push --no-verify" >&2
+    if ! command -v bd >/dev/null 2>&1 && ! command -v gc >/dev/null 2>&1; then
+        echo "push-ownership-guard: BLOCKED — neither bd nor gc is on PATH, cannot verify $id is still claimed. Bypass with: git push --no-verify" >&2
         return 1
     fi
 
     local json
-    if ! json="$(_pog_read_with_retry bd show "$id" --json)" || [[ -z "$json" ]]; then
+    if ! json="$(_pog_show_with_retry "$id")" || [[ -z "$json" ]]; then
         echo "push-ownership-guard: BLOCKED — bd show $id unreachable after $POG_READ_ATTEMPTS attempts; re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
         return 1
     fi

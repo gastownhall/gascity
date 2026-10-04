@@ -130,6 +130,7 @@ case "$1" in
       fi
     fi
     if [ -f "$state/show-exit" ]; then
+      [ -f "$state/show-json" ] && cat "$state/show-json"
       exit "$(cat "$state/show-exit")"
     fi
     if [ -f "$state/show-json" ]; then
@@ -155,6 +156,13 @@ case "$1" in
     fi
     printf '[]'
     exit 0
+    ;;
+  config)
+    if [ "${2:-}" = get ] && [ "${3:-}" = issue_prefix ]; then
+      printf 'ga\n'
+      exit 0
+    fi
+    exit 1
     ;;
   hooks)
     # `bd hooks run <hook>`, chained from .githooks. Model a beads install that
@@ -199,6 +207,8 @@ run_guard() {
         cd "$repo" || exit 1
         PATH="$fbd:$PATH" GC_AGENT="$agent" GC_TEMPLATE="$template" \
             GC_SESSION_ID="$session_id" GC_SESSION_NAME="$session_name" \
+            POG_BEAD_PREFIXES="${POG_BEAD_PREFIXES:-ga,ep}" \
+            POG_LOCAL_BEAD_PREFIX="${POG_LOCAL_BEAD_PREFIX:-ga}" POG_SHOW_COMMAND=bd \
             POG_TIMEOUT_SECONDS="$pog_timeout" POG_READ_ATTEMPTS="$read_attempts" LIB="$LIB" \
             bash -c '. "$LIB"; assert_bead_still_claimed'
     )
@@ -568,6 +578,84 @@ test_bead_id_branch_resolves_multi_level_subbead_id() {
         record_pass "resolve/branch-resolves-full-multi-level-subbead-id (rc=0, full id ga-o3ko1j.4.3 named, not truncated to ga-o3ko1j.4)"
     else
         record_fail "resolve/branch-resolves-full-multi-level-subbead-id" "expected rc=0 with full id ga-o3ko1j.4.3 in the resolver's warning, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# A branch may belong to any rig, not only this repository's ga-* beads. Once
+# its lease has been revoked, the branch identity is the only durable way to
+# locate the bead: the assignee fallback is necessarily empty. The guard must
+# reject that late push rather than silently allowing it.
+test_branch_id_from_any_rig_blocks_revoked_worker() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "rescue/ep-9wy-waterguru-probe")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ep-9wy" "blocked" "" "" "[]"
+    out="$(run_guard "$repo" "$fbd" "revoked-worker" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -q "ep-9wy" <<<"$out" && grep -qi "status" <<<"$out"; then
+        record_pass "block/any-rig-branch-id-revoked-worker (rc=$rc, branch identity resolves ep-9wy after revocation)"
+    else
+        record_fail "block/any-rig-branch-id-revoked-worker" "expected revoked ep-9wy branch to be blocked, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# Session branches such as gc-builder-1-<hash> contain a word that looks like
+# the unconstrained <two letters>-<identifier> shape, but "gc" is not a bead
+# prefix in this city. They must remain outside the ownership guard rather
+# than being retried and blocked as a missing bead.
+test_non_bead_two_letter_token_does_not_resolve() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "gc-builder-1-05430e6c35ee")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[]' > "$fbd/fake-bd-state/list-json"
+    out="$(run_guard "$repo" "$fbd" "" "" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && [[ -z "$out" ]]; then
+        record_pass "resolve/non-bead-two-letter-token-does-not-resolve (rc=0)"
+    else
+        record_fail "resolve/non-bead-two-letter-token-does-not-resolve" "expected rc=0 with no bead lookup, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# A known route prefix is still insufficient evidence by itself: CI branch
+# names routinely begin ci-pr<number>, which is syntactically bead-like but
+# is not a durable work item. A clean not-found lookup must skip that token.
+test_known_prefix_nonexistent_token_does_not_resolve() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "ci-pr4021-nightly-canary-20260714")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[]' > "$fbd/fake-bd-state/list-json"
+    printf '{"error":"no issues found matching the provided IDs","schema_version":1}' > "$fbd/fake-bd-state/show-json"
+    printf '1' > "$fbd/fake-bd-state/show-exit"
+    out="$(POG_BEAD_PREFIXES=ga,ep,ci run_guard "$repo" "$fbd" "" "" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && [[ -z "$out" ]]; then
+        record_pass "resolve/known-prefix-nonexistent-token-does-not-resolve (rc=0)"
+    else
+        record_fail "resolve/known-prefix-nonexistent-token-does-not-resolve" "expected clean not-found ci-pr4021 token to be ignored, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# Real feature branches often suffix the bead id after a human-readable slug.
+# A revoked writer has no assignee fallback, so the branch id must still be
+# found and checked or the late push silently bypasses the ownership fence.
+test_slug_then_bead_id_blocks_revoked_worker() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "feat/hook-wait-ga-rncghg.2")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-rncghg.2" "blocked" "" "" "[]"
+    out="$(run_guard "$repo" "$fbd" "revoked-worker" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -q "ga-rncghg.2" <<<"$out" && grep -qi "status" <<<"$out"; then
+        record_pass "block/slug-then-bead-id-revoked-worker (rc=$rc, branch identity resolves ga-rncghg.2)"
+    else
+        record_fail "block/slug-then-bead-id-revoked-worker" "expected revoked ga-rncghg.2 branch to be blocked, got rc=$rc, output: $out"
     fi
     rm -rf "$repo" "$fbd"
 }
@@ -1182,7 +1270,9 @@ setup_hook_push_scenario() {
 test_hook_blocks_push_on_stale_claim() {
     local remote work fbd branch out rc
     read -r remote work fbd branch <<<"$(setup_hook_push_scenario closed)"
-    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" GIT_TERMINAL_PROMPT=0 git push origin "$branch" 2>&1)"; rc=$?
+    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" \
+        POG_BEAD_PREFIXES=ga POG_LOCAL_BEAD_PREFIX=ga POG_SHOW_COMMAND=bd \
+        GIT_TERMINAL_PROMPT=0 git push origin "$branch" 2>&1)"; rc=$?
     if [[ $rc -ne 0 ]] && [[ -z "$(remote_sha "$remote" "refs/heads/$branch")" ]]; then
         record_pass "hook/blocks-push-on-stale-claim (rejected, remote untouched)"
     else
@@ -1194,7 +1284,9 @@ test_hook_blocks_push_on_stale_claim() {
 test_hook_no_verify_bypasses_guard() {
     local remote work fbd branch out rc
     read -r remote work fbd branch <<<"$(setup_hook_push_scenario closed)"
-    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" GIT_TERMINAL_PROMPT=0 git push --no-verify origin "$branch" 2>&1)"; rc=$?
+    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" \
+        POG_BEAD_PREFIXES=ga POG_LOCAL_BEAD_PREFIX=ga POG_SHOW_COMMAND=bd \
+        GIT_TERMINAL_PROMPT=0 git push --no-verify origin "$branch" 2>&1)"; rc=$?
     if [[ $rc -eq 0 ]] && [[ -n "$(remote_sha "$remote" "refs/heads/$branch")" ]]; then
         record_pass "hook/no-verify-bypasses-guard (push succeeded despite stale claim)"
     else
@@ -1206,7 +1298,9 @@ test_hook_no_verify_bypasses_guard() {
 test_hook_allows_push_on_clean_claim() {
     local remote work fbd branch out rc
     read -r remote work fbd branch <<<"$(setup_hook_push_scenario in_progress)"
-    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" GIT_TERMINAL_PROMPT=0 git push origin "$branch" 2>&1)"; rc=$?
+    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" \
+        POG_BEAD_PREFIXES=ga POG_LOCAL_BEAD_PREFIX=ga POG_SHOW_COMMAND=bd \
+        GIT_TERMINAL_PROMPT=0 git push origin "$branch" 2>&1)"; rc=$?
     if [[ $rc -eq 0 ]] && [[ -n "$(remote_sha "$remote" "refs/heads/$branch")" ]]; then
         record_pass "hook/allows-push-on-clean-claim"
     else
@@ -1270,6 +1364,10 @@ run_all() {
     test_retry_parse_failure_message_mentions_retry_before_no_verify
     test_bead_id_branch_wins_and_warns_on_disagreement
     test_bead_id_branch_resolves_multi_level_subbead_id
+    test_branch_id_from_any_rig_blocks_revoked_worker
+    test_non_bead_two_letter_token_does_not_resolve
+    test_known_prefix_nonexistent_token_does_not_resolve
+    test_slug_then_bead_id_blocks_revoked_worker
     test_bead_id_fallback_used_when_branch_no_match
     test_bead_id_branch_reused_prefers_open_successor_when_branch_bead_closed
     test_bead_id_branch_reused_successor_match_via_branch_metadata_alone
