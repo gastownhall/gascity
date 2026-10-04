@@ -624,6 +624,119 @@ func formatCircuitTime(tm time.Time) string {
 	return tm.UTC().Format(time.RFC3339Nano)
 }
 
+// mergePriorSessionCircuitState is the breaker state a fresh named row
+// carries over from its identity's prior rows (C9.6b as amended by AM-N5,
+// P3-6b §2.3): rows are the identity's rows, open or closed with any close
+// reason, as the create's fenced read returned them. Among the rows that
+// carry any session_circuit_* value, the winner has the highest
+// reset_generation, then the latest last_restart, then the newest row
+// (C9.6(c)). Its values are copied raw, except restarts: the union, within
+// cfg.Window of now, of the restart lists of the rows sharing the winner's
+// reset_generation, less every restart at or before the last restart of
+// such a row that is open past cfg.ResetAfter: its auto-reset clears them,
+// as the in-memory breaker's does (with ResetAfter below Window they are
+// still inside the window). A row whose state does not parse is skipped, as
+// a restore would reject it. Readers apply C9.4's lazy ResetAfter to the
+// copied state. Nil when no row carries breaker state.
+func mergePriorSessionCircuitState(rows []beads.Bead, cfg sessionCircuitBreakerConfig, now time.Time) map[string]string {
+	type prior struct {
+		state       session.CircuitState
+		generation  uint64
+		lastRestart time.Time
+		restarts    []time.Time
+		created     time.Time
+	}
+	var priors []prior
+	for _, b := range rows {
+		cs := session.CircuitStateFromMetadata(b.Metadata)
+		if !hasSessionCircuitMetadata(cs) && strings.TrimSpace(cs.ResetGeneration) == "" {
+			continue
+		}
+		generation, err := parseCircuitResetGeneration(cs.ResetGeneration)
+		if err != nil {
+			continue
+		}
+		lastRestart, err := parseCircuitTime(cs.LastRestart)
+		if err != nil {
+			continue
+		}
+		restarts, err := parseCircuitTimeList(cs.Restarts)
+		if err != nil {
+			continue
+		}
+		priors = append(priors, prior{state: cs, generation: generation, lastRestart: lastRestart, restarts: restarts, created: b.CreatedAt})
+	}
+	if len(priors) == 0 {
+		return nil
+	}
+	winner := priors[0]
+	for _, p := range priors[1:] {
+		switch {
+		case p.generation != winner.generation:
+			if p.generation > winner.generation {
+				winner = p
+			}
+		case !p.lastRestart.Equal(winner.lastRestart):
+			if p.lastRestart.After(winner.lastRestart) {
+				winner = p
+			}
+		case p.created.After(winner.created):
+			winner = p
+		}
+	}
+	out := make(map[string]string, len(sessionCircuitMetadataKeys))
+	for key, value := range map[string]string{
+		sessionCircuitStateMetadata:             winner.state.State,
+		sessionCircuitLastRestartMetadata:       winner.state.LastRestart,
+		sessionCircuitLastProgressMetadata:      winner.state.LastProgress,
+		sessionCircuitLastObservedMetadata:      winner.state.LastObserved,
+		sessionCircuitProgressSignatureMetadata: winner.state.ProgressSignature,
+		sessionCircuitOpenedAtMetadata:          winner.state.OpenedAt,
+		sessionCircuitOpenRestartCountMetadata:  winner.state.OpenRestartCount,
+		sessionCircuitResetGenerationMetadata:   winner.state.ResetGeneration,
+	} {
+		if value != "" {
+			out[key] = value
+		}
+	}
+	cfg = cfg.withDefaults()
+	cutoff := now.Add(-cfg.Window)
+	var resetThrough time.Time
+	for _, p := range priors {
+		if p.generation == winner.generation && p.state.State == circuitOpen.String() &&
+			!p.lastRestart.IsZero() && now.Sub(p.lastRestart) >= cfg.ResetAfter && p.lastRestart.After(resetThrough) {
+			resetThrough = p.lastRestart
+		}
+	}
+	seen := make(map[time.Time]bool)
+	var union []time.Time
+	for _, p := range priors {
+		if p.generation != winner.generation {
+			continue
+		}
+		for _, tm := range p.restarts {
+			tm = tm.UTC()
+			if tm.Before(cutoff) || !tm.After(resetThrough) || seen[tm] {
+				continue
+			}
+			seen[tm] = true
+			union = append(union, tm)
+		}
+	}
+	if len(union) > 0 {
+		sort.Slice(union, func(i, j int) bool { return union[i].Before(union[j]) })
+		restarts := make([]string, len(union))
+		for i, tm := range union {
+			restarts[i] = tm.Format(time.RFC3339Nano)
+		}
+		data, err := json.Marshal(restarts)
+		if err == nil {
+			out[sessionCircuitRestartsMetadata] = string(data)
+		}
+	}
+	return out
+}
+
 func persistSessionCircuitBreakerMetadata(
 	sessFront *session.Store,
 	id string,
