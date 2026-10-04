@@ -7,6 +7,8 @@ package api
 import (
 	"strconv"
 	"time"
+
+	"github.com/danielgtaylor/huma/v2"
 )
 
 // --- Event types ---
@@ -83,8 +85,8 @@ type EventRotateOutput struct {
 // EventStreamInput is the Huma input for GET /v0/city/{cityName}/events/stream.
 type EventStreamInput struct {
 	CityScope
-	AfterSeq    string `query:"after_seq" required:"false" doc:"Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head."`
-	LastEventID string `header:"Last-Event-ID" required:"false" doc:"SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head."`
+	AfterSeq    string `query:"after_seq" required:"false" doc:"Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head. A value that is not a non-negative integer is rejected with 422."`
+	LastEventID string `header:"Last-Event-ID" required:"false" doc:"SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head. Takes precedence over after_seq; a value that is not a non-negative integer starts at the current city event head."`
 }
 
 // HeartbeatEvent is an empty event emitted periodically on SSE streams to keep
@@ -105,17 +107,41 @@ type SessionPendingClearedEvent struct {
 	RequestID string `json:"request_id" doc:"Request ID of the interaction that was cleared."`
 }
 
-// resolveAfterSeq returns the reconnect position from Last-Event-ID or after_seq.
-func (e *EventStreamInput) resolveAfterSeq() uint64 {
-	if e.LastEventID != "" {
-		if n, err := strconv.ParseUint(e.LastEventID, 10, 64); err == nil {
-			return n
-		}
+// resolveAfterSeq returns the reconnect position. A present Last-Event-ID
+// wins, as on the supervisor and session streams; one that is not a sequence
+// number is not a position the stream can place, so ok is false and the
+// caller head-starts rather than reading it as 0, which Watch treats as
+// "replay the entire retained history". after_seq has already been validated
+// by Resolve.
+func (e *EventStreamInput) resolveAfterSeq() (seq uint64, ok bool) {
+	raw := e.LastEventID
+	if raw == "" {
+		raw = e.AfterSeq
 	}
-	if e.AfterSeq != "" {
-		if n, err := strconv.ParseUint(e.AfterSeq, 10, 64); err == nil {
-			return n
-		}
+	if raw == "" {
+		return 0, false
 	}
-	return 0
+	n, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// Resolve rejects a malformed after_seq with 422 before the stream commits,
+// like BlockingParam.index. Last-Event-ID is deliberately not rejected:
+// EventSource clients treat any non-200 as fatal and stop reconnecting, so an
+// unusable Last-Event-ID head-starts instead (see resolveAfterSeq).
+func (e *EventStreamInput) Resolve(_ huma.Context) []error {
+	if e.AfterSeq == "" {
+		return nil
+	}
+	if _, err := strconv.ParseUint(e.AfterSeq, 10, 64); err != nil {
+		return []error{&huma.ErrorDetail{
+			Location: "query.after_seq",
+			Message:  "after_seq must be a non-negative integer",
+			Value:    e.AfterSeq,
+		}}
+	}
+	return nil
 }
