@@ -38,10 +38,21 @@ func antigravityHookAdditionalContext(content string) map[string]any {
 }
 
 func codexHookOutput(eventName, content string) map[string]any {
-	if strings.EqualFold(strings.TrimSpace(eventName), "Stop") {
+	switch strings.ToLower(strings.TrimSpace(eventName)) {
+	case "stop":
 		return map[string]any{
 			"decision": "block",
 			"reason":   strings.TrimRight(content, "\n"),
+		}
+	case "precompact":
+		// Codex has no PreCompactHookSpecificOutputWire: unlike every other
+		// hook event, PreCompact deserializes into PreCompactCommandOutputWire,
+		// which sets deny_unknown_fields and accepts only continue/stopReason/
+		// suppressOutput/systemMessage. The hookSpecificOutput envelope every
+		// other codex event accepts is rejected outright here, so PreCompact
+		// gets its own flat shape instead (gastownhall/gascity#6349).
+		return map[string]any{
+			"systemMessage": strings.TrimRight(content, "\n"),
 		}
 	}
 	return codexHookAdditionalContext(eventName, content)
