@@ -80,7 +80,7 @@ go_test(
         ],
         "//conditions:default": [],
     }),
-    shard_count = 4,
+    shard_count = 14,
     deps = [
         "//internal/bazeltest",
         "//internal/beads",
@@ -111,6 +111,13 @@ go_test(
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],
+)
+
+# The shard placement guard (scripts/integration_shards_test.go) reads this
+# file's srcs and shard_count.
+exports_files(
+    ["BUILD.bazel"],
+    visibility = ["//scripts:__pkg__"],
 )
 
 # The integration lane builds with --define=gotags=integration (bazel-test.yml).

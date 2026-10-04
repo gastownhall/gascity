@@ -26,6 +26,7 @@ go_test(
         "go_test_observable_test.go",
         "gomod_replace_guard_test.go",
         "harness_reap_test.go",
+        "integration_shards_test.go",
         "lint_readonly_contract_test.go",
         "makefile_cgo_test.go",
         "makefile_install_test.go",
@@ -67,6 +68,7 @@ go_test(
         "//contrib:all_files",
         "//scripts/testdata/test-go-test-shard/env_required:pkg_files",
         "//scripts/testdata/test-go-test-shard/no_extra_env:pkg_files",
+        "//test/integration:BUILD.bazel",
     ],
     shard_count = 6,
     deps = [

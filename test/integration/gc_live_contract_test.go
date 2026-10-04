@@ -836,6 +836,11 @@ func exerciseLiveContractSessionLifecycle(t *testing.T, baseURL string, v openap
 	if transcript.ID != id || transcript.Format != "raw" {
 		t.Fatalf("raw transcript = %+v, want id=%q format=raw", transcript, id)
 	}
+	// /wake starts the session in the background and /messages completes
+	// before the session row is confirmed live, so the raw stream (404 "has
+	// no live output" for a stopped session with no transcript, by contract)
+	// is asserted once the session reads live, not on the next request.
+	waitLiveContractSessionLive(t, baseURL, v, sessionPath, 30*time.Second)
 	assertLiveContractStreamOpens(t, baseURL, sessionPath+"/stream?format=raw")
 
 	agents := liveContractJSON[struct {
@@ -1126,6 +1131,32 @@ func assertLiveContractStreamOpens(t *testing.T, baseURL, path string) {
 	}
 	if contentType := resp.Header.Get("Content-Type"); !strings.Contains(contentType, "text/event-stream") {
 		t.Fatalf("GET %s stream content-type = %q, want text/event-stream", path, contentType)
+	}
+}
+
+// waitLiveContractSessionLive polls a session until its state is one whose
+// runtime has live output (active or awake), failing with the states seen.
+// The stream endpoint derives "live" from the same state. A wait that was
+// needed is logged with the state sequence, so a CI run that hit the window
+// records which transition lagged.
+func waitLiveContractSessionLive(t *testing.T, baseURL string, v openapivalidator.Validator, sessionPath string, timeout time.Duration) {
+	t.Helper()
+	start := time.Now()
+	var seen []string
+	live := pollUntil(timeout, 200*time.Millisecond, func() bool {
+		detail := liveContractJSON[struct {
+			State string `json:"state"`
+		}](t, baseURL, v, http.MethodGet, sessionPath, nil, http.StatusOK)
+		if len(seen) == 0 || seen[len(seen)-1] != detail.State {
+			seen = append(seen, detail.State)
+		}
+		return detail.State == "active" || detail.State == "awake"
+	})
+	if !live {
+		t.Fatalf("session %s not live after %s (states %v); its raw stream would answer 404 \"has no live output\"", sessionPath, timeout, seen)
+	}
+	if len(seen) > 1 {
+		t.Logf("session %s became live after %s (states %v)", sessionPath, time.Since(start).Round(time.Millisecond), seen)
 	}
 }
 
