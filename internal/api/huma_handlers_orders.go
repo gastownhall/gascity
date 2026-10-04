@@ -621,7 +621,13 @@ func (s *Server) humaHandleOrdersFeed(_ context.Context, input *OrdersFeedInput)
 		}{Body: body}, nil
 	}
 
-	workflowRuns, err := buildWorkflowRunProjections(s.state, scopeKind, scopeRef, "")
+	// Root-only projections skip the per-root closed-child List that the
+	// full path issues for every workflow root (one backing query per root
+	// per rebuild). The feed is a freshness-over-precision monitor view, the
+	// same trade /formulas/feed already made when it switched to the
+	// root-only builder; see buildWorkflowRunProjectionsRootOnly's contract
+	// note for what may lag.
+	workflowRuns, err := buildWorkflowRunProjectionsRootOnly(s.state, scopeKind, scopeRef)
 	if err != nil {
 		return nil, apierr.Internal.Msg("workflow feed failed")
 	}
