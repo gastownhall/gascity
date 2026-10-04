@@ -404,8 +404,12 @@ func TestRunDetailNewGenerationRefolds(t *testing.T) {
 	}
 }
 
-// currentLastSeq reads the tailer's published fold cursor under its lock.
+// currentLastSeq reads the tailer's published fold cursor under its lock, asking
+// for the projection first the way a real reader does: the published cursor only
+// advances with a published projection, and the tail defers that while nothing is
+// watching.
 func currentLastSeq(tl *cityRunTailer) uint64 {
+	tl.awaitProjection(context.Background())
 	tl.mu.RLock()
 	defer tl.mu.RUnlock()
 	return tl.lastSeq
