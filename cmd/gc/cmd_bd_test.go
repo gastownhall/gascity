@@ -514,6 +514,54 @@ func TestResolveBdScopeTargetErrorsOnForeignRedirect(t *testing.T) {
 	}
 }
 
+// TestResolveBdScopeTargetCityStoreRedirectUsesCityStore is the positive twin
+// of TestResolveBdScopeTargetErrorsOnForeignRedirect: a city-scoped agent's
+// worktree of the city repo redirects to the city's own HQ store, and that is
+// city scope, not a foreign store. Only an arg naming an existing bead skips
+// the cwd step (via the prefix probes above it), which is why `show` and
+// `update` of an HQ bead worked from that cwd while create, list, --help and
+// a show of a missing id were refused (ga-k1e9yp). The probe is stubbed to
+// miss, so every case here must resolve through the cwd step.
+func TestResolveBdScopeTargetCityStoreRedirectUsesCityStore(t *testing.T) {
+	cityDir := t.TempDir()
+	worktreeDir := filepath.Join(cityDir, ".gc", "worktrees", "gascity", "pack-author")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(city .beads): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktreeDir, ".beads"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree .beads): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".beads", "redirect"), []byte(filepath.Join(cityDir, ".beads")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(redirect): %v", err)
+	}
+	setCwd(t, worktreeDir)
+	// City-scoped agents run without GC_RIG; an ambient one would win before
+	// the cwd step this test exercises.
+	t.Setenv("GC_RIG", "")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "gascity"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: filepath.Join("rigs", "frontend"), Prefix: "fr"}},
+	}
+	origProbe := bdBeadExists
+	defer func() { bdBeadExists = origProbe }()
+	bdBeadExists = func(string, *config.City, execStoreTarget, string) bool { return false }
+
+	for _, args := range [][]string{
+		{"create", "--title", "probe"},
+		{"list"},
+		{"--help"},
+		{"show", config.EffectiveHQPrefix(cfg) + "-missing"},
+	} {
+		got, err := resolveBdScopeTarget(cfg, cityDir, "", args, false, io.Discard)
+		if err != nil {
+			t.Fatalf("resolveBdScopeTarget(%v) error = %v, want city store", args, err)
+		}
+		if got.ScopeKind != "city" || got.ScopeRoot != cityDir {
+			t.Fatalf("resolveBdScopeTarget(%v) = %#v, want the city store at %q", args, got, cityDir)
+		}
+	}
+}
+
 func TestBdCommandEnvUsesCanonicalRigTarget(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
