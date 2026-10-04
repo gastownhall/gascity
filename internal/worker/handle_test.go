@@ -1820,7 +1820,7 @@ func TestRuntimeHandleNudgeWaitIdleDerivedClaudeWrapsReminder(t *testing.T) {
 	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
 		Provider:       sp,
 		SessionName:    "legacy-worker",
-		ProviderName:   "claude-omni",
+		ProviderName:   "claude-custom",
 		ProviderFamily: "claude",
 	})
 	if err != nil {
@@ -1836,7 +1836,7 @@ func TestRuntimeHandleNudgeWaitIdleDerivedClaudeWrapsReminder(t *testing.T) {
 		t.Fatalf("Nudge(wait_idle): %v", err)
 	}
 	if !result.Delivered {
-		t.Fatal("Nudge(wait_idle) Delivered = false, want true for claude-omni (claude family)")
+		t.Fatal("Nudge(wait_idle) Delivered = false, want true for claude-custom (claude family)")
 	}
 
 	var waitCalls, nudgeNow int
@@ -1849,10 +1849,10 @@ func TestRuntimeHandleNudgeWaitIdleDerivedClaudeWrapsReminder(t *testing.T) {
 		}
 	}
 	if waitCalls != 1 {
-		t.Fatalf("claude-omni WaitForIdle calls = %d, want 1", waitCalls)
+		t.Fatalf("claude-custom WaitForIdle calls = %d, want 1", waitCalls)
 	}
 	if nudgeNow != 1 {
-		t.Fatalf("claude-omni NudgeNow calls = %d, want 1", nudgeNow)
+		t.Fatalf("claude-custom NudgeNow calls = %d, want 1", nudgeNow)
 	}
 }
 
@@ -1946,7 +1946,7 @@ func TestRuntimeHandleNudgeWaitIdleUnsupportedProviderReturnsUndelivered(t *test
 	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
 		Provider:       sp,
 		SessionName:    "legacy-worker",
-		ProviderName:   "codex-omni",
+		ProviderName:   "codex-custom",
 		ProviderFamily: "codex",
 	})
 	if err != nil {
@@ -1961,7 +1961,7 @@ func TestRuntimeHandleNudgeWaitIdleUnsupportedProviderReturnsUndelivered(t *test
 		t.Fatalf("Nudge(wait_idle): %v", err)
 	}
 	if result.Delivered {
-		t.Fatal("Nudge(wait_idle) Delivered = true, want false for codex-omni (codex family)")
+		t.Fatal("Nudge(wait_idle) Delivered = true, want false for codex-custom (codex family)")
 	}
 	for _, call := range sp.Calls {
 		if call.Method == "WaitForIdle" || call.Method == "Nudge" || call.Method == "NudgeNow" {

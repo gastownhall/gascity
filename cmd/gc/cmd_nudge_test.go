@@ -6228,10 +6228,10 @@ func TestDeliverSessionNudgeWaitIdleBusyDerivedClaudeQueuesWithoutBlocking(t *te
 	target := nudgeTarget{
 		cityPath: dir,
 		cfg: &config.City{Providers: map[string]config.ProviderSpec{
-			"claude-omni": {Base: &base},
+			"claude-custom": {Base: &base},
 		}},
 		agent:       config.Agent{Name: "worker"},
-		resolved:    &config.ResolvedProvider{Name: "claude-omni", BuiltinAncestor: "claude"},
+		resolved:    &config.ResolvedProvider{Name: "claude-custom", BuiltinAncestor: "claude"},
 		sessionName: "sess-worker",
 	}
 
@@ -6245,14 +6245,14 @@ func TestDeliverSessionNudgeWaitIdleBusyDerivedClaudeQueuesWithoutBlocking(t *te
 		t.Fatalf("deliver = %d, want 0; stderr: %s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "Queued nudge for worker") {
-		t.Fatalf("stdout = %q, want queued for claude-omni (claude family)", stdout.String())
+		t.Fatalf("stdout = %q, want queued for claude-custom (claude family)", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "never reached an idle boundary") {
-		t.Fatalf("stdout = %q, want busy-target downgrade for claude-omni (claude family)", stdout.String())
+		t.Fatalf("stdout = %q, want busy-target downgrade for claude-custom (claude family)", stdout.String())
 	}
 	for _, call := range fake.Calls {
 		if call.Method == "WaitForIdle" {
-			t.Fatalf("claude-omni busy target must not block in WaitForIdle; calls = %#v", fake.Calls)
+			t.Fatalf("claude-custom busy target must not block in WaitForIdle; calls = %#v", fake.Calls)
 		}
 	}
 }
@@ -6304,10 +6304,10 @@ func TestDeliverSessionNudgeWaitIdleIdleDerivedClaudeDeliversLive(t *testing.T) 
 	target := nudgeTarget{
 		cityPath: dir,
 		cfg: &config.City{Providers: map[string]config.ProviderSpec{
-			"claude-omni": {Base: &base},
+			"claude-custom": {Base: &base},
 		}},
 		agent:       config.Agent{Name: "worker"},
-		resolved:    &config.ResolvedProvider{Name: "claude-omni", BuiltinAncestor: "claude"},
+		resolved:    &config.ResolvedProvider{Name: "claude-custom", BuiltinAncestor: "claude"},
 		sessionName: "sess-worker",
 	}
 
@@ -6323,7 +6323,7 @@ func TestDeliverSessionNudgeWaitIdleIdleDerivedClaudeDeliversLive(t *testing.T) 
 		sawNudge = sawNudge || call.Method == "NudgeNow"
 	}
 	if !sawWait || !sawNudge {
-		t.Fatalf("claude-omni must use live wait-idle delivery; calls = %#v", fake.Calls)
+		t.Fatalf("claude-custom must use live wait-idle delivery; calls = %#v", fake.Calls)
 	}
 }
 
