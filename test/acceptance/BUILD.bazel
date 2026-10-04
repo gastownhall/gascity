@@ -61,6 +61,10 @@ go_test(
         "@dolt_bin_v2_1_7//:dolt-linux-amd64/bin/dolt",
     ],
     shard_count = 2,
+    tags = [
+        "external",
+        "requires-network",
+    ],
     deps = [
         "//internal/beads",
         "//internal/beads/contract",

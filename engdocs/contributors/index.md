@@ -15,6 +15,10 @@ description: The shortest path for new contributors to get productive in Gas Cit
 - [Infra-Class Store Routing Audit](infra-class-store-routing-audit.md) when
   opening a store on a bead id — which class a bead belongs to decides which
   store answers, and the audit inventories the sites that got it wrong
+- [Bazel Test Hermeticity Audit](bazel-test-hermeticity-audit.md) when a
+  test reads the network, the calendar, host tools, or shared paths — what
+  a cached `bazel test` PASS can and cannot vouch for, and how the
+  `test/bazel-hermeticity.toml` ledger tags such tests
 - [Huma Usage Notes](huma-usage.md) when touching `internal/api/`,
   OpenAPI generation, or SSE registration
 - [Excalidraw Setup](excalidraw-setup.md) when authoring diagrams for the docs
