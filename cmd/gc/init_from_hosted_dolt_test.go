@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // gastownExamplePath resolves the bundled example city used as a --from source.
@@ -206,6 +209,67 @@ schema = 2
 	}
 	if !strings.Contains(string(site), rigPath) {
 		t.Errorf("hosted rewrite erased the rig site binding; .gc/site.toml:\n%s", site)
+	}
+}
+
+// TestInitFromHostedKeepsTemplateProxiedTransport verifies that a bare hosted
+// endpoint over a proxied-server `--from` source keeps the template's proxied
+// transport, the compat rule applySelectorToCityConfig applies to a bare
+// --dolt-host: the canonical config.yaml must agree with the copied city.toml,
+// and metadata.json stays absent with the database pinned for the deferred
+// proxied bd init.
+func TestInitFromHostedKeepsTemplateProxiedTransport(t *testing.T) {
+	clearGCEnv(t)
+
+	src := t.TempDir()
+	writeInitSourceFile(t, src, "city.toml", `[workspace]
+name = "fleet"
+prefix = "fl"
+provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
+
+[dolt]
+mode = "proxied-server"
+`)
+	writeInitSourceFile(t, src, "pack.toml", `[pack]
+name = "fleet"
+schema = 2
+`)
+
+	cityPath := filepath.Join(t.TempDir(), "city")
+	hosted := hostedDoltInitOptions{
+		Host:      "dolt.example.com",
+		Port:      "3307",
+		User:      "root",
+		Database:  "bd_prj_abc",
+		ProjectID: "prj_abc",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doInitFromDirWithOptionsInternal(src, cityPath, "", &stdout, &stderr, true, true, hosted)
+	if code != 0 {
+		t.Fatalf("doInitFromDirWithOptionsInternal = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	configPath := filepath.Join(cityPath, ".beads", "config.yaml")
+	state, ok, err := contract.ReadConfigState(fsys.OSFS{}, configPath)
+	if err != nil || !ok {
+		t.Fatalf("ReadConfigState(%s) = %+v, %v, %v", configPath, state, ok, err)
+	}
+	if state.EndpointOrigin != contract.EndpointOriginCityCanonical || state.DoltHost != "dolt.example.com" {
+		t.Errorf("config.yaml endpoint = %+v, want the city_canonical dolt.example.com endpoint", state)
+	}
+	if state.DoltMode != "proxied-server" {
+		t.Errorf("config.yaml dolt.mode = %q, want the template's proxied-server transport", state.DoltMode)
+	}
+	database, ok, err := contract.ReadPinnedDoltDatabase(fsys.OSFS{}, configPath)
+	if err != nil || !ok || database != "bd_prj_abc" {
+		t.Errorf("pinned dolt database = %q, %v, %v; want bd_prj_abc", database, ok, err)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "metadata.json")); !os.IsNotExist(err) {
+		t.Errorf("metadata.json must stay absent until the deferred proxied bd init; os.Stat = %v", err)
 	}
 }
 

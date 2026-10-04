@@ -63,6 +63,11 @@ func TestResolveDoltConnectionTargetProxiedSidecarTCPAndUnix(t *testing.T) {
 	if err != nil || target.Socket != "/tmp/dolt.sock" {
 		t.Fatalf("unix target=%+v err=%v", target, err)
 	}
+	// A socket target has no TCP endpoint; a fabricated "0" port would read as
+	// a real one to any consumer that tests Port != "".
+	if target.Host != "" || target.Port != "" {
+		t.Fatalf("unix target carries a TCP endpoint: %+v", target)
+	}
 }
 
 func TestResolveDoltConnectionTargetIgnoresProxiedSidecarForNonDoltBackend(t *testing.T) {

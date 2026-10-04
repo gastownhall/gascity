@@ -1451,11 +1451,11 @@
             "server",
             "proxied-server"
           ],
-          "description": "Mode selects the Dolt transport for managed-local Beads scopes. The\nempty value preserves the direct SQL-server default; set to\n\"proxied-server\" to opt into Beads' proxied UOW path. Host/port endpoint\nconfiguration always remains direct and cannot be combined with the\nproxied-server mode."
+          "description": "Mode selects the Dolt transport for Beads scopes. The empty value keeps\nthe provider default: fresh managed-local bd/Dolt scopes use Beads'\nproxied-server path, where each scope's Beads UOW owns its proxy and\nchild Dolt lifecycle. Set \"server\" to opt into the direct SQL-server\npath. A host or port selects a user-managed external server, reached\ndirectly unless mode is \"proxied-server\", in which case the local proxy\nfronts that endpoint. Persisted scope metadata stays authoritative, so\nchanging mode does not migrate an initialized scope."
         },
         "port": {
           "type": "integer",
-          "description": "Port is the dolt server port. 0 means use ephemeral port allocation\n(hashed from city path). Set explicitly to override.",
+          "description": "Port is the dolt server port. Setting it, alone or with Host, pins a\nuser-managed external endpoint (a port alone is reached on loopback).\n0 or omitted keeps the provider's managed-local default, which\nallocates its own ephemeral listener port.",
           "default": 0
         },
         "host": {

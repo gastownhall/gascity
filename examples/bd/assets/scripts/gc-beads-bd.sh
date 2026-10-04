@@ -2928,12 +2928,13 @@ op_init() {
     # beads (#1039). Must match doctor.RequiredCustomTypes.
     local custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step}"
 
-    # Fresh managed-local scopes use direct/server mode by default. An explicit
-    # [dolt] mode = "proxied-server" selector is persisted in config before
-    # this helper runs; existing authoritative modes remain unchanged.
+    # Fresh managed-local scopes default to beads RC's proxied-server mode.
+    # Existing authoritative modes are preserved by the metadata/config
+    # canonicalizer, and explicit external endpoints stay on the direct path
+    # unless config selects proxied-server, where the proxy fronts them.
     if scope_is_proxied "$dir"; then
         ensure_beads_dir_permissions "$dir"
-        # An explicitly opted-in proxied scope may already have config.yaml (gc writes the
+        # A fresh proxied scope may already have config.yaml (gc writes the
         # canonical mode before invoking this helper) but no metadata.json.
         # `bd context` can succeed from ambient parent state in that shape, so
         # use the RC's metadata marker as the initialization witness. Honor

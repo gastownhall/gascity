@@ -1951,14 +1951,19 @@ const (
 // DoltConfig holds optional dolt server overrides.
 // When present in city.toml, these override the defaults.
 type DoltConfig struct {
-	// Mode selects the Dolt transport for managed-local Beads scopes. The
-	// empty value preserves the direct SQL-server default; set to
-	// "proxied-server" to opt into Beads' proxied UOW path. Host/port endpoint
-	// configuration always remains direct and cannot be combined with the
-	// proxied-server mode.
+	// Mode selects the Dolt transport for Beads scopes. The empty value keeps
+	// the provider default: fresh managed-local bd/Dolt scopes use Beads'
+	// proxied-server path, where each scope's Beads UOW owns its proxy and
+	// child Dolt lifecycle. Set "server" to opt into the direct SQL-server
+	// path. A host or port selects a user-managed external server, reached
+	// directly unless mode is "proxied-server", in which case the local proxy
+	// fronts that endpoint. Persisted scope metadata stays authoritative, so
+	// changing mode does not migrate an initialized scope.
 	Mode string `toml:"mode,omitempty" jsonschema:"enum=server,enum=proxied-server"`
-	// Port is the dolt server port. 0 means use ephemeral port allocation
-	// (hashed from city path). Set explicitly to override.
+	// Port is the dolt server port. Setting it, alone or with Host, pins a
+	// user-managed external endpoint (a port alone is reached on loopback).
+	// 0 or omitted keeps the provider's managed-local default, which
+	// allocates its own ephemeral listener port.
 	Port int `toml:"port,omitempty" jsonschema:"default=0"`
 	// Host is the dolt server hostname. Defaults to localhost.
 	Host string `toml:"host,omitempty" jsonschema:"default=localhost"`

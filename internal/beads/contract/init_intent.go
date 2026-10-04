@@ -36,7 +36,12 @@ type InitIntentResolution struct {
 // persisted state (when initialized), explicit CLI, allowed environment,
 // city policy, then provider default. Ambient BEADS_DOLT_* variables must not
 // be passed as envIntent; callers should provide only an explicitly allowed
-// policy environment selection.
+// policy environment selection. Every layer is validated even when a higher
+// layer wins, so a caller must never pass a half intent. The gc init front
+// door (applySelectorToCityConfig) wires only the CLI, city-config, and
+// provider-default layers: it passes an empty InitScopeState, so persisted
+// state resolution is not connected there, and it folds
+// GC_BEADS_TRANSPORT/TARGET into its CLI intent instead of envIntent.
 func ResolveInitIntent(persisted InitScopeState, cliIntent, envIntent, configIntent, providerDefault InitIntent) (InitIntentResolution, error) {
 	var err error
 	for _, item := range []struct {
@@ -51,7 +56,7 @@ func ResolveInitIntent(persisted InitScopeState, cliIntent, envIntent, configInt
 		}
 	}
 	if persisted.Initialized {
-		if !isDoltBackend(persisted.Backend) {
+		if !IsDoltBackend(persisted.Backend) {
 			if cliIntent != (InitIntent{}) || envIntent != (InitIntent{}) || configIntent != (InitIntent{}) {
 				return InitIntentResolution{}, fmt.Errorf("initialized backend %q is authoritative; initialization topology cannot be changed", persisted.Backend)
 			}
@@ -102,11 +107,6 @@ func normalizeInitIntent(source string, intent InitIntent) (InitIntent, error) {
 		return InitIntent{}, fmt.Errorf("%s initialization intent has unsupported target %q", source, intent.Target)
 	}
 	return intent, nil
-}
-
-func isDoltBackend(backend string) bool {
-	b := strings.ToLower(strings.TrimSpace(backend))
-	return b == "" || b == "dolt" || b == "bd"
 }
 
 func persistedTransport(mode string) string {

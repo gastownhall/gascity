@@ -1137,7 +1137,16 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		}
 	}
 	if fragMeta.IsDefined("dolt") {
+		// Preserve the transport selector the fragment did not itself set: a
+		// fragment defining any other [dolt] key would otherwise reset mode to
+		// the provider default and silently undo an explicit mode = "server"
+		// escape hatch (mirror of the [beads] rollout-gate preservation
+		// above). A fragment that DOES set mode still wins.
+		mode := base.Dolt.Mode
 		base.Dolt = fragment.Dolt
+		if !fragMeta.IsDefined("dolt", "mode") {
+			base.Dolt.Mode = mode
+		}
 	}
 	if fragMeta.IsDefined("formulas") {
 		base.Formulas = fragment.Formulas

@@ -59,6 +59,7 @@ var allowedNonMetadata = map[string]string{
 	"gc.fish": "shell completion filename (cmd/gc/cmd_shell.go)",
 
 	// City config YAML keys (config-file rewrite, not bead metadata).
+	"gc.dolt_database":   "city config YAML key (internal/beads/contract/files.go)",
 	"gc.endpoint_origin": "city config YAML key (internal/beads/contract/files.go)",
 	"gc.endpoint_status": "city config YAML key (internal/beads/contract/files.go)",
 

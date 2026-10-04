@@ -15,12 +15,15 @@ func TestValidateDoltConfigMode(t *testing.T) {
 		cfg     DoltConfig
 		wantErr string
 	}{
-		{name: "omitted defaults direct", cfg: DoltConfig{}},
+		{name: "omitted keeps provider default", cfg: DoltConfig{}},
 		{name: "server", cfg: DoltConfig{Mode: "server"}},
 		{name: "proxied server", cfg: DoltConfig{Mode: "proxied-server"}},
 		{name: "unknown mode", cfg: DoltConfig{Mode: "proxy"}, wantErr: "mode must be"},
-		{name: "proxied external host", cfg: DoltConfig{Mode: "proxied-server", Host: "db.example"}},
+		{name: "proxied external host and port", cfg: DoltConfig{Mode: "proxied-server", Host: "db.example", Port: 3306}},
 		{name: "proxied external port", cfg: DoltConfig{Mode: "proxied-server", Port: 3306}},
+		{name: "proxied external host without port", cfg: DoltConfig{Mode: "proxied-server", Host: "db.example"}, wantErr: `[dolt] mode "proxied-server" with host "db.example" requires port`},
+		{name: "direct external host without port", cfg: DoltConfig{Mode: "server", Host: "db.example"}},
+		{name: "legacy external host without port", cfg: DoltConfig{Host: "db.example"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -44,7 +47,8 @@ func TestLoadDoltConfigModeValidation(t *testing.T) {
 		name, body, want string
 	}{
 		{"unknown", "[workspace]\nname=\"x\"\n[dolt]\nmode=\"bogus\"\n", "mode must be"},
-		{"proxied external", "[workspace]\nname=\"x\"\n[dolt]\nmode=\"proxied-server\"\nhost=\"db\"\n", ""},
+		{"proxied external", "[workspace]\nname=\"x\"\n[dolt]\nmode=\"proxied-server\"\nhost=\"db\"\nport=3307\n", ""},
+		{"proxied external host without port", "[workspace]\nname=\"x\"\n[dolt]\nmode=\"proxied-server\"\nhost=\"db\"\n", "requires port"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()

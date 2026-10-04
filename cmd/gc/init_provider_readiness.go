@@ -345,7 +345,7 @@ func seedDeferredManagedBeadsBeforeProviderReadiness(cityPath string, cfg *confi
 		return nil
 	}
 	if scopeUsesManagedBdStoreContract(cityPath, cityPath) {
-		if err := seedDeferredManagedBeadsErr(cityPath, cityPath, config.EffectiveHQPrefix(cfg), ""); err != nil {
+		if err := seedDeferredManagedScopeBeforeBdInit(cityPath, cityPath, config.EffectiveHQPrefix(cfg)); err != nil {
 			return err
 		}
 	}
@@ -353,11 +353,23 @@ func seedDeferredManagedBeadsBeforeProviderReadiness(cityPath string, cfg *confi
 		if strings.TrimSpace(rig.Path) == "" || !rigUsesManagedBdStoreContract(cityPath, rig) {
 			continue
 		}
-		if err := seedDeferredManagedBeadsErr(cityPath, rig.Path, rig.EffectivePrefix(), ""); err != nil {
+		if err := seedDeferredManagedScopeBeforeBdInit(cityPath, rig.Path, rig.EffectivePrefix()); err != nil {
 			return fmt.Errorf("rig %q: %w", rig.Name, err)
 		}
 	}
 	return nil
+}
+
+// seedDeferredManagedScopeBeforeBdInit seeds a scope's canonical files ahead
+// of its bd init. A proxied scope still awaiting bd init gets only what
+// initAndHookDir writes before its live bd init: its metadata.json is
+// gc-beads-bd.sh's bd-init witness, so seeding it would let gc start skip bd
+// init. GC_DOLT=skip runs no bd init, so the seed stands in for it there.
+func seedDeferredManagedScopeBeforeBdInit(cityPath, dir, prefix string) error {
+	if !gcDoltSkip() && proxiedScopeAwaitsBdInit(cityPath, dir) {
+		return normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, "")
+	}
+	return seedDeferredManagedBeadsErr(cityPath, dir, prefix, "")
 }
 
 func providerReadinessProbeName(ref string, cfg *config.City) string {

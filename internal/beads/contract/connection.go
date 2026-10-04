@@ -168,7 +168,7 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 			if sidecar, ok, err := readProxiedClientInfo(fs, filepath.Join(scopeRoot, ".beads", "proxied_server_client_info.json")); err != nil {
 				return DoltConnectionTarget{}, err
 			} else if ok {
-				target.Host, target.Port, target.Socket, target.User = sidecar.External.Host, strconv.Itoa(sidecar.External.Port), sidecar.External.Socket, sidecar.External.User
+				target.Host, target.Port, target.Socket, target.User = sidecar.External.Host, sidecarTargetPort(sidecar.External.Port), sidecar.External.Socket, sidecar.External.User
 				target.External = true
 				target.EndpointStatus = EndpointStatusVerified
 				if sameScope(scopeRoot, cityRoot) {
@@ -250,6 +250,15 @@ func readProxiedClientInfo(fs fsys.FS, path string) (proxiedClientInfo, bool, er
 		return proxiedClientInfo{}, false, fmt.Errorf("invalid proxied client info host/port target")
 	}
 	return proxiedClientInfo{External: e}, true, nil
+}
+
+// sidecarTargetPort renders a sidecar's TCP port. Socket targets carry no
+// port, so they resolve to an empty Port rather than a bogus "0".
+func sidecarTargetPort(port int) string {
+	if port > 0 {
+		return strconv.Itoa(port)
+	}
+	return ""
 }
 
 // ValidateCanonicalConfigState validates canonical scope config invariants.

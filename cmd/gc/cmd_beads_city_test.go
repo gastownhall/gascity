@@ -796,6 +796,59 @@ func TestDoBeadsCityUseManagedWritesManagedCityAndInheritedRigs(t *testing.T) {
 	}
 }
 
+// use-managed rewrites the city's authoritative metadata.json to direct server
+// mode (requireCanonicalizedScopeMetadata), so the config.yaml mirror must land
+// on the same mode. Leaving the mirror's dolt.mode unset would keep a fresh
+// scope's proxied-server marker beside server metadata, and connection-target
+// resolution, which reads the mirror first, would take the proxy path the
+// metadata no longer records. The next start keeps the conversion because the
+// desired state mirrors the persisted metadata mode.
+func TestDoBeadsCityUseManagedKeepsProxiedScopeMirrorInAgreement(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	writeCityEndpointCityConfigWithCompat(t, cityDir, config.DoltConfig{}, nil)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	metadataPath := filepath.Join(cityDir, ".beads", "metadata.json")
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, metadataPath, contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "proxied-server",
+		DoltDatabase: "hq",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writeRigEndpointCanonicalConfig(t, cityDir, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified, DoltMode: "proxied-server"})
+	if !scopeUsesProxiedDoltMode(cityDir, cityDir) {
+		t.Fatal("precondition: fresh city scope should be proxied")
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doBeadsCityEndpoint(fsys.OSFS{}, cityDir, cityEndpointOptions{}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doBeadsCityEndpoint() = %d, stderr = %s", code, stderr.String())
+	}
+
+	metadataMode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, metadataPath)
+	if err != nil || !ok {
+		t.Fatalf("ReadDoltMode() = %q, %v, %v", metadataMode, ok, err)
+	}
+	if metadataMode != "server" {
+		t.Fatalf("metadata dolt_mode = %q, want server", metadataMode)
+	}
+	if cityState := readRigEndpointConfigState(t, cityDir); cityState.DoltMode != metadataMode {
+		t.Fatalf("config dolt.mode = %q, want it to agree with metadata dolt_mode %q", cityState.DoltMode, metadataMode)
+	}
+	if scopeUsesProxiedDoltMode(cityDir, cityDir) {
+		t.Fatal("use-managed scope still classified as proxied")
+	}
+	if got := desiredCityDoltConfigState(cityDir, config.DoltConfig{}, "gc").DoltMode; got != "server" {
+		t.Fatalf("startup desired dolt.mode = %q, want server to survive the next start", got)
+	}
+}
+
 func TestDoBeadsCityUseManagedPreservesCompatOnlyExplicitRigs(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 

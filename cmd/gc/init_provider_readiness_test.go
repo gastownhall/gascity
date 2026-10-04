@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -1912,5 +1913,51 @@ func TestFinalizeInitDoesNotRunBdProviderBeforeProviderReadinessBlock(t *testing
 	}
 	if data, err := os.ReadFile(callLog); err == nil && strings.TrimSpace(string(data)) != "" {
 		t.Fatalf("gc-beads-bd should not run before provider readiness passes, got:\n%s", data)
+	}
+}
+
+// gc init's provider preflight seeds the canonical bead store files before the
+// readiness probe can block init. For a fresh proxied city and its rigs that
+// seed must leave metadata.json absent: gc-beads-bd.sh takes the file as its
+// bd-init witness, so gc init's live bd init, or gc start's after a readiness
+// block, would skip initializing the store. Under GC_DOLT=skip no bd init runs,
+// and the seeded metadata.json stands in for it.
+func TestSeedDeferredManagedBeadsBeforeProviderReadinessLeavesProxiedWitnessToBdInit(t *testing.T) {
+	for _, tc := range []struct {
+		name, gcDolt string
+		wantMetadata bool
+	}{
+		{name: "live dolt", gcDolt: ""},
+		{name: "dolt skipped", gcDolt: "skip", wantMetadata: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configureIsolatedRuntimeEnv(t)
+			t.Setenv("GC_BEADS", "bd")
+			t.Setenv("GC_DOLT", tc.gcDolt)
+			cityPath := writeBootstrappedManagedBdCity(t)
+			rigPath := filepath.Join(cityPath, "frontend")
+			if err := os.MkdirAll(rigPath, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := loadInitProviderPreflightConfig(cityPath)
+			if err != nil {
+				t.Fatalf("loadInitProviderPreflightConfig: %v", err)
+			}
+			cfg.Rigs = append(cfg.Rigs, config.Rig{Name: "frontend", Path: rigPath, Prefix: "fr"})
+			if err := seedDeferredManagedBeadsBeforeProviderReadiness(cityPath, cfg); err != nil {
+				t.Fatalf("seedDeferredManagedBeadsBeforeProviderReadiness: %v", err)
+			}
+
+			for _, scope := range []string{cityPath, rigPath} {
+				state, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(scope, ".beads", "config.yaml"))
+				if err != nil || !ok || state.DoltMode != "proxied-server" {
+					t.Fatalf("%s config.yaml dolt.mode = %q (ok=%v err=%v), want proxied-server", scope, state.DoltMode, ok, err)
+				}
+				_, err = os.Stat(filepath.Join(scope, ".beads", "metadata.json"))
+				if gotMetadata := err == nil; gotMetadata != tc.wantMetadata {
+					t.Errorf("%s metadata.json present = %v (stat err %v), want %v", scope, gotMetadata, err, tc.wantMetadata)
+				}
+			}
+		})
 	}
 }

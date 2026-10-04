@@ -309,6 +309,55 @@ func ScopeHasEndpointAuthority(fs fsys.FS, scopeRoot string) bool {
 	return ConfigHasEndpointAuthority(cfg)
 }
 
+// pinnedDoltDatabaseKey is the config.yaml key carrying a scope's bead database
+// name while its metadata.json is still absent: a proxied scope defers
+// metadata.json until bd init, so the database chosen before then is held here
+// for that init. Once metadata.json exists, its dolt_database is authoritative.
+const pinnedDoltDatabaseKey = "gc.dolt_database"
+
+// ReadPinnedDoltDatabase reads the gc.dolt_database pin from config.yaml when present.
+func ReadPinnedDoltDatabase(fs fsys.FS, path string) (string, bool, error) {
+	doc, err := readConfigDoc(fs, path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		if database, ok := scanConfigLineValue(fs, path, pinnedDoltDatabaseKey+":"); ok {
+			return database, true, nil
+		}
+		return "", false, err
+	}
+	if database, ok := configStringValue(mappingRoot(doc), pinnedDoltDatabaseKey); ok {
+		return database, true, nil
+	}
+	return "", false, nil
+}
+
+// EnsurePinnedDoltDatabase records database as config.yaml's gc.dolt_database
+// pin, preserving every other key. It refuses an empty database and a
+// config.yaml that does not parse, rather than guess at either.
+func EnsurePinnedDoltDatabase(fs fsys.FS, path, database string) (bool, error) {
+	database = strings.TrimSpace(database)
+	if database == "" {
+		return false, fmt.Errorf("pinning dolt database in %s: database is empty", path)
+	}
+	doc, err := readConfigDoc(fs, path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return false, err
+		}
+		doc = newConfigDoc()
+	}
+	if !setString(mappingRoot(doc), pinnedDoltDatabaseKey, database) {
+		return false, nil
+	}
+	encoded, err := marshalConfigDoc(doc)
+	if err != nil {
+		return false, err
+	}
+	return true, fs.WriteFile(path, encoded, 0o644)
+}
+
 // ReadDoltDatabase reads the pinned dolt_database from metadata.json.
 func ReadDoltDatabase(fs fsys.FS, path string) (string, bool, error) {
 	data, err := fs.ReadFile(path)

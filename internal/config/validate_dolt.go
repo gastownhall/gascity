@@ -17,7 +17,11 @@ func ValidateDoltConfig(cfg *City, source string) error {
 	}
 	// proxied-server may optionally front an externally managed Dolt server;
 	// the bd adapter translates host/port into its --proxied-server-external-*
-	// flags. An omitted endpoint remains the managed-local proxy shape.
+	// flags, which need both (a port alone pins loopback). An omitted endpoint
+	// remains the managed-local proxy shape.
+	if mode == "proxied-server" && strings.TrimSpace(cfg.Dolt.Host) != "" && cfg.Dolt.Port == 0 {
+		return fmt.Errorf("%s: [dolt] mode %q with host %q requires port", source, mode, cfg.Dolt.Host)
+	}
 	checkNonNegative := func(field string, value int) error {
 		if value < 0 {
 			return fmt.Errorf("%s: [dolt] %s must not be negative: got %d", source, field, value)

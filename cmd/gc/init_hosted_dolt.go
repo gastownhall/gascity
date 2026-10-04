@@ -18,6 +18,8 @@ import (
 // explicitly. The env vars only fill the --dolt-* endpoint inputs; the
 // controller still selects the city template and provider, because a
 // non-interactive bd-backed `gc init` requires --template/--default-provider.
+// gc also projects GC_DOLT_HOST/PORT/USER into its own sessions, so those
+// three count only alongside a non-projected input (hostedDoltInitRequested).
 const (
 	envDoltHost       = "GC_DOLT_HOST"
 	envDoltPort       = "GC_DOLT_PORT"
@@ -89,10 +91,18 @@ func (o hostedDoltInitOptions) applySelectorToCityConfig(cfg *config.City) error
 	if transport == "" && target == "" && !o.enabled() {
 		return nil
 	}
-	// Compatibility: legacy --dolt-host is direct/external.
+	// Compatibility: a bare legacy --dolt-host selects only the external
+	// target. The transport stays the city config's ([dolt] mode, e.g. from
+	// gc init --file) and is direct when the config names none.
 	if transport == "" && target == "" && o.enabled() {
 		transport, target = "direct", "external"
+		if configured := configDoltInitIntent(*cfg).Transport; configured != "" {
+			transport = configured
+		}
 	}
+	// Persisted-state resolution is not connected here (empty InitScopeState),
+	// and GC_BEADS_TRANSPORT/TARGET already arrive folded into the CLI intent
+	// by resolveHostedDoltInitOptions, so the environment layer stays empty.
 	resolved, err := contract.ResolveInitIntent(contract.InitScopeState{}, contract.InitIntent{Transport: transport, Target: target}, contract.InitIntent{}, configDoltInitIntent(*cfg), contract.InitIntent{Transport: "proxied", Target: "local"})
 	if err != nil {
 		return err
@@ -126,34 +136,38 @@ func (o hostedDoltInitOptions) applySelectorToCityConfig(cfg *config.City) error
 	return nil
 }
 
+// configDoltInitIntent is the city-config layer of the init precedence. It reads
+// [dolt] the way desiredCityDoltConfigState does: a host or port selects an
+// external server, direct unless mode is proxied-server (the same compat
+// meaning a bare --dolt-host has), and a mode without an endpoint selects a
+// local target. It never returns a half intent, which ResolveInitIntent would
+// reject even when the CLI layer wins.
 func configDoltInitIntent(cfg config.City) contract.InitIntent {
-	mode := strings.ToLower(strings.TrimSpace(cfg.Dolt.Mode))
-	transport := ""
-	switch mode {
-	case "server":
-		transport = "direct"
-	case "proxied-server":
-		transport = "proxied"
+	proxied := strings.EqualFold(strings.TrimSpace(cfg.Dolt.Mode), "proxied-server")
+	if host, port := configuredExternalDoltTargetForCity(cfg.Dolt); host != "" || port != "" {
+		if proxied {
+			return contract.InitIntent{Transport: "proxied", Target: "external"}
+		}
+		return contract.InitIntent{Transport: "direct", Target: "external"}
 	}
-	target := ""
-	if strings.TrimSpace(cfg.Dolt.Host) != "" || cfg.Dolt.Port != 0 {
-		target = "external"
+	switch {
+	case proxied:
+		return contract.InitIntent{Transport: "proxied", Target: "local"}
+	case strings.EqualFold(strings.TrimSpace(cfg.Dolt.Mode), "server"):
+		return contract.InitIntent{Transport: "direct", Target: "local"}
 	}
-	if transport == "" && target == "" {
-		return contract.InitIntent{}
-	}
-	if target == "" {
-		target = "local"
-	}
-	return contract.InitIntent{Transport: transport, Target: target}
+	return contract.InitIntent{}
 }
 
 // resolveHostedDoltInitOptions merges explicit flag values with environment
-// fallbacks — flags win, env fills the gaps. When no project id is supplied
-// it is derived from a "bd_"-prefixed database name (the create-city
-// provisioner builds dolt_database as "bd_"+project_id, so the suffix is the
-// authoritative id by construction). getenv is injected for testability;
-// production callers pass os.Getenv.
+// fallbacks — flags win, env fills the gaps. gc projects GC_DOLT_HOST/PORT/USER
+// into every session and subprocess it spawns, so those three fill the
+// endpoint only for a request hostedDoltInitRequested recognizes; alone they
+// are the caller's own city connection. When no project id is supplied it is
+// derived from a "bd_"-prefixed database name (the create-city provisioner
+// builds dolt_database as "bd_"+project_id, so the suffix is the authoritative
+// id by construction). getenv is injected for testability; production callers
+// pass os.Getenv.
 func resolveHostedDoltInitOptions(flags hostedDoltInitFlagValues, getenv func(string) string) hostedDoltInitOptions {
 	pick := func(flag, env string) string {
 		if v := strings.TrimSpace(flag); v != "" {
@@ -162,18 +176,33 @@ func resolveHostedDoltInitOptions(flags hostedDoltInitFlagValues, getenv func(st
 		return strings.TrimSpace(getenv(env))
 	}
 	opts := hostedDoltInitOptions{
-		Host:      pick(flags.Host, envDoltHost),
-		Port:      pick(flags.Port, envDoltPort),
-		User:      pick(flags.User, envDoltUser),
 		Database:  pick(flags.Database, envDoltDatabase),
 		ProjectID: pick(flags.ProjectID, envBeadsProjectID),
 		Transport: pick(flags.Transport, envBeadsTransport),
 		Target:    pick(flags.Target, envBeadsTarget),
 	}
+	if hostedDoltInitRequested(flags, opts) {
+		opts.Host = pick(flags.Host, envDoltHost)
+		opts.Port = pick(flags.Port, envDoltPort)
+		opts.User = pick(flags.User, envDoltUser)
+	}
 	if opts.ProjectID == "" {
 		opts.ProjectID = deriveProjectIDFromDoltDatabase(opts.Database)
 	}
 	return opts
+}
+
+// hostedDoltInitRequested reports whether init input asks for an external
+// endpoint through something gc never projects into its sessions: an explicit
+// --dolt-host/--dolt-port/--dolt-user flag, a database or project id (flag or
+// environment), or an external beads target.
+func hostedDoltInitRequested(flags hostedDoltInitFlagValues, opts hostedDoltInitOptions) bool {
+	for _, v := range []string{flags.Host, flags.Port, flags.User, opts.Database, opts.ProjectID} {
+		if strings.TrimSpace(v) != "" {
+			return true
+		}
+	}
+	return strings.EqualFold(opts.Target, "external")
 }
 
 // deriveProjectIDFromDoltDatabase returns the beads project id encoded in a
@@ -256,10 +285,13 @@ func (o hostedDoltInitOptions) applyToCityConfig(cfg *config.City) error {
 // configState builds the canonical .beads/config.yaml endpoint state for the
 // hosted endpoint: an external city-canonical endpoint recorded as
 // unverified. gc start performs the live verification once credentials are
-// wired.
-func (o hostedDoltInitOptions) configState(issuePrefix string) contract.ConfigState {
+// wired. cityDoltMode is the city config's resolved [dolt] mode, which carries
+// the transport: the --beads-transport selection, else the template's own
+// mode under a bare --dolt-host (the compat rule applySelectorToCityConfig
+// applies).
+func (o hostedDoltInitOptions) configState(issuePrefix, cityDoltMode string) contract.ConfigState {
 	mode := "server"
-	if strings.EqualFold(strings.TrimSpace(o.Transport), "proxied") {
+	if strings.EqualFold(strings.TrimSpace(cityDoltMode), "proxied-server") {
 		mode = "proxied-server"
 	}
 	return contract.ConfigState{
@@ -277,7 +309,9 @@ func (o hostedDoltInitOptions) configState(issuePrefix string) contract.ConfigSt
 // endpoint config pins an external (city_canonical) Dolt endpoint that has not
 // yet been verified. init-time bd init against such an endpoint must be
 // deferred to gc start, which carries the credential command — init itself
-// never requires a live connection (R5).
+// never requires a live connection (R5). initDirIfReady applies the deferral
+// to direct scopes and to every proxied scope of such a city, whether or not
+// that scope's local proxy fronts the endpoint. gc start inits them either way.
 func cityExternalDoltEndpointUnverified(cityPath string) bool {
 	state, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "config.yaml"))
 	if err != nil || !ok {
@@ -311,6 +345,23 @@ func hostedDoltBackendError(cityPath string) error {
 	return nil
 }
 
+// applyInitHostedDoltEndpoint pins a supplied hosted endpoint onto a freshly
+// scaffolded city whose city.toml is already written, and is a no-op when no
+// endpoint was supplied. It must run before finalizeInit: the unconditional
+// initDirIfReady there resolves the city as external, and defers its bd init
+// to gc start, only from the canonical files written here. An incompatible
+// effective backend (file or doltlite) is rejected before any canonical file
+// is written, so a rejected init leaves no mixed ledger state.
+func applyInitHostedDoltEndpoint(fs fsys.FS, cityPath, issuePrefix, cityDoltMode string, opts hostedDoltInitOptions) error {
+	if !opts.enabled() {
+		return nil
+	}
+	if err := hostedDoltBackendError(cityPath); err != nil {
+		return err
+	}
+	return applyInitHostedDoltCanonicalConfig(fs, cityPath, issuePrefix, cityDoltMode, opts)
+}
+
 // applyInitHostedDoltCanonicalConfig writes the full canonical external
 // endpoint config for a freshly scaffolded city (R3/R4/R5), identical in
 // shape to what `gc beads city use-external --adopt-unverified` produces plus
@@ -318,13 +369,21 @@ func hostedDoltBackendError(cityPath string) error {
 //
 //   - the L1 project identity (contract.ProjectIdentityPath) — the
 //     authoritative project_id, written via contract.WriteProjectIdentity
-//   - .beads/config.yaml     — city_canonical + unverified + dolt host/port/user
+//   - .beads/config.yaml     — city_canonical + unverified + dolt host/port/user,
+//     and dolt.mode from cityDoltMode (see configState)
 //   - .beads/metadata.json   — backend=dolt, dolt_mode=server, dolt_database,
 //     and project_id (stamped from the L1 identity)
 //
+// A proxied transport gets no metadata.json here. gc-beads-bd.sh takes that
+// file as its bd-init witness and the RC proxied initializer refuses one, so
+// finalizeCanonicalBdScopeInit writes it after gc start's bd init, stamping
+// project_id from the same L1 identity. config.yaml instead pins dolt_database
+// for that init (canonicalScopeDoltDatabase reads it back) and alone
+// classifies the scope proxied until then.
+//
 // It writes the identity first so the canonical metadata write picks up
 // project_id. No live connection is attempted.
-func applyInitHostedDoltCanonicalConfig(fs fsys.FS, cityPath, issuePrefix string, opts hostedDoltInitOptions) error {
+func applyInitHostedDoltCanonicalConfig(fs fsys.FS, cityPath, issuePrefix, cityDoltMode string, opts hostedDoltInitOptions) error {
 	if !opts.enabled() {
 		return nil
 	}
@@ -334,8 +393,15 @@ func applyInitHostedDoltCanonicalConfig(fs fsys.FS, cityPath, issuePrefix string
 	if err := contract.WriteProjectIdentity(fs, cityPath, strings.TrimSpace(opts.ProjectID)); err != nil {
 		return fmt.Errorf("writing project identity: %w", err)
 	}
-	if err := ensureCanonicalScopeConfigState(fs, cityPath, opts.configState(issuePrefix)); err != nil {
+	state := opts.configState(issuePrefix, cityDoltMode)
+	if err := ensureCanonicalScopeConfigState(fs, cityPath, state); err != nil {
 		return fmt.Errorf("writing canonical endpoint config: %w", err)
+	}
+	if state.DoltMode == "proxied-server" {
+		if _, err := contract.EnsurePinnedDoltDatabase(fs, filepath.Join(cityPath, ".beads", "config.yaml"), strings.TrimSpace(opts.Database)); err != nil {
+			return fmt.Errorf("pinning dolt database: %w", err)
+		}
+		return nil
 	}
 	if err := enforceCanonicalScopeMetadataForInit(fs, cityPath, strings.TrimSpace(opts.Database)); err != nil {
 		return fmt.Errorf("writing canonical metadata: %w", err)

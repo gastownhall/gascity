@@ -408,9 +408,9 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().StringArrayVar(&providersFlag, "providers", nil, "readiness-aware providers to write to city.toml (repeatable or comma-separated)")
 	cmd.Flags().StringVar(&templateFlag, "template", "", "non-interactive template to write: minimal, gastown, gascity, custom, or empty")
 	cmd.Flags().StringVar(&bootstrapProfileFlag, "bootstrap-profile", "", "bootstrap profile to apply for hosted/container defaults")
-	cmd.Flags().StringVar(&doltHostFlag, "dolt-host", "", "external/hosted Dolt host for the city beads ledger (or "+envDoltHost+"); pins the city to an external endpoint instead of bootstrapping a managed-local Dolt")
-	cmd.Flags().StringVar(&doltPortFlag, "dolt-port", "", "external/hosted Dolt port (or "+envDoltPort+"); required with --dolt-host")
-	cmd.Flags().StringVar(&doltUserFlag, "dolt-user", "", "external/hosted Dolt user (or "+envDoltUser+"); optional")
+	cmd.Flags().StringVar(&doltHostFlag, "dolt-host", "", "external/hosted Dolt host for the city beads ledger (or "+envDoltHost+"); pins the city to an external endpoint instead of bootstrapping a managed-local Dolt; "+envDoltHost+" is used only alongside an explicit --dolt-… flag, a database or project id, or an external beads target")
+	cmd.Flags().StringVar(&doltPortFlag, "dolt-port", "", "external/hosted Dolt port (or "+envDoltPort+"); required with --dolt-host; "+envDoltPort+" is used only alongside an explicit --dolt-… flag, a database or project id, or an external beads target")
+	cmd.Flags().StringVar(&doltUserFlag, "dolt-user", "", "external/hosted Dolt user (or "+envDoltUser+"); optional; "+envDoltUser+" is used only alongside an explicit --dolt-… flag, a database or project id, or an external beads target")
 	cmd.Flags().StringVar(&doltDatabaseFlag, "dolt-database", "", "hosted beads project database, e.g. bd_prj_… (or "+envDoltDatabase+"); required with --dolt-host")
 	cmd.Flags().StringVar(&doltProjectIDFlag, "dolt-project-id", "", "authoritative beads project_id for the identity handshake (or "+envBeadsProjectID+"); derived from a bd_<id> --dolt-database when omitted")
 	cmd.Flags().StringVar(&beadsTransportFlag, "beads-transport", "", "beads transport selector: direct or proxied")
@@ -1288,6 +1288,12 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// The --dolt-* flags are exclusive with --file, but the GC_DOLT_* env
+	// fallback still supplies an endpoint here; pin it as doInit does.
+	if err := applyInitHostedDoltEndpoint(fs, cityPath, cityPrefix, cfg.Dolt.Mode, hosted); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// Write .gitignore entries for city-managed directories.
 	if err := ensureGitignoreEntries(fs, cityPath, cityGitignoreEntries); err != nil {
@@ -1478,18 +1484,10 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	// When a hosted/external Dolt endpoint was supplied, write the full
 	// canonical external config now (R2/R3/R4/R5) so the unconditional
 	// initDirIfReady that follows resolves the city as external and skips the
-	// managed-local Dolt bootstrap. Reject incompatible effective backends
-	// (file or doltlite) before writing any canonical files so a rejected init
-	// leaves no mixed ledger state.
-	if wiz.hostedDolt.enabled() {
-		if err := hostedDoltBackendError(cityPath); err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		if err := applyInitHostedDoltCanonicalConfig(fs, cityPath, cityPrefix, wiz.hostedDolt); err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+	// managed-local Dolt bootstrap.
+	if err := applyInitHostedDoltEndpoint(fs, cityPath, cityPrefix, cfg.Dolt.Mode, wiz.hostedDolt); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	// Write .gitignore entries for city-managed directories.
@@ -1871,7 +1869,7 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if err := applyInitHostedDoltCanonicalConfig(fs, cityPath, cityPrefix, hosted); err != nil {
+		if err := applyInitHostedDoltCanonicalConfig(fs, cityPath, cityPrefix, cfg.Dolt.Mode, hosted); err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}

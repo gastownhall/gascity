@@ -1423,6 +1423,118 @@ func TestReadConfigStatePreservesDoltMode(t *testing.T) {
 	}
 }
 
+func TestPinnedDoltDatabaseRoundTripsThroughConfig(t *testing.T) {
+	fs := fsys.OSFS{}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if got, ok, err := ReadPinnedDoltDatabase(fs, path); err != nil || ok || got != "" {
+		t.Fatalf("ReadPinnedDoltDatabase(absent) = (%q, %v, %v), want no pin", got, ok, err)
+	}
+	if err := fs.WriteFile(path, []byte("issue_prefix: gc\ndolt.mode: proxied-server\ncustom: keep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsurePinnedDoltDatabase(fs, path, " bd_prj_abc ")
+	if err != nil || !changed {
+		t.Fatalf("EnsurePinnedDoltDatabase() = (%v, %v), want (true, nil)", changed, err)
+	}
+	if changed, err := EnsurePinnedDoltDatabase(fs, path, "bd_prj_abc"); err != nil || changed {
+		t.Fatalf("EnsurePinnedDoltDatabase(repeat) = (%v, %v), want (false, nil)", changed, err)
+	}
+	got, ok, err := ReadPinnedDoltDatabase(fs, path)
+	if err != nil || !ok || got != "bd_prj_abc" {
+		t.Fatalf("ReadPinnedDoltDatabase() = (%q, %v, %v), want bd_prj_abc", got, ok, err)
+	}
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{"issue_prefix: gc", "dolt.mode: proxied-server", "custom: keep"} {
+		if countLineOccurrences(string(data), line) != 1 {
+			t.Fatalf("config.yaml lost %q after pinning:\n%s", line, data)
+		}
+	}
+}
+
+func TestEnsurePinnedDoltDatabaseRefusesEmptyDatabaseAndMalformedConfig(t *testing.T) {
+	fs := fsys.OSFS{}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if _, err := EnsurePinnedDoltDatabase(fs, path, " "); err == nil {
+		t.Fatal("EnsurePinnedDoltDatabase(empty) error = nil, want an error")
+	}
+	if _, err := fs.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("config.yaml stat after refused pin = %v, want not exist", err)
+	}
+
+	malformed := "issue_prefix: gc\n: not yaml\n"
+	if err := fs.WriteFile(path, []byte(malformed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsurePinnedDoltDatabase(fs, path, "bd_prj_abc"); err == nil {
+		t.Fatal("EnsurePinnedDoltDatabase(malformed) error = nil, want the parse error")
+	}
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != malformed {
+		t.Fatalf("malformed config.yaml was rewritten:\n%s", data)
+	}
+}
+
+// The pin is a gc-owned key the canonical config writers do not manage, so
+// every later canonicalization of the scope must carry it through untouched,
+// the malformed-YAML line rewrite included.
+func TestPinnedDoltDatabaseSurvivesCanonicalConfigRewrite(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input string
+	}{
+		{name: "yaml", input: "issue_prefix: gc\ngc.dolt_database: bd_prj_abc\n"},
+		{name: "malformed yaml fallback", input: "issue_prefix: gc\ngc.dolt_database: bd_prj_abc\n: not yaml\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := fsys.OSFS{}
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := fs.WriteFile(path, []byte(tc.input), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+				IssuePrefix:    "gc",
+				EndpointOrigin: EndpointOriginCityCanonical,
+				EndpointStatus: EndpointStatusUnverified,
+				DoltHost:       "gateway.example.com",
+				DoltPort:       "4406",
+				DoltMode:       "proxied-server",
+			}); err != nil {
+				t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+			}
+			got, ok, err := ReadPinnedDoltDatabase(fs, path)
+			if err != nil || !ok || got != "bd_prj_abc" {
+				t.Fatalf("ReadPinnedDoltDatabase() = (%q, %v, %v), want bd_prj_abc", got, ok, err)
+			}
+		})
+	}
+}
+
+func TestReadPinnedDoltDatabaseScansMalformedConfig(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	pinned := filepath.Join(dir, "pinned.yaml")
+	if err := fs.WriteFile(pinned, []byte("gc.dolt_database: bd_prj_abc\n: not yaml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok, err := ReadPinnedDoltDatabase(fs, pinned); err != nil || !ok || got != "bd_prj_abc" {
+		t.Fatalf("ReadPinnedDoltDatabase(malformed, pinned) = (%q, %v, %v), want bd_prj_abc", got, ok, err)
+	}
+	unpinned := filepath.Join(dir, "unpinned.yaml")
+	if err := fs.WriteFile(unpinned, []byte("issue_prefix: gc\n: not yaml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok, err := ReadPinnedDoltDatabase(fs, unpinned); err == nil || ok || got != "" {
+		t.Fatalf("ReadPinnedDoltDatabase(malformed, unpinned) = (%q, %v, %v), want the parse error", got, ok, err)
+	}
+}
+
 func countLineOccurrences(text, needle string) int {
 	count := 0
 	for _, line := range strings.Split(text, "\n") {

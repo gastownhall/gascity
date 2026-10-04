@@ -1173,9 +1173,6 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 	}
 
 	if target, ok := externalDoltEnvOverrideTarget(); ok {
-		if target.Socket != "" {
-			return target, true, nil
-		}
 		return target, true, nil
 	}
 
@@ -1574,7 +1571,7 @@ func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath st
 			env["GC_RIG"] = explicitRig.Name
 		}
 	}
-	if scopeUsesProxiedDoltMode(cityPath, rigPath) || (!scopeOverridesCityBackend(cityPath, rigPath) && scopeUsesProxiedDoltMode(cityPath, cityPath)) {
+	if scopeTakesProxiedDoltPath(cityPath, rigPath) {
 		applyProxiedDoltEnv(env)
 		return env, nil
 	}
