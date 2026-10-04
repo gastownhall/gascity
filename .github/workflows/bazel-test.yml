@@ -47,9 +47,11 @@ on:
         default: "on"
         options: ["on", "cache", "off"]
 
+# PR runs supersede each other; main runs always finish (they save the
+# runner cache and upload coverage), so a push never cancels the previous one.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -94,6 +96,32 @@ jobs:
           fi
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # History for the merge below (blobless: commits and trees only).
+          fetch-depth: 0
+          filter: blob:none
+
+      # A pull_request run checks out refs/pull/N/merge as GitHub computed it
+      # when the event fired. A reopen, an approval-delayed first-time run or
+      # "Re-run jobs" reuses that commit, so it can predate fixes on main
+      # (2026-10-03: #6956 was closed and reopened at 21:24Z and its run tested
+      # a merge onto 28279be, before #6974's no-network test stubs). Test the PR
+      # head merged onto main's current tip instead; a conflict fails here.
+      - name: Merge the PR head onto the base branch's current tip
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --filter=blob:none origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          base_sha="$(git rev-parse "origin/${BASE_REF}")"
+          git checkout --quiet --detach "$HEAD_SHA"
+          if ! git -c user.name=ci -c user.email=ci@invalid merge --quiet --no-edit --no-ff "$base_sha"; then
+            echo "::error title=PR does not merge onto ${BASE_REF}::the PR head ${HEAD_SHA} conflicts with ${BASE_REF} at ${base_sha}; rebase or merge ${BASE_REF}"
+            exit 1
+          fi
+          echo "Tested tree: PR head \`${HEAD_SHA}\` merged onto ${BASE_REF} \`${base_sha}\` (event merge ref \`${GITHUB_SHA}\`)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install bazel via bazelisk
         run: |
