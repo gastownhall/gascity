@@ -155,6 +155,7 @@ go_test(
         "wdelete_edge_test.go",
         "wedge_repro_test.go",
         "worker_dir_test.go",
+        "zz_gm55kp2u_repro_test.go",
     ],
     data = glob(
         ["**"],

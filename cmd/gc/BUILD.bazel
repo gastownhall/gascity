@@ -1707,6 +1707,7 @@ go_test(
         "worker_handle_test.go",
         "workflow_trace_rotation_test.go",
         "write_auth_boot_warning_test.go",
+        "zz_gm55kp2u_repro_test.go",
     ],
     data = glob([
         "testdata/**",

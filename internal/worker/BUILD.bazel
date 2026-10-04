@@ -84,6 +84,7 @@ go_test(
         "subagent_guard_test.go",
         "testenv_import_test.go",
         "transcriptmeta_reconcile_test.go",
+        "zz_gm55kp2u_repro_test.go",
     ],
     data = glob(
         ["**"],
