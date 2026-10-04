@@ -317,6 +317,46 @@ func TestBdByIDServesClaimReleaseAndDepListFromTheClassBinding(t *testing.T) {
 	}
 }
 
+// TestBdByIDRefusesAMalformedAssigneeOnAClassOwnedID pins the ORDERING of the
+// assignee shape guard, which on a split city is the whole of what makes it a
+// guard.
+//
+// `gc bd update <id> --assignee=cairn/` writes a value invisible to both
+// discovery tiers (crn-23jqc), and doBd refuses it on argv alone. But when the
+// id is owned by a relocated class binding, maybeRouteBdByID serves the update
+// in process and returns — so a guard placed downstream of that route never
+// runs, and the malformed value lands in the binding exactly as it did in the
+// incident. The refusal must therefore precede class routing.
+func TestBdByIDRefusesAMalformedAssigneeOnAClassOwnedID(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+
+	origCityFlag, origRigFlag := cityFlag, rigFlag
+	t.Cleanup(func() { cityFlag, rigFlag = origCityFlag, origRigFlag })
+	cityFlag, rigFlag = "", ""
+
+	subject := mustCreateClassBead(t, classStore, beads.Bead{Title: "the subject", Type: "task"})
+	if err := classStore.Update(subject.ID, beads.UpdateOpts{Assignee: strPtr("cairn/pm")}); err != nil {
+		t.Fatalf("seeding a well-formed assignee on %s: %v", subject.ID, err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doBd([]string{"--city", cityPath, "update", subject.ID, "--assignee=cairn/"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("doBd update %s --assignee=cairn/ = 0, want non-zero (refused); stdout %q stderr %q", subject.ID, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "empty rig or role segment") {
+		t.Fatalf("stderr = %q, want the empty-rig-or-role-segment refusal", stderr.String())
+	}
+
+	after, err := classStore.Get(subject.ID)
+	if err != nil {
+		t.Fatalf("re-reading %s from the class binding: %v", subject.ID, err)
+	}
+	if after.Assignee != "cairn/pm" {
+		t.Fatalf("the class binding recorded assignee %q, want %q unchanged — the by-ID class route served the write past the refusal", after.Assignee, "cairn/pm")
+	}
+}
+
 // bdByIDTreeWireRow is the tree row as a CONSUMER reads it, declared here rather
 // than borrowed from the production type on purpose: what the pack scripts and
 // pr_review.py parse is the JSON, and a test that decodes into the emitter's own
