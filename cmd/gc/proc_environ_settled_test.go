@@ -1,9 +1,10 @@
+//go:build linux
+
 package main
 
 import (
 	"fmt"
 	"os/exec"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -17,9 +18,6 @@ import (
 // empty in-execve window returns it — dropping PATH, appended last by the
 // spawn path, and failing "PATH = \"\"" intermittently in CI.
 func TestWaitForProcEnvironNeverReturnsATornRead(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("reads /proc/<pid>/environ")
-	}
 	env := make([]string, 0, 201)
 	for i := 0; i < 200; i++ {
 		env = append(env, fmt.Sprintf("GC_TEST_ENVIRON_FILLER_%03d=%s", i, strings.Repeat("x", 1000)))

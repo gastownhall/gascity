@@ -26,6 +26,10 @@ filegroup(
 
 go_test(
     name = "bazeltest_test",
-    srcs = ["helper_env_test.go"],
+    srcs = [
+        "helper_env_test.go",
+        "testenv_import_test.go",
+    ],
     embed = [":bazeltest"],
+    deps = ["//internal/testenv"],
 )
