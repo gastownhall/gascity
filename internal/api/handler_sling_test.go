@@ -640,6 +640,22 @@ func TestSlingSlotSuffixedPoolTargetNormalizesRoutedTo(t *testing.T) {
 	}
 }
 
+// lockGraphV2SlingFlagsForTest holds the process-global formula_v2 and
+// graph-apply flags for the rest of the test and returns a func that turns
+// both on. Call the returned func only after the server under test is built:
+// New() runs syncFeatureFlags, which would otherwise stomp the flags back to
+// the fake config's defaults. Both flags are restored during cleanup.
+func lockGraphV2SlingFlagsForTest(t *testing.T) (enable func()) {
+	t.Helper()
+	setFormulaV2 := formulatest.LockV2ForTest(t)
+	prevGraphApply := molecule.IsGraphApplyEnabled()
+	t.Cleanup(func() { molecule.SetGraphApplyEnabled(prevGraphApply) })
+	return func() {
+		setFormulaV2(true)
+		molecule.SetGraphApplyEnabled(true)
+	}
+}
+
 func TestSlingGraphV2RejectsLegacySourceWorkflowConflict(t *testing.T) {
 	// The Huma migration moved sling to /v0/city/{cityName}/sling and
 	// replaced the old plain-JSON `{code, message, source_bead_id, ...}`
@@ -658,15 +674,10 @@ func TestSlingGraphV2RejectsLegacySourceWorkflowConflict(t *testing.T) {
 	//      shared formulatest guard and flips it to true AFTER
 	//      newSlingTestServer so New()'s syncFeatureFlags doesn't stomp it
 	//      back to false.
-	setFormulaV2 := formulatest.LockV2ForTest(t)
-	prevGraphApply := molecule.IsGraphApplyEnabled()
-	t.Cleanup(func() {
-		molecule.SetGraphApplyEnabled(prevGraphApply)
-	})
+	enableGraphV2 := lockGraphV2SlingFlagsForTest(t)
 
 	srv, state := newSlingTestServer(t)
-	setFormulaV2(true)
-	molecule.SetGraphApplyEnabled(true)
+	enableGraphV2()
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
 	state.cfg.Agents = append(state.cfg.Agents,

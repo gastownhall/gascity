@@ -13,8 +13,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
-	"github.com/gastownhall/gascity/internal/formulatest"
-	"github.com/gastownhall/gascity/internal/molecule"
 )
 
 // These tests pin POST /sling to the behavior `gc sling` has for the same
@@ -31,13 +29,10 @@ import (
 // demo/claude agent and mol-do-work.
 func newDefaultFormulaParityFixture(t *testing.T, formulaBody string) (http.Handler, *fakeMutatorState, beads.Store, beads.Store, beads.Bead) {
 	t.Helper()
-	setFormulaV2 := formulatest.LockV2ForTest(t)
-	prevGraphApply := molecule.IsGraphApplyEnabled()
-	t.Cleanup(func() { molecule.SetGraphApplyEnabled(prevGraphApply) })
+	enableGraphV2 := lockGraphV2SlingFlagsForTest(t)
 
 	srv, state := newSlingTestServer(t)
-	setFormulaV2(true)
-	molecule.SetGraphApplyEnabled(true)
+	enableGraphV2()
 
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
