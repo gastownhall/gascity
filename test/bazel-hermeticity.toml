@@ -22,23 +22,10 @@
 # engdocs/contributors/bazel-test-hermeticity-audit.md
 
 [[target]]
-package = "test/acceptance"
-tags = ["external", "requires-network"]
-reason = "gc init clones gascity-packs from github.com for the default gascity/roles import (ga-73eoo); the result depends on GitHub being reachable and serving the pinned ref. Drop the tags once the import resolves from the embedded @com_github_gastownhall_gascity_packs module."
-evidence = [
-  "internal/config/public_packs.go:29 (public gascity-packs source)",
-  ".github/workflows/bazel-test.yml: acceptance is skipped on the network-less fork pool for this reason",
-]
-
-[[target]]
 package = "test/integration"
 tags = ["external", "requires-network"]
-reason = "start-drift tests run `go build ./cmd/gc` on the worker, downloading every module from proxy.golang.org into a private, empty GOMODCACHE; tutorial_path runs gc init (the github.com clone above); dolt_config resolves the worker's hostname."
-evidence = [
-  "test/integration/start_drift_test.go:616 buildGCBinaryWithCommit",
-  "test/integration/tutorial_path_test.go:55",
-  "test/integration/dolt_config_test.go:48 net.LookupHost(os.Hostname())",
-]
+reason = "dolt_config resolves the worker's hostname through DNS. The suite has not yet been run on a network-less executor since start-drift moved to prebuilt //cmd/gc:gc_drift_* binaries and gc init stopped cloning gascity-packs (#7005), so the requires-network tag stays until that run proves the rest offline."
+evidence = ["test/integration/dolt_config_test.go:48 net.LookupHost(os.Hostname())"]
 
 [[target]]
 package = "internal/testpolicy/resourcecensus"

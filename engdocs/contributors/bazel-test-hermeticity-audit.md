@@ -39,7 +39,7 @@ These facts were measured with a probe `go_test` on rbe-west, instance
 | Fact | Evidence | Consequence |
 |---|---|---|
 | The `oss` worker tier has public internet egress. Only private ranges are blocked, by nftables, with `NETNS=0`. | A test dialing `github.com:443` PASSED. Its rerun printed `(cached) PASSED`. | Network-dependent tests are cached today with no signal. |
-| The fork tier (`oss-fork`) runs every action with loopback only (`NETNS=1`). It caches nothing. | `tools/rbe/blacksmith-worker.sh` `WORKER_TIER=fork`. `bazel-test.yml` skips acceptance there because `gc init` needs github.com. | A network-less executor already exists. |
+| The fork tier (`oss-fork`) runs every action with loopback only (`NETNS=1`). It caches nothing. | `tools/rbe/blacksmith-worker.sh` `WORKER_TIER=fork`. `bazel-test.yml` skipped acceptance there while `gc init` needed github.com (#6976); it runs there again since #7005. | A network-less executor already exists. |
 | `HOME` is `TEST_TMPDIR`, which is per action. `TMPDIR` is unset, so `os.TempDir()` is `/tmp`. | Probe: `HOME="/tmp/bt/_tmp/<hash>"`, `TMPDIR=""`. | `$HOME` reads are hermetic under Bazel. Remotely, `/tmp` is private to each action (isolation hides other mounts). Locally it is the shared host `/tmp`. |
 | Actions run as an isolated slot user, not root. | Probe: `uid=59001 USER=rbe-a01`. | Root-only `t.Skip` paths (about 25 sites) do run. |
 | `PATH` is `.:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin`. It comes from the client wrapper and CI `--test_env`. | Probe. | The PATH string is keyed. The binaries it points to are not, which is the image-pin effort's concern. |
@@ -51,7 +51,8 @@ These facts were measured with a probe `go_test` on rbe-west, instance
 
 | Class | Count | Packages / sites |
 |---|---|---|
-| (2) tagged `external` in this change | 5 targets | `test/acceptance`, `test/integration`, `internal/testpolicy/resourcecensus`, `internal/testutil/providerledger`, `internal/beads/beadstest` |
+| (2) tagged `external` in this change | 4 targets | `test/integration`, `internal/testpolicy/resourcecensus`, `internal/testutil/providerledger`, `internal/beads/beadstest` |
+| (1) fixed on main since the audit | 2 | `test/acceptance` (`gc init` no longer clones, #7005); `test/integration` start-drift (prebuilt `//cmd/gc:gc_drift_*`) |
 | (1) fixed in this change | 4 fixes, 5 sites | 2030 credential expiry; 3 tzdata-dependent tests; the host-sshd test |
 | (1) open follow-ups | 17 | See [Class 1: open](#class-1-open) |
 | (3) fine, or covered by the image pin | ~10 groups | About 35 host-binary skip sites; about 25 uid-gated skips; about 300 data-only URLs; env-gated opt-in tests |
@@ -71,14 +72,24 @@ These facts were measured with a probe `go_test` on rbe-west, instance
    - Why it is a problem: it turns fatal on 2026-11-15.
    - Decision: class 2, now tagged `external`.
 3. **`test/acceptance`**
-   - What it does: `gc init` clones gascity-packs from github.com for the
+   - What it did: `gc init` cloned gascity-packs from github.com for the
      default `gascity/roles` import (`internal/config/public_packs.go:29`,
      ga-73eoo).
-   - Why it is a problem: this is the gating CI suite, and its result
-     depends on GitHub.
-   - Decision: class 2, tagged `external` plus `requires-network`. The fix is
-     to resolve the import from the embedded
-     `@com_github_gastownhall_gascity_packs` module, which moves it to class 1.
+   - Why it was a problem: this is the gating CI suite, and its result
+     depended on GitHub.
+   - Decision: class 1, fixed on main by #7005 (`a913e735bd`):
+     `gascity/roles` is now a bundled subpack of the embedded gascity pack,
+     so `gc init` resolves it offline. The full `acceptance_a` suite was then
+     run from its Bazel runfiles inside a loopback-only network namespace
+     (`unshare -n`, where `curl https://github.com` fails with "Could not
+     resolve host"), on 2026-10-04 in its two CI shards: 101 of 102
+     top-level tests passed. The one failure (`TestBeadsProxiedDefault`'s
+     doctor-green subtests) reproduces identically with network and is a
+     host-HOME leak (see Class 1: open). No test failed for lack of network,
+     so the target carries no `external`/`requires-network` tag and is not
+     in the ledger, and `bazel-test.yml` runs it on the fork pool again. Dolt's best-effort
+     usage-metrics egress remains when a host `dolt` is on `PATH`; it does
+     not change pass/fail (see the dolt metrics row under Class 1: open).
 4. **`.bazelrc` `--test_env=GC_TEST_REPO_ROOT`**
    - What it does: when the variable is set, every repo-scan guard reads that
      live checkout instead of the declared `//:repo_source_tree`. This goes
@@ -102,19 +113,24 @@ These facts were measured with a probe `go_test` on rbe-west, instance
 6. **`test/integration` start-drift** (`start_drift_test.go:616`)
    - What it does: `go build ./cmd/gc` runs on the worker, downloading every
      module from proxy.golang.org into an empty private `GOMODCACHE`.
-   - Why it is a problem: the result depends on the network.
-   - Decision: class 2, tagged `external` plus `requires-network`. The target
-     is evidence-only today.
+   - Why it is a problem: the result depended on the network.
+   - Decision: class 1, fixed on main: under Bazel the drift tests install
+     the prebuilt `//cmd/gc:gc_drift_old`/`gc_drift_new` binaries from
+     runfiles. The package stays tagged `external` plus `requires-network`
+     (`dolt_config_test.go:48` resolves the worker's hostname) until a
+     network-less run of the integration tier proves the rest offline.
 
 ### Class 2: tagged in this change
 
-These five targets are listed in `test/bazel-hermeticity.toml` with reasons
-and evidence: `test/acceptance`, `test/integration`,
-`internal/testpolicy/resourcecensus`, `internal/testutil/providerledger`,
-`internal/beads/beadstest`. Under `bazel test //...` with the default
-configuration, the acceptance and integration targets compile only their
-untagged files. The tag therefore costs nothing there. It bites only in the
-`--define=gotags=...` invocations, which is where the network use happens.
+These four targets are listed in `test/bazel-hermeticity.toml` with reasons
+and evidence: `test/integration`, `internal/testpolicy/resourcecensus`,
+`internal/testutil/providerledger`, `internal/beads/beadstest`. The ledger is
+per package, so `tools/bazel/hermetic_tags.py` tags every `go_test` in a
+listed package (`test/integration` has two). Under `bazel test //...` with
+the default configuration, the integration targets compile only their
+untagged files. The tag therefore costs little there. It bites in the
+`--define=gotags=integration` invocation, which is where the network use
+happens.
 
 ### Class 1: fixed in this change
 
@@ -146,11 +162,12 @@ untagged files. The tag therefore costs nothing there. It bites only in the
 | Acceptance tiers (`helpers/beads_topology.go:276,623`, `tool_home.go:85`) | Host `dolt`, while `@dolt_bin_v2_1_7` is already declared | Prepend the runfiles dolt directory to PATH in `TestMain`, as `integration_test.go` does |
 | `examples/gastown`, `examples/bd/dolt` | Host `dolt`/`bd`, or a permanent skip (`requireRealBd`) | Declare `@dolt_bin_*` and `@bd_bin_*` and resolve them from runfiles |
 | `cmd/gc` `beads_provider_lifecycle_test.go:8254` | Host `bd` with a skip | Use the runfiles `bd`, and fail rather than skip under Bazel |
-| `test/integration` start-drift | Module downloads | Use prebuilt `x_defs` variants of `//cmd/gc` as data |
 | `tierc_test.go:1042`, `worker_inference/main_test.go:1158`, `tutorial_goldens/main_test.go:603` | Fixed `/tmp/gcac`, reaped across concurrent runs (local runs only) | Use `TEST_TMPDIR` |
 | `scripts/test_go_test_shard_test.go:764,795`, `git_test_env_test.go:44` | Fixed-name `os.TempDir()/gc-...-gomodcache` (local runs only) | Use `t.TempDir()` |
 | `scripts` tests that run real `go test`/`go env` | Toolchain download when the host `go` is older than `go.mod` | `GOTOOLCHAIN=local` |
 | `internal/supervisor/maintenance_snapshot_test.go:451` | dolt metrics egress (pass/fail unaffected) | `"metrics.disabled":"true"` in the seeded config |
+| `test/acceptance/helpers/env.go:127` (HOME swapped to the passwd home under Bazel) | `gc doctor`'s proxied-shared-server check reads `$HOME/.beads/shared-server` (`internal/doctor/checks_proxied_shared_server.go:203`) on the real home. On a host with a bd shared server there (cherry) `TestBeadsProxiedDefault/doctor-green{,-with-rig}` fail; clean worker homes pass | Resolve the shared-server root from the bd tool home, or seed an isolated home the supervisor accepts |
+| `test/acceptance/helpers/env.go:166` (proxied/topology shapes with a host `dolt`) | dolt `send-metrics` egress to eventsapi.dolthub.com after each dolt exit (best effort; pass/fail unaffected, verified offline) | `"metrics.disabled":"true"` in the seeded `config_global.json` |
 | `cmd/gc` `TestMain` | Product-metrics uploader egress (gated; pass/fail unaffected) | `GC_DISABLE_USAGE_METRICS=1` |
 | 18 `cmd/gc` git-using files | `/etc/gitconfig`, `init.defaultBranch` | `GIT_CONFIG_NOSYSTEM=1` plus a temp global config in `TestMain` |
 | `internal/runtime/tmux/main_test.go:28` | Literal `/tmp` socket parent, flock-guarded (local runs only) | Use `os.TempDir()` |
