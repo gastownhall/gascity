@@ -155,7 +155,7 @@ func openNativeStorageProxied(ctx context.Context, scopeRoot string, env map[str
 	}
 	defer restoreEnv()
 
-	storage, err := nativeDoltOpenBestAvailable(ctx, filepath.Join(scopeRoot, ".beads"))
+	storage, err := openNativeDoltStorage(ctx, filepath.Join(scopeRoot, ".beads"))
 	if err != nil {
 		return nil, "", err
 	}
