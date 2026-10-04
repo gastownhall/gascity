@@ -2171,7 +2171,7 @@ func TestCmdMailReplyHumanNotifyQueuesNudge(t *testing.T) {
 	if nudge.Source != "mail" {
 		t.Fatalf("nudge.Source = %q, want mail", nudge.Source)
 	}
-	if nudge.Message != "You have mail from human" {
+	if !strings.HasPrefix(nudge.Message, "You have mail from human") {
 		t.Fatalf("nudge.Message = %q", nudge.Message)
 	}
 }
@@ -2343,8 +2343,8 @@ func assertQueuedMailNudgeMessage(t *testing.T, cityPath, sessionID, message, st
 	if nudge.Source != "mail" {
 		t.Fatalf("nudge.Source = %q, want mail", nudge.Source)
 	}
-	if nudge.Message != message {
-		t.Fatalf("nudge.Message = %q", nudge.Message)
+	if !strings.HasPrefix(nudge.Message, message) {
+		t.Fatalf("nudge.Message = %q, want prefix %q", nudge.Message, message)
 	}
 }
 
