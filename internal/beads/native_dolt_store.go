@@ -1474,6 +1474,34 @@ func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 // updateOnce performs one complete update attempt, so a replay re-picks the
 // door from the same fields rather than reusing an earlier decision.
 func (s *NativeDoltStore) updateOnce(ctx context.Context, storage beadslib.Storage, id string, patch issueops.IssuePatch, opts UpdateOpts) error {
+	// A reparent onto (or off of) a foreign id is a weak reference this store
+	// cannot resolve -- see validateUpdateParent's doc comment, which states the
+	// same rule for the Store.Tx route. The facade's Update role resolves
+	// ParentID like any other local write and refuses a target it cannot find,
+	// so a foreign value has to come OUT of the patch before it reaches either
+	// door below, and go in directly as an edge afterward, the same way
+	// updateParentInTransaction does for Store.Tx. Main carried this on every
+	// Update; the facade replay carried it onto the Tx route only, and dropped
+	// it here.
+	var externalParentID string
+	hasExternalParent := false
+	if opts.ParentID != nil && !nativeParentIsLocal(id, *opts.ParentID, s.idPrefix) {
+		hasExternalParent = true
+		externalParentID = *opts.ParentID
+		patch.ParentID = issueops.Field[string]{}
+	}
+	if err := s.updateOnceThroughFacade(ctx, storage, id, patch, opts); err != nil {
+		return err
+	}
+	if hasExternalParent {
+		return s.updateParentThroughEditor(ctx, storage, id, externalParentID)
+	}
+	return nil
+}
+
+// updateOnceThroughFacade carries out the facade-role write updateOnce picked
+// a door for, once any foreign ParentID has already been taken out of patch.
+func (s *NativeDoltStore) updateOnceThroughFacade(ctx context.Context, storage beadslib.Storage, id string, patch issueops.IssuePatch, opts UpdateOpts) error {
 	// Store.Update is the low-level projection verb: the storage-layer write it
 	// replaced applied no claim fence and no close policy, and the callers that
 	// need those guards (ReleaseIfCurrent, the dispatcher's compare-and-set
@@ -1931,7 +1959,7 @@ func (s *NativeDoltStore) CloseAll(ids []string, metadata map[string]string) (in
 // That read is gone. The lifecycle role answers a write with its post-state
 // snapshot, and issueops.UpdateResult.Issue is the member it rides on — the
 // same one that carries the post-write RowVersion a guarded chain composes its
-// next ExpectedVersion from (bd-enterprise ga-b8ddd.33). Reading the reason
+// next ExpectedVersion from. Reading the reason
 // there is also the more correct of the two: it is the state the write
 // committed, where a re-read is whatever the row holds by the time it lands.
 //
@@ -1971,11 +1999,11 @@ func (s *NativeDoltStore) closeAllOneAtATime(ids []string, metadata map[string]s
 // run in order.
 //
 // A backend that answers no post-state issue is violating the role contract
-// (every leg is held to it — bd-enterprise's RunLifecycleResultsAreHydrated
-// PostStateSnapshots), and the fallback for it re-reads rather than closing on
-// a reason nothing produced. Closing on the pre-write value would be the one
-// wrong answer available here: it is a real string that looks like a reason,
-// and it is the reason this call was told to replace.
+// (every leg — create, update, close, reopen — is held to hydrating its
+// result's post-state Issue), and the fallback for it re-reads rather than
+// closing on a reason nothing produced. Closing on the pre-write value would
+// be the one wrong answer available here: it is a real string that looks like
+// a reason, and it is the reason this call was told to replace.
 //
 // THE FALLBACK RE-READS ON THE HELD HANDLE, and must, which is why it is spelled
 // out here instead of delegating to Close. acquireStorage hands back
@@ -2465,6 +2493,69 @@ func (s *NativeDoltStore) updateParentInTransaction(ctx context.Context, tx bead
 		DependsOnID: parentID,
 		Type:        beadslib.DepParentChild,
 	}, s.actor); err != nil {
+		return nativeStoreError(id, err)
+	}
+	return nil
+}
+
+// updateParentThroughEditor is updateParentInTransaction's non-tx twin for the
+// facade's standalone Update: it clears id's stored parent-child edge and, if
+// parentID names one, asserts a new edge to it. Only updateOnce's external
+// branch calls it, and only after nativeParentIsLocal has already said
+// parentID is not a row this store resolves -- so unlike
+// updateParentInTransaction, there is no local-existence check to run first;
+// the Update role already ran one, against the OLD value, before patch.
+// ParentID was taken out of the write that reaches here.
+//
+// EdgeReader and DependencyEditor are the facade's own front doors for this —
+// the same pair DepAdd, DepRemove and DepList's DOWN leg already ride — so the
+// edge write takes the same role path over a served city that every other
+// graph mutation does, rather than reopening the raw Transaction surface the
+// facade replay moved off of.
+func (s *NativeDoltStore) updateParentThroughEditor(ctx context.Context, storage beadslib.Storage, id, parentID string) error {
+	reader, err := storage.EdgeReader()
+	if err != nil {
+		return nativeStoreError(id, err)
+	}
+	result, err := reader.ReadEdges(ctx, issueops.EdgeReadRequest{
+		IDs:   []string{id},
+		Types: []issueops.DependencyType{issueops.DepParentChild},
+	})
+	if err != nil {
+		return nativeStoreError(id, err)
+	}
+	editor, err := storage.DependencyEditor()
+	if err != nil {
+		return nativeStoreError(id, err)
+	}
+	for _, anchor := range result.Anchors {
+		if anchor.ID != id || anchor.Missing {
+			continue
+		}
+		for _, edge := range anchor.Edges {
+			if edge == nil {
+				continue
+			}
+			if _, err := editor.RemoveDependency(ctx, issueops.RemoveDependencyRequest{
+				Actor:       s.actor,
+				IssueID:     id,
+				DependsOnID: edge.DependsOnID,
+			}); err != nil {
+				return nativeStoreError(id, err)
+			}
+		}
+	}
+	if parentID == "" {
+		return nil
+	}
+	if _, err := editor.AddDependencies(ctx, issueops.AddDependenciesRequest{
+		Actor: s.actor,
+		Edges: []issueops.DependencyEdge{{
+			IssueID:     id,
+			DependsOnID: parentID,
+			Type:        issueops.DepParentChild,
+		}},
+	}); err != nil {
 		return nativeStoreError(id, err)
 	}
 	return nil
