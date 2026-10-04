@@ -243,3 +243,82 @@ type identityVerdict struct {
 	Losers    []rowKey
 	VerdictID string
 }
+
+// createKind is a create plan's kind (P3 spec §4.8).
+type createKind uint8
+
+const (
+	createPool createKind = iota + 1
+	createDependency
+	createNamed
+)
+
+func (k createKind) String() string {
+	switch k {
+	case createPool:
+		return "pool"
+	case createDependency:
+		return "dependency"
+	case createNamed:
+		return "named"
+	default:
+		return "unknown"
+	}
+}
+
+// allocPlan is one fresh row the pass would create. It is data only: P3-5b
+// admits plans in fair-share order (dependency and named plans first),
+// reserves their create entries and hands P3-6 the pool and dependency kinds
+// as createPlanOf(entryID, Template, Plan); the named kind waits for P3-6b.
+type allocPlan struct {
+	Kind     createKind
+	Template string
+	// Plan is the planner's create plan (pool and dependency kinds).
+	Plan poolSessionCreatePlan
+	// Request is the pool request the plan realizes; its FloorGuarantee and
+	// tier feed P3-5b's fair share.
+	Request  SessionRequest
+	Named    *namedCreatePlan
+	Endpoint endpointKey
+}
+
+// identity is the plan's create identity (AM-N8): the key its create veto
+// and its planning reservation are kept under. A pool or dependency plan
+// uses P3-6's createIdentity key; a named one P3-6b's "named:<identity>".
+func (p allocPlan) identity() string {
+	if p.Named != nil {
+		return "named:" + p.Named.Identity
+	}
+	return createIdentity{Template: p.Template, QualifiedInstance: p.Plan.qualifiedInstance, Slot: p.Plan.slot}.key()
+}
+
+// planReservation is an uncleared create entry's planning reservation (C7.1
+// tier 1): the identifiers it holds until its row is in the census. P3-4's
+// entries carry no plan (P3-6b N10), so allocator state keeps these by entry
+// ID and the pass reads them as input. Until the census shows its row, a
+// pool or dependency reservation also stands in for that row in pool demand
+// (POOL-028/029, C5.13): it is in flight, and its trigger work is taken.
+type planReservation struct {
+	EntryID           string
+	Template          string
+	QualifiedInstance string
+	Slot              int
+	// WorkBeadID and WorkStoreRef are the plan's trigger work (its
+	// request's), ReservedAt when its entry was reserved.
+	WorkBeadID     string
+	WorkStoreRef   string
+	ReservedAt     time.Time
+	DependencyOnly bool
+	// NamedIdentity and SessionName are set for a named create.
+	NamedIdentity string
+	SessionName   string
+}
+
+// allocTraceRecord is one decision the pass refused or skipped, so
+// starvation is visible (C2.2): a plan gate's refusal consumes nothing.
+type allocTraceRecord struct {
+	Template string
+	Instance string
+	Key      rowKey
+	Reason   string
+}

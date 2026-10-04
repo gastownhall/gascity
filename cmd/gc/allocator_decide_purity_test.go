@@ -55,7 +55,7 @@ func TestDecideIsPure(t *testing.T) {
 			t.Fatalf("run %d differs from the first: the decide is nondeterministic\n got  %s\n want %s", i, describeDecision(got), describeDecision(first))
 		}
 	}
-	if len(first.Snapshot.Entries) < 5 {
+	if len(first.Plans) == 0 || len(first.Snapshot.Entries) < 5 {
 		t.Fatalf("the fixture must exercise plans and entries: %s", describeDecision(first))
 	}
 	if _, err := decideAllocation(allocInputs{}); err == nil {
@@ -95,11 +95,12 @@ func TestDecideIsPure(t *testing.T) {
 }
 
 // decideFiles are the P3-5a files.
-var decideFiles = []string{"allocator_decide.go", "allocator_snapshot.go"}
+var decideFiles = []string{"allocator_decide.go", "allocator_plan.go", "allocator_snapshot.go"}
 
-// purityInputs is a city that exercises every step: pool rows, named
-// sessions, a manual row, a dependency, identity verdicts, a rollback
-// candidate and an unknown-state row.
+// purityInputs is a city that exercises every step: pool reuse and plans,
+// named sessions (several planned at once, so plan order is tested), an
+// overlay row, a dependency floor, identity verdicts, a rollback candidate
+// and an unknown-state row.
 func purityInputs(t *testing.T) allocInputs {
 	t.Helper()
 	cfg := &config.City{
@@ -131,7 +132,7 @@ func purityInputs(t *testing.T) allocInputs {
 			"configured_named_session", "true", "configured_named_identity", "chat", "configured_named_mode", "always", "generation", "1"),
 		sessionRow("gc-6", "template", "worker", "state", "active", "session_name", "manual-1", "manual_session", "true"),
 		sessionRow("gc-7", "template", "worker", "state", "draining-enterprise", "session_name", "s-gc-7"),
-	).alive("s-gc-1", InventoryAttrs{AttachedKnown: true})
+	).alive("s-gc-1", InventoryAttrs{AttachedKnown: true}).demand("worker", "w-1", "w-2", "w-3", "w-4").demand("app", "w-5")
 	return f.inputs()
 }
 
@@ -140,6 +141,9 @@ func describeDecision(d allocDecision) string {
 	var b strings.Builder
 	ids := entryIDs(d)
 	sort.Strings(ids)
-	fmt.Fprintf(&b, "mode=%s entries=%v", d.Snapshot.Mode, ids)
+	fmt.Fprintf(&b, "mode=%s entries=%v plans=", d.Snapshot.Mode, ids)
+	for _, p := range d.Plans {
+		fmt.Fprintf(&b, "%s/%s ", p.Kind, p.identity())
+	}
 	return b.String()
 }

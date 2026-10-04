@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 // The allocator's decide (P3 spec §4.4 steps 1-14): desire, create plans,
@@ -25,14 +26,13 @@ import (
 // the filesystem, the environment or the clock: every fact, the time
 // included, comes in through allocInputs. TestDecideIsPure pins that.
 //
-// This slice (P3-5a1) is steps 1-3 and 9-13: each row's class, the identity
-// verdicts, the partial causes, the awake set, classification with its Keep
-// conversions, and floors. P3-5a2 adds steps 4-8 and 14 (demand, pool
-// desired, realization, named planning, dependency floors and bindings);
-// until then nothing is selected. Unwired: P3-5b adds the ledger
-// housekeeping, the bucket, start ranks, grants and create admission (steps
-// 15-17); P3-7 gathers the inputs, publishes the snapshot and enqueues its
-// diff.
+// It lands in two slices: P3-5a1 is steps 1-3 and 9-13 (each row's class,
+// the identity verdicts, the partial causes, the awake set, classification
+// with its Keep conversions, and floors), and P3-5a2 steps 4-8 and 14
+// (demand, pool desired, realization, named planning, dependency floors
+// and bindings). Unwired: P3-5b adds the ledger housekeeping, the bucket,
+// start ranks, grants and create admission (steps 15-17); P3-7 gathers the
+// inputs, publishes the snapshot and enqueues its diff.
 
 // errDecideNoClock refuses a pass without its one clock: a zero Now would
 // read every lease as expired and every fact as stale.
@@ -43,6 +43,7 @@ type allocInputs struct {
 	// Now is the pass's one clock (POOL-026, #35). It must be set.
 	Now       time.Time
 	Epoch     string
+	SelGen    uint64 // the generation this pass publishes; binding IDs carry it
 	Cfg       *config.City
 	ConfigRev string
 	EnvGen    uint64
@@ -55,15 +56,40 @@ type allocInputs struct {
 	SuspendedRigPaths map[string]bool
 	Census            *sessionCensus
 	Demand            demandView
-	Obs               *ObservationSnapshot
-	ObsMaxAge         time.Duration
+	// ScaleCheck is the scale_check lane's latest result (I5), trusted for
+	// ScaleCheckMaxAge.
+	ScaleCheck       *scaleCheckResult
+	ScaleCheckMaxAge time.Duration
+	Obs              *ObservationSnapshot
+	ObsMaxAge        time.Duration
 	// Endpoints is each config-only endpoint key's breaker reading.
 	Endpoints map[endpointKey]endpointView
+	// ProviderHealth is I7 at Now; nil reads as no registry (fail open).
+	ProviderHealth *providerHealthSnapshot
+	// Episodes are the startup-health episodes (#46) by episode key.
+	Episodes map[string]session.StartupHealthEpisode
 	// SleepPolicies is resolveSessionSleepPolicyInfo per row, by bead ID; it
 	// asks the provider for the row's sleep capability, so the gather phase
 	// resolves it. A row without one is never config-suppressed.
 	SleepPolicies map[string]resolvedSessionSleepPolicy
-	ReadyWaits    map[string]bool // I10; nil until P4.3
+	// TransportRefused names templates whose session transport the provider
+	// cannot carry (validateAgentSessionTransportForBuild, which resolves the
+	// provider binary): legacy realizes nothing for them.
+	TransportRefused map[string]string
+	ReadyWaits       map[string]bool // I10; nil until P4.3
+	// Ledger is a copy of the uncleared entries (intentLedger.View), and
+	// Reservations the planning reservations of its create entries.
+	Ledger       []ledgerEntry
+	Reservations []planReservation
+	// CreateVetoes are the ledger's create vetoes (intentLedger.Snapshot), by
+	// plan identity (createIdentity.key; "named:<identity>" for a named
+	// create). One live at Now refuses its identity (AM-N8).
+	CreateVetoes map[string]createVeto
+	// WorktreeRefused is the worktree evidence whose verification failed and
+	// whose verdict stands at Now, by work bead ID (#34).
+	WorktreeRefused map[string]worktree.Spec
+	// Prev is the last published snapshot, for sticky bindings.
+	Prev *selectionSnapshot
 }
 
 // demandView is the demand collectors' output for one pass (P3 spec §4.3),
@@ -79,9 +105,19 @@ type demandView struct {
 	AssignedStoreRefs []string
 	ReadyAssigned     map[storeScopedBeadKey]bool
 	StorePartial      bool
-	// WakeClaimRefs (assignedWorkClaimRefs) is a residency-topology read,
-	// resolved per environment generation.
-	WakeClaimRefs []string
+	// Collected is the rest of the demand pass's collection. The pass fills
+	// its custom counts from ScaleCheck and projects its routed rows.
+	Collected collectedDemand
+	// CustomCheckTemplates are the pools with a custom scale_check (the
+	// demand targets' pendingPools); only their I5 partials mean anything.
+	CustomCheckTemplates []string
+	// NamedDefault is defaultNamedSessionDemand's demand.
+	NamedDefault map[string]bool
+	// RelocatedClaimRefs (assignedWorkRelocatedClaimRefs) and WakeClaimRefs
+	// (assignedWorkClaimRefs) are residency-topology reads, resolved per
+	// environment generation.
+	RelocatedClaimRefs []string
+	WakeClaimRefs      []string
 }
 
 // endpointView is one endpoint's breaker as the pass reads it.
@@ -95,6 +131,20 @@ type endpointView struct {
 // allocDecision is one pass's output.
 type allocDecision struct {
 	Snapshot *selectionSnapshot
+	// Plans are the fresh rows the pass would create, in planning order:
+	// named, then pool by template, then dependency floors.
+	Plans []allocPlan
+	// Planning is the census the plans were made against, every canonical
+	// row on every leg: the create effects' planning census
+	// (createPass.planning). It holds census rows only (C7.2), never a
+	// planning reservation, which would fence a create on its own name.
+	Planning []session.Info
+	// ReadyRouted and ReadyRoutedRefs are the ready unassigned routed work
+	// the demand selected, from the projected rows, index-aligned: the
+	// idle-claim nudge's input (P4.3; legacy's ReadyUnassignedRoutedWorkBeads).
+	ReadyRouted     []beads.Bead
+	ReadyRoutedRefs []string
+	Trace           []allocTraceRecord
 }
 
 // decidePass is one decide's working state.
@@ -123,13 +173,32 @@ type decidePass struct {
 
 	losers map[rowKey]bool
 
-	// selected are the rows the plan steps place InDesired (P3-5a2).
+	merged      mergedDemand
+	named       namedSessionDemand
+	poolStates  []PoolDesiredState
+	poolDesired map[string]int
+	poolWork    []beads.Bead
+	// standIns are the pending-create rows uncleared creates stand in for
+	// in pool demand, by stand-in ID; bound maps work C6.6 counts as
+	// consumed to the row holding it.
+	standIns map[string]bool
+	bound    map[string]string
+
+	bp       *agentBuildParams
+	desired  map[string]TemplateParams // membership only (classifyOverlaySession)
 	selected map[rowKey]*selection
+	roots    map[string]bool
+	plans    []allocPlan
+	trace    []allocTraceRecord
 }
 
 // selection is a row the pass placed InDesired.
 type selection struct {
-	ref desiredConfigRef
+	ref     desiredConfigRef
+	binding *bindingTarget // candidate; step 14 decides
+	// resume marks a row realized for its own claimed work (the resume
+	// tier): its request outranks a sticky binding.
+	resume bool
 	// normalize marks a pool-selected canonical singleton whose stored
 	// identity is a phantom slot spelling (POOL-046).
 	normalize bool
@@ -143,6 +212,9 @@ func decideAllocation(in allocInputs) (allocDecision, error) {
 	}
 	p := newDecidePass(in)
 	p.prepare()
+	if !in.CitySuspended {
+		p.plan()
+	}
 	return p.finish(), nil
 }
 
@@ -165,7 +237,11 @@ func newDecidePass(in allocInputs) *decidePass {
 		none:     make(map[rowKey]string),
 		byID:     make(map[string]rowKey),
 		losers:   make(map[rowKey]bool),
+		standIns: make(map[string]bool),
+		bound:    make(map[string]string),
+		desired:  make(map[string]TemplateParams),
 		selected: make(map[rowKey]*selection),
+		roots:    make(map[string]bool),
 	}
 	if in.Census == nil {
 		// No census is not an empty city: nothing is created from it.
@@ -189,7 +265,7 @@ func (p *decidePass) prepare() {
 	p.partials()
 }
 
-// finish is steps 10-13, or step 1's classification for a suspended city.
+// finish is steps 10-14, or step 1's classification for a suspended city.
 func (p *decidePass) finish() allocDecision {
 	if p.in.CitySuspended {
 		p.suspended()
@@ -197,6 +273,7 @@ func (p *decidePass) finish() allocDecision {
 	}
 	p.classify(p.awake())
 	p.floors()
+	p.bindings()
 	return p.decision()
 }
 
@@ -438,8 +515,8 @@ func (p *decidePass) awake() map[string]AwakeDecision {
 	agentSuspended := func(a *config.Agent) bool {
 		return a.Suspended || agentInSuspendedRig(p.in.CityPath, a, p.cfg.Rigs, p.in.SuspendedRigPaths)
 	}
-	input := newAwakeInputFromSnapshot(p.cfg, agentSuspended, infos, nil, nil,
-		nil, nil, p.in.ReadyWaits, work, readyAssignedFlagsForBeads(p.in.Demand.ReadyAssigned, work, workRefs), p.in.Now)
+	input := newAwakeInputFromSnapshot(p.cfg, agentSuspended, infos, p.poolDesired, p.named.workReady,
+		p.named.routedDemand, nil, p.in.ReadyWaits, work, readyAssignedFlagsForBeads(p.in.Demand.ReadyAssigned, work, workRefs), p.in.Now)
 	for _, info := range infos {
 		o := p.obs[p.byID[info.ID]]
 		// Unknown liveness reads running, and an uncertain attach on a live
@@ -501,7 +578,7 @@ func (p *decidePass) configSleepSuppressed(info session.Info, o rowObservation, 
 	eval := awakeSetToWakeEvals(map[string]AwakeDecision{info.SessionNameMetadata: d},
 		[]AwakeSessionBead{{ID: info.ID, SessionName: info.SessionNameMetadata}})[info.ID]
 	template := normalizedSessionTemplateInfo(info, p.cfg)
-	return !wakeDemandOverridesSleepSuppression(d, eval, policy, nil, template, info.SleepIntent != "")
+	return !wakeDemandOverridesSleepSuppression(d, eval, policy, p.poolDesired, template, info.SleepIntent != "")
 }
 
 // classify is step 12 (CONTRACT §2.2): InDesired ∧ ShouldWake is Wake,
@@ -598,7 +675,14 @@ func (p *decidePass) floors() {
 
 // decision assembles the pass's output.
 func (p *decidePass) decision() allocDecision {
-	return allocDecision{Snapshot: p.snap}
+	return allocDecision{
+		Snapshot:        p.snap,
+		Plans:           p.plans,
+		Planning:        slices.Clone(p.occupancy),
+		ReadyRouted:     p.merged.ReadyUnassignedRouted,
+		ReadyRoutedRefs: p.merged.ReadyUnassignedRoutedRefs,
+		Trace:           p.trace,
+	}
 }
 
 // censusIncomplete reports a census with a leg that has no whole read
