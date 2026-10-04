@@ -326,6 +326,16 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 // changes (S5b-portrev item 2).
 const nativeReadEdgesChunkSize = nativeServerEdgeAnchorCap
 
+// nativeReadyVetoListChunkSize bounds how many blocker ids one
+// filterReadyByWorkOutcomeListBlockers List+IDFilter call carries. beads has
+// no documented id-count cap of its own on a listing's IDFilter the way
+// ReadEdges has maxDependencyAnchors, but an http-native IssueReader still
+// puts every id on one URL query string with nothing bounding its length, so
+// this reuses nativeServerEdgeAnchorCap — the one id-count cap this package
+// already knows a served backend accepts — rather than leaving blocker-veto
+// listing unchunked against an unverified assumption.
+const nativeReadyVetoListChunkSize = nativeServerEdgeAnchorCap
+
 // nativeReadyEdgeFanoutLimit bounds concurrent per-blocker IssueReader.Get
 // calls in filterReadyByWorkOutcome's blocker fetch. It matches the batch
 // size gc uses elsewhere for wire fan-out (bounded, not per-candidate) so a
@@ -490,25 +500,55 @@ func (s *NativeDoltStore) filterReadyByWorkOutcome(ctx context.Context, storage 
 // A blocker id the page does not return — external, another ledger's row, or
 // simply absent — is no evidence of blocking, exactly as a Get miss is: it is
 // silently left out of both returned maps.
+//
+// ONE CALL PER CHUNK, EXPLICIT UNLIMITED. issueops.ListRequest.Limit is a
+// *int: nil — what the zero-value request this built on left it at — means
+// "the shared list default," which beads 1.3.1 answers as a 50-row page
+// (read_roles.go's own nativeListReadRequest never touched it). A ready
+// candidate with more than 50 DISTINCT blockers silently saw only the first
+// 50 blockers' outcomes, so a blocker past that page could never veto
+// readiness: a review repro with 60 blockers-each-blocking-one-candidate
+// wrongly readied 10 of them. Limit=0 is explicitly "unlimited" per that
+// field's own doc, so it is set on every chunk rather than left at the
+// zero-value nil that reads as "50."
+//
+// CHUNKED AT nativeReadyVetoListChunkSize ANYWAY, even though unlimited. An
+// explicit Limit answers the TRUNCATION half of the bug (a page short of the
+// full blocker set), not the TRANSPORT half: beads' List has no documented
+// cap of its own on how many ids one IDFilter may carry, but an http-native
+// IssueReader still puts every id on one URL query string, and nothing
+// bounds that string's length today. Reusing nativeServerEdgeAnchorCap — the
+// one server-enforced id-count cap this package already knows about, shared
+// with ReadEdges and DepListBatch — keeps every List+IDFilter call's id count
+// inside a bound a served backend has already proven it accepts, rather than
+// inventing a second, untested one. A chunk's vetoes/malformed merge into the
+// running maps; a chunk's error (including the ErrUnsupported fallback
+// signal) is returned immediately, exactly as a single unchunked call would
+// have.
 func filterReadyByWorkOutcomeListBlockers(ctx context.Context, reader issueops.Reader, blockerIDs []string) (map[string]bool, map[string]error, error) {
-	req := nativeListReadRequest()
-	req.IDFilter = strings.Join(blockerIDs, ",")
-	page, err := reader.List(ctx, req)
-	if err != nil {
-		return nil, nil, err
-	}
 	vetoes := make(map[string]bool, len(blockerIDs))
 	malformed := make(map[string]error)
-	for _, row := range page.Items {
-		if row == nil || row.Issue == nil {
-			continue
+	unlimited := 0
+	for chunkStart := 0; chunkStart < len(blockerIDs); chunkStart += nativeReadyVetoListChunkSize {
+		chunkEnd := min(chunkStart+nativeReadyVetoListChunkSize, len(blockerIDs))
+		req := nativeListReadRequest()
+		req.IDFilter = strings.Join(blockerIDs[chunkStart:chunkEnd], ",")
+		req.Limit = &unlimited
+		page, err := reader.List(ctx, req)
+		if err != nil {
+			return nil, nil, err
 		}
-		metadata, parseErr := metadataMapFromNative(row.Metadata)
-		if parseErr != nil {
-			malformed[row.ID] = parseErr
-			continue
+		for _, row := range page.Items {
+			if row == nil || row.Issue == nil {
+				continue
+			}
+			metadata, parseErr := metadataMapFromNative(row.Metadata)
+			if parseErr != nil {
+				malformed[row.ID] = parseErr
+				continue
+			}
+			vetoes[row.ID] = string(row.Status) == "closed" && metadata[beadmeta.WorkOutcomeMetadataKey] == beadmeta.WorkOutcomeBlocked
 		}
-		vetoes[row.ID] = string(row.Status) == "closed" && metadata[beadmeta.WorkOutcomeMetadataKey] == beadmeta.WorkOutcomeBlocked
 	}
 	return vetoes, malformed, nil
 }
@@ -528,6 +568,16 @@ func filterReadyByWorkOutcomeListBlockers(ctx context.Context, reader issueops.R
 // contract (a miss must be ErrNotFound); treating it as "no evidence of
 // blocking" would silently trust a broken backend, and indexing into it would
 // panic.
+// fetchBlockersSkipHookForTest, when non-nil, is called with a blocker id
+// exactly when filterReadyByWorkOutcomeFetchBlockers skips it because the
+// shared fetch context was already canceled by an earlier real failure. It
+// exists so a test can observe the skip-after-cancel race deterministically —
+// by waiting on a channel the hook sends to — instead of guessing a settle
+// duration long enough for the cascade to finish before asserting on it.
+// Production code never sets it, so the extra nil check this adds to the hot
+// path costs nothing there.
+var fetchBlockersSkipHookForTest func(id string)
+
 func filterReadyByWorkOutcomeFetchBlockers(ctx context.Context, reader issueops.Reader, blockerIDs []string) (map[string]bool, map[string]error, error) {
 	vetoes := make(map[string]bool, len(blockerIDs))
 	malformed := make(map[string]error)
@@ -547,6 +597,9 @@ func filterReadyByWorkOutcomeFetchBlockers(ctx context.Context, reader issueops.
 				// Canceled by an earlier failure while this call was still
 				// queued behind the semaphore: skip it without dialing
 				// IssueReader at all.
+				if fetchBlockersSkipHookForTest != nil {
+					fetchBlockersSkipHookForTest(id)
+				}
 				return
 			}
 			details, getErr := reader.Get(fetchCtx, issueops.GetRequest{ID: id})

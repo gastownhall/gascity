@@ -393,10 +393,11 @@ type readyOutcomeFanoutListStorage struct {
 	edges  map[string][]*beadslib.Dependency
 	issues map[string]*beadslib.Issue
 
-	mu        sync.Mutex
-	listCalls int
-	listIDs   []string
-	getCalls  int
+	mu         sync.Mutex
+	listCalls  int
+	listIDs    []string
+	listLimits []*int
+	getCalls   int
 }
 
 func (f *readyOutcomeFanoutListStorage) EdgeReader() (issueops.EdgeReader, error) {
@@ -428,20 +429,43 @@ func (r *readyOutcomeFanoutListIssueReader) Ready(context.Context, issueops.Read
 	return issueops.IssuePage{}, errors.New("readyOutcomeFanoutListIssueReader: Ready not implemented; filterReadyByWorkOutcome must never call it")
 }
 
+// readyOutcomeFanoutListDefaultPage stands in for beads 1.3.1's real
+// workapi.DefaultListLimit (read_roles.go's own nativeListReadRequest never
+// sets ListRequest.Limit, and a nil Limit there means "the shared list
+// default," not unlimited): this fake enforces the identical rule — a nil
+// Limit truncates to this many rows, an explicit *Limit of 0 is unlimited —
+// so a unit test against it can reproduce the ready-veto truncation bug
+// (S5b-fixrev item 2 HIGH) in milliseconds, without standing up a real
+// upstream store to rediscover beads' own default.
+const readyOutcomeFanoutListDefaultPage = 3
+
 // List answers the IDFilter directly from the graph, exactly as a native
 // IssueReader does — proving filterReadyByWorkOutcome's List-first attempt is
-// actually wired to this door, not merely assumed to always refuse.
+// actually wired to this door, not merely assumed to always refuse. It
+// enforces readyOutcomeFanoutListDefaultPage on a nil Limit, mirroring
+// beads' own nil-means-default-fifty rule, so a caller that forgets to set an
+// explicit Limit sees exactly the truncated page a real served backend would
+// hand it.
 func (r *readyOutcomeFanoutListIssueReader) List(_ context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
 	p := r.parent
 	p.mu.Lock()
 	p.listCalls++
 	p.listIDs = append(p.listIDs, req.IDFilter)
+	p.listLimits = append(p.listLimits, req.Limit)
 	p.mu.Unlock()
 	var page issueops.IssuePage
 	if req.IDFilter == "" {
 		return page, nil
 	}
+	limit := readyOutcomeFanoutListDefaultPage
+	if req.Limit != nil {
+		limit = *req.Limit // 0 means unlimited, exactly as issueops.ListRequest.Limit documents.
+	}
 	for _, id := range strings.Split(req.IDFilter, ",") {
+		if limit > 0 && len(page.Items) >= limit {
+			page.HasMore = true
+			break
+		}
 		issue, ok := p.issues[id]
 		if !ok || issue == nil {
 			continue
@@ -492,6 +516,97 @@ func TestNativeDoltStoreReadyWorkOutcomeFilterPrefersListOverGetFanout(t *testin
 	}
 	if storage.getCalls != 0 {
 		t.Errorf("Get called %d times, want 0: a native reader answers List+IDFilter directly, so the fan-out must never run", storage.getCalls)
+	}
+}
+
+// TestNativeDoltStoreReadyWorkOutcomeListBlockersSetsAnExplicitUnlimitedLimit
+// is the fast unit-level regression for the HIGH bug the Opus G1+G2 review
+// caught: filterReadyByWorkOutcomeListBlockers built its List+IDFilter
+// request from nativeListReadRequest(), which never touches Limit, and a nil
+// issueops.ListRequest.Limit means "the shared list default" — beads 1.3.1's
+// workapi.DefaultListLimit, fifty rows — not unlimited. A ready frontier with
+// more than that many DISTINCT blockers silently saw only the first page's
+// worth of outcomes, so a blocker past the page could never veto readiness: a
+// 60-blockers-each-blocking-one-candidate repro wrongly readied 10 of them.
+//
+// readyOutcomeFanoutListDefaultPage (3, not 50) stands in for the real
+// default so this reproduces in milliseconds: four blockers, closed with
+// work_outcome=blocked, each gating a distinct candidate. Only the first
+// readyOutcomeFanoutListDefaultPage of them would veto their candidate under
+// the unfixed nil-Limit request; the fix must veto all four.
+func TestNativeDoltStoreReadyWorkOutcomeListBlockersSetsAnExplicitUnlimitedLimit(t *testing.T) {
+	const blockerCount = readyOutcomeFanoutListDefaultPage + 1
+	edges := make(map[string][]*beadslib.Dependency, blockerCount)
+	issues := make(map[string]*beadslib.Issue, blockerCount)
+	candidates := make([]Bead, 0, blockerCount)
+	for i := 0; i < blockerCount; i++ {
+		candID := fmt.Sprintf("gc-cand-%02d", i)
+		blockerID := fmt.Sprintf("gc-blocker-%02d", i)
+		candidates = append(candidates, Bead{ID: candID})
+		edges[candID] = []*beadslib.Dependency{fanoutEdge(candID, blockerID)}
+		issues[blockerID] = fanoutIssue(blockerID, beadslib.StatusClosed, fanoutBlockedMeta)
+	}
+	storage := &readyOutcomeFanoutListStorage{edges: edges, issues: issues}
+	store := newNativeDoltStoreForTest(storage)
+
+	got, err := store.filterReadyByWorkOutcome(context.Background(), storage, candidates)
+	if err != nil {
+		t.Fatalf("filterReadyByWorkOutcome: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("filtered = %v, want none: every one of the %d candidates' sole blocker is closed+blocked, including the ones past a %d-row default page", readyOutcomeFanoutIDs(got), blockerCount, readyOutcomeFanoutListDefaultPage)
+	}
+	for i, limit := range storage.listLimits {
+		if limit == nil {
+			t.Errorf("List call %d: Limit = nil, want an explicit *int (nil reads as the backend's default page, not unlimited)", i)
+			continue
+		}
+		if *limit != 0 {
+			t.Errorf("List call %d: Limit = %d, want 0 (explicit unlimited, per issueops.ListRequest.Limit's own doc)", i, *limit)
+		}
+	}
+}
+
+// TestNativeDoltStoreReadyWorkOutcomeListBlockersChunksTheIDFilter pins that
+// filterReadyByWorkOutcomeListBlockers bounds every List+IDFilter call's id
+// count at nativeReadyVetoListChunkSize, reusing the one server-enforced
+// id-count cap this package already knows a served backend accepts
+// (nativeServerEdgeAnchorCap, shared with ReadEdges and DepListBatch) rather
+// than sending an unbounded id set on one call's IDFilter.
+func TestNativeDoltStoreReadyWorkOutcomeListBlockersChunksTheIDFilter(t *testing.T) {
+	// Each candidate names its OWN distinct blocker (unlike
+	// TestNativeDoltStoreReadyWorkOutcomeFilterChunksOverAnchorCap's shared
+	// one), so the DISTINCT blocker-id set this test chunks over actually
+	// grows past nativeReadyVetoListChunkSize instead of deduplicating to one.
+	const total = nativeReadyVetoListChunkSize + 50
+	edges := make(map[string][]*beadslib.Dependency, total)
+	issues := make(map[string]*beadslib.Issue, total)
+	candidates := make([]Bead, 0, total)
+	for i := 0; i < total; i++ {
+		candID := fmt.Sprintf("gc-wide-%03d", i)
+		blockerID := fmt.Sprintf("gc-wide-blocker-%03d", i)
+		candidates = append(candidates, Bead{ID: candID})
+		edges[candID] = []*beadslib.Dependency{fanoutEdge(candID, blockerID)}
+		issues[blockerID] = fanoutIssue(blockerID, beadslib.StatusOpen, "")
+	}
+	storage := &readyOutcomeFanoutListStorage{edges: edges, issues: issues}
+	store := newNativeDoltStoreForTest(storage)
+
+	got, err := store.filterReadyByWorkOutcome(context.Background(), storage, candidates)
+	if err != nil {
+		t.Fatalf("filterReadyByWorkOutcome: %v", err)
+	}
+	if len(got) != total {
+		t.Errorf("filtered = %d candidates, want all %d kept (the shared blocker is open, so nothing is vetoed)", len(got), total)
+	}
+	const wantListCalls = 2 // ceil(150/100): chunks of 100, 50
+	if storage.listCalls != wantListCalls {
+		t.Errorf("List called %d times, want %d (chunked at nativeReadyVetoListChunkSize instead of one call naming all %d ids)", storage.listCalls, wantListCalls, total)
+	}
+	for _, ids := range storage.listIDs {
+		if n := strings.Count(ids, ",") + 1; n > nativeReadyVetoListChunkSize {
+			t.Errorf("one List call carried %d ids, want <= %d", n, nativeReadyVetoListChunkSize)
+		}
 	}
 }
 
@@ -554,17 +669,24 @@ func TestNativeDoltStoreReadyWorkOutcomeFetchBlockersSkipsQueuedCallsAfterCancel
 	blockerIDs := append([]string{"gc-fail"}, holders...)
 	blockerIDs = append(blockerIDs, queued...)
 
-	// Every holder blocks on an UNCLOSED release channel for the entire settle
-	// window below, so the only semaphore slot that can possibly free during
-	// that window is gc-fail's own: holders structurally cannot race ahead of
-	// it. Per the happens-before chain through gc-fail's own semaphore release
-	// (cancelFetch() runs, then it returns, then its deferred <-sem fires, in
-	// that program order, inside the same goroutine), by the time gc-fail's
-	// slot is observably free, cancelFetch() has already run. A generous
-	// settle sleep — while every other slot is pinned — is therefore enough to
-	// guarantee (not merely make likely) that the fetch is canceled before any
-	// "queued" id could ever be dispatched, regardless of how this test's
-	// goroutines happen to be scheduled.
+	// fetchBlockersSkipHookForTest fires exactly when a dispatch observes the
+	// shared fetch context already canceled and skips without dialing
+	// IssueReader — the event this test exists to pin for every "queued" id.
+	// Waiting on skipped is the deterministic replacement for a settle sleep:
+	// it reports the moment each skip actually happened, rather than a
+	// duration hoped to be long enough for the cascade to finish first. Every
+	// holder blocks on the UNCLOSED release channel below, so the only
+	// semaphore slot that can free before release closes is gc-fail's own:
+	// holders structurally cannot race ahead of it, and per the
+	// happens-before chain through gc-fail's own semaphore release
+	// (cancelFetch() runs, then gc-fail's goroutine returns, then its
+	// deferred <-sem fires, all in that goroutine's program order), every
+	// dispatch that follows is guaranteed — not merely likely — to observe
+	// the cancellation and skip.
+	skipped := make(chan string, len(blockerIDs))
+	t.Cleanup(func() { fetchBlockersSkipHookForTest = nil })
+	fetchBlockersSkipHookForTest = func(id string) { skipped <- id }
+
 	var mu sync.Mutex
 	var dialed []string
 	release := make(chan struct{})
@@ -587,7 +709,20 @@ func TestNativeDoltStoreReadyWorkOutcomeFetchBlockersSkipsQueuedCallsAfterCancel
 		}
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	// Wait for a distinct skip signal for every "queued" id rather than a
+	// fixed sleep. If the fix ever regressed and a queued id was dialed
+	// instead of skipped, it would never signal here (it would instead block
+	// on the unclosed release channel inside the fake reader), so this times
+	// out with a clear message rather than hanging forever.
+	seen := make(map[string]bool, len(queued))
+	for len(seen) < len(queued) {
+		select {
+		case id := <-skipped:
+			seen[id] = true
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for all %d queued ids to be skipped; seen so far: %v", len(queued), seen)
+		}
+	}
 	close(release)
 	<-done
 
