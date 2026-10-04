@@ -1,8 +1,6 @@
 package api
 
 import (
-	"bufio"
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -13,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // pendingTransitions returns the session.pending / session.pending_cleared
@@ -288,62 +287,16 @@ func TestPendingMonitorRetriesDroppedEvent(t *testing.T) {
 	}
 }
 
-// sseFrame is one parsed SSE frame.
-type sseFrame struct {
-	event string
-	id    string
-	data  string
-}
-
-// openEventStream opens the city event stream and returns a channel of frames.
-func openEventStream(ctx context.Context, t *testing.T, baseURL string, state State, lastEventID string) <-chan sseFrame {
+// openCityEventStream serves the city event stream in-process.
+func openCityEventStream(t *testing.T, h http.Handler, state State, lastEventID string) *sseStream {
 	t.Helper()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+cityURL(state, "/events/stream"), nil)
-	if err != nil {
-		t.Fatalf("build stream request: %v", err)
-	}
-	req.Header.Set("Accept", "text/event-stream")
-	if lastEventID != "" {
-		req.Header.Set("Last-Event-ID", lastEventID)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("open event stream: %v", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("event stream status = %d", resp.StatusCode)
-	}
-	frames := make(chan sseFrame, 64)
-	go func() {
-		defer close(frames)
-		defer resp.Body.Close() //nolint:errcheck
-		sc := bufio.NewScanner(resp.Body)
-		sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
-		var cur sseFrame
-		for sc.Scan() {
-			line := sc.Text()
-			switch {
-			case line == "":
-				if cur.data != "" {
-					frames <- cur
-				}
-				cur = sseFrame{}
-			case strings.HasPrefix(line, "event:"):
-				cur.event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-			case strings.HasPrefix(line, "id:"):
-				cur.id = strings.TrimSpace(strings.TrimPrefix(line, "id:"))
-			case strings.HasPrefix(line, "data:"):
-				cur.data += strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			}
-		}
-	}()
-	return frames
+	return openSSEStream(t, h, cityURL(state, "/events/stream"), lastEventID)
 }
 
 // waitForFrame returns the first frame whose JSON type is eventType.
-func waitForFrame(t *testing.T, frames <-chan sseFrame, eventType string) sseFrame {
+func waitForFrame(t *testing.T, frames <-chan sseTestFrame, eventType string) sseTestFrame {
 	t.Helper()
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(testutil.GoroutineRaceTimeout)
 	for {
 		select {
 		case f, ok := <-frames:
@@ -353,14 +306,14 @@ func waitForFrame(t *testing.T, frames <-chan sseFrame, eventType string) sseFra
 			var env struct {
 				Type string `json:"type"`
 			}
-			if err := json.Unmarshal([]byte(f.data), &env); err != nil {
+			if err := json.Unmarshal([]byte(f.Data), &env); err != nil {
 				continue
 			}
 			if env.Type == eventType {
 				return f
 			}
 		case <-deadline:
-			t.Fatalf("no %s frame within 5s", eventType)
+			t.Fatalf("no %s frame within %s", eventType, testutil.GoroutineRaceTimeout)
 		}
 	}
 }
@@ -372,84 +325,80 @@ func fastPendingMonitor(t *testing.T) {
 	t.Cleanup(func() { pendingMonitorInterval = prev })
 }
 
+// assertPendingMonitorStopped fails unless the city's monitor has no lease
+// and no detection loop: with no loop, nothing can probe or publish.
+func assertPendingMonitorStopped(t *testing.T, cityPath string) {
+	t.Helper()
+	m := pendingMonitorFor(cityPath)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.refs != 0 || m.done != nil {
+		t.Fatalf("pending monitor for %s still running: refs=%d loop=%v", cityPath, m.refs, m.done != nil)
+	}
+}
+
 // The city event stream carries the pending and cleared transitions to a
 // client that only watches the stream.
 func TestCityEventStreamCarriesPendingTransitions(t *testing.T) {
 	fastPendingMonitor(t)
 	fs := newSessionFakeState(t)
 	srv := New(fs)
-	ts := httptest.NewServer(newTestCityHandlerWith(t, fs, srv))
-	defer ts.Close()
+	h := newTestCityHandlerWith(t, fs, srv)
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Waiting")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	frames := openEventStream(ctx, t, ts.URL, fs, "")
+	stream := openCityEventStream(t, h, fs, "")
 
 	fs.sp.SetPendingInteraction(info.SessionName, approvalFor("req-1"))
-	pending := waitForFrame(t, frames, events.SessionPending)
-	if !strings.Contains(pending.data, `"request_id":"req-1"`) || !strings.Contains(pending.data, `"prompt":"Bash: rm -rf build"`) {
-		t.Fatalf("session.pending frame lacks the interaction: %s", pending.data)
+	pending := waitForFrame(t, stream.frames, events.SessionPending)
+	if !strings.Contains(pending.Data, `"request_id":"req-1"`) || !strings.Contains(pending.Data, `"prompt":"Bash: rm -rf build"`) {
+		t.Fatalf("session.pending frame lacks the interaction: %s", pending.Data)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, ts.URL+cityURL(fs, "/session/")+info.ID+"/respond", strings.NewReader(`{"action":"approve","request_id":"req-1"}`))
-	if err != nil {
-		t.Fatalf("build respond request: %v", err)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/session/")+info.ID+"/respond", strings.NewReader(`{"action":"approve","request_id":"req-1"}`)))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("respond status = %d, want 202; body: %s", rec.Code, rec.Body.String())
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-GC-Request", "true")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("respond: %v", err)
-	}
-	resp.Body.Close() //nolint:errcheck
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("respond status = %d, want 202", resp.StatusCode)
-	}
-	cleared := waitForFrame(t, frames, events.SessionPendingCleared)
-	if !strings.Contains(cleared.data, `"request_id":"req-1"`) || !strings.Contains(cleared.data, `"reason":"resolved"`) {
-		t.Fatalf("session.pending_cleared frame = %s", cleared.data)
+	cleared := waitForFrame(t, stream.frames, events.SessionPendingCleared)
+	if !strings.Contains(cleared.Data, `"request_id":"req-1"`) || !strings.Contains(cleared.Data, `"reason":"resolved"`) {
+		t.Fatalf("session.pending_cleared frame = %s", cleared.Data)
 	}
 
-	// Many more polls: still exactly one of each.
-	time.Sleep(10 * pendingMonitorInterval)
+	// Many more detection passes over the same state: still exactly one of
+	// each. The passes run on the stream's own monitor, interleaved with its
+	// loop.
+	m := pendingMonitorFor(fs.cityPath)
+	for i := 0; i < 10; i++ {
+		m.cycle(srv)
+	}
 	if got := pendingTransitions(t, fs.eventProv); len(got) != 2 {
 		t.Fatalf("got %d transitions, want exactly 2: %#v", len(got), got)
 	}
 }
 
-// Detection costs nothing while no event stream is open for the city.
+// Detection costs nothing while no event stream is open for the city: the
+// monitor's loop exists only while a stream holds a lease.
 func TestPendingMonitorProbesOnlyWhileStreamOpen(t *testing.T) {
 	fastPendingMonitor(t)
 	fs := newSessionFakeState(t)
 	srv := New(fs)
-	ts := httptest.NewServer(newTestCityHandlerWith(t, fs, srv))
-	defer ts.Close()
+	h := newTestCityHandlerWith(t, fs, srv)
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Waiting")
 	fs.sp.SetPendingInteraction(info.SessionName, approvalFor("req-1"))
 
-	time.Sleep(10 * pendingMonitorInterval)
+	assertPendingMonitorStopped(t, fs.cityPath)
 	if n := fs.sp.CountCalls("Pending", info.SessionName); n != 0 {
 		t.Fatalf("probed %d times with no stream open, want 0", n)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	frames := openEventStream(ctx, t, ts.URL, fs, "")
-	waitForFrame(t, frames, events.SessionPending)
-	cancel()
-	for range frames { //nolint:revive // drain until the stream goroutine exits
-	}
-
+	stream := openCityEventStream(t, h, fs, "")
+	waitForFrame(t, stream.frames, events.SessionPending)
 	if n := fs.sp.CountCalls("Pending", info.SessionName); n == 0 {
 		t.Fatal("no probes while the stream was open")
 	}
-	waitForMonitorIdle(t, fs, info.SessionName)
-	idle := fs.sp.CountCalls("Pending", info.SessionName)
-	time.Sleep(10 * pendingMonitorInterval)
-	if n := fs.sp.CountCalls("Pending", info.SessionName); n != idle {
-		t.Fatalf("probed %d more times after the last stream closed, want 0", n-idle)
-	}
+	stream.stop()
+
+	assertPendingMonitorStopped(t, fs.cityPath)
 }
 
 // A client that resumes with Last-Event-ID receives the clear for an
@@ -458,48 +407,27 @@ func TestEventStreamResumeDeliversClearMissedWhileDisconnected(t *testing.T) {
 	fastPendingMonitor(t)
 	fs := newSessionFakeState(t)
 	srv := New(fs)
-	ts := httptest.NewServer(newTestCityHandlerWith(t, fs, srv))
-	defer ts.Close()
+	h := newTestCityHandlerWith(t, fs, srv)
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Waiting")
 	fs.sp.SetPendingInteraction(info.SessionName, approvalFor("req-1"))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	frames := openEventStream(ctx, t, ts.URL, fs, "")
-	pending := waitForFrame(t, frames, events.SessionPending)
-	cancel()
-	for range frames { //nolint:revive // drain until the stream goroutine exits
-	}
-	waitForMonitorIdle(t, fs, info.SessionName)
+	stream := openCityEventStream(t, h, fs, "")
+	pending := waitForFrame(t, stream.frames, events.SessionPending)
+	stream.stop()
+	assertPendingMonitorStopped(t, fs.cityPath)
 
-	// Answered at the terminal while nobody watches.
+	// Answered at the terminal while nobody watches. With the monitor stopped
+	// nothing observes it until a client returns.
 	fs.sp.SetPendingInteraction(info.SessionName, nil)
-	time.Sleep(5 * pendingMonitorInterval)
 	if got := pendingTransitions(t, fs.eventProv); len(got) != 1 {
 		t.Fatalf("got %d transitions while disconnected, want only the pending: %#v", len(got), got)
 	}
 
-	ctx2, cancel2 := context.WithCancel(context.Background())
-	defer cancel2()
-	resumed := openEventStream(ctx2, t, ts.URL, fs, pending.id)
-	cleared := waitForFrame(t, resumed, events.SessionPendingCleared)
-	if !strings.Contains(cleared.data, `"request_id":"req-1"`) {
-		t.Fatalf("resumed clear = %s, want req-1", cleared.data)
+	resumed := openCityEventStream(t, h, fs, pending.ID)
+	cleared := waitForFrame(t, resumed.frames, events.SessionPendingCleared)
+	if !strings.Contains(cleared.Data, `"request_id":"req-1"`) {
+		t.Fatalf("resumed clear = %s, want req-1", cleared.Data)
 	}
-}
-
-// waitForMonitorIdle waits until the monitor stops probing sessionName.
-func waitForMonitorIdle(t *testing.T, fs *fakeState, sessionName string) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		before := fs.sp.CountCalls("Pending", sessionName)
-		time.Sleep(5 * pendingMonitorInterval)
-		if fs.sp.CountCalls("Pending", sessionName) == before {
-			return
-		}
-	}
-	t.Fatal("monitor kept probing after the last stream closed")
 }
 
 // The supervisor-scope stream carries pending transitions for every city it

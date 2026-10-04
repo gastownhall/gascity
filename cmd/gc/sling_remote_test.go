@@ -25,6 +25,21 @@ func remoteTestTarget(url string) *remoteTarget {
 	return &remoteTarget{BaseURL: url, CityName: "mc", Source: remoteSourceURLFlag}
 }
 
+// newCannedSlingServer serves resp as the JSON answer to every request and
+// records the last request body. It is closed when the test ends.
+func newCannedSlingServer(t *testing.T, resp string) (*httptest.Server, *string) {
+	t.Helper()
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(resp))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &gotBody
+}
+
 func TestParseSlingVars(t *testing.T) {
 	m, err := parseSlingVars([]string{"a=1", "b=two=parts"})
 	if err != nil {
@@ -214,14 +229,7 @@ func TestCmdSlingRemote_ForwardsMetadataFlags(t *testing.T) {
 // goes through the same sling.(*Sling).Dispatch as the local CLI, so a convoy is
 // expanded per child on both sides.
 func TestCmdSlingRemote_ForwardsOn(t *testing.T) {
-	var gotBody string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		gotBody = string(b)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"slung","target":"mayor","formula":"review","attached_bead_id":"BL-3","mode":"attached"}`))
-	}))
-	defer srv.Close()
+	srv, gotBody := newCannedSlingServer(t, `{"status":"slung","target":"mayor","formula":"review","attached_bead_id":"BL-3","mode":"attached"}`)
 
 	var out, errb bytes.Buffer
 	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"mayor", "BL-3"},
@@ -230,12 +238,12 @@ func TestCmdSlingRemote_ForwardsOn(t *testing.T) {
 		t.Fatalf("exit %d; stderr=%q", code, errb.String())
 	}
 	for _, want := range []string{`"formula":"review"`, `"attached_bead_id":"BL-3"`} {
-		if !strings.Contains(gotBody, want) {
-			t.Errorf("body %q missing %q", gotBody, want)
+		if !strings.Contains(*gotBody, want) {
+			t.Errorf("body %q missing %q", *gotBody, want)
 		}
 	}
-	if strings.Contains(gotBody, `"bead":`) {
-		t.Errorf("body %q carries bead alongside attached_bead_id; the API treats them as mutually exclusive", gotBody)
+	if strings.Contains(*gotBody, `"bead":`) {
+		t.Errorf("body %q carries bead alongside attached_bead_id; the API treats them as mutually exclusive", *gotBody)
 	}
 }
 
@@ -243,11 +251,7 @@ func TestCmdSlingRemote_ForwardsOn(t *testing.T) {
 // carries the convoy_id, molecule_id and batch fields POST /sling now returns,
 // under the same names the local `gc sling --json` uses.
 func TestCmdSlingRemote_JSONCarriesConvoyAndBatch(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"slung","target":"mayor","bead":"BL-1","mode":"direct","molecule_id":"BL-m","convoy_id":"BL-c","batch":{"container_type":"convoy","total":3,"routed":2,"failed":0,"skipped":1,"idempotent":1}}`))
-	}))
-	defer srv.Close()
+	srv, _ := newCannedSlingServer(t, `{"status":"slung","target":"mayor","bead":"BL-1","mode":"direct","molecule_id":"BL-m","convoy_id":"BL-c","batch":{"container_type":"convoy","total":3,"routed":2,"failed":0,"skipped":1,"idempotent":1}}`)
 
 	var out, errb bytes.Buffer
 	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"mayor", "BL-1"},
