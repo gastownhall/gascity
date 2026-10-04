@@ -149,12 +149,8 @@ func TestDismissFeedbackSurveyModalAgainstDebouncedSurvey(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			model := test.model
 
-			present, err := dismissFeedbackSurveyModal(feedbackSurveySessionFixture, model.capture, model.sendKeys, model.sleep)
-			if err != nil {
+			if err := dismissFeedbackSurveyModal(model.capture, model.sendKeys, model.sleep); err != nil {
 				t.Fatalf("dismissFeedbackSurveyModal error = %v", err)
-			}
-			if !present {
-				t.Fatal("dismissFeedbackSurveyModal reported no survey")
 			}
 			if got := strings.Join(model.keys, ","); got != test.wantKeys {
 				t.Fatalf("keys = %q, want %q", got, test.wantKeys)
@@ -179,15 +175,12 @@ func TestDismissFeedbackSurveyModalAgainstDebouncedSurvey(t *testing.T) {
 			}
 			return multilineDraft, nil
 		}
-		present, err := dismissFeedbackSurveyModal(feedbackSurveySessionFixture, capture, func(sent ...string) error {
+		err := dismissFeedbackSurveyModal(capture, func(sent ...string) error {
 			keys = append(keys, sent...)
 			return nil
 		}, func(time.Duration) {})
 		if !errors.Is(err, errFeedbackSurveyDigitUnresolved) {
 			t.Fatalf("dismissFeedbackSurveyModal error = %v, want %v so the nudge does not submit onto the draft", err, errFeedbackSurveyDigitUnresolved)
-		}
-		if !present {
-			t.Fatal("dismissFeedbackSurveyModal reported no survey")
 		}
 		if got := strings.Join(keys, ","); got != "0" {
 			t.Fatalf("keys = %q, want %q when a continuation row contains a draft", got, "0")
@@ -234,12 +227,8 @@ func TestDismissFeedbackSurveyModalRecaptureFailure(t *testing.T) {
 				return feedbackSurveySessionFixture, nil
 			}
 
-			present, err := dismissFeedbackSurveyModal(feedbackSurveySessionFixture, capture, sendKeys, func(time.Duration) {})
-			if !errors.Is(err, test.wantErr) {
+			if err := dismissFeedbackSurveyModal(capture, sendKeys, func(time.Duration) {}); !errors.Is(err, test.wantErr) {
 				t.Fatalf("dismissFeedbackSurveyModal error = %v, want %v", err, test.wantErr)
-			}
-			if !present {
-				t.Fatal("dismissFeedbackSurveyModal reported no survey")
 			}
 			if got := strings.Join(keys, ","); got != test.wantKeys {
 				t.Fatalf("keys = %q, want %q", got, test.wantKeys)
@@ -381,7 +370,7 @@ func TestDismissFeedbackSurveyModalReportsUnreadableComposerAfterDigit(t *testin
 		}
 		return "⏺ Done — pushed the branch and replied on the PR.", nil
 	}
-	_, err := dismissFeedbackSurveyModal(feedbackSurveySessionFixture, capture, func(sent ...string) error {
+	err := dismissFeedbackSurveyModal(capture, func(sent ...string) error {
 		keys = append(keys, sent...)
 		return nil
 	}, func(time.Duration) {})

@@ -3187,31 +3187,28 @@ const (
 
 var errFeedbackSurveyDigitUnresolved = errors.New("feedback survey dismiss digit sent but the composer was left unreadable or holding other input")
 
-func dismissFeedbackSurveyModal(content string, capture func() (string, error), sendKeys func(keys ...string) error, sleep func(time.Duration)) (bool, error) {
-	if !runtime.ContainsFeedbackSurveyModal(content) {
-		return false, nil
-	}
+func dismissFeedbackSurveyModal(capture func() (string, error), sendKeys func(keys ...string) error, sleep func(time.Duration)) error {
 	sleep(feedbackSurveyMountGuard)
 	content, err := capture()
 	if err != nil || !runtime.ContainsFeedbackSurveyModal(content) {
-		return true, nil
+		return nil
 	}
 	if composer, observed := feedbackSurveyComposer(content); !observed || composer != "" {
-		return true, nil
+		return nil
 	}
 	if err := sendKeys("0"); err != nil {
-		return true, err
+		return err
 	}
 	composer, surveyGone, err := awaitFeedbackSurveyDigit(capture, sleep)
 	switch {
 	case err != nil:
-		return true, err
+		return err
 	case composer == "0", composer == "" && !surveyGone:
-		return true, sendKeys("C-u")
+		return sendKeys("C-u")
 	case composer != "":
-		return true, errFeedbackSurveyDigitUnresolved
+		return errFeedbackSurveyDigitUnresolved
 	}
-	return true, nil
+	return nil
 }
 
 func awaitFeedbackSurveyDigit(capture func() (string, error), sleep func(time.Duration)) (string, bool, error) {
@@ -3299,8 +3296,7 @@ func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) error {
 	if attached, err := t.SessionAttachedWithError(session); err != nil || attached {
 		return nil
 	}
-	_, err = dismissFeedbackSurveyModal(content, capture, sendKeys, time.Sleep)
-	return err
+	return dismissFeedbackSurveyModal(capture, sendKeys, time.Sleep)
 }
 
 // GetPaneCommand returns the current command running in a pane.
