@@ -41,6 +41,8 @@ func main(){
 		fmt.Print("⏺ Done — pushed the branch and replied on the PR.\n\n" + survey)
 	}
 	composer()
+	shown := time.Now()
+	accepts := func() bool { return visible && input == "0" && time.Since(shown) >= 600*time.Millisecond }
 	dismiss := func() {
 		visible = false
 		input = ""
@@ -63,7 +65,7 @@ func main(){
 		case b == 0x15:
 			input = ""
 		case b == '\r' || b == '\n':
-			if visible && input == "0" {
+			if accepts() {
 				dismiss()
 				mu.Unlock()
 				continue
@@ -74,7 +76,7 @@ func main(){
 			input += string(b)
 		}
 		composer()
-		if visible && input == "0" {
+		if accepts() {
 			timer = time.AfterFunc(400*time.Millisecond, func() {
 				mu.Lock()
 				defer mu.Unlock()
@@ -111,8 +113,18 @@ func startFeedbackSurveyAgent(t *testing.T, tm *Tmux, mode string) (session, key
 		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
 	}
 	t.Cleanup(func() { _ = tm.KillSession(session) })
-	time.Sleep(300 * time.Millisecond)
-	return session, keyLog
+	ready := map[string]string{"survey": "0: Dismiss", "stale": "SURVEY_DISMISSED"}[mode]
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		pane, err := tm.CapturePaneAll(session)
+		if err == nil && strings.Contains(pane, ready) {
+			return session, keyLog
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("fake survey agent never drew %q (capture err %v):\n%s", ready, err, pane)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func readFeedbackSurveyKeyLog(t *testing.T, path string) string {

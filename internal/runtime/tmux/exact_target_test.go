@@ -301,7 +301,7 @@ func TestInputOpsTargetExactPane(t *testing.T) {
 		},
 		{
 			"DismissFeedbackSurveyModalIfPresent",
-			scriptedTargetExecutor{captures: []string{feedbackSurveySessionFixture}},
+			scriptedTargetExecutor{captures: []string{feedbackSurveySessionFixture, feedbackSurveySessionFixture}},
 			func(tm *Tmux) { tm.DismissFeedbackSurveyModalIfPresent("worker-1") },
 			[]string{"capture-pane", "send-keys"},
 		},

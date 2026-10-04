@@ -74,10 +74,14 @@ func TestFeedbackSurveyParkedPaneReadsIdle(t *testing.T) {
 	}
 }
 
-const claudeSurveyDigitDebounce = 400 * time.Millisecond
+const (
+	claudeSurveyDigitDebounce = 400 * time.Millisecond
+	claudeSurveyMountDelay    = 600 * time.Millisecond
+)
 
 type claudeSurveyModel struct {
 	visible      bool
+	mountedAt    time.Duration
 	ignoreDigits bool
 	input        string
 	now          time.Duration
@@ -110,7 +114,8 @@ func (m *claudeSurveyModel) sendKeys(keys ...string) error {
 		} else {
 			m.input += key
 		}
-		m.pending = m.visible && !m.ignoreDigits && len(m.input) == 1 && strings.ContainsAny(m.input, "0123")
+		mounted := m.now-m.mountedAt >= claudeSurveyMountDelay
+		m.pending = m.visible && mounted && !m.ignoreDigits && len(m.input) == 1 && strings.ContainsAny(m.input, "0123")
 		m.pendingSince = m.now
 	}
 	return nil
@@ -133,10 +138,11 @@ func TestDismissFeedbackSurveyModalAgainstDebouncedSurvey(t *testing.T) {
 		wantVisible bool
 		wantInput   string
 	}{
-		{"waits out the debounce so the survey consumes the digit", claudeSurveyModel{visible: true}, "0", false, ""},
-		{"clears stray digit when survey is already gone", claudeSurveyModel{}, "0,C-u", false, ""},
-		{"clears digit the survey ignored", claudeSurveyModel{visible: true, ignoreDigits: true}, "0,C-u", true, ""},
-		{"leaves a human draft in place", claudeSurveyModel{visible: true, input: "draft"}, "0", true, "draft0"},
+		{"waits out the debounce so the survey consumes the digit", claudeSurveyModel{visible: true, mountedAt: -time.Minute}, "0", false, ""},
+		{"waits out the mount window of a fresh survey", claudeSurveyModel{visible: true}, "0", false, ""},
+		{"sends nothing once the survey is gone", claudeSurveyModel{}, "", false, ""},
+		{"clears digit the survey ignored", claudeSurveyModel{visible: true, mountedAt: -time.Minute, ignoreDigits: true}, "0,C-u", true, ""},
+		{"leaves a human draft untouched", claudeSurveyModel{visible: true, mountedAt: -time.Minute, input: "draft"}, "", true, "draft"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -155,31 +161,49 @@ func TestDismissFeedbackSurveyModalAgainstDebouncedSurvey(t *testing.T) {
 			if model.visible != test.wantVisible || model.input != test.wantInput {
 				t.Fatalf("survey visible = %t, composer = %q; want visible %t, composer %q", model.visible, model.input, test.wantVisible, test.wantInput)
 			}
-			if model.now > feedbackSurveyDigitDeadline {
-				t.Fatalf("waited %s, beyond the %s deadline", model.now, feedbackSurveyDigitDeadline)
+			if limit := feedbackSurveyMountGuard + feedbackSurveyDigitDeadline; model.now > limit {
+				t.Fatalf("waited %s, beyond the %s limit", model.now, limit)
 			}
 		})
 	}
 }
 
-func TestDismissFeedbackSurveyModalClearsDigitWhenRecaptureFails(t *testing.T) {
+func TestDismissFeedbackSurveyModalRecaptureFailure(t *testing.T) {
 	captureErr := errors.New("capture failed")
-	var keys []string
-	sendKeys := func(sent ...string) error {
-		keys = append(keys, sent...)
-		return nil
-	}
-	capture := func() (string, error) { return "", captureErr }
+	for _, test := range []struct {
+		name               string
+		successfulCaptures int
+		wantKeys           string
+	}{
+		{"before the digit sends nothing", 0, ""},
+		{"after the digit clears it", 1, "0,C-u"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var keys []string
+			sendKeys := func(sent ...string) error {
+				keys = append(keys, sent...)
+				return nil
+			}
+			captures := 0
+			capture := func() (string, error) {
+				captures++
+				if captures > test.successfulCaptures {
+					return "", captureErr
+				}
+				return feedbackSurveySessionFixture, nil
+			}
 
-	present, err := dismissFeedbackSurveyModal(feedbackSurveySessionFixture, capture, sendKeys, func(time.Duration) {})
-	if !errors.Is(err, captureErr) {
-		t.Fatalf("dismissFeedbackSurveyModal error = %v, want %v", err, captureErr)
-	}
-	if !present {
-		t.Fatal("dismissFeedbackSurveyModal reported no survey")
-	}
-	if got := strings.Join(keys, ","); got != "0,C-u" {
-		t.Fatalf("keys = %q, want %q", got, "0,C-u")
+			present, err := dismissFeedbackSurveyModal(feedbackSurveySessionFixture, capture, sendKeys, func(time.Duration) {})
+			if !errors.Is(err, captureErr) {
+				t.Fatalf("dismissFeedbackSurveyModal error = %v, want %v", err, captureErr)
+			}
+			if !present {
+				t.Fatal("dismissFeedbackSurveyModal reported no survey")
+			}
+			if got := strings.Join(keys, ","); got != test.wantKeys {
+				t.Fatalf("keys = %q, want %q", got, test.wantKeys)
+			}
+		})
 	}
 }
 
@@ -221,7 +245,7 @@ func TestDismissFeedbackSurveyModalIgnoresSurveyOnlyInScrollback(t *testing.T) {
 
 func TestDismissFeedbackSurveyModalSendsOneDigitWhileSurveyPersists(t *testing.T) {
 	executor := &scriptedTargetExecutor{
-		captures: []string{feedbackSurveySessionFixture},
+		captures: []string{feedbackSurveySessionFixture, feedbackSurveySessionFixture},
 		capture:  strings.Replace(feedbackSurveySessionFixture, "│ ❯   ", "│ ❯ 0 ", 1),
 	}
 	tm := &Tmux{cfg: DefaultConfig(), exec: executor}

@@ -3184,6 +3184,7 @@ func (t *Tmux) DismissModelSwitchModalIfPresent(session string) {
 }
 
 const (
+	feedbackSurveyMountGuard        = 600 * time.Millisecond
 	feedbackSurveyDigitPollInterval = 100 * time.Millisecond
 	feedbackSurveyDigitDeadline     = time.Second
 )
@@ -3192,27 +3193,46 @@ func dismissFeedbackSurveyModal(content string, capture func() (string, error), 
 	if !runtime.ContainsFeedbackSurveyModal(content) {
 		return false, nil
 	}
+	sleep(feedbackSurveyMountGuard)
+	content, err := capture()
+	if err != nil {
+		return true, err
+	}
+	if composer, observed := feedbackSurveyComposer(content); !runtime.ContainsFeedbackSurveyModal(content) || !observed || composer != "" {
+		return true, nil
+	}
 	if err := sendKeys("0"); err != nil {
 		return true, err
 	}
-	for waited := time.Duration(0); waited < feedbackSurveyDigitDeadline; {
+	content, err = awaitFeedbackSurveyDigit(capture, sleep)
+	if err != nil {
+		return true, errors.Join(err, sendKeys("C-u"))
+	}
+	if composer, observed := feedbackSurveyComposer(content); observed && composer == "0" {
+		return true, sendKeys("C-u")
+	}
+	return true, nil
+}
+
+func awaitFeedbackSurveyDigit(capture func() (string, error), sleep func(time.Duration)) (string, error) {
+	var content string
+	for waited := time.Duration(0); waited < feedbackSurveyDigitDeadline; waited += feedbackSurveyDigitPollInterval {
 		sleep(feedbackSurveyDigitPollInterval)
-		waited += feedbackSurveyDigitPollInterval
 		var err error
 		content, err = capture()
 		if err != nil {
-			return true, errors.Join(err, sendKeys("C-u"))
+			return "", err
 		}
 		if !runtime.ContainsFeedbackSurveyModal(content) {
 			break
 		}
 	}
+	return content, nil
+}
+
+func feedbackSurveyComposer(content string) (string, bool) {
 	remainder, observed := lastComposerRemainder(strings.Split(content, "\n"), DefaultReadyPromptPrefix)
-	composer := strings.TrimSpace(strings.TrimRight(strings.TrimSpace(remainder), "│┃"))
-	if observed && composer == "0" {
-		return true, sendKeys("C-u")
-	}
-	return true, nil
+	return strings.TrimSpace(strings.TrimRight(strings.TrimSpace(remainder), "│┃")), observed
 }
 
 // DismissFeedbackSurveyModalIfPresent clears Claude Code's post-turn
