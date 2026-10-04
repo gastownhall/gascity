@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
@@ -18,7 +19,7 @@ const (
 
 type nudgeReference = nudgequeue.Reference
 
-// openNudgeBeadStore is a test seam (mirrors the injectable vars in
+// openNudgeBeadStoreWithConfig is a test seam (mirrors the injectable vars in
 // cmd_nudge.go) so tests can substitute a fake store and assert that
 // per-tick poll helpers close every store they open. Tests that replace this
 // package variable must stay serial; do not use t.Parallel in those tests.
@@ -27,6 +28,10 @@ type nudgeReference = nudgequeue.Reference
 // every leaf nudge-bead helper; the wrapper carries the same underlying store
 // value (identity to the work store until the nudges class relocates).
 //
+// It takes the city config so a caller that already loaded it (the drain path
+// resolves its target from the same config) does not pay the full city+pack
+// TOML load again inside the store open; nil keeps the loading behavior.
+//
 // It discards the opened handle, so a caller of this form can never close the
 // work store the call opened. Once the nudges class relocates, that work store
 // is not the store returned, so it stays open (leaks) for the life of the
@@ -34,9 +39,15 @@ type nudgeReference = nudgequeue.Reference
 // A frame that closes what it opened must use openOwnedNudgeBeadStore and close
 // the returned handle, never the class store: closing the class store on a
 // relocated city is the bug openOwnedNudgeBeadStore exists to prevent.
-var openNudgeBeadStore = func(cityPath string) beads.NudgesStore {
-	store, _ := openOwnedNudgeBeadStore(cityPath)
+var openNudgeBeadStoreWithConfig = func(cityPath string, cfg *config.City) beads.NudgesStore {
+	store, _ := openOwnedNudgeBeadStoreWithConfig(cityPath, cfg)
 	return store
+}
+
+// openNudgeBeadStore is openNudgeBeadStoreWithConfig for callers with no
+// config in hand.
+func openNudgeBeadStore(cityPath string) beads.NudgesStore {
+	return openNudgeBeadStoreWithConfig(cityPath, nil)
 }
 
 // openOwnedNudgeBeadStore is the owning-frame form of openNudgeBeadStore: it
@@ -58,12 +69,19 @@ var openNudgeBeadStore = func(cityPath string) beads.NudgesStore {
 // resolver, and is how this bug class reproduces
 // (scripts/residency-boundary-patterns.txt, rule b).
 //
-// It is a seam for the same reason openNudgeBeadStore is, and is the one the
-// counting fake replaces: openNudgeBeadStore delegates here, so a test that
-// substitutes this var moves both forms at once and the two can never disagree.
-var openOwnedNudgeBeadStore = func(cityPath string) (beads.NudgesStore, beads.Store) {
-	store, opened, _ := openNudgeBeadStoreOwned(cityPath)
+// It is a seam for the same reason openNudgeBeadStoreWithConfig is, and is the
+// one the counting fake replaces: openNudgeBeadStoreWithConfig delegates here,
+// so a test that substitutes this var moves both forms at once and the two can
+// never disagree.
+var openOwnedNudgeBeadStoreWithConfig = func(cityPath string, cfg *config.City) (beads.NudgesStore, beads.Store) {
+	store, opened, _ := openNudgeBeadStoreOwned(cityPath, cfg)
 	return store, opened
+}
+
+// openOwnedNudgeBeadStore is openOwnedNudgeBeadStoreWithConfig for callers with
+// no config in hand.
+var openOwnedNudgeBeadStore = func(cityPath string) (beads.NudgesStore, beads.Store) {
+	return openOwnedNudgeBeadStoreWithConfig(cityPath, nil)
 }
 
 // openNudgeBeadStoreErr is openNudgeBeadStore with the open failure kept instead
@@ -76,7 +94,13 @@ var openOwnedNudgeBeadStore = func(cityPath string) (beads.NudgesStore, beads.St
 // use this form and print the reason; the seam above stays for the poll/drain
 // helpers whose contract is already "a nil store means do nothing".
 func openNudgeBeadStoreErr(cityPath string) (beads.NudgesStore, error) {
-	store, _, err := openNudgeBeadStoreOwned(cityPath)
+	return openNudgeBeadStoreErrWithConfig(cityPath, nil)
+}
+
+// openNudgeBeadStoreErrWithConfig is openNudgeBeadStoreErr reusing an
+// already-loaded city config (nil loads it).
+func openNudgeBeadStoreErrWithConfig(cityPath string, cfg *config.City) (beads.NudgesStore, error) {
+	store, _, err := openNudgeBeadStoreOwned(cityPath, cfg)
 	return store, err
 }
 
@@ -84,13 +108,16 @@ func openNudgeBeadStoreErr(cityPath string) (beads.NudgesStore, error) {
 // a seam so tests can count, per handle, that each owning frame closes the work
 // store it opened exactly once, including on a relocated city where that handle
 // is not the class store the frame uses. Tests that replace it must stay serial.
-var openNudgeWorkStore = openStoreAtForCity
+// The cfg is the caller's already-loaded city config (nil loads).
+var openNudgeWorkStore = func(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
+	return openStoreAtForCityWithConfig(storePath, cityPath, cfg)
+}
 
 // openNudgeBeadStoreOwned is the one place the nudges-class store is opened, so
 // the class store and the handle the call opened are decided together. Every
 // form above is a projection of it.
-func openNudgeBeadStoreOwned(cityPath string) (beads.NudgesStore, beads.Store, error) {
-	store, err := openNudgeWorkStore(cityPath, cityPath)
+func openNudgeBeadStoreOwned(cityPath string, cfg *config.City) (beads.NudgesStore, beads.Store, error) {
+	store, err := openNudgeWorkStore(cityPath, cityPath, cfg)
 	if err != nil {
 		return beads.NudgesStore{}, nil, fmt.Errorf("opening the city store at %q: %w", cityPath, err)
 	}

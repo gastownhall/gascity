@@ -5926,13 +5926,13 @@ func installCountingNudgeStoreSeam(t *testing.T) (opens, closes *int) {
 	t.Helper()
 	backing := beads.NewMemStore()
 	var openCount, closeCount int
-	prev := openOwnedNudgeBeadStore
-	openOwnedNudgeBeadStore = func(string) (beads.NudgesStore, beads.Store) {
+	prev := openOwnedNudgeBeadStoreWithConfig
+	openOwnedNudgeBeadStoreWithConfig = func(string, *config.City) (beads.NudgesStore, beads.Store) {
 		openCount++
 		store := &countingNudgeStore{MemStore: backing, closes: &closeCount}
 		return beads.NudgesStore{Store: store}, store
 	}
-	t.Cleanup(func() { openOwnedNudgeBeadStore = prev })
+	t.Cleanup(func() { openOwnedNudgeBeadStoreWithConfig = prev })
 	return &openCount, &closeCount
 }
 
@@ -6467,13 +6467,13 @@ func setupNudgeDrainInjectFastPathCity(t *testing.T) (cityDir string, targetOpen
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_ALIAS", "worker")
 
-	previous := openNudgeBeadStore
+	previous := openOwnedNudgeBeadStoreWithConfig
 	opens := 0
-	openNudgeBeadStore = func(string) beads.NudgesStore {
+	openOwnedNudgeBeadStoreWithConfig = func(string, *config.City) (beads.NudgesStore, beads.Store) {
 		opens++
-		return beads.NudgesStore{}
+		return beads.NudgesStore{}, nil
 	}
-	t.Cleanup(func() { openNudgeBeadStore = previous })
+	t.Cleanup(func() { openOwnedNudgeBeadStoreWithConfig = previous })
 	return cityDir, &opens
 }
 

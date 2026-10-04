@@ -58,6 +58,7 @@ func resolveSessionRuntimeTarget(identifier string, warningWriter ...io.Writer) 
 	if err != nil {
 		return sessionRuntimeTarget{}, err
 	}
+	defer discardNudgeTargetStore(&target)
 	display := target.agentKey()
 	if display == "" {
 		display = target.sessionName

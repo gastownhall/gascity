@@ -2757,6 +2757,7 @@ func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, jsonOutput bool,
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	defer discardNudgeTargetStore(&targetInfo)
 	return deliverSessionNudge(targetInfo, message, delivery, jsonOutput, stdout, stderr)
 }
 
