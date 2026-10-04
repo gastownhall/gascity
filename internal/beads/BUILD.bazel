@@ -153,6 +153,7 @@ go_test(
         "native_dolt_store_parent_namespace_test.go",
         "native_dolt_store_read_roles_test.go",
         "native_dolt_store_reader_doubles_test.go",
+        "native_dolt_store_ready_outcome_fanout_test.go",
         "native_dolt_store_ready_projection_internal_test.go",
         "native_dolt_store_reconnect_test.go",
         "native_dolt_store_release_role_test.go",

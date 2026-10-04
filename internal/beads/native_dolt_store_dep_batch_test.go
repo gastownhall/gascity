@@ -34,12 +34,23 @@ type edgeFixtureReader struct {
 	edges    map[string][]*issueops.Dependency
 	requests []issueops.EdgeReadRequest
 	err      error
+
+	// maxIDs, when nonzero, mirrors the server's own ReadEdges anchor cap
+	// (nativeServerEdgeAnchorCap / bd-enterprise's maxDependencyAnchors): a
+	// request naming more than this many ids is refused outright, the way a
+	// real bd-serve refuses the WHOLE call rather than serving the first
+	// maxIDs and dropping the rest. Zero means unbounded, matching every
+	// fixture above that predates the server's cap being enforced here.
+	maxIDs int
 }
 
 func (r *edgeFixtureReader) ReadEdges(_ context.Context, req issueops.EdgeReadRequest) (issueops.EdgeReadResult, error) {
 	r.requests = append(r.requests, req)
 	if r.err != nil {
 		return issueops.EdgeReadResult{}, r.err
+	}
+	if r.maxIDs > 0 && len(req.IDs) > r.maxIDs {
+		return issueops.EdgeReadResult{}, fmt.Errorf("invalid_argument: at most %d issue_id values per request, got %d", r.maxIDs, len(req.IDs))
 	}
 	seen := make(map[string]bool, len(req.IDs))
 	result := issueops.EdgeReadResult{}
@@ -219,6 +230,55 @@ func TestDepListBatchChunksALargeAnchorListWithoutLosingAnchors(t *testing.T) {
 	for _, id := range ids {
 		if len(got[id]) != 1 || got[id][0].DependsOnID != "gc-root" {
 			t.Fatalf("anchor %s = %+v, want its one edge", id, got[id])
+		}
+	}
+}
+
+// realBdServeReadEdgesAnchorCap is the ReadEdges anchor cap a real bd-serve
+// enforces at the pinned enterprise revision (bd-enterprise
+// internal/httpapi/edges.go: maxDependencyAnchors = 100), confirmed live
+// against a real server with a 130-id request. It is written as a LITERAL
+// here, deliberately independent of nativeServerEdgeAnchorCap /
+// nativeDepListBatchChunk, so this test exercises the real, fixed wire limit
+// rather than a mutation-proof-defeating tautology against whatever value the
+// production constant happens to hold.
+const realBdServeReadEdgesAnchorCap = 100
+
+// TestDepListBatchNeverExceedsTheServerAnchorCap pins nativeDepListBatchChunk
+// to the server's own ReadEdges anchor cap rather than an arbitrary, larger
+// client-side batch size.
+//
+// Red before S5b-portrev item 2: nativeDepListBatchChunk was 500, which rode
+// fine against the embedded DoltliteReadStore's own (unrelated) cap of the
+// same name, but exceeds the 100-issue_id-per-request cap a real bd-serve
+// enforces over http — confirmed live, where a batch over the cap is refused
+// outright ("400 invalid_argument: at most 100 issue_id values per request").
+// A fake EdgeReader pinned to the real server's cap (not to whatever
+// production constant this test is meant to be checking) catches any future
+// drift back above it, the way nothing in this package could before this test
+// existed.
+func TestDepListBatchNeverExceedsTheServerAnchorCap(t *testing.T) {
+	const anchors = realBdServeReadEdgesAnchorCap*2 + 30
+	fixture := make(map[string][]*issueops.Dependency, anchors)
+	ids := make([]string, 0, anchors)
+	for i := range anchors {
+		id := fmt.Sprintf("gc-%d", i)
+		ids = append(ids, id)
+		fixture[id] = []*issueops.Dependency{{IssueID: id, DependsOnID: "gc-root", Type: beadslib.DepBlocks}}
+	}
+	store, reader := newEdgeFixtureStore(fixture)
+	reader.maxIDs = realBdServeReadEdgesAnchorCap
+
+	got, err := store.DepListBatch(ids)
+	if err != nil {
+		t.Fatalf("DepListBatch: %v, want chunking to keep every ReadEdges call at or under the server's %d-anchor cap", err, realBdServeReadEdgesAnchorCap)
+	}
+	if len(got) != anchors {
+		t.Fatalf("DepListBatch answered %d anchors, want %d", len(got), anchors)
+	}
+	for _, req := range reader.requests {
+		if len(req.IDs) > realBdServeReadEdgesAnchorCap {
+			t.Fatalf("one ReadEdges call carried %d anchors, want <= %d (the server's own cap)", len(req.IDs), realBdServeReadEdgesAnchorCap)
 		}
 	}
 }

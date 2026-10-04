@@ -191,10 +191,25 @@ func anchorDeps(id string, anchor issueops.AnchorEdges) []Dep {
 	return deps
 }
 
-// nativeDepListBatchChunk caps how many anchors ride one read, matching
-// DoltliteReadStore's cap beside it. It bounds the statement the backend builds
-// without giving back the round-trip saving the batch exists for.
-const nativeDepListBatchChunk = 500
+// nativeServerEdgeAnchorCap is the server's own ReadEdges anchor cap
+// (bd-enterprise internal/httpapi/edges.go: maxDependencyAnchors = 100),
+// enforced on both the dependencies and dependents edge endpoints as a 400
+// invalid_argument rejecting the WHOLE call once a request names more anchors
+// than this — confirmed live against a real bd-serve at the pinned enterprise
+// revision. It is the single source of truth for every ReadEdges chunk size in
+// this package (nativeDepListBatchChunk here, and
+// filterReadyByWorkOutcome's chunking in native_dolt_store_read_roles.go), so
+// a client-side chunk can never silently drift wider than what the server
+// actually enforces (S5b-portrev item 2).
+const nativeServerEdgeAnchorCap = 100
+
+// nativeDepListBatchChunk caps how many anchors ride one read, matching the
+// server's own ReadEdges anchor cap (nativeServerEdgeAnchorCap) rather than an
+// arbitrary, larger client-side batch size: DepListBatch rode the embedded
+// DoltliteReadStore's cap before S5b, and that cap was never checked against
+// what a served bd-serve actually enforces over http, where a batch wider than
+// the server's cap fails the WHOLE chunk outright (S5b-portrev item 2).
+const nativeDepListBatchChunk = nativeServerEdgeAnchorCap
 
 // DepListBatch returns the DOWN edges of many anchors in one round trip.
 //
