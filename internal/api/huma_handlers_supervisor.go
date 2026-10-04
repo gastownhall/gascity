@@ -855,6 +855,10 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 		cursor = strings.TrimSpace(input.AfterCursor)
 	}
 
+	// Subscribe to city-set changes before reading the city set, so a city
+	// that starts while the stream is still connecting closes this channel
+	// and is attached by the loop below instead of waiting for the resync.
+	changes := sm.cityChanges()
 	mux := sm.buildMultiplexer()
 	// Resolve per-city cursors so no city falls through to Watch(0) full-history
 	// replay: head-start clients start every city from now, and a resume cursor
@@ -884,7 +888,6 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 	// The city set is not fixed at connect time (#6861): attach cities that
 	// start after the client connected and detach cities that go away,
 	// whenever the resolver signals a change and on a slow periodic resync.
-	changes := sm.cityChanges()
 	resync := time.NewTicker(sm.eventStreamResyncInterval())
 	defer resync.Stop()
 	replayNewCitiesFromZero := cursor == "0"

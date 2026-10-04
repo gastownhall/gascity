@@ -339,3 +339,44 @@ func TestSupervisorGlobalEventStreamResyncsWithoutChangeNotifier(t *testing.T) {
 	frame, data := stream.nextTaggedEvent(t)
 	assertTaggedEvent(t, frame, data, "beta", "beta-1", "alpha:0,beta:1")
 }
+
+// startOnStreamAttachProvider runs start when the stream itself attaches to it.
+// The supervisor stream attaches twice: its precheck probes every provider and
+// closes the probe, then the stream proper attaches. The second Watch is
+// therefore the moment the stream has read the city set but has not yet begun
+// serving events.
+type startOnStreamAttachProvider struct {
+	*events.Fake
+	mu      sync.Mutex
+	watches int
+	start   func()
+}
+
+func (p *startOnStreamAttachProvider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
+	p.mu.Lock()
+	p.watches++
+	streamAttach := p.watches == 2
+	p.mu.Unlock()
+	if streamAttach {
+		p.start()
+	}
+	return p.Fake.Watch(ctx, afterSeq)
+}
+
+// A city that starts while the stream is still connecting — after it read the
+// city set, before it began waiting for changes — must be attached by the
+// change signal, not left for the slow periodic resync.
+func TestSupervisorGlobalEventStreamAttachesCityStartedWhileConnecting(t *testing.T) {
+	resolver := newDynamicCityResolver(map[string]*fakeState{})
+	betaProv := newWatchSignalProvider()
+	beta := newNamedFakeState(t, "beta", betaProv)
+	alphaProv := &startOnStreamAttachProvider{Fake: events.NewFake(), start: func() { resolver.addCity(beta) }}
+	resolver.addCity(newNamedFakeState(t, "alpha", alphaProv))
+	sm := NewSupervisorMux(resolver, nil, false, "test", "", time.Now())
+	stream := openLiveGlobalStream(t, sm, "", "")
+
+	waitSignal(t, betaProv.watched, "the change signal to attach city beta")
+	betaProv.Record(events.Event{Type: events.SessionWoke, Actor: "tester", Subject: "beta-1"})
+	frame, data := stream.nextTaggedEvent(t)
+	assertTaggedEvent(t, frame, data, "beta", "beta-1", "alpha:0,beta:1")
+}
