@@ -165,20 +165,93 @@ func (s *NativeDoltStore) depList(ctx context.Context, storage beadslib.Storage,
 		if anchor.Missing {
 			return nil, fmt.Errorf("bead %q: %w", id, ErrNotFound)
 		}
-		deps := make([]Dep, 0, len(anchor.Edges))
-		for _, edge := range anchor.Edges {
-			if edge == nil {
-				continue
-			}
-			deps = append(deps, Dep{
-				IssueID:     id,
-				DependsOnID: edge.DependsOnID,
-				Type:        string(edge.Type),
-			})
-		}
-		return deps, nil
+		return anchorDeps(id, anchor), nil
 	}
 	return nil, fmt.Errorf("bead %q: %w", id, ErrNotFound)
+}
+
+// anchorDeps projects one anchor's stored edges into gc's Dep shape.
+//
+// The near id is the one the CALLER named rather than the row's own IssueID: the
+// stored target may be spelled three ways and the anchor is what the request
+// asked about, so attributing the edges to anything else is how a batch answer
+// gets mis-keyed.
+func anchorDeps(id string, anchor issueops.AnchorEdges) []Dep {
+	deps := make([]Dep, 0, len(anchor.Edges))
+	for _, edge := range anchor.Edges {
+		if edge == nil {
+			continue
+		}
+		deps = append(deps, Dep{
+			IssueID:     id,
+			DependsOnID: edge.DependsOnID,
+			Type:        string(edge.Type),
+		})
+	}
+	return deps
+}
+
+// nativeDepListBatchChunk caps how many anchors ride one read, matching
+// DoltliteReadStore's cap beside it. It bounds the statement the backend builds
+// without giving back the round-trip saving the batch exists for.
+const nativeDepListBatchChunk = 500
+
+// DepListBatch returns the DOWN edges of many anchors in one round trip.
+//
+// It is the batch shape of DepList's DOWN leg and rides the same
+// EdgeReader.ReadEdges, which is a batch contract by construction rather than an
+// optimization of a single read: the anchors' existence and their edges come
+// from ONE read transaction, so the answer is one consistent snapshot instead of
+// N snapshots stitched together.
+//
+// WHY IT EXISTS. The per-anchor loop callers ran instead cost one read
+// transaction per bead — and, against a served store whose pool has gone cold or
+// whose link drops handshakes, one CONNECT per bead. A walk over a few hundred
+// beads then scales as (anchors x round trip) with withReadRetry's budget as the
+// only ceiling, which is what made `gc storage recover-stranded` unable to
+// finish over the Tailscale work-store path (ga-50tsx). Every other store in the
+// tree already answers this question in one call; this one was the outlier, so
+// internal/dispatch's scope-skip walk fell back to its per-id loop here too.
+//
+// MISS SEMANTICS ARE THE ONE PLACE IT CANNOT COPY DepList. A batch that answered
+// ErrNotFound for one absent id would throw away the answers for every id it did
+// find, so an anchor this store does not hold gets NO ENTRY — the same rule
+// MemStore, FileStore, BdStore and DoltliteReadStore follow. An anchor that IS
+// held and has no edges gets an entry carrying an empty slice, which is more
+// than the thin stores report and less than a caller may rely on across store
+// types: presence in this map is not a portable existence check.
+//
+// A FAILED CHUNK FAILS THE CALL. The partial map is dropped rather than returned
+// alongside the error, because a caller that walks it reads the anchors the
+// failure cost it as beads with no edges — a dropped link presenting as a clean
+// graph is the one answer no dependency walk can survive.
+func (s *NativeDoltStore) DepListBatch(ids []string) (map[string][]Dep, error) {
+	out := make(map[string][]Dep, len(ids))
+	for start := 0; start < len(ids); start += nativeDepListBatchChunk {
+		end := min(start+nativeDepListBatchChunk, len(ids))
+		chunk := ids[start:end]
+		err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+			reader, err := storage.EdgeReader()
+			if err != nil {
+				return err
+			}
+			result, err := reader.ReadEdges(ctx, issueops.EdgeReadRequest{IDs: chunk})
+			if err != nil {
+				return err
+			}
+			for _, anchor := range result.Anchors {
+				if anchor.Missing {
+					continue
+				}
+				out[anchor.ID] = anchorDeps(anchor.ID, anchor)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("listing the dep edges of %d anchor(s) starting at %q: %w", len(chunk), chunk[0], err)
+		}
+	}
+	return out, nil
 }
 
 // DepMetadata reads the opaque payload one graph-apply edge retained.
