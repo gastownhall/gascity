@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 const (
@@ -94,7 +96,7 @@ func TestSQLiteStoreSequenceFloorSIGKILLAtBoundaries(t *testing.T) {
 			}
 
 			command := sqliteSequenceHelperCommand("TestSQLiteSequenceFloorHelperProcess")
-			command.Env = append(os.Environ(), sqliteSequenceFloorBoundaryEnv+"="+boundary)
+			command.Env = append(command.Env, sqliteSequenceFloorBoundaryEnv+"="+boundary)
 			child := startSQLiteSequenceFloorChild(t, command, dir, 50)
 			child.kill()
 
@@ -275,9 +277,13 @@ func (c *sqliteSequenceFloorChild) kill() {
 }
 
 // sqliteSequenceHelperCommand re-executes this test binary running only the
-// named helper-process test.
+// named helper-process test, without Bazel's test-runner environment: the
+// mint test runs three helpers at once, and under bazel coverage each would
+// otherwise write the parent's coverage profile.
 func sqliteSequenceHelperCommand(testName string) *exec.Cmd {
-	return exec.Command(os.Args[0], "-test.run=^"+testName+"$")
+	cmd := exec.Command(os.Args[0], "-test.run=^"+testName+"$")
+	cmd.Env = bazeltest.HelperProcessEnv(os.Environ())
+	return cmd
 }
 
 const (
@@ -335,7 +341,7 @@ func TestSQLiteSequenceProcessesNeverMintSameID(t *testing.T) {
 	kids := make([]*child, children)
 	for i := range kids {
 		c := &child{cmd: sqliteSequenceHelperCommand("TestSQLiteSequenceMintHelperProcess")}
-		c.cmd.Env = append(os.Environ(),
+		c.cmd.Env = append(c.cmd.Env,
 			sqliteSequenceMintChildDirEnv+"="+dir,
 			sqliteSequenceMintChildCountEnv+"="+strconv.Itoa(count),
 		)
