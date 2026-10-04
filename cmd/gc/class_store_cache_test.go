@@ -120,6 +120,14 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 	"AdvanceSequenceFloor": nil,
 	"StoreHealthPath":      nil,
 	"ReadOnly":             nil,
+	// Enterprise (native Dolt batch dep-edges, gc-enterprise #32): the batch
+	// exists for `gc storage recover-stranded`, which opens the engine
+	// itself. A live cache answers per-anchor down-dep reads from memory, and
+	// the scope-skip dispatch path falls back to them when the assertion
+	// misses, so forwarding DepListBatch on every CachingStore would
+	// advertise a batch capability over backings (e.g. a cached bd store)
+	// that do not actually have it.
+	"DepListBatch": nil,
 	// A declaration about what a cache over the engine holds: the v2
 	// demand reads ask the cache's backing (demandLegCache), and a cache
 	// carrying it would advertise exactness over a bd backing.

@@ -158,6 +158,7 @@ go_test(
         "native_dolt_store_conditional_retry_test.go",
         "native_dolt_store_conformance_test.go",
         "native_dolt_store_count_test.go",
+        "native_dolt_store_dep_batch_test.go",
         "native_dolt_store_facade_test.go",
         "native_dolt_store_graph_deadline_test.go",
         "native_dolt_store_graph_validate_test.go",

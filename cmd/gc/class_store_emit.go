@@ -684,6 +684,20 @@ func (s *emittingClassStore) DeleteBatch(ids []string) error {
 	return nil
 }
 
+// DepListBatch forwards the batched dep-edge read.
+//
+// It emits nothing because it writes nothing — but it has to exist, because the
+// embedded Store interface does not promote an optional capability and this
+// wrapper is what a class-routed caller holds. Without it the batch is invisible
+// and the caller silently pays a round trip per anchor (ga-50tsx).
+func (s *emittingClassStore) DepListBatch(ids []string) (map[string][]beads.Dep, error) {
+	batch, ok := beads.DepListBatchFor(s.Store)
+	if !ok {
+		return nil, beads.ErrDepListBatchUnsupported
+	}
+	return batch.DepListBatch(ids)
+}
+
 func (s *emittingClassStore) ApplyGraphPlan(ctx context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
 	applier, ok := beads.GraphApplyFor(s.Store)
 	if !ok {

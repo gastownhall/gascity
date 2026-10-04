@@ -316,6 +316,64 @@ type sourceDepReader struct {
 	// witnessID names the bead that proved the projection, so the claim is
 	// falsifiable from the report alone.
 	witnessID string
+	// batched holds the edges of every anchor the prefetch asked about, keyed by
+	// bead. A prefetched anchor with no entry has no edges.
+	batched map[string][]beads.Dep
+	// prefetched names the anchors the batch actually asked about, which is what
+	// makes an absent entry readable as "no edges" rather than as "not asked".
+	prefetched map[string]bool
+}
+
+// prefetch reads every anchor's edges in ONE round trip so the three passes
+// below can walk the whole source without asking it again.
+//
+// THE COST IS THE POINT. This repair reads a bead's source edges three times —
+// classifying the stranded rows, planning the topology over every resident bead,
+// and verifying against a second independent read — so a per-bead read costs
+// roughly three round trips per source bead. Against the retained work store,
+// which a hosted city reaches over a WAN link that drops MySQL handshakes, a
+// 231-bead city is ~460 chances to fail, each able to burn the store's whole
+// read-retry budget before the walk gives up on that bead and refuses it. The
+// command whose entire job is to repair a city during an incident then cannot
+// finish on the network the incident is happening on (ga-50tsx).
+//
+// A FAILED PREFETCH FAILS THE RUN — but a store that cannot batch at all does
+// not. Those are different answers: a read that was attempted and failed leaves
+// the walk unable to tell an edge-free bead from an unreadable one, so
+// continuing would hand every bead to the walk as edge-free, and one refusal
+// naming the link is what an operator can act on. A store that never had the
+// capability is simply the older, slower path, and refusing there would break
+// recovery on every store type that cannot batch.
+//
+// ErrDepListBatchUnsupported is how a WRAPPER reports the second case. It has to
+// be handled by value rather than by the type assertion alone, because a wrapper
+// forwards the method precisely so the capability is not silently lost — so the
+// assertion succeeds and the answer arrives as this sentinel.
+//
+// The anchors come from the source snapshot the run is copying FROM, so their
+// existence is already established by the read that produced them; this pass
+// asks only what they depend on. That is why an anchor absent from the answer
+// reads as "no edges" rather than as a missing bead: the thin stores (MemStore,
+// FileStore) omit edge-free anchors by convention, and a re-read could not be
+// more current than the snapshot row being copied anyway.
+func (r *sourceDepReader) prefetch(anchors []string) error {
+	batch, ok := beads.DepListBatchFor(r.source)
+	if !ok || len(anchors) == 0 {
+		return nil
+	}
+	edges, err := batch.DepListBatch(anchors)
+	if errors.Is(err, beads.ErrDepListBatchUnsupported) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading the source's dep edges for %d bead(s) in one batch: %w", len(anchors), err)
+	}
+	r.batched = edges
+	r.prefetched = make(map[string]bool, len(anchors))
+	for _, id := range anchors {
+		r.prefetched[id] = true
+	}
+	return nil
 }
 
 // newSourceDepReader probes the relation read once and, if the adapter refuses
@@ -325,14 +383,18 @@ type sourceDepReader struct {
 // Any other probe error leaves the reader on the relation read: a transient
 // failure is not evidence about the adapter, so each bead's own read decides
 // that bead's fate and a bead whose read fails becomes ambiguous rather than
-// edge-free.
-func newSourceDepReader(source beads.Store, probeID string) (*sourceDepReader, error) {
+// edge-free. On that leg the anchors are then read in one batch (see prefetch),
+// which is what keeps the walk's cost off the bead count.
+func newSourceDepReader(source beads.Store, probeID string, anchors []string) (*sourceDepReader, error) {
 	reader := &sourceDepReader{source: source, relationsOK: true}
 	if probeID == "" {
 		return reader, nil
 	}
 	_, err := source.DepList(probeID, "down")
 	if !infraRelationCapabilityRefusal(err) {
+		if prefetchErr := reader.prefetch(anchors); prefetchErr != nil {
+			return nil, prefetchErr
+		}
 		return reader, nil
 	}
 	reader.relationsOK = false
@@ -356,6 +418,9 @@ func newSourceDepReader(source beads.Store, probeID string) (*sourceDepReader, e
 // must refuse to move it rather than move it edge-free.
 func (r *sourceDepReader) deps(b beads.Bead) (edges []beads.Dep, ok bool, err error) {
 	if r.relationsOK {
+		if r.prefetched[b.ID] {
+			return r.batched[b.ID], true, nil
+		}
 		listed, listErr := r.source.DepList(b.ID, "down")
 		if listErr != nil {
 			return nil, false, listErr
@@ -381,6 +446,9 @@ func (r *sourceDepReader) deps(b beads.Bead) (edges []beads.Dep, ok bool, err er
 // describe states how this reader answered, for the operator report.
 func (r *sourceDepReader) describe() string {
 	if r.relationsOK {
+		if len(r.prefetched) > 0 {
+			return fmt.Sprintf("source dep edges: read through the store's relation listing, %d anchor(s) in one batched read", len(r.prefetched))
+		}
 		return "source dep edges: read through the store's relation listing"
 	}
 	if r.inlineWitnessed {
@@ -691,7 +759,15 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	} else if len(rows) > 0 {
 		probeID = rows[0].ID
 	}
-	depReader, err := newSourceDepReader(source, probeID)
+	// Every source infrastructure bead is an anchor, not just the stranded ones:
+	// the topology plan and the verify pass both walk every bead the binding will
+	// hold, and an anchor left out of the batch is one the walk asks for
+	// separately.
+	anchors := make([]string, 0, len(rows))
+	for _, b := range rows {
+		anchors = append(anchors, b.ID)
+	}
+	depReader, err := newSourceDepReader(source, probeID, anchors)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
