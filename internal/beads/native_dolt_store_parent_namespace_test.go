@@ -15,7 +15,9 @@ import (
 // store's own namespace as foreign and lets the reparent land dangling, which
 // is what main refused and what beads.Bead.ParentID promises.
 func TestNativeDoltStoreResolvesAParentInItsOwnNamespaceForAForeignPrefixedChild(t *testing.T) {
-	store := newNativeDoltStoreWithStorageAndPrefix(newNativeDoltMemStorage(), "native-test", "ga")
+	storage := newNativeDoltMemStorage()
+	storage.issuePrefix = "ga"
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "native-test", "ga")
 	relic, err := store.Create(Bead{ID: "gc-1", Title: "a row carrying another ledger's prefix"})
 	if err != nil {
 		t.Fatalf("Create with a pinned foreign-prefixed id: %v", err)

@@ -345,19 +345,22 @@ func TestNativeDoltStoreListStatusOpenExcludesClosedBeadsFromUpstreamDrift(t *te
 	}
 }
 
-func TestNativeDoltStoreReadyOnlyIncludesOpenAndDeferredUpstreamStatuses(t *testing.T) {
+func TestNativeDoltStoreReadyOffersOnlyOpenWork(t *testing.T) {
 	// bd's own status-category table (vendored beads internal/types.
 	// BuiltInStatusCategory) marks blocked/hooked as "wip" and pinned as
-	// "frozen" — both excluded from bd's own ready semantics. Only "open"
-	// (category active) and deferred (once DeferUntil has passed, handled
-	// via IsReadyCandidateForTier's IsDeferred check) belong here. This
-	// issue set intentionally includes a blocked bead whose dependency
-	// graph the spy treats as fully satisfied (it is returned unconditionally
-	// whenever queried by status), to prove Ready() must never surface it
-	// even when GetReadyWork would happily return it if asked. gc-deferred
-	// carries a past DeferUntil to represent an expired time-bound deferral;
-	// the no-DeferUntil (indefinite) case is covered separately by
-	// TestNativeDoltStoreReadyExcludesIndefinitelyDeferredBeads.
+	// "frozen" — both excluded from bd's own ready semantics — and closed and
+	// in_progress are not ready work either. The rows below are the whole
+	// status vocabulary, so a door that widened its question shows up here as
+	// an extra bead.
+	//
+	// The MECHANISM that keeps them out moved with the re-point and the
+	// assertion did not. gc used to control it by naming the statuses it asked
+	// for; issueops.Reader publishes no status at all and workapi's builder
+	// stamps open for every caller, so it is now the role's guarantee — modeled
+	// by readyWorkFixtureForTest, which answers a WorkFilter the way a backend
+	// does. gc-deferred carries a past DeferUntil and still arrives, because
+	// the backend's lazy defer-wake sweep runs first; the deferred-visibility
+	// rule in full is TestNativeDoltStoreReadyDeferredVisibilityIsUnchangedThroughTheRole.
 	past := time.Now().UTC().Add(-24 * time.Hour)
 	issues := []*beadslib.Issue{
 		{ID: "gc-open", Title: "open", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2},
@@ -371,14 +374,7 @@ func TestNativeDoltStoreReadyOnlyIncludesOpenAndDeferredUpstreamStatuses(t *test
 	}
 	storage := &nativeDoltStorageSpy{
 		getReadyWork: func(_ context.Context, filter beadslib.WorkFilter) ([]*beadslib.Issue, error) {
-			var result []*beadslib.Issue
-			for _, issue := range issues {
-				if !workFilterMatchesStatus(filter, issue.Status) {
-					continue
-				}
-				result = append(result, cloneNativeIssueForTest(issue))
-			}
-			return result, nil
+			return readyWorkFixtureForTest(issues, filter), nil
 		},
 	}
 	store := newNativeDoltStoreForTest(storage)
@@ -438,51 +434,11 @@ func TestNativeDoltStoreReadyExcludesFutureDeferredBeads(t *testing.T) {
 	}
 }
 
-// TestNativeDoltStoreReadyExcludesIndefinitelyDeferredBeads covers bd defer
-// <id> without --until: a first-class, documented "status-based" indefinite
-// deferral (upstream cmd/bd/defer.go) that sets status=deferred and leaves
-// defer_until NULL, distinct from bd defer <id> --until=<time>'s time-bound
-// snooze. nativeDoltOpenReadyStatuses must keep querying StatusDeferred so an
-// *expired* time-bound deferral (defer_until in the past) can resurface, but
-// an issue that was never time-bound (defer_until nil) must not fall through
-// IsReadyCandidateForTier's nil-DeferUntil case as if it were an ordinary
-// open bead that was never deferred at all.
-func TestNativeDoltStoreReadyExcludesIndefinitelyDeferredBeads(t *testing.T) {
-	past := time.Now().UTC().Add(-24 * time.Hour)
-	issues := []*beadslib.Issue{
-		{ID: "gc-open", Title: "open", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2},
-		{ID: "gc-deferred-indefinite", Title: "indefinite", Status: beadslib.StatusDeferred, IssueType: beadslib.TypeTask, Priority: 2},
-		{ID: "gc-deferred-expired", Title: "expired", Status: beadslib.StatusDeferred, IssueType: beadslib.TypeTask, Priority: 2, DeferUntil: &past},
-	}
-	storage := &nativeDoltStorageSpy{
-		getReadyWork: func(_ context.Context, filter beadslib.WorkFilter) ([]*beadslib.Issue, error) {
-			var result []*beadslib.Issue
-			for _, issue := range issues {
-				if !workFilterMatchesStatus(filter, issue.Status) {
-					continue
-				}
-				result = append(result, cloneNativeIssueForTest(issue))
-			}
-			return result, nil
-		},
-	}
-	store := newNativeDoltStoreForTest(storage)
-
-	got, err := store.Ready()
-	if err != nil {
-		t.Fatalf("Ready: %v", err)
-	}
-
-	wantIDs := map[string]bool{"gc-open": true, "gc-deferred-expired": true}
-	if len(got) != len(wantIDs) {
-		t.Fatalf("Ready len = %d, want %d; got %+v", len(got), len(wantIDs), got)
-	}
-	for _, bead := range got {
-		if !wantIDs[bead.ID] {
-			t.Fatalf("Ready returned unexpected bead %q from %+v — an indefinitely status-deferred bead (status=deferred, defer_until=NULL) must never surface as ready", bead.ID, got)
-		}
-	}
-}
+// The indefinite-vs-expired deferral rule this file used to pin twice is now
+// one differential in native_dolt_store_read_roles_test.go
+// (TestNativeDoltStoreReadyDeferredVisibilityIsUnchangedThroughTheRole): same
+// two rows, same expectation, plus the future-deferred arm neither of the old
+// pair covered.
 
 func TestNativeDoltStoreNormalizesUpstreamNotFoundErrors(t *testing.T) {
 	upstreamNotFound := errors.New("not found")
@@ -864,12 +820,18 @@ func TestNativeDoltStorePreservesNonStringMetadataAsJSONText(t *testing.T) {
 	}
 }
 
+// A default listing converts the upstream row and returns no closed bead.
+//
+// The closed exclusion used to be asserted on the backing FILTER, and after the
+// read re-point there is no filter here to assert on: issueops.ListRequest has
+// no ExcludeStatus member and the request deliberately drops every status
+// exclusion (nativeListReadRequest), so gc's own three-value status projection
+// is the whole of it. The protection is therefore re-pinned where it is now
+// decided — on the ANSWER, with a closed row in the backing's reply.
 func TestNativeDoltStoreListDelegatesAndConvertsIssues(t *testing.T) {
 	createdAt := time.Date(2026, 5, 17, 11, 0, 0, 0, time.UTC)
-	var capturedFilter beadslib.IssueFilter
 	storage := &nativeDoltStorageSpy{
-		searchIssues: func(_ context.Context, _ string, filter beadslib.IssueFilter) ([]*beadslib.Issue, error) {
-			capturedFilter = filter
+		searchIssues: func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error) {
 			return []*beadslib.Issue{{
 				ID:          "gc-listed",
 				Title:       "listed through native store",
@@ -881,6 +843,13 @@ func TestNativeDoltStoreListDelegatesAndConvertsIssues(t *testing.T) {
 				Labels:      []string{"native"},
 				Metadata:    json.RawMessage(`{"gc.step_ref":"list"}`),
 				Description: "native list",
+			}, {
+				ID:        "gc-done",
+				Title:     "already closed",
+				Status:    beadslib.StatusClosed,
+				IssueType: beadslib.TypeTask,
+				Priority:  2,
+				CreatedAt: createdAt,
 			}}, nil
 		},
 	}
@@ -890,11 +859,8 @@ func TestNativeDoltStoreListDelegatesAndConvertsIssues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(capturedFilter.ExcludeStatus) != 1 || capturedFilter.ExcludeStatus[0] != beadslib.StatusClosed {
-		t.Fatalf("ExcludeStatus = %#v, want [closed]", capturedFilter.ExcludeStatus)
-	}
 	if len(got) != 1 {
-		t.Fatalf("List len = %d, want 1", len(got))
+		t.Fatalf("List len = %d, want 1 (the closed row must not survive a default listing); got %+v", len(got), got)
 	}
 	if got[0].ID != "gc-listed" || got[0].Title != "listed through native store" {
 		t.Fatalf("listed bead = %#v, want converted upstream issue", got[0])
@@ -2506,6 +2472,17 @@ func (tx nativeDoltTransactionForTest) RemoveLabel(ctx context.Context, issueID,
 	return tx.storage.RemoveLabel(ctx, issueID, label, actor)
 }
 
+// GetConfig forwards to the storage when it declares configuration, and
+// otherwise reports none, so a double without config reads as undeclared.
+func (tx nativeDoltTransactionForTest) GetConfig(ctx context.Context, key string) (string, error) {
+	if configured, ok := tx.storage.(interface {
+		GetConfig(context.Context, string) (string, error)
+	}); ok {
+		return configured.GetConfig(ctx, key)
+	}
+	return "", nil
+}
+
 func (tx nativeDoltTransactionForTest) AddDependency(ctx context.Context, dep *beadslib.Dependency, actor string) error {
 	return tx.storage.AddDependency(ctx, dep, actor)
 }
@@ -2716,6 +2693,9 @@ type nativeDoltMemStorage struct {
 	beadslib.Storage
 	store *MemStore
 	txMu  sync.Mutex
+	// issuePrefix is the namespace this storage declares, the one whose absent
+	// rows it can see; empty means nativeDoltMemIssuePrefixForTest.
+	issuePrefix string
 }
 
 func newNativeDoltMemStorage() *nativeDoltMemStorage {
@@ -2929,7 +2909,8 @@ func (s *nativeDoltMemStorage) AddDependency(_ context.Context, dep *beadslib.De
 	if _, err := s.store.Get(dep.IssueID); err != nil {
 		return err
 	}
-	if !nativeDoltMemTargetIsExternalForTest(dep.DependsOnID) {
+	namespace, _ := s.GetConfig(context.Background(), "issue_prefix")
+	if !nativeDoltTargetIsExternalForTest(namespace, dep.DependsOnID) {
 		if _, err := s.store.Get(dep.DependsOnID); err != nil {
 			return err
 		}
@@ -2995,24 +2976,27 @@ func (s *nativeDoltMemStorage) GetDependentsWithMetadata(_ context.Context, issu
 // the fixture is to pin which key the create-path prefix read asks for.
 func (s *nativeDoltMemStorage) GetConfig(_ context.Context, key string) (string, error) {
 	if key == "issue_prefix" {
+		if s.issuePrefix != "" {
+			return s.issuePrefix, nil
+		}
 		return nativeDoltMemIssuePrefixForTest, nil
 	}
 	return "", nil
 }
 
 // nativeDoltMemIssuePrefixForTest is the namespace nativeDoltMemStorage
-// declares, the one whose absent rows it can see.
+// declares by default, the one whose absent rows it can see.
 const nativeDoltMemIssuePrefixForTest = "gc"
 
-// nativeDoltMemTargetIsExternalForTest reports whether a dependency target
-// names a row outside nativeDoltMemStorage's own namespace, which the facade
-// accepts as an external reference rather than resolving.
-func nativeDoltMemTargetIsExternalForTest(targetID string) bool {
+// nativeDoltTargetIsExternalForTest reports whether a dependency target names a
+// row outside the declared namespace, which the facade accepts as an external
+// reference rather than resolving.
+func nativeDoltTargetIsExternalForTest(namespace, targetID string) bool {
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(targetID)), "external:") {
 		return true
 	}
 	prefix := beadIDPrefix(targetID)
-	return prefix != "" && prefix != nativeDoltMemIssuePrefixForTest
+	return prefix != "" && prefix != normalizeIDPrefix(namespace)
 }
 
 func (s *nativeDoltMemStorage) AddComment(context.Context, string, string, string) error {
@@ -3439,6 +3423,17 @@ func TestNativeDoltStoreReadyWorkOutcomeFilterToleratesOpenGates(t *testing.T) {
 						return nil, nil
 					}
 					return []*beadslib.IssueWithDependencyMetadata{tt.blocker}, nil
+				},
+				// The blocker's row, for the by-id listing the filter reads
+				// blocker status and metadata through.
+				searchIssues: func(_ context.Context, _ string, filter beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+					for _, id := range filter.IDs {
+						if id == tt.blocker.ID {
+							issue := tt.blocker.Issue
+							return []*beadslib.Issue{&issue}, nil
+						}
+					}
+					return nil, nil
 				},
 			}
 			store := newNativeDoltStoreForTest(storage)
