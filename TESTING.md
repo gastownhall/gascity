@@ -46,6 +46,81 @@ packages, run `make bazel-sync` and commit the regenerated BUILD files
 See `engdocs/bazel-quickstart.md` for local setup and
 `engdocs/bazel-ci-budget.md` for the CI optimization loop.
 
+### Bazel cache tiers
+
+A result is reused only by a run that hashes the action identically, so
+every flag that can change an action key is committed, unconditionally, in
+`.bazelrc` (notably the pinned test `PATH`, with Go at `/usr/local/go`). The
+per-mode configs and the gitignored `.bazelrc.local` carry transport only:
+endpoints, credentials, timeouts, download and parallelism policy.
+`scripts/bazel_key_parity_test.go` enforces this, including against the lines
+`bazel-test.yml` writes, so pre-push, PR and main runs compute the same keys.
+
+| tier | how | executes | writes the shared cache |
+|---|---|---|---|
+| contributor (default) | `--config=fork-cache` | locally, on cache misses | never |
+| maintainer (opt-in) | `--config=remote-exec` + a client certificate | rbe-west (default or `oss` instance) | only rbe-west's own workers |
+| CI (`bazel-test.yml`) | `--config=remote-exec` + CI secrets | rbe-west, `oss` instance | only rbe-west's own workers |
+
+- **Contributor.** `fork-cache` reads rbe-west's anonymous, read-only cache
+  (`rbe-cache.ops.gascity.com:8443`, instance `oss`): anything CI already ran
+  for the same inputs is a hit, misses run on your machine, and nothing is
+  ever uploaded. If the endpoint is closed or slow, Bazel falls back to local
+  execution. No credential, no remote compute.
+- **Maintainer.** Remote execution is opt-in and needs an mTLS client
+  certificate for rbe-west; without one nothing tries to execute remotely.
+  Generate the key locally (it never leaves your machine) and send only the
+  CSR to the rbe-west operators (infra `nativelink-cas/west`); there is no
+  self-service path in this repo (the `rbe-fork` mint used by
+  `tools/rbe/fork-credential.sh` certifies only in-progress PR runs):
+
+  ```bash
+  install -d -m 0700 ~/.config/gascity-rbe && cd ~/.config/gascity-rbe
+  # PKCS#8 EC key: Bazel's Netty TLS refuses a SEC1 "EC PRIVATE KEY".
+  openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out client.key
+  openssl req -new -key client.key -subj "/CN=<your-github-login>" -out client.csr
+  ```
+
+  With the certificate and the executor endpoint the operators return, add
+  to `.bazelrc.local` (absolute paths; nothing else belongs there):
+
+  ```
+  build:remote-exec --remote_executor=grpcs://<rbe-west endpoint>
+  build:remote-exec --tls_client_certificate=/home/<you>/.config/gascity-rbe/client.crt
+  build:remote-exec --tls_client_key=/home/<you>/.config/gascity-rbe/client.key
+  ```
+
+  The instance decides which results you share. Unset (the default
+  instance) runs on rbe-west's own workers and reads through to the `oss`
+  action cache, so CI's results are hits, but what your pushes compute stays
+  in the default instance's action cache, which CI does not read. With
+  `build:remote-exec --remote_instance_name=oss` your actions run on the
+  Blacksmith-donated OSS pool (gastownhall code only) and land in the `oss`
+  action cache that CI and contributors read, so a pre-push result is a PR
+  hit; the operators must authorize your certificate for the OSS scheduler.
+- **CI.** `bazel-test.yml` is the trusted writer: its actions execute on
+  rbe-west's `oss` workers, which alone write the `oss` action cache that
+  contributors and fork PRs read. Fork PRs get the read-only cache, or
+  `rbe-fork` remote execution with a certificate minted for that run.
+
+**Pre-push.** `.githooks/pre-push` runs the suite through
+`.githooks/lib/push-suite.sh` when a push changes Go sources. Mode by
+`GC_PREPUSH_SUITE` (default `auto`):
+
+| `GC_PREPUSH_SUITE` | runs |
+|---|---|
+| `auto` | `bazel test //... --config=remote-exec` when `.bazelrc.local` has a `build:remote-exec --remote_executor=` line; `bazel test //... --config=fork-cache` otherwise; `make test-fast-parallel` when bazel is not installed |
+| `rbe` | `bazel test //... --config=remote-exec` |
+| `cache` | `bazel test //... --config=fork-cache` |
+| `go` | `make test-fast-parallel` (plain `go test`, the pre-Bazel suite) |
+
+An explicit `rbe`/`cache` without bazel installed, or an unknown value, fails
+the push. `auto` looks only at `.bazelrc.local`; if your executor lines live in
+another rc file, set `GC_PREPUSH_SUITE=rbe`. Locally executed tests use the pinned test `PATH`, so Go must be at
+`/usr/local/go` (`sudo ln -s "$(go env GOROOT)" /usr/local/go`); overriding
+`--test_env=PATH` in `.bazelrc.local` works but gives your machine its own
+action keys, so nothing CI ran is a hit.
+
 ## The outcome: protected PR feedback in under five minutes
 
 The developer-visible service-level objective is p95 **under five minutes**
@@ -1089,7 +1164,8 @@ wait maps to `exit 75` (`EX_TEMPFAIL`) — distinct from a real test failure
 and from `scripts/push-ownership-guard.sh`'s unrelated `exit 1` contract for
 bead-ownership staleness. That 75 is only visible to callers that invoke
 `scripts/test-local-parallel` directly: the four Makefile targets and
-`.githooks/pre-push` (`exec make test-fast-parallel`) run it under `make`,
+`.githooks/pre-push` (`make test-fast-parallel` via `.githooks/lib/push-suite.sh`
+when bazel is absent or `GC_PREPUSH_SUITE=go`) run it under `make`,
 which reports `make: *** [test-fast-parallel] Error 75` and then exits 2.
 Through those paths the distinguishing signal is the stderr text, not the
 process exit code. The kernel releases the lock automatically when the

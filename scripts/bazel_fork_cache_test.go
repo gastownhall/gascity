@@ -23,8 +23,10 @@ import (
 // Fork PRs (no secrets) read rbe-west's anonymous read-only cache through
 // .bazelrc's fork-cache config, which bazel-test.yml selects by writing
 // `build --config=fork-cache` to .bazelrc.local. Fork actions hit only if
-// they hash like the trusted run's, so the fork .bazelrc.local must carry
-// exactly the trusted run's lines minus build:remote-exec, and fork-cache
+// they hash like the trusted run's, so neither run's .bazelrc.local carries
+// a key-affecting flag (those are committed in .bazelrc:
+// bazel_key_parity_test.go): the trusted one is build:remote-exec only, the
+// fork one is exactly the fork-cache selection, and fork-cache
 // itself must upload nothing, carry no credentials, degrade to local
 // execution when the endpoint is closed or slow, and never be overridden by
 // remote-exec's 3600s timeout.
@@ -150,8 +152,8 @@ func runBazelRCConfigStepProbed(t *testing.T, script string, env map[string]stri
 }
 
 // TestBazelForkCacheRCLocal runs the one step that writes .bazelrc.local in
-// trusted and fork mode: the fork lines must be the trusted lines minus
-// build:remote-exec, plus build --config=fork-cache.
+// trusted and fork mode: trusted lines are build:remote-exec only, fork lines
+// are exactly build --config=fork-cache.
 func TestBazelForkCacheRCLocal(t *testing.T) {
 	steps := bazelTestWorkflowSteps(t, repoRoot(t))
 	var config *bazelTestWorkflowStep
@@ -199,41 +201,30 @@ func TestBazelForkCacheRCLocal(t *testing.T) {
 		"RBE_TLS_CA":            pem,
 		"BAZEL_TEST_PROBE":      "zstd",
 	})
-	for _, line := range trusted {
-		if strings.Contains(line, "remote_cache_compression") {
-			t.Errorf("trusted .bazelrc.local asks for compression (%q); rbe-west's trusted schedulers advertise none", line)
-		}
-	}
 	if probes != 0 {
 		t.Errorf("the trusted run probed rbe-cache %d times; only fork-cache runs may", probes)
 	}
-	var want []string
-	remoteExec := 0
+	// Every key-affecting flag is committed in .bazelrc
+	// (bazel_key_parity_test.go), and compression is fork-cache's alone
+	// (rbe-west's trusted schedulers advertise none), so the trusted
+	// .bazelrc.local is build:remote-exec transport and nothing else.
 	for _, line := range trusted {
-		if strings.HasPrefix(line, "build:remote-exec ") {
-			remoteExec++
-			continue
+		if !strings.HasPrefix(line, "build:remote-exec ") {
+			t.Errorf("trusted .bazelrc.local line %q is not build:remote-exec", line)
 		}
-		want = append(want, line)
 	}
 	for _, line := range []string{
 		"build:remote-exec --remote_executor=grpcs://executor.invalid:443",
+		"build:remote-exec --remote_instance_name=oss",
 		"build:remote-exec --tls_client_certificate=/tmp/rbe-cert.pem",
-		"test --test_env=PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin",
+		"build:remote-exec --tls_client_key=/tmp/rbe-key.pem",
+		"build:remote-exec --tls_certificate_authority=/tmp/rbe-ca.pem",
 	} {
 		if !strings.Contains("\n"+strings.Join(trusted, "\n")+"\n", "\n"+line+"\n") {
 			t.Errorf("trusted .bazelrc.local lacks %q:\n%s", line, strings.Join(trusted, "\n"))
 		}
 	}
-	if remoteExec == 0 || len(want) == 0 {
-		t.Fatalf("trusted .bazelrc.local has %d remote-exec and %d shared lines:\n%s", remoteExec, len(want), strings.Join(trusted, "\n"))
-	}
-	for _, line := range want {
-		if strings.Contains(line, "fork-cache") {
-			t.Errorf("trusted .bazelrc.local selects the fork cache: %q", line)
-		}
-	}
-	want = append(want, bazelForkCacheLine)
+	want := []string{bazelForkCacheLine}
 
 	// A fork (no secrets) and an rbe=cache dispatch (secrets present, executor
 	// emptied) must write the same lines; so must a fork whose rbe-fork steps
@@ -253,8 +244,7 @@ func TestBazelForkCacheRCLocal(t *testing.T) {
 			t.Errorf("%s probed rbe-cache %d times, want once", name, probes)
 		}
 		if strings.Join(got, "\n") != strings.Join(want, "\n") {
-			t.Errorf("%s .bazelrc.local:\n%s\nwant the trusted lines minus build:remote-exec, plus %q:\n%s",
-				name, strings.Join(got, "\n"), bazelForkCacheLine, strings.Join(want, "\n"))
+			t.Errorf("%s .bazelrc.local:\n%s\nwant exactly %q", name, strings.Join(got, "\n"), bazelForkCacheLine)
 		}
 		// A passing probe (rbe-cache advertises zstd) adds the fork cache's
 		// zstd line, and only a passing one (above: it fails).
@@ -268,11 +258,9 @@ func TestBazelForkCacheRCLocal(t *testing.T) {
 		}
 	}
 
-	// rbe-fork (a fork with a minted certificate): the trusted shared lines,
-	// so actions hash alike, plus build:remote-exec for the mint's endpoint,
-	// instance and certificate; no fork cache, and never the CI secrets even
-	// if a run could read them.
-	shared := want[:len(want)-1]
+	// rbe-fork (a fork with a minted certificate): build:remote-exec for the
+	// mint's endpoint, instance and certificate; no fork cache, and never the
+	// CI secrets even if a run could read them.
 	for _, instance := range []string{"oss-fork", "oss"} {
 		fork := map[string]string{
 			"BAZEL_REMOTE_EXECUTOR": "", "BAZEL_FORK_CACHE": "true",
@@ -285,14 +273,6 @@ func TestBazelForkCacheRCLocal(t *testing.T) {
 		if probes != 0 {
 			t.Errorf("rbe-fork %s probed rbe-cache %d times; only fork-cache runs may", instance, probes)
 		}
-		var gotShared, gotRemote []string
-		for _, line := range got {
-			if strings.HasPrefix(line, "build:remote-exec ") {
-				gotRemote = append(gotRemote, line)
-			} else {
-				gotShared = append(gotShared, line)
-			}
-		}
 		wantRemote := []string{
 			"build:remote-exec --remote_executor=" + rbeForkEndpoint,
 			"build:remote-exec --remote_instance_name=" + instance,
@@ -300,9 +280,9 @@ func TestBazelForkCacheRCLocal(t *testing.T) {
 			"build:remote-exec --tls_client_key=/runner/rbe-fork/fork.key",
 			"build:remote-exec --remote_max_connections=8",
 		}
-		if strings.Join(gotShared, "\n") != strings.Join(shared, "\n") || strings.Join(gotRemote, "\n") != strings.Join(wantRemote, "\n") {
-			t.Errorf("rbe-fork %s .bazelrc.local:\n%s\nwant the trusted shared lines:\n%s\nand:\n%s",
-				instance, strings.Join(got, "\n"), strings.Join(shared, "\n"), strings.Join(wantRemote, "\n"))
+		if strings.Join(got, "\n") != strings.Join(wantRemote, "\n") {
+			t.Errorf("rbe-fork %s .bazelrc.local:\n%s\nwant:\n%s",
+				instance, strings.Join(got, "\n"), strings.Join(wantRemote, "\n"))
 		}
 	}
 }
@@ -445,7 +425,7 @@ func TestBazelRBEForkSteps(t *testing.T) {
 				t.Errorf("step %q env %s reads %q; only the rc step and the remote-exec guards read rbe-fork's outputs", s.Name, k, v)
 			}
 		}
-		if strings.Contains(s.If, "fork-cert") && s.If != "env.BAZEL_REMOTE_EXECUTOR == '' && env.BAZEL_FORK_CACHE == 'true' && steps.fork-cert.outputs.cert == ''" {
+		if strings.Contains(s.If, "fork-cert") && s.If != "env.BAZEL_REMOTE_EXECUTOR == '' && steps.fork-cert.outputs.cert == ''" {
 			t.Errorf("step %q if %q", s.Name, s.If)
 		}
 	}
@@ -602,8 +582,9 @@ func TestBazelForkCacheRCExecGuards(t *testing.T) {
 // cache with no local-result uploads, both local fallbacks (without them a
 // closed endpoint fails every action in GetCapabilities), the failure
 // circuit breaker and a short --remote_timeout (a slow endpoint), few
-// connections, and no executor or credentials. Only bazel-test.yml's
-// .bazelrc.local may select it.
+// connections, and no executor or credentials. No .bazelrc line may select
+// it: bazel-test.yml's .bazelrc.local and the pre-push suite's command line
+// do.
 func checkBazelForkCacheConfig(bazelrc string) []error {
 	var errs []error
 	var opts []string
