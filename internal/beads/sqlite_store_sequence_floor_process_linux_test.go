@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 const (
@@ -94,7 +96,7 @@ func TestSQLiteStoreSequenceFloorSIGKILLAtBoundaries(t *testing.T) {
 			}
 
 			command := sqliteSequenceHelperCommand("TestSQLiteSequenceFloorHelperProcess")
-			command.Env = append(os.Environ(), sqliteSequenceFloorBoundaryEnv+"="+boundary)
+			command.Env = append(command.Env, sqliteSequenceFloorBoundaryEnv+"="+boundary)
 			child := startSQLiteSequenceFloorChild(t, command, dir, 50)
 			child.kill()
 
@@ -190,9 +192,6 @@ type sqliteSequenceFloorChild struct {
 
 func startSQLiteSequenceFloorChild(t *testing.T, command *exec.Cmd, dir string, value int64) *sqliteSequenceFloorChild {
 	t.Helper()
-	if command.Env == nil {
-		command.Env = os.Environ()
-	}
 	command.Env = append(
 		command.Env,
 		sqliteSequenceFloorChildDirEnv+"="+dir,
@@ -275,9 +274,13 @@ func (c *sqliteSequenceFloorChild) kill() {
 }
 
 // sqliteSequenceHelperCommand re-executes this test binary running only the
-// named helper-process test.
+// named helper-process test. Its environment drops the Bazel test-runner state
+// the parent owns: under `bazel coverage`, concurrent children inheriting
+// COVERAGE_OUTPUT_FILE all wrote the parent's profile and failed converting it.
 func sqliteSequenceHelperCommand(testName string) *exec.Cmd {
-	return exec.Command(os.Args[0], "-test.run=^"+testName+"$")
+	cmd := exec.Command(os.Args[0], "-test.run=^"+testName+"$")
+	cmd.Env = bazeltest.HelperProcessEnv(os.Environ())
+	return cmd
 }
 
 const (
@@ -335,7 +338,7 @@ func TestSQLiteSequenceProcessesNeverMintSameID(t *testing.T) {
 	kids := make([]*child, children)
 	for i := range kids {
 		c := &child{cmd: sqliteSequenceHelperCommand("TestSQLiteSequenceMintHelperProcess")}
-		c.cmd.Env = append(os.Environ(),
+		c.cmd.Env = append(c.cmd.Env,
 			sqliteSequenceMintChildDirEnv+"="+dir,
 			sqliteSequenceMintChildCountEnv+"="+strconv.Itoa(count),
 		)
