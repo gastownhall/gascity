@@ -2,8 +2,10 @@ package scripts_test
 
 import (
 	"go/ast"
+	"go/build/constraint"
 	"go/parser"
 	"go/token"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -129,13 +131,22 @@ func integrationSrcs(t *testing.T, build string) []string {
 }
 
 // integrationTestOrder lists the top-level tests the way rules_go's test main
-// does: srcs in order, declarations in file order, TestMain excluded.
+// does: srcs in order, declarations in file order, TestMain excluded. Only
+// srcs that actually build for the integration lane's target — `go test
+// -tags integration` on linux/amd64 — contribute tests: a file excluded by
+// its own //go:build line or by a GOOS/GOARCH filename suffix never reaches
+// rules_go's shard assignment, so counting its tests here would misplace
+// every test after it.
 func integrationTestOrder(t *testing.T, root string, srcs []string) []string {
 	t.Helper()
 	var order []string
 	fset := token.NewFileSet()
 	for _, src := range srcs {
-		file, err := parser.ParseFile(fset, filepath.Join(root, "test", "integration", src), nil, parser.SkipObjectResolution)
+		path := filepath.Join(root, "test", "integration", src)
+		if !integrationFileAppliesOnLinuxAMD64(t, path) {
+			continue
+		}
+		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
 		if err != nil {
 			t.Fatalf("parsing %s: %v", src, err)
 		}
@@ -148,6 +159,170 @@ func integrationTestOrder(t *testing.T, root string, srcs []string) []string {
 		}
 	}
 	return order
+}
+
+// integrationLaneTags is the tag set the integration lane's shard guard
+// evaluates //go:build lines against: the "integration" gazelle:build_tags
+// directive plus the lane's canonical linux/amd64 platform (bazel-test.yml
+// and scripts/test-integration-shard both run it there).
+var integrationLaneTags = map[string]bool{"integration": true, "linux": true, "amd64": true}
+
+// knownGOOS and knownGOARCH list every GOOS/GOARCH recognized by the Go
+// toolchain's _GOOS/_GOARCH/_GOOS_GOARCH filename convention (`go tool dist
+// list`), so a filename suffix for a platform this lane does not target
+// (e.g. _darwin.go, _windows_amd64.go) is recognized as such rather than
+// mistaken for an ordinary identifier.
+var (
+	knownGOOS = map[string]bool{
+		"aix": true, "android": true, "darwin": true, "dragonfly": true,
+		"freebsd": true, "illumos": true, "ios": true, "js": true,
+		"linux": true, "netbsd": true, "openbsd": true, "plan9": true,
+		"solaris": true, "wasip1": true, "windows": true,
+	}
+	knownGOARCH = map[string]bool{
+		"386": true, "amd64": true, "arm": true, "arm64": true,
+		"loong64": true, "mips": true, "mips64": true, "mips64le": true,
+		"mipsle": true, "ppc64": true, "ppc64le": true, "riscv64": true,
+		"s390x": true, "wasm": true,
+	}
+)
+
+// integrationFileAppliesOnLinuxAMD64 reports whether src is part of the
+// integration lane's build on linux/amd64: its filename carries no
+// GOOS/GOARCH suffix for a different platform, and its //go:build line (if
+// any) evaluates true against integrationLaneTags.
+func integrationFileAppliesOnLinuxAMD64(t *testing.T, path string) bool {
+	t.Helper()
+	if !goodOSArchFilename(filepath.Base(path)) {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	expr, err := leadingGoBuildConstraint(data)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	if expr == nil {
+		return true
+	}
+	return expr.Eval(func(tag string) bool { return integrationLaneTags[tag] })
+}
+
+// leadingGoBuildConstraint returns the //go:build expression in data's
+// leading comments, or nil if there is none.
+func leadingGoBuildConstraint(data []byte) (constraint.Expr, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "", data, parser.ParseComments|parser.PackageClauseOnly)
+	if err != nil {
+		return nil, err
+	}
+	for _, group := range file.Comments {
+		for _, comment := range group.List {
+			line := strings.TrimSpace(comment.Text)
+			if constraint.IsGoBuild(line) {
+				return constraint.Parse(line)
+			}
+		}
+	}
+	return nil, nil
+}
+
+// goodOSArchFilename reports whether src's _GOOS, _GOARCH or _GOOS_GOARCH
+// filename suffix, if any, names the integration lane's linux/amd64
+// platform. A filename with no such suffix always matches.
+func goodOSArchFilename(src string) bool {
+	name := strings.TrimSuffix(src, ".go")
+	name = strings.TrimSuffix(name, "_test")
+	parts := strings.Split(name, "_")
+	if len(parts) < 2 {
+		return true
+	}
+	last := parts[len(parts)-1]
+	switch {
+	case knownGOARCH[last]:
+		if len(parts) >= 3 && knownGOOS[parts[len(parts)-2]] {
+			return parts[len(parts)-2] == "linux" && last == "amd64"
+		}
+		return last == "amd64"
+	case knownGOOS[last]:
+		return last == "linux"
+	default:
+		return true
+	}
+}
+
+// TestIntegrationFileAppliesOnLinuxAMD64 pins the shard guard's build-tag and
+// filename-suffix filtering: a file the integration lane's own
+// linux/amd64+integration build would exclude must not contribute tests to
+// integrationTestOrder, or the guard would misplace every test that follows
+// it in rules_go's round-robin shard assignment.
+func TestIntegrationFileAppliesOnLinuxAMD64(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(name, content string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+		return path
+	}
+
+	tests := []struct {
+		name    string
+		path    string
+		content string
+		want    bool
+	}{
+		{
+			name: "untagged file",
+			path: writeFile("plain_test.go", "package integration\n"),
+			want: true,
+		},
+		{
+			name: "go:build integration matches the lane",
+			path: writeFile("tagged_test.go", "//go:build integration\n\npackage integration\n"),
+			want: true,
+		},
+		{
+			name: "go:build integration && darwin never applies on linux",
+			path: writeFile("darwin_tagged_test.go", "//go:build integration && darwin\n\npackage integration\n"),
+			want: false,
+		},
+		{
+			name: "go:build !integration excludes the integration lane build",
+			path: writeFile("unit_only_test.go", "//go:build !integration\n\npackage integration\n"),
+			want: false,
+		},
+		{
+			name: "_darwin.go filename suffix",
+			path: writeFile("helpers_darwin_test.go", "package integration\n"),
+			want: false,
+		},
+		{
+			name: "_linux_amd64.go filename suffix",
+			path: writeFile("helpers_linux_amd64_test.go", "package integration\n"),
+			want: true,
+		},
+		{
+			name: "_windows_arm64.go filename suffix",
+			path: writeFile("helpers_windows_arm64_test.go", "package integration\n"),
+			want: false,
+		},
+		{
+			name: "underscore-separated name with no GOOS/GOARCH suffix",
+			path: writeFile("bead_id_test.go", "package integration\n"),
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := integrationFileAppliesOnLinuxAMD64(t, tt.path); got != tt.want {
+				t.Errorf("integrationFileAppliesOnLinuxAMD64(%s) = %v, want %v", filepath.Base(tt.path), got, tt.want)
+			}
+		})
+	}
 }
 
 func integrationHeavyTestNames(t *testing.T, manifest string) []string {
