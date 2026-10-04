@@ -195,6 +195,7 @@ func TestReviewCheckScriptsPreferNewestVerdictWhenListOrderIsStale(t *testing.T)
 		t.Run(tc.name, func(t *testing.T) {
 			fakeDir := t.TempDir()
 			writeFakeBDCommand(t, filepath.Join(fakeDir, "bd"), tc)
+			writeFakeGCBDCommand(t, fakeDir)
 
 			env := newIsolatedToolEnv(t, false)
 			envMap := parseEnvList(env)
@@ -222,12 +223,11 @@ func TestReviewCheckScriptsPreferNewestVerdictWhenListOrderIsStale(t *testing.T)
 
 func setupReviewCheckScriptCity(t *testing.T) string {
 	t.Helper()
-	env := newIsolatedCommandEnv(t, false)
-	env = replaceEnv(env, "GC_BEADS", "file")
+	env := newIsolatedCommandEnv(t, true)
 
 	cityDir := filepath.Join(t.TempDir(), "review-check-script-test")
 	configPath := filepath.Join(t.TempDir(), "review-check-script.toml")
-	cityToml := "[workspace]\nname = \"review-check-script-test\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"subprocess\"\n"
+	cityToml := "[workspace]\nname = \"review-check-script-test\"\n\n[beads]\nprovider = \"bd\"\n\n[session]\nprovider = \"subprocess\"\n"
 	if err := os.WriteFile(configPath, []byte(cityToml), 0o644); err != nil {
 		t.Fatalf("writing config: %v", err)
 	}
@@ -252,15 +252,12 @@ func setupReviewCheckScriptCity(t *testing.T) string {
 			t.Fatalf("writing %s: %v", dst, err)
 		}
 	}
-	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
-	if err != nil {
-		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
-	}
+	initCityWithManagedDoltRecovery(t, env, configPath, cityDir)
 	registerCityCommandEnv(cityDir, env)
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
-		runGCWithEnv(env, "", "stop", cityDir)                //nolint:errcheck
-		runGCWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck
+		runGCDoltWithEnv(env, "", "stop", cityDir)                //nolint:errcheck
+		runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck
 		cleanupTestCityDir(cityDir)
 	})
 
@@ -307,7 +304,7 @@ func reviewCheckBD(t *testing.T, cityDir string, args ...string) (string, error)
 func checkScriptEnv(t *testing.T, cityDir, beadID string) []string {
 	t.Helper()
 
-	env := commandEnvForDir(cityDir, false)
+	env := commandEnvForDir(cityDir, true)
 	env = filterEnvMany(env,
 		"GC_BEAD_ID",
 		"GC_BEADS",
@@ -318,12 +315,32 @@ func checkScriptEnv(t *testing.T, cityDir, beadID string) []string {
 	)
 	env = append(env,
 		"GC_BEAD_ID="+beadID,
-		"GC_BEADS=file",
 		"GC_CITY="+cityDir,
 		"GC_CITY_PATH="+cityDir,
 		"GC_CITY_RUNTIME_DIR="+filepath.Join(cityDir, ".gc", "runtime"),
 	)
+	if port, ok := ensureManagedDoltPortForTest(cityDir); ok {
+		env = appendManagedDoltEndpointEnv(env, port)
+	}
 	return env
+}
+
+// writeFakeGCBDCommand keeps the script's bd and gc bd list paths on the
+// same fixture. Both pack versions must exercise the verdict assertions.
+func writeFakeGCBDCommand(t *testing.T, dir string) {
+	t.Helper()
+	script := `#!/bin/sh
+set -eu
+if [ "${1:-}" != "bd" ]; then
+  echo "unexpected gc command: $*" >&2
+  exit 1
+fi
+shift
+exec "$(dirname "$0")/bd" "$@"
+`
+	if err := os.WriteFile(filepath.Join(dir, "gc"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake gc command: %v", err)
+	}
 }
 
 func writeFakeBDCommand(t *testing.T, path string, tc reviewCheckCase) {
@@ -390,6 +407,7 @@ func TestReviewCheckScriptsStripBeadsRoleWarningFromStdout(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeDir := t.TempDir()
 			writeFakeBDCommandWithWarning(t, filepath.Join(fakeDir, "bd"), tc)
+			writeFakeGCBDCommand(t, fakeDir)
 
 			env := newIsolatedToolEnv(t, false)
 			envMap := parseEnvList(env)
@@ -420,6 +438,7 @@ func TestReviewCheckScriptsRetryTransientBeadShowFailure(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeDir := t.TempDir()
 			writeFakeBDCommandWithTransientShowFailure(t, filepath.Join(fakeDir, "bd"), tc)
+			writeFakeGCBDCommand(t, fakeDir)
 
 			env := newIsolatedToolEnv(t, false)
 			envMap := parseEnvList(env)
@@ -450,6 +469,7 @@ func TestReviewCheckScriptsSurfaceVerdictOutage(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeDir := t.TempDir()
 			writeFakeBDCommandWithVerdictOutage(t, filepath.Join(fakeDir, "bd"))
+			writeFakeGCBDCommand(t, fakeDir)
 
 			env := newIsolatedToolEnv(t, false)
 			envMap := parseEnvList(env)
@@ -470,6 +490,9 @@ func TestReviewCheckScriptsSurfaceVerdictOutage(t *testing.T) {
 			}
 			if !strings.Contains(out, "unable to determine") {
 				t.Fatalf("%s output = %q, want outage message", tc.script, out)
+			}
+			if _, err := os.Stat(filepath.Join(fakeDir, "list-called")); err != nil {
+				t.Fatalf("%s did not reach the fake list outage: %v", tc.script, err)
 			}
 		})
 	}
@@ -601,7 +624,8 @@ esac
 func writeFakeBDCommandWithVerdictOutage(t *testing.T, path string) {
 	t.Helper()
 
-	script := `#!/bin/sh
+	calledPath := filepath.Join(filepath.Dir(path), "list-called")
+	script := fmt.Sprintf(`#!/bin/sh
 set -eu
 
 cmd="$1"
@@ -609,9 +633,10 @@ shift || true
 
 case "$cmd" in
   show)
-    printf '%s\n' '{"metadata":{"gc.attempt":"1","gc.root_bead_id":"root-1"}}'
+    printf '%%s\n' '{"metadata":{"gc.attempt":"1","gc.root_bead_id":"root-1"}}'
     ;;
   list)
+    : > %q
     echo "bd unavailable" >&2
     exit 1
     ;;
@@ -620,7 +645,7 @@ case "$cmd" in
     exit 1
     ;;
 esac
-`
+`, calledPath)
 
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake bd command: %v", err)
