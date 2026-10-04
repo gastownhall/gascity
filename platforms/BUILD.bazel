@@ -2,8 +2,9 @@
 # unconditionally with --extra_execution_platforms, so every action and test
 # executes on it and local, fork-cache and remote runs hash alike).
 #
-# Test actions exec host tools through the client's PATH and cgo actions
-# compile against host headers, so the worker host is an input to every
+# Test actions exec host tools through the client's PATH, and the host runs
+# the hermetic C toolchain and loads the shared libraries of every binary it
+# links (libstdc++, ICU), so the worker host is an input to every
 # cached result. Its exec_properties enter each action's key: worker-env is
 # the sha256 of tools/rbe/worker-env.txt, the manifest of the pinned worker
 # host. blacksmith-worker.sh advertises the sha256 of the manifest it
@@ -15,7 +16,7 @@
 platform(
     name = "rbe_worker",
     exec_properties = {
-        "worker-env": "sha256:35b2a292f0d3a0d33f1204058047820f8e287b6d32256dcf57a199b9799d17c2",
+        "worker-env": "sha256:f4d6d0460877031a71cd0ddb4dc67e789c4e54fc18c0d888fa818c84f8cf61ed",
     },
     parents = ["@bazel_tools//tools:host_platform"],
     visibility = ["//visibility:public"],

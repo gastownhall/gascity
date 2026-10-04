@@ -73,17 +73,20 @@ ROOT="$RUNNER_TEMP/nl-worker"
 NL_BIN_DIR="$RUNNER_TEMP/nl-bin"
 
 # Host toolset: test actions exec tools via the client PATH
-# (/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin), and cgo actions compile
-# against host headers. lld: Bazel's auto-configured C toolchain on a client
-# that has lld links with -fuse-ld=lld, so those cgo link actions fail here
-# ("collect2: fatal error: cannot find 'ld'") without it.
-# gcc, libc6-dev: cgo actions' compiler and headers, here in every mode (the
-# isolation phase installs them too) so the worker-env manifest below does not
-# depend on RBE_ACTION_ISOLATION.
-# Keep in sync with infra nativelink-cas/scripts/elastic.sh.
-WORKER_TOOLSET=(make jq sqlite3 tmux lsof cmake git lld gcc libc6-dev libicu-dev
-	zlib1g-dev libsqlite3-dev libbz2-dev liblzma-dev libffi-dev libexpat1-dev
-	libxml2-dev libreadline-dev libncurses-dev python3-dev)
+# (/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin). C/C++ and cgo actions
+# compile and link with the hermetic LLVM toolchain and Ubuntu 24.04 sysroot
+# registered in MODULE.bazel, never the host's gcc, lld or headers (the
+# isolation phase's gcc only builds the action launcher), but the host still
+# runs that toolchain and the binaries it links:
+# - libstdc++6, libgcc-s1, zlib1g: loaded by clang, lld and the llvm-* tools;
+# - libxml2 (and its liblzma5): loaded by lld;
+# - libicu74, libstdc++6, libgcc-s1: loaded by every Bazel-built Go binary
+#   that links Dolt's go-icu-regex (most tests), as are glibc's (base below);
+# - xz-utils: unpacks the toolchain's .tar.xz archive.
+WORKER_TOOLSET=(make jq sqlite3 tmux lsof cmake git libstdc++6 libgcc-s1 zlib1g
+	libxml2 liblzma5 xz-utils libicu74 zlib1g-dev libsqlite3-dev libbz2-dev
+	liblzma-dev libffi-dev libexpat1-dev libxml2-dev libreadline-dev
+	libncurses-dev python3-dev)
 sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y -qq \
 	"${WORKER_TOOLSET[@]}" >/dev/null
 if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go${GO_VERSION} "; then

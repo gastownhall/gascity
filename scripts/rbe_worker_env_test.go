@@ -17,8 +17,9 @@ import (
 	"time"
 )
 
-// Test actions exec host tools through the client's PATH and cgo actions
-// compile against host headers, so the worker host is an input to every
+// Test actions exec host tools through the client's PATH, and the host runs
+// the hermetic C toolchain and loads the shared libraries of every binary it
+// links (libstdc++, ICU), so the worker host is an input to every
 // result rbe-west caches. These tests pin the worker-env platform property
 // that puts the host into the action key:
 //
@@ -164,6 +165,31 @@ func TestRBEWorkerEnvManifestNamesTheWorkerHost(t *testing.T) {
 	}
 	if !slices.Equal(pkgs, wantPkgs) {
 		t.Errorf("%s packages:\n%v\nwant the worker-env base and WORKER_TOOLSET packages:\n%v", rbeWorkerEnvManifest, pkgs, wantPkgs)
+	}
+}
+
+// TestRBEWorkerToolsetRunsTheHermeticToolchain: C/C++ and cgo actions build
+// with the hermetic LLVM toolchain and sysroot of MODULE.bazel, so the
+// toolset (and with it the worker-env manifest) carries what the host needs
+// to run that toolchain and the binaries it links, and no host compiler,
+// linker or ICU headers: a package no action uses would only re-key every
+// action when the runner image moves it.
+func TestRBEWorkerToolsetRunsTheHermeticToolchain(t *testing.T) {
+	toolset := workerToolset(t, readFile(t, repoRoot(t), rbeWorkerScript))
+	for _, want := range []string{
+		"libstdc++6", "libgcc-s1", "zlib1g", // clang, lld, llvm-*
+		"libxml2", "liblzma5", // lld
+		"libicu74", // Bazel-built binaries linking go-icu-regex
+		"xz-utils", // the toolchain's .tar.xz
+	} {
+		if !slices.Contains(toolset, want) {
+			t.Errorf("%s WORKER_TOOLSET lacks %s, which the hermetic toolchain or its binaries load", rbeWorkerScript, want)
+		}
+	}
+	for _, banned := range []string{"gcc", "g++", "clang", "lld", "libc6-dev", "libicu-dev", "build-essential"} {
+		if slices.Contains(toolset, banned) {
+			t.Errorf("%s WORKER_TOOLSET has %s; no action uses a host compiler, linker or ICU headers", rbeWorkerScript, banned)
+		}
 	}
 }
 
