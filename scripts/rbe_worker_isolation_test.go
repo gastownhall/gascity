@@ -275,7 +275,9 @@ func TestRBEWorkerScriptSlotEgressRuleOrder(t *testing.T) {
 // With isolation off (the RBE_ACTION_ISOLATION=0 rollback) the script must
 // render exactly the worker.json it rendered before O1. The golden file is
 // origin/main's jq program before O1 (4d0e45d9eb^) rendered with the same
-// arguments; regenerate it only for an intended worker config change.
+// arguments; regenerate it only for an intended worker config change. One
+// so far: both goldens advertise the worker-env platform property
+// (rbe_worker_env_test.go), here rbeWorkerEnvSample.
 //
 // The same program renders the fork tier (WORKER_TIER=fork, rbe-fork-pool.yml),
 // always with isolation on: CAS instance oss-fork on :8444, no action cache
@@ -317,6 +319,7 @@ func TestRBEWorkerJSONIsolationOffMatchesPreO1(t *testing.T) {
 			"--arg", "name", "pool-worker-1",
 			"--argjson", "slots", "8",
 			"--arg", "tier", c.tier,
+			"--arg", "worker_env", rbeWorkerEnvSample,
 			"--argjson", "isolation", c.isolation,
 			m[1])
 		var stderr bytes.Buffer
@@ -332,6 +335,9 @@ func TestRBEWorkerJSONIsolationOffMatchesPreO1(t *testing.T) {
 		}
 		if got, want := decode(out), decode(golden); !reflect.DeepEqual(got, want) {
 			t.Errorf("tier %s: worker.json differs from %s:\ngot:\n%s\nwant:\n%s", c.tier, c.golden, out, golden)
+		}
+		if err := checkWorkerJSONAdvertises(out, rbeWorkerEnvSample); err != nil {
+			t.Errorf("tier %s: %v", c.tier, err)
 		}
 		if c.tier == "fork" {
 			for _, err := range checkForkWorkerJSON(out, c.host) {
@@ -576,7 +582,7 @@ func TestRBEWorkerIsolationCanary(t *testing.T) {
 		cmd := exec.CommandContext(ctx, "bash", "-c", prog)
 		cmd.Env = []string{
 			"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"), "HOME=" + home, "RUNNER_TEMP=" + temp, "ROOT=" + nlRoot, "NL_BIN_DIR=" + bin,
-			"RBE_WEST_HOST=rbe-west.example.invalid", "WORKER_NAME=pool-worker-1",
+			"RBE_WEST_HOST=rbe-west.example.invalid", "WORKER_NAME=pool-worker-1", "WORKER_ENV=" + rbeWorkerEnvSample,
 			"MODE=" + mode, "SLOTS=" + strconv.Itoa(slots), "GITHUB_STEP_SUMMARY=" + filepath.Join(home, "summary.md"),
 		}
 		if runID != "" {

@@ -77,11 +77,15 @@ NL_BIN_DIR="$RUNNER_TEMP/nl-bin"
 # against host headers. lld: Bazel's auto-configured C toolchain on a client
 # that has lld links with -fuse-ld=lld, so those cgo link actions fail here
 # ("collect2: fatal error: cannot find 'ld'") without it.
+# gcc, libc6-dev: cgo actions' compiler and headers, here in every mode (the
+# isolation phase installs them too) so the worker-env manifest below does not
+# depend on RBE_ACTION_ISOLATION.
 # Keep in sync with infra nativelink-cas/scripts/elastic.sh.
+WORKER_TOOLSET=(make jq sqlite3 tmux lsof cmake git lld gcc libc6-dev libicu-dev
+	zlib1g-dev libsqlite3-dev libbz2-dev liblzma-dev libffi-dev libexpat1-dev
+	libxml2-dev libreadline-dev libncurses-dev python3-dev)
 sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y -qq \
-	make jq sqlite3 tmux lsof cmake git lld libicu-dev zlib1g-dev libsqlite3-dev \
-	libbz2-dev liblzma-dev libffi-dev libexpat1-dev libxml2-dev libreadline-dev \
-	libncurses-dev python3-dev >/dev/null
+	"${WORKER_TOOLSET[@]}" >/dev/null
 if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go${GO_VERSION} "; then
 	sum=$(curl -fsSL "https://go.dev/dl/?mode=json&include=all" |
 		jq -r --arg f "go${GO_VERSION}.linux-amd64.tar.gz" '.[].files[] | select(.filename==$f) | .sha256')
@@ -94,6 +98,22 @@ if ! dolt version 2>/dev/null | grep -q "$DOLT_VERSION"; then
 	echo "${DOLT_SHA256}  $RUNNER_TEMP/dolt.tgz" | sha256sum -c -
 	tar -C "$RUNNER_TEMP" -xzf "$RUNNER_TEMP/dolt.tgz"
 	sudo cp -f "$RUNNER_TEMP/dolt-linux-amd64/bin/dolt" /usr/local/bin/dolt
+fi
+
+# The worker-env platform property (tools/rbe/worker-env): the sha256 of this
+# host's environment manifest. rbe-west's schedulers match it exactly against
+# the worker-env CI's actions request (//platforms:rbe_worker: the sha256 of
+# the committed tools/rbe/worker-env.txt), so an action runs only on the host
+# its key names and its cached result is never one another host produced. A
+# worker on any other host (a new Blacksmith image, a package or Go upgrade)
+# advertises its own value and serves no CI action until the pin moves: commit
+# its manifest (printed below) as tools/rbe/worker-env.txt and its sha256 in
+# platforms/BUILD.bazel.
+tools/rbe/worker-env "${WORKER_TOOLSET[@]}" >"$RUNNER_TEMP/worker-env.txt"
+WORKER_ENV=sha256:$(sha256sum <"$RUNNER_TEMP/worker-env.txt" | cut -d' ' -f1)
+echo "worker-env: $WORKER_ENV"
+if ! diff -u tools/rbe/worker-env.txt "$RUNNER_TEMP/worker-env.txt"; then
+	echo "::warning title=rbe worker-env drift::this host is not the pinned one (diff above): worker-env=$WORKER_ENV serves no CI action until tools/rbe/worker-env.txt is this manifest and platforms/BUILD.bazel pins its sha256"
 fi
 curl -fsSL -o "$RUNNER_TEMP/nl.tgz" "https://github.com/TraceMachina/nativelink/releases/download/v${NL_VERSION}/nativelink-${NL_VERSION}-x86_64-unknown-linux-musl.tar.gz"
 echo "${NL_SHA256}  $RUNNER_TEMP/nl.tgz" | sha256sum -c -
@@ -171,7 +191,7 @@ isolation_undo() {
 }
 
 render() {
-	jq -n --arg host "grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT:-443}" --arg root "$ROOT" --arg store "$STORE" --arg name "$WORKER_NAME" --argjson slots "$slots" --arg tier "${WORKER_TIER:-oss}" --argjson isolation "$isolation" '
+	jq -n --arg host "grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT:-443}" --arg root "$ROOT" --arg store "$STORE" --arg name "$WORKER_NAME" --argjson slots "$slots" --arg tier "${WORKER_TIER:-oss}" --arg worker_env "$WORKER_ENV" --argjson isolation "$isolation" '
   { cert_file: ($root + "/pki/worker.pem"), key_file: ($root + "/pki/worker.key"),
     ca_file: "/etc/ssl/certs/ca-certificates.crt" } as $tls |
   {
@@ -196,7 +216,8 @@ render() {
       platform_properties: {
         OSFamily: { values: ["linux"] },
         "container-image": { values: [""] },
-        ISA: { values: ["x86_64"] }
+        ISA: { values: ["x86_64"] },
+        "worker-env": { values: [$worker_env] }
       } } + $isolation) } ],
     servers: []
   }' >"$ROOT/worker.json"
