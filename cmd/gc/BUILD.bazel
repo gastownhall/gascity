@@ -1223,6 +1223,7 @@ go_test(
         "provider_health_gate_test.go",
         "provider_store_resolution_test.go",
         "providers_cli_recorder_test.go",
+        "providers_events_roles_test.go",
         "providers_events_rotation_test.go",
         "providers_test.go",
         "quality_gate_fallback_test.go",
