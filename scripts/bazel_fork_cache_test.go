@@ -32,11 +32,8 @@ const (
 	// mint) passes --config=remote-exec too: its .bazelrc.local carries the
 	// mint's endpoint, instance and certificate under build:remote-exec and
 	// no fork-cache. RBE_FORK_CERT must then be the fork-cert step's output.
-	bazelRCExecForkGuard = `if [ -n "$BAZEL_REMOTE_EXECUTOR" ] || [ -n "$RBE_FORK_CERT" ]; then`
-	bazelRCForkCertEnv   = "${{ steps.fork-cert.outputs.cert }}"
-	// The test step also reads the minted instance: the fork pool
-	// (oss-fork, no network) skips the acceptance tier (ga-73eoo).
-	bazelRCForkInstanceEnv = "${{ steps.fork-cert.outputs.instance }}"
+	bazelRCExecForkGuard   = `if [ -n "$BAZEL_REMOTE_EXECUTOR" ] || [ -n "$RBE_FORK_CERT" ]; then`
+	bazelRCForkCertEnv     = "${{ steps.fork-cert.outputs.cert }}"
 	bazelRCExecSteps       = 3
 	forkCacheMaxTimeoutSec = 15
 	// The farm admits 16 connections per source IP and Blacksmith runners
@@ -361,7 +358,7 @@ func TestBazelRBEForkSteps(t *testing.T) {
 	}
 	for _, s := range job.Steps {
 		for k, v := range s.Env {
-			if strings.Contains(v, "steps.fork-") && s.ID != "fork-key" && s.ID != "fork-cert" && s.Name != bazelRCConfigStep && v != bazelRCForkCertEnv && v != bazelRCForkInstanceEnv {
+			if strings.Contains(v, "steps.fork-") && s.ID != "fork-key" && s.ID != "fork-cert" && s.Name != bazelRCConfigStep && v != bazelRCForkCertEnv {
 				t.Errorf("step %q env %s reads %q; only the rc step and the remote-exec guards read rbe-fork's outputs", s.Name, k, v)
 			}
 		}
