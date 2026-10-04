@@ -201,11 +201,12 @@ func TestDismissFeedbackSurveyModalRecaptureFailure(t *testing.T) {
 		name               string
 		successfulCaptures int
 		wantKeys           string
+		wantErr            error
 		typeDraft          bool
 	}{
-		{"before the digit sends nothing", 0, "", false},
-		{"after the digit preserves uncertain input", 1, "0", false},
-		{"after the digit preserves an attached user's draft", 1, "0", true},
+		{"before the digit sends nothing and lets the nudge proceed", 0, "", nil, false},
+		{"after the digit preserves uncertain input", 1, "0", captureErr, false},
+		{"after the digit preserves an attached user's draft", 1, "0", captureErr, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var keys []string
@@ -234,8 +235,8 @@ func TestDismissFeedbackSurveyModalRecaptureFailure(t *testing.T) {
 			}
 
 			present, err := dismissFeedbackSurveyModal(feedbackSurveySessionFixture, capture, sendKeys, func(time.Duration) {})
-			if !errors.Is(err, captureErr) {
-				t.Fatalf("dismissFeedbackSurveyModal error = %v, want %v", err, captureErr)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("dismissFeedbackSurveyModal error = %v, want %v", err, test.wantErr)
 			}
 			if !present {
 				t.Fatal("dismissFeedbackSurveyModal reported no survey")
@@ -334,14 +335,14 @@ func TestDismissFeedbackSurveyModalLeavesHumanSessionsAlone(t *testing.T) {
 
 type failingRecaptureExecutor struct {
 	scriptedTargetExecutor
-	digitSent bool
+	captureFails bool
 }
 
 func (f *failingRecaptureExecutor) execute(args []string) (string, error) {
 	if slices.Contains(args, "send-keys") && slices.Contains(args, "0") {
-		f.digitSent = true
+		f.captureFails = true
 	}
-	if f.digitSent && slices.Contains(args, "capture-pane") {
+	if f.captureFails && slices.Contains(args, "capture-pane") {
 		f.calls = append(f.calls, slices.Clone(args))
 		return "", errors.New("capture-pane failed")
 	}
@@ -370,6 +371,28 @@ func TestDismissFeedbackSurveyModalReportsUnresolvedDigit(t *testing.T) {
 	}
 }
 
+func TestDismissFeedbackSurveyModalReportsUnreadableComposerAfterDigit(t *testing.T) {
+	var keys []string
+	captures := 0
+	capture := func() (string, error) {
+		captures++
+		if captures == 1 {
+			return feedbackSurveySessionFixture, nil
+		}
+		return "⏺ Done — pushed the branch and replied on the PR.", nil
+	}
+	_, err := dismissFeedbackSurveyModal(feedbackSurveySessionFixture, capture, func(sent ...string) error {
+		keys = append(keys, sent...)
+		return nil
+	}, func(time.Duration) {})
+	if !errors.Is(err, errFeedbackSurveyDigitUnresolved) {
+		t.Fatalf("dismissFeedbackSurveyModal error = %v, want %v when no frame after the digit shows the composer", err, errFeedbackSurveyDigitUnresolved)
+	}
+	if got := strings.Join(keys, ","); got != "0" {
+		t.Fatalf("keys = %q, want only the dismiss digit", got)
+	}
+}
+
 func TestFeedbackSurveyComposerReadsEveryContinuationRow(t *testing.T) {
 	pane := "╭──────────────╮\n│ ❯            │\n│ 0            │\n│ draft        │\n╰──────────────╯"
 	composer, observed := feedbackSurveyComposer(pane)
@@ -395,4 +418,20 @@ func TestNudgeSessionDoesNotPasteOntoUnresolvedSurveyDigit(t *testing.T) {
 			t.Fatalf("NudgeSession pasted onto an unresolved survey digit: %v", executor.calls)
 		}
 	}
+}
+
+func TestNudgeSessionDeliversWhenSurveyPeekFails(t *testing.T) {
+	executor := &failingRecaptureExecutor{scriptedTargetExecutor: scriptedTargetExecutor{display: "agent-pane|0"}, captureFails: true}
+	cfg := DefaultConfig()
+	cfg.NudgeReadyTimeout = 10 * time.Millisecond
+	tm := &Tmux{cfg: cfg, exec: executor}
+
+	_ = tm.NudgeSession("agent-pane", "hello")
+
+	for _, call := range executor.calls {
+		if slices.Contains(call, "send-keys") && slices.Contains(call, "hello") {
+			return
+		}
+	}
+	t.Fatalf("NudgeSession dropped the message after a capture-pane failure in the survey peek: %v", executor.calls)
 }

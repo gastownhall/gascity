@@ -2792,13 +2792,7 @@ func (t *Tmux) nudgeSession(
 	}
 
 	// 1.5. Dismiss Claude Code's post-turn feedback survey if it is parked on
-	// the pane (ga-zg7fjq). On the unattached path the C-u above has cleared
-	// the composer; on an attached session it deliberately did not, so a
-	// human draft may still be on the line. That matters: the survey's
-	// onDigit handler
-	// only fires on a single-character input value, so a digit landing on
-	// top of other content silently corrupts the draft instead of
-	// dismissing anything. A parked survey reads idle to WaitForIdle (no
+	// the pane (ga-zg7fjq). A parked survey reads idle to WaitForIdle (no
 	// busy indicator, composer prefix still matches), so this cannot be
 	// gated on an idle-wait failure the way DismissModelSwitchModalIfPresent
 	// is in Provider.Nudge -- it must run unconditionally, here.
@@ -3191,45 +3185,51 @@ const (
 	feedbackSurveyDigitDeadline     = time.Second
 )
 
+var errFeedbackSurveyDigitUnresolved = errors.New("feedback survey dismiss digit sent but the composer never became readable")
+
 func dismissFeedbackSurveyModal(content string, capture func() (string, error), sendKeys func(keys ...string) error, sleep func(time.Duration)) (bool, error) {
 	if !runtime.ContainsFeedbackSurveyModal(content) {
 		return false, nil
 	}
 	sleep(feedbackSurveyMountGuard)
 	content, err := capture()
-	if err != nil {
-		return true, err
+	if err != nil || !runtime.ContainsFeedbackSurveyModal(content) {
+		return true, nil
 	}
-	if composer, observed := feedbackSurveyComposer(content); !runtime.ContainsFeedbackSurveyModal(content) || !observed || composer != "" {
+	if composer, observed := feedbackSurveyComposer(content); !observed || composer != "" {
 		return true, nil
 	}
 	if err := sendKeys("0"); err != nil {
 		return true, err
 	}
-	content, err = awaitFeedbackSurveyDigit(capture, sleep)
+	composer, err := awaitFeedbackSurveyDigit(capture, sleep)
 	if err != nil {
 		return true, err
 	}
-	if composer, observed := feedbackSurveyComposer(content); observed && composer == "0" {
+	if composer == "0" {
 		return true, sendKeys("C-u")
 	}
 	return true, nil
 }
 
 func awaitFeedbackSurveyDigit(capture func() (string, error), sleep func(time.Duration)) (string, error) {
-	var content string
+	var composer string
+	var observed bool
 	for waited := time.Duration(0); waited < feedbackSurveyDigitDeadline; waited += feedbackSurveyDigitPollInterval {
 		sleep(feedbackSurveyDigitPollInterval)
-		var err error
-		content, err = capture()
+		content, err := capture()
 		if err != nil {
 			return "", err
 		}
-		if !runtime.ContainsFeedbackSurveyModal(content) {
+		composer, observed = feedbackSurveyComposer(content)
+		if observed && !runtime.ContainsFeedbackSurveyModal(content) {
 			break
 		}
 	}
-	return content, nil
+	if !observed {
+		return "", errFeedbackSurveyDigitUnresolved
+	}
+	return composer, nil
 }
 
 func feedbackSurveyComposer(content string) (string, bool) {
@@ -3267,9 +3267,11 @@ func feedbackSurveyComposer(content string) (string, bool) {
 // reads idle to WaitForIdle, so callers must not gate this on an idle-wait
 // failure branch -- see the unconditional call from NudgeSession. When the
 // survey is present it blocks for the survey's mount window plus up to a
-// second while the dismiss digit is consumed. A returned error means the
-// pane could not be read or keyed, and the dismiss digit may still sit in
-// the composer, so the caller must not paste on top of it.
+// second while the dismiss digit is consumed. Failures to read the pane
+// before the digit is typed are swallowed, since nothing has been keyed and
+// the nudge can still be delivered. A returned error means the digit was
+// typed and its fate could not be confirmed, so the caller must not paste on
+// top of it.
 func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) error {
 	target := session
 	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
@@ -3288,10 +3290,7 @@ func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) error {
 		return t.CaptureVisiblePane(target)
 	}
 	content, err := capture()
-	if err != nil {
-		return err
-	}
-	if !runtime.ContainsFeedbackSurveyModal(content) {
+	if err != nil || !runtime.ContainsFeedbackSurveyModal(content) {
 		return nil
 	}
 	if attached, err := t.SessionAttachedWithError(session); err != nil || attached {
