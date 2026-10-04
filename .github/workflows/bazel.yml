@@ -260,6 +260,9 @@ jobs:
           BAZEL_FORK_REMOTE: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}
           RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
           RBE_FORK_PR: ${{ github.event.pull_request.number }}
+      - name: Restore the LLVM archive
+        id: llvm
+        uses: ./.github/actions/llvm-archive-cache
 
       - name: Create Bazel test tmpdir
         run: |
@@ -325,6 +328,32 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      # The LLVM archive (~1.9 GB) has a runner cache entry of its own, keyed
+      # on its sha256 (.github/actions/llvm-archive-cache), saved under the
+      # same conditions as the runner cache below; it is then deleted from the
+      # repository cache so the runner cache never stores it.
+      # scripts/bazel_output_cache_test.go pins the order.
+      - name: Was the LLVM archive fetched
+        id: llvm-fetched
+        if: always() && steps.llvm.outcome == 'success'
+        env:
+          LLVM_ARCHIVE_DIR: ${{ steps.llvm.outputs.path }}
+        run: |
+          fetched=false
+          [ -f "$LLVM_ARCHIVE_DIR/file" ] && fetched=true
+          echo "fetched=$fetched" >> "$GITHUB_OUTPUT"
+      - name: Save LLVM archive cache
+        if: always() && matrix.lane == 'unit' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.llvm-fetched.outputs.fetched == 'true' && steps.llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.llvm.outputs.path }}
+          key: ${{ steps.llvm.outputs.key }}
+      - name: Keep the LLVM archive out of the runner cache
+        if: always() && steps.llvm.outcome == 'success'
+        env:
+          LLVM_ARCHIVE_DIR: ${{ steps.llvm.outputs.path }}
+        run: rm -rf -- "$LLVM_ARCHIVE_DIR"
+
       # Only a push to main that missed the exact key writes the runner cache
       # (--repository_cache only, never the rc or credentials), from one lane.
       - name: Save Bazel runner cache
@@ -357,6 +386,8 @@ jobs:
           RBE_TLS_CERT: ${{ secrets.RBE_TLS_CERT }}
           RBE_TLS_KEY: ${{ secrets.RBE_TLS_KEY }}
           RBE_INSTANCE: oss
+      - name: Restore the LLVM archive
+        uses: ./.github/actions/llvm-archive-cache
       - name: Create Bazel test tmpdir
         run: mkdir -p /tmp/bt
       - name: bazel coverage //... (lcov)
@@ -404,6 +435,8 @@ jobs:
           cache: false
       - name: Set up Bazel
         uses: ./.github/actions/setup-bazel
+      - name: Restore the LLVM archive
+        uses: ./.github/actions/llvm-archive-cache
       - name: BUILD files are in sync (gazelle + repo tree)
         run: |
           make bazel-sync
