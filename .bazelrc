@@ -6,7 +6,6 @@ common --color=no
 # build --remote_cache=<your-cache-endpoint>
 
 test --test_output=errors
-test --flaky_test_attempts=2
 
 
 # Bazel sandboxes root t.TempDir() deep under the output tree, blowing past the
