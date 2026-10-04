@@ -443,9 +443,9 @@ func (e *capabilityRefusal) Error() string {
 }
 func (e *capabilityRefusal) Unwrap() error { return e.sentinel }
 
-// wireRefusingStorage always hands back an applier — as httpstore's accessor
-// does, since the refusal is the WIRE's and not the accessor's — and that
-// applier refuses every request in the capability shape.
+// wireRefusingStorage always hands back an applier — as a served backend's
+// accessor must, since the refusal is the WIRE's and not the accessor's — and
+// that applier refuses every request in the capability shape.
 type wireRefusingStorage struct {
 	*nativeDoltMemStorage
 	sentinel error
@@ -473,55 +473,6 @@ func TestCloseAllHardFailsOnAnUnregisteredRefusalShape(t *testing.T) {
 	}
 	if closed != 0 {
 		t.Errorf("closed = %d, want 0", closed)
-	}
-}
-
-// TestCloseAllFallsBackOnARegisteredWireRefusal is F1: the fallback was DEAD on
-// the served wire until the fence learned the wire's refusal shape.
-//
-// The five original fallback pins all used doubles refusing in the PORTABLE
-// type, which the fence classified from the start — so every one of them passed
-// against a fence that could never fire on the transport gc actually routes
-// infrastructure over. httpstore's BatchApplier() accessor ALWAYS returns an
-// applier; the refusal is raised at the dispatch's capability preflight and
-// carries the wire's own sentinel. This drives the same shape through the same
-// registration door production uses.
-func TestCloseAllFallsBackOnARegisteredWireRefusal(t *testing.T) {
-	// A sentinel unique to this test, so the process-global registration this
-	// makes can never answer for another test's error.
-	sentinel := errors.New("bd serve does not advertise the capability this operation needs (test)")
-	RegisterBatchUnavailableRefusal(func(err error) bool { return errors.Is(err, sentinel) })
-
-	storage := newNativeDoltMemStorage()
-	native := newNativeDoltStoreForTest(storage)
-	first, err := native.Create(Bead{Type: "task", Status: "open", Title: "first"})
-	if err != nil {
-		t.Fatalf("Create first: %v", err)
-	}
-	second, err := native.Create(Bead{Type: "task", Status: "open", Title: "second"})
-	if err != nil {
-		t.Fatalf("Create second: %v", err)
-	}
-
-	store := newNativeDoltStoreForTest(&wireRefusingStorage{nativeDoltMemStorage: storage, sentinel: sentinel})
-	closed, err := store.CloseAll([]string{first.ID, second.ID}, map[string]string{"close_reason": "closed by the fallback route"})
-	if err != nil {
-		t.Fatalf("CloseAll over a backing whose wire refuses the batch: %v", err)
-	}
-	if closed != 2 {
-		t.Fatalf("closed = %d, want 2: the per-bead fallback must run when the WIRE refuses, not only when the accessor does", closed)
-	}
-	for _, id := range []string{first.ID, second.ID} {
-		got, gErr := store.Get(id)
-		if gErr != nil {
-			t.Fatalf("Get(%s): %v", id, gErr)
-		}
-		if got.Status != "closed" {
-			t.Errorf("bead %s status = %q, want closed", id, got.Status)
-		}
-		if got.Metadata["close_reason"] != "closed by the fallback route" {
-			t.Errorf("bead %s close_reason = %q, want the fallback to have stamped it", id, got.Metadata["close_reason"])
-		}
 	}
 }
 

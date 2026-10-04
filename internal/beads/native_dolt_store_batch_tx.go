@@ -46,7 +46,6 @@ import (
 //     updateIssue does. Refusing here names the member; letting it through
 //     would surface the encoder's refusal as an opaque transport error at the
 //     one call site — an Update carrying ParentID — that can explain it.
-//     (ga-b8ddd.28 is the wire-side bead.)
 //
 // READS ARE NOT IN THE TRANSACTION, and that is the one property lost relative
 // to the native route. The close reason and the already-closed check are read
