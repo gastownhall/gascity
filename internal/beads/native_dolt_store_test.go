@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	beadslib "github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func TestNativeDoltStoreCreateDelegatesToUpstreamStorage(t *testing.T) {
@@ -25,15 +25,22 @@ func TestNativeDoltStoreCreateDelegatesToUpstreamStorage(t *testing.T) {
 	var captured *beadslib.Issue
 	var capturedActor string
 	storage := &nativeDoltStorageSpy{
-		getIssue: func(_ context.Context, id string) (*beadslib.Issue, error) {
-			return &beadslib.Issue{ID: id, Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2}, nil
+		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
+			if captured == nil {
+				t.Fatal("Create did not use CreateIssue before loading the created issue")
+			}
+			return cloneNativeIssueForTest(captured), nil
 		},
 		createIssue: func(_ context.Context, issue *beadslib.Issue, actor string) error {
-			captured = cloneNativeIssueForTest(issue)
 			capturedActor = actor
 			issue.ID = "gc-native"
 			issue.CreatedAt = createdAt
 			issue.UpdatedAt = createdAt
+			captured = cloneNativeIssueForTest(issue)
+			return nil
+		},
+		addDependency: func(_ context.Context, dependency *beadslib.Dependency, _ string) error {
+			captured.Dependencies = append(captured.Dependencies, cloneNativeDependencies([]*beadslib.Dependency{dependency})...)
 			return nil
 		},
 	}
@@ -726,10 +733,15 @@ func TestNativeDoltStoreCloseStoreWaitsForInFlightOperation(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	closed := make(chan struct{})
+	// Close reads the bead once to derive its close reason and the facade reads
+	// it again inside the write, so the gate only trips on the first read.
+	enter := sync.OnceFunc(func() {
+		close(entered)
+		<-release
+	})
 	storage := &nativeDoltStorageSpy{
 		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
-			close(entered)
-			<-release
+			enter()
 			return &beadslib.Issue{ID: "gc-open", Status: beadslib.StatusOpen}, nil
 		},
 		closeIssue: func(context.Context, string, string, string, string) error {
@@ -1013,99 +1025,6 @@ func TestNativeDoltStoreListTierWispsIncludesNoHistoryAndEphemeralRows(t *testin
 	}
 }
 
-func TestNativeDoltStoreSetMetadataBatchRejectsInvalidExistingMetadata(t *testing.T) {
-	updateCalled := false
-	storage := &nativeDoltStorageSpy{
-		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
-			return &beadslib.Issue{
-				ID:        "gc-corrupt",
-				Title:     "corrupt metadata",
-				Status:    beadslib.StatusOpen,
-				IssueType: beadslib.TypeTask,
-				Priority:  2,
-				Metadata:  json.RawMessage(`{"existing":`),
-			}, nil
-		},
-		updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
-			updateCalled = true
-			return nil
-		},
-	}
-	store := newNativeDoltStoreForTest(storage)
-
-	if err := store.SetMetadataBatch("gc-corrupt", map[string]string{"gc.step_ref": "build"}); err == nil {
-		t.Fatal("SetMetadataBatch error = nil, want invalid metadata error")
-	} else if !strings.Contains(err.Error(), `parsing metadata for bead "gc-corrupt"`) {
-		t.Fatalf("SetMetadataBatch error = %v, want bead metadata context", err)
-	}
-	if updateCalled {
-		t.Fatal("UpdateIssueChecked was called after invalid metadata")
-	}
-}
-
-func TestNativeDoltStoreSetMetadataBatchRetriesSerializationConflictFromFreshState(t *testing.T) {
-	getCalls := 0
-	updateCalls := 0
-	var expectedVersions []int64
-	var writtenMetadata json.RawMessage
-	storage := &nativeDoltStorageSpy{
-		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
-			getCalls++
-			metadata := json.RawMessage(`{"existing":"before-conflict"}`)
-			if getCalls > 1 {
-				metadata = json.RawMessage(`{"concurrent":"preserved"}`)
-			}
-			return &beadslib.Issue{
-				ID:         "gc-conflict",
-				Title:      "metadata conflict",
-				Status:     beadslib.StatusOpen,
-				IssueType:  beadslib.TypeTask,
-				Priority:   2,
-				Metadata:   metadata,
-				RowVersion: int64(getCalls),
-			}, nil
-		},
-		updateIssueChecked: func(_ context.Context, _ string, updates map[string]interface{}, _ string, opts beadslib.UpdateIssueOptions) error {
-			updateCalls++
-			if opts.ExpectedVersion == nil {
-				t.Fatal("metadata write carried no expected version")
-			}
-			expectedVersions = append(expectedVersions, *opts.ExpectedVersion)
-			if updateCalls == 1 {
-				return errors.New("dolt commit: Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction, try restarting transaction")
-			}
-			raw, ok := updates["metadata"].(json.RawMessage)
-			if !ok {
-				t.Fatalf("metadata update type = %T, want json.RawMessage", updates["metadata"])
-			}
-			writtenMetadata = slices.Clone(raw)
-			return nil
-		},
-	}
-	store := newNativeDoltStoreForTest(storage)
-
-	if err := store.SetMetadataBatch("gc-conflict", map[string]string{"requested": "written"}); err != nil {
-		t.Fatalf("SetMetadataBatch: %v", err)
-	}
-	if getCalls != 2 {
-		t.Fatalf("GetIssue calls = %d, want 2 so retry re-reads current metadata", getCalls)
-	}
-	if updateCalls != 2 {
-		t.Fatalf("UpdateIssueChecked calls = %d, want 2", updateCalls)
-	}
-	if !slices.Equal(expectedVersions, []int64{1, 2}) {
-		t.Fatalf("expected versions = %v, want [1 2]: each attempt must swap against the version its own read returned", expectedVersions)
-	}
-	var got map[string]string
-	if err := json.Unmarshal(writtenMetadata, &got); err != nil {
-		t.Fatalf("unmarshal written metadata: %v", err)
-	}
-	want := map[string]string{"concurrent": "preserved", "requested": "written"}
-	if !maps.Equal(got, want) {
-		t.Fatalf("written metadata = %#v, want %#v", got, want)
-	}
-}
-
 func TestNativeDoltStoreSetMetadataBatchDoesNotRetryPermanentWriteError(t *testing.T) {
 	wantErr := errors.New("metadata write denied")
 	getCalls := 0
@@ -1115,7 +1034,7 @@ func TestNativeDoltStoreSetMetadataBatchDoesNotRetryPermanentWriteError(t *testi
 			getCalls++
 			return &beadslib.Issue{ID: "gc-permanent", Metadata: json.RawMessage(`{"existing":"kept"}`)}, nil
 		},
-		updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
+		updateIssue: func(context.Context, string, map[string]interface{}, string) error {
 			updateCalls++
 			return wantErr
 		},
@@ -1127,32 +1046,7 @@ func TestNativeDoltStoreSetMetadataBatchDoesNotRetryPermanentWriteError(t *testi
 		t.Fatalf("SetMetadataBatch error = %v, want %v", err, wantErr)
 	}
 	if getCalls != 1 || updateCalls != 1 {
-		t.Fatalf("calls = GetIssue:%d UpdateIssueChecked:%d, want 1 each", getCalls, updateCalls)
-	}
-}
-
-func TestNativeDoltStoreSetMetadataBatchStopsAfterThreeSerializationConflicts(t *testing.T) {
-	wantErr := errors.New("commit failed (SQLSTATE 40001): serialization failure")
-	getCalls := 0
-	updateCalls := 0
-	storage := &nativeDoltStorageSpy{
-		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
-			getCalls++
-			return &beadslib.Issue{ID: "gc-persistent-conflict"}, nil
-		},
-		updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
-			updateCalls++
-			return wantErr
-		},
-	}
-	store := newNativeDoltStoreForTest(storage)
-
-	err := store.SetMetadataBatch("gc-persistent-conflict", map[string]string{"requested": "written"})
-	if !errors.Is(err, wantErr) {
-		t.Fatalf("SetMetadataBatch error = %v, want %v", err, wantErr)
-	}
-	if getCalls != 3 || updateCalls != 3 {
-		t.Fatalf("calls = GetIssue:%d UpdateIssueChecked:%d, want 3 each", getCalls, updateCalls)
+		t.Fatalf("calls = GetIssue:%d UpdateIssue:%d, want 1 each", getCalls, updateCalls)
 	}
 }
 
@@ -1786,6 +1680,7 @@ func TestNativeDoltStoreCreatePersistsDependenciesAfterUpstreamCreate(t *testing
 	child, err := store.Create(Bead{
 		Title:    "create child",
 		ParentID: parent.ID,
+		Labels:   []string{"created", "hydrated"},
 		Dependencies: []Dep{{
 			DependsOnID: blocker.ID,
 			Type:        "blocks",
@@ -1797,6 +1692,9 @@ func TestNativeDoltStoreCreatePersistsDependenciesAfterUpstreamCreate(t *testing
 	}
 	if child.ParentID != parent.ID {
 		t.Fatalf("created ParentID = %q, want %q", child.ParentID, parent.ID)
+	}
+	if !slices.Equal(child.Labels, []string{"created", "hydrated"}) {
+		t.Fatalf("created labels = %v, want hydrated labels", child.Labels)
 	}
 
 	got, err := store.Get(child.ID)
@@ -2051,7 +1949,7 @@ func TestNativeDoltStoreCreateDependencyFailureDeletesPartialIssue(t *testing.T)
 	}
 }
 
-func TestNativeDoltStoreCreateDependencyTimeoutCleansUpWithFreshContext(t *testing.T) {
+func TestNativeDoltStoreCreateDependencyTimeoutRollsBackFacadeTransaction(t *testing.T) {
 	oldTimeout := bdCommandTimeout
 	bdCommandTimeout = time.Millisecond
 	t.Cleanup(func() {
@@ -2643,6 +2541,7 @@ type nativeDoltStorageSpy struct {
 	getDependenciesWithMetadata func(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error)
 	getDependentsWithMetadata   func(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error)
 	getConfig                   func(context.Context, string) (string, error)
+	issueLifecycle              func() (issueops.Lifecycle, error)
 	close                       func() error
 }
 
@@ -2875,7 +2774,7 @@ func (s *nativeDoltMemStorage) GetIssue(_ context.Context, id string) (*beadslib
 	if err != nil {
 		return nil, err
 	}
-	return nativeIssueFromBead(bead)
+	return s.nativeIssueWithStoredDependencies(bead)
 }
 
 func (s *nativeDoltMemStorage) UpdateIssue(_ context.Context, id string, updates map[string]interface{}, _ string) error {
@@ -3040,6 +2939,19 @@ func (s *nativeDoltMemStorage) editLabelsKeepingRevision(id string, opts UpdateO
 }
 
 func (s *nativeDoltMemStorage) AddDependency(_ context.Context, dep *beadslib.Dependency, _ string) error {
+	// The facade refuses an edge whose endpoints do not resolve, so the double
+	// has to as well or a missing-target create looks like a success here. A
+	// target in another ledger's namespace is the exception, as it is for the
+	// facade: this database cannot see that row, so it records the edge as
+	// external instead of refusing it.
+	if _, err := s.store.Get(dep.IssueID); err != nil {
+		return err
+	}
+	if !nativeDoltMemTargetIsExternalForTest(dep.DependsOnID) {
+		if _, err := s.store.Get(dep.DependsOnID); err != nil {
+			return err
+		}
+	}
 	return s.store.DepAdd(dep.IssueID, dep.DependsOnID, string(dep.Type))
 }
 
@@ -3101,9 +3013,24 @@ func (s *nativeDoltMemStorage) GetDependentsWithMetadata(_ context.Context, issu
 // the fixture is to pin which key the create-path prefix read asks for.
 func (s *nativeDoltMemStorage) GetConfig(_ context.Context, key string) (string, error) {
 	if key == "issue_prefix" {
-		return "gc", nil
+		return nativeDoltMemIssuePrefixForTest, nil
 	}
 	return "", nil
+}
+
+// nativeDoltMemIssuePrefixForTest is the namespace nativeDoltMemStorage
+// declares, the one whose absent rows it can see.
+const nativeDoltMemIssuePrefixForTest = "gc"
+
+// nativeDoltMemTargetIsExternalForTest reports whether a dependency target
+// names a row outside nativeDoltMemStorage's own namespace, which the facade
+// accepts as an external reference rather than resolving.
+func nativeDoltMemTargetIsExternalForTest(targetID string) bool {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(targetID)), "external:") {
+		return true
+	}
+	prefix := beadIDPrefix(targetID)
+	return prefix != "" && prefix != nativeDoltMemIssuePrefixForTest
 }
 
 func (s *nativeDoltMemStorage) AddComment(context.Context, string, string, string) error {
@@ -3292,6 +3219,23 @@ func nativeDoltMemUpdateOpts(updates map[string]interface{}) (UpdateOpts, error)
 				return UpdateOpts{}, err
 			}
 			opts.Metadata = metadata
+		case nativeDoltMergeMetadataOp:
+			raw, ok := value.(json.RawMessage)
+			if !ok {
+				return UpdateOpts{}, fmt.Errorf("metadata merge has type %T, want json.RawMessage", value)
+			}
+			var rawMetadata map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &rawMetadata); err != nil {
+				return UpdateOpts{}, err
+			}
+			opts.Metadata = make(map[string]string, len(rawMetadata))
+			for metadataKey, metadataValue := range rawMetadata {
+				var text string
+				if err := json.Unmarshal(metadataValue, &text); err != nil {
+					return UpdateOpts{}, fmt.Errorf("metadata %q: %w", metadataKey, err)
+				}
+				opts.Metadata[metadataKey] = text
+			}
 		default:
 			return UpdateOpts{}, fmt.Errorf("unsupported native update field %q", key)
 		}
