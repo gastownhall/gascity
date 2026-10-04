@@ -27,6 +27,7 @@ type executionBackstopFixture struct {
 	cfg      *config.City
 	store    beads.Store
 	sp       *runtime.Fake
+	provider runtime.Provider
 	session  beads.Bead
 	work     beads.Bead
 	rec      *events.Fake
@@ -115,11 +116,25 @@ func (f *executionBackstopFixture) tick(t *testing.T) {
 			stores[i] = f.workStore
 		}
 	}
-	nudgeStalledPoolExecution(f.sp, f.cfg, f.store, sessions, work, stores, refs, false, f.now, f.rec,
+	sp := runtime.Provider(f.sp)
+	if f.provider != nil {
+		sp = f.provider
+	}
+	nudgeStalledPoolExecution(sp, f.cfg, f.store, sessions, work, stores, refs, false, f.now, f.rec,
 		func(sessionBead beads.Bead) error {
 			f.drained = append(f.drained, strings.TrimSpace(sessionBead.Metadata["session_name"]))
 			return nil
 		}, &f.stdout)
+}
+
+type executionBackstopIdleSnapshotProvider struct {
+	*runtime.Fake
+	idle bool
+	err  error
+}
+
+func (p *executionBackstopIdleSnapshotProvider) SnapshotIdle(string) (bool, error) {
+	return p.idle, p.err
 }
 
 // idleFor backdates the runtime's last-activity so the predicate observes an
@@ -198,6 +213,55 @@ func TestExecutionBackstopIsSilentForAWorkingAgent(t *testing.T) {
 	}
 	if got := f.sessionMeta(t, executionClaimNudgeAtKey); got != "" {
 		t.Fatalf("persisted timestamp = %q, want no write at all for a working agent", got)
+	}
+}
+
+// A quiet pane clock is not proof that an interactive agent ended its turn:
+// long model turns and quiet tool calls can leave tmux activity stale while
+// the provider's busy indicator still says the turn is active. When the
+// runtime can take a point-in-time idle snapshot, that stronger observation
+// must hold the backstop before it writes or nudges.
+func TestExecutionBackstopIsSilentWhenIdleSnapshotReportsBusy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "busy"},
+		{name: "unknown", err: errors.New("snapshot unavailable")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			f.provider = &executionBackstopIdleSnapshotProvider{Fake: f.sp, idle: false, err: tc.err}
+			f.idleFor(t, 10*time.Minute)
+
+			for i := 0; i < 5; i++ {
+				f.tick(t)
+				f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+				f.idleFor(t, 10*time.Minute)
+			}
+
+			if got := f.nudgeCount(); got != 0 {
+				t.Fatalf("nudges without affirmative idle snapshot = %d, want 0; stdout=%s", got, f.stdout.String())
+			}
+			if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != "" {
+				t.Fatalf("persisted work marker = %q, want no pacing state without affirmative idle snapshot", got)
+			}
+		})
+	}
+}
+
+func TestExecutionBackstopAdvancesWhenIdleSnapshotReportsIdle(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.provider = &executionBackstopIdleSnapshotProvider{Fake: f.sp, idle: true}
+	f.idleFor(t, 10*time.Minute)
+
+	f.tick(t)
+	f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+
+	if got := f.nudgeCount(); got != 1 {
+		t.Fatalf("nudges after affirmative idle snapshot = %d, want 1; stdout=%s", got, f.stdout.String())
 	}
 }
 
