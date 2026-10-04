@@ -46,6 +46,17 @@ var startupWatchFirstEventTimeout = runtime.StartupDialogTimeout
 
 const startupWatchCloseTimeout = 200 * time.Millisecond
 
+// startCancellationGrace is the cooperative-cancellation budget handed to
+// [execgrace.Apply] for every adapter invocation: once the context is canceled
+// the adapter's process group receives SIGINT and has this long to run its
+// rollback trap — and to release the I/O pipes any grandchild still holds —
+// before Go forcibly kills it.
+//
+// Cancellation tests assert against this same constant so the production budget
+// and the assertions cannot drift apart, and so a failure can report whether
+// the grace was skipped or merely exhausted.
+const startCancellationGrace = 2 * time.Second
+
 // NewProvider returns an exec [Provider] that delegates to the given script.
 // The script path may be absolute, relative, or a bare name resolved via
 // exec.LookPath.
@@ -87,7 +98,7 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 	// the adapter already created (e.g. a Docker container). The grace also
 	// ensures Go forcibly closes I/O pipes after the context expires, even if
 	// grandchild processes (e.g. sleep in a shell script) still hold them open.
-	cancellationAccepted := execgrace.Apply(cmd, 2*time.Second)
+	cancellationAccepted := execgrace.Apply(cmd, startCancellationGrace)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
