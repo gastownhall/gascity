@@ -710,9 +710,13 @@ func refuseExpiredHookClaimWindow(candidateID string, ops hookClaimOps, stderr i
 // A candidate whose claim errors because THIS store cannot resolve the id is
 // skipped rather than fatal (see hookClaimBeadIsElsewhere), so the federated
 // caller can try the store that actually holds it; the returned result's
-// claimsErrored flag carries the skip to the shared drain. Every other claim
-// error still fails closed: ownership is unresolved on a bead this session
-// already owns, and claiming unrelated fresh work would strand it.
+// claimsErrored flag carries the skip to the shared drain. A routed candidate
+// that resolves to a wisp row (hookClaimBeadIsAWisp) and a binding that refuses
+// the claim CAS outright (hookClaimBindingRefusedTheClaim) are skipped for the
+// same reason: both are refused before any write, so nothing is outstanding.
+// Every other claim error still fails closed: ownership is unresolved on a
+// bead this session already owns, and claiming unrelated fresh work would
+// strand it.
 func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) hookClaimResult {
 	ctx, cancel := ops.claimMutationContext()
 	defer cancel()
@@ -744,7 +748,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		claimActor := strings.TrimSpace(candidate.Assignee)
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
 		if err != nil {
-			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err)) {
+			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err) || hookClaimBeadIsAWisp(err)) {
 				// The read federated and the write did not: the assigned tier
 				// reads city-wide, so a graph step in a relocated class store
 				// arrives here while the claim runs against this store's bd
@@ -758,6 +762,12 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 				// lands before any write (hookClaimBindingRefusedTheClaim). One
 				// bead no store can claim must not stop this session claiming
 				// the work that other stores can.
+				//
+				// A routed id that resolves to a wisp row carries the same proof
+				// for the same reason (hookClaimBeadIsAWisp): the claimer refused
+				// before any write, so nothing is outstanding, and a wisp is never
+				// claimable through this role no matter how many times it is
+				// retried.
 				fmt.Fprintf(stderr, "gc hook --claim: skipping ready assignment %s: %v\n", candidate.ID, err) //nolint:errcheck
 				claimsErrored = true
 				continue
