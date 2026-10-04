@@ -273,7 +273,9 @@ func TestDismissFeedbackSurveyModalIgnoresSurveyOnlyInScrollback(t *testing.T) {
 	executor := &staleSurveyScrollbackExecutor{}
 	tm := &Tmux{cfg: DefaultConfig(), exec: executor}
 
-	tm.DismissFeedbackSurveyModalIfPresent("agent-pane")
+	if err := tm.DismissFeedbackSurveyModalIfPresent("agent-pane"); err != nil {
+		t.Fatalf("DismissFeedbackSurveyModalIfPresent error = %v", err)
+	}
 
 	for _, call := range executor.calls {
 		if slices.Contains(call, "send-keys") {
@@ -287,10 +289,12 @@ func TestDismissFeedbackSurveyModalIgnoresSurveyOnlyInScrollback(t *testing.T) {
 }
 
 func TestDismissFeedbackSurveyModalSendsOneDigitWhileSurveyPersists(t *testing.T) {
-	executor := &scriptedTargetExecutor{capture: feedbackSurveySessionFixture}
+	executor := &scriptedTargetExecutor{capture: feedbackSurveySessionFixture, display: "agent-pane|0"}
 	tm := &Tmux{cfg: DefaultConfig(), exec: executor}
 
-	tm.DismissFeedbackSurveyModalIfPresent("agent-pane")
+	if err := tm.DismissFeedbackSurveyModalIfPresent("agent-pane"); err != nil {
+		t.Fatalf("DismissFeedbackSurveyModalIfPresent error = %v", err)
+	}
 
 	var sent []string
 	for _, call := range executor.calls {
@@ -300,5 +304,95 @@ func TestDismissFeedbackSurveyModalSendsOneDigitWhileSurveyPersists(t *testing.T
 	}
 	if got := strings.Join(sent, ","); got != "0" {
 		t.Fatalf("send-keys = %q, want one dismiss digit and no second attempt while the survey persists", got)
+	}
+}
+
+func TestDismissFeedbackSurveyModalLeavesHumanSessionsAlone(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		display string
+	}{
+		{"attached client", "agent-pane|1"},
+		{"attachment unknown", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			executor := &scriptedTargetExecutor{capture: feedbackSurveySessionFixture, display: test.display}
+			tm := &Tmux{cfg: DefaultConfig(), exec: executor}
+
+			if err := tm.DismissFeedbackSurveyModalIfPresent("agent-pane"); err != nil {
+				t.Fatalf("DismissFeedbackSurveyModalIfPresent error = %v", err)
+			}
+
+			for _, call := range executor.calls {
+				if slices.Contains(call, "send-keys") {
+					t.Fatalf("survey dismissal keyed a session a human may be typing in: %v", executor.calls)
+				}
+			}
+		})
+	}
+}
+
+type failingRecaptureExecutor struct {
+	scriptedTargetExecutor
+	digitSent bool
+}
+
+func (f *failingRecaptureExecutor) execute(args []string) (string, error) {
+	if slices.Contains(args, "send-keys") && slices.Contains(args, "0") {
+		f.digitSent = true
+	}
+	if f.digitSent && slices.Contains(args, "capture-pane") {
+		f.calls = append(f.calls, slices.Clone(args))
+		return "", errors.New("capture-pane failed")
+	}
+	return f.scriptedTargetExecutor.execute(args)
+}
+
+func (f *failingRecaptureExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return f.execute(args)
+}
+
+func TestDismissFeedbackSurveyModalReportsUnresolvedDigit(t *testing.T) {
+	executor := &failingRecaptureExecutor{scriptedTargetExecutor: scriptedTargetExecutor{capture: feedbackSurveySessionFixture, display: "agent-pane|0"}}
+	tm := &Tmux{cfg: DefaultConfig(), exec: executor}
+
+	if err := tm.DismissFeedbackSurveyModalIfPresent("agent-pane"); err == nil {
+		t.Fatal("DismissFeedbackSurveyModalIfPresent error = nil after the post-digit capture failed, want an error so the nudge does not paste onto the digit")
+	}
+	var sent []string
+	for _, call := range executor.calls {
+		if slices.Contains(call, "send-keys") {
+			sent = append(sent, call[len(call)-1])
+		}
+	}
+	if got := strings.Join(sent, ","); got != "0" {
+		t.Fatalf("send-keys = %q, want only the dismiss digit", got)
+	}
+}
+
+func TestFeedbackSurveyComposerReadsEveryContinuationRow(t *testing.T) {
+	pane := "╭──────────────╮\n│ ❯            │\n│ 0            │\n│ draft        │\n╰──────────────╯"
+	composer, observed := feedbackSurveyComposer(pane)
+	if !observed {
+		t.Fatal("feedbackSurveyComposer observed no composer")
+	}
+	if composer != "0\ndraft" {
+		t.Fatalf("composer = %q, want %q so a digit on a continuation row is not mistaken for a lone dismiss digit", composer, "0\ndraft")
+	}
+}
+
+func TestNudgeSessionDoesNotPasteOntoUnresolvedSurveyDigit(t *testing.T) {
+	executor := &failingRecaptureExecutor{scriptedTargetExecutor: scriptedTargetExecutor{capture: feedbackSurveySessionFixture, display: "agent-pane|0"}}
+	cfg := DefaultConfig()
+	cfg.NudgeReadyTimeout = 10 * time.Millisecond
+	tm := &Tmux{cfg: cfg, exec: executor}
+
+	if err := tm.NudgeSession("agent-pane", "hello"); err == nil {
+		t.Fatal("NudgeSession error = nil after the survey digit was left unresolved")
+	}
+	for _, call := range executor.calls {
+		if slices.Contains(call, "send-keys") && slices.Contains(call, "hello") {
+			t.Fatalf("NudgeSession pasted onto an unresolved survey digit: %v", executor.calls)
+		}
 	}
 }

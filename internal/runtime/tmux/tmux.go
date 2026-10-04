@@ -2802,7 +2802,9 @@ func (t *Tmux) nudgeSession(
 	// busy indicator, composer prefix still matches), so this cannot be
 	// gated on an idle-wait failure the way DismissModelSwitchModalIfPresent
 	// is in Provider.Nudge -- it must run unconditionally, here.
-	t.DismissFeedbackSurveyModalIfPresent(session)
+	if err := t.DismissFeedbackSurveyModalIfPresent(session); err != nil {
+		return fmt.Errorf("dismissing feedback survey before nudge: %w", err)
+	}
 
 	// 2. Send text in literal mode with retry on transient errors
 	if err := sendText(target, message, t.cfg.NudgeReadyTimeout); err != nil {
@@ -3233,10 +3235,10 @@ func awaitFeedbackSurveyDigit(capture func() (string, error), sleep func(time.Du
 func feedbackSurveyComposer(content string) (string, bool) {
 	lines := strings.Split(content, "\n")
 	remainder, observed := lastComposerRemainder(lines, DefaultReadyPromptPrefix)
-	composer := strings.TrimSpace(strings.TrimRight(strings.TrimSpace(remainder), "│┃"))
 	if !observed {
 		return "", false
 	}
+	rows := []string{strings.TrimSpace(strings.TrimRight(strings.TrimSpace(remainder), "│┃"))}
 	promptRow := -1
 	for i, line := range lines {
 		if matchesPromptPrefix(line, DefaultReadyPromptPrefix) {
@@ -3251,23 +3253,24 @@ func feedbackSurveyComposer(content string) (string, bool) {
 		if !strings.HasPrefix(trimmed, "│") && !strings.HasPrefix(trimmed, "┃") {
 			break
 		}
-		continuation := strings.TrimSpace(strings.Trim(trimmed, "│┃"))
-		if continuation != "" {
-			return strings.TrimSpace(composer + "\n" + continuation), true
-		}
+		rows = append(rows, strings.TrimSpace(strings.Trim(trimmed, "│┃")))
 	}
-	return composer, true
+	return strings.TrimSpace(strings.Join(rows, "\n")), true
 }
 
 // DismissFeedbackSurveyModalIfPresent clears Claude Code's post-turn
 // feedback survey (ga-zg7fjq) on the session's agent pane so a pending nudge
 // is not corrupted by, or silently swallowed into, the survey's
-// single-digit input handler. No-op when the survey is absent. A parked
-// survey reads idle to WaitForIdle, so callers must not gate this on an
-// idle-wait failure branch -- see the unconditional call from NudgeSession.
-// Best-effort: capture/send failures are swallowed (the caller retries on
-// the next wake).
-func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) {
+// single-digit input handler. No-op when the survey is absent, and when a
+// client is attached or attachment cannot be determined, since the dismiss
+// digit and its cleanup would land in a human's composer. A parked survey
+// reads idle to WaitForIdle, so callers must not gate this on an idle-wait
+// failure branch -- see the unconditional call from NudgeSession. When the
+// survey is present it blocks for the survey's mount window plus up to a
+// second while the dismiss digit is consumed. A returned error means the
+// pane could not be read or keyed, and the dismiss digit may still sit in
+// the composer, so the caller must not paste on top of it.
+func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) error {
 	target := session
 	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
 		target = agentPane
@@ -3286,9 +3289,16 @@ func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) {
 	}
 	content, err := capture()
 	if err != nil {
-		return
+		return err
 	}
-	_, _ = dismissFeedbackSurveyModal(content, capture, sendKeys, time.Sleep)
+	if !runtime.ContainsFeedbackSurveyModal(content) {
+		return nil
+	}
+	if attached, err := t.SessionAttachedWithError(session); err != nil || attached {
+		return nil
+	}
+	_, err = dismissFeedbackSurveyModal(content, capture, sendKeys, time.Sleep)
+	return err
 }
 
 // GetPaneCommand returns the current command running in a pane.
