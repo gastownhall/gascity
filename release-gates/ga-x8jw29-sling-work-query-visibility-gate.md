@@ -54,3 +54,30 @@ go build ./...
 go vet ./...
 git status --porcelain=v1
 ```
+
+## Narrowed by the adopt-PR review fixup
+
+The table and acceptance evidence above describe reviewed commit `84d5244c`.
+The maintainer fixup from the PR #4665 review narrowed the postcondition. This
+section does not re-certify the criteria; the adopt-PR review loop reviews the
+fixup head. Where the bullets above disagree with these points, these points
+describe the code:
+
+- Only targets with a custom `work_query` are probed. The built-in query
+  serves the next bead instead of listing a queue, so probing it failed
+  correct routes to busy targets. Those targets keep the pre-write
+  `validateBuiltInRouteStoreReachable` check.
+- The CLI probe runs the same federated store legs as `gc hook`. Unlike the
+  hook, it does not let a failed leg pass as no work: while any leg failed, a
+  no-work answer is reported as a probe error, because the other legs cannot
+  prove the bead invisible.
+- Only output that `gc hook` treats as no work fails the sling, and only while
+  the bead is ready, unassigned and not on hold. The error is a typed
+  `*sling.WorkQueryInvisibleError` that says the bead was routed. Output that
+  lists other work produces a warning, and a probe error is recorded as a
+  metadata error. Neither fails the sling, because the route is already
+  written.
+- Output that is not JSON is searched for the bead ID as a whole token.
+- Batch and convoy slings, API slings, graph workflow launches, and a custom
+  `sling_query` on the built-in work_query are not covered. The batch and
+  convoy gap is tracked as `ga-q0k6uj` and the API gap as `ga-jxfzk`.

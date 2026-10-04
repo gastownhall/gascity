@@ -215,25 +215,6 @@ func SetSlingTargetIndexForTest(fn func(n int) int) (restore func()) {
 	return func() { slingTargetIndex = prev }
 }
 
-// slingWorkQueryProbeOverride lets tests replace the WorkQueryProbe that
-// populateSlingDepsCallbacks would otherwise install on cmdSling's
-// internally-constructed slingDeps. cmdSling takes no deps parameter, so
-// callers that build a slingDeps themselves (doSling + testDeps) can already
-// set deps.WorkQueryProbe directly -- this seam exists for cmdSling-level
-// tests, which have no other way to opt out of the real, shell-executing
-// cliWorkQueryProbe. Default nil: production and any test that doesn't set
-// it get the real probe. See SetSlingWorkQueryProbeForTest.
-var slingWorkQueryProbeOverride func(a config.Agent) (string, error)
-
-// SetSlingWorkQueryProbeForTest overrides the WorkQueryProbe cmdSling installs
-// on its internally-constructed slingDeps and returns a restore func. Test
-// only -- mirrors SetSlingTargetIndexForTest.
-func SetSlingWorkQueryProbeForTest(fn func(a config.Agent) (string, error)) (restore func()) {
-	prev := slingWorkQueryProbeOverride
-	slingWorkQueryProbeOverride = fn
-	return func() { slingWorkQueryProbeOverride = prev }
-}
-
 // inferSling1ArgTarget resolves the routing target for a 1-arg `gc sling <bead>`
 // from the bead's rig default_sling_target(s), probing the existing source bead
 // for its prefix. It is the store-touching pre-core orchestration extracted from
@@ -709,36 +690,19 @@ func populateSlingDepsCallbacks(deps *slingDeps) {
 	deps.Notify = &cliNotifier{}
 	deps.DirectSessionResolver = cliDirectSessionResolver
 	deps.Router = cliBeadRouter{deps: deps}
-	// WorkQueryProbe alone gets a nil-guard: its nil state has an established
-	// "skip the postcondition check" meaning (see SlingDeps.WorkQueryProbe),
-	// and test infra relies on being able to install its own probe instead of
-	// this real, shell-executing one -- typically one that returns
-	// sling.ErrSkipWorkQueryProbe, since a fake modeling real work_query
-	// visibility off the test's Store can't track callers that reassign
-	// deps.Store after the deps are built. Callers that build a slingDeps
-	// themselves (doSling + cmd_sling_test.go's testDeps) set
-	// deps.WorkQueryProbe directly, so this nil-guard is already a no-op for
-	// them; cmdSling builds its own deps with no caller-visible seam, so it
-	// additionally consults slingWorkQueryProbeOverride (see
-	// SetSlingWorkQueryProbeForTest) before falling back to the real probe.
-	// The other callback fields above have no such caller-visible nil
-	// semantic and are safe to always overwrite.
-	if deps.WorkQueryProbe == nil {
-		if slingWorkQueryProbeOverride != nil {
-			deps.WorkQueryProbe = slingWorkQueryProbeOverride
-		} else {
-			deps.WorkQueryProbe = cliWorkQueryProbe(deps.CityPath, deps.CityName, deps.Cfg)
-		}
-	}
+	deps.WorkQueryProbe = cliWorkQueryProbe(deps.CityPath, deps.CityName, deps.Cfg)
 }
 
-// cliWorkQueryProbe implements sling.SlingDeps.WorkQueryProbe by running the
-// target agent's own work_query, reusing the exact env/dir/timeout resolution
-// gc hook already uses (hookQueryEnv + shellWorkQueryWithEnv) so the
-// postcondition check sees precisely what a real hook poll would see.
+// cliWorkQueryProbe implements sling.SlingDeps.WorkQueryProbe the way `gc hook`
+// polls an explicit target: the same query, env, dir and timeout resolution
+// (hookQueryEnv + shellWorkQueryWithEnv), run across the same federated store
+// legs (hookWorkQueryStores + bestStoreWithWork), so the probe answers with the
+// output a hook poll for that agent would act on. The one departure is a failed
+// leg; see probeWorkQueryStores.
 func cliWorkQueryProbe(cityPath, cityName string, cfg *config.City) func(a config.Agent) (string, error) {
 	return func(a config.Agent) (string, error) {
-		workQuery := a.EffectiveWorkQueryForBeads(cfg.Beads)
+		topo := cityQueryTopology(cityPath, cfg)
+		workQuery := a.EffectiveWorkQueryFor(topo)
 		workQuery = expandAgentCommandTemplate(cityPath, cityName, &a, cfg.Rigs, "work_query", workQuery, os.Stderr)
 		workDir := agentCommandDir(cityPath, &a, cfg.Rigs)
 		overrides, err := hookQueryEnv(cityPath, cfg, &a)
@@ -753,8 +717,31 @@ func cliWorkQueryProbe(cityPath, cityName string, cfg *config.City) func(a confi
 		overrides["GC_SESSION_ORIGIN"] = ""
 		overrides["GC_TEMPLATE"] = ""
 		queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
-		return shellWorkQueryWithEnv(workQuery, workDir, queryEnv)
+		stores := hookWorkQueryStores(cityPath, cfg, &a, resolvedAgentName, workDir, queryEnv, overrides)
+		stores = scopeFederatedHookStores(stores, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, os.Stderr))
+		return probeWorkQueryStores(workQuery, stores, shellWorkQueryWithEnv)
 	}
+}
+
+// probeWorkQueryStores runs the probe's query across the federated legs with
+// bestStoreWithWork, which skips a failed secondary leg so one flaky store
+// cannot wedge the hook; the hook polls again. The probe answers once, so a
+// no-work answer is unproven while any leg failed: the leg errors replace it,
+// and sling records them rather than failing on them.
+func probeWorkQueryStores(command string, stores []hookStore, run hookStoreRunner) (string, error) {
+	var legErrs []error
+	recordLegErrors := func(query, dir string, env []string) (string, error) {
+		out, err := run(query, dir, env)
+		if err != nil {
+			legErrs = append(legErrs, fmt.Errorf("store %s: %w", dir, err))
+		}
+		return out, err
+	}
+	out, _, err := bestStoreWithWork(command, stores, stores[0], recordLegErrors)
+	if len(legErrs) > 0 && !workQueryHasReadyWork(strings.TrimSpace(out)) {
+		return out, errors.Join(legErrs...)
+	}
+	return out, err
 }
 
 func cliDirectSessionResolver(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error) {

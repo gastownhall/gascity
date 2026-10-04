@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -889,58 +890,114 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 		result.NudgeAgent = &a
 	}
 
-	// Postcondition (ga-wvtgnv): verify the routed bead is actually visible
-	// to the target's own work_query, so a pack.toml work_query override
-	// that filters on labels/metadata sling never set can't silently strand
-	// the bead. Skip when no probe is wired (nil = skip, e.g. most tests and
-	// callers), on dry-run (nothing was actually routed to verify), or under
-	// Force (which already tolerates routing a bead the local store/query
-	// may not resolve -- see the auto-convoy Force tolerance above).
-	if deps.WorkQueryProbe != nil && !opts.DryRun && !opts.Force {
-		target := agentutil.RoutedToIdentity(&a)
-		output, err := deps.WorkQueryProbe(a)
-		switch {
-		case errors.Is(err, ErrSkipWorkQueryProbe):
-			// Probe explicitly opted out of checking this call; treat as satisfied.
-		case err != nil:
-			return result, fmt.Errorf("sling: checking %s visible to %s's work_query: %w", beadID, target, err)
-		case !workQueryContainsBead(output, beadID):
-			return result, fmt.Errorf("sling: %s routed to %s but not visible to its work_query "+
-				"after routing — check labels/metadata/holds against the query "+
-				"%s actually runs", beadID, target, target)
-		}
-	}
+	return verifyRoutedBeadVisible(opts, deps, beadID, result)
+}
 
+// verifyRoutedBeadVisible is finalize's postcondition for a target with a
+// custom work_query: a query that filters on labels or metadata sling never
+// set can strand a routed bead where no poller will ever see it. Only a query
+// that returns no work while the bead is ready, unassigned and not on hold
+// proves the strand and fails the sling. Probe errors and listings that name
+// other work are reported without failing, because the route is already
+// written and a later poll can still serve the bead. Dry runs have nothing to
+// verify, and Force already tolerates routes the local store cannot resolve.
+func verifyRoutedBeadVisible(opts SlingOpts, deps SlingDeps, beadID string, result SlingResult) (SlingResult, error) {
+	a := opts.Target
+	if deps.WorkQueryProbe == nil || opts.DryRun || opts.Force || strings.TrimSpace(a.WorkQuery) == "" {
+		return result, nil
+	}
+	target := agentutil.RoutedToIdentity(&a)
+	output, err := deps.WorkQueryProbe(a)
+	if err != nil {
+		result.MetadataErrors = append(result.MetadataErrors,
+			fmt.Sprintf("checking bead %s against %s's work_query: %v", beadID, target, err))
+		return result, nil
+	}
+	switch classifyWorkQueryOutput(output, beadID) {
+	case workQueryListsBead:
+		return result, nil
+	case workQueryListsOther:
+		result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf(
+			"warning: bead %s routed to %q, but %s's work_query output does not list it", beadID, target, target))
+		return result, nil
+	}
+	ready, err := deps.Store.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+	if err != nil {
+		result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf(
+			"warning: %s's work_query returned no work, and checking whether bead %s is ready failed: %v", target, beadID, err))
+		return result, nil
+	}
+	if beadAwaitsWorkQuery(ready, beadID) {
+		return result, &WorkQueryInvisibleError{BeadID: beadID, Target: target}
+	}
 	return result, nil
 }
 
-// workQueryContainsBead reports whether beadID appears in a work_query's
-// output. It mirrors workQueryHasReadyWork's JSON-array/object/no-work-line
-// parsing (cmd/gc/cmd_hook.go) but matches a specific bead ID within the
-// parsed structure rather than treating any non-empty output as a hit, so a
-// bead ID that happens to be a substring of another bead's ID or fields
-// cannot produce a false match.
-func workQueryContainsBead(output, beadID string) bool {
+// beadAwaitsWorkQuery reports whether beadID is in the ready frontier with no
+// assignee and no dispatch hold, the only state in which a work_query is what
+// must serve it next. A blocked, deferred, claimed or held bead is waiting on
+// something else.
+func beadAwaitsWorkQuery(ready []beads.Bead, beadID string) bool {
+	for _, b := range ready {
+		if b.ID != beadID {
+			continue
+		}
+		held := slices.ContainsFunc(beadmeta.DispatchHoldLabels, func(hold string) bool {
+			return slices.Contains(b.Labels, hold)
+		})
+		return b.Assignee == "" && !held
+	}
+	return false
+}
+
+// workQueryVerdict is what a work_query's output says about one routed bead.
+type workQueryVerdict int
+
+const (
+	// workQueryNoWork is output `gc hook` treats as no ready work.
+	workQueryNoWork workQueryVerdict = iota
+	// workQueryListsBead is output that names the routed bead.
+	workQueryListsBead
+	// workQueryListsOther is work output that does not name the routed bead.
+	workQueryListsOther
+)
+
+// classifyWorkQueryOutput reads work_query output the way `gc hook` does. The
+// no-work set is exactly what workQueryHasReadyWork (cmd/gc/cmd_hook.go)
+// treats as no ready work: blank output, the bd "No ready work found" line, and
+// JSON null or an empty array or object. JSON beads match on their "id" field
+// alone. Any other output still counts as work to the hook, so it is searched
+// for the bead ID as a whole token.
+func classifyWorkQueryOutput(output, beadID string) workQueryVerdict {
 	output = strings.TrimSpace(output)
 	if output == "" || strings.Contains(output, "No ready work found") {
-		return false
+		return workQueryNoWork
 	}
 	var decoded any
 	if err := json.Unmarshal([]byte(output), &decoded); err != nil {
-		return false
+		return workQueryTokenVerdict(output, beadID)
 	}
 	switch v := decoded.(type) {
+	case nil:
+		return workQueryNoWork
 	case []any:
-		for _, item := range v {
-			if workQueryEntryIsBead(item, beadID) {
-				return true
-			}
+		if len(v) == 0 {
+			return workQueryNoWork
 		}
-		return false
+		if slices.ContainsFunc(v, func(item any) bool { return workQueryEntryIsBead(item, beadID) }) {
+			return workQueryListsBead
+		}
+		return workQueryListsOther
 	case map[string]any:
-		return workQueryEntryIsBead(v, beadID)
+		if len(v) == 0 {
+			return workQueryNoWork
+		}
+		if workQueryEntryIsBead(v, beadID) {
+			return workQueryListsBead
+		}
+		return workQueryListsOther
 	default:
-		return false
+		return workQueryTokenVerdict(output, beadID)
 	}
 }
 
@@ -951,6 +1008,21 @@ func workQueryEntryIsBead(item any, beadID string) bool {
 	}
 	id, ok := m["id"].(string)
 	return ok && id == beadID
+}
+
+// workQueryTokenVerdict searches output that is not a JSON bead listing for
+// beadID as a whole token, so "BL-42" never matches "BL-421" or "BL-42.1". A
+// trailing period ends a sentence rather than the ID.
+func workQueryTokenVerdict(output, beadID string) workQueryVerdict {
+	tokens := strings.FieldsFunc(output, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '-' && r != '_' && r != '.'
+	})
+	for _, token := range tokens {
+		if strings.TrimRight(token, ".") == beadID {
+			return workQueryListsBead
+		}
+	}
+	return workQueryListsOther
 }
 
 func validateBuiltInRouteStoreReachable(deps SlingDeps, beadID string, a config.Agent) error {
