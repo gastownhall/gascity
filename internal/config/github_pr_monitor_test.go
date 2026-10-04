@@ -252,3 +252,23 @@ merge_queue = "observe"
 		t.Errorf("patched Notify = %v, want [ops]", mainMonitor.Notify)
 	}
 }
+
+func TestGitHubPRMonitorRepairWorkflowFormulaIsConfigOnly(t *testing.T) {
+	cases := []struct {
+		name     string
+		workflow string
+		want     string
+	}{
+		{name: "unset attaches nothing", workflow: "", want: ""},
+		{name: "whitespace attaches nothing", workflow: "  \t", want: ""},
+		{name: "configured is trimmed", workflow: "  pr-repair-work ", want: "pr-repair-work"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := GitHubPRMonitor{RepairWorkflow: tc.workflow}
+			if got := m.RepairWorkflowFormula(); got != tc.want {
+				t.Fatalf("RepairWorkflowFormula() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

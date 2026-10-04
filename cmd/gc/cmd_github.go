@@ -214,7 +214,7 @@ func doGitHubPRBackfill(opts githubPRBackfillOptions, stdout, stderr io.Writer) 
 						Updated:    outcome.updated,
 						Dispatched: outcome.dispatched,
 						Route:      prResult.RepairRoute,
-						Workflow:   monitor.RepairWorkflowOrDefault(),
+						Workflow:   monitor.RepairWorkflowFormula(),
 					})
 					switch {
 					case outcome.created:
@@ -296,10 +296,13 @@ func ensureGitHubPRRepairBead(cityPath string, cfg *config.City, monitor config.
 		return githubPRRepairOutcome{}, fmt.Errorf("creating repair bead: %w", err)
 	}
 	outcome := githubPRRepairOutcome{bead: created, created: true}
+	if monitor.RepairWorkflowFormula() == "" {
+		return outcome, nil
+	}
 	// Attach the configured repair workflow so the routed bead carries the
-	// standard branch/test/push/refinery steps instead of sitting as a raw
-	// routed task (ga-y5yhvnk). Attach failure is non-fatal: the bead is
-	// created and routed, so the pool scaler can still pick it up.
+	// pack's repair steps instead of sitting as a raw routed task
+	// (ga-y5yhvnk). Attach failure is non-fatal: the bead is created and
+	// routed, so the pool scaler can still pick it up.
 	if err := attachGitHubPRRepairWorkflow(store, cliGraphStore(store, cfg, cityPath), cfg, rig, monitor, created, result); err != nil {
 		outcome.dispatchErr = err
 		return outcome, nil
@@ -380,8 +383,8 @@ func githubPRRepairMetadata(result githubmonitor.Result) map[string]string {
 
 // defaultAttachGitHubPRRepairWorkflow instantiates the monitor's repair
 // workflow as a molecule attached to the repair bead, so routed repair work
-// carries the standard polecat steps. The error is treated as non-fatal by the
-// caller (the bead is already created and routed).
+// carries the configured formula's steps. The error is treated as non-fatal by
+// the caller (the bead is already created and routed).
 //
 // Two stores because the classes differ: the repair bead is work class, while
 // the attached workflow's class comes from the compiled recipe.
@@ -396,7 +399,7 @@ func githubPRRepairMetadata(result githubmonitor.Result) map[string]string {
 // tree asks the residency resolver, which is the one component that holds both
 // legs.
 func defaultAttachGitHubPRRepairWorkflow(store beads.Store, graphStore beads.GraphStore, cfg *config.City, rig config.Rig, monitor config.GitHubPRMonitor, bead beads.Bead, result githubmonitor.Result) error {
-	workflow := monitor.RepairWorkflowOrDefault()
+	workflow := monitor.RepairWorkflowFormula()
 	if workflow == "" {
 		return nil
 	}
