@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	beadslib "github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/issueops"
@@ -196,5 +197,152 @@ func TestClaimRejectsAnEmptyAssignee(t *testing.T) {
 	}
 	if len(spy.requests) != 0 {
 		t.Fatalf("a claim was dialed with no assignee: %+v", spy.requests)
+	}
+}
+
+// claimBlockingSpy's Claim blocks until the test closes proceed, after
+// signaling the test (by closing inClaim) that it has entered the role call —
+// so a test can arrange a pending writer to arrive while Claim still holds
+// its own acquireStorage read lock, then let Claim's claimer.Claim return
+// ErrNotFound and fall into the wisp-disambiguation read.
+//
+// It overrides IssueClaimer and IssueReader (not just Claim) because
+// claimRoleSpy's own IssueClaimer/IssueReader return the embedded
+// *claimRoleSpy, which would bypass this type's blocking Claim entirely.
+type claimBlockingSpy struct {
+	claimRoleSpy
+	inClaim chan struct{}
+	proceed chan struct{}
+}
+
+func (s *claimBlockingSpy) IssueClaimer() (issueops.Claimer, error) { return s, nil }
+func (s *claimBlockingSpy) IssueReader() (issueops.Reader, error)   { return s, nil }
+
+func (s *claimBlockingSpy) Claim(_ context.Context, _ issueops.ClaimRequest) (issueops.ClaimResult, error) {
+	close(s.inClaim)
+	<-s.proceed
+	return issueops.ClaimResult{}, issueops.ErrNotFound
+}
+
+// TestClaimDoesNotDeadlockWhenAPendingWriterArrivesWhileItHoldsItsReadLock is
+// the regression test for the Opus G1+G2 review's CRITICAL finding: Claim
+// held s.mu.RLock (via acquireStorage) across its whole body, and its
+// wisp-disambiguation fallback used to call s.Get(id), which re-takes s.mu
+// through withReadRetry/acquireStorageGen — a second, nested RLock request
+// from the SAME goroutine. Go's sync.RWMutex gives a blocked Lock() writer
+// priority over new readers once one is waiting, so a writer (a reconnect
+// swap, or here a plain s.mu.Lock()/Unlock() standing in for one) arriving
+// while Claim holds its outer RLock permanently wedges Claim's nested RLock
+// behind that writer, which itself can never proceed because Claim's outer
+// RLock is never released. The fix reads the disambiguating row off the
+// storage handle and ctx Claim already has (nativeClaimWispDisambiguationFindsRow),
+// never re-taking s.mu, so neither side of this can block the other.
+func TestClaimDoesNotDeadlockWhenAPendingWriterArrivesWhileItHoldsItsReadLock(t *testing.T) {
+	spy := &claimBlockingSpy{inClaim: make(chan struct{}), proceed: make(chan struct{})}
+	spy.getErr = issueops.ErrNotFound
+	store := newNativeDoltStoreForTest(spy)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _, _ = store.Claim("gc-1", "worker-1")
+	}()
+
+	<-spy.inClaim // Claim is inside claimer.Claim, still holding its RLock.
+
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		store.mu.Lock()   // the pending writer: a reconnect swap or CloseStore.
+		store.mu.Unlock() //nolint:staticcheck // SA2001: the empty critical section IS the test — acquiring and releasing s.mu.Lock() is what stands in for a pending writer; there is nothing to protect because nothing is shared here.
+	}()
+	time.Sleep(200 * time.Millisecond) // let the writer queue behind Claim's RLock.
+	close(spy.proceed)                 // let claimer.Claim return ErrNotFound.
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("DEADLOCK: Claim's wisp-disambiguation read blocked behind a pending writer while Claim still held its own RLock")
+	}
+	select {
+	case <-writerDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the pending writer never got in either: Claim never released its RLock")
+	}
+}
+
+// claimReconnectSpy pairs with a store's reopen hook so a transient error from
+// the disambiguation read's IssueReader().Get call exercises the real
+// reconnect path. It overrides Close so a reconnect's closeStorageQuietly(old)
+// (called on a detached goroutine against this value) does not nil-panic
+// through claimRoleSpy's embedded, unset beadslib.Storage field.
+type claimReconnectSpy struct{ *claimRoleSpy }
+
+func (claimReconnectSpy) Close() error { return nil }
+
+// TestClaimDoesNotSelfDeadlockWhenTheDisambiguationReadNeedsAReconnect is the
+// regression test for the Opus G1+G2 review's companion CRITICAL case: even
+// with no other goroutine involved, a transient failure on the old
+// s.Get(id)-based disambiguation read would run withReadRetry's reconnect,
+// which takes s.mu.Lock() — a write-lock request from the SAME goroutine that
+// still holds Claim's own s.mu.RLock via acquireStorage. That can never be
+// granted: a goroutine cannot upgrade its own read lock to a write lock, and
+// nothing else can release the RLock it holds. The fix never calls
+// s.Get/withReadRetry for this read at all (see Claim's doc comment and
+// nativeClaimWispDisambiguationFindsRow), so a transient error here simply
+// degrades to the pre-fix "report the original ErrNotFound" outcome instead
+// of reaching reconnect.
+func TestClaimDoesNotSelfDeadlockWhenTheDisambiguationReadNeedsAReconnect(t *testing.T) {
+	spy := claimReconnectSpy{&claimRoleSpy{
+		err:    issueops.ErrNotFound,
+		getErr: errors.New("invalid connection"), // the withReadRetry transient signature.
+	}}
+	store := newNativeDoltStoreForTest(spy)
+	store.reopen = func(context.Context) (beadslib.Storage, error) { return spy, nil }
+	store.readRetryBudgetOverride = 2 * time.Second
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, claimed, err := store.Claim("gc-1", "worker-1")
+		if claimed {
+			t.Error("claimed = true on a not-found row")
+		}
+		if !errors.Is(err, ErrNotFound) {
+			t.Errorf("error = %v, want a wrapped ErrNotFound (degrade-to-pre-fix, not a manufactured wisp refusal)", err)
+		}
+		if errors.Is(err, ErrWispNotClaimable) {
+			t.Errorf("error = %v, want it NOT to claim this transient-read id is a wisp", err)
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SELF-DEADLOCK: Claim's disambiguation read reached a reconnect that took s.mu.Lock() under Claim's own s.mu.RLock")
+	}
+}
+
+// TestGetAloneStillReconnectsOnATransientFailureWithoutHanging is the control
+// for the above: it pins that the ordinary s.Get path (not nested inside
+// Claim, so no outer RLock is held) still recovers through withReadRetry's
+// reconnect exactly as before the Claim fix, which touched only Claim's own
+// disambiguation read and nothing in Get/withReadRetry/reconnect itself.
+func TestGetAloneStillReconnectsOnATransientFailureWithoutHanging(t *testing.T) {
+	spy := claimReconnectSpy{&claimRoleSpy{getErr: errors.New("invalid connection")}}
+	store := newNativeDoltStoreForTest(spy)
+	store.reopen = func(context.Context) (beadslib.Storage, error) { return spy, nil }
+	store.readRetryBudgetOverride = 2 * time.Second
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = store.Get("gc-1")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Get alone hung too: this would mean the regression was in withReadRetry/reconnect, not Claim")
 	}
 }

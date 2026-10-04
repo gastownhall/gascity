@@ -1859,7 +1859,8 @@ func nativeReleaseRefused(err error) bool {
 //
 // Distinguishing them needs a second read, because the claimer's own
 // ErrNotFound carries nothing to tell them apart by itself: when the
-// claimer's error resolves to issueops.ErrNotFound, Get(id) is asked, through
+// claimer's error resolves to issueops.ErrNotFound,
+// nativeClaimWispDisambiguationFindsRow asks the reader role for id, through
 // the reader role, which — unlike the claimer — DOES resolve the wisp table
 // (issueops.Reader.Get's own doc comment: "A miss — for both the issue and
 // the wisp table — is ErrNotFound"). If Get finds the row, the only backend
@@ -1870,6 +1871,25 @@ func nativeReleaseRefused(err error) bool {
 // disambiguating read must never manufacture a wisp refusal that was never
 // actually decided, so it degrades to the pre-fix behavior rather than
 // guessing.
+//
+// THE DISAMBIGUATING READ GOES THROUGH THE storage HANDLE AND ctx CLAIM
+// ALREADY HOLDS, NEVER THROUGH s.Get (review fix, G1+G2 Opus pass). Claim
+// still holds s.mu.RLock here (acquireStorage above, released only on
+// return via the deferred release()). s.Get funnels through withReadRetry,
+// which re-takes s.mu via acquireStorageGen and, on a transient read error,
+// reconnects via s.mu.Lock() — both of which are a second, nested lock
+// request from the SAME goroutine that already holds the outer RLock.
+// Go's sync.RWMutex is not reentrant and gives a blocked Lock() writer
+// priority over new readers, so either shape self-deadlocks the goroutine
+// permanently: a pending writer (a reconnect swap or CloseStore racing in
+// from elsewhere) blocks the nested RLock forever behind itself, and a
+// transient failure on the disambiguating read alone reaches
+// reconnect's s.mu.Lock() while this same goroutine's outer RLock is still
+// held, which can never be granted. Reading directly off the storage and ctx
+// Claim already has avoids taking s.mu a second time at all, so neither shape
+// can occur; a transient error here is reported as "no row found" (see the
+// paragraph above), which is the documented pre-fix degradation, not a new
+// retry/reconnect path.
 func (s *NativeDoltStore) Claim(id, assignee string) (Bead, bool, error) {
 	if err := s.readOnlyGuard(); err != nil {
 		return Bead{}, false, err
@@ -1895,7 +1915,7 @@ func (s *NativeDoltStore) Claim(id, assignee string) (Bead, bool, error) {
 			return Bead{}, false, nil
 		}
 		if errors.Is(err, issueops.ErrNotFound) {
-			if _, getErr := s.Get(id); getErr == nil {
+			if nativeClaimWispDisambiguationFindsRow(ctx, storage, id) {
 				return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, ErrWispNotClaimable)
 			}
 		}
@@ -1909,6 +1929,23 @@ func (s *NativeDoltStore) Claim(id, assignee string) (Bead, bool, error) {
 		return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, err)
 	}
 	return bead, true, nil
+}
+
+// nativeClaimWispDisambiguationFindsRow asks the reader role for id using the
+// storage handle and ctx Claim already holds, and reports whether it found a
+// row. It deliberately does NOT go through s.Get/s.withReadRetry: see the
+// "THE DISAMBIGUATING READ" paragraph on Claim's doc comment above for why a
+// second, nested acquisition of s.mu from the same goroutine self-deadlocks.
+// Any failure here (including one that would ordinarily reconnect and retry)
+// is reported as "no row found," which is the documented, deliberate
+// degrade-to-pre-fix behavior, not a best-effort guess.
+func nativeClaimWispDisambiguationFindsRow(ctx context.Context, storage beadslib.Storage, id string) bool {
+	reader, err := storage.IssueReader()
+	if err != nil {
+		return false
+	}
+	details, err := reader.Get(ctx, issueops.GetRequest{ID: id})
+	return err == nil && details != nil
 }
 
 // ErrWispNotClaimable names the refusal Claim reports for an id that exists
