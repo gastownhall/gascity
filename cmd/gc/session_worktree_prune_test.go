@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -218,6 +219,31 @@ func TestPruneAgentHomeWorktreeIfSafe_OutsideWorktreesTree(t *testing.T) {
 	var stderr bytes.Buffer
 	if pruneAgentHomeWorktreeIfSafe(session, fx.cityPath, fx.cfg, &stderr) {
 		t.Fatal("prune returned true for path outside .gc/worktrees")
+	}
+}
+
+func TestPruneAgentHomeWorktreeIfSafe_UsesConfiguredWorktreesRoot(t *testing.T) {
+	fx := newPruneFixture(t)
+	configuredRoot := filepath.Join(fx.cityPath, "configured-worktrees")
+	configuredWorker := filepath.Join(configuredRoot, "demo", "polecats", "polecat-3")
+	t.Setenv("GC_WORKTREES_DIR", configuredRoot)
+	if err := os.MkdirAll(configuredWorker, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configuredWorker, ".git"), []byte("gitdir: /fake\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	session := fx.sessionBead()
+	session.Metadata["worker_dir"] = configuredWorker
+	fx.setProbe(configuredWorker, &fakeGitProbe{isRepo: true})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	if !pruneAgentHomeWorktreeIfSafe(session, fx.cityPath, fx.cfg, io.Discard) {
+		t.Fatal("configured-root worktree was not pruned")
+	}
+	if !rigProbe.removeInvoked || rigProbe.removedPath != configuredWorker {
+		t.Fatalf("WorktreeRemove path = %q, invoked=%v", rigProbe.removedPath, rigProbe.removeInvoked)
 	}
 }
 
