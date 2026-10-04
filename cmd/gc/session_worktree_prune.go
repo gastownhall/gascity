@@ -23,7 +23,6 @@ type gitProbe interface {
 	CurrentBranch() (string, error)
 	HasUncommittedWork() bool
 	HasUnpushedCommitsResult() (bool, error)
-	HasStashesResult() (bool, error)
 	WorktreeRemove(path string, force bool) error
 }
 
@@ -62,7 +61,7 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 //   - the session bead has no worker_dir metadata
 //   - the worker_dir does not live under cityPath/.gc/worktrees/
 //   - the worker_dir is missing on disk or has no .git pointer
-//   - the worktree has uncommitted changes, unpushed commits, or stashes
+//   - the worktree has uncommitted changes or unpushed commits
 //   - the rig that owns the session cannot be resolved to a filesystem path
 //
 // Removal failures are logged but never surfaced — an orphaned worktree
@@ -109,17 +108,6 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 		writeWorktreeStaleMarker(gp, workerDir, "unpushed-commits", stderr)
 		return false
 	}
-	hasStashes, err := gp.HasStashesResult()
-	if err != nil {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: stash probe failed: %v\n", workerDir, err) //nolint:errcheck
-		return false
-	}
-	if hasStashes {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has stashed work\n", workerDir) //nolint:errcheck
-		writeWorktreeStaleMarker(gp, workerDir, "stashed-work", stderr)
-		return false
-	}
-
 	// Run `git worktree remove` from the rig root rather than from the
 	// worktree being removed: git refuses to remove a worktree whose path
 	// equals cwd in some configurations, and operating from cwd of a
@@ -184,17 +172,6 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 		writeWorktreeStaleMarker(gp, workerDir, "unpushed-commits", stderr)
 		return
 	}
-	hasStashes, err := gp.HasStashesResult()
-	if err != nil {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: stash probe failed: %v\n", workerDir, err) //nolint:errcheck
-		return
-	}
-	if hasStashes {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has stashed work\n", workerDir) //nolint:errcheck
-		writeWorktreeStaleMarker(gp, workerDir, "stashed-work", stderr)
-		return
-	}
-
 	rigRoot := lookupRigRootForSessionInfo(info, cfg)
 	if rigRoot == "" {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: rig path unresolved\n", workerDir) //nolint:errcheck
