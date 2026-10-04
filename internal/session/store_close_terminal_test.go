@@ -76,7 +76,7 @@ func TestCloseWithTerminalPatchAcrossBackends(t *testing.T) {
 			}
 			front := NewStore(beads.SessionStore{Store: tracing})
 
-			closed, err := front.CloseWithTerminalPatch(created.ID, failedCreateTerminalPatch(), "gc: close failed-create session "+created.ID, closeTestNow)
+			closed, err := front.CloseWithTerminalPatch(decidedOn(t, backing, created.ID), failedCreateTerminalPatch(), "gc: close failed-create session "+created.ID, closeTestNow)
 			if err != nil {
 				t.Fatalf("CloseWithTerminalPatch: %v", err)
 			}
@@ -155,7 +155,7 @@ func TestCloseWithTerminalPatchRefusesWhenItsPremiseMoves(t *testing.T) {
 				}
 				front := NewStore(beads.SessionStore{Store: tracing})
 
-				closed, err := front.CloseWithTerminalPatch(created.ID, ClosePatch(closeTestNow, "dead-runtime"), "gc: close session "+created.ID, closeTestNow)
+				closed, err := front.CloseWithTerminalPatch(decidedOn(t, backing, created.ID), ClosePatch(closeTestNow, "dead-runtime"), "gc: close session "+created.ID, closeTestNow)
 				if !errors.Is(err, ErrSessionCloseSuperseded) || closed {
 					t.Fatalf("CloseWithTerminalPatch = (%v, %v), want (false, ErrSessionCloseSuperseded)", closed, err)
 				}
@@ -186,7 +186,7 @@ func TestCloseWithTerminalPatchLeavesAClosedRowAlone(t *testing.T) {
 	backing := beads.NewAtomicCloseMemStore()
 	created := seedOpenSession(t, backing, "s-closed")
 	front := NewStore(beads.SessionStore{Store: backing})
-	if closed, err := front.CloseWithTerminalPatch(created.ID, ClosePatch(closeTestNow, "orphaned"), "first", closeTestNow); err != nil || !closed {
+	if closed, err := front.CloseWithTerminalPatch(decidedOn(t, backing, created.ID), ClosePatch(closeTestNow, "orphaned"), "first", closeTestNow); err != nil || !closed {
 		t.Fatalf("first close = (%v, %v), want (true, nil)", closed, err)
 	}
 	before, err := backing.Get(created.ID)
@@ -195,7 +195,7 @@ func TestCloseWithTerminalPatchLeavesAClosedRowAlone(t *testing.T) {
 	}
 
 	tracing := &terminalCloseTxStore{closeInterferenceStore: &closeInterferenceStore{Store: backing}}
-	closed, err := NewStore(beads.SessionStore{Store: tracing}).CloseWithTerminalPatch(created.ID, failedCreateTerminalPatch(), "second", closeTestNow)
+	closed, err := NewStore(beads.SessionStore{Store: tracing}).CloseWithTerminalPatch(decidedOn(t, backing, created.ID), failedCreateTerminalPatch(), "second", closeTestNow)
 	if err != nil || closed {
 		t.Fatalf("second close = (%v, %v), want (false, nil) on a closed row", closed, err)
 	}
@@ -230,7 +230,7 @@ func TestCloseWithTerminalPatchReportsFalseWhenAnotherCloserWins(t *testing.T) {
 		}
 		return backing.Close(id)
 	}
-	closed, err := NewStore(beads.SessionStore{Store: tracing}).CloseWithTerminalPatch(created.ID, failedCreateTerminalPatch(), "gc: close session", closeTestNow)
+	closed, err := NewStore(beads.SessionStore{Store: tracing}).CloseWithTerminalPatch(decidedOn(t, backing, created.ID), failedCreateTerminalPatch(), "gc: close session", closeTestNow)
 	if err != nil || closed {
 		t.Fatalf("CloseWithTerminalPatch = (%v, %v), want (false, nil) after losing to a competing closer", closed, err)
 	}
@@ -254,7 +254,7 @@ func TestCloseWithTerminalPatchFallsBackToTheTxWhenRefusedAtCallTime(t *testing.
 	backing := beads.NewAtomicCloseMemStore()
 	created := seedOpenSession(t, backing, "s-refused")
 	tracing := &terminalCloseTxStore{closeInterferenceStore: &closeInterferenceStore{Store: backing, unsupported: true}}
-	closed, err := NewStore(beads.SessionStore{Store: tracing}).CloseWithTerminalPatch(created.ID, failedCreateTerminalPatch(), "gc: close session", closeTestNow)
+	closed, err := NewStore(beads.SessionStore{Store: tracing}).CloseWithTerminalPatch(decidedOn(t, backing, created.ID), failedCreateTerminalPatch(), "gc: close session", closeTestNow)
 	if err != nil || !closed {
 		t.Fatalf("CloseWithTerminalPatch = (%v, %v), want (true, nil) through the fallback", closed, err)
 	}
@@ -306,7 +306,7 @@ func TestCloseWithTerminalPatchYieldsToAKillFence(t *testing.T) {
 				t.Fatalf("stamping the kill fence: %v", err)
 			}
 
-			closed, err := NewStore(beads.SessionStore{Store: tracing}).CloseWithTerminalPatch(created.ID, ClosePatch(closeTestNow, "dead-runtime"), "gc: close session", closeTestNow.Add(time.Second))
+			closed, err := NewStore(beads.SessionStore{Store: tracing}).CloseWithTerminalPatch(decidedOn(t, backing, created.ID), ClosePatch(closeTestNow, "dead-runtime"), "gc: close session", closeTestNow.Add(time.Second))
 			if !errors.Is(err, ErrSessionKillPending) || closed {
 				t.Fatalf("CloseWithTerminalPatch = (%v, %v), want (false, ErrSessionKillPending)", closed, err)
 			}
@@ -333,7 +333,7 @@ func TestCloseWithTerminalPatchClosesPastAStaleKillFence(t *testing.T) {
 	if err := backing.SetMetadataBatch(created.ID, map[string]string(KillPendingPatch(closeTestNow))); err != nil {
 		t.Fatalf("stamping the kill fence: %v", err)
 	}
-	closed, err := NewStore(beads.SessionStore{Store: backing}).CloseWithTerminalPatch(created.ID, ClosePatch(closeTestNow, "dead-runtime"), "gc: close session", closeTestNow.Add(KillPendingGrace+time.Second))
+	closed, err := NewStore(beads.SessionStore{Store: backing}).CloseWithTerminalPatch(decidedOn(t, backing, created.ID), ClosePatch(closeTestNow, "dead-runtime"), "gc: close session", closeTestNow.Add(KillPendingGrace+time.Second))
 	if err != nil || !closed {
 		t.Fatalf("CloseWithTerminalPatch = (%v, %v), want (true, nil) past the kill grace", closed, err)
 	}

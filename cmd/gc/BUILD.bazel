@@ -1299,6 +1299,7 @@ go_test(
         "pool_on_boot_parallel_test.go",
         "pool_pieces_prerefactor_test.go",
         "pool_pieces_test.go",
+        "pool_release_bd_guard_test.go",
         "pool_session_identifier_lock_test.go",
         "pool_session_name_churn_test.go",
         "pool_session_name_holder_test.go",

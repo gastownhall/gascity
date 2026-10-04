@@ -674,13 +674,13 @@ func isCanonicalWorkflowRoot(wb beads.Bead) bool {
 //     verb it slots in inside BdStore.ReleaseIfCurrent (feature-detect the
 //     verb, fall back to `bd sql` on unsupported) and this caller needs no
 //     change.
-//  2. Otherwise releasePoolAssignmentWithRecheck: re-read the bead and write
-//     status, assignee and the affinity metadata as one UpdateIfMatch on that
-//     read's revision, so a claim landing after the re-read is never
-//     clobbered. Because the one write also clears the affinity metadata, it
-//     is the correct path for continuation-group beads: the group is never
-//     exposed on an open, unassigned bead. A store that cannot fence the write
-//     is refused and logged rather than written blind.
+//  2. Otherwise releasePoolAssignmentWithRecheck: status, assignee and the
+//     affinity metadata as one write fenced on the snapshot's (status,
+//     assignee), so a claim landing after the snapshot is never clobbered.
+//     Because the one write also clears the affinity metadata, it is the
+//     correct path for continuation-group beads: the group is never exposed on
+//     an open, unassigned bead. A store that cannot fence the write is refused
+//     and logged rather than written blind.
 func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetached bool) bool {
 	if store == nil || strings.TrimSpace(wb.ID) == "" {
 		return false
@@ -777,32 +777,18 @@ func clearReleasedPoolAssignmentMetadata(store beads.Store, id string, clearDeta
 // releasePoolAssignmentWithRecheck is the release for snapshots
 // ReleaseIfCurrent cannot take: open-status strands (#2793), assignee-less
 // in_progress recovery, continuation-group beads (beadHasActiveContinuationGroup),
-// and stores without the verb. It re-reads the bead, re-verifies the
-// snapshot's (status, assignee), and writes status, assignee and the affinity
-// metadata as ONE UpdateIfMatch on that read's revision. A claim that lands
-// after the re-read fails the fence and is kept; the next sweep decides again.
-// The re-read only picks the token, so a cached row is safe: a stale revision
-// fails the fence too.
+// and stores without the verb. It writes status, assignee and the affinity
+// metadata as ONE write fenced on the snapshot's (status, assignee)
+// (releaseAssignmentFenced): bd's guarded update on BdStore, otherwise an
+// UpdateIfMatch on a live re-read's revision. A claim that lands after the
+// snapshot fails the fence and is kept; the next sweep decides again.
 //
-// A store that cannot fence (BdStore without --if-revision, a legacy SQLite
-// layout) is refused and logged, never released by an unconditional write: a
-// clobbered claim reads back empty and leaves no trace. Such a bead stays
-// assigned until its snapshot fits ReleaseIfCurrent or the store can fence.
+// A store that can fence neither way (a bd without --if-status/--if-assignee,
+// a legacy SQLite layout, the exec store) is refused and logged, never released
+// by an unconditional write: a clobbered claim reads back empty and leaves no
+// trace. Such a bead stays assigned until its snapshot fits ReleaseIfCurrent or
+// the store can fence.
 func releasePoolAssignmentWithRecheck(store beads.Store, wb beads.Bead, clearDetached bool) bool {
-	writer, ok := beads.ConditionalWriterForTarget(store)
-	if !ok {
-		log.Printf("releaseOrphanedPoolAssignments: refusing to release %s: the store cannot release it conditionally", wb.ID)
-		return false
-	}
-	current, err := beads.HandlesFor(store).Live.Get(wb.ID)
-	if err != nil {
-		log.Printf("releaseOrphanedPoolAssignments: re-reading %s before release: %v", wb.ID, err)
-		return false
-	}
-	if current.Status != wb.Status || strings.TrimSpace(current.Assignee) != strings.TrimSpace(wb.Assignee) {
-		log.Printf("releaseOrphanedPoolAssignments: skipping release for %s: assignment changed between staleness check and release write", wb.ID)
-		return false
-	}
 	opts := beads.UpdateOpts{
 		Assignee: stringPtr(""),
 		Status:   stringPtr("open"),
@@ -811,16 +797,18 @@ func releasePoolAssignmentWithRecheck(store beads.Store, wb beads.Bead, clearDet
 	if clearDetached {
 		opts.Metadata[detachedProbeMetadataKey] = ""
 	}
-	err = writer.UpdateIfMatch(wb.ID, current.Revision, opts)
+	outcome, err := releaseAssignmentFenced(store, wb, opts)
 	switch {
-	case err == nil:
-		return true
-	case beads.IsPreconditionFailed(err):
-		log.Printf("releaseOrphanedPoolAssignments: skipping release for %s: the bead changed after the re-read", wb.ID)
-	case beads.IsConditionalWriteUnsupported(err):
-		log.Printf("releaseOrphanedPoolAssignments: refusing to release %s: the store cannot release it conditionally", wb.ID)
-	default:
+	case err != nil:
 		log.Printf("releaseOrphanedPoolAssignments: releasing orphaned pool assignment %s: %v", wb.ID, err)
+	case outcome == fencedReleaseApplied:
+		return true
+	case outcome == fencedReleaseChanged:
+		log.Printf("releaseOrphanedPoolAssignments: skipping release for %s: assignment changed between staleness check and release write", wb.ID)
+	case outcome == fencedReleaseLost:
+		log.Printf("releaseOrphanedPoolAssignments: skipping release for %s: the bead changed after the re-read", wb.ID)
+	default:
+		log.Printf("releaseOrphanedPoolAssignments: refusing to release %s: the store cannot release it conditionally", wb.ID)
 	}
 	return false
 }

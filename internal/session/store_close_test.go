@@ -92,6 +92,17 @@ func seedOpenSession(t *testing.T, store beads.Store, name string) beads.Bead {
 
 var closeTestNow = time.Date(2026, 9, 28, 1, 2, 3, 0, time.UTC)
 
+// decidedOn reads id from store and returns the Info a caller would decide a
+// close on: the row as it is right now.
+func decidedOn(t *testing.T, store beads.Store, id string) Info {
+	t.Helper()
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get %s: %v", id, err)
+	}
+	return infoFromPersistedBead(b)
+}
+
 // TestCloseFencesAStaleAwakeWriterOutOfTheTerminalRow is the regression for
 // the closed-but-awake strand and for closing over a wake. A wake stamps
 // state=awake after Close has read the row. Before the atomic close, Close
@@ -109,7 +120,7 @@ func TestCloseFencesAStaleAwakeWriterOutOfTheTerminalRow(t *testing.T) {
 	tracing.interfere = staleAwakeOnce(backing)
 	front := NewStore(beads.SessionStore{Store: tracing})
 
-	closed, err := front.Close(created.ID, string(StateDrained), closeTestNow)
+	closed, err := front.Close(decidedOn(t, backing, created.ID), string(StateDrained), closeTestNow)
 	if !errors.Is(err, ErrSessionCloseSuperseded) || closed {
 		t.Fatalf("Close = (%v, %v), want (false, ErrSessionCloseSuperseded) after a wake won the fence", closed, err)
 	}
@@ -125,6 +136,76 @@ func TestCloseFencesAStaleAwakeWriterOutOfTheTerminalRow(t *testing.T) {
 	}
 }
 
+// TestCloseRefusesAWakeBetweenTheDecisionAndTheFirstRead is the regression
+// for a close premise taken from the close's own first read. The caller decides
+// to close a suspended row, and a wake stamps state=awake before the close
+// reads it. That read then agreed with itself, so the close landed on the woken
+// row. Close and CloseWithTerminalPatch now check the caller's Info on every
+// read, the first included, and write nothing. Close's fallback arm reads the
+// row too, so a store without the atomic close refuses as well.
+func TestCloseRefusesAWakeBetweenTheDecisionAndTheFirstRead(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		backing func() beads.Store
+		// plain hands the front door the bare store, so a store without the
+		// atomic close takes the two-write fallback arm.
+		plain bool
+		close func(front *Store, decided Info) (bool, error)
+	}{
+		{
+			name:    "Close/atomic",
+			backing: beads.NewAtomicCloseMemStore,
+			close: func(front *Store, decided Info) (bool, error) {
+				return front.Close(decided, string(StateDrained), closeTestNow)
+			},
+		},
+		{
+			name:    "Close/fallback",
+			backing: func() beads.Store { return beads.NewMemStore() },
+			plain:   true,
+			close: func(front *Store, decided Info) (bool, error) {
+				return front.Close(decided, string(StateDrained), closeTestNow)
+			},
+		},
+		{
+			name:    "CloseWithTerminalPatch/atomic",
+			backing: beads.NewAtomicCloseMemStore,
+			close: func(front *Store, decided Info) (bool, error) {
+				return front.CloseWithTerminalPatch(decided, ClosePatch(closeTestNow, "dead-runtime"), "gc: close session", closeTestNow)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backing := tc.backing()
+			created := seedOpenSession(t, backing, "s-woken")
+			decided := decidedOn(t, backing, created.ID)
+			if err := backing.SetMetadata(created.ID, "state", string(StateAwake)); err != nil {
+				t.Fatalf("stamping the wake: %v", err)
+			}
+			tracing := &closeInterferenceStore{Store: backing}
+			var frontStore beads.Store = tracing
+			if tc.plain {
+				frontStore = backing
+			}
+
+			closed, err := tc.close(NewStore(beads.SessionStore{Store: frontStore}), decided)
+			if !errors.Is(err, ErrSessionCloseSuperseded) || closed {
+				t.Fatalf("close = (%v, %v), want (false, ErrSessionCloseSuperseded) for a row woken after the decision", closed, err)
+			}
+			got, err := backing.Get(created.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.Status != "open" || got.Metadata["state"] != string(StateAwake) || got.Metadata["close_reason"] != "" {
+				t.Fatalf("row = status %q state %q close_reason %q, want the woken row untouched", got.Status, got.Metadata["state"], got.Metadata["close_reason"])
+			}
+			if tracing.atomicCalls != 0 || tracing.plainCloseCalls != 0 {
+				t.Fatalf("atomic/plain close calls = %d/%d, want 0/0 (refused on the first read)", tracing.atomicCalls, tracing.plainCloseCalls)
+			}
+		})
+	}
+}
+
 // TestCloseRetriesPastAWriteOutsideItsPremise proves the retry still serves
 // its purpose: a writer that moves the revision without touching a lifecycle
 // fact (a nudge stamp) wins the fence once, and the retry closes the row in
@@ -136,7 +217,7 @@ func TestCloseRetriesPastAWriteOutsideItsPremise(t *testing.T) {
 	tracing.interfere = unrelatedWriteOnce(backing)
 	front := NewStore(beads.SessionStore{Store: tracing})
 
-	closed, err := front.Close(created.ID, string(StateDrained), closeTestNow)
+	closed, err := front.Close(decidedOn(t, backing, created.ID), string(StateDrained), closeTestNow)
 	if err != nil || !closed {
 		t.Fatalf("Close = (%v, %v), want (true, nil)", closed, err)
 	}
@@ -167,7 +248,7 @@ func TestCloseBoundsRepeatedAtomicRevisionConflicts(t *testing.T) {
 	}
 	front := NewStore(beads.SessionStore{Store: tracing})
 
-	closed, err := front.Close(created.ID, string(StateDrained), closeTestNow)
+	closed, err := front.Close(decidedOn(t, backing, created.ID), string(StateDrained), closeTestNow)
 	if !beads.IsPreconditionFailed(err) {
 		t.Fatalf("Close error = %v, want the bounded precondition failure", err)
 	}
@@ -207,7 +288,7 @@ func TestCloseReportsFalseWhenAnotherActorClosesFirst(t *testing.T) {
 	}
 	front := NewStore(beads.SessionStore{Store: tracing})
 
-	closed, err := front.Close(created.ID, string(StateDrained), closeTestNow)
+	closed, err := front.Close(decidedOn(t, backing, created.ID), string(StateDrained), closeTestNow)
 	if err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -233,6 +314,7 @@ func TestConcurrentClosesHaveExactlyOneWinner(t *testing.T) {
 	backing := beads.NewAtomicCloseMemStore()
 	created := seedOpenSession(t, backing, "s-stampede")
 	front := NewStore(beads.SessionStore{Store: backing})
+	decided := decidedOn(t, backing, created.ID)
 
 	const callers = 8
 	results := make([]bool, callers)
@@ -244,7 +326,7 @@ func TestConcurrentClosesHaveExactlyOneWinner(t *testing.T) {
 		go func() {
 			defer done.Done()
 			<-start
-			results[i], errs[i] = front.Close(created.ID, string(StateDrained), closeTestNow)
+			results[i], errs[i] = front.Close(decided, string(StateDrained), closeTestNow)
 		}()
 	}
 	close(start)
@@ -275,7 +357,7 @@ func TestCloseFallsBackWhenAtomicCloseIsUnsupportedAtCallTime(t *testing.T) {
 	tracing := &closeInterferenceStore{Store: backing, unsupported: true}
 	front := NewStore(beads.SessionStore{Store: tracing})
 
-	closed, err := front.Close(created.ID, string(StateDrained), closeTestNow)
+	closed, err := front.Close(decidedOn(t, backing, created.ID), string(StateDrained), closeTestNow)
 	if err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -306,7 +388,7 @@ func TestCloseSurfacesANonFenceAtomicCloseError(t *testing.T) {
 	tracing.interfere = func(string) error { return boom }
 	front := NewStore(beads.SessionStore{Store: tracing})
 
-	closed, err := front.Close(created.ID, string(StateDrained), closeTestNow)
+	closed, err := front.Close(decidedOn(t, backing, created.ID), string(StateDrained), closeTestNow)
 	if !errors.Is(err, boom) {
 		t.Fatalf("Close error = %v, want the store failure", err)
 	}

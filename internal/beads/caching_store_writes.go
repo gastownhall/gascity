@@ -84,8 +84,37 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 	if err := c.backing.Update(id, opts); err != nil {
 		return err
 	}
+	c.absorbUpdate(id, opts, startSeq)
+	return nil
+}
 
-	// Re-fetch from backing to get the authoritative state.
+// UpdateIfAssignment forwards the guarded update to the backing store's
+// capability and maintains the cache. It never short-circuits on the cached
+// row the way Update does: the guard exists because that row may be stale, and
+// only the backing can evaluate it. A landed update refreshes the row exactly
+// as Update does. A rejected guard proves the cached row stale, so it is
+// evicted and the next read fetches it again.
+func (c *CachingStore) UpdateIfAssignment(id, expectedStatus, expectedAssignee string, opts UpdateOpts) (bool, error) {
+	updater, ok := AssignmentGuardedUpdaterFor(c.conditionalBacking())
+	if !ok {
+		return false, ErrConditionalWriteUnsupported
+	}
+	startSeq := c.currentMutationSeq()
+	updated, err := updater.UpdateIfAssignment(id, expectedStatus, expectedAssignee, opts)
+	switch {
+	case err != nil:
+		return false, err
+	case !updated:
+		c.evictForConditionalWrite(id)
+		return false, nil
+	}
+	c.absorbUpdate(id, opts, startSeq)
+	return true, nil
+}
+
+// absorbUpdate refreshes the cached row for id after opts landed on the
+// backing store, starting from the backing's authoritative row.
+func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq uint64) {
 	fresh, err := c.backing.Get(id)
 	c.mu.Lock()
 	raced := c.racedWriteLocked(id, startSeq)
@@ -105,7 +134,7 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 		if notifyClosed {
 			c.notifyChange("bead.closed", closed)
 		}
-		return nil
+		return
 	}
 	if err != nil {
 		patched, found := c.patchedCachedRowLocked(id, func(b *Bead) { *b = applyUpdateOptsToBead(*b, opts) })
@@ -129,14 +158,14 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 		if found {
 			c.notifyChange("bead.updated", patched)
 		}
-		return nil
+		return
 	}
 	if raced {
 		// Notify with the backing's row, not the write laid over it.
 		c.updateStatsLocked()
 		c.mu.Unlock()
 		c.notifyChange("bead.updated", fresh)
-		return nil
+		return
 	}
 	fresh = applyUpdateOptsToBead(fresh, opts)
 	c.noteLocalMutationLocked(id)
@@ -153,7 +182,6 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 	c.mu.Unlock()
 
 	c.notifyChange("bead.updated", fresh)
-	return nil
 }
 
 // ReleaseIfCurrent clears an in-progress assignment through the backing store

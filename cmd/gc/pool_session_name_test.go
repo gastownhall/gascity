@@ -2511,6 +2511,72 @@ func TestReleaseOrphanedPoolAssignments_FallbackRefusesWithoutAConditionalWrite(
 	}
 }
 
+// TestReleaseOrphanedPoolAssignments_FallbackRefusesAWriterThatCannotFence is
+// the BdStore-shaped "unsupported" path: the store hands out a conditional
+// writer, but the writer refuses at call time (conditional writes disabled,
+// as on a bd without --if-revision), and there is no guarded update either.
+// The release must stop at the refused fenced write, never follow it with a
+// blind one.
+func TestReleaseOrphanedPoolAssignments_FallbackRefusesAWriterThatCannotFence(t *testing.T) {
+	store, work := newConditionalReleaseProbeStore(t)
+	store.releaseUnsupported = true
+	store.mem.DisableConditionalWrites = true
+	if _, ok := beads.ConditionalWriterForTarget(store); !ok {
+		t.Fatal("probe store hands out no conditional writer; the case needs one that refuses at call time")
+	}
+
+	var buf bytes.Buffer
+	restore := captureLogOutput(&buf)
+	defer restore()
+
+	released := releaseProbeAssignments(store, work)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none when the writer cannot fence", released)
+	}
+	if len(store.assignmentUpdates) != 1 {
+		t.Fatalf("assignment-shaped writes = %+v, want only the refused fenced attempt, no blind follow-up", store.assignmentUpdates)
+	}
+	if !strings.Contains(buf.String(), "cannot release it conditionally") {
+		t.Fatalf("log output = %q, want the refusal logged", buf.String())
+	}
+	got, err := store.mem.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-dead" || got.Metadata["gc.session_affinity"] != "require" {
+		t.Fatalf("work = status %q assignee %q affinity %q, want it left as it was", got.Status, got.Assignee, got.Metadata["gc.session_affinity"])
+	}
+}
+
+// TestReleaseOrphanedPoolAssignment_FencedFallbackFollowsAResolveTarget
+// releases through a wrapper that declares its conditional-writes resolution
+// target instead of promoting the capability, as the cmd/gc policy store and
+// the typed class wrappers do. The fenced fallback must find the writer
+// behind it; looking only at the wrapper itself would refuse every release
+// made through one.
+func TestReleaseOrphanedPoolAssignment_FencedFallbackFollowsAResolveTarget(t *testing.T) {
+	store, work := newConditionalReleaseProbeStore(t)
+	store.releaseUnsupported = true
+	wrapper := beads.WorkStore{Store: store}
+	if _, ok := beads.ConditionalWriterFor(wrapper); ok {
+		t.Fatal("the wrapper promotes the writer itself; the case needs one that only declares a target")
+	}
+
+	if !releaseOrphanedPoolAssignment(wrapper, work, false) {
+		t.Fatal("release through the wrapper = false, want the fenced release to land on its target")
+	}
+	if len(store.assignmentUpdates) != 1 {
+		t.Fatalf("assignment-shaped writes = %+v, want exactly the fenced release", store.assignmentUpdates)
+	}
+	got, err := store.mem.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" || got.Metadata["gc.session_affinity"] != "" {
+		t.Fatalf("work = status %q assignee %q affinity %q, want released with affinity cleared", got.Status, got.Assignee, got.Metadata["gc.session_affinity"])
+	}
+}
+
 func TestReleaseOrphanedPoolAssignments_UnsupportedStoreReleasesNormalOrphan(t *testing.T) {
 	store, work := newConditionalReleaseProbeStore(t)
 	store.releaseUnsupported = true

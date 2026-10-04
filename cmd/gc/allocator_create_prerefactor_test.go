@@ -241,7 +241,7 @@ func createPoolSessionBeadWithIdentifiersPreRefactor(
 	if identifiers.beadScoped {
 		if want := PoolSessionName(template, info.ID); info.SessionNameMetadata != want {
 			if err := sessionFrontDoor(store).SetMarker(info.ID, "session_name", want); err != nil {
-				closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, io.Discard)
+				closeFailedCreateBead(sessionFrontDoor(store), info, now, io.Discard)
 				return session.Info{}, err
 			}
 			info = info.ApplyPatch(session.MetadataPatch{"session_name": want})
