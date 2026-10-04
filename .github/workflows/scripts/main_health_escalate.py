@@ -57,7 +57,7 @@ def _detail_lines(author: str, pr_number: str, run_url: str) -> list[str]:
 
 
 def build_issue_body(sha: str, author: str, pr_number: str, run_url: str) -> str:
-    """Build the issue body: context for a human, plus the marker find_open_escalation_issue looks for."""
+    """Build the issue body: context for a human, plus the marker later pushes find it by."""
     lines = [
         f"The build on `main` is broken as of commit `{sha}`.",
         "",
