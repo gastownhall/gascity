@@ -118,12 +118,17 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 	sourceWorkflowScanWarnings := make(map[string]struct{})
 	var sourceWorkflowScanMessages []string
 	deps := sling.SlingDeps{
-		CityName:   s.state.CityName(),
-		CityPath:   s.state.CityPath(),
-		Cfg:        s.state.Config(),
-		SP:         s.state.SessionProvider(),
-		Store:      store,
-		GraphStore: s.relocatedGraphStore(),
+		CityName: s.state.CityName(),
+		CityPath: s.state.CityPath(),
+		Cfg:      s.state.Config(),
+		SP:       s.state.SessionProvider(),
+		Store:    store,
+		// Only a relocated graph binding; with nil the sling domain cooks the
+		// workflow in the sling's selected work store, next to its source
+		// bead, the rule `gc sling` applies through resolveGraphStore.
+		// Passing the non-relocated graph store (the city store) put a rig
+		// bead's workflow where the rig's pool workers never look.
+		GraphStore: relocatedGraphStore(s.state),
 		Events:     s.state.EventProvider(),
 		StoreRef:   storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
@@ -273,23 +278,6 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		return nil, http.StatusInternalServerError, "internal", "sling did not produce a workflow or bead id", nil
 	}
 	return resp, http.StatusOK, "", "", nil
-}
-
-// relocatedGraphStore returns the city's graph-class binding only when the city
-// relocates the graph class, and nil otherwise. With nil, the sling domain
-// cooks a workflow in the sling's selected work store, next to its source bead.
-// That is the rule `gc sling` applies through resolveGraphStore: the relocated
-// binding when there is one, else the bead's own work store. Passing the
-// non-relocated graph store here (the city store) put a rig bead's workflow in
-// the city store, where the rig's pool workers never look, so the bead was
-// never claimed. On a default city GraphBeadStore() is CityBeadStore(), the
-// same identity sourceWorkflowStores relies on.
-func (s *Server) relocatedGraphStore() beads.Store {
-	graph := s.state.GraphBeadStore().Store
-	if graph == nil || graph == s.state.CityBeadStore() {
-		return nil
-	}
-	return graph
 }
 
 func allowsForceStoreFallback(body slingBody, agentCfg config.Agent) bool {
