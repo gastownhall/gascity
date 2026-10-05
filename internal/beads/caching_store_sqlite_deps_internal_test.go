@@ -50,7 +50,7 @@ func newDepsFixture(t *testing.T, engine Store) *depsFixture {
 	if err := engine.DepAdd(f.step.ID, f.blocker.ID, "blocks"); err != nil {
 		t.Fatalf("DepAdd: %v", err)
 	}
-	f.cache = NewCachingStore(engine, func(eventType, beadID, _, _, _ string, _ *[]string, payload json.RawMessage) {
+	f.cache = NewCachingStore(engine, func(_ ChangeSource, eventType, beadID, _, _, _ string, _ *[]string, payload json.RawMessage) {
 		f.pending = append(f.pending, cacheWriteNotification{eventType: eventType, beadID: beadID, payload: payload})
 	})
 	if err := f.cache.Prime(context.Background()); err != nil {

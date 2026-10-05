@@ -2558,7 +2558,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						if rn := config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity); rn != "" && rn != identity {
 							preserve = append(preserve, rn)
 						}
-						if closeBeadPreservingAssignees(store, id, reason, preserve, clk.Now().UTC(), stderr) {
+						if closeBeadPreservingAssignees(store, infoByID[id], reason, preserve, clk.Now().UTC(), stderr) {
 							tick.markClosed(id)
 							fmt.Fprintf(stdout, "Recycled dead named-session phantom '%s' (squats configured identity %q; process gone)\n", name, identity) //nolint:errcheck
 							if trace != nil {
@@ -3061,7 +3061,40 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						providerHealthy = h
 					}
 				}
-				if sessionProgressStalled(claimlessThreshold, holdsClaim, providerHealthy, exempt || floorExempt, lastActivity, clk.Now()) {
+				// Idle on_demand seats with no demand are legitimately unclaimed:
+				// the on-demand:running override (compute_awake_set.go) keeps them
+				// alive by design until their own idle_timeout drains them.
+				// Recycling one here commits a reset whose reset-pending arm
+				// re-wakes it with no demand on the very next tick — an indefinite
+				// fresh-wake loop (ga-lqcr3x). Scoped to the claim-less recycler
+				// only, same as the min-floor exemption above: a seat with any
+				// demand is still recycled and re-woken exactly as today.
+				onDemandIdleExempt := false
+				exemptReason := TraceReasonOnDemandIdleNoDemand
+				if !exempt && !floorExempt && !holdsClaim && namedSessionModeInfo(infoByID[id]) == "on_demand" {
+					identity := namedSessionIdentityInfo(infoByID[id])
+					demand := namedSessionDemand[identity] || namedRoutedDemand[identity] ||
+						workSet[tp.TemplateName] || poolDesired[tp.TemplateName] > 0 || readyWaitSet[id]
+					if !demand {
+						hasOpen, openErr := sessionHasOpenAssignedWorkForConfigInfo(cityPath, cfg, store, rigStores, infoByID[id])
+						if openErr != nil {
+							// Fail safe: an unreadable open-work check must not recycle
+							// a session that may hold assigned work. Mirrors the
+							// attachment and claim-check guards above — skip the
+							// destructive action on error rather than assume the seat
+							// is idle.
+							fmt.Fprintf(stderr, "session reconciler: checking open assigned work before progress-stall recycle for %s: %v\n", name, openErr) //nolint:errcheck
+							onDemandIdleExempt = true
+							exemptReason = TraceReasonOpenWorkCheckError
+						} else {
+							onDemandIdleExempt = !hasOpen
+						}
+					}
+					if onDemandIdleExempt && trace != nil {
+						trace.RecordDecision(TraceSiteReconcilerProgressStallExempt, exemptReason, TraceOutcomeExempt, tp.TemplateName, name, nil)
+					}
+				}
+				if sessionProgressStalled(claimlessThreshold, holdsClaim, providerHealthy, exempt || floorExempt || onDemandIdleExempt, lastActivity, clk.Now()) {
 					// Record the restart request on the typed snapshot only. This
 					// marker is decision-state consumed by the restart-request block
 					// below (which reads Info.RestartRequested off infoByID) and never
@@ -3145,6 +3178,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				batch := sessionpkg.RestartRequestPatch(newSessionKey, clk.Now())
 				if hasCapability && newSessionKey == "" {
 					batch["session_key"] = ""
+				}
+				if runtimeRunning {
+					// Only when this branch actually killed something: the
+					// already-dead fall-through below (the "Runtime was
+					// already dead — no kill happened" block) deliberately
+					// leaves state untouched so the wake decision below can
+					// fire on this same tick (#2345) — forcing "asleep" here
+					// would fight that same-tick start. When we did kill a
+					// live runtime, record the same fact fix site #1 does:
+					// gc must not keep believing a session it just stopped
+					// is still awake. See ga-2fpf9z.
+					batch["state"] = string(sessionpkg.StateAsleep)
 				}
 				if err := sessionFrontDoor(store).ApplyPatch(id, batch); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: recording restart handoff for %s: %v\n", name, err) //nolint:errcheck
@@ -4305,7 +4350,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// the stamp below just hasn't caught up yet). Fail toward the
 					// pre-existing cycle behavior on any lookup or parse error.
 					if prev := strings.TrimSpace(info.CurrentlyProcessingBeadID); prev != "" {
-						prevOpen, prevClosedAt, err := prevAssignedBeadStatus(store, prev)
+						prevOpen, prevClosedAt, err := prevAssignedBeadStatus(residencyTopologyForCity(cityPath, cfg, store, rigStores), prev)
 						if err == nil && prevOpen {
 							continue
 						}
@@ -4553,7 +4598,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if closeReason == "" {
 				closeReason = "drained"
 			}
-			if closeBead(store, target.info.ID, closeReason, clk.Now().UTC(), stderr) {
+			if closeBead(store, infoByID[target.info.ID], closeReason, clk.Now().UTC(), stderr) {
 				// Store-only close family: mirror the close onto the snapshot
 				// (write-returns-Info) so a later reader sees Closed=true.
 				tick.markClosed(target.info.ID)
@@ -5330,20 +5375,7 @@ func emitSessionUnknownStateDiagnostic(
 		if rec == nil {
 			return
 		}
-		age := now.Sub(firstSeen).Round(time.Second)
-		msg := fmt.Sprintf("session %q has unrecognized state %q; reconciler is skipping it (forward-compatible rollback)", name, state)
-		if escalated {
-			msg = fmt.Sprintf("session %q still has unrecognized state %q after %s; reconciler continues to skip it — operator or pack recovery required", name, state, age)
-		}
-		rec.Record(events.Event{
-			Type:      events.SessionUnknownState,
-			Ts:        now,
-			Actor:     "gc",
-			Subject:   info.ID,
-			Message:   msg,
-			SessionID: info.ID,
-			Payload:   api.SessionUnknownStatePayloadJSON(info.ID, name, state, firstSeen, escalated),
-		})
+		rec.Record(sessionUnknownStateEvent(info, now, firstSeen, escalated))
 	}
 
 	firstSeenRaw := strings.TrimSpace(info.UnknownStateFirstSeen)
@@ -5376,6 +5408,28 @@ func emitSessionUnknownStateDiagnostic(
 	setMarker(unknownStateEscalatedKey, now.Format(time.RFC3339))
 	snapshot.ApplyOpenInfoPatch(info.ID, fold)
 	return fold
+}
+
+// sessionUnknownStateEvent is the session.unknown_state event for info, seen
+// at now with the raw state first seen at firstSeen. The legacy diagnostic
+// and the v2 session key both record it.
+func sessionUnknownStateEvent(info sessionpkg.Info, now, firstSeen time.Time, escalated bool) events.Event {
+	name := strings.TrimSpace(info.SessionNameMetadata)
+	state := info.MetadataState
+	msg := fmt.Sprintf("session %q has unrecognized state %q; reconciler is skipping it (forward-compatible rollback)", name, state)
+	if escalated {
+		age := now.Sub(firstSeen).Round(time.Second)
+		msg = fmt.Sprintf("session %q still has unrecognized state %q after %s; reconciler continues to skip it — operator or pack recovery required", name, state, age)
+	}
+	return events.Event{
+		Type:      events.SessionUnknownState,
+		Ts:        now,
+		Actor:     "gc",
+		Subject:   info.ID,
+		Message:   msg,
+		SessionID: info.ID,
+		Payload:   api.SessionUnknownStatePayloadJSON(info.ID, name, state, firstSeen, escalated),
+	}
 }
 
 // clearSessionUnknownStateMarkers removes the unknown-state throttle markers

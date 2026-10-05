@@ -210,6 +210,52 @@ func TestObservationCache_OwnerlessRuntimeVisibleByName(t *testing.T) {
 	}
 }
 
+// Kills: owner fields read as last written (Appendix C gap 1). Get serves
+// Incarnation, Owner and InstanceToken only while Listed reads Yes and the
+// pass that listed the name also enriched it: not after a pass that listed
+// it without enrichment, not once stale, and not after a provider swap.
+func TestObservationCache_OwnerGatedOnFreshPrimedListedIncarnation(t *testing.T) {
+	owned := func(incarnation string) map[string]InventoryAttrs {
+		a := liveAttrs(incarnation)
+		a.OwnerState, a.OwnerID, a.InstanceToken = OwnerSession, "gc-42", "tok"
+		return map[string]InventoryAttrs{"gc-a": a}
+	}
+	wantOwner := func(t *testing.T, c *ObservationCache, what string, trusted bool) {
+		t.Helper()
+		got := getObs(t, c, "gc-a")
+		has := got.OwnerState == OwnerSession && got.Owner.SessionID == "gc-42" && got.InstanceToken == "tok" && got.Incarnation == "i1"
+		cleared := got.OwnerState == OwnerUnknown && got.Owner.SessionID == "" && got.InstanceToken == "" && got.Incarnation == ""
+		if (trusted && !has) || (!trusted && !cleared) {
+			t.Fatalf("%s: owner = (%v, %q, token %q, incarnation %q), trusted=%v", what, got.OwnerState, got.Owner.SessionID, got.InstanceToken, got.Incarnation, trusted)
+		}
+	}
+
+	t.Run("listed without enrichment", func(t *testing.T) {
+		c, clk := newTestObservationCache()
+		c.PublishInventory(obsPass(clk, 1, 1, completeBackend("", "gc-a")), owned("i1"))
+		wantOwner(t, c, "enriched pass", true)
+		clk.Advance(15 * time.Second)
+		c.PublishInventory(obsPass(clk, 2, 1, completeBackend("", "gc-a")), nil)
+		wantOwner(t, c, "unenriched pass", false)
+		if c.Snapshot().ByName["gc-a"].Owner.SessionID != "gc-42" {
+			t.Fatal("the stored owner should stay underneath; only reads are gated")
+		}
+	})
+	t.Run("stale", func(t *testing.T) {
+		c, clk := newTestObservationCache()
+		c.PublishInventory(obsPass(clk, 1, 1, completeBackend("", "gc-a")), owned("i1"))
+		clk.Advance(obsTestMaxAge + time.Second)
+		wantOwner(t, c, "stale", false)
+	})
+	t.Run("provider swapped", func(t *testing.T) {
+		c, clk := newTestObservationCache()
+		c.PublishInventory(obsPass(clk, 1, 1, completeBackend("", "gc-a")), owned("i1"))
+		clk.Advance(15 * time.Second)
+		c.PublishInventory(obsPass(clk, 2, 2, partialSingle("gc-a")), owned("i1"))
+		wantOwner(t, c, "unprimed after the swap", false)
+	})
+}
+
 // Kills: facts served before a backend's first complete pass (C4.5 item 4).
 func TestObservationCache_UnprimedIsUnknown(t *testing.T) {
 	c, clk := newTestObservationCache()
@@ -465,32 +511,32 @@ func TestObservationCache_SnapshotImmutableUnderConcurrentPublish(t *testing.T) 
 
 // Kills: serving a pass older than the caller's bound, or one whose merged
 // listing failed, to a legacy consumer instead of its live fallback.
-func TestObservationCache_FreshInventoryRejectsStaleAndFailed(t *testing.T) {
+func TestObservationCache_FreshSnapshotRejectsStaleAndFailed(t *testing.T) {
 	c, clk := newTestObservationCache()
-	if _, ok := c.FreshInventory(obsTestMaxAge); ok {
-		t.Fatal("FreshInventory before any pass")
+	if _, ok := c.FreshSnapshot(obsTestMaxAge); ok {
+		t.Fatal("FreshSnapshot before any pass")
 	}
 	pass := obsPass(clk, 1, 1, completeBackend("", "gc-a"))
 	pass.MergedNames = []string{"gc-a"}
 	c.PublishInventory(pass, nil)
-	if got, ok := c.FreshInventory(obsTestMaxAge); !ok || got.Seq != 1 || !reflect.DeepEqual(got.MergedNames, []string{"gc-a"}) {
-		t.Fatalf("FreshInventory = (%+v, %v), want pass 1", got, ok)
+	if got, ok := c.FreshSnapshot(obsTestMaxAge); !ok || got.Inventory.Seq != 1 || !reflect.DeepEqual(got.Inventory.MergedNames, []string{"gc-a"}) {
+		t.Fatalf("FreshSnapshot = (%+v, %v), want pass 1", got, ok)
 	}
 	clk.Advance(obsTestMaxAge + time.Second)
-	if _, ok := c.FreshInventory(obsTestMaxAge); ok {
-		t.Fatal("FreshInventory served a pass older than maxAge")
+	if _, ok := c.FreshSnapshot(obsTestMaxAge); ok {
+		t.Fatal("FreshSnapshot served a pass older than maxAge")
 	}
 
 	partial := obsPass(clk, 2, 1, partialSingle("gc-a"))
 	partial.MergedNames, partial.MergedErr = []string{"gc-a"}, &runtime.PartialListError{Err: errors.New("acp down")}
 	c.PublishInventory(partial, nil)
-	if _, ok := c.FreshInventory(obsTestMaxAge); !ok {
-		t.Fatal("FreshInventory rejected a partial pass; legacy consumers use its visible names")
+	if _, ok := c.FreshSnapshot(obsTestMaxAge); !ok {
+		t.Fatal("FreshSnapshot rejected a partial pass; legacy consumers use its visible names")
 	}
 	failed := obsPass(clk, 3, 1, failedSingle())
 	failed.MergedErr = errors.New("list-sessions timed out")
 	c.PublishInventory(failed, nil)
-	if _, ok := c.FreshInventory(obsTestMaxAge); ok {
-		t.Fatal("FreshInventory served a failed pass")
+	if _, ok := c.FreshSnapshot(obsTestMaxAge); ok {
+		t.Fatal("FreshSnapshot served a failed pass")
 	}
 }

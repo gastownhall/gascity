@@ -321,7 +321,7 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 			Store:               storeNameBdStore,
 			NativeStoreEligible: false,
 			PreflightGate:       nativeHooksGate,
-			PreflightReason:     "bd hooks are installed; remove .beads/hooks/on_create,on_update,on_close after confirming controller cache events cover this deployment",
+			PreflightReason:     "bd hooks are installed and the native store would not run them; remove .beads/hooks/on_create,on_update,on_close once nothing depends on them firing for every write",
 		}
 		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
 		return opts.openBdFallback(provider, diag)
@@ -566,9 +566,13 @@ func diagnosticFromPreflight(result contract.PreflightResult) BeadsDiagnostic {
 
 // scopeHasExecutableBdHooks reports whether any of the standard bd hooks
 // (on_create, on_update, on_close) are executable and NOT installed by gc.
-// GC's own stamped forwarder hooks are exempt: the controller-cache event
-// path already covers bead events for gc's own writes, and bd-CLI operations
-// (e.g., agent writes via bd close) still fire those hooks for autoclose.
+// The native store writes in-process and never runs bd's hook scripts, so a
+// foreign hook would silently miss every write gc makes. GC's own stamped
+// forwarder hooks are exempt because installBeadHooks deletes them
+// (cmd/gc/hooks.go); nothing depends on them. Their removal means a write
+// that emits no gc event, such as an agent's `bd close`, now reaches the
+// controller only when a cache reconcile scan notices it: the controller's
+// cache events cover gc's own writes, not other writers'.
 func scopeHasExecutableBdHooks(scopeRoot string) bool {
 	for _, name := range []string{"on_create", "on_update", "on_close"} {
 		path := filepath.Join(scopeRoot, ".beads", "hooks", name)

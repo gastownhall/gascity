@@ -2,14 +2,52 @@ load("@rules_go//go:def.bzl", "go_test")
 
 # gazelle:build_tags integration
 
+# bead_id_test.go and dolt_config_timeout_test.go carry no //go:build tag, so
+# under the build_tags directive above gazelle would otherwise fold them into
+# integration_test's srcs alongside every integration-tagged file. Excluding
+# them here hands them to the unsharded go_test below instead, so
+# integration_test's shard_count only spreads integration-tagged work.
+# bead_id_helpers_test.go is deliberately NOT excluded: helpers_test.go
+# (integration-tagged) calls parseBeadID, so that file stays reachable from
+# both go_test targets below, same as testenv_import_test.go.
+# gazelle:exclude bead_id_test.go
+# gazelle:exclude dolt_config_timeout_test.go
+
+# keep
+go_test(
+    name = "integration_unsharded_test",
+    srcs = [
+        "bead_id_helpers_test.go",
+        "bead_id_test.go",
+        "dolt_config_timeout_test.go",
+        "testenv_import_test.go",
+    ],
+    # bead_id_test.go reads ../agents/lib/bead-id.sh and ../agents/*.sh;
+    # dolt_config_timeout_test.go parses dolt_config_test.go as a text
+    # fixture (it is not a source dep). //:repo_source_tree covers the
+    # former, the glob covers the latter.
+    data = glob(
+        ["*.go"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:repo_source_tree",
+    ],
+    tags = [
+        "external",
+        "requires-network",
+    ],
+    deps = [
+        "//internal/testenv",
+    ],
+)
+
 go_test(
     name = "integration_test",
     srcs = [
         "bdstore_batch_delete_test.go",
         "bdstore_test.go",
-        "bead_id_test.go",
+        "bead_id_helpers_test.go",
         "dolt_config_test.go",
-        "dolt_config_timeout_test.go",
         "dolt_persistence_test.go",
         "e2e_comm_test.go",
         "e2e_config_test.go",
@@ -37,6 +75,7 @@ go_test(
         "gastown_shutdown_test.go",
         "gastown_sling_test.go",
         "gastown_witness_test.go",
+        "gc_live_contract_store_conflict_test.go",
         "gc_live_contract_test.go",
         "graph_dispatch_harness_test.go",
         "graph_dispatch_test.go",
@@ -58,18 +97,33 @@ go_test(
         ["**"],
         exclude = ["BUILD.bazel"],
     ) + [
-        "//cmd/gc",
-        "//examples/bd",
-        "//test/integration/filebdshim",
         "//:go.mod",
         "//:repo_source_tree",
-        # Pinned prebuilt release binaries (see MODULE.bazel): hermetic bd and
-        # dolt for the dolt-backed integration shapes, same versions the
-        # go-test CI installs via install-bd-archive.sh / install-dolt-archive.sh.
-        "@bd_bin_v1_3_1//:bd",
-        "@dolt_bin_v2_1_7//:dolt-linux-amd64/bin/dolt",
+    ] + select({
+        # Only the integration-tagged tests exec these. The untagged tests that
+        # also build in the default configuration (bead_id_test.go,
+        # dolt_config_timeout_test.go) read sources only, so `bazel test //...`
+        # neither links nor stages them; the gc links are 207 MB each.
+        ":gotags_integration": [
+            "//cmd/gc",
+            "//cmd/gc:gc_drift_new",
+            "//cmd/gc:gc_drift_old",
+            "//examples/bd",
+            "//test/integration/filebdshim",
+            # Pinned prebuilt release binaries (see MODULE.bazel): hermetic bd
+            # and dolt for the dolt-backed integration shapes, same versions the
+            # go-test CI installs via install-bd-archive.sh /
+            # install-dolt-archive.sh.
+            "@bd_bin_v1_3_1//:bd",
+            "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
+        ],
+        "//conditions:default": [],
+    }),
+    shard_count = 14,
+    tags = [
+        "external",
+        "requires-network",
     ],
-    shard_count = 4,
     deps = [
         "//internal/bazeltest",
         "//internal/beads",
@@ -100,6 +154,19 @@ go_test(
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],
+)
+
+# The shard placement guard (scripts/integration_shards_test.go) reads this
+# file's srcs and shard_count.
+exports_files(
+    ["BUILD.bazel"],
+    visibility = ["//scripts:__pkg__"],
+)
+
+# The integration lane builds with --define=gotags=integration (bazel-test.yml).
+config_setting(
+    name = "gotags_integration",
+    define_values = {"gotags": "integration"},
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

@@ -338,7 +338,21 @@ func (p *Provider) IsDeadRuntimeSession(name string) (bool, error) {
 }
 
 // IsAttached reports whether a user terminal is connected to the named session.
+//
+// Served from the same short-lived fleet snapshot as IsRunning (one
+// `tmux list-panes -a`), not a `display-message` fork per session: a reconcile
+// pass probes attachment for every session it tracks, so the per-session form
+// cost one tmux process per session per pass. A session missing from the
+// snapshot falls back to the direct read.
+//
+// Only this boolean read is served from the snapshot. [Provider.IsAttachedWithError],
+// the error-aware probe that destructive-action gates use, deliberately keeps
+// its direct per-session `display-message` so those gates never act on a
+// cached answer.
 func (p *Provider) IsAttached(name string) bool {
+	if attached, ok := p.cache.SessionAttached(name); ok {
+		return attached
+	}
 	return p.tm.IsSessionAttached(name)
 }
 
@@ -791,8 +805,18 @@ func (p *Provider) RuntimeInventory(ctx context.Context) (map[string]runtime.Inv
 }
 
 // GetLastActivity returns the time of the last I/O activity in the named
-// session. Delegates to [Tmux.GetSessionActivity].
+// session.
+//
+// The raw timestamp comes from the same fleet snapshot as IsRunning rather than
+// a `list-windows` fork per session, and the poke discount
+// ([Tmux.discountedActivity]) is applied to it exactly as
+// [Tmux.GetSessionActivity] would. The snapshot carries max(#{window_activity})
+// per session — NOT #{session_activity}, which does not advance on detached
+// pane I/O. A session missing from the snapshot falls back to the direct read.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
+	if activity, ok := p.cache.SessionActivity(name); ok {
+		return p.tm.discountedActivity(name, activity), nil
+	}
 	return p.tm.GetSessionActivity(name)
 }
 
@@ -1314,7 +1338,7 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 	stderr := newCommandOutputTail(setupCommandOutputLimit)
 	c.Stdout = mon.Writer(stdout)
 	c.Stderr = mon.Writer(stderr)
-	// Cooperative cancellation (execgrace.Apply): deadline expiry interrupts
+	// Cooperative cancellation (execgrace.Apply): deadline expiry sends SIGTERM to
 	// the command's process group first so shell rollback traps — e.g.
 	// worktree-setup.sh restoring content it staged aside — run before the
 	// forced kill. Go's default context-cancel is SIGKILL, which is

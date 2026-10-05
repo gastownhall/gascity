@@ -233,22 +233,52 @@ func buildExpectedNewEnd(st storeState, in snapshotInputs, postPreserveFresh map
 	// deps under depsComplete=true.
 	exp.depsComplete = expectedNextDepsComplete(st, in, postPreserveFresh)
 	exp.readyLost = expectedReadyLost(st, exp.beads)
-	exp.writeSeq = expectedWriteSeq(st, in, exp)
+	exp.writeSeq = expectedWriteSeq(st)
+	exp.writeAtIDs = keySet(exp.writeSeq)
+	exp.deletedSeq = expectedDeletedSeq(st, in, exp)
+	exp.retainedIDs = expectedRetainedIDs(in, exp)
 	return exp
 }
 
-// expectedWriteSeq re-derives the write-revision map from the input and the
-// expected end maps. The merge never mints or rewrites a write revision; it
-// drops one only together with the rest of its row, when it evicts the row or
-// collects the orphan's fences, and a revision past the snapshot protects its
-// id. So an input entry survives exactly when it is past the snapshot or its
-// id still has a row or any fence/deps entry at the end. The frozen branches
-// predate writeSeq, so the reference end state cannot supply it.
-func expectedWriteSeq(st storeState, in snapshotInputs, exp mergeEndState) map[string]uint64 {
+// expectedWriteSeq re-derives the write-revision map from the input. The merge
+// never mints, rewrites or drops a write revision: an evicted or collected
+// row's revision is retained, and only a retention older than
+// recentWriteVerifyWindow is pruned, which no seeded state carries. The frozen
+// branches predate writeSeq, so the reference end state cannot supply it.
+func expectedWriteSeq(st storeState) map[string]uint64 {
 	out := map[string]uint64{}
 	for id, seq := range st.writeSeq {
-		if _, ok := exp.beads[id]; ok || stateHasAnyOrphanEntry(exp, id) || seq > in.startSeq {
+		out[id] = seq
+	}
+	return out
+}
+
+// expectedDeletedSeq re-derives the tombstones from the input: like a write
+// revision, a tombstone is retained when its id has no row, and only an
+// absorbed row sheds it. A tombstone past the snapshot fences its id, so the
+// id keeps any row it had. The frozen branches collect stale tombstones, so
+// the reference end state cannot supply them.
+func expectedDeletedSeq(st storeState, in snapshotInputs, exp mergeEndState) map[string]uint64 {
+	out := map[string]uint64{}
+	for id, seq := range st.deletedSeq {
+		if _, held := exp.beads[id]; !held || seq > in.startSeq {
 			out[id] = seq
+		}
+	}
+	return out
+}
+
+// expectedRetainedIDs is every id the sweep visits that carries a write
+// fence at the end: no row on either side, and a write revision or tombstone.
+func expectedRetainedIDs(in snapshotInputs, exp mergeEndState) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, fences := range []map[string]uint64{exp.writeSeq, exp.deletedSeq} {
+		for id := range fences {
+			_, held := exp.beads[id]
+			_, fresh := in.freshByID[id]
+			if !held && !fresh {
+				out[id] = struct{}{}
+			}
 		}
 	}
 	return out
@@ -443,12 +473,10 @@ func beadsIdentical(a, b Bead) bool {
 
 func assertNewEndInvariants(t *testing.T, name string, end mergeEndState, in snapshotInputs) {
 	t.Helper()
-	// INV1 (no leaks): every orphan id (no bead) carrying any fence/deps entry
-	// must have a live protector — a fence > startSeq or a recent localAt.
+	// INV1 (no leaks): every orphan id (no bead) carrying a non-write
+	// fence/deps entry must have a live protector — a fence > startSeq or a
+	// recent localAt — and every one carrying a write fence a retention stamp.
 	orphanIDs := map[string]struct{}{}
-	for id := range end.deletedSeq {
-		orphanIDs[id] = struct{}{}
-	}
 	for id := range end.dirty {
 		orphanIDs[id] = struct{}{}
 	}
@@ -459,9 +487,6 @@ func assertNewEndInvariants(t *testing.T, name string, end mergeEndState, in sna
 		orphanIDs[id] = struct{}{}
 	}
 	for id := range end.deps {
-		orphanIDs[id] = struct{}{}
-	}
-	for id := range end.writeSeq {
 		orphanIDs[id] = struct{}{}
 	}
 	for id := range orphanIDs {
@@ -475,6 +500,15 @@ func assertNewEndInvariants(t *testing.T, name string, end mergeEndState, in sna
 		if !protected {
 			t.Fatalf("%s: INV1 leak — orphan %q retained a fence/deps entry with no protector (deletedSeq=%d beadSeq=%d localAt=%v startSeq=%d)",
 				name, id, end.deletedSeq[id], end.beadSeq[id], end.localBeadAt[id], in.startSeq)
+		}
+	}
+	for _, fences := range []map[string]uint64{end.writeSeq, end.deletedSeq} {
+		for id := range fences {
+			_, hasBead := end.beads[id]
+			_, fresh := in.freshByID[id]
+			if _, retained := end.retainedIDs[id]; !hasBead && !fresh && !retained {
+				t.Fatalf("%s: INV1 leak — orphan %q kept a write fence with no retention stamp", name, id)
+			}
 		}
 	}
 	// INV2 (V1): deletedSeq present ⇒ beads absent.

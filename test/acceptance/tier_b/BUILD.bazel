@@ -19,7 +19,7 @@ go_test(
         # dolt for the dolt-backed acceptance shapes, same versions the go-test
         # CI installs via install-bd-archive.sh / install-dolt-archive.sh.
         "@bd_bin_v1_3_1//:bd",
-        "@dolt_bin_v2_1_7//:dolt-linux-amd64/bin/dolt",
+        "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
     ],
     deps = [
         "//internal/beads",

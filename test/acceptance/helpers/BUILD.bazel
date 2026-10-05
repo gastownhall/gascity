@@ -24,6 +24,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//internal/bazeltest",
+        "//internal/testutil",
         "//test/toolhome",
         "@com_github_steveyegge_beads//schema",
         "@org_golang_x_mod//semver",

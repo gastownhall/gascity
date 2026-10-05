@@ -528,6 +528,11 @@ test-pack-registry-live:
 	$(TEST_ENV) CGO_ENABLED=0 GC_TEST_GASCITY_PACKS_REGISTRY="$${GC_TEST_GASCITY_PACKS_REGISTRY}" go test ./cmd/gc -run '^TestPackRegistryLiveGascityPacksCatalog$$' -count=1
 	$(TEST_ENV) CGO_ENABLED=0 GC_TEST_GASCITY_PACKS_REGISTRY="$${GC_TEST_GASCITY_PACKS_REGISTRY}" go test -tags acceptance_a -timeout 10m ./test/acceptance -run '^TestPackRegistryLiveImportsEveryCatalogPack$$' -count=1
 
+## check-embedded-pins: verify the bundled pack pin and bd/dolt pins are the latest releases
+.PHONY: check-embedded-pins
+check-embedded-pins:
+	scripts/check-embedded-pins
+
 ## update-bundled-gastown-pack: pin the gastown module/constants/example to the latest registry release
 update-bundled-gastown-pack:
 	scripts/update-bundled-gastown-pack
@@ -1154,8 +1159,10 @@ help:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## //' | column -t -s ':'
 
 ## bazel-sync: regenerate bazel BUILD files (gazelle) and the hermetic repo
-## source tree used by whole-repo scan guards. Run after adding packages.
+## source tree used by whole-repo scan guards, then apply the hermeticity
+## ledger's go_test tags (test/bazel-hermeticity.toml). Run after adding packages.
 .PHONY: bazel-sync
 bazel-sync:
 	bazel run //:gazelle
 	python3 tools/bazel/repo_tree.py
+	python3 tools/bazel/hermetic_tags.py

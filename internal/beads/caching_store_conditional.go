@@ -43,9 +43,10 @@ import (
 // wins. Afterwards Get, the dirty-row overlay, reconcile's merge, a Live list,
 // Prime's concurrent-mutation path and PrimeActive fence on the write's
 // writeSeq as well as its beadSeq, so none of them can install a row read
-// before the write. Events are not fenced on writeSeq: a conflicting event is
-// verified only while beadSeq is present or the local write is under five
-// seconds old (see CacheRevision for the remaining known limits).
+// before the write. An event with no cached row to merge onto is fenced on
+// writeSeq and deletedSeq, and a conflicting event is verified against the
+// backing while beadSeq is present or the local write is younger than
+// recentWriteVerifyWindow (see CacheRevision for the remaining known limits).
 // The refetched row feeds the change notification verbatim.
 var (
 	_ ConditionalWriter                = (*CachingStore)(nil)
@@ -78,7 +79,7 @@ func (h *cachingAtomicConditionalCloser) CloseWithMetadataIfMatch(id string, exp
 		(!ev.cached || ev.revision == expectedRevision) {
 		h.cache.installAfterConditionalWrite(id, ev, closed)
 	}
-	h.cache.notifyChange("bead.closed", closed)
+	h.cache.notifyChange(ChangeLocal, "bead.closed", closed)
 	return closed, nil
 }
 
@@ -204,7 +205,7 @@ func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts Upd
 		c.recordProblem("refresh bead after conditional update", fmt.Errorf("%s: %w", id, err))
 		return nil
 	}
-	c.notifyChange("bead.updated", fresh)
+	c.notifyChange(ChangeLocal, "bead.updated", fresh)
 	return nil
 }
 
@@ -237,7 +238,7 @@ func (c *CachingStore) CloseIfMatch(id string, expectedRevision int64) error {
 	// The close is proven committed; forcing the status onto the event
 	// payload states that fact without installing anything in the cache.
 	setBeadStatus(&fresh, "closed")
-	c.notifyChange("bead.closed", fresh)
+	c.notifyChange(ChangeLocal, "bead.closed", fresh)
 	return nil
 }
 
@@ -263,7 +264,7 @@ func (c *CachingStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	if haveDeleted {
-		c.notifyChange("bead.deleted", deleted)
+		c.notifyChange(ChangeLocal, "bead.deleted", deleted)
 	}
 	return nil
 }
@@ -303,7 +304,7 @@ func (c *CachingStore) CompareAndSetMetadataKey(id, key, expected, next string) 
 		c.recordProblem("refresh bead after conditional metadata swap", fmt.Errorf("%s: %w", id, err))
 		return true, nil
 	}
-	c.notifyChange("bead.updated", fresh)
+	c.notifyChange(ChangeLocal, "bead.updated", fresh)
 	return true, nil
 }
 
@@ -336,13 +337,15 @@ func (c *CachingStore) applyConditionalWriteFailure(id string, err error) {
 
 // conditionalEviction records what evictForConditionalWrite removed. seq is
 // the eviction's mutation sequence: the write's WriteRev and the fence for
-// installing a post-write row. prior is the newest fence id carried before the
+// installing a post-write row, and scanGen the scan generation then, which
+// fences it against scan merges. prior is the newest fence id carried before the
 // eviction, against which a row obtained before it is checked. deps are the
 // row's dependencies, which no conditional verb changes; the install carries
 // them when the post-write row has no dependency fields of its own. cached,
 // dirty and revision describe the evicted row.
 type conditionalEviction struct {
 	seq      uint64
+	scanGen  uint64
 	prior    uint64
 	deps     []Dep
 	hadDeps  bool
@@ -378,6 +381,7 @@ func (c *CachingStore) evictForConditionalWrite(id string) conditionalEviction {
 	row, cached := c.beads[id]
 	_, dirty := c.dirty[id]
 	ev := conditionalEviction{
+		scanGen:  c.scanGen,
 		prior:    max(c.beadSeq[id], c.deletedSeq[id], c.writeSeq[id]),
 		deps:     cloneDeps(deps),
 		hadDeps:  hadDeps,
@@ -447,16 +451,21 @@ func (c *CachingStore) refetchAfterConditionalWrite(id string, ev conditionalEvi
 // change while the row was absent could not invalidate it, so readiness
 // answers from the dependency predicate, as after any refetch of an evicted
 // row. It
-// declines when the cache is not serving or a mutation newer than the eviction
-// touched id, and it keeps the eviction's beadSeq fence so no older scan,
-// event or refetch can overwrite the row afterwards.
+// declines when the cache is not serving, a mutation newer than the eviction
+// touched id, or a scan merged since the eviction (scanRacedLocked, which
+// leaves id dirty unless the scan's row agrees with row), and it keeps the
+// eviction's beadSeq fence so no older scan, event or refetch can overwrite
+// the row afterwards.
 func (c *CachingStore) installAfterConditionalWrite(id string, ev conditionalEviction, row Bead) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if (c.state != cacheLive && c.state != cachePartial) || c.refetchFencedLocked(id, ev.seq) {
+	if (c.state != cacheLive && c.state != cachePartial) || c.refetchFencedLocked(id, ev.seq) ||
+		c.scanRacedLocked(id, ev.scanGen, row, true) {
 		return
 	}
-	opts := absorbOpts{depsMode: depsFromFields, seqMode: seqKeep, clearDirty: true}
+	// A row that omits its edges leaves the evicted, possibly pre-write, edge
+	// set standing, so it does not answer a raced write's mark.
+	opts := absorbOpts{depsMode: depsFromFields, seqMode: seqKeep, clearDirty: !ev.dirty || c.rowAnswersEdges(row)}
 	if ev.hadDeps && !beadCarriesDependencyFields(row) {
 		opts.depsMode = depsExplicit
 		opts.deps = ev.deps

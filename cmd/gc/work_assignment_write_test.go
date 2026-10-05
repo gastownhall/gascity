@@ -8,10 +8,11 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// recordingWriteWorkStore records every Update/SetMetadata call the
-// work-assignment WRITE façade emits while delegating to a MemStore for real
-// effects. It proves the façade emits byte-identical bead writes to the raw ops
-// it replaces (same UpdateOpts pointers/values, same metadata patches).
+// recordingWriteWorkStore records every Update/UpdateIfMatch/SetMetadata call
+// the work-assignment WRITE façade emits while delegating reads to a MemStore.
+// It proves the façade writes the same fields as the raw ops it replaces (same
+// UpdateOpts pointers/values, same metadata patches), and that a release
+// computed from a snapshot reaches the store as a fenced write.
 type recordingWriteWorkStore struct {
 	*beads.MemStore
 	listQueries []beads.ListQuery
@@ -22,6 +23,9 @@ type recordingWriteWorkStore struct {
 type recordedUpdate struct {
 	id   string
 	opts beads.UpdateOpts
+	// fenced is set for an UpdateIfMatch, which carries revision.
+	fenced   bool
+	revision int64
 }
 
 type recordedMetaSet struct {
@@ -49,6 +53,13 @@ func (s *recordingWriteWorkStore) Update(id string, opts beads.UpdateOpts) error
 	return nil
 }
 
+// UpdateIfMatch records the fenced write, with the revision it is fenced on,
+// and reports success without delegating, exactly as Update does.
+func (s *recordingWriteWorkStore) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	s.updates = append(s.updates, recordedUpdate{id: id, opts: opts, fenced: true, revision: expectedRevision})
+	return nil
+}
+
 func (s *recordingWriteWorkStore) SetMetadata(id, key, value string) error {
 	s.metaSets = append(s.metaSets, recordedMetaSet{id: id, key: key, value: value})
 	return nil
@@ -58,12 +69,16 @@ func (s *recordingWriteWorkStore) SetMetadata(id, key, value string) error {
 // the override stops satisfying the interface, MemStore's implementation is
 // promoted in its place, and every assert here silently reroutes onto tier 1
 // while still reporting green.
-var _ beads.ConditionalAssignmentReleaser = (*recordingWriteWorkStore)(nil)
+var (
+	_ beads.ConditionalAssignmentReleaser = (*recordingWriteWorkStore)(nil)
+	_ beads.ConditionalWriter             = (*recordingWriteWorkStore)(nil)
+)
 
 // ReleaseIfCurrent reports the conditional verb as unsupported so these tests
-// pin the UNCONDITIONAL fallback write — the shape that must stay byte-identical
-// to the raw release ops. The conditional fast path emits a different (metadata-
-// only) write by design and is covered in work_assignment_release_race_test.go.
+// pin the tier-2 fallback write — the fields must match the raw release ops,
+// and the write must be fenced. The conditional fast path emits a different
+// (metadata-only) write by design and is covered in
+// work_assignment_release_race_test.go.
 // Without this override the embedded MemStore would promote its own
 // implementation and silently move every assert onto the other path.
 func (s *recordingWriteWorkStore) ReleaseIfCurrent(_, _ string) (bool, error) {
@@ -71,11 +86,12 @@ func (s *recordingWriteWorkStore) ReleaseIfCurrent(_, _ string) (bool, error) {
 }
 
 // seedWriteWorkBead puts the bead the façade is about to release into the
-// backing store with live state matching the caller's snapshot. The release path
-// re-reads the bead immediately before writing (the dr-huhn no-clobber guard), so
-// a snapshot with no bead behind it is correctly refused. Seeding goes straight to
+// backing store with live state matching the caller's snapshot, and returns the
+// seeded row. The release path re-reads the bead immediately before writing and
+// fences the write on that read's revision (the dr-huhn no-clobber guard), so a
+// snapshot with no bead behind it is correctly refused. Seeding goes straight to
 // the MemStore because the recorder's own Update deliberately does not delegate.
-func seedWriteWorkBead(t *testing.T, rec *recordingWriteWorkStore, item beads.Bead) {
+func seedWriteWorkBead(t *testing.T, rec *recordingWriteWorkStore, item beads.Bead) beads.Bead {
 	t.Helper()
 	rec.HonorExplicitIDs = true
 	if _, err := rec.Create(beads.Bead{ID: item.ID, Title: "work", Metadata: item.Metadata}); err != nil {
@@ -95,6 +111,15 @@ func seedWriteWorkBead(t *testing.T, rec *recordingWriteWorkStore, item beads.Be
 	if got.Status != item.Status || got.Assignee != item.Assignee {
 		t.Fatalf("seed(%s) failed: status=%q assignee=%q, want %q/%q",
 			item.ID, got.Status, got.Assignee, item.Status, item.Assignee)
+	}
+	return got
+}
+
+// assertFencedOn fails unless got is a fenced write on seeded's revision.
+func assertFencedOn(t *testing.T, got recordedUpdate, seeded beads.Bead) {
+	t.Helper()
+	if !got.fenced || got.revision != seeded.Revision {
+		t.Fatalf("release write fenced=%v revision=%d, want an UpdateIfMatch on the re-read revision %d", got.fenced, got.revision, seeded.Revision)
 	}
 }
 
@@ -122,22 +147,23 @@ func TestWorkAssignmentOpenAssignedToBasic_ByteIdenticalQuery(t *testing.T) {
 }
 
 // TestWorkAssignmentReleaseWorkBead_OpenStaysOpen asserts that releasing an
-// already-open bead emits Update{Assignee:"", Metadata:<clearedAffinity>} with
-// NO Status change (status reset is only for in_progress), byte-identical to the
-// raw release op.
+// already-open bead writes {Assignee:"", Metadata:<clearedAffinity>} with NO
+// Status change (status reset is only for in_progress), the raw release op's
+// fields, as one write fenced on the re-read revision.
 func TestWorkAssignmentReleaseWorkBead_OpenStaysOpen(t *testing.T) {
 	rec := newRecordingWriteWorkStore()
 	wa := workAssignmentForStore(beads.WorkStore{Store: rec})
 
 	item := beads.Bead{ID: "w-open", Status: "open", Assignee: "agent-1"}
-	seedWriteWorkBead(t, rec, item)
+	seeded := seedWriteWorkBead(t, rec, item)
 	if err := wa.ReleaseWorkBead(item, ""); err != nil {
 		t.Fatalf("ReleaseWorkBead: %v", err)
 	}
 	if len(rec.updates) != 1 {
-		t.Fatalf("expected 1 Update, got %d: %#v", len(rec.updates), rec.updates)
+		t.Fatalf("expected 1 write, got %d: %#v", len(rec.updates), rec.updates)
 	}
 	got := rec.updates[0]
+	assertFencedOn(t, got, seeded)
 	if got.id != "w-open" {
 		t.Fatalf("Update id = %q, want w-open", got.id)
 	}
@@ -154,17 +180,22 @@ func TestWorkAssignmentReleaseWorkBead_OpenStaysOpen(t *testing.T) {
 }
 
 // TestWorkAssignmentReleaseWorkBead_InProgressResetsToOpen asserts an
-// in_progress bead is reset to open on release, byte-identical to the raw op.
+// in_progress bead is reset to open on release, as the raw op did, in a fenced
+// write.
 func TestWorkAssignmentReleaseWorkBead_InProgressResetsToOpen(t *testing.T) {
 	rec := newRecordingWriteWorkStore()
 	wa := workAssignmentForStore(beads.WorkStore{Store: rec})
 
 	item := beads.Bead{ID: "w-ip", Status: "in_progress", Assignee: "agent-1"}
-	seedWriteWorkBead(t, rec, item)
+	seeded := seedWriteWorkBead(t, rec, item)
 	if err := wa.ReleaseWorkBead(item, ""); err != nil {
 		t.Fatalf("ReleaseWorkBead: %v", err)
 	}
+	if len(rec.updates) != 1 {
+		t.Fatalf("expected 1 write, got %d: %#v", len(rec.updates), rec.updates)
+	}
 	got := rec.updates[0]
+	assertFencedOn(t, got, seeded)
 	if got.opts.Status == nil || *got.opts.Status != "open" {
 		t.Fatalf("Status = %v, want open", got.opts.Status)
 	}
@@ -175,17 +206,22 @@ func TestWorkAssignmentReleaseWorkBead_InProgressResetsToOpen(t *testing.T) {
 
 // TestWorkAssignmentReleaseWorkBead_RunTargetFallbackApplied asserts the
 // run_target fallback (used by the retire/unclaim path) is written only when the
-// bead has neither run_target nor routed_to, byte-identical to the raw op.
+// bead has neither run_target nor routed_to, as the raw op did, in the same
+// fenced write.
 func TestWorkAssignmentReleaseWorkBead_RunTargetFallbackApplied(t *testing.T) {
 	rec := newRecordingWriteWorkStore()
 	wa := workAssignmentForStore(beads.WorkStore{Store: rec})
 
 	item := beads.Bead{ID: "w-route", Status: "in_progress", Assignee: "agent-1"}
-	seedWriteWorkBead(t, rec, item)
+	seeded := seedWriteWorkBead(t, rec, item)
 	if err := wa.ReleaseWorkBead(item, "worker"); err != nil {
 		t.Fatalf("ReleaseWorkBead: %v", err)
 	}
+	if len(rec.updates) != 1 {
+		t.Fatalf("expected 1 write, got %d: %#v", len(rec.updates), rec.updates)
+	}
 	got := rec.updates[0]
+	assertFencedOn(t, got, seeded)
 	if got.opts.Metadata[beadmeta.RunTargetMetadataKey] != "worker" {
 		t.Fatalf("run_target fallback = %q, want worker", got.opts.Metadata[beadmeta.RunTargetMetadataKey])
 	}

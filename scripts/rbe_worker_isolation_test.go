@@ -3,6 +3,8 @@ package scripts_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -60,7 +62,8 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 				t.Errorf("checkout must set persist-credentials: false, got %v", step.With["persist-credentials"])
 			}
 		}
-		if strings.Contains(step.Run, rbeWorkerScript) {
+		// The worker-env measure step runs the script too, without a worker.
+		if strings.Contains(step.Run, rbeWorkerScript) && step.Env["WORKER_MODE"] != "measure" {
 			worker = true
 			// Default on; the repository variable RBE_ACTION_ISOLATION=0 is the
 			// rollback without a code change.
@@ -70,6 +73,25 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 			// canary: one run in RBE_ACTION_CANARY_EVERY tries isolation.
 			if got, want := step.Env["RBE_ACTION_CANARY_EVERY"], "${{ vars.RBE_ACTION_CANARY_EVERY || '4' }}"; got != want {
 				t.Errorf("worker step RBE_ACTION_CANARY_EVERY = %q, want %q", got, want)
+			}
+			// zstd fetches, off unless the repository variable says 1: merging
+			// changes nothing, and rollback is the variable.
+			if got, want := step.Env["RBE_WIRE_ZSTD"], "${{ vars.RBE_WIRE_ZSTD || '0' }}"; got != want {
+				t.Errorf("worker step RBE_WIRE_ZSTD = %q, want %q", got, want)
+			}
+			// The dedicated zread host; the worker refuses zstd without it.
+			if got, want := step.Env["RBE_WIRE_ZSTD_READ_URL"], "${{ vars.RBE_WIRE_ZSTD_READ_URL || '' }}"; got != want {
+				t.Errorf("worker step RBE_WIRE_ZSTD_READ_URL = %q, want %q", got, want)
+			}
+			// The OSS pool keeps the script's defaults (tier oss, :443) and its
+			// own certificate; the fork tier is rbe-fork-pool.yml's alone.
+			for _, k := range []string{"WORKER_TIER", "RBE_WEST_PORT"} {
+				if v, ok := step.Env[k]; ok {
+					t.Errorf("worker step sets %s=%q; the OSS pool runs the defaults", k, v)
+				}
+			}
+			if got, want := step.Env["RBE_WORKER_TLS_KEY"], "${{ secrets.RBE_WORKER_TLS_KEY }}"; got != want {
+				t.Errorf("worker step RBE_WORKER_TLS_KEY = %q, want %q", got, want)
 			}
 		}
 	}
@@ -135,7 +157,13 @@ func TestRBEWorkerScriptIsolationConfig(t *testing.T) {
 	for k, want := range map[string]string{
 		"WORK_ROOT": "$WORK_ROOT", "MASK_ROOT": "$MASK_ROOT", "SLOT_UID0": "$SLOT_UID0", "SLOT_COUNT": "$slots",
 		"BACKSTOP_S": "1260", "MAX_TIMEOUT_S": "1200", "HOME_DIR": "/var/lib/rbe-action/home",
-		"NETNS": "0", "WORKER_JSON": "$ROOT/worker.json",
+		// Set by WORKER_TIER alone (TestRBEWorkerScriptForkTier): 0 for oss,
+		// 1 (loopback only) for fork.
+		"NETNS": "${NETNS:-0}", "WORKER_JSON": "$ROOT/worker.json",
+		// Never infra's privileged network namespace class (RBE_X_NETNS_ROOT=1,
+		// MAIN only): a no-op for this launcher copy until it is synced, then
+		// the pin.
+		"NETNS_ROOT": "0",
 		// The launcher refuses actions while this chain is missing: it must name
 		// the table and chain the nft ruleset below creates.
 		"EGRESS_CHAIN": `"inet rbe_action output"`,
@@ -259,33 +287,47 @@ func TestRBEWorkerScriptSlotEgressRuleOrder(t *testing.T) {
 // With isolation off (the RBE_ACTION_ISOLATION=0 rollback) the script must
 // render exactly the worker.json it rendered before O1. The golden file is
 // origin/main's jq program before O1 (4d0e45d9eb^) rendered with the same
-// arguments; regenerate it only for an intended worker config change.
+// arguments; regenerate it only for an intended worker config change. One
+// since: REMOTE_CAS instance "oss", not "" (rbe-west FU2 confines the worker
+// certificate to "oss"-only listeners); and both goldens advertise the
+// worker-env platform property (rbe_worker_env_test.go), here
+// rbeWorkerEnvSample.
+//
+// The same program renders the fork tier (WORKER_TIER=fork, rbe-fork-pool.yml),
+// always with isolation on: CAS instance oss-fork on :8444, no action cache
+// store, nothing uploaded. Its golden is that rendering with the script's own
+// isolation keys; the checks below hold whatever the golden says.
 func TestRBEWorkerJSONIsolationOffMatchesPreO1(t *testing.T) {
 	root := repoRoot(t)
-	script := readFile(t, root, rbeWorkerScript)
-	m := regexp.MustCompile(`(?s)--argjson isolation "\$isolation" '\n(.*?)' >"\$ROOT/worker.json"\n`).FindStringSubmatch(script)
-	if m == nil {
-		t.Fatalf("%s: no worker.json jq program", rbeWorkerScript)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "jq", "-n",
-		"--arg", "host", "grpcs://rbe-west.example.invalid:443",
-		"--arg", "root", "/home/runner/work/_temp/nl-worker",
-		"--arg", "store", "/home/runner/work/_temp/nl-worker",
-		"--arg", "name", "pool-worker-1",
-		"--argjson", "slots", "8",
-		"--argjson", "isolation", "{}",
-		m[1])
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("jq (needed by %s itself): %v\n%s", rbeWorkerScript, err, stderr.String())
-	}
-	golden, err := os.ReadFile(filepath.Join(root, "scripts", "testdata", "rbe-worker", "worker-isolation-off.golden.json"))
-	if err != nil {
-		t.Fatal(err)
+	prog, iso := workerJSONProgram(t, root)
+	// render runs the script's own jq program with render()'s arguments for a
+	// pool worker; extra adds those render() passes only when they differ from
+	// the program's defaults (--argjson zstd true). This is the test's one jq
+	// subprocess (the census's Medium owner), so the WireZstd subtest uses it too.
+	render := func(t *testing.T, tier, host, isolation string, extra ...string) []byte {
+		t.Helper()
+		args := []string{
+			"-n",
+			"--arg", "host", host,
+			"--arg", "root", "/home/runner/work/_temp/nl-worker",
+			"--arg", "store", "/home/runner/work/_temp/nl-worker",
+			"--arg", "name", "pool-worker-1",
+			"--argjson", "slots", "8",
+			"--arg", "tier", tier,
+			"--arg", "worker_env", rbeWorkerEnvSample,
+		}
+		args = append(args, extra...)
+		args = append(args, "--argjson", "isolation", isolation, prog)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "jq", args...)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("tier %s: jq (needed by %s itself): %v\n%s", tier, rbeWorkerScript, err, stderr.String())
+		}
+		return out
 	}
 	decode := func(b []byte) any {
 		d := json.NewDecoder(bytes.NewReader(b))
@@ -296,9 +338,241 @@ func TestRBEWorkerJSONIsolationOffMatchesPreO1(t *testing.T) {
 		}
 		return v
 	}
-	if got, want := decode(out), decode(golden); !reflect.DeepEqual(got, want) {
-		t.Errorf("worker.json with isolation='{}' differs from the pre-O1 rendering:\ngot:\n%s\nwant:\n%s", out, golden)
+	for _, c := range []struct {
+		tier, host, isolation, golden string
+	}{
+		// The OSS tier, isolation off: the pre-O1 worker.json, byte for byte
+		// in content.
+		{"oss", "grpcs://rbe-west.example.invalid:443", "{}", "worker-isolation-off.golden.json"},
+		{"fork", "grpcs://rbe-fork.example.invalid:8444", iso, "worker-fork.golden.json"},
+	} {
+		out := render(t, c.tier, c.host, c.isolation)
+		golden, err := os.ReadFile(filepath.Join(root, "scripts", "testdata", "rbe-worker", c.golden))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := decode(out), decode(golden); !reflect.DeepEqual(got, want) {
+			t.Errorf("tier %s: worker.json differs from %s:\ngot:\n%s\nwant:\n%s", c.tier, c.golden, out, golden)
+		}
+		if err := checkWorkerJSONAdvertises(out, rbeWorkerEnvSample); err != nil {
+			t.Errorf("tier %s: %v", c.tier, err)
+		}
+		if c.tier == "fork" {
+			for _, err := range checkForkWorkerJSON(out, c.host) {
+				t.Errorf("tier fork: %v", err)
+			}
+		}
+		for _, err := range checkNoDefaultInstance(out) {
+			t.Errorf("tier %s: %v", c.tier, err)
+		}
 	}
+
+	// RBE_WIRE_ZSTD=1, both tiers: fetches zstd (REMOTE_READ, the read-only
+	// side of a fast_slow), uploads identity (REMOTE_WRITE, false explicitly).
+	// No writable rbe-west listener accepts zstd, so no other remote store may
+	// compress. REMOTE_READ goes to RBE_WIRE_ZSTD_READ_URL, by default the
+	// worker's own endpoint, where rbe-west routes this certificate's
+	// ByteStream.Read to its read-only zstd process. Off, worker.json is the
+	// golden one (above).
+	t.Run("WireZstd", func(t *testing.T) {
+		const readDefault = `ZSTD_READ_URL=${RBE_WIRE_ZSTD_READ_URL:-grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT}}`
+		// Indented: measure mode (no farm host) skips it.
+		if !regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(readDefault) + `$`).MatchString(readFile(t, root, rbeWorkerScript)) {
+			t.Errorf("%s: want %s (REMOTE_READ defaults to the worker's own endpoint)", rbeWorkerScript, readDefault)
+		}
+		type store struct {
+			Name string `json:"name"`
+			GRPC *struct {
+				InstanceName string `json:"instance_name"`
+				Endpoints    []struct {
+					Address string `json:"address"`
+				} `json:"endpoints"`
+				StoreType  string `json:"store_type"`
+				Compressed *bool  `json:"experimental_remote_cache_compression"`
+			} `json:"grpc"`
+			FastSlow map[string]any `json:"fast_slow"`
+		}
+		for _, c := range []struct {
+			tier, host, isolation, instance, read string
+		}{
+			{"oss", "grpcs://rbe-west.example.invalid:443", "{}", "oss", ""},
+			{"oss", "grpcs://rbe-west.example.invalid:443", "{}", "oss", "grpcs://rbe-west-read.example.invalid:443"},
+			{"fork", "grpcs://rbe-fork.example.invalid:8444", iso, "oss-fork", ""},
+		} {
+			extra := []string{"--argjson", "zstd", "true"}
+			wantRead := c.host
+			if c.read != "" {
+				extra = append(extra, "--arg", "read", c.read)
+				wantRead = c.read
+			}
+			out := render(t, c.tier, c.host, c.isolation, extra...)
+			for _, err := range checkNoDefaultInstance(out) {
+				t.Errorf("tier %s (zstd): %v", c.tier, err)
+			}
+			if c.tier == "fork" {
+				for _, err := range checkForkWorkerJSON(out, c.host) {
+					t.Errorf("fork tier: %v", err)
+				}
+			}
+			var cfg struct {
+				Stores []store `json:"stores"`
+			}
+			if err := json.Unmarshal(out, &cfg); err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]any{}
+			for _, s := range cfg.Stores {
+				switch {
+				case s.GRPC != nil:
+					if s.GRPC.Compressed == nil {
+						got[s.Name] = nil
+					} else {
+						got[s.Name] = *s.GRPC.Compressed
+					}
+					addr := c.host
+					if s.Name == "REMOTE_READ" {
+						addr = wantRead
+					}
+					if len(s.GRPC.Endpoints) != 1 || s.GRPC.Endpoints[0].Address != addr {
+						t.Errorf("tier %s: store %s endpoints %+v, want %s alone", c.tier, s.Name, s.GRPC.Endpoints, addr)
+					}
+					if s.GRPC.StoreType == "cas" && s.GRPC.InstanceName != c.instance {
+						t.Errorf("tier %s: store %s instance %q, want %q", c.tier, s.Name, s.GRPC.InstanceName, c.instance)
+					}
+				case s.Name == "REMOTE_CAS":
+					got[s.Name] = s.FastSlow["fast_direction"]
+				}
+			}
+			want := map[string]any{"REMOTE_READ": true, "REMOTE_WRITE": false, "REMOTE_CAS": "read_only"}
+			if c.tier == "oss" {
+				want["REMOTE_AC"] = nil // the action cache never compresses
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("tier %s (read %q) stores %v, want %v", c.tier, c.read, got, want)
+			}
+		}
+	})
+}
+
+// workerJSONProgram returns the jq program render() writes worker.json with
+// and the script's own isolation='{...}' worker keys.
+func workerJSONProgram(t *testing.T, root string) (prog, iso string) {
+	t.Helper()
+	script := readFile(t, root, rbeWorkerScript)
+	m := regexp.MustCompile(`(?s)--argjson isolation "\$isolation" '\n(.*?)' >"\$ROOT/worker.json"\n`).FindStringSubmatch(script)
+	if m == nil {
+		t.Fatalf("%s: no worker.json jq program", rbeWorkerScript)
+	}
+	i := regexp.MustCompile(`(?s)\n\tisolation='(\{.*?\})'\n`).FindStringSubmatch(script)
+	if i == nil {
+		t.Fatalf("%s: no isolation='{...}' worker config", rbeWorkerScript)
+	}
+	return m[1], i[1]
+}
+
+// checkNoDefaultInstance checks that no remote store in a worker.json uses
+// instance "": rbe-west's edges confine both worker certificates to
+// listeners that know "oss" (the OSS tier, :443, FU2) or "oss-fork" (the
+// fork tier, :8444) alone, where "" is 'instance_name' not configured.
+func checkNoDefaultInstance(out []byte) []error {
+	var cfg struct {
+		Stores []struct {
+			Name string `json:"name"`
+			GRPC *struct {
+				InstanceName *string `json:"instance_name"`
+			} `json:"grpc"`
+		} `json:"stores"`
+	}
+	if err := json.Unmarshal(out, &cfg); err != nil {
+		return []error{err}
+	}
+	var errs []error
+	for _, s := range cfg.Stores {
+		if s.GRPC != nil && (s.GRPC.InstanceName == nil || *s.GRPC.InstanceName == "") {
+			errs = append(errs, errors.New("store "+s.Name+" uses instance \"\"; want oss (or oss-fork)"))
+		}
+	}
+	return errs
+}
+
+// checkForkWorkerJSON checks a fork-tier worker.json: every endpoint is the
+// fork host, the only remote store is the CAS for instance oss-fork, no
+// store is an action cache, results are never uploaded, and actions go
+// through the isolation entrypoint.
+func checkForkWorkerJSON(out []byte, host string) []error {
+	var cfg struct {
+		Stores []struct {
+			Name string `json:"name"`
+			GRPC *struct {
+				InstanceName string `json:"instance_name"`
+				Endpoints    []struct {
+					Address string `json:"address"`
+				} `json:"endpoints"`
+				StoreType  string `json:"store_type"`
+				Compressed *bool  `json:"experimental_remote_cache_compression"`
+			} `json:"grpc"`
+		} `json:"stores"`
+		Workers []struct {
+			Local struct {
+				WorkerAPIEndpoint struct {
+					URI string `json:"uri"`
+				} `json:"worker_api_endpoint"`
+				UploadActionResult map[string]any `json:"upload_action_result"`
+				Entrypoint         string         `json:"entrypoint"`
+			} `json:"local"`
+		} `json:"workers"`
+	}
+	if err := json.Unmarshal(out, &cfg); err != nil {
+		return []error{err}
+	}
+	var errs []error
+	var grpcStores []string
+	compressed := map[string]*bool{}
+	for _, s := range cfg.Stores {
+		if s.GRPC == nil {
+			continue
+		}
+		grpcStores = append(grpcStores, s.Name)
+		compressed[s.Name] = s.GRPC.Compressed
+		if s.GRPC.StoreType != "cas" || s.GRPC.InstanceName != "oss-fork" {
+			errs = append(errs, errors.New("store "+s.Name+": "+s.GRPC.StoreType+" instance "+strconv.Quote(s.GRPC.InstanceName)+", want cas instance \"oss-fork\" only"))
+		}
+		for _, e := range s.GRPC.Endpoints {
+			if e.Address != host {
+				errs = append(errs, errors.New("store "+s.Name+" endpoint "+e.Address+", want "+host))
+			}
+		}
+	}
+	// RBE_WIRE_ZSTD=1 splits the remote CAS: compressed reads (REMOTE_READ)
+	// and identity writes (REMOTE_WRITE, never compressed: no writable
+	// rbe-west listener accepts zstd, and a compressed fork upload could store
+	// more than it sends).
+	switch {
+	case reflect.DeepEqual(grpcStores, []string{"REMOTE_CAS"}):
+		if c := compressed["REMOTE_CAS"]; c != nil && *c {
+			errs = append(errs, errors.New("REMOTE_CAS alone uploads too, so it must not set experimental_remote_cache_compression: true"))
+		}
+	case reflect.DeepEqual(grpcStores, []string{"REMOTE_READ", "REMOTE_WRITE"}):
+		if c := compressed["REMOTE_WRITE"]; c == nil || *c {
+			errs = append(errs, errors.New("REMOTE_WRITE must set experimental_remote_cache_compression: false"))
+		}
+	default:
+		errs = append(errs, errors.New("remote stores "+strings.Join(grpcStores, ",")+", want REMOTE_CAS, or REMOTE_READ and REMOTE_WRITE"))
+	}
+	if len(cfg.Workers) != 1 {
+		return append(errs, errors.New("want exactly one worker"))
+	}
+	w := cfg.Workers[0].Local
+	if w.WorkerAPIEndpoint.URI != host {
+		errs = append(errs, errors.New("worker API "+w.WorkerAPIEndpoint.URI+", want "+host))
+	}
+	if !reflect.DeepEqual(w.UploadActionResult, map[string]any{"upload_ac_results_strategy": "never"}) {
+		errs = append(errs, errors.New("upload_action_result must be {upload_ac_results_strategy: never} alone"))
+	}
+	if w.Entrypoint != "/usr/local/libexec/rbe-action/entry" {
+		errs = append(errs, errors.New("entrypoint "+strconv.Quote(w.Entrypoint)+": fork actions run isolated only"))
+	}
+	return errs
 }
 
 func TestRBEWorkerScriptGatesNativeLinkOnIsolation(t *testing.T) {
@@ -472,7 +746,7 @@ func TestRBEWorkerIsolationCanary(t *testing.T) {
 		cmd := exec.CommandContext(ctx, "bash", "-c", prog)
 		cmd.Env = []string{
 			"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"), "HOME=" + home, "RUNNER_TEMP=" + temp, "ROOT=" + nlRoot, "NL_BIN_DIR=" + bin,
-			"RBE_WEST_HOST=rbe-west.example.invalid", "WORKER_NAME=pool-worker-1",
+			"RBE_WEST_HOST=rbe-west.example.invalid", "WORKER_NAME=pool-worker-1", "WORKER_ENV=" + rbeWorkerEnvSample,
 			"MODE=" + mode, "SLOTS=" + strconv.Itoa(slots), "GITHUB_STEP_SUMMARY=" + filepath.Join(home, "summary.md"),
 		}
 		if runID != "" {
@@ -586,5 +860,99 @@ func TestRBEWorkerIsolationCanary(t *testing.T) {
 				t.Errorf("unusable-setting warning = %v, want %v\n%s", got, c.warn, r.out)
 			}
 		})
+	}
+}
+
+// A sticky disk is written by other VMs, so scrub_cas must delete whatever it
+// holds that is not a blob named for its own SHA-256 and size, whatever the
+// name: quotes and spaces once aborted it under set -e (xargs read them as
+// quoting), and -regextype after ! left GNU find 4.9's name filter dead. The
+// function runs from the script itself in bash, with sudo as a pass-through
+// (chown to the caller's own ids needs no root), on a store whose own path
+// has a space and a quote too.
+func TestRBEWorkerScrubCAS(t *testing.T) {
+	m := regexp.MustCompile(`(?s)\nscrub_cas\(\) \{ # STORE\n.*?\n\}\n`).FindString(readFile(t, repoRoot(t), rbeWorkerScript))
+	if m == "" {
+		t.Fatalf("%s: no scrub_cas function", rbeWorkerScript)
+	}
+	tmp := t.TempDir()
+	store := filepath.Join(tmp, "sticky disk's")
+	d2 := filepath.Join(store, "content", "d2")
+	for _, d := range []string{d2, filepath.Join(store, "work", "action 1"), filepath.Join(store, "tmp"), filepath.Join(tmp, "runner")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	blob := func(body string) string {
+		sum := sha256.Sum256([]byte(body))
+		return hex.EncodeToString(sum[:]) + "-" + strconv.Itoa(len(body)) + "-7"
+	}
+	good, open := blob("kept"), blob("kept, world-writable")
+	files := map[string]string{
+		good:                 "kept",
+		open:                 "kept, world-writable",
+		blob("hashed") + "x": "hashed", // not the name pattern
+		blob("other"):        "OTHER",  // hash mismatch, same size
+		strings.Replace(blob("short"), "-5-", "-50-", 1): "short", // wrong size in the name
+		"it's a blob":             "single quote",  // aborted xargs
+		`say "cheese" now`:        "double quotes", // aborted xargs
+		"new\nline " + blob("nl"): "nl",            // newline: a split name
+		"back\\slash":             "sha256sum escape",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(d2, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(filepath.Join(d2, open), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/etc/passwd", filepath.Join(d2, blob("link"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, "content", "stray"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// GNU find and coreutils, as on the runner image; exit 77 skips elsewhere.
+	prog := "set -euo pipefail\n" +
+		"{ find --version | grep -q GNU && command -v sha256sum nproc; } >/dev/null 2>&1 || exit 77\n" +
+		"sudo() { \"$@\"; }\n" + m + "scrub_cas \"$1\"\n"
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", "-c", prog, "bash", store)
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "LC_ALL=C", "RUNNER_TEMP=" + filepath.Join(tmp, "runner")}
+	out, err := cmd.CombinedOutput()
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 77 {
+		t.Skip("scrub_cas needs GNU find and coreutils (the runner image's)")
+	}
+	if err != nil {
+		t.Fatalf("scrub_cas: %v\n%s", err, out)
+	}
+	entries, err := os.ReadDir(d2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept []string
+	for _, e := range entries {
+		kept = append(kept, e.Name())
+	}
+	want := []string{good, open}
+	if good > open {
+		want = []string{open, good}
+	}
+	if !reflect.DeepEqual(kept, want) {
+		t.Errorf("d2 kept %q, want %q\n%s", kept, want, out)
+	}
+	if fi, err := os.Stat(filepath.Join(d2, open)); err != nil || fi.Mode().Perm()&0o022 != 0 {
+		t.Errorf("%s: want go-w, got %v %v", open, fi, err)
+	}
+	for _, gone := range []string{filepath.Join(store, "content", "stray"), filepath.Join(store, "work", "action 1")} {
+		if _, err := os.Lstat(gone); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s survived the scrub (%v)", gone, err)
+		}
+	}
+	if !strings.Contains(string(out), "cas scrub: 2 blobs removed, 2 kept") {
+		t.Errorf("scrub summary: want 2 blobs removed (hash, size), 2 kept; got\n%s", out)
 	}
 }

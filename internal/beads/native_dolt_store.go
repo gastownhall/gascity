@@ -294,7 +294,7 @@ func openNativeStorageWithoutAmbientEnvWithCredentialCommand(ctx context.Context
 	}
 	defer restoreEnv()
 
-	storage, err := nativeDoltOpenBestAvailable(ctx, filepath.Join(scopeRoot, ".beads"))
+	storage, err := openNativeDoltStorage(ctx, filepath.Join(scopeRoot, ".beads"))
 	if err != nil {
 		return nil, "", err
 	}
@@ -655,7 +655,7 @@ func openNativeStorageWithCredentialCommand(ctx context.Context, scopeRoot strin
 		return nil, "", err
 	}
 	defer restoreEnv()
-	storage, err := nativeDoltOpenBestAvailable(ctx, filepath.Join(scopeRoot, ".beads"))
+	storage, err := openNativeDoltStorage(ctx, filepath.Join(scopeRoot, ".beads"))
 	if err != nil {
 		return nil, "", err
 	}

@@ -2792,17 +2792,13 @@ func (t *Tmux) nudgeSession(
 	}
 
 	// 1.5. Dismiss Claude Code's post-turn feedback survey if it is parked on
-	// the pane (ga-zg7fjq). On the unattached path the C-u above has cleared
-	// the composer; on an attached session it deliberately did not, so a
-	// human draft may still be on the line. That matters: the survey's
-	// onDigit handler
-	// only fires on a single-character input value, so a digit landing on
-	// top of other content silently corrupts the draft instead of
-	// dismissing anything. A parked survey reads idle to WaitForIdle (no
+	// the pane (ga-zg7fjq). A parked survey reads idle to WaitForIdle (no
 	// busy indicator, composer prefix still matches), so this cannot be
 	// gated on an idle-wait failure the way DismissModelSwitchModalIfPresent
 	// is in Provider.Nudge -- it must run unconditionally, here.
-	t.DismissFeedbackSurveyModalIfPresent(session)
+	if err := t.DismissFeedbackSurveyModalIfPresent(session); err != nil {
+		return fmt.Errorf("dismissing feedback survey before nudge: %w", err)
+	}
 
 	// 2. Send text in literal mode with retry on transient errors
 	if err := sendText(target, message, t.cfg.NudgeReadyTimeout); err != nil {
@@ -3183,39 +3179,110 @@ func (t *Tmux) DismissModelSwitchModalIfPresent(session string) {
 	)
 }
 
-// feedbackSurveyDismissConfirmDelay lets the "0" keystroke register in the
-// composer before Enter confirms it, so Enter does not race the digit.
-const feedbackSurveyDismissConfirmDelay = 150 * time.Millisecond
+const (
+	feedbackSurveyMountGuard        = 600 * time.Millisecond
+	feedbackSurveyDigitPollInterval = 100 * time.Millisecond
+	feedbackSurveyDigitDeadline     = time.Second
+)
 
-// dismissFeedbackSurveyModal dismisses Claude Code's post-turn feedback
-// survey (ga-zg7fjq) by sending "0" (Dismiss) then Enter. Enter resolves to
-// the bundle's chat:submit action, which fires the survey's onDigit handler
-// immediately instead of waiting out its 400ms debounce -- see
-// runtime.ContainsFeedbackSurveyModal for the bundle-verified mechanism this
-// mirrors. It is a no-op unless the matcher fires, so it never sends stray
-// keystrokes into ordinary working panes. Side effects are injected so the
-// decision is unit-testable without a live tmux server. Returns whether the
-// modal was present (i.e. a dismiss was attempted).
-func dismissFeedbackSurveyModal(content string, sendKeys func(keys ...string) error, sleep func(time.Duration)) (bool, error) {
-	if !runtime.ContainsFeedbackSurveyModal(content) {
-		return false, nil
+var errFeedbackSurveyDigitUnresolved = errors.New("feedback survey dismiss digit sent but the composer was left unreadable or holding other input")
+
+func dismissFeedbackSurveyModal(capture func() (string, error), attached func() bool, sendKeys func(keys ...string) error, sleep func(time.Duration)) error {
+	if attached() {
+		return nil
+	}
+	sleep(feedbackSurveyMountGuard)
+	content, err := capture()
+	if err != nil || !runtime.ContainsFeedbackSurveyModal(content) {
+		return nil
+	}
+	if composer, observed := feedbackSurveyComposer(content); !observed || composer != "" {
+		return nil
+	}
+	if attached() {
+		return nil
 	}
 	if err := sendKeys("0"); err != nil {
-		return true, err
+		return err
 	}
-	sleep(feedbackSurveyDismissConfirmDelay)
-	return true, sendKeys("Enter")
+	composer, surveyGone, err := awaitFeedbackSurveyDigit(capture, sleep)
+	switch {
+	case err != nil:
+		return err
+	case composer == "0", composer == "" && !surveyGone:
+		if attached() {
+			return errFeedbackSurveyDigitUnresolved
+		}
+		return sendKeys("C-u")
+	case composer != "":
+		return errFeedbackSurveyDigitUnresolved
+	}
+	return nil
+}
+
+func awaitFeedbackSurveyDigit(capture func() (string, error), sleep func(time.Duration)) (string, bool, error) {
+	var composer string
+	var observed, surveyGone bool
+	for waited := time.Duration(0); waited < feedbackSurveyDigitDeadline; waited += feedbackSurveyDigitPollInterval {
+		sleep(feedbackSurveyDigitPollInterval)
+		content, err := capture()
+		if err != nil {
+			return "", false, err
+		}
+		composer, observed = feedbackSurveyComposer(content)
+		surveyGone = !runtime.ContainsFeedbackSurveyModal(content)
+		if observed && surveyGone {
+			break
+		}
+	}
+	if !observed {
+		return "", false, errFeedbackSurveyDigitUnresolved
+	}
+	return composer, surveyGone, nil
+}
+
+func feedbackSurveyComposer(content string) (string, bool) {
+	lines := strings.Split(content, "\n")
+	remainder, observed := lastComposerRemainder(lines, DefaultReadyPromptPrefix)
+	if !observed {
+		return "", false
+	}
+	rows := []string{strings.TrimSpace(strings.TrimRight(strings.TrimSpace(remainder), "│┃"))}
+	promptRow := -1
+	for i, line := range lines {
+		if matchesPromptPrefix(line, DefaultReadyPromptPrefix) {
+			promptRow = i
+		}
+	}
+	for _, line := range lines[promptRow+1:] {
+		trimmed := strings.TrimSpace(strings.ReplaceAll(line, "\u00a0", " "))
+		if trimmed == "" {
+			continue
+		}
+		if !strings.HasPrefix(trimmed, "│") && !strings.HasPrefix(trimmed, "┃") {
+			break
+		}
+		rows = append(rows, strings.TrimSpace(strings.Trim(trimmed, "│┃")))
+	}
+	return strings.TrimSpace(strings.Join(rows, "\n")), true
 }
 
 // DismissFeedbackSurveyModalIfPresent clears Claude Code's post-turn
 // feedback survey (ga-zg7fjq) on the session's agent pane so a pending nudge
 // is not corrupted by, or silently swallowed into, the survey's
-// single-digit input handler. No-op when the survey is absent. A parked
-// survey reads idle to WaitForIdle, so callers must not gate this on an
-// idle-wait failure branch -- see the unconditional call from NudgeSession.
-// Best-effort: capture/send failures are swallowed (the caller retries on
-// the next wake).
-func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) {
+// single-digit input handler. No-op when the survey is absent. It stops
+// keying as soon as a client is attached or attachment cannot be determined,
+// checked before each keystroke, since the dismiss digit and its cleanup
+// would land in a human's composer. A parked survey
+// reads idle to WaitForIdle, so callers must not gate this on an idle-wait
+// failure branch -- see the unconditional call from NudgeSession. When the
+// survey is present it blocks for the survey's mount window plus up to a
+// second while the dismiss digit is consumed. Failures to read the pane
+// before the digit is typed are swallowed, since nothing has been keyed and
+// the nudge can still be delivered. A returned error means the digit was
+// typed and its fate could not be confirmed, so the caller must not paste on
+// top of it.
+func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) error {
 	target := session
 	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
 		target = agentPane
@@ -3229,23 +3296,18 @@ func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) {
 		return nil
 	}
 
-	content, err := t.CapturePane(target, promptObservationLines)
-	if err != nil {
-		return
+	capture := func() (string, error) {
+		return t.CaptureVisiblePane(target)
 	}
-	present, _ := dismissFeedbackSurveyModal(content, sendKeys, time.Sleep)
-	if !present {
-		return
+	attached := func() bool {
+		attached, err := t.SessionAttachedWithError(session)
+		return err != nil || attached
 	}
-
-	// The survey can occasionally eat the first digit (e.g. a keystroke lost
-	// to a slow-to-wake detached pane); re-check and retry the dismiss pair
-	// once before giving up for this call.
-	content, err = t.CapturePane(target, promptObservationLines)
-	if err != nil {
-		return
+	content, err := capture()
+	if err != nil || !runtime.ContainsFeedbackSurveyModal(content) {
+		return nil
 	}
-	_, _ = dismissFeedbackSurveyModal(content, sendKeys, time.Sleep)
+	return dismissFeedbackSurveyModal(capture, attached, sendKeys, time.Sleep)
 }
 
 // GetPaneCommand returns the current command running in a pane.
@@ -3520,13 +3582,22 @@ func (t *Tmux) GetSessionActivity(session string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
+	return t.discountedActivity(session, wa), nil
+}
+
+// discountedActivity applies the poke discount to an already-read raw window
+// activity. Callers that obtained wa from a batched fleet snapshot instead of a
+// per-session read get the same answer GetSessionActivity would give, so
+// batching cannot silently drop the discount and make every parked agent look
+// freshly active.
+func (t *Tmux) discountedActivity(session string, wa time.Time) time.Time {
 	t.pokeMu.Lock()
 	pk, ok := t.pokes[session]
 	t.pokeMu.Unlock()
 	if !ok {
-		return wa, nil
+		return wa
 	}
-	return discountPokeActivity(wa, pk, time.Now()), nil
+	return discountPokeActivity(wa, pk, time.Now())
 }
 
 // rawSessionActivity returns the most recent tmux per-window activity timestamp.

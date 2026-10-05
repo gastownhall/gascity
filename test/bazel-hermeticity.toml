@@ -1,0 +1,44 @@
+# Bazel test hermeticity ledger.
+#
+# A remotely cached `bazel test` PASS is only true while every input the test
+# reads is declared. This ledger records the go_test packages that read
+# undeclared state, and what was decided for each:
+#
+#   [[target]]    the package's go_test must never be served from the cache.
+#                 `tags` must include one of external / no-cache /
+#                 no-remote-cache; requires-network documents (and, under a
+#                 network-less sandbox, grants) internet access.
+#                 tools/bazel/hermetic_tags.py writes these tags into the
+#                 package's BUILD.bazel (run by `make bazel-sync`; the CI
+#                 "BUILD files in sync" job fails on drift).
+#   [[reviewed]]  a signal the static scan reports, confirmed not to make the
+#                 result environment-dependent. One entry per (package,
+#                 signal); a stale entry (no matching finding) fails.
+#
+# internal/testpolicy/bazelhermetic (TestRepositoryTestsAreHermeticOrLedgered)
+# fails when the scan finds a signal in a package that is neither a target
+# nor reviewed for it. Signals: dns, external-url, network-cli, wall-clock,
+# shared-tmp. Full audit and rationale:
+# engdocs/contributors/bazel-test-hermeticity-audit.md
+
+[[target]]
+package = "test/integration"
+tags = ["external", "requires-network"]
+reason = "dolt_config resolves the worker's hostname through DNS. The suite has not yet been run on a network-less executor since start-drift moved to prebuilt //cmd/gc:gc_drift_* binaries and gc init stopped cloning gascity-packs (#7005), so the requires-network tag stays until that run proves the rest offline."
+evidence = ["test/integration/dolt_config_test.go:48 net.LookupHost(os.Hostname())"]
+
+[[target]]
+package = "internal/testpolicy/waiverexpiry"
+tags = ["external"]
+reason = "TestDatedWaiversAgainstToday is the one place a dated waiver (provider ledger, resource census, beads conformance skips) is compared with time.Now(); it must re-run every day, so it is never cached. The ledgers' own structural tests stay cached and date-free."
+evidence = ["internal/testpolicy/waiverexpiry/waiverexpiry_test.go"]
+
+[[reviewed]]
+package = "cmd/gc"
+signal = "wall-clock"
+reason = "TestRunAnalyzeReliability_FullPipelineMatchesGoldenSnapshot sizes its --since window as time.Since(fixed)+24h, so the fixture always falls inside it: the pass/fail result does not change with the date."
+
+[[reviewed]]
+package = "internal/runtime/ssh"
+signal = "network-cli"
+reason = "ssh_test.go dials 127.0.0.1:1 (refused) through the image's ssh client; the host-sshd test lives in ssh_localhost_integration_test.go behind the integration build tag, outside the Bazel target."

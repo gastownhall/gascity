@@ -59,7 +59,7 @@ on:
   schedule:
     - cron: "17 3 * * *"
   pull_request:
-    branches: [main]
+    branches: [main, 'hotfix/**', 'release/**']
     types:
       - opened
       - reopened
@@ -74,7 +74,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 env:
-  DOLT_VERSION: "2.1.7"
+  DOLT_VERSION: "2.2.0"
   BD_VERSION: "v1.3.1"
 
 # Tier routing is centralized in the `gate` job below, which always runs
@@ -89,7 +89,7 @@ env:
 jobs:
   runner-policy:
     name: Runner policy
-    runs-on: ${{ inputs.force_blacksmith && 'blacksmith-2vcpu-ubuntu-2404' || (github.event_name == 'pull_request' && contains(fromJSON('["julianknutsen","csells","sjarmak","quad341"]'), github.event.pull_request.user.login) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest') }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     outputs:
       use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
       reason: ${{ steps.policy.outputs.reason }}

@@ -27,7 +27,7 @@ concurrency:
 jobs:
   runner-policy:
     name: Runner policy
-    runs-on: ${{ inputs.force_blacksmith && 'blacksmith-2vcpu-ubuntu-2404' || (github.event_name == 'pull_request' && contains(fromJSON('["julianknutsen","csells","sjarmak","quad341"]'), github.event.pull_request.user.login) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest') }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     outputs:
       use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
       reason: ${{ steps.policy.outputs.reason }}
@@ -314,7 +314,7 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
-      DOLT_VERSION: "2.1.7"
+      DOLT_VERSION: "2.2.0"
       BD_VERSION: "v1.3.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -343,7 +343,7 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
-      DOLT_VERSION: "2.1.7"
+      DOLT_VERSION: "2.2.0"
       BD_VERSION: "v1.3.1"
     strategy:
       fail-fast: false
@@ -525,7 +525,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     timeout-minutes: 105
     env:
-      DOLT_VERSION: "2.1.7"
+      DOLT_VERSION: "2.2.0"
       GC_REQUIRE_ACCEPTANCE_TOOLING: "1"
       # Tier A skips the matrix to stay a smoke tier. This is the job that runs
       # it, so this is the job that opts in.
@@ -562,6 +562,12 @@ jobs:
           go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
           echo "GC_ACCEPTANCE_BD_BIN=${HOME}/.local/bin/bd" >> "$GITHUB_ENV"
           echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+      # A failing test copies its managed Dolt server logs (gc's dolt.log, bd's
+      # proxy and scope-local server logs) and the supervisor log out of its
+      # temp dir before t.Cleanup removes it
+      # (internal/testutil.SaveFailureDiagnostics); the upload below keeps them.
+      - name: Route acceptance failure diagnostics
+        run: echo "GC_TEST_FAILURE_ARTIFACT_DIR=${RUNNER_TEMP}/failure-artifacts" >> "$GITHUB_ENV"
       # Fail here rather than inside a test: a bd that is missing or too old is
       # a broken job, and the tests below would otherwise be asked to decide it
       # one skip at a time.
@@ -584,7 +590,7 @@ jobs:
         run: |
           set -euo pipefail
           go test -tags acceptance_a -timeout 15m -count=1 -v \
-            -run 'TestBeadsProxiedIgnoresUserLevelSharedServer$' ./test/acceptance/ 2>&1 \
+            -run 'TestBeadsProxiedIgnoresUserLevelSharedServer$|TestBlockedRepairOnProxiedCityAndRig$' ./test/acceptance/ 2>&1 \
             | tee "${RUNNER_TEMP}/shared-server.log"
       - name: Migration acceptance (AC-X)
         run: |
@@ -598,6 +604,14 @@ jobs:
           go test -tags acceptance_a -timeout 30m -count=1 -v \
             -run 'TestBeadsInitTopologyMatrix$/^(M1-proxied-local|M5-legacy-gc-managed)$' \
             ./test/acceptance/ 2>&1 | tee "${RUNNER_TEMP}/topology.log"
+      - name: Upload acceptance failure diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: failure-diagnostics-beads-topology-acceptance-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/failure-artifacts
+          if-no-files-found: ignore
+          retention-days: 7
       # A skip that nobody reads is the failure mode this whole job exists to
       # fix, so the ones that remain are named in the summary.
       - name: Report remaining skips
@@ -649,7 +663,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     timeout-minutes: 60
     env:
-      DOLT_VERSION: "2.1.7"
+      DOLT_VERSION: "2.2.0"
       GC_REQUIRE_ACCEPTANCE_TOOLING: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -682,6 +696,9 @@ jobs:
           go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
           echo "GC_ACCEPTANCE_BD_BIN=${HOME}/.local/bin/bd" >> "$GITHUB_ENV"
           echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+      # Same failure-diagnostics routing as the topology job above.
+      - name: Route acceptance failure diagnostics
+        run: echo "GC_TEST_FAILURE_ARTIFACT_DIR=${RUNNER_TEMP}/failure-artifacts" >> "$GITHUB_ENV"
       - name: Verify bd supports proxied-server
         run: |
           set -euo pipefail
@@ -697,6 +714,14 @@ jobs:
           go test -tags acceptance_a -timeout 45m -count=1 -v \
             -run 'TestProxiedNativeLifecycle$|TestProxiedNativeSafety$' \
             ./test/acceptance/ 2>&1 | tee "${RUNNER_TEMP}/proxied-native.log"
+      - name: Upload acceptance failure diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: failure-diagnostics-beads-proxied-native-acceptance-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/failure-artifacts
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report remaining skips
         if: ${{ always() }}
         run: |
@@ -867,7 +892,7 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     env:
-      DOLT_VERSION: "2.1.7"
+      DOLT_VERSION: "2.2.0"
       BD_VERSION: "v1.3.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -1045,7 +1070,7 @@ jobs:
             timeout_minutes: 15
             command: ./scripts/test-integration-shard rest-smoke-2-of-2
     env:
-      DOLT_VERSION: "2.1.7"
+      DOLT_VERSION: "2.2.0"
       BD_VERSION: "v1.3.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -1072,7 +1097,7 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     env:
-      DOLT_VERSION: "2.1.7"
+      DOLT_VERSION: "2.2.0"
       BD_VERSION: "v1.3.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6

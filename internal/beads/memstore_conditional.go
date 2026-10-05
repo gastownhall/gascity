@@ -94,6 +94,7 @@ func (m *MemStore) DeleteIfMatch(id string, expectedRevision int64) error {
 		return &PreconditionFailedError{ID: id, Expected: expectedRevision, Current: m.beads[i].Revision}
 	}
 	m.beads = append(m.beads[:i], m.beads[i+1:]...)
+	delete(m.localStrings, id)
 	return nil
 }
 

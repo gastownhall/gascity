@@ -294,6 +294,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		}
 		register(doctor.NewConfigValidCheck(cfg))
 		register(doctor.NewLegacySuspendedFieldCheck(cfg))
+		register(newSessionReconcilerDoctorCheck(cfg, reconcilerModeLookupEnv))
 		// Rollout gates section: one advisory line per registered gate (value +
 		// origin + notices). Never blocks the exit code.
 		for _, c := range rolloutGateChecks(opts.RolloutFlags, opts.RolloutResolveErr) {
@@ -442,6 +443,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newRouteRecoveryQuarantineCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newHoldLabelRoutedToCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newPoolIdleRoutedWorkCheck(cfg, cityPath, storeFactory))
+			registerCityStoreCheck(newV2DemandMigrationsCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newWorkOptionMetadataMigrationCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newBacklogDepthCheck(cityPath, storeFactory))
 			registerCityStoreCheck(newOrderTrackingRetentionCheck(cityPath, storeFactory))
@@ -712,6 +714,21 @@ type doctorUnknownCheckFailure struct {
 	RegisteredChecks []string `json:"registered_checks,omitempty"`
 }
 
+// doctorBlockingFailedErrorCode is the error code a --json run reports when
+// at least one blocking check failed, mirroring the non-zero exit code.
+const doctorBlockingFailedErrorCode = "doctor_blocking_failed"
+
+// doctorBlockingFailure is the --json payload for a run with blocking
+// failures. It is the shared failure envelope (schemas/failure.schema.json),
+// so ok:false always arrives with an error object, and the full report rides
+// along under the schema's additionalProperties so the caller still sees
+// which checks failed. Advisory-only failures keep the report shape and
+// ok:true, matching the zero exit code.
+type doctorBlockingFailure struct {
+	jsonSchemaErrorPayload
+	doctorJSONReport
+}
+
 // reportUnknownDoctorChecks fails a --check run whose names do not all resolve,
 // and tells the caller what it could have asked for. Running the names that did
 // match would be worse than erroring: a caller filtering doctor output by name
@@ -967,6 +984,9 @@ type doctorJSONResult struct {
 	Payload any `json:"payload,omitempty"`
 }
 
+// doctorJSONReport carries no ok or error key of its own: a clean or
+// advisory-only run gets ok:true from withDefaultSuccessOK, and a blocking
+// failure wraps it in doctorBlockingFailure, whose envelope supplies both.
 type doctorJSONReport struct {
 	Passed         int                `json:"passed"`
 	Warned         int                `json:"warned"`
@@ -974,7 +994,6 @@ type doctorJSONReport struct {
 	BlockingFailed int                `json:"blocking_failed"`
 	Fixed          int                `json:"fixed"`
 	Results        []doctorJSONResult `json:"results"`
-	Error          string             `json:"error,omitempty"`
 }
 
 func doctorStatusString(s doctor.CheckStatus) string {
@@ -1021,6 +1040,20 @@ func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
 			Fixed:        r.Fixed,
 			TimedOut:     r.TimedOut,
 			Payload:      r.Payload,
+		})
+	}
+	if report.BlockingFailed > 0 {
+		return writeCLIJSONLine(w, doctorBlockingFailure{
+			jsonSchemaErrorPayload: jsonSchemaErrorPayload{
+				SchemaVersion: "1",
+				OK:            false,
+				Error: jsonSchemaErrorDetail{
+					Code:     doctorBlockingFailedErrorCode,
+					Message:  fmt.Sprintf("%d blocking check(s) failed", report.BlockingFailed),
+					ExitCode: 1,
+				},
+			},
+			doctorJSONReport: out,
 		})
 	}
 	return writeCLIJSONLine(w, out)

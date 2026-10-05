@@ -4100,10 +4100,10 @@ func TestCachingStoreDependencyInvalidationPreservesStatusBasedDeferral(t *testi
 
 func TestCachingStoreNotificationPreservesStatusBasedDeferral(t *testing.T) {
 	var payload json.RawMessage
-	cache := NewCachingStore(NewMemStore(), func(_, _, _, _, _ string, _ *[]string, got json.RawMessage) {
+	cache := NewCachingStore(NewMemStore(), func(_ ChangeSource, _, _, _, _, _ string, _ *[]string, got json.RawMessage) {
 		payload = append(payload[:0], got...)
 	})
-	cache.notifyChange("bead.updated", Bead{
+	cache.notifyChange(ChangeLocal, "bead.updated", Bead{
 		ID:                   "gc-deferred",
 		Status:               "open",
 		Type:                 "task",

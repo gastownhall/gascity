@@ -7,6 +7,7 @@ go_test(
     srcs = [
         "agent_env_test.go",
         "agent_suspend_test.go",
+        "beads_blocked_repair_test.go",
         "beads_health_test.go",
         "beads_migrate_proxied_test.go",
         "beads_proxied_default_test.go",
@@ -58,7 +59,7 @@ go_test(
         # Pinned prebuilt release binaries (see MODULE.bazel): hermetic bd and
         # dolt, same versions the go-test CI installs.
         "@bd_bin_v1_3_1//:bd",
-        "@dolt_bin_v2_1_7//:dolt-linux-amd64/bin/dolt",
+        "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
     ],
     shard_count = 2,
     deps = [
@@ -77,6 +78,7 @@ go_test(
         "//internal/remotesource",
         "//internal/session",
         "//internal/testenv",
+        "//internal/testutil",
         "//test/acceptance/helpers",
         "@com_github_burntsushi_toml//:toml",
         "@com_github_gastownhall_gascity_packs//:gascity-packs",

@@ -42,6 +42,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 	"github.com/gastownhall/gascity/test/toolhome"
@@ -283,7 +284,7 @@ func TestMain(m *testing.M) {
 		if err := writeExecShim(doltBinary, override); err != nil {
 			panic("integration: writing dolt shim: " + err.Error())
 		}
-	} else if resolved := runfilesBinaryAt("dolt_bin_v2_1_7", "dolt-linux-amd64/bin/dolt"); resolved != "" {
+	} else if resolved := runfilesBinaryAt("dolt_bin_v2_2_0", "dolt-linux-amd64/bin/dolt"); resolved != "" {
 		// Prebuilt pinned dolt from runfiles (bazel http_archive data dep);
 		// preferred over PATH so remote workers without a system dolt run the
 		// dolt-backed shapes.
@@ -549,17 +550,35 @@ func pinnedBdStoreCommandRunnerWithEnv(overrides map[string]string) beads.Comman
 }
 
 func pinnedIntegrationBeadsModuleVersion() (string, error) {
-	cmd := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "github.com/steveyegge/beads")
+	// `go mod edit -json` reads go.mod alone. `go list -m` would fetch the
+	// module's .info from the proxy, which fails where tests have no network
+	// (rbe-west's fork pool runs actions with loopback only).
+	cmd := exec.Command("go", "mod", "edit", "-json")
 	cmd.Dir = findModuleRoot()
-	out, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("resolve github.com/steveyegge/beads module version: %w\n%s", err, out)
+		return "", fmt.Errorf("resolve github.com/steveyegge/beads module version: %w\n%s", err, stderr.Bytes())
 	}
-	version := strings.TrimSpace(string(out))
-	if version == "" {
-		return "", errors.New("github.com/steveyegge/beads module version is empty")
+	var mod struct {
+		Require []struct {
+			Path    string
+			Version string
+		}
 	}
-	return version, nil
+	if err := json.Unmarshal(out, &mod); err != nil {
+		return "", fmt.Errorf("resolve github.com/steveyegge/beads module version: parse go mod edit -json: %w", err)
+	}
+	for _, req := range mod.Require {
+		if req.Path == "github.com/steveyegge/beads" {
+			if req.Version == "" {
+				return "", errors.New("github.com/steveyegge/beads module version is empty")
+			}
+			return req.Version, nil
+		}
+	}
+	return "", errors.New("go.mod does not require github.com/steveyegge/beads")
 }
 
 // wantPinnedBeadsModuleVersion is the beads module version this suite expects
@@ -1424,10 +1443,18 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env = filterEnv(env, integrationGCBinaryEnv)
 	env = filterEnv(env, integrationDoltBinaryEnv)
 	env = filterEnv(env, "BEADS_DOLT_AUTO_START")
+	env = filterEnv(env, "GC_DOLT_INIT_LOCK_DIR")
 	if !useDolt {
 		env = append(env, "GC_DOLT=skip")
 	}
 	env = append(env, "GC_HOME="+gcHome)
+	// gc-beads-bd.sh serializes forced reinits on a per-database flock under
+	// $TMPDIR by default, shared by every process on the host. Every test city
+	// initializes the same "hq" database on its own Dolt server, so concurrent
+	// test actions on one worker would queue on one lock (and fail after its
+	// 60s budget under load). Cities that share a Dolt server share a GC_HOME,
+	// so a lock directory under it keeps the serialization the lock exists for.
+	env = append(env, "GC_DOLT_INIT_LOCK_DIR="+filepath.Join(gcHome, "dolt-init-locks"))
 	env = append(env, "XDG_RUNTIME_DIR="+runtimeDir)
 	env = append(env, managedDoltTestModeEnv+"=1")
 	env = append(env, managedDoltTestParentEnv+"="+strconv.Itoa(os.Getpid()))
@@ -1628,12 +1655,7 @@ func trimmedCommandOutput(binary string, args ...string) (string, error) {
 }
 
 func seedIsolatedDoltConfig(gcHome string) error {
-	doltDir := filepath.Join(gcHome, ".dolt")
-	if err := os.MkdirAll(doltDir, 0o755); err != nil {
-		return err
-	}
-	doltCfg := `{"user.name":"gc-test","user.email":"gc-test@test.local"}`
-	return os.WriteFile(filepath.Join(doltDir, "config_global.json"), []byte(doltCfg), 0o644)
+	return testutil.SeedDoltGlobalConfig(gcHome)
 }
 
 func registerCityCommandEnv(cityDir string, env []string) {
@@ -2482,6 +2504,9 @@ func TestNewIsolatedToolEnvSeedsLocalDoltIdentity(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"user.email":"gc-test@test.local"`) {
 		t.Fatalf("isolated dolt config missing user.email: %s", string(data))
+	}
+	if !strings.Contains(string(data), `"metrics.disabled":"true"`) {
+		t.Fatalf("isolated dolt config leaves dolt usage metrics on (egress to eventsapi.dolthub.com): %s", string(data))
 	}
 }
 
