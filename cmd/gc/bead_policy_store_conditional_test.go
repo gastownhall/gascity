@@ -28,6 +28,9 @@ func TestBeadPolicyStoreResolvesConditionalWritesThroughWrapper(t *testing.T) {
 	if _, _, ok := unwrapBeadPolicyStore(wrapped); !ok {
 		t.Fatalf("test premise: store %T is not policy-wrapped", wrapped)
 	}
+	if writer, ok := beads.ConditionalWriterFor(wrapped); !ok || writer == nil {
+		t.Fatal("policy wrapper hid the hard ownership-fence capability")
+	}
 
 	writer, diag, resolveErr := beads.ResolveConditionalWriter(wrapped)
 	if resolveErr != nil || diag != nil {

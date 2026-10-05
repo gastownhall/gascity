@@ -882,20 +882,26 @@ store, copy them into the binding with
 						if err != nil {
 							return fmt.Errorf("attach bead %s: %w", attach, err)
 						}
-						result, err = molecule.Instantiate(cmd.Context(), store, recipe, molecule.Options{
-							Title:            title,
-							Vars:             cookVars,
-							IdempotencyKey:   graphRootKey,
-							PriorityOverride: cloneFormulaCookPriority(source.Priority),
-						})
-						if err != nil {
-							if cleanupErr := closeFormulaCookFailedGraphV2Roots(store, recipe); cleanupErr != nil {
-								return errors.Join(err, cleanupErr)
-							}
-							return err
+						ownership := sourceworkflow.InputOwnership{
+							Work: store, Graph: store, CityPath: cityPath,
+							LockScope: sourceWorkflowLockScopeForStoreRef(cityPath, cfg, scope.storeRoot, storeRef),
 						}
-						emitFormulaCookExecutionFacts(store, store, cityPath, result, stderr)
-						return ensureFormulaCookAttachDep(store, attach, result.RootID)
+						return ownership.WithWorkflow(cmd.Context(), inv.InputConvoy, func() error {
+							result, err = molecule.Instantiate(cmd.Context(), store, recipe, molecule.Options{
+								Title:            title,
+								Vars:             cookVars,
+								IdempotencyKey:   graphRootKey,
+								PriorityOverride: cloneFormulaCookPriority(source.Priority),
+							})
+							if err != nil {
+								if cleanupErr := closeFormulaCookFailedGraphV2Roots(store, recipe); cleanupErr != nil {
+									return errors.Join(err, cleanupErr)
+								}
+								return err
+							}
+							emitFormulaCookExecutionFacts(store, store, cityPath, result, stderr)
+							return ensureFormulaCookAttachDep(store, attach, result.RootID)
+						})
 					})
 					if err != nil {
 						// A post-prepare failure discards the invocation; close the

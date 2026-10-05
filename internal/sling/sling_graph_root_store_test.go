@@ -215,6 +215,10 @@ type rootKeyQuerySpy struct {
 	rootKeyQueries int
 }
 
+func (s *rootKeyQuerySpy) ConditionalWriterHandle() (beads.ConditionalWriter, bool) {
+	return beads.ConditionalWriterFor(s.Store)
+}
+
 func (s *rootKeyQuerySpy) ListByMetadata(match map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
 	if _, ok := match[beadmeta.Graphv2RootKeyMetadataKey]; ok {
 		s.rootKeyQueries++

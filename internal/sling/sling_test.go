@@ -4473,7 +4473,8 @@ func TestReopenForReassign_RigStore(t *testing.T) {
 		t.Fatalf("rig Create: %v", err)
 	}
 	deps := SlingDeps{
-		Store: cityStore,
+		CityPath: t.TempDir(),
+		Store:    cityStore,
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
 		},
@@ -4598,7 +4599,8 @@ func TestReopenForReassign_NilPrimaryStore(t *testing.T) {
 		t.Fatalf("rig Create: %v", err)
 	}
 	deps := SlingDeps{
-		Store: nil,
+		CityPath: t.TempDir(),
+		Store:    nil,
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
 		},

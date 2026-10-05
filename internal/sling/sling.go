@@ -1376,7 +1376,7 @@ func InstantiateCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 	var result *molecule.Result
 	err := sourceworkflow.WithLock(ctx, deps.CityPath, sourceWorkflowLockScope(deps), rootKey, func() error {
 		var innerErr error
-		result, innerErr = materialize()
+		result, innerErr = withWorkflowInputOwnership(ctx, deps, recipe, a, materialize)
 		return innerErr
 	})
 	if err != nil {
@@ -1531,8 +1531,14 @@ func snapshotGraphV2ReplacementRoot(store beads.Store, formulaName string, vars 
 }
 
 func rollbackGraphV2ReplacementLaunch(store beads.Store, replacementRootID string, snapshot graphV2ReplacementSnapshot) error {
-	if store == nil || snapshot.rootID == "" || len(snapshot.snapshots) == 0 {
+	if store == nil {
 		return nil
+	}
+	if snapshot.rootID == "" || len(snapshot.snapshots) == 0 {
+		// A fresh launch has no replaced root to restore, but its published
+		// steps must still be retired before releasing input ownership.
+		_, err := sourceworkflow.CloseWorkflowSubtree(store, replacementRootID)
+		return err
 	}
 	var rollbackErr error
 	replacementRootID = strings.TrimSpace(replacementRootID)
