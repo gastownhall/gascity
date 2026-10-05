@@ -165,9 +165,7 @@ func nestedContributorAgentsFiles(t *testing.T, root string) []string {
 			if path == root {
 				return nil
 			}
-			name := d.Name()
-			if strings.HasPrefix(name, ".") || name == "node_modules" || name == "testdata" ||
-				isBeadScratchRoot(name) || isNestedWorktreeRoot(path) || isSessionScaffoldRoot(path) {
+			if skipScanDir(root, path, d.Name()) || d.Name() == "testdata" {
 				return filepath.SkipDir
 			}
 			for _, p := range agentInstructionProductDirs {
@@ -189,6 +187,21 @@ func nestedContributorAgentsFiles(t *testing.T, root string) []string {
 	return out
 }
 
+// skipScanDir reports whether a whole-repo walk should skip the directory at
+// path. Hidden and dependency directories are skipped at any depth; the
+// scratch, worktree, and session-scaffold heuristics apply only to top-level
+// entries, because tests create runtime state such as cmd/gc/.gc inside
+// source packages and those packages must still be scanned.
+func skipScanDir(root, path, name string) bool {
+	if strings.HasPrefix(name, ".") || name == "node_modules" {
+		return true
+	}
+	if filepath.Dir(path) != root {
+		return false
+	}
+	return isBeadScratchRoot(name) || isNestedWorktreeRoot(path) || isSessionScaffoldRoot(path)
+}
+
 // goTestFuncNames returns the names of every top-level Test function in the
 // repository's Go test files.
 func goTestFuncNames(t *testing.T, root string) map[string]bool {
@@ -199,9 +212,7 @@ func goTestFuncNames(t *testing.T, root string) map[string]bool {
 			return err
 		}
 		if d.IsDir() {
-			name := d.Name()
-			if path != root && (strings.HasPrefix(name, ".") || name == "node_modules" ||
-				isBeadScratchRoot(name) || isNestedWorktreeRoot(path) || isSessionScaffoldRoot(path)) {
+			if path != root && skipScanDir(root, path, d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
