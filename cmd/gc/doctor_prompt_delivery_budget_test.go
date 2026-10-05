@@ -662,3 +662,35 @@ func TestPromptDeliveryBudgetCheck_SuppressedStartupPromptSkipped(t *testing.T) 
 		t.Fatalf("suppressed startup prompt with an oversized template: status = %v, want StatusOK; message=%q details=%v", res.Status, res.Message, res.Details)
 	}
 }
+
+// TestPromptDeliveryBudgetCheck_RendersResolvedWorkDir guards that the check
+// renders {{.WorkDir}} with the workdir launch resolves, not an empty string,
+// and that resolving it stays read-only: the body alone is under the raw
+// limit, and only the resolved path plus the beacon push it to the limit.
+func TestPromptDeliveryBudgetCheck_RendersResolvedWorkDir(t *testing.T) {
+	clearPromptDeliveryBudgetEnv(t)
+	cityPath := t.TempDir()
+	agent := promptFixtureAgent("workdir-agent", "", "subprocess", "arg")
+	agent.WorkDir = "work/workdir-agent"
+	wantWorkDir, err := resolveConfiguredWorkDirPathUnvalidated(cityPath, "demo", agent.QualifiedName(), &agent, nil)
+	if err != nil {
+		t.Fatalf("resolveConfiguredWorkDirPathUnvalidated: %v", err)
+	}
+	filler := strings.Repeat("a", maxPromptSuffixRawBytes-startupPromptOverhead(agent.Name)-len(wantWorkDir))
+	agent.PromptTemplate = writePromptFile(t, cityPath, "prompts/workdir.template.md", "{{.WorkDir}}"+filler)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Agents:    []config.Agent{agent},
+	}
+
+	res := runPromptDeliveryBudgetCheck(t, cfg, cityPath)
+	if res.Status != doctor.StatusError {
+		t.Fatalf("body plus resolved workdir plus beacon at the raw limit: status = %v, want StatusError; message=%q details=%v", res.Status, res.Message, res.Details)
+	}
+	if want := fmt.Sprintf("prompt %d raw bytes", maxPromptSuffixRawBytes); !strings.Contains(joinedDetails(res), want) {
+		t.Errorf("details missing %q (rendered with the resolved workdir): %v", want, res.Details)
+	}
+	if _, err := os.Stat(wantWorkDir); !os.IsNotExist(err) {
+		t.Errorf("workdir %q exists after the check (stat err=%v); doctor must not create it", wantWorkDir, err)
+	}
+}

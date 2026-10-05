@@ -401,7 +401,7 @@ func TestPromptDeliveryOversized(t *testing.T) {
 			t.Errorf("promptDelivery() error = %v, want errors.Is(err, errOversizedPromptUnsupportedRuntime)", err)
 		}
 		if got.PromptSuffix != "" || got.PromptFlag != "" || got.Delivered {
-			t.Errorf("promptDelivery() must return a zero-value result alongside the hard-fail error, got %+v", got)
+			t.Errorf("promptDelivery() hard-fail must leave PromptSuffix/PromptFlag/Delivered empty, got %+v", got)
 		}
 	})
 

@@ -61,7 +61,13 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 
 	agents := make([]config.Agent, len(c.cfg.Agents))
 	copy(agents, c.cfg.Agents)
-	sort.Slice(agents, func(i, j int) bool { return agents[i].Name < agents[j].Name })
+	sort.Slice(agents, func(i, j int) bool {
+		qi, qj := agents[i].QualifiedName(), agents[j].QualifiedName()
+		if qi != qj {
+			return qi < qj
+		}
+		return agents[i].Name < agents[j].Name
+	})
 
 	var details []string
 	worst := doctor.StatusOK
@@ -99,6 +105,12 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 		resolved, _ := config.ResolveProvider(&a, &c.cfg.Workspace, c.cfg.Providers, c.lookPath)
 
 		ctx := buildAgentPromptContext(c.cityPath, cityName, &a, c.cfg.Rigs, topo, io.Discard)
+		// Render with the workdir launch would use. The unvalidated resolver
+		// is a pure path computation, so doctor creates no directory.
+		if wd, err := resolveConfiguredWorkDirPathUnvalidated(c.cityPath, cityName, a.QualifiedName(), &a, c.cfg.Rigs); err == nil {
+			ctx.WorkDir = wd
+			ctx.DefaultBranch = defaultBranchForRig(ctx.RigName, c.cfg.Rigs, ctx.WorkDir)
+		}
 		ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(&a, &c.cfg.Workspace, c.cfg.Providers)
 		ctx.InstructionsFile = instructionsFileForAgent(&a, &c.cfg.Workspace, c.cfg.Providers)
 
@@ -116,9 +128,10 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 		// Measure the startup prompt launch would send: the beacon is
 		// prepended exactly as resolveTemplate does. Its timestamp is
 		// fixed-width, so the zero time yields the same byte count. The
-		// assigned-skills appendix launch may append (resolveTemplate Step
-		// 9b) is not counted: its gating depends on the session workdir and
-		// runtime materialization paths that are only known at launch.
+		// render above uses the resolved workdir; only the assigned-skills
+		// appendix launch may append (resolveTemplate Step 9b) is not
+		// counted, since its gating depends on runtime materialization paths
+		// that are only known at launch.
 		if prompt != "" {
 			beacon := runtime.FormatBeaconAt(cityName, a.QualifiedName(), false, time.Time{})
 			prompt = composeStartupPrompt(beacon, prompt, false)
@@ -140,11 +153,11 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 		}
 		switch {
 		case dErr != nil:
-			note(doctor.StatusError, fmt.Sprintf("%s: hard-fail: prompt exceeds the delivery budget for runtime %q and has no supported fallback (configured_mode=%s effective_mode=%s): %v", a.Name, effProvider, configuredMode, delivery.EffectiveMode, dErr))
+			note(doctor.StatusError, fmt.Sprintf("%s: hard-fail: prompt exceeds the delivery budget for runtime %q and has no supported fallback (configured_mode=%s effective_mode=%s): %v", a.QualifiedName(), effProvider, configuredMode, delivery.EffectiveMode, dErr))
 		case delivery.OversizedFallback:
-			note(doctor.StatusWarning, fmt.Sprintf("%s: nudge-fallback: prompt exceeds the delivery budget for runtime %q; falls back to a post-start nudge (configured_mode=%s effective_mode=%s raw_bytes=%d raw_limit=%d argv_bytes=%d argv_limit=%d)", a.Name, effProvider, configuredMode, delivery.EffectiveMode, delivery.RawBytes, maxPromptSuffixRawBytes, delivery.ArgvBytes, maxPromptSuffixQuotedBytes))
+			note(doctor.StatusWarning, fmt.Sprintf("%s: nudge-fallback: prompt exceeds the delivery budget for runtime %q; falls back to a post-start nudge (configured_mode=%s effective_mode=%s raw_bytes=%d raw_limit=%d argv_bytes=%d argv_limit=%d)", a.QualifiedName(), effProvider, configuredMode, delivery.EffectiveMode, delivery.RawBytes, maxPromptSuffixRawBytes, delivery.ArgvBytes, maxPromptSuffixQuotedBytes))
 		case renderErrs.Len() > 0:
-			note(doctor.StatusWarning, fmt.Sprintf("%s: render warning: prompt template %q failed to render and fell back to raw text", a.Name, a.PromptTemplate))
+			note(doctor.StatusWarning, fmt.Sprintf("%s: render warning: prompt template %q failed to render and fell back to raw text", a.QualifiedName(), a.PromptTemplate))
 		}
 	}
 
