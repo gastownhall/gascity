@@ -1027,7 +1027,7 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		if addErr != nil {
 			t.Fatalf("gc rig add --adopt on a bd-initialised proxied workspace: %v\n%s", addErr, owned)
 		}
-		assertProxiedScope(t, env, adopted, "adopted rig")
+		assertProxiedScope(t, proxiedNeverIdleEnv(env.Clone()), adopted, "adopted rig")
 
 		// The clone shape: metadata says proxied-server, but bd's store is
 		// gitignored and never came along. gc must refuse rather than let bd
