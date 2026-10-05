@@ -370,7 +370,10 @@ isolate() {
 		case "$d" in "$MASK_ROOT"/*) ;; *) fail "$d must be under $MASK_ROOT (MASK_ROOT, hidden from actions)" ;; esac
 	done
 	phase packages
-	sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y -qq \
+	# --no-upgrade: this host already advertised worker-env, so add what is
+	# missing but move no installed package (libc6-dev would pull libc6, and
+	# util-linux and procps are measured).
+	sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y -qq --no-upgrade \
 		gcc libc6-dev nftables file util-linux procps >/dev/null
 	phase users
 	# The nft rules cover uids 59000-59063 whatever owns them: anything already
