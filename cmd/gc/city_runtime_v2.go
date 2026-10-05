@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -84,6 +85,16 @@ func (cr *CityRuntime) newV2Host() v2Host {
 		beginTrace:  cr.beginV2Trace,
 		safeTick:    cr.safeTick,
 		stderr:      cr.stderr,
+		// The controller's workers start after boot, and run sets the
+		// inventory lane before the startup step boots the runtime.
+		sessionsStore: cr.v2SessionsStore,
+		observations: func() *ObservationCache {
+			if cr.inventoryLane == nil {
+				return nil
+			}
+			return cr.inventoryLane.cache
+		},
+		rec: cr.rec,
 	}
 }
 
@@ -172,6 +183,19 @@ func (cr *CityRuntime) reloadUnderBarrier(p *tickPass, source reloadSource) {
 		}
 	}
 	_, _ = cr.v2.barrier.run(p.ctx, intent, apply, reply)
+}
+
+// beforeProviderSwap holds a provider swap until every in-flight v2 start
+// effect has committed or failed, so the swap's listing of the old
+// provider's sessions cannot miss a runtime a start is still creating (C4.4
+// step 3, R6). It waits up to the startup timeout plus 10s, then cancels the
+// starts and waits effectCancelBound; past that the reload must abort. A
+// legacy controller has nothing to wait for.
+func (cr *CityRuntime) beforeProviderSwap(cfg *config.City) error {
+	if cr.v2 == nil {
+		return nil
+	}
+	return cr.v2.exec.waitStarts(cfg.Session.StartupTimeoutDuration() + 10*time.Second)
 }
 
 // checkReconcilerWiring refuses runtime params whose v2 runtime and wake

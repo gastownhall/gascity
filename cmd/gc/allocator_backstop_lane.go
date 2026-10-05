@@ -78,12 +78,14 @@ const (
 // ClosedNamed. Immutable once published: readers copy before editing a row.
 type backstopRecording struct {
 	Seq uint64
-	// At is when the pass's reads ended. The recording is fresh through
+	// StartedAt is when the pass's reads started (C5.4(3)), and At when
+	// they ended. The recording is fresh through
 	// Expires: At plus twice the lane interval plus the longest recent pass
 	// (at most cacheLagBound), so a lane keeping its cadence never serves a
 	// stale recording.
-	At      time.Time
-	Expires time.Time
+	StartedAt time.Time
+	At        time.Time
+	Expires   time.Time
 
 	Legs        map[beads.Store]legRecording
 	Sessions    map[beads.Store]sessionLegRecording
@@ -145,7 +147,7 @@ func (r *backstopRecording) sessionLeg(store beads.Store) (censusRecording, bool
 	if !ok {
 		return censusRecording{}, false
 	}
-	return censusRecording{Rows: l.Rows, At: r.At, Expires: r.Expires, Err: l.Err}, true
+	return censusRecording{Rows: l.Rows, StartedAt: r.StartedAt, At: r.At, Expires: r.Expires, Err: l.Err}, true
 }
 
 // leg returns store's recorded demand reads. A nil recording holds no leg.
@@ -167,7 +169,8 @@ func (r *backstopRecording) closedNamed(store beads.Store) (closedNamedRecording
 }
 
 // sameContent reports whether r and o recorded the same legs, rows, indexes
-// and errors. Seq, At, Expires, ScopeGaps and RepairSeq are not content.
+// and errors. Seq, StartedAt, At, Expires, ScopeGaps and RepairSeq are not
+// content.
 func (r *backstopRecording) sameContent(o *backstopRecording) bool {
 	if r == nil || o == nil {
 		return r == o
@@ -308,7 +311,7 @@ func (l *backstopLane) pass(ctx context.Context) bool {
 	}
 	l.passTimes[l.seq%backstopPassWindow] = end.Sub(start)
 	l.seq++
-	next.Seq, next.At, next.Expires = l.seq, end, end.Add(2*l.interval+min(slices.Max(l.passTimes[:]), cacheLagBound))
+	next.Seq, next.StartedAt, next.At, next.Expires = l.seq, start, end, end.Add(2*l.interval+min(slices.Max(l.passTimes[:]), cacheLagBound))
 	if run := l.repairs.Load(); run != nil {
 		next.ScopeGaps, next.RepairSeq = run.gaps, run.seq
 	}
@@ -357,8 +360,8 @@ func (l *backstopLane) passEnv(ctx context.Context) (backstopEnv, bool) {
 // recordBackstop reads every non-exact leg concurrently: the demand legs
 // through legacyDemandReads, the session census legs through the session
 // front door's live ListAll, and the city store's closed named-session index
-// when an on_demand named session can consult it. Seq, At and Expires are the
-// caller's.
+// when an on_demand named session can consult it. Seq, StartedAt, At and
+// Expires are the caller's.
 func recordBackstop(env backstopEnv, stderr io.Writer) *backstopRecording {
 	rec := &backstopRecording{
 		Legs:        make(map[beads.Store]legRecording),

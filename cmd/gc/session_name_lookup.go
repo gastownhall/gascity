@@ -61,11 +61,13 @@ type poolSessionCreateIdentity struct {
 // poolCreateWriteError marks a create error from the row write itself, or
 // from after it: the row may exist (rowID, when known, names it). The v2
 // create effect settles such an error as ambiguous, with its token as the
-// marker, so lag repair decides (C5.4). The message is the cause's, so legacy
-// output is unchanged.
+// marker, so a read started after the settle decides (C5.4(3)). landed marks
+// an error from a write after the row landed, which no refusal class can
+// unwrite. The message is the cause's, so legacy output is unchanged.
 type poolCreateWriteError struct {
-	err   error
-	rowID string
+	err    error
+	rowID  string
+	landed bool
 }
 
 func (e poolCreateWriteError) Error() string { return e.err.Error() }
@@ -419,7 +421,7 @@ func createPoolSessionBeadWithIdentifiers(
 				// Nothing was started under the placeholder; closing as
 				// failed_create releases the identity lease for the next tick.
 				closeFailedCreateBead(sessionFrontDoor(store), info, now, io.Discard)
-				return sessionpkg.Info{}, poolCreateWriteError{err: err, rowID: info.ID}
+				return sessionpkg.Info{}, poolCreateWriteError{err: err, rowID: info.ID, landed: true}
 			}
 			info = info.ApplyPatch(sessionpkg.MetadataPatch{"session_name": want})
 		}

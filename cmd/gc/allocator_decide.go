@@ -15,7 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 // The allocator's decide (P3 spec §4.4 steps 1-14): desire, create plans,
@@ -81,13 +80,11 @@ type allocInputs struct {
 	// Reservations the planning reservations of its create entries.
 	Ledger       []ledgerEntry
 	Reservations []planReservation
-	// CreateVetoes are the ledger's create vetoes (intentLedger.Snapshot), by
-	// plan identity (createIdentity.key; "named:<identity>" for a named
-	// create). One live at Now refuses its identity (AM-N8).
-	CreateVetoes map[string]createVeto
-	// WorktreeRefused is the worktree evidence whose verification failed and
-	// whose verdict stands at Now, by work bead ID (#34).
-	WorktreeRefused map[string]worktree.Spec
+	// Backoff is the backoff table (backoffTable.Snapshot, read after the
+	// ledger). A create record live at Now refuses its plan identity
+	// (AM-N8); a work record live at Now refuses its bead's worktree
+	// evidence while its fingerprint matches (#34).
+	Backoff map[string]backoffRecord
 	// Prev is the last published snapshot, for sticky bindings.
 	Prev *selectionSnapshot
 }
