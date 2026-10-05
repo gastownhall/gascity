@@ -42,6 +42,14 @@ reason = "most response fields are optional under Huma; removal is still a clien
 # variant excludes known types via a `not: {enum: [...]}` list, so each new
 # event type adds an enum value and a oneOf branch. The event vocabulary is
 # an open set by design (consumers must tolerate unknown types).
+#
+# Both overrides are global, not scoped to the event union: oasdiff applies
+# a severity level to its check id across the whole spec. A new value on
+# any response property enum (e.g. RigCreateResponseBody.status, a closed
+# union in the generated TypeScript client) or a new branch on any response
+# property oneOf also passes as INFO. oasdiff severity levels have no path
+# scope, so narrowing these to the event-stream schemas needs a gate-side
+# filter (ga-vbm3ps).
 [[severity]]
 check = "response-property-enum-value-added"
 level = "info"

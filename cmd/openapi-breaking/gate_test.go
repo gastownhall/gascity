@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -168,6 +169,81 @@ func TestEvaluateAppliesWaivers(t *testing.T) {
 	if _, err := evaluate([]finding{mismatched}, p.Waivers); err == nil || !strings.Contains(err.Error(), "target") {
 		t.Fatalf("mismatched waiver target err = %v", err)
 	}
+}
+
+// TestLoadBaseReadsSpecAtGitRef covers the path CI takes: the base spec is
+// read from a commit (-base / $OPENAPI_BREAKING_BASE, else the merge base of
+// HEAD and origin/main), never from the working tree.
+func TestLoadBaseReadsSpecAtGitRef(t *testing.T) {
+	isolateGit(t)
+	t.Chdir(t.TempDir())
+	runGit(t, "init", "--quiet")
+	runGit(t, "config", "user.name", "openapi-breaking test")
+	runGit(t, "config", "user.email", "test@example.com")
+	commitSpec := func(content, msg string) string {
+		t.Helper()
+		path := filepath.FromSlash(defaultRevision)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runGit(t, "add", defaultRevision)
+		runGit(t, "commit", "--quiet", "-m", msg)
+		return strings.TrimSpace(runGit(t, "rev-parse", "HEAD"))
+	}
+	const baseSpec = `{"openapi":"3.1.0","info":{"title":"base","version":"1"}}`
+	base := commitSpec(baseSpec, "base")
+	runGit(t, "update-ref", "refs/remotes/"+defaultUpstream, base)
+	commitSpec(`{"openapi":"3.1.0","info":{"title":"head","version":"2"}}`, "head")
+
+	for name, ref := range map[string]string{"explicit ref": base, "merge-base fallback": ""} {
+		got, err := loadBase(context.Background(), options{BaseRef: ref, Revision: defaultRevision})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if string(got) != baseSpec {
+			t.Errorf("%s: base spec = %s, want the spec committed at %s", name, got, base)
+		}
+	}
+
+	const missing = "no-such-ref"
+	_, err := loadBase(context.Background(), options{BaseRef: missing, Revision: defaultRevision})
+	if err == nil || !strings.Contains(err.Error(), "reading base spec at "+missing) {
+		t.Fatalf("missing ref: err = %v, want an error naming %s", err, missing)
+	}
+}
+
+// isolateGit points every git subprocess in the test, loadBase's included, at
+// the repository in the working directory. A test run from a git hook
+// inherits GIT_DIR, GIT_INDEX_FILE, and friends for the outer repository.
+// System and global git config are ignored too.
+func isolateGit(t *testing.T) {
+	t.Helper()
+	for _, kv := range os.Environ() {
+		key, _, _ := strings.Cut(kv, "=")
+		if !strings.HasPrefix(key, "GIT_") {
+			continue
+		}
+		t.Setenv(key, "") // restores the inherited value after the test
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+}
+
+// runGit builds fixtures with gitOutput, the git runner loadBase uses,
+// instead of a second exec.Command call site in test source.
+func runGit(t *testing.T, args ...string) string {
+	t.Helper()
+	out, err := gitOutput(context.Background(), args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
 }
 
 func readFixture(t *testing.T, name string) []byte {

@@ -786,7 +786,10 @@ jobs:
       # Make TestGeneratedClientInSync fatal on missing oapi-codegen so the
       # spec->client drift check can never silently skip in CI.
       GC_REQUIRE_OAPI_CODEGEN: "1"
-      # Merge-base side of the OpenAPI breaking-change gate (cmd/openapi-breaking).
+      # Base side of the OpenAPI breaking-change gate (cmd/openapi-breaking):
+      # the PR base commit from the event payload, normally the base of the
+      # checked-out test merge ("Merge <head> into <base>"); github.sha on
+      # non-PR events.
       OPENAPI_BREAKING_BASE: ${{ github.event.pull_request.base.sha || github.sha }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
