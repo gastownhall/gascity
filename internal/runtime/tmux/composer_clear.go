@@ -309,7 +309,7 @@ func (t *Tmux) emptyInput(target string, in claudeInput, mayType func() error) e
 func (t *Tmux) noClientAttached(session string) error {
 	attached, err := t.SessionAttachedWithError(session)
 	if err != nil {
-		return fmt.Errorf("%w (attachment probe failed: %v)", runtime.ErrInputClearSkipped, err)
+		return fmt.Errorf("%w (attachment probe failed: %w)", runtime.ErrInputClearSkipped, err)
 	}
 	if attached {
 		return fmt.Errorf("%w: a client is attached to session %q", runtime.ErrInputClearSkipped, session)

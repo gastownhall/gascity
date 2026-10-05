@@ -2914,7 +2914,9 @@ func (t *Tmux) nudgeSession(
 		if submitsSent == 0 {
 			return err
 		}
-		return fmt.Errorf("%w: session %q: not re-sent: %v", ErrNudgeSubmitUnconfirmed, session, err)
+		// Report it unconfirmed, not as a pending interaction: the first
+		// submit may already have delivered the message.
+		return fmt.Errorf("%w: session %q: not re-sent: %s", ErrNudgeSubmitUnconfirmed, session, err.Error())
 	}
 	wake := func() { t.WakePaneIfDetached(session) }
 	if t.submitVerifyEligible(target) {
