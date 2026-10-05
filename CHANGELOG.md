@@ -44,6 +44,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response are now priority-ordered.
 
 ### Fixed
+- **The `bd` schema-parity probe no longer leaks a gate-lock file per run,
+  and prefers a RAM-backed temp root on Linux.** `--db <dir>/probe.db` (a
+  flat path, nothing already at `dir`) made bd treat `dir` itself as the
+  workspace root, so its gate lock landed as `dir`'s own sibling,
+  `<dir>.gate.lock`, outside everything the probe's cleanup removes —
+  leaking one file per acceptance run (hundreds observed accumulated in
+  `/var/tmp`). The probe's database now lives one directory level deeper,
+  so the gate lock lands inside the directory that gets removed. On Linux
+  the probe also prefers `/dev/shm` (tmpfs) over the default temp root when
+  it is writable: on a loaded, copy-on-write filesystem (observed:
+  btrfs-backed `/var/tmp` under write load) the probe's fsyncs pushed a
+  sub-second operation past its 60s timeout (#7105).
+
 
 - **`passthroughEnv` now honors `GC_SUPERVISOR_ENV` when deciding which
   non-`GC_`-prefixed variables reach a spawned agent session, not only which

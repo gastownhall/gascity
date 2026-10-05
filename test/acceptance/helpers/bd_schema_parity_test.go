@@ -134,3 +134,84 @@ func TestBdLatestSchemaVersionIsolatesHOMEFromSharedServerConfig(t *testing.T) {
 		t.Fatalf("bdLatestSchemaVersion under a shared-server HOME: %v", err)
 	}
 }
+
+// TestBdLatestSchemaVersionLeavesNoSiblingGateLock is the #7105 regression.
+// --db dir/probe.db (a flat path, nothing already at dir) made bd treat dir
+// ITSELF as the workspace root, so bd's gate lock for it landed as dir's own
+// SIBLING ("dir.gate.lock") in the OS temp root — outside everything
+// RemoveAll(dir) reaches, leaking one file per probe run (observed:
+// hundreds accumulated in /var/tmp). Nesting the db one level deeper makes
+// the gate lock land as a sibling of THAT inner directory instead, which
+// is still inside dir and so still removed.
+func TestBdLatestSchemaVersionLeavesNoSiblingGateLock(t *testing.T) {
+	bdPath := RequireBD(t)
+
+	root := bdSchemaProbeTempRoot()
+	if root == "" {
+		root = os.TempDir()
+	}
+	before, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read temp root before probe: %v", err)
+	}
+	seenBefore := make(map[string]bool, len(before))
+	for _, e := range before {
+		seenBefore[e.Name()] = true
+	}
+
+	if _, err := bdLatestSchemaVersion(bdPath); err != nil {
+		t.Fatalf("bdLatestSchemaVersion: %v", err)
+	}
+
+	after, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read temp root after probe: %v", err)
+	}
+	for _, e := range after {
+		if seenBefore[e.Name()] {
+			continue
+		}
+		if strings.HasPrefix(e.Name(), "gc-bd-schema-probe-") {
+			t.Errorf("probe left a leaked entry in the temp root: %s", e.Name())
+		}
+	}
+}
+
+// TestWritableDirOrEmpty pins the probe's temp-root preference check (#7105)
+// against a real writable directory, a path that does not exist, and a path
+// that exists but is not a directory.
+func TestWritableDirOrEmpty(t *testing.T) {
+	t.Run("a real writable directory is returned", func(t *testing.T) {
+		dir := t.TempDir()
+		if got := writableDirOrEmpty(dir); got != dir {
+			t.Errorf("writableDirOrEmpty(%q) = %q, want %q", dir, got, dir)
+		}
+	})
+	t.Run("a nonexistent directory falls back to empty", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "does-not-exist")
+		if got := writableDirOrEmpty(dir); got != "" {
+			t.Errorf("writableDirOrEmpty(%q) = %q, want empty", dir, got)
+		}
+	})
+	t.Run("a file, not a directory, falls back to empty", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "not-a-dir")
+		if err := os.WriteFile(file, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := writableDirOrEmpty(file); got != "" {
+			t.Errorf("writableDirOrEmpty(%q) = %q, want empty", file, got)
+		}
+	})
+}
+
+// TestBdSchemaProbeTempRootIsLinuxOnly pins the platform gate: the /dev/shm
+// preference must never activate outside Linux, where tmpfs is not a
+// universal assumption.
+func TestBdSchemaProbeTempRootIsLinuxOnly(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("this pins the non-Linux fallback; /dev/shm selection needs a Linux runner")
+	}
+	if got := bdSchemaProbeTempRoot(); got != "" {
+		t.Errorf("bdSchemaProbeTempRoot() on %s = %q, want empty (Linux-only preference)", runtime.GOOS, got)
+	}
+}

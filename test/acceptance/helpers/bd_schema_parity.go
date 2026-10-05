@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"time"
 
@@ -82,7 +83,7 @@ func abs(n int) int {
 // and no server when handed an explicit --db, so this costs one sub-second
 // process and touches nothing the suite cares about.
 func bdLatestSchemaVersion(bdPath string) (int, error) {
-	dir, err := os.MkdirTemp("", "gc-bd-schema-probe-*")
+	dir, err := os.MkdirTemp(bdSchemaProbeTempRoot(), "gc-bd-schema-probe-*")
 	if err != nil {
 		return 0, fmt.Errorf("bd schema probe: create temp dir: %w", err)
 	}
@@ -102,7 +103,20 @@ func bdLatestSchemaVersion(bdPath string) (int, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "home"), 0o755); err != nil {
 		return 0, fmt.Errorf("bd schema probe: create tool home: %w", err)
 	}
-	cmd := bdSchemaProbeCommand(ctx, bdPath, dir)
+	// db lives one level under dir, not directly in it: --db dir/probe.db
+	// (a flat, non-directory path with nothing already at dir) makes bd treat
+	// dir ITSELF as the workspace root, and its gate lock lands as dir's own
+	// SIBLING, "dir.gate.lock", outside everything the RemoveAll above
+	// reaches (#7105; confirmed empirically — a flat --db path leaks exactly
+	// that sibling file, hundreds of which were observed accumulated in
+	// /var/tmp). Nesting the db one level deeper makes the gate lock land as
+	// a sibling of THAT inner directory instead, which is still inside dir
+	// and so still removed by the RemoveAll above.
+	dbDir := filepath.Join(dir, "db")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		return 0, fmt.Errorf("bd schema probe: create db dir: %w", err)
+	}
+	cmd := bdSchemaProbeCommand(ctx, bdPath, dir, dbDir)
 	// BEADS_TEST_MODE=1 (beadstest.EnvBeadsTestMode) stops bd spawning the
 	// detached metrics flusher that would race the RemoveAll of dir above.
 	cmd.Env = append(cmd.Env, "BEADS_TEST_MODE=1")
@@ -117,7 +131,49 @@ func bdLatestSchemaVersion(bdPath string) (int, error) {
 	return version, nil
 }
 
-// bdSchemaProbeCommand builds the probe's `bd migrate schema` under dir.
+// bdSchemaProbeTempRoot returns a RAM-backed temp root for the probe's
+// throwaway database, or "" to fall back to os.MkdirTemp's own default (the
+// OS temp dir, honoring TMPDIR).
+//
+// The probe runs a real embedded-Dolt open and migration, which fsyncs. On a
+// loaded, copy-on-write filesystem — observed: btrfs-backed /var/tmp under
+// concurrent write load — that pushed a sub-second operation past the 60s
+// timeout (one measured run: 69.41s wall, 4.8s CPU, 539 fsyncs, threads
+// parked in btrfs wait_log_commit; #7105). /dev/shm is tmpfs on every Linux
+// this suite targets, so the probe's lack of any real durability requirement
+// costs nothing there. Every other platform, and a Linux host where /dev/shm
+// is missing or unusable (containers sometimes restrict it), keeps the OS
+// default.
+func bdSchemaProbeTempRoot() string {
+	if runtime.GOOS != "linux" {
+		return ""
+	}
+	return writableDirOrEmpty("/dev/shm")
+}
+
+// writableDirOrEmpty returns dir if it exists, is a directory, and a file can
+// actually be created in it, or "" otherwise.
+//
+// The actual-write check matters beyond the stat: a read-only or
+// space-exhausted /dev/shm (some containers restrict it) must fall back
+// silently rather than let the probe that follows fail on it.
+func writableDirOrEmpty(dir string) string {
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+	probe, err := os.MkdirTemp(dir, "gc-bd-schema-probe-writable-*")
+	if err != nil {
+		return ""
+	}
+	_ = os.RemoveAll(probe)
+	return dir
+}
+
+// bdSchemaProbeCommand builds the probe's `bd migrate schema` against
+// dbDir/probe.db, with dir as the process's working directory and the root of
+// its isolated HOME. dbDir must be a subdirectory of dir (see the nesting note
+// in bdLatestSchemaVersion) so bd's gate lock for it is removed along with dir.
 //
 // TestMain runs it before any Env exists, so it cannot borrow one: it runs with
 // the test process's environment re-homed under dir (IsolatedToolEnv). With the
@@ -125,8 +181,8 @@ func bdLatestSchemaVersion(bdPath string) (int, error) {
 // `dolt.shared-server: true` turned this "throwaway SQLite" probe into a dial of
 // the operator's shared Dolt server, plus machine-id and metrics writes under
 // the operator's ~/.beads and ~/.config/bd.
-func bdSchemaProbeCommand(ctx context.Context, bdPath, dir string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, bdPath, "migrate", "schema", "--db", filepath.Join(dir, "probe.db")) //nolint:gosec // caller-supplied test binary
+func bdSchemaProbeCommand(ctx context.Context, bdPath, dir, dbDir string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, bdPath, "migrate", "schema", "--db", filepath.Join(dbDir, "probe.db")) //nolint:gosec // caller-supplied test binary
 	cmd.Dir = dir
 	cmd.Env = IsolatedToolEnv(os.Environ(), filepath.Join(dir, "home"))
 	return cmd
