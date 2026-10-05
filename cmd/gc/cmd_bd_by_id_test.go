@@ -2659,34 +2659,44 @@ func TestBdByIDUnservedReadOfAMigratedBeadIsRefusedNotAnsweredFromTheRetainedCop
 	}
 	resetCLIStorageRoutes(t)
 
-	for name, args := range map[string][]string{
-		"an unimplemented show flag":      {"show", "--long", step.ID},
-		"a trailing unimplemented flag":   {"show", step.ID, "--include-comments"},
-		"a second positional id":          {"show", step.ID, root.ID},
-		"the relocated id second":         {"show", plain.ID, step.ID},
-		"a root flag before the verb":     {"--actor", "someone", "show", "--long", step.ID},
-		"the id behind --id":              {"show", "--id", step.ID, "--long"},
-		"a multi-subject dep list":        {"dep", "list", plain.ID, step.ID},
-		"a multi-subject dep tree":        {"dep", "tree", plain.ID, step.ID},
-		"after the end-of-flags marker":   {"show", "--long", "--", step.ID},
-		"a value flag before the subject": {"show", "--as-of", "HEAD", "--long", step.ID},
+	binding, _, err := cliSoleClassBinding(cityPath)
+	if err != nil {
+		t.Fatalf("resolving the class binding: %v", err)
+	}
+	for name, tc := range map[string]struct {
+		args  []string
+		verb  string
+		shape string
+	}{
+		"an unimplemented show flag":      {[]string{"show", "--long", step.ID}, "show", "with --long"},
+		"a trailing unimplemented flag":   {[]string{"show", step.ID, "--include-comments"}, "show", "with --include-comments"},
+		"a second positional id":          {[]string{"show", step.ID, root.ID}, "show", "with more than one id"},
+		"the relocated id second":         {[]string{"show", plain.ID, step.ID}, "show", "with more than one id"},
+		"a flag and a second id":          {[]string{"show", "--json", plain.ID, "--long", step.ID}, "show", "with --long and more than one id"},
+		"a root flag before the verb":     {[]string{"--actor", "someone", "show", "--long", step.ID}, "show", "with --long"},
+		"only a root flag":                {[]string{"--actor", "someone", "show", step.ID}, "show", "with --actor"},
+		"the id behind --id":              {[]string{"show", "--id", step.ID, "--long"}, "show", "with --id"},
+		"a multi-subject dep list":        {[]string{"dep", "list", plain.ID, "--direction", "up", step.ID}, "dep list", "with more than one id"},
+		"a multi-subject dep tree":        {[]string{"dep", "tree", plain.ID, step.ID}, "dep tree", "with more than one id"},
+		"after the end-of-flags marker":   {[]string{"show", "--long", "--", step.ID}, "show", "with --long"},
+		"a value flag before the subject": {[]string{"show", "--as-of", "HEAD", step.ID}, "show", "with --as-of"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			resetCLIStorageRoutes(t)
 			var stdout, stderr bytes.Buffer
-			code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr)
+			code, handled := maybeRouteBdByID(cityPath, "", tc.args, &stdout, &stderr)
 			if !handled {
-				t.Fatalf("%v fell through to the bd subprocess, which answers from the retained work-store copy", args)
+				t.Fatalf("%v fell through to the bd subprocess, which answers from the retained work-store copy", tc.args)
 			}
 			if code != 1 {
-				t.Fatalf("%v exited %d; an unserved read of a relocated bead must refuse: %s", args, code, stderr.String())
+				t.Fatalf("%v exited %d; an unserved read of a relocated bead must refuse: %s", tc.args, code, stderr.String())
 			}
-			got := stderr.String()
-			if !strings.Contains(got, step.ID) || !strings.Contains(got, "class binding") || !strings.Contains(got, "is not served in process") {
-				t.Fatalf("the refusal for %v does not name the bead, the binding and the unserved spelling: %q", args, got)
+			want := fmt.Sprintf("gc bd: %s is owned by the %s class binding, and `gc bd %s` %s is not served in process; refusing rather than running it against the work store, which does not hold the authoritative copy — read each id on its own: `gc bd %s <id>`\n", step.ID, binding.Name, tc.verb, tc.shape, tc.verb)
+			if got := stderr.String(); got != want {
+				t.Fatalf("refusal for %v:\n got %q\nwant %q", tc.args, got, want)
 			}
 			if stdout.Len() != 0 {
-				t.Fatalf("%v printed %q to stdout; a refusal answers nothing", args, stdout.String())
+				t.Fatalf("%v printed %q to stdout; a refusal answers nothing", tc.args, stdout.String())
 			}
 		})
 	}

@@ -923,26 +923,106 @@ var bdByIDShowIDFlags = map[string]bool{"--id": true}
 // than address them, and bd_relocated_classes.go refuses those on its own
 // terms.
 func bdByIDReadSubjects(bdArgs []string) []string {
-	sub, rest, resolved := bdByIDSubcommand(bdArgs)
-	var valueFlags, boolFlags, idValueFlags map[string]bool
-	switch {
-	case resolved && sub == "show":
-		valueFlags, boolFlags, idValueFlags = bdflags.ValueFlags(sub), bdflags.BoolFlags(sub), bdByIDShowIDFlags
-	case resolved && sub == "dep list":
-		valueFlags, boolFlags = bdflags.ValueFlags(sub), bdflags.BoolFlags(sub)
-	case !resolved && bdByIDIsDepTree(bdArgs, rest):
-		rest = rest[1:]
-		valueFlags, boolFlags = bdflags.GlobalValueFlags(), bdflags.GlobalBoolFlags()
-		maps.Copy(valueFlags, bdByIDDepTreeValueFlags)
-		maps.Copy(boolFlags, bdByIDDepTreeBoolFlags)
-	default:
+	manifest, ok := bdByIDReadManifestFor(bdArgs)
+	if !ok {
 		return nil
 	}
-	ids, ambiguous := bdScanPositionalIDs(rest, valueFlags, boolFlags, idValueFlags)
+	ids, ambiguous := bdScanPositionalIDs(manifest.rest, manifest.valueFlags, manifest.boolFlags, manifest.idValueFlags)
 	if ambiguous {
 		return nil
 	}
 	return ids
+}
+
+// bdByIDReadManifest is a by-ID read argv split at its verb, with the flag
+// manifest that verb's tail is scanned against.
+type bdByIDReadManifest struct {
+	// verb is the read as an operator types it: "show", "dep list", "dep tree".
+	verb string
+	// rest is the argv after the verb.
+	rest []string
+	// valueFlags, boolFlags and idValueFlags are bdScanPositionalIDs' inputs.
+	valueFlags, boolFlags, idValueFlags map[string]bool
+}
+
+// bdByIDReadManifestFor resolves the by-ID read verb of bdArgs and its flag
+// manifest; ok=false when the argv is not one of the reads parseBdByIDOp
+// serves.
+func bdByIDReadManifestFor(bdArgs []string) (bdByIDReadManifest, bool) {
+	sub, rest, resolved := bdByIDSubcommand(bdArgs)
+	switch {
+	case resolved && sub == "show":
+		return bdByIDReadManifest{verb: sub, rest: rest, valueFlags: bdflags.ValueFlags(sub), boolFlags: bdflags.BoolFlags(sub), idValueFlags: bdByIDShowIDFlags}, true
+	case resolved && sub == "dep list":
+		return bdByIDReadManifest{verb: sub, rest: rest, valueFlags: bdflags.ValueFlags(sub), boolFlags: bdflags.BoolFlags(sub)}, true
+	case !resolved && bdByIDIsDepTree(bdArgs, rest):
+		valueFlags, boolFlags := bdflags.GlobalValueFlags(), bdflags.GlobalBoolFlags()
+		maps.Copy(valueFlags, bdByIDDepTreeValueFlags)
+		maps.Copy(boolFlags, bdByIDDepTreeBoolFlags)
+		return bdByIDReadManifest{verb: "dep tree", rest: rest[1:], valueFlags: valueFlags, boolFlags: boolFlags}, true
+	}
+	return bdByIDReadManifest{}, false
+}
+
+// bdByIDServedReadFlags are the flags each by-ID read's served parser accepts
+// (parseBdByIDPositional, parseBdDepListArgs, parseBdDepTreeArgs). Any other
+// flag is what kept a read off this surface, and the refusal names it.
+var bdByIDServedReadFlags = map[string]map[string]bool{
+	"show":     {"--json": true},
+	"dep list": {"--json": true, "--direction": true, "--type": true, "-t": true},
+	"dep tree": {"--json": true, "--reverse": true, "--direction": true, "--max-depth": true, "-d": true},
+}
+
+// bdByIDUnservedReadShape describes what kept a by-ID read off this surface:
+// the first flag its served parser does not accept, more than one subject, or
+// both. A flag after the verb is reported first; failing that, a flag before
+// the verb counts, because the served parsers take the verb first. Values of value flags are skipped, so a value is never reported
+// as a flag.
+func bdByIDUnservedReadShape(bdArgs []string, manifest bdByIDReadManifest, subjects []string) string {
+	flag := ""
+	for i := 0; i < len(manifest.rest); i++ {
+		arg := manifest.rest[i]
+		if arg == "--" {
+			break
+		}
+		if !strings.HasPrefix(arg, "-") {
+			continue
+		}
+		name, _, inline := strings.Cut(arg, "=")
+		if !bdByIDServedReadFlags[manifest.verb][name] {
+			flag = name
+			break
+		}
+		if !inline && manifest.valueFlags[name] {
+			i++
+		}
+	}
+	for _, arg := range bdArgs[:len(bdArgs)-len(manifest.rest)] {
+		if flag == "" && strings.HasPrefix(arg, "-") {
+			flag, _, _ = strings.Cut(arg, "=")
+		}
+	}
+	var parts []string
+	if flag != "" {
+		parts = append(parts, flag)
+	}
+	if len(subjects) > 1 {
+		parts = append(parts, "more than one id")
+	}
+	if len(parts) == 0 {
+		return "in this spelling"
+	}
+	return "with " + strings.Join(parts, " and ")
+}
+
+// refuseUnservedClassRead refuses a by-ID READ, in a spelling this surface
+// does not serve, of a bead the class binding holds. It names what made the
+// spelling unserved and the spelling that IS served, because the read itself
+// is answerable: only this shape of it is not.
+func refuseUnservedClassRead(door bdByIDClassDoor, bdArgs []string, manifest bdByIDReadManifest, id string, stderr io.Writer) (int, bool) {
+	shape := bdByIDUnservedReadShape(bdArgs, manifest, bdByIDReadSubjects(bdArgs))
+	fmt.Fprintf(stderr, "gc bd: %s is owned by %s, and `gc bd %s` %s is not served in process; refusing rather than running it against the work store, which does not hold the authoritative copy — read each id on its own: `gc bd %s <id>`\n", id, door.bindingName(), manifest.verb, shape, manifest.verb) //nolint:errcheck // best-effort stderr
+	return 1, true
 }
 
 // bdByIDIsDepTree reports whether an argv bdByIDSubcommand could not resolve
@@ -1074,6 +1154,9 @@ func refuseUnservedClassTarget(door bdByIDClassDoor, bdArgs, classIDs, subjectID
 	// The invocation addresses a bead the class binding holds, in a spelling
 	// this surface does not serve. Forwarding it would run the command against
 	// the one ledger that cannot hold the bead.
+	if manifest, read := bdByIDReadManifestFor(bdArgs); read {
+		return refuseUnservedClassRead(door, bdArgs, manifest, resident, stderr)
+	}
 	return refuseClassOwnedTarget(door, bdByIDRefusedVerb(bdArgs), resident, bdByIDUnservedFlag(bdArgs), stderr)
 }
 
@@ -1225,7 +1308,7 @@ func refuseClassOwnedTarget(door bdByIDClassDoor, verb, id, flag string, stderr 
 	if flag != "" {
 		because = fmt.Sprintf(" (%s has no representation in the class store contract)", flag)
 	}
-	fmt.Fprintf(stderr, "gc bd: %s is owned by %s, and `gc bd %s` is not served in process%s; refusing rather than running it against the work store, which does not hold the bead\n", id, door.bindingName(), verb, because) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "gc bd: %s is owned by %s, and `gc bd %s` is not served in process%s; refusing rather than running it against the work store, which does not hold the authoritative copy\n", id, door.bindingName(), verb, because) //nolint:errcheck // best-effort stderr
 	return 1, true
 }
 
