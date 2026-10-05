@@ -457,6 +457,7 @@ go_test(
     deps = [
         "//internal/agent",
         "//internal/agentutil",
+        "//internal/api/apicontract",
         "//internal/api/apierr",
         "//internal/api/dashboardbff",
         "//internal/api/dashboardspa",
@@ -516,8 +517,6 @@ go_test(
         "@com_github_danielgtaylor_huma_v2//:huma",
         "@com_github_danielgtaylor_huma_v2//sse",
         "@com_github_go_sql_driver_mysql//:mysql",
-        "@com_github_pb33f_libopenapi//:libopenapi",
-        "@com_github_pb33f_libopenapi_validator//:libopenapi-validator",
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
