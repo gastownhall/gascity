@@ -1269,6 +1269,21 @@ type BeadGraphResponse struct {
 // BeadGraphResponseMembership Rule that decided which beads are in Beads: the root, everything carrying gc.root_bead_id == root, plus the root's convoy members when the root is a convoy, and then the transitive parent-child closure taken over all of those — a convoy member brings its own subtree. Both storage tiers are in scope, so a wisp molecule (whose beads are all ephemeral) returns its members rather than reading as empty. Never dependency reachability, which drops dependency-isolated members such as gc.kind=spec sidecars.
 type BeadGraphResponseMembership string
 
+// BeadRedispatchCapHeldPayload defines model for BeadRedispatchCapHeldPayload.
+type BeadRedispatchCapHeldPayload struct {
+	// BeadId ID of the auto-held work bead (also the envelope Subject).
+	BeadId string `json:"bead_id"`
+
+	// Cycles Number of consecutive drain-acked-with-assigned-work cycles observed inside the window before the cap tripped.
+	Cycles int64 `json:"cycles"`
+
+	// RoutedTo The gc.routed_to pool BeadID was stuck looping against, when set.
+	RoutedTo *string `json:"routed_to,omitempty"`
+
+	// SessionId Session bead ID whose drain-ack cycle tripped the cap.
+	SessionId *string `json:"session_id,omitempty"`
+}
+
 // BeadUpdateBody defines model for BeadUpdateBody.
 type BeadUpdateBody struct {
 	// Assignee Assigned agent.
@@ -5516,6 +5531,22 @@ type TypedEventStreamEnvelopeBeadDeleted struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeBeadRedispatchCapHeld defines model for TypedEventStreamEnvelopeBeadRedispatchCapHeld.
+type TypedEventStreamEnvelopeBeadRedispatchCapHeld struct {
+	Actor            string                       `json:"actor"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          BeadRedispatchCapHeldPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeBeadUpdated defines model for TypedEventStreamEnvelopeBeadUpdated.
 type TypedEventStreamEnvelopeBeadUpdated struct {
 	Actor            string                   `json:"actor"`
@@ -7158,6 +7189,23 @@ type TypedTaggedEventStreamEnvelopeBeadDeleted struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld defines model for TypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld.
+type TypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld struct {
+	Actor            string                       `json:"actor"`
+	City             string                       `json:"city"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          BeadRedispatchCapHeldPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeBeadUpdated defines model for TypedTaggedEventStreamEnvelopeBeadUpdated.
@@ -10527,6 +10575,32 @@ func (t *EventPayload) MergeBeadEventPayload(v BeadEventPayload) error {
 	return err
 }
 
+// AsBeadRedispatchCapHeldPayload returns the union data inside the EventPayload as a BeadRedispatchCapHeldPayload
+func (t EventPayload) AsBeadRedispatchCapHeldPayload() (BeadRedispatchCapHeldPayload, error) {
+	var body BeadRedispatchCapHeldPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromBeadRedispatchCapHeldPayload overwrites any union data inside the EventPayload as the provided BeadRedispatchCapHeldPayload
+func (t *EventPayload) FromBeadRedispatchCapHeldPayload(v BeadRedispatchCapHeldPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeBeadRedispatchCapHeldPayload performs a merge with any union data inside the EventPayload, using the provided BeadRedispatchCapHeldPayload
+func (t *EventPayload) MergeBeadRedispatchCapHeldPayload(v BeadRedispatchCapHeldPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsBeadWorktreeReapSkippedPayload returns the union data inside the EventPayload as a BeadWorktreeReapSkippedPayload
 func (t EventPayload) AsBeadWorktreeReapSkippedPayload() (BeadWorktreeReapSkippedPayload, error) {
 	var body BeadWorktreeReapSkippedPayload
@@ -13750,6 +13824,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadDeleted(v Ty
 	return err
 }
 
+// AsTypedEventStreamEnvelopeBeadRedispatchCapHeld returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadRedispatchCapHeld
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadRedispatchCapHeld() (TypedEventStreamEnvelopeBeadRedispatchCapHeld, error) {
+	var body TypedEventStreamEnvelopeBeadRedispatchCapHeld
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeBeadRedispatchCapHeld overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeBeadRedispatchCapHeld
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadRedispatchCapHeld(v TypedEventStreamEnvelopeBeadRedispatchCapHeld) error {
+	v.Type = "bead.redispatch_cap_held"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeBeadRedispatchCapHeld performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadRedispatchCapHeld
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadRedispatchCapHeld(v TypedEventStreamEnvelopeBeadRedispatchCapHeld) error {
+	v.Type = "bead.redispatch_cap_held"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeBeadUpdated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadUpdated
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadUpdated() (TypedEventStreamEnvelopeBeadUpdated, error) {
 	var body TypedEventStreamEnvelopeBeadUpdated
@@ -16440,6 +16542,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeBeadDeadAssigneeReopened()
 	case "bead.deleted":
 		return t.AsTypedEventStreamEnvelopeBeadDeleted()
+	case "bead.redispatch_cap_held":
+		return t.AsTypedEventStreamEnvelopeBeadRedispatchCapHeld()
 	case "bead.updated":
 		return t.AsTypedEventStreamEnvelopeBeadUpdated()
 	case "bead.worktree.reap_skipped":
@@ -16829,6 +16933,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadD
 // MergeTypedTaggedEventStreamEnvelopeBeadDeleted performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadDeleted
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadDeleted(v TypedTaggedEventStreamEnvelopeBeadDeleted) error {
 	v.Type = "bead.deleted"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld() (TypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld, error) {
+	var body TypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld(v TypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld) error {
+	v.Type = "bead.redispatch_cap_held"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld(v TypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld) error {
+	v.Type = "bead.redispatch_cap_held"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -19529,6 +19661,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened()
 	case "bead.deleted":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadDeleted()
+	case "bead.redispatch_cap_held":
+		return t.AsTypedTaggedEventStreamEnvelopeBeadRedispatchCapHeld()
 	case "bead.updated":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadUpdated()
 	case "bead.worktree.reap_skipped":

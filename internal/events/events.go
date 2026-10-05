@@ -183,6 +183,16 @@ const (
 	// drain-ack defect is spreading while this bound quietly absorbs it.
 	// See ga-rxhu2.
 	SessionPoolSlotRetiredAtDrainDeadline = "session.pool_slot_retired_at_drain_deadline"
+	// BeadRedispatchCapHeld fires when the dispatch redispatch-cap guard
+	// (ra-3y4okc, enforceDrainAckAssignedWorkCycleCap) auto-holds a work bead
+	// that accumulated drainAckAssignedWorkCycleCap consecutive
+	// session.drain_acked_with_assigned_work cycles inside its window: a pool
+	// session claimed it, correctly refused to execute or close it,
+	// escalated, and drained — repeatedly, with nothing the dispatcher reads
+	// ever changing. The guard adds the hold:mayor label and clears the
+	// assignee (mirroring the manual fix pattern) so the bead stops looking
+	// dispatch-eligible without a human or lead needing to be awake to act.
+	BeadRedispatchCapHeld = "bead.redispatch_cap_held"
 	// SessionUnknownState fires when the reconciler observes a session bead
 	// whose metadata state it does not recognize. The reconciler skips such
 	// beads (forward-compatible rollback: an older reconciler ignores a newer
@@ -475,6 +485,7 @@ var KnownEventTypes = []string{
 	SessionDrainStopEscalated,
 	SessionStranded,
 	SessionPoolSlotRetiredAtDrainDeadline,
+	BeadRedispatchCapHeld,
 	SessionUnknownState,
 	SessionWakeRefused,
 	SessionResetStalled,
