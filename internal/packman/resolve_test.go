@@ -73,3 +73,30 @@ func TestDefaultConstraint(t *testing.T) {
 		t.Fatalf("DefaultConstraint = %q, want %q", got, "^1.4")
 	}
 }
+
+func TestSelectVersion(t *testing.T) {
+	versions := []string{"0.1.2", "0.1.10", "0.1.6", "0.2.0", "not-semver", "1.0"}
+	cases := []struct {
+		constraint string
+		want       string
+		ok         bool
+	}{
+		{"", "1.0", true},
+		{"0.1.6", "0.1.6", true},
+		{">=0.1.6", "1.0", true},
+		{"^0.1", "0.1.10", true},
+		{"~0.1.6", "0.1.10", true},
+		{">=0.1.2,<0.1.6", "0.1.2", true},
+		{"0.1.7", "", false},
+		{"main", "", false},
+	}
+	for _, tc := range cases {
+		got, ok := SelectVersion(versions, tc.constraint)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("SelectVersion(%q) = %q, %v; want %q, %v", tc.constraint, got, ok, tc.want, tc.ok)
+		}
+	}
+	if got := SortVersions(versions); strings.Join(got, ",") != "0.1.2,0.1.6,0.1.10,0.2.0,1.0" {
+		t.Errorf("SortVersions = %v", got)
+	}
+}

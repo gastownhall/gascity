@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
+	"github.com/gastownhall/gascity/internal/packregistry"
 )
 
 // Typed errors let callers map a failure to a transport-appropriate status
@@ -32,7 +33,9 @@ var (
 	// target scope (or is owned by a city.toml [imports] override). HTTP: 409.
 	ErrImportExists = errors.New("import already exists")
 	// ErrVersionResolveFailed means version/HEAD resolution for a git-backed
-	// source failed. HTTP: 502 (upstream git probe) or 400 depending on caller.
+	// source failed, including a registry release that matches no published
+	// version or whose fetched content does not match its content hash.
+	// HTTP: 502 (upstream git probe) or 400 depending on caller.
 	ErrVersionResolveFailed = errors.New("import version resolution failed")
 	// ErrInstallFailed means the lock sync or lockfile write failed. HTTP: 500.
 	ErrInstallFailed = errors.New("import install failed")
@@ -58,6 +61,9 @@ type AddResult struct {
 	// GitBacked reports whether the resolved source is a git source (and thus
 	// has a lock entry); false for plain local path imports.
 	GitBacked bool
+	// RegistryRelease names the registry release a semver --version resolved
+	// to (for example "main:gascity 0.1.6"); empty when no registry answered.
+	RegistryRelease string
 }
 
 // RemoveResult reports the binding RemoveImport deleted.
@@ -91,6 +97,28 @@ type Deps struct {
 	ResolveVersion    func(cityRoot, source, constraint string) (packman.ResolvedVersion, error)
 	DefaultConstraint func(version string) (string, error)
 	ResolveHeadCommit func(cityRoot, source string) (string, error)
+
+	// LookupRegistryPacks finds the configured-registry catalog packs that
+	// publish a source; a semver --version for such a source resolves against
+	// their release entries instead of git tags. VerifyRegistryRelease checks
+	// the fetched source@commit content against the release hash. Leave nil to
+	// use the Gas City home's registries and the shared repo cache.
+	LookupRegistryPacks   func(source string) (packregistry.PackLookup, error)
+	VerifyRegistryRelease func(source, commit, hash string) error
+}
+
+func (d Deps) lookupRegistryPacks() func(string) (packregistry.PackLookup, error) {
+	if d.LookupRegistryPacks != nil {
+		return d.LookupRegistryPacks
+	}
+	return lookupRegistryPacks
+}
+
+func (d Deps) verifyRegistryRelease() func(string, string, string) error {
+	if d.VerifyRegistryRelease != nil {
+		return d.VerifyRegistryRelease
+	}
+	return verifyRegistryRelease
 }
 
 func (d Deps) syncLock() func(string, map[string]config.Import, packman.InstallMode) (*packman.Lockfile, error) {
@@ -171,31 +199,59 @@ func (d Deps) fenceSource(source string) error {
 // pack existing in the tree at all (gastownhall/gascity#3659). The returned
 // error already carries the transport-mapped sentinel (ErrInvalidSource or
 // ErrVersionResolveFailed).
-func (d Deps) resolveImportVersion(cityRoot, source, versionConstraint string, gitBacked, localHead bool) (string, error) {
+//
+// A semver constraint for a source a configured registry publishes resolves
+// against that registry's release entries and is written as the release's
+// "sha:<commit>" pin; the returned registryPin carries the release hash the
+// caller verifies once the content is fetched. Any other constraint is
+// written as given and resolved against git tags at lock time.
+func (d Deps) resolveImportVersion(cityRoot, source, versionConstraint string, gitBacked, localHead bool) (importVersion, error) {
 	if !gitBacked {
 		if versionConstraint != "" {
-			return "", fmt.Errorf("%w: --version is only valid for git-backed imports", ErrInvalidSource)
+			return importVersion{}, fmt.Errorf("%w: --version is only valid for git-backed imports", ErrInvalidSource)
 		}
-		return "", nil
+		return importVersion{}, nil
 	}
 	if hasRepositoryRefInSource(source) {
-		return "", fmt.Errorf("%w: embed refs in --version, not in the source URL", ErrInvalidSource)
+		return importVersion{}, fmt.Errorf("%w: embed refs in --version, not in the source URL", ErrInvalidSource)
 	}
 	if versionConstraint != "" {
-		return versionConstraint, nil
+		if strings.HasPrefix(versionConstraint, "sha:") {
+			return importVersion{version: versionConstraint}, nil
+		}
+		pin, unavailable, err := d.resolveRegistryRelease(source, versionConstraint)
+		if err != nil {
+			return importVersion{}, err
+		}
+		if pin != nil {
+			return importVersion{version: "sha:" + pin.commit, registry: pin}, nil
+		}
+		return importVersion{version: versionConstraint, registryUnavailable: unavailable}, nil
 	}
 	if localHead {
 		commit, err := d.resolveHeadCommit()(cityRoot, source)
 		if err != nil {
-			return "", fmt.Errorf("%w: %w", ErrVersionResolveFailed, err)
+			return importVersion{}, fmt.Errorf("%w: %w", ErrVersionResolveFailed, err)
 		}
-		return "sha:" + commit, nil
+		return importVersion{version: "sha:" + commit}, nil
 	}
 	version, err := d.defaultImportVersionForSource(cityRoot, source)
 	if err != nil {
-		return "", fmt.Errorf("%w: %w", ErrVersionResolveFailed, err)
+		return importVersion{}, fmt.Errorf("%w: %w", ErrVersionResolveFailed, err)
 	}
-	return version, nil
+	return importVersion{version: version}, nil
+}
+
+// importVersion is the resolved manifest version for an add plus how it was
+// resolved.
+type importVersion struct {
+	// version is the value written to the manifest.
+	version string
+	// registry is set when a registry release answered a semver constraint.
+	registry *registryPin
+	// registryUnavailable records registries that could not be read while
+	// looking the source up; it annotates a later git-tag failure.
+	registryUnavailable error
 }
 
 // AddImport resolves source once and writes it as a durable [imports.<name>]
@@ -251,10 +307,11 @@ func AddImportWith(fs fsys.FS, cityPath, source, nameOverride, versionConstraint
 		}
 	}
 
-	version, err := deps.resolveImportVersion(cityPath, source, versionConstraint, gitBacked, localHead)
+	resolved, err := deps.resolveImportVersion(cityPath, source, versionConstraint, gitBacked, localHead)
 	if err != nil {
 		return nil, err
 	}
+	version := resolved.version
 
 	scope.imports[name] = config.Import{
 		Source:  source,
@@ -267,7 +324,15 @@ func AddImportWith(fs fsys.FS, cityPath, source, nameOverride, versionConstraint
 	allImports[scope.syntheticKey(name)] = scope.imports[name]
 	lock, err := deps.syncLock()(cityPath, allImports, packman.InstallResolveIfNeeded)
 	if err != nil {
+		if resolved.registryUnavailable != nil {
+			return nil, fmt.Errorf("%w: %w (pack registries were not all readable, so a registry release for this source may have been missed: %w)", ErrInstallFailed, err, resolved.registryUnavailable)
+		}
 		return nil, fmt.Errorf("%w: %w", ErrInstallFailed, err)
+	}
+	if pin := resolved.registry; pin != nil {
+		if err := deps.verifyRegistryRelease()(source, pin.commit, pin.hash); err != nil {
+			return nil, fmt.Errorf("%w: registry release %s (commit %s) failed content verification: %w", ErrVersionResolveFailed, pin, pin.commit, err)
+		}
 	}
 	if err := scope.save(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInstallFailed, err)
@@ -275,12 +340,16 @@ func AddImportWith(fs fsys.FS, cityPath, source, nameOverride, versionConstraint
 	if err := deps.writeLockfile()(fs, cityPath, lock); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInstallFailed, err)
 	}
-	return &AddResult{
+	result := &AddResult{
 		Name:      name,
 		Source:    source,
 		Version:   version,
 		GitBacked: gitBacked,
-	}, nil
+	}
+	if pin := resolved.registry; pin != nil {
+		result.RegistryRelease = pin.String()
+	}
+	return result, nil
 }
 
 // RemoveImport deletes the binding name from its owning scope (rig, root pack,
