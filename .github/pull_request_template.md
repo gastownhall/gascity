@@ -1,8 +1,9 @@
 Closes #
 
-<!-- Gas City is issue-first: link an issue marked `status/accepted`. The issue
-already holds the motivation, impact, and risk; this description covers what
-changed and the evidence that it works. See CONTRIBUTING.md. -->
+<!-- Every pull request links a documented issue (file it first or alongside;
+no approval needed). The issue holds the motivation, impact, and risk; this
+description covers what changed and the evidence that it works. See
+CONTRIBUTING.md. -->
 
 ## What changed
 

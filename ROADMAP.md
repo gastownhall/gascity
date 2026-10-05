@@ -13,11 +13,10 @@ release.
   reviewed first. Work outside them is still welcome, but expect it to wait.
 - **Tracking.** Each priority area has one tracking issue on GitHub. Its
   sub-issues are the work; their state is the progress report.
-- **Proposing work.** Gas City is issue-first. File an issue with the feature
-  form (motivation, impact, risk, verification); maintainers mark it
-  `status/accepted` before a pull request is reviewed. To propose a new
-  priority area, open an issue and tag the roadmap owner. See
-  [CONTRIBUTING.md](CONTRIBUTING.md).
+- **Proposing work.** Every pull request links a documented issue. File one
+  with the feature form (motivation, impact, risk, verification) before or
+  alongside your pull request. To propose a new priority area, open an issue
+  and tag the roadmap owner. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Priority areas for 1.6
 
@@ -57,10 +56,10 @@ benchmark exists.
 
 **Goal.** A new contributor, human or agent, finds the rules for the code
 they are changing next to that code, understands its intent and invariants,
-and lands a change through the issue-first flow.
+and lands a change with a documented issue and pull request.
 
 **This period.**
-- Slim root `AGENTS.md`, colocated area rules, and issue-first intake
+- Slim root `AGENTS.md`, colocated area rules, and documented-issue intake
   ([#7090](https://github.com/gastownhall/gascity/pull/7090)).
 - Per-package `AGENTS.md` files for the busiest packages: `cmd/gc`,
   `internal/beads`, and `internal/dispatch`, each naming its guard tests.

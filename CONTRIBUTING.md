@@ -51,28 +51,27 @@ changes, also smoke the built app with
 
 ## Development Workflow
 
-Gas City is **issue-first for everyone**, maintainers included. GitHub Issues
-is the public tracker; a pull request is a proposed solution to an issue that
-maintainers have already accepted.
+Every pull request links a documented issue, maintainers included. GitHub
+Issues is the public tracker, and the issue is where the context lives: why
+the change is needed, what it affects, and how we will know it works. The
+issue does not need maintainer approval before you open the pull request;
+file it first or alongside.
 
 1. Find or file an issue. Use the issue forms: they ask for the motivation,
-   impact, risk, and verification plan up front, which is most of what review
-   needs.
-2. Wait for `status/accepted` (see [Issue Triage Labels](#issue-triage-labels)).
-   Small, obvious bug fixes can be accepted quickly; anything that adds SDK
-   surface goes through the [Primitive Test](engdocs/contributors/primitive-test.md)
-   first.
-3. Create a branch from `main` (see [Branch Naming](#branch-naming)) and make
+   impact, risk, and verification plan (or, for a bug, the reproduction and
+   impact), which is most of what review needs. Changes that add SDK surface
+   should explain how they pass the
+   [Primitive Test](engdocs/contributors/primitive-test.md).
+2. Create a branch from `main` (see [Branch Naming](#branch-naming)) and make
    the change.
-4. Run `make check`, and `make check-docs` if you touched docs, navigation,
+3. Run `make check`, and `make check-docs` if you touched docs, navigation,
    or cross-links.
-5. Open a pull request whose description says `Closes #<issue>` and shows
+4. Open a pull request whose description says `Closes #<issue>` and shows
    evidence that the change works end to end.
 
-Pull requests without an accepted issue may be closed with a pointer back to
-this section. Using an AI agent is fine; you are accountable for what it
-produces. Agents working in this repo read [AGENTS.md](AGENTS.md), which
-carries the same rules.
+Using an AI agent is fine; you are accountable for what it produces. Agents
+working in this repo read [AGENTS.md](AGENTS.md), which carries the same
+rules.
 
 What is planned next is in [ROADMAP.md](ROADMAP.md).
 
@@ -292,7 +291,7 @@ this ladder:
 | `status/needs-info` | Waiting on the reporter for details | Maintainers / automation |
 | `status/needs-repro` | Cannot be investigated without a reproduction | Maintainers / automation |
 | `status/needs-design` | Real need, but the approach must be agreed before code | Maintainers |
-| `status/accepted` | Approved — a pull request that closes this issue is welcome | Maintainers only |
+| `status/accepted` | Confirmed and on our radar | Maintainers only |
 | `status/help-wanted` | Accepted and explicitly open to outside contributors | Maintainers only |
 
 `kind/*` says what the issue is (bug, feature, docs, chore, ...) and
