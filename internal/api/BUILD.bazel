@@ -252,6 +252,7 @@ go_test(
         "agent_resolution_test.go",
         "apierr_guard_test.go",
         "apierr_roundtrip_test.go",
+        "bead_close_event_test.go",
         "bead_close_reason_test.go",
         "blocking_test.go",
         "blocking_validation_test.go",
