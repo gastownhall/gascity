@@ -709,6 +709,10 @@ jobs:
           fi
           dolt version
       - name: Proxied-native lifecycle and safety, and the proxied idle timeout
+        env:
+          # The idle-timeout row is gated with the topology matrix's switch so
+          # Tier A skips it; this job is where it runs.
+          GC_ACCEPTANCE_TOPOLOGY_MATRIX: "1"
         run: |
           set -euo pipefail
           go test -tags acceptance_a -timeout 45m -count=1 -v \
