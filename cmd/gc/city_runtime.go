@@ -113,13 +113,13 @@ type CityRuntime struct {
 	// drainedLastTick records, per suspended scope root, whether its sessions
 	// were already drained on the previous tick (retireSuspendedScopes).
 	drainedLastTick map[string]bool
-	cityPath       string
-	cityName       string
-	configName     string
-	tomlPath       string
-	watchTargets   []config.WatchTarget
-	configRev      string
-	configDirty    *atomic.Bool
+	cityPath        string
+	cityName        string
+	configName      string
+	tomlPath        string
+	watchTargets    []config.WatchTarget
+	configRev       string
+	configDirty     *atomic.Bool
 	// configDebounce is the config watcher's coalesce window; zero selects
 	// defaultConfigDebounce.
 	configDebounce time.Duration

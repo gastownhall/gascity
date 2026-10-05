@@ -309,7 +309,7 @@ func TestQuiescentCityTickTouchesNoStore(t *testing.T) {
 type countingOrderDispatcher struct{ dispatches int }
 
 func (d *countingOrderDispatcher) dispatch(context.Context, string, time.Time) { d.dispatches++ }
-func (d *countingOrderDispatcher) drain(context.Context) bool             { return true }
+func (d *countingOrderDispatcher) drain(context.Context) bool                  { return true }
 
 // A suspended city gets no order pass: neither dispatch nor the tracking and
 // mail watchdogs, which read every scope's store.
