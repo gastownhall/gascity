@@ -23,6 +23,8 @@ const (
 	hermeticCCToolchains   = `register_toolchains("@llvm_toolchain//:all")`
 	hermeticCCSysrootLabel = "@cc_sysroot_noble_amd64//:sysroot"
 	hermeticCCLLVMLabel    = "@llvm_dist_linux_x86_64//:BUILD.bazel"
+	// Every other host's stock LLVM release (toolchains_llvm's sha256 table).
+	hermeticCCHostLLVMLabel = "@llvm_dist_host//:BUILD.bazel"
 )
 
 var (
@@ -79,6 +81,22 @@ func checkHermeticCCModule(module string) []error {
 	}
 	if _, err := moduleCall(module, "llvm.toolchain_root", hermeticCCLLVMLabel); err != nil {
 		errs = append(errs, err)
+	}
+	// toolchains_llvm creates no stock distribution once any toolchain_root
+	// is set, and fails every build on a host no root covers ("LLVM toolchain
+	// root missing"), so the other hosts (macOS, Linux arm64) need a root
+	// without targets.
+	if root, err := moduleCall(module, "llvm.toolchain_root", hermeticCCHostLLVMLabel); err != nil {
+		errs = append(errs, err)
+	} else if strings.Contains(root, "targets") {
+		errs = append(errs, errors.New("llvm.toolchain_root naming "+hermeticCCHostLLVMLabel+" must be the fallback (no targets)"))
+	}
+	if dist, err := moduleCall(module, "llvm_host_dist", `name = "llvm_dist_host"`); err != nil {
+		errs = append(errs, err)
+	} else if !strings.Contains(dist, "llvm_version = LLVM_VERSION,") || !strings.Contains(dist, `llvm_versions = {"": LLVM_VERSION},`) {
+		// The bare `llvm` rule reads llvm_versions (llvm_toolchain's macro
+		// fills it in from llvm_version; use_repo_rule does not).
+		errs = append(errs, errors.New("llvm_host_dist must set llvm_version and llvm_versions to LLVM_VERSION, whose per-host sha256 toolchains_llvm pins"))
 	}
 
 	if dist, err := moduleCall(module, "llvm_dist", `name = "llvm_dist_linux_x86_64"`); err != nil {
@@ -180,10 +198,20 @@ llvm_dist(
     sha256 = "` + sum + `",
 )
 
+llvm_host_dist(
+    name = "llvm_dist_host",
+    llvm_version = LLVM_VERSION,
+    llvm_versions = {"": LLVM_VERSION},
+)
+
 llvm.toolchain_root(
     name = "llvm_toolchain",
     label = "` + hermeticCCLLVMLabel + `",
     targets = ["linux-x86_64"],
+)
+llvm.toolchain_root(
+    name = "llvm_toolchain",
+    label = "` + hermeticCCHostLLVMLabel + `",
 )
 llvm.sysroot(
     name = "llvm_toolchain",
@@ -196,15 +224,20 @@ llvm.sysroot(
 		t.Fatalf("good MODULE.bazel fixture: %v", errs)
 	}
 	for name, bad := range map[string]string{
-		"no toolchains_llvm":    strings.Replace(module, `bazel_dep(name = "toolchains_llvm", version = "1.11.0")`, "", 1),
-		"no registration":       strings.Replace(module, hermeticCCToolchains, "", 1),
-		"second registration":   module + `register_toolchains("@local_config_cc//:all")` + "\n",
-		"no sysroot":            strings.Replace(module, "llvm.sysroot(", "llvm.other(", 1),
-		"host LLVM":             strings.Replace(module, "llvm.toolchain_root(", "llvm.other(", 1),
-		"unpinned LLVM":         strings.Replace(module, `    sha256 = "`+sum+`",`+"\n)", "\n)", 1),
-		"moving mirror first":   strings.Replace(module, `"https://snapshot.ubuntu.com/ubuntu/20261001T000000Z/",`, "", 1),
-		"unpinned package":      strings.Replace(module, `_amd64.deb": "`+sum+`"`, `_amd64.deb": ""`, 1),
-		"sysroot other targets": strings.Replace(module, "label = \""+hermeticCCSysrootLabel+"\",\n    targets = [\"linux-x86_64\"]", "label = \""+hermeticCCSysrootLabel+"\",\n    targets = []", 1),
+		"no toolchains_llvm":       strings.Replace(module, `bazel_dep(name = "toolchains_llvm", version = "1.11.0")`, "", 1),
+		"no registration":          strings.Replace(module, hermeticCCToolchains, "", 1),
+		"second registration":      module + `register_toolchains("@local_config_cc//:all")` + "\n",
+		"no sysroot":               strings.Replace(module, "llvm.sysroot(", "llvm.other(", 1),
+		"host LLVM":                strings.Replace(module, "llvm.toolchain_root(", "llvm.other(", 1),
+		"no other-host root":       strings.Replace(module, "label = \""+hermeticCCHostLLVMLabel+"\",", "", 1),
+		"other-host root scoped":   strings.Replace(module, "label = \""+hermeticCCHostLLVMLabel+"\",", "label = \""+hermeticCCHostLLVMLabel+"\",\n    targets = [\"darwin-aarch64\"],", 1),
+		"no other-host dist":       strings.Replace(module, "llvm_host_dist(", "other(", 1),
+		"other-host dist version":  strings.Replace(module, "llvm_version = LLVM_VERSION", `llvm_version = "17.0.6"`, 1),
+		"other-host dist versions": strings.Replace(module, `llvm_versions = {"": LLVM_VERSION},`, "", 1),
+		"unpinned LLVM":            strings.Replace(module, `    sha256 = "`+sum+`",`+"\n)", "\n)", 1),
+		"moving mirror first":      strings.Replace(module, `"https://snapshot.ubuntu.com/ubuntu/20261001T000000Z/",`, "", 1),
+		"unpinned package":         strings.Replace(module, `_amd64.deb": "`+sum+`"`, `_amd64.deb": ""`, 1),
+		"sysroot other targets":    strings.Replace(module, "label = \""+hermeticCCSysrootLabel+"\",\n    targets = [\"linux-x86_64\"]", "label = \""+hermeticCCSysrootLabel+"\",\n    targets = []", 1),
 	} {
 		if len(checkHermeticCCModule(bad)) == 0 {
 			t.Errorf("%s: expected an error for MODULE.bazel fixture:\n%s", name, bad)

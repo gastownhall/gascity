@@ -42,6 +42,11 @@ it), and the runtime libraries the official LLVM binaries load: libstdc++6,
 zlib1g and libxml2. Bazel-built binaries load glibc, libstdc++ and ICU 74
 (`libicu74`) at run time, as on the RBE workers.
 
+Other hosts (macOS arm64, Linux arm64) build with toolchains_llvm's stock
+release of the same LLVM version, also pinned by sha256, but without a
+sysroot: cgo uses the host's C headers and libraries (ICU included), and
+their action keys do not match CI's.
+
 ### 2. Point at the remote cache (the free win)
 
 Create `.bazelrc.local` in the repo root (gitignored) using your team's

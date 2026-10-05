@@ -110,6 +110,22 @@ llvm_dist(
     urls = ["https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz"],
 )
 
+# Every other host (macOS arm64, Linux arm64) runs toolchains_llvm's stock
+# LLVM_VERSION release for its platform, pinned by sha256 in toolchains_llvm's
+# distribution table and fetched only there. Once any toolchain_root is set,
+# toolchains_llvm creates no stock distribution of its own and fails every
+# build on a host no root covers. Not hermetic there: no sysroot, so cgo
+# uses the host's headers and libraries (ICU included), as before.
+llvm_host_dist = use_repo_rule("@toolchains_llvm//toolchain:rules.bzl", "llvm")
+
+llvm_host_dist(
+    name = "llvm_dist_host",
+    llvm_version = LLVM_VERSION,
+    # The bare rule reads the per-host dict; llvm_toolchain's macro would
+    # fill it in from llvm_version.
+    llvm_versions = {"": LLVM_VERSION},
+)
+
 llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
 llvm.toolchain(
     name = "llvm_toolchain",
@@ -122,6 +138,10 @@ llvm.toolchain_root(
     name = "llvm_toolchain",
     label = "@llvm_dist_linux_x86_64//:BUILD.bazel",
     targets = ["linux-x86_64"],
+)
+llvm.toolchain_root(
+    name = "llvm_toolchain",
+    label = "@llvm_dist_host//:BUILD.bazel",
 )
 llvm.sysroot(
     name = "llvm_toolchain",
