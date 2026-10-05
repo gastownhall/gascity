@@ -21,7 +21,12 @@ max_modules="${GC_NATIVE_DEP_MAX_MODULES:-737}"
 # grows the binary ~90KB/day, so 180,000,000 gives ~88 days of headroom.
 # Re-baseline with fresh measurement + growth-rate evidence, not an
 # arbitrary bump, when this next fails.
-max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-180000000}"
+#
+# Re-baselined 2026-10-05 (gc 1.5.1 suspension quiescence, #7115, which was
+# the first PR over the cap): origin/main 6e4eec02b2 measured 179,875,091
+# bytes with this build, and #7115 180,002,151 (+127KB). Growth since 2026-08-29
+# was 7.78MB over 37 days, ~210KB/day, so 190,000,000 gives ~48 days.
+max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-190000000}"
 max_aws_modules="${GC_NATIVE_DEP_MAX_AWS_MODULES:-25}"
 max_azure_modules="${GC_NATIVE_DEP_MAX_AZURE_MODULES:-9}"
 max_dolthub_modules="${GC_NATIVE_DEP_MAX_DOLTHUB_MODULES:-15}"
