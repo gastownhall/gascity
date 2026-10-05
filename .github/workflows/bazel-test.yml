@@ -67,6 +67,7 @@ jobs:
     permissions:
       contents: read
       actions: write # dispatch rbe-worker-pool.yml (pre-warm)
+      issues: read # worker-env drift issues (tools/rbe/worker-env-drift)
     env:
       # Hoisted so the step-level `if:` below can see it. Empty for forks
       # (no secrets) and for rbe=cache/off dispatches: the job then runs
@@ -216,6 +217,29 @@ jobs:
           RBE_FORK_TIER: ${{ steps.fork-status.outputs.tier }}
         run: bash tools/rbe/fork-credential.sh cert
 
+      # worker-env (tools/rbe/worker-env-drift): rbe-west's schedulers match
+      # the worker-env pin exactly, and pool workers serve the default
+      # branch's pin only. A change that moves the pin can't run remotely
+      # before it merges: the remote suite is skipped (pin-moved) and the
+      # last step measures this Blacksmith host against the new manifest
+      # instead, as it does for any change to the worker host (measure). A
+      # remote run on a pin with an open drift issue fails here rather than
+      # queueing for an hour.
+      - name: worker-env preflight
+        id: worker-env
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RBE_FORK_CERT: ${{ steps.fork-cert.outputs.cert }}
+        run: |
+          # Remote exactly when the bazel steps pass --config=remote-exec.
+          if [ -n "$BAZEL_REMOTE_EXECUTOR" ] || [ -n "$RBE_FORK_CERT" ]; then export WORKER_ENV_REMOTE=true; fi
+          git fetch --no-tags --filter=blob:none origin "refs/heads/$DEFAULT_BRANCH"
+          git show FETCH_HEAD:platforms/BUILD.bazel >"$RUNNER_TEMP/worker-env-base.bazel" 2>/dev/null ||
+            : >"$RUNNER_TEMP/worker-env-base.bazel"
+          git diff --name-only FETCH_HEAD HEAD >"$RUNNER_TEMP/worker-env-changed"
+          tools/rbe/worker-env-drift preflight "$RUNNER_TEMP/worker-env-base.bazel" "$RUNNER_TEMP/worker-env-changed"
+
       # One .bazelrc.local for both remote modes, carrying endpoints and
       # credentials only: every key-affecting flag is committed in .bazelrc,
       # so trusted, fork and developer runs hash actions alike. With an
@@ -301,6 +325,7 @@ jobs:
           mkdir -p /tmp/bt
 
       - name: "bazel test //... (+ acceptance)"
+        if: steps.worker-env.outputs.pin-moved != 'true'
         env:
           RBE_FORK_CERT: ${{ steps.fork-cert.outputs.cert }}
         run: |
@@ -355,7 +380,7 @@ jobs:
       # product-side, this step reports without gating. Never on a failed
       # fresh merge: the checkout is then a half-merged PR head.
       - name: "bazel test //test/integration (evidence-only)"
-        if: always() && steps.fresh-merge.outcome != 'failure'
+        if: always() && steps.fresh-merge.outcome != 'failure' && steps.worker-env.outputs.pin-moved != 'true'
         env:
           RBE_FORK_CERT: ${{ steps.fork-cert.outputs.cert }}
         run: |
@@ -425,6 +450,17 @@ jobs:
           flags: bazel-unit
           token: ${{ secrets.CODECOV_TOKEN }}
           verbose: true
+
+      # Last, after every bazel run: provisioning installs the worker toolset,
+      # Go and dolt on this runner, which must not change what the client's
+      # own actions see. The PR's own blacksmith-worker.sh and manifest, on the
+      # Blacksmith image the pool runs: a manifest no worker would measure
+      # can't merge.
+      - name: Measure this Blacksmith host against the worker-env manifest
+        if: always() && steps.worker-env.outputs.measure == 'true'
+        env:
+          WORKER_MODE: measure
+        run: tools/rbe/blacksmith-worker.sh
 
       - name: Upload test logs
         if: failure()

@@ -45,6 +45,13 @@ test --test_env=GC_TEST_REPO_ROOT
 # their GOROOT there (`sudo ln -s "$(go env GOROOT)" /usr/local/go`).
 test --test_env=PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin
 
+# The pinned remote-worker host in every action key: //platforms:rbe_worker's
+# worker-env exec property is the sha256 of its manifest, and rbe-west's
+# schedulers run an action only on a worker that measured that host
+# (platforms/BUILD.bazel, scripts/rbe_worker_env_test.go). Key-affecting, so
+# unconditional: local, fork-cache and remote runs hash alike.
+build --extra_execution_platforms=//platforms:rbe_worker
+
 # Remote execution on the NativeLink farm (CI, and maintainers who opt in with
 # a client certificate: TESTING.md "Bazel cache tiers"). The executor endpoint
 # and credentials are environment-specific and deliberately NOT hardcoded here
