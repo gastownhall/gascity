@@ -59,7 +59,8 @@ func loadCityConfigForProxiedIdleTimeout(cityPath string) (*config.City, error) 
 	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
-	cfg, err := loadCityConfig(cityPath, io.Discard)
+	// No builtin pack refresh: resolving a value is a read.
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	if err != nil {
 		return nil, fmt.Errorf("resolve proxied idle timeout: %w", err)
 	}
