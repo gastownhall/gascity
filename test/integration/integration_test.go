@@ -34,11 +34,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
+
 	"github.com/cenkalti/backoff/v4"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 	"github.com/gastownhall/gascity/test/toolhome"
@@ -201,11 +205,27 @@ func TestMain(m *testing.M) {
 		}
 	} else {
 		gcBinary = filepath.Join(integrationToolBinDir, "gc")
-		buildCmd := exec.Command("go", "build", "-o", gcBinary, "./cmd/gc")
-		buildCmd.Dir = findModuleRoot()
-		buildCmd.Env = append(os.Environ(), "CGO_ENABLED=0")
-		if out, err := buildCmd.CombinedOutput(); err != nil {
-			panic("integration: building gc binary: " + err.Error() + "\n" + string(out))
+		// Under bazel the pre-built gc binary ships in runfiles (declared as
+		// a data dep); use it instead of shelling out to `go build`.
+		runfilesGC := ""
+		for _, rf := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
+			if rf == "" {
+				continue
+			}
+			if bin := filepath.Join(rf, "_main", "cmd", "gc", "gc_", "gc"); statOK(bin) {
+				runfilesGC = bin
+				break
+			}
+		}
+		if runfilesGC != "" {
+			gcBinary = runfilesGC
+		} else {
+			buildCmd := exec.Command("go", "build", "-o", gcBinary, "./cmd/gc")
+			buildCmd.Dir = findModuleRoot()
+			buildCmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+			if out, err := buildCmd.CombinedOutput(); err != nil {
+				panic("integration: building gc binary: " + err.Error() + "\n" + string(out))
+			}
 		}
 	}
 
@@ -213,6 +233,12 @@ func TestMain(m *testing.M) {
 		panic("integration: resolving bd override: " + err.Error())
 	} else if ok {
 		realBDBinary = override
+	} else if bazeltest.IsBazel() {
+		// Under bazel the pinned bd ships prebuilt in runfiles as a data dep
+		// (http_archive of the same release the go-test CI installs).
+		if bd := runfilesBinaryAt("bd_bin_v1_3_1", "bd"); bd != "" {
+			realBDBinary = bd
+		}
 	} else {
 		var err error
 		realBDBinary, err = buildPinnedIntegrationBDBinary(tmpDir)
@@ -231,14 +257,24 @@ func TestMain(m *testing.M) {
 	}
 	realBDBinary = wrappedRealBD
 	bdBinary = filepath.Join(integrationToolBinDir, "bd")
-	shimCmd := exec.Command("go", "build", "-o", bdBinary, "./test/integration/filebdshim")
-	shimCmd.Dir = findModuleRoot()
-	shimCmd.Env = append(os.Environ(), "CGO_ENABLED=0")
-	if out, err := shimCmd.CombinedOutput(); err != nil {
-		panic("integration: building bd shim: " + err.Error() + "\n" + string(out))
+	if bazeltest.IsBazel() {
+		// The shim is a bazel-built go_binary shipped in runfiles as a data
+		// dep; no on-worker `go build` (which needs a module cache) required.
+		if shim := runfilesBinary("test/integration/filebdshim/filebdshim_/filebdshim"); shim != "" {
+			bdBinary = shim
+		}
+	} else {
+		shimCmd := exec.Command("go", "build", "-o", bdBinary, "./test/integration/filebdshim")
+		shimCmd.Dir = findModuleRoot()
+		shimCmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+		if out, err := shimCmd.CombinedOutput(); err != nil {
+			panic("integration: building bd shim: " + err.Error() + "\n" + string(out))
+		}
 	}
-	if err := os.Setenv(integrationRealBDBinaryEnv, realBDBinary); err != nil {
-		panic("integration: setting GC_INTEGRATION_REAL_BD: " + err.Error())
+	if realBDBinary != "" {
+		if err := os.Setenv(integrationRealBDBinaryEnv, realBDBinary); err != nil {
+			panic("integration: setting GC_INTEGRATION_REAL_BD: " + err.Error())
+		}
 	}
 
 	if override, ok, err := binaryOverride(integrationDoltBinaryEnv); err != nil {
@@ -248,10 +284,45 @@ func TestMain(m *testing.M) {
 		if err := writeExecShim(doltBinary, override); err != nil {
 			panic("integration: writing dolt shim: " + err.Error())
 		}
+	} else if resolved := runfilesBinaryAt("dolt_bin_v2_2_0", "dolt-linux-amd64/bin/dolt"); resolved != "" {
+		// Prebuilt pinned dolt from runfiles (bazel http_archive data dep);
+		// preferred over PATH so remote workers without a system dolt run the
+		// dolt-backed shapes.
+		doltBinary = filepath.Join(integrationToolBinDir, "dolt")
+		if err := writeExecShim(doltBinary, resolved); err != nil {
+			panic("integration: writing dolt shim: " + err.Error())
+		}
 	} else if resolved, err := exec.LookPath("dolt"); err == nil {
 		doltBinary = filepath.Join(integrationToolBinDir, "dolt")
 		if err := writeExecShim(doltBinary, resolved); err != nil {
 			panic("integration: writing dolt shim: " + err.Error())
+		}
+	}
+
+	// Agents resolve gc/bd/dolt from PATH (their scripts cannot see runfiles
+	// paths), and integrationEnvFor prepends integrationToolBinDir to PATH.
+	// Under bazel gcBinary/bdBinary point directly at runfiles binaries, so
+	// link them into the tool bin dir the way the go-build path materializes
+	// them there. Symlinks keep the 100MB+ gc binary out of every test's
+	// sandbox copy; copy is the fallback when linking fails.
+	for name, bin := range map[string]string{
+		"gc":   gcBinary,
+		"bd":   bdBinary,
+		"dolt": doltBinary,
+	} {
+		if bin == "" || filepath.Dir(bin) == integrationToolBinDir {
+			continue
+		}
+		dst := filepath.Join(integrationToolBinDir, name)
+		_ = os.Remove(dst)
+		if err := os.Symlink(bin, dst); err != nil {
+			data, readErr := os.ReadFile(bin)
+			if readErr != nil {
+				panic("integration: staging " + name + " into tool bin dir: " + readErr.Error())
+			}
+			if err := os.WriteFile(dst, data, 0o755); err != nil {
+				panic("integration: staging " + name + " into tool bin dir: " + err.Error())
+			}
 		}
 	}
 
@@ -454,25 +525,67 @@ func pinnedBdStoreCommandRunner() beads.CommandRunner {
 	}
 }
 
+// pinnedBdStoreCommandRunnerWithEnv keeps direct BdStore integration tests on
+// the same bd shim used by their setup commands. The default runner resolves
+// the ambient process PATH before its per-command environment applies, so
+// using it directly could select a host bd whose schema knowledge predates the
+// pinned Beads module that created the test database. overrides (layered over
+// beadstest.BdSubprocessEnv's defaults) are applied on top of the inherited
+// process environment of every bd invocation; callers pin HOME there so a
+// shared-server config.yaml in the ambient HOME cannot divert them. Its
+// workspaces are bound to a Dolt server (bd init --server-port), so test mode
+// is off unless an override says otherwise: see beadstest.EnvBeadsTestMode.
+func pinnedBdStoreCommandRunnerWithEnv(overrides map[string]string) beads.CommandRunner {
+	env := map[string]string{beadstest.EnvBeadsTestMode: "0"}
+	for k, v := range overrides {
+		env[k] = v
+	}
+	runner := beads.ExecCommandRunnerWithEnv(beadstest.BdSubprocessEnv(env))
+	return func(dir, name string, args ...string) ([]byte, error) {
+		if name == "bd" {
+			name = bdBinary
+		}
+		return runner(dir, name, args...)
+	}
+}
+
 func pinnedIntegrationBeadsModuleVersion() (string, error) {
-	cmd := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "github.com/steveyegge/beads")
+	// `go mod edit -json` reads go.mod alone. `go list -m` would fetch the
+	// module's .info from the proxy, which fails where tests have no network
+	// (rbe-west's fork pool runs actions with loopback only).
+	cmd := exec.Command("go", "mod", "edit", "-json")
 	cmd.Dir = findModuleRoot()
-	out, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("resolve github.com/steveyegge/beads module version: %w\n%s", err, out)
+		return "", fmt.Errorf("resolve github.com/steveyegge/beads module version: %w\n%s", err, stderr.Bytes())
 	}
-	version := strings.TrimSpace(string(out))
-	if version == "" {
-		return "", errors.New("github.com/steveyegge/beads module version is empty")
+	var mod struct {
+		Require []struct {
+			Path    string
+			Version string
+		}
 	}
-	return version, nil
+	if err := json.Unmarshal(out, &mod); err != nil {
+		return "", fmt.Errorf("resolve github.com/steveyegge/beads module version: parse go mod edit -json: %w", err)
+	}
+	for _, req := range mod.Require {
+		if req.Path == "github.com/steveyegge/beads" {
+			if req.Version == "" {
+				return "", errors.New("github.com/steveyegge/beads module version is empty")
+			}
+			return req.Version, nil
+		}
+	}
+	return "", errors.New("go.mod does not require github.com/steveyegge/beads")
 }
 
 // wantPinnedBeadsModuleVersion is the beads module version this suite expects
 // go.mod to pin. TestBDVersionPins in scripts/bd_version_pin_test.go reads it
 // by name out of this file and asserts it matches go.mod — see
 // TestPinnedIntegrationBeadsModuleVersion for why it is a literal.
-const wantPinnedBeadsModuleVersion = "v1.3.1-rc.2"
+const wantPinnedBeadsModuleVersion = "v1.3.1"
 
 func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	version, err := pinnedIntegrationBeadsModuleVersion()
@@ -1244,6 +1357,9 @@ func renderFileStoreBeadList(items []beads.Bead) string {
 
 // findModuleRoot walks up from the current directory to find go.mod.
 func findModuleRoot() string {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	dir, err := os.Getwd()
 	if err != nil {
 		panic("integration: getting cwd: " + err.Error())
@@ -1327,10 +1443,18 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env = filterEnv(env, integrationGCBinaryEnv)
 	env = filterEnv(env, integrationDoltBinaryEnv)
 	env = filterEnv(env, "BEADS_DOLT_AUTO_START")
+	env = filterEnv(env, "GC_DOLT_INIT_LOCK_DIR")
 	if !useDolt {
 		env = append(env, "GC_DOLT=skip")
 	}
 	env = append(env, "GC_HOME="+gcHome)
+	// gc-beads-bd.sh serializes forced reinits on a per-database flock under
+	// $TMPDIR by default, shared by every process on the host. Every test city
+	// initializes the same "hq" database on its own Dolt server, so concurrent
+	// test actions on one worker would queue on one lock (and fail after its
+	// 60s budget under load). Cities that share a Dolt server share a GC_HOME,
+	// so a lock directory under it keeps the serialization the lock exists for.
+	env = append(env, "GC_DOLT_INIT_LOCK_DIR="+filepath.Join(gcHome, "dolt-init-locks"))
 	env = append(env, "XDG_RUNTIME_DIR="+runtimeDir)
 	env = append(env, managedDoltTestModeEnv+"=1")
 	env = append(env, managedDoltTestParentEnv+"="+strconv.Itoa(os.Getpid()))
@@ -1345,7 +1469,30 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	// reliable kill-switch. Mirrors bdRuntimeEnv in cmd/gc/bd_env.go.
 	env = append(env, "BEADS_DOLT_AUTO_START=0")
 	env = pinRealHomeEnv(env)
+	// Seed a global gitconfig under the isolated GC_HOME and point children at
+	// it. The Makefile's TEST_ENV does this via scripts/test-gitconfig-path
+	// (user.name, user.email, beads.role=maintainer); under bazel the ambient
+	// variable is unset and gc subprocesses would read the executing worker's
+	// real global config, which has no beads.role — `gc doctor`'s beads-role
+	// check fails on any machine that never opted in. Writing it per-GC_HOME
+	// keeps every isolated root self-contained.
+	env = replaceEnv(env, "GIT_CONFIG_GLOBAL", ensureIntegrationGitConfig(gcHome))
 	return env
+}
+
+// ensureIntegrationGitConfig writes the isolated global gitconfig mirrors of
+// scripts/test-gitconfig-path into gcHome and returns its path. Panics on
+// failure: a missing beads.role silently breaks agent flows mid-test.
+func ensureIntegrationGitConfig(gcHome string) string {
+	if err := os.MkdirAll(gcHome, 0o755); err != nil {
+		panic("integration: creating GC_HOME for gitconfig: " + err.Error())
+	}
+	path := filepath.Join(gcHome, "gitconfig-global")
+	content := "[user]\n\tname = Gas City Integration Test\n\temail = integration-test@gascity.invalid\n[beads]\n\trole = maintainer\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		panic("integration: writing isolated gitconfig: " + err.Error())
+	}
+	return path
 }
 
 // pinRealHomeEnv pins HOME to the real passwd-db home for the current uid.
@@ -1508,12 +1655,7 @@ func trimmedCommandOutput(binary string, args ...string) (string, error) {
 }
 
 func seedIsolatedDoltConfig(gcHome string) error {
-	doltDir := filepath.Join(gcHome, ".dolt")
-	if err := os.MkdirAll(doltDir, 0o755); err != nil {
-		return err
-	}
-	doltCfg := `{"user.name":"gc-test","user.email":"gc-test@test.local"}`
-	return os.WriteFile(filepath.Join(doltDir, "config_global.json"), []byte(doltCfg), 0o644)
+	return testutil.SeedDoltGlobalConfig(gcHome)
 }
 
 func registerCityCommandEnv(cityDir string, env []string) {
@@ -2363,6 +2505,9 @@ func TestNewIsolatedToolEnvSeedsLocalDoltIdentity(t *testing.T) {
 	if !strings.Contains(string(data), `"user.email":"gc-test@test.local"`) {
 		t.Fatalf("isolated dolt config missing user.email: %s", string(data))
 	}
+	if !strings.Contains(string(data), `"metrics.disabled":"true"`) {
+		t.Fatalf("isolated dolt config leaves dolt usage metrics on (egress to eventsapi.dolthub.com): %s", string(data))
+	}
 }
 
 func TestNewIsolatedToolEnvSkipIdentityModeSkipsConfigWrite(t *testing.T) {
@@ -2658,3 +2803,60 @@ type mainTB struct{ testing.TB }
 
 func (mainTB) Helper()                         {}
 func (mainTB) Logf(format string, args ...any) {}
+
+func statOK(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// runfilesBinaryAt resolves a file inside an external repository (e.g. a
+// prebuilt release binary fetched via http_archive) in the test's runfiles
+// tree, returning "" when absent. Bazel materializes external repos under
+// their canonical name (+http_archive+repo); _repo_mapping maps the apparent
+// name used in BUILD labels to the canonical runfiles path.
+func runfilesBinaryAt(repo, rel string) string {
+	for _, rf := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
+		if rf == "" {
+			continue
+		}
+		for _, cand := range []string{repo, canonicalRunfilesRepo(rf, repo)} {
+			if cand == "" {
+				continue
+			}
+			if bin := filepath.Join(rf, cand, rel); statOK(bin) {
+				return bin
+			}
+		}
+	}
+	return ""
+}
+
+// canonicalRunfilesRepo reads _repo_mapping in the runfiles root and returns
+// the canonical repository name for an apparent one ("" when unmapped).
+func canonicalRunfilesRepo(rf, apparent string) string {
+	data, err := os.ReadFile(filepath.Join(rf, "_repo_mapping"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		parts := strings.Split(line, ",")
+		if len(parts) == 3 && parts[1] == apparent {
+			return parts[2]
+		}
+	}
+	return ""
+}
+
+// runfilesBinary resolves a bazel-built binary from the test's runfiles tree
+// (workspace-relative path) and returns "" when absent.
+func runfilesBinary(rel string) string {
+	for _, rf := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
+		if rf == "" {
+			continue
+		}
+		if bin := filepath.Join(rf, "_main", rel); statOK(bin) {
+			return bin
+		}
+	}
+	return ""
+}

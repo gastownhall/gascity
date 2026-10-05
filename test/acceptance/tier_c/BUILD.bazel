@@ -1,9 +1,36 @@
 load("@rules_go//go:def.bzl", "go_test")
 
+# gazelle:build_tags acceptance_c
+
 go_test(
     name = "tier_c_test",
-    srcs = ["testenv_import_test.go"],
-    deps = ["//internal/testenv"],
+    srcs = [
+        "fresh_install_spawn_test.go",
+        "testenv_import_test.go",
+        "tierc_helpers_test.go",
+        "tierc_test.go",
+    ],
+    data = [
+        "//cmd/gc",
+        "//examples/bd",
+        "//:go.mod",
+        "//:repo_source_tree",
+        # Pinned prebuilt release binaries (see MODULE.bazel): hermetic bd and
+        # dolt for the dolt-backed acceptance shapes, same versions the go-test
+        # CI installs via install-bd-archive.sh / install-dolt-archive.sh.
+        "@bd_bin_v1_3_1//:bd",
+        "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
+    ],
+    deps = [
+        "//internal/config",
+        "//internal/configedit",
+        "//internal/fsys",
+        "//internal/testenv",
+        "//test/acceptance/helpers",
+        "//test/dolttest",
+        "//test/tmuxtest",
+        "@com_github_stretchr_testify//require",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

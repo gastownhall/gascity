@@ -1443,6 +1443,18 @@
           "description": "NudgeDispatcher selects how queued nudges get delivered to running\nsessions. \"legacy\" (default) auto-spawns a per-session `gc nudge poll`\nprocess that polls the file-backed queue every 2s. \"supervisor\" runs\nthe delivery loop inside the city runtime instead, with a unix-socket\nwake fast path triggered by enqueue, eliminating the per-session bd\nshellout storm.",
           "default": "legacy"
         },
+        "session_reconciler": {
+          "type": "string",
+          "enum": [
+            "legacy",
+            "v2",
+            "off",
+            "auto",
+            "require"
+          ],
+          "description": "SessionReconciler selects the controller's session reconciler. \"legacy\"\n(default) runs the tick reconciler. \"v2\" is reserved for the keyed\nreconciler and is refused in this build: a controller configured with it\ndoes not start. The gc-enterprise values \"off\", \"auto\" and \"require\" are\ndeprecated aliases for \"legacy\". Boot-latched: a change applies at the next\ncontroller restart. Leave it unset.",
+          "default": "legacy"
+        },
         "auto_restart_on_drift": {
           "type": "boolean",
           "description": "AutoRestartOnDrift controls whether `gc start` automatically restarts\nthe supervisor when it detects the running supervisor's binary or\npack snapshot has drifted from on-disk state. Nil (unset) defaults\nto true — operators get the correct-by-default behavior. Set to\nfalse as a global kill switch (e.g., for production cities where a\nrebuild on the host should not auto-restart the supervisor).",
@@ -2610,6 +2622,10 @@
           "type": "string",
           "description": "DefaultBranch is the rig repository's mainline branch (e.g. \"main\",\n\"master\", \"develop\"). When set, routing formulas use this as the\ndefault merge target instead of probing origin/HEAD at sling time.\nCaptured by `gc rig add` from the rig's git config; set manually for\nrigs whose mainline isn't reachable via origin/HEAD."
         },
+        "default_merge_strategy": {
+          "type": "string",
+          "description": "DefaultMergeStrategy is the merge strategy `gc sling` stamps on a bead\nrouted into this rig when the caller passes no --merge flag. One of\n\"direct\", \"mr\", or \"local\"; empty leaves the bead unstamped, which\nconsumers read as their own implicit default. Set it to \"mr\" on rigs\nthat deliver work through a pull request instead of a push to the\ntarget branch, so a bare `gc sling` records the shape the rig actually\nuses rather than one every caller has to remember to pass."
+        },
         "suspended": {
           "type": "boolean",
           "description": "Suspended is the deprecated pre-runtime-state suspension flag.\nParsed for backwards compatibility and treated as an alias for\nSuspendedOnStart by [Rig.EffectiveSuspendedOnStart], so existing\ncities with `suspended = true` continue to start their rigs\nsuspended after upgrade. Live suspend/resume commands no longer\nwrite this field. `gc doctor` flags it and offers `--fix` to\nrename to suspended_on_start."
@@ -2709,6 +2725,10 @@
         "default_branch": {
           "type": "string",
           "description": "DefaultBranch overrides the rig's recorded mainline branch."
+        },
+        "default_merge_strategy": {
+          "type": "string",
+          "description": "DefaultMergeStrategy overrides the merge strategy `gc sling` stamps on\nbeads routed into this rig. Set to \"\" to clear the rig's default and go\nback to leaving merge_strategy unstamped."
         },
         "suspended": {
           "type": "boolean",

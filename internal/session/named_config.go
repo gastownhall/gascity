@@ -845,9 +845,21 @@ func FindClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessi
 	if store == nil {
 		return beads.Bead{}, false, nil
 	}
+	candidates, err := NamedSessionIdentityRows(store, identity)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	b, ok := ClosedNamedSessionBeadIn(candidates, sessionName)
+	return b, ok, nil
+}
+
+// NamedSessionIdentityRows lists every bead, open or closed, that records
+// identity as its configured named session identity, newest first. It reads
+// store as given: a cached store answers from its cache, so a caller that
+// must see another process's writes passes a live view.
+func NamedSessionIdentityRows(store beads.Store, identity string) ([]beads.Bead, error) {
 	identity = NormalizeNamedSessionTarget(identity)
-	sessionName = strings.TrimSpace(sessionName)
-	candidates, err := store.List(beads.ListQuery{
+	rows, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{
 			NamedSessionIdentityMetadata: identity,
 		},
@@ -855,8 +867,17 @@ func FindClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessi
 		Sort:          beads.SortCreatedDesc,
 	})
 	if err != nil {
-		return beads.Bead{}, false, fmt.Errorf("listing closed named session beads for %q: %w", identity, err)
+		return nil, fmt.Errorf("listing closed named session beads for %q: %w", identity, err)
 	}
+	return rows, nil
+}
+
+// ClosedNamedSessionBeadIn picks the closed bead to reopen from an identity's
+// rows (NamedSessionIdentityRows): the newest reopen-eligible closed bead
+// whose session_name is sessionName, or, with sessionName empty, the newest
+// one with any session_name, else the newest eligible one.
+func ClosedNamedSessionBeadIn(candidates []beads.Bead, sessionName string) (beads.Bead, bool) {
+	sessionName = strings.TrimSpace(sessionName)
 	var fallback beads.Bead
 	hasFallback := false
 	for _, b := range candidates {
@@ -868,12 +889,12 @@ func FindClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessi
 		}
 		if sessionName != "" {
 			if strings.TrimSpace(b.Metadata["session_name"]) == sessionName {
-				return b, true, nil
+				return b, true
 			}
 			continue
 		}
 		if strings.TrimSpace(b.Metadata["session_name"]) != "" {
-			return b, true, nil
+			return b, true
 		}
 		if !hasFallback {
 			fallback = b
@@ -881,9 +902,9 @@ func FindClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessi
 		}
 	}
 	if hasFallback {
-		return fallback, true, nil
+		return fallback, true
 	}
-	return beads.Bead{}, false, nil
+	return beads.Bead{}, false
 }
 
 func closedNamedSessionReopenEligible(b beads.Bead) bool {

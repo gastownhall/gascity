@@ -910,7 +910,12 @@ func TestCachingStoreListBothTiersUsesCachedWispsByDefault(t *testing.T) {
 	}
 }
 
-func TestCachingStoreApplyEventRecordsBackingVerificationErrorAndAppliesUpdate(t *testing.T) {
+// TestCachingStoreApplyEventRecordsBackingVerificationErrorAndRefetchesUpdate
+// pins that an event conflicting with a recent local write, whose backing
+// verification fails, is not installed as a clean row: the row is marked dirty
+// and the next read takes the backing's answer, so a real external update
+// still wins without trusting an unverified payload.
+func TestCachingStoreApplyEventRecordsBackingVerificationErrorAndRefetchesUpdate(t *testing.T) {
 	t.Parallel()
 
 	backing := &cacheEventVerificationFailStore{Store: NewMemStore()}
@@ -931,16 +936,31 @@ func TestCachingStoreApplyEventRecordsBackingVerificationErrorAndAppliesUpdate(t
 	cache.mu.Lock()
 	delete(cache.beadSeq, bead.ID)
 	cache.mu.Unlock()
+	externalTitle := "external"
+	if err := backing.Update(bead.ID, UpdateOpts{Title: &externalTitle}); err != nil {
+		t.Fatalf("external Update: %v", err)
+	}
 	backing.failNextGet = true
+	seqBefore := cacheMutationSeq(cache)
 
 	cache.ApplyEvent("bead.updated", json.RawMessage(`{"id":"`+bead.ID+`","title":"external"}`))
 
+	cache.mu.RLock()
+	cached := cache.beads[bead.ID]
+	_, dirty := cache.dirty[bead.ID]
+	cache.mu.RUnlock()
+	if !dirty || cached.Title != localTitle {
+		t.Fatalf("after unverifiable event: cached title %q dirty=%v, want the local row fenced dirty", cached.Title, dirty)
+	}
+	if cacheMutationSeq(cache) == seqBefore {
+		t.Fatal("dirty mark without a seq bump; an older scan could clear it")
+	}
 	got, err := cache.Get(bead.ID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Title != "external" {
-		t.Fatalf("Title after verification error = %q, want external", got.Title)
+	if got.Title != externalTitle {
+		t.Fatalf("Title after verification error = %q, want the backing's external", got.Title)
 	}
 	stats := cache.Stats()
 	if stats.ProblemCount == 0 {
@@ -4080,10 +4100,10 @@ func TestCachingStoreDependencyInvalidationPreservesStatusBasedDeferral(t *testi
 
 func TestCachingStoreNotificationPreservesStatusBasedDeferral(t *testing.T) {
 	var payload json.RawMessage
-	cache := NewCachingStore(NewMemStore(), func(_, _, _, _, _ string, _ *[]string, got json.RawMessage) {
+	cache := NewCachingStore(NewMemStore(), func(_ ChangeSource, _, _, _, _, _ string, _ *[]string, got json.RawMessage) {
 		payload = append(payload[:0], got...)
 	})
-	cache.notifyChange("bead.updated", Bead{
+	cache.notifyChange(ChangeLocal, "bead.updated", Bead{
 		ID:                   "gc-deferred",
 		Status:               "open",
 		Type:                 "task",

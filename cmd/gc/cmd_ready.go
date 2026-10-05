@@ -554,11 +554,9 @@ func beadMatchesMetadata(b beads.Bead, want []metadataFieldFilter) bool {
 // here: a second copy of a total order across a package boundary is a copy that
 // drifts, and this one decides which rows a bounded read serves.
 //
-// Imposing it is also what makes the merged set well-ordered at all. Each leg's
-// own order is deterministic but they are not the same order — a caching-wrapped
-// work store emits (priority, created_at, id) while the canonical relocated
-// graph binding emits (created_at, id) with no priority term — so the raw
-// concatenation has no single total order for --limit to cut.
+// Imposing it is also what makes the merged set well-ordered at all. Each leg
+// emits its own rows in canonical order, but a concatenation of sorted legs is
+// not sorted, so the raw merge has no single total order for --limit to cut.
 //
 // An unrecognized order is rejected rather than falling back to the default,
 // which is how a bounded query quietly serves the wrong prefix.

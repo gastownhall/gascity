@@ -26,11 +26,13 @@ go_test(
     srcs = [
         "acp_test.go",
         "activity_test.go",
+        "capacity_test.go",
         "meta_privacy_test.go",
         "pipe_error_test.go",
         "proctable_linux_test.go",
         "protocol_test.go",
         "seams_test.go",
+        "socket_probe_test.go",
         "startup_test.go",
         "stop_grace_test.go",
         "testenv_import_test.go",

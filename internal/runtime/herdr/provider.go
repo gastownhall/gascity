@@ -152,7 +152,7 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	// binding BEFORE the launch. The launch below blocks for seconds (shell
 	// readiness + herdr's TUI detection), and reconcile ticks that fire in
 	// that window read both stores: the pending-create ownership check
-	// (runningSessionMatchesPendingCreateInfo) reads GC_SESSION_ID /
+	// (attributePendingCreateRuntime) reads GC_SESSION_ID /
 	// GC_INSTANCE_TOKEN via GetMeta — with an unseeded sidecar it misreads
 	// the fresh runtime as "live runtime belongs to another session" and
 	// rolls it back mid-boot — and liveness reads the pane binding. tmux gets
@@ -506,7 +506,7 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 	var out bytes.Buffer
 	w := mon.Writer(&out)
 	c.Stdout, c.Stderr = w, w
-	// Cooperative cancellation (execgrace.Apply): deadline expiry interrupts
+	// Cooperative cancellation (execgrace.Apply): deadline expiry sends SIGTERM to
 	// the command's process group first so shell rollback traps run before
 	// the forced kill; the grace doubles as the pipe-closing WaitDelay
 	// (mirrors tmux's runSetupCommand).

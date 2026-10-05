@@ -184,6 +184,7 @@ operator arranges rather than something a program can observe.`,
 		newStoragePreflightCmd(surface, stdout, stderr),
 		newStorageStatusCmd(surface, stdout, stderr),
 		newStorageRecoverCmd(repair, stdout, stderr),
+		newStorageRepairSequenceCmd(surface, stdout, stderr),
 	)
 	return cmd
 }

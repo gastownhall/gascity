@@ -33,12 +33,14 @@ type Fake struct {
 	Zombies                 map[string]bool      // sessions with dead agent processes
 	Attached                map[string]bool      // sessions with attached terminals
 	AttachedSequence        map[string][]bool    // scripted IsAttached results by session
+	AttachedErrors          map[string]error     // per-session IsAttachedWithError errors for testing
 	PeekOutput              map[string]string    // session → canned peek output
 	Activity                map[string]time.Time // session → last activity time
 	StartErrors             map[string]error     // per-session Start errors for testing
 	StopErrors              map[string]error     // per-session Stop errors for testing
 	StopLeavesRunning       map[string]bool      // per-session Stop returns nil without deleting the session
 	PendingInteractions     map[string]*PendingInteraction
+	PendingErrors           map[string]error // per-session Pending errors for testing
 	Responses               map[string][]InteractionResponse
 	SleepCapabilityValue    SessionSleepCapability
 	WaitForIdleErrors       map[string]error
@@ -47,6 +49,7 @@ type Fake struct {
 	ResetTurnErrors         map[string]error
 	InterruptBoundaryErrors map[string]error
 	RemoveMetaErrors        map[string]map[string]error // per-session/key RemoveMeta errors for testing
+	GetMetaErrors           map[string]map[string]error // per-session/key GetMeta errors for testing
 	// WaitForIdleGates blocks WaitForIdle on a per-name channel until the
 	// caller closes it. A nil or absent entry returns the configured
 	// WaitForIdleErrors value immediately. The gate is read under f.mu
@@ -66,11 +69,17 @@ type Fake struct {
 	// NudgeErrors configures Fake.Nudge/Fake.NudgeNow errors per session name;
 	// an absent entry nudges successfully.
 	NudgeErrors map[string]error
+	// ListingUnattested makes Fake.ListRunningComplete report false, modeling
+	// a provider whose ListRunning may omit live sessions.
+	ListingUnattested bool
 }
 
 var (
 	_ ProcessTableScanner = (*Fake)(nil)
 	_ RelaunchProvider    = (*Fake)(nil)
+	_ ListingAttestation  = (*Fake)(nil)
+
+	_ AttachmentObserverWithError = (*Fake)(nil)
 )
 
 // Call records a single method invocation on [Fake].
@@ -128,6 +137,7 @@ func NewFake() *Fake {
 		OrphanedRuntimes:        make(map[string]LiveRuntime),
 		Zombies:                 make(map[string]bool),
 		Attached:                make(map[string]bool),
+		AttachedErrors:          make(map[string]error),
 		AttachedSequence:        make(map[string][]bool),
 		StartErrors:             make(map[string]error),
 		StopErrors:              make(map[string]error),
@@ -141,6 +151,8 @@ func NewFake() *Fake {
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
 		RemoveMetaErrors:        make(map[string]map[string]error),
+		GetMetaErrors:           make(map[string]map[string]error),
+		PendingErrors:           make(map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
 		WaitForIdleStarted:      make(map[string]chan struct{}),
 		RelaunchErrors:          make(map[string]error),
@@ -157,6 +169,7 @@ func NewFailFake() *Fake {
 		OrphanedRuntimes:        make(map[string]LiveRuntime),
 		Zombies:                 make(map[string]bool),
 		Attached:                make(map[string]bool),
+		AttachedErrors:          make(map[string]error),
 		StartErrors:             make(map[string]error),
 		StopErrors:              make(map[string]error),
 		StopLeavesRunning:       make(map[string]bool),
@@ -335,6 +348,24 @@ func (f *Fake) IsAttached(name string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{Method: "IsAttached", Name: name})
+	return f.attachedLocked(name)
+}
+
+// IsAttachedWithError returns the configured AttachedErrors entry for the
+// named session. Without one it answers exactly as [Fake.IsAttached] with a
+// nil error, so tests that never set an error see no difference.
+func (f *Fake) IsAttachedWithError(name string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "IsAttachedWithError", Name: name})
+	if err := f.AttachedErrors[name]; err != nil {
+		return false, err
+	}
+	return f.attachedLocked(name), nil
+}
+
+// attachedLocked is the shared IsAttached answer. The caller holds f.mu.
+func (f *Fake) attachedLocked(name string) bool {
 	if f.broken {
 		return false
 	}
@@ -447,6 +478,9 @@ func (f *Fake) Pending(name string) (*PendingInteraction, error) {
 	if f.broken {
 		return nil, fmt.Errorf("session unavailable")
 	}
+	if err := f.PendingErrors[name]; err != nil {
+		return nil, err
+	}
 	pending := f.PendingInteractions[name]
 	if pending == nil {
 		return nil, nil
@@ -510,6 +544,9 @@ func (f *Fake) GetMeta(name, key string) (string, error) {
 	if f.broken {
 		return "", fmt.Errorf("session unavailable")
 	}
+	if err := f.GetMetaErrors[name][key]; err != nil {
+		return "", err
+	}
 	return f.meta[name][key], nil
 }
 
@@ -568,6 +605,14 @@ func (f *Fake) ListRunning(prefix string) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// ListRunningComplete implements [ListingAttestation]: the in-memory listing
+// is complete unless ListingUnattested is set.
+func (f *Fake) ListRunningComplete() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return !f.ListingUnattested
 }
 
 // Synthetic pids for the Fake's provider-owned pane root. The parent is a

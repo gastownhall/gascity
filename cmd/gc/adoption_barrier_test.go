@@ -274,7 +274,7 @@ func TestAdoptionBarrier_PreservesLiveInstanceToken(t *testing.T) {
 // that adopting a running session whose runtime carries NO live
 // GC_INSTANCE_TOKEN leaves the adopted bead's instance_token empty rather
 // than fabricating one. An empty instance_token is the codebase's existing
-// "cannot verify identity" signal (see verifiedStop/verifiedInterrupt in
+// "cannot verify identity" signal (see verifiedStop in
 // session_wake.go and the drain-ack fence in session_reconciler.go) and
 // deliberately fails open at drain time; a fabricated token would instead
 // fence the runtime from ever being drained, since it could never match.
@@ -345,7 +345,7 @@ func TestAdoptionBarrier_AdoptedRuntimeCanLaterBeDrained(t *testing.T) {
 	// actually stop the still-running pre-restart runtime.
 	tracker := &asyncStartTracker{}
 	var drainStderr synchronizedBuffer
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, beadList[0].ID, "test-city-worker", adoptedToken, nil, tracker, &drainStderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, beadList[0].ID, "test-city-worker", adoptedToken, nil, tracker, nil, &drainStderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -404,7 +404,7 @@ func TestAdoptionBarrier_TokenlessAdoptedRuntimeCanLaterBeDrained(t *testing.T) 
 	// unverifiable mismatch.
 	tracker := &asyncStartTracker{}
 	var drainStderr synchronizedBuffer
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, beadList[0].ID, "test-city-worker", adoptedToken, nil, tracker, &drainStderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, beadList[0].ID, "test-city-worker", adoptedToken, nil, tracker, nil, &drainStderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}

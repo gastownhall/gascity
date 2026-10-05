@@ -13,6 +13,7 @@ func TestInitMinimalProviderWritesWorkspaceProvider(t *testing.T) {
 	configureSupervisorHooksForTests()
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("PATH", os.Getenv("PATH"))
+	stubInitRemoteImports(t)
 
 	cityDir := filepath.Join(t.TempDir(), "my-city")
 	var stdout, stderr bytes.Buffer

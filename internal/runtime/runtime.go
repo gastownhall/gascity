@@ -36,6 +36,40 @@ var ErrInteractionUnsupported = errors.New("session interaction is unsupported")
 // process, but it exited before startup completed successfully.
 var ErrSessionDiedDuringStartup = errors.New("session died during startup")
 
+// ExitCodeTempFail is sysexits.h EX_TEMPFAIL. A launched agent command that
+// exits with it before startup completes declares a retryable, endpoint-wide
+// refusal rather than a session-specific crash. It is the same convention gate
+// commands use to report an infrastructure outcome (convergence.GateInfraExitCode).
+const ExitCodeTempFail = 75
+
+// CapacitySourceExitStatus is the [CapacityError.Source] of a refusal observed
+// as the launched command's exit status.
+const CapacitySourceExitStatus = "exit_status"
+
+// ErrProviderCapacity reports that a start was refused because a shared
+// serving endpoint is at capacity or temporarily unavailable. It is retryable
+// and not specific to the session that attempted the start.
+var ErrProviderCapacity = errors.New("provider endpoint at capacity")
+
+// CapacityError is returned by providers that observed a capacity refusal at a
+// process boundary. It matches both [ErrProviderCapacity] and its cause under
+// errors.Is, and its message is exactly the cause's, so logs, pane excerpts,
+// and existing string consumers are unchanged.
+type CapacityError struct {
+	ExitCode int    // the observed exit status
+	Source   string // how the refusal was observed, e.g. CapacitySourceExitStatus
+	Err      error  // the provider's own error, e.g. one wrapping ErrSessionDiedDuringStartup
+}
+
+// Error returns the cause's message unchanged.
+func (e *CapacityError) Error() string { return e.Err.Error() }
+
+// Unwrap exposes both the capacity sentinel and the provider's cause.
+func (e *CapacityError) Unwrap() []error { return []error{ErrProviderCapacity, e.Err} }
+
+// IsProviderCapacity reports whether err carries a typed capacity refusal.
+func IsProviderCapacity(err error) bool { return errors.Is(err, ErrProviderCapacity) }
+
 // ErrSessionNotFound reports that an operation targeted a session the
 // runtime does not know about. Benign for Stop() — the session was
 // already gone — but fatal for Attach/Send. Providers wrap their own
@@ -72,6 +106,35 @@ var ErrRuntimeUnavailable = errors.New("runtime unavailable: liveness observatio
 // own [RelaunchProvider.Relaunch] when the routed/wrapped backend does not
 // support relaunch; the reconciler treats it as "fall back to full Stop+Start".
 var ErrRelaunchUnsupported = errors.New("runtime does not support warm-box relaunch")
+
+// ErrStopRefused reports that the provider deliberately left the session
+// running (policy, not failure). The runtime is still live; callers must not
+// record a stop. Its message, and the message of every error wrapping it, must
+// not match [IsSessionGone], or a refusal would read as an idempotent stop.
+var ErrStopRefused = errors.New("runtime refused to stop the session")
+
+// ErrStopUnsupported reports that the runtime has no stop operation (exec
+// `stop` answered exit 2). It wraps [ErrStopRefused].
+var ErrStopUnsupported = fmt.Errorf("%w: stop not implemented", ErrStopRefused)
+
+// ErrMetaUnsupported reports that the runtime has no session metadata store
+// (exec get-meta/set-meta answered exit 2). A token read that returns it is
+// "absent by construction", never "unverifiable".
+var ErrMetaUnsupported = errors.New("runtime does not implement session metadata")
+
+// ErrListUnsupported reports that the runtime cannot enumerate sessions (exec
+// list-running answered exit 2). It is never a complete empty list.
+var ErrListUnsupported = errors.New("runtime does not implement session listing")
+
+// MetaValue folds [ErrMetaUnsupported] into "unset", for readers whose legacy
+// behavior treated an unimplemented meta op as an empty value. Every other
+// error is returned unchanged.
+func MetaValue(v string, err error) (string, error) {
+	if errors.Is(err, ErrMetaUnsupported) {
+		return "", nil
+	}
+	return v, err
+}
 
 // IsSessionGone reports whether err represents a "the session is not
 // there" condition — either ErrSessionNotFound or the legacy provider
@@ -229,6 +292,46 @@ type Provider interface {
 	Capabilities() ProviderCapabilities
 }
 
+// AttachmentObserverWithError is the optional capability for an attachment
+// probe that separates "no client is attached" from "could not tell".
+type AttachmentObserverWithError interface {
+	IsAttachedWithError(name string) (bool, error)
+}
+
+// IsAttachedWithError reports whether a human terminal is attached to name.
+// A provider without the capability answers through IsAttached with a nil
+// error, so existing providers are unchanged. With the capability:
+//
+//	(true, nil)  one or more clients attached
+//	(false, nil) confirmed: no client
+//	(false, err) err wraps ErrSessionNotFound: the session does not exist
+//	(false, err) err wraps ErrRuntimeUnavailable: the probe could not answer
+//
+// Callers gating a destructive action MUST treat any error other than
+// ErrSessionNotFound as attached; [AttachProbeHolds] states that rule.
+// A nil provider or blank name answers (false, nil) without a probe.
+func IsAttachedWithError(sp Provider, name string) (bool, error) {
+	if sp == nil || strings.TrimSpace(name) == "" {
+		return false, nil
+	}
+	if observer, ok := sp.(AttachmentObserverWithError); ok {
+		return observer.IsAttachedWithError(name)
+	}
+	return sp.IsAttached(name), nil
+}
+
+// AttachProbeHolds reports whether an [IsAttachedWithError] answer must hold a
+// destructive action: a client is attached, or the probe failed with any error
+// other than ErrSessionNotFound. Only a vanished session counts as not
+// attached. It classifies with errors.Is, never IsSessionGone: that message
+// matching reads text such as "not found" in an unavailable probe as gone.
+func AttachProbeHolds(attached bool, err error) bool {
+	if err != nil {
+		return !errors.Is(err, ErrSessionNotFound)
+	}
+	return attached
+}
+
 // PendingInteraction describes a blocking interaction raised by a session.
 // This is an optional capability exposed by providers that support
 // structured approvals, questions, or other turn-blocking prompts.
@@ -341,6 +444,40 @@ type SessionRosterProvider interface {
 type SessionRosterEntry struct {
 	Attached     bool
 	LastActivity time.Time
+}
+
+// InventoryProvider is an optional extension that reads per-session
+// runtime attributes for the whole fleet in one call, for callers that would
+// otherwise probe every listed session separately.
+//
+// Like [SessionRosterProvider], it is an attributes source, not a listing:
+// the entry names are a subset of the same instant's ListRunning("") result,
+// and a name absent from the inventory is not thereby proven absent.
+type InventoryProvider interface {
+	RuntimeInventory(ctx context.Context) (map[string]InventoryEntry, error)
+}
+
+// InventoryEntry holds the batch-readable attributes of one session,
+// as returned by [InventoryProvider.RuntimeInventory]. A false Known
+// flag means the attribute could not be read; its value is then meaningless.
+type InventoryEntry struct {
+	// Incarnation identifies this runtime instance of the session. A new
+	// runtime under the same name, or a respawn of the session's first pane,
+	// gets a different value. Empty when the provider cannot report one.
+	//
+	// On tmux it can also change without a restart: swap-pane,
+	// split-window -b, rotate-window, or killing pane 0.0 moves a different
+	// process into the first slot. That is harmless; a changed id only costs
+	// one attribution re-read.
+	Incarnation string
+	// DeadKnown and AllPanesDead report whether every process slot of the
+	// session has exited (a corpse kept visible, for example by tmux
+	// remain-on-exit).
+	DeadKnown, AllPanesDead bool
+	// AttachedKnown and Attached report whether any client is attached. On
+	// tmux the count includes gc's own hidden attach client, so a session gc
+	// is briefly attached to reads attached.
+	AttachedKnown, Attached bool
 }
 
 // EnvironmentBatchProvider is an optional extension exposing a single-exec

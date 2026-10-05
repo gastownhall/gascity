@@ -20,6 +20,7 @@ go_library(
 go_test(
     name = "exec_test",
     srcs = [
+        "capacity_test.go",
         "cutover_test.go",
         "exec_connection_test.go",
         "exec_reuse_test.go",

@@ -1,6 +1,7 @@
 package beads_test
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -33,14 +34,37 @@ func TestSQLiteStoreConformance(t *testing.T) {
 	beadstest.RunMetadataTests(t, factory)
 }
 
-// TestSQLiteStoreConditionalWriterConformance runs the shared fenced-write
-// suite against the embedded store. Without the capability the graph plane's
-// control epochs, drain reservations, and attach fences silently degrade to
-// unconditional writes on a routed city.
-func TestSQLiteStoreConditionalWriterConformance(t *testing.T) {
-	beadstest.RunConditionalWriterConformance(t, "SQLiteStore", func(t *testing.T) beads.Store {
-		return newSQLiteForConformance(t)
+// TestSQLiteStoreReadyParityConformance proves a primed CachingStore over the
+// store serves the same ready rows, in the same order, as the store's own
+// Ready. A class binding's cache is the census the controller's demand reads
+// are answered from, so a divergence here offers blocked work or cuts a
+// different Limit prefix on every split city.
+func TestSQLiteStoreReadyParityConformance(t *testing.T) {
+	beadstest.RunReadyParityConformance(t, "SQLiteStore", beadstest.ReadyParityHarness{
+		Open:   func(t *testing.T) beads.Store { return newSQLiteForConformance(t) },
+		Rescan: (*beads.CachingStore).ReconcileForTest,
 	})
+}
+
+// TestSQLiteStoreConditionalWriterConformance runs the shared fenced-write
+// suite against the embedded store, raw and under the CachingStore the
+// controller puts over a binding engine. Without the capability the graph
+// plane's control epochs, drain reservations, and attach fences silently
+// degrade to unconditional writes on a routed city. The row-backed leg proves
+// every whole-row write flavor mints a fresh revision, which is what makes the
+// fence honest once the engine is stamped. The cache elides a write that
+// changes nothing, so it leaves that leg off, as every cache row does.
+func TestSQLiteStoreConditionalWriterConformance(t *testing.T) {
+	beadstest.RunConditionalWriterConformanceWithOptions(t, "SQLiteStore", func(t *testing.T) beads.Store {
+		return newSQLiteForConformance(t)
+	}, beadstest.ConditionalWriterOptions{RowBackedMutationFlavors: true, SuppliesCurrent: true})
+	beadstest.RunConditionalWriterConformanceWithOptions(t, "CachingStore/SQLiteStore", func(t *testing.T) beads.Store {
+		cache := beads.NewCachingStoreForTest(newSQLiteForConformance(t), nil)
+		if err := cache.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+		return cache
+	}, beadstest.ConditionalWriterOptions{SuppliesCurrent: true})
 }
 
 // TestSQLiteStoreAtomicCloserConformance runs the shared atomic terminal-close

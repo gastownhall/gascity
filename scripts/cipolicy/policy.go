@@ -83,10 +83,43 @@ const (
 	// cap moves 90 -> 105 minutes to keep the step budget under it. Reviewed
 	// delta: one test step and the cap, no new job, trigger or permission.
 	//
-	// Bumped again for the Beads v1.3.0 -> v1.3.1-rc.2 pin: every job's
+	// Bumped again for the Beads v1.3.0 -> v1.3.1-rc.2 -> v1.3.1 pins: every job's
 	// BD_VERSION env value moves to the new tag. Reviewed delta: that value
 	// only, no new job, step, trigger or permission.
-	expectedCIExecutionHash     = "00c7da41fd7f67a986f1fec6e8730b14632e725063ea977636bd0da2f6cb5ed0"
+	//
+	// Bumped again (ga-nr9epw, restoring ga-1037rg / ga-yoxtux regression
+	// coverage without re-widening test-bd-cli-contract's own -run regex,
+	// which TestAcceptanceTargetsSeparateTierAFromExternalBdContracts pins as
+	// an exact literal substring): one new step, "bd CLI contract HOME
+	// isolation (...)", added immediately after the existing "bd CLI contract
+	// (...)" step in each of contract-acceptance-previous, contract-
+	// acceptance-current and contract-radar-bd-head. Each new step runs `make
+	// test-bd-cli-contract-home-isolation`, a separate Makefile target driving
+	// only TestRunBDIsolatesHOMEFromSharedServerConfig under the same
+	// acceptance_bd_contract tag and bd binary the preceding step already
+	// resolved onto PATH. No new job, trigger or permission.
+	//
+	// Bumped again (rbe-west plan R2 step 1): the runner-policy job's own
+	// runs-on drops its hard-coded login list for blacksmith-2vcpu-ubuntu-2404,
+	// matching runner_policy.py, which now selects Blacksmith for every event
+	// and author. Reviewed delta: that one runs-on value, no new job, step,
+	// trigger or permission.
+	//
+	// Bumped again for the Dolt 2.1.7 -> 2.2.0 pin (the Dolt beads v1.3.1
+	// qualifies): the job DOLT_VERSION env values only.
+	//
+	// Bumped again (keep managed Dolt logs from failed acceptance tests):
+	// beads-topology-acceptance and beads-proxied-native-acceptance each gain
+	// a step exporting GC_TEST_FAILURE_ARTIFACT_DIR to $GITHUB_ENV and an
+	// `if: failure()` pinned upload-artifact step for that directory. No new
+	// job, trigger, permission or secret.
+	//
+	// Bumped again (beads#7037): the topology job's shared-server step -run
+	// also selects TestBlockedRepairOnProxiedCityAndRig, the proxied city+rig
+	// proof of gc start's is_blocked repair (about 4 minutes, inside that
+	// step's 15m -timeout). Reviewed delta: one -run alternative, no new job,
+	// step, trigger or permission.
+	expectedCIExecutionHash     = "5ce8f7a7966b71d98581b13c44907a05d7a3152c895b2efdd782594d18dc470f"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -99,8 +132,15 @@ const (
 	// -run selector gained TestFreshInit_SlingSpawnsDefaultPoolWorker and
 	// TestFreshInit_ClaudeUnrestricted, mirroring RC Gate's acceptance C shards;
 	// same job, env, secrets and runner. Then the Beads v1.3.0 -> v1.3.1-rc.2
-	// pin: the workflow and job BD_VERSION env values only.
-	expectedNightlyExecutionHash = "95cdfa034e95e92beb2e1d01d29b7a6e4ccd323614caa4e8c2932f3ebe3de243"
+	// -> v1.3.1 pins: the workflow and job BD_VERSION env values only. Then
+	// the Dolt 2.1.7 -> 2.2.0 pin (DOLT_VERSION env values) and one step in
+	// the bundled-pack-pins job, `scripts/check-embedded-pins --skip-bundled`
+	// with GITHUB_TOKEN, which fails when deps.env falls behind the latest
+	// beads release or the Dolt it qualifies. No new job, trigger or
+	// permission. Then beads-proxied-perf gains the same failure-diagnostics
+	// routing step and `if: failure()` pinned upload-artifact step as the PR
+	// acceptance jobs; no new job, trigger, permission or secret.
+	expectedNightlyExecutionHash = "4a92bdce7c7c323b4fb38f338808ec280939e7ffe2fca314d89c303a00a28a60"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 

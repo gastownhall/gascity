@@ -28,6 +28,7 @@ go_test(
         "keys_test.go",
         "kindsets_test.go",
         "leaf_test.go",
+        "merge_strategy_test.go",
         "path_test.go",
         "reserved_prefixes_test.go",
         "runid_test.go",

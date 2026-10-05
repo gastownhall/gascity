@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os/exec"
@@ -548,12 +549,43 @@ func workerSessionTargetAliveWithConfig(store beads.Store, sp runtime.Provider, 
 	return obs.Alive, nil
 }
 
+// workerSessionTargetAttachedWithConfig reports whether target has an attached
+// terminal. An attachment probe that could not tell answers (true, err) with
+// err wrapping runtime.ErrRuntimeUnavailable, so a destructive caller holds.
 func workerSessionTargetAttachedWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (bool, error) {
 	obs, err := workerObserveSessionTargetWithConfig(cityPath, store, sp, cfg, target)
 	if err != nil {
 		return false, err
 	}
+	if obs.AttachedErr != nil {
+		return true, attachProbeUnavailable(target, obs.AttachedErr)
+	}
 	return obs.Attached, nil
+}
+
+// attachmentHolds reports whether a destructive action against name must hold
+// because a human may be attached: the probe answered attached, or it could
+// not tell. In the second case err is the probe error, wrapping
+// runtime.ErrRuntimeUnavailable. A vanished session (runtime.ErrSessionNotFound)
+// is not attached and answers (false, nil).
+func attachmentHolds(sp runtime.Provider, name string) (bool, error) {
+	attached, err := runtime.IsAttachedWithError(sp, name)
+	if !runtime.AttachProbeHolds(attached, err) {
+		return false, nil
+	}
+	if err != nil {
+		return true, attachProbeUnavailable(name, err)
+	}
+	return true, nil
+}
+
+// attachProbeUnavailable names an attachment probe failure as "unknown" for
+// callers that defer on runtime.ErrRuntimeUnavailable.
+func attachProbeUnavailable(name string, err error) error {
+	if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		return fmt.Errorf("observe attachment for %q: %w", name, err)
+	}
+	return fmt.Errorf("observe attachment for %q: %w: %w", name, runtime.ErrRuntimeUnavailable, err)
 }
 
 func workerSessionTargetLastActivityWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (time.Time, error) {

@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -33,6 +34,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
@@ -609,12 +611,38 @@ func newDriftIsolatedEnvRoot(t *testing.T) (string, string, []string) {
 	return gcHome, runtimeDir, env
 }
 
-// buildGCBinaryWithCommit compiles the gc binary at outPath with
-// `-X main.commit=commitID` so the supervisor's /health reports
-// build_id=commitID. Used to fabricate drift between the running
-// supervisor and the on-disk binary.
+// driftPrebuiltRunfiles maps each drift commit to the gc Bazel links with
+// that commit stamped (//cmd/gc:gc_drift_old and :gc_drift_new, data deps of
+// this target), relative to the main repository's runfiles root.
+var driftPrebuiltRunfiles = map[string]string{
+	driftHappyOldCommit: "cmd/gc/gc_drift_old_/gc_drift_old",
+	driftHappyNewCommit: "cmd/gc/gc_drift_new_/gc_drift_new",
+}
+
+// buildGCBinaryWithCommit puts a gc binary stamped with `-X
+// main.commit=commitID` at outPath, so the supervisor's /health reports
+// build_id=commitID. Used to fabricate drift between the running supervisor
+// and the on-disk binary.
+//
+// Under Bazel the binary is the prebuilt link from runfiles: a test action
+// has neither go.sum nor a module cache, and the fork pool has no network to
+// fill one. It is installed the way `go build -o` replaces a binary, through
+// a rename, so a supervisor running the previous bytes keeps its inode.
+// Outside Bazel it is compiled, as before.
 func buildGCBinaryWithCommit(t *testing.T, outPath, commitID string) {
 	t.Helper()
+	if bazeltest.IsBazel() {
+		rel, ok := driftPrebuiltRunfiles[commitID]
+		if !ok {
+			t.Fatalf("no Bazel-linked gc for drift commit %s; add a //cmd/gc:gc_drift_* target and map it here", commitID)
+		}
+		prebuilt := runfilesBinary(rel)
+		if prebuilt == "" {
+			t.Fatalf("Bazel-linked gc for drift commit %s (%s) is not in runfiles; is it a data dep of this target?", commitID, rel)
+		}
+		installDriftBinary(t, prebuilt, outPath)
+		return
+	}
 	cmd := exec.Command("go", "build",
 		"-buildvcs=false",
 		"-ldflags", "-X main.commit="+commitID,
@@ -625,6 +653,41 @@ func buildGCBinaryWithCommit(t *testing.T, outPath, commitID string) {
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("building gc with commit=%s: %v\n%s", commitID, err, string(out))
+	}
+}
+
+// installDriftBinary copies src to dst through a temporary file in dst's
+// directory and a rename, like `go build -o` replacing an installed binary:
+// the replacement gets a new inode, so a supervisor still executing dst keeps
+// running the old bytes and the copy never fails with ETXTBSY.
+func installDriftBinary(t *testing.T, src, dst string) {
+	t.Helper()
+	in, err := os.Open(src)
+	if err != nil {
+		t.Fatalf("opening prebuilt gc %s: %v", src, err)
+	}
+	defer in.Close() //nolint:errcheck
+	tmp, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".tmp-*")
+	if err != nil {
+		t.Fatalf("staging gc at %s: %v", dst, err)
+	}
+	if _, err := io.Copy(tmp, in); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		t.Fatalf("copying prebuilt gc to %s: %v", tmp.Name(), err)
+	}
+	if err := tmp.Chmod(0o755); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		t.Fatalf("chmod %s: %v", tmp.Name(), err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		t.Fatalf("closing %s: %v", tmp.Name(), err)
+	}
+	if err := os.Rename(tmp.Name(), dst); err != nil {
+		_ = os.Remove(tmp.Name())
+		t.Fatalf("installing gc at %s: %v", dst, err)
 	}
 }
 

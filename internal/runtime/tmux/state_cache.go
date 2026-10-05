@@ -54,7 +54,9 @@ const (
 // StateFetcher abstracts tmux subprocess calls for testability.
 type StateFetcher interface {
 	// FetchState returns a runtime-state snapshot for live sessions.
-	// Sessions with remain-on-exit corpses (pane_dead=1) are excluded.
+	// Corpse-only sessions (every pane pane_dead=1 under remain-on-exit) are
+	// kept with Running: false so their window activity is recorded; they
+	// still contribute no liveness.
 	// The returned snapshot is handed to StateCache, which publishes it to
 	// lock-free readers, so the fetcher must not retain or mutate its maps.
 	FetchState(ctx context.Context) (runtimeStateSnapshot, error)
@@ -68,6 +70,13 @@ type paneRuntimeState struct {
 type sessionRuntimeState struct {
 	Running bool
 	Panes   []paneRuntimeState
+	// Attached reports whether any client is attached to the session.
+	Attached bool
+	// Activity is the session's most recent window-activity timestamp (unix
+	// seconds), taken as the MAX over every one of its panes' #{window_activity}
+	// — the same value the per-session `list-windows -t <s>` read returns. Zero
+	// means the snapshot carries no activity for the session.
+	Activity int64
 }
 
 type processRuntimeState struct {
@@ -122,10 +131,36 @@ type StateCache struct {
 	// Entries at or below publishedGeneration can never filter again and are
 	// pruned on publish.
 	evictedAt map[string]uint64
-	ttl       time.Duration
-	staleTTL  time.Duration
-	sf        singleflight.Group
-	fetcher   StateFetcher
+	// primedByNoServer reports that the published snapshot is the empty one
+	// primed by an unprimed no-server failure, not a fleet the server listed.
+	primedByNoServer bool
+	ttl              time.Duration
+	staleTTL         time.Duration
+	sf               singleflight.Group
+	fetcher          StateFetcher
+	// now is the cache clock. Nil selects time.Now; tests inject a fake.
+	now func() time.Time
+}
+
+// cacheObservation is one read of the cache after its refresh trigger ran:
+// the published snapshot plus what is known about how far to trust it.
+type cacheObservation struct {
+	state     runtimeStateSnapshot
+	fetchedAt time.Time
+	// lastErr is the error of the most recent refresh attempt; nil after a
+	// success.
+	lastErr error
+	// dirty reports that an Invalidate or EvictSession landed after the
+	// published fetch began, so the snapshot may predate a known Start or Stop.
+	dirty bool
+	// primedByNoServer reports that the snapshot came from the unprimed
+	// no-server prime rather than from a server's answer.
+	primedByNoServer bool
+}
+
+// primed reports whether the observation holds a published snapshot.
+func (o cacheObservation) primed() bool {
+	return o.state.Sessions != nil && !o.fetchedAt.IsZero()
 }
 
 // NewStateCache creates a new cache with the given fetcher and TTL.
@@ -157,39 +192,141 @@ func (c *StateCache) ProcessAlive(name string, processNames []string) bool {
 	return c.currentState().processAlive(name, processNames)
 }
 
+// SessionAttached reports the cached attachment state for the named session.
+// ok is false when the snapshot holds no row for it — never observed, evicted,
+// or the whole snapshot aged past staleTTL — so the caller falls back to a
+// direct per-session read instead of reading "unknown" as "detached".
+func (c *StateCache) SessionAttached(name string) (attached bool, ok bool) {
+	session, ok := c.currentState().Sessions[name]
+	if !ok {
+		return false, false
+	}
+	return session.Attached, true
+}
+
+// SessionActivity reports the cached max window-activity timestamp for the
+// named session. ok is false when the snapshot holds no activity for it, so
+// the caller falls back to a direct per-session read rather than reporting a
+// zero timestamp — "not observed" and "last active at the epoch" drive
+// different reconciler decisions.
+func (c *StateCache) SessionActivity(name string) (time.Time, bool) {
+	session, ok := c.currentState().Sessions[name]
+	if !ok || session.Activity == 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(session.Activity, 0), true
+}
+
 func (c *StateCache) currentState() runtimeStateSnapshot {
-	c.mu.RLock()
-	state := c.state
-	fetchedAt := c.fetchedAt
-	dirty := c.dirty
-	c.mu.RUnlock()
+	// A nil cache knows nothing: report an empty snapshot so every reader
+	// treats the session as absent and falls back to its direct probe. Tests
+	// (and any future zero-value Provider) build a Tmux without a cache.
+	if c == nil {
+		return runtimeStateSnapshot{}
+	}
+	obs, hit := c.observeRefreshing()
+	if hit {
+		return obs.state
+	}
+	// If the cache is older than staleTTL, report all sessions as not running.
+	// Note: fetchedAt is preserved on failure (never zeroed), so this only
+	// triggers after staleTTL of real wall-clock time since last success.
+	if !obs.primed() || c.clock().Sub(obs.fetchedAt) > c.staleTTL {
+		return runtimeStateSnapshot{}
+	}
+	return obs.state
+}
+
+// observe returns the published snapshot with its refresh outcome, running
+// the same refresh trigger as currentState but never applying the staleTTL
+// cliff: the caller decides what a stale or failed observation means.
+func (c *StateCache) observe() cacheObservation {
+	obs, _ := c.observeRefreshing()
+	return obs
+}
+
+// observeRefreshing reads the cache, refreshing it first unless it is a hit,
+// and reports whether it was one.
+func (c *StateCache) observeRefreshing() (cacheObservation, bool) {
+	obs := c.observation()
 
 	// Cache hit: fresh data, not invalidated.
-	if state.Sessions != nil && !fetchedAt.IsZero() && !dirty && time.Since(fetchedAt) < c.ttl {
-		return state
+	if obs.primed() && !obs.dirty && c.clock().Sub(obs.fetchedAt) < c.ttl {
+		return obs, true
 	}
 
 	// Stale, empty, or dirty — trigger refresh.
 	// When dirty, forget any in-flight singleflight so we get a fresh fetch
 	// instead of coalescing with a pre-invalidation call.
-	if dirty {
+	if obs.dirty {
 		c.sf.Forget("refresh")
 	}
 	c.refresh()
 
 	// Read the (potentially updated) cache.
-	c.mu.RLock()
-	state = c.state
-	fetchedAt = c.fetchedAt
-	c.mu.RUnlock()
+	return c.observation(), false
+}
 
-	// If the cache is older than staleTTL, report all sessions as not running.
-	// Note: fetchedAt is preserved on failure (never zeroed), so this only
-	// triggers after staleTTL of real wall-clock time since last success.
-	if state.Sessions == nil || fetchedAt.IsZero() || time.Since(fetchedAt) > c.staleTTL {
-		return runtimeStateSnapshot{}
+func (c *StateCache) observation() cacheObservation {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return cacheObservation{
+		state:            c.state,
+		fetchedAt:        c.fetchedAt,
+		lastErr:          c.lastError,
+		dirty:            c.dirty,
+		primedByNoServer: c.primedByNoServer,
 	}
-	return state
+}
+
+func (c *StateCache) clock() time.Time {
+	if c.now == nil {
+		return time.Now()
+	}
+	return c.now()
+}
+
+// cacheAnswer is how far one cache observation can answer for a session.
+type cacheAnswer int
+
+const (
+	// cacheAnswerSnapshot: answer from the published snapshot.
+	cacheAnswerSnapshot cacheAnswer = iota
+	// cacheAnswerAbsent: confirmed absent whatever the snapshot holds.
+	cacheAnswerAbsent
+	// cacheAnswerUnknown: the snapshot cannot be trusted either way.
+	cacheAnswerUnknown
+)
+
+// classifyCacheObservation decides how far obs can answer for name. It never
+// answers absent while the bool path (IsRunning, which keeps the staleTTL
+// cliff) would still report name running, so the two forms cannot disagree:
+//   - a successful last refresh over a primed snapshot answers from it;
+//   - a failed refresh inside staleTTL over a snapshot a server listed answers
+//     from that snapshot when it is clean (#4082), and is unknown when it is
+//     dirty and still lists name;
+//   - otherwise the snapshot cannot hold name live (past staleTTL, unprimed,
+//     primed only by the no-server fallback, or name not listed). A
+//     no-server failure whose socket serverDead confirms gone is then
+//     absent, since a session cannot outlive its server; anything else is
+//     unknown.
+//
+// serverDead is consulted only for a no-server failure.
+func classifyCacheObservation(obs cacheObservation, name string, now time.Time, staleTTL time.Duration, serverDead func() bool) cacheAnswer {
+	if obs.lastErr == nil && obs.primed() {
+		return cacheAnswerSnapshot
+	}
+	trusted := obs.primed() && !obs.primedByNoServer && now.Sub(obs.fetchedAt) <= staleTTL
+	if trusted && !obs.dirty {
+		return cacheAnswerSnapshot
+	}
+	if trusted && obs.state.Sessions[name].Running {
+		return cacheAnswerUnknown
+	}
+	if isNoServerError(obs.lastErr) && serverDead() {
+		return cacheAnswerAbsent
+	}
+	return cacheAnswerUnknown
 }
 
 // Invalidate marks the cache as dirty, forcing the next IsRunning call
@@ -237,9 +374,9 @@ func (c *StateCache) refresh() {
 		startGeneration := c.generation
 		c.mu.RUnlock()
 
-		start := time.Now()
+		start := c.clock()
 		state, err := c.fetcher.FetchState(ctx)
-		elapsed := time.Since(start)
+		elapsed := c.clock().Sub(start)
 
 		if err != nil {
 			log.Printf("tmux state cache: refresh failed in %v: %v", elapsed, err)
@@ -264,7 +401,8 @@ func (c *StateCache) refresh() {
 			//   — that is #4082's intent.
 			if c.fetchedAt.IsZero() && isNoServerError(err) {
 				c.state = runtimeStateSnapshot{Sessions: make(map[string]sessionRuntimeState)}
-				c.fetchedAt = time.Now()
+				c.fetchedAt = c.clock()
+				c.primedByNoServer = true
 				c.publishedGeneration = startGeneration
 				// Stay dirty if an invalidation (e.g. the Start that brings
 				// the server up) landed mid-fetch, as a successful refresh does.
@@ -305,8 +443,9 @@ func (c *StateCache) refresh() {
 		}
 
 		c.state = state
-		c.fetchedAt = time.Now()
+		c.fetchedAt = c.clock()
 		c.lastError = nil
+		c.primedByNoServer = false
 		c.dirty = superseded
 		c.publishedGeneration = startGeneration
 		for name, generation := range c.evictedAt {
@@ -401,10 +540,12 @@ func (g *processSnapshotGate) succeeded() bool {
 }
 
 // FetchState runs one tmux pane snapshot and one process-table snapshot.
-// Sessions where remain-on-exit has kept a dead pane (pane_dead=1) are
-// excluded — they represent exited processes, not running ones.
+// Corpse-only sessions (remain-on-exit has kept only dead panes, pane_dead=1)
+// are kept with Running: false so their window activity is recorded; they
+// still contribute no liveness — they represent exited processes, not
+// running ones.
 func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, error) {
-	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}")
+	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}\t#{session_attached}\t#{window_activity}")
 	if err != nil {
 		if errors.Is(err, ErrNoCurrentTarget) {
 			// The server ANSWERED and holds zero sessions. gc configures
@@ -448,12 +589,37 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 	}
 
 	for _, line := range strings.Split(out, "\n") {
-		parts := strings.SplitN(line, "\t", 4)
+		parts := strings.SplitN(line, "\t", 6)
 		if len(parts) < 2 || parts[0] == "" {
 			continue
 		}
 		name := parts[0]
+		session := state.Sessions[name]
+		// Attachment and activity are read from EVERY pane row, dead panes
+		// included. A remain-on-exit corpse window is still a window, and the
+		// per-session `list-windows -t <s> -F '#{window_activity}'` read this
+		// replaces reports it, so skipping those rows would make a session look
+		// older than tmux says it is. Every window has at least one pane and all
+		// panes of a window carry their window's activity, so the max over pane
+		// rows is exactly the max over windows.
+		// #{session_attached} is the NUMBER of attached clients, not a 0/1
+		// flag: a session with two clients reads "2". Anything but "0" (or a
+		// missing/blank field) is attached — matching parseAttachedClients,
+		// which the direct per-session probe uses.
+		if len(parts) > 4 {
+			if attached := strings.TrimSpace(parts[4]); attached != "" && attached != "0" {
+				session.Attached = true
+			}
+		}
+		if len(parts) > 5 {
+			if activity, convErr := strconv.ParseInt(strings.TrimSpace(parts[5]), 10, 64); convErr == nil && activity > session.Activity {
+				session.Activity = activity
+			}
+		}
 		if parts[1] == "1" {
+			// A dead pane contributes no liveness: Running stays as-is so a
+			// session whose panes are all corpses is still reported not-running.
+			state.Sessions[name] = session
 			continue
 		}
 		var pane paneRuntimeState
@@ -463,7 +629,6 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 		if len(parts) > 3 {
 			pane.PID = strings.TrimSpace(parts[3])
 		}
-		session := state.Sessions[name]
 		session.Running = true
 		if pane.Command != "" || pane.PID != "" {
 			session.Panes = append(session.Panes, pane)

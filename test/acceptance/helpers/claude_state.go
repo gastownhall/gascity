@@ -95,6 +95,12 @@ func EnsureClaudeProjectState(env *Env, projectPath string) error {
 	return nil
 }
 
+// claudeStatePaths lists the state files to seed: HOME's and the config dir's.
+// Claude reads the config dir's whenever CLAUDE_CONFIG_DIR is set, so when HOME
+// cannot be written (Bazel's local sandbox mounts the runner's read-only) HOME's
+// is left out rather than failing a run that does not need it. It is never left
+// out when it would be the only one, so an unwritable HOME with no config dir of
+// its own still fails.
 func claudeStatePaths(home, configDir string) []string {
 	seen := make(map[string]struct{}, 2)
 	var paths []string
@@ -111,6 +117,9 @@ func claudeStatePaths(home, configDir string) []string {
 	}
 	add(filepath.Join(home, ".claude.json"))
 	add(filepath.Join(configDir, ".claude.json"))
+	if len(paths) > 1 && !dirWritable(home) {
+		paths = paths[1:]
+	}
 	return paths
 }
 

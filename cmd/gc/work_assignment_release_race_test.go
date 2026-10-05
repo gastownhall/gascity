@@ -34,10 +34,10 @@ func (s *errReleaseStore) ReleaseIfCurrent(string, string) (bool, error) {
 	return false, s.err
 }
 
-// errGetStore fails the tier-2 pre-release verification read. It reports the
-// conditional verb as unsupported so the release is forced onto tier 2. The
-// verification is a LIVE List (not Get), because a cached Get would re-confirm
-// the caller's stale snapshot against an equally stale cache.
+// errGetStore fails the live re-read before a tier-2 write: the Get that picks
+// the fenced release's revision, and the live List the reassign re-checks. It
+// reports the conditional verb as unsupported so the release is forced onto
+// tier 2.
 type errGetStore struct {
 	*beads.MemStore
 	err  error
@@ -46,6 +46,13 @@ type errGetStore struct {
 
 func (s *errGetStore) ReleaseIfCurrent(string, string) (bool, error) {
 	return false, beads.ErrConditionalReleaseUnsupported
+}
+
+func (s *errGetStore) Get(id string) (beads.Bead, error) {
+	if s.fail {
+		return beads.Bead{}, s.err
+	}
+	return s.MemStore.Get(id)
 }
 
 func (s *errGetStore) List(q beads.ListQuery) ([]beads.Bead, error) {
@@ -124,7 +131,7 @@ func TestReleaseWorkBead_FallbackRouteNeverRidesASecondWrite(t *testing.T) {
 		}
 
 		if store.updateCalls != 1 {
-			t.Fatalf("Update calls = %d, want 1 combined release write", store.updateCalls)
+			t.Fatalf("write calls = %d, want 1 combined release write", store.updateCalls)
 		}
 		got, err := store.Get(claimed.ID)
 		if err != nil {
@@ -152,7 +159,7 @@ func TestReleaseWorkBead_FallbackRouteNeverRidesASecondWrite(t *testing.T) {
 		}
 
 		if store.updateCalls != 0 {
-			t.Fatalf("Update calls = %d, want 0 for a stale release snapshot", store.updateCalls)
+			t.Fatalf("write calls = %d, want 0 for a stale release snapshot", store.updateCalls)
 		}
 		got, err := store.Get(stale.ID)
 		if err != nil {
@@ -165,10 +172,10 @@ func TestReleaseWorkBead_FallbackRouteNeverRidesASecondWrite(t *testing.T) {
 	})
 }
 
-// staleGetReleaseStore answers Get from a stale snapshot while List(Live:true) tells
-// the truth, which is the shape CachingStore has: Get serves a clone from the
-// in-memory cache for a tracked, non-dirty bead. It reports the conditional verb
-// as unsupported so the release is forced onto tier 2.
+// staleGetReleaseStore answers Get from a stale snapshot while the store itself
+// has moved on, which is the shape a cache that missed an out-of-process write
+// has. It reports the conditional verb as unsupported so the release is forced
+// onto tier 2.
 type staleGetReleaseStore struct {
 	*beads.MemStore
 	stale beads.Bead
@@ -186,26 +193,31 @@ func (s *staleGetReleaseStore) Get(id string) (beads.Bead, error) {
 }
 
 // TestReleaseWorkBead_Tier2DoesNotTrustACachedRead is the cache half of the
-// dr-huhn race. Verifying the caller's stale snapshot with a CACHED read
-// re-confirms it against an equally stale cache and lets the unconditional write
-// clobber a live claim, which is the original bug wearing a guard. The
-// verification must read live.
+// dr-huhn race. A re-read that is as stale as the caller's snapshot confirms
+// it, which let the old unconditional write clobber a live claim: the original
+// bug wearing a guard. Any read may be stale, so the fence is at the write:
+// the release is fenced on the stale read's revision, the fresh claim moved
+// it, and nothing is written. The release reports an error because a lost
+// fence cannot tell a claim from an unrelated write, and the bead may still be
+// assigned to the retired session.
 func TestReleaseWorkBead_Tier2DoesNotTrustACachedRead(t *testing.T) {
 	mem := beads.NewMemStore()
 	store := &staleGetReleaseStore{MemStore: mem}
-	// Live truth: a fresh worker holds it.
-	claimed := seedClaimedBead(t, mem, "fresh-worker")
-	// The caller's snapshot, and what a cached Get would still answer.
-	stale := claimed
-	stale.Assignee = "retired-session"
+	// The caller's snapshot, and what a stale Get still answers.
+	stale := seedClaimedBead(t, mem, "retired-session")
 	store.stale = stale
-
-	wa := workAssignmentForStore(beads.WorkStore{Store: store})
-	if err := wa.ReleaseWorkBead(stale, ""); err != nil {
-		t.Fatalf("ReleaseWorkBead: %v", err)
+	// Live truth: a fresh worker claimed it since.
+	fresh := "fresh-worker"
+	if err := mem.Update(stale.ID, beads.UpdateOpts{Assignee: &fresh}); err != nil {
+		t.Fatalf("re-claim: %v", err)
 	}
 
-	got, err := mem.Get(claimed.ID)
+	wa := workAssignmentForStore(beads.WorkStore{Store: store})
+	if err := wa.ReleaseWorkBead(stale, ""); err == nil {
+		t.Fatal("ReleaseWorkBead = nil after losing its fence; a caller gating a close on it would close over the bead")
+	}
+
+	got, err := mem.Get(stale.ID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -216,10 +228,11 @@ func TestReleaseWorkBead_Tier2DoesNotTrustACachedRead(t *testing.T) {
 }
 
 // failSecondWriteStore implements the conditional verb but fails a
-// METADATA-ONLY Update, which is exactly the second write of the tier-1 path.
-// A combined status+assignee+metadata Update (the single-write tier-2 release)
-// still succeeds. So a release that correctly bypasses tier 1 lands whole, and
-// one that splits the write leaves the bead released but unrouted.
+// METADATA-ONLY write, which is exactly the second write of the tier-1 path.
+// A combined status+assignee+metadata write (the single-write tier-2 release,
+// fenced through UpdateIfMatch) still succeeds. So a release that correctly
+// bypasses tier 1 lands whole, and one that splits the write leaves the bead
+// released but unrouted. updateCalls counts plain and fenced writes alike.
 type failSecondWriteStore struct {
 	*beads.MemStore
 	updateCalls int
@@ -231,6 +244,14 @@ func (s *failSecondWriteStore) Update(id string, opts beads.UpdateOpts) error {
 		return errors.New("metadata-only write failed")
 	}
 	return s.MemStore.Update(id, opts)
+}
+
+func (s *failSecondWriteStore) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	s.updateCalls++
+	if opts.Assignee == nil && opts.Status == nil && opts.Metadata != nil {
+		return errors.New("metadata-only write failed")
+	}
+	return s.MemStore.UpdateIfMatch(id, expectedRevision, opts)
 }
 
 // clobberingReleaseStore simulates the dr-huhn race: the caller computed its
@@ -450,7 +471,7 @@ func TestReleaseWorkBead_ContinuationGroupNeverRidesASecondWrite(t *testing.T) {
 		}
 
 		if store.updateCalls != 1 {
-			t.Fatalf("Update calls = %d, want 1 combined release write", store.updateCalls)
+			t.Fatalf("write calls = %d, want 1 combined release write", store.updateCalls)
 		}
 		got, err := store.Get(claimed.ID)
 		if err != nil {
@@ -481,7 +502,7 @@ func TestReleaseWorkBead_ContinuationGroupNeverRidesASecondWrite(t *testing.T) {
 		}
 
 		if store.updateCalls != 0 {
-			t.Fatalf("Update calls = %d, want 0 for a stale release snapshot", store.updateCalls)
+			t.Fatalf("write calls = %d, want 0 for a stale release snapshot", store.updateCalls)
 		}
 		got, err := store.Get(stale.ID)
 		if err != nil {

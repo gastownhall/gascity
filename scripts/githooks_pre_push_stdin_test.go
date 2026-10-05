@@ -41,6 +41,8 @@ func newPrePushFixture(t *testing.T) *prePushFixture {
 		"GIT_CONFIG_SYSTEM="+filepath.Join(recordDir, "gitconfig-system"),
 		"BD_STDIN_RECORD="+f.bdStdin,
 		"MAKE_RECORD="+f.makeRuns,
+		// The developer's own mode choice must not leak into the fixture.
+		"GC_PREPUSH_SUITE=",
 	)
 
 	// `bd` records exactly what the chain handed it on stdin.
@@ -57,7 +59,7 @@ printf '%s\n' "$*" >> "$MAKE_RECORD"
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 	}
-	for _, rel := range []string{".githooks/pre-push", ".githooks/lib/beads-chain.sh"} {
+	for _, rel := range []string{".githooks/pre-push", ".githooks/lib/beads-chain.sh", ".githooks/lib/push-suite.sh"} {
 		body, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {
 			t.Fatalf("read %s: %v", rel, err)

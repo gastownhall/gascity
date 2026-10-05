@@ -20,6 +20,7 @@ go_test(
     srcs = [
         "meta_privacy_test.go",
         "seams_test.go",
+        "socket_probe_test.go",
         "subprocess_test.go",
         "testenv_import_test.go",
     ],

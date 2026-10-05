@@ -573,10 +573,7 @@ func TestEmittingClassStoreKeepsEveryEngineCapability(t *testing.T) {
 	wrapped := splitClassRoutes(beads.NewMemStore()).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
 	wrapper := reflect.TypeOf(wrapped)
 
-	for _, engine := range []reflect.Type{
-		reflect.TypeOf(&beads.SQLiteStore{}),
-		reflect.TypeOf(&beads.NativeDoltStore{}),
-	} {
+	for _, engine := range bindingEngineTypes {
 		var missing []string
 		for i := 0; i < engine.NumMethod(); i++ {
 			method := engine.Method(i)
@@ -595,6 +592,16 @@ func TestEmittingClassStoreKeepsEveryEngineCapability(t *testing.T) {
 			t.Errorf("the emitting class store drops %v from %s; every one is a capability assertion that stops matching", missing, engine)
 		}
 	}
+}
+
+// bindingEngineTypes are the bead engines a relocated class binding can open.
+// Every layer the binding gets wrapped in — the one-shot CLI's emitter, the
+// controller's CachingStore — is held to their method sets, because optional
+// capabilities are discovered by type assertion and a dropped method silently
+// downgrades its caller.
+var bindingEngineTypes = []reflect.Type{
+	reflect.TypeOf(&beads.SQLiteStore{}),
+	reflect.TypeOf(&beads.NativeDoltStore{}),
 }
 
 // The relic census is the one capability where carrying the method is WORSE
@@ -1244,7 +1251,7 @@ func TestControllerRoutesFromOpenStorageRoutesCarryNoEmitTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolving the storage plan: %v", err)
 	}
-	routes, err := openStorageRoutes(plan, mustResolveInfraTarget(t, cityPath, cfg))
+	routes, err := openStorageRoutes(plan, mustResolveInfraTarget(t, cityPath, cfg), cfg, cityPath, nil)
 	if err != nil {
 		t.Fatalf("opening the controller's storage routes: %v", err)
 	}

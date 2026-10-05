@@ -13,12 +13,16 @@ go_library(
 go_test(
     name = "resilience_test",
     srcs = [
+        "breaker_reentrancy_test.go",
         "breaker_test.go",
         "registry_test.go",
         "testenv_import_test.go",
     ],
     embed = [":resilience"],
-    deps = ["//internal/testenv"],
+    deps = [
+        "//internal/testenv",
+        "//internal/testutil",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
