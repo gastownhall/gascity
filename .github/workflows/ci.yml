@@ -708,15 +708,15 @@ jobs:
             exit 1
           fi
           dolt version
-      - name: Proxied-native lifecycle and safety, and the proxied idle timeout
+      - name: Proxied-native lifecycle and safety, the proxied idle timeout, and suspension quiescence
         env:
-          # The idle-timeout row is gated with the topology matrix's switch so
-          # Tier A skips it; this job is where it runs.
+          # The idle-timeout and quiescence rows are gated with the topology
+          # matrix's switch so Tier A skips them; this job is where they run.
           GC_ACCEPTANCE_TOPOLOGY_MATRIX: "1"
         run: |
           set -euo pipefail
           go test -tags acceptance_a -timeout 45m -count=1 -v \
-            -run 'TestProxiedNativeLifecycle$|TestProxiedNativeSafety$|TestProxiedIdleTimeoutReapAndTransparentRestart$' \
+            -run 'TestProxiedNativeLifecycle$|TestProxiedNativeSafety$|TestProxiedIdleTimeoutReapAndTransparentRestart$|TestProxiedSuspensionIsQuiescence$' \
             ./test/acceptance/ 2>&1 | tee "${RUNNER_TEMP}/proxied-native.log"
       - name: Upload acceptance failure diagnostics
         if: ${{ failure() }}

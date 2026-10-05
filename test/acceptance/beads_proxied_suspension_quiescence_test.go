@@ -84,7 +84,10 @@ func (r *scopeRecordingBD) callsUnder(t *testing.T, root string) []string {
 	return hits
 }
 
-func TestSuspensionIsQuiescence(t *testing.T) {
+func TestProxiedSuspensionIsQuiescence(t *testing.T) {
+	// Two multi-minute quiescence windows over a running city: not Tier A
+	// smoke material. The proxied-native acceptance job runs it.
+	helpers.RequireTopologyMatrix(t)
 	bdPath, doltPath := requireProxiedTooling(t)
 	env, wrappedBD := proxiedEnvWithBD(t, bdPath, doltPath)
 	shim := newScopeRecordingBD(t, wrappedBD)

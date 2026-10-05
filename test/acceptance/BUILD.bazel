@@ -15,7 +15,7 @@ go_test(
         "beads_proxied_native_safety_test.go",
         "beads_proxied_native_test.go",
         "beads_proxied_shared_server_test.go",
-        "beads_suspension_quiescence_test.go",
+        "beads_proxied_suspension_quiescence_test.go",
         "beads_topology_matrix_test.go",
         "cli_basics_test.go",
         "config_pack_test.go",
