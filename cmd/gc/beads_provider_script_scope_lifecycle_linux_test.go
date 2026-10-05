@@ -299,6 +299,7 @@ func TestGcBeadsBdProviderOwnedInitAnchorsBeadsDirBeforeBdInit(t *testing.T) {
 				"GC_BEADS_PROVIDER_OWNED=1",
 				"GC_BEADS_TRANSPORT="+tt.transport,
 				"GC_BEADS_TARGET=local",
+				"GC_BEADS_PROXIED_IDLE_TIMEOUT=0",
 			)
 			out, err := runProviderOwnedScriptOp(t, env, "init", scopeDir, "anc", "hq")
 			if tt.bdExit == 0 && err != nil {

@@ -1094,6 +1094,10 @@
           ],
           "description": "GuardedRelease selects the ownership-release discipline for work beads:\n\"off\" (legacy, owner-blind bd update/unclaim), \"auto\" (fence-guarded\nrelease verbs where the bd binary is capable, loud degrade otherwise), or\n\"require\" (guarded release or a typed refusal). Empty defaults to \"off\".\nAny other value fails config load."
         },
+        "proxied_idle_timeout": {
+          "type": "string",
+          "description": "ProxiedIdleTimeout is how long a bd-owned proxied scope's proxy and Dolt\nchild stay up with no connections before bd retires them; the next bd\ncommand restarts them. Go duration; \"0\" means never. A finite value\nmust be at least 1m. Empty uses the default. It applies to scopes gc\ninitializes (gc init, gc rig add, gc beads city migrate-proxied); bd\ncannot change an existing scope's value, and gc doctor reports drift.\nOverridden per rig by beads_proxied_idle_timeout and by the\nGC_BEADS_PROXIED_IDLE_TIMEOUT environment variable."
+        },
         "policies": {
           "additionalProperties": {
             "$ref": "#/$defs/BeadPolicyConfig"
@@ -2699,6 +2703,10 @@
           },
           "type": "object",
           "description": "FormulaVars provides rig-scoped defaults for formula vars. Keys match\nvar names declared in formula `[vars.\u003cname\u003e]` blocks. Values are used\nwhen a formula runs in this rig and the caller did not pass an\nexplicit --var override. Takes precedence over formula-level defaults\nbut loses to --var flags."
+        },
+        "beads_proxied_idle_timeout": {
+          "type": "string",
+          "description": "BeadsProxiedIdleTimeout overrides [beads] proxied_idle_timeout for this\nrig's bd-owned proxied scope. Go duration; \"0\" means never. Ignored, with\na warning, for a rig that shares the city's proxy root: one proxy serves\nevery scope on that root and carries the city's value."
         }
       },
       "additionalProperties": false,
@@ -2744,6 +2752,10 @@
           },
           "type": "object",
           "description": "FormulaVars adds or overrides rig-scoped formula var defaults.\nAdditive merge: patch keys win over existing rig keys, unspecified\nkeys are preserved."
+        },
+        "beads_proxied_idle_timeout": {
+          "type": "string",
+          "description": "BeadsProxiedIdleTimeout overrides the rig's beads_proxied_idle_timeout."
         }
       },
       "additionalProperties": false,

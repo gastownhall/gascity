@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "agent_discovery.go",
         "bead_policy_validation.go",
+        "beads_proxied_idle.go",
         "chain.go",
         "command_discovery.go",
         "compose.go",
@@ -94,6 +95,7 @@ go_test(
         "acp_session_config_test.go",
         "agent_discovery_test.go",
         "agent_layout_test.go",
+        "beads_proxied_idle_test.go",
         "builtin_family_test.go",
         "bundled_import_test.go",
         "chain_test.go",

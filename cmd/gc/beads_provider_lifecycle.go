@@ -2025,12 +2025,16 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 		// new proxy in ~/.beads/shared-server and persist that choice into the
 		// scope's config.yaml. See applyProxiedSharedServerOptOut.
 		applyProxiedSharedServerOptOut(env)
-		// Idle-never is not an optimization, it is D3: without it bd retires
-		// the proxy and its Dolt child after 30s quiet and every later command
-		// pays a cold start. It also has to be passed for bd to write the
-		// client-info sidecar at all, which is what the lifecycle then reads
-		// to find the proxy root.
-		args = append(args[:1], "--proxied-server", "--proxied-server-idle-timeout", "0", "-p", prefix, "--skip-hooks")
+		// The idle timeout is always passed explicitly: left out, bd retires
+		// the proxy and its Dolt child after its own 30s default, and it is
+		// also what makes bd write the client-info sidecar the lifecycle reads
+		// to find the proxy root. The value is the configured one
+		// ([beads] proxied_idle_timeout, the rig override, or the env).
+		idle, err := resolveScopeProxiedIdleTimeout(cityPath, dir, os.Stderr)
+		if err != nil {
+			return err
+		}
+		args = append(args[:1], "--proxied-server", "--proxied-server-idle-timeout", idle.BdFlagValue(), "-p", prefix, "--skip-hooks")
 	} else {
 		args = append(args[:1], "--server", "-p", prefix, "--skip-hooks")
 	}
@@ -3489,6 +3493,15 @@ func providerLifecycleProcessEnvForScopeInitWithError(cityPath, scopeRoot, provi
 	}
 	if providerUsesBdStoreContract(provider) && scopeRuntimeEnvIndependentOfCityProjection(cityPath, scopeRoot) {
 		env = providerLifecycleIndependentScopeInitEnv(cityPath, scopeRoot, env)
+	}
+	if providerUsesBdStoreContract(provider) {
+		// The script's proxied init arms refuse to run without it rather
+		// than fall back to an idle policy nobody configured.
+		idle, err := resolveScopeProxiedIdleTimeout(cityPath, scopeRoot, os.Stderr)
+		if err != nil {
+			return nil, err
+		}
+		env = overlayEnvEntries(env, map[string]string{config.ProxiedIdleTimeoutEnv: idle.BdFlagValue()})
 	}
 	return env, nil
 }

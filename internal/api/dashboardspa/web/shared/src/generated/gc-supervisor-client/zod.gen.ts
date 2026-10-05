@@ -1443,6 +1443,7 @@ export const zRigCreateSucceededPayload = z.object({
 });
 
 export const zRigPatch = z.object({
+    BeadsProxiedIdleTimeout: z.string().nullable(),
     DefaultBranch: z.string().nullable(),
     DefaultMergeStrategy: z.string().nullable(),
     FormulaVars: z.record(z.string(), z.string()),

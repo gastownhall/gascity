@@ -3126,6 +3126,13 @@ run_bd_init_pinned_over_verified_empty() {
     rm -f "$stub_aside"
 }
 
+# require_proxied_idle_timeout dies unless gc projected the idle timeout it
+# resolved for the scope being initialized. A proxied init without it must not
+# fall back to bd's own 30s default or to a value nobody configured.
+require_proxied_idle_timeout() {
+    [ -n "${GC_BEADS_PROXIED_IDLE_TIMEOUT:-}" ] || die "proxied init requires GC_BEADS_PROXIED_IDLE_TIMEOUT (gc projects the resolved [beads] proxied_idle_timeout)"
+}
+
 # run_bd_init_proxied initializes a local workspace through beads RC's
 # proxied-server UOW path. Gas City deliberately does not provide a Dolt
 # host/port here: the RC owns both the proxy and its local Dolt child.
@@ -3145,12 +3152,14 @@ run_bd_init_proxied() {
         unset GC_DOLT_DATA_DIR GC_DOLT_LOG_FILE GC_DOLT_STATE_FILE GC_DOLT_PID_FILE GC_DOLT_LOCK_FILE GC_DOLT_CONFIG_FILE
         unset BEADS_DOLT_SERVER_MODE BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_SOCKET BEADS_DOLT_SERVER_USER BEADS_DOLT_PASSWORD
         bd_bin="${BD_BIN:-bd}"
-        # Idle-never is D3, and it applies to every proxied scope GC owns, not
-        # only the ones that arrive through the provider-owned front door:
-        # without it bd retires the proxy and its Dolt child after 30s quiet and
-        # every later command pays a cold start. It is also what makes bd write
-        # the client-info sidecar the lifecycle reads to find the proxy root.
-        set -- init --quiet --proxied-server --proxied-server-idle-timeout 0
+        # The idle timeout applies to every proxied scope GC owns, not only the
+        # ones that arrive through the provider-owned front door. gc resolves
+        # it ([beads] proxied_idle_timeout, the rig override, or the env) and
+        # projects it as GC_BEADS_PROXIED_IDLE_TIMEOUT; passing it is also what
+        # makes bd write the client-info sidecar the lifecycle reads to find
+        # the proxy root.
+        require_proxied_idle_timeout
+        set -- init --quiet --proxied-server --proxied-server-idle-timeout "$GC_BEADS_PROXIED_IDLE_TIMEOUT"
         if [ -n "$external_host" ] || [ -n "$external_port" ]; then
             [ -n "$external_host" ] && [ -n "$external_port" ] || die "proxied-external init requires both GC_BEADS_PROXY_EXTERNAL_HOST and GC_BEADS_PROXY_EXTERNAL_PORT"
             set -- "$@" --proxied-server-external-host "$external_host" --proxied-server-external-port "$external_port"
@@ -4190,14 +4199,14 @@ op_provider_owned_init() {
             ;;
         proxied:local|proxied:external)
             # Both targets own a LOCAL proxy and its Dolt child; only the data
-            # upstream differs. bd's default 30s idle timeout retires that pair
-            # after every quiet period, so each later bd command would pay a
-            # proxy plus Dolt cold start (~0.6-6s measured on rc.2). GC keeps
-            # the proxy resident for the city's lifetime instead and retires it
-            # explicitly in the stop op. Idle timeout 0 is bd's
-            # IdleTimeoutNever; it lands in the client-info sidecar as
-            # "idle_timeout": -1.
-            set -- init --init-if-missing --quiet --proxied-server --proxied-server-idle-timeout 0
+            # upstream differs. bd retires that pair after the idle timeout gc
+            # resolved for this scope and projected as
+            # GC_BEADS_PROXIED_IDLE_TIMEOUT; the next bd command restarts it,
+            # and the stop op retires it explicitly. "0" is bd's
+            # IdleTimeoutNever and lands in the client-info sidecar as
+            # "idle_timeout": -1; a finite value lands as nanoseconds.
+            require_proxied_idle_timeout
+            set -- init --init-if-missing --quiet --proxied-server --proxied-server-idle-timeout "$GC_BEADS_PROXIED_IDLE_TIMEOUT"
             if [ "${GC_BEADS_TARGET:-}" = "external" ]; then
                 if [ -n "${GC_BEADS_PROXY_EXTERNAL_SOCKET:-}" ]; then
                     set -- "$@" --proxied-server-external-socket-path "$GC_BEADS_PROXY_EXTERNAL_SOCKET"
