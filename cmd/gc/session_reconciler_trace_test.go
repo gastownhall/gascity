@@ -416,6 +416,152 @@ func TestTraceRecoveryQuarantinesInteriorCorruption(t *testing.T) {
 	}
 }
 
+func TestTraceRecoveryQuarantinesInvalidHead(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "empty", data: []byte{}},
+		{name: "garbage", data: []byte("not-json")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			root, maxSeq := seedTraceStoreForHeadRecovery(t, cityDir)
+			headPath := filepath.Join(root, sessionReconcilerTraceHeadFile)
+			if err := os.WriteFile(headPath, tt.data, sessionReconcilerTraceOwnerFilePerm); err != nil {
+				t.Fatalf("write invalid head: %v", err)
+			}
+
+			var stderr bytes.Buffer
+			store, err := newSessionReconcilerTraceStore(cityDir, &stderr)
+			if err != nil {
+				t.Fatalf("recover store: %v", err)
+			}
+			t.Cleanup(func() {
+				if err := store.Close(); err != nil {
+					t.Errorf("Close: %v", err)
+				}
+			})
+
+			seq, err := store.LatestSeq()
+			if err != nil {
+				t.Fatalf("LatestSeq: %v", err)
+			}
+			if seq != maxSeq {
+				t.Fatalf("LatestSeq = %d, want segment max %d", seq, maxSeq)
+			}
+			data, err := os.ReadFile(headPath)
+			if err != nil {
+				t.Fatalf("read rewritten head: %v", err)
+			}
+			var head sessionReconcilerTraceHead
+			if err := json.Unmarshal(data, &head); err != nil {
+				t.Fatalf("unmarshal rewritten head: %v", err)
+			}
+			if head.Seq != maxSeq {
+				t.Fatalf("rewritten head seq = %d, want %d", head.Seq, maxSeq)
+			}
+			quarantined, err := filepath.Glob(filepath.Join(root, sessionReconcilerTraceQuarantine, sessionReconcilerTraceHeadFile+".*"))
+			if err != nil {
+				t.Fatalf("glob quarantined heads: %v", err)
+			}
+			if len(quarantined) != 1 {
+				t.Fatalf("quarantined heads = %d, want 1", len(quarantined))
+			}
+			quarantinedData, err := os.ReadFile(quarantined[0])
+			if err != nil {
+				t.Fatalf("read quarantined head: %v", err)
+			}
+			if !bytes.Equal(quarantinedData, tt.data) {
+				t.Fatalf("quarantined head = %q, want %q", quarantinedData, tt.data)
+			}
+			if !strings.Contains(stderr.String(), "trace: quarantined "+headPath) {
+				t.Fatalf("stderr = %q, want quarantine report for %s", stderr.String(), headPath)
+			}
+		})
+	}
+}
+
+func TestTraceRecoveryDoesNotMaskUnreadableHead(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("file mode does not make a file unreadable on this platform")
+	}
+	cityDir := t.TempDir()
+	root, _ := seedTraceStoreForHeadRecovery(t, cityDir)
+	headPath := filepath.Join(root, sessionReconcilerTraceHeadFile)
+	if err := os.Chmod(headPath, 0); err != nil {
+		t.Fatalf("chmod head: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(headPath, sessionReconcilerTraceOwnerFilePerm) })
+	if _, err := os.ReadFile(headPath); err == nil {
+		t.Skip("file mode did not make the head unreadable")
+	}
+
+	if _, err := newSessionReconcilerTraceStore(cityDir, io.Discard); err == nil {
+		t.Fatal("newSessionReconcilerTraceStore succeeded with unreadable head")
+	}
+}
+
+func TestSessionReconcilerTracerRecoversEmptyHead(t *testing.T) {
+	cityDir := t.TempDir()
+	root, _ := seedTraceStoreForHeadRecovery(t, cityDir)
+	headPath := filepath.Join(root, sessionReconcilerTraceHeadFile)
+	if err := os.WriteFile(headPath, nil, sessionReconcilerTraceOwnerFilePerm); err != nil {
+		t.Fatalf("write empty head: %v", err)
+	}
+
+	tracer := newSessionReconcilerTracer(cityDir, "trace-town", io.Discard)
+	if !tracer.Enabled() {
+		t.Fatal("tracer should be enabled after recovering an empty head")
+	}
+	if err := tracer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func seedTraceStoreForHeadRecovery(t *testing.T, cityDir string) (string, uint64) {
+	t.Helper()
+	store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	record := SessionReconcilerTraceRecord{
+		TraceSchemaVersion: sessionReconcilerTraceSchemaVersion,
+		TraceID:            "cycle-head-recovery",
+		TickID:             "trace-head-recovery",
+		RecordType:         TraceRecordDecision,
+		Template:           "repo/polecat",
+		SessionName:        "polecat-1",
+		SiteCode:           TraceSiteReconcilerWakeDecision,
+		TraceMode:          TraceModeDetail,
+		TraceSource:        TraceSourceManual,
+		Ts:                 time.Now().UTC(),
+	}
+	if err := store.AppendBatch([]SessionReconcilerTraceRecord{record}, TraceDurabilityDurable); err != nil {
+		t.Fatalf("append batch: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	root := filepath.Join(cityDir, ".gc", "runtime", sessionReconcilerTraceRootDir)
+	segments, err := filepath.Glob(filepath.Join(root, sessionReconcilerTraceSegments, "*", "*", "*", "*.jsonl"))
+	if err != nil {
+		t.Fatalf("glob segments: %v", err)
+	}
+	if len(segments) != 1 {
+		t.Fatalf("segments = %d, want 1", len(segments))
+	}
+	maxSeq, ok, err := scanTraceSegment(segments[0])
+	if err != nil {
+		t.Fatalf("scan segment: %v", err)
+	}
+	if !ok {
+		t.Fatal("segment has no committed records")
+	}
+	return root, maxSeq
+}
+
 func TestTraceCycleResultRollupIncludesFlushedRecords(t *testing.T) {
 	cityDir := t.TempDir()
 	tracer := newSessionReconcilerTracer(cityDir, "trace-town", io.Discard)

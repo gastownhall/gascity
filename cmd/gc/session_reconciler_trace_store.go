@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -31,6 +32,8 @@ const (
 	sessionReconcilerTraceMaxAge           = 7 * 24 * time.Hour
 	sessionReconcilerTracePruneInterval    = 5 * time.Minute
 )
+
+var errInvalidSessionReconcilerTraceHead = errors.New("invalid session reconciler trace head")
 
 type SessionReconcilerTraceStore struct {
 	mu             sync.Mutex
@@ -211,6 +214,13 @@ func (s *SessionReconcilerTraceStore) recoverFromHead() (bool, error) {
 		if os.IsNotExist(err) {
 			return false, nil
 		}
+		if errors.Is(err, errInvalidSessionReconcilerTraceHead) {
+			path := filepath.Join(s.rootDir, sessionReconcilerTraceHeadFile)
+			if quarantineErr := s.quarantine(path, err); quarantineErr != nil && s.stderr != nil {
+				fmt.Fprintf(s.stderr, "trace: quarantine %s: %v\n", path, quarantineErr) //nolint:errcheck
+			}
+			return false, nil
+		}
 		return false, err
 	}
 	if head.CurrentPath == "" {
@@ -240,7 +250,7 @@ func (s *SessionReconcilerTraceStore) loadHead() (sessionReconcilerTraceHead, er
 	}
 	var head sessionReconcilerTraceHead
 	if err := json.Unmarshal(data, &head); err != nil {
-		return sessionReconcilerTraceHead{}, err
+		return sessionReconcilerTraceHead{}, fmt.Errorf("%w: %w", errInvalidSessionReconcilerTraceHead, err)
 	}
 	if head.SchemaVersion == 0 {
 		head.SchemaVersion = sessionReconcilerTraceSchemaVersion
