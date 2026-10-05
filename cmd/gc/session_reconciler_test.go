@@ -9087,6 +9087,12 @@ func TestReconcileSessionBeads_RollsBackPendingCreateWhenConflictingRuntimeAlrea
 	if got.Metadata["state"] != "failed-create" {
 		t.Fatalf("state = %q, want %q", got.Metadata["state"], "failed-create")
 	}
+	if !sp.IsRunning("sky") {
+		t.Fatal("rollback stopped the foreign runtime")
+	}
+	if id, err := sp.GetMeta("sky", "GC_SESSION_ID"); err != nil || id != "different-bead" {
+		t.Fatalf("foreign runtime ownership changed: id=%q err=%v", id, err)
+	}
 }
 
 func TestReconcileSessionBeads_RollsBackAllMismatchesInOneTickAndStillStarts(t *testing.T) {
@@ -10134,6 +10140,10 @@ func TestReconcileSessionBeads_ConfigDriftAttachmentErrorDefersLiveDrift(t *test
 	session := env.createSessionBead("worker", "worker")
 	env.setSessionMetadata(&session, map[string]string{
 		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+		// Converged with the live runtime, so no status heal (which re-reads
+		// the row before writing) consumes the one injected Get failure
+		// ahead of the attachment observation under test.
+		"state": "awake",
 	})
 	backing := env.store
 	env.store = &sessionObservationGetErrorStore{

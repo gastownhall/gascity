@@ -22,7 +22,11 @@ import (
 	"time"
 )
 
-var _ ConditionalWriter = (*SQLiteStore)(nil)
+var (
+	_ ConditionalWriter                     = (*SQLiteStore)(nil)
+	_ AtomicConditionalCloser               = (*SQLiteStore)(nil)
+	_ AtomicConditionalCloserHandleProvider = (*SQLiteStore)(nil)
+)
 
 // UpdateIfMatch applies opts only when the stored revision matches.
 func (s *SQLiteStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
@@ -49,6 +53,49 @@ func (s *SQLiteStore) CloseIfMatch(id string, expectedRevision int64) error {
 		b.UpdatedAt = time.Now()
 		return s.upsertBeadTx(ctx, tx, b)
 	})
+}
+
+// CloseWithMetadataIfMatch merges metadata into id and closes it, but only
+// while the stored revision still equals expectedRevision. Both changes are one
+// upsert inside the fence's own transaction, so they commit together or not at
+// all, and no writer can land between them. A losing fence returns
+// *PreconditionFailedError and leaves the row untouched. It returns the
+// committed row.
+func (s *SQLiteStore) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error) {
+	if err := s.ensureOpen(); err != nil {
+		return Bead{}, err
+	}
+	closedStatus := "closed"
+	var closed Bead
+	err := s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, b Bead) error {
+		next := applySQLiteUpdateOpts(b, UpdateOpts{Status: &closedStatus, Metadata: metadata})
+		next.UpdatedAt = time.Now()
+		if err := s.upsertBeadTx(ctx, tx, next); err != nil {
+			return err
+		}
+		stored, err := s.getTx(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		closed = stored
+		return nil
+	})
+	if err != nil {
+		return Bead{}, err
+	}
+	return closed, nil
+}
+
+// AtomicConditionalCloserHandle reports the atomic terminal close only for a
+// layout that carries the revision column. AtomicConditionalCloserFor is a
+// hard capability gate, and a legacy layout without the column cannot fence at
+// all (conditionalWrite refuses it), so discovery must answer no there rather
+// than hand out a closer that always fails.
+func (s *SQLiteStore) AtomicConditionalCloserHandle() (AtomicConditionalCloser, bool) {
+	if s == nil || !s.hasRevisionColumn {
+		return nil, false
+	}
+	return s, true
 }
 
 // DeleteIfMatch deletes the bead only when the stored revision matches.

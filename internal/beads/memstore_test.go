@@ -47,6 +47,14 @@ func TestMemStoreConditionalWriterConformance(t *testing.T) {
 	)
 }
 
+// TestAtomicCloseMemStoreAtomicCloserConformance pins the opt-in in-memory
+// atomic-close store to the shared AtomicConditionalCloser contract, the same
+// table FileStore and SQLiteStore run.
+func TestAtomicCloseMemStoreAtomicCloserConformance(t *testing.T) {
+	beadstest.RunAtomicConditionalCloserConformance(t, "AtomicCloseMemStore",
+		func(_ *testing.T) beads.Store { return beads.NewAtomicCloseMemStore() })
+}
+
 func TestMemStoreSetMetadata(t *testing.T) {
 	s := beads.NewMemStore()
 	b, err := s.Create(beads.Bead{Title: "test"})
