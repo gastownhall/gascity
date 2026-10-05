@@ -16,14 +16,21 @@ import "sort"
 // trackCloseTransitionLocked keeps unannouncedCloses in step with the row just
 // installed for id. A row that is not closed cancels any queued close (a
 // reopen before the drain must not announce a stale close). A not-closed to
-// closed transition is queued unless the caller announces it itself. Caller
-// must hold c.mu in write mode.
+// closed transition is queued unless the caller announces it itself, and so is
+// a closed row installed with no cached row before it while a closing write of
+// ours is in flight (closeIntents). Caller must hold c.mu in write mode.
 func (c *CachingStore) trackCloseTransitionLocked(id string, previous Bead, hadPrevious bool, installed Bead, announced bool) {
 	if installed.Status != "closed" || announced {
 		c.dropQueuedCloseLocked(id)
 		return
 	}
-	if !hadPrevious || previous.Status == "closed" {
+	switch {
+	case hadPrevious && previous.Status != "closed":
+		// A close observed over a cached open row.
+	case !hadPrevious && c.closeIntents[id] > 0:
+		// A close a write of ours is making, observed before that write
+		// claims it: queue it so the claim (or the drain) announces it.
+	default:
 		return
 	}
 	if c.unannouncedCloses == nil {
@@ -128,8 +135,53 @@ func (c *CachingStore) updateEventTypeLocked(id string, installed Bead, opts Upd
 	if installed.Status != "closed" {
 		return "bead.updated"
 	}
-	if c.claimCloseLocked(id, opts.Status != nil && *opts.Status == "closed", fenced) {
+	if c.claimCloseLocked(id, updateCloses(opts), fenced) {
 		return "bead.closed"
 	}
 	return "bead.updated"
+}
+
+// beginCloseIntent registers a closing write for id before its backing write
+// (closeIntents). The write must end it with claimCloseIntentLocked, or with
+// endCloseIntent when it fails before claiming.
+func (c *CachingStore) beginCloseIntent(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closeIntents == nil {
+		c.closeIntents = make(map[string]int)
+	}
+	c.closeIntents[id]++
+}
+
+// endCloseIntent ends a closing write that will not claim (its backing write
+// failed).
+func (c *CachingStore) endCloseIntent(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.endCloseIntentLocked(id)
+}
+
+// endCloseIntentLocked drops one in-flight closing write for id. Caller must
+// hold c.mu in write mode.
+func (c *CachingStore) endCloseIntentLocked(id string) {
+	switch n := c.closeIntents[id]; {
+	case n > 1:
+		c.closeIntents[id] = n - 1
+	case n == 1:
+		delete(c.closeIntents, id)
+	}
+}
+
+// claimCloseIntentLocked ends a closing write's intent and claims its close
+// (claimCloseLocked) under the same lock, so no read can queue the close
+// between the two. fenced is claimCloseLocked's. Caller must hold c.mu in
+// write mode.
+func (c *CachingStore) claimCloseIntentLocked(id string, uncachedOwns, fenced bool) bool {
+	c.endCloseIntentLocked(id)
+	return c.claimCloseLocked(id, uncachedOwns, fenced)
+}
+
+// updateCloses reports whether opts writes status=closed.
+func updateCloses(opts UpdateOpts) bool {
+	return opts.Status != nil && *opts.Status == "closed"
 }

@@ -137,6 +137,11 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// cached one, which the IncludeClosed=false scan does not do. Its
 		// exactly-once behavior is pinned by caching_store_close_event_test.go.
 		"unannouncedCloses": true, "hasUnannouncedCloses": true,
+		// closeIntents counts closing writes in flight between their backing
+		// write and their announcement claim; only those writers touch it, and
+		// the seam reads it only through trackCloseTransitionLocked's queueing
+		// (excluded above with the queue it feeds).
+		"closeIntents": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CachingStore{}), comparedStore, excludedStore)
 

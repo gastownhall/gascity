@@ -104,6 +104,14 @@ type CachingStore struct {
 	// mirrors len(unannouncedCloses) > 0 so the drain costs no lock when idle.
 	unannouncedCloses    map[string]Bead
 	hasUnannouncedCloses atomic.Bool
+	// closeIntents counts, per bead, the closing writes (Close, a closing
+	// Update, the conditional closers) between their backing write and their
+	// claim of the bead.closed announcement (claimCloseLocked). While one is
+	// in flight, a read that caches the bead as closed with no cached row
+	// before it queues the close too, so a close of a bead the cache never
+	// held is not swallowed as an already-closed row (see
+	// trackCloseTransitionLocked).
+	closeIntents map[string]int
 
 	reconciling    atomic.Bool
 	syncFailures   int
