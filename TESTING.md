@@ -46,6 +46,204 @@ packages, run `make bazel-sync` and commit the regenerated BUILD files
 See `engdocs/bazel-quickstart.md` for local setup and
 `engdocs/bazel-ci-budget.md` for the CI optimization loop.
 
+### Measuring cache hits (BEP cache report)
+
+To check whether a run actually reused results, write a Build Event
+Protocol file and summarize it:
+
+```bash
+bazel test //... --build_event_json_file=/var/tmp/bep-unit.json
+go run ./scripts/bazel-bep-summary.go --context local unit=/var/tmp/bep-unit.json
+```
+
+The report counts test targets as **cached** (local action cache, remote
+cache, or disk cache; bazel's `(cached) PASSED`) or **executed** (remote
+executor or a local strategy), gives passed/flaky/failed totals, the hit
+rate, test time run versus skipped, the action-level runner counts
+(`remote cache hit`, `remote`, `linux-sandbox`, ...) and the slowest
+executed tests. Pass one `PHASE=FILE` per invocation; `--json-out PATH`
+writes the machine-readable report (schema 1), `--allow-missing` shows an
+absent file as "no BEP file" instead of failing, and `--top N` sizes the
+slowest list. `bazel-test.yml` runs it after every `bazel test` step
+(unit, acceptance, integration) into the job summary and uploads the JSON
+as the `bazel-bep-summary-<attempt>` artifact, so hit rates can be
+compared across pre-push, PR, and main runs. `bazel.yml` does the same per
+lane: each lane uploads its BEP file, redacted to the fields the report
+reads (`internal/testpolicy/bepsummary/redact.jq`: a raw BEP file holds the
+expanded command line, including `--remote_executor`), and the
+`bazel / test cache report` job reports them in one table (one phase per
+lane, context `<event>/<mode>`) and uploads
+`bazel-yml-bep-summary-<attempt>`.
+`scripts/bazel_bep_summary_workflow_test.go` fails if a `bazel test`
+invocation or a `bazel.yml` lane stops writing a BEP file the report reads.
+
+### Bazel cache tiers
+
+A result is reused only by a run that hashes the action identically, so
+every flag that can change an action key is committed, unconditionally, in
+`.bazelrc` (notably the pinned test `PATH`, with Go at `/usr/local/go`). The
+per-mode configs and the gitignored `.bazelrc.local` carry transport only:
+endpoints, credentials, timeouts, download and parallelism policy.
+`scripts/bazel_key_parity_test.go` enforces this, including against the lines
+`bazel-test.yml` writes, so pre-push, PR and main runs compute the same keys.
+
+| tier | how | executes | writes the shared cache |
+|---|---|---|---|
+| contributor (default) | `--config=fork-cache` | locally, on cache misses | never |
+| maintainer (opt-in, allowlisted) | `--config=remote-exec` + a client certificate | rbe-west, `oss` instance | only rbe-west's own workers |
+| CI (`bazel-test.yml`) | `--config=remote-exec` + CI secrets | rbe-west, `oss` instance | only rbe-west's own workers |
+
+- **Contributor.** `fork-cache` reads rbe-west's anonymous, read-only cache
+  (`rbe-cache.ops.gascity.com:8443`, instance `oss`): anything CI already ran
+  for the same inputs is a hit, misses run on your machine, and nothing is
+  ever uploaded. If the endpoint is closed or slow, Bazel falls back to local
+  execution. No credential, no remote compute.
+- **Maintainer.** Remote execution is opt-in and needs an mTLS client
+  certificate for rbe-west; without one nothing tries to execute remotely.
+  Generate the key locally (it never leaves your machine) and send only the
+  CSR to the rbe-west operators (infra `nativelink-cas/west`); there is no
+  self-service path in this repo (the `rbe-fork` mint used by
+  `tools/rbe/fork-credential.sh` certifies only in-progress PR runs):
+
+  ```bash
+  install -d -m 0700 ~/.config/rbe
+  # PKCS#8 EC key: Bazel's Netty TLS refuses a SEC1 "EC PRIVATE KEY".
+  openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out ~/.config/rbe/rbe-maint.key
+  chmod 600 ~/.config/rbe/rbe-maint.key
+  # Exactly these two RDNs: CN = your GitHub login, O = gascity-maintainers.
+  openssl req -new -key ~/.config/rbe/rbe-maint.key \
+    -subj "/CN=<your-github-login>/O=gascity-maintainers" -out rbe-maint.csr
+  ```
+
+  A CSR is public, so send it to a rbe-west operator over any channel. Your
+  GitHub login must be on the allowlist that the fork mint uses for
+  read/write PR runs. You get back `rbe-maint.crt`: client-auth only, valid
+  for 90 days, and its fingerprint is pinned on the farm. An operator revokes
+  it by removing that pin, effective immediately. To renew, send a new CSR
+  (preferably for a new key) before it expires. Maintainer certificates use
+  their own CA and a dedicated endpoint that reaches only the `oss`
+  instance. Results are still written only by the workers.
+
+  With the certificate and the endpoint the operators return, add to
+  `.bazelrc.local` (absolute paths; nothing else belongs there):
+
+  ```
+  build:remote-exec --remote_executor=grpcs://<maintainer endpoint>
+  build:remote-exec --remote_instance_name=oss
+  build:remote-exec --tls_client_certificate=/home/<you>/.config/rbe/rbe-maint.crt
+  build:remote-exec --tls_client_key=/home/<you>/.config/rbe/rbe-maint.key
+  ```
+
+  Allowlisted maintainers working on this OSS project run on the
+  Blacksmith-donated OSS pool (`--remote_instance_name=oss`; OSS code only).
+  Their actions land in the `oss` action cache that CI and contributors
+  read, so a pre-push result is a PR and main hit. The operators authorize
+  each certificate for the OSS scheduler when they issue it.
+- **CI.** `bazel-test.yml` is the trusted writer: its actions execute on
+  rbe-west's `oss` workers, which alone write the `oss` action cache that
+  contributors and fork PRs read. Fork PRs get the read-only cache, or
+  `rbe-fork` remote execution with a certificate minted for that run.
+
+**Pre-push.** `.githooks/pre-push` runs the suite through
+`.githooks/lib/push-suite.sh` when a push changes Go sources. Mode by
+`GC_PREPUSH_SUITE` (default `auto`):
+
+| `GC_PREPUSH_SUITE` | runs |
+|---|---|
+| `auto` | `bazel test //... --config=remote-exec` when any rc file Bazel reads names a remote executor; `bazel test //... --config=fork-cache` otherwise; `make test-fast-parallel` when bazel is not installed, or for `fork-cache` when the pinned test `PATH` has no `go` |
+| `rbe` | `bazel test //... --config=remote-exec`; fails when no rc file names an executor |
+| `cache` | `bazel test //... --config=fork-cache` |
+| `go` | `make test-fast-parallel` (plain `go test`, the pre-Bazel suite) |
+
+`auto` asks Bazel which options its rc files set (`bazel info --announce_rc
+--config=remote-exec`, which contacts no remote): a non-empty
+`--remote_executor` in the system rc, the workspace rc with `.bazelrc.local`
+(a maintainer's `build:remote-exec` lines), or `~/.bazelrc` selects
+`remote-exec`. Agent hosts whose `~/.bazelrc` sets `build
+--remote_executor=...` with the operator certificate therefore push with
+remote execution: compiles and tests run on rbe-west, and the host only
+analyzes, which keeps `go test` fan-out off shared machines.
+`--config=remote-exec` adds transport only on top of such an rc (minimal
+downloads, `--jobs=64`, a long timeout, no uploads of local results), so
+actions hash like CI's. An explicit `rbe`/`cache` without bazel installed,
+`rbe` with no executor in any rc (the suite would build and run locally at
+`--jobs=64`), an option set Bazel cannot read, or an unknown value fails the
+push. `fork-cache` resets `--remote_executor`, so the cache mode never
+executes remotely. Locally
+executed tests use the pinned test `PATH`, so Go must be at `/usr/local/go`
+(`sudo ln -s "$(go env GOROOT)" /usr/local/go`; without it `auto` runs
+`make test-fast-parallel` instead of the cache mode); overriding
+`--test_env=PATH` in `.bazelrc.local` works but gives your machine its own
+action keys, so nothing CI ran is a hit.
+
+### Re-pinning the RBE worker host
+
+Every action's key carries `worker-env`, the sha256 of
+`tools/rbe/worker-env.txt` (`//platforms:rbe_worker`). That file is the
+manifest of the Blacksmith host the pool workers run on: OS, arch, Go,
+dolt, and the dpkg versions of the worker toolset. rbe-west's oss and
+oss-fork schedulers match `worker-env` exactly. The default instance
+ignores it. Each worker advertises the hash of the host it measures
+(`tools/rbe/worker-env`). An action runs only on a worker whose host is
+the pinned one.
+
+The measurement is stable while the Blacksmith image is. The worker
+installs its toolset from the image's own apt lists (no `apt-get
+update`) and Go and dolt by checksum. It changes with an image refresh,
+or with a change to the toolset, Go or dolt. That is drift, and it is
+loud (`tools/rbe/worker-env-drift`):
+
+- A drifted worker still registers, advertising the hash it measured.
+  The pools are shared with beads, whose actions send no `worker-env`
+  and still run on it. gascity's actions carry the pin and never match
+  it.
+- The pool run's measurement step fails, with the diff and the manifest
+  and pin to commit in the step summary. The worker keeps serving. The
+  run's `await-drift` and `report-drift` jobs open or update the GitHub
+  issue labelled `rbe-worker-env-drift`, titled
+  `rbe worker-env drift: <pin>`.
+- That issue is the farm's signal too. While any open
+  `rbe-worker-env-drift` issue exists, each rbe-west pool scaler caps
+  its pool at `NLPOOL_DRIFT_MAX_WORKERS` (default 2), so the unmatched
+  queue can't drive the pool to 16 VMs. Keep that label, and keep the
+  issue open until the re-pin lands.
+- While the issue is open, remote `bazel-test` and `bazel` (bazel.yml)
+  runs on its pin fail at their preflight instead of queueing.
+- `rbe-worker-env-canary.yml` measures a Blacksmith runner every six
+  hours, so drift usually opens the issue before CI meets it.
+- A change to the worker host (`tools/rbe/worker-env*`,
+  `blacksmith-worker.sh`, `platforms/BUILD.bazel`) is measured on the
+  Blacksmith image in the required `bazel test` job (and in bazel.yml's
+  `bazel / unit` lane). If the PR's manifest is not what that image
+  measures, the job fails.
+
+To re-pin, anyone with write access:
+
+1. Take the manifest and pin line from the drift issue, or from the
+   failed run's step summary.
+2. Commit the manifest as `tools/rbe/worker-env.txt` and the pin in
+   `platforms/BUILD.bazel`. `go test ./scripts/ -run RBEWorkerEnv`
+   checks that they agree with each other, `go.mod` and the toolset.
+3. Open the PR. Pool workers run the default branch's provisioning, so
+   the new pin isn't reliably served before it merges, and
+   `bazel test` (and every bazel.yml lane) skips the remote suite. It
+   measures its own Blacksmith host against the new manifest instead
+   (bazel.yml: the unit lane), and fails if they differ.
+4. Merge. The canary runs on the merge and closes the issues of
+   superseded pins, which lifts the farm's cap. Don't close the drift
+   issue before the re-pin lands.
+
+A re-pin is a new key for every action. The first runs after it miss
+the cache entirely and re-execute everything on the new host, which is
+the point: no result from the old host is served for the new one.
+
+A worker that measures an earlier pin is on a stale image (the tail of
+a rollout, or a rollback). It still serves, and opens no issue. If
+every worker is stale, Blacksmith rolled the image back: revert the
+re-pin.
+If an issue stays open for the current pin while hosts match again,
+close it by hand.
+
 ## The outcome: protected PR feedback in under five minutes
 
 The developer-visible service-level objective is p95 **under five minutes**
@@ -1089,7 +1287,8 @@ wait maps to `exit 75` (`EX_TEMPFAIL`) — distinct from a real test failure
 and from `scripts/push-ownership-guard.sh`'s unrelated `exit 1` contract for
 bead-ownership staleness. That 75 is only visible to callers that invoke
 `scripts/test-local-parallel` directly: the four Makefile targets and
-`.githooks/pre-push` (`exec make test-fast-parallel`) run it under `make`,
+`.githooks/pre-push` (`make test-fast-parallel` via `.githooks/lib/push-suite.sh`
+when bazel is absent or `GC_PREPUSH_SUITE=go`) run it under `make`,
 which reports `make: *** [test-fast-parallel] Error 75` and then exits 2.
 Through those paths the distinguishing signal is the stderr text, not the
 process exit code. The kernel releases the lock automatically when the

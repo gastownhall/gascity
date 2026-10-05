@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,6 +35,11 @@ type readyOutcomeFanoutStorage struct {
 	// failure must fail the whole filter."
 	getErr   map[string]error
 	getDelay chan struct{}
+	// atGate, when set, receives one signal from each Get call the moment it
+	// reaches getDelay, so a test can wait for calls to park on the gate
+	// instead of polling inFlight. It must be buffered for every call that
+	// can reach the gate, so a send never blocks.
+	atGate chan struct{}
 
 	mu            sync.Mutex
 	edgeReadCalls int
@@ -127,6 +131,9 @@ func (r *readyOutcomeFanoutIssueReader) Get(_ context.Context, req issueops.GetR
 		}
 	}
 	if p.getDelay != nil {
+		if p.atGate != nil {
+			p.atGate <- struct{}{}
+		}
 		<-p.getDelay
 	}
 	p.mu.Lock()
@@ -248,7 +255,8 @@ func TestNativeDoltStoreReadyWorkOutcomeFilterFansOutConcurrently(t *testing.T) 
 		issues[blocker] = fanoutIssue(blocker, beadslib.StatusOpen, "")
 	}
 	gate := make(chan struct{})
-	storage := &readyOutcomeFanoutStorage{edges: edges, issues: issues, getDelay: gate}
+	atGate := make(chan struct{}, len(candidates))
+	storage := &readyOutcomeFanoutStorage{edges: edges, issues: issues, getDelay: gate, atGate: atGate}
 	store := newNativeDoltStoreForTest(storage)
 
 	// A LITERAL bound, independent of nativeReadyEdgeFanoutLimit (mirrors
@@ -271,33 +279,19 @@ func TestNativeDoltStoreReadyWorkOutcomeFilterFansOutConcurrently(t *testing.T) 
 		close(done)
 	}()
 
-	// Let wantMaxFanout dispatchable Get calls actually park on their own
-	// <-p.getDelay before this goroutine drains any of them, rather than
-	// sleeping a guessed settle window (S5b-fixrev item 1 follow-up: a
-	// fixed-duration sleep is a resourcecensus-tracked fixed_sleep call the
-	// repo's ledger ratchets down, not up). storage.inFlight is incremented
-	// the instant a Get call begins, before it ever reaches <-p.getDelay, so
-	// it is a direct, real-time signal of how many goroutines are currently
-	// blocked on the gate: the correct, bounded implementation cannot exceed
-	// nativeReadyEdgeFanoutLimit (>= wantMaxFanout) in flight, so it crosses
-	// this threshold almost immediately and the loop below returns fast. A
-	// mutant that removes the bound still needs a settle window for the same
-	// reason the old sleep did: without one, draining could keep pace with
-	// dispatch and never observe more than a handful in flight at once,
-	// masking the missing bound. Such a mutant simply never reaches
-	// wantMaxFanout in flight (every Get completes and drains before a ninth
-	// could even be attempted under a correct cap, but with the cap removed
-	// nothing throttles dispatch either, so inFlight still ramps past
-	// wantMaxFanout on the way to 20) — and if some future change ever made
-	// that genuinely impossible, this loop still fails loudly via the
-	// deadline below rather than silently passing, which the old sleep could
-	// not do.
-	deadline := time.Now().Add(10 * time.Second)
-	for atomic.LoadInt32(&storage.inFlight) < wantMaxFanout {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %d Get calls to park on the gate (saw %d in flight)", wantMaxFanout, atomic.LoadInt32(&storage.inFlight))
+	// Wait for wantMaxFanout Get calls to park on the gate before draining
+	// any of them, so the in-flight peak is observed rather than raced: each
+	// Get signals atGate the moment it reaches getDelay. The correct, bounded
+	// implementation parks exactly nativeReadyEdgeFanoutLimit calls almost
+	// immediately; an implementation that never reaches wantMaxFanout
+	// concurrent calls fails here at the deadline instead of passing.
+	deadline := time.After(10 * time.Second)
+	for parked := 0; parked < wantMaxFanout; parked++ {
+		select {
+		case <-atGate:
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d Get calls to park on the gate (saw %d)", wantMaxFanout, parked)
 		}
-		runtime.Gosched()
 	}
 	for range candidates {
 		gate <- struct{}{}
