@@ -43,10 +43,11 @@ const (
 	// does what it says. The pin names a real gascity.git commit whose
 	// bundled pack trees match the content this binary embeds, so a gc that
 	// does not know the pin (an older release reading a newer city) fetches
-	// the same bytes. TestBundledPackImportVersionMatchesEmbeddedContent
-	// checks that when the commit is in the local history; bump the pin (and
-	// append the old value to SupersededBundledPackImportVersions) when
-	// cutting a release whose bundled core/bd/dolt content changed.
+	// the same bytes. scripts/check-embedded-pins (RC Gate) checks that the
+	// commit is an ancestor of the release ref with identical core/bd/dolt
+	// trees; bump the pin (and append the old value to
+	// SupersededBundledPackImportVersions) when cutting a release whose
+	// bundled core/bd/dolt content changed.
 	BundledPackImportVersion = "sha:e38ce9cc55d15fa351199c042f0d07aba1a347af"
 )
 

@@ -125,6 +125,36 @@ func TestCheckEmbeddedPins(t *testing.T) {
 		}
 	})
 
+	t.Run("content-equal pin off this branch", func(t *testing.T) {
+		f := newEmbeddedPinsFixture(t)
+		f.git("checkout", "--quiet", "-b", "side", "HEAD~1")
+		f.write("README.md", "side branch\n")
+		side := f.commit("side commit with the same pack trees")
+		f.git("checkout", "--quiet", "main")
+		f.writePublicPacks("sha:" + side)
+		f.commit("pin a commit that is not an ancestor")
+		out, err := f.run()
+		if err == nil || !strings.Contains(out, "is not an ancestor of HEAD") {
+			t.Fatalf("err = %v, want non-ancestor pin failure:\n%s", err, out)
+		}
+	})
+
+	t.Run("newer beads release is advisory with --bd-advisory", func(t *testing.T) {
+		f := newEmbeddedPinsFixture(t)
+		script := filepath.Join(repoRoot(t), "scripts", "check-embedded-pins")
+		cmd := exec.Command(script, "--repo-root", f.root, "--skip-bundled", "--latest-bd", "v1.3.2", "--bd-qualified-dolt", "2.2.0", "--bd-advisory")
+		cmd.Env = f.env
+		out, err := cmd.CombinedOutput()
+		if err != nil || !strings.Contains(string(out), "::warning title=bd pin behind latest beads release::") {
+			t.Fatalf("err = %v, want a passing run with a bd warning:\n%s", err, out)
+		}
+		cmd = exec.Command(script, "--repo-root", f.root, "--skip-bundled", "--latest-bd", "v1.3.2", "--bd-qualified-dolt", "2.2.0")
+		cmd.Env = f.env
+		if out, err := cmd.CombinedOutput(); err == nil {
+			t.Fatalf("strict mode passed with bd behind the latest release:\n%s", out)
+		}
+	})
+
 	t.Run("example carries a superseded pin", func(t *testing.T) {
 		f := newEmbeddedPinsFixture(t)
 		f.write("examples/demo/pack.toml", "[imports.core]\nversion = \"sha:f895c0ff47d6ee9334ed282a416387eb5b084d24\"\n")

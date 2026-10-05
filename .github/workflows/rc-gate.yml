@@ -90,19 +90,23 @@ jobs:
       - name: Run make check-docs
         run: make check-docs
 
-  # Release-time pin guard: the bundled core/bd/dolt pin must name a commit
-  # with the content this ref embeds, and bd/dolt must be the latest beads
-  # release and the Dolt it qualifies (scripts/check-embedded-pins).
+  # Release-time pin guard: the bundled core/bd/dolt pin must name an
+  # ancestor commit with the content this ref embeds, and DOLT_VERSION must be
+  # the Dolt the pinned beads release qualifies (scripts/check-embedded-pins).
   ubuntu_embedded_pins:
     name: ubuntu / embedded pins are the latest releases
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+      # --bd-advisory: a beads patch released after the pin is a warning
+      # here (the nightly check stays strict), so it cannot block a release.
       - name: Check embedded pins
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/check-embedded-pins
+        run: scripts/check-embedded-pins --bd-advisory
 
   ubuntu_acceptance_a:
     name: ubuntu / acceptance A / ${{ matrix.label }}

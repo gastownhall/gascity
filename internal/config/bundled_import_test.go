@@ -407,6 +407,9 @@ func TestIsBundledSourceAtCanonicalPin(t *testing.T) {
 		{"empty commit", coreSource, "", false},
 		{"core at superseded gascity.git canonical pin", coreSource, lastSupersededCommit(SupersededBundledPackImportVersions), true},
 		{"public gastown at superseded public pin", PublicGastownPackSource, lastSupersededCommit(SupersededPublicGastownPackVersions), false},
+		{"core at abbreviated superseded pin", coreSource, lastSupersededCommit(SupersededBundledPackImportVersions)[:10], true},
+		{"core at uppercase superseded pin", coreSource, strings.ToUpper(lastSupersededCommit(SupersededBundledPackImportVersions)), true},
+		{"core at too-short superseded prefix", coreSource, lastSupersededCommit(SupersededBundledPackImportVersions)[:6], false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -737,5 +740,37 @@ func TestResolveGascityRolesWithoutLockIsOffline(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(got, ".git")); !os.IsNotExist(err) {
 		t.Fatalf("synthetic roles cache must not be a git checkout (stat .git err = %v)", err)
+	}
+}
+
+// TestMatchSupersededPinSpellings pins the spelling tolerance of the
+// superseded-pin match: case-insensitive, "sha:" optional, and an
+// abbreviation of at least 7 hex digits that names exactly one entry. Any
+// other spelling stays a deliberate pin.
+func TestMatchSupersededPinSpellings(t *testing.T) {
+	list := []string{
+		"sha:f895c0ff47d6ee9334ed282a416387eb5b084d24",
+		"sha:f895c0f000000000000000000000000000000000",
+		"sha:282d2bf26b1a9396016e90b0128c1cd16b719f4d3af7cd0ea06cf25fbc426d18",
+	}
+	tests := []struct {
+		version string
+		want    bool
+	}{
+		{"sha:f895c0ff47d6ee9334ed282a416387eb5b084d24", true},
+		{"SHA:F895C0FF47D6EE9334ED282A416387EB5B084D24", true},
+		{"f895c0ff47d6ee9334ed282a416387eb5b084d24", true},
+		{"sha:f895c0ff47", true},
+		{"sha:F895C0FF", true},
+		{"sha:f895c0f", false}, // ambiguous: prefixes two entries
+		{"sha:282d2bf", true},  // unique 7-digit prefix
+		{"sha:282d2b", false},  // shorter than 7
+		{"sha:f895c0ff48", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := matchSupersededPin(tt.version, list); got != tt.want {
+			t.Errorf("matchSupersededPin(%q) = %v, want %v", tt.version, got, tt.want)
+		}
 	}
 }

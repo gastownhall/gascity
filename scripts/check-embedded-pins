@@ -3,8 +3,8 @@
 
 Checks:
 
-  bundled   BundledPackImportVersion (internal/config/public_packs.go) names a
-            gascity.git commit whose core/bd/dolt pack trees match this
+  bundled   BundledPackImportVersion (internal/config/public_packs.go) names an
+            ancestor of HEAD whose core/bd/dolt pack trees match this
             checkout, so a gc that does not know the pin and fetches it gets
             the bytes the binary embeds. Release-time check: on main the
             bundled content moves ahead of the pin between releases by design.
@@ -13,7 +13,8 @@ Checks:
   releases  deps.env BD_VERSION is the latest published (non-prerelease)
             gastownhall/beads release, and DOLT_VERSION is the Dolt version
             that beads release qualifies (scripts/ci/install-dolt.sh at the
-            tag). beads measures each Dolt release before raising its pin
+            tag). --bd-advisory (RC Gate) turns a newer beads release into a
+            warning and checks Dolt against the pinned bd instead. beads measures each Dolt release before raising its pin
             (Dolt 2.3.x regressed DOLT_RESET('--hard')), so the qualified pin,
             not upstream "latest", is the newest safe Dolt.
 
@@ -57,6 +58,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-stale", action="store_true", help="skip the superseded-pin scan of examples and docs")
     parser.add_argument("--latest-bd", help="latest beads release tag (skips the GitHub lookup)")
     parser.add_argument("--bd-qualified-dolt", help="Dolt version the beads release qualifies (skips the lookup)")
+    parser.add_argument(
+        "--bd-advisory",
+        action="store_true",
+        help="report a newer beads release than BD_VERSION as a warning, and check DOLT_VERSION "
+        "against the Dolt the pinned BD_VERSION qualifies (release gates: a beads patch shipped "
+        "after the pin must not block a release)",
+    )
     return parser.parse_args()
 
 
@@ -69,7 +77,7 @@ def main() -> int:
     if not args.skip_stale:
         errors += check_stale(root)
     if not args.skip_releases:
-        errors += check_releases(root, args.latest_bd, args.bd_qualified_dolt)
+        errors += check_releases(root, args.latest_bd, args.bd_qualified_dolt, args.bd_advisory)
     for error in errors:
         print(f"error: {error}", file=sys.stderr)
     if errors:
@@ -106,10 +114,20 @@ def check_bundled(root: Path) -> list[str]:
     commit = pin[4:]
     if pin in superseded:
         errors.append(f"BundledPackImportVersion {pin} is also listed as superseded")
+    if git(root, "rev-parse", "--is-shallow-repository").stdout.strip() == "true":
+        # Ancestry needs the history between the pin and HEAD.
+        deepened = git(root, "fetch", "--quiet", "--unshallow", "origin", check=False)
+        if deepened.returncode != 0:
+            return errors + [f"cannot deepen the shallow checkout to check BundledPackImportVersion ancestry: {deepened.stderr.strip()}"]
     if git(root, "cat-file", "-e", f"{commit}^{{commit}}", check=False).returncode != 0:
-        fetched = git(root, "fetch", "--quiet", "--depth=1", "origin", commit, check=False)
-        if fetched.returncode != 0:
-            return errors + [f"BundledPackImportVersion commit {commit} is not fetchable from origin: {fetched.stderr.strip()}"]
+        return errors + [f"BundledPackImportVersion commit {commit} is not in this ref's history"]
+    if git(root, "merge-base", "--is-ancestor", commit, "HEAD", check=False).returncode != 0:
+        # A content-equal commit from another branch (a PR head, main for a
+        # release branch) is not part of what this ref ships.
+        errors.append(
+            f"BundledPackImportVersion commit {commit[:12]} is not an ancestor of HEAD; "
+            "pin a commit on this branch"
+        )
     diff = git(root, "diff", "--name-only", commit, "HEAD", "--", *BUNDLED_PACK_PATHS)
     changed = [line for line in diff.stdout.splitlines() if line]
     if changed:
@@ -177,21 +195,27 @@ def beads_qualified_dolt(tag: str) -> str:
     return match.group(1)
 
 
-def check_releases(root: Path, latest_bd: str | None, qualified_dolt: str | None) -> list[str]:
+def check_releases(root: Path, latest_bd: str | None, qualified_dolt: str | None, bd_advisory: bool) -> list[str]:
     env = deps_env(root)
     bd = env.get("BD_VERSION", "")
     dolt = env.get("DOLT_VERSION", "")
     errors: list[str] = []
     online = qualified_dolt is None
     latest_bd = latest_bd or latest_release_tag(BEADS_REPO)
+    qualifying_bd = latest_bd
     if bd != latest_bd:
-        errors.append(f"deps.env BD_VERSION={bd}, latest beads release is {latest_bd}")
-    qualified_dolt = qualified_dolt or beads_qualified_dolt(latest_bd)
+        message = f"deps.env BD_VERSION={bd}, latest beads release is {latest_bd}"
+        if bd_advisory:
+            print(f"::warning title=bd pin behind latest beads release::{message}")
+            qualifying_bd = bd
+        else:
+            errors.append(message)
+    qualified_dolt = qualified_dolt or beads_qualified_dolt(qualifying_bd)
     if dolt != qualified_dolt:
-        errors.append(f"deps.env DOLT_VERSION={dolt}, beads {latest_bd} qualifies Dolt {qualified_dolt}")
+        errors.append(f"deps.env DOLT_VERSION={dolt}, beads {qualifying_bd} qualifies Dolt {qualified_dolt}")
     if online:
         upstream = latest_release_tag(DOLT_REPO).lstrip("v")
-        print(f"bd {bd} (latest {latest_bd}); dolt {dolt} (beads {latest_bd} qualifies {qualified_dolt}; upstream latest {upstream})")
+        print(f"bd {bd} (latest {latest_bd}); dolt {dolt} (beads {qualifying_bd} qualifies {qualified_dolt}; upstream latest {upstream})")
     return errors
 
 

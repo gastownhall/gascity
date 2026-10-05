@@ -344,14 +344,18 @@ func TestEnsureRepoInCacheNeverFetchesSupersededGascityGitPin(t *testing.T) {
 	}
 	t.Cleanup(func() { runNetworkGit = prevNetGit })
 
-	got, err := EnsureRepoInCache("", source, commit)
-	if err != nil {
-		t.Fatalf("EnsureRepoInCache: %v", err)
-	}
-	if err := builtinpacks.ValidateSyntheticRepo(got, builtinpacks.Repository, commit); err != nil {
-		t.Fatalf("superseded pin was not served from embedded content: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(got, "internal", "bootstrap", "packs", "core", "pack.toml")); err != nil {
-		t.Fatalf("synthetic cache missing core pack.toml: %v", err)
+	// Hand-written spellings of the same pin (abbreviated, uppercase) must
+	// not slip through as deliberate pins either.
+	for _, spelling := range []string{commit, commit[:10], strings.ToUpper(commit)} {
+		got, err := EnsureRepoInCache("", source, spelling)
+		if err != nil {
+			t.Fatalf("EnsureRepoInCache(%q): %v", spelling, err)
+		}
+		if err := builtinpacks.ValidateSyntheticRepo(got, builtinpacks.Repository, spelling); err != nil {
+			t.Fatalf("superseded pin %q was not served from embedded content: %v", spelling, err)
+		}
+		if _, err := os.Stat(filepath.Join(got, "internal", "bootstrap", "packs", "core", "pack.toml")); err != nil {
+			t.Fatalf("synthetic cache for %q missing core pack.toml: %v", spelling, err)
+		}
 	}
 }

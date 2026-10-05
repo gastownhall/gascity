@@ -237,13 +237,39 @@ func SupersededBundledPinTarget(source, version string) (string, bool) {
 	default:
 		return "", false
 	}
-	v := strings.TrimSpace(version)
-	for _, old := range superseded {
-		if v == old {
-			return current, true
-		}
+	if matchSupersededPin(version, superseded) {
+		return current, true
 	}
 	return "", false
+}
+
+// minSupersededPinPrefix is the shortest abbreviated sha accepted as naming a
+// superseded pin (git's default abbreviation length).
+const minSupersededPinPrefix = 7
+
+// matchSupersededPin reports whether version names one of the superseded
+// "sha:<hex>" pins. Hand-written pins vary in spelling, so the comparison
+// ignores case and accepts an abbreviation of at least
+// minSupersededPinPrefix hex digits that matches exactly one entry: a short
+// or uppercase spelling of a superseded pin must not slip past as a
+// deliberate pin and be fetched from git.
+func matchSupersededPin(version string, superseded []string) bool {
+	v := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(version), "sha:"))
+	v = strings.TrimPrefix(v, "sha:")
+	if len(v) < minSupersededPinPrefix {
+		return false
+	}
+	matches := 0
+	for _, old := range superseded {
+		full := strings.ToLower(strings.TrimPrefix(old, "sha:"))
+		if full == v {
+			return true
+		}
+		if strings.HasPrefix(full, v) {
+			matches++
+		}
+	}
+	return matches == 1
 }
 
 // notCachedRemediation returns the remediation clause for an import whose
