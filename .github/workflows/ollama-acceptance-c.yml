@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 env:
-  DOLT_VERSION: "2.1.7"
+  DOLT_VERSION: "2.2.0"
   BD_VERSION: "v1.3.1"
   ANTHROPIC_BASE_URL: https://ollama.com
   ANTHROPIC_API_KEY: ""

@@ -92,7 +92,7 @@ func stubInitDependencyChecks(t *testing.T) {
 func stubInitDoltAuthorIdentity(t *testing.T, values map[string]string) {
 	t.Helper()
 	old := initRunDoltConfigGet
-	initRunDoltConfigGet = func(key string) (string, error) {
+	initRunDoltConfigGet = func(_ context.Context, key string) (string, error) {
 		value := strings.TrimSpace(values[key])
 		if value == "" {
 			return "", errDoltConfigKeyMissing
@@ -1134,8 +1134,7 @@ func TestShellQuotePathForOSWindows(t *testing.T) {
 
 func TestInitRunVersionTimesOutHungVersionCommand(t *testing.T) {
 	oldCommandContext := initRunVersionCommandContext
-	oldTimeout := initRunVersionTimeout
-	initRunVersionTimeout = 50 * time.Millisecond
+	stubInitProbeBudgets(t, []time.Duration{50 * time.Millisecond, 50 * time.Millisecond})
 	initRunVersionCommandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestHelperProcessInitRunVersionHang", "--")
 		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
@@ -1143,7 +1142,6 @@ func TestInitRunVersionTimesOutHungVersionCommand(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		initRunVersionCommandContext = oldCommandContext
-		initRunVersionTimeout = oldTimeout
 	})
 
 	start := time.Now()
@@ -1154,8 +1152,192 @@ func TestInitRunVersionTimesOutHungVersionCommand(t *testing.T) {
 	if line != "" {
 		t.Fatalf("initRunVersion line = %q, want empty on timeout", line)
 	}
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+	if !errors.Is(err, errInitProbeTimedOut) {
+		t.Fatalf("initRunVersion error = %v, want errInitProbeTimedOut", err)
+	}
+	if !strings.Contains(err.Error(), "hung-binary version probe timed out after") {
+		t.Fatalf("initRunVersion error = %q, want probe name and attempt count", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("initRunVersion elapsed = %v, want timeout-bound execution", elapsed)
+	}
+}
+
+func stubInitProbeBudgets(t *testing.T, budgets []time.Duration) {
+	t.Helper()
+	oldBudgets := initProbeAttemptTimeouts
+	oldBackoff := initProbeRetryBackoff
+	initProbeAttemptTimeouts = budgets
+	initProbeRetryBackoff = 0
+	oldNotice := initProbeNotice
+	initProbeNotice = io.Discard
+	t.Cleanup(func() {
+		initProbeAttemptTimeouts = oldBudgets
+		initProbeRetryBackoff = oldBackoff
+		initProbeNotice = oldNotice
+	})
+}
+
+func TestRunInitProbeWithRetryPrintsNoticeOnEachSlowRetry(t *testing.T) {
+	stubInitProbeBudgets(t, []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, time.Second})
+	var notices bytes.Buffer
+	initProbeNotice = &notices
+
+	attempts := 0
+	err := runInitProbeWithRetry(context.Background(), "dolt identity", func(ctx context.Context) error {
+		attempts++
+		if attempts < 3 {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("runInitProbeWithRetry error = %v", err)
+	}
+	want := "dolt identity probe slow, retrying (attempt 2, 20ms)\n" +
+		"dolt identity probe slow, retrying (attempt 3, 1s)\n"
+	if notices.String() != want {
+		t.Fatalf("notices = %q, want %q", notices.String(), want)
+	}
+}
+
+func TestRunInitProbeWithRetryStopsAtParentDeadline(t *testing.T) {
+	stubInitProbeBudgets(t, []time.Duration{time.Hour, time.Hour, time.Hour})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	attempts := 0
+	err := runInitProbeWithRetry(ctx, "dolt identity", func(ctx context.Context) error {
+		attempts++
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	if !errors.Is(err, errInitProbeTimedOut) {
+		t.Fatalf("error = %v, want errInitProbeTimedOut", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (the overall deadline ends the probe)", attempts)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("elapsed = %v, want bounded by the parent deadline", elapsed)
+	}
+}
+
+// A hung dolt must not stall the identity preflight beyond the shared cap:
+// both keys together stay within initDoltIdentityProbeTotal.
+func TestCheckDoltAuthorIdentityCapsTotalProbeTime(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	stubInitDependencyChecks(t)
+	stubInitProbeBudgets(t, []time.Duration{time.Hour})
+	oldTotal := initDoltIdentityProbeTotal
+	initDoltIdentityProbeTotal = 150 * time.Millisecond
+	t.Cleanup(func() { initDoltIdentityProbeTotal = oldTotal })
+
+	old := initRunDoltConfigGet
+	initRunDoltConfigGet = func(ctx context.Context, _ string) (string, error) {
+		return "", runInitProbeWithRetry(ctx, "dolt identity", func(ctx context.Context) error {
+			<-ctx.Done()
+			return ctx.Err()
+		})
+	}
+	t.Cleanup(func() { initRunDoltConfigGet = old })
+
+	start := time.Now()
+	status := checkDoltAuthorIdentity(t.TempDir())
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("identity preflight took %v, want it capped near %v", elapsed, initDoltIdentityProbeTotal)
+	}
+	if len(status.probeErrors) != 2 {
+		t.Fatalf("probe errors = %#v, want both keys reported as timed out", status.probeErrors)
+	}
+}
+
+func TestRunInitProbeWithRetryRetriesOnlyTimedOutAttempts(t *testing.T) {
+	stubInitProbeBudgets(t, []time.Duration{20 * time.Millisecond, 20 * time.Millisecond, time.Second})
+
+	attempts := 0
+	err := runInitProbeWithRetry(context.Background(), "slow probe", func(ctx context.Context) error {
+		attempts++
+		if attempts < 3 {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("runInitProbeWithRetry error = %v, want success on third attempt", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts = %d, want 3", attempts)
+	}
+}
+
+func TestRunInitProbeWithRetryDoesNotRetryRealFailures(t *testing.T) {
+	stubInitProbeBudgets(t, []time.Duration{time.Second, time.Second})
+
+	attempts := 0
+	realErr := errors.New("exit status 2")
+	err := runInitProbeWithRetry(context.Background(), "broken probe", func(context.Context) error {
+		attempts++
+		return realErr
+	})
+	if !errors.Is(err, realErr) {
+		t.Fatalf("runInitProbeWithRetry error = %v, want the attempt's own error", err)
+	}
+	if errors.Is(err, errInitProbeTimedOut) {
+		t.Fatalf("runInitProbeWithRetry error = %v, must not be reported as a timeout", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (real failures are not retried)", attempts)
+	}
+}
+
+func TestInitRunDoltConfigGetRetriesSlowProbeOnLoadedHost(t *testing.T) {
+	stubInitProbeBudgets(t, []time.Duration{300 * time.Millisecond, 10 * time.Second})
+	binDir := t.TempDir()
+	marker := filepath.Join(binDir, "first-call-done")
+	doltPath := filepath.Join(binDir, "dolt")
+	script := "#!/bin/sh\n" +
+		"if [ ! -e " + shellQuotePOSIXPath(marker) + " ]; then\n" +
+		"  : > " + shellQuotePOSIXPath(marker) + "\n" +
+		"  exec sleep 30\n" +
+		"fi\n" +
+		"echo 'Test User'\n"
+	if err := os.WriteFile(doltPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	value, err := initRunDoltConfigGet(context.Background(), "user.name")
+	if err != nil {
+		t.Fatalf("initRunDoltConfigGet error = %v, want success after retry", err)
+	}
+	if value != "Test User" {
+		t.Fatalf("value = %q, want %q", value, "Test User")
+	}
+}
+
+func TestInitRunDoltConfigGetReportsTimeoutAfterAllAttempts(t *testing.T) {
+	stubInitProbeBudgets(t, []time.Duration{100 * time.Millisecond, 100 * time.Millisecond})
+	binDir := t.TempDir()
+	doltPath := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(doltPath, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := initRunDoltConfigGet(context.Background(), "user.name")
+	if !errors.Is(err, errInitProbeTimedOut) {
+		t.Fatalf("initRunDoltConfigGet error = %v, want errInitProbeTimedOut", err)
+	}
+	if errors.Is(err, errDoltConfigKeyMissing) {
+		t.Fatalf("initRunDoltConfigGet error = %v, timeout must not read as missing key", err)
+	}
+	if !strings.Contains(err.Error(), "dolt identity probe timed out after") {
+		t.Fatalf("initRunDoltConfigGet error = %q, want attempt detail", err)
 	}
 }
 
@@ -1689,7 +1871,7 @@ func TestDoStartForegroundReportsHardDependenciesBeforeDoltIdentity(t *testing.T
 	t.Cleanup(func() { initRunVersion = oldRunVersion })
 
 	oldDoltConfigGet := initRunDoltConfigGet
-	initRunDoltConfigGet = func(string) (string, error) {
+	initRunDoltConfigGet = func(context.Context, string) (string, error) {
 		t.Fatal("Dolt identity should not be probed before hard dependency failures are reported")
 		return "", nil
 	}
@@ -1724,7 +1906,7 @@ func TestCheckDoltAuthorIdentitySkipsWhenGCDoltSkip(t *testing.T) {
 	stubInitDependencyChecks(t)
 
 	old := initRunDoltConfigGet
-	initRunDoltConfigGet = func(string) (string, error) {
+	initRunDoltConfigGet = func(context.Context, string) (string, error) {
 		t.Fatal("Dolt identity should not be probed when GC_DOLT=skip")
 		return "", nil
 	}
@@ -1772,7 +1954,7 @@ func TestCheckDoltAuthorIdentitySkipsWhenDoltMissing(t *testing.T) {
 	t.Cleanup(func() { initLookPath = oldLookPath })
 
 	old := initRunDoltConfigGet
-	initRunDoltConfigGet = func(string) (string, error) {
+	initRunDoltConfigGet = func(context.Context, string) (string, error) {
 		t.Fatal("Dolt identity should not be probed when dolt is not on PATH")
 		return "", nil
 	}
@@ -1813,7 +1995,7 @@ dolt_port = "3307"
 	}
 
 	old := initRunDoltConfigGet
-	initRunDoltConfigGet = func(string) (string, error) {
+	initRunDoltConfigGet = func(context.Context, string) (string, error) {
 		t.Fatal("rig-only external Dolt should not require local identity")
 		return "", nil
 	}
@@ -1843,7 +2025,7 @@ port = 3307
 	}
 
 	old := initRunDoltConfigGet
-	initRunDoltConfigGet = func(string) (string, error) {
+	initRunDoltConfigGet = func(context.Context, string) (string, error) {
 		t.Fatal("city external Dolt should not require local identity")
 		return "", nil
 	}
@@ -1880,7 +2062,7 @@ dolt.auto-start: false
 	writeOpaqueBindingScopeFixture(t, cityDir)
 
 	old := initRunDoltConfigGet
-	initRunDoltConfigGet = func(string) (string, error) {
+	initRunDoltConfigGet = func(context.Context, string) (string, error) {
 		t.Fatal("a city gc does not serve must not require a local Dolt identity")
 		return "", nil
 	}
@@ -1935,7 +2117,7 @@ func TestCheckDoltAuthorIdentityReportsProbeErrorsSeparately(t *testing.T) {
 	stubInitDependencyChecks(t)
 
 	old := initRunDoltConfigGet
-	initRunDoltConfigGet = func(key string) (string, error) {
+	initRunDoltConfigGet = func(_ context.Context, key string) (string, error) {
 		if key == "user.name" {
 			return "", fmt.Errorf("dolt config probe timed out after 2s")
 		}
@@ -1975,7 +2157,7 @@ func TestInitRunDoltConfigGetReportsExitStderrAsProbeError(t *testing.T) {
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	value, err := initRunDoltConfigGet("user.name")
+	value, err := initRunDoltConfigGet(context.Background(), "user.name")
 	if value != "" {
 		t.Fatalf("value = %q, want empty", value)
 	}
@@ -1998,7 +2180,7 @@ func TestInitRunDoltConfigGetTreatsSilentEmptyExitAsMissingKey(t *testing.T) {
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	value, err := initRunDoltConfigGet("user.name")
+	value, err := initRunDoltConfigGet(context.Background(), "user.name")
 	if value != "" {
 		t.Fatalf("value = %q, want empty", value)
 	}

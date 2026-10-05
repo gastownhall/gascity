@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -96,6 +97,13 @@ type v2Host struct {
 	beginTrace func(trigger string) *sessionReconcilerTraceCycle
 	safeTick   func(fn func(), trigger string) (panicked bool)
 	stderr     io.Writer
+	// sessionsStore returns the sessions-class store the session keys read
+	// and write (sessionsBeadStore), observations the inventory lane's
+	// observation cache (I3) or nil, and rec the event recorder. The session
+	// controller reads them; the skeleton does not.
+	sessionsStore func() beads.Store
+	observations  func() *ObservationCache
+	rec           events.Recorder
 }
 
 // reconcileEnv is immutable once published: a reload publishes a new one at
@@ -193,6 +201,7 @@ type v2Runtime struct {
 	noStore    atomic.Bool // the city has no bead store, so boot never runs (MAINT-003)
 	barrier    *reloadBarrier
 	fs         *workerFSGate
+	exec       *effectExecutor // the session keys' effects (C1.9)
 	metrics    *v2Metrics
 	report     v2QueueReport
 	workers    int
@@ -228,6 +237,17 @@ func newV2Runtime(host v2Host, ctrl v2Controllers, metrics *v2Metrics) *v2Runtim
 		rand:     rand.Float64,
 	}
 	rt.barrier = &reloadBarrier{rt: rt, deadline: reloadReconcileDeadline}
+	// A settled effect wakes the allocator: the effect changed supply (C1.9,
+	// C5.12). A success re-runs its key at once, past any backoff; a failure
+	// or panic backs the key off like a failed reconcile (C1.4b).
+	rt.exec = newEffectExecutor(func(k rowKey, err error) {
+		if err != nil {
+			rt.sessions.AddRateLimited(k, workqueue.Reason{Kind: v2ReasonEffect})
+		} else {
+			rt.sessions.Add(k, workqueue.LaneHot, workqueue.Reason{Kind: v2ReasonEffect, Urgent: true})
+		}
+		rt.alloc.wake(workqueue.Reason{Kind: v2ReasonEffect})
+	}, host.stderr)
 	rt.fs = &workerFSGate{sample: func() (fsPressureStatus, bool) { return currentFSPressureStatus(host.stderr) }}
 	jitter := func() float64 { return rt.rand() }
 	rt.sessions = workqueue.New(workqueue.Config[rowKey]{Jitter: v2Jitter, Rand: jitter})
@@ -438,11 +458,15 @@ func (rt *v2Runtime) start(parent context.Context) (context.Context, bool) {
 }
 
 // stop shuts the runtime down (C1.8, GUAR-013, INC-026): cancel, close the
-// queue's admission so queued keys are never started, then join the workers
-// and lanes, bounded by the shutdown timeout. A goroutine still running at the
-// bound is logged and abandoned; it holds no lock stop needs. No lock is held
-// while joining.
+// queue's and the effect executor's admission so queued keys are never
+// started and a worker still running submits nothing, then join the workers
+// and lanes, then the effect executor, all within one shutdown deadline (P4
+// F15, as amended: the city shutdown that follows keeps its own full budget,
+// as legacy's does). A goroutine still running at the deadline is logged and
+// abandoned; it holds no lock stop needs, and an abandoned worker's writes are
+// fenced on its canceled context. No lock is held while joining.
 func (rt *v2Runtime) stop() {
+	deadline := time.Now().Add(rt.env.Load().shutdownTimeout())
 	rt.mu.Lock()
 	if rt.stopped {
 		rt.mu.Unlock()
@@ -457,6 +481,7 @@ func (rt *v2Runtime) stop() {
 		cancel()
 	}
 	rt.sessions.ShutDown()
+	rt.exec.close()
 	rt.alloc.stopTimer()
 
 	joined := make(chan struct{})
@@ -467,14 +492,14 @@ func (rt *v2Runtime) stop() {
 		}
 		close(joined)
 	}()
-	bound := rt.env.Load().shutdownTimeout()
-	t := time.NewTimer(bound)
+	t := time.NewTimer(time.Until(deadline))
 	defer t.Stop()
 	select {
 	case <-joined:
 	case <-t.C:
-		fmt.Fprintf(rt.host.stderr, "v2 reconciler: workers still running %s after stop; abandoning them\n", bound) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(rt.host.stderr, "v2 reconciler: workers still running at the shutdown deadline; abandoning them") //nolint:errcheck // best-effort stderr
 	}
+	rt.exec.stop(deadline)
 }
 
 // work is one session worker: it reconciles keys until the queue shuts down.
