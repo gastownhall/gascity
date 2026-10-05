@@ -107,13 +107,16 @@ type CityRuntime struct {
 	// retiredScopes are the suspended scopes whose bd-owned proxy and Dolt
 	// this controller already stopped; a scope leaves the set when it resumes.
 	retiredScopes suspendedScopeRetirements
-	cityPath      string
-	cityName      string
-	configName    string
-	tomlPath      string
-	watchTargets  []config.WatchTarget
-	configRev     string
-	configDirty   *atomic.Bool
+	// lastSuspension is the suspension state the previous tick saw, so the
+	// next one can tell which scopes resumed (repairResumedScopes).
+	lastSuspension *beadsScopeSuspension
+	cityPath       string
+	cityName       string
+	configName     string
+	tomlPath       string
+	watchTargets   []config.WatchTarget
+	configRev      string
+	configDirty    *atomic.Bool
 	// configDebounce is the config watcher's coalesce window; zero selects
 	// defaultConfigDebounce.
 	configDebounce time.Duration

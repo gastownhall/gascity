@@ -190,3 +190,44 @@ func TestCompletionReconcileInputsSkipSuspendedRigs(t *testing.T) {
 		t.Fatalf("the sweep fans out to %d store(s), want 2 (city work + the unsuspended rig)", len(fan))
 	}
 }
+
+// gc start's is_blocked repair leaves suspended scopes cold, and the
+// controller runs it for a scope on the first tick after that scope resumes.
+func TestBlockedRepairSkipsSuspendedScopesAndRunsOnResume(t *testing.T) {
+	cr, _, rig, _ := quiescenceRuntime(t, "")
+	t.Setenv("GC_SUSPENDED", "")
+	scopes := []blockedRepairScope{{id: "city", root: cr.cityPath}, {id: "rig/r1", root: rig}}
+
+	suspendRig := func(v bool) {
+		t.Helper()
+		if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cr.cityPath, "r1", &v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	suspendRig(true)
+	kept := withoutSuspendedRepairScopes(scopes, suspendedBeadsScopes(cr.cityPath, cr.cfg))
+	if len(kept) != 1 || kept[0].id != "city" {
+		t.Fatalf("start repair scopes = %+v, want only the city", kept)
+	}
+
+	oldRepair, oldCandidates := resumeRepairBlockedFlags, resumeRepairCandidates
+	t.Cleanup(func() { resumeRepairBlockedFlags, resumeRepairCandidates = oldRepair, oldCandidates })
+	resumeRepairCandidates = func(string, *config.City) []blockedRepairScope { return scopes }
+	var repaired []string
+	resumeRepairBlockedFlags = func(_ string, _ *config.City, got []blockedRepairScope, _ io.Writer, _ string) {
+		for _, s := range got {
+			repaired = append(repaired, s.id)
+		}
+	}
+	cr.enterBeadsQuiescenceIfDue(context.Background()) // first tick: rig suspended
+	cr.enterBeadsQuiescenceIfDue(context.Background()) // still suspended
+	if len(repaired) != 0 {
+		t.Fatalf("repaired %v while the rig was suspended", repaired)
+	}
+	suspendRig(false)
+	cr.enterBeadsQuiescenceIfDue(context.Background())
+	cr.enterBeadsQuiescenceIfDue(context.Background())
+	if strings.Join(repaired, ",") != "rig/r1" {
+		t.Fatalf("repaired %v after resume, want exactly rig/r1 once", repaired)
+	}
+}

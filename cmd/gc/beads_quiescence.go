@@ -84,6 +84,7 @@ func (cr *CityRuntime) setBeadsQuiescent(quiescent bool) {
 func (cr *CityRuntime) enterBeadsQuiescenceIfDue(ctx context.Context) bool {
 	suspended := suspendedBeadsScopes(cr.cityPath, cr.cfg)
 	cr.retiredScopes.forgetResumed(suspended)
+	cr.repairResumedScopes(suspended)
 	quiescent := false
 	if suspended.City() {
 		running, err := cr.sp.ListRunning("")
@@ -95,6 +96,37 @@ func (cr *CityRuntime) enterBeadsQuiescenceIfDue(ctx context.Context) bool {
 	}
 	cr.retireSuspendedScopes(ctx, suspended, func(string) bool { return true })
 	return true
+}
+
+// resumeRepairBlockedFlags and resumeRepairCandidates are the resume path's
+// calls into gc start's one-shot is_blocked repair, seams so tests can pin
+// which scopes it is made for.
+var (
+	resumeRepairBlockedFlags = runBlockedRepairForScopes
+	resumeRepairCandidates   = blockedRepairScopes
+)
+
+// repairResumedScopes runs gc start's one-shot is_blocked repair
+// (beads_blocked_repair.go) for every scope that was suspended on the previous
+// tick and no longer is. gc start skipped those scopes to leave them cold; the
+// repair is marker-gated, so a scope it already covered costs one probe. It
+// runs at the top of the tick, before any phase starts the resumed scope's
+// agents.
+func (cr *CityRuntime) repairResumedScopes(suspended beadsScopeSuspension) {
+	prev := cr.lastSuspension
+	cr.lastSuspension = &suspended
+	if prev == nil || cr.cfg == nil || gcDoltSkip() {
+		return
+	}
+	var resumed []blockedRepairScope
+	for _, scope := range resumeRepairCandidates(cr.cityPath, cr.cfg) {
+		if prev.Suspended(scope.root) && !suspended.Suspended(scope.root) {
+			resumed = append(resumed, scope)
+		}
+	}
+	if len(resumed) > 0 {
+		resumeRepairBlockedFlags(cr.cityPath, cr.cfg, resumed, cr.stderr, "gc resume")
+	}
 }
 
 // tickRetireSuspendedRigScopes stops the pair of each suspended rig whose
