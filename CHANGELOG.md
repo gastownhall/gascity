@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **The first `gc start` after a bd upgrade runs `bd recompute-blocked` once
+  per scope.** beads migration 0059 wrongly marks some beads blocked when a
+  store is upgraded from bd v1.3.0 or older (beads#7037), so they drop out of
+  `bd ready` and gc stops dispatching them. gc repairs the city and each rig
+  it owns, logs `recomputed is_blocked for <scope> under bd <version>: N rows
+  corrected`, and emits `beads.blocked.recomputed`. It does not touch external
+  Dolt servers, complete storage bindings or non-bd providers: run
+  `bd recompute-blocked` in those scopes yourself. A failed repair only warns,
+  and gc retries it on the next start.
 - **Upgrade Beads (`bd`) to v1.3.1.** v1.5.0 pins and is tested against bd
   v1.3.1 (`deps.env` `BD_VERSION` and the go.mod library), a stable release
   that keeps bd v1.3.0's schema. Install it with `brew upgrade beads` (or
@@ -267,6 +276,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Work hidden by beads migration 0059 is dispatched again.** On the first
+  start under a new bd version, `gc start` (and the supervisor) runs
+  `bd recompute-blocked` once over each gc-owned, Dolt-backed bd scope and
+  records the bd version in the scope's own bd config
+  (`custom.gascity.blocked_repair_bd_version`), so later starts skip it. This
+  clears the `is_blocked` flags migration 0059 set across relates-to,
+  discovered-from and other non-blocking edges on stores upgraded from
+  bd v1.3.0 or older (beads#7037).
 - **`passthroughEnv` now honors `GC_SUPERVISOR_ENV` when deciding which
   non-`GC_`-prefixed variables reach a spawned agent session, not only which
   ones survive into the persisted service file.** The two allowlists used to

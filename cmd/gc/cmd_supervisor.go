@@ -2810,6 +2810,8 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': beads health: %v\n", cityName, err) //nolint:errcheck
 		// Non-fatal.
 	}
+	// One-shot is_blocked repair after a bd upgrade (beads#7037). Best-effort.
+	repairBlockedFlagsOnUpgrade(cityPath, cfg, stderr, fmt.Sprintf("gc supervisor: city '%s'", cityName))
 
 	// Resolve formula symlinks.
 	// System formulas/orders now arrive via the core bootstrap pack.

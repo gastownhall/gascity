@@ -1345,6 +1345,27 @@
         ],
         "type": "string"
       },
+      "BlockedRecomputedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bd_version": {
+            "type": "string"
+          },
+          "rows_corrected": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "scope": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "rows_corrected",
+          "bd_version"
+        ],
+        "type": "object"
+      },
       "BoundEventPayload": {
         "additionalProperties": false,
         "properties": {
@@ -2631,6 +2652,9 @@
           },
           {
             "$ref": "#/components/schemas/BeadWorktreeReapedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/BlockedRecomputedPayload"
           },
           {
             "$ref": "#/components/schemas/BoundEventPayload"
@@ -12486,6 +12510,7 @@
             "bead.updated": "#/components/schemas/TypedEventStreamEnvelopeBeadUpdated",
             "bead.worktree.reap_skipped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReapSkipped",
             "bead.worktree.reaped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReaped",
+            "beads.blocked.recomputed": "#/components/schemas/TypedEventStreamEnvelopeBeadsBlockedRecomputed",
             "beads.conditional_writes.degraded": "#/components/schemas/TypedEventStreamEnvelopeBeadsConditionalWritesDegraded",
             "city.created": "#/components/schemas/TypedEventStreamEnvelopeCityCreated",
             "city.resumed": "#/components/schemas/TypedEventStreamEnvelopeCityResumed",
@@ -12610,6 +12635,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReaped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadsBlockedRecomputed"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadsConditionalWritesDegraded"
@@ -13460,6 +13488,63 @@
         "title": "TypedEventStreamEnvelope bead.worktree.reaped",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeBeadsBlockedRecomputed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BlockedRecomputedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "beads.blocked.recomputed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope beads.blocked.recomputed",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeBeadsConditionalWritesDegraded": {
         "additionalProperties": false,
         "properties": {
@@ -14280,6 +14365,7 @@
                 "emergency.signaled",
                 "emergency.acked",
                 "beads.conditional_writes.degraded",
+                "beads.blocked.recomputed",
                 "storage.binding.converged",
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
@@ -18820,6 +18906,7 @@
             "bead.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadUpdated",
             "bead.worktree.reap_skipped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped",
             "bead.worktree.reaped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReaped",
+            "beads.blocked.recomputed": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed",
             "beads.conditional_writes.degraded": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded",
             "city.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityCreated",
             "city.resumed": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityResumed",
@@ -18944,6 +19031,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReaped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded"
@@ -19834,6 +19924,67 @@
         "title": "TypedTaggedEventStreamEnvelope bead.worktree.reaped",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BlockedRecomputedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "beads.blocked.recomputed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope beads.blocked.recomputed",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded": {
         "additionalProperties": false,
         "properties": {
@@ -20705,6 +20856,7 @@
                 "emergency.signaled",
                 "emergency.acked",
                 "beads.conditional_writes.degraded",
+                "beads.blocked.recomputed",
                 "storage.binding.converged",
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
