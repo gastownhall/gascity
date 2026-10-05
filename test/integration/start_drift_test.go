@@ -9,9 +9,11 @@ package integration
 // real systemctl --user invocation, the real SIGTERM + spawn cycle,
 // and the real /health round-trip after restart.
 //
-// Each test isolates GC_HOME / XDG_RUNTIME_DIR so a failing run on a
-// developer box does not corrupt the real supervisor; supervisors
-// started here listen on a per-test reserved loopback port.
+// Each test isolates GC_HOME / HOME / XDG_RUNTIME_DIR so a failing run on
+// a developer box does not corrupt the real supervisor, and gc never
+// installs a platform supervisor unit (GC_SUPERVISOR_ISOLATED_HOME; see
+// isolateGCHomeEnv). Supervisors started here listen on a per-test
+// reserved loopback port.
 
 import (
 	"context"
@@ -1300,6 +1302,8 @@ Restart=no
 StandardOutput=append:%s/supervisor.log
 StandardError=append:%s/supervisor.log
 Environment=GC_HOME=%s
+Environment=HOME=%s
+Environment=%s=1
 Environment=XDG_RUNTIME_DIR=%s
 Environment=GC_DOLT=skip
 Environment=GC_BEADS=file
@@ -1307,7 +1311,7 @@ Environment=GC_SESSION=fake
 
 [Install]
 WantedBy=default.target
-`, binaryPath, gcHome, gcHome, gcHome, runtimeDir)
+`, binaryPath, gcHome, gcHome, gcHome, integrationIsolatedHome(gcHome), supervisorIsolatedHomeEnv, runtimeDir)
 	path := filepath.Join(dir, unitName)
 	if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
 		t.Fatalf("writing systemd unit: %v", err)
