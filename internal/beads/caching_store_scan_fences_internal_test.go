@@ -730,6 +730,19 @@ func TestCachingStoreScanFencesStress(t *testing.T) {
 		t.Fatalf("%d dirty marks survived reads no scan overlapped", dirty)
 	}
 
+	// Age every row's local-write stamp before the final reconcile, the same
+	// way the Create loop above already does. Without this, a row the stress
+	// phase's own writers touched in the last recentLocalMutation window
+	// (5s) is still "recent" here — the reconcile's mergeSkipRecentLocal
+	// keeps the cached copy on purpose (#1588) rather than reading it as
+	// stale, and this assertion then races the out-of-process writer's last
+	// mem.SetMetadata against the cache's last install for that row (#7101).
+	// That is a real, working keep this test must not assert past, not a
+	// fence gap: 43/43 traced failures landed in mergeSkipRecentLocal, never
+	// mergeSkipFenced.
+	for _, id := range ids {
+		ageLocalWrite(cache, id)
+	}
 	cache.ReconcileNowForTest()
 	for _, id := range ids {
 		truth, err := mem.Get(id)
