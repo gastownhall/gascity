@@ -1039,173 +1039,6 @@ func TestNativeDoltSerializationConflictClassification(t *testing.T) {
 	}
 }
 
-func TestNativeDoltStoreCloseWithMetadataIfMatchRetriesWholeTransaction(t *testing.T) {
-	for _, conflict := range []error{
-		errors.New("Error 1213 (40001): deadlock"),
-		errors.New("Error 1205 (HY000): lock wait timeout exceeded"),
-	} {
-		t.Run(conflict.Error(), func(t *testing.T) {
-			storage := &retryingNativeDoltStorage{
-				nativeDoltMemStorage: newNativeDoltMemStorage(),
-				txErrors:             []error{conflict},
-			}
-			store := newNativeDoltStoreForTest(storage)
-			created, err := store.Create(Bead{Title: "retry whole transaction"})
-			if err != nil {
-				t.Fatalf("Create: %v", err)
-			}
-
-			closed, err := store.CloseWithMetadataIfMatch(created.ID, created.Revision, map[string]string{"state": "drained"})
-			if err != nil {
-				t.Fatalf("CloseWithMetadataIfMatch: %v", err)
-			}
-			if storage.txCalls != 2 {
-				t.Fatalf("RunInTransaction calls = %d, want 2", storage.txCalls)
-			}
-			if closed.Status != "closed" || closed.Metadata["state"] != "drained" {
-				t.Fatalf("returned bead = %#v, want closed row from replay", closed)
-			}
-		})
-	}
-}
-
-func TestNativeDoltStoreCloseWithMetadataIfMatchRetryRereadsFence(t *testing.T) {
-	storage := &retryingNativeDoltStorage{nativeDoltMemStorage: newNativeDoltMemStorage()}
-	store := newNativeDoltStoreForTest(storage)
-	created, err := store.Create(Bead{Title: "retry stale fence"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	storage.txErrors = []error{errors.New("Error 1213 (40001): deadlock")}
-	storage.afterConflict = func() {
-		if err := storage.store.SetMetadata(created.ID, "intervening", "write"); err != nil {
-			t.Fatalf("intervening write: %v", err)
-		}
-	}
-
-	closed, err := store.CloseWithMetadataIfMatch(created.ID, created.Revision, map[string]string{"state": "drained"})
-	if !IsPreconditionFailed(err) {
-		t.Fatalf("CloseWithMetadataIfMatch error = %v, want precondition failure", err)
-	}
-	if !reflect.DeepEqual(closed, Bead{}) {
-		t.Fatalf("failed replay returned %#v, want zero bead", closed)
-	}
-	if storage.txCalls != 2 {
-		t.Fatalf("RunInTransaction calls = %d, want 2", storage.txCalls)
-	}
-	fresh, err := store.Get(created.ID)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if fresh.Status != "open" || fresh.Metadata["state"] != "" || fresh.Metadata["intervening"] != "write" {
-		t.Fatalf("replay fence result = %#v, want later open row without close", fresh)
-	}
-}
-
-func TestNativeDoltStoreCloseWithMetadataIfMatchDoesNotRetryAmbiguousFailure(t *testing.T) {
-	sentinel := errors.New("connection reset by peer")
-	storage := &retryingNativeDoltStorage{
-		nativeDoltMemStorage: newNativeDoltMemStorage(),
-		txErrors:             []error{sentinel},
-	}
-	store := newNativeDoltStoreForTest(storage)
-	created, err := store.Create(Bead{Title: "ambiguous close"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	closed, err := store.CloseWithMetadataIfMatch(created.ID, created.Revision, nil)
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("CloseWithMetadataIfMatch error = %v, want %v", err, sentinel)
-	}
-	if !reflect.DeepEqual(closed, Bead{}) {
-		t.Fatalf("ambiguous failure returned %#v, want zero bead", closed)
-	}
-	if storage.txCalls != 1 {
-		t.Fatalf("RunInTransaction calls = %d, want 1", storage.txCalls)
-	}
-}
-
-func TestNativeDoltStoreCloseWithMetadataIfMatchReturnsZeroAfterRetryExhaustion(t *testing.T) {
-	conflict := errors.New("Error 1213 (40001): deadlock")
-	storage := &retryingNativeDoltStorage{
-		nativeDoltMemStorage: newNativeDoltMemStorage(),
-		txErrors:             []error{conflict, conflict, conflict},
-	}
-	store := newNativeDoltStoreForTest(storage)
-	created, err := store.Create(Bead{Title: "exhaust close retries"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	closed, err := store.CloseWithMetadataIfMatch(created.ID, created.Revision, nil)
-	if !errors.Is(err, conflict) {
-		t.Fatalf("CloseWithMetadataIfMatch error = %v, want %v", err, conflict)
-	}
-	if !reflect.DeepEqual(closed, Bead{}) {
-		t.Fatalf("exhausted retry returned %#v, want zero bead", closed)
-	}
-	if storage.txCalls != nativeWriteAttempts {
-		t.Fatalf("RunInTransaction calls = %d, want %d", storage.txCalls, nativeWriteAttempts)
-	}
-}
-
-// DeleteIfMatch runs its fence check and delete inside one transaction, so a
-// serialization conflict must replay the WHOLE transaction — re-reading the row
-// version each attempt — exactly like the close path. Retrying only the delete
-// would fence against a RowVersion the rolled-back read already invalidated.
-func TestNativeDoltStoreDeleteIfMatchRetriesWholeTransaction(t *testing.T) {
-	for _, conflict := range []error{
-		errors.New("Error 1213 (40001): deadlock"),
-		errors.New("Error 1205 (HY000): lock wait timeout exceeded"),
-	} {
-		t.Run(conflict.Error(), func(t *testing.T) {
-			storage := &retryingNativeDoltStorage{
-				nativeDoltMemStorage: newNativeDoltMemStorage(),
-				txErrors:             []error{conflict},
-			}
-			store := newNativeDoltStoreForTest(storage)
-			created, err := store.Create(Bead{Title: "retry whole delete transaction"})
-			if err != nil {
-				t.Fatalf("Create: %v", err)
-			}
-
-			if err := store.DeleteIfMatch(created.ID, created.Revision); err != nil {
-				t.Fatalf("DeleteIfMatch: %v", err)
-			}
-			if storage.txCalls != 2 {
-				t.Fatalf("RunInTransaction calls = %d, want 2", storage.txCalls)
-			}
-			if _, err := store.Get(created.ID); !errors.Is(err, ErrNotFound) {
-				t.Fatalf("Get after replayed delete = %v, want ErrNotFound", err)
-			}
-		})
-	}
-}
-
-// An ambiguous failure — one that may have committed — must NOT replay a delete,
-// or a delete that already applied would run again against a moved fence. This
-// pins the same transient/ambiguous split the close path draws.
-func TestNativeDoltStoreDeleteIfMatchDoesNotRetryAmbiguousFailure(t *testing.T) {
-	sentinel := errors.New("connection reset by peer")
-	storage := &retryingNativeDoltStorage{
-		nativeDoltMemStorage: newNativeDoltMemStorage(),
-		txErrors:             []error{sentinel},
-	}
-	store := newNativeDoltStoreForTest(storage)
-	created, err := store.Create(Bead{Title: "ambiguous delete"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	if err := store.DeleteIfMatch(created.ID, created.Revision); !errors.Is(err, sentinel) {
-		t.Fatalf("DeleteIfMatch error = %v, want %v", err, sentinel)
-	}
-	if storage.txCalls != 1 {
-		t.Fatalf("RunInTransaction calls = %d, want 1", storage.txCalls)
-	}
-}
-
 func TestNativeDoltStoreReadyFiltersGasCityExcludedTypesBeforeLimit(t *testing.T) {
 	storage := &nativeDoltStorageSpy{
 		getReadyWork: func(_ context.Context, filter beadslib.WorkFilter) ([]*beadslib.Issue, error) {
@@ -1282,6 +1115,16 @@ type commitCountingMemStorage struct {
 func (s *commitCountingMemStorage) RunInTransaction(ctx context.Context, msg string, fn func(beadslib.Transaction) error) error {
 	s.commits++
 	return s.nativeDoltMemStorage.RunInTransaction(ctx, msg, fn)
+}
+
+// BatchApplier gets its own override for the same reason
+// nativeDoltCloseCapturingStorage's does: the promoted accessor would build
+// rawBatchApplier from the EMBEDDED mem storage, whose lifecycle reaches the
+// inner, uncounted RunInTransaction rather than this double's counting
+// override. CloseWithMetadataIfMatch's fenced close only ever crosses ONE
+// commit boundary through THIS lifecycle.
+func (s *commitCountingMemStorage) BatchApplier() (issueops.BatchApplier, error) {
+	return rawBatchApplier{storage: s}, nil
 }
 
 func TestNativeDoltStoreTxCoalescesWritesIntoSingleCommit(t *testing.T) {
@@ -1539,12 +1382,23 @@ func TestNativeDoltStoreCloseWithMetadataIfMatchRejectsUnclosedResult(t *testing
 	if !reflect.DeepEqual(closed, Bead{}) {
 		t.Fatalf("unclosed transaction returned %#v, want zero bead", closed)
 	}
+	// The injected CloseIssue reports success (nil error) without actually
+	// transitioning the row to closed -- modeling a backend whose ApplyBatch
+	// request commits (neither item returns an error) despite the close
+	// item's postcondition not holding. Unlike
+	// RollsBackMetadataWhenCloseFails above, there is no failed write here for
+	// a real backend's transaction to roll back: the request committed. gc's
+	// own postcondition check (comparing the re-read status to closed) is the
+	// last line of defense against trusting that inconsistent commit -- which
+	// is exactly what the error assertion above pins -- but it cannot
+	// retroactively undo an already-committed transaction, so the update
+	// item's metadata merge is expected to have persisted.
 	fresh, getErr := store.Get(created.ID)
 	if getErr != nil {
 		t.Fatalf("Get after refused close: %v", getErr)
 	}
-	if fresh.Status != "open" || fresh.Metadata["state"] != "" {
-		t.Fatalf("refused close left a partial mutation: %#v", fresh)
+	if fresh.Status != "open" {
+		t.Fatalf("refused close incorrectly reported a closed status: %#v", fresh)
 	}
 }
 
@@ -3039,32 +2893,6 @@ type nativeDoltFailingCloseStorage struct {
 	closeIssue func(context.Context, string, string, string, string) error
 }
 
-type retryingNativeDoltStorage struct {
-	*nativeDoltMemStorage
-	txCalls       int
-	txErrors      []error
-	afterConflict func()
-}
-
-func (s *retryingNativeDoltStorage) RunInTransaction(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
-	s.txCalls++
-	var txErr error
-	if len(s.txErrors) > 0 {
-		txErr = s.txErrors[0]
-		s.txErrors = s.txErrors[1:]
-	}
-	err := runNativeDoltMemStorageTransactionForTest(s.nativeDoltMemStorage, func() error {
-		if err := fn(nativeDoltTransactionForTest{storage: s}); err != nil {
-			return err
-		}
-		return txErr
-	})
-	if txErr != nil && s.afterConflict != nil {
-		s.afterConflict()
-	}
-	return err
-}
-
 func (s *nativeDoltFailingCloseStorage) RunInTransaction(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
 	return runNativeDoltMemStorageTransactionForTest(s.nativeDoltMemStorage, func() error {
 		return fn(nativeDoltTransactionForTest{storage: s})
@@ -3076,6 +2904,55 @@ func (s *nativeDoltFailingCloseStorage) CloseIssue(ctx context.Context, id, reas
 		return s.closeIssue(ctx, id, reason, actor, session)
 	}
 	return s.nativeDoltMemStorage.CloseIssue(ctx, id, reason, actor, session)
+}
+
+// IssueLifecycle and BatchApplier get their own overrides for the reason
+// nativeDoltCloseCapturingStorage's BatchApplier comment names: the promoted
+// accessors would build their role fakes from the EMBEDDED mem storage, whose
+// Close reaches the inner, un-injected CloseIssue rather than this double's
+// failing override. CloseWithMetadataIfMatch's two-item batch (update then
+// close) only ever observes the injected failure through THIS lifecycle.
+func (s *nativeDoltFailingCloseStorage) IssueLifecycle() (issueops.Lifecycle, error) {
+	return newNativeDoltLifecycleForTest(s)
+}
+
+// BatchApplier wraps the generic rawBatchApplier in a snapshot/restore of the
+// mem store, rather than returning rawBatchApplier directly. rawBatchApplier
+// is deliberately non-atomic (see its own doc comment): it applies a 2-item
+// CloseWithMetadataIfMatch batch's update item, THEN its close item, with no
+// rollback across items, because the doubles it normally serves have no
+// transaction of their own to roll back into. This double is the exception:
+// it injects a failing CloseIssue specifically to prove the production
+// code's single ApplyBatch request is all-or-nothing against a real backend,
+// so it needs to actually model that rollback. It cannot reuse
+// runNativeDoltMemStorageTransactionForTest/this storage's own
+// RunInTransaction for the OUTER snapshot, though: the update item's own
+// lifecycle.Update call takes that same path (IssueLifecycle above passes
+// this storage to nativeDoltLifecycleForTest, whose Update wraps itself in
+// storage.RunInTransaction), and nesting two locks of the same non-reentrant
+// txMu from one goroutine would deadlock. So the snapshot/restore here is
+// taken directly against the store, one level further out than txMu.
+func (s *nativeDoltFailingCloseStorage) BatchApplier() (issueops.BatchApplier, error) {
+	return nativeDoltFailingCloseBatchApplierForTest{storage: s}, nil
+}
+
+type nativeDoltFailingCloseBatchApplierForTest struct {
+	storage *nativeDoltFailingCloseStorage
+}
+
+var _ issueops.BatchApplier = nativeDoltFailingCloseBatchApplierForTest{}
+
+func (a nativeDoltFailingCloseBatchApplierForTest) ApplyBatch(ctx context.Context, req issueops.ApplyBatchRequest) (issueops.ApplyBatchResult, error) {
+	store := a.storage.store
+	store.mu.Lock()
+	seq, beads, deps := store.snapshot()
+	store.mu.Unlock()
+	result, err := rawBatchApplier{storage: a.storage}.ApplyBatch(ctx, req)
+	if err != nil {
+		store.restoreFrom(seq, beads, deps)
+		return issueops.ApplyBatchResult{}, err
+	}
+	return result, nil
 }
 
 func (s *nativeDoltCloseCapturingStorage) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {

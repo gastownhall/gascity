@@ -113,6 +113,7 @@ go_test(
         "caching_store_sqlite_deps_internal_test.go",
         "caching_store_stale_event_internal_test.go",
         "caching_store_test.go",
+        "caching_store_transfer_if_current_internal_test.go",
         "caching_store_watermark_holes_internal_test.go",
         "caching_store_watermark_internal_test.go",
         "caching_store_writes_internal_test.go",

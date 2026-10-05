@@ -290,6 +290,22 @@ type ConditionalAssignmentReleaser interface {
 	ReleaseIfCurrent(id, expectedAssignee string) (bool, error)
 }
 
+// ConditionalAssigneeTransferer is implemented by stores that can move an
+// in-progress assignment from one exact assignee spelling to another only
+// while the bead still carries the expected holder -- the same capability
+// family as ConditionalAssignmentReleaser, with the opposite terminal
+// assignee (a new holder instead of none). See BdStore.TransferIfCurrent
+// (bdstore_conditional_release.go) and NativeDoltStore.TransferIfCurrent
+// (native_dolt_store_conditional.go) for the full per-store contract,
+// including the reassignment-steal fence each skips because the CAS names
+// the holder explicitly. A store that cannot atomically transfer reports
+// ErrConditionalTransferUnsupported, discovered the same way as every other
+// optional capability here: type-assert on the resolved store, never on a
+// wrapper.
+type ConditionalAssigneeTransferer interface {
+	TransferIfCurrent(id, fromAssignee, toAssignee string) (bool, error)
+}
+
 // AssignmentGuardedUpdater is implemented by stores whose backend can apply an
 // update only while the bead still has an expected status and assignee,
 // checked inside the same write. It fences an assignment change on the facts

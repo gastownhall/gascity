@@ -79,6 +79,7 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"CompareAndSetMetadataKey":    nativeStoreMutation,
 	"DeleteIfMatch":               nativeStoreMutation,
 	"ReleaseIfCurrent":            nativeStoreMutation,
+	"TransferIfCurrent":           nativeStoreMutation,
 	"Claim":                       nativeStoreMutation,
 	"UpdateIfMatch":               nativeStoreMutation,
 	"WaitForParentProjection":     nativeStoreRead,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -27,10 +28,16 @@ import (
 // the member that also carries the post-write RowVersion a guarded chain
 // composes its next ExpectedVersion from), so the reason comes off the result.
 //
-// The doubles below make both halves observable: rawReads counts the raw
-// read-backs the chain dials, and the lifecycle records every request. A
-// re-introduced follow-up Get shows up as a raw read; a reason taken from the
-// pre-write row shows up as the stale value.
+// A backend that violates that contract (answers Update with no post-state
+// Issue) still needs a reason from somewhere, and the fallback for it re-reads
+// through the Reader role — the same door the loop's own status read already
+// takes — rather than a raw GetIssue. There is no raw door left in this chain
+// at all.
+//
+// The doubles below make both halves observable: rawReads counts any RAW
+// GetIssue the chain dials (none, on the current route) and roleReads counts
+// every Reader.Get. A re-introduced raw follow-up shows up as a nonzero
+// rawReads; a reason taken from the pre-write row shows up as the stale value.
 
 type closeChainLifecycle struct {
 	storage *closeChainStorage
@@ -95,21 +102,26 @@ func (l *closeChainLifecycle) Reopen(context.Context, issueops.ReopenRequest) (i
 
 // closeChainStorage answers the detail read through the reader role and counts
 // every RAW GetIssue beside it. The raw read is the follow-up this chain is
-// supposed to have stopped dialing, so its count is the assertion.
+// supposed to have stopped dialing entirely, so its count (staying at zero) is
+// part of the assertion.
 type closeChainStorage struct {
 	beadslib.Storage
 	metadata map[string]map[string]string
 	rawReads int
-	// lifecycles counts accessor resolutions. It is the deadlock guard: the
-	// chain runs under the store's read lock, so a fallback that re-entered a
-	// public door would take that lock a second time on the same goroutine and
-	// deadlock behind any queued writer. One acquisition means one accessor
-	// resolution, so a second resolution IS the re-entry, observed without
-	// having to race a writer into the window.
+	// lifecycles counts accessor resolutions of IssueLifecycle() specifically.
+	// It is the deadlock guard: the chain runs under the store's read lock, so
+	// a fallback that re-entered a public door would take that lock a second
+	// time on the same goroutine and deadlock behind any queued writer. One
+	// acquisition means one IssueLifecycle() resolution, so a second resolution
+	// IS the re-entry, observed without having to race a writer into the
+	// window. The fallback's Reader.Get resolves a DIFFERENT accessor
+	// (IssueReader()) on the same already-held handle, so it does not touch
+	// this counter at all.
 	lifecycles int
 	roleReads  int
-	// vanished makes the raw read answer "no such row", the state a bead
-	// deleted between this chain's status read and its fallback re-read is in.
+	// vanished makes BOTH the raw read and the role read answer "no such row",
+	// the state a bead deleted between this chain's status read and its
+	// fallback re-read is in.
 	vanished  bool
 	lifecycle *closeChainLifecycle
 }
@@ -173,9 +185,12 @@ type closeChainReader struct{ storage *closeChainStorage }
 
 func (r closeChainReader) Get(_ context.Context, req issueops.GetRequest) (*issueops.IssueDetails, error) {
 	r.storage.roleReads++
+	if r.storage.vanished {
+		return nil, fmt.Errorf("bead %q: %w", req.ID, issueops.ErrNotFound)
+	}
 	issue := r.storage.issue(req.ID)
 	if issue == nil {
-		return nil, errors.New("not found")
+		return nil, fmt.Errorf("bead %q: %w", req.ID, issueops.ErrNotFound)
 	}
 	return &issueops.IssueDetails{Issue: *issue}, nil
 }
@@ -220,7 +235,7 @@ func TestCloseAllPerBeadRouteTakesTheCloseReasonOffTheUpdateResult(t *testing.T)
 
 // A backend that answers a write with no post-state snapshot is violating the
 // role contract, but the chain must not close on a reason it never read. It
-// re-reads the row — ON THE HANDLE IT ALREADY HOLDS.
+// re-reads the row through the Reader role — ON THE HANDLE IT ALREADY HOLDS.
 //
 // That last part is the deadlock this test also guards. The chain runs under
 // the store's read lock (acquireStorage hands back s.mu.RUnlock), and a
@@ -229,10 +244,14 @@ func TestCloseAllPerBeadRouteTakesTheCloseReasonOffTheUpdateResult(t *testing.T)
 // arriving in between — the reconnect handle swap, or CloseStore — parks in
 // front of the inner RLock and all three hang. Racing a writer into that window
 // is not observable (an RWMutex publishes no waiter count), so the assertion is
-// on the structure instead: one storage acquisition resolves one accessor, so a
-// SECOND accessor resolution is the re-entry, deterministically and with no
-// timing. The path exists precisely for the misbehaving backend, and hanging is
-// a worse answer than the one it was written to give.
+// on the structure instead: one storage acquisition resolves one
+// IssueLifecycle() accessor, so a SECOND resolution of THAT accessor is the
+// re-entry, deterministically and with no timing. Resolving IssueReader() for
+// the fallback read is not a second lifecycle resolution and is not the
+// hazard this guards against — it is the same category of call as the
+// IssueLifecycle() resolution already made, on the same already-held handle.
+// The path exists precisely for the misbehaving backend, and hanging is a
+// worse answer than the one it was written to give.
 func TestCloseAllPerBeadRouteFallsBackWhenTheUpdateAnswersNoPostState(t *testing.T) {
 	storage := newCloseChainStorage(nil)
 	storage.lifecycle.hydrate = false
@@ -241,8 +260,11 @@ func TestCloseAllPerBeadRouteFallsBackWhenTheUpdateAnswersNoPostState(t *testing
 	if _, err := store.CloseAll([]string{"gc-1"}, map[string]string{"close_reason": "the sweep's reason"}); err != nil {
 		t.Fatalf("CloseAll: %v", err)
 	}
-	if storage.rawReads == 0 {
-		t.Error("the chain closed without reading the reason from anywhere: no post-state snapshot and no re-read")
+	if storage.rawReads != 0 {
+		t.Errorf("the chain dialed %d raw read-back(s); the fallback takes the Reader role, not a raw GetIssue", storage.rawReads)
+	}
+	if storage.roleReads != 2 {
+		t.Errorf("the chain made %d detail reads, want 2: the loop's own status read plus the fallback re-read", storage.roleReads)
 	}
 	if got := storage.lifecycle.closes[0].Reason; got != "the sweep's reason" {
 		t.Errorf("close reason = %q, want the reason the fallback re-read", got)

@@ -671,6 +671,18 @@ func (s *emittingClassStore) ReleaseIfCurrent(id, expectedAssignee string) (bool
 	return released, err
 }
 
+func (s *emittingClassStore) TransferIfCurrent(id, fromAssignee, toAssignee string) (bool, error) {
+	mover, ok := s.Store.(beads.ConditionalAssigneeTransferer)
+	if !ok {
+		return false, beads.ErrConditionalTransferUnsupported
+	}
+	moved, err := mover.TransferIfCurrent(id, fromAssignee, toAssignee)
+	if err == nil && moved {
+		s.emitUpdated(id)
+	}
+	return moved, err
+}
+
 func (s *emittingClassStore) DeleteBatch(ids []string) error {
 	deleter, ok := s.Store.(beads.BatchDeleter)
 	if !ok {

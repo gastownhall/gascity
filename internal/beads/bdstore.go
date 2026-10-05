@@ -498,7 +498,10 @@ const (
 	bdTransientReadAttempts  = 3
 )
 
-var _ ConditionalAssignmentReleaser = (*BdStore)(nil)
+var (
+	_ ConditionalAssignmentReleaser = (*BdStore)(nil)
+	_ ConditionalAssigneeTransferer = (*BdStore)(nil)
+)
 
 // BdStoreOption configures optional bd CLI behavior for a BdStore.
 type BdStoreOption func(*BdStore)

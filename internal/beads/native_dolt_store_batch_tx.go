@@ -20,6 +20,14 @@ import (
 // metadata-then-close pair that stamps a session's terminal state and then
 // retires it — would fail outright on a served city.
 //
+// This stays the FALLBACK, tried only after RunInTransaction refuses as
+// unsupported, on purpose: issueops.UpdateItem validates every metadata key
+// the role's way, where the native map-based tx.UpdateIssue does not
+// (TestNativeDoltStoreMetadataKeyRuleSplitsByRoute pins this as a deliberate
+// asymmetry). Trying this route first on a LOCAL backend that has a working
+// transaction would silently tighten that contract for every Store.Tx caller,
+// not just the served backend that actually needs it.
+//
 // The second route is issueops.BatchApplier: ONE request whose items are
 // applied inside one transaction the SERVER opens, all or nothing. So the
 // callback is not executed against a live transaction at all; it is RECORDED
@@ -46,6 +54,9 @@ import (
 //     updateIssue does. Refusing here names the member; letting it through
 //     would surface the encoder's refusal as an opaque transport error at the
 //     one call site — an Update carrying ParentID — that can explain it.
+//   - OVER CAP. A callback recording more than issueops.MaxApplyBatchItems
+//     items cannot dial as one request either; refusing by name here is more
+//     actionable than letting the server reject an oversized wire request.
 //
 // READS ARE NOT IN THE TRANSACTION, and that is the one property lost relative
 // to the native route. The close reason and the already-closed check are read
@@ -60,6 +71,14 @@ import (
 // "this backend cannot do transactions at all" from "this backend cannot do
 // THIS write in a transaction".
 var errBatchTxUnrecordable = errors.New("beads tx: unrecordable in a batch-applied transaction")
+
+// errBatchTxTooLarge reports a Store.Tx callback that recorded more items
+// than one issueops.BatchApplier request can carry. This route is only
+// reached at all when RunInTransaction has already refused as unsupported,
+// so there is no further fallback below it — unlike ApplyGraphPlanWithStorage,
+// which can still retry a local backend's RunInTransaction above the cap,
+// a Tx callback this large on a served backend has nowhere else to go.
+var errBatchTxTooLarge = fmt.Errorf("beads tx: more writes than one batch request can carry (max %d)", issueops.MaxApplyBatchItems)
 
 // runTxAsBatch replays fn's writes as one issueops.BatchApplier request. It is
 // called only after the native transaction refused as unsupported.
@@ -77,6 +96,9 @@ func (s *NativeDoltStore) runTxAsBatch(ctx context.Context, storage beadslib.Sto
 	}
 	if len(recorder.items) == 0 {
 		return nil
+	}
+	if len(recorder.items) > issueops.MaxApplyBatchItems {
+		return errBatchTxTooLarge
 	}
 	if _, err := applier.ApplyBatch(ctx, issueops.ApplyBatchRequest{
 		Actor: s.actor,
@@ -161,13 +183,19 @@ func (t *nativeBatchTx) SetMetadataBatch(id string, kvs map[string]string) error
 // already holds. An already-closed row records nothing, matching
 // applyCloseInTx; a missing one is ErrNotFound, also matching it.
 func (t *nativeBatchTx) Close(id string) error {
-	current, err := t.storage.GetIssue(t.ctx, id)
+	// t.storage is a plain beadslib.Storage handle, not an open transaction --
+	// this route records items for one ApplyBatch dialed after the whole
+	// Store.Tx callback returns (see the file comment), so this pre-read runs
+	// OUTSIDE any transaction and takes the Reader role door rather than the
+	// raw GetIssue a tx-bound caller would be stuck with.
+	reader, err := t.storage.IssueReader()
 	if err != nil {
 		t.err = nativeStoreError(id, err)
 		return t.err
 	}
-	if current == nil {
-		t.err = fmt.Errorf("bead %q: %w", id, ErrNotFound)
+	current, err := reader.Get(t.ctx, issueops.GetRequest{ID: id})
+	if err != nil {
+		t.err = nativeReadNotFound(id, err)
 		return t.err
 	}
 	if current.Status == beadslib.StatusClosed {
@@ -177,7 +205,7 @@ func (t *nativeBatchTx) Close(id string) error {
 		Kind: issueops.ItemClose,
 		Close: &issueops.CloseItem{
 			Target: issueops.Ref{ID: id},
-			Reason: t.closeReason(id, current),
+			Reason: t.closeReason(id, &current.Issue),
 			// Force mirrors the native route: applyCloseInTx wrote through
 			// tx.CloseIssue, which applies no close policy, and a molecule root
 			// routinely closes over open children.

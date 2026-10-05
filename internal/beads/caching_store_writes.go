@@ -250,6 +250,64 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 	return true, nil
 }
 
+// TransferIfCurrent moves an in-progress assignment from one exact assignee
+// spelling to another through the backing store, refreshing the cache only
+// when the conditional transfer succeeds. It follows ReleaseIfCurrent's own
+// shape immediately above -- the same capability family, with the opposite
+// terminal assignee (toAssignee instead of none) -- and the same reasoning
+// for the cache-only fallback branch: a transfer never changes a bead's
+// status away from in_progress, so there is no ready-projection fan-out to
+// clear the way ReleaseIfCurrent's open transition has.
+func (c *CachingStore) TransferIfCurrent(id, fromAssignee, toAssignee string) (bool, error) {
+	mover, ok := c.backing.(ConditionalAssigneeTransferer)
+	if !ok {
+		return false, ErrConditionalTransferUnsupported
+	}
+	startSeq := c.currentMutationSeq()
+	moved, err := mover.TransferIfCurrent(id, fromAssignee, toAssignee)
+	if err != nil || !moved {
+		return moved, err
+	}
+
+	fresh, refreshed := c.refreshBeadAfterWrite(id, "refresh bead after transfer-if-current")
+	c.mu.Lock()
+	raced := c.racedWriteLocked(id, startSeq)
+	row, found := fresh, refreshed
+	if !refreshed {
+		row, found = c.patchedCachedRowLocked(id, func(b *Bead) {
+			b.Assignee = toAssignee
+			b.UpdatedAt = time.Now()
+		})
+	}
+	if !raced {
+		c.noteLocalMutationLocked(id)
+		switch {
+		case refreshed:
+			c.absorbFreshLocked(id, row, time.Now(), absorbOpts{
+				depsMode:   depsFromFieldsIfCarried,
+				seqMode:    seqKeep,
+				clearDirty: true,
+			})
+		case found:
+			c.absorbFreshLocked(id, row, time.Now(), absorbOpts{
+				depsMode:   depsKeepCached,
+				seqMode:    seqKeep,
+				clearDirty: false,
+			})
+			c.markDirtyLocked(id)
+		default:
+			c.markDirtyLocked(id)
+		}
+		c.markFreshLocked(time.Now())
+	}
+	c.updateStatsLocked()
+	c.mu.Unlock()
+	if found {
+		c.notifyChange(ChangeLocal, "bead.updated", row)
+	}
+	return true, nil
+}
+
 // Claim claims id for assignee through the backing store's two-argument
 // compare-and-swap claim and writes the claimed row through to the cache. A
 // conflict (ok=false, nil error) and any error pass straight through without

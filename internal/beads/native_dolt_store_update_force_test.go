@@ -118,3 +118,63 @@ func TestUpdateWithOnlyAReparentStaysOnThePlainDoor(t *testing.T) {
 		t.Error("the parent edit did not reach the patch")
 	}
 }
+
+// UpdateIfMatch's batch door (native_dolt_store_conditional.go) hand-duplicates
+// the same ForceAssigneeTransfer/ForceClosePolicy wiring Store.Update's batch
+// door carries, because the conditional path also sets ExpectedVersion, which
+// the unconditional door never does. The two call sites can drift
+// independently -- this pins the conditional one the same way
+// TestUpdateWithAnAssigneeEditTakesTheBatchDoorWithItsForce and
+// TestUpdateWithAStatusEditForcesOnlyTheClosePolicy pin the unconditional one.
+func TestUpdateIfMatchWithAnAssigneeEditTakesTheBatchDoorWithItsForce(t *testing.T) {
+	spy := newUpdateForceSpy()
+	store := newNativeDoltStoreForTest(spy)
+
+	assignee := "worker-2"
+	const expectedRevision int64 = 7
+	if err := store.UpdateIfMatch("gc-1", expectedRevision, UpdateOpts{Assignee: &assignee}); err != nil {
+		t.Fatalf("UpdateIfMatch: %v", err)
+	}
+	if len(spy.lifecycle.updates) != 0 {
+		t.Fatalf("a force-requiring conditional patch took the plain door: %+v", spy.lifecycle.updates)
+	}
+	req := soleBatchRequest(t, spy.applier)
+	if len(req.Items) != 1 || req.Items[0].Update == nil {
+		t.Fatalf("batch = %+v, want one update item", req.Items)
+	}
+	item := req.Items[0].Update
+	if item.Target.ID != "gc-1" {
+		t.Errorf("target = %+v, want gc-1 by id", item.Target)
+	}
+	if !item.ForceAssigneeTransfer {
+		t.Error("the conditional assignee transfer is not forced; UpdateIfMatch's own ExpectedVersion is the fence here, not the claim guard")
+	}
+	if item.ForceClosePolicy {
+		t.Error("close policy is forced on a conditional update without a status change")
+	}
+	if item.ExpectedVersion == nil || *item.ExpectedVersion != expectedRevision {
+		t.Errorf("ExpectedVersion = %v, want %d: the conditional door must still carry its own fence onto the batch item", item.ExpectedVersion, expectedRevision)
+	}
+}
+
+func TestUpdateIfMatchWithAStatusEditForcesOnlyTheClosePolicy(t *testing.T) {
+	spy := newUpdateForceSpy()
+	store := newNativeDoltStoreForTest(spy)
+
+	status := "closed"
+	const expectedRevision int64 = 3
+	if err := store.UpdateIfMatch("gc-1", expectedRevision, UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("UpdateIfMatch: %v", err)
+	}
+	req := soleBatchRequest(t, spy.applier)
+	item := req.Items[0].Update
+	if !item.ForceClosePolicy {
+		t.Error("a done-crossing conditional status write is not force-waived; a molecule root routinely closes over open children through this door too")
+	}
+	if item.ForceAssigneeTransfer {
+		t.Error("the assignee fence is waived on a conditional update without an assignee edit")
+	}
+	if item.ExpectedVersion == nil || *item.ExpectedVersion != expectedRevision {
+		t.Errorf("ExpectedVersion = %v, want %d", item.ExpectedVersion, expectedRevision)
+	}
+}

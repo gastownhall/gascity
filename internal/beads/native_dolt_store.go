@@ -560,6 +560,7 @@ func WithNativeDoltStoreReservedIDPrefixes(prefixes ...string) NativeDoltStoreOp
 var (
 	_ Store                         = (*NativeDoltStore)(nil)
 	_ ConditionalAssignmentReleaser = (*NativeDoltStore)(nil)
+	_ ConditionalAssigneeTransferer = (*NativeDoltStore)(nil)
 	_ AtomicTxStore                 = (*NativeDoltStore)(nil)
 	_ GraphApplyStore               = (*NativeDoltStore)(nil)
 	_ StorageGraphApplyStore        = (*NativeDoltStore)(nil)
@@ -2150,12 +2151,13 @@ func (s *NativeDoltStore) Close(id string) error {
 // closeOnce performs one complete close attempt, read included, so a retry
 // decides from freshly read state instead of replaying a stale one.
 func (s *NativeDoltStore) closeOnce(ctx context.Context, storage beadslib.Storage, id string) error {
-	current, err := storage.GetIssue(ctx, id)
+	reader, err := storage.IssueReader()
 	if err != nil {
 		return nativeStoreError(id, err)
 	}
-	if current == nil {
-		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+	current, err := reader.Get(ctx, issueops.GetRequest{ID: id})
+	if err != nil {
+		return nativeReadNotFound(id, err)
 	}
 	// A replay re-reads, so a bead another actor closed during the backoff
 	// must not be closed again.
@@ -2172,7 +2174,7 @@ func (s *NativeDoltStore) closeOnce(ctx context.Context, storage beadslib.Storag
 	if _, err := ops.Close(ctx, issueops.CloseRequest{
 		Actor:   s.actor,
 		IssueID: id,
-		Reason:  nativeCloseReasonFromIssue(current),
+		Reason:  nativeCloseReasonFromIssue(&current.Issue),
 		Force:   true,
 	}); err != nil {
 		return nativeStoreError(id, err)
@@ -2202,12 +2204,13 @@ func (s *NativeDoltStore) Reopen(id string) error {
 // reopenOnce performs one complete reopen attempt, read included, so the
 // already-open short-circuit reflects the state this attempt observed.
 func (s *NativeDoltStore) reopenOnce(ctx context.Context, storage beadslib.Storage, id string) error {
-	current, err := storage.GetIssue(ctx, id)
+	reader, err := storage.IssueReader()
 	if err != nil {
 		return nativeStoreError(id, err)
 	}
-	if current == nil {
-		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+	current, err := reader.Get(ctx, issueops.GetRequest{ID: id})
+	if err != nil {
+		return nativeReadNotFound(id, err)
 	}
 	if current.Status == beadslib.StatusOpen {
 		return nil
@@ -2366,14 +2369,15 @@ func (s *NativeDoltStore) stampAndClose(id string, metadata map[string]string) e
 	if closing == nil {
 		ctx, cancel := nativeDoltOperationContext(context.TODO())
 		defer cancel()
-		current, err := storage.GetIssue(ctx, id)
+		reader, err := storage.IssueReader()
 		if err != nil {
 			return nativeStoreError(id, err)
 		}
-		if current == nil {
-			return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+		current, err := reader.Get(ctx, issueops.GetRequest{ID: id})
+		if err != nil {
+			return nativeReadNotFound(id, err)
 		}
-		closing = current
+		closing = &current.Issue
 	}
 	// Force keeps the storage-layer close's policy-free semantics, exactly as
 	// Close does: a molecule root routinely closes with children still open.
@@ -2674,6 +2678,19 @@ func (s *NativeDoltStore) Tx(commitMsg string, fn func(Tx) error) error {
 	if strings.TrimSpace(commitMsg) == "" {
 		commitMsg = "gc: tx"
 	}
+	// RunInTransaction, not BatchApplier, has to stay the PRIMARY path: the
+	// native map-based tx.UpdateIssue this route runs skips the role's
+	// metadata-key validation on purpose
+	// (TestNativeDoltStoreMetadataKeyRuleSplitsByRoute pins this as a
+	// deliberate, if surprising, asymmetry against the validated
+	// Store.Update/SetMetadataBatch routes — Create and the map-based
+	// Store.Tx write accept a key every later standalone write refuses,
+	// which is why internal/dispatch drops such keys itself,
+	// beadmeta.CopyUserKeys). Trying issueops.BatchApplier's validated
+	// UpdateItem FIRST would silently tighten that contract for every
+	// backend that has a working native transaction, not just the served
+	// backend that genuinely needs the batch route. So BatchApplier stays
+	// the FALLBACK, reached only on this route's own refusal.
 	return runInNativeTransaction(ctx, storage, commitMsg, func(tx beadslib.Transaction) error {
 		return fn(&nativeDoltTx{store: s, ctx: ctx, tx: tx})
 	}, func() error {
@@ -2739,6 +2756,15 @@ type nativeIssueGetter interface {
 	GetIssue(context.Context, string) (*beadslib.Issue, error)
 }
 
+// nativeUpdates and validateUpdateParent below are called ONLY from
+// applyUpdateInTx (native_dolt_store.go), itself called only from
+// nativeDoltTx.Update inside Store.Tx's RunInTransaction callback -- grep
+// confirms no other call site hands either function a bare storage handle.
+// Their storage.GetIssue is therefore a TRANSACTION read, not a plain one:
+// local fallback, kept raw on purpose, because beadslib.Transaction (unlike
+// beadslib.Storage) publishes no role accessors at all -- no IssueReader(),
+// no IssueLifecycle() -- so there is no Reader.Get door open inside an open
+// transaction for either function to take instead.
 func (s *NativeDoltStore) nativeUpdates(ctx context.Context, storage nativeIssueGetter, id string, opts UpdateOpts) (map[string]interface{}, error) {
 	updates := make(map[string]interface{})
 	if opts.Title != nil {
@@ -2785,6 +2811,10 @@ func (s *NativeDoltStore) nativeUpdates(ctx context.Context, storage nativeIssue
 // to agree here — a store that admits a cross-store parent and then refuses to
 // write the same value back is worse than one that refuses both, because the
 // refusal only appears on the reparent, long after the shape was accepted.
+//
+// Called only from applyUpdateInTx with tx as storage: see nativeUpdates'
+// doc comment just above for why that keeps this a local-fallback
+// transaction read rather than a Reader.Get port.
 func (s *NativeDoltStore) validateUpdateParent(ctx context.Context, storage nativeIssueGetter, id, parentID string) error {
 	if strings.TrimSpace(parentID) == "" {
 		return nil
