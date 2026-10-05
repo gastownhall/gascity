@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -129,45 +130,96 @@ func newNamedFakeState(t *testing.T, name string, prov events.Provider) *fakeSta
 	return s
 }
 
-// liveGlobalStream is an open GET /v0/events/stream connection over a real
-// HTTP server. Frames are parsed as they arrive.
-type liveGlobalStream struct {
-	frames <-chan sseTestFrame
+// pipeResponseWriter is an http.ResponseWriter whose body is the write end of
+// an io.Pipe, so a streaming handler runs in-process and a test reads each SSE
+// frame as the handler writes it, with no loopback listener. As with net/http,
+// the response is committed by the first Write or Flush; committed is closed
+// at that moment.
+type pipeResponseWriter struct {
+	header    http.Header
+	body      *io.PipeWriter
+	committed chan struct{}
+	once      sync.Once
+
+	mu     sync.Mutex
+	status int
 }
 
-func openLiveGlobalStream(t *testing.T, h http.Handler, query, lastEventID string) *liveGlobalStream {
-	t.Helper()
-	srv := httptest.NewServer(h)
-	ctx, cancel := context.WithCancel(context.Background())
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/v0/events/stream"+query, nil)
-	if err != nil {
-		cancel()
-		srv.Close()
-		t.Fatalf("new request: %v", err)
+func newPipeResponseWriter(body *io.PipeWriter) *pipeResponseWriter {
+	return &pipeResponseWriter{header: make(http.Header), body: body, committed: make(chan struct{})}
+}
+
+func (w *pipeResponseWriter) Header() http.Header { return w.header }
+
+func (w *pipeResponseWriter) WriteHeader(status int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.status == 0 {
+		w.status = status
 	}
+}
+
+func (w *pipeResponseWriter) Write(p []byte) (int, error) {
+	w.commit()
+	return w.body.Write(p)
+}
+
+func (w *pipeResponseWriter) Flush() { w.commit() }
+
+func (w *pipeResponseWriter) commit() {
+	w.WriteHeader(http.StatusOK)
+	w.once.Do(func() { close(w.committed) })
+}
+
+func (w *pipeResponseWriter) statusCode() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.status == 0 {
+		return http.StatusOK
+	}
+	return w.status
+}
+
+// sseStream is an SSE response a handler is serving in-process. Frames are
+// parsed as the handler writes them.
+type sseStream struct {
+	frames <-chan sseTestFrame
+	stop   func()
+}
+
+// openSSEStream serves GET path on h in-process and returns once the handler
+// has committed a 200 response. stop cancels the request and returns only after
+// the handler has returned, so everything the handler defers (watcher closes,
+// pending-monitor leases) has run by then. It is also registered as cleanup.
+func openSSEStream(t *testing.T, h http.Handler, path, lastEventID string) *sseStream {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
+	req.Host = "127.0.0.1"
+	req.RemoteAddr = "127.0.0.1:40000"
 	req.Header.Set("Accept", "text/event-stream")
 	if lastEventID != "" {
 		req.Header.Set("Last-Event-ID", lastEventID)
 	}
-	resp, err := srv.Client().Do(req)
-	if err != nil {
-		cancel()
-		srv.Close()
-		t.Fatalf("GET /v0/events/stream: %v", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close() //nolint:errcheck
-		cancel()
-		srv.Close()
-		t.Fatalf("GET /v0/events/stream status = %d, want 200", resp.StatusCode)
-	}
-	frames := make(chan sseTestFrame, 64)
-	readerDone := make(chan struct{})
+
+	pr, pw := io.Pipe()
+	w := newPipeResponseWriter(pw)
+	served := make(chan struct{})
 	go func() {
-		defer close(readerDone)
+		defer close(served)
+		h.ServeHTTP(w, req)
+		pw.Close() //nolint:errcheck // reports EOF to the reader
+	}()
+
+	frames := make(chan sseTestFrame, 64)
+	go func() {
 		defer close(frames)
+		// Closing the read end unblocks a handler write the test no longer
+		// consumes, so the handler can always return.
+		defer pr.Close() //nolint:errcheck
 		var current sseTestFrame
-		scanner := bufio.NewScanner(resp.Body)
+		scanner := bufio.NewScanner(pr)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
 		for scanner.Scan() {
 			line := scanner.Text()
 			switch {
@@ -189,13 +241,41 @@ func openLiveGlobalStream(t *testing.T, h http.Handler, query, lastEventID strin
 			}
 		}
 	}()
-	t.Cleanup(func() {
-		cancel()
-		resp.Body.Close() //nolint:errcheck
-		<-readerDone
-		srv.Close()
-	})
-	return &liveGlobalStream{frames: frames}
+
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() {
+			cancel()
+			select {
+			case <-served:
+			case <-time.After(testutil.GoroutineRaceTimeout):
+				t.Errorf("GET %s: handler did not return after the request was canceled", path)
+			}
+		})
+	}
+	t.Cleanup(stop)
+
+	select {
+	case <-w.committed:
+	case <-served:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatalf("GET %s: handler committed no response", path)
+	}
+	if code := w.statusCode(); code != http.StatusOK {
+		t.Fatalf("GET %s status = %d, want 200", path, code)
+	}
+	return &sseStream{frames: frames, stop: stop}
+}
+
+// liveGlobalStream is an open GET /v0/events/stream served in-process.
+type liveGlobalStream struct {
+	frames <-chan sseTestFrame
+}
+
+func openLiveGlobalStream(t *testing.T, h http.Handler, query, lastEventID string) *liveGlobalStream {
+	t.Helper()
+	stream := openSSEStream(t, h, "/v0/events/stream"+query, lastEventID)
+	return &liveGlobalStream{frames: stream.frames}
 }
 
 // nextTaggedEvent returns the next tagged_event frame, skipping heartbeats.
