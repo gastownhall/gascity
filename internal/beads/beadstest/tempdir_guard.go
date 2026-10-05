@@ -128,8 +128,9 @@ func plantBait(t testing.TB, root string) string {
 }
 
 // baitDisturbance reports what bd left in the bait workspace at baitDir, or ""
-// when it holds exactly the planted files. A bd command that adopted the bait
-// writes its own files beside them: a database, version and gate files.
+// when it holds exactly the planted files with their planted contents. A bd
+// command that adopted the bait writes its own files beside them (a database,
+// version and gate files) or rewrites a planted file in place.
 func baitDisturbance(baitDir string) string {
 	entries, err := os.ReadDir(baitDir)
 	if err != nil {
@@ -139,8 +140,18 @@ func baitDisturbance(baitDir string) string {
 	for _, entry := range entries {
 		names = append(names, entry.Name())
 	}
-	if want := slices.Sorted(maps.Keys(baitFiles)); !slices.Equal(names, want) {
+	want := slices.Sorted(maps.Keys(baitFiles))
+	if !slices.Equal(names, want) {
 		return fmt.Sprintf("holds %v, planted %v", names, want)
+	}
+	for _, name := range want {
+		got, err := os.ReadFile(filepath.Join(baitDir, name))
+		if err != nil {
+			return fmt.Sprintf("could not read back planted %s: %v", name, err)
+		}
+		if string(got) != baitFiles[name] {
+			return fmt.Sprintf("rewrote planted %s", name)
+		}
 	}
 	return ""
 }

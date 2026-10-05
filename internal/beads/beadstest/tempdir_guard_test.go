@@ -226,6 +226,14 @@ func TestBaitDisturbanceNamesWhatBdLeftBehind(t *testing.T) {
 		t.Fatal("a bait that lost a planted file reports nothing, want the difference")
 	}
 
+	rewritten := plantBait(t, t.TempDir())
+	if err := os.WriteFile(filepath.Join(rewritten, "config.yaml"), []byte("issue-prefix: escaped\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := baitDisturbance(rewritten); !strings.Contains(got, "config.yaml") {
+		t.Fatalf("a bait whose planted config.yaml was rewritten in place reports %q, want it to name config.yaml", got)
+	}
+
 	if got := baitDisturbance(filepath.Join(bait, "gone")); got == "" {
 		t.Fatal("an unreadable bait reports nothing, want the read failure")
 	}
