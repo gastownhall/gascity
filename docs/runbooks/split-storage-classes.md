@@ -402,6 +402,10 @@ This puts the pre-cutover infrastructure rows back into a `bd` work store, for
 a rollback after the clear. It restores the state **as of the cutover**: beads
 written to the binding since then are not in the backup and are lost by the
 rollback, and the fields listed under "What the backup holds" are not restored.
+That includes progress: a workflow step that was open at the cutover and
+finished in the binding afterwards comes back open, and the restored city
+dispatches it again. Check the binding (`gc bd show <id>` before the revert)
+for any step whose work must not run twice.
 Edge payloads (a `waits_for` gate's `{"gate":"any-children"}`) are not carried
 by `bd import`; a restored gate reads as the default, `all-children`. Verified
 with `bd` 1.3.2-rc.1.
