@@ -1432,6 +1432,35 @@ func RunCloseReasonTests(t *testing.T, newStore func() beads.Store) {
 			t.Errorf("CloseReason after Reopen = %q, want empty", got.CloseReason)
 		}
 	})
+
+	// The closer's metadata.close_reason is the close's input: a store that
+	// kept it across Reopen handed the old reason to the next close made
+	// without one (bd close, a controller close), so that close reported why
+	// the PREVIOUS close happened.
+	t.Run("ReopenClearsCloseReasonMetadataSoTheNextCloseHasNone", func(t *testing.T) {
+		s := newStore()
+		b := closeWithReason(t, s, "reopened then closed again")
+		if err := s.Reopen(b.ID); err != nil {
+			t.Fatal(err)
+		}
+		reopened, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := reopened.Metadata["close_reason"]; got != "" {
+			t.Errorf("metadata.close_reason after Reopen = %q, want it cleared", got)
+		}
+		if err := s.Close(b.ID); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.CloseReason != "" {
+			t.Errorf("CloseReason after reopen and a close without a reason = %q, want empty", got.CloseReason)
+		}
+	})
 }
 
 // RunCloseReasonAfterReopenTests pins that a reopen, by Reopen or by an Update

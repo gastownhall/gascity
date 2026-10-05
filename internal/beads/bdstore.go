@@ -2757,6 +2757,14 @@ func (s *BdStore) close(id, reason string) error {
 
 // Reopen sets a closed bead's status to open via bd reopen.
 func (s *BdStore) Reopen(id string) error {
+	// bd reopen clears its close_reason column but not metadata.close_reason,
+	// which Close forwards as --reason; clear it first (staleCloseReasonToClear)
+	// so a later close without a reason does not report the old one.
+	if b, err := s.Get(id); err == nil && staleCloseReasonToClear(b) {
+		if err := s.SetMetadata(id, closeReasonMetadataKey, ""); err != nil {
+			return fmt.Errorf("reopening bead %q: clearing close_reason: %w", id, err)
+		}
+	}
 	err := s.runBDTransientWrite("reopen", "--json", id)
 	if err != nil {
 		if isBdNotFound(err) {

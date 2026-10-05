@@ -869,6 +869,39 @@ func setBeadStatus(b *Bead, status string) {
 	}
 }
 
+// dropCloseReasonMetadata removes metadata.close_reason from a bead a
+// whole-row store is reopening. That key is the input to the bead's next close
+// (recordCloseReason, BdStore's and NativeDoltStore's --reason forwarding), so a
+// reopened bead that kept it handed the old reason to a later close made
+// without one. The metadata map is replaced, never mutated in place, since
+// callers may share it.
+func dropCloseReasonMetadata(b *Bead) {
+	if _, ok := b.Metadata[closeReasonMetadataKey]; !ok {
+		return
+	}
+	md := make(map[string]string, len(b.Metadata)-1)
+	for k, v := range b.Metadata {
+		if k != closeReasonMetadataKey {
+			md[k] = v
+		}
+	}
+	b.Metadata = md
+}
+
+// closeReasonMetadataKey is the metadata key a closer stamps with its reason
+// before closing (bd close --reason's input on stores that forward it).
+const closeReasonMetadataKey = "close_reason"
+
+// staleCloseReasonToClear reports whether b, about to be reopened, carries a
+// metadata.close_reason that must be cleared first. Stores whose reopen cannot
+// edit metadata in the same write (BdStore, NativeDoltStore, exec) clear it
+// BEFORE reopening: a closed bead reports its reason from the store's own
+// close_reason column, so clearing the input key first changes no read, and a
+// reopen that fails or is replayed afterwards still finds it cleared.
+func staleCloseReasonToClear(b Bead) bool {
+	return b.Status != "open" && strings.TrimSpace(b.Metadata[closeReasonMetadataKey]) != ""
+}
+
 // recordCloseReason stamps CloseReason on a bead a whole-row store (MemStore,
 // FileStore, SQLiteStore) has just moved from not-closed to closed. The reason
 // is the trimmed metadata.close_reason its closer stamped first, which is what

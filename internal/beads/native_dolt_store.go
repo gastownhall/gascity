@@ -2218,6 +2218,15 @@ func (s *NativeDoltStore) Reopen(id string) error {
 	if err := s.readOnlyGuard(); err != nil {
 		return err
 	}
+	// ReopenIssue clears the close_reason column but not metadata.close_reason,
+	// which Close forwards as the reason; clear it first, outside the reopen's
+	// single write (see reopenOnce), so a later close without a reason does not
+	// report the old one (staleCloseReasonToClear).
+	if b, err := s.Get(id); err == nil && staleCloseReasonToClear(b) {
+		if err := s.SetMetadata(id, closeReasonMetadataKey, ""); err != nil {
+			return fmt.Errorf("reopening bead %q: clearing close_reason: %w", id, err)
+		}
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
