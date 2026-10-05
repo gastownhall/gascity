@@ -471,6 +471,8 @@ Use "gc supervisor run" for foreground operation.`,
 		"preview what agents would start without starting them")
 	cmd.Flags().BoolVar(&noAutoRestartMode, "no-auto-restart", false,
 		"detect supervisor binary drift but do not auto-restart; exits non-zero on drift")
+	cmd.Flags().BoolVar(&allowSupervisorMismatch, allowSupervisorMismatchFlag, false,
+		"start even when the running supervisor is a different gc installation than this binary")
 	cmd.Flags().BoolVar(&startVerboseMode, "verbose", false,
 		"disable warning deduplication and print every supervisor warning")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
@@ -567,8 +569,23 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 	if jsonOut {
 		driftStdout = stderr
 	}
-	if exitCode, cont := runStartDriftCheck(cityPath, driftStdout, stderr); !cont {
-		return exitCode
+	// A supervisor running a different gc installation cannot be fixed by
+	// the drift auto-restart (it would relaunch that other binary), so it is
+	// checked first. --dry-run only previews, so it warns instead.
+	skipDriftCheck := false
+	if dryRunMode {
+		warnSupervisorBinaryMismatch("gc start", stderr)
+	} else {
+		proceed, acceptedDifferentInstall := checkSupervisorBinaryBeforeRegister("gc start", stderr, false)
+		if !proceed {
+			return 1
+		}
+		skipDriftCheck = acceptedDifferentInstall
+	}
+	if !skipDriftCheck {
+		if exitCode, cont := runStartDriftCheck(cityPath, driftStdout, stderr); !cont {
+			return exitCode
+		}
 	}
 
 	// --dry-run routes to the standalone preview path *after* the drift
