@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
@@ -23,8 +24,9 @@ import (
 //
 // Two reverse indexes make the mapping possible: identity -> session rows
 // (every name a work bead can be assigned under) and work bead -> its last
-// seen assignee. Bead events maintain them incrementally; the resync lane
-// rebuilds them from cached census reads.
+// seen assignee. A third set, the work beads last seen routed, serves the
+// allocator wake policy (CONTRACT §1.1, C9). Bead events maintain them
+// incrementally; the resync lane rebuilds them from cached census reads.
 //
 // The router has no write path. Everything it does is an enqueue, which is
 // why cache-reconcile replays can be routed like any other event without
@@ -83,6 +85,10 @@ const routerMaxPending = 1 << 14
 // last complete rebuild. Past it a close asks for a resync, which clears them.
 const routerMaxTombstones = 1 << 12
 
+// routerMaxRouted bounds the routed work set. Past it the set is full, and
+// every work event wakes the allocator until a complete rebuild fits.
+const routerMaxRouted = 1 << 16
+
 var errRouterPendingOverflow = errors.New("reconcile router: events overflowed the rebuild log")
 
 // routerIndex is the pair of reverse indexes. A rebuild constructs a fresh
@@ -91,6 +97,8 @@ type routerIndex struct {
 	identities map[string]map[rowKey]struct{} // identity -> session rows (multi-map: duplicates and alias reuse)
 	keyIdents  map[rowKey][]string            // reverse, for updates and removal
 	assignee   map[string]string              // open work bead ID -> last seen assignee
+	routed     map[string]struct{}            // open work bead IDs last seen carrying gc.routed_to
+	routedFull bool                           // a routed insert found the set at routerMaxRouted
 	// tombstones holds the identities of rows closed since the last complete
 	// rebuild. A name that resolves only here (the runtime of a row just
 	// retired reports gone) wakes the closed row, a cheap no-op, instead of
@@ -105,6 +113,7 @@ func newRouterIndex() routerIndex {
 		identities: make(map[string]map[rowKey]struct{}),
 		keyIdents:  make(map[rowKey][]string),
 		assignee:   make(map[string]string),
+		routed:     make(map[string]struct{}),
 		tombstones: make(map[string]map[rowKey]struct{}),
 	}
 }
@@ -157,6 +166,20 @@ func setAssigneeOp(id, assignee string) routerOp {
 
 func dropAssigneeOp(id string) routerOp { return func(x *routerIndex) { delete(x.assignee, id) } }
 
+func setRoutedOp(id string, routed bool) routerOp {
+	return func(x *routerIndex) {
+		switch _, had := x.routed[id]; {
+		case !routed:
+			delete(x.routed, id)
+		case had:
+		case len(x.routed) >= routerMaxRouted:
+			x.routedFull = true
+		default:
+			x.routed[id] = struct{}{}
+		}
+	}
+}
+
 func (x *routerIndex) dropSession(k rowKey) {
 	for _, id := range x.keyIdents[k] {
 		delete(x.identities[id], k)
@@ -203,12 +226,13 @@ type reconcileRouter struct {
 	sink      routerSink
 	stderr    io.Writer
 
-	events, replays, undecodable, keysOut, unresolved, panics atomic.Uint64
+	events, replays, undecodable, keysOut, unresolved, panics, wakesSuppressed atomic.Uint64
 }
 
 // routerStats is a point-in-time copy of the router's counters.
+// WakesSuppressed counts bead events the wake policy kept from the allocator.
 type routerStats struct {
-	Events, Replays, Undecodable, KeysOut, Unresolved, Panics uint64
+	Events, Replays, Undecodable, KeysOut, Unresolved, Panics, WakesSuppressed uint64
 }
 
 func newReconcileRouter(sessionsLeg string, sink routerSink, stderr io.Writer) *reconcileRouter {
@@ -220,12 +244,13 @@ func newReconcileRouter(sessionsLeg string, sink routerSink, stderr io.Writer) *
 
 func (r *reconcileRouter) stats() routerStats {
 	return routerStats{
-		Events:      r.events.Load(),
-		Replays:     r.replays.Load(),
-		Undecodable: r.undecodable.Load(),
-		KeysOut:     r.keysOut.Load(),
-		Unresolved:  r.unresolved.Load(),
-		Panics:      r.panics.Load(),
+		Events:          r.events.Load(),
+		Replays:         r.replays.Load(),
+		Undecodable:     r.undecodable.Load(),
+		KeysOut:         r.keysOut.Load(),
+		Unresolved:      r.unresolved.Load(),
+		Panics:          r.panics.Load(),
+		WakesSuppressed: r.wakesSuppressed.Load(),
 	}
 }
 
@@ -307,19 +332,26 @@ func (r *reconcileRouter) OnBeadEvent(evt events.Event, snapshot, appliedToSessi
 		return
 	}
 	reason := routeReason{Kind: kind, Detail: evt.Type + " " + b.ID}
-	rows, tombFull := r.indexBeadEvent(evt.Type, b, appliedToSessions)
+	rows, tombFull, alloc := r.indexBeadEvent(evt.Type, b, appliedToSessions)
 	r.emit(rows, reason)
 	if tombFull {
 		r.requestResync("tombstone-overflow")
 	}
-	// Every bead event is a census input: a session row's change, a relic on
-	// another leg (the create fence), or work demand.
+	if !alloc {
+		r.wakesSuppressed.Add(1)
+		return
+	}
 	r.wakeAllocator(reason)
 }
 
 // indexBeadEvent updates the indexes for one decoded bead and returns the
-// session rows it concerns, and whether a close found the tombstones full.
-func (r *reconcileRouter) indexBeadEvent(eventType string, b beads.Bead, appliedToSessions bool) (rows []rowKey, tombFull bool) {
+// session rows it concerns, whether a close found the tombstones full, and
+// whether the event wakes the allocator. The wake policy (CONTRACT §1.1, C9)
+// takes, on any leg and replays included: a close or delete; a session row,
+// relics included (the create fence); and work whose current or previously
+// indexed version carries gc.routed_to or an assignee. Any other work event
+// reaches the allocator by the patrol backstop.
+func (r *reconcileRouter) indexBeadEvent(eventType string, b beads.Bead, appliedToSessions bool) (rows []rowKey, tombFull, alloc bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	closedOrDeleted := eventType == events.BeadClosed || eventType == events.BeadDeleted
@@ -330,15 +362,20 @@ func (r *reconcileRouter) indexBeadEvent(eventType string, b beads.Bead, applied
 	// in the sessions store is still that session.
 	if session.IsSessionBeadOrRepairable(b) || (closedOrDeleted && appliedToSessions && indexed) {
 		if !appliedToSessions {
-			return nil, false // a migrated relic (C2.11): census only
+			return nil, false, true // a migrated relic (C2.11): census only
 		}
 		if !gone {
 			r.apply(upsertSessionOp(k, sessionBeadAssigneeIdentities(b)))
-			return []rowKey{k}, false
+			return []rowKey{k}, false, true
 		}
 		// Logged even when not indexed: a rebuild's census may hold the row.
 		r.apply(closeSessionOp(k, r.idx.keyIdents[k]))
-		return []rowKey{k}, indexed && r.idx.tombFull
+		return []rowKey{k}, indexed && r.idx.tombFull, true
+	}
+	_, wasRouted := r.idx.routed[b.ID]
+	routed := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != ""
+	if keep := routed && !gone; keep != wasRouted {
+		r.apply(setRoutedOp(b.ID, keep))
 	}
 	old, had := r.idx.assignee[b.ID]
 	if had {
@@ -353,7 +390,8 @@ func (r *reconcileRouter) indexBeadEvent(eventType string, b beads.Bead, applied
 	} else if had {
 		r.apply(dropAssigneeOp(b.ID))
 	}
-	return rows, false
+	alloc = closedOrDeleted || routed || wasRouted || had || next != "" || r.idx.routedFull
+	return rows, false, alloc
 }
 
 // Enqueue routes externally keyed triggers (API, socket, lanes, pump).
@@ -515,8 +553,8 @@ type routerCensus struct {
 // rebuilt (the sessions census failed, or the log overflowed and the build was
 // abandoned); boot readiness gates on it alone. legErr names the work census
 // legs that failed. A partial read never reads as deletion (P-3): a failed
-// sessions census keeps the session index whole, and a failed assignee leg
-// keeps every previous assignee entry the legs that did read do not
+// sessions census keeps the session index whole, and a failed work leg keeps
+// every previous assignee and routed entry the legs that did read do not
 // supersede. Any failure also asks for a resync.
 func (r *reconcileRouter) rebuild(c routerCensus) (rows []rowKey, sessErr, legErr error) {
 	rows, sessErr, legErr = r.rebuildIndex(c)
@@ -547,13 +585,13 @@ func (r *reconcileRouter) rebuildIndex(c routerCensus) (rows []rowKey, sessErr, 
 	if sessErr != nil {
 		sessErr = fmt.Errorf("reconcile router: sessions census: %w", sessErr)
 	}
-	assignees, legErr := readAssigneeCensus(c.legs)
-	return r.swap(infos, sessErr, assignees, legErr)
+	assignees, routed, legErr := readWorkCensus(c.legs)
+	return r.swap(infos, sessErr, assignees, routed, legErr)
 }
 
 // swap builds the new index under mu, replays the logged ops onto it and
 // swaps it in, unless the log overflowed.
-func (r *reconcileRouter) swap(infos []session.Info, sessErr error, assignees map[string]string, legErr error) ([]rowKey, error, error) {
+func (r *reconcileRouter) swap(infos []session.Info, sessErr error, assignees map[string]string, routed []string, legErr error) ([]rowKey, error, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.overflow {
@@ -576,10 +614,13 @@ func (r *reconcileRouter) swap(infos []session.Info, sessErr error, assignees ma
 		}
 	}
 	if legErr != nil {
-		next.assignee = r.idx.assignee
+		next.assignee, next.routed, next.routedFull = r.idx.assignee, r.idx.routed, r.idx.routedFull
 	}
 	for id, a := range assignees {
 		next.assignee[id] = a
+	}
+	for _, id := range routed {
+		setRoutedOp(id, true)(&next)
 	}
 	for _, op := range r.pending {
 		op(&next)
@@ -588,14 +629,16 @@ func (r *reconcileRouter) swap(infos []session.Info, sessErr error, assignees ma
 	return rows, sessErr, legErr
 }
 
-// readAssigneeCensus reads open and in-progress work with an assignee over
-// every census leg, from the cache. It returns what it read and an error
-// naming every leg that failed; rows a failed leg did return are kept.
-func readAssigneeCensus(legs func() ([]classStoreCandidate, error)) (map[string]string, error) {
+// readWorkCensus reads open and in-progress work over every census leg, from
+// the cache: the assignee of each assigned bead, and the IDs of routed ones.
+// It returns what it read and an error naming every leg that failed; rows a
+// failed leg did return are kept.
+func readWorkCensus(legs func() ([]classStoreCandidate, error)) (map[string]string, []string, error) {
 	out := make(map[string]string)
+	var routed []string
 	candidates, err := legs()
 	if err != nil {
-		return out, fmt.Errorf("reconcile router: census legs: %w", err)
+		return out, nil, fmt.Errorf("reconcile router: census legs: %w", err)
 	}
 	var errs []error
 	for _, leg := range candidates {
@@ -615,8 +658,11 @@ func readAssigneeCensus(legs func() ([]classStoreCandidate, error)) (map[string]
 				if a := strings.TrimSpace(b.Assignee); a != "" {
 					out[b.ID] = a
 				}
+				if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" {
+					routed = append(routed, b.ID)
+				}
 			}
 		}
 	}
-	return out, errors.Join(errs...)
+	return out, routed, errors.Join(errs...)
 }

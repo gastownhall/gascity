@@ -60,13 +60,17 @@ func psTimeout() time.Duration {
 // process reaped between two probes, a window too narrow to hit on demand.
 var readProcStat = os.ReadFile
 
+// probeSignal sends a signal for Alive's existence probe. It is a seam so tests
+// can model a process owned by another user, whose probe answers EPERM.
+var probeSignal = syscall.Kill
+
 // Alive reports whether a PID exists and is not a zombie.
 func Alive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	err := syscall.Kill(pid, 0)
-	if err != nil && !errors.Is(err, syscall.EPERM) {
+	probeErr := probeSignal(pid, 0)
+	if probeErr != nil && !errors.Is(probeErr, syscall.EPERM) {
 		return false
 	}
 	statPath := filepath.Join("/proc", strconv.Itoa(pid), "stat")
@@ -75,7 +79,9 @@ func Alive(pid int) bool {
 		// With /proc mounted, a missing entry after a successful kill(0)
 		// means the process was reaped in between. The ps zombie probe
 		// below finds nothing for a vanished PID and would report it alive.
-		if errors.Is(err, fs.ErrNotExist) && procMounted() {
+		// After EPERM the process exists: its entry can be hidden (hidepid)
+		// rather than gone, so that case keeps the ps probe.
+		if probeErr == nil && errors.Is(err, fs.ErrNotExist) && procMounted() {
 			return false
 		}
 		return !psReportsZombie(pid)

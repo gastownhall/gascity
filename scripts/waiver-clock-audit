@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # waiver-clock-audit
 #
-# Runs the two checked ledgers that carry dated waivers -- the runtime provider
-# ledger (internal/testutil/providerledger) and the resource census
-# (internal/testpolicy/resourcecensus) -- with the waiver clock in strict mode,
-# so a lapsed date fails here instead of on somebody else's push.
+# Runs the one date check over every dated waiver -- internal/testpolicy/
+# waiverexpiry, which reads the provider ledger, the resource census, and the
+# beads conformance skips -- with the waiver clock in strict mode, so a lapsed
+# date fails here instead of on somebody else's push.
 #
 # Strict is the whole point. The fleet's push path runs the same tests in grace
 # mode (internal/testpolicy/waiverclock), which warns for 14 days before a lapse
@@ -77,8 +77,7 @@ fi
 # see a lapse that is already fatal, which is 14 days too late to be useful.
 set +e
 output=$(env GC_WAIVER_CLOCK=strict go test -count=1 -v \
-    ./internal/testutil/providerledger \
-    ./internal/testpolicy/resourcecensus 2>&1)
+    ./internal/testpolicy/waiverexpiry 2>&1)
 test_status=$?
 set -e
 
