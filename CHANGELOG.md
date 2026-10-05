@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrading Notes
+
+- **Upgrade Beads (`bd`) to v1.3.2-rc.1.** This build pins and is tested
+  against bd v1.3.2-rc.1 (`deps.env` `BD_VERSION` and the go.mod library),
+  v1.3.1 plus the `bd purge` live-dependent fix (beads#7031) and the backup
+  watermark fix (beads#7032), with the same schema. It is a prerelease and is
+  not on Homebrew: download `bd` from the
+  [v1.3.2-rc.1 release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.2-rc.1)
+  or run `go install github.com/steveyegge/beads/cmd/bd@v1.3.2-rc.1`.
+
 ## [1.5.0] - 2026-10-05
 
 ### Upgrading Notes

@@ -62,18 +62,19 @@ const (
 	// its job cap moves 90 -> 110 minutes (release step budget 95). Reviewed
 	// delta: one test step and the cap, no new job, trigger or permission.
 	//
-	// Bumped for the Beads v1.3.0 -> v1.3.1-rc.2 -> v1.3.1 pins: every job's
-	// BD_VERSION env value moves to the new tag. Reviewed delta: that value only.
-	expectedCIExecutionHash     = "3921aabd1ff956bb82e6b11ef91422f23b51cb3bc6db988f31081a7f47b268dc"
+	// Bumped for the Beads v1.3.0 -> v1.3.1-rc.2 -> v1.3.1 -> v1.3.2-rc.1 pins:
+	// every job's BD_VERSION env value moves to the new tag. Reviewed delta:
+	// that value only.
+	expectedCIExecutionHash     = "44dff48590e05c44af119caecd7d20345429216d8e668357d0b8d2cb1c08aafa"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (v1.5.0 Tier C
 	// first-run drain) the tier-c job's -run selector gained
 	// TestFreshInit_SlingSpawnsDefaultPoolWorker and
 	// TestFreshInit_ClaudeUnrestricted, mirroring RC Gate's acceptance C shards;
 	// same job, env, secrets and runner.
-	// Bumped for the Beads v1.3.0 -> v1.3.1-rc.2 -> v1.3.1 pins: the workflow
-	// and job BD_VERSION env values only.
-	expectedNightlyExecutionHash = "896608864491e88c6327fd49231ab0f83610a81ae24bfb3e87ec1cba570fa993"
+	// Bumped for the Beads v1.3.0 -> v1.3.1-rc.2 -> v1.3.1 -> v1.3.2-rc.1 pins:
+	// the workflow and job BD_VERSION env values only.
+	expectedNightlyExecutionHash = "ed0552dba2f4aed28d38eb7ef24c103848958400f34efe9db80da0aaef1fb9a2"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 
