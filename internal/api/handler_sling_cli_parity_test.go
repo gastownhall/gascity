@@ -271,3 +271,74 @@ func TestSlingConvoyRoutesEachChildLikeCLI(t *testing.T) {
 		t.Fatalf("batch = %+v, want convoy with 2 of 2 routed", resp.Batch)
 	}
 }
+
+// TestSlingOnFormulaAttachesEachConvoyChildLikeCLI pins `--on` over the API:
+// POST /sling {formula, attached_bead_id: <convoy>} attaches a v1 formula to
+// every open tracked child, as `gc sling <target> <convoy> --on <formula>`
+// does, and leaves the container bare. The batch it reports is what tells a
+// remote CLI that the server expanded the convoy; an older server attached the
+// wisp to the container and reported no batch.
+func TestSlingOnFormulaAttachesEachConvoyChildLikeCLI(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+	v1Formula := "formula = \"code-review\"\nversion = 1\n\n[[steps]]\nid = \"review\"\ntitle = \"Review\"\n"
+	if err := os.WriteFile(filepath.Join(formulaDir, "code-review.toml"), []byte(v1Formula), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := state.stores["myrig"]
+	convoy, err := store.Create(beads.Bead{Title: "batch", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var children []beads.Bead
+	for _, title := range []string{"first", "second"} {
+		child, err := store.Create(beads.Bead{Title: title, Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.DepAdd(convoy.ID, child.ID, "tracks"); err != nil {
+			t.Fatal(err)
+		}
+		children = append(children, child)
+	}
+
+	rec, resp := postSlingJSON(t, h, state, `{"target":"myrig/worker","formula":"code-review","attached_bead_id":"`+convoy.ID+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	molecules := map[string]bool{}
+	for _, child := range children {
+		got, err := store.Get(child.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		molecule := got.Metadata[beadmeta.MoleculeIDMetadataKey]
+		if molecule == "" {
+			t.Fatalf("child %s has no molecule_id, want the formula attached to it", child.ID)
+		}
+		molecules[molecule] = true
+		if got.Metadata[beadmeta.RoutedToMetadataKey] != "myrig/worker" {
+			t.Fatalf("child %s gc.routed_to = %q, want myrig/worker", child.ID, got.Metadata[beadmeta.RoutedToMetadataKey])
+		}
+	}
+	if len(molecules) != len(children) {
+		t.Fatalf("children share molecules %v, want one wisp per child", molecules)
+	}
+	gotConvoy, err := store.Get(convoy.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := gotConvoy.Metadata[beadmeta.MoleculeIDMetadataKey]; v != "" {
+		t.Fatalf("convoy container molecule_id = %q, want no wisp on the container", v)
+	}
+	if v := gotConvoy.Metadata[beadmeta.RoutedToMetadataKey]; v != "" {
+		t.Fatalf("convoy container gc.routed_to = %q, want it left unrouted", v)
+	}
+	if resp.Mode != "attached" || resp.Formula != "code-review" || resp.AttachedBeadID != convoy.ID {
+		t.Fatalf("response = %+v, want code-review attached on %s", resp, convoy.ID)
+	}
+	if resp.Batch == nil || resp.Batch.Routed != 2 || resp.Batch.Total != 2 || resp.Batch.ContainerType != "convoy" {
+		t.Fatalf("batch = %+v, want convoy with 2 of 2 routed", resp.Batch)
+	}
+}

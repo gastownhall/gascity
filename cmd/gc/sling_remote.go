@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // cmdSlingRemote routes a sling mutation to a REMOTE city over the control
@@ -33,9 +34,10 @@ func cmdSlingRemote(c *api.Client, target *remoteTarget, args []string, isFormul
 	}
 	// --nudge stays refused for a remote city: it needs server-side delivery
 	// wiring. --on and the metadata flags (--merge/--no-convoy/--owned/
-	// --no-formula) are server-expressible and forwarded below; the server runs
-	// the same sling.(*Sling).Dispatch as the local path, so --on on a convoy is
-	// attached per child on both sides.
+	// --no-formula) are server-expressible and forwarded below. A current server
+	// runs the same sling.(*Sling).Dispatch as the local path, so --on on a
+	// convoy is attached per child; checkRemoteOnAttach catches an older server
+	// that attached it to the container instead.
 	if doNudge {
 		return fail("unsupported_remote", "gc sling: --nudge delivery for a remote city lands separately; sling without --nudge")
 	}
@@ -94,7 +96,44 @@ func cmdSlingRemote(c *api.Client, target *remoteTarget, args []string, isFormul
 	if err != nil {
 		return fail("sling_failed", "gc sling: "+err.Error())
 	}
+	if onFormula != "" {
+		if msg := checkRemoteOnAttach(c, &res, args[0], args[1], onFormula); msg != "" {
+			return fail("attached_to_container", msg)
+		}
+	}
 	return renderRemoteSlingResult(res, jsonOutput, stdout, stderr)
+}
+
+// checkRemoteOnAttach catches a remote server older than this client
+// attaching an --on formula to a convoy container rather than to each open
+// child, as `gc sling` does locally. A current server always reports where the
+// formula went: a per-child batch for a convoy, a molecule_id for a v1 attach
+// to a single bead, a workflow_id for a graph launch. An older server has no
+// batch or molecule_id field, so its v1 attach reports none of the three, and
+// only then is the bead looked up. A workflow_id skips the lookup, which is
+// safe for a convoy: a graph formula takes a convoy as its one input on an
+// older server as on a current one. It returns the failure message when the
+// bead is a convoy; a failed lookup only adds a warning to res, because the
+// sling itself succeeded. An older server also attaches a formula to an epic,
+// which a current one refuses. This check misses that, since an epic is not a
+// container type and a graph launch skips the lookup (ga-nabyph).
+func checkRemoteOnAttach(c *api.Client, res *api.SlingResult, target, beadID, formula string) string {
+	if res.Batch != nil || res.MoleculeID != "" || res.WorkflowID != "" {
+		return ""
+	}
+	got, err := c.GetBead(beadID)
+	if err != nil {
+		res.Warnings = append(res.Warnings, fmt.Sprintf(
+			"could not check that %s is not a convoy (%v); a server older than this gc attaches --on %s to a convoy itself, not to each open child",
+			beadID, err, formula))
+		return ""
+	}
+	if !beads.IsContainerType(got.Body.Type) {
+		return ""
+	}
+	return fmt.Sprintf(
+		"gc sling: the remote city attached formula %q to %s %s itself, not to each open child: its server is older than this gc. Upgrade the remote city, or attach the formula child by child: gc sling %s <child> --on %s",
+		formula, got.Body.Type, beadID, target, formula)
 }
 
 // parseSlingVars splits repeatable key=value strings into a map.

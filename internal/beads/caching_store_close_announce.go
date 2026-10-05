@@ -4,7 +4,11 @@ import "sort"
 
 // This file holds the CachingStore's bead.closed announcement bookkeeping: the
 // queue of closes a non-announcing absorb installed (gastownhall/gascity#6860)
-// and the drain that turns them into bead.closed notifications exactly once.
+// and the drain that announces each queued close once. That is once per cache,
+// not once per close: a close another process made and announced itself
+// reaches this cache either as its bead.closed, absorbed as already announced,
+// or through a read, and when the read lands first this cache announces the
+// close as well, so the bus carries two bead.closed for it.
 
 // trackCloseTransitionLocked keeps unannouncedCloses in step with the row just
 // installed for id. A row that is not closed cancels any queued close (a
@@ -81,8 +85,16 @@ func (c *CachingStore) announceUnannouncedCloses() {
 // closed and not queued was announced by whoever installed it, so the write
 // does not announce again. With no cached row, uncachedOwns decides: a write
 // that itself closed the bead owns its close; one that merely refreshed an
-// uncached row does not. Caller must hold c.mu in write mode.
-func (c *CachingStore) claimCloseLocked(id string, uncachedOwns bool) bool {
+// uncached row does not.
+//
+// fenced is racedWriteLocked's verdict: the write installs nothing. A held row
+// that is not closed would then stay cached under the dirty mark, and the read
+// that settles the mark (a dirty Get or list overlay, RefreshRow, a reconcile)
+// would see it close and announce the close this write announces. So a fenced
+// claim drops that row, as evictForConditionalClose does: the dirty mark keeps
+// readers on the backing, and a read that finds no held row announces nothing.
+// Caller must hold c.mu in write mode.
+func (c *CachingStore) claimCloseLocked(id string, uncachedOwns, fenced bool) bool {
 	if c.dropQueuedCloseLocked(id) {
 		return true
 	}
@@ -90,7 +102,14 @@ func (c *CachingStore) claimCloseLocked(id string, uncachedOwns bool) bool {
 	if !held {
 		return uncachedOwns
 	}
-	return previous.Status != "closed"
+	if previous.Status == "closed" {
+		return false
+	}
+	if fenced {
+		delete(c.beads, id)
+		delete(c.deps, id)
+	}
+	return true
 }
 
 // updateEventTypeLocked names the event a write that installs installed for id
@@ -99,13 +118,14 @@ func (c *CachingStore) claimCloseLocked(id string, uncachedOwns bool) bool {
 // when it was not closed before is a close, whatever spelling asked for it, so
 // it is announced as Close announces it; announcing it as bead.updated hid it
 // from every bead.closed consumer (gastownhall/gascity#6860). With no cached
-// row to compare, the update's own status=closed is the evidence. Caller must
-// hold c.mu in write mode, before installing the row.
-func (c *CachingStore) updateEventTypeLocked(id string, installed Bead, opts UpdateOpts) string {
+// row to compare, the update's own status=closed is the evidence. fenced is
+// claimCloseLocked's. Caller must hold c.mu in write mode, before installing
+// the row.
+func (c *CachingStore) updateEventTypeLocked(id string, installed Bead, opts UpdateOpts, fenced bool) string {
 	if installed.Status != "closed" {
 		return "bead.updated"
 	}
-	if c.claimCloseLocked(id, opts.Status != nil && *opts.Status == "closed") {
+	if c.claimCloseLocked(id, opts.Status != nil && *opts.Status == "closed", fenced) {
 		return "bead.closed"
 	}
 	return "bead.updated"

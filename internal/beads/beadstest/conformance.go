@@ -1309,25 +1309,6 @@ func RunMetadataTests(t *testing.T, newStore func() beads.Store) {
 func RunCloseReasonTests(t *testing.T, newStore func() beads.Store) {
 	t.Helper()
 
-	// bd's validation.on-close=error rejects reasons under 20 characters, so
-	// the reasons here are long enough to pass it on a real bd.
-	const reason = "fixed in commit abc123; tests pass"
-
-	closeWithReason := func(t *testing.T, s beads.Store, title string) beads.Bead {
-		t.Helper()
-		b, err := s.Create(beads.Bead{Title: title})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := s.SetMetadata(b.ID, "close_reason", reason); err != nil {
-			t.Fatal(err)
-		}
-		if err := s.Close(b.ID); err != nil {
-			t.Fatal(err)
-		}
-		return b
-	}
-
 	t.Run("CloseRecordsCloseReasonOnGet", func(t *testing.T) {
 		s := newStore()
 		b := closeWithReason(t, s, "close with a reason")
@@ -1338,8 +1319,8 @@ func RunCloseReasonTests(t *testing.T, newStore func() beads.Store) {
 		if got.Status != "closed" {
 			t.Fatalf("Status = %q, want closed", got.Status)
 		}
-		if got.CloseReason != reason {
-			t.Errorf("CloseReason = %q, want %q", got.CloseReason, reason)
+		if got.CloseReason != closeReason {
+			t.Errorf("CloseReason = %q, want %q", got.CloseReason, closeReason)
 		}
 	})
 
@@ -1354,8 +1335,8 @@ func RunCloseReasonTests(t *testing.T, newStore func() beads.Store) {
 			if got.ID != b.ID {
 				continue
 			}
-			if got.CloseReason != reason {
-				t.Errorf("List CloseReason = %q, want %q", got.CloseReason, reason)
+			if got.CloseReason != closeReason {
+				t.Errorf("List CloseReason = %q, want %q", got.CloseReason, closeReason)
 			}
 			return
 		}
@@ -1368,15 +1349,15 @@ func RunCloseReasonTests(t *testing.T, newStore func() beads.Store) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.CloseAll([]string{b.ID}, map[string]string{"close_reason": reason}); err != nil {
+		if _, err := s.CloseAll([]string{b.ID}, map[string]string{"close_reason": closeReason}); err != nil {
 			t.Fatal(err)
 		}
 		got, err := s.Get(b.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.CloseReason != reason {
-			t.Errorf("CloseReason = %q, want %q", got.CloseReason, reason)
+		if got.CloseReason != closeReason {
+			t.Errorf("CloseReason = %q, want %q", got.CloseReason, closeReason)
 		}
 	})
 
@@ -1386,7 +1367,7 @@ func RunCloseReasonTests(t *testing.T, newStore func() beads.Store) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := s.SetMetadata(b.ID, "close_reason", reason); err != nil {
+		if err := s.SetMetadata(b.ID, "close_reason", closeReason); err != nil {
 			t.Fatal(err)
 		}
 		got, err := s.Get(b.ID)
@@ -1412,6 +1393,84 @@ func RunCloseReasonTests(t *testing.T, newStore func() beads.Store) {
 			t.Errorf("CloseReason after Reopen = %q, want empty", got.CloseReason)
 		}
 	})
+}
+
+// RunCloseReasonAfterReopenTests pins that a reopen, by Reopen or by an Update
+// to open, ends the close whose reason was recorded, so a later close that
+// gives no reason, by Close or by an Update to closed, reports none. Call it
+// for the stores whose reopen drops metadata.close_reason: MemStore, FileStore
+// and SQLiteStore. BdStore and NativeDoltStore hand that key to bd as the close
+// reason, and bd's reopen clears its close_reason column but not the key, so
+// their next close reports the old reason (ga-c8fe4w). NativeDoltStore's
+// conformance fixture is not a caller either: its storage is a MemStore that
+// drops the key and ignores the reason it is handed, so it would pass on
+// MemStore's behalf.
+func RunCloseReasonAfterReopenTests(t *testing.T, newStore func() beads.Store) {
+	t.Helper()
+
+	type statusMove struct {
+		name string
+		run  func(s beads.Store, id string) error
+	}
+	setStatus := func(status string) func(s beads.Store, id string) error {
+		return func(s beads.Store, id string) error {
+			return s.Update(id, beads.UpdateOpts{Status: &status})
+		}
+	}
+	reopens := []statusMove{
+		{name: "Reopen", run: func(s beads.Store, id string) error { return s.Reopen(id) }},
+		{name: "UpdateStatusOpen", run: setStatus("open")},
+	}
+	closes := []statusMove{
+		{name: "Close", run: func(s beads.Store, id string) error { return s.Close(id) }},
+		{name: "UpdateStatusClosed", run: setStatus("closed")},
+	}
+	for _, reopen := range reopens {
+		for _, closeAgain := range closes {
+			t.Run(closeAgain.name+"After"+reopen.name+"HasNoStaleCloseReason", func(t *testing.T) {
+				s := newStore()
+				b := closeWithReason(t, s, "closed, reopened, closed again")
+				if err := reopen.run(s, b.ID); err != nil {
+					t.Fatal(err)
+				}
+				if err := closeAgain.run(s, b.ID); err != nil {
+					t.Fatal(err)
+				}
+				got, err := s.Get(b.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.Status != "closed" {
+					t.Fatalf("Status = %q, want closed", got.Status)
+				}
+				if got.CloseReason != "" {
+					t.Errorf("CloseReason after a close that gave none = %q, want empty", got.CloseReason)
+				}
+			})
+		}
+	}
+}
+
+// closeReason is the reason the close-reason suites record. bd's
+// validation.on-close=error rejects reasons under 20 characters, so it is long
+// enough to pass that on a real bd.
+const closeReason = "fixed in commit abc123; tests pass"
+
+// closeWithReason creates a bead titled title, stamps closeReason as its
+// metadata.close_reason, and closes it.
+func closeWithReason(t *testing.T, s beads.Store, title string) beads.Bead {
+	t.Helper()
+	b, err := s.Create(beads.Bead{Title: title})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMetadata(b.ID, "close_reason", closeReason); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // RunSequentialIDTests runs tests that assert gc-N sequential IDs. Call this

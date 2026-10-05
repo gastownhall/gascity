@@ -789,6 +789,15 @@ func recordCloseReason(b *Bead) {
 	b.CloseReason = strings.TrimSpace(b.Metadata["close_reason"])
 }
 
+// forgetCloseReason drops the metadata.close_reason recordCloseReason reads,
+// on a bead a whole-row store has just moved from closed to not closed. That
+// reason belonged to the close the move undoes, as bd's reopen clears its
+// close_reason column; kept, the bead's next close would record it again. A
+// reason the same write sets is merged after this, so it survives.
+func forgetCloseReason(b *Bead) {
+	delete(b.Metadata, "close_reason")
+}
+
 func isReadyBlockingDependencyType(t string) bool {
 	return IsReadyBlockingDependencyType(t)
 }

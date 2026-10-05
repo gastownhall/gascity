@@ -59,9 +59,12 @@ func convoySweepFixture(t *testing.T) (cs *controllerState, backing *beads.MemSt
 }
 
 // TestAutocloseSweepRunsAutocloseForASilentClose is the missed-close probe
-// (mc-zndi7.55): a Live list absorbs an out-of-process close and the scan
-// evicts the closed row, so no bead.closed is ever emitted. The sweep sees the
-// row leave the census and runs autoclose, after one pass of grace.
+// (mc-zndi7.55): a Live list absorbs an out-of-process close, the cache
+// announces it once (gastownhall/gascity#6860) and the scan evicts the closed
+// row, but the bead.closed never reaches the event path: the fixture records
+// it without delivering it, as when the event log drops it
+// (CACHE-LAYERING-REVIEW F2). The sweep sees the row leave the census and runs
+// autoclose, after one pass of grace.
 func TestAutocloseSweepRunsAutocloseForASilentClose(t *testing.T) {
 	cs, backing, cached, notes, convoy, member := convoySweepFixture(t)
 
@@ -75,8 +78,8 @@ func TestAutocloseSweepRunsAutocloseForASilentClose(t *testing.T) {
 	}
 	cached.ReconcileNowForTest()
 	cached.ReconcileNowForTest()
-	if len(notes.ids) != 0 {
-		t.Fatalf("precondition: the cache notified bead.closed %v; the probe needs a silent close", notes.ids)
+	if len(notes.ids) != 1 || notes.ids[0] != member.ID {
+		t.Fatalf("precondition: the cache notified bead.closed %v, want [%s]; the probe needs one announced close the event path never receives", notes.ids, member.ID)
 	}
 
 	if got := cs.runAutocloseSweepPass(sweepTestClock(1)); got.Ran != 0 {

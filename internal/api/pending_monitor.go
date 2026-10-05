@@ -41,25 +41,34 @@ import (
 // which is what it replaces. A successful POST .../respond pokes it so the
 // clear lands immediately rather than on the next tick.
 //
-// Exactly once. A transition is marked published only after the event log
-// acknowledges the append (events.AckRecorder), so a dropped append is
-// retried on the next cycle rather than lost, and an unchanged interaction is
-// never re-announced however many cycles see it. A probe error leaves that
-// session's published state alone; a partial session listing suppresses the
-// session_gone clears it cannot vouch for.
+// Delivery. A transition is marked published only after the event log
+// acknowledges the append (events.AckRecorder), so a dropped append is retried
+// on the next cycle rather than lost, and while the monitor runs an unchanged
+// interaction is never re-announced however many cycles see it. An exec:
+// provider cannot acknowledge, so its appends are trusted as every emitter
+// trusts Record, and one it drops is lost. Across a restart delivery is not
+// exactly once: the published set is saved after a cycle's appends, not with
+// them, so after a crash between the two, or a failed save, the next monitor
+// diffs against a saved set that lags the log. It can then repeat a transition
+// the log already holds, or miss one: the clear of an interaction it does not
+// know was announced, or an interaction cleared and back under the same
+// request ID. Consumers dedupe on session ID and request ID; one that must not
+// miss a transition re-reads GET /pending when its stream reconnects. A probe
+// error leaves that session's published state alone; a partial session listing
+// suppresses the session_gone clears it cannot vouch for.
 //
 // Restarts and resumes. The published set is persisted under the city's
 // .gc/runtime directory, so a monitor that starts — after a supervisor
 // restart, or when a client returns after every watcher left — emits only the
-// difference between what was published and what is pending now. Every
-// transition goes through the durable city event log, so a client resuming
-// with Last-Event-ID receives the transitions it missed: those logged while
-// it was away, plus the reconciling transitions the monitor emits when the
-// client's own stream restarts it. Something that became pending and was
-// answered while nothing watched the city is never announced; nobody could
-// have acted on it. A client connecting without a cursor starts at the head
-// of the log, so it reads GET /v0/city/{cityName}/pending once for the
-// current set and applies events from there.
+// difference between the saved set and what is pending now. Every transition
+// goes through the durable city event log, so a client resuming with
+// Last-Event-ID receives the transitions it missed: those logged while it was
+// away, plus the reconciling transitions the monitor emits when the client's
+// own stream restarts it. Something that became pending and was answered while
+// nothing watched the city is never announced; nobody could have acted on it.
+// A client connecting without a cursor starts at the head of the log, so it
+// reads GET /v0/city/{cityName}/pending once for the current set and applies
+// events from there.
 
 // pendingMonitorInterval is how often an active pending monitor probes.
 var pendingMonitorInterval = 2 * time.Second

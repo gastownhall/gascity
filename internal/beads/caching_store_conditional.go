@@ -407,7 +407,7 @@ func (c *CachingStore) evictForConditionalWrite(id string) conditionalEviction {
 func (c *CachingStore) evictForConditionalClose(id string) (conditionalEviction, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	own := c.claimCloseLocked(id, true)
+	own := c.claimCloseLocked(id, true, false)
 	return c.evictForConditionalWriteLocked(id), own
 }
 

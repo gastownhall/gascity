@@ -409,3 +409,106 @@ func TestTxCloseRacingLiveListAnnouncesBeadClosedOnce(t *testing.T) {
 	}
 	assertClosedExactlyOnce(t, rec, seed.ID, "after a Tx close raced a live list")
 }
+
+// A close whose install a racing local write fenced still announces the close
+// itself, so no read that later settles the row it left dirty may announce
+// that close again. The racer is a metadata-only Update that commits after the
+// close captured its start and before its backing write, so the backing ends
+// closed while the cache holds the racer's open row.
+func TestFencedCloseAnnouncesBeadClosedOnce(t *testing.T) {
+	t.Parallel()
+	closedStatus := "closed"
+	update := func(cs *CachingStore, id string) error {
+		return cs.Update(id, UpdateOpts{Status: &closedStatus})
+	}
+	txClose := func(cs *CachingStore, id string) error {
+		return cs.Tx("close", func(tx Tx) error { return tx.Close(id) })
+	}
+	refreshNotFound := func(b *casBackingStore) { b.notFoundNextGet = true }
+	spellings := []struct {
+		name string
+		// arm runs after the racer, before the close's backing write, to
+		// steer the close's own refresh read.
+		arm   func(*casBackingStore)
+		close func(*CachingStore, string) error
+	}{
+		{name: "update", close: update},
+		{name: "update_refresh_fails", arm: func(b *casBackingStore) { b.failNextGet = true }, close: update},
+		{name: "update_refresh_not_found", arm: refreshNotFound, close: update},
+		{name: "close", close: func(cs *CachingStore, id string) error { return cs.Close(id) }},
+		{name: "close_all", close: func(cs *CachingStore, id string) error {
+			_, err := cs.CloseAll([]string{id}, nil)
+			return err
+		}},
+		{name: "tx", close: txClose},
+		{name: "tx_refresh_not_found", arm: refreshNotFound, close: txClose},
+	}
+	settles := []struct {
+		name   string
+		settle func(*CachingStore, string) error
+	}{
+		{name: "dirty_get", settle: func(cs *CachingStore, id string) error {
+			_, err := cs.Get(id)
+			return err
+		}},
+		{name: "live_list", settle: func(cs *CachingStore, _ string) error {
+			_, err := cs.List(ListQuery{Status: "open", AllowScan: true, Live: true})
+			return err
+		}},
+		{name: "refresh_row", settle: func(cs *CachingStore, id string) error {
+			_, err := cs.RefreshRow(id)
+			return err
+		}},
+		{name: "reconcile", settle: func(cs *CachingStore, id string) error {
+			ageLocalWrite(cs, id)
+			cs.runReconciliation()
+			return nil
+		}},
+	}
+	for _, sp := range spellings {
+		for _, st := range settles {
+			t.Run(sp.name+"/"+st.name, func(t *testing.T) {
+				t.Parallel()
+				mem := NewMemStore()
+				seed, err := mem.Create(Bead{Title: "plain task", Status: "open"})
+				if err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				backing := &writeRaceStore{casBackingStore: &casBackingStore{Store: mem}}
+				rec := &closeEventRecorder{}
+				cs := NewCachingStoreForTest(backing, rec.onChange(t))
+				if err := cs.Prime(context.Background()); err != nil {
+					t.Fatalf("Prime: %v", err)
+				}
+				backing.beforeWrite = func() {
+					if err := cs.Update(seed.ID, UpdateOpts{Metadata: map[string]string{"racer": "won"}}); err != nil {
+						t.Errorf("racing Update: %v", err)
+					}
+					if sp.arm != nil {
+						sp.arm(backing.casBackingStore)
+					}
+				}
+				if err := sp.close(cs, seed.ID); err != nil {
+					t.Fatalf("fenced close: %v", err)
+				}
+				if !isDirty(cs, seed.ID) {
+					t.Fatal("the close was not fenced; the race is vacuous")
+				}
+				assertClosedExactlyOnce(t, rec, seed.ID, "after the fenced close")
+
+				if err := st.settle(cs, seed.ID); err != nil {
+					t.Fatalf("%s: %v", st.name, err)
+				}
+				assertClosedExactlyOnce(t, rec, seed.ID, "after "+st.name+" read the closed row")
+				ageLocalWrite(cs, seed.ID)
+				cs.runReconciliation()
+				assertClosedExactlyOnce(t, rec, seed.ID, "after a later reconcile pass")
+
+				got, err := cs.Get(seed.ID)
+				if err != nil || got.Status != "closed" || got.Metadata["racer"] != "won" {
+					t.Fatalf("Get = (%+v, %v), want the closed row carrying the racer's metadata", got, err)
+				}
+			})
+		}
+	}
+}

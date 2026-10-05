@@ -775,11 +775,14 @@ func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput)
 	if err := s.gateWorkRecordClose(ctx, id, store, current, submitted); err != nil {
 		return nil, err
 	}
-	// On a bead that is not closed, a recorded close_reason is left over from
-	// an earlier close (reopen does not clear the metadata), so this close
-	// replaces it with its own reason, or with none.
+	// Only a close that happens stamps a reason. On a bead that is not closed,
+	// a recorded close_reason is left over from an earlier close (bd's reopen
+	// clears its close_reason column but not the metadata), so this close
+	// replaces it with its own reason, or with none. On a bead already closed,
+	// Close is a no-op that keeps the reason its close recorded, so no other
+	// reason is stamped beside it.
 	priorReason := current.Metadata["close_reason"]
-	stampReason := reason != "" || (current.Status != "closed" && strings.TrimSpace(priorReason) != "")
+	stampReason := current.Status != "closed" && (reason != "" || strings.TrimSpace(priorReason) != "")
 	if stampReason {
 		if err := store.SetMetadata(id, "close_reason", reason); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {

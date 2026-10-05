@@ -4,10 +4,9 @@ package main
 //
 // Convoy, wisp and molecule autoclose run when applyBeadEventToStores sees a
 // bead.closed. Nothing else runs them, so a close that never reaches the bus
-// skipped them forever: a refetch that absorbs an out-of-process close and a
-// scan that then evicts the closed row both notify nothing (mc-zndi7.55), and
-// the event log can drop the notification (CACHE-LAYERING-REVIEW F2). An
-// unconfirmable scan-derived close (applyInferredClose) is deferred here too.
+// skipped them forever: the event log can drop the notification
+// (CACHE-LAYERING-REVIEW F2). An unconfirmable scan-derived close
+// (applyInferredClose) is deferred here too.
 //
 // The sweep diffs each live cache's active census (open and in-progress rows,
 // both tiers) against the previous pass. A row that left the census was closed

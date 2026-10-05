@@ -224,24 +224,85 @@ func postBeadAction(t *testing.T, h http.Handler, state State, id, action string
 	return rec
 }
 
+// bdShapedReopenStore reopens the way bd does: the bead's close_reason goes,
+// but metadata.close_reason stays behind.
+type bdShapedReopenStore struct {
+	beads.Store
+}
+
+func (s bdShapedReopenStore) Reopen(id string) error {
+	closed, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	if err := s.Store.Reopen(id); err != nil {
+		return err
+	}
+	if reason, ok := closed.Metadata["close_reason"]; ok {
+		return s.SetMetadata(id, "close_reason", reason)
+	}
+	return nil
+}
+
 // A reason recorded by an earlier close must not resurface when a reopened
-// bead is closed again without one.
+// bead is closed again without one, whether or not the store's reopen dropped
+// the metadata the reason was recorded from.
 func TestBeadCloseRouteWithoutReasonAfterReopenDropsTheOldReason(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		store beads.Store
+	}{
+		{name: "reopen drops the metadata", store: beads.NewMemStore()},
+		{name: "reopen keeps the metadata", store: bdShapedReopenStore{Store: beads.NewMemStore()}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newFakeState(t)
+			state.stores["myrig"] = tc.store
+			bead, err := tc.store.Create(beads.Bead{Title: "close, reopen, close"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			h := newTestCityHandler(t, state)
+
+			if rec := postBeadAction(t, h, state, bead.ID, "close", bytes.NewBufferString(`{"reason":"duplicate of gc-0"}`)); rec.Code != http.StatusOK {
+				t.Fatalf("first close = %d: %s", rec.Code, rec.Body.String())
+			}
+			if rec := postBeadAction(t, h, state, bead.ID, "reopen", nil); rec.Code != http.StatusOK {
+				t.Fatalf("reopen = %d: %s", rec.Code, rec.Body.String())
+			}
+			if rec := postBeadAction(t, h, state, bead.ID, "close", nil); rec.Code != http.StatusOK {
+				t.Fatalf("second close = %d: %s", rec.Code, rec.Body.String())
+			}
+
+			got, err := tc.store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.Status != "closed" || got.CloseReason != "" {
+				t.Fatalf("after close without a reason: status=%q CloseReason=%q, want closed with no reason", got.Status, got.CloseReason)
+			}
+			if reason, present := getBeadJSON(t, h, state, bead.ID)["close_reason"]; present {
+				t.Fatalf("GET close_reason = %#v, want it omitted", reason)
+			}
+		})
+	}
+}
+
+// Closing a bead that is already closed changes nothing, so a reason sent with
+// it must not be stamped beside the reason the bead's close recorded.
+func TestBeadCloseRouteOnClosedBeadKeepsItsReason(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
-	bead, err := store.Create(beads.Bead{Title: "close, reopen, close"})
+	bead, err := store.Create(beads.Bead{Title: "closed twice"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	h := newTestCityHandler(t, state)
 
-	if rec := postBeadAction(t, h, state, bead.ID, "close", bytes.NewBufferString(`{"reason":"duplicate of gc-0"}`)); rec.Code != http.StatusOK {
+	if rec := postBeadAction(t, h, state, bead.ID, "close", bytes.NewBufferString(`{"reason":"`+apiCloseReason+`"}`)); rec.Code != http.StatusOK {
 		t.Fatalf("first close = %d: %s", rec.Code, rec.Body.String())
 	}
-	if rec := postBeadAction(t, h, state, bead.ID, "reopen", nil); rec.Code != http.StatusOK {
-		t.Fatalf("reopen = %d: %s", rec.Code, rec.Body.String())
-	}
-	if rec := postBeadAction(t, h, state, bead.ID, "close", nil); rec.Code != http.StatusOK {
+	if rec := postBeadAction(t, h, state, bead.ID, "close", bytes.NewBufferString(`{"reason":"superseded by a later fix"}`)); rec.Code != http.StatusOK {
 		t.Fatalf("second close = %d: %s", rec.Code, rec.Body.String())
 	}
 
@@ -249,11 +310,8 @@ func TestBeadCloseRouteWithoutReasonAfterReopenDropsTheOldReason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Status != "closed" || got.CloseReason != "" {
-		t.Fatalf("after close without a reason: status=%q CloseReason=%q, want closed with no reason", got.Status, got.CloseReason)
-	}
-	if reason, present := getBeadJSON(t, h, state, bead.ID)["close_reason"]; present {
-		t.Fatalf("GET close_reason = %#v, want it omitted", reason)
+	if got.CloseReason != apiCloseReason || got.Metadata["close_reason"] != apiCloseReason {
+		t.Fatalf("after closing again: CloseReason=%q metadata close_reason=%q, want both %q", got.CloseReason, got.Metadata["close_reason"], apiCloseReason)
 	}
 }
 
