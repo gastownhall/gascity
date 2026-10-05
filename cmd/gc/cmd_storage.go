@@ -526,6 +526,10 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 				return 1
 			}
 		}
+		if blocked, held := revertHoldingNote(storageSplitNone, request.CityPath); held {
+			fmt.Fprintf(stdout, "binding: none configured, and BLOCKED — %s\n", infraMigrationOperatorAdvice(blocked, logPrefix)) //nolint:errcheck // best-effort stdout
+			return 1
+		}
 		fmt.Fprintln(stdout, "binding: none — every class is served by the work store, and nothing migrates.") //nolint:errcheck // best-effort stdout
 		return exitCode
 	}
@@ -613,6 +617,21 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		// an operator would reach for after a non-zero `gc storage status` said
 		// nothing about how to make it zero again.
 		fmt.Fprintf(stdout, "blocking invariant: the binding cannot read these beads. Stop every writer and copy them in with `%s`\n", storageRecoveryInstruction()) //nolint:errcheck // best-effort stdout
+		return 1
+	}
+	note, notePresent, err := readInfraClearedNote(request.CityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if len(note.LostCrossEdges) > 0 {
+		fmt.Fprintf(stdout, "  lost cross-store edges: %d (the work store could not keep these edges from work beads into beads the migration moved; each is recorded in the retained-source backup)\n", len(note.LostCrossEdges)) //nolint:errcheck // best-effort stdout
+		for _, edge := range note.LostCrossEdges {
+			fmt.Fprintf(stdout, "    %s\n", edge) //nolint:errcheck // best-effort stdout
+		}
+	}
+	if notePresent && !note.Complete {
+		fmt.Fprintf(stdout, "  clear: INTERRUPTED (%d bead(s) in the unfinished session)\nblocking invariant: an earlier clear of the retained copies did not finish. Stop the city and finish it with `%s`\n", len(note.Pending), storageClearInstruction()) //nolint:errcheck // best-effort stdout
 		return 1
 	}
 	if len(gap.Retained) > 0 {

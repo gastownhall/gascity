@@ -152,7 +152,7 @@ func stubInfraControllerPing(t *testing.T, pid int) {
 func migrateInfraClassesRetainingSource(t *testing.T, cityPath string, cfg *config.City, stderr io.Writer) infraMigrationReport {
 	t.Helper()
 	prev := clearRetainedInfraCopiesFn
-	clearRetainedInfraCopiesFn = func(string, infraBindingTarget) (infraClearResult, error) { return infraClearResult{}, nil }
+	clearRetainedInfraCopiesFn = func(string, infraBindingTarget, io.Writer) (infraClearResult, error) { return infraClearResult{}, nil }
 	defer func() { clearRetainedInfraCopiesFn = prev }()
 	return migrateInfraClasses(t, cityPath, cfg, stderr)
 }

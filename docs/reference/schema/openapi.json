@@ -11971,6 +11971,15 @@
           "invariant": {
             "type": "string"
           },
+          "lost_cross_edges": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "outcome": {
             "type": "string"
           },

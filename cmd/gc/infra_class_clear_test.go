@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,8 +12,10 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
 // TestMigratedCityStopsServingAClosedStepFromTheWorkCopy is #5987 end to end
@@ -166,7 +169,7 @@ func TestTheClearRefusesRowsTheProvenCopyNeverCarried(t *testing.T) {
 
 	// The clear's own refusal, reached when the boot check cannot see the
 	// strand (it is in the binding but not the manifest: recovery residue).
-	_, err := clearRetainedInfraCopies(cityPath, mustResolveInfraTarget(t, cityPath, cfg))
+	_, err := clearRetainedInfraCopies(cityPath, mustResolveInfraTarget(t, cityPath, cfg), io.Discard)
 	var unproven *infraUnprovenSourceRows
 	if !errors.As(err, &unproven) || !slices.Contains(unproven.IDs, stranded.ID) {
 		t.Fatalf("clear error = %v, want a refusal naming %s", err, stranded.ID)
@@ -428,5 +431,136 @@ func TestStorageMigrateTakesExactlyOneSource(t *testing.T) {
 		if !strings.Contains(stderr.String(), "exactly one of") {
 			t.Fatalf("migrate %v: refusal does not state the contract: %s", args, stderr.String())
 		}
+	}
+}
+
+// danglingRefusingStore models a bd or native-Dolt work store: Delete drops
+// every edge touching the row, and DepAdd refuses an edge to a bead the store
+// does not hold.
+type danglingRefusingStore struct{ *beads.MemStore }
+
+func (s danglingRefusingStore) Delete(id string) error {
+	for _, dir := range []string{"up", "down"} {
+		deps, _ := s.DepList(id, dir)
+		for _, d := range deps {
+			_ = s.DepRemove(d.IssueID, d.DependsOnID)
+		}
+	}
+	return s.MemStore.Delete(id)
+}
+
+func (s danglingRefusingStore) DepAdd(issueID, dependsOnID, depType string) error {
+	if _, err := s.Get(dependsOnID); err != nil {
+		return errors.New(`no issue found matching "` + dependsOnID + `"`)
+	}
+	return s.MemStore.DepAdd(issueID, dependsOnID, depType)
+}
+
+// TestCrossStoreEdgesADoltStoreCannotKeepAreAnnouncedAndRecorded pins the
+// Dolt-shaped loss: the edges at risk are listed before any row is removed,
+// and the ones the store then refuses are recorded where they outlive the
+// run — the cleared note, `gc storage status`, and the boot event.
+func TestCrossStoreEdgesADoltStoreCannotKeepAreAnnouncedAndRecorded(t *testing.T) {
+	stubInfraControllerPing(t, 0)
+	mem := beads.NewMemStore()
+	source := danglingRefusingStore{mem}
+	prev := openInfraMigrationSource
+	openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
+	t.Cleanup(func() { openInfraMigrationSource = prev })
+
+	running := mustCreateInfraBead(t, source, beads.Bead{Title: "graft running", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+	waiting := mustCreateInfraBead(t, source, beads.Bead{Title: "work waiting on the running graft", Type: "task"})
+	if err := source.DepAdd(waiting.ID, running.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	request := storageTestRequest(t, infraSplitConfig(filepath.Join(t.TempDir(), "store")))
+	cityPath, cfg := request.CityPath, request.Cfg
+
+	var announced bytes.Buffer
+	deleted := false
+	prevDel := infraClearBeforeDelete
+	infraClearBeforeDelete = func(string) error {
+		if !deleted && !strings.Contains(announced.String(), "AT RISK") {
+			t.Errorf("a row was removed before the at-risk cross edges were announced: %q", announced.String())
+		}
+		deleted = true
+		return nil
+	}
+	t.Cleanup(func() { infraClearBeforeDelete = prevDel })
+	report := migrateInfraClasses(t, cityPath, cfg, &announced)
+	if report.Outcome != infraMigrationConverged {
+		t.Fatalf("migrate = %s: %s", report.Outcome, announced.String())
+	}
+	edge := waiting.ID + " -[blocks]-> " + running.ID
+	if !strings.Contains(announced.String(), edge) {
+		t.Fatalf("the migrate output does not list the edge at risk %q: %s", edge, announced.String())
+	}
+	if len(report.LostCrossEdges) != 1 || !strings.HasPrefix(report.LostCrossEdges[0], edge) {
+		t.Fatalf("report.LostCrossEdges = %v, want the refused edge %q", report.LostCrossEdges, edge)
+	}
+	note, present, err := readInfraClearedNote(cityPath)
+	if err != nil || !present || !note.Complete || len(note.LostCrossEdges) != 1 {
+		t.Fatalf("cleared note = %+v present=%v err=%v; want complete with the lost edge", note, present, err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	doStorageStatus(request, &stdout, &stderr)
+	if !strings.Contains(stdout.String(), "lost cross-store edges: 1") || !strings.Contains(stdout.String(), edge) {
+		t.Fatalf("status does not list the lost edge: %s", stdout.String())
+	}
+
+	rec := events.NewFake()
+	routes, err := storageBootGate(cityPath, cfg, "gc start", rec, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("boot refused a cleared city: %v", err)
+	}
+	_ = routes.close()
+	found := false
+	for _, e := range rec.Events {
+		var payload storebinding.StorageBindingOutcomePayload
+		if json.Unmarshal(e.Payload, &payload) == nil && len(payload.LostCrossEdges) == 1 && strings.HasPrefix(payload.LostCrossEdges[0], edge) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no boot event carries the lost edge: %+v", rec.Events)
+	}
+}
+
+// TestRevertingToTheWorkBindingAfterAClearRefusesBoot pins A2: once the work
+// store's copies are cleared, pointing every class back at work (or deleting
+// [storage]) would start the city with no infrastructure state. Boot refuses
+// and names the restore.
+func TestRevertingToTheWorkBindingAfterAClearRefusesBoot(t *testing.T) {
+	cityPath := t.TempDir()
+	source := stubInfraMigrationSource(t)
+	mustCreateInfraBead(t, source, beads.Bead{Title: "session", Type: "session", Labels: []string{"gc:session"}})
+	cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+	var log bytes.Buffer
+	if got := migrateInfraClasses(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("cutover = %s: %s", got.Outcome, log.String())
+	}
+
+	allWork := &config.City{Storage: &config.StorageConfig{Classes: config.StorageClasses{
+		Work: config.StorageWorkBinding, Graph: config.StorageWorkBinding, Sessions: config.StorageWorkBinding,
+		Messaging: config.StorageWorkBinding, Orders: config.StorageWorkBinding, Nudges: config.StorageWorkBinding,
+	}}}
+	for name, revert := range map[string]*config.City{"classes back at work": allWork, "[storage] deleted": {}} {
+		_, err := storageBootGate(cityPath, revert, "gc start", nil, &bytes.Buffer{})
+		if err == nil {
+			t.Fatalf("%s: a cleared city started with no infrastructure state", name)
+		}
+		for _, want := range []string{"NO infrastructure state", "Restoring the work store from the backup", infraRetainedBackupName, infraClearedNotePath(cityPath)} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: the refusal does not mention %q: %v", name, want, err)
+			}
+		}
+	}
+
+	if err := os.Remove(infraClearedNotePath(cityPath)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storageBootGate(cityPath, allWork, "gc start", nil, &bytes.Buffer{}); err != nil {
+		t.Fatalf("after the operator's attestation the revert still refuses: %v", err)
 	}
 }

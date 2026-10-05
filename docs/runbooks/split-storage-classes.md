@@ -157,6 +157,18 @@ What the command does, in order:
    `<binding root>/infra.retained-source.jsonl`; the file is re-read from disk
    and proven equal to the rows it records; only then is a row removed.
 
+**What the backup holds, and what it does not.** The backup records each bead
+as gc models it: id, title, status, type, description, priority, assignee,
+sender, parent, ref, labels, metadata, the ephemeral and no-history bits,
+timestamps, defer-until, and every dependency edge touching the bead with its
+payload. That is exactly the set of fields the copy carried into the binding
+and the equality stage proved. It does **not** hold the fields only `bd` models:
+notes, comments, close reason and closed-at, design, acceptance criteria, the
+event history, and the indefinitely-deferred state. Those were never copied
+into the binding either. On a native-Dolt work store each removal is a Dolt
+commit, so until Dolt garbage-collects that history, `dolt` (`AS OF` a commit
+before the clear) is the full-fidelity backstop for them.
+
 Nothing in the work store changes before the marker: until step 7 the source is
 exactly as you left it, and the cutover can still be abandoned by a config
 edit. Past the marker the binding is the only authoritative copy, which is why
@@ -168,12 +180,32 @@ dispatched again and again.
 Step 8 changes only what it has to. A work bead whose blocking dependency
 points at a moved bead keeps that dependency, unless the binding has already
 closed the bead it waits on, in which case the dependency is released. Every
-other dependency from a work bead into a moved bead is kept. A backend that
-cannot keep such an edge once its target is gone is named on stderr, and the
-edge stays recorded in the backup.
+other dependency from a work bead into a moved bead is kept by re-adding it
+after its target row is removed.
+
+**On a `bd` or native-Dolt work store those kept edges are lost.** Removing a
+row there drops every edge touching it, and the store refuses to re-add an edge
+to a bead it no longer holds. So a work bead blocked on a moved bead that is
+still open stops being held back, and a `tracks` or `related` edge from a work
+bead (a convoy tracking a workflow bead, say) stops linking the two. Cross-class
+blocking is not expressible on a split city yet (ga-2orlf); the migration does
+not refuse over it, because refusing would leave a city that boot also refuses
+with no way forward. Instead:
+
+- the migrate output lists every such edge as **AT RISK** before the first row
+  is removed;
+- every edge the store then refuses is recorded in
+  `.gc/storage-infra-cleared.json`, listed under `lost cross-store edges` by
+  `gc storage status`, and carried as `lost_cross_edges` on every
+  `storage.binding.*` event that reads the note;
+- every one stays in the backup (`dependents` on the moved bead's entry).
+
+A file or SQLite work store keeps them.
 
 The command is idempotent. Run it again on a converged city and it re-proves
-convergence and finishes any clear that did not complete; that is also how a
+convergence and finishes any clear that did not complete — including the
+cross-store edges of rows an interrupted run already removed, which the note
+names until the clear finishes; that is also how a
 city migrated by gc 1.5.0, which kept the work store's copies, is repaired (see
 below).
 
@@ -314,7 +346,8 @@ you spell it still matters.
 > its infrastructure beads, while everything the city has is in the binding,
 > unread. Nothing says so.
 
-Spell the rollback as a class map instead:
+Spell the rollback as a class map instead (on a city whose work store was
+cleared, restore the work store first; see below):
 
 ```toml
 [storage.classes]
@@ -352,11 +385,65 @@ cleared, a revert also starts the city with no infrastructure state at all: the
 pre-cutover rows are in `infra.retained-source.jsonl`, not in the work store.
 
 The clear also leaves `.gc/storage-infra-cleared.json` in the city directory.
-It is what stops a cleared city whose binding volume is not mounted from being
-mistaken for a new city with nothing to move: with the note present, a missing
-marker refuses the boot instead of creating an empty binding. Removing the note
-is your attestation that the binding's contents are recovered or deliberately
-abandoned.
+It holds two edits that would otherwise start a city with no infrastructure
+state:
+
+- a binding whose volume is not mounted: with the note present, a missing
+  marker refuses the boot instead of creating an empty binding;
+- a revert — `[storage.classes]` pointed back at `work`, or `[storage]`
+  deleted: boot refuses and names the restore below.
+
+Removing the note is your attestation that the work store holds the state you
+want served, or that the binding's contents are deliberately abandoned.
+
+### Restoring the work store from the backup
+
+This puts the pre-cutover infrastructure rows back into a `bd` work store, for
+a rollback after the clear. It restores the state **as of the cutover**: beads
+written to the binding since then are not in the backup and are lost by the
+rollback, and the fields listed under "What the backup holds" are not restored.
+Edge payloads (a `waits_for` gate's `{"gate":"any-children"}`) are not carried
+by `bd import`; a restored gate reads as the default, `all-children`. Verified
+with `bd` 1.3.2-rc.1.
+
+The order matters, because `gc` refuses to serve a reverted city while the
+notes stand — that refusal is what sent you here:
+
+1. `gc stop`.
+2. Point `[storage.classes]` back at `work` and drop the binding block.
+3. Remove `.gc/storage-infra-cleared.json` and `.gc/storage-served-binding.json`.
+   This is the attestation, and from here until step 5 the city must not be
+   started: it would run with no infrastructure state.
+4. Restore, from the city directory, with `B` set to the backup the boot
+   refusal named:
+
+```bash
+B=<binding root>/infra.retained-source.jsonl
+
+# The rows, with their outbound edges and parent links.
+cat > /tmp/gc-restore.jq <<'JQ'
+select(.bead)
+| .bead as $b
+| ([(.deps // [])[] | {issue_id, depends_on_id, type}]
+   + (if $b.parent then [{issue_id: $b.id, depends_on_id: $b.parent, type: "parent-child"}] else [] end)
+   | unique_by([.depends_on_id, .type])) as $deps
+| $b
+| del(.parent, .from)
+| .dependencies = $deps
+| if $b.from then .metadata = (($b.metadata // {}) + {from: $b.from}) else . end
+JQ
+jq -c -f /tmp/gc-restore.jq "$B" > /tmp/gc-restore.jsonl
+gc bd import /tmp/gc-restore.jsonl
+
+# The edges from work beads into the restored beads.
+jq -r 'select(.bead) | .dependents[]? | "\(.issue_id) \(.depends_on_id) \(.type)"' "$B" |
+  while read -r issue on kind; do gc bd dep add "$issue" "$on" --type "$kind"; done
+```
+
+5. `gc start`.
+
+`gc bd import` needs the city's custom bead types, which a gc city's work store
+already has (`gc bd config get types.custom`).
 
 ## If this city cut over before edge payloads were carried
 
