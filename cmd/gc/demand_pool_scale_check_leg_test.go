@@ -165,3 +165,55 @@ func TestPoolScaleCheckSingleStoreCityKeepsOneTarget(t *testing.T) {
 	}
 	assertPoolDemandMatchesClaim(t, e, "worker", seeded)
 }
+
+// darkLedgerReadyStore is a work ledger whose ready read fails outright.
+type darkLedgerReadyStore struct{ beads.Store }
+
+func (darkLedgerReadyStore) Ready(...beads.ReadyQuery) ([]beads.Bead, error) {
+	return nil, errDarkLeg{}
+}
+
+// A dark city leg — the work ledger or the binding — is a leg the probe could
+// not read, so the count is not authoritative: the pool and its named-backing
+// template go partial (retain, don't drain) instead of reporting the readable
+// leg's rows as the whole answer. Both legs count under "city", so this is
+// also the guard that they are two reads and not one merged group.
+func TestPoolScaleCheckDarkCityLegMarksPartial(t *testing.T) {
+	for _, darkBinding := range []bool{false, true} {
+		name := "dark-work-ledger"
+		if darkBinding {
+			name = "dark-binding"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := newLegAgreementEnv(t, false)
+			work := beads.NewMemStoreFrom(1, nil, nil)
+			binding := beads.NewMemStoreFrom(500000, nil, nil)
+			readable := beads.Store(binding)
+			e.work, e.binding = darkLedgerReadyStore{Store: work}, binding
+			if darkBinding {
+				e.work, e.binding, readable = work, darkLedgerReadyStore{Store: binding}, work
+			}
+			routes := splitRoutes(e.binding)
+			registerResidencyRoutes(e.cityPath, routes, func() beads.Store { return e.work })
+			t.Cleanup(func() { unregisterResidencyRoutes(e.cityPath, routes) })
+			e.cfg.Agents = []config.Agent{
+				{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(5)},
+				{Name: "helper", StartCommand: "true", MaxActiveSessions: intPtr(1)},
+			}
+			e.cfg.NamedSessions = []config.NamedSession{{Template: "helper", Mode: "on_demand"}}
+			seedRoutedWork(t, readable, "worker", "readable row")
+
+			targets, counts, _, partials, errs := poolDemandForEnv(t, e)
+			if len(errs) == 0 || !partials["worker"] {
+				t.Fatalf("errs=%v partials=%v, want an error and worker partial", errs, partials)
+			}
+			if counts["worker"] != 1 {
+				t.Fatalf("readable row counted %d, want 1 (the readable leg still counts)", counts["worker"])
+			}
+			_, namedPartials, namedErrs := defaultNamedSessionDemand(targets.defaultNamedScaleTargets, e.cfg, e.cityPath, newReadyDemandCache())
+			if len(namedErrs) == 0 || !namedPartials["helper"] {
+				t.Fatalf("named errs=%v partials=%v, want helper partial", namedErrs, namedPartials)
+			}
+		})
+	}
+}
