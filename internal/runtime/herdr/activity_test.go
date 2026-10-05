@@ -65,12 +65,16 @@ func waitActivity(t *testing.T, p *Provider, name string, timeout time.Duration,
 // assertWorkingContinuouslyActive is the working leg of the activity contract,
 // run once name has been reported working: wait for a poll to observe the
 // transition, then require successive reads to keep advancing. preTransition is
-// the stamp name held before the report. TestActivityLive and its hermetic
-// reproduction share this leg so the two cannot drift apart.
+// the stamp name held before the report, and the wait requires the read to move
+// past it. Recency alone cannot tell the two apart: a just-seeded idle stamp is
+// only microseconds old, and accepting it let both reads return that one frozen
+// stamp whenever the next poll landed after the 30ms window (ga-8nndgz).
+// TestActivityLive and its hermetic reproduction share this leg so the two
+// cannot drift apart.
 func assertWorkingContinuouslyActive(t *testing.T, p *Provider, name string, preTransition time.Time) {
 	t.Helper()
 	waitActivity(t, p, name, 5*time.Second, func(got time.Time) bool {
-		return !got.IsZero() && time.Since(got) < 100*time.Millisecond
+		return got.After(preTransition) && time.Since(got) < 100*time.Millisecond
 	})
 	w1 := lastActivity(t, p, name)
 	time.Sleep(30 * time.Millisecond)
