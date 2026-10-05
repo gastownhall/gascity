@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -269,5 +270,91 @@ func TestSlingConvoyRoutesEachChildLikeCLI(t *testing.T) {
 	}
 	if resp.Batch == nil || resp.Batch.Routed != 2 || resp.Batch.Total != 2 || resp.Batch.ContainerType != "convoy" {
 		t.Fatalf("batch = %+v, want convoy with 2 of 2 routed", resp.Batch)
+	}
+}
+
+// routeFailingStore fails the gc.routed_to write for the listed beads, the
+// way a store fault on a convoy child surfaces through the built-in router.
+type routeFailingStore struct {
+	beads.Store
+	failIDs map[string]bool
+}
+
+func (s routeFailingStore) SetMetadata(id, key, value string) error {
+	if s.failIDs[id] && key == beadmeta.RoutedToMetadataKey {
+		return errors.New("injected route failure")
+	}
+	return s.Store.SetMetadata(id, key, value)
+}
+
+// newTwoChildConvoy creates an open convoy tracking two open task children in
+// the myrig store.
+func newTwoChildConvoy(t *testing.T, store beads.Store) (beads.Bead, []beads.Bead) {
+	t.Helper()
+	convoy, err := store.Create(beads.Bead{Title: "batch", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var children []beads.Bead
+	for _, title := range []string{"first", "second"} {
+		child, err := store.Create(beads.Bead{Title: title, Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.DepAdd(convoy.ID, child.ID, "tracks"); err != nil {
+			t.Fatal(err)
+		}
+		children = append(children, child)
+	}
+	return convoy, children
+}
+
+// TestSlingConvoyPartialFailureReturnsBatchResult pins the partial-convoy
+// contract: when some children route and others fail, the routed children are
+// already committed, so POST /sling must report the per-child outcome the way
+// `gc sling` prints it, instead of a bare 400 that hides what was routed and
+// makes a blind client retry look like nothing happened.
+func TestSlingConvoyPartialFailureReturnsBatchResult(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	store := state.stores["myrig"]
+	convoy, children := newTwoChildConvoy(t, store)
+	state.stores["myrig"] = routeFailingStore{Store: store, failIDs: map[string]bool{children[1].ID: true}}
+
+	rec, resp := postSlingJSON(t, h, state, `{"target":"myrig/worker","bead":"`+convoy.ID+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 with the partial batch result; body = %s", rec.Code, rec.Body.String())
+	}
+	if resp.Status != SlingStatusPartial {
+		t.Fatalf("status field = %q, want %q", resp.Status, SlingStatusPartial)
+	}
+	if resp.Batch == nil || resp.Batch.Total != 2 || resp.Batch.Routed != 1 || resp.Batch.Failed != 1 {
+		t.Fatalf("batch = %+v, want 1 routed and 1 failed of 2", resp.Batch)
+	}
+	if len(resp.Batch.Failures) != 1 || resp.Batch.Failures[0].BeadID != children[1].ID || !strings.Contains(resp.Batch.Failures[0].Reason, "injected route failure") {
+		t.Fatalf("batch failures = %+v, want %s with its route error", resp.Batch.Failures, children[1].ID)
+	}
+	got, err := store.Get(children[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata[beadmeta.RoutedToMetadataKey] != "myrig/worker" {
+		t.Fatalf("child %s gc.routed_to = %q, want myrig/worker (routed before the sibling failed)", children[0].ID, got.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+}
+
+// TestSlingConvoyWhollyFailedStaysAnError pins that a convoy where every
+// attempted child failed routed nothing, so it stays an error response.
+func TestSlingConvoyWhollyFailedStaysAnError(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	store := state.stores["myrig"]
+	convoy, children := newTwoChildConvoy(t, store)
+	state.stores["myrig"] = routeFailingStore{Store: store, failIDs: map[string]bool{children[0].ID: true, children[1].ID: true}}
+
+	rec, _ := postSlingJSON(t, h, state, `{"target":"myrig/worker","bead":"`+convoy.ID+`"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 when no child routed; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "2/2 children failed") {
+		t.Fatalf("body = %s, want the per-child failure summary", rec.Body.String())
 	}
 }

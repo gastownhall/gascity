@@ -114,9 +114,18 @@ func parseSlingVars(vars []string) (map[string]string, error) {
 // renderRemoteSlingResult prints a remote sling outcome. Warnings go to stderr;
 // the result goes to stdout (a compact JSON object with --json, otherwise a
 // one-line summary).
+//
+// A partial convoy result (some children routed, some failed) exits 1, like
+// the local `gc sling`: each failed child is named on stderr, and the --json
+// payload reports success=false with the per-child failures.
 func renderRemoteSlingResult(res api.SlingResult, jsonOutput bool, stdout, stderr io.Writer) int {
 	for _, w := range res.Warnings {
 		fmt.Fprintln(stderr, "warning:", w) //nolint:errcheck // best-effort stderr
+	}
+	partial := res.Status == api.SlingStatusPartial
+	exitCode := 0
+	if partial {
+		exitCode = 1
 	}
 	if jsonOutput {
 		// Keep the automation-critical fields aligned with the local `sling --json`
@@ -127,7 +136,7 @@ func renderRemoteSlingResult(res api.SlingResult, jsonOutput bool, stdout, stder
 		// mode) is added.
 		payload := map[string]any{
 			"schema_version": "1",
-			"success":        true,
+			"success":        !partial,
 			"status":         res.Status,
 			"target":         res.Target,
 		}
@@ -148,6 +157,13 @@ func renderRemoteSlingResult(res api.SlingResult, jsonOutput bool, stdout, stder
 				"idempotent": b.Idempotent,
 			}
 			putIfSet(batch, "container_type", b.ContainerType)
+			if len(b.Failures) > 0 {
+				failures := make([]map[string]any, 0, len(b.Failures))
+				for _, f := range b.Failures {
+					failures = append(failures, map[string]any{"bead_id": f.BeadID, "reason": f.Reason})
+				}
+				batch["failures"] = failures
+			}
 			payload["batch"] = batch
 		}
 		if len(res.Warnings) > 0 {
@@ -159,7 +175,7 @@ func renderRemoteSlingResult(res api.SlingResult, jsonOutput bool, stdout, stder
 			return 1
 		}
 		fmt.Fprintln(stdout, string(enc)) //nolint:errcheck // best-effort stdout
-		return 0
+		return exitCode
 	}
 	line := res.Status + " → " + res.Target
 	switch {
@@ -169,7 +185,13 @@ func renderRemoteSlingResult(res api.SlingResult, jsonOutput bool, stdout, stder
 		line += " (" + res.Bead + ")"
 	}
 	fmt.Fprintln(stdout, line) //nolint:errcheck // best-effort stdout
-	return 0
+	if partial && res.Batch != nil {
+		for _, f := range res.Batch.Failures {
+			fmt.Fprintf(stderr, "  %s: %s\n", f.BeadID, f.Reason) //nolint:errcheck // best-effort stderr
+		}
+		fmt.Fprintf(stderr, "%d/%d children failed\n", res.Batch.Failed, res.Batch.Failed+res.Batch.Routed+res.Batch.Idempotent) //nolint:errcheck // best-effort stderr
+	}
+	return exitCode
 }
 
 func putIfSet(m map[string]any, key, val string) {

@@ -271,3 +271,48 @@ func TestCmdSlingRemote_JSONCarriesConvoyAndBatch(t *testing.T) {
 		t.Errorf("batch = %v", batch)
 	}
 }
+
+// TestCmdSlingRemote_PartialConvoyExitsNonZero pins that a remote convoy sling
+// where some children failed renders like the local `gc sling`: the routed
+// children are reported, each failed child is named with its reason, and the
+// command exits 1. With --json the payload carries success=false and the
+// per-child failures.
+func TestCmdSlingRemote_PartialConvoyExitsNonZero(t *testing.T) {
+	const partial = `{"status":"partial","target":"mayor","bead":"BL-c","mode":"direct","batch":{"container_type":"convoy","total":2,"routed":1,"failed":1,"skipped":0,"idempotent":0,"failures":[{"bead_id":"BL-2","reason":"setting gc.routed_to on BL-2: boom"}]}}`
+	srv, _ := newCannedSlingServer(t, partial)
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"mayor", "BL-c"},
+		false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, &out, &errb)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1 for a partial convoy; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	for _, want := range []string{"BL-2", "boom", "1/2 children failed"} {
+		if !strings.Contains(errb.String(), want) {
+			t.Errorf("stderr %q missing %q", errb.String(), want)
+		}
+	}
+
+	out.Reset()
+	errb.Reset()
+	code = cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"mayor", "BL-c"},
+		false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", true /*json*/, &out, &errb)
+	if code != 1 {
+		t.Fatalf("--json exit %d, want 1 for a partial convoy; stderr=%q", code, errb.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("output not JSON: %v (%q)", err, out.String())
+	}
+	if got["success"] != false || got["status"] != "partial" {
+		t.Errorf("json = %v, want success=false status=partial", got)
+	}
+	batch, _ := got["batch"].(map[string]any)
+	failures, _ := batch["failures"].([]any)
+	if len(failures) != 1 {
+		t.Fatalf("json batch failures = %v, want one", batch["failures"])
+	}
+	if f, _ := failures[0].(map[string]any); f["bead_id"] != "BL-2" {
+		t.Errorf("failure = %v, want bead_id BL-2", failures[0])
+	}
+}

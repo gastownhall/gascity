@@ -11158,6 +11158,16 @@
             "format": "int64",
             "type": "integer"
           },
+          "failures": {
+            "description": "Children whose routing failed, with the reason. Present only when failed \u003e 0.",
+            "items": {
+              "$ref": "#/components/schemas/SlingChildFailure"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "idempotent": {
             "description": "Children skipped because they were already routed to the target.",
             "format": "int64",
@@ -11185,6 +11195,24 @@
           "failed",
           "skipped",
           "idempotent"
+        ],
+        "type": "object"
+      },
+      "SlingChildFailure": {
+        "additionalProperties": false,
+        "properties": {
+          "bead_id": {
+            "description": "Child bead ID.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why routing the child failed.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "reason"
         ],
         "type": "object"
       },
@@ -11300,6 +11328,11 @@
             "description": "Reference to the launched run resource, present only when a graph workflow was launched (the same run the Location header addresses)."
           },
           "status": {
+            "description": "slung when the sling succeeded; partial when a convoy's children were routed one by one and some failed. A partial result is not rolled back: the routed children stay routed, and batch.failures names the ones to retry.",
+            "enum": [
+              "slung",
+              "partial"
+            ],
             "type": "string"
           },
           "target": {

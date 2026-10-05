@@ -4596,6 +4596,10 @@ export type SlingBatchSummary = {
      */
     failed: number;
     /**
+     * Children whose routing failed, with the reason. Present only when failed > 0.
+     */
+    failures?: Array<SlingChildFailure> | null;
+    /**
      * Children skipped because they were already routed to the target.
      */
     idempotent: number;
@@ -4611,6 +4615,17 @@ export type SlingBatchSummary = {
      * Children tracked by the container.
      */
     total: number;
+};
+
+export type SlingChildFailure = {
+    /**
+     * Child bead ID.
+     */
+    bead_id: string;
+    /**
+     * Why routing the child failed.
+     */
+    reason: string;
 };
 
 export type SlingInputBody = {
@@ -4704,7 +4719,10 @@ export type SlingResponse = {
      * Reference to the launched run resource, present only when a graph workflow was launched (the same run the Location header addresses).
      */
     run?: RunRef;
-    status: string;
+    /**
+     * slung when the sling succeeded; partial when a convoy's children were routed one by one and some failed. A partial result is not rolled back: the routed children stay routed, and batch.failures names the ones to retry.
+     */
+    status: 'slung' | 'partial';
     target: string;
     warnings?: Array<string> | null;
     workflow_id?: string;

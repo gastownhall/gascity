@@ -2793,9 +2793,15 @@ export const zSessionWakeRefusedPayload = z.object({
     wake_request: z.string()
 });
 
+export const zSlingChildFailure = z.object({
+    bead_id: z.string(),
+    reason: z.string()
+});
+
 export const zSlingBatchSummary = z.object({
     container_type: z.string().optional(),
     failed: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    failures: z.array(zSlingChildFailure).nullish(),
     idempotent: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     routed: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     skipped: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
@@ -2831,7 +2837,7 @@ export const zSlingResponse = z.object({
     molecule_id: z.string().optional(),
     root_bead_id: z.string().optional(),
     run: zRunRef.optional(),
-    status: z.string(),
+    status: z.enum(['slung', 'partial']),
     target: z.string(),
     warnings: z.array(z.string()).nullish(),
     workflow_id: z.string().optional()

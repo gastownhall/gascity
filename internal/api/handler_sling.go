@@ -40,8 +40,17 @@ type slingBody struct {
 	NoFormula      bool              `json:"no_formula"`
 }
 
+// Values of the POST /sling response status.
+const (
+	// SlingStatusSlung reports that the sling succeeded.
+	SlingStatusSlung = "slung"
+	// SlingStatusPartial reports a convoy sling where some children routed and
+	// others failed; batch carries the counts and each failure.
+	SlingStatusPartial = "partial"
+)
+
 type slingResponse struct {
-	Status         string             `json:"status"`
+	Status         string             `json:"status" enum:"slung,partial" doc:"slung when the sling succeeded; partial when a convoy's children were routed one by one and some failed. A partial result is not rolled back: the routed children stay routed, and batch.failures names the ones to retry."`
 	Target         string             `json:"target"`
 	Formula        string             `json:"formula,omitempty"`
 	Bead           string             `json:"bead,omitempty"`
@@ -60,12 +69,19 @@ type slingResponse struct {
 // SlingBatchSummary counts the outcome of a convoy sling that routed each
 // open child separately. Field names match gc sling --json.
 type SlingBatchSummary struct {
-	ContainerType string `json:"container_type,omitempty" doc:"Container bead type, e.g. convoy."`
-	Total         int    `json:"total" doc:"Children tracked by the container."`
-	Routed        int    `json:"routed" doc:"Children routed by this sling."`
-	Failed        int    `json:"failed" doc:"Children whose routing failed."`
-	Skipped       int    `json:"skipped" doc:"Children skipped: already routed, or not open."`
-	Idempotent    int    `json:"idempotent" doc:"Children skipped because they were already routed to the target."`
+	ContainerType string              `json:"container_type,omitempty" doc:"Container bead type, e.g. convoy."`
+	Total         int                 `json:"total" doc:"Children tracked by the container."`
+	Routed        int                 `json:"routed" doc:"Children routed by this sling."`
+	Failed        int                 `json:"failed" doc:"Children whose routing failed."`
+	Skipped       int                 `json:"skipped" doc:"Children skipped: already routed, or not open."`
+	Idempotent    int                 `json:"idempotent" doc:"Children skipped because they were already routed to the target."`
+	Failures      []SlingChildFailure `json:"failures,omitempty" doc:"Children whose routing failed, with the reason. Present only when failed > 0."`
+}
+
+// SlingChildFailure names one convoy child whose routing failed.
+type SlingChildFailure struct {
+	BeadID string `json:"bead_id" doc:"Child bead ID."`
+	Reason string `json:"reason" doc:"Why routing the child failed."`
 }
 
 var apiSlingStderr = func() io.Writer { return os.Stderr }
@@ -198,11 +214,19 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		opts.BeadOrFormula = strings.TrimSpace(body.Bead)
 	}
 	result, err := sl.Dispatch(ctx, opts, store)
+	// A convoy whose children were routed one by one reports per-child
+	// outcomes even when some failed. The routed children are committed, so
+	// the caller gets the batch result (as gc sling prints it) rather than a
+	// bare error; a source-workflow conflict keeps its dedicated 409.
+	partial := false
 	if err != nil {
 		var conflictErr *sourceworkflow.ConflictError
 		if errors.As(err, &conflictErr) {
 			return nil, http.StatusConflict, "conflict", err.Error(), conflictErr
 		}
+		partial = isPartialBatchResult(result)
+	}
+	if err != nil && !partial {
 		var lookupErr *sling.BeadLookupError
 		if errors.As(err, &lookupErr) {
 			fmt.Fprintf(apiSlingStderr(), "gc api sling: %v\n", lookupErr) //nolint:errcheck
@@ -232,7 +256,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		warnings = append(append([]string(nil), result.MetadataErrors...), sourceWorkflowScanMessages...)
 	}
 	resp := &slingResponse{
-		Status:     "slung",
+		Status:     SlingStatusSlung,
 		Target:     body.Target,
 		Bead:       body.Bead,
 		Mode:       mode,
@@ -241,14 +265,10 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		ConvoyID:   result.ConvoyID,
 	}
 	if result.ContainerType != "" {
-		resp.Batch = &SlingBatchSummary{
-			ContainerType: result.ContainerType,
-			Total:         result.Total,
-			Routed:        result.Routed,
-			Failed:        result.Failed,
-			Skipped:       result.Skipped,
-			Idempotent:    result.IdempotentCt,
-		}
+		resp.Batch = slingBatchSummary(result)
+	}
+	if partial {
+		resp.Status = SlingStatusPartial
 	}
 	explicitFormula := opts.IsFormula || opts.OnFormula != ""
 	// The domain names the formula it cooked. On a plain bead that is the
@@ -272,6 +292,33 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		return nil, http.StatusInternalServerError, "internal", "sling did not produce a workflow or bead id", nil
 	}
 	return resp, http.StatusOK, "", "", nil
+}
+
+// isPartialBatchResult reports whether a failed dispatch still routed part of
+// a container: its children were attempted one by one and at least one was
+// routed, so the failure is not the whole outcome. A container where every
+// attempted child failed committed nothing and stays an error.
+func isPartialBatchResult(result sling.SlingResult) bool {
+	return result.ContainerType != "" && result.Routed > 0
+}
+
+// slingBatchSummary projects a container sling's per-child outcome onto the
+// wire, naming each child whose routing failed.
+func slingBatchSummary(result sling.SlingResult) *SlingBatchSummary {
+	summary := &SlingBatchSummary{
+		ContainerType: result.ContainerType,
+		Total:         result.Total,
+		Routed:        result.Routed,
+		Failed:        result.Failed,
+		Skipped:       result.Skipped,
+		Idempotent:    result.IdempotentCt,
+	}
+	for _, child := range result.Children {
+		if child.Failed {
+			summary.Failures = append(summary.Failures, SlingChildFailure{BeadID: child.BeadID, Reason: child.FailReason})
+		}
+	}
+	return summary
 }
 
 // relocatedGraphStore returns the city's graph-class binding only when the city

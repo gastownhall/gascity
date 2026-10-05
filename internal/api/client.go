@@ -1613,7 +1613,7 @@ func (c *Client) Sling(req SlingRequest) (SlingResult, error) {
 	}
 	r := resp.JSON200
 	out := SlingResult{
-		Status:         r.Status,
+		Status:         string(r.Status),
 		Target:         r.Target,
 		Formula:        derefStr(r.Formula),
 		Bead:           derefStr(r.Bead),
@@ -1632,6 +1632,11 @@ func (c *Client) Sling(req SlingRequest) (SlingResult, error) {
 			Failed:        int(b.Failed),
 			Skipped:       int(b.Skipped),
 			Idempotent:    int(b.Idempotent),
+		}
+		if b.Failures != nil {
+			for _, f := range *b.Failures {
+				out.Batch.Failures = append(out.Batch.Failures, SlingChildFailure{BeadID: f.BeadId, Reason: f.Reason})
+			}
 		}
 	}
 	if r.Warnings != nil {
