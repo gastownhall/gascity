@@ -349,7 +349,10 @@ func (s *DoltliteReadStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	}
 	s.readyMu.Unlock()
 
-	q := ListQuery{Status: "open", AllowScan: true, IncludeClosed: false, Limit: 0, SkipLabels: true}
+	// Ready rows feed controller demand as well as worker claims. Preserve their
+	// labels so the controller can exclude the same canonical dispatch holds as
+	// the worker query; stripping them here creates spawn/no-work churn.
+	q := ListQuery{Status: "open", AllowScan: true, IncludeClosed: false, Limit: 0}
 	if rq.Assignee != "" {
 		q.Assignee = rq.Assignee
 	}
