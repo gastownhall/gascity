@@ -286,8 +286,34 @@ func buildSplitRC1FromTag(t *testing.T) string {
 // shares the developer's (or CI's) warm build and module caches.
 func splitGoBuildEnv(t *testing.T, dir string) []string {
 	t.Helper()
+	home := filepath.Join(dir, "build-home")
+	config := filepath.Join(home, ".config")
+	if err := os.MkdirAll(config, 0o755); err != nil {
+		t.Fatalf("create %s: %v", config, err)
+	}
+	isolated := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + home,
+		"XDG_CONFIG_HOME=" + config,
+		"TMPDIR=" + os.TempDir(),
+	}
+	// Even `go env` counts itself in the telemetry files, so it too runs
+	// isolated; GOENV still names the developer's go/env file (read, never
+	// written) so the settings it holds are the ones resolved.
 	keys := []string{"GOCACHE", "GOMODCACHE", "GOPATH", "GOPROXY", "GOSUMDB", "GONOSUMDB", "GONOPROXY", "GOPRIVATE", "GOTOOLCHAIN", "GOTMPDIR", "GOROOT"}
-	out, err := exec.Command("go", append([]string{"env", "-json"}, keys...)...).Output()
+	query := exec.Command("go", append([]string{"env", "-json"}, keys...)...)
+	query.Dir = dir
+	query.Env = append([]string{}, isolated...)
+	for _, k := range append([]string{"GOENV"}, keys...) {
+		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+			query.Env = append(query.Env, k+"="+v)
+		} else if k == "GOENV" {
+			if userConfig, err := os.UserConfigDir(); err == nil {
+				query.Env = append(query.Env, "GOENV="+filepath.Join(userConfig, "go", "env"))
+			}
+		}
+	}
+	out, err := query.Output()
 	if err != nil {
 		t.Fatalf("go env: %v", err)
 	}
@@ -295,21 +321,12 @@ func splitGoBuildEnv(t *testing.T, dir string) []string {
 	if err := json.Unmarshal(out, &vals); err != nil {
 		t.Fatalf("decode go env -json: %v\n%s", err, out)
 	}
-	home := filepath.Join(dir, "build-home")
-	config := filepath.Join(home, ".config")
-	if err := os.MkdirAll(config, 0o755); err != nil {
-		t.Fatalf("create %s: %v", config, err)
-	}
-	env := []string{
-		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + home,
-		"XDG_CONFIG_HOME=" + config,
-		"TMPDIR=" + os.TempDir(),
+	env := append(isolated,
 		"CGO_ENABLED=0",
 		"GOWORK=off",
 		"GOFLAGS=-mod=mod",
-		"GOTELEMETRY=off",
-	}
+		"GOENV=off",
+	)
 	for _, k := range keys {
 		if v := strings.TrimSpace(vals[k]); v != "" {
 			env = append(env, k+"="+v)
@@ -397,10 +414,13 @@ func newSplitE2ECity(t *testing.T, bdPath, doltPath string, bornSplit bool, preB
 		city.CleanupRuntime()
 		// Whichever binary the city ended on, stop the other one's
 		// supervisor too; both share this test's GC_HOME.
-		helpers.RunGC(preEnv, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
-		helpers.RunGC(env, "", "supervisor", "stop", "--wait")    //nolint:errcheck // best-effort cleanup
+		helpers.RunGC(preEnv, root, "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
+		helpers.RunGC(env, root, "supervisor", "stop", "--wait")    //nolint:errcheck // best-effort cleanup
 	})
-	out, err := helpers.RunGC(preEnv, "", "init", "--skip-provider-readiness", "--no-start", "--provider", "claude",
+	// Every gc and bd here runs from inside the test root: bd walks up from
+	// its working directory looking for a .beads, and the test process's own
+	// cwd is the package directory, under the developer's home.
+	out, err := helpers.RunGC(preEnv, root, "init", "--skip-provider-readiness", "--no-start", "--provider", "claude",
 		"--dolt-host", upstream.Host, "--dolt-port", upstream.Port,
 		"--dolt-database", upstream.Database, "--dolt-project-id", upstream.ProjectID, dir)
 	if err != nil {
@@ -493,7 +513,7 @@ func (c *splitE2ECity) handOver() {
 		c.t.Fatalf("hand-over with the pre-cutover controller still running")
 	}
 	if !c.standalone {
-		if out, err := helpers.RunGC(c.preEnv, "", "supervisor", "stop", "--wait"); err != nil {
+		if out, err := helpers.RunGC(c.preEnv, c.root, "supervisor", "stop", "--wait"); err != nil {
 			c.t.Logf("stopping the pre-cutover supervisor: %v\n%s", err, out)
 		}
 	}
@@ -616,7 +636,7 @@ func (c *splitE2ECity) start() {
 		c.startStandaloneController()
 		return
 	}
-	helpers.RunGC(c.city.Env, "", "supervisor", "stop", "--wait") //nolint:errcheck // a stale supervisor must not carry an old env
+	helpers.RunGC(c.city.Env, c.root, "supervisor", "stop", "--wait") //nolint:errcheck // a stale supervisor must not carry an old env
 	if out, err := c.tryStart(); err != nil {
 		c.t.Fatalf("gc start: %v\n%s", err, out)
 	}
