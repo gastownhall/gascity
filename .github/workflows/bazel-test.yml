@@ -365,7 +365,7 @@ jobs:
           bazel "${ARGS[@]}" test //test/integration:integration_test \
             --build_event_json_file=/tmp/bazel-bep/integration.json \
             "${RCEXEC[@]}" --test_output=errors --keep_going \
-            --define=gotags=integration --test_timeout=1100 --flaky_test_attempts=1 || true
+            --define=gotags=integration --test_timeout=1100 || true
 
       - name: Critical-path report + budget (the optimization loop metric)
         if: always()
