@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -582,7 +583,10 @@ func TestBazelForkCacheRCExecGuards(t *testing.T) {
 // cache with no local-result uploads, both local fallbacks (without them a
 // closed endpoint fails every action in GetCapabilities), the failure
 // circuit breaker and a short --remote_timeout (a slow endpoint), few
-// connections, and no executor or credentials. No .bazelrc line may select
+// connections, no credentials, and an executor reset to none: a machine whose
+// own rc (~/.bazelrc, /etc/bazel.bazelrc) names an executor would otherwise
+// execute remotely against the read-only cache, whose CAS refuses the input
+// upload (FindMissingBlobs PERMISSION_DENIED). No .bazelrc line may select
 // it: bazel-test.yml's .bazelrc.local and the pre-push suite's command line
 // do.
 func checkBazelForkCacheConfig(bazelrc string) []error {
@@ -612,14 +616,17 @@ func checkBazelForkCacheConfig(bazelrc string) []error {
 		return append(errs, errors.New(".bazelrc has no fork-cache config"))
 	}
 	for _, flag := range opts {
-		name, _, _ := strings.Cut(flag, "=")
+		name, value, _ := strings.Cut(flag, "=")
 		if strings.Contains(name, "remote_cache_compression") {
 			errs = append(errs, errors.New("fork-cache sets "+flag+"; bazel-test.yml adds it while rbe-cache advertises zstd, so rollback needs no revert"))
 		}
-		if name == "--remote_executor" || strings.HasPrefix(name, "--tls_") || strings.HasSuffix(name, "_header") ||
+		if (name == "--remote_executor" && value != "") || strings.HasPrefix(name, "--tls_") || strings.HasSuffix(name, "_header") ||
 			strings.HasPrefix(name, "--credential_helper") || strings.HasPrefix(name, "--google_") || strings.HasPrefix(name, "--bes_") {
 			errs = append(errs, errors.New("fork-cache sets "+flag+"; the fork cache is anonymous and executes nothing remotely"))
 		}
+	}
+	if !slices.Contains(opts, "--remote_executor=") || forkCacheLastValue(opts, "--remote_executor") != "" {
+		errs = append(errs, errors.New("fork-cache must end with --remote_executor= (no executor, whatever the machine's own rc sets)"))
 	}
 	if forkCacheLastValue(opts, "--remote_cache") == "" {
 		errs = append(errs, errors.New("fork-cache sets no --remote_cache"))
@@ -683,6 +690,7 @@ func TestBazelForkCacheConfig(t *testing.T) {
 
 	ep := "grpc" + "s://cache.example:8443"
 	good := "build:fork-cache --remote_cache=" + ep + "\n" +
+		"build:fork-cache --remote_executor=\n" +
 		"build:fork-cache --noremote_upload_local_results\n" +
 		"build:fork-cache --remote_local_fallback\n" +
 		"build:fork-cache --incompatible_remote_local_fallback_for_remote_cache\n" +
@@ -698,6 +706,7 @@ func TestBazelForkCacheConfig(t *testing.T) {
 	for name, rc := range map[string]string{
 		"missing":             "build:remote-exec --remote_timeout=3600\n",
 		"no endpoint":         drop("build:fork-cache --remote_cache=" + ep),
+		"no executor reset":   drop("build:fork-cache --remote_executor="),
 		"no upload switch":    drop("build:fork-cache --noremote_upload_local_results"),
 		"uploads again":       good + "build:fork-cache --remote_upload_local_results\n",
 		"no local fallback":   drop("build:fork-cache --remote_local_fallback"),

@@ -64,6 +64,10 @@ build:remote-exec --jobs=64
 # and hit what trusted CI executed.
 build:fork-cache --remote_cache=grpcs://rbe-cache.ops.gascity.com:8443
 build:fork-cache --remote_instance_name=oss
+# No executor, whatever the machine's own rc (~/.bazelrc, /etc/bazel.bazelrc)
+# names: remote execution would upload inputs to this read-only CAS and fail
+# every action (FindMissingBlobs PERMISSION_DENIED).
+build:fork-cache --remote_executor=
 build:fork-cache --remote_accept_cached
 build:fork-cache --noremote_upload_local_results
 build:fork-cache --remote_download_minimal
