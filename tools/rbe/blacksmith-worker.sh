@@ -2,10 +2,12 @@
 # Run a NativeLink remote-execution worker on a Blacksmith runner for the life of
 # this workflow run's Bazel job, then drain and exit.
 #
-# Blacksmith donates this compute for OSS-repo workflows only. The worker
+# Blacksmith donates this compute for OSS-project work only. The worker
 # registers with rbe-west's OSS scheduler (clients reach it with
-# --remote_instance_name=oss); developer and agent builds use the default
-# instance and never run here. The OSS and default instances share one CAS,
+# --remote_instance_name=oss): OSS CI, plus allowlisted maintainers building
+# OSS code with an operator-issued client certificate. Other developer and
+# agent builds use the default instance and never run here. The OSS and
+# default instances share one CAS,
 # but rbe-west splits the action cache: results written here go to the "oss"
 # action cache, which fork PRs read anonymously and the default instance
 # reads through (never writes). So REMOTE_AC must say "oss", and so must the

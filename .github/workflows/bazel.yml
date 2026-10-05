@@ -11,8 +11,10 @@
 # job names deliberately differ from the required checks ("bazel test
 # (side-by-side)", "BUILD files in sync"), which bazel-test.yml keeps until
 # the cutover renames this gate and deletes bazel-test.yml. Until then:
-#   - --config=ci holds bazel-test.yml's generated lines with byte-identical
-#     values, so both workflows' actions share the remote cache and the
+#   - every key-affecting flag is committed unconditionally in .bazelrc, and
+#     --config=ci, setup-bazel's rc and bazel-test.yml's .bazelrc.local carry
+#     transport and result policy only (scripts/bazel_key_parity_test.go), so
+#     these lanes, bazel-test.yml and pre-push hash actions alike and the
 #     second run of a commit is mostly cache hits;
 #   - no lane passes --config=sole-run (per lane from G0 on);
 #   - the rbe job's lane list (event and mode) decides which lanes start;
@@ -180,10 +182,16 @@ jobs:
           done
           # ls-remote matches the pattern as a ref name's tail
           # (refs/heads/x/refs/heads/main too): exactly one head named $ref.
-          mapfile -t shas < <(awk -F '\t' -v ref="$ref" '$2 == ref { print $1 }' <<<"$heads")
-          [ "${#shas[@]}" -eq 1 ] || { echo "::error::${#shas[@]} heads named $ref"; exit 1; }
-          [[ "${shas[0]}" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cannot resolve ${BASE_REF}: '${shas[0]}'"; exit 1; }
-          echo "base-sha=${shas[0]}" >> "$GITHUB_OUTPUT"
+          # awk counts the matches itself: no mapfile, which macOS's bash 3.2
+          # lacks, and scripts/bazel_multilane_test.go runs this step there.
+          sha="$(awk -F '\t' -v ref="$ref" '
+            $2 == ref { n++; sha = $1 }
+            END {
+              if (n != 1) { printf "::error::%d heads named %s\n", n, ref; exit 1 }
+              print sha
+            }' <<<"$heads")" || { echo "$sha"; exit 1; }
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cannot resolve ${BASE_REF}: '${sha}'"; exit 1; }
+          echo "base-sha=${sha}" >> "$GITHUB_OUTPUT"
 
       # Best effort: a worker boots (~30 s) while the lanes check out and
       # analyze. The rbe-west scaler covers anything beyond one worker.
@@ -232,8 +240,8 @@ jobs:
         with:
           base-sha: ${{ needs.rbe.outputs.base-sha }}
 
-      # Local modes run tests here with --config=ci's PATH, so give them the
-      # Go the remote workers have at /usr/local/go.
+      # Local modes run tests here with .bazelrc's pinned test PATH, so give
+      # them the Go the remote workers have at /usr/local/go.
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         if: needs.rbe.outputs.mode == 'cache' || needs.rbe.outputs.mode == 'local'
         with:

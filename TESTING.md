@@ -46,6 +46,105 @@ packages, run `make bazel-sync` and commit the regenerated BUILD files
 See `engdocs/bazel-quickstart.md` for local setup and
 `engdocs/bazel-ci-budget.md` for the CI optimization loop.
 
+### Bazel cache tiers
+
+A result is reused only by a run that hashes the action identically, so
+every flag that can change an action key is committed, unconditionally, in
+`.bazelrc` (notably the pinned test `PATH`, with Go at `/usr/local/go`). The
+per-mode configs and the gitignored `.bazelrc.local` carry transport only:
+endpoints, credentials, timeouts, download and parallelism policy.
+`scripts/bazel_key_parity_test.go` enforces this, including against the lines
+`bazel-test.yml` writes, so pre-push, PR and main runs compute the same keys.
+
+| tier | how | executes | writes the shared cache |
+|---|---|---|---|
+| contributor (default) | `--config=fork-cache` | locally, on cache misses | never |
+| maintainer (opt-in, allowlisted) | `--config=remote-exec` + a client certificate | rbe-west, `oss` instance | only rbe-west's own workers |
+| CI (`bazel-test.yml`) | `--config=remote-exec` + CI secrets | rbe-west, `oss` instance | only rbe-west's own workers |
+
+- **Contributor.** `fork-cache` reads rbe-west's anonymous, read-only cache
+  (`rbe-cache.ops.gascity.com:8443`, instance `oss`): anything CI already ran
+  for the same inputs is a hit, misses run on your machine, and nothing is
+  ever uploaded. If the endpoint is closed or slow, Bazel falls back to local
+  execution. No credential, no remote compute.
+- **Maintainer.** Remote execution is opt-in and needs an mTLS client
+  certificate for rbe-west; without one nothing tries to execute remotely.
+  Generate the key locally (it never leaves your machine) and send only the
+  CSR to the rbe-west operators (infra `nativelink-cas/west`); there is no
+  self-service path in this repo (the `rbe-fork` mint used by
+  `tools/rbe/fork-credential.sh` certifies only in-progress PR runs):
+
+  ```bash
+  install -d -m 0700 ~/.config/rbe
+  # PKCS#8 EC key: Bazel's Netty TLS refuses a SEC1 "EC PRIVATE KEY".
+  openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out ~/.config/rbe/rbe-maint.key
+  chmod 600 ~/.config/rbe/rbe-maint.key
+  # Exactly these two RDNs: CN = your GitHub login, O = gascity-maintainers.
+  openssl req -new -key ~/.config/rbe/rbe-maint.key \
+    -subj "/CN=<your-github-login>/O=gascity-maintainers" -out rbe-maint.csr
+  ```
+
+  A CSR is public, so send it to a rbe-west operator over any channel. Your
+  GitHub login must be on the allowlist that the fork mint uses for
+  read/write PR runs. You get back `rbe-maint.crt`: client-auth only, valid
+  for 90 days, and its fingerprint is pinned on the farm. An operator revokes
+  it by removing that pin, effective immediately. To renew, send a new CSR
+  (preferably for a new key) before it expires. Maintainer certificates use
+  their own CA and a dedicated endpoint that reaches only the `oss`
+  instance. Results are still written only by the workers.
+
+  With the certificate and the endpoint the operators return, add to
+  `.bazelrc.local` (absolute paths; nothing else belongs there):
+
+  ```
+  build:remote-exec --remote_executor=grpcs://<maintainer endpoint>
+  build:remote-exec --remote_instance_name=oss
+  build:remote-exec --tls_client_certificate=/home/<you>/.config/rbe/rbe-maint.crt
+  build:remote-exec --tls_client_key=/home/<you>/.config/rbe/rbe-maint.key
+  ```
+
+  Allowlisted maintainers working on this OSS project run on the
+  Blacksmith-donated OSS pool (`--remote_instance_name=oss`; OSS code only).
+  Their actions land in the `oss` action cache that CI and contributors
+  read, so a pre-push result is a PR and main hit. The operators authorize
+  each certificate for the OSS scheduler when they issue it.
+- **CI.** `bazel-test.yml` is the trusted writer: its actions execute on
+  rbe-west's `oss` workers, which alone write the `oss` action cache that
+  contributors and fork PRs read. Fork PRs get the read-only cache, or
+  `rbe-fork` remote execution with a certificate minted for that run.
+
+**Pre-push.** `.githooks/pre-push` runs the suite through
+`.githooks/lib/push-suite.sh` when a push changes Go sources. Mode by
+`GC_PREPUSH_SUITE` (default `auto`):
+
+| `GC_PREPUSH_SUITE` | runs |
+|---|---|
+| `auto` | `bazel test //... --config=remote-exec` when any rc file Bazel reads names a remote executor; `bazel test //... --config=fork-cache` otherwise; `make test-fast-parallel` when bazel is not installed, or for `fork-cache` when the pinned test `PATH` has no `go` |
+| `rbe` | `bazel test //... --config=remote-exec`; fails when no rc file names an executor |
+| `cache` | `bazel test //... --config=fork-cache` |
+| `go` | `make test-fast-parallel` (plain `go test`, the pre-Bazel suite) |
+
+`auto` asks Bazel which options its rc files set (`bazel info --announce_rc
+--config=remote-exec`, which contacts no remote): a non-empty
+`--remote_executor` in the system rc, the workspace rc with `.bazelrc.local`
+(a maintainer's `build:remote-exec` lines), or `~/.bazelrc` selects
+`remote-exec`. Agent hosts whose `~/.bazelrc` sets `build
+--remote_executor=...` with the operator certificate therefore push with
+remote execution: compiles and tests run on rbe-west, and the host only
+analyzes, which keeps `go test` fan-out off shared machines.
+`--config=remote-exec` adds transport only on top of such an rc (minimal
+downloads, `--jobs=64`, a long timeout, no uploads of local results), so
+actions hash like CI's. An explicit `rbe`/`cache` without bazel installed,
+`rbe` with no executor in any rc (the suite would build and run locally at
+`--jobs=64`), an option set Bazel cannot read, or an unknown value fails the
+push. `fork-cache` resets `--remote_executor`, so the cache mode never
+executes remotely. Locally
+executed tests use the pinned test `PATH`, so Go must be at `/usr/local/go`
+(`sudo ln -s "$(go env GOROOT)" /usr/local/go`; without it `auto` runs
+`make test-fast-parallel` instead of the cache mode); overriding
+`--test_env=PATH` in `.bazelrc.local` works but gives your machine its own
+action keys, so nothing CI ran is a hit.
+
 ## The outcome: protected PR feedback in under five minutes
 
 The developer-visible service-level objective is p95 **under five minutes**
@@ -540,6 +639,7 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `internal/runtime/tmux` package `tmux` | TestMain: environment, tmux | ga-cp3hwi | runtime tmux TestMain is the checked Medium owner for isolated tmux process and socket cleanup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4c-tmux | 2026-10-31 |
 | Medium owner | `internal/workrecord` package `workrecord` | TestCommitReachableOnBranch: subprocess | ga-cp3hwi | the ADR-0009 commit-reachability oracle is a checked Medium subprocess owner; the git processes are confined to TestCommitReachableOnBranch, which exists to ask a real repository whether a commit is an ancestor of a branch: CommitReachableOnBranch is that git invocation, so a fake oracle would only prove itself | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestAddTestenvImportSkipsNestedGitWorktrees: subprocess | ga-t00ejy | the nested-git-worktree walk-skip regression proof is a checked Medium subprocess owner; the one go run subprocess is confined to TestAddTestenvImportSkipsNestedGitWorktrees, which exists to exercise add-testenv-import.go end to end: the script is package main, so only a real subprocess run can prove its directory walk skips linked git worktrees | P0.4b | 2026-10-31 |
+| Medium owner | `scripts` package `scripts_test` | TestCacheZstdProbe: http_test_server | ga-cp3hwi | the anonymous-cache zstd probe's behavior proof is a checked Medium HTTP test server owner; the loopback TLS HTTP/2 servers are confined to TestCacheZstdProbe, which exists to run tools/rbe/cache-zstd-probe.sh against a stand-in rbe-cache GetCapabilities (zstd advertised or not, gRPC and HTTP errors, malformed answers, a timeout): the probe is curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestDockerSessionProtocol: subprocess | ga-cp3hwi | Docker session adapter protocol proof is a checked Medium owner; the one adapter subprocess is confined to TestDockerSessionProtocol and Docker itself is a strict PATH-injected fake | W6 | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestFreshMergeActionBehaviour: subprocess | ga-cp3hwi | the fresh-merge composite action's behavior proof is a checked Medium subprocess owner; the git and bash subprocesses are confined to TestFreshMergeActionBehaviour, which exists to run .github/actions/fresh-merge's own bash script against a scratch git origin (clean merge, workflow skew, conflict, head already containing the tip, unfetchable base): the script is git plumbing, so only real git can prove what it merges and when it fails | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestProviderOverridesAndSuiteContractsCrossMakeIsolation: subprocess | ga-cp3hwi | Make/provider and suite-contract proof is a checked Medium owner; the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation | P0.1 | 2026-10-31 |
@@ -561,7 +661,7 @@ all-source audit while staying outside untagged and Small debt.
 | Source debt ratchet | `cmd/gc` untagged test source | environment: 122 calls / 14 files (historical regex census: 3960 / 184) | ga-cp3hwi | untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized process-environment mutation | D5/D6/E6 | 2026-10-31 |
 | Source debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 61 calls / 25 files (historical regex census: 78 / 27) | ga-cp3hwi | untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; the helper definition and every marked caller retain an explicit process-suite migration owner | D5/D6/E6 | 2026-10-31 |
 | Source debt ratchet | all untagged test source | fixed_sleep: 318 calls / 121 files (historical regex census: 295 / 114) | ga-cp3hwi | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-31 |
-| Source debt ratchet | all untagged test source | http_test_server: 318 calls / 66 files (historical regex census: 255 / 56) | ga-cp3hwi | untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline; each owning test closes its loopback server and removes duplicate server-backed coverage | P0.4c | 2026-10-31 |
+| Source debt ratchet | all untagged test source | http_test_server: 319 calls / 67 files (historical regex census: 255 / 56) | ga-cp3hwi | untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline; each owning test closes its loopback server and removes duplicate server-backed coverage | P0.4c | 2026-10-31 |
 | Source debt ratchet | all untagged test source | listener_helper: 39 calls / 13 files | ga-cp3hwi | untagged listener-helper call/file totals cannot grow; reductions must lower this baseline; each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership | P0.4c-listener-helper | 2026-10-31 |
 | Source debt ratchet | all untagged test source | net_listen: 97 calls / 37 files (historical regex census: 92 / 34) | ga-cp3hwi | untagged stream-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its stream listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-31 |
 | Source debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-cp3hwi | untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its configured listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-31 |
@@ -1088,7 +1188,8 @@ wait maps to `exit 75` (`EX_TEMPFAIL`) — distinct from a real test failure
 and from `scripts/push-ownership-guard.sh`'s unrelated `exit 1` contract for
 bead-ownership staleness. That 75 is only visible to callers that invoke
 `scripts/test-local-parallel` directly: the four Makefile targets and
-`.githooks/pre-push` (`exec make test-fast-parallel`) run it under `make`,
+`.githooks/pre-push` (`make test-fast-parallel` via `.githooks/lib/push-suite.sh`
+when bazel is absent or `GC_PREPUSH_SUITE=go`) run it under `make`,
 which reports `make: *** [test-fast-parallel] Error 75` and then exits 2.
 Through those paths the distinguishing signal is the stderr text, not the
 process exit code. The kernel releases the lock automatically when the
