@@ -1021,10 +1021,6 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
-	if msg := s.sessionWakeRefusal(store, id); msg != "" {
-		return nil, apierr.DemandOnlySingleton.Msg(msg)
-	}
-
 	res, err := session.NewStore(store).WakeSession(id, time.Now().UTC(), session.WakeOpts{RejectClosed: true})
 	if err != nil {
 		if errors.Is(err, session.ErrNotSessionBead) {
@@ -1052,6 +1048,11 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 	sessionName := res.Info.SessionNameMetadata
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
+	}
+	// The wake is recorded; refuse to report success for a session only pool
+	// demand can start, and do not start it here (#6858).
+	if msg := demandOnlySingletonWakeRefusal(s.state.Config(), res.Info); msg != "" {
+		return nil, apierr.DemandOnlySingleton.Msg(msg)
 	}
 	handle, err := s.workerHandleForSession(store.Store, id)
 	if err != nil {

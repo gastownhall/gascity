@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -474,11 +475,6 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 		writeResolveError(w, err)
 		return
 	}
-	if msg := s.sessionWakeRefusal(store, id); msg != "" {
-		writeError(w, http.StatusBadRequest, "invalid", msg)
-		return
-	}
-
 	res, err := session.NewStore(store).WakeSession(id, time.Now().UTC(), session.WakeOpts{})
 	if err != nil {
 		if errors.Is(err, session.ErrNotSessionBead) {
@@ -505,6 +501,10 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 	sessionName := res.Info.SessionNameMetadata
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
+	}
+	if msg := demandOnlySingletonWakeRefusal(s.state.Config(), res.Info); msg != "" {
+		writeError(w, apierr.DemandOnlySingleton.Status, apierr.DemandOnlySingleton.Code, msg)
+		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": id})

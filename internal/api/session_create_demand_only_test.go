@@ -117,7 +117,28 @@ func TestHandleSessionCreateRefusesDemandOnlySingletonAgent(t *testing.T) {
 		t.Fatalf("decode problem body: %v", err)
 	}
 	assertDemandOnlyRefusalMessage(t, problem.Detail)
+	assertCompatDemandOnlyCode(t, problem.Detail)
 	assertNoSessionBeads(t, fs)
+}
+
+// A max = 1 pool with a session floor (min_active_sessions = 1) keeps its one
+// session running without demand, so it is not demand-only and an API create
+// still returns 202.
+func TestHumaHandleSessionCreateAcceptsSingletonWithSessionFloor(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents[0].MinActiveSessions = intPtr(1)
+	fs.cfg.NamedSessions = nil
+	srv := New(&commandableWaiterState{fakeState: fs})
+
+	out, err := srv.humaHandleSessionCreate(context.Background(), &SessionCreateInput{
+		Body: sessionCreateBody{Kind: "agent", Name: "myrig/worker"},
+	})
+	if err != nil {
+		t.Fatalf("humaHandleSessionCreate(min=1 singleton): %v", err)
+	}
+	if out.Status != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", out.Status, http.StatusAccepted)
+	}
 }
 
 // createDemandOnlyPoolSession seeds the controller-owned pool session of the
@@ -132,24 +153,43 @@ func createDemandOnlyPoolSession(t *testing.T, fs *fakeState) string {
 		"pool_managed":   "true",
 		"state":          "asleep",
 		"session_name":   "myrig--worker",
+		"held_until":     "2999-01-01T00:00:00Z",
+		"sleep_reason":   "user-hold",
 	}, "worker pool session")
 	return b.ID
 }
 
-func assertNoWakeRecorded(t *testing.T, fs *fakeState, id string) {
+// assertWakeRecordedHoldCleared pins SESSION-RECON-016's wake contract: the
+// wake is recorded and its hold cleared even though the session will not
+// start, exactly as `gc session wake` does, so a held or quarantined
+// demand-only session can still be un-held over the API.
+func assertWakeRecordedHoldCleared(t *testing.T, fs *fakeState, id string) {
 	t.Helper()
 	got, err := fs.cityBeadStore.Get(id)
 	if err != nil {
 		t.Fatalf("Get(%s): %v", id, err)
 	}
-	if got.Metadata["wake_request"] != "" {
-		t.Fatalf("wake_request = %q after a refused wake, want none recorded", got.Metadata["wake_request"])
+	if got.Metadata["wake_request"] == "" {
+		t.Fatal("wake_request is empty after the wake; the wake must be recorded before it is refused")
+	}
+	if got.Metadata["held_until"] != "" || got.Metadata["sleep_reason"] != "" {
+		t.Fatalf("held_until = %q sleep_reason = %q after the wake, want the hold cleared", got.Metadata["held_until"], got.Metadata["sleep_reason"])
 	}
 }
 
-// #6858: `gc session wake` reports that a demand-only singleton's pool session
-// will not start; the API wake must refuse it the same way the create does,
-// with a dedicated code clients can tell apart from a malformed request.
+// assertCompatDemandOnlyCode pins that the compatibility routes report the same
+// demand-only-singleton code as the Huma routes.
+func assertCompatDemandOnlyCode(t *testing.T, detail string) {
+	t.Helper()
+	if !strings.HasPrefix(detail, apierr.DemandOnlySingleton.Code+": ") {
+		t.Fatalf("detail = %q, want the %q code prefix", detail, apierr.DemandOnlySingleton.Code)
+	}
+}
+
+// #6858: `gc session wake` records the wake and then reports that a
+// demand-only singleton's pool session will not start; the API wake must do
+// the same, with a dedicated code clients can tell apart from a malformed
+// request.
 func TestHumaHandleSessionWakeRefusesDemandOnlySingletonSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	id := createDemandOnlyPoolSession(t, fs)
@@ -167,7 +207,7 @@ func TestHumaHandleSessionWakeRefusesDemandOnlySingletonSession(t *testing.T) {
 		t.Fatalf("problem = status %d code %q, want status %d code %q", problem.Status, problem.Code, http.StatusBadRequest, apierr.DemandOnlySingleton.Code)
 	}
 	assertDemandOnlyRefusalMessage(t, problem.Detail)
-	assertNoWakeRecorded(t, fs, id)
+	assertWakeRecordedHoldCleared(t, fs, id)
 }
 
 // The create refusal carries the same dedicated code.
@@ -202,5 +242,6 @@ func TestHandleSessionWakeRefusesDemandOnlySingletonSession(t *testing.T) {
 		t.Fatalf("decode problem body: %v", err)
 	}
 	assertDemandOnlyRefusalMessage(t, problem.Detail)
-	assertNoWakeRecorded(t, fs, id)
+	assertCompatDemandOnlyCode(t, problem.Detail)
+	assertWakeRecordedHoldCleared(t, fs, id)
 }
