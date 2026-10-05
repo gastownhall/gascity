@@ -1415,6 +1415,7 @@ func TestCityRuntimeDriftJudgesWithTheWiringsEnv(t *testing.T) {
 // are pinned: a trace consumer reads them by name.
 var v2QueueRecordFields = []string{
 	"adds", "allocator_duty", "allocator_failures", "allocator_last_pass_ms", "allocator_passes", "allocator_wakes",
+	"allocator_wakes_suppressed",
 	"bead_event_latency_p50_ms", "bead_event_latency_p99_ms", "boot", "boot_ms",
 	"deferred", "depth_hot", "depth_resync", "dirty", "dropped_adds", "fs_gate", "holds", "keys",
 	"latency_p50_ms", "latency_p99_ms", "legacy_session_entries", "longest_in_flight_ms",
