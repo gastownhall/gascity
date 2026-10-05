@@ -311,7 +311,7 @@ func openNativeStorageWithoutAmbientEnvWithCredentialCommand(ctx context.Context
 	}
 	var prefix string
 	if readPrefix {
-		prefix, err = storage.GetConfig(ctx, nativeIssuePrefixConfigKey)
+		prefix, err = nativeReadIssuePrefix(ctx, storage)
 		if err != nil {
 			_ = storage.Close()
 			return nil, "", fmt.Errorf("reading native issue prefix: %w", err)
@@ -650,6 +650,24 @@ func OpenNativeStorageAtWithoutAmbientEnvWithCredentialCommand(ctx context.Conte
 // Dolt-backed ledger mints under.
 const nativeIssuePrefixConfigKey = "issue_prefix"
 
+// nativeReadIssuePrefix reads the configured issue prefix through the
+// issueops.WorkspaceConfig role rather than the raw storage.GetConfig
+// primitive the G3 port retired: WorkspaceConfig.GetSetting answers an unset
+// key as "" with a nil error (never beads.ErrConfigNotFound or similar), the
+// same contract the raw primitive gave every one of this function's three
+// call sites, so this is a direct substitution rather than a behavior change.
+func nativeReadIssuePrefix(ctx context.Context, storage beadslib.Storage) (string, error) {
+	settings, err := storage.WorkspaceConfig()
+	if err != nil {
+		return "", err
+	}
+	result, err := settings.GetSetting(ctx, issueops.GetSettingRequest{Key: nativeIssuePrefixConfigKey})
+	if err != nil {
+		return "", err
+	}
+	return result.Value, nil
+}
+
 // openNativeStorage projects the scoped Dolt env, opens the best-available
 // native storage, and (when readPrefix) reads the configured issue prefix while
 // the env is still projected. It is shared by the initial open and the
@@ -670,7 +688,7 @@ func openNativeStorageWithCredentialCommand(ctx context.Context, scopeRoot strin
 	}
 	var prefix string
 	if readPrefix {
-		prefix, err = storage.GetConfig(ctx, nativeIssuePrefixConfigKey)
+		prefix, err = nativeReadIssuePrefix(ctx, storage)
 		if err != nil {
 			_ = storage.Close()
 			return nil, "", fmt.Errorf("reading native issue prefix: %w", err)

@@ -28,12 +28,32 @@ type rawGraphStorage interface {
 	RemoveDependency(context.Context, string, string, string) error
 	GetDependenciesWithMetadata(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error)
 	GetDependentsWithMetadata(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error)
+	GetIssue(context.Context, string) (*beadslib.Issue, error)
 }
 
 type rawDeleter struct{ raw rawGraphStorage }
 
+// Delete honors DeleteRequest.ExpectedVersion, matching the real role's own
+// ordering: the existence probe, then the version precondition, then the
+// deletion -- all deletes nothing on a miss. Validation (a non-nil
+// ExpectedVersion beside more than one id) matches issueops.ErrValidation.
 func (d rawDeleter) Delete(ctx context.Context, req issueops.DeleteRequest) (issueops.DeleteResult, error) {
+	if req.ExpectedVersion != nil && len(req.IDs) != 1 {
+		return issueops.DeleteResult{}, fmt.Errorf("%w: rawDeleter: ExpectedVersion requires exactly one id", issueops.ErrValidation)
+	}
 	for _, id := range req.IDs {
+		if req.ExpectedVersion != nil {
+			current, err := d.raw.GetIssue(ctx, id)
+			if err != nil {
+				return issueops.DeleteResult{}, err
+			}
+			if current == nil {
+				return issueops.DeleteResult{}, fmt.Errorf("not found: issue %s", id)
+			}
+			if current.RowVersion != *req.ExpectedVersion {
+				return issueops.DeleteResult{}, issueops.ErrVersionMismatch
+			}
+		}
 		if err := d.raw.DeleteIssue(ctx, id); err != nil {
 			return issueops.DeleteResult{}, err
 		}
@@ -108,6 +128,55 @@ func (reachableStatsReporter) AssigneeStats(context.Context, issueops.AssigneeSt
 }
 
 func (s *nativeDoltStorageSpy) Deleter() (issueops.Deleter, error) { return rawDeleter{raw: s}, nil }
+
+// rawConfigStorage is the raw hook nativeReadIssuePrefix's role port replaced.
+// Both in-package doubles implement it (nativeDoltStorageSpy's getConfig hook,
+// nativeDoltMemStorage's issue-prefix fixture), so rawWorkspaceConfig is their
+// shared adapter rather than a separate one per double.
+type rawConfigStorage interface {
+	GetConfig(context.Context, string) (string, error)
+}
+
+// rawWorkspaceConfig stands in for the issueops.WorkspaceConfig role over a
+// double's raw GetConfig hook. Only GetSetting is forwarded: it is the only
+// method nativeReadIssuePrefix, this role's sole production caller, ever
+// calls. The other three follow the spy's own "unset hook is a no-op"
+// convention rather than the raw-panic tripwire's, since nothing in this
+// package exercises them yet; the first caller that needs ListSettings,
+// SetSetting or UnsetSetting through a double extends them here rather than
+// inventing a second role fake.
+type rawWorkspaceConfig struct{ raw rawConfigStorage }
+
+var _ issueops.WorkspaceConfig = rawWorkspaceConfig{}
+
+func (w rawWorkspaceConfig) GetSetting(ctx context.Context, req issueops.GetSettingRequest) (issueops.SettingResult, error) {
+	value, err := w.raw.GetConfig(ctx, req.Key)
+	if err != nil {
+		return issueops.SettingResult{}, err
+	}
+	return issueops.SettingResult{Key: req.Key, Value: value}, nil
+}
+
+func (w rawWorkspaceConfig) ListSettings(context.Context, issueops.ListSettingsRequest) (issueops.ListSettingsResult, error) {
+	return issueops.ListSettingsResult{Settings: map[string]string{}}, nil
+}
+
+func (w rawWorkspaceConfig) SetSetting(context.Context, issueops.SetSettingRequest) (issueops.SetSettingResult, error) {
+	return issueops.SetSettingResult{}, nil
+}
+
+func (w rawWorkspaceConfig) UnsetSetting(context.Context, issueops.UnsetSettingRequest) (issueops.UnsetSettingResult, error) {
+	return issueops.UnsetSettingResult{}, nil
+}
+
+func (s *nativeDoltStorageSpy) WorkspaceConfig() (issueops.WorkspaceConfig, error) {
+	return rawWorkspaceConfig{raw: s}, nil
+}
+
+func (s *nativeDoltMemStorage) WorkspaceConfig() (issueops.WorkspaceConfig, error) {
+	return rawWorkspaceConfig{raw: s}, nil
+}
+
 func (s *nativeDoltStorageSpy) DependencyEditor() (issueops.DependencyEditor, error) {
 	return rawDependencyEditor{raw: s}, nil
 }
