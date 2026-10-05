@@ -35,13 +35,28 @@ func underRealUserHome(path string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
+// EnvAllowHostClaude opts a run in to Claude state writes under the real user
+// home, for a developer who has decided their own ~/.claude.json may take the
+// test's trust entries. CI runners need no opt-in: their home is discarded
+// with the runner (GITHUB_ACTIONS=true).
+const EnvAllowHostClaude = "GC_TEST_ALLOW_HOST_CLAUDE"
+
+// HostClaudeStateAllowed reports whether this run may write Claude state under
+// the real user home at all: on a GitHub Actions runner, or with
+// GC_TEST_ALLOW_HOST_CLAUDE=1. Everywhere else — a developer box — the refusal
+// stands even for an Env that asked with WithHostClaudeState.
+func HostClaudeStateAllowed() bool {
+	return strings.TrimSpace(os.Getenv("GITHUB_ACTIONS")) == "true" ||
+		strings.TrimSpace(os.Getenv(EnvAllowHostClaude)) == "1"
+}
+
 // errRealUserHomeClaudeState is the refusal for a Claude state write that
 // would land in the developer's own ~/.claude.json or ~/.claude: a
 // truncate-then-write of a file live Claude sessions rewrite constantly, and
 // an ever-growing list of trusted temp directories (#6838's class).
 func errRealUserHomeClaudeState(paths []string) error {
-	return fmt.Errorf("acceptance: refusing to write Claude state under the real user home %s (%s); give the env an isolated HOME or CLAUDE_CONFIG_DIR, or opt in with Env.WithHostClaudeState for a tier that drives the host's own Claude CLI",
-		realUserHome(), strings.Join(paths, ", "))
+	return fmt.Errorf("acceptance: refusing to write Claude state under the real user home %s (%s); give the env an isolated HOME or CLAUDE_CONFIG_DIR; a tier that drives the host's own Claude CLI may write there only through Env.WithHostClaudeState on a CI runner (GITHUB_ACTIONS=true) or with %s=1",
+		realUserHome(), strings.Join(paths, ", "), EnvAllowHostClaude)
 }
 
 // EnsureClaudeStateFile creates or updates HOME/.claude.json with the minimum
@@ -115,7 +130,7 @@ func EnsureClaudeProjectState(env *Env, projectPath string) error {
 			configDir = v
 		}
 	}
-	allowHost := env.hostClaudeState
+	allowHost := env.hostClaudeState && HostClaudeStateAllowed()
 	if err := ensureClaudeStateFile(home, configDir, allowHost); err != nil {
 		return err
 	}

@@ -136,7 +136,7 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	// gc never installs a launchd/systemd unit from it. Being writable, it
 	// also holds the Claude state the tests seed (a CLAUDE_CONFIG_DIR from the
 	// host still wins: it carries the operator's credentials).
-	home := filepath.Join(gcHome, "home")
+	home := IsolatedHome(gcHome)
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		panic(fmt.Sprintf("acceptance: creating isolated HOME under %s: %v", gcHome, err))
 	}
@@ -254,15 +254,22 @@ func (e *Env) WithHostHome() *Env {
 	return e
 }
 
-// WithHostClaudeState lets the harness seed Claude onboarding and project
-// trust into the real user home's ~/.claude.json, returning the Env for
-// chaining. Every other Env is refused that write (claude_state.go). It is for
-// the one tier that drives the operator's own Claude CLI through the host HOME
-// with no config dir of its own (tutorial goldens), where trust has to live in
-// that file for a test city not to stop on the trust dialog.
+// WithHostClaudeState asks to let the harness seed Claude onboarding and
+// project trust into the real user home's ~/.claude.json, returning the Env
+// for chaining. It takes effect only where HostClaudeStateAllowed — a CI
+// runner's throwaway home, or an explicit GC_TEST_ALLOW_HOST_CLAUDE=1 — and
+// every other write under the real home is refused (claude_state.go). It is
+// for a tier that drives the operator's own Claude CLI through the host HOME
+// (tutorial goldens in host mode).
 func (e *Env) WithHostClaudeState() *Env {
 	e.hostClaudeState = true
 	return e
+}
+
+// IsolatedHome is the HOME NewEnv gives gc for gcHome. A tier that stages
+// provider credentials for gc's sessions stages them here.
+func IsolatedHome(gcHome string) string {
+	return filepath.Join(gcHome, "home")
 }
 
 // Without removes a variable.

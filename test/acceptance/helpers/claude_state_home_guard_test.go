@@ -117,20 +117,117 @@ func TestNewEnvClaudeStateStaysInTheIsolatedHome(t *testing.T) {
 	untouched()
 }
 
-// WithHostClaudeState is the one explicit opt-in, and it is not inherited by
-// accident: only an Env (or a Clone of one) that called it may write there.
-func TestWithHostClaudeStateIsTheOnlyWayIntoTheRealHome(t *testing.T) {
-	home, _ := canaryRealHome(t)
-	project := filepath.Join(t.TempDir(), "city")
-	base := NewEnv("", t.TempDir(), t.TempDir()).With("HOME", home).Without("CLAUDE_CONFIG_DIR")
-	if err := EnsureClaudeProjectState(base.Clone(), project); err == nil {
-		t.Fatalf("a Clone of an Env without the opt-in wrote the real home")
+// devBox clears both host-Claude opt-ins, so a test runs as on a developer
+// box whatever CI runner it is on.
+func devBox(t *testing.T) {
+	t.Helper()
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv(EnvAllowHostClaude, "")
+}
+
+// On a developer box WithHostClaudeState does not open the real home: the
+// refusal stands and names the opt-in.
+func TestWithHostClaudeStateIsRefusedOnADevBox(t *testing.T) {
+	devBox(t)
+	home, untouched := canaryRealHome(t)
+	env := NewEnv("", t.TempDir(), t.TempDir()).With("HOME", home).Without("CLAUDE_CONFIG_DIR").WithHostClaudeState()
+	err := EnsureClaudeProjectState(env, filepath.Join(t.TempDir(), "city"))
+	if err == nil || !strings.Contains(err.Error(), EnvAllowHostClaude) {
+		t.Fatalf("EnsureClaudeProjectState(WithHostClaudeState) on a dev box = %v, want a refusal naming %s", err, EnvAllowHostClaude)
 	}
-	if err := EnsureClaudeProjectState(base.Clone().WithHostClaudeState(), project); err != nil {
-		t.Fatalf("EnsureClaudeProjectState with WithHostClaudeState: %v", err)
+	if HostClaudeStateAllowed() {
+		t.Fatal("HostClaudeStateAllowed() with neither opt-in set")
 	}
-	state := readClaudeStateForTest(t, filepath.Join(home, ".claude.json"))
-	if projects, _ := state["projects"].(map[string]any); projects[project] == nil {
-		t.Errorf("opted-in write did not seed %s: %#v", project, state)
+	untouched()
+}
+
+// On a CI runner (GITHUB_ACTIONS=true), or with GC_TEST_ALLOW_HOST_CLAUDE=1,
+// an Env that asked may write the real home — and one that did not ask still
+// may not, nor may a Clone of it.
+func TestWithHostClaudeStateIsAllowedOnCIOrExplicitOptIn(t *testing.T) {
+	for _, tc := range []struct{ name, key, val string }{
+		{"github-actions", "GITHUB_ACTIONS", "true"},
+		{"explicit-opt-in", EnvAllowHostClaude, "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			devBox(t)
+			t.Setenv(tc.key, tc.val)
+			if !HostClaudeStateAllowed() {
+				t.Fatalf("HostClaudeStateAllowed() with %s=%s", tc.key, tc.val)
+			}
+			home, _ := canaryRealHome(t)
+			project := filepath.Join(t.TempDir(), "city")
+			base := NewEnv("", t.TempDir(), t.TempDir()).With("HOME", home).Without("CLAUDE_CONFIG_DIR")
+			if err := EnsureClaudeProjectState(base.Clone(), project); err == nil {
+				t.Fatalf("an Env without WithHostClaudeState wrote the real home")
+			}
+			if err := EnsureClaudeProjectState(base.Clone().WithHostClaudeState(), project); err != nil {
+				t.Fatalf("EnsureClaudeProjectState with WithHostClaudeState: %v", err)
+			}
+			state := readClaudeStateForTest(t, filepath.Join(home, ".claude.json"))
+			if projects, _ := state["projects"].(map[string]any); projects[project] == nil {
+				t.Errorf("opted-in write did not seed %s: %#v", project, state)
+			}
+		})
+	}
+	// Anything other than the exact spellings is not an opt-in.
+	devBox(t)
+	t.Setenv("GITHUB_ACTIONS", "1")
+	t.Setenv(EnvAllowHostClaude, "true")
+	if HostClaudeStateAllowed() {
+		t.Errorf("HostClaudeStateAllowed() accepted GITHUB_ACTIONS=1 / %s=true", EnvAllowHostClaude)
+	}
+}
+
+// StageClaudeAuthHome copies only the CLI's credentials out of the real home,
+// leaves the real home byte-identical, and refuses to stage into it.
+func TestStageClaudeAuthHomeCopiesOnlyTheCredentials(t *testing.T) {
+	hostHome := t.TempDir()
+	prev := realUserHome
+	realUserHome = func() string { return hostHome }
+	t.Cleanup(func() { realUserHome = prev })
+
+	creds := []byte(`{"claudeAiOauth":{"accessToken":"a","refreshToken":"r"}}`)
+	state := []byte(`{"oauthAccount":{"emailAddress":"dev@example.com"},"userID":"u1","projects":{"/home/dev/secret":{"hasTrustDialogAccepted":true}},"history":["x"]}`)
+	if err := os.MkdirAll(filepath.Join(hostHome, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hostHome, ".claude", ".credentials.json"), creds, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hostHome, ".claude.json"), state, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := filepath.Join(t.TempDir(), "home")
+	found, err := StageClaudeAuthHome(hostHome, dst)
+	if err != nil || !found {
+		t.Fatalf("StageClaudeAuthHome = %v, %v; want found, nil", found, err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dst, ".claude", ".credentials.json")); !bytes.Equal(got, creds) {
+		t.Errorf("staged credentials = %s, want %s", got, creds)
+	}
+	staged := readClaudeStateForTest(t, filepath.Join(dst, ".claude.json"))
+	if staged["oauthAccount"] == nil || staged["userID"] != "u1" {
+		t.Errorf("staged state lacks the auth fields: %#v", staged)
+	}
+	for _, private := range []string{"projects", "history"} {
+		if _, ok := staged[private]; ok {
+			t.Errorf("staged state carries the operator's %q", private)
+		}
+	}
+	if got, _ := os.ReadFile(filepath.Join(hostHome, ".claude.json")); !bytes.Equal(got, state) {
+		t.Errorf("the real ~/.claude.json changed: %s", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(hostHome, ".claude", ".credentials.json")); !bytes.Equal(got, creds) {
+		t.Errorf("the real credentials changed: %s", got)
+	}
+
+	if _, err := StageClaudeAuthHome(hostHome, filepath.Join(hostHome, "nested")); err == nil {
+		t.Error("StageClaudeAuthHome staged into the real home")
+	}
+	empty := t.TempDir()
+	if found, err := StageClaudeAuthHome(empty, filepath.Join(t.TempDir(), "home")); err != nil || found {
+		t.Errorf("StageClaudeAuthHome(no credentials) = %v, %v; want not found, nil", found, err)
 	}
 }
