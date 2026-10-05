@@ -95,6 +95,9 @@ func newTutorialBaseEnv(gcBinary, home, runtimeDir, bdPath string) *helpers.Env 
 	// CLIs, which resolve their state through the host HOME.
 	env := helpers.NewEnv(gcBinary, home, runtimeDir).
 		WithHostHome().
+		// The host CLI reads trust from the real ~/.claude.json (its shim
+		// drops CLAUDE_CONFIG_DIR), so this tier opts in to seeding it.
+		WithHostClaudeState().
 		Without("GC_SESSION").
 		Without("GC_BEADS").
 		Without("GC_DOLT").

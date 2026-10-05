@@ -80,8 +80,11 @@ const (
 	// splitStepsBeforeStop is how many steps close before the cutover.
 	splitStepsBeforeStop = 2
 
-	splitPhaseTimeout  = 4 * time.Minute
-	splitFinishTimeout = 4 * time.Minute
+	// splitPhaseTimeoutDefault bounds each formula half. A run under a
+	// tracer (the home-isolation audit runs the scenarios under strace)
+	// raises it with splitPhaseTimeoutEnv.
+	splitPhaseTimeoutDefault = 4 * time.Minute
+	splitPhaseTimeoutEnv     = "GC_ACCEPTANCE_SPLIT_PHASE_TIMEOUT"
 )
 
 const splitFormulaTOML = `formula = "split-e2e"
@@ -205,6 +208,15 @@ func TestSplitStorageMigratedFormulaCompletes(t *testing.T) {
 	})
 }
 
+// splitPhaseTimeout is splitPhaseTimeoutDefault, or the duration in
+// splitPhaseTimeoutEnv when that parses.
+func splitPhaseTimeout() time.Duration {
+	if d, err := time.ParseDuration(strings.TrimSpace(os.Getenv(splitPhaseTimeoutEnv))); err == nil && d > 0 {
+		return d
+	}
+	return splitPhaseTimeoutDefault
+}
+
 // splitRC1Tag is the release whose migration retains the work-store copies.
 const splitRC1Tag = "v1.5.0-rc1"
 
@@ -257,13 +269,53 @@ func buildSplitRC1FromTag(t *testing.T) string {
 	bin := filepath.Join(dir, "bin", "gc")
 	build := exec.Command("go", "build", "-o", bin, "./cmd/gc")
 	build.Dir = src
-	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GOWORK=off", "GOFLAGS=-mod=mod")
+	build.Env = splitGoBuildEnv(t, dir)
 	started := time.Now()
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build gc from %s: %v\n%s", splitRC1Tag, err, out)
 	}
 	t.Logf("built gc %s (%s) in %s", splitRC1Tag, strings.TrimSpace(string(commit))[:10], time.Since(started).Round(time.Second))
 	return bin
+}
+
+// splitGoBuildEnv is the environment the rc1 build runs under. The toolchain
+// keeps per-user state through HOME and XDG_CONFIG_HOME — its go/env file and
+// the telemetry counters it rewrites on every invocation — so both point into
+// dir. The cache, module and toolchain settings that would have come from the
+// go/env file are resolved first and passed explicitly, so the build still
+// shares the developer's (or CI's) warm build and module caches.
+func splitGoBuildEnv(t *testing.T, dir string) []string {
+	t.Helper()
+	keys := []string{"GOCACHE", "GOMODCACHE", "GOPATH", "GOPROXY", "GOSUMDB", "GONOSUMDB", "GONOPROXY", "GOPRIVATE", "GOTOOLCHAIN", "GOTMPDIR", "GOROOT"}
+	out, err := exec.Command("go", append([]string{"env", "-json"}, keys...)...).Output()
+	if err != nil {
+		t.Fatalf("go env: %v", err)
+	}
+	var vals map[string]string
+	if err := json.Unmarshal(out, &vals); err != nil {
+		t.Fatalf("decode go env -json: %v\n%s", err, out)
+	}
+	home := filepath.Join(dir, "build-home")
+	config := filepath.Join(home, ".config")
+	if err := os.MkdirAll(config, 0o755); err != nil {
+		t.Fatalf("create %s: %v", config, err)
+	}
+	env := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + home,
+		"XDG_CONFIG_HOME=" + config,
+		"TMPDIR=" + os.TempDir(),
+		"CGO_ENABLED=0",
+		"GOWORK=off",
+		"GOFLAGS=-mod=mod",
+		"GOTELEMETRY=off",
+	}
+	for _, k := range keys {
+		if v := strings.TrimSpace(vals[k]); v != "" {
+			env = append(env, k+"="+v)
+		}
+	}
+	return env
 }
 
 // splitE2ECity is one isolated city plus the paths the assertions read.
@@ -277,6 +329,17 @@ type splitE2ECity struct {
 	// for the upgrade scenario the v1.5.0-rc1 gc, first on PATH as `gc` so
 	// the worker's own gc calls and the supervisor resolve the same binary.
 	preEnv *helpers.Env
+	// standalone runs the city's controller as `gc start --foreground`
+	// instead of under a supervisor: the v1.5.0-rc1 phase does, because that
+	// binary's supervisor refuses any HOME but the passwd one, and this test
+	// never hands any gc the real HOME.
+	standalone bool
+	// startedControllers counts the controllers this test has seen start.
+	startedControllers int
+	// controller is the running standalone controller, nil otherwise.
+	controller *exec.Cmd
+	// controllerDone is closed once controller has exited.
+	controllerDone chan struct{}
 }
 
 func newSplitE2ECity(t *testing.T, bdPath, doltPath string, bornSplit bool, preBin string) *splitE2ECity {
@@ -296,7 +359,7 @@ func newSplitE2ECity(t *testing.T, bdPath, doltPath string, bornSplit bool, preB
 	if err := helpers.WriteSupervisorConfig(gcHome); err != nil {
 		t.Fatalf("write supervisor config: %v", err)
 	}
-	base := helpers.NewEnv(gcBin, gcHome, runtimeDir).With("GC_SESSION", "subprocess")
+	base := splitIsolatedUserDirs(t, helpers.NewEnv(gcBin, gcHome, runtimeDir).With("GC_SESSION", "subprocess"), root)
 	// The binary under test is installed as `gc` in a directory of its own.
 	// helpers.NewEnv only prepends the binary's directory to PATH, so a binary
 	// not named gc (gc-a2, say) left the worker's `gc hook`/`gc bd` calls and
@@ -304,11 +367,11 @@ func newSplitE2ECity(t *testing.T, bdPath, doltPath string, bornSplit bool, preB
 	env := splitBinaryEnv(t, helpers.TopologyEnv(t, base, root, bdPath, doltPath), gcBin, filepath.Join(root, "gc-bin"))
 	preEnv := env
 	if preBin != "" {
-		// v1.5.0-rc1 predates GC_SUPERVISOR_ISOLATED_HOME: its supervisor
-		// refuses any HOME but the passwd one, so its gc gets the host HOME
-		// (as every acceptance gc did before #7033). bd and dolt children
-		// still run under the tool home.
-		preEnv = splitBinaryEnv(t, env, preBin, filepath.Join(root, "pre-bin")).WithHostHome()
+		// The pre-cutover binary keeps the isolated HOME too. v1.5.0-rc1
+		// predates GC_SUPERVISOR_ISOLATED_HOME (#7033), and its supervisor
+		// start paths refuse any HOME but the passwd one, so that phase runs
+		// a standalone controller instead (see splitE2ECity.standalone).
+		preEnv = splitBinaryEnv(t, env, preBin, filepath.Join(root, "pre-bin"))
 	}
 
 	// Registered before the upstream and the city so it runs after both have
@@ -349,12 +412,36 @@ func newSplitE2ECity(t *testing.T, bdPath, doltPath string, bornSplit bool, preB
 		}
 		t.Logf("gc init hit the dolt identity probe timeout; gc start completes it:\n%s", out)
 	}
-	c := &splitE2ECity{t: t, env: env, city: city, root: root, dir: dir, preEnv: preEnv}
+	c := &splitE2ECity{t: t, env: env, city: city, root: root, dir: dir, preEnv: preEnv, standalone: preBin != ""}
+	t.Cleanup(c.stopStandaloneController)
 	c.reduceToScriptedWorker(scriptPath, bornSplit)
 	if err := os.WriteFile(c.path("formulas", splitFormulaName+".toml"), []byte(splitFormulaTOML), 0o644); err != nil {
 		t.Fatalf("write formula: %v", err)
 	}
 	return c
+}
+
+// splitIsolatedUserDirs points every per-user state directory a gc, bd, dolt
+// or agent could reach at the test root: Claude's config dir, the XDG base
+// directories and Dolt's root. HOME itself is already isolated by
+// helpers.NewEnv; these close the paths that do not go through HOME.
+func splitIsolatedUserDirs(t *testing.T, env *helpers.Env, root string) *helpers.Env {
+	t.Helper()
+	dirs := map[string]string{
+		"CLAUDE_CONFIG_DIR": filepath.Join(root, "user", "claude"),
+		"XDG_CONFIG_HOME":   filepath.Join(root, "user", "config"),
+		"XDG_DATA_HOME":     filepath.Join(root, "user", "data"),
+		"XDG_STATE_HOME":    filepath.Join(root, "user", "state"),
+		"XDG_CACHE_HOME":    filepath.Join(root, "user", "cache"),
+		"DOLT_ROOT_PATH":    env.Get("GC_HOME"),
+	}
+	for key, dir := range dirs {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("create %s: %v", dir, err)
+		}
+		env.With(key, dir)
+	}
+	return env
 }
 
 // splitBinaryEnv is env with bin as the gc every child resolves: the harness's
@@ -402,11 +489,17 @@ func copySplitBinary(src, dst string) error {
 // against the same GC_HOME.
 func (c *splitE2ECity) handOver() {
 	c.t.Helper()
-	if out, err := helpers.RunGC(c.preEnv, "", "supervisor", "stop", "--wait"); err != nil {
-		c.t.Logf("stopping the pre-cutover supervisor: %v\n%s", err, out)
+	if c.controller != nil {
+		c.t.Fatalf("hand-over with the pre-cutover controller still running")
+	}
+	if !c.standalone {
+		if out, err := helpers.RunGC(c.preEnv, "", "supervisor", "stop", "--wait"); err != nil {
+			c.t.Logf("stopping the pre-cutover supervisor: %v\n%s", err, out)
+		}
 	}
 	c.city.Env = c.env
 	c.preEnv = c.env
+	c.standalone = false
 }
 
 // splitLegacyDoltPort is the host's shared Dolt default, which no acceptance
@@ -504,9 +597,9 @@ func (c *splitE2ECity) runFirstHalf() string {
 
 	if !c.city.WaitForCondition(func() bool {
 		return len(c.workerLog().closed) >= splitStepsBeforeStop && c.budget() == 0
-	}, splitPhaseTimeout) {
+	}, splitPhaseTimeout()) {
 		c.dumpDiagnostics(root)
-		c.t.Fatalf("worker did not close %d steps within %s", splitStepsBeforeStop, splitPhaseTimeout)
+		c.t.Fatalf("worker did not close %d steps within %s", splitStepsBeforeStop, splitPhaseTimeout())
 	}
 	c.stop()
 	return root
@@ -519,6 +612,10 @@ const splitDoltProbeTimeout = "dolt config probe timed out"
 // start boots the city under its own supervisor.
 func (c *splitE2ECity) start() {
 	c.t.Helper()
+	if c.standalone {
+		c.startStandaloneController()
+		return
+	}
 	helpers.RunGC(c.city.Env, "", "supervisor", "stop", "--wait") //nolint:errcheck // a stale supervisor must not carry an old env
 	if out, err := c.tryStart(); err != nil {
 		c.t.Fatalf("gc start: %v\n%s", err, out)
@@ -544,6 +641,90 @@ func (c *splitE2ECity) stop() {
 	if out, err := c.city.GC("stop", c.dir); err != nil {
 		c.t.Fatalf("gc stop: %v\n%s", err, out)
 	}
+	if c.controller != nil {
+		select {
+		case <-c.controllerDone:
+		case <-time.After(splitControllerStopTimeout):
+			c.t.Fatalf("the standalone controller did not exit within %s of gc stop", splitControllerStopTimeout)
+		}
+		c.controller = nil
+	}
+}
+
+// splitControllerStopTimeout bounds how long a standalone controller may take
+// to exit after `gc stop`.
+const splitControllerStopTimeout = time.Minute
+
+// startStandaloneController runs `gc start --foreground` in the background,
+// which never touches a supervisor, and waits for the controller to answer.
+func (c *splitE2ECity) startStandaloneController() {
+	c.t.Helper()
+	gcPath, err := helpers.ResolveGCPath(c.city.Env)
+	if err != nil {
+		c.t.Fatalf("resolve gc: %v", err)
+	}
+	logPath := filepath.Join(c.root, "standalone-controller.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		c.t.Fatalf("open controller log: %v", err)
+	}
+	cmd := exec.Command(gcPath, "start", "--foreground", c.dir)
+	cmd.Dir = c.dir
+	cmd.Env = c.city.Env.List()
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		c.t.Fatalf("gc start --foreground: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		_ = logFile.Close()
+		close(done)
+	}()
+	c.controller, c.controllerDone = cmd, done
+	if !c.city.WaitForCondition(func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+		}
+		_, err := c.city.GC("status", "--city", c.dir)
+		return err == nil && c.events().counts["controller.started"] > c.controllerStarts()
+	}, 2*time.Minute) {
+		log, _ := os.ReadFile(logPath)
+		c.t.Fatalf("the standalone controller did not come up within 2m:\n%s", log)
+	}
+	select {
+	case <-done:
+		log, _ := os.ReadFile(logPath)
+		c.t.Fatalf("the standalone controller exited during startup:\n%s", log)
+	default:
+	}
+	c.startedControllers++
+}
+
+// controllerStarts is how many controller.started events this test has
+// already accounted for.
+func (c *splitE2ECity) controllerStarts() int { return c.startedControllers }
+
+// stopStandaloneController is the cleanup for a standalone controller the
+// test did not stop itself.
+func (c *splitE2ECity) stopStandaloneController() {
+	if c.controller == nil {
+		return
+	}
+	helpers.RunGC(c.city.Env, c.dir, "stop", c.dir) //nolint:errcheck // best-effort cleanup
+	select {
+	case <-c.controllerDone:
+	case <-time.After(splitControllerStopTimeout):
+		if c.controller.Process != nil {
+			_ = c.controller.Process.Kill()
+		}
+		<-c.controllerDone
+	}
+	c.controller = nil
 }
 
 func (c *splitE2ECity) authorSplit() {
@@ -596,7 +777,7 @@ func (c *splitE2ECity) finishAndAssert(root string) {
 	}
 	c.start()
 
-	deadline := time.Now().Add(splitFinishTimeout)
+	deadline := time.Now().Add(splitPhaseTimeout())
 	for {
 		if v := c.violations(); len(v) > 0 {
 			// Give the loop a moment to repeat so the evidence is unambiguous.
@@ -609,7 +790,7 @@ func (c *splitE2ECity) finishAndAssert(root string) {
 		}
 		if time.Now().After(deadline) {
 			c.dumpDiagnostics(root)
-			c.t.Fatalf("workflow root %s did not close within %s", root, splitFinishTimeout)
+			c.t.Fatalf("workflow root %s did not close within %s", root, splitPhaseTimeout())
 		}
 		time.Sleep(time.Second)
 	}

@@ -39,6 +39,7 @@ go_test(
         "beads_topology_test.go",
         "binary_test.go",
         "city_test.go",
+        "claude_state_home_guard_test.go",
         "claude_state_test.go",
         "env_test.go",
         "provider_shim_test.go",

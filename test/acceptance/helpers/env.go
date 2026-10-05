@@ -39,6 +39,9 @@ type Env struct {
 	// toolHome is the HOME every bd and dolt child of this Env gets in place
 	// of the real one. See tool_home.go.
 	toolHome string
+	// hostClaudeState lets the Claude state seeding write under the real user
+	// home. Only WithHostClaudeState sets it; see claude_state.go.
+	hostClaudeState bool
 }
 
 // NewEnv creates an isolated environment with the minimum inherited
@@ -220,7 +223,7 @@ func installServiceManagerShims(gcHome string) (string, error) {
 // package, and With mutates in place, so a test that needs its own PATH or
 // provider selection must take a copy rather than reach into the shared one.
 func (e *Env) Clone() *Env {
-	clone := &Env{vars: make(map[string]string, len(e.vars)), toolHome: e.toolHome}
+	clone := &Env{vars: make(map[string]string, len(e.vars)), toolHome: e.toolHome, hostClaudeState: e.hostClaudeState}
 	for k, v := range e.vars {
 		clone.vars[k] = v
 	}
@@ -248,6 +251,17 @@ func (e *Env) WithHostHome() *Env {
 		home = lu.HomeDir
 	}
 	e.vars["HOME"] = home
+	return e
+}
+
+// WithHostClaudeState lets the harness seed Claude onboarding and project
+// trust into the real user home's ~/.claude.json, returning the Env for
+// chaining. Every other Env is refused that write (claude_state.go). It is for
+// the one tier that drives the operator's own Claude CLI through the host HOME
+// with no config dir of its own (tutorial goldens), where trust has to live in
+// that file for a test city not to stop on the trust dialog.
+func (e *Env) WithHostClaudeState() *Env {
+	e.hostClaudeState = true
 	return e
 }
 
