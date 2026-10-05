@@ -30,6 +30,7 @@ go_test(
         "@go_sdk//:srcs",
     ],
     embed = [":providerledger"],
+    tags = ["external"],
     deps = [
         "//internal/bazeltest",
         "//internal/testenv",

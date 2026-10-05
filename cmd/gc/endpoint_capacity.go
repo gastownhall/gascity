@@ -203,6 +203,10 @@ type endpointCapacityState struct {
 	// refusals counts this open episode's refusals per session ID, for probe
 	// rotation. Cleared when the endpoint closes.
 	refusals map[string]int
+	// windowRefused is the templates refused since the endpoint last closed.
+	// The starts a close admits resolve concurrently, in arbitrary order, so
+	// the valve asks it whether a refusal was alone in its window.
+	windowRefused map[string]struct{}
 	// valve holds each refused template's valve history. It is keyed by
 	// template (per endpoint), so replacement beads keep the count and two
 	// seats of one template cannot mask each other.
@@ -224,6 +228,9 @@ type capacityValveState struct {
 	// streak is the consecutive probe refusals with no success of this
 	// template; streakCloses is the endpoint's close count when it began.
 	streak, streakCloses int
+	// alone is whether no other template was refused before this template's
+	// previous refusal in that refusal's close window.
+	alone bool
 }
 
 // newEndpointCapacityGuard returns a guard on the given clock.
@@ -249,9 +256,10 @@ func (g *endpointCapacityGuard) stateLocked(k endpointKey) *endpointCapacityStat
 	st := g.endpoints[k]
 	if st == nil {
 		st = &endpointCapacityState{
-			refusalsBy: make(map[string]int),
-			refusals:   make(map[string]int),
-			valve:      make(map[string]capacityValveState),
+			refusalsBy:    make(map[string]int),
+			refusals:      make(map[string]int),
+			windowRefused: make(map[string]struct{}),
+			valve:         make(map[string]capacityValveState),
 		}
 		g.endpoints[k] = st
 	}
@@ -272,6 +280,7 @@ func (g *endpointCapacityGuard) onTransition(t resilience.Transition) {
 		st.openSince = time.Time{}
 		st.closes++
 		clear(st.refusals)
+		clear(st.windowRefused)
 	}
 }
 
@@ -319,12 +328,18 @@ func (g *endpointCapacityGuard) Admit(k endpointKey, sessionID, template string)
 	}
 	g.probeMu.Unlock()
 	if !allowed {
-		g.mu.Lock()
-		g.stateLocked(k).deferredAdmit++
-		g.mu.Unlock()
+		g.noteDeferredAdmit(k)
 		return nil, false
 	}
 	return t, true
+}
+
+// noteDeferredAdmit counts a start on k deferred at admission, for the
+// per-tick record.
+func (g *endpointCapacityGuard) noteDeferredAdmit(k endpointKey) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.stateLocked(k).deferredAdmit++
 }
 
 // HoldsPendingCreate reports whether never-started pending creates on k must
@@ -451,8 +466,10 @@ func (g *endpointCapacityGuard) resolve(t *capacityTicket, v startVerdict) bool 
 // reports whether the valve tripped for the template. It trips on either:
 //   - capacityValveThreshold refusals that each followed another template's
 //     success with no other template refused since the template's previous
-//     refusal (a first refusal never counts), so outages and steady
-//     saturation, where other templates are refused too, never count; or
+//     refusal, nor before it in that refusal's close window (a first refusal
+//     never counts), so outages and steady saturation, where other templates
+//     are refused too, never count whatever order a herd's refusals resolve
+//     in; or
 //   - the backstop: capacityBackstopRefusals probe refusals in a row with no
 //     success of the template while the endpoint closed
 //     capacityBackstopCloses times. Only probe refusals count: the herd a
@@ -467,11 +484,14 @@ func (st *endpointCapacityState) noteRefusal(sessionID, template string, probe b
 		}
 	}
 	prev, seen := st.valve[template]
+	_, again := st.windowRefused[template]
+	alone := len(st.windowRefused) == 0 || (again && len(st.windowRefused) == 1)
+	st.windowRefused[template] = struct{}{}
 	st.refusalSeq++
 	st.refusalsBy[template]++
 	otherRefusals := st.refusalSeq - st.refusalsBy[template]
 	v := prev
-	if seen && st.successes > prev.successes && otherRefusals == prev.otherRefusals {
+	if seen && prev.alone && st.successes > prev.successes && otherRefusals == prev.otherRefusals {
 		v.count++
 	}
 	if probe {
@@ -481,7 +501,7 @@ func (st *endpointCapacityState) noteRefusal(sessionID, template string, probe b
 		v.streak++
 	}
 	v.lastRefusalAt = now
-	v.successes, v.otherRefusals = st.successes, otherRefusals
+	v.successes, v.otherRefusals, v.alone = st.successes, otherRefusals, alone
 	if v.count >= capacityValveThreshold ||
 		(v.streak >= capacityBackstopRefusals && st.closes-v.streakCloses >= capacityBackstopCloses) {
 		delete(st.valve, template)

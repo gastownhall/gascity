@@ -89,6 +89,32 @@ bazel test //internal/config:config_test --test_output=errors  # one test, verbo
 bazel run //cmd/gc -- --help            # run a binary
 ```
 
+**Agents should prefer Bazel for repeated build+test cycles.** The first
+`bazel build //...` costs the same as `go build ./...`; every subsequent
+one is a cache hit (seconds). The remote CAS is shared across all
+worktrees, all CI runs, and all developers — a test that passed once on
+CI never re-executes for you locally.
+
+**When to use which:**
+
+| situation | use |
+|---|---|
+| iterating on one package's tests | `bazel test //pkg/...` (remote-cached) |
+| verifying a cross-cutting change | `bazel test //...` |
+| quick syntax check of one file | `go build ./pkg/` (no server startup) |
+| running the existing CI gate | `make test-cover-*` (go test, unchanged) |
+| adding a new dependency | `go get` then `make bazel-sync` |
+
+**Test sharding:** the heavy suites (cmd/gc, scripts, api, examples) are
+sharded for parallel remote execution. Sharded helpers re-exec the test
+binary; if you add a helper-spawning test, strip `TEST_SHARD_INDEX` /
+`TEST_TOTAL_SHARDS` from the helper's env (see `sanitizedBaseEnv` in
+`cmd/gc/fast_loop_helpers_test.go`).
+
+**Do NOT commit machine-specific endpoints.** `grpc://127.0.0.1:5005x`
+endpoints belong in `.bazelrc.local` (gitignored) for dev machines, or
+in CI secrets. The repo's `.bazelrc` has no executor hardcoded.
+
 ## When you change BUILD-relevant things
 
 After adding a package, a file, or changing imports:
@@ -97,6 +123,8 @@ After adding a package, a file, or changing imports:
 make bazel-sync     # regenerates BUILD files + the repo source tree
 git add -A && git commit -m "build: sync"   # the CI gate checks this
 ```
+
+The CI gate `BUILD files are in sync` fails if you forget.
 
 ## Troubleshooting
 
