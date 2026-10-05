@@ -966,6 +966,7 @@ go_test(
         "dead_assignee_event_test.go",
         "dead_assignee_repair_test.go",
         "demand_divergence_test.go",
+        "demand_pool_scale_check_leg_test.go",
         "demand_serve_agreement_test.go",
         "demand_snapshot_binding_fingerprint_test.go",
         "demand_snapshot_budget_test.go",
