@@ -80,7 +80,7 @@ const (
 	// pin (DOLT_VERSION env values) and one bundled-pack-pins step,
 	// `scripts/check-embedded-pins --skip-bundled`. No new job, trigger or
 	// permission.
-	expectedNightlyExecutionHash = "169aed2b551cffa4d123a19e8723d7f29a5d405b1e95f7a9bb4e28e53639d175"
+	expectedNightlyExecutionHash = "3147999d25f7936dbaf3d5b8922de8299e06072f1822b8fb9e9191259fe5dcf7"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 
