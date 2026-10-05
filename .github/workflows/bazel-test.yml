@@ -251,6 +251,17 @@ jobs:
               echo 'build:remote-exec --remote_max_connections=8'
             elif [ -z "$BAZEL_REMOTE_EXECUTOR" ]; then
               echo 'build --config=fork-cache'
+              # REAPI zstd for the anonymous cache's transfers, only while
+              # rbe-cache (:8443) advertises it: cache-zstd-probe.sh asks its
+              # GetCapabilities, and any failure means no flag (never a failed
+              # step). A probe, not a repository variable: fork pull_request
+              # runs see no vars. Never under remote-exec: rbe-west's trusted
+              # schedulers and the fork edge advertise no compressor, and
+              # Bazel then refuses the remote. Transport only, so action keys
+              # are unchanged.
+              if bash tools/rbe/cache-zstd-probe.sh; then
+                echo 'build:fork-cache --remote_cache_compression'
+              fi
             fi
           } > .bazelrc.local
 
