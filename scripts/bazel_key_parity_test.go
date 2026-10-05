@@ -14,8 +14,8 @@ import (
 // others only if every phase hashes its actions identically. So every flag
 // that can change an action key lives unconditionally in the committed
 // .bazelrc, and the per-mode configs (remote-exec, fork-cache), the CI policy
-// configs bazel.yml's lanes pass (ci, sole-run), the lines CI and developers
-// write to the gitignored .bazelrc.local and the rc setup-bazel generates for
+// config bazel.yml's lanes pass (ci), the lines CI and developers write to
+// the gitignored .bazelrc.local and the rc setup-bazel generates for
 // bazel.yml carry transport and result policy only: endpoints, credentials,
 // timeouts, download and parallelism policy, retries and test-result reuse.
 //
@@ -29,9 +29,9 @@ const bazelPinnedTestPath = "/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
 
 // bazelNonKeyConfigs select how actions run, where results come from and
 // whether a result is reused or retried; none may change what an action is.
-// remote-exec and fork-cache are the remote modes (CI and pre-push); ci and
-// sole-run are bazel.yml's lane policy.
-var bazelNonKeyConfigs = []string{"remote-exec", "fork-cache", "ci", "sole-run"}
+// remote-exec and fork-cache are the remote modes (CI and pre-push); ci is
+// bazel.yml's lane policy.
+var bazelNonKeyConfigs = []string{"remote-exec", "fork-cache", "ci"}
 
 // bazelClientEnvAllowed may be forwarded from the client environment: it is a
 // debug override (internal/bazeltest) that no phase sets, so an unset value
@@ -178,7 +178,7 @@ func TestBazelKeyParity(t *testing.T) {
 		"build:fork-cache --remote_cache=" + ep + " --remote_instance_name oss\n" +
 		"build:fork-cache --noremote_local_fallback --experimental_circuit_breaker_strategy=failure\n" +
 		"test:ci --flaky_test_attempts=1\n" +
-		"test:sole-run --nocache_test_results --experimental_remote_cache_eviction_retries=0\n" +
+		"test:ci --experimental_remote_cache_eviction_retries=0\n" +
 		"build:other --define=gotags=x\n" +
 		"try-import %workspace%/.bazelrc.local\n"
 	if errs := checkBazelKeyParity(good); len(errs) != 0 {
@@ -201,11 +201,10 @@ func TestBazelKeyParity(t *testing.T) {
 		"no remote-exec":       strings.ReplaceAll(good, "build:remote-exec", "build:gone"),
 		"no fork-cache":        strings.ReplaceAll(good, "build:fork-cache", "build:gone"),
 		"no ci":                strings.ReplaceAll(good, "test:ci", "test:gone"),
-		"no sole-run":          strings.ReplaceAll(good, "test:sole-run", "test:gone"),
 		"ci PATH copy":         good + "test:ci --test_env=PATH=" + bazelPinnedTestPath + "\n",
 		"ci define":            good + "test:ci --define=gotags=x\n",
 		"ci test timeout":      good + "test:ci --test_timeout=1100\n",
-		"sole-run action env":  good + "build:sole-run --action_env=GOFLAGS=-mod=mod\n",
+		"ci action env":        good + "build:ci --action_env=GOFLAGS=-mod=mod\n",
 	} {
 		if len(checkBazelKeyParity(rc)) == 0 {
 			t.Errorf("%s: expected an error for .bazelrc fixture:\n%s", name, rc)

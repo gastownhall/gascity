@@ -146,12 +146,14 @@ func TestBazelCIConfigMatchesBazelTestRC(t *testing.T) {
 	}
 	for _, line := range []string{
 		"test:ci --flaky_test_attempts=1",
-		"test:sole-run --nocache_test_results",
-		"test:sole-run --experimental_remote_cache_eviction_retries=0",
+		"test:ci --experimental_remote_cache_eviction_retries=0",
 	} {
 		if !strings.Contains(rc, "\n"+line+"\n") {
 			t.Errorf(".bazelrc lacks %q", line)
 		}
+	}
+	if strings.Contains(rc, "--nocache_test_results") {
+		t.Errorf(".bazelrc forces test re-execution with --nocache_test_results; lanes should reuse cached results")
 	}
 }
 
@@ -200,8 +202,8 @@ var gascityRequiredChecks = []string{
 	"BUILD files in sync",
 }
 
-// Each lane's exact bazel command. Every lane passes --config=ci; no lane
-// passes --config=sole-run before G0.
+// Each lane's exact bazel command. Every lane passes --config=ci and reuses
+// cached test results; there is no --config=sole-run.
 var multiLaneCommands = map[string]string{
 	"unit":        "test --config=ci --keep_going //...",
 	"acceptance":  "test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test",

@@ -114,10 +114,8 @@ build:fork-cache --remote_max_connections=4
 # G0: a retried pass never stands in for a run (CI lanes restate the
 # single-attempt pin above).
 test:ci --flaky_test_attempts=1
-# Lanes that are the only pre-merge run: every test executes, and a remote
-# cache eviction fails the action rather than silently re-running it.
-test:sole-run --nocache_test_results
-test:sole-run --experimental_remote_cache_eviction_retries=0
+# A remote cache eviction fails the action rather than silently re-running it.
+test:ci --experimental_remote_cache_eviction_retries=0
 
 # The tagged suites, as bazel-test.yml runs them (byte-identical values:
 # --define and --test_timeout are key inputs). --test_timeout stays at or
