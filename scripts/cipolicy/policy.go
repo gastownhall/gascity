@@ -113,7 +113,11 @@ const (
 	// a step exporting GC_TEST_FAILURE_ARTIFACT_DIR to $GITHUB_ENV and an
 	// `if: failure()` pinned upload-artifact step for that directory. No new
 	// job, trigger, permission or secret.
-	expectedCIExecutionHash     = "f09cde554074ba570ce7d1e480ac538a2641c15539f120c3d028ee8ee63d07ac"
+	//
+	// Bumped again (gc 1.5.1 proxied idle timeout): the proxied-native job's
+	// test step also selects TestProxiedIdleTimeoutReapAndTransparentRestart,
+	// and the step is renamed to say so. No new job, trigger or permission.
+	expectedCIExecutionHash     = "397707507a2bd7ef933973b577e21d41380c30dd104e39a313fb14a23f430fb8"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

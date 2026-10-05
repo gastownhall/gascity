@@ -708,11 +708,11 @@ jobs:
             exit 1
           fi
           dolt version
-      - name: Proxied-native lifecycle and safety
+      - name: Proxied-native lifecycle and safety, and the proxied idle timeout
         run: |
           set -euo pipefail
           go test -tags acceptance_a -timeout 45m -count=1 -v \
-            -run 'TestProxiedNativeLifecycle$|TestProxiedNativeSafety$' \
+            -run 'TestProxiedNativeLifecycle$|TestProxiedNativeSafety$|TestProxiedIdleTimeoutReapAndTransparentRestart$' \
             ./test/acceptance/ 2>&1 | tee "${RUNNER_TEMP}/proxied-native.log"
       - name: Upload acceptance failure diagnostics
         if: ${{ failure() }}
