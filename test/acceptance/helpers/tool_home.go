@@ -10,11 +10,12 @@ import (
 	"github.com/gastownhall/gascity/test/toolhome"
 )
 
-// The acceptance suite runs gc with the operator's real HOME (the platform
-// supervisor refuses an override; gc isolates through GC_HOME). bd and dolt
-// never see it: every Env carries a tool home, and each bd or dolt child is
-// re-homed under it — through ToolList or ToolCommand when the suite forks it,
-// through LinkBeadsTooling's wrapper when gc finds it on PATH or via BD_BIN.
+// The acceptance suite runs gc with an isolated HOME under GC_HOME (see
+// NewEnv); only the real-provider tiers hand it the operator's own
+// (WithHostHome). bd and dolt see neither: every Env carries a tool home, and
+// each bd or dolt child is re-homed under it — through ToolList or ToolCommand
+// when the suite forks it, through LinkBeadsTooling's wrapper when gc finds it
+// on PATH or via BD_BIN.
 // See package toolhome for what bd resolves from HOME and the incident this
 // guards against.
 

@@ -1,0 +1,38 @@
+name: llvm-archive-cache
+description: >
+  Restore the hermetic LLVM release archive (MODULE.bazel's llvm_dist, about
+  1.9 GB) into setup-bazel's repository cache from a runner cache entry of
+  its own, keyed on the archive's sha256. Run it after setup-bazel and before
+  any bazel command. A caller that saves setup-bazel's runner cache saves
+  this entry first (outputs path and key) and then deletes path, so the
+  runner cache never carries the archive.
+outputs:
+  path:
+    description: The archive's directory in the repository cache (content_addressable/sha256/<sha256>)
+    value: ${{ steps.locate.outputs.path }}
+  key:
+    description: The archive's runner cache key (bazel-llvm-v1-<os>-<sha256>)
+    value: ${{ steps.locate.outputs.key }}
+  cache-hit:
+    description: '"true" when the archive was restored'
+    value: ${{ steps.restore.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - name: Locate the LLVM archive
+      id: locate
+      shell: bash
+      env:
+        # setup-bazel's --repository_cache (BAZEL_CI_CACHE_DIR/repo).
+        REPO_CACHE: ${{ runner.temp }}/bazel-ci-cache/repo
+      run: bash "$GITHUB_ACTION_PATH/locate.sh"
+
+    # Exact key only: another digest's archive is of no use. Bazel checks the
+    # restored file against its sha256 on use, like every repository cache
+    # hit, so a poisoned entry cannot change what executes.
+    - name: Restore the LLVM archive
+      id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.locate.outputs.path }}
+        key: ${{ steps.locate.outputs.key }}

@@ -297,7 +297,7 @@ func TestLedgerMarkerRaceCountsStartOnce(t *testing.T) {
 			assertPass := func(step string, c ledgerCensus, wantClear bool) {
 				t.Helper()
 				view := l.View()
-				if got := cityInFlight(view, c, nil); got != 1 {
+				if got, _ := cityInFlight(view, c, nil); got != 1 {
 					t.Fatalf("cacheFirst=%v %s: in flight %d, want 1", cacheFirst, step, got)
 				}
 				e := view[0]
@@ -321,7 +321,7 @@ func TestLedgerMarkerRaceCountsStartOnce(t *testing.T) {
 				assertPass("committed, cache lagging", stale, false)
 			}
 			assertPass("committed, marker visible", fresh, true)
-			if got := cityInFlight(l.View(), fresh, nil); got != 1 {
+			if got, _ := cityInFlight(l.View(), fresh, nil); got != 1 {
 				t.Fatalf("cacheFirst=%v after clear: in flight %d, want 1 (the row's lease)", cacheFirst, got)
 			}
 			if l.Transition("g", ledgerCommitted, ledgerCleared, nil) || l.Commit("g", ledgerMarker{Incarnation: 5}) {
@@ -610,7 +610,7 @@ func TestLedgerReserveTTL(t *testing.T) {
 			t.Fatalf("TTL releases refunded %d, want 1 (the grant; a create debited none)", refunds)
 		}
 		view := l.View()
-		if got := cityInFlight(view, ledgerCensus{}, nil); got != 1 {
+		if got, _ := cityInFlight(view, ledgerCensus{}, nil); got != 1 {
 			t.Fatalf("in flight after TTL release = %d, want 1 (the issued grant)", got)
 		}
 		if got := endpointOutstanding(view)["provider:half-open"]; got != 0 {
