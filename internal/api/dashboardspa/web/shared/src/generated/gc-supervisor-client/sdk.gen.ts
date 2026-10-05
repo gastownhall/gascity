@@ -1135,6 +1135,8 @@ export const createSession = <ThrowOnError extends boolean = false>(options: Opt
 
 /**
  * Post v0 city by city name sling
+ *
+ * A convoy bead is expanded and each open child is routed separately, as gc sling does; the response then carries batch counts and one children entry per child. When some children were routed and others failed, the sling has already changed state, so it answers 200 with status "partial" and the per-child outcomes (failed children carry a reason) rather than an error; do not retry such a request as a whole. A convoy sling that routed no child and failed at least one is an error, as before.
  */
 export const postV0CityByCityNameSling = <ThrowOnError extends boolean = false>(options: Options<PostV0CityByCityNameSlingData, ThrowOnError>) => (options.client ?? client).post<PostV0CityByCityNameSlingResponses, PostV0CityByCityNameSlingErrors, ThrowOnError>({
     url: '/v0/city/{cityName}/sling',

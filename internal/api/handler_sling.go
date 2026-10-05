@@ -42,20 +42,65 @@ type slingBody struct {
 }
 
 type slingResponse struct {
-	Status         string             `json:"status"`
-	Target         string             `json:"target"`
-	Formula        string             `json:"formula,omitempty"`
-	Bead           string             `json:"bead,omitempty"`
-	WorkflowID     string             `json:"workflow_id,omitempty"`
-	RootBeadID     string             `json:"root_bead_id,omitempty"`
-	AttachedBeadID string             `json:"attached_bead_id,omitempty"`
-	Mode           string             `json:"mode,omitempty"`
-	Warnings       []string           `json:"warnings,omitempty"`
-	DashboardURL   string             `json:"dashboard_url,omitempty" doc:"Absolute dashboard deep link for the slung work: the run detail view when a graph workflow was launched, otherwise the runs list. Present only when the serving process also hosts the dashboard (the supervisor listener); the standalone controller API omits it."`
-	Run            *RunRef            `json:"run,omitempty" doc:"Reference to the launched run resource, present only when a graph workflow was launched (the same run the Location header addresses)."`
-	MoleculeID     string             `json:"molecule_id,omitempty" doc:"Root of the formula wisp attached to the bead, when a non-graph (v1) formula was attached. Matches gc sling --json molecule_id."`
-	ConvoyID       string             `json:"convoy_id,omitempty" doc:"Auto-convoy tracking the routed bead, when one was created or reused. Matches gc sling --json convoy_id."`
-	Batch          *SlingBatchSummary `json:"batch,omitempty" doc:"Per-child outcome counts, present only when the bead was a convoy whose open children were routed one by one (as gc sling does). Matches gc sling --json batch."`
+	Status         string              `json:"status" enum:"slung,partial" doc:"slung: the sling completed. partial: a convoy sling routed some children and failed others; the request changed state, so do not retry it as a whole. children names each child's outcome, and batch.failed counts the failures."`
+	Target         string              `json:"target"`
+	Formula        string              `json:"formula,omitempty"`
+	Bead           string              `json:"bead,omitempty"`
+	WorkflowID     string              `json:"workflow_id,omitempty"`
+	RootBeadID     string              `json:"root_bead_id,omitempty"`
+	AttachedBeadID string              `json:"attached_bead_id,omitempty"`
+	Mode           string              `json:"mode,omitempty"`
+	Warnings       []string            `json:"warnings,omitempty"`
+	DashboardURL   string              `json:"dashboard_url,omitempty" doc:"Absolute dashboard deep link for the slung work: the run detail view when a graph workflow was launched, otherwise the runs list. Present only when the serving process also hosts the dashboard (the supervisor listener); the standalone controller API omits it."`
+	Run            *RunRef             `json:"run,omitempty" doc:"Reference to the launched run resource, present only when a graph workflow was launched (the same run the Location header addresses)."`
+	MoleculeID     string              `json:"molecule_id,omitempty" doc:"Root of the formula wisp attached to the bead, when a non-graph (v1) formula was attached. Matches gc sling --json molecule_id."`
+	ConvoyID       string              `json:"convoy_id,omitempty" doc:"Auto-convoy tracking the routed bead, when one was created or reused. Matches gc sling --json convoy_id."`
+	Batch          *SlingBatchSummary  `json:"batch,omitempty" doc:"Per-child outcome counts, present only when the bead was a convoy whose open children were routed one by one (as gc sling does). Matches gc sling --json batch."`
+	Children       []SlingChildOutcome `json:"children,omitempty" doc:"One entry per child of the expanded convoy, in the order gc sling reports them: routed, failed (with the reason) or skipped. Present whenever batch is."`
+}
+
+// Sling response statuses (slingResponse.Status).
+const (
+	// SlingStatusSlung is a sling that completed.
+	SlingStatusSlung = "slung"
+	// SlingStatusPartial is a convoy sling that routed some children and
+	// failed others.
+	SlingStatusPartial = "partial"
+)
+
+// SlingChildOutcome is the outcome of one child of a convoy sling. It mirrors
+// the per-child lines gc sling prints for a convoy.
+type SlingChildOutcome struct {
+	BeadID     string `json:"bead_id" doc:"Child bead ID."`
+	Outcome    string `json:"outcome" enum:"routed,failed,skipped" doc:"routed: this sling routed the child (or attached a formula to it). failed: routing it failed; see reason. skipped: already routed to the target, or not open (see status)."`
+	Status     string `json:"status,omitempty" doc:"The child's bead status when it was skipped because it was not open."`
+	Reason     string `json:"reason,omitempty" doc:"Why routing the child failed. Present only for outcome failed."`
+	Formula    string `json:"formula,omitempty" doc:"Formula attached to the child, when one was."`
+	WorkflowID string `json:"workflow_id,omitempty" doc:"Graph workflow launched for the child, when one was."`
+	MoleculeID string `json:"molecule_id,omitempty" doc:"Root of the formula wisp attached to the child, when a non-graph formula was attached."`
+}
+
+// slingChildOutcomes projects the domain's per-child results onto the wire.
+func slingChildOutcomes(children []sling.SlingChildResult) []SlingChildOutcome {
+	if len(children) == 0 {
+		return nil
+	}
+	out := make([]SlingChildOutcome, 0, len(children))
+	for _, child := range children {
+		outcome := SlingChildOutcome{
+			BeadID:     child.BeadID,
+			Outcome:    child.Outcome(),
+			Status:     child.Status,
+			Formula:    child.FormulaName,
+			WorkflowID: child.WorkflowID,
+			MoleculeID: child.WispRootID,
+		}
+		if child.Failed {
+			outcome.Reason = child.FailReason
+		}
+		out = append(out, outcome)
+	}
+	return out
 }
 
 // SlingBatchSummary counts the outcome of a convoy sling that routed each
@@ -204,6 +249,15 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		opts.BeadOrFormula = strings.TrimSpace(body.Bead)
 	}
 	result, err := sl.Dispatch(ctx, opts, store)
+	partial := err != nil && result.PartialFailure()
+	if partial {
+		// Some children were routed before others failed. A bare error would
+		// hide which ones, and a client retrying the whole request would route
+		// them again; answer with the per-child outcomes instead, as gc sling
+		// prints them.
+		fmt.Fprintf(apiSlingStderr(), "gc api sling: %s partially failed: %v\n", opts.BeadOrFormula, err) //nolint:errcheck
+		err = nil
+	}
 	if err != nil {
 		var conflictErr *sourceworkflow.ConflictError
 		if errors.As(err, &conflictErr) {
@@ -237,8 +291,12 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 	if len(sourceWorkflowScanMessages) > 0 {
 		warnings = append(append([]string(nil), result.MetadataErrors...), sourceWorkflowScanMessages...)
 	}
+	status := SlingStatusSlung
+	if partial {
+		status = SlingStatusPartial
+	}
 	resp := &slingResponse{
-		Status:     "slung",
+		Status:     status,
 		Target:     body.Target,
 		Bead:       body.Bead,
 		Mode:       mode,
@@ -255,6 +313,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 			Skipped:       result.Skipped,
 			Idempotent:    result.IdempotentCt,
 		}
+		resp.Children = slingChildOutcomes(result.Children)
 	}
 	explicitFormula := opts.IsFormula || opts.OnFormula != ""
 	// The domain names the formula it cooked. On a plain bead that is the

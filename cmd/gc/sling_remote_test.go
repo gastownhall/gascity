@@ -284,6 +284,66 @@ func TestCmdSlingRemote_JSONCarriesConvoyAndBatch(t *testing.T) {
 	}
 }
 
+const partialConvoySlingResponse = `{"status":"partial","target":"mayor","bead":"BL-c","mode":"direct",` +
+	`"batch":{"container_type":"convoy","total":3,"routed":1,"failed":1,"skipped":1,"idempotent":0},` +
+	`"children":[{"bead_id":"BL-1","outcome":"routed"},{"bead_id":"BL-2","outcome":"failed","reason":"setting gc.routed_to on BL-2: boom"},{"bead_id":"BL-3","outcome":"skipped","status":"closed"}]}`
+
+// A remote convoy sling that routed some children and failed others prints the
+// same per-child lines the local path prints, and exits non-zero as it does.
+func TestCmdSlingRemote_PartialConvoyPrintsPerChildResults(t *testing.T) {
+	srv, _ := newCannedSlingServer(t, partialConvoySlingResponse)
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"mayor", "BL-c"},
+		false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, &out, &errb)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1 for a partial convoy; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	for _, want := range []string{
+		"Expanding convoy BL-c (3 children, 2 open)",
+		"Slung BL-1 → mayor",
+		"Skipped BL-3 (status: closed)",
+		"Slung 1/3 children of BL-c → mayor",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("stdout missing %q:\n%s", want, out.String())
+		}
+	}
+	for _, want := range []string{"Failed BL-2: setting gc.routed_to on BL-2: boom", "1/2 children failed"} {
+		if !strings.Contains(errb.String(), want) {
+			t.Errorf("stderr missing %q:\n%s", want, errb.String())
+		}
+	}
+}
+
+// --json for a partial convoy reports success=false with the per-child
+// outcomes, and exits non-zero.
+func TestCmdSlingRemote_PartialConvoyJSON(t *testing.T) {
+	srv, _ := newCannedSlingServer(t, partialConvoySlingResponse)
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"mayor", "BL-c"},
+		false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", true /*json*/, &out, &errb)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1 for a partial convoy; stderr=%q", code, errb.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("output not JSON: %v (%q)", err, out.String())
+	}
+	if got["success"] != false || got["status"] != "partial" {
+		t.Errorf("json = %v, want success=false status=partial", got)
+	}
+	children, ok := got["children"].([]any)
+	if !ok || len(children) != 3 {
+		t.Fatalf("json children = %v, want 3 entries", got["children"])
+	}
+	failed, _ := children[1].(map[string]any)
+	if failed["bead_id"] != "BL-2" || failed["outcome"] != "failed" || failed["reason"] == "" {
+		t.Errorf("failed child = %v", failed)
+	}
+}
+
 // newOnAttachServer answers POST /sling with slingResp and GET /bead/{id} with
 // beadResp, or with a 500 when beadResp is empty. It counts the bead lookups.
 func newOnAttachServer(t *testing.T, slingResp, beadResp string) (*httptest.Server, *int) {

@@ -2873,6 +2873,20 @@ export const zSlingBatchSummary = z.object({
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
+export const zSlingChildOutcome = z.object({
+    bead_id: z.string(),
+    formula: z.string().optional(),
+    molecule_id: z.string().optional(),
+    outcome: z.enum([
+        'routed',
+        'failed',
+        'skipped'
+    ]),
+    reason: z.string().optional(),
+    status: z.string().optional(),
+    workflow_id: z.string().optional()
+});
+
 export const zSlingInputBody = z.object({
     attached_bead_id: z.string().optional(),
     bead: z.string().optional(),
@@ -2895,6 +2909,7 @@ export const zSlingResponse = z.object({
     attached_bead_id: z.string().optional(),
     batch: zSlingBatchSummary.optional(),
     bead: z.string().optional(),
+    children: z.array(zSlingChildOutcome).nullish(),
     convoy_id: z.string().optional(),
     dashboard_url: z.string().optional(),
     formula: z.string().optional(),
@@ -2902,7 +2917,7 @@ export const zSlingResponse = z.object({
     molecule_id: z.string().optional(),
     root_bead_id: z.string().optional(),
     run: zRunRef.optional(),
-    status: z.string(),
+    status: z.enum(['slung', 'partial']),
     target: z.string(),
     warnings: z.array(z.string()).nullish(),
     workflow_id: z.string().optional()
