@@ -117,11 +117,12 @@ func TestHandleSessionCreateRefusesDemandOnlySingletonAgent(t *testing.T) {
 		t.Fatalf("decode problem body: %v", err)
 	}
 	assertDemandOnlyRefusalMessage(t, problem.Detail)
+	assertCompatDemandOnlyCode(t, problem.Detail)
 	assertNoSessionBeads(t, fs)
 }
 
 // createDemandOnlyPoolSession seeds the controller-owned pool session of the
-// demand-only singleton myrig/worker, asleep.
+// demand-only singleton myrig/worker, asleep under a user hold.
 func createDemandOnlyPoolSession(t *testing.T, fs *fakeState) string {
 	t.Helper()
 	fs.cfg.Agents[0].MinActiveSessions = intPtr(0)
@@ -132,24 +133,30 @@ func createDemandOnlyPoolSession(t *testing.T, fs *fakeState) string {
 		"pool_managed":   "true",
 		"state":          "asleep",
 		"session_name":   "myrig--worker",
+		"held_until":     "2999-01-01T00:00:00Z",
+		"sleep_reason":   "user-hold",
 	}, "worker pool session")
 	return b.ID
 }
 
-func assertNoWakeRecorded(t *testing.T, fs *fakeState, id string) {
+// assertWakeRecorded checks that a refused wake still recorded the wake, as
+// `gc session wake` does (SESSION-RECON-019): its hold is cleared, so the
+// session is free to start the next time the pool has work for it.
+func assertWakeRecorded(t *testing.T, fs *fakeState, id string) {
 	t.Helper()
 	got, err := fs.cityBeadStore.Get(id)
 	if err != nil {
 		t.Fatalf("Get(%s): %v", id, err)
 	}
-	if got.Metadata["wake_request"] != "" {
-		t.Fatalf("wake_request = %q after a refused wake, want none recorded", got.Metadata["wake_request"])
+	if got.Metadata["held_until"] != "" || got.Metadata["sleep_reason"] != "" {
+		t.Fatalf("held_until = %q, sleep_reason = %q after the wake, want the hold cleared", got.Metadata["held_until"], got.Metadata["sleep_reason"])
 	}
 }
 
-// #6858: `gc session wake` reports that a demand-only singleton's pool session
-// will not start; the API wake must refuse it the same way the create does,
-// with a dedicated code clients can tell apart from a malformed request.
+// #6858: `gc session wake` records the wake (clearing holds) and then reports
+// that a demand-only singleton's pool session will not start; the API wake
+// does the same, refusing with a dedicated code clients can tell apart from a
+// malformed request.
 func TestHumaHandleSessionWakeRefusesDemandOnlySingletonSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	id := createDemandOnlyPoolSession(t, fs)
@@ -167,7 +174,10 @@ func TestHumaHandleSessionWakeRefusesDemandOnlySingletonSession(t *testing.T) {
 		t.Fatalf("problem = status %d code %q, want status %d code %q", problem.Status, problem.Code, http.StatusBadRequest, apierr.DemandOnlySingleton.Code)
 	}
 	assertDemandOnlyRefusalMessage(t, problem.Detail)
-	assertNoWakeRecorded(t, fs, id)
+	if !strings.Contains(problem.Detail, "wake recorded") {
+		t.Fatalf("refusal detail = %q, want it to say the wake was recorded", problem.Detail)
+	}
+	assertWakeRecorded(t, fs, id)
 }
 
 // The create refusal carries the same dedicated code.
@@ -202,5 +212,15 @@ func TestHandleSessionWakeRefusesDemandOnlySingletonSession(t *testing.T) {
 		t.Fatalf("decode problem body: %v", err)
 	}
 	assertDemandOnlyRefusalMessage(t, problem.Detail)
-	assertNoWakeRecorded(t, fs, id)
+	assertCompatDemandOnlyCode(t, problem.Detail)
+	assertWakeRecorded(t, fs, id)
+}
+
+// assertCompatDemandOnlyCode checks that a compatibility route names the same
+// registered problem code as the Huma routes, as its detail prefix.
+func assertCompatDemandOnlyCode(t *testing.T, detail string) {
+	t.Helper()
+	if want := apierr.DemandOnlySingleton.Code + ": "; !strings.HasPrefix(detail, want) {
+		t.Fatalf("compat refusal detail = %q, want prefix %q (the Huma routes' code)", detail, want)
+	}
 }

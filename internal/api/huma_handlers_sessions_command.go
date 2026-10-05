@@ -1103,9 +1103,6 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
-	if msg := s.sessionWakeRefusal(store, id); msg != "" {
-		return nil, apierr.DemandOnlySingleton.Msg(msg)
-	}
 
 	res, err := session.NewStore(store).WakeSession(id, time.Now().UTC(), session.WakeOpts{RejectClosed: true})
 	if err != nil {
@@ -1134,6 +1131,13 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 	sessionName := res.Info.SessionNameMetadata
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
+	}
+	// The wake is recorded and its holds are cleared, but a demand-only
+	// singleton's pool session starts only from pool demand: refuse instead of
+	// starting it, as `gc session wake` does (#6858).
+	if msg := demandOnlySingletonWakeRefusal(s.state.Config(), res.Info); msg != "" {
+		s.state.Enqueue(reconcilekey.Session(id))
+		return nil, apierr.DemandOnlySingleton.Msg(msg)
 	}
 	// The wake is recorded (wake_request=explicit). While the name's on_death
 	// hook is queued or running, the reconciler owns the start, as it does

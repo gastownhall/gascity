@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -39,29 +38,19 @@ func demandOnlySingletonCreateRefusal(cfg *config.City, agentCfg config.Agent) s
 	return "cannot create a session: " + session.DemandOnlySingletonExplanation(agentCfg.QualifiedName())
 }
 
-// sessionWakeRefusal returns the message refusing an explicit wake of session
-// id before anything is recorded, or "" when the wake may proceed. A failed
-// read is not a refusal: WakeSession reads the same bead next and reports the
-// failure through its own error mapping.
-func (s *Server) sessionWakeRefusal(store beads.SessionStore, id string) string {
-	info, err := session.NewStore(store).Get(id)
-	if err != nil {
-		return ""
-	}
-	return demandOnlySingletonWakeRefusal(s.state.Config(), info)
-}
-
 // demandOnlySingletonWakeRefusal returns the message refusing an explicit wake
-// of info, or "" when the wake may proceed. A wake of a demand-only singleton's
-// pool session that is not running would be recorded but never acted on: the
-// reconciler starts it only from pool demand (#6858). The classification is
-// shared with `gc session wake` (session.DemandOnlySingletonWakeRefused).
+// of info, or "" when the wake may proceed. The wake is recorded first (holds
+// and quarantine are cleared, as `gc session wake` does), but a demand-only
+// singleton's pool session that is not running will not start from it: the
+// reconciler starts it only from pool demand (#6858, SESSION-RECON-019). The
+// classification is shared with `gc session wake`
+// (session.DemandOnlySingletonWakeRefused).
 func demandOnlySingletonWakeRefusal(cfg *config.City, info session.Info) string {
 	agentCfg, ok := findAgentByQualifiedTemplate(cfg, info.Template)
 	if !ok || !session.DemandOnlySingletonWakeRefused(cfg, &agentCfg, info) {
 		return ""
 	}
-	return "cannot wake session " + info.ID + ": " + session.DemandOnlySingletonExplanation(agentCfg.QualifiedName())
+	return "wake recorded for session " + info.ID + ", but it will not start: " + session.DemandOnlySingletonExplanation(agentCfg.QualifiedName())
 }
 
 func (s *Server) resolveAgentCreateContext(template, alias string) (agentCreateContext, error) {
