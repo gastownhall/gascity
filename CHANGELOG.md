@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrading Notes
+
+- **A formula step that means "blocked, stop the graph" must close with
+  `gc.outcome=fail`.** A formula step bead (one carrying `gc.step_ref`) that
+  closes with `gc.outcome=pass` now satisfies its dependents even when it also
+  records `gc.work_outcome=blocked`. Plain work beads are unchanged: a blocked
+  work outcome still withholds their dependents.
+- **`bead.closed` is emitted for every close gc observes.** A
+  `Update(status=closed)` now emits `bead.closed` instead of `bead.updated`,
+  re-closing an already-closed bead no longer re-emits, and orders and
+  autoclose now fire for closes made with `bd` or `gc bd` (#6860).
+- **API session creates for a demand-only singleton are refused.** `POST
+  /sessions` with `kind: "agent"` for a pool agent with
+  `max_active_sessions = 1`, `min_active_sessions = 0` and no
+  `[[named_session]]` now returns 400 `demand-only-singleton` instead of 202
+  and a session that never started. An API wake of such a session records the
+  wake (clearing holds) and returns the same error (#6858).
+
+### Fixed
+
+- `gc stop` stops the city's nudge pollers and never reopens a stopped city's
+  store (#6857).
+- The supervisor event stream includes cities started after the client
+  connected (#6861).
+- Workflows no longer stall after a formula step that passed but recorded a
+  blocked work outcome.
+- Claude Code's feedback-survey dismissal no longer submits a stray `0` into
+  the session (#6859; backport of #7013).
+- A gateway login reaches the Claude provider readiness probe.
+- `POST /v0/city/{city}/sling` routes and cooks formulas exactly like
+  `gc sling`: a rig bead's default formula is cooked in the rig store, title
+  and vars reach the default formula, and a convoy's children are routed one
+  by one. When some convoy children fail, the response is 200 with status
+  `partial` and `batch.failures`; `gc sling` against a remote city exits 1 for
+  it. `gc sling --on` stays refused for a remote city.
+- A session can close a bead it claimed under its session bead id without
+  `--force`; `gc bd close` runs bd as that id. Claims recorded under a session
+  name or alias still need `--force` (#6324). The close's audit actor is the
+  assignee string.
+- `gc session pin` and `gc session wake` report a demand-only singleton's pool
+  session honestly instead of succeeding (#6858).
+
 ## [1.5.0] - 2026-10-05
 
 ### Upgrading Notes
