@@ -296,18 +296,19 @@ func TestStartDrift_PermissionDenied_DescriptiveError(t *testing.T) {
 // supervisor never serves /health within the 5s budget, gc start must
 // surface a descriptive error and exit 1 — never hang.
 //
-// We exercise this by replacing the supervisor binary with one that
-// exits immediately (it is /bin/true wrapped in a `gc supervisor run`
-// shim that just sleeps without binding the port). The kill+spawn
-// succeeds; PollReady cannot get a 200; the timeout fires.
+// The relaunched supervisor runs the same gc binary as the invoking
+// `gc start`: an in-place upgrade, the only drift gc start auto-restarts.
+// A supervisor whose relaunch binary is a different file than this gc is
+// refused as a different installation before any restart, so the stuck
+// replacement cannot come from swapping the binary on disk. Instead the
+// replacement's single-instance lock is made unacquirable (see
+// blockSupervisorRelaunch), so its `gc supervisor run` exits at startup.
+// The kill+spawn succeeds; PollReady cannot get a 200; the timeout fires.
 func TestStartDrift_RestartTimeout_ExitsNonZero(t *testing.T) {
 	requireLinuxProcExe(t)
 	tc := setupDriftDirectScenario(t)
 
-	// Replace the binary on disk with a no-op shim so the post-kill
-	// spawn never serves /health.
-	stuckShim := writeStuckSupervisorShim(t, tc.binaryPath)
-	defer os.Remove(stuckShim) //nolint:errcheck
+	blockSupervisorRelaunch(t, tc.gcHome)
 
 	out, exitCode, elapsed := runDriftCommand(t, tc.newBinary, tc.env, tc.cityDir,
 		"start", tc.cityDir)
@@ -321,6 +322,15 @@ func TestStartDrift_RestartTimeout_ExitsNonZero(t *testing.T) {
 	if !strings.Contains(out, "Last known pid=") {
 		t.Errorf("output missing %q (operator needs the pid to investigate)\n%s",
 			"Last known pid=", out)
+	}
+	// Pin the cause: the timeout must come from the induced startup
+	// failure of the relaunched supervisor, not from something else.
+	logData, err := os.ReadFile(filepath.Join(tc.gcHome, "supervisor.log"))
+	if err != nil {
+		t.Fatalf("reading supervisor log: %v", err)
+	}
+	if !strings.Contains(string(logData), "opening supervisor lock") {
+		t.Errorf("relaunched supervisor did not fail on the blocked lock; the timeout has another cause\nsupervisor.log:\n%s", logData)
 	}
 	// The whole invocation must NOT hang — restart timeout (~5s) +
 	// detection (~0.1s) + kill/spawn (~0.5s); pin a generous outer
@@ -1105,26 +1115,35 @@ func setDaemonKeyForTest(src, key, value string) string {
 	return strings.Join(next, "")
 }
 
-// writeStuckSupervisorShim overwrites binaryPath with a shell script
-// that, when invoked as `<binary> supervisor run`, sleeps without
-// binding the /health port. Used by the restart-timeout test.
-func writeStuckSupervisorShim(t *testing.T, binaryPath string) string {
+// blockSupervisorRelaunch makes every `gc supervisor run` started after it
+// under gcHome exit at startup, before binding /health, while the supervisor
+// already running keeps serving. The running supervisor holds its
+// single-instance flock on the open lock-file inode, so moving that file
+// aside leaves it untouched; a directory put at the lock path then makes a
+// new supervisor's open fail with EISDIR, which (unlike a permission change)
+// also holds when the test runs as root. The lock file is restored on
+// cleanup. Used by the restart-timeout test.
+func blockSupervisorRelaunch(t *testing.T, gcHome string) {
 	t.Helper()
-	script := "#!/bin/sh\nif [ \"$1\" = \"supervisor\" ] && [ \"$2\" = \"run\" ]; then\n  exec sleep 60\nfi\nexec '" + binaryPath + ".real' \"$@\"\n"
-	// Move the real binary aside so the shim can fall through for any
-	// non-`supervisor run` subcommand the drift code path needs.
-	realPath := binaryPath + ".real"
-	if err := os.Rename(binaryPath, realPath); err != nil {
-		t.Fatalf("moving real binary: %v", err)
+	lockPath := filepath.Join(gcHome, "supervisor.lock")
+	info, err := os.Stat(lockPath)
+	if err != nil {
+		t.Fatalf("locating the running supervisor's lock file: %v", err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("supervisor lock %s is not a regular file (mode %s)", lockPath, info.Mode())
+	}
+	heldPath := lockPath + ".held"
+	if err := os.Rename(lockPath, heldPath); err != nil {
+		t.Fatalf("moving supervisor lock aside: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = os.Remove(binaryPath)
-		_ = os.Rename(realPath, binaryPath)
+		_ = os.RemoveAll(lockPath)
+		_ = os.Rename(heldPath, lockPath)
 	})
-	if err := os.WriteFile(binaryPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("writing stuck shim: %v", err)
+	if err := os.Mkdir(lockPath, 0o700); err != nil {
+		t.Fatalf("blocking supervisor lock path: %v", err)
 	}
-	return binaryPath
 }
 
 // requireUserSystemd skips the test unless `systemctl --user
