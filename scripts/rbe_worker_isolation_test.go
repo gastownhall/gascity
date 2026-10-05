@@ -78,6 +78,10 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 			if got, want := step.Env["RBE_WIRE_ZSTD"], "${{ vars.RBE_WIRE_ZSTD || '0' }}"; got != want {
 				t.Errorf("worker step RBE_WIRE_ZSTD = %q, want %q", got, want)
 			}
+			// The dedicated zread host; the worker refuses zstd without it.
+			if got, want := step.Env["RBE_WIRE_ZSTD_READ_URL"], "${{ vars.RBE_WIRE_ZSTD_READ_URL || '' }}"; got != want {
+				t.Errorf("worker step RBE_WIRE_ZSTD_READ_URL = %q, want %q", got, want)
+			}
 			// The OSS pool keeps the script's defaults (tier oss, :443) and its
 			// own certificate; the fork tier is rbe-fork-pool.yml's alone.
 			for _, k := range []string{"WORKER_TIER", "RBE_WEST_PORT"} {
@@ -282,7 +286,9 @@ func TestRBEWorkerScriptSlotEgressRuleOrder(t *testing.T) {
 // With isolation off (the RBE_ACTION_ISOLATION=0 rollback) the script must
 // render exactly the worker.json it rendered before O1. The golden file is
 // origin/main's jq program before O1 (4d0e45d9eb^) rendered with the same
-// arguments; regenerate it only for an intended worker config change.
+// arguments; regenerate it only for an intended worker config change. One
+// since: REMOTE_CAS instance "oss", not "" (rbe-west FU2 confines the worker
+// certificate to "oss"-only listeners).
 //
 // The same program renders the fork tier (WORKER_TIER=fork, rbe-fork-pool.yml),
 // always with isolation on: CAS instance oss-fork on :8444, no action cache
@@ -349,6 +355,9 @@ func TestRBEWorkerJSONIsolationOffMatchesPreO1(t *testing.T) {
 				t.Errorf("tier fork: %v", err)
 			}
 		}
+		for _, err := range checkNoDefaultInstance(out) {
+			t.Errorf("tier %s: %v", c.tier, err)
+		}
 	}
 
 	// RBE_WIRE_ZSTD=1, both tiers: fetches zstd (REMOTE_READ, the read-only
@@ -378,8 +387,8 @@ func TestRBEWorkerJSONIsolationOffMatchesPreO1(t *testing.T) {
 		for _, c := range []struct {
 			tier, host, isolation, instance, read string
 		}{
-			{"oss", "grpcs://rbe-west.example.invalid:443", "{}", "", ""},
-			{"oss", "grpcs://rbe-west.example.invalid:443", "{}", "", "grpcs://rbe-west-read.example.invalid:443"},
+			{"oss", "grpcs://rbe-west.example.invalid:443", "{}", "oss", ""},
+			{"oss", "grpcs://rbe-west.example.invalid:443", "{}", "oss", "grpcs://rbe-west-read.example.invalid:443"},
 			{"fork", "grpcs://rbe-fork.example.invalid:8444", iso, "oss-fork", ""},
 		} {
 			extra := []string{"--argjson", "zstd", "true"}
@@ -389,6 +398,9 @@ func TestRBEWorkerJSONIsolationOffMatchesPreO1(t *testing.T) {
 				wantRead = c.read
 			}
 			out := render(t, c.tier, c.host, c.isolation, extra...)
+			for _, err := range checkNoDefaultInstance(out) {
+				t.Errorf("tier %s (zstd): %v", c.tier, err)
+			}
 			if c.tier == "fork" {
 				for _, err := range checkForkWorkerJSON(out, c.host) {
 					t.Errorf("fork tier: %v", err)
@@ -448,6 +460,31 @@ func workerJSONProgram(t *testing.T, root string) (prog, iso string) {
 		t.Fatalf("%s: no isolation='{...}' worker config", rbeWorkerScript)
 	}
 	return m[1], i[1]
+}
+
+// checkNoDefaultInstance checks that no remote store in a worker.json uses
+// instance "": rbe-west's edges confine both worker certificates to
+// listeners that know "oss" (the OSS tier, :443, FU2) or "oss-fork" (the
+// fork tier, :8444) alone, where "" is 'instance_name' not configured.
+func checkNoDefaultInstance(out []byte) []error {
+	var cfg struct {
+		Stores []struct {
+			Name string `json:"name"`
+			GRPC *struct {
+				InstanceName *string `json:"instance_name"`
+			} `json:"grpc"`
+		} `json:"stores"`
+	}
+	if err := json.Unmarshal(out, &cfg); err != nil {
+		return []error{err}
+	}
+	var errs []error
+	for _, s := range cfg.Stores {
+		if s.GRPC != nil && (s.GRPC.InstanceName == nil || *s.GRPC.InstanceName == "") {
+			errs = append(errs, errors.New("store "+s.Name+" uses instance \"\"; want oss (or oss-fork)"))
+		}
+	}
+	return errs
 }
 
 // checkForkWorkerJSON checks a fork-tier worker.json: every endpoint is the

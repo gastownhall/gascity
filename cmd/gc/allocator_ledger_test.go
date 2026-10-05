@@ -1,14 +1,18 @@
 package main
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // Ledger tests run the ledger on the synctest bubble's clock (time.Now) and
-// move time with advance, so TTLs, veto backoff and the lag bound are exact.
+// move time with advance, so the TTL and the hard bound are exact.
 // The pure verdicts take the pass's time explicitly.
 
 var (
@@ -16,13 +20,13 @@ var (
 	ledgerRowB = rowKey{Leg: "sessions", ID: "gc-b"}
 )
 
-func ledgerGrant(id string, k rowKey, cost int) ledgerEntry {
-	return ledgerEntry{ID: id, Kind: kindGrant, Key: k, Endpoint: "provider:p", Cost: cost, ReservedAt: time.Now(), State: ledgerReserved}
+func ledgerGrant(id string, k rowKey) ledgerEntry {
+	return ledgerEntry{ID: id, Kind: kindGrant, Key: k, Endpoint: "provider:p", ReservedAt: time.Now(), State: ledgerReserved}
 }
 
 func ledgerCreate(id, token string) ledgerEntry {
 	return ledgerEntry{
-		ID: id, Kind: kindCreate, Key: rowKey{Leg: "sessions"}, Endpoint: "provider:p", Cost: 1,
+		ID: id, Kind: kindCreate, Key: rowKey{Leg: "sessions"}, Endpoint: "provider:p",
 		ReservedAt: time.Now(), State: ledgerReserved, Marker: ledgerMarker{InstanceToken: token},
 	}
 }
@@ -37,7 +41,8 @@ func ledgerEntryOf(l *intentLedger, id string) (ledgerEntry, bool) {
 	return ledgerEntry{}, false
 }
 
-// ledgerCensusOf builds a ledgerCensus that holds every leg of its rows plus legs.
+// ledgerCensusOf builds a ledgerCensus that holds every leg of its rows plus
+// legs, as complete exact legs: no read start.
 func ledgerCensusOf(rows map[rowKey]ledgerRow, legs ...string) ledgerCensus {
 	c := ledgerCensus{Rows: rows, Legs: make(map[string]bool)}
 	for k := range rows {
@@ -66,7 +71,7 @@ func TestLedgerStateMachineEveryEdge(t *testing.T) {
 	// entries have left the ledger.
 	into := func(from ledgerState) *intentLedger {
 		l := newIntentLedger(time.Now)
-		l.Reserve(ledgerGrant("g", ledgerRowA, 1))
+		l.Reserve(ledgerGrant("g", ledgerRowA))
 		path := map[ledgerState][]ledgerState{
 			ledgerIssued:    {ledgerIssued},
 			ledgerCommitted: {ledgerIssued, ledgerCommitted},
@@ -119,7 +124,7 @@ func TestLedgerTransitionsAreCompareAndSwap(t *testing.T) {
 	issued, released := 0, 0
 	for i := 0; i < 500; i++ {
 		l := newIntentLedger(time.Now)
-		l.Reserve(ledgerGrant("g", ledgerRowA, 1))
+		l.Reserve(ledgerGrant("g", ledgerRowA))
 		var wg sync.WaitGroup
 		start := make(chan struct{})
 		var issueOK, releaseOK bool
@@ -150,25 +155,19 @@ func TestLedgerTransitionsAreCompareAndSwap(t *testing.T) {
 }
 
 // Kills: releasing an issued grant (a start losing its slot mid-flight);
-// releasing a landed effect or a veto; a refund on a lost release; issuing a
-// grant that was released or that belongs to another key.
+// releasing a landed effect; a refund on a lost release; a refund for a
+// create (C5.7: creates debit nothing); issuing a grant that was released or
+// that belongs to another key.
 func TestLedgerOnlyReservedEntriesRelease(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		l := newIntentLedger(time.Now)
 		for _, id := range []string{"issued", "committed", "failed"} {
-			l.Reserve(ledgerGrant(id, rowKey{Leg: "sessions", ID: id}, 1))
+			l.Reserve(ledgerGrant(id, rowKey{Leg: "sessions", ID: id}))
 			l.Issue(id, rowKey{Leg: "sessions", ID: id})
 		}
 		l.Commit("committed", ledgerMarker{Incarnation: 2})
 		l.Fail("failed", true, ledgerMarker{Incarnation: 2})
-		l.Veto(ledgerRowB, time.Time{}, "fresh-read")
-		var vetoID string
-		for _, e := range l.View() {
-			if e.Kind == kindVeto {
-				vetoID = e.ID
-			}
-		}
-		for _, id := range []string{"issued", "committed", "failed", vetoID} {
+		for _, id := range []string{"issued", "committed", "failed"} {
 			if refund, ok := l.Release(id); ok || refund != 0 {
 				t.Errorf("Release(%s) = (%d, %v), want (0, false)", id, refund, ok)
 			}
@@ -177,7 +176,7 @@ func TestLedgerOnlyReservedEntriesRelease(t *testing.T) {
 			}
 		}
 
-		l.Reserve(ledgerGrant("g", ledgerRowA, 1))
+		l.Reserve(ledgerGrant("g", ledgerRowA))
 		if l.Issue("g", ledgerRowB) {
 			t.Fatal("Issue of another key's grant won")
 		}
@@ -194,23 +193,27 @@ func TestLedgerOnlyReservedEntriesRelease(t *testing.T) {
 		if l.Issue("g", ledgerRowA) {
 			t.Fatal("Issue after release won")
 		}
+		if refund, ok := l.Release("c"); !ok || refund != 0 {
+			t.Fatalf("Release(reserved create) = (%d, %v), want (0, true)", refund, ok)
+		}
 	})
 }
 
-// Kills: Reserve accepting a veto, an empty ID or a duplicate ID (two
+// Kills: Reserve accepting another kind, an empty ID or a duplicate ID (two
 // entries for one grant would debit twice and clear once); a create with no
 // instance token, which an ambiguous outcome could never clear by marker
-// (N60).
-func TestLedgerReserveRefusesDuplicateEmptyAndVeto(t *testing.T) {
+// (N60), or no sessions leg, which no read could ever clear by absence.
+func TestLedgerReserveRefusesDuplicateEmptyAndOtherKinds(t *testing.T) {
 	l := newIntentLedger(time.Now)
-	if !l.Reserve(ledgerGrant("g", ledgerRowA, 1)) {
+	if !l.Reserve(ledgerGrant("g", ledgerRowA)) {
 		t.Fatal("Reserve refused a fresh grant")
 	}
 	for name, e := range map[string]ledgerEntry{
-		"duplicate":                        ledgerGrant("g", ledgerRowB, 1),
-		"empty ID":                         ledgerGrant("", ledgerRowB, 1),
-		"veto":                             {ID: "v", Kind: kindVeto, Key: ledgerRowB},
-		"create without an instance token": {ID: "c", Kind: kindCreate, Key: rowKey{Leg: "sessions"}, Cost: 1}, // N60
+		"duplicate":                        ledgerGrant("g", ledgerRowB),
+		"empty ID":                         ledgerGrant("", ledgerRowB),
+		"another kind":                     {ID: "v", Kind: kindGrant + 1, Key: ledgerRowB},
+		"create without an instance token": {ID: "c", Kind: kindCreate, Key: rowKey{Leg: "sessions"}}, // N60
+		"create without its sessions leg":  {ID: "c", Kind: kindCreate, Marker: ledgerMarker{InstanceToken: "tok"}},
 	} {
 		if l.Reserve(e) {
 			t.Errorf("Reserve(%s) won", name)
@@ -228,51 +231,48 @@ func TestLedgerReserveRefusesDuplicateEmptyAndVeto(t *testing.T) {
 // Kills: clearing before the marker is in the census (R18: a pass counts
 // the effect zero times); clearing a grant on an older incarnation; clearing
 // a grant whose row is missing from a leg the census did not read; never
-// clearing on a later incarnation or a closed row; a refund on a landed
-// create; a grant with no recorded incarnation clearing on any open row
-// (N60).
+// clearing on a later incarnation or a closed row; a grant with no recorded
+// incarnation clearing on any open row (N60).
 func TestLedgerClearsCreateOnRowMarkerGrantOnIncarnation(t *testing.T) {
 	now := time.Unix(1_000, 0)
 	created := ledgerEntry{
-		ID: "c", Kind: kindCreate, Key: rowKey{Leg: "sessions", ID: "gc-new"}, Cost: 1, State: ledgerCommitted,
+		ID: "c", Kind: kindCreate, Key: rowKey{Leg: "sessions", ID: "gc-new"}, State: ledgerCommitted, SettledAt: now,
 		WroteRow: true, Marker: ledgerMarker{RowID: "gc-new", InstanceToken: "tok"},
 	}
 	ambiguous := created
-	ambiguous.Key.ID, ambiguous.Marker.RowID = "", ""
+	ambiguous.Key.ID, ambiguous.Marker.RowID, ambiguous.Ambiguous = "", "", true
 	granted := ledgerEntry{
-		ID: "g", Kind: kindGrant, Key: ledgerRowA, Cost: 1, State: ledgerCommitted, WroteRow: true,
-		ProviderCalled: true, Marker: ledgerMarker{Incarnation: 5},
+		ID: "g", Kind: kindGrant, Key: ledgerRowA, State: ledgerCommitted, WroteRow: true, SettledAt: now,
+		Marker: ledgerMarker{Incarnation: 5},
 	}
 	issued := granted
 	issued.State, issued.WroteRow = ledgerIssued, false
 	unmarked := granted
 	unmarked.Marker.Incarnation = 0
 	tests := []struct {
-		name   string
-		e      ledgerEntry
-		c      ledgerCensus
-		clears bool
-		refund int
+		name string
+		e    ledgerEntry
+		c    ledgerCensus
+		want ledgerClear
 	}{
-		{"create, row not yet visible", created, ledgerCensusOf(map[rowKey]ledgerRow{ledgerRowA: {}}), false, 0},
-		{"create, row ID on its leg", created, ledgerCensusOf(map[rowKey]ledgerRow{{"sessions", "gc-new"}: {}}), true, 0},
-		{"create, row ID on another leg", created, ledgerCensusOf(map[rowKey]ledgerRow{{"rig", "gc-new"}: {}}), true, 0},
-		{"create, token only (ambiguous outcome)", ambiguous, ledgerCensusOf(map[rowKey]ledgerRow{{"sessions", "gc-x"}: {InstanceToken: "tok"}}), true, 0},
-		{"create, other token", ambiguous, ledgerCensusOf(map[rowKey]ledgerRow{{"sessions", "gc-x"}: {InstanceToken: "other"}}), false, 0},
-		{"grant, census on the old incarnation", granted, ledgerCensusOf(map[rowKey]ledgerRow{ledgerRowA: {Incarnation: 4}}), false, 0},
-		{"grant, census at the PreWake generation", granted, ledgerCensusOf(map[rowKey]ledgerRow{ledgerRowA: {Incarnation: 5}}), true, 0},
-		{"grant, census at a later generation", granted, ledgerCensusOf(map[rowKey]ledgerRow{ledgerRowA: {Incarnation: 9}}), true, 0},
-		{"grant, row closed (gone from its read leg)", granted, ledgerCensusOf(nil, "sessions"), true, 0},
-		{"grant, row's leg not in the census", granted, ledgerCensusOf(map[rowKey]ledgerRow{{"rig", "gc-r"}: {}}), false, 0},
-		{"grant, no recorded incarnation (N60)", unmarked, ledgerCensusOf(map[rowKey]ledgerRow{ledgerRowA: {Incarnation: 4}}), false, 0},
-		{"grant, no recorded incarnation, row closed", unmarked, ledgerCensusOf(nil, "sessions"), true, 0},
-		{"grant, issued with the row visible", issued, ledgerCensusOf(map[rowKey]ledgerRow{ledgerRowA: {Incarnation: 9}}), false, 0},
+		{"create, row not yet visible", created, ledgerCensusOf(map[rowKey]ledgerRow{ledgerRowA: {}}), clearKeep},
+		{"create, row ID on its leg", created, ledgerCensusOf(map[rowKey]ledgerRow{{"sessions", "gc-new"}: {}}), clearWritten},
+		{"create, row ID on another leg", created, ledgerCensusOf(map[rowKey]ledgerRow{{"rig", "gc-new"}: {}}), clearWritten},
+		{"create, token only (ambiguous outcome)", ambiguous, ledgerCensusOf(map[rowKey]ledgerRow{{"sessions", "gc-x"}: {InstanceToken: "tok"}}), clearWritten},
+		{"create, other token", ambiguous, ledgerCensusOf(map[rowKey]ledgerRow{{"sessions", "gc-x"}: {InstanceToken: "other"}}), clearKeep},
+		{"grant, census on the old incarnation", granted, ledgerCensusOf(map[rowKey]ledgerRow{ledgerRowA: {Incarnation: 4}}), clearKeep},
+		{"grant, census at the PreWake generation", granted, ledgerCensusOf(map[rowKey]ledgerRow{ledgerRowA: {Incarnation: 5}}), clearWritten},
+		{"grant, census at a later generation", granted, ledgerCensusOf(map[rowKey]ledgerRow{ledgerRowA: {Incarnation: 9}}), clearWritten},
+		{"grant, row closed (gone from its read leg)", granted, ledgerCensusOf(nil, "sessions"), clearWritten},
+		{"grant, row's leg not in the census", granted, ledgerCensusOf(map[rowKey]ledgerRow{{"rig", "gc-r"}: {}}), clearKeep},
+		{"grant, no recorded incarnation (N60)", unmarked, ledgerCensusOf(map[rowKey]ledgerRow{ledgerRowA: {Incarnation: 4}}), clearKeep},
+		{"grant, no recorded incarnation, row closed", unmarked, ledgerCensusOf(nil, "sessions"), clearWritten},
+		{"grant, issued with the row visible", issued, ledgerCensusOf(map[rowKey]ledgerRow{ledgerRowA: {Incarnation: 9}}), clearKeep},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			clears, refund := tt.e.clearVerdict(tt.c, now)
-			if clears != tt.clears || refund != tt.refund {
-				t.Fatalf("clearVerdict = (%v, %d), want (%v, %d)", clears, refund, tt.clears, tt.refund)
+			if got := tt.e.clearVerdict(tt.c, now); got != tt.want {
+				t.Fatalf("clearVerdict = %d, want %d", got, tt.want)
 			}
 		})
 	}
@@ -287,7 +287,7 @@ func TestLedgerMarkerRaceCountsStartOnce(t *testing.T) {
 		fresh := ledgerCensusOf(map[rowKey]ledgerRow{ledgerRowA: {Incarnation: 5, StartLease: true}})
 		for _, cacheFirst := range []bool{false, true} {
 			l := newIntentLedger(time.Now)
-			l.Reserve(ledgerGrant("g", ledgerRowA, 1))
+			l.Reserve(ledgerGrant("g", ledgerRowA))
 			l.Issue("g", ledgerRowA)
 			// The pass sees whichever order the race produced.
 			seen := stale
@@ -301,7 +301,7 @@ func TestLedgerMarkerRaceCountsStartOnce(t *testing.T) {
 					t.Fatalf("cacheFirst=%v %s: in flight %d, want 1", cacheFirst, step, got)
 				}
 				e := view[0]
-				clears, _ := e.clearVerdict(c, time.Now())
+				clears := e.clearVerdict(c, time.Now()) != clearKeep
 				if clears != wantClear {
 					t.Fatalf("cacheFirst=%v %s: clear=%v, want %v", cacheFirst, step, clears, wantClear)
 				}
@@ -331,434 +331,249 @@ func TestLedgerMarkerRaceCountsStartOnce(t *testing.T) {
 	})
 }
 
-// Kills: a refund on a provider-called failure (#45); no refund on a
-// prepare failure (START-013); a failure that wrote nothing waiting for a
-// marker that never comes; a refund for a prepaid grant.
-func TestLedgerNoWriteFailuresClearImmediatelyWithRefund(t *testing.T) {
+// Kills: a failure that wrote nothing waiting for a marker that never comes;
+// a failure that wrote a row clearing before its marker; a refund for an
+// issued grant (C5.7: once issued, its token is spent whatever the outcome,
+// so the only refund, Release, loses).
+func TestLedgerNoWriteFailuresClearImmediately(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		l := newIntentLedger(time.Now)
-		mk := func(e ledgerEntry, providerCalled, wroteRow bool) {
+		mk := func(e ledgerEntry, wroteRow bool) {
 			l.Reserve(e)
 			l.Transition(e.ID, ledgerReserved, ledgerIssued, nil)
-			if providerCalled {
-				l.MarkProviderCalled(e.ID)
-			}
 			l.Fail(e.ID, wroteRow, ledgerMarker{Incarnation: 5})
 		}
-		mk(ledgerGrant("prepare-failure", rowKey{"sessions", "a"}, 1), false, false)
-		mk(ledgerGrant("prepaid-prepare-failure", rowKey{"sessions", "b"}, 0), false, false)
-		mk(ledgerGrant("start-failed", rowKey{"sessions", "c"}, 1), true, true)
-		mk(ledgerGrant("finalizer-after-start", rowKey{"sessions", "d"}, 1), true, false)
-		mk(ledgerCreate("create-failed", "tok"), false, false)
+		mk(ledgerGrant("prepare-failure", rowKey{"sessions", "a"}), false)
+		mk(ledgerGrant("start-failed", rowKey{"sessions", "c"}), true)
+		mk(ledgerCreate("create-failed", "tok"), false)
 		// The census shows none of their markers.
-		c := ledgerCensusOf(map[rowKey]ledgerRow{{"sessions", "a"}: {}, {"sessions", "b"}: {}, {"sessions", "c"}: {}, {"sessions", "d"}: {}})
-		want := map[string]struct {
-			clears bool
-			refund int
-		}{
-			"prepare-failure":         {true, 1},
-			"prepaid-prepare-failure": {true, 0},
-			"start-failed":            {false, 0}, // wrote a row: waits for its marker
-			"finalizer-after-start":   {true, 0},
-			"create-failed":           {true, 1},
+		c := ledgerCensusOf(map[rowKey]ledgerRow{{"sessions", "a"}: {}, {"sessions", "c"}: {}})
+		want := map[string]ledgerClear{
+			"prepare-failure": clearUnwritten,
+			"start-failed":    clearKeep, // wrote a row: waits for its marker
+			"create-failed":   clearUnwritten,
 		}
 		for _, e := range l.View() {
-			clears, refund := e.clearVerdict(c, time.Now())
-			if w := want[e.ID]; clears != w.clears || refund != w.refund {
-				t.Errorf("%s: clearVerdict = (%v, %d), want (%v, %d)", e.ID, clears, refund, w.clears, w.refund)
+			if got := e.clearVerdict(c, time.Now()); got != want[e.ID] {
+				t.Errorf("%s: clearVerdict = %d, want %d", e.ID, got, want[e.ID])
 			}
-		}
-		// MarkProviderCalled only marks an issued grant.
-		l.Reserve(ledgerGrant("reserved", ledgerRowB, 1))
-		l.MarkProviderCalled("reserved")
-		if e, _ := ledgerEntryOf(l, "reserved"); e.ProviderCalled {
-			t.Fatal("MarkProviderCalled marked a reserved grant")
-		}
-	})
-}
-
-// Kills (R24): a landed effect whose marker never reaches the census stuck
-// forever; repair before the bound; repair rereading every pass after a read
-// installed the row; a refund for a provider-called grant proven absent; a
-// second outcome overwriting a clearing one.
-func TestLedgerLagRepairAfterBound(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		l := newIntentLedger(time.Now)
-		l.Reserve(ledgerCreate("c", "tok"))
-		l.Transition("c", ledgerReserved, ledgerIssued, nil)
-		l.Commit("c", ledgerMarker{RowID: "gc-new"})
-		l.Reserve(ledgerGrant("g", ledgerRowA, 1))
-		l.Issue("g", ledgerRowA)
-		l.MarkProviderCalled("g")
-		l.Commit("g", ledgerMarker{Incarnation: 5})
-		lagged := ledgerCensusOf(map[rowKey]ledgerRow{ledgerRowA: {Incarnation: 4}})
-		lagging := func() map[string]bool {
-			out := make(map[string]bool)
-			for _, e := range l.View() {
-				if e.lagging(lagged, time.Now()) {
-					out[e.ID] = true
-				}
-			}
-			return out
-		}
-
-		advance(ledgerCacheLagBound - time.Millisecond)
-		if got := lagging(); len(got) != 0 {
-			t.Fatalf("lagging before the bound: %v", got)
-		}
-		advance(time.Millisecond)
-		if got := lagging(); !got["c"] || !got["g"] {
-			t.Fatalf("lagging at the bound = %v, want c and g", got)
-		}
-		if e, _ := ledgerEntryOf(l, "c"); e.Key.ID != "gc-new" {
-			t.Fatalf("committed create key = %+v, want the new row", e.Key)
-		}
-
-		// The read installed the create's row: no rereads for another bound.
-		if !l.ResolveLag("c", lagInstalled) {
-			t.Fatal("ResolveLag(c, installed) lost")
-		}
-		if got := lagging(); got["c"] {
-			t.Fatal("a create whose row the read installed is lagging again at once")
-		}
-		if e, _ := ledgerEntryOf(l, "c"); func() bool { ok, _ := e.clearVerdict(lagged, time.Now()); return ok }() {
-			t.Fatal("an installed create cleared before its marker reached the census")
-		}
-		advance(ledgerCacheLagBound)
-		if got := lagging(); !got["c"] {
-			t.Fatal("a create still missing a bound after the read is not lagging")
-		}
-
-		// The reads found nothing: both clear at the next pass.
-		l.ResolveLag("c", lagNotFound)
-		l.ResolveLag("g", lagNotFound)
-		if l.ResolveLag("c", lagInstalled) || l.ResolveLag("g", lagClosed) {
-			t.Fatal("a second outcome overwrote a clearing one")
-		}
-		for _, e := range l.View() {
-			clears, refund := e.clearVerdict(lagged, time.Now())
-			wantRefund := map[string]int{"c": 1, "g": 0}[e.ID]
-			if !clears || refund != wantRefund || e.lagging(lagged, time.Now()) {
-				t.Errorf("%s not found: clear=%v refund=%d lagging=%v, want clear, refund %d",
-					e.ID, clears, refund, e.lagging(lagged, time.Now()), wantRefund)
-			}
-		}
-
-		l.Reserve(ledgerGrant("r", ledgerRowB, 1))
-		if l.ResolveLag("r", lagNotFound) || l.ResolveLag("missing", lagNotFound) {
-			t.Fatal("ResolveLag accepted an entry that has not landed")
-		}
-		l.Issue("r", ledgerRowB)
-		l.Commit("r", ledgerMarker{Incarnation: 2})
-		if l.ResolveLag("r", 0) || l.ResolveLag("r", lagNotFound+1) {
-			t.Fatal("ResolveLag accepted an unknown outcome")
-		}
-	})
-}
-
-// Kills (C5.15 as amended 2026-10-03 per P3-4 review): a closed row read as
-// unwritten (a create refunded though it wrote its row); a closed, unmarked
-// or missing row leaving the entry stuck; an installed read clearing before
-// the census shows the marker; a provider-called grant refunded on any
-// outcome; a prepare-only grant charged.
-func TestLedgerLagRepairOutcomesClearAndRefund(t *testing.T) {
-	lagged := ledgerCensusOf(map[rowKey]ledgerRow{ledgerRowA: {Incarnation: 4}})
-	create := ledgerEntry{
-		ID: "c", Kind: kindCreate, Key: rowKey{Leg: "sessions", ID: "gc-new"}, Cost: 1, State: ledgerCommitted,
-		WroteRow: true, Marker: ledgerMarker{RowID: "gc-new", InstanceToken: "tok"},
-	}
-	called := ledgerEntry{
-		ID: "g", Kind: kindGrant, Key: ledgerRowA, Cost: 1, State: ledgerCommitted, WroteRow: true,
-		ProviderCalled: true, Marker: ledgerMarker{Incarnation: 5},
-	}
-	uncalled := called
-	uncalled.ProviderCalled = false
-	type verdict struct {
-		clears bool
-		refund int
-	}
-	for _, tt := range []struct {
-		name string
-		e    ledgerEntry
-		want map[lagOutcome]verdict
-	}{
-		{"create", create, map[lagOutcome]verdict{
-			lagInstalled: {false, 0}, lagNoMarker: {true, 1}, lagClosed: {true, 0}, lagNotFound: {true, 1},
-		}},
-		{"grant, provider called", called, map[lagOutcome]verdict{
-			lagInstalled: {false, 0}, lagNoMarker: {true, 0}, lagClosed: {true, 0}, lagNotFound: {true, 0},
-		}},
-		{"grant, provider never called", uncalled, map[lagOutcome]verdict{
-			lagInstalled: {false, 0}, lagNoMarker: {true, 1}, lagClosed: {true, 1}, lagNotFound: {true, 1},
-		}},
-	} {
-		for o, w := range tt.want {
-			synctest.Test(t, func(t *testing.T) {
-				l := newIntentLedger(time.Now)
-				e := tt.e
-				e.State = ledgerReserved
-				l.Reserve(e)
-				l.Transition(e.ID, ledgerReserved, ledgerIssued, func(x *ledgerEntry) { x.ProviderCalled = tt.e.ProviderCalled })
-				l.Commit(e.ID, tt.e.Marker)
-				advance(ledgerCacheLagBound)
-				if !l.ResolveLag(e.ID, o) {
-					t.Fatalf("%s: ResolveLag(%d) lost", tt.name, o)
-				}
-				got, _ := ledgerEntryOf(l, e.ID)
-				clears, refund := got.clearVerdict(lagged, time.Now())
-				if clears != w.clears || refund != w.refund {
-					t.Fatalf("%s, outcome %d: clearVerdict = (%v, %d), want (%v, %d)", tt.name, o, clears, refund, w.clears, w.refund)
-				}
-				if got.lagging(lagged, time.Now()) {
-					t.Fatalf("%s, outcome %d: lagging right after the read", tt.name, o)
-				}
-			})
-		}
-	}
-}
-
-// Kills: a grant row read below the incarnation PreWake would have written
-// counted as found, so lag repair rereads it every bound forever and its leg
-// stays flagged (review scenario 1); a create whose row closed before the
-// census showed it read as found or as unwritten (review scenario 2); a
-// marked row not installed; a grant with no recorded incarnation read as
-// marked.
-func TestLedgerLagOutcomeOfLiveRead(t *testing.T) {
-	create := ledgerEntry{Kind: kindCreate, Marker: ledgerMarker{RowID: "gc-new", InstanceToken: "tok"}}
-	ambiguous := ledgerEntry{Kind: kindCreate, Marker: ledgerMarker{InstanceToken: "tok"}}
-	grant := ledgerEntry{Kind: kindGrant, Key: ledgerRowA, Marker: ledgerMarker{Incarnation: 5}}
-	unmarked := ledgerEntry{Kind: kindGrant, Key: ledgerRowA}
-	newRow := rowKey{Leg: "sessions", ID: "gc-new"}
-	for _, tt := range []struct {
-		name        string
-		e           ledgerEntry
-		k           rowKey
-		r           ledgerRow
-		found, open bool
-		want        lagOutcome
-	}{
-		{"create, row by ID", create, newRow, ledgerRow{InstanceToken: "tok"}, true, true, lagInstalled},
-		{"create, row by token only", ambiguous, rowKey{Leg: "sessions", ID: "gc-x"}, ledgerRow{InstanceToken: "tok"}, true, true, lagInstalled},
-		{"create, row closed before the census saw it", create, newRow, ledgerRow{InstanceToken: "tok"}, true, false, lagClosed},
-		{"create, nothing", ambiguous, rowKey{}, ledgerRow{}, false, false, lagNotFound},
-		{"grant, row at the marker", grant, ledgerRowA, ledgerRow{Incarnation: 5}, true, true, lagInstalled},
-		{"grant, row past the marker", grant, ledgerRowA, ledgerRow{Incarnation: 6}, true, true, lagInstalled},
-		{"grant, row below the marker", grant, ledgerRowA, ledgerRow{Incarnation: 4}, true, true, lagNoMarker},
-		{"grant, row closed", grant, ledgerRowA, ledgerRow{Incarnation: 5}, true, false, lagClosed},
-		{"grant, row gone", grant, ledgerRowA, ledgerRow{}, false, false, lagNotFound},
-		{"grant, no recorded incarnation", unmarked, ledgerRowA, ledgerRow{Incarnation: 4}, true, true, lagNoMarker},
-	} {
-		if got := tt.e.lagOutcomeOf(tt.k, tt.r, tt.found, tt.open); got != tt.want {
-			t.Errorf("%s: lagOutcomeOf = %d, want %d", tt.name, got, tt.want)
-		}
-	}
-
-	// Both review scenarios, end to end: the read resolves the entry at the
-	// next pass instead of rereading every bound.
-	synctest.Test(t, func(t *testing.T) {
-		l := newIntentLedger(time.Now)
-		l.Reserve(ledgerGrant("g", ledgerRowA, 1))
-		l.Issue("g", ledgerRowA)
-		l.MarkProviderCalled("g")
-		l.Commit("g", ledgerMarker{Incarnation: 5}) // ambiguous: PreWake never landed
-		l.Reserve(ledgerCreate("c", "tok"))
-		l.Transition("c", ledgerReserved, ledgerIssued, nil)
-		l.Commit("c", ledgerMarker{RowID: "gc-new"})
-		// The census holds A below the marker and never saw gc-new, which
-		// closed before its open row was ever delivered.
-		c := ledgerCensusOf(map[rowKey]ledgerRow{ledgerRowA: {Incarnation: 4}})
-		live := map[string]struct {
-			k           rowKey
-			r           ledgerRow
-			found, open bool
-		}{
-			"g": {ledgerRowA, ledgerRow{Incarnation: 4}, true, true},
-			"c": {newRow, ledgerRow{InstanceToken: "tok"}, true, false},
-		}
-		want := map[string]int{"g": 0, "c": 0}
-		advance(ledgerCacheLagBound)
-		for _, e := range l.View() {
-			if !e.lagging(c, time.Now()) {
-				t.Fatalf("%s not lagging at the bound", e.ID)
-			}
-			rd := live[e.ID]
-			l.ResolveLag(e.ID, e.lagOutcomeOf(rd.k, rd.r, rd.found, rd.open))
-		}
-		for _, e := range l.View() {
-			clears, refund := e.clearVerdict(c, time.Now())
-			if !clears || refund != want[e.ID] {
-				t.Errorf("%s after the read: clearVerdict = (%v, %d), want (true, %d)", e.ID, clears, refund, want[e.ID])
+			if refund, ok := l.Release(e.ID); ok || refund != 0 {
+				t.Errorf("%s: Release = (%d, %v), want (0, false): an issued grant's token is spent", e.ID, refund, ok)
 			}
 		}
 	})
 }
 
-// Kills (N39): a proof of absence beating the marker. An ambiguous create's
-// read found no row; its write lands after the read and reaches the census
-// before the pass. The entry must clear as written, with no refund: the
-// token was spent on a row that exists.
-func TestLedgerMarkerBeatsLateAbsenceProof(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		l := newIntentLedger(time.Now)
-		l.Reserve(ledgerCreate("c", "tok"))
-		l.Transition("c", ledgerReserved, ledgerIssued, nil)
-		l.Commit("c", ledgerMarker{}) // ambiguous: token only
-		advance(ledgerCacheLagBound)
-		if !l.ResolveLag("c", lagNotFound) {
-			t.Fatal("ResolveLag lost")
-		}
-		late := ledgerCensusOf(map[rowKey]ledgerRow{{"sessions", "gc-late"}: {InstanceToken: "tok", PendingCreate: true}})
-		e, _ := ledgerEntryOf(l, "c")
-		if clears, refund := e.clearVerdict(late, time.Now()); !clears || refund != 0 {
-			t.Fatalf("late write visible: clearVerdict = (%v, %d), want (true, 0)", clears, refund)
-		}
-	})
-}
-
-// vetoesOf returns l's veto entries for k.
-func vetoesOf(l *intentLedger, k rowKey) []ledgerEntry {
-	var got []ledgerEntry
-	for _, e := range l.View() {
-		if e.Kind == kindVeto && e.Key == k {
-			got = append(got, e)
-		}
+// committedCreate reserves, issues and commits a create on the sessions leg
+// at the bubble's now, ambiguous or proven, and returns the settled entry.
+func committedCreate(t *testing.T, l *intentLedger, id string, ambiguous bool, m ledgerMarker) ledgerEntry {
+	t.Helper()
+	l.Reserve(ledgerCreate(id, "tok-"+id))
+	if _, _, ok := l.IssueCreate(id); !ok {
+		t.Fatalf("issue %s lost", id)
 	}
-	return got
+	if !l.CommitCreate(id, ambiguous, m) {
+		t.Fatalf("commit %s lost", id)
+	}
+	e, _ := ledgerEntryOf(l, id)
+	return e
 }
 
-// Kills: linear or uncapped veto backoff; a backoff that never resets after a
-// start; a requested Until shortened by the backoff; two vetoes for one key;
-// a veto that never clears or clears early.
-func TestLedgerVetoBackoffDoublesCapsAtFiveMinutesResetsOnIssue(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		l := newIntentLedger(time.Now)
-		veto := func(k rowKey, until time.Time) ledgerEntry {
-			t.Helper()
-			l.Veto(k, until, "fresh-read")
-			got := vetoesOf(l, k)
-			if len(got) != 1 {
-				t.Fatalf("%d vetoes for %v, want 1", len(got), k)
-			}
-			return got[0]
-		}
-		// Each veto comes after the last one expired: a consecutive refusal.
-		for i, want := range []time.Duration{10, 20, 40, 80, 160, 300, 300, 300} {
-			e := veto(ledgerRowA, time.Time{})
-			if got := time.Until(e.Until); got != want*time.Second || e.Consecutive != i+1 {
-				t.Fatalf("veto %d: backoff %v consecutive %d, want %v and %d", i+1, got, e.Consecutive, want*time.Second, i+1)
-			}
-			advance(time.Until(e.Until))
-		}
-		if e := veto(ledgerRowB, time.Time{}); time.Until(e.Until) != 10*time.Second {
-			t.Fatalf("another key's first veto backs off %v, want 10s", time.Until(e.Until))
-		}
-		if e := veto(ledgerRowB, time.Now().Add(time.Minute)); time.Until(e.Until) != time.Minute {
-			t.Fatalf("requeueAfter floor lost: backoff %v, want 1m", time.Until(e.Until))
-		}
-
-		// The veto clears at Until, not before.
-		e := veto(ledgerRowA, time.Time{})
-		if clears, _ := e.clearVerdict(ledgerCensus{}, e.Until.Add(-time.Nanosecond)); clears {
-			t.Fatal("veto cleared before Until")
-		}
-		if clears, refund := e.clearVerdict(ledgerCensus{}, e.Until); !clears || refund != 0 {
-			t.Fatalf("veto at Until: clear=%v refund=%d, want clear, no refund", clears, refund)
-		}
-		advance(time.Until(e.Until))
-
-		// An issued start resets the backoff.
-		l.Reserve(ledgerGrant("g", ledgerRowA, 1))
-		l.Issue("g", ledgerRowA)
-		if e := veto(ledgerRowA, time.Time{}); time.Until(e.Until) != 10*time.Second || e.Consecutive != 1 {
-			t.Fatalf("after issue: backoff %v consecutive %d, want 10s and 1", time.Until(e.Until), e.Consecutive)
-		}
-	})
+// startedCensus is a census whose complete non-exact sessions leg was read
+// from started, holding rows.
+func startedCensus(rows map[rowKey]ledgerRow, started time.Time) ledgerCensus {
+	c := ledgerCensusOf(rows, "sessions")
+	c.ReadStarted = map[string]time.Time{"sessions": started}
+	return c
 }
 
-// Kills: a held grant's session key, re-deciding on every event, escalating
-// its own backoff to minutes within one refusal. Four vetoes 100ms apart on
-// one held grant are one refusal: the count stays 1 and the live veto
-// extends to the later Until, never shortens.
-func TestLedgerVetoWhileLiveDoesNotEscalate(t *testing.T) {
+// Kills (C2 rule 1, C5.4(3)): an ambiguous create resolved by a read that
+// started before or at its settle (a read that may predate the write
+// proving it absent), or never resolved by one that started after; an
+// ambiguous create on an exact leg (no read start) resolved by absence
+// instead of only by marker or the hard bound; the marker losing to an
+// absence; a proven create cleared by absence; a reopen resolved by its
+// reserved token instead of its row ID.
+func TestLedgerAmbiguousCreateResolvedByReadStartedAfterSettle(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		l := newIntentLedger(time.Now)
-		l.Reserve(ledgerGrant("g", ledgerRowA, 1)) // held, never issued
-		start := time.Now()
-		for i := 0; i < 4; i++ {
-			l.Veto(ledgerRowA, time.Time{}, "fresh-read")
-			got := vetoesOf(l, ledgerRowA)
-			if len(got) != 1 || got[0].Consecutive != 1 || !got[0].Until.Equal(time.Now().Add(ledgerVetoBase)) {
-				t.Fatalf("veto %d at +%v: %+v, want one veto, consecutive 1, until now+10s", i+1, time.Since(start), got)
-			}
-			advance(100 * time.Millisecond)
-		}
-		// A shorter request does not shorten the live veto.
-		l.Veto(ledgerRowA, time.Now().Add(time.Minute), "commit-rule")
-		l.Veto(ledgerRowA, time.Time{}, "fresh-read")
-		if got := vetoesOf(l, ledgerRowA)[0]; time.Until(got.Until) != time.Minute || got.Consecutive != 1 {
-			t.Fatalf("re-veto shortened or escalated: %+v, want until now+1m, consecutive 1", got)
-		}
-		// Once it expires, the next veto is a consecutive refusal.
-		advance(time.Until(vetoesOf(l, ledgerRowA)[0].Until))
-		l.Veto(ledgerRowA, time.Time{}, "fresh-read")
-		if got := vetoesOf(l, ledgerRowA); len(got) != 1 || got[0].Consecutive != 2 || time.Until(got[0].Until) != 2*ledgerVetoBase {
-			t.Fatalf("veto after expiry: %+v, want one veto, consecutive 2, 20s", got)
-		}
-	})
-}
-
-// Kills (N48): a veto on one key removing or extending another key's veto,
-// or sharing its backoff count.
-func TestLedgerVetoesAreIndependentPerKey(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		l := newIntentLedger(time.Now)
-		l.Veto(ledgerRowA, time.Time{}, "fresh-read")
+		e := committedCreate(t, l, "c", true, ledgerMarker{})
+		settled := e.SettledAt
 		advance(time.Second)
-		l.Veto(ledgerRowB, time.Time{}, "commit-rule")
-		a, b := vetoesOf(l, ledgerRowA), vetoesOf(l, ledgerRowB)
-		if len(a) != 1 || len(b) != 1 {
-			t.Fatalf("vetoes: A %d, B %d, want one each", len(a), len(b))
+		token := map[rowKey]ledgerRow{{"sessions", "gc-x"}: {InstanceToken: "tok-c"}}
+		other := map[rowKey]ledgerRow{{"sessions", "gc-y"}: {InstanceToken: "other"}}
+		for _, tt := range []struct {
+			name string
+			c    ledgerCensus
+			want ledgerClear
+		}{
+			{"read started before the settle, token absent", startedCensus(other, settled.Add(-time.Nanosecond)), clearKeep},
+			{"read started at the settle, token absent", startedCensus(other, settled), clearKeep},
+			{"read started after the settle, token absent", startedCensus(other, settled.Add(time.Nanosecond)), clearUnwritten},
+			{"read started after the settle, token present", startedCensus(token, settled.Add(time.Nanosecond)), clearWritten},
+			{"read started before the settle, token present", startedCensus(token, settled.Add(-time.Second)), clearWritten},
+			{"exact leg, token absent", ledgerCensusOf(other, "sessions"), clearKeep},
+			{"another leg read after the settle", func() ledgerCensus {
+				c := startedCensus(other, time.Time{})
+				c.ReadStarted = map[string]time.Time{"rig": settled.Add(time.Second)}
+				return c
+			}(), clearKeep},
+		} {
+			if got := e.clearVerdict(tt.c, time.Now()); got != tt.want {
+				t.Errorf("%s: clearVerdict = %d, want %d", tt.name, got, tt.want)
+			}
 		}
-		if time.Until(a[0].Until) != 9*time.Second || a[0].Reason != "fresh-read" || a[0].Consecutive != 1 {
-			t.Fatalf("B's veto moved A's: %+v", a[0])
+		// On an exact leg only the hard bound resolves it.
+		if got := e.clearVerdict(ledgerCensusOf(other, "sessions"), settled.Add(ledgerHardBound)); got != clearHardBound {
+			t.Errorf("exact leg at the hard bound: clearVerdict = %d, want clearHardBound", got)
 		}
-		if time.Until(b[0].Until) != 10*time.Second || b[0].Consecutive != 1 {
-			t.Fatalf("B's veto shares A's backoff: %+v", b[0])
+
+		proven := committedCreate(t, l, "p", false, ledgerMarker{RowID: "gc-p"})
+		if got := proven.clearVerdict(startedCensus(other, proven.SettledAt.Add(time.Second)), time.Now()); got != clearKeep {
+			t.Errorf("proven create absent from a later read: clearVerdict = %d, want clearKeep (marker or hard bound only)", got)
+		}
+
+		l.Reserve(ledgerCreate("r", "tok-r"))
+		l.IssueCreate("r")
+		l.Retarget("r", "gc-closed")
+		l.CommitCreate("r", true, ledgerMarker{RowID: "gc-closed", InstanceToken: "tok-r"})
+		reopen, _ := ledgerEntryOf(l, "r")
+		later := reopen.SettledAt.Add(time.Second)
+		if got := reopen.clearVerdict(startedCensus(map[rowKey]ledgerRow{{"sessions", "gc-closed"}: {}}, later), time.Now()); got != clearWritten {
+			t.Errorf("reopened row open after the settle: clearVerdict = %d, want clearWritten", got)
+		}
+		if got := reopen.clearVerdict(startedCensus(other, later), time.Now()); got != clearUnwritten {
+			t.Errorf("reopen target still closed after the settle: clearVerdict = %d, want clearUnwritten", got)
 		}
 	})
 }
 
-// Kills: veto backoff memory growing with every row ever vetoed; forgetting
-// an open row's backoff, or a row on a leg the census did not hold.
-func TestLedgerForgetClosedBoundsVetoBackoff(t *testing.T) {
+// Kills (C2 rule 1's input): a read start published for a leg whose rows
+// prove nothing (missing, stale, or an exact leg's cache, which installs
+// nothing for a failed write), or a last-good leg stamped with this pass's
+// time instead of its own read's.
+func TestCensusLedgerReadStartsOnlyForCompleteNonExactLegs(t *testing.T) {
+	t0 := time.Unix(1_000, 0)
+	c := &sessionCensus{Legs: []censusLeg{
+		{Ref: "read", State: legRead, StartedAt: t0},
+		{Ref: "last-good", State: legLastGood, StartedAt: t0.Add(-time.Minute)},
+		{Ref: "exact", Exact: true, State: legRead},
+		{Ref: "stale", State: legStale, StartedAt: t0},
+		{Ref: "missing", State: legMissing},
+	}}
+	got := c.Ledger(&config.City{}).ReadStarted
+	want := map[string]time.Time{"read": t0, "last-good": t0.Add(-time.Minute)}
+	if len(got) != len(want) || !got["read"].Equal(want["read"]) || !got["last-good"].Equal(want["last-good"]) {
+		t.Fatalf("ReadStarted = %v, want %v", got, want)
+	}
+
+	start, end := t0, t0.Add(3*time.Second)
+	rec := censusRecording{StartedAt: start, At: end, Expires: end.Add(time.Minute)}
+	r := newCensusReader(censusLegFeed{
+		exact:    func(beads.Store) bool { return false },
+		recorded: func(beads.Store) (censusRecording, bool) { return rec, true },
+	})
+	leg, _ := r.readLeg(end, classStoreCandidate{ref: "sessions"})
+	if !leg.StartedAt.Equal(start) {
+		t.Fatalf("read leg StartedAt = %v, want the recording's %v", leg.StartedAt, start)
+	}
+	rec = censusRecording{Err: errors.New("down")}
+	if leg, _ = r.readLeg(end.Add(time.Second), classStoreCandidate{ref: "sessions"}); leg.State != legLastGood || !leg.StartedAt.Equal(start) {
+		t.Fatalf("last-good leg = %+v, want StartedAt %v from its own read", leg, start)
+	}
+}
+
+// Kills (C5.4(5), R24): a landed entry whose marker never appears counting
+// forever, or clearing before the bound; the bound measured from reserve
+// instead of the settle.
+func TestLedgerHardBoundClearsAsUnwritten(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		l := newIntentLedger(time.Now)
-		rig := rowKey{Leg: "rig", ID: "gc-r"}
-		for _, k := range []rowKey{ledgerRowA, ledgerRowB, rig} {
-			l.Veto(k, time.Time{}, "fresh-read")
+		l.Reserve(ledgerGrant("g", ledgerRowA))
+		l.Issue("g", ledgerRowA)
+		advance(time.Minute)
+		l.Commit("g", ledgerMarker{Incarnation: 5})
+		e, _ := ledgerEntryOf(l, "g")
+		lagging := ledgerCensusOf(map[rowKey]ledgerRow{ledgerRowA: {Incarnation: 4}})
+		if got := e.clearVerdict(lagging, e.SettledAt.Add(ledgerHardBound-time.Nanosecond)); got != clearKeep {
+			t.Fatalf("before the bound: clearVerdict = %d, want clearKeep", got)
 		}
-		// B closed; the rig leg was not read this pass.
-		l.ForgetClosed(ledgerCensusOf(map[rowKey]ledgerRow{ledgerRowA: {}}))
-		advance(ledgerVetoBase) // every veto expired
-		for k, want := range map[rowKey]time.Duration{ledgerRowA: 20 * time.Second, ledgerRowB: 10 * time.Second, rig: 20 * time.Second} {
-			l.Veto(k, time.Time{}, "fresh-read")
-			for _, e := range vetoesOf(l, k) {
-				if time.Until(e.Until) != want {
-					t.Errorf("%v: second veto backs off %v, want %v", k, time.Until(e.Until), want)
+		if got := e.clearVerdict(lagging, e.SettledAt.Add(ledgerHardBound)); got != clearHardBound {
+			t.Fatalf("at the bound: clearVerdict = %d, want clearHardBound", got)
+		}
+		if got := e.clearVerdict(ledgerCensusOf(map[rowKey]ledgerRow{ledgerRowA: {Incarnation: 5}}), e.SettledAt.Add(ledgerHardBound)); got != clearWritten {
+			t.Fatalf("marker visible at the bound: clearVerdict = %d, want clearWritten", got)
+		}
+		if !l.Transition("g", ledgerCommitted, ledgerCleared, nil) {
+			t.Fatal("hard-bound clear lost")
+		}
+	})
+}
+
+// Kills (C2 rule 2): a grant whose row closed (a rolled-back start) holding
+// its in-flight slot until the hard bound; or one clearing on an absence
+// from a leg whose read is stale or missing, which proves nothing.
+func TestLedgerGrantClearsWhenRowGoneFromCompleteLeg(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		l := newIntentLedger(time.Now)
+		for _, id := range []string{"committed", "failed-after-prewake"} {
+			k := rowKey{Leg: "sessions", ID: id}
+			l.Reserve(ledgerGrant(id, k))
+			l.Issue(id, k)
+		}
+		l.Commit("committed", ledgerMarker{Incarnation: 5})
+		l.Fail("failed-after-prewake", true, ledgerMarker{Incarnation: 5})
+		for _, tt := range []struct {
+			state censusLegState
+			want  ledgerClear
+		}{{legRead, clearWritten}, {legLastGood, clearWritten}, {legStale, clearKeep}, {legMissing, clearKeep}} {
+			c := (&sessionCensus{Legs: []censusLeg{{Ref: "sessions", Exact: true, State: tt.state}}}).Ledger(&config.City{})
+			for _, e := range l.View() {
+				if got := e.clearVerdict(c, time.Now()); got != tt.want {
+					t.Errorf("%s, row gone from a %s leg: clearVerdict = %d, want %d", e.ID, tt.state, got, tt.want)
 				}
 			}
 		}
 	})
+}
+
+// Kills: the create executor issuing or settling a grant, or committing a
+// create it never issued; an ambiguous flag lost or set on a proven commit.
+func TestLedgerCreateMovesRefuseOtherKindsAndStates(t *testing.T) {
+	l := newIntentLedger(time.Now)
+	l.Reserve(ledgerGrant("g", ledgerRowA))
+	if _, _, ok := l.IssueCreate("g"); ok {
+		t.Fatal("IssueCreate issued a grant")
+	}
+	l.Issue("g", ledgerRowA)
+	if l.CommitCreate("g", false, ledgerMarker{}) {
+		t.Fatal("CommitCreate settled a grant")
+	}
+	l.Reserve(ledgerCreate("c", "tok"))
+	if l.CommitCreate("c", true, ledgerMarker{}) {
+		t.Fatal("CommitCreate settled a reserved create")
+	}
+	for id, ambiguous := range map[string]bool{"proven": false, "ambiguous": true} {
+		l.Reserve(ledgerCreate(id, "tok-"+id))
+		l.IssueCreate(id)
+		if !l.CommitCreate(id, ambiguous, ledgerMarker{RowID: "gc-" + id}) {
+			t.Fatalf("commit %s lost", id)
+		}
+		if e, _ := ledgerEntryOf(l, id); e.Ambiguous != ambiguous || !e.WroteRow || e.Key.ID != "gc-"+id {
+			t.Fatalf("%s entry = %+v", id, e)
+		}
+	}
 }
 
 // Kills: a reserved grant or create held forever, so a plan no key or
-// executor picks up keeps its token, its city slot and its endpoint's probe;
+// executor picks up keeps its city slot, its endpoint's probe and, for a
+// grant, its token;
 // a release before the TTL; TTL release reaching an issued entry.
 func TestLedgerReserveTTL(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		l := newIntentLedger(time.Now)
-		l.Reserve(ledgerGrant("grant", ledgerRowA, 1))
-		l.Reserve(ledgerGrant("issued", ledgerRowB, 1))
+		l.Reserve(ledgerGrant("grant", ledgerRowA))
+		l.Reserve(ledgerGrant("issued", ledgerRowB))
 		l.Issue("issued", ledgerRowB)
 		create := ledgerCreate("create", "tok")
 		create.Endpoint = "provider:half-open"
@@ -791,8 +606,8 @@ func TestLedgerReserveTTL(t *testing.T) {
 			}
 			refunds += refund
 		}
-		if refunds != 2 {
-			t.Fatalf("TTL releases refunded %d, want 2", refunds)
+		if refunds != 1 {
+			t.Fatalf("TTL releases refunded %d, want 1 (the grant; a create debited none)", refunds)
 		}
 		view := l.View()
 		if got := cityInFlight(view, ledgerCensus{}, nil); got != 1 {
@@ -807,8 +622,8 @@ func TestLedgerReserveTTL(t *testing.T) {
 // Kills: View exposing the ledger's own entries, or an unstable order.
 func TestLedgerViewIsSortedCopy(t *testing.T) {
 	l := newIntentLedger(time.Now)
-	l.Reserve(ledgerGrant("b", ledgerRowB, 1))
-	l.Reserve(ledgerGrant("a", ledgerRowA, 1))
+	l.Reserve(ledgerGrant("b", ledgerRowB))
+	l.Reserve(ledgerGrant("a", ledgerRowA))
 	view := l.View()
 	if len(view) != 2 || view[0].ID != "a" || view[1].ID != "b" {
 		t.Fatalf("View order = %v", view)
@@ -816,123 +631,5 @@ func TestLedgerViewIsSortedCopy(t *testing.T) {
 	view[0].State = ledgerCommitted
 	if e, _ := ledgerEntryOf(l, "a"); e.State != ledgerReserved {
 		t.Fatal("editing the view edited the ledger")
-	}
-}
-
-var (
-	createIdentityA = createIdentity{Template: "worker", QualifiedInstance: "worker-1", Slot: 1}
-	createIdentityB = createIdentity{Template: "worker", QualifiedInstance: "worker-2", Slot: 2}
-)
-
-// failCreate reserves and issues create id under rev, then fails it for c.
-func failCreate(t *testing.T, l *intentLedger, id, rev string, c createIdentity) createVeto {
-	t.Helper()
-	e := ledgerCreate(id, "tok-"+id)
-	e.ConfigRev = rev
-	if !l.Reserve(e) {
-		t.Fatalf("reserve %s refused", id)
-	}
-	if token, ok := l.IssueCreate(id); !ok || token != "tok-"+id {
-		t.Fatalf("issue %s = (%q, %v)", id, token, ok)
-	}
-	if !l.FailCreate(id, c, "fence") {
-		t.Fatalf("fail %s refused", id)
-	}
-	entries, vetoes := l.Snapshot()
-	for _, e := range entries {
-		if e.ID == id && (e.State != ledgerFailed || e.WroteRow) {
-			t.Fatalf("entry %+v, want failed without a row", e)
-		}
-	}
-	return vetoes[c.key()]
-}
-
-// Kills (AM-N8): create vetoes kept with the row vetoes, so a row's issued
-// start or close resets a create identity's backoff; a create veto shown to
-// the pass as a ledger entry; one identity's veto moving another's.
-func TestLedgerCreateVetoIsItsOwnKeySpace(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		l := newIntentLedger(time.Now)
-		failCreate(t, l, "c1", "r", createIdentityA)
-		advance(ledgerVetoBase)
-		before := failCreate(t, l, "c2", "r", createIdentityA)
-		l.Reserve(ledgerGrant("g", ledgerRowA, 1))
-		l.Issue("g", ledgerRowA)
-		l.ForgetClosed(ledgerCensusOf(nil, "sessions"))
-		_, vetoes := l.Snapshot()
-		if vetoes[createIdentityA.key()] != before || before.Consecutive != 2 {
-			t.Fatalf("create veto %+v after Issue and ForgetClosed, want %+v (consecutive 2)", vetoes[createIdentityA.key()], before)
-		}
-		if _, ok := vetoes[createIdentityB.key()]; ok || len(vetoesOf(l, ledgerRowA)) != 0 {
-			t.Fatal("a create veto leaked into another identity or into the row vetoes")
-		}
-		for _, e := range l.View() {
-			if e.Kind == kindVeto {
-				t.Fatalf("create veto shown as ledger entry %+v", e)
-			}
-		}
-	})
-}
-
-// Kills: a create veto that escalates within one refusal, survives a
-// commit or a ConfigRev change, or outlives its identity in config.
-func TestLedgerCreateVetoResetsOnCommitAndConfigRevAndPrunes(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		l := newIntentLedger(time.Now)
-		failCreate(t, l, "c1", "r1", createIdentityA)
-		advance(time.Second)
-		if v := failCreate(t, l, "c2", "r1", createIdentityA); v.Consecutive != 1 || time.Until(v.Until) != ledgerVetoBase {
-			t.Fatalf("refusal while live: %+v, want consecutive 1 extended to now+10s", v)
-		}
-		advance(ledgerVetoBase)
-		if v := failCreate(t, l, "c3", "r1", createIdentityA); v.Consecutive != 2 {
-			t.Fatalf("refusal after expiry: %+v, want consecutive 2", v)
-		}
-		advance(2 * ledgerVetoBase)
-		if v := failCreate(t, l, "c4", "r2", createIdentityA); v.Consecutive != 1 || v.ConfigRev != "r2" || time.Until(v.Until) != ledgerVetoBase {
-			t.Fatalf("refusal under a new ConfigRev: %+v, want a fresh count", v)
-		}
-
-		e := ledgerCreate("ok", "tok-ok")
-		l.Reserve(e)
-		l.IssueCreate("ok")
-		if !l.CommitCreate("ok", createIdentityA, ledgerMarker{RowID: "gc-1"}) {
-			t.Fatal("commit refused")
-		}
-		if _, vetoes := l.Snapshot(); len(vetoes) != 0 {
-			t.Fatalf("vetoes after a commit = %+v, want none", vetoes)
-		}
-
-		failCreate(t, l, "a", "r2", createIdentityA)
-		failCreate(t, l, "b", "r2", createIdentityB)
-		l.PruneCreateVetoes("r2", func(c createIdentity) bool { return c != createIdentityB })
-		if _, vetoes := l.Snapshot(); len(vetoes) != 1 || vetoes[createIdentityA.key()].Consecutive != 1 {
-			t.Fatalf("after pruning B: %+v, want only A", vetoes)
-		}
-		l.PruneCreateVetoes("r3", func(createIdentity) bool { return true })
-		if _, vetoes := l.Snapshot(); len(vetoes) != 0 {
-			t.Fatalf("after a ConfigRev change: %+v, want none", vetoes)
-		}
-	})
-}
-
-// Kills: the create executor issuing or settling a grant, or vetoing on an
-// entry it never issued.
-func TestLedgerCreateMovesRefuseOtherKindsAndStates(t *testing.T) {
-	l := newIntentLedger(time.Now)
-	l.Reserve(ledgerGrant("g", ledgerRowA, 1))
-	if _, ok := l.IssueCreate("g"); ok {
-		t.Fatal("IssueCreate issued a grant")
-	}
-	l.Issue("g", ledgerRowA)
-	if l.FailCreate("g", createIdentityA, "fence") || l.CommitCreate("g", createIdentityA, ledgerMarker{}) {
-		t.Fatal("a create move settled a grant")
-	}
-	l.Reserve(ledgerCreate("c", "tok"))
-	if l.FailCreate("c", createIdentityA, "fence") {
-		t.Fatal("FailCreate settled a reserved create")
-	}
-	if _, vetoes := l.Snapshot(); len(vetoes) != 0 {
-		t.Fatalf("vetoes = %+v, want none from refused moves", vetoes)
 	}
 }

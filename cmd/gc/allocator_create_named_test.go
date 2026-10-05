@@ -449,7 +449,7 @@ func TestCreateEffect_NamedReopensClosedCanonicalAndMatchesLegacyMetadata(t *tes
 				t.Fatalf("reopened row = %s token %q generation %q, want open with its own token and generation",
 					raw.Status, raw.Metadata["instance_token"], raw.Metadata["generation"])
 			}
-			if e := h.entry(t); e.State != ledgerCommitted || e.Marker.RowID != closed.ID || !e.Reopen {
+			if e := h.entry(t); e.State != ledgerCommitted || e.Marker.RowID != closed.ID {
 				t.Fatalf("entry = %+v, want committed reopen of %s", e, closed.ID)
 			}
 		})
@@ -488,7 +488,7 @@ func TestCreateEffect_NamedIneligibleClosedRowsCreateFresh(t *testing.T) {
 				t.Fatalf("ineligible row = %s %v, want untouched", after.Status, after.Metadata)
 			}
 			e := h.entry(t)
-			if e.State != ledgerCommitted || e.Reopen || e.Marker.RowID == closed.ID || e.Marker.RowID == "" {
+			if e.State != ledgerCommitted || e.Marker.RowID == closed.ID || e.Marker.RowID == "" {
 				t.Fatalf("entry = %+v, want a committed fresh create", e)
 			}
 			fresh, err := store.Get(e.Marker.RowID)
@@ -531,7 +531,7 @@ func (s *namedHookStore) Update(id string, opts beads.UpdateOpts) error {
 // token (P3-6b T5, S5). At the write the entry already names the row it
 // reopens, so a census that shows the row counts the entry and the row once;
 // after the write a census row without the token clears the entry by its
-// row ID, with no refund.
+// row ID.
 func TestCreateEffect_NamedReopenRetargetsBeforeWriteAndClearsByRowID(t *testing.T) {
 	cfg := mayorCity()
 	mem := beads.NewMemStore()
@@ -549,7 +549,7 @@ func TestCreateEffect_NamedReopenRetargetsBeforeWriteAndClearsByRowID(t *testing
 	token := h.reserve(t, "c1")
 	h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, "c1", "mayor"))
 
-	if duringWrite.State != ledgerIssued || duringWrite.Key != k || duringWrite.Marker.RowID != closed.ID || !duringWrite.Reopen {
+	if duringWrite.State != ledgerIssued || duringWrite.Key != k || duringWrite.Marker.RowID != closed.ID {
 		t.Fatalf("entry at the write = %+v, want issued and retargeted to %v", duringWrite, k)
 	}
 	if inFlight != 1 {
@@ -560,63 +560,38 @@ func TestCreateEffect_NamedReopenRetargetsBeforeWriteAndClearsByRowID(t *testing
 		t.Fatalf("entry = %+v, want committed with the row as its marker", e)
 	}
 	census := ledgerCensusOf(map[rowKey]ledgerRow{k: {Incarnation: 4, InstanceToken: "tok-old"}})
-	if clears, refund := e.clearVerdict(census, namedEffectNow); !clears || refund != 0 {
-		t.Fatalf("clear verdict with the reopened row = (%v, %d), want cleared as written", clears, refund)
+	if got := e.clearVerdict(census, namedEffectNow); got != clearWritten {
+		t.Fatalf("clear verdict with the reopened row = %d, want clearWritten", got)
 	}
-	if clears, _ := e.clearVerdict(ledgerCensusOf(nil, "sessions"), namedEffectNow); clears {
+	if e.Ambiguous || e.clearVerdict(ledgerCensusOf(nil, "sessions"), namedEffectNow) != clearKeep {
 		t.Fatal("a reopen cleared before the census showed its row open")
 	}
 }
 
-// Kills: a token leaked on a reopen that never landed, a token refunded for
-// a reopen that landed and closed again, and a marker that never clears
-// (P3-6b T6). An ambiguous reopen commits with the row and the revision it
-// read; lag repair reads the row still closed at that revision as not
-// written (refund), closed at a later one as written and closed (no
-// refund), and open as installed.
-func TestCreateEffect_NamedAmbiguousReopenLagRepairClosedIsUnwritten(t *testing.T) {
+// Kills: an ambiguous reopen resolved by its reserved token, which it never
+// writes, instead of its row ID (C5.4(3), AM-N2); one held until the hard
+// bound although a later read shows the row still closed; or one given a
+// create backoff before it resolves.
+func TestCreateEffect_NamedAmbiguousReopenResolvesByRowID(t *testing.T) {
 	cfg := mayorCity()
-	for _, tc := range []struct {
-		name   string
-		bump   int64 // the lag read's revision over the one the effect read
-		open   bool
-		want   lagOutcome
-		refund int
-	}{
-		{name: "closed at the revision read", want: lagNoMarker, refund: 1},
-		{name: "closed at a later revision", bump: 2, want: lagClosed, refund: 0},
-		{name: "open", bump: 1, open: true, want: lagInstalled},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			mem := beads.NewMemStore()
-			closed := seedClosedNamedRow(t, mem, cfg, nil)
-			h := newNamedHarness(t, t.TempDir(), nil)
-			h.reserve(t, "c1")
-			h.runAll(t, &createPass{cfg: cfg, store: &namedHookStore{Store: mem, failTx: errors.New("connection reset during reopen")}}, namedPlan(t, cfg, "c1", "mayor"))
+	mem := beads.NewMemStore()
+	closed := seedClosedNamedRow(t, mem, cfg, nil)
+	h := newNamedHarness(t, t.TempDir(), nil)
+	h.reserve(t, "c1")
+	h.runAll(t, &createPass{cfg: cfg, store: &namedHookStore{Store: mem, failTx: errors.New("connection reset during reopen")}}, namedPlan(t, cfg, "c1", "mayor"))
 
-			e := h.entry(t)
-			if e.State != ledgerCommitted || !e.WroteRow || !e.Reopen || e.Marker.RowID != closed.ID || e.ReopenRevision != closed.Revision || closed.Revision == 0 {
-				t.Fatalf("entry = %+v, want an ambiguous committed reopen of %s read at revision %d", e, closed.ID, closed.Revision)
-			}
-			h.assertNoCreateVeto(t)
-			if !e.lagging(ledgerCensusOf(nil, "sessions"), e.SettledAt.Add(ledgerCacheLagBound)) {
-				t.Fatal("an ambiguous reopen is not handed to lag repair after the bound")
-			}
-			k, row := rowKey{Leg: "sessions", ID: closed.ID}, ledgerRow{Revision: closed.Revision + tc.bump}
-			got := e.lagOutcomeOf(k, row, true, tc.open)
-			if got != tc.want {
-				t.Fatalf("lag outcome = %d, want %d", got, tc.want)
-			}
-			if tc.open {
-				return
-			}
-			if !h.ledger.ResolveLag("c1", got) {
-				t.Fatal("ResolveLag refused")
-			}
-			if clears, refund := h.entry(t).clearVerdict(ledgerCensusOf(nil, "sessions"), namedEffectNow); !clears || refund != tc.refund {
-				t.Fatalf("clear verdict = (%v, %d), want cleared with refund %d", clears, refund, tc.refund)
-			}
-		})
+	e := h.entry(t)
+	if e.State != ledgerCommitted || !e.WroteRow || !e.Ambiguous || e.Marker.RowID != closed.ID {
+		t.Fatalf("entry = %+v, want an ambiguous committed reopen of %s", e, closed.ID)
+	}
+	h.assertNoCreateBackoff(t)
+	later := e.SettledAt.Add(time.Second)
+	if got := e.clearVerdict(startedCensus(nil, later), namedEffectNow); got != clearUnwritten {
+		t.Fatalf("row still closed in a later read: clear verdict = %d, want clearUnwritten", got)
+	}
+	open := startedCensus(map[rowKey]ledgerRow{{Leg: "sessions", ID: closed.ID}: {InstanceToken: "tok-old"}}, later)
+	if got := e.clearVerdict(open, namedEffectNow); got != clearWritten {
+		t.Fatalf("row open in a later read: clear verdict = %d, want clearWritten", got)
 	}
 }
 
@@ -640,7 +615,7 @@ func (s *namedCASStore) ConditionalWritesResolveTarget() beads.Store { return s.
 
 // Kills: clobbering a concurrent CLI reopen or start (P3-6b T7, AM-N4).
 // Where the store fences, a writer that lands between the locked read and
-// the write wins: the reopen writes nothing and records a create veto.
+// the write wins: the reopen writes nothing and records a create backoff.
 // Without the capability the reopen keeps legacy's transaction.
 func TestCreateEffect_NamedReopenIsConditionalOnRevision(t *testing.T) {
 	cfg := mayorCity()
@@ -668,7 +643,7 @@ func TestCreateEffect_NamedReopenIsConditionalOnRevision(t *testing.T) {
 			t.Fatalf("row = %s %v, want the concurrent write kept and no reopen", after.Status, after.Metadata)
 		}
 		assertFailedNoWrite(t, h)
-		h.assertCreateVeto(t, plan, createStageFence)
+		h.assertCreateBackoff(t, plan, createStageFence)
 	})
 	t.Run("unfenced keeps legacy's transaction", func(t *testing.T) {
 		mem := beads.NewMemStore()
@@ -701,8 +676,9 @@ func TestCreateEffect_NamedLocksIdentityAndSessionNameOnce(t *testing.T) {
 	sn := config.NamedSessionRuntimeName("test-city", cfg.Workspace, "mayor")
 	for _, reopen := range []bool{true, false} {
 		store := beads.NewMemStore()
+		var closed beads.Bead
 		if reopen {
-			seedClosedNamedRow(t, store, cfg, nil)
+			closed = seedClosedNamedRow(t, store, cfg, nil)
 		}
 		var calls [][]string
 		h := newNamedHarness(t, t.TempDir(), func(host *createEffectHost) {
@@ -726,7 +702,7 @@ func TestCreateEffect_NamedLocksIdentityAndSessionNameOnce(t *testing.T) {
 		if want := []string{"mayor", sn}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("reopen=%v: lock set = %v, want %v", reopen, got, want)
 		}
-		if e := h.entry(t); e.State != ledgerCommitted || e.Reopen != reopen {
+		if e := h.entry(t); e.State != ledgerCommitted || (e.Marker.RowID == closed.ID) != reopen {
 			t.Fatalf("reopen=%v: entry = %+v, want committed", reopen, e)
 		}
 	}
@@ -801,7 +777,7 @@ func TestCreateEffect_NamedFenceReadsLiveInsideLock(t *testing.T) {
 			h.runAll(t, &createPass{cfg: cfg, store: namedFenceProbeStore{Store: cache, locked: &locked, t: t}}, plan)
 
 			assertFailedNoWrite(t, h)
-			h.assertCreateVeto(t, plan, createStageFence)
+			h.assertCreateBackoff(t, plan, createStageFence)
 			after := namedComparableRows(t, backing)
 			if len(after) != len(before)+1 {
 				t.Fatalf("rows = %+v, want the seeded rows and the one written behind the cache", after)
@@ -956,8 +932,8 @@ func TestCreateEffect_NamedNeverProbesNorWritesFiles(t *testing.T) {
 
 // Kills: the S4 pass-rate loop for named creates (P3-6b T15, AM-N8). A
 // malformed Claude settings override fails every resolution, a refusal the
-// census never shows; the identity's veto backs off 10s doubling to 5m, and
-// a commit resets it. (A closed row that owns the runtime name does not
+// census never shows; the identity's backoff runs 10s doubling to 5m, and a
+// commit resets it. (A closed row that owns the runtime name does not
 // refuse a named create on main: the configured owner may reuse it.)
 func TestCreateEffect_NamedRefusalBacksOffPerIdentity(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -978,27 +954,28 @@ func TestCreateEffect_NamedRefusalBacksOffPerIdentity(t *testing.T) {
 		}
 		for i, want := range []time.Duration{10, 20, 40, 80, 160, 300, 300} {
 			plan := attempt(fmt.Sprintf("c%d", i))
-			if plan.identity().key() != "named:mayor" {
-				t.Fatalf("veto key = %q, want named:mayor", plan.identity().key())
+			if k := createBackoffKey(plan.identity().key()); k != "named:mayor" {
+				t.Fatalf("backoff key = %q, want named:mayor", k)
 			}
-			v := h.assertCreateVeto(t, plan, createStageResolve)
+			v := h.assertCreateBackoff(t, plan, createStageResolve)
 			if got := time.Until(v.Until); got != want*time.Second || v.Consecutive != i+1 {
-				t.Fatalf("attempt %d: veto for %v (consecutive %d), want %v", i+1, got, v.Consecutive, want*time.Second)
+				t.Fatalf("attempt %d: backoff for %v (consecutive %d), want %v", i+1, got, v.Consecutive, want*time.Second)
 			}
 			advance(time.Until(v.Until))
 		}
 		cityPath = healthy
 		attempt("ok")
-		h.assertNoCreateVeto(t)
-		// The named identity prunes against its configured named session.
+		h.assertNoCreateBackoff(t)
+		// The named identity's record is kept under its ConfigRev and
+		// dropped on a change (TestBackoffNamedIdentityPrunedWhenUnconfigured).
 		cityPath = broken
 		attempt("again")
-		h.ledger.PruneCreateVetoes(createHarnessRev, createIdentityConfigured(cfg))
-		if len(h.vetoes()) != 1 {
-			t.Fatal("pruning dropped a configured named identity's veto")
+		h.backoff.Prune(createHarnessRev, ledgerCensus{}, nil)
+		if len(h.createBackoffs()) != 1 {
+			t.Fatal("pruning dropped a configured named identity's backoff")
 		}
-		h.ledger.PruneCreateVetoes(createHarnessRev, createIdentityConfigured(&config.City{Agents: cfg.Agents}))
-		h.assertNoCreateVeto(t)
+		h.backoff.Prune("rev-without-mayor", ledgerCensus{}, nil)
+		h.assertNoCreateBackoff(t)
 	})
 }
 
@@ -1032,7 +1009,7 @@ func TestCreateEffect_NamedStalePlanFailsNoWrite(t *testing.T) {
 			edit(plan.Named, cfg)
 			h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
 			assertFailedNoWrite(t, h)
-			h.assertCreateVeto(t, plan, createStageStalePlan)
+			h.assertCreateBackoff(t, plan, createStageStalePlan)
 			if rows := sessionRows(t, store); len(rows) != 0 {
 				t.Fatalf("rows = %+v, want none", rows)
 			}
@@ -1206,49 +1183,37 @@ func TestReadOnlyResolveMatchesResolveTemplateMetadata(t *testing.T) {
 	})
 }
 
-// Kills: a retarget of an entry that is not an issued create, a reopen lag
-// outcome that reads a closed row it never wrote as written, and one that
-// reads a row written and closed again as unwritten (AM-N2).
+// Kills: a retarget of an entry that is not an issued create, or one that
+// loses the row on its commit (AM-N2).
 func TestLedgerRetargetMarksIssuedCreatesOnly(t *testing.T) {
 	l := newIntentLedger(func() time.Time { return namedEffectNow })
-	create := ledgerEntry{ID: "c1", Kind: kindCreate, Key: rowKey{Leg: "sessions"}, Cost: 1, Marker: ledgerMarker{InstanceToken: "tok"}}
-	grant := ledgerEntry{ID: "g1", Kind: kindGrant, Key: rowKey{Leg: "sessions", ID: "gc-1"}, Cost: 1}
+	create := ledgerEntry{ID: "c1", Kind: kindCreate, Key: rowKey{Leg: "sessions"}, Marker: ledgerMarker{InstanceToken: "tok"}}
+	grant := ledgerEntry{ID: "g1", Kind: kindGrant, Key: rowKey{Leg: "sessions", ID: "gc-1"}}
 	if !l.Reserve(create) || !l.Reserve(grant) {
 		t.Fatal("reserve refused")
 	}
-	if l.Retarget("c1", "gc-9", 7) {
+	if l.Retarget("c1", "gc-9") {
 		t.Fatal("retargeted a reserved create")
 	}
-	if _, ok := l.IssueCreate("c1"); !ok || !l.Issue("g1", grant.Key) {
+	if _, _, ok := l.IssueCreate("c1"); !ok || !l.Issue("g1", grant.Key) {
 		t.Fatal("issue refused")
 	}
-	if l.Retarget("g1", "gc-9", 7) || l.Retarget("c1", "", 7) || l.Retarget("missing", "gc-9", 7) {
+	if l.Retarget("g1", "gc-9") || l.Retarget("c1", "") || l.Retarget("missing", "gc-9") {
 		t.Fatal("retargeted a grant, an empty row or a missing entry")
 	}
-	if !l.Retarget("c1", "gc-9", 7) {
+	if !l.Retarget("c1", "gc-9") {
 		t.Fatal("issued create not retargeted")
 	}
 	e, _ := ledgerEntryOf(l, "c1")
-	if e.Key != (rowKey{Leg: "sessions", ID: "gc-9"}) || e.Marker != (ledgerMarker{RowID: "gc-9", InstanceToken: "tok"}) || !e.Reopen || e.ReopenRevision != 7 {
+	if e.Key != (rowKey{Leg: "sessions", ID: "gc-9"}) || e.Marker != (ledgerMarker{RowID: "gc-9", InstanceToken: "tok"}) {
 		t.Fatalf("retargeted entry = %+v", e)
 	}
 	l.Commit("c1", ledgerMarker{RowID: "gc-9", InstanceToken: "tok"})
-	if l.Retarget("c1", "gc-8", 9) {
+	if l.Retarget("c1", "gc-8") {
 		t.Fatal("retargeted a committed create")
 	}
-	e, _ = ledgerEntryOf(l, "c1")
-	if e.ReopenRevision != 7 {
-		t.Fatalf("commit dropped the revision read: %+v", e)
-	}
-	if got := e.lagOutcomeOf(e.Key, ledgerRow{Revision: 7}, true, false); got != lagNoMarker {
-		t.Fatalf("reopen target closed at the revision read = %d, want lagNoMarker", got)
-	}
-	if got := e.lagOutcomeOf(e.Key, ledgerRow{Revision: 8}, true, false); got != lagClosed {
-		t.Fatalf("reopen target closed at a later revision = %d, want lagClosed", got)
-	}
-	plain := ledgerEntry{Kind: kindCreate, Marker: ledgerMarker{RowID: "gc-9"}}
-	if got := plain.lagOutcomeOf(e.Key, ledgerRow{}, true, false); got != lagClosed {
-		t.Fatalf("closed fresh create = %d, want lagClosed", got)
+	if e, _ = ledgerEntryOf(l, "c1"); e.Key.ID != "gc-9" {
+		t.Fatalf("commit dropped the reopened row: %+v", e)
 	}
 }
 
@@ -1402,7 +1367,7 @@ func TestSyncSessionBeadsNamedArmMatchesPreRefactor(t *testing.T) {
 
 // Kills: a named create or reopen without the flock (S6, AM-N1): legacy
 // creates unlocked on a lock error; the effect writes nothing and records a
-// create veto.
+// create backoff.
 func TestCreateEffect_NamedLockFailureFailsClosed(t *testing.T) {
 	cfg := mayorCity()
 	for _, reopen := range []bool{false, true} {
@@ -1418,7 +1383,7 @@ func TestCreateEffect_NamedLockFailureFailsClosed(t *testing.T) {
 		plan := namedPlan(t, cfg, "c1", "mayor")
 		h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
 		assertFailedNoWrite(t, h)
-		h.assertCreateVeto(t, plan, createStageLock)
+		h.assertCreateBackoff(t, plan, createStageLock)
 		if after := namedComparableRows(t, store); !reflect.DeepEqual(after, before) {
 			t.Fatalf("reopen=%v: rows changed without the lock: %+v", reopen, after)
 		}
@@ -1526,15 +1491,15 @@ func TestCreateEffect_NamedConditionalReopenWritesOnceAndOpensTheRow(t *testing.
 	if row.Status != "open" || row.Revision == closed.Revision {
 		t.Fatalf("row = %s at revision %d (read at %d), want open and written", row.Status, row.Revision, closed.Revision)
 	}
-	if e := h.entry(t); e.State != ledgerCommitted || !e.Reopen || e.Marker.RowID != closed.ID {
+	if e := h.entry(t); e.State != ledgerCommitted || e.Marker.RowID != closed.ID {
 		t.Fatalf("entry = %+v, want a committed reopen of %s", e, closed.ID)
 	}
-	h.assertNoCreateVeto(t)
+	h.assertNoCreateBackoff(t)
 }
 
-// Kills: a refused write settled as ambiguous, which leaks the token until
-// lag repair and skips the create veto, and a panic in the write settled as
-// no write, which refunds a row that may exist (E6-E8, latent 1). A store
+// Kills: a refused write settled as ambiguous, which holds the entry until a
+// later read and skips the create backoff, and a panic in the write settled
+// as no write, which backs off a row that may exist (E6-E8, latent 1). A store
 // that cannot fence, a gate refusal, a code-less not-found and a lost fence
 // prove nothing was written, for the create and the reopen alike; a panic
 // or a connection error during the write is ambiguous.
@@ -1569,7 +1534,7 @@ func TestCreateEffect_NamedRefusedWriteIsNoWriteAndPanicIsAmbiguous(t *testing.T
 				store.err = err
 				h, plan, _ := run(t, store)
 				assertFailedNoWrite(t, h)
-				h.assertCreateVeto(t, plan, createStageFence)
+				h.assertCreateBackoff(t, plan, createStageFence)
 			})
 		}
 		for name, edit := range map[string]func(*namedCondStore){
@@ -1584,7 +1549,7 @@ func TestCreateEffect_NamedRefusedWriteIsNoWriteAndPanicIsAmbiguous(t *testing.T
 				if e.State != ledgerCommitted || !e.WroteRow || e.Marker.RowID != closedID {
 					t.Fatalf("entry = %+v, want an ambiguous commit marked with row %q", e, closedID)
 				}
-				h.assertNoCreateVeto(t)
+				h.assertNoCreateBackoff(t)
 			})
 		}
 	}
@@ -1608,7 +1573,7 @@ func TestCreateEffect_NamedValidatesTransport(t *testing.T) {
 	plan := namedPlan(t, cfg, "c1", "mayor")
 	h.runAll(t, &createPass{cfg: cfg, sp: &acpOnlyDesiredStateProvider{Fake: runtime.NewFake()}, store: store}, plan)
 	assertFailedNoWrite(t, h)
-	h.assertCreateVeto(t, plan, createStagePrepare)
+	h.assertCreateBackoff(t, plan, createStagePrepare)
 	if rows := sessionRows(t, store); len(rows) != 0 {
 		t.Fatalf("rows = %+v, want none for an unsupported transport", rows)
 	}
@@ -1630,7 +1595,7 @@ func TestCreateEffect_NamedResolutionFailureGatesTheReopen(t *testing.T) {
 	h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
 
 	assertFailedNoWrite(t, h)
-	h.assertCreateVeto(t, plan, createStageResolve)
+	h.assertCreateBackoff(t, plan, createStageResolve)
 	after, err := store.Get(closed.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -1795,7 +1760,7 @@ func TestCreateEffect_NamedReopenWritesNothingOnceItsEntryIsSettled(t *testing.T
 	if after, err := inner.Get(closed.ID); err != nil || after.Status != "closed" {
 		t.Fatalf("row = %+v, %v; want it still closed", after, err)
 	}
-	if e := h.entry(t); e.Reopen || e.Key.ID != "" {
+	if e := h.entry(t); e.Key.ID != "" {
 		t.Fatalf("entry = %+v, want the watchdog's commit, never retargeted", e)
 	}
 }

@@ -8532,7 +8532,7 @@ func TestReapRuntimesBoundToClosedBeadsStopsLiveRuntime(t *testing.T) {
 	}})
 
 	var stderr bytes.Buffer
-	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, nil, &stderr)
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, nil, "", &stderr)
 	if got != 1 {
 		t.Fatalf("reapRuntimesBoundToClosedBeads() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -8563,7 +8563,7 @@ func TestReapRuntimesBoundToClosedBeadsSkipsOpenBeadRuntime(t *testing.T) {
 	}})
 
 	var stderr bytes.Buffer
-	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, nil, &stderr)
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, nil, "", &stderr)
 	if got != 0 || sp.stopCalls["worker"] != 0 {
 		t.Fatalf("reaped open-bead runtime: got=%d stopCalls=%d stderr=%q", got, sp.stopCalls["worker"], stderr.String())
 	}
@@ -8579,7 +8579,7 @@ func TestReapRuntimesBoundToClosedBeadsSkipsRuntimeWithoutSessionID(t *testing.T
 	snapshot := newSessionBeadSnapshot(nil)
 
 	var stderr bytes.Buffer
-	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, nil, &stderr)
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, nil, "", &stderr)
 	if got != 0 || sp.stopCalls["mystery"] != 0 {
 		t.Fatalf("reaped unattributable runtime: got=%d stopCalls=%d", got, sp.stopCalls["mystery"])
 	}
@@ -8605,7 +8605,7 @@ func TestReapRuntimesBoundToClosedBeadsSkipsUnknownAndNonClosedBeads(t *testing.
 	snapshot := newSessionBeadSnapshot(nil)
 
 	var stderr bytes.Buffer
-	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, nil, &stderr)
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, nil, "", &stderr)
 	if got != 0 || sp.stopCalls["foreign"] != 0 || sp.stopCalls["still-open"] != 0 {
 		t.Fatalf("reaped a runtime that was not confirmed-closed: got=%d stderr=%q", got, stderr.String())
 	}
@@ -8627,7 +8627,7 @@ func TestReapRuntimesBoundToClosedBeadsSkipsActiveDrain(t *testing.T) {
 	dt.set("gm-closed", &drainState{reason: "user"})
 
 	var stderr bytes.Buffer
-	got := reapRuntimesBoundToClosedBeads(store, snapshot, dt, sp, nil, &stderr)
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, dt, sp, nil, "", &stderr)
 	if got != 0 || sp.stopCalls["mayor"] != 0 {
 		t.Fatalf("reaped a draining runtime: got=%d stopCalls=%d", got, sp.stopCalls["mayor"])
 	}
@@ -10116,7 +10116,7 @@ func TestReapRuntimesBoundToClosedBeadsConfirmsClosedLive(t *testing.T) {
 	}
 	store := cachedSessionReopenedBehindTheCache(t)
 	var stderr bytes.Buffer
-	if got := reapRuntimesBoundToClosedBeads(store, newSessionBeadSnapshot(nil), nil, sp, nil, &stderr); got != 0 || len(sp.stopped) != 0 {
+	if got := reapRuntimesBoundToClosedBeads(store, newSessionBeadSnapshot(nil), nil, sp, nil, "", &stderr); got != 0 || len(sp.stopped) != 0 {
 		t.Fatalf("reaped %d (stopped %v) on a cached closed row the store has reopened; stderr=%q", got, sp.stopped, stderr.String())
 	}
 }

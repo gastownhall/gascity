@@ -49,10 +49,13 @@ jobs:
           POOL_MAX_MINUTES: ${{ inputs.max_minutes }}
           WORKER_NAME: gha-fork-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}
           RBE_ACTION_ISOLATION: "1"
-          # zstd fetches only (uploads stay identity): Caddyfile.fork sends
-          # this certificate's ByteStream.Read to rbe-west's read-only zstd
-          # process. Off until the repository variable RBE_FORK_WIRE_ZSTD is 1,
-          # after that route is live; rollback: set it to 0, and the next
-          # dispatch fetches identity again.
+          # zstd fetches only (uploads stay identity), from the dedicated
+          # read-only zstd host. Off until the repository variable
+          # RBE_FORK_WIRE_ZSTD is 1, set together with
+          # RBE_FORK_WIRE_ZSTD_READ_URL=grpcs://rbe-fork-zread.ops.gascity.com:8444
+          # (the worker refuses to start with the switch on and no zread URL).
+          # Rollback: set it to 0, and the next dispatch fetches identity
+          # again; for an emergency also cancel the running pool runs.
           RBE_WIRE_ZSTD: ${{ vars.RBE_FORK_WIRE_ZSTD || '0' }}
+          RBE_WIRE_ZSTD_READ_URL: ${{ vars.RBE_FORK_WIRE_ZSTD_READ_URL || '' }}
         run: tools/rbe/blacksmith-worker.sh

@@ -71,6 +71,7 @@ const (
 	TraceSiteRuntimeInventoryPass           TraceSiteCode = "runtime_inventory.pass"
 	TraceSiteRuntimeInventoryOnDeath        TraceSiteCode = "runtime_inventory.on_death"
 	TraceSiteReconcileQueue                 TraceSiteCode = "reconcile.queue"
+	TraceSiteV2SessionDecision              TraceSiteCode = "reconcile.session.decision"
 	TraceSitePoolDemandCompute              TraceSiteCode = "pool_desired.compute"
 	TraceSiteSessionSnapshot                TraceSiteCode = "session_snapshot.load"
 	TraceSiteSessionSync                    TraceSiteCode = "session_sync.update_index"
