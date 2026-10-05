@@ -119,15 +119,18 @@ endpoints, credentials, timeouts, download and parallelism policy.
 
 | `GC_PREPUSH_SUITE` | runs |
 |---|---|
-| `auto` | `bazel test //... --config=remote-exec` when `.bazelrc.local` has a `build:remote-exec --remote_executor=` line; `bazel test //... --config=fork-cache` otherwise; `make test-fast-parallel` when bazel is not installed |
+| `auto` | `bazel test //... --config=remote-exec` when `.bazelrc.local` has a `build:remote-exec --remote_executor=` line; `bazel test //... --config=fork-cache` otherwise; `make test-fast-parallel` when bazel is not installed, or for `fork-cache` when the pinned test `PATH` has no `go` |
 | `rbe` | `bazel test //... --config=remote-exec` |
 | `cache` | `bazel test //... --config=fork-cache` |
 | `go` | `make test-fast-parallel` (plain `go test`, the pre-Bazel suite) |
 
 An explicit `rbe`/`cache` without bazel installed, or an unknown value, fails
 the push. `auto` looks only at `.bazelrc.local`; if your executor lines live in
-another rc file, set `GC_PREPUSH_SUITE=rbe`. Locally executed tests use the pinned test `PATH`, so Go must be at
-`/usr/local/go` (`sudo ln -s "$(go env GOROOT)" /usr/local/go`); overriding
+another rc file (`~/.bazelrc`), set `GC_PREPUSH_SUITE=rbe`; `fork-cache` resets
+`--remote_executor`, so the cache mode never executes remotely. Locally
+executed tests use the pinned test `PATH`, so Go must be at `/usr/local/go`
+(`sudo ln -s "$(go env GOROOT)" /usr/local/go`; without it `auto` runs
+`make test-fast-parallel` instead of the cache mode); overriding
 `--test_env=PATH` in `.bazelrc.local` works but gives your machine its own
 action keys, so nothing CI ran is a hit.
 

@@ -159,3 +159,57 @@ func TestPrePushSuitePropagatesBazelFailure(t *testing.T) {
 		t.Errorf("make ran after a bazel failure: %q", got)
 	}
 }
+
+// TestPrePushSuiteAutoNeedsGoOnPinnedPath: fork-cache misses run tests on
+// this machine with .bazelrc's pinned test PATH, and tests that exec `go`
+// fail there when Go lives elsewhere (Homebrew, asdf, ~/sdk). auto then runs
+// the go suite instead; remote execution and an explicit cache mode are
+// unaffected.
+func TestPrePushSuiteAutoNeedsGoOnPinnedPath(t *testing.T) {
+	executor := "build:remote-exec --remote_executor=grpcs://rbe.example:443\n"
+	for _, tc := range []struct {
+		name      string
+		goOnPath  bool
+		mode      string
+		rcLocal   string
+		wantBazel string
+		wantMake  string
+	}{
+		{name: "go on the pinned PATH reads the cache", goOnPath: true, wantBazel: prePushBazelCacheArgs},
+		{name: "no go on the pinned PATH falls back to go test", wantMake: prePushMakeArgs},
+		{name: "remote execution needs no local go", rcLocal: executor, wantBazel: prePushBazelRBEArgs},
+		{name: "explicit cache still runs bazel", mode: "cache", wantBazel: prePushBazelCacheArgs},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPrePushFixture(t)
+			bazelRecord := f.withFakeBazel(t)
+			pinned := t.TempDir()
+			if tc.goOnPath {
+				writeExecutable(t, filepath.Join(pinned, "go"), "#!/usr/bin/env sh\nexit 0\n")
+			}
+			rc := "test --test_env=PATH=/nonexistent/forwarded\n" +
+				"test --test_env=PATH=" + filepath.Join(t.TempDir(), "empty") + ":" + pinned + " # pinned\n"
+			if err := os.WriteFile(filepath.Join(f.repo, ".bazelrc"), []byte(rc), 0o644); err != nil {
+				t.Fatalf("write .bazelrc: %v", err)
+			}
+			f.env = append(f.env, "GC_PREPUSH_SUITE="+tc.mode)
+			if tc.rcLocal != "" {
+				f.writeBazelRCLocal(t, tc.rcLocal)
+			}
+
+			code, out := f.run(t, f.pushRefLine())
+			if code != 0 {
+				t.Fatalf("pre-push exit = %d, want 0\n%s", code, out)
+			}
+			if got := strings.TrimSpace(f.read(t, f.makeRuns)); got != tc.wantMake {
+				t.Errorf("make ran %q, want %q\n%s", got, tc.wantMake, out)
+			}
+			if got := strings.TrimSpace(f.read(t, bazelRecord)); got != tc.wantBazel {
+				t.Errorf("bazel ran %q, want %q\n%s", got, tc.wantBazel, out)
+			}
+			if tc.wantMake != "" && !strings.Contains(out, pinned) {
+				t.Errorf("fallback does not name the pinned PATH %s:\n%s", pinned, out)
+			}
+		})
+	}
+}

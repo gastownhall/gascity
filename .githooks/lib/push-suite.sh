@@ -15,7 +15,8 @@
 # GC_PREPUSH_SUITE picks the mode (default auto):
 #   auto   remote-exec when bazel is installed and .bazelrc.local sets
 #          `build:remote-exec --remote_executor=...`; fork-cache when bazel is
-#          installed without one; make test-fast-parallel without bazel.
+#          installed without one and .bazelrc's pinned test PATH has `go`;
+#          make test-fast-parallel otherwise.
 #   rbe    --config=remote-exec.
 #   cache  --config=fork-cache.
 #   go     make test-fast-parallel (plain go test, the pre-Bazel suite).
@@ -37,6 +38,24 @@ have_bazel() {
   command -v bazel >/dev/null 2>&1
 }
 
+# .bazelrc's pinned test PATH (the last unconditional one, as Bazel applies it).
+pinned_test_path() {
+  [ -f .bazelrc ] && sed -n 's/^test[[:space:]]\{1,\}--test_env=PATH=\([^[:space:]]\{1,\}\).*/\1/p' .bazelrc | tail -n 1
+}
+
+# Locally executed tests (fork-cache misses) exec `go` from the pinned test
+# PATH; without it there, they fail rather than skip.
+pinned_path_has_go() {
+  local pinned dir
+  pinned="$(pinned_test_path)" || return 0
+  [ -n "$pinned" ] || return 0
+  local IFS=:
+  for dir in $pinned; do
+    [ -x "$dir/go" ] && return 0
+  done
+  return 1
+}
+
 case "$mode" in
 auto)
   if ! have_bazel; then
@@ -45,6 +64,10 @@ auto)
     mode=go
   elif remote_executor_configured; then
     mode=rbe
+  elif ! pinned_path_has_go; then
+    echo "pre-push: no go on .bazelrc's pinned test PATH ($(pinned_test_path)); running make test-fast-parallel." >&2
+    echo "pre-push: link your GOROOT to /usr/local/go to run the bazel suite (TESTING.md \"Bazel cache tiers\")." >&2
+    mode=go
   else
     mode=cache
   fi
