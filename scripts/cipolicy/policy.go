@@ -114,10 +114,16 @@ const (
 	// `if: failure()` pinned upload-artifact step for that directory. No new
 	// job, trigger, permission or secret.
 	//
+	// Bumped again (beads#7037): the topology job's shared-server step -run
+	// also selects TestBlockedRepairOnProxiedCityAndRig, the proxied city+rig
+	// proof of gc start's is_blocked repair (about 4 minutes, inside that
+	// step's 15m -timeout). Reviewed delta: one -run alternative, no new job,
+	// step, trigger or permission.
+	//
 	// Bumped again (gc 1.5.1 proxied idle timeout): the proxied-native job's
 	// test step also selects TestProxiedIdleTimeoutReapAndTransparentRestart,
 	// and the step is renamed to say so. No new job, trigger or permission.
-	expectedCIExecutionHash     = "397707507a2bd7ef933973b577e21d41380c30dd104e39a313fb14a23f430fb8"
+	expectedCIExecutionHash     = "818a6ed46b87879b1dd635ca8f06acc492e974b6d312d0eef5efd36275d2edfb"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
