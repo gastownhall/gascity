@@ -492,7 +492,9 @@ func providerOwnedLifecycleScopeRoots(cityPath, op string) ([]string, error) {
 		if cfgErr != nil && cityConfigFilePresent(cityPath) {
 			return nil, cfgErr
 		}
-		return roots, nil
+		// A suspended rig or city is left cold: start and health would
+		// restart its proxy and Dolt. Retiring ops above still visit it.
+		return withoutSuspendedScopes(roots, suspendedBeadsScopes(cityPath, cfg)), nil
 	}
 	journal, exists, err := loadProviderScopeOwnershipJournal(cityPath)
 	if err != nil {
@@ -516,6 +518,18 @@ func providerOwnedLifecycleScopeRoots(cityPath, op string) ([]string, error) {
 		add(root)
 	}
 	return roots, nil
+}
+
+// withoutSuspendedScopes drops the scope roots that belong to a suspended rig
+// or city.
+func withoutSuspendedScopes(roots []string, suspended beadsScopeSuspension) []string {
+	kept := roots[:0]
+	for _, root := range roots {
+		if !suspended.Suspended(root) {
+			kept = append(kept, root)
+		}
+	}
+	return kept
 }
 
 // scopeArtifactAbsent reports whether err says a scope artifact simply is not

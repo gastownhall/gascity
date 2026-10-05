@@ -281,8 +281,14 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	if err := initAndHookDir(cityPath, cityPath, beadsPrefix); err != nil {
 		return fmt.Errorf("init city beads: %w", err)
 	}
+	suspended := suspendedBeadsScopes(cityPath, cfg)
 	for i := range cfg.Rigs {
 		if strings.TrimSpace(cfg.Rigs[i].Path) == "" {
+			continue
+		}
+		if suspended.Suspended(cfg.Rigs[i].Path) && providerOwnedScopeReady(cityPath, cfg.Rigs[i].Path) {
+			// A suspended rig whose store already exists is left cold: its
+			// readiness ping would restart its proxy and Dolt.
 			continue
 		}
 		prefix := cfg.Rigs[i].EffectivePrefix()
@@ -1304,6 +1310,11 @@ func runProviderOwnedScopesLifecycleOpReportingFailures(parent context.Context, 
 	for _, scopeRoot := range scopes {
 		owned, err := scopeProviderOwned(cityPath, scopeRoot)
 		if err == nil && !owned {
+			continue
+		}
+		if err == nil && op == "health" && beadsScopeIdleRetired(scopeRoot) {
+			// The proxy retired on its idle timeout. That is healthy, and a
+			// ping would only restart it for another idle period.
 			continue
 		}
 		if err == nil {

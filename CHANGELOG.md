@@ -44,6 +44,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`gc doctor`, `beads-health` and the dashboard understand a finite proxied
+  idle timeout.** A scope whose proxy retired on its idle timeout is idle, not
+  down. On a running city, doctor reads it, which wakes it for one more idle
+  period, instead of warning "store not running". `beads-health` and the
+  dashboard's per-rig probe count it as healthy and do not ping it. A stopped
+  city is still never started. A suspended rig or city is never woken: doctor
+  reports its store checks as "not checked: suspended", and `gc start` and
+  health leave it alone. The `proxied-idle-timeout` doctor check now compares
+  the configured value with the scope's sidecar and with the running proxy,
+  and reports drift as an advisory (#6561).
+
 - **Ready work in a SQLite infra ledger is ordered priority-first.** On a city
   that relocates classes to a `sqlite-beads` binding, that ledger's ready read
   returned rows oldest-first (`created_at, id`). It now returns the canonical

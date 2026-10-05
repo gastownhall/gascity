@@ -137,3 +137,16 @@ func ValidateProxiedIdleTimeouts(cfg *City, source string) error {
 	}
 	return nil
 }
+
+// ProxiedIdleTimeoutForScope resolves the idle timeout for one scope. rig is
+// the scope's rig, nil for the city. A rig whose scope shares the city's
+// proxy root resolves the city's value, and ignoredRigOverride reports that
+// the rig's own beads_proxied_idle_timeout was set and ignored.
+func ProxiedIdleTimeoutForScope(city *City, rig *Rig, sharesCityRoot bool) (timeout ProxiedIdleTimeout, ignoredRigOverride bool, err error) {
+	if rig != nil && sharesCityRoot {
+		ignoredRigOverride = rig.BeadsProxiedIdleTimeout != nil
+		rig = nil
+	}
+	timeout, err = ProxiedIdleTimeoutFor(city, rig)
+	return timeout, ignoredRigOverride, err
+}

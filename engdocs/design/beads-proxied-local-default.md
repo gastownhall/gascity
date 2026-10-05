@@ -314,14 +314,31 @@ beads `cmd/bd/proxy_capability.go`; packs and orders that call those verbs
 against a proxied scope fail typed. The dashboard and doctor use `bd ping`
 rather than `bd doctor --readonly` for exactly this reason.
 
-`gc doctor` never starts a server. On the proxied path any bd read of a stopped
-store starts its proxy and Dolt child (`BEADS_DOLT_AUTO_START` does not apply
-there), and gc-owned scopes keep them up for good. So before the bead-store
-preflight and before any store-reading check, doctor asks gc's own endpoint
-inspection (the proxy record plus the process table, no bd call) whether each
-proxied scope's proxy is running. For a stopped scope every store-reading check,
-and every fix that needs the store, is reported as "not checked: store not
-running". Checks that do not read the store run as usual.
+`gc doctor` never starts a stopped city's servers. On the proxied path any bd
+read of a stopped store starts its proxy and Dolt child (`BEADS_DOLT_AUTO_START`
+does not apply there), and they then stay up until the scope's idle timeout.
+So before the bead-store preflight and before any store-reading check, doctor
+asks gc's own endpoint inspection (the proxy record plus the process table, no
+bd call) whether each proxied scope's proxy is running, and decides per scope:
+
+| city | scope | proxy | doctor |
+| --- | --- | --- | --- |
+| any | suspended rig, or any scope of a suspended city | any | "not checked: suspended", OK; never woken |
+| any | any | running | reads it |
+| stopped | any | not running | "not checked: store not running", OK; never started |
+| running | finite idle timeout | not running | reads it: the proxy retired on its idle timeout, and the read restarts it for one more idle period |
+| running | never | not running | "not checked: store not running", **warning**: a never-idle proxy that is down under a running city is a fault |
+
+Every store-reading check, and every fix that needs the store, uses the
+stand-in; checks that do not read the store run as usual. The
+`proxied-endpoint` account reports a finite scope with no proxy record as idle
+rather than as a gap.
+
+`beads-health` (`gc beads health`) and the dashboard's per-rig probe follow
+the same rule without the doctor stand-ins: a scope whose proxy retired on its
+finite idle timeout counts as healthy and is not pinged, and a suspended rig or
+city is neither pinged nor started at `gc start`. A never-idle scope with no
+proxy is still pinged and recovered.
 
 `backup*` is on that list in rc.2 and v1.3.0, and it is the one refusal with a
 data consequence: there, a proxied scope has no backup, by anyone. gc cannot

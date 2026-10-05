@@ -197,3 +197,25 @@ func TestIdlePolicyRendering(t *testing.T) {
 		}
 	}
 }
+
+func TestSidecarIdleMatches(t *testing.T) {
+	never := IdleTimeoutNever
+	thirty := 30 * time.Minute
+	for _, tc := range []struct {
+		name    string
+		sidecar Sidecar
+		d       time.Duration
+		want    bool
+	}{
+		{name: "never matches never", sidecar: Sidecar{Present: true, IdleTimeout: &never}, d: 0, want: true},
+		{name: "never is not finite", sidecar: Sidecar{Present: true, IdleTimeout: &never}, d: thirty},
+		{name: "finite matches itself", sidecar: Sidecar{Present: true, IdleTimeout: &thirty}, d: thirty, want: true},
+		{name: "finite is not never", sidecar: Sidecar{Present: true, IdleTimeout: &thirty}, d: 0},
+		{name: "absent key matches nothing", sidecar: Sidecar{Present: true}, d: 0},
+		{name: "absent sidecar matches nothing", sidecar: Sidecar{}, d: 0},
+	} {
+		if got := tc.sidecar.IdleMatches(tc.d); got != tc.want {
+			t.Errorf("%s: IdleMatches(%v) = %v, want %v", tc.name, tc.d, got, tc.want)
+		}
+	}
+}

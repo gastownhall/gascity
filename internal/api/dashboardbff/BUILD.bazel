@@ -24,6 +24,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/beads",
+        "//internal/beads/proxyendpoint",
         "//internal/events",
         "//internal/runproj",
         "@com_github_shirou_gopsutil_v4//host",

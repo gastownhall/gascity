@@ -414,14 +414,12 @@ func migrateProxiedScopeIdleTimeout(cityPath string, scope migrateProxiedScope) 
 	if cfg != nil && !scope.IsCity {
 		rig = rigConfigForScopeRoot(cityPath, scope.Path, cfg.Rigs)
 	}
+	shares := rig != nil && (scope.SharedRootRel != "" || rigSharesCityDoltDataDir(cityPath, scope))
+	idle, ignored, err := config.ProxiedIdleTimeoutForScope(cfg, rig, shares)
 	var warnings []string
-	if rig != nil && (scope.SharedRootRel != "" || rigSharesCityDoltDataDir(cityPath, scope)) {
-		if rig.BeadsProxiedIdleTimeout != nil {
-			warnings = append(warnings, fmt.Sprintf("rig %q beads_proxied_idle_timeout is ignored: the rig shares the city's proxy root and uses the city's [beads] proxied_idle_timeout", rig.Name))
-		}
-		rig = nil
+	if ignored {
+		warnings = append(warnings, ignoredSharedRootIdleOverride(rig.Name))
 	}
-	idle, err := config.ProxiedIdleTimeoutFor(cfg, rig)
 	return idle, warnings, err
 }
 
@@ -437,24 +435,11 @@ func migratedScopeIdleTimeoutDrift(scope migrateProxiedScope, idle config.Proxie
 	if !sidecar.Present {
 		return nil
 	}
-	if sidecarIdleMatches(sidecar, idle) {
+	if sidecar.IdleMatches(idle.Duration) {
 		return nil
 	}
 	return []string{fmt.Sprintf("bd kept the idle timeout it recorded when this migration started (%s); the configured value is %s. gc doctor reports the drift",
 		sidecar.IdlePolicy(), idle)}
-}
-
-// sidecarIdleMatches reports whether a scope's sidecar carries the idle
-// timeout gc resolved for it. bd persists never as a negative duration and a
-// finite value as itself.
-func sidecarIdleMatches(sidecar proxyendpoint.Sidecar, idle config.ProxiedIdleTimeout) bool {
-	if sidecar.IdleTimeout == nil {
-		return false
-	}
-	if idle.Never() {
-		return *sidecar.IdleTimeout < 0
-	}
-	return *sidecar.IdleTimeout == idle.Duration
 }
 
 // resumeInterruptedScopeMigration replays the phases bd did not reach.

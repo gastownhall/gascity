@@ -35,13 +35,18 @@ func proxiedIdleTimeoutForScope(cfg *config.City, cityPath, scopeRoot string, wa
 	if cfg != nil && !samePath(cityPath, scopeRoot) {
 		rig = rigConfigForScopeRoot(cityPath, scopeRoot, cfg.Rigs)
 	}
-	if rig != nil && rigScopeSharesCityProxyRoot(cityPath, scopeRoot) {
-		if rig.BeadsProxiedIdleTimeout != nil && warn != nil {
-			fmt.Fprintf(warn, "warning: rig %q beads_proxied_idle_timeout is ignored: the rig shares the city's proxy root, so it uses the city's [beads] proxied_idle_timeout\n", rig.Name) //nolint:errcheck // best-effort warning
-		}
-		rig = nil
+	shares := rig != nil && proxyendpoint.SharesCityRoot(cityPath, scopeRoot)
+	idle, ignored, err := config.ProxiedIdleTimeoutForScope(cfg, rig, shares)
+	if ignored && warn != nil {
+		fmt.Fprintf(warn, "warning: %s\n", ignoredSharedRootIdleOverride(rig.Name)) //nolint:errcheck // best-effort warning
 	}
-	return config.ProxiedIdleTimeoutFor(cfg, rig)
+	return idle, err
+}
+
+// ignoredSharedRootIdleOverride is the warning for a shared-root rig that sets
+// its own idle timeout.
+func ignoredSharedRootIdleOverride(rigName string) string {
+	return fmt.Sprintf("rig %q beads_proxied_idle_timeout is ignored: the rig shares the city's proxy root, so it uses the city's [beads] proxied_idle_timeout", rigName)
 }
 
 // loadCityConfigForProxiedIdleTimeout loads the city config, answering nil for
@@ -59,21 +64,4 @@ func loadCityConfigForProxiedIdleTimeout(cityPath string) (*config.City, error) 
 		return nil, fmt.Errorf("resolve proxied idle timeout: %w", err)
 	}
 	return cfg, nil
-}
-
-// rigScopeSharesCityProxyRoot reports whether a rig scope resolves the city's
-// proxy root, so one proxy serves both. A root gc cannot resolve answers false.
-func rigScopeSharesCityProxyRoot(cityPath, scopeRoot string) bool {
-	if cityPath == "" || samePath(cityPath, scopeRoot) {
-		return false
-	}
-	cityRoot, err := proxyendpoint.ProviderRoot(cityPath)
-	if err != nil || cityRoot == "" {
-		return false
-	}
-	rigRoot, err := proxyendpoint.ProviderRoot(scopeRoot)
-	if err != nil || rigRoot == "" {
-		return false
-	}
-	return samePath(cityRoot, rigRoot)
 }

@@ -250,12 +250,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		checks = append(checks, c)
 	}
 
-	// Doctor never starts a server: a store-reading check against a stopped
-	// bd-owned proxied store would start its proxy and Dolt (see
-	// doctorStoreGate), so each such check asks the gate and is replaced by a
-	// "not checked: store not running" line for a stopped scope.
-	storeGate := newDoctorStoreGate(opts.ControllerRunning)
-	cityStoreStopped := storeGate.Stopped(cityPath)
+	// Doctor never starts a stopped city's servers and never wakes a suspended
+	// scope: a store-reading check against a stopped bd-owned proxied store
+	// would start its proxy and Dolt (see doctorStoreGate), so each such check
+	// asks the gate and is replaced by a "not checked" line for a skipped scope.
+	storeGate := newDoctorStoreGate(opts.ControllerRunning, suspendedBeadsScopes(cityPath, cfg).Suspended)
+	cityStoreStopped := storeGate.Skipped(cityPath)
 	registerCityStoreCheck := func(c doctor.Check) {
 		register(storeGate.Check(c, []string{cityPath}, []string{"city"}))
 	}
@@ -376,7 +376,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		// stopped proxied city gets the not-running lines without building it.
 		if cityStoreStopped {
 			for _, name := range []string{"agent-sessions", "zombie-sessions", "orphan-sessions"} {
-				register(storeGate.NotRunning(name, "city"))
+				register(storeGate.StandIn(name, []string{cityPath}, []string{"city"}))
 			}
 		} else {
 			sp, err := newSessionProvider()

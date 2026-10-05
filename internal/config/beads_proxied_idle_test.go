@@ -225,3 +225,20 @@ func TestApplyRigPatchProxiedIdleTimeout(t *testing.T) {
 		t.Fatalf("BeadsProxiedIdleTimeout = %v after an unrelated patch, want 0", got)
 	}
 }
+
+func TestProxiedIdleTimeoutForScopeSharedRoot(t *testing.T) {
+	t.Setenv(ProxiedIdleTimeoutEnv, "")
+	city := &City{Beads: BeadsConfig{ProxiedIdleTimeout: "45m"}}
+	rig := &Rig{Name: "r", BeadsProxiedIdleTimeout: strPtr("0")}
+	got, ignored, err := ProxiedIdleTimeoutForScope(city, rig, true)
+	if err != nil || !ignored || got.Duration != 45*time.Minute {
+		t.Fatalf("shared root = %+v ignored=%v err=%v, want the city's 45m with the override ignored", got, ignored, err)
+	}
+	got, ignored, err = ProxiedIdleTimeoutForScope(city, rig, false)
+	if err != nil || ignored || !got.Never() {
+		t.Fatalf("own root = %+v ignored=%v err=%v, want the rig's never", got, ignored, err)
+	}
+	if _, ignored, _ := ProxiedIdleTimeoutForScope(city, &Rig{Name: "plain"}, true); ignored {
+		t.Fatal("a shared-root rig with no override reported an ignored override")
+	}
+}

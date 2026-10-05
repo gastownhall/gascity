@@ -24,6 +24,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//internal/bazeltest",
+        "//internal/config",
         "//internal/testutil",
         "//test/toolhome",
         "@com_github_steveyegge_beads//schema",

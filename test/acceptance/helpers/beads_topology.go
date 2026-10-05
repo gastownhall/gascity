@@ -14,7 +14,19 @@ import (
 	"time"
 
 	"golang.org/x/mod/semver"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
+
+// DefaultSidecarIdleTimeout is the idle_timeout bd persists in a sidecar gc
+// initialized at the default proxied idle timeout: -1 (bd's never) when the
+// default is never, the window in nanoseconds otherwise.
+func DefaultSidecarIdleTimeout() int {
+	if config.DefaultProxiedIdleTimeout <= 0 {
+		return -1
+	}
+	return int(config.DefaultProxiedIdleTimeout)
+}
 
 // The init topology matrix.
 //
@@ -68,7 +80,8 @@ type ScopeShape struct {
 	// the proxied default.
 	ForbiddenDoltMode string
 	// Sidecar requires .beads/proxied_server_client_info.json, and IdleTimeout
-	// the value in it. GC-owned proxies are pinned resident (-1).
+	// the value in it: what gc's init writes at the default config
+	// (DefaultSidecarIdleTimeout).
 	Sidecar     bool
 	IdleTimeout int
 	// ExternalUpstreamSidecar requires the sidecar to name the external
@@ -366,7 +379,7 @@ func BeadsTopologies() []BeadsTopology {
 		Evidence: "argv+birth", IdlePolicyPrefix: "never",
 	}
 	proxiedLocalScope := ScopeShape{
-		DoltMode: "proxied-server", Sidecar: true, IdleTimeout: -1,
+		DoltMode: "proxied-server", Sidecar: true, IdleTimeout: DefaultSidecarIdleTimeout(),
 		Journaled: true, Proxies: 1, Servers: 1, Owner: OwnerProvider,
 	}
 	directLocalScope := ScopeShape{
@@ -472,12 +485,12 @@ func BeadsTopologies() []BeadsTopology {
 			Doc:      "a local bd proxy fronting the external server: the proxy is ours, the data is not",
 			Upstream: true,
 			City: ScopeShape{
-				DoltMode: "proxied-server", Sidecar: true, IdleTimeout: -1,
+				DoltMode: "proxied-server", Sidecar: true, IdleTimeout: DefaultSidecarIdleTimeout(),
 				ExternalUpstreamSidecar: true,
 				Journaled:               true, Proxies: 1, Servers: 0, Owner: OwnerProvider,
 			},
 			Rig: ScopeShape{
-				DoltMode: "proxied-server", Sidecar: true, IdleTimeout: -1,
+				DoltMode: "proxied-server", Sidecar: true, IdleTimeout: DefaultSidecarIdleTimeout(),
 				ExternalUpstreamSidecar: true,
 				Journaled:               true, Proxies: 1, Servers: 0, Owner: OwnerProvider,
 			},
