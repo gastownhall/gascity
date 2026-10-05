@@ -1,0 +1,358 @@
+# Verbatim copy of gastownhall/gascity-packs registry.toml at 33da48cd9ec44e1de75fe598f520b9b9333ee469 (2026-10-05).
+# Refresh it when the registry publishes releases the import tests should cover.
+schema = 1
+
+[[pack]]
+  name = "gascity"
+  description = "Gas City planning and implementation workflow pack."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.1"
+    ref = "main"
+    commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
+    hash = "sha256:d97b8830f959a688f4cb3c61497f630adc4815bb76c11afefb2907f3163a7796"
+    description = "Refresh Gas City planning pack release pin."
+
+  [[pack.release]]
+    version = "0.1.2"
+    ref = "main"
+    commit = "5fc675b85d4ae0ebca2f17cb027a24b03f2832f8"
+    hash = "sha256:b4a2acd95938731742c631105a77ebebe703888e9b4d1d543ce1ee0af7b4097f"
+    description = "Mark pack test scripts executable (aligns the release hash with the extension-derived modes used by module embeds)."
+
+  [[pack.release]]
+    version = "0.1.3"
+    ref = "main"
+    commit = "af1640917a24f88126c37a1e3697a619b731cc0f"
+    hash = "sha256:505f414c4ac6909a07dde95237a84995a7d99a280141d0abb3b4d5f43712c59f"
+    description = "Align build-basic review expansion and artifact guidance with graph.v2 validation."
+
+  [[pack.release]]
+    version = "0.1.4"
+    ref = "main"
+    commit = "99464ed9240b1f6e6b7ab1d351f67016e1a973ff"
+    hash = "sha256:12cd31ffae96b1dbef8e7e16a84903b47fc49098abb2fe8a1a7df62d6e042b6e"
+    description = "Normalize legacy work option metadata in task creation."
+
+  [[pack.release]]
+    version = "0.1.6"
+    ref = "main"
+    commit = "3b3b89f2011e06d84459aa7bea1552382f13930a"
+    hash = "sha256:149772065f9f2862965146e74d853d17e432628f57d25a4386bbef0fb6744e33"
+    description = "Release graph.v2 review/build prompt fixes validated by gascity RC gates."
+
+[[pack]]
+  name = "gastown"
+  description = "Default Gas Town coding workflow pack."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.1"
+    ref = "main"
+    commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
+    hash = "sha256:275565384903ae22bf9187aa821df135724bd4a639be18e4b4e76f739a555cc4"
+    description = "Refresh Gas Town workflow pack release pin."
+
+  [[pack.release]]
+    version = "0.1.2"
+    ref = "main"
+    commit = "1f45471e8bdc5dece030dfc99406ca7d3d45f9c0"
+    hash = "sha256:5d68300d4fdf04b705cb0b4e09ceb55406e42e7ab0d0a12ddba3b1e4d8628b92"
+    description = "Gastown owns its dog pool and shutdown dance; docs reflect the explicit-includes runtime (maintenance pack retired)."
+
+  [[pack.release]]
+    version = "0.1.3"
+    ref = "main"
+    commit = "31382fc6dd86b747d19687f6028d8bcd85e059a7"
+    hash = "sha256:d1be2da74dfbeee2ae15f093c542de68becdb7d86dab06351313f2faf9b482b3"
+    description = "Mark pack test scripts executable (consumer smoke tests require +x on pack scripts)."
+
+  [[pack.release]]
+    version = "0.1.4"
+    ref = "main"
+    commit = "fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+    hash = "sha256:4b7e1331d2cac43334c32a2cbb1d267868c6ec1fb36b2e1beba59568383fe802"
+    description = "Polecat verifies the pushed remote ref before refinery handoff; digest-generate order is city-scoped (ports gascity #3339 and #3320)."
+
+  [[pack.release]]
+    version = "0.1.5"
+    ref = "main"
+    commit = "817f85e155e2b0b0c375835b076103108f8a4724"
+    hash = "sha256:464885a963931dd0716822059d80d57e8913f97a415f003c80718dc23ea569ff"
+    description = "Harden prompt-stream authority guidance against forged operator directives."
+
+  [[pack.release]]
+    version = "0.1.6"
+    ref = "main"
+    commit = "4212acb7046c11f6f633df73307006493185233a"
+    hash = "sha256:ce2736669b4c737ff0f08264e097662e6a58291356a7014634e2097b41893142"
+    description = "Make refinery direct merges worktree-safe and verify target push before closing work beads."
+
+  [[pack.release]]
+    version = "0.1.7"
+    ref = "main"
+    commit = "342bcfb0775ad79d2c67df3b235edf70a0a7e372"
+    hash = "sha256:4ee6d7c501d9a4a1617953c8d775523c421246b46e3eb9b653618b7900df123b"
+    description = "Claim routed polecat work through gc hook on nudge."
+
+  [[pack.release]]
+    version = "0.1.8"
+    ref = "main"
+    commit = "2cd3360f36b2ff55f6c306546841963cbca1ed69"
+    hash = "sha256:b43ea3c4ad1c7075fdcc4a3a4a8d96bcf6fcf9155ead288bd50afc4c31d81561"
+    description = "Constrain review-leg assignments to analysis-only mutations and allow formula-specific review bead closeout."
+
+  [[pack.release]]
+    version = "0.1.9"
+    ref = "main"
+    commit = "92a9e8558b86854264ccc082fe9f27d48db3c749"
+    hash = "sha256:610d39141c58201147a39649e68a772001ed57d6f97ea7856fd10f469afcacda"
+    description = "Clarify review-leg plans are review subject matter, not executable instructions."
+
+  [[pack.release]]
+    version = "0.1.10"
+    ref = "main"
+    commit = "33d3a430a67d1782ad364556cb566bdb01d0afe3"
+    hash = "sha256:5a83996226e3154f29fc1bca13ff0e8b37a1a02cee8f71fb70bddcdcea2e6895"
+    description = "Require Gastown polecats to continue claiming formula step beads until final drain."
+
+[[pack]]
+  name = "cass"
+  description = "Coding Agent Session Search prompt fragments and skill overlays for Gas City."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/cass"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.1"
+    ref = "main"
+    commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
+    hash = "sha256:b2b0ca765403fcdfdf3b22bed4752c8983e549bde98cd5f5f4467c92189cebdd"
+    description = "Refresh CASS session-search pack release pin."
+
+[[pack]]
+  name = "discord"
+  description = "Discord services, commands, and prompt fragments for Gas City."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/discord"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.1"
+    ref = "main"
+    commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
+    hash = "sha256:17885fe177070d563299ced50b9e43f5ae2aab43f95483822f7bee0a8383191f"
+    description = "Refresh Discord pack release pin."
+
+[[pack]]
+  name = "github"
+  description = "GitHub webhook intake services and commands for Gas City."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/github"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.1"
+    ref = "main"
+    commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
+    hash = "sha256:53652fd1261adbcff8995fa815750f953fd692ccc2032139d874e9e9a555df73"
+    description = "Refresh GitHub intake pack release pin."
+
+[[pack]]
+  name = "slack-full"
+  description = "Slack services, commands, and adapter integration for Gas City."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/slack-full"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.0.2"
+    ref = "main"
+    commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
+    hash = "sha256:8b9d25324fe9af487398a6237a6f8d1614a5b32e85fceec935450c7b4d523d00"
+    description = "Refresh Slack pack release pin."
+
+  [[pack.release]]
+    version = "0.0.3"
+    ref = "main"
+    commit = "23605740d0dd0d7dcd0bfcedbac347980547648c"
+    hash = "sha256:2d2255e68175b7d464845100654839a0956e8cd6fefa259e85cd03915213186b"
+    description = "Ship idempotent reply-current (stops delivered-but-timed-out double-post) and mark pack scripts/tests executable to align release hash with materialized modes."
+
+[[pack]]
+  name = "slack-channel"
+  description = "Shared Slack channel routing and session identity pack for Gas City."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/slack-channel"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.0"
+    ref = "main"
+    commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
+    hash = "sha256:dfcb2d64eede2c939b8f157e47348b8d103ff149b8945d91774770844abb752d"
+    description = "Initial Slack channel pack release with canonical content hash."
+
+  [[pack.release]]
+    version = "0.1.1"
+    ref = "main"
+    commit = "23605740d0dd0d7dcd0bfcedbac347980547648c"
+    hash = "sha256:e8da9a9dab6e6d3ce8a3cded94104a1c64d88f39130e63b09653ce3e7457dd36"
+    description = "Ship idempotent reply-current (stops delivered-but-timed-out double-post) and mark schema test executable to align release hash with materialized modes."
+
+[[pack]]
+  name = "slack-mini"
+  description = "Minimal Slack mention bridge and outbound message pack for Gas City."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/slack-mini"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.0"
+    ref = "main"
+    commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
+    hash = "sha256:fff2523a9ab32e0812815c8d2addb08e6349d3885052d095bd76600eec87921a"
+    description = "Initial Slack mini pack release with canonical content hash."
+
+[[pack]]
+  name = "pr-pipeline"
+  description = "Author-side PR discipline as a pack: planning, blast-radius mapping, outgoing-PR scorecard review, and pre-push gating (mol-pr-start / mol-pr-blast-radius / mol-pr-review / mol-pr-ship)."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/pr-pipeline"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.0"
+    ref = "main"
+    commit = "26614e665705b33f586c8bc41ef73592548114fd"
+    hash = "sha256:92b4debf702222eb5fbb516e78ebd6397b1bdb98c67df2e542522a8faaa337fe"
+    description = "Initial pr-pipeline release: four author-side formulas (mol-pr-start, mol-pr-blast-radius, mol-pr-review, mol-pr-ship) + wrapper commands."
+
+[[pack]]
+  name = "contributing"
+  description = "The external-contributor lifecycle for gastownhall/gascity — write a good issue, find priority work, plan a PR, map its blast radius, and self-review against the codebase audit. Each step produces an artifact you act on; the pack stops before pushing — opening the PR is your call. Self-contained: gas-city's actual standards (the B-rule adoption-review audit, blast-radius dimensions, test tiers) are baked into the skills; no imports."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/contributing"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.0"
+    ref = "main"
+    commit = "16f8297d4e62e143456bfbe4a00e0980a7d9400e"
+    hash = "sha256:8ee58fba7a87a2390fe707ccb593eec3f25b303782696d836d800e68992beeef"
+    description = "Initial contributing pack release."
+
+  [[pack.release]]
+    version = "0.2.0"
+    ref = "main"
+    commit = "7dd57dd9be7d286f19f74c27a00a4359392734a4"
+    hash = "sha256:3ba4ad08c81ab8d2cb9bd591a0f546435e14a9132b1d4d4745bde03d0feb94ad"
+    description = "Self-contained gas-city contributor lifecycle: drops the pr-pipeline import, bakes in the B-rule adoption-review audit, blast-radius dimensions, and test-tier strategy (7 skills, zero imports)."
+
+  [[pack.release]]
+    version = "0.2.1"
+    ref = "main"
+    commit = "5b7c5c1320ee6537f5b9c661d2e52712140320df"
+    hash = "sha256:3757a3dee523efb29e7cf1f9927c70c9bf491eba6d8416e147430aa6130702cf"
+    description = "YAML-safe skill front matter (0.2.0 had an unquoted colon that broke parsing) plus a durability pass — removes time-pinned references (PR-number citations, dated product names, build-timeout numbers, drift-prone counts) so the skills resist staleness. No behavior change."
+
+[[pack]]
+  name = "oversight-rig"
+  description = "Disaggregates project-level work scoping out of the mayor — adds one always-on, rig-scoped project-lead per rig that triages its rig and dispatches its own ready work directly, with deterministic severity-based escalation (no relay agent). Composes with any slack adapter pack; ships only the oversight role and its escalation machinery, not a slack bridge."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/oversight-rig"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.0"
+    ref = "main"
+    commit = "a1490ecf90238f3af52ab2e7f24e30b5b62cbfc2"
+    hash = "sha256:c06f30e61407994cef7e16aafecbc71afbbc9f8cdfd0d506146fdf95837333cf"
+    description = "Initial oversight-rig release: rig-scoped project-lead + deterministic escalation machinery."
+
+[[pack]]
+  name = "bmad"
+  description = "BMAD Method delivery process (PRD, architecture, epics and stories, readiness, adversarial review) as a Gas City build factory."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/bmad"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.0"
+    ref = "main"
+    commit = "636fdfaaf54195b293e8e56d5e9c30e4b8d5a9ef"
+    hash = "sha256:cb81d9e35fe4ca2263922e901eac34aec6183d92832aa0695e43ff038462087d"
+    description = "First registry release of the BMAD build factory."
+
+  [[pack.release]]
+    version = "0.1.1"
+    ref = "main"
+    commit = "390cac1a8a0478b6dfde603dae00a43ed9748d13"
+    hash = "sha256:f59ebe28181a208086a7018d1c6df4396894c22be9bd272e025312feb7879a0a"
+    description = "Implementer commits in the source-anchor worktree (only real changes); code review records a validated review report on the workflow root; apply-findings keeps artifacts schema-valid; picks up newer gascity pack commits (do-work now needs an origin remote)."
+
+[[pack]]
+  name = "compound-engineering"
+  description = "Every Inc.'s Compound Engineering methodology as a Gas City build factory, with the widest reviewer-persona fanout in the catalog."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/compound-engineering"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.0"
+    ref = "main"
+    commit = "636fdfaaf54195b293e8e56d5e9c30e4b8d5a9ef"
+    hash = "sha256:7981abfa28021a99accacc097d32a04e2d28c344f09ebf17e3f0ca51768140af"
+    description = "First registry release of the Compound Engineering build factory."
+
+  [[pack.release]]
+    version = "0.1.1"
+    ref = "main"
+    commit = "390cac1a8a0478b6dfde603dae00a43ed9748d13"
+    hash = "sha256:12bf7fbd2ab86d0fc2a866ac7562bc957908eae408c779e539af3c3d14ede4b9"
+    description = "Implementer commits in the source-anchor worktree; code review and compound resolution record validated report paths on the workflow root; apply-findings keeps artifacts schema-valid and the plan is re-validated after plan review; picks up newer gascity pack commits (do-work now needs an origin remote)."
+
+[[pack]]
+  name = "gstack"
+  description = "garrytan/gstack founder sprint (office hours, autoplan, QA, security, release readiness) as a Gas City build factory."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/gstack"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.0"
+    ref = "main"
+    commit = "636fdfaaf54195b293e8e56d5e9c30e4b8d5a9ef"
+    hash = "sha256:4f180f1327933239a29918e661c0cd3a54ff3de84ab981324665e776de2eff8f"
+    description = "First registry release of the gstack build factory."
+
+  [[pack.release]]
+    version = "0.1.1"
+    ref = "main"
+    commit = "390cac1a8a0478b6dfde603dae00a43ed9748d13"
+    hash = "sha256:ed74c2b288875a5f563d2b0d2a5afffab048a4136b237fb94d6e7baf60031cba"
+    description = "Implementer commits in the source-anchor worktree; code review records a validated review report on the workflow root; apply-findings keeps artifacts schema-valid and the plan is re-validated after plan review; picks up newer gascity pack commits (do-work now needs an origin remote)."
+
+[[pack]]
+  name = "superpowers"
+  description = "obra/superpowers TDD-first skill library as a Gas City build factory."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/superpowers"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.0"
+    ref = "main"
+    commit = "636fdfaaf54195b293e8e56d5e9c30e4b8d5a9ef"
+    hash = "sha256:ba0428bf51627bf465a693f2426cf6be0cef70ae81b043fce3ce6761a4772290"
+    description = "First registry release of the superpowers build factory."
+
+  [[pack.release]]
+    version = "0.1.1"
+    ref = "main"
+    commit = "390cac1a8a0478b6dfde603dae00a43ed9748d13"
+    hash = "sha256:4358803ef87a4209a90f0c000fdcc58d7f92d04a9db471474d0b0ce2f0054223"
+    description = "Requirements spec carries requirements.v1 front matter and repairs from validator errors; code review records a validated review report on the workflow root; plan re-validated after plan review; vendors systematic-debugging; picks up newer gascity pack commits (do-work now needs an origin remote)."
+
+[[pack]]
+  name = "runtime-cloudflare"
+  description = "The Cloudflare session runtime, shipped as a pack so it versions independently of the gc binary. Declares [runtimes.cloudflare] backed by the gc-runtime-cloudflare RPP v0 provider, replacing the deleted gascity builtin."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/runtime-cloudflare"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.0"
+    ref = "main"
+    commit = "ffcb02933f878c7c9ac2df470338c28a5e5d829d"
+    hash = "sha256:432a1f917c400a3497f1be7466e0297d108b5e2174eed4d7ae4a87579e45d2d1"
+    description = "First registry release of the Cloudflare session runtime as an RPP v0 pack."

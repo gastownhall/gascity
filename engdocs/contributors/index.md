@@ -27,6 +27,8 @@ description: The shortest path for new contributors to get productive in Gas Cit
 - [Contributor Response and Attribution Conventions](contributor-response-conventions.md)
   when replying to, superseding, adopting, or closing someone else's issue or
   PR — what the contributor is owed and how credit is recorded
+- [Maintainer Environment](maintainer-environment.md) for maintainers on the
+  shared build hosts or the internal bd ledger — contributors can skip it
 - [`CONTRIBUTING.md`](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 - [`TESTING.md`](https://github.com/gastownhall/gascity/blob/main/TESTING.md)
 

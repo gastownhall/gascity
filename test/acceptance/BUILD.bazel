@@ -77,6 +77,7 @@ go_test(
         "//internal/remotesource",
         "//internal/session",
         "//internal/testenv",
+        "//internal/testutil",
         "//test/acceptance/helpers",
         "@com_github_burntsushi_toml//:toml",
         "@com_github_gastownhall_gascity_packs//:gascity-packs",
