@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 727
-baseline_files = 213
+baseline_calls = 732
+baseline_files = 214
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -51,8 +51,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 492
-baseline_files = 144
+baseline_calls = 497
+baseline_files = 145
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -116,8 +116,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 318
-baseline_files = 66
+baseline_calls = 319
+baseline_files = 67
 reported_calls = 255
 reported_files = 56
 owner_bead = "ga-cp3hwi"
@@ -417,6 +417,17 @@ resource_owner = "the git and bash subprocesses are confined to TestFreshMergeAc
 migration_target = "P0.4b"
 expires = "2026-10-31"
 
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestCacheZstdProbe"
+resources = ["http_test_server"]
+owner_bead = "ga-cp3hwi"
+invariant = "the anonymous-cache zstd probe's behavior proof is a checked Medium HTTP test server owner"
+resource_owner = "the loopback TLS HTTP/2 servers are confined to TestCacheZstdProbe, which exists to run tools/rbe/cache-zstd-probe.sh against a stand-in rbe-cache GetCapabilities (zstd advertised or not, gRPC and HTTP errors, malformed answers, a timeout): the probe is curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
 # A reviewed-hermetic-body row is narrower than a Small test declaration. It
 # proves that the exact untagged test body and statically reachable
 # receiverless same-package helpers contain none of the cataloged resources.
@@ -454,8 +465,8 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 470
-baseline_files = 136
+baseline_calls = 475
+baseline_files = 137
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-cp3hwi"

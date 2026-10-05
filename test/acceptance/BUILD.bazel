@@ -58,7 +58,7 @@ go_test(
         # Pinned prebuilt release binaries (see MODULE.bazel): hermetic bd and
         # dolt, same versions the go-test CI installs.
         "@bd_bin_v1_3_1//:bd",
-        "@dolt_bin_v2_1_7//:dolt-linux-amd64/bin/dolt",
+        "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
     ],
     shard_count = 2,
     deps = [

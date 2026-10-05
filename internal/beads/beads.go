@@ -289,7 +289,8 @@ func AssignmentGuardedUpdaterFor(store Store) (AssignmentGuardedUpdater, bool) {
 //   - Every successful mutation of revision-guarded whole-row content —
 //     conditional or unconditional — mints a fresh nonzero revision. This
 //     covers row-backed Update fields, metadata writes, Close, and Reopen;
-//     reads never change it.
+//     reads never change it. A same-value update (setting a field to what it
+//     already holds) succeeds but may leave the revision unchanged.
 //     Separate label/parent persistence and derived or heartbeat fields are
 //     outside this guarantee.
 //   - Denormalized/derived projection columns are OUTSIDE this guarantee. bd
