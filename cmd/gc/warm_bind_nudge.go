@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -130,12 +131,18 @@ func buildWarmClaimTriggerProbe(resolve warmClaimTriggerResolver, faults io.Writ
 // so a steady warm fleet pays nothing; the store read (unclaimed probe) and the
 // idle wait run only on the tick(s) right after a new binding, before the marker
 // is set. Best-effort throughout: it never fails the (already-successful) warm start.
-func deliverWarmBindClaimNudge(ctx context.Context, sp runtime.Provider, store beads.Store, session *beads.Bead, claimText string, probe warmClaimTriggerProbe) {
+func deliverWarmBindClaimNudge(ctx context.Context, sp runtime.Provider, store beads.Store, cfg *config.City, session *beads.Bead, claimText string, probe warmClaimTriggerProbe) {
 	if sp == nil || store == nil || session == nil || probe == nil {
 		return
 	}
-	if strings.TrimSpace(session.Metadata["pool_managed"]) != "true" {
-		return // pool slots only
+	// Pool slots only -- including a canonical-singleton pool slot whose phantom
+	// pool identity buildDesiredState has collapsed onto the named identity. The
+	// collapse clears pool_managed while the bead keeps the pool path's own
+	// "-pool" step-aside runtime name, so the raw field alone would drop exactly
+	// the shape gascity#6933 made legal. See isCollapsedCanonicalSingletonPoolBead.
+	if strings.TrimSpace(session.Metadata["pool_managed"]) != "true" &&
+		!isCollapsedCanonicalSingletonPoolBead(cfg, *session) {
+		return
 	}
 	name := strings.TrimSpace(session.Metadata["session_name"])
 	if name == "" {
