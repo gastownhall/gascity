@@ -168,6 +168,35 @@ func TestSweep_LsofErrorFailsClosed(t *testing.T) {
 	}
 }
 
+func TestSweep_LsofTimeoutFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "orphan1", 1, old)
+	command := filepath.Join(t.TempDir(), "lsof-stub")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\nprintf 'partial\\n'\nexec tail -f /dev/null\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(%s): %v", command, err)
+	}
+
+	result := Sweep(SweepConfig{
+		Root:            root,
+		lsofCommand:     command,
+		lsofScanTimeout: 50 * time.Millisecond,
+	})
+
+	if len(result.Removed) != 0 {
+		t.Fatalf("Removed = %v, want none when lsof times out", result.Removed)
+	}
+	if len(result.Errors) == 0 {
+		t.Fatal("expected an error when lsof times out")
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("Skipped = %d, want 1", result.Skipped)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("dir %s should still exist: %v", dir, err)
+	}
+}
+
 func TestSweep_ContinuesAfterOneRemovalFails(t *testing.T) {
 	root := t.TempDir()
 	old := time.Now().Add(-2 * time.Hour)
