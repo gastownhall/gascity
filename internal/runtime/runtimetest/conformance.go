@@ -139,6 +139,27 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		}
 	})
 
+	// Optional capability: a provider that reports liveness with an error must
+	// answer a session it stopped as confirmed absent, never as "unknown".
+	t.Run("ObserveLivenessWithError_StoppedIsAbsent", func(t *testing.T) {
+		sp, cfg, name := newSession(t)
+		observer, ok := sp.(runtime.LivenessObserverWithError)
+		if !ok {
+			return
+		}
+		startOrSkip(t, opts, sp, name, cfg, "Start")
+		if err := sp.Stop(name); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+		obs, err := observer.ObserveLivenessWithError(name, nil)
+		if err != nil {
+			t.Fatalf("ObserveLivenessWithError after Stop: %v, want confirmed absence (nil error)", err)
+		}
+		if obs.Running || obs.Alive {
+			t.Errorf("ObserveLivenessWithError after Stop = %+v, want absent", obs)
+		}
+	})
+
 	t.Run("Stop_Idempotent_NotRunning", func(t *testing.T) {
 		sp, _, _ := newSession(t)
 		if err := sp.Stop("never-started-conformance-session"); err != nil {
@@ -492,6 +513,30 @@ func RunSessionTests(t *testing.T, sp runtime.Provider, cfg runtime.Config, name
 		}
 	})
 
+	// An empty value is a value, not a delete. Providers translate SetMeta
+	// rather than storing it verbatim — tmux maps it onto `set-environment`,
+	// where set-empty and unset are distinct states — so a caller that blanks a
+	// key to retract what it says must be able to rely on the blank landing.
+	// gc's drain-ack binding does exactly that: a pane that cannot prove its
+	// incarnation writes an empty stamp over whatever the previous occupant
+	// left, and if the old value survived it would pair with the new
+	// acknowledgement and read as proof of residue.
+	t.Run("SetMeta_EmptyValueOverwrites", func(t *testing.T) {
+		if err := sp.SetMeta(name, "empty-me", "prior-value"); err != nil {
+			t.Fatalf("SetMeta prior: %v", err)
+		}
+		if err := sp.SetMeta(name, "empty-me", ""); err != nil {
+			t.Fatalf("SetMeta empty: %v", err)
+		}
+		val, err := sp.GetMeta(name, "empty-me")
+		if err != nil {
+			t.Fatalf("GetMeta: %v", err)
+		}
+		if val != "" {
+			t.Errorf("GetMeta after SetMeta to empty = %q, want empty", val)
+		}
+	})
+
 	t.Run("SetMeta_OverwritesPrevious", func(t *testing.T) {
 		if err := sp.SetMeta(name, "key", "v1"); err != nil {
 			t.Fatalf("SetMeta v1: %v", err)
@@ -553,6 +598,24 @@ func RunSessionTests(t *testing.T, sp runtime.Provider, cfg runtime.Config, name
 			t.Errorf("ClearScrollback: %v", err)
 		}
 	})
+
+	// Optional capability: an error-bearing attachment probe separates "no
+	// client" from "could not tell", so on a healthy runtime it must not error.
+	if observer, ok := sp.(runtime.AttachmentObserverWithError); ok {
+		t.Run("IsAttachedWithError_UnattachedSession", func(t *testing.T) {
+			attached, err := observer.IsAttachedWithError(name)
+			if err != nil || attached {
+				t.Errorf("IsAttachedWithError = (%v, %v), want (false, nil)", attached, err)
+			}
+		})
+
+		t.Run("IsAttachedWithError_MissingSession", func(t *testing.T) {
+			attached, err := observer.IsAttachedWithError("nonexistent-conformance-session")
+			if attached || (err != nil && !errors.Is(err, runtime.ErrSessionNotFound)) {
+				t.Errorf("IsAttachedWithError on missing session = (%v, %v), want (false, nil) or ErrSessionNotFound", attached, err)
+			}
+		})
+	}
 
 	// --- Group 4b: CopyTo (best-effort) ---
 

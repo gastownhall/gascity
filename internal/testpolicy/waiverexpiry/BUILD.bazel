@@ -1,0 +1,38 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "waiverexpiry",
+    srcs = ["doc.go"],
+    importpath = "github.com/gastownhall/gascity/internal/testpolicy/waiverexpiry",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "waiverexpiry_test",
+    srcs = [
+        "testenv_import_test.go",
+        "waiverexpiry_test.go",
+    ],
+    # The test compares waiver dates with today, an input no cache can key on,
+    # so it must re-run on every invocation. See the package documentation.
+    tags = ["external"],
+    deps = [
+        "//internal/beads/beadstest",
+        "//internal/testenv",
+        "//internal/testpolicy/resourcecensus",
+        "//internal/testpolicy/waiverclock",
+        "//internal/testutil/providerledger",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

@@ -51,7 +51,7 @@ const (
 	// current session.
 	LeaseCommit LeaseCommitVerdict = iota
 	// LeaseDiscardStopRuntime means the result is stale — discard it and (subject
-	// to the separate runningSessionMatchesPendingCreate runtime probe) stop
+	// to the separate attributePendingCreateRuntime runtime probe) stop
 	// the spawned runtime.
 	LeaseDiscardStopRuntime
 )
@@ -86,6 +86,16 @@ func (l PendingCreateLease) SameIdentity(current PendingCreateLease) bool {
 		return true
 	}
 	return current.Generation == l.Generation
+}
+
+// CanRollback requires the exact observed incarnation to remain pending. Unlike
+// completion, destructive rollback never tolerates generation drift. A partial
+// failed-create close may be retried after its claim was cleared.
+// Awake is advisory: heal can project it while the claimed Start is in flight.
+func (l PendingCreateLease) CanRollback(current PendingCreateLease) bool {
+	return !current.Closed && l.Generation == current.Generation && l.InstanceToken == current.InstanceToken &&
+		current.State != StateActive &&
+		(current.Claim || current.State == StateFailedCreate)
 }
 
 // CommitVerdict decides whether an async start result should commit against

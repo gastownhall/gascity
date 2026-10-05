@@ -3,15 +3,20 @@
 package proctable
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+const processSnapshotTimeout = 10 * time.Second
 
 // ScanBySessionID returns live agent root processes whose environment carries
 // GC_SESSION_ID equal to id. Empty id returns all roots with any GC_SESSION_ID.
@@ -51,7 +56,8 @@ func scanRecordsBySessionID(records map[int]psRecord, id string) []runtime.LiveR
 		if id != "" && sessionID != id {
 			continue
 		}
-		if parent, ok := records[record.ppid]; ok && parent.env["GC_SESSION_ID"] == sessionID && !isInfrastructureCommand(parent.command) {
+		parent, hasParent := records[record.ppid]
+		if hasParent && parent.env["GC_SESSION_ID"] == sessionID && !isInfrastructureCommand(parent.command) {
 			continue
 		}
 		epoch, _ := strconv.Atoi(record.env["GC_RUNTIME_EPOCH"])
@@ -64,6 +70,12 @@ func scanRecordsBySessionID(records map[int]psRecord, id string) []runtime.LiveR
 			City:      city,
 			Epoch:     epoch,
 			PID:       record.pid,
+			PPID:      record.ppid,
+			// A parent that is not in the snapshot at all (it exited, or ps
+			// could not report it) is not provider infrastructure: this field
+			// only ever reports what the scan positively saw.
+			ParentIsProviderInfrastructure: hasParent && isInfrastructureCommand(parent.command),
+			Name:                           filepath.Base(strings.TrimSpace(record.command)),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -127,7 +139,9 @@ type psRecord struct {
 }
 
 func psRecords() (map[int]psRecord, error) {
-	out, err := exec.Command("ps", "eww", "-ax", "-o", "pid=,ppid=,command=").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), processSnapshotTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "eww", "-ax", "-o", "pid=,ppid=,command=").Output()
 	if err != nil {
 		return nil, fmt.Errorf("running ps: %w", err)
 	}

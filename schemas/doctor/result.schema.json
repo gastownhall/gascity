@@ -23,6 +23,9 @@
     "failed": {
       "type": "integer"
     },
+    "blocking_failed": {
+      "type": "integer"
+    },
     "fixed": {
       "type": "integer"
     },

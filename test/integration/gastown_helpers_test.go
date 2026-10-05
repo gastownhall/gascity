@@ -278,6 +278,32 @@ func initBd(t *testing.T, dir string) string {
 	return prefix
 }
 
+// isolateBdHomeEnv returns env with HOME replaced by GC_HOME (already
+// present in env, set by newIsolatedToolEnv/integrationEnvFor to an isolated
+// per-test directory) so a shared-server config.yaml sitting in the real
+// ambient HOME (a real fleet-host condition, not hypothetical) cannot divert
+// an individual bd invocation toward that shared server instead of the target
+// the caller's explicit flags (or directory-local, no-server config) intend.
+//
+// Unlike standaloneBdEnv, this does not strip GC_DOLT_*/BEADS_DOLT_* vars —
+// callers here are themselves driving an explicit shared Dolt server and
+// need those preserved; only HOME is corrected.
+//
+// Every individual bd invocation needs this call, not just the first one in
+// a sequence: bd's own config resolution can re-consult
+// $HOME/.beads/config.yaml on each call regardless of what an earlier call
+// in the same directory already wrote there. This is not a theoretical
+// worry — this bead's own live reproduction showed a later `bd config set`
+// mis-route to a shared/global server even though `bd init` moments earlier,
+// in the same workspace, had already written a correct directory-local
+// config.
+func isolateBdHomeEnv(env []string) []string {
+	if gcHome := parseEnvList(env)["GC_HOME"]; gcHome != "" {
+		return replaceEnv(env, "HOME", gcHome)
+	}
+	return env
+}
+
 func standaloneBdEnv(t *testing.T, dir string) []string {
 	t.Helper()
 

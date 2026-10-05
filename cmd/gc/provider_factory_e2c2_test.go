@@ -201,7 +201,7 @@ func runE2c2ProviderFailureHelper(t *testing.T, cityPath, sessionID, markerPath 
 	assertE2c2ProviderBuilds(t, providerBuilds, 7, "session nudge JSON")
 	assertE2c2NoQueuedNudges(t, target, "session nudge provider failures")
 
-	if err := sendMailNotify(target, "human"); err == nil || err.Error() != e2c2ProviderConstructionFailure {
+	if err := sendMailNotify(target, "human", ""); err == nil || err.Error() != e2c2ProviderConstructionFailure {
 		t.Fatalf("sendMailNotify provider failure = %v, want %q", err, e2c2ProviderConstructionFailure)
 	}
 	assertE2c2ProviderBuilds(t, providerBuilds, 8, "mail notify")
@@ -209,9 +209,9 @@ func runE2c2ProviderFailureHelper(t *testing.T, cityPath, sessionID, markerPath 
 
 	t.Setenv("GC_MAIL", "fake")
 	const mailNotifyFailure = "gc mail send: nudge failed: " + e2c2ProviderConstructionFailure + "\n"
-	assertE2c2RunResult(t, []string{"--city", cityPath, "mail", "send", "worker", "provider failure notice", "--notify", "--from", "human"}, 0, "Sent message fake-1 to worker\n", mailNotifyFailure)
+	assertE2c2RunResult(t, []string{"--city", cityPath, "mail", "send", "worker", "provider failure notice", "--notify"}, 0, "Sent message fake-1 to worker\n", mailNotifyFailure)
 	assertE2c2ProviderBuilds(t, providerBuilds, 9, "mail notify text command")
-	assertE2c2MailNotifyJSONResult(t, []string{"--city", cityPath, "mail", "send", "worker", "provider failure notice", "--notify", "--from", "human", "--json"}, mailNotifyFailure)
+	assertE2c2MailNotifyJSONResult(t, []string{"--city", cityPath, "mail", "send", "worker", "provider failure notice", "--notify", "--json"}, mailNotifyFailure)
 	assertE2c2ProviderBuilds(t, providerBuilds, 10, "mail notify JSON command")
 	assertE2c2NoQueuedNudges(t, target, "mail notify command provider failures")
 

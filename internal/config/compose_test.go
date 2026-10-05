@@ -106,6 +106,42 @@ patrol_interval = "1m"
 	}
 }
 
+// TestComposeDaemonFragmentPreservesSessionReconciler pins that a fragment
+// defining any other [daemon] key does not silently reset the switch (a
+// fragment's [daemon] replaces the whole struct), while a fragment that sets
+// the key itself wins.
+func TestComposeDaemonFragmentPreservesSessionReconciler(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fragment string
+		want     string
+	}{
+		{name: "fragment sets another daemon key", fragment: "[daemon]\npatrol_interval = \"1m\"\n", want: "v2"},
+		{name: "fragment sets the switch", fragment: "[daemon]\nsession_reconciler = \"legacy\"\n", want: "legacy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := fsys.NewFake()
+			fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[daemon]
+session_reconciler = "v2"
+`)
+			fs.Files["/city/fragment.toml"] = []byte(tc.fragment)
+			cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+			if err != nil {
+				t.Fatalf("LoadWithIncludes: %v", err)
+			}
+			if got := cfg.Daemon.SessionReconciler; got != tc.want {
+				t.Fatalf("Daemon.SessionReconciler = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadWithIncludes_InvalidProviderChainFailsLoad(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`

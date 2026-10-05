@@ -74,6 +74,24 @@ func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store 
 	return policyStore
 }
 
+// ProxiedStore hands back the proxied-native split store underneath this policy
+// layer, if there is one.
+//
+// The policy wrapper is the OUTERMOST thing every caller holds — it is applied
+// after the factory, outside the cache — and it embeds the beads.Store
+// interface, which strips everything the interface does not name. That is what
+// left `gc doctor` reporting a handle as native half an hour after it stood
+// down: the wrapper could not be asked. Participating in the seam costs one
+// forward and makes the question answerable from any layer.
+//
+// beadPolicyGraphStore inherits this through its embedded *beadPolicyStore.
+func (s *beadPolicyStore) ProxiedStore() (beads.ProxiedStoreView, bool) {
+	if s == nil {
+		return nil, false
+	}
+	return beads.ProxiedStoreFrom(s.Store)
+}
+
 func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bool) {
 	switch s := store.(type) {
 	case *beadPolicyGraphStore:
@@ -156,6 +174,42 @@ func (s *beadPolicyStore) DeleteBatch(ids []string) error {
 		return beads.ErrBatchDeleteUnsupported
 	}
 	return deleter.DeleteBatch(ids)
+}
+
+// GetExactBatch forwards the exact batch read to the wrapped store. The policy
+// layer shapes creation and listing, not exact reads by id.
+func (s *beadPolicyStore) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	getter, ok := s.Store.(beads.ExactBatchGetter)
+	if !ok {
+		return nil, nil, beads.ErrExactBatchGetUnsupported
+	}
+	return getter.GetExactBatch(ids)
+}
+
+var (
+	_ beads.ExactBatchGetter = (*beadPolicyStore)(nil)
+	_ beads.ExactBatchGetter = (*beadPolicyGraphStore)(nil)
+)
+
+var (
+	_ beads.RowWitness = (*beadPolicyStore)(nil)
+	_ beads.RowWitness = (*beadPolicyGraphStore)(nil)
+)
+
+// SawRows implements beads.RowWitness by forwarding to the wrapped store. Like
+// Count and DeleteBatch, the delegation must be explicit, and here the cost of
+// omitting it is silent rather than loud: an absent optional capability reads
+// to a caller as "this store cannot witness itself", which is a supported
+// state. The store-health row count would keep certifying a zero it has the
+// evidence to refuse, on every controller-opened city, because both the store
+// opener and wrapWithCachingStore hand the API server its city store through
+// this wrapper. Inner stores that cannot witness themselves report no
+// evidence, which leaves the caller on its prior behavior rather than
+// refusing a count. beadPolicyGraphStore embeds *beadPolicyStore, so it
+// forwards through this too.
+func (s *beadPolicyStore) SawRows() bool {
+	witness, ok := s.Store.(beads.RowWitness)
+	return ok && witness.SawRows()
 }
 
 func (s *beadPolicyStore) Handles() beads.StoreHandles {

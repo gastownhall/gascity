@@ -86,13 +86,26 @@ func tutorialTmuxTmpDir(runtimeDir string) string {
 	return filepath.Join(runtimeDir, "tmux")
 }
 
-func newTutorialBaseEnv(gcBinary, home, runtimeDir string) *helpers.Env {
+// newTutorialBaseEnv builds the tutorial Env. A non-empty bdPath is staged in
+// the tutorial bin dir behind the tool-home wrapper: gc and the tutorial's own
+// `bd` commands run with the real HOME, and bd must never resolve the
+// operator's ~/.beads (or a user-level dolt.shared-server: true) through it.
+func newTutorialBaseEnv(gcBinary, home, runtimeDir, bdPath string) *helpers.Env {
+	// The wrapped provider binaries delegate to the operator's authenticated
+	// CLIs, which resolve their state through the host HOME.
 	env := helpers.NewEnv(gcBinary, home, runtimeDir).
+		WithHostHome().
 		Without("GC_SESSION").
 		Without("GC_BEADS").
 		Without("GC_DOLT").
 		With("DOLT_ROOT_PATH", home)
-	env.With("PATH", filepath.Join(home, ".local", "bin")+":"+env.Get("PATH"))
+	binDir := filepath.Join(home, ".local", "bin")
+	if bdPath != "" {
+		if _, err := helpers.InstallBeadsTooling(env, binDir, bdPath, ""); err != nil {
+			panic("tutorial-goldens: " + err.Error())
+		}
+	}
+	env.With("PATH", binDir+":"+env.Get("PATH"))
 	// Tutorial cities all use the same workspace name (`my-city`), so without an
 	// isolated tmux socket root they can adopt stale sessions from earlier runs.
 	// That lets `peek` hit an old pane while `session logs` resolves the current
@@ -168,13 +181,6 @@ func newTutorialEnv(t *testing.T) *tutorialEnv {
 	if err := helpers.WriteSupervisorConfig(home); err != nil {
 		t.Fatalf("writing supervisor config: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(home, ".dolt"), 0o755); err != nil {
-		t.Fatalf("creating dolt dir: %v", err)
-	}
-	doltCfg := `{"user.name":"gc-test","user.email":"gc-test@test.local"}`
-	if err := os.WriteFile(filepath.Join(home, ".dolt", "config_global.json"), []byte(doltCfg), 0o644); err != nil {
-		t.Fatalf("writing dolt config: %v", err)
-	}
 	if err := stageClaudeAuth(home); err != nil {
 		t.Fatalf("staging Claude auth: %v", err)
 	}
@@ -191,7 +197,7 @@ func newTutorialEnv(t *testing.T) *tutorialEnv {
 		t.Fatalf("linking session roots: %v", err)
 	}
 
-	env := newTutorialBaseEnv(goldenGCBinary, home, runtimeDir)
+	env := newTutorialBaseEnv(goldenGCBinary, home, runtimeDir, goldenBDPath)
 
 	for _, key := range []string{
 		"ANTHROPIC_AUTH_TOKEN",
@@ -393,7 +399,7 @@ esac
 func TestNewTutorialBaseEnvSetsIsolatedTmuxTmpDir(t *testing.T) {
 	home := t.TempDir()
 	runtimeDir := filepath.Join(home, "runtime")
-	got := newTutorialBaseEnv("/tmp/fake-gc", home, runtimeDir)
+	got := newTutorialBaseEnv("/tmp/fake-gc", home, runtimeDir, "")
 
 	wantTmux := filepath.Join(runtimeDir, "tmux")
 	if got.Get("TMUX_TMPDIR") != wantTmux {

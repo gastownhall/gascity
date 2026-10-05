@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 func TestPreCommitFormatterPreservesFileMode(t *testing.T) {
@@ -208,8 +210,18 @@ func TestPrePushUsesCanonicalMachineAwareConcurrency(t *testing.T) {
 	if strings.Contains(content, `LOCAL_TEST_JOBS="${LOCAL_TEST_JOBS:-3}"`) {
 		t.Fatal("pre-push hook must not replace the canonical machine-aware default with a fixed three-job cap")
 	}
-	if !strings.Contains(content, "exec make test-fast-parallel") {
-		t.Fatal("pre-push hook must continue delegating the unchanged fast-suite inventory to make test-fast-parallel")
+	if !strings.Contains(content, `exec "$repo_root/.githooks/lib/push-suite.sh"`) {
+		t.Fatal("pre-push hook must delegate the push-time suite to .githooks/lib/push-suite.sh")
+	}
+	suite, err := os.ReadFile(filepath.Join(repoRoot, ".githooks", "lib", "push-suite.sh"))
+	if err != nil {
+		t.Fatalf("read push-suite.sh: %v", err)
+	}
+	if strings.Contains(string(suite), "LOCAL_TEST_JOBS") {
+		t.Fatal("push-suite.sh must not shadow the canonical machine-aware job count")
+	}
+	if !strings.Contains(string(suite), "exec make test-fast-parallel") {
+		t.Fatal("push-suite.sh's go fallback must continue delegating the unchanged fast-suite inventory to make test-fast-parallel")
 	}
 	for _, path := range []string{"Makefile", filepath.Join("scripts", "test-local-parallel")} {
 		content, err := os.ReadFile(filepath.Join(repoRoot, path))
@@ -459,7 +471,12 @@ func TestPreCommitFailsClosedWhenGoBlockStagesSpecAsSideEffectAndNpmAbsent(t *te
 	if err := os.MkdirAll(filepath.Dir(formatStagedGoPath), 0o755); err != nil {
 		t.Fatalf("create parent for %s: %v", formatStagedGoPath, err)
 	}
-	writeExecutable(t, formatStagedGoPath, "#!/usr/bin/env bash\nexit 0\n")
+	// The hook pipes the staged file list into this script under
+	// `set -o pipefail`. Like the real script, the stub must read its stdin
+	// to EOF: one that exits without reading races the hook's printf, which
+	// dies of SIGPIPE whenever the stub exits first, and bash exits 141
+	// without printing anything (the silent CI flake on loaded runners).
+	writeExecutable(t, formatStagedGoPath, "#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n")
 	runGit("add", "-A")
 	runGit("commit", "-m", "init")
 
@@ -679,6 +696,9 @@ func TestLocalParallelAllowlistIncludesObservableEnv(t *testing.T) {
 
 func repoRoot(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)

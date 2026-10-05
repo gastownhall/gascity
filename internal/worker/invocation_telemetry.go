@@ -231,7 +231,9 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 // recordInvocationTelemetry collapse a re-recorded invocation to one fact at the
 // sink via IdempotencyKey. Unpriced is true exactly when the pricing registry
 // had no entry for the (family, model) pair; cost is then left zero and must be
-// read as "not measured", never as a free invocation.
+// read as "not measured", never as a free invocation. At prefers the
+// transcript entry's own Timestamp when the extractor populated one, falling
+// back to now for providers whose tail extraction leaves it zero.
 func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sessionID, worker, providerFamily string, cost float64, priced bool, now time.Time) usage.Fact {
 	// beadID and sessionID are the session bead id and the run-id fallback — the
 	// same fields the retired ResolveRunID(bead.Metadata, bead.ID, sessionID) read
@@ -248,6 +250,10 @@ func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sess
 	if !priced {
 		cost = 0
 	}
+	at := now
+	if !u.Timestamp.IsZero() {
+		at = u.Timestamp
+	}
 	return usage.Fact{
 		RunID:     runID,
 		SessionID: strings.TrimSpace(sessionID),
@@ -263,7 +269,7 @@ func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sess
 		CostUSDEstimate:     cost,
 		Unpriced:            !priced,
 		UpstreamReqID:       reqID,
-		At:                  now.UnixMilli(),
+		At:                  at.UnixMilli(),
 		IdempotencyKey:      usage.ModelIdempotencyKey(runID, reqID),
 	}
 }

@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 )
 
 // Observed filesystem state for a per-process path (cwd, --config). The zero
@@ -119,17 +121,18 @@ type ReapPlan struct {
 
 // extractConfigPath pulls the --config <path> argument from a dolt sql-server
 // argv. Supports both `--config foo` and `--config=foo` forms; returns empty
-// when the flag is absent or has no value.
+// when the flag is absent or has no value. Values are space-trimmed, matching
+// argvFlagValue, so a padded argv entry still compares equal under samePath.
 func extractConfigPath(argv []string) string {
 	for i, arg := range argv {
 		if arg == "--config" {
 			if i+1 < len(argv) {
-				return argv[i+1]
+				return strings.TrimSpace(argv[i+1])
 			}
 			return ""
 		}
 		if strings.HasPrefix(arg, "--config=") {
-			return strings.TrimPrefix(arg, "--config=")
+			return strings.TrimSpace(strings.TrimPrefix(arg, "--config="))
 		}
 	}
 	return ""
@@ -249,34 +252,39 @@ func configUnderActiveTestRoot(configPath string, activeTestRoots []string) bool
 //  1. Any port match against rigPortByPort → protected (active rig server),
 //     even if the cmdline says it's a test path or its scope looks deleted
 //     (defense in depth).
-//  2. Else protect if the --config sits under an active test root, even when
+//  2. Else protect a process bd owns: the `bd db-proxy-child` supervisor
+//     itself, or a sql-server whose --config is a config.yaml with a live
+//     proxy.pid record beside it. Checked before every reap rule below,
+//     including the test-config-path allowlist, because a real-bd lifecycle
+//     test in t.TempDir() produces exactly that shape.
+//  3. Else protect if the --config sits under an active test root, even when
 //     the config file itself is momentarily gone (mid-teardown of a test
 //     that is still running).
-//  3. Else reap when the working directory is an unlinked inode (ga-10wmzh):
+//  4. Else reap when the working directory is an unlinked inode (ga-10wmzh):
 //     a cwd readlink ending in " (deleted)" can never revert, so it proves the
 //     scope is gone — this also covers bare servers started without --config.
-//  4. Else, for a bare server (no --config) running inside a container
+//  5. Else, for a bare server (no --config) running inside a container
 //     (ContainerRuntime non-empty, from a /proc/<pid>/cgroup docker-/libpod-
 //     marker): protect unconditionally. gc does not own container lifecycle,
 //     and killing the in-container PID would leave a broken container rather
 //     than free anything (ga-sm1cvj) — checked before the --data-dir allowlist
 //     below because a container's own --data-dir is never a signal gc can act on.
-//  5. Else, for a bare server (no --config): reap when --data-dir is present
+//  6. Else, for a bare server (no --config): reap when --data-dir is present
 //     and itself independently passes the test-config-path allowlist from
-//     step 6 below (e.g. examples/gastown's real-dolt integration test,
+//     step 7 below (e.g. examples/gastown's real-dolt integration test,
 //     which launches `dolt sql-server --data-dir <t.TempDir()>/dolt` with no
 //     --config at all — a confirmed regression exemplar). Otherwise protect:
 //     an unidentified dolt server (no --config and no allowlisted
 //     --data-dir) is never killed.
-//  6. Else reap when --config is on the test-config-path allowlist (/tmp/Test*,
+//  7. Else reap when --config is on the test-config-path allowlist (/tmp/Test*,
 //     os.TempDir()/Test*, known Gas City temp prefixes, /var/tmp/gotmp/Test*,
 //     or $GOTMPDIR/Test*). The allowlist match is an ownership signal, so an
 //     owned test scope is reaped even if its --config file was already removed.
-//  7. Else, if a non-allowlist --config has vanished while the cwd is still
+//  8. Else, if a non-allowlist --config has vanished while the cwd is still
 //     live or its state is unknown, protect with a confirm-and-kill-manually
 //     reason: a lone missing-config observation is not proof of scope deletion,
 //     so it reaps only with cross-signal corroboration (a confirmed deleted
-//     cwd, checked in step 3) or an ownership signal (the allowlist in step 6).
+//     cwd, checked in step 4) or an ownership signal (the allowlist in step 7).
 //     Otherwise protect with a reason that echoes the actual config path so
 //     operators can decide whether to kill it manually (architect Open Q 0).
 //     Unknown state is never a reap signal.
@@ -291,6 +299,23 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 	}
 
 	cfgPath := extractConfigPath(p.Argv)
+	// The standing guard for the supervisor process itself. Process discovery
+	// only enumerates `dolt sql-server` today, so nothing reaches here with a
+	// supervisor's argv — but if discovery ever widens, bd's own proxy must not
+	// become a candidate.
+	if proxyendpoint.ArgvRunsChild(p.Argv) {
+		return reapClassification{
+			Action: "protect",
+			Reason: "bd db-proxy-child; bd owns this proxy's lifecycle",
+		}
+	}
+	if proxyPID, ok := bdOwnedProxyDoltConfig(cfgPath); ok {
+		return reapClassification{
+			Action:     "protect",
+			Reason:     fmt.Sprintf("bd-owned proxied dolt server (live proxy pid %d); bd owns this process", proxyPID),
+			ConfigPath: cfgPath,
+		}
+	}
 	if configUnderActiveTestRoot(cfgPath, activeTestRoots) {
 		return reapClassification{
 			Action:     "protect",
@@ -322,7 +347,7 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 		}
 		if isTestConfigPath(dataDirPath, homeDir, tempDir) {
 			// A --data-dir match against the same allowlist used for --config
-			// (step 6 below) is an ownership signal in its own right: a bare
+			// (step 7 below) is an ownership signal in its own right: a bare
 			// server with no --config but a test-owned --data-dir is a known
 			// regression-test shape and is reaped rather than protected.
 			return reapClassification{Action: "reap", DataDir: dataDirPath}

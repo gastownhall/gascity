@@ -8,6 +8,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/api/dashboardbff"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // SlingOutput is the Huma response for POST /v0/sling.
@@ -88,7 +89,7 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 	if body.Owned && body.NoConvoy {
 		return nil, huma.Error400BadRequest("owned requires a convoy (cannot use with no_convoy)")
 	}
-	if body.Merge != "" && body.Merge != "direct" && body.Merge != "mr" && body.Merge != "local" {
+	if body.Merge != "" && !beadmeta.IsKnownMergeStrategy(body.Merge) {
 		return nil, huma.Error400BadRequest("merge must be 'direct', 'mr', or 'local'")
 	}
 	if body.NoFormula && (body.Formula != "" || body.AttachedBeadID != "") {

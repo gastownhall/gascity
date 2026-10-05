@@ -1,0 +1,61 @@
+# Fork remote-execution worker pool on Blacksmith (infra nativelink-cas/west
+# README "rbe-fork"). Dispatched by rbe-west's fork pool scaler: each run is
+# one NativeLink worker for the fork scheduler (instance oss-fork: fork and
+# Dependabot PR actions), retiring after idle_minutes with nothing in flight
+# or at max_minutes, draining first.
+#
+# Untrusted code runs here, so unlike rbe-worker-pool.yml: action isolation
+# is always on (never the repository variable), every action gets its own
+# network namespace with loopback only, nothing is cached for anyone (no
+# action cache, no worker AC credential), and the certificate
+# (CN=rbe-fork-worker, fork CA) reaches only the fork scheduler and the CAS.
+# Blacksmith donates this compute for workflows of our OSS repos only.
+name: rbe-fork-pool
+
+on:
+  workflow_dispatch:
+    inputs:
+      idle_minutes:
+        description: Retire after this many minutes with no action in flight
+        default: "10"
+        type: string
+      max_minutes:
+        description: Retire after this many minutes regardless (recycles the VM)
+        default: "120"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    name: rbe fork pool worker (Blacksmith, fork scheduler)
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: NativeLink fork worker until idle or max age
+        env:
+          RBE_WORKER_TLS_CERT: ${{ secrets.RBE_FORK_WORKER_TLS_CERT }}
+          RBE_WORKER_TLS_KEY: ${{ secrets.RBE_FORK_WORKER_TLS_KEY }}
+          RBE_WEST_HOST: rbe-fork.ops.gascity.com
+          RBE_WEST_PORT: "8444"
+          WORKER_TIER: fork
+          WORKER_MODE: pool
+          POOL_IDLE_MINUTES: ${{ inputs.idle_minutes }}
+          POOL_MAX_MINUTES: ${{ inputs.max_minutes }}
+          WORKER_NAME: gha-fork-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          RBE_ACTION_ISOLATION: "1"
+          # zstd fetches only (uploads stay identity), from the dedicated
+          # read-only zstd host. Off until the repository variable
+          # RBE_FORK_WIRE_ZSTD is 1, set together with
+          # RBE_FORK_WIRE_ZSTD_READ_URL=grpcs://rbe-fork-zread.ops.gascity.com:8444
+          # (the worker refuses to start with the switch on and no zread URL).
+          # Rollback: set it to 0, and the next dispatch fetches identity
+          # again; for an emergency also cancel the running pool runs.
+          RBE_WIRE_ZSTD: ${{ vars.RBE_FORK_WIRE_ZSTD || '0' }}
+          RBE_WIRE_ZSTD_READ_URL: ${{ vars.RBE_FORK_WIRE_ZSTD_READ_URL || '' }}
+        run: tools/rbe/blacksmith-worker.sh

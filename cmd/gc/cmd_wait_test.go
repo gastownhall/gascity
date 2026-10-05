@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
+	"github.com/gastownhall/gascity/test/toolhome"
 	"golang.org/x/mod/semver"
 )
 
@@ -480,6 +481,7 @@ func TestWriteWaitDetail_RendersWaitInfo(t *testing.T) {
 }
 
 func TestWaitJSONSchemasDoNotExposeRawMetadata(t *testing.T) {
+	chdirToRealPackageDir(t)
 	for _, path := range []string{
 		filepath.Join("..", "..", "schemas", "wait", "list", "result.schema.json"),
 		filepath.Join("..", "..", "schemas", "wait", "inspect", "result.schema.json"),
@@ -770,7 +772,11 @@ func TestBuildPinnedBDBinaryForTestsUsesGoModSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pinnedBeadsModuleVersion: %v", err)
 	}
-	out, err := exec.Command(bdPath, "version").CombinedOutput()
+	// bd resolves user-level state from HOME and writes machine-id, event and
+	// metrics state there even for `version`; never let it see the real one.
+	versionCmd := exec.Command(bdPath, "version")
+	versionCmd.Env = toolhome.Environ(os.Environ(), t.TempDir())
+	out, err := versionCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s version: %v\n%s", bdPath, err, out)
 	}
@@ -904,14 +910,6 @@ func TestReadyWaitSetForList_ReturnsSetAndCapError(t *testing.T) {
 	}
 }
 
-func writeWaitTestDoltIdentity(homeDir string) error {
-	if err := os.MkdirAll(filepath.Join(homeDir, ".dolt"), 0o755); err != nil {
-		return err
-	}
-	doltConfig := `{"user.name":"gc-test","user.email":"gc-test@example.com"}`
-	return os.WriteFile(filepath.Join(homeDir, ".dolt", "config_global.json"), []byte(doltConfig), 0o644)
-}
-
 func writeManagedBdWaitTestCityScaffold(cityPath string) (string, error) {
 	rigPath := filepath.Join(cityPath, "frontend")
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -952,6 +950,17 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 			managedBdWaitTemplateErr = fmt.Errorf("write template scaffold: %w", err)
 			return
 		}
+		// This template is exclusively for direct-server rebind coverage. The
+		// initialized Beads scope, rather than city.toml, owns that transport.
+		beadsDir := filepath.Join(cityPath, ".beads")
+		if mkdirErr := os.MkdirAll(beadsDir, 0o755); mkdirErr != nil {
+			managedBdWaitTemplateErr = fmt.Errorf("make template beads directory: %w", mkdirErr)
+			return
+		}
+		if writeErr := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt.mode: server\n"), 0o644); writeErr != nil {
+			managedBdWaitTemplateErr = fmt.Errorf("write direct template binding: %w", writeErr)
+			return
+		}
 		if err := EnsureBuiltinRuntimeAssets(cityPath, io.Discard); err != nil {
 			managedBdWaitTemplateErr = fmt.Errorf("EnsureBuiltinRuntimeAssets(template): %w", err)
 			return
@@ -962,19 +971,21 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 			managedBdWaitTemplateErr = fmt.Errorf("MkdirTemp(template home): %w", err)
 			return
 		}
-		if err := writeWaitTestDoltIdentity(homeDir); err != nil {
+		if err := writeTestDoltIdentity(homeDir); err != nil {
 			managedBdWaitTemplateErr = fmt.Errorf("write template dolt identity: %w", err)
 			return
 		}
 		env := waitTestEnv(map[string]string{
-			"GC_BEADS":       "bd",
-			"GC_DOLT":        "",
-			"GC_BIN":         currentGCBinaryForTests(t),
-			"GC_CITY":        cityPath,
-			"GC_CITY_PATH":   cityPath,
-			"HOME":           homeDir,
-			"DOLT_ROOT_PATH": homeDir,
-			"PATH":           strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)),
+			"GC_BEADS":           "bd",
+			"GC_DOLT":            "",
+			"GC_BIN":             currentGCBinaryForTests(t),
+			"GC_CITY":            cityPath,
+			"GC_CITY_PATH":       cityPath,
+			"GC_BEADS_TRANSPORT": "direct",
+			"GC_BEADS_TARGET":    "local",
+			"HOME":               homeDir,
+			"DOLT_ROOT_PATH":     homeDir,
+			"PATH":               strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)),
 		})
 		runScript := func(args ...string) error {
 			cmd := exec.Command(script, args...)
@@ -984,6 +995,18 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 				return fmt.Errorf("%s: %w\n%s", strings.Join(args, " "), err, out)
 			}
 			return nil
+		}
+		// Persist the direct selector: gc-beads-bd treats on-disk mode as
+		// authoritative and intentionally ignores ambient transport variables.
+		for _, dir := range []string{cityPath, rigPath} {
+			if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+				managedBdWaitTemplateErr = fmt.Errorf("create direct marker dir: %w", err)
+				return
+			}
+			if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("dolt.mode: server\n"), 0o600); err != nil {
+				managedBdWaitTemplateErr = fmt.Errorf("write direct mode marker: %w", err)
+				return
+			}
 		}
 		if err := runScript("start"); err != nil {
 			managedBdWaitTemplateErr = err
@@ -1883,7 +1906,7 @@ func TestDispatchReadyWaitNudges_UsesOpenSessionSnapshotInsteadOfWorkerRunningCh
 	}
 	for _, call := range sp.Calls {
 		switch call.Method {
-		case "IsRunning", "ProcessAlive", "IsAttached", "GetLastActivity", "GetMeta":
+		case "IsRunning", "ProcessAlive", "IsAttached", "IsAttachedWithError", "GetLastActivity", "GetMeta":
 			t.Fatalf("dispatch should trust cached session state, saw provider call %#v", call)
 		}
 	}
@@ -3311,8 +3334,8 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) string {
 	t.Setenv("GC_DOLT", "")
 
 	homeDir := filepath.Join(shortSocketTempDir(t, "gc-bd-home-"), "home")
-	if err := writeWaitTestDoltIdentity(homeDir); err != nil {
-		t.Fatalf("writeWaitTestDoltIdentity: %v", err)
+	if err := writeTestDoltIdentity(homeDir); err != nil {
+		t.Fatalf("writeTestDoltIdentity: %v", err)
 	}
 	t.Setenv("HOME", homeDir)
 	t.Setenv("DOLT_ROOT_PATH", homeDir)
@@ -3320,7 +3343,7 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) string {
 
 	reexecGC := reexecGCTestBinaryForTests(t)
 	oldResolve := resolveProviderLifecycleGCBinary
-	resolveProviderLifecycleGCBinary = func() string { return reexecGC }
+	resolveProviderLifecycleGCBinary = func() (string, error) { return reexecGC, nil }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
 	prevCityFlag, prevRigFlag := cityFlag, rigFlag
@@ -3338,17 +3361,39 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) string {
 	t.Setenv("GC_CITY", cityPath)
 	t.Setenv("GC_CITY_PATH", cityPath)
 	materializeBuiltinPacksForTest(t, cityPath)
-	if err := ensureBeadsProvider(cityPath); err != nil {
-		t.Fatalf("ensureBeadsProvider: %v", err)
+	// Record the fresh city as provider-owned before any lifecycle op, exactly
+	// as finalizeInit does at the top of `gc init`. That journal entry is the
+	// only artifact a fresh city has: with it absent, every skip predicate in
+	// ensureBeadsProvider reads a bare directory and selects the legacy managed
+	// lifecycle, which starts a dolt sql-server on <city>/.beads/dolt — the
+	// same directory bd's proxied-server child owns. bd's child then cannot
+	// `dolt init` there ("Detected that a Dolt sql-server is running from this
+	// directory") and dies before publishing its port. This fixture builds its
+	// city by hand rather than through finalizeInit, so it has to do this
+	// itself or it tests a shape production never produces.
+	if err := persistFreshProviderOwnership(cityPath, hostedDoltInitOptions{}); err != nil {
+		t.Fatalf("persistFreshProviderOwnership: %v", err)
+	}
+	// Mirror startBeadsLifecycle's gate: a provider-owned scope is only handed
+	// to the provider's start op once its record is ready. A city journaled
+	// moments ago is still provider_initializing, and starting a provider
+	// against a store that does not exist yet fails with bd's "no beads
+	// database found". initAndHookDir below runs the provider-owned init and
+	// marks the record ready.
+	cityState, cityProviderOwned, err := providerOwnedScopeState(cityPath, cityPath)
+	if err != nil {
+		t.Fatalf("providerOwnedScopeState: %v", err)
+	}
+	if !cityProviderOwned || cityState.State == providerScopeReady {
+		if err := ensureBeadsProvider(cityPath); err != nil {
+			t.Fatalf("ensureBeadsProvider: %v", err)
+		}
 	}
 	t.Cleanup(func() {
 		_ = shutdownBeadsProvider(cityPath)
 	})
 	if err := initAndHookDir(cityPath, cityPath, "gc"); err != nil {
 		t.Fatalf("initAndHookDir(city): %v", err)
-	}
-	if err := publishManagedDoltRuntimeState(cityPath); err != nil {
-		t.Fatalf("publishManagedDoltRuntimeState: %v", err)
 	}
 	return cityPath
 }
@@ -3369,15 +3414,15 @@ func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 	t.Setenv("GC_DOLT", "")
 
 	homeDir := filepath.Join(shortSocketTempDir(t, "gc-bd-home-"), "home")
-	if err := writeWaitTestDoltIdentity(homeDir); err != nil {
-		t.Fatalf("writeWaitTestDoltIdentity: %v", err)
+	if err := writeTestDoltIdentity(homeDir); err != nil {
+		t.Fatalf("writeTestDoltIdentity: %v", err)
 	}
 	t.Setenv("HOME", homeDir)
 	t.Setenv("DOLT_ROOT_PATH", homeDir)
 	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
 
 	oldResolve := resolveProviderLifecycleGCBinary
-	resolveProviderLifecycleGCBinary = func() string { return currentGCBinaryForTests(t) }
+	resolveProviderLifecycleGCBinary = func() (string, error) { return currentGCBinaryForTests(t), nil }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
 	prevCityFlag, prevRigFlag := cityFlag, rigFlag
@@ -3400,6 +3445,30 @@ func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 	if err := os.Chmod(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
 		t.Fatalf("Chmod(rig .beads): %v", err)
 	}
+	// Keep this fixture on the legacy direct-server path even when the copied
+	// template was produced by a proxied-default binary. The rebind assertion
+	// is specifically about direct lifecycle recovery.
+	for _, dir := range []string{cityPath, rigPath} {
+		metadataPath := filepath.Join(dir, ".beads", "metadata.json")
+		data, err := os.ReadFile(metadataPath)
+		if err != nil {
+			t.Fatalf("ReadFile(%s): %v", metadataPath, err)
+		}
+		var metadata map[string]any
+		if err := json.Unmarshal(data, &metadata); err != nil {
+			t.Fatalf("Unmarshal(%s): %v", metadataPath, err)
+		}
+		metadata["backend"] = "dolt"
+		metadata["database"] = "dolt"
+		metadata["dolt_mode"] = "server"
+		updated, err := json.MarshalIndent(metadata, "", "  ")
+		if err != nil {
+			t.Fatalf("Marshal(%s): %v", metadataPath, err)
+		}
+		if err := os.WriteFile(metadataPath, append(updated, '\n'), 0o600); err != nil {
+			t.Fatalf("WriteFile(%s): %v", metadataPath, err)
+		}
+	}
 	t.Setenv("GC_CITY", cityPath)
 	t.Setenv("GC_CITY_PATH", cityPath)
 
@@ -3414,6 +3483,8 @@ func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 	scriptEnv := sanitizedBaseEnv(
 		"GC_CITY="+cityPath,
 		"GC_CITY_PATH="+cityPath,
+		"GC_BEADS_TRANSPORT=direct",
+		"GC_BEADS_TARGET=local",
 	)
 	runScript := func(args ...string) {
 		t.Helper()

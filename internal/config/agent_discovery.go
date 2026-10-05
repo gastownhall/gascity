@@ -1,7 +1,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	iofs "io/fs"
 	"path/filepath"
 	"strings"
 
@@ -49,6 +51,15 @@ func DiscoverPackAgents(fs fsys.FS, packDir, _ string, skipNames map[string]bool
 				return nil, fmt.Errorf("agents/%s/agent.toml: %w", agentName, decErr)
 			}
 			agent.Name = agentName
+		} else if !errors.Is(atErr, iofs.ErrNotExist) {
+			// The file exists but cannot be read (permissions, I/O error). A
+			// silent skip here discovered the agent with none of its config:
+			// no start_command, no provider pin — and the city then launched a
+			// default interactive model session under the agent's name instead
+			// of the configured command. Absence is a legitimate convention
+			// (agent.toml is optional); an unreadable file is a misconfiguration
+			// and must fail the config load, exactly like a decode error does.
+			return nil, fmt.Errorf("agents/%s/agent.toml: %w", agentName, atErr)
 		}
 		applyAgentConventionDefaults(fs, packDir, &agent)
 		agent.source = sourcePack

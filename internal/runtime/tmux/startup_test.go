@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,9 +10,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
@@ -32,6 +35,10 @@ type startCall struct {
 	processNames []string
 	rc           *RuntimeConfig
 	timeout      time.Duration
+	// exitStatus and exitSignal are the dead-pane facts recordStartCrash was
+	// handed, so a test can prove the artifact records what was classified.
+	exitStatus string
+	exitSignal string
 }
 
 // fakeStartOps records calls with full arguments and simulates outcomes
@@ -68,11 +75,14 @@ type fakeStartOps struct {
 	// sendKeysErrs, if non-empty, is consumed sequentially across calls
 	// (like createErrs) and takes priority over sendKeysErr — used to
 	// simulate a startup nudge that confirms on a later retry attempt.
-	sendKeysErrs         []error
-	sendKeysIdx          int
-	capturePaneText      string
-	capturePaneErr       error
-	recordStartCrashPath string
+	sendKeysErrs               []error
+	sendKeysIdx                int
+	capturePaneText            string
+	capturePaneErr             error
+	recordStartCrashPath       string
+	recordUnconfirmedNudgePath string
+	paneDeadStatus             string
+	paneDeadSignal             string
 
 	paneBusyResult bool
 	paneBusyErr    error
@@ -210,9 +220,19 @@ func (f *fakeStartOps) capturePane(name string, _ int) (string, error) {
 	return f.capturePaneText, f.capturePaneErr
 }
 
-func (f *fakeStartOps) recordStartCrash(name, _ string) string {
-	f.calls = append(f.calls, startCall{method: "recordStartCrash", name: name})
+func (f *fakeStartOps) paneDeadInfo(name string) (string, string) {
+	f.calls = append(f.calls, startCall{method: "paneDeadInfo", name: name})
+	return f.paneDeadStatus, f.paneDeadSignal
+}
+
+func (f *fakeStartOps) recordStartCrash(name, _, status, signal string) string {
+	f.calls = append(f.calls, startCall{method: "recordStartCrash", name: name, exitStatus: status, exitSignal: signal})
 	return f.recordStartCrashPath
+}
+
+func (f *fakeStartOps) recordUnconfirmedNudge(name, _ string, _ error) string {
+	f.calls = append(f.calls, startCall{method: "recordUnconfirmedNudge", name: name})
+	return f.recordUnconfirmedNudgePath
 }
 
 func (f *fakeStartOps) runSetupCommand(_ context.Context, cmd string, env map[string]string, timeout time.Duration) error {
@@ -717,6 +737,7 @@ func TestDoStartSession_ReadyDeadlineWithDeadPaneReportsProviderCrash(t *testing
 		"hasSession",
 		"isSessionRunning",
 		"capturePane",
+		"paneDeadInfo",
 		"recordStartCrash",
 	})
 }
@@ -756,6 +777,7 @@ func TestDoStartSession_FinalDeadPaneReportsProviderCrash(t *testing.T) {
 		"hasSession",
 		"isSessionRunning",
 		"capturePane",
+		"paneDeadInfo",
 		"recordStartCrash",
 	})
 }
@@ -796,6 +818,7 @@ func TestDoStartSession_FinalDeadPaneCaptureErrorFallsBack(t *testing.T) {
 		"hasSession",
 		"isSessionRunning",
 		"capturePane",
+		"paneDeadInfo",
 		"recordStartCrash",
 	})
 }
@@ -836,6 +859,7 @@ func TestDoStartSession_DeadPaneRecordsDurableDiagnostic(t *testing.T) {
 		"hasSession",
 		"isSessionRunning",
 		"capturePane",
+		"paneDeadInfo",
 		"recordStartCrash",
 	})
 }
@@ -964,14 +988,14 @@ func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
 	// submit that never clears — even after exhausting every backoff — must
 	// not fail the start: the keystrokes reached tmux and the session is
 	// already verified alive. Only genuine delivery errors are fatal (above).
-	t.Run("unconfirmed submit is not fatal even after exhausting retries", func(t *testing.T) {
+	t.Run("unconfirmed submit is not fatal but is durably recorded after exhausting retries", func(t *testing.T) {
 		origBackoffs := startupNudgeRetryBackoffs
 		startupNudgeRetryBackoffs = []time.Duration{time.Millisecond, time.Millisecond}
 		defer func() { startupNudgeRetryBackoffs = origBackoffs }()
-
 		ops := &fakeStartOps{
-			hasSessionResult: true,
-			sendKeysErr:      fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, "test"),
+			hasSessionResult:           true,
+			sendKeysErr:                fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, "test"),
+			recordUnconfirmedNudgePath: "/city/.gc/sessions/test/startup-nudge-unconfirmed.log",
 		}
 
 		cfg := runtime.Config{
@@ -985,6 +1009,39 @@ func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
 
 		// One initial attempt plus one retry per shrunk backoff.
 		callsByMethod(t, ops, "sendKeys", len(startupNudgeRetryBackoffs)+1)
+		// dr-6siig: an unconfirmed startup nudge has no retry-capable caller
+		// (Start returns nil, so nothing requeues it), so it must leave a
+		// durable artifact for a later observer instead of only a stderr
+		// line that vanishes with the process.
+		callsByMethod(t, ops, "recordUnconfirmedNudge", 1)
+	})
+
+	// Same reasoning as above: a submit proven delivered but never observed
+	// busy (composer drained before the confirm budget saw it) must not fail
+	// the start either. It also gets the same durable artifact as the
+	// unconfirmed case above — the stderr warning alone vanishes with the
+	// process, and this case never retries (see adapter.go), so the artifact
+	// is the only trace left for a later observer.
+	t.Run("delivered-but-unobserved submit is not fatal", func(t *testing.T) {
+		ops := &fakeStartOps{
+			hasSessionResult:           true,
+			sendKeysErr:                fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, "test"),
+			recordUnconfirmedNudgePath: "/city/.gc/sessions/test/startup-nudge-unconfirmed.log",
+		}
+
+		cfg := runtime.Config{
+			Command: "claude",
+			Nudge:   "startup prompt",
+		}
+
+		if err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout); err != nil {
+			t.Fatalf("doStartSession = %v, want nil for a delivered-but-unobserved startup nudge", err)
+		}
+
+		// Exactly one attempt: unlike the unconfirmed case, this ladder never
+		// retries a delivered-but-unobserved submit (refs ga-civwyz).
+		callsByMethod(t, ops, "sendKeys", 1)
+		callsByMethod(t, ops, "recordUnconfirmedNudge", 1)
 	})
 }
 
@@ -1109,6 +1166,48 @@ func TestSendStartupNudgeWithRetry_NonRetryableErrorFailsFast(t *testing.T) {
 	}
 	if slept {
 		t.Error("should not sleep for a non-retryable error")
+	}
+}
+
+// TestSendStartupNudgeWithRetry_DeliveredButUnobservedNeverRetried proves the
+// ga-civwyz composition mayor flagged as the interaction to get right: a
+// submit already proven delivered (composer drained) but never observed busy
+// — arriving through the exact same send closure as ErrNudgeSubmitUnconfirmed
+// — must never be retried or re-pasted by the ladder. Retrying would
+// re-inject a message the session already received: the ga-civwyz
+// duplicate-reminder failure mode (up to 5 copies of one reminder, 1201
+// occurrences in 5 days of production logs). Unlike
+// NonRetryableErrorFailsFast's generic stand-in error, this uses the real
+// sentinel so a future change to the ladder's retry allowlist that
+// accidentally widens to include ErrNudgeSubmitDeliveredUnobserved fails
+// here first, not just at the doStartSession call-site level (see
+// TestDoStartSessionReturnsNudgeDeliveryError's "delivered-but-unobserved
+// submit is not fatal" case, which proves the caller's classification but
+// not the ladder's retry decision in isolation).
+func TestSendStartupNudgeWithRetry_DeliveredButUnobservedNeverRetried(t *testing.T) {
+	calls := 0
+	slept := false
+	busyCalls := 0
+	send := func() error {
+		calls++
+		return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, "test")
+	}
+	busy := func() (bool, error) {
+		busyCalls++
+		return false, nil
+	}
+	err := sendStartupNudgeWithRetry(context.Background(), send, func(time.Duration) { slept = true }, busy)
+	if !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) {
+		t.Fatalf("err = %v, want ErrNudgeSubmitDeliveredUnobserved", err)
+	}
+	if calls != 1 {
+		t.Fatalf("send calls = %d, want 1 (a delivered-but-unobserved submit must never be retried or re-pasted)", calls)
+	}
+	if slept {
+		t.Error("should not sleep for a delivered-but-unobserved submit")
+	}
+	if busyCalls != 0 {
+		t.Fatalf("busy calls = %d, want 0 (a proven-delivered submit fails fast before any busy check)", busyCalls)
 	}
 }
 
@@ -3141,11 +3240,10 @@ func TestPaneDeadInfoErrorReturnsEmpty(t *testing.T) {
 func TestRecordStartCrashWritesDurableArtifact(t *testing.T) {
 	dir := t.TempDir()
 	tm := NewTmux()
-	tm.exec = &fakeExecutor{out: "139|SIGSEGV\n"}
 	o := &tmuxStartOps{tm: tm, runtimeDir: dir}
 
-	path := o.recordStartCrash("mayor", "panic: startup failed\nPane is dead")
-	want := filepath.Join(dir, "sessions", "mayor", "start-stderr.log")
+	path := o.recordStartCrash("mayor", "panic: startup failed\nPane is dead", "139", "SIGSEGV")
+	want := filepath.Join(citylayout.SessionDiagnosticsDirForRuntimeDir(dir), "mayor", "start-stderr.log")
 	if path != want {
 		t.Fatalf("path = %q, want %q", path, want)
 	}
@@ -3162,9 +3260,8 @@ func TestRecordStartCrashWritesDurableArtifact(t *testing.T) {
 
 func TestRecordStartCrashDisabledWhenNoRuntimeDir(t *testing.T) {
 	tm := NewTmux()
-	tm.exec = &fakeExecutor{out: "139|SIGSEGV\n"}
 	o := &tmuxStartOps{tm: tm, runtimeDir: ""}
-	if path := o.recordStartCrash("mayor", "x"); path != "" {
+	if path := o.recordStartCrash("mayor", "x", "139", "SIGSEGV"); path != "" {
 		t.Fatalf("path = %q, want empty when runtimeDir unset", path)
 	}
 }
@@ -3306,5 +3403,165 @@ func TestRunSetupCommandFailureOmitsCredentials(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("failure detail missing %q, so nothing here was scrubbed: %v", want, err)
 		}
+	}
+}
+
+func TestDiscardPartialStartup(t *testing.T) {
+	partialErr := fmt.Errorf("%w: second chunk", errPartialPasteDelivery)
+	cleanupErr := errors.New("process cleanup failed")
+	fallbackErr := errors.New("fallback kill failed")
+
+	t.Run("unrelated error does not kill", func(t *testing.T) {
+		calls := 0
+		err := discardPartialStartup(errors.New("other"), func() error { calls++; return nil }, func() error { calls++; return nil })
+		if err == nil || calls != 0 {
+			t.Fatalf("discardPartialStartup() = %v, kill calls = %d; want original error and no kills", err, calls)
+		}
+	})
+
+	t.Run("process cleanup succeeds", func(t *testing.T) {
+		fallbackCalls := 0
+		err := discardPartialStartup(partialErr, func() error { return nil }, func() error { fallbackCalls++; return nil })
+		if !errors.Is(err, errPartialPasteDelivery) || fallbackCalls != 0 {
+			t.Fatalf("discardPartialStartup() = %v, fallback calls = %d", err, fallbackCalls)
+		}
+	})
+
+	t.Run("session already gone skips fallback", func(t *testing.T) {
+		fallbackCalls := 0
+		err := discardPartialStartup(partialErr, func() error { return ErrSessionNotFound }, func() error { fallbackCalls++; return nil })
+		if !errors.Is(err, errPartialPasteDelivery) || errors.Is(err, ErrSessionNotFound) || fallbackCalls != 0 {
+			t.Fatalf("discardPartialStartup() = %v, fallback calls = %d", err, fallbackCalls)
+		}
+	})
+
+	t.Run("fallback kill succeeds and cleanup failure is reported", func(t *testing.T) {
+		err := discardPartialStartup(partialErr, func() error { return cleanupErr }, func() error { return nil })
+		if !errors.Is(err, errPartialPasteDelivery) || !errors.Is(err, cleanupErr) {
+			t.Fatalf("discardPartialStartup() = %v, want partial and cleanup errors", err)
+		}
+	})
+
+	t.Run("both kill paths fail and both failures are reported", func(t *testing.T) {
+		err := discardPartialStartup(partialErr, func() error { return cleanupErr }, func() error { return fallbackErr })
+		if !errors.Is(err, errPartialPasteDelivery) || !errors.Is(err, cleanupErr) || !errors.Is(err, fallbackErr) {
+			t.Fatalf("discardPartialStartup() = %v, want partial, cleanup, and fallback errors", err)
+		}
+	})
+}
+
+// partialPasteExecutor drives (*tmuxStartOps).sendKeys through the real Copilot
+// chunking path. It reports GC_PROVIDER=copilot so the startup prompt is split,
+// then fails one chosen paste with a non-transient error so delivery stops after
+// an earlier chunk already landed — the partial-delivery state the discard is
+// for. It records whether any kill reached tmux.
+type partialPasteExecutor struct {
+	mu        sync.Mutex
+	pastes    int
+	failPaste int
+	kills     int
+}
+
+func (f *partialPasteExecutor) execute(args []string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// tmux invocations carry leading flags (-u, socket selection), so match the
+	// subcommand anywhere in the argument list rather than at a fixed index.
+	switch {
+	case tmuxArgsContain(args, "show-environment"):
+		return "GC_PROVIDER=copilot", nil
+	case tmuxArgsContain(args, "paste-buffer"):
+		f.pastes++
+		if f.pastes == f.failPaste {
+			// Non-transient so sendTextWithRetry fails fast rather than
+			// retrying this chunk until the deadline.
+			return "", errors.New("no such session")
+		}
+	case tmuxArgsContain(args, "kill-session"):
+		f.kills++
+	}
+	return "", nil
+}
+
+func tmuxArgsContain(args []string, verb string) bool {
+	for _, arg := range args {
+		if arg == verb {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *partialPasteExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return f.execute(args)
+}
+
+func (f *partialPasteExecutor) killCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.kills
+}
+
+// largeCopilotPrompt is big enough to force more than one paste chunk.
+func largeCopilotPrompt() string { return strings.Repeat("x", copilotMaxPasteBytes*2+1) }
+
+// TestStartOpsSendKeysDiscardsPartialStartupOnFreshStart is the fresh-start half
+// of the scope contract: Provider.Start created this box, so a prompt that only
+// half-arrived must not be left running for reconciliation to accept.
+func TestStartOpsSendKeysDiscardsPartialStartupOnFreshStart(t *testing.T) {
+	fe := &partialPasteExecutor{failPaste: 2}
+	tm := NewTmuxWithConfig(DefaultConfig())
+	tm.exec = fe
+	ops := newTmuxStartOps(tm, "", 0, runtime.Config{}, true)
+
+	err := ops.sendKeys("gc-test-partial-fresh", largeCopilotPrompt())
+	if !errors.Is(err, errPartialPasteDelivery) {
+		t.Fatalf("sendKeys() = %v, want errPartialPasteDelivery", err)
+	}
+	if fe.killCount() == 0 {
+		t.Fatal("fresh start with a partial startup paste must discard the session, but no kill reached tmux")
+	}
+}
+
+// TestStartOpsSendKeysKeepsWarmBoxOnRelaunch is the half that regressed: this
+// PR's discard originally fired on every path through launchOrchestration,
+// including Relaunch and RunLive, which drive an already-warm box that
+// Provider.Relaunch documents it leaves in place on failure.
+func TestStartOpsSendKeysKeepsWarmBoxOnRelaunch(t *testing.T) {
+	fe := &partialPasteExecutor{failPaste: 2}
+	tm := NewTmuxWithConfig(DefaultConfig())
+	tm.exec = fe
+	ops := newTmuxStartOps(tm, "", 0, runtime.Config{}, false)
+
+	err := ops.sendKeys("gc-test-partial-relaunch", largeCopilotPrompt())
+	if !errors.Is(err, errPartialPasteDelivery) {
+		t.Fatalf("sendKeys() = %v, want errPartialPasteDelivery surfaced to the caller", err)
+	}
+	if got := fe.killCount(); got != 0 {
+		t.Fatalf("relaunch issued %d kill(s); the warm box must survive a failed startup prompt", got)
+	}
+}
+
+func TestDoStartSession_WarnsWhenTrustDialogLeftUnconfirmed(t *testing.T) {
+	var warnings bytes.Buffer
+	old := startupDialogWarningOut
+	startupDialogWarningOut = &warnings
+	t.Cleanup(func() { startupDialogWarningOut = old })
+
+	ops := &fakeStartOps{
+		hasSessionResult:        true,
+		acceptStartupDialogsErr: fmt.Errorf("workspace trust dialog: %w", runtime.ErrWorkspaceTrustUnconfirmed),
+	}
+	cfg := runtime.Config{Command: "claude", ReadyPromptPrefix: "> ", ProcessNames: []string{"claude"}}
+
+	if err := doStartSession(context.Background(), ops, "gc-city-mayor", cfg, DefaultConfig().SetupTimeout); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Both passes fail; only the final (post-readiness) pass reports it.
+	if got := strings.Count(warnings.String(), "never reached the trust option"); got != 1 {
+		t.Fatalf("warnings = %q, want exactly one unconfirmed-trust warning", warnings.String())
+	}
+	if !strings.Contains(warnings.String(), `"gc-city-mayor"`) {
+		t.Fatalf("warning %q does not name the session", warnings.String())
 	}
 }

@@ -217,7 +217,7 @@ func TestEmitSessionWakeRefused_FreshWakeClearsGuardAndReemits(t *testing.T) {
 		t.Fatalf("wakeRefusedEvents after first refusal = %d, want 1", len(got))
 	}
 
-	patch := sessionpkg.ClearWakeBlockersPatch(sessionpkg.StateAsleep, "")
+	patch := sessionpkg.ClearWakeBlockersPatch(sessionpkg.StateAsleep, "", clk.Now())
 	if v, ok := patch["wake_refused_event_at"]; !ok || v != "" {
 		t.Errorf(`ClearWakeBlockersPatch()["wake_refused_event_at"] = (%q, ok=%v), want ("", ok=true): `+
 			"a fresh explicit wake must clear the throttle guard alongside wake_attempts so a subsequent refusal can emit again", v, ok)

@@ -127,8 +127,15 @@ provider = "claude"
 base = "builtin:claude"
 ready_delay_ms = 0
 
-[daemon]
-formula_v2 = true               # the v2 formula compiler, on by default (Tutorial 05)
+[defaults]
+[defaults.rig]
+[defaults.rig.imports]
+[defaults.rig.imports.gc]       # pack imported into every rig you add
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity/roles"
+version = "sha:<pinned commit>"
+
+# [mail]                        # commented-out mail retention settings follow
+# ...
 ```
 
 ```shell
@@ -138,15 +145,14 @@ $ cat pack.toml
 name = "my-city"
 schema = 2
 
-[imports.core]
-source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
-version = "sha:<pinned commit>"
-
+[imports]
 [imports.bd]
-source = "https://github.com/gastownhall/gascity.git//examples/bd"
+source = "https://github.com/gastownhall/gascity/tree/main/examples/bd"
 version = "sha:<pinned commit>"
-
-[imports.gascity]
+[imports.core]
+source = "https://github.com/gastownhall/gascity/tree/main/internal/bootstrap/packs/core"
+version = "sha:<pinned commit>"
+[imports.gc]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 version = "sha:<pinned commit>"
 
@@ -157,13 +163,16 @@ mode = "always"
 
 The `[workspace]` section in `city.toml` sets shared runtime defaults such as
 the provider. The `[providers.claude]` table registers your chosen provider
-against the builtin `claude` preset. The v2 formula compiler is on by default,
-so nothing is written for it (you'll meet formulas in
+against the builtin `claude` preset. The `[defaults.rig.imports]` table lists
+packs that every rig you add imports automatically. The v2 formula compiler is
+on by default, so nothing is written for it (you'll meet formulas in
 [Tutorial 05](/tutorials/05-formulas)). The `[imports]` entries
 in `pack.toml` are explicit pack composition, not hidden load-time behavior.
 `core` and, for cities on the default `bd` beads provider, `bd` are bundled
-system packs that resolve offline from the user-global pack cache. The
-`gascity` import is the public planning and implementation skills pack pinned
+system packs that resolve offline from the user-global pack cache. Their
+`sha:<pinned commit>` version names the copy of each pack bundled with your
+`gc` binary, not a commit you fetch or choose yourself. The `gc`
+import is the public Gas City planning and implementation skills pack pinned
 to the registry release embedded with this `gc` binary. If required builtin
 imports go missing, `gc doctor --fix` restores them. The machine-local
 workspace identity lives in `.gc/site.toml` instead, which is how `gc

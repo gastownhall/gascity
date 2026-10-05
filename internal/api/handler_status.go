@@ -248,7 +248,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 			if rigName != "" {
 				perRigAgentTotals[rigName]++
 			}
-			sessName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
+			sessName := statusRuntimeSessionName(cityName, sessTmpl, ea.qualifiedName, groupName, sessionSnapshot)
 			info, hasInfo := sessionSnapshot.bySessionName[sessName]
 			running := statusProviderRunning(sp, sessName)
 			// An agent whose work runs under a relocated-graph wisp session is
@@ -1086,6 +1086,63 @@ func statusSessionStateInfo(info session.Info) session.State {
 	default:
 		return state
 	}
+}
+
+// statusRuntimeSessionName resolves the runtime session name an expanded agent
+// actually runs under.
+//
+// The canonical derivation (agent.SessionNameFor) is not the only name a
+// session may legitimately hold. An unaliased pool instance runs under a
+// bead-scoped name (<template>-<beadID>, PoolSessionName), and rows minted by
+// pre-release builds may carry a "-pool" step-aside name (poolRuntimeSessionName
+// in cmd/gc/session_name_lookup.go). Both are recorded on the session bead and
+// cannot be re-derived from the agent identity, so a status path that only
+// derives the canonical name reports a live seat as not running.
+//
+// Resolution order, strongest evidence first:
+//  1. a session bead sitting on the canonical name — today's behavior, kept
+//     exactly so canonically named sessions are unaffected;
+//  2. a session bead whose recorded agent identity IS this instance;
+//  3. for a single-instance identity, the one session bead recorded against
+//     it as template.
+//
+// Anything ambiguous falls back to the canonical name rather than guessing.
+func statusRuntimeSessionName(cityName, sessTmpl, qualifiedName, groupName string, snapshot statusSessionSnapshot) string {
+	canonical := agentSessionName(cityName, qualifiedName, sessTmpl)
+	if _, ok := snapshot.bySessionName[canonical]; ok {
+		return canonical
+	}
+
+	candidates := snapshot.byTemplate[qualifiedName]
+	if groupName != "" && groupName != qualifiedName {
+		candidates = append(append([]statusSessionInfo(nil), candidates...), snapshot.byTemplate[groupName]...)
+	}
+
+	// (2) an explicit per-instance identity match is unambiguous.
+	for _, info := range candidates {
+		if info.agentName != "" && info.agentName == qualifiedName && info.sessionName != "" {
+			return info.sessionName
+		}
+	}
+
+	// (3) a session recorded against this identity as its template, with no
+	// competing sibling. Deterministic by construction: more than one
+	// candidate means the pool has instances we cannot tell apart here, so
+	// the canonical name is the honest answer.
+	var only string
+	for _, info := range snapshot.byTemplate[qualifiedName] {
+		if info.sessionName == "" {
+			continue
+		}
+		if only != "" && only != info.sessionName {
+			return canonical
+		}
+		only = info.sessionName
+	}
+	if only != "" {
+		return only
+	}
+	return canonical
 }
 
 func statusProviderRunning(sp interface{ IsRunning(string) bool }, sessionName string) bool {

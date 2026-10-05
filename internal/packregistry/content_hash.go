@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
+	"io/fs"
+	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
@@ -95,6 +97,97 @@ func VerifyPackContentHash(repoDir, commit, packPath, expected string) error {
 		return err
 	}
 	actual, err := PackContentHash(repoDir, commit, packPath)
+	if err != nil {
+		return err
+	}
+	if actual != expected {
+		return fmt.Errorf("hash mismatch: got %s, want %s", actual, expected)
+	}
+	return nil
+}
+
+// PackDirContentHash returns the canonical content hash for a pack directory
+// on disk that has no git history to read — for example the synthetic cache gc
+// materializes from the pack content embedded in its binary. It hashes the
+// same manifest PackContentHash builds from a git tree: every regular file and
+// symlink below dir by slash-separated relative path, with mode 0755 for an
+// executable file, 0644 for any other regular file, and 0777 for a symlink
+// (whose content is its target, as git stores it). A .git entry is skipped.
+// Any other file type is an error rather than silently left out of the hash.
+func PackDirContentHash(dir string) (string, error) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return "", fmt.Errorf("pack directory is required")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pack.toml")); err != nil {
+		return "", fmt.Errorf("pack directory %q has no pack.toml: %w", dir, err)
+	}
+	var entries []string
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if p == dir {
+			return nil
+		}
+		if d.Name() == ".git" {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		var perm string
+		var data []byte
+		switch {
+		case info.Mode()&fs.ModeSymlink != 0:
+			target, err := os.Readlink(p)
+			if err != nil {
+				return err
+			}
+			perm, data = "0777", []byte(filepath.ToSlash(target))
+		case info.Mode().IsRegular():
+			perm = "0644"
+			if info.Mode().Perm()&0o111 != 0 {
+				perm = "0755"
+			}
+			if data, err = os.ReadFile(p); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unsupported file type %s for %s", info.Mode().Type(), rel)
+		}
+		sum := sha256.Sum256(data)
+		entries = append(entries, fmt.Sprintf("%s %s %x", rel, perm, sum[:]))
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("hashing pack directory %q: %w", dir, err)
+	}
+	sort.Strings(entries)
+	sum := sha256.Sum256([]byte(strings.Join(entries, "\n")))
+	return fmt.Sprintf("sha256:%x", sum[:]), nil
+}
+
+// VerifyPackDirContentHash checks a pack directory on disk against an expected
+// registry release hash (see PackDirContentHash).
+func VerifyPackDirContentHash(dir, expected string) error {
+	expected = strings.TrimSpace(expected)
+	if err := ValidateReleaseHash(expected); err != nil {
+		return err
+	}
+	actual, err := PackDirContentHash(dir)
 	if err != nil {
 		return err
 	}

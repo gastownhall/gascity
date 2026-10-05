@@ -24,6 +24,11 @@ vi.mock('./supervisor/client', () => ({
       items: [{ name: 'test-city', path: '/srv/gc/test-city', running: true }],
       total: 1,
     })),
+    // Routing-level tests do not exercise bead/session data; these stubs exist
+    // so the attention cohort's reads resolve empty instead of tripping over a
+    // missing method.
+    listSessions: vi.fn(async () => ({ items: [], total: 0 })),
+    listBeads: vi.fn(async () => ({ items: [], total: 0 })),
   }),
 }));
 

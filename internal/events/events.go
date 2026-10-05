@@ -53,6 +53,15 @@ const (
 	// always same-subject and same-process, and the payload's reason names which
 	// unwind ran.
 	BeadClaimReleased = "bead.claim_released"
+	// HookClaimReclaimedStale fires when gc hook --claim (ga-7rj87d), opted in
+	// via config.Agent.AutoReclaimStaleClaims, recovers a route-matched
+	// candidate whose only claim blocker was another worker's stale (lease-
+	// expired) assignee, and then wins the retried claim in the same hook
+	// cycle. Scoped to exactly the one candidate bd reclaim --id targeted —
+	// this is not a sweep. Lets mayor/watchers see the recovery happen instead
+	// of only ever observing the fresh claim with no story for how the prior
+	// assignee's abandoned work moved.
+	HookClaimReclaimedStale = "hook.claim.reclaimed_stale"
 	// ExecutionClaimWindowExpired fires when gc hook --claim reaches a claim
 	// mutation after its invocation window has elapsed — the signature of a
 	// claim command that outlived the agent turn that invoked it (an abandoned
@@ -122,12 +131,58 @@ const (
 	// policy (commit-and-push, clear-assignee-and-respawn, or escalate).
 	// See gastownhall/gascity#2293.
 	SessionDrainAckedWithAssignedWork = "session.drain_acked_with_assigned_work"
+	// SessionDrainStopEscalated fires when the reconciler gives up waiting for a
+	// drain-ack stop-pending session to exit on its own and escalates to a
+	// forceful termination. Two arms authorize it, because the two populations
+	// are bounded by different evidence: an AGENT-ACKED session, whose reminder
+	// budget is structurally unspendable, is bounded by time since it entered
+	// stop-pending; every other session is bounded by a spent reminder budget
+	// plus its answer window. Either way, ON THE TICK THAT AUTHORIZED IT the
+	// session held no assigned work, nobody was attached, the pane had been
+	// quiet, and the instance-token fence did not disagree that the runtime was
+	// still the one we meant to stop.
+	//
+	// A fired event means the escalation RAN — not that force landed. It is
+	// emitted once per escalation on EVERY outcome, and the payload reason
+	// carries "<arm>/<outcome>": only the force_terminated outcome means a kill
+	// landed, termination_failed means force was attempted and every
+	// termination call failed, and every other outcome means no force was
+	// applied at all. That includes the outcomes where one of the preconditions
+	// above stopped holding in the meantime — the token fence and the quiet
+	// hold are re-evaluated immediately before the destructive act, so the
+	// tick's answer is not the event's. Alert on the outcome, never on the
+	// event's presence.
+	//
+	// The BEAD IS NOT CLOSED HERE and the pool slot name is therefore not
+	// released by this pass, even when force did land: the close belongs to a
+	// later reconcile tick's own liveness observation, deliberately, because
+	// closing from inside the kill path frees the bead while a live pane may
+	// still hold the runtime name.
+	//
+	// This is the loud half of a deliberately destructive backstop. Its whole
+	// purpose is that a terminal escalation can never silently mask a genuine
+	// drain-ack tail: every kill this pass performs is counted and queryable, so
+	// a rising rate reads as "agents are not exiting on drain-ack" rather than
+	// as quiet success. See ga-rxhu2.
+	SessionDrainStopEscalated = "session.drain_stop_escalated"
 	// SessionStranded fires when a pool slot retains an in-progress work
 	// bead after its runtime has exited — i.e., the worker process is
 	// gone but the bead's assignee/state still references it. Surfaces
 	// the reconciler-detected leak so pack-level subscribers can decide
 	// whether to clear-assignee-and-respawn or escalate.
 	SessionStranded = "session.stranded"
+	// SessionPoolSlotRetiredAtDrainDeadline fires when the reconciler force-
+	// retires a pool-managed session bead that entered drain and never
+	// finalized its drain-ack, once the drain has outlived the retire
+	// deadline, the seat holds no assigned work, and its runtime is
+	// confirmed stopped. The bead close frees the runtime name the pool slot
+	// is pinned to, so the pool can mint the seat again.
+	//
+	// It is a symptom bound, not a cure: every emission is a drain-ack that
+	// never resolved. Count it — a rising rate means the underlying
+	// drain-ack defect is spreading while this bound quietly absorbs it.
+	// See ga-rxhu2.
+	SessionPoolSlotRetiredAtDrainDeadline = "session.pool_slot_retired_at_drain_deadline"
 	// SessionUnknownState fires when the reconciler observes a session bead
 	// whose metadata state it does not recognize. The reconciler skips such
 	// beads (forward-compatible rollback: an older reconciler ignores a newer
@@ -190,13 +245,19 @@ const (
 	ConvoyClosed            = "convoy.closed"
 	ControllerStarted       = "controller.started"
 	ControllerStopped       = "controller.stopped"
-	// ControlStalled fires once, when a control bead's bounded semantic-refusal
-	// retry budget expires and the control dispatcher quarantines it. Before
-	// this event the control plane had no control.* vocabulary at all, so a
-	// city whose dispatcher spent 95% of its throughput re-asking a question
-	// the store had already refused was, by construction, invisible on the
-	// event bus: no event, no metric, every health surface green. It is
-	// edge-triggered on the quarantine, not level-triggered on the retry — one
+	// ControlStalled fires once per disposition whose bounded retry budget
+	// expires: a semantic refusal the control dispatcher then QUARANTINES
+	// (error_class "semantic"), or a drift-pending wait whose loudness horizon
+	// elapsed (error_class "pending"). The two are not interchangeable — a
+	// quarantined bead is CLOSED and its order is dead, while a pending one
+	// stays OPEN and keeps retrying, and completes the moment a human heals the
+	// drift. Only the quarantine emits the paired order.failed; treating a
+	// pending stall as terminal misreads a healable wait as a dead workflow.
+	// Before this event the control plane had no control.* vocabulary at all,
+	// so a city whose dispatcher spent 95% of its throughput re-asking a
+	// question the store had already refused was, by construction, invisible on
+	// the event bus: no event, no metric, every health surface green. It is
+	// edge-triggered on the expiry, not level-triggered on the retry — one
 	// emission per stalled bead under the intended single-control-dispatcher-
 	// per-city topology, never one per attempt. Control beads carry no
 	// claim/lease, so a misconfigured second dispatcher over the same store
@@ -218,6 +279,18 @@ const (
 	// settle attempt; a duplicate is possible under a misconfigured second
 	// dispatcher, same as ControlStalled.
 	ControlRootSettleFailed = "control.root_settle_failed"
+	// ControlDispatcherScopeGap fires once per scope per desired-state build
+	// when open control work is owned by a scope — the city, or one rig — that
+	// configures no control-dispatcher. The reconciler suppresses those rows
+	// from the tick's demand snapshot (routing them to another scope's
+	// dispatcher would park them on a store it cannot read), which is silent by
+	// construction: the work simply never runs. Before this event the gap was
+	// reported only as one stderr line per scope per tick, so a city could
+	// accumulate 600+ identical lines over a day with every health surface
+	// green. The payload carries the count of rows suppressed for that scope in
+	// the build, so the signal is a level-triggered gauge of stuck work rather
+	// than a per-row alert.
+	ControlDispatcherScopeGap = "control.dispatcher_scope_gap"
 	// SupervisorStarted fires once per supervisor startup, after the
 	// instance lock is acquired. Its payload classifies how the previous
 	// supervisor instance exited (clean, crash, or unknown), derived from
@@ -264,7 +337,12 @@ const (
 	// growing is an order that has stopped running with nothing else to say so.
 	// Rate-bounded at the emit site (see cmd/gc/order_dispatch.go) — a
 	// permanently wedged order cannot turn this into a per-tick stream.
-	OrderSuppressed                 = "order.suppressed"
+	OrderSuppressed = "order.suppressed"
+	// OrderSkipped reports that an exec order finished (exit 0) but declared
+	// that some or all of its work did not run: a bead scope it could not
+	// reach, or a safety gate that held a step back. It accompanies the run's
+	// order.completed so a skip is never read as a clean completion.
+	OrderSkipped                    = "order.skipped"
 	ProviderSwapped                 = "provider.swapped"
 	WorkerOperation                 = "worker.operation"
 	ProjectIdentityStamped          = "project.identity.stamped"
@@ -394,7 +472,9 @@ var KnownEventTypes = []string{
 	SessionDraining, SessionUndrained, SessionQuarantined,
 	SessionIdleKilled, SessionMaxAgeKilled, SessionSuspended, SessionUpdated,
 	SessionDrainAckedWithAssignedWork,
+	SessionDrainStopEscalated,
 	SessionStranded,
+	SessionPoolSlotRetiredAtDrainDeadline,
 	SessionUnknownState,
 	SessionWakeRefused,
 	SessionResetStalled,
@@ -405,6 +485,7 @@ var KnownEventTypes = []string{
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,
+	HookClaimReclaimedStale,
 	BeadDeadAssigneeReopened,
 	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
 	ExecutionClaimWindowExpired,
@@ -415,13 +496,14 @@ var KnownEventTypes = []string{
 	ControllerStarted, ControllerStopped,
 	ControlStalled,
 	ControlRootSettleFailed,
+	ControlDispatcherScopeGap,
 	CitySuspended, CityResumed,
 	RequestResultCityCreate, RequestResultCityUnregister,
 	RequestResultSessionCreate, RequestResultSessionMessage,
 	RequestResultSessionSubmit, RequestResultRigCreate, RequestFailed,
 	RigProvisionProgress,
 	CityCreated, CityUnregisterRequested,
-	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed,
+	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed, OrderSkipped,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
 	MoleculeResolved,
 	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,

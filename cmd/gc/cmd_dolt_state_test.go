@@ -1047,9 +1047,7 @@ while True:
 }
 
 func TestDoltStateInspectManagedCmdReportsPortHolderOwnership(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1086,9 +1084,7 @@ func TestDoltStateInspectManagedCmdReportsPortHolderOwnership(t *testing.T) {
 }
 
 func TestDoltStateProbeManagedCmdReportsRunningOwnedHolder(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1137,9 +1133,7 @@ func TestDoltStateProbeManagedCmdReportsRunningOwnedHolder(t *testing.T) {
 }
 
 func TestDoltStateProbeManagedCmdReportsImposterHolder(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	port := reserveRandomTCPPort(t)
 	listener := startTCPListenerProcess(t, port)
@@ -1172,9 +1166,7 @@ func TestDoltStateProbeManagedCmdReportsImposterHolder(t *testing.T) {
 }
 
 func TestDoltStateProbeManagedCmdReportsDeletedOwnedHolder(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1228,9 +1220,7 @@ func TestDoltStateProbeManagedCmdReportsDeletedOwnedHolder(t *testing.T) {
 }
 
 func TestDoltStateExistingManagedCmdRejectsForeignListenerBackedOnlyByStateDataDir(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1276,9 +1266,7 @@ func TestDoltStateExistingManagedCmdRejectsForeignListenerBackedOnlyByStateDataD
 }
 
 func TestDoltStateExistingManagedCmdReportsReusableOwnedServer(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1344,9 +1332,7 @@ esac
 }
 
 func TestDoltStateExistingManagedCmdFallsBackToPublishedRuntimeState(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1413,9 +1399,7 @@ esac
 }
 
 func TestDoltStateExistingManagedCmdReportsDeletedInodes(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1477,9 +1461,7 @@ esac
 }
 
 func TestDoltStatePreflightCleanCmdRemovesSocketsButPreservesDoltInternals(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1544,9 +1526,7 @@ func TestDoltStatePreflightCleanCmdRemovesSocketsButPreservesDoltInternals(t *te
 
 func TestDoltStatePreflightCleanCmdPreservesLiveArtifacts(t *testing.T) {
 	skipSlowCmdGCTest(t, "spawns managed dolt holder processes; run make test-cmd-gc-process for full coverage")
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -2599,9 +2579,7 @@ func TestDoltStateStopManagedCmdCleansStaleStateWhenNoPID(t *testing.T) {
 }
 
 func TestDoltStateStopManagedCmdDoesNotKillImposterPortHolder(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
@@ -3020,5 +2998,105 @@ func writeFakeDoltSQLBinary(t *testing.T, binDir, invocationFile, body string) {
 	path := filepath.Join(binDir, "dolt")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile(fake dolt): %v", err)
+	}
+}
+
+// TestDoltStateCityScopedLifecycleCommandsRefuseProviderOwnership ensures
+// every legacy city-scoped helper used by the managed-Dolt script refuses
+// before it can inspect, probe, stop, clean, start, or recover a bd-owned
+// scope. Generic SQL-only helpers deliberately have no --city and remain out
+// of this boundary.
+func TestDoltStateCityScopedLifecycleCommandsRefuseProviderOwnership(t *testing.T) {
+	commands := []struct {
+		name string
+		args func(city string) []string
+	}{
+		{name: "inspect", args: func(city string) []string {
+			return []string{"dolt-state", "inspect-managed", "--city", city, "--port", "3307"}
+		}},
+		{name: "probe", args: func(city string) []string {
+			return []string{"dolt-state", "probe-managed", "--city", city, "--host", "127.0.0.1", "--port", "3307"}
+		}},
+		{name: "existing", args: func(city string) []string {
+			return []string{"dolt-state", "existing-managed", "--city", city, "--host", "127.0.0.1", "--port", "3307"}
+		}},
+		{name: "wait", args: func(city string) []string {
+			return []string{"dolt-state", "wait-ready", "--city", city, "--host", "127.0.0.1", "--port", "3307", "--pid", "1"}
+		}},
+		{name: "stop", args: func(city string) []string {
+			return []string{"dolt-state", "stop-managed", "--city", city, "--port", "3307"}
+		}},
+		{name: "start", args: func(city string) []string {
+			return []string{"dolt-state", "start-managed", "--city", city, "--host", "127.0.0.1", "--port", "3307"}
+		}},
+		{name: "recover", args: func(city string) []string {
+			return []string{"dolt-state", "recover-managed", "--city", city, "--host", "127.0.0.1", "--port", "3307"}
+		}},
+		{name: "preflight", args: func(city string) []string { return []string{"dolt-state", "preflight-clean", "--city", city} }},
+	}
+	states := []struct {
+		name  string
+		setup func(t *testing.T, city string)
+	}{
+		{
+			name: "initializing",
+			setup: func(t *testing.T, city string) {
+				t.Helper()
+				if err := persistProviderScopeOwnership(city, city, providerScopeIntent{Transport: "direct", Target: "local"}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "ready",
+			setup: func(t *testing.T, city string) {
+				t.Helper()
+				if err := persistProviderScopeOwnership(city, city, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+					t.Fatal(err)
+				}
+				if err := markProviderScopeOwnershipReady(city, city); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "corrupt",
+			setup: func(t *testing.T, city string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Join(city, ".gc"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(providerScopeOwnershipPath(city), []byte("not json"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, state := range states {
+		for _, command := range commands {
+			t.Run(state.name+"/"+command.name, func(t *testing.T) {
+				city := t.TempDir()
+				state.setup(t, city)
+				var stdout, stderr bytes.Buffer
+				if code := run(command.args(city), &stdout, &stderr); code == 0 {
+					t.Fatalf("%s unexpectedly succeeded for provider-owned city", command.name)
+				}
+				if !strings.Contains(stderr.String(), "provider scope ownership") {
+					t.Fatalf("%s stderr = %q, want provider ownership refusal", command.name, stderr.String())
+				}
+			})
+		}
+	}
+}
+
+// skipWithoutProcessInspection skips tests that need to identify port holders
+// and open files. Linux answers both from /proc; other hosts need lsof.
+func skipWithoutProcessInspection(t *testing.T) {
+	t.Helper()
+	if _, err := os.Stat("/proc/net/tcp"); err == nil {
+		return
+	}
+	if _, err := exec.LookPath("lsof"); err != nil {
+		t.Skip("needs /proc or lsof to identify port holders")
 	}
 }

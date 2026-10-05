@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
@@ -18,6 +19,9 @@ func repoRootDir(t *testing.T) string {
 	_, filename, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
+	}
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
 }

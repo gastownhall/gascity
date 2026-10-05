@@ -7,14 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -29,6 +32,15 @@ type Provider struct {
 	cache    *StateCache
 	mu       sync.Mutex
 	workDirs map[string]string // session name → workDir (for CopyTo)
+
+	// livenessUnknown and livenessServerDead are set once
+	// ObserveLivenessWithError reports unknown or a confirmed-dead server,
+	// and cleared only when the cache answers again, so each episode logs
+	// once even while outcomes differ per session.
+	livenessUnknown    atomic.Bool
+	livenessServerDead atomic.Bool
+	// logf logs liveness episodes. Nil selects log.Printf.
+	logf func(format string, args ...any)
 }
 
 var instanceTokenReader = rand.Reader
@@ -44,6 +56,10 @@ var (
 	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
 	_ runtime.SessionRosterProvider         = (*Provider)(nil)
+	_ runtime.ListingAttestation            = (*Provider)(nil)
+	_ runtime.InventoryProvider             = (*Provider)(nil)
+	_ runtime.AttachmentObserverWithError   = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -88,7 +104,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return err
 	}
 
-	err = doStartSession(ctx, newTmuxStartOps(p.tm, p.cfg.RuntimeDir, p.cfg.SetupMaxTimeout, cfg), name, cfg, p.cfg.SetupTimeout)
+	err = doStartSession(ctx, p.startOps(cfg, true), name, cfg, p.cfg.SetupTimeout)
 	if err == nil {
 		p.cache.Invalidate()
 		return nil
@@ -223,7 +239,7 @@ func (p *Provider) cleanupFailedStart(name string, cfg runtime.Config) {
 // RunLive re-applies session_live commands to a running session.
 // Called by the reconciler when only session_live config has changed.
 func (p *Provider) RunLive(name string, cfg runtime.Config) error {
-	runSessionLive(context.Background(), newTmuxStartOps(p.tm, "", p.cfg.SetupMaxTimeout, cfg), name, cfg, os.Stderr, p.cfg.SetupTimeout)
+	runSessionLive(context.Background(), p.startOps(cfg, false), name, cfg, os.Stderr, p.cfg.SetupTimeout)
 	return nil
 }
 
@@ -237,7 +253,13 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 // re-stage files (those are provision-half and unchanged on a launch-only change),
 // and on failure it leaves the warm box in place rather than tearing it down.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
-	if err := doRelaunchSession(ctx, newTmuxStartOps(p.tm, "", p.cfg.SetupMaxTimeout, cfg), name, cfg, p.cfg.SetupTimeout); err != nil {
+	// The runtime dir is what makes the startup-nudge and start-crash
+	// diagnostics reachable. Relaunch and RunLive passed "" here, so an
+	// unconfirmed startup nudge on this path was suppressed by
+	// launchOrchestration and then recorded nowhere: success returned with
+	// neither confirmed delivery nor the durable evidence that suppression
+	// is predicated on.
+	if err := doRelaunchSession(ctx, p.startOps(cfg, false), name, cfg, p.cfg.SetupTimeout); err != nil {
 		return err
 	}
 	p.cache.Invalidate()
@@ -316,8 +338,29 @@ func (p *Provider) IsDeadRuntimeSession(name string) (bool, error) {
 }
 
 // IsAttached reports whether a user terminal is connected to the named session.
+//
+// Served from the same short-lived fleet snapshot as IsRunning (one
+// `tmux list-panes -a`), not a `display-message` fork per session: a reconcile
+// pass probes attachment for every session it tracks, so the per-session form
+// cost one tmux process per session per pass. A session missing from the
+// snapshot falls back to the direct read.
+//
+// Only this boolean read is served from the snapshot. [Provider.IsAttachedWithError],
+// the error-aware probe that destructive-action gates use, deliberately keeps
+// its direct per-session `display-message` so those gates never act on a
+// cached answer.
 func (p *Provider) IsAttached(name string) bool {
+	if attached, ok := p.cache.SessionAttached(name); ok {
+		return attached
+	}
 	return p.tm.IsSessionAttached(name)
+}
+
+// IsAttachedWithError reports whether a user terminal is connected to the
+// named session, separating "no client" from "could not tell". See
+// [Tmux.SessionAttachedWithError] for the error mapping.
+func (p *Provider) IsAttachedWithError(name string) (bool, error) {
+	return p.tm.SessionAttachedWithError(name)
 }
 
 // ProcessAlive reports whether the named session has a live agent
@@ -422,6 +465,87 @@ func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.L
 	}
 }
 
+// ObserveLivenessWithError reports pane and agent-process presence like
+// ObserveLiveness, but answers "unknown" (an error wrapping
+// [runtime.ErrRuntimeUnavailable] and the refresh error) instead of "absent"
+// when the state cache cannot vouch for its snapshot. See
+// [classifyCacheObservation] for when it can. The bool paths (IsRunning,
+// ObserveLiveness) keep their staleTTL cliff unchanged.
+func (p *Provider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	if strings.TrimSpace(name) == "" {
+		return runtime.Liveness{}, nil
+	}
+	obs := p.cache.observe()
+	switch classifyCacheObservation(obs, name, p.cache.clock(), p.cache.staleTTL, p.tm.serverConfirmedDead) {
+	case cacheAnswerAbsent:
+		p.noteLivenessEpisode(livenessOutcomeServerDead, nil)
+		return runtime.Liveness{}, nil
+	case cacheAnswerUnknown:
+		// The message omits the refresh error's text: tmux's "no tmux server
+		// running" and exec's "executable file not found" both match
+		// runtime.IsSessionGone, which would read "unknown" as "gone".
+		errs := []error{runtime.ErrRuntimeUnavailable}
+		if obs.lastErr != nil {
+			errs = append(errs, obs.lastErr)
+		}
+		err := &quietCauseError{
+			msg:  fmt.Sprintf("observing tmux session %q: state cache cannot vouch for it: %v", name, runtime.ErrRuntimeUnavailable),
+			errs: errs,
+		}
+		p.noteLivenessEpisode(livenessOutcomeUnknown, obs.lastErr)
+		return runtime.Liveness{}, err
+	}
+	p.noteLivenessEpisode(livenessOutcomeAnswered, nil)
+	session, ok := obs.state.Sessions[name]
+	if !ok || !session.Running {
+		return runtime.Liveness{}, nil
+	}
+	processNames = nonEmptyProcessNames(processNames)
+	if len(processNames) == 0 {
+		processNames = p.sessionProcessNames(name)
+	}
+	if len(processNames) == 0 {
+		return runtime.Liveness{Running: true, Alive: true}, nil
+	}
+	return runtime.Liveness{Running: true, Alive: obs.state.processAlive(name, processNames)}, nil
+}
+
+// livenessOutcome is how one ObserveLivenessWithError call answered, for the
+// episode log.
+type livenessOutcome int
+
+const (
+	livenessOutcomeAnswered livenessOutcome = iota
+	livenessOutcomeUnknown
+	livenessOutcomeServerDead
+)
+
+// noteLivenessEpisode logs once on entering "unknown", once on entering
+// "server confirmed dead", and once when the cache answers again. A wedged
+// server now stops producing actions instead of false deaths, so the episode
+// must be visible without a line per probe.
+func (p *Provider) noteLivenessEpisode(outcome livenessOutcome, cause error) {
+	logf := p.logf
+	if logf == nil {
+		logf = log.Printf
+	}
+	switch outcome {
+	case livenessOutcomeUnknown:
+		if p.livenessUnknown.CompareAndSwap(false, true) {
+			logf("tmux liveness: reporting unknown for sessions the state cache cannot vouch for until a state refresh succeeds: %v", cause)
+		}
+	case livenessOutcomeServerDead:
+		if p.livenessServerDead.CompareAndSwap(false, true) {
+			logf("tmux liveness: server socket confirmed dead; reporting its sessions absent")
+		}
+	default:
+		wasUnknown := p.livenessUnknown.Swap(false)
+		if wasDead := p.livenessServerDead.Swap(false); wasUnknown || wasDead {
+			logf("tmux liveness: state cache answering again")
+		}
+	}
+}
+
 func (p *Provider) sessionProcessNames(name string) []string {
 	namesRaw, err := p.tm.GetEnvironment(name, gtProcessNamesEnvKey)
 	if err != nil {
@@ -457,6 +581,13 @@ func (p *Provider) SleepCapability(string) runtime.SessionSleepCapability {
 // WaitForIdle waits for the named session to reach an idle prompt.
 func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
 	return p.tm.WaitForIdle(ctx, name, timeout)
+}
+
+// SnapshotIdle reports, in a single non-blocking observation, whether the named
+// session is at an idle interactive boundary right now. It implements
+// [runtime.IdleSnapshotProvider].
+func (p *Provider) SnapshotIdle(name string) (bool, error) {
+	return p.tm.SnapshotIdle(name)
 }
 
 // WaitForInterruptBoundary waits for a provider-native interrupt acknowledgement
@@ -596,18 +727,22 @@ func (p *Provider) SetMeta(name, key, value string) error {
 }
 
 // GetMeta retrieves a value from the named session's tmux environment.
-// Returns ("", nil) if the key is not set. Propagates session-not-found
-// and no-server errors so callers can distinguish "key absent" from
-// "session gone."
+// Returns ("", nil) only when the session answered that the key is not set.
+// A missing session wraps [runtime.ErrSessionNotFound]; any other failure
+// (no server, timeout, unparsable answer) wraps [runtime.ErrRuntimeUnavailable],
+// so a failed read is never mistaken for "unset".
 func (p *Provider) GetMeta(name, key string) (string, error) {
 	val, err := p.tm.GetEnvironment(name, key)
-	if err != nil {
-		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
-			return "", err
-		}
-		return "", nil // key not set
+	switch {
+	case err == nil:
+		return val, nil
+	case errors.Is(err, errEnvUnset):
+		return "", nil
+	case errors.Is(err, ErrSessionNotFound):
+		return "", fmt.Errorf("reading %s from session %q: %w: %w", key, name, runtime.ErrSessionNotFound, err)
+	default:
+		return "", fmt.Errorf("reading %s from session %q: %w: %w", key, name, runtime.ErrRuntimeUnavailable, err)
 	}
-	return val, nil
 }
 
 // RemoveMeta removes a key from the named session's tmux environment.
@@ -657,9 +792,31 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	return matched, nil
 }
 
+// ListRunningComplete implements [runtime.ListingAttestation]. An error-free
+// ListRunning means the server answered list-sessions, which names every
+// session it holds (remain-on-exit corpses included); an absent server is
+// reported as a [runtime.PartialListError], never as an empty list.
+func (p *Provider) ListRunningComplete() bool { return true }
+
+// RuntimeInventory implements [runtime.InventoryProvider] with one
+// batched pane read. Delegates to [Tmux.listRuntimeInventory].
+func (p *Provider) RuntimeInventory(ctx context.Context) (map[string]runtime.InventoryEntry, error) {
+	return p.tm.listRuntimeInventory(ctx)
+}
+
 // GetLastActivity returns the time of the last I/O activity in the named
-// session. Delegates to [Tmux.GetSessionActivity].
+// session.
+//
+// The raw timestamp comes from the same fleet snapshot as IsRunning rather than
+// a `list-windows` fork per session, and the poke discount
+// ([Tmux.discountedActivity]) is applied to it exactly as
+// [Tmux.GetSessionActivity] would. The snapshot carries max(#{window_activity})
+// per session — NOT #{session_activity}, which does not advance on detached
+// pane I/O. A session missing from the snapshot falls back to the direct read.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
+	if activity, ok := p.cache.SessionActivity(name); ok {
+		return p.tm.discountedActivity(name, activity), nil
+	}
 	return p.tm.GetSessionActivity(name)
 }
 
@@ -828,7 +985,9 @@ type startOps interface {
 	waitForReady(ctx context.Context, name string, rc *RuntimeConfig, timeout time.Duration) error
 	hasSession(name string) (bool, error)
 	capturePane(name string, lines int) (string, error)
-	recordStartCrash(name, paneContent string) string
+	paneDeadInfo(name string) (status, signal string)
+	recordStartCrash(name, paneContent, status, signal string) string
+	recordUnconfirmedNudge(name, message string, cause error) string
 	sendKeys(name, text string) error
 	paneBusy(name string) (bool, error)
 	setRemainOnExit(name string) error
@@ -851,6 +1010,11 @@ type tmuxStartOps struct {
 	// pane capture and crash artifact this startup produces. Built by
 	// newTmuxStartOps; a zero value simply redacts nothing.
 	secrets []string
+	// freshStart marks a session this startup created from nothing, so a
+	// partially-delivered startup prompt can be discarded outright. Relaunch
+	// and RunLive drive an already-warm box and must leave it standing on
+	// failure (see Provider.Relaunch), so they set this false.
+	freshStart bool
 }
 
 // newTmuxStartOps builds the startup adapter for one session, deriving the
@@ -862,12 +1026,28 @@ type tmuxStartOps struct {
 // literal compiles fine and produces output that still looks like a diagnostic,
 // so a forgotten field is invisible. TestProductionStartOpsUseTheConstructor
 // enforces that.
-func newTmuxStartOps(tm *Tmux, runtimeDir string, setupMaxTimeout time.Duration, cfg runtime.Config) *tmuxStartOps {
+// startOps builds the start-ops for a production session. Every Provider
+// entry point that starts, relaunches, or drives a live session goes through
+// here rather than calling newTmuxStartOps directly, because the runtime dir
+// is the only thing that makes the start-crash and startup-nudge-unconfirmed
+// diagnostics reachable, and two of the three call sites passed "" -- so
+// Relaunch and RunLive suppressed an unconfirmed startup nudge and then
+// recorded it nowhere, returning success with neither confirmed delivery nor
+// the durable evidence that suppression is predicated on (dr-6siig HIGH 2).
+// Passing the field explicitly at each site is what let two of them omit it;
+// TestProductionStartOpsCarryRuntimeDir asserts this stays the only
+// production construction, so the defect cannot recur by omission.
+func (p *Provider) startOps(cfg runtime.Config, freshStart bool) *tmuxStartOps {
+	return newTmuxStartOps(p.tm, p.cfg.RuntimeDir, p.cfg.SetupMaxTimeout, cfg, freshStart)
+}
+
+func newTmuxStartOps(tm *Tmux, runtimeDir string, setupMaxTimeout time.Duration, cfg runtime.Config, freshStart bool) *tmuxStartOps {
 	return &tmuxStartOps{
 		tm:              tm,
 		runtimeDir:      runtimeDir,
 		setupMaxTimeout: setupMaxTimeout,
 		secrets:         runtime.SetupCommandSecrets(cfg.Env),
+		freshStart:      freshStart,
 	}
 }
 
@@ -953,10 +1133,16 @@ func (o *tmuxStartOps) capturePane(name string, lines int) (string, error) {
 	return runtime.RedactSecrets(content, o.secrets), err
 }
 
+// paneDeadInfo returns the dead pane's exit status and terminating signal.
+func (o *tmuxStartOps) paneDeadInfo(name string) (status, signal string) {
+	return o.tm.PaneDeadInfo(name)
+}
+
 // recordStartCrash persists a per-session start-crash diagnostic so an
 // immediate start-crash leaves a durable on-disk artifact (the transient
 // start error is otherwise lost). It records the dead pane's exit status and
-// terminating signal alongside the captured pane output. Best-effort: a
+// terminating signal (read once by the caller, which also classifies them)
+// alongside the captured pane output. Best-effort: a
 // disabled capture (empty runtimeDir) or any I/O error returns "" without
 // affecting startup. Returns the artifact path when written.
 //
@@ -965,12 +1151,11 @@ func (o *tmuxStartOps) capturePane(name string, lines int) (string, error) {
 // this is the copy that outlives the session, and a future caller reaching for
 // a durable crash record should not have to know which of its arguments were
 // pre-sanitized.
-func (o *tmuxStartOps) recordStartCrash(name, paneContent string) string {
+func (o *tmuxStartOps) recordStartCrash(name, paneContent, status, signal string) string {
 	if o.runtimeDir == "" {
 		return ""
 	}
 	paneContent = runtime.RedactSecrets(paneContent, o.secrets)
-	status, signal := o.tm.PaneDeadInfo(name)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "session: %s\n", name)
@@ -980,25 +1165,119 @@ func (o *tmuxStartOps) recordStartCrash(name, paneContent string) string {
 	if signal != "" {
 		fmt.Fprintf(&b, "signal: %s\n", signal)
 	}
-	b.WriteString("--- last pane output ---\n")
-	b.WriteString(paneContent)
-	if paneContent != "" && !strings.HasSuffix(paneContent, "\n") {
-		b.WriteByte('\n')
-	}
+	writeDiagnosticTextBlock(&b, "--- last pane output ---\n", paneContent)
 
-	dir := filepath.Join(o.runtimeDir, "sessions", name)
-	if err := runtime.EnsurePrivateDir(dir); err != nil {
-		return ""
-	}
-	path := filepath.Join(dir, "start-stderr.log")
-	if err := runtime.WritePrivateFile(path, []byte(b.String())); err != nil {
-		return ""
+	return o.writeDiagnostic(name, "start-stderr.log", b.String())
+}
+
+// recordUnconfirmedNudge persists a durable diagnostic artifact when the
+// startup nudge is delivered but not confirmed ([ErrNudgeSubmitUnconfirmed]).
+// The startup nudge has no retry-capable caller (see launchOrchestration), so
+// unlike the queue-path nudge — which requeues on this error and gets a
+// bounded number of fresh attempts — a lost startup nudge would otherwise be
+// invisible with no other record. This mirrors recordStartCrash's diagnostic
+// capture (same runtimeDir/sessions/<name>/ location, same best-effort
+// semantics): a disabled capture (empty runtimeDir) or any I/O error returns
+// "" without affecting startup. Returns the artifact path when written.
+func (o *tmuxStartOps) recordUnconfirmedNudge(name, message string, cause error) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "session: %s\n", name)
+	fmt.Fprintf(&b, "cause: %v\n", cause)
+	writeDiagnosticTextBlock(&b, "--- startup nudge text ---\n", message)
+
+	return o.writeDiagnostic(name, "startup-nudge-unconfirmed.log", b.String())
+}
+
+// writeDiagnostic writes a per-session diagnostic and warns on stderr when the
+// write was attempted and failed. Every caller here has already suppressed the
+// underlying error on the promise that this artifact exists; discarding the
+// write error too would leave the operation returning success with neither
+// confirmation nor evidence, which is exactly the silent loss the artifacts
+// were added to close.
+func (o *tmuxStartOps) writeDiagnostic(name, filename, content string) string {
+	path, err := writeSessionDiagnosticFile(o.runtimeDir, name, filename, content)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: session %q diagnostic %s not written: %v\n", name, filename, err)
 	}
 	return path
 }
 
+func discardPartialStartup(err error, killWithProcesses, killSession func() error) error {
+	if !errors.Is(err, errPartialPasteDelivery) {
+		return err
+	}
+	killErr := killWithProcesses()
+	if killErr == nil || errors.Is(killErr, ErrSessionNotFound) || errors.Is(killErr, ErrNoServer) {
+		return err
+	}
+	fallbackErr := killSession()
+	if fallbackErr == nil || errors.Is(fallbackErr, ErrSessionNotFound) || errors.Is(fallbackErr, ErrNoServer) {
+		return errors.Join(err, fmt.Errorf("discard partial startup session with process cleanup: %w", killErr))
+	}
+	return errors.Join(err, fmt.Errorf("discard partial startup session: process cleanup: %w; fallback kill: %w", killErr, fallbackErr))
+}
+
+// writeDiagnosticTextBlock appends a labeled text block to a diagnostic
+// builder, normalizing a missing trailing newline. Shared by
+// recordStartCrash, recordUnconfirmedNudge, and Tmux.recordUnconfirmedSubmit.
+func writeDiagnosticTextBlock(b *strings.Builder, label, text string) {
+	b.WriteString(label)
+	b.WriteString(text)
+	if text != "" && !strings.HasSuffix(text, "\n") {
+		b.WriteByte('\n')
+	}
+}
+
+// writeSessionDiagnosticFile writes a per-session diagnostic artifact under
+// the city's session-diagnostics directory, as <dir>/<name>/<filename>. The
+// directory comes from citylayout so the writers and gc doctor's
+// nudge-unconfirmed check resolve one path rather than two literals; they did
+// not, and every artifact this function wrote was invisible to that check.
+//
+// It returns ("", nil) when capture is disabled (empty runtimeDir) and
+// ("", err) when the write was attempted and failed. The distinction is the
+// point: callers promise a durable record when they suppress a delivery
+// error, so a failed write has to be reportable rather than indistinguishable
+// from a deliberately disabled one. Callers still do not fail the operation on
+// it -- they warn -- because treating an unconfirmable delivery as a failure
+// would duplicate every nudge on provider families that can never confirm.
+//
+// Owner-only, via the private writers rather than os.MkdirAll/os.WriteFile:
+// every artifact routed through here is captured pane output or nudge text,
+// which is exactly the material the redaction pass upstream cannot be trusted
+// to have caught in full. startcrash_redaction_test asserts the 0600.
+func writeSessionDiagnosticFile(runtimeDir, name, filename, content string) (string, error) {
+	sessionsDir := citylayout.SessionDiagnosticsDirForRuntimeDir(runtimeDir)
+	if sessionsDir == "" {
+		return "", nil
+	}
+	dir := filepath.Join(sessionsDir, name)
+	if err := runtime.EnsurePrivateDir(dir); err != nil {
+		return "", fmt.Errorf("creating session diagnostic dir %s: %w", dir, err)
+	}
+	path := filepath.Join(dir, filename)
+	if err := runtime.WritePrivateFile(path, []byte(content)); err != nil {
+		return "", fmt.Errorf("writing session diagnostic %s: %w", path, err)
+	}
+	return path, nil
+}
+
 func (o *tmuxStartOps) sendKeys(name, text string) error {
-	return o.tm.NudgeSession(name, text)
+	err := o.tm.nudgeStartupSession(name, text)
+	if !o.freshStart {
+		// Relaunch and RunLive drive a box this startup did not create, and
+		// Provider.Relaunch documents that a failure leaves it in place. Report
+		// the partial delivery instead of tearing down a warm session.
+		return err
+	}
+	// Belt-and-braces on the fresh-start path only: Provider.Start already
+	// calls the token-guarded cleanupFailedStart for any error returned here,
+	// so this kill is redundant cleanup rather than the only cleanup.
+	return discardPartialStartup(
+		err,
+		func() error { return o.tm.KillSessionWithProcesses(name) },
+		func() error { return o.tm.KillSession(name) },
+	)
 }
 
 // paneBusy reports whether the target agent pane is showing a busy/
@@ -1059,7 +1338,7 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 	stderr := newCommandOutputTail(setupCommandOutputLimit)
 	c.Stdout = mon.Writer(stdout)
 	c.Stderr = mon.Writer(stderr)
-	// Cooperative cancellation (execgrace.Apply): deadline expiry interrupts
+	// Cooperative cancellation (execgrace.Apply): deadline expiry sends SIGTERM to
 	// the command's process group first so shell rollback traps — e.g.
 	// worktree-setup.sh restoring content it staged aside — run before the
 	// forced kill. Go's default context-cancel is SIGKILL, which is
@@ -1193,24 +1472,34 @@ func startupDeadSessionError(ops startOps, name string) error {
 	} else {
 		pane = strings.TrimSpace(pane)
 	}
+	// Read the corpse's exit facts once: the durable record and the capacity
+	// classification below must describe the same observation.
+	status, signal := ops.paneDeadInfo(name)
 	// Persist a durable crash diagnostic (exit status + signal + pane output)
 	// so the immediate-exit reason survives the transient start error. Recorded
 	// even when the pane is empty, so an exit-before-render crash still leaves
 	// the exit status/signal on disk. Best-effort: "" when capture is disabled.
-	diagPath := ops.recordStartCrash(name, pane)
+	diagPath := ops.recordStartCrash(name, pane, status, signal)
+	var died error
 	switch {
 	case pane != "" && diagPath != "":
-		return fmt.Errorf("%w: session %q; diagnostic written to %s; last pane output:\n%s",
+		died = fmt.Errorf("%w: session %q; diagnostic written to %s; last pane output:\n%s",
 			runtime.ErrSessionDiedDuringStartup, name, diagPath, pane)
 	case pane != "":
-		return fmt.Errorf("%w: session %q; last pane output:\n%s",
+		died = fmt.Errorf("%w: session %q; last pane output:\n%s",
 			runtime.ErrSessionDiedDuringStartup, name, pane)
 	case diagPath != "":
-		return fmt.Errorf("%w: session %q; diagnostic written to %s",
+		died = fmt.Errorf("%w: session %q; diagnostic written to %s",
 			runtime.ErrSessionDiedDuringStartup, name, diagPath)
 	default:
-		return startupSessionDiedError(name)
+		died = startupSessionDiedError(name)
 	}
+	// A clean EX_TEMPFAIL exit is the launcher declaring the endpoint refused
+	// the start. Only the exit status classifies; the pane text never does.
+	if signal == "" && status == strconv.Itoa(runtime.ExitCodeTempFail) {
+		return &runtime.CapacityError{ExitCode: runtime.ExitCodeTempFail, Source: runtime.CapacitySourceExitStatus, Err: died}
+	}
+	return died
 }
 
 func startupSessionDiedError(name string) error {
@@ -1340,6 +1629,10 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 	return finishLaunch(ctx, ops, name, cfg, setupTimeout)
 }
 
+// startupDialogWarningOut receives startup-dialog warnings (a var so tests can
+// capture it).
+var startupDialogWarningOut io.Writer = os.Stderr
+
 // launchOrchestration runs the post-agent-launch startup steps against a session
 // whose agent pane has just been created (doStartSession) or respawned (the
 // un-weld relaunch path): wait for the agent command, accept startup dialogs
@@ -1360,7 +1653,9 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	// Always attempted when process names are set, since any Claude-like
 	// agent may show a trust dialog regardless of EmitsPermissionWarning.
 	if runtime.ShouldAcceptStartupDialogs(cfg) {
-		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
+		// Best-effort: a trust dialog left unconfirmed here is retried by
+		// the post-readiness pass below, which reports it if it persists.
+		_ = ops.acceptStartupDialogs(ctx, name)
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -1387,7 +1682,12 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	// ready screen. Re-run dialog acceptance after readiness so late dialogs do
 	// not strand the session in an unusable startup state.
 	if runtime.ShouldAcceptStartupDialogs(cfg) {
-		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
+		// Best-effort, but a trust dialog this last pass still could not
+		// confirm is left on screen with the cursor off the trust row, where
+		// any later Enter would answer it. Say so instead of dropping it.
+		if err := ops.acceptStartupDialogs(ctx, name); errors.Is(err, runtime.ErrWorkspaceTrustUnconfirmed) {
+			_, _ = fmt.Fprintf(startupDialogWarningOut, "warning: session %q: %v\n", name, err)
+		}
 		if err := ctx.Err(); err != nil {
 			return ignoreDeadlineIfSessionAlive(ops, name, err)
 		}
@@ -1429,12 +1729,25 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 			// retry-capable caller beyond the bounded ladder just spent, so
 			// exhausting it is a warning, not a start failure: the session
 			// starts, but the agent may sit silently idle with the nudge
-			// still drafted in its input line rather than acted on. Any
+			// still drafted in its input line rather than acted on. A submit
+			// proven delivered but never observed busy
+			// (ErrNudgeSubmitDeliveredUnobserved) is the same warning-not-
+			// failure case for a different reason: the ladder above already
+			// refuses to retry it (retrying would re-inject a message the
+			// session already received), so by the time it reaches here
+			// delivery is proven and only the observation missed it. Any
 			// other error still fails the start.
-			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) && !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) {
 				return fmt.Errorf("sending startup nudge: %w", err)
 			}
+			// The stderr warning alone is not a durable record (Layer 0
+			// session output is not retained), so an unconfirmed startup
+			// nudge would otherwise vanish with nothing to reconcile against
+			// afterward. Persist a diagnostic artifact alongside the
+			// warning so a later observer (gc trace, a human, or an
+			// automated sweep) can find and act on it.
 			fmt.Fprintf(os.Stderr, "warning: startup nudge to %q delivered but not confirmed after retries: %v\n", name, err)
+			ops.recordUnconfirmedNudge(name, cfg.Nudge, err)
 		}
 	}
 

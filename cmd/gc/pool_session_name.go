@@ -63,28 +63,31 @@ type releasedPoolAssignment struct {
 	Index int
 }
 
-// PoolSessionName derives the legacy bead-ID-scoped session name for a pool
+// PoolSessionName derives the bead-ID-scoped runtime session name for a pool
 // worker session. Format: {basename(template)}-{beadID} (e.g., "claude-mc-xyz").
 //
-// Fresh pool session beads no longer get their runtime name from this
-// derivation — see poolIdentitySessionName. It survives as the recognizer for
-// beads created before the change (beadOwnsPoolSessionName and the slot-recovery
-// fallbacks in build_desired_state.go still read it).
+// It is the runtime name for every unaliased pool session bead (the planner's
+// createPoolSessionBeadWithIdentifiers and the sync lane in session_beads.go),
+// so a live runtime resolves straight back to its bead. Because a failed create
+// is retried under a NEW bead and therefore a new name, the ga-vcjr9 box leak
+// is closed by ordering rather than by name reuse: releaseBeadScopedPoolRuntime
+// tears the failed attempt's runtime down before its row may close, and
+// ensurePoolIdentityNotHeldByOpenRow refuses a successor while that row is open.
 func PoolSessionName(template, beadID string) string {
 	base := path.Base(template)
 	return agent.SanitizeQualifiedNameForSession(base) + "-" + beadID
 }
 
-// poolIdentitySessionName returns the runtime session name for a pool
-// instance. It is a pure function of the resolved pool identity — the
-// qualified instance name the planner derives from config and slot — so every
-// create attempt for the same slot addresses the same runtime box.
+// poolIdentitySessionName returns the tmux-safe encoding of a pool instance's
+// resolved identity — the qualified instance name the planner derives from
+// config and slot. It is a pure function of the identity, so every create
+// attempt for the same slot yields the same value.
 //
-// It deliberately does not embed the session bead ID. A bead-ID-scoped name
-// mints a fresh runtime identity on every attempt, and because the runtime
-// name is the sandbox name (and therefore the pod name), a pool whose start op
-// keeps failing then leaks one box per attempt with nothing left to address the
-// previous one by. That is ga-vcjr9: desired=1, 602 pods.
+// For unaliased pools it is NOT the runtime name (that is PoolSessionName,
+// bead-ID scoped); it is the slot's identity lease and lock identifier
+// (derivePoolSessionIdentifiers, ensurePoolIdentityNotHeldByOpenRow) and the
+// base of the startup-health episode key (startupHealthEpisodeKey). tmux_alias
+// pools and named sessions still use identity-derived runtime names.
 func poolIdentitySessionName(identity, template string) string {
 	base := strings.TrimSpace(identity)
 	if base == "" {
@@ -671,23 +674,21 @@ func isCanonicalWorkflowRoot(wb beads.Bead) bool {
 //     verb it slots in inside BdStore.ReleaseIfCurrent (feature-detect the
 //     verb, fall back to `bd sql` on unsupported) and this caller needs no
 //     change.
-//  2. Otherwise the tightest conditional path the store layer offers:
-//     beads.UpdateOpts has no conditional fields, so re-verify the snapshot
-//     with a live read immediately before the unconditional write and re-read
-//     after it, logging loudly when a concurrent claim raced the release. The
-//     residual recheck->write window cannot be closed without a store-level
-//     conditional write; it is shrunk and made observable instead of silent.
-//     This single Update also clears the affinity metadata alongside
-//     status/assignee, so it is the correct path for continuation-group beads:
-//     the group is never exposed on an open, unassigned bead.
+//  2. Otherwise releasePoolAssignmentWithRecheck: status, assignee and the
+//     affinity metadata as one write fenced on the snapshot's (status,
+//     assignee), so a claim landing after the snapshot is never clobbered.
+//     Because the one write also clears the affinity metadata, it is the
+//     correct path for continuation-group beads: the group is never exposed on
+//     an open, unassigned bead. A store that cannot fence the write is refused
+//     and logged rather than written blind.
 func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetached bool) bool {
 	if store == nil || strings.TrimSpace(wb.ID) == "" {
 		return false
 	}
 	// Continuation-group beads bypass the CAS fast path: ReleaseIfCurrent swaps
 	// only status/assignee, so clearing the group would need a second write, and
-	// that gap would expose the routing vector on a claimable bead. The recheck
-	// fallback clears status, assignee, and affinity metadata in one Update.
+	// that gap would expose the routing vector on a claimable bead. The fenced
+	// fallback clears status, assignee, and affinity metadata in one write.
 	if !beadHasActiveContinuationGroup(wb) {
 		if released, handled := releasePoolAssignmentIfCurrent(store, wb); handled {
 			if !released {
@@ -710,7 +711,7 @@ func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetach
 // preassignHookContinuationGroup / hookListContinuationWithBdStore route on
 // gc.continuation_group + gc.root_bead_id. Routing these beads through
 // releasePoolAssignmentWithRecheck clears status, assignee, and the affinity
-// metadata in a single Update, so the group is never visible on a claimable
+// metadata in a single write, so the group is never visible on a claimable
 // bead. gc.session_affinity is an advisory marker no routing path reads (see the
 // beadmeta.SessionAffinityMetadataKeys doc), so it needs no such guard and the
 // CAS path still clears it. Lift this once bd's native conditional-release verb
@@ -724,14 +725,14 @@ func beadHasActiveContinuationGroup(wb beads.Bead) bool {
 // release. handled=false means the store cannot conditionally release this
 // snapshot (no ConditionalAssignmentReleaser, ErrConditionalReleaseUnsupported,
 // or a snapshot shape outside the verb's contract) and the caller must take
-// the recheck fallback. handled=true with released=false means the store
+// the fenced fallback. handled=true with released=false means the store
 // answered authoritatively and the release must NOT be retried unconditionally.
 func releasePoolAssignmentIfCurrent(store beads.Store, wb beads.Bead) (released, handled bool) {
 	expectedAssignee := strings.TrimSpace(wb.Assignee)
 	// ReleaseIfCurrent's contract covers in_progress assignments only, and bd
 	// backends may persist an unassigned bead as SQL NULL rather than '', so
 	// open-status strands (issue #2793) and assignee-less in_progress recovery
-	// take the recheck fallback.
+	// take the fenced fallback.
 	if wb.Status != "in_progress" || expectedAssignee == "" {
 		return false, false
 	}
@@ -773,17 +774,21 @@ func clearReleasedPoolAssignmentMetadata(store beads.Store, id string, clearDeta
 	}
 }
 
-// releasePoolAssignmentWithRecheck is the conditional-release fallback for
-// stores without a usable ReleaseIfCurrent: re-verify (status, assignee) with
-// a live read immediately before the unconditional write — after the earlier
-// staleness gate and the potentially slow detached probe — then verify after
-// the write that no concurrent claim raced the release.
+// releasePoolAssignmentWithRecheck is the release for snapshots
+// ReleaseIfCurrent cannot take: open-status strands (#2793), assignee-less
+// in_progress recovery, continuation-group beads (beadHasActiveContinuationGroup),
+// and stores without the verb. It writes status, assignee and the affinity
+// metadata as ONE write fenced on the snapshot's (status, assignee)
+// (releaseAssignmentFenced): bd's guarded update on BdStore, otherwise an
+// UpdateIfMatch on a live re-read's revision. A claim that lands after the
+// snapshot fails the fence and is kept; the next sweep decides again.
+//
+// A store that can fence neither way (a bd without --if-status/--if-assignee,
+// a legacy SQLite layout, the exec store) is refused and logged, never released
+// by an unconditional write: a clobbered claim reads back empty and leaves no
+// trace. Such a bead stays assigned until its snapshot fits ReleaseIfCurrent or
+// the store can fence.
 func releasePoolAssignmentWithRecheck(store beads.Store, wb beads.Bead, clearDetached bool) bool {
-	expectedAssignee := strings.TrimSpace(wb.Assignee)
-	if !liveWorkAssignmentStillReleasable(store, wb.ID, wb.Status, expectedAssignee) {
-		log.Printf("releaseOrphanedPoolAssignments: skipping release for %s: assignment changed between staleness check and release write", wb.ID)
-		return false
-	}
 	opts := beads.UpdateOpts{
 		Assignee: stringPtr(""),
 		Status:   stringPtr("open"),
@@ -792,31 +797,20 @@ func releasePoolAssignmentWithRecheck(store beads.Store, wb beads.Bead, clearDet
 	if clearDetached {
 		opts.Metadata[detachedProbeMetadataKey] = ""
 	}
-	if err := store.Update(wb.ID, opts); err != nil {
+	outcome, err := releaseAssignmentFenced(store, wb, opts)
+	switch {
+	case err != nil:
 		log.Printf("releaseOrphanedPoolAssignments: releasing orphaned pool assignment %s: %v", wb.ID, err)
-		return false
+	case outcome == fencedReleaseApplied:
+		return true
+	case outcome == fencedReleaseChanged:
+		log.Printf("releaseOrphanedPoolAssignments: skipping release for %s: assignment changed between staleness check and release write", wb.ID)
+	case outcome == fencedReleaseLost:
+		log.Printf("releaseOrphanedPoolAssignments: skipping release for %s: the bead changed after the re-read", wb.ID)
+	default:
+		log.Printf("releaseOrphanedPoolAssignments: refusing to release %s: the store cannot release it conditionally", wb.ID)
 	}
-	verifyReleasedPoolAssignment(store, wb.ID, expectedAssignee)
-	return true
-}
-
-// verifyReleasedPoolAssignment makes a lost release race observable: when a
-// concurrent claim lands around the unconditional release write, the ordering
-// that survives (claim after release) shows up here as a foreign assignee. A
-// claim clobbered BY the release write (claim between recheck and write)
-// reads back empty and stays undetectable without a store-level conditional
-// write — that ordering is why ReleaseIfCurrent is preferred.
-func verifyReleasedPoolAssignment(store beads.Store, id, expectedAssignee string) {
-	got, err := store.Get(id)
-	if err != nil {
-		log.Printf("releaseOrphanedPoolAssignments: verify-after read failed for %s: %v", id, err)
-		return
-	}
-	observed := strings.TrimSpace(got.Assignee)
-	if observed == "" || observed == expectedAssignee {
-		return
-	}
-	log.Printf("releaseOrphanedPoolAssignments: RELEASE RACE on %s: observed assignee %q immediately after releasing %q — a concurrent claim raced the orphan release", id, observed, expectedAssignee)
+	return false
 }
 
 func liveOpenSessionAssignmentExists(store beads.Store, assignee string) bool {

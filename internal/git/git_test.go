@@ -23,7 +23,7 @@ func initTestRepo(t *testing.T) string {
 
 // runGit runs a git command in dir and fails the test on error.
 // Strips git env vars to prevent interference from pre-commit hooks.
-func runGit(t *testing.T, dir string, args ...string) {
+func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
@@ -38,6 +38,7 @@ func runGit(t *testing.T, dir string, args ...string) {
 	if err != nil {
 		t.Fatalf("git %s: %s: %v", strings.Join(args, " "), out, err)
 	}
+	return string(out)
 }
 
 // runGitAllowFail runs a git command in dir and returns its combined output

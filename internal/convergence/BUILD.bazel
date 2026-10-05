@@ -1,0 +1,91 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "convergence",
+    srcs = [
+        "acl.go",
+        "artifact.go",
+        "capture.go",
+        "childstats.go",
+        "condition.go",
+        "create.go",
+        "depfilter.go",
+        "evaluate.go",
+        "events.go",
+        "formula.go",
+        "gate.go",
+        "gate_infra.go",
+        "gate_output.go",
+        "handler.go",
+        "hybrid.go",
+        "manual.go",
+        "metadata.go",
+        "reconcile.go",
+        "retry.go",
+        "template.go",
+        "token.go",
+        "trigger.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/convergence",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads",
+        "//internal/citylayout",
+        "//internal/doltauth",
+        "//internal/fsys",
+        "//internal/gchome",
+        "//internal/pathutil",
+    ],
+)
+
+go_test(
+    name = "convergence_test",
+    srcs = [
+        "acl_test.go",
+        "artifact_test.go",
+        "capture_test.go",
+        "childstats_test.go",
+        "condition_credentials_test.go",
+        "condition_test.go",
+        "create_test.go",
+        "depfilter_test.go",
+        "evaluate_test.go",
+        "events_test.go",
+        "formula_test.go",
+        "gate_infra_test.go",
+        "gate_output_test.go",
+        "gate_test.go",
+        "handler_test.go",
+        "hybrid_test.go",
+        "manual_test.go",
+        "metadata_test.go",
+        "reconcile_test.go",
+        "retry_test.go",
+        "stop_test.go",
+        "template_test.go",
+        "testenv_import_test.go",
+        "token_test.go",
+        "trigger_test.go",
+    ],
+    embed = [":convergence"],
+    deps = [
+        "//internal/beads",
+        "//internal/fsys",
+        "//internal/gchome",
+        "//internal/processenv",
+        "//internal/testenv",
+        "//internal/testutil",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

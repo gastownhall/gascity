@@ -1,0 +1,44 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "warmup",
+    srcs = [
+        "mail.go",
+        "warmup.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/warmup",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/config",
+        "//internal/doctor",
+        "//internal/mail",
+        "@org_golang_x_sync//errgroup",
+    ],
+)
+
+go_test(
+    name = "warmup_test",
+    srcs = [
+        "testenv_import_test.go",
+        "warmup_test.go",
+    ],
+    embed = [":warmup"],
+    deps = [
+        "//internal/config",
+        "//internal/doctor",
+        "//internal/mail",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

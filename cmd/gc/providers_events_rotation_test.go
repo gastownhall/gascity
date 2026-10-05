@@ -110,7 +110,34 @@ func TestNewEventsProviderForNameLegacyWrapper(t *testing.T) {
 	}
 }
 
-func TestOpenCityEventsProviderAppliesRotationConfig(t *testing.T) {
+// TestNewEventsProviderForNameFileFailureReturnsNilProvider locks the contract
+// the caller-side nil guards depend on: a file-backed provider that could not
+// be opened comes back as a nil interface. Returning the concrete
+// *events.FileRecorder instead would box a typed nil into events.Provider, so
+// every `provider == nil` guard would read non-nil for a recorder that was
+// never opened.
+func TestNewEventsProviderForNameFileFailureReturnsNilProvider(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	provider, err := newEventsProviderForName("", filepath.Join(blocker, "events.jsonl"), io.Discard)
+	if err == nil {
+		if provider != nil {
+			provider.Close() //nolint:errcheck // test cleanup
+		}
+		t.Fatal("newEventsProviderForName with an unopenable events path: err = nil, want an error")
+	}
+	if provider != nil {
+		t.Fatalf("provider = %#v, want nil alongside the error", provider)
+	}
+}
+
+// TestOpenCityEventsProviderNeverRotates pins the CLI provider as a secondary
+// writer: even with a tiny configured threshold it must not rotate, because a
+// CLI that opened its handle before the controller rotated would rotate the
+// controller's fresh log (mc-zndi7.58).
+func TestOpenCityEventsProviderNeverRotates(t *testing.T) {
 	cityDir := t.TempDir()
 	t.Setenv("GC_EVENTS", "")
 	t.Setenv("GC_CITY", cityDir)
@@ -123,18 +150,7 @@ func TestOpenCityEventsProviderAppliesRotationConfig(t *testing.T) {
 		cityFlag = oldCityFlag
 		rigFlag = oldRigFlag
 	})
-
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
-[workspace]
-name = "test-city"
-
-[events.rotation]
-max_size_bytes = 512
-check_interval_records = 1
-check_interval_seconds = 3600
-`), 0o644); err != nil {
-		t.Fatalf("write city.toml: %v", err)
-	}
+	writeSmallRotationCityToml(t, cityDir)
 
 	var stderr strings.Builder
 	ep, code := openCityEventsProvider(&stderr, "test")
@@ -145,6 +161,52 @@ check_interval_seconds = 3600
 	if !ok {
 		t.Fatalf("provider = %T, want *events.FileRecorder", ep)
 	}
+	recordAndAssertNoRotation(t, rec, cityDir)
+}
+
+// TestOpenCityRecorderAtNeverRotates is the same promise for the recorder
+// behind every CLI emit (gc convoy control, gc sling, gc mail, ...).
+func TestOpenCityRecorderAtNeverRotates(t *testing.T) {
+	cityDir := t.TempDir()
+	writeSmallRotationCityToml(t, cityDir)
+	rec, ok := openCityRecorderAt(cityDir, io.Discard).(*events.FileRecorder)
+	if !ok {
+		t.Fatal("openCityRecorderAt did not return a *events.FileRecorder")
+	}
+	recordAndAssertNoRotation(t, rec, cityDir)
+}
+
+// TestNewEventsReaderForNameHoldsNoWriteHandle covers the provider read-only
+// watchers (gc convoy control --serve --follow, gc status) open: it creates no
+// file and refuses to record.
+func TestNewEventsReaderForNameHoldsNoWriteHandle(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), ".gc")
+	ep, err := newEventsReaderForName("", filepath.Join(dir, "events.jsonl"), io.Discard)
+	if err != nil {
+		t.Fatalf("newEventsReaderForName: %v", err)
+	}
+	defer ep.Close() //nolint:errcheck // test cleanup
+	ack, ok := ep.(events.AckRecorder)
+	if !ok {
+		t.Fatalf("provider = %T, want an events.AckRecorder", ep)
+	}
+	if err := ack.RecordAck(events.Event{Type: events.BeadCreated, Actor: "test"}); err == nil {
+		t.Fatal("RecordAck on the read-only provider succeeded")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("read-only provider created %s (stat err %v)", dir, err)
+	}
+}
+
+func TestNewFileEventsRecorderAppliesRotationConfig(t *testing.T) {
+	dir := t.TempDir()
+	maxSize, checkRecords := int64(512), 1
+	rec, err := newFileEventsRecorder(filepath.Join(dir, "events.jsonl"), config.EventsConfig{
+		Rotation: config.EventsRotationConfig{MaxSizeBytes: &maxSize, CheckIntervalRecords: &checkRecords},
+	}, io.Discard)
+	if err != nil {
+		t.Fatalf("newFileEventsRecorder: %v", err)
+	}
 	defer rec.Close() //nolint:errcheck // test cleanup
 
 	for i := 0; i < 40; i++ {
@@ -152,46 +214,20 @@ check_interval_seconds = 3600
 	}
 	rec.WaitForRotations()
 
-	if got := countEventArchives(t, filepath.Join(cityDir, ".gc")); got == 0 {
+	if got := countEventArchives(t, dir); got == 0 {
 		t.Fatal("expected configured small max_size_bytes to produce at least one archive")
 	}
 }
 
-func TestOpenCityEventsProviderEnvCanDisableRotation(t *testing.T) {
-	cityDir := t.TempDir()
-	t.Setenv("GC_EVENTS", "")
+func TestNewFileEventsRecorderEnvCanDisableRotation(t *testing.T) {
 	t.Setenv("GC_EVENTS_ROTATION_ENABLED", "false")
-	t.Setenv("GC_CITY", cityDir)
-	t.Setenv("GC_CITY_PATH", "")
-	t.Setenv("GC_CITY_ROOT", "")
-	t.Setenv("GC_RIG", "")
-	oldCityFlag, oldRigFlag := cityFlag, rigFlag
-	cityFlag, rigFlag = "", ""
-	t.Cleanup(func() {
-		cityFlag = oldCityFlag
-		rigFlag = oldRigFlag
-	})
-
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
-[workspace]
-name = "test-city"
-
-[events.rotation]
-max_size_bytes = 1
-check_interval_records = 1
-check_interval_seconds = 1
-`), 0o644); err != nil {
-		t.Fatalf("write city.toml: %v", err)
-	}
-
-	var stderr strings.Builder
-	ep, code := openCityEventsProvider(&stderr, "test")
-	if code != 0 || ep == nil {
-		t.Fatalf("openCityEventsProvider() code = %d, provider nil = %t, stderr = %q", code, ep == nil, stderr.String())
-	}
-	rec, ok := ep.(*events.FileRecorder)
-	if !ok {
-		t.Fatalf("provider = %T, want *events.FileRecorder", ep)
+	dir := t.TempDir()
+	maxSize, checkRecords := int64(1), 1
+	rec, err := newFileEventsRecorder(filepath.Join(dir, "events.jsonl"), config.EventsConfig{
+		Rotation: config.EventsRotationConfig{MaxSizeBytes: &maxSize, CheckIntervalRecords: &checkRecords},
+	}, io.Discard)
+	if err != nil {
+		t.Fatalf("newFileEventsRecorder: %v", err)
 	}
 	defer rec.Close() //nolint:errcheck // test cleanup
 
@@ -200,7 +236,7 @@ check_interval_seconds = 1
 	}
 	rec.WaitForRotations()
 
-	if got := countEventArchives(t, filepath.Join(cityDir, ".gc")); got != 0 {
+	if got := countEventArchives(t, dir); got != 0 {
 		t.Fatalf("archives = %d, want 0 when env disables rotation", got)
 	}
 }
@@ -239,6 +275,42 @@ archive_retain_age = "24h"
 	want := "events.rotation: warning: archive_retain_age=24h may delete recent archives\n"
 	if stderr.String() != want {
 		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+// writeSmallRotationCityToml writes a city.toml whose [events.rotation] would
+// rotate after a few records, for proving that a recorder ignores it.
+func writeSmallRotationCityToml(t *testing.T, cityDir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "test-city"
+
+[events.rotation]
+max_size_bytes = 512
+check_interval_records = 1
+check_interval_seconds = 3600
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+}
+
+// recordAndAssertNoRotation writes well past the city.toml threshold through rec,
+// closes it, and asserts that the log was never rotated.
+func recordAndAssertNoRotation(t *testing.T, rec *events.FileRecorder, cityDir string) {
+	t.Helper()
+	for i := 0; i < 40; i++ {
+		rec.Record(events.Event{Type: events.BeadCreated, Actor: "test", Subject: strings.Repeat("x", 80)})
+	}
+	if err := rec.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := countEventArchives(t, filepath.Join(cityDir, ".gc")); got != 0 {
+		t.Fatalf("archives = %d, want 0: a secondary writer must never rotate", got)
+	}
+	all, err := events.ReadAll(filepath.Join(cityDir, ".gc", "events.jsonl"))
+	if err != nil || len(all) != 40 {
+		t.Fatalf("active log holds %d events (err %v), want all 40 unrotated", len(all), err)
 	}
 }
 

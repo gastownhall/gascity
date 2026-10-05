@@ -153,8 +153,9 @@ type SessionCloseInput struct {
 // SessionSubmitInput is the Huma input for POST /v0/city/{cityName}/session/{id}/submit.
 type SessionSubmitInput struct {
 	CityScope
-	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Body struct {
+	ID             string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           struct {
 		Message string               `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to submit."`
 		Intent  session.SubmitIntent `json:"intent,omitempty" enum:"default,follow_up,interrupt_now" doc:"Submit intent; empty defaults to \"default\"."`
 	}
@@ -170,8 +171,9 @@ type SessionSubmitOutput struct {
 // whitespace-only messages are rejected at the validation layer.
 type SessionMessageInput struct {
 	CityScope
-	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Body struct {
+	ID             string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           struct {
 		Message string `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to send."`
 	}
 }
@@ -184,8 +186,9 @@ type SessionMessageOutput struct {
 // SessionRespondInput is the Huma input for POST /v0/city/{cityName}/session/{id}/respond.
 type SessionRespondInput struct {
 	CityScope
-	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Body struct {
+	ID             string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           struct {
 		RequestID string            `json:"request_id,omitempty" doc:"Pending interaction request ID (optional)."`
 		Action    string            `json:"action" minLength:"1" doc:"Response action (e.g. allow, deny)."`
 		Text      string            `json:"text,omitempty" doc:"Optional response text."`

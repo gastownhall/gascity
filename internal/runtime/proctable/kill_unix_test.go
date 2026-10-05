@@ -3,12 +3,15 @@
 package proctable
 
 import (
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 func TestKillByPIDRefusesLowPIDs(t *testing.T) {
@@ -147,5 +150,78 @@ func TestWaitUntilRespectsZeroTimeout(t *testing.T) {
 	}
 	if waitUntil(func() bool { return false }, 0) {
 		t.Fatal("waitUntil should report false when the condition never holds at zero timeout")
+	}
+}
+
+// TestKillLivenessFuncsAreIdentityBound pins the recycled-PID protection at the
+// wiring, not just at the helper.
+//
+// The SIGTERM-grace probe used to be a bare kill(0) existence check, and it is
+// what gates the SIGKILL wave: a target that answered SIGTERM and was reaped,
+// whose PID was recycled before the grace expired, still read as "alive", so
+// SIGKILL was sent to the new owner. signalPIDWith tries kill(-pid) first, so if
+// that owner leads a process group — every tmux pane command and every Setpgid'd
+// daemon does — the whole unrelated group dies and the call reports success.
+//
+// Both probes must therefore be bound to the ORIGINAL target's start-time
+// identity: asked about a different live PID they must answer false. Restoring
+// either to a bare existence check fails this.
+func TestKillLivenessFuncsAreIdentityBound(t *testing.T) {
+	self := os.Getpid()
+	termLive, runLive := killLivenessFuncsForPID(self)
+
+	if !termLive(self) {
+		t.Error("termLive(self) = false; the probe must recognize its own target")
+	}
+	if !runLive(self) {
+		t.Error("runLive(self) = false; the probe must recognize its own target")
+	}
+
+	// A live child with a start time distinct from ours stands in for a
+	// recycled PID now owned by an unrelated process.
+	recycled := startDistinctLiveProcess(t, self)
+	if termLive(recycled) {
+		t.Error("termLive reported a DIFFERENT live pid as our target: a recycled PID would receive a process-group SIGKILL")
+	}
+	if runLive(recycled) {
+		t.Error("runLive reported a DIFFERENT live pid as our target")
+	}
+}
+
+// startDistinctLiveProcess starts a long-lived child whose start-time identity
+// differs from pid's, and returns the child's PID. Start times have clock-tick
+// resolution on Linux (10ms) and one-second resolution through ps on darwin, so
+// processes started close together share one. That is why PID 1 cannot stand
+// in for "a different process": inside a fresh PID namespace (Bazel's
+// linux-sandbox) init starts moments before the test binary and intermittently
+// lands in the same tick, so the identity probe rightly answers "same
+// process". A child that collides is discarded and another started.
+func startDistinctLiveProcess(t *testing.T, pid int) int {
+	t.Helper()
+	own, err := pidutil.StartTime(pid)
+	if err != nil || own == "" {
+		t.Fatalf("start time of pid %d: %q, %v", pid, own, err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		cmd := exec.Command("sleep", "60")
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start stand-in process: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		})
+		started, err := pidutil.StartTime(cmd.Process.Pid)
+		if err != nil || started == "" {
+			t.Fatalf("start time of stand-in pid %d: %q, %v", cmd.Process.Pid, started, err)
+		}
+		if started != own {
+			return cmd.Process.Pid
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("every stand-in process shared pid %d's start time %q", pid, own)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
