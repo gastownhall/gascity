@@ -240,13 +240,8 @@ func readyRigLegStores(cfg *config.City, cityPath string) (map[string]beads.Stor
 
 // relocatedGraphLegFrom is the identity gate over an already-resolved binding:
 // a binding that resolved back to the city's own work store is the same store
-// already federated as the city leg, so there is no second store to add.
-//
-// The `==` is safe for the same reason residencyBindingsFromRoutes's map key is:
-// both operands are stores a constructor opened, and every one of those is
-// pointer-typed. An interface == on a value-typed store with an uncomparable
-// dynamic type panics — see storeref.storeSet, which is where that stopped being
-// hypothetical.
+// already federated as the city leg, so there is no second store to add. The
+// gate itself is beads.RelocatedGraphStore, shared with POST /sling.
 //
 // Production no longer calls it — readyFederationLegs resolves the binding from
 // the city's routes and the plan's own dedupe applies the gate — but the
@@ -254,10 +249,10 @@ func readyRigLegStores(cfg *config.City, cityPath string) (map[string]beads.Stor
 // caller that resolved the binding itself applies the same rule rather than
 // restating it.
 func relocatedGraphLegFrom(binding beads.Store, relocated bool, cityStore beads.Store) beads.Store {
-	if !relocated || binding == nil || binding == cityStore {
+	if !relocated {
 		return nil
 	}
-	return binding
+	return beads.RelocatedGraphStore(binding, cityStore)
 }
 
 // federateReadyBeads reads the ready set from every leg and merges it.

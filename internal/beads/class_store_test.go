@@ -55,3 +55,24 @@ func TestClassStoresEmbedStore(t *testing.T) {
 		})
 	}
 }
+
+// TestRelocatedGraphStore pins the identity gate every surface applies to the
+// graph-class binding: only a binding distinct from the city's work store is a
+// relocated graph store; a nil binding or one that resolved back to the city
+// store is not.
+func TestRelocatedGraphStore(t *testing.T) {
+	city := NewMemStore()
+	graph := NewMemStore()
+	if got := RelocatedGraphStore(nil, city); got != nil {
+		t.Errorf("RelocatedGraphStore(nil, city) = %v, want nil", got)
+	}
+	if got := RelocatedGraphStore(city, city); got != nil {
+		t.Errorf("RelocatedGraphStore(city, city) = %v, want nil (the binding is the city store)", got)
+	}
+	if got := RelocatedGraphStore(graph, city); got != graph {
+		t.Errorf("RelocatedGraphStore(graph, city) = %v, want the graph binding", got)
+	}
+	if got := RelocatedGraphStore(graph, nil); got != graph {
+		t.Errorf("RelocatedGraphStore(graph, nil) = %v, want the graph binding", got)
+	}
+}

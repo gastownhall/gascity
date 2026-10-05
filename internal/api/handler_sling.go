@@ -284,11 +284,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 // never claimed. On a default city GraphBeadStore() is CityBeadStore(), the
 // same identity sourceWorkflowStores relies on.
 func (s *Server) relocatedGraphStore() beads.Store {
-	graph := s.state.GraphBeadStore().Store
-	if graph == nil || graph == s.state.CityBeadStore() {
-		return nil
-	}
-	return graph
+	return beads.RelocatedGraphStore(s.state.GraphBeadStore().Store, s.state.CityBeadStore())
 }
 
 func allowsForceStoreFallback(body slingBody, agentCfg config.Agent) bool {

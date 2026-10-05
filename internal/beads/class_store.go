@@ -37,6 +37,22 @@ type GraphStore struct {
 	Store
 }
 
+// RelocatedGraphStore returns the graph-class binding when it is a store
+// distinct from the city's work store, and nil otherwise. A nil result means
+// the graph class is not relocated, so graph beads belong next to the work
+// they serve: a sling cooks its workflow in the source bead's own store, and a
+// federated read adds no second leg for a binding that is the city leg.
+//
+// The == is identity over store values a constructor opened; every one of
+// those is pointer-typed, so the comparison cannot panic on an uncomparable
+// dynamic type.
+func RelocatedGraphStore(binding, cityStore Store) Store {
+	if binding == nil || binding == cityStore {
+		return nil
+	}
+	return binding
+}
+
 // SessionStore is a strongly-typed view over a single Store holding session
 // beads (session lifecycle projection). It is backed by the same underlying
 // store it wraps; the wrapper exists so the compiler enforces that a
