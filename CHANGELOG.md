@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[[named_session]]` now returns 400 `demand-only-singleton` instead of 202
   and a session that never started. An API wake of such a session records the
   wake (clearing holds) and returns the same error (#6858).
+- **A partially routed convoy sling answers 200 with status `partial`.**
+  `POST /v0/city/{city}/sling` reports a convoy whose children were routed
+  only in part as 200 with `status: "partial"` and the failed children in
+  `batch.failures`, so API clients must check `status`, not only the HTTP
+  code. A remote `gc sling` older than 1.5.1 does not check `status`: it
+  exits 0, and its `--json` output reports `success: true`. Upgrade remote
+  `gc` clients alongside the server.
 
 ### Fixed
 
@@ -53,7 +60,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `gc stop` stops the city's nudge pollers and never reopens a stopped city's
   store (#6857).
 - The supervisor event stream includes cities started after the client
-  connected (#6861).
+  connected (#6861). Delivery is at-least-once when a city's watcher is
+  re-attached mid-connection, for example after the city stops and starts
+  again: events already buffered for that city can be delivered again, and
+  its seq in the composite SSE id can move back. Dedupe on city and seq.
 - Workflows no longer stall after a formula step that passed but recorded a
   blocked work outcome.
 - Claude Code's feedback-survey dismissal no longer submits a stray `0` into

@@ -851,9 +851,18 @@ func TestBdWorkflow(t *testing.T) {
 	// refused; a close under the assignee's exact identity passes without
 	// --force. gc bd's own-claim close relies on exactly this: it switches
 	// BEADS_ACTOR to the claim's session bead id and nothing else (#6324).
+	// Every bd from v1.3.0 has the guard, but the minimum-supported pin
+	// (BD_PREV_VERSION in deps.env) and v1.2.2 predate it and close under any
+	// actor, so only the refusal is version-gated; the own-identity close is
+	// asserted on every bd.
 	requireBD(t, dir, "close", "--json", rootID)
-	if out, err := runBDWithEnv(t, dir, []string{"BEADS_ACTOR=polecat-chair"}, "close", "--json", stepID); err == nil {
-		t.Fatalf("bd close of a bead assigned to polecat-1 succeeded under actor polecat-chair; gc relies on bd refusing it\n%s", out)
+	if !t.Run("cross-actor close refused", func(t *testing.T) {
+		helpers.RequireBDAtLeast(t, helpers.RequireBD(t), "v1.3.0-0", "bd's cross-actor close-authority guard (gastownhall/beads#3734)")
+		if out, err := runBDWithEnv(t, dir, []string{"BEADS_ACTOR=polecat-chair"}, "close", "--json", stepID); err == nil {
+			t.Fatalf("bd close of a bead assigned to polecat-1 succeeded under actor polecat-chair; gc relies on bd refusing it\n%s", out)
+		}
+	}) {
+		return
 	}
 	if out, err := runBDWithEnv(t, dir, []string{"BEADS_ACTOR=polecat-1"}, "close", "--json", stepID); err != nil {
 		t.Fatalf("bd close under the assignee's own identity: %v\n%s", err, out)
