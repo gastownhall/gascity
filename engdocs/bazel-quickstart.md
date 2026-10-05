@@ -33,27 +33,30 @@ curl -sSfL https://github.com/bazelbuild/bazelisk/releases/latest/download/bazel
 
 Bazelisk reads `.bazelversion` (committed) and pins the exact version.
 
-### 2. Point at the remote cache (the free win)
+### 2. Use the shared cache (the free win)
 
-Create `.bazelrc.local` in the repo root (gitignored) using your team's
-Bazel remote cache endpoint:
-
-```bash
-# read + write the shared CAS — safe: content-addressed, never corrupts
-build --remote_cache=grpcs://<your-cache-endpoint>:443
-```
-
-For **read-only** (cheaper, no upload):
+No setup: the committed `.bazelrc` has a `fork-cache` config for rbe-west's
+anonymous, read-only cache. Pass it to read every result CI already
+computed; misses build and run locally, and nothing you run is uploaded:
 
 ```bash
-build --remote_cache=grpcs://<your-cache-endpoint>:443
-build --remote_upload_local_results=false
+bazel test //... --config=fork-cache
 ```
 
-If your team runs a remote execution farm, ask the owners for the
-executor endpoint and mTLS client certificate. For most dev work the
-cache alone is enough — you compile locally but hit shared results,
-which is where the ~0.6s warm suite comes from.
+This only hits if your actions hash like CI's, so do not add key-affecting
+flags (`--test_env`, `--action_env`, `--define`, platforms, ...) to
+`.bazelrc.local`; it is for endpoints and credentials only
+(`scripts/bazel_key_parity_test.go`). Locally run tests get the pinned test
+`PATH`, so Go must be at `/usr/local/go`
+(`sudo ln -s "$(go env GOROOT)" /usr/local/go` if it is elsewhere).
+
+Maintainers can opt in to remote execution with an rbe-west client
+certificate; see TESTING.md "Bazel cache tiers" for how to obtain one and
+the `.bazelrc.local` lines, then use `--config=remote-exec`. The pre-push
+hook picks the right mode automatically: remote execution when any rc file
+(`.bazelrc.local`, `~/.bazelrc`, `/etc/bazel.bazelrc`) names a remote
+executor, as agent hosts' `~/.bazelrc` does, and the read-only cache
+otherwise.
 
 ### 3. Verify
 

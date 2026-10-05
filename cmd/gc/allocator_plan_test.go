@@ -83,7 +83,7 @@ func reserveAll(f *allocFixture, d allocDecision, at time.Time) {
 		id := fmt.Sprintf("c-%d-%s", len(f.in.Ledger)+i, p.identity())
 		f.in.Ledger = append(f.in.Ledger, ledgerEntry{
 			ID: id, Kind: kindCreate, Key: rowKey{Leg: allocSessionsLeg}, Template: p.Template,
-			State: ledgerReserved, ReservedAt: at, Cost: 1, Marker: ledgerMarker{InstanceToken: "tok-" + id},
+			State: ledgerReserved, ReservedAt: at, Marker: ledgerMarker{InstanceToken: "tok-" + id},
 		})
 		f.in.Reservations = append(f.in.Reservations, planReservation{
 			EntryID: id, Template: p.Template, QualifiedInstance: p.Plan.qualifiedInstance, Slot: p.Plan.poolSlot,
@@ -253,20 +253,18 @@ func TestAllocator_FreshSlot_FailedCreateKeepsNameNotSlot(t *testing.T) {
 }
 
 // Kills: one refused identity starving its template (owner decision at P3-5a
-// review): a live create veto on worker-1 with slots 2-5 free and demand for
+// review): a live create backoff on worker-1 with slots 2-5 free and demand for
 // three plans three, on slots 2-4.
 func TestAllocator_RefusedIdentityDoesNotStarveTemplate(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 5)}}
 	f := newAllocFixture(t, cfg).demand("worker", "w-1", "w-2", "w-3")
-	f.in.CreateVetoes = map[string]createVeto{
-		"worker/worker-1": {Identity: createIdentity{Template: "worker", QualifiedInstance: "worker-1", Slot: 1}, Until: allocNow.Add(5 * time.Minute), Cause: "fence"},
-	}
+	f.in.Backoff = createRefusal("worker/worker-1", createStageFence, allocNow.Add(5*time.Minute))
 	d := f.decide()
 	if got := planSlots(d, "worker"); fmt.Sprint(got) != "[2 3 4]" {
 		t.Fatalf("plans = %v, want [2 3 4]; trace %v", got, d.Trace)
 	}
 	if !traceHas(d, gateCreateRefused+"fence") {
-		t.Fatalf("the vetoed identity must be traced: %v", d.Trace)
+		t.Fatalf("the refused identity must be traced: %v", d.Trace)
 	}
 }
 
@@ -274,19 +272,20 @@ func TestAllocator_RefusedIdentityDoesNotStarveTemplate(t *testing.T) {
 // request to the next slot (F3): one template-wide create failure, or one
 // quarantined start, would spread across every slot pass after pass and
 // defeat per-identity backoff. As legacy stalls (build_desired_state.go
-// 5180), a template-wide create backoff (prepare, lock) and a #46
-// quarantine plan nothing past the refused slot; a fence refusal (the name
-// was taken) advances one slot per pass, within the cap.
+// 5180), a template-wide create backoff (prepare, lock, fence-read) and a
+// #46 quarantine plan nothing past the refused slot; a fence refusal (the
+// name was taken) advances one slot per pass, within the cap. The refusals
+// go through the backoff table, so its causes are kept verbatim (C3).
 func TestAllocator_RefusedIdentityStallsUnlessNameSpecific(t *testing.T) {
 	for _, cause := range []string{"prepare", "lock", createStageFenceRead, "quarantine", createStageFence} {
 		for label, agent := range map[string]config.Agent{"max-5": allocPoolAgent("worker", 5), "unlimited": {Name: "worker", MaxActiveSessions: intPtr(-1)}} {
 			cfg := &config.City{Agents: []config.Agent{agent}}
-			vetoes := map[string]createVeto{}
+			table := newBackoffTable()
 			episodes := map[string]session.StartupHealthEpisode{}
 			var slots []int
 			for pass := 0; pass < 7; pass++ {
 				f := newAllocFixture(t, cfg).demand("worker", "w-1")
-				f.in.CreateVetoes, f.in.Episodes = vetoes, episodes
+				f.in.Backoff, f.in.Episodes = table.Snapshot(), episodes
 				d := f.decide()
 				if len(d.Plans) == 0 {
 					slots = append(slots, 0)
@@ -299,7 +298,7 @@ func TestAllocator_RefusedIdentityStallsUnlessNameSpecific(t *testing.T) {
 					episodes[key] = session.StartupHealthEpisode{QuarantinedUntil: allocNow.Add(5 * time.Minute)}
 					continue
 				}
-				vetoes[p.identity()] = createVeto{Until: allocNow.Add(10 * time.Second), Cause: cause}
+				table.Refuse(createBackoffKey(p.identity()), allocNow, time.Time{}, cause, f.in.ConfigRev)
 			}
 			want := "[1 0 0 0 0 0 0]"
 			switch {
@@ -319,7 +318,7 @@ func TestAllocator_RefusedIdentityStallsUnlessNameSpecific(t *testing.T) {
 // spread across every slot, and loop over an unlimited pool's. A shut
 // endpoint and an unresolvable tmux_alias refuse every slot alike, so the
 // request stalls on its first plan, in a capped pool and in an unlimited
-// one whose fence veto elsewhere allows more than one try. However a
+// one whose fence backoff elsewhere allows more than one try. However a
 // refusal is classified, the slots tried are bounded.
 func TestAllocator_TemplateWideRefusalStallsAnUnlimitedPool(t *testing.T) {
 	for cause, setup := range map[string]func(*config.Agent, *allocFixture){
@@ -332,9 +331,7 @@ func TestAllocator_TemplateWideRefusalStallsAnUnlimitedPool(t *testing.T) {
 			agent := config.Agent{Name: "worker", MaxActiveSessions: intPtr(limit)}
 			f := newAllocFixture(t, nil).demand("worker", "w-1")
 			f.in.Endpoints = map[endpointKey]endpointView{"provider:claude": {Gate: gateClosed}}
-			f.in.CreateVetoes = map[string]createVeto{
-				"worker/worker-9": {Identity: createIdentity{Template: "worker", QualifiedInstance: "worker-9", Slot: 9}, Until: allocNow.Add(time.Minute), Cause: createStageFence},
-			}
+			f.in.Backoff = createRefusal("worker/worker-9", createStageFence, allocNow.Add(time.Minute))
 			setup(&agent, f)
 			f.in.Cfg = &config.City{Agents: []config.Agent{agent}, Workspace: config.Workspace{Provider: "claude"}}
 			done := make(chan allocDecision, 1)
@@ -840,7 +837,7 @@ func TestAllocator_BindingsOnlyForStartCandidates(t *testing.T) {
 		d0 := f.in.Demand.Collected.DefaultDemand["worker"]
 		d0.WorktreeSpecs = map[string]*worktree.Spec{"w-1": &spec}
 		f.in.Demand.Collected.DefaultDemand["worker"] = d0
-		f.in.WorktreeRefused = map[string]worktree.Spec{"w-1": spec}
+		f.in.Backoff = workRefusal(spec)
 		return f
 	}
 	live := withSpec(newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "active")).alive("s-gc-1", InventoryAttrs{AttachedKnown: true}).demand("worker", "w-1"))
@@ -981,7 +978,7 @@ func TestAllocator_NamedPlan_OnePerIdentityWhileEntryUncleared(t *testing.T) {
 // Kills: legacy predicate drift (POOL-039..042, P3-6b §3.1): an
 // identity-first canonical row plans nothing, a conflicting holder plans
 // nothing, an on_demand session without work plans nothing, a pool-slot
-// shaped identity is never planned, and a live create veto refuses it.
+// shaped identity is never planned, and a live create backoff refuses it.
 func TestAllocator_NamedPlan_CanonicalAndConflictGates(t *testing.T) {
 	named := func(mode string) *config.City {
 		return &config.City{
@@ -1015,9 +1012,9 @@ func TestAllocator_NamedPlan_CanonicalAndConflictGates(t *testing.T) {
 		t.Errorf("pool-slot shaped identity: plans %+v trace %v", d.Plans, d.Trace)
 	}
 	f = newAllocFixture(t, named("always"))
-	f.in.CreateVetoes = map[string]createVeto{"named:chat": {Until: allocNow.Add(time.Minute), Cause: "fence"}}
+	f.in.Backoff = createRefusal("named:chat", createStageFence, allocNow.Add(time.Minute))
 	if d = f.decide(); len(d.Plans) != 0 || !traceHas(d, gateCreateRefused+"fence") {
-		t.Errorf("vetoed identity: plans %+v trace %v", d.Plans, d.Trace)
+		t.Errorf("refused identity: plans %+v trace %v", d.Plans, d.Trace)
 	}
 }
 
@@ -1173,23 +1170,23 @@ func TestAllocator_IdentityLeaseAskedOnlyForBeadScopedIdentities(t *testing.T) {
 	}
 }
 
-// Kills: a create veto ignored (AM-N8, P3-6 obligation) and a refused
-// worktree's work bound or created (#34): the vetoed identity is refused
-// and traced, and a template-wide cause plans no other slot; the throttled
-// work item takes no slot, while a verdict on other evidence for the same
-// bead refuses nothing.
-func TestAllocator_CreateVetoAndWorktreeVerdictRefusePlans(t *testing.T) {
+// Kills: a create backoff ignored (AM-N8, P3-6 obligation) and a refused
+// worktree's work bound or created (#34): the refused identity is traced,
+// and a template-wide cause plans no other slot; the throttled work item
+// takes no slot, while a record on other evidence for the same bead, or an
+// expired one, refuses nothing.
+func TestAllocator_CreateAndWorkBackoffRefusePlans(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
 	f := newAllocFixture(t, cfg).demand("worker", "w-1")
 	key := createIdentity{Template: "worker", QualifiedInstance: "worker-1", Slot: 1}.key()
-	f.in.CreateVetoes = map[string]createVeto{key: {Until: allocNow.Add(time.Minute), Cause: "lock"}}
+	f.in.Backoff = createRefusal(key, createStageLock, allocNow.Add(time.Minute))
 	d := f.decide()
 	if len(d.Plans) != 0 || !traceHas(d, gateCreateRefused+"lock") {
-		t.Fatalf("vetoed identity: plans %v trace %v, want worker-1 refused and nothing planned", planSlots(d, "worker"), d.Trace)
+		t.Fatalf("refused identity: plans %v trace %v, want worker-1 refused and nothing planned", planSlots(d, "worker"), d.Trace)
 	}
-	f.in.CreateVetoes = map[string]createVeto{key: {Until: allocNow, Cause: "lock"}}
+	f.in.Backoff = createRefusal(key, createStageLock, allocNow)
 	if d = f.decide(); fmt.Sprint(planSlots(d, "worker")) != "[1]" {
-		t.Fatalf("expired veto: plans %v trace %v", planSlots(d, "worker"), d.Trace)
+		t.Fatalf("expired backoff: plans %v trace %v", planSlots(d, "worker"), d.Trace)
 	}
 
 	spec := worktree.Spec{BeadID: "w-1", StoreRef: "city", Path: "/wt/w-1"}
@@ -1203,11 +1200,17 @@ func TestAllocator_CreateVetoAndWorktreeVerdictRefusePlans(t *testing.T) {
 	}
 	other := spec
 	other.Path = "/wt/elsewhere"
-	f.in.WorktreeRefused = map[string]worktree.Spec{"w-1": other}
+	f.in.Backoff = workRefusal(other)
 	if d = f.decide(); len(d.Plans) != 1 {
-		t.Fatalf("a verdict on other evidence refused the plan: %+v trace %v", d.Plans, d.Trace)
+		t.Fatalf("a record on other evidence refused the plan: %+v trace %v", d.Plans, d.Trace)
 	}
-	f.in.WorktreeRefused = map[string]worktree.Spec{"w-1": spec}
+	expired := workRefusal(spec)
+	expired[workBackoffKey("w-1")] = backoffRecord{Until: allocNow, Fingerprint: specFingerprint(spec)}
+	f.in.Backoff = expired
+	if d = f.decide(); len(d.Plans) != 1 {
+		t.Fatalf("an expired work record refused the plan: %+v trace %v", d.Plans, d.Trace)
+	}
+	f.in.Backoff = workRefusal(spec)
 	refused := f.decide()
 	if len(refused.Plans) != 0 || !traceHas(refused, gateWorktreeRefused) {
 		t.Fatalf("refused worktree: plans %+v trace %v", refused.Plans, refused.Trace)
@@ -1479,7 +1482,7 @@ func TestAllocator_RefusedPairingFallsThroughToFreshRealization(t *testing.T) {
 	}
 	f := withSpec(newAllocFixture(t, cfg).sessions(x, poolRow("gc-z", "worker", 2, "active")).
 		alive("s-gc-z", InventoryAttrs{AttachedKnown: true}).demand("worker", "W"))
-	f.in.WorktreeRefused = map[string]worktree.Spec{"W": spec}
+	f.in.Backoff = workRefusal(spec)
 	f.in.Prev, f.in.SelGen = d1.Snapshot, 2
 	d := f.decide()
 	// Z is realized for the request (pool identity), not only kept by the

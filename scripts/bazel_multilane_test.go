@@ -108,40 +108,26 @@ func bazelRCFlagValue(rc, prefix string) string {
 	return m[len(m)-1][1]
 }
 
-// --config=ci must give tests the same PATH bazel-test.yml's runs do (the
-// key input), and the tagged-suite configs bazel-test.yml's flags, or the two
-// workflows stop sharing remote cache entries. Either source may hold a
-// value: today bazel-test.yml writes its lines to .bazelrc.local; once
-// gascity #6993 lands they are committed (an unconditional pinned test PATH,
-// build:remote-exec transport flags, which setup-bazel's --config=remote-exec
-// picks up), and --config=ci's copies become redundant but must still agree.
+// bazel.yml's lanes and bazel-test.yml share remote cache entries only if
+// their actions hash alike. The test PATH and every other key input are
+// committed unconditionally in .bazelrc, and --config=ci carries no key input
+// (bazel_key_parity_test.go checks both); this test pins the rest: the
+// tagged-suite configs carry bazel-test.yml's flags, and the remote modes
+// both workflows select give 2 vCPU clients minimal downloads and 64 actions
+// in flight.
 func TestBazelCIConfigMatchesBazelTestRC(t *testing.T) {
 	root := repoRoot(t)
 	rc := readFile(t, root, ".bazelrc")
 	legacy := readFile(t, root, bazelTestWorkflow)
 
-	legacyPath := ""
-	if m := regexp.MustCompile(`echo 'test --test_env=PATH=([^']+)'`).FindStringSubmatch(legacy); m != nil {
-		legacyPath = m[1]
-	} else {
-		legacyPath = bazelRCFlagValue(rc, "test --test_env=PATH")
+	if bazelRCFlagValue(rc, "test --test_env=PATH") == "" {
+		t.Errorf(".bazelrc pins no unconditional test PATH (test --test_env=PATH=...)")
 	}
-	if legacyPath == "" {
-		t.Fatalf("neither %s's .bazelrc.local lines nor .bazelrc pin a test PATH (test --test_env=PATH=...)", bazelTestWorkflow)
-	}
-	ciPath := bazelRCFlagValue(rc, "test:ci --test_env=PATH")
-	if ciPath == "" {
-		ciPath = bazelRCFlagValue(rc, "test --test_env=PATH")
-	}
-	if ciPath != legacyPath {
-		t.Errorf("--config=ci tests see PATH %q, bazel-test.yml's %q; the PATH is a key input, keep them equal", ciPath, legacyPath)
-	}
-
-	// 2 vCPU clients: minimal downloads and 64 actions in flight, from
-	// --config=ci or from the remote-exec config setup-bazel enables.
-	for _, flag := range []string{"--remote_download_minimal", "--jobs=64"} {
-		if !strings.Contains(rc, "\nbuild:ci "+flag+"\n") && !strings.Contains(rc, "\nbuild:remote-exec "+flag+"\n") {
-			t.Errorf(".bazelrc sets %s in neither build:ci nor build:remote-exec", flag)
+	for _, config := range []string{"remote-exec", "fork-cache"} {
+		for _, flag := range []string{"--remote_download_minimal", "--jobs=64"} {
+			if !strings.Contains(rc, "\nbuild:"+config+" "+flag+"\n") {
+				t.Errorf(".bazelrc lacks build:%s %s", config, flag)
+			}
 		}
 	}
 

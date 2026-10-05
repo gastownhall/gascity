@@ -388,7 +388,7 @@ source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 version = "^0.1"
 
 # exact SHA pin — this revision must be used
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:3b3b89f2011e06d84459aa7bea1552382f13930a"
 ```
 
 The authored import expresses the source and optional constraint; the lockfile
