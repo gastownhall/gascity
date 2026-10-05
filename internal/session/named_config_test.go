@@ -1370,6 +1370,14 @@ func TestIsDemandOnlySingletonTemplate(t *testing.T) {
 			want:  false,
 		},
 		{
+			// min_active_sessions = 1 keeps the pool's one session running
+			// without demand, so creates, pins and wakes are honored (#6858
+			// follow-up).
+			name:  "singleton with a minimum of one session",
+			agent: config.Agent{Name: "worker", Dir: "demo", MinActiveSessions: &one, MaxActiveSessions: &one},
+			want:  false,
+		},
+		{
 			name:  "unbounded template",
 			agent: config.Agent{Name: "worker"},
 			want:  false,
