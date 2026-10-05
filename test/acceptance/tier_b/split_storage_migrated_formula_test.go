@@ -19,9 +19,11 @@
 //
 //   - FreshMigration: a city without [storage] runs half the formula, stops,
 //     authors the split, migrates with this binary, starts and finishes.
-//   - MigratedByV150RC1: the same, but the migration is run by a v1.5.0-rc1
-//     gc (GC_ACCEPTANCE_SPLIT_RC1_GC_BIN). Booting that city with this binary
-//     must refuse and name the repair command; running it repairs the city.
+//   - MigratedByV150RC1: the same, but everything up to and including the
+//     migration is run by a v1.5.0-rc1 gc (GC_ACCEPTANCE_SPLIT_RC1_GC_BIN, or
+//     built here from the tag when the clone has it). Booting that city with
+//     this binary must refuse and name the repair command; running it repairs
+//     the city.
 //   - BornSplit: a city with [storage] from its first boot. The control.
 //
 // Requires: bd >= 1.3.0, dolt, jq. The work store is a bd city bound to an
@@ -38,9 +40,8 @@
 //
 // Run:
 //
-//	make test-acceptance-split-storage \
-//	  GC_ACCEPTANCE_BD_BIN=/path/to/bd-1.3.1 \
-//	  GC_ACCEPTANCE_SPLIT_RC1_GC_BIN=/path/to/gc-v1.5.0-rc1
+//	git fetch --no-tags --depth=1 origin +refs/tags/v1.5.0-rc1:refs/tags/v1.5.0-rc1
+//	make test-acceptance-split-storage GC_ACCEPTANCE_BD_BIN=/path/to/bd-1.3.1
 package tierb_test
 
 import (
@@ -166,42 +167,49 @@ func TestSplitStorageMigratedFormulaCompletes(t *testing.T) {
 	}
 
 	t.Run("FreshMigration", func(t *testing.T) {
-		c := newSplitE2ECity(t, bdPath, doltPath, false)
+		c := newSplitE2ECity(t, bdPath, doltPath, false, "")
 		root := c.runFirstHalf()
 		c.authorSplit()
-		c.migrate(c.gcBin)
+		c.migrate()
 		c.finishAndAssert(root)
 	})
 
 	t.Run("MigratedByV150RC1", func(t *testing.T) {
+		// The whole pre-cutover life of this city is v1.5.0-rc1's: it is
+		// initialized, run, stopped and migrated by that binary, under its
+		// own supervisor, exactly as an operator who adopted 1.5.0 did. Only
+		// then is the binary under test handed the city.
 		rc1 := splitRC1Binary(t)
-		c := newSplitE2ECity(t, bdPath, doltPath, false)
+		c := newSplitE2ECity(t, bdPath, doltPath, false, rc1)
 		root := c.runFirstHalf()
 		c.authorSplit()
-		c.migrate(rc1)
+		c.migrate()
+		c.handOver()
 		c.expectBootRefusalNamingRepair()
-		c.migrate(c.gcBin)
+		c.migrate()
 		c.finishAndAssert(root)
 	})
 
 	t.Run("BornSplit", func(t *testing.T) {
-		c := newSplitE2ECity(t, bdPath, doltPath, true)
+		c := newSplitE2ECity(t, bdPath, doltPath, true, "")
 		root := c.runFirstHalf()
 		c.finishAndAssert(root)
 	})
 }
 
-// splitRC1Binary returns the v1.5.0-rc1 gc, skipping (or failing under
-// splitRequireRC1Env) when it is not configured. A set-but-unusable path fails.
+// splitRC1Tag is the release whose migration retains the work-store copies.
+const splitRC1Tag = "v1.5.0-rc1"
+
+// splitRC1Binary returns the v1.5.0-rc1 gc: GC_ACCEPTANCE_SPLIT_RC1_GC_BIN when
+// set, otherwise one built here from the tag in this clone's history. It skips
+// (or fails under splitRequireRC1Env) only when neither is available — a
+// shallow CI checkout has no tags until it fetches this one. A set-but-unusable
+// path, or a build of a present tag that fails, is always a failure.
 func splitRC1Binary(t *testing.T) string {
 	t.Helper()
 	raw := strings.TrimSpace(os.Getenv(splitRC1GCBinEnv))
 	if raw == "" {
-		reason := fmt.Sprintf("%s is unset; build gc from tag v1.5.0-rc1 and point it there to run the upgraded-city scenario", splitRC1GCBinEnv)
-		if v := strings.TrimSpace(os.Getenv(splitRequireRC1Env)); v != "" && v != "0" {
-			t.Fatalf("%s is set, so this scenario must run, but %s", splitRequireRC1Env, reason)
-		}
-		t.Skip(reason)
+		return buildSplitRC1FromTag(t)
 	}
 	bin, err := filepath.Abs(raw)
 	if err != nil {
@@ -213,17 +221,57 @@ func splitRC1Binary(t *testing.T) string {
 	return bin
 }
 
-// splitE2ECity is one isolated city plus the paths the assertions read.
-type splitE2ECity struct {
-	t     *testing.T
-	env   *helpers.Env
-	city  *helpers.City
-	root  string
-	dir   string
-	gcBin string
+// buildSplitRC1FromTag extracts the tagged tree with git archive (no worktree
+// is registered, nothing in the clone changes) and builds its gc into a
+// test-owned temp dir. The only network it can need is the Go module proxy
+// for dependencies the module cache lacks, the same access `go test` has.
+func buildSplitRC1FromTag(t *testing.T) string {
+	t.Helper()
+	repo := helpers.FindModuleRoot()
+	commit, err := exec.Command("git", "-C", repo, "rev-parse", "--verify", "--quiet", splitRC1Tag+"^{commit}").Output()
+	if err != nil || strings.TrimSpace(string(commit)) == "" {
+		reason := fmt.Sprintf("%s is unset and tag %s is not in this clone (git fetch --no-tags --depth=1 origin +refs/tags/%s:refs/tags/%s), so there is no v1.5.0-rc1 gc for the upgraded-city scenario",
+			splitRC1GCBinEnv, splitRC1Tag, splitRC1Tag, splitRC1Tag)
+		if v := strings.TrimSpace(os.Getenv(splitRequireRC1Env)); v != "" && v != "0" {
+			t.Fatalf("%s is set, so this scenario must run, but %s", splitRequireRC1Env, reason)
+		}
+		t.Skip(reason)
+	}
+	dir := helpers.TempDir(t)
+	src := filepath.Join(dir, "src")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatalf("create rc1 source dir: %v", err)
+	}
+	archive := exec.Command("sh", "-c", `git -C "$1" archive --format=tar "$2" | tar -x -C "$3"`, "--", repo, strings.TrimSpace(string(commit)), src)
+	if out, err := archive.CombinedOutput(); err != nil {
+		t.Fatalf("extract %s: %v\n%s", splitRC1Tag, err, out)
+	}
+	bin := filepath.Join(dir, "bin", "gc")
+	build := exec.Command("go", "build", "-o", bin, "./cmd/gc")
+	build.Dir = src
+	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GOWORK=off", "GOFLAGS=-mod=mod")
+	started := time.Now()
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build gc from %s: %v\n%s", splitRC1Tag, err, out)
+	}
+	t.Logf("built gc %s (%s) in %s", splitRC1Tag, strings.TrimSpace(string(commit))[:10], time.Since(started).Round(time.Second))
+	return bin
 }
 
-func newSplitE2ECity(t *testing.T, bdPath, doltPath string, bornSplit bool) *splitE2ECity {
+// splitE2ECity is one isolated city plus the paths the assertions read.
+type splitE2ECity struct {
+	t    *testing.T
+	env  *helpers.Env // the binary under test
+	city *helpers.City
+	root string
+	dir  string
+	// preEnv runs everything before the hand-over: the binary under test, or
+	// for the upgrade scenario the v1.5.0-rc1 gc, first on PATH as `gc` so
+	// the worker's own gc calls and the supervisor resolve the same binary.
+	preEnv *helpers.Env
+}
+
+func newSplitE2ECity(t *testing.T, bdPath, doltPath string, bornSplit bool, preBin string) *splitE2ECity {
 	t.Helper()
 	gcBin, err := helpers.ResolveGCPath(testEnvB)
 	if err != nil {
@@ -242,6 +290,10 @@ func newSplitE2ECity(t *testing.T, bdPath, doltPath string, bornSplit bool) *spl
 	}
 	base := helpers.NewEnv(gcBin, gcHome, runtimeDir).With("GC_SESSION", "subprocess")
 	env := helpers.TopologyEnv(t, base, root, bdPath, doltPath)
+	preEnv := env
+	if preBin != "" {
+		preEnv = splitBinaryEnv(t, env, preBin, filepath.Join(root, "pre-bin"))
+	}
 
 	// Registered before the upstream and the city so it runs after both have
 	// stopped: no Dolt server or bd proxy under this root may outlive the test.
@@ -261,9 +313,15 @@ func newSplitE2ECity(t *testing.T, bdPath, doltPath string, bornSplit bool) *spl
 		t.Fatalf("write worker script: %v", err)
 	}
 	dir := filepath.Join(root, "city")
-	city := helpers.NewCityAt(t, env, dir)
-	t.Cleanup(city.CleanupRuntime)
-	out, err := helpers.RunGC(env, "", "init", "--skip-provider-readiness", "--no-start", "--provider", "claude",
+	city := helpers.NewCityAt(t, preEnv, dir)
+	t.Cleanup(func() {
+		city.CleanupRuntime()
+		// Whichever binary the city ended on, stop the other one's
+		// supervisor too; both share this test's GC_HOME.
+		helpers.RunGC(preEnv, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
+		helpers.RunGC(env, "", "supervisor", "stop", "--wait")    //nolint:errcheck // best-effort cleanup
+	})
+	out, err := helpers.RunGC(preEnv, "", "init", "--skip-provider-readiness", "--no-start", "--provider", "claude",
 		"--dolt-host", upstream.Host, "--dolt-port", upstream.Port,
 		"--dolt-database", upstream.Database, "--dolt-project-id", upstream.ProjectID, dir)
 	if err != nil {
@@ -275,12 +333,42 @@ func newSplitE2ECity(t *testing.T, bdPath, doltPath string, bornSplit bool) *spl
 		}
 		t.Logf("gc init hit the dolt identity probe timeout; gc start completes it:\n%s", out)
 	}
-	c := &splitE2ECity{t: t, env: env, city: city, root: root, dir: dir, gcBin: gcBin}
+	c := &splitE2ECity{t: t, env: env, city: city, root: root, dir: dir, preEnv: preEnv}
 	c.reduceToScriptedWorker(scriptPath, bornSplit)
 	if err := os.WriteFile(c.path("formulas", splitFormulaName+".toml"), []byte(splitFormulaTOML), 0o644); err != nil {
 		t.Fatalf("write formula: %v", err)
 	}
 	return c
+}
+
+// splitBinaryEnv is env with bin as the gc every child resolves: the harness's
+// pinned binary and the first `gc` on PATH, so the supervisor, the sessions it
+// spawns and the worker's own `gc hook`/`gc bd` calls all run bin.
+func splitBinaryEnv(t *testing.T, env *helpers.Env, bin, linkDir string) *helpers.Env {
+	t.Helper()
+	if err := os.MkdirAll(linkDir, 0o755); err != nil {
+		t.Fatalf("create %s: %v", linkDir, err)
+	}
+	link := filepath.Join(linkDir, "gc")
+	if err := os.Symlink(bin, link); err != nil {
+		t.Fatalf("link %s as gc: %v", bin, err)
+	}
+	return env.Clone().
+		With("GC_ACCEPTANCE_GC_BIN", link).
+		With("PATH", linkDir+string(os.PathListSeparator)+env.Get("PATH"))
+}
+
+// handOver retires the pre-cutover binary's supervisor with that binary and
+// gives the city to the binary under test. The order matters: a supervisor is
+// stopped by the build that started it, before the next build starts its own
+// against the same GC_HOME.
+func (c *splitE2ECity) handOver() {
+	c.t.Helper()
+	if out, err := helpers.RunGC(c.preEnv, "", "supervisor", "stop", "--wait"); err != nil {
+		c.t.Logf("stopping the pre-cutover supervisor: %v\n%s", err, out)
+	}
+	c.city.Env = c.env
+	c.preEnv = c.env
 }
 
 // splitLegacyDoltPort is the host's shared Dolt default, which no acceptance
@@ -393,7 +481,7 @@ const splitDoltProbeTimeout = "dolt config probe timed out"
 // start boots the city under its own supervisor.
 func (c *splitE2ECity) start() {
 	c.t.Helper()
-	helpers.RunGC(c.env, "", "supervisor", "stop", "--wait") //nolint:errcheck // a stale supervisor must not carry an old env
+	helpers.RunGC(c.city.Env, "", "supervisor", "stop", "--wait") //nolint:errcheck // a stale supervisor must not carry an old env
 	if out, err := c.tryStart(); err != nil {
 		c.t.Fatalf("gc start: %v\n%s", err, out)
 	}
@@ -425,17 +513,18 @@ func (c *splitE2ECity) authorSplit() {
 	c.city.AppendToConfig(splitStorageTOML)
 }
 
-// migrate runs the cutover with bin (this build, or the rc1 build).
-func (c *splitE2ECity) migrate(bin string) {
+// migrate runs the cutover with whichever binary currently owns the city.
+func (c *splitE2ECity) migrate() {
 	c.t.Helper()
-	cmd := exec.Command(bin, "storage", "migrate", "--from-work", "--fleet-stopped")
-	cmd.Dir = c.dir
-	cmd.Env = c.env.List()
-	out, err := cmd.CombinedOutput()
+	bin, err := helpers.ResolveGCPath(c.city.Env)
+	if err != nil {
+		c.t.Fatalf("resolve gc: %v", err)
+	}
+	out, err := c.city.GC("storage", "migrate", "--from-work", "--fleet-stopped")
 	if err != nil {
 		c.t.Fatalf("%s storage migrate --from-work --fleet-stopped: %v\n%s", bin, err, out)
 	}
-	c.t.Logf("%s storage migrate:\n%s", filepath.Base(bin), out)
+	c.t.Logf("%s storage migrate:\n%s", bin, out)
 }
 
 // expectBootRefusalNamingRepair starts the rc1-migrated city with this build
@@ -455,6 +544,7 @@ func (c *splitE2ECity) expectBootRefusalNamingRepair() {
 	if !strings.Contains(out, splitRepairCommand) {
 		c.t.Fatalf("gc start refused the rc1-migrated city without naming %q:\n%s", splitRepairCommand, out)
 	}
+	c.t.Logf("gc start refused the rc1-migrated city as required:\n%s", out)
 }
 
 // finishAndAssert lifts the budget, starts the city, waits for the root to

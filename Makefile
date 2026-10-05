@@ -721,14 +721,15 @@ test-bd-conditional-release-contract:
 ## test-acceptance-b: run Tier B acceptance tests (lifecycle, ~5 min, nightly)
 ACCEPTANCE_B_TIMEOUT ?= 10m
 test-acceptance-b:
-	$(TEST_ENV) go test -tags acceptance_b -timeout $(ACCEPTANCE_B_TIMEOUT) -v ./test/acceptance/tier_b/...
+	$(TEST_ENV) GC_ACCEPTANCE_BD_BIN="$${GC_ACCEPTANCE_BD_BIN-}" GC_ACCEPTANCE_SPLIT_RC1_GC_BIN="$${GC_ACCEPTANCE_SPLIT_RC1_GC_BIN-}" GC_REQUIRE_ACCEPTANCE_SPLIT_RC1_GC="$${GC_REQUIRE_ACCEPTANCE_SPLIT_RC1_GC-}" go test -tags acceptance_b -timeout $(ACCEPTANCE_B_TIMEOUT) -v ./test/acceptance/tier_b/...
 
 ## test-acceptance-split-storage: run the split-storage end-to-end acceptance
 ## test (Tier B tag; #5987): a real controller and a scripted worker run a
-## graph.v2 formula across `gc storage migrate`. Needs bd >= 1.3.0 with
-## --proxied-server (GC_ACCEPTANCE_BD_BIN), dolt and jq. The upgraded-city
-## scenario also needs a gc built from tag v1.5.0-rc1
-## (GC_ACCEPTANCE_SPLIT_RC1_GC_BIN) and skips without it unless
+## graph.v2 formula across `gc storage migrate`. Needs bd >= 1.3.0
+## (GC_ACCEPTANCE_BD_BIN), dolt and jq. The upgraded-city scenario uses a
+## v1.5.0-rc1 gc: GC_ACCEPTANCE_SPLIT_RC1_GC_BIN, or one the test builds from
+## the v1.5.0-rc1 tag (git fetch --no-tags --depth=1 origin
+## +refs/tags/v1.5.0-rc1:refs/tags/v1.5.0-rc1). It skips without either unless
 ## GC_REQUIRE_ACCEPTANCE_SPLIT_RC1_GC is set.
 SPLIT_STORAGE_ACCEPTANCE_TIMEOUT ?= 20m
 test-acceptance-split-storage:

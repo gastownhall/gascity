@@ -26,9 +26,15 @@ jobs:
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
 
+      - name: Fetch the v1.5.0-rc1 tag for the split-storage upgrade scenario
+        # TestSplitStorageMigratedFormulaCompletes builds gc from this tag; the
+        # checkout above is shallow and tagless.
+        run: git fetch --no-tags --depth=1 origin +refs/tags/v1.5.0-rc1:refs/tags/v1.5.0-rc1
+
       - name: Tier B lifecycle tests
         env:
           ACCEPTANCE_B_TIMEOUT: 20m
+          GC_REQUIRE_ACCEPTANCE_SPLIT_RC1_GC: "1"
           EXTRA_TEST_ENV: >-
             GC_IDLE_BEAD_STABILITY_WARMUP=10s
             GC_IDLE_BEAD_STABILITY_SAMPLES=36
