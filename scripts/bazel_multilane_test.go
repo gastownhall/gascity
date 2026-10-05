@@ -265,11 +265,12 @@ func TestBazelMultiLaneWorkflowTriggersAndPermissions(t *testing.T) {
 		t.Errorf("top-level permissions = %v, want %v", wf.Permissions, readOnly)
 	}
 	wantJobs := map[string]map[string]string{
-		"rbe":        {"contents": "read", "actions": "write"}, // dispatches rbe-worker-pool.yml
-		"lane":       readOnly,
-		"coverage":   readOnly,
-		"sync-check": readOnly,
-		"gate":       nil, // the top-level contents: read
+		"rbe":         {"contents": "read", "actions": "write"}, // dispatches rbe-worker-pool.yml
+		"lane":        readOnly,
+		"coverage":    readOnly,
+		"sync-check":  readOnly,
+		"bep-summary": readOnly, // downloads this run's artifacts with the job token
+		"gate":        nil,      // the top-level contents: read
 	}
 	if len(wf.Jobs) != len(wantJobs) {
 		t.Errorf("%s has %d jobs, want %d (%v)", bazelMultiLaneWorkflow, len(wf.Jobs), len(wantJobs), wantJobs)

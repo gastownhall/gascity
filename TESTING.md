@@ -46,6 +46,37 @@ packages, run `make bazel-sync` and commit the regenerated BUILD files
 See `engdocs/bazel-quickstart.md` for local setup and
 `engdocs/bazel-ci-budget.md` for the CI optimization loop.
 
+### Measuring cache hits (BEP cache report)
+
+To check whether a run actually reused results, write a Build Event
+Protocol file and summarize it:
+
+```bash
+bazel test //... --build_event_json_file=/var/tmp/bep-unit.json
+go run ./scripts/bazel-bep-summary.go --context local unit=/var/tmp/bep-unit.json
+```
+
+The report counts test targets as **cached** (local action cache, remote
+cache, or disk cache; bazel's `(cached) PASSED`) or **executed** (remote
+executor or a local strategy), gives passed/flaky/failed totals, the hit
+rate, test time run versus skipped, the action-level runner counts
+(`remote cache hit`, `remote`, `linux-sandbox`, ...) and the slowest
+executed tests. Pass one `PHASE=FILE` per invocation; `--json-out PATH`
+writes the machine-readable report (schema 1), `--allow-missing` shows an
+absent file as "no BEP file" instead of failing, and `--top N` sizes the
+slowest list. `bazel-test.yml` runs it after every `bazel test` step
+(unit, acceptance, integration) into the job summary and uploads the JSON
+as the `bazel-bep-summary-<attempt>` artifact, so hit rates can be
+compared across pre-push, PR, and main runs. `bazel.yml` does the same per
+lane: each lane uploads its BEP file, redacted to the fields the report
+reads (`internal/testpolicy/bepsummary/redact.jq`: a raw BEP file holds the
+expanded command line, including `--remote_executor`), and the
+`bazel / test cache report` job reports them in one table (one phase per
+lane, context `<event>/<mode>`) and uploads
+`bazel-yml-bep-summary-<attempt>`.
+`scripts/bazel_bep_summary_workflow_test.go` fails if a `bazel test`
+invocation or a `bazel.yml` lane stops writing a BEP file the report reads.
+
 ### Bazel cache tiers
 
 A result is reused only by a run that hashes the action identically, so
