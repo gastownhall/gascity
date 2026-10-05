@@ -2115,6 +2115,10 @@ entry using source plus optional version. Supported sources are:
   with the pack subpath and locked to the current commit
 - remote git repositories: cloned and locked; --version accepts a semver
   constraint or sha:&lt;commit&gt;
+- packs published in a configured pack registry: a semver --version (or no
+  --version) resolves against the registry's release entries, not git tags;
+  the constraint is kept, the lock records the release version and commit,
+  and the fetched content must match the release's content hash
 - remote GitHub repository subpaths: use dereferenceable tree URLs such as
   https://github.com/org/repo/tree/main/packs/foo
 
@@ -2332,6 +2336,7 @@ gc init --template gascity --default-provider claude \
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--allow-supervisor-mismatch` | bool |  | register the city even when the running supervisor is a different gc installation than this binary |
 | `--beads-target` | string |  | beads target selector: local or external (or GC_BEADS_TARGET); give with --beads-transport. Default local. external requires --dolt-host, --dolt-port and --dolt-database (or GC_DOLT_HOST/GC_DOLT_PORT/GC_DOLT_DATABASE); bd resolves the project_id itself, so --dolt-project-id is not needed with a selector |
 | `--beads-transport` | string |  | beads transport selector: direct or proxied (or GC_BEADS_TRANSPORT); give with --beads-target. Default proxied: bd owns the Dolt process, any bd read restarts it, and gc stop stops it. direct is the escape hatch and is also bd-owned (bd init --server), not the legacy gc-managed server. Every fresh provider-owned init requires bd &gt;= 1.3.0, selector or not; only the legacy --dolt-host alias given without a selector stays on the 1.0.4 floor |
 | `--bootstrap-profile` | string |  | bootstrap profile to apply for hosted/container defaults |
@@ -4620,6 +4625,7 @@ gc supervisor run
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--allow-supervisor-mismatch` | bool |  | start even when the running supervisor is a different gc installation than this binary |
 | `-n`, `--dry-run` | bool |  | preview what agents would start without starting them |
 | `--json` | bool |  | emit JSONL summary |
 | `--no-auto-restart` | bool |  | detect supervisor binary drift but do not auto-restart; exits non-zero on drift |

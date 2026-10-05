@@ -134,7 +134,7 @@ func (x *createEffects) writeNamed(pass *createPass, p createPlan, tp TemplatePa
 // legacy's reopen batch in one write: conditional on the revision the
 // fenced read saw where the store resolves a conditional writer, else
 // legacy's transaction (last writer wins, design §4a N3). The entry names
-// the row, and the revision read, before anything is checked or written;
+// the row before anything is checked or written;
 // settle reads a refused write (a lost fence, a writer that cannot fence)
 // as no write.
 func (x *createEffects) reopenNamed(store beads.Store, live beads.Store, cfg *config.City, p createPlan, closed beads.Bead, now time.Time, prog *createProgress) (session.Info, error) {
@@ -143,7 +143,7 @@ func (x *createEffects) reopenNamed(store beads.Store, live beads.Store, cfg *co
 	if err != nil {
 		return session.Info{}, fmt.Errorf("reopening configured named session %q: %w", plan.Identity, err)
 	}
-	if !x.host.ledger.Retarget(p.EntryID, closed.ID, closed.Revision) {
+	if !x.host.ledger.Retarget(p.EntryID, closed.ID) {
 		return session.Info{}, fmt.Errorf("reopening configured named session %q: create entry %s is no longer issued", plan.Identity, p.EntryID)
 	}
 	state := "stopped"

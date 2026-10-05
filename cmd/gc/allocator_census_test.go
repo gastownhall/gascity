@@ -318,6 +318,25 @@ func TestCensusNonExactLegFreshThroughRecordingsExpires(t *testing.T) {
 	}
 }
 
+// Kills: a last-good leg stamped with the start of the failed read that sent
+// it to last good. That read began after the rows it serves were read, so an
+// ambiguous create settled between the two reads would clear as unwritten
+// against rows read before its write (C5.4(3)).
+func TestCensusLastGoodKeepsItsOwnReadStartWhenTheFailedReadIsLater(t *testing.T) {
+	t0 := time.Unix(1_000, 0)
+	rec := censusRecording{StartedAt: t0, At: t0.Add(time.Second), Expires: t0.Add(time.Hour)}
+	r := newCensusReader(censusLegFeed{
+		exact:    func(beads.Store) bool { return false },
+		recorded: func(beads.Store) (censusRecording, bool) { return rec, true },
+	})
+	r.readLeg(t0.Add(time.Second), classStoreCandidate{ref: "sessions"})
+	rec = censusRecording{StartedAt: t0.Add(time.Minute), At: t0.Add(61 * time.Second), Expires: t0.Add(time.Hour), Err: errors.New("down")}
+	leg, _ := r.readLeg(t0.Add(62*time.Second), classStoreCandidate{ref: "sessions"})
+	if leg.State != legLastGood || !leg.StartedAt.Equal(t0) {
+		t.Fatalf("last-good leg = %+v, want StartedAt %v from the read that produced its rows", leg, t0)
+	}
+}
+
 // Kills: bd subprocess I/O in the pass (F6), and a recording served to the
 // wrong leg. A non-exact leg is served from the backstop lane's recording of
 // its own store and the store is never called; with no recording the leg is

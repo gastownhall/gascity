@@ -3401,13 +3401,14 @@ func cleanupDeadRuntimeSessionCorpses(
 // inv, when set, nominates the names to check and skips names whose listed
 // incarnation the lane attributed to a bead the snapshot holds open. Every
 // Stop still follows a fresh GetMeta of that name and a fresh exact-name
-// listing that still shows it.
+// listing that still shows it. cityPath keys the runtime-name lock.
 func reapRuntimesBoundToClosedBeads(
 	store beads.Store,
 	sessionBeads *sessionBeadSnapshot,
 	dt *drainTracker,
 	sp runtime.Provider,
 	inv *runtimeInventoryView,
+	cityPath string,
 	stderr io.Writer,
 ) int {
 	if store == nil || sp == nil {
@@ -3493,17 +3494,11 @@ func reapRuntimesBoundToClosedBeads(
 			continue
 		}
 
-		// A lane-nominated name may be gone by now, and providers whose
-		// GetMeta reads sidecar files (acp, subprocess) answer for a gone
-		// name. Stop only a name a fresh exact-name listing still shows,
-		// as a live listing would have.
-		if inv != nil {
-			if names, _ := sp.ListRunning(name); !slices.Contains(names, name) {
-				continue
-			}
+		stopped, err := stopStillBoundClosedRuntime(cityPath, name, liveID, sp, inv != nil)
+		if !stopped {
+			continue
 		}
-
-		if err := sp.Stop(name); err != nil {
+		if err != nil {
 			if runtime.IsSessionGone(err) {
 				continue
 			}
@@ -3514,6 +3509,33 @@ func reapRuntimesBoundToClosedBeads(
 		reaped++
 	}
 	return reaped
+}
+
+// stopStillBoundClosedRuntime is the closed-bead reap's Stop. A v2 start can
+// put a fresh runtime under name while the reaper's reads run. Under the name
+// lock, which the start holds across its provider Start, it re-reads the
+// binding and stops only a runtime still bound to the closed bead liveID (P4
+// F14); a name mid-start is skipped. A lane-nominated name (listed) may be
+// gone by now, and providers whose GetMeta reads sidecar files (acp,
+// subprocess) answer for a gone name, so it then stops only a name a fresh
+// exact-name listing still shows, as a live listing would have. stopped
+// reports whether Stop ran, and err is its error. The unlock is deferred, so a
+// provider panic cannot leave the name locked.
+func stopStillBoundClosedRuntime(cityPath, name, liveID string, sp runtime.Provider, listed bool) (bool, error) {
+	unlock := runtimeNames.tryLock(cityPath, name)
+	if unlock == nil {
+		return false, nil
+	}
+	defer unlock()
+	if again, err := sp.GetMeta(name, "GC_SESSION_ID"); err != nil || strings.TrimSpace(again) != liveID {
+		return false, nil
+	}
+	if listed {
+		if names, _ := sp.ListRunning(name); !slices.Contains(names, name) {
+			return false, nil
+		}
+	}
+	return true, sp.Stop(name)
 }
 
 // fencedInfrastructureRootSet remembers, per city, which fenced

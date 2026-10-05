@@ -324,6 +324,16 @@ func TestRBEWorkerScriptAdvertisesWorkerEnv(t *testing.T) {
 	if n := strings.Count(script, "apt-get install"); n != 2 {
 		t.Errorf("%s has %d apt-get installs, want the toolset's and the isolation phase's", rbeWorkerScript, n)
 	}
+	// The image's apt lists carry newer candidates than some installed
+	// packages (installing libc6-dev upgrades libc6), so an install after
+	// the measurement could move a measured package on a host that already
+	// advertised its hash. Every later install adds packages only.
+	measured := strings.Index(script, "\ntools/rbe/worker-env ")
+	for _, m := range regexp.MustCompile(`apt-get install[^\n]*`).FindAllStringIndex(script, -1) {
+		if m[0] > measured && !strings.Contains(script[m[0]:m[1]], " --no-upgrade") {
+			t.Errorf("%s: %q runs after the worker-env measurement without --no-upgrade", rbeWorkerScript, script[m[0]:m[1]])
+		}
+	}
 }
 
 // checkWorkerJSONAdvertises checks a rendered worker.json advertises

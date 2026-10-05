@@ -2,13 +2,19 @@
 # Run a NativeLink remote-execution worker on a Blacksmith runner for the life of
 # this workflow run's Bazel job, then drain and exit.
 #
-# Blacksmith donates this compute for OSS-repo workflows only. The worker
+# Blacksmith donates this compute for OSS-project work only. The worker
 # registers with rbe-west's OSS scheduler (clients reach it with
-# --remote_instance_name=oss); developer and agent builds use the default
-# instance and never run here. The OSS and default instances share one CAS,
+# --remote_instance_name=oss): OSS CI, plus allowlisted maintainers building
+# OSS code with an operator-issued client certificate. Other developer and
+# agent builds use the default instance and never run here. The OSS and
+# default instances share one CAS,
 # but rbe-west splits the action cache: results written here go to the "oss"
 # action cache, which fork PRs read anonymously and the default instance
-# reads through (never writes). So REMOTE_AC must say "oss".
+# reads through (never writes). So REMOTE_AC must say "oss", and so must the
+# CAS stores: rbe-west's :443 confines this certificate to listeners that
+# know instance "oss" alone (infra README "OSS worker certificate confined",
+# FU2), where "" is 'instance_name' not configured. The fork tier says
+# oss-fork, never "".
 #
 # Env (from the workflow):
 #   RBE_WORKER_TLS_CERT / RBE_WORKER_TLS_KEY  base64 PEM, CN=rbe-oss-worker
@@ -44,16 +50,24 @@
 #                       uploads stay identity (no writable rbe-west listener
 #                       accepts zstd). The remote CAS is split: REMOTE_READ
 #                       (zstd, RBE_WIRE_ZSTD_READ_URL) and REMOTE_WRITE
-#                       (identity, the worker's own endpoint). Needs rbe-west's
-#                       read-only zstd route for this tier first, else every
-#                       such fetch fails with InvalidArgument. 0 (default):
-#                       identity through one REMOTE_CAS, as before.
-#   RBE_WIRE_ZSTD_READ_URL  where REMOTE_READ fetches (default: the worker's
-#                       own grpcs://RBE_WEST_HOST:RBE_WEST_PORT). rbe-west's
-#                       edge sends this certificate's ByteStream.Read there to
-#                       the read-only zstd process (fork: Caddyfile.fork :8444;
-#                       oss: the :443 route); everything else goes where it
-#                       always did.
+#                       (identity, the worker's own endpoint). Needs
+#                       RBE_WIRE_ZSTD_READ_URL set to the dedicated zread
+#                       host below, else every such fetch fails with
+#                       InvalidArgument (there is no identity fallback). 0
+#                       (default): identity through one REMOTE_CAS, as before.
+#   RBE_WIRE_ZSTD_READ_URL  where REMOTE_READ fetches when RBE_WIRE_ZSTD=1.
+#                       The farm serves zstd reads only on dedicated zread
+#                       hostnames, never the worker's own endpoint: OSS
+#                       grpcs://rbe-zread.ops.gascity.com:443, fork
+#                       grpcs://rbe-fork-zread.ops.gascity.com:8444 (the
+#                       normal hosts return InvalidArgument for compressed
+#                       reads). Required when RBE_WIRE_ZSTD=1; the worker
+#                       exits 2 instead of registering if this is empty or
+#                       equal to its own grpcs://RBE_WEST_HOST:RBE_WEST_PORT.
+#                       Rollback: set RBE_WIRE_ZSTD (RBE_FORK_WIRE_ZSTD for
+#                       the fork pool) to 0; for an emergency rollback cancel
+#                       the pool runs, since an in-flight worker keeps its
+#                       store (and this switch) until it retires.
 #   RBE_ACTION_ISOLATION  1 (default): every action runs as a per-action slot
 #                       user in private namespaces (below). 0: the rollback
 #                       switch, actions run as this runner user as before.
@@ -97,6 +111,12 @@ RBE_WEST_PORT=${RBE_WEST_PORT:-443}
 if [ "$WORKER_MODE" != measure ]; then
 	ZSTD_READ_URL=${RBE_WIRE_ZSTD_READ_URL:-grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT}}
 	[[ $ZSTD_READ_URL =~ ^grpcs://[A-Za-z0-9.-]+:[0-9]{1,5}$ ]] || { echo "RBE_WIRE_ZSTD_READ_URL must be grpcs://host:port" >&2; exit 2; }
+	# The worker's own endpoint answers compressed reads with InvalidArgument (no
+	# identity fallback): zstd needs the dedicated zread host.
+	if [ "$wire_zstd" = true ] && [ "$ZSTD_READ_URL" = "grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT}" ]; then
+		echo "RBE_WIRE_ZSTD=1 needs RBE_WIRE_ZSTD_READ_URL (fork pool: RBE_FORK_WIRE_ZSTD_READ_URL) set to the zread host, not grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT}" >&2
+		exit 2
+	fi
 fi
 NL_VERSION=1.7.1
 NL_SHA256=a3d7abc2598e976d022fcdabe88a2f8fae46a3ae64f1868698002ca968dd88e9
@@ -297,7 +317,7 @@ render() {
 	jq -n --arg host "grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT:-443}" --arg root "$ROOT" --arg store "$STORE" --arg name "$WORKER_NAME" --argjson slots "$slots" --arg tier "${WORKER_TIER:-oss}" --arg worker_env "$WORKER_ENV" --argjson zstd "${wire_zstd:-false}" --arg read "${ZSTD_READ_URL:-grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT:-443}}" --argjson casmax "${CAS_MAX_BYTES:-150000000000}" --arg work "${WORK:-$ROOT/work}" --argjson isolation "$isolation" '
   { cert_file: ($root + "/pki/worker.pem"), key_file: ($root + "/pki/worker.key"),
     ca_file: "/etc/ssl/certs/ca-certificates.crt" } as $tls |
-  (if $tier == "fork" then "oss-fork" else "" end) as $cas_instance |
+  (if $tier == "fork" then "oss-fork" else "oss" end) as $cas_instance |
   {
     stores: [
       (if ($ARGS.named.zstd // false) then
@@ -353,7 +373,10 @@ isolate() {
 		case "$d" in "$MASK_ROOT"/*) ;; *) fail "$d must be under $MASK_ROOT (MASK_ROOT, hidden from actions)" ;; esac
 	done
 	phase packages
-	sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y -qq \
+	# --no-upgrade: this host already advertised worker-env, so add what is
+	# missing but move no installed package (libc6-dev would pull libc6, and
+	# util-linux and procps are measured).
+	sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y -qq --no-upgrade \
 		gcc libc6-dev nftables file util-linux procps >/dev/null
 	phase users
 	# The nft rules cover uids 59000-59063 whatever owns them: anything already

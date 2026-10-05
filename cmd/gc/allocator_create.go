@@ -58,7 +58,7 @@ type createPlan struct {
 }
 
 // identity is the create identity the plan materializes: the key of its
-// create veto (AM-N8).
+// create backoff record (AM-N8).
 func (p createPlan) identity() createIdentity {
 	if p.Named != nil {
 		return createIdentity{Template: p.Named.Template, QualifiedInstance: p.Named.Identity, Named: true}
@@ -90,14 +90,6 @@ func (c createIdentity) agentIn(cfg *config.City) (*config.Agent, error) {
 	return cfgAgent, nil
 }
 
-// createIdentityConfigured is PruneCreateVetoes' predicate for cfg.
-func createIdentityConfigured(cfg *config.City) func(createIdentity) bool {
-	return func(c createIdentity) bool {
-		_, err := c.agentIn(cfg)
-		return err == nil
-	}
-}
-
 // createPlanOf adapts a planner create plan (selectOrPlanPoolSessionBead, or
 // the dependency floor's) to the create entry entryID.
 func createPlanOf(entryID, template string, p poolSessionCreatePlan) createPlan {
@@ -122,9 +114,8 @@ func createPlanOf(entryID, template string, p poolSessionCreatePlan) createPlan 
 // identifier locks and the live re-census instead.
 //
 // An effect writes through the stores it was handed. After a store swap, a
-// closed store fails the effect: before the write as a no-write failure, or
-// at the write itself, which settles as ambiguous (a closed store and a lost
-// write look alike), so lag repair decides.
+// closed store fails the effect as a no-write failure, at the write too: a
+// closed store refuses before it writes (createWriteRefused).
 type createPass struct {
 	cfg *config.City
 	// sp answers transport capability checks only; no effect probes it.
@@ -149,11 +140,11 @@ type createEffectHost struct {
 	withLocks poolSessionIdentifierLockFunc
 	// verify is worktree.Verify unless a test injects one.
 	verify func(worktree.Spec) (worktree.Report, error)
-	// verdicts is the worktree verdict cache the planner reads. It is
-	// required: a private cache would hide every verdict from the planner.
-	verdicts *worktreeVerdicts
-	now      func() time.Time
-	stderr   io.Writer
+	// backoff is the backoff table the planner reads. It is required: a
+	// private table would hide every refusal from the planner.
+	backoff *backoffTable
+	now     func() time.Time
+	stderr  io.Writer
 }
 
 // createEffects is the executor: at most createEffectParallelism effects run
@@ -174,14 +165,14 @@ type createJob struct {
 }
 
 // newCreateEffects builds the executor. It refuses a host without the
-// ledger, the shared verdict cache or the city path: with no city path the
+// ledger, the shared backoff table or the city path: with no city path the
 // identifier locks would fence this process only (C7.1 tier 2).
 func newCreateEffects(h createEffectHost) (*createEffects, error) {
 	switch {
 	case h.ledger == nil:
 		return nil, errors.New("create effects: no intent ledger")
-	case h.verdicts == nil:
-		return nil, errors.New("create effects: no worktree verdict cache")
+	case h.backoff == nil:
+		return nil, errors.New("create effects: no backoff table")
 	case strings.TrimSpace(h.cityPath) == "":
 		return nil, errors.New("create effects: no city path for the identifier locks")
 	}
@@ -260,7 +251,7 @@ func (x *createEffects) work() {
 }
 
 // Create effect stages. A no-write failure names the stage it failed in as
-// its create veto's cause (ineligible:create-refused:<cause>).
+// its create backoff's cause (ineligible:create-refused:<cause>).
 const (
 	createStageStalePlan = "stale-plan" // the plan's template or identity left config
 	createStageWorktree  = "worktree"   // the plan's worktree evidence failed verification
@@ -286,7 +277,7 @@ type createProgress struct {
 // nothing; from the write on, the row may exist, so it settles as ambiguous.
 func (x *createEffects) run(job createJob) {
 	p := job.plan
-	token, ok := x.host.ledger.IssueCreate(p.EntryID)
+	token, configRev, ok := x.host.ledger.IssueCreate(p.EntryID)
 	if !ok {
 		return // released first: the allocator re-decides
 	}
@@ -304,7 +295,7 @@ func (x *createEffects) run(job createJob) {
 				prog.stage = createStagePanic
 			}
 		}
-		x.settle(p, token, prog.stage, info, err)
+		x.settle(p, token, configRev, prog.stage, info, err)
 	}()
 	if p.Named != nil {
 		info, err = x.createNamed(job.pass, p, token, &prog)
@@ -335,18 +326,19 @@ func (x *createEffects) run(job createJob) {
 
 // verifiedMetadata verifies the plan's worktree evidence and stamps the
 // verified work dir as poolTriggerMetadata does outside planOnly (POOL-055,
-// #34). A failure writes nothing and is remembered, so the planner stops
-// binding the work while its evidence stands.
+// #34). A failure writes nothing and records a work backoff, so the planner
+// stops binding the work while the same evidence stands (C6.5(a)).
 func (x *createEffects) verifiedMetadata(p createPlan) (map[string]string, error) {
 	if p.WorktreeSpec == nil {
 		return p.Metadata, nil
 	}
+	key := workBackoffKey(p.WorktreeSpec.BeadID)
 	report, err := x.host.verify(*p.WorktreeSpec)
 	if err != nil {
-		x.host.verdicts.record(*p.WorktreeSpec, x.host.now())
+		x.host.backoff.Refuse(key, x.host.now(), time.Time{}, createStageWorktree, specFingerprint(*p.WorktreeSpec))
 		return nil, fmt.Errorf("%w: verification failed: %w", errPoolTriggerWorktreeEvidence, err)
 	}
-	x.host.verdicts.verified(p.WorktreeSpec.BeadID)
+	x.host.backoff.Succeed(key)
 	metadata := make(map[string]string, len(p.Metadata)+2)
 	maps.Copy(metadata, p.Metadata)
 	if report.Path != "" {
@@ -381,22 +373,24 @@ func (x *createEffects) view(pass *createPass, token string) poolCreateView {
 
 // settle records the effect's outcome and wakes the allocator (C5.12). A
 // create commits with its row ID and token, and resets its identity's create
-// veto. An error from the write itself is ambiguous, since the row may
-// exist: it commits with the token (and the row ID, when known) as its
-// marker, and lag repair decides (C5.4, C5.15); an ambiguous named reopen
-// also wakes its row's session key, since a Tx reopen raises no event on the
-// binding. A write the store refused (createWriteRefused), and any other
-// error, wrote nothing: the entry fails, its clear refunds, and its identity
-// gets a create veto (AM-N8), except for failed worktree evidence, which the
-// verdict cache throttles per work item rather than per slot. A pool create's
-// veto is "fence" only when the locked checks proved its name taken; any
-// other failure under the locks (a failed live re-census or alias query, a
-// refused write) is "fence-read", which stalls the request where "fence"
-// moves it to the next slot (F3).
+// backoff. An error from the write itself is ambiguous, since the row may
+// exist: it commits as ambiguous with the token (and the row ID, when known)
+// as its marker, and a read started after the settle decides (C5.4(3)); an
+// ambiguous named reopen also wakes its row's session key, since a Tx reopen
+// raises no event on the binding. A row write the store refused
+// (createWriteRefused), and any other error, wrote nothing: the entry fails,
+// and its identity gets a create backoff (AM-N8) under configRev, the
+// ConfigRev the entry was reserved under, except for failed worktree
+// evidence, whose work backoff throttles the work item rather than the slot.
+// A pool create's cause is "fence" only when the locked checks proved its
+// name taken; any other failure under the locks (a failed live re-census or
+// alias query, a refused write) is "fence-read", which stalls the request
+// where "fence" moves it to the next slot (F3).
 //
-// The ledger moves first. A panic after it (a wake or log sink) is
-// recovered: the entry is settled, and the worker lives on.
-func (x *createEffects) settle(p createPlan, token, stage string, info session.Info, err error) {
+// The backoff moves before the ledger, so no pass sees the settle without
+// it. A panic after them (a wake or log sink) is recovered: the entry is
+// settled, and the worker lives on.
+func (x *createEffects) settle(p createPlan, token, configRev, stage string, info session.Info, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			x.logf("allocator: settling create %s: panic: %v\n", p.EntryID, r)
@@ -408,11 +402,12 @@ func (x *createEffects) settle(p createPlan, token, stage string, info session.I
 	)
 	switch {
 	case err == nil:
-		x.host.ledger.CommitCreate(p.EntryID, p.identity(), ledgerMarker{RowID: info.ID, InstanceToken: token})
+		x.host.backoff.Succeed(createBackoffKey(p.identity().key()))
+		x.host.ledger.CommitCreate(p.EntryID, false, ledgerMarker{RowID: info.ID, InstanceToken: token})
 		x.wake(reconcilekey.Session(info.ID))
 		return
-	case errors.As(err, &written) && !createWriteRefused(err):
-		x.host.ledger.Commit(p.EntryID, ledgerMarker{RowID: written.rowID, InstanceToken: token})
+	case errors.As(err, &written) && (written.landed || !createWriteRefused(err)):
+		x.host.ledger.CommitCreate(p.EntryID, true, ledgerMarker{RowID: written.rowID, InstanceToken: token})
 		if p.Named != nil && written.rowID != "" {
 			keys = append(keys, reconcilekey.Session(written.rowID))
 		}
@@ -422,7 +417,8 @@ func (x *createEffects) settle(p createPlan, token, stage string, info session.I
 		if stage == createStageFence && p.Named == nil && !errors.Is(err, errPoolSessionNameUnavailable) {
 			stage = createStageFenceRead
 		}
-		x.host.ledger.FailCreate(p.EntryID, p.identity(), stage)
+		x.host.backoff.Refuse(createBackoffKey(p.identity().key()), x.host.now(), time.Time{}, stage, configRev)
+		x.host.ledger.Fail(p.EntryID, false, ledgerMarker{})
 	}
 	subject := p.Template
 	if p.Named != nil {
@@ -434,12 +430,15 @@ func (x *createEffects) settle(p createPlan, token, stage string, info session.I
 
 // createWriteRefused reports a write error that proves the store wrote
 // nothing: a lost revision fence, a store that cannot fence, a backend gate
-// refusal, or a not-found (bd's classification of a code-less not-found,
-// bdstore_conditional.go). The connection class, where the write may have
-// committed, is none of these.
+// refusal, a not-found (bd's classification of a code-less not-found,
+// bdstore_conditional.go), a closed store (SQLite's ensureOpen and native
+// Dolt's acquireStorage refuse before any write; no other store returns
+// it), or a SQLite write whose busy retries ran out uncommitted. The
+// connection class, where the write may have committed, is none of these.
 func createWriteRefused(err error) bool {
 	return beads.IsPreconditionFailed(err) || beads.IsConditionalWriteUnsupported(err) ||
-		beads.IsGateRefusal(err) || errors.Is(err, beads.ErrNotFound)
+		beads.IsGateRefusal(err) || errors.Is(err, beads.ErrNotFound) ||
+		errors.Is(err, beads.ErrStoreClosed) || errors.Is(err, beads.ErrSQLiteBusyExhausted)
 }
 
 // logf reports to stderr. A panicking writer is ignored: it must not kill a
@@ -452,69 +451,5 @@ func (x *createEffects) logf(format string, args ...any) {
 func (x *createEffects) wake(keys ...reconcilekey.Key) {
 	if x.host.enqueue != nil {
 		x.host.enqueue("create", append([]reconcilekey.Key{reconcilekey.Allocator()}, keys...)...)
-	}
-}
-
-// worktreeVerdicts remembers, per work bead, the worktree evidence a create
-// effect failed to verify (C6.2, C6.5a, POOL-054/055, #34). The planner skips
-// binding a work bead while its verdict stands, so a bad work item is not
-// created and refused on every pass. A verdict stands for C5.11's backoff
-// (10s doubling per consecutive failure of the same evidence, capped at 5m),
-// so evidence repaired out of band is retried. New evidence for the bead
-// (another generation, path or branch) is verified afresh, a successful
-// verify drops the verdict, and prune drops beads no longer in demand.
-type worktreeVerdicts struct {
-	mu     sync.Mutex
-	failed map[string]worktreeVerdict
-}
-
-type worktreeVerdict struct {
-	spec        worktree.Spec
-	until       time.Time
-	consecutive int
-}
-
-func (v *worktreeVerdicts) record(spec worktree.Spec, now time.Time) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if v.failed == nil {
-		v.failed = make(map[string]worktreeVerdict)
-	}
-	f := v.failed[spec.BeadID]
-	if f.spec != spec {
-		f = worktreeVerdict{spec: spec}
-	}
-	if !f.until.After(now) {
-		f.consecutive++
-	}
-	f.until = now.Add(vetoBackoff(f.consecutive))
-	v.failed[spec.BeadID] = f
-}
-
-// verified drops beadID's verdict: its evidence verified.
-func (v *worktreeVerdicts) verified(beadID string) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	delete(v.failed, beadID)
-}
-
-// refuses reports whether spec is evidence that failed verification and
-// whose verdict still stands at now.
-func (v *worktreeVerdicts) refuses(spec worktree.Spec, now time.Time) bool {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	f, ok := v.failed[spec.BeadID]
-	return ok && f.spec == spec && f.until.After(now)
-}
-
-// prune drops the verdict of every bead not in demand, so the cache stays
-// bounded by the current demand set. The planner calls it each pass.
-func (v *worktreeVerdicts) prune(demand map[string]bool) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	for beadID := range v.failed {
-		if !demand[beadID] {
-			delete(v.failed, beadID)
-		}
 	}
 }
