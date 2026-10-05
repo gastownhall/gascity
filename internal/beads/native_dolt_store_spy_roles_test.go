@@ -274,14 +274,32 @@ func (s *nativeDoltMemStorage) Releaser() (issueops.Releaser, error) {
 }
 
 // rawBatchApplier reproduces issueops.BatchApplier over the double's own
-// lifecycle role, so a fixture that records or applies UpdateRequests keeps
-// seeing the requests the store composed even when the store routes a patch
-// through the batch door.
+// lifecycle and dependency-editor roles, so a fixture that records or applies
+// UpdateRequests (or AddDependency calls) keeps seeing the requests the store
+// composed even when the store routes a patch, close, or edge through the
+// batch door — including the native graph-apply route, which composes
+// create/dep_add/update items in one request.
+//
+// Ref.Key resolution is LOCAL to one ApplyBatch call, matching the role's own
+// per-request scoping: a key an earlier create item in THIS request named
+// resolves to the id that item minted, and nothing else is consulted.
+// CreateItem.MetadataRefs is spliced AFTER every item in the request has run
+// (a second write per spliced issue), matching the role's documented
+// "every id is minted before any splice is applied" rule, including refs
+// that reach FORWARD to a create item later in the same request.
 //
 // It is deliberately NOT atomic: the doubles it serves have no transaction to
 // roll back, and inventing one here would let a test pass against a store that
 // dialed a partial batch.
 type rawBatchApplier struct{ storage beadslib.Storage }
+
+// rawBatchApplierPendingSplice defers a CreateItem.MetadataRefs splice until
+// every item in the request has run and every id is known, per
+// CreateItem.MetadataRefs's own rule.
+type rawBatchApplierPendingSplice struct {
+	issueID string
+	refs    map[string]issueops.Ref
+}
 
 // ApplyBatch applies each item and answers ONE ItemResult per item, in request
 // order, carrying the Changed the underlying operation reported.
@@ -305,12 +323,30 @@ func (a rawBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBatch
 		return issueops.ApplyBatchResult{}, err
 	}
 	result := issueops.ApplyBatchResult{Keys: map[string]string{}, Items: make([]issueops.ItemResult, 0, len(req.Items))}
+	keys := map[string]string{}
+	var splices []rawBatchApplierPendingSplice
+
+	resolve := func(ref issueops.Ref) (string, error) {
+		if ref.ID != "" {
+			return ref.ID, nil
+		}
+		id, ok := keys[ref.Key]
+		if !ok {
+			return "", fmt.Errorf("rawBatchApplier: ref key %q does not resolve to any create item in this request", ref.Key)
+		}
+		return id, nil
+	}
+
 	for _, item := range req.Items {
 		switch item.Kind {
 		case issueops.ItemUpdate:
+			targetID, err := resolve(item.Update.Target)
+			if err != nil {
+				return issueops.ApplyBatchResult{}, err
+			}
 			updated, err := lifecycle.Update(ctx, issueops.UpdateRequest{
 				Actor:                 req.Actor,
-				IssueID:               item.Update.Target.ID,
+				IssueID:               targetID,
 				Patch:                 item.Update.Patch,
 				ForceAssigneeTransfer: item.Update.ForceAssigneeTransfer,
 				ForceClosePolicy:      item.Update.ForceClosePolicy,
@@ -322,12 +358,16 @@ func (a rawBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBatch
 				return issueops.ApplyBatchResult{}, err
 			}
 			result.Items = append(result.Items, issueops.ItemResult{
-				Kind: item.Kind, IssueID: item.Update.Target.ID, Changed: updated.Changed,
+				Kind: item.Kind, IssueID: targetID, Changed: updated.Changed,
 			})
 		case issueops.ItemClose:
+			targetID, err := resolve(item.Close.Target)
+			if err != nil {
+				return issueops.ApplyBatchResult{}, err
+			}
 			closed, err := lifecycle.Close(ctx, issueops.CloseRequest{
 				Actor:           req.Actor,
-				IssueID:         item.Close.Target.ID,
+				IssueID:         targetID,
 				Reason:          item.Close.Reason,
 				Session:         item.Close.Session,
 				Force:           item.Close.Force,
@@ -337,7 +377,7 @@ func (a rawBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBatch
 				return issueops.ApplyBatchResult{}, err
 			}
 			result.Items = append(result.Items, issueops.ItemResult{
-				Kind: item.Kind, IssueID: item.Close.Target.ID, Changed: closed.Changed,
+				Kind: item.Kind, IssueID: targetID, Changed: closed.Changed,
 			})
 		case issueops.ItemCreate:
 			created, err := lifecycle.Create(ctx, issueops.CreateRequest{Actor: req.Actor, Issue: item.Create.Issue})
@@ -350,14 +390,69 @@ func (a rawBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBatch
 			}
 			if item.Create.Key != "" && id != "" {
 				result.Keys[item.Create.Key] = id
+				keys[item.Create.Key] = id
+			}
+			if len(item.Create.MetadataRefs) > 0 && id != "" {
+				splices = append(splices, rawBatchApplierPendingSplice{issueID: id, refs: item.Create.MetadataRefs})
 			}
 			result.Items = append(result.Items, issueops.ItemResult{
 				Kind: item.Kind, IssueID: id, Changed: true,
+			})
+		case issueops.ItemDepAdd:
+			graph, ok := a.storage.(rawGraphStorage)
+			if !ok {
+				return issueops.ApplyBatchResult{}, fmt.Errorf("rawBatchApplier: storage %T does not support dependency edges", a.storage)
+			}
+			sourceID, err := resolve(item.DepAdd.Source)
+			if err != nil {
+				return issueops.ApplyBatchResult{}, err
+			}
+			targetID, err := resolve(item.DepAdd.Target)
+			if err != nil {
+				return issueops.ApplyBatchResult{}, err
+			}
+			dep := &beadslib.Dependency{
+				IssueID:     sourceID,
+				DependsOnID: targetID,
+				Type:        item.DepAdd.Type,
+				Metadata:    item.DepAdd.Metadata,
+			}
+			if err := graph.AddDependency(ctx, dep, req.Actor); err != nil {
+				return issueops.ApplyBatchResult{}, err
+			}
+			result.Items = append(result.Items, issueops.ItemResult{
+				Kind: item.Kind, IssueID: sourceID, DependsOnID: targetID, Changed: true,
 			})
 		default:
 			return issueops.ApplyBatchResult{}, fmt.Errorf("rawBatchApplier: unsupported item kind %q", item.Kind)
 		}
 	}
+
+	// The splice pass runs only after every item above has landed, so a
+	// MetadataRefs entry naming a create item LATER in the request resolves
+	// exactly as issueops.CreateItem.MetadataRefs documents.
+	for _, splice := range splices {
+		values := make(map[string]json.RawMessage, len(splice.refs))
+		for metaKey, ref := range splice.refs {
+			resolvedID, err := resolve(ref)
+			if err != nil {
+				return issueops.ApplyBatchResult{}, err
+			}
+			raw, err := json.Marshal(resolvedID)
+			if err != nil {
+				return issueops.ApplyBatchResult{}, err
+			}
+			values[metaKey] = raw
+		}
+		if _, err := lifecycle.Update(ctx, issueops.UpdateRequest{
+			Actor:   req.Actor,
+			IssueID: splice.issueID,
+			Patch:   issueops.IssuePatch{Metadata: issueops.MetadataPatch{Set: values}},
+		}); err != nil {
+			return issueops.ApplyBatchResult{}, err
+		}
+	}
+
 	return result, nil
 }
 
