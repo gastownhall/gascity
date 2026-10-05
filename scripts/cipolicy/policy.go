@@ -65,7 +65,10 @@ const (
 	// Bumped for the Beads v1.3.0 -> v1.3.1-rc.2 -> v1.3.1 pins: every job's
 	// BD_VERSION env value moves to the new tag. Reviewed delta: that value only.
 	// Then the Dolt 2.1.7 -> 2.2.0 pin (#7070): job DOLT_VERSION env values only.
-	expectedCIExecutionHash     = "a458c3b4fe738b7e065c85247df95f12e70c014b6b470beb0645a9c777956189"
+	// Then (#7087, beads#7037) the topology job's shared-server step -run also
+	// selects TestBlockedRepairOnProxiedCityAndRig. Reviewed delta: one -run
+	// alternative, no new job, step, trigger or permission.
+	expectedCIExecutionHash     = "1aa299cb4f5be4a72c8fa0afc7bb7985984d77ea6cc7a7c1bff1a6668451511d"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (v1.5.0 Tier C
 	// first-run drain) the tier-c job's -run selector gained
