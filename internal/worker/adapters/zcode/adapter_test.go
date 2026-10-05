@@ -1625,6 +1625,57 @@ func TestInterruptedTurnClosesTheMirrorEntry(t *testing.T) {
 	}
 }
 
+// Once the adapter's signal traps are armed, no shell code may expand a
+// command or process substitution. On bash 5.2 a trapped signal that lands
+// while bash is expanding one runs the trap inside that expansion: the trap's
+// own text then fails to parse ("trap: line 2: unexpected EOF while looking
+// for matching `)'"), so `exit 0` never runs, and the shell either exits 1 or
+// wedges for good — spinning, or blocked reading a comsub pipe whose write end
+// it still holds. Observed as TestInterruptedTurnClosesTheMirrorEntry failing
+// at its wait deadline on a loaded host, with exactly that stderr: its TERM
+// lands right after the error line, inside report_stderr's substitution.
+// `$(<file)` is affected too (it hung 36 of 400 standalone runs). The race is
+// a few instructions wide, so this pins the invariant structurally instead.
+func TestNoSubstitutionsWhileSignalTrapsAreArmed(t *testing.T) {
+	t.Parallel()
+
+	lines := strings.Split(string(zcodeadapter.Script()), "\n")
+	armed := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "trap ") && strings.HasSuffix(line, " TERM") {
+			armed = i
+			break
+		}
+	}
+	if armed < 0 {
+		t.Fatal("no top-level TERM trap found in zcode-repl")
+	}
+
+	heredocEnd := ""
+	for i := armed; i < len(lines); i++ {
+		line := lines[i]
+		if heredocEnd != "" {
+			if line == heredocEnd {
+				heredocEnd = ""
+			}
+			continue
+		}
+		code := strings.TrimSpace(line)
+		if strings.HasPrefix(code, "#") {
+			continue
+		}
+		if _, tag, ok := strings.Cut(code, "<<'"); ok {
+			heredocEnd, _, _ = strings.Cut(tag, "'")
+		}
+		code = strings.ReplaceAll(code, "$((", "")
+		for _, form := range []string{"$(", "`", "<(", ">("} {
+			if strings.Contains(code, form) {
+				t.Errorf("zcode-repl:%d expands %q after the signal traps are armed: %s", i+1, form, code)
+			}
+		}
+	}
+}
+
 // Entry ids are identities to gc: HistorySnapshot.Cursor.AfterEntryID is one,
 // and history comparison short-circuits on id equality. Positional ids alone
 // made every conversation emit the same sequence, so two unrelated
