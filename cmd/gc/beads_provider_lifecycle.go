@@ -1408,6 +1408,9 @@ func runProviderOwnedScopeInit(cityPath, dir, prefix, script string) (bool, erro
 	if err != nil {
 		return false, err
 	}
+	if env, err = withProxiedInitIdleTimeout(env, cityPath, dir, "exec:"+script); err != nil {
+		return false, err
+	}
 	if entry.Intent.Target == "local" {
 		// A fresh local provider scope owns its listener. Do not pass legacy
 		// GC managed-server coordinates, auto-start policy, or runtime paths to
@@ -1842,6 +1845,9 @@ func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, exe
 			if err != nil {
 				return err
 			}
+			if baseEnv, err = withProxiedInitIdleTimeout(baseEnv, cityPath, dir, provider); err != nil {
+				return err
+			}
 			env := overlayEnvEntries(baseEnv, map[string]string{
 				"BEADS_DIR":                 filepath.Join(dir, ".beads"),
 				"BEADS_DOLT_PROXIED_SERVER": "1",
@@ -1874,6 +1880,9 @@ func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, exe
 		if execProviderUsesCanonicalBdScopeFiles(provider) && !execProviderNeedsScopedDoltInit(provider) {
 			baseEnv, err := providerLifecycleProcessEnvForScopeInitWithError(cityPath, dir, provider)
 			if err != nil {
+				return err
+			}
+			if baseEnv, err = withProxiedInitIdleTimeout(baseEnv, cityPath, dir, provider); err != nil {
 				return err
 			}
 			overrides := map[string]string{
@@ -3505,16 +3514,23 @@ func providerLifecycleProcessEnvForScopeInitWithError(cityPath, scopeRoot, provi
 	if providerUsesBdStoreContract(provider) && scopeRuntimeEnvIndependentOfCityProjection(cityPath, scopeRoot) {
 		env = providerLifecycleIndependentScopeInitEnv(cityPath, scopeRoot, env)
 	}
-	if providerUsesBdStoreContract(provider) {
-		// The script's proxied init arms refuse to run without it rather
-		// than fall back to an idle policy nobody configured.
-		idle, err := resolveScopeProxiedIdleTimeout(cityPath, scopeRoot, os.Stderr)
-		if err != nil {
-			return nil, err
-		}
-		env = overlayEnvEntries(env, map[string]string{config.ProxiedIdleTimeoutEnv: idle.BdFlagValue()})
-	}
 	return env, nil
+}
+
+// withProxiedInitIdleTimeout adds the idle timeout gc resolved for scopeRoot
+// to the env of a provider `init` op; the script's proxied init arms refuse to
+// run without it rather than fall back to an idle policy nobody configured.
+// Only init carries it: start, health, recover and stop never resolve the
+// value, so a bad one cannot fail them and they read no config for it.
+func withProxiedInitIdleTimeout(env []string, cityPath, scopeRoot, provider string) ([]string, error) {
+	if !providerUsesBdStoreContract(provider) {
+		return env, nil
+	}
+	idle, err := resolveScopeProxiedIdleTimeout(cityPath, scopeRoot, os.Stderr)
+	if err != nil {
+		return nil, err
+	}
+	return overlayEnvEntries(env, map[string]string{config.ProxiedIdleTimeoutEnv: idle.BdFlagValue()}), nil
 }
 
 func providerLifecycleIndependentScopeInitEnv(cityPath, scopeRoot string, env []string) []string {

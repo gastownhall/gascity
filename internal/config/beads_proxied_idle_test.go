@@ -113,8 +113,8 @@ func TestValidateProxiedIdleTimeouts(t *testing.T) {
 		Beads: BeadsConfig{ProxiedIdleTimeout: "30m"},
 		Rigs:  []Rig{{Name: "a", BeadsProxiedIdleTimeout: strPtr("0")}, {Name: "b"}},
 	}
-	if err := ValidateProxiedIdleTimeouts(ok, "city.toml"); err != nil {
-		t.Fatalf("valid config rejected: %v", err)
+	if w := ValidateProxiedIdleTimeouts(ok, "city.toml"); len(w) != 0 {
+		t.Fatalf("valid config warned: %v", w)
 	}
 	bad := []*City{
 		{Beads: BeadsConfig{ProxiedIdleTimeout: "30s"}},
@@ -124,13 +124,15 @@ func TestValidateProxiedIdleTimeouts(t *testing.T) {
 		{Rigs: []Rig{{Name: "a", BeadsProxiedIdleTimeout: strPtr("")}}},
 	}
 	for i, cfg := range bad {
-		if err := ValidateProxiedIdleTimeouts(cfg, "city.toml"); err == nil {
+		if w := ValidateProxiedIdleTimeouts(cfg, "city.toml"); len(w) == 0 {
 			t.Errorf("case %d: invalid config accepted", i)
 		}
 	}
 }
 
-func TestLoadRejectsProxiedIdleTimeoutBelowFloor(t *testing.T) {
+// A bad value warns at load instead of failing it: the rest of the city must
+// still load, so `gc stop` can retire it. Initializing a scope with it fails.
+func TestLoadWarnsOnProxiedIdleTimeoutBelowFloor(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
 [workspace]
@@ -139,8 +141,20 @@ name = "test"
 [beads]
 proxied_idle_timeout = "30s"
 `)
-	if _, _, err := LoadWithIncludes(fs, "/city/city.toml"); err == nil || !strings.Contains(err.Error(), "proxied_idle_timeout") {
-		t.Fatalf("LoadWithIncludes error = %v, want a proxied_idle_timeout refusal", err)
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes failed on a bad idle timeout: %v", err)
+	}
+	found := false
+	for _, w := range prov.Warnings {
+		found = found || strings.Contains(w, "proxied_idle_timeout")
+	}
+	if !found {
+		t.Fatalf("warnings = %v, want a proxied_idle_timeout warning", prov.Warnings)
+	}
+	t.Setenv(ProxiedIdleTimeoutEnv, "")
+	if _, err := ProxiedIdleTimeoutFor(cfg, nil); err == nil {
+		t.Fatal("resolving the bad value succeeded")
 	}
 }
 
