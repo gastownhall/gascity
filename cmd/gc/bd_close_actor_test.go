@@ -82,10 +82,20 @@ func TestCloseActorForOwnClaim(t *testing.T) {
 			session, nil, "",
 		},
 		{
-			"the child's effective actor, not the process env, decides whether a change is needed",
+			// #6324: for tmux_alias pools and legacy rows the session name is
+			// a shared chair, so a successor must not close its
+			// predecessor's chair-named claim without --force.
+			"a claim held under the session name is not the session's own",
 			[]string{"close", "ci-1"},
 			map[string]beads.Bead{"ci-1": held("rig--gc__review-synthesizer-1-pool")},
-			session, strPtr("city-default-actor"), "rig--gc__review-synthesizer-1-pool",
+			session, strPtr("city-default-actor"), "",
+		},
+		{
+			"a claim held under the alias is not the session's own",
+			[]string{"close", "ci-1"},
+			map[string]beads.Bead{"ci-1": held("reviewer")},
+			map[string]string{"GC_SESSION_ID": "ci-wisp-fe8", "GC_ALIAS": "reviewer", "BEADS_ACTOR": "rig--gc__review-synthesizer-1-pool"},
+			nil, "",
 		},
 		{
 			"an effective actor already matching the assignee needs no change",
@@ -110,5 +120,25 @@ func TestWithEnvValueReplacesEveryPriorEntry(t *testing.T) {
 	got := withEnvValue([]string{"A=1", "BEADS_ACTOR=old", "B=2", "BEADS_ACTOR=older"}, "BEADS_ACTOR", "new")
 	if want := []string{"A=1", "B=2", "BEADS_ACTOR=new"}; !slices.Equal(got, want) {
 		t.Fatalf("withEnvValue = %v, want %v", got, want)
+	}
+}
+
+// TestOwnClaimCloseEnvRewritesTheChildActor pins the doBd wiring: the bd
+// child's BEADS_ACTOR, not the process env's, is what the own-claim rewrite
+// compares and replaces.
+func TestOwnClaimCloseEnvRewritesTheChildActor(t *testing.T) {
+	session := map[string]string{"GC_SESSION_ID": "ci-wisp-fe8", "BEADS_ACTOR": "process-actor"}
+	getenv := func(k string) string { return session[k] }
+	targets := map[string]beads.Bead{"ci-1": {ID: "ci-1", Assignee: "ci-wisp-fe8"}}
+	childEnv := []string{"PATH=/bin", "BEADS_ACTOR=child-actor", "BEADS_ACTOR=child-actor-dup"}
+
+	got := ownClaimCloseEnv(childEnv, []string{"close", "ci-1", "--reason", "done"}, targets, getenv)
+	if want := []string{"PATH=/bin", "BEADS_ACTOR=ci-wisp-fe8"}; !slices.Equal(got, want) {
+		t.Fatalf("ownClaimCloseEnv() = %v, want %v", got, want)
+	}
+
+	other := map[string]beads.Bead{"ci-1": {ID: "ci-1", Assignee: "ci-wisp-other"}}
+	if got := ownClaimCloseEnv(childEnv, []string{"close", "ci-1"}, other, getenv); !slices.Equal(got, childEnv) {
+		t.Fatalf("ownClaimCloseEnv(another session's claim) = %v, want the child env unchanged", got)
 	}
 }
