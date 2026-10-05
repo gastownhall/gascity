@@ -78,14 +78,19 @@ func NamedSessionBackingTemplate(spec NamedSessionSpec) string {
 }
 
 // IsDemandOnlySingletonTemplate reports whether agentCfg is a canonical
-// singleton pool template (max_active_sessions = 1, no namepool) that no
-// configured [[named_session]] backs. The controller owns such a template's
+// singleton pool template (max_active_sessions = 1, no namepool) with no
+// session floor (effective min_active_sessions = 0) that no configured
+// [[named_session]] backs. A floor of 1 keeps the one session running without
+// demand, so that template is not demand-only. The controller owns such a template's
 // only session: it starts it while the pool has work for it and drains it when
 // the pool has none. Nothing else can start it or keep it running: not an API
 // create, not pin_awake, not an explicit wake request (#6858). This is the
 // shape `gc config show --validate` warns about.
 func IsDemandOnlySingletonTemplate(cfg *config.City, agentCfg *config.Agent) bool {
 	if cfg == nil || agentCfg == nil || !agentCfg.UsesCanonicalSingletonPoolIdentity() {
+		return false
+	}
+	if agentCfg.EffectiveMinActiveSessions() > 0 {
 		return false
 	}
 	template := agentCfg.QualifiedName()

@@ -1384,6 +1384,13 @@ func TestIsDemandOnlySingletonTemplate(t *testing.T) {
 			agent: config.Agent{Name: "worker", MaxActiveSessions: &one, Namepool: "names.txt"},
 			want:  false,
 		},
+		{
+			// min_active_sessions = 1 keeps the one session running without
+			// demand, so the controller does start and keep it.
+			name:  "singleton with a session floor",
+			agent: config.Agent{Name: "worker", Dir: "demo", MinActiveSessions: &one, MaxActiveSessions: &one},
+			want:  false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
