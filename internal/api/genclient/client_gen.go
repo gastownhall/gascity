@@ -5192,6 +5192,9 @@ type StatusWorkCounts struct {
 
 	// Ready Number of ready work items.
 	Ready int64 `json:"ready"`
+
+	// SuspendedRigsExcluded Number of suspended rigs left out of these counts: a suspended rig's store is not read.
+	SuspendedRigsExcluded *int64 `json:"suspended_rigs_excluded,omitempty"`
 }
 
 // StorageBindingOutcomePayload defines model for StorageBindingOutcomePayload.

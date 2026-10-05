@@ -11981,6 +11981,11 @@
             "description": "Number of ready work items.",
             "format": "int64",
             "type": "integer"
+          },
+          "suspended_rigs_excluded": {
+            "description": "Number of suspended rigs left out of these counts: a suspended rig's store is not read.",
+            "format": "int64",
+            "type": "integer"
           }
         },
         "required": [
