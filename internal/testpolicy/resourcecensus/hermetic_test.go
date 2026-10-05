@@ -5,9 +5,6 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
-	"time"
-
-	"github.com/gastownhall/gascity/internal/testpolicy/waiverclock"
 )
 
 func TestValidateReviewedHermeticBodiesRequiresExactUniqueUntaggedTest(t *testing.T) {
@@ -98,7 +95,7 @@ func TestOwned(t *testing.T) {}
 		ledger := policy
 		ledger.ReviewedHermeticBody = append([]ReviewedHermeticBody(nil), policy.ReviewedHermeticBody...)
 		ledger.ReviewedHermeticBody[0].EffectiveSize = "small"
-		_, err := validateAgainstPolicy(policy, ledger, clean, time.Time{}, waiverclock.ModeStrict)
+		err := validateAgainstPolicy(policy, ledger, clean)
 		requireErrorContains(t, err, `bootstrap policy requires "medium"`)
 	})
 
@@ -113,7 +110,7 @@ func TestOwned(t *testing.T) { helper() }
 func helper() { time.Sleep(0) }
 `)},
 		})
-		_, err := validateAgainstPolicy(policy, policy, withResource, time.Time{}, waiverclock.ModeStrict)
+		err := validateAgainstPolicy(policy, policy, withResource)
 		requireErrorContains(t, err, string(ResourceFixedSleep))
 	})
 }

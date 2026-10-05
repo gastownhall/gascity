@@ -1159,8 +1159,10 @@ help:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## //' | column -t -s ':'
 
 ## bazel-sync: regenerate bazel BUILD files (gazelle) and the hermetic repo
-## source tree used by whole-repo scan guards. Run after adding packages.
+## source tree used by whole-repo scan guards, then apply the hermeticity
+## ledger's go_test tags (test/bazel-hermeticity.toml). Run after adding packages.
 .PHONY: bazel-sync
 bazel-sync:
 	bazel run //:gazelle
 	python3 tools/bazel/repo_tree.py
+	python3 tools/bazel/hermetic_tags.py

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 )
 
@@ -69,5 +70,33 @@ func TestAliveWithStartTimeReportsDeadWhenProcessVanishesDuringIdentityRead(t *t
 	vanishAfter(t, self, 1)
 	if AliveWithStartTime(self, token) {
 		t.Fatal("AliveWithStartTime = true for a PID that vanished before its start time could be read")
+	}
+}
+
+// permissionDenied makes Alive's kill(0) probe answer EPERM for pid, as it
+// does for a live process owned by another user.
+func permissionDenied(t *testing.T, pid int) {
+	t.Helper()
+	orig := probeSignal
+	probeSignal = func(p int, sig syscall.Signal) error {
+		if p == pid {
+			return syscall.EPERM
+		}
+		return orig(p, sig)
+	}
+	t.Cleanup(func() { probeSignal = orig })
+}
+
+// EPERM from kill(0) proves the process exists; only its owner differs. With
+// /proc mounted hidepid=1 or 2, another user's /proc/<pid> entry is hidden, so
+// a missing entry after EPERM is not a reaped process and must not read as
+// dead. Only a missing entry after a successful kill(0) means it vanished.
+func TestAliveKeepsPermissionDeniedProcessWithHiddenProcEntry(t *testing.T) {
+	failingPS(t)
+	self := os.Getpid()
+	permissionDenied(t, self)
+	vanishAfter(t, self, 0)
+	if !Alive(self) {
+		t.Fatal("Alive = false for a PID that kill(0) answered with EPERM; a hidden /proc entry (hidepid) does not mean the process is gone")
 	}
 }

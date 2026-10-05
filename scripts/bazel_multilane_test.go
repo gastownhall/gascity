@@ -349,10 +349,9 @@ func wantMultiLanes(event, mode string) []string {
 		// rbe-west off; a cache-mode PR until rbe-west's mint serves bazel.yml.
 		return []string{}
 	}
-	lanes := []string{"unit"}
-	if mode != "fork-ro" { // the fork pool has no network (ga-73eoo)
-		lanes = append(lanes, "acceptance")
-	}
+	// Acceptance runs in every mode, the fork pool's (fork-ro: no network)
+	// included: gc init no longer clones gascity-packs (#7005).
+	lanes := []string{"unit", "acceptance"}
 	if event == "push" || event == "workflow_dispatch" { // until G3
 		lanes = append(lanes, "integration")
 	}
