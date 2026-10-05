@@ -1,0 +1,30 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "pendingwatch",
+    srcs = ["pendingwatch.go"],
+    importpath = "github.com/gastownhall/gascity/internal/pendingwatch",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/events",
+        "//internal/runtime",
+    ],
+)
+
+go_test(
+    name = "pendingwatch_test",
+    srcs = ["pendingwatch_test.go"],
+    embed = [":pendingwatch"],
+    deps = [
+        "//internal/events",
+        "//internal/runtime",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(["**"], exclude = ["BUILD.bazel"], allow_empty = True),
+    visibility = ["//visibility:public"],
+)

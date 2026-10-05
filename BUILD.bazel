@@ -445,6 +445,7 @@ filegroup(
         "//internal/packregistry:bazel_repo_srcs",
         "//internal/pathdurability:bazel_repo_srcs",
         "//internal/pathutil:bazel_repo_srcs",
+        "//internal/pendingwatch:bazel_repo_srcs",
         "//internal/pidutil:bazel_repo_srcs",
         "//internal/poolplan:bazel_repo_srcs",
         "//internal/pricing:bazel_repo_srcs",
