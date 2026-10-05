@@ -37,6 +37,8 @@ func (v *int64Value) UnmarshalJSON(data []byte) error {
 
 // bepEvent is the subset of build_event_stream.BuildEvent this package reads.
 // Unknown fields and event kinds are ignored.
+// redact.jq, which bazel.yml applies before a lane uploads its BEP file, must
+// keep every field decoded here (TestRedactProgramKeepsEveryDecodedField).
 type bepEvent struct {
 	ID struct {
 		TestResult  *bepTestID `json:"testResult"`

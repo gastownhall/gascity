@@ -316,13 +316,29 @@ jobs:
           [ -f "$RUNNER_TEMP/bazel-profile.json" ] || exit 0
           python3 tools/bazel/critpath.py "$RUNNER_TEMP/bazel-profile.json" --tier T2 --budget 150 || true
 
-      # The bep-summary job reports every lane's BEP file in one table.
+      # The bep-summary job reports every lane's BEP file in one table. The
+      # raw file holds the expanded command line (--remote_executor, the
+      # client key path) and bytestream:// URIs naming the remote cache, and
+      # artifacts of this public repo are world-readable: only the fields
+      # bepsummary reads (internal/testpolicy/bepsummary/redact.jq) are
+      # uploaded. The redacted file appears only once jq has succeeded.
+      - name: Redact BEP file
+        if: always() && steps.test.outcome != 'skipped'
+        continue-on-error: true
+        run: |
+          [ -f "$RUNNER_TEMP/bazel-bep.json" ] || exit 0
+          out="$RUNNER_TEMP/bep-upload/bazel-bep.json"
+          mkdir -p "${out%/*}"
+          jq -R -c -f internal/testpolicy/bepsummary/redact.jq "$RUNNER_TEMP/bazel-bep.json" > "$out.tmp"
+          mv -f "$out.tmp" "$out"
+
       - name: Upload BEP file
         if: always() && steps.test.outcome != 'skipped'
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bazel-bep-${{ matrix.lane }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/bazel-bep.json
+          path: ${{ runner.temp }}/bep-upload/bazel-bep.json
           retention-days: 1
           if-no-files-found: ignore
 
@@ -397,6 +413,7 @@ jobs:
             integration="$dir/bazel-bep-integration-$ATTEMPT/bazel-bep.json" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload bazel test cache report
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bazel-yml-bep-summary-${{ github.run_attempt }}

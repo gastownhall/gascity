@@ -68,9 +68,12 @@ slowest list. `bazel-test.yml` runs it after every `bazel test` step
 (unit, acceptance, integration) into the job summary and uploads the JSON
 as the `bazel-bep-summary-<attempt>` artifact, so hit rates can be
 compared across pre-push, PR, and main runs. `bazel.yml` does the same per
-lane: each lane uploads its BEP file, and the `bazel / test cache report`
-job reports them in one table (one phase per lane, context
-`<event>/<mode>`) and uploads `bazel-yml-bep-summary-<attempt>`.
+lane: each lane uploads its BEP file, redacted to the fields the report
+reads (`internal/testpolicy/bepsummary/redact.jq`: a raw BEP file holds the
+expanded command line, including `--remote_executor`), and the
+`bazel / test cache report` job reports them in one table (one phase per
+lane, context `<event>/<mode>`) and uploads
+`bazel-yml-bep-summary-<attempt>`.
 `scripts/bazel_bep_summary_workflow_test.go` fails if a `bazel test`
 invocation or a `bazel.yml` lane stops writing a BEP file the report reads.
 

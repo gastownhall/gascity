@@ -15,11 +15,13 @@ go_library(
 go_test(
     name = "bepsummary_test",
     srcs = [
+        "redact_test.go",
         "summary_test.go",
         "testenv_import_test.go",
     ],
     data = glob(["testdata/**"]),
     embed = [":bepsummary"],
+    embedsrcs = ["redact.jq"],
     deps = ["//internal/testenv"],
 )
 

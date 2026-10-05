@@ -18,7 +18,10 @@ import (
 // without a BEP file, or a BEP file the report step does not read, would
 // silently drop that phase from the trend. bazel.yml does the same per lane:
 // each lane uploads its BEP file and the bep-summary job reports them all,
-// one phase per lane.
+// one phase per lane. A raw BEP file holds the expanded command line
+// (--remote_executor, the client key path) and bytestream:// URIs naming the
+// remote cache, so a lane uploads only its redact.jq projection. Every upload
+// is continue-on-error: an artifact-service failure never fails a job.
 
 const (
 	bepReportStep    = "Bazel test cache report (BEP)"
@@ -92,9 +95,9 @@ func TestBazelTestWorkflowEveryTestInvocationFeedsTheCacheReport(t *testing.T) {
 		t.Fatalf("%s needs an %q step after %q", bazelTestWorkflow, bepUploadStep, bepReportStep)
 	}
 	upload := steps[uploadIdx]
-	if upload.If != "always()" || !strings.HasPrefix(upload.Uses, "actions/upload-artifact@") || upload.With["path"] != bepReportJSONOut {
-		t.Errorf("%q must be an always() actions/upload-artifact of %s, got if=%q uses=%q path=%q",
-			bepUploadStep, bepReportJSONOut, upload.If, upload.Uses, upload.With["path"])
+	if upload.If != "always()" || !upload.ContinueOnError || !strings.HasPrefix(upload.Uses, "actions/upload-artifact@") || upload.With["path"] != bepReportJSONOut {
+		t.Errorf("%q must be an always(), continue-on-error actions/upload-artifact of %s, got if=%q continue-on-error=%t uses=%q path=%q",
+			bepUploadStep, bepReportJSONOut, upload.If, upload.ContinueOnError, upload.Uses, upload.With["path"])
 	}
 
 	// The report tool itself must exist where the step runs it.
@@ -105,10 +108,14 @@ func TestBazelTestWorkflowEveryTestInvocationFeedsTheCacheReport(t *testing.T) {
 }
 
 // bazel.yml's BEP plumbing: lane job step "test" writes laneBEPFile, step
-// "Upload BEP file" keeps it as bazel-bep-<lane>-<attempt>, and the
+// "Redact BEP file" projects it with laneBEPRedact into laneBEPUploadPath,
+// step "Upload BEP file" keeps that as bazel-bep-<lane>-<attempt>, and the
 // bep-summary job downloads them all and reports one phase per lane.
 const (
 	laneBEPFile        = `--build_event_json_file="$RUNNER_TEMP/bazel-bep.json"`
+	laneBEPRedactStep  = "Redact BEP file"
+	laneBEPRedact      = `jq -R -c -f internal/testpolicy/bepsummary/redact.jq "$RUNNER_TEMP/bazel-bep.json"`
+	laneBEPUploadPath  = "${{ runner.temp }}/bep-upload/bazel-bep.json"
 	laneBEPUploadStep  = "Upload BEP file"
 	laneBEPArtifact    = "bazel-bep-${{ matrix.lane }}-${{ github.run_attempt }}"
 	bepSummaryJob      = "bep-summary"
@@ -170,15 +177,32 @@ func TestBazelMultiLaneWorkflowEveryLaneFeedsTheCacheReport(t *testing.T) {
 	if !strings.Contains(lane.Steps[testIdx].Run, laneBEPFile) {
 		t.Errorf("%s lane step %q must pass %s", bazelMultiLaneWorkflow, lane.Steps[testIdx].Name, laneBEPFile)
 	}
+	redactIdx := bepStepIndex(lane.Steps, func(s bepWorkflowStep) bool { return s.Name == laneBEPRedactStep })
 	uploadIdx := bepStepIndex(lane.Steps, func(s bepWorkflowStep) bool { return s.Name == laneBEPUploadStep })
-	if uploadIdx < testIdx {
-		t.Fatalf("%s: the lane job needs an %q step after the test step", bazelMultiLaneWorkflow, laneBEPUploadStep)
+	if redactIdx < testIdx || uploadIdx < redactIdx {
+		t.Fatalf("%s: the lane job needs %q then %q steps after the test step", bazelMultiLaneWorkflow, laneBEPRedactStep, laneBEPUploadStep)
+	}
+	red := lane.Steps[redactIdx]
+	// The redacted file appears only once jq has finished (temp file, then
+	// mv), so a failed redaction uploads nothing rather than a partial file.
+	if !strings.HasPrefix(red.If, "always()") || !red.ContinueOnError || !strings.Contains(red.Run, laneBEPRedact) ||
+		!strings.Contains(red.Run, `mv -f "$out.tmp" "$out"`) || !strings.Contains(red.Run, `out="$RUNNER_TEMP/bep-upload/bazel-bep.json"`) {
+		t.Errorf("%q must be an always(), continue-on-error step that runs %s into $RUNNER_TEMP/bep-upload/bazel-bep.json via a temp file, got if=%q continue-on-error=%t run:\n%s",
+			laneBEPRedactStep, laneBEPRedact, red.If, red.ContinueOnError, red.Run)
 	}
 	up := lane.Steps[uploadIdx]
-	if !strings.HasPrefix(up.If, "always()") || !strings.HasPrefix(up.Uses, "actions/upload-artifact@") ||
-		up.With["name"] != laneBEPArtifact || up.With["path"] != "${{ runner.temp }}/bazel-bep.json" {
-		t.Errorf("%q must be an always() upload of the lane's BEP file as %s, got if=%q uses=%q name=%q path=%q",
-			laneBEPUploadStep, laneBEPArtifact, up.If, up.Uses, up.With["name"], up.With["path"])
+	if !strings.HasPrefix(up.If, "always()") || !up.ContinueOnError || !strings.HasPrefix(up.Uses, "actions/upload-artifact@") ||
+		up.With["name"] != laneBEPArtifact || up.With["path"] != laneBEPUploadPath {
+		t.Errorf("%q must be an always(), continue-on-error upload of the redacted BEP file %s as %s, got if=%q continue-on-error=%t uses=%q name=%q path=%q",
+			laneBEPUploadStep, laneBEPUploadPath, laneBEPArtifact, up.If, up.ContinueOnError, up.Uses, up.With["name"], up.With["path"])
+	}
+	// The raw BEP file never leaves the runner.
+	for name, job := range wf.Jobs {
+		for _, s := range job.Steps {
+			if strings.HasPrefix(s.Uses, "actions/upload-artifact@") && strings.Contains(s.With["path"], "bazel-bep.json") && s.With["path"] != laneBEPUploadPath {
+				t.Errorf("%s job %s step %q uploads %q; only the redacted %s may be uploaded", bazelMultiLaneWorkflow, name, s.Name, s.With["path"], laneBEPUploadPath)
+			}
+		}
 	}
 
 	// No other job runs `bazel test` outside the lanes (it would be missing
@@ -231,9 +255,9 @@ func TestBazelMultiLaneWorkflowEveryLaneFeedsTheCacheReport(t *testing.T) {
 		}
 	}
 	u := job.Steps[upload]
-	if u.If != "always()" || !strings.HasPrefix(u.Uses, "actions/upload-artifact@") || u.With["path"] != "${{ runner.temp }}/bazel-bep/summary.json" ||
+	if u.If != "always()" || !u.ContinueOnError || !strings.HasPrefix(u.Uses, "actions/upload-artifact@") || u.With["path"] != "${{ runner.temp }}/bazel-bep/summary.json" ||
 		u.With["name"] == "" || strings.HasPrefix(u.With["name"], "bazel-bep-") {
-		t.Errorf("%q must be an always() upload of the JSON report under a name the download pattern cannot match, got if=%q uses=%q with=%v",
-			bepUploadStep, u.If, u.Uses, u.With)
+		t.Errorf("%q must be an always(), continue-on-error upload of the JSON report under a name the download pattern cannot match, got if=%q continue-on-error=%t uses=%q with=%v",
+			bepUploadStep, u.If, u.ContinueOnError, u.Uses, u.With)
 	}
 }
