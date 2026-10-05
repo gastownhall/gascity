@@ -511,6 +511,17 @@ var bootstrapPolicy = Ledger{
 		{
 			PackageDir:      "scripts",
 			PackageName:     "scripts_test",
+			Owner:           "TestRBEWorkerScrubCAS",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the sticky-disk CAS scrub proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the one bash subprocess is confined to TestRBEWorkerScrubCAS, which exists to run tools/rbe/blacksmith-worker.sh's own scrub_cas function on a scratch store of odd names (quotes, spaces, a newline, a backslash) and bad blobs: the function is GNU find, xargs and sha256sum plumbing, so only bash can prove it deletes every bad file without aborting the worker",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
 			Owner:           "TestFreshMergeActionBehaviour",
 			Resources:       []Resource{ResourceSubprocess},
 			OwnerBead:       "ga-cp3hwi",
@@ -554,7 +565,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   471,
+			BaselineCalls:   470,
 			BaselineFiles:   136,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
