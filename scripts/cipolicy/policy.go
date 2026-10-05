@@ -122,8 +122,10 @@ const (
 	//
 	// Bumped again (gc 1.5.1 proxied idle timeout): the proxied-native job's
 	// test step also selects TestProxiedIdleTimeoutReapAndTransparentRestart,
-	// and the step is renamed to say so. No new job, trigger or permission.
-	expectedCIExecutionHash     = "818a6ed46b87879b1dd635ca8f06acc492e974b6d312d0eef5efd36275d2edfb"
+	// sets GC_ACCEPTANCE_TOPOLOGY_MATRIX=1 for that step (the row is gated off
+	// Tier A by that switch), and the step is renamed to say so. No new job,
+	// trigger or permission.
+	expectedCIExecutionHash     = "45af99a3a2e9eb914ab5e12bfc9ec3f7feefecb759df7153c6902c5a8692b8e1"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

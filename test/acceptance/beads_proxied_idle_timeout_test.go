@@ -32,6 +32,9 @@ const idleTimeoutUnderTest = 20 * time.Second
 const idleRetireWait = idleTimeoutUnderTest*3/2 + 45*time.Second
 
 func TestProxiedIdleTimeoutReapAndTransparentRestart(t *testing.T) {
+	// Several idle retirements of a real proxy and Dolt child take minutes:
+	// not Tier A smoke material. The proxied-native acceptance job runs it.
+	helpers.RequireTopologyMatrix(t)
 	bdPath, doltPath := requireProxiedTooling(t)
 	env := proxiedEnv(t, bdPath, doltPath).With(config.ProxiedIdleTimeoutEnv, idleTimeoutUnderTest.String())
 
