@@ -758,6 +758,16 @@ func lintClaudeOverlayHookShape(packDir string) []lintDiagnostic {
 				"hooks.%s[%d] is a bare hook entry; Claude settings require the wrapped form {\"matcher\": ..., \"hooks\": [...]}",
 				b.Category, b.Index)))
 		}
+		invalid, err := overlay.FindInvalidHookMatchers(data)
+		if err != nil {
+			diagnostics = append(diagnostics, diagnosticFromError(path, err))
+			return nil
+		}
+		for _, m := range invalid {
+			diagnostics = append(diagnostics, newLintDiagnostic(path, 0, fmt.Sprintf(
+				"hooks.%s[%d] matcher %q does not compile as a tool-name regular expression (%v); Claude Code interprets a hook matcher as a regex, not permission-rule Tool(args) syntax, so this hook never fires",
+				m.Category, m.Index, m.Matcher, m.Err)))
+		}
 		return nil
 	})
 	return diagnostics
