@@ -50,6 +50,15 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 		fmt.Fprintf(stderr, "%s: recording provider-owned beads scope: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Check the running supervisor before the slow dependency and readiness
+	// work: a supervisor from a different gc installation would run this
+	// city with the wrong binary.
+	if !opts.noStart {
+		if proceed, _ := checkSupervisorBinaryBeforeRegister(opts.commandName, stderr, true); !proceed {
+			fmt.Fprintf(stderr, "%s: city created at %s but not registered; after fixing the supervisor, run 'gc start' there\n", opts.commandName, cityPath) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 
 	// Check hard binary dependencies before handing off to the supervisor.
 	// Without this, missing deps (tmux, git, dolt, bd) cause the supervisor
