@@ -44,16 +44,24 @@
 #                       uploads stay identity (no writable rbe-west listener
 #                       accepts zstd). The remote CAS is split: REMOTE_READ
 #                       (zstd, RBE_WIRE_ZSTD_READ_URL) and REMOTE_WRITE
-#                       (identity, the worker's own endpoint). Needs rbe-west's
-#                       read-only zstd route for this tier first, else every
-#                       such fetch fails with InvalidArgument. 0 (default):
-#                       identity through one REMOTE_CAS, as before.
-#   RBE_WIRE_ZSTD_READ_URL  where REMOTE_READ fetches (default: the worker's
-#                       own grpcs://RBE_WEST_HOST:RBE_WEST_PORT). rbe-west's
-#                       edge sends this certificate's ByteStream.Read there to
-#                       the read-only zstd process (fork: Caddyfile.fork :8444;
-#                       oss: the :443 route); everything else goes where it
-#                       always did.
+#                       (identity, the worker's own endpoint). Needs
+#                       RBE_WIRE_ZSTD_READ_URL set to the dedicated zread
+#                       host below, else every such fetch fails with
+#                       InvalidArgument (there is no identity fallback). 0
+#                       (default): identity through one REMOTE_CAS, as before.
+#   RBE_WIRE_ZSTD_READ_URL  where REMOTE_READ fetches when RBE_WIRE_ZSTD=1.
+#                       The farm serves zstd reads only on dedicated zread
+#                       hostnames, never the worker's own endpoint: OSS
+#                       grpcs://rbe-zread.ops.gascity.com:443, fork
+#                       grpcs://rbe-fork-zread.ops.gascity.com:8444 (the
+#                       normal hosts return InvalidArgument for compressed
+#                       reads). Required when RBE_WIRE_ZSTD=1; the worker
+#                       exits 2 instead of registering if this is empty or
+#                       equal to its own grpcs://RBE_WEST_HOST:RBE_WEST_PORT.
+#                       Rollback: set RBE_WIRE_ZSTD (RBE_FORK_WIRE_ZSTD for
+#                       the fork pool) to 0; for an emergency rollback cancel
+#                       the pool runs, since an in-flight worker keeps its
+#                       store (and this switch) until it retires.
 #   RBE_ACTION_ISOLATION  1 (default): every action runs as a per-action slot
 #                       user in private namespaces (below). 0: the rollback
 #                       switch, actions run as this runner user as before.
@@ -94,6 +102,12 @@ esac
 RBE_WEST_PORT=${RBE_WEST_PORT:-443}
 ZSTD_READ_URL=${RBE_WIRE_ZSTD_READ_URL:-grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT}}
 [[ $ZSTD_READ_URL =~ ^grpcs://[A-Za-z0-9.-]+:[0-9]{1,5}$ ]] || { echo "RBE_WIRE_ZSTD_READ_URL must be grpcs://host:port" >&2; exit 2; }
+# The worker's own endpoint answers compressed reads with InvalidArgument (no
+# identity fallback): zstd needs the dedicated zread host.
+if [ "$wire_zstd" = true ] && [ "$ZSTD_READ_URL" = "grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT}" ]; then
+	echo "RBE_WIRE_ZSTD=1 needs RBE_WIRE_ZSTD_READ_URL (fork pool: RBE_FORK_WIRE_ZSTD_READ_URL) set to the zread host, not grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT}" >&2
+	exit 2
+fi
 NL_VERSION=1.7.1
 NL_SHA256=a3d7abc2598e976d022fcdabe88a2f8fae46a3ae64f1868698002ca968dd88e9
 GO_VERSION=$(awk '/^go /{print $2; exit}' go.mod)

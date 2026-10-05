@@ -78,6 +78,10 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 			if got, want := step.Env["RBE_WIRE_ZSTD"], "${{ vars.RBE_WIRE_ZSTD || '0' }}"; got != want {
 				t.Errorf("worker step RBE_WIRE_ZSTD = %q, want %q", got, want)
 			}
+			// The dedicated zread host; the worker refuses zstd without it.
+			if got, want := step.Env["RBE_WIRE_ZSTD_READ_URL"], "${{ vars.RBE_WIRE_ZSTD_READ_URL || '' }}"; got != want {
+				t.Errorf("worker step RBE_WIRE_ZSTD_READ_URL = %q, want %q", got, want)
+			}
 			// The OSS pool keeps the script's defaults (tier oss, :443) and its
 			// own certificate; the fork tier is rbe-fork-pool.yml's alone.
 			for _, k := range []string{"WORKER_TIER", "RBE_WEST_PORT"} {
