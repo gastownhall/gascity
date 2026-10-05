@@ -123,15 +123,21 @@ func ProxiedIdleTimeoutFor(city *City, rig *Rig) (ProxiedIdleTimeout, error) {
 	return ProxiedIdleTimeout{Duration: DefaultProxiedIdleTimeout, Source: ProxiedIdleTimeoutSourceDefault}, nil
 }
 
-// ValidateProxiedIdleTimeouts rejects a configured proxied idle timeout that
-// does not parse, is negative, or is finite and below MinProxiedIdleTimeout.
-func ValidateProxiedIdleTimeouts(cfg *City, source string) error {
+// ValidateProxiedIdleTimeouts reports, as load warnings, a configured proxied
+// idle timeout that does not parse, is negative, or is finite and below
+// MinProxiedIdleTimeout. They are warnings rather than load errors so a bad
+// value cannot stop the rest of the city from loading — `gc stop` in
+// particular must still retire the city's processes. Strict loads treat them
+// as fatal like any other config warning, and initializing a scope with a bad
+// value fails in ProxiedIdleTimeoutFor.
+func ValidateProxiedIdleTimeouts(cfg *City, source string) []string {
 	if cfg == nil {
 		return nil
 	}
+	var warnings []string
 	if v := cfg.Beads.ProxiedIdleTimeout; strings.TrimSpace(v) != "" {
 		if _, err := ParseProxiedIdleTimeout(v); err != nil {
-			return fmt.Errorf("%s: [beads] proxied_idle_timeout: %w", source, err)
+			warnings = append(warnings, fmt.Sprintf("%s: [beads] proxied_idle_timeout: %v", source, err))
 		}
 	}
 	for _, r := range cfg.Rigs {
@@ -139,10 +145,10 @@ func ValidateProxiedIdleTimeouts(cfg *City, source string) error {
 			continue
 		}
 		if _, err := ParseProxiedIdleTimeout(*r.BeadsProxiedIdleTimeout); err != nil {
-			return fmt.Errorf("%s: rig %q beads_proxied_idle_timeout: %w", source, r.Name, err)
+			warnings = append(warnings, fmt.Sprintf("%s: rig %q beads_proxied_idle_timeout: %v", source, r.Name, err))
 		}
 	}
-	return nil
+	return warnings
 }
 
 // ProxiedIdleTimeoutForScope resolves the idle timeout for one scope. rig is

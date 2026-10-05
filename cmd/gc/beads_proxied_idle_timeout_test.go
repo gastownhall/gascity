@@ -236,19 +236,63 @@ func TestScopeIdleTimeoutSharedRootRigUsesCityValue(t *testing.T) {
 	}
 }
 
-// The script's init arms get the resolved value through the env gc projects.
+// The script's init arms get the resolved value through the env gc projects
+// for the init op, and only for it: start, health, recover and stop never
+// resolve it.
 func TestScopeInitEnvProjectsResolvedIdleTimeout(t *testing.T) {
 	clearGCEnv(t)
 	t.Setenv(config.ProxiedIdleTimeoutEnv, "")
 	city := t.TempDir()
 	writeIdleTimeoutCityToml(t, city, `proxied_idle_timeout = "45m"`)
-	env, err := providerLifecycleProcessEnvForScopeInitWithError(city, city, "exec:"+filepath.Join(city, "gc-beads-bd"))
+	provider := "exec:" + filepath.Join(city, "gc-beads-bd")
+	env, err := providerLifecycleProcessEnvForScopeInitWithError(city, city, provider)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := runtimeEnvEntriesToMap(env)[config.ProxiedIdleTimeoutEnv]
-	if got != "45m0s" {
+	if got := runtimeEnvEntriesToMap(env)[config.ProxiedIdleTimeoutEnv]; got != "" {
+		t.Fatalf("the shared lifecycle env carries %s=%q; only init may", config.ProxiedIdleTimeoutEnv, got)
+	}
+	env, err = withProxiedInitIdleTimeout(env, city, city, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := runtimeEnvEntriesToMap(env)[config.ProxiedIdleTimeoutEnv]; got != "45m0s" {
 		t.Fatalf("%s = %q, want 45m0s", config.ProxiedIdleTimeoutEnv, got)
+	}
+}
+
+// An invalid idle timeout must never stop gc from retiring a city: the stop
+// op does not resolve it, and the config still loads (with a warning).
+func TestInvalidProxiedIdleTimeoutDoesNotBreakStop(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv(config.ProxiedIdleTimeoutEnv, "")
+	city := t.TempDir()
+	rig := filepath.Join(city, "rigs", "r1")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(city, "provider.log")
+	provider := filepath.Join(city, "gc-beads-bd.sh")
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$GC_TEST_PROVIDER_LOG\"\n"), 0o755); err != nil { //nolint:gosec // fixture must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("GC_TEST_PROVIDER_LOG", logPath)
+	toml := "[beads]\nprovider = \"exec:" + provider + "\"\nproxied_idle_timeout = \"bogus\"\n[[rigs]]\nname = \"r1\"\npath = \"rigs/r1\"\n"
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(toml), 0o644); err != nil { //nolint:gosec // fixture
+		t.Fatal(err)
+	}
+	if err := persistProviderScopeOwnership(city, rig, providerScopeIntent{Transport: "direct", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := markProviderScopeOwnershipReady(city, rig); err != nil {
+		t.Fatal(err)
+	}
+	if err := runProviderOwnedScopesLifecycleOp(city, "stop"); err != nil {
+		t.Fatalf("stop with an invalid idle timeout: %v", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil || strings.TrimSpace(string(data)) != "stop" {
+		t.Fatalf("provider ops = %q (%v), want the stop to have run", data, err)
 	}
 }
 
