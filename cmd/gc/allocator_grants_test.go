@@ -656,7 +656,7 @@ func TestCreates_BlockedByPartialRedQuarantineEndpoint(t *testing.T) {
 	cfg.NamedSessions = []config.NamedSession{{Template: "chat", Mode: "always"}}
 	cfg.Workspace.Provider = "claude"
 	closed := map[endpointKey]endpointView{"provider:claude": {Gate: gateClosed}}
-	named := namedRuntimeName(t, cfg, "chat")
+	named := namedRuntimeName(t, cfg)
 	pool := boundSessionNameLength(poolIdentitySessionName("worker-1", "worker") + poolRuntimeNameSuffix)
 	cases := []struct {
 		name  string
