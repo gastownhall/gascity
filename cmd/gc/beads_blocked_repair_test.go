@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,8 +16,11 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // fakeBlockedRepairBd is a scripted bd for one scope: a version, a stored
@@ -350,5 +354,126 @@ func TestBlockedRepairRunsScopesInParallelWithinTheBound(t *testing.T) {
 	// Results print in scope order whatever order the recomputes finished in.
 	if strings.Index(out, "rig/r0 ") > strings.Index(out, "rig/r7 ") {
 		t.Fatalf("results not in scope order: %q", out)
+	}
+}
+
+// TestStartStandaloneRunsBlockedRepairExceptOnDryRun pins the standalone
+// `gc start` wiring: the repair is called once for the resolved city, and
+// --dry-run, which only previews, never calls it.
+func TestStartStandaloneRunsBlockedRepairExceptOnDryRun(t *testing.T) {
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dry-run=%v", dryRun), func(t *testing.T) {
+			cityPath := t.TempDir()
+			clearInheritedBeadsEnv(t)
+			requireNoLeakedDoltAfterForPaths(t, cityPath)
+			t.Chdir(t.TempDir())
+			if err := os.MkdirAll(filepath.Join(cityPath, citylayout.RuntimeRoot), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cityTOML := "[workspace]\nname = \"repair-wiring\"\n\n[beads]\nprovider = \"file\"\n"
+			if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			oldBuild := buildSessionProviderByName
+			oldRepair := startRepairBlockedFlags
+			oldDry := dryRunMode
+			t.Cleanup(func() {
+				buildSessionProviderByName = oldBuild
+				startRepairBlockedFlags = oldRepair
+				dryRunMode = oldDry
+			})
+			buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+				return runtime.NewFake(), nil
+			}
+			var calls []string
+			startRepairBlockedFlags = func(gotCity string, cfg *config.City, _ io.Writer, cmdName string) {
+				if cfg == nil {
+					t.Error("repair called without the resolved config")
+				}
+				calls = append(calls, cmdName+" "+gotCity)
+			}
+			dryRunMode = dryRun
+
+			var stdout, stderr bytes.Buffer
+			if code := doStartStandalone([]string{cityPath}, false, &stdout, &stderr); code != 0 {
+				t.Fatalf("doStartStandalone exit = %d\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+			}
+			want := []string{"gc start " + cityPath}
+			if dryRun {
+				want = nil
+			}
+			if !slices.Equal(calls, want) {
+				t.Fatalf("repair calls = %q, want %q", calls, want)
+			}
+		})
+	}
+}
+
+// TestBlockedRepairScopesForRigSelectsOnlyTheAddedRig pins the `gc rig add`
+// scope: the new rig alone, and nothing for a rig gc does not own.
+func TestBlockedRepairScopesForRigSelectsOnlyTheAddedRig(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_BEADS_BACKEND", "")
+	const doltMeta = `{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"%s"}`
+	city := t.TempDir()
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"c\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeBlockedRepairScope(t, city, fmt.Sprintf(doltMeta, "hq"))
+	writeBlockedRepairScope(t, filepath.Join(city, "rigs", "added"), fmt.Sprintf(doltMeta, "added"))
+	writeBlockedRepairScope(t, filepath.Join(city, "rigs", "other"), fmt.Sprintf(doltMeta, "other"))
+	external := filepath.Join(t.TempDir(), "external")
+	writeBlockedRepairScope(t, external, fmt.Sprintf(doltMeta, "external"))
+	cfg := &config.City{Rigs: []config.Rig{
+		{Name: "added", Path: "rigs/added"}, // relative, as city.toml records it
+		{Name: "other", Path: "rigs/other"},
+		{Name: "external", Path: external, DoltHost: "db.example.com", DoltPort: "3306"},
+	}}
+	got := blockedRepairScopesForRig(city, cfg, "added")
+	want := []blockedRepairScope{{id: "rig/added", root: filepath.Join(city, "rigs", "added")}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("scopes = %+v, want %+v", got, want)
+	}
+	if got := blockedRepairScopesForRig(city, cfg, "external"); len(got) != 0 {
+		t.Fatalf("an external rig was selected: %+v", got)
+	}
+}
+
+// TestDoRigAddRepairsTheAddedRig pins the `gc rig add` wiring: the added rig
+// is repaired at once, by name, without waiting for the next `gc start`.
+func TestDoRigAddRepairsTheAddedRig(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, dolt string
+		want                 []string
+	}{
+		{name: "live store", provider: "file", want: []string{"added-rig"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+			rigPath := filepath.Join(t.TempDir(), "added-rig")
+			if err := os.MkdirAll(rigPath, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GC_BEADS", tc.provider)
+			t.Setenv("GC_DOLT", tc.dolt)
+			old := rigAddRepairBlockedFlags
+			t.Cleanup(func() { rigAddRepairBlockedFlags = old })
+			var calls []string
+			rigAddRepairBlockedFlags = func(gotCity string, cfg *config.City, rigName string, _ io.Writer) {
+				if gotCity != cityPath || cfg == nil {
+					t.Errorf("repair called with city %q cfg %v", gotCity, cfg)
+				}
+				calls = append(calls, rigName)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr); code != 0 {
+				t.Fatalf("doRigAdd = %d\n%s", code, stderr.String())
+			}
+			if !slices.Equal(calls, tc.want) {
+				t.Fatalf("repair calls = %q, want %q", calls, tc.want)
+			}
+		})
 	}
 }

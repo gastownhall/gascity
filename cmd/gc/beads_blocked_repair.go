@@ -66,7 +66,43 @@ func repairBlockedFlagsOnUpgrade(cityPath string, cfg *config.City, stderr io.Wr
 	if gcDoltSkip() || cfg == nil {
 		return
 	}
-	scopes := blockedRepairScopes(cityPath, cfg)
+	runBlockedRepairForScopes(cityPath, cfg, blockedRepairScopes(cityPath, cfg), stderr, cmdName)
+}
+
+// startRepairBlockedFlags is the start paths' call into the repair, a seam so
+// tests can pin that `gc start` and the supervisor make it.
+var startRepairBlockedFlags = repairBlockedFlagsOnUpgrade
+
+// rigAddRepairBlockedFlags is `gc rig add`'s call into the repair, a seam so
+// tests can pin that it is made for the added rig only.
+var rigAddRepairBlockedFlags = repairBlockedFlagsForAddedRig
+
+// repairBlockedFlagsForAddedRig is the same one-shot repair, with the same
+// marker, for a rig `gc rig add` just attached to a city. An existing store
+// adopted as a rig may have crossed migration 0059 under an older bd; without
+// this it would wait for the next `gc start`. A rig whose store init was
+// deferred to the controller has no live store yet and is left to that start.
+func repairBlockedFlagsForAddedRig(cityPath string, cfg *config.City, rigName string, stderr io.Writer) {
+	if gcDoltSkip() || cfg == nil {
+		return
+	}
+	runBlockedRepairForScopes(cityPath, cfg, blockedRepairScopesForRig(cityPath, cfg, rigName), stderr, "gc rig add")
+}
+
+// blockedRepairScopesForRig is blockedRepairScopes narrowed to one rig.
+func blockedRepairScopesForRig(cityPath string, cfg *config.City, rigName string) []blockedRepairScope {
+	// city.toml may record the rig relative to the city; scopes need roots.
+	resolveRigPaths(cityPath, cfg.Rigs)
+	var scopes []blockedRepairScope
+	for _, s := range blockedRepairScopes(cityPath, cfg) {
+		if s.id == "rig/"+rigName {
+			scopes = append(scopes, s)
+		}
+	}
+	return scopes
+}
+
+func runBlockedRepairForScopes(cityPath string, cfg *config.City, scopes []blockedRepairScope, stderr io.Writer, cmdName string) {
 	if len(scopes) == 0 {
 		return
 	}

@@ -857,7 +857,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// it warns and retries on the next start instead of failing this one.
 	// --dry-run only previews, so it writes nothing.
 	if !dryRunMode {
-		repairBlockedFlagsOnUpgrade(cityPath, cfg, stderr, "gc start")
+		startRepairBlockedFlags(cityPath, cfg, stderr, "gc start")
 	}
 
 	// Warm-up doctor scan. Fail-open: startup continues regardless of check,

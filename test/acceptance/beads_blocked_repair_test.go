@@ -168,12 +168,18 @@ func TestBlockedRepairOnProxiedCityAndRig(t *testing.T) {
 	}
 	scopeID := map[string]string{"": "city", rig: "rig/" + rig}
 
-	// First start of a fresh city: every scope is repaired once (nothing to
-	// correct) and stamped with the running bd version.
+	// `gc rig add` repairs the rig it added, on its own: an existing store
+	// adopted as a rig must not wait for the next start.
+	if added := blockedRepairEvents(t, run.City.Dir); len(added) != 1 || added[0].Payload.Scope != "rig/"+rig {
+		t.Fatalf("gc rig add recorded repair events %+v, want one for rig/%s", added, rig)
+	}
+
+	// First start of the fresh city: the city scope is repaired once (nothing
+	// to correct) and stamped; the rig, already stamped by rig add, is not.
 	run.Start(t)
 	first := blockedRepairEvents(t, run.City.Dir)
-	if len(first) != 2 {
-		t.Fatalf("first start recorded %d repair event(s), want one per scope: %+v", len(first), first)
+	if len(first) != 2 || first[1].Payload.Scope != "city" {
+		t.Fatalf("after the first start, repair events = %+v, want rig add's then the city's", first)
 	}
 	bdVersion := first[0].Payload.BDVersion
 	for _, ev := range first {
