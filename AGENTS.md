@@ -255,6 +255,11 @@ becoming more useful as models improve — it becomes LESS useful instead.
   `make bazel-sync` and commit the result — the `BUILD files are in sync` CI
   gate fails otherwise. Never commit machine-specific endpoints; they belong
   in `.bazelrc.local`. Details: `engdocs/bazel-quickstart.md`.
+- **Optional shared cache (opt-in).** `--config=fork-cache` reads the
+  project's anonymous, read-only Bazel cache, so results CI already computed
+  are hits and nothing is uploaded. It is off by default; when setting up a
+  dev environment, ask your human before adding `build --config=fork-cache`
+  to `.bazelrc.local`.
 - **Never run `go clean -cache`** — it corrupts shared build caches.
   `go clean -testcache` is fine. Maintainers on the shared build hosts: read
   `engdocs/contributors/maintainer-environment.md` before touching `GOCACHE`

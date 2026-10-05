@@ -2,8 +2,10 @@ common --enable_bzlmod
 common --color=no
 
 # Side-by-side opt-in bazel arm. `go build`/`go test` continues to work unchanged.
-# To use a remote cache, uncomment:
-# build --remote_cache=<your-cache-endpoint>
+# Opt-in shared cache: --config=fork-cache (defined below) reads the
+# project's anonymous, read-only cache. To make it your default, put
+# `build --config=fork-cache` in your gitignored .bazelrc.local. See
+# engdocs/bazel-quickstart.md.
 
 test --test_output=errors
 test --flaky_test_attempts=2

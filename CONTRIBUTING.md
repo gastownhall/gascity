@@ -18,6 +18,11 @@ contributors. Before making changes, read:
    [docs/getting-started/installation.md](docs/getting-started/installation.md).
 4. Set up tooling and hooks: `make setup`
 5. Build and run the fast quality gates: `make build && make check`
+6. Optional: if you use Bazel, opt in to the project's anonymous, read-only
+   build cache by adding `build --config=fork-cache` to your gitignored
+   `.bazelrc.local` (or pass `--config=fork-cache` per command). Results CI
+   already computed become cache hits; nothing you build is uploaded. See
+   [engdocs/bazel-quickstart.md](engdocs/bazel-quickstart.md).
 
 `make setup` installs a pre-commit hook at `.githooks/pre-commit` that
 auto-formats staged Go files and, when any Go file is staged,
