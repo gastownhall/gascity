@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // promptDeliveryBudgetDoctorCheck verifies every agent's rendered prompt
@@ -78,6 +80,11 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 		if a.PromptTemplate == "" {
 			continue
 		}
+		// Launch never delivers a startup prompt to an agent whose prompt is
+		// suppressed, so there is nothing to measure against the budget.
+		if suppressStartupPromptForAgent(&a) {
+			continue
+		}
 
 		// ResolveProvider's error is intentionally discarded: cmd_prime.go's
 		// own per-agent loop never branches on it either, and every consumer
@@ -91,7 +98,7 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 		// as out of scope rather than an error.
 		resolved, _ := config.ResolveProvider(&a, &c.cfg.Workspace, c.cfg.Providers, c.lookPath)
 
-		ctx := buildPrimeContextFor(c.cityPath, cityName, &a, c.cfg.Rigs, topo, io.Discard)
+		ctx := buildAgentPromptContext(c.cityPath, cityName, &a, c.cfg.Rigs, topo, io.Discard)
 		ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(&a, &c.cfg.Workspace, c.cfg.Providers)
 		ctx.InstructionsFile = instructionsFileForAgent(&a, &c.cfg.Workspace, c.cfg.Providers)
 
@@ -106,17 +113,36 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 
 		var renderErrs bytes.Buffer
 		prompt := renderPrompt(fsys.OSFS{}, c.cityPath, cityName, a.PromptTemplate, ctx, c.cfg.Workspace.SessionTemplate, &renderErrs, packDirs, fragments, nil)
+		// Measure the startup prompt launch would send: the beacon is
+		// prepended exactly as resolveTemplate does. Its timestamp is
+		// fixed-width, so the zero time yields the same byte count. The
+		// assigned-skills appendix launch may append (resolveTemplate Step
+		// 9b) is not counted: its gating depends on the session workdir and
+		// runtime materialization paths that are only known at launch.
+		if prompt != "" {
+			beacon := runtime.FormatBeaconAt(cityName, a.QualifiedName(), false, time.Time{})
+			prompt = composeStartupPrompt(beacon, prompt, false)
+		}
 
 		effProvider := effectiveSessionProvider(a.Session, c.cfg.Session.Provider)
 		sessionTransport := config.ResolveSessionCreateTransport(a.Session, resolved)
 		isACP := sessionTransport == config.SessionTransportACP
 
 		delivery, dErr := promptDelivery(prompt, isACP, resolved, "", effProvider, c.cfg.Runtimes)
+		// Report the configured mode in the same vocabulary as
+		// reportPromptDeliveryBudget (gc prime --strict).
+		configuredMode := delivery.ConfiguredMode
+		switch {
+		case isACP:
+			configuredMode = "acp"
+		case configuredMode == "":
+			configuredMode = "arg"
+		}
 		switch {
 		case dErr != nil:
-			note(doctor.StatusError, fmt.Sprintf("%s: hard-fail: prompt exceeds the delivery budget for runtime %q and has no supported fallback (configured_mode=%s effective_mode=%s): %v", a.Name, effProvider, delivery.ConfiguredMode, delivery.EffectiveMode, dErr))
+			note(doctor.StatusError, fmt.Sprintf("%s: hard-fail: prompt exceeds the delivery budget for runtime %q and has no supported fallback (configured_mode=%s effective_mode=%s): %v", a.Name, effProvider, configuredMode, delivery.EffectiveMode, dErr))
 		case delivery.OversizedFallback:
-			note(doctor.StatusWarning, fmt.Sprintf("%s: nudge-fallback: prompt exceeds the delivery budget for runtime %q; falls back to a post-start nudge (configured_mode=%s effective_mode=%s raw_bytes=%d raw_limit=%d argv_bytes=%d argv_limit=%d)", a.Name, effProvider, delivery.ConfiguredMode, delivery.EffectiveMode, delivery.RawBytes, maxPromptSuffixRawBytes, delivery.ArgvBytes, maxPromptSuffixQuotedBytes))
+			note(doctor.StatusWarning, fmt.Sprintf("%s: nudge-fallback: prompt exceeds the delivery budget for runtime %q; falls back to a post-start nudge (configured_mode=%s effective_mode=%s raw_bytes=%d raw_limit=%d argv_bytes=%d argv_limit=%d)", a.Name, effProvider, configuredMode, delivery.EffectiveMode, delivery.RawBytes, maxPromptSuffixRawBytes, delivery.ArgvBytes, maxPromptSuffixQuotedBytes))
 		case renderErrs.Len() > 0:
 			note(doctor.StatusWarning, fmt.Sprintf("%s: render warning: prompt template %q failed to render and fell back to raw text", a.Name, a.PromptTemplate))
 		}

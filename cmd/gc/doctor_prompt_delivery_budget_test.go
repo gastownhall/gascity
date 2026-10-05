@@ -6,10 +6,21 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+// startupPromptOverhead is the number of bytes launch adds ahead of a
+// non-empty rendered prompt for agentName in the "demo" fixture city: the
+// beacon plus the blank line separating it from the prompt. The beacon
+// carries no single quotes, so it adds the same count to the raw and
+// argv-encoded lengths.
+func startupPromptOverhead(agentName string) int {
+	return len(runtime.FormatBeaconAt("demo", agentName, false, time.Time{})) + len("\n\n")
+}
 
 // clearPromptDeliveryBudgetEnv clears the ambient GC_* variables that
 // buildPrimeContextFor reads directly (GC_ALIAS, GC_AGENT, GC_DIR, GC_RIG,
@@ -94,7 +105,8 @@ func TestPromptDeliveryBudgetCheck_NoAgents(t *testing.T) {
 func TestPromptDeliveryBudgetCheck_SafePrompt_RawThreshold(t *testing.T) {
 	clearPromptDeliveryBudgetEnv(t)
 	cityPath := t.TempDir()
-	body := strings.Repeat("a", 99999) // raw=99999 (<100000), quoted=100001 (<128000): safe
+	// raw=99999 (<100000) and quoted=100001 (<128000) once the beacon is prepended: safe.
+	body := strings.Repeat("a", maxPromptSuffixRawBytes-1-startupPromptOverhead("safe-raw"))
 	tmpl := writePromptFile(t, cityPath, "prompts/safe-raw.md", body)
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "demo"},
@@ -110,7 +122,8 @@ func TestPromptDeliveryBudgetCheck_SafePrompt_RawThreshold(t *testing.T) {
 func TestPromptDeliveryBudgetCheck_SafePrompt_QuotedThreshold(t *testing.T) {
 	clearPromptDeliveryBudgetEnv(t)
 	cityPath := t.TempDir()
-	body := strings.Repeat("'", 31999) // raw=31999, quoted=4*31999+2=127998 (<128000): safe
+	// quoted=overhead+4*n+2 stays under 128000 once the beacon is prepended: safe.
+	body := strings.Repeat("'", (maxPromptSuffixQuotedBytes-1-2-startupPromptOverhead("safe-quoted"))/4)
 	tmpl := writePromptFile(t, cityPath, "prompts/safe-quoted.md", body)
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "demo"},
@@ -217,16 +230,17 @@ func TestPromptDeliveryBudgetCheck_OversizedRaw_NudgeFallbackRuntime(t *testing.
 	if !strings.Contains(details, "effective_mode=nudge-fallback") {
 		t.Errorf("details missing effective_mode=nudge-fallback: %v", res.Details)
 	}
-	// body is 100000 'a's: raw=100000 (trips the raw guard at its exact
-	// limit), quoted=100002 (no embedded quotes to escape, so 100000+2).
-	if !strings.Contains(details, "raw_bytes=100000") {
-		t.Errorf("details missing raw_bytes=100000: %v", res.Details)
+	// body is 100000 'a's behind the beacon: raw=100000+overhead (trips the
+	// raw guard), quoted=raw+2 (no embedded quotes to escape).
+	rawBytes := 100000 + startupPromptOverhead(agent.Name)
+	if want := fmt.Sprintf("raw_bytes=%d", rawBytes); !strings.Contains(details, want) {
+		t.Errorf("details missing %s: %v", want, res.Details)
 	}
 	if !strings.Contains(details, "raw_limit=100000") {
 		t.Errorf("details missing raw_limit=100000: %v", res.Details)
 	}
-	if !strings.Contains(details, "argv_bytes=100002") {
-		t.Errorf("details missing argv_bytes=100002: %v", res.Details)
+	if want := fmt.Sprintf("argv_bytes=%d", rawBytes+2); !strings.Contains(details, want) {
+		t.Errorf("details missing %s: %v", want, res.Details)
 	}
 	if !strings.Contains(details, "argv_limit=128000") {
 		t.Errorf("details missing argv_limit=128000: %v", res.Details)
@@ -264,16 +278,18 @@ func TestPromptDeliveryBudgetCheck_OversizedQuoted_NudgeFallbackRuntime(t *testi
 	if !strings.Contains(details, "effective_mode=nudge-fallback") {
 		t.Errorf("details missing effective_mode=nudge-fallback: %v", res.Details)
 	}
-	// body is 32000 "'"s: raw=32000 (safe), quoted=4*32000+2=128002 (each
-	// embedded ' becomes '\'', trips the quoted guard past its limit).
-	if !strings.Contains(details, "raw_bytes=32000") {
-		t.Errorf("details missing raw_bytes=32000: %v", res.Details)
+	// body is 32000 "'"s behind the beacon: raw=32000+overhead (safe),
+	// quoted=overhead+4*32000+2 (each embedded ' becomes '\'', trips the
+	// quoted guard past its limit).
+	overhead := startupPromptOverhead(agent.Name)
+	if want := fmt.Sprintf("raw_bytes=%d", 32000+overhead); !strings.Contains(details, want) {
+		t.Errorf("details missing %s: %v", want, res.Details)
 	}
 	if !strings.Contains(details, "raw_limit=100000") {
 		t.Errorf("details missing raw_limit=100000: %v", res.Details)
 	}
-	if !strings.Contains(details, "argv_bytes=128002") {
-		t.Errorf("details missing argv_bytes=128002: %v", res.Details)
+	if want := fmt.Sprintf("argv_bytes=%d", overhead+128002); !strings.Contains(details, want) {
+		t.Errorf("details missing %s: %v", want, res.Details)
 	}
 	if !strings.Contains(details, "argv_limit=128000") {
 		t.Errorf("details missing argv_limit=128000: %v", res.Details)
@@ -539,5 +555,110 @@ func TestPromptDeliveryBudgetCheck_MultiRig_PackDirsScopedPerAgent(t *testing.T)
 	}
 	if strings.Contains(details, alphaAgent.Name) {
 		t.Errorf("details unexpectedly mention alpha agent %q -- alpha's own rig fragment is tiny and safe; its presence here means rig beta's pack dir leaked into rig alpha's resolution: %v", alphaAgent.Name, res.Details)
+	}
+}
+
+// TestPromptDeliveryBudgetCheck_IgnoresAmbientSessionEnv guards against the
+// check rendering every agent with the identity of the session gc doctor
+// runs in: with GC_RIG/GC_AGENT pointing at rig alpha, each agent must still
+// resolve its own configured rig, so only rig beta's agent hard-fails.
+func TestPromptDeliveryBudgetCheck_IgnoresAmbientSessionEnv(t *testing.T) {
+	clearPromptDeliveryBudgetEnv(t)
+	t.Setenv("GC_RIG", "alpha")
+	t.Setenv("GC_AGENT", "someone-else")
+	cityPath := t.TempDir()
+
+	alphaPackDir := t.TempDir()
+	betaPackDir := t.TempDir()
+	for _, dir := range []string{alphaPackDir, betaPackDir} {
+		if err := os.MkdirAll(filepath.Join(dir, "template-fragments"), 0o755); err != nil {
+			t.Fatalf("mkdir template-fragments: %v", err)
+		}
+	}
+	smallFragment := `{{define "rig-marker"}}small{{end}}`
+	largeFragment := `{{define "rig-marker"}}` + strings.Repeat("a", 100000) + `{{end}}`
+	if err := os.WriteFile(filepath.Join(alphaPackDir, "template-fragments", "rig-marker.template.md"), []byte(smallFragment), 0o644); err != nil {
+		t.Fatalf("write alpha fragment: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(betaPackDir, "template-fragments", "rig-marker.template.md"), []byte(largeFragment), 0o644); err != nil {
+		t.Fatalf("write beta fragment: %v", err)
+	}
+	tmpl := writePromptFile(t, cityPath, "prompts/multirig.template.md", `{{template "rig-marker" .}}`)
+
+	alphaAgent := promptFixtureAgent("rig-alpha-agent", tmpl, "subprocess", "arg")
+	alphaAgent.Dir = "alpha"
+	betaAgent := promptFixtureAgent("rig-beta-agent", tmpl, "subprocess", "arg")
+	betaAgent.Dir = "beta"
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs:      []config.Rig{{Name: "alpha"}, {Name: "beta"}},
+		RigPackDirs: map[string][]string{
+			"alpha": {alphaPackDir},
+			"beta":  {betaPackDir},
+		},
+		Agents: []config.Agent{alphaAgent, betaAgent},
+	}
+
+	res := runPromptDeliveryBudgetCheck(t, cfg, cityPath)
+	if res.Status != doctor.StatusError {
+		t.Fatalf("rig-beta agent should hard-fail on its own rig's fragment despite GC_RIG=alpha: status = %v, want StatusError; message=%q details=%v", res.Status, res.Message, res.Details)
+	}
+	details := joinedDetails(res)
+	if !strings.Contains(details, betaAgent.Name) {
+		t.Errorf("details missing beta agent's name %q: %v", betaAgent.Name, res.Details)
+	}
+	if strings.Contains(details, alphaAgent.Name) {
+		t.Errorf("details unexpectedly mention alpha agent %q: %v", alphaAgent.Name, res.Details)
+	}
+}
+
+// TestPromptDeliveryBudgetCheck_CountsStartupBeacon guards that the check
+// measures the startup prompt launch sends, beacon included: a rendered body
+// just under the raw limit is pushed over it by the beacon launch prepends.
+func TestPromptDeliveryBudgetCheck_CountsStartupBeacon(t *testing.T) {
+	clearPromptDeliveryBudgetEnv(t)
+	cityPath := t.TempDir()
+	body := strings.Repeat("a", maxPromptSuffixRawBytes-10)
+	tmpl := writePromptFile(t, cityPath, "prompts/beacon.md", body)
+	agent := promptFixtureAgent("beacon-agent", tmpl, "subprocess", "arg")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Agents:    []config.Agent{agent},
+	}
+
+	res := runPromptDeliveryBudgetCheck(t, cfg, cityPath)
+	if res.Status != doctor.StatusError {
+		t.Fatalf("body 10 bytes under the raw limit plus beacon: status = %v, want StatusError; message=%q details=%v", res.Status, res.Message, res.Details)
+	}
+	details := joinedDetails(res)
+	if !strings.Contains(details, agent.Name) {
+		t.Errorf("details missing agent name %q: %v", agent.Name, res.Details)
+	}
+	if want := fmt.Sprintf("prompt %d raw bytes", maxPromptSuffixRawBytes-10+startupPromptOverhead(agent.Name)); !strings.Contains(details, want) {
+		t.Errorf("details missing %q (rendered body plus beacon): %v", want, res.Details)
+	}
+}
+
+// TestPromptDeliveryBudgetCheck_SuppressedStartupPromptSkipped guards that an
+// agent whose startup prompt launch suppresses (the deterministic control
+// dispatcher) is not judged on a prompt it is never sent.
+func TestPromptDeliveryBudgetCheck_SuppressedStartupPromptSkipped(t *testing.T) {
+	clearPromptDeliveryBudgetEnv(t)
+	cityPath := t.TempDir()
+	tmpl := writePromptFile(t, cityPath, "prompts/control-dispatcher.md", strings.Repeat("a", 100000))
+	agent := promptFixtureAgent(config.ControlDispatcherAgentName, tmpl, "subprocess", "arg")
+	agent.StartCommand = "gc convoy control --serve"
+	if !config.IsDeterministicControlDispatcher(&agent) {
+		t.Fatalf("fixture agent is not a deterministic control dispatcher: %+v", agent)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Agents:    []config.Agent{agent},
+	}
+
+	res := runPromptDeliveryBudgetCheck(t, cfg, cityPath)
+	if res.Status != doctor.StatusOK {
+		t.Fatalf("suppressed startup prompt with an oversized template: status = %v, want StatusOK; message=%q details=%v", res.Status, res.Message, res.Details)
 	}
 }

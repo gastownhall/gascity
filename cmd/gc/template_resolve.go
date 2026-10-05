@@ -440,14 +440,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// instruction costs a turn and duplicates the context it just received.
 	includePrimeInstruction := !hasHooks && prompt == ""
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, includePrimeInstruction, p.beaconTime)
-	switch {
-	case suppressStartupPrompt:
-		prompt = ""
-	case prompt != "":
-		prompt = beacon + "\n\n" + prompt
-	default:
-		prompt = beacon
-	}
+	prompt = composeStartupPrompt(beacon, prompt, suppressStartupPrompt)
 
 	// Step 9b: Append the assigned-skills appendix when the agent
 	// has a vendor sink, hasn't opted out, AND the runtime actually
@@ -836,6 +829,21 @@ func appendKimiHookConfigArg(command string) string {
 	}
 	parts = append(parts, configArgs...)
 	return shellquote.Join(parts)
+}
+
+// composeStartupPrompt combines the session beacon with the rendered prompt
+// into the startup prompt a launch delivers: empty when the agent's startup
+// prompt is suppressed, the beacon alone when nothing rendered, and otherwise
+// the beacon, a blank line, and the rendered prompt.
+func composeStartupPrompt(beacon, prompt string, suppress bool) string {
+	switch {
+	case suppress:
+		return ""
+	case prompt != "":
+		return beacon + "\n\n" + prompt
+	default:
+		return beacon
+	}
 }
 
 func suppressStartupPromptForAgent(cfgAgent *config.Agent) bool {

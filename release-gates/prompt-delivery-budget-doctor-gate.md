@@ -17,7 +17,7 @@ Candidate merge tree: `fc72c9869f7e5471320dd2d49d3cd314432e9890`
 | 4 | No high-severity review findings open | PASS | Reviewer reported no blocking or security finding. The two test assertion gaps are P4 in `ga-u4dq0h`. |
 | 5 | Final candidate tree clean | PASS | The materialized merge worktree remained clean after build, vet and the suite. Policy and Bazel drift lanes ran in separate fresh tree views with zero modified, untracked or ignored files; the deploy branch is checked clean before push. |
 | 6 | Branch diverges cleanly from main | PASS | `git merge-tree --write-tree` succeeded at pinned base `9b19defec38070498387c598b9f1dba5a0b03e37` (tree `fc72c9869f7e5471320dd2d49d3cd314432e9890`), where `go build ./...` and `go vet ./...` passed. Main advanced during the suite. After fetching its then-current tip `9bedc0980d48555d49b195b8ae39a92707b3cbc8`, a final merge-tree recheck also succeeded (tree `f85fb40b82a5ebb269d3ee59c630837a2fb3dc8f`). |
-| 7 | Single feature theme | PASS | Seven changed files, all in `cmd/gc`, implement one doctor prompt delivery budget check. |
+| 7 | Single feature theme | PASS | Eight changed files, all in `cmd/gc`, implement one doctor prompt delivery budget check. |
 
 ## Criterion 3 evidence
 
