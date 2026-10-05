@@ -51,6 +51,7 @@ go_test(
         "control_payloads_test.go",
         "events_test.go",
         "latest_archived_match_test.go",
+        "multiplexer_membership_test.go",
         "multiplexer_test.go",
         "order_payloads_test.go",
         "payload_test.go",
