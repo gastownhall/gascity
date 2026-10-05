@@ -1,13 +1,16 @@
 package main
 
 import (
-	"io"
+	"bytes"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // The POOL-DEMAND half of reader agreement (#6019).
@@ -20,14 +23,56 @@ import (
 // (`gc ready` federates Plan(RoutedWork)) and counted by nobody, so a pool whose
 // queue was work-class never demand-spawned.
 
-// poolDemandForEnv builds the default scale-check targets exactly as the
-// controller's agent loop does (leading = the sessions-class store) and counts
-// them the way the demand pass does.
-func poolDemandForEnv(t *testing.T, e legAgreementEnv) (demandTargets, map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
+// poolDemandResult is what one desired-state build reports about default
+// pool demand: the counts and the pool / named partial templates.
+type poolDemandResult struct {
+	counts        map[string]int
+	poolPartials  map[string]bool
+	namedPartials map[string]bool
+	stderr        string
+}
+
+// poolDemandForStore runs the controller's desired-state build with leading as
+// the store it is handed (the sessions-class store) and reports its demand.
+func poolDemandForStore(t *testing.T, cityName, cityPath string, cfg *config.City, leading beads.Store, rigs map[string]beads.Store) poolDemandResult {
 	t.Helper()
-	targets := buildDemandTargets(e.cityName, e.cityPath, e.cfg, e.leading(), e.rigs, nil, nil, controllerQueryRuntimeEnv, io.Discard)
-	counts, demand, partials, errs := defaultScaleCheckCountsAndDemand(e.cfg, targets.defaultScaleTargets, newReadyDemandCache())
-	return targets, counts, demand, partials, errs
+	snapshot, err := loadSessionBeadSnapshot(leading)
+	if err != nil {
+		t.Fatalf("load session snapshot: %v", err)
+	}
+	var stderr bytes.Buffer
+	res := buildDesiredStateWithSessionBeads(cityName, cityPath, time.Now().UTC(), cfg, runtime.NewFake(), leading, rigs, snapshot, nil, &stderr)
+	return poolDemandResult{
+		counts:        res.ScaleCheckCounts,
+		poolPartials:  res.PoolScaleCheckPartialTemplates,
+		namedPartials: res.NamedScaleCheckPartialTemplates,
+		stderr:        stderr.String(),
+	}
+}
+
+func poolDemandForEnv(t *testing.T, e legAgreementEnv) poolDemandResult {
+	t.Helper()
+	return poolDemandForStore(t, e.cityName, e.cityPath, e.cfg, e.leading(), e.rigs)
+}
+
+// cityLegDemand counts template's default demand over the city legs in the
+// order the agent loop builds them (routedWorkCityDemandLegs), exposing the
+// per-bead detail the desired-state result does not carry.
+func cityLegDemand(t *testing.T, e legAgreementEnv, template string) (map[string]int, map[string]scaleCheckDemand) {
+	t.Helper()
+	legs, err := routedWorkCityDemandLegs(e.cityPath, e.cfg, e.leading(), e.rigs, nil)
+	if err != nil {
+		t.Fatalf("routedWorkCityDemandLegs: %v", err)
+	}
+	var targets []defaultScaleCheckTarget
+	for _, leg := range legs {
+		targets = append(targets, defaultScaleCheckTarget{template: template, store: leg.store, storeKey: "city"})
+	}
+	counts, demand, _, errs := defaultScaleCheckCountsAndDemand(e.cfg, targets, newReadyDemandCache())
+	if len(errs) != 0 {
+		t.Fatalf("city-leg demand errors: %v", errs)
+	}
+	return counts, demand
 }
 
 func seedRoutedWork(t *testing.T, store beads.Store, target, title string) beads.Bead {
@@ -74,24 +119,16 @@ func assertPoolDemandMatchesClaim(t *testing.T, e legAgreementEnv, template stri
 			t.Fatalf("fixture: seeded routed bead %s is not claimable; the claim reader does not see it", b.ID)
 		}
 	}
-	_, counts, demand, partials, errs := poolDemandForEnv(t, e)
-	if len(errs) != 0 {
-		t.Fatalf("pool demand probe errors: %v", errs)
+	got := poolDemandForEnv(t, e)
+	if len(got.poolPartials) != 0 {
+		t.Fatalf("pool demand probe partial templates: %v (stderr %s)", got.poolPartials, got.stderr)
 	}
-	if len(partials) != 0 {
-		t.Fatalf("pool demand probe partial templates: %v", partials)
-	}
-	counted := map[string]bool{}
-	for _, id := range demand[template].WorkBeadIDs {
-		counted[id] = true
-	}
-	for _, b := range seeded {
-		if !counted[b.ID] {
-			t.Errorf("routed bead %s (%q) is CLAIMABLE but uncounted: the pool demand probe does not read the leg it lives in, so no seat is ever spawned to take it", b.ID, b.Title)
+	counts := got.counts
+	if n, want := counts[template], len(claimable); n != want {
+		for _, b := range seeded {
+			t.Logf("seeded %s (%q)", b.ID, b.Title)
 		}
-	}
-	if got, want := counts[template], len(claimable); got != want {
-		t.Fatalf("pool demand counted %d of %d claimable routed rows for %s", got, want, template)
+		t.Fatalf("pool demand counted %d of %d claimable routed rows for %s: a claimable bead the probe does not count is never spawned for", n, want, template)
 	}
 }
 
@@ -137,11 +174,11 @@ func TestPoolScaleCheckCoResidentRowCountsOnceFirstLegWins(t *testing.T) {
 		}
 	}
 
+	if got := poolDemandForEnv(t, e); got.counts["worker"] != 1 {
+		t.Fatalf("co-resident row counted %d times, want 1", got.counts["worker"])
+	}
 	for i := 0; i < 20; i++ { // group iteration must not be map-order dependent
-		_, counts, demand, _, errs := poolDemandForEnv(t, e)
-		if len(errs) != 0 {
-			t.Fatalf("errors: %v", errs)
-		}
+		counts, demand := cityLegDemand(t, e, "worker")
 		if counts["worker"] != 1 {
 			t.Fatalf("co-resident row counted %d times, want 1", counts["worker"])
 		}
@@ -157,12 +194,9 @@ func TestPoolScaleCheckSingleStoreCityKeepsOneTarget(t *testing.T) {
 	e := newLegAgreementEnv(t, false)
 	e.cfg.Agents = []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(5)}}
 	seeded := []beads.Bead{seedRoutedWork(t, e.work, "worker", "work row")}
-	targets, _, _, _, _ := poolDemandForEnv(t, e)
-	if len(targets.defaultScaleTargets) != 1 {
-		t.Fatalf("single-store city got %d default targets, want 1: %+v", len(targets.defaultScaleTargets), targets.defaultScaleTargets)
-	}
-	if tg := targets.defaultScaleTargets[0]; tg.store != e.work || tg.storeKey != "city" {
-		t.Fatalf("single-store target = %+v, want the city store under key city", tg)
+	legs, err := routedWorkCityDemandLegs(e.cityPath, e.cfg, e.leading(), e.rigs, nil)
+	if err != nil || legs != nil {
+		t.Fatalf("single-store city resolved extra city legs %+v (err %v); want none, so its one target is unchanged", legs, err)
 	}
 	assertPoolDemandMatchesClaim(t, e, "worker", seeded)
 }
@@ -204,16 +238,15 @@ func TestPoolScaleCheckDarkCityLegMarksPartial(t *testing.T) {
 			e.cfg.NamedSessions = []config.NamedSession{{Template: "helper", Mode: "on_demand"}}
 			seedRoutedWork(t, readable, "worker", "readable row")
 
-			targets, counts, _, partials, errs := poolDemandForEnv(t, e)
-			if len(errs) == 0 || !partials["worker"] {
-				t.Fatalf("errs=%v partials=%v, want an error and worker partial", errs, partials)
+			got := poolDemandForEnv(t, e)
+			if !got.poolPartials["worker"] {
+				t.Fatalf("pool partials=%v, want worker partial (stderr %s)", got.poolPartials, got.stderr)
 			}
-			if counts["worker"] != 1 {
-				t.Fatalf("readable row counted %d, want 1 (the readable leg still counts)", counts["worker"])
+			if got.counts["worker"] != 1 {
+				t.Fatalf("readable row counted %d, want 1 (the readable leg still counts)", got.counts["worker"])
 			}
-			_, namedPartials, namedErrs := defaultNamedSessionDemand(targets.defaultNamedScaleTargets, e.cfg, e.cityPath, newReadyDemandCache())
-			if len(namedErrs) == 0 || !namedPartials["helper"] {
-				t.Fatalf("named errs=%v partials=%v, want helper partial", namedErrs, namedPartials)
+			if !got.namedPartials["helper"] {
+				t.Fatalf("named partials=%v, want helper partial", got.namedPartials)
 			}
 		})
 	}
@@ -236,13 +269,12 @@ func TestPoolScaleCheckRefusedCityIsPartialNotSilent(t *testing.T) {
 	store := beads.NewMemStore()
 	seedRoutedWork(t, store, "worker", "leading row")
 
-	targets := buildDemandTargets(cfg.Workspace.Name, cityPath, cfg, store, nil, nil, nil, controllerQueryRuntimeEnv, io.Discard)
-	counts, _, partials, errs := defaultScaleCheckCountsAndDemand(cfg, targets.defaultScaleTargets, newReadyDemandCache())
-	if len(errs) == 0 || !partials["worker"] {
-		t.Fatalf("refused city: errs=%v partials=%v, want the plan error and worker partial", errs, partials)
+	got := poolDemandForStore(t, cfg.Workspace.Name, cityPath, cfg, store, nil)
+	if !got.poolPartials["worker"] || !strings.Contains(got.stderr, "resolving routed-work city legs") {
+		t.Fatalf("refused city: partials=%v stderr=%q, want worker partial and the plan error reported", got.poolPartials, got.stderr)
 	}
-	if counts["worker"] != 1 {
-		t.Fatalf("leading row counted %d, want 1 (the leading handle is still read)", counts["worker"])
+	if got.counts["worker"] != 1 {
+		t.Fatalf("leading row counted %d, want 1 (the leading handle is still read)", got.counts["worker"])
 	}
 }
 
@@ -281,10 +313,11 @@ func TestPoolScaleCheckRetainedFrozenCopyCountsFirstLegWins(t *testing.T) {
 		t.Fatalf("close binding copy: %v", err)
 	}
 
-	_, counts, demand, partials, errs := poolDemandForEnv(t, e)
-	if len(errs) != 0 || len(partials) != 0 {
-		t.Fatalf("errs=%v partials=%v", errs, partials)
+	got := poolDemandForEnv(t, e)
+	if len(got.poolPartials) != 0 || got.counts["worker"] != 1 {
+		t.Fatalf("relic: counted %d partials=%v, want 1 and none", got.counts["worker"], got.poolPartials)
 	}
+	counts, demand := cityLegDemand(t, e, "worker")
 	if counts["worker"] != 1 || demand["worker"].WorkBeadIDs[0] != "gc-relic-1" {
 		t.Fatalf("relic: counted %d (%v), want 1 — the ledger's open frozen copy, first leg wins", counts["worker"], demand["worker"].WorkBeadIDs)
 	}
