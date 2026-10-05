@@ -265,11 +265,12 @@ func TestBazelMultiLaneWorkflowTriggersAndPermissions(t *testing.T) {
 		t.Errorf("top-level permissions = %v, want %v", wf.Permissions, readOnly)
 	}
 	wantJobs := map[string]map[string]string{
-		"rbe":        {"contents": "read", "actions": "write"}, // dispatches rbe-worker-pool.yml
-		"lane":       readOnly,
-		"coverage":   readOnly,
-		"sync-check": readOnly,
-		"gate":       nil, // the top-level contents: read
+		"rbe":         {"contents": "read", "actions": "write"}, // dispatches rbe-worker-pool.yml
+		"lane":        readOnly,
+		"coverage":    readOnly,
+		"sync-check":  readOnly,
+		"bep-summary": readOnly, // downloads this run's artifacts with the job token
+		"gate":        nil,      // the top-level contents: read
 	}
 	if len(wf.Jobs) != len(wantJobs) {
 		t.Errorf("%s has %d jobs, want %d (%v)", bazelMultiLaneWorkflow, len(wf.Jobs), len(wantJobs), wantJobs)
@@ -348,10 +349,9 @@ func wantMultiLanes(event, mode string) []string {
 		// rbe-west off; a cache-mode PR until rbe-west's mint serves bazel.yml.
 		return []string{}
 	}
-	lanes := []string{"unit"}
-	if mode != "fork-ro" { // the fork pool has no network (ga-73eoo)
-		lanes = append(lanes, "acceptance")
-	}
+	// Acceptance runs in every mode, the fork pool's (fork-ro: no network)
+	// included: gc init no longer clones gascity-packs (#7005).
+	lanes := []string{"unit", "acceptance"}
 	if event == "push" || event == "workflow_dispatch" { // until G3
 		lanes = append(lanes, "integration")
 	}
