@@ -704,9 +704,17 @@ func sortCandidatesByProbeRotation(candidates []startCandidate, g *endpointCapac
 	if g == nil {
 		return
 	}
+	rotateProbeSlots(candidates, func(c startCandidate) endpointKey { return resolvedEndpointKey(c.tp, c.info) },
+		func(k endpointKey, c startCandidate) int { return g.refusalsInEpisode(k, c.info.ID) })
+}
+
+// rotateProbeSlots is the probe rotation over any candidate type: within
+// each endpoint's own slots, fewest refusals first, stably. The v2
+// allocator's grants share it, with refusals read from the pass's inputs.
+func rotateProbeSlots[T any](items []T, key func(T) endpointKey, refusals func(endpointKey, T) int) {
 	slots := make(map[endpointKey][]int)
-	for i, c := range candidates {
-		if k := resolvedEndpointKey(c.tp, c.info); k != "" {
+	for i, c := range items {
+		if k := key(c); k != "" {
 			slots[k] = append(slots[k], i)
 		}
 	}
@@ -714,17 +722,18 @@ func sortCandidatesByProbeRotation(candidates []startCandidate, g *endpointCapac
 		if len(idx) < 2 {
 			continue
 		}
-		members := make([]startCandidate, len(idx))
-		ranks := make(map[string]int, len(idx))
+		members := make([]T, len(idx))
+		ranks := make([]int, len(idx))
 		for j, i := range idx {
-			members[j] = candidates[i]
-			ranks[members[j].info.ID] = g.refusalsInEpisode(k, members[j].info.ID)
+			members[j], ranks[j] = items[i], refusals(k, items[i])
 		}
-		sort.SliceStable(members, func(a, b int) bool {
-			return ranks[members[a].info.ID] < ranks[members[b].info.ID]
-		})
+		order := make([]int, len(idx))
+		for j := range order {
+			order[j] = j
+		}
+		sort.SliceStable(order, func(a, b int) bool { return ranks[order[a]] < ranks[order[b]] })
 		for j, i := range idx {
-			candidates[i] = members[j]
+			items[i] = members[order[j]]
 		}
 	}
 }
