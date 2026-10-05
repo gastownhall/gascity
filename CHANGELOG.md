@@ -9,6 +9,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **The first restart after upgrading reaps pre-upgrade ACP agents whose owner
+  is gone.** Any city routing a session to ACP had process-table orphan
+  reaping off — for its ACP sessions, and in a city that mixes ACP with a
+  tmux or subprocess default, for every session including the tmux and
+  subprocess ones. It is on again. An ACP agent started by the previous binary
+  carries no `GC_ACP_CONTROL_SOCKET` marker, and once its supervisor has
+  restarted no connection to it survives, so it reads untracked and the
+  pre-start orphan sweep terminates it. That is the intended verdict — its
+  owner's control socket died with the owner, so the agent could no longer be
+  driven — and it happens once, on the first restart, not on every one
+  (#6543).
+
+- **`[daemon] session_reconciler` is now a known key.** A city that still sets
+  the gc-enterprise spelling `"off"`, `"auto"` or `"require"` boots on the
+  legacy reconciler with a deprecation warning, including under strict mode;
+  remove the key. `"v2"` is reserved: a controller configured with it refuses
+  to start in this release, and `gc doctor` reports it as an error. An unknown
+  value also refuses controller start. Remove the key before rolling back to an
+  older gc, which rejects it under strict mode.
+
+### Changed
+
+- **Ready work in a SQLite infra ledger is ordered priority-first.** On a city
+  that relocates classes to a `sqlite-beads` binding, that ledger's ready read
+  returned rows oldest-first (`created_at, id`). It now returns the canonical
+  `(priority, created_at, id)` order that `bd ready` and gc's cached ready
+  reads already use. When several ready beads in the ledger route to one pool
+  template, the bead a new session takes its trigger, worktree and pack from is
+  now the highest-priority one, oldest first within a priority; the order in
+  which sessions claim work does not change. `GET /v0/beads/ready` also returns
+  the relocated graph leg's rows in this order: the API concatenates its legs
+  without re-sorting them, so on a split city the graph rows at the end of the
+  response are now priority-ordered.
+
+### Fixed
+
+- **`passthroughEnv` now honors `GC_SUPERVISOR_ENV` when deciding which
+  non-`GC_`-prefixed variables reach a spawned agent session, not only which
+  ones survive into the persisted service file.** The two allowlists used to
+  be independent: opting a variable into `GC_SUPERVISOR_ENV` widened the
+  systemd/launchd unit's environment, but `passthroughEnv`'s sweep still only
+  forwarded `GC_`-prefixed keys into sessions, so a variable could be fully
+  persisted into the supervisor's own process and still never reach an agent.
+  One opt-in list now governs both, so declaring a variable once is enough.
+  Behavior change: variables already listed in `GC_SUPERVISOR_ENV` will now
+  also be forwarded into agent sessions.
+
+- **`gc mail send --from` can no longer forge another live session's
+  identity.** A session could previously claim `--from <name>` for any
+  other live, named session in the city with zero authentication — mail
+  would display as coming from a privileged coordinator role even though
+  it was actually sent by an unrelated worker. `--from` is now checked
+  against the calling session's own identity. A live agent session may only
+  send as itself — it can no longer claim another live session, the
+  operator's `human` identity, or `controller`. A caller with no
+  `GC_SESSION_ID`/`GC_ALIAS`/`GC_AGENT` set (an interactive terminal, or an
+  exec order running under the supervisor's environment) may still claim
+  any sender, which keeps scripted `--from controller` automation such as
+  the dolt compact quarantine alert working. A caller whose identity
+  variables are set but resolve to no live session is refused. This is a
+  spoofing guard, not authentication: those variables are caller-controlled.
+
+  **Upgrading:** scripts that pass `--from human` or `--from controller`
+  while running inside an agent session (or under a supervisor that
+  inherited one's `GC_*` session variables) now exit 1 with "does not match
+  this session's own identity".
+
+## [1.5.0] - 2026-10-05
+
+### Upgrading Notes
+
 - **Upgrade Beads (`bd`) to v1.3.1.** v1.5.0 pins and is tested against bd
   v1.3.1 (`deps.env` `BD_VERSION` and the go.mod library), a stable release
   that keeps bd v1.3.0's schema. Install it with `brew upgrade beads` (or
@@ -94,17 +165,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.1.6, whose role prompts run `gc gc claim`, rename the key to `gc`;
   `gc doctor --fix` offers the rename (#6683). Do not add a second `gc` import
   next to the old key: that imports the pack twice (#4508).
-- **The first restart after upgrading reaps pre-upgrade ACP agents whose owner
-  is gone.** Any city routing a session to ACP had process-table orphan
-  reaping off — for its ACP sessions, and in a city that mixes ACP with a
-  tmux or subprocess default, for every session including the tmux and
-  subprocess ones. It is on again. An ACP agent started by the previous binary
-  carries no `GC_ACP_CONTROL_SOCKET` marker, and once its supervisor has
-  restarted no connection to it survives, so it reads untracked and the
-  pre-start orphan sweep terminates it. That is the intended verdict — its
-  owner's control socket died with the owner, so the agent could no longer be
-  driven — and it happens once, on the first restart, not on every one
-  (#6543).
 - **The `reaper`, `jsonl-export` and dolt `mol-dog-backup` orders now work
   through bd on every city topology.** Each bead scope (the city and every
   rig) is reached with `gc bd`, so bd-owned proxied, gc-managed and mixed
@@ -132,13 +192,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     order timeout) stops starting new work, reports a partial outcome, and the
     next run continues.
   - Both orders now run with a 900s timeout.
-- **`[daemon] session_reconciler` is now a known key.** A city that still sets
-  the gc-enterprise spelling `"off"`, `"auto"` or `"require"` boots on the
-  legacy reconciler with a deprecation warning, including under strict mode;
-  remove the key. `"v2"` is reserved: a controller configured with it refuses
-  to start in this release, and `gc doctor` reports it as an error. An unknown
-  value also refuses controller start. Remove the key before rolling back to an
-  older gc, which rejects it under strict mode.
 
 ### Added
 
@@ -184,18 +237,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   size is not something the verdict established — not that the copy is empty.
 
 ### Changed
-
-- **Ready work in a SQLite infra ledger is ordered priority-first.** On a city
-  that relocates classes to a `sqlite-beads` binding, that ledger's ready read
-  returned rows oldest-first (`created_at, id`). It now returns the canonical
-  `(priority, created_at, id)` order that `bd ready` and gc's cached ready
-  reads already use. When several ready beads in the ledger route to one pool
-  template, the bead a new session takes its trigger, worktree and pack from is
-  now the highest-priority one, oldest first within a priority; the order in
-  which sessions claim work does not change. `GET /v0/beads/ready` also returns
-  the relocated graph leg's rows in this order: the API concatenates its legs
-  without re-sorting them, so on a split city the graph rows at the end of the
-  response are now priority-ordered.
 
 - **Closed session beads in a SQLite infra ledger are purged after
   `GC_INFRA_SESSION_PURGE_AGE` (default 72h).** This applies only when a city
@@ -266,17 +307,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   minter, which is the premise this change retires (ga-8w5c7).
 
 ### Fixed
-
-- **`passthroughEnv` now honors `GC_SUPERVISOR_ENV` when deciding which
-  non-`GC_`-prefixed variables reach a spawned agent session, not only which
-  ones survive into the persisted service file.** The two allowlists used to
-  be independent: opting a variable into `GC_SUPERVISOR_ENV` widened the
-  systemd/launchd unit's environment, but `passthroughEnv`'s sweep still only
-  forwarded `GC_`-prefixed keys into sessions, so a variable could be fully
-  persisted into the supervisor's own process and still never reach an agent.
-  One opt-in list now governs both, so declaring a variable once is enough.
-  Behavior change: variables already listed in `GC_SUPERVISOR_ENV` will now
-  also be forwarded into agent sessions.
 
 - **The reaper's stale-issue auto-close works again when an open bead
   depends on a wisp or external bead.** Such a dependency has no
@@ -389,8 +419,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`gc bd show --watch` works on proxied cities.** bd v1.3.0 refuses watch
   mode under the default proxied beads transport, so `gc bd show <id> --watch`
   (also `view` and `--current`) now polls the bead every 2 seconds and redraws
-  it when it changes. Plain `bd show --watch` still refuses there until beads
-  fixes it upstream; use `gc bd show --watch` (#6681).
+  it when it changes. With the pinned bd v1.3.1, plain `bd show --watch` works
+  on proxied cities too (#6681).
 
 - **The tutorials match the `gc` pack binding.** Tutorial 01 and the
   quickstart now show `[imports.gc]`, as `gc init` writes it (#6676).
@@ -870,26 +900,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `nix profile install`) was reported as "not installed" even when it was on
   the shell's `PATH`. Both locations are now included, matching the existing
   npm/pnpm/yarn/cargo/nvm handling in `internal/searchpath`. Fixes #3962.
-
-- **`gc mail send --from` can no longer forge another live session's
-  identity.** A session could previously claim `--from <name>` for any
-  other live, named session in the city with zero authentication — mail
-  would display as coming from a privileged coordinator role even though
-  it was actually sent by an unrelated worker. `--from` is now checked
-  against the calling session's own identity. A live agent session may only
-  send as itself — it can no longer claim another live session, the
-  operator's `human` identity, or `controller`. A caller with no
-  `GC_SESSION_ID`/`GC_ALIAS`/`GC_AGENT` set (an interactive terminal, or an
-  exec order running under the supervisor's environment) may still claim
-  any sender, which keeps scripted `--from controller` automation such as
-  the dolt compact quarantine alert working. A caller whose identity
-  variables are set but resolve to no live session is refused. This is a
-  spoofing guard, not authentication: those variables are caller-controlled.
-
-  **Upgrading:** scripts that pass `--from human` or `--from controller`
-  while running inside an agent session (or under a supervisor that
-  inherited one's `GC_*` session variables) now exit 1 with "does not match
-  this session's own identity".
 
 - **ACP activity is now available across process boundaries.** ACP
   `session/update` timestamps are published through an atomic, coalesced
