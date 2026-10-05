@@ -137,10 +137,11 @@ package main
 // and reading it as one would defeat the detector. The binding is the live
 // infrastructure store after cutover, and its own lifecycle DELETES rows: wisp
 // GC hard-deletes the ownership closure of every expired closed workflow root,
-// and the mail retention sweep hard-deletes read message wisps. The retained
-// source keeps those same rows verbatim forever by design. So on any healthy
-// city the first wisp GC after cutover leaves the source holding beads the
-// binding will never hold again — a permanent, entirely correct divergence. A
+// and the mail retention sweep hard-deletes read message wisps. A work store
+// that has not been cleared yet (a city migrated by a build that kept its
+// source) still holds those rows. So the first wisp GC after cutover leaves
+// such a source holding beads the binding will never hold again — an entirely
+// correct divergence, which the clear removes. A
 // check that called that a strand would fire on every healthy city, and an
 // alarm that fires on every healthy city is muted, which is how the real strand
 // it exists to catch goes unseen.

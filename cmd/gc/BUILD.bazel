@@ -1231,6 +1231,7 @@ go_test(
         "idle_tracker_test.go",
         "import_state_doctor_check_test.go",
         "infra_class_clear_crash_resume_test.go",
+        "infra_class_clear_phase_matrix_test.go",
         "infra_class_clear_test.go",
         "infra_class_migrate_edge_payload_test.go",
         "infra_class_migrate_equality_test.go",

@@ -266,19 +266,36 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 		session[id] = true
 	}
 
+	// Backup first, proven from disk, before any row is touched.
+	previous, _, err := readInfraRetainedBackup(target)
+	if err != nil {
+		return result, err
+	}
+	// Within an open session the FIRST entry for an id wins: it was proven
+	// before any row of the session was touched. A row an interrupted run
+	// left behind has since lost edges — its own outbound deps are removed
+	// before its delete, and a cascading store drops inbound edges with every
+	// earlier delete — so re-reading it now would overwrite the only full
+	// record of its topology with a stripped one.
+	sessionBackup := map[string]infraBackupEntry{}
+	if resuming {
+		for _, e := range previous {
+			if session[e.Bead.ID] {
+				sessionBackup[e.Bead.ID] = e
+			}
+		}
+	}
 	entries := make([]infraBackupEntry, 0, len(retained))
 	for _, b := range retained {
+		if prior, ok := sessionBackup[b.ID]; ok {
+			entries = append(entries, prior)
+			continue
+		}
 		entry, err := infraBackupEntryFor(source, b, retainedIDs)
 		if err != nil {
 			return result, err
 		}
 		entries = append(entries, entry)
-	}
-
-	// Backup first, proven from disk, before any row is touched.
-	previous, _, err := readInfraRetainedBackup(target)
-	if err != nil {
-		return result, err
 	}
 	merged := mergeInfraBackupEntries(previous, entries)
 	if len(entries) > 0 {

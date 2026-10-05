@@ -566,8 +566,8 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 	}
 	// Both sides, always — including on the unconverged arm below, where the
 	// binding's zero is the whole point. The source count alone cannot tell an
-	// operator whether a cutover landed, because the migration retains the
-	// source verbatim and that number is the same either way.
+	// operator whether a cutover landed: it reads zero both on a cleared city
+	// and on one that never held an infrastructure bead.
 	//
 	// A census that could not run prints its reason in place of the number
 	// instead of a confident zero. The unreadable case is a whole missing binding
