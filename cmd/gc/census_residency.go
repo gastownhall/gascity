@@ -140,9 +140,8 @@ func routedWorkStoreCandidates(
 // It returns nil for a city that relocates nothing (no class leg survives the
 // plan's dedupe): the probe's one city target is already the whole answer there,
 // and a single-store city must not gain a read on the tick. An unplannable
-// topology returns its error; the caller keeps the legacy single target, as
-// convergedRoutedWorkBinding does, and collectOpenUnassignedRoutedWork reports
-// the same plan error later in the build.
+// topology returns its error; the caller keeps the legacy single target and
+// marks it partial with that error.
 func routedWorkCityDemandLegs(
 	cityPath string,
 	cfg *config.City,
