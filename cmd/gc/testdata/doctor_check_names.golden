@@ -70,6 +70,7 @@ run-target-routed-to-backfill
 route-recovery-quarantine
 hold-label-routed-to
 pool-idle-routed-work
+v2-demand-migrations
 work-option-metadata-migration
 backlog-depth
 order-tracking-retention

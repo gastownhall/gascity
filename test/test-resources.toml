@@ -10,7 +10,7 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 726
+baseline_calls = 727
 baseline_files = 213
 reported_calls = 495
 reported_files = 135
@@ -51,7 +51,7 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 491
+baseline_calls = 492
 baseline_files = 144
 reported_calls = 380
 reported_files = 98
@@ -392,6 +392,17 @@ resources = ["subprocess"]
 owner_bead = "ga-cp3hwi"
 invariant = "the OSS worker rollback-config and fork-tier worker-config proof is a checked Medium subprocess owner"
 resource_owner = "the one jq subprocess is confined to TestRBEWorkerJSONIsolationOffMatchesPreO1, which exists to render tools/rbe/blacksmith-worker.sh's own jq program for the OSS tier with isolation off, compared with the pre-O1 worker.json, and for the fork tier, compared with its golden: the program is jq, so only jq can prove the rollback renders the same config and the fork tier caches nothing"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestRBEWorkerScrubCAS"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the sticky-disk CAS scrub proof is a checked Medium subprocess owner"
+resource_owner = "the one bash subprocess is confined to TestRBEWorkerScrubCAS, which exists to run tools/rbe/blacksmith-worker.sh's own scrub_cas function on a scratch store of odd names (quotes, spaces, a newline, a backslash) and bad blobs: the function is GNU find, xargs and sha256sum plumbing, so only bash can prove it deletes every bad file without aborting the worker"
 migration_target = "P0.4b"
 expires = "2026-10-31"
 

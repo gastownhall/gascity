@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -79,10 +80,13 @@ func sessionCloseBackends() []closeBackend {
 
 // TestCloseAcrossBackendsKeepsTerminalMetadataWithTheClose runs the stale
 // awake writer against every in-tree store kind. On a store that provides the
-// atomic close, the row must end closed and drained, with the close landing
-// through the fenced single write only. On a store without the capability,
-// the front door must take the two-write fallback, and nothing more is
-// promised there: that residual race is documented on Store.Close.
+// atomic close, the wake wins the fence and changes the facts the close was
+// decided on, so the close writes nothing and returns
+// ErrSessionCloseSuperseded; the next pass
+// decides again and closes through the fenced single write only. On a store
+// without the capability, the front door must take the two-write fallback,
+// and nothing more is promised there: that residual race is documented on
+// Store.Close.
 func TestCloseAcrossBackendsKeepsTerminalMetadataWithTheClose(t *testing.T) {
 	for _, backend := range sessionCloseBackends() {
 		t.Run(backend.name, func(t *testing.T) {
@@ -97,7 +101,24 @@ func TestCloseAcrossBackendsKeepsTerminalMetadataWithTheClose(t *testing.T) {
 			}
 			front := NewStore(beads.SessionStore{Store: tracing})
 
-			closed, err := front.Close(created.ID, string(StateDrained), closeTestNow)
+			closed, err := front.Close(decidedOn(t, backing, created.ID), string(StateDrained), closeTestNow)
+			if backend.atomic {
+				if !errors.Is(err, ErrSessionCloseSuperseded) || closed {
+					t.Fatalf("Close = (%v, %v), want (false, ErrSessionCloseSuperseded) after a wake won the fence", closed, err)
+				}
+				woken, getErr := backing.Get(created.ID)
+				if getErr != nil {
+					t.Fatalf("Get: %v", getErr)
+				}
+				if woken.Status != "open" || woken.Metadata["state"] != string(StateAwake) {
+					t.Fatalf("row = status %q state %q, want the wake's open/awake row", woken.Status, woken.Metadata["state"])
+				}
+				if tracing.atomicCalls != 1 || tracing.plainCloseCalls != 0 {
+					t.Fatalf("atomic/plain close calls = %d/%d, want 1/0 (one lost fence, no retry, no split write)", tracing.atomicCalls, tracing.plainCloseCalls)
+				}
+				// The next pass decides on the woken row and closes it.
+				closed, err = front.Close(decidedOn(t, backing, created.ID), string(StateDrained), closeTestNow)
+			}
 			if err != nil {
 				t.Fatalf("Close: %v", err)
 			}
@@ -115,7 +136,7 @@ func TestCloseAcrossBackendsKeepsTerminalMetadataWithTheClose(t *testing.T) {
 			}
 			if backend.atomic {
 				if tracing.atomicCalls != 2 || tracing.plainCloseCalls != 0 {
-					t.Fatalf("atomic/plain close calls = %d/%d, want 2/0 (one lost fence, one retry, no split write)", tracing.atomicCalls, tracing.plainCloseCalls)
+					t.Fatalf("atomic/plain close calls = %d/%d, want 2/0 (the refused attempt, then the next pass, no split write)", tracing.atomicCalls, tracing.plainCloseCalls)
 				}
 			} else if tracing.atomicCalls != 1 || tracing.plainCloseCalls != 1 {
 				// The tracing wrapper itself carries the method, so it is
@@ -124,7 +145,7 @@ func TestCloseAcrossBackendsKeepsTerminalMetadataWithTheClose(t *testing.T) {
 				t.Fatalf("atomic/plain close calls = %d/%d, want 1/1 (unsupported, then the fallback)", tracing.atomicCalls, tracing.plainCloseCalls)
 			}
 
-			again, err := front.Close(created.ID, string(StateDrained), closeTestNow)
+			again, err := front.Close(decidedOn(t, backing, created.ID), string(StateDrained), closeTestNow)
 			if err != nil || again {
 				t.Fatalf("second Close = (%v, %v), want (false, nil) on a closed session", again, err)
 			}

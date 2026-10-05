@@ -453,18 +453,10 @@ func LifecycleEvent(eventType string, root, step beads.Bead, actor string) (even
 // root is loaded from graphStore so a v1 or unrelated parent can never produce
 // a lifecycle event by metadata resemblance alone.
 func EmitLifecycle(recorder events.Recorder, graphStore beads.Store, eventType string, step beads.Bead, actor string) bool {
-	if recorder == nil || graphStore == nil {
+	if recorder == nil {
 		return false
 	}
-	rootID := step.Metadata[beadmeta.RootBeadIDMetadataKey]
-	if !eventexport.IsOpaqueRef(rootID) {
-		return false
-	}
-	root, err := graphStore.Get(rootID)
-	if err != nil {
-		return false
-	}
-	event, ok := LifecycleEvent(eventType, root, step, actor)
+	event, ok := lifecycleEventFromStore(graphStore, eventType, step, actor)
 	if !ok {
 		return false
 	}
@@ -472,16 +464,52 @@ func EmitLifecycle(recorder events.Recorder, graphStore beads.Store, eventType s
 	return true
 }
 
-// EmitCompletedFromClosedNotification is the sole close-side lifecycle entry
-// point. It consumes the physical bead snapshot carried by the authoritative
-// bead.closed notification rather than inferring completion from dependencies
-// or re-projecting current graph state.
-func EmitCompletedFromClosedNotification(recorder events.Recorder, graphStore beads.Store, payload json.RawMessage, actor string) bool {
-	step, ok := beads.DecodeBeadEventPayload(payload)
-	if !ok || !strings.EqualFold(strings.TrimSpace(step.Status), "closed") {
+func lifecycleEventFromStore(graphStore beads.Store, eventType string, step beads.Bead, actor string) (events.Event, bool) {
+	if graphStore == nil {
+		return events.Event{}, false
+	}
+	rootID := step.Metadata[beadmeta.RootBeadIDMetadataKey]
+	if !eventexport.IsOpaqueRef(rootID) {
+		return events.Event{}, false
+	}
+	root, err := graphStore.Get(rootID)
+	if err != nil {
+		return events.Event{}, false
+	}
+	return LifecycleEvent(eventType, root, step, actor)
+}
+
+// EmitCompleted is the sole close-side lifecycle entry point. step is a
+// committed close: the snapshot a local close or its writer's bead.closed
+// carried, or a live read that returned the row closed. Inferences (a row
+// absent from a scan) must be confirmed by such a read first.
+//
+// It records at most one fact per key: a fact this index already holds, from
+// the journal or from an earlier call, is not repeated, so a replayed or
+// re-inferred close is idempotent. The key is recorded unconfirmed, exactly as
+// the delta pass records its own facts, and an unloaded index stays unloaded,
+// so its first warm still reads the journal.
+func (idx *CompletedFactIndex) EmitCompleted(recorder events.Recorder, graphStore beads.Store, step beads.Bead, actor string) bool {
+	if recorder == nil || !strings.EqualFold(strings.TrimSpace(step.Status), "closed") {
 		return false
 	}
-	return EmitLifecycle(recorder, graphStore, events.ExecutionStepCompleted, step, actor)
+	event, ok := lifecycleEventFromStore(graphStore, events.ExecutionStepCompleted, step, actor)
+	if !ok {
+		return false
+	}
+	key := completedFactKeyFor(event)
+	idx.mu.Lock()
+	if _, present := idx.facts[key]; present {
+		idx.mu.Unlock()
+		return false
+	}
+	if idx.facts == nil {
+		idx.facts = map[completedFactKey]bool{}
+	}
+	idx.facts[key] = false
+	idx.mu.Unlock()
+	recorder.Record(event)
+	return true
 }
 
 // ReconcileCompleted repairs completed facts that were stranded between a

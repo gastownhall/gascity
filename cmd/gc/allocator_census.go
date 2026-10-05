@@ -74,7 +74,10 @@ type censusLeg struct {
 	Exact  bool
 	State  censusLegState
 	ReadAt time.Time // when the served rows were read; zero when missing
-	Err    error     // this pass's read error, if any
+	// StartedAt is when the live read behind a non-exact leg's served rows
+	// started; zero on an exact leg and when missing.
+	StartedAt time.Time
+	Err       error // this pass's read error, if any
 }
 
 // complete reports whether the leg's rows are a whole read that has not
@@ -106,15 +109,16 @@ type censusRow struct {
 
 // censusRecording is the backstop lane's last recording of one non-exact
 // session census leg (backstopRecording.sessionLeg): the session front
-// door's live ListAll of the leg, when the lane's reads ended, the
-// recording's published expiry, and the error the read returned. Rows are
+// door's live ListAll of the leg, when the lane's reads started and ended,
+// the recording's published expiry, and the error the read returned. Rows are
 // what legacy's census keeps: all of a clean read, what a partial read
 // returned, nothing of a hard failure.
 type censusRecording struct {
-	Rows    []session.Info
-	At      time.Time
-	Expires time.Time
-	Err     error
+	Rows      []session.Info
+	StartedAt time.Time
+	At        time.Time
+	Expires   time.Time
+	Err       error
 }
 
 // censusLegFeed is the census's seam to P3-2's demand reads, which own leg
@@ -146,9 +150,10 @@ type sessionCensus struct {
 
 // censusLegRows is one leg's last good read and when it expires.
 type censusLegRows struct {
-	infos   []session.Info
-	at      time.Time
-	expires time.Time
+	infos     []session.Info
+	startedAt time.Time
+	at        time.Time
+	expires   time.Time
 }
 
 // censusReader reads the census pass after pass. It keeps each leg's last
@@ -215,7 +220,7 @@ func (r *censusReader) read(now time.Time, cfg *config.City, legs []classStoreCa
 func (r *censusReader) readLeg(now time.Time, source classStoreCandidate) (censusLeg, []session.Info) {
 	leg := censusLeg{Ref: source.ref, Exact: r.feed.exact(source.store)}
 	var infos []session.Info
-	var at, expires time.Time
+	var startedAt, at, expires time.Time
 	if leg.Exact {
 		infos, leg.Err = sessionFrontDoor(source.store).ListAll(session.ListAllOptions{})
 		at, expires = now, now.Add(cacheLagBound)
@@ -227,15 +232,15 @@ func (r *censusReader) readLeg(now time.Time, source classStoreCandidate) (censu
 		default:
 			leg.Err = rec.Err
 			infos = rec.Rows
-			at, expires = rec.At, rec.Expires
+			startedAt, at, expires = rec.StartedAt, rec.At, rec.Expires
 		}
 	}
 	if leg.Err == nil {
-		r.lastGood[leg.Ref] = censusLegRows{infos: infos, at: at, expires: expires}
-		leg.State, leg.ReadAt = legRead, at
+		r.lastGood[leg.Ref] = censusLegRows{infos: infos, startedAt: startedAt, at: at, expires: expires}
+		leg.State, leg.ReadAt, leg.StartedAt = legRead, at, startedAt
 	} else if good, ok := r.lastGood[leg.Ref]; ok {
 		infos, expires = good.infos, good.expires
-		leg.State, leg.ReadAt = legLastGood, good.at
+		leg.State, leg.ReadAt, leg.StartedAt = legLastGood, good.at, good.startedAt
 	} else {
 		// A partial read's rows still occupy their slots and names (legacy's
 		// fold keeps them); the leg stays incomplete.
@@ -393,8 +398,9 @@ func (c *sessionCensus) UnknownStates(cfg *config.City) map[string]int {
 }
 
 // Ledger is the census as the intent ledger reads it (P3-4): every row on
-// every leg with its config-only endpoint (endpointKeyForAgent), and the legs
-// whose read is complete.
+// every leg with its config-only endpoint (endpointKeyForAgent), the legs
+// whose read is complete, and when each complete non-exact leg's read
+// started (C5.4(3)).
 func (c *sessionCensus) Ledger(cfg *config.City) ledgerCensus {
 	rows := make(map[rowKey]ledgerRow, len(c.Rows))
 	for k, row := range c.Rows {
@@ -407,5 +413,11 @@ func (c *sessionCensus) Ledger(cfg *config.City) ledgerCensus {
 			PendingCreate: row.PendingCreate,
 		}
 	}
-	return ledgerCensus{Rows: rows, Legs: c.CompleteLegs()}
+	started := make(map[string]time.Time)
+	for _, l := range c.Legs {
+		if l.complete() && !l.Exact {
+			started[l.Ref] = l.StartedAt
+		}
+	}
+	return ledgerCensus{Rows: rows, Legs: c.CompleteLegs(), ReadStarted: started}
 }

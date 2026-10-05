@@ -3,7 +3,7 @@
     {
       "name": "REMOTE_CAS",
       "grpc": {
-        "instance_name": "",
+        "instance_name": "oss",
         "endpoints": [
           {
             "address": "grpcs://rbe-west.example.invalid:443",

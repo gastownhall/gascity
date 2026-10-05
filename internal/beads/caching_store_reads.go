@@ -783,12 +783,12 @@ func (c *CachingStore) RefreshRow(id string) (Bead, error) {
 		if eventType != "" {
 			gone := cloneBead(cached)
 			setBeadStatus(&gone, "closed")
-			c.notifyChange(eventType, gone)
+			c.notifyChange(ChangeRefresh, eventType, gone)
 		}
 		return Bead{}, readErr
 	}
 	if eventType != "" {
-		c.notifyChange(eventType, installed)
+		c.notifyChange(ChangeRefresh, eventType, installed)
 	}
 	return installed, nil
 }

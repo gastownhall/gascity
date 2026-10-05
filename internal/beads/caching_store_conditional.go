@@ -79,7 +79,7 @@ func (h *cachingAtomicConditionalCloser) CloseWithMetadataIfMatch(id string, exp
 		(!ev.cached || ev.revision == expectedRevision) {
 		h.cache.installAfterConditionalWrite(id, ev, closed)
 	}
-	h.cache.notifyChange("bead.closed", closed)
+	h.cache.notifyChange(ChangeLocal, "bead.closed", closed)
 	return closed, nil
 }
 
@@ -205,7 +205,7 @@ func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts Upd
 		c.recordProblem("refresh bead after conditional update", fmt.Errorf("%s: %w", id, err))
 		return nil
 	}
-	c.notifyChange("bead.updated", fresh)
+	c.notifyChange(ChangeLocal, "bead.updated", fresh)
 	return nil
 }
 
@@ -238,7 +238,7 @@ func (c *CachingStore) CloseIfMatch(id string, expectedRevision int64) error {
 	// The close is proven committed; forcing the status onto the event
 	// payload states that fact without installing anything in the cache.
 	setBeadStatus(&fresh, "closed")
-	c.notifyChange("bead.closed", fresh)
+	c.notifyChange(ChangeLocal, "bead.closed", fresh)
 	return nil
 }
 
@@ -264,7 +264,7 @@ func (c *CachingStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	if haveDeleted {
-		c.notifyChange("bead.deleted", deleted)
+		c.notifyChange(ChangeLocal, "bead.deleted", deleted)
 	}
 	return nil
 }
@@ -304,7 +304,7 @@ func (c *CachingStore) CompareAndSetMetadataKey(id, key, expected, next string) 
 		c.recordProblem("refresh bead after conditional metadata swap", fmt.Errorf("%s: %w", id, err))
 		return true, nil
 	}
-	c.notifyChange("bead.updated", fresh)
+	c.notifyChange(ChangeLocal, "bead.updated", fresh)
 	return true, nil
 }
 

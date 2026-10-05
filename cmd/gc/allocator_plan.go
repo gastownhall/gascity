@@ -426,12 +426,12 @@ func (p *decidePass) realizePools() {
 // planned name keeps its slot used and plans the next free one. Any other
 // refusal stalls the request, as legacy's does (build_desired_state.go:5180).
 // The plans tried are bounded by the slot range, and for an unlimited pool by
-// the names that can refuse (a fence veto or an identity lease names one), so
+// the names that can refuse (a fence backoff or an identity lease names one), so
 // a refusal misread as name-specific cannot loop.
 func (p *decidePass) realizeRequest(cfgAgent *config.Agent, qualifiedName string, prefer *session.Info, request SessionRequest, used map[string]bool, usedSlots map[int]bool) {
 	tries, unlimited, _, _ := freshPoolSlotUpperBound(cfgAgent)
 	if unlimited {
-		tries = len(p.in.CreateVetoes) + len(p.in.Census.Rows) + 1
+		tries = len(p.in.Backoff) + len(p.in.Census.Rows) + 1
 	}
 	for ; ; tries-- {
 		info, slot, plan, err := selectOrPlanPoolSessionBead(p.bp, cfgAgent, qualifiedName, prefer, request, p.in.Now, used, usedSlots)
@@ -928,24 +928,24 @@ func (p *decidePass) refuse(template, instance string, k rowKey, cause string) {
 	p.trace = append(p.trace, allocTraceRecord{Template: template, Instance: instance, Key: k, Reason: "ineligible:" + cause})
 }
 
-// createRefused returns the cause of a create veto live at Now for the
+// createRefused returns the cause of a create backoff live at Now for the
 // plan's identity, or "".
 func (p *decidePass) createRefused(ap allocPlan) string {
-	if v, ok := p.in.CreateVetoes[ap.identity()]; ok && v.live(p.in.Now) {
-		return firstNonEmpty(v.Cause, "unknown")
+	if r, ok := p.in.Backoff[createBackoffKey(ap.identity())]; ok && r.live(p.in.Now) {
+		return firstNonEmpty(r.Cause, "unknown")
 	}
 	return ""
 }
 
 // worktreeRefused reports a request whose worktree evidence failed
-// verification and whose verdict still stands (#34): the work item is
+// verification and whose backoff is live (#34): the work item is
 // throttled, never the slot.
 func (p *decidePass) worktreeRefused(request SessionRequest) bool {
 	if request.WorktreeSpec == nil {
 		return false
 	}
-	spec, ok := p.in.WorktreeRefused[request.WorktreeSpec.BeadID]
-	return ok && spec == *request.WorktreeSpec
+	r, ok := p.in.Backoff[workBackoffKey(request.WorktreeSpec.BeadID)]
+	return ok && r.live(p.in.Now) && r.Fingerprint == specFingerprint(*request.WorktreeSpec)
 }
 
 // quarantined reports a #46 startup-health episode in quarantine at Now.
