@@ -535,17 +535,26 @@ func buildDesiredStateWithSessionBeadsAt(
 	// Plan(RoutedWork) order — the legs `gc ready` serves a seat from (#6019).
 	// nil on a city that relocates nothing, which keeps its one leading target
 	// and gains no read. All of them count under the "city" key, the scope a
-	// class binding already normalizes onto. An unplannable topology keeps the
-	// legacy target too (see routedWorkCityDemandLegs for where it is reported).
+	// class binding already normalizes onto.
+	//
+	// An unplannable topology (a refused city) still reads the leading handle,
+	// but the plan error rides on every city target: the count is not
+	// authoritative, so each such template is reported partial (retain, don't
+	// drain) and the error reaches the demand pass's error list instead of
+	// being dropped here.
 	var cityLegs []classStoreCandidate
+	var cityLegsErr error
 	if store != nil {
-		if legs, err := routedWorkCityDemandLegs(cityPath, cfg, store, rigStores, suspendedRigPaths); err == nil {
+		legs, err := routedWorkCityDemandLegs(cityPath, cfg, store, rigStores, suspendedRigPaths)
+		if err != nil {
+			cityLegsErr = fmt.Errorf("default scale_check: resolving routed-work city legs: %w", err)
+		} else {
 			cityLegs = legs
 		}
 	}
 	cityTargets := func(template string) []defaultScaleCheckTarget {
 		if len(cityLegs) == 0 {
-			return []defaultScaleCheckTarget{{template: template, store: store, storeKey: "city"}}
+			return []defaultScaleCheckTarget{{template: template, store: store, storeKey: "city", err: cityLegsErr}}
 		}
 		out := make([]defaultScaleCheckTarget, 0, len(cityLegs))
 		for _, leg := range cityLegs {
@@ -2056,7 +2065,8 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 	// The counting pass dedups bead IDs per template ACROSS store groups,
 	// first group in the template's leg order wins. On a split city the work
 	// ledger and the binding are both city legs, and a migrated row co-resident
-	// in both resolves to the ledger's copy — as it does for `gc ready`. Bead IDs are unique within a deployment, so a legitimate cross-store
+	// in both resolves to the ledger's copy — as it does for `gc ready`.
+	// Bead IDs are unique within a deployment, so a legitimate cross-store
 	// union never collides — but when a rig store aliases the city store as a
 	// distinct Store object (pointer inequality passes: a legacy unscoped
 	// file-store layout, or a rig dir whose missing .beads resolves bd's

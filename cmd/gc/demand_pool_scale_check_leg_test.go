@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"path/filepath"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -215,5 +216,79 @@ func TestPoolScaleCheckDarkCityLegMarksPartial(t *testing.T) {
 				t.Fatalf("named errs=%v partials=%v, want helper partial", namedErrs, namedPartials)
 			}
 		})
+	}
+}
+
+// A refused city has no routed-work plan. The probe still reads the leading
+// handle, but the plan error is not dropped: the city-scope pool is reported
+// partial (retain, don't drain) and the error reaches the demand pass.
+func TestPoolScaleCheckRefusedCityIsPartialNotSilent(t *testing.T) {
+	cityPath := t.TempDir()
+	resetCLIStorageRoutes(t)
+	resetCLIResidencyBindings()
+	t.Cleanup(resetCLIResidencyBindings)
+	entry := cliStorageRoutesEntryFor(filepath.Clean(cityPath))
+	entry.once.Do(func() {
+		entry.routes = refusingStorageRoutes("infra", errStorageRefusedForTest{})
+	})
+	cfg := residencyTestConfig()
+	cfg.Agents = []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(5)}}
+	store := beads.NewMemStore()
+	seedRoutedWork(t, store, "worker", "leading row")
+
+	targets := buildDemandTargets(cfg.Workspace.Name, cityPath, cfg, store, nil, nil, nil, controllerQueryRuntimeEnv, io.Discard)
+	counts, _, partials, errs := defaultScaleCheckCountsAndDemand(cfg, targets.defaultScaleTargets, newReadyDemandCache())
+	if len(errs) == 0 || !partials["worker"] {
+		t.Fatalf("refused city: errs=%v partials=%v, want the plan error and worker partial", errs, partials)
+	}
+	if counts["worker"] != 1 {
+		t.Fatalf("leading row counted %d, want 1 (the leading handle is still read)", counts["worker"])
+	}
+}
+
+// The RELIC case, pinned honestly: a migrated city that still holds a frozen
+// work-store copy of a relocated bead — ledger copy open, binding copy closed
+// under the same id (gc 1.5.0's "source retained" migration, #5987).
+//
+// The ledger leg is first, so the open frozen copy wins and the probe counts 1:
+// phantom demand for work the binding already closed. This is NOT a divergence
+// between the readers — `gc ready` serves the same frozen copy, and that is
+// asserted below — it is the retained-copy data defect itself. The probe does
+// not paper over it (a binding-first count would disagree with the claim reader,
+// the D6 shape). What keeps it out of production is #7074: `gc storage migrate`
+// clears the retained copies after proof, and boot refuses a city that still
+// holds them (storage.binding.unconverged, outcome retained-copies). This change
+// must therefore merge strictly after #7074. If this test starts counting 0,
+// the leg order or the dedupe changed — re-check agreement with `gc ready`
+// before updating it.
+func TestPoolScaleCheckRetainedFrozenCopyCountsFirstLegWins(t *testing.T) {
+	e := newLegAgreementEnv(t, true)
+	e.cfg.Agents = []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(5)}}
+	e.work.(*beads.MemStore).HonorExplicitIDs = true
+	e.binding.(*beads.MemStore).HonorExplicitIDs = true
+	for _, store := range []*beads.MemStore{e.work.(*beads.MemStore), e.binding.(*beads.MemStore)} {
+		if _, err := store.Create(beads.Bead{
+			ID:       "gc-relic-1",
+			Title:    "relocated step",
+			Type:     "task",
+			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+		}); err != nil {
+			t.Fatalf("seed relic copy: %v", err)
+		}
+	}
+	closed := "closed"
+	if err := e.binding.Update("gc-relic-1", beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("close binding copy: %v", err)
+	}
+
+	_, counts, demand, partials, errs := poolDemandForEnv(t, e)
+	if len(errs) != 0 || len(partials) != 0 {
+		t.Fatalf("errs=%v partials=%v", errs, partials)
+	}
+	if counts["worker"] != 1 || demand["worker"].WorkBeadIDs[0] != "gc-relic-1" {
+		t.Fatalf("relic: counted %d (%v), want 1 — the ledger's open frozen copy, first leg wins", counts["worker"], demand["worker"].WorkBeadIDs)
+	}
+	if claimable := claimableRoutedIDs(t, e, "worker"); !claimable["gc-relic-1"] || len(claimable) != 1 {
+		t.Fatalf("claim reader served %v; the probe must agree with it on the relic (both serve the frozen copy until #7074 clears it)", claimable)
 	}
 }
