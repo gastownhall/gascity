@@ -30,10 +30,16 @@ import (
 // Returns combined output and any error.
 func runBD(t *testing.T, dir string, args ...string) (string, error) {
 	t.Helper()
+	return runBDWithEnv(t, dir, nil, args...)
+}
+
+// runBDWithEnv is runBD with extra environment entries (e.g. BEADS_ACTOR).
+func runBDWithEnv(t *testing.T, dir string, extraEnv []string, args ...string) (string, error) {
+	t.Helper()
 	bdPath := helpers.RequireBD(t)
 	cmd := exec.Command(bdPath, args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "BEADS_DIR="+filepath.Join(dir, ".beads"))
+	cmd.Env = append(append(os.Environ(), "BEADS_DIR="+filepath.Join(dir, ".beads")), extraEnv...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -839,12 +845,19 @@ func TestBdWorkflow(t *testing.T) {
 	}
 
 	// 6. Close the root (unassigned), then the step. The step was assigned to
-	// polecat-1 above, and this test process drives bd as a different actor (it
-	// never sets BEADS_ACTOR), so closing it exercises bd's cross-actor
-	// close-authority guard (gastownhall/beads#3734) and must pass --force — the
-	// same override the SDK BdStore always applies.
+	// polecat-1 above, so bd's cross-actor close-authority guard
+	// (gastownhall/beads#3734) compares that assignee with the actor as
+	// strings. A close under another actor (here a session's chair name) is
+	// refused; a close under the assignee's exact identity passes without
+	// --force. gc bd's own-claim close relies on exactly this: it switches
+	// BEADS_ACTOR to the claim's session bead id and nothing else (#6324).
 	requireBD(t, dir, "close", "--json", rootID)
-	requireBD(t, dir, "close", "--force", "--json", stepID)
+	if out, err := runBDWithEnv(t, dir, []string{"BEADS_ACTOR=polecat-chair"}, "close", "--json", stepID); err == nil {
+		t.Fatalf("bd close of a bead assigned to polecat-1 succeeded under actor polecat-chair; gc relies on bd refusing it\n%s", out)
+	}
+	if out, err := runBDWithEnv(t, dir, []string{"BEADS_ACTOR=polecat-1"}, "close", "--json", stepID); err != nil {
+		t.Fatalf("bd close under the assignee's own identity: %v\n%s", err, out)
+	}
 
 	// 7. Verify both are closed.
 	for _, id := range []string{rootID, stepID} {

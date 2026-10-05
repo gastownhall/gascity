@@ -6,12 +6,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// sessionCloseIdentityKeys are the environment variables that carry the
-// identities a running session is known by: the session bead id its claims
-// record as assignee, its runtime session name, its alias, and the actor bd
-// stamps on its writes.
-var sessionCloseIdentityKeys = []string{"GC_SESSION_ID", "GC_SESSION_NAME", "GC_ALIAS", "BEADS_ACTOR"}
-
 // closeActorForOwnClaim returns the actor a session's close of its own claimed
 // work should run under, or "" to leave the actor alone.
 //
@@ -24,22 +18,29 @@ var sessionCloseIdentityKeys = []string{"GC_SESSION_ID", "GC_SESSION_NAME", "GC_
 // same principal speaking, and bd's check passes without --force. A bead held
 // by anyone else keeps the session's own actor, so bd still refuses it.
 //
-// getenv reads the session's identities; effectiveActor is the BEADS_ACTOR the
-// bd child will actually run under (its command env, which can differ from the
-// process env), so the "already the actor" short-circuit judges what bd sees.
+// The session's own identities are only its session bead id (GC_SESSION_ID)
+// and the actor its bd child runs under. The session name and alias are not:
+// for tmux_alias pools and legacy rows they are a shared chair a successor
+// session takes over (#6324), so a claim recorded under one may be a
+// predecessor's, and closing it still needs --force.
+//
+// getenv reads GC_SESSION_ID; effectiveActor is the BEADS_ACTOR the bd child
+// will actually run under (its command env, which can differ from the process
+// env), so both the identity set and the "already the actor" short-circuit
+// judge what bd sees.
 func closeActorForOwnClaim(bdArgs []string, targets map[string]beads.Bead, getenv func(string) string, effectiveActor string) string {
 	ids, isClose := workRecordCloseTargets(bdArgs)
 	if !isClose {
 		return ""
 	}
-	own := make(map[string]bool, len(sessionCloseIdentityKeys))
-	for _, key := range sessionCloseIdentityKeys {
-		if v := strings.TrimSpace(getenv(key)); v != "" {
-			own[v] = true
-		}
-	}
-	if !own[strings.TrimSpace(getenv("GC_SESSION_ID"))] {
+	sessionID := strings.TrimSpace(getenv("GC_SESSION_ID"))
+	if sessionID == "" {
 		return "" // not running as a session
+	}
+	effectiveActor = strings.TrimSpace(effectiveActor)
+	own := map[string]bool{sessionID: true}
+	if effectiveActor != "" {
+		own[effectiveActor] = true
 	}
 	actor := ""
 	for _, id := range ids {
@@ -56,7 +57,7 @@ func closeActorForOwnClaim(bdArgs []string, targets map[string]beads.Bead, geten
 		}
 		actor = assignee
 	}
-	if actor == strings.TrimSpace(effectiveActor) {
+	if actor == effectiveActor {
 		return ""
 	}
 	return actor
