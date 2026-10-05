@@ -101,13 +101,19 @@ var orderRescanInterval = time.Minute
 // across runController and controllerLoop. A machine-wide supervisor can
 // instantiate multiple CityRuntimes — one per registered city.
 type CityRuntime struct {
-	cityPath     string
-	cityName     string
-	configName   string
-	tomlPath     string
-	watchTargets []config.WatchTarget
-	configRev    string
-	configDirty  *atomic.Bool
+	// beadsQuiescent is true while the city is suspended and no session runs:
+	// the controller then touches no bead store (beads_quiescence.go).
+	beadsQuiescent atomic.Bool
+	// retiredScopes are the suspended scopes whose bd-owned proxy and Dolt
+	// this controller already stopped; a scope leaves the set when it resumes.
+	retiredScopes suspendedScopeRetirements
+	cityPath      string
+	cityName      string
+	configName    string
+	tomlPath      string
+	watchTargets  []config.WatchTarget
+	configRev     string
+	configDirty   *atomic.Bool
 	// configDebounce is the config watcher's coalesce window; zero selects
 	// defaultConfigDebounce.
 	configDebounce time.Duration
@@ -1299,6 +1305,7 @@ var legacyTickPhases = []tickPhase{
 	{name: "refresh_desired_state", session: true, run: (*CityRuntime).tickRefreshDesiredState},
 	{name: "apply_soft_reload_acceptance", session: true, run: (*CityRuntime).tickApplySoftReloadAcceptance},
 	{name: "bead_reconcile_tick", session: true, maintenance: beadReconcileMaintenancePhases, run: (*CityRuntime).tickBeadReconcile},
+	{name: "retire_suspended_rig_scopes", run: (*CityRuntime).tickRetireSuspendedRigScopes},
 	{name: "reconcile_execution_completions", run: (*CityRuntime).tickReconcileExecutionCompletions},
 	{name: "wisp_gc", run: (*CityRuntime).tickWispGC},
 	{name: "workspace_service_tick", run: (*CityRuntime).tickWorkspaceService},
@@ -1390,6 +1397,13 @@ func (cr *CityRuntime) tick(
 		cr.sendReloadReply(p.manualReload.doneCh, reply)
 		cr.clearActiveReloadIf(p.manualReload)
 	}()
+	if !hasActive && cr.enterBeadsQuiescenceIfDue(ctx) {
+		// Suspended with nothing running: no phase runs, so no bead store is
+		// touched until the city resumes. A pending config change stays dirty
+		// and is applied on the first tick after resume.
+		p.completed = true
+		return
+	}
 	if !cr.runTickPhases(p, cr.tickPhases()) {
 		return
 	}
@@ -1616,7 +1630,7 @@ func (cr *CityRuntime) tickReapClosedBeadWorktrees(p *tickPass) bool {
 		// addition to the authoritative /proc cwd scan. Real removal supersedes
 		// dry-run when both flags are set.
 		liveSessionDirs := liveSessionWorktreeDirs(p.sessionBeads)
-		report := reapClosedBeadWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), liveSessionDirs, !reapEnabled, cr.rec, cr.reapSkips, cr.stderr)
+		report := reapClosedBeadWorktrees(cr.cityPath, cr.cfg, withoutSuspendedRigs(cr.cityPath, cr.cfg, cr.rigBeadStores()), liveSessionDirs, !reapEnabled, cr.rec, cr.reapSkips, cr.stderr)
 		p.recordPhase(TraceSiteControllerTickPhase, "reap_closed_bead_worktrees", phaseStart, map[string]any{
 			"reaped":    len(report.Reaped),
 			"protected": len(report.Protected),
@@ -1626,7 +1640,7 @@ func (cr *CityRuntime) tickReapClosedBeadWorktrees(p *tickPass) bool {
 		// when real reaping is enabled — never under dry-run.
 		if reapEnabled {
 			phaseStart = time.Now()
-			agentHomesReset := cleanupClosedBeadAgentHomeWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), cr.stderr)
+			agentHomesReset := cleanupClosedBeadAgentHomeWorktrees(cr.cityPath, cr.cfg, withoutSuspendedRigs(cr.cityPath, cr.cfg, cr.rigBeadStores()), cr.stderr)
 			p.recordPhase(TraceSiteControllerTickPhase, "cleanup_agent_home_worktrees", phaseStart, map[string]any{"reset": agentHomesReset})
 		}
 	}

@@ -144,6 +144,10 @@ func (cr *CityRuntime) recoverUnroutedWorkRoutes() {
 
 // runRouteRecoveryBackstop executes one authoritative pass and reports it.
 func (cr *CityRuntime) runRouteRecoveryBackstop(reason string) routeRecoveryReport {
+	if cr.beadsQuiescent.Load() {
+		// Suspended with nothing running: no store is read until resume.
+		return routeRecoveryReport{lane: "backstop", reason: reason}
+	}
 	lane := cr.routeRecoveryLaneOf()
 	if !lane.beginBackstop() {
 		// Another pass is already reading the same state. On a large city the

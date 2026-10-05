@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
@@ -15,6 +16,10 @@ import (
 type beadsScopeSuspension struct {
 	city bool
 	rigs map[string]bool
+	// epoch is when the runtime suspension state was last written. Every
+	// suspend and resume rewrites it, so it names the suspension episode a
+	// scope's retirement belongs to.
+	epoch time.Time
 }
 
 // suspendedBeadsScopes loads the runtime suspension state and answers for
@@ -32,7 +37,7 @@ func suspendedBeadsScopesWithState(cityPath string, cfg *config.City, st suspens
 	if cfg == nil {
 		return beadsScopeSuspension{}
 	}
-	s := beadsScopeSuspension{city: effectiveCitySuspended(cfg, st), rigs: map[string]bool{}}
+	s := beadsScopeSuspension{city: effectiveCitySuspended(cfg, st), rigs: map[string]bool{}, epoch: st.UpdatedAt}
 	names := buildEffectiveSuspendedRigNames(cfg, st)
 	for _, r := range cfg.Rigs {
 		if !names[r.Name] || r.Path == "" {
@@ -58,6 +63,14 @@ func (s beadsScopeSuspension) Suspended(scopeRoot string) bool {
 
 // City reports whether the whole city is suspended.
 func (s beadsScopeSuspension) City() bool { return s.city }
+
+// anyRig reports whether any rig is suspended in its own right.
+func (s beadsScopeSuspension) anyRig() bool { return len(s.rigs) > 0 }
+
+// withoutCity is s with only the rigs suspended in their own right.
+func (s beadsScopeSuspension) withoutCity() beadsScopeSuspension {
+	return beadsScopeSuspension{rigs: s.rigs, epoch: s.epoch}
+}
 
 // beadsScopeIdleRetired reports whether scopeRoot is a bd-owned proxied scope
 // whose proxy is not running because it retired on its idle timeout. It reads

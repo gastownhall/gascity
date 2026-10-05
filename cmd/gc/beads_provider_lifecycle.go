@@ -2341,8 +2341,9 @@ func waitForAllBeadsScopesReadyAfterRecovery(ctx context.Context, cityPath strin
 		return nil
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
+	suspended := suspendedBeadsScopes(cityPath, cfg)
 	for _, rig := range cfg.Rigs {
-		if strings.TrimSpace(rig.Path) == "" {
+		if strings.TrimSpace(rig.Path) == "" || suspended.Suspended(rig.Path) {
 			continue
 		}
 		if err := waitForBeadsScopeReadyAfterRecovery(ctx, resolveStoreScopeRoot(cityPath, rig.Path), cityPath, deadline); err != nil {

@@ -126,7 +126,7 @@ printf '\n' > "$SCOPES_FILE" # HQ scope: an empty line
 RIGS_JSON="$(gc rig list --json 2>/dev/null || true)"
 if [ -n "$RIGS_JSON" ]; then
     printf '%s' "$RIGS_JSON" \
-        | jq -r '(.rigs // [])[] | select(.hq != true) | .name' 2>/dev/null \
+        | jq -r '(.rigs // [])[] | select(.hq != true and .suspended != true) | .name' 2>/dev/null \
         >> "$SCOPES_FILE" || true
 fi
 

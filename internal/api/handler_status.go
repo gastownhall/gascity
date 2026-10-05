@@ -214,8 +214,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	suspendedRigs := make(map[string]bool, len(cfg.Rigs))
 	// cacheColdRigs mirrors the controller's per-rig cache refresh gate
 	// (rigStoreBackgroundRefresh): a rig suspended by EFFECTIVE state gets no
-	// async full prime and no reconciler, so its cache never reaches live and
-	// the cache-only Ready projection can never answer. It is deliberately not
+	// cache at all, and status does not read its store (statusWorkCounts). It is deliberately not
 	// the same set as suspendedRigs, which grows below to include rigs merely
 	// inferred suspended because every one of their agents is — those keep a
 	// refreshing cache and must still be asked for ready work.
@@ -693,12 +692,13 @@ type statusWorkResult struct {
 // by design (see cacheColdRigs below), which is the opposite of the graph leg's
 // fail-loud contract, so wiring one in is its own slice, not a rider.
 //
-// Rigs in cacheColdRigs are asked for persisted counts but not for ready work.
-// Their store runs no background cache refresh, so the cache-only Ready
-// projection is guaranteed to decline with ErrCacheUnavailable — reporting that
-// as a partial error made every city with a suspended rig permanently partial,
-// which greys out unrelated status tiles in the dashboard. Skipping the read
-// changes no count: the failing read already contributed zero ready work.
+// Rigs in cacheColdRigs (suspended rigs) are not asked at all. Their store
+// runs no cache, so every read would go to bd, and a bd read restarts a
+// suspended rig's retired proxy and Dolt; gc leaves a suspended scope
+// untouched. Their open and in-progress work is therefore not in the counts.
+// The cache-only Ready projection would decline for them anyway — reporting
+// that as a partial error made every city with a suspended rig permanently
+// partial, which greys out unrelated status tiles in the dashboard.
 func (s *Server) statusWorkCounts(ctx context.Context, cacheColdRigs map[string]bool) (workCounts, []string) {
 	stores := s.state.BeadStores()
 	// sortedRigNames deduplicates rigs sharing one store instance, so each
@@ -720,11 +720,14 @@ func (s *Server) statusWorkCounts(ctx context.Context, cacheColdRigs map[string]
 	}
 	cityName := s.state.CityName()
 	for _, rigName := range rigNames {
+		if cacheColdRigs[rigName] {
+			continue
+		}
 		queries = append(queries, workQuery{
 			label:         "rig " + rigName,
 			store:         stores[rigName],
 			includeStored: true,
-			includeReady:  rigName != cityName && !cacheColdRigs[rigName],
+			includeReady:  rigName != cityName,
 		})
 	}
 

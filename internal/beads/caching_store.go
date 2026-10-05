@@ -34,6 +34,9 @@ type CachingStore struct {
 	// cache applies, in place of idPrefix (WithEventIDPrefixes).
 	eventPrefixes []string
 	epoch         uint64 // names this instance in every CacheRevision it issues
+	// reconcileGate, when set, is asked before each periodic reconcile; a
+	// false answer skips that cycle (WithReconcileGate).
+	reconcileGate func() bool
 
 	mu           sync.RWMutex
 	beads        map[string]Bead
@@ -469,6 +472,18 @@ func WithEventIDPrefixes(prefixes ...string) CachingStoreOption {
 				c.eventPrefixes = append(c.eventPrefixes, normalized)
 			}
 		}
+	}
+}
+
+// WithReconcileGate makes the periodic reconcile loop ask allowed before each
+// cycle and skip the cycle when it answers false. The loop keeps running, so
+// the cache resumes reconciling as soon as allowed answers true again. A
+// caller whose backing store must not be touched for a while (its scope is
+// quiescent) uses this to stop the loop's full scans without rebuilding the
+// cache.
+func WithReconcileGate(allowed func() bool) CachingStoreOption {
+	return func(c *CachingStore) {
+		c.reconcileGate = allowed
 	}
 }
 

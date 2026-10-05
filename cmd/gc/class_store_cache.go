@@ -75,7 +75,7 @@ import (
 // Routes that already emit (the one-shot funnel's) are returned untouched: a
 // cache over an emitter would emit twice and hide the engine's ready
 // projection. A store that is already a cache is left as it is.
-func (r *storageRoutes) withControllerCache(ctx context.Context, ep events.Provider) *storageRoutes {
+func (r *storageRoutes) withControllerCache(ctx context.Context, ep events.Provider, opts ...beads.CachingStoreOption) *storageRoutes {
 	if r == nil || len(r.stores) == 0 || r.emitCityPath != "" {
 		return r
 	}
@@ -89,7 +89,7 @@ func (r *storageRoutes) withControllerCache(ctx context.Context, ep events.Provi
 		}
 		wrapped, ok := cached[store]
 		if !ok {
-			wrapped = wrapWithCachingStore(ctx, store, ep, true, beads.WithEventIDPrefixes(r.namespacesServedBy(store)...))
+			wrapped = wrapWithCachingStore(ctx, store, ep, true, append([]beads.CachingStoreOption{beads.WithEventIDPrefixes(r.namespacesServedBy(store)...)}, opts...)...)
 			if wrapped == nil {
 				continue
 			}

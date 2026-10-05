@@ -84,6 +84,7 @@ go_test(
         "caching_store_reconcile_external_claim_test.go",
         "caching_store_reconcile_fixtures_test.go",
         "caching_store_reconcile_flood_internal_test.go",
+        "caching_store_reconcile_gate_internal_test.go",
         "caching_store_reconcile_generators_test.go",
         "caching_store_reconcile_internal_test.go",
         "caching_store_reconcile_oracle_test.go",

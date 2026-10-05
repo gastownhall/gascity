@@ -28,8 +28,10 @@ SCOPE_LAST_ERROR=""
 # there, which is not a failure.
 SCOPE_NOT_BD=0
 
-# core_rig_names prints one configured rig name per line (suspended rigs
-# included: their stores still hold data). Prints nothing and returns 1 when
+# core_rig_names prints one configured rig name per line. Suspended rigs are
+# left out: gc does not touch a suspended scope, because any bd read restarts
+# its retired proxy and Dolt, and nothing writes to it while it is suspended,
+# so its maintenance waits for it to resume. Prints nothing and returns 1 when
 # the rig list cannot be read, so the caller can record that the rig scopes
 # were not visited.
 core_rig_names() {
@@ -37,7 +39,7 @@ core_rig_names() {
     if ! raw=$(cd "$CITY_ABS" && gc rig list --json 2>/dev/null); then
         return 1
     fi
-    printf '%s\n' "$raw" | jq -r '.rigs[]? | select((.hq // false) == false) | .name // empty' 2>/dev/null
+    printf '%s\n' "$raw" | jq -r '.rigs[]? | select((.hq // false) == false and (.suspended // false) == false) | .name // empty' 2>/dev/null
 }
 
 # scope_select <city|rig> [rig-name] makes a scope current. SCOPE_DB is left

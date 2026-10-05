@@ -59,6 +59,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A suspended rig or city is left cold.** gc no longer touches the bead
+  store of a suspended rig, or of any scope of a suspended city. That covers
+  cache scans, demand, order-tracking sweeps, the completions sweep,
+  convergence, `beads-health`, `/status` counts, the dashboard rig probe and
+  the core maintenance orders (reaper, jsonl-export, orphan-sweep, renudge).
+  Once a suspended scope's sessions have drained, gc stops its bd proxy and
+  Dolt child with `bd dolt stop`, the same step `gc stop` runs last, so a
+  suspended scope holds no memory. A suspended city with no running session
+  runs no controller tick and no order pass at all. `gc resume` / `gc rig
+  resume` let the next command restart the pair. `/status` work counts no
+  longer include suspended rigs (#6561).
+
 - **`gc doctor`, `beads-health` and the dashboard understand a finite proxied
   idle timeout.** A scope whose proxy retired on its idle timeout is idle, not
   down. On a running city, doctor reads it, which wakes it for one more idle

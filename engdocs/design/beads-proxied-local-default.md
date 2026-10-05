@@ -167,6 +167,35 @@ force-eligible condition only as message text, and signalling a PID bd could not
 identify is irreversible. Health reports the same way, so one bad scope cannot
 hide the state of the others.
 
+## Suspension is quiescence
+
+A suspended rig, and every scope of a suspended city, gets no bd call from gc:
+any bd read restarts a bd-owned proxied scope's proxy and Dolt child, so a
+periodic read would keep a suspended scope warm for good.
+
+- **Not touched:** the controller's rig caches (no pre-prime, no full prime,
+  no reconcile), demand, both order-tracking watchdogs and `gc order
+  sweep-tracking`, the completions sweep, convergence, the closed-bead
+  worktree reaper, `beads-health`, `gc start`'s readiness pass, `/status` work
+  counts, the dashboard rig probe, and the core maintenance orders (reaper,
+  jsonl-export, orphan-sweep, renudge read `gc rig list --json`'s `suspended`
+  and skip the rig).
+- **A suspended city with no running session is quiescent:** its tick runs no
+  phase, the order lane and the completions, route-recovery and orphan
+  backstops stand down, and every cache pauses its reconcile
+  (`beads.WithReconcileGate`). A config change made while it is quiescent is
+  applied on the first tick after resume.
+- **Retire on suspend.** Once a suspended scope's sessions have drained, the
+  controller stops its pair with the same lifecycle `stop` op (`bd dolt stop`)
+  gc stop runs last: a rig when its own sessions are gone, the city and every
+  rig when nothing runs at all. With no controller running, `gc rig suspend`
+  and `gc suspend` stop it directly. A rig that shares the city's proxy root
+  is not stopped on its own, because its pair also serves the city. Resuming
+  lets the next read restart the pair.
+- **Event-driven work still reaches a suspended rig** when something writes to
+  it (an operator's `gc bd --rig`, an event-triggered order for a bead in that
+  rig). That is a deliberate touch, not a poll.
+
 ## Idle policy
 
 bd's proxy retires itself and its Dolt child after an idle timeout, and the
@@ -220,8 +249,8 @@ than that scope's idle timeout; anything that must react faster reacts to an
 event, not a poll. Otherwise gc decides the scope's liveness and the timeout is
 dead config. Today a running city still touches every non-suspended scope
 every ≤31s, so on a running city a finite timeout mostly bounds leaks rather
-than saving memory; suspended scopes are left untouched (see Stop semantics),
-and activity-gated backstops for quiet scopes are follow-up work
+than saving memory; suspended scopes are left untouched (see "Suspension is
+quiescence"), and activity-gated backstops for quiet scopes are follow-up work
 (`engdocs/design/idle-controller-call-rate.md`, Pillar 3).
 
 The opt-in proxied-native lane admits a long-lived native open only on a
