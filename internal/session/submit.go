@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -452,7 +453,9 @@ func restoresInterruptedInput(b beads.Bead) bool {
 
 // clearRestoredInputLocked waits briefly for Claude to restore an interrupted
 // prompt, then clears the input box and verifies it is empty. handled is false
-// when the runtime cannot do a verified clear.
+// when the runtime cannot do a verified clear. When a client is attached the
+// runtime leaves the input box alone (a human may be typing in it, #5192);
+// that is logged and handled, so no caller falls back to a raw Ctrl-U.
 func (m *Manager) clearRestoredInputLocked(ctx context.Context, sessName string) (handled bool, err error) {
 	clearer, ok := m.sp.(runtime.InputClearProvider)
 	if !ok {
@@ -461,6 +464,10 @@ func (m *Manager) clearRestoredInputLocked(ctx context.Context, sessName string)
 	err = clearer.ClearInput(ctx, sessName, claudeInputRestoreWindow)
 	if errors.Is(err, runtime.ErrInteractionUnsupported) {
 		return false, nil
+	}
+	if errors.Is(err, runtime.ErrInputClearSkipped) {
+		log.Printf("session: left the input box of %q as it is after an interrupt: %v", sessName, err)
+		return true, nil
 	}
 	if err != nil {
 		return true, fmt.Errorf("clearing the interrupted prompt from the input box: %w", err)

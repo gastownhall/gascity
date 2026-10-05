@@ -16,10 +16,21 @@ import (
 // a single Ctrl-U leaves most of a long draft behind. That matters after an
 // interrupt that lands before Claude's first response chunk: Claude puts the
 // interrupted prompt back into the input box, and the next message pasted
-// after one Ctrl-U is sent glued to what is left of the old one. These helpers
-// press Ctrl-U until the input box reads empty, and fail loudly when it will
-// not. They never press Ctrl-C: on an empty input box it arms "press Ctrl-C
-// again to exit".
+// after one Ctrl-U is sent glued to what is left of the old one.
+//
+// Ctrl-U deletes only from the cursor back to the start of the cursor's
+// wrapped row, so with the cursor at the start of the draft it deletes nothing.
+// Ctrl-K deletes from the cursor to the end of its row (on an empty line it
+// joins the next line). Each press here is the pair Ctrl-U Ctrl-K, which
+// removes text wherever the cursor is; on Claude Code 2.1.289 it emptied
+// single- and multi-line drafts with the cursor at the end, the start and the
+// middle, and on an empty input box it does nothing. Moving the cursor first
+// is not an option: End and Ctrl-E stop at the end of the current line, and Up
+// or Down at the edge of the input box recalls prompt history into it.
+//
+// These helpers press the pair until the input box reads empty, and fail
+// loudly when it will not. They never press Ctrl-C: on an empty input box it
+// arms "press Ctrl-C again to exit".
 
 var (
 	// inputRedrawPoll is the pause between captures while waiting for the
@@ -37,7 +48,8 @@ const (
 	// deletes something is progress; this only stops a runaway loop.
 	inputMaxCtrlU = 200
 	// inputStalledCtrlU is how many presses in a row may leave the input box
-	// unchanged before the clear is declared failed.
+	// unchanged before the clear is declared failed. One press can delete
+	// only an invisible line break.
 	inputStalledCtrlU = 2
 )
 
@@ -204,17 +216,21 @@ func (t *Tmux) captureInputLines(target string) ([]string, error) {
 	return lines, nil
 }
 
-// emptyClaudeInput presses Ctrl-U until the input box reads empty, starting
-// from in. After each press it waits for the input box to redraw. It fails
-// when the input box stops changing while it still holds text, when it can no
-// longer be read, or after inputMaxCtrlU presses.
-func emptyClaudeInput(in claudeInput, read func() (claudeInput, bool, error), ctrlU func() error, sleep func(time.Duration)) error {
+// inputClearKeys is one clearing press: Ctrl-U then Ctrl-K, sent in one
+// send-keys (see the comment at the top of this file).
+var inputClearKeys = []string{"C-u", "C-k"}
+
+// emptyClaudeInput presses Ctrl-U Ctrl-K until the input box reads empty,
+// starting from in. After each press it waits for the input box to redraw. It
+// fails when the input box stops changing while it still holds text, when it
+// can no longer be read, when press fails, or after inputMaxCtrlU presses.
+func emptyClaudeInput(in claudeInput, read func() (claudeInput, bool, error), press func() error, sleep func(time.Duration)) error {
 	stalled := 0
 	for presses := 0; !in.empty(); presses++ {
 		if presses >= inputMaxCtrlU || stalled >= inputStalledCtrlU {
-			return fmt.Errorf("input box still holds %q after %d Ctrl-U", firstNRunes(in.text(), 80), presses)
+			return fmt.Errorf("input box still holds %q after %d Ctrl-U Ctrl-K", firstNRunes(in.text(), 80), presses)
 		}
-		if err := ctrlU(); err != nil {
+		if err := press(); err != nil {
 			return fmt.Errorf("clearing input box: %w", err)
 		}
 		before := in
@@ -260,7 +276,7 @@ func (t *Tmux) clearInputBeforePaste(target string) error {
 	if t.isClaudeTarget(target) {
 		in, ok, err := t.readInput(target)
 		if err == nil && ok {
-			return t.emptyInput(target, in)
+			return t.emptyInput(target, in, nil)
 		}
 	}
 	if _, err := t.run("send-keys", "-t", paneTarget(target), "C-u"); err != nil {
@@ -270,19 +286,44 @@ func (t *Tmux) clearInputBeforePaste(target string) error {
 	return nil
 }
 
-func (t *Tmux) emptyInput(target string, in claudeInput) error {
+// emptyInput clears in from target's input box. mayType, when set, runs
+// before every press and stops the clear with its error.
+func (t *Tmux) emptyInput(target string, in claudeInput, mayType func() error) error {
 	read := func() (claudeInput, bool, error) { return t.readInput(target) }
-	ctrlU := func() error {
-		_, err := t.run("send-keys", "-t", paneTarget(target), "C-u")
+	press := func() error {
+		if mayType != nil {
+			if err := mayType(); err != nil {
+				return err
+			}
+		}
+		args := append([]string{"send-keys", "-t", paneTarget(target)}, inputClearKeys...)
+		_, err := t.run(args...)
 		return err
 	}
-	return emptyClaudeInput(in, read, ctrlU, time.Sleep)
+	return emptyClaudeInput(in, read, press, time.Sleep)
+}
+
+// noClientAttached returns an error wrapping runtime.ErrInputClearSkipped when
+// a client is attached to session, or when the probe cannot tell: a human may
+// be typing in the input box (#5192).
+func (t *Tmux) noClientAttached(session string) error {
+	attached, err := t.SessionAttachedWithError(session)
+	if err != nil {
+		return fmt.Errorf("%w (attachment probe failed: %v)", runtime.ErrInputClearSkipped, err)
+	}
+	if attached {
+		return fmt.Errorf("%w: a client is attached to session %q", runtime.ErrInputClearSkipped, session)
+	}
+	return nil
 }
 
 // ClearInput implements [runtime.InputClearProvider] for Claude Code panes. It
 // watches the input box for up to restoreWindow; as soon as it holds text it
 // is cleared and verified empty. An input box that stays empty, or cannot be
-// read, gets no keys. Other providers return runtime.ErrInteractionUnsupported.
+// read, gets no keys. When a client is attached, or the attachment probe
+// cannot tell, it sends no keys and returns an error wrapping
+// runtime.ErrInputClearSkipped; it checks before every key it sends. Other
+// providers return runtime.ErrInteractionUnsupported.
 func (t *Tmux) ClearInput(ctx context.Context, session string, restoreWindow time.Duration) error {
 	if !acquireNudgeLock(session, t.cfg.NudgeLockTimeout) {
 		return fmt.Errorf("nudge lock timeout for session %q: previous nudge may be hung", session)
@@ -299,14 +340,18 @@ func (t *Tmux) ClearInput(ctx context.Context, session string, restoreWindow tim
 	// A detached pane may not have redrawn since the interrupt.
 	t.WakePaneIfDetached(session)
 
+	mayType := func() error { return t.noClientAttached(session) }
 	deadline := time.Now().Add(restoreWindow)
 	for {
+		if err := mayType(); err != nil {
+			return err
+		}
 		in, ok, err := t.readInput(target)
 		if err != nil {
 			return fmt.Errorf("reading input box: %w", err)
 		}
 		if ok && !in.empty() {
-			return t.emptyInput(target, in)
+			return t.emptyInput(target, in, mayType)
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {

@@ -1,8 +1,11 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -72,15 +75,71 @@ func TestStopTurnClearsClaudeInputAfterIdle(t *testing.T) {
 	}
 }
 
-// A restored draft that cannot be cleared is reported, not swallowed: the
-// caller's next message would be merged into it.
-func TestStopTurnReportsClaudeInputThatWillNotClear(t *testing.T) {
+// captureLog redirects the standard logger for the test and returns what it
+// wrote.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+	return &buf
+}
+
+// The stop itself succeeded: a restored draft that cannot be cleared is logged
+// with the text left behind, and StopTurn does not fail the stop over it.
+func TestStopTurnLogsClaudeInputThatWillNotClear(t *testing.T) {
+	logs := captureLog(t)
 	mgr, sp, info := newStopTestSession(t, "claude")
 	sp.ClearInputErrors[info.SessionName] = errors.New("input box still holds \"d1.0-A: write\"")
 
-	err := mgr.StopTurn(info.ID)
-	if err == nil || !strings.Contains(err.Error(), "d1.0-A: write") {
-		t.Fatalf("StopTurn error = %v, want the ClearInput failure", err)
+	if err := mgr.StopTurn(info.ID); err != nil {
+		t.Fatalf("StopTurn = %v, want nil: the turn was stopped", err)
+	}
+	if !strings.Contains(logs.String(), "d1.0-A: write") {
+		t.Fatalf("log = %q, want the ClearInput failure logged", logs.String())
+	}
+}
+
+// A client is attached, so a human may be typing: the runtime leaves the input
+// box alone, and StopTurn neither fails nor falls back to a raw Ctrl-U that
+// would wipe the human's draft (#5192).
+func TestStopTurnLeavesAttachedClaudeInputAlone(t *testing.T) {
+	logs := captureLog(t)
+	mgr, sp, info := newStopTestSession(t, "claude")
+	sp.ClearInputErrors[info.SessionName] = fmt.Errorf("%w: a client is attached", runtime.ErrInputClearSkipped)
+
+	if err := mgr.StopTurn(info.ID); err != nil {
+		t.Fatalf("StopTurn = %v, want nil", err)
+	}
+	if n := sp.CountCalls("SendKeys", info.SessionName); n != 0 {
+		t.Fatalf("calls = %v, want no SendKeys while a client is attached", callMethods(sp.SnapshotCalls()))
+	}
+	if !strings.Contains(logs.String(), "attached") {
+		t.Fatalf("log = %q, want a note that the input box was left alone", logs.String())
+	}
+}
+
+// interrupt_now on an attached session: the verified clear is skipped, and the
+// old single Ctrl-U must not run in its place (it would wipe a human's draft).
+func TestSubmitInterruptNowLeavesAttachedClaudeInputAlone(t *testing.T) {
+	mgr, sp, info := newStopTestSession(t, "claude")
+	sp.ClearInputErrors[info.SessionName] = fmt.Errorf("%w: a client is attached", runtime.ErrInputClearSkipped)
+
+	if _, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow); err != nil {
+		t.Fatalf("Submit(interrupt_now): %v", err)
+	}
+	for _, call := range sp.SnapshotCalls() {
+		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "C-u" {
+			t.Fatalf("calls = %v, want no Ctrl-U while a client is attached", callMethods(sp.SnapshotCalls()))
+		}
+	}
+	if callIndex(sp.SnapshotCalls(), "NudgeNow", info.SessionName) < 0 {
+		t.Fatalf("calls = %v, want the replacement message delivered", callMethods(sp.SnapshotCalls()))
 	}
 }
 

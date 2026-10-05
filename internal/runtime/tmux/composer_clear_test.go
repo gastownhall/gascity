@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // Pane captures from Claude Code 2.1.288 in an 80-column tmux pane, taken in
@@ -79,6 +81,22 @@ var (
 			"❯ ",
 		},
 	}
+	// keys.sh on Claude Code 2.1.289: the same draft with the cursor moved to
+	// its start, then the input box after each Ctrl-U+Ctrl-K pair sent in one
+	// send-keys. A Ctrl-U alone there deletes nothing; Ctrl-K deletes the rest
+	// of the cursor's wrapped row.
+	claudeCtrlUCtrlKFromStartSequence = [][]string{
+		{
+			"❯  omicron pi rho sigma tau upsilon phi chi psi omega one two three four five",
+			"  six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen END",
+		},
+		{
+			"❯ six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen END",
+		},
+		{
+			"❯ ",
+		},
+	}
 	claudeCtrlUDraft = "EXP alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi " +
 		"omicron pi rho sigma tau upsilon phi chi psi omega one two three four five " +
 		"six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen END"
@@ -86,9 +104,12 @@ var (
 
 // fakeClaudePane is a tmux executor that plays a Claude Code 2.1.288 pane: an
 // 80-column transcript above an input box framed by rules. It models what the
-// repro measured: the input box word-wraps at 77 columns, one Ctrl-U deletes
-// only the last wrapped row, Enter sends the whole draft as one message, and a
-// Ctrl-C on an empty input box arms "press Ctrl-C again to exit".
+// repro measured: the input box word-wraps at 77 columns, Ctrl-U deletes from
+// the cursor back to the start of the cursor's wrapped row (so one Ctrl-U at
+// the end of a draft removes only the last row, and a Ctrl-U with the cursor at
+// the start of the draft removes nothing), Ctrl-K deletes from the cursor to
+// the end of its wrapped row, Enter sends the whole draft as one message, and
+// a Ctrl-C on an empty input box arms "press Ctrl-C again to exit".
 type fakeClaudePane struct {
 	mu sync.Mutex
 
@@ -96,13 +117,23 @@ type fakeClaudePane struct {
 	draft    string
 	attached bool
 	busy     bool
+	// cursor is the byte offset of the input cursor in draft; draftEnd
+	// (the default) keeps it at the end, where typing leaves it.
+	cursor int
+	// attachProbeErr makes the attachment probe fail, so whether a human is
+	// at the pane cannot be told.
+	attachProbeErr error
+	// attachOnCapture attaches a client on the attachOnCapture'th
+	// capture-pane (1-based), the way a human may attach mid-clear.
+	attachOnCapture int
 
 	// restoreDraft appears in the input box on the restoreOnCapture'th
 	// capture-pane (1-based), the way Claude restores an interrupted prompt
 	// after /stop has already settled.
 	restoreDraft     string
 	restoreOnCapture int
-	// ignoreCtrlU makes Ctrl-U a no-op (an input box that will not clear).
+	// ignoreCtrlU makes Ctrl-U and Ctrl-K no-ops (an input box that will
+	// not clear).
 	ignoreCtrlU bool
 	// placeholder is drawn dim in an empty input box, as Claude draws
 	// "Try \"write a test for <filepath>\"" at startup.
@@ -117,12 +148,51 @@ type fakeClaudePane struct {
 
 const fakeClaudeInputWidth = 77
 
+// draftEnd is fakeClaudePane.cursor for "at the end of the draft".
+const draftEnd = -1
+
 func newFakeClaudePane(draft string) *fakeClaudePane {
 	return &fakeClaudePane{
 		header:      append([]string(nil), claudeRestoredDraftPane[:3]...),
 		draft:       draft,
+		cursor:      draftEnd,
 		sessionName: "lab",
 	}
+}
+
+// cur returns the cursor's byte offset in the draft.
+func (f *fakeClaudePane) cur() int {
+	if f.cursor < 0 || f.cursor > len(f.draft) {
+		return len(f.draft)
+	}
+	return f.cursor
+}
+
+// cursorRow returns the start and end offsets of the wrapped row holding the
+// cursor. A cursor at a row start belongs to that row.
+func (f *fakeClaudePane) cursorRow() (start, end int) {
+	starts := f.rowStarts()
+	c := f.cur()
+	r := 0
+	for i, st := range starts {
+		if st <= c {
+			r = i
+		}
+	}
+	end = len(f.draft)
+	if r+1 < len(starts) {
+		end = starts[r+1]
+	}
+	return starts[r], end
+}
+
+// setCursor stores c, keeping "at the end" sticky so later typing appends.
+func (f *fakeClaudePane) setCursor(c int) {
+	if c >= len(f.draft) {
+		f.cursor = draftEnd
+		return
+	}
+	f.cursor = c
 }
 
 // rowStarts word-wraps the draft the way the repro's captures show it and
@@ -204,8 +274,20 @@ func (f *fakeClaudePane) ctrlU() {
 	if f.ignoreCtrlU {
 		return
 	}
-	starts := f.rowStarts()
-	f.draft = f.draft[:starts[len(starts)-1]]
+	start, _ := f.cursorRow()
+	c := f.cur()
+	f.draft = f.draft[:start] + f.draft[c:]
+	f.setCursor(start)
+}
+
+func (f *fakeClaudePane) ctrlK() {
+	if f.ignoreCtrlU {
+		return
+	}
+	_, end := f.cursorRow()
+	c := f.cur()
+	f.draft = f.draft[:c] + f.draft[end:]
+	f.setCursor(c)
 }
 
 func (f *fakeClaudePane) execute(args []string) (string, error) {
@@ -226,6 +308,9 @@ func (f *fakeClaudePane) execute(args []string) (string, error) {
 		return "%1\tclaude\t4242", nil
 	case "display-message":
 		if slices.Contains(args, "#{session_name}|#{session_attached}") {
+			if f.attachProbeErr != nil {
+				return "", f.attachProbeErr
+			}
 			if f.attached {
 				return f.sessionName + "|1", nil
 			}
@@ -239,8 +324,12 @@ func (f *fakeClaudePane) execute(args []string) (string, error) {
 		return "", errors.New("unknown variable")
 	case "capture-pane":
 		f.captures++
+		if f.attachOnCapture > 0 && f.captures >= f.attachOnCapture {
+			f.attached = true
+		}
 		if f.restoreDraft != "" && f.captures >= f.restoreOnCapture {
 			f.draft, f.restoreDraft = f.restoreDraft, ""
+			f.cursor = draftEnd
 		}
 		return strings.TrimSpace(strings.Join(f.renderStyled(slices.Contains(args, "-e")), "\n")), nil
 	case "send-keys":
@@ -269,7 +358,10 @@ func (f *fakeClaudePane) sendKeys(args []string) {
 		}
 	}
 	if literal {
-		f.draft += strings.Join(keys, " ")
+		text := strings.Join(keys, " ")
+		c := f.cur()
+		f.draft = f.draft[:c] + text + f.draft[c:]
+		f.setCursor(c + len(text))
 		return
 	}
 	for _, key := range keys {
@@ -277,15 +369,19 @@ func (f *fakeClaudePane) sendKeys(args []string) {
 		switch key {
 		case "C-u":
 			f.ctrlU()
+		case "C-k":
+			f.ctrlK()
 		case "C-c":
 			if f.draft == "" {
 				f.exitArmed = true
 			}
 			f.draft = ""
+			f.cursor = draftEnd
 		case "Enter":
 			if f.draft != "" {
 				f.submitted = append(f.submitted, f.draft)
 				f.draft = ""
+				f.cursor = draftEnd
 				f.busy = true
 			}
 		}
@@ -327,6 +423,28 @@ func TestFakeClaudePaneMatchesRealCaptures(t *testing.T) {
 		got = got[len(pane.header)+1 : len(got)-2]
 		if !slices.Equal(got, want) {
 			t.Fatalf("after %d Ctrl-U the input box reads\n%s\nwant the real capture\n%s", i, strings.Join(got, "\n"), strings.Join(want, "\n"))
+		}
+	}
+}
+
+// The fake must also clear a draft whose cursor is not at its end the way
+// Claude Code 2.1.289 does: Ctrl-U alone stalls at the start of the draft, and
+// each Ctrl-U+Ctrl-K pair removes one wrapped row (rows compared with spaces
+// collapsed: the real input box kept the space at the first wrap point).
+func TestFakeClaudePaneMatchesRealCursorCaptures(t *testing.T) {
+	pane := newFakeClaudePane(claudeCtrlUDraft)
+	pane.cursor = 0
+	pane.ctrlU()
+	if pane.draft != claudeCtrlUDraft {
+		t.Fatalf("Ctrl-U at the start of the draft left %q, want the draft unchanged", pane.draft)
+	}
+	for i, want := range claudeCtrlUCtrlKFromStartSequence {
+		pane.ctrlU()
+		pane.ctrlK()
+		got := pane.render()
+		got = got[len(pane.header)+1 : len(got)-2]
+		if !slices.EqualFunc(got, want, func(a, b string) bool { return strings.Join(strings.Fields(a), " ") == strings.Join(strings.Fields(b), " ") }) {
+			t.Fatalf("after %d Ctrl-U+Ctrl-K the input box reads\n%s\nwant the real capture\n%s", i+1, strings.Join(got, "\n"), strings.Join(want, "\n"))
 		}
 	}
 }
@@ -506,5 +624,90 @@ func TestClaudeInputIgnoresPermissionMenuCursor(t *testing.T) {
 	}
 	if in, ok := readClaudeInput(lines); ok {
 		t.Fatalf("read input box %q from a permission menu, want none", in.rows)
+	}
+}
+
+// A human attached to the session may be typing: the stop-time clear must not
+// wipe their draft (#5192). It sends no keys and says why.
+func TestClearInputLeavesAttachedClaudeDraftAlone(t *testing.T) {
+	pane := newFakeClaudePane("human draft in progress")
+	pane.attached = true
+	tm := newFakeClaudeTmux(pane)
+
+	err := tm.ClearInput(context.Background(), pane.sessionName, 300*time.Millisecond)
+	if !errors.Is(err, runtime.ErrInputClearSkipped) {
+		t.Fatalf("ClearInput = %v, want runtime.ErrInputClearSkipped", err)
+	}
+	if len(pane.keys) != 0 || pane.draft != "human draft in progress" {
+		t.Fatalf("keys = %q, draft = %q; want no keys and the draft intact", pane.keys, pane.draft)
+	}
+}
+
+// When the attachment probe cannot answer, a human may be there: leave the
+// input box alone, as the paste path does.
+func TestClearInputLeavesDraftAloneWhenAttachProbeFails(t *testing.T) {
+	pane := newFakeClaudePane("human draft in progress")
+	pane.attachProbeErr = errors.New("server exited unexpectedly")
+	tm := newFakeClaudeTmux(pane)
+
+	err := tm.ClearInput(context.Background(), pane.sessionName, 0)
+	if !errors.Is(err, runtime.ErrInputClearSkipped) {
+		t.Fatalf("ClearInput = %v, want runtime.ErrInputClearSkipped", err)
+	}
+	if len(pane.keys) != 0 || pane.draft != "human draft in progress" {
+		t.Fatalf("keys = %q, draft = %q; want no keys and the draft intact", pane.keys, pane.draft)
+	}
+}
+
+// A client that attaches while ClearInput waits for Claude to restore the
+// interrupted prompt also stops the clear before any key is sent.
+func TestClearInputStopsWhenClientAttachesDuringRestoreWindow(t *testing.T) {
+	pane := newFakeClaudePane("")
+	pane.restoreDraft = claudeRestoredDraft
+	pane.restoreOnCapture = 3
+	pane.attachOnCapture = 2
+	tm := newFakeClaudeTmux(pane)
+
+	err := tm.ClearInput(context.Background(), pane.sessionName, 2*time.Second)
+	if !errors.Is(err, runtime.ErrInputClearSkipped) {
+		t.Fatalf("ClearInput = %v, want runtime.ErrInputClearSkipped", err)
+	}
+	if len(pane.keys) != 0 {
+		t.Fatalf("keys = %q, want none once a client attached", pane.keys)
+	}
+}
+
+// A draft whose cursor is not at its end (a human moved it, or Claude
+// restored the prompt with the cursor at the start) still clears: Ctrl-U
+// alone deletes nothing before a cursor at the start of the draft.
+func TestClearInputClearsDraftWithCursorAtStart(t *testing.T) {
+	pane := newFakeClaudePane(claudeRestoredDraft)
+	pane.cursor = 0
+	tm := newFakeClaudeTmux(pane)
+
+	if err := tm.ClearInput(context.Background(), pane.sessionName, 0); err != nil {
+		t.Fatalf("ClearInput: %v", err)
+	}
+	if pane.draft != "" {
+		t.Fatalf("input box still holds %q", pane.draft)
+	}
+	if n := pane.keyCount("C-c"); n != 0 || pane.exitArmed {
+		t.Fatalf("keys = %q, want no Ctrl-C", pane.keys)
+	}
+}
+
+// The submit path's clear handles a cursor in the middle of the draft too, so
+// the message still goes out alone.
+func TestNudgeSessionClearsDraftWithCursorInTheMiddle(t *testing.T) {
+	pane := newFakeClaudePane(claudeRestoredDraft)
+	pane.cursor = strings.Index(claudeRestoredDraft, "lighthouses")
+	tm := newFakeClaudeTmux(pane)
+	const b = "d1.0-B: reply with exactly the words BANANA d1.0 and nothing else."
+
+	if err := tm.NudgeSession(pane.sessionName, b); err != nil {
+		t.Fatalf("NudgeSession: %v", err)
+	}
+	if !slices.Equal(pane.submitted, []string{b}) {
+		t.Fatalf("Claude received %q, want only %q", pane.submitted, b)
 	}
 }

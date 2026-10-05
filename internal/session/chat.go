@@ -1138,8 +1138,11 @@ func (m *Manager) StopTurn(id string) error {
 			return fmt.Errorf("waiting for stopped session interrupt boundary: %w", err)
 		}
 		if running && restoresInterruptedInput(b) {
+			// The stop already succeeded. A draft that will not clear is
+			// logged, not returned: the next submit clears the input box
+			// again before it pastes.
 			if _, err := m.clearRestoredInputLocked(context.Background(), sessName); err != nil {
-				return fmt.Errorf("stopped the turn but %w", err)
+				log.Printf("session: stopped the turn of %q but %v", sessName, err)
 			}
 		}
 		return nil
