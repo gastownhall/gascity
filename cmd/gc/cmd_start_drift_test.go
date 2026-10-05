@@ -129,7 +129,7 @@ func TestDecideDriftAction(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			sv := SupervisorStatus{BuildID: tc.supervisorID}
-			got := decideDriftAction(tc.localBuildID, sv, nil, tc.flags)
+			got := decideDriftAction(gcBinaryIdentity{BuildID: tc.localBuildID}, sv, nil, tc.flags)
 			if got.ProceedNormally != tc.wantProceed {
 				t.Errorf("ProceedNormally = %v, want %v", got.ProceedNormally, tc.wantProceed)
 			}

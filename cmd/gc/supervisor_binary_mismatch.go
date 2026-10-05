@@ -52,9 +52,24 @@ func readProcessExePathViaPS(pid int) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("ps -p %d: %w", pid, err)
 	}
-	path := strings.TrimSpace(string(out))
+	return verifiedPSExecutablePath(pid, strings.TrimSpace(string(out)))
+}
+
+// verifiedPSExecutablePath accepts a ps(1) comm value only when it names an
+// existing regular file. On macOS comm is derived from argv[0] and may be
+// relative, truncated, or stale; such a value would misidentify the
+// supervisor's binary, so it is rejected and the caller falls back to the
+// service definition or to "unknown" (which never refuses).
+func verifiedPSExecutablePath(pid int, path string) (string, error) {
 	if !filepath.IsAbs(path) {
 		return "", fmt.Errorf("ps -p %d reported non-absolute command %q", pid, path)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("ps -p %d reported %q: %w", pid, path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("ps -p %d reported %q, which is not a regular file", pid, path)
 	}
 	return path, nil
 }
@@ -326,7 +341,7 @@ func checkSupervisorBinaryBeforeRegister(commandName string, stderr io.Writer, w
 		return true, false
 	}
 	if !m.DifferentInstall {
-		if m.BuildDiffers && !warnOnBuildDrift {
+		if !warnOnBuildDrift && detectGCBinaryDrift(m.Local, SupervisorStatus{BuildID: m.Supervisor.BuildID, Version: m.Supervisor.Version}) {
 			// gc start's binary-drift handling reports and resolves this.
 			return true, false
 		}

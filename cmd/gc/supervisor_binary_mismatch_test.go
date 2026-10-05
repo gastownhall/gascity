@@ -199,6 +199,12 @@ func TestSupervisorBinaryMismatchClassify(t *testing.T) {
 			wantDifferent: true,
 		},
 		{
+			name:          "different install, same version, one build unknown (homebrew-core vs tarball)",
+			sup:           gcBinaryIdentity{ExePath: a, Version: "1.5.0", BuildID: "unknown"},
+			local:         gcBinaryIdentity{ExePath: b, Version: "v1.5.0", BuildID: "e38ce9cc55"},
+			wantDifferent: true,
+		},
+		{
 			name:          "different install, identity unknown",
 			sup:           gcBinaryIdentity{ExePath: a, Version: "dev", BuildID: "unknown"},
 			local:         gcBinaryIdentity{ExePath: b, Version: "dev", BuildID: "unknown"},
@@ -535,5 +541,86 @@ func TestDetectSupervisorBinaryMismatchMacOSForkedOutsideLaunchd(t *testing.T) {
 	printSupervisorBinaryMismatch(&stderr, "gc status", m)
 	if !strings.Contains(stderr.String(), " supervisor stop'), then rerun with this gc") {
 		t.Fatalf("forked supervisor must get the stop-it fix, got:\n%s", stderr.String())
+	}
+}
+
+func TestVerifiedPSExecutablePath(t *testing.T) {
+	bin := writeFakeGCBinary(t, "ps")
+	if got, err := verifiedPSExecutablePath(1, bin); err != nil || got != bin {
+		t.Fatalf("regular file: got (%q, %v), want (%q, nil)", got, err, bin)
+	}
+	for name, path := range map[string]string{
+		"argv0 relative":  "gc",
+		"truncated":       bin[:len(bin)-1],
+		"stale (removed)": filepath.Join(t.TempDir(), "gone", "gc"),
+		"directory":       filepath.Dir(bin),
+	} {
+		if got, err := verifiedPSExecutablePath(1, path); err == nil {
+			t.Errorf("%s: accepted %q (got %q), want rejection", name, path, got)
+		}
+	}
+}
+
+// When macOS ps(1) gives no usable path and no service defines one, the
+// supervisor's binary is unknown: that must never refuse, only warn (init)
+// or defer to the drift auto-restart (start).
+func TestUnknownSupervisorPathNeverRefuses(t *testing.T) {
+	f := macOSHomebrewSupervisorFixture(t)
+	f.serviceBinary, f.service = "", ""
+	stubSupervisorBinary(t, f)
+	supervisorRuntimeGOOS = "darwin"
+
+	m, mismatched := detectSupervisorBinaryMismatch()
+	if !mismatched || m.DifferentInstall {
+		t.Fatalf("mismatched=%v DifferentInstall=%v, want a version mismatch that is not a known different install", mismatched, m.DifferentInstall)
+	}
+	var initErr bytes.Buffer
+	if proceed, _ := checkSupervisorBinaryBeforeRegister("gc init", &initErr, true); !proceed {
+		t.Fatalf("gc init refused with an unknown supervisor path:\n%s", initErr.String())
+	}
+	if !strings.Contains(initErr.String(), "at (unknown path)") {
+		t.Fatalf("warning should say the path is unknown:\n%s", initErr.String())
+	}
+	var startErr bytes.Buffer
+	if proceed, _ := checkSupervisorBinaryBeforeRegister("gc start", &startErr, false); !proceed || startErr.Len() != 0 {
+		t.Fatalf("gc start proceed=%v stderr=%q, want a silent hand-off to the drift check", proceed, startErr.String())
+	}
+}
+
+func TestDetectGCBinaryDrift(t *testing.T) {
+	cases := []struct {
+		name  string
+		local gcBinaryIdentity
+		sv    SupervisorStatus
+		want  bool
+	}{
+		{"builds equal", gcBinaryIdentity{Version: "1.5.0", BuildID: "abc1234"}, SupervisorStatus{Version: "1.5.1", BuildID: "abc1234"}, false},
+		{"builds differ", gcBinaryIdentity{Version: "1.5.0", BuildID: "abc1234"}, SupervisorStatus{Version: "1.5.0", BuildID: "def5678"}, true},
+		{"homebrew upgrade: no commits, versions differ", gcBinaryIdentity{Version: "1.5.1", BuildID: "unknown"}, SupervisorStatus{Version: "1.5.0", BuildID: "unknown"}, true},
+		{"homebrew same version", gcBinaryIdentity{Version: "v1.5.1", BuildID: "unknown"}, SupervisorStatus{Version: "1.5.1", BuildID: "unknown"}, false},
+		{"old supervisor without build_id", gcBinaryIdentity{Version: "1.5.1", BuildID: "abc1234"}, SupervisorStatus{Version: "1.3.5"}, true},
+		{"dev builds without commits", gcBinaryIdentity{Version: "dev", BuildID: "unknown"}, SupervisorStatus{Version: "dev", BuildID: "unknown"}, false},
+	}
+	for _, tc := range cases {
+		if got := detectGCBinaryDrift(tc.local, tc.sv); got != tc.want {
+			t.Errorf("%s: detectGCBinaryDrift = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// An in-place `brew upgrade` (homebrew-core builds carry no commit) must
+// auto-restart the supervisor like any other binary drift.
+func TestDecideDriftActionRestartsHomebrewInPlaceUpgrade(t *testing.T) {
+	res := decideDriftAction(
+		gcBinaryIdentity{Version: "1.5.1", BuildID: "unknown"},
+		SupervisorStatus{Version: "1.5.0", BuildID: "unknown"},
+		nil, driftFlags{})
+	if !res.Restart || !res.BinaryDrift {
+		t.Fatalf("decideDriftAction = %+v, want a binary-drift restart", res)
+	}
+	var buf bytes.Buffer
+	printDriftReport(&buf, driftReport{BinaryDrift: true, LocalBuildID: "unknown", SupervisorID: "unknown", LocalVersion: "1.5.1", SupervisorVersion: "1.5.0"})
+	if !strings.Contains(buf.String(), "binary: local=version 1.5.1 supervisor=version 1.5.0") {
+		t.Fatalf("drift report = %q, want version tokens", buf.String())
 	}
 }
