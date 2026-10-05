@@ -21,66 +21,85 @@ func TestCloseActorForOwnClaim(t *testing.T) {
 		args    []string
 		targets map[string]beads.Bead
 		env     map[string]string
-		want    string
+		// effective is the BEADS_ACTOR the bd child would run under; nil
+		// means the same value as the process env.
+		effective *string
+		want      string
 	}{
 		{
 			"own claim under the session bead id closes as that id",
 			[]string{"close", "ci-1", "--reason", "done"},
 			map[string]beads.Bead{"ci-1": held("ci-wisp-fe8")},
-			session, "ci-wisp-fe8",
+			session, nil, "ci-wisp-fe8",
 		},
 		{
 			"update to closed is a close too",
 			[]string{"update", "ci-1", "--status", "closed"},
 			map[string]beads.Bead{"ci-1": held("ci-wisp-fe8")},
-			session, "ci-wisp-fe8",
+			session, nil, "ci-wisp-fe8",
 		},
 		{
 			"a bead held by another session keeps the session's own actor",
 			[]string{"close", "ci-1"},
 			map[string]beads.Bead{"ci-1": held("ci-wisp-other")},
-			session, "",
+			session, nil, "",
 		},
 		{
 			"already the actor needs no change",
 			[]string{"close", "ci-1"},
 			map[string]beads.Bead{"ci-1": held("rig--gc__review-synthesizer-1-pool")},
-			session, "",
+			session, nil, "",
 		},
 		{
 			"unassigned bead needs no change",
 			[]string{"close", "ci-1"},
 			map[string]beads.Bead{"ci-1": held("")},
-			session, "",
+			session, nil, "",
 		},
 		{
 			"outside a session nothing changes",
 			[]string{"close", "ci-1"},
 			map[string]beads.Bead{"ci-1": held("ci-wisp-fe8")},
 			map[string]string{"BEADS_ACTOR": "human"},
-			"",
+			nil, "",
 		},
 		{
 			"an unread target leaves bd's check to decide",
 			[]string{"close", "ci-1"},
 			map[string]beads.Bead{},
-			session, "",
+			session, nil, "",
 		},
 		{
 			"targets held by two identities are not merged",
 			[]string{"close", "ci-1", "ci-2"},
 			map[string]beads.Bead{"ci-1": held("ci-wisp-fe8"), "ci-2": {ID: "ci-2", Assignee: "rig--gc__review-synthesizer-1-pool"}},
-			session, "",
+			session, nil, "",
 		},
 		{
 			"a metadata update is not a close",
 			[]string{"update", "ci-1", "--set-metadata", "gc.outcome=pass"},
 			map[string]beads.Bead{"ci-1": held("ci-wisp-fe8")},
-			session, "",
+			session, nil, "",
+		},
+		{
+			"the child's effective actor, not the process env, decides whether a change is needed",
+			[]string{"close", "ci-1"},
+			map[string]beads.Bead{"ci-1": held("rig--gc__review-synthesizer-1-pool")},
+			session, strPtr("city-default-actor"), "rig--gc__review-synthesizer-1-pool",
+		},
+		{
+			"an effective actor already matching the assignee needs no change",
+			[]string{"close", "ci-1"},
+			map[string]beads.Bead{"ci-1": held("ci-wisp-fe8")},
+			session, strPtr("ci-wisp-fe8"), "",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := closeActorForOwnClaim(tc.args, tc.targets, getenv(tc.env)); got != tc.want {
+			effective := tc.env["BEADS_ACTOR"]
+			if tc.effective != nil {
+				effective = *tc.effective
+			}
+			if got := closeActorForOwnClaim(tc.args, tc.targets, getenv(tc.env), effective); got != tc.want {
 				t.Fatalf("closeActorForOwnClaim(%v) = %q, want %q", tc.args, got, tc.want)
 			}
 		})

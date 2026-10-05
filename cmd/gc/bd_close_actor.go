@@ -23,7 +23,11 @@ var sessionCloseIdentityKeys = []string{"GC_SESSION_ID", "GC_SESSION_NAME", "GC_
 // by one identity of this session, closing under that exact identity is the
 // same principal speaking, and bd's check passes without --force. A bead held
 // by anyone else keeps the session's own actor, so bd still refuses it.
-func closeActorForOwnClaim(bdArgs []string, targets map[string]beads.Bead, getenv func(string) string) string {
+//
+// getenv reads the session's identities; effectiveActor is the BEADS_ACTOR the
+// bd child will actually run under (its command env, which can differ from the
+// process env), so the "already the actor" short-circuit judges what bd sees.
+func closeActorForOwnClaim(bdArgs []string, targets map[string]beads.Bead, getenv func(string) string, effectiveActor string) string {
 	ids, isClose := workRecordCloseTargets(bdArgs)
 	if !isClose {
 		return ""
@@ -52,7 +56,7 @@ func closeActorForOwnClaim(bdArgs []string, targets map[string]beads.Bead, geten
 		}
 		actor = assignee
 	}
-	if actor == strings.TrimSpace(getenv("BEADS_ACTOR")) {
+	if actor == strings.TrimSpace(effectiveActor) {
 		return ""
 	}
 	return actor
