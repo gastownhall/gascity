@@ -1446,12 +1446,12 @@ type BeadsConfig struct {
 	// ProxiedIdleTimeout is how long a bd-owned proxied scope's proxy and Dolt
 	// child stay up with no connections before bd retires them; the next bd
 	// command restarts them. Go duration; "0" means never. A finite value
-	// must be at least 1m. Empty uses the default. It applies to scopes gc
+	// must be at least 1m. Empty uses the default, 30m. It applies to scopes gc
 	// initializes (gc init, gc rig add, gc beads city migrate-proxied); bd
 	// cannot change an existing scope's value, and gc doctor reports drift.
 	// Overridden per rig by beads_proxied_idle_timeout and by the
 	// GC_BEADS_PROXIED_IDLE_TIMEOUT environment variable.
-	ProxiedIdleTimeout string `toml:"proxied_idle_timeout,omitempty"`
+	ProxiedIdleTimeout string `toml:"proxied_idle_timeout,omitempty" jsonschema:"default=30m"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.

@@ -137,9 +137,13 @@ The order is load-bearing. `BEADS_DOLT_AUTO_START=0` is **inert** on bd's
 proxied path — every ordinary command short-circuits into the proxied UOW
 provider (beads `cmd/bd/main.go:1758`) before auto-start policy is read — so
 **any bd read restarts the proxy and its Dolt child**, measured at ~0.6s. A
-dashboard sample, a `gc doctor`, or one straggler agent surviving the stop
-undoes it. `applyProxiedDoltEnv` therefore drops the variable for proxied
-scopes rather than projecting a promise bd does not keep.
+dashboard sample, a `gc doctor` under a running controller, or one straggler
+agent surviving the stop brings a pair back up; with a finite idle timeout it
+retires again after T to 1.5T instead of staying for good. `applyProxiedDoltEnv`
+therefore drops the variable for proxied scopes rather than projecting a
+promise bd does not keep. On a scope whose proxy already retired, `bd dolt stop`
+is a no-op that exits 0; during an idle exit's shutdown GC it kills the pair
+promptly and skips the GC.
 
 Stop is re-runnable. `bd dolt stop` is idempotent on the proxied path (exit 0,
 `stopped`/`verified` true, with or without a live proxy); on the direct path bd
@@ -165,12 +169,65 @@ hide the state of the others.
 
 ## Idle policy
 
-GC-owned proxied scopes are initialized with `--proxied-server-idle-timeout 0`
-(bd's `IdleTimeoutNever`, recorded as `"idle_timeout": -1` in the client-info
-sidecar). Both proxied targets get it: local and external alike own a *local*
-proxy plus its Dolt child, only the data upstream differs. Without it bd's
-30s default retires the pair after every quiet period and each later command
-pays a proxy-plus-Dolt cold start.
+bd's proxy retires itself and its Dolt child after an idle timeout, and the
+next bd command restarts them (about +0.5s). gc passes that timeout explicitly
+to every proxied scope it creates, from `gc init`, `gc rig add` (the Go
+initializer and both provider-script arms, which die without it) and
+`gc beads city migrate-proxied`. Both proxied targets get it: local and
+external alike own a *local* proxy plus its Dolt child, only the data upstream
+differs. Passing it is also what makes bd write the client-info sidecar the
+lifecycle reads.
+
+| knob | where | notes |
+| --- | --- | --- |
+| `[beads] proxied_idle_timeout` | city.toml | Go duration; `"0"` = never; unset = default `30m`. A finite value must be at least `1m`. A `[beads]` fragment that omits it keeps the root's value. |
+| `beads_proxied_idle_timeout` | `[[rigs]]` | Per-rig override (`RigPatch` too). Ignored, with a warning at init and in doctor, for a rig that shares the city's proxy root. |
+| `GC_BEADS_PROXIED_IDLE_TIMEOUT` | environment | Overrides both, for tests and diagnosis; may go below `1m`. gc projects the resolved value into the provider script's init env under this name. |
+
+Precedence is env > rig > city > default (`config.ProxiedIdleTimeoutFor`).
+
+**Encoding toward bd.** `0` is passed as `--proxied-server-idle-timeout 0` /
+`--idle-timeout 0`, which bd persists as `"idle_timeout": -1` (`IdleTimeoutNever`);
+a finite value is passed as a Go duration (`30m0s`) and persisted in
+nanoseconds.
+
+**Shared roots.** Whichever scope's bd spawns a proxy decides its timeout from
+its *own* sidecar (beads `uow_factory.go`). On a migrated city one proxy serves
+hq and every rig, so every scope on that root carries the city's value.
+
+**Existing scopes.** bd has no verb that changes an initialized scope's idle
+timeout (`bd init` refuses or no-ops, `bd migrate` reports "already proxied",
+`bd dolt set` has no such key), and gc never edits bd's sidecar. So the value
+applies at creation only; a scope keeps what it was created with (`-1` for
+every scope gc made before 1.5.1), and `gc doctor`'s `proxied-idle-timeout`
+check reports the drift as an advisory. gastownhall/beads#7239 asks for
+`bd dolt set idle-timeout`; with it, `gc start` can apply the configured value
+to existing scopes.
+
+**Why 30m.** bd 1.3.2's idle watcher samples open connections every `T/4`
+instead of tracking the last close, so a scope polled with short connections
+still retires every T to 1.5T. Each retirement costs a `DOLT_GC` that can stall
+the next opener for 8-12s on a loaded host (bounded only by bd's 15s open
+deadline), plus ~0.7 CPU-s for the respawn. At 30m that is ~1.6 cycles an hour
+on a busy scope; 5m measured 6-9 and 30s 46-81. In exchange every pair gc used
+to leak forever — a stray read after `gc stop`, `gc init --no-start`, `gc rig
+add` on an unstarted city — retires within 45 minutes. Revisit toward 10m once
+bd measures idle from the last close (gastownhall/beads#7240) and stops
+stalling opens behind the exit GC (gastownhall/beads#7241).
+
+**Invariant.** gc's periodic backstops must touch a quiet scope less often
+than that scope's idle timeout; anything that must react faster reacts to an
+event, not a poll. Otherwise gc decides the scope's liveness and the timeout is
+dead config. Today a running city still touches every non-suspended scope
+every ≤31s, so on a running city a finite timeout mostly bounds leaks rather
+than saving memory; suspended scopes are left untouched (see Stop semantics),
+and activity-gated backstops for quiet scopes are follow-up work
+(`engdocs/design/idle-controller-call-rate.md`, Pillar 3).
+
+The opt-in proxied-native lane admits a long-lived native open only on a
+never-idle proxy (a pool held across an idle exit is pinned to a dead
+generation), so with a finite timeout a `GC_BEADS_PROXIED_NATIVE=1` controller
+reads through bd, with verdict `idle_policy_finite`.
 
 Readiness is a single `bd ping`, with no outer retry loop: bd's provider open
 already waits up to 15s for the proxy endpoint and then up to 30s for the Dolt

@@ -242,3 +242,18 @@ func TestProxiedIdleTimeoutForScopeSharedRoot(t *testing.T) {
 		t.Fatal("a shared-root rig with no override reported an ignored override")
 	}
 }
+
+// The default is pinned: changing it changes what every new scope gets.
+func TestDefaultProxiedIdleTimeoutIsThirtyMinutes(t *testing.T) {
+	if DefaultProxiedIdleTimeout != 30*time.Minute {
+		t.Fatalf("DefaultProxiedIdleTimeout = %v, want 30m", DefaultProxiedIdleTimeout)
+	}
+	t.Setenv(ProxiedIdleTimeoutEnv, "")
+	got, err := ProxiedIdleTimeoutFor(&City{}, &Rig{Name: "r"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BdFlagValue() != "30m0s" || got.Source != ProxiedIdleTimeoutSourceDefault {
+		t.Fatalf("unset config resolves %+v (%s), want 30m0s from default", got, got.BdFlagValue())
+	}
+}

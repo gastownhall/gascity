@@ -28,6 +28,26 @@ func DefaultSidecarIdleTimeout() int {
 	return int(config.DefaultProxiedIdleTimeout)
 }
 
+// NativeLaneExpectation is the beads-store payload with
+// GC_BEADS_PROXIED_NATIVE on, for a proxied scope gc initialized at the
+// default idle timeout. On a never-idle proxy the store that serves the reads
+// is the native one (design 5.3), pinned to a generation established from
+// argv AND the birth token. On a finite one the lane refuses a long-lived open
+// with idle_policy_finite and the reads stay on bd: a pool held across an
+// idle exit would be pinned to a dead generation.
+func NativeLaneExpectation() *BeadsStoreExpectation {
+	if config.DefaultProxiedIdleTimeout <= 0 {
+		return &BeadsStoreExpectation{
+			Store: "NativeDoltStore", RequireProxiedAccount: true, RequireNoVerdict: true,
+			Evidence: "argv+birth", IdlePolicyPrefix: "never",
+		}
+	}
+	return &BeadsStoreExpectation{
+		Store: "BdStore", RequireProxiedAccount: true, Verdict: "idle_policy_finite",
+		IdlePolicyPrefix: "finite",
+	}
+}
+
 // The init topology matrix.
 //
 // Gas City supports more than one way to bring a beads scope up, and the
@@ -371,13 +391,9 @@ func BeadsTopologies() []BeadsTopology {
 	proxiedProviderStore := BeadsStoreExpectation{
 		Store: "BdStore", PreflightGate: "proxied_provider", RefuseProxiedAccount: true,
 	}
-	// And with the flag on: the store that serves the reads is the native one
-	// (design 5.3), pinned to a generation established from argv AND the birth
-	// token, on a proxy gc's own init pins resident.
-	proxiedNativeStore := &BeadsStoreExpectation{
-		Store: "NativeDoltStore", RequireProxiedAccount: true, RequireNoVerdict: true,
-		Evidence: "argv+birth", IdlePolicyPrefix: "never",
-	}
+	// And with the flag on: what the native lane does with a scope gc
+	// initialized at the default idle timeout (NativeLaneExpectation).
+	proxiedNativeStore := NativeLaneExpectation()
 	proxiedLocalScope := ScopeShape{
 		DoltMode: "proxied-server", Sidecar: true, IdleTimeout: DefaultSidecarIdleTimeout(),
 		Journaled: true, Proxies: 1, Servers: 1, Owner: OwnerProvider,

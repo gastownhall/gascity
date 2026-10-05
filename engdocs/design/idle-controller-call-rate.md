@@ -267,6 +267,17 @@ proposing any further work here:
   `gc rig list --json` path (@Cdfghglz measured a core pegged); these may not be
   covered by the dispatch/reconcile skip. Phase 0 will show whether they still
   fire for suspended rigs.
+- **Measured residual (gc 1.5.0, bd 1.3.2-rc.1).** On a running 3-rig city
+  every scope was still touched every 17-31 s, suspended rigs and every scope
+  of a `gc suspend`ed city included: 9-11 bd calls/min per rig (full cache
+  scans, order-tracking watchdogs and sweep, `beads-health` ping, gate-sweep)
+  and 82/min on the city. That keeps every bd-owned proxied scope warm and
+  makes a finite proxied idle timeout dead config on a running city. gc 1.5.1
+  makes suspension quiescence (zero bd touches on a suspended rig or city, and
+  its proxy+Dolt pair stopped on suspend) and records the invariant that
+  periodic backstops touch a quiet scope less often than its idle timeout;
+  activity-gated backstops for non-suspended quiet scopes are the follow-up.
+  See "Idle policy" in `engdocs/design/beads-proxied-local-default.md`.
 - **Cursor sanity (likely still open).** The phantom event-cursor backlog where
   a suspended, 0-issue rig reports hundreds of thousands of "pending
   `bead.updated`" events (@mmlac) — initialise/clamp cursors so a quiescent scope

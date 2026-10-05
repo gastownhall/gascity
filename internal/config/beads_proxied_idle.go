@@ -18,8 +18,15 @@ const ProxiedIdleTimeoutEnv = "GC_BEADS_PROXIED_IDLE_TIMEOUT"
 const MinProxiedIdleTimeout = time.Minute
 
 // DefaultProxiedIdleTimeout is the idle timeout a scope gets when neither the
-// city nor its rig sets one. Zero means never.
-const DefaultProxiedIdleTimeout time.Duration = 0
+// city nor its rig sets one.
+//
+// 30m bounds every pair gc would otherwise leak forever (a stray read after
+// gc stop, gc init --no-start, gc rig add on an unstarted city) to at most
+// 45 minutes, and costs a busy scope about 1.6 idle cycles an hour under
+// bd's sampled idle watcher (each one a cold start plus a shutdown GC that can
+// stall one caller for several seconds). It stays above every periodic
+// interval gc keeps for a quiet scope.
+const DefaultProxiedIdleTimeout = 30 * time.Minute
 
 // ProxiedIdleTimeoutSource names where a resolved idle timeout came from.
 type ProxiedIdleTimeoutSource string

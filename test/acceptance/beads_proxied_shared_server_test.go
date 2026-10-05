@@ -70,7 +70,7 @@ func TestBeadsProxiedIgnoresUserLevelSharedServer(t *testing.T) {
 		}
 
 		// The store is the scope's own: bd-owned proxy under <scope>/.beads/dolt.
-		assertProxiedScope(t, scope.root, scope.label)
+		assertProxiedScope(t, env, scope.root, scope.label)
 		var sidecar proxiedSidecar
 		readJSONFile(t, filepath.Join(scope.root, ".beads", "proxied_server_client_info.json"), &sidecar)
 		if sidecar.RootPath != "" && strings.HasPrefix(sidecar.RootPath, sharedDir) {
