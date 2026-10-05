@@ -139,8 +139,11 @@ const (
 	// beads release or the Dolt it qualifies. No new job, trigger or
 	// permission. Then beads-proxied-perf gains the same failure-diagnostics
 	// routing step and `if: failure()` pinned upload-artifact step as the PR
-	// acceptance jobs; no new job, trigger, permission or secret.
-	expectedNightlyExecutionHash = "4a92bdce7c7c323b4fb38f338808ec280939e7ffe2fca314d89c303a00a28a60"
+	// acceptance jobs; no new job, trigger, permission or secret. Then the
+	// tier B job fetches tag v1.5.0-rc1 (shallow, one ref) and requires the
+	// split-storage rc1 upgrade scenario to run rather than skip; no new job,
+	// trigger, permission or secret.
+	expectedNightlyExecutionHash = "ff2cf05eb0064ae1d58bd7fd2080e5cfc358c22d44e5745a7c97d637d2bec8e9"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 

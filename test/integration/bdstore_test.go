@@ -253,11 +253,9 @@ func TestBdStoreMailWispInsert(t *testing.T) {
 // shared-server config.yaml before running the exact same
 // runBDInit/configureCustomTypes/pinnedBdStoreCommandRunnerWithEnv chain.
 //
-// newIsolatedToolEnv pins env's own HOME to the REAL passwd-db home (via
-// pinRealHomeEnv/integrationEnvFor), not to any test-scoped directory —
-// gc-start/gc-supervisor-start consumers need that real pin (see
-// pinRealHomeEnv's doc comment), so t.Setenv("HOME", ...) cannot reach it.
-// This test substitutes a controlled, worst-case stand-in for "whatever the
+// newIsolatedToolEnv sets env's own HOME explicitly (via isolateGCHomeEnv/
+// integrationEnvFor), so t.Setenv("HOME", ...) cannot reach it. This test
+// substitutes a controlled, worst-case stand-in for "whatever the
 // real invoking user's real home happens to contain" (on a fleet host that
 // runs a real shared bd/dolt server out of that real home — this one does —
 // that's a real shared-server config, not a hypothetical) so the

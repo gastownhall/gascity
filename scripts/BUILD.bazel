@@ -33,6 +33,7 @@ go_test(
         "githooks_beads_chain_test.go",
         "githooks_pre_push_stdin_test.go",
         "githooks_pre_push_suite_test.go",
+        "githooks_pre_push_worker_env_test.go",
         "go_test_observable_test.go",
         "gomod_replace_guard_test.go",
         "harness_reap_test.go",
