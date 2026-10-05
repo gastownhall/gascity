@@ -67,6 +67,10 @@ if [ "$go_changed" -eq 0 ]; then
   exit 0
 fi
 
-# The Makefile and direct sharded runner share scripts/test-local-job-count as
-# their default policy. Do not shadow it here; an explicit override still wins.
-exec make test-fast-parallel
+# bazel test //... with CI's action keys (read-only cache, or remote execution
+# when any rc file names an executor: a maintainer's .bazelrc.local, an agent
+# host's ~/.bazelrc); make test-fast-parallel without bazel or with
+# GC_PREPUSH_SUITE=go. The Makefile and direct sharded runner share
+# scripts/test-local-job-count as their default policy. Do not shadow it here;
+# an explicit override still wins.
+exec "$repo_root/.githooks/lib/push-suite.sh"
