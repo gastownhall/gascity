@@ -584,7 +584,7 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	}
 
 	if supervisorRuntimeGOOS == "darwin" {
-		if handled, code := startSupervisorViaInstalledLaunchd(supervisorLaunchdPlistPath(), gcPath, stdout, stderr, jsonOut); handled {
+		if handled, code := startSupervisorViaInstalledLaunchd(supervisorStartLaunchdPlistPath(), gcPath, stdout, stderr, jsonOut); handled {
 			return code
 		}
 	}
@@ -620,6 +620,10 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	return waitForStartedSupervisor(stdout, stderr, jsonOut, "see "+logPath)
 }
 
+// supervisorStartLaunchdPlistPath locates the installed launchd plist for
+// gc supervisor start. Overridable for tests.
+var supervisorStartLaunchdPlistPath = supervisorLaunchdPlistPath
+
 // startSupervisorViaInstalledLaunchd starts the installed launchd job
 // instead of forking a detached supervisor (#6966). A forked supervisor runs
 // outside launchd's KeepAlive and inherits the caller's whole shell
@@ -627,10 +631,12 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 // provider credentials the operator kept out of the service would reach
 // every agent session.
 //
-// It returns handled=false when no plist is installed, or when the plist
-// launches a different gc binary than gcPath: starting that job would run
-// another gc installation, so the caller falls back to forking this one and
-// a warning names the fix.
+// It returns handled=false, and the caller forks this gc as before, when no
+// plist is installed; when the plist launches a different (or unparseable)
+// gc binary than gcPath, since starting that job would run another gc
+// installation; and when launchctl cannot start the job (no GUI session over
+// SSH or in CI), matching ensureSupervisorRunning's fork fallback. Each
+// fallback except the first prints a warning naming the fix.
 func startSupervisorViaInstalledLaunchd(plistPath, gcPath string, stdout, stderr io.Writer, jsonOut bool) (handled bool, code int) {
 	content, err := os.ReadFile(plistPath)
 	if err != nil {
@@ -640,7 +646,11 @@ func startSupervisorViaInstalledLaunchd(plistPath, gcPath string, stdout, stderr
 		return false, 0
 	}
 	label := supervisorLaunchdLabel()
-	if plistBinary := supervisorLaunchdPlistGCPath(string(content)); plistBinary != "" && !supervisorSameBinary(plistBinary, gcPath) {
+	plistBinary := supervisorLaunchdPlistGCPath(string(content))
+	if plistBinary == "" {
+		plistBinary = "(unreadable ProgramArguments)"
+	}
+	if !supervisorSameBinary(plistBinary, gcPath) {
 		fmt.Fprintf(stderr, "gc supervisor start: warning: launchd service %q runs %s, not this gc (%s); starting this gc outside launchd. Run '%s supervisor install --force' to make the service run this gc.\n", label, plistBinary, gcPath, shellQuotePath(gcPath)) //nolint:errcheck // best-effort stderr
 		return false, 0
 	}
@@ -648,8 +658,8 @@ func startSupervisorViaInstalledLaunchd(plistPath, gcPath string, stdout, stderr
 	// but stopped job can be unloaded safely before a clean load+kickstart.
 	_ = supervisorLaunchctlRun("unload", plistPath)
 	if err := loadAndStartSupervisorLaunchd(plistPath, label); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor start: starting launchd service %q: %v\n", label, err) //nolint:errcheck // best-effort stderr
-		return true, 1
+		fmt.Fprintf(stderr, "gc supervisor start: warning: could not start launchd service %q (%v); starting the supervisor outside launchd instead. It will not be restarted by launchd and inherits this shell's environment, including provider credentials unless %s=1 is set.\n", label, err, supervisorOmitProviderCredsEnv) //nolint:errcheck // best-effort stderr
+		return false, 0
 	}
 	return true, waitForStartedSupervisor(stdout, stderr, jsonOut, "check 'launchctl print "+supervisorLaunchdServiceTarget(label)+"' and "+supervisorLogPath())
 }

@@ -106,16 +106,69 @@ func TestStartSupervisorViaInstalledLaunchdForeignBinaryFallsBack(t *testing.T) 
 	}
 }
 
-func TestStartSupervisorViaInstalledLaunchdReportsLaunchctlFailure(t *testing.T) {
+// Without a GUI session (SSH, CI) launchctl cannot start the job; gc
+// supervisor start must fall back to the fork, as before, with a warning.
+func TestStartSupervisorViaInstalledLaunchdFallsBackWhenLaunchctlFails(t *testing.T) {
 	gcPath := fakeGCBinary(t)
 	plistPath, _ := launchdStartFixture(t, gcPath, errors.New("Load failed: 5: Input/output error"))
 
 	var stdout, stderr bytes.Buffer
-	handled, code := startSupervisorViaInstalledLaunchd(plistPath, gcPath, &stdout, &stderr, false)
-	if !handled || code != 1 {
-		t.Fatalf("handled=%v code=%d, want a reported launchctl failure", handled, code)
+	handled, _ := startSupervisorViaInstalledLaunchd(plistPath, gcPath, &stdout, &stderr, false)
+	if handled {
+		t.Fatal("handled = true after a launchctl failure, want the fork fallback")
 	}
-	if !strings.Contains(stderr.String(), "Input/output error") {
-		t.Fatalf("stderr = %q, want launchctl error", stderr.String())
+	for _, want := range []string{"Input/output error", "starting the supervisor outside launchd instead", supervisorOmitProviderCredsEnv} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr missing %q:\n%s", want, stderr.String())
+		}
+	}
+}
+
+func TestStartSupervisorViaInstalledLaunchdUnparseablePlistFallsBack(t *testing.T) {
+	_, calls := launchdStartFixture(t, "/unused/gc", nil)
+	plistPath := filepath.Join(t.TempDir(), "broken.plist")
+	if err := os.WriteFile(plistPath, []byte("<plist><dict></dict></plist>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	handled, _ := startSupervisorViaInstalledLaunchd(plistPath, fakeGCBinary(t), &stdout, &stderr, false)
+	if handled || len(*calls) != 0 {
+		t.Fatalf("handled=%v calls=%v, want an unparseable plist treated as foreign", handled, *calls)
+	}
+	if !strings.Contains(stderr.String(), "(unreadable ProgramArguments)") {
+		t.Fatalf("stderr = %q, want unparseable-plist warning", stderr.String())
+	}
+}
+
+// Covers the macOS wiring in gc supervisor start: with this binary's plist
+// installed, it starts the launchd job and never forks.
+func TestDoSupervisorStartOnDarwinStartsInstalledLaunchdJob(t *testing.T) {
+	pinRealHome(t)
+	t.Setenv("GC_HOME", shortTempDir(t, "gc-home-"))
+	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t, "gc-run-"))
+	t.Setenv(supervisorSystemdUnitEnv, "")
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plistPath, calls := launchdStartFixture(t, self, nil)
+	oldGOOS, oldPlist := supervisorRuntimeGOOS, supervisorStartLaunchdPlistPath
+	t.Cleanup(func() { supervisorRuntimeGOOS, supervisorStartLaunchdPlistPath = oldGOOS, oldPlist })
+	supervisorRuntimeGOOS = "darwin"
+	supervisorStartLaunchdPlistPath = func() string { return plistPath }
+
+	var stdout, stderr bytes.Buffer
+	if code := doSupervisorStart(&stdout, &stderr); code != 0 {
+		t.Fatalf("doSupervisorStart = %d; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(strings.Join(*calls, "\n"), "kickstart -p gui/") {
+		t.Fatalf("launchctl calls = %v, want the installed job kickstarted", *calls)
+	}
+	if !strings.Contains(stdout.String(), "Supervisor started (PID 4321)") {
+		t.Fatalf("stdout = %q, want started message from the launchd job", stdout.String())
+	}
+	if strings.Contains(stderr.String(), "outside launchd") {
+		t.Fatalf("supervisor was forked outside launchd:\n%s", stderr.String())
 	}
 }
