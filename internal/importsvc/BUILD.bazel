@@ -43,6 +43,7 @@ go_test(
         "//internal/packman",
         "//internal/packregistry",
         "//internal/testenv",
+        "//internal/testutil",
     ],
 )
 

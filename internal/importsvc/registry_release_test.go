@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/packregistry"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 const realRegistryFixture = "testdata/gascity-packs-registry.toml"
@@ -49,13 +49,7 @@ func absFixture(t *testing.T, rel string) string {
 
 func runFixtureGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", append([]string{"-c", "user.email=test@example.com", "-c", "user.name=Test", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"}, args...)...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s: %s: %v", strings.Join(args, " "), out, err)
-	}
-	return strings.TrimSpace(string(out))
+	return testutil.RunGit(t, dir, append([]string{"-c", "user.email=test@example.com", "-c", "user.name=Test", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"}, args...)...)
 }
 
 func writeTree(t *testing.T, root, rel, body string, mode os.FileMode) {

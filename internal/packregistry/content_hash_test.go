@@ -122,12 +122,9 @@ func TestPackDirContentHashMatchesGitTreeHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PackContentHash: %v", err)
 	}
-	// Copy the tracked pack out of the repository so no .git is reachable,
-	// exactly as a synthetic cache presents it.
-	plain := filepath.Join(t.TempDir(), "demo")
-	if out, err := exec.Command("cp", "-a", filepath.Join(repo, "packs", "demo"), plain).CombinedOutput(); err != nil {
-		t.Fatalf("cp: %s: %v", out, err)
-	}
+	// The pack directory itself holds no .git (that sits at the repository
+	// root), so it presents exactly as a synthetic cache does.
+	plain := filepath.Join(repo, "packs", "demo")
 	got, err := PackDirContentHash(plain)
 	if err != nil {
 		t.Fatalf("PackDirContentHash: %v", err)
