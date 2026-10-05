@@ -223,27 +223,24 @@ func TestCmdSlingRemote_ForwardsMetadataFlags(t *testing.T) {
 	}
 }
 
-// TestCmdSlingRemote_ForwardsOn proves --on forwards to the server as the
-// API's formula + attached_bead_id pair. It was refused while the server
-// attached the wisp to a convoy container instead of each child; POST /sling now
-// goes through the same sling.(*Sling).Dispatch as the local CLI, so a convoy is
-// expanded per child on both sides.
-func TestCmdSlingRemote_ForwardsOn(t *testing.T) {
-	srv, gotBody := newCannedSlingServer(t, `{"status":"slung","target":"mayor","formula":"review","attached_bead_id":"BL-3","mode":"attached"}`)
+// TestCmdSlingRemote_RefusesOn proves --on stays refused for a remote city in
+// the 1.5.x line. The server now expands a convoy per child on the attach path
+// too, but forwarding --on is a separate behavior change kept out of the patch
+// release; the refusal must not contact the server.
+func TestCmdSlingRemote_RefusesOn(t *testing.T) {
+	srv, gotBody := newCannedSlingServer(t, `{"status":"slung","target":"mayor"}`)
 
 	var out, errb bytes.Buffer
 	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"mayor", "BL-3"},
 		false, false, false, "", nil, "", false, false, false, "review" /*onFormula*/, false, false, false, "", "", false, &out, &errb)
-	if code != 0 {
-		t.Fatalf("exit %d; stderr=%q", code, errb.String())
+	if code != 1 {
+		t.Fatalf("exit %d, want 1 (--on refused); stderr=%q", code, errb.String())
 	}
-	for _, want := range []string{`"formula":"review"`, `"attached_bead_id":"BL-3"`} {
-		if !strings.Contains(*gotBody, want) {
-			t.Errorf("body %q missing %q", *gotBody, want)
-		}
+	if !strings.Contains(errb.String(), "--on") {
+		t.Fatalf("stderr = %q, want --on refusal", errb.String())
 	}
-	if strings.Contains(*gotBody, `"bead":`) {
-		t.Errorf("body %q carries bead alongside attached_bead_id; the API treats them as mutually exclusive", *gotBody)
+	if *gotBody != "" {
+		t.Fatalf("server received %q; a refused --on must not reach the server", *gotBody)
 	}
 }
 

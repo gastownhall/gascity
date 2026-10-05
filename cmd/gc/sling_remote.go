@@ -11,11 +11,11 @@ import (
 
 // cmdSlingRemote routes a sling mutation to a REMOTE city over the control
 // plane. The remote server does all config and store resolution, so this
-// forwards the raw sling parameters (target, bead-or-formula, --on, vars,
-// scope, force, title) and renders the result. Modes that require local state
-// are refused with a clear message: inline text (needs a locally-created bead),
-// the 1-arg form (infers the target from local rig config), and the
-// --dry-run/--nudge flags the server API does not model.
+// forwards the raw sling parameters (target, bead-or-formula, vars, scope,
+// force, title) and renders the result. Modes that require local state or are
+// not forwarded are refused with a clear message: inline text (needs a
+// locally-created bead), the 1-arg form (infers the target from local rig
+// config), --on, and the --dry-run/--nudge flags the server API does not model.
 func cmdSlingRemote(c *api.Client, target *remoteTarget, args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, jsonOutput bool, stdout, stderr io.Writer) int {
 	fail := func(code, message string) int {
 		if jsonOutput {
@@ -31,13 +31,16 @@ func cmdSlingRemote(c *api.Client, target *remoteTarget, args []string, isFormul
 	if dryRun {
 		return fail("unsupported_remote", "gc sling: --dry-run is not supported for a remote city")
 	}
-	// --nudge stays refused for a remote city: it needs server-side delivery
-	// wiring. --on and the metadata flags (--merge/--no-convoy/--owned/
-	// --no-formula) are server-expressible and forwarded below; the server runs
-	// the same sling.(*Sling).Dispatch as the local path, so --on on a convoy is
-	// attached per child on both sides.
+	// --nudge and --on stay refused for a remote city. --nudge needs server-side
+	// delivery wiring. --on is not forwarded in the 1.5.x line: forwarding it is
+	// a behavior change kept out of the patch release. The metadata flags
+	// (--merge/--no-convoy/--owned/--no-formula) are server-expressible and
+	// forwarded below.
 	if doNudge {
 		return fail("unsupported_remote", "gc sling: --nudge delivery for a remote city lands separately; sling without --nudge")
+	}
+	if onFormula != "" {
+		return fail("unsupported_remote", "gc sling: --on is not supported for a remote city; attach the formula from the local city, or sling the bead without --on")
 	}
 
 	// A remote city cannot infer the default target from local rig config, so an
@@ -71,14 +74,9 @@ func cmdSlingRemote(c *api.Client, target *remoteTarget, args []string, isFormul
 		Owned:     owned,
 		NoFormula: noFormula,
 	}
-	switch {
-	case isFormula:
+	if isFormula {
 		req.Formula = args[1]
-	case onFormula != "":
-		// The API spells `--on <formula> <bead>` as formula + attached_bead_id.
-		req.Formula = onFormula
-		req.AttachedBeadID = args[1]
-	default:
+	} else {
 		req.Bead = args[1]
 	}
 
