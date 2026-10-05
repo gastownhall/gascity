@@ -4541,6 +4541,45 @@ func TestDoSupervisorStartIsolatedHomeRequiresGCHome(t *testing.T) {
 	}
 }
 
+// The opt-in admits a bare start beside a GC_HOME of the run's own: the
+// HOME override no longer blocks `gc supervisor start`.
+func TestBareSupervisorHomeOverrideErrorAdmitsIsolatedGCHome(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv(supervisorIsolatedHomeEnv, "1")
+
+	if msg, blocked := bareSupervisorHomeOverrideError(); blocked {
+		t.Fatalf("bareSupervisorHomeOverrideError() blocked = true (%q), want an isolated run admitted", msg)
+	}
+}
+
+// GC_HOME naming the operator's default ~/.gc is not isolation: under the
+// throwaway HOME, gc would resolve its lock and socket under that ~/.gc rather
+// than $XDG_RUNTIME_DIR/gc, miss the operator's running supervisor, and start
+// a second one over the same cities.toml registry.
+func TestBareSupervisorHomeOverrideErrorRejectsHostDefaultGCHome(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	lookup, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", filepath.Join(lookup.HomeDir, ".gc"))
+	t.Setenv(supervisorIsolatedHomeEnv, "1")
+
+	if supervisorIsolatedHome() {
+		t.Fatal("supervisorIsolatedHome() = true with GC_HOME at the operator's default ~/.gc, want false")
+	}
+	msg, blocked := bareSupervisorHomeOverrideError()
+	if !blocked {
+		t.Fatal("bareSupervisorHomeOverrideError() blocked = false with GC_HOME at the operator's default ~/.gc, want true")
+	}
+	if !strings.Contains(msg, "Keep HOME unchanged and use GC_HOME for isolated runs") {
+		t.Fatalf("msg = %q, want HOME override guidance", msg)
+	}
+}
+
 func TestWaitForSupervisorReadyUsesHookedTimeout(t *testing.T) {
 	oldAlive := supervisorAliveHook
 	oldTimeout := supervisorReadyTimeout

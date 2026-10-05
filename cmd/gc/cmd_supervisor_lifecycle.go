@@ -26,6 +26,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/execenv"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/searchpath"
@@ -816,9 +817,24 @@ const supervisorIsolatedHomeEnv = "GC_SUPERVISOR_ISOLATED_HOME"
 
 // supervisorIsolatedHome reports whether this run opted into a bare
 // supervisor under an overridden HOME: GC_SUPERVISOR_ISOLATED_HOME=1 with an
-// explicit GC_HOME holding the supervisor's state.
+// explicit GC_HOME holding the supervisor's state. A GC_HOME naming the
+// operator's default ~/.gc does not qualify: under the overridden HOME gc
+// would put its lock and socket there instead of $XDG_RUNTIME_DIR/gc, miss the
+// operator's running supervisor, and start a second one over the same
+// registry.
 func supervisorIsolatedHome() bool {
-	return os.Getenv(supervisorIsolatedHomeEnv) == "1" && strings.TrimSpace(os.Getenv("GC_HOME")) != ""
+	if os.Getenv(supervisorIsolatedHomeEnv) != "1" {
+		return false
+	}
+	gcHome := strings.TrimSpace(os.Getenv("GC_HOME"))
+	if gcHome == "" {
+		return false
+	}
+	lookup, err := osuser.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil || strings.TrimSpace(lookup.HomeDir) == "" {
+		return false
+	}
+	return pathutil.NormalizePathForCompare(gcHome) != pathutil.NormalizePathForCompare(filepath.Join(lookup.HomeDir, ".gc"))
 }
 
 // bareSupervisorHomeOverrideError is platformSupervisorHomeOverrideError for a
