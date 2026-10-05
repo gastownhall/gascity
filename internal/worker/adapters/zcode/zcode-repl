@@ -59,6 +59,8 @@ readonly BUSY="zcode-repl turn in flight (C-c to interrupt)"
 readonly GUARD_TOKEN="zcode-repl "
 readonly MAX_CONSECUTIVE_FAILURES=5
 readonly DRAIN_TIMEOUT=1
+# How often an idle adapter wakes from its input wait so a pending trap runs.
+readonly IDLE_WAKE_SECS=1
 # Every read below passes -n, which is what keeps bash on its unbuffered,
 # byte-at-a-time reader for a tty and a pipe alike. Without it bash reads a line
 # through a 128-byte static buffer (zreadc) and pushes the remainder back with
@@ -318,7 +320,9 @@ if [[ -r "$sid_path" ]]; then
 fi
 
 workdir="$(mktemp -d)"
+# Saved here, before the signal traps are armed; see the note at the traps.
 stty_saved=""
+if [[ -t 0 ]]; then stty_saved="$(stty -g 2>/dev/null || true)"; fi
 turn_pid=""
 heartbeat_pid=""
 
@@ -398,6 +402,14 @@ cleanup() {
 # interrupt the *turn*: stop the turn, let the rc!=0 branch report it, and keep
 # looping with the sid intact. Exiting here would kill the pane on every
 # interrupt.
+#
+# From here on, no code may expand a command or process substitution, $(<file)
+# included: read files with the read builtin instead. On bash 5.2 a trapped
+# signal that lands while bash is expanding a substitution runs the trap inside
+# that expansion. The trap text then fails to parse ("trap: line 2: unexpected
+# EOF while looking for matching `)'"), so `exit 0` never runs, and the shell
+# exits 1 or wedges for good. TestNoSubstitutionsWhileSignalTrapsAreArmed
+# enforces this.
 interrupted=0
 trap 'cleanup; exit 0' TERM
 trap 'interrupted=1; stop_turn' INT
@@ -408,7 +420,6 @@ trap cleanup EXIT
 # pasted body out of the pane (the adapter's own output stays the pane's only
 # content).
 if [[ -t 0 ]]; then
-    stty_saved="$(stty -g 2>/dev/null || true)"
     stty -icanon -echo min 1 time 0 2>/dev/null || true
 fi
 
@@ -730,9 +741,14 @@ run_turn() {
 }
 
 report_stderr() {
-    if [[ -s "$turn_err" ]]; then
-        printf 'zcode-repl stderr: %s\n' "$(tr '\n' ' ' <"$turn_err" | cut -c1-300)"
-    fi
+    [[ -s "$turn_err" ]] || return 0
+    # Read only the excerpt (-n 300). Folding the newlines of the whole file
+    # instead is quadratic in bash: a 1 MiB stderr took 14 s in a UTF-8
+    # locale, with the TERM trap deferred until it finished.
+    local err=
+    IFS= read -r -d '' -n 300 err <"$turn_err"
+    err="${err//$'\n'/ }"
+    printf 'zcode-repl stderr: %s\n' "${err:0:300}"
 }
 
 report_failure() {
@@ -757,8 +773,31 @@ while :; do
     # Cleared before every read: bash 3.2 returns from a signal-interrupted
     # read without touching the variable, so a stale value would be re-run.
     line=
-    IFS= read -r -n "$MAX_LINE_BYTES" line
-    read_rc=$?
+    # Wait for the first byte on a timer, then read the rest of the line
+    # blocking. bash runs a trap only between commands or when a blocking read
+    # returns. A signal that lands after bash last checked for traps, but
+    # before read() blocks, leaves its trap pending until input arrives, and
+    # for an idle pane that is never: TERM would not end the session (seen in
+    # TestInterruptedTurnClosesTheMirrorEntry under load). Waking every
+    # IDLE_WAKE_SECS lets bash run any pending trap.
+    #
+    # A timed-out one-byte read can still hand back a byte: bash 5.2 checks the
+    # timer again after storing the byte it read, so a byte that lands as the
+    # timer expires returns with the timeout status and the byte in the
+    # variable. That byte is input, not a timeout.
+    while :; do
+        IFS= read -r -n 1 -t "$IDLE_WAKE_SECS" line
+        read_rc=$?
+        if (( read_rc > 128 && ! interrupted )) && [[ -n "$line" ]]; then read_rc=0; fi
+        if (( read_rc > 128 && ! interrupted )); then continue; fi
+        break
+    done
+    if (( read_rc == 0 )) && [[ -n "$line" ]]; then
+        rest=
+        IFS= read -r -n "$MAX_LINE_BYTES" rest
+        read_rc=$?
+        line+="$rest"
+    fi
     if (( read_rc != 0 )); then
         # An INT is an interrupt, not end of input. A trapped INT reaches a
         # failed read in more than one shape: it can abort the read outright
@@ -904,7 +943,8 @@ while :; do
         consecutive_failures=0
         sid_unvalidated=0
         if [[ -s "$sid_out" ]]; then
-            sid="$(<"$sid_out")"
+            sid=
+            IFS= read -r sid <"$sid_out"
             printf '%s\n' "$sid" >"$sid_path"
         fi
     else
