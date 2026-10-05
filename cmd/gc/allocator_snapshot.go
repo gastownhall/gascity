@@ -9,8 +9,8 @@ import (
 // The allocator's selection snapshot (CONTRACT §2, P3 spec §4.5): the
 // immutable decision of one allocator pass, which session keys read. This
 // slice computes desire, plans, bindings and identity verdicts; grants, start
-// ranks, dependency views and the budget view are P3-5b's, and SelGen,
-// publication and the diff enqueue are P3-7's.
+// ranks and the diff enqueue are P3-5b's, and SelGen and publication are
+// P3-7's.
 
 // allocMode is the snapshot's mode (C2.1, C2.8, #41).
 type allocMode uint8
@@ -152,6 +152,9 @@ type selectionEntry struct {
 	// Liveness is the row's runtime as I3 reads it; P3-5b ranks only start
 	// candidates (absent, absent-unconfirmed, dead).
 	Liveness rowLiveness
+	// Start is a ranked start candidate's place in the start order and its
+	// grant (C2.7, C5.9); nil for an entry that is not an eligible candidate.
+	Start *startView
 	// Binding is the work a row that is not alive is bound to at start
 	// (AM2); live rows never carry one.
 	Binding *bindingTarget
@@ -161,6 +164,13 @@ type selectionEntry struct {
 	Endpoint             endpointKey
 	ObservationUncertain bool
 	Identity             *identityView
+}
+
+// startView is an eligible start candidate's rank, published with or
+// without a grant, and the grant ID it holds, if any (C2.7, C5.9).
+type startView struct {
+	Rank  int
+	Grant string
 }
 
 // rowBasis is the row incarnation the pass saw.
@@ -267,9 +277,9 @@ func (k createKind) String() string {
 }
 
 // allocPlan is one fresh row the pass would create. It is data only: P3-5b
-// admits plans in fair-share order (named plans first),
-// reserves their create entries and hands P3-6 the pool and dependency kinds
-// as createPlanOf(entryID, Template, Plan); the named kind waits for P3-6b.
+// admits named plans first, then the rest in fair-share order, reserves
+// their create entries and hands P3-6 the pool and dependency kinds as
+// createPlanOf(entryID, Template, Plan) and the named kind with Named set.
 type allocPlan struct {
 	Kind     createKind
 	Template string

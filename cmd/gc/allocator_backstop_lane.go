@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -12,90 +13,140 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// The demand backstop lane (design §4a's periodic per-store demand backstop,
-// CONTRACT C0.4 as amended by AM6). The v2 allocator's pass does no backing
-// I/O, but a leg whose cache is not exact (bd ledgers, native Dolt, Postgres)
-// cannot answer demand from its cache: bd folds blocked work into "open"
-// (EB-42o8), and out-of-process bd writes reach the cache only at its re-scan.
-// So this lane runs legacy's own live reads of those legs, off the pass, and
-// publishes them as a recording that v2DemandReads and the allocator's
-// session census serve from.
+// The external-reads lane (CONTRACT C0.4 as amended by C4). The v2
+// allocator's pass does no live I/O, but a leg its cache cannot feed (bd
+// ledgers, native Dolt, Postgres) cannot answer demand from that cache: bd
+// folds blocked work into "open" (EB-42o8), and out-of-process bd writes
+// reach the cache only at its re-scan. So this one lane runs every live or
+// slow read the allocator needs, off the pass, and publishes the results as
+// one recording that v2DemandReads, the session census and the decide's
+// scale_check input serve from.
 //
-// A pass reads, concurrently, every non-exact leg in any demand leg set (the
-// work census, the default-probe target stores) through legacyDemandReads,
-// every non-exact session census leg through the session front door's live
-// ListAll, as legacy's census reads it (collectOpenSessionInfos), and, when
-// the config has an on_demand named session, the city store's closed
-// named-session index on any leg, since no cache holds closed history. It
-// publishes the recording, stamped when its reads ended and fresh until an
-// expiry derived from the lane's cadence, and wakes the allocator when its
-// content changed or it replaces an expired recording. The allocator's
-// session census serves those legs through sessionLeg, and so takes the same
-// expiry.
+// A pass reads its sources concurrently, each in its own goroutine, at most
+// one read in flight per source: every lane-fed leg in any demand leg set
+// (the work census, the default-probe target stores) through
+// legacyDemandReads; every lane-fed session census leg through the session
+// front door's live ListAll, as legacy's census reads it
+// (collectOpenSessionInfos); when the config has an on_demand named session,
+// the city store's closed named-session index on any leg, since no cache
+// holds closed history; and the custom scale_check commands (I5).
 //
-// Legacy's demand-pass repair writes (POOL-019/020) run on their own paced
-// goroutine, at most once per backstopRepairInterval, in legacy order over
-// every leg, so they never delay a recording. Those writes run only under
-// v2; legacy keeps them in its tick, so the two never both run. The lane
-// writes work beads through those repairs and nothing else. Every recording
-// carries the scope gaps of the latest repair run with that run's sequence
-// number, so a consumer emits each run's gaps once.
+// The source deadline bounds only how long a pass waits before it publishes;
+// it never decides whether a read counts. Each read stores its result when it
+// ends, whenever that is, stamped when it started (C5.4(3)) and ended. A pass
+// publishes, for each source it reads, the latest ended result, which stays
+// fresh for 3 × patrol from its own end; a read still in flight at publish is
+// marked on that result (InFlightSince), and a read that ends after its pass
+// published wakes the lane, whose next pass publishes it. Only a source with
+// no result yet whose read has outlived its budget publishes
+// errSourceTimeout. A leg turns partial only when its result goes stale or
+// failed. The lane wakes the allocator when a publish changes content or
+// turns a stale source fresh.
 //
-// While the city is suspended neither goroutine reads or writes, as legacy's
+// After publishing, the pass starts its due steps, each on its own goroutine
+// under a deadline, one run in flight per step, counted by the gate, so a
+// slow step never delays the reads. The one step today is legacy's
+// demand-pass repairs (POOL-019/020), at most once a minute from the end of
+// the last run, in legacy order over every leg: the session stamp, the
+// control-dispatcher route repair (which emits control.dispatcher_scope_gap
+// itself), and the four migration repairs. The four stay in the lane by owner
+// decision (2026-10-05): ops step G′'s counts were never taken, and the doctor
+// --fix move is re-measured after cutover. Those writes run only under v2;
+// legacy keeps them in its tick, so the two never both run. P3-9 and P4.1d
+// add their steps here.
+//
+// While the city is suspended a pass neither reads nor writes, as legacy's
 // demand pass returns before any of it (POOL-001); the last recording stays
-// published and expires.
+// published and ages out.
 //
-// The recording goroutine is paced at the patrol interval and woken by
-// key-less socket and API pokes (a CLI writer such as gc sling pokes
-// key-less), a supervisor reload, a store swap after the barrier, a resume,
-// and the allocator when a recording has expired.
+// The lane is paced at the patrol interval and woken by key-less socket and
+// API pokes (a CLI writer such as gc sling pokes key-less), a supervisor
+// reload, a store swap after the barrier, a resume, a create that wrote a row
+// on a lane-fed leg, and a read that ended after its pass published.
 //
-// Unwired in this slice: P3-7 starts it and wires its wakes.
+// Unwired in this slice: P3-7 starts it, sets its gate, wires its wakes and
+// joins it before closing the stores.
 
 const (
-	// backstopLaneMinGap is the least idle time between two woken passes, so
-	// a burst of CLI pokes costs one pass.
-	backstopLaneMinGap = 2 * time.Second
-	// backstopRepairInterval is the least idle time between two repair runs.
-	backstopRepairInterval = time.Minute
-	// backstopPassWindow is how many recent pass durations a recording's
-	// expiry takes its maximum over. The maximum is capped at cacheLagBound,
-	// so one slow pass cannot keep a dead lane's recordings fresh for its
-	// own length.
-	backstopPassWindow = 8
-	// backstopSafeTickTrigger and backstopRepairSafeTickTrigger name the
-	// lane's goroutines in safeTick panic lines.
-	backstopSafeTickTrigger       = "v2-demand-backstop"
-	backstopRepairSafeTickTrigger = "v2-demand-backstop-repairs"
+	// externalReadsMinGap is the least idle time between two woken passes,
+	// so a burst of CLI pokes costs one pass.
+	externalReadsMinGap = 2 * time.Second
+	// externalReadsSourceDeadline is how long a pass waits for its reads
+	// before it publishes, and a store source's budget.
+	externalReadsSourceDeadline = 10 * time.Second
+	// externalReadsRepairInterval is the least time between the end of one
+	// run of the demand repairs step and the start of the next.
+	externalReadsRepairInterval = time.Minute
+	// externalReadsStepDeadline bounds each step run. Steps write, so they
+	// stop at their own checkpoints.
+	externalReadsStepDeadline = time.Minute
+	// externalReadsFreshPatrols is how many patrol intervals a source result
+	// stays fresh after its read ended.
+	externalReadsFreshPatrols = 3
+	// externalReadsSafeTickTrigger names the lane in safeTick panic lines.
+	externalReadsSafeTickTrigger = "v2-external-reads"
 )
 
-// backstopRecording is one pass's live reads of the non-exact legs, keyed by
-// the store behind the policy front door (demandLabelKey): demand reads in
-// Legs, session census reads in Sessions, the closed named-session index in
-// ClosedNamed. Immutable once published: readers copy before editing a row.
-type backstopRecording struct {
-	Seq uint64
-	// StartedAt is when the pass's reads started (C5.4(3)), and At when
-	// they ended. The recording is fresh through
-	// Expires: At plus twice the lane interval plus the longest recent pass
-	// (at most cacheLagBound), so a lane keeping its cadence never serves a
-	// stale recording.
-	StartedAt time.Time
-	At        time.Time
-	Expires   time.Time
+// errSourceTimeout is a source's result when it has none yet and its first
+// read has outlived its budget.
+var errSourceTimeout = errors.New("external reads: source read exceeded its deadline")
 
-	Legs        map[beads.Store]legRecording
-	Sessions    map[beads.Store]sessionLegRecording
-	ClosedNamed map[beads.Store]closedNamedRecording
-	// ScopeGaps are the control-dispatcher scope gaps the latest repair run
-	// found, for P3-7 to emit, and RepairSeq numbers that run (0 before the
-	// first). Successive recordings repeat a run's gaps under the same
-	// RepairSeq. Neither is content: no demand reads them.
-	ScopeGaps []ControlDispatcherScopeGap
-	RepairSeq uint64
+// sourceKind names what a source reads.
+type sourceKind int
+
+const (
+	sourceDemand      sourceKind = iota // sourcePayload.Leg
+	sourceSessions                      // sourcePayload.Sessions
+	sourceClosedNamed                   // sourcePayload.ClosedNamed
+	sourceScaleCheck                    // sourcePayload.ScaleCheck
+)
+
+// sourceKey names one source: its kind and the store behind the policy front
+// door (demandLabelKey), or for the scale_check source the config it runs, so
+// a run of an older config is never published.
+type sourceKey struct {
+	kind  sourceKind
+	store beads.Store
+	cfg   *config.City
+}
+
+func keyOf(kind sourceKind, store beads.Store) sourceKey {
+	if store != nil {
+		store = demandLabelKey(store)
+	}
+	return sourceKey{kind: kind, store: store}
+}
+
+// sourcePayload is what a source read: only its kind's field is set.
+type sourcePayload struct {
+	Leg         legRecording
+	Sessions    []session.Info
+	ClosedNamed session.ClosedNamedSessionBeadIndex
+	ScaleCheck  *scaleCheckResult
+}
+
+// sourceResult is one source's latest ended read: when it started (C5.4(3))
+// and ended, its error, and what it read, which a failed read keeps when the
+// reader returned rows with its error. InFlightSince, set only on a published
+// copy, is when the source's next read started, still running at publish.
+type sourceResult struct {
+	StartedAt     time.Time
+	EndedAt       time.Time
+	InFlightSince time.Time
+	Err           error
+	sourcePayload
+}
+
+// externalReadsRecording is one pass's source results. Immutable once
+// published: readers copy before editing a row.
+type externalReadsRecording struct {
+	Seq      uint64
+	FreshFor time.Duration
+	Sources  map[sourceKey]sourceResult
 }
 
 // legRecording is one leg's legacy live reads, each with its own error so a
@@ -107,97 +158,104 @@ type legRecording struct {
 	ReadyAllErr error
 }
 
-// sessionLegRecording is one session census leg's legacy live read, as
-// ListAll returns it: all of a clean read, what a partial result returned,
-// nothing of a hard failure.
-type sessionLegRecording struct {
-	Rows []session.Info
-	Err  error
+func (r *externalReadsRecording) source(key sourceKey) (sourceResult, bool) {
+	if r == nil {
+		return sourceResult{}, false
+	}
+	s, ok := r.Sources[key]
+	return s, ok
 }
 
-// closedNamedRecording is legacy's closed named-session index read, as
-// BuildClosedNamedSessionBeadIndex returns it.
-type closedNamedRecording struct {
-	Index session.ClosedNamedSessionBeadIndex
-	Err   error
+// fresh reports whether s may be served at now.
+func (r *externalReadsRecording) fresh(s sourceResult, now time.Time) bool {
+	return r != nil && !now.After(s.EndedAt.Add(r.FreshFor))
 }
 
-// backstopRepairRun is one repair run's scope gaps and its sequence number.
-type backstopRepairRun struct {
-	seq  uint64
-	gaps []ControlDispatcherScopeGap
-}
-
-// fresh reports whether the recording may be served at now. A nil recording
-// is never fresh.
-func (r *backstopRecording) fresh(now time.Time) bool {
-	return r != nil && !now.After(r.Expires)
+// lookup returns the result of store's kind source, or
+// errDemandRecordingMissing when the recording holds none and
+// errDemandRecordingStale when it is no longer fresh at now.
+func (r *externalReadsRecording) lookup(kind sourceKind, store beads.Store, now time.Time) (sourceResult, error) {
+	s, ok := r.source(keyOf(kind, store))
+	switch {
+	case !ok:
+		return sourceResult{}, errDemandRecordingMissing
+	case !r.fresh(s, now):
+		return sourceResult{}, errDemandRecordingStale
+	}
+	return s, nil
 }
 
 // sessionLeg returns store's recorded session census read, as the census
 // reads it (censusLegFeed.recorded). A non-nil Err makes the leg partial: a
 // beads.PartialResultError when Rows holds what a partial read returned, any
 // other error when Rows is empty. ok is false for a leg the recording does
-// not hold: an exact leg, or any leg before the first pass.
-func (r *backstopRecording) sessionLeg(store beads.Store) (censusRecording, bool) {
-	if r == nil {
-		return censusRecording{}, false
-	}
-	l, ok := r.Sessions[demandLabelKey(store)]
+// not hold: a cache-fed leg, or any leg before the first pass.
+func (r *externalReadsRecording) sessionLeg(store beads.Store) (censusRecording, bool) {
+	s, ok := r.source(keyOf(sourceSessions, store))
 	if !ok {
 		return censusRecording{}, false
 	}
-	return censusRecording{Rows: l.Rows, StartedAt: r.StartedAt, At: r.At, Expires: r.Expires, Err: l.Err}, true
+	return censusRecording{Rows: s.Sessions, StartedAt: s.StartedAt, At: s.EndedAt, Expires: s.EndedAt.Add(r.FreshFor), Err: s.Err}, true
 }
 
-// leg returns store's recorded demand reads. A nil recording holds no leg.
-func (r *backstopRecording) leg(store beads.Store) (legRecording, bool) {
+// scaleCheck returns the scale_check result, or nil when there is none, the
+// run failed, or it is stale at now, so every custom template reads partial
+// (scaleCheckResult.partial).
+func (r *externalReadsRecording) scaleCheck(now time.Time) *scaleCheckResult {
 	if r == nil {
-		return legRecording{}, false
+		return nil
 	}
-	l, ok := r.Legs[demandLabelKey(store)]
-	return l, ok
+	for key, s := range r.Sources {
+		if key.kind == sourceScaleCheck && s.Err == nil && r.fresh(s, now) {
+			return s.ScaleCheck
+		}
+	}
+	return nil
 }
 
-// closedNamed returns store's recorded closed named-session index.
-func (r *backstopRecording) closedNamed(store beads.Store) (closedNamedRecording, bool) {
+// failing reports whether a kind source r publishes holds a failed read.
+func (r *externalReadsRecording) failing(kind sourceKind) bool {
 	if r == nil {
-		return closedNamedRecording{}, false
+		return false
 	}
-	l, ok := r.ClosedNamed[demandLabelKey(store)]
-	return l, ok
+	for key, s := range r.Sources {
+		if key.kind == kind && (s.Err != nil || s.Leg.RawOpenErr != nil || s.Leg.ReadyAllErr != nil) {
+			return true
+		}
+	}
+	return false
 }
 
-// sameContent reports whether r and o recorded the same legs, rows, indexes
-// and errors. Seq, StartedAt, At, Expires, ScopeGaps and RepairSeq are not
-// content.
-func (r *backstopRecording) sameContent(o *backstopRecording) bool {
+// sameContent reports whether r and o hold the same sources with the same
+// payloads and errors. Seq and the read times are not content.
+func (r *externalReadsRecording) sameContent(o *externalReadsRecording) bool {
 	if r == nil || o == nil {
 		return r == o
 	}
-	if len(r.Legs) != len(o.Legs) || len(r.Sessions) != len(o.Sessions) || len(r.ClosedNamed) != len(o.ClosedNamed) {
+	if len(r.Sources) != len(o.Sources) {
 		return false
 	}
-	for store, a := range r.Legs {
-		b, ok := o.Legs[store]
-		if !ok || errorText(a.RawOpenErr) != errorText(b.RawOpenErr) || errorText(a.ReadyAllErr) != errorText(b.ReadyAllErr) ||
-			!reflect.DeepEqual(a.RawOpen, b.RawOpen) || !reflect.DeepEqual(a.ReadyAll, b.ReadyAll) {
-			return false
-		}
-	}
-	for store, a := range r.Sessions {
-		b, ok := o.Sessions[store]
-		if !ok || errorText(a.Err) != errorText(b.Err) || !reflect.DeepEqual(a.Rows, b.Rows) {
-			return false
-		}
-	}
-	for store, a := range r.ClosedNamed {
-		b, ok := o.ClosedNamed[store]
-		if !ok || errorText(a.Err) != errorText(b.Err) || !reflect.DeepEqual(a.Index, b.Index) {
+	for key, a := range r.Sources {
+		b, ok := o.Sources[key]
+		if !ok || errorText(a.Err) != errorText(b.Err) || !reflect.DeepEqual(a.sourcePayload, b.sourcePayload) {
 			return false
 		}
 	}
 	return true
+}
+
+// wakes reports whether publishing r after prev at now must wake the
+// allocator: new content, or a source stale in prev that r serves fresh.
+func (r *externalReadsRecording) wakes(prev *externalReadsRecording, now time.Time) bool {
+	if !prev.sameContent(r) {
+		return true
+	}
+	for key, s := range r.Sources {
+		if !prev.fresh(prev.Sources[key], now) && r.fresh(s, now) {
+			return true
+		}
+	}
+	return false
 }
 
 func errorText(err error) string {
@@ -207,10 +265,12 @@ func errorText(err error) string {
 	return err.Error()
 }
 
-// backstopEnv is what one pass reads: the stores and config of the
-// environment it runs against.
-type backstopEnv struct {
+// externalReadsEnv is what one pass reads: the stores and config of the
+// environment it runs against. It is a snapshot: a reload replaces Cfg rather
+// than editing it, and the scale_check source is keyed by that pointer.
+type externalReadsEnv struct {
 	CityPath          string
+	CityName          string
 	Cfg               *config.City
 	CityStore         beads.Store
 	RigStores         map[string]beads.Store
@@ -225,36 +285,83 @@ type backstopEnv struct {
 	Sessions *sessionBeadSnapshot
 }
 
-// backstopLane owns the latest recording.
-type backstopLane struct {
-	interval time.Duration
-	env      func() (backstopEnv, error)
-	onChange func()
-	safeTick func(fn func(), trigger string) (panicked bool)
-	stderr   io.Writer
-	now      func() time.Time
-	wakeCh   chan struct{}
-	rec      atomic.Pointer[backstopRecording]
-	repairs  atomic.Pointer[backstopRepairRun]
-
-	// seq and passTimes belong to the recording goroutine.
-	seq       uint64
-	passTimes [backstopPassWindow]time.Duration
+// laneStep is work a pass starts after it publishes, at most once per every
+// from the end of its last run, and not while the legs of kind legs it reads
+// just failed.
+type laneStep struct {
+	name  string
+	every time.Duration
+	legs  sourceKind
+	run   func(ctx context.Context, env externalReadsEnv)
+	// running and last (when its last run ended) are guarded by the lane's
+	// mu.
+	running bool
+	last    time.Time
 }
 
-// newBackstopLane returns a lane paced at interval (the patrol) that reads
-// env each pass and calls onChange (the allocator's wake) when a pass records
-// new content or refreshes an expired recording. A nil onChange wakes nothing.
-func newBackstopLane(interval time.Duration, env func() (backstopEnv, error), onChange func(), safeTick func(fn func(), trigger string) bool, stderr io.Writer) *backstopLane {
+// externalReadsLane owns the latest recording.
+type externalReadsLane struct {
+	// interval may change only while the lane is stopped (a patrol change):
+	// a restart keeps the recording, the reads in flight and the steps'
+	// clocks.
+	interval time.Duration
+	env      func() (externalReadsEnv, error)
+	onChange func()
+	safeTick func(fn func(), trigger string) (panicked bool)
+	events   events.Recorder
+	stderr   io.Writer
+	now      func() time.Time
+	// gate, when set, lets the reload barrier and the worker FS gate hold
+	// passes; a held pass declines and does not pace the next wake. It counts
+	// the steps a pass starts until they end.
+	gate             *laneGate
+	sourceDeadline   time.Duration
+	scaleCheckBudget time.Duration
+	runner           ScaleCheckRunner
+	queryEnv         probeEnvFunc
+	wakeCh           chan struct{}
+	rec              atomic.Pointer[externalReadsRecording]
+	// wg counts the source and step goroutines (join).
+	wg sync.WaitGroup
+
+	mu       sync.Mutex
+	results  map[sourceKey]sourceResult // each source's latest ended read
+	inFlight map[sourceKey]*sourceRead
+	late     bool // a late read ended since the last collect
+	steps    []*laneStep
+
+	// seq belongs to the lane goroutine.
+	seq uint64
+}
+
+// sourceRead is one read in flight.
+type sourceRead struct {
+	started time.Time
+	// late: a pass has published without it, so its end wakes the lane.
+	late bool
+}
+
+// newExternalReadsLane returns a lane paced at interval (the patrol) that
+// reads env each pass, calls onChange (the allocator's wake) when a pass
+// publishes new content or turns a stale source fresh, and records the
+// repairs' scope gaps to rec. A nil onChange wakes nothing.
+func newExternalReadsLane(interval time.Duration, env func() (externalReadsEnv, error), onChange func(), safeTick func(fn func(), trigger string) bool, rec events.Recorder, stderr io.Writer) *externalReadsLane {
 	if onChange == nil {
 		onChange = func() {}
 	}
-	return &backstopLane{interval: interval, env: env, onChange: onChange, safeTick: safeTick, stderr: stderr, now: time.Now, wakeCh: make(chan struct{}, 1)}
+	l := &externalReadsLane{
+		interval: interval, env: env, onChange: onChange, safeTick: safeTick, events: rec, stderr: stderr, now: time.Now,
+		sourceDeadline: externalReadsSourceDeadline, scaleCheckBudget: parseBDProbeTimeout(stderr),
+		runner: shellScaleCheck, queryEnv: controllerQueryRuntimeEnv, wakeCh: make(chan struct{}, 1),
+		results: make(map[sourceKey]sourceResult), inFlight: make(map[sourceKey]*sourceRead),
+	}
+	l.steps = []*laneStep{{name: "demand-repairs", every: externalReadsRepairInterval, legs: sourceDemand, run: l.demandRepairs}}
+	return l
 }
 
-// wake asks for a recording pass. Non-blocking; wakes that wait out the duty
-// cycle join the one pass that follows.
-func (l *backstopLane) wake() {
+// wake asks for a pass. Non-blocking; wakes that wait out the duty cycle
+// join the one pass that follows.
+func (l *externalReadsLane) wake() {
 	select {
 	case l.wakeCh <- struct{}{}:
 	default:
@@ -262,79 +369,82 @@ func (l *backstopLane) wake() {
 }
 
 // recording returns the latest published recording, or nil before the first.
-func (l *backstopLane) recording() *backstopRecording { return l.rec.Load() }
+func (l *externalReadsLane) recording() *externalReadsRecording { return l.rec.Load() }
 
-// start runs the recording and repair goroutines until ctx ends and returns
-// a channel closed when both have. Each runs its first pass at once: until a
-// recording exists every non-exact leg reads partial. A pass that declines
-// (suspended city, no env, shutdown) does not pace the next wake.
-func (l *backstopLane) start(ctx context.Context) <-chan struct{} {
+// start runs the lane until ctx ends and returns a channel closed when it
+// has. The first pass runs at once: until a recording exists every lane-fed
+// leg reads partial. A pass that declines (held, suspended city, no env,
+// shutdown) does not pace the next wake. start may run again once the
+// channel closed.
+func (l *externalReadsLane) start(ctx context.Context) <-chan struct{} {
 	l.wake()
-	recording := startGatedPacedLane(ctx, l.interval, backstopLaneMinGap, l.wakeCh, func(bool) bool {
+	return startGatedPacedLane(ctx, l.interval, externalReadsMinGap, l.wakeCh, func(bool) bool {
 		ran := false
-		panicked := l.safeTick(func() { ran = l.pass(ctx) }, backstopSafeTickTrigger)
+		panicked := l.safeTick(func() { ran = l.pass(ctx) }, externalReadsSafeTickTrigger)
 		return ran || panicked
 	})
-	// The repairs' only wake today is this first one, so a declined run
-	// pacing the next wake would change nothing yet. The gated shape is for
-	// P3-7: a gate release re-runs a skipped repair through a wake, which a
-	// skipped run must not pace.
-	repairWake := make(chan struct{}, 1)
-	repairWake <- struct{}{}
-	repairs := startGatedPacedLane(ctx, backstopRepairInterval, backstopRepairInterval, repairWake, func(bool) bool {
-		ran := false
-		panicked := l.safeTick(func() { ran = l.repair(ctx) }, backstopRepairSafeTickTrigger)
-		return ran || panicked
-	})
-	done := make(chan struct{})
-	go func() {
-		<-recording
-		<-repairs
-		close(done)
-	}()
-	return done
 }
 
-// pass records the non-exact legs and publishes, waking the allocator on new
-// content or on a fresh recording replacing an expired one. It reports
-// whether it ran.
-func (l *backstopLane) pass(ctx context.Context) bool {
+// join waits until every read and step the lane started has ended, or ctx
+// ends. Call it once the lane stopped, before closing the stores it reads.
+func (l *externalReadsLane) join(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		l.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// pass publishes the reads that ended after the last publish, reads the
+// sources, publishes, then starts the steps that are due. It reports whether
+// it ran.
+func (l *externalReadsLane) pass(ctx context.Context) bool {
+	if l.gate != nil {
+		if !l.gate.enter() {
+			return false
+		}
+		defer l.gate.exit()
+	}
 	env, ok := l.passEnv(ctx)
 	if !ok {
 		return false
 	}
-	start := l.now()
-	next := recordBackstop(env, l.stderr)
-	end := l.now()
+	sources := l.sources(env)
+	if l.lateEnded() {
+		l.publish(l.collect(sources))
+	}
+	published := l.read(ctx, sources)
 	if ctx.Err() != nil {
 		return false
 	}
-	l.passTimes[l.seq%backstopPassWindow] = end.Sub(start)
-	l.seq++
-	next.Seq, next.StartedAt, next.At, next.Expires = l.seq, start, end, end.Add(2*l.interval+min(slices.Max(l.passTimes[:]), cacheLagBound))
-	if run := l.repairs.Load(); run != nil {
-		next.ScopeGaps, next.RepairSeq = run.gaps, run.seq
-	}
-	if prev := l.rec.Swap(next); !prev.sameContent(next) || !prev.fresh(end) {
-		l.onChange()
-	}
+	l.startSteps(ctx, env, l.publish(published))
 	return true
 }
 
-// repair runs legacy's demand-pass repairs once and keeps the scope gaps
-// they found, numbered by the run, for the next recordings. It reports
-// whether it ran.
-func (l *backstopLane) repair(ctx context.Context) bool {
-	env, ok := l.passEnv(ctx)
-	if !ok || env.CityStore == nil {
-		return false
+// publish publishes sources as the next recording and wakes the allocator on
+// new content or on a stale source turned fresh, judged now.
+func (l *externalReadsLane) publish(sources map[sourceKey]sourceResult) *externalReadsRecording {
+	prev := l.rec.Load()
+	l.seq++
+	next := &externalReadsRecording{Seq: l.seq, FreshFor: externalReadsFreshPatrols * l.interval, Sources: sources}
+	l.rec.Store(next)
+	if next.wakes(prev, l.now()) {
+		l.onChange()
 	}
-	run := &backstopRepairRun{seq: 1, gaps: runBackstopDemandRepairs(ctx, env, l.stderr)}
-	if prev := l.repairs.Load(); prev != nil {
-		run.seq = prev.seq + 1
-	}
-	l.repairs.Store(run)
-	return true
+	return next
+}
+
+// lateEnded reports whether a late read ended since the last collect.
+func (l *externalReadsLane) lateEnded() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.late
 }
 
 // passEnv returns the environment a pass runs against, and false when the
@@ -342,92 +452,190 @@ func (l *backstopLane) repair(ctx context.Context) bool {
 // is suspended (legacy's demand pass returns before any read or repair,
 // POOL-001). Like legacy, an unreadable suspension file reads as the zero
 // state.
-func (l *backstopLane) passEnv(ctx context.Context) (backstopEnv, bool) {
+func (l *externalReadsLane) passEnv(ctx context.Context) (externalReadsEnv, bool) {
 	if ctx.Err() != nil {
-		return backstopEnv{}, false
+		return externalReadsEnv{}, false
 	}
 	env, err := l.env()
 	if err != nil {
-		fmt.Fprintf(l.stderr, "demand backstop: %v\n", err) //nolint:errcheck
-		return backstopEnv{}, false
+		fmt.Fprintf(l.stderr, "external reads: %v\n", err) //nolint:errcheck
+		return externalReadsEnv{}, false
 	}
 	if effectiveCitySuspended(env.Cfg, loadSuspensionStateBestEffort(env.CityPath)) {
-		return backstopEnv{}, false
+		return externalReadsEnv{}, false
 	}
 	return env, true
 }
 
-// recordBackstop reads every non-exact leg concurrently: the demand legs
-// through legacyDemandReads, the session census legs through the session
-// front door's live ListAll, and the city store's closed named-session index
-// when an on_demand named session can consult it. Seq, StartedAt, At and
-// Expires are the caller's.
-func recordBackstop(env backstopEnv, stderr io.Writer) *backstopRecording {
-	rec := &backstopRecording{
-		Legs:        make(map[beads.Store]legRecording),
-		Sessions:    make(map[beads.Store]sessionLegRecording),
-		ClosedNamed: make(map[beads.Store]closedNamedRecording),
+// externalSource is one source a pass reads. budget is how long its first
+// read may run before the source publishes errSourceTimeout.
+type externalSource struct {
+	key    sourceKey
+	budget time.Duration
+	read   func() (sourcePayload, error)
+}
+
+// read starts every source not already in flight, each in its own goroutine,
+// waits until they have all ended or the source deadline passed, and returns
+// what the pass publishes (collect). A source an earlier pass started whose
+// read ended meanwhile starts again before the publish, rather than a duty
+// cycle later. It returns nil once shutdown begins.
+func (l *externalReadsLane) read(ctx context.Context, sources []externalSource) map[sourceKey]sourceResult {
+	ended := make(chan struct{}, len(sources))
+	started := make(map[sourceKey]bool, len(sources))
+	deadline := time.NewTimer(l.sourceDeadline)
+	defer deadline.Stop()
+wait:
+	for pending := l.launch(sources, started, false, ended); pending > 0; pending-- {
+		select {
+		case <-ended:
+		case <-deadline.C:
+			break wait
+		case <-ctx.Done():
+			return nil
+		}
 	}
-	demandLegs, sessionLegs := backstopLegs(env, stderr)
-	var mu sync.Mutex
-	var wg sync.WaitGroup
+	l.launch(sources, started, true, ended)
+	return l.collect(sources)
+}
+
+// launch starts a read of each source neither in flight nor in started, adds
+// it to started, and returns how many it started. late marks reads the pass
+// does not wait for.
+func (l *externalReadsLane) launch(sources []externalSource, started map[sourceKey]bool, late bool, ended chan<- struct{}) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, s := range sources {
+		if l.inFlight[s.key] != nil || started[s.key] {
+			continue
+		}
+		r := &sourceRead{started: l.now(), late: late}
+		l.inFlight[s.key] = r
+		started[s.key] = true
+		n++
+		l.wg.Add(1)
+		go l.readSource(s, r, ended)
+	}
+	return n
+}
+
+// readSource runs one read and stores its result, waking the lane when the
+// pass that started it has already published.
+func (l *externalReadsLane) readSource(s externalSource, r *sourceRead, ended chan<- struct{}) {
+	defer l.wg.Done()
+	p, err := guardedRead(s.read)
+	res := sourceResult{StartedAt: r.started, EndedAt: l.now(), Err: err, sourcePayload: p}
+	l.mu.Lock()
+	l.results[s.key] = res
+	delete(l.inFlight, s.key)
+	late := r.late
+	l.late = l.late || late
+	l.mu.Unlock()
+	ended <- struct{}{}
+	if late {
+		l.wake()
+	}
+}
+
+// collect returns what a pass publishes for sources: each one's latest ended
+// result, with InFlightSince when a newer read is still running, or
+// errSourceTimeout for a source with no result whose read has outlived its
+// budget. It marks the reads still in flight late and drops the results of
+// sources no longer read.
+func (l *externalReadsLane) collect(sources []externalSource) map[sourceKey]sourceResult {
+	now := l.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.late = false
+	out := make(map[sourceKey]sourceResult, len(sources))
+	for _, s := range sources {
+		res, ok := l.results[s.key]
+		if r := l.inFlight[s.key]; r != nil {
+			r.late = true
+			switch {
+			case ok:
+				res.InFlightSince = r.started
+			case now.Sub(r.started) >= s.budget:
+				res, ok = sourceResult{StartedAt: r.started, EndedAt: now, Err: errSourceTimeout}, true
+			}
+		}
+		if ok {
+			out[s.key] = res
+		}
+	}
+	for key := range l.results {
+		if _, keep := out[key]; !keep {
+			delete(l.results, key)
+		}
+	}
+	return out
+}
+
+// sources lists what a pass reads: each lane-fed demand leg (RawOpen and
+// ReadyAll), each lane-fed session census leg, the city store's closed
+// named-session index when an on_demand named session can consult it, and
+// the custom scale_checks.
+func (l *externalReadsLane) sources(env externalReadsEnv) []externalSource {
+	var out []externalSource
+	add := func(key sourceKey, read func() (sourcePayload, error)) {
+		out = append(out, externalSource{key: key, budget: l.sourceDeadline, read: read})
+	}
+	demandLegs, sessionLegs := externalReadLegs(env, l.stderr)
 	reads := legacyDemandReads{}
 	for _, leg := range demandLegs {
-		wg.Go(func() {
-			var l legRecording
-			l.RawOpen, l.RawOpenErr = guardedLegRead(func() ([]beads.Bead, error) { return reads.RawOpen(leg.store) })
-			l.ReadyAll, l.ReadyAllErr = guardedLegRead(func() ([]beads.Bead, error) { return reads.ReadyAll(leg.store) })
-			mu.Lock()
-			defer mu.Unlock()
-			rec.Legs[demandLabelKey(leg.store)] = l
+		add(keyOf(sourceDemand, leg.store), func() (sourcePayload, error) {
+			var r legRecording
+			r.RawOpen, r.RawOpenErr = guardedRead(func() ([]beads.Bead, error) { return reads.RawOpen(leg.store) })
+			r.ReadyAll, r.ReadyAllErr = guardedRead(func() ([]beads.Bead, error) { return reads.ReadyAll(leg.store) })
+			return sourcePayload{Leg: r}, nil
 		})
 	}
 	for _, leg := range sessionLegs {
-		wg.Go(func() {
-			rows, err := guardedLegRead(func() ([]session.Info, error) {
-				return sessionFrontDoor(leg.store).ListAll(session.ListAllOptions{Live: true})
-			})
-			mu.Lock()
-			defer mu.Unlock()
-			rec.Sessions[demandLabelKey(leg.store)] = sessionLegRecording{Rows: rows, Err: err}
+		add(keyOf(sourceSessions, leg.store), func() (sourcePayload, error) {
+			rows, err := sessionFrontDoor(leg.store).ListAll(session.ListAllOptions{Live: true})
+			return sourcePayload{Sessions: rows}, err
 		})
 	}
 	if env.CityStore != nil && env.Cfg != nil && slices.ContainsFunc(env.Cfg.NamedSessions, func(n config.NamedSession) bool { return n.Mode == "on_demand" }) {
-		wg.Go(func() {
-			idx, err := guardedLegRead(func() (session.ClosedNamedSessionBeadIndex, error) { return reads.ClosedNamedIndex(env.CityStore) })
-			mu.Lock()
-			defer mu.Unlock()
-			rec.ClosedNamed[demandLabelKey(env.CityStore)] = closedNamedRecording{Index: idx, Err: err}
+		add(keyOf(sourceClosedNamed, env.CityStore), func() (sourcePayload, error) {
+			idx, err := reads.ClosedNamedIndex(env.CityStore)
+			return sourcePayload{ClosedNamed: idx}, err
 		})
 	}
-	wg.Wait()
-	return rec
+	if env.Cfg != nil {
+		out = append(out, externalSource{key: sourceKey{kind: sourceScaleCheck, cfg: env.Cfg}, budget: l.scaleCheckBudget, read: func() (sourcePayload, error) {
+			return sourcePayload{ScaleCheck: runCustomScaleChecks(env, l.runner, l.queryEnv, l.stderr)}, nil
+		}})
+	}
+	return out
 }
 
-// guardedLegRead runs one leg read and turns a panic into the read's error,
-// so one bad leg is recorded as failed instead of killing the process from
-// its goroutine (mc-zndi7.40).
-func guardedLegRead[T any](read func() (T, error)) (v T, err error) {
+// guardedRead runs one read and turns a panic into the read's error, so one
+// bad source is recorded as failed instead of killing the process from its
+// goroutine (mc-zndi7.40).
+func guardedRead[T any](read func() (T, error)) (v T, err error) {
 	defer func() {
 		if p := recover(); p != nil {
 			var zero T
-			v, err = zero, fmt.Errorf("demand backstop: leg read panicked: %v", p)
+			v, err = zero, fmt.Errorf("external reads: read panicked: %v", p)
 		}
 	}()
 	return read()
 }
 
-// backstopLegs returns the non-exact legs a pass reads, each once per set:
-// the demand legs (the work census and the default-probe target stores) and
-// the session census legs. The routed-work legs need no set of their own:
-// Plan(RoutedWork) is the census's work federation narrowed to the bindings,
-// so every routed-work leg is a census leg. A leg set the topology refuses is
-// skipped: the collectors and the census report it partial themselves.
-func backstopLegs(env backstopEnv, stderr io.Writer) (demand, sessions []classStoreCandidate) {
+// externalReadLegs returns the lane-fed legs a pass reads, each once per
+// set: the demand legs (the work census and the default-probe target stores)
+// and the session census legs. The routed-work legs need no set of their
+// own: Plan(RoutedWork) is the census's work federation narrowed to the
+// bindings, so every routed-work leg is a census leg. A leg set the topology
+// refuses is skipped: the collectors and the census report it partial
+// themselves.
+func externalReadLegs(env externalReadsEnv, stderr io.Writer) (demand, sessions []classStoreCandidate) {
 	demandSeen, sessionSeen := make(map[beads.Store]bool), make(map[beads.Store]bool)
 	add := func(into *[]classStoreCandidate, seen map[beads.Store]bool, set string, legs []classStoreCandidate, err error) {
 		if err != nil {
-			fmt.Fprintf(stderr, "demand backstop: %s legs: %v\n", set, err) //nolint:errcheck
+			fmt.Fprintf(stderr, "external reads: %s legs: %v\n", set, err) //nolint:errcheck
 			return
 		}
 		for _, leg := range legs {
@@ -436,7 +644,7 @@ func backstopLegs(env backstopEnv, stderr io.Writer) (demand, sessions []classSt
 				continue
 			}
 			seen[key] = true
-			if _, exact := demandLegCache(leg.store); !exact {
+			if _, cacheFed := demandLegCache(leg.store); !cacheFed {
 				*into = append(*into, leg)
 			}
 		}
@@ -453,14 +661,57 @@ func backstopLegs(env backstopEnv, stderr io.Writer) (demand, sessions []classSt
 	return demand, sessions
 }
 
+// startSteps starts each due step on its own goroutine: one not already
+// running, whose interval since its last run ended is up, and whose legs read
+// fine in rec. The gate counts each run until it ends.
+func (l *externalReadsLane) startSteps(ctx context.Context, env externalReadsEnv, rec *externalReadsRecording) {
+	now := l.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, step := range l.steps {
+		if step.running || (!step.last.IsZero() && now.Sub(step.last) < step.every) || rec.failing(step.legs) {
+			continue
+		}
+		step.running = true
+		done := func() {}
+		if l.gate != nil {
+			done = l.gate.spawn()
+		}
+		l.wg.Add(1)
+		go l.runStep(ctx, env, step, done)
+	}
+}
+
+// runStep runs step once under the step deadline. A panic is reported and
+// counts as a run, so a broken step is not retried every pass.
+func (l *externalReadsLane) runStep(ctx context.Context, env externalReadsEnv, step *laneStep, done func()) {
+	defer l.wg.Done()
+	defer done()
+	stepCtx, cancel := context.WithTimeout(ctx, externalReadsStepDeadline)
+	defer cancel()
+	if _, err := guardedRead(func() (struct{}, error) { step.run(stepCtx, env); return struct{}{}, nil }); err != nil {
+		fmt.Fprintf(l.stderr, "external reads: step %s: %v\n", step.name, err) //nolint:errcheck
+	}
+	l.mu.Lock()
+	step.running, step.last = false, l.now()
+	l.mu.Unlock()
+}
+
+// demandRepairs is the demand repairs step: legacy's repair sequence, then
+// one control.dispatcher_scope_gap event per scope gap the run found.
+func (l *externalReadsLane) demandRepairs(ctx context.Context, env externalReadsEnv) {
+	gaps := runBackstopDemandRepairs(ctx, env, l.stderr)
+	emitControlDispatcherScopeGapEvents(l.events, env.CityName, gaps, l.now())
+}
+
 // runBackstopDemandRepairs is legacy's demand-pass repair sequence
 // (buildDesiredStateWithSessionBeadsAt), collections included, in legacy
 // order: each collection is read live right before the repairs over it, so
 // the unassigned collection sees the assigned repairs' writes, and the work
 // dir repair runs before the stamp that must get the last word. It stops
-// between the halves once shutdown has begun, and returns the control
-// dispatcher scope gaps it found.
-func runBackstopDemandRepairs(ctx context.Context, env backstopEnv, stderr io.Writer) []ControlDispatcherScopeGap {
+// between the halves once ctx ends (shutdown or the step deadline), and
+// returns the control dispatcher scope gaps it found.
+func runBackstopDemandRepairs(ctx context.Context, env externalReadsEnv, stderr io.Writer) []ControlDispatcherScopeGap {
 	cfg := env.Cfg
 	assigned, assignedStores, _, _, _ := collectAssignedWorkBeadsWithStores(env.CityPath, cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, env.Sessions, newReadyDemandCache())
 	repairPoolSlotWorkDirClobber(cfg, assigned, assignedStores, stderr)

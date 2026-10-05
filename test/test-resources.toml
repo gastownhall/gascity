@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 732
-baseline_files = 214
+baseline_calls = 743
+baseline_files = 217
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -23,8 +23,8 @@ expires = "2026-10-31"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 489
-baseline_files = 178
+baseline_calls = 492
+baseline_files = 180
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-cp3hwi"
@@ -36,10 +36,10 @@ expires = "2026-10-31"
 [[audit_baseline]]
 scope = "all"
 resource = "listener_helper"
-baseline_calls = 59
-baseline_files = 23
-reported_calls = 59
-reported_files = 23
+baseline_calls = 60
+baseline_files = 24
+reported_calls = 60
+reported_files = 24
 owner_bead = "ga-cp3hwi"
 invariant = "all-source listener-helper call/file totals cannot drift without an explicit checked policy update"
 resource_owner = "ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption"

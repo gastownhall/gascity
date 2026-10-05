@@ -107,7 +107,19 @@ const (
 	//
 	// Bumped again for the Dolt 2.1.7 -> 2.2.0 pin (the Dolt beads v1.3.1
 	// qualifies): the job DOLT_VERSION env values only.
-	expectedCIExecutionHash     = "ee1573fb3c69cb057697f4dddbd30e100f21e8a0df1bc23b446f95dbdf90d615"
+	//
+	// Bumped again (keep managed Dolt logs from failed acceptance tests):
+	// beads-topology-acceptance and beads-proxied-native-acceptance each gain
+	// a step exporting GC_TEST_FAILURE_ARTIFACT_DIR to $GITHUB_ENV and an
+	// `if: failure()` pinned upload-artifact step for that directory. No new
+	// job, trigger, permission or secret.
+	//
+	// Bumped again (beads#7037): the topology job's shared-server step -run
+	// also selects TestBlockedRepairOnProxiedCityAndRig, the proxied city+rig
+	// proof of gc start's is_blocked repair (about 4 minutes, inside that
+	// step's 15m -timeout). Reviewed delta: one -run alternative, no new job,
+	// step, trigger or permission.
+	expectedCIExecutionHash     = "5ce8f7a7966b71d98581b13c44907a05d7a3152c895b2efdd782594d18dc470f"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -125,8 +137,13 @@ const (
 	// the bundled-pack-pins job, `scripts/check-embedded-pins --skip-bundled`
 	// with GITHUB_TOKEN, which fails when deps.env falls behind the latest
 	// beads release or the Dolt it qualifies. No new job, trigger or
-	// permission.
-	expectedNightlyExecutionHash = "6d3e09d4d392cfee12325b6cdafc0a3574cc1014b25d142a93baf70cf9441a48"
+	// permission. Then beads-proxied-perf gains the same failure-diagnostics
+	// routing step and `if: failure()` pinned upload-artifact step as the PR
+	// acceptance jobs; no new job, trigger, permission or secret. Then the
+	// tier B job fetches tag v1.5.0-rc1 (shallow, one ref) and requires the
+	// split-storage rc1 upgrade scenario to run rather than skip; no new job,
+	// trigger, permission or secret.
+	expectedNightlyExecutionHash = "ff2cf05eb0064ae1d58bd7fd2080e5cfc358c22d44e5745a7c97d637d2bec8e9"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 

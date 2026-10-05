@@ -103,7 +103,7 @@ endif
 endif
 endif
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-hooks check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-full lint-new lint-changed lint-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-beads-topology-matrix test-bd-cli-contract test-bd-cli-contract-home-isolation test-bd-conditional-release-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-hooks check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-full lint-new lint-changed lint-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-beads-topology-matrix test-bd-cli-contract test-bd-cli-contract-home-isolation test-bd-conditional-release-contract test-acceptance-b test-acceptance-split-storage test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
 .PHONY: check-release-dist-ignore
 
 ## build: compile gc binary with version metadata
@@ -721,7 +721,19 @@ test-bd-conditional-release-contract:
 ## test-acceptance-b: run Tier B acceptance tests (lifecycle, ~5 min, nightly)
 ACCEPTANCE_B_TIMEOUT ?= 10m
 test-acceptance-b:
-	$(TEST_ENV) go test -tags acceptance_b -timeout $(ACCEPTANCE_B_TIMEOUT) -v ./test/acceptance/tier_b/...
+	$(TEST_ENV) GC_ACCEPTANCE_BD_BIN="$${GC_ACCEPTANCE_BD_BIN-}" GC_ACCEPTANCE_SPLIT_RC1_GC_BIN="$${GC_ACCEPTANCE_SPLIT_RC1_GC_BIN-}" GC_REQUIRE_ACCEPTANCE_SPLIT_RC1_GC="$${GC_REQUIRE_ACCEPTANCE_SPLIT_RC1_GC-}" go test -tags acceptance_b -timeout $(ACCEPTANCE_B_TIMEOUT) -v ./test/acceptance/tier_b/...
+
+## test-acceptance-split-storage: run the split-storage end-to-end acceptance
+## test (Tier B tag; #5987): a real controller and a scripted worker run a
+## graph.v2 formula across `gc storage migrate`. Needs bd >= 1.3.0
+## (GC_ACCEPTANCE_BD_BIN), dolt and jq. The upgraded-city scenario uses a
+## v1.5.0-rc1 gc: GC_ACCEPTANCE_SPLIT_RC1_GC_BIN, or one the test builds from
+## the v1.5.0-rc1 tag (git fetch --no-tags --depth=1 origin
+## +refs/tags/v1.5.0-rc1:refs/tags/v1.5.0-rc1). It skips without either unless
+## GC_REQUIRE_ACCEPTANCE_SPLIT_RC1_GC is set.
+SPLIT_STORAGE_ACCEPTANCE_TIMEOUT ?= 20m
+test-acceptance-split-storage:
+	$(TEST_ENV) GC_ACCEPTANCE_BD_BIN="$${GC_ACCEPTANCE_BD_BIN-}" GC_ACCEPTANCE_GC_BIN="$${GC_ACCEPTANCE_GC_BIN-}" GC_ACCEPTANCE_SPLIT_RC1_GC_BIN="$${GC_ACCEPTANCE_SPLIT_RC1_GC_BIN-}" GC_REQUIRE_ACCEPTANCE_SPLIT_RC1_GC="$${GC_REQUIRE_ACCEPTANCE_SPLIT_RC1_GC-}" GC_REQUIRE_ACCEPTANCE_TOOLING="$(ACCEPTANCE_REQUIRE_TOOLING)" go test -tags acceptance_b -count=1 -timeout $(SPLIT_STORAGE_ACCEPTANCE_TIMEOUT) -v -run '^TestSplitStorageMigratedFormulaCompletes$$' ./test/acceptance/tier_b
 
 ## test-acceptance-c: run Tier C acceptance tests (real inference, ~30-40 min, manual/nightly)
 test-acceptance-c:
@@ -1159,8 +1171,10 @@ help:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## //' | column -t -s ':'
 
 ## bazel-sync: regenerate bazel BUILD files (gazelle) and the hermetic repo
-## source tree used by whole-repo scan guards. Run after adding packages.
+## source tree used by whole-repo scan guards, then apply the hermeticity
+## ledger's go_test tags (test/bazel-hermeticity.toml). Run after adding packages.
 .PHONY: bazel-sync
 bazel-sync:
 	bazel run //:gazelle
 	python3 tools/bazel/repo_tree.py
+	python3 tools/bazel/hermetic_tags.py

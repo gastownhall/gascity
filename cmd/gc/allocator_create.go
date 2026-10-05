@@ -261,6 +261,9 @@ const (
 	createStageFenceRead = "fence-read" // a pool create's locked failure that proves no name taken
 	createStagePanic     = "panic"      // a panic before the write
 	createStageResolve   = "resolve"    // a named create's read-only template resolution
+	// createStageWrite: an ambiguous write the census proved never landed
+	// (C5.4(3)); recorded by the allocator, and it stalls like fence-read.
+	createStageWrite = "write"
 )
 
 // createProgress is how far one effect got: the stage a no-write failure

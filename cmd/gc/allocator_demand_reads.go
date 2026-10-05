@@ -27,22 +27,21 @@ import (
 // legacyDemandReads is today's calls, unchanged: a nil reads is legacy.
 // v2DemandReads does no backing I/O. An exact leg (its CachingStore's backing
 // declares beads.CachedReadExact) is read from the cache with strict reads and
-// a last-good fallback; any other leg's live reads come from the backstop
-// lane's recording (allocator_backstop_lane.go).
+// a last-good fallback; any other leg's live reads come from the
+// external-reads lane's recording (allocator_backstop_lane.go).
 //
 // Unwired in this slice: P3-5a's gather builds a v2DemandReads per pass, and
-// P3-7 starts the backstop lane and owns the demandLastGood.
+// P3-7 starts the external-reads lane and owns the demandLastGood.
 
 // cacheLagBound bounds how long an exact leg's read may be served from its
 // last good answer (P3 spec §4.2 rule 4). An older answer is refused, so the
 // leg reads partial. It is the one last-good bound of the allocator's reads:
-// the session census and its episode reader use it too, and it caps the
-// pass-time term of a backstop recording's expiry.
+// the session census and its episode reader use it too.
 const cacheLagBound = 60 * time.Second
 
 var (
-	errDemandRecordingMissing = errors.New("no backstop recording for this leg")
-	errDemandRecordingStale   = errors.New("backstop recording is stale")
+	errDemandRecordingMissing = errors.New("no external-reads recording for this leg")
+	errDemandRecordingStale   = errors.New("external-reads recording is stale")
 	errDemandLegUncached      = errors.New("leg has no cache to read")
 )
 
@@ -136,7 +135,7 @@ func demandLegCache(store beads.Store) (cache *beads.CachingStore, exact bool) {
 //     ReadyContext. On an exact backing the cached status is the raw status
 //     and the cached ready projection is complete.
 //   - RawOpen and ReadyAll on any other leg: the recording's copy of
-//     legacy's own live read. A missing recording, or one past its Expires,
+//     legacy's own live read. A missing source, or one past its freshness,
 //     is a PartialResultError with no rows: the collectors
 //     mark the leg's templates partial (retain, block create) instead of
 //     reading zero demand. A bd leg's cache folds blocked work into "open"
@@ -159,7 +158,7 @@ func demandLegCache(store beads.Store) (cache *beads.CachingStore, exact bool) {
 // are safe for the collectors' concurrent legs.
 type v2DemandReads struct {
 	now      time.Time
-	rec      *backstopRecording
+	rec      *externalReadsRecording
 	lastGood *demandLastGood
 
 	mu        sync.Mutex
@@ -180,11 +179,11 @@ type demandReadFallback struct {
 	Age   time.Duration
 }
 
-// newV2DemandReads returns the reads for one pass at now. rec is the backstop
-// lane's latest recording (nil before its first pass), served until its
-// Expires. lastGood carries exact legs' answers across passes; nil keeps
+// newV2DemandReads returns the reads for one pass at now. rec is the
+// external-reads lane's latest recording (nil before its first pass), each
+// source served while fresh. lastGood carries exact legs' answers across passes; nil keeps
 // none, so every refused strict read is partial.
-func newV2DemandReads(now time.Time, rec *backstopRecording, lastGood *demandLastGood) *v2DemandReads {
+func newV2DemandReads(now time.Time, rec *externalReadsRecording, lastGood *demandLastGood) *v2DemandReads {
 	return &v2DemandReads{
 		now:      now,
 		rec:      rec,
@@ -237,14 +236,11 @@ func (r *v2DemandReads) ReadyLimit(*config.City) int { return 0 }
 
 func (r *v2DemandReads) ClosedNamedIndex(store beads.Store) (session.ClosedNamedSessionBeadIndex, error) {
 	const shape = "closed_named_index"
-	l, ok := r.rec.closedNamed(store)
-	switch {
-	case !ok:
-		return session.ClosedNamedSessionBeadIndex{}, &beads.PartialResultError{Op: "v2 demand " + shape, Err: errDemandRecordingMissing}
-	case !r.rec.fresh(r.now):
-		return session.ClosedNamedSessionBeadIndex{}, &beads.PartialResultError{Op: "v2 demand " + shape, Err: errDemandRecordingStale}
+	s, err := r.rec.lookup(sourceClosedNamed, store, r.now)
+	if err != nil {
+		return session.ClosedNamedSessionBeadIndex{}, &beads.PartialResultError{Op: "v2 demand " + shape, Err: err}
 	}
-	return l.Index, l.Err
+	return s.ClosedNamed, s.Err
 }
 
 // Fallbacks returns the reads this pass served from their last good answer.
@@ -254,16 +250,17 @@ func (r *v2DemandReads) Fallbacks() []demandReadFallback {
 	return append([]demandReadFallback(nil), r.fallbacks...)
 }
 
-// recorded serves a non-exact leg's live read from the backstop recording.
+// recorded serves a lane-fed leg's live read from the external-reads
+// recording. A source that failed whole (a timeout) fails both reads.
 func (r *v2DemandReads) recorded(store beads.Store, shape string, pick func(legRecording) ([]beads.Bead, error)) ([]beads.Bead, error) {
-	leg, ok := r.rec.leg(store)
-	switch {
-	case !ok:
-		return nil, &beads.PartialResultError{Op: "v2 demand " + shape, Err: errDemandRecordingMissing}
-	case !r.rec.fresh(r.now):
-		return nil, &beads.PartialResultError{Op: "v2 demand " + shape, Err: errDemandRecordingStale}
+	s, err := r.rec.lookup(sourceDemand, store, r.now)
+	if err != nil {
+		return nil, &beads.PartialResultError{Op: "v2 demand " + shape, Err: err}
 	}
-	return pick(leg)
+	if s.Err != nil {
+		return nil, s.Err
+	}
+	return pick(s.Leg)
 }
 
 // strict runs a cache-only read once per pass, falling back to the last good
@@ -342,7 +339,7 @@ func (g *demandLastGood) get(key demandLegRead) ([]beads.Bead, time.Time, bool) 
 // legacy's in-tick repair leaves in the rows that openControlDispatcherDemand
 // counts, minus the writes. It drops gc.routed_to from a control row whose
 // owning scope has no dispatcher (a scope gap) and from one whose stored route
-// differs from its scope's dispatcher (a repair the backstop lane has not
+// differs from its scope's dispatcher (a repair the external-reads lane has not
 // persisted yet); a row needing only its fallback marker cleared keeps its
 // route. The writes are the lane's (runBackstopDemandRepairs), so a row the
 // lane repaired counts on the first pass after its recording shows the new

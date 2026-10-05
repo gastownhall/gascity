@@ -543,7 +543,7 @@ func TestCreateEffect_NamedReopenRetargetsBeforeWriteAndClearsByRowID(t *testing
 	store := &namedHookStore{Store: mem, beforeTx: func() {
 		duringWrite, _ = ledgerEntryOf(h.ledger, "c1")
 		census := ledgerCensusOf(map[rowKey]ledgerRow{k: {StartLease: true, Incarnation: 4, InstanceToken: "tok-old"}})
-		inFlight = cityInFlight(h.ledger.View(), census, nil)
+		inFlight, _ = cityInFlight(h.ledger.View(), census, nil)
 	}}
 	h = newNamedHarness(t, t.TempDir(), nil)
 	token := h.reserve(t, "c1")

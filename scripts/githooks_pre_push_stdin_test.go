@@ -18,6 +18,7 @@ type prePushFixture struct {
 	commitOld string
 	commitNew string
 	env       []string
+	workerEnv *prePushWorkerEnv // set by withFakeBazel
 }
 
 // newPrePushFixture builds a repo with two commits — the second adds a Go file —

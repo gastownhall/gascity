@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# worker-env: print this remote-execution worker's environment manifest.
+#
+#   tools/rbe/worker-env PACKAGE...
+#
+# Test actions exec host tools through the client's PATH and cgo actions
+# compile against host headers, so the host is an input to every result the
+# worker caches, yet nothing of it is in the action key. blacksmith-worker.sh
+# advertises sha256(this manifest) as the worker-env platform property, and
+# CI's actions request //platforms:rbe_worker's worker-env, the sha256 of the
+# committed manifest tools/rbe/worker-env.txt. rbe-west's schedulers match
+# worker-env exactly: an action runs only on a worker whose host is the one
+# its key names, and a host change (a new runner image, a package or Go
+# upgrade) is a new key once the pin moves. scripts/rbe_worker_env_test.go
+# pins both halves.
+#
+# What it measures, one sorted line each: the OS release and architecture,
+# the Go and dolt that actions find on that PATH, and the installed version of
+# each PACKAGE (blacksmith-worker.sh passes its toolset) and of the base
+# packages below. "missing" for a package that is not installed. The kernel
+# is deliberately not measured: Blacksmith moves it under every image.
+#
+# Env (tests only): WORKER_ENV_PATH (default the CI test PATH below),
+# WORKER_ENV_OS_RELEASE (default /etc/os-release).
+set -euo pipefail
+
+# The PATH CI pins for every test action (scripts/rbe_worker_env_test.go).
+PATH=${WORKER_ENV_PATH:-/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin}
+os_release=${WORKER_ENV_OS_RELEASE:-/etc/os-release}
+# Packages every test reaches through that PATH whatever the toolset says.
+base=(bash coreutils diffutils findutils grep libc6 procps sed tar util-linux)
+
+# No go.mod around (a toolchain line would make go fetch another Go).
+cd /
+export GOTOOLCHAIN=local
+
+# Assignments, so a tool that is missing or fails ends the script (set -e).
+# shellcheck source=/dev/null # the host's os-release
+os_id=$(. "$os_release" && echo "${ID:?} ${VERSION_ID:?}")
+arch=$(uname -m)
+dolt_version=$(dolt version | sed -n 1p)
+go_version=$(go version)
+{
+	echo "arch $arch"
+	echo "dolt $dolt_version"
+	echo "go $go_version"
+	echo "os $os_id"
+	for p in $(printf '%s\n' "${base[@]}" "$@" | sort -u); do
+		# One line per installed architecture (libc6:amd64 and :i386 alike).
+		v=$(dpkg-query -W -f '${db:Status-Status} ${Version}\n' "$p" 2>/dev/null |
+			sed -n 's/^installed //p' | LC_ALL=C sort -u | paste -sd, - || true)
+		echo "pkg $p ${v:-missing}"
+	done
+} | LC_ALL=C sort

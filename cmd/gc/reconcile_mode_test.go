@@ -119,6 +119,30 @@ func TestLatchReconcilerModeRefusesUnknownAndInadmissibleV2(t *testing.T) {
 	}
 }
 
+// TestLatchRefusesV2WithIdentityBreaker pins C5's boot rule (START-800..806,
+// SESS-018..024): v2 defers the identity circuit breaker, so a v2 city that
+// turns it on refuses to start, with the reason in the latch error and in
+// doctor, rather than silently running without the protection. Legacy keeps
+// the breaker, and v2 without it is admitted.
+func TestLatchRefusesV2WithIdentityBreaker(t *testing.T) {
+	const want = `[daemon] session_reconciler = "v2" with session_circuit_breaker = true: the identity circuit breaker is not available under v2; remove session_circuit_breaker or run legacy`
+	cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: "v2", SessionCircuitBreaker: true}}
+	if _, err := latchReconcilerMode(cfg, overrideEnv("1")); err == nil || err.Error() != want {
+		t.Fatalf("latch(v2, breaker) err = %v, want %q", err, want)
+	}
+	if r := newSessionReconcilerDoctorCheck(cfg, overrideEnv("1")).Run(&doctor.CheckContext{}); r.Status != doctor.StatusError || !strings.Contains(r.Message, want) {
+		t.Errorf("doctor = %v %q, want an error naming %q", r.Status, r.Message, want)
+	}
+	cfg.Daemon.SessionReconciler = ""
+	if mode, err := latchReconcilerMode(cfg, overrideEnv("1")); err != nil || mode != reconcilerLegacy {
+		t.Errorf("latch(legacy, breaker) = %v, %v; want legacy, nil", mode, err)
+	}
+	cfg.Daemon.SessionReconciler, cfg.Daemon.SessionCircuitBreaker = "v2", false
+	if mode, err := latchReconcilerMode(cfg, overrideEnv("1")); err != nil || mode != reconcilerV2 {
+		t.Errorf("latch(v2, no breaker) = %v, %v; want v2, nil", mode, err)
+	}
+}
+
 // TestReloadSessionReconcilerDriftWarnsOncePerTransition pins the reload half
 // of the boot latch: a changed session_reconciler warns "pending restart" once
 // per transition, never on every reload, and never re-latches the running mode.
