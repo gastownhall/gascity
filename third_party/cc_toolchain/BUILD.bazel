@@ -1,0 +1,3 @@
+# Repository rules behind the hermetic C/C++ toolchain registered in
+# MODULE.bazel: llvm_dist.bzl (pinned LLVM) and deb_sysroot.bzl (pinned
+# Ubuntu sysroot).

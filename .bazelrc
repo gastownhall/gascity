@@ -1,5 +1,9 @@
 common --enable_bzlmod
 common --color=no
+# C/C++ (and so cgo and the Go stdlib) builds only with MODULE.bazel's pinned
+# LLVM toolchain: no host-detected local_config_cc to fall back to, which
+# would key actions to the host's gcc and lld (scripts/bazel_hermetic_cc_test.go).
+common --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 
 # Side-by-side opt-in bazel arm. `go build`/`go test` continues to work unchanged.
 # To use a remote cache, uncomment:
