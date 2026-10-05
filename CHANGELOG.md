@@ -86,7 +86,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resume` let the next command restart the pair; if something restarts a
   suspended scope's pair in the meantime, gc stops it again on its next tick.
   `/status` work counts no longer include suspended rigs, and report how many
-  they left out in `work.suspended_rigs_excluded` (#6561).
+  they left out in `work.suspended_rigs_excluded`. On a suspended city
+  `/status` reads no bead store at all and sets `stores_not_read`, so an open
+  dashboard does not restart the city's pair (#6561).
 
 - **`gc doctor`, `beads-health` and the dashboard understand a finite proxied
   idle timeout.** A scope whose proxy retired on its idle timeout is idle, not

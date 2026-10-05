@@ -199,10 +199,20 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
 	sessTmpl := cfg.Workspace.SessionTemplate
-	sessionSnapshot := s.statusSessionSnapshot(ctx)
-	partialErrors := append([]string(nil), sessionSnapshot.partialErrors...)
-
 	citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
+	// A suspended city's bead stores are not read: a read restarts the
+	// retired bd proxy the controller just stopped, and an open dashboard
+	// polling this would cycle it. The body says so (StoresNotRead) and
+	// carries no work, mail, session-count or store-health figures.
+	citySuspended := suspensionstate.EffectiveCitySuspended(citySt, cfg.Workspace.EffectiveSuspendedOnStart())
+	sessionSnapshot := statusSessionSnapshot{
+		bySessionName: make(map[string]statusSessionInfo),
+		byTemplate:    make(map[string][]statusSessionInfo),
+	}
+	if !citySuspended {
+		sessionSnapshot = s.statusSessionSnapshot(ctx)
+	}
+	partialErrors := append([]string(nil), sessionSnapshot.partialErrors...)
 
 	// Count agents by state and collect per-agent detail rows in a single
 	// pass. Pool expansion emits one detail row per instance with a
@@ -230,7 +240,10 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	// Active graph-resident work, indexed once per request by agent session
 	// name. On a single-store city this is nil, so every lookup below misses
 	// and the counts stay byte-identical to the provider-only behavior.
-	graphWork := s.graphActiveWorkBySession()
+	var graphWork map[string]graphAgentWork
+	if !citySuspended {
+		graphWork = s.graphActiveWorkBySession()
+	}
 	for _, a := range cfg.Agents {
 		rigName := workdirutil.ConfiguredRigName(s.state.CityPath(), a, cfg.Rigs)
 		scope := "city"
@@ -328,7 +341,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	// Count work items (best-effort). Skipped in lite mode: querying every
 	// rig store is one of the per-request costs the lite poll avoids.
 	var wc workCounts
-	if !lite {
+	if !lite && !citySuspended {
 		var workErrs []string
 		wc, workErrs = s.statusWorkCounts(ctx, cacheColdRigs)
 		partialErrors = append(partialErrors, workErrs...)
@@ -337,7 +350,11 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	// Count mail (best-effort).
 	var mc mailCounts
 	seenProvs := make(map[string]bool)
-	for _, mp := range s.state.MailProviders() {
+	mailProviders := s.state.MailProviders()
+	if citySuspended {
+		mailProviders = nil
+	}
+	for _, mp := range mailProviders {
 		key := fmt.Sprintf("%p", mp)
 		if seenProvs[key] {
 			continue
@@ -380,7 +397,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	// StoreHealth carries a full closed-history Dolt row scan (behind its
 	// sub-cache). Omitted in lite mode so a cold lite poll never triggers it.
 	var storeHealth *StatusStoreHealth
-	if !lite {
+	if !lite && !citySuspended {
 		var err error
 		storeHealth, err = s.cachedStoreHealth(ctx, time.Now())
 		if err != nil {
@@ -395,7 +412,8 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		DoltVersion:         versions.Dolt,
 		BeadsVersion:        versions.Beads,
 		UptimeSec:           uptime,
-		Suspended:           suspensionstate.EffectiveCitySuspended(citySt, cfg.Workspace.EffectiveSuspendedOnStart()),
+		Suspended:           citySuspended,
+		StoresNotRead:       citySuspended,
 		AgentCount:          ac.Total,
 		RigCount:            rc.Total,
 		Running:             rawRunning,

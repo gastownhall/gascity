@@ -388,3 +388,27 @@ func TestRigCacheReconcilePausesWhileTheRigIsSuspended(t *testing.T) {
 		t.Fatal("a resumed rig's cache did not scan")
 	}
 }
+
+// A quiescent city still supervises its workspace services: they are not
+// suspended with the city, so a crashed one must still be seen.
+func TestQuiescentCityTickStillTicksWorkspaceServices(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, false)
+	if cr.svc == nil {
+		t.Fatal("the fixture runtime has no workspace service manager")
+	}
+	if err := cr.sp.Stop("worker"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_SUSPENDED", "1")
+	runFixtureTick(cr, "patrol")
+	if !cr.beadsQuiescent.Load() {
+		t.Fatal("the city was not quiescent")
+	}
+	found := false
+	for _, op := range tickOperationRecords(t, cr) {
+		found = found || strings.HasSuffix(op, " workspace_service_tick")
+	}
+	if !found {
+		t.Fatal("a quiescent tick did not tick workspace services")
+	}
+}
