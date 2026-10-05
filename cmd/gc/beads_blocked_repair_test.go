@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -278,5 +279,76 @@ func TestBlockedRepairScopesSkipStoresGCDoesNotOwn(t *testing.T) {
 	}
 	if blockedRepairScopeEligible(city, cfg, city) {
 		t.Fatal("a file-provider city scope was selected for a bd repair")
+	}
+}
+
+// TestBlockedRepairRunsScopesInParallelWithinTheBound pins the startup-cost
+// shape: recomputes overlap, never more than blockedRepairParallelism at once,
+// and the run announces how many scopes it is repairing before it starts.
+func TestBlockedRepairRunsScopesInParallelWithinTheBound(t *testing.T) {
+	var mu sync.Mutex
+	inFlight, peak := 0, 0
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "version":
+			return []byte("bd version 1.3.2 (x)\n"), nil
+		case "config":
+			if args[1] == "get" {
+				return []byte(`{"value":""}`), nil
+			}
+			return nil, nil
+		case "recompute-blocked":
+			mu.Lock()
+			inFlight++
+			if inFlight > peak {
+				peak = inFlight
+			}
+			reached := peak == blockedRepairParallelism
+			mu.Unlock()
+			if reached {
+				releaseOnce.Do(func() { close(release) })
+			}
+			<-release
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+			return []byte(`{"rows_corrected": 1}`), nil
+		}
+		return nil, errors.New("unexpected bd call")
+	}
+	var scopes []blockedRepairScope
+	for i := 0; i < 2*blockedRepairParallelism; i++ {
+		scopes = append(scopes, blockedRepairScope{id: fmt.Sprintf("rig/r%d", i), root: fmt.Sprintf("/r%d", i)})
+	}
+	rec := events.NewFake()
+	var stderr bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runBlockedRepair(scopes, blockedRepairDeps{
+			openStore:    func(s blockedRepairScope) *beads.BdStore { return beads.NewBdStore(s.root, runner) },
+			openRecorder: func() (events.Recorder, func()) { return rec, func() {} },
+		}, &stderr, "gc start")
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("recomputes never reached the parallelism bound together")
+	}
+	if peak != blockedRepairParallelism {
+		t.Fatalf("peak concurrent recomputes = %d, want %d", peak, blockedRepairParallelism)
+	}
+	out := stderr.String()
+	if !strings.HasPrefix(out, fmt.Sprintf("gc start: repairing blocked flags in %d scope(s)", len(scopes))) {
+		t.Fatalf("progress line missing or not first: %q", out)
+	}
+	if !strings.Contains(out, fmt.Sprintf("finished for %d of %d scope(s)", len(scopes), len(scopes))) || len(rec.Events) != len(scopes) {
+		t.Fatalf("stderr=%q events=%d, want every scope repaired", out, len(rec.Events))
+	}
+	// Results print in scope order whatever order the recomputes finished in.
+	if strings.Index(out, "rig/r0 ") > strings.Index(out, "rig/r7 ") {
+		t.Fatalf("results not in scope order: %q", out)
 	}
 }

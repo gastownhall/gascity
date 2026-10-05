@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -49,8 +51,17 @@ type blockedRepairDeps struct {
 //
 // It runs once per gc-owned, Dolt-backed bd scope per bd version: on the first
 // start after the scope's bd changes, or when the scope carries no marker. It
-// never blocks startup. A failure is a warning, and since the marker is written
+// never fails startup. A failure is a warning, and since the marker is written
 // only after a successful recompute, the next start retries it.
+//
+// It runs in the foreground, before agents start, on purpose. Scopes are
+// repaired in parallel (blockedRepairParallelism), so the wait is the slowest
+// scope, not the sum. In the background, agents would write to a store whose
+// column is being rewritten wholesale. bd refuses the recompute over a dirty
+// working set, so a racing write turns the repair into a warning, and the
+// hidden work stays hidden until the next start, which may be days away.
+// Repairing first also means the controller's first dispatch tick already
+// sees the corrected column.
 func repairBlockedFlagsOnUpgrade(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) {
 	if gcDoltSkip() || cfg == nil {
 		return
@@ -119,9 +130,47 @@ func blockedRepairScopeEligible(cityPath string, cfg *config.City, scopeRoot str
 	return !initScopeUsesExternalDolt(cityPath, scopeRoot, cfg)
 }
 
-// runBlockedRepair visits each scope independently: one scope's failure never
-// stops the others.
+// blockedRepairParallelism bounds how many scopes probe or recompute at once.
+// Each recompute is one bd subprocess holding one connection to its scope's
+// Dolt; four keeps a many-rig city's first start short without stampeding a
+// shared server.
+const blockedRepairParallelism = 4
+
+// runBlockedRepair probes every scope, then recomputes the ones whose marker
+// does not name the running bd, both phases bounded by
+// blockedRepairParallelism. Scopes are independent: one scope's failure never
+// stops the others. Output is printed in scope order once each phase is done.
 func runBlockedRepair(scopes []blockedRepairScope, d blockedRepairDeps, stderr io.Writer, cmdName string) {
+	stores := make([]*beads.BdStore, len(scopes))
+	for i, scope := range scopes {
+		stores[i] = d.openStore(scope)
+	}
+	plans := make([]blockedRepairPlan, len(scopes))
+	forEachBounded(len(scopes), blockedRepairParallelism, func(i int) {
+		plans[i] = planBlockedRepair(stores[i])
+	})
+	var due []int
+	for i, plan := range plans {
+		switch {
+		case plan.err != nil:
+			warnBlockedRepairFailed(stderr, cmdName, scopes[i], plan.err)
+		case plan.due:
+			due = append(due, i)
+		}
+	}
+	if len(due) == 0 {
+		return
+	}
+
+	started := time.Now()
+	fmt.Fprintf(stderr, "%s: repairing blocked flags in %d scope(s) after a bd version change (beads#7037)...\n", cmdName, len(due)) //nolint:errcheck // best-effort stderr
+	outcomes := make([]blockedRepairOutcome, len(due))
+	errs := make([]error, len(due))
+	forEachBounded(len(due), blockedRepairParallelism, func(k int) {
+		i := due[k]
+		outcomes[k], errs[k] = applyBlockedRepair(stores[i], plans[i].bdVersion)
+	})
+
 	var rec events.Recorder
 	var closeRec func()
 	defer func() {
@@ -129,15 +178,15 @@ func runBlockedRepair(scopes []blockedRepairScope, d blockedRepairDeps, stderr i
 			closeRec()
 		}
 	}()
-	for _, scope := range scopes {
-		outcome, err := repairBlockedFlagsForScope(d.openStore(scope))
-		if err != nil {
-			fmt.Fprintf(stderr, "%s: warning: is_blocked repair for %s did not run, will retry on next start: %v (to repair by hand: bd recompute-blocked in %s)\n", cmdName, scope.id, err, scope.root) //nolint:errcheck // best-effort stderr
+	repaired := 0
+	for k, i := range due {
+		scope := scopes[i]
+		if errs[k] != nil {
+			warnBlockedRepairFailed(stderr, cmdName, scope, errs[k])
 			continue
 		}
-		if !outcome.ran {
-			continue
-		}
+		repaired++
+		outcome := outcomes[k]
 		fmt.Fprintf(stderr, "%s: recomputed is_blocked for %s under bd %s: %d rows corrected\n", cmdName, scope.id, outcome.bdVersion, outcome.rowsCorrected) //nolint:errcheck // best-effort stderr
 		if outcome.markerErr != nil {
 			fmt.Fprintf(stderr, "%s: warning: is_blocked repair for %s: recording marker %s failed, will rerun on next start: %v\n", cmdName, scope.id, blockedRepairMarkerKey, outcome.markerErr) //nolint:errcheck // best-effort stderr
@@ -147,6 +196,28 @@ func runBlockedRepair(scopes []blockedRepairScope, d blockedRepairDeps, stderr i
 		}
 		recordBlockedRecomputed(rec, scope, outcome)
 	}
+	fmt.Fprintf(stderr, "%s: blocked-flag repair finished for %d of %d scope(s) in %s\n", cmdName, repaired, len(due), time.Since(started).Round(time.Millisecond)) //nolint:errcheck // best-effort stderr
+}
+
+func warnBlockedRepairFailed(stderr io.Writer, cmdName string, scope blockedRepairScope, err error) {
+	fmt.Fprintf(stderr, "%s: warning: is_blocked repair for %s did not run, will retry on next start: %v (to repair by hand: bd recompute-blocked in %s)\n", cmdName, scope.id, err, scope.root) //nolint:errcheck // best-effort stderr
+}
+
+// forEachBounded calls fn(0..n-1) with at most limit calls in flight and
+// returns when all have returned.
+func forEachBounded(n, limit int, fn func(int)) {
+	sem := make(chan struct{}, limit)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			fn(i)
+		}(i)
+	}
+	wg.Wait()
 }
 
 func recordBlockedRecomputed(rec events.Recorder, scope blockedRepairScope, outcome blockedRepairOutcome) {
@@ -168,7 +239,6 @@ func recordBlockedRecomputed(rec events.Recorder, scope blockedRepairScope, outc
 
 // blockedRepairOutcome is what one scope's repair did.
 type blockedRepairOutcome struct {
-	ran           bool
 	bdVersion     string
 	rowsCorrected int
 	// markerErr is a failure to record the marker after a successful
@@ -176,31 +246,39 @@ type blockedRepairOutcome struct {
 	markerErr error
 }
 
-// repairBlockedFlagsForScope runs the recompute when the scope's marker does not
-// name the running bd version, then records that version as the marker. A bd
-// that predates `bd recompute-blocked` is skipped without a marker, so the
-// repair runs once the scope's bd is upgraded.
-func repairBlockedFlagsForScope(store *beads.BdStore) (blockedRepairOutcome, error) {
+// blockedRepairPlan is one scope's probe result.
+type blockedRepairPlan struct {
+	due       bool
+	bdVersion string
+	err       error
+}
+
+// planBlockedRepair reports whether the scope's marker does not name the
+// running bd version. A bd that predates `bd recompute-blocked` is never due
+// (and gets no marker), so the repair runs once the scope's bd is upgraded.
+func planBlockedRepair(store *beads.BdStore) blockedRepairPlan {
 	version, err := store.BDVersion()
 	if err != nil {
-		return blockedRepairOutcome{}, err
+		return blockedRepairPlan{err: err}
 	}
 	if deps.CompareVersions(version, beads.RecomputeBlockedMinBDVersion) < 0 {
-		return blockedRepairOutcome{}, nil
+		return blockedRepairPlan{}
 	}
 	marker, err := store.ConfigGet(blockedRepairMarkerKey)
 	if err != nil {
-		return blockedRepairOutcome{}, err
+		return blockedRepairPlan{err: err}
 	}
-	if strings.TrimSpace(marker) == version {
-		return blockedRepairOutcome{}, nil
-	}
+	return blockedRepairPlan{due: strings.TrimSpace(marker) != version, bdVersion: version}
+}
+
+// applyBlockedRepair runs the recompute, then records version as the scope's
+// marker. The marker is written only after a successful recompute.
+func applyBlockedRepair(store *beads.BdStore, version string) (blockedRepairOutcome, error) {
 	rows, err := store.RecomputeBlocked()
 	if err != nil {
 		return blockedRepairOutcome{}, err
 	}
 	return blockedRepairOutcome{
-		ran:           true,
 		bdVersion:     version,
 		rowsCorrected: rows,
 		markerErr:     store.ConfigSet(blockedRepairMarkerKey, version),
