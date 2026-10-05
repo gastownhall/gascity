@@ -176,6 +176,74 @@ executed tests use the pinned test `PATH`, so Go must be at `/usr/local/go`
 `--test_env=PATH` in `.bazelrc.local` works but gives your machine its own
 action keys, so nothing CI ran is a hit.
 
+### Re-pinning the RBE worker host
+
+Every action's key carries `worker-env`, the sha256 of
+`tools/rbe/worker-env.txt` (`//platforms:rbe_worker`). That file is the
+manifest of the Blacksmith host the pool workers run on: OS, arch, Go,
+dolt, and the dpkg versions of the worker toolset. rbe-west's oss and
+oss-fork schedulers match `worker-env` exactly. The default instance
+ignores it. Each worker advertises the hash of the host it measures
+(`tools/rbe/worker-env`). An action runs only on a worker whose host is
+the pinned one.
+
+The measurement is stable while the Blacksmith image is. The worker
+installs its toolset from the image's own apt lists (no `apt-get
+update`) and Go and dolt by checksum. It changes with an image refresh,
+or with a change to the toolset, Go or dolt. That is drift, and it is
+loud (`tools/rbe/worker-env-drift`):
+
+- A drifted worker still registers, advertising the hash it measured.
+  The pools are shared with beads, whose actions send no `worker-env`
+  and still run on it. gascity's actions carry the pin and never match
+  it.
+- The pool run's measurement step fails, with the diff and the manifest
+  and pin to commit in the step summary. The worker keeps serving. The
+  run's `await-drift` and `report-drift` jobs open or update the GitHub
+  issue labelled `rbe-worker-env-drift`, titled
+  `rbe worker-env drift: <pin>`.
+- That issue is the farm's signal too. While any open
+  `rbe-worker-env-drift` issue exists, each rbe-west pool scaler caps
+  its pool at `NLPOOL_DRIFT_MAX_WORKERS` (default 2), so the unmatched
+  queue can't drive the pool to 16 VMs. Keep that label, and keep the
+  issue open until the re-pin lands.
+- While the issue is open, remote `bazel-test` and `bazel` (bazel.yml)
+  runs on its pin fail at their preflight instead of queueing.
+- `rbe-worker-env-canary.yml` measures a Blacksmith runner every six
+  hours, so drift usually opens the issue before CI meets it.
+- A change to the worker host (`tools/rbe/worker-env*`,
+  `blacksmith-worker.sh`, `platforms/BUILD.bazel`) is measured on the
+  Blacksmith image in the required `bazel test` job (and in bazel.yml's
+  `bazel / unit` lane). If the PR's manifest is not what that image
+  measures, the job fails.
+
+To re-pin, anyone with write access:
+
+1. Take the manifest and pin line from the drift issue, or from the
+   failed run's step summary.
+2. Commit the manifest as `tools/rbe/worker-env.txt` and the pin in
+   `platforms/BUILD.bazel`. `go test ./scripts/ -run RBEWorkerEnv`
+   checks that they agree with each other, `go.mod` and the toolset.
+3. Open the PR. Pool workers run the default branch's provisioning, so
+   the new pin isn't reliably served before it merges, and
+   `bazel test` (and every bazel.yml lane) skips the remote suite. It
+   measures its own Blacksmith host against the new manifest instead
+   (bazel.yml: the unit lane), and fails if they differ.
+4. Merge. The canary runs on the merge and closes the issues of
+   superseded pins, which lifts the farm's cap. Don't close the drift
+   issue before the re-pin lands.
+
+A re-pin is a new key for every action. The first runs after it miss
+the cache entirely and re-execute everything on the new host, which is
+the point: no result from the old host is served for the new one.
+
+A worker that measures an earlier pin is on a stale image (the tail of
+a rollout, or a rollback). It still serves, and opens no issue. If
+every worker is stale, Blacksmith rolled the image back: revert the
+re-pin.
+If an issue stays open for the current pin while hosts match again,
+close it by hand.
+
 ## The outcome: protected PR feedback in under five minutes
 
 The developer-visible service-level objective is p95 **under five minutes**

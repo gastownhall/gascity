@@ -54,8 +54,9 @@ func TestRBEWorkerScriptForkTier(t *testing.T) {
 		// zstd needs the dedicated zread host: the worker's own endpoint
 		// answers compressed reads with InvalidArgument (no fallback), so the
 		// worker exits before installing anything rather than register.
+		// Indented: measure mode (no farm host) skips the farm checks.
 		`if [ "$wire_zstd" = true ] && [ "$ZSTD_READ_URL" = "grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT}" ]; then`,
-		"\texit 2\nfi\n",
+		"\t\texit 2\n\tfi\nfi\n",
 		"sudo DEBIAN_FRONTEND=noninteractive",
 		`if [ "$ACTION_ISOLATION" = canary ]; then`,
 		"\t\tNETNS=${NETNS:-0}\n",
@@ -124,9 +125,11 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 		t.Errorf("permissions %v, want contents: read only", wf.Permissions)
 	}
 
+	// The worker-env drift jobs beside it, and its measure step, are
+	// TestRBEPoolWorkflowsReportDriftWhileServing's.
 	job, ok := wf.Jobs["worker"]
-	if !ok || len(wf.Jobs) != 1 {
-		t.Fatalf("%s: jobs %v, want worker alone", rbeForkPoolWorkflow, rbeSortedKeys(wf.Jobs))
+	if !ok || len(wf.Jobs) != 3 {
+		t.Fatalf("%s: jobs %v, want worker, await-drift and report-drift", rbeForkPoolWorkflow, rbeSortedKeys(wf.Jobs))
 	}
 	// Blacksmith donates this compute for our OSS repos' workflows; the
 	// default branch only, as rbe-worker-pool.yml.
@@ -150,7 +153,7 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 				t.Errorf("checkout must set persist-credentials: false, got %v", step.With["persist-credentials"])
 			}
 		}
-		if strings.TrimSpace(step.Run) != rbeWorkerScript {
+		if strings.TrimSpace(step.Run) != rbeWorkerScript || step.Env["WORKER_MODE"] == "measure" {
 			continue
 		}
 		worker = true
