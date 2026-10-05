@@ -405,6 +405,8 @@ func TestIsBundledSourceAtCanonicalPin(t *testing.T) {
 		{"legacy gascity.git gastown at public pin", legacyGastownSource, publicGastownCommit, false},
 		{"non-bundled URL", "https://github.com/example/other.git//pack", gascityGitCommit, false},
 		{"empty commit", coreSource, "", false},
+		{"core at superseded gascity.git canonical pin", coreSource, lastSupersededCommit(SupersededBundledPackImportVersions), true},
+		{"public gastown at superseded public pin", PublicGastownPackSource, lastSupersededCommit(SupersededPublicGastownPackVersions), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -413,6 +415,55 @@ func TestIsBundledSourceAtCanonicalPin(t *testing.T) {
 			}
 		})
 	}
+}
+
+func lastSupersededCommit(pins []string) string {
+	if len(pins) == 0 {
+		return ""
+	}
+	return strings.TrimPrefix(pins[len(pins)-1], "sha:")
+}
+
+// TestSupersededGascityGitPinServesEmbeddedContent pins the upgrade path for
+// a city whose core/bd/dolt imports carry a superseded gascity.git canonical
+// pin (every city created by gc through v1.5.0 carries sha:f895c0ff47). Those
+// pins only ever meant "the pack bundled with gc": the commit itself holds
+// June 2026 content. Config load must keep serving the running binary's
+// embedded content offline, with or without a lock entry, instead of failing
+// until "gc doctor --fix" and pointing at "gc import install", which fetched
+// the stale commit from git.
+func TestSupersededGascityGitPinServesEmbeddedContent(t *testing.T) {
+	source := bundledPackSource()
+	superseded := lastSupersededCommit(SupersededBundledPackImportVersions)
+	if superseded == "" || superseded == canonicalBundledCommit(source) {
+		t.Fatalf("superseded pin %q must be set and differ from the canonical pin", superseded)
+	}
+
+	t.Run("locked", func(t *testing.T) {
+		home, cityDir := setupBundledImportTest(t)
+		writeBundledImportLock(t, cityDir, source, superseded)
+		got, err := resolveInstalledRemoteImport(source, "sha:"+superseded, cityDir, false)
+		if err != nil {
+			t.Fatalf("resolveInstalledRemoteImport at superseded gascity.git pin: %v", err)
+		}
+		if want := bundledRepoCacheDir(home, source, superseded); got != want {
+			t.Fatalf("cacheDir = %q, want %q", got, want)
+		}
+		if err := builtinpacks.ValidateSyntheticRepo(got, builtinpacks.Repository, superseded); err != nil {
+			t.Fatalf("superseded pin was not served from embedded content: %v", err)
+		}
+	})
+
+	t.Run("declared without lock", func(t *testing.T) {
+		_, cityDir := setupBundledImportTest(t)
+		got, err := resolveInstalledRemoteImport(source, "sha:"+superseded, cityDir, false)
+		if err != nil {
+			t.Fatalf("resolveInstalledRemoteImport without lock: %v", err)
+		}
+		if err := builtinpacks.ValidateSyntheticRepoFast(got, builtinpacks.Repository, superseded); err != nil {
+			t.Fatalf("superseded declared pin was not served from embedded content: %v", err)
+		}
+	})
 }
 
 // TestBundledSourcePinnedVersionNormalizesSpellings pins the canonical-pin
