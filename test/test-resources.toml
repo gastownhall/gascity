@@ -10,7 +10,7 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 736
+baseline_calls = 714
 baseline_files = 208
 reported_calls = 495
 reported_files = 135
@@ -23,7 +23,7 @@ expires = "2026-10-31"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 496
+baseline_calls = 484
 baseline_files = 177
 reported_calls = 447
 reported_files = 157
