@@ -116,8 +116,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 318
-baseline_files = 66
+baseline_calls = 319
+baseline_files = 67
 reported_calls = 255
 reported_files = 56
 owner_bead = "ga-cp3hwi"
@@ -414,6 +414,17 @@ resources = ["subprocess"]
 owner_bead = "ga-cp3hwi"
 invariant = "the fresh-merge composite action's behavior proof is a checked Medium subprocess owner"
 resource_owner = "the git and bash subprocesses are confined to TestFreshMergeActionBehaviour, which exists to run .github/actions/fresh-merge's own bash script against a scratch git origin (clean merge, workflow skew, conflict, head already containing the tip, unfetchable base): the script is git plumbing, so only real git can prove what it merges and when it fails"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestCacheZstdProbe"
+resources = ["http_test_server"]
+owner_bead = "ga-cp3hwi"
+invariant = "the anonymous-cache zstd probe's behavior proof is a checked Medium HTTP test server owner"
+resource_owner = "the loopback TLS HTTP/2 servers are confined to TestCacheZstdProbe, which exists to run tools/rbe/cache-zstd-probe.sh against a stand-in rbe-cache GetCapabilities (zstd advertised or not, gRPC and HTTP errors, malformed answers, a timeout): the probe is curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd"
 migration_target = "P0.4b"
 expires = "2026-10-31"
 
