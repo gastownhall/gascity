@@ -260,6 +260,53 @@ func TestStartDrift_KillSwitchInConfig_PreventsRestart(t *testing.T) {
 	}
 }
 
+// TestStartDrift_DifferentInstall_RefusesWithoutAllowFlag pins the
+// different-install refusal: when the running supervisor was launched from
+// another gc executable than the one being invoked and the two builds
+// differ, gc start refuses before it looks for drift, exits 1, and leaves
+// the supervisor alone. Restarting a supervisor can only relaunch its own
+// binary, so the operator is told to repoint it or to pass
+// --allow-supervisor-mismatch to proceed anyway.
+func TestStartDrift_DifferentInstall_RefusesWithoutAllowFlag(t *testing.T) {
+	requireLinuxProcExe(t)
+	tc := setupDriftDirectScenario(t)
+	prePID := readPidFromHealth(t, tc.supervisorPort)
+
+	// A second installation of the new build: the same bytes as the binary
+	// on disk at the supervisor's path, but a different file, so restarting
+	// the supervisor can never put it on this gc.
+	otherInstall := filepath.Join(filepath.Dir(tc.binaryPath), "gc-other-install")
+	installDriftBinary(t, tc.binaryPath, otherInstall)
+
+	out, exitCode, _ := runDriftCommand(t, otherInstall, tc.env, tc.cityDir,
+		"start", tc.cityDir)
+	if exitCode != 1 {
+		t.Fatalf("gc start from a different gc installation exit = %d, want 1\noutput:\n%s",
+			exitCode, out)
+	}
+	for _, want := range []string{
+		"refusing to hand the city to a supervisor running a different gc installation",
+		"--allow-supervisor-mismatch",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n%s", want, out)
+		}
+	}
+	// The refusal comes before the drift check: no drift report, no restart.
+	for _, unwanted := range []string{"Drift detected:", "Restarting supervisor"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("refused gc start still reached the drift path (%q):\n%s", unwanted, out)
+		}
+	}
+	if id := readBuildIDFromHealth(t, tc.supervisorPort); id != driftHappyOldCommit {
+		t.Errorf("supervisor build_id changed under the refusal: got %q, want %q (still old)",
+			id, driftHappyOldCommit)
+	}
+	if postPID := readPidFromHealth(t, tc.supervisorPort); postPID != prePID {
+		t.Errorf("supervisor PID changed under the refusal: pre=%d post=%d", prePID, postPID)
+	}
+}
+
 // TestStartDrift_PermissionDenied_DescriptiveError pins the behavior
 // when `/proc/<pid>/exe` cannot be read because the supervisor runs as
 // a different uid. The acceptance brief calls for a descriptive error
