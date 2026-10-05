@@ -20,9 +20,10 @@ config, run one command, start the city.
 
 ## Before you start
 
-- **Take a backup.** The migration retains the source verbatim and proves
-  equality before recording anything, but it is still the moment your city's
-  infrastructure state exists in two places. Back up the city directory.
+- **Take a backup.** The migration proves equality before recording anything,
+  and it backs up every work-store row before clearing it, but it is still the
+  moment your city's infrastructure state moves between stores. Back up the
+  city directory.
 - **Know which side you are on.** `gc storage status` answers it, read-only,
   and never creates the database it reports on.
 - **Rehearse the cutover.** `gc storage preflight` runs every check the
@@ -151,9 +152,30 @@ What the command does, in order:
 6. Closes the destination, reopens it, and proves field-level equality against
    the bytes on disk — not against the connection that wrote them.
 7. Records a proven-copy manifest, and only then the convergence marker.
+8. Clears the work store's copies of the beads it moved. Each row, with every
+   dependency edge touching it and that edge's payload, is first written to
+   `<binding root>/infra.retained-source.jsonl`; the file is re-read from disk
+   and proven equal to the rows it records; only then is a row removed.
 
-The source is never mutated. Nothing is deleted, moved, or pruned from the
-work store.
+Nothing in the work store changes before the marker: until step 7 the source is
+exactly as you left it, and the cutover can still be abandoned by a config
+edit. Past the marker the binding is the only authoritative copy, which is why
+step 8 exists — a copy left behind in the work store is served to every reader
+that reaches the work store first (`bd`, `gc hook`, the demand and claim
+surfaces), and a workflow step closed in the binding stays open there and is
+dispatched again and again.
+
+Step 8 changes only what it has to. A work bead whose blocking dependency
+points at a moved bead keeps that dependency, unless the binding has already
+closed the bead it waits on, in which case the dependency is released. Every
+other dependency from a work bead into a moved bead is kept. A backend that
+cannot keep such an edge once its target is gone is named on stderr, and the
+edge stays recorded in the backup.
+
+The command is idempotent. Run it again on a converged city and it re-proves
+convergence and finishes any clear that did not complete; that is also how a
+city migrated by gc 1.5.0, which kept the work store's copies, is repaired (see
+below).
 
 ## Step 5: start, and verify
 
@@ -163,17 +185,48 @@ gc storage status
 ```
 
 `status` reports the class map, the binding, the marker and manifest paths,
-how many infrastructure beads the retained source still holds, how many the
-binding itself holds right now, and — once converged — the proven-copy size,
-the stranded count, and how many the binding's own garbage collection has
-removed since cutover. It exits non-zero while the city is unconverged, so a
-deployment script can gate on it.
+how many infrastructure beads the work store still holds, the retained-source
+backup and how many beads it records, how many the binding itself holds right
+now, and — once converged — the proven-copy size, the stranded count, and the
+number of retained copies still in the work store. It exits non-zero while the
+city is unconverged, while it holds a stranded write, and while the work store
+still holds copies of beads the binding owns, so a deployment script can gate
+on it.
 
-Read the two census lines as a pair. The `source:` count does not change when
-a cutover succeeds — the migration copies and retains — so it is the `binding:`
-count that tells you whether anything is being served from the new store. On an
-unconverged city that line reads zero without the database being created to
+On a converged city `source:` reads 0 and `binding:` carries the count. On an
+unconverged city `binding:` reads zero without the database being created to
 learn it.
+
+## Upgrading a city migrated by gc 1.5.0
+
+gc 1.5.0's migration kept the work store's copies of every bead it moved. A
+city in that state refuses to start under this build:
+
+```
+gc start: this city converged on binding "infra", and its work store still
+holds N retained pre-migration cop(ies) of beads the binding now owns (...).
+Every reader that reaches the work store first is served those frozen copies,
+so finished workflow steps are dispatched again and again (#5987). Stop the
+city and clear them — each is backed up and proven before it is removed — with:
+gc storage migrate --from-work --fleet-stopped
+```
+
+That is the whole repair:
+
+```
+gc stop
+gc storage migrate --from-work --fleet-stopped
+gc start
+gc storage status
+```
+
+The command re-proves convergence, then runs step 8 above. Copies the binding's
+own garbage collection has since removed from the binding are cleared too:
+they are the frozen rows the demand surface would otherwise serve forever.
+
+If the city also holds a stranded write, the command names it and clears
+nothing; run `gc storage recover-stranded --from-work --fleet-stopped` first,
+then the migration again.
 
 ## Watching a cutover from outside
 
@@ -193,12 +246,12 @@ The last one is a verdict, not the absence of one, and it is why a subscriber
 can gate on these events at all: silence would otherwise be indistinguishable
 from a gate that crashed before deciding.
 
-`outcome` is finer than the event type. Four refusals — `unconverged`,
-`stranded`, `born-split-blocked` and `genesis-blocked` — all arrive as
-`storage.binding.unconverged`, because a subscriber branches on "is this city
-serving" and all four answer no. The `outcome` field says which no it was and
-`invariant` says why, so a consumer that switches on `outcome` must handle all
-eight values, not the five type names.
+`outcome` is finer than the event type. Five refusals — `unconverged`,
+`stranded`, `born-split-blocked`, `genesis-blocked` and `retained-copies` — all
+arrive as `storage.binding.unconverged`, because a subscriber branches on "is
+this city serving" and all five answer no. The `outcome` field says which no it
+was and `invariant` says why, so a consumer that switches on `outcome` must
+handle all nine values, not the five type names.
 
 `proven_beads` is zero on every refusal, where it means the size was not
 established rather than that the copy is empty. On `genesis` the zero is real.
@@ -257,10 +310,9 @@ you spell it still matters.
 > A city with no `[storage]` short-circuits at the top of the startup gate: no
 > plan is resolved, no binding is named, no marker is read, and no convergence
 > check runs at all. On a city that never cut over, that is harmless. On one
-> that did, the city starts cleanly and serves every infrastructure read from
-> the retained work store, while everything written since the marker stays in
-> the binding, unread. The two diverge from that boot onward and nothing says
-> so.
+> that did, the city starts cleanly against a work store that no longer holds
+> its infrastructure beads, while everything the city has is in the binding,
+> unread. Nothing says so.
 
 Spell the rollback as a class map instead:
 
@@ -295,7 +347,16 @@ emptiness.
 
 The check to run by hand is the marker: if
 `<binding path>/infra.migrated` exists, the city has cut over, and a config
-revert abandons whatever the binding holds.
+revert abandons whatever the binding holds. Once the work store has been
+cleared, a revert also starts the city with no infrastructure state at all: the
+pre-cutover rows are in `infra.retained-source.jsonl`, not in the work store.
+
+The clear also leaves `.gc/storage-infra-cleared.json` in the city directory.
+It is what stops a cleared city whose binding volume is not mounted from being
+mistaken for a new city with nothing to move: with the note present, a missing
+marker refuses the boot instead of creating an empty binding. Removing the note
+is your attestation that the binding's contents are recovered or deliberately
+abandoned.
 
 ## If this city cut over before edge payloads were carried
 
@@ -321,10 +382,12 @@ repair skips exactly the edges that are wrong. `gc storage preflight` returns
 at the convergence step on a converged city and never reaches the edge-payload
 check. Detection and a non-destructive repair are tracked as `ga-67pm3`.
 
-**What is not lost.** The migration retained the work store, so the original
-payload of every pre-cutover edge is still readable there. Every edge written
-to the binding after cutover went through the normal writer and carries its
-payload. The damage is bounded to the edge set the old copy carried.
+**What is not lost.** The original payload of every pre-cutover edge is still
+readable in the work store until it is cleared, and in
+`infra.retained-source.jsonl` after that — the clear records every edge with
+its payload. Every edge written to the binding after cutover went through the
+normal writer and carries its payload. The damage is bounded to the edge set
+the old copy carried.
 
 ### Re-converging, and what it costs
 
@@ -343,14 +406,20 @@ gc storage status   # read the `database:` line; its parent directory is what
                     # the next step removes
 gc stop
 rm -rf <binding root>/graph
-gc storage migrate --from-work --fleet-stopped
+gc storage migrate --from-backup --fleet-stopped
 gc start
 gc storage status
 ```
 
+`--from-backup` re-copies from `infra.retained-source.jsonl`. On a city whose
+work store was never cleared (one migrated by gc 1.5.0 and not yet repaired),
+use `--from-work` instead; the backup does not exist yet, and the re-copy ends
+by clearing the work store. With the backup present, `--from-work` refuses:
+the work store no longer holds the slice, and re-copying from it would rebuild
+an empty binding.
+
 > **Danger: this destroys every binding write made since cutover.**
-> The re-copy reads the retained work store, which is the state as of the
-> original cutover. Every infrastructure bead created since — and every edge
+> The re-copy reads the state as of the original cutover. Every infrastructure bead created since — and every edge
 > among them — exists only in the directory being removed. Take a filesystem
 > copy of the binding root first, and treat this as worth doing only where the
 > gate kinds matter more than that history.
@@ -362,16 +431,16 @@ key on.
 
 ## What a later boot keeps checking
 
-Convergence is not asserted once. Every boot re-checks that every
-infrastructure bead the retained source still holds is readable from the
-binding, classified against the recorded proven-copy manifest.
+Convergence is not asserted once. Every boot re-checks that the work store
+holds no infrastructure bead, and classifies any it finds against the recorded
+proven-copy manifest.
 
-- A bead the copy delivered that the binding no longer holds is the binding's
-  own garbage collection doing its job — expired closed workflows and read
-  mail — and is counted, not alarmed.
-- A bead the copy **never carried** is a write that landed in the source after
-  the equality proof. It becomes a blocked boot that names the ids, and the
-  beads are intact in the retained source. It never becomes silence.
+- A bead the copy **never carried** is a write that landed in the work store
+  after the equality proof. It becomes a blocked boot that names the ids, and
+  the beads are intact in the work store. It never becomes silence.
+- A bead the copy delivered that the work store still holds — a city migrated
+  by gc 1.5.0, or a clear that was interrupted — is a second row under an id
+  the binding owns. It becomes a blocked boot that names the repair command.
 - A check that could not run is reported as a failed check, not as a city that
   never converged, and the boot refuses rather than serving from a binding it
   could not verify.

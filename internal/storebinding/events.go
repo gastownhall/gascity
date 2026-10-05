@@ -28,16 +28,16 @@ type StorageBindingOutcomePayload struct {
 	// always populated once a binding exists.
 	Database string `json:"database"`
 	// Outcome names what was concluded, and it is FINER than the event type.
-	// Five types carry eight outcomes: not-configured, converged, genesis and
+	// Five types carry nine outcomes: not-configured, converged, genesis and
 	// uncheckable each have a type to themselves, while unconverged, stranded,
-	// born-split-blocked and genesis-blocked all arrive as
+	// born-split-blocked, genesis-blocked and retained-copies all arrive as
 	// storage.binding.unconverged.
 	//
 	// They share a type because a subscriber branches on "is this city serving"
-	// and all four answer no; they keep distinct outcomes because an operator
+	// and all five answer no; they keep distinct outcomes because an operator
 	// reading one event needs to know which no it was. A consumer switching on
-	// this field must handle all eight — matching only the five type names would
-	// silently drop three real values — and Invariant is the sentence that
+	// this field must handle all nine — matching only the five type names would
+	// silently drop four real values — and Invariant is the sentence that
 	// explains whichever one arrived.
 	Outcome string `json:"outcome"`
 	// ProvenBeads is the size of the proven-copy manifest a serving verdict

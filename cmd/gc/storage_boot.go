@@ -701,6 +701,7 @@ var storageBindingEventTypes = map[infraMigrationOutcome]string{
 	infraMigrationStranded:         events.StorageBindingUnconverged,
 	infraMigrationBornSplitBlocked: events.StorageBindingUnconverged,
 	infraMigrationGenesisBlocked:   events.StorageBindingUnconverged,
+	infraMigrationRetained:         events.StorageBindingUnconverged,
 	infraMigrationUncheckable:      events.StorageBindingUncheckable,
 }
 

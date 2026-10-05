@@ -361,8 +361,13 @@ func TestStorageStatusReportsBothSidesOfTheCutover(t *testing.T) {
 		t.Fatalf("status exited %d on a converged city: stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "source: 2 infrastructure bead(s) retained") {
-		t.Errorf("status does not report the retained source census: %q", out)
+	// The cutover cleared the work store's copies, so the source census
+	// reads zero and only the binding's count says what is being served.
+	if !strings.Contains(out, "source: 0 infrastructure bead(s) retained") {
+		t.Errorf("status does not report the cleared source census: %q", out)
+	}
+	if !strings.Contains(out, "retained-source backup: ") || !strings.Contains(out, "(2 cleared bead(s))") {
+		t.Errorf("status does not report the retained-source backup: %q", out)
 	}
 	if !strings.Contains(out, "binding: 1 infrastructure bead(s)") {
 		t.Errorf("status does not report what the binding itself holds, so the only count an operator gets is the source's — which is unchanged by a successful cutover: %q", out)

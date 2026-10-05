@@ -87,12 +87,19 @@ package main
 // would abandon everything on that volume. Absence of everything is not proof
 // of emptiness; it is usually proof that nobody looked.
 //
-// # Retained source
+// # The source after the marker
 //
-// The source is never mutated. There is no residue sweep and no delete-back:
-// the work store keeps its infrastructure rows verbatim, so rolling back is a
-// config swap with no data recovery step. That is the whole reason equality is
-// a separate, fail-closed stage rather than a side effect of the copy.
+// Nothing in the work store changes before the marker, so a rollback before
+// cutover is a config swap with no data recovery step. That is the whole reason
+// equality is a separate, fail-closed stage rather than a side effect of the
+// copy.
+//
+// Past the marker the binding is the only authoritative copy, and the work
+// store's rows are cleared (infra_class_clear.go): backed up beside the
+// manifest, the backup re-read and proven, and only then removed. Keeping them
+// — which this migration did until gc 1.5.1 — left every relocated bead living
+// twice under one id, and every reader that reaches the work store first was
+// served the frozen copy (#5987).
 //
 // # Writers, and the stranded-write window
 //
@@ -311,6 +318,14 @@ const (
 	// so serving, genesis and migration all refuse until the operator attests
 	// by removing the note.
 	infraMigrationGenesisBlocked
+	// infraMigrationRetained reports a converged city whose work store still
+	// holds its retained pre-migration copies: every relocated bead lives
+	// under one id in two stores, and every reader that reaches the work store
+	// first is served the frozen copy — which re-dispatches finished workflow
+	// steps forever (#5987). A city migrated by a build that kept the source
+	// is in this state until the operator command clears it, and boot refuses
+	// rather than serve it.
+	infraMigrationRetained
 )
 
 // String names the outcome for operator-visible diagnostics and test failures.
@@ -332,6 +347,8 @@ func (o infraMigrationOutcome) String() string {
 		return "born-split-blocked"
 	case infraMigrationGenesisBlocked:
 		return "genesis-blocked"
+	case infraMigrationRetained:
+		return "retained-copies"
 	}
 	return fmt.Sprintf("infraMigrationOutcome(%d)", int(o))
 }
@@ -393,6 +410,12 @@ type infraMigrationReport struct {
 	// established, or nil. A probe that could not run is not proof of anything,
 	// so it withholds the revert — and says why rather than going quiet.
 	BindingProbe error
+	// Retained holds the sorted ids of the retained work-store copies the
+	// retained-copies outcome found, for the refusal to count and sample.
+	Retained []string
+	// Clear is what the operator command's clear pass did, on the paths that
+	// ran one.
+	Clear infraClearResult
 }
 
 // serving reports whether this outcome leaves the binding safe to route reads
@@ -448,6 +471,13 @@ func infraMigrationOperatorAdvice(report infraMigrationReport, logPrefix string)
 		// repair is a separate, additive verb and not the migration again.
 		situation = fmt.Sprintf("%s: this city converged on binding %q, and the retained work store holds %d infrastructure bead(s) the binding cannot read: %s. The named beads are intact in the retained work store. Stop every writer and copy them into the binding with:  %s. Re-check with `gc storage status`, which exits zero once the binding contains them.",
 			logPrefix, report.Target.Binding, len(report.Stranded), infraStrandedIDList(report.Stranded), storageRecoveryInstruction())
+	case infraMigrationRetained:
+		cause := ""
+		if report.Fault != nil {
+			cause = fmt.Sprintf(" The last attempt to clear them stopped: %v.", report.Fault)
+		}
+		situation = fmt.Sprintf("%s: this city converged on binding %q, and its work store still holds %d retained pre-migration cop(ies) of beads the binding now owns (%s). Every reader that reaches the work store first is served those frozen copies, so finished workflow steps are dispatched again and again (#5987).%s Stop the city and clear them — each is backed up and proven before it is removed — with:  %s",
+			logPrefix, report.Target.Binding, len(report.Retained), infraStrandedIDList(report.Retained), cause, storageClearInstruction())
 	case infraMigrationUncheckable:
 		// The fault is repeated here rather than left on stderr because this
 		// sentence is what a supervisor records and what the event carries, and
@@ -807,8 +837,12 @@ func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPref
 		// that never converged and the revert stays withheld by the marker the
 		// evidence probe can still see. Its claim about the present does not
 		// hold, and only the operator command may act on that.
-		return say(infraMigrationUncheckable, fmt.Errorf("%s claims convergence but %s is gone; the binding cannot serve until the migration runs again",
-			target.MarkerPath(), target.Database))
+		remedy := storageClearInstruction()
+		if backedUp, err := infraPathExists(target.RetainedBackupPath()); err == nil && backedUp {
+			remedy = storageRecopyFromBackupInstruction()
+		}
+		return say(infraMigrationUncheckable, fmt.Errorf("%s claims convergence but %s is gone; the binding cannot serve until it is re-copied with:  %s",
+			target.MarkerPath(), target.Database, remedy))
 	}
 
 	// No marker. Either this city has infrastructure beads in the work store —
@@ -816,6 +850,13 @@ func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPref
 	// which is a genesis: the copy would move zero rows, prove equality
 	// vacuously, and record it. Doing exactly that here costs nothing and is
 	// what lets a brand-new city with a [storage] section start.
+	//
+	// Unless the work store was cleared into this binding: then an empty work
+	// store is the expected state of a converged city, and a missing marker
+	// means the binding is not where it should be.
+	if err := infraClearedNoteHold(cityPath, target); err != nil {
+		return say(infraMigrationUncheckable, err)
+	}
 	source, err := openInfraMigrationSource(cityPath)
 	if err != nil {
 		return say(infraMigrationUnconverged, fmt.Errorf("opening the work store to census infrastructure beads: %w", err))
@@ -1060,6 +1101,29 @@ func infraBindingRootEnumerable(root string) error {
 // to say what happened and why, on stderr; the revert is decided from the
 // binding afterwards, by infraBindingHoldsNothing.
 func runInfraClassMigration(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
+	return runInfraClassMigrationFrom(cityPath, target, infraMigrationFromWork, logPrefix, stderr)
+}
+
+// infraMigrationSource names where a copy reads the infrastructure slice from.
+type infraMigrationSource int
+
+const (
+	// infraMigrationFromWork copies out of the city work store: the cutover,
+	// and the re-copy of a stale binding whose work store was never cleared.
+	infraMigrationFromWork infraMigrationSource = iota
+	// infraMigrationFromBackup re-copies a stale binding from the
+	// retained-source backup a clear wrote, because the work store no longer
+	// holds the slice.
+	infraMigrationFromBackup
+)
+
+// runInfraClassMigrationFrom is runInfraClassMigration with the copy's source
+// stated. Every path that ends converged ends with the work store cleared of
+// the retained copies (see infra_class_clear.go): a fresh copy clears right
+// after its marker, and a converged city that still holds them — one migrated
+// by a build that kept the source, or a clear that was interrupted — is cleared
+// on the re-run.
+func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from infraMigrationSource, logPrefix string, stderr io.Writer) infraMigrationReport {
 	say := func(outcome infraMigrationOutcome, err error) infraMigrationReport {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		// The fault rides along so the outcome that could not decide can say what
@@ -1092,12 +1156,37 @@ func runInfraClassMigration(cityPath string, target infraBindingTarget, logPrefi
 		return say(infraMigrationUncheckable, err)
 	}
 
+	backedUp, err := infraPathExists(target.RetainedBackupPath())
+	if err != nil {
+		return say(infraMigrationUncheckable, fmt.Errorf("reading the retained-source backup: %w", err))
+	}
+	if from == infraMigrationFromBackup && state != infraConvergenceStale {
+		return say(infraMigrationUncheckable, fmt.Errorf("--%s re-copies only a binding whose database is gone (a convergence marker at %s with no %s); this binding is not in that state, so nothing was copied", storageFromBackupFlag, target.MarkerPath(), target.Database))
+	}
+
 	switch state {
 	case infraConvergenceMarked:
-		return confirmInfraConvergence(cityPath, target, logPrefix, stderr)
+		report := confirmInfraConvergence(cityPath, target, logPrefix, stderr)
+		if report.Outcome != infraMigrationRetained {
+			return report
+		}
+		return clearInfraRetainedCopiesReport(cityPath, target, report.ProvenBeads, logPrefix, stderr)
 	case infraConvergenceStale:
+		if backedUp && from == infraMigrationFromWork {
+			// The work store's copies were cleared into the backup, so a re-copy
+			// from it would rebuild a binding holding only what was written to
+			// the work store since — and the marker would bless it.
+			return say(infraMigrationUncheckable, fmt.Errorf("%s claims convergence but %s is gone, and this city's retained work-store copies were cleared into %s. Re-copying from the work store would rebuild an empty binding; re-copy from the backup instead:  %s",
+				target.MarkerPath(), target.Database, target.RetainedBackupPath(), storageRecopyFromBackupInstruction()))
+		}
 		fmt.Fprintf(stderr, "%s: %s claims convergence but %s is gone; re-running the copy\n", //nolint:errcheck // best-effort stderr
 			logPrefix, target.MarkerPath(), target.Database)
+	}
+
+	if state == infraConvergenceAbsent {
+		if err := infraClearedNoteHold(cityPath, target); err != nil {
+			return say(infraMigrationUncheckable, err)
+		}
 	}
 
 	// The one writer exclusion this can prove. A source another controller is
@@ -1107,11 +1196,19 @@ func runInfraClassMigration(cityPath string, target infraBindingTarget, logPrefi
 		return fail(fmt.Errorf("controller PID %d is live on this city and is still writing infrastructure beads to the work store; the copy cannot be proven against a source under mutation. Stop it (gc stop) and start again", pid))
 	}
 
-	source, err := openInfraMigrationSource(cityPath)
-	if err != nil {
-		return fail(fmt.Errorf("opening work store: %w", err))
+	var source beads.Store
+	if from == infraMigrationFromBackup {
+		source, err = openInfraBackupSource(target)
+		if err != nil {
+			return fail(fmt.Errorf("opening the retained-source backup: %w", err))
+		}
+	} else {
+		source, err = openInfraMigrationSource(cityPath)
+		if err != nil {
+			return fail(fmt.Errorf("opening work store: %w", err))
+		}
+		defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
 	}
-	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
 
 	writer, err := openInfraDestination(target)
 	if err != nil {
@@ -1164,12 +1261,68 @@ func runInfraClassMigration(cityPath string, target infraBindingTarget, logPrefi
 	if err := writeInfraMigratedMarker(target); err != nil {
 		return fail(err)
 	}
-	fmt.Fprintf(stderr, "%s: infrastructure classes migrated to %s (%d beads copied, source retained)\n", //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "%s: infrastructure classes migrated to %s (%d beads copied)\n", //nolint:errcheck // best-effort stderr
 		logPrefix, target.Database, imported)
 	// The manifest's size rather than the import count: the manifest is what
 	// every later verdict re-reads, so reporting anything else here would make
 	// the cutover's own event disagree with every boot that follows it.
-	return infraMigrationReport{Outcome: infraMigrationConverged, ProvenBeads: len(proven)}
+	//
+	// Past the marker the binding is authoritative, so the work store's copies
+	// are cleared now. A failure here leaves a converged city holding them,
+	// which boot refuses with the command that finishes the job — this one.
+	return clearInfraRetainedCopiesReport(cityPath, target, len(proven), logPrefix, stderr)
+}
+
+// clearInfraRetainedCopiesReport runs the clear on a converged city and maps
+// what it did to the report the operator command renders.
+func clearInfraRetainedCopiesReport(cityPath string, target infraBindingTarget, provenBeads int, logPrefix string, stderr io.Writer) infraMigrationReport {
+	result, err := clearRetainedInfraCopiesFn(cityPath, target)
+	if err != nil {
+		var unproven *infraUnprovenSourceRows
+		if errors.As(err, &unproven) {
+			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+			return infraMigrationReport{Outcome: infraMigrationStranded, Stranded: unproven.IDs, Clear: result}
+		}
+		fmt.Fprintf(stderr, "%s: clearing the retained work-store copies: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		retained, _ := infraRetainedIDs(cityPath, target)
+		return infraMigrationReport{Outcome: infraMigrationRetained, Retained: retained, Fault: err, Clear: result}
+	}
+	fmt.Fprintf(stderr, "%s: %s\n", logPrefix, describeInfraClear(result)) //nolint:errcheck // best-effort stderr
+	for _, edge := range result.Unrestorable {
+		fmt.Fprintf(stderr, "%s: WARNING: cross-store edge %s could not be kept in the work store after its target moved out; its dependent no longer waits on it. The edge is recorded in %s\n", logPrefix, edge, result.Backup) //nolint:errcheck // best-effort stderr
+	}
+	return infraMigrationReport{Outcome: infraMigrationConverged, ProvenBeads: provenBeads, Clear: result}
+}
+
+// clearRetainedInfraCopiesFn is the clear the operator command runs. Tests
+// replace it to build a city exactly as a build that retained its source left
+// it — the state every repair path starts from.
+var clearRetainedInfraCopiesFn = clearRetainedInfraCopies
+
+// infraRetainedIDs lists the work store's retained copies against the manifest,
+// best-effort, for a refusal to name.
+func infraRetainedIDs(cityPath string, target infraBindingTarget) ([]string, error) {
+	proven, recorded, err := readInfraCopyManifest(target)
+	if err != nil || !recorded {
+		return nil, err
+	}
+	source, err := openInfraMigrationSource(cityPath)
+	if err != nil {
+		return nil, err
+	}
+	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
+	rows, err := readInfraSnapshot(source)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, b := range rows {
+		if proven[b.ID] {
+			ids = append(ids, b.ID)
+		}
+	}
+	sort.Strings(ids)
+	return ids, nil
 }
 
 // infraConvergenceState is what the binding root says about whether this city
@@ -1268,6 +1421,9 @@ func confirmInfraConvergence(cityPath string, target infraBindingTarget, logPref
 		return reportUncheckableConvergence(target, logPrefix, stderr, err)
 	}
 	if len(gap.Stranded) == 0 {
+		if len(gap.Retained) > 0 {
+			return infraMigrationReport{Outcome: infraMigrationRetained, Retained: gap.Retained, ProvenBeads: len(proven)}
+		}
 		return infraMigrationReport{Outcome: infraMigrationConverged, ProvenBeads: len(proven)}
 	}
 	// The removed-since count is context for reading the strand, not a second
@@ -1321,6 +1477,12 @@ type infraContainmentGap struct {
 	// removal from any other cause leaves identical evidence and is therefore
 	// inside this count rather than distinguished from it.
 	RemovedSinceCutover int
+	// Retained holds the sorted ids of the work store's infrastructure rows
+	// that are NOT stranded: the copies the cutover retained (whether the
+	// binding still holds its own copy or its GC collected it), and any row a
+	// recovery proved into the binding. Every one is a second row under an id
+	// the binding owns, and the clear removes them.
+	Retained []string
 }
 
 // classifyInfraContainmentGap classifies every source infrastructure bead the binding
@@ -1339,15 +1501,18 @@ func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, pro
 	if err != nil {
 		return infraContainmentGap{}, err
 	}
-	if len(rows) == 0 {
-		return infraContainmentGap{}, nil
-	}
 
+	// Opened even when the work store holds nothing to classify — the normal
+	// state of a cleared city — so a converged verdict always rests on a
+	// binding this check actually read.
 	destination, err := openInfraBindingReadOnly(target)
 	if err != nil {
 		return infraContainmentGap{}, fmt.Errorf("opening binding %q at %s: %w", target.Binding, target.Database, err)
 	}
 	defer closeBeadStoreHandle(destination) //nolint:errcheck // best-effort close
+	if len(rows) == 0 {
+		return infraContainmentGap{}, nil
+	}
 
 	copied, err := destination.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
 	if err != nil {
@@ -1360,15 +1525,18 @@ func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, pro
 	gap := infraContainmentGap{}
 	for _, b := range rows {
 		if have[b.ID] {
+			gap.Retained = append(gap.Retained, b.ID)
 			continue
 		}
 		if proven[b.ID] {
 			gap.RemovedSinceCutover++
+			gap.Retained = append(gap.Retained, b.ID)
 			continue
 		}
 		gap.Stranded = append(gap.Stranded, b.ID)
 	}
 	sort.Strings(gap.Stranded)
+	sort.Strings(gap.Retained)
 	return gap, nil
 }
 

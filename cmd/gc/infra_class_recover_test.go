@@ -57,7 +57,10 @@ func convergedRecoveryCity(t *testing.T) (cityPath string, cfg *config.City, sou
 
 	cfg = infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
 	var log bytes.Buffer
-	if got := migrateInfraClasses(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+	// Migrated the way a build that kept its source did: strands and the
+	// residue this repair handles are the state such a city reaches, and the
+	// cutover's own rows are still in the work store beside them.
+	if got := migrateInfraClassesRetainingSource(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
 		t.Fatalf("cutover outcome = %v, want converged; log: %s", got.Outcome, log.String())
 	}
 	return cityPath, cfg, source, mustResolveInfraTarget(t, cityPath, cfg)

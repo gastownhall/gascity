@@ -181,7 +181,7 @@ func newStorageRecoverCmd(surface storageCommandSurface, stdout, stderr io.Write
 	)
 	cmd := &cobra.Command{
 		Use:          surface.Verb,
-		Short:        "Copy stranded infrastructure beads from the retained work store into the converged binding",
+		Short:        "Copy stranded infrastructure beads from the work store into the converged binding",
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		Long: `Copy the infrastructure beads a converged city's proven copy never carried
@@ -197,7 +197,10 @@ It refuses on a city that has NOT converged — the whole copy is still owed
 there, and ` + "`" + storageMigrationCommand + "`" + ` is what owes it. It is not that
 command run twice: the migration is one-shot on purpose, and forcing it to
 re-copy would re-import a serving binding from a source that no longer holds
-what the binding does.`,
+what the binding does.
+
+The recovered beads stay in the work store until the migration is run again,
+which clears them exactly as it clears the cutover's own copies.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !fromWork {
 				fmt.Fprintf(stderr, "gc %s %s: pass --%s. The source is stated explicitly rather than detected, exactly as the migration states it\n", //nolint:errcheck // best-effort stderr
@@ -1023,6 +1026,13 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	reportAmbiguous(stdout, ambiguous)
 	if len(residual.Stranded) > 0 || len(ambiguous) > 0 || len(plan.dropped) > 0 || len(plan.unstatable) > 0 || len(unprovable) > 0 {
 		return 1
+	}
+	// The recovered rows are now proven into the binding and still in the work
+	// store: second rows under ids the binding owns, which boot refuses until
+	// they are cleared. This command only ever adds, so it names the one that
+	// clears rather than doing it.
+	if len(residual.Retained) > 0 {
+		fmt.Fprintf(stdout, "next: the work store still holds %d cop(ies) of beads the binding now owns; clear them with `%s`\n", len(residual.Retained), storageClearInstruction()) //nolint:errcheck // best-effort stdout
 	}
 	return 0
 }

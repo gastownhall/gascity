@@ -261,8 +261,8 @@ func TestBootGateTakesTheCensus(t *testing.T) {
 // The same gate, on the city shape that actually shipped: one bead carried
 // across under its original work id. The boot must observe it and keep probing.
 func TestBootGateKeepsTheProbeForACityThatMigratedWork(t *testing.T) {
-	cityPath, cfg, source, _ := convergedInfraCity(t)
-	carried := infraStoreFingerprint(t, source)
+	cityPath, cfg, _, target := convergedInfraCity(t)
+	carried := manifestIDs(t, target)
 	if len(carried) == 0 {
 		t.Fatal("the converged fixture migrated nothing, so this row cannot distinguish an observed relic from the pessimistic default")
 	}
@@ -297,8 +297,8 @@ func TestBootGateKeepsTheProbeForACityThatMigratedWork(t *testing.T) {
 // bug lived in the gap between the fixtures that seed OPEN relics and the ones
 // that hold none at all.
 func TestBootCensusKeepsTheProbeForAClosedRelic(t *testing.T) {
-	cityPath, cfg, source, _ := convergedInfraCity(t)
-	carried := infraStoreFingerprint(t, source)
+	cityPath, cfg, _, target := convergedInfraCity(t)
+	carried := manifestIDs(t, target)
 	if len(carried) != 1 {
 		t.Fatalf("the converged fixture carried %d beads across, want exactly 1 so closing it empties the OPEN population outright", len(carried))
 	}
@@ -338,8 +338,8 @@ func TestBootCensusKeepsTheProbeForAClosedRelic(t *testing.T) {
 // back at the open list is the .19 bug. This row holds both ends apart on one
 // city at one moment.
 func TestClosingTheLastRelicDrainsTheCountAndKeepsTheProbe(t *testing.T) {
-	cityPath, cfg, source, _ := convergedInfraCity(t)
-	carried := infraStoreFingerprint(t, source)
+	cityPath, cfg, _, target := convergedInfraCity(t)
+	carried := manifestIDs(t, target)
 	if len(carried) != 1 {
 		t.Fatalf("the converged fixture carried %d beads across, want exactly 1", len(carried))
 	}
@@ -375,8 +375,8 @@ func TestClosingTheLastRelicDrainsTheCountAndKeepsTheProbe(t *testing.T) {
 // for weeks looks exactly like one that retired it, and there is nothing to
 // point at when asking why every read costs two.
 func TestStorageStatusCountsTheOpenRelics(t *testing.T) {
-	cityPath, cfg, source, _ := convergedInfraCity(t)
-	carried := infraStoreFingerprint(t, source)
+	cityPath, cfg, _, target := convergedInfraCity(t)
+	carried := manifestIDs(t, target)
 	if len(carried) != 1 {
 		t.Fatalf("the converged fixture carried %d beads across, want exactly 1 so the printed count is unambiguous", len(carried))
 	}
