@@ -6,10 +6,10 @@ import (
 	"github.com/gastownhall/gascity/internal/resilience"
 )
 
-// The allocator's start budget (CONTRACT C5.7, C5.9 as amended by AM5): one
-// token bucket for creates and wakes, the city in-flight cap, and the
-// endpoint capacity breaker. The bucket refills by time, not by pass, so
-// per-event passes cannot multiply the start rate (design §4a). The
+// The allocator's start budget (CONTRACT C5.7, C5.9 as amended by AM5 and
+// C6): one token bucket for grants (a create costs none), the city in-flight
+// cap, and the endpoint capacity breaker. The bucket refills by time, not by
+// pass, so per-event passes cannot multiply the start rate (design §4a). The
 // allocator is its only reader and writer, so it needs no lock.
 //
 // Unwired in this slice: P3-5b's admission walk calls admitStart, and P3-7
@@ -58,7 +58,8 @@ func (b bucketState) debit(cost int) (bucketState, bool) {
 	return b, true
 }
 
-// refund returns n tokens: a release, or a failure before provider Start.
+// refund returns n tokens: a grant released before any key issued it, the
+// only refund (C5.7).
 func (b bucketState) refund(n, capacity int) bucketState {
 	b.Tokens += n
 	return b.capped(capacity)
@@ -111,13 +112,13 @@ func endpointGateOf(g *endpointCapacityGuard, k endpointKey) endpointGate {
 	return gateProbe
 }
 
-// admitStart reports whether one more start costing cost may be reserved
-// (AM5): the bucket holds cost, the city has fewer than limit starts in
+// admitStart reports whether one more start may be reserved (AM5, C5.9):
+// the bucket holds its one token, the city has fewer than limit starts in
 // flight, and k's gate admits: closed admits, a probe gate admits only while
 // k has nothing outstanding, a shut gate admits nothing. A create is admitted
 // on the same test for its row's first grant.
-func admitStart(b bucketState, cost, inFlight, limit int, gate endpointGate, outstanding int) bool {
-	if b.Tokens < cost || inFlight >= limit {
+func admitStart(b bucketState, inFlight, limit int, gate endpointGate, outstanding int) bool {
+	if b.Tokens < 1 || inFlight >= limit {
 		return false
 	}
 	switch gate {
@@ -134,7 +135,7 @@ func admitStart(b bucketState, cost, inFlight, limit int, gate endpointGate, out
 // (it clears at once and represents nothing). A landed grant counts until its
 // marker clears it; from then the census row's start lease counts it.
 func ledgerCounts(e ledgerEntry) bool {
-	return e.Kind != kindVeto && (e.State != ledgerFailed || e.WroteRow)
+	return e.State != ledgerFailed || e.WroteRow
 }
 
 // cityInFlight counts starts in flight city-wide (START-003), once per effect

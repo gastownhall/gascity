@@ -401,6 +401,9 @@ testing philosophy and tier boundaries.
 
 - [Health Patrol](health-patrol.md) -- reconciliation state machine,
   crash loop quarantine, idle tracking, and order dispatch details
+- [Session Reconciler v2](reconciler-v2.md) -- the keyed reconciler
+  behind `[daemon] session_reconciler`: queue, router, exclusivity, the
+  per-tick `reconcile_queue` record, and the A1-A17 guarantees
 - [Architecture glossary](glossary.md) -- authoritative definitions
   of controller, pool, provider, rig, and other terms used in this doc
 - [Config struct definitions](https://github.com/gastownhall/gascity/blob/main/internal/config/config.go) --

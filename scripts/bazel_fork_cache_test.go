@@ -32,11 +32,8 @@ const (
 	// mint) passes --config=remote-exec too: its .bazelrc.local carries the
 	// mint's endpoint, instance and certificate under build:remote-exec and
 	// no fork-cache. RBE_FORK_CERT must then be the fork-cert step's output.
-	bazelRCExecForkGuard = `if [ -n "$BAZEL_REMOTE_EXECUTOR" ] || [ -n "$RBE_FORK_CERT" ]; then`
-	bazelRCForkCertEnv   = "${{ steps.fork-cert.outputs.cert }}"
-	// The test step also reads the minted instance: the fork pool
-	// (oss-fork, no network) skips the acceptance tier (ga-73eoo).
-	bazelRCForkInstanceEnv = "${{ steps.fork-cert.outputs.instance }}"
+	bazelRCExecForkGuard   = `if [ -n "$BAZEL_REMOTE_EXECUTOR" ] || [ -n "$RBE_FORK_CERT" ]; then`
+	bazelRCForkCertEnv     = "${{ steps.fork-cert.outputs.cert }}"
 	bazelRCExecSteps       = 3
 	forkCacheMaxTimeoutSec = 15
 	// The farm admits 16 connections per source IP and Blacksmith runners
@@ -75,15 +72,13 @@ func bazelTestWorkflowSteps(t *testing.T, root string) []bazelTestWorkflowStep {
 	return job.Steps
 }
 
-// runBazelRCConfigStep runs the step's script as Actions does (bash -eo
-// pipefail) in a scratch directory with env, its /tmp/ paths redirected
-// there, and returns the .bazelrc.local lines it writes with those paths
-// mapped back.
-func runBazelRCConfigStep(t *testing.T, script string, env map[string]string) []string {
+// runWorkflowStepScript runs a workflow step's script as Actions does (bash
+// --noprofile --norc -eo pipefail) in dir, with this process's PATH and env
+// (env's PATH, if set, replaces it), and returns its combined output.
+func runWorkflowStepScript(t *testing.T, dir, script string, env map[string]string) (string, error) {
 	t.Helper()
-	dir := t.TempDir()
 	path := filepath.Join(dir, "step.sh")
-	if err := os.WriteFile(path, []byte(strings.ReplaceAll(script, "/tmp/", dir+"/")), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("bash", "--noprofile", "--norc", "-eo", "pipefail", path)
@@ -92,7 +87,18 @@ func runBazelRCConfigStep(t *testing.T, script string, env map[string]string) []
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// runBazelRCConfigStep runs the step's script as Actions does (bash -eo
+// pipefail) in a scratch directory with env, its /tmp/ paths redirected
+// there, and returns the .bazelrc.local lines it writes with those paths
+// mapped back.
+func runBazelRCConfigStep(t *testing.T, script string, env map[string]string) []string {
+	t.Helper()
+	dir := t.TempDir()
+	if out, err := runWorkflowStepScript(t, dir, strings.ReplaceAll(script, "/tmp/", dir+"/"), env); err != nil {
 		t.Fatalf("step script with %v: %v\n%s", env, err, out)
 	}
 	rc, err := os.ReadFile(filepath.Join(dir, ".bazelrc.local"))
@@ -352,7 +358,7 @@ func TestBazelRBEForkSteps(t *testing.T) {
 	}
 	for _, s := range job.Steps {
 		for k, v := range s.Env {
-			if strings.Contains(v, "steps.fork-") && s.ID != "fork-key" && s.ID != "fork-cert" && s.Name != bazelRCConfigStep && v != bazelRCForkCertEnv && v != bazelRCForkInstanceEnv {
+			if strings.Contains(v, "steps.fork-") && s.ID != "fork-key" && s.ID != "fork-cert" && s.Name != bazelRCConfigStep && v != bazelRCForkCertEnv {
 				t.Errorf("step %q env %s reads %q; only the rc step and the remote-exec guards read rbe-fork's outputs", s.Name, k, v)
 			}
 		}

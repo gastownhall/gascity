@@ -27,20 +27,39 @@ func disableBootstrapForTests(t *testing.T) {
 	t.Cleanup(func() { bootstrap.BootstrapPacks = old })
 }
 
-// stubInitRemoteImports makes finalizeInit's remote-import install hermetic.
+// configureInitRemoteImportsForTests makes finalizeInit's remote-import
+// install a no-op for every test in this package. TestMain calls it, so a
+// test that runs a real init stays hermetic without opting in.
 //
-// A full init clones gascity-packs over the network: the nested bundled source
-// gascity/roles is not recognized as bundled, so it misses the synthetic cache
-// and takes the real clone path (ga-73eoo). That single clone is most of the
-// runtime of every test that runs a real init, and packman performs it while
-// holding the machine-wide repo-cache write lock — so one wedged remote stalls
-// the whole suite and the pre-push hook with it (ga-r0epd).
+// The default template's imports are all served from the binary's embedded
+// packs since ga-73eoo (gascity/roles is a bundled subpack of the gascity
+// pack; TestInstallInitRemoteImportsGascityTemplateNeedsNoNetwork pins that),
+// so a real install no longer clones. The no-op still keeps tests whose
+// subject is not the install from materializing the synthetic caches, and
+// from taking the machine-wide repo-cache write lock (ga-r0epd).
 //
-// Use this only in tests whose subject is something other than import
-// installation. Tests that assert on the install itself must stub
+// Tests whose subject is import installation must opt back in with
+// useRealInitRemoteImports, against a local file:// remote, or stub
 // ensureInitRemoteImportsInstalled directly with the behavior they mean to
-// exercise, the way TestFinalizeInitReportsRemoteImportInstallFailure does;
-// routing those through this helper would assert against a no-op.
+// exercise, the way TestFinalizeInitReportsRemoteImportInstallFailure does.
+func configureInitRemoteImportsForTests() {
+	ensureInitRemoteImportsInstalled = func(string) error { return nil }
+}
+
+// useRealInitRemoteImports opts a test back in to the production
+// remote-import installer for the rest of the test. Only use it with remotes
+// the test owns (file:// fixtures); a github.com source would clone over the
+// network.
+func useRealInitRemoteImports(t *testing.T) {
+	t.Helper()
+	prev := ensureInitRemoteImportsInstalled
+	t.Cleanup(func() { ensureInitRemoteImportsInstalled = prev })
+	ensureInitRemoteImportsInstalled = installInitRemoteImports
+}
+
+// stubInitRemoteImports makes finalizeInit's remote-import install a no-op for
+// the rest of the test. configureInitRemoteImportsForTests already does this
+// package-wide; the explicit call remains valid and documents intent.
 func stubInitRemoteImports(t *testing.T) {
 	t.Helper()
 	prev := ensureInitRemoteImportsInstalled
@@ -350,6 +369,8 @@ func TestFinalizeInitChecksRemoteImportProvidersAfterInstall(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	disableBootstrapForTests(t)
 	stubInitDependencyChecks(t)
+	// The subject is the real install of a local file:// import.
+	useRealInitRemoteImports(t)
 
 	remote := initImportBarePackRepo(t, "remote-pack", "", strings.Join([]string{
 		"[pack]",
@@ -2185,4 +2206,53 @@ func TestCmdInitResumePreservesPreparedExternalSelector(t *testing.T) {
 			t.Fatalf("conflicting selector invoked provider: %v", err)
 		}
 	})
+}
+
+// TestInstallInitRemoteImportsGascityTemplateNeedsNoNetwork is the ga-73eoo
+// regression test. A real install of the default (gascity) template's remote
+// imports — core, the gascity pack and its gascity/roles default rig import —
+// is served entirely from the binary's embedded packs. git is replaced by a
+// stub that fails every invocation, so the clone gascity/roles used to take
+// fails this test instead of reaching github.com.
+func TestInstallInitRemoteImportsGascityTemplateNeedsNoNetwork(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
+	stubInitDependencyChecks(t)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	if code := doInit(fsys.OSFS{}, cityPath, defaultWizardConfig(), "", &initStdout, &initStderr, false); code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	binDir := t.TempDir()
+	stub := "#!/bin/sh\necho \"git $*: the default template must install without git\" >&2\nexit 97\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := installInitRemoteImports(cityPath); err != nil {
+		t.Fatalf("installInitRemoteImports: %v", err)
+	}
+	lock, err := packman.ReadLockfile(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("reading packs.lock: %v", err)
+	}
+	roles, ok := lock.Packs[config.PublicGascityRolesPackSource]
+	if !ok {
+		t.Fatalf("packs.lock = %v, want the gascity/roles default rig import", lock.Packs)
+	}
+	if want := strings.TrimPrefix(config.PublicGascityPackVersion, "sha:"); roles.Commit != want {
+		t.Fatalf("roles locked at %q, want the gascity pin %q", roles.Commit, want)
+	}
+	cachePath, err := packman.RepoCachePath(config.PublicGascityRolesPackSource, roles.Commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(cachePath, "gascity", "roles", "pack.toml")); err != nil {
+		t.Fatalf("roles pack not materialized from embedded content: %v", err)
+	}
 }

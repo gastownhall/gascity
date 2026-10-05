@@ -1086,6 +1086,9 @@ func (cr *CityRuntime) startupReadinessWatchdog(ctx context.Context, ready <-cha
 		return
 	case <-timer.C:
 	}
+	if cr.runsV2() {
+		fmt.Fprintf(cr.stderr, "%s: startup watchdog: session reconciler v2: %s\n", cr.logPrefix, cr.v2.bootStatus(time.Now())) //nolint:errcheck // best-effort stderr
+	}
 	buf := make([]byte, 1<<20)
 	n := goruntime.Stack(buf, true)
 	fmt.Fprintf(cr.stderr, //nolint:errcheck // best-effort stderr
@@ -1364,6 +1367,12 @@ func (cr *CityRuntime) tick(
 			p.trace.end(completion, traceRecordPayload{"phase": "tick", "trigger": traceTrigger})
 		}
 	}()
+	// Under v2 every maintenance tick, however it ends, records the queue.
+	defer func() {
+		if cr.runsV2() {
+			cr.recordV2Queue(p.trace)
+		}
+	}()
 	defer func() {
 		if p.dirtyCleared && !p.completed && p.manualReload == nil {
 			dirty.Store(true)
@@ -1571,7 +1580,7 @@ func (cr *CityRuntime) phaseCleanupDeadRuntimeSessionCorpses(p *tickPass) bool {
 // name's current owner can rebind it and attach lands on the right runtime.
 func (cr *CityRuntime) phaseReapRuntimesBoundToClosedBeads(p *tickPass) bool {
 	phaseStart := time.Now()
-	reapRuntimesBoundToClosedBeads(cr.sessionsBeadStore().Store, p.sessionBeads, cr.sessionDrains, cr.sp, p.inv, cr.stderr)
+	reapRuntimesBoundToClosedBeads(cr.sessionsBeadStore().Store, p.sessionBeads, cr.sessionDrains, cr.sp, p.inv, cr.cityPath, cr.stderr)
 	p.recordPhase(TraceSiteControllerTickPhase, "reap_runtimes_bound_to_closed_beads", phaseStart, p.inv.closedBoundPhaseFields())
 	return false
 }
@@ -1857,7 +1866,7 @@ func (cr *CityRuntime) startupReconcile(ctx context.Context) bool {
 	}
 	p.completed = cr.runTickPhases(p, phases)
 	if p.completed && cr.runsV2() {
-		p.completed = cr.bootV2(ctx)
+		p.completed = cr.bootV2(ctx, p.trace)
 	}
 	return p.completed
 }
@@ -2657,6 +2666,15 @@ func (cr *CityRuntime) reloadConfigTraced(
 	}
 
 	if providerChanged {
+		if err := cr.beforeProviderSwap(nextCfg); err != nil {
+			err = fmt.Errorf("config reload: provider swap: %w", err)
+			fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+			telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
+			if trace != nil {
+				trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+			}
+			return reloadControlReply{Outcome: reloadOutcomeFailed, Error: err.Error(), Warnings: warnings}
+		}
 		running, lErr := cr.sp.ListRunning("")
 		if lErr != nil {
 			err := fmt.Errorf("config reload: listing sessions failed during provider swap: %w", lErr)

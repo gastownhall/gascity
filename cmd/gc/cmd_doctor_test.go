@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 func prependDoctorJSONStubBinaries(t *testing.T, names ...string) {
@@ -1100,5 +1101,115 @@ func TestBuildDoctorChecksRegistersRigWorktreesCheck(t *testing.T) {
 	}
 	if doctorCheckIndex(names, "rig:sleeping:worktrees") >= 0 {
 		t.Errorf("rig:sleeping:worktrees registered for a suspended rig; names=%v", names)
+	}
+}
+
+// TestWriteDoctorJSONOKReflectsBlockingFailed pins ok to the same gate the
+// plain-text/exit-code path already uses (BlockingFailed == 0) -- an
+// advisory-only failure must not flip ok to false, and a blocking failure
+// must not leave it stuck at the JSON envelope's hardcoded default of true.
+// A blocking failure takes the shared failure envelope, so its ok:false
+// always arrives with an error object while the report still rides along.
+func TestWriteDoctorJSONOKReflectsBlockingFailed(t *testing.T) {
+	// The schemas come from the command itself, so this asserts against the
+	// contract gc publishes rather than a copy of it in the test.
+	schemas := map[string]*jsonschema.Schema{}
+	for _, role := range []string{jsonSchemaResultRole, jsonSchemaFailureRole} {
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"doctor", "--json-schema=" + role}, &stdout, &stderr); code != 0 {
+			t.Fatalf("%s schema code=%d stderr=%q", role, code, stderr.String())
+		}
+		schemas[role] = compileJSONSchema(t, "gc://schemas/doctor/"+role+".schema.json", stdout.Bytes())
+	}
+
+	tests := []struct {
+		name       string
+		report     *doctor.Report
+		wantOK     bool
+		wantSchema string
+	}{
+		{
+			name:       "clean report",
+			report:     &doctor.Report{},
+			wantOK:     true,
+			wantSchema: jsonSchemaResultRole,
+		},
+		{
+			name: "advisory failure only",
+			report: &doctor.Report{
+				Failed: 1,
+				Results: []*doctor.CheckResult{
+					{Name: "advisory", Status: doctor.StatusError, Severity: doctor.SeverityAdvisory, Message: "advisory issue"},
+				},
+			},
+			wantOK:     true,
+			wantSchema: jsonSchemaResultRole,
+		},
+		{
+			name: "blocking failure",
+			report: &doctor.Report{
+				Failed:         1,
+				BlockingFailed: 1,
+				Results: []*doctor.CheckResult{
+					{Name: "blocking", Status: doctor.StatusError, Severity: doctor.SeverityBlocking, Message: "blocking issue"},
+				},
+			},
+			wantOK:     false,
+			wantSchema: jsonSchemaFailureRole,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := writeDoctorJSON(&buf, tt.report); err != nil {
+				t.Fatalf("writeDoctorJSON: %v", err)
+			}
+			var decoded struct {
+				OK bool `json:"ok"`
+			}
+			if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+				t.Fatalf("decode doctor JSON: %v; out=%q", err, buf.String())
+			}
+			if decoded.OK != tt.wantOK {
+				t.Fatalf("ok = %v, want %v; blocking_failed=%d out=%s", decoded.OK, tt.wantOK, tt.report.BlockingFailed, buf.String())
+			}
+
+			var raw map[string]any
+			if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+				t.Fatalf("decode doctor JSON: %v; out=%q", err, buf.String())
+			}
+			if err := schemas[tt.wantSchema].Validate(raw); err != nil {
+				t.Fatalf("payload does not satisfy the published %s schema: %v\n%s", tt.wantSchema, err, buf.String())
+			}
+
+			if tt.wantOK {
+				if _, ok := raw["error"]; ok {
+					t.Fatalf("error = %v, want absent on ok:true; out=%s", raw["error"], buf.String())
+				}
+				return
+			}
+			errObj, ok := raw["error"].(map[string]any)
+			if !ok {
+				t.Fatalf("error = %#v, want object; out=%s", raw["error"], buf.String())
+			}
+			if got := errObj["code"]; got != doctorBlockingFailedErrorCode {
+				t.Errorf("error.code = %v, want %q", got, doctorBlockingFailedErrorCode)
+			}
+			if got := errObj["exit_code"]; got != float64(1) {
+				t.Errorf("error.exit_code = %v, want 1", got)
+			}
+			for _, key := range []string{"blocking_failed", "passed", "results"} {
+				if _, ok := raw[key]; !ok {
+					t.Errorf("report key %q missing from blocking failure payload; out=%s", key, buf.String())
+				}
+			}
+			if got := raw["blocking_failed"]; got != float64(tt.report.BlockingFailed) {
+				t.Errorf("blocking_failed = %v, want %d", got, tt.report.BlockingFailed)
+			}
+			if results, _ := raw["results"].([]any); len(results) != len(tt.report.Results) {
+				t.Errorf("results = %v, want %d entries", raw["results"], len(tt.report.Results))
+			}
+		})
 	}
 }

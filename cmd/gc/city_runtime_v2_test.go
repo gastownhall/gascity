@@ -26,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/workqueue"
 )
 
 // The P2-8 wiring tests: the v2 runtime behind the exclusive switch. Unit
@@ -83,7 +84,7 @@ func newTestV2Wiring(t *testing.T, cfg *config.City, stderr io.Writer) (*control
 
 func bootTestV2(t *testing.T, cr *CityRuntime) {
 	t.Helper()
-	if !cr.bootV2(context.Background()) {
+	if !cr.bootV2(context.Background(), nil) {
 		t.Fatal("bootV2 did not reach ready")
 	}
 }
@@ -481,7 +482,7 @@ func TestCityRuntimeV2NoStoreDisablesWorkers(t *testing.T) {
 	rt, _ := attachTestV2(t, cr)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // a boot that tried would fail at once instead of retrying
-	if !cr.bootV2(ctx) {
+	if !cr.bootV2(ctx, nil) {
 		t.Fatal("a store-less v2 city did not proceed to readiness")
 	}
 	rt.mu.Lock()
@@ -1212,7 +1213,7 @@ func TestV2SessionsCensusFailedReadBlocksReady(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	result := make(chan bool, 1)
-	go func() { result <- cr.bootV2(ctx) }()
+	go func() { result <- cr.bootV2(ctx, nil) }()
 	awaitCond(t, func() bool {
 		return strings.Contains(stderr.String(), "boot census failed") || len(result) == 1
 	}, "the boot census failing")
@@ -1407,5 +1408,315 @@ func TestCityRuntimeDriftJudgesWithTheWiringsEnv(t *testing.T) {
 	got := cr.reconcilerDrift.observe(&config.City{Daemon: config.DaemonConfig{SessionReconciler: "v2"}})
 	if !strings.HasPrefix(got, "pending restart: ") || strings.Contains(got, "will refuse it") {
 		t.Errorf("drift warning = %q, want pending restart without a refusal", got)
+	}
+}
+
+// v2QueueRecordFields are the reconcile_queue record's fields (§4.13). They
+// are pinned: a trace consumer reads them by name.
+var v2QueueRecordFields = []string{
+	"adds", "allocator_duty", "allocator_failures", "allocator_last_pass_ms", "allocator_passes", "allocator_wakes",
+	"bead_event_latency_p50_ms", "bead_event_latency_p99_ms", "boot", "boot_ms",
+	"deferred", "depth_hot", "depth_resync", "dirty", "dropped_adds", "fs_gate", "holds", "keys",
+	"latency_p50_ms", "latency_p99_ms", "legacy_session_entries", "longest_in_flight_ms",
+	"oldest_hot_ms", "oldest_resync_ms", "processing", "reconcile_failures", "reconcile_panics",
+	"reconciles", "resync_requests", "resync_superseded", "resync_sweep_ms",
+	"router_events", "router_keys_out", "router_panics", "router_replays", "router_undecodable",
+	"router_unresolved", "session_reasons", "timers", "work_p50_ms", "work_p99_ms",
+}
+
+// queueRecords returns the reconcile_queue records, in order.
+func queueRecords(records []SessionReconcilerTraceRecord) []SessionReconcilerTraceRecord {
+	var out []SessionReconcilerTraceRecord
+	for _, r := range records {
+		if r.RecordType == TraceRecordOperation && r.Fields["operation_name"] == "reconcile_queue" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// Kills: the reconcile_queue record missing from the v2 maintenance tick,
+// recorded twice in one, its fields renamed, its adds cumulative instead of
+// since the last tick, or recorded by a legacy tick (whose trace must not
+// change); and the m14/m15 mutations of TestCityRuntimeV2FullTickRunsOnlyMaintenance
+// as they show in the record: the v2 tick running the legacy phase list (the
+// guard counts its refusals) or tracing as a controller tick.
+func TestV2MaintenanceTraceRecordsReconcileQueue(t *testing.T) {
+	t.Run("v2", func(t *testing.T) {
+		cr, _ := newPhaseFixtureRuntime(t, false, true)
+		attachTestV2(t, cr)
+		bootTestV2(t, cr)
+		runFixtureTick(cr, "patrol")
+		runFixtureTick(cr, "patrol")
+		if n := cr.legacySessionEntries.Load(); n != 0 {
+			t.Errorf("legacySessionEntries = %d after v2 ticks, want 0", n)
+		}
+		records := closeTrace(t, cr)
+		recs := queueRecords(records)
+		if len(recs) != 2 || recs[0].TickID == recs[1].TickID {
+			t.Fatalf("reconcile_queue records = %d over two v2 ticks, want one per tick", len(recs))
+		}
+		first, second := recs[0], recs[1]
+		details := map[string]bool{}
+		for _, r := range records {
+			if r.TickID == first.TickID && r.TriggerDetail != "" {
+				details[r.TriggerDetail] = true
+			}
+		}
+		if first.SiteCode != TraceSiteReconcileQueue || !details["maintenance_tick"] || details["controller_tick"] {
+			t.Errorf("record site %q in a trace with details %v, want %q in a maintenance_tick trace", first.SiteCode, details, TraceSiteReconcileQueue)
+		}
+		var names []string
+		for name := range first.Fields {
+			if name != "operation_name" {
+				names = append(names, name)
+			}
+		}
+		slices.Sort(names)
+		assertLinesEqual(t, "reconcile_queue fields", names, v2QueueRecordFields)
+		if first.Fields["boot"] != v2BootReady || first.Fields["legacy_session_entries"] != float64(0) || first.Fields["reconciles"] != float64(1) {
+			t.Errorf("record boot=%v legacy_session_entries=%v reconciles=%v, want ready, 0, 1 (the boot reconcile of the open row)",
+				first.Fields["boot"], first.Fields["legacy_session_entries"], first.Fields["reconciles"])
+		}
+		if adds, _ := first.Fields["adds"].(map[string]any); adds["boot"] != float64(1) {
+			t.Errorf("first record adds = %v, want the boot add", first.Fields["adds"])
+		}
+		if adds, _ := second.Fields["adds"].(map[string]any); len(adds) != 0 {
+			t.Errorf("second record adds = %v, want none since the first", second.Fields["adds"])
+		}
+	})
+
+	t.Run("legacy", func(t *testing.T) {
+		cr, _ := newPhaseFixtureRuntime(t, false, true)
+		runFixtureTick(cr, "patrol")
+		if recs := queueRecords(closeTrace(t, cr)); len(recs) != 0 {
+			t.Errorf("a legacy tick recorded reconcile_queue %d times, want never", len(recs))
+		}
+	})
+}
+
+// Kills: the exclusivity counter not surfaced: the record reports a constant
+// instead of the city runtime's count of refused legacy session entries.
+func TestV2LegacySessionEntriesReportedInTrace(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, true)
+	attachTestV2(t, cr)
+	cr.beadReconcileTick(context.Background(), DesiredStateResult{}, nil, nil, false) // refused and counted
+	cr.controlDispatcherTick(context.Background())                                    // refused and counted
+	runFixtureTick(cr, "patrol")
+	recs := queueRecords(closeTrace(t, cr))
+	if len(recs) != 1 {
+		t.Fatalf("reconcile_queue records = %d, want 1", len(recs))
+	}
+	if got := recs[0].Fields["legacy_session_entries"]; got != float64(2) {
+		t.Errorf("legacy_session_entries = %v, want 2", got)
+	}
+}
+
+// Kills: a store-less v2 city's record reading as a boot stuck on its census
+// (MAINT-003: boot never runs there, and readiness proceeds). bootV2 latches
+// no-store; the record does not re-read the store.
+func TestCityRuntimeV2NoStoreQueueRecordSaysNoStore(t *testing.T) {
+	cityPath := t.TempDir()
+	cr := &CityRuntime{
+		cityName:  "test-city",
+		cityPath:  cityPath,
+		cfg:       &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		logPrefix: "gc test",
+		stdout:    io.Discard,
+		stderr:    io.Discard,
+		trace:     newSessionReconcilerTraceManager(cityPath, "test-city", io.Discard),
+	}
+	attachTestV2(t, cr)
+	if !cr.bootV2(context.Background(), nil) {
+		t.Fatal("a store-less v2 city did not proceed to readiness")
+	}
+	trace := cr.beginTraceCycle("patrol", "maintenance_tick", nil)
+	cr.recordV2Queue(trace)
+	trace.end(TraceCompletionCompleted, traceRecordPayload{"phase": "tick"})
+	recs := queueRecords(closeTrace(t, cr))
+	if len(recs) != 1 {
+		t.Fatalf("reconcile_queue records = %d, want 1", len(recs))
+	}
+	if got := recs[0].Fields["boot"]; got != "no-store" {
+		t.Errorf("boot = %v, want no-store", got)
+	}
+}
+
+// startupQueueRecords returns the boot values of the reconcile_queue records
+// in the startup step's trace cycle, in order.
+func startupQueueRecords(records []SessionReconcilerTraceRecord) []string {
+	var tick string
+	for _, r := range records {
+		if r.RecordType == TraceRecordCycleResult && r.Fields["phase"] == "startup" {
+			tick = r.TickID
+		}
+	}
+	var boots []string
+	for _, r := range queueRecords(records) {
+		if r.TickID == tick {
+			boots = append(boots, fmt.Sprint(r.Fields["boot"]))
+		}
+	}
+	return boots
+}
+
+// awaitQueueRecord waits until the v2 runtime builds its next reconcile_queue
+// record.
+func awaitQueueRecord(t *testing.T, rt *v2Runtime) {
+	t.Helper()
+	rt.report.mu.Lock()
+	rt.report.adds = nil
+	rt.report.mu.Unlock()
+	awaitCond(t, func() bool {
+		rt.report.mu.Lock()
+		defer rt.report.mu.Unlock()
+		return rt.report.adds != nil
+	}, "a reconcile_queue record")
+}
+
+// Kills: a boot stuck before ready leaving no record (records only on
+// maintenance ticks, which start after ready), the boot patrol recording
+// outside the startup step's trace, or the record reading no-store for a
+// city that has a store (the store re-read, or no-store whenever not ready:
+// N1); and the startup watchdog saying nothing of v2. A boot stuck on a boot
+// key's first reconcile records coverage at every patrol, and a boot stuck on
+// the allocator records allocator, in the startup step's trace; a boot whose
+// census keeps failing records census while it waits to retry.
+func TestV2BootPatrolRecordsWhatBootWaitsOn(t *testing.T) {
+	setup := func(t *testing.T) (*CityRuntime, *v2Runtime, *v2Recorder, *synchronizedBuffer) {
+		cr, _ := newPhaseFixtureRuntime(t, false, false)
+		stderr := &synchronizedBuffer{}
+		cr.stderr = stderr
+		cr.cfg.Daemon.PatrolInterval = "10ms"
+		rt, rec := attachTestV2(t, cr)
+		return cr, rt, rec, stderr
+	}
+	startup := func(cr *CityRuntime) <-chan bool {
+		done := make(chan bool, 1)
+		go func() { done <- cr.startupReconcile(context.Background()) }()
+		return done
+	}
+	finish := func(t *testing.T, done <-chan bool) {
+		t.Helper()
+		select {
+		case ok := <-done:
+			if !ok {
+				t.Fatal("the v2 startup step did not complete")
+			}
+		case <-time.After(hangBudget):
+			t.Fatalf("the v2 startup step did not complete within %s", hangBudget)
+		}
+	}
+
+	t.Run("census", func(t *testing.T) {
+		cr, rt, _, _ := setup(t)
+		cr.cs.cityBeadStore = failingListStore{Store: cr.cs.cityBeadStore}
+		trace := cr.beginTraceCycle("startup", "initial_reconcile", nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan bool, 1)
+		go func() { done <- cr.bootV2(ctx, trace) }()
+		awaitQueueRecord(t, rt)
+		cancel()
+		select {
+		case ok := <-done:
+			if ok {
+				t.Fatal("bootV2 reported ready on a failing census")
+			}
+		case <-time.After(hangBudget):
+			t.Fatalf("bootV2 did not return within %s of its context ending", hangBudget)
+		}
+		trace.end(TraceCompletionAborted, traceRecordPayload{"phase": "startup"})
+		boots := startupQueueRecords(closeTrace(t, cr))
+		if len(boots) == 0 || slices.ContainsFunc(boots, func(b string) bool { return b != v2BootCensus }) {
+			t.Fatalf("startup trace boot records = %v, want census at every patrol while the census fails", boots)
+		}
+	})
+
+	t.Run("coverage", func(t *testing.T) {
+		cr, rt, rec, stderr := setup(t)
+		release := make(chan struct{})
+		releaseOnce := sync.OnceFunc(func() { close(release) })
+		t.Cleanup(releaseOnce)
+		rec.setSession(func(workqueue.Item[rowKey], *reconcileEnv) (time.Duration, error) {
+			<-release
+			return 0, nil
+		})
+		done := startup(cr)
+		awaitQueueRecord(t, rt)
+		awaitQueueRecord(t, rt)
+		cr.startupReadinessWatchdog(context.Background(), make(chan struct{}), 0, time.Minute)
+		if got := stderr.String(); !strings.Contains(got, "session reconciler v2: boot=coverage depth_hot=0 depth_resync=0 processing=1 longest_in_flight=") {
+			t.Errorf("startup watchdog = %q, want the v2 boot state with a reconcile in flight", got)
+		}
+		releaseOnce()
+		finish(t, done)
+		boots := startupQueueRecords(closeTrace(t, cr))
+		if len(boots) < 2 || boots[0] != v2BootCoverage || boots[1] != v2BootCoverage {
+			t.Fatalf("startup trace boot records = %v, want coverage at every patrol while the boot key reconciles", boots)
+		}
+		for _, b := range boots {
+			if b != v2BootCoverage && b != v2BootReady {
+				t.Fatalf("startup trace boot records = %v, want coverage until ready", boots)
+			}
+		}
+	})
+
+	t.Run("allocator", func(t *testing.T) {
+		cr, rt, rec, _ := setup(t)
+		var primed atomic.Bool
+		rec.setAllocator(func() error {
+			if !primed.Load() {
+				return errors.New("not yet")
+			}
+			return nil
+		})
+		done := startup(cr)
+		awaitCond(t, func() bool { return rt.bootState() == v2BootAllocator }, "boot waiting on the allocator")
+		awaitQueueRecord(t, rt)
+		primed.Store(true)
+		rt.router.Enqueue(wakeReasonAPI) // urgent: the next pass skips the failed pass's backoff
+		finish(t, done)
+		boots := startupQueueRecords(closeTrace(t, cr))
+		if len(boots) == 0 || !slices.Contains(boots, v2BootAllocator) {
+			t.Fatalf("startup trace boot records = %v, want allocator while the allocator fails", boots)
+		}
+		for _, b := range boots {
+			if b != v2BootCoverage && b != v2BootAllocator && b != v2BootReady {
+				t.Fatalf("startup trace boot records = %v, want coverage, then allocator, until ready", boots)
+			}
+		}
+	})
+}
+
+// Kills: the record left out of a maintenance tick that panics (recorded only
+// at the tick's normal end, or only when it completed). The aborted cycle
+// still carries exactly one record.
+func TestV2PanickedMaintenanceTickRecordsTheQueue(t *testing.T) {
+	cr, store := newPhaseFixtureRuntime(t, false, false)
+	attachTestV2(t, cr)
+	bootTestV2(t, cr)
+	cr.cs.cityBeadStore = &panicOnLabelStore{Store: store, label: "gc:extmsg-binding"}
+	if !cr.safeTick(func() { runFixtureTick(cr, "patrol") }, "patrol") {
+		t.Fatal("the maintenance tick did not panic; the test needs it to")
+	}
+	records := closeTrace(t, cr)
+	if got := passCompletion(records, "tick"); got != TraceCompletionAborted {
+		t.Fatalf("tick completion = %q, want aborted", got)
+	}
+	var tick string
+	for _, r := range records {
+		if r.RecordType == TraceRecordCycleResult && r.Fields["phase"] == "tick" {
+			tick = r.TickID
+		}
+	}
+	var n int
+	for _, r := range queueRecords(records) {
+		if r.TickID == tick {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("reconcile_queue records in the aborted tick = %d, want 1", n)
 	}
 }

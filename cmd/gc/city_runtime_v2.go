@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -83,6 +85,16 @@ func (cr *CityRuntime) newV2Host() v2Host {
 		beginTrace:  cr.beginV2Trace,
 		safeTick:    cr.safeTick,
 		stderr:      cr.stderr,
+		// The controller's workers start after boot, and run sets the
+		// inventory lane before the startup step boots the runtime.
+		sessionsStore: cr.v2SessionsStore,
+		observations: func() *ObservationCache {
+			if cr.inventoryLane == nil {
+				return nil
+			}
+			return cr.inventoryLane.cache
+		},
+		rec: cr.rec,
 	}
 }
 
@@ -107,6 +119,15 @@ func (cr *CityRuntime) v2SessionsCensus() ([]sessionpkg.Info, error) {
 	return snapshot.OpenInfos(), nil
 }
 
+// recordV2Queue records the v2 runtime's reconcile_queue operation in trace:
+// a maintenance tick's, or the startup step's while boot waits. It runs
+// whether or not the tick traces, since building the record is what raises
+// the stuck-reconcile alert.
+func (cr *CityRuntime) recordV2Queue(trace *sessionReconcilerTraceCycle) {
+	fields := cr.v2.queueRecord(time.Now(), cr.legacySessionEntries.Load())
+	trace.RecordControllerOperation(TraceSiteReconcileQueue, TraceReasonRetained, TraceOutcomeComplete, "reconcile_queue", 0, fields)
+}
+
 // beginV2Trace opens a trace cycle for a v2 decision. It runs off the
 // controller goroutine (the worker FS gate), so it is built like
 // beginOrdersLaneTrace: the config from the locked snapshot, no revision.
@@ -124,15 +145,18 @@ func (cr *CityRuntime) beginV2Trace(trigger string) *sessionReconcilerTraceCycle
 // boots the runtime on ctx, the run context, which becomes the runtime's
 // lifetime, and returns once every open session row has been reconciled once
 // and the allocator has passed (MAINT-010, MAINT-012), or false when ctx
-// ends. With no bead store there is nothing to reconcile: the workers stay
-// off and readiness proceeds (MAINT-003). boot is idempotent, so a startup
-// retry after a panic resumes it (MAINT-005).
-func (cr *CityRuntime) bootV2(ctx context.Context) bool {
+// ends. While boot waits, every patrol interval records the queue in trace,
+// the startup step's, so a boot stuck before ready says what it waits on.
+// With no bead store there is nothing to reconcile: the runtime latches
+// no-store, the workers stay off and readiness proceeds (MAINT-003). boot is
+// idempotent, so a startup retry after a panic resumes it (MAINT-005).
+func (cr *CityRuntime) bootV2(ctx context.Context, trace *sessionReconcilerTraceCycle) bool {
 	if cr.cityBeadStore() == nil {
+		cr.v2.noStore.Store(true)
 		fmt.Fprintf(cr.stderr, "%s: session reconciler v2: no bead store; reconcile workers disabled\n", cr.logPrefix) //nolint:errcheck // best-effort stderr
 		return true
 	}
-	if err := cr.v2.boot(ctx); err != nil {
+	if err := cr.v2.boot(ctx, func() { cr.recordV2Queue(trace) }); err != nil {
 		if ctx.Err() == nil {
 			fmt.Fprintf(cr.stderr, "%s: session reconciler v2: boot: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		}
@@ -159,6 +183,19 @@ func (cr *CityRuntime) reloadUnderBarrier(p *tickPass, source reloadSource) {
 		}
 	}
 	_, _ = cr.v2.barrier.run(p.ctx, intent, apply, reply)
+}
+
+// beforeProviderSwap holds a provider swap until every in-flight v2 start
+// effect has committed or failed, so the swap's listing of the old
+// provider's sessions cannot miss a runtime a start is still creating (C4.4
+// step 3, R6). It waits up to the startup timeout plus 10s, then cancels the
+// starts and waits effectCancelBound; past that the reload must abort. A
+// legacy controller has nothing to wait for.
+func (cr *CityRuntime) beforeProviderSwap(cfg *config.City) error {
+	if cr.v2 == nil {
+		return nil
+	}
+	return cr.v2.exec.waitStarts(cfg.Session.StartupTimeoutDuration() + 10*time.Second)
 }
 
 // checkReconcilerWiring refuses runtime params whose v2 runtime and wake
