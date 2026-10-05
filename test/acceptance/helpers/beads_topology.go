@@ -30,21 +30,19 @@ func DefaultSidecarIdleTimeout() int {
 
 // NativeLaneExpectation is the beads-store payload with
 // GC_BEADS_PROXIED_NATIVE on, for a proxied scope gc initialized at the
-// default idle timeout. On a never-idle proxy the store that serves the reads
-// is the native one (design 5.3), pinned to a generation established from
-// argv AND the birth token. On a finite one the lane refuses a long-lived open
-// with idle_policy_finite and the reads stay on bd: a pool held across an
-// idle exit would be pinned to a dead generation.
+// default idle timeout. Doctor's open is short-lived, so the store that serves
+// its reads is the native one (design 5.3) whatever the idle policy, pinned to
+// a generation established from argv AND the birth token; only a long-lived
+// open (the controller's) is refused on a finite policy. The idle policy the
+// payload reports follows the default.
 func NativeLaneExpectation() *BeadsStoreExpectation {
-	if config.DefaultProxiedIdleTimeout <= 0 {
-		return &BeadsStoreExpectation{
-			Store: "NativeDoltStore", RequireProxiedAccount: true, RequireNoVerdict: true,
-			Evidence: "argv+birth", IdlePolicyPrefix: "never",
-		}
+	idle := "never"
+	if config.DefaultProxiedIdleTimeout > 0 {
+		idle = "finite"
 	}
 	return &BeadsStoreExpectation{
-		Store: "BdStore", RequireProxiedAccount: true, Verdict: "idle_policy_finite",
-		IdlePolicyPrefix: "finite",
+		Store: "NativeDoltStore", RequireProxiedAccount: true, RequireNoVerdict: true,
+		Evidence: "argv+birth", IdlePolicyPrefix: idle,
 	}
 }
 

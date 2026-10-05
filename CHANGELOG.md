@@ -21,7 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sidecar, so scopes created before this release keep never. `gc doctor`'s
   `proxied-idle-timeout` check reports the drift. Set `proxied_idle_timeout =
   "0"` to keep new scopes resident. With a finite timeout the opt-in
-  `GC_BEADS_PROXIED_NATIVE` lane reads through bd (verdict
+  `GC_BEADS_PROXIED_NATIVE` lane still serves short-lived reads natively, but
+  the controller's long-lived handles read through bd (verdict
   `idle_policy_finite`) (#6561).
 
 - **The first restart after upgrading reaps pre-upgrade ACP agents whose owner

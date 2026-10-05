@@ -226,8 +226,10 @@ and activity-gated backstops for quiet scopes are follow-up work
 
 The opt-in proxied-native lane admits a long-lived native open only on a
 never-idle proxy (a pool held across an idle exit is pinned to a dead
-generation), so with a finite timeout a `GC_BEADS_PROXIED_NATIVE=1` controller
-reads through bd, with verdict `idle_policy_finite`.
+generation), so with a finite timeout a `GC_BEADS_PROXIED_NATIVE=1`
+controller's long-lived handles read through bd, with verdict
+`idle_policy_finite`. Short-lived opens (a CLI command, doctor) are still
+served natively.
 
 Readiness is a single `bd ping`, with no outer retry loop: bd's provider open
 already waits up to 15s for the proxy endpoint and then up to 30s for the Dolt
