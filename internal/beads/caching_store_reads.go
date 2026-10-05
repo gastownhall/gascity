@@ -26,6 +26,9 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		items, err := c.backing.List(query)
 		if err == nil {
 			items = c.refreshCachedBeads(query, startSeq, startScan, items)
+			// A live list is often the first reader to see a close made by
+			// another process (bd close); announce what it installed.
+			c.announceUnannouncedCloses()
 		}
 		return items, err
 	}
@@ -532,6 +535,9 @@ func (c *CachingStore) ListOpen(status ...string) ([]Bead, error) {
 
 // Get returns a single bead by ID from the cache or backing store.
 func (c *CachingStore) Get(id string) (Bead, error) {
+	// Deferred so it runs after every unlock below: a dirty-row refresh can be
+	// the first reader to see a close made by another process.
+	defer c.announceUnannouncedCloses()
 	c.mu.RLock()
 	if _, deleted := c.deletedSeq[id]; deleted {
 		c.mu.RUnlock()
@@ -757,6 +763,9 @@ func (c *CachingStore) RefreshRow(id string) (Bead, error) {
 	evicted := false
 	if found {
 		opts := absorbOpts{depsMode: depsFromFieldsIfCarried, seqMode: seqKeep, clearDirty: true}
+		// RefreshRow announces the close of a row it held open itself
+		// (rowRefreshChange), so that close is not queued as well.
+		opts.closeAnnounced = held && cached.Status != "closed" && fresh.Status == "closed"
 		if depsFromBacking {
 			opts.depsMode, opts.deps = depsExplicit, freshDeps
 		}

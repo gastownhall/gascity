@@ -125,6 +125,13 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// depend on it. Its own behavior is pinned by
 		// TestDegradedProjectionSendsReadyToTheLiveBdVerdict.
 		"readyProjectionDegraded": true,
+		// unannouncedCloses is an announcement queue, not cache state: it holds
+		// closes that absorbs installed without emitting bead.closed, and
+		// runReconciliation drains it after the seam returns. The seam queues
+		// into it only when the full scan hands back a closed row over an open
+		// cached one, which the IncludeClosed=false scan does not do. Its
+		// exactly-once behavior is pinned by caching_store_close_event_test.go.
+		"unannouncedCloses": true, "hasUnannouncedCloses": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CachingStore{}), comparedStore, excludedStore)
 
