@@ -343,23 +343,26 @@ func TestStartDrift_PermissionDenied_DescriptiveError(t *testing.T) {
 // supervisor never serves /health within the 5s budget, gc start must
 // surface a descriptive error and exit 1 — never hang.
 //
-// We exercise this by replacing the supervisor binary with one that
-// exits immediately (it is /bin/true wrapped in a `gc supervisor run`
-// shim that just sleeps without binding the port). The kill+spawn
-// succeeds; PollReady cannot get a 200; the timeout fires.
+// We exercise this by making the respawned supervisor die during boot:
+// gc start runs with GC_CITY_WRITE_REQUIRED=1 and no verifying key, which
+// the supervisor refuses ("write-auth required but no verifying key
+// configured") before it serves /health. The respawn inherits gc start's
+// environment, so the kill+spawn succeeds; PollReady cannot get a 200; the
+// timeout fires. The invoking gc must stay the very file the supervisor
+// was launched from: any other installation is refused before a restart is
+// attempted (TestStartDrift_DifferentInstall_RefusesWithoutAllowFlag).
 func TestStartDrift_RestartTimeout_ExitsNonZero(t *testing.T) {
 	requireLinuxProcExe(t)
 	tc := setupDriftDirectScenario(t)
 
-	// Replace the binary on disk with a no-op shim so the post-kill
-	// spawn never serves /health.
-	stuckShim := writeStuckSupervisorShim(t, tc.binaryPath)
-	defer os.Remove(stuckShim) //nolint:errcheck
+	// An ambient verifying key would let the respawned supervisor boot, so
+	// drop it as well as requiring write-auth.
+	env := replaceEnv(filterEnv(tc.env, "GC_CITY_WRITE_PUBKEY"), "GC_CITY_WRITE_REQUIRED", "1")
 
-	out, exitCode, elapsed := runDriftCommand(t, tc.newBinary, tc.env, tc.cityDir,
+	out, exitCode, elapsed := runDriftCommand(t, tc.newBinary, env, tc.cityDir,
 		"start", tc.cityDir)
 	if exitCode != 1 {
-		t.Fatalf("gc start with stuck post-restart supervisor exit = %d, want 1\noutput:\n%s",
+		t.Fatalf("gc start with a post-restart supervisor that never serves exit = %d, want 1 (GC_CITY_WRITE_REQUIRED=1 should keep the respawn from booting)\noutput:\n%s",
 			exitCode, out)
 	}
 	if !strings.Contains(out, "supervisor restart timed out after") {
@@ -1150,28 +1153,6 @@ func setDaemonKeyForTest(src, key, value string) string {
 	next = append(next, entry)
 	next = append(next, lines[daemonStart+1:]...)
 	return strings.Join(next, "")
-}
-
-// writeStuckSupervisorShim overwrites binaryPath with a shell script
-// that, when invoked as `<binary> supervisor run`, sleeps without
-// binding the /health port. Used by the restart-timeout test.
-func writeStuckSupervisorShim(t *testing.T, binaryPath string) string {
-	t.Helper()
-	script := "#!/bin/sh\nif [ \"$1\" = \"supervisor\" ] && [ \"$2\" = \"run\" ]; then\n  exec sleep 60\nfi\nexec '" + binaryPath + ".real' \"$@\"\n"
-	// Move the real binary aside so the shim can fall through for any
-	// non-`supervisor run` subcommand the drift code path needs.
-	realPath := binaryPath + ".real"
-	if err := os.Rename(binaryPath, realPath); err != nil {
-		t.Fatalf("moving real binary: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.Remove(binaryPath)
-		_ = os.Rename(realPath, binaryPath)
-	})
-	if err := os.WriteFile(binaryPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("writing stuck shim: %v", err)
-	}
-	return binaryPath
 }
 
 // requireUserSystemd skips the test unless `systemctl --user
