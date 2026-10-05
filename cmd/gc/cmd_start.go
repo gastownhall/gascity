@@ -853,6 +853,12 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: beads health check: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal warning — server may recover by the time agents need it.
 	}
+	// One-shot is_blocked repair after a bd upgrade (beads#7037). Best-effort:
+	// it warns and retries on the next start instead of failing this one.
+	// --dry-run only previews, so it writes nothing.
+	if !dryRunMode {
+		startRepairBlockedFlags(cityPath, cfg, stderr, "gc start")
+	}
 
 	// Warm-up doctor scan. Fail-open: startup continues regardless of check,
 	// mail, or runner failures.
