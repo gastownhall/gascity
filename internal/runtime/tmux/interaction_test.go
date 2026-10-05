@@ -1027,3 +1027,63 @@ func TestRespond_ReportsFailureWhenThePromptNeverClears(t *testing.T) {
 		t.Fatalf("Respond(deny) on a prompt that never clears = %v, want a did-not-clear error", err)
 	}
 }
+
+// Claude Code hard-wraps a long permission question at the pane width, in the
+// middle of a word when it has to: on 2.1.289 at 80 columns "Do you want to
+// make this edit to <long file name>?" took two rows. Such a prompt must still
+// be detected, or a submit's Enter answers it, and the question must read the
+// same as on a pane wide enough not to wrap it.
+func TestParseApprovalPrompt_WrappedQuestion(t *testing.T) {
+	const want = "Do you want to make this edit to deployment-configuration-checklist-for-the-staging-and-production-environments.txt?"
+	for _, fixture := range []string{
+		"edit-wrapped-question-2.1.289-80x30.txt",
+		"edit-wrapped-question-2.1.289-160x40.txt",
+	} {
+		t.Run(fixture, func(t *testing.T) {
+			a := parseApprovalPrompt(readApprovalFixture(t, fixture))
+			if a == nil {
+				t.Fatal("expected an approval prompt, got nil")
+			}
+			if a.ToolName != "Edit" {
+				t.Errorf("ToolName = %q, want Edit", a.ToolName)
+			}
+			if a.Question != want {
+				t.Errorf("Question = %q, want %q", a.Question, want)
+			}
+			if got := approvalOptionLabels(a); len(got) != 3 || got[0] != "Yes" || got[2] != "No" {
+				t.Errorf("option labels = %q, want Yes / Yes, and switch... / No", got)
+			}
+		})
+	}
+}
+
+// When the wrap falls on a space, the space ends the first row (and the
+// capture drops it) or starts the second; either way the rejoined question
+// keeps exactly one space there.
+func TestParseApprovalPrompt_QuestionWrappedAtASpace(t *testing.T) {
+	// An 80-column pane: one column of indent, 78 of question per row.
+	for _, xs := range []int{44, 45} {
+		question := "Do you want to make this edit to " + strings.Repeat("x", xs) + " notes for the release.txt?"
+		rows := " " + strings.TrimRight(question[:78], " ") + "\n " + question[78:] + "\n"
+		pane := strings.Replace(readApprovalFixture(t, "edit-80x24.txt"),
+			" Do you want to make this edit to notes.txt?\n", rows, 1)
+		a := parseApprovalPrompt(pane)
+		if a == nil {
+			t.Fatalf("%d x: expected an approval prompt, got nil", xs)
+		}
+		if a.Question != question {
+			t.Errorf("%d x: Question = %q, want %q", xs, a.Question, question)
+		}
+	}
+}
+
+// The rejoined question takes only the rows from its start down to the menu.
+func TestParseApprovalPrompt_WrappedQuestionStopsAtTheMenu(t *testing.T) {
+	a := parseApprovalPrompt(readApprovalFixture(t, "edit-wrapped-question-2.1.289-80x30.txt"))
+	if a == nil {
+		t.Fatal("expected an approval prompt, got nil")
+	}
+	if strings.Contains(a.Question, "Yes") || strings.Contains(a.Question, "╌") {
+		t.Errorf("Question = %q, want only the question rows", a.Question)
+	}
+}

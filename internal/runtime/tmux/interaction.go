@@ -128,21 +128,22 @@ func parseApprovalPrompt(paneText string) *parsedApproval {
 		break
 	}
 
-	question := -1
+	question, menu := -1, -1
+	var questionText string
+	width := paneWidth(lines[:end])
 	for i := end - 1; i >= 0; i-- {
-		if approvalQuestionRe.MatchString(strings.TrimSpace(lines[i])) {
-			question = i
+		if text, next, ok := approvalQuestionAt(lines[:end], i, width); ok {
+			question, menu, questionText = i, next, text
 			break
 		}
 	}
 	if question < 0 {
 		return nil
 	}
-	questionText := strings.TrimSpace(lines[question])
 	if nonApprovalQuestions[questionText] {
 		return nil
 	}
-	options, ok := parseApprovalMenu(lines[question+1 : end])
+	options, ok := parseApprovalMenu(lines[menu:end])
 	if !ok {
 		return nil
 	}
@@ -150,6 +151,70 @@ func parseApprovalPrompt(paneText string) *parsedApproval {
 	approval := &parsedApproval{Question: questionText, Options: options}
 	describeApprovalTool(approval, lines[:question])
 	return approval
+}
+
+// approvalQuestionMaxRows bounds how many pane rows one question may span.
+const approvalQuestionMaxRows = 4
+
+// approvalQuestionAt reads a permission question that starts at lines[i]. A
+// long question ("Do you want to make this edit to <long file name>?") is
+// hard-wrapped at the pane width, mid-word if need be, so it continues on the
+// rows below until the first menu option. It returns the rejoined question,
+// the index of the row after it, and whether lines[i] starts a question.
+func approvalQuestionAt(lines []string, i, width int) (string, int, bool) {
+	first := strings.TrimSpace(lines[i])
+	if !strings.HasPrefix(first, "Do you want to ") && first != "Approve edits?" {
+		return "", 0, false
+	}
+	// Continuation rows share the first row's indent; a space the wrap put at
+	// the start of a row is part of the question.
+	indent := lines[i][:len(lines[i])-len(strings.TrimLeft(lines[i], " "))]
+	text := first
+	prevRow := strings.TrimRight(lines[i], " ")
+	next := i + 1
+	for ; next < len(lines) && next-i < approvalQuestionMaxRows; next++ {
+		if approvalQuestionRe.MatchString(text) {
+			break
+		}
+		raw := strings.TrimRight(lines[next], " ")
+		row := strings.TrimPrefix(raw, indent)
+		if strings.TrimSpace(row) == "" || approvalOptionRe.MatchString(strings.TrimSpace(row)) {
+			break
+		}
+		text = joinWrappedRow(text, prevRow, row, width)
+		prevRow = raw
+	}
+	if !approvalQuestionRe.MatchString(text) {
+		return "", 0, false
+	}
+	return text, next, true
+}
+
+// joinWrappedRow appends row, the next row of hard-wrapped text without its
+// indent. A previous row that fills the pane (all but its last column) was
+// cut exactly there, so row continues it as it is, a leading space included.
+// A shorter one lost the space it was cut at (capture drops trailing spaces),
+// so one space goes back between them.
+func joinWrappedRow(text, prevRow, row string, width int) string {
+	if width > 0 && utf8.RuneCountInString(prevRow) >= width-1 {
+		return text + row
+	}
+	return text + " " + strings.TrimLeft(row, " ")
+}
+
+// paneWidth returns the pane width as the length of the widest full-width
+// rule (a row of ─ or ╌) in lines, or 0 when there is none. Claude Code draws
+// those rules across the whole pane.
+func paneWidth(lines []string) int {
+	width := 0
+	for _, line := range lines {
+		trimmed := strings.TrimRight(line, " ")
+		if trimmed == "" || strings.Trim(trimmed, "─╌") != "" {
+			continue
+		}
+		width = max(width, utf8.RuneCountInString(trimmed))
+	}
+	return width
 }
 
 // parseApprovalMenu parses the lines between the question and the end of the

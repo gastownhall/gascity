@@ -101,3 +101,23 @@ func TestSubmitEnterAndConfirmStopsAtPendingPrompt(t *testing.T) {
 		t.Fatalf("submit attempts = %d, want 2 (the first send, then the refused re-send)", calls)
 	}
 }
+
+// A permission question hard-wrapped onto two rows is still a prompt: the
+// nudge refuses it instead of pasting and pressing Enter on it.
+func TestNudgeNowRefusesWrappedPermissionQuestion(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "claude-approval", "edit-wrapped-question-2.1.289-80x30.txt"))
+	if err != nil {
+		t.Fatalf("reading fixture: %v", err)
+	}
+	pane := newFakeClaudePane("")
+	pane.prompt = string(data)
+	pane.promptOnCapture = 1
+
+	err = nudgeNowText(t, pane, "run the tests")
+	if !errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("NudgeNow = %v, want runtime.ErrPendingInteraction", err)
+	}
+	if len(pane.promptKeys) != 0 {
+		t.Fatalf("the permission prompt received %q, want nothing", pane.promptKeys)
+	}
+}
