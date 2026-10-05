@@ -48,6 +48,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -131,16 +132,19 @@ path = ".gc/store"
 const splitWorkerScript = `#!/bin/bash
 set -u
 cd "$GC_CITY" || exit 1
+# GC_BIN is the exact binary the controller runs as; a bare gc is whatever
+# PATH holds.
+GC="${GC_BIN:-gc}"
 LOG="$GC_CITY/.gc/split-e2e-worker.log"
 BUDGET="$GC_CITY/.gc/split-e2e-budget"
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S.%N)" "$*" >> "$LOG"; }
-log "start session=${GC_SESSION_NAME:-} id=${GC_SESSION_ID:-}"
+log "start session=${GC_SESSION_NAME:-} id=${GC_SESSION_ID:-} gc=$GC"
 while true; do
   if [ -f "$BUDGET" ] && [ "$(cat "$BUDGET" 2>/dev/null || echo 0)" -le 0 ]; then
     sleep 0.3
     continue
   fi
-  out=$(timeout 60 gc hook --claim --json 2>>"$LOG")
+  out=$(timeout 60 "$GC" hook --claim --json 2>>"$LOG")
   last=$(printf '%s\n' "$out" | tail -n 1)
   action=$(printf '%s\n' "$last" | jq -r '.action // empty' 2>/dev/null)
   id=$(printf '%s\n' "$last" | jq -r '.bead_id // empty' 2>/dev/null)
@@ -149,7 +153,7 @@ while true; do
     continue
   fi
   log "claimed $id"
-  if timeout 60 gc bd update "$id" --set-metadata gc.outcome=pass --set-metadata gc.work_outcome=no-op --status closed >>"$LOG.bd" 2>&1; then
+  if timeout 60 "$GC" bd update "$id" --set-metadata gc.outcome=pass --set-metadata gc.work_outcome=no-op --status closed >>"$LOG.bd" 2>&1; then
     log "closed $id"
     if [ -f "$BUDGET" ]; then
       echo $(( $(cat "$BUDGET") - 1 )) > "$BUDGET"
@@ -293,10 +297,18 @@ func newSplitE2ECity(t *testing.T, bdPath, doltPath string, bornSplit bool, preB
 		t.Fatalf("write supervisor config: %v", err)
 	}
 	base := helpers.NewEnv(gcBin, gcHome, runtimeDir).With("GC_SESSION", "subprocess")
-	env := helpers.TopologyEnv(t, base, root, bdPath, doltPath)
+	// The binary under test is installed as `gc` in a directory of its own.
+	// helpers.NewEnv only prepends the binary's directory to PATH, so a binary
+	// not named gc (gc-a2, say) left the worker's `gc hook`/`gc bd` calls and
+	// the sessions resolving whatever `gc` sat beside it — a different build.
+	env := splitBinaryEnv(t, helpers.TopologyEnv(t, base, root, bdPath, doltPath), gcBin, filepath.Join(root, "gc-bin"))
 	preEnv := env
 	if preBin != "" {
-		preEnv = splitBinaryEnv(t, env, preBin, filepath.Join(root, "pre-bin"))
+		// v1.5.0-rc1 predates GC_SUPERVISOR_ISOLATED_HOME: its supervisor
+		// refuses any HOME but the passwd one, so its gc gets the host HOME
+		// (as every acceptance gc did before #7033). bd and dolt children
+		// still run under the tool home.
+		preEnv = splitBinaryEnv(t, env, preBin, filepath.Join(root, "pre-bin")).WithHostHome()
 	}
 
 	// Registered before the upstream and the city so it runs after both have
@@ -353,13 +365,35 @@ func splitBinaryEnv(t *testing.T, env *helpers.Env, bin, linkDir string) *helper
 	if err := os.MkdirAll(linkDir, 0o755); err != nil {
 		t.Fatalf("create %s: %v", linkDir, err)
 	}
+	// A real file, not a symlink: gc puts the directory of its resolved
+	// executable first on every session's PATH, and a symlink resolves back
+	// to bin's own directory and whatever `gc` sits there.
 	link := filepath.Join(linkDir, "gc")
-	if err := os.Symlink(bin, link); err != nil {
-		t.Fatalf("link %s as gc: %v", bin, err)
+	if err := os.Link(bin, link); err != nil {
+		if err := copySplitBinary(bin, link); err != nil {
+			t.Fatalf("install %s as %s: %v", bin, link, err)
+		}
 	}
 	return env.Clone().
 		With("GC_ACCEPTANCE_GC_BIN", link).
 		With("PATH", linkDir+string(os.PathListSeparator)+env.Get("PATH"))
+}
+
+func copySplitBinary(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close() //nolint:errcheck // read-only
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o755)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // handOver retires the pre-cutover binary's supervisor with that binary and
@@ -811,6 +845,23 @@ func (c *splitE2ECity) dumpDiagnostics(root string) {
 		marks = marks[len(marks)-60:]
 	}
 	c.t.Logf("worker log (claims/closes):\n%s", strings.Join(marks, "\n"))
+	// Everything else the worker logged is its gc calls' stderr; the tail is
+	// what explains a worker that started and never claimed.
+	var other []string
+	for _, l := range lines {
+		if f := strings.Fields(l); len(f) >= 2 && (f[1] == "claimed" || f[1] == "closed" || f[1] == "close-failed" || f[1] == "start") {
+			continue
+		}
+		if strings.TrimSpace(l) != "" {
+			other = append(other, l)
+		}
+	}
+	if len(other) > 15 {
+		other = other[len(other)-15:]
+	}
+	if len(other) > 0 {
+		c.t.Logf("worker log (gc stderr tail):\n%s", strings.Join(other, "\n"))
+	}
 	out, err := c.city.GC("storage", "status")
 	c.t.Logf("gc storage status (err=%v):\n%s", err, out)
 }
