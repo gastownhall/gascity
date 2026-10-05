@@ -59,6 +59,8 @@ readonly BUSY="zcode-repl turn in flight (C-c to interrupt)"
 readonly GUARD_TOKEN="zcode-repl "
 readonly MAX_CONSECUTIVE_FAILURES=5
 readonly DRAIN_TIMEOUT=1
+# How often an idle adapter wakes from its input wait so a pending trap runs.
+readonly IDLE_WAKE_SECS=1
 # Every read below passes -n, which is what keeps bash on its unbuffered,
 # byte-at-a-time reader for a tty and a pipe alike. Without it bash reads a line
 # through a 128-byte static buffer (zreadc) and pushes the remainder back with
@@ -768,8 +770,26 @@ while :; do
     # Cleared before every read: bash 3.2 returns from a signal-interrupted
     # read without touching the variable, so a stale value would be re-run.
     line=
-    IFS= read -r -n "$MAX_LINE_BYTES" line
-    read_rc=$?
+    # Wait for the first byte on a timer, then read the rest of the line
+    # blocking. bash runs a trap only between commands or when a blocking read
+    # returns. A signal that lands after bash last checked for traps, but
+    # before read() blocks, leaves its trap pending until input arrives, and
+    # for an idle pane that is never: TERM would not end the session (seen in
+    # TestInterruptedTurnClosesTheMirrorEntry under load). A one-byte read
+    # that times out has consumed nothing, so waking every IDLE_WAKE_SECS loses
+    # no input and lets bash run any pending trap.
+    while :; do
+        IFS= read -r -n 1 -t "$IDLE_WAKE_SECS" line
+        read_rc=$?
+        if (( read_rc > 128 && ! interrupted )); then continue; fi
+        break
+    done
+    if (( read_rc == 0 )) && [[ -n "$line" ]]; then
+        rest=
+        IFS= read -r -n "$MAX_LINE_BYTES" rest
+        read_rc=$?
+        line+="$rest"
+    fi
     if (( read_rc != 0 )); then
         # An INT is an interrupt, not end of input. A trapped INT reaches a
         # failed read in more than one shape: it can abort the read outright
