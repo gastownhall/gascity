@@ -98,11 +98,22 @@ func readyOutcomeEdge(from, to, depType string) *beadslib.Dependency {
 
 const readyOutcomeBlockedMeta = `{"gc.work_outcome":"blocked"}`
 
+// Blocker metadata for the passed-step readiness override: only a formula
+// step bead (gc.step_ref) whose control-plane step passed stops its blocked
+// work outcome from withholding dependents.
+const (
+	readyOutcomePassedStepMeta = `{"gc.step_ref":"mol.review","gc.outcome":"pass","gc.work_outcome":"blocked"}`
+	readyOutcomePassedWorkMeta = `{"gc.outcome":"pass","gc.work_outcome":"blocked"}`
+	readyOutcomeFailedStepMeta = `{"gc.step_ref":"mol.review","gc.outcome":"fail","gc.work_outcome":"blocked"}`
+)
+
 // readyOutcomeShapedGraph builds the graph every shape of the veto rule sees:
 // no edges; closed+blocked (vetoed); closed without an outcome (kept); open
 // with the blocked outcome (kept); a non-ready-blocking edge to a vetoing
 // target (ignored); mixed edges where one vetoes (vetoed); a dangling target
-// (kept); a nil edge entry and a nil issue row (tolerated); plus 25 bulk
+// (kept); a nil edge entry and a nil issue row (tolerated); a passed formula
+// step closed blocked (kept), a plain work bead closed pass+blocked (vetoed),
+// a failed formula step closed blocked (vetoed); plus 25 bulk
 // candidates behind two closed-without-outcome blockers each. It returns the
 // storage, the candidates in order, and the ids the rule must remove.
 func readyOutcomeShapedGraph() (*readyOutcomeBatchStorage, []Bead, map[string]bool) {
@@ -116,15 +127,21 @@ func readyOutcomeShapedGraph() (*readyOutcomeBatchStorage, []Bead, map[string]bo
 				readyOutcomeEdge("gc-mixed", "gc-done", "blocks"),
 				readyOutcomeEdge("gc-mixed", "gc-gaveup", "conditional-blocks"),
 			},
-			"gc-dangling":  {readyOutcomeEdge("gc-dangling", "gc-missing", "blocks")},
-			"gc-nil-edge":  {nil, readyOutcomeEdge("gc-nil-edge", "gc-done", "blocks")},
-			"gc-nil-issue": {readyOutcomeEdge("gc-nil-issue", "gc-nil-row", "blocks")},
+			"gc-dangling":          {readyOutcomeEdge("gc-dangling", "gc-missing", "blocks")},
+			"gc-nil-edge":          {nil, readyOutcomeEdge("gc-nil-edge", "gc-done", "blocks")},
+			"gc-nil-issue":         {readyOutcomeEdge("gc-nil-issue", "gc-nil-row", "blocks")},
+			"gc-after-passed-step": {readyOutcomeEdge("gc-after-passed-step", "gc-passed-step", "blocks")},
+			"gc-after-passed-work": {readyOutcomeEdge("gc-after-passed-work", "gc-passed-work", "blocks")},
+			"gc-after-failed-step": {readyOutcomeEdge("gc-after-failed-step", "gc-failed-step", "blocks")},
 		},
 		issues: map[string]*beadslib.Issue{
 			"gc-gaveup":      readyOutcomeIssue("gc-gaveup", beadslib.StatusClosed, readyOutcomeBlockedMeta),
 			"gc-done":        readyOutcomeIssue("gc-done", beadslib.StatusClosed, ""),
 			"gc-open-gaveup": readyOutcomeIssue("gc-open-gaveup", beadslib.StatusOpen, readyOutcomeBlockedMeta),
 			"gc-nil-row":     nil,
+			"gc-passed-step": readyOutcomeIssue("gc-passed-step", beadslib.StatusClosed, readyOutcomePassedStepMeta),
+			"gc-passed-work": readyOutcomeIssue("gc-passed-work", beadslib.StatusClosed, readyOutcomePassedWorkMeta),
+			"gc-failed-step": readyOutcomeIssue("gc-failed-step", beadslib.StatusClosed, readyOutcomeFailedStepMeta),
 		},
 	}
 	candidates := []Bead{
@@ -137,6 +154,9 @@ func readyOutcomeShapedGraph() (*readyOutcomeBatchStorage, []Bead, map[string]bo
 		{ID: "gc-dangling"},
 		{ID: "gc-nil-edge"},
 		{ID: "gc-nil-issue"},
+		{ID: "gc-after-passed-step"},
+		{ID: "gc-after-passed-work"},
+		{ID: "gc-after-failed-step"},
 	}
 	for i := range 25 {
 		id := fmt.Sprintf("gc-bulk-%02d", i)
@@ -148,7 +168,7 @@ func readyOutcomeShapedGraph() (*readyOutcomeBatchStorage, []Bead, map[string]bo
 		}
 		storage.issues[blocker] = readyOutcomeIssue(blocker, beadslib.StatusClosed, "")
 	}
-	return storage, candidates, map[string]bool{"gc-vetoed": true, "gc-mixed": true}
+	return storage, candidates, map[string]bool{"gc-vetoed": true, "gc-mixed": true, "gc-after-passed-work": true, "gc-after-failed-step": true}
 }
 
 func readyOutcomeIDs(beads []Bead) []string {
