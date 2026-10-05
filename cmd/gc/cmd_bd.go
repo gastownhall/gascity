@@ -687,7 +687,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
 	// A session closing work it claimed closes it under the identity the claim
 	// recorded, so bd's assignee check passes without --force.
-	if actor := closeActorForOwnClaim(bdArgs, guardBeads, os.Getenv); actor != "" {
+	if actor := closeActorForOwnClaim(bdArgs, guardBeads, os.Getenv, hookClaimEnvValue(cmd.Env, "BEADS_ACTOR")); actor != "" {
 		cmd.Env = withEnvValue(cmd.Env, "BEADS_ACTOR", actor)
 	}
 
