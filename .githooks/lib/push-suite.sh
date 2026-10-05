@@ -23,6 +23,10 @@
 #          would otherwise compile and run on this machine at --jobs=64).
 #   cache  --config=fork-cache (it resets any rc's executor).
 #   go     make test-fast-parallel (plain go test, the pre-Bazel suite).
+#
+# Remote execution also needs a current worker-env pin (worker_env_refusal
+# below): rbe-west's workers serve only main's pin. On a stale pin, or an open
+# drift issue for main's pin, auto picks the non-remote mode and rbe fails.
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
@@ -78,6 +82,78 @@ probe_executor() {
   fi
 }
 
+# run_bounded SECONDS CMD...: CMD, killed after SECONDS where timeout(1)
+# exists (stock macOS has none; there CMD runs unbounded).
+run_bounded() {
+  local seconds=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+  else
+    "$@"
+  fi
+}
+
+# github_repo REMOTE: REMOTE's owner/name when its configured URL is on
+# github.com; fails otherwise.
+github_repo() {
+  local url
+  url="$(git config --get "remote.$1.url")" || return 1
+  url="${url%.git}"
+  case "$url" in
+  https://github.com/*/* | git@github.com:*/* | ssh://git@github.com/*/*)
+    printf '%s\n' "${url#*github.com[:/]}"
+    ;;
+  *) return 1 ;;
+  esac
+}
+
+# Why remote execution must not run, on stdout; nothing when the worker-env
+# pin is current. Every remote action sends //platforms:rbe_worker's
+# worker-env pin, and rbe-west's oss schedulers match it exactly against what
+# live workers advertise: main's pin, nothing else (TESTING.md "Bazel cache
+# tiers"). Any other pin, from a branch that predates a re-pin or moves the
+# pin, queues every action forever while the pool scaler starts VMs that
+# cannot take them; so does main's own pin while it has an open drift issue.
+# Main is a fresh fetch of $GC_PREPUSH_MAIN_REMOTE (default origin), or its
+# last fetched ref when offline; the drift issue lookup (gh, through
+# tools/rbe/worker-env-drift preflight) is best effort and time-bounded.
+worker_env_refusal() {
+  local main_remote="${GC_PREPUSH_MAIN_REMOTE:-origin}" drift=tools/rbe/worker-env-drift
+  local ref pin base repo out issue status=0
+  ref="refs/remotes/$main_remote/main"
+  if ! run_bounded 30 env GIT_TERMINAL_PROMPT=0 git fetch --no-tags --quiet "$main_remote" "+refs/heads/main:$ref" >/dev/null 2>&1; then
+    echo "pre-push: could not fetch $main_remote's main; comparing against the last fetched $main_remote/main" >&2
+  fi
+  if ! git rev-parse --quiet --verify "$ref^{commit}" >/dev/null; then
+    echo "there is no $main_remote/main to read rbe-west's current worker-env pin from (GC_PREPUSH_MAIN_REMOTE names the remote carrying gascity's main)"
+    return 0
+  fi
+  if ! pin="$("$drift" pin 2>&1)"; then
+    echo "this checkout's worker-env pin is unreadable: $pin"
+    return 0
+  fi
+  if ! base="$(git show "$ref:platforms/BUILD.bazel" 2>/dev/null | "$drift" pin /dev/stdin 2>&1)"; then
+    echo "$main_remote/main's worker-env pin is unreadable: $base"
+    return 0
+  fi
+  if [ "$pin" != "$base" ]; then
+    echo "this checkout pins worker-env=$pin, but rbe-west's workers serve only $main_remote/main's $base. Rebase onto main to execute remotely; a change that moves the pin runs its remote suite after merge"
+    return 0
+  fi
+  if ! command -v gh >/dev/null 2>&1 || ! repo="$(github_repo "$main_remote")"; then
+    return 0
+  fi
+  out="$(GITHUB_REPOSITORY="$repo" WORKER_ENV_REMOTE=true GITHUB_OUTPUT='' GITHUB_STEP_SUMMARY='' \
+    run_bounded 20 "$drift" preflight platforms/BUILD.bazel /dev/null 2>&1)" || status=$?
+  issue="$(printf '%s\n' "$out" | sed -n 's/^::error title=rbe worker-env drift::\(https:[^ :]*\):.*/\1/p')"
+  if [ "$status" -eq 1 ] && [ -n "$issue" ]; then
+    echo "main's worker-env pin $pin has an open drift issue, $issue: no live worker serves it until the re-pin lands"
+  elif [ "$status" -ne 0 ] || printf '%s\n' "$out" | grep -q '^::warning title=rbe worker-env preflight::'; then
+    echo "pre-push: could not check $repo's rbe worker-env drift issues (gh); executing remotely anyway" >&2
+  fi
+}
+
 have_bazel() {
   command -v bazel >/dev/null 2>&1
 }
@@ -109,6 +185,13 @@ auto)
   else
     probe_executor
     if [ -n "$executor" ]; then
+      refusal="$(worker_env_refusal)"
+      if [ -n "$refusal" ]; then
+        echo "pre-push: not executing remotely on $executor: $refusal." >&2
+        executor=""
+      fi
+    fi
+    if [ -n "$executor" ]; then
       mode=rbe
     elif ! pinned_path_has_go; then
       echo "pre-push: no go on .bazelrc's pinned test PATH ($(pinned_test_path)); running make test-fast-parallel." >&2
@@ -125,6 +208,11 @@ rbe)
     probe_executor
     if [ -z "$executor" ]; then
       echo "pre-push: GC_PREPUSH_SUITE=rbe but no rc file names a --remote_executor; configure one (TESTING.md \"Bazel cache tiers\") or use GC_PREPUSH_SUITE=cache|go" >&2
+      exit 2
+    fi
+    refusal="$(worker_env_refusal)"
+    if [ -n "$refusal" ]; then
+      echo "pre-push: GC_PREPUSH_SUITE=rbe refused: $refusal. Its actions would queue on $executor with no worker to run them; use GC_PREPUSH_SUITE=cache|go meanwhile." >&2
       exit 2
     fi
   fi

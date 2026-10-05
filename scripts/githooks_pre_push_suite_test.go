@@ -75,6 +75,9 @@ printf '%s\n' "$*" >> "$BAZEL_RECORD"
 exit "${BAZEL_EXIT:-0}"
 `)
 	f.env = append(f.env, "BAZEL_RECORD="+runs, "BAZEL_PROBE_RECORD="+probes, "BAZEL_ANNOUNCE="+announce)
+	// A remote run first checks the checkout's worker-env pin against
+	// origin's main (githooks_pre_push_worker_env_test.go): current here.
+	f.workerEnv = f.withWorkerEnv(t)
 	return runs, probes
 }
 
