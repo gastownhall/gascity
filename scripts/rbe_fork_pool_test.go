@@ -51,6 +51,11 @@ func TestRBEWorkerScriptForkTier(t *testing.T) {
 		`*) echo "RBE_ACTION_ISOLATION must be 0, 1 or canary" >&2; exit 2 ;;`,
 		gate,
 		"RBE_WEST_PORT=${RBE_WEST_PORT:-443}\n",
+		// zstd needs the dedicated zread host: the worker's own endpoint
+		// answers compressed reads with InvalidArgument (no fallback), so the
+		// worker exits before installing anything rather than register.
+		`if [ "$wire_zstd" = true ] && [ "$ZSTD_READ_URL" = "grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT}" ]; then`,
+		"\texit 2\nfi\n",
 		"sudo DEBIAN_FRONTEND=noninteractive",
 		`if [ "$ACTION_ISOLATION" = canary ]; then`,
 		"\t\tNETNS=${NETNS:-0}\n",
@@ -168,6 +173,8 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 			// off unless the repository variable says 1: merging changes
 			// nothing, and rollback is the variable.
 			"RBE_WIRE_ZSTD": "${{ vars.RBE_FORK_WIRE_ZSTD || '0' }}",
+			// The dedicated zread host; the worker refuses zstd without it.
+			"RBE_WIRE_ZSTD_READ_URL": "${{ vars.RBE_FORK_WIRE_ZSTD_READ_URL || '' }}",
 		}
 		for k, v := range want {
 			if step.Env[k] != v {
@@ -185,8 +192,8 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	}
 
 	// No secret but the fork worker certificate (never the OSS worker's, which
-	// writes AC_OSS), and no repository variable but RBE_FORK_WIRE_ZSTD
-	// (pinned above as RBE_WIRE_ZSTD alone): none can turn isolation down.
+	// writes AC_OSS), and no repository variables but RBE_FORK_WIRE_ZSTD and
+	// RBE_FORK_WIRE_ZSTD_READ_URL (pinned above): none can turn isolation down.
 	secrets := map[string]bool{}
 	for _, m := range regexp.MustCompile(`secrets\.([A-Za-z0-9_]+)`).FindAllStringSubmatch(text, -1) {
 		secrets[m[1]] = true
@@ -194,8 +201,9 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	if got := rbeSortedKeys(secrets); strings.Join(got, ",") != "RBE_FORK_WORKER_TLS_CERT,RBE_FORK_WORKER_TLS_KEY" {
 		t.Errorf("%s uses secrets %v, want RBE_FORK_WORKER_TLS_CERT and RBE_FORK_WORKER_TLS_KEY only", rbeForkPoolWorkflow, got)
 	}
-	if n := strings.Count(text, "vars."); n != 1 || !strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD ") {
-		t.Errorf("%s reads repository variables %d times; want vars.RBE_FORK_WIRE_ZSTD once, nothing else", rbeForkPoolWorkflow, n)
+	if n := strings.Count(text, "vars."); n != 2 || !strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD ") ||
+		!strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD_READ_URL ") {
+		t.Errorf("%s reads repository variables %d times; want vars.RBE_FORK_WIRE_ZSTD and vars.RBE_FORK_WIRE_ZSTD_READ_URL once each, nothing else", rbeForkPoolWorkflow, n)
 	}
 }
 

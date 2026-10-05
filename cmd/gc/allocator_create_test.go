@@ -31,8 +31,9 @@ import (
 
 // createHarness is one executor with a recorded enqueue.
 type createHarness struct {
-	ledger *intentLedger
-	x      *createEffects
+	ledger  *intentLedger
+	backoff *backoffTable
+	x       *createEffects
 
 	mu       sync.Mutex
 	enqueued [][]reconcilekey.Key
@@ -40,12 +41,12 @@ type createHarness struct {
 
 func newCreateHarness(t *testing.T, edit func(*createEffectHost)) *createHarness {
 	t.Helper()
-	h := &createHarness{ledger: newIntentLedger(time.Now)}
+	h := &createHarness{ledger: newIntentLedger(time.Now), backoff: newBackoffTable()}
 	host := createEffectHost{
 		cityPath: t.TempDir(),
 		cityName: "test-city",
 		ledger:   h.ledger,
-		verdicts: &worktreeVerdicts{},
+		backoff:  h.backoff,
 		enqueue: func(_ string, keys ...reconcilekey.Key) {
 			h.mu.Lock()
 			defer h.mu.Unlock()
@@ -77,7 +78,7 @@ func (h *createHarness) reserve(t *testing.T, id string) string {
 	t.Helper()
 	token := session.NewInstanceToken()
 	if !h.ledger.Reserve(ledgerEntry{
-		ID: id, Kind: kindCreate, Key: rowKey{Leg: "sessions"}, Cost: 1, ConfigRev: createHarnessRev,
+		ID: id, Kind: kindCreate, Key: rowKey{Leg: "sessions"}, ConfigRev: createHarnessRev,
 		ReservedAt: time.Now(), Marker: ledgerMarker{InstanceToken: token},
 	}) {
 		t.Fatalf("reserve %s refused", id)
@@ -104,29 +105,43 @@ func (h *createHarness) entry(t *testing.T) ledgerEntry {
 	return e
 }
 
-// vetoes returns the ledger's create vetoes, by identity key.
-func (h *createHarness) vetoes() map[string]createVeto {
-	_, vetoes := h.ledger.Snapshot()
-	return vetoes
+// createBackoffs returns the table's create and named records, by key.
+func (h *createHarness) createBackoffs() map[string]backoffRecord {
+	out := make(map[string]backoffRecord)
+	for k, r := range h.backoff.Snapshot() {
+		if !strings.HasPrefix(k, "work:") {
+			out[k] = r
+		}
+	}
+	return out
 }
 
-// assertNoCreateVeto fails if any create veto was recorded.
-func (h *createHarness) assertNoCreateVeto(t *testing.T) {
+// assertNoCreateBackoff fails if any create backoff was recorded.
+func (h *createHarness) assertNoCreateBackoff(t *testing.T) {
 	t.Helper()
-	if got := h.vetoes(); len(got) != 0 {
-		t.Fatalf("create vetoes = %+v, want none", got)
+	if got := h.createBackoffs(); len(got) != 0 {
+		t.Fatalf("create backoffs = %+v, want none", got)
 	}
 }
 
-// assertCreateVeto checks that plan's identity holds a live create veto with
-// cause, and returns it.
-func (h *createHarness) assertCreateVeto(t *testing.T, plan createPlan, cause string) createVeto {
+// assertCreateBackoff checks that plan's identity holds a create backoff
+// live on the effect's clock, with cause, under createHarnessRev, and
+// returns it.
+func (h *createHarness) assertCreateBackoff(t *testing.T, plan createPlan, cause string) backoffRecord {
 	t.Helper()
-	v, ok := h.vetoes()[plan.identity().key()]
-	if !ok || !v.live(time.Now()) || v.Cause != cause || v.Identity != plan.identity() || v.ConfigRev != createHarnessRev {
-		t.Fatalf("create veto for %q = %+v (present %v), want live with cause %q", plan.identity().key(), v, ok, cause)
+	key := createBackoffKey(plan.identity().key())
+	r, ok := h.backoff.Snapshot()[key]
+	if !ok || !r.live(h.x.host.now()) || r.Cause != cause || r.Fingerprint != createHarnessRev {
+		t.Fatalf("create backoff for %q = %+v (present %v), want live with cause %q", key, r, ok, cause)
 	}
-	return v
+	return r
+}
+
+// refusesWork reports whether the table holds a live work record for
+// spec's evidence.
+func (h *createHarness) refusesWork(spec worktree.Spec) bool {
+	r, ok := h.backoff.Snapshot()[workBackoffKey(spec.BeadID)]
+	return ok && r.live(h.x.host.now()) && r.Fingerprint == specFingerprint(spec) && r.Cause == createStageWorktree
 }
 
 func (h *createHarness) enqueues() [][]reconcilekey.Key {
@@ -136,16 +151,15 @@ func (h *createHarness) enqueues() [][]reconcilekey.Key {
 }
 
 // assertFailedNoWrite checks C5.4(2) for create entry c1: a create that
-// wrote nothing clears at the next pass, whatever the census, refunding its
-// token.
+// wrote nothing clears at the next pass, whatever the census.
 func assertFailedNoWrite(t *testing.T, h *createHarness) {
 	t.Helper()
 	e := h.entry(t)
 	if e.State != ledgerFailed || e.WroteRow {
 		t.Fatalf("entry c1 = state %d wroteRow %v, want failed without a row", e.State, e.WroteRow)
 	}
-	if clears, refund := e.clearVerdict(ledgerCensus{}, time.Now()); !clears || refund != 1 {
-		t.Fatalf("entry c1 clear verdict = (%v, %d), want cleared with a refund of 1", clears, refund)
+	if got := e.clearVerdict(ledgerCensus{}, time.Now()); got != clearUnwritten {
+		t.Fatalf("entry c1 clear verdict = %d, want clearUnwritten", got)
 	}
 }
 
@@ -397,8 +411,8 @@ func TestCreateEffect_NeverProbesProvider(t *testing.T) {
 
 // Kills: starting into an unverified work dir; retrying a bad work item
 // forever (#34, POOL-055, C6.5a). Evidence that fails verification writes
-// nothing, refunds, and is remembered until the bead's evidence changes.
-func TestCreateEffect_WorktreeEvidenceFailureNoWriteRefundAndCached(t *testing.T) {
+// nothing and records a work backoff that a bead's new evidence escapes.
+func TestCreateEffect_WorktreeEvidenceFailureNoWriteAndWorkBackoff(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := workerCity(3)
 	root := t.TempDir()
@@ -427,60 +441,16 @@ func TestCreateEffect_WorktreeEvidenceFailureNoWriteRefundAndCached(t *testing.T
 	if !reflect.DeepEqual(verified, []worktree.Spec{spec}) {
 		t.Fatalf("verified = %+v, want exactly the plan's spec", verified)
 	}
-	if !h.x.host.verdicts.refuses(spec, time.Now()) {
-		t.Fatal("verdicts do not refuse the evidence that failed")
+	if !h.refusesWork(spec) {
+		t.Fatal("no work backoff refuses the evidence that failed")
 	}
 	next := spec
 	next.Generation = "g2"
-	if h.x.host.verdicts.refuses(next, time.Now()) {
-		t.Fatal("verdicts refuse a new generation of the bead's evidence")
+	if h.refusesWork(next) {
+		t.Fatal("the work backoff refuses a new generation of the bead's evidence")
 	}
-	// The work item is throttled, not the slot: no create veto.
-	h.assertNoCreateVeto(t)
-}
-
-// Kills: a worktree verdict that stands forever (evidence repaired out of
-// band never retried), escalates linearly or not at all, survives a
-// successful verify, or outlives the bead's demand.
-func TestWorktreeVerdictsExpireWithBackoffClearOnVerifyAndPrune(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		v := &worktreeVerdicts{}
-		spec := worktree.Spec{BeadID: "w-1", Path: "/wt", Branch: "b", Generation: "g1"}
-		// Recorded again while it stands: the same failure, no escalation;
-		// the verdict extends to the later backoff.
-		v.record(spec, time.Now())
-		advance(time.Second)
-		v.record(spec, time.Now())
-		if !v.refuses(spec, time.Now().Add(10*time.Second-time.Nanosecond)) || v.refuses(spec, time.Now().Add(10*time.Second)) {
-			t.Fatal("a re-record while the verdict stands escalated, or did not extend it to now+10s")
-		}
-		v.verified("w-1")
-		for _, want := range []time.Duration{10, 20, 40, 80, 160, 300, 300} {
-			v.record(spec, time.Now())
-			if !v.refuses(spec, time.Now().Add(want*time.Second-time.Nanosecond)) || v.refuses(spec, time.Now().Add(want*time.Second)) {
-				t.Fatalf("verdict does not stand for exactly %v", want*time.Second)
-			}
-			advance(want * time.Second)
-		}
-		// New evidence starts afresh.
-		next := spec
-		next.Generation = "g2"
-		v.record(next, time.Now())
-		if v.refuses(next, time.Now().Add(10*time.Second)) || v.refuses(spec, time.Now()) {
-			t.Fatal("new evidence for the bead did not restart the backoff at 10s")
-		}
-		v.verified("w-1")
-		if v.refuses(next, time.Now()) {
-			t.Fatal("a successful verify left the verdict standing")
-		}
-		other := worktree.Spec{BeadID: "w-2", Path: "/wt2"}
-		v.record(spec, time.Now())
-		v.record(other, time.Now())
-		v.prune(map[string]bool{"w-2": true})
-		if v.refuses(spec, time.Now()) || !v.refuses(other, time.Now()) {
-			t.Fatal("prune kept a bead out of demand, or dropped one in demand")
-		}
-	})
+	// The work item is throttled, not the slot: no create backoff.
+	h.assertNoCreateBackoff(t)
 }
 
 // Kills: a plan-only create written without its verified work dir (P3-1
@@ -507,13 +477,13 @@ func TestCreateEffect_VerifiesPlanOnlyWorktreeSpecAndStampsWorkDir(t *testing.T)
 	})
 	stale := spec
 	stale.Generation = "old"
-	h.x.host.verdicts.record(stale, time.Now())
+	h.backoff.Refuse(workBackoffKey(stale.BeadID), time.Now(), time.Time{}, createStageWorktree, specFingerprint(stale))
 	h.reserve(t, "c1")
 
 	h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
 
-	if h.x.host.verdicts.refuses(stale, time.Now()) {
-		t.Fatal("a successful verify left the bead's verdict standing")
+	if _, ok := h.backoff.Snapshot()[workBackoffKey(stale.BeadID)]; ok {
+		t.Fatal("a successful verify left the bead's work backoff standing")
 	}
 
 	rows, err := store.ListByLabel(sessionBeadLabel, 0)
@@ -539,7 +509,8 @@ func (failingCreateStore) Create(beads.Bead) (beads.Bead, error) {
 // Kills: clearing an unproven create (C5.4, C5.15). A landed create commits
 // with its row and pre-minted token; a failure before the write fails with
 // no row; an error from the write itself is ambiguous and commits with the
-// token as its marker, so it clears only through the census or lag repair.
+// token as its marker, so it clears only through the census: by its marker,
+// or by a sessions-leg read started after it settled (C5.4(3)).
 func TestCreateEffect_CommitsMarkerOrFailsNoWrite_AmbiguousLeavesMarker(t *testing.T) {
 	cfg := workerCity(2)
 
@@ -567,12 +538,12 @@ func TestCreateEffect_CommitsMarkerOrFailsNoWrite_AmbiguousLeavesMarker(t *testi
 		if got := raw.Metadata["pending_create_started_at"]; got != "2026-10-03T11:00:00Z" {
 			t.Fatalf("pending_create_started_at = %q, want the effect's clock in UTC", got)
 		}
-		if clears, _ := e.clearVerdict(ledgerCensus{}, time.Now()); clears {
+		if e.Ambiguous || e.clearVerdict(startedCensus(nil, e.SettledAt.Add(time.Second)), time.Now()) != clearKeep {
 			t.Fatal("a committed create cleared before the census showed its row")
 		}
 		census := ledgerCensusOf(map[rowKey]ledgerRow{{Leg: "sessions", ID: rows[0].ID}: {InstanceToken: token}})
-		if clears, refund := e.clearVerdict(census, time.Now()); !clears || refund != 0 {
-			t.Fatalf("clear verdict with the row = (%v, %d), want cleared without a refund", clears, refund)
+		if got := e.clearVerdict(census, time.Now()); got != clearWritten {
+			t.Fatalf("clear verdict with the row = %d, want clearWritten", got)
 		}
 		want := [][]reconcilekey.Key{{reconcilekey.Allocator(), reconcilekey.Session(rows[0].ID)}}
 		if got := h.enqueues(); !reflect.DeepEqual(got, want) {
@@ -589,7 +560,7 @@ func TestCreateEffect_CommitsMarkerOrFailsNoWrite_AmbiguousLeavesMarker(t *testi
 		h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
 
 		assertFailedNoWrite(t, h)
-		h.assertCreateVeto(t, plan, createStageStalePlan)
+		h.assertCreateBackoff(t, plan, createStageStalePlan)
 	})
 
 	t.Run("ambiguous write", func(t *testing.T) {
@@ -599,23 +570,23 @@ func TestCreateEffect_CommitsMarkerOrFailsNoWrite_AmbiguousLeavesMarker(t *testi
 		h.runAll(t, &createPass{cfg: cfg, store: failingCreateStore{Store: beads.NewMemStore()}}, workerPlan(cfg, "c1", 1))
 
 		e := h.entry(t)
-		if e.State != ledgerCommitted || !e.WroteRow || e.Marker != (ledgerMarker{InstanceToken: token}) {
-			t.Fatalf("entry = %+v, want committed with only the token as its marker", e)
+		if e.State != ledgerCommitted || !e.WroteRow || !e.Ambiguous || e.Marker != (ledgerMarker{InstanceToken: token}) {
+			t.Fatalf("entry = %+v, want committed as ambiguous with only the token as its marker", e)
 		}
-		if clears, _ := e.clearVerdict(ledgerCensus{}, time.Now()); clears {
-			t.Fatal("an ambiguous create cleared without its marker")
+		if got := e.clearVerdict(startedCensus(nil, e.SettledAt), time.Now()); got != clearKeep {
+			t.Fatalf("an ambiguous create cleared by a read that started at its settle: %d", got)
 		}
-		if !e.lagging(ledgerCensus{}, e.SettledAt.Add(ledgerCacheLagBound)) {
-			t.Fatal("an ambiguous create is not handed to lag repair after the bound")
+		if got := e.clearVerdict(startedCensus(nil, e.SettledAt.Add(time.Second)), time.Now()); got != clearUnwritten {
+			t.Fatalf("clear verdict after a later read without the token = %d, want clearUnwritten", got)
 		}
 		census := ledgerCensusOf(map[rowKey]ledgerRow{{Leg: "sessions", ID: "gc-late"}: {InstanceToken: token}})
-		if clears, refund := e.clearVerdict(census, time.Now()); !clears || refund != 0 {
-			t.Fatalf("clear verdict with the token's row = (%v, %d), want cleared as written", clears, refund)
+		if got := e.clearVerdict(census, time.Now()); got != clearWritten {
+			t.Fatalf("clear verdict with the token's row = %d, want clearWritten", got)
 		}
 		if got := h.enqueues(); !reflect.DeepEqual(got, [][]reconcilekey.Key{{reconcilekey.Allocator()}}) {
 			t.Fatalf("enqueues = %v, want one allocator wake", got)
 		}
-		h.assertNoCreateVeto(t)
+		h.assertNoCreateBackoff(t)
 	})
 }
 
@@ -642,12 +613,12 @@ func (s *firstListFailStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 	return s.Store.List(q)
 }
 
-// Kills: a read failure under the locks vetoed as fence (F3). Only a taken
+// Kills: a read failure under the locks recorded as fence (F3). Only a taken
 // name is fence, which moves the planner's request to the next slot; a
 // failed live re-census or alias query proves nothing about the name and is
 // fence-read, which stalls it. A taken name stays fence
-// (TestCreateEffect_NoWriteFailureVetoesIdentityWithBackoff).
-func TestCreateEffect_LockedReadFailureVetoesFenceRead(t *testing.T) {
+// (TestCreateEffect_NoWriteFailureBacksOffIdentity).
+func TestCreateEffect_LockedReadFailureBacksOffFenceRead(t *testing.T) {
 	cfg := workerCity(60)
 	for name, store := range map[string]beads.Store{
 		"re-census read error": &firstListFailStore{Store: beads.NewMemStore()},
@@ -659,24 +630,28 @@ func TestCreateEffect_LockedReadFailureVetoesFenceRead(t *testing.T) {
 			plan := workerPlan(cfg, "c1", 1)
 			h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
 			assertFailedNoWrite(t, h)
-			h.assertCreateVeto(t, plan, createStageFenceRead)
+			h.assertCreateBackoff(t, plan, createStageFenceRead)
 		})
 	}
 }
 
 // Kills: a create the store provably refused settled as ambiguous (latent 1
-// from the P3-6b review): it would hold the token until lag repair and skip
-// the create veto, so the planner re-plans the identity at pass rate. A gate
-// refusal, a code-less not-found, a lost fence and a store that cannot fence
-// fail the entry with no row and veto the identity, as fence-read: none
-// proves the name taken (F3).
-func TestCreateEffect_RefusedWriteFailsNoWriteAndVetoes(t *testing.T) {
+// from the P3-6b review): it would hold the token until resolved and skip
+// the create backoff, so the planner re-plans the identity at pass rate. A gate
+// refusal, a code-less not-found, a lost fence, a store that cannot fence, a
+// closed store and a SQLite write out of busy retries fail the entry with no
+// row and back off the identity, as fence-read: none proves the name taken
+// (F3).
+func TestCreateEffect_RefusedWriteFailsNoWriteAndBacksOff(t *testing.T) {
 	cfg := workerCity(2)
 	for name, err := range map[string]error{
 		"gate refusal":                   &beads.GateRefusalError{Verb: "create", Code: "policy"},
 		"code-less not found":            fmt.Errorf("bd create: %w", beads.ErrNotFound),
 		"precondition failed":            &beads.PreconditionFailedError{Expected: 1, Current: 2},
 		"conditional writes unsupported": beads.ErrConditionalWriteUnsupported,
+		"sqlite store closed":            fmt.Errorf("sqlite store: %w", beads.ErrStoreClosed),
+		"native Dolt store closed":       fmt.Errorf("native Dolt store: %w", beads.ErrStoreClosed),
+		"sqlite busy retries exhausted":  fmt.Errorf("sqlite create: begin tx: %w", beads.ErrSQLiteBusyExhausted),
 	} {
 		t.Run(name, func(t *testing.T) {
 			mem := beads.NewMemStore()
@@ -685,7 +660,7 @@ func TestCreateEffect_RefusedWriteFailsNoWriteAndVetoes(t *testing.T) {
 			plan := workerPlan(cfg, "c1", 1)
 			h.runAll(t, &createPass{cfg: cfg, store: refusingCreateStore{Store: mem, err: err}}, plan)
 			assertFailedNoWrite(t, h)
-			h.assertCreateVeto(t, plan, createStageFenceRead)
+			h.assertCreateBackoff(t, plan, createStageFenceRead)
 			if rows := sessionRows(t, mem); len(rows) != 0 {
 				t.Fatalf("rows = %+v, want none", rows)
 			}
@@ -712,7 +687,7 @@ func TestCreateEffect_ReleasedEntryRunsNoEffect(t *testing.T) {
 	if got := h.enqueues(); len(got) != 0 {
 		t.Fatalf("enqueues = %v, want none", got)
 	}
-	h.assertNoCreateVeto(t)
+	h.assertNoCreateBackoff(t)
 }
 
 // gateLocker parks every effect inside the identifier locks until release,
@@ -834,7 +809,7 @@ func TestCreateEffect_JoinedAtShutdown(t *testing.T) {
 		if rows := sessionRows(t, store); len(rows) != createEffectParallelism {
 			t.Fatalf("rows = %d, want %d", len(rows), createEffectParallelism)
 		}
-		h.assertNoCreateVeto(t) // plans dropped at shutdown were never issued
+		h.assertNoCreateBackoff(t) // plans dropped at shutdown were never issued
 	})
 }
 
@@ -1198,12 +1173,12 @@ func closedNameOwner(t *testing.T, store beads.Store, sessionName string) {
 	}
 }
 
-// Kills (AM-N8, S4): a doomed create re-planned at pass rate (the refund and
-// replan loop); a veto that does not double, is uncapped, clears early or
-// never; a commit that leaves the backoff; a veto on a lost issue CAS or on
-// an ambiguous write; a failed entry visible to a pass without its veto; a
-// veto that survives a ConfigRev change or its identity's removal.
-func TestCreateEffect_NoWriteFailureVetoesIdentityWithBackoff(t *testing.T) {
+// Kills (AM-N8, S4): a doomed create re-planned at pass rate; a backoff that
+// does not double, is uncapped, clears early or never; a commit that leaves
+// the backoff; a backoff on a lost issue CAS or on an ambiguous write; a
+// failed entry visible to a pass (ledger read before the table) without its
+// backoff; a backoff that survives a ConfigRev change.
+func TestCreateEffect_NoWriteFailureBacksOffIdentity(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cfg := workerCity(60)
 		cfg.Agents[0].TmuxAlias = "crew"
@@ -1223,36 +1198,34 @@ func TestCreateEffect_NoWriteFailureVetoesIdentityWithBackoff(t *testing.T) {
 			if e, _ := ledgerEntryOf(h.ledger, plan.EntryID); e.State != ledgerFailed || e.WroteRow {
 				t.Fatalf("attempt %d: entry %+v, want failed without a row", i+1, e)
 			}
-			v := h.assertCreateVeto(t, plan, createStageFence)
+			v := h.assertCreateBackoff(t, plan, createStageFence)
 			if got := time.Until(v.Until); got != want*time.Second || v.Consecutive != i+1 {
-				t.Fatalf("attempt %d: veto for %v (consecutive %d), want %v (%d)", i+1, got, v.Consecutive, want*time.Second, i+1)
+				t.Fatalf("attempt %d: backoff for %v (consecutive %d), want %v (%d)", i+1, got, v.Consecutive, want*time.Second, i+1)
 			}
+			key := createBackoffKey(plan.identity().key())
 			advance(time.Until(v.Until) - time.Nanosecond)
-			if !h.vetoes()[plan.identity().key()].live(time.Now()) {
-				t.Fatalf("attempt %d: veto cleared before Until", i+1)
+			if !h.backoff.Snapshot()[key].live(time.Now()) {
+				t.Fatalf("attempt %d: backoff cleared before Until", i+1)
 			}
 			advance(time.Nanosecond)
-			if h.vetoes()[plan.identity().key()].live(time.Now()) {
-				t.Fatalf("attempt %d: veto still live at Until", i+1)
+			if h.backoff.Snapshot()[key].live(time.Now()) {
+				t.Fatalf("attempt %d: backoff still live at Until", i+1)
 			}
 		}
 
 		// A commit for the identity resets its backoff.
 		attempt("ok", beads.NewMemStore())
-		h.assertNoCreateVeto(t)
+		h.assertNoCreateBackoff(t)
 		plan := attempt("again", doomed)
-		if v := h.assertCreateVeto(t, plan, createStageFence); time.Until(v.Until) != ledgerVetoBase || v.Consecutive != 1 {
-			t.Fatalf("after a commit: veto %+v, want 10s and consecutive 1", v)
+		if v := h.assertCreateBackoff(t, plan, createStageFence); time.Until(v.Until) != backoffBase || v.Consecutive != 1 {
+			t.Fatalf("after a commit: backoff %+v, want 10s and consecutive 1", v)
 		}
 
-		// A ConfigRev change, or the identity leaving config, drops the veto.
-		h.ledger.PruneCreateVetoes(createHarnessRev, createIdentityConfigured(cfg))
-		h.assertCreateVeto(t, plan, createStageFence)
-		h.ledger.PruneCreateVetoes("rev-2", createIdentityConfigured(cfg))
-		h.assertNoCreateVeto(t)
-		attempt("removed", doomed)
-		h.ledger.PruneCreateVetoes(createHarnessRev, createIdentityConfigured(&config.City{Agents: []config.Agent{{Name: "other"}}}))
-		h.assertNoCreateVeto(t)
+		// A ConfigRev change drops the backoff.
+		h.backoff.Prune(createHarnessRev, ledgerCensus{}, nil)
+		h.assertCreateBackoff(t, plan, createStageFence)
+		h.backoff.Prune("rev-2", ledgerCensus{}, nil)
+		h.assertNoCreateBackoff(t)
 
 		// A lost issue CAS and an ambiguous write record nothing.
 		h.reserve(t, "released")
@@ -1261,9 +1234,9 @@ func TestCreateEffect_NoWriteFailureVetoesIdentityWithBackoff(t *testing.T) {
 		}
 		h.runAll(t, &createPass{cfg: cfg, store: doomed}, workerPlan(cfg, "released", 1))
 		attempt("ambiguous", failingCreateStore{Store: beads.NewMemStore()})
-		h.assertNoCreateVeto(t)
+		h.assertNoCreateBackoff(t)
 
-		// Every failed create a pass can see carries its veto: 40 doomed
+		// Every failed create a pass can see carries its backoff: 40 doomed
 		// effects fail in parallel while a pass reads the ledger. Slot i's
 		// runtime name is crew-i.
 		var plans []createPlan
@@ -1277,15 +1250,16 @@ func TestCreateEffect_NoWriteFailureVetoesIdentityWithBackoff(t *testing.T) {
 		}
 		identities := make(map[string]string, len(plans))
 		for _, p := range plans {
-			identities[p.EntryID] = p.identity().key()
+			identities[p.EntryID] = createBackoffKey(p.identity().key())
 		}
 		stop, observed := make(chan struct{}), make(chan error, 1)
 		go func() {
 			for {
-				entries, vetoes := h.ledger.Snapshot()
+				entries := h.ledger.View()
+				recs := h.backoff.Snapshot()
 				for _, e := range entries {
-					if key, ok := identities[e.ID]; ok && e.State == ledgerFailed && !vetoes[key].live(time.Now()) {
-						observed <- fmt.Errorf("entry %s failed without its veto", e.ID)
+					if key, ok := identities[e.ID]; ok && e.State == ledgerFailed && !recs[key].live(time.Now()) {
+						observed <- fmt.Errorf("entry %s failed without its backoff", e.ID)
 						return
 					}
 				}
@@ -1302,8 +1276,8 @@ func TestCreateEffect_NoWriteFailureVetoesIdentityWithBackoff(t *testing.T) {
 		if err := <-observed; err != nil {
 			t.Fatal(err)
 		}
-		if got := len(h.vetoes()); got != len(plans) {
-			t.Fatalf("create vetoes = %d, want one per doomed identity (%d)", got, len(plans))
+		if got := len(h.createBackoffs()); got != len(plans) {
+			t.Fatalf("create backoffs = %d, want one per doomed identity (%d)", got, len(plans))
 		}
 	})
 }
@@ -1371,7 +1345,7 @@ func (s panicAfterCreateStore) Create(b beads.Bead) (beads.Bead, error) {
 }
 
 // Kills: the pre-minted row ID dropped from a commit or from an ambiguous
-// marker (lag repair then needs a token scan to find the row).
+// marker (the census then finds the row only by its token).
 func TestCreateEffect_PreMintedRowIDIsTheMarker(t *testing.T) {
 	cfg := workerCity(2)
 	t.Run("committed", func(t *testing.T) {
@@ -1392,58 +1366,142 @@ func TestCreateEffect_PreMintedRowIDIsTheMarker(t *testing.T) {
 		if e := h.entry(t); e.State != ledgerCommitted || !e.WroteRow || e.Marker != want {
 			t.Fatalf("entry %+v, want ambiguous commit with marker %+v", e, want)
 		}
-		h.assertNoCreateVeto(t)
+		h.assertNoCreateBackoff(t)
 	})
 }
 
 // setMarkerFailStore lets Create through, then fails the follow-up write of
-// the bead-scoped session_name.
-type setMarkerFailStore struct{ beads.Store }
+// the bead-scoped session_name with err.
+type setMarkerFailStore struct {
+	beads.Store
+	err error
+}
 
 func (s setMarkerFailStore) SetMetadata(id, key, value string) error {
 	if key == "session_name" {
-		return errors.New("dolt: connection lost during set")
+		return s.err
 	}
 	return s.Store.SetMetadata(id, key, value)
 }
 
 func (s setMarkerFailStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	if _, ok := kvs["session_name"]; ok {
-		return errors.New("dolt: connection lost during set")
+		return s.err
 	}
 	return s.Store.SetMetadataBatch(id, kvs)
 }
 
 func (s setMarkerFailStore) Update(id string, opts beads.UpdateOpts) error {
 	if _, ok := opts.Metadata["session_name"]; ok {
-		return errors.New("dolt: connection lost during update")
+		return s.err
 	}
 	return s.Store.Update(id, opts)
 }
 
 // Kills: a failure after the row landed (the session_name follow-up of a
-// store that pre-mints no ID) read as no write: a refund and a create veto
-// for a row that exists.
+// store that pre-mints no ID) read as no write: a create backoff for a row
+// that exists. A refusal class from that follow-up (a store closed after the
+// Create, a not-found) proves only that the follow-up wrote nothing.
 func TestCreateEffect_FailureAfterTheWriteIsAmbiguous(t *testing.T) {
 	cfg := workerCity(2)
-	mem := beads.NewMemStore()
-	h := newCreateHarness(t, nil)
-	token := h.reserve(t, "c1")
-	h.runAll(t, &createPass{cfg: cfg, store: setMarkerFailStore{Store: mem}}, workerPlan(cfg, "c1", 1))
-	all, err := mem.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
-	if err != nil || len(all) != 1 {
-		t.Fatalf("rows = %+v (%v), want the one row the create wrote", all, err)
+	for name, err := range map[string]error{
+		"connection lost": errors.New("dolt: connection lost during set"),
+		"store closed":    fmt.Errorf("sqlite store: %w", beads.ErrStoreClosed),
+		"not found":       fmt.Errorf("bd update: %w", beads.ErrNotFound),
+	} {
+		t.Run(name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			h := newCreateHarness(t, nil)
+			token := h.reserve(t, "c1")
+			h.runAll(t, &createPass{cfg: cfg, store: setMarkerFailStore{Store: mem, err: err}}, workerPlan(cfg, "c1", 1))
+			all, err := mem.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+			if err != nil || len(all) != 1 {
+				t.Fatalf("rows = %+v (%v), want the one row the create wrote", all, err)
+			}
+			want := ledgerMarker{RowID: all[0].ID, InstanceToken: token}
+			if e := h.entry(t); e.State != ledgerCommitted || !e.WroteRow || !e.Ambiguous || e.Marker != want {
+				t.Fatalf("entry %+v, want ambiguous commit with marker %+v", e, want)
+			}
+			h.assertNoCreateBackoff(t)
+		})
 	}
-	want := ledgerMarker{RowID: all[0].ID, InstanceToken: token}
-	if e := h.entry(t); e.State != ledgerCommitted || !e.WroteRow || e.Marker != want {
-		t.Fatalf("entry %+v, want ambiguous commit with marker %+v", e, want)
-	}
-	h.assertNoCreateVeto(t)
 }
 
-// Kills: a panic before the row write settled as ambiguous (a lag-repair
-// round and a leg flag for a create that wrote nothing); a panic after it
-// settled as no write (a refund for a row that exists); the pre-minted row ID
+// Kills: busy text alone read as a write that committed nothing. Only the
+// SQLite store's exhausted retries prove that (ErrSQLiteBusyExhausted); the
+// same text from another writer (a bd subprocess) stays ambiguous.
+func TestCreateEffect_UnprovenBusyWriteIsAmbiguous(t *testing.T) {
+	cfg := workerCity(2)
+	h := newCreateHarness(t, nil)
+	h.reserve(t, "c1")
+	busy := errors.New("bd create: database is locked (5) (SQLITE_BUSY)")
+	h.runAll(t, &createPass{cfg: cfg, store: refusingCreateStore{Store: beads.NewMemStore(), err: busy}}, workerPlan(cfg, "c1", 1))
+	if e := h.entry(t); e.State != ledgerCommitted || !e.Ambiguous {
+		t.Fatalf("entry %+v, want an ambiguous commit", e)
+	}
+	h.assertNoCreateBackoff(t)
+}
+
+// Kills (ME7, and a backoff fingerprinted by anything but the entry): a
+// no-write failure's create backoff under a fingerprint other than the
+// ConfigRev its entry was reserved under. The pass carries no revision, so
+// only the entry's can reach the record, and Prune keeps it exactly while
+// the pass's revision is the entry's.
+func TestCreateEffect_NoWriteBackoffFingerprintIsTheEntryConfigRev(t *testing.T) {
+	cfg := workerCity(60)
+	cfg.Agents[0].TmuxAlias = "crew"
+	doomed := beads.NewMemStore()
+	closedNameOwner(t, doomed, "crew")
+	h := newCreateHarness(t, nil)
+	if !h.ledger.Reserve(ledgerEntry{
+		ID: "c1", Kind: kindCreate, Key: rowKey{Leg: "sessions"}, ConfigRev: "rev-entry",
+		ReservedAt: time.Now(), Marker: ledgerMarker{InstanceToken: session.NewInstanceToken()},
+	}) {
+		t.Fatal("reserve refused")
+	}
+	plan := workerPlan(cfg, "c1", 1)
+	h.runAll(t, &createPass{cfg: cfg, store: doomed}, plan)
+	key := createBackoffKey(plan.identity().key())
+	if r := h.backoff.Snapshot()[key]; r.Fingerprint != "rev-entry" || r.Cause != createStageFence {
+		t.Fatalf("create backoff = %+v, want fence under the entry's ConfigRev rev-entry", r)
+	}
+	h.backoff.Prune("rev-entry", ledgerCensus{}, nil)
+	if _, ok := h.backoff.Snapshot()[key]; !ok {
+		t.Fatal("prune under the entry's ConfigRev dropped its backoff")
+	}
+	h.backoff.Prune("rev-next", ledgerCensus{}, nil)
+	if _, ok := h.backoff.Snapshot()[key]; ok {
+		t.Fatal("the backoff survived a ConfigRev change")
+	}
+}
+
+// Kills (M19, deterministic): the ledger settling a failed create before its
+// backoff is recorded. The ledger reads its clock under its lock at every
+// settle, so the hook sees the table as a pass that reads the ledger first
+// and the table second sees it once the failed entry is visible.
+func TestCreateEffect_BackoffRecordedBeforeTheLedgerSettles(t *testing.T) {
+	cfg := workerCity(60)
+	cfg.Agents[0].TmuxAlias = "crew"
+	doomed := beads.NewMemStore()
+	closedNameOwner(t, doomed, "crew")
+	h := newCreateHarness(t, nil)
+	plan := workerPlan(cfg, "c1", 1)
+	key := createBackoffKey(plan.identity().key())
+	var atSettle []backoffRecord
+	h.ledger.now = func() time.Time {
+		atSettle = append(atSettle, h.backoff.Snapshot()[key])
+		return time.Now()
+	}
+	h.reserve(t, "c1")
+	h.runAll(t, &createPass{cfg: cfg, store: doomed}, plan)
+	if len(atSettle) != 1 || !atSettle[0].live(time.Now()) || atSettle[0].Cause != createStageFence {
+		t.Fatalf("create backoff when the ledger settled = %+v, want the fence record already live", atSettle)
+	}
+}
+
+// Kills: a panic before the row write settled as ambiguous (an entry held
+// until a later read for a create that wrote nothing); a panic after it
+// settled as no write (a create backoff for a row that exists); the pre-minted row ID
 // lost on the panic path; a panic that skips the settle and strands the
 // entry issued.
 func TestCreateEffect_PanicSettlesByWhetherTheWriteBegan(t *testing.T) {
@@ -1460,7 +1518,7 @@ func TestCreateEffect_PanicSettlesByWhetherTheWriteBegan(t *testing.T) {
 		plan := workerPlan(cfg, "c1", 1)
 		h.runAll(t, &createPass{cfg: cfg, store: aliasPanicStore{Store: store}}, plan)
 		assertFailedNoWrite(t, h)
-		h.assertCreateVeto(t, plan, createStagePanic)
+		h.assertCreateBackoff(t, plan, createStagePanic)
 		if rows := sessionRows(t, store); len(rows) != 0 {
 			t.Fatalf("rows = %+v, want none", rows)
 		}
@@ -1485,7 +1543,7 @@ func TestCreateEffect_PanicSettlesByWhetherTheWriteBegan(t *testing.T) {
 		if _, err := store.Get(rowID); err != nil {
 			t.Fatalf("the row the panicking create wrote: %v", err)
 		}
-		h.assertNoCreateVeto(t)
+		h.assertNoCreateBackoff(t)
 	})
 }
 
@@ -1571,7 +1629,7 @@ func TestCreateEffect_ValidatesTransportWithLookPath(t *testing.T) {
 	plan := workerPlan(cfg, "c1", 1)
 	h.runAll(t, &createPass{cfg: cfg, sp: &acpOnlyDesiredStateProvider{Fake: runtime.NewFake()}, store: store}, plan)
 	assertFailedNoWrite(t, h)
-	h.assertCreateVeto(t, plan, createStagePrepare)
+	h.assertCreateBackoff(t, plan, createStagePrepare)
 	if rows := sessionRows(t, store); len(rows) != 0 {
 		t.Fatalf("rows = %+v, want none for an unsupported transport", rows)
 	}
@@ -1583,9 +1641,9 @@ func TestCreateEffect_ValidatesTransportWithLookPath(t *testing.T) {
 func TestCreateEffect_LocksFailClosedWithoutTheCityPath(t *testing.T) {
 	ledger := newIntentLedger(time.Now)
 	for name, host := range map[string]createEffectHost{
-		"no city path": {ledger: ledger, verdicts: &worktreeVerdicts{}},
-		"no verdicts":  {ledger: ledger, cityPath: t.TempDir()},
-		"no ledger":    {verdicts: &worktreeVerdicts{}, cityPath: t.TempDir()},
+		"no city path": {ledger: ledger, backoff: newBackoffTable()},
+		"no backoff":   {ledger: ledger, cityPath: t.TempDir()},
+		"no ledger":    {backoff: newBackoffTable(), cityPath: t.TempDir()},
 	} {
 		if _, err := newCreateEffects(host); err == nil {
 			t.Errorf("%s: newCreateEffects accepted the host", name)
@@ -1606,7 +1664,7 @@ func TestCreateEffect_LocksFailClosedWithoutTheCityPath(t *testing.T) {
 	plan := workerPlan(cfg, "c1", 1)
 	h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
 	assertFailedNoWrite(t, h)
-	h.assertCreateVeto(t, plan, createStageLock)
+	h.assertCreateBackoff(t, plan, createStageLock)
 	if rows := sessionRows(t, store); len(rows) != 0 {
 		t.Fatalf("rows = %+v, want none without the city flock", rows)
 	}
@@ -1650,7 +1708,7 @@ func TestCreateEffect_RefusesAPlanConfigDoesNotDerive(t *testing.T) {
 			h.reserve(t, "c1")
 			h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
 			assertFailedNoWrite(t, h)
-			h.assertCreateVeto(t, plan, createStageStalePlan)
+			h.assertCreateBackoff(t, plan, createStageStalePlan)
 			if rows := sessionRows(t, store); len(rows) != 0 {
 				t.Fatalf("rows = %+v, want none", rows)
 			}

@@ -57,9 +57,12 @@ jobs:
           RBE_ACTION_CANARY_EVERY: ${{ vars.RBE_ACTION_CANARY_EVERY || '4' }}
           # REAPI compressed-blobs (zstd) fetches for blobs of 64 KiB or more:
           # about a quarter of the bytes on the wire for test binaries and
-          # archives. Uploads stay identity. Only after rbe-west's :443 route
-          # sends this certificate's ByteStream.Read to its read-only zstd
-          # process. Rollback: the repository variable RBE_WIRE_ZSTD=0; the
-          # next dispatch fetches identity again.
+          # archives. Uploads stay identity. Set RBE_WIRE_ZSTD=1 together with
+          # RBE_WIRE_ZSTD_READ_URL=grpcs://rbe-zread.ops.gascity.com:443 (the
+          # dedicated read-only zstd host; the worker refuses to start with the
+          # switch on and no zread URL). Rollback: RBE_WIRE_ZSTD=0, and the
+          # next dispatch fetches identity again; for an emergency also cancel
+          # the running pool runs, which keep their store until they retire.
           RBE_WIRE_ZSTD: ${{ vars.RBE_WIRE_ZSTD || '0' }}
+          RBE_WIRE_ZSTD_READ_URL: ${{ vars.RBE_WIRE_ZSTD_READ_URL || '' }}
         run: tools/rbe/blacksmith-worker.sh

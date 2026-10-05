@@ -282,7 +282,7 @@ type allocPlan struct {
 	Endpoint endpointKey
 }
 
-// identity is the plan's create identity (AM-N8): the key its create veto
+// identity is the plan's create identity (AM-N8): the key its create backoff
 // and its planning reservation are kept under. A pool or dependency plan
 // uses P3-6's createIdentity key; a named one P3-6b's "named:<identity>".
 func (p allocPlan) identity() string {
