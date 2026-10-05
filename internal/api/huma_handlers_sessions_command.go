@@ -109,7 +109,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	// session on request, so refuse up front instead of returning 202 for a
 	// bead that would sit start-pending forever (#6858).
 	if msg := demandOnlySingletonCreateRefusal(cfg, agentCfg); msg != "" {
-		return nil, apierr.InvalidRequest.Msg(msg)
+		return nil, apierr.DemandOnlySingleton.Msg(msg)
 	}
 	alias = createCtx.Alias
 	explicitName := createCtx.ExplicitName
@@ -1102,6 +1102,9 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
+	}
+	if msg := s.sessionWakeRefusal(store, id); msg != "" {
+		return nil, apierr.DemandOnlySingleton.Msg(msg)
 	}
 
 	res, err := session.NewStore(store).WakeSession(id, time.Now().UTC(), session.WakeOpts{RejectClosed: true})

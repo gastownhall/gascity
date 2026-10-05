@@ -1404,3 +1404,63 @@ func TestIsDemandOnlySingletonTemplate(t *testing.T) {
 		t.Fatal("IsDemandOnlySingletonTemplate(nil agent) = true, want false")
 	}
 }
+
+// TestIsDemandOnlySingletonSession pins which sessions of a demand-only
+// singleton template are the controller-owned pool capacity that neither a
+// wake nor a pin can start (#6858): named and manual sessions of the same
+// template start on their own terms.
+func TestIsDemandOnlySingletonSession(t *testing.T) {
+	one, two := 1, 2
+	singleton := config.Agent{Name: "worker", Dir: "demo", MaxActiveSessions: &one}
+	tests := []struct {
+		name  string
+		agent config.Agent
+		info  Info
+		want  bool
+	}{
+		{"pool-managed session", singleton, Info{Template: "demo/worker", PoolManaged: true}, true},
+		{"ephemeral origin", singleton, Info{Template: "demo/worker", SessionOrigin: "ephemeral"}, true},
+		{"pool slot marker", singleton, Info{Template: "demo/worker", PoolSlot: "1"}, true},
+		{"dependency-only session", singleton, Info{Template: "demo/worker", DependencyOnly: true}, true},
+		{"legacy slot-suffixed agent name", singleton, Info{Template: "demo/worker", AgentName: "demo/worker-2"}, true},
+		{"manual origin", singleton, Info{Template: "demo/worker", SessionOrigin: "manual", PoolManaged: true}, false},
+		{"manual metadata", singleton, Info{Template: "demo/worker", ManualSessionMetadata: "true", PoolManaged: true}, false},
+		{"configured named session", singleton, Info{Template: "demo/worker", ConfiguredNamedSession: true, PoolManaged: true}, false},
+		{"no origin markers", singleton, Info{Template: "demo/worker"}, false},
+		{"multi-session template", config.Agent{Name: "worker", Dir: "demo", MaxActiveSessions: &two}, Info{Template: "demo/worker", PoolManaged: true}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{tt.agent}}
+			if got := IsDemandOnlySingletonSession(cfg, &cfg.Agents[0], tt.info); got != tt.want {
+				t.Fatalf("IsDemandOnlySingletonSession(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+	if IsDemandOnlySingletonSession(&config.City{}, nil, Info{PoolManaged: true}) {
+		t.Fatal("IsDemandOnlySingletonSession(nil agent) = true, want false")
+	}
+}
+
+// TestDemandOnlySingletonWakeRefused: a wake of the pool capacity cannot start
+// it, but a wake of one already running only clears its blockers.
+func TestDemandOnlySingletonWakeRefused(t *testing.T) {
+	one := 1
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{{Name: "worker", MaxActiveSessions: &one}}}
+	agent := &cfg.Agents[0]
+	for _, tt := range []struct {
+		state string
+		want  bool
+	}{
+		{"asleep", true},
+		{"", true},
+		{"drained", true},
+		{"active", false},
+		{"awake", false},
+	} {
+		info := Info{Template: "worker", PoolManaged: true, MetadataState: tt.state}
+		if got := DemandOnlySingletonWakeRefused(cfg, agent, info); got != tt.want {
+			t.Errorf("DemandOnlySingletonWakeRefused(state=%q) = %v, want %v", tt.state, got, tt.want)
+		}
+	}
+}

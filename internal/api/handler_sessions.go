@@ -474,6 +474,10 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 		writeResolveError(w, err)
 		return
 	}
+	if msg := s.sessionWakeRefusal(store, id); msg != "" {
+		writeError(w, http.StatusBadRequest, "invalid", msg)
+		return
+	}
 
 	res, err := session.NewStore(store).WakeSession(id, time.Now().UTC(), session.WakeOpts{})
 	if err != nil {
