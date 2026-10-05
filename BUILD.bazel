@@ -206,6 +206,7 @@ filegroup(
         "//cmd/gen-command-census:bazel_repo_srcs",
         "//cmd/genschema:bazel_repo_srcs",
         "//cmd/genspec:bazel_repo_srcs",
+        "//cmd/openapi-breaking:bazel_repo_srcs",
         "//contrib:bazel_repo_srcs",
         "//docs:bazel_repo_srcs",
         "//examples:bazel_repo_srcs",

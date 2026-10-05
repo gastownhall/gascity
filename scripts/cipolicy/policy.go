@@ -113,7 +113,14 @@ const (
 	// a step exporting GC_TEST_FAILURE_ARTIFACT_DIR to $GITHUB_ENV and an
 	// `if: failure()` pinned upload-artifact step for that directory. No new
 	// job, trigger, permission or secret.
-	expectedCIExecutionHash     = "f09cde554074ba570ce7d1e480ac538a2641c15539f120c3d028ee8ee63d07ac"
+	//
+	// Bumped again (OpenAPI breaking-change gate): preflight-generated gains
+	// an OPENAPI_BREAKING_BASE job env (PR base SHA, else github.sha) and a
+	// "Fetch OpenAPI breaking-change base" step that shallow-fetches that
+	// commit before `make spec-ci`, which now also runs the oasdiff gate; the
+	// spec-ci step is renamed to say so. Reviewed delta: one env var, one
+	// step, one step name; no new job, trigger or permission.
+	expectedCIExecutionHash     = "f858745ebfdcdbaa1370bdc9f39994f02f2a4d43aff84d705a4c218a044d0407"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

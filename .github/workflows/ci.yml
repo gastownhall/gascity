@@ -786,6 +786,8 @@ jobs:
       # Make TestGeneratedClientInSync fatal on missing oapi-codegen so the
       # spec->client drift check can never silently skip in CI.
       GC_REQUIRE_OAPI_CODEGEN: "1"
+      # Merge-base side of the OpenAPI breaking-change gate (cmd/openapi-breaking).
+      OPENAPI_BREAKING_BASE: ${{ github.event.pull_request.base.sha || github.sha }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
@@ -796,7 +798,14 @@ jobs:
           node-version: "22"
       - name: Dashboard bundle drift check
         run: make dashboard-ci
-      - name: OpenAPI spec + client drift check
+      # spec-ci also runs the OpenAPI breaking-change gate against the PR base.
+      # Non-PR events compare HEAD with itself (nothing to gate).
+      - name: Fetch OpenAPI breaking-change base
+        run: |
+          if ! git cat-file -e "${OPENAPI_BREAKING_BASE}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$OPENAPI_BREAKING_BASE"
+          fi
+      - name: OpenAPI spec + client drift check and breaking-change gate
         run: make spec-ci
       # On drift this fails the job and leaves the exact regen patch, which
       # the Docs Autofix workflow (docs-autofix.yml) applies to the PR branch.
