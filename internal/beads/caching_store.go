@@ -111,7 +111,7 @@ type CachingStore struct {
 	// before it queues the close too, so a close of a bead the cache never
 	// held is not swallowed as an already-closed row (see
 	// trackCloseTransitionLocked).
-	closeIntents map[string]int
+	closeIntents map[string]*closeIntent
 
 	reconciling    atomic.Bool
 	syncFailures   int
