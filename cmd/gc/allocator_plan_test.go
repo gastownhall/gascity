@@ -866,12 +866,12 @@ func TestAllocator_NamedResolvesToVerdictWinnerNotFirstClaimant(t *testing.T) {
 	}
 }
 
-// namedRuntimeName is spec.SessionName for identity.
-func namedRuntimeName(t *testing.T, cfg *config.City, identity string) string {
+// namedRuntimeName is spec.SessionName for the named session "chat".
+func namedRuntimeName(t *testing.T, cfg *config.City) string {
 	t.Helper()
-	spec, ok := findNamedSessionSpec(cfg, "city", identity)
+	spec, ok := findNamedSessionSpec(cfg, "city", "chat")
 	if !ok {
-		t.Fatalf("no named spec %q", identity)
+		t.Fatalf("no named spec %q", "chat")
 	}
 	return spec.SessionName
 }
@@ -880,7 +880,7 @@ func namedRuntimeName(t *testing.T, cfg *config.City, identity string) string {
 // storm or stall (AM-N6, P3-6b §2.2): every row of the occupancy table.
 func TestAllocator_NamedPlan_OccupancyFromObservation(t *testing.T) {
 	cfg := chatCity("always")
-	name := namedRuntimeName(t, cfg, "chat")
+	name := namedRuntimeName(t, cfg)
 	cases := []struct {
 		label string
 		setup func(*allocFixture)
@@ -923,7 +923,7 @@ func TestAllocator_NamedPlan_OccupancyFromObservation(t *testing.T) {
 func TestAllocator_NamedPlan_PlanTimeGates(t *testing.T) {
 	cfg := chatCity("always")
 	cfg.Workspace.Provider = "claude"
-	name := namedRuntimeName(t, cfg, "chat")
+	name := namedRuntimeName(t, cfg)
 	open := map[endpointKey]endpointView{"provider:claude": {Gate: gateClosed}}
 	cases := []struct {
 		cause string
@@ -968,7 +968,7 @@ func TestAllocator_NamedPlan_PlanTimeGates(t *testing.T) {
 func TestAllocator_NamedPlan_OnePerIdentityWhileEntryUncleared(t *testing.T) {
 	cfg := chatCity("always")
 	f := newAllocFixture(t, cfg)
-	f.in.Reservations = []planReservation{{EntryID: "create-1", Template: "chat", NamedIdentity: "chat", SessionName: namedRuntimeName(t, cfg, "chat")}}
+	f.in.Reservations = []planReservation{{EntryID: "create-1", Template: "chat", NamedIdentity: "chat", SessionName: namedRuntimeName(t, cfg)}}
 	d := f.decide()
 	if len(d.Plans) != 0 || !traceHas(d, gateInFlight) {
 		t.Fatalf("plans %+v trace %v: one create per identity while its entry is uncleared", d.Plans, d.Trace)

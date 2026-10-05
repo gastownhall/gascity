@@ -33,6 +33,20 @@ curl -sSfL https://github.com/bazelbuild/bazelisk/releases/latest/download/bazel
 
 Bazelisk reads `.bazelversion` (committed) and pins the exact version.
 
+No C compiler is needed: cgo and the Go stdlib build with the LLVM toolchain
+and Ubuntu 24.04 sysroot that `MODULE.bazel` pins by sha256, so every Linux
+x86_64 machine computes the same action keys as CI (host toolchain detection
+is off). The first fetch downloads the 2GB LLVM release archive once and
+keeps ~700MB of it. Running the toolchain needs glibc 2.34+, `xz` (to unpack
+it), and the runtime libraries the official LLVM binaries load: libstdc++6,
+zlib1g and libxml2. Bazel-built binaries load glibc, libstdc++ and ICU 74
+(`libicu74`) at run time, as on the RBE workers.
+
+Other hosts (macOS arm64, Linux arm64) build with toolchains_llvm's stock
+release of the same LLVM version, also pinned by sha256, but without a
+sysroot: cgo uses the host's C headers and libraries (ICU included), and
+their action keys do not match CI's.
+
 ### 2. Use the shared cache (the free win)
 
 No setup: the committed `.bazelrc` has a `fork-cache` config for rbe-west's
@@ -75,6 +89,32 @@ bazel test //internal/config:config_test --test_output=errors  # one test, verbo
 bazel run //cmd/gc -- --help            # run a binary
 ```
 
+**Agents should prefer Bazel for repeated build+test cycles.** The first
+`bazel build //...` costs the same as `go build ./...`; every subsequent
+one is a cache hit (seconds). The remote CAS is shared across all
+worktrees, all CI runs, and all developers — a test that passed once on
+CI never re-executes for you locally.
+
+**When to use which:**
+
+| situation | use |
+|---|---|
+| iterating on one package's tests | `bazel test //pkg/...` (remote-cached) |
+| verifying a cross-cutting change | `bazel test //...` |
+| quick syntax check of one file | `go build ./pkg/` (no server startup) |
+| running the existing CI gate | `make test-cover-*` (go test, unchanged) |
+| adding a new dependency | `go get` then `make bazel-sync` |
+
+**Test sharding:** the heavy suites (cmd/gc, scripts, api, examples) are
+sharded for parallel remote execution. Sharded helpers re-exec the test
+binary; if you add a helper-spawning test, strip `TEST_SHARD_INDEX` /
+`TEST_TOTAL_SHARDS` from the helper's env (see `sanitizedBaseEnv` in
+`cmd/gc/fast_loop_helpers_test.go`).
+
+**Do NOT commit machine-specific endpoints.** `grpc://127.0.0.1:5005x`
+endpoints belong in `.bazelrc.local` (gitignored) for dev machines, or
+in CI secrets. The repo's `.bazelrc` has no executor hardcoded.
+
 ## When you change BUILD-relevant things
 
 After adding a package, a file, or changing imports:
@@ -83,6 +123,8 @@ After adding a package, a file, or changing imports:
 make bazel-sync     # regenerates BUILD files + the repo source tree
 git add -A && git commit -m "build: sync"   # the CI gate checks this
 ```
+
+The CI gate `BUILD files are in sync` fails if you forget.
 
 ## Troubleshooting
 

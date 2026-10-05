@@ -135,6 +135,16 @@ jobs:
       # changes and every run pays a lost-inputs build restart. Rotate daily.
       # Only pushes to main save (~880MB): per-PR saves would churn the repo's
       # 10GB cache and evict main's entry. PRs restore main's latest.
+      # The path list keeps everything under --output_user_root except the
+      # repository cache's download store (cache/repos/v1/content_addressable),
+      # which holds raw archives by sha256: the ~1.9GB LLVM tarball alone would
+      # take the entry from ~880MB to ~3.7GB. Extracted repositories stay
+      # cached in cache/repos/v1/contents (repo contents cache), so a warm run
+      # downloads nothing. actions/cache tars each matched directory
+      # recursively, so a lone `!` exclusion under a listed parent is ignored:
+      # every ancestor of the excluded directory is expanded one level instead.
+      # Restore and save must list the same paths (they are part of the cache
+      # version). scripts/bazel_output_cache_test.go pins this.
       - name: Bazel cache day
         id: bazel-cache-day
         run: echo "day=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
@@ -143,7 +153,14 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
-            ${{ runner.temp }}/bazel-outputs
+            ${{ runner.temp }}/bazel-outputs/*
+            !${{ runner.temp }}/bazel-outputs/cache
+            ${{ runner.temp }}/bazel-outputs/cache/*
+            !${{ runner.temp }}/bazel-outputs/cache/repos
+            ${{ runner.temp }}/bazel-outputs/cache/repos/*
+            !${{ runner.temp }}/bazel-outputs/cache/repos/v1
+            ${{ runner.temp }}/bazel-outputs/cache/repos/v1/*
+            !${{ runner.temp }}/bazel-outputs/cache/repos/v1/content_addressable
           key: bazel-v2-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock') }}-${{ steps.bazel-cache-day.outputs.day }}
           restore-keys: |
             bazel-v2-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock') }}-
@@ -289,6 +306,9 @@ jobs:
         run: |
           ARGS=(--output_user_root="$RUNNER_TEMP"/bazel-outputs)
           PROFILE=(--profile=/tmp/bazel-profile.json)
+          # Build Event Protocol per invocation: the cache report step below
+          # counts cached vs executed test targets from these.
+          mkdir -p /tmp/bazel-bep
           # Unit arm runs in the default configuration so its cache keys stay
           # stable; tagged suites get their own invocations because
           # --define=gotags reconfigures every action under it (a full-world
@@ -306,8 +326,10 @@ jobs:
             RCEXEC=()
           fi
           bazel "${ARGS[@]}" test "${PROFILE[@]}" //... \
+            --build_event_json_file=/tmp/bazel-bep/unit.json \
             "${RCEXEC[@]}" --test_output=errors --keep_going
           bazel "${ARGS[@]}" test "${PROFILE[@]}" //test/acceptance:acceptance_test \
+            --build_event_json_file=/tmp/bazel-bep/acceptance.json \
             "${RCEXEC[@]}" --test_output=errors --keep_going \
             --define=gotags=acceptance_a --test_timeout=1100
 
@@ -316,7 +338,14 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
-            ${{ runner.temp }}/bazel-outputs
+            ${{ runner.temp }}/bazel-outputs/*
+            !${{ runner.temp }}/bazel-outputs/cache
+            ${{ runner.temp }}/bazel-outputs/cache/*
+            !${{ runner.temp }}/bazel-outputs/cache/repos
+            ${{ runner.temp }}/bazel-outputs/cache/repos/*
+            !${{ runner.temp }}/bazel-outputs/cache/repos/v1
+            ${{ runner.temp }}/bazel-outputs/cache/repos/v1/*
+            !${{ runner.temp }}/bazel-outputs/cache/repos/v1/content_addressable
           key: ${{ steps.bazel-cache.outputs.cache-primary-key }}
 
       # Evidence-only: the integration suite's agent-flow tests are sensitive
@@ -332,13 +361,47 @@ jobs:
         run: |
           ARGS=(--output_user_root="$RUNNER_TEMP"/bazel-outputs)
           if [ -n "$BAZEL_REMOTE_EXECUTOR" ] || [ -n "$RBE_FORK_CERT" ]; then RCEXEC=(--config=remote-exec); else RCEXEC=(); fi
+          mkdir -p /tmp/bazel-bep
           bazel "${ARGS[@]}" test //test/integration:integration_test \
+            --build_event_json_file=/tmp/bazel-bep/integration.json \
             "${RCEXEC[@]}" --test_output=errors --keep_going \
-            --define=gotags=integration --test_timeout=1100 --flaky_test_attempts=1 || true
+            --define=gotags=integration --test_timeout=1100 || true
 
       - name: Critical-path report + budget (the optimization loop metric)
         if: always()
         run: python3 tools/bazel/critpath.py /tmp/bazel-profile.json --tier T2 --budget 150 || true
+
+      # Cross-phase test skipping, measured: per invocation, how many test
+      # targets were cache hits (local / remote / disk) vs executed (remote /
+      # local), plus failures, flakes and action-level runner counts, from the
+      # BEP files above (internal/testpolicy/bepsummary). A phase that did not
+      # run (a failed unit step stops acceptance) shows as "no BEP file".
+      # Reporting only: a parse failure marks this step, never the job.
+      - name: Bazel test cache report (BEP)
+        if: always()
+        continue-on-error: true
+        run: |
+          case "$GITHUB_EVENT_NAME/$GITHUB_REF" in
+            pull_request/*) context="pr" ;;
+            push/refs/heads/main) context="main" ;;
+            *) context="$GITHUB_EVENT_NAME" ;;
+          esac
+          mkdir -p /tmp/bazel-bep
+          go run ./scripts/bazel-bep-summary.go --context "$context" --allow-missing \
+            --json-out /tmp/bazel-bep/summary.json \
+            unit=/tmp/bazel-bep/unit.json \
+            acceptance=/tmp/bazel-bep/acceptance.json \
+            integration=/tmp/bazel-bep/integration.json >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload bazel test cache report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bazel-bep-summary-${{ github.run_attempt }}
+          path: /tmp/bazel-bep/summary.json
+          retention-days: 30
+          if-no-files-found: warn
 
       # Coverage reporting only matters on the main branch — mirrors the go-test
       # arm's policy (preflight-unit-cover-*). The lcov combined report uploads
