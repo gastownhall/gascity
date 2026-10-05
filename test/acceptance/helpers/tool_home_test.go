@@ -176,6 +176,9 @@ func assertBdSawNoHostHome(t *testing.T, canary string, envs []map[string]string
 	}
 }
 
+// newCanaryEnv builds an Env whose gc side keeps the (canary) host HOME, the
+// way the real-provider tiers run (WithHostHome), so these tests prove the bd
+// and dolt re-homing on its own rather than through NewEnv's isolated HOME.
 func newCanaryEnv(t *testing.T) *Env {
 	t.Helper()
 	root := t.TempDir()
@@ -186,7 +189,7 @@ func newCanaryEnv(t *testing.T) *Env {
 			t.Fatal(err)
 		}
 	}
-	return NewEnv("", gcHome, runtimeDir)
+	return NewEnv("", gcHome, runtimeDir).WithHostHome()
 }
 
 // The TestMain schema probe runs before any Env exists, on the test process's
@@ -208,7 +211,7 @@ func TestProvisionBeadsDatabaseNeverSeesTheHostHome(t *testing.T) {
 	bd, logDir := envRecordingBD(t)
 	env := newCanaryEnv(t)
 	if env.Get("HOME") != canary {
-		t.Fatalf("Env HOME = %q, want the (canary) host HOME gc needs", env.Get("HOME"))
+		t.Fatalf("Env HOME = %q, want the (canary) host HOME WithHostHome gives gc", env.Get("HOME"))
 	}
 	up := &ExternalDolt{Host: "127.0.0.1", Port: "1", Database: "canary_db"}
 	up.ProvisionBeadsDatabase(t, env, bd, filepath.Join(t.TempDir(), "provision"), "hosted")
@@ -223,7 +226,7 @@ func TestProvisionBeadsDatabaseNeverSeesTheHostHome(t *testing.T) {
 	untouched()
 }
 
-// gc forks bd with the Env's real HOME. The bd it finds on a topology's PATH
+// A gc on the operator's HOME (WithHostHome) forks bd with it. The bd it finds on a topology's PATH
 // must re-home itself.
 func TestTopologyPathBdNeverSeesTheHostHome(t *testing.T) {
 	canary, untouched := hostCanary(t)
@@ -237,7 +240,7 @@ func TestTopologyPathBdNeverSeesTheHostHome(t *testing.T) {
 	cmd := exec.Command(found, "list") //nolint:gosec // resolved test wrapper
 	cmd.Env = env.List()
 	if env.Get("HOME") != canary {
-		t.Fatalf("the gc-side env should keep the (canary) host HOME, got %q", env.Get("HOME"))
+		t.Fatalf("the gc-side env should hold the (canary) host HOME from WithHostHome, got %q", env.Get("HOME"))
 	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bd via PATH: %v\n%s", err, out)

@@ -33,6 +33,20 @@ curl -sSfL https://github.com/bazelbuild/bazelisk/releases/latest/download/bazel
 
 Bazelisk reads `.bazelversion` (committed) and pins the exact version.
 
+No C compiler is needed: cgo and the Go stdlib build with the LLVM toolchain
+and Ubuntu 24.04 sysroot that `MODULE.bazel` pins by sha256, so every Linux
+x86_64 machine computes the same action keys as CI (host toolchain detection
+is off). The first fetch downloads the 2GB LLVM release archive once and
+keeps ~700MB of it. Running the toolchain needs glibc 2.34+, `xz` (to unpack
+it), and the runtime libraries the official LLVM binaries load: libstdc++6,
+zlib1g and libxml2. Bazel-built binaries load glibc, libstdc++ and ICU 74
+(`libicu74`) at run time, as on the RBE workers.
+
+Other hosts (macOS arm64, Linux arm64) build with toolchains_llvm's stock
+release of the same LLVM version, also pinned by sha256, but without a
+sysroot: cgo uses the host's C headers and libraries (ICU included), and
+their action keys do not match CI's.
+
 ### 2. Use the shared cache (the free win)
 
 No setup: the committed `.bazelrc` has a `fork-cache` config for rbe-west's

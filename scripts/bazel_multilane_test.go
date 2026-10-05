@@ -267,10 +267,11 @@ func TestBazelMultiLaneWorkflowTriggersAndPermissions(t *testing.T) {
 	wantJobs := map[string]map[string]string{
 		"rbe": {"contents": "read", "actions": "write"}, // dispatches rbe-worker-pool.yml
 		// The worker-env preflight lists drift issues (tools/rbe/worker-env-drift).
-		"lane":       {"contents": "read", "issues": "read"},
-		"coverage":   {"contents": "read", "issues": "read"},
-		"sync-check": readOnly,
-		"gate":       nil, // the top-level contents: read
+		"lane":        {"contents": "read", "issues": "read"},
+		"coverage":    {"contents": "read", "issues": "read"},
+		"sync-check":  readOnly,
+		"bep-summary": readOnly, // downloads this run's artifacts with the job token
+		"gate":        nil,      // the top-level contents: read
 	}
 	if len(wf.Jobs) != len(wantJobs) {
 		t.Errorf("%s has %d jobs, want %d (%v)", bazelMultiLaneWorkflow, len(wf.Jobs), len(wantJobs), wantJobs)

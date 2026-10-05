@@ -147,6 +147,11 @@ jobs:
           go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
           echo "GC_ACCEPTANCE_BD_BIN=${HOME}/.local/bin/bd" >> "$GITHUB_ENV"
           echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+      # A failing test copies its managed Dolt server logs and the supervisor
+      # log out of its temp dir before t.Cleanup removes it
+      # (internal/testutil.SaveFailureDiagnostics); the upload below keeps them.
+      - name: Route acceptance failure diagnostics
+        run: echo "GC_TEST_FAILURE_ARTIFACT_DIR=${RUNNER_TEMP}/failure-artifacts" >> "$GITHUB_ENV"
       - name: Verify bd supports proxied-server
         run: |
           set -euo pipefail
@@ -161,6 +166,14 @@ jobs:
           set -euo pipefail
           go test -tags acceptance_a -timeout 45m -count=1 -v \
             -run 'TestBeadsProxiedDefault$' ./test/acceptance/
+      - name: Upload acceptance failure diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: failure-diagnostics-beads-proxied-perf-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/failure-artifacts
+          if-no-files-found: ignore
+          retention-days: 7
 
   # Catches registry-side drift: a new gastown release published to
   # gascity-packs makes the local pins stale without any PR to trigger
