@@ -1039,6 +1039,10 @@ func standaloneBDEnvForDir(dir string) []string {
 		"LC_ALL",
 		"TZ",
 		"DOLT_ROOT_PATH",
+		// internal/testenv sets this process-wide; this allowlist rebuilds the
+		// child env from scratch, so carry it or every standalone bd/dolt
+		// command forks a detached `dolt send-metrics`.
+		dolttest.DisableEventFlushVar,
 		integrationRealBDBinaryEnv,
 		integrationGCBinaryEnv,
 		integrationDoltBinaryEnv,
@@ -1592,14 +1596,14 @@ func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {
 func seedDoltIdentityForRoot(gcHome string) error {
 	switch mode := doltIdentityMode(); mode {
 	case doltIdentityModeIsolated:
-		return seedIsolatedDoltConfig(gcHome)
+		return dolttest.WriteGlobalConfig(gcHome)
 	case doltIdentityModeSkip:
 		return nil
 	case doltIdentityModeGlobal:
 		if err := ensureGlobalDoltIdentity(); err != nil {
 			return err
 		}
-		return seedIsolatedDoltConfig(gcHome)
+		return dolttest.WriteGlobalConfig(gcHome)
 	default:
 		return fmt.Errorf("%s=%q is invalid", integrationDoltIdentityEnv, mode)
 	}
@@ -1651,15 +1655,6 @@ func trimmedCommandOutput(binary string, args ...string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
-}
-
-func seedIsolatedDoltConfig(gcHome string) error {
-	doltDir := filepath.Join(gcHome, ".dolt")
-	if err := os.MkdirAll(doltDir, 0o755); err != nil {
-		return err
-	}
-	doltCfg := `{"user.name":"gc-test","user.email":"gc-test@test.local"}`
-	return os.WriteFile(filepath.Join(doltDir, "config_global.json"), []byte(doltCfg), 0o644)
 }
 
 func registerCityCommandEnv(cityDir string, env []string) {
@@ -2220,6 +2215,9 @@ func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
 	}
 	if got["XDG_RUNTIME_DIR"] != dir {
 		t.Fatalf("XDG_RUNTIME_DIR = %q, want %q", got["XDG_RUNTIME_DIR"], dir)
+	}
+	if got[dolttest.DisableEventFlushVar] != dolttest.DisableEventFlushValue {
+		t.Fatalf("%s = %q, want %q carried into standalone bd env", dolttest.DisableEventFlushVar, got[dolttest.DisableEventFlushVar], dolttest.DisableEventFlushValue)
 	}
 	for _, key := range []string{
 		"GC_DOLT",

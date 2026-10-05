@@ -96,13 +96,8 @@ func TestMain(m *testing.M) {
 		panic("acceptance-c: staging provider binaries: " + err.Error())
 	}
 
-	// Configure dolt identity in the isolated home (dolt requires user.name).
-	doltCfgDir := filepath.Join(gcHome, ".dolt")
-	if err := os.MkdirAll(doltCfgDir, 0o755); err != nil {
-		panic("acceptance-c: " + err.Error())
-	}
-	doltCfg := `{"user.name":"gc-test","user.email":"gc-test@test.local"}`
-	if err := os.WriteFile(filepath.Join(doltCfgDir, "config_global.json"), []byte(doltCfg), 0o644); err != nil {
+	// Configure dolt in the isolated home (dolt requires user.name).
+	if err := dolttest.WriteGlobalConfig(gcHome); err != nil {
 		panic("acceptance-c: " + err.Error())
 	}
 
