@@ -1,7 +1,9 @@
 package acceptancehelpers
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -345,8 +347,11 @@ func (e *ExternalDolt) ProvisionBeadsDatabase(t *testing.T, env *Env, bdPath, wo
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		t.Fatalf("create provisioning workspace: %v", err)
 	}
-	cmd := e.provisionCommand(env, bdPath, workspace, prefix)
+	cmd, ctx := e.provisionCommand(t, env, bdPath, workspace, prefix)
 	if out, err := cmd.CombinedOutput(); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("provision beads database %q on %s exceeded %s:\n%s", e.Database, e.Addr(), acceptanceToolCommandTimeout, out)
+		}
 		t.Fatalf("provision beads database %q on %s: %v\n%s", e.Database, e.Addr(), err, out)
 	}
 	data, err := os.ReadFile(filepath.Join(workspace, ".beads", "metadata.json"))
@@ -372,14 +377,14 @@ func (e *ExternalDolt) ProvisionBeadsDatabase(t *testing.T, env *Env, bdPath, wo
 // shared-server mode (a user-level `dolt.shared-server: true`) ignores the
 // explicit --server-host/--server-port and starts the host-wide server under
 // ~/.beads/shared-server with whatever dolt is on PATH — here, this run's.
-func (e *ExternalDolt) provisionCommand(env *Env, bdPath, workspace, prefix string) *exec.Cmd {
-	cmd := exec.Command(bdPath, "init", "--server", //nolint:gosec // resolved test binary
+func (e *ExternalDolt) provisionCommand(t *testing.T, env *Env, bdPath, workspace, prefix string) (*exec.Cmd, context.Context) {
+	cmd, ctx := boundedToolCommand(t, acceptanceToolCommandTimeout, bdPath, "init", "--server",
 		"--server-host", e.Host, "--server-port", e.Port,
 		"--database", e.Database, "-p", prefix,
 		"--skip-hooks", "--skip-agents", "--quiet", "--non-interactive", workspace)
 	cmd.Dir = workspace
 	cmd.Env = env.Clone().With("BEADS_DIR", filepath.Join(workspace, ".beads")).ToolList()
-	return cmd
+	return cmd, ctx
 }
 
 // BeadsTopologies returns the matrix in the order AC-M lists it.
