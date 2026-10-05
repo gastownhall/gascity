@@ -660,6 +660,7 @@ Skipping any step lands on a CI failure, not a production bug:
 | Spec not regenerated after Go-type change | `TestOpenAPISpecInSync` |
 | Generated Go client out of sync with spec | `TestGeneratedClientInSync` |
 | Handler response field undeclared in spec | Layer 1 response-validation tests |
+| Handler drift against the production `controllerState`, a 202 without its terminal outcome, or a new operation with no contract coverage | `TestAPIContractSuite` (`cmd/gc/api_contract_*_test.go`): one real in-process city (controller loop, fake runtime) driven through `genclient`, every response validated via `internal/api/apicontract`; every operation must be exercised or waived in `contractWaivers`, and every 202 operation needs a terminal-outcome row in `contractAsyncCases` |
 | Spec/client method-shape drift | Layer 2 round-trip tests (`genclient_roundtrip_test.go`) |
 | End-to-end binary wire regression | Layer 3 integration tests (`//go:build integration`) |
 | New event-type constant without registered payload | `TestEveryKnownEventTypeHasRegisteredPayload` |
