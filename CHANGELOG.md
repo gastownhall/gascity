@@ -83,8 +83,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Dolt child with `bd dolt stop`, the same step `gc stop` runs last, so a
   suspended scope holds no memory. A suspended city with no running session
   runs no controller tick and no order pass at all. `gc resume` / `gc rig
-  resume` let the next command restart the pair. `/status` work counts no
-  longer include suspended rigs (#6561).
+  resume` let the next command restart the pair; if something restarts a
+  suspended scope's pair in the meantime, gc stops it again on its next tick.
+  `/status` work counts no longer include suspended rigs, and report how many
+  they left out in `work.suspended_rigs_excluded` (#6561).
 
 - **`gc doctor`, `beads-health` and the dashboard understand a finite proxied
   idle timeout.** A scope whose proxy retired on its idle timeout is idle, not

@@ -84,6 +84,38 @@ func (r *scopeRecordingBD) callsUnder(t *testing.T, root string) []string {
 	return hits
 }
 
+// runEveryCityOrder runs each city-level order once with `gc order run` and
+// returns their names. A failing order is logged, not fatal: what the caller
+// asserts is which scopes the orders touched.
+func runEveryCityOrder(t *testing.T, city *helpers.City) []string {
+	t.Helper()
+	out, err := city.GCStdout("order", "list", "--json")
+	if err != nil {
+		t.Fatalf("gc order list --json: %v\n%s", err, out)
+	}
+	var list struct {
+		Orders []struct {
+			Name string `json:"name"`
+			Rig  string `json:"rig"`
+		} `json:"orders"`
+	}
+	lastJSONLine(t, out, &list)
+	var ran []string
+	for _, order := range list.Orders {
+		if order.Rig != "" {
+			continue
+		}
+		if out, err := city.GC("order", "run", order.Name); err != nil {
+			t.Logf("gc order run %s: %v\n%s", order.Name, err, out)
+		}
+		ran = append(ran, order.Name)
+	}
+	if len(ran) == 0 {
+		t.Fatal("the city has no city-level orders to run")
+	}
+	return ran
+}
+
 func TestProxiedSuspensionIsQuiescence(t *testing.T) {
 	// Two multi-minute quiescence windows over a running city: not Tier A
 	// smoke material. The proxied-native acceptance job runs it.
@@ -122,9 +154,15 @@ func TestProxiedSuspensionIsQuiescence(t *testing.T) {
 			t.Fatalf("the suspended rig's pair is still running:\n%s", strings.Join(leaked, "\n"))
 		}
 		shim.reset(t)
-		time.Sleep(quiescenceWindow)
+		start := time.Now()
+		// Every city-level order once, so no order's cadence can hide a
+		// visit to the suspended rig behind the window.
+		ran := runEveryCityOrder(t, city)
+		if remaining := quiescenceWindow - time.Since(start); remaining > 0 {
+			time.Sleep(remaining)
+		}
 		if calls := shim.callsUnder(t, rigDir); len(calls) > 0 {
-			t.Fatalf("gc touched the suspended rig %d time(s) in %s:\n%s", len(calls), quiescenceWindow, strings.Join(calls, "\n"))
+			t.Fatalf("gc touched the suspended rig %d time(s) in %s (orders run: %s):\n%s", len(calls), time.Since(start).Round(time.Second), strings.Join(ran, ", "), strings.Join(calls, "\n"))
 		}
 		if started := doltProcessesUnder(t, rigDir); len(started) > 0 {
 			t.Fatalf("the suspended rig's pair came back:\n%s", strings.Join(started, "\n"))

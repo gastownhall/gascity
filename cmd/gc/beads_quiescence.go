@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -85,6 +86,7 @@ func (cr *CityRuntime) enterBeadsQuiescenceIfDue(ctx context.Context) bool {
 	suspended := suspendedBeadsScopes(cr.cityPath, cr.cfg)
 	cr.retiredScopes.forgetResumed(suspended)
 	cr.repairResumedScopes(suspended)
+	cr.cs.setSuspendedRigs(buildEffectiveSuspendedRigNames(cr.cfg, loadSuspensionStateBestEffort(cr.cityPath)))
 	quiescent := false
 	if suspended.City() {
 		running, err := cr.sp.ListRunning("")
@@ -160,14 +162,43 @@ func (cr *CityRuntime) tickRetireSuspendedRigScopes(p *tickPass) bool {
 	return false
 }
 
-// retireSuspendedScopes stops the bd-owned pair of every suspended scope that
-// drained reports drained and that this controller has not stopped yet. A
-// scope that is not provider-owned has no bd-owned pair. A rig that shares the
-// city's proxy root is left alone unless the city is suspended too: stopping it
-// would stop the pair serving the city and every other rig.
+// suspendedScopePair reports whether scopeRoot is a bd-owned proxied scope
+// and, if so, whether its proxy is running right now. It reads the proxy record
+// and the process table; nothing is dialed. A variable so tests can model a
+// running or stopped pair.
+var suspendedScopePair = func(scopeRoot string) (proxied, live bool) {
+	if !doctor.ProxiedStoreScope(scopeRoot) {
+		return false, false
+	}
+	return true, !doctor.ProxiedStoreNotRunning(scopeRoot)
+}
+
+// retireSuspendedScopes stops the bd-owned pair of every suspended scope whose
+// sessions have been drained for a whole tick, so the drain's own bead
+// bookkeeping is done before the pair goes away.
+//
+// It converges on live state rather than remembering what it did: a proxied
+// scope's pair is stopped whenever it is found running, so a late touch that
+// restarted it (a straggler write, an event-driven order) is undone on the
+// next tick instead of leaking a never-idle pair for good. A scope that is not
+// proxied has no proxy to observe and is stopped once per suspension episode.
+// A scope that is not provider-owned has no bd-owned pair. A rig that shares
+// the city's proxy root is left alone unless the city is suspended too:
+// stopping it would stop the pair serving the city and every other rig.
 func (cr *CityRuntime) retireSuspendedScopes(ctx context.Context, suspended beadsScopeSuspension, drained func(scopeRoot string) bool) {
 	for _, root := range cr.beadsScopeRoots() {
-		if !suspended.Suspended(root) || cr.retiredScopes.done(root, suspended.epoch) {
+		key := normalizePathForCompare(root)
+		if !suspended.Suspended(root) {
+			delete(cr.drainedLastTick, key)
+			continue
+		}
+		drainedNow := drained(root)
+		settled := drainedNow && cr.drainedLastTick[key]
+		if cr.drainedLastTick == nil {
+			cr.drainedLastTick = map[string]bool{}
+		}
+		cr.drainedLastTick[key] = drainedNow
+		if !settled {
 			continue
 		}
 		owned, err := scopeProviderOwned(cr.cityPath, root)
@@ -176,14 +207,16 @@ func (cr *CityRuntime) retireSuspendedScopes(ctx context.Context, suspended bead
 			continue
 		}
 		if !owned {
-			cr.retiredScopes.mark(root, suspended.epoch)
 			continue
 		}
 		if !samePath(root, cr.cityPath) && !suspended.City() && proxyendpoint.SharesCityRoot(cr.cityPath, root) {
-			cr.retiredScopes.mark(root, suspended.epoch)
 			continue
 		}
-		if !drained(root) {
+		proxied, live := suspendedScopePair(root)
+		switch {
+		case proxied && !live:
+			continue
+		case !proxied && cr.retiredScopes.done(root, suspended.epoch):
 			continue
 		}
 		if err := runProviderOwnedScopeLifecycleOpContext(ctx, cr.cityPath, root, "stop"); err != nil {

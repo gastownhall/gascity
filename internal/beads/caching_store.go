@@ -523,6 +523,12 @@ func (c *CachingStore) ReconcileNowForTest() {
 	}
 }
 
+// ReconcileIfDueForTest runs one periodic reconcile-loop step now: the cycle
+// runs only if one is due and the reconcile gate (WithReconcileGate) allows it.
+func (c *CachingStore) ReconcileIfDueForTest() {
+	c.reconcileIfDue(time.Now())
+}
+
 // SetPrimeRetryDelayForTest overrides the inter-attempt backoff Prime
 // uses when the backing store's full scan fails, so tests can exercise
 // prime-failure paths without real multi-second sleeps. Test-only.

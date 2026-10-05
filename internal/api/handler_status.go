@@ -719,8 +719,10 @@ func (s *Server) statusWorkCounts(ctx context.Context, cacheColdRigs map[string]
 		})
 	}
 	cityName := s.state.CityName()
+	excluded := 0
 	for _, rigName := range rigNames {
 		if cacheColdRigs[rigName] {
+			excluded++
 			continue
 		}
 		queries = append(queries, workQuery{
@@ -764,6 +766,7 @@ func (s *Server) statusWorkCounts(ctx context.Context, cacheColdRigs map[string]
 		}
 		errs = append(errs, r.errs...)
 	}
+	wc.SuspendedRigsExcluded = excluded
 	return wc, errs
 }
 

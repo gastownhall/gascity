@@ -74,6 +74,11 @@ type controllerState struct {
 	// and has no running sessions: every cache this state owns then skips its
 	// periodic reconcile, so nothing touches a store whose pair was retired.
 	beadsQuiescent *atomic.Bool
+	// suspendedRigs is the set of rigs the city runtime last saw suspended,
+	// published every tick. A suspended rig's cache skips its periodic
+	// reconcile from the next tick on, with no reload: any bd read restarts
+	// the rig's retired proxy.
+	suspendedRigs atomic.Pointer[map[string]bool]
 	// onDeathGate is the city runtime's on_death start interlock, set when
 	// its inventory lane starts; nil holds nothing.
 	onDeathGate atomic.Pointer[onDeathGate]
@@ -293,6 +298,7 @@ func newControllerStateWithRoutes(
 	for _, n := range cs.rolloutFlags.Notices() {
 		cs.rolloutWarnf("api: rollout: %s\n", n.Message)
 	}
+	cs.setSuspendedRigs(buildEffectiveSuspendedRigNames(cfg, loadSuspensionStateBestEffort(cityPath)))
 	cs.beadStores = cs.buildStores(cfg)
 	// Capture the initial raw config snapshot so provenance reads before the
 	// first reload still use the gate's basis. nil is tolerated: RawConfig
@@ -437,7 +443,7 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 			continue
 		}
 		store = cs.openRigStore(scopeProvider, rig.Name, scopeRoot, rig.EffectivePrefix(), cfg)
-		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, rigStoreBackgroundRefresh(suspState, rig), cs.reconcileGate())
+		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, rigStoreBackgroundRefresh(suspState, rig), cs.rigReconcileGate(rig.Name))
 	}
 	return stores
 }
@@ -466,6 +472,34 @@ func (cs *controllerState) reconcileGate() beads.CachingStoreOption {
 // reconcileGateFor pauses a cache's periodic reconcile while quiescent is set.
 func reconcileGateFor(quiescent *atomic.Bool) beads.CachingStoreOption {
 	return beads.WithReconcileGate(func() bool { return quiescent == nil || !quiescent.Load() })
+}
+
+// rigReconcileGate is reconcileGate for one rig's cache: it also pauses while
+// that rig is suspended (suspendedRigs).
+func (cs *controllerState) rigReconcileGate(rigName string) beads.CachingStoreOption {
+	return beads.WithReconcileGate(func() bool {
+		if cs.beadsQuiescent != nil && cs.beadsQuiescent.Load() {
+			return false
+		}
+		return !cs.rigSuspended(rigName)
+	})
+}
+
+// rigSuspended reports whether the city runtime last saw rigName suspended.
+func (cs *controllerState) rigSuspended(rigName string) bool {
+	if cs == nil {
+		return false
+	}
+	rigs := cs.suspendedRigs.Load()
+	return rigs != nil && (*rigs)[rigName]
+}
+
+// setSuspendedRigs publishes the rigs the city runtime sees suspended.
+func (cs *controllerState) setSuspendedRigs(rigs map[string]bool) {
+	if cs == nil {
+		return
+	}
+	cs.suspendedRigs.Store(&rigs)
 }
 
 // setBeadsQuiescent records whether the city is quiescent (suspended, with no

@@ -110,6 +110,9 @@ type CityRuntime struct {
 	// lastSuspension is the suspension state the previous tick saw, so the
 	// next one can tell which scopes resumed (repairResumedScopes).
 	lastSuspension *beadsScopeSuspension
+	// drainedLastTick records, per suspended scope root, whether its sessions
+	// were already drained on the previous tick (retireSuspendedScopes).
+	drainedLastTick map[string]bool
 	cityPath       string
 	cityName       string
 	configName     string
@@ -1401,9 +1404,11 @@ func (cr *CityRuntime) tick(
 		cr.clearActiveReloadIf(p.manualReload)
 	}()
 	if !hasActive && cr.enterBeadsQuiescenceIfDue(ctx) {
-		// Suspended with nothing running: no phase runs, so no bead store is
-		// touched until the city resumes. A pending config change stays dirty
-		// and is applied on the first tick after resume.
+		// Suspended with nothing running: no bead-store phase runs until the
+		// city resumes. Workspace services are not suspended with the city,
+		// so their supervision still ticks. A pending config change stays
+		// dirty and is applied on the first tick after resume.
+		cr.tickWorkspaceService(p)
 		p.completed = true
 		return
 	}
@@ -1624,6 +1629,10 @@ func (cr *CityRuntime) tickReapStaleSessionBeads(p *tickPass) bool {
 	return false
 }
 
+// tickReapClosedBeadWorktreesFn is the tick's call into the closed-bead
+// worktree reaper, a seam so tests can pin which rig stores it is handed.
+var tickReapClosedBeadWorktreesFn = reapClosedBeadWorktrees
+
 func (cr *CityRuntime) tickReapClosedBeadWorktrees(p *tickPass) bool {
 	reapEnabled := cr.cfg.Daemon.AutoReapClosedBeadWorktreesEnabled()
 	reapDryRun := cr.cfg.Daemon.AutoReapClosedBeadWorktreesDryRunEnabled()
@@ -1633,7 +1642,7 @@ func (cr *CityRuntime) tickReapClosedBeadWorktrees(p *tickPass) bool {
 		// addition to the authoritative /proc cwd scan. Real removal supersedes
 		// dry-run when both flags are set.
 		liveSessionDirs := liveSessionWorktreeDirs(p.sessionBeads)
-		report := reapClosedBeadWorktrees(cr.cityPath, cr.cfg, withoutSuspendedRigs(cr.cityPath, cr.cfg, cr.rigBeadStores()), liveSessionDirs, !reapEnabled, cr.rec, cr.reapSkips, cr.stderr)
+		report := tickReapClosedBeadWorktreesFn(cr.cityPath, cr.cfg, withoutSuspendedRigs(cr.cityPath, cr.cfg, cr.rigBeadStores()), liveSessionDirs, !reapEnabled, cr.rec, cr.reapSkips, cr.stderr)
 		p.recordPhase(TraceSiteControllerTickPhase, "reap_closed_bead_worktrees", phaseStart, map[string]any{
 			"reaped":    len(report.Reaped),
 			"protected": len(report.Protected),

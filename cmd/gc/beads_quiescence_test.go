@@ -60,12 +60,17 @@ func TestBeadsQuiescenceRetiresASuspendedCityOnceItHasDrained(t *testing.T) {
 	if !cr.beadsQuiescent.Load() || !cr.cs.beadsQuiescent.Load() {
 		t.Fatal("quiescence was not published to the runtime and its caches")
 	}
+	// The drain's own bead bookkeeping gets a whole tick before the pair goes.
+	if ops := providerOpsLogged(t, logPath); ops != "" {
+		t.Fatalf("provider ops on the first drained tick = %q, want none yet", ops)
+	}
+	cr.enterBeadsQuiescenceIfDue(context.Background())
 	if ops := providerOpsLogged(t, logPath); ops != "stop" {
 		t.Fatalf("provider ops = %q, want one stop", ops)
 	}
 	cr.enterBeadsQuiescenceIfDue(context.Background())
 	if ops := providerOpsLogged(t, logPath); ops != "stop" {
-		t.Fatalf("provider ops after a second quiescent tick = %q, want still one stop", ops)
+		t.Fatalf("provider ops after another quiescent tick = %q, want still one stop", ops)
 	}
 
 	t.Setenv("GC_SUSPENDED", "")
@@ -137,9 +142,19 @@ func TestOrderTrackingSweepTargetsSkipSuspendedRigs(t *testing.T) {
 // The core maintenance orders enumerate rigs through scope_bd.sh and their own
 // jq filters; every one of them leaves suspended rigs out.
 func TestCoreMaintenanceScriptsSkipSuspendedRigs(t *testing.T) {
-	dir := filepath.Join(repoRootForLint(t), "internal", "bootstrap", "packs", "core", "assets", "scripts")
-	for _, name := range []string{"scope_bd.sh", "orphan-sweep.sh", "renudge-stale-human-gates.sh"} {
-		data, err := os.ReadFile(filepath.Join(dir, name))
+	core := filepath.Join(repoRootForLint(t), "internal", "bootstrap", "packs", "core", "assets", "scripts")
+	dolt := filepath.Join(repoRootForLint(t), "examples", "bd", "dolt", "assets", "scripts")
+	for _, path := range []string{
+		filepath.Join(core, "scope_bd.sh"),
+		filepath.Join(core, "orphan-sweep.sh"),
+		filepath.Join(core, "renudge-stale-human-gates.sh"),
+		filepath.Join(core, "cascade-nudge-on-blocker-close.sh"),
+		filepath.Join(core, "notify-on-human-gate-creation.sh"),
+		filepath.Join(core, "cross-rig-deps.sh"),
+		filepath.Join(dolt, "mol-dog-backup.sh"),
+	} {
+		name := filepath.Base(path)
+		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -163,6 +178,7 @@ func TestRetireSuspendedRigScopeAgainInANewEpisode(t *testing.T) {
 		time.Sleep(10 * time.Millisecond) // distinct UpdatedAt stamps
 	}
 	suspend(true)
+	cr.tickRetireSuspendedRigScopes(p)
 	cr.tickRetireSuspendedRigScopes(p)
 	suspend(false)
 	suspend(true)
@@ -229,5 +245,146 @@ func TestBlockedRepairSkipsSuspendedScopesAndRunsOnResume(t *testing.T) {
 	cr.enterBeadsQuiescenceIfDue(context.Background())
 	if strings.Join(repaired, ",") != "rig/r1" {
 		t.Fatalf("repaired %v after resume, want exactly rig/r1 once", repaired)
+	}
+}
+
+// A suspended proxied scope's pair is stopped whenever it is found running,
+// not once: a late touch that restarted it is undone on the next tick.
+func TestRetireSuspendedProxiedScopeConvergesOnLiveState(t *testing.T) {
+	cr, _, rig, logPath := quiescenceRuntime(t, "suspended_on_start = true\n")
+	t.Setenv("GC_SUSPENDED", "")
+	live := true
+	old := suspendedScopePair
+	t.Cleanup(func() { suspendedScopePair = old })
+	suspendedScopePair = func(root string) (bool, bool) {
+		if samePath(root, rig) {
+			return true, live
+		}
+		return false, false
+	}
+	p := &tickPass{ctx: context.Background(), sessionBeads: newSessionBeadSnapshotFromInfos(nil)}
+	cr.tickRetireSuspendedRigScopes(p) // drained once: settle
+	cr.tickRetireSuspendedRigScopes(p) // stop
+	live = false
+	cr.tickRetireSuspendedRigScopes(p) // already down: nothing
+	live = true                        // a straggler restarted it
+	cr.tickRetireSuspendedRigScopes(p) // stop again
+	if ops := providerOpsLogged(t, logPath); ops != "stop\nstop" {
+		t.Fatalf("provider ops = %q, want a stop each time the pair was found running", ops)
+	}
+}
+
+// Without a controller, gc rig suspend stops the rig's pair itself.
+func TestRigSuspendWithoutControllerStopsThePair(t *testing.T) {
+	cr, _, _, logPath := quiescenceRuntime(t, "")
+	t.Setenv("GC_SUSPENDED", "")
+	var stdout, stderr strings.Builder
+	if code := doRigSuspend(fsys.OSFS{}, cr.cityPath, "r1", &stdout, &stderr); code != 0 {
+		t.Fatalf("gc rig suspend = %d: %s", code, stderr.String())
+	}
+	if ops := providerOpsLogged(t, logPath); ops != "stop" {
+		t.Fatalf("provider ops = %q, want the suspended rig stopped", ops)
+	}
+}
+
+// A quiescent city's tick runs no bead-store phase: the fixture store sees no
+// call at all.
+func TestQuiescentCityTickTouchesNoStore(t *testing.T) {
+	cr, store := newPhaseFixtureRuntime(t, false, false)
+	if err := cr.sp.Stop("worker"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_SUSPENDED", "1")
+	before := len(store.recorded())
+	runFixtureTick(cr, "patrol")
+	if got := store.recorded()[before:]; len(got) != 0 {
+		t.Fatalf("a quiescent tick touched the store: %v", got)
+	}
+	if !cr.beadsQuiescent.Load() {
+		t.Fatal("the city was not quiescent")
+	}
+}
+
+// countingOrderDispatcher counts dispatch passes.
+type countingOrderDispatcher struct{ dispatches int }
+
+func (d *countingOrderDispatcher) dispatch(context.Context, string, time.Time) { d.dispatches++ }
+func (d *countingOrderDispatcher) drain(context.Context) bool             { return true }
+
+// A suspended city gets no order pass: neither dispatch nor the tracking and
+// mail watchdogs, which read every scope's store.
+func TestDispatchOrdersSkipsASuspendedCity(t *testing.T) {
+	cr, store := newPhaseFixtureRuntime(t, false, false)
+	od := &countingOrderDispatcher{}
+	cr.od = od
+	cr.wispIndexMigrationApplied = true
+	t.Setenv("GC_SUSPENDED", "1")
+	before := len(store.recorded())
+	cr.dispatchOrdersLocked(context.Background(), cr.cityPath, 0, cr.cfg)
+	if od.dispatches != 0 {
+		t.Fatalf("dispatched %d order pass(es) in a suspended city", od.dispatches)
+	}
+	if got := store.recorded()[before:]; len(got) != 0 {
+		t.Fatalf("the order pass touched the store in a suspended city: %v", got)
+	}
+	t.Setenv("GC_SUSPENDED", "")
+	cr.dispatchOrdersLocked(context.Background(), cr.cityPath, 0, cr.cfg)
+	if od.dispatches != 1 {
+		t.Fatalf("dispatches after resume = %d, want 1", od.dispatches)
+	}
+}
+
+// A suspended rig's convergence loops wait: its store is not read.
+func TestConvergenceTickSkipsASuspendedRig(t *testing.T) {
+	cr, _, _, _ := quiescenceRuntime(t, "suspended_on_start = true\n")
+	t.Setenv("GC_SUSPENDED", "")
+	store := &opRecordingStore{Store: beads.NewMemStore()}
+	scope := cr.newConvergenceScope("r1", store, "", nil, false)
+	scope.needsStartupReconcile = true
+	cr.convScopes = map[string]*convergenceScope{"r1": scope}
+	cr.convergenceReqCh = make(chan convergenceRequest, 1)
+	cr.convergenceTick(context.Background())
+	cr.convergenceStartupReconcile(context.Background())
+	if got := store.recorded(); len(got) != 0 {
+		t.Fatalf("convergence read a suspended rig's store: %v", got)
+	}
+}
+
+// The closed-bead worktree reaper is not handed a suspended rig's store.
+func TestReapClosedBeadWorktreesSkipsASuspendedRig(t *testing.T) {
+	cr, _, _, _ := quiescenceRuntime(t, "suspended_on_start = true\n")
+	t.Setenv("GC_SUSPENDED", "")
+	cr.standaloneRigStores = map[string]beads.Store{"r1": beads.NewMemStore()}
+	enabled := true
+	cr.cfg.Daemon.AutoReapClosedBeadWorktrees = &enabled
+	old := tickReapClosedBeadWorktreesFn
+	t.Cleanup(func() { tickReapClosedBeadWorktreesFn = old })
+	var handed map[string]beads.Store
+	tickReapClosedBeadWorktreesFn = func(_ string, _ *config.City, rigStores map[string]beads.Store, _ []string, _ bool, _ events.Recorder, _ *reapSkipTracker, _ io.Writer) reapReport {
+		handed = rigStores
+		return reapReport{}
+	}
+	p := &tickPass{ctx: context.Background(), sessionBeads: newSessionBeadSnapshotFromInfos(nil)}
+	cr.tickReapClosedBeadWorktrees(p)
+	if _, ok := handed["r1"]; ok {
+		t.Fatalf("the worktree reaper was handed the suspended rig's store: %v", handed)
+	}
+}
+
+// A rig suspended at runtime stops its cache's periodic full scan from the
+// next tick on, with no reload; resuming lets it scan again.
+func TestRigCacheReconcilePausesWhileTheRigIsSuspended(t *testing.T) {
+	cs := &controllerState{beadsQuiescent: new(atomic.Bool)}
+	backing := &primeCountingStore{Store: beads.NewMemStore()}
+	cache := beads.NewCachingStore(backing, nil, cs.rigReconcileGate("r1"))
+	cs.setSuspendedRigs(map[string]bool{"r1": true})
+	cache.ReconcileIfDueForTest()
+	if backing.lists != 0 {
+		t.Fatalf("a suspended rig's cache scanned its store %d time(s)", backing.lists)
+	}
+	cs.setSuspendedRigs(map[string]bool{})
+	cache.ReconcileIfDueForTest()
+	if backing.lists == 0 {
+		t.Fatal("a resumed rig's cache did not scan")
 	}
 }

@@ -57,6 +57,9 @@ func TestStatusWorkCountsSkipsCacheColdRigs(t *testing.T) {
 	if wc.Open != 0 || wc.Ready != 0 {
 		t.Errorf("counts = open %d ready %d, want 0: a suspended rig's store is not read", wc.Open, wc.Ready)
 	}
+	if wc.SuspendedRigsExcluded != 1 {
+		t.Errorf("suspended_rigs_excluded = %d, want 1: the counts must say they left the rig out", wc.SuspendedRigsExcluded)
+	}
 }
 
 // TestStatusWorkCountsStillReportsReadyFailureForRefreshingRigs pins the other
