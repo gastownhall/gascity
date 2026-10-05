@@ -593,11 +593,13 @@ func TestProxiedIdleTimeoutCheck(t *testing.T) {
 			wantIn:     "could not compare",
 		},
 		{
+			// The scope matches what this environment resolves, so the
+			// override is named without turning the line into a warning.
 			name:       "the env override is named",
 			beads:      "30m",
 			env:        "20s",
 			sidecar:    `{"root_path":"dolt","idle_timeout":20000000000}`,
-			wantStatus: StatusWarning,
+			wantStatus: StatusOK,
 			wantIn:     config.ProxiedIdleTimeoutEnv + "=20s",
 		},
 	}

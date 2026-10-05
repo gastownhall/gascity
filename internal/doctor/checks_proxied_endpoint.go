@@ -407,8 +407,9 @@ func (c *ProxiedIdleTimeoutCheck) Run(_ *CheckContext) *CheckResult {
 			restart = append(restart, fmt.Sprintf("%s: running proxy has %s, scope has %s", label, argv, sidecar.IdlePolicy()))
 		}
 	}
+	envNote := ""
 	if env := strings.TrimSpace(os.Getenv(config.ProxiedIdleTimeoutEnv)); env != "" {
-		notes = append(notes, fmt.Sprintf("%s=%s overrides the configured idle timeout for every scope gc initializes from this environment", config.ProxiedIdleTimeoutEnv, env))
+		envNote = fmt.Sprintf("%s=%s overrides the configured idle timeout for every scope gc initializes from this environment", config.ProxiedIdleTimeoutEnv, env)
 	}
 
 	if len(drift) == 0 && len(restart) == 0 && len(notes) == 0 && len(unreadable) == 0 {
@@ -425,9 +426,17 @@ func (c *ProxiedIdleTimeoutCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("%d gc-owned proxied scope(s) carry the configured idle timeout", settled)
 		if len(pending) > 0 {
 			r.Message += fmt.Sprintf("; %d still initializing", len(pending))
-			r.Details = pending
 		}
+		if envNote != "" {
+			// Informational: the scopes match what this environment resolves.
+			r.Message += "; " + config.ProxiedIdleTimeoutEnv + " is set"
+			r.Details = append(r.Details, envNote)
+		}
+		r.Details = append(r.Details, pending...)
 		return r
+	}
+	if envNote != "" {
+		notes = append(notes, envNote)
 	}
 
 	r.Status = StatusWarning
