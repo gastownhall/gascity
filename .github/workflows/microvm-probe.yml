@@ -1,0 +1,33 @@
+# THROWAWAY: scratch/microvm-probe only (delete the branch after the run).
+# rbe-west microVM single-pool design, Q1: does a Blacksmith 32-vCPU runner
+# expose nested KVM, and does a Firecracker microVM boot on it? Talks to
+# nothing on rbe-west: no worker, no certificate, no secrets.
+name: microvm-probe
+
+on:
+  push:
+    branches: [scratch/microvm-probe]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Probe KVM and boot a Firecracker microVM
+        run: |
+          set -o pipefail
+          bash tools/rbe/microvm/kvm-probe.sh 2>&1 | tee "$RUNNER_TEMP/probe.log"
+          grep -E '^(MICROVM_KVM=|FC_BOOT=|kernel=|dev_kvm=|firecracker=|cpu)' "$RUNNER_TEMP/probe.log" >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Upload the probe log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: microvm-probe-log
+          path: ${{ runner.temp }}/probe.log
+          retention-days: 3
