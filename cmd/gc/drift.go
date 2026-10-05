@@ -19,6 +19,10 @@ type SupervisorStatus struct {
 	// predates buildID exposure.
 	BuildID string
 
+	// Version is the supervisor binary's reported release version (the
+	// /health "version" field). Empty when not reported.
+	Version string
+
 	// UptimeSec is the supervisor's reported uptime in seconds. Used to
 	// derive the `started=` token on the operator-facing identity line.
 	UptimeSec int
