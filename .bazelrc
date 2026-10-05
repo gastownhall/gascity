@@ -28,8 +28,11 @@ test --test_env=HOME
 # is minimal, so forward the client's.
 test --test_env=PATH
 
-# Remote execution on the NativeLink farm (scheduler on cherry). Local
-# clients reach it on loopback; off-host agents should use the tailnet
-# endpoint grpc://cherry.tail3127c0.ts.net:50051 instead.
-build:remote-exec --remote_executor=grpc://127.0.0.1:50052
+# Remote execution: the endpoint, instance and client certificate come from
+# .bazelrc.local (bazel-test.yml writes them from the RBE_* secrets; rbe-west
+# since the cherry farm was retired). A loopback executor here would win over
+# that file and fail every CI run with "Connection refused 127.0.0.1:50052".
 build:remote-exec --remote_timeout=3600
+
+# Machine- and CI-local settings (remote endpoint, instance, credentials).
+try-import %workspace%/.bazelrc.local
