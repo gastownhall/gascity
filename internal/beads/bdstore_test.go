@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // fakeRunner returns a CommandRunner that returns canned output for specific
@@ -5600,4 +5601,13 @@ func TestBdStoreListReadsCloseReason(t *testing.T) {
 	if reasons["bd-open"] != "" {
 		t.Errorf("bd-open CloseReason = %q, want empty", reasons["bd-open"])
 	}
+}
+
+// TestBdStoreCloseNotificationConformance runs the close-notification contract
+// through a CachingStore over a BdStore driving a fake bd, so bd's row shapes
+// (JSON rows, show/list refreshes, close --reason forwarding) are covered.
+func TestBdStoreCloseNotificationConformance(t *testing.T) {
+	beadstest.RunCloseNotificationTests(t, func(*testing.T) beads.Store {
+		return beadstest.NewFakeBd().NewBdStore()
+	})
 }
